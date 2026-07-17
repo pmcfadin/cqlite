@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/mutation.rs`."><title>mutation.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/</div>mutation.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Mutation types for CQL write operations
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/mutation.rs`."><title>mutation.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/</div>mutation.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Mutation types for CQL write operations
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! Represents INSERT, UPDATE, DELETE operations as structured mutations.
 <a href=#4 id=4 data-nosnippet>4</a>//! Supports cell-level operations with timestamps and TTL.
@@ -754,9 +754,9 @@
 <a href=#754 id=754 data-nosnippet>754</a>
 <a href=#755 id=755 data-nosnippet>755</a>        (Value::Float(f), ComparatorType::Float) =&gt; <span class="prelude-val">Ok</span>(f.to_bits().to_be_bytes().to_vec()),
 <a href=#756 id=756 data-nosnippet>756</a>
-<a href=#757 id=757 data-nosnippet>757</a>        (Value::Text(s), ComparatorType::Text) =&gt; <span class="prelude-val">Ok</span>(s.as_bytes().to_vec()),
+<a href=#757 id=757 data-nosnippet>757</a>        (Value::Text(s), ComparatorType::Text) =&gt; <span class="prelude-val">Ok</span>(s.to_vec()),
 <a href=#758 id=758 data-nosnippet>758</a>
-<a href=#759 id=759 data-nosnippet>759</a>        (Value::Blob(bytes), ComparatorType::Blob) =&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#759 id=759 data-nosnippet>759</a>        (Value::Blob(bytes), ComparatorType::Blob) =&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
 <a href=#760 id=760 data-nosnippet>760</a>
 <a href=#761 id=761 data-nosnippet>761</a>        (Value::Timestamp(millis), ComparatorType::Timestamp) =&gt; <span class="prelude-val">Ok</span>(millis.to_be_bytes().to_vec()),
 <a href=#762 id=762 data-nosnippet>762</a>
@@ -773,9 +773,9 @@
 <a href=#773 id=773 data-nosnippet>773</a>            <span class="prelude-val">Ok</span>(nanos.to_be_bytes().to_vec())
 <a href=#774 id=774 data-nosnippet>774</a>        }
 <a href=#775 id=775 data-nosnippet>775</a>
-<a href=#776 id=776 data-nosnippet>776</a>        (Value::Inet(bytes), ComparatorType::Custom(name)) <span class="kw">if </span>name == <span class="string">"inet" </span>=&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#776 id=776 data-nosnippet>776</a>        (Value::Inet(bytes), ComparatorType::Custom(name)) <span class="kw">if </span>name == <span class="string">"inet" </span>=&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
 <a href=#777 id=777 data-nosnippet>777</a>
-<a href=#778 id=778 data-nosnippet>778</a>        (Value::Varint(bytes), ComparatorType::Varint) =&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#778 id=778 data-nosnippet>778</a>        (Value::Varint(bytes), ComparatorType::Varint) =&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
 <a href=#779 id=779 data-nosnippet>779</a>
 <a href=#780 id=780 data-nosnippet>780</a>        (Value::Decimal { scale, unscaled }, ComparatorType::Decimal) =&gt; {
 <a href=#781 id=781 data-nosnippet>781</a>            <span class="comment">// Decimal: [scale (4B BE i32)][unscaled bytes]
@@ -944,7 +944,7 @@
 <a href=#944 id=944 data-nosnippet>944</a>        <span class="kw">let </span>schema = create_test_schema(<span class="macro">vec!</span>[(<span class="string">"id"</span>, <span class="string">"int"</span>), (<span class="string">"name"</span>, <span class="string">"text"</span>)], <span class="macro">vec!</span>[]);
 <a href=#945 id=945 data-nosnippet>945</a>        <span class="kw">let </span>pk = PartitionKey::new(<span class="macro">vec!</span>[
 <a href=#946 id=946 data-nosnippet>946</a>            (<span class="string">"id"</span>.to_string(), Value::Integer(<span class="number">42</span>)),
-<a href=#947 id=947 data-nosnippet>947</a>            (<span class="string">"name"</span>.to_string(), Value::Text(<span class="string">"hello"</span>.to_string())),
+<a href=#947 id=947 data-nosnippet>947</a>            (<span class="string">"name"</span>.to_string(), Value::text(<span class="string">"hello"</span>.to_string())),
 <a href=#948 id=948 data-nosnippet>948</a>        ]);
 <a href=#949 id=949 data-nosnippet>949</a>
 <a href=#950 id=950 data-nosnippet>950</a>        <span class="kw">let </span>bytes = pk.to_bytes(<span class="kw-2">&amp;</span>schema).unwrap();
@@ -969,8 +969,8 @@
 <a href=#969 id=969 data-nosnippet>969</a>            <span class="macro">vec!</span>[],
 <a href=#970 id=970 data-nosnippet>970</a>        );
 <a href=#971 id=971 data-nosnippet>971</a>        <span class="kw">let </span>pk = PartitionKey::new(<span class="macro">vec!</span>[
-<a href=#972 id=972 data-nosnippet>972</a>            (<span class="string">"symbol"</span>.to_string(), Value::Text(<span class="string">"AAPL"</span>.to_string())),
-<a href=#973 id=973 data-nosnippet>973</a>            (<span class="string">"exchange"</span>.to_string(), Value::Text(<span class="string">"NYSE"</span>.to_string())),
+<a href=#972 id=972 data-nosnippet>972</a>            (<span class="string">"symbol"</span>.to_string(), Value::text(<span class="string">"AAPL"</span>.to_string())),
+<a href=#973 id=973 data-nosnippet>973</a>            (<span class="string">"exchange"</span>.to_string(), Value::text(<span class="string">"NYSE"</span>.to_string())),
 <a href=#974 id=974 data-nosnippet>974</a>            (<span class="string">"bucket"</span>.to_string(), Value::Integer(<span class="number">100</span>)),
 <a href=#975 id=975 data-nosnippet>975</a>        ]);
 <a href=#976 id=976 data-nosnippet>976</a>
@@ -1186,8 +1186,8 @@
 <a href=#1186 id=1186 data-nosnippet>1186</a>            <span class="macro">vec!</span>[(<span class="string">"c"</span>, <span class="string">"text"</span>, ClusteringOrder::Asc)],
 <a href=#1187 id=1187 data-nosnippet>1187</a>        );
 <a href=#1188 id=1188 data-nosnippet>1188</a>
-<a href=#1189 id=1189 data-nosnippet>1189</a>        <span class="kw">let </span>empty_ck = ClusteringKey::single(<span class="string">"c"</span>, Value::Text(String::new()));
-<a href=#1190 id=1190 data-nosnippet>1190</a>        <span class="kw">let </span>valued_ck = ClusteringKey::single(<span class="string">"c"</span>, Value::Text(<span class="string">"a"</span>.to_string()));
+<a href=#1189 id=1189 data-nosnippet>1189</a>        <span class="kw">let </span>empty_ck = ClusteringKey::single(<span class="string">"c"</span>, Value::text(String::new()));
+<a href=#1190 id=1190 data-nosnippet>1190</a>        <span class="kw">let </span>valued_ck = ClusteringKey::single(<span class="string">"c"</span>, Value::text(<span class="string">"a"</span>.to_string()));
 <a href=#1191 id=1191 data-nosnippet>1191</a>
 <a href=#1192 id=1192 data-nosnippet>1192</a>        <span class="macro">assert_eq!</span>(
 <a href=#1193 id=1193 data-nosnippet>1193</a>            empty_ck.compare(<span class="kw-2">&amp;</span>valued_ck, <span class="kw-2">&amp;</span>schema).unwrap(),
@@ -1205,8 +1205,8 @@
 <a href=#1205 id=1205 data-nosnippet>1205</a>            <span class="macro">vec!</span>[(<span class="string">"c"</span>, <span class="string">"text"</span>, ClusteringOrder::Desc)],
 <a href=#1206 id=1206 data-nosnippet>1206</a>        );
 <a href=#1207 id=1207 data-nosnippet>1207</a>
-<a href=#1208 id=1208 data-nosnippet>1208</a>        <span class="kw">let </span>empty_ck = ClusteringKey::single(<span class="string">"c"</span>, Value::Text(String::new()));
-<a href=#1209 id=1209 data-nosnippet>1209</a>        <span class="kw">let </span>valued_ck = ClusteringKey::single(<span class="string">"c"</span>, Value::Text(<span class="string">"a"</span>.to_string()));
+<a href=#1208 id=1208 data-nosnippet>1208</a>        <span class="kw">let </span>empty_ck = ClusteringKey::single(<span class="string">"c"</span>, Value::text(String::new()));
+<a href=#1209 id=1209 data-nosnippet>1209</a>        <span class="kw">let </span>valued_ck = ClusteringKey::single(<span class="string">"c"</span>, Value::text(<span class="string">"a"</span>.to_string()));
 <a href=#1210 id=1210 data-nosnippet>1210</a>
 <a href=#1211 id=1211 data-nosnippet>1211</a>        <span class="macro">assert_eq!</span>(
 <a href=#1212 id=1212 data-nosnippet>1212</a>            empty_ck.compare(<span class="kw-2">&amp;</span>valued_ck, <span class="kw-2">&amp;</span>schema).unwrap(),
@@ -1348,7 +1348,7 @@
 <a href=#1348 id=1348 data-nosnippet>1348</a>        <span class="kw">let </span>pk = PartitionKey::single(<span class="string">"id"</span>, Value::Integer(<span class="number">1</span>));
 <a href=#1349 id=1349 data-nosnippet>1349</a>        <span class="kw">let </span>ops = <span class="macro">vec!</span>[CellOperation::Write {
 <a href=#1350 id=1350 data-nosnippet>1350</a>            column: <span class="string">"name"</span>.to_string(),
-<a href=#1351 id=1351 data-nosnippet>1351</a>            value: Value::Text(<span class="string">"Alice"</span>.to_string()),
+<a href=#1351 id=1351 data-nosnippet>1351</a>            value: Value::text(<span class="string">"Alice"</span>.to_string()),
 <a href=#1352 id=1352 data-nosnippet>1352</a>        }];
 <a href=#1353 id=1353 data-nosnippet>1353</a>
 <a href=#1354 id=1354 data-nosnippet>1354</a>        <span class="kw">let </span>mutation = Mutation::new(table_id.clone(), pk, <span class="prelude-val">None</span>, ops, <span class="number">1234567890</span>, <span class="prelude-val">None</span>);
@@ -1408,7 +1408,7 @@
 <a href=#1408 id=1408 data-nosnippet>1408</a>        <span class="macro">assert_eq!</span>(bytes, <span class="macro">vec!</span>[<span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x2A</span>]);
 <a href=#1409 id=1409 data-nosnippet>1409</a>
 <a href=#1410 id=1410 data-nosnippet>1410</a>        <span class="comment">// Text
-<a href=#1411 id=1411 data-nosnippet>1411</a>        </span><span class="kw">let </span>bytes = serialize_value_bytes(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"hello"</span>.to_string()), <span class="kw-2">&amp;</span>ComparatorType::Text)
+<a href=#1411 id=1411 data-nosnippet>1411</a>        </span><span class="kw">let </span>bytes = serialize_value_bytes(<span class="kw-2">&amp;</span>Value::text(<span class="string">"hello"</span>.to_string()), <span class="kw-2">&amp;</span>ComparatorType::Text)
 <a href=#1412 id=1412 data-nosnippet>1412</a>            .unwrap();
 <a href=#1413 id=1413 data-nosnippet>1413</a>        <span class="macro">assert_eq!</span>(bytes, <span class="string">b"hello"</span>);
 <a href=#1414 id=1414 data-nosnippet>1414</a>
@@ -1643,17 +1643,17 @@
 <a href=#1643 id=1643 data-nosnippet>1643</a>    </span><span class="kw">fn </span>test_compare_frozen_list_values() {
 <a href=#1644 id=1644 data-nosnippet>1644</a>        <span class="comment">// Issue #437: Frozen collection clustering keys must be comparable
 <a href=#1645 id=1645 data-nosnippet>1645</a>        </span><span class="kw">let </span>list_a = Value::Frozen(Box::new(Value::List(<span class="macro">vec!</span>[
-<a href=#1646 id=1646 data-nosnippet>1646</a>            Value::Text(<span class="string">"a"</span>.to_string()),
-<a href=#1647 id=1647 data-nosnippet>1647</a>            Value::Text(<span class="string">"b"</span>.to_string()),
+<a href=#1646 id=1646 data-nosnippet>1646</a>            Value::text(<span class="string">"a"</span>.to_string()),
+<a href=#1647 id=1647 data-nosnippet>1647</a>            Value::text(<span class="string">"b"</span>.to_string()),
 <a href=#1648 id=1648 data-nosnippet>1648</a>        ])));
 <a href=#1649 id=1649 data-nosnippet>1649</a>        <span class="kw">let </span>list_b = Value::Frozen(Box::new(Value::List(<span class="macro">vec!</span>[
-<a href=#1650 id=1650 data-nosnippet>1650</a>            Value::Text(<span class="string">"a"</span>.to_string()),
-<a href=#1651 id=1651 data-nosnippet>1651</a>            Value::Text(<span class="string">"c"</span>.to_string()),
+<a href=#1650 id=1650 data-nosnippet>1650</a>            Value::text(<span class="string">"a"</span>.to_string()),
+<a href=#1651 id=1651 data-nosnippet>1651</a>            Value::text(<span class="string">"c"</span>.to_string()),
 <a href=#1652 id=1652 data-nosnippet>1652</a>        ])));
 <a href=#1653 id=1653 data-nosnippet>1653</a>        <span class="kw">let </span>list_c = Value::Frozen(Box::new(Value::List(<span class="macro">vec!</span>[
-<a href=#1654 id=1654 data-nosnippet>1654</a>            Value::Text(<span class="string">"a"</span>.to_string()),
-<a href=#1655 id=1655 data-nosnippet>1655</a>            Value::Text(<span class="string">"b"</span>.to_string()),
-<a href=#1656 id=1656 data-nosnippet>1656</a>            Value::Text(<span class="string">"c"</span>.to_string()),
+<a href=#1654 id=1654 data-nosnippet>1654</a>            Value::text(<span class="string">"a"</span>.to_string()),
+<a href=#1655 id=1655 data-nosnippet>1655</a>            Value::text(<span class="string">"b"</span>.to_string()),
+<a href=#1656 id=1656 data-nosnippet>1656</a>            Value::text(<span class="string">"c"</span>.to_string()),
 <a href=#1657 id=1657 data-nosnippet>1657</a>        ])));
 <a href=#1658 id=1658 data-nosnippet>1658</a>
 <a href=#1659 id=1659 data-nosnippet>1659</a>        <span class="comment">// Same elements: equal
@@ -1677,25 +1677,25 @@
 <a href=#1677 id=1677 data-nosnippet>1677</a>        </span><span class="kw">let </span>ck_2elem = ClusteringKey::single(
 <a href=#1678 id=1678 data-nosnippet>1678</a>            <span class="string">"tags"</span>,
 <a href=#1679 id=1679 data-nosnippet>1679</a>            Value::Frozen(Box::new(Value::List(<span class="macro">vec!</span>[
-<a href=#1680 id=1680 data-nosnippet>1680</a>                Value::Text(<span class="string">"ck_0_0"</span>.to_string()),
-<a href=#1681 id=1681 data-nosnippet>1681</a>                Value::Text(<span class="string">"ck_0_1"</span>.to_string()),
+<a href=#1680 id=1680 data-nosnippet>1680</a>                Value::text(<span class="string">"ck_0_0"</span>.to_string()),
+<a href=#1681 id=1681 data-nosnippet>1681</a>                Value::text(<span class="string">"ck_0_1"</span>.to_string()),
 <a href=#1682 id=1682 data-nosnippet>1682</a>            ]))),
 <a href=#1683 id=1683 data-nosnippet>1683</a>        );
 <a href=#1684 id=1684 data-nosnippet>1684</a>        <span class="kw">let </span>ck_3elem = ClusteringKey::single(
 <a href=#1685 id=1685 data-nosnippet>1685</a>            <span class="string">"tags"</span>,
 <a href=#1686 id=1686 data-nosnippet>1686</a>            Value::Frozen(Box::new(Value::List(<span class="macro">vec!</span>[
-<a href=#1687 id=1687 data-nosnippet>1687</a>                Value::Text(<span class="string">"ck_1_0"</span>.to_string()),
-<a href=#1688 id=1688 data-nosnippet>1688</a>                Value::Text(<span class="string">"ck_1_1"</span>.to_string()),
-<a href=#1689 id=1689 data-nosnippet>1689</a>                Value::Text(<span class="string">"ck_1_2"</span>.to_string()),
+<a href=#1687 id=1687 data-nosnippet>1687</a>                Value::text(<span class="string">"ck_1_0"</span>.to_string()),
+<a href=#1688 id=1688 data-nosnippet>1688</a>                Value::text(<span class="string">"ck_1_1"</span>.to_string()),
+<a href=#1689 id=1689 data-nosnippet>1689</a>                Value::text(<span class="string">"ck_1_2"</span>.to_string()),
 <a href=#1690 id=1690 data-nosnippet>1690</a>            ]))),
 <a href=#1691 id=1691 data-nosnippet>1691</a>        );
 <a href=#1692 id=1692 data-nosnippet>1692</a>        <span class="kw">let </span>ck_4elem = ClusteringKey::single(
 <a href=#1693 id=1693 data-nosnippet>1693</a>            <span class="string">"tags"</span>,
 <a href=#1694 id=1694 data-nosnippet>1694</a>            Value::Frozen(Box::new(Value::List(<span class="macro">vec!</span>[
-<a href=#1695 id=1695 data-nosnippet>1695</a>                Value::Text(<span class="string">"ck_2_0"</span>.to_string()),
-<a href=#1696 id=1696 data-nosnippet>1696</a>                Value::Text(<span class="string">"ck_2_1"</span>.to_string()),
-<a href=#1697 id=1697 data-nosnippet>1697</a>                Value::Text(<span class="string">"ck_2_2"</span>.to_string()),
-<a href=#1698 id=1698 data-nosnippet>1698</a>                Value::Text(<span class="string">"ck_2_3"</span>.to_string()),
+<a href=#1695 id=1695 data-nosnippet>1695</a>                Value::text(<span class="string">"ck_2_0"</span>.to_string()),
+<a href=#1696 id=1696 data-nosnippet>1696</a>                Value::text(<span class="string">"ck_2_1"</span>.to_string()),
+<a href=#1697 id=1697 data-nosnippet>1697</a>                Value::text(<span class="string">"ck_2_2"</span>.to_string()),
+<a href=#1698 id=1698 data-nosnippet>1698</a>                Value::text(<span class="string">"ck_2_3"</span>.to_string()),
 <a href=#1699 id=1699 data-nosnippet>1699</a>            ]))),
 <a href=#1700 id=1700 data-nosnippet>1700</a>        );
 <a href=#1701 id=1701 data-nosnippet>1701</a>
@@ -1773,7 +1773,7 @@
 <a href=#1773 id=1773 data-nosnippet>1773</a>            dropped_columns: HashMap::new(),
 <a href=#1774 id=1774 data-nosnippet>1774</a>        };
 <a href=#1775 id=1775 data-nosnippet>1775</a>
-<a href=#1776 id=1776 data-nosnippet>1776</a>        <span class="kw">let </span>original = PartitionKey::single(<span class="string">"name"</span>, Value::Text(<span class="string">"hello"</span>.to_string()));
+<a href=#1776 id=1776 data-nosnippet>1776</a>        <span class="kw">let </span>original = PartitionKey::single(<span class="string">"name"</span>, Value::text(<span class="string">"hello"</span>.to_string()));
 <a href=#1777 id=1777 data-nosnippet>1777</a>        <span class="kw">let </span>bytes = original.to_bytes(<span class="kw-2">&amp;</span>schema).unwrap();
 <a href=#1778 id=1778 data-nosnippet>1778</a>        <span class="kw">let </span>decoded = PartitionKey::from_bytes(<span class="kw-2">&amp;</span>bytes, <span class="kw-2">&amp;</span>schema).unwrap();
 <a href=#1779 id=1779 data-nosnippet>1779</a>        <span class="macro">assert_eq!</span>(original, decoded);
@@ -1803,7 +1803,7 @@
 <a href=#1803 id=1803 data-nosnippet>1803</a>        };
 <a href=#1804 id=1804 data-nosnippet>1804</a>
 <a href=#1805 id=1805 data-nosnippet>1805</a>        <span class="kw">let </span>original = PartitionKey::new(<span class="macro">vec!</span>[
-<a href=#1806 id=1806 data-nosnippet>1806</a>            (<span class="string">"tenant"</span>.to_string(), Value::Text(<span class="string">"acme"</span>.to_string())),
+<a href=#1806 id=1806 data-nosnippet>1806</a>            (<span class="string">"tenant"</span>.to_string(), Value::text(<span class="string">"acme"</span>.to_string())),
 <a href=#1807 id=1807 data-nosnippet>1807</a>            (<span class="string">"id"</span>.to_string(), Value::Integer(<span class="number">99</span>)),
 <a href=#1808 id=1808 data-nosnippet>1808</a>        ]);
 <a href=#1809 id=1809 data-nosnippet>1809</a>        <span class="kw">let </span>bytes = original.to_bytes(<span class="kw-2">&amp;</span>schema).unwrap();
@@ -1839,7 +1839,7 @@
 <a href=#1839 id=1839 data-nosnippet>1839</a>            columns: <span class="macro">vec!</span>[(<span class="string">"col"</span>.to_string(), Value::Integer(<span class="number">1</span>))],
 <a href=#1840 id=1840 data-nosnippet>1840</a>        };
 <a href=#1841 id=1841 data-nosnippet>1841</a>        <span class="kw">let </span>key_b = ClusteringKey {
-<a href=#1842 id=1842 data-nosnippet>1842</a>            columns: <span class="macro">vec!</span>[(<span class="string">"col"</span>.to_string(), Value::Text(<span class="string">"1"</span>.to_string()))],
+<a href=#1842 id=1842 data-nosnippet>1842</a>            columns: <span class="macro">vec!</span>[(<span class="string">"col"</span>.to_string(), Value::text(<span class="string">"1"</span>.to_string()))],
 <a href=#1843 id=1843 data-nosnippet>1843</a>        };
 <a href=#1844 id=1844 data-nosnippet>1844</a>
 <a href=#1845 id=1845 data-nosnippet>1845</a>        <span class="comment">// Must not panic.

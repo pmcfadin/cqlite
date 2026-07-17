@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/types.rs`."><title>types.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>types.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Public types for SSTable reader
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/types.rs`."><title>types.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>types.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Public types for SSTable reader
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>std::path::PathBuf;
 <a href=#4 id=4 data-nosnippet>4</a><span class="kw">use </span>std::sync::Arc;
@@ -409,41 +409,38 @@
 <a href=#409 id=409 data-nosnippet>409</a>    ///
 <a href=#410 id=410 data-nosnippet>410</a>    /// [`ChunkKey::sstable`]: crate::storage::cache::ChunkKey::sstable
 <a href=#411 id=411 data-nosnippet>411</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) chunk_cache_id: u64,
-<a href=#412 id=412 data-nosnippet>412</a>    <span class="doccomment">/// Lazily-computed, ascending-sorted list of every partition's UNCOMPRESSED
-<a href=#413 id=413 data-nosnippet>413</a>    /// `Data.db` start offset, enumerated authoritatively from the BTI
-<a href=#414 id=414 data-nosnippet>414</a>    /// `Partitions.db` trie (issue #953 / #951).
-<a href=#415 id=415 data-nosnippet>415</a>    ///
-<a href=#416 id=416 data-nosnippet>416</a>    /// `None` until the first within-SSTable seek requests a successor offset;
-<a href=#417 id=417 data-nosnippet>417</a>    /// computed once via [`SSTableReader::bti_partition_offsets`] (a full trie DFS
-<a href=#418 id=418 data-nosnippet>418</a>    /// resolving WIDE-partition `RowsOffset`s through `Rows.db`) and cached so the
-<a href=#419 id=419 data-nosnippet>419</a>    /// successor lookup is an O(log n) binary search per seek, not an O(n) DFS.
-<a href=#420 id=420 data-nosnippet>420</a>    /// Only ever populated for BTI readers; BIG readers use the sorted `Index.db`
-<a href=#421 id=421 data-nosnippet>421</a>    /// entries directly.
-<a href=#422 id=422 data-nosnippet>422</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) bti_partition_offsets: std::sync::OnceLock&lt;Vec&lt;u64&gt;&gt;,
-<a href=#423 id=423 data-nosnippet>423</a>    <span class="doccomment">/// Single-slot same-key memo of the most recent BTI partition resolution
-<a href=#424 id=424 data-nosnippet>424</a>    /// (issue #1574, audit C3). A single-candidate `WHERE pk = ?` point read
-<a href=#425 id=425 data-nosnippet>425</a>    /// descends the `Partitions.db` trie twice — once for the candidate prune
-<a href=#426 id=426 data-nosnippet>426</a>    /// (`might_contain_partition`) and once for the seek — for the SAME key. The
-<a href=#427 id=427 data-nosnippet>427</a>    /// resolved uncompressed `Data.db` offset (`Some(off)`) or authoritative
-<a href=#428 id=428 data-nosnippet>428</a>    /// absence (`None`) is a pure function of the immutable trie + key, so the
-<a href=#429 id=429 data-nosnippet>429</a>    /// prune stores it here and the seek reuses it without a second descent
-<a href=#430 id=430 data-nosnippet>430</a>    /// (`TRIE_WALKS` stays 1 per point read). A stale slot (a different key, or a
-<a href=#431 id=431 data-nosnippet>431</a>    /// concurrent read) simply misses and re-walks — never a wrong result. Best
-<a href=#432 id=432 data-nosnippet>432</a>    /// effort: a poisoned lock is treated as a miss. This is NOT a cross-lookup
-<a href=#433 id=433 data-nosnippet>433</a>    /// key/offset cache (that is Epic B/B4); it is bounded to one entry.
-<a href=#434 id=434 data-nosnippet>434</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) bti_lookup_memo: BtiLookupMemo,
-<a href=#435 id=435 data-nosnippet>435</a>    <span class="doccomment">/// Per-reader key→partition-offset cache (issue #1570, Epic B/B4) — the
-<a href=#436 id=436 data-nosnippet>436</a>    /// Cassandra key-cache analogue. Maps the raw partition-key bytes to the
-<a href=#437 id=437 data-nosnippet>437</a>    /// location the index/trie descent produces, so a repeated hot point read can
-<a href=#438 id=438 data-nosnippet>438</a>    /// return the location without re-probing `Index.db` (BIG,
-<a href=#439 id=439 data-nosnippet>439</a>    /// `lookup_partition_with_index`) or re-descending the `Partitions.db` trie
-<a href=#440 id=440 data-nosnippet>440</a>    /// (BTI, `lookup_partition_via_bti_trie`, `TRIE_WALKS`). Per-reader (not shared):
-<a href=#441 id=441 data-nosnippet>441</a>    /// a location is meaningful only within this SSTable's offset domain, so the
-<a href=#442 id=442 data-nosnippet>442</a>    /// cache dies with the reader on remove/reload — the audit's immutable-SSTable
-<a href=#443 id=443 data-nosnippet>443</a>    /// invalidation rule, trivially satisfied. Positive-only (absent keys are never
-<a href=#444 id=444 data-nosnippet>444</a>    /// stored, so a hit can never be fabricated). Built honoring
-<a href=#445 id=445 data-nosnippet>445</a>    /// `config.memory.block_cache.enabled` (the B2 read-cache toggle): a disabled
-<a href=#446 id=446 data-nosnippet>446</a>    /// cache is a genuine no-op so the point-read path bypasses it.
-<a href=#447 id=447 data-nosnippet>447</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) key_offset_cache: Arc&lt;<span class="kw">crate</span>::storage::cache::KeyOffsetCache&gt;,
-<a href=#448 id=448 data-nosnippet>448</a>}
+<a href=#412 id=412 data-nosnippet>412</a>    <span class="doccomment">/// Single-slot same-key memo of the most recent BTI partition resolution
+<a href=#413 id=413 data-nosnippet>413</a>    /// (issue #1574, audit C3). A single-candidate `WHERE pk = ?` point read
+<a href=#414 id=414 data-nosnippet>414</a>    /// descends the `Partitions.db` trie twice — once for the candidate prune
+<a href=#415 id=415 data-nosnippet>415</a>    /// (`might_contain_partition`) and once for the seek — for the SAME key. The
+<a href=#416 id=416 data-nosnippet>416</a>    /// resolved uncompressed `Data.db` offset (`Some(off)`) or authoritative
+<a href=#417 id=417 data-nosnippet>417</a>    /// absence (`None`) is a pure function of the immutable trie + key, so the
+<a href=#418 id=418 data-nosnippet>418</a>    /// prune stores it here and the seek reuses it without a second descent
+<a href=#419 id=419 data-nosnippet>419</a>    /// (`TRIE_WALKS` stays 1 per point read). A stale slot (a different key, or a
+<a href=#420 id=420 data-nosnippet>420</a>    /// concurrent read) simply misses and re-walks — never a wrong result. Best
+<a href=#421 id=421 data-nosnippet>421</a>    /// effort: a poisoned lock is treated as a miss. This is NOT a cross-lookup
+<a href=#422 id=422 data-nosnippet>422</a>    /// key/offset cache (that is Epic B/B4); it is bounded to one entry.
+<a href=#423 id=423 data-nosnippet>423</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) bti_lookup_memo: BtiLookupMemo,
+<a href=#424 id=424 data-nosnippet>424</a>    <span class="doccomment">/// Per-reader key→partition-offset cache (issue #1570, Epic B/B4) — the
+<a href=#425 id=425 data-nosnippet>425</a>    /// Cassandra key-cache analogue. Maps the raw partition-key bytes to the
+<a href=#426 id=426 data-nosnippet>426</a>    /// location the index/trie descent produces, so a repeated hot point read can
+<a href=#427 id=427 data-nosnippet>427</a>    /// return the location without re-probing `Index.db` (BIG,
+<a href=#428 id=428 data-nosnippet>428</a>    /// `lookup_partition_with_index`) or re-descending the `Partitions.db` trie
+<a href=#429 id=429 data-nosnippet>429</a>    /// (BTI, `lookup_partition_via_bti_trie`, `TRIE_WALKS`). Issue #2059: a shared
+<a href=#430 id=430 data-nosnippet>430</a>    /// handle to the PROCESS-GLOBAL byte-bounded cache (or a per-reader
+<a href=#431 id=431 data-nosnippet>431</a>    /// [`disabled`](crate::storage::cache::GlobalKeyOffsetCache::disabled) no-op
+<a href=#432 id=432 data-nosnippet>432</a>    /// when `block_cache.enabled == false`), keyed on
+<a href=#433 id=433 data-nosnippet>433</a>    /// `(generation_identity, raw key)` so aggregate resident memory is bounded by
+<a href=#434 id=434 data-nosnippet>434</a>    /// ONE global cap regardless of open-reader count. Positive-only (absent keys
+<a href=#435 id=435 data-nosnippet>435</a>    /// are never stored, so a hit can never be fabricated).
+<a href=#436 id=436 data-nosnippet>436</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) key_offset_cache: Arc&lt;<span class="kw">crate</span>::storage::cache::GlobalKeyOffsetCache&gt;,
+<a href=#437 id=437 data-nosnippet>437</a>    <span class="doccomment">/// This reader's authoritative inode-stable generation identity
+<a href=#438 id=438 data-nosnippet>438</a>    /// (device+inode+size+generation, #2345/#2059) — the namespacing half of every
+<a href=#439 id=439 data-nosnippet>439</a>    /// global key-cache entry. Computed ONCE at open and IMMUTABLE thereafter, so it
+<a href=#440 id=440 data-nosnippet>440</a>    /// stays stable across a #2383 rebind-by-inode (a path swap over a byte-identical
+<a href=#441 id=441 data-nosnippet>441</a>    /// generation), which is exactly why cached entries survive a rebind. `None` when
+<a href=#442 id=442 data-nosnippet>442</a>    /// the `Data.db` could not be `stat`ed at open (the cache is then bypassed rather
+<a href=#443 id=443 data-nosnippet>443</a>    /// than fabricating an identity — no-heuristics #28).
+<a href=#444 id=444 data-nosnippet>444</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) generation_identity: <span class="prelude-ty">Option</span>&lt;<span class="kw">crate</span>::storage::cache::GenerationIdentity&gt;,
+<a href=#445 id=445 data-nosnippet>445</a>}
 </code></pre></div></section></main></body></html>

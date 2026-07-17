@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/parser/collection_benchmarks.rs`."><title>collection_benchmarks.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/parser/</div>collection_benchmarks.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Performance benchmarks for collection parsing and serialization
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/parser/collection_benchmarks.rs`."><title>collection_benchmarks.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/parser/</div>collection_benchmarks.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Performance benchmarks for collection parsing and serialization
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! This module provides comprehensive benchmarks for collections to ensure
 <a href=#4 id=4 data-nosnippet>4</a>//! they meet performance requirements for production Cassandra workloads.
@@ -77,7 +77,7 @@
 <a href=#77 id=77 data-nosnippet>77</a>            <span class="comment">// String List benchmark
 <a href=#78 id=78 data-nosnippet>78</a>            </span><span class="kw">let </span>string_list = Value::List(
 <a href=#79 id=79 data-nosnippet>79</a>                (<span class="number">0</span>..size)
-<a href=#80 id=80 data-nosnippet>80</a>                    .map(|i| Value::Text(<span class="macro">format!</span>(<span class="string">"item_{:06}"</span>, i)))
+<a href=#80 id=80 data-nosnippet>80</a>                    .map(|i| Value::text(<span class="macro">format!</span>(<span class="string">"item_{:06}"</span>, i)))
 <a href=#81 id=81 data-nosnippet>81</a>                    .collect(),
 <a href=#82 id=82 data-nosnippet>82</a>            );
 <a href=#83 id=83 data-nosnippet>83</a>
@@ -130,7 +130,7 @@
 <a href=#130 id=130 data-nosnippet>130</a>            <span class="comment">// String Set benchmark (tags, categories)
 <a href=#131 id=131 data-nosnippet>131</a>            </span><span class="kw">let </span>string_set = Value::Set(
 <a href=#132 id=132 data-nosnippet>132</a>                (<span class="number">0</span>..size)
-<a href=#133 id=133 data-nosnippet>133</a>                    .map(|i| Value::Text(<span class="macro">format!</span>(<span class="string">"tag_{:04}"</span>, i)))
+<a href=#133 id=133 data-nosnippet>133</a>                    .map(|i| Value::text(<span class="macro">format!</span>(<span class="string">"tag_{:04}"</span>, i)))
 <a href=#134 id=134 data-nosnippet>134</a>                    .collect(),
 <a href=#135 id=135 data-nosnippet>135</a>            );
 <a href=#136 id=136 data-nosnippet>136</a>
@@ -165,7 +165,7 @@
 <a href=#165 id=165 data-nosnippet>165</a>            <span class="comment">// String-to-Integer Map (common pattern)
 <a href=#166 id=166 data-nosnippet>166</a>            </span><span class="kw">let </span>string_int_map = Value::Map(
 <a href=#167 id=167 data-nosnippet>167</a>                (<span class="number">0i32</span>..size)
-<a href=#168 id=168 data-nosnippet>168</a>                    .map(|i| (Value::Text(<span class="macro">format!</span>(<span class="string">"key_{:06}"</span>, i)), Value::Integer(i)))
+<a href=#168 id=168 data-nosnippet>168</a>                    .map(|i| (Value::text(<span class="macro">format!</span>(<span class="string">"key_{:06}"</span>, i)), Value::Integer(i)))
 <a href=#169 id=169 data-nosnippet>169</a>                    .collect(),
 <a href=#170 id=170 data-nosnippet>170</a>            );
 <a href=#171 id=171 data-nosnippet>171</a>
@@ -181,8 +181,8 @@
 <a href=#181 id=181 data-nosnippet>181</a>                (<span class="number">0</span>..size)
 <a href=#182 id=182 data-nosnippet>182</a>                    .map(|i| {
 <a href=#183 id=183 data-nosnippet>183</a>                        (
-<a href=#184 id=184 data-nosnippet>184</a>                            Value::Text(<span class="macro">format!</span>(<span class="string">"key_{:06}"</span>, i)),
-<a href=#185 id=185 data-nosnippet>185</a>                            Value::Text(<span class="macro">format!</span>(<span class="string">"value_{:06}"</span>, i)),
+<a href=#184 id=184 data-nosnippet>184</a>                            Value::text(<span class="macro">format!</span>(<span class="string">"key_{:06}"</span>, i)),
+<a href=#185 id=185 data-nosnippet>185</a>                            Value::text(<span class="macro">format!</span>(<span class="string">"value_{:06}"</span>, i)),
 <a href=#186 id=186 data-nosnippet>186</a>                        )
 <a href=#187 id=187 data-nosnippet>187</a>                    })
 <a href=#188 id=188 data-nosnippet>188</a>                    .collect(),
@@ -201,7 +201,7 @@
 <a href=#201 id=201 data-nosnippet>201</a>                    .map(|i| {
 <a href=#202 id=202 data-nosnippet>202</a>                        <span class="kw">let </span><span class="kw-2">mut </span>uuid = [<span class="number">0u8</span>; <span class="number">16</span>];
 <a href=#203 id=203 data-nosnippet>203</a>                        uuid[<span class="number">0</span>..<span class="number">4</span>].copy_from_slice(<span class="kw-2">&amp;</span>(i <span class="kw">as </span>u32).to_be_bytes());
-<a href=#204 id=204 data-nosnippet>204</a>                        (Value::Uuid(uuid), Value::Text(<span class="macro">format!</span>(<span class="string">"user_{:06}"</span>, i)))
+<a href=#204 id=204 data-nosnippet>204</a>                        (Value::Uuid(uuid), Value::text(<span class="macro">format!</span>(<span class="string">"user_{:06}"</span>, i)))
 <a href=#205 id=205 data-nosnippet>205</a>                    })
 <a href=#206 id=206 data-nosnippet>206</a>                    .collect(),
 <a href=#207 id=207 data-nosnippet>207</a>            );
@@ -229,7 +229,7 @@
 <a href=#229 id=229 data-nosnippet>229</a>                (<span class="number">0</span>..size)
 <a href=#230 id=230 data-nosnippet>230</a>                    .map(|i| <span class="kw">match </span>i % <span class="number">6 </span>{
 <a href=#231 id=231 data-nosnippet>231</a>                        <span class="number">0 </span>=&gt; Value::Integer(i),
-<a href=#232 id=232 data-nosnippet>232</a>                        <span class="number">1 </span>=&gt; Value::Text(<span class="macro">format!</span>(<span class="string">"field_{}"</span>, i)),
+<a href=#232 id=232 data-nosnippet>232</a>                        <span class="number">1 </span>=&gt; Value::text(<span class="macro">format!</span>(<span class="string">"field_{}"</span>, i)),
 <a href=#233 id=233 data-nosnippet>233</a>                        <span class="number">2 </span>=&gt; Value::Boolean(i % <span class="number">2 </span>== <span class="number">0</span>),
 <a href=#234 id=234 data-nosnippet>234</a>                        <span class="number">3 </span>=&gt; Value::Float(i <span class="kw">as </span>f64 * std::f64::consts::PI),
 <a href=#235 id=235 data-nosnippet>235</a>                        <span class="number">4 </span>=&gt; Value::BigInt(i <span class="kw">as </span>i64 * <span class="number">1_000_000</span>),
@@ -262,7 +262,7 @@
 <a href=#262 id=262 data-nosnippet>262</a>            <span class="comment">// String tuple (field names, etc.)
 <a href=#263 id=263 data-nosnippet>263</a>            </span><span class="kw">let </span>string_tuple = Value::Tuple(
 <a href=#264 id=264 data-nosnippet>264</a>                (<span class="number">0</span>..size)
-<a href=#265 id=265 data-nosnippet>265</a>                    .map(|i| Value::Text(<span class="macro">format!</span>(<span class="string">"field_{}"</span>, i)))
+<a href=#265 id=265 data-nosnippet>265</a>                    .map(|i| Value::text(<span class="macro">format!</span>(<span class="string">"field_{}"</span>, i)))
 <a href=#266 id=266 data-nosnippet>266</a>                    .collect(),
 <a href=#267 id=267 data-nosnippet>267</a>            );
 <a href=#268 id=268 data-nosnippet>268</a>
@@ -290,17 +290,17 @@
 <a href=#290 id=290 data-nosnippet>290</a>                (<span class="number">0i32</span>..size)
 <a href=#291 id=291 data-nosnippet>291</a>                    .map(|i| {
 <a href=#292 id=292 data-nosnippet>292</a>                        Value::Map(<span class="macro">vec!</span>[
-<a href=#293 id=293 data-nosnippet>293</a>                            (Value::Text(<span class="string">"id"</span>.to_string()), Value::Integer(i)),
+<a href=#293 id=293 data-nosnippet>293</a>                            (Value::text(<span class="string">"id"</span>.to_string()), Value::Integer(i)),
 <a href=#294 id=294 data-nosnippet>294</a>                            (
-<a href=#295 id=295 data-nosnippet>295</a>                                Value::Text(<span class="string">"name"</span>.to_string()),
-<a href=#296 id=296 data-nosnippet>296</a>                                Value::Text(<span class="macro">format!</span>(<span class="string">"item_{}"</span>, i)),
+<a href=#295 id=295 data-nosnippet>295</a>                                Value::text(<span class="string">"name"</span>.to_string()),
+<a href=#296 id=296 data-nosnippet>296</a>                                Value::text(<span class="macro">format!</span>(<span class="string">"item_{}"</span>, i)),
 <a href=#297 id=297 data-nosnippet>297</a>                            ),
 <a href=#298 id=298 data-nosnippet>298</a>                            (
-<a href=#299 id=299 data-nosnippet>299</a>                                Value::Text(<span class="string">"active"</span>.to_string()),
+<a href=#299 id=299 data-nosnippet>299</a>                                Value::text(<span class="string">"active"</span>.to_string()),
 <a href=#300 id=300 data-nosnippet>300</a>                                Value::Boolean(i % <span class="number">2 </span>== <span class="number">0</span>),
 <a href=#301 id=301 data-nosnippet>301</a>                            ),
 <a href=#302 id=302 data-nosnippet>302</a>                            (
-<a href=#303 id=303 data-nosnippet>303</a>                                Value::Text(<span class="string">"score"</span>.to_string()),
+<a href=#303 id=303 data-nosnippet>303</a>                                Value::text(<span class="string">"score"</span>.to_string()),
 <a href=#304 id=304 data-nosnippet>304</a>                                Value::Float(i <span class="kw">as </span>f64 * <span class="number">1.5</span>),
 <a href=#305 id=305 data-nosnippet>305</a>                            ),
 <a href=#306 id=306 data-nosnippet>306</a>                        ])
@@ -320,11 +320,11 @@
 <a href=#320 id=320 data-nosnippet>320</a>                (<span class="number">0</span>..size)
 <a href=#321 id=321 data-nosnippet>321</a>                    .map(|i| {
 <a href=#322 id=322 data-nosnippet>322</a>                        (
-<a href=#323 id=323 data-nosnippet>323</a>                            Value::Text(<span class="macro">format!</span>(<span class="string">"category_{}"</span>, i)),
+<a href=#323 id=323 data-nosnippet>323</a>                            Value::text(<span class="macro">format!</span>(<span class="string">"category_{}"</span>, i)),
 <a href=#324 id=324 data-nosnippet>324</a>                            Value::List(<span class="macro">vec!</span>[
-<a href=#325 id=325 data-nosnippet>325</a>                                Value::Text(<span class="macro">format!</span>(<span class="string">"item_{}_{}"</span>, i, <span class="number">1</span>)),
-<a href=#326 id=326 data-nosnippet>326</a>                                Value::Text(<span class="macro">format!</span>(<span class="string">"item_{}_{}"</span>, i, <span class="number">2</span>)),
-<a href=#327 id=327 data-nosnippet>327</a>                                Value::Text(<span class="macro">format!</span>(<span class="string">"item_{}_{}"</span>, i, <span class="number">3</span>)),
+<a href=#325 id=325 data-nosnippet>325</a>                                Value::text(<span class="macro">format!</span>(<span class="string">"item_{}_{}"</span>, i, <span class="number">1</span>)),
+<a href=#326 id=326 data-nosnippet>326</a>                                Value::text(<span class="macro">format!</span>(<span class="string">"item_{}_{}"</span>, i, <span class="number">2</span>)),
+<a href=#327 id=327 data-nosnippet>327</a>                                Value::text(<span class="macro">format!</span>(<span class="string">"item_{}_{}"</span>, i, <span class="number">3</span>)),
 <a href=#328 id=328 data-nosnippet>328</a>                            ]),
 <a href=#329 id=329 data-nosnippet>329</a>                        )
 <a href=#330 id=330 data-nosnippet>330</a>                    })
@@ -341,14 +341,14 @@
 <a href=#341 id=341 data-nosnippet>341</a>            <span class="comment">// Tuple with nested collections (complex records)
 <a href=#342 id=342 data-nosnippet>342</a>            </span><span class="kw">let </span>nested_tuple = Value::Tuple(<span class="macro">vec!</span>[
 <a href=#343 id=343 data-nosnippet>343</a>                Value::Integer(<span class="number">42</span>),
-<a href=#344 id=344 data-nosnippet>344</a>                Value::Text(<span class="string">"complex_record"</span>.to_string()),
+<a href=#344 id=344 data-nosnippet>344</a>                Value::text(<span class="string">"complex_record"</span>.to_string()),
 <a href=#345 id=345 data-nosnippet>345</a>                Value::List((<span class="number">0i32</span>..size).map(Value::Integer).collect()),
 <a href=#346 id=346 data-nosnippet>346</a>                Value::Map(
 <a href=#347 id=347 data-nosnippet>347</a>                    (<span class="number">0</span>..size / <span class="number">2</span>)
 <a href=#348 id=348 data-nosnippet>348</a>                        .map(|i| {
 <a href=#349 id=349 data-nosnippet>349</a>                            (
-<a href=#350 id=350 data-nosnippet>350</a>                                Value::Text(<span class="macro">format!</span>(<span class="string">"attr_{}"</span>, i)),
-<a href=#351 id=351 data-nosnippet>351</a>                                Value::Text(<span class="macro">format!</span>(<span class="string">"value_{}"</span>, i)),
+<a href=#350 id=350 data-nosnippet>350</a>                                Value::text(<span class="macro">format!</span>(<span class="string">"attr_{}"</span>, i)),
+<a href=#351 id=351 data-nosnippet>351</a>                                Value::text(<span class="macro">format!</span>(<span class="string">"value_{}"</span>, i)),
 <a href=#352 id=352 data-nosnippet>352</a>                            )
 <a href=#353 id=353 data-nosnippet>353</a>                        })
 <a href=#354 id=354 data-nosnippet>354</a>                        .collect(),
@@ -377,7 +377,7 @@
 <a href=#377 id=377 data-nosnippet>377</a>            <span class="comment">// Large string list
 <a href=#378 id=378 data-nosnippet>378</a>            </span><span class="kw">let </span>large_list = Value::List(
 <a href=#379 id=379 data-nosnippet>379</a>                (<span class="number">0</span>..size)
-<a href=#380 id=380 data-nosnippet>380</a>                    .map(|i| Value::Text(<span class="macro">format!</span>(<span class="string">"large_item_{:08}"</span>, i)))
+<a href=#380 id=380 data-nosnippet>380</a>                    .map(|i| Value::text(<span class="macro">format!</span>(<span class="string">"large_item_{:08}"</span>, i)))
 <a href=#381 id=381 data-nosnippet>381</a>                    .collect(),
 <a href=#382 id=382 data-nosnippet>382</a>            );
 <a href=#383 id=383 data-nosnippet>383</a>
@@ -403,7 +403,7 @@
 <a href=#403 id=403 data-nosnippet>403</a>                <span class="comment">// Large map
 <a href=#404 id=404 data-nosnippet>404</a>                </span><span class="kw">let </span>large_map = Value::Map(
 <a href=#405 id=405 data-nosnippet>405</a>                    (<span class="number">0i32</span>..size)
-<a href=#406 id=406 data-nosnippet>406</a>                        .map(|i| (Value::Text(<span class="macro">format!</span>(<span class="string">"key_{:08}"</span>, i)), Value::Integer(i)))
+<a href=#406 id=406 data-nosnippet>406</a>                        .map(|i| (Value::text(<span class="macro">format!</span>(<span class="string">"key_{:08}"</span>, i)), Value::Integer(i)))
 <a href=#407 id=407 data-nosnippet>407</a>                        .collect(),
 <a href=#408 id=408 data-nosnippet>408</a>                );
 <a href=#409 id=409 data-nosnippet>409</a>
@@ -635,35 +635,30 @@
 <a href=#635 id=635 data-nosnippet>635</a>        <span class="kw">let </span>report = benchmarks.generate_report();
 <a href=#636 id=636 data-nosnippet>636</a>        <span class="macro">println!</span>(<span class="string">"{}"</span>, report);
 <a href=#637 id=637 data-nosnippet>637</a>
-<a href=#638 id=638 data-nosnippet>638</a>        <span class="comment">// Verify performance requirements
-<a href=#639 id=639 data-nosnippet>639</a>        </span><span class="kw">for </span>result <span class="kw">in </span><span class="kw-2">&amp;</span>benchmarks.results {
-<a href=#640 id=640 data-nosnippet>640</a>            <span class="comment">// Parse time should be reasonable (&lt;100ms for even large collections)
-<a href=#641 id=641 data-nosnippet>641</a>            </span><span class="macro">assert!</span>(
-<a href=#642 id=642 data-nosnippet>642</a>                result.parse_time.as_millis() &lt; <span class="number">100</span>,
-<a href=#643 id=643 data-nosnippet>643</a>                <span class="string">"Parse time too slow for {}: {}ms"</span>,
-<a href=#644 id=644 data-nosnippet>644</a>                result.collection_type,
-<a href=#645 id=645 data-nosnippet>645</a>                result.parse_time.as_millis()
-<a href=#646 id=646 data-nosnippet>646</a>            );
-<a href=#647 id=647 data-nosnippet>647</a>
-<a href=#648 id=648 data-nosnippet>648</a>            <span class="comment">// Serialize time should be reasonable (&lt;100ms for even large collections)
-<a href=#649 id=649 data-nosnippet>649</a>            </span><span class="macro">assert!</span>(
-<a href=#650 id=650 data-nosnippet>650</a>                result.serialize_time.as_millis() &lt; <span class="number">100</span>,
-<a href=#651 id=651 data-nosnippet>651</a>                <span class="string">"Serialize time too slow for {}: {}ms"</span>,
-<a href=#652 id=652 data-nosnippet>652</a>                result.collection_type,
-<a href=#653 id=653 data-nosnippet>653</a>                result.serialize_time.as_millis()
-<a href=#654 id=654 data-nosnippet>654</a>            );
-<a href=#655 id=655 data-nosnippet>655</a>
-<a href=#656 id=656 data-nosnippet>656</a>            <span class="comment">// Throughput should be reasonable (&gt;1 MB/s for most operations)
-<a href=#657 id=657 data-nosnippet>657</a>            </span><span class="kw">if </span>result.data_size_bytes &gt; <span class="number">1000 </span>{
-<a href=#658 id=658 data-nosnippet>658</a>                <span class="comment">// Only check for non-trivial data sizes
-<a href=#659 id=659 data-nosnippet>659</a>                </span><span class="macro">assert!</span>(
-<a href=#660 id=660 data-nosnippet>660</a>                    result.throughput_mb_per_sec &gt; <span class="number">0.1</span>,
-<a href=#661 id=661 data-nosnippet>661</a>                    <span class="string">"Throughput too low for {}: {:.2} MB/s"</span>,
-<a href=#662 id=662 data-nosnippet>662</a>                    result.collection_type,
-<a href=#663 id=663 data-nosnippet>663</a>                    result.throughput_mb_per_sec
-<a href=#664 id=664 data-nosnippet>664</a>                );
-<a href=#665 id=665 data-nosnippet>665</a>            }
-<a href=#666 id=666 data-nosnippet>666</a>        }
-<a href=#667 id=667 data-nosnippet>667</a>    }
-<a href=#668 id=668 data-nosnippet>668</a>}
+<a href=#638 id=638 data-nosnippet>638</a>        <span class="comment">// Timing/throughput are RECORDED, never asserted (issue #2369): absolute
+<a href=#639 id=639 data-nosnippet>639</a>        // wall-clock bounds flake the Required PR Gate under loaded/parallel CI
+<a href=#640 id=640 data-nosnippet>640</a>        // runners. The perf signal belongs to the bench-regression lane, not this
+<a href=#641 id=641 data-nosnippet>641</a>        // unit test. Here we only assert functional correctness (benchmarks ran,
+<a href=#642 id=642 data-nosnippet>642</a>        // results are non-vacuous, each op decoded); the parse/serialize inside
+<a href=#643 id=643 data-nosnippet>643</a>        // `run_all_benchmarks` already fails closed on any decode error.
+<a href=#644 id=644 data-nosnippet>644</a>        </span><span class="kw">for </span>result <span class="kw">in </span><span class="kw-2">&amp;</span>benchmarks.results {
+<a href=#645 id=645 data-nosnippet>645</a>            <span class="comment">// Non-vacuity: every recorded op decoded and produced a size.
+<a href=#646 id=646 data-nosnippet>646</a>            </span><span class="macro">assert!</span>(
+<a href=#647 id=647 data-nosnippet>647</a>                result.data_size_bytes &gt; <span class="number">0</span>,
+<a href=#648 id=648 data-nosnippet>648</a>                <span class="string">"Benchmark produced empty serialized data for {}"</span>,
+<a href=#649 id=649 data-nosnippet>649</a>                result.collection_type
+<a href=#650 id=650 data-nosnippet>650</a>            );
+<a href=#651 id=651 data-nosnippet>651</a>
+<a href=#652 id=652 data-nosnippet>652</a>            <span class="comment">// Recorded metrics only — no pass/fail bound.
+<a href=#653 id=653 data-nosnippet>653</a>            </span><span class="macro">eprintln!</span>(
+<a href=#654 id=654 data-nosnippet>654</a>                <span class="string">"perf {} ({}): parse={}ms serialize={}ms throughput={:.2} MB/s"</span>,
+<a href=#655 id=655 data-nosnippet>655</a>                result.operation,
+<a href=#656 id=656 data-nosnippet>656</a>                result.collection_type,
+<a href=#657 id=657 data-nosnippet>657</a>                result.parse_time.as_millis(),
+<a href=#658 id=658 data-nosnippet>658</a>                result.serialize_time.as_millis(),
+<a href=#659 id=659 data-nosnippet>659</a>                result.throughput_mb_per_sec
+<a href=#660 id=660 data-nosnippet>660</a>            );
+<a href=#661 id=661 data-nosnippet>661</a>        }
+<a href=#662 id=662 data-nosnippet>662</a>    }
+<a href=#663 id=663 data-nosnippet>663</a>}
 </code></pre></div></section></main></body></html>

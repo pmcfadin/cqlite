@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/block_entries.rs`."><title>block_entries.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/</div>block_entries.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Block entry parsing for SSTable data
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/block_entries.rs`."><title>block_entries.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/</div>block_entries.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Block entry parsing for SSTable data
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! This module handles parsing of block entries from decompressed block data,
 <a href=#4 id=4 data-nosnippet>4</a>//! including modern Cassandra 5+ format parsing with state machine integration
@@ -988,7 +988,7 @@
 <a href=#988 id=988 data-nosnippet>988</a>
 <a href=#989 id=989 data-nosnippet>989</a>        <span class="comment">// Create ParsedRow with static columns
 <a href=#990 id=990 data-nosnippet>990</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>static_cols = HashMap::new();
-<a href=#991 id=991 data-nosnippet>991</a>        static_cols.insert(<span class="string">"static_col1"</span>.to_string(), Value::Text(<span class="string">"value1"</span>.to_string()));
+<a href=#991 id=991 data-nosnippet>991</a>        static_cols.insert(<span class="string">"static_col1"</span>.to_string(), Value::text(<span class="string">"value1"</span>.to_string()));
 <a href=#992 id=992 data-nosnippet>992</a>        static_cols.insert(<span class="string">"static_col2"</span>.to_string(), Value::Integer(<span class="number">42</span>));
 <a href=#993 id=993 data-nosnippet>993</a>
 <a href=#994 id=994 data-nosnippet>994</a>        <span class="kw">let </span>parsed_row =
@@ -1022,7 +1022,7 @@
 <a href=#1022 id=1022 data-nosnippet>1022</a>
 <a href=#1023 id=1023 data-nosnippet>1023</a>        <span class="comment">// Create ParsedRow with one clustering row
 <a href=#1024 id=1024 data-nosnippet>1024</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>cols = HashMap::new();
-<a href=#1025 id=1025 data-nosnippet>1025</a>        cols.insert(<span class="string">"col1"</span>.to_string(), Value::Text(<span class="string">"text_value"</span>.to_string()));
+<a href=#1025 id=1025 data-nosnippet>1025</a>        cols.insert(<span class="string">"col1"</span>.to_string(), Value::text(<span class="string">"text_value"</span>.to_string()));
 <a href=#1026 id=1026 data-nosnippet>1026</a>        cols.insert(<span class="string">"col2"</span>.to_string(), Value::Integer(<span class="number">123</span>));
 <a href=#1027 id=1027 data-nosnippet>1027</a>
 <a href=#1028 id=1028 data-nosnippet>1028</a>        <span class="kw">let </span>clustering_rows = <span class="macro">vec!</span>[(<span class="string">b"clustering_key1"</span>.to_vec(), cols)];
@@ -1121,7 +1121,7 @@
 <a href=#1121 id=1121 data-nosnippet>1121</a>        };
 <a href=#1122 id=1122 data-nosnippet>1122</a>
 <a href=#1123 id=1123 data-nosnippet>1123</a>        <span class="kw">let </span><span class="kw-2">mut </span>cols = HashMap::new();
-<a href=#1124 id=1124 data-nosnippet>1124</a>        cols.insert(<span class="string">"name"</span>.to_string(), Value::Text(<span class="string">"alice"</span>.to_string()));
+<a href=#1124 id=1124 data-nosnippet>1124</a>        cols.insert(<span class="string">"name"</span>.to_string(), Value::text(<span class="string">"alice"</span>.to_string()));
 <a href=#1125 id=1125 data-nosnippet>1125</a>        <span class="kw">let </span>clustering_rows = <span class="macro">vec!</span>[(<span class="string">b"ck"</span>.to_vec(), cols)];
 <a href=#1126 id=1126 data-nosnippet>1126</a>        <span class="kw">let </span>parsed_row = create_test_parsed_row(<span class="string">b"pk"</span>.to_vec(), <span class="prelude-val">None</span>, clustering_rows);
 <a href=#1127 id=1127 data-nosnippet>1127</a>
@@ -1141,7 +1141,7 @@
 <a href=#1141 id=1141 data-nosnippet>1141</a>            .expect(<span class="string">"roborev H: a live row must NOT be suppressed by into_cells()"</span>);
 <a href=#1142 id=1142 data-nosnippet>1142</a>        <span class="macro">assert_eq!</span>(
 <a href=#1143 id=1143 data-nosnippet>1143</a>            row.values.get(<span class="string">"name"</span>),
-<a href=#1144 id=1144 data-nosnippet>1144</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"alice"</span>.to_string())),
+<a href=#1144 id=1144 data-nosnippet>1144</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::text(<span class="string">"alice"</span>.to_string())),
 <a href=#1145 id=1145 data-nosnippet>1145</a>            <span class="string">"the real column value must survive the scan-&gt;query carrier"
 <a href=#1146 id=1146 data-nosnippet>1146</a>        </span>);
 <a href=#1147 id=1147 data-nosnippet>1147</a>    }
@@ -1158,11 +1158,11 @@
 <a href=#1158 id=1158 data-nosnippet>1158</a>            ),
 <a href=#1159 id=1159 data-nosnippet>1159</a>            <span class="string">"a null cell must stay a suppressed marker"
 <a href=#1160 id=1160 data-nosnippet>1160</a>        </span>);
-<a href=#1161 id=1161 data-nosnippet>1161</a>        <span class="kw">match </span>live_cell_scan_row(<span class="string">"name"</span>, <span class="kw-2">&amp;</span>Value::Text(<span class="string">"bob"</span>.to_string())) {
+<a href=#1161 id=1161 data-nosnippet>1161</a>        <span class="kw">match </span>live_cell_scan_row(<span class="string">"name"</span>, <span class="kw-2">&amp;</span>Value::text(<span class="string">"bob"</span>.to_string())) {
 <a href=#1162 id=1162 data-nosnippet>1162</a>            ScanRow::Row(cells) =&gt; {
 <a href=#1163 id=1163 data-nosnippet>1163</a>                <span class="macro">assert_eq!</span>(cells.len(), <span class="number">1</span>);
 <a href=#1164 id=1164 data-nosnippet>1164</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;*</span>cells[<span class="number">0</span>].<span class="number">0</span>, <span class="string">"name"</span>, <span class="string">"interned real column name"</span>);
-<a href=#1165 id=1165 data-nosnippet>1165</a>                <span class="macro">assert_eq!</span>(cells[<span class="number">0</span>].<span class="number">1</span>, Value::Text(<span class="string">"bob"</span>.to_string()));
+<a href=#1165 id=1165 data-nosnippet>1165</a>                <span class="macro">assert_eq!</span>(cells[<span class="number">0</span>].<span class="number">1</span>, Value::text(<span class="string">"bob"</span>.to_string()));
 <a href=#1166 id=1166 data-nosnippet>1166</a>            }
 <a href=#1167 id=1167 data-nosnippet>1167</a>            ScanRow::RawRow(<span class="kw">_</span>) =&gt; {
 <a href=#1168 id=1168 data-nosnippet>1168</a>                <span class="macro">panic!</span>(<span class="string">"classify_cell never yields a RawRow; a decoded value must be a live Row"</span>)
@@ -1221,7 +1221,7 @@
 <a href=#1221 id=1221 data-nosnippet>1221</a>    </span><span class="kw">fn </span>fallback_without_name_stays_raw_and_null_is_marker() {
 <a href=#1222 id=1222 data-nosnippet>1222</a>        <span class="kw">let </span>raw = <span class="macro">vec!</span>[<span class="number">0xde</span>, <span class="number">0xad</span>, <span class="number">0xbe</span>, <span class="number">0xef</span>];
 <a href=#1223 id=1223 data-nosnippet>1223</a>        <span class="macro">assert_eq!</span>(
-<a href=#1224 id=1224 data-nosnippet>1224</a>            fallback_value_scan_row(<span class="prelude-val">None</span>, Value::Blob(raw.clone()), <span class="kw-2">&amp;</span>raw),
+<a href=#1224 id=1224 data-nosnippet>1224</a>            fallback_value_scan_row(<span class="prelude-val">None</span>, Value::blob(raw.clone()), <span class="kw-2">&amp;</span>raw),
 <a href=#1225 id=1225 data-nosnippet>1225</a>            ScanRow::RawRow(raw.clone()),
 <a href=#1226 id=1226 data-nosnippet>1226</a>            <span class="string">"no resolvable column name -&gt; undecoded RAW provenance"
 <a href=#1227 id=1227 data-nosnippet>1227</a>        </span>);
@@ -1257,7 +1257,7 @@
 <a href=#1257 id=1257 data-nosnippet>1257</a>            .expect(<span class="string">"a raw fallback row must NOT be suppressed by into_cells()"</span>);
 <a href=#1258 id=1258 data-nosnippet>1258</a>        <span class="macro">assert_eq!</span>(
 <a href=#1259 id=1259 data-nosnippet>1259</a>            row.values.get(<span class="string">"data"</span>),
-<a href=#1260 id=1260 data-nosnippet>1260</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Blob(raw)),
+<a href=#1260 id=1260 data-nosnippet>1260</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Blob(raw.into())),
 <a href=#1261 id=1261 data-nosnippet>1261</a>            <span class="string">"the raw fallback bytes must surface as the \"data\" column in SELECT/export"
 <a href=#1262 id=1262 data-nosnippet>1262</a>        </span>);
 <a href=#1263 id=1263 data-nosnippet>1263</a>    }

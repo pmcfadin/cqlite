@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/query/result.rs`."><title>result.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/query/</div>result.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Query result types for CQLite
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/query/result.rs`."><title>result.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/query/</div>result.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Query result types for CQLite
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! This module provides result types and utilities for query execution results.
 <a href=#4 id=4 data-nosnippet>4</a>//! It includes result set management, row iteration, and result metadata.
@@ -1048,7 +1048,7 @@
 <a href=#1048 id=1048 data-nosnippet>1048</a>            Value::Timestamp(ts) =&gt; <span class="macro">json!</span>(<span class="kw-2">*</span>ts),
 <a href=#1049 id=1049 data-nosnippet>1049</a>            Value::Float(f) =&gt; float_to_json(<span class="kw-2">*</span>f),
 <a href=#1050 id=1050 data-nosnippet>1050</a>            Value::Float32(f) =&gt; float_to_json(<span class="kw-2">*</span>f <span class="kw">as </span>f64),
-<a href=#1051 id=1051 data-nosnippet>1051</a>            Value::Text(s) =&gt; <span class="macro">json!</span>(s),
+<a href=#1051 id=1051 data-nosnippet>1051</a>            Value::Text(s) =&gt; <span class="macro">json!</span>(std::str::from_utf8(s).unwrap_or_default()),
 <a href=#1052 id=1052 data-nosnippet>1052</a>            Value::Json(value) =&gt; (<span class="kw-2">**</span>value).clone(),
 <a href=#1053 id=1053 data-nosnippet>1053</a>            Value::Blob(bytes) | Value::Varint(bytes) | Value::Inet(bytes) =&gt; <span class="macro">json!</span>(b64(bytes)),
 <a href=#1054 id=1054 data-nosnippet>1054</a>            Value::Uuid(uuid) =&gt; <span class="macro">json!</span>(b64(uuid)),
@@ -1123,11 +1123,11 @@
 <a href=#1123 id=1123 data-nosnippet>1123</a>    </span><span class="kw">fn </span>test_query_result_with_rows() {
 <a href=#1124 id=1124 data-nosnippet>1124</a>        <span class="kw">let </span><span class="kw-2">mut </span>row1 = QueryRow::new(RowKey::new(<span class="macro">vec!</span>[<span class="number">1</span>]));
 <a href=#1125 id=1125 data-nosnippet>1125</a>        row1.set(<span class="string">"id"</span>.to_string(), Value::Integer(<span class="number">1</span>));
-<a href=#1126 id=1126 data-nosnippet>1126</a>        row1.set(<span class="string">"name"</span>.to_string(), Value::Text(<span class="string">"Alice"</span>.to_string()));
+<a href=#1126 id=1126 data-nosnippet>1126</a>        row1.set(<span class="string">"name"</span>.to_string(), Value::text(<span class="string">"Alice"</span>.to_string()));
 <a href=#1127 id=1127 data-nosnippet>1127</a>
 <a href=#1128 id=1128 data-nosnippet>1128</a>        <span class="kw">let </span><span class="kw-2">mut </span>row2 = QueryRow::new(RowKey::new(<span class="macro">vec!</span>[<span class="number">2</span>]));
 <a href=#1129 id=1129 data-nosnippet>1129</a>        row2.set(<span class="string">"id"</span>.to_string(), Value::Integer(<span class="number">2</span>));
-<a href=#1130 id=1130 data-nosnippet>1130</a>        row2.set(<span class="string">"name"</span>.to_string(), Value::Text(<span class="string">"Bob"</span>.to_string()));
+<a href=#1130 id=1130 data-nosnippet>1130</a>        row2.set(<span class="string">"name"</span>.to_string(), Value::text(<span class="string">"Bob"</span>.to_string()));
 <a href=#1131 id=1131 data-nosnippet>1131</a>
 <a href=#1132 id=1132 data-nosnippet>1132</a>        <span class="kw">let </span>result = QueryResult::with_rows(<span class="macro">vec!</span>[row1, row2]);
 <a href=#1133 id=1133 data-nosnippet>1133</a>        <span class="macro">assert_eq!</span>(result.row_count(), <span class="number">2</span>);
@@ -1137,7 +1137,7 @@
 <a href=#1137 id=1137 data-nosnippet>1137</a>        <span class="macro">assert_eq!</span>(first_row.get(<span class="string">"id"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Integer(<span class="number">1</span>)));
 <a href=#1138 id=1138 data-nosnippet>1138</a>        <span class="macro">assert_eq!</span>(
 <a href=#1139 id=1139 data-nosnippet>1139</a>            first_row.get(<span class="string">"name"</span>),
-<a href=#1140 id=1140 data-nosnippet>1140</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"Alice"</span>.to_string()))
+<a href=#1140 id=1140 data-nosnippet>1140</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::text(<span class="string">"Alice"</span>.to_string()))
 <a href=#1141 id=1141 data-nosnippet>1141</a>        );
 <a href=#1142 id=1142 data-nosnippet>1142</a>    }
 <a href=#1143 id=1143 data-nosnippet>1143</a>
@@ -1331,7 +1331,7 @@
 <a href=#1331 id=1331 data-nosnippet>1331</a>    </span><span class="kw">fn </span>test_json_serialization() {
 <a href=#1332 id=1332 data-nosnippet>1332</a>        <span class="kw">let </span><span class="kw-2">mut </span>row = QueryRow::new(RowKey::new(<span class="macro">vec!</span>[<span class="number">1</span>]));
 <a href=#1333 id=1333 data-nosnippet>1333</a>        row.set(<span class="string">"id"</span>.to_string(), Value::Integer(<span class="number">1</span>));
-<a href=#1334 id=1334 data-nosnippet>1334</a>        row.set(<span class="string">"name"</span>.to_string(), Value::Text(<span class="string">"test"</span>.to_string()));
+<a href=#1334 id=1334 data-nosnippet>1334</a>        row.set(<span class="string">"name"</span>.to_string(), Value::text(<span class="string">"test"</span>.to_string()));
 <a href=#1335 id=1335 data-nosnippet>1335</a>
 <a href=#1336 id=1336 data-nosnippet>1336</a>        <span class="kw">let </span>json = row.to_json();
 <a href=#1337 id=1337 data-nosnippet>1337</a>        <span class="macro">assert!</span>(json.is_object());
@@ -1398,7 +1398,7 @@
 <a href=#1398 id=1398 data-nosnippet>1398</a>    </span><span class="attr">#[test]
 <a href=#1399 id=1399 data-nosnippet>1399</a>    </span><span class="kw">fn </span>test_cell_metadata_single_sstable_single_cell() {
 <a href=#1400 id=1400 data-nosnippet>1400</a>        <span class="kw">let </span><span class="kw-2">mut </span>row = QueryRow::new(RowKey::new(<span class="macro">vec!</span>[<span class="number">1</span>]));
-<a href=#1401 id=1401 data-nosnippet>1401</a>        row.set(<span class="string">"name"</span>.to_string(), Value::Text(<span class="string">"Alice"</span>.to_string()));
+<a href=#1401 id=1401 data-nosnippet>1401</a>        row.set(<span class="string">"name"</span>.to_string(), Value::text(<span class="string">"Alice"</span>.to_string()));
 <a href=#1402 id=1402 data-nosnippet>1402</a>
 <a href=#1403 id=1403 data-nosnippet>1403</a>        <span class="kw">let </span>meta = CellWriteMetadata {
 <a href=#1404 id=1404 data-nosnippet>1404</a>            write_timestamp_micros: <span class="number">1_700_000_000_000_000</span>, <span class="comment">// ~2023 epoch in µs
@@ -1409,7 +1409,7 @@
 <a href=#1409 id=1409 data-nosnippet>1409</a>        <span class="comment">// cell_metadata map must now be Some
 <a href=#1410 id=1410 data-nosnippet>1410</a>        </span><span class="macro">assert!</span>(row.cell_metadata.is_some());
 <a href=#1411 id=1411 data-nosnippet>1411</a>        <span class="comment">// Values are unchanged
-<a href=#1412 id=1412 data-nosnippet>1412</a>        </span><span class="macro">assert_eq!</span>(row.get(<span class="string">"name"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"Alice"</span>.to_string())));
+<a href=#1412 id=1412 data-nosnippet>1412</a>        </span><span class="macro">assert_eq!</span>(row.get(<span class="string">"name"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::text(<span class="string">"Alice"</span>.to_string())));
 <a href=#1413 id=1413 data-nosnippet>1413</a>        <span class="comment">// Metadata round-trips correctly
 <a href=#1414 id=1414 data-nosnippet>1414</a>        </span><span class="kw">let </span>got = row
 <a href=#1415 id=1415 data-nosnippet>1415</a>            .get_cell_metadata(<span class="string">"name"</span>)
@@ -1610,11 +1610,11 @@
 <a href=#1610 id=1610 data-nosnippet>1610</a>    </span><span class="kw">fn </span>test_row_values_addressable_by_str_key() {
 <a href=#1611 id=1611 data-nosnippet>1611</a>        <span class="kw">let </span><span class="kw-2">mut </span>row = QueryRow::new(RowKey::new(<span class="macro">vec!</span>[<span class="number">1</span>]));
 <a href=#1612 id=1612 data-nosnippet>1612</a>        row.set(<span class="string">"id"</span>, Value::Integer(<span class="number">7</span>)); <span class="comment">// &amp;str key
-<a href=#1613 id=1613 data-nosnippet>1613</a>        </span>row.set(<span class="string">"name"</span>.to_string(), Value::Text(<span class="string">"Zoe"</span>.to_string())); <span class="comment">// String key
+<a href=#1613 id=1613 data-nosnippet>1613</a>        </span>row.set(<span class="string">"name"</span>.to_string(), Value::text(<span class="string">"Zoe"</span>.to_string())); <span class="comment">// String key
 <a href=#1614 id=1614 data-nosnippet>1614</a>
 <a href=#1615 id=1615 data-nosnippet>1615</a>        // `get(&amp;str)` works unchanged.
 <a href=#1616 id=1616 data-nosnippet>1616</a>        </span><span class="macro">assert_eq!</span>(row.get(<span class="string">"id"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Integer(<span class="number">7</span>)));
-<a href=#1617 id=1617 data-nosnippet>1617</a>        <span class="macro">assert_eq!</span>(row.get(<span class="string">"name"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"Zoe"</span>.to_string())));
+<a href=#1617 id=1617 data-nosnippet>1617</a>        <span class="macro">assert_eq!</span>(row.get(<span class="string">"name"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::text(<span class="string">"Zoe"</span>.to_string())));
 <a href=#1618 id=1618 data-nosnippet>1618</a>        <span class="macro">assert_eq!</span>(row.get(<span class="string">"absent"</span>), <span class="prelude-val">None</span>);
 <a href=#1619 id=1619 data-nosnippet>1619</a>
 <a href=#1620 id=1620 data-nosnippet>1620</a>        <span class="comment">// The key type is a shared Arc&lt;str&gt; handle.
@@ -1629,7 +1629,7 @@
 <a href=#1629 id=1629 data-nosnippet>1629</a>    </span><span class="kw">fn </span>test_query_result_serde_round_trip_preserves_names_and_values() {
 <a href=#1630 id=1630 data-nosnippet>1630</a>        <span class="kw">let </span><span class="kw-2">mut </span>row = QueryRow::new(RowKey::new(<span class="macro">vec!</span>[<span class="number">1</span>]));
 <a href=#1631 id=1631 data-nosnippet>1631</a>        row.set(<span class="string">"id"</span>, Value::Integer(<span class="number">42</span>));
-<a href=#1632 id=1632 data-nosnippet>1632</a>        row.set(<span class="string">"name"</span>, Value::Text(<span class="string">"Alice"</span>.to_string()));
+<a href=#1632 id=1632 data-nosnippet>1632</a>        row.set(<span class="string">"name"</span>, Value::text(<span class="string">"Alice"</span>.to_string()));
 <a href=#1633 id=1633 data-nosnippet>1633</a>        <span class="kw">let </span>result = QueryResult::with_rows(<span class="macro">vec!</span>[row]);
 <a href=#1634 id=1634 data-nosnippet>1634</a>
 <a href=#1635 id=1635 data-nosnippet>1635</a>        <span class="comment">// Serialize → the values object is keyed by the plain column-name string
@@ -1651,7 +1651,7 @@
 <a href=#1651 id=1651 data-nosnippet>1651</a>        </span><span class="kw">let </span>back: QueryResult = serde_json::from_value(json).expect(<span class="string">"deserialise QueryResult"</span>);
 <a href=#1652 id=1652 data-nosnippet>1652</a>        <span class="kw">let </span>r = <span class="kw-2">&amp;</span>back.rows[<span class="number">0</span>];
 <a href=#1653 id=1653 data-nosnippet>1653</a>        <span class="macro">assert_eq!</span>(r.get(<span class="string">"id"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Integer(<span class="number">42</span>)));
-<a href=#1654 id=1654 data-nosnippet>1654</a>        <span class="macro">assert_eq!</span>(r.get(<span class="string">"name"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"Alice"</span>.to_string())));
+<a href=#1654 id=1654 data-nosnippet>1654</a>        <span class="macro">assert_eq!</span>(r.get(<span class="string">"name"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::text(<span class="string">"Alice"</span>.to_string())));
 <a href=#1655 id=1655 data-nosnippet>1655</a>    }
 <a href=#1656 id=1656 data-nosnippet>1656</a>}
 </code></pre></div></section></main></body></html>

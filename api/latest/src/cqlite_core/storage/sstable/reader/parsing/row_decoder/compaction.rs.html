@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/compaction.rs`."><title>compaction.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../../" data-static-root-path="../../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../../src-files.js"></script><script defer src="../../../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/row_decoder/</div>compaction.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="kw">use super</span>::<span class="kw-2">*</span>;
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/compaction.rs`."><title>compaction.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../../" data-static-root-path="../../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../../src-files.js"></script><script defer src="../../../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/row_decoder/</div>compaction.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="kw">use super</span>::<span class="kw-2">*</span>;
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a><span class="kw">impl </span>V5CompressedLegacyParser {
 <a href=#4 id=4 data-nosnippet>4</a>    <span class="doccomment">/// Build a [`CompactionRow`] from a parsed row's pieces (epic #899).
@@ -367,7 +367,7 @@
 <a href=#367 id=367 data-nosnippet>367</a>/// shadowing (it reconciles tombstones itself across generations), the static
 <a href=#368 id=368 data-nosnippet>368</a>/// row is emitted as its own `CompactionRow` (issue #1074, not merged), and
 <a href=#369 id=369 data-nosnippet>369</a>/// range-tombstone markers are paired into `RangeMarker` rows (issue #933).
-<a href=#370 id=370 data-nosnippet>370</a></span><span class="kw">struct </span>CompactionPolicy&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#370 id=370 data-nosnippet>370</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">struct </span>CompactionPolicy&lt;<span class="lifetime">'a</span>&gt; {
 <a href=#371 id=371 data-nosnippet>371</a>    parser: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>V5CompressedLegacyParser,
 <a href=#372 id=372 data-nosnippet>372</a>    partition_key: RowKey,
 <a href=#373 id=373 data-nosnippet>373</a>    <span class="doccomment">/// Issue #933: in-flight range-tombstone start bound
@@ -381,7 +381,7 @@
 <a href=#381 id=381 data-nosnippet>381</a>}
 <a href=#382 id=382 data-nosnippet>382</a>
 <a href=#383 id=383 data-nosnippet>383</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>&gt; CompactionPolicy&lt;<span class="lifetime">'a</span>&gt; {
-<a href=#384 id=384 data-nosnippet>384</a>    <span class="kw">fn </span>new(parser: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>V5CompressedLegacyParser) -&gt; <span class="self">Self </span>{
+<a href=#384 id=384 data-nosnippet>384</a>    <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>new(parser: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>V5CompressedLegacyParser) -&gt; <span class="self">Self </span>{
 <a href=#385 id=385 data-nosnippet>385</a>        <span class="self">Self </span>{
 <a href=#386 id=386 data-nosnippet>386</a>            parser,
 <a href=#387 id=387 data-nosnippet>387</a>            partition_key: RowKey::new(Vec::new()),
@@ -389,202 +389,239 @@
 <a href=#389 id=389 data-nosnippet>389</a>        }
 <a href=#390 id=390 data-nosnippet>390</a>    }
 <a href=#391 id=391 data-nosnippet>391</a>
-<a href=#392 id=392 data-nosnippet>392</a>    <span class="doccomment">/// Build a `CompactionBound` from decoded clustering-prefix values. An empty
-<a href=#393 id=393 data-nosnippet>393</a>    /// prefix is an OPEN bound (Bottom for a start, Top for an end); a non-empty
-<a href=#394 id=394 data-nosnippet>394</a>    /// prefix pairs each value with its schema clustering-column name
-<a href=#395 id=395 data-nosnippet>395</a>    /// (positionally; bounds may be PREFIX-length).
-<a href=#396 id=396 data-nosnippet>396</a>    </span><span class="kw">fn </span>make_bound(
-<a href=#397 id=397 data-nosnippet>397</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#398 id=398 data-nosnippet>398</a>        schema: <span class="kw-2">&amp;</span>TableSchema,
-<a href=#399 id=399 data-nosnippet>399</a>        values: Vec&lt;Value&gt;,
-<a href=#400 id=400 data-nosnippet>400</a>        inclusive: bool,
-<a href=#401 id=401 data-nosnippet>401</a>        is_start: bool,
-<a href=#402 id=402 data-nosnippet>402</a>    ) -&gt; <span class="kw">crate</span>::storage::sstable::reader::compaction_row::CompactionBound {
-<a href=#403 id=403 data-nosnippet>403</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::reader::compaction_row::CompactionBound;
-<a href=#404 id=404 data-nosnippet>404</a>        <span class="kw">if </span>values.is_empty() {
-<a href=#405 id=405 data-nosnippet>405</a>            <span class="kw">return if </span>is_start {
-<a href=#406 id=406 data-nosnippet>406</a>                CompactionBound::Bottom
-<a href=#407 id=407 data-nosnippet>407</a>            } <span class="kw">else </span>{
-<a href=#408 id=408 data-nosnippet>408</a>                CompactionBound::Top
-<a href=#409 id=409 data-nosnippet>409</a>            };
-<a href=#410 id=410 data-nosnippet>410</a>        }
-<a href=#411 id=411 data-nosnippet>411</a>        <span class="kw">let </span>pairs: Vec&lt;(String, Value)&gt; = values
-<a href=#412 id=412 data-nosnippet>412</a>            .into_iter()
-<a href=#413 id=413 data-nosnippet>413</a>            .enumerate()
-<a href=#414 id=414 data-nosnippet>414</a>            .map(|(i, v)| {
-<a href=#415 id=415 data-nosnippet>415</a>                <span class="kw">let </span>name = schema
-<a href=#416 id=416 data-nosnippet>416</a>                    .clustering_keys
-<a href=#417 id=417 data-nosnippet>417</a>                    .get(i)
-<a href=#418 id=418 data-nosnippet>418</a>                    .map(|c| c.name.clone())
-<a href=#419 id=419 data-nosnippet>419</a>                    .unwrap_or_else(|| <span class="macro">format!</span>(<span class="string">"ck{i}"</span>));
-<a href=#420 id=420 data-nosnippet>420</a>                (name, v)
-<a href=#421 id=421 data-nosnippet>421</a>            })
-<a href=#422 id=422 data-nosnippet>422</a>            .collect();
-<a href=#423 id=423 data-nosnippet>423</a>        <span class="kw">if </span>inclusive {
-<a href=#424 id=424 data-nosnippet>424</a>            CompactionBound::Inclusive(pairs)
-<a href=#425 id=425 data-nosnippet>425</a>        } <span class="kw">else </span>{
-<a href=#426 id=426 data-nosnippet>426</a>            CompactionBound::Exclusive(pairs)
-<a href=#427 id=427 data-nosnippet>427</a>        }
-<a href=#428 id=428 data-nosnippet>428</a>    }
-<a href=#429 id=429 data-nosnippet>429</a>}
-<a href=#430 id=430 data-nosnippet>430</a>
-<a href=#431 id=431 data-nosnippet>431</a><span class="kw">impl </span>SlidingPartitionPolicy <span class="kw">for </span>CompactionPolicy&lt;<span class="lifetime">'_</span>&gt; {
-<a href=#432 id=432 data-nosnippet>432</a>    <span class="kw">type </span>Row = <span class="kw">crate</span>::storage::sstable::reader::compaction_row::CompactionRow;
-<a href=#433 id=433 data-nosnippet>433</a>
-<a href=#434 id=434 data-nosnippet>434</a>    <span class="kw">fn </span>on_partition_open(
-<a href=#435 id=435 data-nosnippet>435</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-<a href=#436 id=436 data-nosnippet>436</a>        partition_key: RowKey,
-<a href=#437 id=437 data-nosnippet>437</a>        partition_deletion: <span class="prelude-ty">Option</span>&lt;(i64, i32)&gt;,
-<a href=#438 id=438 data-nosnippet>438</a>        _schema: <span class="kw-2">&amp;</span>TableSchema,
-<a href=#439 id=439 data-nosnippet>439</a>        pending: <span class="kw-2">&amp;mut </span>Vec&lt;<span class="self">Self</span>::Row&gt;,
-<a href=#440 id=440 data-nosnippet>440</a>    ) {
-<a href=#441 id=441 data-nosnippet>441</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::reader::compaction_row::{CompactionRow, CompactionRowData};
-<a href=#442 id=442 data-nosnippet>442</a>        <span class="self">self</span>.partition_key = partition_key;
-<a href=#443 id=443 data-nosnippet>443</a>        <span class="comment">// Issue #1072: surface a partition-level tombstone as a synthetic
-<a href=#444 id=444 data-nosnippet>444</a>        // partition-delete `CompactionRow` (pushed once per partition, even for a
-<a href=#445 id=445 data-nosnippet>445</a>        // tombstone-only partition) so the merge can apply the partition floor.
-<a href=#446 id=446 data-nosnippet>446</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>((mfda, ldt)) = partition_deletion {
-<a href=#447 id=447 data-nosnippet>447</a>            pending.push(CompactionRow {
-<a href=#448 id=448 data-nosnippet>448</a>                key: <span class="self">self</span>.partition_key.clone(),
-<a href=#449 id=449 data-nosnippet>449</a>                row_timestamp: mfda,
-<a href=#450 id=450 data-nosnippet>450</a>                row_data: CompactionRowData::PartitionDelete {
-<a href=#451 id=451 data-nosnippet>451</a>                    deletion_time: mfda,
-<a href=#452 id=452 data-nosnippet>452</a>                    local_deletion_time: ldt,
-<a href=#453 id=453 data-nosnippet>453</a>                },
-<a href=#454 id=454 data-nosnippet>454</a>            });
-<a href=#455 id=455 data-nosnippet>455</a>        }
-<a href=#456 id=456 data-nosnippet>456</a>    }
-<a href=#457 id=457 data-nosnippet>457</a>
-<a href=#458 id=458 data-nosnippet>458</a>    <span class="kw">fn </span>on_range_marker(
-<a href=#459 id=459 data-nosnippet>459</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-<a href=#460 id=460 data-nosnippet>460</a>        data: <span class="kw-2">&amp;</span>[u8],
-<a href=#461 id=461 data-nosnippet>461</a>        offset: usize,
-<a href=#462 id=462 data-nosnippet>462</a>        schema: <span class="kw-2">&amp;</span>TableSchema,
-<a href=#463 id=463 data-nosnippet>463</a>        pending: <span class="kw-2">&amp;mut </span>Vec&lt;<span class="self">Self</span>::Row&gt;,
-<a href=#464 id=464 data-nosnippet>464</a>    ) -&gt; MarkerOutcome {
-<a href=#465 id=465 data-nosnippet>465</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::reader::compaction_row::{
-<a href=#466 id=466 data-nosnippet>466</a>            CompactionBound, CompactionRow, CompactionRowData,
-<a href=#467 id=467 data-nosnippet>467</a>        };
-<a href=#468 id=468 data-nosnippet>468</a>        <span class="comment">// Issue #933: parse the range-tombstone bound marker and pair it into a
-<a href=#469 id=469 data-nosnippet>469</a>        // complete `RangeMarker` so the merge can shadow covered cells AND
-<a href=#470 id=470 data-nosnippet>470</a>        // re-emit the surviving marker.
-<a href=#471 id=471 data-nosnippet>471</a>        </span><span class="kw">let </span>(bound_values, bound_kind, (mfda_p, ldt_p), secondary, next_offset) = <span class="kw">match </span><span class="self">self
-<a href=#472 id=472 data-nosnippet>472</a>            </span>.parser
-<a href=#473 id=473 data-nosnippet>473</a>            .parse_range_tombstone_marker_with_ldt(data, offset, schema)
-<a href=#474 id=474 data-nosnippet>474</a>        {
-<a href=#475 id=475 data-nosnippet>475</a>            <span class="prelude-val">Ok</span>(v) =&gt; v,
-<a href=#476 id=476 data-nosnippet>476</a>            <span class="comment">// Truncated marker body at a chunk boundary (or corrupt at the
-<a href=#477 id=477 data-nosnippet>477</a>            // final chunk): terminate exactly as the prior skip path did.
-<a href=#478 id=478 data-nosnippet>478</a>            </span><span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span>MarkerOutcome::Stop,
-<a href=#479 id=479 data-nosnippet>479</a>        };
-<a href=#480 id=480 data-nosnippet>480</a>
-<a href=#481 id=481 data-nosnippet>481</a>        <span class="comment">// ClusteringPrefix.Kind ordinals:
-<a href=#482 id=482 data-nosnippet>482</a>        //   0 EXCL_END, 1 INCL_START, 2 EXCL_END_INCL_START_BOUNDARY,
-<a href=#483 id=483 data-nosnippet>483</a>        //   5 INCL_END_EXCL_START_BOUNDARY, 6 INCL_END, 7 EXCL_START.
-<a href=#484 id=484 data-nosnippet>484</a>        </span><span class="kw">match </span>bound_kind {
-<a href=#485 id=485 data-nosnippet>485</a>            <span class="number">1 </span>| <span class="number">7 </span>=&gt; {
-<a href=#486 id=486 data-nosnippet>486</a>                <span class="comment">// Simple start bound: buffer until the matching end.
-<a href=#487 id=487 data-nosnippet>487</a>                </span><span class="kw">let </span>start = <span class="self">self</span>.make_bound(schema, bound_values, bound_kind == <span class="number">1</span>, <span class="bool-val">true</span>);
-<a href=#488 id=488 data-nosnippet>488</a>                <span class="self">self</span>.pending_range_start = <span class="prelude-val">Some</span>((start, mfda_p, ldt_p));
-<a href=#489 id=489 data-nosnippet>489</a>            }
-<a href=#490 id=490 data-nosnippet>490</a>            <span class="number">0 </span>| <span class="number">6 </span>=&gt; {
-<a href=#491 id=491 data-nosnippet>491</a>                <span class="comment">// Simple end bound: close the buffered start.
-<a href=#492 id=492 data-nosnippet>492</a>                </span><span class="kw">let </span>end = <span class="self">self</span>.make_bound(schema, bound_values, bound_kind == <span class="number">6</span>, <span class="bool-val">false</span>);
-<a href=#493 id=493 data-nosnippet>493</a>                <span class="kw">let </span>start = <span class="self">self
-<a href=#494 id=494 data-nosnippet>494</a>                    </span>.pending_range_start
-<a href=#495 id=495 data-nosnippet>495</a>                    .take()
-<a href=#496 id=496 data-nosnippet>496</a>                    .map(|(s, <span class="kw">_</span>, <span class="kw">_</span>)| s)
-<a href=#497 id=497 data-nosnippet>497</a>                    .unwrap_or(CompactionBound::Bottom);
-<a href=#498 id=498 data-nosnippet>498</a>                pending.push(CompactionRow {
-<a href=#499 id=499 data-nosnippet>499</a>                    key: <span class="self">self</span>.partition_key.clone(),
-<a href=#500 id=500 data-nosnippet>500</a>                    row_timestamp: mfda_p,
-<a href=#501 id=501 data-nosnippet>501</a>                    row_data: CompactionRowData::RangeMarker {
-<a href=#502 id=502 data-nosnippet>502</a>                        start,
-<a href=#503 id=503 data-nosnippet>503</a>                        end,
-<a href=#504 id=504 data-nosnippet>504</a>                        deletion_time: mfda_p,
-<a href=#505 id=505 data-nosnippet>505</a>                        local_deletion_time: ldt_p,
-<a href=#506 id=506 data-nosnippet>506</a>                    },
-<a href=#507 id=507 data-nosnippet>507</a>                });
-<a href=#508 id=508 data-nosnippet>508</a>            }
-<a href=#509 id=509 data-nosnippet>509</a>            <span class="number">2 </span>| <span class="number">5 </span>=&gt; {
-<a href=#510 id=510 data-nosnippet>510</a>                <span class="comment">// Boundary marker: primary closes the previous range, the
-<a href=#511 id=511 data-nosnippet>511</a>                // secondary opens the next. kind 2 = EXCL_END + INCL_START,
-<a href=#512 id=512 data-nosnippet>512</a>                // kind 5 = INCL_END + EXCL_START.
-<a href=#513 id=513 data-nosnippet>513</a>                </span><span class="kw">let </span>end_inclusive = bound_kind == <span class="number">5</span>;
-<a href=#514 id=514 data-nosnippet>514</a>                <span class="kw">if let </span><span class="prelude-val">Some</span>((start, <span class="kw">_</span>, <span class="kw">_</span>)) = <span class="self">self</span>.pending_range_start.take() {
-<a href=#515 id=515 data-nosnippet>515</a>                    <span class="kw">let </span>end = <span class="self">self</span>.make_bound(schema, bound_values.clone(), end_inclusive, <span class="bool-val">false</span>);
-<a href=#516 id=516 data-nosnippet>516</a>                    pending.push(CompactionRow {
-<a href=#517 id=517 data-nosnippet>517</a>                        key: <span class="self">self</span>.partition_key.clone(),
-<a href=#518 id=518 data-nosnippet>518</a>                        row_timestamp: mfda_p,
-<a href=#519 id=519 data-nosnippet>519</a>                        row_data: CompactionRowData::RangeMarker {
-<a href=#520 id=520 data-nosnippet>520</a>                            start,
-<a href=#521 id=521 data-nosnippet>521</a>                            end,
-<a href=#522 id=522 data-nosnippet>522</a>                            deletion_time: mfda_p,
-<a href=#523 id=523 data-nosnippet>523</a>                            local_deletion_time: ldt_p,
-<a href=#524 id=524 data-nosnippet>524</a>                        },
-<a href=#525 id=525 data-nosnippet>525</a>                    });
-<a href=#526 id=526 data-nosnippet>526</a>                }
-<a href=#527 id=527 data-nosnippet>527</a>                <span class="kw">let </span>(new_mfda, new_ldt) = secondary.unwrap_or((mfda_p, ldt_p));
-<a href=#528 id=528 data-nosnippet>528</a>                <span class="kw">let </span>new_start = <span class="self">self</span>.make_bound(schema, bound_values, bound_kind == <span class="number">2</span>, <span class="bool-val">true</span>);
-<a href=#529 id=529 data-nosnippet>529</a>                <span class="self">self</span>.pending_range_start = <span class="prelude-val">Some</span>((new_start, new_mfda, new_ldt));
-<a href=#530 id=530 data-nosnippet>530</a>            }
-<a href=#531 id=531 data-nosnippet>531</a>            <span class="kw">_ </span>=&gt; {
-<a href=#532 id=532 data-nosnippet>532</a>                <span class="comment">// Unknown bound kind: skip it rather than mis-parse the partition
-<a href=#533 id=533 data-nosnippet>533</a>                // (the offset already advanced past the marker).
-<a href=#534 id=534 data-nosnippet>534</a>            </span>}
-<a href=#535 id=535 data-nosnippet>535</a>        }
-<a href=#536 id=536 data-nosnippet>536</a>        MarkerOutcome::Advanced(next_offset)
-<a href=#537 id=537 data-nosnippet>537</a>    }
-<a href=#538 id=538 data-nosnippet>538</a>
-<a href=#539 id=539 data-nosnippet>539</a>    <span class="kw">fn </span>on_data_row(
-<a href=#540 id=540 data-nosnippet>540</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-<a href=#541 id=541 data-nosnippet>541</a>        data: <span class="kw-2">&amp;</span>[u8],
-<a href=#542 id=542 data-nosnippet>542</a>        offset: usize,
-<a href=#543 id=543 data-nosnippet>543</a>        schema: <span class="kw-2">&amp;</span>TableSchema,
-<a href=#544 id=544 data-nosnippet>544</a>        reader: <span class="kw-2">&amp;</span><span class="kw">crate</span>::storage::sstable::reader::types::SSTableReader,
-<a href=#545 id=545 data-nosnippet>545</a>        resolution: <span class="kw-2">&amp;</span>RowColumnResolution,
-<a href=#546 id=546 data-nosnippet>546</a>        pending: <span class="kw-2">&amp;mut </span>Vec&lt;<span class="self">Self</span>::Row&gt;,
-<a href=#547 id=547 data-nosnippet>547</a>    ) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
-<a href=#548 id=548 data-nosnippet>548</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::reader::compaction_row::CompactionRow;
-<a href=#549 id=549 data-nosnippet>549</a>        <span class="comment">// Compaction mode: capture per-column complex elements and request
-<a href=#550 id=550 data-nosnippet>550</a>        // per-cell metadata so simple cells carry per-cell timestamps/TTLs.
-<a href=#551 id=551 data-nosnippet>551</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>complex_capture: CompactionComplexColumns = HashMap::new();
-<a href=#552 id=552 data-nosnippet>552</a>        <span class="kw">match </span><span class="self">self</span>.parser.parse_row_data_with_offset_impl(
-<a href=#553 id=553 data-nosnippet>553</a>            data,
-<a href=#554 id=554 data-nosnippet>554</a>            offset,
-<a href=#555 id=555 data-nosnippet>555</a>            <span class="prelude-val">Some</span>(schema),
-<a href=#556 id=556 data-nosnippet>556</a>            reader,
-<a href=#557 id=557 data-nosnippet>557</a>            <span class="bool-val">true</span>,
-<a href=#558 id=558 data-nosnippet>558</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;mut </span>complex_capture),
-<a href=#559 id=559 data-nosnippet>559</a>            resolution,
-<a href=#560 id=560 data-nosnippet>560</a>            <span class="comment">// Compaction is a physical consumer: no read-side shadowing.
-<a href=#561 id=561 data-nosnippet>561</a>            </span><span class="prelude-val">None</span>,
-<a href=#562 id=562 data-nosnippet>562</a>        ) {
-<a href=#563 id=563 data-nosnippet>563</a>            <span class="prelude-val">Ok</span>((cells, cell_meta, row_header_opt, next_offset, _is_static, _complex_meta)) =&gt; {
-<a href=#564 id=564 data-nosnippet>564</a>                <span class="comment">// Issue #932 (K1): the ONE row-write-timestamp coexistence rule.
-<a href=#565 id=565 data-nosnippet>565</a>                </span><span class="kw">let </span>row_ts = row_write_timestamp(<span class="kw-2">&amp;</span>row_header_opt);
-<a href=#566 id=566 data-nosnippet>566</a>
-<a href=#567 id=567 data-nosnippet>567</a>                <span class="comment">// Issue #1074: emit BOTH static and clustering rows as their own
-<a href=#568 id=568 data-nosnippet>568</a>                // `CompactionRow` (static-ness is decided by the schema in the
-<a href=#569 id=569 data-nosnippet>569</a>                // writer, not by on-disk folding).
-<a href=#570 id=570 data-nosnippet>570</a>                </span><span class="kw">let </span>row_data = <span class="self">self</span>.parser.build_compaction_row_data(
-<a href=#571 id=571 data-nosnippet>571</a>                    cells,
-<a href=#572 id=572 data-nosnippet>572</a>                    cell_meta,
-<a href=#573 id=573 data-nosnippet>573</a>                    complex_capture,
-<a href=#574 id=574 data-nosnippet>574</a>                    <span class="kw-2">&amp;</span>row_header_opt,
-<a href=#575 id=575 data-nosnippet>575</a>                    row_ts,
-<a href=#576 id=576 data-nosnippet>576</a>                    schema,
-<a href=#577 id=577 data-nosnippet>577</a>                );
-<a href=#578 id=578 data-nosnippet>578</a>
-<a href=#579 id=579 data-nosnippet>579</a>                pending.push(CompactionRow {
-<a href=#580 id=580 data-nosnippet>580</a>                    key: <span class="self">self</span>.partition_key.clone(),
-<a href=#581 id=581 data-nosnippet>581</a>                    row_timestamp: row_ts,
-<a href=#582 id=582 data-nosnippet>582</a>                    row_data,
-<a href=#583 id=583 data-nosnippet>583</a>                });
-<a href=#584 id=584 data-nosnippet>584</a>                <span class="prelude-val">Some</span>(next_offset)
-<a href=#585 id=585 data-nosnippet>585</a>            }
-<a href=#586 id=586 data-nosnippet>586</a>            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">None</span>,
-<a href=#587 id=587 data-nosnippet>587</a>        }
-<a href=#588 id=588 data-nosnippet>588</a>    }
-<a href=#589 id=589 data-nosnippet>589</a>}
+<a href=#392 id=392 data-nosnippet>392</a>    <span class="doccomment">/// The partition key decoded on `on_partition_open` (issue #2299: the
+<a href=#393 id=393 data-nosnippet>393</a>    /// resumable streaming driver in `compaction_stream` reads it back to carry
+<a href=#394 id=394 data-nosnippet>394</a>    /// across a chunk-straddling refill).
+<a href=#395 id=395 data-nosnippet>395</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>partition_key(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>RowKey {
+<a href=#396 id=396 data-nosnippet>396</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.partition_key
+<a href=#397 id=397 data-nosnippet>397</a>    }
+<a href=#398 id=398 data-nosnippet>398</a>
+<a href=#399 id=399 data-nosnippet>399</a>    <span class="doccomment">/// The in-flight range-tombstone start bound (issue #2299: carried across
+<a href=#400 id=400 data-nosnippet>400</a>    /// resumed streaming calls — see `CompactionPartitionState::pending_range_start`).
+<a href=#401 id=401 data-nosnippet>401</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>pending_range_start(
+<a href=#402 id=402 data-nosnippet>402</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#403 id=403 data-nosnippet>403</a>    ) -&gt; <span class="kw-2">&amp;</span><span class="prelude-ty">Option</span>&lt;(
+<a href=#404 id=404 data-nosnippet>404</a>        <span class="kw">crate</span>::storage::sstable::reader::compaction_row::CompactionBound,
+<a href=#405 id=405 data-nosnippet>405</a>        i64,
+<a href=#406 id=406 data-nosnippet>406</a>        i32,
+<a href=#407 id=407 data-nosnippet>407</a>    )&gt; {
+<a href=#408 id=408 data-nosnippet>408</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.pending_range_start
+<a href=#409 id=409 data-nosnippet>409</a>    }
+<a href=#410 id=410 data-nosnippet>410</a>
+<a href=#411 id=411 data-nosnippet>411</a>    <span class="doccomment">/// Restore the partition key on a resumed streaming call (issue #2299).
+<a href=#412 id=412 data-nosnippet>412</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>set_partition_key(<span class="kw-2">&amp;mut </span><span class="self">self</span>, key: RowKey) {
+<a href=#413 id=413 data-nosnippet>413</a>        <span class="self">self</span>.partition_key = key;
+<a href=#414 id=414 data-nosnippet>414</a>    }
+<a href=#415 id=415 data-nosnippet>415</a>
+<a href=#416 id=416 data-nosnippet>416</a>    <span class="doccomment">/// Restore the in-flight range-tombstone start bound on a resumed streaming
+<a href=#417 id=417 data-nosnippet>417</a>    /// call (issue #2299).
+<a href=#418 id=418 data-nosnippet>418</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>set_pending_range_start(
+<a href=#419 id=419 data-nosnippet>419</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#420 id=420 data-nosnippet>420</a>        pending: <span class="prelude-ty">Option</span>&lt;(
+<a href=#421 id=421 data-nosnippet>421</a>            <span class="kw">crate</span>::storage::sstable::reader::compaction_row::CompactionBound,
+<a href=#422 id=422 data-nosnippet>422</a>            i64,
+<a href=#423 id=423 data-nosnippet>423</a>            i32,
+<a href=#424 id=424 data-nosnippet>424</a>        )&gt;,
+<a href=#425 id=425 data-nosnippet>425</a>    ) {
+<a href=#426 id=426 data-nosnippet>426</a>        <span class="self">self</span>.pending_range_start = pending;
+<a href=#427 id=427 data-nosnippet>427</a>    }
+<a href=#428 id=428 data-nosnippet>428</a>
+<a href=#429 id=429 data-nosnippet>429</a>    <span class="doccomment">/// Build a `CompactionBound` from decoded clustering-prefix values. An empty
+<a href=#430 id=430 data-nosnippet>430</a>    /// prefix is an OPEN bound (Bottom for a start, Top for an end); a non-empty
+<a href=#431 id=431 data-nosnippet>431</a>    /// prefix pairs each value with its schema clustering-column name
+<a href=#432 id=432 data-nosnippet>432</a>    /// (positionally; bounds may be PREFIX-length).
+<a href=#433 id=433 data-nosnippet>433</a>    </span><span class="kw">fn </span>make_bound(
+<a href=#434 id=434 data-nosnippet>434</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#435 id=435 data-nosnippet>435</a>        schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#436 id=436 data-nosnippet>436</a>        values: Vec&lt;Value&gt;,
+<a href=#437 id=437 data-nosnippet>437</a>        inclusive: bool,
+<a href=#438 id=438 data-nosnippet>438</a>        is_start: bool,
+<a href=#439 id=439 data-nosnippet>439</a>    ) -&gt; <span class="kw">crate</span>::storage::sstable::reader::compaction_row::CompactionBound {
+<a href=#440 id=440 data-nosnippet>440</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::reader::compaction_row::CompactionBound;
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="kw">if </span>values.is_empty() {
+<a href=#442 id=442 data-nosnippet>442</a>            <span class="kw">return if </span>is_start {
+<a href=#443 id=443 data-nosnippet>443</a>                CompactionBound::Bottom
+<a href=#444 id=444 data-nosnippet>444</a>            } <span class="kw">else </span>{
+<a href=#445 id=445 data-nosnippet>445</a>                CompactionBound::Top
+<a href=#446 id=446 data-nosnippet>446</a>            };
+<a href=#447 id=447 data-nosnippet>447</a>        }
+<a href=#448 id=448 data-nosnippet>448</a>        <span class="kw">let </span>pairs: Vec&lt;(String, Value)&gt; = values
+<a href=#449 id=449 data-nosnippet>449</a>            .into_iter()
+<a href=#450 id=450 data-nosnippet>450</a>            .enumerate()
+<a href=#451 id=451 data-nosnippet>451</a>            .map(|(i, v)| {
+<a href=#452 id=452 data-nosnippet>452</a>                <span class="kw">let </span>name = schema
+<a href=#453 id=453 data-nosnippet>453</a>                    .clustering_keys
+<a href=#454 id=454 data-nosnippet>454</a>                    .get(i)
+<a href=#455 id=455 data-nosnippet>455</a>                    .map(|c| c.name.clone())
+<a href=#456 id=456 data-nosnippet>456</a>                    .unwrap_or_else(|| <span class="macro">format!</span>(<span class="string">"ck{i}"</span>));
+<a href=#457 id=457 data-nosnippet>457</a>                (name, v)
+<a href=#458 id=458 data-nosnippet>458</a>            })
+<a href=#459 id=459 data-nosnippet>459</a>            .collect();
+<a href=#460 id=460 data-nosnippet>460</a>        <span class="kw">if </span>inclusive {
+<a href=#461 id=461 data-nosnippet>461</a>            CompactionBound::Inclusive(pairs)
+<a href=#462 id=462 data-nosnippet>462</a>        } <span class="kw">else </span>{
+<a href=#463 id=463 data-nosnippet>463</a>            CompactionBound::Exclusive(pairs)
+<a href=#464 id=464 data-nosnippet>464</a>        }
+<a href=#465 id=465 data-nosnippet>465</a>    }
+<a href=#466 id=466 data-nosnippet>466</a>}
+<a href=#467 id=467 data-nosnippet>467</a>
+<a href=#468 id=468 data-nosnippet>468</a><span class="kw">impl </span>SlidingPartitionPolicy <span class="kw">for </span>CompactionPolicy&lt;<span class="lifetime">'_</span>&gt; {
+<a href=#469 id=469 data-nosnippet>469</a>    <span class="kw">type </span>Row = <span class="kw">crate</span>::storage::sstable::reader::compaction_row::CompactionRow;
+<a href=#470 id=470 data-nosnippet>470</a>
+<a href=#471 id=471 data-nosnippet>471</a>    <span class="kw">fn </span>on_partition_open(
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#473 id=473 data-nosnippet>473</a>        partition_key: RowKey,
+<a href=#474 id=474 data-nosnippet>474</a>        partition_deletion: <span class="prelude-ty">Option</span>&lt;(i64, i32)&gt;,
+<a href=#475 id=475 data-nosnippet>475</a>        _schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#476 id=476 data-nosnippet>476</a>        pending: <span class="kw-2">&amp;mut </span>Vec&lt;<span class="self">Self</span>::Row&gt;,
+<a href=#477 id=477 data-nosnippet>477</a>    ) {
+<a href=#478 id=478 data-nosnippet>478</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::reader::compaction_row::{CompactionRow, CompactionRowData};
+<a href=#479 id=479 data-nosnippet>479</a>        <span class="self">self</span>.partition_key = partition_key;
+<a href=#480 id=480 data-nosnippet>480</a>        <span class="comment">// Issue #1072: surface a partition-level tombstone as a synthetic
+<a href=#481 id=481 data-nosnippet>481</a>        // partition-delete `CompactionRow` (pushed once per partition, even for a
+<a href=#482 id=482 data-nosnippet>482</a>        // tombstone-only partition) so the merge can apply the partition floor.
+<a href=#483 id=483 data-nosnippet>483</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>((mfda, ldt)) = partition_deletion {
+<a href=#484 id=484 data-nosnippet>484</a>            pending.push(CompactionRow {
+<a href=#485 id=485 data-nosnippet>485</a>                key: <span class="self">self</span>.partition_key.clone(),
+<a href=#486 id=486 data-nosnippet>486</a>                row_timestamp: mfda,
+<a href=#487 id=487 data-nosnippet>487</a>                row_data: CompactionRowData::PartitionDelete {
+<a href=#488 id=488 data-nosnippet>488</a>                    deletion_time: mfda,
+<a href=#489 id=489 data-nosnippet>489</a>                    local_deletion_time: ldt,
+<a href=#490 id=490 data-nosnippet>490</a>                },
+<a href=#491 id=491 data-nosnippet>491</a>            });
+<a href=#492 id=492 data-nosnippet>492</a>        }
+<a href=#493 id=493 data-nosnippet>493</a>    }
+<a href=#494 id=494 data-nosnippet>494</a>
+<a href=#495 id=495 data-nosnippet>495</a>    <span class="kw">fn </span>on_range_marker(
+<a href=#496 id=496 data-nosnippet>496</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#497 id=497 data-nosnippet>497</a>        data: <span class="kw-2">&amp;</span>[u8],
+<a href=#498 id=498 data-nosnippet>498</a>        offset: usize,
+<a href=#499 id=499 data-nosnippet>499</a>        schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#500 id=500 data-nosnippet>500</a>        pending: <span class="kw-2">&amp;mut </span>Vec&lt;<span class="self">Self</span>::Row&gt;,
+<a href=#501 id=501 data-nosnippet>501</a>    ) -&gt; MarkerOutcome {
+<a href=#502 id=502 data-nosnippet>502</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::reader::compaction_row::{
+<a href=#503 id=503 data-nosnippet>503</a>            CompactionBound, CompactionRow, CompactionRowData,
+<a href=#504 id=504 data-nosnippet>504</a>        };
+<a href=#505 id=505 data-nosnippet>505</a>        <span class="comment">// Issue #933: parse the range-tombstone bound marker and pair it into a
+<a href=#506 id=506 data-nosnippet>506</a>        // complete `RangeMarker` so the merge can shadow covered cells AND
+<a href=#507 id=507 data-nosnippet>507</a>        // re-emit the surviving marker.
+<a href=#508 id=508 data-nosnippet>508</a>        </span><span class="kw">let </span>(bound_values, bound_kind, (mfda_p, ldt_p), secondary, next_offset) = <span class="kw">match </span><span class="self">self
+<a href=#509 id=509 data-nosnippet>509</a>            </span>.parser
+<a href=#510 id=510 data-nosnippet>510</a>            .parse_range_tombstone_marker_with_ldt(data, offset, schema)
+<a href=#511 id=511 data-nosnippet>511</a>        {
+<a href=#512 id=512 data-nosnippet>512</a>            <span class="prelude-val">Ok</span>(v) =&gt; v,
+<a href=#513 id=513 data-nosnippet>513</a>            <span class="comment">// Truncated marker body at a chunk boundary (or corrupt at the
+<a href=#514 id=514 data-nosnippet>514</a>            // final chunk): terminate exactly as the prior skip path did.
+<a href=#515 id=515 data-nosnippet>515</a>            </span><span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span>MarkerOutcome::Stop,
+<a href=#516 id=516 data-nosnippet>516</a>        };
+<a href=#517 id=517 data-nosnippet>517</a>
+<a href=#518 id=518 data-nosnippet>518</a>        <span class="comment">// ClusteringPrefix.Kind ordinals:
+<a href=#519 id=519 data-nosnippet>519</a>        //   0 EXCL_END, 1 INCL_START, 2 EXCL_END_INCL_START_BOUNDARY,
+<a href=#520 id=520 data-nosnippet>520</a>        //   5 INCL_END_EXCL_START_BOUNDARY, 6 INCL_END, 7 EXCL_START.
+<a href=#521 id=521 data-nosnippet>521</a>        </span><span class="kw">match </span>bound_kind {
+<a href=#522 id=522 data-nosnippet>522</a>            <span class="number">1 </span>| <span class="number">7 </span>=&gt; {
+<a href=#523 id=523 data-nosnippet>523</a>                <span class="comment">// Simple start bound: buffer until the matching end.
+<a href=#524 id=524 data-nosnippet>524</a>                </span><span class="kw">let </span>start = <span class="self">self</span>.make_bound(schema, bound_values, bound_kind == <span class="number">1</span>, <span class="bool-val">true</span>);
+<a href=#525 id=525 data-nosnippet>525</a>                <span class="self">self</span>.pending_range_start = <span class="prelude-val">Some</span>((start, mfda_p, ldt_p));
+<a href=#526 id=526 data-nosnippet>526</a>            }
+<a href=#527 id=527 data-nosnippet>527</a>            <span class="number">0 </span>| <span class="number">6 </span>=&gt; {
+<a href=#528 id=528 data-nosnippet>528</a>                <span class="comment">// Simple end bound: close the buffered start.
+<a href=#529 id=529 data-nosnippet>529</a>                </span><span class="kw">let </span>end = <span class="self">self</span>.make_bound(schema, bound_values, bound_kind == <span class="number">6</span>, <span class="bool-val">false</span>);
+<a href=#530 id=530 data-nosnippet>530</a>                <span class="kw">let </span>start = <span class="self">self
+<a href=#531 id=531 data-nosnippet>531</a>                    </span>.pending_range_start
+<a href=#532 id=532 data-nosnippet>532</a>                    .take()
+<a href=#533 id=533 data-nosnippet>533</a>                    .map(|(s, <span class="kw">_</span>, <span class="kw">_</span>)| s)
+<a href=#534 id=534 data-nosnippet>534</a>                    .unwrap_or(CompactionBound::Bottom);
+<a href=#535 id=535 data-nosnippet>535</a>                pending.push(CompactionRow {
+<a href=#536 id=536 data-nosnippet>536</a>                    key: <span class="self">self</span>.partition_key.clone(),
+<a href=#537 id=537 data-nosnippet>537</a>                    row_timestamp: mfda_p,
+<a href=#538 id=538 data-nosnippet>538</a>                    row_data: CompactionRowData::RangeMarker {
+<a href=#539 id=539 data-nosnippet>539</a>                        start,
+<a href=#540 id=540 data-nosnippet>540</a>                        end,
+<a href=#541 id=541 data-nosnippet>541</a>                        deletion_time: mfda_p,
+<a href=#542 id=542 data-nosnippet>542</a>                        local_deletion_time: ldt_p,
+<a href=#543 id=543 data-nosnippet>543</a>                    },
+<a href=#544 id=544 data-nosnippet>544</a>                });
+<a href=#545 id=545 data-nosnippet>545</a>            }
+<a href=#546 id=546 data-nosnippet>546</a>            <span class="number">2 </span>| <span class="number">5 </span>=&gt; {
+<a href=#547 id=547 data-nosnippet>547</a>                <span class="comment">// Boundary marker: primary closes the previous range, the
+<a href=#548 id=548 data-nosnippet>548</a>                // secondary opens the next. kind 2 = EXCL_END + INCL_START,
+<a href=#549 id=549 data-nosnippet>549</a>                // kind 5 = INCL_END + EXCL_START.
+<a href=#550 id=550 data-nosnippet>550</a>                </span><span class="kw">let </span>end_inclusive = bound_kind == <span class="number">5</span>;
+<a href=#551 id=551 data-nosnippet>551</a>                <span class="kw">if let </span><span class="prelude-val">Some</span>((start, <span class="kw">_</span>, <span class="kw">_</span>)) = <span class="self">self</span>.pending_range_start.take() {
+<a href=#552 id=552 data-nosnippet>552</a>                    <span class="kw">let </span>end = <span class="self">self</span>.make_bound(schema, bound_values.clone(), end_inclusive, <span class="bool-val">false</span>);
+<a href=#553 id=553 data-nosnippet>553</a>                    pending.push(CompactionRow {
+<a href=#554 id=554 data-nosnippet>554</a>                        key: <span class="self">self</span>.partition_key.clone(),
+<a href=#555 id=555 data-nosnippet>555</a>                        row_timestamp: mfda_p,
+<a href=#556 id=556 data-nosnippet>556</a>                        row_data: CompactionRowData::RangeMarker {
+<a href=#557 id=557 data-nosnippet>557</a>                            start,
+<a href=#558 id=558 data-nosnippet>558</a>                            end,
+<a href=#559 id=559 data-nosnippet>559</a>                            deletion_time: mfda_p,
+<a href=#560 id=560 data-nosnippet>560</a>                            local_deletion_time: ldt_p,
+<a href=#561 id=561 data-nosnippet>561</a>                        },
+<a href=#562 id=562 data-nosnippet>562</a>                    });
+<a href=#563 id=563 data-nosnippet>563</a>                }
+<a href=#564 id=564 data-nosnippet>564</a>                <span class="kw">let </span>(new_mfda, new_ldt) = secondary.unwrap_or((mfda_p, ldt_p));
+<a href=#565 id=565 data-nosnippet>565</a>                <span class="kw">let </span>new_start = <span class="self">self</span>.make_bound(schema, bound_values, bound_kind == <span class="number">2</span>, <span class="bool-val">true</span>);
+<a href=#566 id=566 data-nosnippet>566</a>                <span class="self">self</span>.pending_range_start = <span class="prelude-val">Some</span>((new_start, new_mfda, new_ldt));
+<a href=#567 id=567 data-nosnippet>567</a>            }
+<a href=#568 id=568 data-nosnippet>568</a>            <span class="kw">_ </span>=&gt; {
+<a href=#569 id=569 data-nosnippet>569</a>                <span class="comment">// Unknown bound kind: skip it rather than mis-parse the partition
+<a href=#570 id=570 data-nosnippet>570</a>                // (the offset already advanced past the marker).
+<a href=#571 id=571 data-nosnippet>571</a>            </span>}
+<a href=#572 id=572 data-nosnippet>572</a>        }
+<a href=#573 id=573 data-nosnippet>573</a>        MarkerOutcome::Advanced(next_offset)
+<a href=#574 id=574 data-nosnippet>574</a>    }
+<a href=#575 id=575 data-nosnippet>575</a>
+<a href=#576 id=576 data-nosnippet>576</a>    <span class="kw">fn </span>on_data_row(
+<a href=#577 id=577 data-nosnippet>577</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#578 id=578 data-nosnippet>578</a>        data: <span class="kw-2">&amp;</span>[u8],
+<a href=#579 id=579 data-nosnippet>579</a>        offset: usize,
+<a href=#580 id=580 data-nosnippet>580</a>        schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#581 id=581 data-nosnippet>581</a>        reader: <span class="kw-2">&amp;</span><span class="kw">crate</span>::storage::sstable::reader::types::SSTableReader,
+<a href=#582 id=582 data-nosnippet>582</a>        resolution: <span class="kw-2">&amp;</span>RowColumnResolution,
+<a href=#583 id=583 data-nosnippet>583</a>        pending: <span class="kw-2">&amp;mut </span>Vec&lt;<span class="self">Self</span>::Row&gt;,
+<a href=#584 id=584 data-nosnippet>584</a>    ) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
+<a href=#585 id=585 data-nosnippet>585</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::reader::compaction_row::CompactionRow;
+<a href=#586 id=586 data-nosnippet>586</a>        <span class="comment">// Compaction mode: capture per-column complex elements and request
+<a href=#587 id=587 data-nosnippet>587</a>        // per-cell metadata so simple cells carry per-cell timestamps/TTLs.
+<a href=#588 id=588 data-nosnippet>588</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>complex_capture: CompactionComplexColumns = HashMap::new();
+<a href=#589 id=589 data-nosnippet>589</a>        <span class="kw">match </span><span class="self">self</span>.parser.parse_row_data_with_offset_impl(
+<a href=#590 id=590 data-nosnippet>590</a>            data,
+<a href=#591 id=591 data-nosnippet>591</a>            offset,
+<a href=#592 id=592 data-nosnippet>592</a>            <span class="prelude-val">Some</span>(schema),
+<a href=#593 id=593 data-nosnippet>593</a>            reader,
+<a href=#594 id=594 data-nosnippet>594</a>            <span class="bool-val">true</span>,
+<a href=#595 id=595 data-nosnippet>595</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;mut </span>complex_capture),
+<a href=#596 id=596 data-nosnippet>596</a>            resolution,
+<a href=#597 id=597 data-nosnippet>597</a>            <span class="comment">// Compaction is a physical consumer: no read-side shadowing.
+<a href=#598 id=598 data-nosnippet>598</a>            </span><span class="prelude-val">None</span>,
+<a href=#599 id=599 data-nosnippet>599</a>        ) {
+<a href=#600 id=600 data-nosnippet>600</a>            <span class="prelude-val">Ok</span>((cells, cell_meta, row_header_opt, next_offset, _is_static, _complex_meta)) =&gt; {
+<a href=#601 id=601 data-nosnippet>601</a>                <span class="comment">// Issue #932 (K1): the ONE row-write-timestamp coexistence rule.
+<a href=#602 id=602 data-nosnippet>602</a>                </span><span class="kw">let </span>row_ts = row_write_timestamp(<span class="kw-2">&amp;</span>row_header_opt);
+<a href=#603 id=603 data-nosnippet>603</a>
+<a href=#604 id=604 data-nosnippet>604</a>                <span class="comment">// Issue #1074: emit BOTH static and clustering rows as their own
+<a href=#605 id=605 data-nosnippet>605</a>                // `CompactionRow` (static-ness is decided by the schema in the
+<a href=#606 id=606 data-nosnippet>606</a>                // writer, not by on-disk folding).
+<a href=#607 id=607 data-nosnippet>607</a>                </span><span class="kw">let </span>row_data = <span class="self">self</span>.parser.build_compaction_row_data(
+<a href=#608 id=608 data-nosnippet>608</a>                    cells,
+<a href=#609 id=609 data-nosnippet>609</a>                    cell_meta,
+<a href=#610 id=610 data-nosnippet>610</a>                    complex_capture,
+<a href=#611 id=611 data-nosnippet>611</a>                    <span class="kw-2">&amp;</span>row_header_opt,
+<a href=#612 id=612 data-nosnippet>612</a>                    row_ts,
+<a href=#613 id=613 data-nosnippet>613</a>                    schema,
+<a href=#614 id=614 data-nosnippet>614</a>                );
+<a href=#615 id=615 data-nosnippet>615</a>
+<a href=#616 id=616 data-nosnippet>616</a>                pending.push(CompactionRow {
+<a href=#617 id=617 data-nosnippet>617</a>                    key: <span class="self">self</span>.partition_key.clone(),
+<a href=#618 id=618 data-nosnippet>618</a>                    row_timestamp: row_ts,
+<a href=#619 id=619 data-nosnippet>619</a>                    row_data,
+<a href=#620 id=620 data-nosnippet>620</a>                });
+<a href=#621 id=621 data-nosnippet>621</a>                <span class="prelude-val">Some</span>(next_offset)
+<a href=#622 id=622 data-nosnippet>622</a>            }
+<a href=#623 id=623 data-nosnippet>623</a>            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">None</span>,
+<a href=#624 id=624 data-nosnippet>624</a>        }
+<a href=#625 id=625 data-nosnippet>625</a>    }
+<a href=#626 id=626 data-nosnippet>626</a>}
 </code></pre></div></section></main></body></html>

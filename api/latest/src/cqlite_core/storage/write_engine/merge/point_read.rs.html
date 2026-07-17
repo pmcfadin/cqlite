@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/merge/point_read.rs`."><title>point_read.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/merge/</div>point_read.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Single-partition point-read merge assembly (issue #2207, Stage 1/2 core side).
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/merge/point_read.rs`."><title>point_read.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/merge/</div>point_read.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Single-partition point-read merge assembly (issue #2207, Stage 1/2 core side).
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! Builds a [`KWayMerger`] over ONE run per candidate SSTable, each yielding only
 <a href=#4 id=4 data-nosnippet>4</a>//! the target partition's entries, so the Flight `do_get` point path reconciles
@@ -201,238 +201,251 @@
 <a href=#201 id=201 data-nosnippet>201</a>                }
 <a href=#202 id=202 data-nosnippet>202</a>                <span class="kw">let </span><span class="kw-2">mut </span>entries: Vec&lt;MergeEntry&gt; = Vec::with_capacity(rows.len());
 <a href=#203 id=203 data-nosnippet>203</a>                <span class="kw">for </span>row <span class="kw">in </span>rows {
-<a href=#204 id=204 data-nosnippet>204</a>                    entries.push(SSTableRowIteratorAdapter::build_merge_entry(
-<a href=#205 id=205 data-nosnippet>205</a>                        run_index, row, schema,
-<a href=#206 id=206 data-nosnippet>206</a>                    )<span class="question-mark">?</span>);
-<a href=#207 id=207 data-nosnippet>207</a>                }
-<a href=#208 id=208 data-nosnippet>208</a>                <span class="comment">// BLOCKER fix (roborev, issue #2207): `rows` was accumulated in
-<a href=#209 id=209 data-nosnippet>209</a>                // REQUESTED-KEY order (IN-list / Or order), not token order. Every
-<a href=#210 id=210 data-nosnippet>210</a>                // `SSTableRowIterator` MUST yield entries in ascending `MergeEntry`
-<a href=#211 id=211 data-nosnippet>211</a>                // order (token, key, clustering) — `refill_heap` buffers only ONE
-<a href=#212 id=212 data-nosnippet>212</a>                // entry per run at a time and relies on that invariant (mod.rs
-<a href=#213 id=213 data-nosnippet>213</a>                // `step`/`refill_heap`). An out-of-order run causes `step()` to
-<a href=#214 id=214 data-nosnippet>214</a>                // silently split one run's contribution across two heap pops,
-<a href=#215 id=215 data-nosnippet>215</a>                // duplicating rows and breaking cross-generation reconciliation
-<a href=#216 id=216 data-nosnippet>216</a>                // (a newer generation's overwrite/tombstone no longer shadows the
-<a href=#217 id=217 data-nosnippet>217</a>                // older one). Sort once, here, before wrapping in `VecRun`.
-<a href=#218 id=218 data-nosnippet>218</a>                </span>entries.sort();
-<a href=#219 id=219 data-nosnippet>219</a>                runs.push(Box::new(VecRun {
-<a href=#220 id=220 data-nosnippet>220</a>                    entries: entries.into(),
-<a href=#221 id=221 data-nosnippet>221</a>                }));
-<a href=#222 id=222 data-nosnippet>222</a>            }
-<a href=#223 id=223 data-nosnippet>223</a>            PathProbe::NeedsScan =&gt; {
-<a href=#224 id=224 data-nosnippet>224</a>                <span class="comment">// Fail-safe: scan this ONE SSTable, forwarding only the target
-<a href=#225 id=225 data-nosnippet>225</a>                // partitions. The missing index costs speed, never correctness.
-<a href=#226 id=226 data-nosnippet>226</a>                </span><span class="kw">let </span>adapter = SSTableRowIteratorAdapter::open(
-<a href=#227 id=227 data-nosnippet>227</a>                    path,
-<a href=#228 id=228 data-nosnippet>228</a>                    run_index,
-<a href=#229 id=229 data-nosnippet>229</a>                    schema,
-<a href=#230 id=230 data-nosnippet>230</a>                    <span class="prelude-val">None</span>,
-<a href=#231 id=231 data-nosnippet>231</a>                    scan_cancel.clone(),
-<a href=#232 id=232 data-nosnippet>232</a>                )<span class="question-mark">?</span>;
-<a href=#233 id=233 data-nosnippet>233</a>                runs.push(Box::new(SinglePartitionFilterRun {
-<a href=#234 id=234 data-nosnippet>234</a>                    inner: adapter,
-<a href=#235 id=235 data-nosnippet>235</a>                    keys: key_set.clone(),
-<a href=#236 id=236 data-nosnippet>236</a>                }));
-<a href=#237 id=237 data-nosnippet>237</a>            }
-<a href=#238 id=238 data-nosnippet>238</a>        }
-<a href=#239 id=239 data-nosnippet>239</a>    }
-<a href=#240 id=240 data-nosnippet>240</a>
-<a href=#241 id=241 data-nosnippet>241</a>    <span class="kw">if </span>runs.is_empty() {
-<a href=#242 id=242 data-nosnippet>242</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#243 id=243 data-nosnippet>243</a>    }
-<a href=#244 id=244 data-nosnippet>244</a>    <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(KWayMerger::from_row_iterators(runs, schema)<span class="question-mark">?</span>))
-<a href=#245 id=245 data-nosnippet>245</a>}
+<a href=#204 id=204 data-nosnippet>204</a>                    <span class="comment">// Issue #2096: one merge entry decoded from `Data.db` by the
+<a href=#205 id=205 data-nosnippet>205</a>                    // SEEK path (this candidate held the target partition). Counting
+<a href=#206 id=206 data-nosnippet>206</a>                    // per built entry — the same unit the full-scan run counts per
+<a href=#207 id=207 data-nosnippet>207</a>                    // `Ok(entry)` — keeps `merge_run_entries_decoded` apples-to-
+<a href=#208 id=208 data-nosnippet>208</a>                    // apples between the two paths.
+<a href=#209 id=209 data-nosnippet>209</a>                    </span><span class="kw">crate</span>::storage::sstable::work_counters::add_merge_run_entry_decoded();
+<a href=#210 id=210 data-nosnippet>210</a>                    entries.push(SSTableRowIteratorAdapter::build_merge_entry(
+<a href=#211 id=211 data-nosnippet>211</a>                        run_index, row, schema,
+<a href=#212 id=212 data-nosnippet>212</a>                    )<span class="question-mark">?</span>);
+<a href=#213 id=213 data-nosnippet>213</a>                }
+<a href=#214 id=214 data-nosnippet>214</a>                <span class="comment">// BLOCKER fix (roborev, issue #2207): `rows` was accumulated in
+<a href=#215 id=215 data-nosnippet>215</a>                // REQUESTED-KEY order (IN-list / Or order), not token order. Every
+<a href=#216 id=216 data-nosnippet>216</a>                // `SSTableRowIterator` MUST yield entries in ascending `MergeEntry`
+<a href=#217 id=217 data-nosnippet>217</a>                // order (token, key, clustering) — `refill_heap` buffers only ONE
+<a href=#218 id=218 data-nosnippet>218</a>                // entry per run at a time and relies on that invariant (mod.rs
+<a href=#219 id=219 data-nosnippet>219</a>                // `step`/`refill_heap`). An out-of-order run causes `step()` to
+<a href=#220 id=220 data-nosnippet>220</a>                // silently split one run's contribution across two heap pops,
+<a href=#221 id=221 data-nosnippet>221</a>                // duplicating rows and breaking cross-generation reconciliation
+<a href=#222 id=222 data-nosnippet>222</a>                // (a newer generation's overwrite/tombstone no longer shadows the
+<a href=#223 id=223 data-nosnippet>223</a>                // older one). Sort once, here, before wrapping in `VecRun`.
+<a href=#224 id=224 data-nosnippet>224</a>                </span>entries.sort();
+<a href=#225 id=225 data-nosnippet>225</a>                runs.push(Box::new(VecRun {
+<a href=#226 id=226 data-nosnippet>226</a>                    entries: entries.into(),
+<a href=#227 id=227 data-nosnippet>227</a>                }));
+<a href=#228 id=228 data-nosnippet>228</a>            }
+<a href=#229 id=229 data-nosnippet>229</a>            PathProbe::NeedsScan =&gt; {
+<a href=#230 id=230 data-nosnippet>230</a>                <span class="comment">// Fail-safe: scan this ONE SSTable, forwarding only the target
+<a href=#231 id=231 data-nosnippet>231</a>                // partitions. The missing index costs speed, never correctness.
+<a href=#232 id=232 data-nosnippet>232</a>                </span><span class="kw">let </span>adapter = SSTableRowIteratorAdapter::open(
+<a href=#233 id=233 data-nosnippet>233</a>                    path,
+<a href=#234 id=234 data-nosnippet>234</a>                    run_index,
+<a href=#235 id=235 data-nosnippet>235</a>                    schema,
+<a href=#236 id=236 data-nosnippet>236</a>                    <span class="prelude-val">None</span>,
+<a href=#237 id=237 data-nosnippet>237</a>                    scan_cancel.clone(),
+<a href=#238 id=238 data-nosnippet>238</a>                )<span class="question-mark">?</span>;
+<a href=#239 id=239 data-nosnippet>239</a>                runs.push(Box::new(SinglePartitionFilterRun {
+<a href=#240 id=240 data-nosnippet>240</a>                    inner: adapter,
+<a href=#241 id=241 data-nosnippet>241</a>                    keys: key_set.clone(),
+<a href=#242 id=242 data-nosnippet>242</a>                }));
+<a href=#243 id=243 data-nosnippet>243</a>            }
+<a href=#244 id=244 data-nosnippet>244</a>        }
+<a href=#245 id=245 data-nosnippet>245</a>    }
 <a href=#246 id=246 data-nosnippet>246</a>
-<a href=#247 id=247 data-nosnippet>247</a><span class="doccomment">/// Reader-based analogue of [`build_single_partition_merger`] (issue #2346):
-<a href=#248 id=248 data-nosnippet>248</a>/// assembles a [`KWayMerger`] that reads ONLY the target `keys`, but across
-<a href=#249 id=249 data-nosnippet>249</a>/// already-open, possibly-SHARED `readers` instead of `paths` — the seam a
-<a href=#250 id=250 data-nosnippet>250</a>/// future cached-reader caller (e.g. a Flight warm-handle registry) uses to
-<a href=#251 id=251 data-nosnippet>251</a>/// avoid a fresh per-request reader-open/Index/Summary/Statistics/bloom parse.
-<a href=#252 id=252 data-nosnippet>252</a>///
-<a href=#253 id=253 data-nosnippet>253</a>/// Semantics mirror `build_single_partition_merger` exactly (same
-<a href=#254 id=254 data-nosnippet>254</a>/// canonicalization, same three-way per-candidate probe via [`probe_reader`],
-<a href=#255 id=255 data-nosnippet>255</a>/// same [`SinglePartitionFilterRun`] fail-safe, same run-index ordering) — only
-<a href=#256 id=256 data-nosnippet>256</a>/// WHO opens/owns the `SSTableReader` differs. `readers` must be the same
-<a href=#257 id=257 data-nosnippet>257</a>/// (token-pruned) candidate list, in the same order, the full-scan reader-based
-<a href=#258 id=258 data-nosnippet>258</a>/// merger ([`KWayMerger::new_from_readers`]) would merge.
-<a href=#259 id=259 data-nosnippet>259</a></span><span class="kw">pub fn </span>build_single_partition_merger_from_readers(
-<a href=#260 id=260 data-nosnippet>260</a>    readers: Vec&lt;Arc&lt;SSTableReader&gt;&gt;,
-<a href=#261 id=261 data-nosnippet>261</a>    keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
-<a href=#262 id=262 data-nosnippet>262</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
-<a href=#263 id=263 data-nosnippet>263</a>    scan_cancel: ScanCancel,
-<a href=#264 id=264 data-nosnippet>264</a>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;KWayMerger&gt;&gt; {
-<a href=#265 id=265 data-nosnippet>265</a>    schema.validate_dropped_columns()<span class="question-mark">?</span>;
-<a href=#266 id=266 data-nosnippet>266</a>    <span class="kw">if </span>keys.is_empty() {
-<a href=#267 id=267 data-nosnippet>267</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#268 id=268 data-nosnippet>268</a>    }
-<a href=#269 id=269 data-nosnippet>269</a>
-<a href=#270 id=270 data-nosnippet>270</a>    <span class="kw">let </span><span class="kw-2">mut </span>canonical: Vec&lt;Vec&lt;u8&gt;&gt; = keys.to_vec();
-<a href=#271 id=271 data-nosnippet>271</a>    canonical.sort_by_key(|k| <span class="kw">crate</span>::util::cassandra_murmur3::cassandra_murmur3_token(k));
-<a href=#272 id=272 data-nosnippet>272</a>    canonical.dedup();
-<a href=#273 id=273 data-nosnippet>273</a>    <span class="kw">let </span>keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;] = <span class="kw-2">&amp;</span>canonical;
-<a href=#274 id=274 data-nosnippet>274</a>
-<a href=#275 id=275 data-nosnippet>275</a>    <span class="kw">let </span>key_set: std::collections::HashSet&lt;Vec&lt;u8&gt;&gt; = keys.iter().cloned().collect();
-<a href=#276 id=276 data-nosnippet>276</a>
-<a href=#277 id=277 data-nosnippet>277</a>    <span class="kw">let </span><span class="kw-2">mut </span>runs: Vec&lt;Box&lt;<span class="kw">dyn </span>SSTableRowIterator&gt;&gt; = Vec::new();
-<a href=#278 id=278 data-nosnippet>278</a>    <span class="kw">for </span>(run_index, reader) <span class="kw">in </span>readers.into_iter().enumerate() {
-<a href=#279 id=279 data-nosnippet>279</a>        <span class="comment">// Cooperative cancellation (#2264): honour a cancel BEFORE each candidate's
-<a href=#280 id=280 data-nosnippet>280</a>        // probe, so a disconnected point read does no further per-SSTable work.
-<a href=#281 id=281 data-nosnippet>281</a>        </span>scan_cancel.check()<span class="question-mark">?</span>;
+<a href=#247 id=247 data-nosnippet>247</a>    <span class="kw">if </span>runs.is_empty() {
+<a href=#248 id=248 data-nosnippet>248</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#249 id=249 data-nosnippet>249</a>    }
+<a href=#250 id=250 data-nosnippet>250</a>    <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(KWayMerger::from_row_iterators(runs, schema)<span class="question-mark">?</span>))
+<a href=#251 id=251 data-nosnippet>251</a>}
+<a href=#252 id=252 data-nosnippet>252</a>
+<a href=#253 id=253 data-nosnippet>253</a><span class="doccomment">/// Reader-based analogue of [`build_single_partition_merger`] (issue #2346):
+<a href=#254 id=254 data-nosnippet>254</a>/// assembles a [`KWayMerger`] that reads ONLY the target `keys`, but across
+<a href=#255 id=255 data-nosnippet>255</a>/// already-open, possibly-SHARED `readers` instead of `paths` — the seam a
+<a href=#256 id=256 data-nosnippet>256</a>/// future cached-reader caller (e.g. a Flight warm-handle registry) uses to
+<a href=#257 id=257 data-nosnippet>257</a>/// avoid a fresh per-request reader-open/Index/Summary/Statistics/bloom parse.
+<a href=#258 id=258 data-nosnippet>258</a>///
+<a href=#259 id=259 data-nosnippet>259</a>/// Semantics mirror `build_single_partition_merger` exactly (same
+<a href=#260 id=260 data-nosnippet>260</a>/// canonicalization, same three-way per-candidate probe via [`probe_reader`],
+<a href=#261 id=261 data-nosnippet>261</a>/// same [`SinglePartitionFilterRun`] fail-safe, same run-index ordering) — only
+<a href=#262 id=262 data-nosnippet>262</a>/// WHO opens/owns the `SSTableReader` differs. `readers` must be the same
+<a href=#263 id=263 data-nosnippet>263</a>/// (token-pruned) candidate list, in the same order, the full-scan reader-based
+<a href=#264 id=264 data-nosnippet>264</a>/// merger ([`KWayMerger::new_from_readers`]) would merge.
+<a href=#265 id=265 data-nosnippet>265</a></span><span class="kw">pub fn </span>build_single_partition_merger_from_readers(
+<a href=#266 id=266 data-nosnippet>266</a>    readers: Vec&lt;Arc&lt;SSTableReader&gt;&gt;,
+<a href=#267 id=267 data-nosnippet>267</a>    keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
+<a href=#268 id=268 data-nosnippet>268</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#269 id=269 data-nosnippet>269</a>    scan_cancel: ScanCancel,
+<a href=#270 id=270 data-nosnippet>270</a>) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;KWayMerger&gt;&gt; {
+<a href=#271 id=271 data-nosnippet>271</a>    schema.validate_dropped_columns()<span class="question-mark">?</span>;
+<a href=#272 id=272 data-nosnippet>272</a>    <span class="kw">if </span>keys.is_empty() {
+<a href=#273 id=273 data-nosnippet>273</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#274 id=274 data-nosnippet>274</a>    }
+<a href=#275 id=275 data-nosnippet>275</a>
+<a href=#276 id=276 data-nosnippet>276</a>    <span class="kw">let </span><span class="kw-2">mut </span>canonical: Vec&lt;Vec&lt;u8&gt;&gt; = keys.to_vec();
+<a href=#277 id=277 data-nosnippet>277</a>    canonical.sort_by_key(|k| <span class="kw">crate</span>::util::cassandra_murmur3::cassandra_murmur3_token(k));
+<a href=#278 id=278 data-nosnippet>278</a>    canonical.dedup();
+<a href=#279 id=279 data-nosnippet>279</a>    <span class="kw">let </span>keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;] = <span class="kw-2">&amp;</span>canonical;
+<a href=#280 id=280 data-nosnippet>280</a>
+<a href=#281 id=281 data-nosnippet>281</a>    <span class="kw">let </span>key_set: std::collections::HashSet&lt;Vec&lt;u8&gt;&gt; = keys.iter().cloned().collect();
 <a href=#282 id=282 data-nosnippet>282</a>
-<a href=#283 id=283 data-nosnippet>283</a>        <span class="kw">match </span>probe_reader(Arc::clone(<span class="kw-2">&amp;</span>reader), keys, schema, scan_cancel.clone())<span class="question-mark">? </span>{
-<a href=#284 id=284 data-nosnippet>284</a>            PathProbe::Empty =&gt; {
-<a href=#285 id=285 data-nosnippet>285</a>                <span class="comment">// Pruned / absent for every key. No run.
-<a href=#286 id=286 data-nosnippet>286</a>            </span>}
-<a href=#287 id=287 data-nosnippet>287</a>            PathProbe::Seeked(rows) =&gt; {
-<a href=#288 id=288 data-nosnippet>288</a>                <span class="kw">if </span>rows.is_empty() {
-<a href=#289 id=289 data-nosnippet>289</a>                    <span class="kw">continue</span>;
-<a href=#290 id=290 data-nosnippet>290</a>                }
-<a href=#291 id=291 data-nosnippet>291</a>                <span class="kw">let </span><span class="kw-2">mut </span>entries: Vec&lt;MergeEntry&gt; = Vec::with_capacity(rows.len());
-<a href=#292 id=292 data-nosnippet>292</a>                <span class="kw">for </span>row <span class="kw">in </span>rows {
-<a href=#293 id=293 data-nosnippet>293</a>                    entries.push(SSTableRowIteratorAdapter::build_merge_entry(
-<a href=#294 id=294 data-nosnippet>294</a>                        run_index, row, schema,
-<a href=#295 id=295 data-nosnippet>295</a>                    )<span class="question-mark">?</span>);
+<a href=#283 id=283 data-nosnippet>283</a>    <span class="kw">let </span><span class="kw-2">mut </span>runs: Vec&lt;Box&lt;<span class="kw">dyn </span>SSTableRowIterator&gt;&gt; = Vec::new();
+<a href=#284 id=284 data-nosnippet>284</a>    <span class="kw">for </span>(run_index, reader) <span class="kw">in </span>readers.into_iter().enumerate() {
+<a href=#285 id=285 data-nosnippet>285</a>        <span class="comment">// Cooperative cancellation (#2264): honour a cancel BEFORE each candidate's
+<a href=#286 id=286 data-nosnippet>286</a>        // probe, so a disconnected point read does no further per-SSTable work.
+<a href=#287 id=287 data-nosnippet>287</a>        </span>scan_cancel.check()<span class="question-mark">?</span>;
+<a href=#288 id=288 data-nosnippet>288</a>
+<a href=#289 id=289 data-nosnippet>289</a>        <span class="kw">match </span>probe_reader(Arc::clone(<span class="kw-2">&amp;</span>reader), keys, schema, scan_cancel.clone())<span class="question-mark">? </span>{
+<a href=#290 id=290 data-nosnippet>290</a>            PathProbe::Empty =&gt; {
+<a href=#291 id=291 data-nosnippet>291</a>                <span class="comment">// Pruned / absent for every key. No run.
+<a href=#292 id=292 data-nosnippet>292</a>            </span>}
+<a href=#293 id=293 data-nosnippet>293</a>            PathProbe::Seeked(rows) =&gt; {
+<a href=#294 id=294 data-nosnippet>294</a>                <span class="kw">if </span>rows.is_empty() {
+<a href=#295 id=295 data-nosnippet>295</a>                    <span class="kw">continue</span>;
 <a href=#296 id=296 data-nosnippet>296</a>                }
-<a href=#297 id=297 data-nosnippet>297</a>                <span class="comment">// See `build_single_partition_merger`'s identical sort — every
-<a href=#298 id=298 data-nosnippet>298</a>                // `SSTableRowIterator` MUST yield ascending `MergeEntry` order.
-<a href=#299 id=299 data-nosnippet>299</a>                </span>entries.sort();
-<a href=#300 id=300 data-nosnippet>300</a>                runs.push(Box::new(VecRun {
-<a href=#301 id=301 data-nosnippet>301</a>                    entries: entries.into(),
-<a href=#302 id=302 data-nosnippet>302</a>                }));
-<a href=#303 id=303 data-nosnippet>303</a>            }
-<a href=#304 id=304 data-nosnippet>304</a>            PathProbe::NeedsScan =&gt; {
-<a href=#305 id=305 data-nosnippet>305</a>                <span class="comment">// Fail-safe: scan this ONE shared reader's compaction stream,
-<a href=#306 id=306 data-nosnippet>306</a>                // forwarding only the target partitions — never a fresh
-<a href=#307 id=307 data-nosnippet>307</a>                // path-based open (issue #2346's whole point). `reader` (the
-<a href=#308 id=308 data-nosnippet>308</a>                // ORIGINAL, not the clone `probe_reader` consumed above) is
-<a href=#309 id=309 data-nosnippet>309</a>                // still available here.
-<a href=#310 id=310 data-nosnippet>310</a>                </span><span class="kw">let </span>adapter = SSTableRowIteratorAdapter::open_from_reader(
-<a href=#311 id=311 data-nosnippet>311</a>                    reader,
-<a href=#312 id=312 data-nosnippet>312</a>                    run_index,
-<a href=#313 id=313 data-nosnippet>313</a>                    schema,
-<a href=#314 id=314 data-nosnippet>314</a>                    scan_cancel.clone(),
-<a href=#315 id=315 data-nosnippet>315</a>                )<span class="question-mark">?</span>;
-<a href=#316 id=316 data-nosnippet>316</a>                runs.push(Box::new(SinglePartitionFilterRun {
-<a href=#317 id=317 data-nosnippet>317</a>                    inner: adapter,
-<a href=#318 id=318 data-nosnippet>318</a>                    keys: key_set.clone(),
-<a href=#319 id=319 data-nosnippet>319</a>                }));
-<a href=#320 id=320 data-nosnippet>320</a>            }
-<a href=#321 id=321 data-nosnippet>321</a>        }
-<a href=#322 id=322 data-nosnippet>322</a>    }
-<a href=#323 id=323 data-nosnippet>323</a>
-<a href=#324 id=324 data-nosnippet>324</a>    <span class="kw">if </span>runs.is_empty() {
-<a href=#325 id=325 data-nosnippet>325</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#326 id=326 data-nosnippet>326</a>    }
-<a href=#327 id=327 data-nosnippet>327</a>    <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(KWayMerger::from_row_iterators(runs, schema)<span class="question-mark">?</span>))
-<a href=#328 id=328 data-nosnippet>328</a>}
-<a href=#329 id=329 data-nosnippet>329</a>
-<a href=#330 id=330 data-nosnippet>330</a><span class="doccomment">/// Probe an ALREADY-OPEN `reader` for every requested key via the core seek
-<a href=#331 id=331 data-nosnippet>331</a>/// primitive (default `not(tombstones)` build) — the shared core BOTH
-<a href=#332 id=332 data-nosnippet>332</a>/// [`probe_path`] (path-based, opens its own reader then delegates here) and
-<a href=#333 id=333 data-nosnippet>333</a>/// [`build_single_partition_merger_from_readers`] (reader-based) use, so the
-<a href=#334 id=334 data-nosnippet>334</a>/// two never diverge (issue #2346).
-<a href=#335 id=335 data-nosnippet>335</a>///
-<a href=#336 id=336 data-nosnippet>336</a>/// A single SSTable's index availability is a property of the SSTable (not the
-<a href=#337 id=337 data-nosnippet>337</a>/// key), so the FIRST `IndexUnavailable` short-circuits to [`PathProbe::NeedsScan`]
-<a href=#338 id=338 data-nosnippet>338</a>/// (scan the whole file, filtered). Otherwise every present key's seeked rows are
-<a href=#339 id=339 data-nosnippet>339</a>/// concatenated (they share this SSTable's generation / run index).
-<a href=#340 id=340 data-nosnippet>340</a></span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
-<a href=#341 id=341 data-nosnippet>341</a></span><span class="kw">async fn </span>probe_reader_async(
-<a href=#342 id=342 data-nosnippet>342</a>    reader: <span class="kw-2">&amp;</span>SSTableReader,
-<a href=#343 id=343 data-nosnippet>343</a>    keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
-<a href=#344 id=344 data-nosnippet>344</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
-<a href=#345 id=345 data-nosnippet>345</a>    scan_cancel: <span class="kw-2">&amp;</span>ScanCancel,
-<a href=#346 id=346 data-nosnippet>346</a>) -&gt; <span class="prelude-ty">Result</span>&lt;PathProbe&gt; {
-<a href=#347 id=347 data-nosnippet>347</a>    <span class="kw">let </span><span class="kw-2">mut </span>rows: Vec&lt;CompactionRow&gt; = Vec::new();
-<a href=#348 id=348 data-nosnippet>348</a>    <span class="kw">for </span>key <span class="kw">in </span>keys {
-<a href=#349 id=349 data-nosnippet>349</a>        <span class="kw">match </span>reader
-<a href=#350 id=350 data-nosnippet>350</a>            .read_single_partition_for_compaction(key, <span class="prelude-val">Some</span>(schema), scan_cancel)
-<a href=#351 id=351 data-nosnippet>351</a>            .<span class="kw">await</span><span class="question-mark">?
-<a href=#352 id=352 data-nosnippet>352</a>        </span>{
-<a href=#353 id=353 data-nosnippet>353</a>            SinglePartitionCompaction::DefinitelyAbsent =&gt; {}
-<a href=#354 id=354 data-nosnippet>354</a>            SinglePartitionCompaction::Rows(<span class="kw-2">mut </span>r) =&gt; rows.append(<span class="kw-2">&amp;mut </span>r),
-<a href=#355 id=355 data-nosnippet>355</a>            <span class="comment">// Index availability is per-SSTable, not per-key: fall back to
-<a href=#356 id=356 data-nosnippet>356</a>            // scanning the whole file once, filtered to the key set.
-<a href=#357 id=357 data-nosnippet>357</a>            </span>SinglePartitionCompaction::IndexUnavailable =&gt; {
-<a href=#358 id=358 data-nosnippet>358</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(PathProbe::NeedsScan);
-<a href=#359 id=359 data-nosnippet>359</a>            }
-<a href=#360 id=360 data-nosnippet>360</a>        }
-<a href=#361 id=361 data-nosnippet>361</a>    }
-<a href=#362 id=362 data-nosnippet>362</a>    <span class="kw">if </span>rows.is_empty() {
-<a href=#363 id=363 data-nosnippet>363</a>        <span class="prelude-val">Ok</span>(PathProbe::Empty)
-<a href=#364 id=364 data-nosnippet>364</a>    } <span class="kw">else </span>{
-<a href=#365 id=365 data-nosnippet>365</a>        <span class="prelude-val">Ok</span>(PathProbe::Seeked(rows))
-<a href=#366 id=366 data-nosnippet>366</a>    }
-<a href=#367 id=367 data-nosnippet>367</a>}
-<a href=#368 id=368 data-nosnippet>368</a>
-<a href=#369 id=369 data-nosnippet>369</a><span class="doccomment">/// Open `path` ONCE and probe it for every requested key, delegating to
-<a href=#370 id=370 data-nosnippet>370</a>/// [`probe_reader_async`] (issue #2346) once the reader is open.
-<a href=#371 id=371 data-nosnippet>371</a>///
-<a href=#372 id=372 data-nosnippet>372</a>/// Runs the async open + seek on the shared bridge runtime. The reader is opened
-<a href=#373 id=373 data-nosnippet>373</a>/// with buffered I/O (never mmap/direct — the file may be deleted after the
-<a href=#374 id=374 data-nosnippet>374</a>/// read), matching the full-scan producer's file-lifetime contract (issue #591).
-<a href=#375 id=375 data-nosnippet>375</a></span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
-<a href=#376 id=376 data-nosnippet>376</a></span><span class="kw">fn </span>probe_path(
-<a href=#377 id=377 data-nosnippet>377</a>    path: <span class="kw-2">&amp;</span>Path,
-<a href=#378 id=378 data-nosnippet>378</a>    keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
-<a href=#379 id=379 data-nosnippet>379</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
-<a href=#380 id=380 data-nosnippet>380</a>    scan_cancel: ScanCancel,
-<a href=#381 id=381 data-nosnippet>381</a>) -&gt; <span class="prelude-ty">Result</span>&lt;PathProbe&gt; {
-<a href=#382 id=382 data-nosnippet>382</a>    <span class="kw">let </span>path = path.to_path_buf();
-<a href=#383 id=383 data-nosnippet>383</a>    <span class="kw">let </span>schema = schema.clone();
-<a href=#384 id=384 data-nosnippet>384</a>    <span class="kw">let </span>keys: Vec&lt;Vec&lt;u8&gt;&gt; = keys.to_vec();
-<a href=#385 id=385 data-nosnippet>385</a>    block_on_async(<span class="kw">async move </span>{
-<a href=#386 id=386 data-nosnippet>386</a>        <span class="kw">let </span><span class="kw-2">mut </span>config = Config::default();
-<a href=#387 id=387 data-nosnippet>387</a>        config.storage.use_mmap = <span class="bool-val">false</span>;
-<a href=#388 id=388 data-nosnippet>388</a>        config.storage.disk_access_mode = DiskAccessMode::Buffered;
-<a href=#389 id=389 data-nosnippet>389</a>        <span class="kw">let </span>platform = Arc::new(Platform::new(<span class="kw-2">&amp;</span>config).<span class="kw">await</span><span class="question-mark">?</span>);
-<a href=#390 id=390 data-nosnippet>390</a>        <span class="kw">let </span>reader = SSTableReader::open(<span class="kw-2">&amp;</span>path, <span class="kw-2">&amp;</span>config, platform).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#391 id=391 data-nosnippet>391</a>        probe_reader_async(<span class="kw-2">&amp;</span>reader, <span class="kw-2">&amp;</span>keys, <span class="kw-2">&amp;</span>schema, <span class="kw-2">&amp;</span>scan_cancel).<span class="kw">await
-<a href=#392 id=392 data-nosnippet>392</a>    </span>})
-<a href=#393 id=393 data-nosnippet>393</a>}
-<a href=#394 id=394 data-nosnippet>394</a>
-<a href=#395 id=395 data-nosnippet>395</a><span class="doccomment">/// Probe an ALREADY-OPEN, possibly-SHARED `reader` (issue #2346) — the
-<a href=#396 id=396 data-nosnippet>396</a>/// reader-based analogue of [`probe_path`], used by
-<a href=#397 id=397 data-nosnippet>397</a>/// [`build_single_partition_merger_from_readers`]. `reader` is an `Arc` clone
-<a href=#398 id=398 data-nosnippet>398</a>/// (the caller keeps the original for the `NeedsScan` fail-safe path), moved
-<a href=#399 id=399 data-nosnippet>399</a>/// into the bridged future so no borrow needs to outlive this call.
-<a href=#400 id=400 data-nosnippet>400</a></span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
-<a href=#401 id=401 data-nosnippet>401</a></span><span class="kw">fn </span>probe_reader(
-<a href=#402 id=402 data-nosnippet>402</a>    reader: Arc&lt;SSTableReader&gt;,
-<a href=#403 id=403 data-nosnippet>403</a>    keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
-<a href=#404 id=404 data-nosnippet>404</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
-<a href=#405 id=405 data-nosnippet>405</a>    scan_cancel: ScanCancel,
-<a href=#406 id=406 data-nosnippet>406</a>) -&gt; <span class="prelude-ty">Result</span>&lt;PathProbe&gt; {
-<a href=#407 id=407 data-nosnippet>407</a>    <span class="kw">let </span>schema = schema.clone();
-<a href=#408 id=408 data-nosnippet>408</a>    <span class="kw">let </span>keys: Vec&lt;Vec&lt;u8&gt;&gt; = keys.to_vec();
-<a href=#409 id=409 data-nosnippet>409</a>    block_on_async(<span class="kw">async move </span>{ probe_reader_async(<span class="kw-2">&amp;</span>reader, <span class="kw-2">&amp;</span>keys, <span class="kw-2">&amp;</span>schema, <span class="kw-2">&amp;</span>scan_cancel).<span class="kw">await </span>})
-<a href=#410 id=410 data-nosnippet>410</a>}
-<a href=#411 id=411 data-nosnippet>411</a>
-<a href=#412 id=412 data-nosnippet>412</a><span class="doccomment">/// Tombstones-build fallback: the single-partition SEEK machinery
-<a href=#413 id=413 data-nosnippet>413</a>/// (`successor_partition_offset`, `point_read_whole_section`, …) is
-<a href=#414 id=414 data-nosnippet>414</a>/// `not(tombstones)` only, so under the alternate `tombstones` feature every
-<a href=#415 id=415 data-nosnippet>415</a>/// candidate degrades to a full scan filtered to the key set — correct, just
-<a href=#416 id=416 data-nosnippet>416</a>/// without the seek speedup. Keeps the public builder API identical across builds.
-<a href=#417 id=417 data-nosnippet>417</a></span><span class="attr">#[cfg(feature = <span class="string">"tombstones"</span>)]
-<a href=#418 id=418 data-nosnippet>418</a></span><span class="kw">fn </span>probe_path(
-<a href=#419 id=419 data-nosnippet>419</a>    _path: <span class="kw-2">&amp;</span>Path,
-<a href=#420 id=420 data-nosnippet>420</a>    _keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
-<a href=#421 id=421 data-nosnippet>421</a>    _schema: <span class="kw-2">&amp;</span>TableSchema,
-<a href=#422 id=422 data-nosnippet>422</a>    _scan_cancel: ScanCancel,
-<a href=#423 id=423 data-nosnippet>423</a>) -&gt; <span class="prelude-ty">Result</span>&lt;PathProbe&gt; {
-<a href=#424 id=424 data-nosnippet>424</a>    <span class="prelude-val">Ok</span>(PathProbe::NeedsScan)
-<a href=#425 id=425 data-nosnippet>425</a>}
-<a href=#426 id=426 data-nosnippet>426</a>
-<a href=#427 id=427 data-nosnippet>427</a><span class="doccomment">/// Tombstones-build fallback for the reader-based probe (issue #2346) — mirrors
-<a href=#428 id=428 data-nosnippet>428</a>/// [`probe_path`]'s `tombstones` fallback above.
-<a href=#429 id=429 data-nosnippet>429</a></span><span class="attr">#[cfg(feature = <span class="string">"tombstones"</span>)]
-<a href=#430 id=430 data-nosnippet>430</a></span><span class="kw">fn </span>probe_reader(
-<a href=#431 id=431 data-nosnippet>431</a>    _reader: Arc&lt;SSTableReader&gt;,
-<a href=#432 id=432 data-nosnippet>432</a>    _keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
-<a href=#433 id=433 data-nosnippet>433</a>    _schema: <span class="kw-2">&amp;</span>TableSchema,
-<a href=#434 id=434 data-nosnippet>434</a>    _scan_cancel: ScanCancel,
-<a href=#435 id=435 data-nosnippet>435</a>) -&gt; <span class="prelude-ty">Result</span>&lt;PathProbe&gt; {
-<a href=#436 id=436 data-nosnippet>436</a>    <span class="prelude-val">Ok</span>(PathProbe::NeedsScan)
-<a href=#437 id=437 data-nosnippet>437</a>}
+<a href=#297 id=297 data-nosnippet>297</a>                <span class="kw">let </span><span class="kw-2">mut </span>entries: Vec&lt;MergeEntry&gt; = Vec::with_capacity(rows.len());
+<a href=#298 id=298 data-nosnippet>298</a>                <span class="kw">for </span>row <span class="kw">in </span>rows {
+<a href=#299 id=299 data-nosnippet>299</a>                    <span class="comment">// Issue #2096: one merge entry decoded from `Data.db` by the
+<a href=#300 id=300 data-nosnippet>300</a>                    // SEEK path (this candidate held the target partition), same
+<a href=#301 id=301 data-nosnippet>301</a>                    // accounting as the path-based builder above.
+<a href=#302 id=302 data-nosnippet>302</a>                    </span><span class="kw">crate</span>::storage::sstable::work_counters::add_merge_run_entry_decoded();
+<a href=#303 id=303 data-nosnippet>303</a>                    entries.push(SSTableRowIteratorAdapter::build_merge_entry(
+<a href=#304 id=304 data-nosnippet>304</a>                        run_index, row, schema,
+<a href=#305 id=305 data-nosnippet>305</a>                    )<span class="question-mark">?</span>);
+<a href=#306 id=306 data-nosnippet>306</a>                }
+<a href=#307 id=307 data-nosnippet>307</a>                <span class="comment">// See `build_single_partition_merger`'s identical sort — every
+<a href=#308 id=308 data-nosnippet>308</a>                // `SSTableRowIterator` MUST yield ascending `MergeEntry` order.
+<a href=#309 id=309 data-nosnippet>309</a>                </span>entries.sort();
+<a href=#310 id=310 data-nosnippet>310</a>                runs.push(Box::new(VecRun {
+<a href=#311 id=311 data-nosnippet>311</a>                    entries: entries.into(),
+<a href=#312 id=312 data-nosnippet>312</a>                }));
+<a href=#313 id=313 data-nosnippet>313</a>            }
+<a href=#314 id=314 data-nosnippet>314</a>            PathProbe::NeedsScan =&gt; {
+<a href=#315 id=315 data-nosnippet>315</a>                <span class="comment">// Fail-safe: scan this ONE shared reader's compaction stream,
+<a href=#316 id=316 data-nosnippet>316</a>                // forwarding only the target partitions — never a fresh
+<a href=#317 id=317 data-nosnippet>317</a>                // path-based open (issue #2346's whole point). `reader` (the
+<a href=#318 id=318 data-nosnippet>318</a>                // ORIGINAL, not the clone `probe_reader` consumed above) is
+<a href=#319 id=319 data-nosnippet>319</a>                // still available here.
+<a href=#320 id=320 data-nosnippet>320</a>                // Point-read fail-safe: a specific-key filter, not a range scan —
+<a href=#321 id=321 data-nosnippet>321</a>                // no token bound is pushed (issue #2412; the key set bounds it).
+<a href=#322 id=322 data-nosnippet>322</a>                </span><span class="kw">let </span>adapter = SSTableRowIteratorAdapter::open_from_reader(
+<a href=#323 id=323 data-nosnippet>323</a>                    reader,
+<a href=#324 id=324 data-nosnippet>324</a>                    run_index,
+<a href=#325 id=325 data-nosnippet>325</a>                    schema,
+<a href=#326 id=326 data-nosnippet>326</a>                    scan_cancel.clone(),
+<a href=#327 id=327 data-nosnippet>327</a>                    <span class="prelude-val">None</span>,
+<a href=#328 id=328 data-nosnippet>328</a>                )<span class="question-mark">?</span>;
+<a href=#329 id=329 data-nosnippet>329</a>                runs.push(Box::new(SinglePartitionFilterRun {
+<a href=#330 id=330 data-nosnippet>330</a>                    inner: adapter,
+<a href=#331 id=331 data-nosnippet>331</a>                    keys: key_set.clone(),
+<a href=#332 id=332 data-nosnippet>332</a>                }));
+<a href=#333 id=333 data-nosnippet>333</a>            }
+<a href=#334 id=334 data-nosnippet>334</a>        }
+<a href=#335 id=335 data-nosnippet>335</a>    }
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a>    <span class="kw">if </span>runs.is_empty() {
+<a href=#338 id=338 data-nosnippet>338</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#339 id=339 data-nosnippet>339</a>    }
+<a href=#340 id=340 data-nosnippet>340</a>    <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(KWayMerger::from_row_iterators(runs, schema)<span class="question-mark">?</span>))
+<a href=#341 id=341 data-nosnippet>341</a>}
+<a href=#342 id=342 data-nosnippet>342</a>
+<a href=#343 id=343 data-nosnippet>343</a><span class="doccomment">/// Probe an ALREADY-OPEN `reader` for every requested key via the core seek
+<a href=#344 id=344 data-nosnippet>344</a>/// primitive (default `not(tombstones)` build) — the shared core BOTH
+<a href=#345 id=345 data-nosnippet>345</a>/// [`probe_path`] (path-based, opens its own reader then delegates here) and
+<a href=#346 id=346 data-nosnippet>346</a>/// [`build_single_partition_merger_from_readers`] (reader-based) use, so the
+<a href=#347 id=347 data-nosnippet>347</a>/// two never diverge (issue #2346).
+<a href=#348 id=348 data-nosnippet>348</a>///
+<a href=#349 id=349 data-nosnippet>349</a>/// A single SSTable's index availability is a property of the SSTable (not the
+<a href=#350 id=350 data-nosnippet>350</a>/// key), so the FIRST `IndexUnavailable` short-circuits to [`PathProbe::NeedsScan`]
+<a href=#351 id=351 data-nosnippet>351</a>/// (scan the whole file, filtered). Otherwise every present key's seeked rows are
+<a href=#352 id=352 data-nosnippet>352</a>/// concatenated (they share this SSTable's generation / run index).
+<a href=#353 id=353 data-nosnippet>353</a></span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#354 id=354 data-nosnippet>354</a></span><span class="kw">async fn </span>probe_reader_async(
+<a href=#355 id=355 data-nosnippet>355</a>    reader: <span class="kw-2">&amp;</span>SSTableReader,
+<a href=#356 id=356 data-nosnippet>356</a>    keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
+<a href=#357 id=357 data-nosnippet>357</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#358 id=358 data-nosnippet>358</a>    scan_cancel: <span class="kw-2">&amp;</span>ScanCancel,
+<a href=#359 id=359 data-nosnippet>359</a>) -&gt; <span class="prelude-ty">Result</span>&lt;PathProbe&gt; {
+<a href=#360 id=360 data-nosnippet>360</a>    <span class="kw">let </span><span class="kw-2">mut </span>rows: Vec&lt;CompactionRow&gt; = Vec::new();
+<a href=#361 id=361 data-nosnippet>361</a>    <span class="kw">for </span>key <span class="kw">in </span>keys {
+<a href=#362 id=362 data-nosnippet>362</a>        <span class="kw">match </span>reader
+<a href=#363 id=363 data-nosnippet>363</a>            .read_single_partition_for_compaction(key, <span class="prelude-val">Some</span>(schema), scan_cancel)
+<a href=#364 id=364 data-nosnippet>364</a>            .<span class="kw">await</span><span class="question-mark">?
+<a href=#365 id=365 data-nosnippet>365</a>        </span>{
+<a href=#366 id=366 data-nosnippet>366</a>            SinglePartitionCompaction::DefinitelyAbsent =&gt; {}
+<a href=#367 id=367 data-nosnippet>367</a>            SinglePartitionCompaction::Rows(<span class="kw-2">mut </span>r) =&gt; rows.append(<span class="kw-2">&amp;mut </span>r),
+<a href=#368 id=368 data-nosnippet>368</a>            <span class="comment">// Index availability is per-SSTable, not per-key: fall back to
+<a href=#369 id=369 data-nosnippet>369</a>            // scanning the whole file once, filtered to the key set.
+<a href=#370 id=370 data-nosnippet>370</a>            </span>SinglePartitionCompaction::IndexUnavailable =&gt; {
+<a href=#371 id=371 data-nosnippet>371</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(PathProbe::NeedsScan);
+<a href=#372 id=372 data-nosnippet>372</a>            }
+<a href=#373 id=373 data-nosnippet>373</a>        }
+<a href=#374 id=374 data-nosnippet>374</a>    }
+<a href=#375 id=375 data-nosnippet>375</a>    <span class="kw">if </span>rows.is_empty() {
+<a href=#376 id=376 data-nosnippet>376</a>        <span class="prelude-val">Ok</span>(PathProbe::Empty)
+<a href=#377 id=377 data-nosnippet>377</a>    } <span class="kw">else </span>{
+<a href=#378 id=378 data-nosnippet>378</a>        <span class="prelude-val">Ok</span>(PathProbe::Seeked(rows))
+<a href=#379 id=379 data-nosnippet>379</a>    }
+<a href=#380 id=380 data-nosnippet>380</a>}
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a><span class="doccomment">/// Open `path` ONCE and probe it for every requested key, delegating to
+<a href=#383 id=383 data-nosnippet>383</a>/// [`probe_reader_async`] (issue #2346) once the reader is open.
+<a href=#384 id=384 data-nosnippet>384</a>///
+<a href=#385 id=385 data-nosnippet>385</a>/// Runs the async open + seek on the shared bridge runtime. The reader is opened
+<a href=#386 id=386 data-nosnippet>386</a>/// with buffered I/O (never mmap/direct — the file may be deleted after the
+<a href=#387 id=387 data-nosnippet>387</a>/// read), matching the full-scan producer's file-lifetime contract (issue #591).
+<a href=#388 id=388 data-nosnippet>388</a></span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#389 id=389 data-nosnippet>389</a></span><span class="kw">fn </span>probe_path(
+<a href=#390 id=390 data-nosnippet>390</a>    path: <span class="kw-2">&amp;</span>Path,
+<a href=#391 id=391 data-nosnippet>391</a>    keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
+<a href=#392 id=392 data-nosnippet>392</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#393 id=393 data-nosnippet>393</a>    scan_cancel: ScanCancel,
+<a href=#394 id=394 data-nosnippet>394</a>) -&gt; <span class="prelude-ty">Result</span>&lt;PathProbe&gt; {
+<a href=#395 id=395 data-nosnippet>395</a>    <span class="kw">let </span>path = path.to_path_buf();
+<a href=#396 id=396 data-nosnippet>396</a>    <span class="kw">let </span>schema = schema.clone();
+<a href=#397 id=397 data-nosnippet>397</a>    <span class="kw">let </span>keys: Vec&lt;Vec&lt;u8&gt;&gt; = keys.to_vec();
+<a href=#398 id=398 data-nosnippet>398</a>    block_on_async(<span class="kw">async move </span>{
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="kw">let </span><span class="kw-2">mut </span>config = Config::default();
+<a href=#400 id=400 data-nosnippet>400</a>        config.storage.use_mmap = <span class="bool-val">false</span>;
+<a href=#401 id=401 data-nosnippet>401</a>        config.storage.disk_access_mode = DiskAccessMode::Buffered;
+<a href=#402 id=402 data-nosnippet>402</a>        <span class="kw">let </span>platform = Arc::new(Platform::new(<span class="kw-2">&amp;</span>config).<span class="kw">await</span><span class="question-mark">?</span>);
+<a href=#403 id=403 data-nosnippet>403</a>        <span class="kw">let </span>reader = SSTableReader::open(<span class="kw-2">&amp;</span>path, <span class="kw-2">&amp;</span>config, platform).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#404 id=404 data-nosnippet>404</a>        probe_reader_async(<span class="kw-2">&amp;</span>reader, <span class="kw-2">&amp;</span>keys, <span class="kw-2">&amp;</span>schema, <span class="kw-2">&amp;</span>scan_cancel).<span class="kw">await
+<a href=#405 id=405 data-nosnippet>405</a>    </span>})
+<a href=#406 id=406 data-nosnippet>406</a>}
+<a href=#407 id=407 data-nosnippet>407</a>
+<a href=#408 id=408 data-nosnippet>408</a><span class="doccomment">/// Probe an ALREADY-OPEN, possibly-SHARED `reader` (issue #2346) — the
+<a href=#409 id=409 data-nosnippet>409</a>/// reader-based analogue of [`probe_path`], used by
+<a href=#410 id=410 data-nosnippet>410</a>/// [`build_single_partition_merger_from_readers`]. `reader` is an `Arc` clone
+<a href=#411 id=411 data-nosnippet>411</a>/// (the caller keeps the original for the `NeedsScan` fail-safe path), moved
+<a href=#412 id=412 data-nosnippet>412</a>/// into the bridged future so no borrow needs to outlive this call.
+<a href=#413 id=413 data-nosnippet>413</a></span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#414 id=414 data-nosnippet>414</a></span><span class="kw">fn </span>probe_reader(
+<a href=#415 id=415 data-nosnippet>415</a>    reader: Arc&lt;SSTableReader&gt;,
+<a href=#416 id=416 data-nosnippet>416</a>    keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
+<a href=#417 id=417 data-nosnippet>417</a>    schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#418 id=418 data-nosnippet>418</a>    scan_cancel: ScanCancel,
+<a href=#419 id=419 data-nosnippet>419</a>) -&gt; <span class="prelude-ty">Result</span>&lt;PathProbe&gt; {
+<a href=#420 id=420 data-nosnippet>420</a>    <span class="kw">let </span>schema = schema.clone();
+<a href=#421 id=421 data-nosnippet>421</a>    <span class="kw">let </span>keys: Vec&lt;Vec&lt;u8&gt;&gt; = keys.to_vec();
+<a href=#422 id=422 data-nosnippet>422</a>    block_on_async(<span class="kw">async move </span>{ probe_reader_async(<span class="kw-2">&amp;</span>reader, <span class="kw-2">&amp;</span>keys, <span class="kw-2">&amp;</span>schema, <span class="kw-2">&amp;</span>scan_cancel).<span class="kw">await </span>})
+<a href=#423 id=423 data-nosnippet>423</a>}
+<a href=#424 id=424 data-nosnippet>424</a>
+<a href=#425 id=425 data-nosnippet>425</a><span class="doccomment">/// Tombstones-build fallback: the single-partition SEEK machinery
+<a href=#426 id=426 data-nosnippet>426</a>/// (`successor_partition_offset`, `point_read_whole_section`, …) is
+<a href=#427 id=427 data-nosnippet>427</a>/// `not(tombstones)` only, so under the alternate `tombstones` feature every
+<a href=#428 id=428 data-nosnippet>428</a>/// candidate degrades to a full scan filtered to the key set — correct, just
+<a href=#429 id=429 data-nosnippet>429</a>/// without the seek speedup. Keeps the public builder API identical across builds.
+<a href=#430 id=430 data-nosnippet>430</a></span><span class="attr">#[cfg(feature = <span class="string">"tombstones"</span>)]
+<a href=#431 id=431 data-nosnippet>431</a></span><span class="kw">fn </span>probe_path(
+<a href=#432 id=432 data-nosnippet>432</a>    _path: <span class="kw-2">&amp;</span>Path,
+<a href=#433 id=433 data-nosnippet>433</a>    _keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
+<a href=#434 id=434 data-nosnippet>434</a>    _schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#435 id=435 data-nosnippet>435</a>    _scan_cancel: ScanCancel,
+<a href=#436 id=436 data-nosnippet>436</a>) -&gt; <span class="prelude-ty">Result</span>&lt;PathProbe&gt; {
+<a href=#437 id=437 data-nosnippet>437</a>    <span class="prelude-val">Ok</span>(PathProbe::NeedsScan)
+<a href=#438 id=438 data-nosnippet>438</a>}
+<a href=#439 id=439 data-nosnippet>439</a>
+<a href=#440 id=440 data-nosnippet>440</a><span class="doccomment">/// Tombstones-build fallback for the reader-based probe (issue #2346) — mirrors
+<a href=#441 id=441 data-nosnippet>441</a>/// [`probe_path`]'s `tombstones` fallback above.
+<a href=#442 id=442 data-nosnippet>442</a></span><span class="attr">#[cfg(feature = <span class="string">"tombstones"</span>)]
+<a href=#443 id=443 data-nosnippet>443</a></span><span class="kw">fn </span>probe_reader(
+<a href=#444 id=444 data-nosnippet>444</a>    _reader: Arc&lt;SSTableReader&gt;,
+<a href=#445 id=445 data-nosnippet>445</a>    _keys: <span class="kw-2">&amp;</span>[Vec&lt;u8&gt;],
+<a href=#446 id=446 data-nosnippet>446</a>    _schema: <span class="kw-2">&amp;</span>TableSchema,
+<a href=#447 id=447 data-nosnippet>447</a>    _scan_cancel: ScanCancel,
+<a href=#448 id=448 data-nosnippet>448</a>) -&gt; <span class="prelude-ty">Result</span>&lt;PathProbe&gt; {
+<a href=#449 id=449 data-nosnippet>449</a>    <span class="prelude-val">Ok</span>(PathProbe::NeedsScan)
+<a href=#450 id=450 data-nosnippet>450</a>}
 </code></pre></div></section></main></body></html>

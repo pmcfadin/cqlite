@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/partition_key_codec.rs`."><title>partition_key_codec.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/</div>partition_key_codec.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Canonical partition-key (de)serialization codec.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/partition_key_codec.rs`."><title>partition_key_codec.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/</div>partition_key_codec.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Canonical partition-key (de)serialization codec.
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! This module is the single source of truth for turning the raw partition-key
 <a href=#4 id=4 data-nosnippet>4</a>//! bytes stored in SSTables (and produced by the write engine) back into typed
@@ -210,7 +210,7 @@
 <a href=#210 id=210 data-nosnippet>210</a>        <span class="comment">// UUID / TIMEUUID literal -&gt; already in the serializer's expected shape.
 <a href=#211 id=211 data-nosnippet>211</a>        </span>(Value::Uuid(bytes), ComparatorType::Uuid) =&gt; Value::Uuid(<span class="kw-2">*</span>bytes),
 <a href=#212 id=212 data-nosnippet>212</a>        <span class="comment">// Blob literal (0x...) -&gt; matches the `blob` serializer directly.
-<a href=#213 id=213 data-nosnippet>213</a>        </span>(Value::Blob(bytes), ComparatorType::Blob) =&gt; Value::Blob(bytes.clone()),
+<a href=#213 id=213 data-nosnippet>213</a>        </span>(Value::Blob(bytes), ComparatorType::Blob) =&gt; Value::blob(bytes.clone()),
 <a href=#214 id=214 data-nosnippet>214</a>        <span class="kw">_ </span>=&gt; value.clone(),
 <a href=#215 id=215 data-nosnippet>215</a>    }
 <a href=#216 id=216 data-nosnippet>216</a>}
@@ -231,8 +231,8 @@
 <a href=#231 id=231 data-nosnippet>231</a>        (Value::Counter(n), ComparatorType::Counter) =&gt; <span class="prelude-val">Ok</span>(n.to_be_bytes().to_vec()),
 <a href=#232 id=232 data-nosnippet>232</a>        (Value::Float32(f), ComparatorType::Float32) =&gt; <span class="prelude-val">Ok</span>(f.to_bits().to_be_bytes().to_vec()),
 <a href=#233 id=233 data-nosnippet>233</a>        (Value::Float(f), ComparatorType::Float) =&gt; <span class="prelude-val">Ok</span>(f.to_bits().to_be_bytes().to_vec()),
-<a href=#234 id=234 data-nosnippet>234</a>        (Value::Text(s), ComparatorType::Text) =&gt; <span class="prelude-val">Ok</span>(s.as_bytes().to_vec()),
-<a href=#235 id=235 data-nosnippet>235</a>        (Value::Blob(bytes), ComparatorType::Blob) =&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#234 id=234 data-nosnippet>234</a>        (Value::Text(s), ComparatorType::Text) =&gt; <span class="prelude-val">Ok</span>(s.to_vec()),
+<a href=#235 id=235 data-nosnippet>235</a>        (Value::Blob(bytes), ComparatorType::Blob) =&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
 <a href=#236 id=236 data-nosnippet>236</a>        (Value::Timestamp(millis), ComparatorType::Timestamp) =&gt; <span class="prelude-val">Ok</span>(millis.to_be_bytes().to_vec()),
 <a href=#237 id=237 data-nosnippet>237</a>        (Value::Date(days), ComparatorType::Date) =&gt; {
 <a href=#238 id=238 data-nosnippet>238</a>            <span class="kw">let </span>stored = days.wrapping_sub(i32::MIN) <span class="kw">as </span>u32;
@@ -242,8 +242,8 @@
 <a href=#242 id=242 data-nosnippet>242</a>        (Value::Time(nanos), ComparatorType::Custom(name)) <span class="kw">if </span>name == <span class="string">"time" </span>=&gt; {
 <a href=#243 id=243 data-nosnippet>243</a>            <span class="prelude-val">Ok</span>(nanos.to_be_bytes().to_vec())
 <a href=#244 id=244 data-nosnippet>244</a>        }
-<a href=#245 id=245 data-nosnippet>245</a>        (Value::Inet(bytes), ComparatorType::Custom(name)) <span class="kw">if </span>name == <span class="string">"inet" </span>=&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
-<a href=#246 id=246 data-nosnippet>246</a>        (Value::Varint(bytes), ComparatorType::Varint) =&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#245 id=245 data-nosnippet>245</a>        (Value::Inet(bytes), ComparatorType::Custom(name)) <span class="kw">if </span>name == <span class="string">"inet" </span>=&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
+<a href=#246 id=246 data-nosnippet>246</a>        (Value::Varint(bytes), ComparatorType::Varint) =&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
 <a href=#247 id=247 data-nosnippet>247</a>        (Value::Decimal { scale, unscaled }, ComparatorType::Decimal) =&gt; {
 <a href=#248 id=248 data-nosnippet>248</a>            <span class="kw">let </span><span class="kw-2">mut </span>result = Vec::with_capacity(<span class="number">4 </span>+ unscaled.len());
 <a href=#249 id=249 data-nosnippet>249</a>            result.extend_from_slice(<span class="kw-2">&amp;</span>scale.to_be_bytes());
@@ -328,9 +328,9 @@
 <a href=#328 id=328 data-nosnippet>328</a>        ComparatorType::Text =&gt; {
 <a href=#329 id=329 data-nosnippet>329</a>            <span class="kw">let </span>s = String::from_utf8(data.to_vec())
 <a href=#330 id=330 data-nosnippet>330</a>                .map_err(|e| Error::InvalidInput(<span class="macro">format!</span>(<span class="string">"Invalid UTF-8 in text value: {}"</span>, e)))<span class="question-mark">?</span>;
-<a href=#331 id=331 data-nosnippet>331</a>            <span class="prelude-val">Ok</span>(Value::Text(s))
+<a href=#331 id=331 data-nosnippet>331</a>            <span class="prelude-val">Ok</span>(Value::Text(s.into()))
 <a href=#332 id=332 data-nosnippet>332</a>        }
-<a href=#333 id=333 data-nosnippet>333</a>        ComparatorType::Blob =&gt; <span class="prelude-val">Ok</span>(Value::Blob(data.to_vec())),
+<a href=#333 id=333 data-nosnippet>333</a>        ComparatorType::Blob =&gt; <span class="prelude-val">Ok</span>(Value::blob(data.to_vec())),
 <a href=#334 id=334 data-nosnippet>334</a>        ComparatorType::Timestamp =&gt; {
 <a href=#335 id=335 data-nosnippet>335</a>            <span class="kw">let </span>bytes: [u8; <span class="number">8</span>] = data.try_into().map_err(|<span class="kw">_</span>| {
 <a href=#336 id=336 data-nosnippet>336</a>                Error::InvalidInput(<span class="macro">format!</span>(<span class="string">"Timestamp requires 8 bytes, got {}"</span>, data.len()))
@@ -356,8 +356,8 @@
 <a href=#356 id=356 data-nosnippet>356</a>            })<span class="question-mark">?</span>;
 <a href=#357 id=357 data-nosnippet>357</a>            <span class="prelude-val">Ok</span>(Value::Time(i64::from_be_bytes(bytes)))
 <a href=#358 id=358 data-nosnippet>358</a>        }
-<a href=#359 id=359 data-nosnippet>359</a>        ComparatorType::Custom(name) <span class="kw">if </span>name == <span class="string">"inet" </span>=&gt; <span class="prelude-val">Ok</span>(Value::Inet(data.to_vec())),
-<a href=#360 id=360 data-nosnippet>360</a>        ComparatorType::Varint =&gt; <span class="prelude-val">Ok</span>(Value::Varint(data.to_vec())),
+<a href=#359 id=359 data-nosnippet>359</a>        ComparatorType::Custom(name) <span class="kw">if </span>name == <span class="string">"inet" </span>=&gt; <span class="prelude-val">Ok</span>(Value::inet(data.to_vec())),
+<a href=#360 id=360 data-nosnippet>360</a>        ComparatorType::Varint =&gt; <span class="prelude-val">Ok</span>(Value::varint(data.to_vec())),
 <a href=#361 id=361 data-nosnippet>361</a>        ComparatorType::Decimal =&gt; {
 <a href=#362 id=362 data-nosnippet>362</a>            <span class="kw">if </span>data.len() &lt; <span class="number">4 </span>{
 <a href=#363 id=363 data-nosnippet>363</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidInput(<span class="macro">format!</span>(
@@ -440,7 +440,7 @@
 <a href=#440 id=440 data-nosnippet>440</a>            cols,
 <a href=#441 id=441 data-nosnippet>441</a>            <span class="macro">vec!</span>[(
 <a href=#442 id=442 data-nosnippet>442</a>                <span class="string">"id"</span>.to_string(),
-<a href=#443 id=443 data-nosnippet>443</a>                Value::Text(<span class="string">"k0000000000000000"</span>.to_string())
+<a href=#443 id=443 data-nosnippet>443</a>                Value::text(<span class="string">"k0000000000000000"</span>.to_string())
 <a href=#444 id=444 data-nosnippet>444</a>            )]
 <a href=#445 id=445 data-nosnippet>445</a>        );
 <a href=#446 id=446 data-nosnippet>446</a>    }
@@ -465,8 +465,8 @@
 <a href=#465 id=465 data-nosnippet>465</a>        <span class="macro">assert_eq!</span>(
 <a href=#466 id=466 data-nosnippet>466</a>            cols,
 <a href=#467 id=467 data-nosnippet>467</a>            <span class="macro">vec!</span>[
-<a href=#468 id=468 data-nosnippet>468</a>                (<span class="string">"application_id"</span>.to_string(), Value::Text(<span class="string">"a"</span>.to_string())),
-<a href=#469 id=469 data-nosnippet>469</a>                (<span class="string">"metric_name"</span>.to_string(), Value::Text(<span class="string">"view"</span>.to_string())),
+<a href=#468 id=468 data-nosnippet>468</a>                (<span class="string">"application_id"</span>.to_string(), Value::text(<span class="string">"a"</span>.to_string())),
+<a href=#469 id=469 data-nosnippet>469</a>                (<span class="string">"metric_name"</span>.to_string(), Value::text(<span class="string">"view"</span>.to_string())),
 <a href=#470 id=470 data-nosnippet>470</a>            ]
 <a href=#471 id=471 data-nosnippet>471</a>        );
 <a href=#472 id=472 data-nosnippet>472</a>    }
@@ -480,7 +480,7 @@
 <a href=#480 id=480 data-nosnippet>480</a>        <span class="kw">let </span>cols = decode_partition_key_columns(<span class="kw-2">&amp;</span>data, <span class="kw-2">&amp;</span>schema).unwrap();
 <a href=#481 id=481 data-nosnippet>481</a>        <span class="macro">assert_eq!</span>(
 <a href=#482 id=482 data-nosnippet>482</a>            cols[<span class="number">0</span>],
-<a href=#483 id=483 data-nosnippet>483</a>            (<span class="string">"symbol"</span>.to_string(), Value::Text(<span class="string">"AAPL"</span>.to_string()))
+<a href=#483 id=483 data-nosnippet>483</a>            (<span class="string">"symbol"</span>.to_string(), Value::text(<span class="string">"AAPL"</span>.to_string()))
 <a href=#484 id=484 data-nosnippet>484</a>        );
 <a href=#485 id=485 data-nosnippet>485</a>        <span class="macro">assert_eq!</span>(cols[<span class="number">1</span>].<span class="number">0</span>, <span class="string">"trading_day"</span>);
 <a href=#486 id=486 data-nosnippet>486</a>        <span class="macro">assert!</span>(
@@ -500,7 +500,7 @@
 <a href=#500 id=500 data-nosnippet>500</a>    </span><span class="kw">fn </span>encode_single_text_pk_is_raw_bytes() {
 <a href=#501 id=501 data-nosnippet>501</a>        <span class="kw">let </span>schema = schema_with_pks(<span class="kw-2">&amp;</span>[(<span class="string">"id"</span>, <span class="string">"text"</span>)]);
 <a href=#502 id=502 data-nosnippet>502</a>        <span class="kw">let </span>bytes =
-<a href=#503 id=503 data-nosnippet>503</a>            encode_partition_key_columns(<span class="kw-2">&amp;</span>[Value::Text(<span class="string">"k0000000000000000"</span>.to_string())], <span class="kw-2">&amp;</span>schema)
+<a href=#503 id=503 data-nosnippet>503</a>            encode_partition_key_columns(<span class="kw-2">&amp;</span>[Value::text(<span class="string">"k0000000000000000"</span>.to_string())], <span class="kw-2">&amp;</span>schema)
 <a href=#504 id=504 data-nosnippet>504</a>                .unwrap();
 <a href=#505 id=505 data-nosnippet>505</a>        <span class="macro">assert_eq!</span>(bytes, <span class="string">b"k0000000000000000"</span>);
 <a href=#506 id=506 data-nosnippet>506</a>    }
@@ -521,8 +521,8 @@
 <a href=#521 id=521 data-nosnippet>521</a>    </span><span class="kw">fn </span>encode_decode_roundtrip_composite() {
 <a href=#522 id=522 data-nosnippet>522</a>        <span class="kw">let </span>schema = schema_with_pks(<span class="kw-2">&amp;</span>[(<span class="string">"application_id"</span>, <span class="string">"text"</span>), (<span class="string">"metric_name"</span>, <span class="string">"text"</span>)]);
 <a href=#523 id=523 data-nosnippet>523</a>        <span class="kw">let </span>values = <span class="macro">vec!</span>[
-<a href=#524 id=524 data-nosnippet>524</a>            Value::Text(<span class="string">"a"</span>.to_string()),
-<a href=#525 id=525 data-nosnippet>525</a>            Value::Text(<span class="string">"view"</span>.to_string()),
+<a href=#524 id=524 data-nosnippet>524</a>            Value::text(<span class="string">"a"</span>.to_string()),
+<a href=#525 id=525 data-nosnippet>525</a>            Value::text(<span class="string">"view"</span>.to_string()),
 <a href=#526 id=526 data-nosnippet>526</a>        ];
 <a href=#527 id=527 data-nosnippet>527</a>        <span class="kw">let </span>bytes = encode_partition_key_columns(<span class="kw-2">&amp;</span>values, <span class="kw-2">&amp;</span>schema).unwrap();
 <a href=#528 id=528 data-nosnippet>528</a>        <span class="comment">// [len=1]['a'][0x00][len=4]["view"][0x00]
@@ -534,8 +534,8 @@
 <a href=#534 id=534 data-nosnippet>534</a>        <span class="macro">assert_eq!</span>(
 <a href=#535 id=535 data-nosnippet>535</a>            decoded,
 <a href=#536 id=536 data-nosnippet>536</a>            <span class="macro">vec!</span>[
-<a href=#537 id=537 data-nosnippet>537</a>                (<span class="string">"application_id"</span>.to_string(), Value::Text(<span class="string">"a"</span>.to_string())),
-<a href=#538 id=538 data-nosnippet>538</a>                (<span class="string">"metric_name"</span>.to_string(), Value::Text(<span class="string">"view"</span>.to_string())),
+<a href=#537 id=537 data-nosnippet>537</a>                (<span class="string">"application_id"</span>.to_string(), Value::text(<span class="string">"a"</span>.to_string())),
+<a href=#538 id=538 data-nosnippet>538</a>                (<span class="string">"metric_name"</span>.to_string(), Value::text(<span class="string">"view"</span>.to_string())),
 <a href=#539 id=539 data-nosnippet>539</a>            ]
 <a href=#540 id=540 data-nosnippet>540</a>        );
 <a href=#541 id=541 data-nosnippet>541</a>    }
@@ -577,7 +577,7 @@
 <a href=#577 id=577 data-nosnippet>577</a>        // its raw bytes for a `blob` partition key.
 <a href=#578 id=578 data-nosnippet>578</a>        </span><span class="kw">let </span>schema = schema_with_pks(<span class="kw-2">&amp;</span>[(<span class="string">"data"</span>, <span class="string">"blob"</span>)]);
 <a href=#579 id=579 data-nosnippet>579</a>        <span class="kw">let </span>bytes =
-<a href=#580 id=580 data-nosnippet>580</a>            encode_partition_key_columns(<span class="kw-2">&amp;</span>[Value::Blob(<span class="macro">vec!</span>[<span class="number">0xde</span>, <span class="number">0xad</span>, <span class="number">0xbe</span>, <span class="number">0xef</span>])], <span class="kw-2">&amp;</span>schema)
+<a href=#580 id=580 data-nosnippet>580</a>            encode_partition_key_columns(<span class="kw-2">&amp;</span>[Value::blob(<span class="macro">vec!</span>[<span class="number">0xde</span>, <span class="number">0xad</span>, <span class="number">0xbe</span>, <span class="number">0xef</span>])], <span class="kw-2">&amp;</span>schema)
 <a href=#581 id=581 data-nosnippet>581</a>                .unwrap();
 <a href=#582 id=582 data-nosnippet>582</a>        <span class="macro">assert_eq!</span>(bytes, <span class="macro">vec!</span>[<span class="number">0xde</span>, <span class="number">0xad</span>, <span class="number">0xbe</span>, <span class="number">0xef</span>]);
 <a href=#583 id=583 data-nosnippet>583</a>    }
@@ -585,7 +585,7 @@
 <a href=#585 id=585 data-nosnippet>585</a>    <span class="attr">#[test]
 <a href=#586 id=586 data-nosnippet>586</a>    </span><span class="kw">fn </span>encode_column_count_mismatch_errors() {
 <a href=#587 id=587 data-nosnippet>587</a>        <span class="kw">let </span>schema = schema_with_pks(<span class="kw-2">&amp;</span>[(<span class="string">"a"</span>, <span class="string">"text"</span>), (<span class="string">"b"</span>, <span class="string">"text"</span>)]);
-<a href=#588 id=588 data-nosnippet>588</a>        <span class="macro">assert!</span>(encode_partition_key_columns(<span class="kw-2">&amp;</span>[Value::Text(<span class="string">"a"</span>.to_string())], <span class="kw-2">&amp;</span>schema).is_err());
+<a href=#588 id=588 data-nosnippet>588</a>        <span class="macro">assert!</span>(encode_partition_key_columns(<span class="kw-2">&amp;</span>[Value::text(<span class="string">"a"</span>.to_string())], <span class="kw-2">&amp;</span>schema).is_err());
 <a href=#589 id=589 data-nosnippet>589</a>    }
 <a href=#590 id=590 data-nosnippet>590</a>
 <a href=#591 id=591 data-nosnippet>591</a>    <span class="attr">#[test]
@@ -614,7 +614,7 @@
 <a href=#614 id=614 data-nosnippet>614</a>        <span class="kw">let </span>cases: Vec&lt;Case&gt; = <span class="macro">vec!</span>[
 <a href=#615 id=615 data-nosnippet>615</a>            (
 <a href=#616 id=616 data-nosnippet>616</a>                <span class="macro">vec!</span>[(<span class="string">"id"</span>, <span class="string">"text"</span>)],
-<a href=#617 id=617 data-nosnippet>617</a>                <span class="macro">vec!</span>[(<span class="string">"id"</span>, Value::Text(<span class="string">"k123"</span>.to_string()))],
+<a href=#617 id=617 data-nosnippet>617</a>                <span class="macro">vec!</span>[(<span class="string">"id"</span>, Value::text(<span class="string">"k123"</span>.to_string()))],
 <a href=#618 id=618 data-nosnippet>618</a>            ),
 <a href=#619 id=619 data-nosnippet>619</a>            (<span class="macro">vec!</span>[(<span class="string">"id"</span>, <span class="string">"int"</span>)], <span class="macro">vec!</span>[(<span class="string">"id"</span>, Value::Integer(<span class="number">42</span>))]),
 <a href=#620 id=620 data-nosnippet>620</a>            (<span class="macro">vec!</span>[(<span class="string">"id"</span>, <span class="string">"bigint"</span>)], <span class="macro">vec!</span>[(<span class="string">"id"</span>, Value::BigInt(-<span class="number">7</span>))]),
@@ -622,14 +622,14 @@
 <a href=#622 id=622 data-nosnippet>622</a>            (
 <a href=#623 id=623 data-nosnippet>623</a>                <span class="macro">vec!</span>[(<span class="string">"app"</span>, <span class="string">"text"</span>), (<span class="string">"metric"</span>, <span class="string">"text"</span>)],
 <a href=#624 id=624 data-nosnippet>624</a>                <span class="macro">vec!</span>[
-<a href=#625 id=625 data-nosnippet>625</a>                    (<span class="string">"app"</span>, Value::Text(<span class="string">"a"</span>.to_string())),
-<a href=#626 id=626 data-nosnippet>626</a>                    (<span class="string">"metric"</span>, Value::Text(<span class="string">"view"</span>.to_string())),
+<a href=#625 id=625 data-nosnippet>625</a>                    (<span class="string">"app"</span>, Value::text(<span class="string">"a"</span>.to_string())),
+<a href=#626 id=626 data-nosnippet>626</a>                    (<span class="string">"metric"</span>, Value::text(<span class="string">"view"</span>.to_string())),
 <a href=#627 id=627 data-nosnippet>627</a>                ],
 <a href=#628 id=628 data-nosnippet>628</a>            ),
 <a href=#629 id=629 data-nosnippet>629</a>            (
 <a href=#630 id=630 data-nosnippet>630</a>                <span class="macro">vec!</span>[(<span class="string">"app"</span>, <span class="string">"text"</span>), (<span class="string">"part"</span>, <span class="string">"int"</span>)],
 <a href=#631 id=631 data-nosnippet>631</a>                <span class="macro">vec!</span>[
-<a href=#632 id=632 data-nosnippet>632</a>                    (<span class="string">"app"</span>, Value::Text(<span class="string">"svc"</span>.to_string())),
+<a href=#632 id=632 data-nosnippet>632</a>                    (<span class="string">"app"</span>, Value::text(<span class="string">"svc"</span>.to_string())),
 <a href=#633 id=633 data-nosnippet>633</a>                    (<span class="string">"part"</span>, Value::Integer(<span class="number">3</span>)),
 <a href=#634 id=634 data-nosnippet>634</a>                ],
 <a href=#635 id=635 data-nosnippet>635</a>            ),

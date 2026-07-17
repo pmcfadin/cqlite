@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/cql_to_mutation/builders.rs`."><title>builders.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/cql_to_mutation/</div>builders.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Mutation builders for INSERT, UPDATE, DELETE, and BATCH statements.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/cql_to_mutation/builders.rs`."><title>builders.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/cql_to_mutation/</div>builders.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Mutation builders for INSERT, UPDATE, DELETE, and BATCH statements.
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! Each builder converts a parsed CQL AST node into a `Mutation` (or list of
 <a href=#4 id=4 data-nosnippet>4</a>//! mutations) using schema information to identify partition/clustering keys and
@@ -18,7 +18,7 @@
 <a href=#18 id=18 data-nosnippet>18</a>    CqlLiteral, CqlTable, CqlUpdate, CqlUsing,
 <a href=#19 id=19 data-nosnippet>19</a>};
 <a href=#20 id=20 data-nosnippet>20</a><span class="attr">#[cfg(feature = <span class="string">"write-support"</span>)]
-<a href=#21 id=21 data-nosnippet>21</a></span><span class="kw">use </span><span class="kw">crate</span>::schema::{CqlType, TableSchema};
+<a href=#21 id=21 data-nosnippet>21</a></span><span class="kw">use </span><span class="kw">crate</span>::schema::TableSchema;
 <a href=#22 id=22 data-nosnippet>22</a><span class="attr">#[cfg(feature = <span class="string">"write-support"</span>)]
 <a href=#23 id=23 data-nosnippet>23</a></span><span class="kw">use </span><span class="kw">crate</span>::storage::write_engine::mutation::{
 <a href=#24 id=24 data-nosnippet>24</a>    CellOperation, ClusteringKey, Mutation, PartitionKey, PartitionTombstone, TableId,
@@ -96,7 +96,7 @@
 <a href=#96 id=96 data-nosnippet>96</a>                    pk_col.name
 <a href=#97 id=97 data-nosnippet>97</a>                ))
 <a href=#98 id=98 data-nosnippet>98</a>            })<span class="question-mark">?</span>;
-<a href=#99 id=99 data-nosnippet>99</a>        <span class="kw">let </span>cql_type = CqlType::parse(<span class="kw-2">&amp;</span>pk_col.data_type)<span class="question-mark">?</span>;
+<a href=#99 id=99 data-nosnippet>99</a>        <span class="kw">let </span>cql_type = <span class="kw">super</span>::type_cache::cached_parse(<span class="kw-2">&amp;</span>pk_col.data_type)<span class="question-mark">?</span>;
 <a href=#100 id=100 data-nosnippet>100</a>        <span class="kw">let </span>value = expression_to_value(expr, <span class="kw-2">&amp;</span>cql_type)<span class="question-mark">?</span>;
 <a href=#101 id=101 data-nosnippet>101</a>        pk_columns.push((pk_col.name.clone(), value));
 <a href=#102 id=102 data-nosnippet>102</a>    }
@@ -111,7 +111,7 @@
 <a href=#111 id=111 data-nosnippet>111</a>            <span class="kw">let </span>col_name_lc = ck_col.name.to_lowercase();
 <a href=#112 id=112 data-nosnippet>112</a>            <span class="comment">// Clustering key columns are optional in INSERT (may be absent)
 <a href=#113 id=113 data-nosnippet>113</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>((<span class="kw">_</span>, expr)) = col_val_pairs.iter().find(|(name, <span class="kw">_</span>)| <span class="kw-2">*</span>name == col_name_lc) {
-<a href=#114 id=114 data-nosnippet>114</a>                <span class="kw">let </span>cql_type = CqlType::parse(<span class="kw-2">&amp;</span>ck_col.data_type)<span class="question-mark">?</span>;
+<a href=#114 id=114 data-nosnippet>114</a>                <span class="kw">let </span>cql_type = <span class="kw">super</span>::type_cache::cached_parse(<span class="kw-2">&amp;</span>ck_col.data_type)<span class="question-mark">?</span>;
 <a href=#115 id=115 data-nosnippet>115</a>                <span class="kw">let </span>value = expression_to_value(expr, <span class="kw-2">&amp;</span>cql_type)<span class="question-mark">?</span>;
 <a href=#116 id=116 data-nosnippet>116</a>                ck_columns.push((ck_col.name.clone(), value));
 <a href=#117 id=117 data-nosnippet>117</a>            }
@@ -133,7 +133,7 @@
 <a href=#133 id=133 data-nosnippet>133</a>        </span><span class="kw">let </span>column = schema
 <a href=#134 id=134 data-nosnippet>134</a>            .get_column(col_name)
 <a href=#135 id=135 data-nosnippet>135</a>            .ok_or_else(|| Error::InvalidInput(<span class="macro">format!</span>(<span class="string">"Unknown column '{}'"</span>, col_name)))<span class="question-mark">?</span>;
-<a href=#136 id=136 data-nosnippet>136</a>        <span class="kw">let </span>cql_type = CqlType::parse(<span class="kw-2">&amp;</span>column.data_type)<span class="question-mark">?</span>;
+<a href=#136 id=136 data-nosnippet>136</a>        <span class="kw">let </span>cql_type = <span class="kw">super</span>::type_cache::cached_parse(<span class="kw-2">&amp;</span>column.data_type)<span class="question-mark">?</span>;
 <a href=#137 id=137 data-nosnippet>137</a>        <span class="kw">let </span>value = expression_to_value(expr, <span class="kw-2">&amp;</span>cql_type)<span class="question-mark">?</span>;
 <a href=#138 id=138 data-nosnippet>138</a>        operations.push(CellOperation::Write {
 <a href=#139 id=139 data-nosnippet>139</a>            column: column.name.clone(),
@@ -218,7 +218,7 @@
 <a href=#218 id=218 data-nosnippet>218</a>                    pk_col.name
 <a href=#219 id=219 data-nosnippet>219</a>                ))
 <a href=#220 id=220 data-nosnippet>220</a>            })<span class="question-mark">?</span>;
-<a href=#221 id=221 data-nosnippet>221</a>        <span class="kw">let </span>cql_type = CqlType::parse(<span class="kw-2">&amp;</span>pk_col.data_type)<span class="question-mark">?</span>;
+<a href=#221 id=221 data-nosnippet>221</a>        <span class="kw">let </span>cql_type = <span class="kw">super</span>::type_cache::cached_parse(<span class="kw-2">&amp;</span>pk_col.data_type)<span class="question-mark">?</span>;
 <a href=#222 id=222 data-nosnippet>222</a>        <span class="kw">let </span>value = json_value_to_cql_value(json_val, <span class="kw-2">&amp;</span>cql_type)<span class="question-mark">?</span>;
 <a href=#223 id=223 data-nosnippet>223</a>        pk_columns.push((pk_col.name.clone(), value));
 <a href=#224 id=224 data-nosnippet>224</a>    }
@@ -230,7 +230,7 @@
 <a href=#230 id=230 data-nosnippet>230</a>    <span class="kw">for </span>ck_col <span class="kw">in </span><span class="kw-2">&amp;</span>ordered_ck {
 <a href=#231 id=231 data-nosnippet>231</a>        <span class="kw">let </span>col_name_lc = ck_col.name.to_lowercase();
 <a href=#232 id=232 data-nosnippet>232</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>((<span class="kw">_</span>, json_val)) = col_values.iter().find(|(n, <span class="kw">_</span>)| <span class="kw-2">*</span>n == col_name_lc) {
-<a href=#233 id=233 data-nosnippet>233</a>            <span class="kw">let </span>cql_type = CqlType::parse(<span class="kw-2">&amp;</span>ck_col.data_type)<span class="question-mark">?</span>;
+<a href=#233 id=233 data-nosnippet>233</a>            <span class="kw">let </span>cql_type = <span class="kw">super</span>::type_cache::cached_parse(<span class="kw-2">&amp;</span>ck_col.data_type)<span class="question-mark">?</span>;
 <a href=#234 id=234 data-nosnippet>234</a>            <span class="kw">let </span>value = json_value_to_cql_value(json_val, <span class="kw-2">&amp;</span>cql_type)<span class="question-mark">?</span>;
 <a href=#235 id=235 data-nosnippet>235</a>            ck_columns.push((ck_col.name.clone(), value));
 <a href=#236 id=236 data-nosnippet>236</a>        }
@@ -253,7 +253,7 @@
 <a href=#253 id=253 data-nosnippet>253</a>        <span class="kw">let </span>column = schema
 <a href=#254 id=254 data-nosnippet>254</a>            .get_column(col_name_lc)
 <a href=#255 id=255 data-nosnippet>255</a>            .ok_or_else(|| Error::InvalidInput(<span class="macro">format!</span>(<span class="string">"Unknown column '{}'"</span>, col_name_lc)))<span class="question-mark">?</span>;
-<a href=#256 id=256 data-nosnippet>256</a>        <span class="kw">let </span>cql_type = CqlType::parse(<span class="kw-2">&amp;</span>column.data_type)<span class="question-mark">?</span>;
+<a href=#256 id=256 data-nosnippet>256</a>        <span class="kw">let </span>cql_type = <span class="kw">super</span>::type_cache::cached_parse(<span class="kw-2">&amp;</span>column.data_type)<span class="question-mark">?</span>;
 <a href=#257 id=257 data-nosnippet>257</a>        <span class="kw">let </span>value = json_value_to_cql_value(json_val, <span class="kw-2">&amp;</span>cql_type)<span class="question-mark">?</span>;
 <a href=#258 id=258 data-nosnippet>258</a>        operations.push(CellOperation::Write {
 <a href=#259 id=259 data-nosnippet>259</a>            column: column.name.clone(),
@@ -318,7 +318,7 @@
 <a href=#318 id=318 data-nosnippet>318</a>                <span class="kw">let </span>column = schema
 <a href=#319 id=319 data-nosnippet>319</a>                    .get_column(<span class="kw-2">&amp;</span>col_name)
 <a href=#320 id=320 data-nosnippet>320</a>                    .ok_or_else(|| Error::InvalidInput(<span class="macro">format!</span>(<span class="string">"Unknown column '{}'"</span>, col_name)))<span class="question-mark">?</span>;
-<a href=#321 id=321 data-nosnippet>321</a>                <span class="kw">let </span>cql_type = CqlType::parse(<span class="kw-2">&amp;</span>column.data_type)<span class="question-mark">?</span>;
+<a href=#321 id=321 data-nosnippet>321</a>                <span class="kw">let </span>cql_type = <span class="kw">super</span>::type_cache::cached_parse(<span class="kw-2">&amp;</span>column.data_type)<span class="question-mark">?</span>;
 <a href=#322 id=322 data-nosnippet>322</a>                <span class="kw">let </span>value = expression_to_value(<span class="kw-2">&amp;</span>assignment.value, <span class="kw-2">&amp;</span>cql_type)<span class="question-mark">?</span>;
 <a href=#323 id=323 data-nosnippet>323</a>                operations.push(CellOperation::Write {
 <a href=#324 id=324 data-nosnippet>324</a>                    column: column.name.clone(),
@@ -336,7 +336,7 @@
 <a href=#336 id=336 data-nosnippet>336</a>                <span class="kw">let </span>column = schema
 <a href=#337 id=337 data-nosnippet>337</a>                    .get_column(<span class="kw-2">&amp;</span>col_name)
 <a href=#338 id=338 data-nosnippet>338</a>                    .ok_or_else(|| Error::InvalidInput(<span class="macro">format!</span>(<span class="string">"Unknown column '{}'"</span>, col_name)))<span class="question-mark">?</span>;
-<a href=#339 id=339 data-nosnippet>339</a>                <span class="kw">let </span>cql_type = CqlType::parse(<span class="kw-2">&amp;</span>column.data_type)<span class="question-mark">?</span>;
+<a href=#339 id=339 data-nosnippet>339</a>                <span class="kw">let </span>cql_type = <span class="kw">super</span>::type_cache::cached_parse(<span class="kw-2">&amp;</span>column.data_type)<span class="question-mark">?</span>;
 <a href=#340 id=340 data-nosnippet>340</a>                <span class="kw">let </span>value = expression_to_value(<span class="kw-2">&amp;</span>assignment.value, <span class="kw-2">&amp;</span>cql_type)<span class="question-mark">?</span>;
 <a href=#341 id=341 data-nosnippet>341</a>                operations.push(CellOperation::Write {
 <a href=#342 id=342 data-nosnippet>342</a>                    column: column.name.clone(),
@@ -868,7 +868,7 @@
 <a href=#868 id=868 data-nosnippet>868</a>                </span>}
 <a href=#869 id=869 data-nosnippet>869</a>            })
 <a href=#870 id=870 data-nosnippet>870</a>            .collect();
-<a href=#871 id=871 data-nosnippet>871</a>        <span class="macro">assert_eq!</span>(op_map.get(<span class="string">"name"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"Alice"</span>.to_string())));
+<a href=#871 id=871 data-nosnippet>871</a>        <span class="macro">assert_eq!</span>(op_map.get(<span class="string">"name"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::text(<span class="string">"Alice"</span>.to_string())));
 <a href=#872 id=872 data-nosnippet>872</a>        <span class="macro">assert_eq!</span>(op_map.get(<span class="string">"age"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Integer(<span class="number">30</span>)));
 <a href=#873 id=873 data-nosnippet>873</a>    }
 <a href=#874 id=874 data-nosnippet>874</a>
@@ -942,7 +942,7 @@
 <a href=#942 id=942 data-nosnippet>942</a>                </span>}
 <a href=#943 id=943 data-nosnippet>943</a>            })
 <a href=#944 id=944 data-nosnippet>944</a>            .collect();
-<a href=#945 id=945 data-nosnippet>945</a>        <span class="macro">assert_eq!</span>(op_map.get(<span class="string">"name"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"Alice"</span>.to_string())));
+<a href=#945 id=945 data-nosnippet>945</a>        <span class="macro">assert_eq!</span>(op_map.get(<span class="string">"name"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::text(<span class="string">"Alice"</span>.to_string())));
 <a href=#946 id=946 data-nosnippet>946</a>        <span class="macro">assert_eq!</span>(op_map.get(<span class="string">"value"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>Value::Integer(<span class="number">42</span>)));
 <a href=#947 id=947 data-nosnippet>947</a>    }
 <a href=#948 id=948 data-nosnippet>948</a>
@@ -1104,8 +1104,8 @@
 <a href=#1104 id=1104 data-nosnippet>1104</a>        <span class="macro">assert_eq!</span>(
 <a href=#1105 id=1105 data-nosnippet>1105</a>            list_op,
 <a href=#1106 id=1106 data-nosnippet>1106</a>            <span class="prelude-val">Some</span>(Value::List(<span class="macro">vec!</span>[
-<a href=#1107 id=1107 data-nosnippet>1107</a>                Value::Text(<span class="string">"alpha"</span>.to_string()),
-<a href=#1108 id=1108 data-nosnippet>1108</a>                Value::Text(<span class="string">"beta"</span>.to_string()),
+<a href=#1107 id=1107 data-nosnippet>1107</a>                Value::text(<span class="string">"alpha"</span>.to_string()),
+<a href=#1108 id=1108 data-nosnippet>1108</a>                Value::text(<span class="string">"beta"</span>.to_string()),
 <a href=#1109 id=1109 data-nosnippet>1109</a>            ]))
 <a href=#1110 id=1110 data-nosnippet>1110</a>        );
 <a href=#1111 id=1111 data-nosnippet>1111</a>    }

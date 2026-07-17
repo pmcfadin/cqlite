@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/wal.rs`."><title>wal.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/</div>wal.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Write-ahead log (WAL) for crash recovery
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/write_engine/wal.rs`."><title>wal.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/write_engine/</div>wal.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Write-ahead log (WAL) for crash recovery
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! Provides durability guarantees for mutations before they reach the memtable.
 <a href=#4 id=4 data-nosnippet>4</a>//! Every mutation is fsync'd to the WAL before being acknowledged.
@@ -1932,7 +1932,7 @@
 <a href=#1932 id=1932 data-nosnippet>1932</a>        <span class="kw">let </span>pk = PartitionKey::single(<span class="string">"id"</span>, Value::Integer(id));
 <a href=#1933 id=1933 data-nosnippet>1933</a>        <span class="kw">let </span>ops = <span class="macro">vec!</span>[CellOperation::Write {
 <a href=#1934 id=1934 data-nosnippet>1934</a>            column: <span class="string">"name"</span>.to_string(),
-<a href=#1935 id=1935 data-nosnippet>1935</a>            value: Value::Text(name.to_string()),
+<a href=#1935 id=1935 data-nosnippet>1935</a>            value: Value::text(name.to_string()),
 <a href=#1936 id=1936 data-nosnippet>1936</a>        }];
 <a href=#1937 id=1937 data-nosnippet>1937</a>
 <a href=#1938 id=1938 data-nosnippet>1938</a>        Mutation::new(table_id, pk, <span class="prelude-val">None</span>, ops, <span class="number">1234567890</span>, <span class="prelude-val">None</span>)
@@ -2295,7 +2295,7 @@
 <a href=#2295 id=2295 data-nosnippet>2295</a>        <span class="kw">let </span>ck = <span class="prelude-val">Some</span>(ClusteringKey::single(<span class="string">"ts"</span>, Value::Timestamp(<span class="number">1000</span>)));
 <a href=#2296 id=2296 data-nosnippet>2296</a>        <span class="kw">let </span>ops = <span class="macro">vec!</span>[CellOperation::Write {
 <a href=#2297 id=2297 data-nosnippet>2297</a>            column: <span class="string">"value"</span>.to_string(),
-<a href=#2298 id=2298 data-nosnippet>2298</a>            value: Value::Text(<span class="string">"test"</span>.to_string()),
+<a href=#2298 id=2298 data-nosnippet>2298</a>            value: Value::text(<span class="string">"test"</span>.to_string()),
 <a href=#2299 id=2299 data-nosnippet>2299</a>        }];
 <a href=#2300 id=2300 data-nosnippet>2300</a>
 <a href=#2301 id=2301 data-nosnippet>2301</a>        <span class="kw">let </span>mutation = Mutation::new(table_id, pk, ck, ops, <span class="number">1234567890</span>, <span class="prelude-val">None</span>);
@@ -2316,7 +2316,7 @@
 <a href=#2316 id=2316 data-nosnippet>2316</a>        <span class="kw">let </span>pk = PartitionKey::single(<span class="string">"id"</span>, Value::Integer(<span class="number">1</span>));
 <a href=#2317 id=2317 data-nosnippet>2317</a>        <span class="kw">let </span>ops = <span class="macro">vec!</span>[CellOperation::Write {
 <a href=#2318 id=2318 data-nosnippet>2318</a>            column: <span class="string">"value"</span>.to_string(),
-<a href=#2319 id=2319 data-nosnippet>2319</a>            value: Value::Text(<span class="string">"test"</span>.to_string()),
+<a href=#2319 id=2319 data-nosnippet>2319</a>            value: Value::text(<span class="string">"test"</span>.to_string()),
 <a href=#2320 id=2320 data-nosnippet>2320</a>        }];
 <a href=#2321 id=2321 data-nosnippet>2321</a>
 <a href=#2322 id=2322 data-nosnippet>2322</a>        <span class="kw">let </span>mutation = Mutation::new(table_id, pk, <span class="prelude-val">None</span>, ops, <span class="number">1234567890</span>, <span class="prelude-val">Some</span>(<span class="number">3600</span>));
@@ -2473,7 +2473,7 @@
 <a href=#2473 id=2473 data-nosnippet>2473</a>                },
 <a href=#2474 id=2474 data-nosnippet>2474</a>                LegacyCellOperation::Write {
 <a href=#2475 id=2475 data-nosnippet>2475</a>                    column: <span class="string">"name"</span>.to_string(),
-<a href=#2476 id=2476 data-nosnippet>2476</a>                    value: Value::Text(<span class="string">"Bob"</span>.to_string()),
+<a href=#2476 id=2476 data-nosnippet>2476</a>                    value: Value::text(<span class="string">"Bob"</span>.to_string()),
 <a href=#2477 id=2477 data-nosnippet>2477</a>                },
 <a href=#2478 id=2478 data-nosnippet>2478</a>            ],
 <a href=#2479 id=2479 data-nosnippet>2479</a>            timestamp_micros: <span class="number">999_000</span>,
@@ -2499,7 +2499,7 @@
 <a href=#2499 id=2499 data-nosnippet>2499</a>                },
 <a href=#2500 id=2500 data-nosnippet>2500</a>                CellOperation::Write {
 <a href=#2501 id=2501 data-nosnippet>2501</a>                    column: <span class="string">"name"</span>.to_string(),
-<a href=#2502 id=2502 data-nosnippet>2502</a>                    value: Value::Text(<span class="string">"Bob"</span>.to_string()),
+<a href=#2502 id=2502 data-nosnippet>2502</a>                    value: Value::text(<span class="string">"Bob"</span>.to_string()),
 <a href=#2503 id=2503 data-nosnippet>2503</a>                },
 <a href=#2504 id=2504 data-nosnippet>2504</a>            ],
 <a href=#2505 id=2505 data-nosnippet>2505</a>            <span class="number">999_000</span>,
@@ -2532,7 +2532,7 @@
 <a href=#2532 id=2532 data-nosnippet>2532</a>        <span class="kw">match </span><span class="kw-2">&amp;</span>decoded.operations[<span class="number">1</span>] {
 <a href=#2533 id=2533 data-nosnippet>2533</a>            CellOperation::Write { column, value } =&gt; {
 <a href=#2534 id=2534 data-nosnippet>2534</a>                <span class="macro">assert_eq!</span>(column, <span class="string">"name"</span>);
-<a href=#2535 id=2535 data-nosnippet>2535</a>                <span class="macro">assert_eq!</span>(value, <span class="kw-2">&amp;</span>Value::Text(<span class="string">"Bob"</span>.to_string()));
+<a href=#2535 id=2535 data-nosnippet>2535</a>                <span class="macro">assert_eq!</span>(value, <span class="kw-2">&amp;</span>Value::text(<span class="string">"Bob"</span>.to_string()));
 <a href=#2536 id=2536 data-nosnippet>2536</a>            }
 <a href=#2537 id=2537 data-nosnippet>2537</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Write, got {other:?}"</span>),
 <a href=#2538 id=2538 data-nosnippet>2538</a>        }
@@ -2594,7 +2594,7 @@
 <a href=#2594 id=2594 data-nosnippet>2594</a>                },
 <a href=#2595 id=2595 data-nosnippet>2595</a>                LegacyCellOperation::Write {
 <a href=#2596 id=2596 data-nosnippet>2596</a>                    column: <span class="string">"name"</span>.to_string(),
-<a href=#2597 id=2597 data-nosnippet>2597</a>                    value: Value::Text(<span class="string">"Carol"</span>.to_string()),
+<a href=#2597 id=2597 data-nosnippet>2597</a>                    value: Value::text(<span class="string">"Carol"</span>.to_string()),
 <a href=#2598 id=2598 data-nosnippet>2598</a>                },
 <a href=#2599 id=2599 data-nosnippet>2599</a>            ],
 <a href=#2600 id=2600 data-nosnippet>2600</a>            timestamp_micros: <span class="number">1_650_000_000_000_000</span>,
@@ -2619,7 +2619,7 @@
 <a href=#2619 id=2619 data-nosnippet>2619</a>            <span class="prelude-val">Ok</span>(m) <span class="kw">if </span>m.operations.len() == <span class="number">2
 <a href=#2620 id=2620 data-nosnippet>2620</a>                </span>&amp;&amp; <span class="macro">matches!</span>(<span class="kw-2">&amp;</span>m.operations[<span class="number">0</span>], CellOperation::Delete { column, .. } <span class="kw">if </span>column == <span class="string">"dropped_col"</span>)
 <a href=#2621 id=2621 data-nosnippet>2621</a>                &amp;&amp; <span class="macro">matches!</span>(<span class="kw-2">&amp;</span>m.operations[<span class="number">1</span>], CellOperation::Write { column, value }
-<a href=#2622 id=2622 data-nosnippet>2622</a>                    <span class="kw">if </span>column == <span class="string">"name" </span>&amp;&amp; value == <span class="kw-2">&amp;</span>Value::Text(<span class="string">"Carol"</span>.to_string()))
+<a href=#2622 id=2622 data-nosnippet>2622</a>                    <span class="kw">if </span>column == <span class="string">"name" </span>&amp;&amp; value == <span class="kw-2">&amp;</span>Value::text(<span class="string">"Carol"</span>.to_string()))
 <a href=#2623 id=2623 data-nosnippet>2623</a>        );
 <a href=#2624 id=2624 data-nosnippet>2624</a>        <span class="macro">assert!</span>(
 <a href=#2625 id=2625 data-nosnippet>2625</a>            !current_recovers_faithfully,
@@ -2646,7 +2646,7 @@
 <a href=#2646 id=2646 data-nosnippet>2646</a>        <span class="kw">match </span><span class="kw-2">&amp;</span>decoded.operations[<span class="number">1</span>] {
 <a href=#2647 id=2647 data-nosnippet>2647</a>            CellOperation::Write { column, value } =&gt; {
 <a href=#2648 id=2648 data-nosnippet>2648</a>                <span class="macro">assert_eq!</span>(column, <span class="string">"name"</span>);
-<a href=#2649 id=2649 data-nosnippet>2649</a>                <span class="macro">assert_eq!</span>(value, <span class="kw-2">&amp;</span>Value::Text(<span class="string">"Carol"</span>.to_string()));
+<a href=#2649 id=2649 data-nosnippet>2649</a>                <span class="macro">assert_eq!</span>(value, <span class="kw-2">&amp;</span>Value::text(<span class="string">"Carol"</span>.to_string()));
 <a href=#2650 id=2650 data-nosnippet>2650</a>            }
 <a href=#2651 id=2651 data-nosnippet>2651</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Write, got {other:?}"</span>),
 <a href=#2652 id=2652 data-nosnippet>2652</a>        }
@@ -2677,7 +2677,7 @@
 <a href=#2677 id=2677 data-nosnippet>2677</a>            operations: <span class="macro">vec!</span>[
 <a href=#2678 id=2678 data-nosnippet>2678</a>                PreCellLdtWriteTtlCellOperation::WriteWithTtl {
 <a href=#2679 id=2679 data-nosnippet>2679</a>                    column: <span class="string">"session"</span>.to_string(),
-<a href=#2680 id=2680 data-nosnippet>2680</a>                    value: Value::Text(<span class="string">"abc"</span>.to_string()),
+<a href=#2680 id=2680 data-nosnippet>2680</a>                    value: Value::text(<span class="string">"abc"</span>.to_string()),
 <a href=#2681 id=2681 data-nosnippet>2681</a>                    ttl_seconds: <span class="number">3600</span>,
 <a href=#2682 id=2682 data-nosnippet>2682</a>                },
 <a href=#2683 id=2683 data-nosnippet>2683</a>                PreCellLdtWriteTtlCellOperation::Delete {
@@ -2753,7 +2753,7 @@
 <a href=#2753 id=2753 data-nosnippet>2753</a>                local_deletion_time,
 <a href=#2754 id=2754 data-nosnippet>2754</a>            } =&gt; {
 <a href=#2755 id=2755 data-nosnippet>2755</a>                <span class="macro">assert_eq!</span>(column, <span class="string">"session"</span>);
-<a href=#2756 id=2756 data-nosnippet>2756</a>                <span class="macro">assert_eq!</span>(value, <span class="kw-2">&amp;</span>Value::Text(<span class="string">"abc"</span>.to_string()));
+<a href=#2756 id=2756 data-nosnippet>2756</a>                <span class="macro">assert_eq!</span>(value, <span class="kw-2">&amp;</span>Value::text(<span class="string">"abc"</span>.to_string()));
 <a href=#2757 id=2757 data-nosnippet>2757</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">*</span>ttl_seconds, <span class="number">3600</span>);
 <a href=#2758 id=2758 data-nosnippet>2758</a>                <span class="comment">// pre-#1538 WriteWithTtl had no surfaced source LDT → None.
 <a href=#2759 id=2759 data-nosnippet>2759</a>                </span><span class="macro">assert_eq!</span>(<span class="kw-2">*</span>local_deletion_time, <span class="prelude-val">None</span>);
@@ -2792,7 +2792,7 @@
 <a href=#2792 id=2792 data-nosnippet>2792</a>            operations: <span class="macro">vec!</span>[
 <a href=#2793 id=2793 data-nosnippet>2793</a>                PreCellLdtWriteTtlCellOperation::WriteWithTtl {
 <a href=#2794 id=2794 data-nosnippet>2794</a>                    column: <span class="string">"session"</span>.to_string(),
-<a href=#2795 id=2795 data-nosnippet>2795</a>                    value: Value::Text(<span class="string">"cee"</span>.to_string()),
+<a href=#2795 id=2795 data-nosnippet>2795</a>                    value: Value::text(<span class="string">"cee"</span>.to_string()),
 <a href=#2796 id=2796 data-nosnippet>2796</a>                    ttl_seconds: <span class="number">900</span>,
 <a href=#2797 id=2797 data-nosnippet>2797</a>                },
 <a href=#2798 id=2798 data-nosnippet>2798</a>                PreCellLdtWriteTtlCellOperation::Delete {
@@ -2853,7 +2853,7 @@
 <a href=#2853 id=2853 data-nosnippet>2853</a>                local_deletion_time,
 <a href=#2854 id=2854 data-nosnippet>2854</a>            } =&gt; {
 <a href=#2855 id=2855 data-nosnippet>2855</a>                <span class="macro">assert_eq!</span>(column, <span class="string">"session"</span>);
-<a href=#2856 id=2856 data-nosnippet>2856</a>                <span class="macro">assert_eq!</span>(value, <span class="kw-2">&amp;</span>Value::Text(<span class="string">"cee"</span>.to_string()));
+<a href=#2856 id=2856 data-nosnippet>2856</a>                <span class="macro">assert_eq!</span>(value, <span class="kw-2">&amp;</span>Value::text(<span class="string">"cee"</span>.to_string()));
 <a href=#2857 id=2857 data-nosnippet>2857</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">*</span>ttl_seconds, <span class="number">900</span>);
 <a href=#2858 id=2858 data-nosnippet>2858</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">*</span>local_deletion_time, <span class="prelude-val">None</span>);
 <a href=#2859 id=2859 data-nosnippet>2859</a>            }
@@ -2888,7 +2888,7 @@
 <a href=#2888 id=2888 data-nosnippet>2888</a>            operations: <span class="macro">vec!</span>[
 <a href=#2889 id=2889 data-nosnippet>2889</a>                PreCellLdtWriteTtlCellOperation::WriteWithTtl {
 <a href=#2890 id=2890 data-nosnippet>2890</a>                    column: <span class="string">"session"</span>.to_string(),
-<a href=#2891 id=2891 data-nosnippet>2891</a>                    value: Value::Text(<span class="string">"dee"</span>.to_string()),
+<a href=#2891 id=2891 data-nosnippet>2891</a>                    value: Value::text(<span class="string">"dee"</span>.to_string()),
 <a href=#2892 id=2892 data-nosnippet>2892</a>                    ttl_seconds: <span class="number">1800</span>,
 <a href=#2893 id=2893 data-nosnippet>2893</a>                },
 <a href=#2894 id=2894 data-nosnippet>2894</a>                PreCellLdtWriteTtlCellOperation::Delete {
@@ -2950,7 +2950,7 @@
 <a href=#2950 id=2950 data-nosnippet>2950</a>                local_deletion_time,
 <a href=#2951 id=2951 data-nosnippet>2951</a>            } =&gt; {
 <a href=#2952 id=2952 data-nosnippet>2952</a>                <span class="macro">assert_eq!</span>(column, <span class="string">"session"</span>);
-<a href=#2953 id=2953 data-nosnippet>2953</a>                <span class="macro">assert_eq!</span>(value, <span class="kw-2">&amp;</span>Value::Text(<span class="string">"dee"</span>.to_string()));
+<a href=#2953 id=2953 data-nosnippet>2953</a>                <span class="macro">assert_eq!</span>(value, <span class="kw-2">&amp;</span>Value::text(<span class="string">"dee"</span>.to_string()));
 <a href=#2954 id=2954 data-nosnippet>2954</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">*</span>ttl_seconds, <span class="number">1800</span>);
 <a href=#2955 id=2955 data-nosnippet>2955</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">*</span>local_deletion_time, <span class="prelude-val">None</span>);
 <a href=#2956 id=2956 data-nosnippet>2956</a>            }
@@ -2983,7 +2983,7 @@
 <a href=#2983 id=2983 data-nosnippet>2983</a>            <span class="prelude-val">None</span>,
 <a href=#2984 id=2984 data-nosnippet>2984</a>            <span class="macro">vec!</span>[CellOperation::WriteWithTtl {
 <a href=#2985 id=2985 data-nosnippet>2985</a>                column: <span class="string">"session"</span>.to_string(),
-<a href=#2986 id=2986 data-nosnippet>2986</a>                value: Value::Text(<span class="string">"xyz"</span>.to_string()),
+<a href=#2986 id=2986 data-nosnippet>2986</a>                value: Value::text(<span class="string">"xyz"</span>.to_string()),
 <a href=#2987 id=2987 data-nosnippet>2987</a>                ttl_seconds: <span class="number">7200</span>,
 <a href=#2988 id=2988 data-nosnippet>2988</a>                local_deletion_time: <span class="prelude-val">Some</span>(<span class="number">1_720_007_200</span>),
 <a href=#2989 id=2989 data-nosnippet>2989</a>            }],
@@ -3275,7 +3275,7 @@
 <a href=#3275 id=3275 data-nosnippet>3275</a>                CellOperation::Write {
 <a href=#3276 id=3276 data-nosnippet>3276</a>                    value: Value::Text(name),
 <a href=#3277 id=3277 data-nosnippet>3277</a>                    ..
-<a href=#3278 id=3278 data-nosnippet>3278</a>                } =&gt; name.as_str(),
+<a href=#3278 id=3278 data-nosnippet>3278</a>                } =&gt; std::str::from_utf8(name).unwrap_or_default(),
 <a href=#3279 id=3279 data-nosnippet>3279</a>                other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Write op, got {other:?}"</span>),
 <a href=#3280 id=3280 data-nosnippet>3280</a>            })
 <a href=#3281 id=3281 data-nosnippet>3281</a>            .collect();
@@ -3436,7 +3436,7 @@
 <a href=#3436 id=3436 data-nosnippet>3436</a>                CellOperation::Write {
 <a href=#3437 id=3437 data-nosnippet>3437</a>                    value: Value::Text(name),
 <a href=#3438 id=3438 data-nosnippet>3438</a>                    ..
-<a href=#3439 id=3439 data-nosnippet>3439</a>                } =&gt; name.as_str(),
+<a href=#3439 id=3439 data-nosnippet>3439</a>                } =&gt; std::str::from_utf8(name).unwrap_or_default(),
 <a href=#3440 id=3440 data-nosnippet>3440</a>                other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Write op, got {other:?}"</span>),
 <a href=#3441 id=3441 data-nosnippet>3441</a>            })
 <a href=#3442 id=3442 data-nosnippet>3442</a>            .collect();
@@ -3498,7 +3498,7 @@
 <a href=#3498 id=3498 data-nosnippet>3498</a>                    CellOperation::Write {
 <a href=#3499 id=3499 data-nosnippet>3499</a>                        value: Value::Text(name),
 <a href=#3500 id=3500 data-nosnippet>3500</a>                        ..
-<a href=#3501 id=3501 data-nosnippet>3501</a>                    } =&gt; name.as_str(),
+<a href=#3501 id=3501 data-nosnippet>3501</a>                    } =&gt; std::str::from_utf8(name).unwrap_or_default(),
 <a href=#3502 id=3502 data-nosnippet>3502</a>                    other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Write op, got {other:?}"</span>),
 <a href=#3503 id=3503 data-nosnippet>3503</a>                })
 <a href=#3504 id=3504 data-nosnippet>3504</a>                .collect();
@@ -3593,7 +3593,7 @@
 <a href=#3593 id=3593 data-nosnippet>3593</a>                CellOperation::Write {
 <a href=#3594 id=3594 data-nosnippet>3594</a>                    value: Value::Text(name),
 <a href=#3595 id=3595 data-nosnippet>3595</a>                    ..
-<a href=#3596 id=3596 data-nosnippet>3596</a>                } =&gt; name.as_str(),
+<a href=#3596 id=3596 data-nosnippet>3596</a>                } =&gt; std::str::from_utf8(name).unwrap_or_default(),
 <a href=#3597 id=3597 data-nosnippet>3597</a>                other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Write op, got {other:?}"</span>),
 <a href=#3598 id=3598 data-nosnippet>3598</a>            })
 <a href=#3599 id=3599 data-nosnippet>3599</a>            .collect();
@@ -3668,7 +3668,7 @@
 <a href=#3668 id=3668 data-nosnippet>3668</a>                CellOperation::Write {
 <a href=#3669 id=3669 data-nosnippet>3669</a>                    value: Value::Text(name),
 <a href=#3670 id=3670 data-nosnippet>3670</a>                    ..
-<a href=#3671 id=3671 data-nosnippet>3671</a>                } =&gt; name.as_str(),
+<a href=#3671 id=3671 data-nosnippet>3671</a>                } =&gt; std::str::from_utf8(name).unwrap_or_default(),
 <a href=#3672 id=3672 data-nosnippet>3672</a>                other =&gt; <span class="macro">panic!</span>(<span class="string">"expected Write op, got {other:?}"</span>),
 <a href=#3673 id=3673 data-nosnippet>3673</a>            })
 <a href=#3674 id=3674 data-nosnippet>3674</a>            .collect();

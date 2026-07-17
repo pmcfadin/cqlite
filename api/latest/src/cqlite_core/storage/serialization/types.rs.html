@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/serialization/types.rs`."><title>types.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/serialization/</div>types.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! CQL type serializers
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/serialization/types.rs`."><title>types.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/serialization/</div>types.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! CQL type serializers
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! Provides byte-correct encoding for all CQL types:
 <a href=#4 id=4 data-nosnippet>4</a>//! - Primitives: boolean, int, bigint, float, double, timestamp, uuid, timeuuid
@@ -45,7 +45,7 @@
 <a href=#45 id=45 data-nosnippet>45</a>/// assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x2A]);
 <a href=#46 id=46 data-nosnippet>46</a>///
 <a href=#47 id=47 data-nosnippet>47</a>/// // Text (no length prefix for cell values)
-<a href=#48 id=48 data-nosnippet>48</a>/// let bytes = serializer.serialize_value(&amp;Value::Text("hello".to_string()), "text").unwrap();
+<a href=#48 id=48 data-nosnippet>48</a>/// let bytes = serializer.serialize_value(&amp;Value::text("hello".to_string()), "text").unwrap();
 <a href=#49 id=49 data-nosnippet>49</a>/// assert_eq!(bytes, b"hello");
 <a href=#50 id=50 data-nosnippet>50</a>/// ```
 <a href=#51 id=51 data-nosnippet>51</a></span><span class="attr">#[derive(Debug, Clone, Default)]
@@ -192,7 +192,7 @@
 <a href=#192 id=192 data-nosnippet>192</a>    <span class="doccomment">/// Serialize text types (no length prefix for cell values)
 <a href=#193 id=193 data-nosnippet>193</a>    </span><span class="kw">fn </span>serialize_text(<span class="kw-2">&amp;</span><span class="self">self</span>, value: <span class="kw-2">&amp;</span>Value) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
 <a href=#194 id=194 data-nosnippet>194</a>        <span class="kw">match </span>value {
-<a href=#195 id=195 data-nosnippet>195</a>            Value::Text(s) =&gt; <span class="prelude-val">Ok</span>(s.as_bytes().to_vec()),
+<a href=#195 id=195 data-nosnippet>195</a>            Value::Text(s) =&gt; <span class="prelude-val">Ok</span>(s.to_vec()),
 <a href=#196 id=196 data-nosnippet>196</a>            <span class="kw">_ </span>=&gt; <span class="prelude-val">Err</span>(Error::type_conversion(<span class="macro">format!</span>(
 <a href=#197 id=197 data-nosnippet>197</a>                <span class="string">"Expected Text value, got {:?}"</span>,
 <a href=#198 id=198 data-nosnippet>198</a>                value
@@ -203,7 +203,7 @@
 <a href=#203 id=203 data-nosnippet>203</a>    <span class="doccomment">/// Serialize blob (no length prefix for cell values)
 <a href=#204 id=204 data-nosnippet>204</a>    </span><span class="kw">fn </span>serialize_blob(<span class="kw-2">&amp;</span><span class="self">self</span>, value: <span class="kw-2">&amp;</span>Value) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
 <a href=#205 id=205 data-nosnippet>205</a>        <span class="kw">match </span>value {
-<a href=#206 id=206 data-nosnippet>206</a>            Value::Blob(bytes) =&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#206 id=206 data-nosnippet>206</a>            Value::Blob(bytes) =&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
 <a href=#207 id=207 data-nosnippet>207</a>            <span class="kw">_ </span>=&gt; <span class="prelude-val">Err</span>(Error::type_conversion(<span class="macro">format!</span>(
 <a href=#208 id=208 data-nosnippet>208</a>                <span class="string">"Expected Blob value, got {:?}"</span>,
 <a href=#209 id=209 data-nosnippet>209</a>                value
@@ -254,7 +254,7 @@
 <a href=#254 id=254 data-nosnippet>254</a>    </span><span class="kw">fn </span>serialize_numeric(<span class="kw-2">&amp;</span><span class="self">self</span>, value: <span class="kw-2">&amp;</span>Value, cql_type: <span class="kw-2">&amp;</span>CqlType) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
 <a href=#255 id=255 data-nosnippet>255</a>        <span class="kw">match </span>(value, cql_type) {
 <a href=#256 id=256 data-nosnippet>256</a>            <span class="comment">// Varint: minimal two's complement big-endian
-<a href=#257 id=257 data-nosnippet>257</a>            </span>(Value::Varint(bytes), CqlType::Varint) =&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#257 id=257 data-nosnippet>257</a>            </span>(Value::Varint(bytes), CqlType::Varint) =&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
 <a href=#258 id=258 data-nosnippet>258</a>
 <a href=#259 id=259 data-nosnippet>259</a>            <span class="comment">// Decimal: 4-byte BE scale + varint unscaled value
 <a href=#260 id=260 data-nosnippet>260</a>            </span>(Value::Decimal { scale, unscaled }, CqlType::Decimal) =&gt; {
@@ -273,7 +273,7 @@
 <a href=#273 id=273 data-nosnippet>273</a>    <span class="doccomment">/// Serialize inet address
 <a href=#274 id=274 data-nosnippet>274</a>    </span><span class="kw">fn </span>serialize_inet(<span class="kw-2">&amp;</span><span class="self">self</span>, value: <span class="kw-2">&amp;</span>Value) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
 <a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">match </span>value {
-<a href=#276 id=276 data-nosnippet>276</a>            Value::Inet(bytes) =&gt; <span class="prelude-val">Ok</span>(bytes.clone()),
+<a href=#276 id=276 data-nosnippet>276</a>            Value::Inet(bytes) =&gt; <span class="prelude-val">Ok</span>(bytes.to_vec()),
 <a href=#277 id=277 data-nosnippet>277</a>            <span class="kw">_ </span>=&gt; <span class="prelude-val">Err</span>(Error::type_conversion(<span class="macro">format!</span>(
 <a href=#278 id=278 data-nosnippet>278</a>                <span class="string">"Expected Inet value, got {:?}"</span>,
 <a href=#279 id=279 data-nosnippet>279</a>                value
@@ -536,8 +536,8 @@
 <a href=#536 id=536 data-nosnippet>536</a>    ///
 <a href=#537 id=537 data-nosnippet>537</a>    /// // Create UDT value
 <a href=#538 id=538 data-nosnippet>538</a>    /// let udt = UdtValue::new("address".to_string(), "ks".to_string())
-<a href=#539 id=539 data-nosnippet>539</a>    ///     .with_field("street".to_string(), Some(Value::Text("Main St".to_string())))
-<a href=#540 id=540 data-nosnippet>540</a>    ///     .with_field("city".to_string(), Some(Value::Text("NYC".to_string())));
+<a href=#539 id=539 data-nosnippet>539</a>    ///     .with_field("street".to_string(), Some(Value::text("Main St".to_string())))
+<a href=#540 id=540 data-nosnippet>540</a>    ///     .with_field("city".to_string(), Some(Value::text("NYC".to_string())));
 <a href=#541 id=541 data-nosnippet>541</a>    ///
 <a href=#542 id=542 data-nosnippet>542</a>    /// let bytes = serializer.serialize_udt(&amp;Value::Udt(Box::new(udt)), &amp;schema).unwrap();
 <a href=#543 id=543 data-nosnippet>543</a>    /// ```
@@ -665,13 +665,13 @@
 <a href=#665 id=665 data-nosnippet>665</a>        <span class="kw">let </span>ser = TypeSerializer::new();
 <a href=#666 id=666 data-nosnippet>666</a>
 <a href=#667 id=667 data-nosnippet>667</a>        <span class="kw">let </span>bytes = ser
-<a href=#668 id=668 data-nosnippet>668</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"hello"</span>.to_string()), <span class="string">"text"</span>)
+<a href=#668 id=668 data-nosnippet>668</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::text(<span class="string">"hello"</span>.to_string()), <span class="string">"text"</span>)
 <a href=#669 id=669 data-nosnippet>669</a>            .unwrap();
 <a href=#670 id=670 data-nosnippet>670</a>        <span class="macro">assert_eq!</span>(bytes, <span class="string">b"hello"</span>);
 <a href=#671 id=671 data-nosnippet>671</a>
 <a href=#672 id=672 data-nosnippet>672</a>        <span class="comment">// UTF-8
 <a href=#673 id=673 data-nosnippet>673</a>        </span><span class="kw">let </span>bytes = ser
-<a href=#674 id=674 data-nosnippet>674</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"日本語"</span>.to_string()), <span class="string">"text"</span>)
+<a href=#674 id=674 data-nosnippet>674</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::text(<span class="string">"日本語"</span>.to_string()), <span class="string">"text"</span>)
 <a href=#675 id=675 data-nosnippet>675</a>            .unwrap();
 <a href=#676 id=676 data-nosnippet>676</a>        <span class="macro">assert_eq!</span>(bytes, <span class="string">"日本語"</span>.as_bytes());
 <a href=#677 id=677 data-nosnippet>677</a>    }
@@ -681,7 +681,7 @@
 <a href=#681 id=681 data-nosnippet>681</a>        <span class="kw">let </span>ser = TypeSerializer::new();
 <a href=#682 id=682 data-nosnippet>682</a>
 <a href=#683 id=683 data-nosnippet>683</a>        <span class="kw">let </span>bytes = ser
-<a href=#684 id=684 data-nosnippet>684</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::Blob(<span class="macro">vec!</span>[<span class="number">0x01</span>, <span class="number">0x02</span>, <span class="number">0x03</span>]), <span class="string">"blob"</span>)
+<a href=#684 id=684 data-nosnippet>684</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::blob(<span class="macro">vec!</span>[<span class="number">0x01</span>, <span class="number">0x02</span>, <span class="number">0x03</span>]), <span class="string">"blob"</span>)
 <a href=#685 id=685 data-nosnippet>685</a>            .unwrap();
 <a href=#686 id=686 data-nosnippet>686</a>        <span class="macro">assert_eq!</span>(bytes, <span class="macro">vec!</span>[<span class="number">0x01</span>, <span class="number">0x02</span>, <span class="number">0x03</span>]);
 <a href=#687 id=687 data-nosnippet>687</a>    }
@@ -761,7 +761,7 @@
 <a href=#761 id=761 data-nosnippet>761</a>        <span class="kw">let </span>ser = TypeSerializer::new();
 <a href=#762 id=762 data-nosnippet>762</a>
 <a href=#763 id=763 data-nosnippet>763</a>        <span class="kw">let </span>bytes = ser
-<a href=#764 id=764 data-nosnippet>764</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::Varint(<span class="macro">vec!</span>[<span class="number">0x01</span>, <span class="number">0x02</span>, <span class="number">0x03</span>]), <span class="string">"varint"</span>)
+<a href=#764 id=764 data-nosnippet>764</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::varint(<span class="macro">vec!</span>[<span class="number">0x01</span>, <span class="number">0x02</span>, <span class="number">0x03</span>]), <span class="string">"varint"</span>)
 <a href=#765 id=765 data-nosnippet>765</a>            .unwrap();
 <a href=#766 id=766 data-nosnippet>766</a>        <span class="macro">assert_eq!</span>(bytes, <span class="macro">vec!</span>[<span class="number">0x01</span>, <span class="number">0x02</span>, <span class="number">0x03</span>]);
 <a href=#767 id=767 data-nosnippet>767</a>    }
@@ -788,7 +788,7 @@
 <a href=#788 id=788 data-nosnippet>788</a>
 <a href=#789 id=789 data-nosnippet>789</a>        <span class="comment">// IPv4
 <a href=#790 id=790 data-nosnippet>790</a>        </span><span class="kw">let </span>bytes = ser
-<a href=#791 id=791 data-nosnippet>791</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::Inet(<span class="macro">vec!</span>[<span class="number">192</span>, <span class="number">168</span>, <span class="number">1</span>, <span class="number">1</span>]), <span class="string">"inet"</span>)
+<a href=#791 id=791 data-nosnippet>791</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::inet(<span class="macro">vec!</span>[<span class="number">192</span>, <span class="number">168</span>, <span class="number">1</span>, <span class="number">1</span>]), <span class="string">"inet"</span>)
 <a href=#792 id=792 data-nosnippet>792</a>            .unwrap();
 <a href=#793 id=793 data-nosnippet>793</a>        <span class="macro">assert_eq!</span>(bytes, <span class="macro">vec!</span>[<span class="number">192</span>, <span class="number">168</span>, <span class="number">1</span>, <span class="number">1</span>]);
 <a href=#794 id=794 data-nosnippet>794</a>
@@ -798,7 +798,7 @@
 <a href=#798 id=798 data-nosnippet>798</a>            <span class="number">0x00</span>, <span class="number">0x01</span>,
 <a href=#799 id=799 data-nosnippet>799</a>        ];
 <a href=#800 id=800 data-nosnippet>800</a>        <span class="kw">let </span>bytes = ser
-<a href=#801 id=801 data-nosnippet>801</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::Inet(ipv6.clone()), <span class="string">"inet"</span>)
+<a href=#801 id=801 data-nosnippet>801</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::inet(ipv6.clone()), <span class="string">"inet"</span>)
 <a href=#802 id=802 data-nosnippet>802</a>            .unwrap();
 <a href=#803 id=803 data-nosnippet>803</a>        <span class="macro">assert_eq!</span>(bytes, ipv6);
 <a href=#804 id=804 data-nosnippet>804</a>    }
@@ -834,8 +834,8 @@
 <a href=#834 id=834 data-nosnippet>834</a>        <span class="kw">let </span>ser = TypeSerializer::new();
 <a href=#835 id=835 data-nosnippet>835</a>
 <a href=#836 id=836 data-nosnippet>836</a>        <span class="kw">let </span>set = Value::Set(<span class="macro">vec!</span>[
-<a href=#837 id=837 data-nosnippet>837</a>            Value::Text(<span class="string">"a"</span>.to_string()),
-<a href=#838 id=838 data-nosnippet>838</a>            Value::Text(<span class="string">"b"</span>.to_string()),
+<a href=#837 id=837 data-nosnippet>837</a>            Value::text(<span class="string">"a"</span>.to_string()),
+<a href=#838 id=838 data-nosnippet>838</a>            Value::text(<span class="string">"b"</span>.to_string()),
 <a href=#839 id=839 data-nosnippet>839</a>        ]);
 <a href=#840 id=840 data-nosnippet>840</a>
 <a href=#841 id=841 data-nosnippet>841</a>        <span class="kw">let </span>bytes = ser.serialize_value(<span class="kw-2">&amp;</span>set, <span class="string">"set&lt;text&gt;"</span>).unwrap();
@@ -856,8 +856,8 @@
 <a href=#856 id=856 data-nosnippet>856</a>        <span class="kw">let </span>ser = TypeSerializer::new();
 <a href=#857 id=857 data-nosnippet>857</a>
 <a href=#858 id=858 data-nosnippet>858</a>        <span class="kw">let </span>map = Value::Map(<span class="macro">vec!</span>[
-<a href=#859 id=859 data-nosnippet>859</a>            (Value::Text(<span class="string">"key1"</span>.to_string()), Value::Integer(<span class="number">100</span>)),
-<a href=#860 id=860 data-nosnippet>860</a>            (Value::Text(<span class="string">"key2"</span>.to_string()), Value::Integer(<span class="number">200</span>)),
+<a href=#859 id=859 data-nosnippet>859</a>            (Value::text(<span class="string">"key1"</span>.to_string()), Value::Integer(<span class="number">100</span>)),
+<a href=#860 id=860 data-nosnippet>860</a>            (Value::text(<span class="string">"key2"</span>.to_string()), Value::Integer(<span class="number">200</span>)),
 <a href=#861 id=861 data-nosnippet>861</a>        ]);
 <a href=#862 id=862 data-nosnippet>862</a>
 <a href=#863 id=863 data-nosnippet>863</a>        <span class="kw">let </span>bytes = ser.serialize_value(<span class="kw-2">&amp;</span>map, <span class="string">"map&lt;text, int&gt;"</span>).unwrap();
@@ -885,7 +885,7 @@
 <a href=#885 id=885 data-nosnippet>885</a>
 <a href=#886 id=886 data-nosnippet>886</a>        <span class="kw">let </span>tuple = Value::Tuple(<span class="macro">vec!</span>[
 <a href=#887 id=887 data-nosnippet>887</a>            Value::Integer(<span class="number">42</span>),
-<a href=#888 id=888 data-nosnippet>888</a>            Value::Text(<span class="string">"hello"</span>.to_string()),
+<a href=#888 id=888 data-nosnippet>888</a>            Value::text(<span class="string">"hello"</span>.to_string()),
 <a href=#889 id=889 data-nosnippet>889</a>            Value::Null,
 <a href=#890 id=890 data-nosnippet>890</a>        ]);
 <a href=#891 id=891 data-nosnippet>891</a>
@@ -915,10 +915,10 @@
 <a href=#915 id=915 data-nosnippet>915</a>
 <a href=#916 id=916 data-nosnippet>916</a>        <span class="comment">// Create UDT value (fields in different order than schema)
 <a href=#917 id=917 data-nosnippet>917</a>        </span><span class="kw">let </span>udt = UdtValue::new(<span class="string">"address"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
-<a href=#918 id=918 data-nosnippet>918</a>            .with_field(<span class="string">"city"</span>.to_string(), <span class="prelude-val">Some</span>(Value::Text(<span class="string">"NYC"</span>.to_string())))
+<a href=#918 id=918 data-nosnippet>918</a>            .with_field(<span class="string">"city"</span>.to_string(), <span class="prelude-val">Some</span>(Value::text(<span class="string">"NYC"</span>.to_string())))
 <a href=#919 id=919 data-nosnippet>919</a>            .with_field(
 <a href=#920 id=920 data-nosnippet>920</a>                <span class="string">"street"</span>.to_string(),
-<a href=#921 id=921 data-nosnippet>921</a>                <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Main St"</span>.to_string())),
+<a href=#921 id=921 data-nosnippet>921</a>                <span class="prelude-val">Some</span>(Value::text(<span class="string">"Main St"</span>.to_string())),
 <a href=#922 id=922 data-nosnippet>922</a>            );
 <a href=#923 id=923 data-nosnippet>923</a>
 <a href=#924 id=924 data-nosnippet>924</a>        <span class="kw">let </span>bytes = ser
@@ -946,11 +946,11 @@
 <a href=#946 id=946 data-nosnippet>946</a>            .with_field(<span class="string">"email"</span>.to_string(), CqlType::Text, <span class="bool-val">true</span>);
 <a href=#947 id=947 data-nosnippet>947</a>
 <a href=#948 id=948 data-nosnippet>948</a>        <span class="kw">let </span>udt = UdtValue::new(<span class="string">"person"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
-<a href=#949 id=949 data-nosnippet>949</a>            .with_field(<span class="string">"name"</span>.to_string(), <span class="prelude-val">Some</span>(Value::Text(<span class="string">"John"</span>.to_string())))
+<a href=#949 id=949 data-nosnippet>949</a>            .with_field(<span class="string">"name"</span>.to_string(), <span class="prelude-val">Some</span>(Value::text(<span class="string">"John"</span>.to_string())))
 <a href=#950 id=950 data-nosnippet>950</a>            .with_field(<span class="string">"age"</span>.to_string(), <span class="prelude-val">None</span>) <span class="comment">// NULL
 <a href=#951 id=951 data-nosnippet>951</a>            </span>.with_field(
 <a href=#952 id=952 data-nosnippet>952</a>                <span class="string">"email"</span>.to_string(),
-<a href=#953 id=953 data-nosnippet>953</a>                <span class="prelude-val">Some</span>(Value::Text(<span class="string">"john@example.com"</span>.to_string())),
+<a href=#953 id=953 data-nosnippet>953</a>                <span class="prelude-val">Some</span>(Value::text(<span class="string">"john@example.com"</span>.to_string())),
 <a href=#954 id=954 data-nosnippet>954</a>            );
 <a href=#955 id=955 data-nosnippet>955</a>
 <a href=#956 id=956 data-nosnippet>956</a>        <span class="kw">let </span>bytes = ser
@@ -991,12 +991,12 @@
 <a href=#991 id=991 data-nosnippet>991</a>        </span><span class="kw">let </span>address = UdtValue::new(<span class="string">"address"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
 <a href=#992 id=992 data-nosnippet>992</a>            .with_field(
 <a href=#993 id=993 data-nosnippet>993</a>                <span class="string">"street"</span>.to_string(),
-<a href=#994 id=994 data-nosnippet>994</a>                <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Main St"</span>.to_string())),
+<a href=#994 id=994 data-nosnippet>994</a>                <span class="prelude-val">Some</span>(Value::text(<span class="string">"Main St"</span>.to_string())),
 <a href=#995 id=995 data-nosnippet>995</a>            )
-<a href=#996 id=996 data-nosnippet>996</a>            .with_field(<span class="string">"city"</span>.to_string(), <span class="prelude-val">Some</span>(Value::Text(<span class="string">"NYC"</span>.to_string())));
+<a href=#996 id=996 data-nosnippet>996</a>            .with_field(<span class="string">"city"</span>.to_string(), <span class="prelude-val">Some</span>(Value::text(<span class="string">"NYC"</span>.to_string())));
 <a href=#997 id=997 data-nosnippet>997</a>
 <a href=#998 id=998 data-nosnippet>998</a>        <span class="kw">let </span>_person = UdtValue::new(<span class="string">"person"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
-<a href=#999 id=999 data-nosnippet>999</a>            .with_field(<span class="string">"name"</span>.to_string(), <span class="prelude-val">Some</span>(Value::Text(<span class="string">"John"</span>.to_string())))
+<a href=#999 id=999 data-nosnippet>999</a>            .with_field(<span class="string">"name"</span>.to_string(), <span class="prelude-val">Some</span>(Value::text(<span class="string">"John"</span>.to_string())))
 <a href=#1000 id=1000 data-nosnippet>1000</a>            .with_field(
 <a href=#1001 id=1001 data-nosnippet>1001</a>                <span class="string">"address"</span>.to_string(),
 <a href=#1002 id=1002 data-nosnippet>1002</a>                <span class="prelude-val">Some</span>(Value::Udt(Box::new(address.clone()))),
@@ -1067,12 +1067,12 @@
 <a href=#1067 id=1067 data-nosnippet>1067</a>            );
 <a href=#1068 id=1068 data-nosnippet>1068</a>
 <a href=#1069 id=1069 data-nosnippet>1069</a>        <span class="kw">let </span>udt = UdtValue::new(<span class="string">"user"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
-<a href=#1070 id=1070 data-nosnippet>1070</a>            .with_field(<span class="string">"name"</span>.to_string(), <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Alice"</span>.to_string())))
+<a href=#1070 id=1070 data-nosnippet>1070</a>            .with_field(<span class="string">"name"</span>.to_string(), <span class="prelude-val">Some</span>(Value::text(<span class="string">"Alice"</span>.to_string())))
 <a href=#1071 id=1071 data-nosnippet>1071</a>            .with_field(
 <a href=#1072 id=1072 data-nosnippet>1072</a>                <span class="string">"tags"</span>.to_string(),
 <a href=#1073 id=1073 data-nosnippet>1073</a>                <span class="prelude-val">Some</span>(Value::List(<span class="macro">vec!</span>[
-<a href=#1074 id=1074 data-nosnippet>1074</a>                    Value::Text(<span class="string">"admin"</span>.to_string()),
-<a href=#1075 id=1075 data-nosnippet>1075</a>                    Value::Text(<span class="string">"user"</span>.to_string()),
+<a href=#1074 id=1074 data-nosnippet>1074</a>                    Value::text(<span class="string">"admin"</span>.to_string()),
+<a href=#1075 id=1075 data-nosnippet>1075</a>                    Value::text(<span class="string">"user"</span>.to_string()),
 <a href=#1076 id=1076 data-nosnippet>1076</a>                ])),
 <a href=#1077 id=1077 data-nosnippet>1077</a>            );
 <a href=#1078 id=1078 data-nosnippet>1078</a>
@@ -1144,19 +1144,19 @@
 <a href=#1144 id=1144 data-nosnippet>1144</a>            );
 <a href=#1145 id=1145 data-nosnippet>1145</a>
 <a href=#1146 id=1146 data-nosnippet>1146</a>        <span class="kw">let </span>phone = UdtValue::new(<span class="string">"phone_number"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
-<a href=#1147 id=1147 data-nosnippet>1147</a>            .with_field(<span class="string">"label"</span>.to_string(), <span class="prelude-val">Some</span>(Value::Text(<span class="string">"mobile"</span>.to_string())))
+<a href=#1147 id=1147 data-nosnippet>1147</a>            .with_field(<span class="string">"label"</span>.to_string(), <span class="prelude-val">Some</span>(Value::text(<span class="string">"mobile"</span>.to_string())))
 <a href=#1148 id=1148 data-nosnippet>1148</a>            .with_field(
 <a href=#1149 id=1149 data-nosnippet>1149</a>                <span class="string">"number"</span>.to_string(),
-<a href=#1150 id=1150 data-nosnippet>1150</a>                <span class="prelude-val">Some</span>(Value::Text(<span class="string">"+1-555-0101"</span>.to_string())),
+<a href=#1150 id=1150 data-nosnippet>1150</a>                <span class="prelude-val">Some</span>(Value::text(<span class="string">"+1-555-0101"</span>.to_string())),
 <a href=#1151 id=1151 data-nosnippet>1151</a>            );
 <a href=#1152 id=1152 data-nosnippet>1152</a>        <span class="kw">let </span>address = UdtValue::new(<span class="string">"address"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
 <a href=#1153 id=1153 data-nosnippet>1153</a>            .with_field(
 <a href=#1154 id=1154 data-nosnippet>1154</a>                <span class="string">"street"</span>.to_string(),
-<a href=#1155 id=1155 data-nosnippet>1155</a>                <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Main St"</span>.to_string())),
+<a href=#1155 id=1155 data-nosnippet>1155</a>                <span class="prelude-val">Some</span>(Value::text(<span class="string">"Main St"</span>.to_string())),
 <a href=#1156 id=1156 data-nosnippet>1156</a>            )
-<a href=#1157 id=1157 data-nosnippet>1157</a>            .with_field(<span class="string">"city"</span>.to_string(), <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Seattle"</span>.to_string())));
+<a href=#1157 id=1157 data-nosnippet>1157</a>            .with_field(<span class="string">"city"</span>.to_string(), <span class="prelude-val">Some</span>(Value::text(<span class="string">"Seattle"</span>.to_string())));
 <a href=#1158 id=1158 data-nosnippet>1158</a>        <span class="kw">let </span>person = UdtValue::new(<span class="string">"person"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
-<a href=#1159 id=1159 data-nosnippet>1159</a>            .with_field(<span class="string">"name"</span>.to_string(), <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Alice"</span>.to_string())))
+<a href=#1159 id=1159 data-nosnippet>1159</a>            .with_field(<span class="string">"name"</span>.to_string(), <span class="prelude-val">Some</span>(Value::text(<span class="string">"Alice"</span>.to_string())))
 <a href=#1160 id=1160 data-nosnippet>1160</a>            .with_field(
 <a href=#1161 id=1161 data-nosnippet>1161</a>                <span class="string">"phone_numbers"</span>.to_string(),
 <a href=#1162 id=1162 data-nosnippet>1162</a>                <span class="prelude-val">Some</span>(Value::List(<span class="macro">vec!</span>[Value::Frozen(Box::new(Value::Udt(
@@ -1170,7 +1170,7 @@
 <a href=#1170 id=1170 data-nosnippet>1170</a>                ))))),
 <a href=#1171 id=1171 data-nosnippet>1171</a>            );
 <a href=#1172 id=1172 data-nosnippet>1172</a>        <span class="kw">let </span>company = UdtValue::new(<span class="string">"company"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
-<a href=#1173 id=1173 data-nosnippet>1173</a>            .with_field(<span class="string">"name"</span>.to_string(), <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Acme"</span>.to_string())))
+<a href=#1173 id=1173 data-nosnippet>1173</a>            .with_field(<span class="string">"name"</span>.to_string(), <span class="prelude-val">Some</span>(Value::text(<span class="string">"Acme"</span>.to_string())))
 <a href=#1174 id=1174 data-nosnippet>1174</a>            .with_field(
 <a href=#1175 id=1175 data-nosnippet>1175</a>                <span class="string">"employees"</span>.to_string(),
 <a href=#1176 id=1176 data-nosnippet>1176</a>                <span class="prelude-val">Some</span>(Value::List(<span class="macro">vec!</span>[Value::Frozen(Box::new(Value::Udt(
@@ -1180,7 +1180,7 @@
 <a href=#1180 id=1180 data-nosnippet>1180</a>            .with_field(
 <a href=#1181 id=1181 data-nosnippet>1181</a>                <span class="string">"departments"</span>.to_string(),
 <a href=#1182 id=1182 data-nosnippet>1182</a>                <span class="prelude-val">Some</span>(Value::Map(<span class="macro">vec!</span>[(
-<a href=#1183 id=1183 data-nosnippet>1183</a>                    Value::Text(<span class="string">"platform"</span>.to_string()),
+<a href=#1183 id=1183 data-nosnippet>1183</a>                    Value::text(<span class="string">"platform"</span>.to_string()),
 <a href=#1184 id=1184 data-nosnippet>1184</a>                    Value::Frozen(Box::new(Value::List(<span class="macro">vec!</span>[Value::Frozen(Box::new(
 <a href=#1185 id=1185 data-nosnippet>1185</a>                        Value::Udt(Box::new(person.clone())),
 <a href=#1186 id=1186 data-nosnippet>1186</a>                    ))]))),
@@ -1208,7 +1208,7 @@
 <a href=#1208 id=1208 data-nosnippet>1208</a>        <span class="kw">let </span>departments_bytes = ser
 <a href=#1209 id=1209 data-nosnippet>1209</a>            .serialize_typed_value(
 <a href=#1210 id=1210 data-nosnippet>1210</a>                <span class="kw-2">&amp;</span>Value::Map(<span class="macro">vec!</span>[(
-<a href=#1211 id=1211 data-nosnippet>1211</a>                    Value::Text(<span class="string">"platform"</span>.to_string()),
+<a href=#1211 id=1211 data-nosnippet>1211</a>                    Value::text(<span class="string">"platform"</span>.to_string()),
 <a href=#1212 id=1212 data-nosnippet>1212</a>                    Value::Frozen(Box::new(Value::List(<span class="macro">vec!</span>[Value::Frozen(Box::new(
 <a href=#1213 id=1213 data-nosnippet>1213</a>                        Value::Udt(Box::new(person)),
 <a href=#1214 id=1214 data-nosnippet>1214</a>                    ))]))),
@@ -1252,27 +1252,27 @@
 <a href=#1252 id=1252 data-nosnippet>1252</a>        <span class="kw">let </span>address = UdtValue::new(<span class="string">"address"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
 <a href=#1253 id=1253 data-nosnippet>1253</a>            .with_field(
 <a href=#1254 id=1254 data-nosnippet>1254</a>                <span class="string">"street"</span>.to_string(),
-<a href=#1255 id=1255 data-nosnippet>1255</a>                <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Rua Sao Joao"</span>.to_string())),
+<a href=#1255 id=1255 data-nosnippet>1255</a>                <span class="prelude-val">Some</span>(Value::text(<span class="string">"Rua Sao Joao"</span>.to_string())),
 <a href=#1256 id=1256 data-nosnippet>1256</a>            )
 <a href=#1257 id=1257 data-nosnippet>1257</a>            .with_field(
 <a href=#1258 id=1258 data-nosnippet>1258</a>                <span class="string">"city"</span>.to_string(),
-<a href=#1259 id=1259 data-nosnippet>1259</a>                <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Sao Paulo"</span>.to_string())),
+<a href=#1259 id=1259 data-nosnippet>1259</a>                <span class="prelude-val">Some</span>(Value::text(<span class="string">"Sao Paulo"</span>.to_string())),
 <a href=#1260 id=1260 data-nosnippet>1260</a>            );
 <a href=#1261 id=1261 data-nosnippet>1261</a>        <span class="kw">let </span>address_bytes = ser
 <a href=#1262 id=1262 data-nosnippet>1262</a>            .serialize_udt(<span class="kw-2">&amp;</span>Value::Udt(Box::new(address)), <span class="kw-2">&amp;</span>address_schema)
 <a href=#1263 id=1263 data-nosnippet>1263</a>            .unwrap();
 <a href=#1264 id=1264 data-nosnippet>1264</a>
 <a href=#1265 id=1265 data-nosnippet>1265</a>        <span class="kw">let </span>value = Value::Map(<span class="macro">vec!</span>[(
-<a href=#1266 id=1266 data-nosnippet>1266</a>            Value::Text(<span class="string">"cidade_日本"</span>.to_string()),
+<a href=#1266 id=1266 data-nosnippet>1266</a>            Value::text(<span class="string">"cidade_日本"</span>.to_string()),
 <a href=#1267 id=1267 data-nosnippet>1267</a>            Value::Frozen(Box::new(Value::Udt(Box::new(
 <a href=#1268 id=1268 data-nosnippet>1268</a>                UdtValue::new(<span class="string">"address"</span>.to_string(), <span class="string">"test_ks"</span>.to_string())
 <a href=#1269 id=1269 data-nosnippet>1269</a>                    .with_field(
 <a href=#1270 id=1270 data-nosnippet>1270</a>                        <span class="string">"street"</span>.to_string(),
-<a href=#1271 id=1271 data-nosnippet>1271</a>                        <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Rua Sao Joao"</span>.to_string())),
+<a href=#1271 id=1271 data-nosnippet>1271</a>                        <span class="prelude-val">Some</span>(Value::text(<span class="string">"Rua Sao Joao"</span>.to_string())),
 <a href=#1272 id=1272 data-nosnippet>1272</a>                    )
 <a href=#1273 id=1273 data-nosnippet>1273</a>                    .with_field(
 <a href=#1274 id=1274 data-nosnippet>1274</a>                        <span class="string">"city"</span>.to_string(),
-<a href=#1275 id=1275 data-nosnippet>1275</a>                        <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Sao Paulo"</span>.to_string())),
+<a href=#1275 id=1275 data-nosnippet>1275</a>                        <span class="prelude-val">Some</span>(Value::text(<span class="string">"Sao Paulo"</span>.to_string())),
 <a href=#1276 id=1276 data-nosnippet>1276</a>                    ),
 <a href=#1277 id=1277 data-nosnippet>1277</a>            )))),
 <a href=#1278 id=1278 data-nosnippet>1278</a>        )]);
@@ -1306,7 +1306,7 @@
 <a href=#1306 id=1306 data-nosnippet>1306</a>        <span class="kw">let </span>ser = TypeSerializer::new();
 <a href=#1307 id=1307 data-nosnippet>1307</a>
 <a href=#1308 id=1308 data-nosnippet>1308</a>        <span class="kw">let </span>value = Value::Tuple(<span class="macro">vec!</span>[
-<a href=#1309 id=1309 data-nosnippet>1309</a>            Value::Text(<span class="string">"phase3"</span>.to_string()),
+<a href=#1309 id=1309 data-nosnippet>1309</a>            Value::text(<span class="string">"phase3"</span>.to_string()),
 <a href=#1310 id=1310 data-nosnippet>1310</a>            Value::List(<span class="macro">vec!</span>[
 <a href=#1311 id=1311 data-nosnippet>1311</a>                Value::Integer(<span class="number">1</span>),
 <a href=#1312 id=1312 data-nosnippet>1312</a>                Value::Integer(<span class="number">2</span>),
@@ -1314,12 +1314,12 @@
 <a href=#1314 id=1314 data-nosnippet>1314</a>            ]),
 <a href=#1315 id=1315 data-nosnippet>1315</a>            Value::Map(<span class="macro">vec!</span>[
 <a href=#1316 id=1316 data-nosnippet>1316</a>                (
-<a href=#1317 id=1317 data-nosnippet>1317</a>                    Value::Text(<span class="string">"emoji"</span>.to_string()),
-<a href=#1318 id=1318 data-nosnippet>1318</a>                    Value::Text(<span class="string">"snowman"</span>.to_string()),
+<a href=#1317 id=1317 data-nosnippet>1317</a>                    Value::text(<span class="string">"emoji"</span>.to_string()),
+<a href=#1318 id=1318 data-nosnippet>1318</a>                    Value::text(<span class="string">"snowman"</span>.to_string()),
 <a href=#1319 id=1319 data-nosnippet>1319</a>                ),
 <a href=#1320 id=1320 data-nosnippet>1320</a>                (
-<a href=#1321 id=1321 data-nosnippet>1321</a>                    Value::Text(<span class="string">"plain"</span>.to_string()),
-<a href=#1322 id=1322 data-nosnippet>1322</a>                    Value::Text(<span class="string">"ascii"</span>.to_string()),
+<a href=#1321 id=1321 data-nosnippet>1321</a>                    Value::text(<span class="string">"plain"</span>.to_string()),
+<a href=#1322 id=1322 data-nosnippet>1322</a>                    Value::text(<span class="string">"ascii"</span>.to_string()),
 <a href=#1323 id=1323 data-nosnippet>1323</a>                ),
 <a href=#1324 id=1324 data-nosnippet>1324</a>            ]),
 <a href=#1325 id=1325 data-nosnippet>1325</a>        ]);
@@ -1342,12 +1342,12 @@
 <a href=#1342 id=1342 data-nosnippet>1342</a>            .serialize_value(
 <a href=#1343 id=1343 data-nosnippet>1343</a>                <span class="kw-2">&amp;</span>Value::Map(<span class="macro">vec!</span>[
 <a href=#1344 id=1344 data-nosnippet>1344</a>                    (
-<a href=#1345 id=1345 data-nosnippet>1345</a>                        Value::Text(<span class="string">"emoji"</span>.to_string()),
-<a href=#1346 id=1346 data-nosnippet>1346</a>                        Value::Text(<span class="string">"snowman"</span>.to_string()),
+<a href=#1345 id=1345 data-nosnippet>1345</a>                        Value::text(<span class="string">"emoji"</span>.to_string()),
+<a href=#1346 id=1346 data-nosnippet>1346</a>                        Value::text(<span class="string">"snowman"</span>.to_string()),
 <a href=#1347 id=1347 data-nosnippet>1347</a>                    ),
 <a href=#1348 id=1348 data-nosnippet>1348</a>                    (
-<a href=#1349 id=1349 data-nosnippet>1349</a>                        Value::Text(<span class="string">"plain"</span>.to_string()),
-<a href=#1350 id=1350 data-nosnippet>1350</a>                        Value::Text(<span class="string">"ascii"</span>.to_string()),
+<a href=#1349 id=1349 data-nosnippet>1349</a>                        Value::text(<span class="string">"plain"</span>.to_string()),
+<a href=#1350 id=1350 data-nosnippet>1350</a>                        Value::text(<span class="string">"ascii"</span>.to_string()),
 <a href=#1351 id=1351 data-nosnippet>1351</a>                    ),
 <a href=#1352 id=1352 data-nosnippet>1352</a>                ]),
 <a href=#1353 id=1353 data-nosnippet>1353</a>                <span class="string">"map&lt;text, text&gt;"</span>,
@@ -1402,7 +1402,7 @@
 <a href=#1402 id=1402 data-nosnippet>1402</a>
 <a href=#1403 id=1403 data-nosnippet>1403</a>        <span class="comment">// Wrong type for int
 <a href=#1404 id=1404 data-nosnippet>1404</a>        </span><span class="macro">assert!</span>(ser
-<a href=#1405 id=1405 data-nosnippet>1405</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::Text(<span class="string">"hello"</span>.to_string()), <span class="string">"int"</span>)
+<a href=#1405 id=1405 data-nosnippet>1405</a>            .serialize_value(<span class="kw-2">&amp;</span>Value::text(<span class="string">"hello"</span>.to_string()), <span class="string">"int"</span>)
 <a href=#1406 id=1406 data-nosnippet>1406</a>            .is_err());
 <a href=#1407 id=1407 data-nosnippet>1407</a>
 <a href=#1408 id=1408 data-nosnippet>1408</a>        <span class="comment">// Wrong type for boolean
@@ -1426,7 +1426,7 @@
 <a href=#1426 id=1426 data-nosnippet>1426</a>
 <a href=#1427 id=1427 data-nosnippet>1427</a>        <span class="kw">let </span>udt = UdtValue::new(<span class="string">"person"</span>.to_string(), <span class="string">"test_ks"</span>.to_string()).with_field(
 <a href=#1428 id=1428 data-nosnippet>1428</a>            <span class="string">"street"</span>.to_string(),
-<a href=#1429 id=1429 data-nosnippet>1429</a>            <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Main St"</span>.to_string())),
+<a href=#1429 id=1429 data-nosnippet>1429</a>            <span class="prelude-val">Some</span>(Value::text(<span class="string">"Main St"</span>.to_string())),
 <a href=#1430 id=1430 data-nosnippet>1430</a>        );
 <a href=#1431 id=1431 data-nosnippet>1431</a>
 <a href=#1432 id=1432 data-nosnippet>1432</a>        <span class="kw">let </span>result = ser.serialize_udt(<span class="kw-2">&amp;</span>Value::Udt(Box::new(udt)), <span class="kw-2">&amp;</span>schema);

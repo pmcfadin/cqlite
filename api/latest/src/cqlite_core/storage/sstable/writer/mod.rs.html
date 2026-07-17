@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/writer/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/writer/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SSTable writer components for producing Cassandra 5.0-compatible SSTables
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/writer/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/writer/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! SSTable writer components for producing Cassandra 5.0-compatible SSTables
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! This module coordinates the generation of all SSTable components:
 <a href=#4 id=4 data-nosnippet>4</a>//! - Data.db: Row data with partition and clustering ordering
@@ -1092,7 +1092,7 @@
 <a href=#1092 id=1092 data-nosnippet>1092</a>            fields: <span class="macro">vec!</span>[
 <a href=#1093 id=1093 data-nosnippet>1093</a>                UdtField {
 <a href=#1094 id=1094 data-nosnippet>1094</a>                    name: <span class="string">"name"</span>.to_string(),
-<a href=#1095 id=1095 data-nosnippet>1095</a>                    value: <span class="prelude-val">Some</span>(Value::Text(<span class="string">"Alice"</span>.to_string())),
+<a href=#1095 id=1095 data-nosnippet>1095</a>                    value: <span class="prelude-val">Some</span>(Value::text(<span class="string">"Alice"</span>.to_string())),
 <a href=#1096 id=1096 data-nosnippet>1096</a>                },
 <a href=#1097 id=1097 data-nosnippet>1097</a>                UdtField {
 <a href=#1098 id=1098 data-nosnippet>1098</a>                    name: <span class="string">"age"</span>.to_string(),
@@ -1331,7 +1331,7 @@
 <a href=#1331 id=1331 data-nosnippet>1331</a>            <span class="prelude-val">None</span>,
 <a href=#1332 id=1332 data-nosnippet>1332</a>            <span class="macro">vec!</span>[CellOperation::Write {
 <a href=#1333 id=1333 data-nosnippet>1333</a>                column: <span class="string">"name"</span>.to_string(),
-<a href=#1334 id=1334 data-nosnippet>1334</a>                value: Value::Text(name.to_string()),
+<a href=#1334 id=1334 data-nosnippet>1334</a>                value: Value::text(name.to_string()),
 <a href=#1335 id=1335 data-nosnippet>1335</a>            }],
 <a href=#1336 id=1336 data-nosnippet>1336</a>            timestamp,
 <a href=#1337 id=1337 data-nosnippet>1337</a>            <span class="prelude-val">None</span>,
@@ -1981,7 +1981,7 @@
 <a href=#1981 id=1981 data-nosnippet>1981</a>            <span class="prelude-val">None</span>,
 <a href=#1982 id=1982 data-nosnippet>1982</a>            <span class="macro">vec!</span>[CellOperation::Write {
 <a href=#1983 id=1983 data-nosnippet>1983</a>                column: <span class="string">"name"</span>.to_string(),
-<a href=#1984 id=1984 data-nosnippet>1984</a>                value: Value::Text(<span class="string">"survivor"</span>.to_string()),
+<a href=#1984 id=1984 data-nosnippet>1984</a>                value: Value::text(<span class="string">"survivor"</span>.to_string()),
 <a href=#1985 id=1985 data-nosnippet>1985</a>            }],
 <a href=#1986 id=1986 data-nosnippet>1986</a>            ROW_TS,
 <a href=#1987 id=1987 data-nosnippet>1987</a>            <span class="prelude-val">None</span>,
@@ -2022,7 +2022,7 @@
 <a href=#2022 id=2022 data-nosnippet>2022</a>            <span class="prelude-val">None</span>,
 <a href=#2023 id=2023 data-nosnippet>2023</a>            <span class="macro">vec!</span>[CellOperation::Write {
 <a href=#2024 id=2024 data-nosnippet>2024</a>                column: <span class="string">"name"</span>.to_string(),
-<a href=#2025 id=2025 data-nosnippet>2025</a>                value: Value::Text(<span class="string">"survivor"</span>.to_string()),
+<a href=#2025 id=2025 data-nosnippet>2025</a>                value: Value::text(<span class="string">"survivor"</span>.to_string()),
 <a href=#2026 id=2026 data-nosnippet>2026</a>            }],
 <a href=#2027 id=2027 data-nosnippet>2027</a>            ROW_TS,
 <a href=#2028 id=2028 data-nosnippet>2028</a>            <span class="prelude-val">None</span>,
@@ -2460,11 +2460,11 @@
 <a href=#2460 id=2460 data-nosnippet>2460</a>            <span class="macro">vec!</span>[
 <a href=#2461 id=2461 data-nosnippet>2461</a>                CellOperation::Write {
 <a href=#2462 id=2462 data-nosnippet>2462</a>                    column: <span class="string">"s"</span>.to_string(),
-<a href=#2463 id=2463 data-nosnippet>2463</a>                    value: Value::Text(<span class="string">"static-val"</span>.to_string()),
+<a href=#2463 id=2463 data-nosnippet>2463</a>                    value: Value::text(<span class="string">"static-val"</span>.to_string()),
 <a href=#2464 id=2464 data-nosnippet>2464</a>                },
 <a href=#2465 id=2465 data-nosnippet>2465</a>                CellOperation::Write {
 <a href=#2466 id=2466 data-nosnippet>2466</a>                    column: <span class="string">"name"</span>.to_string(),
-<a href=#2467 id=2467 data-nosnippet>2467</a>                    value: Value::Text(<span class="string">"regular-val"</span>.to_string()),
+<a href=#2467 id=2467 data-nosnippet>2467</a>                    value: Value::text(<span class="string">"regular-val"</span>.to_string()),
 <a href=#2468 id=2468 data-nosnippet>2468</a>                },
 <a href=#2469 id=2469 data-nosnippet>2469</a>            ],
 <a href=#2470 id=2470 data-nosnippet>2470</a>            <span class="number">1_000_000</span>,
@@ -2504,7 +2504,7 @@
 <a href=#2504 id=2504 data-nosnippet>2504</a>                <span class="prelude-val">Some</span>(ClusteringKey::single(<span class="string">"ck"</span>, Value::Integer(<span class="number">7</span>))),
 <a href=#2505 id=2505 data-nosnippet>2505</a>                <span class="macro">vec!</span>[CellOperation::Write {
 <a href=#2506 id=2506 data-nosnippet>2506</a>                    column: <span class="string">"name"</span>.to_string(),
-<a href=#2507 id=2507 data-nosnippet>2507</a>                    value: Value::Text(val.to_string()),
+<a href=#2507 id=2507 data-nosnippet>2507</a>                    value: Value::text(val.to_string()),
 <a href=#2508 id=2508 data-nosnippet>2508</a>                }],
 <a href=#2509 id=2509 data-nosnippet>2509</a>                ts,
 <a href=#2510 id=2510 data-nosnippet>2510</a>                <span class="prelude-val">None</span>,
@@ -2548,7 +2548,7 @@
 <a href=#2548 id=2548 data-nosnippet>2548</a>            <span class="macro">vec!</span>[
 <a href=#2549 id=2549 data-nosnippet>2549</a>                CellOperation::Write {
 <a href=#2550 id=2550 data-nosnippet>2550</a>                    column: <span class="string">"name"</span>.to_string(),
-<a href=#2551 id=2551 data-nosnippet>2551</a>                    value: Value::Text(<span class="string">"Alice"</span>.to_string()),
+<a href=#2551 id=2551 data-nosnippet>2551</a>                    value: Value::text(<span class="string">"Alice"</span>.to_string()),
 <a href=#2552 id=2552 data-nosnippet>2552</a>                },
 <a href=#2553 id=2553 data-nosnippet>2553</a>                CellOperation::Write {
 <a href=#2554 id=2554 data-nosnippet>2554</a>                    column: <span class="string">"age"</span>.to_string(),

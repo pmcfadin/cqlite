@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["SummaryData","SummaryEntry","SummaryHeader","SummaryReader","SummaryStatistics"]};
+window.SIDEBAR_ITEMS = {"mod":["interval"],"struct":["SummaryData","SummaryEntry","SummaryHeader","SummaryReader","SummaryStatistics"]};

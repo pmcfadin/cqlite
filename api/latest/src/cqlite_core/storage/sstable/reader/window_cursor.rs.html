@@ -1,209 +1,520 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/window_cursor.rs`."><title>window_cursor.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.0 (2d8144b78 2026-07-07)" data-channel="1.97.0" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>window_cursor.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Sliding decompressed-byte window helpers (issue #1589).
-<a href=#2 id=2 data-nosnippet>2</a>//!
-<a href=#3 id=3 data-nosnippet>3</a>//! Both the user-facing windowed scan (`scan_stream_windowed`) and the streaming
-<a href=#4 id=4 data-nosnippet>4</a>//! compaction driver (`data_access::compaction`) keep a `Vec&lt;u8&gt;` of decompressed
-<a href=#5 id=5 data-nosnippet>5</a>//! bytes, parse CONFIRMED partitions from the FRONT, and refill from the tail as
-<a href=#6 id=6 data-nosnippet>6</a>//! new chunks arrive. Consuming the front with `window.drain(0..consumed)` memmoves
-<a href=#7 id=7 data-nosnippet>7</a>//! the ENTIRE residual tail on every confirmed partition — Θ(P·W) bytes moved per
-<a href=#8 id=8 data-nosnippet>8</a>//! window for P tiny partitions over a W-byte residual (the pathological case is a
-<a href=#9 id=9 data-nosnippet>9</a>//! partition-dense table: thousands of one-row partitions packed into one window).
-<a href=#10 id=10 data-nosnippet>10</a>//!
-<a href=#11 id=11 data-nosnippet>11</a>//! This module hosts the test-only byte-movement [`probe`] that measures that cost
-<a href=#12 id=12 data-nosnippet>12</a>//! (issue #1589), and the [`WindowCursor`] cursor that reduces it to Θ(W) per
-<a href=#13 id=13 data-nosnippet>13</a>//! window.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/window_cursor.rs`."><title>window_cursor.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../src-files.js"></script><script defer src="../../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/</div>window_cursor.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Sliding decompressed-byte window helpers (issue #1589; enum-backed
+<a href=#2 id=2 data-nosnippet>2</a>//! borrow API added issue #1644 K5 stage 2, design D1).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! Both the user-facing windowed scan (`scan_stream_windowed`) and the streaming
+<a href=#5 id=5 data-nosnippet>5</a>//! compaction driver (`data_access::compaction`) keep a window of decompressed
+<a href=#6 id=6 data-nosnippet>6</a>//! bytes, parse CONFIRMED partitions from the FRONT, and refill from the tail as
+<a href=#7 id=7 data-nosnippet>7</a>//! new chunks arrive. This module hosts the test-only byte-movement [`probe`]
+<a href=#8 id=8 data-nosnippet>8</a>//! (issue #1589), the [`WindowCursor`] cursor that bounds per-window memmove to
+<a href=#9 id=9 data-nosnippet>9</a>//! Θ(W), and (issue #1644) the [`Bytes`]-native borrow path that lets a value
+<a href=#10 id=10 data-nosnippet>10</a>//! fully inside one chunk be materialized as a refcounted view instead of a copy.
+<a href=#11 id=11 data-nosnippet>11</a>
+<a href=#12 id=12 data-nosnippet>12</a></span><span class="kw">use </span>bytes::Bytes;
+<a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span>std::ops::Range;
 <a href=#14 id=14 data-nosnippet>14</a>
-<a href=#15 id=15 data-nosnippet>15</a>/// A decompressed-byte window with a FRONT CURSOR (issue #1589).
+<a href=#15 id=15 data-nosnippet>15</a><span class="doccomment">/// A payload materialized through the window borrow API (issue #1644, D1).
 <a href=#16 id=16 data-nosnippet>16</a>///
-<a href=#17 id=17 data-nosnippet>17</a>/// Invariant: `start &lt;= buf.len()`. The logical window (the bytes not yet consumed)
-<a href=#18 id=18 data-nosnippet>18</a>/// is `buf[start..]`. [`consume`](Self::consume) advances `start` with NO memmove;
-<a href=#19 id=19 data-nosnippet>19</a>/// [`refill`](Self::refill) reclaims the consumed prefix `buf[..start]` with a
-<a href=#20 id=20 data-nosnippet>20</a>/// SINGLE compaction — once per refill, not once per confirmed partition — then
-<a href=#21 id=21 data-nosnippet>21</a>/// appends the new chunk. So each byte is physically moved at most once per refill
-<a href=#22 id=22 data-nosnippet>22</a>/// it survives (Θ(W) per window over the whole window lifetime), replacing the
-<a href=#23 id=23 data-nosnippet>23</a>/// per-partition `window.drain(0..consumed)` that moved Θ(P·W).
-<a href=#24 id=24 data-nosnippet>24</a>///
-<a href=#25 id=25 data-nosnippet>25</a>/// Window sizing / backpressure semantics are unchanged: [`as_slice`](Self::as_slice)
-<a href=#26 id=26 data-nosnippet>26</a>/// yields exactly the same unconsumed bytes the prior `Vec` did after each drain;
-<a href=#27 id=27 data-nosnippet>27</a>/// only the physical byte movement differs.
-<a href=#28 id=28 data-nosnippet>28</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>WindowCursor {
-<a href=#29 id=29 data-nosnippet>29</a>    buf: Vec&lt;u8&gt;,
-<a href=#30 id=30 data-nosnippet>30</a>    start: usize,
-<a href=#31 id=31 data-nosnippet>31</a>}
-<a href=#32 id=32 data-nosnippet>32</a>
-<a href=#33 id=33 data-nosnippet>33</a><span class="kw">impl </span>WindowCursor {
-<a href=#34 id=34 data-nosnippet>34</a>    <span class="doccomment">/// A new, empty window.
-<a href=#35 id=35 data-nosnippet>35</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new() -&gt; <span class="self">Self </span>{
-<a href=#36 id=36 data-nosnippet>36</a>        <span class="self">Self </span>{
-<a href=#37 id=37 data-nosnippet>37</a>            buf: Vec::new(),
-<a href=#38 id=38 data-nosnippet>38</a>            start: <span class="number">0</span>,
-<a href=#39 id=39 data-nosnippet>39</a>        }
-<a href=#40 id=40 data-nosnippet>40</a>    }
-<a href=#41 id=41 data-nosnippet>41</a>
-<a href=#42 id=42 data-nosnippet>42</a>    <span class="doccomment">/// The unconsumed bytes — the logical window the parser reads. Cursor-relative.
-<a href=#43 id=43 data-nosnippet>43</a>    </span><span class="attr">#[inline]
-<a href=#44 id=44 data-nosnippet>44</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>as_slice(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[u8] {
-<a href=#45 id=45 data-nosnippet>45</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.buf[<span class="self">self</span>.start..]
-<a href=#46 id=46 data-nosnippet>46</a>    }
-<a href=#47 id=47 data-nosnippet>47</a>
-<a href=#48 id=48 data-nosnippet>48</a>    <span class="doccomment">/// Number of unconsumed bytes remaining in the logical window.
-<a href=#49 id=49 data-nosnippet>49</a>    </span><span class="attr">#[inline]
-<a href=#50 id=50 data-nosnippet>50</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>len(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-<a href=#51 id=51 data-nosnippet>51</a>        <span class="self">self</span>.buf.len() - <span class="self">self</span>.start
-<a href=#52 id=52 data-nosnippet>52</a>    }
-<a href=#53 id=53 data-nosnippet>53</a>
-<a href=#54 id=54 data-nosnippet>54</a>    <span class="doccomment">/// Whether the logical window is empty (all appended bytes consumed).
-<a href=#55 id=55 data-nosnippet>55</a>    </span><span class="attr">#[inline]
-<a href=#56 id=56 data-nosnippet>56</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_empty(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
-<a href=#57 id=57 data-nosnippet>57</a>        <span class="self">self</span>.start &gt;= <span class="self">self</span>.buf.len()
-<a href=#58 id=58 data-nosnippet>58</a>    }
-<a href=#59 id=59 data-nosnippet>59</a>
-<a href=#60 id=60 data-nosnippet>60</a>    <span class="doccomment">/// Consume `n` bytes from the FRONT of the logical window by advancing the
-<a href=#61 id=61 data-nosnippet>61</a>    /// cursor — NO memmove. `n` is clamped to the unconsumed length, exactly
-<a href=#62 id=62 data-nosnippet>62</a>    /// matching the prior `drain(0..n.min(len))` semantics (a parser reporting
-<a href=#63 id=63 data-nosnippet>63</a>    /// `consumed &gt; remaining` cannot advance the cursor past the window end).
-<a href=#64 id=64 data-nosnippet>64</a>    </span><span class="attr">#[inline]
-<a href=#65 id=65 data-nosnippet>65</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>consume(<span class="kw-2">&amp;mut </span><span class="self">self</span>, n: usize) {
-<a href=#66 id=66 data-nosnippet>66</a>        <span class="comment">// `capped &lt;= self.len()` and `start + self.len() == buf.len()`, so the
-<a href=#67 id=67 data-nosnippet>67</a>        // cursor never runs past the buffer; no overflow (capped &lt;= buf.len()).
-<a href=#68 id=68 data-nosnippet>68</a>        </span><span class="kw">let </span>capped = n.min(<span class="self">self</span>.len());
-<a href=#69 id=69 data-nosnippet>69</a>        <span class="self">self</span>.start += capped;
-<a href=#70 id=70 data-nosnippet>70</a>    }
-<a href=#71 id=71 data-nosnippet>71</a>
-<a href=#72 id=72 data-nosnippet>72</a>    <span class="doccomment">/// Append a freshly decompressed `chunk`. First reclaims the already-consumed
-<a href=#73 id=73 data-nosnippet>73</a>    /// prefix `buf[..start]` with a SINGLE compaction (one memmove of the residual
-<a href=#74 id=74 data-nosnippet>74</a>    /// unconsumed tail), resetting the cursor to 0, THEN extends with `chunk`. The
-<a href=#75 id=75 data-nosnippet>75</a>    /// residual tail is therefore moved at most once PER REFILL — never once per
-<a href=#76 id=76 data-nosnippet>76</a>    /// confirmed partition (issue #1589).
-<a href=#77 id=77 data-nosnippet>77</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>refill(<span class="kw-2">&amp;mut </span><span class="self">self</span>, chunk: <span class="kw-2">&amp;</span>[u8]) {
-<a href=#78 id=78 data-nosnippet>78</a>        <span class="kw">if </span><span class="self">self</span>.start &gt; <span class="number">0 </span>{
-<a href=#79 id=79 data-nosnippet>79</a>            <span class="comment">// Residual (unconsumed) bytes this single compaction moves. `copy_within`
-<a href=#80 id=80 data-nosnippet>80</a>            // + `truncate` moves exactly `residual` bytes — the same work a
-<a href=#81 id=81 data-nosnippet>81</a>            // `drain(0..start)` would do, but done once per refill, not per partition.
-<a href=#82 id=82 data-nosnippet>82</a>            </span><span class="kw">let </span>residual = <span class="self">self</span>.len();
-<a href=#83 id=83 data-nosnippet>83</a>            <span class="attr">#[cfg(feature = <span class="string">"scan-offload-probe"</span>)]
-<a href=#84 id=84 data-nosnippet>84</a>            </span>probe::note_bytes_memmoved(residual);
-<a href=#85 id=85 data-nosnippet>85</a>            <span class="self">self</span>.buf.copy_within(<span class="self">self</span>.start.., <span class="number">0</span>);
-<a href=#86 id=86 data-nosnippet>86</a>            <span class="self">self</span>.buf.truncate(residual);
-<a href=#87 id=87 data-nosnippet>87</a>            <span class="self">self</span>.start = <span class="number">0</span>;
-<a href=#88 id=88 data-nosnippet>88</a>        }
-<a href=#89 id=89 data-nosnippet>89</a>        <span class="attr">#[cfg(feature = <span class="string">"scan-offload-probe"</span>)]
-<a href=#90 id=90 data-nosnippet>90</a>        </span>probe::note_bytes_appended(chunk.len());
-<a href=#91 id=91 data-nosnippet>91</a>        <span class="self">self</span>.buf.extend_from_slice(chunk);
-<a href=#92 id=92 data-nosnippet>92</a>    }
-<a href=#93 id=93 data-nosnippet>93</a>}
-<a href=#94 id=94 data-nosnippet>94</a>
-<a href=#95 id=95 data-nosnippet>95</a><span class="doccomment">/// Test-only probe (issue #1589) for the sliding window's byte-movement cost.
-<a href=#96 id=96 data-nosnippet>96</a>///
-<a href=#97 id=97 data-nosnippet>97</a>/// Records the total bytes physically memmoved by the window's consume/compact path
-<a href=#98 id=98 data-nosnippet>98</a>/// and the total decompressed bytes appended, so a guard test can prove that a
-<a href=#99 id=99 data-nosnippet>99</a>/// partition-dense scan moves O(appended) bytes total — each byte at most ~once per
-<a href=#100 id=100 data-nosnippet>100</a>/// window — rather than the Θ(P·W) the per-partition front-drain moved. Compiled
-<a href=#101 id=101 data-nosnippet>101</a>/// ONLY under the non-default `scan-offload-probe` feature, so it adds zero cost and
-<a href=#102 id=102 data-nosnippet>102</a>/// no public surface in normal/release builds; both the windowed scan and the
-<a href=#103 id=103 data-nosnippet>103</a>/// streaming compaction driver feed this one counter, so it covers both sites.
-<a href=#104 id=104 data-nosnippet>104</a></span><span class="attr">#[cfg(feature = <span class="string">"scan-offload-probe"</span>)]
-<a href=#105 id=105 data-nosnippet>105</a>#[doc(hidden)]
-<a href=#106 id=106 data-nosnippet>106</a></span><span class="kw">pub mod </span>probe {
-<a href=#107 id=107 data-nosnippet>107</a>    <span class="kw">use </span>std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-<a href=#108 id=108 data-nosnippet>108</a>
-<a href=#109 id=109 data-nosnippet>109</a>    <span class="kw">static </span>ARMED: AtomicBool = AtomicBool::new(<span class="bool-val">false</span>);
-<a href=#110 id=110 data-nosnippet>110</a>    <span class="kw">static </span>BYTES_MEMMOVED: AtomicUsize = AtomicUsize::new(<span class="number">0</span>);
-<a href=#111 id=111 data-nosnippet>111</a>    <span class="kw">static </span>BYTES_APPENDED: AtomicUsize = AtomicUsize::new(<span class="number">0</span>);
-<a href=#112 id=112 data-nosnippet>112</a>
-<a href=#113 id=113 data-nosnippet>113</a>    <span class="doccomment">/// Arm the probe and reset the counters. Call before driving a scan/compaction.
-<a href=#114 id=114 data-nosnippet>114</a>    </span><span class="kw">pub fn </span>arm() {
-<a href=#115 id=115 data-nosnippet>115</a>        BYTES_MEMMOVED.store(<span class="number">0</span>, Ordering::SeqCst);
-<a href=#116 id=116 data-nosnippet>116</a>        BYTES_APPENDED.store(<span class="number">0</span>, Ordering::SeqCst);
-<a href=#117 id=117 data-nosnippet>117</a>        ARMED.store(<span class="bool-val">true</span>, Ordering::SeqCst);
-<a href=#118 id=118 data-nosnippet>118</a>    }
-<a href=#119 id=119 data-nosnippet>119</a>
-<a href=#120 id=120 data-nosnippet>120</a>    <span class="doccomment">/// Disarm the probe (restores the production no-op state).
-<a href=#121 id=121 data-nosnippet>121</a>    </span><span class="kw">pub fn </span>disarm() {
-<a href=#122 id=122 data-nosnippet>122</a>        ARMED.store(<span class="bool-val">false</span>, Ordering::SeqCst);
-<a href=#123 id=123 data-nosnippet>123</a>    }
-<a href=#124 id=124 data-nosnippet>124</a>
-<a href=#125 id=125 data-nosnippet>125</a>    <span class="doccomment">/// Record `n` bytes physically memmoved while consuming/compacting the window.
-<a href=#126 id=126 data-nosnippet>126</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>note_bytes_memmoved(n: usize) {
-<a href=#127 id=127 data-nosnippet>127</a>        <span class="kw">if </span>ARMED.load(Ordering::Relaxed) {
-<a href=#128 id=128 data-nosnippet>128</a>            BYTES_MEMMOVED.fetch_add(n, Ordering::Relaxed);
-<a href=#129 id=129 data-nosnippet>129</a>        }
-<a href=#130 id=130 data-nosnippet>130</a>    }
-<a href=#131 id=131 data-nosnippet>131</a>
-<a href=#132 id=132 data-nosnippet>132</a>    <span class="doccomment">/// Record `n` bytes appended (decompressed) into the window, if armed.
-<a href=#133 id=133 data-nosnippet>133</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>note_bytes_appended(n: usize) {
-<a href=#134 id=134 data-nosnippet>134</a>        <span class="kw">if </span>ARMED.load(Ordering::Relaxed) {
-<a href=#135 id=135 data-nosnippet>135</a>            BYTES_APPENDED.fetch_add(n, Ordering::Relaxed);
-<a href=#136 id=136 data-nosnippet>136</a>        }
-<a href=#137 id=137 data-nosnippet>137</a>    }
-<a href=#138 id=138 data-nosnippet>138</a>
-<a href=#139 id=139 data-nosnippet>139</a>    <span class="doccomment">/// Total bytes physically memmoved by the window during the armed run.
-<a href=#140 id=140 data-nosnippet>140</a>    </span><span class="kw">pub fn </span>recorded_bytes_memmoved() -&gt; usize {
-<a href=#141 id=141 data-nosnippet>141</a>        BYTES_MEMMOVED.load(Ordering::Relaxed)
-<a href=#142 id=142 data-nosnippet>142</a>    }
-<a href=#143 id=143 data-nosnippet>143</a>
-<a href=#144 id=144 data-nosnippet>144</a>    <span class="doccomment">/// Total decompressed bytes appended into the window during the armed run.
-<a href=#145 id=145 data-nosnippet>145</a>    </span><span class="kw">pub fn </span>recorded_bytes_appended() -&gt; usize {
-<a href=#146 id=146 data-nosnippet>146</a>        BYTES_APPENDED.load(Ordering::Relaxed)
-<a href=#147 id=147 data-nosnippet>147</a>    }
-<a href=#148 id=148 data-nosnippet>148</a>}
-<a href=#149 id=149 data-nosnippet>149</a>
-<a href=#150 id=150 data-nosnippet>150</a><span class="attr">#[cfg(test)]
-<a href=#151 id=151 data-nosnippet>151</a></span><span class="kw">mod </span>tests {
-<a href=#152 id=152 data-nosnippet>152</a>    <span class="kw">use </span><span class="kw">super</span>::WindowCursor;
-<a href=#153 id=153 data-nosnippet>153</a>
-<a href=#154 id=154 data-nosnippet>154</a>    <span class="attr">#[test]
-<a href=#155 id=155 data-nosnippet>155</a>    </span><span class="kw">fn </span>consume_advances_cursor_without_memmove() {
-<a href=#156 id=156 data-nosnippet>156</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
-<a href=#157 id=157 data-nosnippet>157</a>        w.refill(<span class="string">b"abcdefgh"</span>);
-<a href=#158 id=158 data-nosnippet>158</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"abcdefgh"</span>);
-<a href=#159 id=159 data-nosnippet>159</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">8</span>);
-<a href=#160 id=160 data-nosnippet>160</a>        <span class="macro">assert!</span>(!w.is_empty());
-<a href=#161 id=161 data-nosnippet>161</a>        w.consume(<span class="number">3</span>);
-<a href=#162 id=162 data-nosnippet>162</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"defgh"</span>);
-<a href=#163 id=163 data-nosnippet>163</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">5</span>);
-<a href=#164 id=164 data-nosnippet>164</a>        w.consume(<span class="number">5</span>);
-<a href=#165 id=165 data-nosnippet>165</a>        <span class="macro">assert!</span>(w.is_empty());
-<a href=#166 id=166 data-nosnippet>166</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">0</span>);
-<a href=#167 id=167 data-nosnippet>167</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b""</span>);
-<a href=#168 id=168 data-nosnippet>168</a>    }
-<a href=#169 id=169 data-nosnippet>169</a>
-<a href=#170 id=170 data-nosnippet>170</a>    <span class="attr">#[test]
-<a href=#171 id=171 data-nosnippet>171</a>    </span><span class="kw">fn </span>consume_clamps_to_remaining() {
-<a href=#172 id=172 data-nosnippet>172</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
-<a href=#173 id=173 data-nosnippet>173</a>        w.refill(<span class="string">b"xyz"</span>);
-<a href=#174 id=174 data-nosnippet>174</a>        <span class="comment">// A parser reporting more consumed than remaining must not run past the end
-<a href=#175 id=175 data-nosnippet>175</a>        // (mirrors the prior `drain(0..take.min(window.len()))` clamp).
-<a href=#176 id=176 data-nosnippet>176</a>        </span>w.consume(<span class="number">100</span>);
-<a href=#177 id=177 data-nosnippet>177</a>        <span class="macro">assert!</span>(w.is_empty());
-<a href=#178 id=178 data-nosnippet>178</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">0</span>);
-<a href=#179 id=179 data-nosnippet>179</a>    }
-<a href=#180 id=180 data-nosnippet>180</a>
-<a href=#181 id=181 data-nosnippet>181</a>    <span class="attr">#[test]
-<a href=#182 id=182 data-nosnippet>182</a>    </span><span class="kw">fn </span>refill_compacts_consumed_prefix_and_preserves_residual() {
-<a href=#183 id=183 data-nosnippet>183</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
-<a href=#184 id=184 data-nosnippet>184</a>        w.refill(<span class="string">b"aabbccdd"</span>);
-<a href=#185 id=185 data-nosnippet>185</a>        w.consume(<span class="number">6</span>); <span class="comment">// consume "aabbcc", residual "dd"
-<a href=#186 id=186 data-nosnippet>186</a>        </span><span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"dd"</span>);
-<a href=#187 id=187 data-nosnippet>187</a>        w.refill(<span class="string">b"eeff"</span>); <span class="comment">// compact residual "dd" once, then append "eeff"
-<a href=#188 id=188 data-nosnippet>188</a>        </span><span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"ddeeff"</span>);
-<a href=#189 id=189 data-nosnippet>189</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">6</span>);
-<a href=#190 id=190 data-nosnippet>190</a>        <span class="comment">// A second consume + refill continues from the compacted base.
-<a href=#191 id=191 data-nosnippet>191</a>        </span>w.consume(<span class="number">2</span>); <span class="comment">// "dd"
-<a href=#192 id=192 data-nosnippet>192</a>        </span>w.refill(<span class="string">b"gg"</span>);
-<a href=#193 id=193 data-nosnippet>193</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"eeffgg"</span>);
-<a href=#194 id=194 data-nosnippet>194</a>    }
-<a href=#195 id=195 data-nosnippet>195</a>
-<a href=#196 id=196 data-nosnippet>196</a>    <span class="attr">#[test]
-<a href=#197 id=197 data-nosnippet>197</a>    </span><span class="kw">fn </span>refill_from_empty_and_fully_consumed_windows() {
-<a href=#198 id=198 data-nosnippet>198</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
-<a href=#199 id=199 data-nosnippet>199</a>        <span class="comment">// Refill into an empty window: no residual to compact.
-<a href=#200 id=200 data-nosnippet>200</a>        </span>w.refill(<span class="string">b"first"</span>);
-<a href=#201 id=201 data-nosnippet>201</a>        w.consume(<span class="number">5</span>); <span class="comment">// fully consumed
-<a href=#202 id=202 data-nosnippet>202</a>        </span><span class="macro">assert!</span>(w.is_empty());
-<a href=#203 id=203 data-nosnippet>203</a>        <span class="comment">// Refill after full consumption: compaction removes everything, then appends.
-<a href=#204 id=204 data-nosnippet>204</a>        </span>w.refill(<span class="string">b"second"</span>);
-<a href=#205 id=205 data-nosnippet>205</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"second"</span>);
-<a href=#206 id=206 data-nosnippet>206</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">6</span>);
-<a href=#207 id=207 data-nosnippet>207</a>    }
-<a href=#208 id=208 data-nosnippet>208</a>}
+<a href=#17 id=17 data-nosnippet>17</a>/// Both variants carry a [`Bytes`] payload; the distinction exists so the
+<a href=#18 id=18 data-nosnippet>18</a>/// window-borrow work-probe can record how many bytes were physically COPIED
+<a href=#19 id=19 data-nosnippet>19</a>/// (`Owned`) vs BORROWED (zero-copy refcount view, `Borrowed`) — the #1644
+<a href=#20 id=20 data-nosnippet>20</a>/// acceptance proof (scan-window-borrow spec, "bytes copied into values").
+<a href=#21 id=21 data-nosnippet>21</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#22 id=22 data-nosnippet>22</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">enum </span>ValueBytes {
+<a href=#23 id=23 data-nosnippet>23</a>    <span class="doccomment">/// A refcounted view of the parent chunk's `Bytes` — no allocation.
+<a href=#24 id=24 data-nosnippet>24</a>    </span>Borrowed(Bytes),
+<a href=#25 id=25 data-nosnippet>25</a>    <span class="doccomment">/// A standalone copy: either the range straddled a chunk boundary (no
+<a href=#26 id=26 data-nosnippet>26</a>    /// single parent `Bytes` to slice — correctness over borrow, D1), or the
+<a href=#27 id=27 data-nosnippet>27</a>    /// window had no active `Bytes` backing (e.g. the `Vec&lt;u8&gt;`-based
+<a href=#28 id=28 data-nosnippet>28</a>    /// compaction driver, which never adopted the #1940 `Bytes` substrate).
+<a href=#29 id=29 data-nosnippet>29</a>    </span>Owned(Bytes),
+<a href=#30 id=30 data-nosnippet>30</a>}
+<a href=#31 id=31 data-nosnippet>31</a>
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">impl </span>ValueBytes {
+<a href=#33 id=33 data-nosnippet>33</a>    <span class="doccomment">/// Take the payload, discarding the borrowed/owned distinction.
+<a href=#34 id=34 data-nosnippet>34</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>into_bytes(<span class="self">self</span>) -&gt; Bytes {
+<a href=#35 id=35 data-nosnippet>35</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#36 id=36 data-nosnippet>36</a>            ValueBytes::Borrowed(b) | ValueBytes::Owned(b) =&gt; b,
+<a href=#37 id=37 data-nosnippet>37</a>        }
+<a href=#38 id=38 data-nosnippet>38</a>    }
+<a href=#39 id=39 data-nosnippet>39</a>}
+<a href=#40 id=40 data-nosnippet>40</a>
+<a href=#41 id=41 data-nosnippet>41</a><span class="doccomment">/// Shared pointer-range check (issue #1644, D1): is `sub` a subslice of
+<a href=#42 id=42 data-nosnippet>42</a>/// `base`? If so, calls `on_borrow(offset, len)` to produce a zero-copy
+<a href=#43 id=43 data-nosnippet>43</a>/// [`ValueBytes::Borrowed`]; otherwise falls back to an owned copy of `sub`.
+<a href=#44 id=44 data-nosnippet>44</a>///
+<a href=#45 id=45 data-nosnippet>45</a>/// Used by BOTH [`WindowCursor::borrow_subslice`] (against `self.as_slice()`,
+<a href=#46 id=46 data-nosnippet>46</a>/// when the window's backing is `Backing::Borrowed`) and
+<a href=#47 id=47 data-nosnippet>47</a>/// [`super::value_borrow::borrow_active`] (against the active window's raw
+<a href=#48 id=48 data-nosnippet>48</a>/// `Bytes`, installed via a thread-local for the streaming decode call graph)
+<a href=#49 id=49 data-nosnippet>49</a>/// — the ONE implementation of the pointer-range check, per D1's "localize the
+<a href=#50 id=50 data-nosnippet>50</a>/// borrow/copy decision to one place". The check is a pointer-VALUE
+<a href=#51 id=51 data-nosnippet>51</a>/// comparison only (`as usize` casts, never a dereference outside `sub`'s own
+<a href=#52 id=52 data-nosnippet>52</a>/// valid range), so it can only ever choose borrow-vs-copy, never affect
+<a href=#53 id=53 data-nosnippet>53</a>/// memory safety: the copy fallback dereferences only `sub` itself, a slice
+<a href=#54 id=54 data-nosnippet>54</a>/// the caller already legitimately holds.
+<a href=#55 id=55 data-nosnippet>55</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>borrow_bytes_subslice(
+<a href=#56 id=56 data-nosnippet>56</a>    base: <span class="kw-2">&amp;</span>[u8],
+<a href=#57 id=57 data-nosnippet>57</a>    sub: <span class="kw-2">&amp;</span>[u8],
+<a href=#58 id=58 data-nosnippet>58</a>    on_borrow: <span class="kw">impl </span>FnOnce(usize, usize) -&gt; ValueBytes,
+<a href=#59 id=59 data-nosnippet>59</a>) -&gt; ValueBytes {
+<a href=#60 id=60 data-nosnippet>60</a>    <span class="kw">if </span>sub.is_empty() {
+<a href=#61 id=61 data-nosnippet>61</a>        <span class="kw">return </span>ValueBytes::Owned(Bytes::new());
+<a href=#62 id=62 data-nosnippet>62</a>    }
+<a href=#63 id=63 data-nosnippet>63</a>    <span class="kw">let </span>base_start = base.as_ptr() <span class="kw">as </span>usize;
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="kw">let </span>base_end = base_start + base.len();
+<a href=#65 id=65 data-nosnippet>65</a>    <span class="kw">let </span>sub_start = sub.as_ptr() <span class="kw">as </span>usize;
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="kw">let </span>sub_end = sub_start.saturating_add(sub.len());
+<a href=#67 id=67 data-nosnippet>67</a>    <span class="kw">if </span>sub_start &gt;= base_start &amp;&amp; sub_end &lt;= base_end {
+<a href=#68 id=68 data-nosnippet>68</a>        on_borrow(sub_start - base_start, sub.len())
+<a href=#69 id=69 data-nosnippet>69</a>    } <span class="kw">else </span>{
+<a href=#70 id=70 data-nosnippet>70</a>        <span class="attr">#[cfg(feature = <span class="string">"scan-offload-probe"</span>)]
+<a href=#71 id=71 data-nosnippet>71</a>        </span>probe::note_bytes_copied_into_value(sub.len());
+<a href=#72 id=72 data-nosnippet>72</a>        ValueBytes::Owned(Bytes::copy_from_slice(sub))
+<a href=#73 id=73 data-nosnippet>73</a>    }
+<a href=#74 id=74 data-nosnippet>74</a>}
+<a href=#75 id=75 data-nosnippet>75</a>
+<a href=#76 id=76 data-nosnippet>76</a><span class="doccomment">/// The window's backing storage (issue #1644, D1).
+<a href=#77 id=77 data-nosnippet>77</a></span><span class="kw">enum </span>Backing {
+<a href=#78 id=78 data-nosnippet>78</a>    <span class="doccomment">/// The logical window IS exactly one chunk's `Bytes` (a cursor over it,
+<a href=#79 id=79 data-nosnippet>79</a>    /// `start` tracks consumption). The steady state: the previous chunk was
+<a href=#80 id=80 data-nosnippet>80</a>    /// fully consumed before the next arrived, so `refill_owned` REPLACED the
+<a href=#81 id=81 data-nosnippet>81</a>    /// backing with the incoming `Bytes` by move + refcount — no copy.
+<a href=#82 id=82 data-nosnippet>82</a>    </span>Borrowed(Bytes),
+<a href=#83 id=83 data-nosnippet>83</a>    <span class="doccomment">/// A partition straddled a chunk boundary, leaving a residual unconsumed
+<a href=#84 id=84 data-nosnippet>84</a>    /// tail that had to be concatenated with the next chunk into an owned
+<a href=#85 id=85 data-nosnippet>85</a>    /// buffer — the pre-#1644 copy path. Also the ONLY state the `Vec&lt;u8&gt;`-
+<a href=#86 id=86 data-nosnippet>86</a>    /// sourced compaction driver ever uses (it has no `Bytes` to move).
+<a href=#87 id=87 data-nosnippet>87</a>    </span>Stitched(Vec&lt;u8&gt;),
+<a href=#88 id=88 data-nosnippet>88</a>}
+<a href=#89 id=89 data-nosnippet>89</a>
+<a href=#90 id=90 data-nosnippet>90</a><span class="doccomment">/// A decompressed-byte window with a FRONT CURSOR (issue #1589) and a
+<a href=#91 id=91 data-nosnippet>91</a>/// [`Bytes`]-native borrow path (issue #1644).
+<a href=#92 id=92 data-nosnippet>92</a>///
+<a href=#93 id=93 data-nosnippet>93</a>/// Invariant: `start &lt;= backing.len()`. The logical window (the bytes not yet
+<a href=#94 id=94 data-nosnippet>94</a>/// consumed) is `backing[start..]`. [`consume`](Self::consume) advances `start`
+<a href=#95 id=95 data-nosnippet>95</a>/// with NO memmove; a refill ([`refill`](Self::refill) /
+<a href=#96 id=96 data-nosnippet>96</a>/// [`refill_owned`](Self::refill_owned)) reclaims the consumed prefix with a
+<a href=#97 id=97 data-nosnippet>97</a>/// SINGLE compaction — once per refill, not once per confirmed partition —
+<a href=#98 id=98 data-nosnippet>98</a>/// then appends the new chunk. Each byte is therefore physically moved at most
+<a href=#99 id=99 data-nosnippet>99</a>/// once per refill it survives.
+<a href=#100 id=100 data-nosnippet>100</a>///
+<a href=#101 id=101 data-nosnippet>101</a>/// [`as_slice`](Self::as_slice) yields exactly the same unconsumed bytes
+<a href=#102 id=102 data-nosnippet>102</a>/// regardless of backing — the parser's scanning/boundary logic is UNCHANGED;
+<a href=#103 id=103 data-nosnippet>103</a>/// only value-materialization call sites use [`borrow`](Self::borrow) /
+<a href=#104 id=104 data-nosnippet>104</a>/// [`borrow_subslice`](Self::borrow_subslice).
+<a href=#105 id=105 data-nosnippet>105</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>WindowCursor {
+<a href=#106 id=106 data-nosnippet>106</a>    backing: Backing,
+<a href=#107 id=107 data-nosnippet>107</a>    start: usize,
+<a href=#108 id=108 data-nosnippet>108</a>}
+<a href=#109 id=109 data-nosnippet>109</a>
+<a href=#110 id=110 data-nosnippet>110</a><span class="kw">impl </span>WindowCursor {
+<a href=#111 id=111 data-nosnippet>111</a>    <span class="doccomment">/// A new, empty window.
+<a href=#112 id=112 data-nosnippet>112</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new() -&gt; <span class="self">Self </span>{
+<a href=#113 id=113 data-nosnippet>113</a>        <span class="self">Self </span>{
+<a href=#114 id=114 data-nosnippet>114</a>            backing: Backing::Stitched(Vec::new()),
+<a href=#115 id=115 data-nosnippet>115</a>            start: <span class="number">0</span>,
+<a href=#116 id=116 data-nosnippet>116</a>        }
+<a href=#117 id=117 data-nosnippet>117</a>    }
+<a href=#118 id=118 data-nosnippet>118</a>
+<a href=#119 id=119 data-nosnippet>119</a>    <span class="doccomment">/// A cheap, immutable SNAPSHOT view over `bytes` alone — used by
+<a href=#120 id=120 data-nosnippet>120</a>    /// [`super::value_borrow::ActiveWindowGuard`] to install the current
+<a href=#121 id=121 data-nosnippet>121</a>    /// window's active `Bytes` (issue #1644, D1) as a small standalone
+<a href=#122 id=122 data-nosnippet>122</a>    /// `WindowCursor` a decode site can call [`borrow_subslice`](Self::borrow_subslice)
+<a href=#123 id=123 data-nosnippet>123</a>    /// on, without holding a live reference to the real scanning window (whose
+<a href=#124 id=124 data-nosnippet>124</a>    /// `start` cursor keeps advancing as decode proceeds — the snapshot's own
+<a href=#125 id=125 data-nosnippet>125</a>    /// `start` stays 0, matching `bytes`'s full extent).
+<a href=#126 id=126 data-nosnippet>126</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>from_borrowed_bytes(bytes: Bytes) -&gt; <span class="self">Self </span>{
+<a href=#127 id=127 data-nosnippet>127</a>        <span class="self">Self </span>{
+<a href=#128 id=128 data-nosnippet>128</a>            backing: Backing::Borrowed(bytes),
+<a href=#129 id=129 data-nosnippet>129</a>            start: <span class="number">0</span>,
+<a href=#130 id=130 data-nosnippet>130</a>        }
+<a href=#131 id=131 data-nosnippet>131</a>    }
+<a href=#132 id=132 data-nosnippet>132</a>
+<a href=#133 id=133 data-nosnippet>133</a>    <span class="attr">#[inline]
+<a href=#134 id=134 data-nosnippet>134</a>    </span><span class="kw">fn </span>backing_slice(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[u8] {
+<a href=#135 id=135 data-nosnippet>135</a>        <span class="kw">match </span><span class="kw-2">&amp;</span><span class="self">self</span>.backing {
+<a href=#136 id=136 data-nosnippet>136</a>            Backing::Borrowed(b) =&gt; b,
+<a href=#137 id=137 data-nosnippet>137</a>            Backing::Stitched(v) =&gt; v,
+<a href=#138 id=138 data-nosnippet>138</a>        }
+<a href=#139 id=139 data-nosnippet>139</a>    }
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a>    <span class="doccomment">/// The unconsumed bytes — the logical window the parser reads. Cursor-relative.
+<a href=#142 id=142 data-nosnippet>142</a>    </span><span class="attr">#[inline]
+<a href=#143 id=143 data-nosnippet>143</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>as_slice(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[u8] {
+<a href=#144 id=144 data-nosnippet>144</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.backing_slice()[<span class="self">self</span>.start..]
+<a href=#145 id=145 data-nosnippet>145</a>    }
+<a href=#146 id=146 data-nosnippet>146</a>
+<a href=#147 id=147 data-nosnippet>147</a>    <span class="doccomment">/// Number of unconsumed bytes remaining in the logical window.
+<a href=#148 id=148 data-nosnippet>148</a>    </span><span class="attr">#[inline]
+<a href=#149 id=149 data-nosnippet>149</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>len(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#150 id=150 data-nosnippet>150</a>        <span class="self">self</span>.backing_slice().len() - <span class="self">self</span>.start
+<a href=#151 id=151 data-nosnippet>151</a>    }
+<a href=#152 id=152 data-nosnippet>152</a>
+<a href=#153 id=153 data-nosnippet>153</a>    <span class="doccomment">/// Whether the logical window is empty (all appended bytes consumed).
+<a href=#154 id=154 data-nosnippet>154</a>    </span><span class="attr">#[inline]
+<a href=#155 id=155 data-nosnippet>155</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>is_empty(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#156 id=156 data-nosnippet>156</a>        <span class="self">self</span>.start &gt;= <span class="self">self</span>.backing_slice().len()
+<a href=#157 id=157 data-nosnippet>157</a>    }
+<a href=#158 id=158 data-nosnippet>158</a>
+<a href=#159 id=159 data-nosnippet>159</a>    <span class="doccomment">/// Consume `n` bytes from the FRONT of the logical window by advancing the
+<a href=#160 id=160 data-nosnippet>160</a>    /// cursor — NO memmove. `n` is clamped to the unconsumed length, exactly
+<a href=#161 id=161 data-nosnippet>161</a>    /// matching the prior `drain(0..n.min(len))` semantics (a parser reporting
+<a href=#162 id=162 data-nosnippet>162</a>    /// `consumed &gt; remaining` cannot advance the cursor past the window end).
+<a href=#163 id=163 data-nosnippet>163</a>    </span><span class="attr">#[inline]
+<a href=#164 id=164 data-nosnippet>164</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>consume(<span class="kw-2">&amp;mut </span><span class="self">self</span>, n: usize) {
+<a href=#165 id=165 data-nosnippet>165</a>        <span class="kw">let </span>capped = n.min(<span class="self">self</span>.len());
+<a href=#166 id=166 data-nosnippet>166</a>        <span class="self">self</span>.start += capped;
+<a href=#167 id=167 data-nosnippet>167</a>    }
+<a href=#168 id=168 data-nosnippet>168</a>
+<a href=#169 id=169 data-nosnippet>169</a>    <span class="doccomment">/// The current window's `Bytes` backing when it is a single, un-stitched
+<a href=#170 id=170 data-nosnippet>170</a>    /// chunk (issue #1644, D1) — `None` when the window is
+<a href=#171 id=171 data-nosnippet>171</a>    /// [`Backing::Stitched`] (a straddle occurred, or this window has never
+<a href=#172 id=172 data-nosnippet>172</a>    /// received a `Bytes`-sourced refill, e.g. the compaction driver). A clone
+<a href=#173 id=173 data-nosnippet>173</a>    /// is a refcount bump, not a copy: cheap to call once per partition-parse
+<a href=#174 id=174 data-nosnippet>174</a>    /// to install the active borrow source (`value_borrow`).
+<a href=#175 id=175 data-nosnippet>175</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>active_bytes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;Bytes&gt; {
+<a href=#176 id=176 data-nosnippet>176</a>        <span class="kw">match </span><span class="kw-2">&amp;</span><span class="self">self</span>.backing {
+<a href=#177 id=177 data-nosnippet>177</a>            Backing::Borrowed(b) =&gt; <span class="prelude-val">Some</span>(b.clone()),
+<a href=#178 id=178 data-nosnippet>178</a>            Backing::Stitched(<span class="kw">_</span>) =&gt; <span class="prelude-val">None</span>,
+<a href=#179 id=179 data-nosnippet>179</a>        }
+<a href=#180 id=180 data-nosnippet>180</a>    }
+<a href=#181 id=181 data-nosnippet>181</a>
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="doccomment">/// Borrow the byte range `range` (relative to the LOGICAL window — the same
+<a href=#183 id=183 data-nosnippet>183</a>    /// coordinate space as `as_slice()`) as a [`ValueBytes`] (issue #1644, D1).
+<a href=#184 id=184 data-nosnippet>184</a>    ///
+<a href=#185 id=185 data-nosnippet>185</a>    /// - [`Backing::Borrowed`] → a zero-copy [`Bytes::slice`] view (refcount
+<a href=#186 id=186 data-nosnippet>186</a>    ///   bump only).
+<a href=#187 id=187 data-nosnippet>187</a>    /// - [`Backing::Stitched`] → an owned copy: a straddling value has no
+<a href=#188 id=188 data-nosnippet>188</a>    ///   single parent `Bytes` to slice from, so correctness takes the copy
+<a href=#189 id=189 data-nosnippet>189</a>    ///   (D1 — never sacrifice correctness to avoid a copy).
+<a href=#190 id=190 data-nosnippet>190</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>borrow(<span class="kw-2">&amp;</span><span class="self">self</span>, range: Range&lt;usize&gt;) -&gt; ValueBytes {
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="kw">let </span>abs_start = <span class="self">self</span>.start + range.start;
+<a href=#192 id=192 data-nosnippet>192</a>        <span class="kw">let </span>abs_end = <span class="self">self</span>.start + range.end;
+<a href=#193 id=193 data-nosnippet>193</a>        <span class="kw">match </span><span class="kw-2">&amp;</span><span class="self">self</span>.backing {
+<a href=#194 id=194 data-nosnippet>194</a>            Backing::Borrowed(b) =&gt; ValueBytes::Borrowed(b.slice(abs_start..abs_end)),
+<a href=#195 id=195 data-nosnippet>195</a>            Backing::Stitched(v) =&gt; {
+<a href=#196 id=196 data-nosnippet>196</a>                <span class="attr">#[cfg(feature = <span class="string">"scan-offload-probe"</span>)]
+<a href=#197 id=197 data-nosnippet>197</a>                </span>probe::note_bytes_copied_into_value(abs_end.saturating_sub(abs_start));
+<a href=#198 id=198 data-nosnippet>198</a>                ValueBytes::Owned(Bytes::copy_from_slice(<span class="kw-2">&amp;</span>v[abs_start..abs_end]))
+<a href=#199 id=199 data-nosnippet>199</a>            }
+<a href=#200 id=200 data-nosnippet>200</a>        }
+<a href=#201 id=201 data-nosnippet>201</a>    }
+<a href=#202 id=202 data-nosnippet>202</a>
+<a href=#203 id=203 data-nosnippet>203</a>    <span class="doccomment">/// Borrow `sub` — a byte slice a caller holds that is EXPECTED to be a
+<a href=#204 id=204 data-nosnippet>204</a>    /// subslice of `self.as_slice()` — as a [`ValueBytes`] (issue #1644, D1).
+<a href=#205 id=205 data-nosnippet>205</a>    ///
+<a href=#206 id=206 data-nosnippet>206</a>    /// Delegates to [`borrow_bytes_subslice`], the shared pointer-range check
+<a href=#207 id=207 data-nosnippet>207</a>    /// also used by [`super::value_borrow`] (the active-window decode-borrow
+<a href=#208 id=208 data-nosnippet>208</a>    /// source), against `self.as_slice()`.
+<a href=#209 id=209 data-nosnippet>209</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>borrow_subslice(<span class="kw-2">&amp;</span><span class="self">self</span>, sub: <span class="kw-2">&amp;</span>[u8]) -&gt; ValueBytes {
+<a href=#210 id=210 data-nosnippet>210</a>        borrow_bytes_subslice(<span class="self">self</span>.as_slice(), sub, |offset, len| {
+<a href=#211 id=211 data-nosnippet>211</a>            <span class="self">self</span>.borrow(offset..offset + len)
+<a href=#212 id=212 data-nosnippet>212</a>        })
+<a href=#213 id=213 data-nosnippet>213</a>    }
+<a href=#214 id=214 data-nosnippet>214</a>
+<a href=#215 id=215 data-nosnippet>215</a>    <span class="doccomment">/// Reclaim the consumed prefix (single compaction) so a fresh chunk can be
+<a href=#216 id=216 data-nosnippet>216</a>    /// appended at offset 0, returning an owned buffer holding ONLY the
+<a href=#217 id=217 data-nosnippet>217</a>    /// unconsumed residual at offset 0. Shared by both refill entry points below.
+<a href=#218 id=218 data-nosnippet>218</a>    ///
+<a href=#219 id=219 data-nosnippet>219</a>    /// When the backing is already an owned [`Backing::Stitched`] `Vec`, the
+<a href=#220 id=220 data-nosnippet>220</a>    /// residual is compacted IN PLACE (`copy_within` + `truncate`), REUSING the
+<a href=#221 id=221 data-nosnippet>221</a>    /// existing allocation — no fresh `Vec` per refill (the pre-#1644
+<a href=#222 id=222 data-nosnippet>222</a>    /// allocation pattern). A [`Backing::Borrowed`] chunk has no reusable owned
+<a href=#223 id=223 data-nosnippet>223</a>    /// `Vec`, so its residual is copied into a fresh one.
+<a href=#224 id=224 data-nosnippet>224</a>    </span><span class="kw">fn </span>take_residual_buf(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; Vec&lt;u8&gt; {
+<a href=#225 id=225 data-nosnippet>225</a>        <span class="kw">let </span>start = <span class="self">self</span>.start;
+<a href=#226 id=226 data-nosnippet>226</a>        <span class="kw">let </span>residual_len = <span class="self">self</span>.len();
+<a href=#227 id=227 data-nosnippet>227</a>        <span class="attr">#[cfg(feature = <span class="string">"scan-offload-probe"</span>)]
+<a href=#228 id=228 data-nosnippet>228</a>        </span><span class="kw">if </span>start &gt; <span class="number">0 </span>{
+<a href=#229 id=229 data-nosnippet>229</a>            probe::note_bytes_memmoved(residual_len);
+<a href=#230 id=230 data-nosnippet>230</a>        }
+<a href=#231 id=231 data-nosnippet>231</a>        <span class="kw">match </span>std::mem::replace(<span class="kw-2">&amp;mut </span><span class="self">self</span>.backing, Backing::Stitched(Vec::new())) {
+<a href=#232 id=232 data-nosnippet>232</a>            Backing::Stitched(<span class="kw-2">mut </span>buf) =&gt; {
+<a href=#233 id=233 data-nosnippet>233</a>                <span class="kw">if </span>start &gt; <span class="number">0 </span>{
+<a href=#234 id=234 data-nosnippet>234</a>                    buf.copy_within(start.., <span class="number">0</span>);
+<a href=#235 id=235 data-nosnippet>235</a>                }
+<a href=#236 id=236 data-nosnippet>236</a>                buf.truncate(residual_len);
+<a href=#237 id=237 data-nosnippet>237</a>                buf
+<a href=#238 id=238 data-nosnippet>238</a>            }
+<a href=#239 id=239 data-nosnippet>239</a>            Backing::Borrowed(b) =&gt; {
+<a href=#240 id=240 data-nosnippet>240</a>                <span class="kw">let </span><span class="kw-2">mut </span>buf = Vec::with_capacity(residual_len);
+<a href=#241 id=241 data-nosnippet>241</a>                buf.extend_from_slice(<span class="kw-2">&amp;</span>b[start..]);
+<a href=#242 id=242 data-nosnippet>242</a>                buf
+<a href=#243 id=243 data-nosnippet>243</a>            }
+<a href=#244 id=244 data-nosnippet>244</a>        }
+<a href=#245 id=245 data-nosnippet>245</a>    }
+<a href=#246 id=246 data-nosnippet>246</a>
+<a href=#247 id=247 data-nosnippet>247</a>    <span class="doccomment">/// Append a freshly decompressed `chunk` sourced as an OWNED, refcounted
+<a href=#248 id=248 data-nosnippet>248</a>    /// [`Bytes`] (issue #1644 — the #1940 substrate; `scan_stream_windowed`'s
+<a href=#249 id=249 data-nosnippet>249</a>    /// Bytes-sourced IO half).
+<a href=#250 id=250 data-nosnippet>250</a>    ///
+<a href=#251 id=251 data-nosnippet>251</a>    /// When the window is fully consumed (`self.is_empty()`, the steady state:
+<a href=#252 id=252 data-nosnippet>252</a>    /// the previous chunk was drained before this one arrived), REPLACES the
+<a href=#253 id=253 data-nosnippet>253</a>    /// backing directly with `chunk` — a move + refcount bump, NOT a copy —
+<a href=#254 id=254 data-nosnippet>254</a>    /// switching to [`Backing::Borrowed`] so subsequent `borrow`/`borrow_subslice`
+<a href=#255 id=255 data-nosnippet>255</a>    /// calls for this chunk are zero-copy. Otherwise (a residual straddling
+<a href=#256 id=256 data-nosnippet>256</a>    /// tail survives) stitches: copies the residual + `chunk` into one owned
+<a href=#257 id=257 data-nosnippet>257</a>    /// `Vec&lt;u8&gt;` ([`Backing::Stitched`]) — a straddling value has no single
+<a href=#258 id=258 data-nosnippet>258</a>    /// parent `Bytes`, so correctness requires the copy fallback (D1).
+<a href=#259 id=259 data-nosnippet>259</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>refill_owned(<span class="kw-2">&amp;mut </span><span class="self">self</span>, chunk: Bytes) {
+<a href=#260 id=260 data-nosnippet>260</a>        <span class="attr">#[cfg(feature = <span class="string">"scan-offload-probe"</span>)]
+<a href=#261 id=261 data-nosnippet>261</a>        </span>probe::note_bytes_appended(chunk.len());
+<a href=#262 id=262 data-nosnippet>262</a>        <span class="kw">if </span><span class="self">self</span>.is_empty() {
+<a href=#263 id=263 data-nosnippet>263</a>            <span class="self">self</span>.backing = Backing::Borrowed(chunk);
+<a href=#264 id=264 data-nosnippet>264</a>            <span class="self">self</span>.start = <span class="number">0</span>;
+<a href=#265 id=265 data-nosnippet>265</a>            <span class="kw">return</span>;
+<a href=#266 id=266 data-nosnippet>266</a>        }
+<a href=#267 id=267 data-nosnippet>267</a>        <span class="kw">let </span><span class="kw-2">mut </span>residual = <span class="self">self</span>.take_residual_buf();
+<a href=#268 id=268 data-nosnippet>268</a>        residual.reserve(chunk.len());
+<a href=#269 id=269 data-nosnippet>269</a>        residual.extend_from_slice(<span class="kw-2">&amp;</span>chunk);
+<a href=#270 id=270 data-nosnippet>270</a>        <span class="self">self</span>.backing = Backing::Stitched(residual);
+<a href=#271 id=271 data-nosnippet>271</a>        <span class="self">self</span>.start = <span class="number">0</span>;
+<a href=#272 id=272 data-nosnippet>272</a>    }
+<a href=#273 id=273 data-nosnippet>273</a>
+<a href=#274 id=274 data-nosnippet>274</a>    <span class="doccomment">/// Append a freshly decompressed `chunk` sourced as a borrowed `&amp;[u8]`
+<a href=#275 id=275 data-nosnippet>275</a>    /// (the `Vec&lt;u8&gt;`-based compaction driver, which never adopted the #1940
+<a href=#276 id=276 data-nosnippet>276</a>    /// `Bytes` substrate). ALWAYS copies — there is no `Bytes` to move — so the
+<a href=#277 id=277 data-nosnippet>277</a>    /// window ends up [`Backing::Stitched`] regardless of prior state. Like the
+<a href=#278 id=278 data-nosnippet>278</a>    /// pre-#1644 path it compacts the residual IN PLACE and appends into the
+<a href=#279 id=279 data-nosnippet>279</a>    /// reused buffer (see [`take_residual_buf`](Self::take_residual_buf)) — no
+<a href=#280 id=280 data-nosnippet>280</a>    /// fresh allocation per refill. See [`refill_owned`](Self::refill_owned) for
+<a href=#281 id=281 data-nosnippet>281</a>    /// the Bytes-sourced zero-copy-refill fast path.
+<a href=#282 id=282 data-nosnippet>282</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>refill(<span class="kw-2">&amp;mut </span><span class="self">self</span>, chunk: <span class="kw-2">&amp;</span>[u8]) {
+<a href=#283 id=283 data-nosnippet>283</a>        <span class="attr">#[cfg(feature = <span class="string">"scan-offload-probe"</span>)]
+<a href=#284 id=284 data-nosnippet>284</a>        </span>probe::note_bytes_appended(chunk.len());
+<a href=#285 id=285 data-nosnippet>285</a>        <span class="kw">let </span><span class="kw-2">mut </span>residual = <span class="self">self</span>.take_residual_buf();
+<a href=#286 id=286 data-nosnippet>286</a>        residual.reserve(chunk.len());
+<a href=#287 id=287 data-nosnippet>287</a>        residual.extend_from_slice(chunk);
+<a href=#288 id=288 data-nosnippet>288</a>        <span class="self">self</span>.backing = Backing::Stitched(residual);
+<a href=#289 id=289 data-nosnippet>289</a>        <span class="self">self</span>.start = <span class="number">0</span>;
+<a href=#290 id=290 data-nosnippet>290</a>    }
+<a href=#291 id=291 data-nosnippet>291</a>}
+<a href=#292 id=292 data-nosnippet>292</a>
+<a href=#293 id=293 data-nosnippet>293</a><span class="doccomment">/// Test-only probe (issue #1589) for the sliding window's byte-movement cost;
+<a href=#294 id=294 data-nosnippet>294</a>/// extended (issue #1644) with a bytes-copied-into-VALUES counter — the
+<a href=#295 id=295 data-nosnippet>295</a>/// scan-window-borrow acceptance proof (bytes-copied-into-values ≈ 0 on the
+<a href=#296 id=296 data-nosnippet>296</a>/// non-straddling borrow path).
+<a href=#297 id=297 data-nosnippet>297</a>///
+<a href=#298 id=298 data-nosnippet>298</a>/// Records the total bytes physically memmoved by the window's consume/compact
+<a href=#299 id=299 data-nosnippet>299</a>/// path, the total decompressed bytes appended, and the total bytes copied
+<a href=#300 id=300 data-nosnippet>300</a>/// (rather than borrowed) into a materialized value. Compiled ONLY under the
+<a href=#301 id=301 data-nosnippet>301</a>/// non-default `scan-offload-probe` feature, so it adds zero cost and no public
+<a href=#302 id=302 data-nosnippet>302</a>/// surface in normal/release builds.
+<a href=#303 id=303 data-nosnippet>303</a></span><span class="attr">#[cfg(feature = <span class="string">"scan-offload-probe"</span>)]
+<a href=#304 id=304 data-nosnippet>304</a>#[doc(hidden)]
+<a href=#305 id=305 data-nosnippet>305</a></span><span class="kw">pub mod </span>probe {
+<a href=#306 id=306 data-nosnippet>306</a>    <span class="kw">use </span>std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+<a href=#307 id=307 data-nosnippet>307</a>
+<a href=#308 id=308 data-nosnippet>308</a>    <span class="kw">static </span>ARMED: AtomicBool = AtomicBool::new(<span class="bool-val">false</span>);
+<a href=#309 id=309 data-nosnippet>309</a>    <span class="kw">static </span>BYTES_MEMMOVED: AtomicUsize = AtomicUsize::new(<span class="number">0</span>);
+<a href=#310 id=310 data-nosnippet>310</a>    <span class="kw">static </span>BYTES_APPENDED: AtomicUsize = AtomicUsize::new(<span class="number">0</span>);
+<a href=#311 id=311 data-nosnippet>311</a>    <span class="kw">static </span>BYTES_COPIED_INTO_VALUES: AtomicUsize = AtomicUsize::new(<span class="number">0</span>);
+<a href=#312 id=312 data-nosnippet>312</a>
+<a href=#313 id=313 data-nosnippet>313</a>    <span class="doccomment">/// Arm the probe and reset the counters. Call before driving a scan/compaction.
+<a href=#314 id=314 data-nosnippet>314</a>    </span><span class="kw">pub fn </span>arm() {
+<a href=#315 id=315 data-nosnippet>315</a>        BYTES_MEMMOVED.store(<span class="number">0</span>, Ordering::SeqCst);
+<a href=#316 id=316 data-nosnippet>316</a>        BYTES_APPENDED.store(<span class="number">0</span>, Ordering::SeqCst);
+<a href=#317 id=317 data-nosnippet>317</a>        BYTES_COPIED_INTO_VALUES.store(<span class="number">0</span>, Ordering::SeqCst);
+<a href=#318 id=318 data-nosnippet>318</a>        ARMED.store(<span class="bool-val">true</span>, Ordering::SeqCst);
+<a href=#319 id=319 data-nosnippet>319</a>    }
+<a href=#320 id=320 data-nosnippet>320</a>
+<a href=#321 id=321 data-nosnippet>321</a>    <span class="doccomment">/// Disarm the probe (restores the production no-op state).
+<a href=#322 id=322 data-nosnippet>322</a>    </span><span class="kw">pub fn </span>disarm() {
+<a href=#323 id=323 data-nosnippet>323</a>        ARMED.store(<span class="bool-val">false</span>, Ordering::SeqCst);
+<a href=#324 id=324 data-nosnippet>324</a>    }
+<a href=#325 id=325 data-nosnippet>325</a>
+<a href=#326 id=326 data-nosnippet>326</a>    <span class="doccomment">/// Record `n` bytes physically memmoved while consuming/compacting the window.
+<a href=#327 id=327 data-nosnippet>327</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>note_bytes_memmoved(n: usize) {
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="kw">if </span>ARMED.load(Ordering::Relaxed) {
+<a href=#329 id=329 data-nosnippet>329</a>            BYTES_MEMMOVED.fetch_add(n, Ordering::Relaxed);
+<a href=#330 id=330 data-nosnippet>330</a>        }
+<a href=#331 id=331 data-nosnippet>331</a>    }
+<a href=#332 id=332 data-nosnippet>332</a>
+<a href=#333 id=333 data-nosnippet>333</a>    <span class="doccomment">/// Record `n` bytes appended (decompressed) into the window, if armed.
+<a href=#334 id=334 data-nosnippet>334</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>note_bytes_appended(n: usize) {
+<a href=#335 id=335 data-nosnippet>335</a>        <span class="kw">if </span>ARMED.load(Ordering::Relaxed) {
+<a href=#336 id=336 data-nosnippet>336</a>            BYTES_APPENDED.fetch_add(n, Ordering::Relaxed);
+<a href=#337 id=337 data-nosnippet>337</a>        }
+<a href=#338 id=338 data-nosnippet>338</a>    }
+<a href=#339 id=339 data-nosnippet>339</a>
+<a href=#340 id=340 data-nosnippet>340</a>    <span class="doccomment">/// Record `n` bytes COPIED (not borrowed) into a materialized value's
+<a href=#341 id=341 data-nosnippet>341</a>    /// `Bytes` payload — the #1644 window-borrow work-probe.
+<a href=#342 id=342 data-nosnippet>342</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>note_bytes_copied_into_value(n: usize) {
+<a href=#343 id=343 data-nosnippet>343</a>        <span class="kw">if </span>ARMED.load(Ordering::Relaxed) {
+<a href=#344 id=344 data-nosnippet>344</a>            BYTES_COPIED_INTO_VALUES.fetch_add(n, Ordering::Relaxed);
+<a href=#345 id=345 data-nosnippet>345</a>        }
+<a href=#346 id=346 data-nosnippet>346</a>    }
+<a href=#347 id=347 data-nosnippet>347</a>
+<a href=#348 id=348 data-nosnippet>348</a>    <span class="doccomment">/// Total bytes physically memmoved by the window during the armed run.
+<a href=#349 id=349 data-nosnippet>349</a>    </span><span class="kw">pub fn </span>recorded_bytes_memmoved() -&gt; usize {
+<a href=#350 id=350 data-nosnippet>350</a>        BYTES_MEMMOVED.load(Ordering::Relaxed)
+<a href=#351 id=351 data-nosnippet>351</a>    }
+<a href=#352 id=352 data-nosnippet>352</a>
+<a href=#353 id=353 data-nosnippet>353</a>    <span class="doccomment">/// Total decompressed bytes appended into the window during the armed run.
+<a href=#354 id=354 data-nosnippet>354</a>    </span><span class="kw">pub fn </span>recorded_bytes_appended() -&gt; usize {
+<a href=#355 id=355 data-nosnippet>355</a>        BYTES_APPENDED.load(Ordering::Relaxed)
+<a href=#356 id=356 data-nosnippet>356</a>    }
+<a href=#357 id=357 data-nosnippet>357</a>
+<a href=#358 id=358 data-nosnippet>358</a>    <span class="doccomment">/// Total bytes copied (rather than borrowed) into a materialized value
+<a href=#359 id=359 data-nosnippet>359</a>    /// during the armed run — should stay ≈0 for a non-straddling text-heavy
+<a href=#360 id=360 data-nosnippet>360</a>    /// scan (issue #1644 acceptance proof).
+<a href=#361 id=361 data-nosnippet>361</a>    </span><span class="kw">pub fn </span>recorded_bytes_copied_into_values() -&gt; usize {
+<a href=#362 id=362 data-nosnippet>362</a>        BYTES_COPIED_INTO_VALUES.load(Ordering::Relaxed)
+<a href=#363 id=363 data-nosnippet>363</a>    }
+<a href=#364 id=364 data-nosnippet>364</a>}
+<a href=#365 id=365 data-nosnippet>365</a>
+<a href=#366 id=366 data-nosnippet>366</a><span class="attr">#[cfg(test)]
+<a href=#367 id=367 data-nosnippet>367</a></span><span class="kw">mod </span>tests {
+<a href=#368 id=368 data-nosnippet>368</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#369 id=369 data-nosnippet>369</a>
+<a href=#370 id=370 data-nosnippet>370</a>    <span class="attr">#[test]
+<a href=#371 id=371 data-nosnippet>371</a>    </span><span class="kw">fn </span>consume_advances_cursor_without_memmove() {
+<a href=#372 id=372 data-nosnippet>372</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#373 id=373 data-nosnippet>373</a>        w.refill(<span class="string">b"abcdefgh"</span>);
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"abcdefgh"</span>);
+<a href=#375 id=375 data-nosnippet>375</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">8</span>);
+<a href=#376 id=376 data-nosnippet>376</a>        <span class="macro">assert!</span>(!w.is_empty());
+<a href=#377 id=377 data-nosnippet>377</a>        w.consume(<span class="number">3</span>);
+<a href=#378 id=378 data-nosnippet>378</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"defgh"</span>);
+<a href=#379 id=379 data-nosnippet>379</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">5</span>);
+<a href=#380 id=380 data-nosnippet>380</a>        w.consume(<span class="number">5</span>);
+<a href=#381 id=381 data-nosnippet>381</a>        <span class="macro">assert!</span>(w.is_empty());
+<a href=#382 id=382 data-nosnippet>382</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">0</span>);
+<a href=#383 id=383 data-nosnippet>383</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b""</span>);
+<a href=#384 id=384 data-nosnippet>384</a>    }
+<a href=#385 id=385 data-nosnippet>385</a>
+<a href=#386 id=386 data-nosnippet>386</a>    <span class="attr">#[test]
+<a href=#387 id=387 data-nosnippet>387</a>    </span><span class="kw">fn </span>consume_clamps_to_remaining() {
+<a href=#388 id=388 data-nosnippet>388</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#389 id=389 data-nosnippet>389</a>        w.refill(<span class="string">b"xyz"</span>);
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="comment">// A parser reporting more consumed than remaining must not run past the end
+<a href=#391 id=391 data-nosnippet>391</a>        // (mirrors the prior `drain(0..take.min(window.len()))` clamp).
+<a href=#392 id=392 data-nosnippet>392</a>        </span>w.consume(<span class="number">100</span>);
+<a href=#393 id=393 data-nosnippet>393</a>        <span class="macro">assert!</span>(w.is_empty());
+<a href=#394 id=394 data-nosnippet>394</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">0</span>);
+<a href=#395 id=395 data-nosnippet>395</a>    }
+<a href=#396 id=396 data-nosnippet>396</a>
+<a href=#397 id=397 data-nosnippet>397</a>    <span class="attr">#[test]
+<a href=#398 id=398 data-nosnippet>398</a>    </span><span class="kw">fn </span>refill_compacts_consumed_prefix_and_preserves_residual() {
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#400 id=400 data-nosnippet>400</a>        w.refill(<span class="string">b"aabbccdd"</span>);
+<a href=#401 id=401 data-nosnippet>401</a>        w.consume(<span class="number">6</span>); <span class="comment">// consume "aabbcc", residual "dd"
+<a href=#402 id=402 data-nosnippet>402</a>        </span><span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"dd"</span>);
+<a href=#403 id=403 data-nosnippet>403</a>        w.refill(<span class="string">b"eeff"</span>); <span class="comment">// compact residual "dd" once, then append "eeff"
+<a href=#404 id=404 data-nosnippet>404</a>        </span><span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"ddeeff"</span>);
+<a href=#405 id=405 data-nosnippet>405</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">6</span>);
+<a href=#406 id=406 data-nosnippet>406</a>        <span class="comment">// A second consume + refill continues from the compacted base.
+<a href=#407 id=407 data-nosnippet>407</a>        </span>w.consume(<span class="number">2</span>); <span class="comment">// "dd"
+<a href=#408 id=408 data-nosnippet>408</a>        </span>w.refill(<span class="string">b"gg"</span>);
+<a href=#409 id=409 data-nosnippet>409</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"eeffgg"</span>);
+<a href=#410 id=410 data-nosnippet>410</a>    }
+<a href=#411 id=411 data-nosnippet>411</a>
+<a href=#412 id=412 data-nosnippet>412</a>    <span class="attr">#[test]
+<a href=#413 id=413 data-nosnippet>413</a>    </span><span class="kw">fn </span>refill_from_empty_and_fully_consumed_windows() {
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#415 id=415 data-nosnippet>415</a>        <span class="comment">// Refill into an empty window: no residual to compact.
+<a href=#416 id=416 data-nosnippet>416</a>        </span>w.refill(<span class="string">b"first"</span>);
+<a href=#417 id=417 data-nosnippet>417</a>        w.consume(<span class="number">5</span>); <span class="comment">// fully consumed
+<a href=#418 id=418 data-nosnippet>418</a>        </span><span class="macro">assert!</span>(w.is_empty());
+<a href=#419 id=419 data-nosnippet>419</a>        <span class="comment">// Refill after full consumption: compaction removes everything, then appends.
+<a href=#420 id=420 data-nosnippet>420</a>        </span>w.refill(<span class="string">b"second"</span>);
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"second"</span>);
+<a href=#422 id=422 data-nosnippet>422</a>        <span class="macro">assert_eq!</span>(w.len(), <span class="number">6</span>);
+<a href=#423 id=423 data-nosnippet>423</a>    }
+<a href=#424 id=424 data-nosnippet>424</a>
+<a href=#425 id=425 data-nosnippet>425</a>    <span class="comment">// ---- issue #1644 (K5 stage 2): Bytes-native borrow path ----
+<a href=#426 id=426 data-nosnippet>426</a>
+<a href=#427 id=427 data-nosnippet>427</a>    </span><span class="attr">#[test]
+<a href=#428 id=428 data-nosnippet>428</a>    </span><span class="kw">fn </span>refill_owned_on_empty_window_moves_not_copies() {
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#430 id=430 data-nosnippet>430</a>        <span class="kw">let </span>chunk = Bytes::from_static(<span class="string">b"abcdefgh"</span>);
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="kw">let </span>chunk_ptr = chunk.as_ptr();
+<a href=#432 id=432 data-nosnippet>432</a>        w.refill_owned(chunk);
+<a href=#433 id=433 data-nosnippet>433</a>        <span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"abcdefgh"</span>);
+<a href=#434 id=434 data-nosnippet>434</a>        <span class="comment">// The window's active Bytes IS the same allocation (a refcount bump on
+<a href=#435 id=435 data-nosnippet>435</a>        // refill, not a copy) — same base pointer.
+<a href=#436 id=436 data-nosnippet>436</a>        </span><span class="macro">assert_eq!</span>(w.active_bytes().unwrap().as_ptr(), chunk_ptr);
+<a href=#437 id=437 data-nosnippet>437</a>    }
+<a href=#438 id=438 data-nosnippet>438</a>
+<a href=#439 id=439 data-nosnippet>439</a>    <span class="attr">#[test]
+<a href=#440 id=440 data-nosnippet>440</a>    </span><span class="kw">fn </span>borrow_within_borrowed_backing_is_zero_copy_view() {
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#442 id=442 data-nosnippet>442</a>        <span class="kw">let </span>chunk = Bytes::from_static(<span class="string">b"0123456789"</span>);
+<a href=#443 id=443 data-nosnippet>443</a>        <span class="kw">let </span>chunk_ptr = chunk.as_ptr();
+<a href=#444 id=444 data-nosnippet>444</a>        w.refill_owned(chunk);
+<a href=#445 id=445 data-nosnippet>445</a>        <span class="kw">let </span>borrowed = w.borrow(<span class="number">2</span>..<span class="number">5</span>);
+<a href=#446 id=446 data-nosnippet>446</a>        <span class="kw">match </span>borrowed {
+<a href=#447 id=447 data-nosnippet>447</a>            ValueBytes::Borrowed(b) =&gt; {
+<a href=#448 id=448 data-nosnippet>448</a>                <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>b[..], <span class="string">b"234"</span>);
+<a href=#449 id=449 data-nosnippet>449</a>                <span class="comment">// Same underlying allocation as the source chunk (a `slice`
+<a href=#450 id=450 data-nosnippet>450</a>                // view), not a fresh allocation.
+<a href=#451 id=451 data-nosnippet>451</a>                </span><span class="macro">assert_eq!</span>(b.as_ptr(), <span class="kw">unsafe </span>{ chunk_ptr.add(<span class="number">2</span>) });
+<a href=#452 id=452 data-nosnippet>452</a>            }
+<a href=#453 id=453 data-nosnippet>453</a>            ValueBytes::Owned(<span class="kw">_</span>) =&gt; <span class="macro">panic!</span>(<span class="string">"expected a borrowed (zero-copy) view"</span>),
+<a href=#454 id=454 data-nosnippet>454</a>        }
+<a href=#455 id=455 data-nosnippet>455</a>    }
+<a href=#456 id=456 data-nosnippet>456</a>
+<a href=#457 id=457 data-nosnippet>457</a>    <span class="attr">#[test]
+<a href=#458 id=458 data-nosnippet>458</a>    </span><span class="kw">fn </span>borrow_after_consume_is_cursor_relative() {
+<a href=#459 id=459 data-nosnippet>459</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#460 id=460 data-nosnippet>460</a>        w.refill_owned(Bytes::from_static(<span class="string">b"0123456789"</span>));
+<a href=#461 id=461 data-nosnippet>461</a>        w.consume(<span class="number">4</span>); <span class="comment">// logical window is now "456789"
+<a href=#462 id=462 data-nosnippet>462</a>        </span><span class="kw">let </span>borrowed = w.borrow(<span class="number">0</span>..<span class="number">2</span>);
+<a href=#463 id=463 data-nosnippet>463</a>        <span class="kw">match </span>borrowed {
+<a href=#464 id=464 data-nosnippet>464</a>            ValueBytes::Borrowed(b) =&gt; <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>b[..], <span class="string">b"45"</span>),
+<a href=#465 id=465 data-nosnippet>465</a>            ValueBytes::Owned(<span class="kw">_</span>) =&gt; <span class="macro">panic!</span>(<span class="string">"expected borrowed"</span>),
+<a href=#466 id=466 data-nosnippet>466</a>        }
+<a href=#467 id=467 data-nosnippet>467</a>    }
+<a href=#468 id=468 data-nosnippet>468</a>
+<a href=#469 id=469 data-nosnippet>469</a>    <span class="attr">#[test]
+<a href=#470 id=470 data-nosnippet>470</a>    </span><span class="kw">fn </span>straddling_refill_falls_back_to_owned_copy() {
+<a href=#471 id=471 data-nosnippet>471</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#472 id=472 data-nosnippet>472</a>        w.refill_owned(Bytes::from_static(<span class="string">b"aabbcc"</span>));
+<a href=#473 id=473 data-nosnippet>473</a>        w.consume(<span class="number">4</span>); <span class="comment">// residual "cc" straddles into the next chunk
+<a href=#474 id=474 data-nosnippet>474</a>        </span>w.refill_owned(Bytes::from_static(<span class="string">b"ddee"</span>)); <span class="comment">// stitches: "cc" + "ddee"
+<a href=#475 id=475 data-nosnippet>475</a>        </span><span class="macro">assert_eq!</span>(w.as_slice(), <span class="string">b"ccddee"</span>);
+<a href=#476 id=476 data-nosnippet>476</a>        <span class="kw">let </span>borrowed = w.borrow(<span class="number">0</span>..<span class="number">6</span>);
+<a href=#477 id=477 data-nosnippet>477</a>        <span class="kw">match </span>borrowed {
+<a href=#478 id=478 data-nosnippet>478</a>            ValueBytes::Owned(b) =&gt; <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>b[..], <span class="string">b"ccddee"</span>),
+<a href=#479 id=479 data-nosnippet>479</a>            ValueBytes::Borrowed(<span class="kw">_</span>) =&gt; <span class="macro">panic!</span>(<span class="string">"a stitched window must copy, never borrow"</span>),
+<a href=#480 id=480 data-nosnippet>480</a>        }
+<a href=#481 id=481 data-nosnippet>481</a>    }
+<a href=#482 id=482 data-nosnippet>482</a>
+<a href=#483 id=483 data-nosnippet>483</a>    <span class="attr">#[test]
+<a href=#484 id=484 data-nosnippet>484</a>    </span><span class="kw">fn </span>borrow_subslice_matches_active_window_by_pointer() {
+<a href=#485 id=485 data-nosnippet>485</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#486 id=486 data-nosnippet>486</a>        w.refill_owned(Bytes::from_static(<span class="string">b"hello world"</span>));
+<a href=#487 id=487 data-nosnippet>487</a>        <span class="kw">let </span>sub = <span class="kw-2">&amp;</span>w.as_slice()[<span class="number">0</span>..<span class="number">5</span>];
+<a href=#488 id=488 data-nosnippet>488</a>        <span class="kw">let </span>sub_copy = sub.to_vec(); <span class="comment">// detach the borrow-checker view for later compare
+<a href=#489 id=489 data-nosnippet>489</a>        </span><span class="kw">match </span>w.borrow_subslice(sub) {
+<a href=#490 id=490 data-nosnippet>490</a>            ValueBytes::Borrowed(b) =&gt; <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>b[..], <span class="kw-2">&amp;</span>sub_copy[..]),
+<a href=#491 id=491 data-nosnippet>491</a>            ValueBytes::Owned(<span class="kw">_</span>) =&gt; <span class="macro">panic!</span>(<span class="string">"expected a zero-copy borrowed view"</span>),
+<a href=#492 id=492 data-nosnippet>492</a>        }
+<a href=#493 id=493 data-nosnippet>493</a>    }
+<a href=#494 id=494 data-nosnippet>494</a>
+<a href=#495 id=495 data-nosnippet>495</a>    <span class="attr">#[test]
+<a href=#496 id=496 data-nosnippet>496</a>    </span><span class="kw">fn </span>borrow_subslice_of_unrelated_buffer_falls_back_to_copy() {
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#498 id=498 data-nosnippet>498</a>        w.refill_owned(Bytes::from_static(<span class="string">b"hello world"</span>));
+<a href=#499 id=499 data-nosnippet>499</a>        <span class="kw">let </span>unrelated = <span class="string">b"not in the window"</span>.to_vec();
+<a href=#500 id=500 data-nosnippet>500</a>        <span class="kw">match </span>w.borrow_subslice(<span class="kw-2">&amp;</span>unrelated) {
+<a href=#501 id=501 data-nosnippet>501</a>            ValueBytes::Owned(b) =&gt; <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>b[..], <span class="kw-2">&amp;</span>unrelated[..]),
+<a href=#502 id=502 data-nosnippet>502</a>            ValueBytes::Borrowed(<span class="kw">_</span>) =&gt; <span class="macro">panic!</span>(<span class="string">"an unrelated buffer must never borrow"</span>),
+<a href=#503 id=503 data-nosnippet>503</a>        }
+<a href=#504 id=504 data-nosnippet>504</a>    }
+<a href=#505 id=505 data-nosnippet>505</a>
+<a href=#506 id=506 data-nosnippet>506</a>    <span class="attr">#[test]
+<a href=#507 id=507 data-nosnippet>507</a>    </span><span class="kw">fn </span>active_bytes_is_none_for_stitched_window() {
+<a href=#508 id=508 data-nosnippet>508</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#509 id=509 data-nosnippet>509</a>        w.refill(<span class="string">b"abc"</span>); <span class="comment">// the &amp;[u8] path always stitches
+<a href=#510 id=510 data-nosnippet>510</a>        </span><span class="macro">assert!</span>(w.active_bytes().is_none());
+<a href=#511 id=511 data-nosnippet>511</a>    }
+<a href=#512 id=512 data-nosnippet>512</a>
+<a href=#513 id=513 data-nosnippet>513</a>    <span class="attr">#[test]
+<a href=#514 id=514 data-nosnippet>514</a>    </span><span class="kw">fn </span>active_bytes_is_some_for_borrowed_window() {
+<a href=#515 id=515 data-nosnippet>515</a>        <span class="kw">let </span><span class="kw-2">mut </span>w = WindowCursor::new();
+<a href=#516 id=516 data-nosnippet>516</a>        w.refill_owned(Bytes::from_static(<span class="string">b"abc"</span>));
+<a href=#517 id=517 data-nosnippet>517</a>        <span class="macro">assert!</span>(w.active_bytes().is_some());
+<a href=#518 id=518 data-nosnippet>518</a>    }
+<a href=#519 id=519 data-nosnippet>519</a>}
 </code></pre></div></section></main></body></html>
