@@ -8,9 +8,11 @@
 #[cfg(feature = "write-support")]
 use super::codec::expression_to_value;
 #[cfg(feature = "write-support")]
+use super::type_cache::cached_parse;
+#[cfg(feature = "write-support")]
 use crate::cql::ast::{CqlBinaryOperator, CqlExpression, CqlLiteral, CqlTable, CqlUsing};
 #[cfg(feature = "write-support")]
-use crate::schema::{CqlType, TableSchema};
+use crate::schema::TableSchema;
 #[cfg(feature = "write-support")]
 use crate::storage::write_engine::mutation::{ClusteringBound, ClusteringKey, RangeTombstone};
 #[cfg(feature = "write-support")]
@@ -229,7 +231,7 @@ pub(super) fn build_range_tombstones(
                     pred.column
                 ))
             })?;
-        let cql_type = CqlType::parse(&ck_col.data_type)?;
+        let cql_type = cached_parse(&ck_col.data_type)?;
         let value = expression_to_value(&pred.value, &cql_type)?;
         let ck = ClusteringKey::new(vec![(ck_col.name.clone(), value)]);
 
@@ -294,7 +296,7 @@ pub(super) fn resolve_key_bindings(
                     pk_col.name
                 ))
             })?;
-        let cql_type = CqlType::parse(&pk_col.data_type)?;
+        let cql_type = cached_parse(&pk_col.data_type)?;
         let value = expression_to_value(expr, &cql_type)?;
         pk_columns.push((pk_col.name.clone(), value));
     }
@@ -304,7 +306,7 @@ pub(super) fn resolve_key_bindings(
     for ck_col in &ordered_ck {
         let col_name_lc = ck_col.name.to_lowercase();
         if let Some((_, expr)) = bindings.iter().find(|(name, _)| *name == col_name_lc) {
-            let cql_type = CqlType::parse(&ck_col.data_type)?;
+            let cql_type = cached_parse(&ck_col.data_type)?;
             let value = expression_to_value(expr, &cql_type)?;
             ck_columns.push((ck_col.name.clone(), value));
         }
