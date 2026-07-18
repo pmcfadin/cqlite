@@ -134,7 +134,7 @@ jobs:
           if [ -n "$EXISTING" ]; then
             # UPDATE, never duplicate: post a dated recurrence comment on the open tracker.
             gh issue comment "$EXISTING" \
-              --body "Read-path coverage gate regressed again on run ${RUN_URL} at ${NOW} (advisory — not merge-gating). Read-path line coverage remains below the 77% floor." \
+              --body "The nightly coverage gate (\`coverage.yml\`) concluded \`failure\` again on run ${RUN_URL} at ${NOW} (advisory — not merge-gating). This is USUALLY a read-path coverage regression below the 77% floor, but \`coverage.yml\` also fails on lint / dataset-verify / tooling-install / timeout paths — inspect the run to confirm the actual cause before acting." \
               || echo "::warning::coverage-regression recurrence comment failed (non-gating; coverage result unchanged)."
             echo "updated existing coverage-regression issue #${EXISTING}"
           else
@@ -144,18 +144,22 @@ jobs:
             BODY="$(printf '%s\n' \
               "$MARKER" \
               "" \
-              "The nightly read-path coverage gate (\`coverage.yml\`, >=77%) concluded \`failure\` — read-path line coverage dropped below the 77% floor." \
+              "The nightly coverage gate (\`coverage.yml\`, read-path >=77%) concluded \`failure\`." \
               "" \
-              "This gate is **advisory** by owner decision (issue #2659, epic #2636): it is intentionally NOT a required merge check, so this auto-filed, deduplicated issue is how a regression stays visible. Add tests to restore read-path coverage, then close this issue once the nightly gate is green again." \
+              "**This is most likely a read-path coverage regression below the 77% floor**, but note \`coverage.yml\`'s enforced job also fails on non-coverage paths (Format and Lint Check / \`clippy -D warnings\`, dataset-verify \`DB_COUNT == 0\`, tarpaulin/llvm-cov install, or job timeout). **Inspect the run below to confirm the actual cause** before assuming a coverage regression." \
+              "" \
+              "If it IS a coverage regression: add tests to restore read-path coverage, then close this issue once the nightly gate is green again." \
+              "" \
+              "This gate is **advisory** by owner decision (issue #2659, epic #2636): it is intentionally NOT a required merge check, so this auto-filed, deduplicated issue is how a failure stays visible." \
               "" \
               "## Latest failure" \
               "- **Run:** ${RUN_URL}" \
               "- **Observed:** ${NOW}" \
-              "- **Gate:** read-path line coverage >=77% (\`coverage.yml\`, issue #2022)" \
+              "- **Gate:** \`coverage.yml\` (read-path line coverage >=77%, issue #2022) — verify the run for the actual failing step" \
               "" \
               "_Filed by \`.github/workflows/coverage-regression-issue.yml\` (issue #2659, epic #2636). Not auto-closed — close manually once coverage is restored._")"
             gh issue create \
-              --title "coverage-regression: read-path line coverage below the 77% floor" \
+              --title "coverage-regression: nightly coverage gate (coverage.yml) concluded failure" \
               --body "$BODY" --label "$LABEL" \
               || echo "::warning::coverage-regression issue create failed (non-gating; coverage result unchanged)."
             echo "filed new coverage-regression issue"
