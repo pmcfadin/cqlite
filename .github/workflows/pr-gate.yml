@@ -69,6 +69,20 @@ jobs:
               --skip tests::test_database
           '
 
+      - name: Query-semantics oracle (fail-closed, #2644)
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "query-semantics oracle" -- bash -e -u -o pipefail -c '
+            # Read-time-reconciliation parity oracle (#1742): committed-fixture,
+            # pinned-now, no Docker. The fixtures live in-repo under
+            # test-data/datasets/sstables/test_compaction_tombstone_ttl (git-tracked),
+            # so actions/checkout alone provides them and the test resolves them via
+            # its repo-root fallback. CQLITE_REQUIRE_FIXTURES=1 makes an absent/empty
+            # fixture a HARD FAILURE (reds this required job) instead of a silent skip.
+            CQLITE_REQUIRE_FIXTURES=1 \
+              cargo test -p cqlite-core --features "state_machine cli-helpers" \
+                --test query_semantics_oracle_parity
+          '
+
       - name: Required PR Gate timing summary
         if: always()
         run: bash scripts/ci/ci-timing-summary.sh summary "Required PR Gate timing"
