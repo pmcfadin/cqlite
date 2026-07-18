@@ -60,6 +60,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 RECORD="$tmp/gate-record.txt"
 ROBOREV_SENTINEL="$tmp/roborev-was-called.txt"
+SLEEP_FINISHED_MARKER="$tmp/sleep-grandchild-finished.txt"
 
 # Build a fake repo with the hook and a recording fake gate.
 build_repo() {
@@ -79,8 +80,14 @@ build_repo() {
   echo "CWD:$PWD"
 } >>"$GATE_RECORD"
 case "${FAKE_GATE_MODE:-pass}" in
-  fail)  exit 1 ;;
-  sleep) sleep 15; exit 0 ;;
+  fail)
+    # Emit a recognizable SUMMARY block so the hook's fail path can echo it.
+    [ -n "${AGENT_GATE_SUMMARY_FILE:-}" ] && printf 'AGENT-GATE-LITE-SUMMARY-SENTINEL\nRESULT: FAIL\n' >"$AGENT_GATE_SUMMARY_FILE"
+    exit 1 ;;
+  # sleep past the budget, then drop a marker. If the hook's timeout path only
+  # killed the direct child (not the process group), this grandchild survives and
+  # writes the marker — exactly the invisible-contention leak we must prevent.
+  sleep) sleep 6; echo done >"$SLEEP_FINISHED_MARKER"; exit 0 ;;
   *)     exit 0 ;;
 esac
 EOF
@@ -106,6 +113,7 @@ run_hook() {
   local repo="$1"
   ( cd "$tmp" && echo '{}' | \
       GATE_RECORD="$RECORD" \
+      SLEEP_FINISHED_MARKER="$SLEEP_FINISHED_MARKER" \
       ISSUE_GATE_TEST_CMD="scripts/agent-gate.sh --lite" \
       ISSUE_GATE_COVERAGE_CMD="" \
       ISSUE_GATE_ROBOREV="1" \
@@ -173,18 +181,26 @@ fi
 repoB="$tmp/repoB"
 build_repo "$repoB"
 : >"$RECORD"
-FAKE_GATE_MODE=fail run_hook "$repoB"
+failB_out="$tmp/failB.txt"
+FAKE_GATE_MODE=fail run_hook "$repoB" 2>"$failB_out"
 rcB=$?
 if [ "$rcB" -eq 2 ]; then
   ok "genuine lite FAIL blocks task completion (exit 2)"
 else
   bad "lite FAIL produced exit $rcB (expected 2)"
 fi
+# fix #3: the SUMMARY block (the only retainable text) is echoed into the reason.
+if grep -q 'AGENT-GATE-LITE-SUMMARY-SENTINEL' "$failB_out"; then
+  ok "FAIL path echoes the lite SUMMARY block into the block reason"
+else
+  bad "FAIL path did not echo the lite SUMMARY block"
+fi
 
 # --- Case C: budget exceeded FAILS OPEN (exit 0 + warning) ----------------------
 repoC="$tmp/repoC"
 build_repo "$repoC"
 : >"$RECORD"
+rm -f "$SLEEP_FINISHED_MARKER"
 warn_out="$tmp/warn.txt"
 FAKE_GATE_MODE=sleep BUDGET=2 run_hook "$repoC" 2>"$warn_out"
 rcC=$?
@@ -197,6 +213,15 @@ if grep -q 'FAILING OPEN' "$warn_out"; then
   ok "timeout path emits a visible FAILING OPEN warning"
 else
   bad "timeout path did not emit a 'FAILING OPEN' warning"
+fi
+# Wait past the grandchild's sleep (6s): if the process-group kill worked, the
+# grandchild is dead and the marker NEVER appears. A direct-child-only kill would
+# leave it running to write the marker (and keep contending for gate slots).
+sleep 7
+if [ ! -f "$SLEEP_FINISHED_MARKER" ]; then
+  ok "timeout path killed the whole process group — grandchild never finished (no marker)"
+else
+  bad "timeout path left the gate grandchild alive (marker present) — process-group kill failed"
 fi
 
 # --- Case D: no Rust diff vs origin/main -> cheap skip, gate never runs ----------
