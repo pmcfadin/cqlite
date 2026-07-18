@@ -1,6 +1,6 @@
 ---
 title: Delivery pipeline (flow-lead)
-description: The manager-orchestrated delivery workflow — the flow-lead agent, the flow-* pipeline, the specialist roster, and the two human seams.
+description: The manager-orchestrated delivery workflow — the flow-lead agent, the flow-* pipeline, the specialist roster, and the one standing human seam (spec approval; merge is autonomous on green).
 sidebar:
   label: Delivery pipeline
 ---
@@ -8,7 +8,7 @@ sidebar:
 CQLite delivery is driven by a **manager agent, `flow-lead`**, that orchestrates a team of specialist
 agents through a defined pipeline. Start it as your session driver — `claude --agent flow-lead` (it is
 the repo's default agent) — and it orients from the board. It orchestrates; the specialists do the
-middle; you sit in two seats.
+middle; you sit in one standing seat (spec approval — merge is autonomous on green).
 
 ## The pipeline
 
@@ -38,16 +38,19 @@ middle; you sit in two seats.
 - **Design-driven** (bindings/M6, query-engine surface, CLI/REPL UX, perf/M7, process) — no oracle.
   Goes through `flow-activate` (OpenSpec proposal/design/specs/tasks).
 
-## The two human seams
+## The one standing human seam
 
 1. **Spec approval** (Seam 1, in `flow-activate`) — you approve the OpenSpec spec + design before any
-   implementation. The lead renders it inline and stops.
-2. **Merge** (Seam 2) — **arm `--auto`, GitHub merges on green** (no human merge click for worker-owned
-   issues):
-   - A worker's **terminal state** for an issue is PR-open + `agent-gate.sh` PASS + C PASS (design-driven)
-     + roborev clean. At that point it **arms `gh pr merge --auto` and ends its turn** — it does
-     **not** poll the PR's own external CI in a yield/wake loop (see [Merge-on-green](#merge-on-green-no-ci-busy-wait)).
-   - *Always escalated, never decided by the lead:* product decisions, scope/title changes, epic closes.
+   implementation. The lead renders it inline and stops. **This is the only standing human gate.**
+
+**Merge is autonomous by default** — not a standing seam. A worker's/closer's **terminal state** for an
+issue is PR-open + `agent-gate.sh` PASS + C PASS (design-driven) + roborev clean; at that point it **arms
+`gh pr merge --auto` and ends its turn**, and GitHub lands the PR on green (see
+[Merge-on-green](#merge-on-green-no-ci-busy-wait)) — it does **not** poll the PR's own external CI in a
+yield/wake loop. An owner merge decision exists only **conditionally**, when an escalate-and-hold trigger
+fires: a genuine design-call roborev finding, a scope/product question, an unmet/uncovered requirement,
+work outside the issue, or an explicit `HOLD:` order. *Always escalated, never decided by the lead:*
+product decisions, scope/title changes, epic closes.
 
 ## Merge-on-green (no CI busy-wait)
 
