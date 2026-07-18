@@ -1874,6 +1874,60 @@ test_persistent_pending_automerge_stops() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 42 (#2670 / roborev 1821, finding a): the count probe (PROC_PROBE_CMD) and
+# the list probe (PROC_LIST_CMD) DERIVE from the SAME shared match patterns
+# (PROC_MATCH_BUILD/PROC_MATCH_WORKER) — the "what counts" set and the "what we
+# name" set cannot drift. Source with both probe overrides unset and assert both
+# command strings embed both shared patterns verbatim.
+test_probe_list_derives_from_count_set() {
+  local out build worker probe list
+  # shellcheck disable=SC2016  # $SUP/$PROC_* expand inside the sub-bash, not here.
+  out="$(env -u PROC_PROBE_CMD -u PROC_LIST_CMD SUP="$SUPERVISOR" bash -c '
+    # shellcheck disable=SC1090
+    source "$SUP"
+    printf "%s\n%s\n%s\n%s\n" "$PROC_MATCH_BUILD" "$PROC_MATCH_WORKER" "$PROC_PROBE_CMD" "$PROC_LIST_CMD"' 2>/dev/null)"
+  build="$(printf '%s' "$out" | sed -n 1p)"
+  worker="$(printf '%s' "$out" | sed -n 2p)"
+  probe="$(printf '%s' "$out" | sed -n 3p)"
+  list="$(printf '%s' "$out" | sed -n 4p)"
+  if [[ -n "$build" && -n "$worker" &&
+        "$probe" == *"$build"* && "$probe" == *"$worker"* &&
+        "$list" == *"$build"* && "$list" == *"$worker"* ]]; then
+    pass "probe derivation: count + list probes both derive from the shared match-pattern set"
+  else
+    fail "probe-derivation: build='$build' worker='$worker' probe-has-both=$([[ "$probe" == *"$build"* && "$probe" == *"$worker"* ]] && echo y) list-has-both=$([[ "$list" == *"$build"* && "$list" == *"$worker"* ]] && echo y)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 43 (#2670 / roborev 1821, finding b): MISMATCH_GRACE_CAP_SECS<=0 DISABLES
+# the wall-clock cap — grace stays bounded solely by the retry count and must NOT
+# be blocked. gh reports OPEN then MERGED; with cap=-1, retries=3, wait=0 the grace
+# still retries and resolves `merged` (never a spurious mismatch). Unit-tests
+# verify_finalized_pr directly.
+test_grace_cap_disabled_semantics() {
+  local d ctr out
+  d="$(new_case_dir)"
+  ctr="$d/gh-calls"
+  cat >"$d/gh.sh" <<EOF
+#!/usr/bin/env bash
+n=0; [[ -f "$ctr" ]] && n=\$(cat "$ctr"); n=\$((n + 1)); echo "\$n" >"$ctr"
+if [[ \$n -eq 1 ]]; then printf %s '{"state":"OPEN","autoMergeRequest":null}'
+else printf %s '{"state":"MERGED","autoMergeRequest":null}'; fi
+EOF
+  chmod +x "$d/gh.sh"
+  # shellcheck disable=SC2016  # $1 expands inside the sub-bash, not here.
+  out="$(GH_VERIFY_CMD="$d/gh.sh \"\$1\"" \
+        MISMATCH_RETRIES=3 MISMATCH_RETRY_WAIT_SECS=0 MISMATCH_GRACE_CAP_SECS=-1 STOP_FILE=/nonexistent \
+        bash -c 'source "$1"; verify_finalized_pr 42' _ "$SUPERVISOR" 2>/dev/null)"
+  if [[ "$out" == "merged" && "$(cat "$ctr" 2>/dev/null)" -ge 2 ]]; then
+    pass "grace cap<=0: disabled ceiling, grace stays count-bounded (OPEN→MERGED resolves merged)"
+  else
+    fail "grace-cap-disabled: got '$out' gh_calls=$(cat "$ctr" 2>/dev/null)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -1933,5 +1987,7 @@ test_transport_notfound_is_unverified
 test_python_only_parser_automerge
 test_stop_file_honored_mid_grace
 test_persistent_pending_automerge_stops
+test_probe_list_derives_from_count_set
+test_grace_cap_disabled_semantics
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

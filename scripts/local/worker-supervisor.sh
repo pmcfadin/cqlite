@@ -173,7 +173,9 @@ MISMATCH_RETRIES="${MISMATCH_RETRIES:-3}"
 MISMATCH_RETRY_WAIT_SECS="${MISMATCH_RETRY_WAIT_SECS:-10}"
 # Hard ceiling on TOTAL mismatch-grace wall-clock regardless of retries*wait
 # (roborev 1819 MED): even a misconfigured MISMATCH_RETRIES/WAIT can never make a
-# single verification block longer than this.
+# single verification block longer than this. EXPLICIT semantics (roborev 1821):
+# a value >0 is the wall-clock ceiling; a value <=0 DISABLES the wall-clock cap
+# entirely, leaving grace bounded solely by the retry count (MISMATCH_RETRIES).
 MISMATCH_GRACE_CAP_SECS="${MISMATCH_GRACE_CAP_SECS:-120}"
 # issue #2670 (roborev 1819 MED): a PR that stays OPEN-with-auto-merge-armed across
 # this many consecutive iterations is treated as auto-merge-stuck — the supervisor
@@ -213,6 +215,12 @@ if [[ -z "${DISK_PROBE_CMD:-}" ]]; then
   # shellcheck disable=SC2016  # single-quoted $4 is intentional: literal text for the later `bash -c` eval, not expanded now.
   DISK_PROBE_CMD="df -Pk \"$REPO_ROOT\" | awk 'NR==2{print int(\$4/1024/1024)}'"
 fi
+# Single source of the leftover-process match patterns (roborev 1821): BOTH the
+# count probe (PROC_PROBE_CMD) and the list probe (PROC_LIST_CMD) DERIVE from these,
+# so the "what counts as a leftover" set and the "what we name in the page" set can
+# never drift apart. `[c]argo`/`[c]laude` are the bracket-trick forms (see below).
+PROC_MATCH_BUILD='[c]argo |[n]extest|[g]ate_slot_daemon'
+PROC_MATCH_WORKER='[c]laude.*--agent worker'
 if [[ -z "${PROC_PROBE_CMD:-}" ]]; then
   # Leftover-process probe (issue #2670): two families of prior-iteration debris
   # block the next spawn (HOLD-and-poll, same as load/disk):
@@ -246,14 +254,15 @@ if [[ -z "${PROC_PROBE_CMD:-}" ]]; then
   # is still an argv substring test, so a `claude --agent worker` process ELSEWHERE in
   # the ancestry (beyond the immediate parent) or an unrelated process that merely
   # carries the literal substring in its own argv could still be counted.
-  PROC_PROBE_CMD="{ pgrep -f '[c]argo |[n]extest|[g]ate_slot_daemon'; pgrep -f '[c]laude.*--agent worker'; } 2>/dev/null | sort -u | grep -vxF -e '$$' -e '$PPID' | wc -l | tr -d ' '"
+  PROC_PROBE_CMD="{ pgrep -f '$PROC_MATCH_BUILD'; pgrep -f '$PROC_MATCH_WORKER'; } 2>/dev/null | sort -u | grep -vxF -e '$$' -e '$PPID' | wc -l | tr -d ' '"
 fi
 # Companion to PROC_PROBE_CMD: lists the surviving PIDs (pid + cmd) so a
 # leftover-processes STOP can NAME what never cleared (issue #2670). Best-effort —
-# an empty result just yields "<unavailable>" in the page. Same bracket-trick
-# self-match defusal + $$/$PPID self-exclusion as PROC_PROBE_CMD (roborev 1813/1819).
+# an empty result just yields "<unavailable>" in the page. DERIVED from the SAME
+# $PROC_MATCH_* patterns as the count probe (roborev 1821: list-from-count-set, so
+# the two can't drift), with the same $$/$PPID self-exclusion (roborev 1813/1819).
 if [[ -z "${PROC_LIST_CMD:-}" ]]; then
-  PROC_LIST_CMD="{ pgrep -lf '[c]argo |[n]extest|[g]ate_slot_daemon'; pgrep -lf '[c]laude.*--agent worker'; } 2>/dev/null | sort -u | grep -vE '^($$|$PPID) '"
+  PROC_LIST_CMD="{ pgrep -lf '$PROC_MATCH_BUILD'; pgrep -lf '$PROC_MATCH_WORKER'; } 2>/dev/null | sort -u | grep -vE '^($$|$PPID) '"
 fi
 
 # GH verification of a "finalized" marker's PR (issue #2670). $1 (passed by the
@@ -387,11 +396,17 @@ verify_finalized_pr() {
     fi
   fi
 
-  # Total mismatch-grace wall-clock ceiling (roborev 1819): min(retries*wait, cap).
+  # Total mismatch-grace wall-clock ceiling. The natural budget is retries*wait;
+  # MISMATCH_GRACE_CAP_SECS>0 tightens it to at most the cap, while a cap <=0
+  # DISABLES the ceiling (grace then bounded solely by the retry count — roborev
+  # 1821 explicit semantics). The guard below only binds when grace_budget>0, so a
+  # disabled cap / a wait=0 config leaves retries count-bounded, never blocked.
   local grace_start grace_budget
   grace_start=$(date +%s)
   grace_budget=$((MISMATCH_RETRIES * MISMATCH_RETRY_WAIT_SECS))
-  [[ "$grace_budget" -gt "$MISMATCH_GRACE_CAP_SECS" ]] && grace_budget="$MISMATCH_GRACE_CAP_SECS"
+  if [[ "$MISMATCH_GRACE_CAP_SECS" -gt 0 && "$grace_budget" -gt "$MISMATCH_GRACE_CAP_SECS" ]]; then
+    grace_budget="$MISMATCH_GRACE_CAP_SECS"
+  fi
 
   while :; do
     errfile="$(mktemp "${TMPDIR:-/tmp}/gh-verify.XXXXXX")"
@@ -429,7 +444,11 @@ verify_finalized_pr() {
     if command -v jq >/dev/null 2>&1 && printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
       parser_ok=1
       state="$(printf '%s' "$out" | jq -r '.state // empty' 2>/dev/null || true)"
-      automerge="$(printf '%s' "$out" | jq -r '.autoMergeRequest // empty' 2>/dev/null || true)"
+      # Normalize the auto-merge sentinel (roborev 1821): both parsers emit the
+      # SAME token — "armed" when autoMergeRequest is present, "" otherwise — so the
+      # downstream `-n "$automerge"` test can never diverge between jq and python3
+      # (jq's raw object dump vs python's boolean string).
+      automerge="$(printf '%s' "$out" | jq -r 'if .autoMergeRequest then "armed" else "" end' 2>/dev/null || true)"
     fi
     if [[ "$parser_ok" -eq 0 ]] && command -v python3 >/dev/null 2>&1; then
       if pyout="$(printf '%s' "$out" | python3 -c '
@@ -636,10 +655,10 @@ CONSECUTIVE_PENDING=0
 LAST_BLOCKED_ISSUE=""
 LAST_PARKED_ISSUE=""
 START_TS=$(date +%s)
-# MAX_HOURS_SECS is derived defensively in the config block (roborev 1819) so it is
-# set before preflight_wait can read it; this keeps it consistent if MAX_HOURS was
-# overridden after the config block.
-MAX_HOURS_SECS="${MAX_HOURS_SECS:-$((MAX_HOURS * 3600))}"
+# MAX_HOURS_SECS is derived ONCE in the config block (roborev 1819) — before any
+# preflight_wait call path reads it. The prior duplicate recompute here was dead
+# (nothing mutates MAX_HOURS after the config block) and is removed (roborev 1821
+# config Low).
 
 finalize_exit() {
   local reason="$1" code="$2"
