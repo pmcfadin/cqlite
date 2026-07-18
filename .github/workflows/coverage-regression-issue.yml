@@ -36,6 +36,8 @@ concurrency:
 jobs:
   coverage-regression-issue:
     runs-on: ubuntu-latest
+    # Lightweight gh-only routing job; matches peer lightweight workflow jobs.
+    timeout-minutes: 10
     # Coarse pre-filter over trusted GitHub-computed fields (event name / conclusion /
     # branch); the Validate step below re-checks fail-closed before any token use. A manual
     # workflow_dispatch of THIS workflow always proceeds (then no-ops without a conclusion).
