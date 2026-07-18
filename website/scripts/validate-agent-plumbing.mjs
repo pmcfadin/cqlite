@@ -183,6 +183,13 @@ if (missingFromLlms.length > 0) {
   for (const p of missingFromLlms) {
     console.error(`  MISSING FROM llms-full.txt: ${p}`);
   }
+  // Website-page cross-link rule (issue #2480): the starlight-llms-txt plugin
+  // strips sidebar nav, so a page only lands in llms-full.txt when some page's
+  // BODY PROSE links it. A sidebar-only page fails here. See website/README.md
+  // "Adding pages".
+  console.error('\n  FIX: cross-link each page above from an existing page\'s BODY PROSE');
+  console.error('       (e.g. the user-docs/index.md Topics list) — sidebar nav alone is');
+  console.error('       stripped by starlight-llms-txt. See website/README.md, issue #2480.');
 }
 
 if (missingRawMd.length > 0) {
