@@ -97,6 +97,26 @@ if ! bash "$GUARD" "$tmp/benign-env.yml" >/dev/null 2>&1; then
 fi
 echo "OK: benign env. interpolation not flagged"
 
+# 4b. false-positive guard: env: written AFTER run: (list form). The env: block
+# is a step-level sibling key, not run-body — the fence must terminate the body
+# at the `run:` key column so it is not swallowed and false-positived.
+cat >"$tmp/clean-env-after.yml" <<'YML'
+on: [pull_request_target]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "$TITLE"
+        env:
+          TITLE: ${{ github.event.issue.title }}
+YML
+if ! bash "$GUARD" "$tmp/clean-env-after.yml" >/dev/null 2>&1; then
+  echo "FAIL: guard false-positived on env: written AFTER run: (safe pattern)"
+  bash "$GUARD" "$tmp/clean-env-after.yml" || true
+  exit 1
+fi
+echo "OK: env: after run: (list form) not flagged"
+
 # 5. false-positive guard: head.sha (40-hex, not injectable) must NOT trip.
 cat >"$tmp/benign-sha.yml" <<'YML'
 on: [pull_request]

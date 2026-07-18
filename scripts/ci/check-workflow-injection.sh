@@ -95,9 +95,14 @@ def run_block_ranges(lines):
             i += 1
             continue
         indent = len(m.group(1)) + (len(m.group(2)) if m.group(2) else 0)
-        # For `- run:` the block scalar indents relative to the key column; use
-        # the key indent (group 1) as the fence — anything indented past it is body.
-        fence = len(m.group(1))
+        # Fence on the `run:` KEY column (`indent`), not the `-` column. Step-level
+        # sibling keys (`env:`, `if:`, `with:`) align at the key column, so a
+        # `fence = len(m.group(1))` (the `-` indent) would swallow an `env:` block
+        # written AFTER `run:` into the "run body" and false-positive on the exact
+        # recommended safe pattern (attacker input passed via a quoted env: var).
+        # Block-scalar body content is indented PAST the key column, so it is still
+        # captured; a sibling key at the key column correctly terminates the body.
+        fence = indent
         inline = m.group(3).strip()
         start = i
         j = i + 1
