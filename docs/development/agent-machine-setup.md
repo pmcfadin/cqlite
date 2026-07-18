@@ -72,11 +72,13 @@ run). Do not treat any specific agent (claude-code, codex, …) as doctrine.
 ## Multi-machine: the claim protocol in two sentences
 
 The GitHub Project board `Status` field is the sole dispatch authority; a session
-**claims** an issue by pushing its `issue-<N>-<slug>` branch to origin (the
-cross-machine lock, since assignee `@me` is identical for one user on two machines),
-then setting assignee `@me` + `Status=In Progress` and re-reading to confirm it won the
-race. Because the lock is server-side, a second machine that finds an existing claim
-branch `git fetch`es it to resume rather than colliding.
+**claims** an issue with `bash scripts/flow/claim.sh claim <N>`, which atomically creates
+the slugless ref `refs/claims/issue-<N>` on origin — THE cross-machine lock, arbitrated
+server-side (assignee `@me` is identical for one user on two machines, and the
+`issue-<N>-<slug>` branch is only PR plumbing, never the lock) — then sets assignee `@me`
++ `Status=In Progress`. A second machine picking up a reaped/dead claim adopts it via
+compare-and-swap — `bash scripts/flow/claim.sh adopt <N> --expect <current-sha>` — not a
+bare `git fetch`, so a resurrected original holder loses the lease and detects it at once.
 
 ## Full doctrine
 
