@@ -135,6 +135,22 @@ What it guarantees:
 - **It cannot fail silently**: a push notification (ntfy) on every merge (info) and on any
   stop/hold/breaker-trip (alert). 2–3 consecutive abnormal exits trip the breaker → stop + alert,
   never hot-respawn. One journal line per iteration (issue, verdict, duration, PR).
+- **It never wedges on a question (#2666)**: a worker that hits Seam 1 or a genuine owner decision
+  **parks** (posts a `needs-decision` question comment + EXITs) rather than waiting — the supervisor
+  judges it `parked-on-owner` and pages the owner once. A worker that nonetheless gets stuck on an
+  interactive prompt is caught mid-iteration by a log-tail watchdog and paged as `stuck-on-question`.
+  **Neither counts toward the crash breaker.**
+
+**Per-iteration verdicts** (one journal line each):
+
+| Verdict | Meaning | Breaker |
+|---------|---------|---------|
+| `finalized` | claimed → gate/review → merge-on-green → finalized (`issue`+`pr` set) | resets |
+| `no-work` | nothing Ready / nothing to resume — backoff, then retry | resets |
+| `blocked` | stopped short of merge for an owner escalation; same issue twice ⇒ head-blocked stop | resets |
+| `parked-on-owner` | clean park (#2666): `blocked` marker with `reason: seam1-approval\|needs-decision`; high page, loop advances | **never** |
+| `stuck-on-question` | worker wedged on a prompt, detected mid-iteration; high page with the captured text | **never** |
+| `abnormal` | nonzero exit / missing / malformed marker / unknown outcome | **+1** |
 - **It stops on its own**: at the issue budget or wall-clock ceiling — overnight is "clear a few
   issues safely," not "run unbounded."
 - **Stop it yourself:** `touch .worker-stop` (finishes the current issue, then exits).

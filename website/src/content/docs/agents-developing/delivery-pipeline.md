@@ -212,6 +212,17 @@ issue per session). The supervisor adds a flock single-instance (mechanizing one
 fail-closed preflight (load/disk/leftover-process/stop-file), a crash-loop breaker, budgets, and ntfy
 notifications. See the [fleet runbook](https://github.com/pmcfadin/cqlite/blob/main/docs/development/fleet-runbook.md).
 
+**Never block on a question (park-and-resume, #2666).** A worker runs unattended, so `AskUserQuestion` (and
+any interactive prompt) is attended-sessions-only. When a worker hits Seam 1 (an unapproved spec) or a
+genuine mid-run owner decision it does not wait — it **parks**: posts ONE structured question comment
+(options + recommendation + default), adds the `needs-decision` label, writes a `blocked` marker with
+`reason: seam1-approval|needs-decision`, and exits, releasing the machine. The supervisor judges this
+`parked-on-owner`, pages the owner once, and moves to the next Ready issue; a worker that nonetheless wedges
+on a prompt is caught mid-iteration by a log-tail watchdog and paged as `stuck-on-question`. Neither counts
+toward the crash breaker. The parked issue resumes only on a strictly-newer owner reply (the worker reads
+the answer and clears the label); a durable `resume-dont-ask` label is a standing Seam-1 seal `flow-implement`
+honors in place of asking.
+
 ## Concurrency model
 
 - **One active worker per machine; the worker paces the machine's load (#1930).** A single lead/worker
