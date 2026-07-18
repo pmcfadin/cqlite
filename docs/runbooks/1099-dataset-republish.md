@@ -81,23 +81,34 @@ gh release upload datasets-v3 "../$ASSET" "../$ASSET.sha256" --clobber
 > If you prefer a brand-new release tag instead, create it and pass `--new-tag`
 > in step 4.
 
-## 4. Repoint CI at the new asset (10 workflows)
+## 4. Repoint CI at the new asset (single tracked pin + finalizer)
 
-Use the finalizer — it replaces the asset filename + SHA256 across every
-pinned workflow **and** `test-data/scripts/fetch-datasets.sh` (which carries its
-own `DATASET_ASSET`/`DATASET_SHA256`/`DATASET_TAG` defaults), then verifies no
-stale reference remains. With `--new-tag` it also rewrites the inline
-`gh release download <tag>` / `releases/download/<tag>/` literals (coverage.yml,
-m1-ci.yml). It never edits its own `OLD_*` defaults or this runbook, and prints
-any doc-only references (website docs) for you to update by hand:
+**Single source of truth (issue #2646):** the canonical asset/tag/sha live in
+the tracked file **`test-data/dataset-pin.env`**. Every workflow's
+`DATASET_SHA256` env, the fetch helper, the restore action, `pre-merge.sh`, and
+this bump script all derive from (or are asserted against) it. The distinct
+GENERATED `test-data/datasets/.dataset-pin` (written per-fetch into the fetched
+dataset dir) is `.gitignore`d and must NEVER be tracked.
+
+Use the finalizer — it rewrites the asset filename + SHA256 across every pinned
+workflow, `test-data/scripts/fetch-datasets.sh`, AND `test-data/dataset-pin.env`
+in one pass (its own `OLD_*` defaults are loaded from `dataset-pin.env`, so they
+can't drift), then verifies no stale reference remains. With `--new-tag` it also
+rewrites the inline `gh release download <tag>` / `releases/download/<tag>/`
+literals (coverage.yml, m1-ci.yml) and the `DATASET_TAG=` line in the pin file.
+It never edits its own script body or this runbook, and prints any doc-only
+references (website docs) for you to update by hand:
 
 ```bash
 git switch -c chore/1099-bump-dataset-pin-v3.2
 test-data/scripts/bump-dataset-pin.sh --new-sha <sha256-from-step-2>
 # (add --new-tag <tag> if you cut a new release tag)
 
-# Stage everything the finalizer touched (workflows AND the fetch helper):
-git add .github/workflows test-data/scripts/fetch-datasets.sh
+# Assert every workflow + pin-consuming file agrees with the tracked pin:
+bash scripts/ci/check-dataset-pin.sh   # must print ✅ (the CI gate runs this too)
+
+# Stage everything the finalizer touched (workflows, fetch helper, tracked pin):
+git add .github/workflows test-data/scripts/fetch-datasets.sh test-data/dataset-pin.env
 git commit -m "ci: pin dataset asset to cassandra5-small-full-v3.4 (#1099)"
 git push -u origin chore/1099-bump-dataset-pin-v3.2
 gh pr create --base main --fill
@@ -106,6 +117,14 @@ gh pr create --base main --fill
 The 10 pinned workflows: `ci.yml`, `coverage.yml`, `docs-site.yml`,
 `m1-ci.yml`, `node-ci.yml`, `observability-gate.yml`, `perf-regression.yml`,
 `python-ci.yml`, `smoke-tests.yml`, `sstabledump-parity-gate.yml`.
+
+> **Drift guard (issue #2646):** `scripts/ci/check-dataset-pin.sh` (run by the
+> `Required PR Gate` and `Workflow Config Validation` workflows) REDS if any
+> workflow's `DATASET_SHA256`, any inline 64-hex literal in a pin-consuming
+> file, the helper/restore/pre-merge defaults, or the bump script's `OLD_*`
+> constants disagree with `test-data/dataset-pin.env` — or if the generated
+> `.dataset-pin` ever becomes git-tracked. A partial hand-edit can no longer
+> silently drift one workflow out of sync.
 
 > **Cache note:** `coverage.yml`/`m1-ci.yml` restore the dataset cache and skip
 > the download when `test_basic/simple_table-*-Data.db` is already present.
