@@ -73,16 +73,14 @@ jobs:
         run: rustup component remove clippy --toolchain stable 2>/dev/null || true
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
-
-      - name: Cache cargo dependencies
-        uses: actions/cache@v5
+        # Consolidated caching (issue #2649): shared composite keyed on
+        # Cargo.lock+toolchain. The composite installs the pin via a minimal
+        # rustup profile with no reconcile, so the clippy-preview conflict the
+        # step above guards against cannot occur here — the guard stays as a
+        # harmless idempotent no-op.
+        uses: ./.github/actions/setup-rust-ci
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          cache-key: smoke-tests
 
       - name: Restore dataset cache
         id: dataset-cache
