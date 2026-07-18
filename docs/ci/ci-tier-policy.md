@@ -191,13 +191,34 @@ running any publish workflow with a non-dry-run mode:
 | Coverage | `coverage.yml` and `coverage-baseline.yml` | Green run with downloadable reports |
 | Performance | `perf-regression.yml` nightly/manual run | No regression beyond policy threshold, or release-owner waiver |
 | Supported binding and integration matrices | `node-ci.yml`, `python-ci.yml`, `flight-ci.yml`, `flight-trino-e2e.yml`, `trino-connector-ci.yml`, and `docs-site.yml` where applicable | Green full/nightly/manual matrix for changed release surfaces |
-| Publish dry-runs | `trino-publish.yml` manual `dry_run=true`; `node-release.yml` `npm pack --dry-run` step; `python-release.yml` `twine check dist/*` step; local CLI archive build matching `release.yml` | Dry-run or metadata validation output captured before real publish |
+| Publish dry-runs | `trino-publish.yml` manual dispatch (`dry_run` **defaults to `true`**, #2639); `node-release.yml` `npm pack --dry-run` step; `python-release.yml` `twine check dist/*` step; local CLI archive build matching `release.yml` | Dry-run or metadata validation output captured before real publish |
 | Actual publish workflows | `release.yml`, `node-release.yml`, `python-release.yml`, `trino-publish.yml` | Run only from intentional release tags or explicit maintainer dispatch; never from schedules |
 
 Release checks are release gates, not global PR branch-protection checks. No
 release or publish workflow may be added to `schedule`, and nightly validation
 must not upload packages, images, Maven artifacts, npm packages, Python
 distributions, or GitHub release assets.
+
+#### Armed-publish dispatch guards (issue #2639)
+
+A bare `workflow_dispatch` on a publishing workflow must never publish or move a
+release tag by accident. Two fail-closed guards enforce this; both are covered by
+`scripts/ci/validate-workflows.rb` so they cannot silently regress out of the
+workflow files:
+
+- **`trino-publish.yml` — `dry_run` defaults to `true`.** `gh workflow run
+  trino-publish.yml -f version=X` (no `dry_run`) does a *local-only*
+  `publishToMavenLocal` — it never reaches Maven Central. A real Central release
+  requires an explicit `-f dry_run=false` (still gated on the secrets check). A
+  `v*` tag push is unaffected: `dry_run` applies only to `workflow_dispatch`.
+- **`flight-image.yml` — release-tag provenance.** A manual `version` dispatch can
+  build from an arbitrary ref. Before any `vX.Y.Z` / `vX.Y` / `latest` tag is
+  applied, the `merge` job asserts that `refs/tags/v$version` already resolves to
+  the exact commit this run is building (`github.sha`) and refuses (`exit 1`)
+  otherwise. A dispatch may therefore only *republish an existing release tag's
+  commit* — it can never mint or move a release tag for an arbitrary ref. Push the
+  tag first (`git push origin vX.Y.Z`), or use the one-off `image_tag` input for a
+  non-release image. This is the PRIMARY guard (provenance, not a prompt).
 
 If a release gate is waived, the waiver must name the failed workflow, run URL,
 artifact reviewed, reason for proceeding, and follow-up issue.
