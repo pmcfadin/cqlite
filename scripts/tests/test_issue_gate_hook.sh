@@ -62,6 +62,12 @@ RECORD="$tmp/gate-record.txt"
 ROBOREV_SENTINEL="$tmp/roborev-was-called.txt"
 SLEEP_FINISHED_MARKER="$tmp/sleep-grandchild-finished.txt"
 SLEEP_PID_FILE="$tmp/sleep-grandchild-pid.txt"
+# An EMPTY slots dir every case points at by default, so a real full gate running
+# on this machine (e.g. when this self-test runs INSIDE the gate) can never make the
+# hook's slot-aware skip fire and flip an unrelated assertion. The slot-skip case
+# overrides SLOTS_DIR with a dir holding a genuinely locked slot.
+EMPTY_SLOTS="$tmp/empty-slots"
+mkdir -p "$EMPTY_SLOTS"
 
 # Build a fake repo with the hook and a recording fake gate.
 build_repo() {
@@ -123,6 +129,7 @@ run_hook() {
       ISSUE_GATE_ROBOREV="1" \
       ISSUE_GATE_LITE_BUDGET_SECS="${BUDGET:-480}" \
       FAKE_GATE_MODE="${FAKE_GATE_MODE:-pass}" \
+      CQLITE_GATE_SLOTS_DIR="${SLOTS_DIR:-$EMPTY_SLOTS}" \
       PATH="$tmp/shim:$PATH" \
       bash "$repo/.claude/hooks/issue-gate.sh" )
 }
@@ -193,11 +200,17 @@ if [ "$rcB" -eq 2 ]; then
 else
   bad "lite FAIL produced exit $rcB (expected 2)"
 fi
-# fix #3: the SUMMARY block (the only retainable text) is echoed into the reason.
+# the SUMMARY block (the only retainable text) is echoed into the reason.
 if grep -q 'AGENT-GATE-LITE-SUMMARY-SENTINEL' "$failB_out"; then
   ok "FAIL path echoes the lite SUMMARY block into the block reason"
 else
   bad "FAIL path did not echo the lite SUMMARY block"
+fi
+# fix #1: the block reason names the log path, not the raw gate output.
+if grep -q 'full output:' "$failB_out"; then
+  ok "FAIL path names the log path in the block reason (raw output kept out of the reason)"
+else
+  bad "FAIL path did not name the log path"
 fi
 
 # --- Case C: budget exceeded FAILS OPEN + kills the whole process group ----------
@@ -209,7 +222,8 @@ build_repo "$repoC"
 : >"$RECORD"
 rm -f "$SLEEP_FINISHED_MARKER" "$SLEEP_PID_FILE"
 warn_out="$tmp/warn.txt"
-FAKE_GATE_MODE=sleep BUDGET=2 run_hook "$repoC" 2>"$warn_out"
+out_c="$tmp/out_c.txt"
+FAKE_GATE_MODE=sleep BUDGET=2 run_hook "$repoC" >"$out_c" 2>"$warn_out"
 rcC=$?
 if [ "$rcC" -eq 0 ]; then
   ok "timeout path fails OPEN (exit 0), never blocking on a budget overrun"
@@ -217,9 +231,15 @@ else
   bad "timeout path exited $rcC (expected 0 — fail open)"
 fi
 if grep -q 'FAILING OPEN' "$warn_out"; then
-  ok "timeout path emits a visible FAILING OPEN warning"
+  ok "timeout path emits a visible FAILING OPEN warning (stderr)"
 else
-  bad "timeout path did not emit a 'FAILING OPEN' warning"
+  bad "timeout path did not emit a 'FAILING OPEN' warning on stderr"
+fi
+# fix #4: the FAILING OPEN notice must also reach stdout (surfaced on exit-0).
+if grep -q 'FAILING OPEN' "$out_c"; then
+  ok "timeout path emits the FAILING OPEN notice on stdout too (reaches the session)"
+else
+  bad "timeout path did not emit the FAILING OPEN notice on stdout"
 fi
 
 # Read the grandchild PID (bounded poll — the file appears as soon as the shim starts).
@@ -261,7 +281,7 @@ build_repo "$repoC2"
 rm -f "$SLEEP_PID_FILE"
 cov_marker="$tmp/coverage-ran.txt"
 rm -f "$cov_marker"
-FAKE_GATE_MODE=sleep BUDGET=2 COV="touch $cov_marker" run_hook "$repoC2" 2>/dev/null
+FAKE_GATE_MODE=sleep BUDGET=2 COV="touch $cov_marker" run_hook "$repoC2" >/dev/null 2>&1
 rcC2=$?
 if [ "$rcC2" -eq 0 ] && [ -f "$cov_marker" ]; then
   ok "fail-open timeout falls through — a wired coverage command still runs (exit 0)"
@@ -301,6 +321,75 @@ if [ "$rcE" -eq 0 ] && [ -s "$RECORD" ]; then
   ok "dirty *.rs working tree runs the gate even with no committed diff (exit 0, gate invoked)"
 else
   bad "dirty *.rs working tree did not run the gate (rc=$rcE, record $( [ -s "$RECORD" ] && echo nonempty || echo empty ))"
+fi
+
+# --- Case F: fix #5 — a non-integer budget warns, defaults to 480, and RUNS -------
+repoF="$tmp/repoF"
+build_repo "$repoF"
+: >"$RECORD"
+warnF_out="$tmp/warnF.txt"
+FAKE_GATE_MODE=pass BUDGET=abc run_hook "$repoF" 2>"$warnF_out"
+rcF=$?
+if [ "$rcF" -eq 0 ] && [ -s "$RECORD" ] && grep -q 'is not a non-negative integer' "$warnF_out"; then
+  ok "non-integer budget warns, defaults to 480, and runs the gate normally"
+else
+  bad "non-integer budget mishandled (rc=$rcF, record $( [ -s "$RECORD" ] && echo nonempty || echo empty ), warned=$(grep -qc 'not a non-negative integer' "$warnF_out" && echo yes || echo no))"
+fi
+
+# --- Case G: fix #5 — hook invoked from a NON-git dir -> exit 0, gate never runs ---
+# The hook resolves its repo root from its own location; outside any git repo that
+# resolution fails, so it exits 0 without running anything.
+nongit_hooks="$tmp/nongit/.claude/hooks"
+mkdir -p "$nongit_hooks"
+cp "$HOOK_SRC" "$nongit_hooks/issue-gate.sh"
+chmod +x "$nongit_hooks/issue-gate.sh"
+: >"$RECORD"
+outG="$tmp/outG.txt"
+( cd "$tmp" && echo '{}' | GATE_RECORD="$RECORD" ISSUE_GATE_TEST_CMD="scripts/agent-gate.sh --lite" \
+    CQLITE_GATE_SLOTS_DIR="$EMPTY_SLOTS" PATH="$tmp/shim:$PATH" \
+    bash "$nongit_hooks/issue-gate.sh" ) >"$outG" 2>&1
+rcG=$?
+if [ "$rcG" -eq 0 ] && [ ! -s "$RECORD" ] && grep -q 'could not resolve the repo root' "$outG"; then
+  ok "non-git invocation exits 0 and never invokes the gate"
+else
+  bad "non-git invocation mishandled (rc=$rcG, record $( [ -s "$RECORD" ] && echo nonempty || echo empty ))"
+fi
+
+# --- Case H: fix #2 — a full gate holding a slot -> advisory check skipped ---------
+if command -v python3 >/dev/null 2>&1; then
+  repoH="$tmp/repoH"
+  build_repo "$repoH"
+  live_slots="$tmp/live-slots"
+  mkdir -p "$live_slots"
+  slot_ready="$tmp/slot-ready.txt"
+  rm -f "$slot_ready"
+  # Background holder: flock slot.0 (LOCK_EX) and hold it, mimicking the live daemon.
+  python3 - "$live_slots" "$slot_ready" >/dev/null 2>&1 <<'PY' &
+import sys, os, fcntl, time
+d, ready = sys.argv[1], sys.argv[2]
+os.makedirs(d, exist_ok=True)
+fd = os.open(os.path.join(d, "slot.0"), os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(ready, "w").write("ok")
+time.sleep(30)
+PY
+  holder_pid=$!
+  # Wait for the holder to actually hold the lock (bounded).
+  waited=0
+  while [ "$waited" -lt 5 ] && [ ! -s "$slot_ready" ]; do sleep 1; waited=$((waited + 1)); done
+  : >"$RECORD"
+  outH="$tmp/outH.txt"
+  FAKE_GATE_MODE=pass SLOTS_DIR="$live_slots" run_hook "$repoH" >"$outH" 2>&1
+  rcH=$?
+  kill "$holder_pid" 2>/dev/null
+  wait "$holder_pid" 2>/dev/null
+  if [ "$rcH" -eq 0 ] && [ ! -s "$RECORD" ] && grep -q 'full gate active — advisory check skipped' "$outH"; then
+    ok "full gate holding a slot -> advisory check skipped (exit 0, gate never invoked)"
+  else
+    bad "slot-aware skip failed (rc=$rcH, record $( [ -s "$RECORD" ] && echo nonempty || echo empty ), notice=$(grep -qc 'advisory check skipped' "$outH" && echo yes || echo no))"
+  fi
+else
+  ok "slot-aware skip case SKIPPED (no python3 — the hook's slot probe also no-ops without it)"
 fi
 
 echo

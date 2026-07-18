@@ -24,14 +24,19 @@
 #     interval ramps 0.2s -> 2s, so the effective ceiling is budget + ~2s poll slop
 #     + 2s TERM grace (still far under the 600s hook timeout).
 #   * No hook path runs roborev anymore — the flow-* review pipeline owns reviews.
+#   * If a FULL gate currently holds a machine-wide concurrency slot, the advisory
+#     check is SKIPPED — yielding to the gate of record is always correct (#1930/#2640).
 #   * If the repo has no Rust diff vs origin/main the advisory --lite test is
 #     intentionally SKIPPED (matching --lite's blast-radius philosophy) — a non-Rust
 #     diff is left uncovered by this test. A wired coverage command still runs.
-#   * On a genuine FAIL the lite SUMMARY block is echoed into the block reason before
-#     the summary file is removed — the SUMMARY is the only retainable text (doctrine).
+#   * The gate's own verbose output goes to a temp log; on a genuine FAIL the block
+#     reason is ONLY the lite SUMMARY block + the log path — never the raw log
+#     (mirroring the doctrine invocation: read the SUMMARY, never the gate log).
+#   * The FAILING-OPEN notice is emitted on BOTH stdout and stderr so it reaches the
+#     session (hook stdout is surfaced on a success/exit-0 completion).
 #
 # Exit 2 -> blocks completion (a genuine lite FAIL); stderr is fed back as the
-# reason. Exit 0 -> allowed (PASS, no-diff skip, or a fail-open timeout).
+# reason. Exit 0 -> allowed (PASS, slot/no-diff skip, or a fail-open timeout).
 #
 # Configure via env (set in .claude/settings.json "env" or your shell):
 #   ISSUE_GATE_TEST_CMD           the fast check, e.g. "scripts/agent-gate.sh --lite"
@@ -62,8 +67,40 @@ fail() {
 warn_line() {
   # Advisory-only warning helper. It NEVER exits — the caller decides whether to
   # continue (e.g. so a wired coverage command still runs after a fail-open timeout).
-  echo "issue-gate: WARNING — $1" 1>&2
-  echo "issue-gate: (advisory hook only; the gate of record is the flow-closer's full gate)." 1>&2
+  # Emitted on BOTH stdout (surfaced to the session on an exit-0 completion) and
+  # stderr (always visible), so a FAILING-OPEN notice can never be swallowed (#2671).
+  printf 'issue-gate: WARNING — %s\nissue-gate: (advisory hook only; the gate of record is the flow-closer'"'"'s full gate).\n' "$1"
+  printf 'issue-gate: WARNING — %s\nissue-gate: (advisory hook only; the gate of record is the flow-closer'"'"'s full gate).\n' "$1" 1>&2
+}
+
+# full_gate_active: true (0) when a FULL agent-gate run currently HOLDS one of the
+# machine-wide concurrency slots (issue #1825). Slots live under
+# $CQLITE_GATE_SLOTS_DIR (default ${TMPDIR:-/tmp}/cqlite-gate-slots) as slot.N files
+# held by a live daemon via a non-blocking fcntl.flock (LOCK_EX). Existence alone is
+# stale-prone (the file survives the gate), so we TEST the lock: python3 tries a
+# non-blocking flock on each slot; a slot it cannot lock is held -> a gate is active.
+# No python3 (or no dir) -> we cannot tell -> return false (fail toward running).
+full_gate_active() {
+  local dir="${CQLITE_GATE_SLOTS_DIR:-${TMPDIR:-/tmp}/cqlite-gate-slots}"
+  [ -d "$dir" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$dir" <<'PY'
+import sys, os, fcntl, glob
+d = sys.argv[1]
+for p in glob.glob(os.path.join(d, "slot.*")):
+    try:
+        fd = os.open(p, os.O_RDWR)
+    except OSError:
+        continue
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        sys.exit(0)   # locked -> a full gate holds this slot
+    finally:
+        os.close(fd)
+sys.exit(1)           # no held slot found
+PY
 }
 
 # --- Resolve the repo root from THIS hook file, never the session cwd (#2671) ---
@@ -72,6 +109,14 @@ REPO_ROOT="$(git -C "$HOOK_DIR" rev-parse --show-toplevel 2>/dev/null || echo ""
 if [ -z "$REPO_ROOT" ]; then
   # No repo root -> nothing this advisory hook can run; exit clean (never block).
   warn_line "could not resolve the repo root from ${HOOK_DIR:-<unknown>}; skipping the advisory check."
+  exit 0
+fi
+
+# --- Slot-aware skip: yield to the gate of record (#1930/#2640) ---
+# If a FULL gate holds a slot, an advisory --lite run would contend for CPU/slots
+# invisibly — the exact hazard this defusal closes. Skip the whole advisory check.
+if full_gate_active; then
+  echo "issue-gate: full gate active — advisory check skipped" 1>&2
   exit 0
 fi
 
@@ -90,8 +135,11 @@ if git -C "$REPO_ROOT" rev-parse --verify --quiet origin/main >/dev/null 2>&1; t
 fi
 
 # --- Run the test command under a wall-clock budget, from the repo root ---
-# run_budgeted <budget-secs> <shell-command-string>
-#   returns 0 on success, the child's exit code on genuine failure, 124 on timeout.
+# run_budgeted <budget-secs> <shell-command-string> <output-log>
+#   Returns the child's real exit code; sets the GLOBAL BUDGET_TIMED_OUT=1 (never a
+#   124 sentinel — a child that genuinely exits 124 must still BLOCK) when it killed
+#   the child for exceeding the budget. Command output goes to <output-log> (never to
+#   this hook's stderr) so a FAIL reason can be ONLY the SUMMARY + the log path.
 # Portable (no GNU `timeout` dependency — stock macOS lacks it): `set -m` puts the
 # backgrounded command in its OWN process group (group id == $!), so on a timeout we
 # kill the NEGATIVE pid (the whole group: the subshell, the gate, and any cargo/gate
@@ -102,10 +150,12 @@ fi
 # accounting, no drift. On timeout we group-kill with a direct-pid fallback and the
 # final wait can never block. The poll interval ramps 0.2s -> 2s to stay cheap, so the
 # effective ceiling is budget + ~2s poll slop + 2s TERM grace.
+BUDGET_TIMED_OUT=0
 run_budgeted() {
-  local budget="$1" cmd="$2" pid t0 interval_tenths=2
+  local budget="$1" cmd="$2" log="$3" pid t0 interval_tenths=2
+  BUDGET_TIMED_OUT=0
   set -m
-  ( cd "$REPO_ROOT" && eval "$cmd" ) </dev/null 1>&2 &
+  ( cd "$REPO_ROOT" && eval "$cmd" ) >"$log" 2>&1 </dev/null &
   pid=$!
   set +m
   t0=$(date +%s)
@@ -116,6 +166,7 @@ run_budgeted() {
       sleep 2
       kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
       wait "$pid" 2>/dev/null || true
+      BUDGET_TIMED_OUT=1
       return 124
     fi
     sleep "$(printf '%d.%d' "$((interval_tenths / 10))" "$((interval_tenths % 10))")"
@@ -129,28 +180,30 @@ run_budgeted() {
 if [ "$SKIP_TEST" = "1" ]; then
   echo "issue-gate: no Rust diff vs origin/main — the advisory --lite test is intentionally skipped (#2671)." 1>&2
 elif [ -n "$TEST_CMD" ]; then
-  # Unique summary path so concurrent/foreign gates never contend on one file (#2671/#2079).
+  # Unique summary + log paths so concurrent/foreign gates never contend (#2671/#2079).
   AGENT_GATE_SUMMARY_FILE="$(mktemp -t issue-gate-lite-summary.XXXXXX 2>/dev/null || echo "${TMPDIR:-/tmp}/issue-gate-lite-summary.$$")"
+  GATE_OUTPUT_LOG="$(mktemp -t issue-gate-lite.XXXXXX.log 2>/dev/null || echo "${TMPDIR:-/tmp}/issue-gate-lite.$$.log")"
   export AGENT_GATE_SUMMARY_FILE
-  run_budgeted "$LITE_BUDGET_SECS" "$TEST_CMD"
+  run_budgeted "$LITE_BUDGET_SECS" "$TEST_CMD" "$GATE_OUTPUT_LOG"
   rc=$?
-  if [ "$rc" -eq 124 ]; then
-    rm -f "$AGENT_GATE_SUMMARY_FILE" 2>/dev/null
+  if [ "$BUDGET_TIMED_OUT" = "1" ]; then
+    rm -f "$AGENT_GATE_SUMMARY_FILE" "$GATE_OUTPUT_LOG" 2>/dev/null
     # FAIL OPEN on a budget overrun: warn and fall through (never block; a wired
-    # coverage command still runs, then the hook exits 0).
+    # coverage command still runs, then the hook exits 0). A genuine child exit 124
+    # is NOT a timeout (BUDGET_TIMED_OUT stays 0) and takes the block path below.
     warn_line "the lite check ('$TEST_CMD') exceeded its ${LITE_BUDGET_SECS}s budget — FAILING OPEN."
   elif [ "$rc" -ne 0 ]; then
-    # Echo the SUMMARY block (the only retainable text, per doctrine) into the block
-    # reason BEFORE removing the file.
+    # Block reason = ONLY the SUMMARY block (the only retainable text, per doctrine)
+    # plus the log path — never the raw gate log.
     if [ -s "$AGENT_GATE_SUMMARY_FILE" ]; then
       echo "issue-gate: --- lite gate SUMMARY (retainable text) ---" 1>&2
       cat "$AGENT_GATE_SUMMARY_FILE" 1>&2
       echo "issue-gate: --- end lite gate SUMMARY ---" 1>&2
     fi
     rm -f "$AGENT_GATE_SUMMARY_FILE" 2>/dev/null
-    fail "Lite check failed ('$TEST_CMD'). Fix the failures before marking this issue done (the full gate of record is the flow-closer's)."
+    fail "lite check failed — see the SUMMARY above; full output: $GATE_OUTPUT_LOG"
   fi
-  rm -f "$AGENT_GATE_SUMMARY_FILE" 2>/dev/null
+  rm -f "$AGENT_GATE_SUMMARY_FILE" "$GATE_OUTPUT_LOG" 2>/dev/null
 else
   echo "issue-gate: ISSUE_GATE_TEST_CMD is unset — skipping the test check." 1>&2
 fi
