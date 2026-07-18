@@ -64,7 +64,7 @@ assert_accelerators() {
     return
   fi
   if printf '%s\n' "$line" \
-       | grep -Eq '^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial)$'; then
+       | grep -Eq '^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)$'; then
     ok "$label: accelerators line well-formed ($line)"
   else
     bad "$label: malformed accelerators line: '$line'"
@@ -676,6 +676,72 @@ if [ "$accel_link_fail" -eq 0 ]; then
     bad "accel-absent: missing loud WARN for an absent accelerator"
     echo "------- stderr -------"; cat "$absent_err"; echo "----------------------"
   fi
+fi
+
+# 9c. sccache cache-health token (issue #2641). The accelerators line carries a
+#     trailing `sccache-health=na|ok|warn` token driven by sccache's OWN error
+#     counters (the characterization found the single "corruption under load"
+#     incident had zero supporting evidence — so the mitigation is MONITORING the
+#     real signal, not blindly auto-disabling caching under load). The state is
+#     decided by _sccache_health via two test hooks (AGENT_GATE_TEST_SCCACHE_STATE
+#     to force the sccache accelerator state, AGENT_GATE_TEST_SCCACHE_ERRORS to
+#     force the error sum) so na/ok/warn assert deterministically without sccache
+#     installed and without PATH surgery.
+#
+# 9c-i. sccache in use, ZERO error counters -> sccache-health=ok, NO corruption WARN.
+health_err="$tmp/health-ok.stderr"
+AGENT_GATE_SUMMARY_FILE="$tmp/health-ok.txt" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$health_err"
+if grep -qE '^accelerators: .* sccache-health=ok$' "$tmp/health-ok.txt"; then
+  ok "sccache-health: on + 0 errors -> sccache-health=ok"
+else
+  bad "sccache-health: expected sccache-health=ok for on + 0 errors"
+  grep '^accelerators:' "$tmp/health-ok.txt" 2>/dev/null || cat "$tmp/health-ok.txt"
+fi
+if grep -q 'WARN:.*corrupted or torn cache' "$health_err"; then
+  bad "sccache-health: emitted a corruption WARN with ZERO error counters"
+else
+  ok "sccache-health: no corruption WARN when error counters are zero"
+fi
+
+# 9c-ii. sccache in use, NON-ZERO error counters -> sccache-health=warn + LOUD WARN.
+AGENT_GATE_SUMMARY_FILE="$tmp/health-warn.txt" \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=3 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/health-warn.stderr"
+if grep -qE '^accelerators: .* sccache-health=warn$' "$tmp/health-warn.txt"; then
+  ok "sccache-health: on + >0 errors -> sccache-health=warn"
+else
+  bad "sccache-health: expected sccache-health=warn for on + >0 errors"
+  grep '^accelerators:' "$tmp/health-warn.txt" 2>/dev/null || cat "$tmp/health-warn.txt"
+fi
+if grep -qE 'WARN: sccache reports 3 cache .* corrupted or torn cache' "$tmp/health-warn.stderr"; then
+  ok "sccache-health: LOUD WARN emitted (naming count + inspect command) on non-zero error counters"
+else
+  bad "sccache-health: missing LOUD corruption WARN on non-zero error counters"
+  echo "------- stderr -------"; cat "$tmp/health-warn.stderr"; echo "----------------------"
+fi
+# The mitigation must NOT disable caching or fail the gate on a warn (that would
+# increase build pressure — the exact anti-goal from the #2641 characterization).
+# Host-independent: a warn must never flip the sccache accelerator to `off`
+# (blind auto-disable). The sccache= field reflects the host (on when installed,
+# absent otherwise); the invariant is only that a health warn never disables it.
+if grep -qE '^accelerators: sccache=off ' "$tmp/health-warn.txt"; then
+  bad "sccache-health: sccache was disabled on a warn — the #2641 anti-goal"
+  grep '^accelerators:' "$tmp/health-warn.txt" 2>/dev/null || cat "$tmp/health-warn.txt"
+else
+  ok "sccache-health: caching NOT auto-disabled on a warn (no blind auto-disable)"
+fi
+
+# 9c-iii. sccache NOT in use -> sccache-health=na, nothing to probe, no WARN.
+AGENT_GATE_SUMMARY_FILE="$tmp/health-na.txt" \
+  AGENT_GATE_TEST_SCCACHE_STATE=off \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/health-na.stderr"
+if grep -qE '^accelerators: .* sccache-health=na$' "$tmp/health-na.txt"; then
+  ok "sccache-health: sccache not in use -> sccache-health=na"
+else
+  bad "sccache-health: expected sccache-health=na when sccache not in use"
+  grep '^accelerators:' "$tmp/health-na.txt" 2>/dev/null || cat "$tmp/health-na.txt"
 fi
 
 # ============================================================================

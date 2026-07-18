@@ -30,7 +30,7 @@ without it, it prints the exact command for each gap. It verifies, in order:
 Every gate SUMMARY (full **and** `--lite`) carries one machine-checkable line:
 
 ```
-accelerators: sccache=on nextest=on lanes=on
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok
 ```
 
 - **`sccache`** — cross-worktree compile cache (~25.6% faster fresh builds).

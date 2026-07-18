@@ -60,6 +60,50 @@ sccache --stop-server
 sccache --start-server
 ```
 
+## sccache cache-health monitoring (issue #2641)
+
+A single incident was reported of sccache serving corrupted objects under extreme
+load (loadavg ~150). Issue #2641 **characterized before mitigating**: across ~31k
+requests on a sustained-high-load gate machine, sccache's **own authoritative error
+counters** — `Cache read errors`, `Cache write errors`, `Cache errors`,
+`Cache timeouts` — were **all zero**, the eviction-capped cache held **zero
+torn/zero-byte objects**, and the cache disk had ample free space (not a disk-full
+artifact). There was **no evidence of a load→corruption mechanism**, so the gate
+does **NOT** auto-disable caching under load: doing so would forfeit the measured
+25.6% build speedup and *increase* build pressure on exactly the loaded machines
+that can least afford it, to defend an unreproduced failure mode.
+
+What the incident *did* expose is that sccache's error counters — the one signal
+that would catch real corruption — were invisible in the SUMMARY. The
+evidence-based mitigation is **monitoring that real signal**, not a blind
+auto-disable. Every SUMMARY's `accelerators:` line now carries a trailing
+`sccache-health=` token:
+
+```
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok
+```
+
+- `sccache-health=na`   — sccache not in use (nothing to probe).
+- `sccache-health=ok`   — sccache in use, all error/timeout counters zero.
+- `sccache-health=warn` — a counter is non-zero → **LOUD `WARN:` on STDERR** naming
+  the count and pointing at `sccache --show-stats`. Caching stays **ENABLED** and
+  the gate does **not** fail — the WARN is a signal to inspect the cache, not a
+  blind kill switch.
+
+The counter sum is probed via `sccache --show-stats` only at SUMMARY emission
+(memoized; never in the latency-sensitive classify hooks). On a `warn`, inspect
+and, if you confirm corruption, reset the cache:
+
+```bash
+sccache --show-stats          # confirm which counter fired
+sccache --stop-server && rm -rf "$SCCACHE_DIR" && sccache --start-server
+```
+
+If a future *reproduced* incident correlates non-zero counters with load, the
+per-gate counters are now recorded to drive that decision on evidence — the point
+at which load-aware behavior could be reconsidered. Self-test coverage:
+`scripts/tests/test_agent_gate_summary.sh` (case 9c, na/ok/warn + no-auto-disable).
+
 ## Accelerator degradation is LOUD, not silent (issue #1848)
 
 Every optional accelerator the gate depends on — **sccache** (cross-worktree
@@ -81,7 +125,7 @@ Every SUMMARY block (full **and** `--lite`) carries a **machine-checkable
 scrollback:
 
 ```
-accelerators: sccache=on nextest=absent lanes=serial
+accelerators: sccache=on nextest=absent lanes=serial sccache-health=ok
 ```
 
 State values: `on` (detected & used) · `absent` (missing → WARN) · `off`
