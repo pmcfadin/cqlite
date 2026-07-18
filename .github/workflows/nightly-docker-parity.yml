@@ -1,29 +1,44 @@
 name: "CI: Nightly Docker Parity (nightly_docker tier)"
 
 # The single dedicated lane that implements the `nightly_docker` parity tier
-# (issue #1025, epic #974). It stands up a real, pinned Cassandra 5.0.2 and runs
-# the heavy live-Cassandra differential checks TOGETHER so the parity release
+# (issue #1025, epic #974). It stands up a real, pinned Cassandra 5.0.2 and proves
+# the heavy live-Cassandra differential properties TOGETHER so the parity release
 # checklist's "recent `nightly_docker` pass" item (docs/development/
 # parity-release-checklist.md) has ONE workflow to cite.
 #
-# It aggregates — it does NOT re-implement any per-leg logic. The runner
-# (test-data/scripts/nightly-docker-parity.sh) invokes the existing machinery:
-#   HARD-FAIL legs (a failure fails this workflow):
-#     1. live read-back semantic   -> test-data/scripts/e2e-cassandra-readback.sh
-#                                      (compose stack docker-compose-cassandra5.yml,
-#                                       image cassandra:5.0.2)
+# ── De-duplication (issue #2650, epic #2636) ──────────────────────────────────
+# Two of this umbrella's legs used to be proven TWICE the same night: the live
+# read-back leg re-ran what `e2e-readback.yml` (02:30) already ran, and the
+# compaction logical+byte legs re-ran what `compaction-parity.yml` (05:43)
+# already ran. That doubled the two most expensive parity properties nightly and
+# forced this umbrella to carry its own JDK/Ant/Gradle/Cassandra-source build
+# purely to serve the compaction legs.
+#
+# This umbrella is now an ORCHESTRATOR. Each duplicated property runs EXACTLY
+# ONCE per night, as a reusable-workflow (`workflow_call`) leg shared by the
+# standalone lane and this umbrella:
+#   * live read-back            -> uses: ./.github/workflows/e2e-readback.yml
+#   * compaction logical + byte -> uses: ./.github/workflows/compaction-parity.yml
+# Those two standalone lanes NO LONGER self-schedule nightly (their `schedule:`
+# crons were removed); this umbrella's 06:11 schedule is the single nightly
+# driver for both. The umbrella then runs only its UNIQUE legs (BTI (da)
+# sstabledump + Bloom filter) in the `bti-bloom` job and stitches everything into
+# ONE citable aggregate pass (`aggregate`). Because compaction is delegated, this
+# umbrella's own job no longer needs the JDK/Ant/Gradle/Cassandra-source build.
+#
+# Leg map:
+#   Delegated (single execution, shared with the standalone lane):
+#     1. live read-back semantic   -> e2e-readback.yml (compose cassandra:5.0.2)
+#     3. compaction LOGICAL parity  -> compaction-parity.yml `gradle test` (HARD)
+#     5. compaction BYTE tier        -> compaction-parity.yml `gradle byteParity`
+#                                       (#842 north star, non-blocking / owner F5)
+#   Umbrella-unique (this workflow's own `bti-bloom` job):
 #     2. BTI (da) sstabledump parity-> cqlite-core issue_911_bti_sstabledump_parity
-#     3. compaction LOGICAL parity  -> compaction-parity/ (gradle test) over the
-#                                      pinned Cassandra source (bootstrap-cassandra.sh)
 #     4. Bloom no-false-negative     -> cqlite-core
 #          filter_db_strict_parameters_and_no_false_negative (P0 data loss; ALWAYS
 #          hard-fail, owner fork F4)
-#   ADVISORY legs (continue-on-error; never fail this workflow on their own):
-#     5. compaction BYTE tier        -> compaction-parity/ (gradle byteParity)
-#          (#842 north star, non-blocking per epic #974 / owner fork F5)
 #     6. statistical Bloom FPR        -> filter_db_statistical_false_positive_rate_slow
-#          (measured FPR vs configured bloom_filter_fp_chance; ADVISORY at first,
-#           owner fork F4)
+#          (measured FPR vs configured bloom_filter_fp_chance; ADVISORY, owner F4)
 #
 # TIER POLICY (docs/development/parity-ci-tiers.md `nightly_docker`):
 #   - Scheduled (NOT per-PR): builds Cassandra source / stands up a container,
@@ -35,28 +50,35 @@ name: "CI: Nightly Docker Parity (nightly_docker tier)"
 #
 # Cassandra is pinned to 5.0.2 ONLY (cassandra-5.0.2 / git f278f677…), the SAME
 # pin the committed corpus and every existing live lane use. No second pin is
-# introduced: the live leg reuses docker-compose-cassandra5.yml (cassandra:5.0.2)
-# and the compaction leg reuses bootstrap-cassandra.sh (CASSANDRA_REF).
+# introduced: the delegated live/compaction legs reuse
+# docker-compose-cassandra5.yml (cassandra:5.0.2) and bootstrap-cassandra.sh
+# (CASSANDRA_REF); the umbrella's BTI leg reuses the same cassandra:5.0.2 image.
 
 on:
-  # Nightly at 06:11 UTC — off the existing nightly rush (e2e-readback 02:30,
-  # tombstone/TTL 04:17, cql-type 04:31, live-cell-compaction 04:xx, compression
-  # 05:23, compaction byte tier 05:43) so a shared Cassandra-source cache is warm.
+  # Nightly at 06:11 UTC — off the existing nightly rush so a shared
+  # Cassandra-source cache is warm. This is now the SINGLE nightly driver for the
+  # delegated live read-back + compaction properties (their standalone crons were
+  # removed, issue #2650).
   schedule:
     - cron: '11 6 * * *'
   # Manual dispatch for on-demand runs / release verification.
   workflow_dispatch:
     inputs:
       skip_compaction:
-        description: 'Skip the compaction legs (no JDK/ant Cassandra-source build)'
+        description: 'Skip the delegated compaction legs (no JDK/ant Cassandra-source build)'
         type: boolean
         default: false
 
-# This lane is read-only against the repo; it never comments on PRs (it never
-# runs on PRs). issues:write reserved for the future failure-to-issue automation
-# (#1028, out of scope here).
+# This lane is read-only against the repo and never runs on PRs. The delegated
+# reusable-workflow legs (e2e-readback, compaction-parity) declare
+# pull-requests/issues write for their PR-comment / failure-issue steps; a
+# workflow_call leg's GITHUB_TOKEN scope is bounded by THIS caller, so the caller
+# jobs below grant exactly what each delegated lane needs (those write steps are
+# no-ops on the scheduled/dispatch path).
 permissions:
   contents: read
+  pull-requests: write
+  issues: write
 
 # Only one nightly run at a time; never cancel an in-flight scheduled run.
 concurrency:
@@ -65,33 +87,65 @@ concurrency:
 
 env:
   # Single source of truth for the pin lives in the reused machinery; restated
-  # here only to hand bootstrap-cassandra.sh the same ref (NOT a second pin).
+  # here only for the BTI leg's fixture metadata + image pull (NOT a second pin).
   CASSANDRA_REF: cassandra-5.0.2
-  # Single source of truth for the DOCKER IMAGE the live + BTI legs validate
-  # against. The "Ensure pinned image" step pulls exactly this tag, and the BTI
+  # Single source of truth for the DOCKER IMAGE the BTI leg validates against.
+  # The "Ensure pinned image" step pulls exactly this tag, and the BTI
   # sstabledump test honors it (CASSANDRA_IMAGE) — in strict mode it REQUIRES this
-  # exact image (no fallback to a looser cassandra:5.0 tag that might be on the
-  # runner). Matches docker-compose-cassandra5.yml / the committed corpus (5.0.2);
-  # NOT a second pin.
+  # exact image (no fallback to a looser cassandra:5.0 tag). Matches
+  # docker-compose-cassandra5.yml / the committed corpus (5.0.2); NOT a second pin.
   CASSANDRA_IMAGE: cassandra:5.0.2
-  CQLITE_CASSANDRA_CACHE: ${{ github.workspace }}/.cqlite-cache/cassandra-src
   # Canonical dataset pin — the SAME tag/asset/sha the other fixture-backed
   # parity lanes use (sstabledump-parity-gate.yml). The fixture-dependent HARD
-  # legs (Bloom no-false-negative, BTI read-back) require these *-Data.db /
-  # *-Filter.db / *-Index.db binaries, which are gitignored/absent in a fresh
-  # checkout — so the lane MUST fetch them and FAIL CLOSED if they are missing
-  # (issue #1025; no "gate theater" — never pass a dataset-dependent leg on an
-  # empty dataset, issues #1024/#1093/#1097).
+  # BTI/Bloom legs require these *-Data.db / *-Filter.db / *-Index.db binaries,
+  # gitignored/absent in a fresh checkout — so the umbrella job MUST fetch them
+  # and FAIL CLOSED if they are missing (issue #1025; no "gate theater").
   DATASET_TAG: datasets-v3
   DATASET_ASSET: cassandra5-small-full-v3.5.tar.gz
   DATASET_SHA256: 414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
 
 jobs:
-  nightly-docker-parity:
-    name: Nightly Docker parity (live read-back + BTI + compaction + Bloom)
+  # ── Delegated leg 1: live read-back (single execution, shared lane) ──────────
+  # Invokes the standalone e2e-readback lane via workflow_call so the live
+  # write -> flush -> export -> nodetool refresh -> cqlsh property runs exactly
+  # once per night. `github.event_name` inside the reusable workflow is this
+  # umbrella's triggering event (schedule / workflow_dispatch), so its job guard
+  # (`!= pull_request`) runs the full path.
+  live-readback:
+    name: Live read-back (delegated → e2e-readback.yml)
+    uses: ./.github/workflows/e2e-readback.yml
+    permissions:
+      contents: read
+      pull-requests: write
+
+  # ── Delegated legs 3 + 5: compaction logical + byte tiers ────────────────────
+  # Invokes the standalone compaction-parity lane via workflow_call. The byte
+  # tier's own `if:` (schedule || workflow_dispatch) fires because the reusable
+  # workflow observes this umbrella's event. A workflow_dispatch with
+  # skip_compaction=true skips this whole delegated job (mirrors the old
+  # --skip-compaction dispatch escape hatch, without paying for the JDK/ant build).
+  compaction:
+    name: Compaction parity (delegated → compaction-parity.yml)
+    if: ${{ github.event.inputs.skip_compaction != 'true' }}
+    uses: ./.github/workflows/compaction-parity.yml
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+  # ── Umbrella-unique legs 2 + 4 + 6: BTI (da) sstabledump + Bloom filter ───────
+  # These properties are NOT proven by any standalone lane, so the umbrella runs
+  # them itself. It reuses the aggregating runner with --skip-live and
+  # --skip-compaction (both EXPLICIT user skips → legitimate SKIP even under
+  # strict mode) so only the BTI + Bloom legs execute. Because compaction is
+  # delegated, this job needs NO JDK/Ant/Gradle/Cassandra-source build — only the
+  # Rust toolchain, the candidate binary, the dataset, and the pinned image the
+  # BTI sstabledump leg runs against.
+  bti-bloom:
+    name: BTI + Bloom parity (umbrella-unique legs)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -101,7 +155,7 @@ jobs:
       # The fixture-backed HARD legs (Bloom no-false-negative, BTI read-back)
       # read *-Data.db / *-Filter.db / *-Index.db binaries that are gitignored
       # and absent in a fresh checkout. Mirror the sstabledump-parity-gate.yml
-      # pattern exactly (shared cache+fetch action → provenance → component-count
+      # pattern (shared cache+fetch action → provenance → component-count
       # hard-fail) so a missing/unfetched dataset can NEVER let a P0 leg pass
       # vacuously (issue #1025; fail-closed mandate #1024/#1093/#1097).
       - name: Restore canonical full datasets
@@ -148,33 +202,6 @@ jobs:
             exit 1
           fi
 
-      # JDK 17 — drives Gradle, the compaction test JVM, and the Cassandra source
-      # build (Cassandra 5.0 builds on JDK 11 or 17, NOT 21).
-      #
-      # Medium fix (issue #1025): the JDK/Ant/Gradle setup + the slow Cassandra
-      # source bootstrap exist ONLY for the compaction legs. A
-      # `workflow_dispatch` with skip_compaction:true must short-circuit ALL of
-      # that expensive work (it previously honored the input only when invoking
-      # the runner, AFTER paying the full build cost / risking a build failure).
-      # The guard `github.event.inputs.skip_compaction != 'true'` is TRUE for the
-      # scheduled run (no inputs) so the nightly schedule still does the full
-      # bootstrap; it is FALSE only on a dispatch that explicitly opts out.
-      - name: Setup Java and sstabledump
-        id: setup-sstabledump
-        if: github.event.inputs.skip_compaction != 'true'
-        uses: ./.github/actions/setup-sstabledump
-        with:
-          java-distribution: temurin
-          java-version: '17'
-          install-path: .ci/bin
-          cassandra-version: 5.0.2
-
-      - name: Install Ant (required by the Cassandra source build)
-        if: github.event.inputs.skip_compaction != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ant
-
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-rust-ci
         with:
@@ -182,137 +209,133 @@ jobs:
           components: ''
           cache-key: nightly-docker-parity
 
-      # Cache the slow Cassandra source build, keyed exactly like
-      # compaction-parity.yml so the two lanes share a warm cache.
-      - name: Cache pinned Cassandra build
-        id: cassandra-cache
-        if: github.event.inputs.skip_compaction != 'true'
-        uses: actions/cache@v5
-        with:
-          path: ${{ env.CQLITE_CASSANDRA_CACHE }}
-          key: ${{ runner.os }}-cassandra-${{ env.CASSANDRA_REF }}-${{ hashFiles('compaction-parity/scripts/bootstrap-cassandra.sh') }}
-
-      - name: Build pinned Cassandra source (cold cache only)
-        if: github.event.inputs.skip_compaction != 'true'
-        env:
-          CQLITE_CASSANDRA_CACHE: ${{ env.CQLITE_CASSANDRA_CACHE }}
-          CASSANDRA_REF: ${{ env.CASSANDRA_REF }}
-          CASSANDRA_BUILD_JAVA_HOME: ${{ steps.setup-sstabledump.outputs.java-home }}
-        run: |
-          bash compaction-parity/scripts/bootstrap-cassandra.sh
-
       - name: Build cqlite (write-support) candidate binary
         run: |
           cargo build --package cqlite-cli --features write-support
           test -x target/debug/cqlite
 
-      # Ensure the pinned image (CASSANDRA_IMAGE) is present BEFORE the lane runs.
-      # The live read-back leg AND the BTI sstabledump leg need it locally; the BTI
-      # test only discovers images already on the host (it never pulls) and, in
-      # strict mode, REQUIRES this EXACT pinned tag (no fallback to a looser
-      # cassandra:5.0 tag). So pull exactly $CASSANDRA_IMAGE up front so the hard
-      # BTI leg validates against the stated pin and never a different local image
-      # (issue #1025 run-or-fail + image single-source-of-truth). Pin matches
-      # docker-compose-cassandra5.yml / the committed corpus — NOT a second pin.
-      - name: Ensure pinned Cassandra image (live + BTI legs)
+      # The BTI sstabledump leg discovers images already on the host (it never
+      # pulls) and, in strict mode, REQUIRES this EXACT pinned tag (no fallback to
+      # a looser cassandra:5.0 tag). Pull exactly $CASSANDRA_IMAGE up front so the
+      # hard BTI leg validates against the stated pin (issue #1025 run-or-fail +
+      # image single-source-of-truth). Pin matches docker-compose-cassandra5.yml /
+      # the committed corpus — NOT a second pin.
+      - name: Ensure pinned Cassandra image (BTI leg)
         env:
           CASSANDRA_IMAGE: ${{ env.CASSANDRA_IMAGE }}
         run: |
           docker pull "$CASSANDRA_IMAGE"
           docker image inspect "$CASSANDRA_IMAGE" >/dev/null
 
-      - name: Setup Gradle (no wrapper in compaction-parity)
-        if: github.event.inputs.skip_compaction != 'true'
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.10.2"
-
-      # The aggregating runner drives every leg, classifies hard-fail vs advisory,
-      # writes report.md + the Bloom FPR summary + fixture metadata + per-scenario
-      # diffs, and exits non-zero iff a HARD-FAIL leg failed. It reuses the same
-      # Cassandra source we just built (via CQLITE_CASSANDRA_CACHE -> the leg
-      # re-runs bootstrap, which no-ops on the warm marker).
-      - name: Run nightly docker parity lane
+      # Run ONLY the umbrella-unique legs. --skip-live + --skip-compaction are
+      # explicit user skips (legitimate SKIP even under strict mode); the live +
+      # compaction properties are proven once each by the delegated jobs above.
+      - name: Run BTI + Bloom parity legs (umbrella-unique)
         id: lane
         shell: bash
         env:
-          COMPOSE_CMD: "docker compose"
           CASSANDRA_REF: ${{ env.CASSANDRA_REF }}
           # Image single source of truth: the BTI sstabledump test (run by the
           # runner) honors CASSANDRA_IMAGE and, under strict mode, REQUIRES this
           # exact pinned tag — never a looser cassandra:5.0 tag (issue #1025).
           CASSANDRA_IMAGE: ${{ env.CASSANDRA_IMAGE }}
-          CQLITE_CASSANDRA_CACHE: ${{ env.CQLITE_CASSANDRA_CACHE }}
           CQLITE_DATASETS_ROOT: ${{ env.CQLITE_DATASETS_ROOT }}
           # Fail-closed switch (issue #1025): the runner's fixture-backed HARD legs
           # (Bloom no-false-negative, BTI read-back) inherit this env and PANIC
           # instead of SKIP when a required binary is absent — so a HARD leg can
-          # never vacuously pass on an empty dataset. The dataset was already
-          # fetched + fail-closed-verified above, so under normal operation this
-          # only guards against an in-run loss of the fixtures.
+          # never vacuously pass on an empty dataset.
           CQLITE_REQUIRE_FIXTURES: '1'
-          # Strict mode (issue #1025): this is the REAL scheduled lane and it has
-          # Docker + the pinned cassandra:5.0.2 image + JDK/gradle + the Cassandra
-          # source build all provisioned above. So every HARD leg must RUN or FAIL:
-          # a HARD leg that SKIPs for any reason OTHER than an explicit user skip
-          # flag (--skip-compaction) is converted to FAIL by the runner. Infra
-          # breakage (failed bootstrap, missing image, live check skipped) reds the
-          # lane instead of silently passing. The BTI test inherits this via
-          # CQLITE_REQUIRE_FIXTURES (it panics rather than skip when Cassandra is
-          # unavailable); the runner enforces it for every other HARD leg.
+          # Strict mode (issue #1025): every HARD leg must RUN or FAIL. A HARD leg
+          # that SKIPs for any reason OTHER than an explicit user skip flag is
+          # converted to FAIL by the runner. --skip-live / --skip-compaction below
+          # are explicit user skips and stay legitimate SKIPs (the properties are
+          # proven by the delegated jobs), so only BTI + Bloom are run-or-fail here.
           NIGHTLY_DOCKER_STRICT: '1'
-          # boolean dispatch input (constrained to true/false by GitHub) routed
-          # through env per the workflow-injection guidance — no free-text input.
-          SKIP_COMPACTION: ${{ github.event.inputs.skip_compaction }}
         run: |
-          EXTRA=""
-          if [[ "$SKIP_COMPACTION" == "true" ]]; then
-            EXTRA="--skip-compaction"
-          fi
           bash test-data/scripts/nightly-docker-parity.sh \
             --skip-build \
             --bin "$(pwd)/target/debug/cqlite" \
             --report-dir "$(pwd)/target/nightly-docker-parity" \
-            $EXTRA
+            --skip-live \
+            --skip-compaction
 
-      # Cassandra container logs for the live read-back leg (best-effort).
-      - name: Collect Cassandra container logs
-        if: always()
-        run: |
-          mkdir -p target/nightly-docker-parity/logs
-          docker compose \
-            -f test-data/docker/docker-compose-cassandra5.yml \
-            logs --no-color cassandra-5-0 \
-            > target/nightly-docker-parity/logs/cassandra.log 2>&1 || true
-
-      # Tear down any leftover Cassandra stack (the script's EXIT trap handles the
-      # happy path; this catches runner-level abrupt termination).
-      - name: Tear down Cassandra stack (cleanup guard)
-        if: always()
-        run: |
-          docker compose \
-            -f test-data/docker/docker-compose-cassandra5.yml \
-            down -v --remove-orphans 2>/dev/null || true
-
-      # Upload the report + all diagnostics on success AND failure, >= 30-day
-      # retention per the nightly_docker tier contract. The bundle carries:
-      # Cassandra logs, CQLite/leg logs, fixture metadata (version + git SHA),
-      # per-scenario JSONL diffs, the Bloom FPR summary, and (in report.md) the
-      # exact reproduction commands.
-      - name: Upload nightly parity report and diagnostics
+      # Upload the BTI/Bloom report + diagnostics on success AND failure, >= 30-day
+      # retention per the nightly_docker tier contract.
+      - name: Upload BTI + Bloom parity report and diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: nightly-docker-parity-${{ github.run_id }}
+          name: nightly-docker-parity-bti-bloom-${{ github.run_id }}
           path: |
             target/nightly-docker-parity/report.md
             target/nightly-docker-parity/fixture-metadata.txt
             target/nightly-docker-parity/bloom-fpr-summary.txt
             target/nightly-docker-parity/logs/**
             target/nightly-docker-parity/diffs/**
-            compaction-parity/build/reports/tests/**
-            compaction-parity/build/test-results/**
-            compaction-parity/build/parity-artifacts-test/**
-            compaction-parity/build/parity-artifacts-byteParity/**
           if-no-files-found: warn
           retention-days: 30
+
+  # ── Aggregate: the ONE citable nightly_docker pass ───────────────────────────
+  # Stitches the delegated live + compaction legs and the umbrella-unique
+  # BTI/Bloom leg into a single verdict so the parity-release-checklist still has
+  # ONE workflow run to cite. A delegated compaction leg that is legitimately
+  # skipped (workflow_dispatch skip_compaction=true) does not fail the aggregate.
+  aggregate:
+    name: Nightly Docker parity aggregate (citable pass)
+    needs: [live-readback, compaction, bti-bloom]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Aggregate nightly docker parity result
+        env:
+          # needs.<job>.result is trusted GitHub-computed context; still routed
+          # through env vars, never interpolated into the run: shell (injection-safe).
+          LIVE_RESULT: ${{ needs.live-readback.result }}
+          COMPACTION_RESULT: ${{ needs.compaction.result }}
+          BTI_BLOOM_RESULT: ${{ needs.bti-bloom.result }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "# Nightly Docker Parity — aggregate (citable pass)"
+            echo
+            echo "| Leg | Source | Result |"
+            echo "|---|---|---|"
+            echo "| live read-back (semantic) | delegated: e2e-readback.yml | ${LIVE_RESULT} |"
+            echo "| compaction logical + byte | delegated: compaction-parity.yml | ${COMPACTION_RESULT} |"
+            echo "| BTI (da) sstabledump + Bloom | umbrella: bti-bloom job | ${BTI_BLOOM_RESULT} |"
+            echo
+            echo "Each property is proven exactly once per night: the live read-back"
+            echo "and compaction legs are shared reusable workflows invoked here AND"
+            echo "runnable standalone on PRs; the BTI/Bloom legs are unique to this"
+            echo "umbrella. This aggregate job's success is the citable nightly_docker pass."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "live-readback: ${LIVE_RESULT}"
+          echo "compaction:    ${COMPACTION_RESULT}"
+          echo "bti-bloom:     ${BTI_BLOOM_RESULT}"
+
+          fail=0
+          if [[ "${LIVE_RESULT}" != "success" ]]; then
+            echo "::error::live read-back leg is not green (${LIVE_RESULT})" >&2
+            fail=1
+          fi
+          if [[ "${BTI_BLOOM_RESULT}" != "success" ]]; then
+            echo "::error::BTI/Bloom legs are not green (${BTI_BLOOM_RESULT})" >&2
+            fail=1
+          fi
+          # compaction may be legitimately skipped via workflow_dispatch
+          # skip_compaction=true (explicit user opt-out); any other non-success
+          # result reds the aggregate.
+          if [[ "${COMPACTION_RESULT}" != "success" && "${COMPACTION_RESULT}" != "skipped" ]]; then
+            echo "::error::compaction parity leg is not green (${COMPACTION_RESULT})" >&2
+            fail=1
+          fi
+
+          if [[ "${fail}" -ne 0 ]]; then
+            echo "Nightly Docker parity aggregate: FAIL"
+            exit 1
+          fi
+          echo "Nightly Docker parity aggregate: PASS"

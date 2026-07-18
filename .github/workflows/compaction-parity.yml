@@ -21,9 +21,19 @@ name: "CI: Compaction Parity (differential harness)"
 #     (#886 → #844/#887/#888/#846/#848) land — by dropping continue-on-error.
 #
 # TRIGGERS: PRs that touch the write/merge/compaction paths or this harness, plus
-# manual workflow_dispatch. The pinned Cassandra source build (ant jar build-test)
-# is slow, so it is cached under ~/.cache/cqlite keyed on the cassandra-5.0.2 pin
-# and the bootstrap script hash.
+# manual workflow_dispatch, plus `workflow_call` from the nightly-docker-parity.yml
+# umbrella. The pinned Cassandra source build (ant jar build-test) is slow, so it
+# is cached under ~/.cache/cqlite keyed on the cassandra-5.0.2 pin and the
+# bootstrap script hash.
+#
+# DE-DUPLICATION (issue #2650, epic #2636): this lane's standalone nightly
+# `schedule:` cron was REMOVED. The nightly-docker-parity.yml umbrella now drives
+# the compaction logical + byte properties once per night via `workflow_call`, so
+# they are proven exactly once nightly and this lane's run is part of the
+# umbrella's ONE citable aggregate pass. The byte-tier `if:` below keys on
+# `github.event_name`, which for a reusable-workflow leg reflects the caller's
+# event (schedule / workflow_dispatch), so the nightly byteParity assertion still
+# fires. This lane still runs standalone on PRs and manual dispatch.
 
 on:
   pull_request:
@@ -39,13 +49,12 @@ on:
       - 'cqlite-core/src/schema/**'
       - 'compaction-parity/**'
       - '.github/workflows/compaction-parity.yml'
-  # Nightly run that honors the byte-tier's `nightly_docker` manifest CI tier:
-  # the byteParity assertion (per-component cmp, no allowlist) runs automatically
-  # here, not just on manual dispatch. 05:43 UTC is offset from the other nightly
-  # parity jobs (tombstone/TTL 04:17, cql-type 04:31, compression 05:23) and off
-  # the top-of-hour scheduler rush.
-  schedule:
-    - cron: '43 5 * * *'
+  # Reusable-workflow entry point: the nightly-docker-parity.yml umbrella invokes
+  # this lane so the compaction logical + byte properties run once per night as a
+  # shared leg (issue #2650). The byte-tier assertion (per-component cmp, no
+  # allowlist) fires because `github.event_name` reflects the caller's schedule /
+  # workflow_dispatch event.
+  workflow_call:
   workflow_dispatch:
     inputs:
       run_byte_tier:
