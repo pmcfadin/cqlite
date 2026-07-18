@@ -316,6 +316,16 @@ runs it to merged + finalized, writes a <code dir="auto">.worker-last-iteration.
 issue per session). The supervisor adds a flock single-instance (mechanizing one-worker-per-machine),
 fail-closed preflight (load/disk/leftover-process/stop-file), a crash-loop breaker, budgets, and ntfy
 notifications. See the <a href="https://github.com/pmcfadin/cqlite/blob/main/docs/development/fleet-runbook.md">fleet runbook</a>.</p>
+<p><strong>Never block on a question (park-and-resume, #2666).</strong> A worker runs unattended, so <code dir="auto">AskUserQuestion</code> (and
+any interactive prompt) is attended-sessions-only. When a worker hits Seam 1 (an unapproved spec) or a
+genuine mid-run owner decision it does not wait — it <strong>parks</strong>: posts ONE structured question comment
+(options + recommendation + default), adds the <code dir="auto">needs-decision</code> label, writes a <code dir="auto">blocked</code> marker with
+<code dir="auto">reason: seam1-approval|needs-decision</code>, and exits, releasing the machine. The supervisor judges this
+<code dir="auto">parked-on-owner</code>, pages the owner once, and moves to the next Ready issue; a worker that nonetheless wedges
+on a prompt is caught mid-iteration by a log-tail watchdog and paged as <code dir="auto">stuck-on-question</code>. Neither counts
+toward the crash breaker. The parked issue resumes only on a strictly-newer owner reply (the worker reads
+the answer and clears the label); a durable <code dir="auto">resume-dont-ask</code> label is a standing Seam-1 seal <code dir="auto">flow-implement</code>
+honors in place of asking.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="concurrency-model">Concurrency model</h2><a class="sl-anchor-link" href="#concurrency-model"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Concurrency model”</span></a></div>
 <ul>
 <li><strong>One active worker per machine; the worker paces the machine’s load (#1930).</strong> A single lead/worker
