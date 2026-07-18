@@ -108,10 +108,12 @@ silently fails:
 
 There is a shared **claim board** — a GitHub Project (v2) with a `Status` single-select
 (`Backlog/Ready/In Progress/In Review/Done`) — plus a **claim protocol** so two sessions never work the
-same item. The deciding cross-machine lock is the **`issue-<N>-<slug>` branch pushed to origin** (assignee
-`@me` is identical for the same GitHub user on two machines, so assignee alone is NOT a lock); a session
-claims by pushing that branch, sets assignee + `Status=In Progress` for visibility, then **re-reads** and
-proceeds only if it holds the branch. See `flow-activate` / `flow-implement` for the steps and `flow-board`
+same item. The deciding cross-machine lock is the slugless fixed-name ref **`refs/claims/issue-<N>`**
+acquired via `bash scripts/flow/claim.sh claim <N>` (#2665 — assignee `@me` is identical for the same
+GitHub user on two machines, so assignee alone is NOT a lock; the `issue-<N>-<slug>` branch is PR
+plumbing, NOT the lock); a session claims the ref FIRST (git arbitrates the atomic push server-side),
+then creates the worktree/branch, sets assignee + `Status=In Progress` for visibility, and proceeds only
+on `CLAIM HELD`. See `flow-activate` / `flow-implement` for the steps and `flow-board`
 for the render + reaper. The claiming session also maintains a liveness **heartbeat**
 (`scripts/flow/claim-heartbeat.sh beat <N>` — a cheap origin git ref, never a GitHub API call — refreshed at
 claim time and every stage transition) that `flow-board` uses for deterministic reaping (age > 4h AND no
@@ -127,7 +129,7 @@ open PR), replacing the old "no recent commits" guesswork (issue #2089).
   license to overlap). **Subagents are exempt** — a worker fanning out `sstable-developer`/reviewers is not
   "multiple workers"; the worker orchestrates and paces them, and they never launch competing full gates.
   The rule targets independent lead/worker *sessions*. The claim protocol below still governs *cross-machine*
-  issue ownership (one-per-machine handles a single box; different machines coordinate via the branch lock).
+  issue ownership (one-per-machine handles a single box; different machines coordinate via the `refs/claims/issue-<N>` ref lock).
 - **Default (recommended): one lead → subagents.** A single `flow-lead` spawns subagents and assigns each
   **disjoint** work — zero dup by construction. Subagents never self-select overlapping work; the lead
   hands out distinct tasks.

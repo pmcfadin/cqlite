@@ -209,7 +209,7 @@ notifications. See the [fleet runbook](https://github.com/pmcfadin/cqlite/blob/m
   **disjoint** work — zero duplicate work by construction.
 - **Multiple independent sessions: the claim protocol is mandatory.** Each acquires work only through the
   claim protocol above — and, per the rule above, independent sessions belong on *separate* machines
-  (one-per-machine handles a single box; different machines coordinate via the pushed branch lock).
+  (one-per-machine handles a single box; different machines coordinate via the `refs/claims/issue-<N>` ref lock, #2665).
 - **Agent Teams is optional, desktop-only.** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` gives a built-in
   file-locked shared task list for coordinated parallel sessions, but it is experimental and desktop/tmux
   -only (no `/resume`, one team per session). Use it if you want; it is not required.

@@ -186,7 +186,7 @@ worktree (the manager never rebases someone else's branch).
 
 ## Hard rules
 - The gate is the only run that counts; paste its summary block.
-- Worktrees only; the branch push is the lock; stage explicit paths.
+- Worktrees only; the claim ref (`claim.sh`, `refs/claims/issue-<N>`) is the lock — the branch push is PR plumbing; stage explicit paths.
 - EMU guard every board op: `gh auth switch --user pmcfadin && gh auth setup-git`.
 - roborev follows **this machine's configured agent** (`.roborev.toml`; commonly `codex` — run with no
   flags). Pass explicit `--agent`/`--model` ONLY as a per-machine troubleshooting override when the local

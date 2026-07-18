@@ -58,7 +58,7 @@ onto its own branch). Rules, non-negotiable:
    is running here, **STOP** — do NOT start a second one (two same-machine workers share worktree paths,
    `target/`/sccache, and the gate semaphore → clobbered edits, cargo-lock contention, duplicate PRs, and
    tail-latency gate flakes). One worker fans out to subagents for throughput; a second worker adds none.
-   Cross-*machine* concurrency is fine — it's coordinated by the origin branch lock.
+   Cross-*machine* concurrency is fine — it's coordinated by the origin `refs/claims/issue-<N>` ref lock (#2665).
 2. **Resume THIS machine's own claim FIRST (crash recovery, #2090), else pick up a new one.** Before
    touching the Ready column, rehydrate from the board and check whether this machine already holds a live
    claim from a prior (possibly crashed) session — a `refs/claims/issue-<N>` claim ref this machine
@@ -180,14 +180,16 @@ diff and breaks 1:1:1:1. Instead:
   worker runs per machine. Never start a second one alongside a live peer (they share worktree paths,
   `target/`/sccache, and the gate semaphore). Throughput comes from fanning out to subagents, NOT from a
   second worker. Full-gate concurrency = **1** (serial), always — the #1825 cap stops SIGKILL, not timing
-  flakes. Before claiming, check for **ANY** `issue-<N>-*` branch (any slug), not just your exact slug.
-  Cross-*machine* concurrency stays coordinated by the origin branch lock.
+  flakes. Before claiming, check the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
+  `issue-<N>-*` branch (any slug), not just your exact slug.
+  Cross-*machine* concurrency stays coordinated by the origin `refs/claims/issue-<N>` ref lock (#2665).
 - **Worktrees only — never touch the root checkout's branch.** All git ops via `git -C <worktree>` / after
-  `cd <worktree>`; branch from `origin/main`; the branch push is your lock; stage explicit paths; never
+  `cd <worktree>`; branch from `origin/main`; the `claim.sh` ref is your lock and the branch push is PR plumbing; stage explicit paths; never
   edit another worker's files. If the root is on a non-main branch, isolate in your worktree and surface
   it — never `checkout`/`reset` the root to "fix" it.
-- **Finalize cleans up YOUR worktree only** (`git worktree remove`), then deletes the origin lock branch.
-  Never `git checkout main` / `git reset` the shared root checkout as part of cleanup.
+- **Finalize releases the claim ref** (`claim.sh release <N>`), cleans up YOUR worktree only
+  (`git worktree remove`), then deletes the origin PR branch (plumbing). Never `git checkout main` /
+  `git reset` the shared root checkout as part of cleanup.
 - **One issue per session, then EXIT (#2090).** Never claim a second issue in one session; write the
   iteration marker (step 9) as your last act and exit. Resume this machine's own claim FIRST on entry
   (crash recovery) before picking up new Ready work.
