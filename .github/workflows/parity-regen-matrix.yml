@@ -319,7 +319,7 @@ jobs:
         run: |
           env CQLITE_REQUIRE_FIXTURES=1 \
             CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
-            cargo test -p cqlite-core --features ${{ matrix.features }} \
+            cargo test -p cqlite-core --features "${{ matrix.features }}" \
               ${{ matrix.tests }} \
               -- --nocapture
 
