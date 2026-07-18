@@ -56,7 +56,7 @@ n=0
 n=\$((n + 1))
 echo "\$n" >"$counter_file"
 cat >"\$MARKER_FILE" <<JSON
-{"outcome":"finalized","issue":\$n,"pr":"https://example.invalid/pull/\$n","duration_s":1}
+{"outcome":"finalized","issue":\$n,"pr":"https://github.com/pmcfadin/cqlite/pull/\$n","duration_s":1}
 JSON
 sleep "$sleep_s"
 EOF
@@ -93,7 +93,7 @@ else
   n=\$((n + 1))
   echo "\$n" >"$issue_ctr"
   cat >"\$MARKER_FILE" <<JSON
-{"outcome":"finalized","issue":\$n,"pr":"https://example.invalid/pull/\$n","duration_s":1}
+{"outcome":"finalized","issue":\$n,"pr":"https://github.com/pmcfadin/cqlite/pull/\$n","duration_s":1}
 JSON
 fi
 EOF
@@ -161,7 +161,7 @@ if [[ -f "\$MARKER_FILE" ]]; then
   exit 1
 fi
 cat >"\$MARKER_FILE" <<JSON
-{"outcome":"finalized","issue":1,"pr":"https://example.invalid/pull/1","duration_s":1}
+{"outcome":"finalized","issue":1,"pr":"https://github.com/pmcfadin/cqlite/pull/1","duration_s":1}
 JSON
 EOF
   chmod +x "$path"
@@ -186,7 +186,7 @@ if [[ \$calls -eq 1 ]]; then
 JSON
 else
   cat >"\$MARKER_FILE" <<JSON
-{"outcome":"finalized","issue":78,"pr":"https://example.invalid/pull/78","duration_s":1}
+{"outcome":"finalized","issue":78,"pr":"https://github.com/pmcfadin/cqlite/pull/78","duration_s":1}
 JSON
 fi
 EOF
@@ -225,7 +225,7 @@ if [[ \$calls -eq 1 ]]; then
   sleep 120
 else
   cat >"\$MARKER_FILE" <<JSON
-{"outcome":"finalized","issue":88,"pr":"https://example.invalid/pull/88","duration_s":1}
+{"outcome":"finalized","issue":88,"pr":"https://github.com/pmcfadin/cqlite/pull/88","duration_s":1}
 JSON
 fi
 EOF
@@ -252,7 +252,7 @@ case \$calls in
     sleep 120 ;;
   *)
     cat >"\$MARKER_FILE" <<JSON
-{"outcome":"finalized","issue":91,"pr":"https://example.invalid/pull/91","duration_s":1}
+{"outcome":"finalized","issue":91,"pr":"https://github.com/pmcfadin/cqlite/pull/91","duration_s":1}
 JSON
     ;;
 esac
@@ -296,7 +296,7 @@ JSON
 JSON
     ;;
   *) cat >"\$MARKER_FILE" <<JSON
-{"outcome":"finalized","issue":43,"pr":"https://example.invalid/pull/43","duration_s":1}
+{"outcome":"finalized","issue":43,"pr":"https://github.com/pmcfadin/cqlite/pull/43","duration_s":1}
 JSON
     ;;
 esac
@@ -343,7 +343,7 @@ if [[ \$calls -eq 1 ]]; then
   done
 else
   cat >"\$MARKER_FILE" <<JSON
-{"outcome":"finalized","issue":95,"pr":"https://example.invalid/pull/95","duration_s":1}
+{"outcome":"finalized","issue":95,"pr":"https://github.com/pmcfadin/cqlite/pull/95","duration_s":1}
 JSON
 fi
 EOF
@@ -421,6 +421,61 @@ EOF
   chmod +x "$path"
 }
 
+# issue #2670 (roborev 1813): gh-verify stub whose FIRST read reports OPEN and
+# every read after reports MERGED — proves the mismatch-grace retry absorbs
+# read-after-merge lag (ends up merged, never mismatch).
+write_gh_open_then_merged_stub() {
+  local path="$1" call_ctr="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+calls=0
+[[ -f "$call_ctr" ]] && calls=\$(cat "$call_ctr")
+calls=\$((calls + 1))
+echo "\$calls" >"$call_ctr"
+if [[ \$calls -eq 1 ]]; then
+  printf %s '{"state":"OPEN","mergedAt":null,"autoMergeRequest":null}'
+else
+  printf %s '{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","autoMergeRequest":null}'
+fi
+EOF
+  chmod +x "$path"
+}
+
+# issue #2670 (roborev 1813): gh-verify stub — FIRST read OPEN with auto-merge
+# ARMED (pending-automerge verdict), every read after MERGED (so a following
+# iteration terminates the run). Proves the auto-merge path is not a false mismatch.
+write_gh_automerge_then_merged_stub() {
+  local path="$1" call_ctr="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+calls=0
+[[ -f "$call_ctr" ]] && calls=\$(cat "$call_ctr")
+calls=\$((calls + 1))
+echo "\$calls" >"$call_ctr"
+if [[ \$calls -eq 1 ]]; then
+  printf %s '{"state":"OPEN","mergedAt":null,"autoMergeRequest":{"enabledAt":"2026-01-01T00:00:00Z"}}'
+else
+  printf %s '{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","autoMergeRequest":null}'
+fi
+EOF
+  chmod +x "$path"
+}
+
+# issue #2670 (roborev 1813, finding 4): worker finalizes with a FOREIGN-host PR
+# URL (correct path shape, wrong host/repo) — must classify mismatch:UNRESOLVED,
+# never merged. Never finalizes cleanly.
+write_finalize_foreign_url_stub() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":71,"pr":"https://github.com/evil/other/pull/5","duration_s":1}
+JSON
+EOF
+  chmod +x "$path"
+}
+
 # ---------------------------------------------------------------------------
 # Common env baseline: every test starts here, then overrides what it needs.
 # Clear preflight (no holds), generous budgets, fast polling/backoff.
@@ -442,7 +497,10 @@ common_env() {
   # issue #2670: every "finalized" marker is now GH-verified. Default the mock to
   # MERGED so all pre-existing finalize-based cases credit the issue as before;
   # verification tests override GH_VERIFY_CMD to exercise mismatch/unverified.
-  export GH_VERIFY_CMD='printf %s "{\"state\":\"MERGED\",\"mergedAt\":\"2026-01-01T00:00:00Z\"}"'
+  export GH_VERIFY_CMD='printf %s "{\"state\":\"MERGED\",\"mergedAt\":\"2026-01-01T00:00:00Z\",\"autoMergeRequest\":null}"'
+  # roborev 1813: mismatch grace re-reads gh a few times; keep the wait at 0 so no
+  # test ever sleeps for it.
+  export MISMATCH_RETRY_WAIT_SECS=0
   export LOAD_MAX=999999
   export MAX_ISSUES=100
   export MAX_HOURS=8
@@ -1399,6 +1457,214 @@ test_stop_file_honored_mid_hold() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 31 (#2670 / roborev 1813 MED-HIGH): the DEFAULT proc probe must not count
+# its own brace-group `bash -c` wrapper (whose argv carries the pattern text). On
+# Linux a naive pattern matches that wrapper → a phantom leftover at EVERY boot,
+# hard-stopping every supervisor (macOS `pgrep -f` happens not to, but the bracket
+# trick is the portable fix). Proven portably + deterministically: a process whose
+# argv holds the LITERAL pattern text (as the wrapper's does) must NOT match the
+# bracketed pattern, while a REAL `claude --agent worker` process MUST. Plus a
+# sanity run of the verbatim default probe: well-formed, and its worker-Claude
+# sub-probe is 0 with no worker running.
+test_probe_no_self_match() {
+  local pat='[c]laude.*--agent worker'
+  # real worker shape — the bracketed regex MUST match (`[c]laude` matches `claude`).
+  bash -c 'exec -a "claude --agent worker resume the claim" sleep 30' &
+  local wpid=$!
+  # wrapper-argv shape — argv literally contains the bracketed PATTERN TEXT, exactly
+  # as the probe's own `bash -c` wrapper does. The bracket trick MUST keep the
+  # pattern from matching it (`[c]laude` = literal `c`+`laude`; the text `[c]laude`
+  # has `c` followed by `]`, so no match — this is the self-exclusion property).
+  bash -c 'exec -a "wrap [c]laude.*--agent worker probe" sleep 30' &
+  local xpid=$!
+  local waited=0
+  while [[ "$waited" -lt 50 ]]; do
+    pgrep -f "$pat" | grep -qw "$wpid" && break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  local worker_matched="no" wrapper_matched="no"
+  pgrep -f "$pat" | grep -qw "$wpid" && worker_matched="yes"
+  pgrep -f "$pat" | grep -qw "$xpid" && wrapper_matched="yes"
+  # static sanity: the real DEFAULT probe string carries the bracket trick on BOTH
+  # families. Source with PROC_PROBE_CMD unset so a leaked test override can't mask
+  # the default; assert the string, don't execute it (executing would match this
+  # test's own worker-shaped stub / ambient processes).
+  local probe_cmd defaulted="no"
+  # shellcheck disable=SC2016  # $SUP/$PROC_PROBE_CMD expand inside the sub-bash, not here.
+  probe_cmd="$(env -u PROC_PROBE_CMD SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$PROC_PROBE_CMD"' 2>/dev/null)"
+  [[ "$probe_cmd" == *'[c]laude.*--agent worker'* && "$probe_cmd" == *'[c]argo '* ]] && defaulted="yes"
+  kill "$wpid" "$xpid" 2>/dev/null || true
+  wait "$wpid" "$xpid" 2>/dev/null || true
+  if [[ "$worker_matched" == "yes" && "$wrapper_matched" == "no" && "$defaulted" == "yes" ]]; then
+    pass "probe self-match: bracket trick matches a real worker, excludes the wrapper-argv text"
+  else
+    fail "probe self-match: worker=$worker_matched wrapper=$wrapper_matched defaulted=$defaulted probe='${probe_cmd:0:50}'"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 32 (#2670 / roborev 1813 MED): a tooling gap (NO json parser present) on a
+# VALID gh response must read as `unverified` (transport class), NEVER
+# mismatch:UNRESOLVED — a missing parser is our problem, not the worker's forgery.
+# Unit-tests verify_finalized_pr under a PATH with jq/python3 removed.
+test_parser_absent_is_unverified() {
+  local d bindir t src out
+  d="$(new_case_dir)"
+  bindir="$d/nobin"
+  mkdir -p "$bindir"
+  # symlink only the tools sourcing + verify_finalized_pr's unverified path need
+  # (dirname/date are used at source time); jq AND python3 are deliberately absent.
+  for t in bash mktemp cat rm grep dirname date; do
+    src="$(command -v "$t" 2>/dev/null)" && ln -s "$src" "$bindir/$t"
+  done
+  # shellcheck disable=SC2016  # $1 expands inside the sub-bash (source target), not here.
+  out="$(PATH="$bindir" \
+        GH_VERIFY_CMD='printf %s "{\"state\":\"MERGED\",\"autoMergeRequest\":null}"' \
+        MISMATCH_RETRIES=1 MISMATCH_RETRY_WAIT_SECS=0 \
+        "$bindir/bash" -c 'source "$1"; verify_finalized_pr 42' _ "$SUPERVISOR" 2>/dev/null)"
+  if [[ "$out" == "unverified" ]]; then
+    pass "parser-absent: no jq/python3 on a valid response → unverified (tooling gap, not forgery)"
+  else
+    fail "parser-absent: got '$out' (expected unverified)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 33 (#2670 / roborev 1813 MED): OPEN with auto-merge ARMED is a legitimate
+# pending state, not a false finalize — verdict finalized-pending-automerge:
+# NOT counted toward MAX_ISSUES, default-priority page, breaker-NEUTRAL. Call 2
+# finalizes (merged) so the run terminates at MAX_ISSUES=1 — proving the
+# pending-automerge iteration was not counted.
+test_pending_automerge_verdict() {
+  local d counter gh_ctr jf rc pcount fcount page
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  gh_ctr="$d/gh-calls"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  write_gh_automerge_then_merged_stub "$d/bin/gh.sh" "$gh_ctr"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=1
+  # shellcheck disable=SC2016  # $1 expanded later by the supervisor's own `bash -c`.
+  export GH_VERIFY_CMD="$d/bin/gh.sh \"\$1\""
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  pcount=$(jline_count "$jf" '"outcome":"finalized-pending-automerge"')
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  page=$(grep -c 'finalized PENDING AUTO-MERGE' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -eq 0 && "$pcount" -eq 1 && "$fcount" -eq 1 && "$page" -ge 1 ]] &&
+     grep -q '"outcome":"finalized-pending-automerge".*"verified":"pending-automerge"' "$jf" &&
+     ! grep -q '"reason":"breaker"' "$jf"; then
+    pass "pending-automerge: OPEN+auto-merge armed → not counted, default page, breaker-neutral, loop continues"
+  else
+    fail "pending-automerge: rc=$rc pending=$pcount finalized=$fcount page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 34 (#2670 / roborev 1813 MED): mismatch grace absorbs read-after-merge lag —
+# gh reports OPEN on read 1, MERGED on read 2, so the verdict is `merged` (counted),
+# never a spurious mismatch. Proves the retry re-reads gh (call counter reaches 2).
+test_mismatch_grace_absorbs_lag() {
+  local d counter gh_ctr jf rc fcount acount calls
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  gh_ctr="$d/gh-calls"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  write_gh_open_then_merged_stub "$d/bin/gh.sh" "$gh_ctr"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=1
+  export MISMATCH_RETRIES=3
+  export MISMATCH_RETRY_WAIT_SECS=0
+  # shellcheck disable=SC2016  # $1 expanded later by the supervisor's own `bash -c`.
+  export GH_VERIFY_CMD="$d/bin/gh.sh \"\$1\""
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  calls=$(cat "$gh_ctr" 2>/dev/null || echo -1)
+  if [[ "$rc" -eq 0 && "$fcount" -eq 1 && "$acount" -eq 0 && "$calls" -ge 2 ]] &&
+     grep -q '"verified":"merged"' "$jf"; then
+    pass "mismatch grace: OPEN-then-MERGED across a retry → merged, no spurious mismatch (gh read ${calls}x)"
+  else
+    fail "mismatch-grace: rc=$rc finalized=$fcount abnormal=$acount gh_calls=$calls (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 35 (#2670 / roborev 1813 finding 4): a foreign-host PR URL (right path
+# shape, wrong host/repo) is a forged reference → mismatch:UNRESOLVED (abnormal,
+# high page), never merged. BREAKER_N=1 stops on the single forged finalize.
+test_foreign_url_is_unresolved() {
+  local d jf rc acount page
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_finalize_foreign_url_stub "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  page=$(grep -c '^error|worker-supervisor: finalized MISMATCH' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -ne 0 && "$acount" -eq 1 && "$page" -ge 1 ]] &&
+     grep -q '"verified":"mismatch:UNRESOLVED"' "$jf" &&
+     grep -q '"reason":"breaker"' "$jf"; then
+    pass "foreign URL: non-pmcfadin/cqlite PR URL → mismatch:UNRESOLVED (escalation), never merged"
+  else
+    fail "foreign-url: rc=$rc abnormal=$acount page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 36 (#2670 / roborev 1813 finding 5): leftover-processes holds are counted
+# CUMULATIVELY across the invocation — a transient load blip interleaved between
+# leftover holds must NOT reset the bound. Alternating load(high)/leftover holds
+# still trip the leftover bound and stop the loop. (With the pre-fix reset, the
+# leftover tally would zero on each load pass and never trip.)
+test_alternating_holds_still_bounded() {
+  local d counter jf rc page
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  # load probe toggles high/low each poll via a counter file; proc probe always
+  # reports a leftover. preflight checks load BEFORE procs, so odd polls hold on
+  # `load`, even polls hold on `leftover-processes` — never clearing to a spawn.
+  export LOAD_CONTROL_FILE="$d/loadctr"
+  echo 0 >"$LOAD_CONTROL_FILE"
+  # shellcheck disable=SC2016  # deferred: expanded later by the supervisor's own `bash -c`.
+  export LOAD_PROBE_CMD='n=$(cat "$LOAD_CONTROL_FILE"); n=$((n+1)); echo "$n" >"$LOAD_CONTROL_FILE"; if [ $((n % 2)) -eq 1 ]; then echo 99; else echo 0; fi'
+  export LOAD_MAX=1
+  export PROC_PROBE_CMD="echo 1"
+  export PROC_LIST_CMD="echo '999 claude --agent worker orphan'"
+  export LEFTOVER_HOLD_MAX=2
+  export HOLD_POLL_SECS=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  page=$(grep -c '^error|worker-supervisor: leftover-processes will not clear' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -ne 0 && ! -f "$counter" && "$page" -ge 1 ]] &&
+     grep -q '"reason":"leftover-processes"' "$jf"; then
+    pass "alternating holds: leftover tally is cumulative across a load blip → still bounded (stops)"
+  else
+    fail "alternating-holds: rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -1447,5 +1713,11 @@ test_leftover_hold_bounded_stops
 test_persistent_unverified_stops
 test_forged_pr_is_unresolved_mismatch
 test_stop_file_honored_mid_hold
+test_probe_no_self_match
+test_parser_absent_is_unverified
+test_pending_automerge_verdict
+test_mismatch_grace_absorbs_lag
+test_foreign_url_is_unresolved
+test_alternating_holds_still_bounded
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

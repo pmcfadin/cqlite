@@ -26,39 +26,46 @@
 #               count toward MAX_ISSUES) rather than trusted at face value.
 #               A well-formed "finalized" is still NOT trusted on field shape
 #               alone (issue #2670): the supervisor VERIFIES the claimed PR is
-#               actually merged via `gh pr view <pr> --json state,mergedAt`
-#               before crediting the iteration. Three outcomes, recorded in the
+#               actually merged via `gh pr view <pr> --json state,mergedAt,
+#               autoMergeRequest` before crediting the iteration. Verdicts, in the
 #               journal's `verified:` field:
 #                 verified=merged           — gh reports state MERGED. Counts
 #                                             toward MAX_ISSUES, resets the breaker
 #                                             (the ONLY path that credits an issue).
-#                 verified=mismatch:<STATE> — gh reports a non-MERGED state (the
-#                                             worker parked its endgame yet wrote
-#                                             "finalized"). Judged ABNORMAL: does
-#                                             NOT count toward MAX_ISSUES, does NOT
-#                                             reset the breaker (counts toward it),
-#                                             and fires a HIGH page naming the
-#                                             discrepancy. mismatch:UNRESOLVED is the
-#                                             forged/garbage-marker case: `pr` fails
-#                                             the numeric shape-check (gh never
-#                                             called) OR gh could not resolve it to a
-#                                             PR (a bad reference, distinguished from
-#                                             transport by stderr) — treated as an
-#                                             ESCALATION, not a blip.
-#                 verified=unverified       — STRICTLY a gh exec/transport failure
-#                                             (binary missing / network / auth / rate
-#                                             limit). FAIL-INFORMATIVE, not
-#                                             fail-punitive: logged + a default-priority
+#                 verified=pending-automerge — OPEN with auto-merge armed (the
+#                                             closer's documented auto-merge path).
+#                                             The PR WILL land — a legitimate PENDING
+#                                             state, not a false finalize: does NOT
+#                                             count toward MAX_ISSUES yet, a
+#                                             default-priority page, breaker-NEUTRAL.
+#                                             Outcome `finalized-pending-automerge`
+#                                             (roborev 1813).
+#                 verified=mismatch:<STATE> — a STABLE non-MERGED state without
+#                                             auto-merge armed, confirmed across
+#                                             MISMATCH_RETRIES grace reads (absorbing
+#                                             read-after-merge lag). Judged ABNORMAL:
+#                                             does NOT count toward MAX_ISSUES, counts
+#                                             toward the breaker, HIGH page naming the
+#                                             discrepancy.
+#                 verified=mismatch:UNRESOLVED — the marker's `pr` is FORGED: a
+#                                             non-numeric ref, a URL that is not
+#                                             EXACTLY a pmcfadin/cqlite PR URL, gh
+#                                             could not resolve it (stderr signature),
+#                                             or a cleanly-PARSED response lacking the
+#                                             PR state. Same ESCALATION as mismatch.
+#                 verified=unverified       — a TOOLING/TRANSPORT gap, NEVER forgery:
+#                                             gh binary missing, network/auth/rate-limit
+#                                             error, OR no JSON parser present / the
+#                                             payload failed to parse (a tooling gap
+#                                             must never read as forgery — roborev 1813).
+#                                             FAIL-INFORMATIVE: logged + default-priority
 #                                             page, does NOT count as a completed issue,
-#                                             and is NEUTRAL to the breaker (neither
-#                                             trips nor resets — a transient GitHub
-#                                             outage must not punish the run, nor mask a
-#                                             real crash chain). Outcome recorded as
-#                                             `finalized-unverified`. A PERSISTENT
-#                                             outage is bounded: UNVERIFIED_MAX
+#                                             NEUTRAL to the breaker (neither trips nor
+#                                             resets). Outcome `finalized-unverified`. A
+#                                             PERSISTENT outage is bounded: UNVERIFIED_MAX
 #                                             consecutive unverified finalizes STOP the
-#                                             loop (verify-unavailable, exit 1, HIGH
-#                                             page) so the MAX_ISSUES ceiling can't drift.
+#                                             loop (verify-unavailable, exit 1, HIGH page)
+#                                             so the MAX_ISSUES ceiling can't drift.
 #               Bounded holds: a `leftover-processes` preflight hold that never
 #               clears (a non-self-clearing orphan) STOPS the loop loudly after
 #               LEFTOVER_HOLD_MAX passes — naming the surviving PIDs — and every hold
@@ -154,6 +161,11 @@ PROMPT_SIGNATURE_RE="${PROMPT_SIGNATURE_RE:-AskUserQuestion|Do you want to|waiti
 #   would otherwise let the MAX_ISSUES ceiling drift (uncounted-forever iterations).
 LEFTOVER_HOLD_MAX="${LEFTOVER_HOLD_MAX:-3}"
 UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
+# issue #2670 (roborev 1813): before escalating a non-merged PR state to a
+# mismatch, re-read gh a few times to absorb read-after-merge lag. Env-tunable so
+# the tooling tests set the wait to 0 (nothing sleeps in the suite).
+MISMATCH_RETRIES="${MISMATCH_RETRIES:-3}"
+MISMATCH_RETRY_WAIT_SECS="${MISMATCH_RETRY_WAIT_SECS:-10}"
 
 SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock}"
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
@@ -204,23 +216,33 @@ if [[ -z "${PROC_PROBE_CMD:-}" ]]; then
   # current iteration's own worker has already exited before preflight runs, so any
   # `--agent worker` process seen here is genuinely from a prior iteration. `sort -u`
   # dedups a PID that matched both patterns.
-  PROC_PROBE_CMD="{ pgrep -f 'cargo |nextest|gate_slot_daemon'; pgrep -f 'claude.*--agent worker'; } 2>/dev/null | sort -u | wc -l | tr -d ' '"
+  #
+  # SELF-MATCH DEFUSED (roborev 1813, MED-HIGH): the brace-group form keeps a live
+  # `bash -c` wrapper whose OWN argv contains these pattern strings, so a naive
+  # pattern would match the wrapper and report a phantom leftover at EVERY boot —
+  # hard-stopping every supervisor. The classic pgrep bracket trick (`[c]argo`,
+  # `[c]laude`) makes each regex still match the real process (`cargo`, `claude`)
+  # while the bracketed pattern TEXT in the wrapper's argv (`[c]argo`) no longer
+  # contains the literal substring, so the wrapper cannot match itself.
+  PROC_PROBE_CMD="{ pgrep -f '[c]argo |[n]extest|[g]ate_slot_daemon'; pgrep -f '[c]laude.*--agent worker'; } 2>/dev/null | sort -u | wc -l | tr -d ' '"
 fi
 # Companion to PROC_PROBE_CMD: lists the surviving PIDs (pid + cmd) so a
 # leftover-processes STOP can NAME what never cleared (issue #2670). Best-effort —
-# an empty result just yields "<unavailable>" in the page.
+# an empty result just yields "<unavailable>" in the page. Same bracket-trick
+# self-match defusal as PROC_PROBE_CMD (roborev 1813).
 if [[ -z "${PROC_LIST_CMD:-}" ]]; then
-  PROC_LIST_CMD="{ pgrep -lf 'cargo |nextest|gate_slot_daemon'; pgrep -lf 'claude.*--agent worker'; } 2>/dev/null | sort -u"
+  PROC_LIST_CMD="{ pgrep -lf '[c]argo |[n]extest|[g]ate_slot_daemon'; pgrep -lf '[c]laude.*--agent worker'; } 2>/dev/null | sort -u"
 fi
 
 # GH verification of a "finalized" marker's PR (issue #2670). $1 (passed by the
-# later `bash -c ... _ "$pr"`) is the PR url/number. Default emits the raw
-# `gh pr view` JSON on stdout; a nonzero exit / empty output is treated UNVERIFIED
-# (gh unavailable / network error), never punitive. Overridable so the tooling
-# tests can stub GitHub with a PATH-free command string.
+# later `bash -c ... _ "$prnum"`) is the PR number. Emits the raw `gh pr view` JSON
+# on stdout. `autoMergeRequest` is queried so the verifier can recognize the
+# closer's auto-armed path (OPEN with auto-merge enabled), a legitimate pending
+# state rather than a false-finalize mismatch (roborev 1813). Overridable so the
+# tooling tests can stub GitHub with a PATH-free command string.
 if [[ -z "${GH_VERIFY_CMD:-}" ]]; then
   # shellcheck disable=SC2016  # literal $1 for the later `bash -c` eval, not expanded now.
-  GH_VERIFY_CMD='gh pr view "$1" --repo pmcfadin/cqlite --json state,mergedAt'
+  GH_VERIFY_CMD='gh pr view "$1" --repo pmcfadin/cqlite --json state,mergedAt,autoMergeRequest'
 fi
 
 NOOP_NOTIFY_MARKER="__noop_notify__"
@@ -307,69 +329,122 @@ print(v if v is not None else "")
 # verify_finalized_pr <pr>: check the claimed PR is actually merged (issue #2670).
 # Echoes exactly one verdict token on stdout (never returns nonzero — the caller's
 # `case` handles every path explicitly):
-#   merged             — gh reported state MERGED. The ONLY path that credits an issue.
-#   mismatch:<STATE>   — gh reported a present, non-MERGED state (OPEN, CLOSED, ...).
-#   mismatch:UNRESOLVED— the marker's `pr` is FORGED/GARBAGE: it fails the numeric
-#                        shape-check (so gh was never called), OR gh ran and could
-#                        not resolve it to a PR (a bad reference, not an outage). A
-#                        forged marker is an ESCALATION (abnormal, high page,
-#                        breaker-counting), not a transient blip.
-#   unverified         — strictly an exec/transport failure: gh binary missing, a
-#                        network/auth/rate-limit error, or a nonzero exit with no
-#                        resolve signal. Fail-informative; the caller keeps it
-#                        neutral to the breaker and uncounted.
-# The pr is normalized first: an optional pmcfadin/cqlite PR URL (or a leading '#')
-# collapses to its trailing number; anything not `^[0-9]+$` after that is forged.
+#   merged              — gh reported state MERGED. The ONLY path that credits an issue.
+#   pending-automerge   — OPEN with `autoMergeRequest` armed: the closer's documented
+#                         auto-merge path, so the PR WILL land. Legitimate pending
+#                         state — uncounted (for now), default-priority page,
+#                         breaker-NEUTRAL — not an escalation (roborev 1813).
+#   mismatch:<STATE>    — a STABLE non-MERGED state without auto-merge armed, after
+#                         MISMATCH_RETRIES grace reads (absorbing read-after-merge lag).
+#   mismatch:UNRESOLVED — the marker's `pr` is FORGED/GARBAGE: a non-numeric ref, a
+#                         URL that is not EXACTLY a pmcfadin/cqlite PR URL (finding 4),
+#                         gh could not resolve it (resolve-failure stderr signature),
+#                         or a cleanly-PARSED response that simply lacks a PR state. An
+#                         ESCALATION (abnormal, high page, breaker-counting).
+#   unverified          — a TOOLING/TRANSPORT gap, never forgery (finding 2): gh binary
+#                         missing, a network/auth/rate-limit error, OR no JSON parser
+#                         present / the payload failed to parse. Fail-informative;
+#                         neutral to the breaker and uncounted.
 verify_finalized_pr() {
-  local pr="$1" prnum out err rc state errfile
-  prnum="${pr##*/}"   # URL → trailing number; bare number passes through.
-  prnum="${prnum#\#}" # tolerate a leading '#'.
-  if [[ ! "$prnum" =~ ^[0-9]+$ ]]; then
-    # Forged/garbage pr — never reached gh; classify as an unresolved reference.
-    printf 'mismatch:UNRESOLVED'
-    return 0
-  fi
-  errfile="$(mktemp "${TMPDIR:-/tmp}/gh-verify.XXXXXX")"
-  # Context-independent capture (roborev 1810): do not rely on the errexit-in-
-  # assignment quirk — capture rc explicitly via the `&& rc=0 || rc=$?` list.
-  out="$(bash -c "$GH_VERIFY_CMD" _ "$prnum" 2>"$errfile")" && rc=0 || rc=$?
-  err="$(cat "$errfile" 2>/dev/null || true)"
-  rm -f "$errfile"
-  # gh binary missing (exec failure) is a transport-class problem, never a forged PR.
-  if [[ "$rc" -eq 127 ]]; then
-    printf 'unverified'
-    return 0
-  fi
-  if command -v jq >/dev/null 2>&1; then
-    state="$(printf '%s' "$out" | jq -r '.state // empty' 2>/dev/null || true)"
+  local pr="$1" prnum out err rc parser_ok state automerge errfile pyout attempt=0
+  # Finding 4 (URL shape): a URL-form pr must be EXACTLY a pmcfadin/cqlite PR URL;
+  # any other host/repo is a forged/foreign reference. A bare number (optional
+  # leading '#') is accepted; anything else is forged.
+  if [[ "$pr" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]]; then
+    if [[ "$pr" =~ ^https://github\.com/pmcfadin/cqlite/pull/([0-9]+)$ ]]; then
+      prnum="${BASH_REMATCH[1]}"
+    else
+      printf 'mismatch:UNRESOLVED'
+      return 0
+    fi
   else
-    state="$(printf '%s' "$out" | python3 -c '
+    prnum="${pr#\#}"
+    if [[ ! "$prnum" =~ ^[0-9]+$ ]]; then
+      printf 'mismatch:UNRESOLVED'
+      return 0
+    fi
+  fi
+
+  while :; do
+    errfile="$(mktemp "${TMPDIR:-/tmp}/gh-verify.XXXXXX")"
+    # Context-independent capture (roborev 1810): capture rc explicitly via the
+    # `&& rc=0 || rc=$?` list, not the errexit-in-assignment quirk.
+    out="$(bash -c "$GH_VERIFY_CMD" _ "$prnum" 2>"$errfile")" && rc=0 || rc=$?
+    err="$(cat "$errfile" 2>/dev/null || true)"
+    rm -f "$errfile"
+
+    # gh binary missing (exec failure) is transport class, never a forged PR.
+    if [[ "$rc" -eq 127 ]]; then
+      printf 'unverified'
+      return 0
+    fi
+    # gh RAN and could not resolve the ref (bad PR number) — a forged reference,
+    # distinguished from a transport error by the resolve-failure stderr signature.
+    if printf '%s' "$err" | grep -qiE 'could not resolve|no (pull request|pr)s? (found|with)|not found|no pull requests found'; then
+      printf 'mismatch:UNRESOLVED'
+      return 0
+    fi
+
+    # Parse. parser_ok = a parser is present AND the payload parsed as JSON.
+    # Finding 2: a tooling gap (no parser / parse error) is transport class
+    # (unverified), NEVER forgery. mismatch:UNRESOLVED is reserved for a
+    # SUCCESSFULLY-parsed response that simply lacks the PR state.
+    parser_ok=0
+    state=""
+    automerge=""
+    if command -v jq >/dev/null 2>&1; then
+      if printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+        parser_ok=1
+        state="$(printf '%s' "$out" | jq -r '.state // empty' 2>/dev/null || true)"
+        automerge="$(printf '%s' "$out" | jq -r '.autoMergeRequest // empty' 2>/dev/null || true)"
+      fi
+    elif command -v python3 >/dev/null 2>&1; then
+      if pyout="$(printf '%s' "$out" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
-v = d.get("state")
-print(v if v is not None else "")
-' 2>/dev/null || true)"
-  fi
-  if [[ -n "$state" ]]; then
-    if [[ "$state" == "MERGED" ]]; then printf 'merged'; else printf 'mismatch:%s' "$state"; fi
+    sys.exit(2)
+print(d.get("state") or "")
+print("armed" if d.get("autoMergeRequest") else "")
+' 2>/dev/null)"; then
+        parser_ok=1
+        state="$(printf '%s\n' "$pyout" | sed -n 1p)"
+        automerge="$(printf '%s\n' "$pyout" | sed -n 2p)"
+      fi
+    fi
+
+    if [[ "$parser_ok" -eq 0 ]]; then
+      # No parser, or the payload failed to parse — our tooling/transport gap, not
+      # the worker's forgery.
+      printf 'unverified'
+      return 0
+    fi
+    if [[ -z "$state" ]]; then
+      # Parsed cleanly but no PR state — a genuine unresolved/garbage response.
+      printf 'mismatch:UNRESOLVED'
+      return 0
+    fi
+    if [[ "$state" == "MERGED" ]]; then
+      printf 'merged'
+      return 0
+    fi
+    # Finding 3: OPEN with auto-merge armed is a LEGITIMATE closer path (the PR will
+    # land automatically) — a distinct, non-escalating verdict, not a mismatch.
+    if [[ "$state" == "OPEN" && -n "$automerge" ]]; then
+      printf 'pending-automerge'
+      return 0
+    fi
+    # A resolved, non-merged state without auto-merge. Grace: read-after-merge lag
+    # can briefly show OPEN just after a merge — retry a few times before escalating.
+    attempt=$((attempt + 1))
+    if [[ "$attempt" -lt "$MISMATCH_RETRIES" ]]; then
+      sleep "$MISMATCH_RETRY_WAIT_SECS"
+      continue
+    fi
+    printf 'mismatch:%s' "$state"
     return 0
-  fi
-  # No parseable state. Distinguish a RESOLVE failure (bad PR ref = forged marker →
-  # escalate) from a TRANSPORT failure (network/auth/rate-limit = outage → neutral).
-  if printf '%s' "$err" | grep -qiE 'could not resolve|no (pull request|pr)s? (found|with)|not found|no pull requests found'; then
-    printf 'mismatch:UNRESOLVED'
-    return 0
-  fi
-  if [[ "$rc" -ne 0 || -z "$out" ]]; then
-    printf 'unverified'
-    return 0
-  fi
-  # gh exited 0 with non-empty but unparseable output and no transport signal — not
-  # a clean success and not an outage; treat as an unresolved (garbage) response.
-  printf 'mismatch:UNRESOLVED'
+  done
 }
 
 # json_or_null <value>: quotes+escapes a string field for embedding into the
@@ -483,6 +558,14 @@ preflight_wait() {
       LAST_HOLD_REASON=""
       return 0
     fi
+    # Finding 5 (roborev 1813): count leftover-processes holds CUMULATIVELY across
+    # the whole preflight_wait invocation — do NOT reset the counter when a
+    # different hold reason (a transient load/disk blip) intervenes. Otherwise an
+    # orphan that never dies but is occasionally masked by a load spike would reset
+    # the bound every time and hold forever. A different reason simply doesn't add
+    # to the leftover tally; a genuinely transient mix still clears (returns above).
+    # The wall-clock budget re-check at the top of the loop bounds the total hold
+    # time regardless of the reason mix.
     if [[ "$reason" == "leftover-processes" ]]; then
       leftover_holds=$((leftover_holds + 1))
       if [[ "$leftover_holds" -ge "$LEFTOVER_HOLD_MAX" ]]; then
@@ -493,8 +576,6 @@ preflight_wait() {
         log "leftover-processes held $leftover_holds times (>= LEFTOVER_HOLD_MAX=$LEFTOVER_HOLD_MAX) without clearing; stopping. Surviving: ${pids:-<unavailable>}"
         finalize_exit "leftover-processes" 1
       fi
-    else
-      leftover_holds=0
     fi
     if [[ "$reason" != "$LAST_HOLD_REASON" ]]; then
       notify "high" "worker-supervisor HOLD" "HOLD: $reason (repolling every ${HOLD_POLL_SECS}s, no spawn)"
@@ -658,6 +739,18 @@ run_iteration() {
             ISSUES_DONE=$((ISSUES_DONE + 1))
             journal_line "$ITER" "finalized" "$issue" "$pr" "$duration" "$rc" "" "merged"
             notify "info" "worker-supervisor: finalized issue $issue" "pr=$pr duration_s=$duration verified=merged"
+            ;;
+          pending-automerge)
+            # OPEN with auto-merge armed (roborev 1813): the closer's documented
+            # auto-merge path — the PR WILL land on green. NOT counted toward
+            # MAX_ISSUES yet (it isn't merged), a default-priority page, and
+            # breaker-NEUTRAL (gh resolved fine, so reset the unverified streak but
+            # do NOT touch the crash breaker — this is a legitimate pending state).
+            CONSECUTIVE_UNVERIFIED=0
+            journal_line "$ITER" "finalized-pending-automerge" "$issue" "$pr" "$duration" "$rc" "" "pending-automerge"
+            notify "info" "worker-supervisor: finalized PENDING AUTO-MERGE issue $issue" \
+              "PR $pr is OPEN with auto-merge armed — not counted yet; it will land automatically on green"
+            log "iteration $ITER finalized-pending-automerge (PR $pr OPEN, auto-merge armed; not counted, breaker neutral)"
             ;;
           mismatch:*)
             # The PR is NOT merged (OPEN / CLOSED-unmerged / UNRESOLVED forged ref)

@@ -138,12 +138,16 @@ What it guarantees:
   and a `leftover-processes` hold that never clears (a non-self-clearing orphan) stops the loop
   loudly after `LEFTOVER_HOLD_MAX` passes, paging the surviving PIDs (#2670).
 - **It cannot be fooled by a false finalize (#2670)**: a `finalized` marker is trusted only after
-  the claimed PR gh-verifies as MERGED. A worker that parked its endgame yet wrote `finalized` is
-  caught (`verified: mismatch:<state>`), paged high, judged abnormal, and never credited; a forged /
-  garbage PR reference is `mismatch:UNRESOLVED` (same escalation). A GitHub *outage* yields a neutral
-  `finalized-unverified` (paged, uncounted, breaker untouched) rather than a false success or false
-  crash — but a **persistent** outage is bounded: `UNVERIFIED_MAX` consecutive unverifiable finalizes
-  stop the loop (`verify-unavailable`), so the `MAX_ISSUES` ceiling can't drift.
+  the claimed PR gh-verifies as MERGED (via `state,mergedAt,autoMergeRequest`). A worker that parked
+  its endgame yet wrote `finalized` is caught (`verified: mismatch:<state>`, confirmed across grace
+  re-reads that absorb read-after-merge lag), paged high, judged abnormal, and never credited; a
+  forged PR reference — non-numeric, a non-pmcfadin/cqlite URL, or one gh can't resolve — is
+  `mismatch:UNRESOLVED` (same escalation). An OPEN PR with **auto-merge armed** is the closer's
+  legitimate path, judged `finalized-pending-automerge` (uncounted, breaker-neutral), not a false
+  finalize. A GitHub *outage* — or a missing JSON parser, a tooling gap that must never read as
+  forgery — yields a neutral `finalized-unverified` (paged, uncounted, breaker untouched); a
+  **persistent** outage is bounded: `UNVERIFIED_MAX` consecutive unverifiable finalizes stop the loop
+  (`verify-unavailable`), so the `MAX_ISSUES` ceiling can't drift.
 - **It cannot fail silently**: a push notification (ntfy) on every merge (info) and on any
   stop/hold/breaker-trip (alert). 2–3 consecutive abnormal exits trip the breaker → stop + alert,
   never hot-respawn. One journal line per iteration (issue, verdict, duration, PR, `verified`).
@@ -158,12 +162,13 @@ What it guarantees:
 | Verdict | Meaning | Breaker |
 |---------|---------|---------|
 | `finalized` | claimed → gate/review → merge-on-green → finalized (`issue`+`pr` set) **and the PR gh-verifies as MERGED** (#2670); journal `verified: merged` | resets |
-| `finalized-unverified` | well-formed finalize, but gh could not confirm the merge (gh missing / network / rate limit); journal `verified: unverified`, default-priority page, **not counted** toward the issue budget | **neutral** (neither trips nor resets) |
+| `finalized-unverified` | well-formed finalize, but gh could not confirm the merge — gh missing / network / rate limit, **or no JSON parser present** (a tooling gap is never read as forgery, #2670); journal `verified: unverified`, default-priority page, **not counted** toward the issue budget | **neutral** (neither trips nor resets) |
+| `finalized-pending-automerge` | PR is OPEN with auto-merge armed (the closer's auto-merge path, #2670) — it will land; journal `verified: pending-automerge`, default-priority page, **not counted yet** | **neutral** |
 | `no-work` | nothing Ready / nothing to resume — backoff, then retry | resets |
 | `blocked` | stopped short of merge for an owner escalation; same issue twice ⇒ head-blocked stop | resets |
 | `parked-on-owner` | clean park (#2666): `blocked` marker with `reason: seam1-approval\|needs-decision`; high page, loop advances | **never** |
 | `stuck-on-question` | worker wedged on a prompt, detected mid-iteration; high page with the captured text | **never** |
-| `abnormal` | nonzero exit / missing / malformed marker / unknown outcome / **finalized marker whose PR is NOT merged** (`verified: mismatch:<state>`, high page naming the discrepancy, #2670) | **+1** |
+| `abnormal` | nonzero exit / missing / malformed marker / unknown outcome / **finalized marker whose PR is a stable non-merged state** (`verified: mismatch:<state>`, after grace re-reads) **or a forged PR ref** (`verified: mismatch:UNRESOLVED` — non-numeric, foreign-host URL, or gh-unresolvable); high page naming the discrepancy (#2670) | **+1** |
 - **It stops on its own**: at the issue budget or wall-clock ceiling — overnight is "clear a few
   issues safely," not "run unbounded."
 - **Stop it yourself:** `touch .worker-stop` (finishes the current issue, then exits).
