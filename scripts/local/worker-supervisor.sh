@@ -142,6 +142,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # ---------------------------------------------------------------------------
 MAX_ISSUES="${MAX_ISSUES:-4}"
 MAX_HOURS="${MAX_HOURS:-8}"
+# Derived here in the config block (roborev 1819 HIGH) so the wall-clock budget is
+# ALWAYS defined before any preflight_wait call path that reads it — a hold loop
+# comparing against an unset MAX_HOURS_SECS would abort spuriously. Defensive
+# `:-` keeps an explicit env override intact.
+MAX_HOURS_SECS="${MAX_HOURS_SECS:-$((MAX_HOURS * 3600))}"
 DISK_FLOOR_GB="${DISK_FLOOR_GB:-40}"
 BREAKER_N="${BREAKER_N:-3}"
 BACKOFF_NOWORK_SECS="${BACKOFF_NOWORK_SECS:-900}"
@@ -166,6 +171,14 @@ UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
 # the tooling tests set the wait to 0 (nothing sleeps in the suite).
 MISMATCH_RETRIES="${MISMATCH_RETRIES:-3}"
 MISMATCH_RETRY_WAIT_SECS="${MISMATCH_RETRY_WAIT_SECS:-10}"
+# Hard ceiling on TOTAL mismatch-grace wall-clock regardless of retries*wait
+# (roborev 1819 MED): even a misconfigured MISMATCH_RETRIES/WAIT can never make a
+# single verification block longer than this.
+MISMATCH_GRACE_CAP_SECS="${MISMATCH_GRACE_CAP_SECS:-120}"
+# issue #2670 (roborev 1819 MED): a PR that stays OPEN-with-auto-merge-armed across
+# this many consecutive iterations is treated as auto-merge-stuck — the supervisor
+# STOPS loudly rather than looping forever on a never-landing PR.
+PENDING_AUTOMERGE_MAX="${PENDING_AUTOMERGE_MAX:-3}"
 
 SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock}"
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
@@ -224,14 +237,23 @@ if [[ -z "${PROC_PROBE_CMD:-}" ]]; then
   # `[c]laude`) makes each regex still match the real process (`cargo`, `claude`)
   # while the bracketed pattern TEXT in the wrapper's argv (`[c]argo`) no longer
   # contains the literal substring, so the wrapper cannot match itself.
-  PROC_PROBE_CMD="{ pgrep -f '[c]argo |[n]extest|[g]ate_slot_daemon'; pgrep -f '[c]laude.*--agent worker'; } 2>/dev/null | sort -u | wc -l | tr -d ' '"
+  #
+  # SELF-EXCLUSION (roborev 1819, LOW): additionally drop the supervisor's OWN pid
+  # ($$) and parent ($PPID) from the match set — expanded HERE at definition time so
+  # they are the supervisor's, not the probe subshell's. This covers the case where
+  # the supervisor is itself launched from a `claude --agent worker` ancestor (its
+  # argv would otherwise be counted as a phantom leftover). RESIDUAL LIMIT: the match
+  # is still an argv substring test, so a `claude --agent worker` process ELSEWHERE in
+  # the ancestry (beyond the immediate parent) or an unrelated process that merely
+  # carries the literal substring in its own argv could still be counted.
+  PROC_PROBE_CMD="{ pgrep -f '[c]argo |[n]extest|[g]ate_slot_daemon'; pgrep -f '[c]laude.*--agent worker'; } 2>/dev/null | sort -u | grep -vxF -e '$$' -e '$PPID' | wc -l | tr -d ' '"
 fi
 # Companion to PROC_PROBE_CMD: lists the surviving PIDs (pid + cmd) so a
 # leftover-processes STOP can NAME what never cleared (issue #2670). Best-effort —
 # an empty result just yields "<unavailable>" in the page. Same bracket-trick
-# self-match defusal as PROC_PROBE_CMD (roborev 1813).
+# self-match defusal + $$/$PPID self-exclusion as PROC_PROBE_CMD (roborev 1813/1819).
 if [[ -z "${PROC_LIST_CMD:-}" ]]; then
-  PROC_LIST_CMD="{ pgrep -lf '[c]argo |[n]extest|[g]ate_slot_daemon'; pgrep -lf '[c]laude.*--agent worker'; } 2>/dev/null | sort -u"
+  PROC_LIST_CMD="{ pgrep -lf '[c]argo |[n]extest|[g]ate_slot_daemon'; pgrep -lf '[c]laude.*--agent worker'; } 2>/dev/null | sort -u | grep -vE '^($$|$PPID) '"
 fi
 
 # GH verification of a "finalized" marker's PR (issue #2670). $1 (passed by the
@@ -365,6 +387,12 @@ verify_finalized_pr() {
     fi
   fi
 
+  # Total mismatch-grace wall-clock ceiling (roborev 1819): min(retries*wait, cap).
+  local grace_start grace_budget
+  grace_start=$(date +%s)
+  grace_budget=$((MISMATCH_RETRIES * MISMATCH_RETRY_WAIT_SECS))
+  [[ "$grace_budget" -gt "$MISMATCH_GRACE_CAP_SECS" ]] && grace_budget="$MISMATCH_GRACE_CAP_SECS"
+
   while :; do
     errfile="$(mktemp "${TMPDIR:-/tmp}/gh-verify.XXXXXX")"
     # Context-independent capture (roborev 1810): capture rc explicitly via the
@@ -378,9 +406,13 @@ verify_finalized_pr() {
       printf 'unverified'
       return 0
     fi
-    # gh RAN and could not resolve the ref (bad PR number) — a forged reference,
-    # distinguished from a transport error by the resolve-failure stderr signature.
-    if printf '%s' "$err" | grep -qiE 'could not resolve|no (pull request|pr)s? (found|with)|not found|no pull requests found'; then
+    # gh RAN and could not RESOLVE the ref — a forged reference. Finding 2 (roborev
+    # 1819): match gh's ACTUAL resolve-failure signature ONLY, anchored and
+    # case-tolerant on the leading letter — `Could not resolve to a PullRequest|Issue`
+    # and the `no pull requests found` form. Everything else nonzero is a transport
+    # error (`dial tcp ... no such host`, DNS/proxy 404) → unverified, NEVER forgery.
+    # The bare `not found` substring is deliberately GONE.
+    if printf '%s' "$err" | grep -qE '[Cc]ould not resolve to a (PullRequest|Issue)|[Nn]o pull requests found'; then
       printf 'mismatch:UNRESOLVED'
       return 0
     fi
@@ -388,17 +420,18 @@ verify_finalized_pr() {
     # Parse. parser_ok = a parser is present AND the payload parsed as JSON.
     # Finding 2: a tooling gap (no parser / parse error) is transport class
     # (unverified), NEVER forgery. mismatch:UNRESOLVED is reserved for a
-    # SUCCESSFULLY-parsed response that simply lacks the PR state.
+    # SUCCESSFULLY-parsed response that simply lacks the PR state. Finding 3 (roborev
+    # 1819): jq is tried first, but a jq PARSE FAILURE falls THROUGH to python3 before
+    # giving up (jq present but broken must not defeat a valid response).
     parser_ok=0
     state=""
     automerge=""
-    if command -v jq >/dev/null 2>&1; then
-      if printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
-        parser_ok=1
-        state="$(printf '%s' "$out" | jq -r '.state // empty' 2>/dev/null || true)"
-        automerge="$(printf '%s' "$out" | jq -r '.autoMergeRequest // empty' 2>/dev/null || true)"
-      fi
-    elif command -v python3 >/dev/null 2>&1; then
+    if command -v jq >/dev/null 2>&1 && printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+      parser_ok=1
+      state="$(printf '%s' "$out" | jq -r '.state // empty' 2>/dev/null || true)"
+      automerge="$(printf '%s' "$out" | jq -r '.autoMergeRequest // empty' 2>/dev/null || true)"
+    fi
+    if [[ "$parser_ok" -eq 0 ]] && command -v python3 >/dev/null 2>&1; then
       if pyout="$(printf '%s' "$out" | python3 -c '
 import json, sys
 try:
@@ -437,8 +470,14 @@ print("armed" if d.get("autoMergeRequest") else "")
     fi
     # A resolved, non-merged state without auto-merge. Grace: read-after-merge lag
     # can briefly show OPEN just after a merge — retry a few times before escalating.
+    # The grace loop is BOUNDED (roborev 1819): the retry COUNT (MISMATCH_RETRIES) is
+    # the primary bound; it ALSO stops if the stop-file appears (a requested shutdown
+    # must not wait out the grace) or the total grace wall-clock budget is spent. The
+    # wall-clock guard only binds when there is an actual per-retry wait — with
+    # wait=0 the budget is 0, so instant retries stay count-bounded (not blocked).
     attempt=$((attempt + 1))
-    if [[ "$attempt" -lt "$MISMATCH_RETRIES" ]]; then
+    if [[ "$attempt" -lt "$MISMATCH_RETRIES" ]] && [[ ! -f "$STOP_FILE" ]] &&
+       { [[ "$grace_budget" -le 0 ]] || [[ $(( $(date +%s) - grace_start )) -lt "$grace_budget" ]]; }; then
       sleep "$MISMATCH_RETRY_WAIT_SECS"
       continue
     fi
@@ -593,10 +632,14 @@ ITER=0
 ISSUES_DONE=0
 CONSECUTIVE_ABNORMAL=0
 CONSECUTIVE_UNVERIFIED=0
+CONSECUTIVE_PENDING=0
 LAST_BLOCKED_ISSUE=""
 LAST_PARKED_ISSUE=""
 START_TS=$(date +%s)
-MAX_HOURS_SECS=$((MAX_HOURS * 3600))
+# MAX_HOURS_SECS is derived defensively in the config block (roborev 1819) so it is
+# set before preflight_wait can read it; this keeps it consistent if MAX_HOURS was
+# overridden after the config block.
+MAX_HOURS_SECS="${MAX_HOURS_SECS:-$((MAX_HOURS * 3600))}"
 
 finalize_exit() {
   local reason="$1" code="$2"
@@ -736,6 +779,7 @@ run_iteration() {
           merged)
             CONSECUTIVE_ABNORMAL=0
             CONSECUTIVE_UNVERIFIED=0
+            CONSECUTIVE_PENDING=0
             ISSUES_DONE=$((ISSUES_DONE + 1))
             journal_line "$ITER" "finalized" "$issue" "$pr" "$duration" "$rc" "" "merged"
             notify "info" "worker-supervisor: finalized issue $issue" "pr=$pr duration_s=$duration verified=merged"
@@ -746,11 +790,21 @@ run_iteration() {
             # MAX_ISSUES yet (it isn't merged), a default-priority page, and
             # breaker-NEUTRAL (gh resolved fine, so reset the unverified streak but
             # do NOT touch the crash breaker — this is a legitimate pending state).
+            # BUT a PR that stays pending across PENDING_AUTOMERGE_MAX consecutive
+            # iterations is auto-merge-STUCK (never landing) — the supervisor STOPS
+            # loudly rather than looping forever (roborev 1819 MED).
             CONSECUTIVE_UNVERIFIED=0
+            CONSECUTIVE_PENDING=$((CONSECUTIVE_PENDING + 1))
             journal_line "$ITER" "finalized-pending-automerge" "$issue" "$pr" "$duration" "$rc" "" "pending-automerge"
             notify "info" "worker-supervisor: finalized PENDING AUTO-MERGE issue $issue" \
               "PR $pr is OPEN with auto-merge armed — not counted yet; it will land automatically on green"
             log "iteration $ITER finalized-pending-automerge (PR $pr OPEN, auto-merge armed; not counted, breaker neutral)"
+            if [[ "$CONSECUTIVE_PENDING" -ge "$PENDING_AUTOMERGE_MAX" ]]; then
+              notify "high" "worker-supervisor: auto-merge stuck" \
+                "$CONSECUTIVE_PENDING consecutive finalizes are still OPEN pending auto-merge (latest PR $pr) — auto-merge is not landing; stopping so it isn't looped forever"
+              log "iteration $ITER: $CONSECUTIVE_PENDING consecutive pending-automerge (>= PENDING_AUTOMERGE_MAX=$PENDING_AUTOMERGE_MAX); stopping (automerge-stuck)"
+              finalize_exit "automerge-stuck" 1
+            fi
             ;;
           mismatch:*)
             # The PR is NOT merged (OPEN / CLOSED-unmerged / UNRESOLVED forged ref)

@@ -11,6 +11,7 @@ SUPERVISOR="$REPO_ROOT/scripts/local/worker-supervisor.sh"
 
 PASS_COUNT=0
 FAIL_COUNT=0
+SKIP_COUNT=0
 pass() {
   PASS_COUNT=$((PASS_COUNT + 1))
   echo "PASS: $1"
@@ -18,6 +19,12 @@ pass() {
 fail() {
   FAIL_COUNT=$((FAIL_COUNT + 1))
   echo "FAIL: $1"
+}
+# skip: an ENVIRONMENTAL non-result (e.g. a live control process that never
+# scheduled within the wait cap) — explicitly reported, never counted as failure.
+skip() {
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+  echo "SKIP: $1"
 }
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cqlite-supervisor-test.XXXXXX")"
@@ -1278,29 +1285,40 @@ test_finalized_unverified_not_counted_no_breaker() {
 # ---------------------------------------------------------------------------
 # Test 26 (#2670): PROC_PROBE discriminates the supervisor's OWN worker spawn
 # shape (`claude ... --agent worker`) from a legitimate interactive `claude`
-# session / a different-agent session. Spawns two argv-shaped stub processes and
-# asserts the DEFAULT probe pattern matches only the worker-shaped one — hermetic
-# regardless of any ambient `claude` process on the box (it checks the two known
-# PIDs, not a total count).
+# session / a different-agent session. Portable PROPERTY proof is a pure-string
+# `grep -E` regex check (always runs, deterministic); the live-process PID check
+# is a bonus that SKIPs (never fails) if the control process never schedules
+# within the wait cap — an environmental non-result, not a property failure
+# (roborev 1819 finding 7).
 # ---------------------------------------------------------------------------
 test_proc_probe_discriminates_worker_claude() {
-  local pat='claude.*--agent worker'
-  # worker-shaped: carries the --agent worker marker the supervisor spawns with.
+  local pat='[c]laude.*--agent worker'
+  # Pure-string property proof (no live process): the pattern matches the worker
+  # argv shape and NOT a different-agent session.
+  if ! printf 'claude --agent worker resume the claim\n' | grep -qE "$pat" ||
+       printf 'claude --agent flow-lead review the board\n' | grep -qE "$pat"; then
+    fail "proc-probe: pure-string regex does not discriminate worker vs other-agent"
+    return
+  fi
+  # Bonus live check: spawn the two argv-shaped stubs and confirm the same
+  # discrimination against real PIDs.
   bash -c 'exec -a "claude --agent worker resume the claim branch" sleep 30' &
   local wpid=$!
-  # interactive-shaped: a different-agent claude session (owner running the lead)
-  # — must NOT match, proving we key on `worker`, not any `claude --agent`.
   bash -c 'exec -a "claude --agent flow-lead review the board" sleep 30' &
   local ipid=$!
-  # give both a moment to exec into their argv
-  local waited=0
+  local waited=0 control_up="no"
   while [[ "$waited" -lt 50 ]]; do
-    pgrep -f "$pat" | grep -qw "$wpid" && break
+    pgrep -f "$pat" | grep -qw "$wpid" && { control_up="yes"; break; }
     sleep 0.1
     waited=$((waited + 1))
   done
-  local worker_matched="no" interactive_matched="no"
-  pgrep -f "$pat" | grep -qw "$wpid" && worker_matched="yes"
+  if [[ "$control_up" == "no" ]]; then
+    kill "$wpid" "$ipid" 2>/dev/null || true
+    wait "$wpid" "$ipid" 2>/dev/null || true
+    skip "proc-probe (live): control worker process never scheduled within cap — pure-string proof held"
+    return
+  fi
+  local worker_matched="yes" interactive_matched="no"
   pgrep -f "$pat" | grep -qw "$ipid" && interactive_matched="yes"
   kill "$wpid" "$ipid" 2>/dev/null || true
   wait "$wpid" "$ipid" 2>/dev/null || true
@@ -1468,38 +1486,54 @@ test_stop_file_honored_mid_hold() {
 # sub-probe is 0 with no worker running.
 test_probe_no_self_match() {
   local pat='[c]laude.*--agent worker'
-  # real worker shape — the bracketed regex MUST match (`[c]laude` matches `claude`).
-  bash -c 'exec -a "claude --agent worker resume the claim" sleep 30' &
-  local wpid=$!
-  # wrapper-argv shape — argv literally contains the bracketed PATTERN TEXT, exactly
-  # as the probe's own `bash -c` wrapper does. The bracket trick MUST keep the
-  # pattern from matching it (`[c]laude` = literal `c`+`laude`; the text `[c]laude`
-  # has `c` followed by `]`, so no match — this is the self-exclusion property).
-  bash -c 'exec -a "wrap [c]laude.*--agent worker probe" sleep 30' &
-  local xpid=$!
-  local waited=0
-  while [[ "$waited" -lt 50 ]]; do
-    pgrep -f "$pat" | grep -qw "$wpid" && break
-    sleep 0.1
-    waited=$((waited + 1))
-  done
-  local worker_matched="no" wrapper_matched="no"
-  pgrep -f "$pat" | grep -qw "$wpid" && worker_matched="yes"
-  pgrep -f "$pat" | grep -qw "$xpid" && wrapper_matched="yes"
-  # static sanity: the real DEFAULT probe string carries the bracket trick on BOTH
-  # families. Source with PROC_PROBE_CMD unset so a leaked test override can't mask
-  # the default; assert the string, don't execute it (executing would match this
-  # test's own worker-shaped stub / ambient processes).
+  # PROPERTY proof (pure-string, always runs, deterministic): the bracketed pattern
+  # matches a REAL worker argv, and does NOT match a process whose argv literally
+  # contains the bracketed PATTERN TEXT (exactly as the probe's own `bash -c`
+  # wrapper does) — `[c]laude` = literal `c`+`laude`; the text `[c]laude` has `c`
+  # followed by `]`, so no match. This is the self-exclusion property.
+  if ! printf 'claude --agent worker resume the claim\n' | grep -qE "$pat" ||
+       printf 'wrap [c]laude.*--agent worker probe\n' | grep -qE "$pat"; then
+    fail "probe self-match: pure-string regex fails the self-exclusion property"
+    return
+  fi
+  # static sanity: the real DEFAULT probe string carries the bracket trick + the
+  # $$/$PPID self-exclusion on BOTH families. Source with PROC_PROBE_CMD unset so a
+  # leaked test override can't mask the default; assert the string, don't execute it.
   local probe_cmd defaulted="no"
   # shellcheck disable=SC2016  # $SUP/$PROC_PROBE_CMD expand inside the sub-bash, not here.
   probe_cmd="$(env -u PROC_PROBE_CMD SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$PROC_PROBE_CMD"' 2>/dev/null)"
-  [[ "$probe_cmd" == *'[c]laude.*--agent worker'* && "$probe_cmd" == *'[c]argo '* ]] && defaulted="yes"
+  [[ "$probe_cmd" == *'[c]laude.*--agent worker'* && "$probe_cmd" == *'[c]argo '* &&
+     "$probe_cmd" == *'grep -vxF'* ]] && defaulted="yes"
+  if [[ "$defaulted" != "yes" ]]; then
+    fail "probe self-match: default probe string missing bracket trick / self-exclusion: '${probe_cmd:0:60}'"
+    return
+  fi
+  # Bonus live check: real `claude --agent worker` stub matches, wrapper-text stub
+  # does not. SKIPs (never fails) if the control worker never schedules.
+  bash -c 'exec -a "claude --agent worker resume the claim" sleep 30' &
+  local wpid=$!
+  bash -c 'exec -a "wrap [c]laude.*--agent worker probe" sleep 30' &
+  local xpid=$!
+  local waited=0 control_up="no"
+  while [[ "$waited" -lt 50 ]]; do
+    pgrep -f "$pat" | grep -qw "$wpid" && { control_up="yes"; break; }
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [[ "$control_up" == "no" ]]; then
+    kill "$wpid" "$xpid" 2>/dev/null || true
+    wait "$wpid" "$xpid" 2>/dev/null || true
+    skip "probe self-match (live): control worker process never scheduled within cap — pure-string proof held"
+    return
+  fi
+  local wrapper_matched="no"
+  pgrep -f "$pat" | grep -qw "$xpid" && wrapper_matched="yes"
   kill "$wpid" "$xpid" 2>/dev/null || true
   wait "$wpid" "$xpid" 2>/dev/null || true
-  if [[ "$worker_matched" == "yes" && "$wrapper_matched" == "no" && "$defaulted" == "yes" ]]; then
+  if [[ "$wrapper_matched" == "no" ]]; then
     pass "probe self-match: bracket trick matches a real worker, excludes the wrapper-argv text"
   else
-    fail "probe self-match: worker=$worker_matched wrapper=$wrapper_matched defaulted=$defaulted probe='${probe_cmd:0:50}'"
+    fail "probe self-match: wrapper-argv text was matched (self-exclusion broken)"
   fi
 }
 
@@ -1665,6 +1699,181 @@ test_alternating_holds_still_bounded() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 37 (#2670 / roborev 1819 HIGH, finding 1): a hold entered with ONLY MAX_HOURS
+# set (MAX_HOURS_SECS derived, not passed) must NOT spuriously abort budget-wallclock
+# from inside the hold loop — proves the derived budget is defined on the hold path.
+# Load pinned high, then cleared; the run holds, then finalizes normally.
+# ---------------------------------------------------------------------------
+test_maxhours_only_hold_no_abort() {
+  local d counter jf rc sup_pid waited hold_notifies
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export MAX_HOURS=8
+  unset MAX_HOURS_SECS 2>/dev/null || true   # force derivation on the hold path
+  export LOAD_CONTROL_FILE="$d/load"; echo 99 >"$LOAD_CONTROL_FILE"
+  # shellcheck disable=SC2016  # deferred: expanded later by the supervisor's own `bash -c`.
+  export LOAD_PROBE_CMD='cat "$LOAD_CONTROL_FILE"'
+  export LOAD_MAX=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 &
+  sup_pid=$!
+  waited=0
+  while [[ "$waited" -lt 300 ]]; do
+    hold_notifies=$(grep -c '^error|worker-supervisor HOLD|HOLD: load' "$NOTIFY_LOG" 2>/dev/null || true)
+    [[ "${hold_notifies:-0}" -ge 1 ]] && break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  echo 0 >"$LOAD_CONTROL_FILE"
+  waited=0
+  while [[ ! -f "$counter" && "$waited" -lt 300 ]]; do sleep 0.1; waited=$((waited + 1)); done
+  wait "$sup_pid"
+  rc=$?
+  if [[ "$rc" -eq 0 && -f "$counter" ]] &&
+     grep -q '"outcome":"finalized"' "$jf" &&
+     ! grep -q '"reason":"budget-wallclock"' "$jf"; then
+    pass "maxhours-only hold: derived budget on hold path, no spurious budget-wallclock abort"
+  else
+    fail "maxhours-only: rc=$rc counter=$([[ -f "$counter" ]] && echo yes || echo no) (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 38 (#2670 / roborev 1819 HIGH, finding 2): a TRANSPORT error whose stderr
+# merely contains "not found" (`dial tcp ... host not found`) must classify
+# `unverified`, NOT mismatch:UNRESOLVED — the tightened classifier keys only on
+# gh's actual resolve-failure signature, so a DNS/proxy 404 is never read as forgery.
+# ---------------------------------------------------------------------------
+test_transport_notfound_is_unverified() {
+  local d counter jf rc ucount acount
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export UNVERIFIED_MAX=1   # a single unverified stops the loop → deterministic end
+  export GH_VERIFY_CMD='echo "dial tcp: lookup github.com: no such host: host not found" >&2; exit 1'
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  ucount=$(jline_count "$jf" '"outcome":"finalized-unverified"')
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  if [[ "$ucount" -eq 1 && "$acount" -eq 0 ]] &&
+     grep -q '"verified":"unverified"' "$jf" &&
+     ! grep -q '"verified":"mismatch:UNRESOLVED"' "$jf" &&
+     grep -q '"reason":"verify-unavailable"' "$jf"; then
+    pass "transport not-found: DNS/host-not-found stderr → unverified, never forgery"
+  else
+    fail "transport-notfound: rc=$rc unverified=$ucount abnormal=$acount (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 39 (#2670 / roborev 1819 MED, finding 3): with jq ABSENT but python3
+# present, verify_finalized_pr falls through to the python3 parser and correctly
+# classifies an OPEN+auto-merge-armed response as pending-automerge. Unit-tests the
+# function under a PATH with jq removed (python3 kept).
+# ---------------------------------------------------------------------------
+test_python_only_parser_automerge() {
+  local d bindir t src out
+  d="$(new_case_dir)"
+  bindir="$d/pybin"
+  mkdir -p "$bindir"
+  # symlink the tools the function needs PLUS python3; jq deliberately absent.
+  for t in bash mktemp cat rm grep dirname date sed python3; do
+    src="$(command -v "$t" 2>/dev/null)" && ln -s "$src" "$bindir/$t"
+  done
+  # shellcheck disable=SC2016  # $1 expands inside the sub-bash (source target), not here.
+  out="$(PATH="$bindir" \
+        GH_VERIFY_CMD='printf %s "{\"state\":\"OPEN\",\"autoMergeRequest\":{\"enabledAt\":\"x\"}}"' \
+        MISMATCH_RETRIES=1 MISMATCH_RETRY_WAIT_SECS=0 STOP_FILE=/nonexistent \
+        "$bindir/bash" -c 'source "$1"; verify_finalized_pr 42' _ "$SUPERVISOR" 2>/dev/null)"
+  if [[ "$out" == "pending-automerge" ]]; then
+    pass "python-only parser: jq absent, python3 parses OPEN+auto-merge → pending-automerge"
+  else
+    fail "python-only: got '$out' (expected pending-automerge)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 40 (#2670 / roborev 1819 MED, finding 4): the mismatch-grace retry loop
+# honors the stop-file mid-grace — a shutdown request must not wait out the full
+# grace. gh always returns OPEN (never merges), MISMATCH_RETRIES large with a 1s
+# wait; the stop-file is created while grace is sleeping, and the supervisor exits
+# cleanly (stop-file) well under the would-be full grace time.
+# ---------------------------------------------------------------------------
+test_stop_file_honored_mid_grace() {
+  local d counter jf rc sup_pid t0 elapsed waited
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export GH_VERIFY_CMD='printf %s "{\"state\":\"OPEN\",\"mergedAt\":null,\"autoMergeRequest\":null}"'
+  export MISMATCH_RETRIES=100
+  export MISMATCH_RETRY_WAIT_SECS=1   # would be ~100s of grace without the stop check
+  jf="$JOURNAL_FILE"
+
+  t0=$(date +%s)
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 &
+  sup_pid=$!
+  # wait until the worker has run (counter written → we're into verify/grace)
+  waited=0
+  while [[ ! -f "$counter" && "$waited" -lt 100 ]]; do sleep 0.1; waited=$((waited + 1)); done
+  sleep 1   # let grace enter its sleep
+  touch "$STOP_FILE"
+  wait "$sup_pid"
+  rc=$?
+  elapsed=$(( $(date +%s) - t0 ))
+  if [[ "$rc" -eq 0 && "$elapsed" -lt 30 ]] && grep -q '"reason":"stop-file"' "$jf"; then
+    pass "stop-file mid-grace: grace loop honors the stop-file, exits in ${elapsed}s (not full grace)"
+  else
+    fail "stop-mid-grace: rc=$rc elapsed=${elapsed}s (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 41 (#2670 / roborev 1819 MED, finding 5): a PR that stays OPEN-with-auto-
+# merge-armed across PENDING_AUTOMERGE_MAX consecutive iterations is auto-merge-
+# stuck — the supervisor pages high and STOPS (automerge-stuck, exit 1) rather than
+# looping forever. gh always returns OPEN+armed; PENDING_AUTOMERGE_MAX=2.
+# ---------------------------------------------------------------------------
+test_persistent_pending_automerge_stops() {
+  local d counter jf rc pcount page
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export PENDING_AUTOMERGE_MAX=2
+  export GH_VERIFY_CMD='printf %s "{\"state\":\"OPEN\",\"mergedAt\":null,\"autoMergeRequest\":{\"enabledAt\":\"x\"}}"'
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  pcount=$(jline_count "$jf" '"outcome":"finalized-pending-automerge"')
+  page=$(grep -c '^error|worker-supervisor: auto-merge stuck' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -ne 0 && "$pcount" -eq 2 && "$page" -ge 1 ]] &&
+     grep -q '"reason":"automerge-stuck"' "$jf"; then
+    pass "persistent pending-automerge: 2 consecutive stop the loop (automerge-stuck, exit 1, high page)"
+  else
+    fail "persistent-pending: rc=$rc pending=$pcount page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -1719,5 +1928,10 @@ test_pending_automerge_verdict
 test_mismatch_grace_absorbs_lag
 test_foreign_url_is_unresolved
 test_alternating_holds_still_bounded
-echo "=== $PASS_COUNT passed, $FAIL_COUNT failed ==="
+test_maxhours_only_hold_no_abort
+test_transport_notfound_is_unverified
+test_python_only_parser_automerge
+test_stop_file_honored_mid_grace
+test_persistent_pending_automerge_stops
+echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
