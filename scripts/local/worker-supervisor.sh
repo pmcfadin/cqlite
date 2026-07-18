@@ -38,17 +38,32 @@
 #                                             NOT count toward MAX_ISSUES, does NOT
 #                                             reset the breaker (counts toward it),
 #                                             and fires a HIGH page naming the
-#                                             discrepancy.
-#                 verified=unverified       — gh unavailable / network error /
-#                                             unparseable output. FAIL-INFORMATIVE,
-#                                             not fail-punitive: logged + a
-#                                             default-priority page, does NOT count
-#                                             as a completed issue, and is NEUTRAL to
-#                                             the breaker (neither trips nor resets —
-#                                             a transient GitHub outage must not
-#                                             punish the run, but must not mask a real
-#                                             crash chain either). Outcome recorded as
-#                                             `finalized-unverified`.
+#                                             discrepancy. mismatch:UNRESOLVED is the
+#                                             forged/garbage-marker case: `pr` fails
+#                                             the numeric shape-check (gh never
+#                                             called) OR gh could not resolve it to a
+#                                             PR (a bad reference, distinguished from
+#                                             transport by stderr) — treated as an
+#                                             ESCALATION, not a blip.
+#                 verified=unverified       — STRICTLY a gh exec/transport failure
+#                                             (binary missing / network / auth / rate
+#                                             limit). FAIL-INFORMATIVE, not
+#                                             fail-punitive: logged + a default-priority
+#                                             page, does NOT count as a completed issue,
+#                                             and is NEUTRAL to the breaker (neither
+#                                             trips nor resets — a transient GitHub
+#                                             outage must not punish the run, nor mask a
+#                                             real crash chain). Outcome recorded as
+#                                             `finalized-unverified`. A PERSISTENT
+#                                             outage is bounded: UNVERIFIED_MAX
+#                                             consecutive unverified finalizes STOP the
+#                                             loop (verify-unavailable, exit 1, HIGH
+#                                             page) so the MAX_ISSUES ceiling can't drift.
+#               Bounded holds: a `leftover-processes` preflight hold that never
+#               clears (a non-self-clearing orphan) STOPS the loop loudly after
+#               LEFTOVER_HOLD_MAX passes — naming the surviving PIDs — and every hold
+#               pass re-checks the stop-file and the wall-clock budget (issue #2670,
+#               roborev 1810): a hold can never latch the supervisor silently.
 #   no-work   — rehydrated from the board, nothing Ready (or nothing to
 #               resume). issue/pr may be null. Does NOT count toward
 #               MAX_ISSUES; triggers a BACKOFF_NOWORK_SECS sleep so the loop
@@ -130,6 +145,15 @@ MAX_ITER_SECS="${MAX_ITER_SECS:-7200}"
 # match. Both env-overridable (tests tighten the poll interval).
 STUCK_POLL_SECS="${STUCK_POLL_SECS:-30}"
 PROMPT_SIGNATURE_RE="${PROMPT_SIGNATURE_RE:-AskUserQuestion|Do you want to|waiting for input|❯}"
+# issue #2670: bound the two ways verdict-integrity can otherwise latch the loop.
+# LEFTOVER_HOLD_MAX — consecutive preflight holds on `leftover-processes` before
+#   the supervisor STOPS loudly. A non-self-clearing orphan (a wedged worker
+#   Claude CLI that never dies) must terminate the loop, never latch it silently.
+# UNVERIFIED_MAX — consecutive finalized markers gh could not verify before the
+#   supervisor STOPS. A persistent verification outage is an operator problem and
+#   would otherwise let the MAX_ISSUES ceiling drift (uncounted-forever iterations).
+LEFTOVER_HOLD_MAX="${LEFTOVER_HOLD_MAX:-3}"
+UNVERIFIED_MAX="${UNVERIFIED_MAX:-2}"
 
 SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock}"
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
@@ -181,6 +205,12 @@ if [[ -z "${PROC_PROBE_CMD:-}" ]]; then
   # `--agent worker` process seen here is genuinely from a prior iteration. `sort -u`
   # dedups a PID that matched both patterns.
   PROC_PROBE_CMD="{ pgrep -f 'cargo |nextest|gate_slot_daemon'; pgrep -f 'claude.*--agent worker'; } 2>/dev/null | sort -u | wc -l | tr -d ' '"
+fi
+# Companion to PROC_PROBE_CMD: lists the surviving PIDs (pid + cmd) so a
+# leftover-processes STOP can NAME what never cleared (issue #2670). Best-effort —
+# an empty result just yields "<unavailable>" in the page.
+if [[ -z "${PROC_LIST_CMD:-}" ]]; then
+  PROC_LIST_CMD="{ pgrep -lf 'cargo |nextest|gate_slot_daemon'; pgrep -lf 'claude.*--agent worker'; } 2>/dev/null | sort -u"
 fi
 
 # GH verification of a "finalized" marker's PR (issue #2670). $1 (passed by the
@@ -275,26 +305,43 @@ print(v if v is not None else "")
 }
 
 # verify_finalized_pr <pr>: check the claimed PR is actually merged (issue #2670).
-# Runs $GH_VERIFY_CMD with the PR as $1, parses the `state` field of its JSON, and
-# echoes exactly one verdict token on stdout:
-#   merged            — gh reported state MERGED.
-#   mismatch:<STATE>  — gh reported a present, non-MERGED state (OPEN, CLOSED, ...).
-#   unverified        — gh exited nonzero, produced no output, or emitted JSON with
-#                       no parseable `state` (gh missing / network error / rate
-#                       limit). Fail-informative: the CALLER decides this is neutral
-#                       to the breaker and uncounted, never punitive.
-# Never returns nonzero — the verdict is always on stdout so the caller's `case`
-# handles every path explicitly.
+# Echoes exactly one verdict token on stdout (never returns nonzero — the caller's
+# `case` handles every path explicitly):
+#   merged             — gh reported state MERGED. The ONLY path that credits an issue.
+#   mismatch:<STATE>   — gh reported a present, non-MERGED state (OPEN, CLOSED, ...).
+#   mismatch:UNRESOLVED— the marker's `pr` is FORGED/GARBAGE: it fails the numeric
+#                        shape-check (so gh was never called), OR gh ran and could
+#                        not resolve it to a PR (a bad reference, not an outage). A
+#                        forged marker is an ESCALATION (abnormal, high page,
+#                        breaker-counting), not a transient blip.
+#   unverified         — strictly an exec/transport failure: gh binary missing, a
+#                        network/auth/rate-limit error, or a nonzero exit with no
+#                        resolve signal. Fail-informative; the caller keeps it
+#                        neutral to the breaker and uncounted.
+# The pr is normalized first: an optional pmcfadin/cqlite PR URL (or a leading '#')
+# collapses to its trailing number; anything not `^[0-9]+$` after that is forged.
 verify_finalized_pr() {
-  local pr="$1" out rc state
-  out="$(bash -c "$GH_VERIFY_CMD" _ "$pr" 2>/dev/null)"
-  rc=$?
-  if [[ "$rc" -ne 0 || -z "$out" ]]; then
+  local pr="$1" prnum out err rc state errfile
+  prnum="${pr##*/}"   # URL → trailing number; bare number passes through.
+  prnum="${prnum#\#}" # tolerate a leading '#'.
+  if [[ ! "$prnum" =~ ^[0-9]+$ ]]; then
+    # Forged/garbage pr — never reached gh; classify as an unresolved reference.
+    printf 'mismatch:UNRESOLVED'
+    return 0
+  fi
+  errfile="$(mktemp "${TMPDIR:-/tmp}/gh-verify.XXXXXX")"
+  # Context-independent capture (roborev 1810): do not rely on the errexit-in-
+  # assignment quirk — capture rc explicitly via the `&& rc=0 || rc=$?` list.
+  out="$(bash -c "$GH_VERIFY_CMD" _ "$prnum" 2>"$errfile")" && rc=0 || rc=$?
+  err="$(cat "$errfile" 2>/dev/null || true)"
+  rm -f "$errfile"
+  # gh binary missing (exec failure) is a transport-class problem, never a forged PR.
+  if [[ "$rc" -eq 127 ]]; then
     printf 'unverified'
     return 0
   fi
   if command -v jq >/dev/null 2>&1; then
-    state="$(printf '%s' "$out" | jq -r '.state // empty' 2>/dev/null)"
+    state="$(printf '%s' "$out" | jq -r '.state // empty' 2>/dev/null || true)"
   else
     state="$(printf '%s' "$out" | python3 -c '
 import json, sys
@@ -306,13 +353,23 @@ v = d.get("state")
 print(v if v is not None else "")
 ' 2>/dev/null || true)"
   fi
-  if [[ -z "$state" ]]; then
-    printf 'unverified'
-  elif [[ "$state" == "MERGED" ]]; then
-    printf 'merged'
-  else
-    printf 'mismatch:%s' "$state"
+  if [[ -n "$state" ]]; then
+    if [[ "$state" == "MERGED" ]]; then printf 'merged'; else printf 'mismatch:%s' "$state"; fi
+    return 0
   fi
+  # No parseable state. Distinguish a RESOLVE failure (bad PR ref = forged marker →
+  # escalate) from a TRANSPORT failure (network/auth/rate-limit = outage → neutral).
+  if printf '%s' "$err" | grep -qiE 'could not resolve|no (pull request|pr)s? (found|with)|not found|no pull requests found'; then
+    printf 'mismatch:UNRESOLVED'
+    return 0
+  fi
+  if [[ "$rc" -ne 0 || -z "$out" ]]; then
+    printf 'unverified'
+    return 0
+  fi
+  # gh exited 0 with non-empty but unparseable output and no transport signal — not
+  # a clean success and not an outage; treat as an unresolved (garbage) response.
+  printf 'mismatch:UNRESOLVED'
 }
 
 # json_or_null <value>: quotes+escapes a string field for embedding into the
@@ -410,14 +467,34 @@ preflight_reason() {
 }
 
 LAST_HOLD_REASON=""
+# preflight_wait is BOUNDED (issue #2670, roborev 1810 HIGH): a hold loop must not
+# be able to latch the supervisor silently. Every pass re-checks the stop-file AND
+# the wall-clock budget, and a `leftover-processes` hold that never clears (a
+# non-self-clearing orphan) stops the loop loudly after LEFTOVER_HOLD_MAX passes
+# rather than holding until MAX_HOURS with no page beyond the first HOLD.
 preflight_wait() {
+  local leftover_holds=0
   while true; do
     [[ -f "$STOP_FILE" ]] && finalize_exit "stop-file" 0
+    [[ $(($(date +%s) - START_TS)) -ge "$MAX_HOURS_SECS" ]] && finalize_exit "budget-wallclock" 0
     local reason
     reason="$(preflight_reason)"
     if [[ -z "$reason" ]]; then
       LAST_HOLD_REASON=""
       return 0
+    fi
+    if [[ "$reason" == "leftover-processes" ]]; then
+      leftover_holds=$((leftover_holds + 1))
+      if [[ "$leftover_holds" -ge "$LEFTOVER_HOLD_MAX" ]]; then
+        local pids
+        pids="$(bash -c "$PROC_LIST_CMD" 2>/dev/null | tr '\n' ';' | cut -c1-300)"
+        notify "high" "worker-supervisor: leftover-processes will not clear" \
+          "held $leftover_holds times on leftover processes that never cleared — stopping loudly. Surviving: ${pids:-<unavailable>}"
+        log "leftover-processes held $leftover_holds times (>= LEFTOVER_HOLD_MAX=$LEFTOVER_HOLD_MAX) without clearing; stopping. Surviving: ${pids:-<unavailable>}"
+        finalize_exit "leftover-processes" 1
+      fi
+    else
+      leftover_holds=0
     fi
     if [[ "$reason" != "$LAST_HOLD_REASON" ]]; then
       notify "high" "worker-supervisor HOLD" "HOLD: $reason (repolling every ${HOLD_POLL_SECS}s, no spawn)"
@@ -434,6 +511,7 @@ preflight_wait() {
 ITER=0
 ISSUES_DONE=0
 CONSECUTIVE_ABNORMAL=0
+CONSECUTIVE_UNVERIFIED=0
 LAST_BLOCKED_ISSUE=""
 LAST_PARKED_ISSUE=""
 START_TS=$(date +%s)
@@ -576,14 +654,18 @@ run_iteration() {
         case "$verify" in
           merged)
             CONSECUTIVE_ABNORMAL=0
+            CONSECUTIVE_UNVERIFIED=0
             ISSUES_DONE=$((ISSUES_DONE + 1))
             journal_line "$ITER" "finalized" "$issue" "$pr" "$duration" "$rc" "" "merged"
             notify "info" "worker-supervisor: finalized issue $issue" "pr=$pr duration_s=$duration verified=merged"
             ;;
           mismatch:*)
-            # The PR is NOT merged (OPEN / CLOSED-unmerged) — the worker claimed
-            # a finalize it did not actually land. Judged ABNORMAL: uncounted,
-            # counts toward the breaker, and a HIGH page names the discrepancy.
+            # The PR is NOT merged (OPEN / CLOSED-unmerged / UNRESOLVED forged ref)
+            # — the worker claimed a finalize it did not actually land. Judged
+            # ABNORMAL: uncounted, counts toward the breaker, and a HIGH page names
+            # the discrepancy. gh clearly RESOLVED (or the ref was forged), so a
+            # verification-outage streak is NOT in progress — reset that counter.
+            CONSECUTIVE_UNVERIFIED=0
             local mstate="${verify#mismatch:}"
             journal_line "$ITER" "abnormal" "$issue" "$pr" "$duration" "$rc" "" "$verify"
             notify "high" "worker-supervisor: finalized MISMATCH issue $issue" \
@@ -592,14 +674,24 @@ run_iteration() {
             trip_breaker_or_continue
             ;;
           *)
-            # unverified — gh unavailable / network error. FAIL-INFORMATIVE:
+            # unverified — strictly a gh exec/transport failure. FAIL-INFORMATIVE:
             # log + default-priority page, do NOT count as done, and stay NEUTRAL
             # to the breaker (do not increment — a transient outage is not a crash;
-            # do not reset — it must not mask a real prior crash chain).
+            # do not reset — it must not mask a real prior crash chain). But a
+            # PERSISTENT outage is an operator problem (roborev 1810 MED): after
+            # UNVERIFIED_MAX consecutive unverified finalizes the supervisor STOPS
+            # loudly, so the MAX_ISSUES ceiling can't drift on uncounted-forever runs.
+            CONSECUTIVE_UNVERIFIED=$((CONSECUTIVE_UNVERIFIED + 1))
             journal_line "$ITER" "finalized-unverified" "$issue" "$pr" "$duration" "$rc" "" "unverified"
             notify "info" "worker-supervisor: finalized UNVERIFIED issue $issue" \
               "could not verify PR $pr merged (gh unavailable/network) — not counted, breaker unchanged"
             log "iteration $ITER finalized-unverified (gh could not confirm PR $pr; not counted, breaker neutral)"
+            if [[ "$CONSECUTIVE_UNVERIFIED" -ge "$UNVERIFIED_MAX" ]]; then
+              notify "high" "worker-supervisor: verification unavailable" \
+                "$CONSECUTIVE_UNVERIFIED consecutive finalized markers could not be gh-verified — persistent verification outage; stopping so the MAX_ISSUES ceiling stays meaningful"
+              log "iteration $ITER: $CONSECUTIVE_UNVERIFIED consecutive unverified (>= UNVERIFIED_MAX=$UNVERIFIED_MAX); stopping (verify-unavailable)"
+              finalize_exit "verify-unavailable" 1
+            fi
             ;;
         esac
       fi

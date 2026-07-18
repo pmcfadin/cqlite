@@ -370,6 +370,57 @@ EOF
   chmod +x "$path"
 }
 
+# issue #2670 (roborev 1810): a gh-verify stub that ALWAYS fails transport (exit 1,
+# NO stderr → unverified). Used to prove UNVERIFIED_MAX consecutive unverified
+# finalizes stop the loop (verify-unavailable).
+write_gh_transport_fail_stub() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "$path"
+}
+
+# issue #2670 (roborev 1810): a gh-verify stub that emulates `gh pr view` on a PR
+# number that does NOT exist — a resolve failure (stderr signature + nonzero exit),
+# distinct from a transport outage. verify_finalized_pr must classify this
+# mismatch:UNRESOLVED (forged marker), not unverified.
+write_gh_notfound_stub() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+echo "GraphQL: Could not resolve to a PullRequest with the number of $1. (repository.pullRequest)" >&2
+exit 1
+EOF
+  chmod +x "$path"
+}
+
+# issue #2670 (roborev 1810): worker finalizes with a FORGED pr on every call —
+# call 1 a not-found number (999999), call 2 a garbage non-numeric string — both
+# must be judged abnormal mismatch:UNRESOLVED. Never finalizes cleanly.
+write_finalize_forged_pr_stub() {
+  local path="$1" call_ctr="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+calls=0
+[[ -f "$call_ctr" ]] && calls=\$(cat "$call_ctr")
+calls=\$((calls + 1))
+echo "\$calls" >"$call_ctr"
+if [[ \$calls -eq 1 ]]; then
+  cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":61,"pr":"999999","duration_s":1}
+JSON
+else
+  cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":62,"pr":"not-a-real-pr","duration_s":1}
+JSON
+fi
+EOF
+  chmod +x "$path"
+}
+
 # ---------------------------------------------------------------------------
 # Common env baseline: every test starts here, then overrides what it needs.
 # Clear preflight (no holds), generous budgets, fast polling/backoff.
@@ -1203,6 +1254,151 @@ test_proc_probe_discriminates_worker_claude() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 27 (#2670 / roborev 1810 HIGH): a `leftover-processes` preflight hold that
+# NEVER clears must STOP the supervisor loudly (leftover-processes, exit 1, high
+# page naming survivors) after LEFTOVER_HOLD_MAX passes — not latch it silently
+# until MAX_HOURS.
+# ---------------------------------------------------------------------------
+test_leftover_hold_bounded_stops() {
+  local d counter jf rc page
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  # PROC probe never clears (always reports a leftover process); the worker would
+  # finalize if ever spawned (it must not be).
+  export PROC_PROBE_CMD="echo 1"
+  export PROC_LIST_CMD="echo '12345 claude --agent worker orphan'"
+  export LEFTOVER_HOLD_MAX=3
+  export HOLD_POLL_SECS=1
+  export MAX_HOURS=8
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  page=$(grep -c '^error|worker-supervisor: leftover-processes will not clear' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -ne 0 && ! -f "$counter" && "$page" -ge 1 ]] &&
+     grep -q '"reason":"leftover-processes"' "$jf" &&
+     grep -q '12345' "$NOTIFY_LOG"; then
+    pass "leftover-hold bound: never-clearing orphan stops loudly (exit 1, survivors named), no spawn"
+  else
+    fail "leftover-hold: rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 28 (#2670 / roborev 1810 MED): UNVERIFIED_MAX consecutive unverified
+# finalizes STOP the supervisor (verify-unavailable, exit 1, high page) — a
+# persistent verification outage must not let uncounted-forever iterations drift
+# past the MAX_ISSUES ceiling.
+# ---------------------------------------------------------------------------
+test_persistent_unverified_stops() {
+  local d counter jf rc ucount page
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  write_gh_transport_fail_stub "$d/bin/gh.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export UNVERIFIED_MAX=2
+  # shellcheck disable=SC2016  # $1 expanded later by the supervisor's own `bash -c`.
+  export GH_VERIFY_CMD="$d/bin/gh.sh \"\$1\""
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  ucount=$(jline_count "$jf" '"outcome":"finalized-unverified"')
+  page=$(grep -c '^error|worker-supervisor: verification unavailable' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -ne 0 && "$ucount" -eq 2 && "$page" -ge 1 ]] &&
+     grep -q '"reason":"verify-unavailable"' "$jf"; then
+    pass "persistent unverified: 2 consecutive stop the loop (verify-unavailable, exit 1, high page)"
+  else
+    fail "persistent-unverified: rc=$rc unverified=$ucount page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 29 (#2670 / roborev 1810 MED): a FORGED `pr` is an escalation, not a blip —
+# a gh-not-found number (999999) and a garbage non-numeric string both classify
+# mismatch:UNRESOLVED (abnormal, high MISMATCH page, breaker-counting), NEVER
+# unverified. BREAKER_N=2 stops after the two forged finalizes.
+# ---------------------------------------------------------------------------
+test_forged_pr_is_unresolved_mismatch() {
+  local d call_ctr jf rc acount ucount page
+  d="$(new_case_dir)"
+  call_ctr="$d/calls"
+  common_env "$d"
+  write_finalize_forged_pr_stub "$d/bin/worker.sh" "$call_ctr"
+  write_gh_notfound_stub "$d/bin/gh.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=2
+  # shellcheck disable=SC2016  # $1 expanded later by the supervisor's own `bash -c`.
+  export GH_VERIFY_CMD="$d/bin/gh.sh \"\$1\""
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  ucount=$(jline_count "$jf" '"outcome":"finalized-unverified"')
+  page=$(grep -c '^error|worker-supervisor: finalized MISMATCH' "$NOTIFY_LOG" 2>/dev/null || true)
+  # both forged finalizes → mismatch:UNRESOLVED (one via gh not-found, one via
+  # shape-check), never unverified; breaker trips at 2.
+  if [[ "$rc" -ne 0 && "$acount" -eq 2 && "$ucount" -eq 0 && "$page" -ge 2 ]] &&
+     [[ "$(jline_count "$jf" '"verified":"mismatch:UNRESOLVED"')" -eq 2 ]] &&
+     grep -q '"reason":"breaker"' "$jf"; then
+    pass "forged pr: not-found number + garbage string both mismatch:UNRESOLVED (escalation, not unverified)"
+  else
+    fail "forged-pr: rc=$rc abnormal=$acount unverified=$ucount mismatch_page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 30 (#2670 / roborev 1810 HIGH): the bounded hold loop re-checks exit
+# conditions on EVERY pass — a stop-file created WHILE preflight is holding (a
+# non-leftover reason, so the leftover cap is not what stops it) exits cleanly
+# from inside the hold loop, never spawning. Deterministic (no timing race): load
+# stays pinned high until the stop-file lands.
+# ---------------------------------------------------------------------------
+test_stop_file_honored_mid_hold() {
+  local d counter sup_pid rc hold_notifies
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export LOAD_CONTROL_FILE="$d/load"
+  echo 99 >"$LOAD_CONTROL_FILE"
+  # shellcheck disable=SC2016  # deferred: expanded later by the supervisor's own `bash -c`.
+  export LOAD_PROBE_CMD='cat "$LOAD_CONTROL_FILE"'
+  export LOAD_MAX=1
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 &
+  sup_pid=$!
+  local waited=0
+  hold_notifies=0
+  while [[ "$waited" -lt 300 ]]; do
+    hold_notifies=$(grep -c '^error|worker-supervisor HOLD|HOLD: load' "$NOTIFY_LOG" 2>/dev/null || true)
+    [[ "$hold_notifies" -ge 1 ]] && break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  # stop while still holding (load never cleared)
+  touch "$STOP_FILE"
+  wait "$sup_pid"
+  rc=$?
+  if [[ "$rc" -eq 0 && ! -f "$counter" && "$hold_notifies" -ge 1 ]] &&
+     grep -q '"reason":"stop-file"' "$JOURNAL_FILE"; then
+    pass "stop-file mid-hold: bounded hold loop exits cleanly from inside the hold, no spawn"
+  else
+    fail "stop-mid-hold: rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) holds=$hold_notifies (see $JOURNAL_FILE)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -1247,5 +1443,9 @@ test_finalized_verified_merged_counts
 test_finalized_mismatch_open_is_abnormal
 test_finalized_unverified_not_counted_no_breaker
 test_proc_probe_discriminates_worker_claude
+test_leftover_hold_bounded_stops
+test_persistent_unverified_stops
+test_forged_pr_is_unresolved_mismatch
+test_stop_file_honored_mid_hold
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

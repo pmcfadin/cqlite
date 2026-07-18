@@ -133,12 +133,17 @@ What it guarantees:
   iteration's cargo/gate processes **or an orphaned worker Claude CLI** (`--agent worker`, #2670)
   linger, or disk is low — it waits, it never spins. A flock makes a second supervisor on the same
   machine refuse to start. (The Claude probe keys on the supervisor's own `--agent worker` spawn
-  shape, so a legitimate interactive `claude` REPL or a different-agent session is not matched.)
+  shape, so a legitimate interactive `claude` REPL or a different-agent session is not matched.) A
+  hold cannot latch it silently: every hold pass re-checks the stop-file and the wall-clock budget,
+  and a `leftover-processes` hold that never clears (a non-self-clearing orphan) stops the loop
+  loudly after `LEFTOVER_HOLD_MAX` passes, paging the surviving PIDs (#2670).
 - **It cannot be fooled by a false finalize (#2670)**: a `finalized` marker is trusted only after
   the claimed PR gh-verifies as MERGED. A worker that parked its endgame yet wrote `finalized` is
-  caught (`verified: mismatch:<state>`), paged high, judged abnormal, and never credited; a GitHub
-  outage yields a neutral `finalized-unverified` (paged, uncounted, breaker untouched) rather than a
-  false success or a false crash.
+  caught (`verified: mismatch:<state>`), paged high, judged abnormal, and never credited; a forged /
+  garbage PR reference is `mismatch:UNRESOLVED` (same escalation). A GitHub *outage* yields a neutral
+  `finalized-unverified` (paged, uncounted, breaker untouched) rather than a false success or false
+  crash — but a **persistent** outage is bounded: `UNVERIFIED_MAX` consecutive unverifiable finalizes
+  stop the loop (`verify-unavailable`), so the `MAX_ISSUES` ceiling can't drift.
 - **It cannot fail silently**: a push notification (ntfy) on every merge (info) and on any
   stop/hold/breaker-trip (alert). 2–3 consecutive abnormal exits trip the breaker → stop + alert,
   never hot-respawn. One journal line per iteration (issue, verdict, duration, PR, `verified`).
