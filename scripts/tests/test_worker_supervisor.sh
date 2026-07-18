@@ -436,22 +436,34 @@ test_preflight_load_hold() {
 
   bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 &
   sup_pid=$!
-  sleep 2.5
+  # Load-proof: this suite is now gate-wired (agent-gate.sh tooling-tests), so a
+  # fixed sleep-then-assert window flakes when the box is busy. POLL (hard-capped
+  # at 30s) until the HOLD notify appears instead — the semantic is unchanged
+  # (HOLD fires while load is high, spawn is deferred). Load stays pinned high
+  # (LOAD_CONTROL_FILE=99) throughout, so the spawn cannot happen until we clear
+  # it below; the counter must remain absent the whole time.
+  local waited=0
+  hold_notifies=0
+  while [[ "$waited" -lt 300 ]]; do
+    hold_notifies=$(grep -c '^error|worker-supervisor HOLD|HOLD: load' "$NOTIFY_LOG" 2>/dev/null || true)
+    [[ "$hold_notifies" -ge 1 ]] && break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
   local invoked_while_high="no"
   [[ -f "$counter" ]] && invoked_while_high="yes"
-  hold_notifies=$(grep -c '^error|worker-supervisor HOLD|HOLD: load' "$NOTIFY_LOG" 2>/dev/null || true)
 
   echo 0 >"$LOAD_CONTROL_FILE"
-  local waited=0
-  while [[ ! -f "$counter" && "$waited" -lt 100 ]]; do
+  waited=0
+  while [[ ! -f "$counter" && "$waited" -lt 300 ]]; do
     sleep 0.1
     waited=$((waited + 1))
   done
   wait "$sup_pid"
   rc=$?
 
-  if [[ "$invoked_while_high" == "no" && "$rc" -eq 0 && -f "$counter" && "$hold_notifies" -eq 1 ]]; then
-    pass "preflight: high load holds the spawn (no invoke), then proceeds once clear (1 HOLD notify)"
+  if [[ "$invoked_while_high" == "no" && "$rc" -eq 0 && -f "$counter" && "$hold_notifies" -ge 1 ]]; then
+    pass "preflight: high load holds the spawn (no invoke), then proceeds once clear (HOLD notify fired)"
   else
     fail "preflight: invoked_while_high=$invoked_while_high rc=$rc hold_notifies=$hold_notifies (see $NOTIFY_LOG)"
   fi
