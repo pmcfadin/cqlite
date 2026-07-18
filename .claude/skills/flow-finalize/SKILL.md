@@ -81,10 +81,11 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    # gh project item-edit <item-id> --field Status --single-select-option-id <Done>   # when have_project=1
    gh issue edit <N> --remove-label status:in-review --add-label status:done 2>/dev/null || true
    ```
-   Releasing the claim = removing the `issue-<N>-<slug>` branch from origin (the cross-machine lock); the
-   cleanup below does exactly that. After finalize, nothing for this issue may remain `In Progress`/`In
-   Review` and no `issue-<N>-*` branch may remain on origin.
-6. **Remove the worktree + branch via the guarded cleanup (releases the claim lock).** Do NOT hand-glob
+   Releasing the claim = deleting the CLAIM REF `refs/claims/issue-<N>` via `claim.sh release` (#2665 — the
+   ref is THE cross-machine lock); deleting the `issue-<N>-<slug>` branch is plumbing cleanup of the merged
+   PR head, not the lock. Both happen in step 6 below. After finalize, nothing for this issue may remain
+   `In Progress`/`In Review`, and neither the claim ref nor an `issue-<N>-*` branch may remain on origin.
+6. **Release the claim ref, then remove the worktree + branch via the guarded cleanup (plumbing).** Do NOT hand-glob
    `issue-<N>-*` or blindly `--force` — that destroyed an unrelated active claim on 2026-06-27 (the #1143
    incident: PR merged from `issue-1143-read-p99-regression`, glob also matched + deleted the separate
    active `issue-1143-scan-window-offload`). Use the guardrailed script instead — it targets ONLY the
@@ -100,6 +101,12 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    dirty worktree by hand; never force past it. Confirm the lock is gone afterward:
    `git ls-remote --heads origin "issue-<N>-*"` returns nothing.
    (Regression coverage: `scripts/flow/tests/finalize-cleanup.test.sh` encodes the #1143 scenario.)
+   Then **release the claim ref itself** — the actual cross-machine lock (#2665). The PR is merged, so the
+   open-PR guard passes; do NOT use `--force` here (that is the reaper's path in `flow-board`, not finalize):
+   ```bash
+   bash scripts/flow/claim.sh release <N>   # deletes refs/claims/issue-<N> → CLAIM: RELEASED
+   # confirm gone: `claim.sh status <N>` prints `CLAIM: STATUS none`.
+   ```
    Then clear this machine's claim heartbeat so it doesn't linger on origin until `flow-board`'s 4h reap
    window (issue #2089):
    ```bash

@@ -14,8 +14,8 @@ Doctrine and internals live elsewhere ([delivery pipeline](https://pmcfadin.gith
 ## The model in one paragraph
 
 **One Claude Code session per machine. N machines = N issues in flight.** Each session claims work
-by pushing an `issue-<N>-<slug>` branch to origin (the cross-machine lock — collisions are
-impossible by construction), works it in an isolated worktree, and merges its own PR when the
+by acquiring the slugless fixed-name ref `refs/claims/issue-<N>` on origin (`scripts/flow/claim.sh`,
+the cross-machine lock — #2665), works it in an isolated worktree, and merges its own PR when the
 quality bar is met (gate PASS + roborev clean, + spec-audit PASS for design work). You touch the
 system in exactly **two places**: approving specs (Seam 1) and making product calls (the NEEDS-YOU
 list). Everything else runs itself.
@@ -32,7 +32,18 @@ git clone https://github.com/pmcfadin/cqlite && cd cqlite
 bash scripts/bootstrap-agent-machine.sh        # or manually: sccache, cargo-nextest, bash>=4.3
 bash test-data/scripts/fetch-datasets.sh       # real SSTable binaries — REQUIRED (see below)
 gh auth status                                  # must include the 'project' scope (board access)
+bash scripts/flow/claim.sh smoke               # preflight: prove origin accepts refs/claims/* (see below)
 ```
+
+**Claim-ref preflight (#2665):** the cross-machine lock is a push to the `refs/claims/*` ref
+namespace on origin — `claim.sh smoke` creates, `ls-remote`s, and deletes a throwaway
+`refs/claims/smoke-<nonce>` ref to confirm the remote permits it (`SMOKE-OK` = good). This is
+**verified working on github.com/pmcfadin/cqlite** (2026-07-17). Run it **once when adopting a new
+remote or host** — a managed Git host that restricts custom ref namespaces would make the whole
+claim mechanism unusable, and that must be caught before the fleet relies on it. **Non-unique
+hostnames:** the claim holder identity is `hostname -s`; on a fleet of cloud images/containers/cloned
+VMs that report the *same* short hostname, export a UNIQUE `CLAIM_MACHINE` per box (else two machines
+share one identity and each treats the other's claim as its own).
 
 Sanity check: `bash scripts/agent-gate.sh --lite` should pass in ~1–5 min, and the SUMMARY's
 `accelerators:` line should read `sccache=on nextest=on lanes=parallel`. If anything says
@@ -92,7 +103,7 @@ then type:
 /worker
 ```
 
-That's it. The worker claims the top Ready item via the branch protocol, runs the full loop
+That's it. The worker claims the top Ready item via the claim protocol, runs the full loop
 (implement → lite gate each round → review → full gate ONCE → roborev → PR → **merges its own PR
 on green** → finalize → telemetry stamp), then claims the next. It never needs your eyes
 mid-issue. Leave it running.
@@ -132,7 +143,7 @@ What it guarantees:
 merged PRs, anything held/reaped, the NEEDS-YOU list. A stale heartbeat *plus* no alert received
 = the supervisor itself died — the one unambiguous alarm.
 
-Safe by construction: a worker session holds zero irreplaceable state (claim = origin branch,
+Safe by construction: a worker session holds zero irreplaceable state (claim = origin ref,
 code = worktree commits, criteria = issue body, verdict = summary file, next = board).
 
 ---
@@ -145,8 +156,13 @@ code = worktree commits, criteria = issue body, verdict = summary file, next = b
   findings, `HOLD` conflicts. Always as a list with a recommendation.
 
 **You will NEVER be asked to:** merge a green PR (workers merge their own), re-run a gate, read a
-gate log (the ~15-line SUMMARY block is all anyone sees), or arbitrate a claim conflict (the
-branch lock prevents them — 0 collisions in 174 issues).
+gate log (the ~15-line SUMMARY block is all anyone sees), or arbitrate a claim conflict (git's
+server-side ref arbitration on `refs/claims/issue-<N>` decides every race — #2665). **History note:**
+the earlier slug-named branch lock guaranteed only *same-name* atomicity — two sessions on
+*different* slugs, or on an identical `origin/main` SHA, could both "win" (the #1632 slug pair; the
+identical-SHA no-op "up-to-date" push). The "collisions impossible by construction / 0 in 174 issues"
+claim overstated that: same-slug collisions were prevented, slug/SHA races were not. The fixed-name
+claim ref (#2665) is what actually closes the class.
 
 ## Phrasebook
 
@@ -166,10 +182,10 @@ branch lock prevents them — 0 collisions in 174 issues).
 
 ## Reading the board
 
-`what needs me` on any lead shows: item · Status · assignee · priority · claim (origin branch) ·
+`what needs me` on any lead shows: item · Status · assignee · priority · claim (`refs/claims/issue-<N>`) ·
 machine + heartbeat age (issue #2089). Interpretation:
 
-- **Ready, no claim branch** → next thing a worker will grab
+- **Ready, no claim ref** → next thing a worker will grab
 - **In Progress, heartbeat fresh** → leave it alone
 - **In Progress, heartbeat stale** → deterministically reaped by flow-board (heartbeat age > 4h AND no
   open PR → Status → Ready, work preserved on the branch, traceable comment; issue #2089)
@@ -185,7 +201,7 @@ machine + heartbeat age (issue #2089). Interpretation:
 | Board unreachable (auth/scope error) | The session STOPS by design (labels are decorative, never a dispatch source). Fix `gh auth refresh -s project` and restart. |
 | Gate seems hung | It's probably queued: look for `waiting for gate slot (N in use)…`. Queued ≠ hung. |
 | Green SUMMARY but parity lines say SKIP | Datasets missing on that machine — `fetch-datasets.sh`, re-run. (#2078 makes this a hard FAIL so it can't slip through.) |
-| Two machines want the same issue | Impossible past the claim: the second branch push fails; the loser re-reads and picks the next Ready item. |
+| Two machines want the same issue | Impossible past the claim: the second claim-ref push is rejected server-side (non-fast-forward on the fixed-name ref, #2665); the loser sees `CLAIM LOST` and picks the next Ready item. |
 
 ---
 
@@ -194,7 +210,7 @@ machine + heartbeat age (issue #2089). Interpretation:
 1. **Approval cadence** (Seam 1). The system's real rate limiter — median 29.4h backlog vs
    16-minute merges. Batch approvals at session start; keep the Ready column non-empty.
 2. **Fleet size.** Each additional machine = `git clone` + bootstrap + `/worker` = one more
-   concurrent issue. Coordination cost of machine N+1: one branch push per claim.
+   concurrent issue. Coordination cost of machine N+1: one claim-ref push per claim.
 
 *Written 2026-07-06 from the agentic-workflow audit. Update this page in the same change whenever
 flow-* doctrine changes (doctrine-current rule).*

@@ -41,33 +41,30 @@ never gate stdout or review churn.
    `have_project=1`, `gh project item-edit ... Status=In Progress`; if `have_project=0`, the label above
    is the fallback AND you MUST print the loud `⚠️ board unavailable …` warning so the owner knows the
    board will not reflect this claim.
-2. **Ensure the worktree exists — and that you hold the claim.** Design-driven issues already have a
-   pushed claim branch (established + re-read in `flow-activate`); reuse it. Oracle-driven issues skip
-   `flow-activate`, so they run the claim protocol (D2) HERE: eligibility = `Ready` AND **no**
-   `issue-<N>-*` branch on origin, then create + **push** the branch as the cross-machine lock, then
-   re-read and proceed only as holder:
+2. **Ensure the worktree exists — and that you hold the claim.** Design-driven issues already hold the
+   claim ref + pushed branch (acquired in `flow-activate`); reuse them. Oracle-driven issues skip
+   `flow-activate`, so they run the claim protocol (D2) HERE: `claim.sh` is the lock (the slugless
+   fixed-name ref `refs/claims/issue-<N>`, #2665 — a slug-named branch is only PR plumbing). Acquire the
+   ref FIRST, then create the worktree/branch:
    ```bash
    wt=".claude/worktrees/issue-<N>-<slug>"
    git -C <repo-root> fetch origin -q
    if git -C <repo-root> worktree list | grep -q "$wt"; then
-     # design-driven: worktree + pushed claim already exist (from flow-activate).
+     # design-driven: claim ref + worktree already exist (from flow-activate).
      # Implementation starting IS a stage transition — refresh the heartbeat (#2089).
      scripts/flow/claim-heartbeat.sh beat <N>
    else
-     # oracle-driven: claim now. Refuse if another machine already holds the lock.
-     if git -C <repo-root> ls-remote --heads origin "issue-<N>-*" | grep -q .; then
-       echo "Already claimed on origin — do not work it; take the next item (or fetch to RESUME)."; exit 0
+     # oracle-driven: acquire the claim ref now. claim.sh does the atomic push +
+     # re-read; a UNIQUE root commit means a different-slug or identical-base
+     # competitor can no longer double-claim. Adopting a reaped claim instead?
+     # Use: bash scripts/flow/claim.sh adopt <N> --expect <old-sha>.
+     if ! bash scripts/flow/claim.sh claim <N>; then
+       echo "CLAIM LOST — another machine holds refs/claims/issue-<N>. Take the next item (or fetch to RESUME)."; exit 0
      fi
+     # CLAIM HELD → worktree + branch (naming/PR plumbing, NOT the lock).
      git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
-     # UNIQUE claim commit so a same-base race gets distinct SHAs (a bare identical-SHA
-     # push is a no-op success → both would win). Non-force push: colliding SHA is rejected.
-     git -C "$wt" commit --allow-empty -m "claim issue-<N> $(hostname -s)-${RANDOM}-$$"
-     git -C "$wt" push -u origin "issue-<N>-<slug>" || { echo "Push rejected — another holds the claim; back off."; exit 0; }
+     git -C "$wt" push -u origin "issue-<N>-<slug>"   # PR head — NOT the lock
      gh issue edit <N> --add-assignee @me
-     # re-read: proceed only if origin's branch tip is YOUR claim commit (you won the race)
-     git -C <repo-root> fetch origin -q
-     [ "$(git -C <repo-root> ls-remote --heads origin "issue-<N>-<slug>" | awk '{print $1}')" \
-       = "$(git -C "$wt" rev-parse HEAD)" ] || { echo "Lost the race — back off."; exit 0; }
      scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes the claim heartbeat (#2089)
    fi
    ```

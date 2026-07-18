@@ -1,0 +1,522 @@
+#!/usr/bin/env bash
+#
+# Regression tests for scripts/flow/claim.sh (issue #2665, epic #2664 FM2).
+#
+# Fast + hermetic: a mktemp BARE repo stands in for origin, plus TWO separate
+# clones playing claimant A and claimant B (each overriding CLAIM_MACHINE). No
+# network, no GitHub — the claim is a pure git-ref mechanism. The one subcommand
+# that needs gh (`release`, open-PR guard) gets a PATH-shimmed fake `gh`.
+#
+# Run standalone:   bash scripts/tests/test_claim_lock.sh
+#
+# No wall-clock timing assertions — every verdict is a git-ref state or exit code.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLAIM="$SCRIPT_DIR/../flow/claim.sh"
+REALGIT="$(command -v git)"   # absolute git, for the ls-remote shim in TEST 10
+
+PASS=0
+FAIL=0
+ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
+bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+
+# git in a throwaway identity so commits/pushes work in any sandbox.
+gg() { git -c user.email=t@t -c user.name=t -c init.defaultBranch=main -c commit.gpgsign=false "$@"; }
+
+T=$(mktemp -d "${TMPDIR:-/tmp}/claim-lock-test.XXXXXX")
+trap 'rm -rf "$T"' EXIT
+
+ORIGIN="$T/origin.git"
+A="$T/A"
+B="$T/B"
+gg init --bare -q "$ORIGIN"
+gg clone -q "$ORIGIN" "$A" 2>/dev/null
+gg clone -q "$ORIGIN" "$B" 2>/dev/null
+(
+  cd "$A" || exit 1
+  echo seed >seed.txt
+  gg add seed.txt
+  gg commit -qm seed
+  gg push -q -u origin main
+)
+( cd "$B" && gg fetch -q origin )
+
+# runA/runB — run claim.sh from clone A/B as a distinct machine. The function
+# EXIT CODE is claim.sh's exit code, so callers use `out=$(runA ...); rc=$?`
+# (a command-substitution subshell would otherwise swallow any global we set).
+runA() { ( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
+runB() { ( cd "$B" && CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
+
+ref_sha() { gg -C "$A" ls-remote origin "refs/claims/issue-$1" | awk '{print $1}' | head -1; }
+
+# ===========================================================================
+echo "TEST 1: A claims, B claims same issue -> exactly one HELD, other LOST(2)"
+# ===========================================================================
+outA=$(runA claim 1); rcA=$?
+outB=$(runB claim 1); rcB=$?
+held=0; lost=0
+printf '%s\n' "$outA" | grep -q 'CLAIM: HELD' && held=$((held+1))
+printf '%s\n' "$outB" | grep -q 'CLAIM: HELD' && held=$((held+1))
+printf '%s\n' "$outA" | grep -q 'CLAIM: LOST' && lost=$((lost+1))
+printf '%s\n' "$outB" | grep -q 'CLAIM: LOST' && lost=$((lost+1))
+if [ "$held" -eq 1 ] && [ "$lost" -eq 1 ] && [ "$rcA" -eq 0 ] && [ "$rcB" -eq 2 ]; then
+  ok "exactly one HELD (rcA=0) and one LOST (rcB=2)"
+else
+  bad "expected 1 HELD/1 LOST rcA=0 rcB=2; got held=$held lost=$lost rcA=$rcA rcB=$rcB
+A: $outA
+B: $outB"
+fi
+
+# ===========================================================================
+echo "TEST 2: identical-base hazard — both fresh from the same tip, one loses"
+# ===========================================================================
+# A and B both fetch the same origin/main and race a claim for a fresh issue.
+( cd "$A" && gg fetch -q origin ) ; ( cd "$B" && gg fetch -q origin )
+outA=$(runA claim 2); rcA=$?
+outB=$(runB claim 2); rcB=$?
+winners=0
+[ "$rcA" -eq 0 ] && winners=$((winners+1))
+[ "$rcB" -eq 0 ] && winners=$((winners+1))
+# Exactly one ref, and exactly one winner — a bare identical-SHA no-op push would
+# have let BOTH report success; the unique root commit prevents that.
+refcount=$(gg -C "$A" ls-remote origin "refs/claims/issue-2" | wc -l | tr -d ' ')
+if [ "$winners" -eq 1 ] && [ "$refcount" = "1" ]; then
+  ok "same-base race yields exactly one winner and one claim ref (no identical-SHA double-win)"
+else
+  bad "expected 1 winner + 1 ref; got winners=$winners refcount=$refcount rcA=$rcA rcB=$rcB
+A: $outA
+B: $outB"
+fi
+
+# ===========================================================================
+echo "TEST 3: legacy-guard — pre-existing issue-7-oldslug branch blocks claim 7"
+# ===========================================================================
+# Simulate an OLD-fleet worker that still branch-locks with issue-<N>-<slug>.
+(
+  cd "$A" || exit 1
+  gg checkout -q -b issue-7-oldslug main
+  gg commit -q --allow-empty -m "claim issue-7 someoldbox-1234-5678"
+  gg push -q origin issue-7-oldslug
+  gg checkout -q main
+  gg branch -q -D issue-7-oldslug
+)
+( cd "$B" && gg fetch -q origin )
+outB=$(runB claim 7); rcB=$?
+if [ "$rcB" -eq 2 ] && printf '%s\n' "$outB" | grep -q 'legacy-branch-lock'; then
+  ok "legacy issue-7-oldslug branch blocks a fresh claim 7 (exit 2)"
+else
+  bad "expected legacy-branch-lock refusal exit 2; got rc=$rcB
+B: $outB"
+fi
+
+# ===========================================================================
+echo "TEST 4: adopt CAS — correct --expect wins; original's re-push then loses; stale --expect refused"
+# ===========================================================================
+runA claim 4 >/dev/null; rcClaim=$?          # A holds issue 4
+oldsha=$(ref_sha 4)
+outB=$(runB adopt 4 --expect "$oldsha"); rcAdopt=$?   # B adopts with correct expect
+newsha=$(ref_sha 4)
+# A, the resurrected original, now finds the ref is no longer its own commit.
+outAver=$(runA verify 4); rcAver=$?
+# A tries to adopt back with the STALE expected sha it remembers -> refused.
+outAstale=$(runA adopt 4 --expect "$oldsha"); rcStale=$?
+if [ "$rcClaim" -eq 0 ] && [ "$rcAdopt" -eq 0 ] && [ "$newsha" != "$oldsha" ] \
+   && printf '%s\n' "$outB" | grep -q 'CLAIM: ADOPTED' \
+   && [ "$rcAver" -eq 2 ] \
+   && [ "$rcStale" -eq 2 ] && printf '%s\n' "$outAstale" | grep -q 'CLAIM: ADOPT-LOST'; then
+  ok "adopt CAS: correct-expect wins, original detects loss, stale-expect refused (exit 2)"
+else
+  bad "adopt CAS chain unexpected: rcClaim=$rcClaim rcAdopt=$rcAdopt old=$oldsha new=$newsha rcAver=$rcAver rcStale=$rcStale
+adopt: $outB
+verify: $outAver
+stale: $outAstale"
+fi
+
+# ===========================================================================
+echo "TEST 5: release refuses under an open PR (gh shim), succeeds with --force"
+# ===========================================================================
+runA claim 5 >/dev/null   # A holds issue 5
+
+# gh shim that reports an open PR whose HEAD BRANCH is this issue's (issue-5-*),
+# matching the head-branch guard (never free-text search).
+SHIMDIR="$T/shim-open"
+mkdir -p "$SHIMDIR"
+cat >"$SHIMDIR/gh" <<'SHIM'
+#!/usr/bin/env bash
+# Fake gh: `pr list ... --json headRefName --jq '.[].headRefName'` -> one head.
+printf 'issue-5-some-slug\n'
+SHIM
+chmod +x "$SHIMDIR/gh"
+
+rc=0; outRef=$( cd "$A" && PATH="$SHIMDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 5 ) || rc=$?
+rcRefuse=$rc
+still=$(ref_sha 5)
+if [ "$rcRefuse" -eq 2 ] && printf '%s\n' "$outRef" | grep -q 'RELEASE-REFUSED' && [ -n "$still" ]; then
+  ok "release refused under an open PR (exit 2, ref intact)"
+else
+  bad "expected RELEASE-REFUSED exit 2 with ref intact; got rc=$rcRefuse still=$still
+$outRef"
+fi
+
+rc=0; outForce=$( cd "$A" && PATH="$SHIMDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 5 --force ) || rc=$?
+rcForce=$rc
+gone=$(ref_sha 5)
+if [ "$rcForce" -eq 0 ] && printf '%s\n' "$outForce" | grep -q 'RELEASED' && [ -z "$gone" ]; then
+  ok "release --force deletes the ref even under an open PR (exit 0)"
+else
+  bad "expected RELEASED exit 0 with ref gone; got rc=$rcForce gone='$gone'
+$outForce"
+fi
+
+# ===========================================================================
+echo "TEST 6: re-entrancy — same machine+actor re-claiming its own ref exits 0"
+# ===========================================================================
+runA claim 6 >/dev/null; rc1=$?
+sha1=$(ref_sha 6)
+outRe=$(runA claim 6); rc2=$?
+sha2=$(ref_sha 6)
+if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] && [ "$sha1" = "$sha2" ] \
+   && printf '%s\n' "$outRe" | grep -q 're-entrant'; then
+  ok "re-entrant claim by the same holder exits 0 and leaves the ref unchanged"
+else
+  bad "expected re-entrant exit 0, ref unchanged; got rc1=$rc1 rc2=$rc2 sha1=$sha1 sha2=$sha2
+$outRe"
+fi
+
+# ===========================================================================
+echo "TEST 7: verify holder identity; status renders the claim ref"
+# ===========================================================================
+runA verify 6 >/dev/null; rcVok=$?         # A holds 6
+runB verify 6 >/dev/null; rcVbad=$?        # B does not
+outStat=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" status 6 )
+if [ "$rcVok" -eq 0 ] && [ "$rcVbad" -eq 2 ] \
+   && printf '%s\n' "$outStat" | grep -q 'CLAIM: STATUS issue=6' \
+   && printf '%s\n' "$outStat" | grep -q 'machine=machineA'; then
+  ok "verify true for holder / false for other; status renders holder + machine"
+else
+  bad "verify/status unexpected: rcVok=$rcVok rcVbad=$rcVbad
+status: $outStat"
+fi
+
+# ===========================================================================
+echo "TEST 8: release fails loud when the open-PR check is unavailable (gh errors), no --force"
+# ===========================================================================
+# A gh whose `pr list` fails stands in for gh being absent/broken — the release
+# guard must fail CLOSED (never silently treat it as "0 open PRs").
+runA claim 8 >/dev/null
+FAILDIR="$T/shim-fail"
+mkdir -p "$FAILDIR"
+cat >"$FAILDIR/gh" <<'SHIM'
+#!/usr/bin/env bash
+echo "gh: simulated failure" >&2
+exit 1
+SHIM
+chmod +x "$FAILDIR/gh"
+rc=0; outNoGh=$( cd "$A" && PATH="$FAILDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 8 ) || rc=$?
+rcNoGh=$rc
+intact=$(ref_sha 8)
+if [ "$rcNoGh" -eq 2 ] && printf '%s\n' "$outNoGh" | grep -q 'open-pr-check-unavailable' && [ -n "$intact" ]; then
+  ok "release fails loud (exit 2) when the gh PR check errors and no --force (ref intact)"
+else
+  bad "expected fail-loud refusal exit 2 with ref intact; got rc=$rcNoGh intact=$intact
+$outNoGh"
+fi
+
+# ===========================================================================
+echo "TEST 9: infra failure (origin unreachable) reports ERROR infra (exit 1), never LOST"
+# ===========================================================================
+# Rename origin so BOTH the push AND the follow-up ls-remote fail — a genuine
+# infra outage, NOT a race-loss. claim.sh must exit 1 with CLAIM: ERROR infra,
+# and must NOT claim someone else holds a ref that nobody holds.
+mv "$ORIGIN" "$ORIGIN.bak"
+rc=0; outInfra=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" claim 99 ) || rc=$?
+rcInfra=$rc
+mv "$ORIGIN.bak" "$ORIGIN"
+if [ "$rcInfra" -eq 1 ] && printf '%s\n' "$outInfra" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outInfra" | grep -q 'infra' \
+   && ! printf '%s\n' "$outInfra" | grep -q 'CLAIM: LOST'; then
+  ok "unreachable origin → CLAIM ERROR infra exit 1 (not a bogus LOST)"
+else
+  bad "expected CLAIM ERROR infra exit 1, no LOST; got rc=$rcInfra
+$outInfra"
+fi
+
+# ===========================================================================
+echo "TEST 10: LOST with an empty remote read prints holder=unknown (never our own commit)"
+# ===========================================================================
+# A git shim makes every ls-remote return EMPTY while push passes through. The
+# push creates the ref, but the post-push confirm read comes back empty, so the
+# verdict is LOST — and the holder MUST be reported as unknown, never our own sha.
+SHIMG="$T/shim-git"
+mkdir -p "$SHIMG"
+cat >"$SHIMG/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "ls-remote" ]; then exit 0; fi   # simulate: ls-remote returns nothing
+done
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMG/git"
+rc=0; outUnk=$( cd "$A" && PATH="$SHIMG:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 10 ) || rc=$?
+rcUnk=$rc
+if [ "$rcUnk" -eq 2 ] && printf '%s\n' "$outUnk" | grep -q 'CLAIM: LOST' \
+   && printf '%s\n' "$outUnk" | grep -q 'holder=unknown'; then
+  ok "empty-read LOST path prints holder=unknown (exit 2), not our own commit"
+else
+  bad "expected LOST holder=unknown exit 2; got rc=$rcUnk
+$outUnk"
+fi
+
+# ===========================================================================
+echo "TEST 11: release PR guard matches the HEAD BRANCH exactly, not free-text"
+# ===========================================================================
+# gh shim returns head-branch names. A PR on a DIFFERENT issue's branch (issue-266,
+# issue-99) must NOT block release of issue 11; a real issue-11-* branch must.
+runA claim 11 >/dev/null
+OTHERDIR="$T/shim-other-pr"
+mkdir -p "$OTHERDIR"
+cat >"$OTHERDIR/gh" <<'SHIM'
+#!/usr/bin/env bash
+# Only ever answers `pr list ... --json headRefName --jq ...` — echo unrelated heads.
+printf 'issue-266-substring-trap\nissue-99-unrelated\n'
+SHIM
+chmod +x "$OTHERDIR/gh"
+rc=0; outOther=$( cd "$A" && PATH="$OTHERDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 11 ) || rc=$?
+rcOther=$rc
+goneOther=$(ref_sha 11)
+if [ "$rcOther" -eq 0 ] && printf '%s\n' "$outOther" | grep -q 'RELEASED' && [ -z "$goneOther" ]; then
+  ok "release ignores non-matching head branches (issue-266/issue-99 do not block issue 11)"
+else
+  bad "expected RELEASED exit 0 (unrelated PRs ignored); got rc=$rcOther gone='$goneOther'
+$outOther"
+fi
+
+runA claim 11 >/dev/null   # re-claim to test the blocking case
+MATCHDIR="$T/shim-match-pr"
+mkdir -p "$MATCHDIR"
+cat >"$MATCHDIR/gh" <<'SHIM'
+#!/usr/bin/env bash
+printf 'issue-11-real-work\n'
+SHIM
+chmod +x "$MATCHDIR/gh"
+rc=0; outMatch=$( cd "$A" && PATH="$MATCHDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 11 ) || rc=$?
+rcMatch=$rc
+intactMatch=$(ref_sha 11)
+if [ "$rcMatch" -eq 2 ] && printf '%s\n' "$outMatch" | grep -q 'RELEASE-REFUSED' \
+   && printf '%s\n' "$outMatch" | grep -q 'reason=open-pr' && [ -n "$intactMatch" ]; then
+  ok "release refuses when a matching issue-11-* head branch has an open PR (exit 2)"
+else
+  bad "expected RELEASE-REFUSED open-pr exit 2 (matching head branch); got rc=$rcMatch intact=$intactMatch
+$outMatch"
+fi
+
+# ===========================================================================
+echo "TEST 12: verify under an unreachable origin reports ERROR infra (exit 1), not VERIFY-FAIL"
+# ===========================================================================
+# A holds issue 13; then origin goes away. verify must NOT conclude "you don't
+# hold it" (VERIFY-FAIL exit 2) on a network blip — it must ERROR infra (exit 1).
+runA claim 13 >/dev/null
+mv "$ORIGIN" "$ORIGIN.bak"
+rc=0; outVinfra=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" verify 13 ) || rc=$?
+rcVinfra=$rc
+mv "$ORIGIN.bak" "$ORIGIN"
+if [ "$rcVinfra" -eq 1 ] && printf '%s\n' "$outVinfra" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outVinfra" | grep -q 'infra' \
+   && ! printf '%s\n' "$outVinfra" | grep -q 'VERIFY-FAIL'; then
+  ok "verify on unreachable origin → ERROR infra exit 1 (not a bogus VERIFY-FAIL)"
+else
+  bad "expected verify ERROR infra exit 1, no VERIFY-FAIL; got rc=$rcVinfra
+$outVinfra"
+fi
+
+# ===========================================================================
+echo "TEST 13: open_pr_count passes --limit 1000 to gh (no 30-PR-page under-count)"
+# ===========================================================================
+# gh's default page is 30; an under-count would delete a claim under an open PR.
+# The shim records its args; the test asserts the release path invoked gh with
+# --limit 1000.
+runA claim 12 >/dev/null
+ARGDIR="$T/shim-argcap"
+mkdir -p "$ARGDIR"
+cat >"$ARGDIR/gh" <<SHIM
+#!/usr/bin/env bash
+echo "\$@" >> "$T/gh-argcap.txt"
+printf 'issue-12-paging-check\n'
+SHIM
+chmod +x "$ARGDIR/gh"
+: >"$T/gh-argcap.txt"
+( cd "$A" && PATH="$ARGDIR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 12 >/dev/null 2>&1 ) || true
+if grep -q -- '--limit 1000' "$T/gh-argcap.txt"; then
+  ok "release invoked gh pr list with --limit 1000"
+else
+  bad "expected gh invoked with --limit 1000; captured args:
+$(cat "$T/gh-argcap.txt")"
+fi
+
+# ===========================================================================
+echo "TEST 14: push WINS but the confirm ls-remote fails → ERROR infra (exit 1), never a false LOST"
+# ===========================================================================
+# A git shim passes `push` through (the claim really lands) but fails every
+# ls-remote — so the post-push WIN confirmation cannot read the ref. That must be
+# treated as infra (retryable, exit 1), NOT a bogus LOST on a claim we hold.
+SHIMF="$T/shim-git-lsfail"
+mkdir -p "$SHIMF"
+cat >"$SHIMF/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "ls-remote" ]; then exit 1; fi   # simulate: ls-remote unreachable
+done
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMF/git"
+rc=0; outWin=$( cd "$A" && PATH="$SHIMF:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 14 ) || rc=$?
+rcWin=$rc
+# Sanity: the push really landed — the ref exists when read with real git.
+wonRef=$(ref_sha 14)
+if [ "$rcWin" -eq 1 ] && printf '%s\n' "$outWin" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outWin" | grep -q 'infra' \
+   && ! printf '%s\n' "$outWin" | grep -q 'CLAIM: LOST' \
+   && [ -n "$wonRef" ]; then
+  ok "won push + confirm-read failure → ERROR infra exit 1 (not a false LOST; ref actually landed)"
+else
+  bad "expected ERROR infra exit 1 (no LOST) with ref landed; got rc=$rcWin wonRef=$wonRef
+$outWin"
+fi
+
+# ===========================================================================
+echo "TEST 15: adopt CAS lands but the confirm ls-remote fails → ERROR infra (exit 1), never ADOPT-LOST"
+# ===========================================================================
+# A holds issue 15; B adopts with the correct --expect under the ls-remote-fail
+# shim (reused from TEST 14). force-with-lease carries the expected sha, so the
+# CAS push lands WITHOUT an ls-remote; the post-CAS confirm read then fails →
+# infra (exit 1), never a false ADOPT-LOST on a ref B actually adopted.
+runA claim 15 >/dev/null
+oldsha15=$(ref_sha 15)
+rc=0; outAdoptInfra=$( cd "$B" && PATH="$SHIMF:$PATH" CLAIM_MACHINE=machineB bash "$CLAIM" adopt 15 --expect "$oldsha15" ) || rc=$?
+rcAdoptInfra=$rc
+newsha15=$(ref_sha 15)
+if [ "$rcAdoptInfra" -eq 1 ] && printf '%s\n' "$outAdoptInfra" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outAdoptInfra" | grep -q 'infra' \
+   && ! printf '%s\n' "$outAdoptInfra" | grep -q 'ADOPT-LOST' \
+   && [ -n "$newsha15" ] && [ "$newsha15" != "$oldsha15" ]; then
+  ok "adopt CAS lands + confirm-read failure → ERROR infra exit 1 (not ADOPT-LOST; ref actually adopted)"
+else
+  bad "expected adopt ERROR infra exit 1 (no ADOPT-LOST) with ref changed; got rc=$rcAdoptInfra old=$oldsha15 new=$newsha15
+$outAdoptInfra"
+fi
+
+# ===========================================================================
+echo "TEST 16: release without --force is holder-gated + CAS; --force overrides identity"
+# ===========================================================================
+runA claim 16 >/dev/null   # A (machineA) holds issue 16
+# (a) a non-holder (machineB) releasing without --force is refused (ref intact).
+rc=0; outNH=$( cd "$B" && CLAIM_MACHINE=machineB bash "$CLAIM" release 16 ) || rc=$?
+rcNH=$rc; ref16a=$(ref_sha 16)
+if [ "$rcNH" -eq 2 ] && printf '%s\n' "$outNH" | grep -q 'RELEASE-REFUSED' \
+   && printf '%s\n' "$outNH" | grep -q 'reason=not-holder' && [ -n "$ref16a" ]; then
+  ok "(a) non-holder release without --force refused (exit 2, ref intact)"
+else
+  bad "(a) expected not-holder refusal exit 2, ref intact; got rc=$rcNH intact=$ref16a
+$outNH"
+fi
+# (b) the holder (machineA), no open PR, releases via CAS → RELEASED (ref gone).
+NOPR="$T/shim-nopr"
+mkdir -p "$NOPR"
+cat >"$NOPR/gh" <<'SHIM'
+#!/usr/bin/env bash
+# No open PRs at all.
+printf ''
+SHIM
+chmod +x "$NOPR/gh"
+rc=0; outH=$( cd "$A" && PATH="$NOPR:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 16 ) || rc=$?
+rcH=$rc; ref16b=$(ref_sha 16)
+if [ "$rcH" -eq 0 ] && printf '%s\n' "$outH" | grep -q 'RELEASED' && [ -z "$ref16b" ]; then
+  ok "(b) holder release (no open PR) via CAS → RELEASED exit 0 (ref gone)"
+else
+  bad "(b) expected RELEASED exit 0, ref gone; got rc=$rcH gone='$ref16b'
+$outH"
+fi
+# (c) --force lets a NON-holder (machineB) delete unconditionally (reaper).
+runA claim 16 >/dev/null
+rc=0; outF=$( cd "$B" && CLAIM_MACHINE=machineB bash "$CLAIM" release 16 --force ) || rc=$?
+rcF=$rc; ref16c=$(ref_sha 16)
+if [ "$rcF" -eq 0 ] && printf '%s\n' "$outF" | grep -q 'RELEASED' && [ -z "$ref16c" ]; then
+  ok "(c) --force overrides identity — non-holder reaper delete succeeds (exit 0, ref gone)"
+else
+  bad "(c) expected --force RELEASED exit 0, ref gone; got rc=$rcF gone='$ref16c'
+$outF"
+fi
+
+# ===========================================================================
+echo "TEST 17: a malicious ref name never executes a command substitution"
+# ===========================================================================
+# A git shim emits an ls-remote line whose refname contains \$(touch ...). If any
+# code path expanded remote output unquoted, the file would appear. It must NOT.
+PWNMARK="$T/claimpwn"
+rm -f "$PWNMARK"
+FAKESHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+PWNDIR="$T/shim-pwn"
+mkdir -p "$PWNDIR"
+cat >"$PWNDIR/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "ls-remote" ]; then
+    printf '%s\trefs/claims/issue-99\$(touch $PWNMARK)-evil\n' "$FAKESHA"
+    exit 0
+  fi
+done
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$PWNDIR/git"
+( cd "$A" && PATH="$PWNDIR:$PATH" bash "$CLAIM" status >/dev/null 2>&1 ) || true
+if [ ! -e "$PWNMARK" ]; then
+  ok "status over a \$(...)-laden refname did not execute the payload"
+else
+  bad "SECURITY: refname command substitution EXECUTED — $PWNMARK was created"
+  rm -f "$PWNMARK"
+fi
+
+# ===========================================================================
+echo "TEST 18: CLAIM_MACHINE overrides holder identity (not the clone) for release"
+# ===========================================================================
+# A (machineA) holds issue 18. Holder identity is CLAIM_MACHINE, not the checkout:
+# clone B releasing as machineB is a non-holder (refused), but clone B releasing
+# as machineA IS the holder identity → it may release.
+runA claim 18 >/dev/null
+NOPR2="$T/shim-nopr"   # reuse the empty-PR gh shim from TEST 16 (no open PRs)
+# (a) B with its OWN identity (machineB) is refused as non-holder.
+rc=0; outMisId=$( cd "$B" && PATH="$NOPR2:$PATH" CLAIM_MACHINE=machineB bash "$CLAIM" release 18 ) || rc=$?
+rcMisId=$rc; ref18a=$(ref_sha 18)
+# (b) B impersonating A's CLAIM_MACHINE (machineA) matches the holder → releases.
+rc=0; outSameId=$( cd "$B" && PATH="$NOPR2:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 18 ) || rc=$?
+rcSameId=$rc; ref18b=$(ref_sha 18)
+if [ "$rcMisId" -eq 2 ] && printf '%s\n' "$outMisId" | grep -q 'reason=not-holder' && [ -n "$ref18a" ] \
+   && [ "$rcSameId" -eq 0 ] && printf '%s\n' "$outSameId" | grep -q 'RELEASED' && [ -z "$ref18b" ]; then
+  ok "CLAIM_MACHINE drives holder identity: machineB refused, CLAIM_MACHINE=machineA released"
+else
+  bad "expected machineB refused (exit2, intact) then machineA released (exit0, gone); got rcMisId=$rcMisId intact=$ref18a rcSameId=$rcSameId gone='$ref18b'
+mis: $outMisId
+same: $outSameId"
+fi
+
+# ===========================================================================
+echo "TEST 19: status skips a stray non-issue ref under refs/claims/* (smoke leftover)"
+# ===========================================================================
+# A leftover refs/claims/smoke-<x> (e.g. an interrupted preflight) must NOT be
+# rendered as an issue row; a real issue claim alongside it still is.
+runA claim 19 >/dev/null
+( cd "$A" && gg push -q origin HEAD:refs/claims/smoke-stray )
+statusOut=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" status )
+if printf '%s\n' "$statusOut" | grep -q 'CLAIM: STATUS issue=19' \
+   && ! printf '%s\n' "$statusOut" | grep -q 'smoke-stray'; then
+  ok "status renders issue-19 and skips the stray refs/claims/smoke-stray ref"
+else
+  bad "expected issue=19 rendered and smoke-stray skipped; got:
+$statusOut"
+fi
+
+# ===========================================================================
+echo
+echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
+if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

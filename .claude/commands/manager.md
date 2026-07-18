@@ -34,7 +34,7 @@ sequence workers with **signed issue comments**. That's it.
 1. `gh auth switch --user pmcfadin && gh auth setup-git` (EMU account flips silently — guard each cycle).
 2. **Reconcile** (use `flow-board`): board Status vs origin `issue-*` locks vs open PRs vs worktrees.
    Every In-Progress/In-Review item = exactly one lock. >1 lock → flag a 1:1:1:1 violation; do not touch.
-3. **Reap** stale claims (In Progress, lock branch cold past the window) → surface, never steal.
+3. **Reap** stale claims (In Progress, claim heartbeat cold past the window) → surface, never steal.
 4. **Feed Ready**: promote the next priorities in dependency order; enforce a **WIP cap** (only N in
    flight at once). Drop a signed `GO` / `HOLD` / `ORDER` comment on each as needed.
 5. **Hygiene**: null-status → Backlog; epics out of the claim columns.

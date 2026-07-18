@@ -34,7 +34,7 @@ ORDER: k                # queue rank when several are Ready at once
    **Select by board `Status` ONLY — never by the `status:ready` label** (Path A, #1886: the board is the
    sole dispatch authority; labels are decorative). **Empty Ready → stop** (no work is ready; near a release
    Ready is meant to drain to zero — do NOT fall back to labels). Board unreachable → STOP and fix auth, do
-   not dispatch from labels. Claim it (branch push = the cross-machine lock); first push wins, losers take the next item.
+   not dispatch from labels. Claim it (`bash scripts/flow/claim.sh claim <N>` = the cross-machine lock, the slugless `refs/claims/issue-<N>` ref, #2665); `CLAIM HELD` wins, `CLAIM LOST` takes the next item.
 2. **Read orders**: read the issue's manager comments. Note any `HOLD` / `ORDER` / instructions.
 3. **Route — spec-first for new work**: design-driven / any new feature → run **`flow-activate` FIRST**
    (produces the OpenSpec proposal/design/specs/tasks, STOPS at Seam 1 for owner spec approval); no code
@@ -158,13 +158,16 @@ round-trip, lint-rejects-malformed, fixture-ledger → expected top failure, and
   The cap prevents SIGKILL under load but NOT timing flakes: two concurrent full gates flaked
   `mixed_p99_bounded_by_k_times_baseline` (`cqlite-core/tests/tail_latency_harness.rs`) under CPU
   oversubscription (#1625 core-tests: 693s solo → 87s + FAIL alongside a peer gate).
-- **Any-slug pre-claim check.** Two same-machine sessions once claimed #1632 with *different slugs*
+- **Slugless fixed-name claim ref (#2665).** Two sessions once claimed #1632 with *different slugs*
   (`issue-1632-parser-hardening` vs `issue-1632-parser-hardening-bundle`), so the exact-slug push never
-  collided and the lock didn't fire. Before claiming, check for **ANY** `issue-<N>-*` branch:
-  `git ls-remote --heads origin "issue-<N>-*"` → skip if present.
+  collided and the lock didn't fire; two sessions on an identical `origin/main` SHA likewise both saw an
+  "up-to-date" success. The lock is now the slugless ref `refs/claims/issue-<N>` acquired via
+  `scripts/flow/claim.sh` — a unique root-commit push git arbitrates server-side, slug- and base-independent.
+  Pre-claim, check both the ref (`claim.sh status <N>`) AND the legacy `issue-<N>-*` branch glob
+  (`git ls-remote --heads origin "issue-<N>-*"`) → skip if either is present.
 - **Cross-machine coordination is unchanged:** one-worker-*per-machine* composes with multiple machines —
-  each machine runs one worker; the origin `issue-<N>-<slug>` branch lock coordinates across machines. The
-  branch lock is no longer load-bearing *within* a machine.
+  each machine runs one worker; the origin `refs/claims/issue-<N>` ref coordinates across machines (the
+  `issue-<N>-<slug>` branch is now PR plumbing). The claim lock is not load-bearing *within* a machine.
 
 ## Merge sequencing (why HOLD exists)
 
@@ -183,7 +186,7 @@ worktree (the manager never rebases someone else's branch).
 
 ## Hard rules
 - The gate is the only run that counts; paste its summary block.
-- Worktrees only; the branch push is the lock; stage explicit paths.
+- Worktrees only; the claim ref (`claim.sh`, `refs/claims/issue-<N>`) is the lock — the branch push is PR plumbing; stage explicit paths.
 - EMU guard every board op: `gh auth switch --user pmcfadin && gh auth setup-git`.
 - roborev follows **this machine's configured agent** (`.roborev.toml`; commonly `codex` — run with no
   flags). Pass explicit `--agent`/`--model` ONLY as a per-machine troubleshooting override when the local
