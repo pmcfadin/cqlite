@@ -544,9 +544,9 @@ common_env() {
   # Reset every knob a test may override but common_env does not explicitly re-set, so
   # one test's override (e.g. MAX_HOURS_SECS=3, PENDING_AUTOMERGE_*) cannot leak into the
   # next test in this shared shell and cause a spurious pass/fail.
-  unset MAX_HOURS_SECS PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS BUILD_HOLD_MAX \
-        LEFTOVER_HOLD_MAX UNVERIFIED_MAX MISMATCH_RETRIES MISMATCH_GRACE_CAP_SECS \
-        PROC_LIST_WORKER_CMD PROC_LIST_BUILD_CMD 2>/dev/null || true
+  unset MAX_HOURS_SECS DISK_FLOOR_GB PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS \
+        BUILD_HOLD_MAX LEFTOVER_HOLD_MAX UNVERIFIED_MAX MISMATCH_RETRIES \
+        MISMATCH_GRACE_CAP_SECS PROC_LIST_WORKER_CMD PROC_LIST_BUILD_CMD 2>/dev/null || true
 }
 
 jline_count() { grep -c "$2" "$1" 2>/dev/null || true; }
@@ -2129,6 +2129,58 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Test 53 (#2670 / roborev 1843): the deferred automerge-stuck stop. Two tracked PRs in
+# the same credit pass — one that MERGES (credited) and one that is STUCK — must leave a
+# clean exit report: the stuck PR gets its OWN `finalized-pending-automerge` + HIGH page
+# and is NOT re-listed as a generic `pending-at-exit`; the merged PR (resolved earlier in
+# the same pass) is likewise never announced as still-pending. gh stub is per-PR: PR 21
+# arms once then MERGES; PR 22 stays OPEN+armed forever.
+# ---------------------------------------------------------------------------
+test_deferred_stuck_stop_clean_exit() {
+  local d jf rc pae_stuck pae_merged fpa_stuck stuckpage
+  d="$(new_case_dir)"
+  common_env "$d"
+  # Worker finalizes PR 21 then PR 22 (two distinct armed PRs), then no-work.
+  cat >"$d/bin/worker.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+n=0; [[ -f "$d/counter" ]] && n=\$(cat "$d/counter"); n=\$((n+1)); echo "\$n">"$d/counter"
+if [[ \$n -eq 1 ]]; then pr=21; elif [[ \$n -eq 2 ]]; then pr=22; else
+  printf '{"outcome":"no-work"}' >"\$MARKER_FILE"; exit 0
+fi
+cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":\$pr,"pr":"https://github.com/pmcfadin/cqlite/pull/\$pr","duration_s":1}
+JSON
+EOF
+  chmod +x "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export PENDING_AUTOMERGE_MAX=2
+  export PENDING_AUTOMERGE_MIN_SECS=0
+  export BACKOFF_NOWORK_SECS=1
+  export MAX_HOURS_SECS=20
+  mkdir -p "$d/ghviews"
+  # PR 21: OPEN+armed on first view, MERGED after. PR 22: always OPEN+armed (stuck).
+  # shellcheck disable=SC2016  # $1 expands inside the supervisor's own `bash -c`.
+  export GH_VERIFY_CMD='p="${1##*/}"; f="'"$d"'/ghviews/$p"; c=0; [ -f "$f" ] && c=$(cat "$f"); c=$((c+1)); echo "$c">"$f"; if [ "$p" = "21" ] && [ "$c" -ge 2 ]; then printf %s "{\"state\":\"MERGED\",\"mergedAt\":\"x\",\"autoMergeRequest\":null}"; else printf %s "{\"state\":\"OPEN\",\"mergedAt\":null,\"autoMergeRequest\":{\"enabledAt\":\"x\"}}"; fi'
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  pae_stuck=$(grep -c '"outcome":"pending-at-exit".*/pull/22' "$jf" 2>/dev/null || true)
+  pae_merged=$(grep -c '"outcome":"pending-at-exit".*/pull/21' "$jf" 2>/dev/null || true)
+  fpa_stuck=$(grep -c '"outcome":"finalized-pending-automerge".*/pull/22' "$jf" 2>/dev/null || true)
+  stuckpage=$(grep -c '^error|worker-supervisor: auto-merge stuck' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -ne 0 && "$pae_stuck" -eq 0 && "$pae_merged" -eq 0 && "$fpa_stuck" -ge 1 && "$stuckpage" -ge 1 ]] &&
+     grep -q '"reason":"automerge-stuck"' "$jf"; then
+    pass "deferred stuck stop: stuck PR paged once (not re-listed at exit), merged PR not announced pending (clean exit report)"
+  else
+    fail "deferred-stuck: rc=$rc pae22=$pae_stuck pae21=$pae_merged fpa22=$fpa_stuck stuckpage=$stuckpage (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Test 51 (#2670 / roborev 1841): the wall-clock floor is genuinely CROSSED — with
 # PENDING_AUTOMERGE_MAX=2 and PENDING_AUTOMERGE_MIN_SECS=2, the same PR observed pending
 # holds through the first observations (count reached quickly) and only trips
@@ -2168,10 +2220,10 @@ EOF
   local iters pcount
   iters=$(cat "$counter" 2>/dev/null || echo 0)
   pcount=$(jline_count "$jf" '"outcome":"finalized-pending-automerge"')
-  # Trip only after BOTH: the count term (the SAME PR observed >= PENDING_AUTOMERGE_MAX
-  # times — proven by iters and repeated pending lines) AND the time term (elapsed >= 2s).
-  # A `||`-instead-of-`&&` bug would trip on the 1st observation (~0.6s, elapsed<2 → caught);
-  # a count-ignored bug would trip with iters<2 (→ caught by the iters/pcount asserts).
+  # Trip only after the TIME term (elapsed >= 2s): a `||`-instead-of-`&&` bug (OR a
+  # time-term-ignored bug) would trip on the 1st observation at ~0.35s → elapsed<2, caught
+  # here. The COUNT term is pinned separately by test 47 (MIN_SECS=0, so only the count can
+  # gate the trip). iters/pcount>=2 just confirm the run genuinely accumulated observations.
   if [[ "$rc" -ne 0 ]] &&
      grep -q '"reason":"automerge-stuck"' "$jf" &&
      [[ -n "$elapsed" && "$elapsed" -ge 2 && "$iters" -ge 2 && "$pcount" -ge 2 ]]; then
@@ -2371,6 +2423,7 @@ test_healthy_multi_pr_no_false_stop
 test_pending_time_floor_blocks_fast_stuck
 test_pending_pr_closed_pages_high
 test_unverified_streak_survives_intervening_abnormal
+test_deferred_stuck_stop_clean_exit
 test_pending_time_floor_crossed_trips
 test_numeric_knob_validation
 test_build_hold_uses_loose_bound
