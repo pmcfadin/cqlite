@@ -116,7 +116,7 @@ LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
 # Supervisor-authored git-ref claim (issue #2655 / #2499 design).
 #
 # The supervisor — a long-lived, machine-scoped process — stamps a
-# refs/claims/<machine> liveness ref (issue+PID+ts) at every worker spawn and
+# refs/machine-claims/<machine> liveness ref (issue+PID+ts) at every worker spawn and
 # clears it when it exits cleanly, so claim liveness is MECHANISM-driven and no
 # longer depends on the worker LLM remembering to `beat`. The PID recorded is
 # the SUPERVISOR's own ($$): it is the stable per-machine anchor that outlives
@@ -198,7 +198,7 @@ notify() {
 is_gt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)>(b+0)) exit 0; exit 1 }'; }
 is_lt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)<(b+0)) exit 0; exit 1 }'; }
 
-# stamp_claim <issue>: refresh refs/claims/<machine> with issue+PID+ts (issue
+# stamp_claim <issue>: refresh refs/machine-claims/<machine> with issue+PID+ts (issue
 # #2655). PID stamped is the SUPERVISOR's ($$) — the stable per-machine anchor,
 # not a transient worker subprocess. A non-numeric/empty issue is stamped as "0"
 # (unknown): the reaper then governs purely on age + open-PR (a "0" issue can
@@ -216,7 +216,7 @@ stamp_claim() {
   fi
 }
 
-# clear_claim: delete refs/claims/<machine> on a CLEAN supervisor exit (issue
+# clear_claim: delete refs/machine-claims/<machine> on a CLEAN supervisor exit (issue
 # #2655). `reap` refuses to delete a ref whose issue still has an open PR, so a
 # supervisor that stops with an unfinished endgame leaves the claim in place for
 # adoption rather than orphaning it. Non-fatal on failure.

@@ -128,13 +128,16 @@ issue_has_open_pr() {
   fi
   command -v gh >/dev/null 2>&1 || return 0 # no gh: cannot disprove -> fail-safe keep
   # Detect an open PR via the project's 1:1:1:1 head-branch convention
-  # (`issue-<N>-<slug>`) — `gh pr list --head` matches an exact branch, so we
-  # list all open PRs and keep those whose head starts with `issue-<N>-`. Any
+  # (`issue-<N>-<slug>`) — we list open PRs and keep those whose head starts with
+  # `issue-<N>-`. `--limit 1000` is load-bearing: `gh pr list` defaults to a
+  # 30-PR window, so on a repo with >30 open PRs a live claim's PR could fall
+  # outside the default result set and be read as "no open PR" -> reaped while its
+  # endgame is in flight (the exact fail-safe this reaper is built on). Any
   # gh/network FAILURE is fail-SAFE: "could not prove there is NO open PR" ->
   # return 0 (has open PR), so a transient outage never reaps a possibly-live
   # claim.
   local heads
-  if ! heads="$(gh pr list --state open --json headRefName --jq '.[].headRefName' 2>/dev/null)"; then
+  if ! heads="$(gh pr list --state open --limit 1000 --json headRefName --jq '.[].headRefName' 2>/dev/null)"; then
     return 0 # gh failed -> fail-safe: assume an open PR exists, do not reap
   fi
   printf '%s\n' "$heads" | grep -qE "^issue-${issue}(-|$)"
