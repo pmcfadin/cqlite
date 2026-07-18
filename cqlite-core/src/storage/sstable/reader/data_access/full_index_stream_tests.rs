@@ -622,9 +622,17 @@ async fn write_multi_window_fixture(
 /// intact through the windowed read, not just that some row with that key
 /// arrived.
 ///
-/// `#[serial(work_counters)]`: `INDEX_PROBES`/`SEEK_CALLS` are process-global.
+/// Contamination-proof (issue #2714, mirroring #2470 and the sibling
+/// `windowed_stream_read_pattern_is_sequential`): `INDEX_PROBES`/`SEEK_CALLS` are
+/// process-global atoms, so a `reset()` → scan → global-getter delta races any
+/// concurrent read-driving test in the `--lib` binary. `#[serial(work_counters)]`
+/// only serialises OTHER tagged tests, so an untagged crate-wide reader between the
+/// reset and the read still inflates `index_probes()` above `0`. Measure through a
+/// thread-local [`ReadWorkScope`]: this uncompressed non-stitching walk records both
+/// its per-partition (non-)probe and its window-refill seeks INLINE on this
+/// current-thread `#[tokio::test]`, so the scope captures exactly this scan's
+/// increments — no global `reset()`, no serial tag, no cross-thread contamination.
 #[tokio::test]
-#[serial(work_counters)]
 async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
     use crate::storage::sstable::read_work_counters as rwc;
 
@@ -644,7 +652,9 @@ async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
     let reader = open_reader(&data_path).await;
     let cancel = ScanCancel::default();
 
-    rwc::reset();
+    // Thread-local scope (issue #2714/#2470): counts only THIS scan's inline
+    // increments, immune to any concurrent read-driving test on another thread.
+    let work = rwc::read_work_scope::ReadWorkScope::new();
     let mut streamed: Vec<(crate::RowKey, crate::types::ScanRow)> = Vec::new();
     let outcome = reader
         .stream_all_partitions_via_full_index(&cancel, &mut |row| {
@@ -653,6 +663,10 @@ async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
         })
         .await
         .unwrap();
+    // Capture the scan's scoped counters BEFORE the parity materialise below (which
+    // would add its own reads to the still-open scope).
+    let scan_index_probes = work.index_probes();
+    let scan_seeks = work.seeks();
     assert!(
         matches!(outcome, FullIndexStreamOutcome::Streamed),
         "a full-Index.db fixture must stream via the index walk, not fall back"
@@ -668,11 +682,10 @@ async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
     // actually crosses a window boundary — unreachable by any prior (tiny)
     // fixture. Zero index probes still holds regardless of fixture size.
     assert_eq!(
-        rwc::index_probes(),
-        0,
+        scan_index_probes, 0,
         "the windowed walk must perform ZERO Index.db probes regardless of fixture size"
     );
-    let seeks = rwc::seek_calls();
+    let seeks = scan_seeks;
     assert!(
         seeks >= 2,
         "a >4 MiB Data.db (small partitions ≈4.9 MiB + a wide partition ≈5 MB) \

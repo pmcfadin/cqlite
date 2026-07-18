@@ -748,11 +748,29 @@ async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
 /// a constant, not by `N`. This is the red-then-green pin: it FAILS (records `N`
 /// probes) against the pre-#2430 materialising walk and PASSES (`0`) after.
 ///
-/// `#[serial_test::serial]`: `index_probes` is a process-global counter read after
-/// a `reset()`, so this test must not run concurrently with another scan-driving
-/// test in the same binary.
+/// # Contamination-proof measurement (issue #2714, mirroring #2470)
+///
+/// `index_probes` is a process-global `AtomicU64` bumped by EVERY BIG `Index.db`
+/// probe across the whole `--lib` binary. The former `reset()` → scan →
+/// global-getter delta raced any concurrent read-driving test on another thread in
+/// the ~3250-test `cargo test --lib` write-tests component (which, unlike nextest,
+/// does NOT isolate tests per-process) — a foreign point read landing between the
+/// `reset()` and the read inflated the observed count above `0`, failing the
+/// assertion 5-in-6 in-gate. The bare `#[serial_test::serial]` tag did NOT help: it
+/// serialises only OTHER tagged tests, never the untagged crate-wide readers. This
+/// scan resolves each offset DIRECTLY from the up-front `get_partition_entries()`
+/// load (`full_index_scan.rs`) and never calls `lookup_partition_with_index`, so it
+/// records ZERO probes by construction — the flake was pure cross-thread counter
+/// pollution, NOT the #2059 B4-cache warm-state class (the scan touches no key
+/// cache). Fix: measure through a thread-local
+/// [`ReadWorkScope`](crate::storage::sstable::read_work_counters::read_work_scope::ReadWorkScope)
+/// (the same structural fix #2470 applied to
+/// `windowed_stream_read_pattern_is_sequential`). The default (current-thread)
+/// `#[tokio::test]` drives every `.await` — INCLUDING the pre-#2430 per-partition
+/// probe, which runs inline in `lookup_partition_with_index`, not on a spawn_blocking
+/// thread — on this test's own thread, so the scope captures exactly this scan's
+/// probes and no concurrent test can inflate them. No global `reset()`, no serial tag.
 #[tokio::test]
-#[serial_test::serial]
 async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
     let Some(data_path) = real_index_backed_fixture() else {
         eprintln!(
@@ -763,13 +781,14 @@ async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
     };
     let reader = open_reader(&data_path).await;
 
-    // Measure the index-probe work of ONE full materialising index-backed scan.
+    // Measure the index-probe work of ONE full materialising index-backed scan
+    // through a thread-local scope (immune to concurrent tests, issue #2714/#2470).
     // (The scan internally `ensure_materialized`s the lazily-opened index, so the
     // partition count below is read AFTER, once entries are resident.)
-    crate::storage::sstable::read_work_counters::reset();
+    let work = crate::storage::sstable::read_work_counters::read_work_scope::ReadWorkScope::new();
     let cancel = ScanCancel::new();
     let result = reader.iterate_all_partitions_via_full_index(&cancel).await;
-    let probes = crate::storage::sstable::read_work_counters::index_probes();
+    let probes = work.index_probes();
 
     // The scan must resolve fully through the index branch (not fall through to
     // sequential_scan), else the probe count would be vacuously 0 for the wrong
