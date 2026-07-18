@@ -304,6 +304,52 @@ EOF
   chmod +x "$path"
 }
 
+# issue #2666 / roborev 1773 (case a): prints a stray signature line, then keeps
+# WRITING many lines (log grows + signature scrolls out of the tail) and exits 1
+# WITHOUT a marker. No wedge evidence → must stay ABNORMAL (counts to breaker),
+# never misclassified as stuck.
+write_crash_stray_signature_stub() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "AskUserQuestion: stray tool-name printed in normal trace"
+for i in $(seq 1 60); do
+  echo "working on step $i ..."
+  sleep 0.1
+done
+exit 1
+EOF
+  chmod +x "$path"
+}
+
+# issue #2666 / roborev 1773 (case c): a BUSY worker that prints the signature on
+# EVERY line (so it is always in the tail) but keeps WRITING (log grows every
+# scan) — the no-growth evidence fails, so it must NOT be classified stuck. Call 1
+# runs until killed at the deadline (abnormal); call 2 finalizes to terminate.
+write_busy_signature_then_finalize_stub() {
+  local path="$1" call_ctr="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+calls=0
+[[ -f "$call_ctr" ]] && calls=\$(cat "$call_ctr")
+calls=\$((calls + 1))
+echo "\$calls" >"$call_ctr"
+if [[ \$calls -eq 1 ]]; then
+  while true; do
+    echo "AskUserQuestion tick — still working, writing more output"
+    sleep 0.3
+  done
+else
+  cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":95,"pr":"https://example.invalid/pull/95","duration_s":1}
+JSON
+fi
+EOF
+  chmod +x "$path"
+}
+
 # ---------------------------------------------------------------------------
 # Common env baseline: every test starts here, then overrides what it needs.
 # Clear preflight (no holds), generous budgets, fast polling/backoff.
@@ -880,6 +926,124 @@ test_different_issue_parks_do_not_head_block() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 19 (#2666 / roborev 1773, case a): a crash whose ONLY signature is a stray
+# match in scrollback (log grew + match scrolled out of the tail) must stay
+# ABNORMAL and count toward the breaker — NOT be misclassified as stuck.
+# ---------------------------------------------------------------------------
+test_stray_signature_scrollback_is_abnormal() {
+  local d jf rc acount scount
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_crash_stray_signature_stub "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=1
+  export STUCK_POLL_SECS=1
+  export MAX_ITER_SECS=20
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  scount=$(jline_count "$jf" '"outcome":"stuck-on-question"')
+  if [[ "$rc" -ne 0 && "$acount" -eq 1 && "$scount" -eq 0 ]] && grep -q '"reason":"breaker"' "$jf"; then
+    pass "stray scrollback signature: crash stays ABNORMAL (breaker), not stuck"
+  else
+    fail "stray-scrollback: rc=$rc abnormal=$acount stuck=$scount (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 20 (#2666 / roborev 1773, case b): a GENUINE wedge — alive + signature in
+# the tail + log frozen across two consecutive scans → stuck-on-question, high
+# page, never toward the breaker. Call 2 finalizes so the run terminates.
+# ---------------------------------------------------------------------------
+test_genuine_wedge_frozen_is_stuck() {
+  local d call_ctr jf rc scount fcount page
+  d="$(new_case_dir)"
+  call_ctr="$d/calls"
+  common_env "$d"
+  write_stuck_then_finalize_stub "$d/bin/worker.sh" "$call_ctr"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=1
+  export STUCK_POLL_SECS=1
+  export MAX_ITER_SECS=10
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  scount=$(jline_count "$jf" '"outcome":"stuck-on-question"')
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  page=$(grep -c '^error|worker-supervisor: stuck-on-question' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -eq 0 && "$scount" -eq 1 && "$fcount" -eq 1 && "$page" -ge 1 ]] &&
+     ! grep -q '"outcome":"abnormal"' "$jf" && ! grep -q '"reason":"breaker"' "$jf"; then
+    pass "genuine wedge (frozen log + tail signature x2 polls): stuck, high page, no breaker"
+  else
+    fail "genuine-wedge: rc=$rc stuck=$scount finalized=$fcount page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 21 (#2666 / roborev 1773, case c): a BUSY worker printing the signature on
+# every line while STILL WRITING (log grows between scans) → no-growth evidence
+# fails → NOT stuck (marker-less kill stays abnormal). Call 2 finalizes.
+# ---------------------------------------------------------------------------
+test_busy_writing_signature_not_stuck() {
+  local d call_ctr jf rc scount acount fcount
+  d="$(new_case_dir)"
+  call_ctr="$d/calls"
+  common_env "$d"
+  write_busy_signature_then_finalize_stub "$d/bin/worker.sh" "$call_ctr"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=2
+  export STUCK_POLL_SECS=1
+  export MAX_ITER_SECS=5
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  scount=$(jline_count "$jf" '"outcome":"stuck-on-question"')
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  if [[ "$rc" -eq 0 && "$scount" -eq 0 && "$acount" -eq 1 && "$fcount" -eq 1 ]]; then
+    pass "busy worker printing signature while writing: NOT stuck (growth defeats it)"
+  else
+    fail "busy-writing: rc=$rc stuck=$scount abnormal=$acount finalized=$fcount (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 22 (#2666 / roborev 1773, case d): exit-latency — a fast-finalizing worker
+# is judged on the ~1s exit cadence, NOT held until the 30s wedge-scan cadence.
+# Loose, load-proof cap (well under STUCK_POLL_SECS=30).
+# ---------------------------------------------------------------------------
+test_fast_exit_latency() {
+  local d counter t0 t1 elapsed rc fcount
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export STUCK_POLL_SECS=30
+  export MAX_ITER_SECS=7200
+
+  t0=$(date +%s)
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  t1=$(date +%s)
+  elapsed=$((t1 - t0))
+  fcount=$(jline_count "$JOURNAL_FILE" '"outcome":"finalized"')
+  if [[ "$rc" -eq 0 && "$fcount" -eq 1 && "$elapsed" -lt 15 ]]; then
+    pass "exit-latency: fast finalize judged in ${elapsed}s (<15s, not the 30s scan cadence)"
+  else
+    fail "exit-latency: rc=$rc finalized=$fcount elapsed=${elapsed}s (see $JOURNAL_FILE)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -916,5 +1080,9 @@ test_prompt_signature_grep
 test_stuck_breaks_abnormal_chain
 test_repeated_park_same_issue_stops
 test_different_issue_parks_do_not_head_block
+test_stray_signature_scrollback_is_abnormal
+test_genuine_wedge_frozen_is_stuck
+test_busy_writing_signature_not_stuck
+test_fast_exit_latency
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

@@ -64,12 +64,21 @@
 # stuck-on-question (mid-iteration, no marker) — a worker WEDGED on an
 #               interactive prompt (AskUserQuestion / permission prompt / menu)
 #               in an unattended session never writes a marker; it just burns
-#               MAX_ITER_SECS and would look "abnormal". A lightweight watchdog
-#               tails the live iter-N.log every STUCK_POLL_SECS for prompt
-#               signatures; on a hit it pages the owner immediately and records
-#               verdict `stuck-on-question` when the worker later exits without
-#               a clean marker. This verdict is NOT abnormal and never counts
-#               toward BREAKER_N.
+#               MAX_ITER_SECS and would look "abnormal". A watchdog classifies
+#               this on POSITIVE WEDGE EVIDENCE, not a bare substring match (the
+#               Claude CLI routinely prints tool names like `AskUserQuestion` in
+#               normal trace, so a whole-log substring match would misclassify
+#               ordinary crashes as stuck and permanently defeat the breaker —
+#               roborev 1773). Every STUCK_POLL_SECS the watchdog scans, and
+#               declares `stuck-on-question` ONLY when ALL hold across TWO
+#               consecutive scans: (a) the process is alive, (b) a prompt
+#               signature is in the LAST ~20 log lines (tail, not whole file),
+#               and (c) the log has not grown between the scans (a wedged prompt
+#               emits nothing). It then pages the owner and records the verdict
+#               when the worker later exits without a clean marker. NOT abnormal,
+#               never toward BREAKER_N. A marker-less exit whose only signature is
+#               a stray scrollback match (fails tail-locality or no-growth) stays
+#               ABNORMAL and counts toward the breaker.
 #
 # Any other outcome value, a marker missing required fields, a nonzero worker
 # exit code, OR no marker file present when the worker process exits => the
@@ -162,24 +171,40 @@ notify() {
 is_gt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)>(b+0)) exit 0; exit 1 }'; }
 is_lt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)<(b+0)) exit 0; exit 1 }'; }
 
-# detect_prompt_signature <logfile>: true (exit 0) when the tail of the worker's
-# live log shows an interactive-prompt signature — a wedged AskUserQuestion, a
-# permission prompt, a `❯` menu block, or a "waiting for input" line (issue
-# #2666). Best-effort sensor, tuned to the unattended-session invariant that the
-# worker NEVER legitimately prompts (it parks instead — see the marker contract).
+# detect_prompt_signature <logfile>: true (exit 0) when the LAST ~20 lines of the
+# worker's live log show an interactive-prompt signature — a wedged
+# AskUserQuestion, a permission prompt, a `❯` menu block, or a "waiting for input"
+# line (issue #2666). Deliberately a TAIL scan, not a whole-log scan: the Claude
+# CLI routinely prints tool names like `AskUserQuestion` in its normal trace, so
+# a bare whole-file substring match would misclassify ordinary crashes as stuck
+# and permanently defeat the breaker (roborev 1773). A stray match in old
+# scrollback is not evidence of a live wedge; only a signature still resident in
+# the last frames (paired with no-growth — see the supervise loop) is.
+STUCK_TAIL_LINES="${STUCK_TAIL_LINES:-20}"
 detect_prompt_signature() {
   local logfile="$1"
   [[ -f "$logfile" ]] || return 1
-  tail -n 80 "$logfile" 2>/dev/null | grep -qE "$PROMPT_SIGNATURE_RE"
+  tail -n "$STUCK_TAIL_LINES" "$logfile" 2>/dev/null | grep -qE "$PROMPT_SIGNATURE_RE"
 }
 
-# captured_question <logfile>: the matching prompt line(s), collapsed to a single
-# ≤300-char line for the ntfy body. Empty when nothing matched.
+# captured_question <logfile>: the matching prompt line(s) from the same tail
+# window, collapsed to a single ≤300-char line for the ntfy body. Empty when
+# nothing matched.
 captured_question() {
   local logfile="$1"
   [[ -f "$logfile" ]] || return 0
-  tail -n 80 "$logfile" 2>/dev/null | grep -E "$PROMPT_SIGNATURE_RE" 2>/dev/null \
+  tail -n "$STUCK_TAIL_LINES" "$logfile" 2>/dev/null | grep -E "$PROMPT_SIGNATURE_RE" 2>/dev/null \
     | head -n 3 | tr '\n' ' ' | cut -c1-300
+}
+
+# log_size <logfile>: byte size of the file, or 0 when absent. A wedged
+# interactive prompt produces NO further output, so a frozen byte size across two
+# consecutive scans is the positive evidence that distinguishes a genuine wedge
+# from a busy worker that merely printed a tool name and kept writing.
+log_size() {
+  local f="$1"
+  [[ -f "$f" ]] || { printf '0'; return 0; }
+  wc -c <"$f" 2>/dev/null | tr -d ' '
 }
 
 marker_field() {
@@ -345,20 +370,32 @@ run_iteration() {
   rm -f "$stuck_flag"
   local t0 t1 rc=0
   t0=$(date +%s)
-  # Spawn the worker in the background and supervise it with ONE poll loop that
-  # does two jobs at once (issue #2666): enforce MAX_ITER_SECS (portably — no
-  # coreutils `timeout` on macOS), and tail the live log for interactive-prompt
-  # signatures. A worker wedged on a prompt in an unattended session is invisible
-  # to an exit-only judge — it just burns MAX_ITER_SECS and looks "abnormal".
-  # The watchdog pages the owner the instant a signature appears and records a
-  # `stuck-on-question` verdict so the wedge never counts toward the breaker.
+  # Spawn the worker in the background and supervise it with a split-cadence poll
+  # loop (issue #2666, hardened per roborev 1773):
+  #   * exit/deadline check every 1s — near-blocking completion latency and
+  #     MAX_ITER_SECS enforced at 1s granularity (portably — no coreutils
+  #     `timeout` on macOS).
+  #   * WEDGE scan every STUCK_POLL_SECS — classify `stuck-on-question` ONLY on
+  #     positive wedge evidence that holds across TWO consecutive scans: (a) the
+  #     process is still alive, (b) a prompt signature is in the LAST ~20 log
+  #     lines (tail scan, not whole-log), AND (c) the log has NOT GROWN between
+  #     the two scans (byte size unchanged). A wedged prompt emits no further
+  #     output, so its tail + size freeze; a busy worker that merely printed the
+  #     tool name in its trace keeps writing (size grows) and/or scrolls the match
+  #     out of the tail — either fails the test and is ignored. Tradeoff: a
+  #     genuine wedge takes up to 2*STUCK_POLL_SECS to confirm (vs an instant but
+  #     false-positive-prone substring match), and a marker-less abnormal exit
+  #     with a stray scrollback match stays ABNORMAL (counts toward the breaker) —
+  #     exactly the guarantee the substring approach would have defeated.
   set +e
   bash -c "$WORKER_CMD" >"$logfile" 2>&1 &
   local wpid=$!
   local deadline=$((t0 + MAX_ITER_SECS))
-  local stuck_notified=0 g
+  local stuck_notified=0 g now
+  local last_scan_ts=$t0 prev_size=-1 prev_sig=0 cur_size cur_sig
   while kill -0 "$wpid" 2>/dev/null; do
-    if [[ "$(date +%s)" -ge "$deadline" ]]; then
+    now=$(date +%s)
+    if [[ "$now" -ge "$deadline" ]]; then
       log "iteration $ITER exceeded MAX_ITER_SECS=${MAX_ITER_SECS}s; terminating worker"
       kill -TERM "$wpid" 2>/dev/null
       g=0
@@ -366,16 +403,27 @@ run_iteration() {
       kill -KILL "$wpid" 2>/dev/null
       break
     fi
-    if [[ "$stuck_notified" -eq 0 ]] && detect_prompt_signature "$logfile"; then
-      local qtext
-      qtext="$(captured_question "$logfile")"
-      printf '%s' "$qtext" >"$stuck_flag"
-      notify "high" "worker-supervisor: stuck-on-question (iter $ITER)" \
-        "worker appears blocked on an interactive prompt: ${qtext:-<no text captured>}"
-      log "iteration $ITER: interactive-prompt signature detected; paged owner (stuck-on-question)"
-      stuck_notified=1
+    if [[ "$stuck_notified" -eq 0 ]] && [[ $((now - last_scan_ts)) -ge "$STUCK_POLL_SECS" ]]; then
+      last_scan_ts="$now"
+      cur_size="$(log_size "$logfile")"
+      if detect_prompt_signature "$logfile"; then cur_sig=1; else cur_sig=0; fi
+      # Wedge confirmed only when the signature is present in the tail at BOTH
+      # this scan and the prior one AND the log did not grow between them (and
+      # the process is still alive — the loop condition). prev_size<0 = no prior
+      # scan yet, so the very first scan can never confirm.
+      if [[ "$prev_sig" -eq 1 && "$cur_sig" -eq 1 && "$prev_size" -ge 0 && "$cur_size" -eq "$prev_size" ]]; then
+        local qtext
+        qtext="$(captured_question "$logfile")"
+        printf '%s' "$qtext" >"$stuck_flag"
+        notify "high" "worker-supervisor: stuck-on-question (iter $ITER)" \
+          "worker appears wedged on an interactive prompt (frozen log + signature across 2 polls): ${qtext:-<no text captured>}"
+        log "iteration $ITER: wedge confirmed (frozen log + tail signature x2 polls); paged owner (stuck-on-question)"
+        stuck_notified=1
+      fi
+      prev_size="$cur_size"
+      prev_sig="$cur_sig"
     fi
-    sleep "$STUCK_POLL_SECS"
+    sleep 1
   done
   wait "$wpid"
   rc=$?
