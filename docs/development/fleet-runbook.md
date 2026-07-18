@@ -49,9 +49,10 @@ Sanity check: `bash scripts/agent-gate.sh --lite` should pass in ~1–5 min, and
 `accelerators:` line should read `sccache=on nextest=on lanes=parallel`. If anything says
 `absent`, the gate prints the one-line install fix — do it; a degraded machine is ~3× slower.
 
-**Datasets matter:** without them, parity components skip. Today that still yields an overall
-PASS (the dangerous silent green — being fixed as **#2078**, after which the full gate FAILS
-loudly instead). Fetch them on every machine, day one.
+**Datasets matter:** without them, parity components skip. The FULL gate FAILs CLOSED when the
+fetched validation corpus is absent (**#2078**), stamping `missing-fixtures: FAIL-CLOSED (#2078)`;
+`AGENT_GATE_ALLOW_MISSING_FIXTURES=1` opts out visibly, and `--lite`/`--only` stay lenient. Fetch
+them on every machine, day one.
 
 ---
 
@@ -254,7 +255,7 @@ machine + heartbeat age (issue #2089). Interpretation:
 | Session feels degraded / bloated | Kill it, start fresh. Board + disk are the state; the new session rehydrates in one board read. |
 | Board unreachable (auth/scope error) | The session STOPS by design (labels are decorative, never a dispatch source). Fix `gh auth refresh -s project` and restart. |
 | Gate seems hung | It's probably queued: look for `waiting for gate slot (N in use)…`. Queued ≠ hung. |
-| Green SUMMARY but parity lines say SKIP | Datasets missing on that machine — `fetch-datasets.sh`, re-run. (#2078 makes this a hard FAIL so it can't slip through.) |
+| Green SUMMARY but parity lines say SKIP | Datasets missing on that machine — `fetch-datasets.sh`, re-run. The FULL gate FAILs CLOSED here (`missing-fixtures: FAIL-CLOSED (#2078)`) so it can't slip through; `--lite`/`--only` stay lenient. |
 | Two machines want the same issue | Impossible past the claim: the second claim-ref push is rejected server-side (non-fast-forward on the fixed-name ref, #2665); the loser sees `CLAIM LOST` and picks the next Ready item. |
 
 ---

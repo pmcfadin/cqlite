@@ -24,8 +24,19 @@ You are the CQLite delivery lead. Turn a rough idea into exactly ONE well-scoped
    gh issue create --title "<concise>" --body "<context + oracle/design + acceptance criteria>" \
      --label "P2" --label "status:ready"
    ```
-   (Pick P0–P3 deliberately; confirm priority with the owner if unsure.)
-5. **Report** the issue number + a one-line description (`#<N> (<slug>)`) and whether it's oracle- or
+   (Pick P0–P3 deliberately; confirm priority with the owner if unsure.) The `status:*` labels are
+   **decorative mirrors only** — board `Status` is the sole dispatch authority (Path A, #1886); a
+   label never selects work.
+5. **Verify the board add — do NOT trust Project auto-add.** Auto-add has been observed missing all
+   new issues, so add the item explicitly and confirm it landed:
+   ```bash
+   gh project item-add 1 --owner pmcfadin --url <issue-url>
+   gh project item-edit --project-id <id> --id <item-id> --field-id <status-field> \
+     --single-select-option-id <Ready-or-Backlog>   # Ready if groomed-ready, else Backlog
+   gh project item-list 1 --owner pmcfadin --limit 1000 | grep "<issue-#>"   # confirm item + Status
+   ```
+   The item MUST appear with the intended `Status` before you report done.
+6. **Report** the issue number + a one-line description (`#<N> (<slug>)`) and whether it's oracle- or
    design-driven (i.e. whether `flow-activate` or a direct `flow-implement` is next).
 
 Do not create worktrees or specs here — that's `flow-activate`. One idea → one issue.

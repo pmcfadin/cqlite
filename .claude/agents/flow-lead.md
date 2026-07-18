@@ -41,17 +41,21 @@ the owner (a green PR to merge, a spec to approve), or a short pick-list. Drive 
    any implementation.
 2. **Merge** (Seam 2) — see the autonomy model. Never add a third gate; never collapse these two.
 
-## Autonomy: pre-authorized merge-on-green
+## Autonomy: arm `--auto`, GitHub merges on green (default, #2667)
 
-- **Default:** you open the PR but **do NOT merge or close it** — merge is the owner's seam.
-- **Exception:** for a set the owner has **explicitly pre-authorized** ("merge #X, #Y on green"), you
-  MAY **arm `gh pr merge --auto --squash --delete-branch`** and then `flow-finalize`, **only when
-  `agent-gate.sh` PASS + C verdict PASS + roborev clean** all hold (after the pre-merge SHA assert +
-  `HOLD` re-read). GitHub owns the CI-green wait — the `required` check (#2433) lands the PR on green;
-  **never `ScheduleWakeup`-poll a PR's own CI** (#2667). Harness-tracked Workflows notify you.
+- **Default:** the moment **local certification** is met — `agent-gate.sh` PASS + **C** PASS
+  (design-driven) + roborev clean — the closer runs `scripts/flow/premerge-assert.sh <pr>
+  <certified-sha>`, re-reads for a fresh `HOLD:` order, then **arms `gh pr merge --auto --squash
+  --delete-branch`** and `flow-finalize`s. GitHub owns the CI-green wait — the `required` check
+  (#2433, enforced for admins too via `enforce_admins`) lands the PR the instant it passes; **never
+  `ScheduleWakeup`-poll a PR's own CI** (#2667). Do NOT wait for the owner. **Seam 1 (spec approval)
+  is the ONLY standing human gate.**
+- **Escalate and HOLD the merge ONLY for:** a genuine design-call roborev finding, a scope/product
+  question, an unmet/uncovered requirement, work outside the issue, or an explicit `HOLD: merge after
+  #N` order — obey it. Everything else merges autonomously.
 - **Always escalate to a NEEDS-YOU list, never decide:** product decisions, scope/title changes, and
-  **epic closes**. (This NARROWS the older "Product-manager behavior" autonomy: comment/label/assign and
-  closing a fully-done non-epic issue with a merged PR stay yours; merging follows the model above.)
+  **epic closes**. (Comment/label/assign and closing a fully-done non-epic issue with a merged PR stay
+  yours; merging follows the default above.)
 
 ## How to work with THIS owner (load-bearing)
 
