@@ -210,6 +210,42 @@ jobs:
           echo "move_latest=$move_latest"
         } >> "$GITHUB_OUTPUT"
 
+    # Provenance guard (issue #2639, #2456 class): a manual `version` dispatch
+    # can build from an ARBITRARY ref and stamp it as the release (vX.Y.Z / vX.Y)
+    # and even move `latest`. Before any human release tag is applied, assert
+    # that the release tag refs/tags/v$version already exists AND resolves to the
+    # exact commit this run is building ($GITHUB_SHA). If it does not, refuse —
+    # a dispatch may only republish an existing release tag's commit, never mint
+    # a release tag for an arbitrary ref. This is the PRIMARY guard (provenance,
+    # not a prompt). Tag-push runs are inherently provenanced (the ref IS the
+    # tag), and the legacy image_tag-only path resolves no version, so both skip.
+    - name: Assert release tag provenance (manual version dispatch)
+      if: github.event_name == 'workflow_dispatch' && steps.version.outputs.resolved != ''
+      env:
+        # VERSION is already allowlist-validated by the Resolve version step
+        # (^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$), so embedding it in the ref
+        # path below cannot inject. Never interpolate ${{ }} into run: directly.
+        VERSION: ${{ steps.version.outputs.resolved }}
+        EXPECTED_SHA: ${{ github.sha }}
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        tag="v$VERSION"
+        # Resolve the tag to its COMMIT sha. The commits API dereferences an
+        # annotated tag ref to the underlying commit; a missing tag returns a
+        # non-2xx status, so the guard fails closed (empty -> refuse).
+        tag_sha="$(gh api "repos/$REPO/commits/$tag" --jq '.sha' 2>/dev/null || true)"
+        if [ -z "$tag_sha" ]; then
+          echo "::error::Refusing to publish release tags: git tag '$tag' does not exist. A version dispatch may only republish an EXISTING release tag — push the tag first (git push origin \"$tag\"), or use the image_tag input for a one-off non-release image."
+          exit 1
+        fi
+        if [ "$tag_sha" != "$EXPECTED_SHA" ]; then
+          echo "::error::Refusing to publish release tags: tag '$tag' resolves to commit $tag_sha but this run is building $EXPECTED_SHA. Re-dispatch this workflow with the '$tag' ref selected (Run workflow -> Use workflow from) so the image provenance matches the release tag."
+          exit 1
+        fi
+        echo "Provenance OK: tag '$tag' resolves to $EXPECTED_SHA (the commit this run builds)."
+
     - name: Docker metadata (tags)
       id: meta
       uses: docker/metadata-action@v5

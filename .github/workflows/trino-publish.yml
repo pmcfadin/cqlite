@@ -19,10 +19,13 @@ name: Publish Trino Connector
 #
 # A `workflow_dispatch` trigger allows exercising the publish on demand. Manual
 # runs have no tag to derive the version from, so the `version` input supplies
-# it. `dry_run` now DEFAULTS TO FALSE (issue #2156) — dry-run behavior (publish
-# only to the local Maven repo via publishToMavenLocal, no Central upload, no
-# secrets needed) must be explicitly requested with `dry_run=true`. Omitting
-# the flag means "really publish," gated on the secrets check above.
+# it. `dry_run` DEFAULTS TO TRUE (issue #2639) — a bare `gh workflow run
+# trino-publish.yml -f version=X` MUST NOT reach Maven Central. Dry-run behavior
+# (publish only to the local Maven repo via publishToMavenLocal, no Central
+# upload, no secrets needed) is the default; a real Central publish must be
+# requested explicitly with `dry_run=false`, gated on the secrets check above.
+# Tag-push runs (`push` on `v*`) are unaffected: `dry_run` only applies to
+# workflow_dispatch, so a `v*` tag still publishes for real.
 
 on:
   push:
@@ -35,9 +38,9 @@ on:
         type: string
         required: true
       dry_run:
-        description: 'Dry run: publishToMavenLocal only (no Central upload, no secrets needed). Must be set explicitly — omitting this means a real publish.'
+        description: 'Dry run (DEFAULT): publishToMavenLocal only, no Central upload, no secrets needed. A real Maven Central publish requires setting this to false explicitly.'
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read

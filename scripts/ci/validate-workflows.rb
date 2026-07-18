@@ -263,6 +263,75 @@ def label_exempt_job_allowed?(workflow_name, job_name, job)
   false
 end
 
+# Armed-publish dispatch guards (issue #2639). A bare `workflow_dispatch` on a
+# publishing workflow must not be able to push to Maven Central or mint/move a
+# release tag from an arbitrary ref. These checks fail-close so the guards can
+# never silently regress out of the workflow files.
+def workflow_dispatch_inputs(workflow)
+  triggers = normalize_triggers(workflow["on"] || workflow[true])
+  dispatch = triggers["workflow_dispatch"]
+  return {} unless dispatch.is_a?(Hash)
+
+  inputs = dispatch["inputs"]
+  inputs.is_a?(Hash) ? inputs : {}
+end
+
+def job_step_list(job)
+  return [] unless job.is_a?(Hash)
+
+  Array(job["steps"]).select { |step| step.is_a?(Hash) }
+end
+
+# trino-publish.yml: the `dry_run` input must DEFAULT TO TRUE, so `gh workflow
+# run trino-publish.yml -f version=X` (no dry_run) never reaches Central.
+def trino_publish_guard_errors(file, workflow)
+  errors = []
+  dry_run = workflow_dispatch_inputs(workflow)["dry_run"]
+  if !dry_run.is_a?(Hash)
+    errors << "#{file}: workflow_dispatch must define a `dry_run` input (issue #2639)"
+  elsif dry_run["default"] != true
+    errors << "#{file}: `dry_run` input must default to true so a bare version dispatch cannot publish to Maven Central (issue #2639)"
+  end
+  errors
+end
+
+# flight-image.yml: the merge job (which applies the release tags) must carry a
+# fail-closed provenance assertion that runs on a manual `version` dispatch,
+# BEFORE the Docker metadata (tags) step, comparing the release tag to
+# github.sha and refusing (exit 1) otherwise.
+def flight_image_guard_errors(file, workflow)
+  errors = []
+  merge = (workflow["jobs"] || {})["merge"]
+  unless merge.is_a?(Hash)
+    errors << "#{file}: expected a `merge` job that applies release tags (issue #2639)"
+    return errors
+  end
+
+  steps = job_step_list(merge)
+  tags_index = steps.index { |s| s["id"] == "meta" }
+  provenance_index = steps.index do |s|
+    cond = s["if"].to_s
+    run = s["run"].to_s
+    env = s["env"].is_a?(Hash) ? s["env"] : {}
+    cond.include?("workflow_dispatch") &&
+      cond.include?("steps.version.outputs.resolved") &&
+      env.values.map(&:to_s).any? { |v| v.include?("github.sha") } &&
+      run.match?(/exit\s+1/)
+  end
+
+  if provenance_index.nil?
+    errors << "#{file}: `merge` job must assert release-tag provenance (tag v$version resolves to github.sha) on a manual version dispatch and refuse otherwise (issue #2639)"
+  elsif tags_index && provenance_index >= tags_index
+    errors << "#{file}: release-tag provenance assertion must run BEFORE the Docker metadata (tags) step (issue #2639)"
+  end
+  errors
+end
+
+PUBLISH_DISPATCH_GUARDS = {
+  "trino-publish.yml" => method(:trino_publish_guard_errors),
+  "flight-image.yml" => method(:flight_image_guard_errors)
+}.freeze
+
 workflow_files = Dir[File.join(options[:workflows_dir], "*.{yml,yaml}")].sort
 abort "No workflow files found under #{options[:workflows_dir]}" if workflow_files.empty?
 
@@ -440,6 +509,9 @@ workflow_files.each do |file|
                 "(single-writer with flight-image.yml, issue #2638): #{reason}"
     end
   end
+
+  guard = PUBLISH_DISPATCH_GUARDS[workflow_name]
+  errors.concat(guard.call(file, workflow)) if guard
 
   label = BINDING_PR_MATRIX_LABELS[workflow_name]
   if label && triggers.key?("pull_request")

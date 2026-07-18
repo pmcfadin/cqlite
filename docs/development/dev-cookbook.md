@@ -332,3 +332,31 @@ Policy (nightly-only, out of the stable gate, workspace-excluded) is in `CLAUDE.
   nightly long-run (both nightly + cargo-fuzz, isolated from the stable gate). A
   crash fails the job and uploads the reproducer artifact; crashes are filed as
   their own bug issues (not silently patched here).
+
+## Publish dispatches (armed by default? NO — issue #2639)
+
+The publishing workflows are guarded so a bare `workflow_dispatch` cannot publish
+to Maven Central or mint/move a release tag from an arbitrary ref. Both guards are
+enforced by `scripts/ci/validate-workflows.rb` (they fail the workflow-lint if
+removed) and documented in `docs/ci/ci-tier-policy.md` (Release tier).
+
+```bash
+# Trino connector: bare dispatch is a DRY RUN (publishToMavenLocal only, no
+# Central upload, no secrets) — dry_run DEFAULTS TO TRUE.
+gh workflow run trino-publish.yml -f version=0.15.0
+
+# A real Maven Central release requires dry_run=false explicitly:
+gh workflow run trino-publish.yml -f version=0.15.0 -f dry_run=false
+
+# flight-image: a manual `version` dispatch REFUSES unless refs/tags/v$version
+# already resolves to the commit the run builds (github.sha). Push the release
+# tag first, then dispatch with that tag's ref selected:
+git push origin v0.15.0
+gh workflow run flight-image.yml --ref v0.15.0 -f version=0.15.0
+
+# For a one-off, NON-release image (no vX.Y.Z / latest tags), use image_tag:
+gh workflow run flight-image.yml -f image_tag=dev-preview
+```
+
+A `v*` tag push (`git push origin v0.15.0`) publishes for real automatically on
+both lanes — the guards only constrain manual dispatches.
