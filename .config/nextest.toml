@@ -1,0 +1,62 @@
+# cargo-nextest configuration (issue #2643, epic #2636 build/test/deploy audit).
+#
+# This file is auto-discovered by `cargo nextest run` when it lives at the repo
+# root under .config/ — no --config-file flag is needed. `scripts/agent-gate.sh`
+# runs `core-tests` under `cargo nextest run` (#1737), so the gate picks this up
+# transparently. It is ORTHOGONAL to the gate's per-gate CPU budget (#2640):
+# that derives `--test-threads` (the global concurrency ceiling); this file adds
+# test-GROUPS (bounded co-scheduling of load-sensitive tests), scoped retries,
+# and a hung-test slow-timeout. The two never fight.
+#
+# Doctrine (see docs/development/gate-ops.md, "nextest test-groups, retries, and
+# slow-timeout"):
+#   * TIMING tests (ratio/latency/throughput checks that legitimately vary under
+#     a loaded, oversubscribed CI box) get retries 1-2 AND are co-scheduled one
+#     at a time so they never perturb each other's timings.
+#   * DOCKER / live-Cassandra parity tests are serialized (a single Docker host)
+#     and get a hard hung-test kill — but NOT retries (a real parity divergence
+#     must fail, not flap-retry green).
+#   * PARITY / CORRECTNESS tests keep retries = 0 (the profile default below): a
+#     wrong byte or a diverged SELECT must fail deterministically, never be
+#     masked by a retry.
+
+[profile.default]
+# Correctness default: no test is retried unless an override below opts it in.
+# Only the `timing` group opts in; everything else (parity, byte-for-byte,
+# read-path, type-decode) stays deterministic.
+retries = 0
+
+# Hung-test guard: warn once a test exceeds 60s, then hard-kill after 4 periods
+# (240s). Deliberately generous so a slow-but-honest test on a loaded box is
+# never killed mid-run; it only backstops a genuinely wedged test/process.
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[test-groups]
+# max-threads = 1 co-schedules each group's tests one at a time (across ALL
+# nextest worker threads), so members never contend with each other for CPU.
+# This is the load-control lever that makes the timing ratios stable; it is
+# independent of the gate's global --test-threads ceiling (#2640).
+timing = { max-threads = 1 }
+docker = { max-threads = 1 }
+
+# --- TIMING group: load-sensitive tests get scoped retries + serialization ----
+# tail_latency_harness      — mixed_p99 / cold_mmap_mixed_p99 ratio bounds; the
+#                             documented tail-latency flake under 2 concurrent
+#                             gates (MEMORY: mixed_p99_bounded_by_k_times_baseline).
+# sstable_performance_regression_tests — wall-clock MAX_*_MS budget asserts that
+#                             legitimately vary under load (retirement is #2642;
+#                             until it lands, scoped retries de-flake the gate).
+[[profile.default.overrides]]
+filter = 'binary(tail_latency_harness) | binary(sstable_performance_regression_tests)'
+test-group = 'timing'
+retries = { backoff = "exponential", count = 2, delay = "2s" }
+
+# --- DOCKER group: serialize live-Docker parity tests + hard hung-test kill ----
+# docker_probe_timeout           — exercises the bounded-probe timeout machinery.
+# *under_cassandra5_sstabledump  — live Cassandra 5.0 sstabledump parity (#911),
+#                                  skipped by default in the gate, run in nightly
+#                                  Docker lanes; one Docker host → serialize them.
+# NO retries: a parity divergence must fail, never flap-retry to green.
+[[profile.default.overrides]]
+filter = 'binary(docker_probe_timeout) | test(/under_cassandra5_sstabledump/)'
+test-group = 'docker'
