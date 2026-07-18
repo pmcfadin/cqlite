@@ -152,8 +152,7 @@ bindings (`node-ci.yml`, `python-ci.yml`), Flight/Trino
 performance (`perf-regression.yml`), observability (`observability-gate.yml`),
 and parity/ingest lanes (`nightly-docker-parity.yml`,
 `sstabledump-parity-gate.yml`, `e2e-readback.yml`, `compaction-parity.yml`,
-`compression-corruption-parity.yml`, `cql-type-parity.yml`,
-`live-cell-compaction-parity.yml`, `tombstone-ttl-parity.yml`).
+`parity-regen-matrix.yml`, `live-cell-compaction-parity.yml`).
 
 These workflows can be required by release process policy or by maintainers for
 specific PRs, but they must not be globally required in branch protection.

@@ -176,7 +176,7 @@ jobs:
       #
       # Issue #1405: the parity-failure-issue automation only needs a LANE-SCOPED
       # `parity-failures.json` (structured fields to fingerprint from), exactly as
-      # tombstone-ttl-parity.yml already emits. On a NIGHTLY failure this lets a real
+      # parity-regen-matrix.yml already emits. On a NIGHTLY failure this lets a real
       # byte-parity regression file/update ONE deduped `parity-failure` issue rather
       # than being discovered by manual log-reading. The scenario_id/test_target here
       # are intentionally lane-scoped v1 placeholders (stable per lane so cross-run

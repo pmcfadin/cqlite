@@ -1055,3 +1055,105 @@ fn gradle_exclude_of_unrelated_task_still_counts() {
         "gradle test --exclude-task spotlessCheck"
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Matrix expansion (issue #2651): the consolidated parity lane injects each
+// leg's `--test` set via `${{ matrix.tests }}`, so the mapped-test scan must
+// expand `strategy.matrix` before searching for the literal `--test <name>`.
+// ---------------------------------------------------------------------------
+
+/// A consolidated matrix lane whose `run:` invokes the leg's tests via
+/// `${{ matrix.tests }}` under a workflow-level fail-closed env — the shape the
+/// #2651 consolidation produces. A required_parity scenario mapped to a test that
+/// appears in one leg's `tests` value must be satisfied.
+fn matrix_parity_workflow() -> &'static str {
+    "name: matrix parity\n\
+     env:\n\
+    \x20 CQLITE_REQUIRE_FIXTURES: '1'\n\
+     jobs:\n\
+    \x20 parity:\n\
+    \x20   runs-on: ubuntu-latest\n\
+    \x20   strategy:\n\
+    \x20     matrix:\n\
+    \x20       include:\n\
+    \x20         - leg: cql_type\n\
+    \x20           tests: >-\n\
+    \x20             --test issue_1003_schema_evolution_header_parity\n\
+    \x20             --test issue_1006_null_empty_boundary_parity\n\
+    \x20         - leg: tombstone_ttl\n\
+    \x20           tests: >-\n\
+    \x20             --test issue_1010_deletion_markers_parity\n\
+    \x20   steps:\n\
+    \x20     - name: run parity tests\n\
+    \x20       run: cargo test -p cqlite-core ${{ matrix.tests }}\n"
+}
+
+#[test]
+fn matrix_injected_test_satisfies_required_scenario() {
+    // A mapped test present in leg 1's `tests` value is credited.
+    let findings = check_scenario(
+        "cass.schema_evolution.serialization_header.no_schema_change",
+        ".github/workflows/parity-regen-matrix.yml",
+        matrix_parity_workflow(),
+        &["cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "matrix-injected --test in leg 1 must satisfy the scenario, got: {findings:#?}"
+    );
+    // A mapped test present only in leg 2's `tests` value is also credited.
+    let findings2 = check_scenario(
+        "cass.tombstone_ttl.deletion_markers",
+        ".github/workflows/parity-regen-matrix.yml",
+        matrix_parity_workflow(),
+        &["cqlite-core/tests/issue_1010_deletion_markers_parity.rs".to_string()],
+    );
+    assert!(
+        findings2.is_empty(),
+        "matrix-injected --test in leg 2 must satisfy the scenario, got: {findings2:#?}"
+    );
+}
+
+#[test]
+fn matrix_test_absent_from_every_leg_is_overstated() {
+    // A mapped test that appears in NO leg's `tests` value must still be flagged —
+    // matrix expansion must not manufacture a phantom credit.
+    let findings = check_scenario(
+        "cass.schema_evolution.serialization_header.absent",
+        ".github/workflows/parity-regen-matrix.yml",
+        matrix_parity_workflow(),
+        &["cqlite-core/tests/issue_9999_not_in_any_leg.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("overstated")),
+        "a test in no matrix leg must be overstated, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn matrix_lane_without_fail_closed_env_is_flagged() {
+    // Same matrix shape but NO fail-closed flag: the mapped test runs blocking but
+    // fail-open, so it must be flagged (matrix expansion must not bypass the
+    // fail-closed requirement).
+    let fail_open = "name: matrix parity\n\
+        jobs:\n\
+       \x20 parity:\n\
+       \x20   runs-on: ubuntu-latest\n\
+       \x20   strategy:\n\
+       \x20     matrix:\n\
+       \x20       include:\n\
+       \x20         - leg: cql_type\n\
+       \x20           tests: --test issue_1003_schema_evolution_header_parity\n\
+       \x20   steps:\n\
+       \x20     - run: cargo test -p cqlite-core ${{ matrix.tests }}\n";
+    let findings = check_scenario(
+        "cass.schema_evolution.serialization_header.no_schema_change",
+        ".github/workflows/parity-regen-matrix.yml",
+        fail_open,
+        &["cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "a fail-open matrix lane must be flagged, got: {findings:#?}"
+    );
+}

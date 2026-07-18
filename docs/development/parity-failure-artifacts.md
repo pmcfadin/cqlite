@@ -152,9 +152,7 @@ single source of truth is `NO_EMITTER_ALLOWLIST` in
 reports OK-with-a-note for:
 
 <!-- aspirational-no-emitter-lanes:begin (single source: retention::no_emitter_allowlist) -->
-- `.github/workflows/cql-type-parity.yml`
-- `.github/workflows/tombstone-ttl-parity.yml`
-- `.github/workflows/compression-corruption-parity.yml`
+- `.github/workflows/parity-regen-matrix.yml`
 - `.github/workflows/live-cell-compaction-parity.yml`
 - `.github/workflows/e2e-readback.yml`
 - `.github/workflows/cassandra-validation.yml`

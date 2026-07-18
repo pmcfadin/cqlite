@@ -82,7 +82,19 @@ struct JobYaml {
     #[serde(default)]
     env: BTreeMap<String, serde_yaml::Value>,
     #[serde(default)]
+    strategy: Option<StrategyYaml>,
+    #[serde(default)]
     steps: Vec<StepYaml>,
+}
+
+/// A job's `strategy:` block. We only care about `matrix:` so a matrix-driven
+/// `run:` (`cargo test ... ${{ matrix.tests }}`) can be expanded per leg before
+/// the mapped-test scan (issue #2651: parity lanes consolidated into one matrix
+/// workflow whose `--test` sets are matrix-injected, not literal in the step).
+#[derive(Debug, Deserialize)]
+struct StrategyYaml {
+    #[serde(default)]
+    matrix: Option<serde_yaml::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -378,9 +390,145 @@ fn comparison_is_negative_success(after_accessor: &str) -> bool {
     matches!(inner, Some("success"))
 }
 
+/// Convert a scalar YAML value (string / number / bool) to its text form for
+/// matrix substitution. Non-scalar values (sequence / mapping / null) yield
+/// `None` — a matrix axis whose value is itself a list/map is not a substitutable
+/// scalar (e.g. an `include` entry maps to a leg, not to a `${{ matrix.k }}`
+/// scalar).
+fn scalar_to_text(v: &serde_yaml::Value) -> Option<String> {
+    match v {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Expand a job's `strategy.matrix` into its set of legs, where each leg maps a
+/// matrix key to its scalar text value. Two forms are handled:
+///
+///   * an `include:` list — each entry becomes one leg (its scalar fields), and
+///   * bare axes (`key: [a, b]`, ...) — the cartesian product of the axes.
+///
+/// A matrix that combines both yields the cartesian product of the axes PLUS each
+/// `include` entry as its own leg. This is a deliberate OVER-approximation for the
+/// mapped-test scan: crediting a `required_parity` scenario still requires the
+/// mapped `--test <name>` to appear in some leg's expanded, blocking, fail-closed
+/// step — extra phantom legs cannot manufacture that token unless a real matrix
+/// value contains it. The consolidated parity lane (issue #2651) uses a pure
+/// `include:` matrix, so expansion is exact there.
+///
+/// Returns a single empty leg when there is no matrix, so a non-matrix job's steps
+/// are evaluated unchanged.
+fn matrix_legs(strategy: &Option<StrategyYaml>) -> Vec<BTreeMap<String, String>> {
+    let Some(matrix) = strategy.as_ref().and_then(|s| s.matrix.as_ref()) else {
+        return vec![BTreeMap::new()];
+    };
+    let serde_yaml::Value::Mapping(map) = matrix else {
+        return vec![BTreeMap::new()];
+    };
+
+    // Cartesian product over the bare axes (every key except include/exclude).
+    let mut legs: Vec<BTreeMap<String, String>> = vec![BTreeMap::new()];
+    for (k, v) in map {
+        let Some(key) = k.as_str() else { continue };
+        if key == "include" || key == "exclude" {
+            continue;
+        }
+        let serde_yaml::Value::Sequence(values) = v else {
+            continue;
+        };
+        let mut next = Vec::new();
+        for base in &legs {
+            for val in values {
+                let Some(text) = scalar_to_text(val) else {
+                    continue;
+                };
+                let mut leg = base.clone();
+                leg.insert(key.to_string(), text);
+                next.push(leg);
+            }
+        }
+        if !next.is_empty() {
+            legs = next;
+        }
+    }
+    // Drop the seed empty leg if any axis produced real legs.
+    if legs.len() == 1 && legs[0].is_empty() {
+        legs.clear();
+    }
+
+    // Each `include:` entry is its own leg (its scalar fields).
+    if let Some(serde_yaml::Value::Sequence(includes)) = map.get("include") {
+        for entry in includes {
+            if let serde_yaml::Value::Mapping(fields) = entry {
+                let mut leg = BTreeMap::new();
+                for (k, v) in fields {
+                    if let (Some(key), Some(text)) = (k.as_str(), scalar_to_text(v)) {
+                        leg.insert(key.to_string(), text);
+                    }
+                }
+                if !leg.is_empty() {
+                    legs.push(leg);
+                }
+            }
+        }
+    }
+
+    if legs.is_empty() {
+        vec![BTreeMap::new()]
+    } else {
+        legs
+    }
+}
+
+/// Substitute `${{ matrix.<key> }}` references in `text` with the leg's scalar
+/// values (arbitrary whitespace inside the `${{ }}` is tolerated). A reference to
+/// a key absent from this leg is left intact, so it simply fails to match a mapped
+/// `--test <name>` (never a false credit).
+fn expand_matrix_in_text(text: &str, leg: &BTreeMap<String, String>) -> String {
+    if leg.is_empty() || !text.contains("${{") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("${{") {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 3..];
+        let Some(close) = after.find("}}") else {
+            // No closing delimiter: emit the remainder verbatim.
+            out.push_str(&rest[open..]);
+            rest = "";
+            break;
+        };
+        let expr = after[..close].trim();
+        let replaced = expr
+            .strip_prefix("matrix.")
+            .and_then(|key| leg.get(key.trim()))
+            .cloned();
+        match replaced {
+            Some(val) => out.push_str(&val),
+            None => {
+                // Not a resolvable matrix reference: keep the token verbatim.
+                out.push_str("${{");
+                out.push_str(&after[..close]);
+                out.push_str("}}");
+            }
+        }
+        rest = &after[close + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Parse the workflow YAML into the evaluated `run:` steps we care about. On a
 /// parse failure (malformed / unexpected YAML) we return `None`; callers fall
 /// back to flagging the scenario rather than vacuously passing.
+///
+/// A matrix-driven job (`strategy.matrix`) is expanded per leg: each step is
+/// evaluated once per matrix leg with its `${{ matrix.<key> }}` references
+/// substituted, so a lane whose `--test <name>` set is matrix-injected (issue
+/// #2651) is scanned exactly as if the tokens were literal in the step.
 fn evaluate_steps(workflow_text: &str) -> Option<Vec<EvaluatedStep>> {
     let wf: WorkflowYaml = serde_yaml::from_str(workflow_text).ok()?;
     let workflow_fail_closed = env_is_fail_closed(&wf.env);
@@ -388,6 +536,7 @@ fn evaluate_steps(workflow_text: &str) -> Option<Vec<EvaluatedStep>> {
     for job in wf.jobs.values() {
         let job_fail_closed = workflow_fail_closed || env_is_fail_closed(&job.env);
         let guarded = aggregator_guarded_ids(job);
+        let legs = matrix_legs(&job.strategy);
         for step in &job.steps {
             let Some(run) = &step.run else { continue };
             // A step's SCOPE fail-closed status: workflow/job env, or the step's
@@ -414,11 +563,16 @@ fn evaluate_steps(workflow_text: &str) -> Option<Vec<EvaluatedStep>> {
             // aggregators; this gate is only for the mapped-test step itself.)
             let proven_to_run = matches!(step.gate(), StepGate::Eligible);
             let can_fail_build = proven_to_run && (!step.is_continue_on_error() || id_guarded);
-            out.push(EvaluatedStep {
-                command: run.clone(),
-                can_fail_build,
-                scope_fail_closed,
-            });
+            // Emit the step once per matrix leg with its `${{ matrix.<key> }}`
+            // references substituted. A non-matrix job has exactly one empty leg,
+            // so `expand_matrix_in_text` returns the command unchanged.
+            for leg in &legs {
+                out.push(EvaluatedStep {
+                    command: expand_matrix_in_text(run, leg),
+                    can_fail_build,
+                    scope_fail_closed,
+                });
+            }
         }
     }
     Some(out)

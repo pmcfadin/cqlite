@@ -122,7 +122,8 @@
 #   * Re-running this script produces a STRUCTURALLY equivalent corpus (same
 #     tables, columns, types, kinds, row/cell shapes) but is intentionally NOT
 #     byte-identical to the committed goldens because of the fields above.
-#   * The nightly_docker workflow (.github/workflows/cql-type-parity.yml)
+#   * The nightly_docker workflow (.github/workflows/parity-regen-matrix.yml,
+#     cql-type leg)
 #     regenerates the fixtures STRUCTURALLY to catch Cassandra-format drift; it
 #     does not assert byte-identity against the committed snapshot.
 #

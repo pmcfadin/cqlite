@@ -1,0 +1,368 @@
+name: "CI: Parity Regen Matrix (Nightly Docker, Epic #2636)"
+
+# Consolidated Docker-regenerating nightly enforcement for the three
+# structurally-identical parity lanes (issue #2651, epic #2636). This ONE
+# parameterized workflow replaces the former per-epic lanes:
+#   - compression-corruption-parity.yml (epic #970)
+#   - cql-type-parity.yml               (epic #971)
+#   - tombstone-ttl-parity.yml          (epic #972)
+#
+# Each leg is a `strategy.matrix` entry that preserves its predecessor's EXACT
+# coverage: the same Cassandra 5.0.2 fixture regeneration, the same strict
+# fixture-present enforcement, the same `--test` set run fail-closed
+# (CQLITE_REQUIRE_FIXTURES=1 → panic-instead-of-skip), the same extra proofs,
+# and the same structured failure artifact.
+#
+# Why these lanes are separate from the fast PR gate
+# ---------------------------------------------------
+# The fixture matrices (test_comp / test_comp_corrupt, test_types, test_tomb /
+# test_deltas / test_compaction_tombstone_ttl) are regenerated from a Cassandra
+# 5.0.2 container by the generator scripts below. The fast PR gate
+# (sstabledump-parity-gate.yml) only fetches the published bundle, so the
+# fixture-backed tests there skip-clean when those fixtures are absent and could
+# FALSE-PASS. This workflow REGENERATES the fixtures from scratch, then runs each
+# leg's tests fail-closed so a regeneration failure can never be mistaken for a
+# green parity run.
+#
+# Matrix values are STATIC constants authored in this file (not derived from any
+# untrusted event payload), so interpolating `${{ matrix.* }}` into `run:` is
+# safe. The `${{ matrix.tests }}` interpolation into the fail-closed test step is
+# also load-bearing: `cassandra-parity lint`'s workflow_check expands
+# `strategy.matrix` and scans the substituted command for the mapped
+# `--test <name>` tokens, so the required_parity anti-overstatement enforcement
+# (issue #1228) still applies to the consolidated lane.
+#
+# GATING POLICY: runs on
+#   - workflow_dispatch (manual)
+#   - schedule (nightly)
+#   - pull_request touching any parity test, manifest, fixture generator,
+#     fixture data, production code the tests validate, or this workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: 'Run cargo test with --nocapture'
+        type: boolean
+        default: true
+  schedule:
+    # Nightly at 04:17 UTC (single cron for all legs; the former lanes staggered
+    # 04:17 / 04:31 / 05:23 only to spread scheduler load across three workflows).
+    - cron: '17 4 * * *'
+  pull_request:
+    branches: [main]
+    paths:
+      # This workflow itself.
+      - '.github/workflows/parity-regen-matrix.yml'
+      # Shared manifest (drives the required_parity mapping / lint).
+      - 'test-data/cassandra-parity-manifest.yml'
+      # --- compression / corruption (epic #970) ---
+      - 'cqlite-core/tests/issue_997_compressioninfo_parity.rs'
+      - 'cqlite-core/tests/issue_998_inline_crc_trailers.rs'
+      - 'cqlite-core/tests/issue_1000_verifier.rs'
+      - 'cqlite-core/tests/sstable_parity_corruption_verify.rs'
+      - 'cqlite-core/tests/issue_1001_reject_unknown_compression.rs'
+      - 'cqlite-core/tests/issue_1082_deflate_zlib.rs'
+      - 'cqlite-core/tests/issue_1104_compaction_incompressible_chunks.rs'
+      - 'test-data/datasets/corruption/**'
+      - 'test-data/scripts/capture-cassandra-verify-verdicts.sh'
+      - 'test-data/scripts/generate-compression-parity.sh'
+      - 'test-data/scripts/generate-corruption-corpus.sh'
+      - 'test-data/scripts/gen-wide-bti.sh'
+      - 'test-data/schemas/compression-parity.cql'
+      - 'cqlite-core/src/storage/sstable/compression.rs'
+      - 'cqlite-core/src/storage/sstable/compression_info.rs'
+      - 'cqlite-core/src/storage/sstable/chunk_decompressor.rs'
+      - 'cqlite-core/src/storage/sstable/chunked_data_reader.rs'
+      - 'cqlite-core/src/storage/sstable/verify.rs'
+      - 'cqlite-core/src/storage/sstable/reader/**'
+      - 'cqlite-cli/src/commands/verify.rs'
+      # --- CQL type & schema-evolution (epic #971) ---
+      - 'cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs'
+      - 'cqlite-core/tests/issue_1004_primitive_codec_vectors.rs'
+      - 'cqlite-core/tests/issue_1005_collection_serializer_vectors.rs'
+      - 'cqlite-core/tests/issue_1006_null_empty_boundary_parity.rs'
+      - 'cqlite-core/tests/issue_1007_complex_type_parity.rs'
+      - 'cqlite-core/tests/issue_1008_counter_final_value_parity.rs'
+      - 'cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs'
+      - 'cqlite-core/tests/support/canonical_jsonl.rs'
+      - 'test-data/scripts/generate-cql-type-parity.sh'
+      - 'test-data/schemas/cql-type-parity.cql'
+      - 'test-data/codec-vectors/**'
+      # --- tombstone / TTL (epic #972) ---
+      - 'cqlite-core/tests/issue_101*_*.rs'
+      - 'cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs'
+      - 'cqlite-core/tests/issue_1387_tombstone_ttl_compaction_byte_parity.rs'
+      - 'test-data/scripts/generate-tombstone-parity.sh'
+      - 'test-data/scripts/generate-deltas.sh'
+      - 'test-data/scripts/generate-compaction-tombstone-ttl-parity.sh'
+      - 'test-data/schemas/compaction-tombstone-ttl-parity.cql'
+      - 'test-data/datasets/sstables/test_compaction_tombstone_ttl/**'
+
+env:
+  CASSANDRA_IMAGE: cassandra:5.0.2
+  CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parity-regen-matrix-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  parity:
+    name: "Parity regen (${{ matrix.leg }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --------------------------------------------------------------------
+          # Leg: compression / corruption (was compression-corruption-parity.yml)
+          # --------------------------------------------------------------------
+          - leg: compression-corruption
+            features: write-support,cli-helpers
+            generate: |
+              set -euo pipefail
+              echo "::group::generate compression parity fixtures (test_comp, epic #970)"
+              bash test-data/scripts/generate-compression-parity.sh
+              echo "::endgroup::"
+              # The corruption corpus's bti_partitions_footer_flip / bti_rows_truncation
+              # cases need a clean BTI (da) source, or the generator marks them
+              # `planned` and the verifier tests silently skip BTI corruption coverage.
+              echo "::group::generate BTI source fixtures (test_da/wide_table)"
+              OUT="$CQLITE_DATASETS_ROOT" bash test-data/scripts/gen-wide-bti.sh
+              echo "::endgroup::"
+              echo "::group::generate corruption corpus (test_comp_corrupt, issue #999)"
+              bash test-data/scripts/generate-corruption-corpus.sh
+              echo "::endgroup::"
+              # Strict: fail instead of skip-clean if regeneration produced no fixtures.
+              comp_data=$(find "$CQLITE_DATASETS_ROOT/sstables/test_comp" -name '*-Data.db' 2>/dev/null | wc -l | tr -d ' ')
+              corrupt_dirs=$(find "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+              echo "test_comp Data.db count: $comp_data ; corruption case dirs: $corrupt_dirs"
+              if [ "$comp_data" -eq 0 ]; then
+                echo "FATAL: no test_comp Data.db fixtures were generated — refusing to skip-clean." >&2
+                exit 1
+              fi
+              if [ "$corrupt_dirs" -eq 0 ]; then
+                echo "FATAL: corruption corpus is empty — refusing to skip-clean." >&2
+                exit 1
+              fi
+              for bti in bti_partitions_footer_flip bti_rows_truncation; do
+                if [ ! -d "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt/$bti" ]; then
+                  echo "FATAL: BTI corruption fixture '$bti' is missing/planned — BTI source generation must precede the corpus." >&2
+                  exit 1
+                fi
+              done
+            tests: >-
+              --test issue_997_compressioninfo_parity
+              --test issue_998_inline_crc_trailers
+              --test issue_1000_verifier
+              --test issue_1001_reject_unknown_compression
+              --test issue_1082_deflate_zlib
+              --test issue_1104_compaction_incompressible_chunks
+              --test sstable_parity_corruption_verify
+            extra: |
+              set -uo pipefail
+              # The uncompressed read-time promoted-CRC proof (issue #1396/#1799) is an
+              # in-crate `--lib` module, so it does NOT run in the `--test` step above.
+              # It is the ONLY lane that regenerates the corrupt uncompressed fixture;
+              # enforce the hard requirement here (issue #1869: fail closed if the
+              # filter selects zero tests or a strict proof does not run to ok).
+              out=$(env CQLITE_REQUIRE_CORRUPT_FIXTURES=1 \
+                CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+                cargo test -p cqlite-core --features write-support,cli-helpers \
+                  --lib big_promoted_seek_tests \
+                  -- --nocapture 2>&1)
+              rc=$?
+              printf '%s\n' "$out"
+              if [ "$rc" -ne 0 ]; then
+                echo "FATAL: big_promoted_seek_tests lib proof failed (exit $rc)." >&2
+                exit "$rc"
+              fi
+              passed=$(printf '%s\n' "$out" | sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' | tail -n1)
+              if [ -z "$passed" ] || [ "$passed" -eq 0 ]; then
+                echo "FATAL: the 'big_promoted_seek_tests' filter selected ZERO tests (issue #1869)." >&2
+                exit 1
+              fi
+              for t in clean_reverse_partition_path_returns_rows reverse_partition_path_over_corrupt_chunk_fails_fast; do
+                if ! printf '%s\n' "$out" | grep -qE "${t} \.\.\. ok"; then
+                  echo "FATAL: strict corrupt-corpus proof '$t' did not run to ok (#1799 enforcement lost)." >&2
+                  exit 1
+                fi
+              done
+            scenario_id: cass.compression_corruption.nightly_docker_lane
+            failure_class: DigestMismatch
+            component_path: test-data/datasets/corruption/test_comp_corrupt
+          # --------------------------------------------------------------------
+          # Leg: CQL type & schema-evolution (was cql-type-parity.yml)
+          # --------------------------------------------------------------------
+          - leg: cql-type
+            features: delta-scan
+            generate: |
+              set -euo pipefail
+              echo "::group::generate CQL type / schema-evolution fixtures (test_types, epic #971)"
+              bash test-data/scripts/generate-cql-type-parity.sh
+              echo "::endgroup::"
+              echo "=== test_types Data.db files ==="
+              find "$CQLITE_DATASETS_ROOT/sstables/test_types" -name '*-Data.db' | sort
+            tests: >-
+              --test issue_1003_schema_evolution_header_parity
+              --test issue_1006_null_empty_boundary_parity
+              --test issue_1007_complex_type_parity
+              --test issue_1008_counter_final_value_parity
+            extra: |
+              set -euo pipefail
+              # The no-fixture codec-vector + comparator tests read committed vectors /
+              # published goldens and do not need the Docker regeneration, so they run
+              # WITHOUT CQLITE_REQUIRE_FIXTURES (mirrors the former lane's separate step).
+              cargo test -p cqlite-core --features delta-scan \
+                --test issue_1004_primitive_codec_vectors \
+                --test issue_1005_collection_serializer_vectors \
+                --test issue_1009_canonical_jsonl_comparator \
+                -- --nocapture
+            scenario_id: cass.cql_type.nightly_docker_lane
+            failure_class: RowScanFailed
+            component_path: test-data/datasets/sstables/test_types
+          # --------------------------------------------------------------------
+          # Leg: tombstone / TTL (was tombstone-ttl-parity.yml)
+          # --------------------------------------------------------------------
+          - leg: tombstone-ttl
+            features: delta-scan write-support
+            generate: |
+              set -euo pipefail
+              # issue_1011 asserts test_basic/ttl_test_table Statistics.db, which the
+              # Docker generators below do NOT produce. Under CQLITE_REQUIRE_FIXTURES=1
+              # the test panics if it is absent, so fetch the published bundle first.
+              echo "::group::fetch published datasets (test_basic ttl_test_table, etc.)"
+              bash test-data/scripts/fetch-datasets.sh
+              echo "::endgroup::"
+              echo "::group::generate delta fixtures (test_deltas, issue #701)"
+              bash test-data/scripts/generate-deltas.sh
+              echo "::endgroup::"
+              echo "::group::generate tombstone / TTL fixtures (test_tomb, epic #972)"
+              bash test-data/scripts/generate-tombstone-parity.sh
+              echo "::endgroup::"
+              echo "::group::generate tombstone/TTL COMPACTION fixtures (issue #1387)"
+              bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh
+              echo "::endgroup::"
+              echo "=== test_tomb Data.db files ==="
+              find "$CQLITE_DATASETS_ROOT/sstables/test_tomb" -name '*-Data.db' | sort
+              echo "=== test_deltas Data.db files ==="
+              find "$CQLITE_DATASETS_ROOT/sstables/test_deltas" -name '*-Data.db' | sort
+            tests: >-
+              --test issue_1010_deletion_markers_parity
+              --test issue_1011_ttl_local_deletion_parity
+              --test issue_1012_skipped_sstable_parity
+              --test issue_1013_rt_index_block_parity
+              --test issue_1014_resurrection_safety_parity
+              --test issue_1015_dropped_static_parity
+              --test issue_1019_static_dropped_collection_compaction_parity
+              --test issue_1021_repaired_metadata_compaction_parity
+              --test sstable_parity_repaired_metadata_test
+            extra: |
+              set -euo pipefail
+              # The three #1387 byte-for-byte scenarios are #[ignore] until #1410, so a
+              # default run exercises the gc-purge SEMANTIC scenario plus the NON-ignored
+              # byte_parity_reference_fixtures_present_and_consistent guard. Under
+              # CQLITE_REQUIRE_FIXTURES=1 that guard fail-closes on a missing/incomplete
+              # byte-parity reference (fixture integrity enforced even while byte diffs
+              # stay ignored).
+              env CQLITE_REQUIRE_FIXTURES=1 \
+                CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+                cargo test -p cqlite-core --features write-support \
+                  --test issue_1387_tombstone_ttl_compaction_byte_parity \
+                  -- --nocapture
+            scenario_id: cass.tombstone_ttl.nightly_docker_lane
+            failure_class: RowScanFailed
+            component_path: test-data/datasets/sstables/test_tomb,test_deltas
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Issue #1209/#1217: GitHub runner images ship a stable toolchain that
+      # already provides bin/cargo-clippy. The dtolnay/rust-toolchain@1.88.0
+      # action performs a rustup reconcile that can intermittently try to
+      # (re)install the 'clippy-preview' component and fail with a
+      # "detected conflict: 'bin/cargo-clippy'". Remove the conflicting component
+      # FIRST so the setup cannot reinstall clippy-preview. This lane runs no
+      # clippy. Idempotent: a no-op if clippy is absent.
+      - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
+        shell: bash
+        run: rustup component remove clippy --toolchain stable 2>/dev/null || true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: parity-regen-matrix-${{ matrix.leg }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check Docker available
+        run: docker info
+
+      - name: "Generate fixtures (${{ matrix.leg }})"
+        shell: bash
+        # matrix.generate is a static, workflow-authored shell block per leg.
+        run: ${{ matrix.generate }}
+
+      - name: "Run parity tests (strict, require-fixtures) (${{ matrix.leg }})"
+        shell: bash
+        # Fail-closed: CQLITE_REQUIRE_FIXTURES=1 turns skip-clean into a hard
+        # failure so a vanished/unfetched fixture PANICS instead of green-passing.
+        # matrix.tests is a static, workflow-authored `--test ...` set; it is
+        # interpolated directly so cassandra-parity lint's workflow_check can
+        # expand the matrix and verify each mapped required_parity test runs here.
+        run: |
+          env CQLITE_REQUIRE_FIXTURES=1 \
+            CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+            cargo test -p cqlite-core --features "${{ matrix.features }}" \
+              ${{ matrix.tests }} \
+              -- --nocapture
+
+      - name: "Run extra proofs (${{ matrix.leg }})"
+        shell: bash
+        # Per-leg additional coverage (compression: #1799 lib proof; cql-type:
+        # no-fixture codec vectors; tombstone: #1387 byte-parity guard).
+        run: ${{ matrix.extra }}
+
+      # issue #1028: structured failure summary for the parity-failure-issue
+      # automation (issue #2660 wires the workflow_run trigger + artifact fetch to
+      # this consolidated lane). scenario_id/test_target/component_path are
+      # lane-scoped v1 placeholders (stable per leg so cross-run dedup works).
+      - name: Emit parity-failures.json (on failure)
+        if: failure()
+        shell: bash
+        env:
+          SCENARIO_ID: ${{ matrix.scenario_id }}
+          FAILURE_CLASS: ${{ matrix.failure_class }}
+          COMPONENT_PATH: ${{ matrix.component_path }}
+          LEG: ${{ matrix.leg }}
+        run: |
+          set -euo pipefail
+          # Values come from quoted env vars (never interpolated into the JSON
+          # heredoc) to keep the emitted document injection-safe.
+          jq -n \
+            --arg sid "$SCENARIO_ID" \
+            --arg wf "parity-regen-matrix.yml" \
+            --arg tt "$LEG parity suite" \
+            --arg cp "$COMPONENT_PATH" \
+            --arg fc "$FAILURE_CLASS" \
+            '[{scenario_id: $sid, workflow: $wf, test_target: $tt, component_path: $cp, failure_class: $fc}]' \
+            > parity-failures.json
+          cat parity-failures.json
+
+      - name: Upload parity-failures.json
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          # Dot-separated per-leg suffix keeps artifact names unique across matrix
+          # legs WITHOUT matching the `parity-failures-` shared-#1027-bundle prefix
+          # (this is the #1028 single-file summary, not the forensic bundle — see
+          # retention.rs is_parity_failure_upload).
+          name: parity-failures.${{ matrix.leg }}
+          path: parity-failures.json
+          if-no-files-found: warn

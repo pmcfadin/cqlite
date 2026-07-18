@@ -19,7 +19,8 @@ release-upload rights to `pmcfadin/cqlite`. Run from a clean checkout of `main`.
 ## 1. Generate the Epic #970 fixtures (Docker / Cassandra 5.0.2)
 
 These are the same steps the strict nightly workflow
-(`.github/workflows/compression-corruption-parity.yml`) runs. They write into
+(`.github/workflows/parity-regen-matrix.yml`, compression-corruption leg) runs.
+They write into
 `test-data/datasets`. Run from the repo root:
 
 ```bash
@@ -137,5 +138,5 @@ The 10 pinned workflows: `ci.yml`, `coverage.yml`, `docs-site.yml`,
 Once the pin-bump PR's CI is green (the cache busts automatically because the
 key includes the SHA), the `test` lane runs the verifier against the real
 `test_comp`/corruption binaries instead of skipping. Optionally trigger the
-strict nightly manually (`compression-corruption-parity.yml` → workflow_dispatch)
+strict nightly manually (`parity-regen-matrix.yml` → workflow_dispatch)
 to confirm `CQLITE_REQUIRE_FIXTURES=1` passes end to end. Then close #1099.

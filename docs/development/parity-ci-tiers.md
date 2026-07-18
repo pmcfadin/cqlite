@@ -196,7 +196,8 @@ Rust-side re-compaction byte-parity subset:
   byte-for-byte against committed Cassandra 5.0.2 compacted references. The same
   tests also run on PRs via
   [`live-cell-compaction-parity.yml`](../../.github/workflows/live-cell-compaction-parity.yml)
-  and [`tombstone-ttl-parity.yml`](../../.github/workflows/tombstone-ttl-parity.yml).
+  and the tombstone-ttl leg of
+  [`parity-regen-matrix.yml`](../../.github/workflows/parity-regen-matrix.yml).
 - **What the PR proxy PROMISES.** For the committed live-cell / frozen-UDT /
   nested-UDT scenarios, CQLite's compaction output is byte-identical to the
   committed Cassandra golden on the diffed component set
