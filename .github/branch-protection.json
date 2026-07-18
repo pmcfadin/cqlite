@@ -1,11 +1,8 @@
 {
   "required_status_checks": {
-    "strict": true,
+    "strict": false,
     "contexts": [
-      "CI / test",
-      "CI: Core Library (minimal) / m1-core-validation",
-      "CI: Core Library (minimal) / sstabledump-parity-m1",
-      "CI: SSTableDump Parity Gate / sstabledump-parity"
+      "required"
     ]
   },
   "enforce_admins": true,

@@ -2440,6 +2440,24 @@ run_tooling_tests() {
     return 0
   fi
 
+  # TaskCompleted issue-gate hook defusal self-test (#2671, epic #2664): no python3
+  # needed, always runs (hermetic — builds a throwaway repo, copies the real hook,
+  # and shims the gate + roborev; never runs the real gate). Asserts the hook wires
+  # --lite (never the full gate), uses a unique mktemp summary path from the hook's
+  # own repo root, fails OPEN on a budget overrun, and runs no roborev. A failure
+  # FAILs the component, mirroring the cpu-budget/delta/parity-report guards.
+  echo ">>> [$name] bash scripts/tests/test_issue_gate_hook.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_issue_gate_hook.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (issue-gate hook defusal self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"

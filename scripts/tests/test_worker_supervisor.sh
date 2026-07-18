@@ -547,9 +547,26 @@ common_env() {
   unset MAX_HOURS_SECS DISK_FLOOR_GB PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS \
         BUILD_HOLD_MAX LEFTOVER_HOLD_MAX UNVERIFIED_MAX MISMATCH_RETRIES \
         MISMATCH_GRACE_CAP_SECS PROC_LIST_WORKER_CMD PROC_LIST_BUILD_CMD 2>/dev/null || true
+  # Claim stamping (issue #2655) OFF by default so most tests stay focused; the
+  # dedicated claim tests set a hermetic CLAIM_CMD stub that logs its args.
+  export CLAIM_CMD=""
+  unset HEARTBEAT_MACHINE 2>/dev/null || true
 }
 
 jline_count() { grep -c "$2" "$1" 2>/dev/null || true; }
+
+# A hermetic claim-heartbeat.sh stand-in: append "<subcmd> <args...>" to
+# $CLAIM_LOG on every call, always succeed. Lets a test assert the supervisor
+# invoked `stamp`/`reap` with the right shape, without any origin/network.
+write_claim_stub() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+exit 0
+EOF
+  chmod +x "$path"
+}
 
 # ---------------------------------------------------------------------------
 # Test 1: happy path — 2 finalized iterations, then MAX_ISSUES=2 budget stop.
@@ -1239,6 +1256,45 @@ test_finalized_verified_merged_counts() {
     pass "verify(merged): finalized credited, journal verified=merged, counts to budget"
   else
     fail "verify(merged): rc=$rc finalized=$fcount (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 23-claim (#2655): the supervisor STAMPS refs/machine-claims/<machine> before each
+# spawn and CLEARS (reap) it on a clean exit — via CLAIM_CMD, mechanically, without the
+# worker LLM. A hermetic CLAIM_CMD stub logs every invocation; we assert one
+# `stamp <issue> <pid>` per iteration and exactly one `reap <machine>` at stop.
+# ---------------------------------------------------------------------------
+test_claim_stamp_each_iter_and_clear_on_exit() {
+  local d counter jf rc stamps reaps
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=2
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  # 2 finalized iterations => 2 stamps; a clean budget stop => exactly 1 reap.
+  stamps=$(grep -c '^stamp ' "$CLAIM_LOG" 2>/dev/null || true)
+  reaps=$(grep -c '^reap testbox' "$CLAIM_LOG" 2>/dev/null || true)
+  # Every stamp carries the SUPERVISOR pid as the 3rd token (numeric).
+  local well_formed="yes"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" =~ ^stamp\ [0-9]+\ [0-9]+$ ]] || well_formed="no"
+  done < <(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null)
+  if [[ "$rc" -eq 0 && "$stamps" -eq 2 && "$reaps" -eq 1 && "$well_formed" == "yes" ]]; then
+    pass "claim: stamp per iteration (with pid) + one reap on clean exit"
+  else
+    fail "claim: rc=$rc stamps=$stamps reaps=$reaps well_formed=$well_formed (see $CLAIM_LOG)"
   fi
 }
 
@@ -2054,8 +2110,10 @@ test_pending_time_floor_blocks_fast_stuck() {
 # Test 49 (#2670 / roborev 1840): a tracked armed PR that ends CLOSED-unmerged (auto-
 # merge dropped / PR closed) must NOT be swallowed silently — it is the failure this
 # feature catches. It re-verifies as a non-merged mismatch on the next iteration and
-# fires a HIGH "armed PR did not land" page + a `pending-dropped` journal line. gh
-# returns OPEN+armed on the first view (the finalize), CLOSED thereafter.
+# fires a HIGH "armed PR did not land" page + a `pending-dropped` journal line. gh:
+# PR 1 = OPEN+armed on first view then CLOSED; any later PR = MERGED (so iter2's finalize
+# credits toward MAX_ISSUES=1 and the run exits budget-issues deterministically — NOT
+# wallclock, so the credit re-verify always runs before the stop).
 # ---------------------------------------------------------------------------
 test_pending_pr_closed_pages_high() {
   local d counter jf rc page
@@ -2064,11 +2122,10 @@ test_pending_pr_closed_pages_high() {
   common_env "$d"
   write_finalize_stub "$d/bin/worker.sh" "$counter"
   export WORKER_CMD="$d/bin/worker.sh"
-  export MAX_ISSUES=100
-  export MAX_HOURS_SECS=3
+  export MAX_ISSUES=1
   mkdir -p "$d/ghviews"
   # shellcheck disable=SC2016  # $1 expands inside the supervisor's own `bash -c`.
-  export GH_VERIFY_CMD='n="${1##*/}"; f="'"$d"'/ghviews/$n"; c=0; [ -f "$f" ] && c=$(cat "$f"); c=$((c+1)); echo "$c">"$f"; if [ "$c" -le 1 ]; then printf %s "{\"state\":\"OPEN\",\"mergedAt\":null,\"autoMergeRequest\":{\"enabledAt\":\"x\"}}"; else printf %s "{\"state\":\"CLOSED\",\"mergedAt\":null,\"autoMergeRequest\":null}"; fi'
+  export GH_VERIFY_CMD='n="${1##*/}"; f="'"$d"'/ghviews/$n"; c=0; [ -f "$f" ] && c=$(cat "$f"); c=$((c+1)); echo "$c">"$f"; if [ "$n" != "1" ]; then printf %s "{\"state\":\"MERGED\",\"mergedAt\":\"x\",\"autoMergeRequest\":null}"; elif [ "$c" -le 1 ]; then printf %s "{\"state\":\"OPEN\",\"mergedAt\":null,\"autoMergeRequest\":{\"enabledAt\":\"x\"}}"; else printf %s "{\"state\":\"CLOSED\",\"mergedAt\":null,\"autoMergeRequest\":null}"; fi'
   jf="$JOURNAL_FILE"
 
   bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
@@ -2360,6 +2417,38 @@ test_mid_grace_stop_is_aborted() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 24-claim (#2655): the NEXT spawn's claim stamp carries the issue LEARNED from a
+# non-finalized (blocked) marker — so the reaper's open-PR guard tracks the real
+# issue. Iter 1 blocks issue 88; iter 2's stamp must name issue 88 (before the
+# head-block guard stops the run on the 2nd consecutive block).
+# ---------------------------------------------------------------------------
+test_claim_issue_learned_from_marker() {
+  local d rc second_stamp
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_blocked_same_issue_stub "$d/bin/worker.sh" 88
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  # Iter1 stamp = "stamp 0 <pid>" (issue unknown); iter2 stamp = "stamp 88 <pid>"
+  # (learned from iter1's blocked marker). Grab the 2nd stamp line.
+  second_stamp=$(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null | sed -n '2p')
+  if [[ "$rc" -eq 0 ]] && printf '%s' "$second_stamp" | grep -qE '^stamp 88 [0-9]+$'; then
+    pass "claim: issue learned from a blocked marker names the next stamp (issue 88)"
+  else
+    fail "claim-learn: rc=$rc second_stamp='$second_stamp' (see $CLAIM_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -2400,6 +2489,8 @@ test_stray_signature_scrollback_is_abnormal
 test_genuine_wedge_frozen_is_stuck
 test_busy_writing_signature_not_stuck
 test_fast_exit_latency
+test_claim_stamp_each_iter_and_clear_on_exit
+test_claim_issue_learned_from_marker
 test_finalized_verified_merged_counts
 test_finalized_mismatch_open_is_abnormal
 test_finalized_unverified_not_counted_no_breaker

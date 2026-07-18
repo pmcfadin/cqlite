@@ -238,7 +238,11 @@ machine + heartbeat age (issue #2089). Interpretation:
 - **Ready, no claim ref** → next thing a worker will grab
 - **In Progress, heartbeat fresh** → leave it alone
 - **In Progress, heartbeat stale** → deterministically reaped by flow-board (heartbeat age > 4h AND no
-  open PR → Status → Ready, work preserved on the branch, traceable comment; issue #2089)
+  open PR → Status → Ready, work preserved on the branch, traceable comment; issue #2089). The
+  supervisor also stamps a machine-scoped claim ref `refs/machine-claims/<machine>` that the
+  `project-board-sync` 30-min cron's `reap-claims` job reaps on the SAME predicate server-side (age >
+  4h AND no open PR AND, for a local claim, PID-dead) — so a supervisor that dies overnight gets its
+  claim reaped by CI without waiting for a human to run flow-board (issue #2655)
 - **Ready but branch already on origin** → parked-by-design (e.g. spec approved, awaiting a
   team) — pickup is *resume that branch*, never a fresh claim
 

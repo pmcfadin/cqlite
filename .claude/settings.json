@@ -1,7 +1,7 @@
 {
   "agent": "flow-lead",
   "env": {
-    "ISSUE_GATE_TEST_CMD": "scripts/agent-gate.sh",
+    "ISSUE_GATE_TEST_CMD": "scripts/agent-gate.sh --lite",
     "ISSUE_GATE_COVERAGE_CMD": "",
     "CQLITE_PROJECT_OWNER": "pmcfadin",
     "CQLITE_PROJECT_NUMBER": "1"
