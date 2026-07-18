@@ -266,6 +266,38 @@ end
 workflow_files = Dir[File.join(options[:workflows_dir], "*.{yml,yaml}")].sort
 abort "No workflow files found under #{options[:workflows_dir]}" if workflow_files.empty?
 
+# Single-writer guard for the canonical release image tag (issue #2638).
+#
+# On a v* tag push, flight-image.yml builds and publishes the canonical
+# vX.Y.Z / vX.Y / latest tags as a MULTI-ARCH manifest and must be the SOLE
+# writer of those tags. flight-ci.yml's `image` job builds a single-arch
+# (amd64) image; if it also ran on tag refs it would race the same GHCR tags
+# and last-writer-wins could silently leave the release image amd64-only.
+# Assert flight-ci's image job is fenced off tag refs on BOTH fronts:
+#   1. its `if:` excludes tag pushes (`github.ref_type != 'tag'`), and
+#   2. its metadata emits no `type=ref,event=tag` tag.
+def flight_ci_image_job_off_tag_refs?(jobs)
+  image = jobs["image"]
+  return [false, "image job missing"] unless image.is_a?(Hash)
+
+  condition = image["if"].to_s.gsub(/\s+/, " ").strip
+  unless condition.include?("github.ref_type != 'tag'")
+    return [false, "image job `if:` must exclude tag refs via github.ref_type != 'tag'"]
+  end
+
+  meta_step = Array(image["steps"]).find do |step|
+    step.is_a?(Hash) && step["uses"].to_s.start_with?("docker/metadata-action")
+  end
+  return [false, "image job missing docker/metadata-action step"] unless meta_step
+
+  tags = meta_step.dig("with", "tags").to_s
+  if tags.match?(/type=ref\s*,\s*event=tag/)
+    return [false, "image job must not emit `type=ref,event=tag` (clobbers flight-image.yml on v* tags)"]
+  end
+
+  [true, nil]
+end
+
 errors = []
 warnings = []
 
@@ -399,6 +431,14 @@ workflow_files.each do |file|
 
   if LABEL_GATED_PATH_EXEMPTIONS.key?(workflow_name) && triggers.key?("pull_request_target")
     errors << "#{file}: label-gated path-filter exemption must not use pull_request_target"
+  end
+
+  if workflow_name == "flight-ci.yml"
+    ok, reason = flight_ci_image_job_off_tag_refs?(jobs)
+    unless ok
+      errors << "#{file}: flight-ci image job must not push on v* tag refs " \
+                "(single-writer with flight-image.yml, issue #2638): #{reason}"
+    end
   end
 
   label = BINDING_PR_MATRIX_LABELS[workflow_name]
