@@ -198,9 +198,12 @@ catch a “merge of an old green head” — the SHA assertion is the real guard
 <li><strong>Unique gate-summary paths.</strong> Each gate writes its <code dir="auto">AGENT_GATE_SUMMARY_FILE</code> to a <code dir="auto">mktemp</code>-unique
 path (e.g. <code dir="auto">$(mktemp /tmp/gate-&#x3C;issue>-XXXXXX.txt)</code>) — shared <code dir="auto">/tmp</code> names get contended under
 multi-lane load, so one lane’s summary can clobber or be misread as another’s.</li>
-<li><strong>Single full gate per machine.</strong> The lead enforces one full gate at a time on a box; the closer
-<code dir="auto">pgrep</code>-checks for a running gate before launching its own so concurrent gates never corrupt a
-shared <code dir="auto">target/</code>.</li>
+<li><strong>Single full gate per machine — enforced mechanically (#2640).</strong> The default posture is one full
+gate at a time on a box: <code dir="auto">bootstrap-agent-machine.sh</code> pins <code dir="auto">CQLITE_GATE_MAX_CONCURRENCY=1</code>, so the
+#1825 machine-wide cap admits exactly one full gate and the #2640 per-gate core budget hands that
+sole gate the full core count. The gate also derives <code dir="auto">CARGO_BUILD_JOBS</code> + nextest <code dir="auto">--test-threads</code>
+from the slot count and wraps itself in <code dir="auto">taskpolicy -c utility</code> (macOS) / <code dir="auto">nice</code> (Linux), so even
+if two gates do overlap neither oversubscribes the CPU. No manual <code dir="auto">pgrep</code>-serialization is needed.</li>
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="the-specialist-roster">The specialist roster</h2><a class="sl-anchor-link" href="#the-specialist-roster"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “The specialist roster”</span></a></div>
 
