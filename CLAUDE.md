@@ -291,14 +291,22 @@ implement (TDD) → --lite each fix round (summary-file redirect)
 ### Pre-roborev self-check (common findings to pre-empt)
 `roborev_findings` is the #1 recurring delivery cost. Full guidance:
 https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/
+Three of these classes are now **mechanized as `--lite` lints** (#2656) — the `roborev-lints`
+gate component (GHA injection via `scripts/ci/check-workflow-injection.sh` + the #2642
+wall-clock guard) plus clippy's `manual_range_contains` — so a reintroduction FAILs the fast
+loop, not a review round. The rest stay hand-checked (no low-false-positive static signal).
 - **GitHub Actions injection** — never interpolate `${{ inputs.* }}`/step outputs into `run:`;
-  allowlist-validate fail-closed before any secret step, pass via quoted env var.
-- **clippy `manual_range_contains`** — write `(a..=b).contains(&x)`.
+  allowlist-validate fail-closed before any secret step, pass via quoted env var. MECHANIZED
+  (`roborev-lints`): an attacker-controlled `${{ }}` context inlined in `run:` FAILs `--lite`;
+  mark a provably-safe line `injection-lint-allow`.
+- **clippy `manual_range_contains`** — write `(a..=b).contains(&x)`. MECHANIZED (clippy).
 - **Integer overflow/saturation** — use `num_bigint::BigInt` for unscaled decimal math; compare
   signs/adjusted-exponents first; never materialize `10^scale` with unbounded exponent.
 - **Float ordering vs Java** — `total_cmp` ≠ `Float/Double.compare`; use an explicit comparator
   (NaN last, `-0.0 < +0.0`) when matching Cassandra.
 - **Wall-clock races in tests** — capture the time window to cover ALL sampled operations.
+  MECHANIZED (`roborev-lints`/`tooling-tests`, #2642): a wall-clock threshold assert in the
+  correctness test path FAILs; mark a deliberate `#[ignore]`d perf assert `perf-gate-allow`.
 - **No-heuristics violations** — never infer type/behavior from byte patterns.
 - **Gitignored reference binaries** — `git add -f` tiny parity references; verify against a fresh
   `git worktree add --detach HEAD`, not the dirty tree.

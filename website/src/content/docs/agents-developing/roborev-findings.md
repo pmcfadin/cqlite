@@ -13,6 +13,26 @@ implementation done — every one pre-empted is a review round saved.
 
 This mirrors the **Pre-roborev self-check** section in `CLAUDE.md`. Keep both in sync.
 
+## Which classes are mechanized in `--lite` (issue #2656)
+
+Two of these classes now FAIL in the fast `scripts/agent-gate.sh --lite` loop (component
+`roborev-lints`) — and the full gate — so you no longer spend a review round on them:
+
+| Class | Mechanized by | Where it runs |
+|-------|---------------|---------------|
+| GitHub Actions command injection | `scripts/ci/check-workflow-injection.sh` — flags an *attacker-controlled* `${{ }}` context (issue/PR title/body, `github.head_ref`, commit message, …) inlined into a `run:` shell | `roborev-lints` (`--lite` + full) |
+| clippy `manual_range_contains` | `cargo clippy -D warnings` | `clippy` (`--lite` + full) |
+| Wall-clock races in tests | `scripts/tests/check-no-wallclock-asserts.sh` (#2642) | `roborev-lints` (`--lite`) + `tooling-tests` (full) |
+
+The other classes below (integer/decimal overflow, float ordering, no-heuristics,
+process-global counters, gitignored references) are **not mechanized**: they are semantic
+or structural, with no low-false-positive static signal (a gitignored-references lint would
+false-positive on the intentionally-fetched dataset corpus). Walk them by hand.
+
+**Escape hatches** (deliberate, reviewer-visible, one-line rationale required): the injection
+lint honours `injection-lint-allow` on the offending `run:` line or the line above it; the
+wall-clock guard honours `perf-gate-allow`.
+
 ## The recurring finding classes
 
 ### GitHub Actions command injection
@@ -21,6 +41,14 @@ interpolated directly into a `run:` shell — worst in a step that holds secrets
 
 **Fix:** allowlist-validate the value fail-closed *before* any secret step, then pass it
 through a quoted env var; never inline `${{ }}` in `run:`.
+
+**Mechanized (#2656):** `scripts/ci/check-workflow-injection.sh` (gate component
+`roborev-lints`, in `--lite` and the full gate) FAILs on an *attacker-controlled* `${{ }}`
+context inlined into `run:`. It scopes to the known attacker-supplied contexts (issue/PR
+title/body, `github.head_ref`, commit message, `workflow_run.head_branch`, …) so it does not
+false-positive on benign `${{ env.* }}` / `${{ inputs.* }}` / `head.sha` interpolations. If a
+context is provably not attacker-controlled in that workflow's triggers, mark the line
+`injection-lint-allow` with a rationale.
 
 ```yaml
 # Not allowed — injection sink
