@@ -2403,10 +2403,14 @@ run_tooling_tests() {
   fi
 
   # no-wall-clock-assert guard (#2642 / #2369 rule): SKIP-aware (no python3 ->
-  # no-op SKIP), always runs its self-test AND scans the real correctness test
-  # path. FAILs the component if a wall-clock THRESHOLD assert is (re)introduced
-  # into the default `cargo test` path, mirroring the guards above. This is what
-  # prevents reintroduction of the flaky latency asserts #2642 retired.
+  # no-op SKIP), always runs its self-test AND scans the `tests/` correctness
+  # trees (cqlite-core/tests, cqlite-cli/tests). FAILs the component if a
+  # wall-clock THRESHOLD assert is (re)introduced there, mirroring the guards
+  # above. NOTE: this covers the `tests/` trees ONLY — `#[cfg(test)]` inline
+  # modules under `src/` also run in the default `cargo test` path but are not in
+  # the automated scan yet (pre-existing src/ asserts + a tightened regex are
+  # deferred to #2705). This prevents reintroduction into the `tests/` trees that
+  # #2642 retired.
   echo ">>> [$name] bash scripts/tests/test_check_no_wallclock_asserts.sh && bash scripts/tests/check-no-wallclock-asserts.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_check_no_wallclock_asserts.sh" >>"$log" 2>&1 ||
      ! bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" >>"$log" 2>&1; then

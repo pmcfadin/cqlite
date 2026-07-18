@@ -57,8 +57,8 @@ else
   # pre-existing latency asserts across unrelated modules (value_fmt, collection
   # validation, block_io_retry, async_bridge, benchmarks/cassandra5) and false-positives
   # on the CQL type name `duration`, both of which are out of this issue's enumerated
-  # scope. That sweep + a tightened time-typed regex is deferred to a follow-up. Scan
-  # src/ explicitly by passing the path as an argument.
+  # scope. That sweep is deferred to #2705 (the bare-`duration` over-match is already
+  # dropped from TIME_TOKEN below). Scan src/ explicitly by passing the path as an arg.
   for p in \
     "$REPO_ROOT/cqlite-core/tests" \
     "$REPO_ROOT/cqlite-cli/tests"; do
@@ -81,7 +81,13 @@ roots = sys.argv[1:]
 # strings containing a literal ';' are vanishingly rare in this codebase, so
 # stopping at the first ';' is a safe, dependency-free approximation.
 ASSERT = re.compile(r'assert(?:_eq|_ne)?!\s*\(.*?;', re.DOTALL)
-TIME_TOKEN = re.compile(r'\.elapsed\(\)|\.as_millis|\.as_secs|\.as_micros|\.as_nanos|\belapsed\b|\bduration\b')
+# Time-SPECIFIC tokens only. The bare identifier `duration` is deliberately
+# EXCLUDED: it collides with the CQL type name `duration` and any field/var named
+# `duration`, and — because this guard is fail-closed and gates every run — a bare
+# `assert!(row.duration < limit)` would hard-block the gate for unrelated code
+# (#2642 review). `.as_millis`/`.as_secs`/`.elapsed()`/`elapsed` remain, which is
+# what an actual wall-clock latency bound uses.
+TIME_TOKEN = re.compile(r'\.elapsed\(\)|\.as_millis|\.as_secs|\.as_micros|\.as_nanos|\belapsed\b')
 COMPARE = re.compile(r'[<>]')
 ALLOW = 'perf-gate-allow'
 
