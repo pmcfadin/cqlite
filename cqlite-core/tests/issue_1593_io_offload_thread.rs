@@ -49,6 +49,7 @@ use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::result::StreamingConfig;
 use cqlite_core::storage::sstable::reader::scan_stream_windowed::probe as scan_offload_probe;
 use cqlite_core::Database;
+use serial_test::serial;
 
 const KEYSPACE: &str = "test_wide_rows";
 const TABLE: &str = "wide_partition_table";
@@ -185,7 +186,16 @@ async fn drain_one_scan(db: &Database, sql: &str) -> usize {
 /// The windowed streaming scan's blocking raw chunk read on an mmap backend must
 /// run off the async worker pool (on a `spawn_blocking` thread), not inline on a
 /// tokio worker.
+// Serialized on the shared process-global `scan_offload_probe` statics (`ARMED`,
+// `LAST_IO_READ_THREAD`): this binary's guards each `arm()`/`disarm()` the ONE
+// process-global probe, so running them concurrently (default test parallelism)
+// lets one test's `arm()` reset `LAST_IO_READ_THREAD = None` — clobbering the
+// other test's just-recorded thread before it reads it, which surfaced as an
+// intermittent (~1-in-20) "recorded no I/O read thread" (issue #2674). The probe
+// is a global (not thread-local) singleton, so the fix is to serialize the tests
+// that share it, not to change the probe.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)] // keep == WORKER_THREADS
+#[serial(scan_offload_probe)]
 async fn mmap_scan_io_read_runs_off_async_worker_pool() {
     let Some(_dir) = fixture_dir() else {
         eprintln!(
@@ -255,6 +265,7 @@ async fn mmap_scan_io_read_runs_off_async_worker_pool() {
 /// path did not run at all — a genuine skip; documented, not a silent omission.)
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)] // keep == WORKER_THREADS
+#[serial(scan_offload_probe)] // shares the process-global probe; see the mmap guard.
 async fn direct_scan_io_read_runs_off_async_worker_pool() {
     let Some(_dir) = fixture_dir() else {
         eprintln!(

@@ -16,8 +16,11 @@
 //!
 //! Plus the negative (absent-key) counterpart for both formats: a key the SSTable
 //! does NOT contain resolves to authoritative absence on every read and is NEVER
-//! cached (positive-only insert discipline), so a repeated absent lookup still
-//! re-probes `Index.db` / re-walks the trie (`INDEX_PROBES`/`TRIE_WALKS >= 1`).
+//! cached (positive-only insert discipline). BIG proves this via `INDEX_PROBES >= 1`
+//! on the re-read (the absent key was never positively cached). BTI proves it
+//! directly on the B4 cache: a repeated absent read registers NO B4 cache HIT — the
+//! deterministic property, immune to the reader-local C3 single-walk memo that made
+//! the old `TRIE_WALKS >= 1` proxy flaky (issue #2674).
 //!
 //! Compiled only with `--features work-counters` (the counter getters/`reset` live
 //! behind it). Requires `CQLITE_DATASETS_ROOT`; each test self-skips (never fails)
@@ -307,6 +310,27 @@ mod bti {
     use cqlite_core::{Database, Value};
     use serial_test::serial;
 
+    // ---- Why these guards assert on B4, not TRIE_WALKS (issue #2674) ----------
+    //
+    // The absent-key and disabled-toggle guards below originally asserted on
+    // `TRIE_WALKS` (>= 1, or the disabled companion). That proxy was FLAKY
+    // (~1-in-5): the C3 `bti_lookup_memo` (issue #1574) is *reader-local* and
+    // legitimately stores the resolution — INCLUDING a `None` absence — of the last
+    // key it resolved. Which pooled reader instance serves each `db.execute` is not
+    // deterministic, so whether the memo still held the interleaved key or the
+    // key-under-test varied run to run; when a consulted reader's memo already held
+    // the key-under-test, the read returned the memoized resolution WITHOUT a trie
+    // descent (`TRIE_WALKS == 0`) — a correct single-walk optimization, not a cache
+    // bug. Root-cause proof (20 runs, counter deltas): the B4 cache behaves
+    // IDENTICALLY on every run (the absent key is always a MISS, `len` never grows);
+    // only `TRIE_WALKS` varied with the memo. The counter is a process-global atomic
+    // (NOT thread-local), so this is NOT the #2451 thread-local-scoping class — it is
+    // a wrong-proxy assertion. Both guards now assert the property they actually
+    // exist to protect, directly on the deterministic, memo-immune B4 cache counters
+    // (`hit_count`/`len`): the absent key is never served a B4 HIT; a disabled reader
+    // never touches the global B4 cache at all.
+    // ---------------------------------------------------------------------------
+
     fn schemas_dir() -> Option<PathBuf> {
         if let Some(root) = datasets_root() {
             if let Some(dir) = root.parent().and_then(|p| {
@@ -435,17 +459,17 @@ mod bti {
 
     /// Absent-key wiring evidence (issue #1570 C finding, R3 scenario 3): a BTI
     /// trie-MISS key must resolve to authoritative absence on every read and must
-    /// NEVER be cached. The B4 cache is trie-HIT-only, so an absent key can never
-    /// populate it — the read must re-walk the `Partitions.db` trie each time.
-    /// The single-entry C3 memo WOULD serve a consecutively-repeated absent key
-    /// (it stores the `None` resolution too), so we INTERLEAVE a present key A
-    /// between the two absent reads to displace the memo — leaving the B4 cache as
-    /// the ONLY thing that could skip the descent, which it never does for a miss.
-    /// The re-read of the absent key therefore records `TRIE_WALKS >= 1` (contrast
-    /// the present-key test, which observes `== 0` on the interleaved re-read).
+    /// NEVER be served from the B4 key cache as a false-positive HIT. The B4 cache
+    /// is trie-HIT-only (positive-only insert discipline: `key_cache_insert` fires
+    /// only on the `Some(DataOffset)` resolution arm, never on a trie miss), so a
+    /// clean-miss absent key can never populate it — every repeated absent read is a
+    /// B4 cache MISS, re-resolving authoritative absence.
+    ///
+    /// Asserts on the B4 hit counter, not `TRIE_WALKS` — see the module-level
+    /// "Why these guards assert on B4, not TRIE_WALKS (issue #2674)" note above.
     #[tokio::test]
     #[serial]
-    async fn bti_absent_key_never_cached_rewalks_trie() {
+    async fn bti_absent_key_never_served_b4_hit() {
         if find_data_db("test_da", "simple_table").is_none() {
             eprintln!("Skipping (B4/BTI absent): optional test_da/simple_table not present");
             return;
@@ -461,8 +485,52 @@ mod bti {
             return;
         };
 
-        // First read of the absent key: definitive miss (zero rows). This stores the
-        // `None` resolution in the single-entry C3 memo for the absent key.
+        let gc = cqlite_core::storage::cache::GlobalKeyOffsetCache::global();
+
+        // Start COLD: flush the shared process-global cache so no entry left resident
+        // by a prior test/read can make the precondition below pass vacuously (an
+        // already-resident candidate for the absent key would otherwise be invisible
+        // to a len-delta check). Restoring this flush also fixes an intent regression
+        // (issue #2674 roborev 1799): the clean-miss precondition must observe a
+        // genuinely cold lookup.
+        //
+        // ADJUDICATED (issue #2674, roborev 1799 vs 1802): 1799 DEMANDED this flush to
+        // guard the already-resident-candidate case; 1802 flagged the flush as a
+        // cross-test hazard. We keep the flush — the hazard is bounded, verified:
+        //   (a) the property-carrying assertions are hit/miss counter DELTAS captured
+        //       around each measured read, which are eviction- and concurrency-immune
+        //       (a flush changes ABSOLUTE occupancy, never a per-read delta);
+        //   (b) EVERY test in this binary that touches the global B4 cache is bare
+        //       `#[serial]` (grep-verified: all six `#[tokio::test]` fns carry a bare
+        //       `#[serial]`, none keyed `#[serial(k)]`), so no two run concurrently;
+        //   (c) the global B4 cache is a process-global `static` singleton and
+        //       `cargo test` runs distinct test binaries as SEPARATE PROCESSES (and
+        //       sequentially within one component invocation), so no OTHER binary
+        //       shares this process's cache at all.
+        // The flush therefore only affects this test's own cold start; it cannot
+        // clobber a concurrently-running peer, because there is none.
+        gc.invalidate_all();
+
+        // First read of the absent key: definitive miss (zero rows) that must NOT
+        // create a B4 entry (positive-only insert discipline).
+        //
+        // CLEAN-MISS PRECONDITION (issue #2674 roborev) — counter-based, so it is
+        // immune to LRU eviction-vacuity and to an already-resident candidate:
+        //   - `hit_count()` must NOT advance: a clean trie MISS is never served from
+        //     B4 (nothing was cached for the absent key).
+        //   - `miss_count()` MUST advance: the read really DID consult B4 and resolved
+        //     as a miss (liveness — proves the assertion is not vacuously green because
+        //     the path stopped consulting the cache).
+        //   - `len()` unchanged is kept only as a SECONDARY witness: a clean miss
+        //     resolves to `None` and never calls `key_cache_insert`.
+        // If `hit_count()` advances (or `len()` grows), the fixture's chosen "absent"
+        // key is a BTI prefix-collision CANDIDATE whose candidate offset IS positively
+        // cached and re-verified downstream to absence — fixture drift (the derived
+        // absent key collides on a trie prefix), NOT a cache bug; it would invalidate
+        // the "no B4 hit" re-read assertion, so it is diagnosed explicitly here.
+        let hits_before_absent = gc.hit_count();
+        let misses_before_absent = gc.miss_count();
+        let len_before_absent = gc.len();
         let r_absent = db
             .execute(&sql_absent)
             .await
@@ -471,9 +539,34 @@ mod bti {
             r_absent.rows.is_empty(),
             "B4/BTI absent: an absent key must return zero rows (authoritative absence)"
         );
+        assert_eq!(
+            gc.hit_count(),
+            hits_before_absent,
+            "B4/BTI absent precondition: a clean trie-MISS absent key must not be served a B4 \
+             HIT. It was — the 'absent' key is a BTI prefix-collision CANDIDATE (its candidate \
+             offset is cached): fixture drift, not a cache bug; choose an absent key with no \
+             trie-prefix collision"
+        );
+        assert!(
+            gc.miss_count() > misses_before_absent,
+            "B4/BTI absent precondition liveness: the first absent read must actually CONSULT \
+             the B4 cache and resolve as a MISS (miss_count must advance); it did not, so the \
+             read path is not exercising the cache and the no-hit assertion would be vacuous"
+        );
+        // Non-strict (issue #2674 roborev 1800): a clean-miss path can never GROW the
+        // cache, but a concurrent-shard LRU eviction elsewhere may legitimately SHRINK
+        // `len` within the window — benign, and the counter differentials above carry
+        // the property. Assert only that occupancy did not grow.
+        assert!(
+            gc.len() <= len_before_absent,
+            "B4/BTI absent precondition (secondary witness): a clean trie-MISS absent key must \
+             not GROW the B4 cache (positive-only insert discipline); len grew from {} to {}",
+            len_before_absent,
+            gc.len()
+        );
 
-        // Read present key A: the single-entry C3 memo now holds A, not the absent
-        // key — so only the B4 cache could serve the absent key without a descent.
+        // Read present key A: exercises a real B4 populate for a DIFFERENT key, so a
+        // stale positive entry for A cannot alias the absent key on the re-read.
         let r_present = db
             .execute(&sql_present)
             .await
@@ -483,31 +576,62 @@ mod bti {
             "B4/BTI absent: interleave key A must be present"
         );
 
-        // Re-read the absent key with counters reset. The C3 memo holds A. The B4
-        // cache is now PROCESS-GLOBAL (issue #2059) and — unlike the retired
-        // per-reader cache, which got a fresh empty cache per reader instance — it
-        // persists a BTI prefix-collision CANDIDATE for an absent key across reader
-        // instances (the documented trie-hit-including-candidates behaviour). Flush
-        // the global cache so this re-read starts COLD and genuinely re-descends the
-        // trie, exercising the "an absent key is never served a false-positive hit"
-        // work-probe. Correctness is unchanged either way: the read returns zero rows
-        // (a cached candidate is re-verified to a different key → absence).
-        cqlite_core::storage::cache::GlobalKeyOffsetCache::global().invalidate_all();
-        rwc::reset();
-        assert_eq!(rwc::trie_walks(), 0, "reset must zero TRIE_WALKS");
+        // Re-read the absent key and prove it is NEVER served a B4 cache HIT.
+        //
+        // ROBUST LOOKUP-WINDOW ASSERTION (issue #2674 roborev 1801): the property is
+        // carried by the PAIR of counter deltas across the re-read, with NO premise
+        // about how many lookups occur or which runtime they run on:
+        //   - `hit_count` delta == 0: no B4 hit was served in the window; and
+        //   - `miss_count` delta >= 1: the read really did consult B4 and resolved as
+        //     a miss (liveness — not vacuous because the path stopped using the cache).
+        // Together: the absent key was looked up and MISSED, never hit. A negative
+        // cache (the defect this guards) would instead register a hit → non-zero hit
+        // delta → failure. (The point read resolves the absent key inline through
+        // `key_cache_get` — no `spawn`/`spawn_blocking` in the point-read call chain —
+        // but the assertion does not rely on that; the counter pair is self-contained.)
+        let hits_before = gc.hit_count();
+        let misses_before = gc.miss_count();
+        let len_before_reread = gc.len();
         let r_absent2 = db
             .execute(&sql_absent)
             .await
             .expect("BTI repeated absent point read");
+        let hits_after = gc.hit_count();
         assert!(
             r_absent2.rows.is_empty(),
             "B4/BTI absent: the repeated absent read must still return zero rows"
         );
+        assert_eq!(
+            hits_after,
+            hits_before,
+            "B4/BTI absent: a repeated absent read must NOT be served from the B4 key cache \
+             (positive-only insert discipline — a clean trie miss is never negatively cached); \
+             the re-read registered {} B4 cache hit(s), indicating the absent key was cached \
+             as a false-positive hit",
+            hits_after - hits_before
+        );
+        // LIVENESS CONTROL (issue #2674 roborev 1799): the re-read must actually
+        // CONSULT the B4 cache and resolve as a MISS — `miss_count` must advance. This
+        // makes `hits_after == hits_before` a real differential: without it the no-hit
+        // assertion would pass vacuously if the read path stopped consulting the cache
+        // altogether (zero hits AND zero misses).
         assert!(
-            rwc::trie_walks() >= 1,
-            "B4/BTI absent: a repeated absent read must RE-WALK the trie (TRIE_WALKS >= 1), \
-             proving the absent key was never cached as a hit; got {}",
-            rwc::trie_walks()
+            gc.miss_count() > misses_before,
+            "B4/BTI absent: the repeated absent read must CONSULT the B4 cache and resolve as a \
+             MISS (miss_count must advance); it did not, so the no-hit assertion above is \
+             vacuous — the read path is not exercising the cache"
+        );
+        // Belt-and-braces (issue #2674 roborev): the re-read also must not GROW the
+        // cache — a clean trie miss inserts nothing, so a candidate for the absent key
+        // is never added on the repeat either (the miss above and no-growth here
+        // together bound the absent key out of B4 entirely). Non-strict (roborev
+        // 1800): a benign LRU eviction may shrink `len`; only growth is a violation.
+        assert!(
+            gc.len() <= len_before_reread,
+            "B4/BTI absent: the repeated absent read must not GROW the B4 cache (positive-only \
+             insert discipline); len grew from {} to {}",
+            len_before_reread,
+            gc.len()
         );
     }
 
@@ -555,13 +679,19 @@ mod bti {
 
     /// Disabled-toggle wiring evidence (issue #1570 roborev): with
     /// `config.memory.block_cache.enabled == false` the reader builds a genuine
-    /// no-op key cache, so a repeated INTERLEAVED point read (A, B, A) re-walks the
-    /// `Partitions.db` trie on the second read of A — the single-entry C3 memo holds
-    /// B, so nothing else can serve A. Contrast the enabled test, which observes
-    /// `TRIE_WALKS == 0` on that same interleaved re-read.
+    /// no-op key cache ([`build_key_offset_cache`] hands back a
+    /// `GlobalKeyOffsetCache::disabled()` instance instead of the process-global
+    /// singleton), so NONE of this database's reads ever touch the global B4 cache —
+    /// its hit counter and occupancy stay flat across an interleaved A, B, A read.
+    ///
+    /// Asserts on the global B4 cache, not `TRIE_WALKS` — see the module-level "Why
+    /// these guards assert on B4, not TRIE_WALKS (issue #2674)" note above. A POSITIVE
+    /// CONTROL (an enabled db over the same fixture + query shape, whose re-read of A
+    /// DOES advance the hit counter) proves the counter is live here, so the disabled
+    /// assertion is a real differential, not a vacuous "nothing happened".
     #[tokio::test]
     #[serial]
-    async fn bti_disabled_cache_rewalks_trie_on_interleaved_reread() {
+    async fn bti_disabled_cache_never_touches_global_b4() {
         if find_data_db("test_da", "simple_table").is_none() {
             eprintln!("Skipping (B4/BTI disabled): optional test_da/simple_table not present");
             return;
@@ -577,29 +707,111 @@ mod bti {
             return;
         };
 
-        // Read A, then B — B now occupies the single-entry C3 memo. With the B4
-        // cache disabled, nothing holds A's resolution.
+        // Capture the process-global B4 cache hit counter AND occupancy. Every read
+        // below runs through this disabled database, whose readers hold a `disabled()`
+        // no-op cache — so the GLOBAL singleton must be touched neither by a serve
+        // (hit) nor a populate (len grows). `#[serial]` (bare key) on a current-thread
+        // runtime means no other test/task advances these in the window.
+        let gc = cqlite_core::storage::cache::GlobalKeyOffsetCache::global();
+        let hits_before = gc.hit_count();
+        let len_before = gc.len();
+
+        // Interleaved point reads A, B, A. With an ENABLED cache the final re-read of
+        // A is a B4 HIT (see `bti_repeated_interleaved_point_read_skips_trie_walk`);
+        // with the cache DISABLED it must not be, because the reader never consults
+        // the global cache at all.
         let ra = db.execute(&sql_a).await.expect("BTI point read A");
         assert!(
             !ra.rows.is_empty(),
             "B4/BTI disabled: key A must be present"
         );
         let _ = db.execute(&sql_b).await.expect("BTI point read B");
-
-        // Re-read A: the memo holds B and the key cache is disabled, so the read
-        // MUST descend the trie again (TRIE_WALKS >= 1) — the toggle is real.
-        rwc::reset();
-        assert_eq!(rwc::trie_walks(), 0, "reset must zero TRIE_WALKS");
         let ra2 = db.execute(&sql_a).await.expect("BTI repeated point read A");
         assert!(
             !ra2.rows.is_empty(),
             "B4/BTI disabled: repeated read of present key A returned zero rows"
         );
+
+        assert_eq!(
+            gc.hit_count(),
+            hits_before,
+            "B4/BTI disabled: a disabled key cache must be a genuine no-op — none of the \
+             disabled database's reads may serve from the process-global B4 cache. The global \
+             hit counter advanced by {}, meaning the `block_cache.enabled == false` toggle is \
+             decorative (the reader still consulted the shared cache)",
+            gc.hit_count() - hits_before
+        );
+        // Second witness (issue #2674 roborev): a disabled reader also never POPULATES
+        // the global cache, so occupancy never grows. Non-strict (roborev 1800): a
+        // concurrent-shard LRU eviction may benignly SHRINK `len` within the window;
+        // only growth signals the reader wrongly populated the shared cache.
         assert!(
-            rwc::trie_walks() >= 1,
-            "B4/BTI disabled: a disabled key cache must RE-WALK the trie on the interleaved \
-             re-read (TRIE_WALKS >= 1), proving the toggle is not decorative; got {}",
-            rwc::trie_walks()
+            gc.len() <= len_before,
+            "B4/BTI disabled: a disabled key cache must not populate the process-global B4 \
+             cache; occupancy grew from {} to {}, so the toggle is decorative",
+            len_before,
+            gc.len()
+        );
+
+        // POSITIVE CONTROL (issue #2674 roborev): prove the hit counter is LIVE for
+        // this exact fixture + query shape, so the flat-counter assertions above are a
+        // real differential and not vacuously green. Open an ENABLED db over the same
+        // fixture and run the identical A, B, A — the re-read of A is a genuine B4 HIT
+        // (the enabled reader shares the global singleton), so the hit counter MUST
+        // advance. If it did not, the disabled assertions would prove nothing.
+        // The control must NEVER green-exit without proving liveness (issue #2674
+        // roborev 1800): the first `setup()` already succeeded over this same fixture,
+        // so a failure here is an anomaly, not a dataset-absent skip — panic rather
+        // than return.
+        let db_enabled = match setup("test_da", "da-test.cql").await {
+            Some(db) => db,
+            None => panic!(
+                "positive control setup failed — first setup succeeded over the same fixture; \
+                 this is an anomaly, not a dataset-absent skip"
+            ),
+        };
+        // One warm-up RETRY (issue #2674 roborev 1802): the enabled re-read of A is a
+        // B4 HIT in the common case, but under budget pressure A's freshly-inserted
+        // entry could be LRU-evicted before the re-read consults it (benign). If the
+        // first A,B,A yields no hit delta, run the sequence once more before failing —
+        // two independent misses of a genuine hit are vanishingly unlikely, and this
+        // keeps the liveness control from flaking on a benign eviction.
+        let mut observed_hit = false;
+        for _ in 0..2 {
+            let hits_before_enabled = gc.hit_count();
+            let ea = db_enabled
+                .execute(&sql_a)
+                .await
+                .expect("enabled point read A");
+            assert!(
+                !ea.rows.is_empty(),
+                "B4/BTI disabled positive control: key A must be present"
+            );
+            let _ = db_enabled
+                .execute(&sql_b)
+                .await
+                .expect("enabled point read B");
+            let ea2 = db_enabled
+                .execute(&sql_a)
+                .await
+                .expect("enabled repeated point read A");
+            assert!(
+                !ea2.rows.is_empty(),
+                "B4/BTI disabled positive control: repeated read of present key A returned zero rows"
+            );
+            if gc.hit_count() > hits_before_enabled {
+                observed_hit = true;
+                break;
+            }
+        }
+        assert!(
+            observed_hit,
+            "B4/BTI disabled positive control: an ENABLED db over the same fixture/query must \
+             register at least one B4 cache HIT on the re-read of A (retried once) — proving the \
+             hit counter is live for this shape and the disabled no-op assertions above are a \
+             real differential. No hit was observed across two A,B,A attempts; the likely benign \
+             cause is LRU eviction of A's entry before the re-read, but a genuine liveness \
+             failure cannot be excluded"
         );
     }
 }
