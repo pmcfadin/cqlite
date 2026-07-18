@@ -56,7 +56,11 @@ jobs:
       - name: Build local wheel
         uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist --manylinux off
+          # release-unwind: matches the shipped profile in python-release.yml so
+          # CI exercises the exact panic = "unwind" build that PyPI receives —
+          # the PyO3 catch_unwind firewall (issue #1440) is active here, catching
+          # a panic-strategy regression at PR/CI time instead of at release.
+          args: --profile release-unwind --out dist --manylinux off
           working-directory: bindings/python
 
       - name: Install wheel and smoke dependencies
@@ -142,7 +146,11 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          # release-unwind: matches the shipped profile in python-release.yml so
+          # CI builds the exact panic = "unwind" wheel that PyPI receives (the
+          # PyO3 catch_unwind firewall, issue #1440), catching a panic-strategy
+          # regression at CI time instead of at release.
+          args: --profile release-unwind --out dist
           working-directory: bindings/python
           manylinux: ${{ matrix.manylinux || 'auto' }}
 
@@ -236,7 +244,12 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          # release-unwind: matches the shipped profile in python-release.yml so
+          # the tested wheel is byte-identical in panic strategy to the PyPI
+          # artifact (panic = "unwind", PyO3 catch_unwind firewall — issue #1440).
+          # This exercises the firewall under pytest, catching a panic-strategy
+          # regression at CI time instead of at release.
+          args: --profile release-unwind --out dist
           working-directory: bindings/python
           manylinux: ${{ matrix.manylinux || 'auto' }}
 
