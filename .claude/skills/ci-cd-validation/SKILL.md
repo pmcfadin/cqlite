@@ -56,9 +56,12 @@ gh run view <run-id> --log-failed # failed-job logs only
 
 ## Merge
 
-Merge is **autonomous on green** — gate PASS + (design-driven) spec-auditor **C** PASS + roborev clean →
-`gh pr merge --squash --delete-branch`, then `flow-finalize <N>`. Merge is not a human gate; hold only for a
-genuine design call, a scope/product question, an unmet requirement, or a `HOLD: merge after #N` order. See
+Merge is **autonomous on green** — once **local certification** holds (gate PASS + (design-driven)
+spec-auditor **C** PASS + roborev clean), and after the pre-merge SHA assert + `HOLD` re-read, **arm
+`gh pr merge --auto --squash --delete-branch`** and stop; GitHub lands the PR when the #2433 `required`
+check goes green (#2667), then `flow-finalize <N>`. **Never `ScheduleWakeup`-poll a PR's own CI** — `--auto`
+replaces the busy-wait. Merge is not a human gate; hold only for a genuine design call, a scope/product
+question, an unmet requirement, or a `HOLD: merge after #N` order. See
 [merge-process.md](merge-process.md) and `docs/development/pm-operating-loop.md`.
 
 ## References

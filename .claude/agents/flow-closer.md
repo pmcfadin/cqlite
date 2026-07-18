@@ -122,8 +122,8 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
 5. **Merge on green (worker-merges-own-PR model).** When gate PASS + C PASS (design) +
    roborev clean all hold on the final tree: beat the heartbeat, rebase on `origin/main`
    (resolve conflicts in the worktree — a rebase re-invalidates the gate per step 4),
-   `git push` the certified tip, open the nits follow-up issue if any, then — **before**
-   `gh pr merge` — run the two mechanical pre-merge guards:
+   `git push` the certified tip, open the nits follow-up issue if any, then — **before** arming
+   `gh pr merge --auto` — run the two mechanical pre-merge guards:
 
    **(a) Scripted pre-merge SHA assert (#2456/#2668).** Never merge a head the gate of
    record did not cover. Run the script with the SHA whose gate SUMMARY you hold

@@ -45,9 +45,10 @@ the owner (a green PR to merge, a spec to approve), or a short pick-list. Drive 
 
 - **Default:** you open the PR but **do NOT merge or close it** — merge is the owner's seam.
 - **Exception:** for a set the owner has **explicitly pre-authorized** ("merge #X, #Y on green"), you
-  MAY `gh pr merge --squash` and then `flow-finalize`, **only when `agent-gate.sh` PASS + C verdict PASS
-  + roborev clean** all hold. Poll external CI with `ScheduleWakeup` (cache-aware: ~270s while a lane
-  runs, longer when idle); harness-tracked Workflows notify you — don't poll those.
+  MAY **arm `gh pr merge --auto --squash --delete-branch`** and then `flow-finalize`, **only when
+  `agent-gate.sh` PASS + C verdict PASS + roborev clean** all hold (after the pre-merge SHA assert +
+  `HOLD` re-read). GitHub owns the CI-green wait — the `required` check (#2433) lands the PR on green;
+  **never `ScheduleWakeup`-poll a PR's own CI** (#2667). Harness-tracked Workflows notify you.
 - **Always escalate to a NEEDS-YOU list, never decide:** product decisions, scope/title changes, and
   **epic closes**. (This NARROWS the older "Product-manager behavior" autonomy: comment/label/assign and
   closing a fully-done non-epic issue with a merged PR stay yours; merging follows the model above.)
