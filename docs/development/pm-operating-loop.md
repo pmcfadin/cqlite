@@ -6,7 +6,7 @@ Two roles. One board. The manager orchestrates; the workers do everything else.
 
 | | **Manager** (one window, `/manager`) | **flow-lead workers** (**one per machine**; N machines) |
 |---|---|---|
-| Writes code / claims / merges? | **Never by hand** (runs the merge-on-green poller for the fleet) | Yes — owns the issue end-to-end |
+| Writes code / claims / merges? | **Never by hand** (workers arm `gh pr merge --auto`; GitHub lands the fleet's PRs on green) | Yes — owns the issue end-to-end |
 | Board | Controls **Ready** (what + order); reconciles; reaps | Reads Ready; claims the oldest unlocked item |
 | Lifecycle | none | full **1:1:1:1**: claim → implement → lite → **review-first** (rust-reviewer + roborev) → open PR → **`flow-closer`** {FULL gate ONCE → C → final roborev → **merge-on-green**} → cleanup |
 | Communication | signed **issue comments** (work orders) + Ready ordering | reads manager comments before acting; obeys the latest order |
@@ -50,34 +50,44 @@ ORDER: k                # queue rank when several are Ready at once
 5. **`flow-closer` runs the endgame (#2084) and merges on green.** `flow-implement` spawns a disposable
    per-issue `flow-closer` that runs the ONE full `scripts/agent-gate.sh` of record (via `run_in_background`
    + the summary-file pattern — it **never idle-waits**, which would trip the #1855 stall watchdog), the
-   **C** intent audit (design), and the final roborev pass, then — with any `HOLD: merge after #N` obeyed —
-   merges on green (`gh pr merge --squash --delete-branch`) and returns only a terminal packet. Any src
-   change after the full gate INVALIDATES it — the closer re-runs the gate if a fix or rebase postdates it.
+   **C** intent audit (design), and the final roborev pass, then — after the pre-merge SHA assert + any
+   `HOLD: merge after #N` obeyed — **arms auto-merge (`gh pr merge --auto --squash --delete-branch`) so
+   GitHub owns the CI-green wait** (#2667), and returns only a terminal packet. Any src change after the
+   full gate INVALIDATES it — the closer re-runs the gate if a fix or rebase postdates it.
    No worker CI busy-wait (`ScheduleWakeup`-polling a PR's own CI is prohibited).
 6. **Finalize follows the merge.** The merge event triggers `flow-finalize` (archive any OpenSpec change,
    **stamp the telemetry ledger** with the roborev blocker/nit split, remove the worktree, delete the origin
    claim branch + clear the heartbeat, close the issue with a traceable comment). Board → Done (built-in).
    The lead then **resets** — zero prior-issue carryover, next item re-hydrated from the board alone (#2085).
 
-## Merge-on-green (how a green PR lands — no worker CI busy-wait)
+## Merge-on-green (how a green PR lands — `--auto`, no worker CI busy-wait)
 
-A worker never busy-polls its PR's own CI. When it reaches its terminal state it **arms** one of two
-merge-on-green paths and stops; the mechanism watches the green signal for it:
+A worker/closer never busy-polls its PR's own CI. After **local certification** (the gate of record PASS +
+**C** PASS + roborev clean) and the pre-merge SHA assert + `HOLD` re-read, it **arms auto-merge and stops** —
+GitHub owns the CI-green wait:
 
-- **Primary today — the manager-owned poller.** `main` currently has **no required status checks**
-  (`contexts=[]`), so a naive `gh pr merge --auto` would merge the instant it is set, against an empty
-  check set (forbidden — see the green-signal guard below). So the worker hands the PR off to the
-  manager-owned poller/merge-engine, which gates on an explicit lane set and lands the PR on green. The
-  poller runs **once at the manager level for the whole fleet**, not N times per worker — that concentration
-  is the efficiency win.
-- **`gh pr merge --auto --squash --delete-branch` — primary once required checks are configured on `main`.**
-  When real required status checks exist for the PR's branch, `--auto` is the zero-token native path:
-  GitHub lands the PR the moment the required checks pass and auto-closes the issue via `Closes #N`. Until
-  then it is **not** used as the primary path.
+```bash
+gh pr merge <pr> --auto --squash --delete-branch
+```
 
-The worker **logs which path it armed**. **Green-signal guard:** merge-on-green SHALL only land a PR once a
-*defined* green signal exists — configured required checks, or the manager-poller's explicit lane set. It
-must never auto-land against an empty required-check set.
+GitHub lands the PR the instant the branch's **`required`** status check passes and auto-closes the issue
+via `Closes #N`. This is the single default path — there is no manager-owned poller/merge-engine (that
+mechanism was never built; it is gone).
+
+**Why `--auto` is safe (#2433):** `main` has a real `required` status check + `enforce_admins=true` — **not**
+an empty `contexts=[]` set. `--auto` therefore can never land a PR against an unchecked head, and there is no
+admin bypass. Branch protection is the green-signal guard, enforced by GitHub itself.
+
+**Finalize follows the merge across a possible session boundary (#2667).** Because `--auto` can complete
+after the arming session exits, finalize (telemetry, board, claim release) runs on whichever wake observes
+the merge:
+- **Fast path (DEFAULT when the `required` check is already green at arm time):** the closer briefly confirms
+  `gh pr view <pr> --json state -q .state` == `MERGED` (hard-deadline poll, not a tight loop) and finalizes
+  in-session.
+- **Deferred path (required check still pending at arm time):** the closer returns `verdict: auto-armed` and
+  a **later wake / next session** confirms `state=MERGED` before running `flow-finalize`. The #2667 gate
+  completion push-signal and GitHub's own auto-merge notification are the callbacks — the summary file is a
+  push signal now, not a poll target.
 
 **`ScheduleWakeup` is still valid** for genuinely external, harness-untracked state; what is forbidden is
 using it to busy-poll a PR's own external CI after the work is complete.
@@ -181,8 +191,8 @@ worktree (the manager never rebases someone else's branch).
 - **Seam 1 — spec approval**: design-driven issues stop after `flow-activate` for owner approval.
 - **Exceptions / product calls**: scope, epic close, conflicting requirements → manager surfaces a
   **NEEDS-YOU** list; never decided autonomously.
-- Workers otherwise **arm merge-on-green and stop**; the mechanism lands the PR on green. There is no human
-  merge click for worker-owned issues — and no worker CI busy-wait.
+- Workers otherwise **arm `gh pr merge --auto` and stop**; GitHub lands the PR when the `required` check
+  goes green (#2433/#2667). There is no human merge click for worker-owned issues — and no worker CI busy-wait.
 
 ## Hard rules
 - The gate is the only run that counts; paste its summary block.
