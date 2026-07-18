@@ -45,35 +45,46 @@ TEST_CMD="${ISSUE_GATE_TEST_CMD:-}"
 COVERAGE_CMD="${ISSUE_GATE_COVERAGE_CMD:-}"
 LITE_BUDGET_SECS="${ISSUE_GATE_LITE_BUDGET_SECS:-480}"
 
+# Validate the budget numerically before any arithmetic uses it (a non-integer would
+# break the `[ ... -ge ]` test and could hang the poll). Fall back to the default.
+case "$LITE_BUDGET_SECS" in
+  ''|*[!0-9]*)
+    echo "issue-gate: WARNING — ISSUE_GATE_LITE_BUDGET_SECS='$LITE_BUDGET_SECS' is not a non-negative integer; using 480." 1>&2
+    LITE_BUDGET_SECS=480 ;;
+esac
+
 fail() {
   echo "Issue gate blocked task completion:" 1>&2
   echo "  $1" 1>&2
   exit 2
 }
 
-warn_open() {
-  # Advisory-only fail-open: never block task completion. The gate of record is
-  # the flow-closer's full gate.
+warn_line() {
+  # Advisory-only warning helper. It NEVER exits — the caller decides whether to
+  # continue (e.g. so a wired coverage command still runs after a fail-open timeout).
   echo "issue-gate: WARNING — $1" 1>&2
-  echo "issue-gate: FAILING OPEN (advisory hook only; the gate of record is the flow-closer's full gate)." 1>&2
-  exit 0
+  echo "issue-gate: (advisory hook only; the gate of record is the flow-closer's full gate)." 1>&2
 }
 
 # --- Resolve the repo root from THIS hook file, never the session cwd (#2671) ---
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(git -C "$HOOK_DIR" rev-parse --show-toplevel 2>/dev/null || echo "")"
 if [ -z "$REPO_ROOT" ]; then
-  warn_open "could not resolve the repo root from ${HOOK_DIR:-<unknown>}; skipping the advisory check."
+  # No repo root -> nothing this advisory hook can run; exit clean (never block).
+  warn_line "could not resolve the repo root from ${HOOK_DIR:-<unknown>}; skipping the advisory check."
+  exit 0
 fi
 
-# --- Cheap skip: no Rust diff vs origin/main -> nothing for --lite to do ---
+# --- Cheap skip: no Rust change (committed OR working-tree) -> nothing for --lite ---
 # This short-circuits ONLY the TEST_CMD block (a wired coverage command still runs).
-# Only skip when we can POSITIVELY determine there is no Rust change; if the base
-# ref is unresolvable we fall through and run the check (conservative).
+# Skip only when BOTH the committed diff vs origin/main AND the working tree are free
+# of *.rs changes. `|| echo x` on either query FAILS TOWARD RUNNING (a git error makes
+# the var non-empty, so we do NOT skip). If the base ref is unresolvable we run too.
 SKIP_TEST=0
 if git -C "$REPO_ROOT" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
-  RUST_DIFF="$(git -C "$REPO_ROOT" diff --name-only origin/main...HEAD -- '*.rs' 2>/dev/null || echo "")"
-  if [ -z "$RUST_DIFF" ]; then
+  RUST_DIFF="$(git -C "$REPO_ROOT" diff --name-only origin/main...HEAD -- '*.rs' 2>/dev/null || echo x)"
+  RUST_DIRTY="$(git -C "$REPO_ROOT" status --porcelain -- '*.rs' 2>/dev/null || echo x)"
+  if [ -z "$RUST_DIFF" ] && [ -z "$RUST_DIRTY" ]; then
     SKIP_TEST=1
   fi
 fi
@@ -87,24 +98,29 @@ fi
 # grandchildren) — a direct-child-only kill would orphan the grandchild to keep
 # contending for gate slots, the very failure this defusal closes. `set +m` right
 # after the fork silences async job-completion notices without moving the child back
-# out of its group. The poll interval ramps 0.2s -> 2s to keep a fast check cheap.
+# out of its group. Elapsed time is real integer wall-clock (date +%s) — no float
+# accounting, no drift. On timeout we group-kill with a direct-pid fallback and the
+# final wait can never block. The poll interval ramps 0.2s -> 2s to stay cheap, so the
+# effective ceiling is budget + ~2s poll slop + 2s TERM grace.
 run_budgeted() {
-  local budget="$1" cmd="$2" pid waited=0 interval="0.2"
+  local budget="$1" cmd="$2" pid t0 interval_tenths=2
   set -m
   ( cd "$REPO_ROOT" && eval "$cmd" ) </dev/null 1>&2 &
   pid=$!
   set +m
+  t0=$(date +%s)
   while kill -0 "$pid" 2>/dev/null; do
-    if awk "BEGIN{exit !($waited >= $budget)}"; then
-      kill -TERM -"$pid" 2>/dev/null
+    if [ "$(( $(date +%s) - t0 ))" -ge "$budget" ]; then
+      # Group kill (negative pid) with a direct-child fallback; never hang on wait.
+      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
       sleep 2
-      kill -KILL -"$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
+      kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null || true
       return 124
     fi
-    sleep "$interval"
-    waited=$(awk "BEGIN{printf \"%.1f\", $waited + $interval}")
-    interval=$(awk "BEGIN{n=$interval*2; if(n>2)n=2; printf \"%.1f\", n}")
+    sleep "$(printf '%d.%d' "$((interval_tenths / 10))" "$((interval_tenths % 10))")"
+    interval_tenths=$((interval_tenths * 2))
+    [ "$interval_tenths" -gt 20 ] && interval_tenths=20
   done
   wait "$pid"
   return $?
@@ -120,7 +136,9 @@ elif [ -n "$TEST_CMD" ]; then
   rc=$?
   if [ "$rc" -eq 124 ]; then
     rm -f "$AGENT_GATE_SUMMARY_FILE" 2>/dev/null
-    warn_open "the lite check ('$TEST_CMD') exceeded its ${LITE_BUDGET_SECS}s budget."
+    # FAIL OPEN on a budget overrun: warn and fall through (never block; a wired
+    # coverage command still runs, then the hook exits 0).
+    warn_line "the lite check ('$TEST_CMD') exceeded its ${LITE_BUDGET_SECS}s budget — FAILING OPEN."
   elif [ "$rc" -ne 0 ]; then
     # Echo the SUMMARY block (the only retainable text, per doctrine) into the block
     # reason BEFORE removing the file.

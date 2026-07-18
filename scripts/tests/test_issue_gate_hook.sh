@@ -61,6 +61,7 @@ trap 'rm -rf "$tmp"' EXIT
 RECORD="$tmp/gate-record.txt"
 ROBOREV_SENTINEL="$tmp/roborev-was-called.txt"
 SLEEP_FINISHED_MARKER="$tmp/sleep-grandchild-finished.txt"
+SLEEP_PID_FILE="$tmp/sleep-grandchild-pid.txt"
 
 # Build a fake repo with the hook and a recording fake gate.
 build_repo() {
@@ -84,10 +85,12 @@ case "${FAKE_GATE_MODE:-pass}" in
     # Emit a recognizable SUMMARY block so the hook's fail path can echo it.
     [ -n "${AGENT_GATE_SUMMARY_FILE:-}" ] && printf 'AGENT-GATE-LITE-SUMMARY-SENTINEL\nRESULT: FAIL\n' >"$AGENT_GATE_SUMMARY_FILE"
     exit 1 ;;
-  # sleep past the budget, then drop a marker. If the hook's timeout path only
-  # killed the direct child (not the process group), this grandchild survives and
-  # writes the marker — exactly the invisible-contention leak we must prevent.
-  sleep) sleep 6; echo done >"$SLEEP_FINISHED_MARKER"; exit 0 ;;
+  # Record this gate process's PID, then sleep LONG (30s) past a small budget and
+  # only then drop a marker. The de-flake: the assertion does not race the marker —
+  # it proves the process group was actually killed by checking the recorded PID is
+  # gone (bounded poll), well before the 30s marker could ever appear. If the hook
+  # killed only the direct child, this grandchild survives — kill -0 stays true.
+  sleep) echo "$$" >"$SLEEP_PID_FILE"; sleep 30; echo done >"$SLEEP_FINISHED_MARKER"; exit 0 ;;
   *)     exit 0 ;;
 esac
 EOF
@@ -114,8 +117,9 @@ run_hook() {
   ( cd "$tmp" && echo '{}' | \
       GATE_RECORD="$RECORD" \
       SLEEP_FINISHED_MARKER="$SLEEP_FINISHED_MARKER" \
+      SLEEP_PID_FILE="$SLEEP_PID_FILE" \
       ISSUE_GATE_TEST_CMD="scripts/agent-gate.sh --lite" \
-      ISSUE_GATE_COVERAGE_CMD="" \
+      ISSUE_GATE_COVERAGE_CMD="${COV:-}" \
       ISSUE_GATE_ROBOREV="1" \
       ISSUE_GATE_LITE_BUDGET_SECS="${BUDGET:-480}" \
       FAKE_GATE_MODE="${FAKE_GATE_MODE:-pass}" \
@@ -196,11 +200,14 @@ else
   bad "FAIL path did not echo the lite SUMMARY block"
 fi
 
-# --- Case C: budget exceeded FAILS OPEN (exit 0 + warning) ----------------------
+# --- Case C: budget exceeded FAILS OPEN + kills the whole process group ----------
+# Load-proof (no timing-coupled marker race): the grandchild records its PID then
+# sleeps 30s. We assert exit 0 + warning, then prove the process group is actually
+# gone by polling the recorded PID with a bounded cap (never the 30s marker).
 repoC="$tmp/repoC"
 build_repo "$repoC"
 : >"$RECORD"
-rm -f "$SLEEP_FINISHED_MARKER"
+rm -f "$SLEEP_FINISHED_MARKER" "$SLEEP_PID_FILE"
 warn_out="$tmp/warn.txt"
 FAKE_GATE_MODE=sleep BUDGET=2 run_hook "$repoC" 2>"$warn_out"
 rcC=$?
@@ -214,33 +221,86 @@ if grep -q 'FAILING OPEN' "$warn_out"; then
 else
   bad "timeout path did not emit a 'FAILING OPEN' warning"
 fi
-# Wait past the grandchild's sleep (6s): if the process-group kill worked, the
-# grandchild is dead and the marker NEVER appears. A direct-child-only kill would
-# leave it running to write the marker (and keep contending for gate slots).
-sleep 7
-if [ ! -f "$SLEEP_FINISHED_MARKER" ]; then
-  ok "timeout path killed the whole process group — grandchild never finished (no marker)"
+
+# Read the grandchild PID (bounded poll — the file appears as soon as the shim starts).
+gc_pid=""
+waited=0
+while [ "$waited" -lt 5 ]; do
+  if [ -s "$SLEEP_PID_FILE" ]; then gc_pid=$(cat "$SLEEP_PID_FILE"); break; fi
+  sleep 1; waited=$((waited + 1))
+done
+# Poll-with-cap (bounded ~6s) for the grandchild to be gone. The hook already
+# TERM/KILLed the group during run_hook; this only confirms it, with generous margin.
+gc_gone=0
+if [ -n "$gc_pid" ]; then
+  waited=0
+  while [ "$waited" -lt 6 ]; do
+    if kill -0 "$gc_pid" 2>/dev/null; then
+      sleep 1; waited=$((waited + 1))
+    else
+      gc_gone=1; break
+    fi
+  done
+fi
+if [ "$gc_gone" -eq 1 ]; then
+  ok "timeout path killed the whole process group — grandchild PID $gc_pid is gone (kill -0 fails)"
 else
-  bad "timeout path left the gate grandchild alive (marker present) — process-group kill failed"
+  bad "timeout path left the gate grandchild (PID '${gc_pid:-unknown}') alive — process-group kill failed"
+fi
+# The 30s marker must never have appeared (secondary sanity check; the process is dead).
+if [ ! -f "$SLEEP_FINISHED_MARKER" ]; then
+  ok "gate grandchild never wrote its finished marker (killed before the 30s sleep completed)"
+else
+  bad "gate grandchild wrote its finished marker — it outlived the timeout"
 fi
 
-# --- Case D: no Rust diff vs origin/main -> cheap skip, gate never runs ----------
+# --- Case C2: fix #4 — a wired coverage command STILL runs after a fail-open timeout
+repoC2="$tmp/repoC2"
+build_repo "$repoC2"
+: >"$RECORD"
+rm -f "$SLEEP_PID_FILE"
+cov_marker="$tmp/coverage-ran.txt"
+rm -f "$cov_marker"
+FAKE_GATE_MODE=sleep BUDGET=2 COV="touch $cov_marker" run_hook "$repoC2" 2>/dev/null
+rcC2=$?
+if [ "$rcC2" -eq 0 ] && [ -f "$cov_marker" ]; then
+  ok "fail-open timeout falls through — a wired coverage command still runs (exit 0)"
+else
+  bad "fail-open timeout did not run the wired coverage command (rc=$rcC2, marker $( [ -f "$cov_marker" ] && echo present || echo absent ))"
+fi
+
+# --- Case D: no Rust change (committed AND clean tree) -> cheap skip, gate never runs
 repoD="$tmp/repoD"
 build_repo "$repoD"
-# Advance origin/main to HEAD so there is no Rust diff.
+# Advance origin/main to HEAD so there is no committed Rust diff; tree is clean.
 ( cd "$repoD" && git update-ref refs/remotes/origin/main HEAD )
 : >"$RECORD"
 FAKE_GATE_MODE=pass run_hook "$repoD"
 rcD=$?
 if [ "$rcD" -eq 0 ]; then
-  ok "no-Rust-diff path exits 0"
+  ok "no-Rust-change path exits 0"
 else
-  bad "no-Rust-diff path exited $rcD (expected 0)"
+  bad "no-Rust-change path exited $rcD (expected 0)"
 fi
 if [ ! -s "$RECORD" ]; then
-  ok "no-Rust-diff path skips the gate entirely (gate never invoked)"
+  ok "no-Rust-change path skips the gate entirely (gate never invoked)"
 else
-  bad "no-Rust-diff path invoked the gate (record: $(cat "$RECORD"))"
+  bad "no-Rust-change path invoked the gate (record: $(cat "$RECORD"))"
+fi
+
+# --- Case E: fix #3 — committed diff empty but a DIRTY *.rs working tree -> RUN ---
+# The skip must consult the working tree; an uncommitted Rust edit must NOT be skipped.
+repoE="$tmp/repoE"
+build_repo "$repoE"
+( cd "$repoE" && git update-ref refs/remotes/origin/main HEAD )  # no committed diff
+echo '// uncommitted edit' >>"$repoE/src/lib.rs"                  # dirty *.rs working tree
+: >"$RECORD"
+FAKE_GATE_MODE=pass run_hook "$repoE"
+rcE=$?
+if [ "$rcE" -eq 0 ] && [ -s "$RECORD" ]; then
+  ok "dirty *.rs working tree runs the gate even with no committed diff (exit 0, gate invoked)"
+else
+  bad "dirty *.rs working tree did not run the gate (rc=$rcE, record $( [ -s "$RECORD" ] && echo nonempty || echo empty ))"
 fi
 
 echo
