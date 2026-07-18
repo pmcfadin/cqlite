@@ -35,8 +35,18 @@ budget_field() {
 # cpu_budget <extra-env...>: run the hidden hook with a pinned ncpu + no-wrapper
 # (CQLITE_GATE_NO_NICE=1 keeps the assertion about wrapper=none/derivation clean
 # and avoids a taskpolicy/nice re-exec during the test) plus any extra env pairs.
+#
+# HERMETICITY (issue #2640): when this self-test runs as a `tooling-tests`
+# component, the PARENT gate has already exported its OWN budget/wrapper env —
+# CARGO_BUILD_JOBS (=> source would read `caller`), AGENT_GATE_WRAPPED, and
+# AGENT_GATE_WRAPPER (=> wrapper would read `taskpolicy -c utility`, spaces and
+# all). A nested `--cpu-budget` legitimately inherits those, so we MUST scrub
+# them here to unit-test the derivation against the test's OWN pinned inputs
+# rather than the ambient parent-gate state (else 2/3/6/8 fail nested but pass
+# standalone). `env -u` per-invocation keeps each case's inputs fully controlled.
 cpu_budget() {
-  env CQLITE_GATE_NO_NICE=1 "$@" bash "$GATE" --cpu-budget 2>/dev/null | grep -E '^cpu-budget: ' | head -1
+  env -u CARGO_BUILD_JOBS -u AGENT_GATE_WRAPPED -u AGENT_GATE_WRAPPER \
+    CQLITE_GATE_NO_NICE=1 "$@" bash "$GATE" --cpu-budget 2>/dev/null | grep -E '^cpu-budget: ' | head -1
 }
 
 # --- 1. syntax check ---
@@ -102,8 +112,12 @@ fi
 # --- 7. On this dev box (macOS), taskpolicy wrapping engages when available ---
 if [ "$(uname -s)" = Darwin ] && command -v taskpolicy >/dev/null 2>&1; then
   # WITHOUT the no-nice escape hatch, the gate re-execs under taskpolicy and the
-  # re-exec'd copy reports wrapper=taskpolicy... in its cpu-budget line.
-  wline=$(env AGENT_GATE_TEST_NCPU=16 bash "$GATE" --cpu-budget 2>/dev/null | grep -E '^cpu-budget: ' | head -1)
+  # re-exec'd copy reports wrapper=taskpolicy... in its cpu-budget line. Scrub the
+  # parent gate's AGENT_GATE_WRAPPED/AGENT_GATE_WRAPPER (issue #2640): when nested
+  # in `tooling-tests` they are already set, which would short-circuit the re-exec
+  # guard and report wrapper=none (green standalone, red nested) — clear them so
+  # this case genuinely exercises the wrap.
+  wline=$(env -u AGENT_GATE_WRAPPED -u AGENT_GATE_WRAPPER AGENT_GATE_TEST_NCPU=16 bash "$GATE" --cpu-budget 2>/dev/null | grep -E '^cpu-budget: ' | head -1)
   w=$(budget_field "$wline" wrapper)
   case "$w" in
     taskpolicy) ok "macOS: gate wraps in taskpolicy -c utility (wrapper=$w)" ;;
