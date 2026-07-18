@@ -60,6 +60,10 @@ export default defineConfig({
           autogenerate: { directory: 'releases' },
         },
         {
+          label: 'Field Validation',
+          autogenerate: { directory: 'field-validation' },
+        },
+        {
           label: 'SSTable Format Guide',
           autogenerate: { directory: 'sstable-format' },
         },
