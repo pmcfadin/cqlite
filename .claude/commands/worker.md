@@ -73,7 +73,11 @@ onto its own branch). Rules, non-negotiable:
    branch glob (older workers may still branch-lock):
    `bash scripts/flow/claim.sh status <N>` (any `CLAIM: STATUS issue=<N>` line ⇒ already claimed) and
    `git ls-remote --heads origin "issue-<N>-*"` (any hit ⇒ a legacy branch-lock holds it) → skip it if
-   either fires. **Select by board `Status` ONLY — never by the `status:ready` label**
+   either fires. **Park exclusion (#2666):** also skip any issue carrying the **`needs-decision`** label
+   UNLESS the owner has replied — i.e. it is re-dispatchable only when it has an **owner comment strictly
+   newer than the last `needs-decision` question comment** (then resume it per the park-and-resume protocol:
+   read the answer, remove the label, continue). A `needs-decision` issue with no newer owner reply is
+   parked-on-owner and is not yours to take. **Select by board `Status` ONLY — never by the `status:ready` label**
    (Path A, #1886: labels are decorative; the board is the sole dispatch authority). If the board is
    unreachable, STOP and report — do NOT fall back to labels to find work. **Empty Ready (and no own
    resumable claim) → write a `no-work` iteration marker (see step 9) and EXIT** — a cheap no-op iteration;
@@ -104,6 +108,9 @@ onto its own branch). Rules, non-negotiable:
    - **Design-driven / any new feature or surface with design latitude** → run **`flow-activate <N>` FIRST**.
      It produces the OpenSpec proposal/design/specs/tasks and **STOPS at Seam 1 for the owner's spec
      approval**. Do NOT write any code until the owner approves the spec. No new work without an approved spec.
+     **Unattended (#2666):** if the issue lacks the `resume-dont-ask` seal and the owner has not already
+     approved, do NOT wait at Seam 1 — **park** (`reason: seam1-approval`) per the park-and-resume protocol
+     and EXIT. A `resume-dont-ask` label means proceed without parking.
    - **Oracle-driven bug** (Cassandra/sstabledump source of truth + a pinned parity test) → skip OpenSpec,
      go straight to implement.
 6. **Run to completion** (`flow-implement <N>`) — **by dispatching subagents, not by hand**. Drive the
@@ -160,10 +167,41 @@ onto its own branch). Rules, non-negotiable:
    - **`blocked`** — real progress but stopped short of merge for an owner reason (design-call finding, scope/
      product question, unmet acceptance criterion, an explicit `HOLD: merge after #N`). `issue`+`reason` MUST
      be set; keep `reason` to ONE line (it flows verbatim into an ntfy body — put the actionable ask in it).
+     Two `reason` values are a distinct **clean park** the supervisor judges NORMAL (verdict
+     `parked-on-owner`, never toward the breaker) — see the **park-and-resume** protocol below:
+     - **`reason: "seam1-approval"`** — you reached Seam 1 (an unapproved design spec) in this unattended
+       session and cannot proceed without owner spec approval.
+     - **`reason: "needs-decision"`** — a genuine mid-run owner decision blocks progress (a product/scope
+       call, conflicting requirements, a tradeoff only the owner can make).
+     For a park you MAY also set an optional **`question`** field: a one-line summary of the posted question
+     (the supervisor puts it in the page title). `issue`+`reason` still MUST be set.
    `duration_s` is your own claim→outcome wall clock. A missing marker, a nonzero exit, an unknown `outcome`,
    or missing required fields = the supervisor judges the iteration **abnormal** (`BREAKER_N` consecutive
    abnormal iterations stop it with an alert). The marker write MUST be the final thing you do — anything
    after it that could fail would undermine the guarantee.
+
+## Park-and-resume — NEVER block on a question unattended (#2666)
+You run **unattended**. There is no human at the keyboard to answer a prompt. **`AskUserQuestion` is banned
+in a worker session** — a worker that calls it (or waits on any interactive prompt / permission menu) just
+wedges: it burns `MAX_ITER_SECS`, gets SIGTERM'd, and looks like a crash while the real diagnosis ("waiting
+on you") is never surfaced. When you hit a point that genuinely needs the owner — **Seam 1** (an unapproved
+design spec) or a **genuine mid-run owner decision** — do NOT wait. **Park and release the machine:**
+1. Post **ONE structured question comment** on the issue: the rendered options, **your recommendation**, and
+   a **default** the owner can accept by silence-then-answer. Make it answerable in one reply.
+2. Add the **`needs-decision`** label to the issue (`gh issue edit <N> --add-label needs-decision`).
+3. Write the iteration marker with `outcome: "blocked"` and `reason: "seam1-approval"` (Seam 1) or
+   `reason: "needs-decision"` (mid-run decision), plus an optional one-line `question` field.
+4. **EXIT** — releasing the box. The supervisor judges this `parked-on-owner` (never a crash, never toward
+   the breaker), pages the owner once, and moves to the next Ready issue. You never lose work: all state is
+   durable (branch, worktree, issue body, `openspec/`).
+
+**Resume path (owner answered).** A `needs-decision` issue is re-dispatchable **only** once the owner has
+replied: pick it up when it carries an **owner comment strictly newer than your question comment**. On
+resume, read the owner's answer as context, **remove the `needs-decision` label**
+(`gh issue edit <N> --remove-label needs-decision`), and continue from where you parked. Until such a newer
+owner reply exists, a `needs-decision` issue is **excluded from pickup** (skip it exactly like a claimed
+issue — see step 2). A durable **`resume-dont-ask`** label on an issue is a standing Seam-1 seal: treat spec
+approval as already granted and proceed without parking (honored by `flow-implement`).
 
 ## Discovered bugs & scope (never silently absorb scope creep)
 A bug you find that is **outside the current issue's scope** does not get fixed inline — that bloats the

@@ -353,6 +353,16 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   bound = process exit; the worker writes `.worker-last-iteration.json` then EXITs — never a second
   issue per session), with flock single-instance + preflight + crash-loop breaker + budgets + ntfy
   (`docs/development/fleet-runbook.md`).
+- **Park-and-resume — never block on a question unattended (#2666)**: `AskUserQuestion` (and any
+  interactive prompt) is **attended-sessions-only**. In an unattended worker session, hitting Seam 1 (an
+  unapproved spec) or a genuine mid-run owner decision is NOT a wait — the worker **parks**: post ONE
+  structured question comment (options + recommendation + default), add the `needs-decision` label, write
+  a `blocked` marker with `reason: seam1-approval|needs-decision` (+ optional one-line `question`), and
+  EXIT, releasing the machine. The supervisor judges this `parked-on-owner` (never toward the crash
+  breaker), pages the owner once, and moves to the next Ready issue; a stuck-on-a-prompt worker is detected
+  mid-iteration (log-tail watchdog) and paged as `stuck-on-question`, also never toward the breaker. A
+  `needs-decision` issue resumes only on a strictly-newer owner reply (worker reads the answer, clears the
+  label); a durable `resume-dont-ask` label is a standing Seam-1 seal `flow-implement` honors in place of asking.
 - **Inter-issue reset (#2085)**: after each `flow-finalize` the lead drops ALL prior-issue context
   (board renders, gate summaries, roborev findings, PR bodies, Seam-1 spec renders) and re-hydrates
   the next item from **board + disk alone**. Seam-1 spec bodies are not retained after approval —

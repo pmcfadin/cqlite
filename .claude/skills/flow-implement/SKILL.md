@@ -26,8 +26,12 @@ never gate stdout or review churn.
 
 ## Steps
 
-1. **Confirm precondition.** Design-driven: issue is `status:spec-review` AND owner approved (ask if you
-   can't confirm). Oracle-driven: a pinned parity/repro test exists or is written first. Set exactly one
+1. **Confirm precondition.** Design-driven: issue is `status:spec-review` AND (owner approved OR the
+   `resume-dont-ask` label is present — a durable Seam-1 seal that stands in for a per-session approval, #2666).
+   In an **attended** session you may ask when you can't confirm approval; in an **unattended** session NEVER
+   ask — **park** per the #2666 park-and-resume protocol (post ONE structured question comment + add the
+   `needs-decision` label + write a `blocked`/`reason: seam1-approval` marker + EXIT), never `AskUserQuestion`.
+   Oracle-driven: a pinned parity/repro test exists or is written first. Set exactly one
    lifecycle label — clear ALL `status:*` first so the issue never carries two (oracle issues arrive at
    `status:ready`, design issues at `status:spec-review`):
    ```bash
