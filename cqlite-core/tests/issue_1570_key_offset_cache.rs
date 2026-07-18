@@ -469,7 +469,7 @@ mod bti {
     /// "Why these guards assert on B4, not TRIE_WALKS (issue #2674)" note above.
     #[tokio::test]
     #[serial]
-    async fn bti_absent_key_never_cached_rewalks_trie() {
+    async fn bti_absent_key_never_served_b4_hit() {
         if find_data_db("test_da", "simple_table").is_none() {
             eprintln!("Skipping (B4/BTI absent): optional test_da/simple_table not present");
             return;
@@ -560,24 +560,19 @@ mod bti {
             "B4/BTI absent: interleave key A must be present"
         );
 
-        // Re-read the absent key and prove it is NEVER served a B4 cache HIT. Capture
-        // the process-global B4 hit counter immediately before the re-read; a correct
-        // read resolves the absent key by a cache MISS (then re-descends / re-verifies
-        // to absence) — the hit counter must not advance. Had the first absent read
-        // negatively cached the key (the perf/correctness defect this guard exists to
-        // catch), the re-read would register a B4 HIT and this delta would be > 0.
+        // Re-read the absent key and prove it is NEVER served a B4 cache HIT.
         //
-        // SINGLE-LOOKUP WINDOW (issue #2674 roborev): `hit_count()` is process-global.
-        // The window is safe from OTHER tests only against DEFAULT-KEY `#[serial]`
-        // tests IN THIS BINARY — a bare `#[serial]` (all tests here use it) is one
-        // global lock, so no bare-`#[serial]` peer runs concurrently; a *keyed*
-        // `#[serial(k)]` group would NOT be mutually excluded (different key), and a
-        // non-`#[serial]` test would not be either. There are none of those here. And
-        // this is a current-thread runtime, so no background task advances the counter
-        // within the test. The only B4 lookups between `hits_before` and `hits_after`
-        // are thus this ONE point read's own — a lookup of the absent key against each
-        // generation's reader (each a MISS, per the clean-miss precondition). A
-        // non-zero delta therefore unambiguously means the absent key was served a hit.
+        // ROBUST LOOKUP-WINDOW ASSERTION (issue #2674 roborev 1801): the property is
+        // carried by the PAIR of counter deltas across the re-read, with NO premise
+        // about how many lookups occur or which runtime they run on:
+        //   - `hit_count` delta == 0: no B4 hit was served in the window; and
+        //   - `miss_count` delta >= 1: the read really did consult B4 and resolved as
+        //     a miss (liveness — not vacuous because the path stopped using the cache).
+        // Together: the absent key was looked up and MISSED, never hit. A negative
+        // cache (the defect this guards) would instead register a hit → non-zero hit
+        // delta → failure. (The point read resolves the absent key inline through
+        // `key_cache_get` — no `spawn`/`spawn_blocking` in the point-read call chain —
+        // but the assertion does not rely on that; the counter pair is self-contained.)
         let hits_before = gc.hit_count();
         let misses_before = gc.miss_count();
         let len_before_reread = gc.len();
@@ -680,7 +675,7 @@ mod bti {
     /// assertion is a real differential, not a vacuous "nothing happened".
     #[tokio::test]
     #[serial]
-    async fn bti_disabled_cache_rewalks_trie_on_interleaved_reread() {
+    async fn bti_disabled_cache_never_touches_global_b4() {
         if find_data_db("test_da", "simple_table").is_none() {
             eprintln!("Skipping (B4/BTI disabled): optional test_da/simple_table not present");
             return;
