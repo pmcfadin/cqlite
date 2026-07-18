@@ -37,12 +37,16 @@ const DOC_FENCE_TAG: &str = "parity-retention-minimums";
 ///
 /// See issue #1353 (wire these lanes to the shared emitter, then remove them here).
 const NO_EMITTER_ALLOWLIST: &[&str] = &[
-    // Wave 2f removed the `parity-failures-*` uploads from these six lanes because
+    // Wave 2f removed the `parity-failures-*` uploads from these lanes because
     // their suites use plain `assert!`/`panic!` (they do not route through the
     // shared emitter). Wiring them to emit is deferred to #1353.
-    ".github/workflows/cql-type-parity.yml",
-    ".github/workflows/tombstone-ttl-parity.yml",
-    ".github/workflows/compression-corruption-parity.yml",
+    //
+    // Issue #2651 consolidated the former cql-type-parity / tombstone-ttl-parity /
+    // compression-corruption-parity lanes into a single matrix workflow
+    // (`parity-regen-matrix.yml`); it inherits the same #1353 no-shared-emitter
+    // gap (it uploads only the #1028 single-file summary, not the #1027 forensic
+    // bundle), so the consolidated lane carries the allowlist entry.
+    ".github/workflows/parity-regen-matrix.yml",
     ".github/workflows/live-cell-compaction-parity.yml",
     ".github/workflows/e2e-readback.yml",
     ".github/workflows/cassandra-validation.yml",
@@ -610,16 +614,16 @@ mod tests {
     #[test]
     fn allowlist_matches_bare_and_repo_relative_but_not_suffix_superset() {
         // A bare allowlisted basename matches.
-        assert!(is_allowlisted_no_emitter("cql-type-parity.yml"));
+        assert!(is_allowlisted_no_emitter("parity-regen-matrix.yml"));
         // A repo-relative path to the same lane matches (basename compared exactly).
         assert!(is_allowlisted_no_emitter(
-            ".github/workflows/cql-type-parity.yml"
+            ".github/workflows/parity-regen-matrix.yml"
         ));
         // A NEW lane whose name is a SUFFIX-superset must NOT be allowlisted
         // (regression: was previously matched via `ends_with`).
-        assert!(!is_allowlisted_no_emitter("new-cql-type-parity.yml"));
+        assert!(!is_allowlisted_no_emitter("new-parity-regen-matrix.yml"));
         assert!(!is_allowlisted_no_emitter(
-            ".github/workflows/new-cql-type-parity.yml"
+            ".github/workflows/new-parity-regen-matrix.yml"
         ));
         // An unrelated lane is not allowlisted.
         assert!(!is_allowlisted_no_emitter(

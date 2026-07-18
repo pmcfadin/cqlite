@@ -380,14 +380,14 @@ fn issue_1028_summary_upload_is_not_a_1027_bundle() {
     );
 }
 
-/// The #1028 summary upload, on an ALLOWLISTED lane (the three real deferred lanes:
-/// compression-corruption / cql-type / tombstone-ttl), falls back to the no-emitter
+/// The #1028 summary upload, on an ALLOWLISTED lane (the consolidated
+/// parity-regen-matrix lane, issue #2651), falls back to the no-emitter
 /// allowlist disposition (OK-with-a-note), NOT a retention finding.
 #[test]
 fn issue_1028_summary_on_allowlisted_lane_is_ok_with_note() {
     let wf = issue_1028_summary_upload_workflow();
     let detailed = check_workflow_detailed(
-        ".github/workflows/cql-type-parity.yml",
+        ".github/workflows/parity-regen-matrix.yml",
         &wf,
         &["nightly_docker".to_string()],
         &minimums(),
@@ -506,7 +506,7 @@ fn no_upload_non_allowlisted_lane_is_a_finding() {
 fn no_upload_allowlisted_lane_is_ok_with_note() {
     let wf = no_upload_workflow();
     let detailed = check_workflow_detailed(
-        ".github/workflows/cql-type-parity.yml",
+        ".github/workflows/parity-regen-matrix.yml",
         &wf,
         &["nightly_docker".to_string()],
         &minimums(),
@@ -521,7 +521,7 @@ fn no_upload_allowlisted_lane_is_ok_with_note() {
         .as_deref()
         .expect("allowlisted no-upload lane must carry an OK-with-a-note");
     assert!(
-        note.contains("#1353") && note.contains("cql-type-parity.yml"),
+        note.contains("#1353") && note.contains("parity-regen-matrix.yml"),
         "note must reference #1353 + the workflow, got: {note}"
     );
 }
