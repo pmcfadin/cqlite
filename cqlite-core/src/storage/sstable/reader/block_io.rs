@@ -1155,11 +1155,10 @@ mod tests {
     ///
     /// This test does not assert on READ_CALLS, but each successful
     /// `read_compressed_chunk_at` here calls `record_read()` and thus MUTATES the
-    /// process-global counter. Any test that reads OR mutates READ_CALLS must be in
-    /// the shared `#[serial(work_counters)]` group (issue #1946/#2006, normalized in
-    /// #2714 roborev 1828): without it this sibling could increment the counter
-    /// concurrently with `..._records_one_read_per_chunk` and flake its post-`reset`
-    /// delta assertion.
+    /// process-global counter. Any test that reads OR mutates READ_CALLS must share
+    /// the `#[serial(work_counters)]` group (issue #1946/#2006, normalized #2714): else
+    /// this sibling could bump it concurrently with `..._records_one_read_per_chunk`
+    /// and flake its post-`reset` delta assertion.
     #[test]
     #[serial_test::serial(work_counters)]
     fn read_compressed_chunk_at_verifies_crc_before_returning() {
@@ -1223,15 +1222,10 @@ mod tests {
     /// Counters are a shared process-global, so this test serializes on the
     /// `serial_test` mutex (the counter-test convention; issue #1071) — a stale
     /// value from a parallel test cannot satisfy an assertion after the `reset`.
-    /// INVARIANT (issue #1946/#2006, normalized #2714 roborev 1828): EVERY test in
-    /// this `--lib` binary that reads OR mutates READ_CALLS (i.e. calls
-    /// `record_read()` via `read_compressed_chunk_at` / `read_nb_format_chunk_data`
-    /// / the windowed scan feed, or `rwc::read_calls()`/`rwc::reset()`) must be in the
-    /// ONE shared `#[serial(work_counters)]` group, or its increments contaminate this
-    /// delta assertion. Bare `#[serial]` and `#[serial(work_counters)]` are DIFFERENT
-    /// groups that do NOT serialize against each other — the read-counter guards
-    /// (this file, chunk-cache, big-promoted-seek, compaction-cancel, full-index-stream
-    /// windowed) are all `work_counters` for exactly this reason.
+    /// INVARIANT (issue #1946/#2006, normalized #2714 r1828): EVERY test in this `--lib`
+    /// binary that touches READ_CALLS (`record_read()` via `read_compressed_chunk_at` /
+    /// the windowed scan feed, or `rwc::read_calls()`/`rwc::reset()`) must share the ONE
+    /// `#[serial(work_counters)]` group — bare `#[serial]` is a DIFFERENT, non-serial group.
     #[test]
     #[serial_test::serial(work_counters)]
     fn read_compressed_chunk_at_records_one_read_per_chunk() {
