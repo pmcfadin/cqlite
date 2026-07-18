@@ -62,6 +62,7 @@ RECORD="$tmp/gate-record.txt"
 ROBOREV_SENTINEL="$tmp/roborev-was-called.txt"
 SLEEP_FINISHED_MARKER="$tmp/sleep-grandchild-finished.txt"
 SLEEP_PID_FILE="$tmp/sleep-grandchild-pid.txt"
+SLEEP_KILLED_MARKER="$tmp/sleep-grandchild-killed.txt"
 # An EMPTY slots dir every case points at by default, so a real full gate running
 # on this machine (e.g. when this self-test runs INSIDE the gate) can never make the
 # hook's slot-aware skip fire and flip an unrelated assertion. The slot-skip case
@@ -91,12 +92,18 @@ case "${FAKE_GATE_MODE:-pass}" in
     # Emit a recognizable SUMMARY block so the hook's fail path can echo it.
     [ -n "${AGENT_GATE_SUMMARY_FILE:-}" ] && printf 'AGENT-GATE-LITE-SUMMARY-SENTINEL\nRESULT: FAIL\n' >"$AGENT_GATE_SUMMARY_FILE"
     exit 1 ;;
-  # Record this gate process's PID, then sleep LONG (30s) past a small budget and
-  # only then drop a marker. The de-flake: the assertion does not race the marker —
-  # it proves the process group was actually killed by checking the recorded PID is
-  # gone (bounded poll), well before the 30s marker could ever appear. If the hook
-  # killed only the direct child, this grandchild survives — kill -0 stays true.
-  sleep) echo "$$" >"$SLEEP_PID_FILE"; sleep 30; echo done >"$SLEEP_FINISHED_MARKER"; exit 0 ;;
+  # Trap TERM and write a 'killed' marker BY THIS ACTUAL PROCESS, then sleep LONG
+  # (30s) past a small budget and only then drop a 'finished' marker. The de-flake:
+  # the assertion polls for the killed-marker (written by the real grandchild when the
+  # group TERM reaches it) rather than probing a recyclable PID with kill -0. If the
+  # hook killed only the direct child, this grandchild survives — no killed-marker and
+  # (30s later) a finished-marker.
+  sleep)
+    trap 'echo killed >"$SLEEP_KILLED_MARKER"; exit 143' TERM
+    echo "$$" >"$SLEEP_PID_FILE"
+    sleep 30
+    echo done >"$SLEEP_FINISHED_MARKER"
+    exit 0 ;;
   *)     exit 0 ;;
 esac
 EOF
@@ -124,6 +131,7 @@ run_hook() {
       GATE_RECORD="$RECORD" \
       SLEEP_FINISHED_MARKER="$SLEEP_FINISHED_MARKER" \
       SLEEP_PID_FILE="$SLEEP_PID_FILE" \
+      SLEEP_KILLED_MARKER="$SLEEP_KILLED_MARKER" \
       ISSUE_GATE_TEST_CMD="scripts/agent-gate.sh --lite" \
       ISSUE_GATE_COVERAGE_CMD="${COV:-}" \
       ISSUE_GATE_ROBOREV="1" \
@@ -214,13 +222,14 @@ else
 fi
 
 # --- Case C: budget exceeded FAILS OPEN + kills the whole process group ----------
-# Load-proof (no timing-coupled marker race): the grandchild records its PID then
-# sleeps 30s. We assert exit 0 + warning, then prove the process group is actually
-# gone by polling the recorded PID with a bounded cap (never the 30s marker).
+# Load-proof, no recyclable-PID probe: the grandchild traps TERM and writes a 'killed'
+# marker BY ITSELF, then sleeps 30s. We assert exit 0 + warning, then poll (bounded)
+# for that killed-marker — proof the group TERM actually reached the grandchild — and
+# confirm the 30s 'finished' marker never appeared.
 repoC="$tmp/repoC"
 build_repo "$repoC"
 : >"$RECORD"
-rm -f "$SLEEP_FINISHED_MARKER" "$SLEEP_PID_FILE"
+rm -f "$SLEEP_FINISHED_MARKER" "$SLEEP_PID_FILE" "$SLEEP_KILLED_MARKER"
 warn_out="$tmp/warn.txt"
 out_c="$tmp/out_c.txt"
 FAKE_GATE_MODE=sleep BUDGET=2 run_hook "$repoC" >"$out_c" 2>"$warn_out"
@@ -242,30 +251,18 @@ else
   bad "timeout path did not emit the FAILING OPEN notice on stdout"
 fi
 
-# Read the grandchild PID (bounded poll — the file appears as soon as the shim starts).
-gc_pid=""
+# Poll-with-cap (bounded ~6s) for the grandchild's OWN 'killed' marker — written by its
+# TERM trap when the group signal reaches it. No kill -0 on a recyclable PID.
+gc_killed=0
 waited=0
-while [ "$waited" -lt 5 ]; do
-  if [ -s "$SLEEP_PID_FILE" ]; then gc_pid=$(cat "$SLEEP_PID_FILE"); break; fi
+while [ "$waited" -lt 6 ]; do
+  if [ -f "$SLEEP_KILLED_MARKER" ]; then gc_killed=1; break; fi
   sleep 1; waited=$((waited + 1))
 done
-# Poll-with-cap (bounded ~6s) for the grandchild to be gone. The hook already
-# TERM/KILLed the group during run_hook; this only confirms it, with generous margin.
-gc_gone=0
-if [ -n "$gc_pid" ]; then
-  waited=0
-  while [ "$waited" -lt 6 ]; do
-    if kill -0 "$gc_pid" 2>/dev/null; then
-      sleep 1; waited=$((waited + 1))
-    else
-      gc_gone=1; break
-    fi
-  done
-fi
-if [ "$gc_gone" -eq 1 ]; then
-  ok "timeout path killed the whole process group — grandchild PID $gc_pid is gone (kill -0 fails)"
+if [ "$gc_killed" -eq 1 ]; then
+  ok "timeout path killed the whole process group — grandchild caught the group TERM (wrote its killed-marker)"
 else
-  bad "timeout path left the gate grandchild (PID '${gc_pid:-unknown}') alive — process-group kill failed"
+  bad "timeout path did not signal the gate grandchild — no killed-marker (process-group kill failed)"
 fi
 # The 30s marker must never have appeared (secondary sanity check; the process is dead).
 if [ ! -f "$SLEEP_FINISHED_MARKER" ]; then
@@ -333,7 +330,7 @@ rcF=$?
 if [ "$rcF" -eq 0 ] && [ -s "$RECORD" ] && grep -q 'is not a non-negative integer' "$warnF_out"; then
   ok "non-integer budget warns, defaults to 480, and runs the gate normally"
 else
-  bad "non-integer budget mishandled (rc=$rcF, record $( [ -s "$RECORD" ] && echo nonempty || echo empty ), warned=$(grep -qc 'not a non-negative integer' "$warnF_out" && echo yes || echo no))"
+  bad "non-integer budget mishandled (rc=$rcF, record $( [ -s "$RECORD" ] && echo nonempty || echo empty ), warned=$(grep -q 'not a non-negative integer' "$warnF_out" && echo yes || echo no))"
 fi
 
 # --- Case G: fix #5 — hook invoked from a NON-git dir -> exit 0, gate never runs ---
@@ -386,7 +383,7 @@ PY
   if [ "$rcH" -eq 0 ] && [ ! -s "$RECORD" ] && grep -q 'full gate active — advisory check skipped' "$outH"; then
     ok "full gate holding a slot -> advisory check skipped (exit 0, gate never invoked)"
   else
-    bad "slot-aware skip failed (rc=$rcH, record $( [ -s "$RECORD" ] && echo nonempty || echo empty ), notice=$(grep -qc 'advisory check skipped' "$outH" && echo yes || echo no))"
+    bad "slot-aware skip failed (rc=$rcH, record $( [ -s "$RECORD" ] && echo nonempty || echo empty ), notice=$(grep -q 'advisory check skipped' "$outH" && echo yes || echo no))"
   fi
 else
   ok "slot-aware skip case SKIPPED (no python3 — the hook's slot probe also no-ops without it)"

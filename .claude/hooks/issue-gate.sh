@@ -31,7 +31,9 @@
 #     diff is left uncovered by this test. A wired coverage command still runs.
 #   * The gate's own verbose output goes to a temp log; on a genuine FAIL the block
 #     reason is ONLY the lite SUMMARY block + the log path — never the raw log
-#     (mirroring the doctrine invocation: read the SUMMARY, never the gate log).
+#     (mirroring the doctrine invocation: read the SUMMARY, never the gate log). The
+#     summary file is removed via an EXIT trap; the output log is RETAINED on a FAIL
+#     (so the block reason's path resolves) and removed on PASS/timeout.
 #   * The FAILING-OPEN notice is emitted on BOTH stdout and stderr so it reaches the
 #     session (hook stdout is surfaced on a success/exit-0 completion).
 #
@@ -73,12 +75,15 @@ warn_line() {
   printf 'issue-gate: WARNING — %s\nissue-gate: (advisory hook only; the gate of record is the flow-closer'"'"'s full gate).\n' "$1" 1>&2
 }
 
-# full_gate_active: true (0) when a FULL agent-gate run currently HOLDS one of the
-# machine-wide concurrency slots (issue #1825). Slots live under
-# $CQLITE_GATE_SLOTS_DIR (default ${TMPDIR:-/tmp}/cqlite-gate-slots) as slot.N files
-# held by a live daemon via a non-blocking fcntl.flock (LOCK_EX). Existence alone is
-# stale-prone (the file survives the gate), so we TEST the lock: python3 tries a
-# non-blocking flock on each slot; a slot it cannot lock is held -> a gate is active.
+# full_gate_active: true (0) when ANY gate slot holder currently holds one of the
+# machine-wide concurrency slots (issue #1825). In practice only FULL gates take a
+# slot (--lite self-exempts), so a held slot means the gate of record is running;
+# distinguishing full-vs-lite holders is not worth a new slot-file protocol here.
+# Slots live under $CQLITE_GATE_SLOTS_DIR (default ${TMPDIR:-/tmp}/cqlite-gate-slots)
+# as slot.N files held by a live daemon via a non-blocking fcntl.flock (LOCK_EX).
+# Existence alone is stale-prone (the file survives the gate), so we TEST the lock:
+# python3 tries a non-blocking flock on each slot; a slot it cannot lock (or cannot
+# even open, because another UID's live gate owns it) is held -> a gate is active.
 # No python3 (or no dir) -> we cannot tell -> return false (fail toward running).
 full_gate_active() {
   local dir="${CQLITE_GATE_SLOTS_DIR:-${TMPDIR:-/tmp}/cqlite-gate-slots}"
@@ -90,13 +95,15 @@ d = sys.argv[1]
 for p in glob.glob(os.path.join(d, "slot.*")):
     try:
         fd = os.open(p, os.O_RDWR)
+    except PermissionError:
+        sys.exit(0)   # another UID owns the slot file -> its live gate holds it
     except OSError:
         continue
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(fd, fcntl.LOCK_UN)
     except OSError:
-        sys.exit(0)   # locked -> a full gate holds this slot
+        sys.exit(0)   # locked -> a gate holds this slot
     finally:
         os.close(fd)
 sys.exit(1)           # no held slot found
@@ -152,7 +159,7 @@ fi
 # effective ceiling is budget + ~2s poll slop + 2s TERM grace.
 BUDGET_TIMED_OUT=0
 run_budgeted() {
-  local budget="$1" cmd="$2" log="$3" pid t0 interval_tenths=2
+  local budget="$1" cmd="$2" log="$3" pid t0 interval_tenths=2 child_pgid
   BUDGET_TIMED_OUT=0
   set -m
   ( cd "$REPO_ROOT" && eval "$cmd" ) >"$log" 2>&1 </dev/null &
@@ -161,10 +168,20 @@ run_budgeted() {
   t0=$(date +%s)
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$(( $(date +%s) - t0 ))" -ge "$budget" ]; then
-      # Group kill (negative pid) with a direct-child fallback; never hang on wait.
-      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-      sleep 2
-      kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+      # SAFETY: only signal the process GROUP when the child actually leads its own
+      # group (pgid == pid) — i.e. `set -m` really gave it one. If `set -m` silently
+      # failed, the child shares OUR group, and a negative-pid kill would signal this
+      # hook's own session; fall back to a direct single-process kill in that case.
+      child_pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+      if [ -n "$child_pgid" ] && [ "$child_pgid" = "$pid" ]; then
+        kill -TERM "-$child_pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+        sleep 2
+        kill -KILL "-$child_pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+      else
+        kill -TERM "$pid" 2>/dev/null
+        sleep 2
+        kill -KILL "$pid" 2>/dev/null
+      fi
       wait "$pid" 2>/dev/null || true
       BUDGET_TIMED_OUT=1
       return 124
@@ -183,6 +200,10 @@ elif [ -n "$TEST_CMD" ]; then
   # Unique summary + log paths so concurrent/foreign gates never contend (#2671/#2079).
   AGENT_GATE_SUMMARY_FILE="$(mktemp -t issue-gate-lite-summary.XXXXXX 2>/dev/null || echo "${TMPDIR:-/tmp}/issue-gate-lite-summary.$$")"
   GATE_OUTPUT_LOG="$(mktemp -t issue-gate-lite.XXXXXX.log 2>/dev/null || echo "${TMPDIR:-/tmp}/issue-gate-lite.$$.log")"
+  # Always remove the summary file on exit, even if fail()/a signal short-circuits the
+  # explicit rm below. The output log is intentionally NOT cleaned here — it is retained
+  # on a FAIL so the block reason's log path stays valid (see header).
+  trap 'rm -f "${AGENT_GATE_SUMMARY_FILE:-}"' EXIT
   export AGENT_GATE_SUMMARY_FILE
   run_budgeted "$LITE_BUDGET_SECS" "$TEST_CMD" "$GATE_OUTPUT_LOG"
   rc=$?
