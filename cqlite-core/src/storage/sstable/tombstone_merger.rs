@@ -652,7 +652,8 @@ mod tests {
         let duration = start.elapsed();
 
         assert_eq!(result.len(), 10000);
-        assert!(duration.as_millis() < 1000); // Should complete within 1 second
+        // #2369 record-not-assert: `<1s` bound flakes under load; correctness asserted above.
+        eprintln!("[perf-record] batch_merge_with_tombstones (10k entries): {duration:?}");
 
         Ok(())
     }
@@ -803,8 +804,8 @@ mod tests {
         }
         let duration = start.elapsed();
 
-        // Should complete very quickly (within 100ms for 100k iterations)
-        assert!(duration.as_millis() < 100);
+        // #2369 record-not-assert: `<100ms` bound flakes under load; correctness asserted in loop.
+        eprintln!("[perf-record] fast_tombstone_check x100k: {duration:?}");
     }
 
     // =========================================================================

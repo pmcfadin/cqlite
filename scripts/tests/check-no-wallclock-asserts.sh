@@ -50,6 +50,15 @@ declare -a ROOTS=()
 if [ "$#" -gt 0 ]; then
   ROOTS=("$@")
 else
+  # KNOWN COVERAGE BOUNDARY (#2642 review): the automated default scan covers the
+  # tests/ trees only. `#[cfg(test)]` inline modules under src/ ALSO compile and run
+  # in the default correctness gate (`cargo test --package <pkg>`), so a wall-clock
+  # assert there flakes the same way — but a full src/ sweep surfaces a broader set of
+  # pre-existing latency asserts across unrelated modules (value_fmt, collection
+  # validation, block_io_retry, async_bridge, benchmarks/cassandra5) and false-positives
+  # on the CQL type name `duration`, both of which are out of this issue's enumerated
+  # scope. That sweep + a tightened time-typed regex is deferred to a follow-up. Scan
+  # src/ explicitly by passing the path as an argument.
   for p in \
     "$REPO_ROOT/cqlite-core/tests" \
     "$REPO_ROOT/cqlite-cli/tests"; do
