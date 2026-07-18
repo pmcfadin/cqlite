@@ -517,7 +517,15 @@ print("armed" if d.get("autoMergeRequest") else "")
       sleep "$MISMATCH_RETRY_WAIT_SECS"
       continue
     fi
-    # Retries exhausted on a stable, resolved, non-merged state — a genuine mismatch.
+    # Retries exhausted. Re-check the stop-file here too: with MISMATCH_RETRIES=1 the
+    # loop never reaches the mid-loop guard above, and even with more retries a shutdown
+    # can arrive during this FINAL read — either way a requested shutdown must never be
+    # reported as a forged finalize (roborev 1838), so emit the neutral `aborted`.
+    if [[ -f "$STOP_FILE" ]]; then
+      printf 'aborted'
+      return 0
+    fi
+    # A stable, resolved, non-merged state that outlasted the grace — a genuine mismatch.
     printf 'mismatch:%s' "$state"
     return 0
   done

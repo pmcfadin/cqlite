@@ -1941,13 +1941,19 @@ test_mid_grace_stop_is_aborted() {
   d="$(new_case_dir)"
   touch "$d/stop"
   # shellcheck disable=SC2016  # $1 expands inside the sub-bash, not here.
+  local out1
   out="$(GH_VERIFY_CMD='printf %s "{\"state\":\"OPEN\",\"autoMergeRequest\":null}"' \
         MISMATCH_RETRIES=5 MISMATCH_RETRY_WAIT_SECS=0 STOP_FILE="$d/stop" \
         bash -c 'source "$1"; verify_finalized_pr 42' _ "$SUPERVISOR" 2>/dev/null)"
-  if [[ "$out" == "aborted" ]]; then
-    pass "mid-grace stop: shutdown cuts grace short → aborted (neutral; not a forged-finalize mismatch)"
+  # roborev 1838: also cover MISMATCH_RETRIES=1 — the loop never reaches the mid-loop
+  # guard, so the final-read stop-file re-check is what defuses the forgery verdict.
+  out1="$(GH_VERIFY_CMD='printf %s "{\"state\":\"OPEN\",\"autoMergeRequest\":null}"' \
+        MISMATCH_RETRIES=1 MISMATCH_RETRY_WAIT_SECS=0 STOP_FILE="$d/stop" \
+        bash -c 'source "$1"; verify_finalized_pr 42' _ "$SUPERVISOR" 2>/dev/null)"
+  if [[ "$out" == "aborted" && "$out1" == "aborted" ]]; then
+    pass "mid-grace stop: shutdown cuts grace short → aborted (neutral; retries=5 AND retries=1)"
   else
-    fail "mid-grace-stop: got '$out' (expected aborted, NOT mismatch:* / unverified)"
+    fail "mid-grace-stop: got retries5='$out' retries1='$out1' (expected aborted, NOT mismatch:* / unverified)"
   fi
 }
 
