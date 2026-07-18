@@ -1332,6 +1332,24 @@ _python_build_verify_venv() {
 }
 
 COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
+
+# _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
+# MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
+# hidden --classify-lanes self-test can assert the mapping WITHOUT running any
+# cargo/git. Prints "side" for a component that runs in the concurrent SIDE lane
+# (its own CARGO_TARGET_DIR — no shared cqlite-core target contention with MAIN),
+# else "main". is_side_component (below) delegates here so there is exactly one
+# lane definition. Rationale for each SIDE member lives on the is_side_component
+# doc block. Everything else stays on the strictly-serial MAIN lane; the SUMMARY
+# is reconstructed in canonical COMPONENTS order regardless of lane, so the
+# summary-block contract is unchanged by this mapping.
+_component_lane() {
+  case "$1" in
+    python-bindings|node-bindings) printf side ;;
+    parity-report|delivery-telemetry|tooling-tests|binding-unwind-profile|smoke|memory-budget) printf side ;;
+    *) printf main ;;
+  esac
+}
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
 # and blast-radius-scoped tests (the touched package's --lib + the diff's new
@@ -1410,6 +1428,13 @@ case "${1:-}" in
   # Hidden self-test hook (issue #1821): map stdin paths -> "<pkg>|<has_lib>"
   # via metadata-derived longest-prefix package ownership. No side effects.
   --classify-package-owners) classify_package_owners; exit 0 ;;
+  # Hidden self-test hook (issue #2657): print "<lane> <component>" for every gate
+  # component in canonical COMPONENTS order, where <lane> is main|side, so the
+  # self-test can assert the parallel-sublane split WITHOUT running cargo/git. No
+  # side effects.
+  --classify-lanes)
+    for _lc in "${COMPONENTS[@]}"; do printf '%s %s\n' "$(_component_lane "$_lc")" "$_lc"; done
+    exit 0 ;;
   # Hidden self-test hook (issue #2658): print the no-metadata-parser LOUD-FAIL
   # message so the self-test can assert --lite FAILS (naming the missing tool)
   # rather than silently narrowing to cqlite-core --lib. No side effects.
@@ -2572,6 +2597,24 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_issue_gate_hook.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (issue-gate hook defusal self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # parallel sub-lane scheduling self-test (#2657, epic #2636): no python3 needed,
+  # always runs (hermetic — drives the --classify-lanes hook + static invariants;
+  # no cargo/git). Asserts the isolatable non-core components run in the concurrent
+  # SIDE lane with isolated CARGO_TARGET_DIR, the shared-target cargo components stay
+  # on the serial MAIN lane, the serial fallback is intact, and the SUMMARY stays
+  # reconstructed in canonical order. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_sublanes.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_sublanes.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (parallel sub-lane scheduling self-test #2657); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -4098,16 +4141,38 @@ dispatch_component() {
   esac
 }
 
-# is_side_component / run_side_component: python-bindings and node-bindings are the
-# biggest non-core costs and, being separate crates built with binding-specific
-# features, would repeatedly invalidate + rebuild cqlite-core in the SHARED target
-# dir if run concurrently with the main cargo lane (measured: python-bindings
-# ballooned 72s -> 576s under a naive shared-target pool). So they run in a SIDE
-# lane with their OWN CARGO_TARGET_DIR, which removes the cross-lane cargo
-# feature-thrash and build-lock contention (sccache still dedups the actual
-# compiles across target dirs). Nothing else spawns from these dirs.
+# is_side_component / run_side_component: the SIDE lane holds every gate component
+# that can run CONCURRENTLY with the shared-target MAIN cargo lane WITHOUT
+# introducing cross-lane build thrash. Two classes qualify (issues #1737, #2657):
+#
+#   (a) SEPARATE-CRATE / DIVERGENT-FEATURE cargo components. python-bindings and
+#       node-bindings are the biggest non-core costs and, being separate crates
+#       built with binding-specific features, would repeatedly invalidate + rebuild
+#       cqlite-core in the SHARED target dir if run concurrently with MAIN
+#       (measured: python-bindings ballooned 72s -> 576s under a naive shared-target
+#       pool). The same shared-target hazard applies to the other isolatable cargo
+#       components (issue #2657): memory-budget compiles cqlite-core with a DIFFERENT
+#       feature set (dhat-heap,arrow) than MAIN's cli-helpers — exactly the
+#       feature-thrash shape — and smoke + parity-report build cqlite-cli /
+#       cassandra-parity (both depend on cqlite-core). Running any of these against
+#       MAIN's target dir would thrash it; each therefore gets its OWN
+#       CARGO_TARGET_DIR (see run_side_component), which removes the cross-lane cargo
+#       feature-thrash and build-lock contention (sccache still dedups the actual
+#       compiles across target dirs).
+#   (b) NON-CARGO / isolatable script components: delivery-telemetry (python3),
+#       binding-unwind-profile (offline bash), tooling-tests (bash/python
+#       self-tests; any nested cargo inherits the isolated CARGO_TARGET_DIR, keeping
+#       it off MAIN's target too). These touch MAIN's shared target not at all, so
+#       they are trivially safe to overlap with the core cargo lane.
+#
+# Everything NOT listed here stays on the strictly-serial MAIN lane (it shares
+# cqlite-core's target with a MAIN-compatible feature set), preserving the identical
+# build profile of the historical sequential gate. Widening this set only shifts
+# WHICH lane a component runs in — the end-of-run SUMMARY is reconstructed in
+# canonical COMPONENTS order from per-component .result files, so the summary block
+# CONTRACT is unchanged regardless of lane or finish order.
 is_side_component() {
-  case "$1" in python-bindings|node-bindings) return 0 ;; *) return 1 ;; esac
+  [ "$(_component_lane "$1")" = side ]
 }
 run_side_component() {
   local base="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
@@ -4118,16 +4183,20 @@ run_side_component() {
 declare -a SELECTED_MAIN=() SELECTED_SIDE=()
 SIDE_LANE_EXIT=0
 
-# launch_components: two-lane bounded model (issue #1737). The MAIN lane runs every
-# selected non-side cargo component SERIALLY in canonical order (identical build
+# launch_components: two-lane bounded model (issues #1737, #2657). The MAIN lane
+# runs every selected shared-target cargo component (those that build cqlite-core
+# under MAIN's cli-helpers feature set) SERIALLY in canonical order (identical build
 # profile to the historical sequential gate -- no NEW cross-component thrash), with
-# nextest cutting the core-tests long pole. The SIDE lane runs the isolated-target
-# binding components concurrently with MAIN. Concurrent heavy processes are bounded
-# by AGENT_GATE_JOBS: MAIN takes one slot, the SIDE lane runs up to
-# (AGENT_GATE_JOBS - 1) of its components at once (this per-gate cap composes with
-# the machine-wide bound of #1825). AGENT_GATE_JOBS=1 (or bash < 4.3) collapses to
-# the historical strictly-sequential run. file-size already ran inline before the
-# dataset preflight and is skipped here.
+# nextest cutting the core-tests long pole. The SIDE lane runs every isolatable
+# component (see is_side_component: the bindings PLUS the non-core/isolated-feature
+# components parity-report, delivery-telemetry, tooling-tests, binding-unwind-profile,
+# smoke, memory-budget), each in its OWN CARGO_TARGET_DIR, concurrently with MAIN --
+# so the isolatable non-core work overlaps the core cargo long pole instead of
+# tailing it. Concurrent heavy processes are bounded by AGENT_GATE_JOBS: MAIN takes
+# one slot, the SIDE lane runs up to (AGENT_GATE_JOBS - 1) of its components at once
+# (this per-gate cap composes with the machine-wide bound of #1825). AGENT_GATE_JOBS=1
+# (or bash < 4.3) collapses to the historical strictly-sequential run. file-size
+# already ran inline before the dataset preflight and is skipped here.
 launch_components() {
   local -a main_lane=() side_lane=()
   local c
