@@ -135,8 +135,12 @@ What it guarantees:
   machine refuse to start. (The Claude probe keys on the supervisor's own `--agent worker` spawn
   shape, so a legitimate interactive `claude` REPL or a different-agent session is not matched.) A
   hold cannot latch it silently: every hold pass re-checks the stop-file and the wall-clock budget,
-  and a `leftover-processes` hold that never clears (a non-self-clearing orphan) stops the loop
-  loudly after `LEFTOVER_HOLD_MAX` passes, paging the surviving PIDs (#2670).
+  and a leftover hold that never clears stops the loop loudly, paging the surviving PIDs (#2670).
+  The two leftover families are bounded **separately** (#2670): a non-self-clearing orphaned worker
+  CLI (`leftover-worker`) trips the tight `LEFTOVER_HOLD_MAX` (default 3 ≈ 15 min), while a
+  self-clearing build/gate process (`leftover-build`: cargo/nextest/gate-slot-daemon) gets the loose
+  `BUILD_HOLD_MAX` (default 12 ≈ 1 h, `<=0` disables) so a legitimate concurrent full gate (15–25 min)
+  is waited out, never mistaken for a stuck orphan.
 - **It cannot be fooled by a false finalize (#2670)**: a `finalized` marker is trusted only after
   the claimed PR gh-verifies as MERGED (via `state,mergedAt,autoMergeRequest`). A worker that parked
   its endgame yet wrote `finalized` is caught (`verified: mismatch:<state>`, confirmed across grace
@@ -145,8 +149,12 @@ What it guarantees:
   `could not resolve to a PullRequest` signature only — a transport `not found` like DNS/proxy 404 is
   **not** forgery) — is `mismatch:UNRESOLVED` (same escalation). An OPEN PR with **auto-merge armed**
   is the closer's legitimate path, judged `finalized-pending-automerge` (uncounted, breaker-neutral),
-  not a false finalize — but if it stays pending across `PENDING_AUTOMERGE_MAX` consecutive iterations
-  it is auto-merge-stuck and the loop stops (`automerge-stuck`). A GitHub *outage* — or a missing JSON
+  not a false finalize. Such PRs are tracked **per-PR** (#2670): each is re-verified on later
+  iterations and, once it reaches MERGED, **retroactively credited** toward `MAX_ISSUES`
+  (`pending-credited`) — so a fast fleet with several *distinct* PRs pending at once is never mistaken
+  for a stuck one. Only when the **same** PR is observed still-unmerged across `PENDING_AUTOMERGE_MAX`
+  consecutive iterations is it auto-merge-stuck and the loop stops (`automerge-stuck`). A GitHub
+  *outage* — or a missing JSON
   parser, a tooling gap that must never read as forgery — yields a neutral `finalized-unverified`
   (paged, uncounted, breaker untouched); a **persistent** outage is bounded: `UNVERIFIED_MAX`
   consecutive unverifiable finalizes stop the loop (`verify-unavailable`), so the `MAX_ISSUES` ceiling
@@ -166,7 +174,8 @@ What it guarantees:
 |---------|---------|---------|
 | `finalized` | claimed → gate/review → merge-on-green → finalized (`issue`+`pr` set) **and the PR gh-verifies as MERGED** (#2670); journal `verified: merged` | resets |
 | `finalized-unverified` | well-formed finalize, but gh could not confirm the merge — gh missing / network / rate limit, **or no JSON parser present** (a tooling gap is never read as forgery, #2670); journal `verified: unverified`, default-priority page, **not counted** toward the issue budget | **neutral** (neither trips nor resets) |
-| `finalized-pending-automerge` | PR is OPEN with auto-merge armed (the closer's auto-merge path, #2670) — it will land; journal `verified: pending-automerge`, default-priority page, **not counted yet**; `PENDING_AUTOMERGE_MAX` in a row ⇒ `automerge-stuck` stop | **neutral** |
+| `finalized-pending-automerge` | PR is OPEN with auto-merge armed (the closer's auto-merge path, #2670) — it will land; journal `verified: pending-automerge`, default-priority page, **not counted yet**, tracked per-PR for retroactive credit; the **same** PR still-unmerged `PENDING_AUTOMERGE_MAX` iterations in a row ⇒ `automerge-stuck` stop | **neutral** |
+| `pending-credited` | a previously `finalized-pending-automerge` PR re-verified as MERGED on a later iteration (#2670) — **retroactively counted** toward `MAX_ISSUES`; journal `verified: merged` | **neutral** |
 | `no-work` | nothing Ready / nothing to resume — backoff, then retry | resets |
 | `blocked` | stopped short of merge for an owner escalation; same issue twice ⇒ head-blocked stop | resets |
 | `parked-on-owner` | clean park (#2666): `blocked` marker with `reason: seam1-approval\|needs-decision`; high page, loop advances | **never** |
