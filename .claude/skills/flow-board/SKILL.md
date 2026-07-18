@@ -131,12 +131,42 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
           ref in place and note its current SHA (from `claim.sh status <N>`); the next worker adopts it
           via compare-and-swap — `bash scripts/flow/claim.sh adopt <N> --expect <that-sha>` — so a
           resurrected original holder loses the lease and detects the loss immediately (#2467/#2499). Do
-          not `claim.sh release` a reaped-but-non-dead claim. (Full reap-logic hardening is #2667's scope.)
-     - An item with a fresh heartbeat (age ≤ 4h) or an open PR is **not** reaped — surface it as
-       in-progress/in-review as normal. Do not silently steal a live claim.
+          not `claim.sh release` a reaped-but-non-dead claim.
+   - **Orphaned-endgame reaper — second deterministic rule (issue #2667/#2499).** The rule above
+     protects **every** open-PR item as a review-wait, which makes the exact #2499 orphaned-endgame
+     state (a closer that armed/parked a PR then vanished) permanently un-reapable. Close that blind
+     spot deterministically: an open PR is a *review-wait* (protected) **only when it is still moving** —
+     its head SHA advanced OR it has review activity **newer** than the staleness window. A **stalled**
+     open PR is not protected. Check both ages:
+     ```bash
+     # head-SHA age: when the PR's tip commit last changed
+     gh pr view <pr> --json commits --jq '.commits[-1].committedDate'
+     # review activity age: newest review or PR comment
+     gh pr view <pr> --json reviews,comments \
+       --jq '[(.reviews[].submittedAt), (.comments[].createdAt)] | max // "none"'
+     ```
+     Trigger **only when**: claiming machine's heartbeat age > **4 hours** (same single-source threshold
+     as above) **AND** there is an open PR whose **head SHA is unchanged > 4 hours** **AND** no review
+     activity newer than 4 hours. This is the orphaned endgame: a certified PR sitting completed-but-unowned.
+     - **Do NOT auto-adopt — surface it (owner-attention, not silent steal).** When all three hold:
+       1. **Page the owner** via `agent-notify` (the ntfy wrapper): e.g.
+          `agent-notify --category error "orphaned endgame #<N>" "PR #<pr> head+review idle >4h; claim heartbeat stale — adopt-eligible"`.
+          Best-effort — if `agent-notify` is absent, skip silently and rely on the comment + surfacing.
+       2. Post a traceable comment on the **PR**: the machine whose claim is stale, the head-SHA age,
+          the review-activity age, and that the PR is now adopt-eligible.
+       3. Mark the issue **adopt-eligible** exactly as the first reaper does — leave the
+          `refs/claims/issue-<N>` ref in place, note its SHA from `claim.sh status <N>`; the next worker
+          takes it via `bash scripts/flow/claim.sh adopt <N> --expect <that-sha>` (compare-and-swap, so
+          a resurrected holder detects the loss). Do **not** clear the assignee, flip `Status`, or delete
+          the branch here — the endgame may still be genuinely resumable; you are *surfacing* the orphan
+          for owner/worker adoption, not reaping the work.
+   - An item with a fresh heartbeat (age ≤ 4h) is **not** touched by either rule. An item with an open PR
+     that is **still moving** (head advanced or review activity within 4h) is a live review-wait — surface
+     it as in-review as normal. Do not silently steal a live claim.
 5. **Surface ONE next thing.** Pick the furthest-along item waiting on the owner — in order: a
    green-CI PR to merge (Seam 2), a committed spec to approve (Seam 1), an addressing PR with replies,
-   then an item just reaped by step 4 (now `Status=Ready`, ready to reclaim). Drive that one (render the
+   an **orphaned endgame** just flagged adopt-eligible by step 4 (a stalled certified PR the owner should
+   adopt/merge), then an item just reaped by step 4 (now `Status=Ready`, ready to reclaim). Drive that one (render the
    spec inline / show the PR), or — if nothing waits — offer a short **claim-aware** pick-list: only items
    whose **board `Status=Ready`** AND
    have **no** `refs/claims/issue-<N>` claim ref and **no** legacy `issue-<N>-*` branch on origin
