@@ -64,14 +64,21 @@
 #   smoke                                     one-time preflight: prove refs/claims/* is pushable on origin
 #
 # IDENTITY
-#   machine  CLAIM_MACHINE (default `hostname -s`) — tests override to simulate
-#            multiple machines from one clone.
+#   machine  CLAIM_MACHINE (default `hostname -s`) — the holder identity that
+#            `verify`/`release` match against, and the arbiter of re-entrancy.
+#            A fleet whose boxes DO NOT have unique short hostnames (cloud images,
+#            containers, cloned VMs all reporting the same `hostname -s`) MUST set
+#            CLAIM_MACHINE to a UNIQUE value per box — otherwise two machines share
+#            one identity and each treats the other's claim as its own (false
+#            re-entrancy / cross-release). Tests also use it to simulate multiple
+#            machines from one clone.
 #   actor    --actor <id>, else CLAIM_ACTOR, else "flow" — a sub-machine role.
-#   The holder identity that `verify` matches is machine+actor.
+#   The holder identity that `verify`/`release` match is machine+actor.
 #
 # ENV
 #   CLAIM_REMOTE   origin remote name (default: origin)
-#   CLAIM_MACHINE  override machine identity (default: hostname -s)
+#   CLAIM_MACHINE  override machine identity (default: hostname -s) — set it UNIQUELY
+#                  per box on fleets with non-unique short hostnames (see IDENTITY)
 #   CLAIM_ACTOR    default actor when --actor is omitted (default: flow)
 #
 # CONSTRAINTS
@@ -516,6 +523,13 @@ cmd_status() {
     local sha ref issue msg machine actor ts age epoch
     sha="$(printf '%s' "$line" | awk '{print $1}')"
     ref="$(printf '%s' "$line" | awk '{print $2}')"
+    # Only issue claim refs are rendered — skip stray refs under refs/claims/*
+    # that are NOT issue claims (e.g. a leftover `refs/claims/smoke-<nonce>` from
+    # an interrupted preflight), so they never masquerade as an issue row.
+    case "$ref" in
+      refs/claims/issue-*) : ;;
+      *) continue ;;
+    esac
     issue="${ref#refs/claims/issue-}"
     git fetch "$REMOTE" "$ref" >/dev/null 2>&1 || true
     msg="$(git log -1 --format=%B "$sha" 2>/dev/null || true)"

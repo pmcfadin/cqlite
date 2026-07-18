@@ -478,6 +478,45 @@ else
 fi
 
 # ===========================================================================
+echo "TEST 18: CLAIM_MACHINE overrides holder identity (not the clone) for release"
+# ===========================================================================
+# A (machineA) holds issue 18. Holder identity is CLAIM_MACHINE, not the checkout:
+# clone B releasing as machineB is a non-holder (refused), but clone B releasing
+# as machineA IS the holder identity → it may release.
+runA claim 18 >/dev/null
+NOPR2="$T/shim-nopr"   # reuse the empty-PR gh shim from TEST 16 (no open PRs)
+# (a) B with its OWN identity (machineB) is refused as non-holder.
+rc=0; outMisId=$( cd "$B" && PATH="$NOPR2:$PATH" CLAIM_MACHINE=machineB bash "$CLAIM" release 18 ) || rc=$?
+rcMisId=$rc; ref18a=$(ref_sha 18)
+# (b) B impersonating A's CLAIM_MACHINE (machineA) matches the holder → releases.
+rc=0; outSameId=$( cd "$B" && PATH="$NOPR2:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 18 ) || rc=$?
+rcSameId=$rc; ref18b=$(ref_sha 18)
+if [ "$rcMisId" -eq 2 ] && printf '%s\n' "$outMisId" | grep -q 'reason=not-holder' && [ -n "$ref18a" ] \
+   && [ "$rcSameId" -eq 0 ] && printf '%s\n' "$outSameId" | grep -q 'RELEASED' && [ -z "$ref18b" ]; then
+  ok "CLAIM_MACHINE drives holder identity: machineB refused, CLAIM_MACHINE=machineA released"
+else
+  bad "expected machineB refused (exit2, intact) then machineA released (exit0, gone); got rcMisId=$rcMisId intact=$ref18a rcSameId=$rcSameId gone='$ref18b'
+mis: $outMisId
+same: $outSameId"
+fi
+
+# ===========================================================================
+echo "TEST 19: status skips a stray non-issue ref under refs/claims/* (smoke leftover)"
+# ===========================================================================
+# A leftover refs/claims/smoke-<x> (e.g. an interrupted preflight) must NOT be
+# rendered as an issue row; a real issue claim alongside it still is.
+runA claim 19 >/dev/null
+( cd "$A" && gg push -q origin HEAD:refs/claims/smoke-stray )
+statusOut=$( cd "$A" && CLAIM_MACHINE=machineA bash "$CLAIM" status )
+if printf '%s\n' "$statusOut" | grep -q 'CLAIM: STATUS issue=19' \
+   && ! printf '%s\n' "$statusOut" | grep -q 'smoke-stray'; then
+  ok "status renders issue-19 and skips the stray refs/claims/smoke-stray ref"
+else
+  bad "expected issue=19 rendered and smoke-stray skipped; got:
+$statusOut"
+fi
+
+# ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

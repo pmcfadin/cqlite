@@ -40,7 +40,10 @@ namespace on origin — `claim.sh smoke` creates, `ls-remote`s, and deletes a th
 `refs/claims/smoke-<nonce>` ref to confirm the remote permits it (`SMOKE-OK` = good). This is
 **verified working on github.com/pmcfadin/cqlite** (2026-07-17). Run it **once when adopting a new
 remote or host** — a managed Git host that restricts custom ref namespaces would make the whole
-claim mechanism unusable, and that must be caught before the fleet relies on it.
+claim mechanism unusable, and that must be caught before the fleet relies on it. **Non-unique
+hostnames:** the claim holder identity is `hostname -s`; on a fleet of cloud images/containers/cloned
+VMs that report the *same* short hostname, export a UNIQUE `CLAIM_MACHINE` per box (else two machines
+share one identity and each treats the other's claim as its own).
 
 Sanity check: `bash scripts/agent-gate.sh --lite` should pass in ~1–5 min, and the SUMMARY's
 `accelerators:` line should read `sccache=on nextest=on lanes=parallel`. If anything says
