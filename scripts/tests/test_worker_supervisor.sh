@@ -542,6 +542,12 @@ common_env() {
   export STUCK_POLL_SECS=1
   unset LOAD_CONTROL_FILE 2>/dev/null || true
   unset WORKER_CMD 2>/dev/null || true
+  # Reset every knob a test may override but common_env does not explicitly re-set, so
+  # one test's override (e.g. MAX_HOURS_SECS=3, PENDING_AUTOMERGE_*) cannot leak into the
+  # next test in this shared shell and cause a spurious pass/fail.
+  unset MAX_HOURS_SECS PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS BUILD_HOLD_MAX \
+        LEFTOVER_HOLD_MAX UNVERIFIED_MAX MISMATCH_RETRIES MISMATCH_GRACE_CAP_SECS \
+        PROC_LIST_WORKER_CMD PROC_LIST_BUILD_CMD 2>/dev/null || true
 }
 
 jline_count() { grep -c "$2" "$1" 2>/dev/null || true; }
@@ -1369,7 +1375,7 @@ test_leftover_hold_bounded_stops() {
   # Worker-family probe never clears (always reports an orphaned worker CLI); the
   # worker would finalize if ever spawned (it must not be).
   export PROC_PROBE_WORKER_CMD="echo 1"
-  export PROC_LIST_CMD="echo '12345 claude --agent worker orphan'"
+  export PROC_LIST_WORKER_CMD="echo '12345 claude --agent worker orphan'"
   export LEFTOVER_HOLD_MAX=3
   export HOLD_POLL_SECS=1
   export MAX_HOURS=8
@@ -1520,16 +1526,19 @@ test_probe_no_self_match() {
     fail "probe self-match: pure-string regex fails the self-exclusion property"
     return
   fi
-  # static sanity: the real DEFAULT probe string carries the bracket trick + the
-  # $$/$PPID self-exclusion on BOTH families. Source with PROC_PROBE_CMD unset so a
-  # leaked test override can't mask the default; assert the string, don't execute it.
-  local probe_cmd defaulted="no"
-  # shellcheck disable=SC2016  # $SUP/$PROC_PROBE_CMD expand inside the sub-bash, not here.
-  probe_cmd="$(env -u PROC_PROBE_CMD SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$PROC_PROBE_CMD"' 2>/dev/null)"
-  [[ "$probe_cmd" == *'[c]laude.*--agent worker'* && "$probe_cmd" == *'[c]argo '* &&
-     "$probe_cmd" == *'grep -vxF'* ]] && defaulted="yes"
+  # static sanity: the real DEFAULT per-family probe strings (the ones preflight
+  # ACTUALLY executes, roborev 1840) each carry the bracket trick + the $$/$PPID
+  # self-exclusion. Source with both family probes unset so a leaked test override can't
+  # mask the default; assert the strings, don't execute them.
+  local worker_probe build_probe defaulted="no"
+  # shellcheck disable=SC2016  # $SUP/$PROC_* expand inside the sub-bash, not here.
+  worker_probe="$(env -u PROC_PROBE_WORKER_CMD SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$PROC_PROBE_WORKER_CMD"' 2>/dev/null)"
+  # shellcheck disable=SC2016
+  build_probe="$(env -u PROC_PROBE_BUILD_CMD SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$PROC_PROBE_BUILD_CMD"' 2>/dev/null)"
+  [[ "$worker_probe" == *'[c]laude.*--agent worker'* && "$worker_probe" == *'grep -vxF'* &&
+     "$build_probe" == *'[c]argo '* && "$build_probe" == *'grep -vxF'* ]] && defaulted="yes"
   if [[ "$defaulted" != "yes" ]]; then
-    fail "probe self-match: default probe string missing bracket trick / self-exclusion: '${probe_cmd:0:60}'"
+    fail "probe self-match: default per-family probe strings missing bracket trick / self-exclusion: worker='${worker_probe:0:50}' build='${build_probe:0:50}'"
     return
   fi
   # Bonus live check: real `claude --agent worker` stub matches, wrapper-text stub
@@ -1709,7 +1718,7 @@ test_alternating_holds_still_bounded() {
   export LOAD_PROBE_CMD='n=$(cat "$LOAD_CONTROL_FILE"); n=$((n+1)); echo "$n" >"$LOAD_CONTROL_FILE"; if [ $((n % 2)) -eq 1 ]; then echo 99; else echo 0; fi'
   export LOAD_MAX=1
   export PROC_PROBE_WORKER_CMD="echo 1"
-  export PROC_LIST_CMD="echo '999 claude --agent worker orphan'"
+  export PROC_LIST_WORKER_CMD="echo '999 claude --agent worker orphan'"
   export LEFTOVER_HOLD_MAX=2
   export HOLD_POLL_SECS=1
   jf="$JOURNAL_FILE"
@@ -1886,6 +1895,7 @@ test_persistent_pending_automerge_stops() {
   export MAX_ISSUES=100
   export BREAKER_N=100
   export PENDING_AUTOMERGE_MAX=2
+  export PENDING_AUTOMERGE_MIN_SECS=0   # count alone trips; the wall-clock floor is exercised by test 48
   export GH_VERIFY_CMD='printf %s "{\"state\":\"OPEN\",\"mergedAt\":null,\"autoMergeRequest\":{\"enabledAt\":\"x\"}}"'
   jf="$JOURNAL_FILE"
 
@@ -1953,7 +1963,7 @@ test_build_hold_uses_loose_bound() {
   write_finalize_stub "$d/bin/worker.sh" "$counter"
   export WORKER_CMD="$d/bin/worker.sh"
   export PROC_PROBE_BUILD_CMD="echo 1"   # a concurrent build/gate that never clears
-  export PROC_LIST_CMD="echo '4242 cargo test --workspace'"
+  export PROC_LIST_BUILD_CMD="echo '4242 cargo test --workspace'"
   export LEFTOVER_HOLD_MAX=1             # tight worker bound — must NOT govern builds
   export BUILD_HOLD_MAX=3               # loose build bound governs
   export HOLD_POLL_SECS=1
@@ -1962,13 +1972,15 @@ test_build_hold_uses_loose_bound() {
   bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
   rc=$?
   page=$(grep -c '^error|worker-supervisor: build/gate processes will not clear' "$NOTIFY_LOG" 2>/dev/null || true)
-  holds=$(grep -c 'leftover-build held' "$d/stdout.log" 2>/dev/null || true)
-  if [[ "$rc" -ne 0 && ! -f "$counter" && "$page" -ge 1 ]] &&
+  # It must have held on leftover-build MORE than LEFTOVER_HOLD_MAX(=1) times before
+  # stopping — proving the tight worker bound did NOT govern the build family.
+  holds=$(grep -c 'HOLD: leftover-build' "$d/stdout.log" 2>/dev/null || true)
+  if [[ "$rc" -ne 0 && ! -f "$counter" && "$page" -ge 1 && "$holds" -ge 2 ]] &&
      grep -q '"reason":"leftover-build"' "$jf" &&
      grep -q '4242' "$NOTIFY_LOG"; then
     pass "build hold: self-clearing family uses the LOOSE BUILD_HOLD_MAX (survives LEFTOVER_HOLD_MAX, stops at BUILD_HOLD_MAX)"
   else
-    fail "build-hold-loose: rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) page=$page (see $jf, $NOTIFY_LOG)"
+    fail "build-hold-loose: rc=$rc spawned=$([[ -f "$counter" ]] && echo yes || echo no) page=$page holds=$holds (see $jf, $NOTIFY_LOG)"
   fi
 }
 
@@ -1988,7 +2000,7 @@ test_build_hold_clears_then_proceeds() {
   export MAX_ISSUES=1
   export BUILD_HOLD_MAX=12   # loose; the build clears well before this
   export HOLD_POLL_SECS=1
-  export PROC_CTL="$d/buildctr"; echo 0 >"$PROC_CTL"
+  echo 0 >"$d/buildctr"
   # shellcheck disable=SC2016  # expanded later by the supervisor's own `bash -c`.
   export PROC_PROBE_BUILD_CMD='n=$(cat "'"$d"'/buildctr"); n=$((n+1)); echo "$n">"'"$d"'/buildctr"; if [ "$n" -le 2 ]; then echo 1; else echo 0; fi'
   jf="$JOURNAL_FILE"
@@ -2006,28 +2018,141 @@ test_build_hold_clears_then_proceeds() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 42 (#2670 / roborev 1821, finding a): the count probe (PROC_PROBE_CMD) and
-# the list probe (PROC_LIST_CMD) DERIVE from the SAME shared match patterns
-# (PROC_MATCH_BUILD/PROC_MATCH_WORKER) — the "what counts" set and the "what we
-# name" set cannot drift. Source with both probe overrides unset and assert both
-# command strings embed both shared patterns verbatim.
+# Test 48 (#2670 / roborev 1840): the wall-clock floor — a burst of fast no-progress
+# iterations must NOT trip automerge-stuck on a PR whose CI simply hasn't finished. The
+# same PR is observed OPEN+armed well past PENDING_AUTOMERGE_MAX observations, but with
+# PENDING_AUTOMERGE_MIN_SECS set high the run instead ends at MAX_ISSUES/wall-clock, never
+# `automerge-stuck`. (Here MAX_ITER_SECS-independent: worker no-work after 1 finalize so
+# iterations are instant; MAX_HOURS is the terminating budget.)
+# ---------------------------------------------------------------------------
+test_pending_time_floor_blocks_fast_stuck() {
+  local d counter jf rc stuck
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_fixed_pr_finalize_stub "$d/bin/worker.sh" "$counter" 9
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export PENDING_AUTOMERGE_MAX=2
+  export PENDING_AUTOMERGE_MIN_SECS=100000   # far above the test's wall-clock — never met
+  export MAX_HOURS_SECS=3                     # terminate cleanly on wall-clock instead
+  export GH_VERIFY_CMD='printf %s "{\"state\":\"OPEN\",\"mergedAt\":null,\"autoMergeRequest\":{\"enabledAt\":\"x\"}}"'
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  stuck=$(grep -c '"reason":"automerge-stuck"' "$jf" 2>/dev/null || true)
+  if [[ "$rc" -eq 0 && "$stuck" -eq 0 ]] &&
+     grep -q '"reason":"budget-wallclock"' "$jf"; then
+    pass "pending time-floor: fast repeated observations do NOT trip automerge-stuck before PENDING_AUTOMERGE_MIN_SECS"
+  else
+    fail "pending-time-floor: rc=$rc stuck=$stuck (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 49 (#2670 / roborev 1840): a tracked armed PR that ends CLOSED-unmerged (auto-
+# merge dropped / PR closed) must NOT be swallowed silently — it is the failure this
+# feature catches. It re-verifies as a non-merged mismatch on the next iteration and
+# fires a HIGH "armed PR did not land" page + a `pending-dropped` journal line. gh
+# returns OPEN+armed on the first view (the finalize), CLOSED thereafter.
+# ---------------------------------------------------------------------------
+test_pending_pr_closed_pages_high() {
+  local d counter jf rc page
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export MAX_HOURS_SECS=3
+  mkdir -p "$d/ghviews"
+  # shellcheck disable=SC2016  # $1 expands inside the supervisor's own `bash -c`.
+  export GH_VERIFY_CMD='n="${1##*/}"; f="'"$d"'/ghviews/$n"; c=0; [ -f "$f" ] && c=$(cat "$f"); c=$((c+1)); echo "$c">"$f"; if [ "$c" -le 1 ]; then printf %s "{\"state\":\"OPEN\",\"mergedAt\":null,\"autoMergeRequest\":{\"enabledAt\":\"x\"}}"; else printf %s "{\"state\":\"CLOSED\",\"mergedAt\":null,\"autoMergeRequest\":null}"; fi'
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  page=$(grep -c 'armed PR did not land' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$page" -ge 1 ]] &&
+     grep -q '"outcome":"pending-dropped".*"verified":"mismatch:CLOSED"' "$jf"; then
+    pass "pending closed: an armed PR that ends CLOSED-unmerged pages HIGH (not silently swallowed)"
+  else
+    fail "pending-closed: rc=$rc page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 50 (#2670 / roborev 1840): the verification-outage streak is reset ONLY by a
+# gh-SUCCESS outcome, NOT by an intervening abnormal/no-work iteration — otherwise a
+# persistent gh outage interleaved with unrelated iterations would never trip. Sequence:
+# unverified finalize → abnormal → unverified finalize must reach UNVERIFIED_MAX=2 and
+# STOP (verify-unavailable). Worker alternates: finalize (odd), crash (even).
+# ---------------------------------------------------------------------------
+test_unverified_streak_survives_intervening_abnormal() {
+  local d counter jf rc
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  # Odd calls write a finalized marker; even calls exit 1 with NO marker (abnormal).
+  cat >"$d/bin/worker.sh" <<EOF
+#!/usr/bin/env bash
+n=0
+[[ -f "$counter" ]] && n=\$(cat "$counter")
+n=\$((n + 1))
+echo "\$n" >"$counter"
+if [[ \$((n % 2)) -eq 1 ]]; then
+  cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":\$n,"pr":"https://github.com/pmcfadin/cqlite/pull/\$n","duration_s":1}
+JSON
+else
+  exit 1
+fi
+EOF
+  chmod +x "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100          # do not let the abnormal trip the crash breaker first
+  export UNVERIFIED_MAX=2
+  export GH_VERIFY_CMD='printf %s "GH DOWN"'   # unparseable ⇒ unverified (transport gap)
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  if [[ "$rc" -ne 0 ]] &&
+     grep -q '"reason":"verify-unavailable"' "$jf" &&
+     ! grep -q '"reason":"breaker"' "$jf"; then
+    pass "unverified streak: an intervening abnormal does NOT reset it — persistent outage still trips verify-unavailable"
+  else
+    fail "unverified-streak: rc=$rc (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 42 (#2670 / roborev 1821, 1840): each family's count probe AND its list probe
+# DERIVE from that family's shared match pattern (PROC_MATCH_BUILD / PROC_MATCH_WORKER)
+# — the "what counts" set and the "what we name" set cannot drift, per family. Source
+# with the family probes unset and assert each command string embeds its own pattern.
 test_probe_list_derives_from_count_set() {
-  local out build worker probe list
+  local out build worker wprobe bprobe wlist blist
   # shellcheck disable=SC2016  # $SUP/$PROC_* expand inside the sub-bash, not here.
-  out="$(env -u PROC_PROBE_CMD -u PROC_LIST_CMD SUP="$SUPERVISOR" bash -c '
+  out="$(env -u PROC_PROBE_WORKER_CMD -u PROC_PROBE_BUILD_CMD -u PROC_LIST_WORKER_CMD -u PROC_LIST_BUILD_CMD SUP="$SUPERVISOR" bash -c '
     # shellcheck disable=SC1090
     source "$SUP"
-    printf "%s\n%s\n%s\n%s\n" "$PROC_MATCH_BUILD" "$PROC_MATCH_WORKER" "$PROC_PROBE_CMD" "$PROC_LIST_CMD"' 2>/dev/null)"
+    printf "%s\n%s\n%s\n%s\n%s\n%s\n" "$PROC_MATCH_BUILD" "$PROC_MATCH_WORKER" "$PROC_PROBE_WORKER_CMD" "$PROC_PROBE_BUILD_CMD" "$PROC_LIST_WORKER_CMD" "$PROC_LIST_BUILD_CMD"' 2>/dev/null)"
   build="$(printf '%s' "$out" | sed -n 1p)"
   worker="$(printf '%s' "$out" | sed -n 2p)"
-  probe="$(printf '%s' "$out" | sed -n 3p)"
-  list="$(printf '%s' "$out" | sed -n 4p)"
+  wprobe="$(printf '%s' "$out" | sed -n 3p)"
+  bprobe="$(printf '%s' "$out" | sed -n 4p)"
+  wlist="$(printf '%s' "$out" | sed -n 5p)"
+  blist="$(printf '%s' "$out" | sed -n 6p)"
   if [[ -n "$build" && -n "$worker" &&
-        "$probe" == *"$build"* && "$probe" == *"$worker"* &&
-        "$list" == *"$build"* && "$list" == *"$worker"* ]]; then
-    pass "probe derivation: count + list probes both derive from the shared match-pattern set"
+        "$wprobe" == *"$worker"* && "$wlist" == *"$worker"* &&
+        "$bprobe" == *"$build"* && "$blist" == *"$build"* ]]; then
+    pass "probe derivation: each family's count + list probe derives from its own match pattern"
   else
-    fail "probe-derivation: build='$build' worker='$worker' probe-has-both=$([[ "$probe" == *"$build"* && "$probe" == *"$worker"* ]] && echo y) list-has-both=$([[ "$list" == *"$build"* && "$list" == *"$worker"* ]] && echo y)"
+    fail "probe-derivation: worker-ok=$([[ "$wprobe" == *"$worker"* && "$wlist" == *"$worker"* ]] && echo y) build-ok=$([[ "$bprobe" == *"$build"* && "$blist" == *"$build"* ]] && echo y)"
   fi
 }
 
@@ -2150,6 +2275,9 @@ test_python_only_parser_automerge
 test_stop_file_honored_mid_grace
 test_persistent_pending_automerge_stops
 test_healthy_multi_pr_no_false_stop
+test_pending_time_floor_blocks_fast_stuck
+test_pending_pr_closed_pages_high
+test_unverified_streak_survives_intervening_abnormal
 test_build_hold_uses_loose_bound
 test_build_hold_clears_then_proceeds
 test_probe_list_derives_from_count_set

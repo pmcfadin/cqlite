@@ -153,7 +153,10 @@ What it guarantees:
   iterations and, once it reaches MERGED, **retroactively credited** toward `MAX_ISSUES`
   (`pending-credited`) — so a fast fleet with several *distinct* PRs pending at once is never mistaken
   for a stuck one. Only when the **same** PR is observed still-unmerged across `PENDING_AUTOMERGE_MAX`
-  consecutive iterations is it auto-merge-stuck and the loop stops (`automerge-stuck`). A GitHub
+  consecutive iterations **and** has been pending at least `PENDING_AUTOMERGE_MIN_SECS` (a wall-clock
+  floor above CI time, so a burst of fast no-progress iterations can't burn the budget) is it
+  auto-merge-stuck and the loop stops (`automerge-stuck`); a tracked PR that instead ends
+  CLOSED-unmerged pages high (`pending-dropped`), never silently swallowed. A GitHub
   *outage* — or a missing JSON
   parser, a tooling gap that must never read as forgery — yields a neutral `finalized-unverified`
   (paged, uncounted, breaker untouched); a **persistent** outage is bounded: `UNVERIFIED_MAX`
@@ -176,6 +179,7 @@ What it guarantees:
 | `finalized-unverified` | well-formed finalize, but gh could not confirm the merge — gh missing / network / rate limit, **or no JSON parser present** (a tooling gap is never read as forgery, #2670); journal `verified: unverified`, default-priority page, **not counted** toward the issue budget | **neutral** (neither trips nor resets) |
 | `finalized-pending-automerge` | PR is OPEN with auto-merge armed (the closer's auto-merge path, #2670) — it will land; journal `verified: pending-automerge`, default-priority page, **not counted yet**, tracked per-PR for retroactive credit; the **same** PR still-unmerged `PENDING_AUTOMERGE_MAX` iterations in a row ⇒ `automerge-stuck` stop | **neutral** |
 | `pending-credited` | a previously `finalized-pending-automerge` PR re-verified as MERGED on a later iteration (#2670) — **retroactively counted** toward `MAX_ISSUES`; journal `verified: merged` | **neutral** |
+| `pending-dropped` | a tracked armed PR that ended **CLOSED-unmerged** (auto-merge dropped / PR closed) on re-verification (#2670) — HIGH "armed PR did not land" page, dropped uncredited (never silently swallowed) | **neutral** |
 | `no-work` | nothing Ready / nothing to resume — backoff, then retry | resets |
 | `blocked` | stopped short of merge for an owner escalation; same issue twice ⇒ head-blocked stop | resets |
 | `parked-on-owner` | clean park (#2666): `blocked` marker with `reason: seam1-approval\|needs-decision`; high page, loop advances | **never** |

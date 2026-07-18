@@ -202,6 +202,13 @@ MISMATCH_GRACE_CAP_SECS="${MISMATCH_GRACE_CAP_SECS:-120}"
 # SAME PR is observed still-unmerged across this many consecutive iterations (a PR
 # whose auto-merge genuinely never lands).
 PENDING_AUTOMERGE_MAX="${PENDING_AUTOMERGE_MAX:-3}"
+# PENDING_AUTOMERGE_MIN_SECS (roborev 1840): the observation count alone is not enough
+# to declare a PR stuck — a burst of fast no-progress iterations (e.g. several quick
+# owner-decision parks, which have no backoff) could rack up PENDING_AUTOMERGE_MAX
+# observations of a PR whose CI simply hasn't finished yet. So automerge-stuck ALSO
+# requires the PR to have been pending at least this long (wall-clock, comfortably above
+# CI time). Default 20 min.
+PENDING_AUTOMERGE_MIN_SECS="${PENDING_AUTOMERGE_MIN_SECS:-1200}"
 
 SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock}"
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
@@ -237,64 +244,57 @@ if [[ -z "${DISK_PROBE_CMD:-}" ]]; then
   DISK_PROBE_CMD="df -Pk \"$REPO_ROOT\" | awk 'NR==2{print int(\$4/1024/1024)}'"
 fi
 # Single source of the leftover-process match patterns (roborev 1821): BOTH the
-# count probe (PROC_PROBE_CMD) and the list probe (PROC_LIST_CMD) DERIVE from these,
-# so the "what counts as a leftover" set and the "what we name in the page" set can
-# never drift apart. `[c]argo`/`[c]laude` are the bracket-trick forms (see below).
+# per-family count probes (PROC_PROBE_WORKER/BUILD_CMD) and list probes
+# (PROC_LIST_WORKER/BUILD_CMD) DERIVE from these, so the "what counts as a leftover" set
+# and the "what we name in the page" set can never drift apart. `[c]argo`/`[c]laude` are
+# the bracket-trick forms (see below).
 PROC_MATCH_BUILD='[c]argo |[n]extest|[g]ate_slot_daemon'
 PROC_MATCH_WORKER='[c]laude.*--agent worker'
-if [[ -z "${PROC_PROBE_CMD:-}" ]]; then
-  # Leftover-process probe (issue #2670): two families of prior-iteration debris
-  # block the next spawn (HOLD-and-poll, same as load/disk):
-  #   (1) build/gate processes — cargo/nextest/gate_slot_daemon.
-  #   (2) an orphaned worker Claude CLI from a prior iteration (a classic survivor
-  #       of a SIGTERM'd wrapper, and a stuck-on-question hazard that would burn
-  #       the next iteration).
-  # The Claude match is keyed on the supervisor's OWN spawn shape — `--agent worker`
-  # (see WORKER_CMD) — NOT a bare `claude`. A plain interactive `claude` REPL, or a
-  # different-agent session (`--agent flow-lead`), never carries that marker, so a
-  # legitimate interactive session on the box is not matched. LIMIT: an operator who
-  # deliberately runs `claude --agent worker` by hand WILL be matched (correctly — by
-  # the one-worker-per-machine rule #1930 that is itself leftover worker debris). The
-  # current iteration's own worker has already exited before preflight runs, so any
-  # `--agent worker` process seen here is genuinely from a prior iteration. `sort -u`
-  # dedups a PID that matched both patterns.
-  #
-  # SELF-MATCH DEFUSED (roborev 1813, MED-HIGH): the brace-group form keeps a live
-  # `bash -c` wrapper whose OWN argv contains these pattern strings, so a naive
-  # pattern would match the wrapper and report a phantom leftover at EVERY boot —
-  # hard-stopping every supervisor. The classic pgrep bracket trick (`[c]argo`,
-  # `[c]laude`) makes each regex still match the real process (`cargo`, `claude`)
-  # while the bracketed pattern TEXT in the wrapper's argv (`[c]argo`) no longer
-  # contains the literal substring, so the wrapper cannot match itself.
-  #
-  # SELF-EXCLUSION (roborev 1819, LOW): additionally drop the supervisor's OWN pid
-  # ($$) and parent ($PPID) from the match set — expanded HERE at definition time so
-  # they are the supervisor's, not the probe subshell's. This covers the case where
-  # the supervisor is itself launched from a `claude --agent worker` ancestor (its
-  # argv would otherwise be counted as a phantom leftover). RESIDUAL LIMIT: the match
-  # is still an argv substring test, so a `claude --agent worker` process ELSEWHERE in
-  # the ancestry (beyond the immediate parent) or an unrelated process that merely
-  # carries the literal substring in its own argv could still be counted.
-  PROC_PROBE_CMD="{ pgrep -f '$PROC_MATCH_BUILD'; pgrep -f '$PROC_MATCH_WORKER'; } 2>/dev/null | sort -u | grep -vxF -e '$$' -e '$PPID' | wc -l | tr -d ' '"
-fi
-# Per-FAMILY count probes (roborev 1839): preflight bounds the two leftover families
-# separately (tight for the worker orphan, loose for the self-clearing build/gate),
-# so it needs each family's count independently. Both derive from the SAME shared
-# $PROC_MATCH_* patterns as the combined probe above, with the same bracket-trick
-# self-defusal and $$/$PPID self-exclusion.
+# Leftover-process probes (issue #2670): two families of prior-iteration debris block
+# the next spawn (HOLD-and-poll, same as load/disk), bounded SEPARATELY (roborev 1839)
+# so each needs its OWN count probe:
+#   (1) build/gate processes — cargo/nextest/gate_slot_daemon — SELF-CLEARING; a
+#       legitimate concurrent full gate is one of these, so it gets the LOOSE
+#       BUILD_HOLD_MAX (reason `leftover-build`).
+#   (2) an orphaned worker Claude CLI from a prior iteration (a SIGTERM'd-wrapper
+#       survivor and stuck-on-question hazard) — NON-self-clearing; gets the TIGHT
+#       LEFTOVER_HOLD_MAX (reason `leftover-worker`).
+# The Claude match is keyed on the supervisor's OWN spawn shape — `--agent worker`
+# (see WORKER_CMD) — NOT a bare `claude`. A plain interactive `claude` REPL, or a
+# different-agent session (`--agent flow-lead`), never carries that marker, so a
+# legitimate interactive session on the box is not matched. LIMIT: an operator who
+# deliberately runs `claude --agent worker` by hand WILL be matched (correctly — by the
+# one-worker-per-machine rule #1930). The current iteration's own worker has already
+# exited before preflight runs, so any `--agent worker` seen here is from a prior iteration.
+#
+# SELF-MATCH DEFUSED (roborev 1813, MED-HIGH): a live `bash -c` wrapper's OWN argv
+# contains these pattern strings, so a naive pattern would match the wrapper and report
+# a phantom leftover at EVERY boot. The classic pgrep bracket trick (`[c]argo`,
+# `[c]laude`) makes each regex still match the real process (`cargo`, `claude`) while
+# the bracketed pattern TEXT in the wrapper's argv (`[c]argo`) no longer contains the
+# literal substring, so the wrapper cannot match itself.
+#
+# SELF-EXCLUSION (roborev 1819, LOW): additionally drop the supervisor's OWN pid ($$)
+# and parent ($PPID) — expanded HERE at definition time so they are the supervisor's,
+# not the probe subshell's. RESIDUAL LIMIT: the match is still an argv substring test,
+# so a `claude --agent worker` process ELSEWHERE in the ancestry, or an unrelated
+# process carrying the literal substring, could still be counted.
 if [[ -z "${PROC_PROBE_WORKER_CMD:-}" ]]; then
   PROC_PROBE_WORKER_CMD="pgrep -f '$PROC_MATCH_WORKER' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | wc -l | tr -d ' '"
 fi
 if [[ -z "${PROC_PROBE_BUILD_CMD:-}" ]]; then
   PROC_PROBE_BUILD_CMD="pgrep -f '$PROC_MATCH_BUILD' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | wc -l | tr -d ' '"
 fi
-# Companion to PROC_PROBE_CMD: lists the surviving PIDs (pid + cmd) so a
-# leftover-worker / leftover-build STOP can NAME what never cleared (issue #2670). Best-effort —
-# an empty result just yields "<unavailable>" in the page. DERIVED from the SAME
-# $PROC_MATCH_* patterns as the count probe (roborev 1821: list-from-count-set, so
-# the two can't drift), with the same $$/$PPID self-exclusion (roborev 1813/1819).
-if [[ -z "${PROC_LIST_CMD:-}" ]]; then
-  PROC_LIST_CMD="{ pgrep -lf '$PROC_MATCH_BUILD'; pgrep -lf '$PROC_MATCH_WORKER'; } 2>/dev/null | sort -u | grep -vE '^($$|$PPID) '"
+# Companion PER-FAMILY list probes (roborev 1839/1821): a leftover-worker / leftover-build
+# STOP names ONLY its OWN family's surviving PIDs (never unrelated PIDs from the other
+# family). DERIVED from the SAME $PROC_MATCH_* patterns as the count probes, list-from-
+# count-set so they can't drift, with the same $$/$PPID self-exclusion. Best-effort — an
+# empty result yields "<unavailable>" in the page.
+if [[ -z "${PROC_LIST_WORKER_CMD:-}" ]]; then
+  PROC_LIST_WORKER_CMD="pgrep -lf '$PROC_MATCH_WORKER' 2>/dev/null | grep -vE '^($$|$PPID) '"
+fi
+if [[ -z "${PROC_LIST_BUILD_CMD:-}" ]]; then
+  PROC_LIST_BUILD_CMD="pgrep -lf '$PROC_MATCH_BUILD' 2>/dev/null | grep -vE '^($$|$PPID) '"
 fi
 
 # GH verification of a "finalized" marker's PR (issue #2670). $1 (passed by the
@@ -694,7 +694,7 @@ preflight_wait() {
       worker_holds=$((worker_holds + 1))
       if [[ "$worker_holds" -ge "$LEFTOVER_HOLD_MAX" ]]; then
         local pids
-        pids="$(bash -c "$PROC_LIST_CMD" 2>/dev/null | tr '\n' ';' | cut -c1-300)"
+        pids="$(bash -c "$PROC_LIST_WORKER_CMD" 2>/dev/null | tr '\n' ';' | cut -c1-300)"
         notify "high" "worker-supervisor: leftover worker CLI will not clear" \
           "held $worker_holds times on an orphaned worker CLI that never cleared — stopping loudly. Surviving: ${pids:-<unavailable>}"
         log "leftover-worker held $worker_holds times (>= LEFTOVER_HOLD_MAX=$LEFTOVER_HOLD_MAX) without clearing; stopping. Surviving: ${pids:-<unavailable>}"
@@ -706,7 +706,7 @@ preflight_wait() {
       build_holds=$((build_holds + 1))
       if [[ "$BUILD_HOLD_MAX" -gt 0 ]] && [[ "$build_holds" -ge "$BUILD_HOLD_MAX" ]]; then
         local pids
-        pids="$(bash -c "$PROC_LIST_CMD" 2>/dev/null | tr '\n' ';' | cut -c1-300)"
+        pids="$(bash -c "$PROC_LIST_BUILD_CMD" 2>/dev/null | tr '\n' ';' | cut -c1-300)"
         notify "high" "worker-supervisor: build/gate processes will not clear" \
           "held $build_holds times on build/gate processes that never cleared (well beyond a normal gate) — stopping loudly. Surviving: ${pids:-<unavailable>}"
         log "leftover-build held $build_holds times (>= BUILD_HOLD_MAX=$BUILD_HOLD_MAX) without clearing; stopping. Surviving: ${pids:-<unavailable>}"
@@ -729,12 +729,14 @@ ITER=0
 ISSUES_DONE=0
 CONSECUTIVE_ABNORMAL=0
 CONSECUTIVE_UNVERIFIED=0
-# Auto-merge-stuck is tracked PER-PR (roborev 1839), not as a single across-PR streak:
-# PENDING_PR_LIST holds one TAB-separated "pr<TAB>issue<TAB>observations" record per
-# still-pending armed PR. Each iteration re-verifies them (credit_merged_pending_prs):
-# a PR that reached MERGED is credited toward MAX_ISSUES and dropped; a PR still pending
-# has its observation count bumped and trips automerge-stuck only when the SAME PR has
-# been seen unmerged PENDING_AUTOMERGE_MAX times.
+# Auto-merge-stuck is tracked PER-PR (roborev 1839/1840), not as a single across-PR
+# streak: PENDING_PR_LIST holds one TAB-separated "pr<TAB>issue<TAB>observations<TAB>
+# first-observed-epoch" record per still-pending armed PR. Each iteration re-verifies
+# them (credit_merged_pending_prs): a PR that reached MERGED is credited toward
+# MAX_ISSUES and dropped; a PR still pending has its observation count bumped and trips
+# automerge-stuck only when the SAME PR has been seen unmerged PENDING_AUTOMERGE_MAX
+# times AND has been pending at least PENDING_AUTOMERGE_MIN_SECS (a wall-clock floor so
+# fast no-progress iterations can't burn the budget before CI could finish).
 PENDING_PR_LIST=""
 LAST_BLOCKED_ISSUE=""
 LAST_PARKED_ISSUE=""
@@ -769,7 +771,8 @@ remember_pending_pr() {
     if [[ "${line%%$'\t'*}" == "$pr" ]]; then found=1; fi
   done <<< "$PENDING_PR_LIST"
   [[ -n "$found" ]] && return 0
-  PENDING_PR_LIST="${PENDING_PR_LIST}${pr}"$'\t'"${issue}"$'\t'"1"$'\n'
+  # Record: pr <TAB> issue <TAB> observation-count <TAB> first-observed-epoch.
+  PENDING_PR_LIST="${PENDING_PR_LIST}${pr}"$'\t'"${issue}"$'\t'"1"$'\t'"$(date +%s)"$'\n'
 }
 
 # forget_pending_pr <pr>: drop a PR from the retroactive-credit set once its OWN
@@ -794,8 +797,8 @@ forget_pending_pr() {
 # aborted transient is kept for a later retry. Called once per main-loop iteration.
 credit_merged_pending_prs() {
   [[ -z "$PENDING_PR_LIST" ]] && return 0
-  local new_list="" line pr issue count verify
-  while IFS=$'\t' read -r pr issue count; do
+  local new_list="" pr issue count first_ts verify age mstate
+  while IFS=$'\t' read -r pr issue count first_ts; do
     [[ -z "$pr" ]] && continue
     verify="$(verify_finalized_pr "$pr")"
     case "$verify" in
@@ -808,23 +811,36 @@ credit_merged_pending_prs() {
         ;;
       pending-automerge)
         count=$((count + 1))
-        if [[ "$count" -ge "$PENDING_AUTOMERGE_MAX" ]]; then
+        age=$(( $(date +%s) - first_ts ))
+        # Auto-merge-stuck needs BOTH enough observations AND enough wall-clock (roborev
+        # 1840): the time floor stops a burst of fast no-progress iterations (parks with
+        # no backoff) from burning the observation budget before CI could plausibly finish.
+        if [[ "$count" -ge "$PENDING_AUTOMERGE_MAX" ]] && [[ "$age" -ge "$PENDING_AUTOMERGE_MIN_SECS" ]]; then
           notify "high" "worker-supervisor: auto-merge stuck" \
-            "PR $pr (issue $issue) has stayed OPEN pending auto-merge across $count consecutive observations — auto-merge is not landing; stopping so it isn't looped forever"
-          log "PR $pr observed still-pending $count times (>= PENDING_AUTOMERGE_MAX=$PENDING_AUTOMERGE_MAX); stopping (automerge-stuck)"
-          journal_line "$ITER" "finalized-pending-automerge" "$issue" "$pr" 0 0 "" "pending-automerge"
+            "PR $pr (issue $issue) has stayed OPEN pending auto-merge across $count observations over ${age}s — auto-merge is not landing; stopping so it isn't looped forever"
+          log "PR $pr observed still-pending $count times over ${age}s (>= PENDING_AUTOMERGE_MAX=$PENDING_AUTOMERGE_MAX, >= PENDING_AUTOMERGE_MIN_SECS=$PENDING_AUTOMERGE_MIN_SECS); stopping (automerge-stuck)"
+          journal_line "$ITER" "finalized-pending-automerge" "$issue" "$pr" "$age" 0 "" "pending-automerge"
           finalize_exit "automerge-stuck" 1
         fi
-        new_list="${new_list}${pr}"$'\t'"${issue}"$'\t'"${count}"$'\n'
+        new_list="${new_list}${pr}"$'\t'"${issue}"$'\t'"${count}"$'\t'"${first_ts}"$'\n'
         ;;
       mismatch:*)
+        # A tracked armed PR that ended NOT-merged (CLOSED-unmerged, auto-merge dropped,
+        # or the ref forged/removed) is the very failure this feature exists to catch —
+        # it must NOT be swallowed silently (roborev 1840). Page HIGH naming the PR/issue/
+        # state and journal it abnormal-shaped, then drop it (the crash breaker is not
+        # touched: the PR was legitimately armed earlier, so this is an escalation to the
+        # owner, not a worker-crash signal).
+        mstate="${verify#mismatch:}"
         journal_line "$ITER" "pending-dropped" "$issue" "$pr" 0 0 "" "$verify"
-        log "pending PR $pr no longer pending ($verify); dropped from retroactive-credit set (uncredited)"
+        notify "high" "worker-supervisor: armed PR did not land" \
+          "PR $pr (issue $issue) was OPEN+armed but is now $mstate (not MERGED) — auto-merge did not land; needs owner attention"
+        log "pending PR $pr resolved $verify (issue $issue); dropped from retroactive-credit set, paged high"
         ;;
       *)
-        # unverified / aborted — a transient gh/transport gap or a shutdown; keep the
-        # PR (and its count unchanged) for a later retry rather than crediting or dropping.
-        new_list="${new_list}${pr}"$'\t'"${issue}"$'\t'"${count}"$'\n'
+        # unverified / aborted — a transient gh/transport gap or a shutdown; keep the PR
+        # (count + first_ts unchanged) for a later retry rather than crediting or dropping.
+        new_list="${new_list}${pr}"$'\t'"${issue}"$'\t'"${count}"$'\t'"${first_ts}"$'\n'
         ;;
     esac
   done <<< "$PENDING_PR_LIST"
@@ -904,14 +920,13 @@ run_iteration() {
   t1=$(date +%s)
   local duration=$((t1 - t0))
 
-  # The verification-outage streak is CONSECUTIVE over unverified finalizes only
-  # (roborev 1837/1839, mirroring CONSECUTIVE_ABNORMAL): any intervening outcome —
-  # stuck, abnormal, no-work, blocked/parked, a merged/mismatch/pending finalize —
-  # BREAKS it. Default to a reset here (covers the early-return stuck/abnormal paths
-  # and every non-unverified case below); the `unverified` branch alone re-establishes
-  # the streak from this captured previous value.
-  local prev_unverified=$CONSECUTIVE_UNVERIFIED
-  CONSECUTIVE_UNVERIFIED=0
+  # The verification-outage streak (CONSECUTIVE_UNVERIFIED) measures CONSECUTIVE gh
+  # verification FAILURES with no gh SUCCESS in between (roborev 1840): it is reset ONLY
+  # by an outcome where gh actually RESOLVED the PR (merged / pending-automerge /
+  # mismatch:* below), NOT by an intervening no-work/abnormal/parked iteration that
+  # never exercised gh — otherwise a persistent gh outage interleaved with unrelated
+  # outcomes (a common shape, since gh and worker failures share causes) would never
+  # reach UNVERIFIED_MAX, restoring the MAX_ISSUES-drift hazard #2670 closed.
 
   # A live-but-prompt-blocked worker (detected mid-iteration) that then exits
   # without a trustworthy clean marker is a PARK-shaped stall, not a crash:
@@ -964,6 +979,7 @@ run_iteration() {
         case "$verify" in
           merged)
             CONSECUTIVE_ABNORMAL=0
+            CONSECUTIVE_UNVERIFIED=0
             forget_pending_pr "$pr"
             ISSUES_DONE=$((ISSUES_DONE + 1))
             journal_line "$ITER" "finalized" "$issue" "$pr" "$duration" "$rc" "" "merged"
@@ -979,6 +995,7 @@ run_iteration() {
             # toward MAX_ISSUES retroactively once it reaches MERGED (credit_merged_
             # pending_prs), and only trips automerge-stuck when the SAME PR is seen
             # unmerged PENDING_AUTOMERGE_MAX times — never on N distinct healthy PRs.
+            CONSECUTIVE_UNVERIFIED=0
             remember_pending_pr "$pr" "$issue"
             journal_line "$ITER" "finalized-pending-automerge" "$issue" "$pr" "$duration" "$rc" "" "pending-automerge"
             notify "info" "worker-supervisor: finalized PENDING AUTO-MERGE issue $issue" \
@@ -1001,7 +1018,8 @@ run_iteration() {
             # — the worker claimed a finalize it did not actually land. Judged
             # ABNORMAL: uncounted, counts toward the breaker, and a HIGH page names
             # the discrepancy. gh clearly RESOLVED (or the ref was forged), so the
-            # verification-outage streak is broken (already reset at the top).
+            # verification-outage streak is broken — reset it (a gh-SUCCESS outcome).
+            CONSECUTIVE_UNVERIFIED=0
             forget_pending_pr "$pr"
             local mstate="${verify#mismatch:}"
             journal_line "$ITER" "abnormal" "$issue" "$pr" "$duration" "$rc" "" "$verify"
@@ -1016,9 +1034,10 @@ run_iteration() {
             # to the breaker (do not increment — a transient outage is not a crash;
             # do not reset — it must not mask a real prior crash chain). But a
             # PERSISTENT outage is an operator problem (roborev 1810 MED): after
-            # UNVERIFIED_MAX consecutive unverified finalizes the supervisor STOPS
-            # loudly, so the MAX_ISSUES ceiling can't drift on uncounted-forever runs.
-            CONSECUTIVE_UNVERIFIED=$((prev_unverified + 1))
+            # UNVERIFIED_MAX consecutive unverified finalizes (with no gh-SUCCESS
+            # resetting the streak in between) the supervisor STOPS loudly, so the
+            # MAX_ISSUES ceiling can't drift on uncounted-forever runs.
+            CONSECUTIVE_UNVERIFIED=$((CONSECUTIVE_UNVERIFIED + 1))
             journal_line "$ITER" "finalized-unverified" "$issue" "$pr" "$duration" "$rc" "" "unverified"
             notify "info" "worker-supervisor: finalized UNVERIFIED issue $issue" \
               "could not verify PR $pr merged (gh unavailable/network) — not counted, breaker unchanged"
@@ -1106,7 +1125,29 @@ trip_breaker_or_continue() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+# validate_numeric_knobs: every env-overridable numeric bound is used in arithmetic /
+# `-gt`/`-ge` comparisons; a malformed value (an operator typo like `12h` in a plist)
+# would otherwise evaluate to 0 and SILENTLY disable/misbehave a bound — the opposite of
+# fail-closed (roborev 1840). Validate each against `^-?[0-9]+$` at startup and STOP loudly
+# on a bad value rather than running with a silently-broken safety bound.
+validate_numeric_knobs() {
+  local name val
+  for name in MAX_ISSUES MAX_HOURS MAX_HOURS_SECS DISK_FLOOR_GB BREAKER_N \
+              BACKOFF_NOWORK_SECS HOLD_POLL_SECS MAX_ITER_SECS STUCK_POLL_SECS \
+              LEFTOVER_HOLD_MAX BUILD_HOLD_MAX UNVERIFIED_MAX MISMATCH_RETRIES \
+              MISMATCH_RETRY_WAIT_SECS MISMATCH_GRACE_CAP_SECS PENDING_AUTOMERGE_MAX \
+              PENDING_AUTOMERGE_MIN_SECS; do
+    val="${!name}"
+    if [[ ! "$val" =~ ^-?[0-9]+$ ]]; then
+      log "FATAL: numeric knob $name has a non-integer value '$val' — refusing to start with a silently-broken bound"
+      notify "high" "worker-supervisor: bad config" "$name='$val' is not an integer; supervisor refused to start (fix the env/plist)"
+      exit 2
+    fi
+  done
+}
+
 main() {
+  validate_numeric_knobs
   acquire_lock
   log "started: MAX_ISSUES=$MAX_ISSUES MAX_HOURS=$MAX_HOURS LOAD_MAX=$LOAD_MAX DISK_FLOOR_GB=$DISK_FLOOR_GB BREAKER_N=$BREAKER_N"
   while true; do
