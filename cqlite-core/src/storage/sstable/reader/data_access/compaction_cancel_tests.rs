@@ -748,11 +748,43 @@ async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
 /// a constant, not by `N`. This is the red-then-green pin: it FAILS (records `N`
 /// probes) against the pre-#2430 materialising walk and PASSES (`0`) after.
 ///
-/// `#[serial_test::serial]`: `index_probes` is a process-global counter read after
-/// a `reset()`, so this test must not run concurrently with another scan-driving
-/// test in the same binary.
+/// # Contamination-proof measurement (issue #2714, mirroring #2470)
+///
+/// `index_probes` is a process-global `AtomicU64` bumped by EVERY BIG `Index.db`
+/// probe across the whole `--lib` binary. The former `reset()` → scan →
+/// global-getter delta raced any concurrent read-driving test on another thread in
+/// the ~3250-test `cargo test --lib` write-tests component (which, unlike nextest,
+/// does NOT isolate tests per-process) — a foreign point read landing between the
+/// `reset()` and the read inflated the observed count above `0`, failing the
+/// assertion 5-in-6 in-gate. A `#[serial]` tag alone did NOT help: it serialises
+/// only OTHER tests in the SAME group, never the untagged crate-wide readers. This
+/// scan resolves each offset DIRECTLY from the up-front `get_partition_entries()`
+/// load (`full_index_scan.rs`) and never calls `lookup_partition_with_index`, so it
+/// records ZERO probes by construction — the flake was pure cross-thread counter
+/// pollution, NOT the #2059 B4-cache warm-state class (the scan touches no key
+/// cache). Fix: measure through a thread-local
+/// [`ReadWorkScope`](crate::storage::sstable::read_work_counters::read_work_scope::ReadWorkScope)
+/// (the same structural fix #2470 applied to
+/// `windowed_stream_read_pattern_is_sequential`). The default (current-thread)
+/// `#[tokio::test]` drives every `.await` — INCLUDING the pre-#2430 per-partition
+/// probe, which runs inline in `lookup_partition_with_index`, not on a spawn_blocking
+/// thread — on this test's own thread, so the scope captures exactly this scan's
+/// probes and no concurrent test can inflate them. No global `reset()` needed.
+///
+/// `#[serial_test::serial(work_counters)]` is nonetheless KEPT (issue #2714 roborev
+/// 1827/1828): this test's materialising walk performs real Data.db reads that bump
+/// the PROCESS-GLOBAL `READ_CALLS` counter, and `block_io`'s exact-equality guard
+/// (`read_compressed_chunk_at_records_one_read_per_chunk`) asserts an exact global
+/// `READ_CALLS` delta. The tag and the `ReadWorkScope` are complementary — the scope
+/// makes THIS test's `index_probes` assertion immune to others; the tag keeps THIS
+/// test's global `READ_CALLS` writes from contaminating others. Roborev 1828
+/// NORMALIZED every read-path-counter guard in this `--lib` binary onto the ONE
+/// shared `work_counters` serial group (block_io, chunk-cache, big-promoted-seek,
+/// this test, and the full-index-stream windowed guards) so they are mutually
+/// exclusive — a `#[serial]` (bare) vs `#[serial(work_counters)]` split would leave
+/// them in DIFFERENT groups that do NOT serialize against each other.
 #[tokio::test]
-#[serial_test::serial]
+#[serial_test::serial(work_counters)]
 async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
     let Some(data_path) = real_index_backed_fixture() else {
         eprintln!(
@@ -763,13 +795,21 @@ async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
     };
     let reader = open_reader(&data_path).await;
 
-    // Measure the index-probe work of ONE full materialising index-backed scan.
+    // Measure the index-probe work of ONE full materialising index-backed scan
+    // through a thread-local scope (immune to concurrent tests, issue #2714/#2470).
     // (The scan internally `ensure_materialized`s the lazily-opened index, so the
     // partition count below is read AFTER, once entries are resident.)
-    crate::storage::sstable::read_work_counters::reset();
+    let work = crate::storage::sstable::read_work_counters::read_work_scope::ReadWorkScope::new();
     let cancel = ScanCancel::new();
     let result = reader.iterate_all_partitions_via_full_index(&cancel).await;
-    let probes = crate::storage::sstable::read_work_counters::index_probes();
+    let probes = work.index_probes();
+    // POSITIVE CONTROL (issue #2714 roborev 1826): read a counter the SAME scope
+    // provably bumps INLINE so a dead / mis-scoped measurement fails loudly instead
+    // of passing `probes == 0` vacuously. The materialising walk performs one real
+    // Data.db random read per partition, each recording a `record_seek` inline on
+    // this current-thread runtime, so `seeks > 0` here proves the scope is live and
+    // capturing this scan's work (mirrors the self-validating sibling).
+    let seeks = work.seeks();
 
     // The scan must resolve fully through the index branch (not fall through to
     // sequential_scan), else the probe count would be vacuously 0 for the wrong
@@ -799,6 +839,16 @@ async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
         partition_count > 1,
         "fixture must expose several Index.db partitions for the O(N)-vs-constant \
          reprobe distinction to be meaningful (got {partition_count})"
+    );
+
+    // Positive control (issue #2714 roborev 1826): the scan bumped at least one
+    // inline seek in this scope, so a `probes == 0` below is a REAL zero, not a dead
+    // scope reading nothing.
+    assert!(
+        seeks > 0,
+        "positive control: the materialising scan must record inline read seeks in the \
+         same ReadWorkScope ({partition_count} partitions, each a Data.db read); seeks == 0 \
+         means the scope is dead / mis-scoped and the probes assertion is vacuous"
     );
 
     // The fix: each partition's offset comes from the already-loaded entry, so the

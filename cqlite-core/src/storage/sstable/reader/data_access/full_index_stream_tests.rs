@@ -426,7 +426,13 @@ async fn stream_for_compaction_emits_every_partition_windowed() {
 /// scan's increments and no concurrent test on another thread can inflate them. No
 /// global `reset()` and no `#[serial(work_counters)]` tag needed — see the
 /// `read_work_counters::read_work_scope` module doc for the full rationale.
+// `#[serial(work_counters)]` (issue #2714 roborev 1828): the `ReadWorkScope` makes
+// THIS test's index_probes/seek assertions immune, but its windowed scan performs
+// real reads that bump the process-global `READ_CALLS`; the tag keeps it in the ONE
+// shared `work_counters` group with `block_io`'s exact-`READ_CALLS` guard so it never
+// runs concurrently with a sibling that asserts an exact global read-counter delta.
 #[tokio::test]
+#[serial(work_counters)]
 async fn windowed_stream_read_pattern_is_sequential() {
     use crate::storage::sstable::read_work_counters as rwc;
     const N: i32 = 500;
@@ -622,7 +628,22 @@ async fn write_multi_window_fixture(
 /// intact through the windowed read, not just that some row with that key
 /// arrived.
 ///
-/// `#[serial(work_counters)]`: `INDEX_PROBES`/`SEEK_CALLS` are process-global.
+/// Contamination-proof (issue #2714, mirroring #2470 and the sibling
+/// `windowed_stream_read_pattern_is_sequential`): `INDEX_PROBES`/`SEEK_CALLS` are
+/// process-global atoms, so a `reset()` → scan → global-getter delta races any
+/// concurrent read-driving test in the `--lib` binary. `#[serial(work_counters)]`
+/// only serialises OTHER tagged tests, so an untagged crate-wide reader between the
+/// reset and the read still inflates `index_probes()` above `0`. Measure through a
+/// thread-local
+/// [`ReadWorkScope`](crate::storage::sstable::read_work_counters::read_work_scope::ReadWorkScope):
+/// this uncompressed non-stitching walk records both
+/// its per-partition (non-)probe and its window-refill seeks INLINE on this
+/// current-thread `#[tokio::test]`, so the scope captures exactly this scan's
+/// increments — no global `reset()`. `#[serial(work_counters)]` is KEPT (issue #2714
+/// roborev 1828), the complementary tag: the scope makes THIS test's assertions
+/// immune to others, while the tag keeps its real windowed-scan `READ_CALLS` writes
+/// from contaminating `block_io`'s exact-`READ_CALLS` guard — both live in the ONE
+/// shared `work_counters` read-counter group.
 #[tokio::test]
 #[serial(work_counters)]
 async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
@@ -644,7 +665,9 @@ async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
     let reader = open_reader(&data_path).await;
     let cancel = ScanCancel::default();
 
-    rwc::reset();
+    // Thread-local scope (issue #2714/#2470): counts only THIS scan's inline
+    // increments, immune to any concurrent read-driving test on another thread.
+    let work = rwc::read_work_scope::ReadWorkScope::new();
     let mut streamed: Vec<(crate::RowKey, crate::types::ScanRow)> = Vec::new();
     let outcome = reader
         .stream_all_partitions_via_full_index(&cancel, &mut |row| {
@@ -653,6 +676,10 @@ async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
         })
         .await
         .unwrap();
+    // Capture the scan's scoped counters BEFORE the parity materialise below (which
+    // would add its own reads to the still-open scope).
+    let scan_index_probes = work.index_probes();
+    let scan_seeks = work.seeks();
     assert!(
         matches!(outcome, FullIndexStreamOutcome::Streamed),
         "a full-Index.db fixture must stream via the index walk, not fall back"
@@ -668,15 +695,13 @@ async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
     // actually crosses a window boundary — unreachable by any prior (tiny)
     // fixture. Zero index probes still holds regardless of fixture size.
     assert_eq!(
-        rwc::index_probes(),
-        0,
+        scan_index_probes, 0,
         "the windowed walk must perform ZERO Index.db probes regardless of fixture size"
     );
-    let seeks = rwc::seek_calls();
     assert!(
-        seeks >= 2,
+        scan_seeks >= 2,
         "a >4 MiB Data.db (small partitions ≈4.9 MiB + a wide partition ≈5 MB) \
-         must force at least 2 window refills (got {seeks}) — proves the \
+         must force at least 2 window refills (got {scan_seeks}) — proves the \
          multi-window-refill path actually ran, not just the single-window case \
          every prior (tiny) fixture exercised"
     );

@@ -38,6 +38,11 @@ use std::sync::Arc;
 
 use cqlite_core::storage::sstable::read_work_counters as rwc;
 
+// key_cache_flush requires EVERY test in this binary to be bare `#[serial]` (one
+// shared group) so a flush never interleaves a sibling warm-read (issue #2714 r1828).
+#[path = "common/key_cache_flush.rs"]
+mod key_cache_flush;
+
 fn datasets_root() -> Option<PathBuf> {
     std::env::var("CQLITE_DATASETS_ROOT")
         .ok()
@@ -118,6 +123,11 @@ mod big {
             .await
             .expect("open BIG reader");
 
+        // COLD START (issue #2714): the process-global B4 cache (issue #2059) may be
+        // warm for this raw key from a sibling `#[serial]` test that opened the SAME
+        // fixture — flush so the "first (cold)" probe below is deterministic
+        // regardless of test order (retires this latent-trio member).
+        crate::key_cache_flush::flush_global_key_cache();
         // First resolution: a real Index.db probe (cache miss).
         rwc::reset();
         let first = reader

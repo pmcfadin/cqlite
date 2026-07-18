@@ -35,6 +35,11 @@ use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use serial_test::serial;
 
+// key_cache_flush requires EVERY test in this binary to be bare `#[serial]` (one
+// shared group) so a flush never interleaves a sibling warm-read (issue #2714 r1828).
+#[path = "common/key_cache_flush.rs"]
+mod key_cache_flush;
+
 fn datasets_root() -> Option<PathBuf> {
     std::env::var("CQLITE_DATASETS_ROOT")
         .ok()
@@ -326,13 +331,28 @@ async fn big_locate_b4_repeat_zero_reprobe() {
         .await
         .expect("open BIG reader");
 
+    // COLD START (issue #2714): the process-global B4 key→offset cache (issue #2059,
+    // merged 2026-07-15) persists resolved locations across reader instances keyed by
+    // GENERATION IDENTITY. Because every test in this binary opens the SAME on-disk
+    // fixture (`SSTableReader::open(find_data_db(...))`) they share one identity, so a
+    // SIBLING serial test that locates this exact key first (`big_nb_locate_parity`
+    // locates the boundary min-key of test_basic/simple_table) leaves it warm — and a
+    // fresh reader here would then serve the "first" locate from cache with ZERO
+    // probes. Before #2059 the cache was PER-READER, so a fresh reader was always
+    // cold and this test passed regardless of order; #2059 invalidated that cold-start
+    // assumption. The flake is a pure test-execution-ORDER coin flip (bare `#[serial]`
+    // lock-acquisition order is nondeterministic under parallelism, biased toward
+    // failure under gate CPU contention). Flush the global cache so the first locate
+    // is genuinely COLD and the probe-vs-cache differential below is deterministic.
+    key_cache_flush::flush_global_key_cache();
+
     // First locate warms the B4 cache with a real probe.
     rwc::reset();
     let first = reader.locate(&present).await.expect("first locate");
     assert!(first.is_some(), "G3/B4: present key must resolve");
     assert!(
         rwc::index_probes() >= 1,
-        "G3/B4: the first present-key locate must perform a real Index.db probe; got {}",
+        "G3/B4: the first (cold) present-key locate must perform a real Index.db probe; got {}",
         rwc::index_probes()
     );
 
@@ -390,6 +410,15 @@ async fn bti_narrow_locate_parity() {
         .await
         .expect("open BTI reader");
 
+    // COLD START (issue #2714): same process-global B4 cache hazard as
+    // `big_locate_b4_repeat_zero_reprobe`. No sibling in THIS binary currently locates
+    // a test_da/simple_table key before this test, so the assertion is not observed to
+    // flake today — but it carries the identical latent cold-start assumption (a fresh
+    // reader over the shared fixture shares the warm global cache post-#2059). Flush so
+    // the "descends the trie exactly once" assertion is robust regardless of order and
+    // future sibling additions.
+    key_cache_flush::flush_global_key_cache();
+
     // Counters FIRST, before the parity loop warms the B4 cache for these keys.
     // A single present-key locate() descends the trie exactly once...
     let present = [DA_SIMPLE_GOLDEN[0].0; 16];
@@ -398,7 +427,7 @@ async fn bti_narrow_locate_parity() {
     assert_eq!(
         rwc::trie_walks(),
         1,
-        "G3: a BTI locate() must descend the Partitions.db trie exactly once; got {}",
+        "G3: a BTI (cold) locate() must descend the Partitions.db trie exactly once; got {}",
         rwc::trie_walks()
     );
     // ...and the B4 repeat is cache-served with zero new trie walks.

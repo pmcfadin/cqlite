@@ -27,6 +27,11 @@ use cqlite_core::storage::sstable::read_work_counters as rwc;
 use cqlite_core::{Database, Value};
 use serial_test::serial;
 
+// key_cache_flush requires EVERY test in this binary to be bare `#[serial]` (one
+// shared group) so a flush never interleaves a sibling warm-read (issue #2714 r1828).
+#[path = "common/key_cache_flush.rs"]
+mod key_cache_flush;
+
 fn datasets_root() -> Option<PathBuf> {
     std::env::var("CQLITE_DATASETS_ROOT")
         .ok()
@@ -241,6 +246,11 @@ async fn bti_point_read_increments_trie_walks() {
         panic!("A5: could not learn a present UUID key from test_da.simple_table");
     };
 
+    // COLD START (issue #2714): flush the process-global B4 cache (issue #2059) so a
+    // sibling `#[serial]` test that point-read this key first cannot warm it and turn
+    // this "must descend at least once" assertion into a zero-walk cache hit (retires
+    // this latent-trio member).
+    key_cache_flush::flush_global_key_cache();
     rwc::reset();
     assert_eq!(rwc::trie_walks(), 0, "reset must zero TRIE_WALKS");
 
