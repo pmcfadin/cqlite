@@ -426,18 +426,21 @@ else
   echo "------- classify output -------"; printf '%s\n' "$noparser_out"; echo "-------------------------------"
 fi
 
-# 7c. No metadata parser RUNS the core lib tests (issue #1821 roborev): the
-#     lib-only fallback must ACTUALLY RUN cqlite-core's tests, not compile-check
-#     them. The old code consulted pkg_has_lib (empty index -> 0) and degraded to
-#     `--no-run`. Assert the fallback command includes `--lib` and does NOT include
-#     `--no-run`. Force the no-parser branch hermetically via the existing hook.
-noparser_cmd=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --scoped-test-cmd-noparser 2>/dev/null)
-if printf '%s\n' "$noparser_cmd" | grep -qF -- '--lib' \
-   && ! printf '%s\n' "$noparser_cmd" | grep -qF -- '--no-run'; then
-  ok "no-parser: fallback RUNS cqlite-core --lib tests (has --lib, no --no-run)"
+# 7c. No metadata parser FAILS LOUDLY (issue #2658): silently narrowing --lite to
+#     `cqlite-core --lib` when neither jq nor python3 is present was a
+#     false-confidence path on minimal boxes — a green --lite that validated NONE
+#     of the dependent/integration crates (nor, post-#2658, the core-src
+#     dependent-crate compile-checks). The no-parser path now emits a LOUD-FAIL
+#     message naming the missing tooling. Assert the message (a) names jq AND
+#     python3, and (b) does NOT advertise a narrowed `cqlite-core --lib` run.
+noparser_msg=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --scoped-noparser-fail-msg 2>/dev/null)
+if printf '%s\n' "$noparser_msg" | grep -qF 'jq' \
+   && printf '%s\n' "$noparser_msg" | grep -qF 'python3' \
+   && ! printf '%s\n' "$noparser_msg" | grep -qF -- '--lib'; then
+  ok "no-parser: FAILS loudly naming jq+python3 (never silently narrows to cqlite-core --lib)"
 else
-  bad "no-parser: fallback command does not run lib tests (want --lib, not --no-run)"
-  echo "------- scoped cmd -------"; printf '%s\n' "$noparser_cmd"; echo "--------------------------"
+  bad "no-parser: fail message does not name the missing tools (or still advertises a --lib narrowing)"
+  echo "------- fail msg -------"; printf '%s\n' "$noparser_msg"; echo "-----------------------"
 fi
 
 # 7d. Python-binding blast-radius routing (issue #1893): cqlite-py is a pyo3 cdylib
@@ -541,6 +544,65 @@ if printf '%s\n' "$rst_body" | grep -v '^[[:space:]]*#' | grep -q 'cqlite-py'; t
   printf '%s\n' "$rst_body" | grep -v '^[[:space:]]*#' | grep -n 'cqlite-py'
 else
   ok "py-route: run_scoped_tests has no inline cqlite-py routing (exclusion single-sourced)"
+fi
+
+# 7f. Core-src dependent-crate compile-check (issue #2658): a cqlite-core src
+#     change can break the test code of a SEPARATE test crate (integration-tests,
+#     format-compatibility-tests, cli/flight/root-cqlite test targets) without
+#     touching that crate's files — invisible to --lite's per-package selection
+#     (which routes only packages the diff itself touches), producing the main
+#     lite-green->full-red wasted round. A core-src diff must now ALSO emit a
+#     `cargo test --no-run` compile-check ("compile-check-pkg: <pkg>") for every
+#     dependent test crate. The gate exposes this via the hidden
+#     `--classify-core-dependent-compile-check` hook (no cargo test run).
+cc_core=$(printf '%s\n' \
+  "cqlite-core/src/storage/sstable/reader.rs" \
+  | bash "$GATE" --classify-core-dependent-compile-check 2>/dev/null)
+# The two acceptance-named dependent test crates must be compile-checked.
+if printf '%s\n' "$cc_core" | grep -qxF "compile-check-pkg: cqlite-integration-tests" \
+   && printf '%s\n' "$cc_core" | grep -qxF "compile-check-pkg: format-compatibility-tests"; then
+  ok "core-dep: core-src diff adds --no-run compile-check of integration-tests + format-compatibility-tests"
+else
+  bad "core-dep: core-src diff did NOT add the dependent-crate compile-checks"
+  echo "------- plan -------"; printf '%s\n' "$cc_core"; echo "--------------------"
+fi
+# cqlite-core itself must NOT be in the compile-check set (its --lib already runs),
+# and cdylib bindings (no test targets) must not appear.
+if printf '%s\n' "$cc_core" | grep -qF "compile-check-pkg: cqlite-core" \
+   || printf '%s\n' "$cc_core" | grep -qE 'compile-check-pkg: (cqlite-py|cqlite-node)$'; then
+  bad "core-dep: compile-check set wrongly included cqlite-core or a cdylib binding"
+  echo "------- plan -------"; printf '%s\n' "$cc_core"; echo "--------------------"
+else
+  ok "core-dep: compile-check set excludes cqlite-core + cdylib bindings"
+fi
+# A NON-core diff (docs / another crate's src) must add NO compile-check at all.
+cc_none=$(printf '%s\n' \
+  "docs/some-doc.md" \
+  "cqlite-cli/src/main.rs" \
+  | bash "$GATE" --classify-core-dependent-compile-check 2>/dev/null)
+if [ -z "$cc_none" ]; then
+  ok "core-dep: a non-core-src diff adds NO dependent-crate compile-check"
+else
+  bad "core-dep: a non-core-src diff wrongly emitted compile-check targets"
+  echo "------- plan -------"; printf '%s\n' "$cc_none"; echo "--------------------"
+fi
+# No metadata parser -> NO compile-check set (the caller FAILs loudly instead).
+cc_noparser=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 printf '%s\n' \
+  "cqlite-core/src/storage/sstable/reader.rs" \
+  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --classify-core-dependent-compile-check 2>/dev/null)
+if [ -z "$cc_noparser" ]; then
+  ok "core-dep: no-parser emits NO compile-check plan (caller fails loudly)"
+else
+  bad "core-dep: no-parser wrongly emitted a compile-check plan"
+  echo "------- plan -------"; printf '%s\n' "$cc_noparser"; echo "--------------------"
+fi
+# 7g. Executor consumes the SINGLE compile-check routing function (issue #2658):
+#     an executor-only edit must not fork the compile-check plan. Structurally
+#     assert run_scoped_tests invokes classify_core_dependent_compile_check.
+if printf '%s\n' "$rst_body" | grep -v '^[[:space:]]*#' | grep -q 'classify_core_dependent_compile_check'; then
+  ok "core-dep: executor (run_scoped_tests) consumes classify_core_dependent_compile_check (single source)"
+else
+  bad "core-dep: run_scoped_tests does not call classify_core_dependent_compile_check — compile-check routing forked"
 fi
 
 # 8. Bash 3.2 compatibility (issue #1821): macOS ships Bash 3.2 as /bin/bash and

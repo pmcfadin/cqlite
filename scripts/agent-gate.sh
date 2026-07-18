@@ -233,7 +233,10 @@
 #                                     # scoping as the full gate) + BLAST-RADIUS-SCOPED tests
 #                                     # (the touched package's --lib + the diff's
 #                                     # new --test targets; NOT core-tests/write/
-#                                     # cli/bindings/parity/smoke). ~1-5 min vs
+#                                     # cli/bindings/parity/smoke). A cqlite-core
+#                                     # SRC diff also `cargo test --no-run`
+#                                     # compile-checks every dependent test crate
+#                                     # (issue #2658). ~1-5 min vs
 #                                     # 12-25 min. It is NOT the gate of record and
 #                                     # emits a DISTINCT "==== AGENT-GATE LITE
 #                                     # SUMMARY ====" block (MODE: lite) so it can
@@ -418,7 +421,7 @@ if [ "${CQLITE_DISABLE_NEXTEST:-0}" = 1 ]; then
 elif command -v cargo-nextest >/dev/null 2>&1; then
   NEXTEST=1
   ACCEL_NEXTEST=on
-  # Banner on STDERR: hidden hook modes (--classify-*, --scoped-test-cmd-noparser)
+  # Banner on STDERR: hidden hook modes (--classify-*, --scoped-noparser-fail-msg)
   # must keep STDOUT empty, and this detection runs before the hook dispatch (same
   # rule the sccache banner above already follows; #1821/#1825).
   echo "agent-gate: cargo-nextest detected ($(cargo nextest --version 2>/dev/null | head -1)); core-tests uses nextest + a cargo test --doc pass (#1737)" >&2
@@ -765,14 +768,91 @@ _owners_from_index() {
 # longest-prefix ownership. Empty when no metadata parser is available.
 classify_package_owners() { _owners_from_index "$(_package_index)"; }
 
-# Single source of truth for the no-parser fallback's scoped-test command (issue
-# #1821 roborev): when NEITHER jq nor python3 is present we cannot derive package
-# ownership from Cargo metadata, so we scope to `cqlite-core --lib`. Crucially this
-# RUNS the core lib tests (no `--no-run`) — a compile-only check would give false
-# confidence that tests passed. cli-helpers matches the full gate's core-tests.
-# Both run_scoped_tests and the --scoped-test-cmd-noparser self-test hook use this.
-_scoped_test_cmd_noparser() {
-  echo "test -p cqlite-core --lib --features cli-helpers"
+# Emit the name of every workspace package that (a) DECLARES a dependency on
+# cqlite-core AND (b) owns at least one Cargo `--test` target — i.e. the dependent
+# TEST crates whose test code a cqlite-core API change can break invisibly to
+# --lite (issue #2658). cqlite-core itself is excluded (its --lib is already run);
+# cdylib bindings (cqlite-py/cqlite-node) fall out naturally (zero test targets).
+# Fully metadata-driven (jq OR python3, same parsers as _package_index): the
+# declared-dependency edge is present in `cargo metadata --no-deps`. Empty when no
+# parser is available (the caller then FAILs loudly — never a silent narrowing).
+# Deterministic, sorted; Bash 3.2-safe.
+_core_dependent_test_pkgs() {
+  # Test hook (issue #2658): force the no-parser path hermetically.
+  [ "${AGENT_GATE_TEST_NO_METADATA_PARSER:-0}" = 1 ] && return 0
+  local meta
+  meta=$(cargo metadata --no-deps --format-version 1 2>/dev/null) || return 0
+  [ -n "$meta" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$meta" | jq -r \
+      '.packages[]
+       | select(.name != "cqlite-core")
+       | select(any(.dependencies[]; .name == "cqlite-core"))
+       | select(any(.targets[]; .kind[] == "test"))
+       | .name' | sort -u
+  elif command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$meta" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+out = set()
+for p in d["packages"]:
+    if p["name"] == "cqlite-core":
+        continue
+    if not any(dep["name"] == "cqlite-core" for dep in p["dependencies"]):
+        continue
+    if any("test" in t["kind"] for t in p["targets"]):
+        out.add(p["name"])
+for n in sorted(out):
+    print(n)
+'
+  fi
+}
+
+# Print cqlite-core's absolute manifest DIRECTORY from the metadata package index,
+# or nothing when metadata is unavailable. Single source for "is this path a
+# cqlite-core src file" without hardcoding "cqlite-core/src" (worktree-safe).
+_core_src_dir() {
+  printf '%s\n' "$(_package_index)" \
+    | awk -F'\t' '$2 == "cqlite-core" { print $1 "/src"; exit }'
+}
+
+# Read changed repo-relative paths on stdin; if ANY is a cqlite-core SOURCE file
+# (under cqlite-core/src/), emit "compile-check-pkg: <pkg>" for every dependent
+# TEST crate (issue #2658) — the extra `cargo test --no-run` compile-checks a
+# core-src diff adds to the --lite plan so a core API change that breaks a SEPARATE
+# test crate's code is caught at --lite time, not later as a lite-green->full-red
+# wasted round. Emits NOTHING when the diff has no core-src change. Deterministic;
+# no side effects; does not invoke cargo test. Consumed by run_scoped_tests and the
+# hidden --classify-core-dependent-compile-check self-test hook (single source).
+classify_core_dependent_compile_check() {
+  local changed coredir abs f is_core=0 pkg
+  changed=$(cat)
+  coredir=$(_core_src_dir)
+  [ -n "$coredir" ] || return 0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    abs="$REPO_ROOT/$f"
+    if [ "${abs#"$coredir"/}" != "$abs" ]; then is_core=1; break; fi
+  done <<<"$changed"
+  [ "$is_core" -eq 1 ] || return 0
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] || continue
+    echo "compile-check-pkg: $pkg"
+  done <<<"$(_core_dependent_test_pkgs)"
+}
+
+# Loud-fail message for the no-metadata-parser path (issue #2658). When NEITHER jq
+# nor python3 is present we CANNOT derive from Cargo metadata: package ownership,
+# per-`--test`-target required-features, NOR the core-dependent compile-check set.
+# The pre-#2658 behavior silently NARROWED --lite to `cqlite-core --lib` — a
+# FALSE-CONFIDENCE path on a minimal box, where a green --lite could have skipped
+# every dependent crate + integration target (and, post-#2658, the whole
+# core-src dependent-crate compile-check). So the no-parser path now FAILS LOUDLY,
+# naming the missing tooling, instead of running a narrowed subset that reads green.
+# Single source of truth for both run_scoped_tests and the --scoped-noparser-fail-msg
+# self-test hook (never edit one side alone).
+_scoped_noparser_fail_msg() {
+  echo "no Cargo-metadata parser (need jq OR python3): --lite cannot derive package ownership, per-target required-features, or the core-dependent compile-check set. Refusing to silently narrow to the cqlite-core library tests only (that reads green while skipping dependent/integration crates). Install jq or python3, or run the full gate."
 }
 
 # The FAST python-binding tier --lite runs for a bindings/python diff (issue #1893)
@@ -1330,10 +1410,14 @@ case "${1:-}" in
   # Hidden self-test hook (issue #1821): map stdin paths -> "<pkg>|<has_lib>"
   # via metadata-derived longest-prefix package ownership. No side effects.
   --classify-package-owners) classify_package_owners; exit 0 ;;
-  # Hidden self-test hook (issue #1821 roborev): print the no-parser fallback's
-  # scoped-test command so the self-test can assert it RUNS tests (--lib, never
-  # --no-run). No side effects; does not invoke cargo.
-  --scoped-test-cmd-noparser) echo "cargo $(_scoped_test_cmd_noparser)"; exit 0 ;;
+  # Hidden self-test hook (issue #2658): print the no-metadata-parser LOUD-FAIL
+  # message so the self-test can assert --lite FAILS (naming the missing tool)
+  # rather than silently narrowing to cqlite-core --lib. No side effects.
+  --scoped-noparser-fail-msg) _scoped_noparser_fail_msg; exit 0 ;;
+  # Hidden self-test hook (issue #2658): map stdin changed paths -> the extra
+  # `cargo test --no-run` dependent-crate compile-check targets a core-src diff
+  # adds to the --lite plan ("compile-check-pkg: <pkg>" lines). No cargo/git.
+  --classify-core-dependent-compile-check) classify_core_dependent_compile_check; exit 0 ;;
   # Hidden self-test hook (issue #1893): map stdin changed paths -> the scoped-tests
   # PLAN ("rust-pkg: <pkg>" / "python-tier: <cmd>") WITHOUT running cargo/maturin, so
   # the self-test can assert python diffs route to the maturin+pytest tier.
@@ -2619,6 +2703,19 @@ run_file_size() {
 # says so when no rust workspace package is in the diff (docs/scripts/bindings-only
 # changes). Package detection uses the SAME base-ref resolution as file-size.
 #
+# Core-src dependent-crate widening (issue #2658): when the diff includes a
+# cqlite-core src file, ALSO `cargo test --no-run` (compile-check ONLY) every
+# workspace test crate that depends on cqlite-core (integration-tests,
+# format-compatibility-tests, cli/flight/root-cqlite test targets). A core API
+# change that breaks a SEPARATE test crate's code is otherwise invisible to --lite
+# (per-package selection routes only packages the diff itself touches) — the main
+# lite-green->full-red wasted-round source. See classify_core_dependent_compile_check.
+#
+# No-metadata-parser (issue #2658): with NEITHER jq nor python3 present we cannot
+# derive ownership/features/the compile-check set, so this component FAILS LOUDLY
+# (naming the missing tool) rather than silently narrowing to `cqlite-core --lib`
+# (a false-confidence green on minimal boxes). See _scoped_noparser_fail_msg.
+#
 # Python exception (issue #1893): cqlite-py is a pyo3 cdylib whose
 # `cargo test -p cqlite-py` can never link libpython, so a bindings/python diff is
 # routed to the fast python tier (maturin develop --profile dev + the not-slow
@@ -2654,36 +2751,29 @@ run_scoped_tests() {
 
   # Package ownership and per-`--test` scoping REQUIRE an authoritative
   # Cargo-metadata parser (jq or python3). Without one we cannot map a path to its
-  # owning workspace member NOR learn a target's required-features (running a
-  # feature-gated target feature-less would FAIL --lite spuriously). So when
-  # NEITHER is present we scope to `cqlite-core --lib` ONLY and say so — we emit no
-  # per-package/per-target selection and reintroduce NO hardcoded path mapping. The
-  # AGENT_GATE_TEST_NO_METADATA_PARSER hook forces this branch for the self-test.
+  # owning workspace member, learn a target's required-features, NOR compute the
+  # core-dependent compile-check set. The pre-#2658 fallback silently NARROWED to
+  # `cqlite-core --lib` — a FALSE-CONFIDENCE green on a minimal box (skips every
+  # dependent/integration crate). So when NEITHER parser is present we now FAIL
+  # LOUDLY, naming the missing tooling, instead of running a narrowed subset (issue
+  # #2658). The AGENT_GATE_TEST_NO_METADATA_PARSER hook forces this branch.
   local have_meta_parser=1
   if [ "${AGENT_GATE_TEST_NO_METADATA_PARSER:-0}" = 1 ] || \
      { ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; }; then
     have_meta_parser=0
-    echo ">>> [$name] no jq/python3 — scoping to cqlite-core --lib only; run the full gate for integration-test coverage"
   fi
 
-  # No-parser fallback (issue #1821 roborev): without a metadata parser we do NOT
-  # consult pkg_has_lib (it can't know without metadata and would degrade to a
-  # compile-only --no-run). Run an explicit, unconditional cqlite-core --lib test
-  # that ACTUALLY RUNS the core lib tests, then finish this component and return —
-  # the metadata-derived per-package selection below is skipped entirely.
+  # No-parser: FAIL LOUDLY (issue #2658). Silently scoping to `cqlite-core --lib`
+  # gave a green --lite that had validated NONE of the dependent/integration crates
+  # (and, post-#2658, none of the core-src dependent-crate compile-checks) — a
+  # false-confidence path on minimal boxes. Emit the shared loud-fail message,
+  # mark the component FAIL, and finish here.
   if [ "$have_meta_parser" -eq 0 ]; then
-    local -a args=()
-    read -r -a args <<<"$(_scoped_test_cmd_noparser)"
-    echo ">>> [$name] cargo ${args[*]}"
-    if ! cargo "${args[@]}" >>"$log" 2>&1; then
-      status=FAIL
-      OVERALL=FAIL
-    fi
-    if [ "$status" = FAIL ]; then
-      echo "--- [$name] FAILED; last 60 lines of $log ---"
-      tail -60 "$log"
-      echo "--- end of $name output ---"
-    fi
+    local msg
+    msg=$(_scoped_noparser_fail_msg)
+    echo ">>> [$name] FAIL: $msg" | tee -a "$log" >&2
+    status=FAIL
+    OVERALL=FAIL
     end=$(date +%s)
     NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
     echo ">>> [$name] $status ($((end - start))s)"
@@ -2808,6 +2898,33 @@ run_scoped_tests() {
       OVERALL=FAIL
     fi
   done
+
+  # Core-src dependent-crate compile-check (issue #2658): a cqlite-core src change
+  # can break the test code of a SEPARATE test crate (integration-tests,
+  # format-compatibility-tests, cli/flight/root-cqlite test targets) without
+  # touching that crate's files — invisible to the per-package selection above (it
+  # only routes packages the diff itself touched), so --lite went green while the
+  # full gate went red (the main lite-green->full-red wasted-round source). When the
+  # diff includes a cqlite-core src file we `cargo test --no-run` (compile ONLY, no
+  # slow run) every dependent test crate so a broken test compile surfaces at --lite
+  # time. classify_core_dependent_compile_check is the SINGLE source (same lines the
+  # --classify-core-dependent-compile-check self-test hook asserts).
+  local ccplan ccpkg
+  ccplan=$(printf '%s\n' "$changed" | classify_core_dependent_compile_check)
+  if [ -n "$ccplan" ]; then
+    while IFS= read -r ccpkg; do
+      ccpkg=${ccpkg#compile-check-pkg: }
+      [ -n "$ccpkg" ] || continue
+      # --all-targets compile-checks every test/bin/example of the crate; features
+      # of a per-package target are resolved by cargo (targets whose
+      # required-features are off are simply skipped — no costly duckdb/otel build).
+      echo ">>> [$name] core-src diff: compile-check dependent crate: cargo test -p $ccpkg --all-targets --no-run"
+      if ! cargo test -p "$ccpkg" --all-targets --no-run >>"$log" 2>&1; then
+        status=FAIL
+        OVERALL=FAIL
+      fi
+    done <<<"$ccplan"
+  fi
 
   # Python tier (issue #1893): the REAL python signal --lite runs for a
   # bindings/python diff instead of the always-libpython-link-failing
