@@ -339,6 +339,14 @@ def build_record(args, gh_fields: dict) -> dict:
     if has_severity:
         record["roborev_blockers"] = args.roborev_blockers
         record["roborev_nits"] = args.roborev_nits
+    # Optional stall-observability counters (issue #2667). Authoritative-only: each is
+    # written ONLY when observed (supplied), never defaulted to 0 — an omitted field means
+    # "not observed", not "zero", so a Mode-3 incident that WAS measured stays visible in
+    # the ledger while an unmeasured cycle does not fabricate a clean signal.
+    if args.nudges is not None:
+        record["nudges"] = args.nudges
+    if args.orphan_minutes is not None:
+        record["orphan_minutes"] = args.orphan_minutes
     return record
 
 
@@ -638,6 +646,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="NIT-severity roborev findings (issue #2088); supply together "
                           "with --roborev-blockers")
     rec.add_argument("--rework", type=int, default=None)
+    rec.add_argument("--nudges", type=int, default=None,
+                     help="manual lead nudges required during the cycle to un-stall background "
+                          "work (issue #2667); OPTIONAL — omit when unobserved, never default to 0")
+    rec.add_argument("--orphan-minutes", dest="orphan_minutes", type=int, default=None,
+                     help="total minutes background work sat completed-but-unowned this cycle "
+                          "(issue #2667); OPTIONAL — omit when unobserved, never default to 0")
     rec.add_argument("--from-json", dest="from_json", default=None,
                      help="inject GitHub-derived fields from a JSON file (else pull via gh)")
     rec.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true",
