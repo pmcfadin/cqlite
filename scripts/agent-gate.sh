@@ -199,7 +199,13 @@
 #                      scripts/tests/test_gate_concurrency_cap.sh (#1825) — proves
 #                      the machine-wide full-gate concurrency cap queues at N,
 #                      exempts --lite, and releases a slot on SIGKILL (uses the
-#                      gate's hermetic stub mode, never real gate work).
+#                      gate's hermetic stub mode, never real gate work). Also runs
+#                      (no python3 needed) scripts/tests/test_gate_cpu_budget.sh
+#                      (#2640) — proves the per-gate core budget (CARGO_BUILD_JOBS +
+#                      nextest/cargo --test-threads) is derived from the slot count
+#                      (full cores when sole gate, fair share max(1, ncpu/N) when
+#                      N>1, caller CARGO_BUILD_JOBS respected) and that the gate
+#                      wraps itself in taskpolicy -c utility (macOS) / nice (Linux).
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -323,6 +329,37 @@ set -uo pipefail
 # captured CWD just below, before any further directory change.
 INVOCATION_CWD="$PWD"
 
+# ---- Per-gate CPU utility wrapping (issue #2640) ----------------------------
+# Wrap the ENTIRE gate process in the OS "run at reduced priority / utility QoS"
+# tool so a gate never CPU-oversubscribes a box it shares with other gates or
+# interactive work: `taskpolicy -c utility` on macOS (clamps the whole tree to
+# the background/utility QoS tier) and `nice` on Linux. This is the CPU-priority
+# half of #2640; CARGO_BUILD_JOBS + nextest test-threads (the core-count half)
+# are derived from the machine-wide slot count further below.
+#
+# Mechanism: re-exec THIS script ONCE under the wrapper (guarded by
+# AGENT_GATE_WRAPPED so the re-exec'd copy never loops), before any work — that
+# way the QoS/priority clamp is inherited by every heavy child (cargo, nextest,
+# rustc, python, node). It happens BEFORE `cd`, so the relative "$0" still
+# resolves against the caller's CWD, and BEFORE INVOCATION_CWD/args matter (both
+# are recomputed identically in the re-exec'd copy). Degrades gracefully to an
+# UNWRAPPED run when the tool is absent (no wrapper var set). Escape hatch:
+# CQLITE_GATE_NO_NICE=1 disables wrapping entirely. AGENT_GATE_WRAPPER records
+# which wrapper (if any) is in effect, for the SUMMARY cpu-budget line + the
+# --cpu-budget self-test hook.
+if [ "${AGENT_GATE_WRAPPED:-0}" != 1 ] && [ "${CQLITE_GATE_NO_NICE:-0}" != 1 ]; then
+  _gate_wrapper=""
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    Darwin) command -v taskpolicy >/dev/null 2>&1 && _gate_wrapper="taskpolicy -c utility" ;;
+    Linux)  command -v nice       >/dev/null 2>&1 && _gate_wrapper="nice -n ${CQLITE_GATE_NICE:-10}" ;;
+  esac
+  if [ -n "$_gate_wrapper" ]; then
+    export AGENT_GATE_WRAPPED=1 AGENT_GATE_WRAPPER="$_gate_wrapper"
+    # shellcheck disable=SC2086  # intentional word-split of "<tool> <flags>"
+    exec $_gate_wrapper "${BASH:-bash}" "$0" "$@"
+  fi
+fi
+
 cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
 
@@ -401,7 +438,10 @@ fi
 # datasets are read-only, and each component captures its own log + verdict to a
 # file (see record_result) so interleaved stdout can never corrupt the
 # deterministic end-of-run SUMMARY block.
-_ncpu=$( { command -v nproc >/dev/null 2>&1 && nproc; } || sysctl -n hw.ncpu 2>/dev/null || echo 4 )
+# AGENT_GATE_TEST_NCPU overrides the detected core count (issue #2640 self-test):
+# lets scripts/tests pin ncpu so the CARGO_BUILD_JOBS + test-threads derivation is
+# asserted deterministically across machines. Ignored (detection used) when unset.
+_ncpu="${AGENT_GATE_TEST_NCPU:-$( { command -v nproc >/dev/null 2>&1 && nproc; } || sysctl -n hw.ncpu 2>/dev/null || echo 4 )}"
 case "$_ncpu" in *[!0-9]*|'') _ncpu=4 ;; esac
 _default_jobs=$(( _ncpu / 2 ))
 [ "$_default_jobs" -gt 4 ] && _default_jobs=4
@@ -438,6 +478,68 @@ fi
 accelerators_line() {
   printf 'accelerators: sccache=%s nextest=%s lanes=%s' \
     "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}"
+}
+
+# ---- Per-gate core budget (issue #2640) -------------------------------------
+# The #1825 machine-wide cap bounds the NUMBER of concurrent full gates (N), but
+# on its own does nothing to stop N gates from EACH spawning ncpu build/test
+# threads → ncpu*N oversubscription → SIGKILLs (~15 gate-ish procs) and timing
+# flakes (2 gates → test_write_throughput class). We therefore give each gate a
+# FAIR SHARE of the cores derived from the very same slot count:
+#   per-gate cores = max(1, floor(ncpu / N))
+# where N is the resolved machine-wide concurrency (CQLITE_GATE_MAX_CONCURRENCY
+# override, else the #1825 default formula). When this gate is the SOLE gate
+# (N=1 — the bootstrap default, see bootstrap-agent-machine.sh) it gets the FULL
+# core count, i.e. no throttling at all. The budget drives:
+#   * CARGO_BUILD_JOBS  — caps rustc codegen-unit / crate parallelism, and
+#   * GATE_TEST_THREADS — the nextest / cargo-test `--test-threads` for the
+#                         core-tests long pole.
+# A caller who exports CARGO_BUILD_JOBS is respected verbatim (never overridden).
+
+# _gate_max_concurrency: resolve N from the #1825 default formula + the
+# CQLITE_GATE_MAX_CONCURRENCY override. Defined early (issue #2640) because the
+# core-budget derivation below needs it before any cargo runs; the #1825 cap's
+# acquire_gate_slot consumes the SAME function further down (single source).
+_gate_max_concurrency() {
+  local dflt=$(( ( _ncpu - 2 ) / 4 ))
+  [ "$dflt" -lt 2 ] && dflt=2
+  local v="${CQLITE_GATE_MAX_CONCURRENCY:-$dflt}"
+  case "$v" in *[!0-9]*|'') v=$dflt ;; esac
+  [ "$v" -lt 1 ] && v=1
+  printf '%s' "$v"
+}
+
+# _gate_cores_per_gate: the fair-share core count for THIS gate = max(1, ncpu/N).
+_gate_cores_per_gate() {
+  local n cores
+  n=$(_gate_max_concurrency)
+  cores=$(( _ncpu / n ))
+  [ "$cores" -lt 1 ] && cores=1
+  printf '%s' "$cores"
+}
+
+# Derive + export the budget now, before any component runs. CARGO_BUILD_JOBS is
+# honored if the caller already set it (explicit override wins); GATE_TEST_THREADS
+# is always this run's derived value (run_core_tests passes it to nextest/cargo).
+GATE_CORES_PER_GATE=$(_gate_cores_per_gate)
+GATE_TEST_THREADS="$GATE_CORES_PER_GATE"
+if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+  export CARGO_BUILD_JOBS="$GATE_CORES_PER_GATE"
+  CARGO_BUILD_JOBS_SOURCE=derived
+else
+  CARGO_BUILD_JOBS_SOURCE=caller
+fi
+
+# cpu_budget_line: machine-checkable one-liner stamped into every SUMMARY block,
+# so per-gate CPU throttling (or its absence) is visible in the pasted block, not
+# just scrollback (#2640). Names the wrapper (nice/taskpolicy/none), the resolved
+# machine-wide concurrency N, the derived per-gate cores, and the build-jobs +
+# test-threads the gate actually used.
+cpu_budget_line() {
+  printf 'cpu-budget: wrapper=%s ncpu=%s max-concurrency=%s cores-per-gate=%s build-jobs=%s(%s) test-threads=%s' \
+    "${AGENT_GATE_WRAPPER:-none}" "$_ncpu" "$(_gate_max_concurrency)" \
+    "$GATE_CORES_PER_GATE" "${CARGO_BUILD_JOBS:-unset}" "${CARGO_BUILD_JOBS_SOURCE:-unknown}" \
+    "$GATE_TEST_THREADS"
 }
 
 # Static-golden mandate (coordinator directive for #1737): the local gate runs
@@ -1197,6 +1299,12 @@ case "${1:-}" in
   --python-build-verify)
     _python_build_verify_venv "${2:?--python-build-verify needs <venv>}" "${3:?--python-build-verify needs <maturin-develop-cmd>}" "${4:-}"
     exit $? ;;
+  # Hidden self-test hook (issue #2640): print the per-gate CPU budget the gate
+  # derived (the same cpu_budget_line stamped into the SUMMARY) and exit 0. Lets
+  # scripts/tests assert the CARGO_BUILD_JOBS + test-threads derivation from the
+  # slot count (full cores at N=1, fair share at N>1, caller override respected)
+  # WITHOUT running any component. No side effects beyond reading env + ncpu.
+  --cpu-budget) cpu_budget_line; echo; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -1463,6 +1571,7 @@ if [ "$SELFTEST" -eq 1 ]; then
     "datasets: 0 Data.db files under (selftest)"
     "ci-pins: (selftest)"
     "$(accelerators_line)"
+    "$(cpu_budget_line)"
   )
   for i in "${!NAMES[@]}"; do
     meta+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
@@ -2199,6 +2308,22 @@ run_tooling_tests() {
     return 0
   fi
 
+  # per-gate CPU-budget derivation self-test (#2640): no python3 needed, always
+  # runs (hermetic — drives the --cpu-budget hook with a pinned ncpu, asserts the
+  # CARGO_BUILD_JOBS + test-threads fair-share derivation from the slot count and
+  # the taskpolicy/nice wrapping; no cargo). A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_gate_cpu_budget.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_cpu_budget.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (cpu-budget derivation self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
@@ -2672,6 +2797,7 @@ run_lite() {
   # "green but validated nothing" block detectable from the block alone.
   [ -n "$PYTHON_TIER_NOTE" ] && SUMMARY_META+=("$PYTHON_TIER_NOTE")
   SUMMARY_META+=("$(accelerators_line)")
+  SUMMARY_META+=("$(cpu_budget_line)")
   local i
   for i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
@@ -3022,6 +3148,7 @@ run_delta() {
   # DELTA block alone, exactly as run_lite renders it for the LITE block.
   [ -n "$PYTHON_TIER_NOTE" ] && SUMMARY_META+=("$PYTHON_TIER_NOTE")
   SUMMARY_META+=("$(accelerators_line)")
+  SUMMARY_META+=("$(cpu_budget_line)")
   SUMMARY_META+=("${file_meta[@]}")
   for i in "${!DN[@]}"; do
     SUMMARY_META+=("$(printf '%-18s %s (%s)' "${DN[$i]}:" "${DS[$i]}" "${DT[$i]}")")
@@ -3067,15 +3194,9 @@ run_delta() {
 # daemon is unavailable, and can be force-disabled with CQLITE_GATE_DISABLE_CAP=1.
 # Non-interactive callers block cleanly (waiting on the daemon), never spin-fail.
 
-# Resolve N from the default formula + the CQLITE_GATE_MAX_CONCURRENCY override.
-_gate_max_concurrency() {
-  local dflt=$(( ( _ncpu - 2 ) / 4 ))
-  [ "$dflt" -lt 2 ] && dflt=2
-  local v="${CQLITE_GATE_MAX_CONCURRENCY:-$dflt}"
-  case "$v" in *[!0-9]*|'') v=$dflt ;; esac
-  [ "$v" -lt 1 ] && v=1
-  printf '%s' "$v"
-}
+# N is resolved by _gate_max_concurrency (defined early, near the core-budget
+# derivation for #2640) so the per-gate core budget and this machine-wide cap
+# share a single source of truth for the slot count.
 
 # PID of the background slot daemon (empty when the cap is inactive for this run).
 GATE_SLOT_DAEMON_PID=""
@@ -3188,6 +3309,7 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   SUMMARY_META+=("commit: selftest branch: selftest dirty: no")
   SUMMARY_META+=("lite-scope: file-size fmt clippy scoped-tests (aggregate selftest)")
   SUMMARY_META+=("$(accelerators_line)")
+  SUMMARY_META+=("$(cpu_budget_line)")
   for _i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$_i]}:" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
   done
@@ -3329,13 +3451,17 @@ run_core_tests() {
     nx_filter="$nx_filter and not test(under_cassandra5_sstabledump)"
     skip_args+=(--skip under_cassandra5_sstabledump)
   fi
+  # Per-gate core budget (#2640): cap the core-tests long pole at this gate's
+  # fair share of cores so N concurrent gates never oversubscribe the box.
+  # nextest reads --test-threads; the cargo-test fallback takes it after `--`.
   if [ "$NEXTEST" -eq 1 ]; then
     run_component core-tests bash -c '
-      cargo nextest run --package cqlite-core --features cli-helpers -E "$1" &&
-      cargo test --doc --package cqlite-core --features cli-helpers -- "${@:2}"' \
-      cqlite-agent-gate "$nx_filter" "${skip_args[@]}"
+      cargo nextest run --package cqlite-core --features cli-helpers --test-threads "$1" -E "$2" &&
+      cargo test --doc --package cqlite-core --features cli-helpers -- "${@:3}"' \
+      cqlite-agent-gate "$GATE_TEST_THREADS" "$nx_filter" "${skip_args[@]}"
   else
-    run_component core-tests cargo test --package cqlite-core --features cli-helpers -- "${skip_args[@]}"
+    run_component core-tests cargo test --package cqlite-core --features cli-helpers -- \
+      --test-threads "$GATE_TEST_THREADS" "${skip_args[@]}"
   fi
 }
 
@@ -3804,6 +3930,7 @@ fi
 [ -n "$MISSING_FIXTURES_MARKER" ] && SUMMARY_META+=("$MISSING_FIXTURES_MARKER")
 SUMMARY_META+=("ci-pins: $PINS")
 SUMMARY_META+=("$(accelerators_line)")
+SUMMARY_META+=("$(cpu_budget_line)")
 if [ -n "$ONLY" ]; then
   SUMMARY_META+=("mode: PARTIAL (--only $ONLY) - does NOT count as the gate")
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL

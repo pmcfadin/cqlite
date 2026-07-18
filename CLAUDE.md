@@ -345,8 +345,11 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   (`scripts/flow/claim-heartbeat.sh beat <N>`, refreshed at claim + every stage transition);
   `flow-board` reaps deterministically (age > 4h AND no open PR) (#2089).
 - **One worker per machine (#1930)**: one lead/worker session owns a box; it fans out subagents but
-  **serializes its own full gates** (the #1825 machine cap is a backstop, not a license) and
-  pre-claims by checking the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
+  keeps to **one full gate at a time** — enforced mechanically (#2640): `bootstrap-agent-machine.sh`
+  pins `CQLITE_GATE_MAX_CONCURRENCY=1` (the #1825 cap admits one gate; the per-gate core budget then
+  gives it full cores), and every gate derives `CARGO_BUILD_JOBS` + nextest `--test-threads` from its
+  slot count and runs under `taskpolicy -c utility`/`nice`, so no manual `pgrep`-serialization is
+  needed. It pre-claims by checking the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
   `issue-<N>-*` branch. Multiple independent sessions → separate
   machines, each claim-protocol-gated; NEVER N bare leads without the protocol. Unattended runs:
   `scripts/local/worker-supervisor.sh` (#2090) recycles ONE worker process per issue (hard context
