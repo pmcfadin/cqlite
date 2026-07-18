@@ -1251,14 +1251,14 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
 # and blast-radius-scoped tests (the touched package's --lib + the diff's new
 # test targets), NOT the full core-tests/write/cli/bindings/parity set. It is the
 # FAST ITERATION loop, NOT the gate of record — the full gate must PASS once
 # before merge. See run_lite() below.
-LITE_COMPONENTS=(file-size fmt clippy scoped-tests)
+LITE_COMPONENTS=(file-size fmt clippy roborev-lints scoped-tests)
 # --delta (issue #1892): TEST/DOCS-ONLY RE-CERTIFICATION after a full-gate PASS.
 # Given an anchor (the commit the full gate PASSed at), it verifies the diff
 # anchor..HEAD touches ONLY files the delta can EXECUTE (FAIL-CLOSED if any
@@ -1738,6 +1738,27 @@ run_clippy() {
   env RUSTFLAGS="-D warnings" cargo clippy --all-targets \
     -p cqlite-flight -p cqlite-py -p cqlite-node --features cqlite-node/write-support \
     || return 1
+}
+
+# run_roborev_lints (issue #2656, epic #2636): mechanize the recurring roborev
+# BLOCKER classes that have credible low-false-positive mechanical detection, so
+# they FAIL in the fast --lite loop instead of costing a review round. Two checks:
+#   * check-workflow-injection.sh — the GitHub Actions command-injection class
+#     (top-severity, previously UNMECHANIZED anywhere in the gate).
+#   * check-no-wallclock-asserts.sh — the #2642 wall-clock-race class. It already
+#     ran in the FULL gate (tooling-tests) but NOT in --lite; running it here makes
+#     the fast loop catch a reintroduced wall-clock threshold assert.
+# Other candidate classes from the pre-roborev self-check are deliberately NOT
+# mechanized (see the taxonomy on #2656): manual_range_contains is already caught
+# by clippy; integer/decimal overflow, float-ordering-vs-Java, no-heuristics, and
+# process-global-counter races are semantic (no low-FP static signal); a
+# gitignored-references lint would false-positive on the intentionally-fetched
+# dataset corpus. Both scripts are SKIP-aware (no python3 -> loud SKIP, exit 0),
+# so this component is safe on a stripped runner; any real violation exits non-zero
+# and FAILs the component.
+run_roborev_lints_cmd() {
+  bash "$REPO_ROOT/scripts/ci/check-workflow-injection.sh" &&
+    bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh"
 }
 
 run_component() { # run_component <name> <cmd...>
@@ -2424,6 +2445,23 @@ run_tooling_tests() {
     return 0
   fi
 
+  # GHA command-injection guard self-test (#2656): no Docker/datasets needed
+  # (python3-gated inside the script, always attempts). Regression-guards the
+  # roborev-lints component's check-workflow-injection.sh — the real lint runs in
+  # the roborev-lints component itself; this proves the lint still catches a planted
+  # injection sink and does not false-positive. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_check_workflow_injection.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_check_workflow_injection.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (GHA injection guard self-test #2656); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # docs-only PR-gate classifier self-test (#2645): no python3 needed, always
   # runs (hermetic — pure-shell allowlist classification + pr-gate.yml structural
   # contract that the required status always reports and the #2644 oracle step is
@@ -2878,7 +2916,7 @@ run_scoped_tests() {
 aggregate_lite_components() {
   local -a LN=() LS=() LT=()
   local c rf st secs i
-  for c in file-size fmt clippy; do
+  for c in file-size fmt clippy roborev-lints; do
     rf="$LOG_DIR/$c.result"
     [ -f "$rf" ] || continue   # not run (e.g. --only skip) — do not add, do not fail
     st=""; secs=""
@@ -2907,7 +2945,7 @@ run_lite() {
   echo
   echo "==================================================================="
   echo "  AGENT-GATE --lite  :  FAST ITERATION GATE — *NOT* THE GATE OF RECORD"
-  echo "  Runs: file-size + fmt + scoped workspace clippy + blast-radius-scoped tests."
+  echo "  Runs: file-size + fmt + scoped workspace clippy + roborev-lints + blast-radius-scoped tests."
   echo "  It SKIPS core-tests, write/cli, bindings, parity, smoke, etc."
   echo "  Before merge you MUST run the full  scripts/agent-gate.sh  and it must"
   echo "  PASS — its ==== AGENT-GATE SUMMARY ==== block is the ONLY run that counts."
@@ -2917,6 +2955,7 @@ run_lite() {
   run_file_size
   run_component fmt cargo fmt --all --check
   run_component clippy run_clippy
+  run_component roborev-lints run_roborev_lints_cmd
   run_scoped_tests
 
   # Aggregate the foreground components (file-size/fmt/clippy) into NAMES + OVERALL
@@ -2926,7 +2965,7 @@ run_lite() {
 
   declare -a SUMMARY_META=()
   SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
-  SUMMARY_META+=("lite-scope: file-size fmt clippy scoped-tests (full gate NOT run — run it once before merge)")
+  SUMMARY_META+=("lite-scope: file-size fmt clippy roborev-lints scoped-tests (full gate NOT run — run it once before merge)")
   # Python-tier verdict marker (roborev job 1450): when a python-binding diff was
   # in scope, the block carries the tier's verdict — a SKIPPED marker makes a
   # "green but validated nothing" block detectable from the block alone.
@@ -3665,6 +3704,7 @@ dispatch_component() {
   case "$1" in
     fmt) run_component fmt cargo fmt --all --check ;;
     clippy) run_component clippy run_clippy ;;
+    roborev-lints) run_component roborev-lints run_roborev_lints_cmd ;;
     core-tests) run_core_tests ;;
     tombstones-scan) run_component tombstones-scan cargo test --package cqlite-core \
       --features write-support,cli-helpers,tombstones \
