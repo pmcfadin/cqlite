@@ -1,11 +1,23 @@
 //! Performance regression tests for SSTable eager loading
 //!
-//! These tests ensure that the eager loading mechanism does not introduce
-//! performance regressions and maintains acceptable performance characteristics.
+//! These tests exercise the eager-loading code paths (open, index lookup,
+//! iteration, timestamp/token queries) and RECORD their timings.
+//!
+//! #2369 rule (record-not-assert): these tests DO NOT assert on wall-clock
+//! thresholds. Wall-clock latency depends on the host, contention, and CI
+//! load, so a `assert!(elapsed < N ms)` in the default correctness gate is a
+//! latent flake (issue #2642 retired the previous asserts here). Timings are
+//! logged via `eprintln!` as `[perf-record]` lines for humans/dashboards; the
+//! functional value is that the code paths run to completion without panic.
+//! A dedicated, host-controlled perf gate is the correct place for threshold
+//! enforcement — not `cargo test`.
+//!
+//! Reviewer note: do NOT reintroduce `assert!(<measured elapsed> < <threshold>)`
+//! here or in any default-gate test. See scripts/tests/check-no-wallclock-asserts.sh.
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tempfile::TempDir;
 use tokio::fs;
 
@@ -13,10 +25,22 @@ use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::SSTableReader;
 use cqlite_core::Config;
 
-/// Performance baseline for SSTable reader initialization
-const MAX_INIT_TIME_MS: u64 = 100;
-const MAX_FIRST_OPERATION_MS: u64 = 50;
+/// Reference latencies retained only for `[perf-record]` context — NEVER
+/// asserted on in this default-gate test (#2369 / #2642).
+const REF_INIT_TIME_MS: u64 = 100;
+const REF_FIRST_OPERATION_MS: u64 = 50;
+/// Memory-increase budget (MB). This is NOT a wall-clock threshold — memory
+/// usage is deterministic here (the fallback `get_memory_usage` returns a
+/// constant off Linux), so this assert is retained.
 const MAX_MEMORY_INCREASE_MB: usize = 10;
+
+/// Emit a recorded (non-asserted) timing line for perf dashboards/humans.
+/// #2369: record, do not assert on wall-clock in the correctness gate.
+fn record_timing(label: &str, elapsed: std::time::Duration, reference_ms: u64) {
+    eprintln!(
+        "[perf-record] {label}: {elapsed:?} (reference budget: {reference_ms} ms, not asserted)"
+    );
+}
 
 /// Test that eager loading doesn't cause initialization performance regression
 #[tokio::test]
@@ -52,13 +76,11 @@ async fn test_initialization_performance() {
 
                 println!("✓ {} initialized in {:?}", description, init_duration);
 
-                // Verify initialization time is within acceptable bounds
-                assert!(
-                    init_duration.as_millis() < MAX_INIT_TIME_MS as u128,
-                    "Initialization time {:?} exceeds maximum {} ms for {}",
+                // #2369: record the initialization time, do not assert on it.
+                record_timing(
+                    &format!("init/{description}"),
                     init_duration,
-                    MAX_INIT_TIME_MS,
-                    description
+                    REF_INIT_TIME_MS,
                 );
 
                 // Test first operation performance (should be immediate due to eager loading)
@@ -81,7 +103,7 @@ async fn test_initialization_performance() {
 async fn test_first_operation_performance(reader: &SSTableReader, description: &str) {
     println!("Testing first operation performance for {}", description);
 
-    // Test each operation type individually
+    // Test each operation type individually. #2369: record timings, no asserts.
     let op_start = Instant::now();
     test_index_lookup_performance(reader).await;
     let op_duration = op_start.elapsed();
@@ -89,13 +111,21 @@ async fn test_first_operation_performance(reader: &SSTableReader, description: &
         "✓ {} index_lookup operation: {:?}",
         description, op_duration
     );
-    assert!(op_duration.as_millis() < MAX_FIRST_OPERATION_MS as u128);
+    record_timing(
+        &format!("first-op/index_lookup/{description}"),
+        op_duration,
+        REF_FIRST_OPERATION_MS,
+    );
 
     let op_start = Instant::now();
     test_token_range_performance(reader).await;
     let op_duration = op_start.elapsed();
     println!("✓ {} token_range operation: {:?}", description, op_duration);
-    assert!(op_duration.as_millis() < MAX_FIRST_OPERATION_MS as u128);
+    record_timing(
+        &format!("first-op/token_range/{description}"),
+        op_duration,
+        REF_FIRST_OPERATION_MS,
+    );
 
     let op_start = Instant::now();
     test_timestamp_range_performance(reader).await;
@@ -104,7 +134,11 @@ async fn test_first_operation_performance(reader: &SSTableReader, description: &
         "✓ {} timestamp_range operation: {:?}",
         description, op_duration
     );
-    assert!(op_duration.as_millis() < MAX_FIRST_OPERATION_MS as u128);
+    record_timing(
+        &format!("first-op/timestamp_range/{description}"),
+        op_duration,
+        REF_FIRST_OPERATION_MS,
+    );
 
     let op_start = Instant::now();
     test_token_coverage_performance(reader).await;
@@ -113,7 +147,11 @@ async fn test_first_operation_performance(reader: &SSTableReader, description: &
         "✓ {} token_coverage operation: {:?}",
         description, op_duration
     );
-    assert!(op_duration.as_millis() < MAX_FIRST_OPERATION_MS as u128);
+    record_timing(
+        &format!("first-op/token_coverage/{description}"),
+        op_duration,
+        REF_FIRST_OPERATION_MS,
+    );
 
     // Operations tested above
 }
@@ -235,13 +273,11 @@ async fn test_concurrent_loading_performance() {
             Ok(_) => {
                 println!("✓ Concurrent file {} loaded in {:?}", i, duration);
 
-                // Each individual load should still be fast
-                assert!(
-                    duration.as_millis() < (MAX_INIT_TIME_MS * 2) as u128,
-                    "Concurrent load {} duration {:?} exceeds maximum {} ms",
-                    i,
+                // #2369: record each concurrent-load timing, do not assert.
+                record_timing(
+                    &format!("concurrent-load/{i}"),
                     duration,
-                    MAX_INIT_TIME_MS * 2
+                    REF_INIT_TIME_MS * 2,
                 );
             }
             Err(e) => {
@@ -253,13 +289,11 @@ async fn test_concurrent_loading_performance() {
         }
     }
 
-    // Total concurrent time should be reasonable (not much worse than sequential)
-    let max_concurrent_time = Duration::from_millis(MAX_INIT_TIME_MS * concurrent_count as u64 / 2);
-    assert!(
-        total_concurrent_duration < max_concurrent_time,
-        "Concurrent loading time {:?} exceeds expected maximum {:?}",
+    // #2369: record total concurrent time, do not assert on it.
+    record_timing(
+        "concurrent-load/total",
         total_concurrent_duration,
-        max_concurrent_time
+        REF_INIT_TIME_MS * concurrent_count as u64 / 2,
     );
 
     // Cleanup
@@ -338,14 +372,12 @@ async fn test_component_size_scaling_performance() {
 
                 println!("✓ {} loaded in {:?}", scenario_name, scaling_duration);
 
-                // Performance should scale reasonably with component size
+                // #2369: record scaling timing, do not assert on it.
                 let max_time_for_size = calculate_max_time_for_partition_count(partition_count);
-                assert!(
-                    scaling_duration.as_millis() < max_time_for_size as u128,
-                    "Scaling performance {:?} exceeds expected maximum {} ms for {} partitions",
+                record_timing(
+                    &format!("scaling/{scenario_name}"),
                     scaling_duration,
                     max_time_for_size,
-                    partition_count
                 );
 
                 // Test that larger components don't degrade operation performance
@@ -417,6 +449,7 @@ async fn test_sustained_operation_performance(reader: &SSTableReader) {
 
     let operation_count = 100;
     let total_start = Instant::now();
+    let mut slowest_op = std::time::Duration::ZERO;
 
     for i in 0..operation_count {
         let op_start = Instant::now();
@@ -426,14 +459,10 @@ async fn test_sustained_operation_performance(reader: &SSTableReader) {
 
         let op_duration = op_start.elapsed();
 
-        // Each operation should remain fast
-        assert!(
-            op_duration.as_millis() < MAX_FIRST_OPERATION_MS as u128,
-            "Sustained operation {} took {:?}, exceeds {} ms",
-            i,
-            op_duration,
-            MAX_FIRST_OPERATION_MS
-        );
+        // #2369: record the slowest sustained op below; no per-op assert.
+        if op_duration > slowest_op {
+            slowest_op = op_duration;
+        }
     }
 
     let total_duration = total_start.elapsed();
@@ -444,12 +473,12 @@ async fn test_sustained_operation_performance(reader: &SSTableReader) {
         operation_count, total_duration, avg_per_operation
     );
 
-    // Average should be well under the per-operation limit
-    assert!(
-        avg_per_operation.as_millis() < (MAX_FIRST_OPERATION_MS / 2) as u128,
-        "Average sustained operation time {:?} exceeds expected {} ms",
+    // #2369: record sustained-op timings, do not assert on them.
+    record_timing("sustained/slowest-op", slowest_op, REF_FIRST_OPERATION_MS);
+    record_timing(
+        "sustained/avg-op",
         avg_per_operation,
-        MAX_FIRST_OPERATION_MS / 2
+        REF_FIRST_OPERATION_MS / 2,
     );
 }
 
@@ -469,17 +498,16 @@ async fn test_operation_performance_with_size(reader: &SSTableReader, partition_
 
     // Allow slightly more time for larger components, but not proportionally more
     let max_time_ms = if partition_count > 10000 {
-        MAX_FIRST_OPERATION_MS * 2
+        REF_FIRST_OPERATION_MS * 2
     } else {
-        MAX_FIRST_OPERATION_MS
+        REF_FIRST_OPERATION_MS
     };
 
-    assert!(
-        op_duration.as_millis() < max_time_ms as u128,
-        "Operation with {} partitions took {:?}, exceeds {} ms",
-        partition_count,
+    // #2369: record op-with-size timing, do not assert on it.
+    record_timing(
+        &format!("op-with-size/{partition_count}-partitions"),
         op_duration,
-        max_time_ms
+        max_time_ms,
     );
 
     println!(
@@ -492,10 +520,10 @@ fn calculate_max_time_for_partition_count(partition_count: usize) -> u64 {
     // Scale expected time based on partition count, but with diminishing returns
     // due to eager loading optimization
     match partition_count {
-        0..=1000 => MAX_INIT_TIME_MS,
-        1001..=10000 => MAX_INIT_TIME_MS + 50,
-        10001..=50000 => MAX_INIT_TIME_MS + 100,
-        _ => MAX_INIT_TIME_MS + 200,
+        0..=1000 => REF_INIT_TIME_MS,
+        1001..=10000 => REF_INIT_TIME_MS + 50,
+        10001..=50000 => REF_INIT_TIME_MS + 100,
+        _ => REF_INIT_TIME_MS + 200,
     }
 }
 

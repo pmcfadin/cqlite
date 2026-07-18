@@ -31,8 +31,10 @@ fn bounded_probe_returns_promptly_when_command_hangs() {
         matches!(outcome, ProbeOutcome::TimedOut),
         "a hung command must report TimedOut, got {outcome:?}"
     );
-    // Generous ceiling (kill + reap slack) that is still far below the old
-    // unbounded 16+ min wedge.
+    // perf-gate-allow (#2642): the deadline IS the property under test — a
+    // bounded probe must return instead of hanging. The 10s ceiling is ~25x the
+    // 400ms budget (kill + reap slack), far below the old unbounded 16+ min
+    // wedge, so it is load-immune, not a latency budget.
     assert!(
         elapsed < Duration::from_secs(10),
         "probe must return near the {budget:?} budget, took {elapsed:?}"
@@ -104,8 +106,10 @@ fn bounded_probe_captures_output_larger_than_pipe_buffer() {
              after {elapsed:?}"
         ),
     }
-    // The command exits as fast as it can write; it must finish well within the
-    // generous budget rather than being killed at the deadline.
+    // perf-gate-allow (#2642): deadline-feature contract — a completing command
+    // must NOT be killed at the deadline. The 9s ceiling is far above any real
+    // completion time yet below the timeout budget, so it verifies "not killed"
+    // (a functional property), not a latency budget; load-immune.
     assert!(
         elapsed < Duration::from_secs(9),
         "large-output command should complete promptly, took {elapsed:?}"

@@ -438,6 +438,9 @@ mod performance_tests {
         let duration = start.elapsed();
 
         println!("Query took: {:?}", duration);
+        // perf-gate-allow (#2642): this test is `#[ignore]`d above (opt-in perf
+        // lane, run with `--ignored`), so this wall-clock bound never runs in the
+        // default correctness gate.
         assert!(
             duration.as_millis() < 5000,
             "Query should complete within 5 seconds"
