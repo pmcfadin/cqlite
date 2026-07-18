@@ -537,11 +537,16 @@ mod bti {
              the B4 cache and resolve as a MISS (miss_count must advance); it did not, so the \
              read path is not exercising the cache and the no-hit assertion would be vacuous"
         );
-        assert_eq!(
-            gc.len(),
-            len_before_absent,
+        // Non-strict (issue #2674 roborev 1800): a clean-miss path can never GROW the
+        // cache, but a concurrent-shard LRU eviction elsewhere may legitimately SHRINK
+        // `len` within the window — benign, and the counter differentials above carry
+        // the property. Assert only that occupancy did not grow.
+        assert!(
+            gc.len() <= len_before_absent,
             "B4/BTI absent precondition (secondary witness): a clean trie-MISS absent key must \
-             not insert a B4 entry (positive-only insert discipline)"
+             not GROW the B4 cache (positive-only insert discipline); len grew from {} to {}",
+            len_before_absent,
+            gc.len()
         );
 
         // Read present key A: exercises a real B4 populate for a DIFFERENT key, so a
@@ -608,12 +613,14 @@ mod bti {
         // Belt-and-braces (issue #2674 roborev): the re-read also must not GROW the
         // cache — a clean trie miss inserts nothing, so a candidate for the absent key
         // is never added on the repeat either (the miss above and no-growth here
-        // together bound the absent key out of B4 entirely).
-        assert_eq!(
-            gc.len(),
+        // together bound the absent key out of B4 entirely). Non-strict (roborev
+        // 1800): a benign LRU eviction may shrink `len`; only growth is a violation.
+        assert!(
+            gc.len() <= len_before_reread,
+            "B4/BTI absent: the repeated absent read must not GROW the B4 cache (positive-only \
+             insert discipline); len grew from {} to {}",
             len_before_reread,
-            "B4/BTI absent: the repeated absent read must not insert a B4 entry for the absent \
-             key (positive-only insert discipline)"
+            gc.len()
         );
     }
 
@@ -724,12 +731,15 @@ mod bti {
             gc.hit_count() - hits_before
         );
         // Second witness (issue #2674 roborev): a disabled reader also never POPULATES
-        // the global cache, so occupancy is flat too.
-        assert_eq!(
-            gc.len(),
-            len_before,
+        // the global cache, so occupancy never grows. Non-strict (roborev 1800): a
+        // concurrent-shard LRU eviction may benignly SHRINK `len` within the window;
+        // only growth signals the reader wrongly populated the shared cache.
+        assert!(
+            gc.len() <= len_before,
             "B4/BTI disabled: a disabled key cache must not populate the process-global B4 \
-             cache; occupancy grew, so the toggle is decorative"
+             cache; occupancy grew from {} to {}, so the toggle is decorative",
+            len_before,
+            gc.len()
         );
 
         // POSITIVE CONTROL (issue #2674 roborev): prove the hit counter is LIVE for
@@ -738,9 +748,16 @@ mod bti {
         // fixture and run the identical A, B, A — the re-read of A is a genuine B4 HIT
         // (the enabled reader shares the global singleton), so the hit counter MUST
         // advance. If it did not, the disabled assertions would prove nothing.
-        let Some(db_enabled) = setup("test_da", "da-test.cql").await else {
-            eprintln!("Skipping (B4/BTI disabled positive control): could not ingest test_da");
-            return;
+        // The control must NEVER green-exit without proving liveness (issue #2674
+        // roborev 1800): the first `setup()` already succeeded over this same fixture,
+        // so a failure here is an anomaly, not a dataset-absent skip — panic rather
+        // than return.
+        let db_enabled = match setup("test_da", "da-test.cql").await {
+            Some(db) => db,
+            None => panic!(
+                "positive control setup failed — first setup succeeded over the same fixture; \
+                 this is an anomaly, not a dataset-absent skip"
+            ),
         };
         let hits_before_enabled = gc.hit_count();
         let ea = db_enabled
