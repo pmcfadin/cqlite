@@ -93,9 +93,10 @@ jobs:
           {
             echo "## Docs site CI tier"
             echo ""
-            echo "- Ordinary PRs build the Astro site and validate agent plumbing."
+            echo "- Ordinary PRs build the Astro site and validate agent plumbing (reds this advisory check; NOT a required branch-protection context — issue #2654)."
+            echo "- New website pages must be cross-linked from an existing page's body prose or agent-plumbing fails (issue #2480; see website/README.md)."
             echo "- Recipe smoke tests, CLI build, and dataset fetch run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:docs-full\`."
-            echo "- GitHub Pages deploy remains push-to-main only."
+            echo "- GitHub Pages deploy remains push-to-main only; a build/smoke failure on main files a docs-site-failure tracking issue instead of silently skipping deploy (issue #2654)."
             echo "- Current full-tier decision: ${RUN_FULL}."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -159,6 +160,46 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           CQLITE_CLI: ${{ github.workspace }}/target/debug/cqlite
         run: bash scripts/docs-examples-smoke.sh
+
+  # Issue #2654: make a docs-site failure on `main` VISIBLE. The plumbing
+  # validation runs inside `build` and reds the (advisory, non-required)
+  # `Build docs site` check on docs-touching PRs — that already stops a bad PR
+  # from looking green. But on push-to-main a build/smoke FAILURE makes `deploy`
+  # (which `needs: [build, smoke]`) SKIP SILENTLY: the site quietly stops
+  # deploying and nobody is paged. This job files/updates ONE deduplicated
+  # tracking issue on that path so the skip pages a human instead. It stays
+  # ADVISORY (per the #2654 owner decision it adds NO required branch-protection
+  # context) and is fail-open (never changes the build result).
+  notify-main-failure:
+    name: Alert on docs-site failure (main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build, smoke]
+    # Only on push to main, and only when build or smoke actually failed.
+    if: >-
+      always() &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      (needs.build.result == 'failure' || needs.smoke.result == 'failure')
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: File / update docs-site failure tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+        run: |
+          set -euo pipefail
+          # Event fields are passed via quoted env vars, never interpolated into
+          # the shell body (workflow-injection safe). Compose the failed-job list
+          # from the trusted needs.* results.
+          FAILED=""
+          [ "${BUILD_RESULT}" = "failure" ] && FAILED="build"
+          [ "${SMOKE_RESULT}" = "failure" ] && FAILED="${FAILED:+${FAILED} }smoke"
+          FAILED_JOBS="${FAILED}" bash scripts/ci/docs-site-failure-issue.sh
 
   deploy:
     name: Deploy to GitHub Pages
