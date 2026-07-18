@@ -24,7 +24,31 @@
 #               non-missing) — a "finalized" marker with a null/missing issue
 #               or pr is judged ABNORMAL (counts toward BREAKER_N, does NOT
 #               count toward MAX_ISSUES) rather than trusted at face value.
-#               Otherwise counts toward MAX_ISSUES. Resets the breaker.
+#               A well-formed "finalized" is still NOT trusted on field shape
+#               alone (issue #2670): the supervisor VERIFIES the claimed PR is
+#               actually merged via `gh pr view <pr> --json state,mergedAt`
+#               before crediting the iteration. Three outcomes, recorded in the
+#               journal's `verified:` field:
+#                 verified=merged           — gh reports state MERGED. Counts
+#                                             toward MAX_ISSUES, resets the breaker
+#                                             (the ONLY path that credits an issue).
+#                 verified=mismatch:<STATE> — gh reports a non-MERGED state (the
+#                                             worker parked its endgame yet wrote
+#                                             "finalized"). Judged ABNORMAL: does
+#                                             NOT count toward MAX_ISSUES, does NOT
+#                                             reset the breaker (counts toward it),
+#                                             and fires a HIGH page naming the
+#                                             discrepancy.
+#                 verified=unverified       — gh unavailable / network error /
+#                                             unparseable output. FAIL-INFORMATIVE,
+#                                             not fail-punitive: logged + a
+#                                             default-priority page, does NOT count
+#                                             as a completed issue, and is NEUTRAL to
+#                                             the breaker (neither trips nor resets —
+#                                             a transient GitHub outage must not
+#                                             punish the run, but must not mask a real
+#                                             crash chain either). Outcome recorded as
+#                                             `finalized-unverified`.
 #   no-work   — rehydrated from the board, nothing Ready (or nothing to
 #               resume). issue/pr may be null. Does NOT count toward
 #               MAX_ISSUES; triggers a BACKOFF_NOWORK_SECS sleep so the loop
@@ -141,7 +165,32 @@ if [[ -z "${DISK_PROBE_CMD:-}" ]]; then
   DISK_PROBE_CMD="df -Pk \"$REPO_ROOT\" | awk 'NR==2{print int(\$4/1024/1024)}'"
 fi
 if [[ -z "${PROC_PROBE_CMD:-}" ]]; then
-  PROC_PROBE_CMD="pgrep -f 'cargo |nextest|gate_slot_daemon' | wc -l | tr -d ' '"
+  # Leftover-process probe (issue #2670): two families of prior-iteration debris
+  # block the next spawn (HOLD-and-poll, same as load/disk):
+  #   (1) build/gate processes — cargo/nextest/gate_slot_daemon.
+  #   (2) an orphaned worker Claude CLI from a prior iteration (a classic survivor
+  #       of a SIGTERM'd wrapper, and a stuck-on-question hazard that would burn
+  #       the next iteration).
+  # The Claude match is keyed on the supervisor's OWN spawn shape — `--agent worker`
+  # (see WORKER_CMD) — NOT a bare `claude`. A plain interactive `claude` REPL, or a
+  # different-agent session (`--agent flow-lead`), never carries that marker, so a
+  # legitimate interactive session on the box is not matched. LIMIT: an operator who
+  # deliberately runs `claude --agent worker` by hand WILL be matched (correctly — by
+  # the one-worker-per-machine rule #1930 that is itself leftover worker debris). The
+  # current iteration's own worker has already exited before preflight runs, so any
+  # `--agent worker` process seen here is genuinely from a prior iteration. `sort -u`
+  # dedups a PID that matched both patterns.
+  PROC_PROBE_CMD="{ pgrep -f 'cargo |nextest|gate_slot_daemon'; pgrep -f 'claude.*--agent worker'; } 2>/dev/null | sort -u | wc -l | tr -d ' '"
+fi
+
+# GH verification of a "finalized" marker's PR (issue #2670). $1 (passed by the
+# later `bash -c ... _ "$pr"`) is the PR url/number. Default emits the raw
+# `gh pr view` JSON on stdout; a nonzero exit / empty output is treated UNVERIFIED
+# (gh unavailable / network error), never punitive. Overridable so the tooling
+# tests can stub GitHub with a PATH-free command string.
+if [[ -z "${GH_VERIFY_CMD:-}" ]]; then
+  # shellcheck disable=SC2016  # literal $1 for the later `bash -c` eval, not expanded now.
+  GH_VERIFY_CMD='gh pr view "$1" --repo pmcfadin/cqlite --json state,mergedAt'
 fi
 
 NOOP_NOTIFY_MARKER="__noop_notify__"
@@ -225,6 +274,47 @@ print(v if v is not None else "")
   fi
 }
 
+# verify_finalized_pr <pr>: check the claimed PR is actually merged (issue #2670).
+# Runs $GH_VERIFY_CMD with the PR as $1, parses the `state` field of its JSON, and
+# echoes exactly one verdict token on stdout:
+#   merged            — gh reported state MERGED.
+#   mismatch:<STATE>  — gh reported a present, non-MERGED state (OPEN, CLOSED, ...).
+#   unverified        — gh exited nonzero, produced no output, or emitted JSON with
+#                       no parseable `state` (gh missing / network error / rate
+#                       limit). Fail-informative: the CALLER decides this is neutral
+#                       to the breaker and uncounted, never punitive.
+# Never returns nonzero — the verdict is always on stdout so the caller's `case`
+# handles every path explicitly.
+verify_finalized_pr() {
+  local pr="$1" out rc state
+  out="$(bash -c "$GH_VERIFY_CMD" _ "$pr" 2>/dev/null)"
+  rc=$?
+  if [[ "$rc" -ne 0 || -z "$out" ]]; then
+    printf 'unverified'
+    return 0
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    state="$(printf '%s' "$out" | jq -r '.state // empty' 2>/dev/null)"
+  else
+    state="$(printf '%s' "$out" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+v = d.get("state")
+print(v if v is not None else "")
+' 2>/dev/null || true)"
+  fi
+  if [[ -z "$state" ]]; then
+    printf 'unverified'
+  elif [[ "$state" == "MERGED" ]]; then
+    printf 'merged'
+  else
+    printf 'mismatch:%s' "$state"
+  fi
+}
+
 # json_or_null <value>: quotes+escapes a string field for embedding into the
 # JSONL journal, or emits a bare `null` when empty. A quote/backslash/newline
 # in an untrusted field (pr URL, blocked "reason" text) must never be allowed
@@ -243,15 +333,19 @@ json_or_null() {
 }
 num_or_null() { [[ "$1" =~ ^[0-9]+$ ]] && printf '%s' "$1" || printf 'null'; }
 
-# journal_line <iter> <outcome> <issue> <pr> <duration_s> <exit_code> [reason]
-# `reason` is optional (only "blocked" iterations pass one); both `pr` and
-# `reason` are free-form worker-controlled text and go through json_or_null so
-# a stray quote/backslash/newline can never corrupt the JSONL line.
+# journal_line <iter> <outcome> <issue> <pr> <duration_s> <exit_code> [reason] [verified]
+# `reason` (only "blocked"/park iterations) and `verified` (only the finalized
+# family, issue #2670) are optional; both `pr` and `reason` are free-form
+# worker-controlled text and go through json_or_null so a stray quote/backslash/
+# newline can never corrupt the JSONL line. `verified` is appended only when set,
+# so every pre-existing 6/7-arg caller emits an unchanged line.
 journal_line() {
   mkdir -p "$LOG_DIR"
   local jf="${JOURNAL_FILE:-$LOG_DIR/journal-$(date -u +%Y-%m-%d).jsonl}"
-  printf '{"ts":"%s","iter":%d,"outcome":"%s","issue":%s,"pr":%s,"duration_s":%d,"exit_code":%d,"reason":%s}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "$(num_or_null "$3")" "$(json_or_null "$4")" "$5" "$6" "$(json_or_null "${7:-}")" >>"$jf"
+  local verified_json=""
+  [[ -n "${8:-}" ]] && verified_json=",\"verified\":$(json_or_null "$8")"
+  printf '{"ts":"%s","iter":%d,"outcome":"%s","issue":%s,"pr":%s,"duration_s":%d,"exit_code":%d,"reason":%s%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "$(num_or_null "$3")" "$(json_or_null "$4")" "$5" "$6" "$(json_or_null "${7:-}")" "$verified_json" >>"$jf"
 }
 
 # ---------------------------------------------------------------------------
@@ -472,10 +566,42 @@ run_iteration() {
         log "iteration $ITER abnormal (finalized marker missing issue/pr: issue='$issue' pr='$pr')"
         trip_breaker_or_continue
       else
-        CONSECUTIVE_ABNORMAL=0
-        ISSUES_DONE=$((ISSUES_DONE + 1))
-        journal_line "$ITER" "finalized" "$issue" "$pr" "$duration" "$rc"
-        notify "info" "worker-supervisor: finalized issue $issue" "pr=$pr duration_s=$duration"
+        # Issue #2670: a well-formed "finalized" is NOT trusted on field shape
+        # alone — verify the claimed PR is actually merged on GitHub before
+        # crediting the iteration. A worker that parked its endgame yet wrote
+        # "finalized" (or a stale/forged marker) must never count as done nor
+        # reset the crash breaker.
+        local verify
+        verify="$(verify_finalized_pr "$pr")"
+        case "$verify" in
+          merged)
+            CONSECUTIVE_ABNORMAL=0
+            ISSUES_DONE=$((ISSUES_DONE + 1))
+            journal_line "$ITER" "finalized" "$issue" "$pr" "$duration" "$rc" "" "merged"
+            notify "info" "worker-supervisor: finalized issue $issue" "pr=$pr duration_s=$duration verified=merged"
+            ;;
+          mismatch:*)
+            # The PR is NOT merged (OPEN / CLOSED-unmerged) — the worker claimed
+            # a finalize it did not actually land. Judged ABNORMAL: uncounted,
+            # counts toward the breaker, and a HIGH page names the discrepancy.
+            local mstate="${verify#mismatch:}"
+            journal_line "$ITER" "abnormal" "$issue" "$pr" "$duration" "$rc" "" "$verify"
+            notify "high" "worker-supervisor: finalized MISMATCH issue $issue" \
+              "worker claimed finalized but PR $pr is $mstate (not MERGED) — not counted, breaker +1"
+            log "iteration $ITER abnormal (finalized MISMATCH: PR $pr is $mstate, not MERGED)"
+            trip_breaker_or_continue
+            ;;
+          *)
+            # unverified — gh unavailable / network error. FAIL-INFORMATIVE:
+            # log + default-priority page, do NOT count as done, and stay NEUTRAL
+            # to the breaker (do not increment — a transient outage is not a crash;
+            # do not reset — it must not mask a real prior crash chain).
+            journal_line "$ITER" "finalized-unverified" "$issue" "$pr" "$duration" "$rc" "" "unverified"
+            notify "info" "worker-supervisor: finalized UNVERIFIED issue $issue" \
+              "could not verify PR $pr merged (gh unavailable/network) — not counted, breaker unchanged"
+            log "iteration $ITER finalized-unverified (gh could not confirm PR $pr; not counted, breaker neutral)"
+            ;;
+        esac
       fi
       ;;
     no-work)

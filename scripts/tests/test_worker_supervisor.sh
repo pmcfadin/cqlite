@@ -350,6 +350,26 @@ EOF
   chmod +x "$path"
 }
 
+# issue #2670: a gh-verify stub that FAILS (exit 1, no output → unverified) on the
+# first call and returns MERGED JSON on every call after. Used to prove an
+# unverified finalize is not counted and does not trip the breaker, while still
+# terminating the run (the second, verified-merged finalize hits MAX_ISSUES=1).
+write_gh_flaky_then_merged_stub() {
+  local path="$1" call_ctr="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+calls=0
+[[ -f "$call_ctr" ]] && calls=\$(cat "$call_ctr")
+calls=\$((calls + 1))
+echo "\$calls" >"$call_ctr"
+if [[ \$calls -eq 1 ]]; then
+  exit 1
+fi
+printf %s '{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z"}'
+EOF
+  chmod +x "$path"
+}
+
 # ---------------------------------------------------------------------------
 # Common env baseline: every test starts here, then overrides what it needs.
 # Clear preflight (no holds), generous budgets, fast polling/backoff.
@@ -368,6 +388,10 @@ common_env() {
   export LOAD_PROBE_CMD="echo 0"
   export DISK_PROBE_CMD="echo 999999"
   export PROC_PROBE_CMD="echo 0"
+  # issue #2670: every "finalized" marker is now GH-verified. Default the mock to
+  # MERGED so all pre-existing finalize-based cases credit the issue as before;
+  # verification tests override GH_VERIFY_CMD to exercise mismatch/unverified.
+  export GH_VERIFY_CMD='printf %s "{\"state\":\"MERGED\",\"mergedAt\":\"2026-01-01T00:00:00Z\"}"'
   export LOAD_MAX=999999
   export MAX_ISSUES=100
   export MAX_HOURS=8
@@ -1044,6 +1068,141 @@ test_fast_exit_latency() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 23 (#2670): a "finalized" marker whose PR gh-verifies as MERGED is
+# credited normally — outcome finalized, journal `verified: merged`, counted
+# toward MAX_ISSUES (proven by the budget-issues stop).
+# ---------------------------------------------------------------------------
+test_finalized_verified_merged_counts() {
+  local d counter jf rc fcount
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  # explicit MERGED mock (common_env already defaults to this; pin it here so the
+  # case is self-describing)
+  export GH_VERIFY_CMD='printf %s "{\"state\":\"MERGED\",\"mergedAt\":\"2026-01-01T00:00:00Z\"}"'
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  if [[ "$rc" -eq 0 && "$fcount" -eq 1 ]] &&
+     grep -q '"outcome":"finalized".*"verified":"merged"' "$jf" &&
+     grep -q '"reason":"budget-issues"' "$jf"; then
+    pass "verify(merged): finalized credited, journal verified=merged, counts to budget"
+  else
+    fail "verify(merged): rc=$rc finalized=$fcount (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 24 (#2670): a "finalized" marker whose PR gh-verifies as OPEN is judged
+# ABNORMAL — a HIGH page names the discrepancy, ISSUES_DONE does NOT advance
+# (the false finalize is not counted), and it counts toward the breaker (proven
+# by tripping BREAKER_N=1 immediately).
+# ---------------------------------------------------------------------------
+test_finalized_mismatch_open_is_abnormal() {
+  local d counter jf rc fcount acount page
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=1
+  export GH_VERIFY_CMD='printf %s "{\"state\":\"OPEN\",\"mergedAt\":null}"'
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  page=$(grep -c '^error|worker-supervisor: finalized MISMATCH' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -ne 0 && "$fcount" -eq 0 && "$acount" -eq 1 && "$page" -ge 1 ]] &&
+     grep -q '"outcome":"abnormal".*"verified":"mismatch:OPEN"' "$jf" &&
+     grep -q '"reason":"breaker"' "$jf"; then
+    pass "verify(mismatch OPEN): abnormal + high page, not counted, trips breaker"
+  else
+    fail "verify(mismatch): rc=$rc finalized=$fcount abnormal=$acount page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 25 (#2670): gh unavailable → UNVERIFIED — outcome finalized-unverified
+# (journal `verified: unverified`), NOT counted toward MAX_ISSUES, and NEUTRAL to
+# the breaker (BREAKER_N=1 here must NOT trip on it). The gh mock fails on call 1
+# (unverified) then returns MERGED, so the second, verified-merged finalize hits
+# MAX_ISSUES=1 — proving the unverified iteration was not counted (else the run
+# would have stopped before it).
+# ---------------------------------------------------------------------------
+test_finalized_unverified_not_counted_no_breaker() {
+  local d counter gh_ctr jf rc ucount fcount page
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  gh_ctr="$d/gh-calls"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  write_gh_flaky_then_merged_stub "$d/bin/gh.sh" "$gh_ctr"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=1
+  # shellcheck disable=SC2016  # $1 expanded later by the supervisor's own `bash -c`.
+  export GH_VERIFY_CMD="$d/bin/gh.sh \"\$1\""
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  ucount=$(jline_count "$jf" '"outcome":"finalized-unverified"')
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  page=$(grep -c 'finalized UNVERIFIED' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -eq 0 && "$ucount" -eq 1 && "$fcount" -eq 1 && "$page" -ge 1 ]] &&
+     grep -q '"outcome":"finalized-unverified".*"verified":"unverified"' "$jf" &&
+     ! grep -q '"reason":"breaker"' "$jf"; then
+    pass "verify(unverified): finalized-unverified, not counted, breaker neutral, loop continues"
+  else
+    fail "verify(unverified): rc=$rc unverified=$ucount finalized=$fcount page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 26 (#2670): PROC_PROBE discriminates the supervisor's OWN worker spawn
+# shape (`claude ... --agent worker`) from a legitimate interactive `claude`
+# session / a different-agent session. Spawns two argv-shaped stub processes and
+# asserts the DEFAULT probe pattern matches only the worker-shaped one — hermetic
+# regardless of any ambient `claude` process on the box (it checks the two known
+# PIDs, not a total count).
+# ---------------------------------------------------------------------------
+test_proc_probe_discriminates_worker_claude() {
+  local pat='claude.*--agent worker'
+  # worker-shaped: carries the --agent worker marker the supervisor spawns with.
+  bash -c 'exec -a "claude --agent worker resume the claim branch" sleep 30' &
+  local wpid=$!
+  # interactive-shaped: a different-agent claude session (owner running the lead)
+  # — must NOT match, proving we key on `worker`, not any `claude --agent`.
+  bash -c 'exec -a "claude --agent flow-lead review the board" sleep 30' &
+  local ipid=$!
+  # give both a moment to exec into their argv
+  local waited=0
+  while [[ "$waited" -lt 50 ]]; do
+    pgrep -f "$pat" | grep -qw "$wpid" && break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  local worker_matched="no" interactive_matched="no"
+  pgrep -f "$pat" | grep -qw "$wpid" && worker_matched="yes"
+  pgrep -f "$pat" | grep -qw "$ipid" && interactive_matched="yes"
+  kill "$wpid" "$ipid" 2>/dev/null || true
+  wait "$wpid" "$ipid" 2>/dev/null || true
+  if [[ "$worker_matched" == "yes" && "$interactive_matched" == "no" ]]; then
+    pass "proc-probe: matches --agent worker spawn, excludes interactive/other-agent claude"
+  else
+    fail "proc-probe: worker_matched=$worker_matched interactive_matched=$interactive_matched"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -1084,5 +1243,9 @@ test_stray_signature_scrollback_is_abnormal
 test_genuine_wedge_frozen_is_stuck
 test_busy_writing_signature_not_stuck
 test_fast_exit_latency
+test_finalized_verified_merged_counts
+test_finalized_mismatch_open_is_abnormal
+test_finalized_unverified_not_counted_no_breaker
+test_proc_probe_discriminates_worker_claude
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
