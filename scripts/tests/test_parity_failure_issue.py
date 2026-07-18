@@ -21,6 +21,8 @@ import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
+REPO_ROOT = SCRIPTS.parent
+WORKFLOW_YML = REPO_ROOT / ".github" / "workflows" / "parity-failure-issue.yml"
 
 # The module file name has a hyphen, so load it by path.
 _spec = importlib.util.spec_from_file_location(
@@ -721,6 +723,98 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual(len(comment2), 1, "retry posts exactly one comment on success")
         self.assertTrue(pfi.is_resolved(self._body_after_resolve(calls2, "55")),
                         "successful retry stamps the resolved marker")
+
+
+class WorkflowTriggerCoverageTests(unittest.TestCase):
+    """Issue #2660: the automation workflow's four name-keyed blocks must agree on the
+    tracked-lane set, cover every nightly parity lane, and reference NO retired lane.
+
+    These read parity-failure-issue.yml as text (stdlib only — CI runs this test file with
+    no pyyaml dependency). The four blocks that key on workflow display names / filenames:
+      1. on.workflow_run.workflows       (auto trigger allowlist)
+      2. validate step `case "${R_NAME}"` (workflow_dispatch replay allowlist)
+      3. identity step name→filename `case "${WR_NAME...}"`
+      4. identity step filename→tier `case "${LANE_FILE}"`
+    Blocks 1–3 must list the SAME display names; block 4 must map every derived filename.
+    """
+
+    # Authoritative tracked-lane set after #2650/#2651: display name -> (filename, tier).
+    EXPECTED_LANES = {
+        "CI: Parity Regen Matrix (Nightly Docker, Epic #2636)":
+            ("parity-regen-matrix.yml", "nightly_docker"),
+        "CI: Live-Cell Compaction Byte Parity (issue #1017, #1020)":
+            ("live-cell-compaction-parity.yml", "nightly_docker"),
+        "Exhaustive Regeneration (parity corpus)":
+            ("exhaustive-regeneration.yml", "exhaustive_regeneration"),
+        "CI: Nightly Docker Parity (nightly_docker tier)":
+            ("nightly-docker-parity.yml", "nightly_docker"),
+        "CI: E2E Cassandra Readback Gate":
+            ("e2e-readback.yml", "nightly_docker"),
+        "CI: Cassandra sstableloader Validation":
+            ("cassandra-validation.yml", "nightly_docker"),
+        "CI: Delta Round-Trip Test (DS11 / Issue #707)":
+            ("delta-roundtrip.yml", "nightly_docker"),
+        "CI: Performance Regression Gate":
+            ("perf-regression.yml", "nightly_docker"),
+    }
+
+    # Retired by #2651 — must appear NOWHERE in the automation workflow.
+    RETIRED_NAMES = [
+        "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)",
+        "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)",
+        "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)",
+    ]
+    RETIRED_FILES = [
+        "compression-corruption-parity.yml",
+        "cql-type-parity.yml",
+        "tombstone-ttl-parity.yml",
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = WORKFLOW_YML.read_text()
+
+    def test_all_tracked_lanes_and_files_and_tiers_present(self):
+        for name, (fname, tier) in self.EXPECTED_LANES.items():
+            self.assertIn(name, self.text, f"display name not routed: {name}")
+            self.assertIn(fname, self.text, f"filename not mapped: {fname}")
+            # The tier value must appear in the filename→tier case arm.
+            self.assertIn(tier, self.text, f"tier token absent: {tier}")
+
+    def test_uncovered_nightly_lanes_now_covered(self):
+        # The specific lanes #2660 set out to cover must each be routed by name.
+        for added in (
+            "CI: Cassandra sstableloader Validation",
+            "CI: E2E Cassandra Readback Gate",
+            "CI: Delta Round-Trip Test (DS11 / Issue #707)",
+            "CI: Nightly Docker Parity (nightly_docker tier)",
+            "CI: Performance Regression Gate",
+        ):
+            self.assertIn(added, self.text, f"uncovered lane still missing: {added}")
+
+    def test_no_retired_lane_referenced(self):
+        for name in self.RETIRED_NAMES:
+            self.assertNotIn(name, self.text, f"retired lane name still present: {name}")
+        for fname in self.RETIRED_FILES:
+            self.assertNotIn(fname, self.text, f"retired lane filename still present: {fname}")
+
+    def test_trigger_list_and_both_case_blocks_agree(self):
+        # Each tracked display name must appear at least 3 times: once in the
+        # workflow_run trigger list, once in the replay allowlist case, once in the
+        # name→filename case. (Comments may add more; fewer means a block dropped it.)
+        for name in self.EXPECTED_LANES:
+            self.assertGreaterEqual(
+                self.text.count(name), 3,
+                f"display name '{name}' must appear in all three name-keyed blocks")
+
+    def test_each_filename_maps_to_a_tier(self):
+        # Every filename the identity step can derive must have a tier case arm, so no
+        # tracked lane files an issue with a guessed/empty tier.
+        for _name, (fname, _tier) in self.EXPECTED_LANES.items():
+            # filename appears in name→filename case AND filename→tier case (>= 2).
+            self.assertGreaterEqual(
+                self.text.count(fname), 2,
+                f"filename '{fname}' must be in both the name→filename and filename→tier cases")
 
 
 if __name__ == "__main__":
