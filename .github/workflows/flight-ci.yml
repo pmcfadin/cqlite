@@ -77,7 +77,7 @@ jobs:
             echo ""
             echo "- Ordinary PRs run fmt, clippy, and cqlite-flight library tests."
             echo "- Full package tests and release binary artifacts run on push to main/tags, nightly schedule, workflow_dispatch, or PRs labeled \`ci:flight-full\`."
-            echo "- Container publishing remains limited to push and workflow_dispatch runs."
+            echo "- Container publishing here is limited to main-branch pushes and workflow_dispatch runs (\`latest\` + sha tags); v* tag release images are built multi-arch solely by flight-image.yml (issue #2638)."
           } >> "$GITHUB_STEP_SUMMARY"
 
   full:
@@ -120,8 +120,18 @@ jobs:
   image:
     name: build & push container image
     needs: full
-    # Don't publish images from PRs or nightly validation runs.
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # Publish only main-branch and workflow_dispatch images (main/sha tags).
+    # NOT on v* tag pushes: on a release tag, flight-image.yml is the SOLE
+    # writer of the canonical vX.Y.Z / vX.Y / latest tags as a MULTI-ARCH
+    # manifest. If this single-arch (amd64) job also pushed vX.Y.Z on the same
+    # tag ref, the two runs would race the same GHCR tag and last-writer-wins
+    # could silently leave the release image amd64-only (issue #2638). Gating on
+    # `github.ref_type != 'tag'` keeps this job to branch pushes only.
+    if: >-
+      ${{
+        (github.event_name == 'push' && github.ref_type != 'tag') ||
+        github.event_name == 'workflow_dispatch'
+      }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -138,9 +148,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/cqlite-flight
+          # No `type=ref,event=tag` here: v* tag pushes are handled solely by
+          # flight-image.yml (multi-arch). This job never runs on tag refs (see
+          # the job `if:` above), so it publishes only `latest` (main) + sha
+          # tags and can never clobber the release manifest (issue #2638).
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=ref,event=tag
             type=sha
 
       - name: Build & push
