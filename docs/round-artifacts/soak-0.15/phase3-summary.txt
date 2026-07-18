@@ -1,0 +1,11 @@
+Phase 3 — Quiet-drain probe (claim 4, THE key R13 test) — v0.15.0 snap-0.15
+Setup: Phase1/2 left 660 keyvalue cqlite-* snapshots; keyvalue then QUIET (zero queries).
+
+DECAY (zero queries, retire-grace 10m):
+  t=0-4min: 660 (held)
+  t=5min:   660 -> 6   <-- BACKGROUND SWEEP FIRED, no query
+  t=5-14min: 6 (residual = 2 recent snapshots x 3 nodes, still within 10m grace)
+
+VERDICT: Claim 4 VERIFIED. Snapshot retirement now drains on the BACKGROUND sweep with
+ZERO queries. R12 regression (738 held while idle >10min, query-triggered only) is FIXED in
+0.15. The #2452 background grace-sweep — the exact open flag from R12/R13 — works in the field.

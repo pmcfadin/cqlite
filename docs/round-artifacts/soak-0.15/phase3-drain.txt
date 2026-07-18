@@ -1,0 +1,17 @@
+Phase 3 quiet-drain: keyvalue snapshot backlog, ZERO queries, retire-grace 10m
+t=0min keyvalue_snapshots=660
+t=1min keyvalue_snapshots=660
+t=2min keyvalue_snapshots=660
+t=3min keyvalue_snapshots=660
+t=4min keyvalue_snapshots=660
+t=5min keyvalue_snapshots=6
+t=6min keyvalue_snapshots=6
+t=7min keyvalue_snapshots=6
+t=8min keyvalue_snapshots=6
+t=9min keyvalue_snapshots=6
+t=10min keyvalue_snapshots=6
+t=11min keyvalue_snapshots=6
+t=12min keyvalue_snapshots=6
+t=13min keyvalue_snapshots=6
+t=14min keyvalue_snapshots=6
+DRAIN DONE

@@ -1,0 +1,18 @@
+Phase 2 — Overload burst, 80 threads / 900s (v0.15.0 snap-0.15)
+FINAL: 35,425 queries / 557,468 rows / 0 errors
+qps ~37-39 (SAME as 32-thr Phase 1) — throughput ceiling confirmed
+p50 ~2037ms, p99 ~2713ms (vs Phase1 800/1366) — extra threads QUEUE, not collapse
+
+Saturation gauges (peak during burst; 10s sampler = LOWER BOUNDS, aliases ~2s gauge):
+  admission_in_use: peak 4 (limit 64) — bounded, never approached cap
+  merge_egress_channel_depth: peak 1244 (R12: 3505 — lighter b/c point-read-heavy mix)
+  blocking_tasks: peak 4 (R12: 8)
+  proc: threads 26, fds 34, rss 310Mi
+RECOVERY: egress/admission/blocking all -> 0 in recovery window (drift-free) ✓
+
+VERDICTS:
+- Claim 2 (admission control under overload): VERIFIED — bounded concurrency (adm 4 « 64),
+  graceful queuing (qps flat, latency rose), no collapse, 0 err, clean recovery.
+- Claim 3 (saturation observability): gauges legible + returned to 0. VERIFIED, with caveat that
+  10s scrape undersamples; peaks are lower bounds. Egress peaks lower than R12 (workload mix).
+- No OOMKill, RSS 310Mi peak (< R12 603MB). 

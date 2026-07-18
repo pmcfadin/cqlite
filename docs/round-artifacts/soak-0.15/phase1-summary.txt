@@ -1,0 +1,19 @@
+Phase 1 — Warm steady-state, 90 min @ 32 threads (v0.15.0 snap-0.15)
+FINAL: 211,373 queries / 3,373,635 rows / 0 errors over 5400s
+steady-state qps: ~38-40 (last 30min flat)
+p50: 798ms  p99: 1366ms (final aggregate); intervals p50 ~790-830ms, p99 ~1150-1490ms
+warm ramp: 30s p50 2033ms -> 90s 1262ms -> steady ~800ms (cache fill)
+
+Memory (claim 8 partial): RSS max 301->307Mi over 90min = FLAT, no leak. 0 restarts, 0 OOM.
+  per-pod busiest ~297Mi steady; others 28-39Mi.
+Admission gauge: peak 2-3 (limit 64) — no saturation at 32-thr (expected). Egress transient ~1012, mostly 0.
+
+FAN-OUT FINDING (C2): skewed — pod 25p2q(db2) ~650m CPU/297Mi carries bulk;
+  crhgc ~280m/39Mi, nw74k ~145m/32Mi. All 3 participate (0 err) but single-pod-heavy
+  (token-range dependent, same pattern as R9/R10b). Explains qps ceiling.
+
+VERDICTS:
+- Claim 1 (warm throughput): vs R12 ~33qps@8thr, here ~39qps@32thr / 0 err — PARITY+ held. VERIFIED.
+- Lane-B B1 (warm point ≤300ms / scan-lite ≤500ms): p50 ~800ms floor-inclusive; NOTE JDBC ~2.2s
+  floor is amortized under concurrent driver — server-side much lower. Report as goals-ladder.
+- Lane-B B2 (≥100 qps @ 32thr): NOT MET (~39 qps) — fan-out skew is the bottleneck. Report.

@@ -1,0 +1,41 @@
+METRICS PIPELINE BUG — rate()/increase() panels inflate ~1000x (v0.15.0 snap-0.15)
+====================================================================================
+SYMPTOM: kit dashboard "RPC Requests/sec" (and rows/sec, error-rate) panels show a rising,
+"accumulating" line reaching ~2.35 MILLION/s. Actual throughput was ~39 qps (~176 do_get/s).
+
+ROOT CAUSE (confirmed):
+- cqlite_rpc_requests_total exports 3 series (one per flight pod) but with NO distinguishing
+  label — identical cluster/job/service_name/etc. VictoriaMetrics merges them into ONE series
+  identity.
+- The 3 pods' OTLP CUMULATIVE counters have independent, staggered start-times. Merged into one
+  series they interleave and jump backwards constantly.
+- resets(cqlite_rpc_requests_total[90m]) = 90 on a counter that should never reset.
+- rate()/increase() interpret each backward jump as a counter reset and extrapolate a fresh
+  0->N ramp => the ~1000x inflation + the "ramp then freeze" shape (freezes when load stops
+  because no new samples arrive to trigger more phantom resets).
+
+WHY THE VERDICTS ARE STILL SOUND:
+- Counter DATA is correct: raw per-collection increments are clean and monotonic (~15,600/15s).
+- All reported throughput/latency came from the LOADTEST DRIVER (persistent-connection counts:
+  211,373 queries, ~39 qps, 0 client err) and from raw counter DELTAS (do_get ok 951,762 /
+  err 8,563 = 0.89%), NOT from rate(). Those are unaffected.
+- Gauges (RSS/threads/fds/admission/egress) are instantaneous, not counters — unaffected.
+
+FIX (cannot be done in the dashboard query alone — needs an exporter change):
+- Add a per-pod resource attribute (instance / pod / host.name) to the flight OTLP metric export
+  so each pod's counter is its own series. THEN sum(rate(...)) by (instance) is correct.
+- Until then, the kit dashboard's rate() panels (2,3,9,10,15) are UNRELIABLE; use loadtest
+  driver output or increase()-with-per-pod-grouping for throughput.
+- Recommend a P2 cqlite issue (metrics correctness). NOT a runtime/correctness regression.
+
+==== FIX APPLIED + VERIFIED (2026-07-17) ====
+Root cause was easy-db-lab-side (harness), not cqlite: the OTel collector's metrics/otlp
+pipeline lacked resourcedetection, so OTLP-received flight metrics got no per-node label.
+FIX: added `resourcedetection` to the metrics/otlp pipeline processors in
+  src/main/resources/com/rustyrazorblade/easydblab/configuration/otel/otel-collector-config.yaml
+  (brings it in line with the EMR otel config, which already had it).
+VERIFIED live on this cluster: after patching the ConfigMap + restarting ds/otel-collector,
+metrics gained host_name=db0/db1/db2. rate(...) by (host_name) then read do_get ok
+db0 63 / db1 125 / db2 257 = 445/s total (sane; skew visible), errors 7.45/s — NOT millions.
+=> Fixed for all FUTURE runs (source change). This run's rate() panels stay distorted for the
+   pre-fix window; report uses driver/delta numbers throughout.

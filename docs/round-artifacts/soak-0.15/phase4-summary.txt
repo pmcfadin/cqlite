@@ -1,0 +1,8 @@
+Phase 4 — Integrity sweeps (claims 5, 6) — v0.15.0 snap-0.15
+sweep #1 (baseline, pre-load):  keyvalue=1,927,467  tiny=3  mixed=2  (59.9s)
+sweep #2 (post-load+burst):     keyvalue=1,927,467  tiny=3  mixed=2  (61.0s)
+DELTA: 0 across the entire run (90min@32thr + 80-thr burst). 
+
+Claim 5 (no silent row loss on large cells >=1MB, #2436): VERIFIED — count identical before/after.
+Claim 6 (query-semantics under concurrency): VERIFIED — 6 concurrent identical point-reads
+  returned 1 distinct hash (byte-identical); mixed concurrent queries all correct (tiny3/mixed2).
