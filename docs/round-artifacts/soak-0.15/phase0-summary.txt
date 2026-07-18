@@ -1,0 +1,7 @@
+Phase 0 — Cold start (v0.15.0, snap-0.15)
+boot RSS: 4-5 Mi per flight pod (R12 idle 3-4Mi ✓)
+boot index_parses: absent = 0 (#2412 Summary-guided ✓)
+JDBC floor (SELECT 1): 2.37s
+COLD first-query keyvalue LIMIT5: 2.22s real, 5 correct rows
+=> cold ≈ floor; no cold-parse penalty (#2385/#2412 hold). index_parse metric count post-query: 0
+Claim 7 (cold start): time-to-first-query ≈ 2.2s; Lane-B B4 cold ≤3s => MET

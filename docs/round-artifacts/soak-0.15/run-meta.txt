@@ -1,0 +1,6 @@
+image=ghcr.io/pmcfadin/cqlite-flight:v0.15.0@sha256:30c2b10c9319f88bffa448dfc30bbeeadc5e2a998385500606c9b9822c5446a7
+connector=in.mcfad:cqlite-trino:0.15.0
+trino=481
+cluster=3x i4i.xlarge db + m5.xlarge app, Cassandra 5.0 RF=3
+data=cassandra_easy_stress.keyvalue ~1.93M part/node, 2 SSTable gens
+date=2026-07-17

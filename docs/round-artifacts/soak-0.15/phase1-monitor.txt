@@ -1,0 +1,221 @@
+### sample 1 @ 20:48:59
+cqlite-flight-25p2q   531m   294Mi   
+cqlite-flight-crhgc   198m   35Mi    
+cqlite-flight-nw74k   122m   27Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=315781120
+### sample 2 @ 20:51:00
+cqlite-flight-25p2q   651m   296Mi   
+cqlite-flight-crhgc   269m   37Mi    
+cqlite-flight-nw74k   143m   28Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=319979520
+### sample 3 @ 20:53:01
+cqlite-flight-25p2q   668m   296Mi   
+cqlite-flight-crhgc   288m   38Mi    
+cqlite-flight-nw74k   154m   28Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=320512000
+### sample 4 @ 20:55:02
+cqlite-flight-25p2q   664m   296Mi   
+cqlite-flight-crhgc   272m   38Mi    
+cqlite-flight-nw74k   140m   29Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=320954368
+### sample 5 @ 20:57:03
+cqlite-flight-25p2q   624m   296Mi   
+cqlite-flight-crhgc   285m   38Mi    
+cqlite-flight-nw74k   130m   29Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321105920
+### sample 6 @ 20:59:04
+cqlite-flight-25p2q   637m   297Mi   
+cqlite-flight-crhgc   266m   38Mi    
+cqlite-flight-nw74k   129m   29Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321191936
+### sample 7 @ 21:01:05
+cqlite-flight-25p2q   646m   297Mi   
+cqlite-flight-crhgc   277m   38Mi    
+cqlite-flight-nw74k   152m   29Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321351680
+### sample 8 @ 21:03:06
+cqlite-flight-25p2q   677m   297Mi   
+cqlite-flight-crhgc   276m   39Mi    
+cqlite-flight-nw74k   143m   29Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321347584
+### sample 9 @ 21:05:07
+cqlite-flight-25p2q   668m   297Mi   
+cqlite-flight-crhgc   284m   38Mi    
+cqlite-flight-nw74k   144m   30Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321429504
+### sample 10 @ 21:07:09
+cqlite-flight-25p2q   720m   297Mi   
+cqlite-flight-crhgc   291m   38Mi    
+cqlite-flight-nw74k   145m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321540096
+### sample 11 @ 21:09:10
+cqlite-flight-25p2q   716m   297Mi   
+cqlite-flight-crhgc   290m   39Mi    
+cqlite-flight-nw74k   149m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321552384
+### sample 12 @ 21:11:11
+cqlite-flight-25p2q   662m   296Mi   
+cqlite-flight-crhgc   276m   39Mi    
+cqlite-flight-nw74k   142m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321560576
+### sample 13 @ 21:13:12
+cqlite-flight-25p2q   657m   297Mi   
+cqlite-flight-crhgc   272m   38Mi    
+cqlite-flight-nw74k   146m   30Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321568768
+### sample 14 @ 21:15:13
+cqlite-flight-25p2q   664m   297Mi   
+cqlite-flight-crhgc   267m   38Mi    
+cqlite-flight-nw74k   137m   30Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=321576960
+### sample 15 @ 21:17:14
+cqlite-flight-25p2q   628m   297Mi   
+cqlite-flight-crhgc   254m   39Mi    
+cqlite-flight-nw74k   144m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321576960
+### sample 16 @ 21:19:15
+cqlite-flight-25p2q   650m   297Mi   
+cqlite-flight-crhgc   265m   39Mi    
+cqlite-flight-nw74k   152m   31Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=321568768
+### sample 17 @ 21:21:16
+cqlite-flight-25p2q   656m   296Mi   
+cqlite-flight-crhgc   278m   39Mi    
+cqlite-flight-nw74k   147m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321576960
+### sample 18 @ 21:23:17
+cqlite-flight-25p2q   646m   297Mi   
+cqlite-flight-crhgc   263m   38Mi    
+cqlite-flight-nw74k   148m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321601536
+### sample 19 @ 21:25:18
+cqlite-flight-25p2q   679m   297Mi   
+cqlite-flight-crhgc   286m   38Mi    
+cqlite-flight-nw74k   155m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321613824
+### sample 20 @ 21:27:19
+cqlite-flight-25p2q   639m   297Mi   
+cqlite-flight-crhgc   262m   39Mi    
+cqlite-flight-nw74k   143m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321634304
+### sample 21 @ 21:29:20
+cqlite-flight-25p2q   662m   297Mi   
+cqlite-flight-crhgc   272m   39Mi    
+cqlite-flight-nw74k   152m   32Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=321642496
+### sample 22 @ 21:31:21
+cqlite-flight-25p2q   709m   297Mi   
+cqlite-flight-crhgc   298m   39Mi    
+cqlite-flight-nw74k   156m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321679360
+### sample 23 @ 21:33:22
+cqlite-flight-25p2q   671m   297Mi   
+cqlite-flight-crhgc   287m   39Mi    
+cqlite-flight-nw74k   146m   32Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321748992
+### sample 24 @ 21:35:24
+cqlite-flight-25p2q   704m   297Mi   
+cqlite-flight-crhgc   287m   39Mi    
+cqlite-flight-nw74k   145m   32Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321753088
+### sample 25 @ 21:37:25
+cqlite-flight-25p2q   689m   297Mi   
+cqlite-flight-crhgc   273m   39Mi    
+cqlite-flight-nw74k   157m   31Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=321748992
+### sample 26 @ 21:39:26
+cqlite-flight-25p2q   690m   297Mi   
+cqlite-flight-crhgc   279m   39Mi    
+cqlite-flight-nw74k   167m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321765376
+### sample 27 @ 21:41:27
+cqlite-flight-25p2q   718m   297Mi   
+cqlite-flight-crhgc   271m   39Mi    
+cqlite-flight-nw74k   144m   32Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321810432
+### sample 28 @ 21:43:28
+cqlite-flight-25p2q   705m   297Mi   
+cqlite-flight-crhgc   282m   39Mi    
+cqlite-flight-nw74k   130m   32Mi    
+gauges: egress_max=992 admission_max=2 rss_max_bytes=321843200
+### sample 29 @ 21:45:29
+cqlite-flight-25p2q   661m   297Mi   
+cqlite-flight-crhgc   271m   39Mi    
+cqlite-flight-nw74k   149m   32Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321867776
+### sample 30 @ 21:47:30
+cqlite-flight-25p2q   702m   297Mi   
+cqlite-flight-crhgc   287m   39Mi    
+cqlite-flight-nw74k   154m   32Mi    
+gauges: egress_max=1012 admission_max=3 rss_max_bytes=322023424
+### sample 31 @ 21:49:31
+cqlite-flight-25p2q   659m   297Mi   
+cqlite-flight-crhgc   256m   39Mi    
+cqlite-flight-nw74k   151m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321929216
+### sample 32 @ 21:51:32
+cqlite-flight-25p2q   642m   297Mi   
+cqlite-flight-crhgc   260m   39Mi    
+cqlite-flight-nw74k   142m   31Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321929216
+### sample 33 @ 21:53:33
+cqlite-flight-25p2q   661m   297Mi   
+cqlite-flight-crhgc   276m   39Mi    
+cqlite-flight-nw74k   155m   32Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=321945600
+### sample 34 @ 21:55:34
+cqlite-flight-25p2q   679m   297Mi   
+cqlite-flight-crhgc   278m   39Mi    
+cqlite-flight-nw74k   146m   32Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=322191360
+### sample 35 @ 21:57:35
+cqlite-flight-25p2q   684m   297Mi   
+cqlite-flight-crhgc   290m   39Mi    
+cqlite-flight-nw74k   158m   31Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=321929216
+### sample 36 @ 21:59:37
+cqlite-flight-25p2q   634m   297Mi   
+cqlite-flight-crhgc   270m   39Mi    
+cqlite-flight-nw74k   147m   32Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321957888
+### sample 37 @ 22:01:38
+cqlite-flight-25p2q   670m   297Mi   
+cqlite-flight-crhgc   272m   39Mi    
+cqlite-flight-nw74k   151m   32Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=321998848
+### sample 38 @ 22:03:39
+cqlite-flight-25p2q   676m   297Mi   
+cqlite-flight-crhgc   266m   39Mi    
+cqlite-flight-nw74k   153m   32Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321941504
+### sample 39 @ 22:05:40
+cqlite-flight-25p2q   692m   297Mi   
+cqlite-flight-crhgc   284m   39Mi    
+cqlite-flight-nw74k   142m   32Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=321925120
+### sample 40 @ 22:07:41
+cqlite-flight-25p2q   661m   297Mi   
+cqlite-flight-crhgc   255m   39Mi    
+cqlite-flight-nw74k   133m   32Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=322125824
+### sample 41 @ 22:09:42
+cqlite-flight-25p2q   685m   298Mi   
+cqlite-flight-crhgc   291m   39Mi    
+cqlite-flight-nw74k   154m   32Mi    
+gauges: egress_max=0 admission_max=1 rss_max_bytes=322019328
+### sample 42 @ 22:11:43
+cqlite-flight-25p2q   677m   297Mi   
+cqlite-flight-crhgc   322m   39Mi    
+cqlite-flight-nw74k   148m   32Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=322080768
+### sample 43 @ 22:13:44
+cqlite-flight-25p2q   626m   297Mi   
+cqlite-flight-crhgc   279m   39Mi    
+cqlite-flight-nw74k   136m   32Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=321982464
+### sample 44 @ 22:15:45
+cqlite-flight-25p2q   637m   297Mi   
+cqlite-flight-crhgc   271m   39Mi    
+cqlite-flight-nw74k   144m   32Mi    
+gauges: egress_max=0 admission_max=0 rss_max_bytes=322031616
+MONITOR DONE

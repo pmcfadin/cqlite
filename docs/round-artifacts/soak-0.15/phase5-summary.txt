@@ -1,0 +1,14 @@
+Phase 5 — Restart probe (claims 7, partial 8) — v0.15.0 snap-0.15
+Killed flight pod cqlite-flight-25p2q (busy db2 pod) MID full-ring count:
+  => count returned 1,927,467 (identical), 0 errors, 61.3s. FAILOVER to RF=3 replicas WORKS.
+  => DaemonSet recreated victim (wshpz on db2) in ~79s, Running 1/1.
+Trino coordinator restart: rolled out clean; cqlite catalog + add-opens survived;
+  post-restart first-query LIMIT5 = 3.42s, 5 correct rows.
+fd/RSS/threads step-change check:
+  pre:  rss=356864000 (340Mi) fds=36 threads=19
+  post: rss=83816448 fds=17 threads=7
+  => post is LOWER (fresh idle replacement pod + no active load); no UPWARD step-change = no leak. Pre 340Mi was the busy pod under load; recreated pod idle at ~80Mi confirms clean baseline.
+
+Claim 7 (cold start / restart): VERIFIED — failover clean, restart clean, no parse storm, fast first-query.
+Claim 8 (multi-day stability): COULD-NOT-OBSERVE (condensed run) — but proxies are all green:
+  RSS flat 301-357Mi over ~2.5h, 0 OOMKills, 0 unplanned restarts, no fd/thread drift.

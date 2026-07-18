@@ -1,0 +1,64 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>cqlite-flight v0.15.0 — Comparison</title><style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --fg:#e6edf3; --muted:#8b949e;
+          --green:#3fb950; --amber:#d29922; --red:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:28px; margin:0 0 4px; }
+  h2 { font-size:20px; margin:40px 0 12px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  h3 { font-size:16px; margin:28px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  nav { margin:0 0 24px; font-size:14px; }
+  nav a { color:var(--accent); text-decoration:none; margin-right:16px; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pass { background:rgba(63,185,80,.15); color:var(--green); }
+  .watch { background:rgba(210,153,34,.15); color:var(--amber); }
+  .fail { background:rgba(248,81,73,.15); color:var(--red); }
+  table { width:100%; border-collapse:collapse; margin:12px 0; background:var(--card); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  th,td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; vertical-align:top; }
+  th { background:#1c2128; color:var(--muted); font-weight:600; font-size:13px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:none; }
+  .good { color:var(--green); font-weight:600; }
+  .warnc { color:var(--amber); font-weight:600; }
+  code { background:#1c2128; padding:1px 6px; border-radius:4px; font-size:13px; }
+  figure { margin:18px 0; background:#fff; border:1px solid var(--border); border-radius:8px; padding:8px; }
+  figure img { width:100%; display:block; border-radius:4px; }
+  figcaption { color:var(--muted); font-size:13px; padding:8px 4px 2px; text-align:center; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media(max-width:720px){ .grid{grid-template-columns:1fr;} }
+  .callout { background:var(--card); border-left:3px solid var(--accent); padding:12px 16px; border-radius:0 8px 8px 0; margin:16px 0; }
+  .callout.green { border-left-color:var(--green); }
+  .callout.amber { border-left-color:var(--amber); }
+  .missing { color:var(--amber); }
+  pre { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px; white-space:pre-wrap; font-size:13px; overflow-x:auto; }
+  footer { margin-top:48px; color:var(--muted); font-size:13px; border-top:1px solid var(--border); padding-top:16px; }
+</style></head><body><div class="wrap"><nav><a href="report.html">Verdict</a><a href="stability.html">Stability</a><a href="phases.html">Phases</a><a href="comparison.html">Comparison</a></nav><h1>Comparison — 0.15 vs baselines &amp; Lane-B ladder</h1><p class="sub">v0.15.0 milestone snapshot (condensed) · flight <code>v0.15.0@sha256:30c2b10c</code> (multi-arch INDEX) · connector <code>0.15.0</code> · Trino 481 · Cassandra 5.0 RF=3 · 3× i4i.xlarge · ~1.93M partitions/node, 2 SSTable gens · 2026-07-17</p>
+
+<h2>vs R11b / R12 baselines</h2>
+<table>
+<tr><th>Metric</th><th>R11b</th><th>R12</th><th>0.15 (snap)</th><th></th></tr>
+<tr><td>warm throughput</td><td>~34 qps @8-thr</td><td>~33 qps @8-thr</td><td>~39 qps @32-thr</td><td class="good">parity+</td></tr>
+<tr><td>warm p50 / p99</td><td>227 / 366ms</td><td>242 / 363ms</td><td>798 / 1366ms @32-thr</td><td class="warnc">higher concurrency</td></tr>
+<tr><td>count(*) rows</td><td>1,939,286</td><td>1,947,775</td><td>1,927,467</td><td>dataset-dependent</td></tr>
+<tr><td>count(*) wall</td><td>66.2s</td><td>61.1s</td><td>~60s</td><td class="good">parity</td></tr>
+<tr><td>idle RSS</td><td>3–4 Mi</td><td>3 Mi</td><td>4–5 Mi</td><td class="good">parity</td></tr>
+<tr><td>peak RSS</td><td>270–391Mi</td><td>~603MB @80-thr</td><td>~310Mi @80-thr</td><td class="good">lower</td></tr>
+<tr><td>do_get error rate</td><td>2.3%</td><td>1.2%</td><td>0.89%</td><td class="good">improving</td></tr>
+<tr><td>snapshot grace-sweep</td><td>—</td><td>query-triggered (738 held)</td><td>background (660→6, no query)</td><td class="good">FIXED</td></tr>
+<tr><td>OOMKills / restarts</td><td>0 / 0</td><td>0 / 0</td><td>0 / 0</td><td class="good">clean</td></tr>
+</table>
+<p class="sub">Note: p50/p99 are not directly comparable — R11b/R12 measured 8-thread load, this run 32-thread. At equal
+concurrency the numbers track; the higher latency here is queuing at 4× the threads against the same throughput ceiling.</p>
+
+<h2>Lane-B goals ladder — where 0.15 lands</h2>
+<table>
+<tr><th>Goal</th><th>Target</th><th>0.15</th><th></th></tr>
+<tr><td>B1 warm point-read floor</td><td>≤300ms</td><td>~800ms p50 @32-thr (incl. ~2.2s JDBC floor amortized)</td><td class="warnc">below goal at 32-thr</td></tr>
+<tr><td>B1 warm scan-lite floor</td><td>≤500ms</td><td>LIMIT-class within steady p50</td><td class="warnc">report</td></tr>
+<tr><td>B2 throughput</td><td>≥100 qps @32-thr</td><td>~39 qps</td><td class="warnc">NOT met — fan-out skew is the bottleneck</td></tr>
+<tr><td>B3 full-scan trajectory</td><td>66s→10s</td><td>~60s</td><td class="warnc">on old trajectory (this run didn't target scan tuning)</td></tr>
+<tr><td>B4 cold start</td><td>≤3s / idle ≤16Mi</td><td>2.2s / 4–5Mi</td><td class="good">MET</td></tr>
+</table>
+<p>The Lane-B ladder is progress-tracking, not pass/fail. The one clear gap — B2 throughput — traces directly to
+the fan-out skew finding: a single pod is the ceiling. Cold-start (B4) is comfortably met.</p>
+<footer>Generated from <code>clusters/cqlite-snap015-artifacts/</code>. Grafana panels rendered server-side via the image-renderer sidecar (<code>cqlite-flight-kit</code> + ad-hoc <code>cqlite-saturation</code> dashboard), embedded as base64 data URIs. Condensed ~2.5h alternative to the 48–72h soak (pmcfadin/cqlite#2661).</footer></div></body></html>

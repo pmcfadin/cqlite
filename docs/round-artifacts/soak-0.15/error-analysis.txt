@@ -1,0 +1,36 @@
+ERROR ANALYSIS — do_get server-side errors (v0.15.0 snap-0.15)
+================================================================
+HEADLINE: 0 client-visible errors all run (loadtest final: errors=0).
+BUT server-side do_get errors are non-zero:
+
+  cqlite_rpc_requests_total{method=do_get, status=error} = 8,563 (live pods, end of run)
+  cqlite_rpc_requests_total{method=do_get, status=ok}     = 951,762
+  => 0.89% do_get error rate (R12 was ~1.2% — slightly better)
+  cqlite_errors_total{cqlite_error_category="other"}      = 8,398 (≈ all of them; base category=0)
+  get_schema: 1,375,190 ok, 0 error
+
+DISTRIBUTION (query_range, 5-min buckets across the run):
+  - Steady ~1,300 errors / 5min through BOTH Phase 1 (32-thr) and Phase 2 (80-thr burst).
+  - Burst did NOT raise the error FRACTION — errors scale with request volume, ~constant 0.9%.
+  - Counter dropped 28,864 -> 8,563 when the busy pod (25p2q) was killed in Phase 5:
+    => ~20k of the errors lived on that single pod = errors concentrate on the busiest
+       (fan-out-skew) pod, proportional to the work it does.
+
+LOG EVIDENCE: flight pods logged only 27-45 lines total; ZERO abort/cancel/reset/do_get-error
+  lines. The errors are METRIC-ONLY — they produce no log output.
+
+INTERPRETATION (consistent with, but NOT proven in-field):
+  Signature matches the R12 hypothesis of aborted/superseded splits: a multi-split scan that
+  gets enough data lets the coordinator abandon remaining in-flight do_get splits; the server
+  records those abandoned streams as do_get errors. Load-proportional, client-invisible, and
+  concentrated on the busy pod all fit this. NOT a correctness or liveness failure (integrity
+  sweeps identical, 0 client errors).
+
+LIMITS / FOLLOW-UPS (why we cannot fully close this in the field):
+  1. Category is only "other" — too coarse to name the exact cause. Needs finer error
+     categorization (e.g. aborted-by-peer vs superseded vs stream-closed).
+  2. No log line at any level for these — cannot diagnose from logs; needs a debug-level
+     trace on the do_get abort path.
+  => Recommend a P2 cqlite issue: categorize + optionally log the do_get "other" errors so a
+     future round can convert this from "consistent-with" to "confirmed". Target: 0 by making
+     superseded-split teardown not count as an error, if that's the cause.
