@@ -157,8 +157,12 @@ near-independent issues instead of running one to done before starting the next:
   independent lanes (different files/surfaces) — implementation + review stages overlap freely.
 - **(b) Arm merge-on-green per PR, then move on.** Do NOT block the queue on each PR's CI; arm merge-on-green
   and advance to the next lane. The PR lands when green (see Autonomy).
-- **(c) Full gates run serially.** Different lanes' full gates are run one-at-a-time by you (respect the
-  #1825 cap + measured ~2-gate contention); only the full-gate step serializes — the rest overlaps.
+- **(c) Full gates run serially — enforced mechanically (#2640).** Different lanes' full gates run
+  one-at-a-time: `CQLITE_GATE_MAX_CONCURRENCY=1` (pinned by `bootstrap-agent-machine.sh`) makes the
+  #1825 cap admit one full gate and the per-gate core budget give it full cores; each gate also
+  derives `CARGO_BUILD_JOBS`/`--test-threads` from its slot count and runs under `taskpolicy`/`nice`,
+  so an accidental overlap no longer oversubscribes the CPU. Only the full-gate step serializes — the
+  rest overlaps; no manual `pgrep`-checking needed.
 - **(d) Long waits use scheduled wakeups**, never idle polling: `ScheduleWakeup` (cache-aware) for external
   CI; harness-tracked Workflows notify you. Poll a queued gate's summary file with a cheap `grep` at
   <5-min intervals if you must watch — never a silent wait (a **queued gate ≠ hung gate**: under load it

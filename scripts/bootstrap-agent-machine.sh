@@ -238,6 +238,35 @@ info "  export CQLITE_DATASETS_ROOT=$MAIN_DATASETS"
 info "  Worktrees lack the gitignored Data.db binaries — always aim CQLITE_DATASETS_ROOT"
 info "  at the main checkout (above), NOT a worktree's own test-data/datasets."
 
+# ---- 5b. Single-gate default: one full gate per box (issue #2640) ----
+# One worker per machine (#1930) runs its full gates serially, so the DEFAULT
+# posture is a SINGLE full gate at a time. Pin CQLITE_GATE_MAX_CONCURRENCY=1 in the
+# shell profile so (a) the #1825 machine-wide cap admits exactly one full gate and
+# (b) the #2640 per-gate core budget hands that sole gate the FULL core count —
+# no CPU oversubscription, no manual pgrep-serialization. A machine that
+# deliberately wants >1 concurrent gate overrides the export.
+hdr "Single-gate default (CQLITE_GATE_MAX_CONCURRENCY=1, issue #2640)"
+PROFILE=""
+case "${SHELL:-}" in
+  */zsh) PROFILE="$HOME/.zshrc" ;;
+  */bash) PROFILE="$HOME/.bashrc" ;;
+  *) PROFILE="${ENV:-$HOME/.profile}" ;;
+esac
+EXPORT_LINE='export CQLITE_GATE_MAX_CONCURRENCY=1  # cqlite: one full gate per box, full cores (issue #2640)'
+if [ -n "${CQLITE_GATE_MAX_CONCURRENCY:-}" ]; then
+  ok "CQLITE_GATE_MAX_CONCURRENCY already set to '${CQLITE_GATE_MAX_CONCURRENCY}' in this environment"
+elif [ -n "$PROFILE" ] && [ -f "$PROFILE" ] && grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$PROFILE" 2>/dev/null; then
+  ok "CQLITE_GATE_MAX_CONCURRENCY already pinned in $PROFILE"
+elif [ "$AUTO_YES" = 1 ] && [ -n "$PROFILE" ]; then
+  printf '%s\n' "$EXPORT_LINE" >>"$PROFILE" \
+    && ok "pinned CQLITE_GATE_MAX_CONCURRENCY=1 in $PROFILE (re-source or open a new shell)" \
+    || warn "could not append to $PROFILE — add manually: $EXPORT_LINE"
+else
+  warn "CQLITE_GATE_MAX_CONCURRENCY not pinned — one full gate per box is the default posture (#2640)"
+  info "add to ${PROFILE:-your shell profile}:  $EXPORT_LINE"
+  info "(re-run with --yes to auto-append)"
+fi
+
 # ---- 6. Health check: gate fmt + authoritative accelerators line ----
 hdr "Health check (gate fmt + accelerators line)"
 if [ "$SKIP_SMOKE" = 1 ]; then

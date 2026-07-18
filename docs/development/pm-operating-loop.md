@@ -132,8 +132,12 @@ roborev round-trips):
   lanes — implementation + review stages overlap freely.
 - **(b)** Merge-on-green is **armed per PR** (it lands when green) rather than blocking the queue on each
   PR's CI; the lead advances to the next lane after arming.
-- **(c)** Full gates for different lanes are run **serially** by the lead (respecting the #1825 cap +
-  measured ~2-gate contention) — only the full-gate step serializes; everything else overlaps.
+- **(c)** Full gates for different lanes are run **serially** by the lead — enforced mechanically
+  (#2640): `CQLITE_GATE_MAX_CONCURRENCY=1` (pinned by `bootstrap-agent-machine.sh`) makes the #1825
+  cap admit one full gate and the per-gate core budget give it full cores, and each gate derives
+  `CARGO_BUILD_JOBS`/`--test-threads` from its slot count and runs under `taskpolicy`/`nice` so an
+  overlap no longer oversubscribes the CPU. Only the full-gate step serializes; everything else
+  overlaps. No manual `pgrep`-serialization needed.
 - **(d)** Long waits use **scheduled wakeups**, never idle polling.
 
 ## Self-improvement loop (telemetry + retro)
