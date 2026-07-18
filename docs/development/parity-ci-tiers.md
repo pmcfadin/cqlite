@@ -174,6 +174,39 @@ P0 data-loss path without a recorded gap is a contract violation.
   `required_parity` scenario whose fixtures need a live Cassandra to regenerate
   is *attached* to the nightly so its goldens stay fresh.
 
+#### Umbrella orchestration — each property proven once per night (issue #2650)
+
+The [`nightly-docker-parity.yml`](../../.github/workflows/nightly-docker-parity.yml)
+umbrella is the single dedicated `nightly_docker` lane and the ONE run the
+release checklist cites. To avoid proving the two most expensive live-Cassandra
+properties **twice** the same night, it is an **orchestrator**, not a
+re-implementer:
+
+- **Live read-back** is delegated — the umbrella `uses:`
+  [`e2e-readback.yml`](../../.github/workflows/e2e-readback.yml) as a
+  `workflow_call` reusable workflow. That lane's standalone nightly `schedule:`
+  cron was **removed**; it still runs standalone on PRs (`ci:ingest-full`),
+  manual dispatch, and release publication.
+- **Compaction logical + byte** is delegated — the umbrella `uses:`
+  [`compaction-parity.yml`](../../.github/workflows/compaction-parity.yml) as a
+  `workflow_call` reusable workflow. Its standalone nightly `schedule:` cron was
+  likewise **removed**; it still runs standalone on PRs and manual dispatch. The
+  byte-tier assertion (`gradle byteParity`) keys on `github.event_name`, which
+  for a reusable-workflow leg reflects the umbrella's `schedule` /
+  `workflow_dispatch` event, so it still fires nightly.
+- **BTI (da) sstabledump + Bloom filter** legs are unique to the umbrella and run
+  in its own `bti-bloom` job (via `nightly-docker-parity.sh --skip-live
+  --skip-compaction`). Because compaction is delegated, that job no longer needs
+  the JDK/Ant/Gradle/Cassandra-source build.
+- An `aggregate` job stitches the delegated + unique legs into a single verdict —
+  the citable `nightly_docker` pass. The umbrella's 06:11 UTC schedule is now the
+  **single nightly driver** for the delegated properties.
+
+Net effect: each of the live-read-back and compaction-parity properties is
+executed **exactly once per night**, the aggregate remains one citable pass, and
+`parity-failure-issue.yml`'s `workflow_run` routing keys off the delegated lanes'
+own names (see that workflow, issue #2660).
+
 #### PR-visibility proxy for the compaction byte tier (issue #1405)
 
 The compaction byte-tier scenarios

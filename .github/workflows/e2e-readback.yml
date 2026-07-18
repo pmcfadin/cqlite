@@ -10,13 +10,22 @@ name: "CI: E2E Cassandra Readback Gate"
 # is the single default writer-path PR ingest smoke. Run this full path through:
 #   - PR label: ci:ingest-full
 #   - Manual workflow_dispatch
-#   - Nightly schedule
+#   - Nightly (via the nightly-docker-parity.yml umbrella — see below)
 #   - Release publication
+#
+# DE-DUPLICATION (issue #2650, epic #2636): this lane's standalone nightly
+# `schedule:` cron was REMOVED. The nightly-docker-parity.yml umbrella now drives
+# the live read-back property once per night via `workflow_call` (the
+# `workflow_call` trigger below), so the property is proven exactly once nightly
+# and this lane's run is part of the umbrella's ONE citable aggregate pass. This
+# lane still runs standalone on PRs (`ci:ingest-full`), manual dispatch, and
+# release publication.
 
 on:
-  schedule:
-    # Nightly at 02:30 UTC
-    - cron: '30 2 * * *'
+  # Reusable-workflow entry point: the nightly-docker-parity.yml umbrella invokes
+  # this lane so the live read-back property runs once per night as a shared leg
+  # (issue #2650). No inputs — the umbrella needs the default (all-tables) run.
+  workflow_call:
   release:
     types: [published]
   pull_request:
