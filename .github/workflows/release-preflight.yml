@@ -1,0 +1,54 @@
+name: Release preflight
+
+# Shared release-train preflight (issue #2652, epic #2636).
+#
+# A v* release tag fans out to 7+ INDEPENDENT publish workflows (crates.io, PyPI,
+# npm, Maven Central, the cqlite-flight GHCR image, ...). Every one of those
+# registries is IMMUTABLE — once a version is published it can never be
+# overwritten — and each lane runs its own private tag==manifest check. There is
+# no shared gate that asserts, ONCE and BEFORE any lane uploads, that the tag
+# agrees with EVERY manifest. When they disagree, one lane publishes, a later
+# lane hard-fails on its own private mismatch, and the immutable registries are
+# left half-populated.
+#
+# This reusable workflow is that shared gate. Each publish workflow invokes it
+# (`uses: ./.github/workflows/release-preflight.yml`) as a `needs:` of its
+# publish job, so no lane uploads until the tag has been proven equal to all
+# four release manifests:
+#   Cargo.toml [package] + [workspace.package], bindings/python/pyproject.toml,
+#   bindings/node/package.json — via scripts/bump-version.sh check <version>.
+#
+# NOTE: this cannot make the fan-out ATOMIC (immutable registries preclude
+# that). It closes the far more common failure — shipping a tag whose manifests
+# already disagree — before any irreversible upload happens. Resumability of a
+# mid-train failure is handled per-lane (PyPI skip-existing, npm/Maven
+# tolerate-already-published); see RELEASING.md.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Release version or tag to assert against every manifest (leading v tolerated, e.g. v0.15.0 or 0.15.0).'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  version-agreement:
+    name: Assert tag == every manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # bump-version.sh check fails closed on: any manifest missing/empty, the
+      # four fields disagreeing, or the resolved version != the tag. VERSION is
+      # passed via env (never interpolated into the shell) and the script
+      # allowlist-validates it against ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$.
+      - name: Assert tag agrees with every manifest
+        env:
+          VERSION: ${{ inputs.version }}
+        run: bash scripts/bump-version.sh check "$VERSION"

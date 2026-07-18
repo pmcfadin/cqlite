@@ -46,9 +46,26 @@ permissions:
   contents: read
 
 jobs:
+  # Shared release-train preflight (issue #2652): assert the release tag agrees
+  # with EVERY Rust/Python/Node manifest before the connector is published to
+  # the immutable Maven Central. Only a v* tag push has a ref-derived version to
+  # preflight; a manual workflow_dispatch supplies its own `version` input and
+  # skips this gate (the publish job's `if:` below tolerates the skip).
+  preflight:
+    name: Release preflight
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/release-preflight.yml
+    with:
+      version: ${{ github.ref_name }}
+
   publish:
     name: publishToMavenCentral
     runs-on: ubuntu-latest
+    needs: [preflight]
+    # preflight is `if: push`-gated, so a workflow_dispatch run SKIPS it. Proceed
+    # when it passed (tag push) or was skipped (dispatch), never when it failed.
+    if: ${{ !cancelled() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped') }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -99,6 +116,30 @@ jobs:
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Resumability (issue #2652): Maven Central is immutable — a released
+      # version can never be overwritten, so re-running a partially-failed train
+      # would hard-fail when in.mcfad:cqlite-trino:<version> was already
+      # published on a prior run. Probe the public Central repo (no secrets) and
+      # expose an `already` boolean the Central publish step gates on, so the
+      # train re-runs to completion instead of dead-ending here. This is a
+      # public read of repo1.maven.org; PUBLISH_VERSION is validated semver and
+      # passed via env, never inlined into the shell.
+      - name: Check if version already on Maven Central
+        id: central
+        env:
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          url="https://repo1.maven.org/maven2/in/mcfad/cqlite-trino/${PUBLISH_VERSION}/cqlite-trino-${PUBLISH_VERSION}.pom"
+          code="$(curl -s -o /dev/null -w '%{http_code}' -L "$url" || echo 000)"
+          if [ "$code" = "200" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "in.mcfad:cqlite-trino:${PUBLISH_VERSION} is already on Maven Central — will skip publish (resumable re-run)."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+            echo "in.mcfad:cqlite-trino:${PUBLISH_VERSION} is not on Maven Central (HTTP ${code}) — will publish."
+          fi
+
       # Pre-publish oracle (issue #2300): assert the netty pin survives into the
       # published POM's <dependencies> BEFORE any publish path runs, so a drifted
       # or BOM-only pin (which a downstream Maven consumer would resolve at netty
@@ -119,8 +160,15 @@ jobs:
           PUBLISH_VERSION: ${{ steps.version.outputs.version }}
         run: ./gradlew --no-daemon publishToMavenLocal -Pversion="$PUBLISH_VERSION"
 
+      - name: Skip — already on Maven Central (resumable re-run)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && steps.central.outputs.already == 'true' }}
+        env:
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "in.mcfad:cqlite-trino:${PUBLISH_VERSION} is already published to Maven Central; skipping the publish so a partially-failed release train re-runs to completion (issue #2652)."
+
       - name: Publish to Maven Central
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && steps.guard.outputs.should_publish == 'true' }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && steps.central.outputs.already != 'true' && steps.guard.outputs.should_publish == 'true' }}
         working-directory: trino-connector
         env:
           # vanniktech reads Central credentials + the in-memory GPG key from
@@ -137,7 +185,7 @@ jobs:
       # while the Central publish silently never happened. A skip that isn't an
       # explicit dry run is now unmissable: the job FAILS instead of going green.
       - name: Fail — Central publish skipped (secrets absent, not a dry run)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && steps.guard.outputs.should_publish != 'true' }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && steps.central.outputs.already != 'true' && steps.guard.outputs.should_publish != 'true' }}
         run: |
           echo "::error::Maven Central secrets absent and this is not an explicit dry run (dry_run=true) — failing instead of silently skipping the connector publish. Set MAVEN_CENTRAL_USERNAME/MAVEN_CENTRAL_PASSWORD/SIGNING_KEY/SIGNING_PASSWORD, or dispatch with dry_run=true to validate the build without publishing."
           exit 1

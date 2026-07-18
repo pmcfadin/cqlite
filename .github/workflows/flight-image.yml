@@ -47,6 +47,19 @@ env:
   REGISTRY_IMAGE: ghcr.io/${{ github.repository_owner }}/cqlite-flight
 
 jobs:
+  # Shared release-train preflight (issue #2652): on a v* tag push, assert the
+  # tag agrees with EVERY release manifest before the image is built and pushed.
+  # A workflow_dispatch run (version backfill or one-off image_tag) has no
+  # ref-derived release version to preflight and supplies its own inputs, so it
+  # SKIPS this gate — the merge job's own release-tag provenance assertion
+  # (#2639) still guards a manual version dispatch.
+  preflight:
+    name: Release preflight
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/release-preflight.yml
+    with:
+      version: ${{ github.ref_name }}
+
   # Build per architecture on a NATIVE runner (amd64 on ubuntu-latest, arm64 on
   # ubuntu-24.04-arm) and push each by digest. Native runners avoid
   # QEMU-emulated Rust compiles, which are slow and prone to OOM. The multi-arch
@@ -54,6 +67,11 @@ jobs:
   build:
     name: Build (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
+    needs: [preflight]
+    # preflight is `if: push`-gated, so a workflow_dispatch run SKIPS it. Build
+    # when preflight passed (tag push) or was skipped (dispatch), never when it
+    # failed — a manifest disagreement stops the image build up front.
+    if: ${{ !cancelled() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped') }}
     permissions:
       contents: read
       packages: write

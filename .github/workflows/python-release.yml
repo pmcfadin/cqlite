@@ -13,6 +13,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Shared release-train preflight (issue #2652): assert the tag agrees with
+  # EVERY release manifest before publishing. Both publish lanes need this so a
+  # manifest disagreement fails up front, never after an irreversible PyPI
+  # upload to the immutable index.
+  preflight:
+    name: Release preflight
+    uses: ./.github/workflows/release-preflight.yml
+    with:
+      version: ${{ github.ref_name }}
+
   # Build source distribution
   build-sdist:
     name: Build source distribution
@@ -110,7 +120,7 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     runs-on: ubuntu-latest
-    needs: [build-sdist, build-wheels]
+    needs: [preflight, build-sdist, build-wheels]
     # Pre-release: any tag with hyphen suffix (v1.0.0-rc1, v1.0.0-alpha, v1.0.0-beta1, etc.)
     if: contains(github.ref_name, '-')
     timeout-minutes: 10
@@ -168,6 +178,10 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist/
+          # Resumability (issue #2652): TestPyPI is immutable, so re-running a
+          # partially-failed train tolerates files already uploaded instead of
+          # hard-failing on a duplicate.
+          skip-existing: true
 
       - name: Summary
         run: |
@@ -185,7 +199,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [build-sdist, build-wheels]
+    needs: [preflight, build-sdist, build-wheels]
     # Stable release: tag without hyphen suffix (v1.0.0, v0.3.0)
     if: ${{ !contains(github.ref_name, '-') }}
     timeout-minutes: 10
@@ -261,6 +275,11 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          # Resumability (issue #2652): PyPI is immutable, so re-running a
+          # partially-failed train skips files already uploaded (e.g. the sdist
+          # + some wheels) instead of hard-failing on a duplicate, letting the
+          # train re-run to completion.
+          skip-existing: true
 
       - name: Summary
         run: |
