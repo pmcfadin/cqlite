@@ -130,11 +130,41 @@ What it guarantees:
   claim branch first (crash recovery), else claims the next Ready item, works it to merged +
   finalized, and exits. Empty Ready = cheap no-op + backoff.
 - **It cannot overload the box**: preflight holds the next iteration while load is high, a dead
-  iteration's cargo/gate processes linger, or disk is low — it waits, it never spins. A flock
-  makes a second supervisor on the same machine refuse to start.
+  iteration's cargo/gate processes **or an orphaned worker Claude CLI** (`--agent worker`, #2670)
+  linger, or disk is low — it waits, it never spins. A flock makes a second supervisor on the same
+  machine refuse to start. (The Claude probe keys on the supervisor's own `--agent worker` spawn
+  shape, so a legitimate interactive `claude` REPL or a different-agent session is not matched.) A
+  hold cannot latch it silently: every hold pass re-checks the stop-file and the wall-clock budget,
+  and a leftover hold that never clears stops the loop loudly, paging the surviving PIDs (#2670).
+  The two leftover families are bounded **separately** (#2670): a non-self-clearing orphaned worker
+  CLI (`leftover-worker`) trips the tight `LEFTOVER_HOLD_MAX` (default 3 ≈ 15 min), while a
+  self-clearing build/gate process (`leftover-build`: cargo/nextest/gate-slot-daemon) gets the loose
+  `BUILD_HOLD_MAX` (default 12 ≈ 1 h, `<=0` disables) so a legitimate concurrent full gate (15–25 min)
+  is waited out, never mistaken for a stuck orphan.
+- **It cannot be fooled by a false finalize (#2670)**: a `finalized` marker is trusted only after
+  the claimed PR gh-verifies as MERGED (via `state,mergedAt,autoMergeRequest`). A worker that parked
+  its endgame yet wrote `finalized` is caught (`verified: mismatch:<state>`, confirmed across grace
+  re-reads that absorb read-after-merge lag), paged high, judged abnormal, and never credited; a
+  forged PR reference — non-numeric, a non-pmcfadin/cqlite URL, or one gh *resolves as absent* (gh's
+  `could not resolve to a PullRequest` signature only — a transport `not found` like DNS/proxy 404 is
+  **not** forgery) — is `mismatch:UNRESOLVED` (same escalation). An OPEN PR with **auto-merge armed**
+  is the closer's legitimate path, judged `finalized-pending-automerge` (uncounted, breaker-neutral),
+  not a false finalize. Such PRs are tracked **per-PR** (#2670): each is re-verified on later
+  iterations and, once it reaches MERGED, **retroactively credited** toward `MAX_ISSUES`
+  (`pending-credited`) — so a fast fleet with several *distinct* PRs pending at once is never mistaken
+  for a stuck one. Only when the **same** PR is observed still-unmerged across `PENDING_AUTOMERGE_MAX`
+  consecutive iterations **and** has been pending at least `PENDING_AUTOMERGE_MIN_SECS` (a wall-clock
+  floor above CI time, so a burst of fast no-progress iterations can't burn the budget) is it
+  auto-merge-stuck and the loop stops (`automerge-stuck`); a tracked PR that instead ends
+  CLOSED-unmerged pages high (`pending-dropped`), never silently swallowed. A GitHub
+  *outage* — or a missing JSON
+  parser, a tooling gap that must never read as forgery — yields a neutral `finalized-unverified`
+  (paged, uncounted, breaker untouched); a **persistent** outage is bounded: `UNVERIFIED_MAX`
+  consecutive unverifiable finalizes stop the loop (`verify-unavailable`), so the `MAX_ISSUES` ceiling
+  can't drift.
 - **It cannot fail silently**: a push notification (ntfy) on every merge (info) and on any
   stop/hold/breaker-trip (alert). 2–3 consecutive abnormal exits trip the breaker → stop + alert,
-  never hot-respawn. One journal line per iteration (issue, verdict, duration, PR).
+  never hot-respawn. One journal line per iteration (issue, verdict, duration, PR, `verified`).
 - **It never wedges on a question (#2666)**: a worker that hits Seam 1 or a genuine owner decision
   **parks** (posts a `needs-decision` question comment + EXITs) rather than waiting — the supervisor
   judges it `parked-on-owner` and pages the owner once. A worker that nonetheless gets stuck on an
@@ -145,12 +175,16 @@ What it guarantees:
 
 | Verdict | Meaning | Breaker |
 |---------|---------|---------|
-| `finalized` | claimed → gate/review → merge-on-green → finalized (`issue`+`pr` set) | resets |
+| `finalized` | claimed → gate/review → merge-on-green → finalized (`issue`+`pr` set) **and the PR gh-verifies as MERGED** (#2670); journal `verified: merged` | resets |
+| `finalized-unverified` | well-formed finalize, but gh could not confirm the merge — gh missing / network / rate limit, **or no JSON parser present** (a tooling gap is never read as forgery, #2670); journal `verified: unverified`, default-priority page, **not counted** toward the issue budget | **neutral** (neither trips nor resets) |
+| `finalized-pending-automerge` | PR is OPEN with auto-merge armed (the closer's auto-merge path, #2670) — it will land; journal `verified: pending-automerge`, default-priority page, **not counted yet**, tracked per-PR for retroactive credit; the **same** PR still-unmerged `PENDING_AUTOMERGE_MAX` iterations in a row ⇒ `automerge-stuck` stop | **neutral** |
+| `pending-credited` | a previously `finalized-pending-automerge` PR re-verified as MERGED on a later iteration (#2670) — **retroactively counted** toward `MAX_ISSUES`; journal `verified: merged` | **neutral** |
+| `pending-dropped` | a tracked armed PR that ended **CLOSED-unmerged** (auto-merge dropped / PR closed) on re-verification (#2670) — HIGH "armed PR did not land" page, dropped uncredited (never silently swallowed) | **neutral** |
 | `no-work` | nothing Ready / nothing to resume — backoff, then retry | resets |
 | `blocked` | stopped short of merge for an owner escalation; same issue twice ⇒ head-blocked stop | resets |
 | `parked-on-owner` | clean park (#2666): `blocked` marker with `reason: seam1-approval\|needs-decision`; high page, loop advances | **never** |
 | `stuck-on-question` | worker wedged on a prompt, detected mid-iteration; high page with the captured text | **never** |
-| `abnormal` | nonzero exit / missing / malformed marker / unknown outcome | **+1** |
+| `abnormal` | nonzero exit / missing / malformed marker / unknown outcome / **finalized marker whose PR is a stable non-merged state** (`verified: mismatch:<state>`, after grace re-reads) **or a forged PR ref** (`verified: mismatch:UNRESOLVED` — non-numeric, foreign-host URL, or gh-unresolvable); high page naming the discrepancy (#2670) | **+1** |
 - **It stops on its own**: at the issue budget or wall-clock ceiling — overnight is "clear a few
   issues safely," not "run unbounded."
 - **Stop it yourself:** `touch .worker-stop` (finishes the current issue, then exits).
