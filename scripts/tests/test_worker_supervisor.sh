@@ -519,10 +519,9 @@ common_env() {
   export NOTIFY_CMD="$d/bin/notify.sh"
   export LOAD_PROBE_CMD="echo 0"
   export DISK_PROBE_CMD="echo 999999"
-  export PROC_PROBE_CMD="echo 0"
   # roborev 1839: preflight bounds the two leftover families separately, so it reads
-  # per-family probes. Default both to clear; leftover-hold tests override the family
-  # they exercise.
+  # per-family probes (the old combined PROC_PROBE_CMD is gone). Default both to clear;
+  # leftover-hold tests override the family they exercise.
   export PROC_PROBE_WORKER_CMD="echo 0"
   export PROC_PROBE_BUILD_CMD="echo 0"
   # issue #2670: every "finalized" marker is now GH-verified. Default the mock to
@@ -2130,6 +2129,52 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Test 51 (#2670 / roborev 1841): the wall-clock floor is genuinely CROSSED — with
+# PENDING_AUTOMERGE_MAX=2 and PENDING_AUTOMERGE_MIN_SECS=2, the same PR observed pending
+# holds through the first observations (count reached quickly) and only trips
+# automerge-stuck once ~2s of wall-clock have elapsed. Proves the AND actually binds on
+# the time term (not just the two degenerate MIN_SECS=0 / huge extremes). Asserts the
+# stop IS automerge-stuck and the run lasted >= 2s.
+# ---------------------------------------------------------------------------
+test_pending_time_floor_crossed_trips() {
+  local d counter jf rc elapsed
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  # worker finalizes the same PR each time with a small sleep so the loop doesn't spin
+  # thousands of times per second while the 2s floor elapses.
+  cat >"$d/bin/worker.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+n=0; [[ -f "$counter" ]] && n=\$(cat "$counter"); n=\$((n+1)); echo "\$n">"$counter"
+cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":11,"pr":"https://github.com/pmcfadin/cqlite/pull/11","duration_s":1}
+JSON
+sleep 0.3
+EOF
+  chmod +x "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export PENDING_AUTOMERGE_MAX=2
+  export PENDING_AUTOMERGE_MIN_SECS=2
+  export MAX_HOURS_SECS=30   # backstop so a broken floor can't hang the suite
+  export GH_VERIFY_CMD='printf %s "{\"state\":\"OPEN\",\"mergedAt\":null,\"autoMergeRequest\":{\"enabledAt\":\"x\"}}"'
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  elapsed=$(grep -o '"reason":"automerge-stuck","issues_done":[0-9]*,"elapsed_s":[0-9]*' "$jf" 2>/dev/null | grep -o 'elapsed_s":[0-9]*' | grep -o '[0-9]*' | tail -1)
+  if [[ "$rc" -ne 0 ]] &&
+     grep -q '"reason":"automerge-stuck"' "$jf" &&
+     [[ -n "$elapsed" && "$elapsed" -ge 2 ]]; then
+    pass "pending time-floor crossed: holds through first observations, trips automerge-stuck only after MIN_SECS (elapsed ${elapsed}s)"
+  else
+    fail "pending-time-floor-crossed: rc=$rc elapsed=${elapsed:-?} (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Test 42 (#2670 / roborev 1821, 1840): each family's count probe AND its list probe
 # DERIVE from that family's shared match pattern (PROC_MATCH_BUILD / PROC_MATCH_WORKER)
 # — the "what counts" set and the "what we name" set cannot drift, per family. Source
@@ -2278,6 +2323,7 @@ test_healthy_multi_pr_no_false_stop
 test_pending_time_floor_blocks_fast_stuck
 test_pending_pr_closed_pages_high
 test_unverified_streak_survives_intervening_abnormal
+test_pending_time_floor_crossed_trips
 test_build_hold_uses_loose_bound
 test_build_hold_clears_then_proceeds
 test_probe_list_derives_from_count_set

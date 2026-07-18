@@ -746,10 +746,31 @@ START_TS=$(date +%s)
 # (nothing mutates MAX_HOURS after the config block) and is removed (roborev 1821
 # config Low).
 
+# report_pending_at_exit: a run that stops while armed PRs are still pending must not
+# drop them silently (roborev 1841) — the PENDING_AUTOMERGE_MIN_SECS floor means a
+# recently-armed PR can legitimately never have tripped automerge-stuck in this run. On
+# exit, journal one `pending-at-exit` line per still-tracked PR (with its age) and fire a
+# single summary notify, so an operator can follow up on any PR that hadn't landed yet.
+report_pending_at_exit() {
+  [[ -z "$PENDING_PR_LIST" ]] && return 0
+  local pr issue count first_ts age n=0 summary=""
+  while IFS=$'\t' read -r pr issue count first_ts; do
+    [[ -z "$pr" ]] && continue
+    age=$(( $(date +%s) - first_ts ))
+    journal_line "$ITER" "pending-at-exit" "$issue" "$pr" 0 0 "pending_age_s=$age" "pending-automerge"
+    n=$((n + 1))
+    summary="${summary}${pr} (issue $issue, ${age}s); "
+  done <<< "$PENDING_PR_LIST"
+  [[ "$n" -eq 0 ]] && return 0
+  notify "info" "worker-supervisor: $n armed PR(s) still pending at exit" \
+    "these PRs were OPEN with auto-merge armed and had not yet landed when the run stopped — check they merge: ${summary}"
+}
+
 finalize_exit() {
   local reason="$1" code="$2"
   local elapsed=$(($(date +%s) - START_TS))
   mkdir -p "$LOG_DIR"
+  report_pending_at_exit
   printf '{"ts":"%s","iter":%d,"outcome":"summary","reason":"%s","issues_done":%d,"elapsed_s":%d}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ITER" "$reason" "$ISSUES_DONE" "$elapsed" \
     >>"${JOURNAL_FILE:-$LOG_DIR/journal-$(date -u +%Y-%m-%d).jsonl}"
@@ -819,7 +840,7 @@ credit_merged_pending_prs() {
           notify "high" "worker-supervisor: auto-merge stuck" \
             "PR $pr (issue $issue) has stayed OPEN pending auto-merge across $count observations over ${age}s — auto-merge is not landing; stopping so it isn't looped forever"
           log "PR $pr observed still-pending $count times over ${age}s (>= PENDING_AUTOMERGE_MAX=$PENDING_AUTOMERGE_MAX, >= PENDING_AUTOMERGE_MIN_SECS=$PENDING_AUTOMERGE_MIN_SECS); stopping (automerge-stuck)"
-          journal_line "$ITER" "finalized-pending-automerge" "$issue" "$pr" "$age" 0 "" "pending-automerge"
+          journal_line "$ITER" "finalized-pending-automerge" "$issue" "$pr" 0 0 "pending_age_s=$age" "pending-automerge"
           finalize_exit "automerge-stuck" 1
         fi
         new_list="${new_list}${pr}"$'\t'"${issue}"$'\t'"${count}"$'\t'"${first_ts}"$'\n'
@@ -1132,11 +1153,16 @@ trip_breaker_or_continue() {
 # on a bad value rather than running with a silently-broken safety bound.
 validate_numeric_knobs() {
   local name val
-  for name in MAX_ISSUES MAX_HOURS MAX_HOURS_SECS DISK_FLOOR_GB BREAKER_N \
+  # Only knobs consumed by INTEGER arithmetic / `-gt`/`-ge` comparisons are validated
+  # here. LOAD_MAX and DISK_FLOOR_GB are deliberately EXCLUDED — they are FLOAT-compared
+  # via is_gt/is_lt (awk), so a fractional value (e.g. DISK_FLOOR_GB=37.5) is valid and
+  # must not be rejected. MAX_HOURS is likewise excluded (only used in the derivation +
+  # log); the derived MAX_HOURS_SECS it feeds IS validated below.
+  for name in MAX_ISSUES MAX_HOURS_SECS BREAKER_N \
               BACKOFF_NOWORK_SECS HOLD_POLL_SECS MAX_ITER_SECS STUCK_POLL_SECS \
-              LEFTOVER_HOLD_MAX BUILD_HOLD_MAX UNVERIFIED_MAX MISMATCH_RETRIES \
-              MISMATCH_RETRY_WAIT_SECS MISMATCH_GRACE_CAP_SECS PENDING_AUTOMERGE_MAX \
-              PENDING_AUTOMERGE_MIN_SECS; do
+              STUCK_TAIL_LINES LEFTOVER_HOLD_MAX BUILD_HOLD_MAX UNVERIFIED_MAX \
+              MISMATCH_RETRIES MISMATCH_RETRY_WAIT_SECS MISMATCH_GRACE_CAP_SECS \
+              PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS; do
     val="${!name}"
     if [[ ! "$val" =~ ^-?[0-9]+$ ]]; then
       log "FATAL: numeric knob $name has a non-integer value '$val' — refusing to start with a silently-broken bound"

@@ -100,7 +100,9 @@ write timing simple (one claim → one outcome → one write → exit).
   `MAX_ISSUES`, `MAX_HOURS`, `LOAD_MAX`, `DISK_FLOOR_GB`, `BREAKER_N`,
   `BACKOFF_NOWORK_SECS`, `HOLD_POLL_SECS`, `MAX_ITER_SECS`, `SUPERVISOR_LOCK`,
   `STOP_FILE`, `MARKER_FILE`, `LOG_DIR`, `WORKER_CMD`, `LOAD_PROBE_CMD`,
-  `DISK_PROBE_CMD`, `PROC_PROBE_CMD`, `NOTIFY_CMD`.
+  `DISK_PROBE_CMD`, `PROC_PROBE_WORKER_CMD`, `PROC_PROBE_BUILD_CMD`,
+  `PROC_LIST_WORKER_CMD`, `PROC_LIST_BUILD_CMD`, `BUILD_HOLD_MAX`,
+  `PENDING_AUTOMERGE_MAX`, `PENDING_AUTOMERGE_MIN_SECS`, `NOTIFY_CMD`.
 - Stop-file: create `.worker-stop` at the repo root (or `$STOP_FILE`) to request a
   clean stop before the next iteration; the runbook's "morning check" section should
   mention removing it before the next overnight run.
