@@ -273,6 +273,7 @@ jobs:
   reap-claims:
     if: github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Needs write to delete stale refs/machine-claims/* refs (the top-level
     # default is contents: read); the sweep/pr-closed jobs stay read-only.
     permissions:
