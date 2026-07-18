@@ -23,6 +23,15 @@
 /// before the measured cold read, to make the cold start deterministic regardless of
 /// test order. `#[allow(dead_code)]`: a binary may include this file for a subset of
 /// its guards.
+///
+/// # Invariant — the caller AND every sibling in the binary MUST be `#[serial]`
+///
+/// This is a PROCESS-GLOBAL flush. In a binary where any counter guard relies on a
+/// warm cache (a "second read is a cache HIT / zero probes" assertion), a flush that
+/// lands MID-un-serialized-sibling wipes that sibling's warm state and breaks its
+/// assertion. So every test in a binary that calls this — and every warm-read guard
+/// beside it — MUST carry `#[serial]` (a shared serial group) so the flush can never
+/// interleave with another guard's measured window.
 #[allow(dead_code)]
 pub fn flush_global_key_cache() {
     cqlite_core::storage::cache::GlobalKeyOffsetCache::global().invalidate_all();

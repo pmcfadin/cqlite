@@ -223,30 +223,47 @@ async fn big_point_read_compressed_increments_chunk_read_calls() {
     let (offset, size) = (0u64, 16u32);
 
     // Cold read: cache miss → the compressed branch performs a real backing read and
-    // must bump the counter.
+    // must bump the counter. `cold_reads >= 1` is a pollution-safe LOWER bound on the
+    // process-global counter (a concurrent read only ADDS), and this is the #2167
+    // red/green pin (pre-fix left it at 0).
+    let (h0, m0) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
     SSTableReader::reset_chunk_read_calls();
     let cold = reader
         .read_value_at_offset(offset, size)
         .await
         .expect("cold compressed offset read");
     let cold_reads = SSTableReader::chunk_read_call_count();
+    let (h1, m1) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
     assert!(
         cold_reads >= 1,
         "compressed cold read must increment CHUNK_READ_CALLS (issue #2167), got {cold_reads}"
     );
+    assert_eq!(m1 - m0, 1, "compressed cold read must be a cache MISS");
+    assert_eq!(h1 - h0, 0, "compressed cold read must not hit the cache");
 
-    // Warm read: identical offset → cache hit, ZERO further backing reads (the
-    // increment is gated behind the cache check), identical result.
-    SSTableReader::reset_chunk_read_calls();
+    // Warm read: identical offset → served from the per-reader chunk cache. Prove it
+    // via the PER-READER hit/miss delta (h2-h1 == 1, m2-m1 == 0) — scoped to this
+    // reader and immune to concurrent tests — instead of the former exact-zero on the
+    // PROCESS-GLOBAL `chunk_read_call_count()` (a #2470/#2714 cross-thread flake: a
+    // concurrent read-driving test bumps that global between the reset and the read).
+    // A DecompressedChunkCache hit returns cached bytes WITHOUT a backing read by
+    // construction, so "zero further backing reads" is implied by the hit.
     let warm = reader
         .read_value_at_offset(offset, size)
         .await
         .expect("warm compressed offset read");
-    assert_eq!(
-        SSTableReader::chunk_read_call_count(),
-        0,
-        "warm compressed read must perform ZERO further backing reads (cache hit)"
+    let (h2, m2) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
     );
+    assert_eq!(m2 - m1, 0, "warm compressed read must NOT miss the cache");
+    assert_eq!(h2 - h1, 1, "warm compressed read must be a cache HIT");
     assert_eq!(
         format!("{cold:?}"),
         format!("{warm:?}"),

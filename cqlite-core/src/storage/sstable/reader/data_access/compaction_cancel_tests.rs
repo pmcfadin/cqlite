@@ -769,8 +769,18 @@ async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
 /// `#[tokio::test]` drives every `.await` — INCLUDING the pre-#2430 per-partition
 /// probe, which runs inline in `lookup_partition_with_index`, not on a spawn_blocking
 /// thread — on this test's own thread, so the scope captures exactly this scan's
-/// probes and no concurrent test can inflate them. No global `reset()`, no serial tag.
+/// probes and no concurrent test can inflate them. No global `reset()` needed.
+///
+/// `#[serial_test::serial]` is nonetheless KEPT (issue #2714 roborev 1827): this
+/// test's materialising walk performs real Data.db reads that bump the PROCESS-GLOBAL
+/// `READ_CALLS` counter, and `block_io`'s exact-equality guard
+/// (`read_compressed_chunk_at_records_one_read_per_chunk`) documents the invariant
+/// that EVERY `READ_CALLS`-touching test must be `#[serial]` so its own delta stays
+/// reliable. The tag and the `ReadWorkScope` are complementary — the scope makes THIS
+/// test's `index_probes` assertion immune to others; the tag keeps THIS test's global
+/// `READ_CALLS` writes from contaminating others.
 #[tokio::test]
+#[serial_test::serial]
 async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
     let Some(data_path) = real_index_backed_fixture() else {
         eprintln!(
