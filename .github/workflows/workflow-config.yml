@@ -5,12 +5,26 @@ on:
     branches: [main, develop]
     paths:
       - '.github/workflows/**'
+      - '.github/actions/restore-canonical-datasets/action.yml'
       - 'scripts/ci/validate-workflows.rb'
+      - 'scripts/ci/check-dataset-pin.sh'
+      - 'test-data/dataset-pin.env'
+      - 'test-data/scripts/fetch-datasets.sh'
+      - 'test-data/scripts/bump-dataset-pin.sh'
+      - 'scripts/local/pre-merge.sh'
+      - 'scripts/ci/ensure_real_dataset.sh'
   push:
     branches: [main, develop]
     paths:
       - '.github/workflows/**'
+      - '.github/actions/restore-canonical-datasets/action.yml'
       - 'scripts/ci/validate-workflows.rb'
+      - 'scripts/ci/check-dataset-pin.sh'
+      - 'test-data/dataset-pin.env'
+      - 'test-data/scripts/fetch-datasets.sh'
+      - 'test-data/scripts/bump-dataset-pin.sh'
+      - 'scripts/local/pre-merge.sh'
+      - 'scripts/ci/ensure_real_dataset.sh'
   workflow_dispatch:
 
 permissions:
@@ -32,3 +46,6 @@ jobs:
 
       - name: Validate workflow policy
         run: ruby scripts/ci/validate-workflows.rb
+
+      - name: Dataset pin agreement (#2646)
+        run: bash scripts/ci/check-dataset-pin.sh

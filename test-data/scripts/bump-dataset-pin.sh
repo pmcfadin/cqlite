@@ -31,12 +31,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WF_DIR="$REPO_ROOT/.github/workflows"
 
-# Current (to-be-replaced) pin — keep in sync with the committed workflows.
-# This MUST match the asset/SHA actually committed across the workflows, or the
-# default next bump is a no-op/false-success. Currently v3.5 (issue #1935).
+# Current (to-be-replaced) pin. The single source of truth is the tracked
+# test-data/dataset-pin.env (issue #2646); load OLD_* from it so this bump can
+# never drift from the committed pin. Hardcoded fallbacks below cover an older
+# checkout without the pin file. The CI check (scripts/ci/check-dataset-pin.sh)
+# additionally asserts these OLD_* equal the tracked pin.
+PIN_ENV="$REPO_ROOT/test-data/dataset-pin.env"
 OLD_ASSET="cassandra5-small-full-v3.5.tar.gz"
 OLD_SHA="414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16"
 OLD_TAG="datasets-v3"
+if [[ -f "$PIN_ENV" ]]; then
+  # shellcheck disable=SC1090
+  source "$PIN_ENV"
+  OLD_ASSET="${DATASET_ASSET:-$OLD_ASSET}"
+  OLD_SHA="${DATASET_SHA256:-$OLD_SHA}"
+  OLD_TAG="${DATASET_TAG:-$OLD_TAG}"
+fi
 
 # Next (to-be-written) pin — bump the asset version and pass the new --new-sha.
 NEW_ASSET="cassandra5-small-full-v3.6.tar.gz"
@@ -85,6 +95,9 @@ fi
 # script or the example pin in the #1099 runbook.
 FETCH_HELPER="$REPO_ROOT/test-data/scripts/fetch-datasets.sh"
 SELF_PATH="$REPO_ROOT/test-data/scripts/bump-dataset-pin.sh"
+# The tracked single-source-of-truth pin (issue #2646) — rewritten in the same
+# pass so it stays authoritative (asset/sha via the generic sed; tag below).
+TRACKED_PIN="$REPO_ROOT/test-data/dataset-pin.env"
 
 # Other pin-consuming files outside the workflows dir (issue #1935): local
 # pre-merge harness, the composite restore action, and the CI provenance guard.
@@ -99,6 +112,7 @@ for f in "$WF_DIR"/*.yml "$WF_DIR"/*.yaml; do
   [[ -e "$f" ]] && FILES+=("$f")
 done
 [[ -e "$FETCH_HELPER" ]] && FILES+=("$FETCH_HELPER")
+[[ -e "$TRACKED_PIN" ]] && FILES+=("$TRACKED_PIN")
 for f in "${EXTRA_PIN_FILES[@]}"; do
   [[ -e "$f" ]] && FILES+=("$f")
 done
@@ -120,11 +134,13 @@ for f in "${FILES[@]}"; do
     #   - gh release download:     gh release download <tag>
     #   - release URL path:        releases/download/<tag>/
     #   - fetch-datasets default:  DATASET_TAG:-<tag>
+    #   - tracked pin (dataset-pin.env): DATASET_TAG=<tag>
     sed_inplace \
       "s|DATASET_TAG: $OLD_TAG|DATASET_TAG: $NEW_TAG|g; \
        s|release download $OLD_TAG|release download $NEW_TAG|g; \
        s|releases/download/$OLD_TAG/|releases/download/$NEW_TAG/|g; \
-       s|DATASET_TAG:-$OLD_TAG|DATASET_TAG:-$NEW_TAG|g" "$f"
+       s|DATASET_TAG:-$OLD_TAG|DATASET_TAG:-$NEW_TAG|g; \
+       s|DATASET_TAG=$OLD_TAG|DATASET_TAG=$NEW_TAG|g" "$f"
   fi
   if [[ "$(cat "$f")" != "$before" ]]; then
     echo "  ✓ updated ${f#"$REPO_ROOT"/}"

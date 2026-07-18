@@ -26,6 +26,12 @@ jobs:
           "workflow policy"
           -- ruby scripts/ci/validate-workflows.rb
 
+      - name: Dataset pin agreement (#2646)
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "dataset pin agreement"
+          -- bash scripts/ci/check-dataset-pin.sh
+
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
         with:

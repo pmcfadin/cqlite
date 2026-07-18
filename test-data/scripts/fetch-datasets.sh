@@ -4,9 +4,29 @@ set -euo pipefail
 # Fetch canonical Cassandra 5 datasets into test-data/datasets
 # Usage: DATASET_TAG=datasets-v3 DATASET_ASSET=cassandra5-small-full-v3.5.tar.gz DATASET_SHA256=414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16 ./test-data/scripts/fetch-datasets.sh
 
-TAG="${DATASET_TAG:-datasets-v3}"
-ASSET="${DATASET_ASSET:-cassandra5-small-full-v3.5.tar.gz}"
-SHA256_EXPECTED="${DATASET_SHA256:-414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16}"
+# The canonical asset/tag/sha live in ONE tracked file (issue #2646):
+# test-data/dataset-pin.env. Load it for the defaults so this helper never
+# drifts from the workflows. Precedence: explicit DATASET_* env (CI passes the
+# workflow-declared pin) > tracked pin file > historical hardcoded fallback
+# (older checkouts without the pin file). We capture the incoming env FIRST so
+# sourcing the pin file cannot clobber a real override.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PIN_ENV="${SCRIPT_DIR}/../dataset-pin.env"
+_ENV_TAG="${DATASET_TAG:-}"
+_ENV_ASSET="${DATASET_ASSET:-}"
+_ENV_SHA="${DATASET_SHA256:-}"
+_PIN_TAG=""; _PIN_ASSET=""; _PIN_SHA=""
+if [ -f "${PIN_ENV}" ]; then
+  # shellcheck disable=SC1090
+  . "${PIN_ENV}"
+  _PIN_TAG="${DATASET_TAG:-}"
+  _PIN_ASSET="${DATASET_ASSET:-}"
+  _PIN_SHA="${DATASET_SHA256:-}"
+fi
+
+TAG="${_ENV_TAG:-${_PIN_TAG:-datasets-v3}}"
+ASSET="${_ENV_ASSET:-${_PIN_ASSET:-cassandra5-small-full-v3.5.tar.gz}}"
+SHA256_EXPECTED="${_ENV_SHA:-${_PIN_SHA:-414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16}}"
 DATASET_ROOT="${CQLITE_DATASETS_ROOT:-test-data/datasets}"
 ARCHIVE_DATASET_ROOT="test-data/datasets"
 PIN_FILE="${DATASET_ROOT}/.dataset-pin"
