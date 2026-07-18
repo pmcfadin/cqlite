@@ -225,6 +225,13 @@ elif [ -n "$TEST_CMD" ]; then
     fail "lite check failed — see the SUMMARY above; full output: $GATE_OUTPUT_LOG"
   fi
   rm -f "$AGENT_GATE_SUMMARY_FILE" "$GATE_OUTPUT_LOG" 2>/dev/null
+  # Scope the trap + export to the test block only (roborev 1817): clear the EXIT
+  # trap and drop the exported summary path so neither leaks into the coverage
+  # block below — that command runs its own gate and must not inherit this
+  # (now-removed) lite summary path. The fail/signal short-circuit path exits
+  # before here, so the trap has already served its safety-net purpose.
+  trap - EXIT
+  unset AGENT_GATE_SUMMARY_FILE
 else
   echo "issue-gate: ISSUE_GATE_TEST_CMD is unset — skipping the test check." 1>&2
 fi
