@@ -38,23 +38,26 @@ Stable aggregate means:
 - The aggregate fails closed when any required internal validation fails.
 - The aggregate remains small enough for ordinary PR feedback.
 
-### Migration Rename
+### Migration Complete (issue #2648)
 
-The required check set will be renamed to `Required PR Gate / required` in
-issue #1364 after the workflow exists and has been proven on a PR.
-
-The current checked-in branch-protection config still contains these legacy
-contexts to avoid requiring a missing check during Wave 1:
+The migration to a single required check is complete. Live branch protection
+requires exactly one status check — `required`, produced by the `required` job
+in `.github/workflows/pr-gate.yml` — with `strict = false`. Issue #2648
+reconciled the checked-in `.github/branch-protection.json` to that live truth
+(single `required` context, `strict: false`), so re-running
+`setup-branch-protection.js` can no longer restore the retired legacy contexts:
 
 - `CI / test`
 - `CI: Core Library (minimal) / m1-core-validation`
 - `CI: Core Library (minimal) / sstabledump-parity-m1`
 - `CI: SSTableDump Parity Gate / sstabledump-parity`
 
-Those contexts should be retired from global branch protection when #1364
-updates `.github/branch-protection.json` to the new aggregate. They may continue
-to exist as targeted, nightly, or release validation, but they should not be
-added back as global branch-protection requirements after the migration.
+These are retired from global branch protection. The `m1-ci.yml` stub (which
+kept the two `m1` contexts emitted) has been deleted, and the transitional
+compile shim inside `CI / test` was removed while the `test` job is retained as
+a non-required broad-CI aggregator. These contexts may continue to exist as
+targeted, nightly, or release validation, but they must not be re-added as
+global branch-protection requirements.
 
 ## Tier Contracts
 
