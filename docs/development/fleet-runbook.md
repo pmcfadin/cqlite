@@ -130,11 +130,18 @@ What it guarantees:
   claim branch first (crash recovery), else claims the next Ready item, works it to merged +
   finalized, and exits. Empty Ready = cheap no-op + backoff.
 - **It cannot overload the box**: preflight holds the next iteration while load is high, a dead
-  iteration's cargo/gate processes linger, or disk is low — it waits, it never spins. A flock
-  makes a second supervisor on the same machine refuse to start.
+  iteration's cargo/gate processes **or an orphaned worker Claude CLI** (`--agent worker`, #2670)
+  linger, or disk is low — it waits, it never spins. A flock makes a second supervisor on the same
+  machine refuse to start. (The Claude probe keys on the supervisor's own `--agent worker` spawn
+  shape, so a legitimate interactive `claude` REPL or a different-agent session is not matched.)
+- **It cannot be fooled by a false finalize (#2670)**: a `finalized` marker is trusted only after
+  the claimed PR gh-verifies as MERGED. A worker that parked its endgame yet wrote `finalized` is
+  caught (`verified: mismatch:<state>`), paged high, judged abnormal, and never credited; a GitHub
+  outage yields a neutral `finalized-unverified` (paged, uncounted, breaker untouched) rather than a
+  false success or a false crash.
 - **It cannot fail silently**: a push notification (ntfy) on every merge (info) and on any
   stop/hold/breaker-trip (alert). 2–3 consecutive abnormal exits trip the breaker → stop + alert,
-  never hot-respawn. One journal line per iteration (issue, verdict, duration, PR).
+  never hot-respawn. One journal line per iteration (issue, verdict, duration, PR, `verified`).
 - **It never wedges on a question (#2666)**: a worker that hits Seam 1 or a genuine owner decision
   **parks** (posts a `needs-decision` question comment + EXITs) rather than waiting — the supervisor
   judges it `parked-on-owner` and pages the owner once. A worker that nonetheless gets stuck on an
@@ -145,12 +152,13 @@ What it guarantees:
 
 | Verdict | Meaning | Breaker |
 |---------|---------|---------|
-| `finalized` | claimed → gate/review → merge-on-green → finalized (`issue`+`pr` set) | resets |
+| `finalized` | claimed → gate/review → merge-on-green → finalized (`issue`+`pr` set) **and the PR gh-verifies as MERGED** (#2670); journal `verified: merged` | resets |
+| `finalized-unverified` | well-formed finalize, but gh could not confirm the merge (gh missing / network / rate limit); journal `verified: unverified`, default-priority page, **not counted** toward the issue budget | **neutral** (neither trips nor resets) |
 | `no-work` | nothing Ready / nothing to resume — backoff, then retry | resets |
 | `blocked` | stopped short of merge for an owner escalation; same issue twice ⇒ head-blocked stop | resets |
 | `parked-on-owner` | clean park (#2666): `blocked` marker with `reason: seam1-approval\|needs-decision`; high page, loop advances | **never** |
 | `stuck-on-question` | worker wedged on a prompt, detected mid-iteration; high page with the captured text | **never** |
-| `abnormal` | nonzero exit / missing / malformed marker / unknown outcome | **+1** |
+| `abnormal` | nonzero exit / missing / malformed marker / unknown outcome / **finalized marker whose PR is NOT merged** (`verified: mismatch:<state>`, high page naming the discrepancy, #2670) | **+1** |
 - **It stops on its own**: at the issue budget or wall-clock ceiling — overnight is "clear a few
   issues safely," not "run unbounded."
 - **Stop it yourself:** `touch .worker-stop` (finishes the current issue, then exits).
