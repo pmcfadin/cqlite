@@ -178,11 +178,15 @@ idea ──► spec (OpenSpec change) ──► epic + child issues ──► im
    issue/module, each in its own worktree) plus a `spec-auditor` and `coverage-reviewer`.
    Implementers follow the superpowers process (plan → TDD → implement) and **commit
    often** so reviews land while context is fresh. **[live]**
-4. **Gate.** A task cannot be marked done until `scripts/agent-gate.sh` passes — `cargo
-   fmt`, `clippy -D warnings`, core/integration/write/CLI tests, minimal-features build,
-   and smoke — emitting a machine-checkable summary block. Enforced by the `TaskCompleted`
-   hook (exit 2 blocks completion). **Paste the summary block verbatim; ad-hoc `cargo`
-   runs do not count as "the gate passed."** **[live]**
+4. **Gate.** `scripts/agent-gate.sh` — `cargo fmt`, `clippy -D warnings`,
+   core/integration/write/CLI tests, minimal-features build, and smoke — emits a
+   machine-checkable summary block; the **full gate of record runs once per issue inside
+   the closer** (`#719`/`#2084`), immediately pre-merge, and is the only run that counts.
+   The `TaskCompleted` hook is **advisory only** (`#2671`): it runs `scripts/agent-gate.sh
+   --lite` under a 480s budget inside the 600s hook timeout, **fails OPEN** on overrun
+   (process-group kill), yields to a running full gate, and is explicitly **NOT** the gate
+   of record — it never blocks task completion. **Paste the summary block verbatim; ad-hoc
+   `cargo` runs do not count as "the gate passed."** **[live]**
 5. **Review.** roborev (a second model family) reviews each commit/branch; clear its
    findings (`/roborev-fix`) before handing an issue off. **[live]**
 6. **Audit.** The `spec-auditor` confirms the implementation meets the spec; the
