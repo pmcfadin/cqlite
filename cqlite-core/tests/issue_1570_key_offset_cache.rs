@@ -487,21 +487,34 @@ mod bti {
 
         let gc = cqlite_core::storage::cache::GlobalKeyOffsetCache::global();
 
+        // Start COLD: flush the shared process-global cache so no entry left resident
+        // by a prior test/read can make the precondition below pass vacuously (an
+        // already-resident candidate for the absent key would otherwise be invisible
+        // to a len-delta check). Restoring this flush also fixes an intent regression
+        // (issue #2674 roborev 1799): the clean-miss precondition must observe a
+        // genuinely cold lookup.
+        gc.invalidate_all();
+
         // First read of the absent key: definitive miss (zero rows) that must NOT
         // create a B4 entry (positive-only insert discipline).
         //
-        // CLEAN-MISS PRECONDITION (issue #2674 roborev): capture the global B4 cache
-        // occupancy across this first read and assert it does not grow. A clean trie
-        // MISS resolves to `None` and never calls `key_cache_insert`, so the cache
-        // size is unchanged. If this assertion ever fires, the fixture's chosen
-        // "absent" key is a BTI prefix-collision CANDIDATE: the trie descent returns a
-        // candidate `DataOffset` (re-verified downstream to absence), which IS
-        // positively cached — and a later re-read would then legitimately HIT B4. That
-        // is fixture drift (the derived absent key collides on a trie prefix), NOT a
-        // cache bug, and it would invalidate the "no B4 hit" assertion below; this
-        // precondition diagnoses it explicitly rather than letting it surface as a
-        // confusing hit-counter failure.
-        let cache_len_before_absent = gc.len();
+        // CLEAN-MISS PRECONDITION (issue #2674 roborev) — counter-based, so it is
+        // immune to LRU eviction-vacuity and to an already-resident candidate:
+        //   - `hit_count()` must NOT advance: a clean trie MISS is never served from
+        //     B4 (nothing was cached for the absent key).
+        //   - `miss_count()` MUST advance: the read really DID consult B4 and resolved
+        //     as a miss (liveness — proves the assertion is not vacuously green because
+        //     the path stopped consulting the cache).
+        //   - `len()` unchanged is kept only as a SECONDARY witness: a clean miss
+        //     resolves to `None` and never calls `key_cache_insert`.
+        // If `hit_count()` advances (or `len()` grows), the fixture's chosen "absent"
+        // key is a BTI prefix-collision CANDIDATE whose candidate offset IS positively
+        // cached and re-verified downstream to absence — fixture drift (the derived
+        // absent key collides on a trie prefix), NOT a cache bug; it would invalidate
+        // the "no B4 hit" re-read assertion, so it is diagnosed explicitly here.
+        let hits_before_absent = gc.hit_count();
+        let misses_before_absent = gc.miss_count();
+        let len_before_absent = gc.len();
         let r_absent = db
             .execute(&sql_absent)
             .await
@@ -511,12 +524,24 @@ mod bti {
             "B4/BTI absent: an absent key must return zero rows (authoritative absence)"
         );
         assert_eq!(
+            gc.hit_count(),
+            hits_before_absent,
+            "B4/BTI absent precondition: a clean trie-MISS absent key must not be served a B4 \
+             HIT. It was — the 'absent' key is a BTI prefix-collision CANDIDATE (its candidate \
+             offset is cached): fixture drift, not a cache bug; choose an absent key with no \
+             trie-prefix collision"
+        );
+        assert!(
+            gc.miss_count() > misses_before_absent,
+            "B4/BTI absent precondition liveness: the first absent read must actually CONSULT \
+             the B4 cache and resolve as a MISS (miss_count must advance); it did not, so the \
+             read path is not exercising the cache and the no-hit assertion would be vacuous"
+        );
+        assert_eq!(
             gc.len(),
-            cache_len_before_absent,
-            "B4/BTI absent precondition: a clean trie-MISS absent key must not insert a B4 \
-             entry (positive-only insert discipline). If this fires, the fixture's 'absent' key \
-             is a BTI prefix-collision CANDIDATE whose candidate offset IS cached — fixture \
-             drift, not a cache bug; choose an absent key with no trie-prefix collision"
+            len_before_absent,
+            "B4/BTI absent precondition (secondary witness): a clean trie-MISS absent key must \
+             not insert a B4 entry (positive-only insert discipline)"
         );
 
         // Read present key A: exercises a real B4 populate for a DIFFERENT key, so a
@@ -549,6 +574,7 @@ mod bti {
         // generation's reader (each a MISS, per the clean-miss precondition). A
         // non-zero delta therefore unambiguously means the absent key was served a hit.
         let hits_before = gc.hit_count();
+        let misses_before = gc.miss_count();
         let len_before_reread = gc.len();
         let r_absent2 = db
             .execute(&sql_absent)
@@ -567,6 +593,17 @@ mod bti {
              the re-read registered {} B4 cache hit(s), indicating the absent key was cached \
              as a false-positive hit",
             hits_after - hits_before
+        );
+        // LIVENESS CONTROL (issue #2674 roborev 1799): the re-read must actually
+        // CONSULT the B4 cache and resolve as a MISS — `miss_count` must advance. This
+        // makes `hits_after == hits_before` a real differential: without it the no-hit
+        // assertion would pass vacuously if the read path stopped consulting the cache
+        // altogether (zero hits AND zero misses).
+        assert!(
+            gc.miss_count() > misses_before,
+            "B4/BTI absent: the repeated absent read must CONSULT the B4 cache and resolve as a \
+             MISS (miss_count must advance); it did not, so the no-hit assertion above is \
+             vacuous — the read path is not exercising the cache"
         );
         // Belt-and-braces (issue #2674 roborev): the re-read also must not GROW the
         // cache — a clean trie miss inserts nothing, so a candidate for the absent key
