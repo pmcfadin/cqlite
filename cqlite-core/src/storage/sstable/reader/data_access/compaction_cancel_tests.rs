@@ -789,6 +789,13 @@ async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
     let cancel = ScanCancel::new();
     let result = reader.iterate_all_partitions_via_full_index(&cancel).await;
     let probes = work.index_probes();
+    // POSITIVE CONTROL (issue #2714 roborev 1826): read a counter the SAME scope
+    // provably bumps INLINE so a dead / mis-scoped measurement fails loudly instead
+    // of passing `probes == 0` vacuously. The materialising walk performs one real
+    // Data.db random read per partition, each recording a `record_seek` inline on
+    // this current-thread runtime, so `seeks > 0` here proves the scope is live and
+    // capturing this scan's work (mirrors the self-validating sibling).
+    let seeks = work.seeks();
 
     // The scan must resolve fully through the index branch (not fall through to
     // sequential_scan), else the probe count would be vacuously 0 for the wrong
@@ -818,6 +825,16 @@ async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
         partition_count > 1,
         "fixture must expose several Index.db partitions for the O(N)-vs-constant \
          reprobe distinction to be meaningful (got {partition_count})"
+    );
+
+    // Positive control (issue #2714 roborev 1826): the scan bumped at least one
+    // inline seek in this scope, so a `probes == 0` below is a REAL zero, not a dead
+    // scope reading nothing.
+    assert!(
+        seeks > 0,
+        "positive control: the materialising scan must record inline read seeks in the \
+         same ReadWorkScope ({partition_count} partitions, each a Data.db read); seeks == 0 \
+         means the scope is dead / mis-scoped and the probes assertion is vacuous"
     );
 
     // The fix: each partition's offset comes from the already-loaded entry, so the

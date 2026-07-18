@@ -628,7 +628,9 @@ async fn write_multi_window_fixture(
 /// concurrent read-driving test in the `--lib` binary. `#[serial(work_counters)]`
 /// only serialises OTHER tagged tests, so an untagged crate-wide reader between the
 /// reset and the read still inflates `index_probes()` above `0`. Measure through a
-/// thread-local [`ReadWorkScope`]: this uncompressed non-stitching walk records both
+/// thread-local
+/// [`ReadWorkScope`](crate::storage::sstable::read_work_counters::read_work_scope::ReadWorkScope):
+/// this uncompressed non-stitching walk records both
 /// its per-partition (non-)probe and its window-refill seeks INLINE on this
 /// current-thread `#[tokio::test]`, so the scope captures exactly this scan's
 /// increments — no global `reset()`, no serial tag, no cross-thread contamination.
@@ -685,11 +687,10 @@ async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
         scan_index_probes, 0,
         "the windowed walk must perform ZERO Index.db probes regardless of fixture size"
     );
-    let seeks = scan_seeks;
     assert!(
-        seeks >= 2,
+        scan_seeks >= 2,
         "a >4 MiB Data.db (small partitions ≈4.9 MiB + a wide partition ≈5 MB) \
-         must force at least 2 window refills (got {seeks}) — proves the \
+         must force at least 2 window refills (got {scan_seeks}) — proves the \
          multi-window-refill path actually ran, not just the single-window case \
          every prior (tiny) fixture exercised"
     );

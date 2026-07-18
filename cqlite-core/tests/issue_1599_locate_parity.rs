@@ -35,6 +35,9 @@ use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use serial_test::serial;
 
+#[path = "common/key_cache_flush.rs"]
+mod key_cache_flush;
+
 fn datasets_root() -> Option<PathBuf> {
     std::env::var("CQLITE_DATASETS_ROOT")
         .ok()
@@ -339,7 +342,7 @@ async fn big_locate_b4_repeat_zero_reprobe() {
     // lock-acquisition order is nondeterministic under parallelism, biased toward
     // failure under gate CPU contention). Flush the global cache so the first locate
     // is genuinely COLD and the probe-vs-cache differential below is deterministic.
-    cqlite_core::storage::cache::GlobalKeyOffsetCache::global().invalidate_all();
+    key_cache_flush::flush_global_key_cache();
 
     // First locate warms the B4 cache with a real probe.
     rwc::reset();
@@ -412,7 +415,7 @@ async fn bti_narrow_locate_parity() {
     // reader over the shared fixture shares the warm global cache post-#2059). Flush so
     // the "descends the trie exactly once" assertion is robust regardless of order and
     // future sibling additions.
-    cqlite_core::storage::cache::GlobalKeyOffsetCache::global().invalidate_all();
+    key_cache_flush::flush_global_key_cache();
 
     // Counters FIRST, before the parity loop warms the B4 cache for these keys.
     // A single present-key locate() descends the trie exactly once...
