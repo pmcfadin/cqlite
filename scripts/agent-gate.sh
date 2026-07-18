@@ -472,12 +472,80 @@ if [ "$AGENT_GATE_JOBS" -gt 1 ]; then
   fi
 fi
 
+# ---- sccache cache-health signal (issue #2641) ------------------------------
+# Characterization (issue #2641) of the single reported "sccache served corrupted
+# objects under load (loadavg ~150)" incident found NO evidence of a load→corruption
+# mechanism: across 31k requests on a sustained-high-load gate machine, sccache's
+# OWN authoritative error counters (read/write/errors/timeouts) were all ZERO, the
+# eviction-capped cache held zero torn/zero-byte objects, and the disk had ample
+# free space (not a disk-full artifact). Blindly auto-disabling caching under load
+# is therefore NOT justified — it would forfeit the measured 25.6% build speedup
+# and INCREASE build pressure on the loaded machines that can least afford it, to
+# defend an unreproduced failure mode.
+#
+# What the incident DID expose is that sccache's error counters — the one signal
+# that WOULD catch real corruption — were invisible in the gate SUMMARY. So the
+# evidence-based mitigation is monitoring, not auto-disable: probe those counters
+# and surface a cache-health token (na|ok|warn) on the accelerators: line, with a
+# LOUD WARN when any counter is non-zero, WITHOUT disabling caching or failing the
+# gate. If a future *reproduced* incident correlates errors with load, the per-gate
+# counters are now recorded to drive that call on evidence.
+#
+# States: na (sccache not in use → nothing to probe), ok (all counters 0), warn
+# (any error/timeout counter > 0). Memoized and probed ONLY at SUMMARY emission
+# (accelerators_line); the latency-sensitive classify hooks exit before reaching it.
+
+# _sccache_error_sum: sum sccache's authoritative failure counters from
+# `sccache --show-stats`. Robust text parse (no jq/python dependency). 0 if sccache
+# is unavailable or stats can't be read (absence is not a health failure).
+_sccache_error_sum() {
+  command -v sccache >/dev/null 2>&1 || { printf 0; return; }
+  sccache --show-stats 2>/dev/null | awk '
+    /^Cache read errors/  { s += $NF }
+    /^Cache write errors/ { s += $NF }
+    /^Cache errors/       { s += $NF }
+    /^Cache timeouts/     { s += $NF }
+    END { print s + 0 }' 2>/dev/null || printf 0
+}
+
+# _sccache_health: resolve the cache-health state (na|ok|warn), memoized, emitting
+# the LOUD WARN exactly once when warn. Test hooks (self-test, issue #2641):
+# AGENT_GATE_TEST_SCCACHE_STATE overrides the detected ACCEL_SCCACHE state and
+# AGENT_GATE_TEST_SCCACHE_ERRORS forces the error sum — so the na/ok/warn decision
+# is asserted deterministically without sccache installed or PATH surgery.
+_SCCACHE_HEALTH=""
+_sccache_health() {
+  [ -n "$_SCCACHE_HEALTH" ] && { printf '%s' "$_SCCACHE_HEALTH"; return; }
+  local state="${AGENT_GATE_TEST_SCCACHE_STATE:-${ACCEL_SCCACHE:-absent}}"
+  if [ "$state" != on ]; then
+    _SCCACHE_HEALTH=na
+    printf '%s' "$_SCCACHE_HEALTH"
+    return
+  fi
+  local errsum
+  if [ -n "${AGENT_GATE_TEST_SCCACHE_ERRORS:-}" ]; then
+    errsum="$AGENT_GATE_TEST_SCCACHE_ERRORS"
+  else
+    errsum=$(_sccache_error_sum)
+  fi
+  case "$errsum" in *[!0-9]*|'') errsum=0 ;; esac
+  if [ "$errsum" -gt 0 ]; then
+    _SCCACHE_HEALTH=warn
+    echo "agent-gate: WARN: sccache reports ${errsum} cache read/write/error/timeout event(s) — possible corrupted or torn cache object(s); inspect 'sccache --show-stats' (caching left ENABLED — see the #2641 characterization; auto-disable is NOT evidence-supported)" >&2
+  else
+    _SCCACHE_HEALTH=ok
+  fi
+  printf '%s' "$_SCCACHE_HEALTH"
+}
+
 # accelerators_line: the machine-checkable one-liner stamped into every SUMMARY
 # block (full, lite, and the emission selftest). Values: on|absent|off|serial.
-# See the ACCEL_* detection above (#1848).
+# See the ACCEL_* detection above (#1848). The trailing sccache-health token
+# (na|ok|warn, issue #2641) surfaces sccache's own corruption counters.
 accelerators_line() {
-  printf 'accelerators: sccache=%s nextest=%s lanes=%s' \
-    "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}"
+  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s' \
+    "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}" \
+    "$(_sccache_health)"
 }
 
 # ---- Per-gate core budget (issue #2640) -------------------------------------
