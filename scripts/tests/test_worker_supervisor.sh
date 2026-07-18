@@ -167,6 +167,71 @@ EOF
   chmod +x "$path"
 }
 
+# issue #2666 CLEAN PARK: first call writes a `blocked` marker with a park
+# reason (seam1-approval | needs-decision) and an optional one-line question;
+# every call after finalizes. Used to prove a park is judged parked-on-owner,
+# fires a high page, never trips the breaker, and the loop advances.
+write_park_then_finalize_stub() {
+  local path="$1" call_ctr="$2" reason="$3" question="${4:-}"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+calls=0
+[[ -f "$call_ctr" ]] && calls=\$(cat "$call_ctr")
+calls=\$((calls + 1))
+echo "\$calls" >"$call_ctr"
+if [[ \$calls -eq 1 ]]; then
+  cat >"\$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":77,"pr":null,"duration_s":1,"reason":"$reason","question":"$question"}
+JSON
+else
+  cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":78,"pr":"https://example.invalid/pull/78","duration_s":1}
+JSON
+fi
+EOF
+  chmod +x "$path"
+}
+
+# issue #2666: writes a marker with an UNKNOWN outcome value — must be judged
+# abnormal (counts toward the breaker), never silently trusted.
+write_unknown_outcome_stub() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"$MARKER_FILE" <<JSON
+{"outcome":"weird-outcome","issue":9,"pr":null,"duration_s":1}
+JSON
+EOF
+  chmod +x "$path"
+}
+
+# issue #2666 stuck-on-question: first call prints an interactive-prompt line
+# then sleeps past MAX_ITER_SECS (so the watchdog detects + pages and it gets
+# timeout-killed WITHOUT a marker); every call after finalizes so the test
+# terminates at MAX_ISSUES.
+write_stuck_then_finalize_stub() {
+  local path="$1" call_ctr="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+calls=0
+[[ -f "$call_ctr" ]] && calls=\$(cat "$call_ctr")
+calls=\$((calls + 1))
+echo "\$calls" >"$call_ctr"
+if [[ \$calls -eq 1 ]]; then
+  echo "AskUserQuestion: Do you want to proceed with option A?"
+  sleep 120
+else
+  cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":88,"pr":"https://example.invalid/pull/88","duration_s":1}
+JSON
+fi
+EOF
+  chmod +x "$path"
+}
+
 # ---------------------------------------------------------------------------
 # Common env baseline: every test starts here, then overrides what it needs.
 # Clear preflight (no holds), generous budgets, fast polling/backoff.
@@ -192,6 +257,7 @@ common_env() {
   export BACKOFF_NOWORK_SECS=1
   export HOLD_POLL_SECS=1
   export MAX_ITER_SECS=10
+  export STUCK_POLL_SECS=1
   unset LOAD_CONTROL_FILE 2>/dev/null || true
   unset WORKER_CMD 2>/dev/null || true
 }
@@ -492,6 +558,152 @@ test_journal_escapes_nasty_reason() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 11 (#2666): blocked/seam1-approval is a CLEAN PARK → verdict
+# parked-on-owner, ONE high-priority page, never abnormal, never trips the
+# breaker (BREAKER_N=1 here would stop before finalizing if it did), and the
+# loop advances to the next issue.
+# ---------------------------------------------------------------------------
+test_park_seam1_parked_on_owner() {
+  local d call_ctr jf rc pcount fcount page
+  d="$(new_case_dir)"
+  call_ctr="$d/calls"
+  common_env "$d"
+  write_park_then_finalize_stub "$d/bin/worker.sh" "$call_ctr" "seam1-approval" ""
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  pcount=$(jline_count "$jf" '"outcome":"parked-on-owner"')
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  page=$(grep -c '^error|worker-supervisor: parked issue 77' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -eq 0 && "$pcount" -eq 1 && "$fcount" -eq 1 && "$page" -ge 1 ]] &&
+     ! grep -q '"outcome":"abnormal"' "$jf" && ! grep -q '"reason":"breaker"' "$jf"; then
+    pass "park(seam1-approval): parked-on-owner + high page, no breaker, loop advances"
+  else
+    fail "park(seam1): rc=$rc parked=$pcount finalized=$fcount page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 12 (#2666): blocked/needs-decision parks the same way AND the page title
+# carries the marker's one-line "question" field (issue # + first line).
+# ---------------------------------------------------------------------------
+test_park_needs_decision_question_in_title() {
+  local d call_ctr jf rc pcount page
+  d="$(new_case_dir)"
+  call_ctr="$d/calls"
+  common_env "$d"
+  write_park_then_finalize_stub "$d/bin/worker.sh" "$call_ctr" "needs-decision" "Which compaction strategy for wide rows?"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  pcount=$(jline_count "$jf" '"outcome":"parked-on-owner"')
+  page=$(grep -c 'parked issue 77 — Which compaction strategy for wide rows?' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -eq 0 && "$pcount" -eq 1 && "$page" -ge 1 ]] && grep -q '"reason":"needs-decision"' "$jf"; then
+    pass "park(needs-decision): parked-on-owner + question text in the page title"
+  else
+    fail "park(needs-decision): rc=$rc parked=$pcount page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 13 (#2666): a marker with an UNKNOWN outcome value is still judged
+# abnormal (counts toward the breaker) — parks must not have widened the set of
+# "trusted" outcomes.
+# ---------------------------------------------------------------------------
+test_unknown_outcome_is_abnormal() {
+  local d jf rc acount pcount
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_unknown_outcome_stub "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  pcount=$(jline_count "$jf" '"outcome":"parked-on-owner"')
+  if [[ "$rc" -ne 0 && "$acount" -eq 1 && "$pcount" -eq 0 ]] && grep -q '"reason":"breaker"' "$jf"; then
+    pass "unknown outcome: judged abnormal, trips breaker (not parked/trusted)"
+  else
+    fail "unknown outcome: rc=$rc abnormal=$acount parked=$pcount (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 14 (#2666): a worker WEDGED on an interactive prompt is detected
+# mid-iteration → immediate high page + verdict stuck-on-question when it exits
+# without a marker; NEVER abnormal, never trips the breaker (BREAKER_N=1 here).
+# The second iteration finalizes so the run terminates at MAX_ISSUES.
+# ---------------------------------------------------------------------------
+test_stuck_on_question_detected() {
+  local d call_ctr jf rc scount fcount page
+  d="$(new_case_dir)"
+  call_ctr="$d/calls"
+  common_env "$d"
+  write_stuck_then_finalize_stub "$d/bin/worker.sh" "$call_ctr"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=1
+  export MAX_ITER_SECS=3
+  export STUCK_POLL_SECS=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  scount=$(jline_count "$jf" '"outcome":"stuck-on-question"')
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  page=$(grep -c '^error|worker-supervisor: stuck-on-question' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -eq 0 && "$scount" -eq 1 && "$fcount" -eq 1 && "$page" -ge 1 ]] &&
+     ! grep -q '"outcome":"abnormal"' "$jf" && ! grep -q '"reason":"breaker"' "$jf" &&
+     grep -q 'AskUserQuestion' "$NOTIFY_LOG"; then
+    pass "stuck-on-question: detected mid-iteration, high page, no breaker, loop advances"
+  else
+    fail "stuck-on-question: rc=$rc stuck=$scount finalized=$fcount page=$page (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 15 (#2666): unit-test the prompt-signature grep directly by SOURCING the
+# supervisor (the source-guard keeps main() from running) and calling
+# detect_prompt_signature/captured_question against fixture logs — fires on a
+# menu block, stays silent on a clean log, and captures the question text.
+# ---------------------------------------------------------------------------
+test_prompt_signature_grep() {
+  local d fixture clean out
+  d="$(new_case_dir)"
+  fixture="$d/iter.log"
+  clean="$d/clean.log"
+  printf 'building project...\nrunning tests\n\xe2\x9d\xaf 1. Yes\n  2. No\n' >"$fixture"
+  printf 'building project...\nall tests green\nfinalized issue 5\n' >"$clean"
+
+  out="$(SUPERVISOR="$SUPERVISOR" FIX="$fixture" CLN="$clean" bash -c '
+    # shellcheck disable=SC1090
+    source "$SUPERVISOR"
+    set +e
+    if detect_prompt_signature "$FIX"; then echo MATCH; else echo NOMATCH; fi
+    if detect_prompt_signature "$CLN"; then echo CLEAN-MATCH; else echo CLEAN-NOMATCH; fi
+    captured_question "$FIX"
+  ' 2>/dev/null)"
+
+  if echo "$out" | grep -q '^MATCH$' && echo "$out" | grep -q '^CLEAN-NOMATCH$' &&
+     echo "$out" | grep -q '1. Yes'; then
+    pass "prompt-signature grep: fires on menu block, silent on clean log, captures text"
+  else
+    fail "prompt-signature grep: out='$out'"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -520,5 +732,10 @@ test_stale_marker_removed
 test_repeated_blocked_head_of_queue_stops
 test_finalized_missing_pr_is_abnormal
 test_journal_escapes_nasty_reason
+test_park_seam1_parked_on_owner
+test_park_needs_decision_question_in_title
+test_unknown_outcome_is_abnormal
+test_stuck_on_question_detected
+test_prompt_signature_grep
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
