@@ -195,6 +195,71 @@ Verify groups resolve (no TOML parse errors, membership as intended):
 cargo nextest show-config test-groups --package cqlite-core --features cli-helpers
 # prints: group: docker (max threads = 1) … group: timing (max threads = 1) … with members
 ```
+## Guard-cluster compile/link/exec profile (issue #2647)
+
+**Question (epic #2636):** the guard-cluster components — `tombstones-scan`,
+`scan-offload-guard`, `work-counters-guard`, `byte-budget-guard`, `write-tests` —
+each invoke `cargo test -p cqlite-core` with a *different* `--features` set. Each
+distinct feature set is a distinct `cfg` fingerprint, so `cqlite-core`'s own crate
+(lib + the component's test harnesses) recompiles per set even with a warm shared
+target (sccache caches *dependency* crates across sets, not the first-party crate
+whose `cfg` changed). The #2636 hypothesis was that collapsing them onto one
+superset `--features` invocation would save ~4–6 min of redundant compile.
+
+**Measured (2026-07-18, 16-core arm64, warm sccache 66% hit rate, shared target
+dir, `CARGO_BUILD_JOBS=4` to mimic a serial main-lane compile under load).** The
+distinct feature sets, additive over the `cqlite-core` defaults
+(`all-compression,state_machine,write-support`):
+
+| component | `--features` delta vs default | first-`cargo`-in-set recompile |
+|-----------|-------------------------------|-------------------------------|
+| (warm baseline: deps + first `cqlite-core` cfg) | `write-support,cli-helpers,state_machine` | 476 s (deps-dominated, paid once) |
+| `tombstones-scan` | `+cli-helpers,+tombstones` | **24 s** |
+| `scan-offload-guard` | `cli-helpers,scan-offload-probe` (drops write-support) | **36 s** |
+| `work-counters-guard` | `+cli-helpers,+state_machine,+work-counters` | **30 s** |
+| `byte-budget-guard` | `+cli-helpers,+state_machine` (== default cfg) | **1 s** (cache hit — no recompile) |
+| `write-tests` | default only (drops `cli-helpers`) | **56 s** |
+
+Redundant per-`cfg` recompile in the cluster ≈ **24 + 36 + 30 + 56 = 146 s** (the
+byte-budget set is identical to the default cfg and pays nothing). A single
+**unified superset** (`write-support,cli-helpers,state_machine,tombstones,scan-offload-probe,work-counters`)
+built once measured **275 s from a cold target** and then compiled ALL the cluster's
+`--test`/`--lib` targets under that one cfg with **0 s** incremental thrash. So the
+realizable saving is ~one first-party recompile pass — **≈ 1.5–1.6 min**, NOT the
+4–6 min hypothesized. gate-ops' 67% execution floor for `core-tests` bounds the
+other side: the guard cluster's *execution* (short, targeted `--test` runs) is a
+small fraction of gate wall-clock; compile is the dominant cost only for these
+short-execution components, and 146 s of it is what's on the table.
+
+**Decision (issue #2647): NOT UNIFIED — measurement is the deliverable.** Two
+reasons the ~1.5 min saving does not justify collapsing the cluster:
+
+1. **Coverage would not be identical (`--features` isolation risk).**
+   `scan-offload-probe`, `work-counters`, and `tombstones` do NOT gate test
+   modules only — they gate **production code paths and `pub`/`pub(crate)`
+   visibility** (`scan_stream_windowed*`, `scan_admission`, `read_work_counters`,
+   `work_counters`, the tombstone/GC branches in `select_executor`/`generation_merge`).
+   The gate deliberately exercises BOTH postures: probes-OFF (`core-tests`,
+   `write-tests --lib` on the default cfg with `cli-helpers` and probes absent) and
+   probes-ON (the guards). A superset cfg changes the compiled-code-under-test for
+   the `--lib` runs (extra `record_*` call sites, extra pub surface, the
+   `scan-offload-probe` deadlock module), so the probes-OFF regression net —
+   "a default/release build links no counter/probe statics and pays nothing"
+   (Cargo.toml `work-counters`/`scan-offload-probe` docs) — would no longer be
+   proven by the same run. Acceptance requires *identical* `--test` coverage; a
+   superset silently trades a coverage posture for ~90 s.
+2. **The parallel-lane design already amortizes most of the compile.** #1737's
+   capped 2-lane pool runs these components concurrently against a shared target;
+   the 146 s is wall-clock-overlapped with `core-tests`/`integration-tests`/binding
+   lanes, so the *serial* redundant-compile figure over-states the on-the-clock
+   cost. The net PR-visible saving is well under a minute, against a real coverage
+   regression and a more brittle single invocation.
+
+`dhat-heap` (`memory-budget`) and `arrow` (`arrow-parity-guard`) were out of scope
+for unification regardless (global allocator needs `--test-threads=1`; `arrow`
+pulls the arrow crate) and stay isolated. Re-open only if a *measured* redundant
+compile > ~4 min appears (e.g. after the cluster grows), and only with a scheme
+that preserves the dual OFF/ON coverage posture.
 
 ## Machine-wide full-gate concurrency cap (issue #1825)
 
