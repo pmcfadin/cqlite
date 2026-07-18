@@ -13,6 +13,17 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Shared release-train preflight (issue #2652): assert the tag agrees with
+  # EVERY release manifest before any lane publishes. publish-crate needs this,
+  # so a manifest disagreement fails the whole train up front rather than after
+  # a partial, irreversible publish to an immutable registry.
+  preflight:
+    name: Release preflight
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/release-preflight.yml
+    with:
+      version: ${{ github.ref_name }}
+
   build-cli:
     name: Build CLI (${{ matrix.target }})
     strategy:
@@ -228,7 +239,7 @@ jobs:
   # auth action mints a short-lived token from the id-token JWT (#786).
   publish-crate:
     name: Publish to crates.io
-    needs: [build-cli]
+    needs: [preflight, build-cli]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:

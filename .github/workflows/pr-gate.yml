@@ -82,6 +82,13 @@ jobs:
           "dataset pin agreement"
           -- bash scripts/ci/check-dataset-pin.sh
 
+      - name: Release manifest version agreement (#2652)
+        if: steps.classify.outputs.docs_only != 'true'
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "release version agreement"
+          -- bash scripts/bump-version.sh check
+
       - name: Setup Rust
         if: steps.classify.outputs.docs_only != 'true'
         uses: ./.github/actions/setup-rust-ci

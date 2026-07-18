@@ -25,6 +25,19 @@ env:
   APP_NAME: cqlite-node
 
 jobs:
+  # Shared release-train preflight (issue #2652): assert the tag agrees with
+  # EVERY release manifest before publishing to the immutable npm registry.
+  # Only runs on a v* tag push — a workflow_dispatch republish (issue #2026)
+  # resolves its version from the input against an existing tag and has no
+  # ref-derived tag to preflight, so it skips this gate (publish-npm's own
+  # version-consistency + already-tagged checks still apply).
+  preflight:
+    name: Release preflight
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/release-preflight.yml
+    with:
+      version: ${{ github.ref_name }}
+
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -129,7 +142,11 @@ jobs:
   publish-npm:
     name: Publish to npm
     runs-on: ubuntu-latest
-    needs: build
+    needs: [preflight, build]
+    # preflight is `if: push`-gated, so on a workflow_dispatch republish it is
+    # SKIPPED. Proceed when it succeeded (tag push) or was skipped (dispatch),
+    # but never when it failed — a real manifest disagreement blocks the publish.
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped') }}
     timeout-minutes: 15
 
     permissions:
@@ -265,10 +282,32 @@ jobs:
           echo "::endgroup::"
           echo "Dry-run publish verification passed"
 
+      # Resumability (issue #2652): npm versions are immutable, so a re-run of a
+      # partially-failed train would hard-fail with EPUBLISHCONFLICT when this
+      # exact @cqlite/node@<version> was already published on a prior run. Query
+      # the registry first and skip the publish if the version already exists —
+      # so the train re-runs to completion instead of dead-ending here. VERSION
+      # is validated semver from the ver step; it is passed via env, never
+      # inlined into the shell.
+      - name: Check if version already on npm
+        id: published
+        working-directory: bindings/node
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          if npm view "@cqlite/node@${VERSION}" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "@cqlite/node@${VERSION} is already on npm — will skip publish (resumable re-run)."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+            echo "@cqlite/node@${VERSION} is not yet on npm — will publish."
+          fi
+
       # Trusted Publishing: OIDC authentication, no token needed
       # Provenance attestations are automatic with trusted publishing
       - name: Publish to npm (stable)
-        if: steps.ver.outputs.prerelease == 'false'
+        if: steps.ver.outputs.prerelease == 'false' && steps.published.outputs.already == 'false'
         working-directory: bindings/node
         env:
           NODE_AUTH_TOKEN: ""
@@ -276,7 +315,7 @@ jobs:
         run: npm publish --access public --provenance
 
       - name: Publish to npm (pre-release)
-        if: steps.ver.outputs.prerelease == 'true'
+        if: steps.ver.outputs.prerelease == 'true' && steps.published.outputs.already == 'false'
         working-directory: bindings/node
         env:
           NODE_AUTH_TOKEN: ""

@@ -995,6 +995,15 @@ jobs:
           "flow-finalize guardrail tests"
           -- /bin/bash scripts/flow/tests/finalize-cleanup.test.sh
 
+      # Release-train version tooling (issue #2652). Runs on macOS too so the
+      # system bash 3.2 (the release preflight's real target) is validated, not
+      # just asserted.
+      - name: Run bump-version self-test (${{ matrix.os }} /bin/bash)
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "bump-version self-test"
+          -- /bin/bash scripts/tests/test_bump_version.sh
+
       - name: CI runtime timing summary
         if: always()
         run: bash scripts/ci/ci-timing-summary.sh summary "CI flow tooling timing"
