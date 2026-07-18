@@ -165,16 +165,24 @@ async fn big_point_read_get_cached_data_is_wired() {
         "cold read must perform >=1 underlying read"
     );
 
-    // Warm read: identical offset → cache hit, ZERO underlying reads, ZERO
-    // decompress (uncompressed table), identical result.
-    SSTableReader::reset_chunk_read_calls();
-    SSTableReader::reset_decompress_calls();
+    // Warm read: identical offset → served from the per-reader chunk cache.
+    //
+    // Wiring evidence is the PER-READER `chunk_cache()` hit/miss delta (h2-h1 == 1,
+    // m2-m1 == 0): it is scoped to THIS reader and immune to any concurrent test.
+    // A DecompressedChunkCache hit returns the cached bytes WITHOUT an underlying
+    // Data.db read or decompress by construction, so "zero underlying reads / zero
+    // decompress" is IMPLIED by the hit. The former exact-zero assertions on the
+    // PROCESS-GLOBAL `chunk_read_call_count()` / `decompress_call_count()` were a
+    // #2470/#2714-class cross-thread flake — a concurrent read-driving test in the
+    // same `--lib` binary bumps those globals between the reset and the read (bare
+    // `#[serial]` excludes only other tagged tests), inflating the observed count
+    // above 0 (observed on `warm_decompress`). Dropped in favour of the immune
+    // per-reader delta; the global `cold_reads >= 1` above is a LOWER bound and stays
+    // pollution-safe.
     let warm = reader
         .read_value_at_offset(header, size)
         .await
         .expect("warm offset read");
-    let warm_reads = SSTableReader::chunk_read_call_count();
-    let warm_decompress = SSTableReader::decompress_call_count();
     let (h2, m2) = (
         reader.chunk_cache().hit_count(),
         reader.chunk_cache().miss_count(),
@@ -182,14 +190,6 @@ async fn big_point_read_get_cached_data_is_wired() {
 
     assert_eq!(m2 - m1, 0, "warm read must NOT miss the cache");
     assert_eq!(h2 - h1, 1, "warm read must be a cache HIT");
-    assert_eq!(
-        warm_reads, 0,
-        "warm read must perform ZERO underlying reads"
-    );
-    assert_eq!(
-        warm_decompress, 0,
-        "warm read must perform ZERO decompressions"
-    );
     assert_eq!(
         format!("{cold:?}"),
         format!("{warm:?}"),
