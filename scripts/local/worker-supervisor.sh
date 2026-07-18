@@ -145,11 +145,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # ---------------------------------------------------------------------------
 MAX_ISSUES="${MAX_ISSUES:-4}"
 MAX_HOURS="${MAX_HOURS:-8}"
-# Derived here in the config block (roborev 1819 HIGH) so the wall-clock budget is
-# ALWAYS defined before any preflight_wait call path that reads it — a hold loop
-# comparing against an unset MAX_HOURS_SECS would abort spuriously. Defensive
-# `:-` keeps an explicit env override intact.
-MAX_HOURS_SECS="${MAX_HOURS_SECS:-$((MAX_HOURS * 3600))}"
+# MAX_HOURS_SECS is DERIVED from MAX_HOURS in validate_numeric_knobs (the first thing
+# main() does, before any preflight_wait path reads it — roborev 1819) rather than here,
+# so the `$((MAX_HOURS * 3600))` integer arithmetic runs only AFTER MAX_HOURS is confirmed
+# a valid integer (roborev 1842): a malformed MAX_HOURS pages a FATAL instead of silently
+# deriving 0 (which would exit budget-wallclock rc=0) or crashing under `set -e`. An
+# explicit MAX_HOURS_SECS override is honored (and integer-validated) there too.
+MAX_HOURS_SECS="${MAX_HOURS_SECS:-}"
 DISK_FLOOR_GB="${DISK_FLOOR_GB:-40}"
 BREAKER_N="${BREAKER_N:-3}"
 BACKOFF_NOWORK_SECS="${BACKOFF_NOWORK_SECS:-900}"
@@ -738,6 +740,7 @@ CONSECUTIVE_UNVERIFIED=0
 # times AND has been pending at least PENDING_AUTOMERGE_MIN_SECS (a wall-clock floor so
 # fast no-progress iterations can't burn the budget before CI could finish).
 PENDING_PR_LIST=""
+STUCK_SKIP_PR=""
 LAST_BLOCKED_ISSUE=""
 LAST_PARKED_ISSUE=""
 START_TS=$(date +%s)
@@ -756,8 +759,11 @@ report_pending_at_exit() {
   local pr issue count first_ts age n=0 summary=""
   while IFS=$'\t' read -r pr issue count first_ts; do
     [[ -z "$pr" ]] && continue
+    # The currently-tripping stuck PR already got its own HIGH "auto-merge stuck" page —
+    # don't ALSO announce it here as a generic still-pending PR (roborev 1842).
+    [[ -n "$STUCK_SKIP_PR" && "$pr" == "$STUCK_SKIP_PR" ]] && continue
     age=$(( $(date +%s) - first_ts ))
-    journal_line "$ITER" "pending-at-exit" "$issue" "$pr" 0 0 "pending_age_s=$age" "pending-automerge"
+    journal_line "$ITER" "pending-at-exit" "$issue" "$pr" 0 0 "pending_age_s=$age"
     n=$((n + 1))
     summary="${summary}${pr} (issue $issue, ${age}s); "
   done <<< "$PENDING_PR_LIST"
@@ -819,6 +825,7 @@ forget_pending_pr() {
 credit_merged_pending_prs() {
   [[ -z "$PENDING_PR_LIST" ]] && return 0
   local new_list="" pr issue count first_ts verify age mstate
+  local stuck_pr="" stuck_issue="" stuck_count="" stuck_age=""
   while IFS=$'\t' read -r pr issue count first_ts; do
     [[ -z "$pr" ]] && continue
     verify="$(verify_finalized_pr "$pr")"
@@ -833,17 +840,16 @@ credit_merged_pending_prs() {
       pending-automerge)
         count=$((count + 1))
         age=$(( $(date +%s) - first_ts ))
+        new_list="${new_list}${pr}"$'\t'"${issue}"$'\t'"${count}"$'\t'"${first_ts}"$'\n'
         # Auto-merge-stuck needs BOTH enough observations AND enough wall-clock (roborev
         # 1840): the time floor stops a burst of fast no-progress iterations (parks with
         # no backoff) from burning the observation budget before CI could plausibly finish.
-        if [[ "$count" -ge "$PENDING_AUTOMERGE_MAX" ]] && [[ "$age" -ge "$PENDING_AUTOMERGE_MIN_SECS" ]]; then
-          notify "high" "worker-supervisor: auto-merge stuck" \
-            "PR $pr (issue $issue) has stayed OPEN pending auto-merge across $count observations over ${age}s — auto-merge is not landing; stopping so it isn't looped forever"
-          log "PR $pr observed still-pending $count times over ${age}s (>= PENDING_AUTOMERGE_MAX=$PENDING_AUTOMERGE_MAX, >= PENDING_AUTOMERGE_MIN_SECS=$PENDING_AUTOMERGE_MIN_SECS); stopping (automerge-stuck)"
-          journal_line "$ITER" "finalized-pending-automerge" "$issue" "$pr" 0 0 "pending_age_s=$age" "pending-automerge"
-          finalize_exit "automerge-stuck" 1
+        # DEFER the stop until AFTER the whole list is rebuilt (roborev 1842) so the exit
+        # report reads a fresh PENDING_PR_LIST (no already-resolved PRs) — record the first
+        # stuck PR and act below.
+        if [[ -z "$stuck_pr" ]] && [[ "$count" -ge "$PENDING_AUTOMERGE_MAX" ]] && [[ "$age" -ge "$PENDING_AUTOMERGE_MIN_SECS" ]]; then
+          stuck_pr="$pr"; stuck_issue="$issue"; stuck_count="$count"; stuck_age="$age"
         fi
-        new_list="${new_list}${pr}"$'\t'"${issue}"$'\t'"${count}"$'\t'"${first_ts}"$'\n'
         ;;
       mismatch:*)
         # A tracked armed PR that ended NOT-merged (CLOSED-unmerged, auto-merge dropped,
@@ -866,6 +872,17 @@ credit_merged_pending_prs() {
     esac
   done <<< "$PENDING_PR_LIST"
   PENDING_PR_LIST="$new_list"
+  # Now that PENDING_PR_LIST reflects this pass (resolved PRs removed), act on a stuck PR:
+  # its own HIGH page fires here, and report_pending_at_exit skips it (STUCK_SKIP_PR) so it
+  # isn't ALSO announced as a generic still-pending PR (roborev 1842).
+  if [[ -n "$stuck_pr" ]]; then
+    notify "high" "worker-supervisor: auto-merge stuck" \
+      "PR $stuck_pr (issue $stuck_issue) has stayed OPEN pending auto-merge across $stuck_count observations over ${stuck_age}s — auto-merge is not landing; stopping so it isn't looped forever"
+    log "PR $stuck_pr observed still-pending $stuck_count times over ${stuck_age}s (>= PENDING_AUTOMERGE_MAX=$PENDING_AUTOMERGE_MAX, >= PENDING_AUTOMERGE_MIN_SECS=$PENDING_AUTOMERGE_MIN_SECS); stopping (automerge-stuck)"
+    journal_line "$ITER" "finalized-pending-automerge" "$stuck_issue" "$stuck_pr" 0 0 "pending_age_s=$stuck_age" "pending-automerge"
+    STUCK_SKIP_PR="$stuck_pr"
+    finalize_exit "automerge-stuck" 1
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1151,25 +1168,38 @@ trip_breaker_or_continue() {
 # would otherwise evaluate to 0 and SILENTLY disable/misbehave a bound — the opposite of
 # fail-closed (roborev 1840). Validate each against `^-?[0-9]+$` at startup and STOP loudly
 # on a bad value rather than running with a silently-broken safety bound.
+_bad_knob() {
+  log "FATAL: numeric knob $1 has value '$2' — expected $3; refusing to start with a silently-broken bound"
+  notify "high" "worker-supervisor: bad config" "$1='$2' is not $3; supervisor refused to start (fix the env/plist)"
+  exit 2
+}
+
 validate_numeric_knobs() {
   local name val
-  # Only knobs consumed by INTEGER arithmetic / `-gt`/`-ge` comparisons are validated
-  # here. LOAD_MAX and DISK_FLOOR_GB are deliberately EXCLUDED — they are FLOAT-compared
-  # via is_gt/is_lt (awk), so a fractional value (e.g. DISK_FLOOR_GB=37.5) is valid and
-  # must not be rejected. MAX_HOURS is likewise excluded (only used in the derivation +
-  # log); the derived MAX_HOURS_SECS it feeds IS validated below.
-  for name in MAX_ISSUES MAX_HOURS_SECS BREAKER_N \
-              BACKOFF_NOWORK_SECS HOLD_POLL_SECS MAX_ITER_SECS STUCK_POLL_SECS \
-              STUCK_TAIL_LINES LEFTOVER_HOLD_MAX BUILD_HOLD_MAX UNVERIFIED_MAX \
-              MISMATCH_RETRIES MISMATCH_RETRY_WAIT_SECS MISMATCH_GRACE_CAP_SECS \
-              PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS; do
+  # FLOAT-tolerant knobs — compared via awk is_gt/is_lt (which coerce with `+0`), so a
+  # fractional value (e.g. DISK_FLOOR_GB=37.5) is valid; but a NON-numeric value would
+  # coerce to 0 and silently DISABLE the bound (fail-open), so still validate the shape.
+  for name in LOAD_MAX DISK_FLOOR_GB; do
     val="${!name}"
-    if [[ ! "$val" =~ ^-?[0-9]+$ ]]; then
-      log "FATAL: numeric knob $name has a non-integer value '$val' — refusing to start with a silently-broken bound"
-      notify "high" "worker-supervisor: bad config" "$name='$val' is not an integer; supervisor refused to start (fix the env/plist)"
-      exit 2
-    fi
+    [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] || _bad_knob "$name" "$val" "a number"
   done
+  # INTEGER knobs — consumed by bash arithmetic / `-gt`/`-ge`. MAX_HOURS is here because
+  # its `$((MAX_HOURS * 3600))` derivation is integer arithmetic (a bare-word MAX_HOURS
+  # would coerce to 0 → a silently-broken wall-clock budget, roborev 1842).
+  for name in MAX_HOURS MAX_ISSUES BREAKER_N BACKOFF_NOWORK_SECS HOLD_POLL_SECS \
+              MAX_ITER_SECS STUCK_POLL_SECS STUCK_TAIL_LINES LEFTOVER_HOLD_MAX \
+              BUILD_HOLD_MAX UNVERIFIED_MAX MISMATCH_RETRIES MISMATCH_RETRY_WAIT_SECS \
+              MISMATCH_GRACE_CAP_SECS PENDING_AUTOMERGE_MAX PENDING_AUTOMERGE_MIN_SECS; do
+    val="${!name}"
+    [[ "$val" =~ ^-?[0-9]+$ ]] || _bad_knob "$name" "$val" "an integer"
+  done
+  # Derive the wall-clock budget now that MAX_HOURS is a confirmed integer; honor an
+  # explicit MAX_HOURS_SECS override (also integer-validated).
+  if [[ -z "$MAX_HOURS_SECS" ]]; then
+    MAX_HOURS_SECS=$(( MAX_HOURS * 3600 ))
+  else
+    [[ "$MAX_HOURS_SECS" =~ ^-?[0-9]+$ ]] || _bad_knob MAX_HOURS_SECS "$MAX_HOURS_SECS" "an integer"
+  fi
 }
 
 main() {

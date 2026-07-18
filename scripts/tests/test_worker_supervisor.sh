@@ -2165,12 +2165,60 @@ EOF
   bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
   rc=$?
   elapsed=$(grep -o '"reason":"automerge-stuck","issues_done":[0-9]*,"elapsed_s":[0-9]*' "$jf" 2>/dev/null | grep -o 'elapsed_s":[0-9]*' | grep -o '[0-9]*' | tail -1)
+  local iters pcount
+  iters=$(cat "$counter" 2>/dev/null || echo 0)
+  pcount=$(jline_count "$jf" '"outcome":"finalized-pending-automerge"')
+  # Trip only after BOTH: the count term (the SAME PR observed >= PENDING_AUTOMERGE_MAX
+  # times — proven by iters and repeated pending lines) AND the time term (elapsed >= 2s).
+  # A `||`-instead-of-`&&` bug would trip on the 1st observation (~0.6s, elapsed<2 → caught);
+  # a count-ignored bug would trip with iters<2 (→ caught by the iters/pcount asserts).
   if [[ "$rc" -ne 0 ]] &&
      grep -q '"reason":"automerge-stuck"' "$jf" &&
-     [[ -n "$elapsed" && "$elapsed" -ge 2 ]]; then
-    pass "pending time-floor crossed: holds through first observations, trips automerge-stuck only after MIN_SECS (elapsed ${elapsed}s)"
+     [[ -n "$elapsed" && "$elapsed" -ge 2 && "$iters" -ge 2 && "$pcount" -ge 2 ]]; then
+    pass "pending time-floor crossed: held through $pcount observations (${iters} iters), trips automerge-stuck only after MIN_SECS (elapsed ${elapsed}s)"
   else
-    fail "pending-time-floor-crossed: rc=$rc elapsed=${elapsed:-?} (see $jf)"
+    fail "pending-time-floor-crossed: rc=$rc elapsed=${elapsed:-?} iters=$iters pcount=$pcount (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 52 (#2670 / roborev 1841/1842): numeric-knob validation is fail-CLOSED for a
+# malformed INTEGER knob (a `MAX_HOURS=abc` typo must page + exit 2, never silently
+# derive a 0 budget), but fail-OPEN-safe values are honored — a fractional DISK_FLOOR_GB
+# (float-compared) is ACCEPTED and the supervisor runs normally.
+# ---------------------------------------------------------------------------
+test_numeric_knob_validation() {
+  local d counter rc page
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  # (a) malformed integer knob → FATAL exit 2, no worker spawn, bad-config page.
+  export MAX_HOURS="abc"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  page=$(grep -c 'bad config' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -ne 2 || -f "$counter" || "$page" -lt 1 ]]; then
+    fail "knob-validation(bad-int): rc=$rc (want 2) spawned=$([[ -f "$counter" ]] && echo yes) page=$page"
+    return
+  fi
+  # (b) fractional DISK_FLOOR_GB is a valid float — the run proceeds and finalizes.
+  local d2 counter2
+  d2="$(new_case_dir)"
+  counter2="$d2/counter"
+  common_env "$d2"
+  write_finalize_stub "$d2/bin/worker.sh" "$counter2"
+  export WORKER_CMD="$d2/bin/worker.sh"
+  export MAX_ISSUES=1
+  export DISK_FLOOR_GB="37.5"
+  bash "$SUPERVISOR" >"$d2/stdout.log" 2>&1
+  rc=$?
+  if [[ "$rc" -eq 0 && -f "$counter2" ]] &&
+     grep -q '"reason":"budget-issues"' "$JOURNAL_FILE"; then
+    pass "knob validation: malformed MAX_HOURS fails closed (exit 2, paged); fractional DISK_FLOOR_GB accepted"
+  else
+    fail "knob-validation(float): rc=$rc spawned=$([[ -f "$counter2" ]] && echo yes || echo no) (see $d2)"
   fi
 }
 
@@ -2324,6 +2372,7 @@ test_pending_time_floor_blocks_fast_stuck
 test_pending_pr_closed_pages_high
 test_unverified_streak_survives_intervening_abnormal
 test_pending_time_floor_crossed_trips
+test_numeric_knob_validation
 test_build_hold_uses_loose_bound
 test_build_hold_clears_then_proceeds
 test_probe_list_derives_from_count_set
