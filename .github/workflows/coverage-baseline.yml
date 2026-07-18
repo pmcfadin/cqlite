@@ -28,8 +28,22 @@ jobs:
 
       # Honor the repo toolchain pin (rust-toolchain.toml = 1.88.0), issue #1990.
       # Omitting `toolchain:` makes setup-rust-toolchain read the pin file.
+      # `cache: false` so caching is done by the explicit Swatinem step below with a
+      # deliberate Cargo.lock-keyed key matching the repo's other rust caches, rather
+      # than the toolchain action's implicit cache — one cache, not two overlapping ones.
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
+      # Cache cargo registry/git + target so the PR baseline lane stops rebuilding from
+      # scratch every run (issue #2659). Keyed on Cargo.lock, matching quality-gates.yml;
+      # rust-cache folds the toolchain/rustc version into the key automatically.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage-baseline-${{ hashFiles('**/Cargo.lock') }}
+          cache-on-failure: true
 
       # Prebuilt pinned tarpaulin (issue #1990) — never source-builds, so a
       # tarpaulin/rustc incompat cannot red the coverage baseline again.
