@@ -70,7 +70,15 @@ Status metrics refresh every 5 seconds. Status line disabled for piped output.
 # Build and test
 cd bindings/python && maturin develop --profile dev  # Development build (debug; overrides the release-unwind firewall pin for a fast dev loop)
 cd bindings/python && maturin build --profile release-unwind  # Release wheel (panic-unwind firewall, issue #1440 — NOT --release, which is panic=abort)
+```
 
+**CI/release profile parity (issue #2653):** both `python-ci.yml` (smoke, build-only-wheels, test
+jobs) and `python-release.yml` (build-wheels job) build the wheel with `--profile release-unwind`,
+so CI exercises the exact panic = "unwind" firewall build that PyPI ships and a panic-strategy
+regression reds a PR instead of surfacing only at release. When changing the build profile in one
+workflow, change it in the other to keep the matrix in parity.
+
+```bash
 # Run Python tests - fast tests only (default, Issue #331)
 env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets pytest bindings/python/tests -v
 
