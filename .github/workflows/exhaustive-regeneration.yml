@@ -9,7 +9,7 @@ name: Exhaustive Regeneration (parity corpus)
 # and deliberately does NOT commit regenerated binaries or publish a dataset asset
 # (design D6).
 #
-# Cadence: nightly cron + manual dispatch only. It NEVER runs on pull_request and
+# Cadence: weekly cron + manual dispatch only. It NEVER runs on pull_request and
 # never gates the fast/required PR path. See the tier contract:
 # docs/development/parity-ci-tiers.md (`exhaustive_regeneration`) and the release
 # checklist (`parity-release-checklist.md`). This workflow packages regenerated
@@ -18,8 +18,8 @@ name: Exhaustive Regeneration (parity corpus)
 on:
   workflow_dispatch: {}
   schedule:
-    # Nightly at 08:10 UTC, after coverage and Docker parity lanes have started.
-    - cron: '10 8 * * *'
+    # Weekly on Sunday at 08:10 UTC, after coverage and Docker parity lanes have started.
+    - cron: '10 8 * * 0'
 
 permissions:
   contents: read
