@@ -435,14 +435,31 @@ mod bti {
 
     /// Absent-key wiring evidence (issue #1570 C finding, R3 scenario 3): a BTI
     /// trie-MISS key must resolve to authoritative absence on every read and must
-    /// NEVER be cached. The B4 cache is trie-HIT-only, so an absent key can never
-    /// populate it — the read must re-walk the `Partitions.db` trie each time.
-    /// The single-entry C3 memo WOULD serve a consecutively-repeated absent key
-    /// (it stores the `None` resolution too), so we INTERLEAVE a present key A
-    /// between the two absent reads to displace the memo — leaving the B4 cache as
-    /// the ONLY thing that could skip the descent, which it never does for a miss.
-    /// The re-read of the absent key therefore records `TRIE_WALKS >= 1` (contrast
-    /// the present-key test, which observes `== 0` on the interleaved re-read).
+    /// NEVER be served from the B4 key cache as a false-positive HIT. The B4 cache
+    /// is trie-HIT-only (positive-only insert discipline: `key_cache_insert` fires
+    /// only on the `Some(DataOffset)` resolution arm, never on a trie miss), so a
+    /// clean-miss absent key can never populate it — every repeated absent read is a
+    /// B4 cache MISS, re-resolving authoritative absence.
+    ///
+    /// # Why this asserts on the B4 cache, not `TRIE_WALKS` (issue #2674)
+    ///
+    /// The earlier form of this guard asserted `TRIE_WALKS >= 1` on the re-read,
+    /// reasoning that an interleaved present-key read displaces the single-entry C3
+    /// memo so only the B4 cache could skip the descent. That proxy was FLAKY
+    /// (~1-in-5): the C3 `bti_lookup_memo` is *reader-local* and legitimately stores
+    /// the `None` (absence) resolution (issue #1574), and which reader instance
+    /// serves each `db.execute` — hence whether the memo still holds the absent key
+    /// or the interleaved present key — is not deterministic across calls. When a
+    /// consulted reader's memo still held the absent key, the re-read returned the
+    /// memoized absence WITHOUT a trie descent (`TRIE_WALKS == 0`) — a CORRECT
+    /// single-walk optimization, not a cache bug. Root-cause proof (20 runs,
+    /// counter deltas): the B4 cache behaves IDENTICALLY on every run — always a
+    /// MISS for the absent key, `len` always 0 — while only `TRIE_WALKS` varied with
+    /// the C3 memo. The counter is a process-global atomic (NOT thread-local), so
+    /// this is NOT the #2451 thread-local-scoping class; it is a wrong-proxy
+    /// assertion. We now assert the property the guard actually exists to protect —
+    /// the absent key is never served a B4 cache HIT — directly on the B4 hit
+    /// counter, which is deterministic and immune to the C3 memo.
     #[tokio::test]
     #[serial]
     async fn bti_absent_key_never_cached_rewalks_trie() {
@@ -461,8 +478,9 @@ mod bti {
             return;
         };
 
-        // First read of the absent key: definitive miss (zero rows). This stores the
-        // `None` resolution in the single-entry C3 memo for the absent key.
+        // First read of the absent key: definitive miss (zero rows). A clean trie
+        // miss is the positive-only insert discipline's negative case — it must NOT
+        // create a B4 entry for the absent key.
         let r_absent = db
             .execute(&sql_absent)
             .await
@@ -472,8 +490,8 @@ mod bti {
             "B4/BTI absent: an absent key must return zero rows (authoritative absence)"
         );
 
-        // Read present key A: the single-entry C3 memo now holds A, not the absent
-        // key — so only the B4 cache could serve the absent key without a descent.
+        // Read present key A: exercises a real B4 populate for a DIFFERENT key, so a
+        // stale positive entry for A cannot alias the absent key on the re-read.
         let r_present = db
             .execute(&sql_present)
             .await
@@ -483,31 +501,30 @@ mod bti {
             "B4/BTI absent: interleave key A must be present"
         );
 
-        // Re-read the absent key with counters reset. The C3 memo holds A. The B4
-        // cache is now PROCESS-GLOBAL (issue #2059) and — unlike the retired
-        // per-reader cache, which got a fresh empty cache per reader instance — it
-        // persists a BTI prefix-collision CANDIDATE for an absent key across reader
-        // instances (the documented trie-hit-including-candidates behaviour). Flush
-        // the global cache so this re-read starts COLD and genuinely re-descends the
-        // trie, exercising the "an absent key is never served a false-positive hit"
-        // work-probe. Correctness is unchanged either way: the read returns zero rows
-        // (a cached candidate is re-verified to a different key → absence).
-        cqlite_core::storage::cache::GlobalKeyOffsetCache::global().invalidate_all();
-        rwc::reset();
-        assert_eq!(rwc::trie_walks(), 0, "reset must zero TRIE_WALKS");
+        // Re-read the absent key and prove it is NEVER served a B4 cache HIT. Capture
+        // the process-global B4 hit counter immediately before the re-read; a correct
+        // read resolves the absent key by a cache MISS (then re-descends / re-verifies
+        // to absence) — the hit counter must not advance. Had the first absent read
+        // negatively cached the key (the perf/correctness defect this guard exists to
+        // catch), the re-read would register a B4 HIT and this delta would be > 0.
+        let gc = cqlite_core::storage::cache::GlobalKeyOffsetCache::global();
+        let hits_before = gc.hit_count();
         let r_absent2 = db
             .execute(&sql_absent)
             .await
             .expect("BTI repeated absent point read");
+        let hits_after = gc.hit_count();
         assert!(
             r_absent2.rows.is_empty(),
             "B4/BTI absent: the repeated absent read must still return zero rows"
         );
-        assert!(
-            rwc::trie_walks() >= 1,
-            "B4/BTI absent: a repeated absent read must RE-WALK the trie (TRIE_WALKS >= 1), \
-             proving the absent key was never cached as a hit; got {}",
-            rwc::trie_walks()
+        assert_eq!(
+            hits_after, hits_before,
+            "B4/BTI absent: a repeated absent read must NOT be served from the B4 key cache \
+             (positive-only insert discipline — a clean trie miss is never negatively cached); \
+             the re-read registered {} B4 cache hit(s), indicating the absent key was cached \
+             as a false-positive hit",
+            hits_after - hits_before
         );
     }
 
