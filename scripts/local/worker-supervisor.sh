@@ -112,6 +112,33 @@ STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
 MARKER_FILE="${MARKER_FILE:-$REPO_ROOT/.worker-last-iteration.json}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
 
+# ---------------------------------------------------------------------------
+# Supervisor-authored git-ref claim (issue #2655 / #2499 design).
+#
+# The supervisor — a long-lived, machine-scoped process — stamps a
+# refs/machine-claims/<machine> liveness ref (issue+PID+ts) at every worker spawn and
+# clears it when it exits cleanly, so claim liveness is MECHANISM-driven and no
+# longer depends on the worker LLM remembering to `beat`. The PID recorded is
+# the SUPERVISOR's own ($$): it is the stable per-machine anchor that outlives
+# each recycled worker, so a same-machine reaper's process-liveness check tracks
+# "is this machine's supervisor still running" rather than a transient worker
+# subprocess. When the supervisor dies, nothing refreshes the ref and it goes
+# stale within the reap threshold.
+#
+# CLAIM_CMD is the claim-heartbeat.sh entrypoint; overridable so the tests can
+# substitute a hermetic stub (no origin/network). Set CLAIM_CMD="" to disable
+# claim stamping entirely (e.g. a machine with no origin push rights).
+CLAIM_CMD="${CLAIM_CMD:-bash $REPO_ROOT/scripts/flow/claim-heartbeat.sh}"
+# The machine identity the claim ref is scoped to — must match what the reaper
+# clears. Defaults to claim-heartbeat.sh's own default (`hostname -s`), honoring
+# HEARTBEAT_MACHINE when the fleet overrides it.
+CLAIM_MACHINE="${HEARTBEAT_MACHINE:-$(hostname -s 2>/dev/null || echo unknown)}"
+# Best-known issue for the CURRENT iteration's spawn stamp. Empty/unknown on the
+# first iteration (the worker picks from the board); learned from each marker and
+# reused as the next spawn's stamp. "0" is stamped when still unknown — the
+# reaper treats a non-issue as "no open-PR guard applicable" and governs on age.
+CLAIM_ISSUE="${CLAIM_ISSUE:-}"
+
 detect_ncpu() {
   if command -v nproc >/dev/null 2>&1; then nproc
   elif command -v getconf >/dev/null 2>&1 && getconf _NPROCESSORS_ONLN >/dev/null 2>&1; then getconf _NPROCESSORS_ONLN
@@ -170,6 +197,37 @@ notify() {
 
 is_gt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)>(b+0)) exit 0; exit 1 }'; }
 is_lt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)<(b+0)) exit 0; exit 1 }'; }
+
+# stamp_claim <issue>: refresh refs/machine-claims/<machine> with issue+PID+ts (issue
+# #2655). PID stamped is the SUPERVISOR's ($$) — the stable per-machine anchor,
+# not a transient worker subprocess. A non-numeric/empty issue is stamped as "0"
+# (unknown): the reaper then governs purely on age + open-PR (a "0" issue can
+# have no open PR). Non-fatal on failure (a claim-push hiccup must never crash
+# the supervisor) — logs a WARN and continues; the ref simply won't refresh this
+# iteration and ages toward the reap threshold, which is fail-safe.
+stamp_claim() {
+  local issue="$1"
+  [[ -n "$CLAIM_CMD" ]] || return 0
+  case "$issue" in '' | *[!0-9]*) issue=0 ;; esac
+  if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$issue" "$$" >/dev/null 2>&1; then
+    log "claim stamped: machine=$CLAIM_MACHINE issue=$issue pid=$$"
+  else
+    log "WARN: claim stamp failed (machine=$CLAIM_MACHINE issue=$issue) — ref not refreshed this iteration (non-fatal)"
+  fi
+}
+
+# clear_claim: delete refs/machine-claims/<machine> on a CLEAN supervisor exit (issue
+# #2655). `reap` refuses to delete a ref whose issue still has an open PR, so a
+# supervisor that stops with an unfinished endgame leaves the claim in place for
+# adoption rather than orphaning it. Non-fatal on failure.
+clear_claim() {
+  [[ -n "$CLAIM_CMD" ]] || return 0
+  if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" >/dev/null 2>&1; then
+    log "claim cleared on clean exit: machine=$CLAIM_MACHINE"
+  else
+    log "WARN: claim clear declined/failed for machine=$CLAIM_MACHINE (open PR or push error) — left for adoption (non-fatal)"
+  fi
+}
 
 # detect_prompt_signature <logfile>: true (exit 0) when the LAST ~20 lines of the
 # worker's live log show an interactive-prompt signature — a wedged
@@ -347,6 +405,10 @@ MAX_HOURS_SECS=$((MAX_HOURS * 3600))
 
 finalize_exit() {
   local reason="$1" code="$2"
+  # Release this machine's claim ref on a clean stop (issue #2655). `reap`
+  # refuses when the claim's issue still has an open PR, so an unfinished endgame
+  # is preserved for adoption rather than orphaned.
+  clear_claim
   local elapsed=$(($(date +%s) - START_TS))
   mkdir -p "$LOG_DIR"
   printf '{"ts":"%s","iter":%d,"outcome":"summary","reason":"%s","issues_done":%d,"elapsed_s":%d}\n' \
@@ -365,6 +427,11 @@ run_iteration() {
   ITER=$((ITER + 1))
   rm -f "$MARKER_FILE"
   mkdir -p "$LOG_DIR"
+  # Stamp/refresh the machine's claim ref BEFORE spawning (issue #2655): the
+  # supervisor authors liveness mechanically, so a beat-then-crash worker can no
+  # longer look alive for the whole threshold window. Uses the best-known issue
+  # from the previous iteration's marker (empty/unknown -> "0").
+  stamp_claim "$CLAIM_ISSUE"
   local logfile="$LOG_DIR/iter-${ITER}.log"
   local stuck_flag="$LOG_DIR/.iter-${ITER}.stuck"
   rm -f "$stuck_flag"
@@ -461,6 +528,16 @@ run_iteration() {
   pr="$(marker_field pr)"
   reason="$(marker_field reason)"
   question="$(marker_field question)"
+
+  # Learn the issue this iteration worked so the NEXT spawn's claim stamp names
+  # it (issue #2655). A recycled worker that resumes the same machine's claim
+  # branch stays on the same issue, so carrying it forward keeps the claim ref's
+  # open-PR reap guard accurate. A finalized issue is released (its endgame is
+  # done); anything else keeps the issue for the next stamp.
+  case "$outcome" in
+    finalized) CLAIM_ISSUE="" ;;
+    *) [[ -n "$issue" ]] && CLAIM_ISSUE="$issue" ;;
+  esac
 
   case "$outcome" in
     finalized)

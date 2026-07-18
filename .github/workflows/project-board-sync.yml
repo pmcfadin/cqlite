@@ -10,7 +10,11 @@ name: Project Board Sync
 #
 # Requires a repo secret PROJECTS_TOKEN: a PAT (or GitHub App token) with the
 # `project` scope. The default GITHUB_TOKEN CANNOT write user/org Projects v2.
-# If the secret is absent the workflow no-ops with a notice (never fails CI).
+# If the secret is ABSENT the token-guarded jobs emit a LOUD `::error::`
+# annotation and FAIL (issue #2655) — a persistent red run is the alert that
+# board hygiene + claim reaping have silently stopped working, instead of the
+# old green ::notice:: no-op that hid the outage for weeks. Add the secret and
+# the next scheduled run goes green.
 #
 # IDs below are for the "CQLite Delivery" user Project #1 (owner: pmcfadin).
 # Re-confirm with:
@@ -60,12 +64,11 @@ jobs:
         id: guard
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::notice::PROJECTS_TOKEN not set — skipping board sync. Add a PAT with 'project' scope as repo secret PROJECTS_TOKEN."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::error::PROJECTS_TOKEN not set — board sync is NOT running. Add a PAT (or GitHub App token) with 'project' scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655) so this outage is visible instead of a silent green no-op."
+            exit 1
           fi
 
       - name: Move closed PR card to Done
-        if: steps.guard.outputs.skip != 'true'
         env:
           PR_NODE_ID: ${{ github.event.pull_request.node_id }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -114,24 +117,36 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Scheduled path: idempotent sweep over the whole board.
-  #   * OPEN issue with NULL Status        -> Backlog
+  #   * OPEN issue with NULL Status, older than the auto-add grace window
+  #                                        -> Backlog
   #   * CLOSED PR with Status != Done      -> Done   (safety net for the leak)
   # Never touches Ready / In Progress / In Review items, and never reaps claims.
+  #
+  # AUTO-ADD RACE (issue #2655): the built-in "Auto-add to project" workflow adds
+  # a freshly-created issue to the board and THEN sets its default Status in a
+  # second step. Between those two, the item is on the board with a NULL Status.
+  # If this sweep fires inside that window it would force the item to Backlog and
+  # collide with auto-add's own default write (last-writer-wins churn, and a
+  # `groom`-just-created issue can flicker). Fix: only sweep a NULL-status issue
+  # once it has been around LONGER than SWEEP_GRACE_MINUTES (default 10, well past
+  # auto-add's sub-second window but far under the 30-min cron), keyed on the
+  # issue's own createdAt — never wall-clock-racing a brand-new item.
   # ---------------------------------------------------------------------------
   sweep:
     if: github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
+    env:
+      SWEEP_GRACE_MINUTES: '10'
     steps:
       - name: Guard token
         id: guard
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::notice::PROJECTS_TOKEN not set — skipping board sweep. Add a PAT with 'project' scope as repo secret PROJECTS_TOKEN."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::error::PROJECTS_TOKEN not set — board sweep + claim reaper are NOT running. Add a PAT (or GitHub App token) with 'project' scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655) so this outage is visible instead of a silent green no-op."
+            exit 1
           fi
 
       - name: Reconcile board
-        if: steps.guard.outputs.skip != 'true'
         run: |
           set -euo pipefail
 
@@ -145,8 +160,15 @@ jobs:
               }' -f p="$PROJECT_ID" -f i="$1" -f f="$STATUS_FIELD_ID" -f o="$2" >/dev/null
           }
 
+          # Grace cutoff (epoch seconds): a NULL-status issue is only swept once
+          # its createdAt is OLDER than this — i.e. it has existed longer than the
+          # auto-add settle window, so we are not racing auto-add's default write.
+          grace_secs=$(( SWEEP_GRACE_MINUTES * 60 ))
+          cutoff_epoch=$(( $(date -u +%s) - grace_secs ))
+
           cursor=""
           backlogged=0
+          skipped_fresh=0
           doned=0
           while : ; do
             if [ -z "$cursor" ]; then after="null"; else after="\"$cursor\""; fi
@@ -163,7 +185,7 @@ jobs:
                         }
                         content {
                           __typename
-                          ... on Issue { number state }
+                          ... on Issue { number state createdAt }
                           ... on PullRequest { number state }
                         }
                       }
@@ -181,16 +203,30 @@ jobs:
             # (`.items.nodes == []`) still satisfies `arrays` and is non-fatal.
             echo "$resp" | jq -e '.data.node.items.nodes | arrays' >/dev/null
 
-            # Capture the two ID lists via checked command substitutions BEFORE
+            # Capture the ID lists via checked command substitutions BEFORE
             # iterating, so any extraction failure aborts the step rather than
             # being swallowed inside a process substitution. An empty list is the
             # benign no-work case and leaves the while loop a no-op.
-            null_issue_ids=$(echo "$resp" | jq -r '
+            #
+            # Auto-add race guard: convert each issue's createdAt to epoch and
+            # keep only those OLDER than the grace cutoff. `--argjson` passes the
+            # cutoff as a number; `fromdateiso8601` is jq builtin ISO8601->epoch.
+            null_issue_ids=$(echo "$resp" | jq -r --argjson cutoff "$cutoff_epoch" '
               .data.node.items.nodes[]
               | select(.content.__typename=="Issue")
               | select(.content.state=="OPEN")
               | select((.fieldValueByName.name // "") == "")
+              | select((.content.createdAt | fromdateiso8601) < $cutoff)
               | .id')
+
+            # Count fresh (within-grace) null-status issues we deliberately SKIP,
+            # for an observable "held back N racing new issues" line.
+            skipped_fresh=$(( skipped_fresh + $(echo "$resp" | jq -r --argjson cutoff "$cutoff_epoch" '
+              [ .data.node.items.nodes[]
+                | select(.content.__typename=="Issue")
+                | select(.content.state=="OPEN")
+                | select((.fieldValueByName.name // "") == "")
+                | select((.content.createdAt | fromdateiso8601) >= $cutoff) ] | length') ))
 
             closed_pr_ids=$(echo "$resp" | jq -r '
               .data.node.items.nodes[]
@@ -199,7 +235,7 @@ jobs:
               | select((.fieldValueByName.name // "") != "Done")
               | .id')
 
-            # OPEN issues with null status -> Backlog
+            # OPEN issues with null status (past the grace window) -> Backlog
             while read -r id; do
               [ -n "$id" ] || continue
               set_status "$id" "$OPT_BACKLOG"
@@ -218,4 +254,114 @@ jobs:
             [ "$has_next" = "true" ] || break
           done
 
-          echo "Sweep complete: $backlogged issue(s) -> Backlog, $doned closed PR card(s) -> Done."
+          echo "Sweep complete: $backlogged issue(s) -> Backlog, $doned closed PR card(s) -> Done, $skipped_fresh fresh null-status issue(s) held back (within ${SWEEP_GRACE_MINUTES}m auto-add grace)."
+
+  # ---------------------------------------------------------------------------
+  # Scheduled path: CI-side claim reaper (issue #2655 / #2499 design).
+  #
+  # Enforces the deterministic reap rule IN CODE (it was previously only prose):
+  # a supervisor-authored refs/machine-claims/<machine> liveness ref is reaped when its
+  # age exceeds the threshold AND its issue has NO open PR. The PID-dead clause
+  # is a LOCAL-only refinement (a foreign machine's PID is unknowable from CI), so
+  # from CI the age + no-open-PR gate governs — exactly what `should-reap`
+  # returns for a non-local machine. `should-reap` is FAIL-SAFE: a fresh ref, an
+  # open-PR ref, or an unparseable-age ref is always KEPT (exit 1); a gh/network
+  # hiccup in the open-PR probe is treated as "assume open PR" and KEEPS the ref.
+  # Reaping deletes the claim ref and flips the freed board item In Progress ->
+  # Ready with a traceable comment, mirroring flow-board's manual reap.
+  # ---------------------------------------------------------------------------
+  reap-claims:
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Needs write to delete stale refs/machine-claims/* refs (the top-level
+    # default is contents: read); the sweep/pr-closed jobs stay read-only.
+    permissions:
+      contents: write
+    env:
+      REAP_THRESHOLD_SECS: '14400' # 4h — matches claim-heartbeat.sh's documented default
+    steps:
+      - name: Guard token
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::PROJECTS_TOKEN not set — claim reaper is NOT running. Add a PAT (or GitHub App token) with 'project' scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655) so this outage is visible instead of a silent green no-op."
+            exit 1
+          fi
+
+      - name: Checkout (for claim-heartbeat.sh)
+        uses: actions/checkout@v4
+
+      - name: Reap stale claim refs
+        run: |
+          set -euo pipefail
+          HB="scripts/flow/claim-heartbeat.sh"
+
+          # Map a machine name -> its claim's issue number (parsed from the ref
+          # message, same field grammar claim-heartbeat.sh writes).
+          raw=$(git ls-remote origin 'refs/machine-claims/*' 2>/dev/null || true)
+          if [ -z "$raw" ]; then
+            echo "No claim refs on origin — nothing to reap."
+            exit 0
+          fi
+
+          reaped=0
+          kept=0
+          # Iterate machine names from the ref list (field 2 = refname).
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            refname=$(printf '%s' "$line" | awk '{print $2}')
+            machine="${refname#refs/machine-claims/}"
+            [ -n "$machine" ] || continue
+
+            # should-reap is the single source of truth for the predicate. Exit 0
+            # = reap; 1 = keep; 2 = ref vanished (raced away). Never reaps a
+            # fresh/open-PR/unknown-age claim. Note: from CI `machine` is never
+            # THIS runner, so the PID clause is skipped and age + no-open-PR gate.
+            rc=0
+            bash "$HB" should-reap "$machine" "$REAP_THRESHOLD_SECS" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "keep claim machine=$machine (should-reap rc=$rc)"
+              kept=$((kept+1))
+              continue
+            fi
+
+            # Recover the issue number from the ref message for the board flip +
+            # comment. Best-effort: reaping the ref is the primary action.
+            git fetch origin "$refname" >/dev/null 2>&1 || true
+            msg=$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)
+            issue=$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)
+
+            # `reap` re-checks the open-PR guard atomically before deleting, so a
+            # PR opened between should-reap and here still refuses the delete.
+            if bash "$HB" reap "$machine"; then
+              echo "reaped claim machine=$machine issue=${issue:-?}"
+              reaped=$((reaped+1))
+              # Flip the freed item back to Ready + leave a trace (skip issue "0"
+              # / unknown — a claim with no real issue has no board item to flip).
+              if [ -n "${issue:-}" ] && [ "$issue" != "0" ]; then
+                item_id=$(gh api graphql -f query='
+                  query($p: ID!) { node(id: $p) { ... on ProjectV2 {
+                    items(first: 100) { nodes { id content {
+                      ... on Issue { number state } } } } } } }' \
+                  -f p="$PROJECT_ID" \
+                  --jq ".data.node.items.nodes[] | select(.content.number==${issue}) | select(.content.state==\"OPEN\") | .id" 2>/dev/null | head -1 || true)
+                if [ -n "${item_id:-}" ]; then
+                  gh api graphql -f query='
+                    mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+                      updateProjectV2ItemFieldValue(input: {
+                        projectId: $p, itemId: $i, fieldId: $f,
+                        value: { singleSelectOptionId: $o }
+                      }) { projectV2Item { id } }
+                    }' -f p="$PROJECT_ID" -f i="$item_id" -f f="$STATUS_FIELD_ID" -f o="$OPT_READY" >/dev/null || true
+                  echo "flipped issue #$issue -> Ready"
+                fi
+                gh issue comment "$issue" --body \
+                  "Automated claim reap (issue #2655 CI reaper): machine \`${machine}\`'s claim ref was stale (age > $((REAP_THRESHOLD_SECS/3600))h) with no open PR. Work is preserved on the \`issue-${issue}-*\` branch (never deleted); Status returned to Ready for re-pickup." >/dev/null 2>&1 || true
+              fi
+            else
+              echo "reap declined machine=$machine (open PR appeared, or push error) — kept"
+              kept=$((kept+1))
+            fi
+          done <<< "$raw"
+
+          echo "Reap complete: $reaped claim(s) reaped, $kept kept."

@@ -344,6 +344,21 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   deletes the ref (refuses under an open PR without `--force`). Maintain the liveness heartbeat
   (`scripts/flow/claim-heartbeat.sh beat <N>`, refreshed at claim + every stage transition);
   `flow-board` reaps deterministically (age > 4h AND no open PR) (#2089).
+- **Supervisor-authored machine claim + CI reaper (#2655/#2499)**: liveness is now MECHANISM-driven,
+  not prose. `worker-supervisor.sh` stamps `refs/machine-claims/<machine>` (issue+supervisor-PID+ts)
+  via `claim-heartbeat.sh stamp` at every spawn, refreshes it each iteration, and clears it on a
+  clean exit (`reap`, which REFUSES when the issue still has an open PR — an unfinished endgame stays
+  owned for adoption, never orphaned). This namespace is distinct from `claim.sh`'s per-issue lock
+  `refs/claims/issue-<N>`. `claim-heartbeat.sh should-reap <machine> [secs]` is the single, fail-safe
+  reap predicate (exit 0 = reap, 1 = keep, 2 = no ref): reap ONLY on age > threshold (4h) AND no open
+  PR AND (pid-dead, when the claim is local — a foreign machine's PID is unknowable). It KEEPS on a
+  fresh ref, an open PR, a live local PID, or an unparseable age; a `gh`/network hiccup in the
+  open-PR probe assumes an open PR (keeps). The `project-board-sync` 30-min cron runs a `reap-claims`
+  job that applies this predicate server-side and flips a freed board item back to Ready with a
+  traceable comment. **`PROJECTS_TOKEN` absence now FAILS the workflow loudly (`::error::`)** — a
+  persistent red run is the alert, replacing the old silent green `::notice::` no-op. The scheduled
+  board sweep only backlogs a null-status issue once it is past a 10-min auto-add grace window, so it
+  no longer races the built-in Auto-add's default-status write.
 - **One worker per machine (#1930)**: one lead/worker session owns a box; it fans out subagents but
   keeps to **one full gate at a time** — enforced mechanically (#2640): `bootstrap-agent-machine.sh`
   pins `CQLITE_GATE_MAX_CONCURRENCY=1` (the #1825 cap admits one gate; the per-gate core budget then

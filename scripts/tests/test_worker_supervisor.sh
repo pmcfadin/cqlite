@@ -378,9 +378,26 @@ common_env() {
   export STUCK_POLL_SECS=1
   unset LOAD_CONTROL_FILE 2>/dev/null || true
   unset WORKER_CMD 2>/dev/null || true
+  # Claim stamping (issue #2655) OFF by default so most tests stay focused; the
+  # dedicated claim tests set a hermetic CLAIM_CMD stub that logs its args.
+  export CLAIM_CMD=""
+  unset HEARTBEAT_MACHINE 2>/dev/null || true
 }
 
 jline_count() { grep -c "$2" "$1" 2>/dev/null || true; }
+
+# A hermetic claim-heartbeat.sh stand-in: append "<subcmd> <args...>" to
+# $CLAIM_LOG on every call, always succeed. Lets a test assert the supervisor
+# invoked `stamp`/`reap` with the right shape, without any origin/network.
+write_claim_stub() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+exit 0
+EOF
+  chmod +x "$path"
+}
 
 # ---------------------------------------------------------------------------
 # Test 1: happy path — 2 finalized iterations, then MAX_ISSUES=2 budget stop.
@@ -1044,6 +1061,77 @@ test_fast_exit_latency() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 23 (#2655): the supervisor STAMPS refs/machine-claims/<machine> before each spawn
+# and CLEARS (reap) it on a clean exit — via CLAIM_CMD, mechanically, without the
+# worker LLM. A hermetic CLAIM_CMD stub logs every invocation; we assert one
+# `stamp <issue> <pid>` per iteration and exactly one `reap <machine>` at stop.
+# ---------------------------------------------------------------------------
+test_claim_stamp_each_iter_and_clear_on_exit() {
+  local d counter jf rc stamps reaps
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=2
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  # 2 finalized iterations => 2 stamps; a clean budget stop => exactly 1 reap.
+  stamps=$(grep -c '^stamp ' "$CLAIM_LOG" 2>/dev/null || true)
+  reaps=$(grep -c '^reap testbox' "$CLAIM_LOG" 2>/dev/null || true)
+  # Every stamp carries the SUPERVISOR pid as the 3rd token (numeric).
+  local well_formed="yes"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" =~ ^stamp\ [0-9]+\ [0-9]+$ ]] || well_formed="no"
+  done < <(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null)
+  if [[ "$rc" -eq 0 && "$stamps" -eq 2 && "$reaps" -eq 1 && "$well_formed" == "yes" ]]; then
+    pass "claim: stamp per iteration (with pid) + one reap on clean exit"
+  else
+    fail "claim: rc=$rc stamps=$stamps reaps=$reaps well_formed=$well_formed (see $CLAIM_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 24 (#2655): the NEXT spawn's claim stamp carries the issue LEARNED from a
+# non-finalized (blocked) marker — so the reaper's open-PR guard tracks the real
+# issue. Iter 1 blocks issue 88; iter 2's stamp must name issue 88 (before the
+# head-block guard stops the run on the 2nd consecutive block).
+# ---------------------------------------------------------------------------
+test_claim_issue_learned_from_marker() {
+  local d rc second_stamp
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_blocked_same_issue_stub "$d/bin/worker.sh" 88
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  # Iter1 stamp = "stamp 0 <pid>" (issue unknown); iter2 stamp = "stamp 88 <pid>"
+  # (learned from iter1's blocked marker). Grab the 2nd stamp line.
+  second_stamp=$(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null | sed -n '2p')
+  if [[ "$rc" -eq 0 ]] && printf '%s' "$second_stamp" | grep -qE '^stamp 88 [0-9]+$'; then
+    pass "claim: issue learned from a blocked marker names the next stamp (issue 88)"
+  else
+    fail "claim-learn: rc=$rc second_stamp='$second_stamp' (see $CLAIM_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -1084,5 +1172,7 @@ test_stray_signature_scrollback_is_abnormal
 test_genuine_wedge_frozen_is_stuck
 test_busy_writing_signature_not_stuck
 test_fast_exit_latency
+test_claim_stamp_each_iter_and_clear_on_exit
+test_claim_issue_learned_from_marker
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
