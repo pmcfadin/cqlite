@@ -310,6 +310,27 @@ mod bti {
     use cqlite_core::{Database, Value};
     use serial_test::serial;
 
+    // ---- Why these guards assert on B4, not TRIE_WALKS (issue #2674) ----------
+    //
+    // The absent-key and disabled-toggle guards below originally asserted on
+    // `TRIE_WALKS` (>= 1, or the disabled companion). That proxy was FLAKY
+    // (~1-in-5): the C3 `bti_lookup_memo` (issue #1574) is *reader-local* and
+    // legitimately stores the resolution — INCLUDING a `None` absence — of the last
+    // key it resolved. Which pooled reader instance serves each `db.execute` is not
+    // deterministic, so whether the memo still held the interleaved key or the
+    // key-under-test varied run to run; when a consulted reader's memo already held
+    // the key-under-test, the read returned the memoized resolution WITHOUT a trie
+    // descent (`TRIE_WALKS == 0`) — a correct single-walk optimization, not a cache
+    // bug. Root-cause proof (20 runs, counter deltas): the B4 cache behaves
+    // IDENTICALLY on every run (the absent key is always a MISS, `len` never grows);
+    // only `TRIE_WALKS` varied with the memo. The counter is a process-global atomic
+    // (NOT thread-local), so this is NOT the #2451 thread-local-scoping class — it is
+    // a wrong-proxy assertion. Both guards now assert the property they actually
+    // exist to protect, directly on the deterministic, memo-immune B4 cache counters
+    // (`hit_count`/`len`): the absent key is never served a B4 HIT; a disabled reader
+    // never touches the global B4 cache at all.
+    // ---------------------------------------------------------------------------
+
     fn schemas_dir() -> Option<PathBuf> {
         if let Some(root) = datasets_root() {
             if let Some(dir) = root.parent().and_then(|p| {
@@ -444,25 +465,8 @@ mod bti {
     /// clean-miss absent key can never populate it — every repeated absent read is a
     /// B4 cache MISS, re-resolving authoritative absence.
     ///
-    /// # Why this asserts on the B4 cache, not `TRIE_WALKS` (issue #2674)
-    ///
-    /// The earlier form of this guard asserted `TRIE_WALKS >= 1` on the re-read,
-    /// reasoning that an interleaved present-key read displaces the single-entry C3
-    /// memo so only the B4 cache could skip the descent. That proxy was FLAKY
-    /// (~1-in-5): the C3 `bti_lookup_memo` is *reader-local* and legitimately stores
-    /// the `None` (absence) resolution (issue #1574), and which reader instance
-    /// serves each `db.execute` — hence whether the memo still holds the absent key
-    /// or the interleaved present key — is not deterministic across calls. When a
-    /// consulted reader's memo still held the absent key, the re-read returned the
-    /// memoized absence WITHOUT a trie descent (`TRIE_WALKS == 0`) — a CORRECT
-    /// single-walk optimization, not a cache bug. Root-cause proof (20 runs,
-    /// counter deltas): the B4 cache behaves IDENTICALLY on every run — always a
-    /// MISS for the absent key, `len` always 0 — while only `TRIE_WALKS` varied with
-    /// the C3 memo. The counter is a process-global atomic (NOT thread-local), so
-    /// this is NOT the #2451 thread-local-scoping class; it is a wrong-proxy
-    /// assertion. We now assert the property the guard actually exists to protect —
-    /// the absent key is never served a B4 cache HIT — directly on the B4 hit
-    /// counter, which is deterministic and immune to the C3 memo.
+    /// Asserts on the B4 hit counter, not `TRIE_WALKS` — see the module-level
+    /// "Why these guards assert on B4, not TRIE_WALKS (issue #2674)" note above.
     #[tokio::test]
     #[serial]
     async fn bti_absent_key_never_cached_rewalks_trie() {
@@ -533,14 +537,19 @@ mod bti {
         // negatively cached the key (the perf/correctness defect this guard exists to
         // catch), the re-read would register a B4 HIT and this delta would be > 0.
         //
-        // SINGLE-LOOKUP WINDOW (issue #2674 roborev): `hit_count()` is process-global,
-        // but this is a `#[serial]` test on a current-thread runtime, so no other test
-        // and no background task runs concurrently. The only B4 lookups between
-        // `hits_before` and `hits_after` are this ONE point read's own — a lookup of
-        // the absent key against each generation's reader (each a MISS, per the
-        // clean-miss precondition above). A non-zero delta therefore unambiguously
-        // means the absent key itself was served a B4 hit.
+        // SINGLE-LOOKUP WINDOW (issue #2674 roborev): `hit_count()` is process-global.
+        // The window is safe from OTHER tests only against DEFAULT-KEY `#[serial]`
+        // tests IN THIS BINARY — a bare `#[serial]` (all tests here use it) is one
+        // global lock, so no bare-`#[serial]` peer runs concurrently; a *keyed*
+        // `#[serial(k)]` group would NOT be mutually excluded (different key), and a
+        // non-`#[serial]` test would not be either. There are none of those here. And
+        // this is a current-thread runtime, so no background task advances the counter
+        // within the test. The only B4 lookups between `hits_before` and `hits_after`
+        // are thus this ONE point read's own — a lookup of the absent key against each
+        // generation's reader (each a MISS, per the clean-miss precondition). A
+        // non-zero delta therefore unambiguously means the absent key was served a hit.
         let hits_before = gc.hit_count();
+        let len_before_reread = gc.len();
         let r_absent2 = db
             .execute(&sql_absent)
             .await
@@ -558,6 +567,16 @@ mod bti {
              the re-read registered {} B4 cache hit(s), indicating the absent key was cached \
              as a false-positive hit",
             hits_after - hits_before
+        );
+        // Belt-and-braces (issue #2674 roborev): the re-read also must not GROW the
+        // cache — a clean trie miss inserts nothing, so a candidate for the absent key
+        // is never added on the repeat either (the miss above and no-growth here
+        // together bound the absent key out of B4 entirely).
+        assert_eq!(
+            gc.len(),
+            len_before_reread,
+            "B4/BTI absent: the repeated absent read must not insert a B4 entry for the absent \
+             key (positive-only insert discipline)"
         );
     }
 
@@ -607,24 +626,14 @@ mod bti {
     /// `config.memory.block_cache.enabled == false` the reader builds a genuine
     /// no-op key cache ([`build_key_offset_cache`] hands back a
     /// `GlobalKeyOffsetCache::disabled()` instance instead of the process-global
-    /// singleton), so NONE of this database's reads ever touch the global B4 cache.
+    /// singleton), so NONE of this database's reads ever touch the global B4 cache —
+    /// its hit counter and occupancy stay flat across an interleaved A, B, A read.
     ///
-    /// # Why this asserts on the global B4 cache, not `TRIE_WALKS` (issue #2674)
-    ///
-    /// The earlier form asserted `TRIE_WALKS >= 1` on a repeated interleaved read
-    /// (A, B, A), reasoning the C3 memo holds B so the re-read of A must re-descend.
-    /// That shares the EXACT memo-nondeterminism that made the absent-key guard flaky:
-    /// the reader-local C3 `bti_lookup_memo` is served by whichever pooled reader
-    /// instance handles the re-read, and when that reader's memo still held A the read
-    /// returned the memoized resolution WITHOUT a descent (`TRIE_WALKS == 0`) — a
-    /// legitimate single-walk hit, not a broken toggle. With the B4 cache disabled
-    /// there is no shared global cache to make the outcome deterministic, so the
-    /// proxy is unreliable. Instead assert the property the toggle actually controls:
-    /// a disabled reader routes to a no-op cache and NEVER serves from — or populates
-    /// — the process-global B4 cache. A decorative toggle (flag ignored, global cache
-    /// still used) would insert A/B and register a B4 HIT on the re-read of A; the
-    /// unchanged global hit counter proves the toggle is real. Deterministic and
-    /// memo-immune.
+    /// Asserts on the global B4 cache, not `TRIE_WALKS` — see the module-level "Why
+    /// these guards assert on B4, not TRIE_WALKS (issue #2674)" note above. A POSITIVE
+    /// CONTROL (an enabled db over the same fixture + query shape, whose re-read of A
+    /// DOES advance the hit counter) proves the counter is live here, so the disabled
+    /// assertion is a real differential, not a vacuous "nothing happened".
     #[tokio::test]
     #[serial]
     async fn bti_disabled_cache_rewalks_trie_on_interleaved_reread() {
@@ -643,13 +652,14 @@ mod bti {
             return;
         };
 
-        // Capture the process-global B4 cache hit counter. Every read below runs
-        // through this disabled database, whose readers hold a `disabled()` no-op
-        // cache — so the GLOBAL singleton must not be touched. `#[serial]` on a
-        // current-thread runtime means no other test/task advances this counter in
-        // the window.
+        // Capture the process-global B4 cache hit counter AND occupancy. Every read
+        // below runs through this disabled database, whose readers hold a `disabled()`
+        // no-op cache — so the GLOBAL singleton must be touched neither by a serve
+        // (hit) nor a populate (len grows). `#[serial]` (bare key) on a current-thread
+        // runtime means no other test/task advances these in the window.
         let gc = cqlite_core::storage::cache::GlobalKeyOffsetCache::global();
         let hits_before = gc.hit_count();
+        let len_before = gc.len();
 
         // Interleaved point reads A, B, A. With an ENABLED cache the final re-read of
         // A is a B4 HIT (see `bti_repeated_interleaved_point_read_skips_trie_walk`);
@@ -675,6 +685,55 @@ mod bti {
              hit counter advanced by {}, meaning the `block_cache.enabled == false` toggle is \
              decorative (the reader still consulted the shared cache)",
             gc.hit_count() - hits_before
+        );
+        // Second witness (issue #2674 roborev): a disabled reader also never POPULATES
+        // the global cache, so occupancy is flat too.
+        assert_eq!(
+            gc.len(),
+            len_before,
+            "B4/BTI disabled: a disabled key cache must not populate the process-global B4 \
+             cache; occupancy grew, so the toggle is decorative"
+        );
+
+        // POSITIVE CONTROL (issue #2674 roborev): prove the hit counter is LIVE for
+        // this exact fixture + query shape, so the flat-counter assertions above are a
+        // real differential and not vacuously green. Open an ENABLED db over the same
+        // fixture and run the identical A, B, A — the re-read of A is a genuine B4 HIT
+        // (the enabled reader shares the global singleton), so the hit counter MUST
+        // advance. If it did not, the disabled assertions would prove nothing.
+        let Some(db_enabled) = setup("test_da", "da-test.cql").await else {
+            eprintln!("Skipping (B4/BTI disabled positive control): could not ingest test_da");
+            return;
+        };
+        let hits_before_enabled = gc.hit_count();
+        let ea = db_enabled
+            .execute(&sql_a)
+            .await
+            .expect("enabled point read A");
+        assert!(
+            !ea.rows.is_empty(),
+            "B4/BTI disabled positive control: key A must be present"
+        );
+        let _ = db_enabled
+            .execute(&sql_b)
+            .await
+            .expect("enabled point read B");
+        let ea2 = db_enabled
+            .execute(&sql_a)
+            .await
+            .expect("enabled repeated point read A");
+        assert!(
+            !ea2.rows.is_empty(),
+            "B4/BTI disabled positive control: repeated read of present key A returned zero rows"
+        );
+        assert!(
+            gc.hit_count() > hits_before_enabled,
+            "B4/BTI disabled positive control: an ENABLED db over the same fixture/query must \
+             register at least one B4 cache HIT on the re-read of A — proving the hit counter \
+             is live for this shape and the disabled no-op assertions above are a real \
+             differential; hit counter did not advance (before={hits_before_enabled}, \
+             after={})",
+            gc.hit_count()
         );
     }
 }
