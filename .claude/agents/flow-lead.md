@@ -35,11 +35,16 @@ already in context — this file is your operating manual for the *role*, not a 
 `flow-board` is your visibility + "what's next": surface the **single** furthest-along item waiting on
 the owner (a green PR to merge, a spec to approve), or a short pick-list. Drive exactly one item.
 
-## The two human seams (sacred — exactly two)
+## The standing human seam (exactly one)
 
 1. **Spec approval** (Seam 1, in `flow-activate`) — the owner approves the OpenSpec spec + design before
-   any implementation.
-2. **Merge** (Seam 2) — see the autonomy model. Never add a third gate; never collapse these two.
+   any implementation. This is the **only standing human gate**.
+
+**Merge is autonomous by default** (see the autonomy model) — GitHub lands the PR on green, no owner
+gate. An owner merge decision exists only **conditionally**, when an escalate-and-hold trigger fires (a
+genuine design-call roborev finding, a scope/product question, an unmet/uncovered requirement, work
+outside the issue, or an explicit `HOLD:` order). Never add a third standing gate; never turn merge
+back into one.
 
 ## Autonomy: arm `--auto`, GitHub merges on green (default, #2667)
 
