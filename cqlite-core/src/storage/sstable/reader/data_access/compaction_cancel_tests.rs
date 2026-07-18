@@ -756,8 +756,8 @@ async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
 /// the ~3250-test `cargo test --lib` write-tests component (which, unlike nextest,
 /// does NOT isolate tests per-process) — a foreign point read landing between the
 /// `reset()` and the read inflated the observed count above `0`, failing the
-/// assertion 5-in-6 in-gate. The bare `#[serial_test::serial]` tag did NOT help: it
-/// serialises only OTHER tagged tests, never the untagged crate-wide readers. This
+/// assertion 5-in-6 in-gate. A `#[serial]` tag alone did NOT help: it serialises
+/// only OTHER tests in the SAME group, never the untagged crate-wide readers. This
 /// scan resolves each offset DIRECTLY from the up-front `get_partition_entries()`
 /// load (`full_index_scan.rs`) and never calls `lookup_partition_with_index`, so it
 /// records ZERO probes by construction — the flake was pure cross-thread counter
@@ -771,16 +771,20 @@ async fn pre_cancelled_scan_does_not_probe_index_on_index_backed_path() {
 /// thread — on this test's own thread, so the scope captures exactly this scan's
 /// probes and no concurrent test can inflate them. No global `reset()` needed.
 ///
-/// `#[serial_test::serial]` is nonetheless KEPT (issue #2714 roborev 1827): this
-/// test's materialising walk performs real Data.db reads that bump the PROCESS-GLOBAL
-/// `READ_CALLS` counter, and `block_io`'s exact-equality guard
-/// (`read_compressed_chunk_at_records_one_read_per_chunk`) documents the invariant
-/// that EVERY `READ_CALLS`-touching test must be `#[serial]` so its own delta stays
-/// reliable. The tag and the `ReadWorkScope` are complementary — the scope makes THIS
-/// test's `index_probes` assertion immune to others; the tag keeps THIS test's global
-/// `READ_CALLS` writes from contaminating others.
+/// `#[serial_test::serial(work_counters)]` is nonetheless KEPT (issue #2714 roborev
+/// 1827/1828): this test's materialising walk performs real Data.db reads that bump
+/// the PROCESS-GLOBAL `READ_CALLS` counter, and `block_io`'s exact-equality guard
+/// (`read_compressed_chunk_at_records_one_read_per_chunk`) asserts an exact global
+/// `READ_CALLS` delta. The tag and the `ReadWorkScope` are complementary — the scope
+/// makes THIS test's `index_probes` assertion immune to others; the tag keeps THIS
+/// test's global `READ_CALLS` writes from contaminating others. Roborev 1828
+/// NORMALIZED every read-path-counter guard in this `--lib` binary onto the ONE
+/// shared `work_counters` serial group (block_io, chunk-cache, big-promoted-seek,
+/// this test, and the full-index-stream windowed guards) so they are mutually
+/// exclusive — a `#[serial]` (bare) vs `#[serial(work_counters)]` split would leave
+/// them in DIFFERENT groups that do NOT serialize against each other.
 #[tokio::test]
-#[serial_test::serial]
+#[serial_test::serial(work_counters)]
 async fn full_materializing_scan_does_not_reprobe_index_per_partition() {
     let Some(data_path) = real_index_backed_fixture() else {
         eprintln!(

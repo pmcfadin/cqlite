@@ -336,7 +336,7 @@ mod window_builder {
     /// chunks.
     #[cfg(feature = "lz4")]
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(work_counters)]
     fn valid_compressed_window_round_trips() {
         use crate::storage::sstable::compression::{Compression, CompressionAlgorithm};
 
@@ -377,7 +377,7 @@ mod window_builder {
     /// corruption.
     #[cfg(feature = "lz4")]
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(work_counters)]
     fn incompressible_raw_chunk_round_trips() {
         use crate::storage::sstable::compression::{Compression, CompressionAlgorithm};
 
@@ -436,7 +436,7 @@ mod window_builder {
     /// relationship is irrelevant.
     #[cfg(feature = "lz4")]
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(work_counters)]
     fn zero_max_compressed_length_fails_closed() {
         use crate::storage::sstable::compression::{Compression, CompressionAlgorithm};
 

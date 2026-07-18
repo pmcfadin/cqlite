@@ -116,7 +116,7 @@ async fn open(path: &std::path::Path) -> SSTableReader {
 /// the same offset serves the second read from the shared cache with ZERO
 /// underlying reads and an identical result.
 #[tokio::test]
-#[serial_test::serial]
+#[serial_test::serial(work_counters)]
 async fn big_point_read_get_cached_data_is_wired() {
     let Some(data_db) = uncompressed_data_db() else {
         assert!(
@@ -206,7 +206,7 @@ async fn big_point_read_get_cached_data_is_wired() {
 /// the `>= 1` assertion below trips. The warm read still leaves it unchanged (the
 /// increment sits after the shared-cache check, so a cached repeat does no backing read).
 #[tokio::test]
-#[serial_test::serial]
+#[serial_test::serial(work_counters)]
 async fn big_point_read_compressed_increments_chunk_read_calls() {
     let Some(data_db) = compressed_data_db() else {
         assert!(

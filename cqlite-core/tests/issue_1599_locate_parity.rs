@@ -35,6 +35,8 @@ use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use serial_test::serial;
 
+// key_cache_flush requires EVERY test in this binary to be bare `#[serial]` (one
+// shared group) so a flush never interleaves a sibling warm-read (issue #2714 r1828).
 #[path = "common/key_cache_flush.rs"]
 mod key_cache_flush;
 

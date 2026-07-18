@@ -38,6 +38,8 @@ use std::sync::Arc;
 
 use cqlite_core::storage::sstable::read_work_counters as rwc;
 
+// key_cache_flush requires EVERY test in this binary to be bare `#[serial]` (one
+// shared group) so a flush never interleaves a sibling warm-read (issue #2714 r1828).
 #[path = "common/key_cache_flush.rs"]
 mod key_cache_flush;
 

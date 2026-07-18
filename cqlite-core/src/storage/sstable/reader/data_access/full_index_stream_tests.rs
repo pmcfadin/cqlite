@@ -426,7 +426,13 @@ async fn stream_for_compaction_emits_every_partition_windowed() {
 /// scan's increments and no concurrent test on another thread can inflate them. No
 /// global `reset()` and no `#[serial(work_counters)]` tag needed — see the
 /// `read_work_counters::read_work_scope` module doc for the full rationale.
+// `#[serial(work_counters)]` (issue #2714 roborev 1828): the `ReadWorkScope` makes
+// THIS test's index_probes/seek assertions immune, but its windowed scan performs
+// real reads that bump the process-global `READ_CALLS`; the tag keeps it in the ONE
+// shared `work_counters` group with `block_io`'s exact-`READ_CALLS` guard so it never
+// runs concurrently with a sibling that asserts an exact global read-counter delta.
 #[tokio::test]
+#[serial(work_counters)]
 async fn windowed_stream_read_pattern_is_sequential() {
     use crate::storage::sstable::read_work_counters as rwc;
     const N: i32 = 500;
@@ -633,8 +639,13 @@ async fn write_multi_window_fixture(
 /// this uncompressed non-stitching walk records both
 /// its per-partition (non-)probe and its window-refill seeks INLINE on this
 /// current-thread `#[tokio::test]`, so the scope captures exactly this scan's
-/// increments — no global `reset()`, no serial tag, no cross-thread contamination.
+/// increments — no global `reset()`. `#[serial(work_counters)]` is KEPT (issue #2714
+/// roborev 1828), the complementary tag: the scope makes THIS test's assertions
+/// immune to others, while the tag keeps its real windowed-scan `READ_CALLS` writes
+/// from contaminating `block_io`'s exact-`READ_CALLS` guard — both live in the ONE
+/// shared `work_counters` read-counter group.
 #[tokio::test]
+#[serial(work_counters)]
 async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
     use crate::storage::sstable::read_work_counters as rwc;
 

@@ -24,14 +24,23 @@
 /// test order. `#[allow(dead_code)]`: a binary may include this file for a subset of
 /// its guards.
 ///
-/// # Invariant — the caller AND every sibling in the binary MUST be `#[serial]`
+/// # Invariant — the caller AND every sibling MUST share the BARE `#[serial]` group
 ///
 /// This is a PROCESS-GLOBAL flush. In a binary where any counter guard relies on a
 /// warm cache (a "second read is a cache HIT / zero probes" assertion), a flush that
 /// lands MID-un-serialized-sibling wipes that sibling's warm state and breaks its
 /// assertion. So every test in a binary that calls this — and every warm-read guard
-/// beside it — MUST carry `#[serial]` (a shared serial group) so the flush can never
-/// interleave with another guard's measured window.
+/// beside it — MUST be in ONE shared serial group so the flush can never interleave
+/// with another guard's measured window.
+///
+/// REQUIRED GROUP: the BARE `#[serial]` (default serial-test group). All four
+/// binaries that include this helper (`issue_1599_locate_parity`,
+/// `issue_1570_key_offset_cache`, `issue_1574_bti_single_walk`,
+/// `issue_1566_read_work_counters`) use bare `#[serial]` for EVERY test — audited in
+/// #2714 roborev 1828. Do NOT introduce a keyed `#[serial(name)]` into these binaries:
+/// bare `#[serial]` and `#[serial(name)]` are DIFFERENT groups that do NOT serialize
+/// against each other, so a keyed test could run concurrently with a flush and
+/// corrupt a sibling's warm-read assertion.
 #[allow(dead_code)]
 pub fn flush_global_key_cache() {
     cqlite_core::storage::cache::GlobalKeyOffsetCache::global().invalidate_all();
