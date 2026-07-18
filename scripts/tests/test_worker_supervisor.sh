@@ -1928,6 +1928,30 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Test 44 (#2670 / roborev 1837 MED): a grace loop CUT SHORT by the stop-file
+# (a requested shutdown mid-grace) is NOT a confirmed mismatch — the PR state was
+# never allowed to settle, so verify_finalized_pr must return the NEUTRAL `aborted`
+# verdict, NEVER `mismatch:OPEN` (which the caller turns into an abnormal "worker
+# forged a finalize" HIGH page + breaker+1). `aborted` is also distinct from
+# `unverified` so an ordinary shutdown cannot accumulate the unverified-outage
+# streak. Unit-tests verify_finalized_pr directly with an already-present stop-file.
+# ---------------------------------------------------------------------------
+test_mid_grace_stop_is_aborted() {
+  local d out
+  d="$(new_case_dir)"
+  touch "$d/stop"
+  # shellcheck disable=SC2016  # $1 expands inside the sub-bash, not here.
+  out="$(GH_VERIFY_CMD='printf %s "{\"state\":\"OPEN\",\"autoMergeRequest\":null}"' \
+        MISMATCH_RETRIES=5 MISMATCH_RETRY_WAIT_SECS=0 STOP_FILE="$d/stop" \
+        bash -c 'source "$1"; verify_finalized_pr 42' _ "$SUPERVISOR" 2>/dev/null)"
+  if [[ "$out" == "aborted" ]]; then
+    pass "mid-grace stop: shutdown cuts grace short → aborted (neutral; not a forged-finalize mismatch)"
+  else
+    fail "mid-grace-stop: got '$out' (expected aborted, NOT mismatch:* / unverified)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -1989,5 +2013,6 @@ test_stop_file_honored_mid_grace
 test_persistent_pending_automerge_stops
 test_probe_list_derives_from_count_set
 test_grace_cap_disabled_semantics
+test_mid_grace_stop_is_aborted
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

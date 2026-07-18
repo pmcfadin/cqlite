@@ -495,11 +495,29 @@ print("armed" if d.get("autoMergeRequest") else "")
     # wall-clock guard only binds when there is an actual per-retry wait — with
     # wait=0 the budget is 0, so instant retries stay count-bounded (not blocked).
     attempt=$((attempt + 1))
-    if [[ "$attempt" -lt "$MISMATCH_RETRIES" ]] && [[ ! -f "$STOP_FILE" ]] &&
-       { [[ "$grace_budget" -le 0 ]] || [[ $(( $(date +%s) - grace_start )) -lt "$grace_budget" ]]; }; then
+    if [[ "$attempt" -lt "$MISMATCH_RETRIES" ]]; then
+      # Retries remain, but the grace loop is being CUT SHORT rather than by observing
+      # a stable non-merged state MISMATCH_RETRIES times. The PR state was never allowed
+      # to settle, so reporting it as a forged finalize (abnormal + HIGH page + breaker)
+      # would falsely accuse a worker whose endgame was merely interrupted (roborev 1837).
+      #  - stop-file present  → `aborted`: a NEUTRAL non-verdict (the supervisor is
+      #    shutting down; it is neither a forged mismatch NOR a verification outage, so it
+      #    must not accumulate the unverified-outage streak and trip verify-unavailable
+      #    during an ordinary shutdown).
+      #  - wall-clock budget spent (no shutdown) → `unverified` (transport-class): we
+      #    genuinely could not confirm the state in the allotted grace.
+      if [[ -f "$STOP_FILE" ]]; then
+        printf 'aborted'
+        return 0
+      fi
+      if [[ "$grace_budget" -gt 0 ]] && [[ $(( $(date +%s) - grace_start )) -ge "$grace_budget" ]]; then
+        printf 'unverified'
+        return 0
+      fi
       sleep "$MISMATCH_RETRY_WAIT_SECS"
       continue
     fi
+    # Retries exhausted on a stable, resolved, non-merged state — a genuine mismatch.
     printf 'mismatch:%s' "$state"
     return 0
   done
@@ -824,6 +842,17 @@ run_iteration() {
               log "iteration $ITER: $CONSECUTIVE_PENDING consecutive pending-automerge (>= PENDING_AUTOMERGE_MAX=$PENDING_AUTOMERGE_MAX); stopping (automerge-stuck)"
               finalize_exit "automerge-stuck" 1
             fi
+            ;;
+          aborted)
+            # The finalize verification was cut short by a requested shutdown mid-grace
+            # (roborev 1837): the stop-file appeared before the PR state could settle.
+            # This is NOT a verdict about the worker — it is neutral. Journal it, do NOT
+            # count it toward MAX_ISSUES, do NOT increment the unverified-outage streak
+            # (so an ordinary shutdown can't false-trip verify-unavailable), do NOT page,
+            # and leave the breaker untouched. The main loop exits on the stop-file at its
+            # next top.
+            journal_line "$ITER" "finalized-aborted" "$issue" "$pr" "$duration" "$rc" "" "aborted"
+            log "iteration $ITER finalized-aborted (verify interrupted by shutdown; neutral, not counted)"
             ;;
           mismatch:*)
             # The PR is NOT merged (OPEN / CLOSED-unmerged / UNRESOLVED forged ref)
