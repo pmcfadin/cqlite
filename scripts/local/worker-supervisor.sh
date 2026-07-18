@@ -39,6 +39,33 @@
 #               notify, exit 0) rather than looping until MAX_HOURS — it is
 #               retried exactly once, never auto-retried indefinitely.
 #
+#               Two "blocked" reasons are a distinct CLEAN PARK (issue #2666,
+#               park-and-resume) rather than an owner-escalation:
+#                 reason=seam1-approval  — the worker hit Seam 1 (an unapproved
+#                                          design spec) in an unattended session.
+#                 reason=needs-decision  — a genuine mid-run owner decision.
+#               For either, the worker's contract is: post ONE structured
+#               question comment on the issue (rendered options + recommendation
+#               + default), add the `needs-decision` label, write this marker
+#               (optionally an extra "question" field = one-line question
+#               summary for the page), and EXIT — releasing the machine. NEVER
+#               wait, NEVER call AskUserQuestion unattended. The supervisor
+#               judges these NORMAL: verdict `parked-on-owner`, never toward the
+#               breaker, does NOT head-block the queue (the labeled issue is
+#               excluded from the worker's next pickup until the owner answers
+#               and the label clears), fires ONE high-priority page, and moves
+#               on to the next Ready issue.
+#
+# stuck-on-question (mid-iteration, no marker) — a worker WEDGED on an
+#               interactive prompt (AskUserQuestion / permission prompt / menu)
+#               in an unattended session never writes a marker; it just burns
+#               MAX_ITER_SECS and would look "abnormal". A lightweight watchdog
+#               tails the live iter-N.log every STUCK_POLL_SECS for prompt
+#               signatures; on a hit it pages the owner immediately and records
+#               verdict `stuck-on-question` when the worker later exits without
+#               a clean marker. This verdict is NOT abnormal and never counts
+#               toward BREAKER_N.
+#
 # Any other outcome value, a marker missing required fields, a nonzero worker
 # exit code, OR no marker file present when the worker process exits => the
 # iteration is judged ABNORMAL and counts toward BREAKER_N. The supervisor
@@ -60,6 +87,11 @@ BREAKER_N="${BREAKER_N:-3}"
 BACKOFF_NOWORK_SECS="${BACKOFF_NOWORK_SECS:-900}"
 HOLD_POLL_SECS="${HOLD_POLL_SECS:-300}"
 MAX_ITER_SECS="${MAX_ITER_SECS:-7200}"
+# Mid-iteration stuck-on-question watchdog (issue #2666): how often to tail the
+# live worker log for an interactive-prompt signature, and the signatures to
+# match. Both env-overridable (tests tighten the poll interval).
+STUCK_POLL_SECS="${STUCK_POLL_SECS:-30}"
+PROMPT_SIGNATURE_RE="${PROMPT_SIGNATURE_RE:-AskUserQuestion|Do you want to|waiting for input|❯}"
 
 SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock}"
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
@@ -124,6 +156,26 @@ notify() {
 
 is_gt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)>(b+0)) exit 0; exit 1 }'; }
 is_lt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)<(b+0)) exit 0; exit 1 }'; }
+
+# detect_prompt_signature <logfile>: true (exit 0) when the tail of the worker's
+# live log shows an interactive-prompt signature — a wedged AskUserQuestion, a
+# permission prompt, a `❯` menu block, or a "waiting for input" line (issue
+# #2666). Best-effort sensor, tuned to the unattended-session invariant that the
+# worker NEVER legitimately prompts (it parks instead — see the marker contract).
+detect_prompt_signature() {
+  local logfile="$1"
+  [[ -f "$logfile" ]] || return 1
+  tail -n 80 "$logfile" 2>/dev/null | grep -qE "$PROMPT_SIGNATURE_RE"
+}
+
+# captured_question <logfile>: the matching prompt line(s), collapsed to a single
+# ≤300-char line for the ntfy body. Empty when nothing matched.
+captured_question() {
+  local logfile="$1"
+  [[ -f "$logfile" ]] || return 0
+  tail -n 80 "$logfile" 2>/dev/null | grep -E "$PROMPT_SIGNATURE_RE" 2>/dev/null \
+    | head -n 3 | tr '\n' ' ' | cut -c1-300
+}
 
 marker_field() {
   local field="$1"
@@ -209,29 +261,6 @@ acquire_lock() {
 }
 
 # ---------------------------------------------------------------------------
-# Portable timeout wrapper (GNU coreutils `timeout` is not guaranteed on macOS).
-# ---------------------------------------------------------------------------
-run_with_timeout() {
-  local secs="$1"
-  shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$secs" "$@"
-  else
-    "$@" &
-    local pid=$!
-    (sleep "$secs" && kill -TERM "$pid" 2>/dev/null) &
-    local watcher=$!
-    local rc=0
-    wait "$pid" || rc=$?
-    kill "$watcher" 2>/dev/null || true
-    wait "$watcher" 2>/dev/null || true
-    return "$rc"
-  fi
-}
-
-# ---------------------------------------------------------------------------
 # Preflight: fail-closed, wait-don't-spin. Returns a hold reason on stdout, or
 # empty when clear. stop-file / budgets are handled by the caller (clean exit,
 # not a hold).
@@ -306,14 +335,58 @@ run_iteration() {
   rm -f "$MARKER_FILE"
   mkdir -p "$LOG_DIR"
   local logfile="$LOG_DIR/iter-${ITER}.log"
+  local stuck_flag="$LOG_DIR/.iter-${ITER}.stuck"
+  rm -f "$stuck_flag"
   local t0 t1 rc=0
   t0=$(date +%s)
+  # Spawn the worker in the background and supervise it with ONE poll loop that
+  # does two jobs at once (issue #2666): enforce MAX_ITER_SECS (portably — no
+  # coreutils `timeout` on macOS), and tail the live log for interactive-prompt
+  # signatures. A worker wedged on a prompt in an unattended session is invisible
+  # to an exit-only judge — it just burns MAX_ITER_SECS and looks "abnormal".
+  # The watchdog pages the owner the instant a signature appears and records a
+  # `stuck-on-question` verdict so the wedge never counts toward the breaker.
   set +e
-  run_with_timeout "$MAX_ITER_SECS" bash -c "$WORKER_CMD" >"$logfile" 2>&1
+  bash -c "$WORKER_CMD" >"$logfile" 2>&1 &
+  local wpid=$!
+  local deadline=$((t0 + MAX_ITER_SECS))
+  local stuck_notified=0 g
+  while kill -0 "$wpid" 2>/dev/null; do
+    if [[ "$(date +%s)" -ge "$deadline" ]]; then
+      log "iteration $ITER exceeded MAX_ITER_SECS=${MAX_ITER_SECS}s; terminating worker"
+      kill -TERM "$wpid" 2>/dev/null
+      g=0
+      while kill -0 "$wpid" 2>/dev/null && [[ "$g" -lt 5 ]]; do sleep 1; g=$((g + 1)); done
+      kill -KILL "$wpid" 2>/dev/null
+      break
+    fi
+    if [[ "$stuck_notified" -eq 0 ]] && detect_prompt_signature "$logfile"; then
+      local qtext
+      qtext="$(captured_question "$logfile")"
+      printf '%s' "$qtext" >"$stuck_flag"
+      notify "high" "worker-supervisor: stuck-on-question (iter $ITER)" \
+        "worker appears blocked on an interactive prompt: ${qtext:-<no text captured>}"
+      log "iteration $ITER: interactive-prompt signature detected; paged owner (stuck-on-question)"
+      stuck_notified=1
+    fi
+    sleep "$STUCK_POLL_SECS"
+  done
+  wait "$wpid"
   rc=$?
   set -e
   t1=$(date +%s)
   local duration=$((t1 - t0))
+
+  # A live-but-prompt-blocked worker (detected mid-iteration) that then exits
+  # without a trustworthy clean marker is a PARK-shaped stall, not a crash:
+  # verdict `stuck-on-question`, owner already paged, NOT counted toward the
+  # breaker (issue #2666). Guarded on "no clean marker" so a late false-positive
+  # signature can never mask a real finalized/park outcome.
+  if [[ -f "$stuck_flag" ]] && { [[ "$rc" -ne 0 ]] || [[ ! -f "$MARKER_FILE" ]]; }; then
+    journal_line "$ITER" "stuck-on-question" "" "" "$duration" "$rc" "$(cat "$stuck_flag" 2>/dev/null)"
+    log "iteration $ITER stuck-on-question (owner paged; not counted toward breaker)"
+    return 0
+  fi
 
   if [[ "$rc" -ne 0 ]] || [[ ! -f "$MARKER_FILE" ]]; then
     journal_line "$ITER" "abnormal" "" "" "$duration" "$rc"
@@ -322,11 +395,12 @@ run_iteration() {
     return 0
   fi
 
-  local outcome issue pr reason
+  local outcome issue pr reason question
   outcome="$(marker_field outcome)"
   issue="$(marker_field issue)"
   pr="$(marker_field pr)"
   reason="$(marker_field reason)"
+  question="$(marker_field question)"
 
   case "$outcome" in
     finalized)
@@ -352,19 +426,39 @@ run_iteration() {
       ;;
     blocked)
       CONSECUTIVE_ABNORMAL=0
-      journal_line "$ITER" "blocked" "$issue" "$pr" "$duration" "$rc" "$reason"
-      if [[ -n "$issue" && "$issue" == "$LAST_BLOCKED_ISSUE" ]]; then
-        # F2: the SAME issue blocked on two consecutive iterations means the
-        # queue is head-blocked — looping would just reset the breaker every
-        # time and burn wall-clock budget until MAX_HOURS with no progress.
-        # Stop cleanly and page the owner instead.
-        notify "high" "worker-supervisor: issue $issue persistently blocked" "issue #$issue persistently blocked — queue is head-blocked, needs owner"
-        log "issue $issue blocked on two consecutive iterations; queue is head-blocked, stopping"
-        finalize_exit "head-blocked" 0
-      fi
-      LAST_BLOCKED_ISSUE="$issue"
-      notify "info" "worker-supervisor: blocked on issue $issue" "${reason:-no reason given}"
-      log "remembered blocked issue $LAST_BLOCKED_ISSUE (not auto-retried this run)"
+      case "$reason" in
+        seam1-approval | needs-decision)
+          # CLEAN PARK (issue #2666, park-and-resume). The worker hit Seam 1 (an
+          # unapproved design spec) or a genuine mid-run owner decision: it posted
+          # ONE structured question comment, added the `needs-decision` label, and
+          # released the machine. Judged NORMAL — never abnormal, never toward the
+          # breaker — and it does NOT head-block the queue: the labeled issue is
+          # excluded from the worker's next pickup until the owner answers and the
+          # label clears, so the loop moves straight to the next Ready issue. Fire
+          # ONE high-priority page whose title carries the issue # and the first
+          # line of the question (the marker's optional "question" field).
+          journal_line "$ITER" "parked-on-owner" "$issue" "$pr" "$duration" "$rc" "$reason"
+          local qline="${question:-$reason}"
+          notify "high" "worker-supervisor: parked issue $issue — ${qline}" \
+            "issue #$issue parked awaiting owner (${reason}). Answer the needs-decision question comment on the issue; the worker resumes on a newer owner reply."
+          log "issue $issue parked-on-owner ($reason); moving to next Ready issue"
+          ;;
+        *)
+          journal_line "$ITER" "blocked" "$issue" "$pr" "$duration" "$rc" "$reason"
+          if [[ -n "$issue" && "$issue" == "$LAST_BLOCKED_ISSUE" ]]; then
+            # F2: the SAME issue blocked on two consecutive iterations means the
+            # queue is head-blocked — looping would just reset the breaker every
+            # time and burn wall-clock budget until MAX_HOURS with no progress.
+            # Stop cleanly and page the owner instead.
+            notify "high" "worker-supervisor: issue $issue persistently blocked" "issue #$issue persistently blocked — queue is head-blocked, needs owner"
+            log "issue $issue blocked on two consecutive iterations; queue is head-blocked, stopping"
+            finalize_exit "head-blocked" 0
+          fi
+          LAST_BLOCKED_ISSUE="$issue"
+          notify "info" "worker-supervisor: blocked on issue $issue" "${reason:-no reason given}"
+          log "remembered blocked issue $LAST_BLOCKED_ISSUE (not auto-retried this run)"
+          ;;
+      esac
       ;;
     *)
       journal_line "$ITER" "abnormal" "$issue" "$pr" "$duration" "$rc"
@@ -399,4 +493,9 @@ main() {
   done
 }
 
-main "$@"
+# Run the loop only when executed directly; when sourced (e.g. by the tooling
+# tests to exercise detect_prompt_signature/captured_question in isolation) the
+# functions are defined but the machine-guarding loop never starts.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
