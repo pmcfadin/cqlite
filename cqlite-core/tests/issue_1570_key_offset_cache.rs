@@ -16,8 +16,11 @@
 //!
 //! Plus the negative (absent-key) counterpart for both formats: a key the SSTable
 //! does NOT contain resolves to authoritative absence on every read and is NEVER
-//! cached (positive-only insert discipline), so a repeated absent lookup still
-//! re-probes `Index.db` / re-walks the trie (`INDEX_PROBES`/`TRIE_WALKS >= 1`).
+//! cached (positive-only insert discipline). BIG proves this via `INDEX_PROBES >= 1`
+//! on the re-read (the absent key was never positively cached). BTI proves it
+//! directly on the B4 cache: a repeated absent read registers NO B4 cache HIT — the
+//! deterministic property, immune to the reader-local C3 single-walk memo that made
+//! the old `TRIE_WALKS >= 1` proxy flaky (issue #2674).
 //!
 //! Compiled only with `--features work-counters` (the counter getters/`reset` live
 //! behind it). Requires `CQLITE_DATASETS_ROOT`; each test self-skips (never fails)
@@ -519,7 +522,8 @@ mod bti {
             "B4/BTI absent: the repeated absent read must still return zero rows"
         );
         assert_eq!(
-            hits_after, hits_before,
+            hits_after,
+            hits_before,
             "B4/BTI absent: a repeated absent read must NOT be served from the B4 key cache \
              (positive-only insert discipline — a clean trie miss is never negatively cached); \
              the re-read registered {} B4 cache hit(s), indicating the absent key was cached \
