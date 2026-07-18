@@ -41,19 +41,25 @@ cargo clippy --package cqlite-core --all-targets --all-features -- -D warnings
 This Clippy command is a hard gate. A green `cargo test` run is not sufficient
 for `cqlite-core` changes.
 
-## Retired Global Requirements
+## Retired Global Requirements (reconciled, issue #2648)
 
-These legacy contexts remain in `.github/branch-protection.json` during Wave 1
-so the checked-in config does not require a missing workflow:
+The migration is complete. Live branch protection requires a single status
+check — `required` (produced by the `required` job in `pr-gate.yml`) — with
+`strict = false`. As of issue #2648 the checked-in `.github/branch-protection.json`
+has been reconciled to that live truth (single `required` context, `strict: false`),
+so the committed config can no longer restore the retired legacy contexts:
 
 - `CI / test`
 - `CI: Core Library (minimal) / m1-core-validation`
 - `CI: Core Library (minimal) / sstabledump-parity-m1`
 - `CI: SSTableDump Parity Gate / sstabledump-parity`
 
-They should be retired as global branch-protection requirements when #1364
-lands. They may continue to run as targeted, nightly, or release checks, but
-they must not be reintroduced as globally required PR checks after the migration.
+These are retired as global branch-protection requirements. The stub workflow
+`m1-ci.yml` (which existed only to keep the two `m1` contexts emitted) has been
+deleted, and the transitional compile shim inside `CI / test` has been removed
+(the `test` job is retained as a non-required broad-CI aggregator). These
+contexts may continue to run as targeted, nightly, or release checks, but they
+must not be reintroduced as globally required PR checks.
 
 ## Quality-Gates Workflow
 

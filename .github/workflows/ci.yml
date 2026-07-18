@@ -18,9 +18,9 @@ on:
   pull_request:
     branches: [ main ]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-    # Keep the legacy required "CI / test" context emitted for every PR until
-    # branch protection moves to "Required PR Gate / required". The broad lanes
-    # below opt in separately via the ci:broad label.
+    # "CI / test" is no longer a required branch-protection context; the sole
+    # required check is "Required PR Gate / required" (pr-gate.yml). The broad
+    # lanes below opt in via the ci:broad label / push / workflow_dispatch.
     paths-ignore:
       - '__required_ci_context_never_matches__'
   workflow_dispatch:
@@ -884,35 +884,13 @@ jobs:
           (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
         }}
     steps:
-      - name: Checkout for transitional required context
-        if: ${{ env.RUN_BROAD != 'true' }}
-        uses: actions/checkout@v5
-
-      - name: Setup Rust for transitional required context
-        if: ${{ env.RUN_BROAD != 'true' }}
-        uses: ./.github/actions/setup-rust-ci
-        with:
-          components: rustfmt,clippy
-          cache-key: ci-required-context
-
-      - name: Run transitional required context
-        if: ${{ env.RUN_BROAD != 'true' }}
-        run: >-
-          bash scripts/ci/ci-timing-summary.sh measure
-          "transitional pre-merge fast"
-          -- bash scripts/local/pre-merge.sh fast
-
-      - name: CI runtime timing summary
-        if: ${{ always() && env.RUN_BROAD != 'true' }}
-        run: bash scripts/ci/ci-timing-summary.sh summary "CI transitional required context timing"
-
       - name: Check split test jobs
         run: |
           set -euo pipefail
 
           if [ "${RUN_BROAD}" != "true" ]; then
-            echo "CI / test is retained as a transitional required context."
-            echo "Required Rust fmt/clippy/build/fast tests now run in Required PR Gate / required."
+            echo "CI / test is a non-required aggregator; broad lanes are opt-in."
+            echo "Required Rust fmt/clippy/build/fast tests run in Required PR Gate / required."
             echo "Add the ci:broad label, push to main, or dispatch this workflow with scope=broad to run the broad CI lanes."
             exit 0
           fi

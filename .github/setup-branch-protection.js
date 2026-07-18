@@ -154,7 +154,8 @@ function verifyProtection() {
     const checks = [
       {
         name: 'Status checks required',
-        condition: protection.required_status_checks?.strict === true,
+        condition: Array.isArray(protection.required_status_checks?.contexts) &&
+          protection.required_status_checks.contexts.length > 0,
         critical: true
       },
       {
