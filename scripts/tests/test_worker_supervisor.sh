@@ -232,6 +232,78 @@ EOF
   chmod +x "$path"
 }
 
+# issue #2666 / roborev 1769: abnormal → stuck → abnormal → abnormal → finalize.
+# The stuck iteration (call 2) must RESET the consecutive-abnormal counter so the
+# crash chain is broken and BREAKER_N=3 never trips; call 5 finalizes so the run
+# terminates at MAX_ISSUES.
+write_abnormal_stuck_abnormal_finalize_stub() {
+  local path="$1" call_ctr="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+calls=0
+[[ -f "$call_ctr" ]] && calls=\$(cat "$call_ctr")
+calls=\$((calls + 1))
+echo "\$calls" >"$call_ctr"
+case \$calls in
+  1|3|4) exit 1 ;;
+  2)
+    echo "AskUserQuestion: choose an option"
+    sleep 120 ;;
+  *)
+    cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":91,"pr":"https://example.invalid/pull/91","duration_s":1}
+JSON
+    ;;
+esac
+EOF
+  chmod +x "$path"
+}
+
+# issue #2666 / roborev 1769: parks the SAME issue with a park reason on EVERY
+# call (never finalizes) — proves the park-path head-block guard stops after the
+# same issue parks on two consecutive iterations.
+write_park_same_issue_stub() {
+  local path="$1" issue="$2" reason="${3:-needs-decision}"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"\$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":$issue,"pr":null,"duration_s":1,"reason":"$reason","question":"same question"}
+JSON
+EOF
+  chmod +x "$path"
+}
+
+# issue #2666 / roborev 1769: parks issue 41, then a DIFFERENT issue 42, then
+# finalizes — proves distinct-issue parks do NOT trip the head-block guard.
+write_park_two_issues_then_finalize_stub() {
+  local path="$1" call_ctr="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+calls=0
+[[ -f "$call_ctr" ]] && calls=\$(cat "$call_ctr")
+calls=\$((calls + 1))
+echo "\$calls" >"$call_ctr"
+case \$calls in
+  1) cat >"\$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":41,"pr":null,"duration_s":1,"reason":"needs-decision","question":"q41"}
+JSON
+    ;;
+  2) cat >"\$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":42,"pr":null,"duration_s":1,"reason":"needs-decision","question":"q42"}
+JSON
+    ;;
+  *) cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":43,"pr":"https://example.invalid/pull/43","duration_s":1}
+JSON
+    ;;
+esac
+EOF
+  chmod +x "$path"
+}
+
 # ---------------------------------------------------------------------------
 # Common env baseline: every test starts here, then overrides what it needs.
 # Clear preflight (no holds), generous budgets, fast polling/backoff.
@@ -654,7 +726,11 @@ test_stuck_on_question_detected() {
   export WORKER_CMD="$d/bin/worker.sh"
   export MAX_ISSUES=1
   export BREAKER_N=1
-  export MAX_ITER_SECS=3
+  # Generous deadline headroom: the watchdog detects on its first poll (~1s in);
+  # a large MAX_ITER_SECS keeps detection well ahead of the deadline-kill even
+  # under a heavily loaded box (the wedged stub sleeps 120s, so it is always
+  # killed by the deadline, never by exiting on its own).
+  export MAX_ITER_SECS=10
   export STUCK_POLL_SECS=1
   jf="$JOURNAL_FILE"
 
@@ -704,6 +780,94 @@ test_prompt_signature_grep() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 16 (#2666 / roborev 1769): a stuck-on-question iteration RESETS the
+# consecutive-abnormal counter — the chain abnormal→stuck→abnormal→abnormal must
+# NOT trip a BREAKER_N=3 breaker (the stuck iteration breaks the chain). Call 5
+# finalizes so the run terminates at MAX_ISSUES=1.
+# ---------------------------------------------------------------------------
+test_stuck_breaks_abnormal_chain() {
+  local d call_ctr jf rc scount acount fcount
+  d="$(new_case_dir)"
+  call_ctr="$d/calls"
+  common_env "$d"
+  write_abnormal_stuck_abnormal_finalize_stub "$d/bin/worker.sh" "$call_ctr"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=3
+  # Headroom so the stuck iteration (call 2) is reliably DETECTED (not
+  # deadline-killed before the first poll) even under load — the whole point of
+  # this test is that a detected stuck iteration resets the abnormal chain.
+  export MAX_ITER_SECS=10
+  export STUCK_POLL_SECS=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  scount=$(jline_count "$jf" '"outcome":"stuck-on-question"')
+  acount=$(jline_count "$jf" '"outcome":"abnormal"')
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  if [[ "$rc" -eq 0 && "$scount" -eq 1 && "$acount" -eq 3 && "$fcount" -eq 1 ]] &&
+     ! grep -q '"reason":"breaker"' "$jf"; then
+    pass "stuck breaks abnormal chain: 3 abnormals split by a stuck iter never trip BREAKER_N=3"
+  else
+    fail "stuck-chain: rc=$rc stuck=$scount abnormal=$acount finalized=$fcount (see $jf)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 17 (#2666 / roborev 1769): the SAME issue parking on two consecutive
+# iterations → head-block-on-decision page + clean stop (mirrors the F2
+# blocked-path guard); never loops to MAX_ISSUES.
+# ---------------------------------------------------------------------------
+test_repeated_park_same_issue_stops() {
+  local d jf rc pcount hb
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_park_same_issue_stub "$d/bin/worker.sh" 33 "needs-decision"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  pcount=$(jline_count "$jf" '"outcome":"parked-on-owner"')
+  hb=$(grep -c '^error|worker-supervisor: issue 33 head-blocked on decision' "$NOTIFY_LOG" 2>/dev/null || true)
+  if [[ "$rc" -eq 0 && "$pcount" -eq 2 && "$hb" -ge 1 ]] && grep -q '"reason":"head-blocked-decision"' "$jf"; then
+    pass "repeated park (same issue): head-blocked-on-decision page + clean stop after 2"
+  else
+    fail "repeated-park: rc=$rc parked=$pcount head_block=$hb (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 18 (#2666 / roborev 1769): parks of DIFFERENT issues do NOT trip the
+# head-block guard — issue 41 then 42 park, then a finalize terminates the run.
+# ---------------------------------------------------------------------------
+test_different_issue_parks_do_not_head_block() {
+  local d call_ctr jf rc pcount fcount
+  d="$(new_case_dir)"
+  call_ctr="$d/calls"
+  common_env "$d"
+  write_park_two_issues_then_finalize_stub "$d/bin/worker.sh" "$call_ctr"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=100
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  pcount=$(jline_count "$jf" '"outcome":"parked-on-owner"')
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  if [[ "$rc" -eq 0 && "$pcount" -eq 2 && "$fcount" -eq 1 ]] &&
+     ! grep -q '"reason":"head-blocked-decision"' "$jf" && ! grep -q 'head-blocked on decision' "$NOTIFY_LOG"; then
+    pass "different-issue parks: no head-block, loop advances through both then finalizes"
+  else
+    fail "different-park: rc=$rc parked=$pcount finalized=$fcount (see $jf, $NOTIFY_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -737,5 +901,8 @@ test_park_needs_decision_question_in_title
 test_unknown_outcome_is_abnormal
 test_stuck_on_question_detected
 test_prompt_signature_grep
+test_stuck_breaks_abnormal_chain
+test_repeated_park_same_issue_stops
+test_different_issue_parks_do_not_head_block
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

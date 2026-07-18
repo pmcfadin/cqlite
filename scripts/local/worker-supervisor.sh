@@ -51,10 +51,15 @@
 #               summary for the page), and EXIT — releasing the machine. NEVER
 #               wait, NEVER call AskUserQuestion unattended. The supervisor
 #               judges these NORMAL: verdict `parked-on-owner`, never toward the
-#               breaker, does NOT head-block the queue (the labeled issue is
-#               excluded from the worker's next pickup until the owner answers
-#               and the label clears), fires ONE high-priority page, and moves
-#               on to the next Ready issue.
+#               breaker, and normally does NOT head-block the queue (the labeled
+#               issue is excluded from the worker's next pickup until the owner
+#               answers and the label clears), fires ONE high-priority page, and
+#               moves on to the next Ready issue. Safety valve (mirrors the
+#               blocked-path F2 guard): if the SAME issue parks on two
+#               consecutive iterations — the label evidently never applied, so
+#               the pickup exclusion is not holding — the supervisor pages the
+#               owner (head-blocked-on-decision) and STOPS cleanly rather than
+#               re-asking one question until MAX_ISSUES.
 #
 # stuck-on-question (mid-iteration, no marker) — a worker WEDGED on an
 #               interactive prompt (AskUserQuestion / permission prompt / menu)
@@ -311,6 +316,7 @@ ITER=0
 ISSUES_DONE=0
 CONSECUTIVE_ABNORMAL=0
 LAST_BLOCKED_ISSUE=""
+LAST_PARKED_ISSUE=""
 START_TS=$(date +%s)
 MAX_HOURS_SECS=$((MAX_HOURS * 3600))
 
@@ -383,8 +389,14 @@ run_iteration() {
   # breaker (issue #2666). Guarded on "no clean marker" so a late false-positive
   # signature can never mask a real finalized/park outcome.
   if [[ -f "$stuck_flag" ]] && { [[ "$rc" -ne 0 ]] || [[ ! -f "$MARKER_FILE" ]]; }; then
+    # NEUTRAL, not transparent: like every other non-abnormal verdict this
+    # resets the consecutive-abnormal counter, so a real prior crash chain is
+    # BROKEN by a stuck iteration rather than silently continuing across it
+    # (roborev 1769: `abnormal → stuck → abnormal → abnormal` must not trip
+    # BREAKER_N=3). The owner has already been paged.
+    CONSECUTIVE_ABNORMAL=0
     journal_line "$ITER" "stuck-on-question" "" "" "$duration" "$rc" "$(cat "$stuck_flag" 2>/dev/null)"
-    log "iteration $ITER stuck-on-question (owner paged; not counted toward breaker)"
+    log "iteration $ITER stuck-on-question (owner paged; breaker chain reset, not counted)"
     return 0
   fi
 
@@ -438,6 +450,18 @@ run_iteration() {
           # ONE high-priority page whose title carries the issue # and the first
           # line of the question (the marker's optional "question" field).
           journal_line "$ITER" "parked-on-owner" "$issue" "$pr" "$duration" "$rc" "$reason"
+          if [[ -n "$issue" && "$issue" == "$LAST_PARKED_ISSUE" ]]; then
+            # Head-block-on-decision guard (mirrors the F2 blocked-path guard,
+            # roborev 1769): the SAME issue parked on two consecutive iterations
+            # means the worker keeps re-parking it — typically because the
+            # `needs-decision` label never applied, so the pickup exclusion is not
+            # holding and the loop would burn to MAX_ISSUES re-asking one question.
+            # Page the owner and STOP cleanly instead of looping.
+            notify "high" "worker-supervisor: issue $issue head-blocked on decision" "issue #$issue parked twice in a row (needs-decision) — queue head-blocked on an owner decision, needs owner"
+            log "issue $issue parked on two consecutive iterations; head-blocked on decision, stopping"
+            finalize_exit "head-blocked-decision" 0
+          fi
+          LAST_PARKED_ISSUE="$issue"
           local qline="${question:-$reason}"
           notify "high" "worker-supervisor: parked issue $issue — ${qline}" \
             "issue #$issue parked awaiting owner (${reason}). Answer the needs-decision question comment on the issue; the worker resumes on a newer owner reply."
