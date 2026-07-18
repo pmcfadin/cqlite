@@ -481,9 +481,23 @@ mod bti {
             return;
         };
 
-        // First read of the absent key: definitive miss (zero rows). A clean trie
-        // miss is the positive-only insert discipline's negative case — it must NOT
-        // create a B4 entry for the absent key.
+        let gc = cqlite_core::storage::cache::GlobalKeyOffsetCache::global();
+
+        // First read of the absent key: definitive miss (zero rows) that must NOT
+        // create a B4 entry (positive-only insert discipline).
+        //
+        // CLEAN-MISS PRECONDITION (issue #2674 roborev): capture the global B4 cache
+        // occupancy across this first read and assert it does not grow. A clean trie
+        // MISS resolves to `None` and never calls `key_cache_insert`, so the cache
+        // size is unchanged. If this assertion ever fires, the fixture's chosen
+        // "absent" key is a BTI prefix-collision CANDIDATE: the trie descent returns a
+        // candidate `DataOffset` (re-verified downstream to absence), which IS
+        // positively cached — and a later re-read would then legitimately HIT B4. That
+        // is fixture drift (the derived absent key collides on a trie prefix), NOT a
+        // cache bug, and it would invalidate the "no B4 hit" assertion below; this
+        // precondition diagnoses it explicitly rather than letting it surface as a
+        // confusing hit-counter failure.
+        let cache_len_before_absent = gc.len();
         let r_absent = db
             .execute(&sql_absent)
             .await
@@ -491,6 +505,14 @@ mod bti {
         assert!(
             r_absent.rows.is_empty(),
             "B4/BTI absent: an absent key must return zero rows (authoritative absence)"
+        );
+        assert_eq!(
+            gc.len(),
+            cache_len_before_absent,
+            "B4/BTI absent precondition: a clean trie-MISS absent key must not insert a B4 \
+             entry (positive-only insert discipline). If this fires, the fixture's 'absent' key \
+             is a BTI prefix-collision CANDIDATE whose candidate offset IS cached — fixture \
+             drift, not a cache bug; choose an absent key with no trie-prefix collision"
         );
 
         // Read present key A: exercises a real B4 populate for a DIFFERENT key, so a
@@ -510,7 +532,14 @@ mod bti {
         // to absence) — the hit counter must not advance. Had the first absent read
         // negatively cached the key (the perf/correctness defect this guard exists to
         // catch), the re-read would register a B4 HIT and this delta would be > 0.
-        let gc = cqlite_core::storage::cache::GlobalKeyOffsetCache::global();
+        //
+        // SINGLE-LOOKUP WINDOW (issue #2674 roborev): `hit_count()` is process-global,
+        // but this is a `#[serial]` test on a current-thread runtime, so no other test
+        // and no background task runs concurrently. The only B4 lookups between
+        // `hits_before` and `hits_after` are this ONE point read's own — a lookup of
+        // the absent key against each generation's reader (each a MISS, per the
+        // clean-miss precondition above). A non-zero delta therefore unambiguously
+        // means the absent key itself was served a B4 hit.
         let hits_before = gc.hit_count();
         let r_absent2 = db
             .execute(&sql_absent)
@@ -576,10 +605,26 @@ mod bti {
 
     /// Disabled-toggle wiring evidence (issue #1570 roborev): with
     /// `config.memory.block_cache.enabled == false` the reader builds a genuine
-    /// no-op key cache, so a repeated INTERLEAVED point read (A, B, A) re-walks the
-    /// `Partitions.db` trie on the second read of A — the single-entry C3 memo holds
-    /// B, so nothing else can serve A. Contrast the enabled test, which observes
-    /// `TRIE_WALKS == 0` on that same interleaved re-read.
+    /// no-op key cache ([`build_key_offset_cache`] hands back a
+    /// `GlobalKeyOffsetCache::disabled()` instance instead of the process-global
+    /// singleton), so NONE of this database's reads ever touch the global B4 cache.
+    ///
+    /// # Why this asserts on the global B4 cache, not `TRIE_WALKS` (issue #2674)
+    ///
+    /// The earlier form asserted `TRIE_WALKS >= 1` on a repeated interleaved read
+    /// (A, B, A), reasoning the C3 memo holds B so the re-read of A must re-descend.
+    /// That shares the EXACT memo-nondeterminism that made the absent-key guard flaky:
+    /// the reader-local C3 `bti_lookup_memo` is served by whichever pooled reader
+    /// instance handles the re-read, and when that reader's memo still held A the read
+    /// returned the memoized resolution WITHOUT a descent (`TRIE_WALKS == 0`) — a
+    /// legitimate single-walk hit, not a broken toggle. With the B4 cache disabled
+    /// there is no shared global cache to make the outcome deterministic, so the
+    /// proxy is unreliable. Instead assert the property the toggle actually controls:
+    /// a disabled reader routes to a no-op cache and NEVER serves from — or populates
+    /// — the process-global B4 cache. A decorative toggle (flag ignored, global cache
+    /// still used) would insert A/B and register a B4 HIT on the re-read of A; the
+    /// unchanged global hit counter proves the toggle is real. Deterministic and
+    /// memo-immune.
     #[tokio::test]
     #[serial]
     async fn bti_disabled_cache_rewalks_trie_on_interleaved_reread() {
@@ -598,29 +643,38 @@ mod bti {
             return;
         };
 
-        // Read A, then B — B now occupies the single-entry C3 memo. With the B4
-        // cache disabled, nothing holds A's resolution.
+        // Capture the process-global B4 cache hit counter. Every read below runs
+        // through this disabled database, whose readers hold a `disabled()` no-op
+        // cache — so the GLOBAL singleton must not be touched. `#[serial]` on a
+        // current-thread runtime means no other test/task advances this counter in
+        // the window.
+        let gc = cqlite_core::storage::cache::GlobalKeyOffsetCache::global();
+        let hits_before = gc.hit_count();
+
+        // Interleaved point reads A, B, A. With an ENABLED cache the final re-read of
+        // A is a B4 HIT (see `bti_repeated_interleaved_point_read_skips_trie_walk`);
+        // with the cache DISABLED it must not be, because the reader never consults
+        // the global cache at all.
         let ra = db.execute(&sql_a).await.expect("BTI point read A");
         assert!(
             !ra.rows.is_empty(),
             "B4/BTI disabled: key A must be present"
         );
         let _ = db.execute(&sql_b).await.expect("BTI point read B");
-
-        // Re-read A: the memo holds B and the key cache is disabled, so the read
-        // MUST descend the trie again (TRIE_WALKS >= 1) — the toggle is real.
-        rwc::reset();
-        assert_eq!(rwc::trie_walks(), 0, "reset must zero TRIE_WALKS");
         let ra2 = db.execute(&sql_a).await.expect("BTI repeated point read A");
         assert!(
             !ra2.rows.is_empty(),
             "B4/BTI disabled: repeated read of present key A returned zero rows"
         );
-        assert!(
-            rwc::trie_walks() >= 1,
-            "B4/BTI disabled: a disabled key cache must RE-WALK the trie on the interleaved \
-             re-read (TRIE_WALKS >= 1), proving the toggle is not decorative; got {}",
-            rwc::trie_walks()
+
+        assert_eq!(
+            gc.hit_count(),
+            hits_before,
+            "B4/BTI disabled: a disabled key cache must be a genuine no-op — none of the \
+             disabled database's reads may serve from the process-global B4 cache. The global \
+             hit counter advanced by {}, meaning the `block_cache.enabled == false` toggle is \
+             decorative (the reader still consulted the shared cache)",
+            gc.hit_count() - hits_before
         );
     }
 }
