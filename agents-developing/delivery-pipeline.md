@@ -215,6 +215,26 @@ issue per session). The supervisor adds a flock single-instance (mechanizing one
 fail-closed preflight (load/disk/leftover-process/stop-file), a crash-loop breaker, budgets, and ntfy
 notifications. See the [fleet runbook](https://github.com/pmcfadin/cqlite/blob/main/docs/development/fleet-runbook.md).
 
+**Supervisor-authored claim + CI-side reaper (issue #2655 / #2499 design).** Heartbeats used to depend on
+the worker LLM *remembering* to `beat`, and the reap threshold was enforced only in prose. Liveness is now
+**mechanism-driven**: the supervisor stamps `refs/machine-claims/<machine>` (issue + supervisor-PID + ts, via
+`claim-heartbeat.sh stamp`) at every worker spawn, refreshes it each iteration, and clears it on a clean
+exit — where `reap` **refuses to delete a claim whose issue still has an open PR** (an unfinished endgame
+stays owned for adoption rather than orphaned; the #2499 orphaned-endgame case). This `refs/machine-claims/*`
+namespace is deliberately distinct from `claim.sh`'s per-issue lock `refs/claims/issue-<N>`.
+`claim-heartbeat.sh should-reap <machine>` is the single, **fail-safe** reap predicate (exit `0` = reap,
+`1` = keep, `2` = no ref): it reaps ONLY when age > threshold (4h) **AND** the issue has no open PR **AND**
+(the PID is dead, *when the claim is local* — a foreign machine's PID is unknowable, so from CI that clause
+is skipped and age + no-open-PR govern). It KEEPS on a fresh ref, an open PR, a live local PID, or an
+unparseable age; a `gh`/network hiccup in the open-PR probe assumes an open PR (keeps). The
+`project-board-sync` **30-minute cron** now carries a `reap-claims` job applying exactly this predicate
+server-side, deleting the stale claim ref and flipping the freed board item back to `Ready` with a traceable
+comment. Two workflow hardenings ship with it: **`PROJECTS_TOKEN` absence now fails the workflow loudly**
+(`::error::` + non-zero exit — a persistent red run is the alert) instead of the old silent green
+`::notice::` no-op; and the scheduled board sweep only backlogs a null-status issue once it is **older than a
+10-minute auto-add grace window**, so it no longer races the built-in Auto-add workflow's default-status
+write on a freshly created issue.
+
 **Never block on a question (park-and-resume, #2666).** A worker runs unattended, so `AskUserQuestion` (and
 any interactive prompt) is attended-sessions-only. When a worker hits Seam 1 (an unapproved spec) or a
 genuine mid-run owner decision it does not wait — it **parks**: posts ONE structured question comment

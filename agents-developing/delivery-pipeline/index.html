@@ -319,6 +319,25 @@ runs it to merged + finalized, writes a <code dir="auto">.worker-last-iteration.
 issue per session). The supervisor adds a flock single-instance (mechanizing one-worker-per-machine),
 fail-closed preflight (load/disk/leftover-process/stop-file), a crash-loop breaker, budgets, and ntfy
 notifications. See the <a href="https://github.com/pmcfadin/cqlite/blob/main/docs/development/fleet-runbook.md">fleet runbook</a>.</p>
+<p><strong>Supervisor-authored claim + CI-side reaper (issue #2655 / #2499 design).</strong> Heartbeats used to depend on
+the worker LLM <em>remembering</em> to <code dir="auto">beat</code>, and the reap threshold was enforced only in prose. Liveness is now
+<strong>mechanism-driven</strong>: the supervisor stamps <code dir="auto">refs/machine-claims/&#x3C;machine></code> (issue + supervisor-PID + ts, via
+<code dir="auto">claim-heartbeat.sh stamp</code>) at every worker spawn, refreshes it each iteration, and clears it on a clean
+exit — where <code dir="auto">reap</code> <strong>refuses to delete a claim whose issue still has an open PR</strong> (an unfinished endgame
+stays owned for adoption rather than orphaned; the #2499 orphaned-endgame case). This <code dir="auto">refs/machine-claims/*</code>
+namespace is deliberately distinct from <code dir="auto">claim.sh</code>’s per-issue lock <code dir="auto">refs/claims/issue-&#x3C;N></code>.
+<code dir="auto">claim-heartbeat.sh should-reap &#x3C;machine></code> is the single, <strong>fail-safe</strong> reap predicate (exit <code dir="auto">0</code> = reap,
+<code dir="auto">1</code> = keep, <code dir="auto">2</code> = no ref): it reaps ONLY when age > threshold (4h) <strong>AND</strong> the issue has no open PR <strong>AND</strong>
+(the PID is dead, <em>when the claim is local</em> — a foreign machine’s PID is unknowable, so from CI that clause
+is skipped and age + no-open-PR govern). It KEEPS on a fresh ref, an open PR, a live local PID, or an
+unparseable age; a <code dir="auto">gh</code>/network hiccup in the open-PR probe assumes an open PR (keeps). The
+<code dir="auto">project-board-sync</code> <strong>30-minute cron</strong> now carries a <code dir="auto">reap-claims</code> job applying exactly this predicate
+server-side, deleting the stale claim ref and flipping the freed board item back to <code dir="auto">Ready</code> with a traceable
+comment. Two workflow hardenings ship with it: <strong><code dir="auto">PROJECTS_TOKEN</code> absence now fails the workflow loudly</strong>
+(<code dir="auto">::error::</code> + non-zero exit — a persistent red run is the alert) instead of the old silent green
+<code dir="auto">::notice::</code> no-op; and the scheduled board sweep only backlogs a null-status issue once it is <strong>older than a
+10-minute auto-add grace window</strong>, so it no longer races the built-in Auto-add workflow’s default-status
+write on a freshly created issue.</p>
 <p><strong>Never block on a question (park-and-resume, #2666).</strong> A worker runs unattended, so <code dir="auto">AskUserQuestion</code> (and
 any interactive prompt) is attended-sessions-only. When a worker hits Seam 1 (an unapproved spec) or a
 genuine mid-run owner decision it does not wait — it <strong>parks</strong>: posts ONE structured question comment
