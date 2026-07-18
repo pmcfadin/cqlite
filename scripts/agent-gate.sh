@@ -1424,6 +1424,32 @@ emit_summary() {
   fi
 }
 
+# gate_push_signal <result> <branch> <short-sha> <fail-components> (#2667)
+#
+# Fire ONE advisory push at final-SUMMARY time so a backgrounded FULL gate
+# becomes a PUSH signal, not a passive poll target: the moment RESULT lands, the
+# waiting closer/worker is called back instead of idle-polling the summary file.
+# Wraps `agent-notify` (the same ntfy wrapper worker-supervisor.sh uses).
+# FULL gate ONLY — the sole call site guards out --lite/--delta/--only/selftest,
+# which are iteration aids and never the gate of record.
+#
+# Advisory by contract: if agent-notify is absent OR fails, this is a SILENT
+# no-op — the summary file stays the artifact of record, so a missing daemon or
+# a broken notifier NEVER changes the gate's verdict or exit status.
+#   title: "gate <RESULT> <branch>@<short-sha>"
+#   body:  "RESULT: <RESULT>" (+ "— failing: c1,c2" when any component FAILed)
+gate_push_signal() {
+  local result="$1" branch="$2" short_sha="$3" fail_components="$4"
+  command -v agent-notify >/dev/null 2>&1 || return 0
+  local category=completion
+  case "$result" in PASS) category=completion ;; *) category=error ;; esac
+  local title="gate $result ${branch}@${short_sha}"
+  local body="RESULT: $result"
+  [ -n "$fail_components" ] && body="$body — failing: $fail_components"
+  agent-notify --category "$category" "$title" "$body" >/dev/null 2>&1 || true
+  return 0
+}
+
 # --emit-summary-selftest: prove the SUMMARY block survives capture without
 # running the (5-8 min) gate. Emits a representative block through the exact
 # emit_summary path the real run uses, then exits 0. Used by
@@ -2179,8 +2205,9 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_premerge_assert.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_premerge_assert.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1 &&
@@ -3785,6 +3812,23 @@ for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
 emit_summary "$OVERALL" "${SUMMARY_META[@]}"
+
+# #2667: full-gate completion push-signal. This line is reached ONLY by the full
+# gate and by --only (never --lite/--delta/selftest, which exit earlier), so we
+# additionally exclude --only here — a partial run is not the gate of record and
+# must not page a waiting closer. Advisory: gate_push_signal never affects exit.
+if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "$DELTA" -eq 0 ] && [ "$SELFTEST" -eq 0 ]; then
+  _push_result="$OVERALL"
+  [ "$SUMMARY_WRITE_FAILED" -ne 0 ] && _push_result=FAIL
+  _push_fails=""
+  for i in "${!NAMES[@]}"; do
+    [ "${STATUSES[$i]}" = FAIL ] && _push_fails="${_push_fails:+$_push_fails,}${NAMES[$i]}"
+  done
+  gate_push_signal "$_push_result" \
+    "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)" \
+    "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+    "$_push_fails"
+fi
 
 # If we could not produce the authoritative recovery artifact, never report
 # green (#1175 finding 1): the correctness verdict above is still printed, but a
