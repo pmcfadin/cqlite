@@ -535,9 +535,19 @@ fi
 # just scrollback (#2640). Names the wrapper (nice/taskpolicy/none), the resolved
 # machine-wide concurrency N, the derived per-gate cores, and the build-jobs +
 # test-threads the gate actually used.
+#
+# The `cpu-budget:` line is a space-delimited `key=value`-per-token line, so the
+# wrapper field MUST be a SINGLE token: AGENT_GATE_WRAPPER holds the full command
+# WITH flags (`taskpolicy -c utility`, `nice -n 10`), whose embedded spaces would
+# otherwise inject stray `-c`/`utility`/`-n`/`10` tokens between wrapper= and the
+# next key and break any positional/space-splitting parser. Emit only the tool
+# name (first word) here; the full command stays in AGENT_GATE_WRAPPER for the
+# re-exec (issue #2640).
 cpu_budget_line() {
+  local _wrapper_tok="${AGENT_GATE_WRAPPER:-none}"
+  _wrapper_tok="${_wrapper_tok%% *}"   # first word only: "taskpolicy -c utility" -> "taskpolicy"
   printf 'cpu-budget: wrapper=%s ncpu=%s max-concurrency=%s cores-per-gate=%s build-jobs=%s(%s) test-threads=%s' \
-    "${AGENT_GATE_WRAPPER:-none}" "$_ncpu" "$(_gate_max_concurrency)" \
+    "$_wrapper_tok" "$_ncpu" "$(_gate_max_concurrency)" \
     "$GATE_CORES_PER_GATE" "${CARGO_BUILD_JOBS:-unset}" "${CARGO_BUILD_JOBS_SOURCE:-unknown}" \
     "$GATE_TEST_THREADS"
 }

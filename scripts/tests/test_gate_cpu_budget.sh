@@ -123,6 +123,15 @@ if [ "$(uname -s)" = Darwin ] && command -v taskpolicy >/dev/null 2>&1; then
     taskpolicy) ok "macOS: gate wraps in taskpolicy -c utility (wrapper=$w)" ;;
     *) bad "macOS with taskpolicy present should wrap (wrapper=taskpolicy), got wrapper=$w" ;;
   esac
+  # The wrapper field MUST be a single token even when a wrapper is active — the
+  # underlying command is `taskpolicy -c utility` (spaces), which must NOT leak
+  # `-c`/`utility` into the space-delimited cpu-budget line (roborev #2640).
+  if printf '%s\n' "$wline" \
+     | grep -Eq '^cpu-budget: wrapper=[^ ]+ ncpu=[0-9]+ max-concurrency=[0-9]+ cores-per-gate=[0-9]+ build-jobs=[0-9]+\((derived|caller)\) test-threads=[0-9]+$'; then
+    ok "wrapper-active cpu-budget line stays single-token/well-formed: $wline"
+  else
+    bad "wrapper-active line not well-formed (space leaked from '$w'?): $wline"
+  fi
 else
   ok "SKIP wrapper-engage case (not macOS-with-taskpolicy)"
 fi
