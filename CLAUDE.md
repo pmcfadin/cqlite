@@ -268,9 +268,15 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `opus` with a hard `400 'opus' model is not supported` — a silent review failure that looks like an
   outage. Run from a checkout whose `.roborev.toml` you know (worktrees inherit `main`'s pinned config);
   `--model` is the reliable override. codex's own configured model is `gpt-5.6-sol` (`~/.codex/config.toml`).
-- **flow-closer (#2084)**: the full gate, C, the final roborev pass, and the merge run inside the
+- **flow-closer (#2084/#2668)**: the full gate, the final roborev pass, and the merge run inside the
   disposable `flow-closer` subagent — the lead retains only its terminal packet (verdict, PR URL,
-  summary-file path, ≤10 lines residual), never gate stdout or review churn.
+  summary-file path, ≤10 lines residual), never gate stdout or review churn. The closer has **no
+  `Agent` tool**, so **C is spawned by the lead at the closer's `NEEDS-SPAWN` request** (the closer
+  stops, emits a `NEEDS-SPAWN {role: spec-auditor, …}` packet, and the lead spawns `spec-auditor`
+  then re-invokes with the verdict; a src-design fix respawns `sstable-developer` the same way).
+  Before `gh pr merge` the closer runs the scripted pre-merge assert
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha>` (#2456) — refusing to merge unless the PR
+  head still equals the certified SHA — and re-reads comments for a fresh `HOLD:` order.
 - **Severity triage (#2088, rubric `docs/development/roborev-severity.md`)**: roborev **blockers**
   are fixed pre-merge — each re-triggers `fix → --lite (+ any diff-relevant parity/integration
   target) → re-review` (#2087). **Nits** never trigger

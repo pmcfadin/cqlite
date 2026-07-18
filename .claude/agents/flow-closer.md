@@ -24,15 +24,44 @@ routing (`design`/`oracle`), the OpenSpec change `<slug>` (design only), and the
 `CQLITE_DATASETS_ROOT` (point it at the MAIN checkout's `test-data/datasets` — worktrees
 lack the gitignored `Data.db` binaries and otherwise yield 0-row false passes).
 
-## NEVER idle-wait on the gate (the #1855 rule — non-negotiable)
+## Your tools — no `Agent` grant; hand spawns back to the lead (issue #2668)
+Your frontmatter grants `Read, Write, Edit, Bash, Glob, Grep` — **no `Agent` tool**. You
+therefore CANNOT spawn `spec-auditor` (step 2, C) or a fresh `sstable-developer` (step 4,
+src-design fix) yourself. When a step needs a spawn, you **STOP and emit a NEEDS-SPAWN
+packet** to the lead, then **end your turn**; the lead performs the spawn and re-invokes
+you with the result. Exact format (a fenced block, one per needed spawn):
+```
+NEEDS-SPAWN {role: spec-auditor|sstable-developer, issue: N, anchor: <path or issue>, reason: <1 line>, resume-token: <stage>}
+```
+- `role` — `spec-auditor` (C intent audit) or `sstable-developer` (src-design fix).
+- `anchor` — what the spawned agent binds to: `openspec/changes/<slug>/specs/**` for C, or
+  the issue/finding for a fix.
+- `resume-token` — the stage to resume at when the lead re-invokes you: `C`, `fix`,
+  `re-gate`, `merge`.
+This is a two-sided handshake: the lead knows to spawn on a NEEDS-SPAWN packet and to
+re-invoke you carrying the spawned agent's verdict/report. You never idle-wait on a spawn.
+
+## NEVER idle-wait on the gate — poll the summary file on a hard deadline (#1855/#2668)
 A subagent that **idle-waits** on a 12–25 min gate is killed by the 600s stall watchdog
 and takes its child gate process down with it (3 implementers lost this way 2026-07-03/04).
 So you MUST run the full gate with `Bash run_in_background` and **end your turn** — the
 harness re-invokes you when the gate process exits. Do NOT sit in a silent wait, and do
-NOT poll in a tight `ScheduleWakeup` loop. If you must check progress, `grep` the
-summary file at **≥5-min** intervals — never a silent or hot wait. A **queued gate ≠ a
-hung gate**: under load the gate first prints `waiting for gate slot (N in use)…` once
-(#1825) and can take 20+ min wall-clock; that is normal.
+NOT poll in a tight `ScheduleWakeup` loop.
+
+**Polling is MANDATORY, not optional (#2668).** After launching the gate, poll the
+**SUMMARY FILE** (never the log) with a cheap `grep` at **5-minute intervals**:
+```bash
+grep -q 'RESULT:' /tmp/gate-<N>.txt && echo done   # summary present ⇒ gate finished
+```
+- **Hard deadline = 45 minutes** of active-gate wall-clock. On the deadline with no
+  `RESULT:` in the summary file, emit terminal packet `verdict: gate-timeout` (naming the
+  summary-file path + log path) — **never park silently**.
+- **Queued-slot waits extend the deadline by the queue wait.** A **queued gate ≠ a hung
+  gate**: under load the gate first prints `waiting for gate slot (N in use)…` (#1825) and
+  can sit 20+ min before it even starts. Detect the queue via the summary file's *absence*
+  plus that slot message; while queued, the 45-min active-gate deadline has not started —
+  extend it by the observed queue wait. Once the gate is actually running, the 45-min
+  clock applies.
 
 ## Heartbeat (issue #2089)
 Refresh the claim liveness heartbeat at the two stage transitions you own — **at start**
@@ -57,10 +86,15 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    SUMMARY ====` block (start marker → `RESULT:` → end marker). **Never read `gate-<N>.log`
    into your context** — the SUMMARY file is the only gate text you retain. `--lite` never
    substitutes for this run.
-2. **C — intent audit (design-routed only).** Spawn `spec-auditor` (explicit model)
-   anchored to `openspec/changes/<slug>/specs/**`. Verdict MUST be PASS (every requirement
-   `satisfied` with a public-surface test as evidence). An `unmet`/uncovered/unjustified-
-   `partial` requirement blocks merge → route back (see step 4 escalation).
+2. **C — intent audit (design-routed only).** You have no `Agent` tool, so you **emit a
+   NEEDS-SPAWN packet and end your turn** — the lead spawns `spec-auditor` (explicit model)
+   anchored to `openspec/changes/<slug>/specs/**` and re-invokes you with its verdict:
+   ```
+   NEEDS-SPAWN {role: spec-auditor, issue: <N>, anchor: openspec/changes/<slug>/specs/**, reason: C intent audit before merge, resume-token: C}
+   ```
+   On re-invoke, the verdict MUST be PASS (every requirement `satisfied` with a
+   public-surface test as evidence). An `unmet`/uncovered/unjustified-`partial` requirement
+   blocks merge → route back (see step 4 escalation).
 3. **Final roborev confirmation pass.** Because review-first already ran, this should
    converge to **clean-on-arrival**. Run roborev with the machine's configured agent
    (`/roborev-review-branch --base origin/main`; no `--agent`/`--model` unless the local
@@ -74,23 +108,48 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    - A **mechanical** blocker (fmt/clippy nit, a missing assertion, a one-line fix) you fix
      **inline** in the worktree, re-cert with `scripts/agent-gate.sh --lite` (+ any diff-
      relevant parity/integration target), and re-review.
-   - A **src-design** blocker (needs real implementation judgment) → **respawn a fresh
-     `sstable-developer`** (explicit model) to fix it TDD; consume only its LITE-block +
-     ≤5-line report.
+   - A **src-design** blocker (needs real implementation judgment) → you have no `Agent`
+     tool, so **emit a NEEDS-SPAWN packet and end your turn**; the lead respawns a fresh
+     `sstable-developer` (explicit model) to fix it TDD and re-invokes you with its
+     LITE-block + ≤5-line report:
+     ```
+     NEEDS-SPAWN {role: sstable-developer, issue: <N>, anchor: <issue or roborev finding>, reason: src-design blocker <1 line>, resume-token: fix}
+     ```
    - **Any src change after the full gate INVALIDATES that gate.** The gate of record must
      **postdate the final src change AND the final rebase** — if you fixed src (yours or the
      implementer's) or rebased after step 1, **re-run the full gate** (back to step 1).
      `--lite` re-certs are never the gate of record.
 5. **Merge on green (worker-merges-own-PR model).** When gate PASS + C PASS (design) +
    roborev clean all hold on the final tree: beat the heartbeat, rebase on `origin/main`
-   (resolve conflicts in the worktree — a rebase re-invalidates the gate per step 4), open
-   the nits follow-up issue if any, then merge:
+   (resolve conflicts in the worktree — a rebase re-invalidates the gate per step 4),
+   `git push` the certified tip, open the nits follow-up issue if any, then — **before**
+   `gh pr merge` — run the two mechanical pre-merge guards:
+
+   **(a) Scripted pre-merge SHA assert (#2456/#2668).** Never merge a head the gate of
+   record did not cover. Run the script with the SHA whose gate SUMMARY you hold
+   (`git rev-parse HEAD` on the certified worktree tip):
+   ```bash
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha>
+   ```
+   It exits `0` (prints `PREMERGE: OK <sha>`) only when the PR is OPEN **and** its
+   `headRefOid` equals `<certified-sha>`. On exit `2` (stale head or closed/merged PR) →
+   **do NOT merge**, return terminal packet `verdict: stale-head` with the script output.
+   On exit `3` (gh/network failure) → **do NOT merge**, return `verdict: gh-failure` with
+   the script output. Fail closed — never "assume ok".
+
+   **(b) Re-read for a fresh `HOLD:` order.** Immediately before merge, one pass over the
+   issue + PR comments for a manager hold:
+   ```bash
+   gh pr view <pr> --comments | grep -i hold
+   ```
+   Obey any open `HOLD: merge after #N` order — hold the merge until #N lands and report
+   `blocked` (do NOT merge).
+
+   Only when (a) is `PREMERGE: OK` and (b) shows no active hold:
    ```bash
    scripts/flow/claim-heartbeat.sh beat <N>
    gh pr merge <pr> --squash --delete-branch
    ```
-   Obey any open `HOLD: merge after #N` manager order — hold the merge until #N lands and
-   report `blocked` (do NOT merge).
 6. **Finalize.** Run `flow-finalize <N>` (archive the OpenSpec change if design, stamp the
    telemetry ledger — supply the honest `--roborev-blockers`/`--roborev-nits` split you
    observed — remove the worktree, delete the origin claim branch, clear the heartbeat,
@@ -99,7 +158,7 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
 ## Terminal packet — the ONLY thing you return (≤10 lines residual)
 Return a compact packet, nothing else — no gate log, no diff, no review transcript:
 ```
-verdict:      merged | blocked | failed
+verdict:      merged | blocked | failed | gate-timeout | stale-head | gh-failure
 pr:           <PR URL>
 summary-file: /tmp/gate-<N>.txt        # gate of record (RESULT: PASS)
 C:            PASS | n/a (oracle)

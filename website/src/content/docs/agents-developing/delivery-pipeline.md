@@ -86,9 +86,13 @@ ever regress (contexts emptied, `enforce_admins` disabled), this doctrine govern
 The `flow-closer` certifies a **specific SHA** — the tree the full gate of record and the final
 roborev pass actually ran on. Three mechanical rules keep the merge honest:
 
-- **Pre-merge SHA assertion (#2456, hard precondition).** Immediately before `gh pr merge`, the closer
-  does `git push`, then asserts `gh pr view <N> --json headRefOid` **equals the locally-certified
-  tip** — and **refuses to merge on mismatch**. Motivated by the 2026-07-14 stale-merge escape on
+- **Pre-merge SHA assertion (#2456/#2668, scripted hard precondition).** Immediately before
+  `gh pr merge`, the closer does `git push`, then runs
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha>` — which asserts the PR is OPEN and its
+  `headRefOid` **equals the locally-certified tip**, exiting non-zero (and printing a loud refusal)
+  on a moved head, a closed/merged PR, or a gh failure. The closer **refuses to merge on any
+  non-zero exit** (fail closed). It also re-reads issue/PR comments for a fresh `HOLD:` order in the
+  same pre-merge pass. Motivated by the 2026-07-14 stale-merge escape on
   #2299/PR #2421: the closer certified a rebased-and-fixed tip locally but never pushed it, so
   `gh pr merge` squashed the PR's *stale* pre-fix head and transiently landed a known data-loss
   blocker on `main` (remediated by PR #2455). The GitHub required check re-runs on push but cannot
@@ -243,11 +247,14 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
   criterion) are fixed pre-merge; **nits** (style, naming, comment/doc polish, no-repro test suggestions)
   are batched into ONE linked follow-up issue at merge time and never trigger a re-verify round. When in
   doubt, blocker.
-- **The disposable `flow-closer` owns the endgame (issue #2084).** `flow-implement` opens the PR, then
+- **The disposable `flow-closer` owns the endgame (issue #2084/#2668).** `flow-implement` opens the PR, then
   spawns a per-issue `flow-closer` that runs the ONE full `scripts/agent-gate.sh` of record (via
   `run_in_background` + the summary-file pattern — it **never idle-waits**, which would trip the #1855 stall
-  watchdog and orphan the gate), the **C** intent audit, the final roborev pass, then merges on green and
-  `flow-finalize`s. It returns only a terminal packet (verdict, PR URL, summary-file path, ≤10 lines
+  watchdog and orphan the gate; polling the summary file is mandatory on a hard 45-min deadline), the **C**
+  intent audit, the final roborev pass, then merges on green and `flow-finalize`s. The closer has **no
+  `Agent` tool**, so it never spawns directly: for **C** (and any src-design fix) it emits a structured
+  `NEEDS-SPAWN` packet and ends its turn — the lead spawns `spec-auditor`/`sstable-developer` and re-invokes
+  the closer with the result. It returns only a terminal packet (verdict, PR URL, summary-file path, ≤10 lines
   residual), so gate stdout and review churn die with its context instead of accreting in the lead session.
   Any src change after the full gate INVALIDATES it — the gate of record must postdate the final src change
   and rebase.
