@@ -42,9 +42,13 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Rust toolchain
-        # No `toolchain:` input: setup-rust-toolchain reads rust-toolchain.toml
-        # (pinned 1.88.0) instead of overriding it with stable (issue #1990).
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        # Consolidated caching (issue #2649): shared composite keyed on
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # cargo builds from cqlite-core/ still write the workspace-root target/,
+        # so the composite's root-level cache is correct for these lanes.
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: minimal-features
 
       - name: Build with minimal compression (lz4 + snappy only)
         run: cargo build --no-default-features --features=lz4,snappy
@@ -61,9 +65,13 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Rust toolchain
-        # No `toolchain:` input: setup-rust-toolchain reads rust-toolchain.toml
-        # (pinned 1.88.0) instead of overriding it with stable (issue #1990).
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        # Consolidated caching (issue #2649): shared composite keyed on
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # cargo builds from cqlite-core/ still write the workspace-root target/,
+        # so the composite's root-level cache is correct for these lanes.
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: minimal-features
 
       - name: Build with all compression support
         run: cargo build --no-default-features --features=all-compression
@@ -90,9 +98,13 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Rust toolchain
-        # No `toolchain:` input: setup-rust-toolchain reads rust-toolchain.toml
-        # (pinned 1.88.0) instead of overriding it with stable (issue #1990).
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        # Consolidated caching (issue #2649): shared composite keyed on
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # cargo builds from cqlite-core/ still write the workspace-root target/,
+        # so the composite's root-level cache is correct for these lanes.
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: minimal-features
 
       - name: Build and test with parquet export feature (Epic #682)
         run: |
@@ -113,9 +125,13 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Rust toolchain
-        # No `toolchain:` input: setup-rust-toolchain reads rust-toolchain.toml
-        # (pinned 1.88.0) instead of overriding it with stable (issue #1990).
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        # Consolidated caching (issue #2649): shared composite keyed on
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # cargo builds from cqlite-core/ still write the workspace-root target/,
+        # so the composite's root-level cache is correct for these lanes.
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: minimal-features
 
       - name: Verify default build does not compile arrow/parquet (Epic #682)
         run: |
@@ -138,9 +154,13 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Rust toolchain
-        # No `toolchain:` input: setup-rust-toolchain reads rust-toolchain.toml
-        # (pinned 1.88.0) instead of overriding it with stable (issue #1990).
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        # Consolidated caching (issue #2649): shared composite keyed on
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # cargo builds from cqlite-core/ still write the workspace-root target/,
+        # so the composite's root-level cache is correct for these lanes.
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          cache-key: minimal-features
 
       - name: Verify M2+ core features ARE in defaults
         run: |

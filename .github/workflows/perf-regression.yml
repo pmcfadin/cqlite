@@ -63,25 +63,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Consolidated caching (issue #2649): shared composite keyed on
+      # Cargo.lock+toolchain. cache-targets: false caches ONLY registry/git, NOT
+      # target/ — this job checks out two source trees (PR ref, then main) into
+      # the same workspace, so a cached target/ would carry incremental state
+      # across the switch. Rebuilding from clean deps is the robust gate choice.
       - name: Setup Rust toolchain
-        # No `toolchain:` input: setup-rust-toolchain reads rust-toolchain.toml
-        # (pinned 1.88.0) instead of overriding it with stable (issue #1990).
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      # Cache only the registry/git, NOT target/. This job checks out two
-      # different source trees (PR ref, then main) into the same workspace; a
-      # cached target/ would carry incremental-compilation state across that
-      # switch. Rebuilding from clean deps is the robust choice for a gate.
-      - name: Cache Cargo registry
-        uses: actions/cache@v5
+        uses: ./.github/actions/setup-rust-ci
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-perfgate-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-perfgate-cargo-
-            ${{ runner.os }}-cargo-
+          cache-key: perf-regression
+          cache-targets: 'false'
 
       - name: Cache canonical datasets
         uses: actions/cache@v5

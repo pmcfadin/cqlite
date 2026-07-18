@@ -14,6 +14,14 @@ inputs:
     description: Stable cache namespace for this workflow or job family.
     required: false
     default: rust-ci
+  cache-targets:
+    description: >-
+      Whether to include the workspace `target/` directory in the cache.
+      Set to 'false' for jobs that build multiple checkouts into the same
+      workspace (e.g. perf A/B comparisons), where a shared `target/` cache
+      would be stale or incorrect. Registry + git are always cached.
+    required: false
+    default: 'true'
 
 runs:
   using: composite
@@ -42,7 +50,13 @@ runs:
         rustc --version
         cargo --version
 
-    - name: Restore Cargo cache
+    # ONE cache strategy for every Rust lane (issue #2649): a single
+    # actions/cache keyed on Cargo.lock + all Cargo.toml + the toolchain pin,
+    # namespaced per job family via `cache-key`. Registry + git + target by
+    # default; jobs that build multiple checkouts into one workspace opt out of
+    # the `target/` entry via `cache-targets: 'false'`.
+    - name: Restore Cargo cache (with target/)
+      if: ${{ inputs.cache-targets != 'false' }}
       uses: actions/cache@v5
       with:
         path: |
@@ -53,3 +67,15 @@ runs:
         restore-keys: |
           ${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key }}-${{ inputs.toolchain }}-
           ${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key }}-
+
+    - name: Restore Cargo cache (registry only)
+      if: ${{ inputs.cache-targets == 'false' }}
+      uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cargo/git
+          ~/.cargo/registry
+        key: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key }}-registry-${{ inputs.toolchain }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key }}-registry-${{ inputs.toolchain }}-
+          ${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key }}-registry-

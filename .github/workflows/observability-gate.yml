@@ -104,20 +104,11 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Rust toolchain
-        # No `toolchain:` input: setup-rust-toolchain reads rust-toolchain.toml
-        # (pinned 1.88.0) instead of overriding it with stable (issue #1990).
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v5
+        # Consolidated caching (issue #2649): shared composite keyed on
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        uses: ./.github/actions/setup-rust-ci
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-obsgate-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-obsgate-cargo-
-            ${{ runner.os }}-cargo-
+          cache-key: observability-gate
 
       - name: Cache canonical datasets
         uses: actions/cache@v5
