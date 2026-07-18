@@ -19,44 +19,99 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # Full history so the docs-only classifier can diff the PR base
+          # against its head (base.sha may be behind the shallow default).
+          fetch-depth: 0
+
+      # ALWAYS-EMIT docs-only classifier (issue #2645, pattern:
+      # observability-gate.yml classify job). Computes the changed-file set for
+      # this PR and decides whether the Rust build + query-semantics oracle
+      # (#2644) + heavy steps must run. Fail-closed: any non-docs file, or an
+      # empty/ambiguous set, forces the full path. This step MUST NOT be skipped
+      # so the `required` status always reports in BOTH branches; do NOT add
+      # paths/paths-ignore to the trigger (a filtered required check that never
+      # fires would block every affected PR forever).
+      - name: Classify docs-only diff
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # Names only, NUL-safe path handling, base..head three-dot compare so
+          # only files the PR actually changed are considered.
+          git diff --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
+
+          echo "Changed files:"
+          sed 's/^/  - /' changed-files.txt
+
+          docs_only=false
+          if bash scripts/ci/classify-docs-only.sh < changed-files.txt; then
+            docs_only=true
+          fi
+
+          echo "docs_only=${docs_only}" >> "$GITHUB_OUTPUT"
+          echo "Classifier verdict: docs_only=${docs_only}"
+
+      - name: Docs-only short-circuit summary
+        if: steps.classify.outputs.docs_only == 'true'
+        run: |
+          {
+            echo "## Required PR Gate: docs-only short-circuit"
+            echo ""
+            echo "The changed-file set is documentation only (issue #2645), so"
+            echo "the Rust build, query-semantics oracle (#2644), and other heavy"
+            echo "steps were skipped. Docs validation runs on docs PRs via"
+            echo "docs-site.yml. This required status reports green from the"
+            echo "always-run classifier."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Validate workflow policy
+        if: steps.classify.outputs.docs_only != 'true'
         run: >-
           bash scripts/ci/ci-timing-summary.sh measure
           "workflow policy"
           -- ruby scripts/ci/validate-workflows.rb
 
       - name: Dataset pin agreement (#2646)
+        if: steps.classify.outputs.docs_only != 'true'
         run: >-
           bash scripts/ci/ci-timing-summary.sh measure
           "dataset pin agreement"
           -- bash scripts/ci/check-dataset-pin.sh
 
       - name: Setup Rust
+        if: steps.classify.outputs.docs_only != 'true'
         uses: ./.github/actions/setup-rust-ci
         with:
           components: rustfmt,clippy
           cache-key: pr-gate
 
       - name: Rust format check
+        if: steps.classify.outputs.docs_only != 'true'
         run: >-
           bash scripts/ci/ci-timing-summary.sh measure
           "cargo fmt"
           -- cargo fmt --all -- --check
 
       - name: cqlite-core clippy hard gate
+        if: steps.classify.outputs.docs_only != 'true'
         run: >-
           bash scripts/ci/ci-timing-summary.sh measure
           "cqlite-core clippy"
           -- cargo clippy --package cqlite-core --all-targets --all-features -- -D warnings
 
       - name: cqlite-core all-feature build
+        if: steps.classify.outputs.docs_only != 'true'
         run: >-
           bash scripts/ci/ci-timing-summary.sh measure
           "cqlite-core all-feature build"
           -- cargo build --package cqlite-core --all-features
 
       - name: cqlite-core fast representative tests
+        if: steps.classify.outputs.docs_only != 'true'
         run: |
           bash scripts/ci/ci-timing-summary.sh measure "cqlite-core fast tests" -- bash -e -u -o pipefail -c '
             # Mirrors scripts/local/pre-merge.sh fast. The skipped tests are legacy
@@ -70,6 +125,7 @@ jobs:
           '
 
       - name: Query-semantics oracle (fail-closed, #2644)
+        if: steps.classify.outputs.docs_only != 'true'
         run: |
           bash scripts/ci/ci-timing-summary.sh measure "query-semantics oracle" -- bash -e -u -o pipefail -c '
             # Read-time-reconciliation parity oracle (#1742): committed-fixture,
@@ -84,5 +140,5 @@ jobs:
           '
 
       - name: Required PR Gate timing summary
-        if: always()
+        if: steps.classify.outputs.docs_only != 'true'
         run: bash scripts/ci/ci-timing-summary.sh summary "Required PR Gate timing"
