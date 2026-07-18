@@ -332,6 +332,74 @@ class RoborevSeverityTests(unittest.TestCase):
             self.assertIn("6 nit(s) excluded", text)
 
 
+class StallObservabilityTests(unittest.TestCase):
+    """issue #2667: optional nudges / orphan_minutes stall-observability counters."""
+
+    def test_record_with_stall_counters_is_schema_valid(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main([
+                "record", "--ledger", str(ledger),
+                "--issue", "2667", "--pr", "2680", "--slug", "poll-to-push",
+                "--gate", "pass", "--gate-runs", "1",
+                "--claim-collisions", "0", "--rebase-events", "0",
+                "--roborev-findings", "0", "--rework", "0",
+                "--nudges", "2", "--orphan-minutes", "45",
+                "--from-json", _from_json_file(tmp),
+            ])
+            self.assertEqual(rc, 0)
+            rec = json.loads(ledger.read_text().splitlines()[0])
+            self.assertEqual(dt.validate_record(rec, SCHEMA), [])
+            self.assertEqual(rec["nudges"], 2)
+            self.assertEqual(rec["orphan_minutes"], 45)
+
+    def test_record_omits_stall_counters_when_unobserved(self):
+        # Authoritative-only: an unsupplied counter must be ABSENT, never zero-filled.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main([
+                "record", "--ledger", str(ledger),
+                "--issue", "1", "--pr", "2", "--slug", "x",
+                "--gate", "pass", "--gate-runs", "1",
+                "--claim-collisions", "0", "--rebase-events", "0",
+                "--roborev-findings", "0", "--rework", "0",
+                "--from-json", _from_json_file(tmp),
+            ])
+            self.assertEqual(rc, 0)
+            rec = json.loads(ledger.read_text().splitlines()[0])
+            self.assertNotIn("nudges", rec)
+            self.assertNotIn("orphan_minutes", rec)
+            self.assertEqual(dt.validate_record(rec, SCHEMA), [])
+
+    def test_stall_counters_are_independently_optional(self):
+        # Either counter may appear without the other — they are not a both-or-neither pair.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main([
+                "record", "--ledger", str(ledger),
+                "--issue", "3", "--pr", "4", "--slug", "y",
+                "--gate", "pass", "--gate-runs", "1",
+                "--claim-collisions", "0", "--rebase-events", "0",
+                "--roborev-findings", "0", "--rework", "0",
+                "--nudges", "1",
+                "--from-json", _from_json_file(tmp),
+            ])
+            self.assertEqual(rc, 0)
+            rec = json.loads(ledger.read_text().splitlines()[0])
+            self.assertEqual(rec["nudges"], 1)
+            self.assertNotIn("orphan_minutes", rec)
+            self.assertEqual(dt.validate_record(rec, SCHEMA), [])
+
+    def test_schema_rejects_negative_stall_counter(self):
+        rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+        rec["orphan_minutes"] = -5
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(errors)
+
+
 class LintTests(unittest.TestCase):
     def test_clean_ledger_passes(self):
         rc = dt.main(["lint", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])

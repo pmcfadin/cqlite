@@ -122,8 +122,8 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
 5. **Merge on green (worker-merges-own-PR model).** When gate PASS + C PASS (design) +
    roborev clean all hold on the final tree: beat the heartbeat, rebase on `origin/main`
    (resolve conflicts in the worktree — a rebase re-invalidates the gate per step 4),
-   `git push` the certified tip, open the nits follow-up issue if any, then — **before**
-   `gh pr merge` — run the two mechanical pre-merge guards:
+   `git push` the certified tip, open the nits follow-up issue if any, then — **before** arming
+   `gh pr merge --auto` — run the two mechanical pre-merge guards:
 
    **(a) Scripted pre-merge SHA assert (#2456/#2668).** Never merge a head the gate of
    record did not cover. Run the script with the SHA whose gate SUMMARY you hold
@@ -145,20 +145,39 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    Obey any open `HOLD: merge after #N` order — hold the merge until #N lands and report
    `blocked` (do NOT merge).
 
-   Only when (a) is `PREMERGE: OK` and (b) shows no active hold:
+   **(c) Arm `--auto` — GitHub owns the CI-green wait (#2667).** Once (a) is `PREMERGE: OK`
+   and (b) shows no active hold, arm auto-merge — GitHub lands the PR the instant the
+   `required` status check goes green, so you never idle-poll a PR's own external CI. This
+   is SAFE because #2433 configured a real `required` check + `enforce_admins` on `main`
+   (no empty `contexts=[]`, no bypass) — `--auto` can never merge against an unchecked head.
    ```bash
    scripts/flow/claim-heartbeat.sh beat <N>
-   gh pr merge <pr> --squash --delete-branch
+   gh pr merge <pr> --auto --squash --delete-branch
    ```
-6. **Finalize.** Run `flow-finalize <N>` (archive the OpenSpec change if design, stamp the
-   telemetry ledger — supply the honest `--roborev-blockers`/`--roborev-nits` split you
-   observed — remove the worktree, delete the origin claim branch, clear the heartbeat,
-   close the issue with a traceable comment).
+6. **Finalize — two paths (the merge may land AFTER you exit).** `--auto` means the merge
+   can complete after this session ends, so finalize (telemetry, board, claim release) must
+   not assume the PR is already merged. Choose:
+   - **(b) Fast path — DEFAULT when the `required` check is already GREEN at arm time**
+     (`gh pr checks <pr>` shows the required lane passed): `--auto` lands within seconds —
+     briefly confirm `gh pr view <pr> --json state -q .state` == `MERGED` (poll on the same
+     hard-deadline discipline as the gate wait, NOT a tight loop), then run
+     `flow-finalize <N>` in-session.
+   - **(a) Deferred path — when the required check is still PENDING at arm time**: do NOT
+     idle-wait for CI. Return `verdict: auto-armed` with the PR URL; the merge + finalize
+     complete on a **later wake / next session** that first confirms
+     `gh pr view <pr> --json state -q .state` == `MERGED` before running `flow-finalize <N>`.
+     The gate completion push-signal (#2667) and GitHub's own auto-merge notification are the
+     callbacks — the summary file is a push signal now, not a poll target.
+
+   `flow-finalize <N>` archives the OpenSpec change if design, stamps the telemetry ledger
+   (supply the honest `--roborev-blockers`/`--roborev-nits` split you observed; and any
+   `--nudges`/`--orphan-minutes` you incurred, #2667), removes the worktree, deletes the
+   origin claim branch, clears the heartbeat, and closes the issue with a traceable comment.
 
 ## Terminal packet — the ONLY thing you return (≤10 lines residual)
 Return a compact packet, nothing else — no gate log, no diff, no review transcript:
 ```
-verdict:      merged | blocked | failed | gate-timeout | stale-head | gh-failure
+verdict:      merged | auto-armed | blocked | failed | gate-timeout | stale-head | gh-failure
 pr:           <PR URL>
 summary-file: /tmp/gate-<N>.txt        # gate of record (RESULT: PASS)
 C:            PASS | n/a (oracle)

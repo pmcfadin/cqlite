@@ -274,9 +274,10 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `Agent` tool**, so **C is spawned by the lead at the closer's `NEEDS-SPAWN` request** (the closer
   stops, emits a `NEEDS-SPAWN {role: spec-auditor, …}` packet, and the lead spawns `spec-auditor`
   then re-invokes with the verdict; a src-design fix respawns `sstable-developer` the same way).
-  Before `gh pr merge` the closer runs the scripted pre-merge assert
+  Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
   `scripts/flow/premerge-assert.sh <pr> <certified-sha>` (#2456) — refusing to merge unless the PR
-  head still equals the certified SHA — and re-reads comments for a fresh `HOLD:` order.
+  head still equals the certified SHA — and re-reads comments for a fresh `HOLD:` order. With `--auto`
+  armed, GitHub lands the PR on the `required` check going green (#2667); no CI busy-wait.
 - **Severity triage (#2088, rubric `docs/development/roborev-severity.md`)**: roborev **blockers**
   are fixed pre-merge — each re-triggers `fix → --lite (+ any diff-relevant parity/integration
   target) → re-review` (#2087). **Nits** never trigger
@@ -383,12 +384,16 @@ end-to-end test. Green helper-only unit tests are not sufficient.
 ## Product-Manager Behavior (lead)
 
 - The lead acts as product manager: track epics and issues, prioritize, keep work moving.
-- **Autonomy — auto-merge on green (default)**: workers (and the lead) **merge their own PR** the
-  moment the quality bar is met — local gate PASS + **C** PASS (design-driven) + roborev clean **+ the
-  GitHub `required` CI check green** — via `gh pr merge --squash --delete-branch`, then `flow-finalize`.
-  Branch protection enforces the `required` check for admins too (`enforce_admins`), so bypass is
-  impossible; a known-flake red gets `gh run rerun --failed`, never a bypass. This enforcement is
-  load-bearing: if branch-protection settings change, this doc governs catching it (#2433). Do NOT
+- **Autonomy — arm `--auto`, GitHub merges on green (default, #2667)**: the moment **local
+  certification** is met — local gate PASS + **C** PASS (design-driven) + roborev clean — workers (and
+  the lead) **arm auto-merge on their own PR** via `gh pr merge --auto --squash --delete-branch`
+  (after the pre-merge SHA assert + `HOLD` re-read), then finalize. GitHub owns the CI-green wait and
+  lands the PR the instant the `required` check passes — **never `ScheduleWakeup`-poll a PR's own CI**.
+  Branch protection enforces the `required` check for admins too (`enforce_admins`), so `--auto` can
+  never land against an unchecked head and bypass is impossible; a known-flake red gets
+  `gh run rerun --failed`, never a bypass. This enforcement is load-bearing: if branch-protection
+  settings change, this doc governs catching it (#2433). Finalize runs in-session when the required
+  check is already green at arm time, else on a later wake confirming `state=MERGED`. Do NOT
   wait for the owner. Seam 1
   (spec approval) is the only standing human gate. Escalate and **hold the merge** ONLY for: a
   genuine design-call roborev finding, a scope/product question, an unmet/uncovered requirement, or

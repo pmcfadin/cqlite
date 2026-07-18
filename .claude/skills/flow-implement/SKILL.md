@@ -144,11 +144,15 @@ never gate stdout or review churn.
       src-design blockers respawn a fresh `sstable-developer`; nits batched into the follow-up issue.
       **Any src change after the full gate INVALIDATES it** — the gate of record must postdate the final
       src change AND the final rebase, so the closer re-runs the full gate if either happened.
-   4. Merges on green (`gh pr merge --squash --delete-branch`, worker-merges-own-PR model) — obeying any
-      open `HOLD: merge after #N` — then runs `flow-finalize`.
+   4. After the pre-merge SHA assert + `HOLD` re-read, **arms auto-merge
+      (`gh pr merge --auto --squash --delete-branch`) so GitHub owns the CI-green wait** (#2667; safe
+      because #2433's `required` check + `enforce_admins` are live) — obeying any open `HOLD: merge
+      after #N` — then runs `flow-finalize` (in-session when the required check is already green at arm
+      time, else on a later wake confirming `state=MERGED`).
    5. Returns ONLY a terminal packet: `{verdict, PR URL, summary-file path, C, roborev, ≤10 lines
-      residual}`. Escalations (design-call finding, unmet requirement, scope/product question, work outside
-      the issue) come back as `verdict: blocked` for the owner's NEEDS-YOU list — the closer holds the merge.
+      residual}` (`verdict: auto-armed` when the merge is still pending GitHub's green). Escalations
+      (design-call finding, unmet requirement, scope/product question, work outside the issue) come back
+      as `verdict: blocked` for the owner's NEEDS-YOU list — the closer holds the merge.
 8. **Report.** Relay the closer's terminal packet — verdict, PR URL, the gate-of-record summary-file path,
    the C/roborev line, and any residual — to the owner. **Never read the raw gate log or roborev transcript
    into your context**; the terminal packet is all you retain (that is the whole reason the closer exists).

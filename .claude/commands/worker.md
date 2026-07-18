@@ -127,8 +127,11 @@ onto its own branch). Rules, non-negotiable:
       THE full `scripts/agent-gate.sh` **exactly once** (the ONLY gate of record) via `run_in_background`
       with the summary-file pattern and **never idle-waits** (a subagent idle-waiting on a 12-25 min gate is
       watchdog-killed and orphans the gate — the #1855 failure), spawns `spec-auditor` for **C** (design),
-      runs the final roborev confirmation pass, merges on green (`gh pr merge --squash --delete-branch`,
-      obeying any `HOLD: merge after #N`), then `flow-finalize`s. Any src change after the full gate
+      runs the final roborev confirmation pass, then — after the pre-merge SHA assert + `HOLD` re-read —
+      **arms auto-merge (`gh pr merge --auto --squash --delete-branch`) so GitHub owns the CI-green wait**
+      (#2667; safe because #2433 configured a real `required` check + `enforce_admins` on `main`), then
+      `flow-finalize`s (in-session when the required check is already green, else the merge + finalize
+      complete on a later wake confirming `state=MERGED`). Any src change after the full gate
       INVALIDATES it — the closer re-runs the gate if a fix or rebase postdates it. The closer returns ONLY
       a terminal packet `{verdict, PR URL, summary-file path, C, roborev, ≤10 lines residual}`.
    You coordinate and read summaries/packets; you never open the source or read raw gate/roborev output.
@@ -214,8 +217,13 @@ diff and breaks 1:1:1:1. Instead:
   reconciles the gate's component set with the CI lane set. And never gate a
   non-deterministically-regenerated source on a whole-file byte identity — gate the
   semantic verdict (validation playbook, L1).
-- **The `flow-closer` merges on green (worker-merges-own-PR model), then finalizes** — no human merge
-  click, and **no worker CI busy-wait** (never `ScheduleWakeup`-poll a PR's own external CI). Escalate to
+- **The `flow-closer` arms auto-merge, then finalizes — GitHub owns the green-wait (#2667).** After local
+  certification (gate PASS + C + roborev clean) and the pre-merge SHA assert + `HOLD` re-read, the closer
+  arms `gh pr merge --auto --squash --delete-branch` and stops — GitHub lands the PR the instant the
+  `required` check goes green (#2433 configured that check + `enforce_admins`, so `--auto` is safe: no
+  `contexts=[]`, no bypass). **Never `ScheduleWakeup`-poll a PR's own external CI** — arming `--auto`
+  replaces the busy-wait. Finalize in-session when the required check is already green at arm time;
+  otherwise the merge + finalize complete on a later wake confirming `state=MERGED`. Escalate to
   the owner ONLY for: a genuine design-call roborev finding, an unmet requirement, a scope/product
   question, or anything outside your issue (the closer returns these as `verdict: blocked`).
 - Never close an epic or change scope/title. Surface those; don't act.
