@@ -266,26 +266,40 @@ no work is ready (near a release it is <em>meant</em> to drain to zero), not a c
 <div class="sl-heading-wrapper level-h2"><h2 id="the-claim-protocol-no-duplicate-work">The claim protocol (no duplicate work)</h2><a class="sl-anchor-link" href="#the-claim-protocol-no-duplicate-work"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “The claim protocol (no duplicate work)”</span></a></div>
 <p>Before working an item, a session claims it so no two sessions — <strong>including two sessions authenticated
 as the same GitHub user on different machines</strong> — work the same item. Because assignee <code dir="auto">@me</code> is identical
-for the same user on two machines, the assignee is <em>not</em> the lock; the deciding lock is the
-<strong><code dir="auto">issue-&#x3C;N>-&#x3C;slug></code> branch pushed to origin</strong> (server-side, per-machine-distinct, the natural 1:1:1:1
-artifact).</p>
+for the same user on two machines, the assignee is <em>not</em> the lock; the deciding lock is the <strong>slugless
+fixed-name ref <code dir="auto">refs/claims/issue-&#x3C;N></code></strong>, acquired through <code dir="auto">scripts/flow/claim.sh</code> (issue #2665).
+<code dir="auto">claim.sh claim &#x3C;N></code> pushes a <strong>unique root commit</strong> to that fixed-name ref; git arbitrates the ref
+update server-side, so the winner is decided purely by the push result — regardless of slug or base.
+This closes two field hazards the earlier slug-named branch lock left open: two sessions on <strong>different
+slugs</strong> (<code dir="auto">issue-&#x3C;N>-a</code> vs <code dir="auto">issue-&#x3C;N>-b</code>) both succeeded (the #1632 slug pair), and two sessions branching
+the <strong>same <code dir="auto">origin/main</code> tip</strong> pushed an identical SHA, so git reported “up-to-date” to the loser and
+both thought they won. The <code dir="auto">issue-&#x3C;N>-&#x3C;slug></code> branch survives only as <strong>worktree/PR plumbing — never the
+lock</strong>.</p>
 <ol>
-<li><strong>Eligibility</strong> — the item is <code dir="auto">Ready</code> AND has <strong>no</strong> existing <code dir="auto">issue-&#x3C;N>-*</code> branch on origin
-(<code dir="auto">git ls-remote --heads origin "issue-&#x3C;N>-*"</code>).</li>
-<li><strong>Claim</strong> — push the <code dir="auto">issue-&#x3C;N>-&#x3C;slug></code> branch to origin (the cross-machine lock), then set assignee
-<code dir="auto">@me</code> + <code dir="auto">Status=In Progress</code> for board visibility. <code dir="auto">flow-activate</code> pushes the branch immediately —
-before any spec work — as the claim; oracle-driven issues claim in <code dir="auto">flow-implement</code>.</li>
-<li><strong>Re-read</strong> — confirm origin’s branch is your commit (you won the race) and proceed only if you hold
-it; otherwise back off and take the next eligible item.</li>
+<li><strong>Eligibility</strong> — the item is <code dir="auto">Ready</code> AND has <strong>no</strong> <code dir="auto">refs/claims/issue-&#x3C;N></code> claim ref
+(<code dir="auto">bash scripts/flow/claim.sh status &#x3C;N></code>) and <strong>no</strong> legacy <code dir="auto">issue-&#x3C;N>-*</code> branch on origin (mixed-fleet
+safety; older workers still branch-lock).</li>
+<li><strong>Claim</strong> — <code dir="auto">bash scripts/flow/claim.sh claim &#x3C;N></code> acquires the lock (<code dir="auto">CLAIM HELD</code> exit 0 / <code dir="auto">CLAIM LOST</code>
+exit 2); only then create the worktree + branch and set assignee <code dir="auto">@me</code> + <code dir="auto">Status=In Progress</code> for board
+visibility. <code dir="auto">flow-activate</code> claims immediately — before any spec work; oracle-driven issues claim in
+<code dir="auto">flow-implement</code>.</li>
+<li><strong>Verify</strong> — <code dir="auto">claim.sh</code> re-reads the ref after the push and reports <code dir="auto">CLAIM HELD</code> only if you hold it
+(<code dir="auto">claim.sh verify &#x3C;N></code> re-checks holder identity later); on <code dir="auto">CLAIM LOST</code>, back off and take the next
+eligible item.</li>
 </ol>
-<p>Another machine that finds an existing claim branch can <code dir="auto">git fetch</code> it to <strong>resume</strong> that work instead of
-colliding. The claiming session also maintains a liveness <strong>heartbeat</strong> (<code dir="auto">scripts/flow/claim-heartbeat.sh beat &#x3C;N></code> — a cheap origin git ref under <code dir="auto">refs/heartbeats/&#x3C;machine></code>, never a GitHub API call — refreshed at
-claim time and on every stage transition: activate/implement/gate/PR). <code dir="auto">flow-board</code> reaps <strong>abandoned
-claims deterministically</strong> (issue #2089): an <code dir="auto">In Progress</code> item is reaped only when its heartbeat age
-exceeds the documented threshold (4h — the <code dir="auto">claim-heartbeat.sh</code> header is the single source of truth) <strong>AND</strong>
-it has no open PR — reap = a traceable comment + assignee clear + <code dir="auto">Status → Ready</code> + a claim-branch note
-(never deleting a branch that carries commits). This replaces the old “no recent commits” guess.
-<code dir="auto">flow-finalize</code> releases the claim by deleting the origin branch and clearing the heartbeat on cleanup.</p>
+<p>Another machine that finds an existing claim can <code dir="auto">git fetch</code> the branch to <strong>resume</strong> that work instead of
+colliding; a <strong>reaped</strong> claim is adopted via compare-and-swap — <code dir="auto">claim.sh adopt &#x3C;N> --expect &#x3C;old-sha></code>,
+which replaces the ref with force-with-lease so a resurrected original holder loses the lease and detects
+the loss immediately (fixes the #2467/#2499 two-writer race). The claiming session also maintains a
+liveness <strong>heartbeat</strong> (<code dir="auto">scripts/flow/claim-heartbeat.sh beat &#x3C;N></code> — a cheap origin git ref under
+<code dir="auto">refs/heartbeats/&#x3C;machine></code>, never a GitHub API call — refreshed at claim time and on every stage
+transition: activate/implement/gate/PR). <code dir="auto">flow-board</code> reaps <strong>abandoned claims deterministically</strong> (issue
+#2089): an <code dir="auto">In Progress</code> item is reaped only when its heartbeat age exceeds the documented threshold (4h —
+the <code dir="auto">claim-heartbeat.sh</code> header is the single source of truth) <strong>AND</strong> it has no open PR — reap = a
+traceable comment + assignee clear + <code dir="auto">Status → Ready</code> + an adopt-eligibility note on the claim ref (never
+deleting a branch that carries commits). This replaces the old “no recent commits” guess. <code dir="auto">flow-finalize</code>
+releases the claim (<code dir="auto">claim.sh release &#x3C;N></code>, which refuses under an open PR without <code dir="auto">--force</code>) and clears
+the heartbeat on cleanup.</p>
 <p>For unattended/overnight runs a <strong>worker supervisor</strong> (<code dir="auto">scripts/local/worker-supervisor.sh</code>, issue #2090)
 recycles one worker process per issue — the hard context bound is process exit: the worker rehydrates from
 the board, resumes this machine’s own claim branch first (crash recovery) else claims the next Ready item,
@@ -307,7 +321,7 @@ workers” — they never launch competing full gates. The rule targets independ
 <strong>disjoint</strong> work — zero duplicate work by construction.</li>
 <li><strong>Multiple independent sessions: the claim protocol is mandatory.</strong> Each acquires work only through the
 claim protocol above — and, per the rule above, independent sessions belong on <em>separate</em> machines
-(one-per-machine handles a single box; different machines coordinate via the pushed branch lock).</li>
+(one-per-machine handles a single box; different machines coordinate via the <code dir="auto">refs/claims/issue-&#x3C;N></code> ref lock, #2665).</li>
 <li><strong>Agent Teams is optional, desktop-only.</strong> <code dir="auto">CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1</code> gives a built-in
 file-locked shared task list for coordinated parallel sessions, but it is experimental and desktop/tmux
 -only (no <code dir="auto">/resume</code>, one team per session). Use it if you want; it is not required.</li>
