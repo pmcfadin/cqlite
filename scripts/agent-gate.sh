@@ -2402,6 +2402,24 @@ run_tooling_tests() {
     return 0
   fi
 
+  # no-wall-clock-assert guard (#2642 / #2369 rule): SKIP-aware (no python3 ->
+  # no-op SKIP), always runs its self-test AND scans the real correctness test
+  # path. FAILs the component if a wall-clock THRESHOLD assert is (re)introduced
+  # into the default `cargo test` path, mirroring the guards above. This is what
+  # prevents reintroduction of the flaky latency asserts #2642 retired.
+  echo ">>> [$name] bash scripts/tests/test_check_no_wallclock_asserts.sh && bash scripts/tests/check-no-wallclock-asserts.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_check_no_wallclock_asserts.sh" >>"$log" 2>&1 ||
+     ! bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (no-wall-clock-assert guard #2642); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"

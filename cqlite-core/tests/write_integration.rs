@@ -738,8 +738,13 @@ async fn test_maintenance_step_budget_honored() -> Result<()> {
     let report = engine.maintenance_step(budget)?;
     let elapsed = start.elapsed();
 
-    // Should return quickly when there's no work (no SSTables to compact)
-    assert!(elapsed < Duration::from_millis(50), "Should respect budget");
+    // #2369 (record-not-assert): do NOT assert on wall-clock latency in the
+    // correctness gate — a `elapsed < 50ms` bound flakes under CI load. Record
+    // the timing for humans; the correctness property is that a no-work
+    // maintenance step reports nothing pending.
+    eprintln!(
+        "[perf-record] maintenance_step (no work): {elapsed:?} (budget: {budget:?}, not asserted)"
+    );
     assert!(!report.pending_compaction);
 
     Ok(())

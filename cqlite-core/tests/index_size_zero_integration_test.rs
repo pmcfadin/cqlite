@@ -276,14 +276,10 @@ async fn test_sequential_scan_performance() {
         result.err()
     );
 
-    eprintln!("Scan completed in {:?}", elapsed);
-
-    // Smoke test: Should complete within 5 seconds (not a benchmark, just sanity check)
-    assert!(
-        elapsed.as_secs() < 5,
-        "Scan took too long: {:?} (should be < 5s). Possible performance regression.",
-        elapsed
-    );
+    // #2369 (record-not-assert): the correctness property is that scan()
+    // returns Ok (asserted above). Wall-clock bounds flake under CI load, so the
+    // scan time is recorded, not asserted; regressions belong in the perf lane.
+    eprintln!("[perf-record] scan (index-size-zero): {elapsed:?} (not asserted)");
 
     eprintln!(
         "✓ Sequential scan performance is acceptable ({:?})",

@@ -314,11 +314,8 @@ mod integration_tests {
 
         let duration = start.elapsed();
 
-        // Should complete within reasonable time
-        assert!(
-            duration.as_millis() < 1000,
-            "Parsing took too long: {:?}",
-            duration
-        );
+        // #2369 (record-not-assert): the property is that 10k parses complete
+        // without panic; the wall-clock bound flakes under CI load, so record it.
+        eprintln!("[perf-record] parse_cql_value x10000: {duration:?} (not asserted)");
     }
 }

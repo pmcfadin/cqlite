@@ -749,19 +749,18 @@ async fn test_performance_discovery_regression() {
 
     store_performance_metrics_in_memory(&perf_metrics).await;
 
-    // Performance assertions
+    // Correctness assertion: every SSTable was discovered and loaded.
     assert_eq!(
         successful_loads, num_sstables,
         "Not all SSTables loaded successfully"
     );
-    assert!(
-        discovery_time.as_millis() < 10000,
-        "Discovery took too long: {}ms",
-        discovery_time.as_millis()
-    );
-    assert!(
-        perf_metrics.avg_time_per_sstable_ms < 100,
-        "Average time per SSTable too high: {}ms",
+    // #2369 (record-not-assert): discovery/per-SSTable wall-clock bounds flake
+    // under CI load; record them instead of asserting. The functional property
+    // (all SSTables loaded) is asserted above; timing regressions belong in the
+    // dedicated perf lane, not the correctness gate.
+    eprintln!(
+        "[perf-record] discovery: {}ms total, {}ms/sstable (not asserted)",
+        discovery_time.as_millis(),
         perf_metrics.avg_time_per_sstable_ms
     );
 

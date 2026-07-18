@@ -1178,8 +1178,11 @@ async fn test_stage0_sstable_component_order() -> Result<()> {
     let data_modified = std::fs::metadata(&info.data_path)?.modified()?;
     let stats_modified = std::fs::metadata(&info.stats_path)?.modified()?;
 
-    // TOC should be written last or at same time as other components
-    // (we can't guarantee ordering within same test, but files should exist)
+    // perf-gate-allow (#2642): these assert file-MODIFICATION-TIME ORDERING (the
+    // publication-barrier invariant that TOC.txt is written last), NOT code
+    // execution latency. The `< 1000ms` term only absorbs filesystem mtime
+    // granularity when the writes land in the same coarse tick — it is not a
+    // wall-clock latency budget and does not flake under CI load.
     assert!(
         toc_modified >= data_modified
             || toc_modified
@@ -1189,6 +1192,7 @@ async fn test_stage0_sstable_component_order() -> Result<()> {
                 < 1000,
         "TOC.txt written as publication barrier"
     );
+    // perf-gate-allow (#2642): mtime-ordering invariant (see above), not latency.
     assert!(
         toc_modified >= stats_modified
             || toc_modified
