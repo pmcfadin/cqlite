@@ -178,6 +178,24 @@ CQLITE_SKIP_DOCKER_TESTS=0 bash scripts/agent-gate.sh     # include live Cassand
 
 **Graceful fallback**: absent `cargo-nextest`, no `/bin/bash wait -n` (macOS stock 3.2), or `AGENT_GATE_JOBS=1` → gate degrades gracefully to the historical sequential run without loss of coverage.
 
+## nextest test-groups, retries, and slow-timeout (issue #2643)
+
+`.config/nextest.toml` at the repo root is **auto-discovered** by `cargo nextest run` — no `--config-file` flag needed — so the gate's `core-tests` nextest invocation (#1737) picks it up transparently. It is **orthogonal to the per-gate CPU budget (#2640)**: that derives the global `--test-threads` ceiling; this file adds test-*groups* (bounded co-scheduling of load-sensitive tests), scoped retries, and a hung-test `slow-timeout`. The two levers never fight — `--test-threads` caps total concurrency; a group's `max-threads = 1` caps concurrency *within that group*.
+
+The design principle is **retries scoped to load-variance, never to correctness**:
+
+- **`timing` group** (`max-threads = 1`, `retries = 2` exponential backoff): the ratio/latency/throughput tests that legitimately vary on a loaded, oversubscribed box — `tail_latency_harness` (the documented `mixed_p99_bounded_by_k_times_baseline` tail-latency flake under concurrent gates) and `sstable_performance_regression_tests` (wall-clock `MAX_*_MS` budget asserts; their retirement is #2642 — until that lands, scoped retries de-flake the gate). Serialized so they never perturb each other's timings.
+- **`docker` group** (`max-threads = 1`, **no retries**): `docker_probe_timeout` plus the `*under_cassandra5_sstabledump` live-Cassandra parity tests (#911, skipped by default in the gate, run in nightly Docker lanes). A single Docker host → serialize; but a parity divergence must **fail**, never flap-retry to green.
+- **Everything else — parity, byte-for-byte, read-path, type-decode — keeps `retries = 0`** (the `profile.default` default). A wrong byte or a diverged `SELECT` must fail deterministically, never be masked by a retry.
+- **`slow-timeout`** = warn at 60s, hard-kill after 4 periods (240s) — a generous backstop for a genuinely wedged test/process, never a killer of slow-but-honest tests on a loaded box.
+
+Verify groups resolve (no TOML parse errors, membership as intended):
+
+```bash
+cargo nextest show-config test-groups --package cqlite-core --features cli-helpers
+# prints: group: docker (max threads = 1) … group: timing (max threads = 1) … with members
+```
+
 ## Machine-wide full-gate concurrency cap (issue #1825)
 
 Running many sessions/worktrees at once used to let ~15 full gates hit the CPU at once (load 30–60) and SIGKILL gates mid-`core-tests`. The FULL `agent-gate.sh` run now takes a **cross-process bounded semaphore**: at most **N** full gates execute machine-wide at once; excess invocations **queue** (block) for a slot — printing `waiting for gate slot (N in use)…` once — and then proceed. **They never fail from the cap**; non-interactive callers block cleanly.
