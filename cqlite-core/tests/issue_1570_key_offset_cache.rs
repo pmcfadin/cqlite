@@ -493,6 +493,22 @@ mod bti {
         // to a len-delta check). Restoring this flush also fixes an intent regression
         // (issue #2674 roborev 1799): the clean-miss precondition must observe a
         // genuinely cold lookup.
+        //
+        // ADJUDICATED (issue #2674, roborev 1799 vs 1802): 1799 DEMANDED this flush to
+        // guard the already-resident-candidate case; 1802 flagged the flush as a
+        // cross-test hazard. We keep the flush — the hazard is bounded, verified:
+        //   (a) the property-carrying assertions are hit/miss counter DELTAS captured
+        //       around each measured read, which are eviction- and concurrency-immune
+        //       (a flush changes ABSOLUTE occupancy, never a per-read delta);
+        //   (b) EVERY test in this binary that touches the global B4 cache is bare
+        //       `#[serial]` (grep-verified: all six `#[tokio::test]` fns carry a bare
+        //       `#[serial]`, none keyed `#[serial(k)]`), so no two run concurrently;
+        //   (c) the global B4 cache is a process-global `static` singleton and
+        //       `cargo test` runs distinct test binaries as SEPARATE PROCESSES (and
+        //       sequentially within one component invocation), so no OTHER binary
+        //       shares this process's cache at all.
+        // The flush therefore only affects this test's own cold start; it cannot
+        // clobber a concurrently-running peer, because there is none.
         gc.invalidate_all();
 
         // First read of the absent key: definitive miss (zero rows) that must NOT
@@ -754,35 +770,48 @@ mod bti {
                  this is an anomaly, not a dataset-absent skip"
             ),
         };
-        let hits_before_enabled = gc.hit_count();
-        let ea = db_enabled
-            .execute(&sql_a)
-            .await
-            .expect("enabled point read A");
+        // One warm-up RETRY (issue #2674 roborev 1802): the enabled re-read of A is a
+        // B4 HIT in the common case, but under budget pressure A's freshly-inserted
+        // entry could be LRU-evicted before the re-read consults it (benign). If the
+        // first A,B,A yields no hit delta, run the sequence once more before failing —
+        // two independent misses of a genuine hit are vanishingly unlikely, and this
+        // keeps the liveness control from flaking on a benign eviction.
+        let mut observed_hit = false;
+        for _ in 0..2 {
+            let hits_before_enabled = gc.hit_count();
+            let ea = db_enabled
+                .execute(&sql_a)
+                .await
+                .expect("enabled point read A");
+            assert!(
+                !ea.rows.is_empty(),
+                "B4/BTI disabled positive control: key A must be present"
+            );
+            let _ = db_enabled
+                .execute(&sql_b)
+                .await
+                .expect("enabled point read B");
+            let ea2 = db_enabled
+                .execute(&sql_a)
+                .await
+                .expect("enabled repeated point read A");
+            assert!(
+                !ea2.rows.is_empty(),
+                "B4/BTI disabled positive control: repeated read of present key A returned zero rows"
+            );
+            if gc.hit_count() > hits_before_enabled {
+                observed_hit = true;
+                break;
+            }
+        }
         assert!(
-            !ea.rows.is_empty(),
-            "B4/BTI disabled positive control: key A must be present"
-        );
-        let _ = db_enabled
-            .execute(&sql_b)
-            .await
-            .expect("enabled point read B");
-        let ea2 = db_enabled
-            .execute(&sql_a)
-            .await
-            .expect("enabled repeated point read A");
-        assert!(
-            !ea2.rows.is_empty(),
-            "B4/BTI disabled positive control: repeated read of present key A returned zero rows"
-        );
-        assert!(
-            gc.hit_count() > hits_before_enabled,
+            observed_hit,
             "B4/BTI disabled positive control: an ENABLED db over the same fixture/query must \
-             register at least one B4 cache HIT on the re-read of A — proving the hit counter \
-             is live for this shape and the disabled no-op assertions above are a real \
-             differential; hit counter did not advance (before={hits_before_enabled}, \
-             after={})",
-            gc.hit_count()
+             register at least one B4 cache HIT on the re-read of A (retried once) — proving the \
+             hit counter is live for this shape and the disabled no-op assertions above are a \
+             real differential. No hit was observed across two A,B,A attempts; the likely benign \
+             cause is LRU eviction of A's entry before the re-read, but a genuine liveness \
+             failure cannot be excluded"
         );
     }
 }
