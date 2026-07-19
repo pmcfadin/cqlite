@@ -1346,7 +1346,7 @@ COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-o
 _component_lane() {
   case "$1" in
     python-bindings|node-bindings) printf side ;;
-    parity-report|delivery-telemetry|tooling-tests|binding-unwind-profile|smoke|memory-budget) printf side ;;
+    parity-report|delivery-telemetry|binding-unwind-profile|smoke|memory-budget) printf side ;;
     *) printf main ;;
   esac
 }
@@ -4160,10 +4160,16 @@ dispatch_component() {
 #       feature-thrash and build-lock contention (sccache still dedups the actual
 #       compiles across target dirs).
 #   (b) NON-CARGO / isolatable script components: delivery-telemetry (python3),
-#       binding-unwind-profile (offline bash), tooling-tests (bash/python
-#       self-tests; any nested cargo inherits the isolated CARGO_TARGET_DIR, keeping
-#       it off MAIN's target too). These touch MAIN's shared target not at all, so
-#       they are trivially safe to overlap with the core cargo lane.
+#       binding-unwind-profile (offline bash). These touch MAIN's shared target not
+#       at all, so they are trivially safe to overlap with the core cargo lane.
+#
+# EXCLUDED from SIDE (issue #2657, gate FAIL): tooling-tests stays on the SERIAL MAIN
+# lane despite being non-cargo. It embeds TIMING-SENSITIVE shell self-tests --
+# notably test_worker_supervisor.sh's exit-latency assertion (#2666, <15s ceiling) --
+# that STARVE under co-scheduled SIDE-lane CPU load: measured ~20s under the parallel
+# pool vs ~7s in isolation, so parallelizing it degraded the very component it moved.
+# Keeping it serial preserves its latency headroom; the other five isolatable
+# components still overlap the core long pole.
 #
 # Everything NOT listed here stays on the strictly-serial MAIN lane (it shares
 # cqlite-core's target with a MAIN-compatible feature set), preserving the identical
@@ -4189,8 +4195,9 @@ SIDE_LANE_EXIT=0
 # profile to the historical sequential gate -- no NEW cross-component thrash), with
 # nextest cutting the core-tests long pole. The SIDE lane runs every isolatable
 # component (see is_side_component: the bindings PLUS the non-core/isolated-feature
-# components parity-report, delivery-telemetry, tooling-tests, binding-unwind-profile,
-# smoke, memory-budget), each in its OWN CARGO_TARGET_DIR, concurrently with MAIN --
+# components parity-report, delivery-telemetry, binding-unwind-profile, smoke,
+# memory-budget -- tooling-tests is EXCLUDED and stays serial on MAIN, see below),
+# each in its OWN CARGO_TARGET_DIR, concurrently with MAIN --
 # so the isolatable non-core work overlaps the core cargo long pole instead of
 # tailing it. Concurrent heavy processes are bounded by AGENT_GATE_JOBS: MAIN takes
 # one slot, the SIDE lane runs up to (AGENT_GATE_JOBS - 1) of its components at once

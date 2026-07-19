@@ -25,9 +25,15 @@ ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 # The isolatable non-core components #2657 moves onto the concurrent SIDE lane, on
-# top of the two bindings the #1737 pool already parallelized.
-EXPECTED_NEW_SIDE="parity-report delivery-telemetry tooling-tests binding-unwind-profile smoke memory-budget"
+# top of the two bindings the #1737 pool already parallelized. tooling-tests is
+# DELIBERATELY EXCLUDED (see EXPECTED_MAIN_ONLY): its embedded timing-sensitive shell
+# self-tests (test_worker_supervisor.sh exit-latency, #2666) starved under co-scheduled
+# SIDE-lane load, so it stays SERIAL on the MAIN lane.
+EXPECTED_NEW_SIDE="parity-report delivery-telemetry binding-unwind-profile smoke memory-budget"
 EXPECTED_EXISTING_SIDE="python-bindings node-bindings"
+# Components that MUST stay on the strictly-serial MAIN lane despite being otherwise
+# isolatable — tooling-tests is here because its shell self-tests are latency-sensitive.
+EXPECTED_MAIN_ONLY="tooling-tests"
 
 # 1) Drive the real classifier. STDOUT must be the "<lane> <component>" mapping and
 #    nothing else (the classify hooks keep STDOUT clean; banners go to STDERR).
@@ -70,12 +76,24 @@ for c in core-tests write-tests cli-tests integration-tests fmt clippy tombstone
   fi
 done
 
+# 4b) tooling-tests MUST stay on the strictly-serial MAIN lane (#2657 gate FAIL):
+#     its embedded timing-sensitive shell self-tests (test_worker_supervisor.sh
+#     exit-latency, #2666) starved under co-scheduled SIDE-lane load. Keeping it
+#     serial preserves its latency headroom.
+for c in $EXPECTED_MAIN_ONLY; do
+  if [ "$(lane_of "$c")" = main ]; then
+    ok "$c stays SERIAL on the MAIN lane (timing-sensitive self-tests, #2657)"
+  else
+    bad "$c leaked onto the SIDE lane — its latency-sensitive self-tests will starve (#2657)"
+  fi
+done
+
 # 5) The SIDE lane must be exactly the union of the two sets — nothing else silently
 #    joined it, so the MAIN build profile is unchanged for every other component.
 side_sorted=$(printf '%s\n' $side_list | sort)
 expected_side_sorted=$(printf '%s\n' $EXPECTED_NEW_SIDE $EXPECTED_EXISTING_SIDE | sort)
 if [ "$side_sorted" = "$expected_side_sorted" ]; then
-  ok "SIDE lane is exactly the 8 expected isolatable components"
+  ok "SIDE lane is exactly the 7 expected isolatable components (tooling-tests excluded)"
 else
   bad "SIDE lane membership drifted:
 --- got ---
