@@ -997,14 +997,23 @@ fi
 #       14b behavioral — the scrub mechanism actually prevents the clobber, with a
 #           negative control proving the clobber is real (so 14b cannot pass vacuously).
 
-# 14a. STRUCTURAL: extract the run_tooling_tests body (top-level `}` ends it, same
-#      awk idiom as 7e/13e) and assert it de-exports / env -u's AGENT_GATE_SUMMARY_FILE.
-tt_body=$(awk '/^run_tooling_tests\(\)/{f=1} f{print} f&&/^\}/{exit}' "$GATE")
-if printf '%s\n' "$tt_body" | grep -v '^[[:space:]]*#' \
-     | grep -Eq 'export -n AGENT_GATE_SUMMARY_FILE|env -u AGENT_GATE_SUMMARY_FILE'; then
-  ok "2751-structural: run_tooling_tests scrubs AGENT_GATE_SUMMARY_FILE from nested self-tests"
+# 14a. STRUCTURAL (property, not location): the gate must scrub
+#      AGENT_GATE_SUMMARY_FILE from the environment exactly ONCE, AFTER the summary
+#      path is resolved into the parent's own var and BEFORE any component runs — so
+#      no child (present or future) can inherit the path. We assert the property by
+#      line ordering rather than pinning to a single component: the (non-comment)
+#      scrub line exists, sits AFTER the `case "$SUMMARY_FILE"` resolution, and
+#      BEFORE the component runner (`run_component() {`) is even defined. FAILs if
+#      the scrub line is deleted.
+scrub_ln=$(grep -nE '^[[:space:]]*(export -n|env -u) AGENT_GATE_SUMMARY_FILE' "$GATE" \
+             | grep -v ':[[:space:]]*#' | head -1 | cut -d: -f1)
+resolve_ln=$(grep -n '^case "\$SUMMARY_FILE" in' "$GATE" | head -1 | cut -d: -f1)
+dispatch_ln=$(grep -n '^run_component() {' "$GATE" | head -1 | cut -d: -f1)
+if [ -n "$scrub_ln" ] && [ -n "$resolve_ln" ] && [ -n "$dispatch_ln" ] \
+   && [ "$scrub_ln" -gt "$resolve_ln" ] && [ "$scrub_ln" -lt "$dispatch_ln" ]; then
+  ok "2751-structural: gate scrubs AGENT_GATE_SUMMARY_FILE after summary resolution and before component dispatch (line $scrub_ln)"
 else
-  bad "2751-structural: run_tooling_tests no longer scrubs AGENT_GATE_SUMMARY_FILE — nested gates can clobber the parent summary"
+  bad "2751-structural: no AGENT_GATE_SUMMARY_FILE scrub in the resolved-but-pre-dispatch region (scrub=$scrub_ln resolve=$resolve_ln dispatch=$dispatch_ln) — nested gates can clobber the parent summary"
 fi
 
 # 14b. BEHAVIORAL: copy the gate into a bare temp dir (hermetic — --emit-summary-selftest
@@ -1016,22 +1025,29 @@ SENTINEL="PARENT-OWNED-SUMMARY-2751-DO-NOT-CLOBBER"
 
 # Negative control: a nested gate that INHERITS an exported AGENT_GATE_SUMMARY_FILE
 # overwrites it. This makes the positive assertion meaningful (proves the clobber is
-# real and reachable, so 14b cannot pass just because nothing wrote anywhere).
+# real and reachable, so 14b cannot pass just because nothing wrote anywhere). We
+# assert BOTH that the sentinel is gone AND that a real gate summary marker now
+# occupies the file — so a "file vanished/emptied" outcome cannot pass the control.
 clob="$tmp/2751-parent-clobber.txt"
 printf '%s\n' "$SENTINEL" >"$clob"
 ( export AGENT_GATE_SUMMARY_FILE="$clob"; cd "$tt_repo" \
     && bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
-if grep -q "$SENTINEL" "$clob" 2>/dev/null; then
-  bad "2751-clobber-control: an INHERITED AGENT_GATE_SUMMARY_FILE was NOT overwritten — behavioral control invalid"
-  echo "------- on disk -------"; cat "$clob" 2>/dev/null; echo "-----------------------"
+if ! grep -q "$SENTINEL" "$clob" 2>/dev/null \
+   && grep -q "$END_MARKER" "$clob" 2>/dev/null; then
+  ok "2751-clobber-control: a nested gate with an inherited summary path OVERWRITES it with a gate summary (clobber is real)"
 else
-  ok "2751-clobber-control: a nested gate with an inherited summary path DOES overwrite it (clobber is real)"
+  bad "2751-clobber-control: the inherited path was not overwritten with a gate summary — behavioral control invalid"
+  echo "------- on disk -------"; cat "$clob" 2>/dev/null; echo "-----------------------"
 fi
 
-# Positive: with the scrub (env -u, exactly as run_tooling_tests applies it) the
-# parent's chosen path is untouched, and the scrubbed child writes its OWN default.
+# Positive: with the scrub (env -u, exactly as the gate applies it after summary
+# resolution) the parent's chosen path is untouched, and the scrubbed child writes
+# its OWN default. Remove any prior default first so the "child wrote its own
+# default" assertion can never pass on a stale file (from the negative control or a
+# future case) — it must be (re)created by THIS invocation.
 safe="$tmp/2751-parent-safe.txt"
 printf '%s\n' "$SENTINEL" >"$safe"
+rm -f "$tt_repo/.agent-gate-summary.txt"
 ( export AGENT_GATE_SUMMARY_FILE="$safe"; cd "$tt_repo" \
     && env -u AGENT_GATE_SUMMARY_FILE bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
 if grep -q "$SENTINEL" "$safe" 2>/dev/null; then
@@ -1040,13 +1056,19 @@ else
   bad "2751-scrub-prevents-clobber: the parent's summary file was clobbered despite the scrub"
   echo "------- on disk -------"; cat "$safe" 2>/dev/null; echo "-----------------------"
 fi
-# The scrubbed child must still have emitted a summary — at its OWN repo-root
-# default — proving it ran fully and simply wrote elsewhere, not that it no-op'd.
-if [ -s "$tt_repo/.agent-gate-summary.txt" ] \
-   && ! grep -q "$SENTINEL" "$tt_repo/.agent-gate-summary.txt" 2>/dev/null; then
-  ok "2751-scrub-prevents-clobber: the scrubbed child wrote its own repo-root default summary instead"
+# The scrubbed child must still have emitted a COMPLETED summary — at its OWN
+# repo-root default, (re)created by this run — proving it ran fully and simply wrote
+# elsewhere, not that it no-op'd or left only the startup INCOMPLETE sentinel.
+child_default="$tt_repo/.agent-gate-summary.txt"
+if [ -f "$child_default" ] \
+   && grep -q "$END_MARKER" "$child_default" 2>/dev/null \
+   && grep -q "^RESULT: " "$child_default" 2>/dev/null \
+   && ! grep -q "RESULT: INCOMPLETE" "$child_default" 2>/dev/null \
+   && ! grep -q "$SENTINEL" "$child_default" 2>/dev/null; then
+  ok "2751-scrub-prevents-clobber: the scrubbed child wrote a COMPLETED summary at its own repo-root default instead"
 else
-  bad "2751-scrub-prevents-clobber: the scrubbed child produced no summary at its own default path"
+  bad "2751-scrub-prevents-clobber: the scrubbed child's own-default summary is missing/incomplete"
+  echo "------- on disk -------"; cat "$child_default" 2>/dev/null; echo "-----------------------"
 fi
 
 echo "----"
