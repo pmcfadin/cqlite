@@ -19,6 +19,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import in.mcfad.cqlite.flight.PrimaryKeyExtractor.KeyColumn;
+
 import in.mcfad.cqlite.flight.sidecar.HostAddresses;
 import in.mcfad.cqlite.flight.sidecar.SidecarClient;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.ReplicaInfo;
@@ -29,6 +31,9 @@ import in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse;
  * (which lives on RF replicas) is read exactly once across the cluster.
  */
 public class CqliteFlightSplitManager implements ConnectorSplitManager {
+    private static final System.Logger LOG =
+            System.getLogger(CqliteFlightSplitManager.class.getName());
+
     private final CqliteFlightConfig config;
     private final SidecarClient sidecar;
     private final SnapshotManager snapshots;
@@ -87,6 +92,18 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
         List<CqliteFlightSplit> ranges = buildSplits(
                 handle, replicas, config.localDatacenter(), config.flightPort(), snapshot, availableHosts);
 
+        // Plan-time split pruning (issue #2679): when the pushed-down constraint FULLY binds
+        // the partition key (equality on every PK column, or an IN over full keys), compute the
+        // Murmur3 token(s) and keep only the covering token range(s). Anything less — or any
+        // doubt (unknown partitioner, un-serializable value, exception) — leaves the full
+        // fan-out unchanged. Split elimination is load-bearing for correctness (a mis-pruned
+        // split silently drops rows), so this is fail-safe by construction. Never applied to an
+        // aggregated handle: the finalize split must still fan out to every range to merge.
+        if (!handle.isAggregated()) {
+            ranges = pruneToBoundPartitionKey(
+                    handle, ranges, constraint, config.splitPruningEnabled(), Partitioner.resolve());
+        }
+
         // Aggregated handle: Trino does not re-aggregate across splits, so return
         // ONE finalize split carrying all range→replica assignments. Its PageSource
         // fans out, pulls each range's partial, merges, and emits the final rows.
@@ -103,6 +120,84 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
         }
 
         return new FixedSplitSource(ranges);
+    }
+
+    /**
+     * Prune {@code ranges} to those covering the bound partition key's Murmur3 token(s)
+     * (issue #2679), or return {@code ranges} unchanged (full fan-out) on ANY doubt.
+     *
+     * <p>Fail-safe by construction: pruning is skipped — and the reason logged — when the
+     * toggle is off, the resolved {@link Partitioner} is not Murmur3, the constraint does not
+     * fully bind the partition key, a value cannot be serialized, the covering set would be
+     * empty, or anything throws. Full fan-out is always correct, so a skip is never a
+     * correctness risk; a mis-prune would be, hence the conservative posture.
+     */
+    static List<CqliteFlightSplit> pruneToBoundPartitionKey(
+            CqliteFlightTableHandle handle, List<CqliteFlightSplit> ranges, Constraint constraint,
+            boolean pruningEnabled, Partitioner partitioner) {
+        try {
+            if (!pruningEnabled) {
+                return ranges;
+            }
+            if (constraint == null) {
+                return ranges;
+            }
+            if (partitioner != Partitioner.MURMUR3) {
+                LOG.log(System.Logger.Level.DEBUG,
+                        () -> "Split pruning disabled: partitioner " + partitioner
+                                + " is not Murmur3Partitioner; using full fan-out for "
+                                + handle.keyspace() + "." + handle.table());
+                return ranges;
+            }
+            List<KeyColumn> partitionKey = PrimaryKeyExtractor.extract(handle.ddl()).partitionKey();
+            BoundPartitionKeys bound = BoundPartitionKeys.compute(constraint.getSummary(), partitionKey);
+            if (!bound.isBound()) {
+                LOG.log(System.Logger.Level.DEBUG,
+                        () -> "Split pruning skipped for " + handle.keyspace() + "." + handle.table()
+                                + " (full fan-out): " + bound.skipReason());
+                return ranges;
+            }
+            long[] tokens = bound.tokens().orElseThrow();
+            List<CqliteFlightSplit> pruned = new ArrayList<>();
+            for (CqliteFlightSplit split : ranges) {
+                if (rangeCoversAnyToken(split, tokens)) {
+                    pruned.add(split);
+                }
+            }
+            if (pruned.isEmpty()) {
+                // Every token fell outside every emitted range: the ring guard already
+                // validated exact tiling, so this should be impossible — but if it happens,
+                // fail safe to the full fan-out rather than return zero splits (0 rows).
+                LOG.log(System.Logger.Level.WARNING,
+                        () -> "Split pruning produced no covering range for a fully-bound key on "
+                                + handle.keyspace() + "." + handle.table()
+                                + "; falling back to full fan-out (never drop rows)");
+                return ranges;
+            }
+            List<CqliteFlightSplit> full = ranges;
+            LOG.log(System.Logger.Level.DEBUG,
+                    () -> "Split pruning: " + full.size() + " -> " + pruned.size()
+                            + " splits for a fully-bound partition key on "
+                            + handle.keyspace() + "." + handle.table());
+            return pruned;
+        } catch (RuntimeException e) {
+            // Any unexpected failure in the pruning path must NOT fail the query or drop rows.
+            LOG.log(System.Logger.Level.WARNING,
+                    "Split pruning failed; using full fan-out for "
+                            + handle.keyspace() + "." + handle.table(), e);
+            return ranges;
+        }
+    }
+
+    /** Does this split's {@code (start, end]} range (with wraparound) contain any of {@code tokens}? */
+    private static boolean rangeCoversAnyToken(CqliteFlightSplit split, long[] tokens) {
+        for (long token : tokens) {
+            if (Murmur3Token.tokenInRange(
+                    token, split.tokenStart(), split.tokenEnd(), split.wraparound())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

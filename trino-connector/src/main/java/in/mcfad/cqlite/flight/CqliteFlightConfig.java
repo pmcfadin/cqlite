@@ -31,6 +31,10 @@ import java.util.Optional;
  * # Deadline for the optional planning-time table_stats DoAction (issue #944). A slow or
  * # half-open Flight endpoint must degrade to "no estimate", never stall query planning.
  * cqlite.table-stats-timeout-ms=3000
+ * # Plan-time split pruning (issue #2679): when the pushed-down constraint fully binds the
+ * # partition key, emit splits only for the covering token range(s) instead of one per range.
+ * # Default on; set false to force the full fan-out (the differential baseline).
+ * cqlite.split-pruning-enabled=true                 # true | false
  * </pre>
  */
 public record CqliteFlightConfig(
@@ -43,9 +47,19 @@ public record CqliteFlightConfig(
         ReadMode readMode,
         Optional<String> snapshotTtl,
         long snapshotReuseWindowMillis,
-        long snapshotRetireGraceMillis) {
+        long snapshotRetireGraceMillis,
+        boolean splitPruningEnabled) {
 
     public static final int DEFAULT_FLIGHT_PORT = 8815;
+
+    /**
+     * Plan-time split pruning (issue #2679) is ON by default: when a query's pushed-down
+     * constraint fully binds the partition key, the split manager emits splits only for the
+     * covering token range(s) instead of one per token range. Set
+     * {@code cqlite.split-pruning-enabled=false} to force the full fan-out (the differential
+     * baseline). Pruning is always fail-safe — any doubt already falls back to full fan-out.
+     */
+    public static final boolean DEFAULT_SPLIT_PRUNING_ENABLED = true;
 
     /**
      * Default backstop TTL for per-query snapshots (issue #2105). Explicit best-effort
@@ -246,9 +260,12 @@ public record CqliteFlightConfig(
         long retireGraceMs = config.containsKey("cqlite.snapshot-retire-grace-ms")
                 ? Long.parseLong(config.get("cqlite.snapshot-retire-grace-ms"))
                 : DEFAULT_SNAPSHOT_RETIRE_GRACE_MILLIS;
+        boolean splitPruning = config.containsKey("cqlite.split-pruning-enabled")
+                ? Boolean.parseBoolean(config.get("cqlite.split-pruning-enabled"))
+                : DEFAULT_SPLIT_PRUNING_ENABLED;
         return new CqliteFlightConfig(
                 URI.create(sidecar), port, dc, policy, ratio, statsTimeoutMs, readMode, snapshotTtl,
-                reuseWindowMs, retireGraceMs);
+                reuseWindowMs, retireGraceMs, splitPruning);
     }
 
     /**
