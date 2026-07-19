@@ -147,19 +147,29 @@ fn table_dir() -> Option<PathBuf> {
     {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with("collections_with_udts-")
-            && entry.path().join("nb-1-big-Data.db").is_file()
-        {
+        // Glob both the CFID (a regen mints a new one) AND the Data.db component
+        // name (`nb-*`/`da-*`, any generation) so a fixture regen can never turn
+        // this into a hard false failure (roborev job 1925 item 3).
+        if name.starts_with("collections_with_udts-") && has_data_db(&entry.path()) {
             found = Some(entry.path());
             break;
         }
     }
     assert!(
         found.is_some(),
-        "test_collections dir exists but no collections_with_udts-*/nb-1-big-Data.db found \
+        "test_collections dir exists but no collections_with_udts-*/*-Data.db found \
          at {ks_dir:?} — the UDT-in-collection fixture moved or regressed (do NOT silently skip)"
     );
     found
+}
+
+/// Whether `dir` holds any `*-Data.db` SSTable component (any version/generation).
+fn has_data_db(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with("-Data.db"))
 }
 
 fn producer() -> MergeProducer {
@@ -309,5 +319,68 @@ fn warm_path_decodes_udt_in_collection_matching_cold_and_golden() {
         decoded_addresses(&combined, &uuid_bytes(TARGET_UUID)),
         expected_sorted(),
         "warm path: addresses frozen<UDT> list must decode identically to cold + golden"
+    );
+}
+
+/// Aggregate/group-by UDT-column resolution (roborev job 1925 item 4). A
+/// `GROUP BY` on a top-level `frozen<address_type>` column puts a UDT-typed column
+/// in the PARTIAL output. Under the PRODUCTION order (`with_udt_registry` THEN
+/// `with_aggregation`, as `service.rs` builds it) that partial column must resolve
+/// to an Arrow `Struct`, not opaque `Utf8` — else the aggregate schema silently
+/// disagrees with the emitted arrays. The reverse order must yield an IDENTICAL
+/// schema. Pure schema assertion — no SSTable read, so it never skips.
+#[test]
+fn aggregate_udt_group_by_column_resolves_to_struct_both_orders() {
+    use arrow::datatypes::DataType;
+
+    // id uuid PRIMARY KEY, home frozen<address_type>.
+    let schema = TableSchema {
+        keyspace: "test_collections".into(),
+        table: "udt_agg".into(),
+        partition_keys: vec![KeyColumn {
+            name: "id".into(),
+            data_type: "uuid".into(),
+            position: 0,
+        }],
+        clustering_keys: Vec::<ClusteringColumn>::new(),
+        columns: vec![col("id", "uuid"), col("home", "frozen<address_type>")],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    };
+    // GROUP BY home, count(*) AS cnt.
+    let aggregation: cqlite_flight::ticket::Aggregation =
+        serde_json::from_value(serde_json::json!({
+            "group_by": ["home"],
+            "aggregates": [{"func": "Count", "column": null, "output": "cnt"}]
+        }))
+        .expect("aggregation");
+    let registry = || udt_registry_from_cql(DDL, "test_collections");
+
+    // PRODUCTION order: registry first, then aggregation.
+    let prod = MergeProducer::with_spec(schema.clone(), 64, ScanSpec::default())
+        .unwrap()
+        .with_udt_registry(registry())
+        .with_aggregation(&aggregation)
+        .unwrap();
+    let prod_schema = prod.arrow_schema().unwrap();
+    let home = prod_schema
+        .field_with_name("home")
+        .expect("home in partial schema");
+    assert!(
+        matches!(home.data_type(), DataType::Struct(_)),
+        "production order: UDT group-by column must resolve to Struct, got {:?}",
+        home.data_type()
+    );
+
+    // REVERSE order: aggregation first, then registry — must be identical.
+    let rev = MergeProducer::with_spec(schema, 64, ScanSpec::default())
+        .unwrap()
+        .with_aggregation(&aggregation)
+        .unwrap()
+        .with_udt_registry(registry());
+    assert_eq!(
+        prod_schema,
+        rev.arrow_schema().unwrap(),
+        "both builder orders must yield an identical aggregate Arrow schema (#2349)"
     );
 }

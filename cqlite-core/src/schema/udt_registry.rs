@@ -291,18 +291,18 @@ impl UdtRegistry {
                 )
             })
             .collect();
-        // Preserve an EXPLICIT `keyspace.type` qualifier so two same-named UDTs in
-        // different keyspaces stay distinguishable on any re-resolution/round-trip
-        // (roborev job 1924 blocker 2). An UNQUALIFIED reference keeps its bare name
-        // — matching `CqlType::parse`'s output and the un-keyspaced `CqlType::Udt`
-        // form the rest of the codebase produces, so the parity/golden comparison
-        // (which reads struct FIELDS, never the node name) is unchanged.
-        let node_name = if udt_name.contains('.') {
-            udt_name.to_string()
-        } else {
-            bare_name.to_string()
-        };
-        Some(CqlType::Udt(node_name, fields))
+        // The node name is deliberately the BARE type name, never a
+        // `keyspace.type` qualifier (roborev job 1925 blocker 2). A qualifier is
+        // resolved AT resolution time — the lookup above already used the explicit
+        // keyspace, and every nested field is resolved against `def.keyspace` — so
+        // the correct definition is baked into `fields`; the keyspace need not (and
+        // MUST NOT) live in the name. Many consumers key on a bare name and would
+        // break on a qualified one: `UdtValue.type_name` is emitted verbatim as
+        // `_type` in CLI/binding JSON output (json.rs, query/result.rs), and
+        // `UdtTypeDef::validate_value` / `get_udt` / `contains_udt` all match a bare
+        // name. Keeping it bare matches `CqlType::parse`'s output and preserves that
+        // consumer contract; the golden comparison reads struct FIELDS, not the name.
+        Some(CqlType::Udt(bare_name.to_string(), fields))
     }
 
     /// Resolve UDT with full dependency chain
@@ -635,17 +635,20 @@ CREATE TYPE ks.contact_info (email text, address frozen<address_type>);";
     }
 
     #[test]
-    fn resolve_type_preserves_explicit_keyspace_qualifier() {
-        // `ks.address_type` (explicitly qualified) keeps its qualifier so two
-        // same-named UDTs in different keyspaces stay distinguishable (blocker 2).
+    fn resolve_type_qualified_reference_resolves_to_bare_node_name() {
+        // An explicit `ks.address_type` reference resolves via the named keyspace
+        // but the resulting node carries the BARE type name (roborev job 1925
+        // blocker 2): the correct definition is already baked into the fields, and
+        // bare names are the contract every name-keyed consumer (UdtValue.type_name
+        // JSON output, get_udt/validate_value) expects.
         let reg = udt_registry_from_cql(DDL, "ks");
         let parsed = CqlType::parse("frozen<ks.address_type>").unwrap();
         let resolved = reg.resolve_type(&parsed, "other_ks");
         match &resolved {
             CqlType::Frozen(inner) => match inner.as_ref() {
                 CqlType::Udt(name, fields) => {
-                    assert_eq!(name, "ks.address_type", "qualifier preserved");
-                    assert_eq!(fields.len(), 2);
+                    assert_eq!(name, "address_type", "node name stays BARE, not qualified");
+                    assert_eq!(fields.len(), 2, "resolved against the ks keyspace");
                 }
                 other => panic!("expected Udt, got {other:?}"),
             },

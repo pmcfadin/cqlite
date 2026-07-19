@@ -427,26 +427,35 @@ impl MergeProducer {
     /// `self` for chaining.
     pub fn with_udt_registry(mut self, registry: UdtRegistry) -> Self {
         let keyspace = self.schema.keyspace.clone();
-        let resolve = |columns: &mut Vec<ColumnInfo>| {
-            for column in columns {
-                if let Some(cql_type) = &column.cql_type {
-                    let resolved = registry.resolve_type(cql_type, &keyspace);
-                    column.data_type = flat_data_type(&resolved);
-                    column.cql_type = Some(resolved);
-                }
-            }
-        };
-        resolve(&mut self.columns);
+        Self::resolve_columns_udts(&registry, &keyspace, &mut self.columns);
         // If aggregation was already attached (a caller that chained
         // `with_aggregation` BEFORE `with_udt_registry`), the PARTIAL output columns
         // must be resolved too — otherwise the aggregate Arrow schema would keep
         // pre-resolution `Custom("udt:X")` types while the emitted arrays are
         // resolved, a silent schema/array disagreement (roborev job 1924 blocker 1).
+        // The PRODUCTION order (`with_udt_registry` THEN `with_aggregation`) is
+        // covered symmetrically in `with_aggregation` (roborev job 1925 item 1).
         if let Some(partial) = self.partial_columns.as_mut() {
-            resolve(partial);
+            Self::resolve_columns_udts(&registry, &keyspace, partial);
         }
         self.udt_registry = Some(registry);
         self
+    }
+
+    /// Resolve each column's `cql_type` against `registry` in place (issue #2349):
+    /// a `Custom("udt:X")` becomes a fully-structured `Udt(X, fields)` so the Arrow
+    /// field is a `Struct`, not opaque `Utf8`/`Binary`. Shared by
+    /// [`Self::with_udt_registry`] (full-row columns) and [`Self::with_aggregation`]
+    /// (partial/group-by columns) so a UDT group-by column never keeps an
+    /// unresolved type the emitted arrays contradict.
+    fn resolve_columns_udts(registry: &UdtRegistry, keyspace: &str, columns: &mut [ColumnInfo]) {
+        for column in columns {
+            if let Some(cql_type) = &column.cql_type {
+                let resolved = registry.resolve_type(cql_type, keyspace);
+                column.data_type = flat_data_type(&resolved);
+                column.cql_type = Some(resolved);
+            }
+        }
     }
 
     /// Open a cold full-scan k-way merger over `paths`, threading the resolved UDT
@@ -474,7 +483,16 @@ impl MergeProducer {
     /// to the PARTIAL aggregate schema. Consumes and returns `self` for chaining.
     pub fn with_aggregation(mut self, aggregation: &Aggregation) -> Result<Self, ProducerError> {
         let plan = AggPlan::build(aggregation, &self.schema)?;
-        let partial = plan.partial_columns(&self.schema)?;
+        let mut partial = plan.partial_columns(&self.schema)?;
+        // Production order is `with_udt_registry(...)` THEN `with_aggregation(...)`
+        // (service.rs). `plan.partial_columns` derives from the RAW schema, so a
+        // UDT-typed group-by column would carry `Custom("udt:X")` while its emitted
+        // array decodes structurally — a silent Arrow schema/array disagreement
+        // (roborev job 1925 item 1). Resolve the partial columns against the already-
+        // attached registry so both are `Struct`.
+        if let Some(registry) = self.udt_registry.clone() {
+            Self::resolve_columns_udts(&registry, &self.schema.keyspace, &mut partial);
+        }
         self.agg = Some(plan);
         self.partial_columns = Some(partial);
         Ok(self)
