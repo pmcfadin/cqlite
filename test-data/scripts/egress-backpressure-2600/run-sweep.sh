@@ -59,8 +59,14 @@ mkdir -p "$OUT"
 # Extract a single numeric JSON field value (no key, no quotes).
 numfield() { sed -n "s/.*\"$1\":\([0-9][0-9.]*\).*/\1/p"; }
 
-# Running peak of the depth CSV = max of col3 (monotonic → also its last value).
-peak_of() { [ -f "$1" ] && cut -d, -f3 "$1" 2>/dev/null | sort -n | tail -1; }
+# Running peak of the depth CSV = max of col3 (the running monotonic peak; for the
+# raw sample files this equals max(col2) since col3 = running max of col2). Prints
+# the NA sentinel for both a missing file and a present-but-empty one.
+peak_of() {
+  local p=""
+  [ -f "$1" ] && p="$(cut -d, -f3 "$1" 2>/dev/null | sort -n | tail -1)"
+  printf '%s' "${p:-NA(no-instr)}"
+}
 
 # Block until the server accepts a TCP connection on $PORT, or fail loudly.
 wait_for_port() {
@@ -85,7 +91,10 @@ start_server() {
   wait_for_port "$log" || { stop_server; return 1; }
 }
 stop_server() {
-  [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null && wait "$SRV_PID" 2>/dev/null
+  if [ -n "$SRV_PID" ]; then
+    kill "$SRV_PID" 2>/dev/null || true
+    wait "$SRV_PID" 2>/dev/null || true
+  fi
   SRV_PID=""
 }
 
@@ -101,7 +110,7 @@ run_cell() {
   stop_server
   local rec; rec="$(cat "$OUT/$name.loadgen.jsonl" 2>/dev/null)"
   printf '%-22s thr=%-3s shape=%-8s peak_depth=%-8s qps=%-9s p50=%-8s p99=%-8s\n' \
-     "$name" "$threads" "$shape" "$(peak_of "$samp" || echo 'NA(no-instr)')" \
+     "$name" "$threads" "$shape" "$(peak_of "$samp")" \
      "$(echo "$rec" | numfield qps)" "$(echo "$rec" | numfield p50)" "$(echo "$rec" | numfield p99)"
 }
 
@@ -115,23 +124,33 @@ run_two_table() {
   "$LG" --endpoint "http://127.0.0.1:$PORT" --ticket-template "$HERE/sensor_data.ticket.json" \
      --ramp 40 --step-duration "$DUR" --shape full --round t2b --out "$OUT/t2b.jsonl" > "$OUT/t2b.lg.log" 2>&1 &
   local b=$!
-  wait "$a"; wait "$b"
+  local sa=0 sb=0
+  wait "$a" || sa=$?
+  wait "$b" || sb=$?
   stop_server
+  if [ "$sa" != 0 ] || [ "$sb" != 0 ]; then
+    echo "two_table_80: LOADGEN-FAIL (simple=$sa sensor=$sb; see $OUT/t2a.lg.log $OUT/t2b.lg.log)" >&2
+    return 1
+  fi
   printf '%-22s thr=%-3s shape=%-8s peak_depth=%-8s (simple40 + sensor40 concurrent)\n' \
-     two_table_80 80 full "$(peak_of "$samp" || echo 'NA(no-instr)')"
+     two_table_80 80 full "$(peak_of "$samp")"
 }
 
 trap 'stop_server' EXIT
 
 echo "=== egress backpressure sweep  KLIMIT=$KLIMIT DUR=$DUR ==="
-run_cell simple_full_8  "$HERE/simple_table.ticket.json" 8  full    ""
-run_cell simple_full_32 "$HERE/simple_table.ticket.json" 32 full    ""
-run_cell simple_full_80 "$HERE/simple_table.ticket.json" 80 full    ""
-run_cell simple_lim_8   "$HERE/simple_table.ticket.json" 8  limit-k "--limit-k 100"
-run_cell simple_lim_32  "$HERE/simple_table.ticket.json" 32 limit-k "--limit-k 100"
-run_cell simple_lim_80  "$HERE/simple_table.ticket.json" 80 limit-k "--limit-k 100"
-run_cell sensor_full_80 "$HERE/sensor_data.ticket.json"  80 full    ""
-[ "${TWO_TABLE:-0}" = "1" ] && run_two_table
+FAILED=0
+run_cell simple_full_8  "$HERE/simple_table.ticket.json" 8  full    ""            || FAILED=1
+run_cell simple_full_32 "$HERE/simple_table.ticket.json" 32 full    ""            || FAILED=1
+run_cell simple_full_80 "$HERE/simple_table.ticket.json" 80 full    ""            || FAILED=1
+run_cell simple_lim_8   "$HERE/simple_table.ticket.json" 8  limit-k "--limit-k 100" || FAILED=1
+run_cell simple_lim_32  "$HERE/simple_table.ticket.json" 32 limit-k "--limit-k 100" || FAILED=1
+run_cell simple_lim_80  "$HERE/simple_table.ticket.json" 80 limit-k "--limit-k 100" || FAILED=1
+run_cell sensor_full_80 "$HERE/sensor_data.ticket.json"  80 full    ""            || FAILED=1
+if [ "${TWO_TABLE:-0}" = "1" ]; then
+  run_two_table || FAILED=1
+fi
 echo "raw per-cell data under $OUT"
 echo "note: the cap32_* rows in data/sweep-results.csv require the reverted"
 echo "      STREAMING_CHANNEL_CAPACITY=32 experiment build (see doc §Lever); not stock-runnable."
+[ "$FAILED" = 0 ] || { echo "sweep had failing cells" >&2; exit 1; }

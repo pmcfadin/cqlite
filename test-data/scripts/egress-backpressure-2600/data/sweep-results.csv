@@ -1,7 +1,8 @@
 # Issue #2600 egress-backpressure sweep — raw results (2026-07-19)
-# machine: Darwin 25.5.0 (Apple Silicon, 10 cores), release build, DUR=8s. peak_egress_depth = max col3 (running peak) of the 15ms depth sampler (see run-sweep.sh header / doc §Methodology). KLIMIT=128 unless a note says otherwise.
+# machine: Darwin 25.5.0 (Apple Silicon, 10 cores), release build, DUR=8s. KLIMIT=128 unless a note says otherwise.
+# PROVENANCE: every peak_egress_depth below is the running-peak (col3) of that cell's raw 15ms instrumented sample file. For these files col3 == max(col2) by construction (col3 is the running max of col2), verified per-row (col2max==col3max for all 11 rows). run-sweep.sh now extracts col3 directly, matching these published values.
 cell,threads,shape,peak_egress_depth,qps,rows_per_s,p50_ms,p99_ms,requests_unavailable,notes
-simple_full_8,8,full,1473,195.04,195041.2,36.191,98.687,0,finding-1 re-verify (col3 extraction) reproduced peak=1530 (~4% run variance)
+simple_full_8,8,full,1473,195.04,195041.2,36.191,98.687,0,raw file col2max==col3max==1473; a separate finding-1 re-verify run gave 1530 (~4% run variance)
 simple_full_32,32,full,5397,186.79,186794.0,178.047,378.367,0,
 simple_full_80,80,full,8080,190.39,190388.1,416.511,814.079,0,
 simple_lim_8,8,limit-k,1310,1091.05,109105.2,6.015,23.983,0,
