@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "keyspace": "test_timeseries",
+  "table": "sensor_data",
+  "ddl": "CREATE TABLE test_timeseries.sensor_data (sensor_id uuid, timestamp timestamp, temperature float, humidity float, pressure double, battery_level tinyint, location text, status text, PRIMARY KEY (sensor_id, timestamp))",
+  "snapshot": null
+}
