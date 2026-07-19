@@ -23,6 +23,11 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
+# #2751 defense-in-depth: this self-test drives nested `agent-gate.sh --only
+# parity-report` runs. Each case below pins its own AGENT_GATE_SUMMARY_FILE, but
+# scrub any inherited value up front so a standalone run can never clobber the
+# caller's summary file (the tooling-tests component scrubs it too).
+unset AGENT_GATE_SUMMARY_FILE
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 MANIFEST="$REPO_ROOT/test-data/cassandra-parity-manifest.yml"
 REPORT_REL="docs/reports/cassandra-test-parity.md"

@@ -15,6 +15,13 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
+
+# #2751 defense-in-depth: scrub any AGENT_GATE_SUMMARY_FILE inherited from the
+# caller before doing anything. Every case below pins its OWN caller-known path
+# per-invocation, so a top-level unset only removes a leaked value that could
+# otherwise be clobbered when this script is run standalone by an agent who has the
+# var exported (the tooling-tests component scrubs it too — belt-and-suspenders).
+unset AGENT_GATE_SUMMARY_FILE
 START_MARKER="==== AGENT-GATE SUMMARY ===="
 END_MARKER="==== END AGENT-GATE SUMMARY ===="
 STAGE_LINE="fmt:" # representative stage line from the selftest block
@@ -975,6 +982,71 @@ if printf '%s\n' "$rl_body" | grep -v '^[[:space:]]*#' | grep -q 'aggregate_lite
   ok "2121-structural: run_lite invokes aggregate_lite_components (lite OVERALL aggregation single-sourced)"
 else
   bad "2121-structural: run_lite no longer calls aggregate_lite_components — lite OVERALL aggregation lost"
+fi
+
+# 14. NESTED-GATE SUMMARY CLOBBER (#2751): the tooling-tests component runs
+#     self-test scripts that recursively invoke agent-gate.sh (the --delta
+#     self-test's temp-repo `--delta` runs, this script's `--emit-summary-selftest`
+#     runs). If a nested gate INHERITS the parent gate's AGENT_GATE_SUMMARY_FILE it
+#     overwrites the parent's summary file mid-run with a foreign verdict (field
+#     impact: #2672 read a foreign DELTA REFUSED block; #2600's full gate died in
+#     tooling-tests leaving an INCOMPLETE placeholder with a foreign run-id, costing
+#     a 57-min re-run). run_tooling_tests must scrub AGENT_GATE_SUMMARY_FILE so no
+#     child can inherit it. Two halves prove the fix and make it un-removable:
+#       14a structural — run_tooling_tests applies the scrub (FAILs if removed);
+#       14b behavioral — the scrub mechanism actually prevents the clobber, with a
+#           negative control proving the clobber is real (so 14b cannot pass vacuously).
+
+# 14a. STRUCTURAL: extract the run_tooling_tests body (top-level `}` ends it, same
+#      awk idiom as 7e/13e) and assert it de-exports / env -u's AGENT_GATE_SUMMARY_FILE.
+tt_body=$(awk '/^run_tooling_tests\(\)/{f=1} f{print} f&&/^\}/{exit}' "$GATE")
+if printf '%s\n' "$tt_body" | grep -v '^[[:space:]]*#' \
+     | grep -Eq 'export -n AGENT_GATE_SUMMARY_FILE|env -u AGENT_GATE_SUMMARY_FILE'; then
+  ok "2751-structural: run_tooling_tests scrubs AGENT_GATE_SUMMARY_FILE from nested self-tests"
+else
+  bad "2751-structural: run_tooling_tests no longer scrubs AGENT_GATE_SUMMARY_FILE — nested gates can clobber the parent summary"
+fi
+
+# 14b. BEHAVIORAL: copy the gate into a bare temp dir (hermetic — --emit-summary-selftest
+#      needs no cargo/git and writes to its OWN repo-root default when the path is unset).
+tt_repo="$tmp/2751-scrub-repo"
+mkdir -p "$tt_repo/scripts"
+cp "$GATE" "$tt_repo/scripts/agent-gate.sh"
+SENTINEL="PARENT-OWNED-SUMMARY-2751-DO-NOT-CLOBBER"
+
+# Negative control: a nested gate that INHERITS an exported AGENT_GATE_SUMMARY_FILE
+# overwrites it. This makes the positive assertion meaningful (proves the clobber is
+# real and reachable, so 14b cannot pass just because nothing wrote anywhere).
+clob="$tmp/2751-parent-clobber.txt"
+printf '%s\n' "$SENTINEL" >"$clob"
+( export AGENT_GATE_SUMMARY_FILE="$clob"; cd "$tt_repo" \
+    && bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
+if grep -q "$SENTINEL" "$clob" 2>/dev/null; then
+  bad "2751-clobber-control: an INHERITED AGENT_GATE_SUMMARY_FILE was NOT overwritten — behavioral control invalid"
+  echo "------- on disk -------"; cat "$clob" 2>/dev/null; echo "-----------------------"
+else
+  ok "2751-clobber-control: a nested gate with an inherited summary path DOES overwrite it (clobber is real)"
+fi
+
+# Positive: with the scrub (env -u, exactly as run_tooling_tests applies it) the
+# parent's chosen path is untouched, and the scrubbed child writes its OWN default.
+safe="$tmp/2751-parent-safe.txt"
+printf '%s\n' "$SENTINEL" >"$safe"
+( export AGENT_GATE_SUMMARY_FILE="$safe"; cd "$tt_repo" \
+    && env -u AGENT_GATE_SUMMARY_FILE bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
+if grep -q "$SENTINEL" "$safe" 2>/dev/null; then
+  ok "2751-scrub-prevents-clobber: env -u AGENT_GATE_SUMMARY_FILE leaves the parent's summary file intact"
+else
+  bad "2751-scrub-prevents-clobber: the parent's summary file was clobbered despite the scrub"
+  echo "------- on disk -------"; cat "$safe" 2>/dev/null; echo "-----------------------"
+fi
+# The scrubbed child must still have emitted a summary — at its OWN repo-root
+# default — proving it ran fully and simply wrote elsewhere, not that it no-op'd.
+if [ -s "$tt_repo/.agent-gate-summary.txt" ] \
+   && ! grep -q "$SENTINEL" "$tt_repo/.agent-gate-summary.txt" 2>/dev/null; then
+  ok "2751-scrub-prevents-clobber: the scrubbed child wrote its own repo-root default summary instead"
+else
+  bad "2751-scrub-prevents-clobber: the scrubbed child produced no summary at its own default path"
 fi
 
 echo "----"

@@ -2407,6 +2407,21 @@ run_tooling_tests() {
   start=$(date +%s)
   : >"$log"
 
+  # #2751: EVERY self-test below may recursively invoke agent-gate.sh — the --delta
+  # self-test's temp-repo `--delta` runs, the summary self-test's
+  # `--emit-summary-selftest` runs, the parity-report/oom-audit `--only` runs. A
+  # nested gate that INHERITED this gate's AGENT_GATE_SUMMARY_FILE would overwrite
+  # our summary file mid-run with a FOREIGN verdict — a DELTA REFUSED block, or the
+  # startup INCOMPLETE placeholder stamped with the child's run-id (field impact:
+  # #2672 read a foreign verdict; #2600's full gate died here leaving an INCOMPLETE
+  # foreign-run-id placeholder, costing a 57-min re-run). SUMMARY_FILE is already
+  # resolved into the PARENT's own var (and emit_summary + the startup sentinel both
+  # write SUMMARY_FILE, never re-reading this env var), so the env var has served
+  # its purpose: de-export it here so NO child spawned by this component can inherit
+  # the parent's path (equivalent to `env -u AGENT_GATE_SUMMARY_FILE` on each child).
+  # The self-test scripts also scrub it themselves (belt-and-suspenders, #2751).
+  export -n AGENT_GATE_SUMMARY_FILE 2>/dev/null || true
+
   # generator keyspace-scoping guard (#1232): no python3 needed, always runs. A
   # failure here FAILs the component, mirroring the summary selftest semantics.
   echo ">>> [$name] bash scripts/tests/test_generator_keyspace_scoping.sh"
