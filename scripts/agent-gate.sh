@@ -1569,7 +1569,14 @@ esac
 # child. The wrapper re-exec (which must preserve the caller's path) already ran
 # above this line, so it is unaffected. The self-test scripts also scrub it
 # themselves (belt-and-suspenders, #2751).
-export -n AGENT_GATE_SUMMARY_FILE 2>/dev/null || true
+# Visible fallback (#2751 roborev r2): this clobber fix was filed FOR a silent
+# failure, so it must not itself fail silently. If `export -n` errors on some shell,
+# fall back to a plain `unset` (which fully removes it from the env — an even
+# stronger scrub) and log one warning line, rather than swallowing it with `|| true`.
+if ! export -n AGENT_GATE_SUMMARY_FILE 2>/dev/null; then
+  echo "agent-gate: WARN export -n AGENT_GATE_SUMMARY_FILE failed; unsetting instead (#2751)" >&2
+  unset AGENT_GATE_SUMMARY_FILE
+fi
 # Keep a copy under the logs bundle for archival.
 LOG_SUMMARY_FILE="$LOG_DIR/summary.txt"
 declare -a NAMES=() STATUSES=() TIMES=()

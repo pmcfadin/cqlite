@@ -1005,15 +1005,33 @@ fi
 #      scrub line exists, sits AFTER the `case "$SUMMARY_FILE"` resolution, and
 #      BEFORE the component runner (`run_component() {`) is even defined. FAILs if
 #      the scrub line is deleted.
-scrub_ln=$(grep -nE '^[[:space:]]*(export -n|env -u) AGENT_GATE_SUMMARY_FILE' "$GATE" \
-             | grep -v ':[[:space:]]*#' | head -1 | cut -d: -f1)
+# Match the primary env scrub verb (`export -n`/`env -u`) that scrubs the path for
+# ALL children, optionally wrapped in an `if ! …; then` visible-fallback guard. The
+# `^[[:space:]]*` anchor already excludes comment lines, so no extra comment filter is
+# needed (a `: #` trailing comment must NOT false-FAIL it). The `unset` fallback line
+# is deliberately NOT matched — deleting the primary scrub must still FAIL this test.
+scrub_ln=$(grep -nE '^[[:space:]]*(if[[:space:]]+![[:space:]]*)?(export -n|env -u) AGENT_GATE_SUMMARY_FILE' "$GATE" \
+             | head -1 | cut -d: -f1)
 resolve_ln=$(grep -n '^case "\$SUMMARY_FILE" in' "$GATE" | head -1 | cut -d: -f1)
 dispatch_ln=$(grep -n '^run_component() {' "$GATE" | head -1 | cut -d: -f1)
-if [ -n "$scrub_ln" ] && [ -n "$resolve_ln" ] && [ -n "$dispatch_ln" ] \
-   && [ "$scrub_ln" -gt "$resolve_ln" ] && [ "$scrub_ln" -lt "$dispatch_ln" ]; then
+if [ -z "$resolve_ln" ]; then
+  # The resolution anchor is the load-bearing "after" boundary; if it moved the
+  # property is un-checkable — hard FAIL with a DISTINCT message (not "scrub missing").
+  bad "2751-structural: summary-resolution anchor ('case \"\$SUMMARY_FILE\" in') not found — test anchor moved, cannot verify scrub ordering"
+elif [ -z "$scrub_ln" ]; then
+  bad "2751-structural: no AGENT_GATE_SUMMARY_FILE scrub line in the gate — nested gates can clobber the parent summary (#2751 regression)"
+elif [ -z "$dispatch_ln" ]; then
+  # Degrade gracefully: the "before dispatch" upper bound moved, but we can still
+  # assert the essential property (scrub AFTER resolution). Warn, don't false-FAIL.
+  if [ "$scrub_ln" -gt "$resolve_ln" ]; then
+    ok "2751-structural: gate scrubs AGENT_GATE_SUMMARY_FILE after summary resolution (line $scrub_ln); NOTE: dispatch anchor 'run_component() {' moved — upper-bound check skipped"
+  else
+    bad "2751-structural: scrub line ($scrub_ln) is NOT after summary resolution ($resolve_ln) — scrub happens too early to cover the resolved path"
+  fi
+elif [ "$scrub_ln" -gt "$resolve_ln" ] && [ "$scrub_ln" -lt "$dispatch_ln" ]; then
   ok "2751-structural: gate scrubs AGENT_GATE_SUMMARY_FILE after summary resolution and before component dispatch (line $scrub_ln)"
 else
-  bad "2751-structural: no AGENT_GATE_SUMMARY_FILE scrub in the resolved-but-pre-dispatch region (scrub=$scrub_ln resolve=$resolve_ln dispatch=$dispatch_ln) — nested gates can clobber the parent summary"
+  bad "2751-structural: scrub line out of the resolved-but-pre-dispatch region (scrub=$scrub_ln resolve=$resolve_ln dispatch=$dispatch_ln) — nested gates can clobber the parent summary"
 fi
 
 # 14b. BEHAVIORAL: copy the gate into a bare temp dir (hermetic — --emit-summary-selftest
@@ -1047,7 +1065,7 @@ fi
 # future case) — it must be (re)created by THIS invocation.
 safe="$tmp/2751-parent-safe.txt"
 printf '%s\n' "$SENTINEL" >"$safe"
-rm -f "$tt_repo/.agent-gate-summary.txt"
+rm -f "$tt_repo"/.agent-gate-*summary.txt  # widen: covers lite/delta default siblings too
 ( export AGENT_GATE_SUMMARY_FILE="$safe"; cd "$tt_repo" \
     && env -u AGENT_GATE_SUMMARY_FILE bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
 if grep -q "$SENTINEL" "$safe" 2>/dev/null; then
