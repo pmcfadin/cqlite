@@ -308,6 +308,36 @@ class CqliteFlightSplitPruningTest {
                 token, pruned.get(0).tokenStart(), pruned.get(0).tokenEnd(), pruned.get(0).wraparound()));
     }
 
+    /**
+     * Composite-PK fail-safe (issue #2679 roborev, silent-row-loss guard): a composite-PK DDL
+     * spelling the main {@link PrimaryKeyExtractor} cannot resolve consistently — here a quoted
+     * identifier containing {@code ')'}, which UNDER-counts the partition key to a single
+     * component — must NOT prune, even when the constraint binds BOTH real components. The
+     * independent quote-aware arity cross-check disagrees with the extractor's under-count, so
+     * the guard forces the FULL fan-out (always correct). Without the guard this would build a
+     * single-component key, compute the wrong token, and silently drop the partition's rows.
+     */
+    @Test
+    void compositePkExtractorUnderCountKeepsFullFanOut() {
+        // Quoted PK component "a)b": PrimaryKeyExtractor.extract under-counts to ["a] (size 1),
+        // but the true partition key is ("a)b", b) — arity 2. Bind both real components.
+        CqliteFlightColumnHandle pk1 =
+                new CqliteFlightColumnHandle("a)b", VARCHAR, PushdownCapability.FULL);
+        CqliteFlightColumnHandle pk2 = new CqliteFlightColumnHandle("b", INTEGER, PushdownCapability.FULL);
+        CqliteFlightTableHandle table = new CqliteFlightTableHandle(
+                "ks", "t", "CREATE TABLE ks.t (\"a)b\" text, b int, v text, PRIMARY KEY ((\"a)b\", b)))");
+        TokenRangeReplicasResponse resp = ringCovering(-100L, 0L, 100L);
+        List<CqliteFlightSplit> full = CqliteFlightSplitManager.buildSplits(table, resp, "dc1", 8815);
+        var constraint = summary(TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
+                pk1, Domain.singleValue(VARCHAR, Slices.utf8Slice("hello")),
+                pk2, Domain.singleValue(INTEGER, 42L))));
+
+        List<CqliteFlightSplit> pruned = CqliteFlightSplitManager.pruneToBoundPartitionKey(
+                table, full, constraint, true, Partitioner.MURMUR3);
+        assertEquals(full.size(), pruned.size(),
+                "an extractor under-count on a composite PK must keep the full fan-out (never drop rows)");
+    }
+
     @Test
     void compositePkPartiallyBoundKeepsFullFanOut() {
         CqliteFlightColumnHandle pk1 = new CqliteFlightColumnHandle("a", VARCHAR, PushdownCapability.FULL);

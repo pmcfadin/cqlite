@@ -272,6 +272,38 @@ class CqliteFlightSplitPruningWiringTest {
         }
     }
 
+    /**
+     * Composite-PK fail-safe through the PUBLIC getSplits surface (issue #2679 roborev): a
+     * composite-PK DDL whose quoted {@code ')'} identifier makes the main extractor UNDER-count
+     * the partition key must emit the FULL fan-out even with BOTH real components bound. The
+     * independent arity cross-check disagrees with the under-count, so the connector refuses to
+     * prune — never a mis-pruned (row-dropping) plan. Asserted on the public split count.
+     */
+    @Test
+    void compositePkExtractorUnderCountKeepsFullFanOutThroughPublicSurface() throws Exception {
+        CqliteFlightColumnHandle pk1 =
+                new CqliteFlightColumnHandle("a)b", VARCHAR, PushdownCapability.FULL);
+        CqliteFlightColumnHandle pk2 = new CqliteFlightColumnHandle("b", INTEGER, PushdownCapability.FULL);
+        long token = Murmur3Token.token(new byte[] {0, 0, 0, 0x2A});
+        HttpServer server = startFakeSidecar(tokenRangeReplicasJson(token));
+        try {
+            URI uri = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+            SidecarClient sidecar = new SidecarClient(uri);
+            var mgr = new CqliteFlightSplitManager(config(uri, true), sidecar, liveSnapshots());
+            CqliteFlightTableHandle handle = new CqliteFlightTableHandle(
+                    "ks", "t", "CREATE TABLE ks.t (\"a)b\" text, b int, v text, PRIMARY KEY ((\"a)b\", b)))");
+            var constraint = new Constraint(TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
+                    pk1, Domain.singleValue(VARCHAR, Slices.utf8Slice("hello")),
+                    pk2, Domain.singleValue(INTEGER, 42L))), Constant.TRUE, Map.of());
+
+            List<ConnectorSplit> splits = drain(mgr.getSplits(null, null, handle, null, constraint));
+            assertTrue(splits.size() > 1,
+                    "an extractor under-count on a composite PK → full fan-out (never drop rows)");
+        } finally {
+            server.stop(0);
+        }
+    }
+
     /** VARCHAR text PK (utf-8 bytes) also prunes through the public surface. */
     @Test
     void textPkPointReadPrunesThroughPublicSurface() throws Exception {

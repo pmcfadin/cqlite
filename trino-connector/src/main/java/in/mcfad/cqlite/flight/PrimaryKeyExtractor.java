@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -90,6 +91,141 @@ public final class PrimaryKeyExtractor {
             }
         }
         return new Keys(List.of(), List.of());
+    }
+
+    /**
+     * Independently count the number of PARTITION-KEY components in {@code ddl}, using a
+     * QUOTE-AWARE scan that {@link #parseClause} does not perform. This is the fail-safe
+     * cross-check for plan-time split pruning (issue #2679): the pruning path builds a
+     * composite partition-key byte layout ({@code [len:u16 BE][value][0x00]} per component)
+     * whose token is only correct when EVERY component is present in order. A parse
+     * UNDER-count (e.g. a quoted identifier containing {@code ')'} closes the composite group
+     * early) would silently drop the partition's rows. The caller prunes ONLY when this arity
+     * agrees with {@link #extract}'s partition-key column count; any disagreement (or an
+     * indeterminate parse here) forces the full fan-out (always correct).
+     *
+     * <p>Returns {@link OptionalInt#empty()} when the partition-key arity cannot be determined
+     * with confidence (no locatable PRIMARY KEY, an unbalanced clause) so the caller fails safe.
+     *
+     * <p>Robustness comes from masking the contents of every double-quoted identifier to a
+     * neutral filler BEFORE any structural (paren/comma) scanning, so parentheses, commas, and
+     * keywords inside a quoted identifier can never be mistaken for CQL syntax.
+     */
+    public static OptionalInt partitionKeyArity(String ddl) {
+        if (ddl == null) {
+            return OptionalInt.empty();
+        }
+        String masked = maskQuotedIdentifiers(ddl);
+        Matcher clause = PK_CLAUSE.matcher(masked);
+        if (clause.find()) {
+            int openParen = clause.end() - 1;
+            int close = matchingParen(masked, openParen);
+            if (close < 0) {
+                return OptionalInt.empty();
+            }
+            String body = masked.substring(openParen + 1, close);
+            String trimmed = body.trim();
+            if (trimmed.startsWith("(")) {
+                // Composite partition key: count the components inside the leading (...) group.
+                int innerOpen = body.indexOf('(');
+                int innerClose = matchingParen(body, innerOpen);
+                if (innerClose < 0) {
+                    return OptionalInt.empty();
+                }
+                String inner = body.substring(innerOpen + 1, innerClose);
+                return OptionalInt.of(countTopLevelComponents(inner));
+            }
+            // Simple PK clause: the first top-level column is the (single) partition key.
+            return OptionalInt.of(1);
+        }
+        // Inline single-column form: "<col> <type> PRIMARY KEY".
+        if (INLINE_PK.matcher(masked).find()) {
+            return OptionalInt.of(1);
+        }
+        return OptionalInt.empty();
+    }
+
+    /**
+     * Count the top-level (depth-0), non-empty comma-separated components of {@code group}.
+     * {@code group} is already quote-masked, so parentheses here are structural only.
+     */
+    private static int countTopLevelComponents(String group) {
+        int depth = 0;
+        int count = 0;
+        StringBuilder cur = new StringBuilder();
+        for (int i = 0; i < group.length(); i++) {
+            char c = group.charAt(i);
+            if (c == '(') {
+                depth++;
+                cur.append(c);
+            } else if (c == ')') {
+                depth--;
+                cur.append(c);
+            } else if (c == ',' && depth == 0) {
+                if (!cur.toString().trim().isEmpty()) {
+                    count++;
+                }
+                cur.setLength(0);
+            } else {
+                cur.append(c);
+            }
+        }
+        if (!cur.toString().trim().isEmpty()) {
+            count++;
+        }
+        return count;
+    }
+
+    /**
+     * Index of the parenthesis matching the {@code '('} at {@code open} in an
+     * already-quote-masked string, or {@code -1} if unbalanced.
+     */
+    private static int matchingParen(String masked, int open) {
+        int depth = 0;
+        for (int i = open; i < masked.length(); i++) {
+            char c = masked.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Replace the contents of every double-quoted CQL identifier with a neutral filler
+     * ({@code 'a'}), preserving overall length and the quote delimiters, so a subsequent
+     * structural scan cannot mistake a {@code '('}, {@code ')'}, {@code ','}, or keyword
+     * INSIDE a quoted identifier for CQL syntax. A doubled quote ({@code ""}) inside a quoted
+     * identifier is the CQL escape for a literal quote and stays part of the string (masked).
+     */
+    private static String maskQuotedIdentifiers(String ddl) {
+        char[] out = ddl.toCharArray();
+        boolean inQuote = false;
+        for (int i = 0; i < out.length; i++) {
+            char c = out[i];
+            if (!inQuote) {
+                if (c == '"') {
+                    inQuote = true;
+                }
+            } else if (c == '"') {
+                if (i + 1 < out.length && out[i + 1] == '"') {
+                    // Escaped quote inside the identifier: both chars are content → mask both.
+                    out[i] = 'a';
+                    out[i + 1] = 'a';
+                    i++;
+                } else {
+                    inQuote = false; // closing quote
+                }
+            } else {
+                out[i] = 'a';
+            }
+        }
+        return new String(out);
     }
 
     /**

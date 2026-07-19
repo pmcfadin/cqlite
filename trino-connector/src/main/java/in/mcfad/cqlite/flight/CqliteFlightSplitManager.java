@@ -150,6 +150,30 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                 return ranges;
             }
             List<KeyColumn> partitionKey = PrimaryKeyExtractor.extract(handle.ddl()).partitionKey();
+            // Fail-safe composite-PK consistency guard (issue #2679 roborev): the pruning path
+            // builds a composite partition-key byte layout whose Murmur3 token is correct ONLY
+            // when EVERY partition-key component is present, in order. PrimaryKeyExtractor was
+            // built for estimateGroupRatio (#944) where a parse MISS is fail-safe — but here an
+            // UNDER-count on a composite PK (e.g. a quoted identifier containing ')' closes the
+            // composite group early, so PRIMARY KEY ((a,b)) resolves to [a]) is CATASTROPHIC:
+            // it builds a single-component raw-byte key, computes the WRONG token, maps to the
+            // wrong range, and SILENTLY DROPS the partition's rows. Cross-check the extracted
+            // partition-key column count against an INDEPENDENT, quote-aware arity scan of the
+            // same DDL; prune only when they agree. Any disagreement — or an indeterminate
+            // arity — means we cannot be certain we have all components in the right order, so
+            // we fall back to the full fan-out (always correct). This subsumes the
+            // single-component case (1 == 1) unchanged.
+            java.util.OptionalInt arity = PrimaryKeyExtractor.partitionKeyArity(handle.ddl());
+            if (arity.isEmpty() || arity.getAsInt() != partitionKey.size()) {
+                LOG.log(System.Logger.Level.DEBUG,
+                        () -> "Split pruning skipped for " + handle.keyspace() + "." + handle.table()
+                                + " (full fan-out): partition-key parse is not provably complete — "
+                                + "extractor resolved " + partitionKey.size() + " component(s) but the "
+                                + "independent quote-aware arity scan found "
+                                + (arity.isEmpty() ? "an indeterminate count" : arity.getAsInt())
+                                + "; refusing to prune on a possibly under-counted composite key");
+                return ranges;
+            }
             BoundPartitionKeys bound = BoundPartitionKeys.compute(constraint.getSummary(), partitionKey);
             if (!bound.isBound()) {
                 LOG.log(System.Logger.Level.DEBUG,
