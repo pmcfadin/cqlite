@@ -16,7 +16,9 @@ use std::path::PathBuf;
 
 use arrow::record_batch::RecordBatch;
 use cqlite_core::query::AccessPath;
-use cqlite_core::storage::write_engine::{build_single_partition_merger, PartitionKey};
+use cqlite_core::storage::write_engine::{
+    build_single_partition_merger_with_registry, PartitionKey,
+};
 use cqlite_core::types::Value;
 
 use crate::cancel::CancelFlag;
@@ -167,12 +169,19 @@ impl MergeProducer {
         // Map a cooperative cancellation to the distinct `Cancelled` variant, never
         // masking a real I/O/corruption error as a clean cancel (issue #2264,
         // mirroring `drive_merge`).
-        let built =
-            build_single_partition_merger(paths, &key_bytes, &self.schema, cancel.scan_cancel())
-                .map_err(|e| match e {
-                    cqlite_core::Error::Cancelled => ProducerError::Cancelled,
-                    other => ProducerError::Merge(other),
-                })?;
+        let built = build_single_partition_merger_with_registry(
+            paths,
+            &key_bytes,
+            &self.schema,
+            // Issue #2349: thread the resolved UDT registry so a point read decodes
+            // `frozen<UDT>`-in-collection cells exactly as the full-scan cold path.
+            self.udt_registry.as_ref(),
+            cancel.scan_cancel(),
+        )
+        .map_err(|e| match e {
+            cqlite_core::Error::Cancelled => ProducerError::Cancelled,
+            other => ProducerError::Merge(other),
+        })?;
 
         on_merger_built();
         // Label = router's decision (route variant), NOT surviving key count —

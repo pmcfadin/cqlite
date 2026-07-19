@@ -44,7 +44,7 @@ pub use export::{ExportOptions, ExportReport};
 #[cfg(feature = "write-support")]
 pub use memtable::Memtable;
 #[cfg(feature = "write-support")]
-pub use merge::build_single_partition_merger;
+pub use merge::{build_single_partition_merger, build_single_partition_merger_with_registry};
 #[cfg(feature = "write-support")]
 // Issue #2346: the reader-based analogue of `build_single_partition_merger`,
 // re-exported alongside it so both surfaces are reachable the same way.

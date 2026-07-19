@@ -174,7 +174,7 @@ fn rebind_across_snapshot_teardown_does_not_reparse() {
 
     // Query N: warm from snap1 (readers open with file_path inside snap1).
     let snap1 = make_snapshot(&table_dir, "snap1");
-    reg.warm_readers(&key(), ddl(), &schema, &snap1, Some("snap1"), &cancel)
+    reg.warm_readers(&key(), ddl(), &schema, None, &snap1, Some("snap1"), &cancel)
         .expect("first snapshot warms");
     let opens_after_first = reg.metrics().snapshot().reader_opens;
     assert!(opens_after_first >= 2, "both generations parsed cold");
@@ -185,7 +185,7 @@ fn rebind_across_snapshot_teardown_does_not_reparse() {
     // Query N+1: a NEW snapshot dir over the SAME inodes (hardlinks).
     let snap2 = make_snapshot(&table_dir, "snap2");
     let w2 = reg
-        .warm_readers(&key(), ddl(), &schema, &snap2, Some("snap2"), &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &snap2, Some("snap2"), &cancel)
         .expect("second snapshot request after teardown");
 
     // Every returned reader must back a LIVE path (#2352 ENOENT protection kept).
@@ -237,7 +237,7 @@ fn warm_hit_over_large_generation_is_scale_free() {
     let cancel = CancelFlag::new();
 
     // Cold warm: opens (parses) the one big generation.
-    reg.warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+    reg.warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("cold warm of the big generation");
     let after_cold = reg.metrics().snapshot();
     assert!(
@@ -246,7 +246,7 @@ fn warm_hit_over_large_generation_is_scale_free() {
     );
 
     // Repeat over the SAME stable path: a pure warm hit — zero further work.
-    reg.warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+    reg.warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("warm hit");
     let after_hit = reg.metrics().snapshot();
     assert_eq!(
@@ -297,7 +297,7 @@ fn concurrent_misses_single_flight_one_parse_per_generation() {
             let start = Arc::clone(&start);
             thread::spawn(move || {
                 start.wait();
-                reg.warm_readers(&key(), ddl(), &schema, &dir, None, &CancelFlag::new())
+                reg.warm_readers(&key(), ddl(), &schema, None, &dir, None, &CancelFlag::new())
                     .expect("concurrent warm")
                     .readers
                     .len()
@@ -374,7 +374,7 @@ fn cancel_during_large_index_parse_aborts_promptly() {
     // FASTER, never slower, than this baseline).
     let calib_start = std::time::Instant::now();
     WarmTableRegistry::new()
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &CancelFlag::new())
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &CancelFlag::new())
         .expect("calibration warm (uncancelled) completes");
     let baseline = calib_start.elapsed();
     // 1/20th of the measured baseline: tens of ms on every host we've observed,
@@ -410,7 +410,7 @@ fn cancel_during_large_index_parse_aborts_promptly() {
         })
     };
 
-    let res = reg.warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel);
+    let res = reg.warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel);
     canceller.join().expect("canceller");
 
     // RED today: the parse ignores the mid-parse cancel and returns Ok. GREEN once
@@ -457,7 +457,7 @@ fn evicted_but_inflight_reader_is_not_served_with_dead_path() {
     // Budget = exactly ONE generation's footprint, so warming B evicts A.
     let probe = WarmTableRegistry::new();
     probe
-        .warm_readers(&key_a, ddl(), &schema, &dir_a, None, &CancelFlag::new())
+        .warm_readers(&key_a, ddl(), &schema, None, &dir_a, None, &CancelFlag::new())
         .expect("probe warm");
     let one_gen = probe.debug_used_bytes();
     assert!(one_gen > 0, "a generation's footprint is non-zero");
@@ -470,7 +470,7 @@ fn evicted_but_inflight_reader_is_not_served_with_dead_path() {
     // holder outside the registry's cache" this bug depends on.
     let snap1 = make_snapshot(&dir_a, "snap1");
     let w1 = reg
-        .warm_readers(&key_a, ddl(), &schema, &snap1, Some("snap1"), &cancel)
+        .warm_readers(&key_a, ddl(), &schema, None, &snap1, Some("snap1"), &cancel)
         .expect("warm A from snap1");
     assert_eq!(w1.readers.len(), 1, "table A is a single generation");
     let held: Vec<Arc<SSTableReader>> = w1.readers.clone();
@@ -478,7 +478,7 @@ fn evicted_but_inflight_reader_is_not_served_with_dead_path() {
 
     // Warm B: pushes `used_bytes` over budget, evicting A's generation from the
     // registry's OWN cache — but R stays alive via `held` above.
-    reg.warm_readers(&key_b, ddl(), &schema, &dir_b, None, &cancel)
+    reg.warm_readers(&key_b, ddl(), &schema, None, &dir_b, None, &cancel)
         .expect("warm B evicts A");
     assert_eq!(
         reg.debug_reader_count(&key_a),
@@ -496,7 +496,7 @@ fn evicted_but_inflight_reader_is_not_served_with_dead_path() {
     // dead path is the coalescer's own path-liveness gate (blocker 1).
     let snap2 = make_snapshot(&dir_a, "snap2");
     let w2 = reg
-        .warm_readers(&key_a, ddl(), &schema, &snap2, Some("snap2"), &cancel)
+        .warm_readers(&key_a, ddl(), &schema, None, &snap2, Some("snap2"), &cancel)
         .expect("re-warm A after eviction + snapshot teardown");
     assert_eq!(w2.readers.len(), 1, "table A is still a single generation");
 

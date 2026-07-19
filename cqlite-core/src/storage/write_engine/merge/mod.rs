@@ -99,7 +99,10 @@ pub use read_assembly::assemble_read_cells;
 #[cfg(feature = "write-support")]
 mod point_read;
 #[cfg(feature = "write-support")]
-pub use point_read::{build_single_partition_merger, build_single_partition_merger_from_readers};
+pub use point_read::{
+    build_single_partition_merger, build_single_partition_merger_from_readers,
+    build_single_partition_merger_with_registry,
+};
 
 /// Warm/shared-reader k-way merge construction (issue #2346): builds a merger
 /// directly from already-open `Arc<SSTableReader>`s instead of paths, so a

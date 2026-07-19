@@ -8,24 +8,21 @@
 //! mutates nothing and in-flight requests holding `Arc` clones complete against
 //! the pre-swap set.
 //!
-//! ## UDT-registry posture — identical to the cold path (WS1 #2345, follow-up #2349)
+//! ## UDT-registry posture — identical to the cold path (WS1 #2345 → wired #2349)
 //!
 //! The reader-based merge seam `KWayMerger::new_from_readers` takes NO
 //! `udt_registry` parameter (a shared `Arc` reader has no `&mut self` for
 //! `set_udt_registry`), so a reader must be opened WITH its registry already
-//! resolved BEFORE it is wrapped in `Arc`. The cold Flight path, however, opens
-//! its readers via `KWayMerger::new_cancellable`, which passes `udt_registry =
-//! None` — so the cold path currently decodes WITHOUT a UDT registry. To keep the
-//! spec non-goal (warm is a PARSE-COST change only, never a read-semantics
-//! change), the warm path opens readers with the EXACTLY SAME posture: no UDT
-//! registry. [`open_one_reader`] therefore does NOT set a registry, and both
-//! paths hand the merge readers with `has_udt_registry() == false`. Parity is
-//! guaranteed by identical posture, not by matching a non-null authority.
-//!
-//! Wiring a real UDT registry into BOTH paths (so a frozen/nested UDT cell in a
-//! collection decodes structurally instead of as `Blob`, the #1234 data-loss
-//! class) is tracked as a single follow-up, issue #2349 — it must land for the
-//! cold path and the warm path together so they never diverge.
+//! resolved BEFORE it is wrapped in `Arc`. Issue #2349 threads a resolved
+//! `Option<&UdtRegistry>` (from the ticket DDL's `CREATE TYPE` statements, via
+//! `udt_registry_from_cql`) through `warm_readers` → `rebuild` → `open_added` →
+//! `open_one_reader`, which calls `set_udt_registry` on each freshly-opened
+//! reader BEFORE sharing it — the exact same registry the cold path sets via
+//! `KWayMerger::new_with_gc_and_registry_cancellable`. Both paths therefore flip
+//! TOGETHER: `has_udt_registry()` is `true` iff the DDL declares UDTs, so a
+//! `frozen<UDT>` cell inside a collection decodes structurally on both (the #1234
+//! data-loss class), and the warm-vs-cold read semantics never diverge. A DDL with
+//! no `CREATE TYPE` resolves to `None` and both paths stay registry-free.
 //!
 //! ## File-lifetime contract (from `from_readers.rs`)
 //!
@@ -49,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use cqlite_core::schema::TableSchema;
+use cqlite_core::schema::{TableSchema, UdtRegistry};
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::Platform;
 
@@ -189,11 +186,13 @@ impl WarmTableRegistry {
     /// * `snapshot` — the ticket's snapshot name (enables the manifest fast path).
     /// * `cancel` — the request cancel flag; a pre-cancelled request does ZERO
     ///   probe/rebuild work and returns [`WarmError::Cancelled`] by variant.
+    #[allow(clippy::too_many_arguments)]
     pub fn warm_readers(
         &self,
         key: &TableKey,
         ddl_hash: u64,
         schema: &TableSchema,
+        udt_registry: Option<&UdtRegistry>,
         dir: &Path,
         snapshot: Option<&str>,
         cancel: &CancelFlag,
@@ -236,21 +235,39 @@ impl WarmTableRegistry {
                 } else {
                     None
                 };
-                self.finish_enumerated(key, ddl_hash, schema, entries, manifest, cancel)
+                self.finish_enumerated(
+                    key,
+                    ddl_hash,
+                    schema,
+                    udt_registry,
+                    entries,
+                    manifest,
+                    cancel,
+                )
             }
             ProbeOutcome::Enumerated {
                 entries, manifest, ..
-            } => self.finish_enumerated(key, ddl_hash, schema, entries, manifest, cancel),
+            } => self.finish_enumerated(
+                key,
+                ddl_hash,
+                schema,
+                udt_registry,
+                entries,
+                manifest,
+                cancel,
+            ),
         }
     }
 
     /// Resolve an authoritatively-enumerated generation set into a warm hit (set
     /// unchanged) or a fail-closed delta rebuild.
+    #[allow(clippy::too_many_arguments)]
     fn finish_enumerated(
         &self,
         key: &TableKey,
         ddl_hash: u64,
         schema: &TableSchema,
+        udt_registry: Option<&UdtRegistry>,
         entries: Vec<GenerationEntry>,
         manifest: Option<Vec<u8>>,
         cancel: &CancelFlag,
@@ -271,6 +288,7 @@ impl WarmTableRegistry {
             key,
             ddl_hash,
             schema,
+            udt_registry,
             entries,
             current_set,
             manifest,
@@ -340,6 +358,7 @@ impl WarmTableRegistry {
         key: &TableKey,
         ddl_hash: u64,
         schema: &TableSchema,
+        udt_registry: Option<&UdtRegistry>,
         entries: Vec<GenerationEntry>,
         current_set: GenerationSet,
         manifest: Option<Vec<u8>>,
@@ -423,7 +442,7 @@ impl WarmTableRegistry {
             .iter()
             .filter(|e| !alive_ids.contains(&e.id))
             .collect();
-        let (opened, reader_opens) = match self.open_added(&added, schema, cancel) {
+        let (opened, reader_opens) = match self.open_added(&added, schema, udt_registry, cancel) {
             Ok(opened) => opened,
             Err(e) => {
                 // The previously warm set is untouched. Record the fail-closed

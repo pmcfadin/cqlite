@@ -29,7 +29,7 @@ use cqlite_core::export::{build_arrow_schema, rows_to_record_batch, ArrowConvert
 use cqlite_core::query::{
     build_row_from_scan_cached, AccessPath, ColumnInfo, PartitionKeyCache, QueryRow,
 };
-use cqlite_core::schema::{CqlType, TableSchema};
+use cqlite_core::schema::{CqlType, TableSchema, UdtRegistry};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
 use cqlite_core::types::{DataType, RowCells, ScanRow};
@@ -333,6 +333,19 @@ pub struct MergeProducer {
     agg: Option<AggPlan>,
     /// Partial-output column metadata, present iff [`Self::agg`] is `Some`.
     partial_columns: Option<Vec<ColumnInfo>>,
+    /// Authoritative UDT registry resolved from the ticket DDL's `CREATE TYPE`
+    /// statements (issue #2349). When present it is threaded onto every merge
+    /// reader (cold [`KWayMerger::new_with_gc_and_registry_cancellable`] and the
+    /// cold point-read [`build_single_partition_merger`]) so a `frozen<UDT>` cell
+    /// inside a collection decodes STRUCTURALLY (as `Value::Udt`) instead of
+    /// opaque bytes — the #1234 silent-data-loss class. `None` keeps the prior
+    /// non-UDT-aware decode. The `columns`' `cql_type`s are also resolved against
+    /// it ([`Self::with_udt_registry`]) so the Arrow output field is a `Struct`,
+    /// not opaque `Utf8`. The warm reader-based path sets the SAME registry on its
+    /// shared readers (see `crate::warm`), so both paths flip together. `pub(crate)`
+    /// so the service can hand the SAME resolved registry to the warm registry's
+    /// reader-open path (issue #2349).
+    pub(crate) udt_registry: Option<UdtRegistry>,
 }
 
 /// Abstraction over the k-way merge stepper.
@@ -402,7 +415,47 @@ impl MergeProducer {
             spec,
             agg: None,
             partial_columns: None,
+            udt_registry: None,
         })
+    }
+
+    /// Attach the authoritative UDT registry (issue #2349), resolving every
+    /// column's `cql_type` against it so a `frozen<UDT>` in a collection surfaces
+    /// as an Arrow `Struct` (not opaque `Utf8`/`Binary`) and threading it onto the
+    /// cold merge readers. An empty registry (a DDL with no `CREATE TYPE`) is a
+    /// no-op — column types and reader posture are unchanged. Consumes and returns
+    /// `self` for chaining.
+    pub fn with_udt_registry(mut self, registry: UdtRegistry) -> Self {
+        let keyspace = self.schema.keyspace.clone();
+        for column in &mut self.columns {
+            if let Some(cql_type) = &column.cql_type {
+                let resolved = registry.resolve_type(cql_type, &keyspace);
+                column.data_type = flat_data_type(&resolved);
+                column.cql_type = Some(resolved);
+            }
+        }
+        self.udt_registry = Some(registry);
+        self
+    }
+
+    /// Open a cold full-scan k-way merger over `paths`, threading the resolved UDT
+    /// registry (issue #2349) onto every input reader so a `frozen<UDT>` cell
+    /// inside a collection decodes structurally. With no registry this is
+    /// behaviourally identical to the prior `KWayMerger::new_cancellable`.
+    fn open_cold_merger(
+        &self,
+        paths: Vec<PathBuf>,
+        cancel: &CancelFlag,
+    ) -> Result<KWayMerger, ProducerError> {
+        KWayMerger::new_with_gc_and_registry_cancellable(
+            paths,
+            &self.schema,
+            None,
+            None,
+            self.udt_registry.clone(),
+            cancel.scan_cancel(),
+        )
+        .map_err(ProducerError::Merge)
     }
 
     /// Attach an aggregation spec (issue #841), validating it against the table
@@ -619,8 +672,7 @@ impl MergeProducer {
         // producer promptly once the consumer stops pulling — see
         // `SSTableReader::stream_all_partitions_cancellable`'s doc for the full
         // reasoning.
-        let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
-            .map_err(ProducerError::Merge)?;
+        let mut merger = self.open_cold_merger(paths, cancel)?;
         on_merger_built();
         self.drive_merge_over(
             &mut merger,
@@ -723,8 +775,7 @@ impl MergeProducer {
             return Ok(batches);
         }
 
-        let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
-            .map_err(ProducerError::Merge)?;
+        let mut merger = self.open_cold_merger(paths, cancel)?;
         let mut sink = CollectSink(&mut batches);
         // Collect path (parity oracle): a private seam — no external observer, but
         // the same incremental counter emission runs (issue #2162). This is the
@@ -872,8 +923,7 @@ impl MergeProducer {
         let mut state = plan.new_state();
 
         if !paths.is_empty() {
-            let mut merger = KWayMerger::new_cancellable(paths, &self.schema, cancel.scan_cancel())
-                .map_err(ProducerError::Merge)?;
+            let mut merger = self.open_cold_merger(paths, cancel)?;
             self.drive_aggregate(plan, &mut merger, cancel, &mut state)?;
         }
 
