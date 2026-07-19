@@ -38,6 +38,24 @@ class CqliteFlightSplitPruningTest {
     private static final CqliteFlightTableHandle INT_PK_TABLE =
             new CqliteFlightTableHandle("ks", "t", "CREATE TABLE ks.t (id int PRIMARY KEY, v text)");
 
+    // uuid / timeuuid PKs surface as VARCHAR with EQUALITY capability; the server parses the
+    // hyphenated string to the 16-byte big-endian UUID (PartitionKeyBytes.uuidBytes) — a
+    // distinct serialization from a genuine text (FULL, UTF-8) PK.
+    private static final CqliteFlightColumnHandle ID_UUID =
+            new CqliteFlightColumnHandle("id", VARCHAR, PushdownCapability.EQUALITY);
+    private static final CqliteFlightTableHandle UUID_PK_TABLE =
+            new CqliteFlightTableHandle("ks", "u", "CREATE TABLE ks.u (id uuid PRIMARY KEY, v text)");
+    private static final CqliteFlightTableHandle TIMEUUID_PK_TABLE =
+            new CqliteFlightTableHandle("ks", "u", "CREATE TABLE ks.u (id timeuuid PRIMARY KEY, v text)");
+
+    private static byte[] bytes(int... vals) {
+        byte[] out = new byte[vals.length];
+        for (int i = 0; i < vals.length; i++) {
+            out[i] = (byte) vals[i];
+        }
+        return out;
+    }
+
     private static ReplicaInfo range(long start, long end) {
         return new ReplicaInfo(Long.toString(start), Long.toString(end),
                 Map.of("dc1", List.of("10.0.0.1:7000")));
@@ -202,6 +220,69 @@ class CqliteFlightSplitPruningTest {
         List<CqliteFlightSplit> pruned = CqliteFlightSplitManager.pruneToBoundPartitionKey(
                 table, full, constraint, true, Partitioner.MURMUR3);
         assertEquals(full.size(), pruned.size(), "un-serializable PK value → no pruning, never misprune");
+    }
+
+    // ── uuid / timeuuid PK: VARCHAR + EQUALITY → 16-byte parse → covering split ─
+
+    // Canonical uuid whose parsed 16-byte big-endian representation is the pinned
+    // Murmur3TokenTest vector {0x55,0x0e,0x84,0x00,0xe2,0x9b,0x41,0xd4,0xa7,0x16,0x44,0x66,0x55,0x44,0,0}.
+    private static final String CANONICAL_UUID = "550e8400-e29b-41d4-a716-446655440000";
+    private static final byte[] CANONICAL_UUID_BYTES =
+            bytes(0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00);
+
+    @Test
+    void uuidPkFullyBoundPrunesToCoveringSplitAtParsedByteToken() {
+        // The token the prune must target is the token of the PARSED 16 bytes, NOT the UTF-8
+        // of the hyphenated string — proving the uuid string→16-byte parse path is exercised.
+        long token = Murmur3Token.token(CANONICAL_UUID_BYTES);
+        assertEquals(4277286421682315655L, token, "pinned uuid vector token (Murmur3TokenTest)");
+        // UTF-8-of-the-string token differs → confirms we are not accidentally hashing the string.
+        assertTrue(token != Murmur3Token.token(CANONICAL_UUID.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                "the parsed-byte token must differ from the UTF-8-of-string token");
+
+        TokenRangeReplicasResponse resp = ringCovering(token - 1, token, token + 1000);
+        var constraint = summary(TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
+                ID_UUID, Domain.singleValue(VARCHAR, Slices.utf8Slice(CANONICAL_UUID)))));
+
+        List<CqliteFlightSplit> full = CqliteFlightSplitManager.buildSplits(UUID_PK_TABLE, resp, "dc1", 8815);
+        List<CqliteFlightSplit> pruned = prune(UUID_PK_TABLE, resp, constraint);
+
+        assertTrue(full.size() > 1, "fixture must fan out to many ranges on main");
+        assertEquals(1, pruned.size(), "a fully-bound uuid PK prunes to exactly one covering split");
+        CqliteFlightSplit s = pruned.get(0);
+        assertTrue(Murmur3Token.tokenInRange(token, s.tokenStart(), s.tokenEnd(), s.wraparound()),
+                "the emitted split covers the token of the parsed 16-byte uuid");
+    }
+
+    @Test
+    void timeuuidPkFullyBoundPrunesToCoveringSplitAtParsedByteToken() {
+        // timeuuid uses the same VARCHAR+EQUALITY → 16-byte-parse path as uuid.
+        long token = Murmur3Token.token(CANONICAL_UUID_BYTES);
+        TokenRangeReplicasResponse resp = ringCovering(token - 1, token, token + 1000);
+        var constraint = summary(TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
+                ID_UUID, Domain.singleValue(VARCHAR, Slices.utf8Slice(CANONICAL_UUID)))));
+
+        List<CqliteFlightSplit> full = CqliteFlightSplitManager.buildSplits(TIMEUUID_PK_TABLE, resp, "dc1", 8815);
+        List<CqliteFlightSplit> pruned = prune(TIMEUUID_PK_TABLE, resp, constraint);
+
+        assertTrue(full.size() > 1, "fixture must fan out to many ranges on main");
+        assertEquals(1, pruned.size(), "a fully-bound timeuuid PK prunes to exactly one covering split");
+        assertTrue(Murmur3Token.tokenInRange(
+                token, pruned.get(0).tokenStart(), pruned.get(0).tokenEnd(), pruned.get(0).wraparound()));
+    }
+
+    @Test
+    void nonCanonicalUuidStringKeepsFullFanOut() {
+        // A garbage/non-canonical uuid string cannot be parsed to 16 bytes → no serialization →
+        // fail-safe full fan-out, never a misprune.
+        long token = Murmur3Token.token(CANONICAL_UUID_BYTES);
+        TokenRangeReplicasResponse resp = ringCovering(token - 1, token, token + 1000);
+        List<CqliteFlightSplit> full = CqliteFlightSplitManager.buildSplits(UUID_PK_TABLE, resp, "dc1", 8815);
+        var constraint = summary(TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
+                ID_UUID, Domain.singleValue(VARCHAR, Slices.utf8Slice("not-a-uuid")))));
+
+        assertEquals(full.size(), prune(UUID_PK_TABLE, resp, constraint).size(),
+                "a non-canonical uuid string cannot be serialized → full fan-out (never misprune)");
     }
 
     // ── Composite PK: both components bound → 1 covering split ──────────────────

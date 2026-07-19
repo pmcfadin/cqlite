@@ -213,6 +213,65 @@ class CqliteFlightSplitPruningWiringTest {
         }
     }
 
+    /**
+     * uuid PK (VARCHAR + EQUALITY capability) prunes through the PUBLIC getSplits surface, and the
+     * ONE emitted split covers the token of the PARSED 16-byte uuid — proving the uuid string→16-byte
+     * parse + token path (PartitionKeyBytes.uuidBytes) is exercised end-to-end, not just some split.
+     */
+    @Test
+    void uuidPkPointReadPrunesToParsedByteTokenThroughPublicSurface() throws Exception {
+        CqliteFlightColumnHandle idUuid =
+                new CqliteFlightColumnHandle("id", VARCHAR, PushdownCapability.EQUALITY);
+        String uuid = "550e8400-e29b-41d4-a716-446655440000";
+        // The pinned Murmur3TokenTest vector for this uuid's 16 big-endian bytes.
+        byte[] parsed = {0x55, 0x0e, (byte) 0x84, 0x00, (byte) 0xe2, (byte) 0x9b, 0x41, (byte) 0xd4,
+                (byte) 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00};
+        long token = Murmur3Token.token(parsed);
+        assertEquals(4277286421682315655L, token, "pinned uuid vector token");
+        HttpServer server = startFakeSidecar(tokenRangeReplicasJson(token));
+        try {
+            URI uri = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+            SidecarClient sidecar = new SidecarClient(uri);
+            var mgr = new CqliteFlightSplitManager(config(uri, true), sidecar, liveSnapshots());
+            CqliteFlightTableHandle handle =
+                    new CqliteFlightTableHandle("ks", "u", "CREATE TABLE ks.u (id uuid PRIMARY KEY, v text)");
+            var constraint = new Constraint(TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
+                    idUuid, Domain.singleValue(VARCHAR, Slices.utf8Slice(uuid)))), Constant.TRUE, Map.of());
+
+            List<ConnectorSplit> splits = drain(mgr.getSplits(null, null, handle, null, constraint));
+            assertEquals(1, splits.size(), "uuid PK point read prunes to one covering split");
+            CqliteFlightSplit s = (CqliteFlightSplit) splits.get(0);
+            assertTrue(Murmur3Token.tokenInRange(token, s.tokenStart(), s.tokenEnd(), s.wraparound()),
+                    "the single emitted split covers the token of the parsed 16-byte uuid");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /** A non-canonical uuid string cannot parse to 16 bytes → fail-safe full fan-out, never misprune. */
+    @Test
+    void nonCanonicalUuidStringKeepsFullFanOutThroughPublicSurface() throws Exception {
+        CqliteFlightColumnHandle idUuid =
+                new CqliteFlightColumnHandle("id", VARCHAR, PushdownCapability.EQUALITY);
+        long token = Murmur3Token.token(new byte[] {0, 0, 0, 0x2A});
+        HttpServer server = startFakeSidecar(tokenRangeReplicasJson(token));
+        try {
+            URI uri = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+            SidecarClient sidecar = new SidecarClient(uri);
+            var mgr = new CqliteFlightSplitManager(config(uri, true), sidecar, liveSnapshots());
+            CqliteFlightTableHandle handle =
+                    new CqliteFlightTableHandle("ks", "u", "CREATE TABLE ks.u (id uuid PRIMARY KEY, v text)");
+            var constraint = new Constraint(TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
+                    idUuid, Domain.singleValue(VARCHAR, Slices.utf8Slice("not-a-uuid")))), Constant.TRUE, Map.of());
+
+            List<ConnectorSplit> splits = drain(mgr.getSplits(null, null, handle, null, constraint));
+            assertTrue(splits.size() > 1,
+                    "a non-canonical uuid string cannot be serialized → full fan-out (never misprune)");
+        } finally {
+            server.stop(0);
+        }
+    }
+
     /** VARCHAR text PK (utf-8 bytes) also prunes through the public surface. */
     @Test
     void textPkPointReadPrunesThroughPublicSurface() throws Exception {
