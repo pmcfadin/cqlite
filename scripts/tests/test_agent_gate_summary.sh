@@ -15,6 +15,13 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
+
+# #2751 defense-in-depth: scrub any AGENT_GATE_SUMMARY_FILE inherited from the
+# caller before doing anything. Every case below pins its OWN caller-known path
+# per-invocation, so a top-level unset only removes a leaked value that could
+# otherwise be clobbered when this script is run standalone by an agent who has the
+# var exported (the tooling-tests component scrubs it too — belt-and-suspenders).
+unset AGENT_GATE_SUMMARY_FILE
 START_MARKER="==== AGENT-GATE SUMMARY ===="
 END_MARKER="==== END AGENT-GATE SUMMARY ===="
 STAGE_LINE="fmt:" # representative stage line from the selftest block
@@ -975,6 +982,111 @@ if printf '%s\n' "$rl_body" | grep -v '^[[:space:]]*#' | grep -q 'aggregate_lite
   ok "2121-structural: run_lite invokes aggregate_lite_components (lite OVERALL aggregation single-sourced)"
 else
   bad "2121-structural: run_lite no longer calls aggregate_lite_components — lite OVERALL aggregation lost"
+fi
+
+# 14. NESTED-GATE SUMMARY CLOBBER (#2751): the tooling-tests component runs
+#     self-test scripts that recursively invoke agent-gate.sh (the --delta
+#     self-test's temp-repo `--delta` runs, this script's `--emit-summary-selftest`
+#     runs). If a nested gate INHERITS the parent gate's AGENT_GATE_SUMMARY_FILE it
+#     overwrites the parent's summary file mid-run with a foreign verdict (field
+#     impact: #2672 read a foreign DELTA REFUSED block; #2600's full gate died in
+#     tooling-tests leaving an INCOMPLETE placeholder with a foreign run-id, costing
+#     a 57-min re-run). run_tooling_tests must scrub AGENT_GATE_SUMMARY_FILE so no
+#     child can inherit it. Two halves prove the fix and make it un-removable:
+#       14a structural — run_tooling_tests applies the scrub (FAILs if removed);
+#       14b behavioral — the scrub mechanism actually prevents the clobber, with a
+#           negative control proving the clobber is real (so 14b cannot pass vacuously).
+
+# 14a. STRUCTURAL (property, not location): the gate must scrub
+#      AGENT_GATE_SUMMARY_FILE from the environment exactly ONCE, AFTER the summary
+#      path is resolved into the parent's own var and BEFORE any component runs — so
+#      no child (present or future) can inherit the path. We assert the property by
+#      line ordering rather than pinning to a single component: the (non-comment)
+#      scrub line exists, sits AFTER the `case "$SUMMARY_FILE"` resolution, and
+#      BEFORE the component runner (`run_component() {`) is even defined. FAILs if
+#      the scrub line is deleted.
+# Match the primary env scrub verb (`export -n`/`env -u`) that scrubs the path for
+# ALL children, optionally wrapped in an `if ! …; then` visible-fallback guard. The
+# `^[[:space:]]*` anchor already excludes comment lines, so no extra comment filter is
+# needed (a `: #` trailing comment must NOT false-FAIL it). The `unset` fallback line
+# is deliberately NOT matched — deleting the primary scrub must still FAIL this test.
+scrub_ln=$(grep -nE '^[[:space:]]*(if[[:space:]]+![[:space:]]*)?(export -n|env -u) AGENT_GATE_SUMMARY_FILE' "$GATE" \
+             | head -1 | cut -d: -f1)
+resolve_ln=$(grep -n '^case "\$SUMMARY_FILE" in' "$GATE" | head -1 | cut -d: -f1)
+dispatch_ln=$(grep -n '^run_component() {' "$GATE" | head -1 | cut -d: -f1)
+if [ -z "$resolve_ln" ]; then
+  # The resolution anchor is the load-bearing "after" boundary; if it moved the
+  # property is un-checkable — hard FAIL with a DISTINCT message (not "scrub missing").
+  bad "2751-structural: summary-resolution anchor ('case \"\$SUMMARY_FILE\" in') not found — test anchor moved, cannot verify scrub ordering"
+elif [ -z "$scrub_ln" ]; then
+  bad "2751-structural: no AGENT_GATE_SUMMARY_FILE scrub line in the gate — nested gates can clobber the parent summary (#2751 regression)"
+elif [ -z "$dispatch_ln" ]; then
+  # Degrade gracefully: the "before dispatch" upper bound moved, but we can still
+  # assert the essential property (scrub AFTER resolution). Warn, don't false-FAIL.
+  if [ "$scrub_ln" -gt "$resolve_ln" ]; then
+    ok "2751-structural: gate scrubs AGENT_GATE_SUMMARY_FILE after summary resolution (line $scrub_ln); NOTE: dispatch anchor 'run_component() {' moved — upper-bound check skipped"
+  else
+    bad "2751-structural: scrub line ($scrub_ln) is NOT after summary resolution ($resolve_ln) — scrub happens too early to cover the resolved path"
+  fi
+elif [ "$scrub_ln" -gt "$resolve_ln" ] && [ "$scrub_ln" -lt "$dispatch_ln" ]; then
+  ok "2751-structural: gate scrubs AGENT_GATE_SUMMARY_FILE after summary resolution and before component dispatch (line $scrub_ln)"
+else
+  bad "2751-structural: scrub line out of the resolved-but-pre-dispatch region (scrub=$scrub_ln resolve=$resolve_ln dispatch=$dispatch_ln) — nested gates can clobber the parent summary"
+fi
+
+# 14b. BEHAVIORAL: copy the gate into a bare temp dir (hermetic — --emit-summary-selftest
+#      needs no cargo/git and writes to its OWN repo-root default when the path is unset).
+tt_repo="$tmp/2751-scrub-repo"
+mkdir -p "$tt_repo/scripts"
+cp "$GATE" "$tt_repo/scripts/agent-gate.sh"
+SENTINEL="PARENT-OWNED-SUMMARY-2751-DO-NOT-CLOBBER"
+
+# Negative control: a nested gate that INHERITS an exported AGENT_GATE_SUMMARY_FILE
+# overwrites it. This makes the positive assertion meaningful (proves the clobber is
+# real and reachable, so 14b cannot pass just because nothing wrote anywhere). We
+# assert BOTH that the sentinel is gone AND that a real gate summary marker now
+# occupies the file — so a "file vanished/emptied" outcome cannot pass the control.
+clob="$tmp/2751-parent-clobber.txt"
+printf '%s\n' "$SENTINEL" >"$clob"
+( export AGENT_GATE_SUMMARY_FILE="$clob"; cd "$tt_repo" \
+    && bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
+if ! grep -q "$SENTINEL" "$clob" 2>/dev/null \
+   && grep -q "$END_MARKER" "$clob" 2>/dev/null; then
+  ok "2751-clobber-control: a nested gate with an inherited summary path OVERWRITES it with a gate summary (clobber is real)"
+else
+  bad "2751-clobber-control: the inherited path was not overwritten with a gate summary — behavioral control invalid"
+  echo "------- on disk -------"; cat "$clob" 2>/dev/null; echo "-----------------------"
+fi
+
+# Positive: with the scrub (env -u, exactly as the gate applies it after summary
+# resolution) the parent's chosen path is untouched, and the scrubbed child writes
+# its OWN default. Remove any prior default first so the "child wrote its own
+# default" assertion can never pass on a stale file (from the negative control or a
+# future case) — it must be (re)created by THIS invocation.
+safe="$tmp/2751-parent-safe.txt"
+printf '%s\n' "$SENTINEL" >"$safe"
+rm -f "$tt_repo"/.agent-gate-*summary.txt  # widen: covers lite/delta default siblings too
+( export AGENT_GATE_SUMMARY_FILE="$safe"; cd "$tt_repo" \
+    && env -u AGENT_GATE_SUMMARY_FILE bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
+if grep -q "$SENTINEL" "$safe" 2>/dev/null; then
+  ok "2751-scrub-prevents-clobber: env -u AGENT_GATE_SUMMARY_FILE leaves the parent's summary file intact"
+else
+  bad "2751-scrub-prevents-clobber: the parent's summary file was clobbered despite the scrub"
+  echo "------- on disk -------"; cat "$safe" 2>/dev/null; echo "-----------------------"
+fi
+# The scrubbed child must still have emitted a COMPLETED summary — at its OWN
+# repo-root default, (re)created by this run — proving it ran fully and simply wrote
+# elsewhere, not that it no-op'd or left only the startup INCOMPLETE sentinel.
+child_default="$tt_repo/.agent-gate-summary.txt"
+if [ -f "$child_default" ] \
+   && grep -q "$END_MARKER" "$child_default" 2>/dev/null \
+   && grep -q "^RESULT: " "$child_default" 2>/dev/null \
+   && ! grep -q "RESULT: INCOMPLETE" "$child_default" 2>/dev/null \
+   && ! grep -q "$SENTINEL" "$child_default" 2>/dev/null; then
+  ok "2751-scrub-prevents-clobber: the scrubbed child wrote a COMPLETED summary at its own repo-root default instead"
+else
+  bad "2751-scrub-prevents-clobber: the scrubbed child's own-default summary is missing/incomplete"
+  echo "------- on disk -------"; cat "$child_default" 2>/dev/null; echo "-----------------------"
 fi
 
 echo "----"

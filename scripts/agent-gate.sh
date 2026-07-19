@@ -1554,6 +1554,29 @@ case "$SUMMARY_FILE" in
   /*) ;; # absolute (incl. the repo-root default) -> use verbatim
   *)  SUMMARY_FILE="$INVOCATION_CWD/$SUMMARY_FILE" ;;
 esac
+# #2751: the summary path is now fully resolved into SUMMARY_FILE (the parent's own
+# var). Both the startup INCOMPLETE sentinel below and emit_summary write
+# SUMMARY_FILE and NEVER re-read AGENT_GATE_SUMMARY_FILE, so the env var has served
+# its whole purpose. De-export it here — ONE scrub after resolution, before any
+# component runs — so NO child this gate spawns (present or future) can inherit the
+# parent's path and clobber the summary file mid-run with a foreign verdict. The
+# tooling-tests self-tests recursively invoke agent-gate.sh (the --delta self-test's
+# temp-repo runs, the summary self-test's --emit-summary-selftest runs); a nested
+# gate that inherited this path would overwrite our file with a DELTA REFUSED block
+# or a foreign-run-id INCOMPLETE placeholder (field impact: #2672 read a foreign
+# verdict; #2600's full gate died in tooling-tests leaving such a placeholder,
+# costing a 57-min re-run). Equivalent to `env -u AGENT_GATE_SUMMARY_FILE` on every
+# child. The wrapper re-exec (which must preserve the caller's path) already ran
+# above this line, so it is unaffected. The self-test scripts also scrub it
+# themselves (belt-and-suspenders, #2751).
+# Visible fallback (#2751 roborev r2): this clobber fix was filed FOR a silent
+# failure, so it must not itself fail silently. If `export -n` errors on some shell,
+# fall back to a plain `unset` (which fully removes it from the env — an even
+# stronger scrub) and log one warning line, rather than swallowing it with `|| true`.
+if ! export -n AGENT_GATE_SUMMARY_FILE 2>/dev/null; then
+  echo "agent-gate: WARN export -n AGENT_GATE_SUMMARY_FILE failed; unsetting instead (#2751)" >&2
+  unset AGENT_GATE_SUMMARY_FILE
+fi
 # Keep a copy under the logs bundle for archival.
 LOG_SUMMARY_FILE="$LOG_DIR/summary.txt"
 declare -a NAMES=() STATUSES=() TIMES=()
@@ -2406,6 +2429,11 @@ run_tooling_tests() {
   local start end status
   start=$(date +%s)
   : >"$log"
+
+  # NOTE (#2751): AGENT_GATE_SUMMARY_FILE is already de-exported once after summary
+  # resolution (see the scrub near the SUMMARY_FILE `case` block), so none of the
+  # self-tests below — several of which recursively invoke agent-gate.sh — can
+  # inherit the parent's summary path and clobber it. No per-component scrub needed.
 
   # generator keyspace-scoping guard (#1232): no python3 needed, always runs. A
   # failure here FAILs the component, mirroring the summary selftest semantics.

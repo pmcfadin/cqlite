@@ -36,6 +36,17 @@ set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GATE="$SCRIPT_DIR/../agent-gate.sh"
 
+# #2751 defense-in-depth: this self-test recursively invokes the REAL gate — the
+# temp-repo `--delta` runs below (rename-refuses, node-build-refuse) spawn
+# agent-gate.sh WITHOUT an explicit AGENT_GATE_SUMMARY_FILE, so an inherited value
+# would make them write the DELTA REFUSED / startup INCOMPLETE block to the
+# caller's summary file (the tooling-tests clobber, #2751). Scrub any inherited
+# path up front so those nested gates fall back to their OWN (temp-repo) default,
+# never clobbering the caller — even when this script is run standalone by an agent
+# who has AGENT_GATE_SUMMARY_FILE exported. Per-case invocations below that pin
+# AGENT_GATE_SUMMARY_FILE="$tmp/..." set it fresh and are unaffected.
+unset AGENT_GATE_SUMMARY_FILE
+
 DELTA_START="==== AGENT-GATE DELTA SUMMARY ===="
 DELTA_END="==== END AGENT-GATE DELTA SUMMARY ===="
 FULL_START="==== AGENT-GATE SUMMARY ===="
