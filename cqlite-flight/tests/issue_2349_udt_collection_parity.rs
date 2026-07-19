@@ -32,7 +32,9 @@ use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StringArray, StructAr
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 
-use cqlite_core::schema::{udt_registry_from_cql, ClusteringColumn, Column, KeyColumn, TableSchema};
+use cqlite_core::schema::{
+    udt_registry_from_cql, ClusteringColumn, Column, KeyColumn, TableSchema,
+};
 use cqlite_flight::cancel::CancelFlag;
 use cqlite_flight::filter::ScanSpec;
 use cqlite_flight::producer::{DirSource, MergeProducer, SstableSource};
@@ -198,8 +200,10 @@ fn decoded_addresses(combined: &RecordBatch, target: &[u8; 16]) -> Vec<[String; 
 }
 
 fn expected_sorted() -> Vec<[String; 5]> {
-    let mut want: Vec<[String; 5]> =
-        golden_addresses().into_iter().map(|a| a.map(String::from)).collect();
+    let mut want: Vec<[String; 5]> = golden_addresses()
+        .into_iter()
+        .map(|a| a.map(String::from))
+        .collect();
     want.sort();
     want
 }
@@ -216,7 +220,10 @@ fn cold_path_decodes_udt_in_collection_matching_golden() {
         .produce_from_paths(DirSource::new(&dir).data_paths().unwrap())
         .unwrap();
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert!(rows > 0, "cold scan must return rows (never a 0-row false pass)");
+    assert!(
+        rows > 0,
+        "cold scan must return rows (never a 0-row false pass)"
+    );
 
     let arrow_schema = producer.arrow_schema().unwrap();
     let combined = concat_batches(&arrow_schema.into(), &batches).unwrap();
@@ -266,7 +273,10 @@ fn warm_path_decodes_udt_in_collection_matching_cold_and_golden() {
         .produce_streaming_from_readers_to_vec(readers, &CancelFlag::new())
         .unwrap();
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert!(rows > 0, "warm scan must return rows (never a 0-row false pass)");
+    assert!(
+        rows > 0,
+        "warm scan must return rows (never a 0-row false pass)"
+    );
 
     let arrow_schema = producer.arrow_schema().unwrap();
     let combined = concat_batches(&arrow_schema.into(), &batches).unwrap();

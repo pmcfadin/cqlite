@@ -331,8 +331,8 @@ impl CqliteFlightService {
         // registry on its shared readers in `do_get_resolve`, so both flip together.
         // An empty registry (a DDL with no `CREATE TYPE`) is a no-op.
         let registry = cqlite_core::schema::udt_registry_from_cql(&ticket.ddl, &ticket.keyspace);
-        let producer =
-            MergeProducer::with_spec((*schema).clone(), self.batch_size, spec)?.with_udt_registry(registry);
+        let producer = MergeProducer::with_spec((*schema).clone(), self.batch_size, spec)?
+            .with_udt_registry(registry);
         // Aggregation pushdown (issue #841): when the ticket carries an
         // aggregation spec, the producer emits PARTIAL aggregate rows under the
         // partial schema instead of full rows.

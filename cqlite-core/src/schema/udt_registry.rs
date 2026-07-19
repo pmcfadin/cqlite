@@ -205,15 +205,21 @@ impl UdtRegistry {
             return ty.clone();
         }
         match ty {
-            CqlType::List(inner) => {
-                CqlType::List(Box::new(self.resolve_type_depth(inner, keyspace, depth + 1)))
-            }
-            CqlType::Set(inner) => {
-                CqlType::Set(Box::new(self.resolve_type_depth(inner, keyspace, depth + 1)))
-            }
-            CqlType::Frozen(inner) => {
-                CqlType::Frozen(Box::new(self.resolve_type_depth(inner, keyspace, depth + 1)))
-            }
+            CqlType::List(inner) => CqlType::List(Box::new(self.resolve_type_depth(
+                inner,
+                keyspace,
+                depth + 1,
+            ))),
+            CqlType::Set(inner) => CqlType::Set(Box::new(self.resolve_type_depth(
+                inner,
+                keyspace,
+                depth + 1,
+            ))),
+            CqlType::Frozen(inner) => CqlType::Frozen(Box::new(self.resolve_type_depth(
+                inner,
+                keyspace,
+                depth + 1,
+            ))),
             CqlType::Map(k, v) => CqlType::Map(
                 Box::new(self.resolve_type_depth(k, keyspace, depth + 1)),
                 Box::new(self.resolve_type_depth(v, keyspace, depth + 1)),
@@ -531,7 +537,10 @@ CREATE TYPE ks.contact_info (email text, address frozen<address_type>);";
             CqlType::Udt(_, fields) => fields,
             other => panic!("expected Udt, got {other:?}"),
         };
-        let (_, addr_type) = fields.iter().find(|(n, _)| n == "address").expect("address field");
+        let (_, addr_type) = fields
+            .iter()
+            .find(|(n, _)| n == "address")
+            .expect("address field");
         match addr_type {
             CqlType::Frozen(a) => assert!(
                 matches!(a.as_ref(), CqlType::Udt(n, f) if n == "address_type" && f.len() == 2),

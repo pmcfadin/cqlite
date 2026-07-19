@@ -374,7 +374,15 @@ fn cancel_during_large_index_parse_aborts_promptly() {
     // FASTER, never slower, than this baseline).
     let calib_start = std::time::Instant::now();
     WarmTableRegistry::new()
-        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &CancelFlag::new())
+        .warm_readers(
+            &key(),
+            ddl(),
+            &schema,
+            None,
+            &table_dir,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("calibration warm (uncancelled) completes");
     let baseline = calib_start.elapsed();
     // 1/20th of the measured baseline: tens of ms on every host we've observed,
@@ -457,7 +465,15 @@ fn evicted_but_inflight_reader_is_not_served_with_dead_path() {
     // Budget = exactly ONE generation's footprint, so warming B evicts A.
     let probe = WarmTableRegistry::new();
     probe
-        .warm_readers(&key_a, ddl(), &schema, None, &dir_a, None, &CancelFlag::new())
+        .warm_readers(
+            &key_a,
+            ddl(),
+            &schema,
+            None,
+            &dir_a,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("probe warm");
     let one_gen = probe.debug_used_bytes();
     assert!(one_gen > 0, "a generation's footprint is non-zero");

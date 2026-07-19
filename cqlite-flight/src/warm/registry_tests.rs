@@ -220,7 +220,15 @@ fn warm_and_cold_reader_udt_posture_identical() {
     // cold `SSTableReader::open`.
     let reg = WarmTableRegistry::new();
     let w_none = reg
-        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &CancelFlag::new())
+        .warm_readers(
+            &key(),
+            ddl(),
+            &schema,
+            None,
+            &table_dir,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("warms (no registry)");
     assert!(!w_none.readers.is_empty(), "opened at least one reader");
     for r in &w_none.readers {
@@ -314,7 +322,15 @@ fn concurrent_same_key_rebuild_dedups_readers_and_bytes() {
     // reader count (2) and accounted footprint.
     let reference = WarmTableRegistry::new();
     reference
-        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &CancelFlag::new())
+        .warm_readers(
+            &key(),
+            ddl(),
+            &schema,
+            None,
+            &table_dir,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("reference warm");
     let ref_used = reference.debug_used_bytes();
     let ref_count = reference.debug_reader_count(&key());
@@ -410,7 +426,15 @@ fn slow_rebuild_does_not_overwrite_a_faster_newer_swap() {
     let a_handle = thread::Builder::new()
         .name("slow-A".to_string())
         .spawn(move || {
-            a_reg.warm_readers(&key(), ddl(), &a_schema, None, &a_dir, None, &CancelFlag::new())
+            a_reg.warm_readers(
+                &key(),
+                ddl(),
+                &a_schema,
+                None,
+                &a_dir,
+                None,
+                &CancelFlag::new(),
+            )
         })
         .expect("spawn slow-A");
 
@@ -422,7 +446,15 @@ fn slow_rebuild_does_not_overwrite_a_faster_newer_swap() {
     // state A's stale probe never saw.
     append_gen(&table_dir, &schema, vec![write_row(2, "b", 2, 100)]);
     let b_result = reg
-        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &CancelFlag::new())
+        .warm_readers(
+            &key(),
+            ddl(),
+            &schema,
+            None,
+            &table_dir,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("fast rebuild B installs the newer set");
     assert_eq!(b_result.readers.len(), 2, "B installs both generations");
 
@@ -592,7 +624,15 @@ fn lru_evicts_when_over_budget() {
     // registry): B fits, but A+B together force A out.
     let probe = WarmTableRegistry::new();
     probe
-        .warm_readers(&key_b, ddl(), &schema, None, &dir_b, None, &CancelFlag::new())
+        .warm_readers(
+            &key_b,
+            ddl(),
+            &schema,
+            None,
+            &dir_b,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("probe warm");
     let one_gen = probe.debug_used_bytes();
     assert!(one_gen > 0, "a generation's footprint is non-zero");
@@ -662,7 +702,15 @@ fn capacity_eviction_preserves_global_key_cache() {
     // fits, so warming A+B forces A out via the CAPACITY-eviction path.
     let probe = WarmTableRegistry::new();
     probe
-        .warm_readers(&key_b, ddl(), &schema, None, &dir_b, None, &CancelFlag::new())
+        .warm_readers(
+            &key_b,
+            ddl(),
+            &schema,
+            None,
+            &dir_b,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("probe warm");
     let one_gen = probe.debug_used_bytes();
     assert!(one_gen > 0, "a generation's footprint is non-zero");
