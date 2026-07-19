@@ -27,6 +27,8 @@ use tonic::transport::{Channel, Server};
 
 use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
 use cqlite_flight::service::CqliteFlightService;
+
+mod fixture_support;
 // The field-shape `keyvalue` fixture (keyspace/table/DDL, columns, the canonical
 // k1/k2/k3 rows, timestamp, batch size) is the single source of truth shared with
 // `examples/emit_arrow_golden.rs`, so the committed golden this test byte-compares
@@ -296,26 +298,26 @@ fn do_get_over_transport_matches_committed_golden() {
 /// empty dataset (the 0-rows-when-present failure mode).
 #[test]
 fn do_get_over_transport_real_compressed_fixture() {
-    let Some(root) = std::env::var_os("CQLITE_DATASETS_ROOT") else {
-        eprintln!("CQLITE_DATASETS_ROOT unset — skipping real-fixture repro");
+    // Skip when the gitignored `Data.db` BINARY is absent (the repo ships only
+    // the JSONL references, so the fixture DIRECTORY exists even in a worktree
+    // that never ran `fetch-datasets.sh`). The shared helper checks the actual
+    // `Data.db` file — not just the dir — which is what stops this from silently
+    // 0-row-passing on an unfetched checkout while still asserting `> 0` whenever
+    // the binary is real.
+    let Some(_table_dir) = fixture_support::table_dir_if_present(
+        "test_basic",
+        "simple_table-6aa08200a25111f0a3fef1a551383fb9",
+        "nb-1-big",
+    ) else {
+        eprintln!("real fixture Data.db binary absent (run fetch-datasets.sh) — skipping");
         return;
     };
     // The service resolves `<data_dir>/<keyspace>/<table>[-<uuid>]`, so point
     // `data_dir` at `sstables/` and let the ticket carry keyspace `test_basic`.
-    let data_dir = std::path::PathBuf::from(&root).join("sstables");
-    // Skip when the gitignored `Data.db` BINARY is absent (the repo ships only
-    // the JSONL references, so the fixture DIRECTORY exists even in a worktree
-    // that never ran `fetch-datasets.sh`). Checking the actual `Data.db` file —
-    // not just the dir — is what stops this from silently 0-row-passing on an
-    // unfetched checkout while still asserting `> 0` whenever the binary is real.
-    let data_db = data_dir
-        .join("test_basic")
-        .join("simple_table-6aa08200a25111f0a3fef1a551383fb9")
-        .join("nb-1-big-Data.db");
-    if !data_db.is_file() {
-        eprintln!("real fixture Data.db binary absent (run fetch-datasets.sh) — skipping");
+    let Some(data_dir) = fixture_support::sstables_root() else {
+        eprintln!("CQLITE_DATASETS_ROOT unset — skipping real-fixture repro");
         return;
-    }
+    };
     let ddl = "CREATE TABLE test_basic.simple_table (\
         id uuid PRIMARY KEY, name text, age int, salary bigint, height float, \
         weight double, active boolean, created timestamp, birth_date date, \
