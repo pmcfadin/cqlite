@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "keyspace": "test_basic",
+  "table": "simple_table",
+  "ddl": "CREATE TABLE test_basic.simple_table (id uuid PRIMARY KEY, name text, age int, salary bigint, height float, weight double, active boolean, created timestamp, birth_date date, work_time time, description blob, account_balance decimal, session_id timeuuid, ip_address inet, small_number tinyint, medium_number smallint, duration_val duration, varchar_field text, ascii_field ascii)",
+  "snapshot": null
+}
