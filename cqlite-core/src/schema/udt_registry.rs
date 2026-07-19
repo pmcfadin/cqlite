@@ -233,6 +233,24 @@ impl UdtRegistry {
             CqlType::Udt(name, fields) if fields.is_empty() => self
                 .resolve_udt_reference(name, keyspace, depth)
                 .unwrap_or_else(|| ty.clone()),
+            // An already-populated UDT node is NOT necessarily fully resolved: an
+            // inner field may still hold an unresolved `Custom("udt:X")` (roborev
+            // job 1924 blocker 3). Recurse into every field type so a partially-
+            // resolved nested UDT fully materializes — the exact data-loss class
+            // this issue targets. A UDT whose fields are already resolved re-maps to
+            // an equal tree (idempotent), so this is safe to run unconditionally.
+            CqlType::Udt(name, fields) => CqlType::Udt(
+                name.clone(),
+                fields
+                    .iter()
+                    .map(|(fname, ftype)| {
+                        (
+                            fname.clone(),
+                            self.resolve_type_depth(ftype, keyspace, depth + 1),
+                        )
+                    })
+                    .collect(),
+            ),
             CqlType::Custom(name) => {
                 let udt_name = name.strip_prefix("udt:").unwrap_or(name);
                 if super::is_udt_identifier(udt_name) {
@@ -242,7 +260,7 @@ impl UdtRegistry {
                     ty.clone()
                 }
             }
-            // Already-resolved UDTs (non-empty fields) and primitives pass through.
+            // Primitives pass through.
             other => other.clone(),
         }
     }
@@ -273,7 +291,18 @@ impl UdtRegistry {
                 )
             })
             .collect();
-        Some(CqlType::Udt(bare_name.to_string(), fields))
+        // Preserve an EXPLICIT `keyspace.type` qualifier so two same-named UDTs in
+        // different keyspaces stay distinguishable on any re-resolution/round-trip
+        // (roborev job 1924 blocker 2). An UNQUALIFIED reference keeps its bare name
+        // — matching `CqlType::parse`'s output and the un-keyspaced `CqlType::Udt`
+        // form the rest of the codebase produces, so the parity/golden comparison
+        // (which reads struct FIELDS, never the node name) is unchanged.
+        let node_name = if udt_name.contains('.') {
+            udt_name.to_string()
+        } else {
+            bare_name.to_string()
+        };
+        Some(CqlType::Udt(node_name, fields))
     }
 
     /// Resolve UDT with full dependency chain
@@ -567,5 +596,60 @@ CREATE TYPE ks.contact_info (email text, address frozen<address_type>);";
         let reg = udt_registry_from_cql(DDL, "ks");
         let parsed = CqlType::parse("map<text, int>").unwrap();
         assert_eq!(reg.resolve_type(&parsed, "ks"), parsed);
+    }
+
+    #[test]
+    fn resolve_type_recurses_into_a_partially_resolved_udt_node() {
+        // A Udt node that is ALREADY populated (non-empty fields) but whose inner
+        // field still holds an unresolved `Custom("udt:address_type")` must have
+        // that inner ref resolved too (roborev job 1924 blocker 3) — else the inner
+        // UDT decodes opaque, the data-loss class this issue targets.
+        let reg = udt_registry_from_cql(DDL, "ks");
+        let partial = CqlType::Udt(
+            "contact_info".to_string(),
+            vec![
+                ("email".to_string(), CqlType::Text),
+                (
+                    "address".to_string(),
+                    CqlType::Frozen(Box::new(CqlType::Custom("udt:address_type".to_string()))),
+                ),
+            ],
+        );
+        let resolved = reg.resolve_type(&partial, "ks");
+        let fields = match &resolved {
+            CqlType::Udt(_, fields) => fields,
+            other => panic!("expected Udt, got {other:?}"),
+        };
+        let (_, addr) = fields
+            .iter()
+            .find(|(n, _)| n == "address")
+            .expect("address");
+        let inner = match addr {
+            CqlType::Frozen(inner) => inner.as_ref(),
+            other => panic!("expected Frozen, got {other:?}"),
+        };
+        assert!(
+            matches!(inner, CqlType::Udt(n, f) if n == "address_type" && f.len() == 2),
+            "the inner Custom(\"udt:address_type\") must resolve to the full Struct, got {inner:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_type_preserves_explicit_keyspace_qualifier() {
+        // `ks.address_type` (explicitly qualified) keeps its qualifier so two
+        // same-named UDTs in different keyspaces stay distinguishable (blocker 2).
+        let reg = udt_registry_from_cql(DDL, "ks");
+        let parsed = CqlType::parse("frozen<ks.address_type>").unwrap();
+        let resolved = reg.resolve_type(&parsed, "other_ks");
+        match &resolved {
+            CqlType::Frozen(inner) => match inner.as_ref() {
+                CqlType::Udt(name, fields) => {
+                    assert_eq!(name, "ks.address_type", "qualifier preserved");
+                    assert_eq!(fields.len(), 2);
+                }
+                other => panic!("expected Udt, got {other:?}"),
+            },
+            other => panic!("expected Frozen, got {other:?}"),
+        }
     }
 }

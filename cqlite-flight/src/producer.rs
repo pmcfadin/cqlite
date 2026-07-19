@@ -427,12 +427,23 @@ impl MergeProducer {
     /// `self` for chaining.
     pub fn with_udt_registry(mut self, registry: UdtRegistry) -> Self {
         let keyspace = self.schema.keyspace.clone();
-        for column in &mut self.columns {
-            if let Some(cql_type) = &column.cql_type {
-                let resolved = registry.resolve_type(cql_type, &keyspace);
-                column.data_type = flat_data_type(&resolved);
-                column.cql_type = Some(resolved);
+        let resolve = |columns: &mut Vec<ColumnInfo>| {
+            for column in columns {
+                if let Some(cql_type) = &column.cql_type {
+                    let resolved = registry.resolve_type(cql_type, &keyspace);
+                    column.data_type = flat_data_type(&resolved);
+                    column.cql_type = Some(resolved);
+                }
             }
+        };
+        resolve(&mut self.columns);
+        // If aggregation was already attached (a caller that chained
+        // `with_aggregation` BEFORE `with_udt_registry`), the PARTIAL output columns
+        // must be resolved too — otherwise the aggregate Arrow schema would keep
+        // pre-resolution `Custom("udt:X")` types while the emitted arrays are
+        // resolved, a silent schema/array disagreement (roborev job 1924 blocker 1).
+        if let Some(partial) = self.partial_columns.as_mut() {
+            resolve(partial);
         }
         self.udt_registry = Some(registry);
         self

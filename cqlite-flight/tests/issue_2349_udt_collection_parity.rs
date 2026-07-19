@@ -124,17 +124,42 @@ fn uuid_bytes(s: &str) -> [u8; 16] {
     out
 }
 
+/// Resolve the `collections_with_udts-<cfid>` table dir by GLOB (issue #2349,
+/// roborev job 1924 blocker 4) — never pinned to one CFID, so a dataset regen
+/// (which mints a new CFID) does not silently turn this into a permanent skip.
+///
+/// Returns `None` (a legitimate skip) ONLY when `CQLITE_DATASETS_ROOT` is unset or
+/// the keyspace dir is absent (a worktree without `fetch-datasets.sh`). When the
+/// keyspace dir DOES exist but no `collections_with_udts-*` dir with a `Data.db` is
+/// found, it PANICS — the fixture moved/regressed, which must fail loudly, not skip.
 fn table_dir() -> Option<PathBuf> {
     let root = std::env::var_os("CQLITE_DATASETS_ROOT")?;
-    let dir = PathBuf::from(&root)
+    let ks_dir = PathBuf::from(&root)
         .join("sstables")
-        .join("test_collections")
-        .join("collections_with_udts-6bc2bae0a25111f0a3fef1a551383fb9");
-    if dir.join("nb-1-big-Data.db").is_file() {
-        Some(dir)
-    } else {
-        None
+        .join("test_collections");
+    if !ks_dir.is_dir() {
+        return None;
     }
+    let mut found: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(&ks_dir)
+        .expect("read test_collections dir")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("collections_with_udts-")
+            && entry.path().join("nb-1-big-Data.db").is_file()
+        {
+            found = Some(entry.path());
+            break;
+        }
+    }
+    assert!(
+        found.is_some(),
+        "test_collections dir exists but no collections_with_udts-*/nb-1-big-Data.db found \
+         at {ks_dir:?} — the UDT-in-collection fixture moved or regressed (do NOT silently skip)"
+    );
+    found
 }
 
 fn producer() -> MergeProducer {
