@@ -80,19 +80,21 @@ fn scan_partition_keys(entries: &[(RowKey, ScanRow)]) -> BTreeSet<Vec<u8>> {
     entries.iter().map(|(k, _)| k.as_bytes().to_vec()).collect()
 }
 
-/// The (partition-key -> sorted (column, debug-value)) map decoded by `scan`.
-/// Keyed by partition; for this single-row-per-partition fixture each key maps to
-/// one row's cells. Debug-formatting the `Value` gives a stable content oracle
-/// without depending on the internal cell representation.
-fn scan_cells(entries: &[(RowKey, ScanRow)]) -> Vec<(Vec<u8>, Vec<(String, String)>)> {
+/// One partition's decoded content: its key bytes + a sorted `column=Debug(value)`
+/// set. Debug-formatting the `Value` gives a stable content oracle without
+/// depending on the internal cell representation.
+type PartitionContent = (Vec<u8>, BTreeSet<String>);
+
+/// The per-partition content decoded by the authoritative `scan`. For this
+/// single-row-per-partition fixture each key maps to one row's cells.
+fn scan_cells(entries: &[(RowKey, ScanRow)]) -> Vec<PartitionContent> {
     let mut out = Vec::new();
     for (k, row) in entries {
         if let ScanRow::Row(cells) = row {
-            let mut kv: Vec<(String, String)> = cells
+            let kv: BTreeSet<String> = cells
                 .iter()
-                .map(|(name, v)| (name.to_string(), format!("{v:?}")))
+                .map(|(name, v)| format!("{name}={v:?}"))
                 .collect();
-            kv.sort();
             out.push((k.as_bytes().to_vec(), kv));
         }
     }
@@ -156,25 +158,22 @@ async fn bti_compaction_paths_match_scan_oracle() {
     // Content pin: every scalar cell value the scan oracle decoded must appear on
     // the buffered compaction path (its row_data carries the live cells). This
     // proves the compaction path did schema-aware decode, not a raw-blob fallback.
-    for (key, expected_cells) in &scan_cell_map {
+    for (key, expected) in &scan_cell_map {
         let row = buffered
             .iter()
             .find(|r| r.key.as_bytes() == key.as_slice())
             .expect("every scan partition present on the buffered compaction path");
-        let got: BTreeSet<String> = compaction_simple_cell_debug(row);
-        for (col, val) in expected_cells {
-            // The scan oracle carries the id PK as a cell too; the compaction row
-            // carries only the regular columns' simple cells — so require every
-            // NON-Null scalar the scan saw for a regular column to be present.
-            if val == "Null" {
-                continue;
-            }
-            let needle = format!("{col}={val}");
-            // Only assert for columns the compaction path surfaces as simple cells.
-            if got.iter().any(|g| g.starts_with(&format!("{col}="))) {
+        let got = compaction_simple_cell_debug(row);
+        // The compaction row surfaces regular columns as simple cells (the id PK
+        // and any Null are not simple cells here). Require every `column=value`
+        // the scan oracle saw for a column the compaction path ALSO surfaces to
+        // match — proving schema-aware decode, not a raw-blob fallback.
+        for cell in expected {
+            let col_prefix = format!("{}=", cell.split('=').next().unwrap_or(""));
+            if got.iter().any(|g| g.starts_with(&col_prefix)) {
                 assert!(
-                    got.contains(&needle),
-                    "compaction row for partition {key:?} must carry {needle}; got {got:?}"
+                    got.contains(cell),
+                    "compaction row for partition {key:?} must carry {cell}; got {got:?}"
                 );
             }
         }
