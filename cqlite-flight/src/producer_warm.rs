@@ -10,10 +10,12 @@
 //! Everything downstream — the point-read route selection, LIMIT/budget pushdown,
 //! tombstone reconciliation, Arrow conversion — is byte-identical to the cold
 //! path; only WHO opened the reader differs. Crucially, decode posture matches
-//! too: the cold path (`KWayMerger::new_cancellable`) and the warm registry BOTH
-//! open readers WITHOUT a UDT registry (`has_udt_registry() == false`), so parity
-//! is guaranteed by identical posture — NOT by warm matching some non-null
-//! authority. Wiring a real UDT registry into both paths together is issue #2349.
+//! too (issue #2349): the cold path
+//! (`KWayMerger::new_with_gc_and_registry_cancellable`) and the warm registry BOTH
+//! open readers WITH the SAME resolved UDT registry (from the ticket DDL's
+//! `CREATE TYPE` statements), so a `frozen<UDT>`-in-collection cell decodes
+//! structurally on both — parity guaranteed by matching the SAME authority, and
+//! both flip together when the DDL declares no UDTs (registry-free).
 //!
 //! Lives in its own module (not `producer.rs`) because that file is over the
 //! campsite file-size threshold (epic #1116).

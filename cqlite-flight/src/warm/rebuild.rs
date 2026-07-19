@@ -39,7 +39,7 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
-use cqlite_core::schema::TableSchema;
+use cqlite_core::schema::{TableSchema, UdtRegistry};
 use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::{Config, Error, Platform};
@@ -299,9 +299,9 @@ fn prune_dead(map: &mut HashMap<GenerationId, Arc<OpenSlot>>) {
 impl WarmTableRegistry {
     /// Open the ADDED generations, single-flight-coalesced (issue #2383 fix A) and
     /// cancel-aware (fix C). Fail-closed: any open error (or a cancellation)
-    /// returns immediately WITHOUT partial state. Readers are opened with the SAME
-    /// UDT-registry posture as the cold path (none — see the `registry` module
-    /// doc; #2349 wires a real registry into both paths together).
+    /// returns immediately WITHOUT partial state. Each reader is opened WITH the
+    /// resolved `udt_registry` (issue #2349), matching the cold path exactly so a
+    /// `frozen<UDT>`-in-collection cell decodes structurally on both paths.
     ///
     /// Returns `(opened, real_opens)`: `real_opens` counts only the opens THIS
     /// call actually performed (coalesced follower opens do not count), so the
@@ -311,6 +311,7 @@ impl WarmTableRegistry {
         &self,
         added: &[&GenerationEntry],
         _schema: &TableSchema,
+        udt_registry: Option<&UdtRegistry>,
         cancel: &CancelFlag,
     ) -> Result<(Vec<WarmReader>, u64), WarmError> {
         if added.is_empty() {
@@ -353,6 +354,7 @@ impl WarmTableRegistry {
                     &entry.path,
                     &config,
                     Arc::clone(&platform),
+                    udt_registry,
                     scan_cancel.clone(),
                 )
                 .map(Arc::new)
@@ -426,15 +428,19 @@ pub(super) fn rebind_matches(id: GenerationId, expected_size: u64, live_path: &P
     }
 }
 
-/// Open ONE reader, cancel-aware (issue #2383 fix C), with the SAME UDT-registry
-/// posture as the cold path.
+/// Open ONE reader, cancel-aware (issue #2383 fix C), threading the SAME resolved
+/// UDT registry as the cold path (issue #2349).
 ///
-/// The cold Flight path (`KWayMerger::new_cancellable`) opens readers with
-/// `udt_registry = None`, so — to keep warm a parse-cost-only change with no
-/// read-semantics divergence — this does NOT set a registry either. Wiring a real
-/// registry into BOTH paths together is issue #2349; see the `registry` module
-/// doc. The `cancel` flag is polled inside the O(entries) `Index.db` parse
-/// (`open_cancellable`), so a mid-parse client disconnect surfaces as
+/// The cold Flight path (`KWayMerger::new_with_gc_and_registry_cancellable`) opens
+/// each reader WITH its resolved registry via `set_udt_registry` so a `frozen<UDT>`
+/// cell inside a collection decodes structurally (the #1234 data-loss class). The
+/// warm path must match EXACTLY (spec non-goal: warm is a parse-cost change, never
+/// a read-semantics change), so this sets the same registry on the freshly-opened
+/// reader BEFORE it is shared as an `Arc` (the only point a `&mut self` exists —
+/// see `from_readers.rs`'s shared-reader UDT contract). `udt_registry = None` (a
+/// DDL with no `CREATE TYPE`) leaves the reader registry-free, identical to the
+/// cold path's `None`. The `cancel` flag is polled inside the O(entries) `Index.db`
+/// parse (`open_cancellable`), so a mid-parse client disconnect surfaces as
 /// [`Error::Cancelled`] and is mapped to [`WarmError::Cancelled`] — never masked
 /// as an `Open` failure, never run to completion.
 fn open_one_reader(
@@ -442,9 +448,10 @@ fn open_one_reader(
     path: &Path,
     config: &Config,
     platform: Arc<Platform>,
+    udt_registry: Option<&UdtRegistry>,
     cancel: ScanCancel,
 ) -> Result<SSTableReader, WarmError> {
-    let reader = runtime
+    let mut reader = runtime
         .block_on(SSTableReader::open_cancellable(
             path, config, platform, cancel,
         ))
@@ -455,9 +462,13 @@ fn open_one_reader(
                 source,
             },
         })?;
-    debug_assert!(
-        !reader.has_udt_registry(),
-        "warm reader must match the cold path's no-UDT-registry posture (#2349)"
+    if let Some(registry) = udt_registry {
+        reader.set_udt_registry(registry.clone());
+    }
+    debug_assert_eq!(
+        reader.has_udt_registry(),
+        udt_registry.is_some(),
+        "warm reader UDT-registry posture must match the cold path (#2349)"
     );
     Ok(reader)
 }

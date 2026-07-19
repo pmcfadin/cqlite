@@ -94,14 +94,14 @@ fn cross_snapshot_dirs_share_one_warm_entry() {
     let cancel = CancelFlag::new();
 
     let w1 = reg
-        .warm_readers(&key(), ddl(), &schema, &snap1, Some("snap1"), &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &snap1, Some("snap1"), &cancel)
         .expect("first snapshot warms");
     assert_eq!(w1.outcome, RefreshOutcome::RebuiltDelta, "first is a build");
     let opens_after_first = reg.metrics().snapshot().reader_opens;
     assert!(opens_after_first >= 2, "both generations opened cold");
 
     let w2 = reg
-        .warm_readers(&key(), ddl(), &schema, &snap2, Some("snap2"), &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &snap2, Some("snap2"), &cancel)
         .expect("second snapshot (different dir, same inodes)");
     assert_eq!(
         w2.outcome,
@@ -150,7 +150,7 @@ fn warm_hit_after_snapshot_teardown_rebuilds_instead_of_enoent() {
     let reg = WarmTableRegistry::new();
     let cancel = CancelFlag::new();
     let w1 = reg
-        .warm_readers(&key(), ddl(), &schema, &snap1, Some("snap1"), &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &snap1, Some("snap1"), &cancel)
         .expect("first snapshot warms");
     assert_eq!(w1.outcome, RefreshOutcome::RebuiltDelta, "first is a build");
     assert_eq!(
@@ -167,7 +167,7 @@ fn warm_hit_after_snapshot_teardown_rebuilds_instead_of_enoent() {
     // identity makes this a set-match — but a dead cached path must NOT be served.
     let snap2 = make_snapshot(&table_dir, "snap2");
     let w2 = reg
-        .warm_readers(&key(), ddl(), &schema, &snap2, Some("snap2"), &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &snap2, Some("snap2"), &cancel)
         .expect("second snapshot request after the first was cleared");
 
     // The fix: a dead cached path is a rebuild (a refresh outcome), never a
@@ -201,33 +201,70 @@ fn warm_hit_after_snapshot_teardown_rebuilds_instead_of_enoent() {
 }
 
 /// Warm/cold UDT-registry PARITY (spec non-goal: warm is a parse-cost change
-/// only, never a read-semantics change; #2349): the warm path must open readers
-/// with the SAME UDT-registry posture as the cold path. The cold Flight path
-/// (`KWayMerger::new_cancellable`) opens readers with `udt_registry = None`, so a
-/// warm reader must ALSO have no registry. Both are `has_udt_registry() == false`
-/// today; they flip together when #2349 wires a real registry into both paths.
+/// only, never a read-semantics change; #2349): the warm path opens readers with
+/// the SAME UDT-registry posture as the cold path — they flip TOGETHER. When the
+/// resolved registry is `None` (a DDL with no `CREATE TYPE`), a warm reader has no
+/// registry, exactly like a plain cold `SSTableReader::open`; when a registry is
+/// supplied it is set on every warm reader, exactly as the cold
+/// `KWayMerger::new_with_gc_and_registry_cancellable` sets it. Both directions are
+/// asserted so a regression in either the None or Some posture is caught.
 #[test]
 fn warm_and_cold_reader_udt_posture_identical() {
+    use cqlite_core::schema::UdtRegistry;
     use cqlite_core::{Config, Platform};
 
     let schema = simple_schema();
     let (_temp, _data, table_dir) = build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
 
-    // WARM posture: readers handed out by the registry.
+    // Posture 1 — NO registry: warm readers must be registry-free, like a plain
+    // cold `SSTableReader::open`.
     let reg = WarmTableRegistry::new();
-    let w = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &CancelFlag::new())
-        .expect("warms");
-    assert!(!w.readers.is_empty(), "opened at least one reader");
-    for r in &w.readers {
+    let w_none = reg
+        .warm_readers(
+            &key(),
+            ddl(),
+            &schema,
+            None,
+            &table_dir,
+            None,
+            &CancelFlag::new(),
+        )
+        .expect("warms (no registry)");
+    assert!(!w_none.readers.is_empty(), "opened at least one reader");
+    for r in &w_none.readers {
         assert!(
             !r.has_udt_registry(),
-            "a warm reader must match the cold path's no-UDT-registry posture (#2349)"
+            "a warm reader with no resolved registry must have none (parity, #2349)"
         );
     }
 
-    // COLD posture: open a reader exactly as `KWayMerger::new_cancellable` does
-    // (plain `SSTableReader::open`, never `set_udt_registry`).
+    // Posture 2 — WITH a registry: every warm reader carries it (a distinct
+    // `TableKey` so the no-registry cache entry above is not reused).
+    let reg2 = WarmTableRegistry::new();
+    let registry = UdtRegistry::with_cassandra5_defaults();
+    let key2 = TableKey::new("test_ks", "with_udt");
+    let w_some = reg2
+        .warm_readers(
+            &key2,
+            ddl(),
+            &schema,
+            Some(&registry),
+            &table_dir,
+            None,
+            &CancelFlag::new(),
+        )
+        .expect("warms (with registry)");
+    assert!(!w_some.readers.is_empty(), "opened at least one reader");
+    for r in &w_some.readers {
+        assert!(
+            r.has_udt_registry(),
+            "a warm reader opened WITH a registry must carry it — flips with the cold \
+             path (#2349)"
+        );
+    }
+
+    // COLD posture: a plain `SSTableReader::open` (as the cold path does before
+    // `set_udt_registry`) has no registry, so it matches Posture 1.
     let data_db = std::fs::read_dir(&table_dir)
         .unwrap()
         .flatten()
@@ -251,12 +288,12 @@ fn warm_and_cold_reader_udt_posture_identical() {
     });
     assert_eq!(
         cold.has_udt_registry(),
-        w.readers[0].has_udt_registry(),
-        "warm and cold readers must share one UDT-registry posture (parity, #2349)"
+        w_none.readers[0].has_udt_registry(),
+        "a registry-free warm reader matches a plain cold open (parity, #2349)"
     );
     assert!(
         !cold.has_udt_registry(),
-        "the cold path opens readers without a UDT registry"
+        "a plain cold open has no UDT registry"
     );
 }
 
@@ -285,7 +322,15 @@ fn concurrent_same_key_rebuild_dedups_readers_and_bytes() {
     // reader count (2) and accounted footprint.
     let reference = WarmTableRegistry::new();
     reference
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &CancelFlag::new())
+        .warm_readers(
+            &key(),
+            ddl(),
+            &schema,
+            None,
+            &table_dir,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("reference warm");
     let ref_used = reference.debug_used_bytes();
     let ref_count = reference.debug_reader_count(&key());
@@ -308,7 +353,7 @@ fn concurrent_same_key_rebuild_dedups_readers_and_bytes() {
             let schema = schema.clone();
             let dir = table_dir.clone();
             thread::spawn(move || {
-                reg.warm_readers(&key(), ddl(), &schema, &dir, None, &CancelFlag::new())
+                reg.warm_readers(&key(), ddl(), &schema, None, &dir, None, &CancelFlag::new())
                     .expect("concurrent warm")
                     .readers
                     .len()
@@ -381,7 +426,15 @@ fn slow_rebuild_does_not_overwrite_a_faster_newer_swap() {
     let a_handle = thread::Builder::new()
         .name("slow-A".to_string())
         .spawn(move || {
-            a_reg.warm_readers(&key(), ddl(), &a_schema, &a_dir, None, &CancelFlag::new())
+            a_reg.warm_readers(
+                &key(),
+                ddl(),
+                &a_schema,
+                None,
+                &a_dir,
+                None,
+                &CancelFlag::new(),
+            )
         })
         .expect("spawn slow-A");
 
@@ -393,7 +446,15 @@ fn slow_rebuild_does_not_overwrite_a_faster_newer_swap() {
     // state A's stale probe never saw.
     append_gen(&table_dir, &schema, vec![write_row(2, "b", 2, 100)]);
     let b_result = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &CancelFlag::new())
+        .warm_readers(
+            &key(),
+            ddl(),
+            &schema,
+            None,
+            &table_dir,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("fast rebuild B installs the newer set");
     assert_eq!(b_result.readers.len(), 2, "B installs both generations");
 
@@ -449,7 +510,7 @@ fn fail_closed_rebuild_retains_prior_warm_set() {
 
     // Warm the valid set.
     let w1 = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("warms the valid generation");
     let opens_after_first = reg.metrics().snapshot().reader_opens;
 
@@ -470,7 +531,7 @@ fn fail_closed_rebuild_retains_prior_warm_set() {
     .unwrap();
 
     let err = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect_err("a corrupt added generation must fail the rebuild");
     assert!(
         matches!(err, WarmError::Open { .. }),
@@ -487,7 +548,7 @@ fn fail_closed_rebuild_retains_prior_warm_set() {
     // never dropped by the failed rebuild).
     std::fs::remove_file(table_dir.join("nb-999-big-Data.db")).unwrap();
     let w2 = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("prior set still serves");
     assert_eq!(
         w2.outcome,
@@ -518,7 +579,7 @@ fn removed_generation_is_evicted_immediately() {
     let reg = WarmTableRegistry::new();
     let cancel = CancelFlag::new();
     let w1 = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("warms two generations");
     assert_eq!(w1.readers.len(), 2);
 
@@ -536,7 +597,7 @@ fn removed_generation_is_evicted_immediately() {
     std::fs::remove_file(&victim).unwrap();
 
     let w2 = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("rebuild drops the removed generation");
     assert_eq!(w2.readers.len(), 1, "the removed generation is gone");
     assert!(
@@ -563,7 +624,15 @@ fn lru_evicts_when_over_budget() {
     // registry): B fits, but A+B together force A out.
     let probe = WarmTableRegistry::new();
     probe
-        .warm_readers(&key_b, ddl(), &schema, &dir_b, None, &CancelFlag::new())
+        .warm_readers(
+            &key_b,
+            ddl(),
+            &schema,
+            None,
+            &dir_b,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("probe warm");
     let one_gen = probe.debug_used_bytes();
     assert!(one_gen > 0, "a generation's footprint is non-zero");
@@ -571,9 +640,9 @@ fn lru_evicts_when_over_budget() {
     let reg = WarmTableRegistry::with_budget(one_gen);
     let cancel = CancelFlag::new();
 
-    reg.warm_readers(&key_a, ddl(), &schema, &dir_a, None, &cancel)
+    reg.warm_readers(&key_a, ddl(), &schema, None, &dir_a, None, &cancel)
         .expect("warm A");
-    reg.warm_readers(&key_b, ddl(), &schema, &dir_b, None, &cancel)
+    reg.warm_readers(&key_b, ddl(), &schema, None, &dir_b, None, &cancel)
         .expect("warm B evicts A");
     assert!(
         reg.metrics().snapshot().evicts >= 1,
@@ -589,7 +658,7 @@ fn lru_evicts_when_over_budget() {
     // must be CORRECT — the re-opened reader decodes partition id=1 → name "a".
     let opens_before = reg.metrics().snapshot().reader_opens;
     let wa = reg
-        .warm_readers(&key_a, ddl(), &schema, &dir_a, None, &cancel)
+        .warm_readers(&key_a, ddl(), &schema, None, &dir_a, None, &cancel)
         .expect("A re-parses after eviction");
     assert_eq!(
         wa.outcome,
@@ -633,7 +702,15 @@ fn capacity_eviction_preserves_global_key_cache() {
     // fits, so warming A+B forces A out via the CAPACITY-eviction path.
     let probe = WarmTableRegistry::new();
     probe
-        .warm_readers(&key_b, ddl(), &schema, &dir_b, None, &CancelFlag::new())
+        .warm_readers(
+            &key_b,
+            ddl(),
+            &schema,
+            None,
+            &dir_b,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("probe warm");
     let one_gen = probe.debug_used_bytes();
     assert!(one_gen > 0, "a generation's footprint is non-zero");
@@ -642,7 +719,7 @@ fn capacity_eviction_preserves_global_key_cache() {
     let cancel = CancelFlag::new();
 
     let wa = reg
-        .warm_readers(&key_a, ddl(), &schema, &dir_a, None, &cancel)
+        .warm_readers(&key_a, ddl(), &schema, None, &dir_a, None, &cancel)
         .expect("warm A");
     let reader_a = Arc::clone(&wa.readers[0]);
 
@@ -667,7 +744,7 @@ fn capacity_eviction_preserves_global_key_cache() {
     );
 
     // Warm B past the one-generation budget → CAPACITY-evicts A from the warm set.
-    reg.warm_readers(&key_b, ddl(), &schema, &dir_b, None, &cancel)
+    reg.warm_readers(&key_b, ddl(), &schema, None, &dir_b, None, &cancel)
         .expect("warm B capacity-evicts A");
     assert!(
         reg.metrics().snapshot().evicts >= 1,
@@ -722,7 +799,7 @@ fn manifest_fast_path_serves_cached_without_relisting() {
     let reg = WarmTableRegistry::new();
     let cancel = CancelFlag::new();
     let w1 = reg
-        .warm_readers(&key(), ddl(), &schema, &snap, Some("snap1"), &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &snap, Some("snap1"), &cancel)
         .expect("warm snapshot");
     assert_eq!(w1.readers.len(), 2, "both generations warmed");
     let opens = reg.metrics().snapshot().reader_opens;
@@ -733,7 +810,7 @@ fn manifest_fast_path_serves_cached_without_relisting() {
     std::fs::write(snap.join("nb-3-big-Data.db"), b"not-a-real-sstable").unwrap();
 
     let w2 = reg
-        .warm_readers(&key(), ddl(), &schema, &snap, Some("snap1"), &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &snap, Some("snap1"), &cancel)
         .expect("manifest fast path serves cached");
     assert_eq!(
         w2.outcome,
@@ -764,7 +841,7 @@ fn held_warm_set_is_isolated_from_a_rebuild_swap() {
     let reg = WarmTableRegistry::new();
     let cancel = CancelFlag::new();
     let w1 = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("warm gen-1");
     // Hold the pre-swap Arc set (as an in-flight stream would).
     let held = w1.readers.clone();
@@ -772,7 +849,7 @@ fn held_warm_set_is_isolated_from_a_rebuild_swap() {
     // Add a second generation and rebuild+swap the warm set.
     append_gen(&table_dir, &schema, vec![write_row(2, "b", 2, 200)]);
     let w2 = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("rebuild adds gen-2");
     assert_eq!(
         w2.readers.len(),
@@ -806,7 +883,7 @@ fn mid_rebuild_cancellation_leaves_prior_set_intact() {
     let reg = WarmTableRegistry::new();
     let cancel = CancelFlag::new();
     // Warm gen-1 (the prior set).
-    reg.warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+    reg.warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("warm gen-1");
 
     // Add TWO more generations so the rebuild opens multiple.
@@ -825,7 +902,7 @@ fn mid_rebuild_cancellation_leaves_prior_set_intact() {
     }));
 
     let err = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect_err("a mid-rebuild cancellation must abort");
     assert!(matches!(err, WarmError::Cancelled), "got {err:?}");
     assert!(
@@ -849,7 +926,7 @@ fn pre_cancelled_warm_lookup_does_zero_work() {
     let cancel = CancelFlag::new();
     cancel.cancel();
     let err = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect_err("a pre-cancelled lookup must not work");
     assert!(matches!(err, WarmError::Cancelled), "got {err:?}");
     let m = reg.metrics().snapshot();
@@ -866,11 +943,11 @@ fn unchanged_live_set_is_a_warm_hit() {
     let reg = WarmTableRegistry::new();
     let cancel = CancelFlag::new();
     let _ = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("first");
     let opens = reg.metrics().snapshot().reader_opens;
     let w2 = reg
-        .warm_readers(&key(), ddl(), &schema, &table_dir, None, &cancel)
+        .warm_readers(&key(), ddl(), &schema, None, &table_dir, None, &cancel)
         .expect("second");
     assert_eq!(w2.outcome, RefreshOutcome::Unchanged);
     assert_eq!(

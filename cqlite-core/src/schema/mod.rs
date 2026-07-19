@@ -21,7 +21,7 @@ mod key_ordering;
 mod schema_comparator;
 mod udt_registry;
 
-pub use udt_registry::UdtRegistry;
+pub use udt_registry::{udt_registry_from_cql, UdtRegistry};
 
 /// Test-only work counters for the derived-comparator caching path (issue #1709).
 ///

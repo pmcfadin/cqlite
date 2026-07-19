@@ -10,6 +10,39 @@ use crate::types::UdtTypeDef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Build a [`UdtRegistry`] from every `CREATE TYPE` statement in a CQL DDL string
+/// (issue #2349).
+///
+/// This is the SINGLE authoritative DDL→registry resolver, reused by the CLI
+/// write path (`udt_registry_from_schema_file`) and the Flight read path (which
+/// resolves a ticket's DDL): it splits the DDL into statements
+/// ([`super::cql_parser::split_cql_statements`]), parses each `CREATE TYPE`
+/// ([`super::cql_parser::parse_create_type`]), and registers the resulting
+/// [`UdtTypeDef`]. A field whose declared type does not parse falls back to
+/// [`CqlType::Blob`] (rendered `BytesType`), matching the writer's unknown-type
+/// handling. A `CREATE TYPE` with no explicit keyspace inherits `default_keyspace`.
+///
+/// No-heuristics (issue #28): types come ONLY from the authoritative DDL — never
+/// inferred from data bytes. A DDL carrying no `CREATE TYPE` yields an empty
+/// registry (resolution then a no-op), so a non-UDT table is unaffected.
+pub fn udt_registry_from_cql(cql: &str, default_keyspace: &str) -> UdtRegistry {
+    use super::cql_parser::{parse_create_type, split_cql_statements};
+
+    let mut registry = UdtRegistry::new();
+    for stmt in split_cql_statements(cql) {
+        if let Ok((_, (name, keyspace, fields))) = parse_create_type(&stmt) {
+            let keyspace = keyspace.unwrap_or_else(|| default_keyspace.to_string());
+            let mut def = UdtTypeDef::new(keyspace, name);
+            for (field_name, field_type) in fields {
+                let cql = CqlType::parse(&field_type).unwrap_or(CqlType::Blob);
+                def = def.with_field(field_name, cql, true);
+            }
+            registry.register_udt(def);
+        }
+    }
+    registry
+}
+
 /// UDT Schema Registry for managing User Defined Type definitions
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UdtRegistry {
@@ -143,6 +176,133 @@ impl UdtRegistry {
             .with_field("last_updated".to_string(), CqlType::Timestamp, true);
 
         self.register_udt(contact_info_udt);
+    }
+
+    /// Rewrite every UDT reference inside `ty` into a fully-structured
+    /// [`CqlType::Udt`] whose fields come from this registry (issue #2349).
+    ///
+    /// `CqlType::parse` renders a UDT reference as `Custom("udt:<name>")` (or a
+    /// bare `Custom("<name>")` for lowercase names) with NO field information, and
+    /// an already-`Udt` node with an empty field list is likewise unresolved. This
+    /// walks the type tree and replaces each such reference with the registry's
+    /// authoritative field definitions, recursing through collection/frozen/tuple
+    /// wrappers and into each resolved UDT field's own type (so `frozen<contact>`
+    /// with an inner `frozen<address>` field fully materializes).
+    ///
+    /// A reference with no registry entry is left UNCHANGED — resolution is a
+    /// no-op fail-open, never a fabricated type (no-heuristics, issue #28). The
+    /// lookup honours an explicit `keyspace.type` qualifier and falls back to the
+    /// `system` keyspace, mirroring [`super::TableSchema::validate_udt_references`].
+    pub fn resolve_type(&self, ty: &CqlType, keyspace: &str) -> CqlType {
+        // Cap recursion so a (registry-level) cyclic UDT reference can never
+        // loop forever; Cassandra forbids cycles, so a real schema is shallow.
+        self.resolve_type_depth(ty, keyspace, 0)
+    }
+
+    fn resolve_type_depth(&self, ty: &CqlType, keyspace: &str, depth: usize) -> CqlType {
+        const MAX_DEPTH: usize = 32;
+        if depth >= MAX_DEPTH {
+            return ty.clone();
+        }
+        match ty {
+            CqlType::List(inner) => CqlType::List(Box::new(self.resolve_type_depth(
+                inner,
+                keyspace,
+                depth + 1,
+            ))),
+            CqlType::Set(inner) => CqlType::Set(Box::new(self.resolve_type_depth(
+                inner,
+                keyspace,
+                depth + 1,
+            ))),
+            CqlType::Frozen(inner) => CqlType::Frozen(Box::new(self.resolve_type_depth(
+                inner,
+                keyspace,
+                depth + 1,
+            ))),
+            CqlType::Map(k, v) => CqlType::Map(
+                Box::new(self.resolve_type_depth(k, keyspace, depth + 1)),
+                Box::new(self.resolve_type_depth(v, keyspace, depth + 1)),
+            ),
+            CqlType::Tuple(types) => CqlType::Tuple(
+                types
+                    .iter()
+                    .map(|t| self.resolve_type_depth(t, keyspace, depth + 1))
+                    .collect(),
+            ),
+            CqlType::Udt(name, fields) if fields.is_empty() => self
+                .resolve_udt_reference(name, keyspace, depth)
+                .unwrap_or_else(|| ty.clone()),
+            // An already-populated UDT node is NOT necessarily fully resolved: an
+            // inner field may still hold an unresolved `Custom("udt:X")` (roborev
+            // job 1924 blocker 3). Recurse into every field type so a partially-
+            // resolved nested UDT fully materializes — the exact data-loss class
+            // this issue targets. A UDT whose fields are already resolved re-maps to
+            // an equal tree (idempotent), so this is safe to run unconditionally.
+            CqlType::Udt(name, fields) => CqlType::Udt(
+                name.clone(),
+                fields
+                    .iter()
+                    .map(|(fname, ftype)| {
+                        (
+                            fname.clone(),
+                            self.resolve_type_depth(ftype, keyspace, depth + 1),
+                        )
+                    })
+                    .collect(),
+            ),
+            CqlType::Custom(name) => {
+                let udt_name = name.strip_prefix("udt:").unwrap_or(name);
+                if super::is_udt_identifier(udt_name) {
+                    self.resolve_udt_reference(udt_name, keyspace, depth)
+                        .unwrap_or_else(|| ty.clone())
+                } else {
+                    ty.clone()
+                }
+            }
+            // Primitives pass through.
+            other => other.clone(),
+        }
+    }
+
+    /// Look a UDT reference up in this registry and return its fully-resolved
+    /// [`CqlType::Udt`] (fields recursively resolved), or `None` when absent.
+    fn resolve_udt_reference(
+        &self,
+        udt_name: &str,
+        keyspace: &str,
+        depth: usize,
+    ) -> Option<CqlType> {
+        let (lookup_keyspace, bare_name) = match udt_name.split_once('.') {
+            Some((ks, n)) => (ks, n),
+            None => (keyspace, udt_name),
+        };
+        let def = self
+            .get_udt(lookup_keyspace, bare_name)
+            .or_else(|| self.get_udt("system", bare_name))?;
+        let fields = def
+            .fields
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    // Resolve nested UDT fields against the UDT's OWN keyspace.
+                    self.resolve_type_depth(&f.field_type, &def.keyspace, depth + 1),
+                )
+            })
+            .collect();
+        // The node name is deliberately the BARE type name, never a
+        // `keyspace.type` qualifier (roborev job 1925 blocker 2). A qualifier is
+        // resolved AT resolution time — the lookup above already used the explicit
+        // keyspace, and every nested field is resolved against `def.keyspace` — so
+        // the correct definition is baked into `fields`; the keyspace need not (and
+        // MUST NOT) live in the name. Many consumers key on a bare name and would
+        // break on a qualified one: `UdtValue.type_name` is emitted verbatim as
+        // `_type` in CLI/binding JSON output (json.rs, query/result.rs), and
+        // `UdtTypeDef::validate_value` / `get_udt` / `contains_udt` all match a bare
+        // name. Keeping it bare matches `CqlType::parse`'s output and preserves that
+        // consumer contract; the golden comparison reads struct FIELDS, not the name.
+        Some(CqlType::Udt(bare_name.to_string(), fields))
     }
 
     /// Resolve UDT with full dependency chain
@@ -343,6 +503,156 @@ impl UdtRegistry {
             }
             CqlType::Frozen(inner) => format!("frozen<{}>", self.format_cql_type(inner)),
             CqlType::Custom(name) => name.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    const DDL: &str = "\
+CREATE TYPE ks.address_type (street text, city text); \
+CREATE TYPE ks.contact_info (email text, address frozen<address_type>);";
+
+    #[test]
+    fn from_cql_registers_every_create_type() {
+        let reg = udt_registry_from_cql(DDL, "ks");
+        assert!(reg.contains_udt("ks", "address_type"));
+        assert!(reg.contains_udt("ks", "contact_info"));
+        assert_eq!(reg.total_udts(), 2);
+    }
+
+    #[test]
+    fn from_cql_no_create_type_is_empty() {
+        let reg = udt_registry_from_cql("CREATE TABLE ks.t (id int PRIMARY KEY, v text)", "ks");
+        assert_eq!(reg.total_udts(), 0);
+    }
+
+    #[test]
+    fn resolve_type_rewrites_custom_udt_in_list_to_struct() {
+        let reg = udt_registry_from_cql(DDL, "ks");
+        // `list<frozen<address_type>>` parses to List(Frozen(Custom("udt:address_type"))).
+        let parsed = CqlType::parse("list<frozen<address_type>>").unwrap();
+        let resolved = reg.resolve_type(&parsed, "ks");
+        match &resolved {
+            CqlType::List(inner) => match inner.as_ref() {
+                CqlType::Frozen(udt) => match udt.as_ref() {
+                    CqlType::Udt(name, fields) => {
+                        assert_eq!(name, "address_type");
+                        assert_eq!(fields.len(), 2, "street + city resolved from the registry");
+                        assert_eq!(fields[0].0, "street");
+                    }
+                    other => panic!("inner must resolve to Udt, got {other:?}"),
+                },
+                other => panic!("expected Frozen wrapper, got {other:?}"),
+            },
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_type_recurses_into_nested_udt_fields() {
+        let reg = udt_registry_from_cql(DDL, "ks");
+        // contact_info.address is itself a frozen<address_type> — the nested UDT
+        // must resolve to a full Struct, not stay a bare Custom.
+        let parsed = CqlType::parse("frozen<contact_info>").unwrap();
+        let resolved = reg.resolve_type(&parsed, "ks");
+        let inner = match &resolved {
+            CqlType::Frozen(inner) => inner.as_ref(),
+            other => panic!("expected Frozen, got {other:?}"),
+        };
+        let fields = match inner {
+            CqlType::Udt(_, fields) => fields,
+            other => panic!("expected Udt, got {other:?}"),
+        };
+        let (_, addr_type) = fields
+            .iter()
+            .find(|(n, _)| n == "address")
+            .expect("address field");
+        match addr_type {
+            CqlType::Frozen(a) => assert!(
+                matches!(a.as_ref(), CqlType::Udt(n, f) if n == "address_type" && f.len() == 2),
+                "nested address field must resolve to the full address_type Struct"
+            ),
+            CqlType::Udt(n, f) => {
+                assert_eq!(n, "address_type");
+                assert_eq!(f.len(), 2);
+            }
+            other => panic!("nested address must resolve to a Udt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_type_unknown_reference_is_left_unchanged() {
+        let reg = UdtRegistry::new();
+        let parsed = CqlType::parse("list<frozen<missing_type>>").unwrap();
+        // No registry entry → fail-open, type tree unchanged (no fabricated fields).
+        assert_eq!(reg.resolve_type(&parsed, "ks"), parsed);
+    }
+
+    #[test]
+    fn resolve_type_leaves_primitives_untouched() {
+        let reg = udt_registry_from_cql(DDL, "ks");
+        let parsed = CqlType::parse("map<text, int>").unwrap();
+        assert_eq!(reg.resolve_type(&parsed, "ks"), parsed);
+    }
+
+    #[test]
+    fn resolve_type_recurses_into_a_partially_resolved_udt_node() {
+        // A Udt node that is ALREADY populated (non-empty fields) but whose inner
+        // field still holds an unresolved `Custom("udt:address_type")` must have
+        // that inner ref resolved too (roborev job 1924 blocker 3) — else the inner
+        // UDT decodes opaque, the data-loss class this issue targets.
+        let reg = udt_registry_from_cql(DDL, "ks");
+        let partial = CqlType::Udt(
+            "contact_info".to_string(),
+            vec![
+                ("email".to_string(), CqlType::Text),
+                (
+                    "address".to_string(),
+                    CqlType::Frozen(Box::new(CqlType::Custom("udt:address_type".to_string()))),
+                ),
+            ],
+        );
+        let resolved = reg.resolve_type(&partial, "ks");
+        let fields = match &resolved {
+            CqlType::Udt(_, fields) => fields,
+            other => panic!("expected Udt, got {other:?}"),
+        };
+        let (_, addr) = fields
+            .iter()
+            .find(|(n, _)| n == "address")
+            .expect("address");
+        let inner = match addr {
+            CqlType::Frozen(inner) => inner.as_ref(),
+            other => panic!("expected Frozen, got {other:?}"),
+        };
+        assert!(
+            matches!(inner, CqlType::Udt(n, f) if n == "address_type" && f.len() == 2),
+            "the inner Custom(\"udt:address_type\") must resolve to the full Struct, got {inner:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_type_qualified_reference_resolves_to_bare_node_name() {
+        // An explicit `ks.address_type` reference resolves via the named keyspace
+        // but the resulting node carries the BARE type name (roborev job 1925
+        // blocker 2): the correct definition is already baked into the fields, and
+        // bare names are the contract every name-keyed consumer (UdtValue.type_name
+        // JSON output, get_udt/validate_value) expects.
+        let reg = udt_registry_from_cql(DDL, "ks");
+        let parsed = CqlType::parse("frozen<ks.address_type>").unwrap();
+        let resolved = reg.resolve_type(&parsed, "other_ks");
+        match &resolved {
+            CqlType::Frozen(inner) => match inner.as_ref() {
+                CqlType::Udt(name, fields) => {
+                    assert_eq!(name, "address_type", "node name stays BARE, not qualified");
+                    assert_eq!(fields.len(), 2, "resolved against the ks keyspace");
+                }
+                other => panic!("expected Udt, got {other:?}"),
+            },
+            other => panic!("expected Frozen, got {other:?}"),
         }
     }
 }

@@ -541,28 +541,13 @@ pub(crate) fn udt_registry_from_schema_file(
     schema_path: &Path,
     default_keyspace: &str,
 ) -> cqlite_core::schema::UdtRegistry {
-    use cqlite_core::schema::cql_parser::{parse_create_type, split_cql_statements};
-    use cqlite_core::schema::{CqlType, UdtRegistry};
-    use cqlite_core::types::UdtTypeDef;
-
-    let mut registry = UdtRegistry::new();
-    let Ok(content) = std::fs::read_to_string(schema_path) else {
-        return registry;
-    };
-    for stmt in split_cql_statements(&content) {
-        if let Ok((_, (name, keyspace, fields))) = parse_create_type(&stmt) {
-            let keyspace = keyspace.unwrap_or_else(|| default_keyspace.to_string());
-            let mut def = UdtTypeDef::new(keyspace, name);
-            for (field_name, field_type) in fields {
-                // Unparseable field types fall back to Blob (rendered BytesType),
-                // matching the writer's unknown-type handling.
-                let cql = CqlType::parse(&field_type).unwrap_or(CqlType::Blob);
-                def = def.with_field(field_name, cql, true);
-            }
-            registry.register_udt(def);
-        }
+    // Delegate to the single authoritative DDL→registry resolver (issue #2349):
+    // read the file, then reuse the same `CREATE TYPE`-parsing mechanism the Flight
+    // read path uses, so the two can never drift.
+    match std::fs::read_to_string(schema_path) {
+        Ok(content) => cqlite_core::schema::udt_registry_from_cql(&content, default_keyspace),
+        Err(_) => cqlite_core::schema::UdtRegistry::new(),
     }
-    registry
 }
 
 /// Recursively discover published input SSTables under `dir`, ordered

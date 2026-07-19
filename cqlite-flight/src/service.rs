@@ -323,7 +323,16 @@ impl CqliteFlightService {
     fn build_producer(&self, ticket: &FlightTicket) -> Result<MergeProducer, Status> {
         let schema = self.cached_schema(ticket)?;
         let spec = ScanSpec::from_ticket(ticket, &schema)?;
-        let producer = MergeProducer::with_spec((*schema).clone(), self.batch_size, spec)?;
+        // Issue #2349: resolve the authoritative UDT registry from the ticket DDL's
+        // `CREATE TYPE` statements (schema-authoritative, no-heuristics #28) and
+        // attach it. This resolves each column's `cql_type` (so a `frozen<UDT>` in
+        // a collection surfaces as an Arrow `Struct`, not opaque bytes) AND threads
+        // the registry onto the cold merge readers. The warm path sets the SAME
+        // registry on its shared readers in `do_get_resolve`, so both flip together.
+        // An empty registry (a DDL with no `CREATE TYPE`) is a no-op.
+        let registry = cqlite_core::schema::udt_registry_from_cql(&ticket.ddl, &ticket.keyspace);
+        let producer = MergeProducer::with_spec((*schema).clone(), self.batch_size, spec)?
+            .with_udt_registry(registry);
         // Aggregation pushdown (issue #841): when the ticket carries an
         // aggregation spec, the producer emits PARTIAL aggregate rows under the
         // partial schema instead of full rows.
@@ -775,6 +784,10 @@ impl CqliteFlightService {
                     &key,
                     ddl_hash(&ticket.ddl),
                     &producer.schema,
+                    // Issue #2349: open warm readers WITH the same resolved UDT
+                    // registry the producer carries, so a `frozen<UDT>`-in-collection
+                    // cell decodes structurally on the warm path exactly as on cold.
+                    producer.udt_registry.as_ref(),
                     &dir,
                     ticket.snapshot.as_deref(),
                     &resolve_cancel,

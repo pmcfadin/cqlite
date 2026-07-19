@@ -101,7 +101,15 @@ fn warm_footprint_does_not_scale_with_partition_count() {
     let (_small_temp, small_dir) = build_single_gen(&schema, 200);
     let small_reg = WarmTableRegistry::new();
     small_reg
-        .warm_readers(&key(), ddl(), &schema, &small_dir, None, &CancelFlag::new())
+        .warm_readers(
+            &key(),
+            ddl(),
+            &schema,
+            None,
+            &small_dir,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("small generation warms");
     let small_footprint = small_reg.debug_used_bytes();
 
@@ -113,7 +121,15 @@ fn warm_footprint_does_not_scale_with_partition_count() {
     let (large_index_bytes, large_summary_bytes) = sibling_component_sizes(&large_data);
     let large_reg = WarmTableRegistry::new();
     large_reg
-        .warm_readers(&key(), ddl(), &schema, &large_dir, None, &CancelFlag::new())
+        .warm_readers(
+            &key(),
+            ddl(),
+            &schema,
+            None,
+            &large_dir,
+            None,
+            &CancelFlag::new(),
+        )
         .expect("large generation warms");
     let large_footprint = large_reg.debug_used_bytes();
 

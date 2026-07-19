@@ -19,7 +19,7 @@
 //! the same way.
 
 use super::{KWayMerger, MergeEntry, RunReader, SSTableRowIterator, SSTableRowIteratorAdapter};
-use crate::schema::TableSchema;
+use crate::schema::{TableSchema, UdtRegistry};
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
 use crate::{Error, Result};
@@ -166,6 +166,23 @@ pub fn build_single_partition_merger(
     schema: &TableSchema,
     scan_cancel: ScanCancel,
 ) -> Result<Option<KWayMerger>> {
+    build_single_partition_merger_with_registry(paths, keys, schema, None, scan_cancel)
+}
+
+/// Like [`build_single_partition_merger`], but threads an authoritative
+/// [`UdtRegistry`] onto every candidate reader (issue #2349) so a `frozen<UDT>`
+/// cell inside a collection decodes structurally instead of as opaque bytes — the
+/// cold point-read analogue of the full-scan
+/// [`KWayMerger::new_with_gc_and_registry_cancellable`]. Passing `None` is
+/// byte-identical to the registry-free path. Used by the Flight point-read route so
+/// point and full-scan reads never diverge (issue #1918 differential lane).
+pub fn build_single_partition_merger_with_registry(
+    paths: Vec<PathBuf>,
+    keys: &[Vec<u8>],
+    schema: &TableSchema,
+    udt_registry: Option<&UdtRegistry>,
+    scan_cancel: ScanCancel,
+) -> Result<Option<KWayMerger>> {
     schema.validate_dropped_columns()?;
     if keys.is_empty() {
         return Ok(None);
@@ -191,7 +208,7 @@ pub fn build_single_partition_merger(
         // seek/open, so a disconnected point read does no further per-SSTable work.
         scan_cancel.check()?;
 
-        match probe_path(path, keys, schema, scan_cancel.clone())? {
+        match probe_path(path, keys, schema, udt_registry, scan_cancel.clone())? {
             PathProbe::Empty => {
                 // Pruned / absent for every key. No run.
             }
@@ -233,7 +250,7 @@ pub fn build_single_partition_merger(
                     path,
                     run_index,
                     schema,
-                    None,
+                    udt_registry.cloned(),
                     scan_cancel.clone(),
                 )?;
                 runs.push(Box::new(SinglePartitionFilterRun {
@@ -390,17 +407,24 @@ fn probe_path(
     path: &Path,
     keys: &[Vec<u8>],
     schema: &TableSchema,
+    udt_registry: Option<&UdtRegistry>,
     scan_cancel: ScanCancel,
 ) -> Result<PathProbe> {
     let path = path.to_path_buf();
     let schema = schema.clone();
     let keys: Vec<Vec<u8>> = keys.to_vec();
+    let udt_registry = udt_registry.cloned();
     block_on_async(async move {
         let mut config = Config::default();
         config.storage.use_mmap = false;
         config.storage.disk_access_mode = DiskAccessMode::Buffered;
         let platform = Arc::new(Platform::new(&config).await?);
-        let reader = SSTableReader::open(&path, &config, platform).await?;
+        let mut reader = SSTableReader::open(&path, &config, platform).await?;
+        // Issue #2349: decode a `frozen<UDT>`-in-collection cell structurally on the
+        // point-read seek path too, matching the full-scan cold reader.
+        if let Some(registry) = udt_registry {
+            reader.set_udt_registry(registry);
+        }
         probe_reader_async(&reader, &keys, &schema, &scan_cancel).await
     })
 }
@@ -432,6 +456,7 @@ fn probe_path(
     _path: &Path,
     _keys: &[Vec<u8>],
     _schema: &TableSchema,
+    _udt_registry: Option<&UdtRegistry>,
     _scan_cancel: ScanCancel,
 ) -> Result<PathProbe> {
     Ok(PathProbe::NeedsScan)
