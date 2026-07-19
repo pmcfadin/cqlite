@@ -155,22 +155,15 @@ impl SSTableReader {
         &self,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<super::super::compaction_row::CompactionRow>> {
-        // Issue #2372: BTI (`da`) Data.db uses the SAME chunk-compressed V5 row
-        // layout as nb (which is exactly why `bti_scan_with_metadata` stitches +
-        // parses it with the V5 parser). But `requires_chunk_stitching()` gates on
-        // `is_nb_format()`, which EXCLUDES BTI, so without this branch a BTI table
-        // fell through to the block-by-block `parse_block_entries` fallback below,
-        // which errors ("Blob fallback not allowed for value parsing in modern
-        // format V5_0Bti") — the compaction/merge read path (Flight `do_get`) had
-        // no BTI branch, unlike `get_all_entries`/`scan`. Route BTI through the
-        // SAME stitch-and-parse-for-compaction path nb uses so per-row timestamps
-        // and complex-cell granularity are preserved (strictly better than the
-        // legacy collapsed-value fallback).
-        //
-        // Only the V5CompressedLegacy NB chunk-stitching path is otherwise
-        // supported here (that is the format the WriteEngine produces).  For other
-        // formats, fall back to iterate_all_partitions and attach timestamp 0 as a
-        // conservative default (LWW ordering then relies solely on run_index).
+        // Issue #2372: BTI (`da`) is chunk-compressed with the SAME V5 row layout
+        // as nb (why `bti_scan_with_metadata` stitches+parses it with the V5
+        // parser), but `requires_chunk_stitching()` gates on `is_nb_format()` and
+        // EXCLUDES BTI — so without this branch a BTI table fell into the
+        // block-by-block `parse_block_entries` fallback below and errored ("Blob
+        // fallback not allowed … V5_0Bti"): the compaction path had no BTI branch,
+        // unlike `get_all_entries`/`scan`. Route BTI through the SAME stitch path.
+        // Otherwise only V5CompressedLegacy NB is supported here; other formats
+        // fall back to iterate_all_partitions with timestamp 0 (LWW by run_index).
         if self.requires_chunk_stitching() || self.bti_partitions_db.is_some() {
             // We need schema; retrieve it once.
             // `schema` is Option<&TableSchema>; clone it into an owned value so we
@@ -596,15 +589,11 @@ impl SSTableReader {
         // a row-level `LIMIT` (see `stream_all_partitions_cancellable`'s doc) —
         // `LIMIT` is enforced purely downstream via the consumer's
         // post-reconciliation break + cancel-aware Drop teardown. Issue #2346:
-        // the PER-CALL `scan_cancel` governs the whole walk.
-        //
-        // Issue #2372: BTI (`da`) is EXCLUDED from this non-stitch branch even
-        // though `requires_chunk_stitching()` is false for it — a BTI Data.db is
-        // chunk-compressed with the same V5 row layout as nb, and the non-stitch
-        // path's `stream_all_partitions_cancellable` fallback (`sequential_scan`)
-        // has no BTI branch, so it would hit the no-schema `parse_block_entries`
-        // fallback and error. The stitch+parse drain path below decompresses and
-        // parses BTI correctly (the same machinery `bti_scan_with_metadata` uses).
+        // the PER-CALL `scan_cancel` governs the whole walk. Issue #2372: BTI
+        // (`da`) is EXCLUDED here even though `requires_chunk_stitching()` is false
+        // for it — the non-stitch fallback (`sequential_scan`) has no BTI branch
+        // and would hit the no-schema `parse_block_entries` error; the stitch+parse
+        // drain below decodes BTI correctly (as `bti_scan_with_metadata` does).
         if !self.requires_chunk_stitching() && self.bti_partitions_db.is_none() {
             self.stream_all_partitions_cancellable(scan_cancel, |(key, value)| {
                 let row =
