@@ -48,7 +48,6 @@
 //! (precedent: `cqlite-core/tests/issue_953_multichunk_cell_seek.rs`).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 use arrow::compute::concat_batches;
@@ -61,6 +60,8 @@ use cqlite_core::types::Value;
 use cqlite_flight::cancel::CancelFlag;
 use cqlite_flight::filter::{FilterExpr, ScanSpec};
 use cqlite_flight::producer::{DirSource, MergeProducer, SstableSource};
+
+mod fixture_support;
 
 /// Serializes the two tests in this file so the process-global
 /// `work_counters::chunks_decompressed()` window one test resets+reads is
@@ -187,19 +188,14 @@ fn point_path_chunks_decompressed(
 fn dual_path_parity_compressed_corpus_large_single_pk_table() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
-    let Some(root) = std::env::var_os("CQLITE_DATASETS_ROOT") else {
-        eprintln!("CQLITE_DATASETS_ROOT unset — skipping real-corpus compressed-seek parity");
+    let Some(table_dir) = fixture_support::table_dir_if_present(
+        "test_wide_rows",
+        "large_blob_table-6d81d000a25111f0a3fef1a551383fb9",
+        "nb-1-big",
+    ) else {
+        eprintln!("large_blob_table Data.db absent — skipping (run fetch-datasets.sh)");
         return;
     };
-    let table_dir = PathBuf::from(&root)
-        .join("sstables")
-        .join("test_wide_rows")
-        .join("large_blob_table-6d81d000a25111f0a3fef1a551383fb9");
-    let data_db = table_dir.join("nb-1-big-Data.db");
-    if !data_db.is_file() {
-        eprintln!("real fixture Data.db binary absent (run fetch-datasets.sh) — skipping");
-        return;
-    }
     assert!(
         table_dir.join("nb-1-big-CompressionInfo.db").is_file(),
         "large_blob_table must be a genuinely compressed nb fixture for this test to be meaningful"
@@ -279,19 +275,14 @@ fn dual_path_parity_compressed_corpus_large_single_pk_table() {
 fn dual_path_parity_in_under_and_with_residual_large_single_pk_table() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
-    let Some(root) = std::env::var_os("CQLITE_DATASETS_ROOT") else {
-        eprintln!("CQLITE_DATASETS_ROOT unset — skipping real-corpus IN-under-And parity");
+    let Some(table_dir) = fixture_support::table_dir_if_present(
+        "test_wide_rows",
+        "large_blob_table-6d81d000a25111f0a3fef1a551383fb9",
+        "nb-1-big",
+    ) else {
+        eprintln!("large_blob_table Data.db absent — skipping (run fetch-datasets.sh)");
         return;
     };
-    let table_dir = PathBuf::from(&root)
-        .join("sstables")
-        .join("test_wide_rows")
-        .join("large_blob_table-6d81d000a25111f0a3fef1a551383fb9");
-    let data_db = table_dir.join("nb-1-big-Data.db");
-    if !data_db.is_file() {
-        eprintln!("real fixture Data.db binary absent (run fetch-datasets.sh) — skipping");
-        return;
-    }
     assert!(
         table_dir.join("nb-1-big-CompressionInfo.db").is_file(),
         "large_blob_table must be a genuinely compressed nb fixture for this test to be meaningful"
@@ -381,19 +372,14 @@ fn dual_path_parity_in_under_and_with_residual_large_single_pk_table() {
 fn dual_path_parity_compressed_corpus_composite_pk_table() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
-    let Some(root) = std::env::var_os("CQLITE_DATASETS_ROOT") else {
-        eprintln!("CQLITE_DATASETS_ROOT unset — skipping real-corpus compressed-seek parity");
+    let Some(table_dir) = fixture_support::table_dir_if_present(
+        "test_timeseries",
+        "app_metrics-6c87b890a25111f0a3fef1a551383fb9",
+        "nb-1-big",
+    ) else {
+        eprintln!("app_metrics Data.db absent — skipping (run fetch-datasets.sh)");
         return;
     };
-    let table_dir = PathBuf::from(&root)
-        .join("sstables")
-        .join("test_timeseries")
-        .join("app_metrics-6c87b890a25111f0a3fef1a551383fb9");
-    let data_db = table_dir.join("nb-1-big-Data.db");
-    if !data_db.is_file() {
-        eprintln!("real fixture Data.db binary absent (run fetch-datasets.sh) — skipping");
-        return;
-    }
     assert!(
         table_dir.join("nb-1-big-CompressionInfo.db").is_file(),
         "app_metrics must be a genuinely compressed nb fixture for this test to be meaningful"

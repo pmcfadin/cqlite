@@ -37,6 +37,8 @@ use cqlite_flight::cancel::CancelFlag;
 use cqlite_flight::filter::{FilterExpr, ScanSpec};
 use cqlite_flight::producer::{DirSource, MergeProducer, SstableSource};
 
+mod fixture_support;
+
 /// Raw 16 bytes of a hyphenated UUID string.
 fn uuid_bytes(s: &str) -> [u8; 16] {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
@@ -249,16 +251,11 @@ fn assert_full_collections(combined: &RecordBatch, target: &[u8; 16], path: &str
 }
 
 fn table_dir() -> Option<PathBuf> {
-    let root = std::env::var_os("CQLITE_DATASETS_ROOT")?;
-    let dir = PathBuf::from(&root)
-        .join("sstables")
-        .join("test_collections")
-        .join("collection_table-6b8c8fb0a25111f0a3fef1a551383fb9");
-    if dir.join("nb-1-big-Data.db").is_file() {
-        Some(dir)
-    } else {
-        None
-    }
+    fixture_support::table_dir_if_present(
+        "test_collections",
+        "collection_table-6b8c8fb0a25111f0a3fef1a551383fb9",
+        "nb-1-big",
+    )
 }
 
 // The multi-element target partition (from the JSONL golden).
