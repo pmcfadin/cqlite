@@ -60,6 +60,11 @@ const BOUNDED_KEYS: &[&str] = &[
     catalog::attr::RPC_STATUS,
     catalog::attr::ACCESS_PATH,
     catalog::attr::SSTABLE_FORMAT,
+    // Issue #2681: the fine-grained do_get abort taxonomy attribute is a bounded
+    // (closed-value-set) metric dimension, so it belongs on the allowlist.
+    catalog::attr::ERROR_CATEGORY,
+    catalog::attr::SUBSYSTEM,
+    catalog::attr::FLIGHT_ABORT_REASON,
 ];
 
 fn simple_schema() -> TableSchema {

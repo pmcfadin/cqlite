@@ -31,6 +31,11 @@ use tonic::Request;
 /// Subsystem label for [`obs::record_error`] from the Flight service.
 pub const SUBSYSTEM: &str = "flight";
 
+// The `do_get` abort taxonomy (issue #2681) lives in a sibling module
+// (campsite rule, epic #1116) but is re-exported here so call sites keep the
+// stable `crate::obs::{AbortReason, AbortContext, record_do_get_abort}` path.
+pub use crate::obs_abort::{record_do_get_abort, AbortContext, AbortReason};
+
 /// Bounded `cqlite.rpc.status` value for a successful RPC.
 const STATUS_OK: &str = "ok";
 /// Bounded `cqlite.rpc.status` value for a failed RPC.

@@ -388,7 +388,7 @@ pub(crate) async fn build_aggregate_response(
     metrics: RpcMetrics,
     cancel: CancelFlag,
     timer: crate::obs::PhaseTimer,
-) -> Result<DoGetStream, (Status, RpcMetrics)> {
+) -> Result<DoGetStream, (Status, RpcMetrics, crate::obs::AbortReason)> {
     // The aggregate route materializes its bounded per-group output — it never
     // enters a client `stream` phase (issue #2162). The caller transitioned
     // `resolve` → `merge_setup` before this call, so `timer` measures the merger
@@ -411,11 +411,18 @@ pub(crate) async fn build_aggregate_response(
 
     let batches = match result {
         Ok(Ok(batches)) => batches,
-        Ok(Err(e)) => return Err((Status::from(e), metrics)),
+        // Issue #2681: stamp the abort reason from the typed producer error
+        // VARIANT (a cooperative cancel → client_cancel; a genuine merge/convert/
+        // discovery fault → internal), never inferred from the gRPC code.
+        Ok(Err(e)) => {
+            let reason = crate::service::producer_error_abort_reason(&e);
+            return Err((Status::from(e), metrics, reason));
+        }
         Err(e) => {
             return Err((
                 Status::internal(format!("aggregate merge task panicked: {e}")),
                 metrics,
+                crate::obs::AbortReason::Internal,
             ))
         }
     };
@@ -483,7 +490,13 @@ fn flight_error_to_status(e: FlightError, probe: &StreamProbe) -> Status {
 /// server-side (via [`crate::obs::record_status_error`]'s error log + error
 /// signal) AND delivered as a proper gRPC error status.
 fn record_encoder_error(status: Status, probe: &StreamProbe) -> Status {
-    crate::obs::record_status_error(&status);
+    // Issue #2681: an encoder-stage egress failure (Arrow IPC framing / encode /
+    // send) is a genuine internal fault — stamp `internal` at the site.
+    crate::obs::record_do_get_abort(
+        &status,
+        crate::obs::AbortReason::Internal,
+        crate::obs::AbortContext::empty(),
+    );
     probe.errors_recorded.fetch_add(1, Ordering::Relaxed);
     status
 }
@@ -628,11 +641,19 @@ impl Stream for MeteredDoGetStream {
                 this.errored = true;
                 this.disarm_guard();
                 this.finalize(false);
+                // Issue #2681: stamp the abort reason from the typed producer
+                // error VARIANT (a cooperative cancel → client_cancel; a
+                // merge/convert/predicate/discovery/panic fault → internal),
+                // never inferred from the resulting gRPC code. The high-cardinality
+                // ticket/split identity is not threaded into the merge task, so the
+                // event carries an empty context here (the metric attribution — the
+                // load-bearing signal — is fully stamped).
+                let reason = crate::service::producer_error_abort_reason(&err);
                 let status = Status::from(err);
                 // Roborev B2: pre-change `do_get` ran `record_status_error` for
                 // EVERY error (service.rs `finish`); a mid-stream error must hit the
                 // same error-observability path, not just the per-RPC OK/error flag.
-                crate::obs::record_status_error(&status);
+                crate::obs::record_do_get_abort(&status, reason, crate::obs::AbortContext::empty());
                 this.probe.errors_recorded.fetch_add(1, Ordering::Relaxed);
                 Poll::Ready(Some(Err(FlightError::ExternalError(Box::new(status)))))
             }
@@ -672,7 +693,14 @@ impl Drop for MeteredDoGetStream {
         if self.metrics.is_some() {
             let status =
                 Status::aborted("do_get stream dropped before completion (client disconnected)");
-            crate::obs::record_status_error(&status);
+            // Issue #2681: a stream dropped before completion IS a client
+            // disconnect — stamp `client_cancel` at the site (a benign, expected
+            // terminal state), never inferred from the `Aborted` code.
+            crate::obs::record_do_get_abort(
+                &status,
+                crate::obs::AbortReason::ClientCancel,
+                crate::obs::AbortContext::empty(),
+            );
             self.probe.errors_recorded.fetch_add(1, Ordering::Relaxed);
         }
 

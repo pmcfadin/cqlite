@@ -1126,7 +1126,7 @@ fn aggregate_path_matches_collect_content() {
         .await
         {
             Ok(stream) => stream,
-            Err((status, _metrics)) => panic!("aggregate response failed: {status}"),
+            Err((status, _metrics, _reason)) => panic!("aggregate response failed: {status}"),
         };
         drain_stream(stream).await
     });

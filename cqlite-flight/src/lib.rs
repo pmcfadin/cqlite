@@ -13,6 +13,7 @@ pub mod agg;
 pub mod cancel;
 pub mod filter;
 pub mod obs;
+pub mod obs_abort;
 pub mod pathsafe;
 pub mod point_read;
 pub mod producer;

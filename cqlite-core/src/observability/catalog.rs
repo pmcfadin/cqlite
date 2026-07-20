@@ -120,6 +120,18 @@ pub mod attr {
     /// `"unchanged"`, `"rebuilt_delta"`, `"fail_closed_retained"` — a `&'static str`
     /// from a fixed slot table, never a ticket, key, or path value.
     pub const WARM_REFRESH_OUTCOME: &str = "cqlite.warm.refresh_outcome";
+    /// Fine-grained Flight `do_get` abort reason (issue #2681). Bounded to the
+    /// closed set `"superseded_split"`, `"client_cancel"`, `"admission_shed"`,
+    /// `"snapshot_retired"`, `"internal"`, `"ticket_invalid"` — a `&'static str`
+    /// STAMPED at the abort construction site (never inferred from the gRPC code
+    /// or the error message text, no-heuristics #28). Attached ONLY to
+    /// [`super::ERRORS_TOTAL`] for `cqlite.subsystem = "flight"`, so a benign
+    /// abort (a torn-down split, a client hang-up, an admission shed) is
+    /// distinguishable in-field from a genuine internal fault that all previously
+    /// collapsed into the coarse `cqlite.error.category = "other"` bucket. The
+    /// high-cardinality ticket/split identity + snapshot generation live on the
+    /// abort log/trace event only, NEVER on this or any metric label.
+    pub const FLIGHT_ABORT_REASON: &str = "cqlite.flight.abort_reason";
 }
 
 /// `cqlite.read.rows` — counter `{row}`.
@@ -939,6 +951,7 @@ mod tests {
             attr::RPC_PHASE,
             attr::FALLBACK_REASON,
             attr::WARM_REFRESH_OUTCOME,
+            attr::FLIGHT_ABORT_REASON,
         ] {
             assert!(key.starts_with("cqlite."), "attr {key} must be namespaced");
         }

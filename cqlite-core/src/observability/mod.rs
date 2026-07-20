@@ -242,6 +242,41 @@ pub fn record_error(err: &Error, subsystem: &'static str) {
     }
 }
 
+/// Record an error into [`catalog::ERRORS_TOTAL`] with EXTRA bounded attributes
+/// beyond the canonical `{cqlite.error.category, cqlite.subsystem}` pair.
+///
+/// Identical to [`record_error`] but appends the caller-supplied `extra`
+/// attributes to the same single counter increment (and still marks the active
+/// span errored with the derived category). The extra keys MUST be bounded
+/// (closed value sets), e.g. the Flight `do_get` abort taxonomy's
+/// `cqlite.flight.abort_reason` (issue #2681) — never a raw message, ticket, or
+/// key. No-op when the `observability` feature is off.
+#[inline]
+pub fn record_error_with_attrs(err: &Error, subsystem: &'static str, extra: &[Attr]) {
+    #[cfg(feature = "observability")]
+    {
+        if otel::metrics_active() {
+            let mut attrs = to_key_values(extra);
+            attrs.push(opentelemetry::KeyValue::new(
+                catalog::attr::ERROR_CATEGORY,
+                err.obs_category().as_str(),
+            ));
+            attrs.push(opentelemetry::KeyValue::new(
+                catalog::attr::SUBSYSTEM,
+                subsystem,
+            ));
+            otel::add_counter(catalog::ERRORS_TOTAL, 1, &attrs);
+            otel::mark_span_error(err.obs_category());
+        } else {
+            let _ = (err, subsystem, extra);
+        }
+    }
+    #[cfg(not(feature = "observability"))]
+    {
+        let _ = (err, subsystem, extra);
+    }
+}
+
 /// Convenience: run a `Result`-returning closure and [`record_error`] on the
 /// `Err` path, returning the result unchanged. Lets call sites instrument an
 /// operation without restructuring their error handling.

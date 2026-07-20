@@ -37,7 +37,7 @@ use cqlite_core::storage::sstable::reader::SSTableReader;
 use crate::admission::Admission;
 use crate::cancel::CancelFlag;
 use crate::filter::{FilterError, ScanSpec};
-use crate::obs::{rpc_span, RpcMetrics};
+use crate::obs::{rpc_span, AbortContext, AbortReason, RpcMetrics};
 use crate::producer::{DirSource, MergeProducer, ProducerError};
 use crate::stats::{gather_table_stats, StatsError, TableStatsRequest, TABLE_STATS_ACTION};
 use crate::ticket::{FlightTicket, TicketError};
@@ -98,9 +98,86 @@ fn warm_error_to_status(e: WarmError) -> Status {
             Status::not_found(msg)
         }
         WarmError::Probe { .. }
-        | WarmError::ProbeEntry { .. }
+        | WarmError::ProbeEntryContainment { .. }
+        | WarmError::ProbeEntrySuperseded { .. }
         | WarmError::Open { .. }
         | WarmError::Runtime(_) => Status::internal(msg),
+    }
+}
+
+/// The authoritative, site-stamped [`AbortReason`] for a warm-handle failure
+/// (issue #2681), classified from the typed `WarmError` VARIANT — never inferred
+/// from the gRPC code or message text (no-heuristics #28).
+///
+/// - [`WarmError::Cancelled`] is a cooperative cancel → `client_cancel`.
+/// - [`WarmError::Probe`] with `NotFound` means the resolved snapshot/live dir
+///   was absent at probe time — the #2452 "snapshot retired under a streaming
+///   reader" field case → `snapshot_retired`. RESIDUAL (documented, not guessed):
+///   a table dir that never existed is indistinguishable from a torn-down one at
+///   this layer and also lands here; both are dir-absent-at-resolve, and the
+///   more specific reason we DO know is that the resolved generation is gone.
+/// - [`WarmError::ProbeEntrySuperseded`] means a specific `*-Data.db` entry
+///   vanished / could not be `stat`ed while the dir itself listed — a single
+///   split superseded/torn down under the reader → `superseded_split` (benign).
+/// - [`WarmError::ProbeEntryContainment`] is the issue #1430 containment backstop:
+///   a directory entry whose resolved path ESCAPED the table dir (a
+///   symlink/path-escape attempt). It is SECURITY-relevant → `internal` (ERROR),
+///   never demoted to the benign `superseded_split` bucket — preserving the exact
+///   signal the #1430 backstop exists to surface.
+/// - [`WarmError::Probe`] with a non-`NotFound` I/O error, [`WarmError::Open`]
+///   (e.g. a corrupt `Statistics.db`), and [`WarmError::Runtime`] are genuine
+///   faults → `internal`.
+fn warm_error_abort_reason(e: &WarmError) -> AbortReason {
+    match e {
+        WarmError::Cancelled => AbortReason::ClientCancel,
+        WarmError::Probe { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            AbortReason::SnapshotRetired
+        }
+        WarmError::ProbeEntrySuperseded { .. } => AbortReason::SupersededSplit,
+        WarmError::ProbeEntryContainment { .. }
+        | WarmError::Probe { .. }
+        | WarmError::Open { .. }
+        | WarmError::Runtime(_) => AbortReason::Internal,
+    }
+}
+
+/// The authoritative, site-stamped [`AbortReason`] for a producer failure
+/// (issue #2681), classified from the typed `ProducerError` VARIANT — never
+/// inferred from the gRPC code or message text (no-heuristics #28).
+///
+/// - [`ProducerError::Cancelled`] is a cooperative cancel (client disconnected
+///   mid-setup/stream) → `client_cancel`.
+/// - [`ProducerError::InvalidColumnType`], [`ProducerError::Aggregation`], and
+///   [`ProducerError::UnsafePath`] are rejected ticket-derived input (a bad DDL
+///   column type, an invalid aggregation spec, an escaping path) → `ticket_invalid`.
+/// - [`ProducerError::Merge`], [`ProducerError::Convert`],
+///   [`ProducerError::Predicate`], [`ProducerError::Discovery`], and
+///   [`ProducerError::Panicked`] are genuine faults → `internal`.
+pub(crate) fn producer_error_abort_reason(e: &ProducerError) -> AbortReason {
+    match e {
+        ProducerError::Cancelled => AbortReason::ClientCancel,
+        ProducerError::InvalidColumnType { .. }
+        | ProducerError::Aggregation(_)
+        | ProducerError::UnsafePath { .. } => AbortReason::TicketInvalid,
+        ProducerError::Merge(_)
+        | ProducerError::Convert(_)
+        | ProducerError::Predicate(_)
+        | ProducerError::Discovery { .. }
+        | ProducerError::Panicked { .. } => AbortReason::Internal,
+    }
+}
+
+/// The bounded ticket/split identity string for the abort log/trace event
+/// (issue #2681): `keyspace/table[/snapshot]`. Carried on the event ONLY, never
+/// on a metric label — the keyspace/table are DDL-derived and low-cardinality in
+/// practice, but a per-query snapshot name can vary, so this string is
+/// deliberately kept off `cqlite.errors.total`.
+fn ticket_identity(ticket: &FlightTicket) -> String {
+    match ticket.snapshot.as_deref() {
+        Some(snap) if !snap.is_empty() => {
+            format!("{}/{}/{}", ticket.keyspace, ticket.table, snap)
+        }
+        _ => format!("{}/{}", ticket.keyspace, ticket.table),
     }
 }
 
@@ -149,6 +226,19 @@ struct DoGetSetup {
     producer: MergeProducer,
     schema_ref: Arc<ArrowSchema>,
     input: DoGetInput,
+}
+
+/// A `do_get` setup-phase abort carrying its authoritative, site-stamped
+/// classification (issue #2681). Returned by [`CqliteFlightService::do_get_inner`]
+/// so the outer `do_get` handler records `cqlite.errors.total` with the correct
+/// `cqlite.flight.abort_reason` and logs the abort event at the reason-appropriate
+/// level — the reason is set at the site that raised the error, never inferred
+/// from `status.code()`/`status.message()` (no-heuristics #28).
+struct DoGetAbort {
+    status: Status,
+    metrics: RpcMetrics,
+    reason: AbortReason,
+    cx: AbortContext,
 }
 
 /// Cross-request setup caches (spec Requirement 8): the schema PARSE is the one
@@ -405,8 +495,19 @@ impl FlightService for CqliteFlightService {
         async move {
             match self.do_get_inner(request, metrics).await {
                 Ok(response) => Ok(response),
-                Err((status, metrics)) => {
-                    crate::obs::record_status_error(&status);
+                Err(abort) => {
+                    let DoGetAbort {
+                        status,
+                        metrics,
+                        reason,
+                        cx,
+                    } = abort;
+                    // Issue #2681: record the setup-phase abort through the
+                    // reason-carrying hook so `cqlite.errors.total` carries the
+                    // authoritative, site-stamped `cqlite.flight.abort_reason` and
+                    // the abort event logs at the reason-appropriate level — never
+                    // inferred from the gRPC code (no-heuristics #28).
+                    crate::obs::record_do_get_abort(&status, reason, cx);
                     drop(metrics);
                     Err(status)
                 }
@@ -579,7 +680,7 @@ impl CqliteFlightService {
         &self,
         request: Request<Ticket>,
         metrics: RpcMetrics,
-    ) -> Result<Response<<Self as FlightService>::DoGetStream>, (Status, RpcMetrics)> {
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, DoGetAbort> {
         // Cancellation (issue #1476, roborev F1): pre-change, the single merge
         // `spawn_blocking` was covered by a `CancelGuard` held across its whole
         // `.await`, so a client disconnect during that call stopped the work. The
@@ -616,8 +717,20 @@ impl CqliteFlightService {
         // ever transitioning, recording the `validate` phase duration it died in.
         let ticket = match self.validate_do_get_ticket(request) {
             Ok(t) => t,
-            Err(status) => return Err((status, metrics)),
+            // A malformed/rejected ticket is a client fault, stamped at the site
+            // (issue #2681) — not inferred from the `InvalidArgument` code.
+            Err(status) => {
+                return Err(DoGetAbort {
+                    status,
+                    metrics,
+                    reason: AbortReason::TicketInvalid,
+                    cx: AbortContext::empty(),
+                })
+            }
         };
+        // The ticket/split identity for the abort event (issue #2681) — bounded
+        // to keyspace/table[/snapshot], NEVER attached to a metric label.
+        let ticket_id = ticket_identity(&ticket);
         // Validated: close `validate` and enter `admission`. `cqlite.rpc.duration`
         // already includes admission wait in the RPC total, but the per-phase
         // breakdown is what field triage localizes latency with (e.g. #2398) —
@@ -640,7 +753,17 @@ impl CqliteFlightService {
         // disconnect/cancel all release it via one RAII drop.
         let permit = match self.admission.acquire().await {
             Ok(permit) => permit,
-            Err(status) => return Err((status, metrics)),
+            // A saturated admission ceiling sheds with `UNAVAILABLE` — stamped
+            // `admission_shed` at the site (issue #2681/#2420), a benign, expected
+            // shed under load, never a genuine fault.
+            Err(status) => {
+                return Err(DoGetAbort {
+                    status,
+                    metrics,
+                    reason: AbortReason::AdmissionShed,
+                    cx: AbortContext::with_ticket(ticket_id.clone()),
+                })
+            }
         };
         let cancel = CancelFlag::new();
         let mut setup_guard = cancel.drop_guard();
@@ -655,7 +778,21 @@ impl CqliteFlightService {
         // as a clean error BEFORE the stream opens.
         let setup = match self.do_get_resolve(ticket, &cancel).await {
             Ok(setup) => setup,
-            Err(status) => return Err((status, metrics)),
+            // The reason is stamped inside `do_get_resolve` from the typed
+            // producer/warm error VARIANT (issue #2681), never re-derived from the
+            // gRPC code here. `generation` is the SSTable generation resolved at
+            // the error's site, when known (spec Req 2) — attached to the abort
+            // EVENT only, never a metric label.
+            Err((status, reason, generation)) => {
+                let mut cx = AbortContext::with_ticket(ticket_id.clone());
+                cx.snapshot_generation = generation;
+                return Err(DoGetAbort {
+                    status,
+                    metrics,
+                    reason,
+                    cx,
+                });
+            }
         };
         setup_guard.disarm();
         // `resolve` done; enter `merge_setup` (opening SSTables + building the
@@ -671,10 +808,21 @@ impl CqliteFlightService {
             // Aggregate output is bounded (one row per group): keep materializing
             // and serve it as a stream, unchanged in content (issue #1476).
             DoGetInput::Aggregate(paths) => {
-                crate::streaming::build_aggregate_response(
+                match crate::streaming::build_aggregate_response(
                     producer, paths, schema_ref, metrics, cancel, timer,
                 )
-                .await?
+                .await
+                {
+                    Ok(stream) => stream,
+                    Err((status, metrics, reason)) => {
+                        return Err(DoGetAbort {
+                            status,
+                            metrics,
+                            reason,
+                            cx: AbortContext::with_ticket(ticket_id.clone()),
+                        })
+                    }
+                }
             }
             // Row/point path (issue #2310): drive the merge over the WARM,
             // already-open reader set. The merge runs on the blocking pool and
@@ -742,65 +890,110 @@ impl CqliteFlightService {
         &self,
         ticket: FlightTicket,
         cancel: &CancelFlag,
-    ) -> Result<DoGetSetup, Status> {
+    ) -> Result<DoGetSetup, (Status, AbortReason, Option<u64>)> {
         let svc = self.clone();
         let resolve_cancel = cancel.clone();
 
-        tokio::task::spawn_blocking(move || -> Result<DoGetSetup, Status> {
-            // Issue #2419 (WS2, roborev job 1733 fix 3): account this
-            // flight-managed blocking task on `cqlite.flight.blocking_tasks_in_use`
-            // for the whole closure — the guard is the FIRST act, mirroring the
-            // `streaming.rs` merge/aggregate sites, so the gauge reflects EVERY
-            // flight-managed blocking task (resolve included), not merge-only.
-            let _blocking_guard = crate::saturation::BlockingTaskGuard::enter();
-            let producer = svc.build_producer(&ticket)?;
-            let schema_ref = Arc::new(producer.arrow_schema()?);
-            // Spec Req 8: reuse a cached LIVE-mode resolution on a warm hit instead
-            // of re-running `DirSource::resolve` every request.
-            let dir = svc.resolve_dir(&ticket)?;
+        tokio::task::spawn_blocking(
+            move || -> Result<DoGetSetup, (Status, AbortReason, Option<u64>)> {
+                // Issue #2419 (WS2, roborev job 1733 fix 3): account this
+                // flight-managed blocking task on `cqlite.flight.blocking_tasks_in_use`
+                // for the whole closure — the guard is the FIRST act, mirroring the
+                // `streaming.rs` merge/aggregate sites, so the gauge reflects EVERY
+                // flight-managed blocking task (resolve included), not merge-only.
+                let _blocking_guard = crate::saturation::BlockingTaskGuard::enter();
+                // Producer/schema construction is ticket-derived input work (CQL DDL
+                // parse, predicate/projection/aggregation-spec lowering) — any failure
+                // is a `ticket_invalid` client fault, stamped at the site (issue #2681),
+                // never inferred from the resulting `InvalidArgument` code.
+                let producer = svc
+                    .build_producer(&ticket)
+                    .map_err(|s| (s, AbortReason::TicketInvalid, None))?;
+                // Arrow-schema construction can raise a genuine conversion fault; stamp
+                // from the typed producer error VARIANT.
+                let schema_ref = Arc::new(producer.arrow_schema().map_err(|e| {
+                    let reason = producer_error_abort_reason(&e);
+                    (Status::from(e), reason, None)
+                })?);
+                // Spec Req 8: reuse a cached LIVE-mode resolution on a warm hit instead
+                // of re-running `DirSource::resolve` every request. A resolve failure is
+                // an escaping-path (`UnsafePath`) ticket fault.
+                //
+                // DELIBERATE asymmetry (issue #2681): a ticket-derived `UnsafePath`
+                // rejected HERE at resolve time is bad client input → `ticket_invalid`
+                // (WARN, client fault). A symlink containment escape DISCOVERED later
+                // by the warm probe (`WarmError::ProbeEntryContainment`, see
+                // `warm_error_abort_reason`) is `internal` (ERROR) — the #1430 security
+                // backstop surfacing an on-disk escape. The split is intentional.
+                let dir = svc
+                    .resolve_dir(&ticket)
+                    .map_err(|s| (s, AbortReason::TicketInvalid, None))?;
 
-            // Aggregate route keeps the cold path (bounded per-group output, no
-            // per-request reader-open regression): resolve + token-prune paths.
-            // A cancellation surfaces as `ProducerError::Cancelled` → `aborted`.
-            if producer.is_aggregating() {
-                let source = DirSource::new(dir.clone());
-                let paths = producer.resolve_paths_cancellable(&source, &resolve_cancel)?;
-                return Ok(DoGetSetup {
+                // Aggregate route keeps the cold path (bounded per-group output, no
+                // per-request reader-open regression): resolve + token-prune paths.
+                // A cancellation surfaces as `ProducerError::Cancelled` → `aborted`;
+                // the reason is stamped from the typed error VARIANT (issue #2681).
+                if producer.is_aggregating() {
+                    let source = DirSource::new(dir.clone());
+                    let paths = producer
+                        .resolve_paths_cancellable(&source, &resolve_cancel)
+                        .map_err(|e| {
+                            let reason = producer_error_abort_reason(&e);
+                            (Status::from(e), reason, None)
+                        })?;
+                    return Ok(DoGetSetup {
+                        producer,
+                        schema_ref,
+                        input: DoGetInput::Aggregate(paths),
+                    });
+                }
+
+                // Row/point route (issue #2310): obtain the WARM reader set. The
+                // registry probes the generation set (authoritative listing /
+                // snapshot manifest fast path) and serves cached readers on an
+                // unchanged set (zero reader-open/parse), or fail-closed rebuilds
+                // only the delta. Cancellation is honored inside `warm_readers`.
+                let key = TableKey::new(&ticket.keyspace, &ticket.table);
+                let warm = svc
+                    .warm
+                    .warm_readers(
+                        &key,
+                        ddl_hash(&ticket.ddl),
+                        &producer.schema,
+                        // Issue #2349: open warm readers WITH the same resolved UDT
+                        // registry the producer carries, so a `frozen<UDT>`-in-collection
+                        // cell decodes structurally on the warm path exactly as on cold.
+                        producer.udt_registry.as_ref(),
+                        &dir,
+                        ticket.snapshot.as_deref(),
+                        &resolve_cancel,
+                    )
+                    // Issue #2681: stamp the abort reason from the typed `WarmError`
+                    // VARIANT — a torn-down/retired snapshot dir is a benign
+                    // teardown, distinguished from a genuine open/runtime fault — and
+                    // carry the SSTable generation resolved at the error's site (spec
+                    // Req 2), when the error names a specific `*-Data.db`.
+                    .map_err(|e| {
+                        let reason = warm_error_abort_reason(&e);
+                        let generation = e.resolved_generation();
+                        (warm_error_to_status(e), reason, generation)
+                    })?;
+                Ok(DoGetSetup {
                     producer,
                     schema_ref,
-                    input: DoGetInput::Aggregate(paths),
-                });
-            }
-
-            // Row/point route (issue #2310): obtain the WARM reader set. The
-            // registry probes the generation set (authoritative listing /
-            // snapshot manifest fast path) and serves cached readers on an
-            // unchanged set (zero reader-open/parse), or fail-closed rebuilds
-            // only the delta. Cancellation is honored inside `warm_readers`.
-            let key = TableKey::new(&ticket.keyspace, &ticket.table);
-            let warm = svc
-                .warm
-                .warm_readers(
-                    &key,
-                    ddl_hash(&ticket.ddl),
-                    &producer.schema,
-                    // Issue #2349: open warm readers WITH the same resolved UDT
-                    // registry the producer carries, so a `frozen<UDT>`-in-collection
-                    // cell decodes structurally on the warm path exactly as on cold.
-                    producer.udt_registry.as_ref(),
-                    &dir,
-                    ticket.snapshot.as_deref(),
-                    &resolve_cancel,
-                )
-                .map_err(warm_error_to_status)?;
-            Ok(DoGetSetup {
-                producer,
-                schema_ref,
-                input: DoGetInput::Rows(warm.readers),
-            })
-        })
+                    input: DoGetInput::Rows(warm.readers),
+                })
+            },
+        )
         .await
-        .map_err(|e| Status::internal(format!("do_get setup panicked: {e}")))?
+        // A panic in the setup blocking task is a genuine internal fault.
+        .map_err(|e| {
+            (
+                Status::internal(format!("do_get setup panicked: {e}")),
+                AbortReason::Internal,
+                None,
+            )
+        })?
     }
 
     /// Body of [`FlightService::do_action`], run inside the RPC span (issue #944).
@@ -1383,7 +1576,11 @@ mod tests {
                 Err(e) => e,
             }
         });
-        assert_eq!(err.code(), tonic::Code::Aborted, "got: {err:?}");
+        let (status, reason, _generation) = err;
+        assert_eq!(status.code(), tonic::Code::Aborted, "got: {status:?}");
+        // Issue #2681: a cooperative cancel is stamped `client_cancel` from the
+        // typed error VARIANT, not inferred from the `Aborted` code.
+        assert_eq!(reason, AbortReason::ClientCancel);
         let m = svc.warm_metrics();
         assert_eq!(m.reader_opens, 0, "a cancelled request opens zero readers");
         assert_eq!(m.misses, 0, "and does no build");
@@ -1523,16 +1720,18 @@ mod tests {
                 .expect("ticket validates");
             svc.do_get_resolve(t, &cancel).await
         });
-        let err = match result {
+        let (status, reason, _generation) = match result {
             Ok(_) => panic!("a cancelled setup must not resolve/return paths"),
             Err(e) => e,
         };
         assert_eq!(
-            err.code(),
+            status.code(),
             tonic::Code::Aborted,
             "cancellation must surface as Aborted (ProducerError::Cancelled → Status::aborted), \
-             got: {err:?}"
+             got: {status:?}"
         );
+        // Issue #2681: stamped `client_cancel` from the typed error VARIANT.
+        assert_eq!(reason, AbortReason::ClientCancel);
     }
 
     /// Baseline for the test above: the SAME token-range ticket, WITHOUT
