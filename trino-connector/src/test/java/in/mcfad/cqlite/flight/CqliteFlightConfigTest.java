@@ -42,6 +42,20 @@ class CqliteFlightConfigTest {
                 config.snapshotRetireGraceMillis());
         assertEquals(CqliteFlightConfig.DEFAULT_SNAPSHOT_RETIRE_GRACE_NANOS,
                 config.snapshotRetireGraceNanos());
+        // Plan-time split pruning defaults ON (issue #2679).
+        assertEquals(CqliteFlightConfig.DEFAULT_SPLIT_PRUNING_ENABLED, config.splitPruningEnabled());
+    }
+
+    @Test
+    void parsesSplitPruningToggle() {
+        Map<String, String> off = base();
+        off.put("cqlite.split-pruning-enabled", "false");
+        assertEquals(false, CqliteFlightConfig.fromMap(off).splitPruningEnabled(),
+                "cqlite.split-pruning-enabled=false forces the unpruned baseline (issue #2679)");
+
+        Map<String, String> on = base();
+        on.put("cqlite.split-pruning-enabled", "true");
+        assertEquals(true, CqliteFlightConfig.fromMap(on).splitPruningEnabled());
     }
 
     @Test
