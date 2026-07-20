@@ -124,12 +124,25 @@ pub fn decode_mutation(body: &[u8], schemas: &SchemaSet) -> Result<Mutation> {
     let num_updates = c.uvint()?;
     let mut updates = Vec::with_capacity(num_updates.min(1024) as usize);
     for _ in 0..num_updates {
-        updates.push(decode_partition_update(&mut c, schemas)?);
+        // Each update is decoded either fully (cursor left at the next update) or
+        // partially (structural fields only — no schema, or an unmodeled
+        // construct). A partial decode cannot locate the following update's
+        // offset without the schema, so we stop the update loop and return what
+        // we have. The record's frame CRC already proved the bytes are intact;
+        // an under-reported batch is honest, not corruption.
+        let (update, consumed_fully) = decode_partition_update(&mut c, schemas)?;
+        updates.push(update);
+        if !consumed_fully {
+            break;
+        }
     }
     Ok(Mutation { updates })
 }
 
-fn decode_partition_update(c: &mut Cursor<'_>, schemas: &SchemaSet) -> Result<PartitionUpdate> {
+fn decode_partition_update(
+    c: &mut Cursor<'_>,
+    schemas: &SchemaSet,
+) -> Result<(PartitionUpdate, bool)> {
     let table_id = c.take_array16()?;
     let pk_len = c.uvint()? as usize;
     let partition_key = c.take(pk_len)?.to_vec();
@@ -145,9 +158,10 @@ fn decode_partition_update(c: &mut Cursor<'_>, schemas: &SchemaSet) -> Result<Pa
     };
 
     if iter_flags & ITER_IS_EMPTY != 0 {
-        // Empty partition (e.g. a partition-only delete carrier). Nothing more.
+        // Empty partition (e.g. a partition-only delete carrier). The update body
+        // is exactly tableId + pk + flags — fully consumed.
         update.rows_decoded = true;
-        return Ok(update);
+        return Ok((update, true));
     }
 
     // EncodingStats: minTimestamp, minLocalDeletionTime, minTTL (all uvints).
@@ -165,8 +179,9 @@ fn decode_partition_update(c: &mut Cursor<'_>, schemas: &SchemaSet) -> Result<Pa
     update.has_partition_deletion = iter_flags & ITER_HAS_PARTITION_DELETION != 0;
 
     // Constructs we do not fully model: bail structurally (honest, no guessing).
+    // The cursor is left mid-body, so this update is NOT fully consumed.
     if update.has_partition_deletion || has_static {
-        return Ok(update);
+        return Ok((update, false));
     }
 
     if iter_flags & ITER_HAS_ROW_ESTIMATE != 0 {
@@ -175,22 +190,24 @@ fn decode_partition_update(c: &mut Cursor<'_>, schemas: &SchemaSet) -> Result<Pa
 
     let schema = match schemas.get(&table_id) {
         Some(s) => s,
-        None => return Ok(update), // structural-only decode
+        None => return Ok((update, false)), // structural-only decode
     };
 
     match decode_rows(c, schema, &update.column_names) {
         Ok(rows) => {
             update.rows = rows;
             update.rows_decoded = true;
+            // decode_rows consumed through END_OF_PARTITION.
+            Ok((update, true))
         }
         Err(_) => {
             // A construct beyond this decoder's model was hit; keep the
             // structural fields and report rows as not decoded.
             update.rows.clear();
             update.rows_decoded = false;
+            Ok((update, false))
         }
     }
-    Ok(update)
 }
 
 /// A sentinel error used internally to bail out of the full row decode into the
@@ -359,14 +376,20 @@ impl<'a> Cursor<'a> {
     /// high bits count the number of *extra* bytes; the value is big-endian.
     fn uvint(&mut self) -> Result<u64> {
         let first = self.u8()?;
+        // `leading_ones()` on a u8 is 0..=8: the count of `1` continuation-marker
+        // bits, i.e. the number of *extra* value bytes that follow.
         let extra = first.leading_ones() as usize;
         if extra == 0 {
             return Ok(first as u64);
         }
-        if extra > 8 {
-            return Err(Error::CorruptCommitLogFrame(
-                "vint with more than 8 continuation bytes".to_string(),
-            ));
+        if extra == 8 {
+            // All value bits are in the 8 following bytes; the lead byte (0xFF)
+            // contributes none. Shifting a u8 by 8 would overflow, so special-case.
+            let mut val = 0u64;
+            for _ in 0..8 {
+                val = (val << 8) | self.u8()? as u64;
+            }
+            return Ok(val);
         }
         let mask = 0xffu8 >> extra;
         let mut val = (first & mask) as u64;
