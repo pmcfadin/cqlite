@@ -84,6 +84,7 @@ impl CompactionRow {
                     // A live `ScanRow::Row` never carries a coexisting row deletion
                     // (a row tombstone arrives as a `ScanRow::Marker`, handled below).
                     row_deletion: None,
+                    row_liveness: RowLiveness::default(),
                 }
             }
             // A row tombstone marker becomes a row tombstone.
@@ -114,6 +115,7 @@ impl CompactionRow {
                 }],
                 complex: Vec::new(),
                 row_deletion: None,
+                row_liveness: RowLiveness::default(),
             },
             // Any other marker (null row, cell tombstone, …) collapses to a single
             // `value` cell, exactly as the pre-#1334 fallback did.
@@ -127,6 +129,7 @@ impl CompactionRow {
                 }],
                 complex: Vec::new(),
                 row_deletion: None,
+                row_liveness: RowLiveness::default(),
             },
         };
         CompactionRow {
@@ -157,6 +160,61 @@ pub enum CompactionBound {
     Bottom,
     /// After all clustering keys (end of partition).
     Top,
+}
+
+/// Primary-key (row-marker) liveness surfaced on a live compaction row so a
+/// READ consumer can apply Cassandra's row-visibility rule (issue #2374/#2789).
+///
+/// A row is visible to a `SELECT` iff it has at least one live data cell OR a
+/// LIVE primary-key liveness marker (`HAS_TIMESTAMP`, whose TTL — if any — has
+/// not expired). Compaction (the WRITE path) does NOT consult this — it retains
+/// an expired marker within gc_grace for byte-parity — so this is carry-only for
+/// the read side (Flight `do_get` / cross-generation read merge), never a write
+/// decision. No-heuristics (#28): both fields come from the authoritative
+/// on-disk row header, never inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RowLiveness {
+    /// Whether the row carried a primary-key liveness marker (`HAS_TIMESTAMP` —
+    /// i.e. it was INSERTed, not created implicitly by a data-cell UPDATE).
+    pub has_marker: bool,
+    /// Marker expiry (epoch seconds) when the liveness marker carries a TTL
+    /// (`HAS_TTL`); `None` when the marker is live-forever (no TTL). Only
+    /// meaningful when `has_marker` is `true`. Reinterpreted UNSIGNED upstream
+    /// so a post-2038 expiry is not wrapped negative.
+    pub expires_at_seconds: Option<i64>,
+}
+
+impl RowLiveness {
+    /// `true` when the primary-key liveness marker is present AND still live at
+    /// `now_secs` (no TTL, or its expiry is strictly in the future). Matches
+    /// `Cell.isLive`: live iff `now < localExpirationTime`.
+    pub fn marker_live_at(&self, now_secs: i64) -> bool {
+        self.has_marker && self.expires_at_seconds.is_none_or(|s| s > now_secs)
+    }
+
+    /// Fold two markers into the reconciled row liveness (issue #2374): the row
+    /// is live if EITHER generation's marker is live, so a live-forever marker
+    /// wins over any TTL'd marker, and among TTL'd markers the LATEST expiry
+    /// wins. `has_marker` is the disjunction.
+    pub fn merge(self, other: RowLiveness) -> RowLiveness {
+        let expires_at_seconds = match (
+            self.has_marker,
+            other.has_marker,
+            self.expires_at_seconds,
+            other.expires_at_seconds,
+        ) {
+            // A live-forever marker (present, no TTL) subsumes any TTL'd marker.
+            (true, _, None, _) | (_, true, _, None) => None,
+            (true, true, Some(a), Some(b)) => Some(a.max(b)),
+            (true, false, a, _) => a,
+            (false, true, _, b) => b,
+            (false, false, _, _) => None,
+        };
+        RowLiveness {
+            has_marker: self.has_marker || other.has_marker,
+            expires_at_seconds,
+        }
+    }
 }
 
 /// Live-or-tombstone payload of a [`CompactionRow`].
@@ -232,6 +290,11 @@ pub enum CompactionRowData {
         /// deletion (no surviving cells) is a [`Self::Tombstone`], not a `Live`
         /// with this field set.
         row_deletion: Option<(i64, i32)>,
+        /// Primary-key (row-marker) liveness of this row (issue #2374/#2789),
+        /// carried so a READ consumer can hide a row whose only content is an
+        /// EXPIRED liveness marker plus already-tombstoned cells. Carry-only for
+        /// reads — the compaction WRITE path ignores it (byte-parity preserved).
+        row_liveness: RowLiveness,
     },
 }
 

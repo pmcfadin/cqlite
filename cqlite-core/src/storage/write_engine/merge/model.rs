@@ -84,6 +84,15 @@ pub struct MergeEntry {
     /// live rows in another, resurrecting the deleted partition. `None` for every
     /// non-carrier entry.
     pub partition_deletion: Option<(i64, i32)>,
+    /// Primary-key (row-marker) liveness of this entry's `(pk, ck)` row (issue
+    /// #2374/#2789), carried so a READ consumer (Flight `do_get` / cross-gen read
+    /// merge) can apply Cassandra's row-visibility rule: a row with no surviving
+    /// live DATA cell is visible only when its liveness marker is present AND
+    /// unexpired. Reconciliation folds it across the cluster (the latest-expiry /
+    /// live-forever marker wins). CARRY-ONLY for the WRITE path — compaction
+    /// never consults it, so output bytes are unchanged (defaults to an absent
+    /// marker on every carrier / write-built entry).
+    pub row_liveness: crate::storage::sstable::reader::compaction_row::RowLiveness,
 }
 
 /// Manual `Clone` (was `#[derive(Clone)]`) so the #1664 double-clone regression
@@ -106,6 +115,7 @@ impl Clone for MergeEntry {
             range_deletion: self.range_deletion.clone(),
             row_deletion: self.row_deletion,
             partition_deletion: self.partition_deletion,
+            row_liveness: self.row_liveness,
         }
     }
 }
@@ -135,7 +145,19 @@ impl MergeEntry {
             range_deletion: None,
             row_deletion: None,
             partition_deletion: None,
+            row_liveness: crate::storage::sstable::reader::compaction_row::RowLiveness::default(),
         }
+    }
+
+    /// Attach the primary-key (row-marker) liveness for the READ path (issue
+    /// #2374/#2789; carry-only, ignored by the write path).
+    #[must_use]
+    pub fn with_row_liveness(
+        mut self,
+        row_liveness: crate::storage::sstable::reader::compaction_row::RowLiveness,
+    ) -> Self {
+        self.row_liveness = row_liveness;
+        self
     }
 
     /// Attach complex-deletion markers (issue #886 substrate; carry-only).

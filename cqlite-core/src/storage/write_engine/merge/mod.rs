@@ -865,7 +865,7 @@ impl SSTableRowIteratorAdapter {
         // the partition's `None` bucket and mis-reconcile against the static row
         // and against other clustering-row tombstones.
         let clustering_key = Self::extract_clustering_key_from_compaction(&row_data, schema);
-        let (row_data, complex_deletions, row_deletion) =
+        let (row_data, complex_deletions, row_deletion, row_liveness) =
             Self::compaction_row_data_to_row_data(row_data, row_timestamp);
         let entry = MergeEntry::new(
             run_index,
@@ -873,7 +873,9 @@ impl SSTableRowIteratorAdapter {
             clustering_key,
             row_timestamp,
             row_data,
-        );
+        )
+        // Issue #2374/#2789: carry the row-marker liveness for the read path.
+        .with_row_liveness(row_liveness);
         let entry = if complex_deletions.is_empty() {
             entry
         } else {
@@ -1013,11 +1015,17 @@ impl SSTableRowIteratorAdapter {
     ///
     /// [`ComplexElement`]: crate::storage::sstable::reader::compaction_row::ComplexElement
     /// [`CellOperation::WriteComplexElement`]: crate::storage::write_engine::mutation::CellOperation::WriteComplexElement
+    #[allow(clippy::type_complexity)]
     fn compaction_row_data_to_row_data(
         row_data: crate::storage::sstable::reader::compaction_row::CompactionRowData,
         _row_timestamp: i64,
-    ) -> (RowData, Vec<ComplexDeletion>, Option<(i64, i32)>) {
-        use crate::storage::sstable::reader::compaction_row::CompactionRowData;
+    ) -> (
+        RowData,
+        Vec<ComplexDeletion>,
+        Option<(i64, i32)>,
+        crate::storage::sstable::reader::compaction_row::RowLiveness,
+    ) {
+        use crate::storage::sstable::reader::compaction_row::{CompactionRowData, RowLiveness};
 
         match row_data {
             CompactionRowData::Tombstone {
@@ -1034,6 +1042,7 @@ impl SSTableRowIteratorAdapter {
                 },
                 Vec::new(),
                 None,
+                RowLiveness::default(),
             ),
             CompactionRowData::Live {
                 simple,
@@ -1041,6 +1050,8 @@ impl SSTableRowIteratorAdapter {
                 // Issue #932: a coexisting row deletion surfaces here so the
                 // merge entry carries it alongside the live cells.
                 row_deletion,
+                // Issue #2374/#2789: primary-key liveness carried for the read path.
+                row_liveness,
             } => {
                 let element_count: usize = complex.iter().map(|c| c.elements.len()).sum();
                 let mut cells = Vec::with_capacity(simple.len() + element_count);
@@ -1109,20 +1120,31 @@ impl SSTableRowIteratorAdapter {
                     }
                 }
 
-                (RowData::Live { cells }, complex_deletions, row_deletion)
+                (
+                    RowData::Live { cells },
+                    complex_deletions,
+                    row_deletion,
+                    row_liveness,
+                )
             }
             // Issue #933: range markers are intercepted in `build_merge_entry`
             // (carrier entry with `range_deletion`); they never reach this
             // conversion. Map defensively to an empty live row.
-            CompactionRowData::RangeMarker { .. } => {
-                (RowData::Live { cells: Vec::new() }, Vec::new(), None)
-            }
+            CompactionRowData::RangeMarker { .. } => (
+                RowData::Live { cells: Vec::new() },
+                Vec::new(),
+                None,
+                RowLiveness::default(),
+            ),
             // Issue #1072: partition tombstones are intercepted in
             // `build_merge_entry` (carrier entry with `partition_deletion`); they
             // never reach this conversion. Map defensively to an empty live row.
-            CompactionRowData::PartitionDelete { .. } => {
-                (RowData::Live { cells: Vec::new() }, Vec::new(), None)
-            }
+            CompactionRowData::PartitionDelete { .. } => (
+                RowData::Live { cells: Vec::new() },
+                Vec::new(),
+                None,
+                RowLiveness::default(),
+            ),
         }
     }
 
@@ -2586,6 +2608,19 @@ impl KWayMerger {
     /// retained — which can never resurrect data in a partial compaction.
     pub fn with_purge_safe(mut self, purge_safe: bool) -> Self {
         self.purge_safe = purge_safe;
+        self
+    }
+
+    /// Set the read-time TTL evaluation instant (`now`, epoch seconds) for this
+    /// merge (issue #2374/#2789), enabling `expire_ttl_cells` on a READ merge
+    /// built through a `now`-less constructor (e.g. the warm
+    /// [`new_from_readers`](Self::new_from_readers) path). `gc_before_secs`
+    /// stays `None` so NO tombstone is gc-purged — a read reflects deletions, it
+    /// does not collect them. A compaction WRITE path threads `now` through its
+    /// constructor instead and never calls this.
+    #[must_use]
+    pub fn with_now_secs(mut self, now_secs: Option<i64>) -> Self {
+        self.now_secs = now_secs;
         self
     }
 
@@ -8696,9 +8731,10 @@ mod issue_899_per_element_merge {
                 ]),
             }],
             row_deletion: None,
+            row_liveness: Default::default(),
         };
 
-        let (row, complex_deletions, _row_deletion) =
+        let (row, complex_deletions, _row_deletion, _row_liveness) =
             SSTableRowIteratorAdapter::compaction_row_data_to_row_data(row_data, 999);
         assert!(complex_deletions.is_empty(), "no complex deletion present");
 
@@ -8739,9 +8775,10 @@ mod issue_899_per_element_merge {
                 collapsed_value: Value::Set(vec![Value::text("x".to_string())]),
             }],
             row_deletion: None,
+            row_liveness: Default::default(),
         };
 
-        let (_row, complex_deletions, _row_deletion) =
+        let (_row, complex_deletions, _row_deletion, _row_liveness) =
             SSTableRowIteratorAdapter::compaction_row_data_to_row_data(row_data, 20_000);
         assert_eq!(complex_deletions.len(), 1);
         assert_eq!(complex_deletions[0].column, "tags");
@@ -10613,6 +10650,7 @@ mod issue_912_row_tombstone_clustering_identity {
             }],
             complex: Vec::new(),
             row_deletion: None,
+            row_liveness: Default::default(),
         };
         let live_ck =
             SSTableRowIteratorAdapter::extract_clustering_key_from_compaction(&live, &schema);

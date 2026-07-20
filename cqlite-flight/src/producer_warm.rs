@@ -94,7 +94,10 @@ impl MergeProducer {
                 // Issue #2423: row-granular streaming drive (see `produce_point`) —
                 // bounds a warm wide-partition point read to one clustering group +
                 // batch and makes cancellation mid-partition, byte-identically.
-                Some(mut merger) => {
+                Some(merger) => {
+                    // Issue #2374/#2789: thread the read-time reconciliation clock
+                    // so the warm point-read merge expires TTL cells with parity.
+                    let mut merger = merger.with_now_secs(Some(self.now_secs));
                     self.drive_merge_over(&mut merger, cancel, sink, progress, label)
                 }
             };
@@ -107,7 +110,10 @@ impl MergeProducer {
         let token_bound = self.spec.token.as_ref().map(|t| t.to_scan_bound());
         let mut merger =
             KWayMerger::new_from_readers(readers, &self.schema, cancel.scan_cancel(), token_bound)
-                .map_err(ProducerError::Merge)?;
+                .map_err(ProducerError::Merge)?
+                // Issue #2374/#2789: thread the read-time reconciliation clock so
+                // the warm full-scan merge expires TTL cells with parity to core.
+                .with_now_secs(Some(self.now_secs));
         on_merger_built();
         // Issue #2423: the warm full-scan branch streams row-granularly too, matching
         // the cold full-scan path (#2230) — bounded memory + mid-partition cancel.

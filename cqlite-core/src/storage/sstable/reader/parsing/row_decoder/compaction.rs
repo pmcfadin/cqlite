@@ -133,10 +133,19 @@ impl V5CompressedLegacyParser {
             }
         }
 
+        // Issue #2374/#2789: carry the row-marker liveness so the READ path can
+        // hide a row whose only content is an expired liveness marker + already-
+        // tombstoned cells (carry-only; the write path ignores it).
+        let row_liveness = row_header_opt
+            .as_ref()
+            .map(|h| h.row_liveness())
+            .unwrap_or_default();
+
         CompactionRowData::Live {
             simple: simple_cells,
             complex: complex_cols,
             row_deletion,
+            row_liveness,
         }
     }
 

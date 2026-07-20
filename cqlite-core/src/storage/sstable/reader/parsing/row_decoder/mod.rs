@@ -478,6 +478,20 @@ impl RowHeader {
         }
     }
 
+    /// Issue #2374/#2789: the primary-key (row-marker) liveness of this row for
+    /// the READ path. `has_marker` = the row carried `HAS_TIMESTAMP` (an INSERT
+    /// liveness marker, not a data-cell-only UPDATE); `expires_at_seconds` = the
+    /// marker's TTL expiry when `HAS_TTL` was set, else `None` (live-forever).
+    /// Carry-only for reads; the compaction write path never consults it.
+    pub(crate) fn row_liveness(
+        &self,
+    ) -> crate::storage::sstable::reader::compaction_row::RowLiveness {
+        crate::storage::sstable::reader::compaction_row::RowLiveness {
+            has_marker: self.timestamp.is_some(),
+            expires_at_seconds: self.liveness_expires_at_seconds,
+        }
+    }
+
     /// Issue #1741: the row's maximum write timestamp (µs) across its liveness and
     /// decoded data cells. Used for partition/range-tombstone shadowing.
     fn max_write_timestamp(&self) -> i64 {

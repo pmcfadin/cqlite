@@ -67,7 +67,15 @@ const TTL_NOW_OVERRIDE_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
 /// seam first; an invalid/absent override leaves the wall-clock behavior
 /// unchanged. In release builds this is a straight `SystemTime::now()` call —
 /// the override seam (including the env read itself) is compiled out entirely.
-pub(crate) fn now_epoch_secs() -> i64 {
+///
+/// Issue #2789: `pub` (but `#[doc(hidden)]`, an internal read-path seam) so the
+/// Flight producer (`cqlite-flight`) can thread the SAME authoritative
+/// reconciliation `now` into its k-way merger's TTL expiry as the core read
+/// path uses, rather than re-implementing the wall-clock/override logic and
+/// diverging on parity. Re-exported as
+/// [`crate::storage::write_engine::read_time_now_secs`].
+#[doc(hidden)]
+pub fn now_epoch_secs() -> i64 {
     #[cfg(debug_assertions)]
     let raw_override = std::env::var(TTL_NOW_OVERRIDE_ENV).ok();
     #[cfg(not(debug_assertions))]

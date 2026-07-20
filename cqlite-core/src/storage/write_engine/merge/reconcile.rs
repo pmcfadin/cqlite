@@ -92,6 +92,10 @@ pub(super) struct ReconcileState {
     /// Whether the row held non-key data BEFORE the gc-grace purge (phantom-row
     /// guard, captured pre-purge).
     had_data_before: bool,
+    /// Reconciled primary-key (row-marker) liveness across the cluster's entries
+    /// (issue #2374/#2789), carry-only for the read path (Flight `do_get` / cross-
+    /// gen read merge). Folded so the latest-expiry / live-forever marker wins.
+    row_liveness: crate::storage::sstable::reader::compaction_row::RowLiveness,
 }
 
 impl ReconcileState {
@@ -110,6 +114,7 @@ impl ReconcileState {
             after_row_del: Vec::new(),
             surviving: Vec::new(),
             had_data_before: false,
+            row_liveness: crate::storage::sstable::reader::compaction_row::RowLiveness::default(),
         }
     }
 
@@ -135,6 +140,11 @@ impl ReconcileState {
                 self.key = Some(entry.key.clone());
             }
             self.run_index = self.run_index.min(entry.run_index);
+
+            // Issue #2374/#2789: fold the row-marker liveness across generations
+            // (latest-expiry / live-forever wins) so the read path can decide
+            // row visibility. Carry-only — never a write-path decision.
+            self.row_liveness = self.row_liveness.merge(entry.row_liveness);
 
             for cd in &entry.complex_deletions {
                 if !self.complex_deletions.contains(cd) {
@@ -660,6 +670,7 @@ impl ReconcileState {
             range_deletion,
             surviving,
             had_data_before,
+            row_liveness,
             ..
         } = self;
 
@@ -768,6 +779,9 @@ impl ReconcileState {
         };
 
         built.map(|entry| {
+            // Issue #2374/#2789: carry the reconciled row-marker liveness onto the
+            // emitted entry for the read path's visibility decision (carry-only).
+            let entry = entry.with_row_liveness(row_liveness);
             let entry = if complex_deletions.is_empty() {
                 entry
             } else {
