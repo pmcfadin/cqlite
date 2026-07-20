@@ -20,12 +20,14 @@
 //! ```
 //!
 //! This module fully decodes the common insert path (simple columns, all
-//! columns present, no static/complex/subset/deletion). Constructs it does not
-//! fully model (static rows, complex/collection columns, column subsets, range
-//! tombstone markers, row/partition deletions) are surfaced honestly: the
-//! affected partition's [`PartitionUpdate::rows_decoded`] is set `false` rather
-//! than guessing byte offsets — each mutation record is independently CRC-framed
-//! and length-delimited, so bailing on one body never disturbs the others.
+//! columns present, no clustering/static/complex/subset/deletion). Constructs
+//! it does not fully model (clustering columns — the `ClusteringPrefix`
+//! presence-header is not decoded, see `decode_rows`'s bail — static rows,
+//! complex/collection columns, column subsets, range tombstone markers,
+//! row/partition deletions) are surfaced honestly: the affected partition's
+//! [`PartitionUpdate::rows_decoded`] is set `false` rather than guessing byte
+//! offsets — each mutation record is independently CRC-framed and
+//! length-delimited, so bailing on one body never disturbs the others.
 
 use crate::storage::commitlog::schema::{
     cql_fixed_len, format_table_id, CommitLogSchema, SchemaSet,
@@ -222,6 +224,20 @@ fn decode_rows(
     schema: &CommitLogSchema,
     column_names: &[String],
 ) -> RowResult<Vec<DecodedRow>> {
+    // Clustered tables: NOT modeled. Cassandra's `ClusteringPrefix.Serializer`
+    // writes a `writeUnsignedVInt` PRESENCE HEADER (2 bits per clustering
+    // column, batched per 32 columns: 0=present, 1=empty, 2=null) before the
+    // present/non-empty values — see the SSTable reader's
+    // `row_decoder/row_framing.rs` (issue #213) for the canonical decode of
+    // this exact header. A naive per-column value loop (no header) misreads
+    // the header bytes as the first value's bytes, silently misaligning every
+    // subsequent field. Bail honestly rather than guess, matching this
+    // module's existing posture for other unmodeled constructs (range
+    // tombstone markers, partition/static-row deletions) — decoding it is a
+    // follow-up, not a v1 requirement.
+    if !schema.clustering.is_empty() {
+        return Err(Unsupported);
+    }
     let mut rows = Vec::new();
     loop {
         let flags = c.u8().map_err(|_| Unsupported)?;
@@ -236,7 +252,9 @@ fn decode_rows(
             let _ext = c.u8().map_err(|_| Unsupported)?;
         }
 
-        // Clustering values (one per clustering column, in schema order).
+        // Clustering values: schema.clustering is guaranteed empty here (see
+        // the bail above), so this never executes — kept for signature/shape
+        // stability until clustering decode is implemented as a follow-up.
         let mut clustering = Vec::with_capacity(schema.clustering.len());
         for col in &schema.clustering {
             let v = read_typed_value(c, &col.type_name)?;
@@ -446,6 +464,34 @@ mod tests {
         assert_eq!(age.value, Some(vec![0, 0, 0, 30]));
         let name = row.cells.iter().find(|c| c.column == "name").unwrap();
         assert_eq!(name.value.as_deref(), Some(b"alice".as_ref()));
+    }
+
+    #[test]
+    fn clustered_schema_bails_honestly_instead_of_misaligning() {
+        // A schema.clustering entry is enough to trip the bail (decode_rows
+        // checks the schema, not the wire bytes) — regression for the
+        // clustering-prefix-header gap: decoding a clustered table's rows
+        // without reading Cassandra's ClusteringPrefix presence-header first
+        // silently misaligns every field after it. Rather than decode wrong
+        // values, the schema-declares-clustering case must bail to the
+        // honest structural-only path, exactly like partition deletions and
+        // static rows already do.
+        let body = hex(ALICE_BODY);
+        let id = parse_table_id("d6de7150-8448-11f1-bf5a-bf4cbc47cb4a").unwrap();
+        let mut schema = users_schema();
+        schema.clustering = vec![ColumnSpec::new("ck", "int")];
+        let mut schemas: SchemaSet = HashMap::new();
+        schemas.insert(id, schema);
+        let m = decode_mutation(&body, &schemas).expect("decode");
+        let u = &m.updates[0];
+        assert!(
+            !u.rows_decoded,
+            "clustered schema must bail to structural-only, never emit misaligned rows"
+        );
+        assert!(u.rows.is_empty());
+        // Structural fields (table id, partition key) still surface correctly
+        // — only the row body is honestly withheld.
+        assert_eq!(u.partition_key, vec![0, 0, 0, 1]);
     }
 
     fn hex(s: &str) -> Vec<u8> {
