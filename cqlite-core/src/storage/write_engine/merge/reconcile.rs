@@ -46,6 +46,13 @@ use super::{CellData, ComplexDeletion, KWayMerger, MergeEntry, PurgeCounts, RowD
 #[cfg(test)]
 mod ttl_complex_tests;
 
+// Issue #2374/#2789: direct coverage of the cross-generation row-marker liveness
+// FOLD (Step 1) through the REAL `ReconcileState` add/consume path — the
+// timestamp-LWW winner carried onto the emitted entry. Only the end-to-end Flight
+// parity lane exercised this fold, and it SKIPs when fixtures are absent.
+#[cfg(test)]
+mod row_liveness_fold_tests;
+
 /// Per-cell reconcile key: `(column, cell_path)` so each element of a multi-cell
 /// column reconciles independently (epic #899). Simple cells have
 /// `cell_path == None`.
