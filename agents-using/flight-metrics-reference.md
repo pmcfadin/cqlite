@@ -39,7 +39,7 @@ Total instruments: **73**.
 | `cqlite.compaction.tombstones_purged` | counter | `{tombstone}` | _(none)_ | Tombstones genuinely purged (gc-grace/overlap-safe) during compaction. | Rising means space is being reclaimed; zero while tombstones accumulate means purge is blocked (gc_grace/overlap). |
 | `cqlite.compaction.tombstones_suppressed` | counter | `{tombstone}` | _(none)_ | Live cells/rows shadowed by a tombstone during merge reconciliation. | Suppression without a matching purge or retained marker is the resurrection-risk smell. |
 | `cqlite.compression.ratio` | histogram | `1` | `cqlite.compression` | Per-chunk compression ratio (compressed/uncompressed; <=1.0 means the chunk shrank). | Ratios near 1.0 mean incompressible data; a sudden rise means less benefit from the configured codec. |
-| `cqlite.errors.total` | counter | `{error}` | `cqlite.error.category`<br>`cqlite.subsystem` | Canonical error-rate signal, keyed by bounded {category, subsystem}; eagerly registered at 0 on startup. | Absent metric name = error counting isn't wired (never 'no errors'); any sustained increase is the error-rate alarm. |
+| `cqlite.errors.total` | counter | `{error}` | `cqlite.error.category`<br>`cqlite.subsystem`<br>`cqlite.flight.abort_reason` | Canonical error-rate signal, keyed by bounded {category, subsystem}; flight do_get aborts also carry flight.abort_reason; eagerly registered at 0 on startup. | Absent metric name = error counting isn't wired (never 'no errors'); any sustained increase is the error-rate alarm; on subsystem=flight, split abort_reason to separate benign aborts (client_cancel/superseded_split/snapshot_retired/admission_shed) from genuine internal faults. |
 | `cqlite.flight.admission.in_use` | gauge | `1` | _(none)_ | do_get admission permits currently held (admitted, in-flight scans only). | Below the limit is healthy headroom; sitting at admission.limit with a non-zero waiting gauge is saturation. |
 | `cqlite.flight.admission.limit` | gauge | `1` | _(none)_ | The configured do_get admission ceiling K (--max-concurrent-scans); constant while the server runs. | Chart admission.in_use against this ceiling; in_use pinned at the limit means the server is saturated. |
 | `cqlite.flight.admission.rejected_total` | counter | `1` | _(none)_ | do_get requests rejected (gRPC UNAVAILABLE) because no permit freed within the wait timeout. | Should stay 0 under normal load; any sustained increase means clients are being shed and should fail over. |
@@ -107,7 +107,7 @@ Metrics a #2399 round-template scoreboard item consumes. Round handoffs (#2367-s
 | `cqlite.cache.key.misses` | read-path perf (#2059) |
 | `cqlite.cache.key.resident_bytes` | read-path perf (#2059) |
 | `cqlite.compaction.lag` | compaction-lag watch (#2399) |
-| `cqlite.errors.total` | error-rate watch (#2193/#2399) |
+| `cqlite.errors.total` | error-rate watch (#2193/#2399/#2681) |
 | `cqlite.flight.admission.in_use` | admission saturation (#2420/#2399) |
 | `cqlite.flight.admission.limit` | admission saturation (#2420/#2399) |
 | `cqlite.flight.admission.rejected_total` | admission saturation (#2420/#2399) |
