@@ -50,8 +50,7 @@ class CqliteFlightLogicalRowCountTest {
                 ReadMode.SNAPSHOT, java.util.Optional.of("6h"),
                 CqliteFlightConfig.DEFAULT_SNAPSHOT_REUSE_WINDOW_MILLIS,
                 CqliteFlightConfig.DEFAULT_SNAPSHOT_RETIRE_GRACE_MILLIS,
-                CqliteFlightConfig.DEFAULT_SPLIT_PRUNING_ENABLED,
-                CqliteFlightConfig.DEFAULT_SUB_SPLITS_PER_RANGE);
+                CqliteFlightConfig.DEFAULT_SPLIT_PRUNING_ENABLED);
     }
 
     private static CqliteFlightTableHandle plainHandle() {
