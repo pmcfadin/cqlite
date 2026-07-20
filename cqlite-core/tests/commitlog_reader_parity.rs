@@ -169,9 +169,20 @@ fn decoded_mutations_match_inserted_set() {
 fn truncated_segment_returns_clean_prefix_and_flags_truncation() {
     let dir = commitlog_dir();
     let gt = load_ground_truth(&dir);
-    let clean = find_fixture(&dir, "truncated-");
-    let reader = CommitLogReader::open(&clean).expect("open truncated segment");
+    let table_id = parse_table_id(&gt.table_id).expect("table id");
+    // Named `torn`, not `clean` — this is the deliberately-truncated fixture;
+    // the previous name was a copy-paste leftover from the clean-fixture test
+    // (roborev finding, review-first pass: test-quality nit, fixed alongside
+    // the count-bound fix below since both touch this test).
+    let torn = find_fixture(&dir, "truncated-");
+    let reader = CommitLogReader::open(&torn).expect("open truncated segment");
 
+    // Count only OUR table's decoded updates, not every mutation in the
+    // segment — it also carries system-keyspace traffic, so counting all
+    // successfully-decoded mutations made the lower-bound assertion below
+    // weaker than it looked: the reader could drop every one of our inserts
+    // and still pass on system mutations alone (roborev finding, review-first
+    // pass).
     let mut count = 0usize;
     let mut saw_err = false;
     let mut it = reader.mutations();
@@ -181,7 +192,13 @@ fn truncated_segment_returns_clean_prefix_and_flags_truncation() {
         // decode may still hit corruption if the tear lands mid-record — that is
         // surfaced as a typed Err, which is acceptable (no panic).
         match res {
-            Ok(_) => count += 1,
+            Ok(mutation) => {
+                count += mutation
+                    .updates
+                    .iter()
+                    .filter(|u| u.table_id == table_id)
+                    .count();
+            }
             Err(_) => saw_err = true,
         }
     }
@@ -194,7 +211,7 @@ fn truncated_segment_returns_clean_prefix_and_flags_truncation() {
     // review-first pass).
     assert!(
         count >= gt.inserts.len() - 1,
-        "expected at least {} of {} inserts to decode before the tear, got {count}",
+        "expected at least {} of {} of OUR table's inserts to decode before the tear, got {count}",
         gt.inserts.len() - 1,
         gt.inserts.len()
     );

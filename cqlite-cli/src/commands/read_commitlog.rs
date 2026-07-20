@@ -63,10 +63,20 @@ struct UpdateView {
     has_partition_deletion: bool,
 }
 
-fn collect(reader: &CommitLogReader, limit: Option<usize>) -> (Vec<UpdateView>, usize, bool, bool) {
+/// `(views, mutation_count, truncated, errored, limited)`. `truncated`/
+/// `errored` are only meaningful when `limited` is false — if `--limit` cut
+/// iteration short, the segment's true tail state (torn? corrupt?) was never
+/// reached, so reporting `false` for either would be an authoritative-looking
+/// "clean" verdict that was never actually determined (roborev finding,
+/// review-first pass).
+fn collect(
+    reader: &CommitLogReader,
+    limit: Option<usize>,
+) -> (Vec<UpdateView>, usize, bool, bool, bool) {
     let mut views = Vec::new();
     let mut mutation_count = 0usize;
     let mut errored = false;
+    let mut limited = false;
     let mut it = reader.mutations();
     for res in it.by_ref() {
         match res {
@@ -89,6 +99,7 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> (Vec<UpdateView>, 
                     // mutation (roborev finding, review-first pass).
                     if let Some(n) = limit {
                         if views.len() >= n {
+                            limited = true;
                             break;
                         }
                     }
@@ -101,6 +112,9 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> (Vec<UpdateView>, 
                 break;
             }
         }
+        if limited {
+            break;
+        }
         if let Some(n) = limit {
             // Stop on whichever bound is hit first: mutation_count (the
             // documented meaning of --limit) or views.len() (the actual
@@ -108,11 +122,12 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> (Vec<UpdateView>, 
             // mutation — without this, a later mutation could still push
             // views past n even after an earlier one was capped).
             if mutation_count >= n || views.len() >= n {
+                limited = true;
                 break;
             }
         }
     }
-    (views, mutation_count, it.truncated(), errored)
+    (views, mutation_count, it.truncated(), errored, limited)
 }
 
 fn render_text(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
@@ -125,9 +140,13 @@ fn render_text(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
         desc.compression_class.as_deref().unwrap_or("none")
     );
 
-    let (views, mutation_count, truncated, errored) = collect(reader, limit);
+    let (views, mutation_count, truncated, errored, limited) = collect(reader, limit);
     println!("  mutations:   {mutation_count}");
-    println!("  truncated:   {truncated}");
+    if limited {
+        println!("  truncated:   not determined (--limit stopped before the segment's true end)");
+    } else {
+        println!("  truncated:   {truncated}");
+    }
     if errored {
         println!("  note:        stream ended on a corrupt record (typed decode error)");
     }
@@ -164,7 +183,7 @@ fn render_text(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
 
 fn render_json(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
     let desc = reader.descriptor();
-    let (views, mutation_count, truncated, errored) = collect(reader, limit);
+    let (views, mutation_count, truncated, errored, limited) = collect(reader, limit);
     let updates: Vec<serde_json::Value> = views
         .iter()
         .map(|v| {
@@ -178,6 +197,19 @@ fn render_json(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
             })
         })
         .collect();
+    // When --limit cut iteration short, the segment's true tail state was
+    // never reached — report `null` (not a false-looking `false`) for
+    // truncated/decode_error, plus an explicit `limited` marker, rather than
+    // an authoritative-looking "clean" verdict that was never determined
+    // (roborev finding, review-first pass).
+    let (truncated_json, decode_error_json) = if limited {
+        (serde_json::Value::Null, serde_json::Value::Null)
+    } else {
+        (
+            serde_json::Value::Bool(truncated),
+            serde_json::Value::Bool(errored),
+        )
+    };
     let out = serde_json::json!({
         "descriptor": {
             "version": desc.version,
@@ -185,8 +217,9 @@ fn render_json(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
             "compression": desc.compression_class,
         },
         "mutation_count": mutation_count,
-        "truncated": truncated,
-        "decode_error": errored,
+        "truncated": truncated_json,
+        "decode_error": decode_error_json,
+        "limited": limited,
         "updates": updates,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);

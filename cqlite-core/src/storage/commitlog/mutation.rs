@@ -30,7 +30,7 @@
 //! length-delimited, so bailing on one body never disturbs the others.
 
 use crate::storage::commitlog::schema::{
-    cql_fixed_len, format_table_id, CommitLogSchema, SchemaSet,
+    cql_fixed_len, format_table_id, is_simple_scalar_type, CommitLogSchema, SchemaSet,
 };
 use crate::{Error, Result};
 
@@ -261,6 +261,22 @@ fn decode_rows(
     // tombstone markers, partition/static-row deletions) — decoding it is a
     // follow-up, not a v1 requirement.
     if !schema.clustering.is_empty() {
+        return Err(Unsupported);
+    }
+    // Complex columns (collection/tuple/UDT/vector): NOT modeled. Cassandra
+    // serializes a complex column as an entirely different wire shape (an
+    // optional complex-deletion time, then a count-prefixed set of
+    // (cell-path, cell) pairs) — not the single simple Cell this module's
+    // read_cell decodes. The module doc previously claimed this was
+    // "surfaced honestly", but nothing actually checked for it: a schema
+    // with e.g. a `list<text>` column would silently misalign every
+    // subsequent row while still reporting rows_decoded == true (roborev
+    // finding, review-first pass). Checked once here (a schema-level
+    // property, not a per-row one) rather than per column per row.
+    if column_names
+        .iter()
+        .any(|name| !schema.column_type(name).is_some_and(is_simple_scalar_type))
+    {
         return Err(Unsupported);
     }
     let mut rows = Vec::new();
@@ -517,6 +533,48 @@ mod tests {
         // Structural fields (table id, partition key) still surface correctly
         // — only the row body is honestly withheld.
         assert_eq!(u.partition_key, vec![0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn collection_column_schema_bails_honestly_instead_of_misaligning() {
+        // Regression: a schema with a collection/tuple/UDT column must bail
+        // to structural-only, never attempt to decode it as a simple Cell —
+        // Cassandra's complex-column wire shape is categorically different
+        // (roborev finding, review-first pass; the module doc previously
+        // claimed this was already handled and it was not).
+        //
+        // Calls decode_rows() directly rather than through decode_mutation():
+        // the bail is purely schema-driven (checked before any cursor read),
+        // but the only real fixture's wire bytes declare just age/name as
+        // column_names — no fixture exists with an actual collection column
+        // on the wire, and hand-crafting one would just be guessing bytes,
+        // exactly what this module avoids. Testing decode_rows in isolation
+        // proves the guard fires without needing to fabricate wire bytes it
+        // never even reads.
+        let mut schema = users_schema();
+        schema.columns.push(ColumnSpec::new("tags", "list<text>"));
+        let column_names = vec!["age".to_string(), "name".to_string(), "tags".to_string()];
+        let mut c = Cursor::new(&[]);
+        let result = decode_rows(&mut c, &schema, &column_names);
+        assert!(
+            result.is_err(),
+            "a collection-typed column in column_names must bail, never emit misaligned rows"
+        );
+    }
+
+    #[test]
+    fn counter_column_no_longer_misreads_as_fixed_length() {
+        // Regression: cql_fixed_len("counter") used to return Some(8),
+        // silently consuming 8 raw bytes where a vint-length-prefixed
+        // CounterContext blob actually sits. This doesn't assert a specific
+        // decoded value (a CounterContext isn't a plain scalar this module
+        // interprets further) — it asserts the schema-driven bail no longer
+        // treats a counter column as fixed-8, i.e. it's on the
+        // simple-scalar allowlist via the vint-length path, not excluded
+        // from decode entirely (roborev finding, review-first pass).
+        use crate::storage::commitlog::schema::is_simple_scalar_type;
+        assert!(is_simple_scalar_type("counter"));
+        assert_eq!(cql_fixed_len("counter"), None);
     }
 
     fn hex(s: &str) -> Vec<u8> {

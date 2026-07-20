@@ -73,10 +73,60 @@ pub fn cql_fixed_len(type_name: &str) -> Option<usize> {
         "boolean" | "tinyint" => Some(1),
         "smallint" => Some(2),
         "int" | "date" | "float" => Some(4),
-        "bigint" | "timestamp" | "time" | "double" | "counter" => Some(8),
+        "bigint" | "timestamp" | "time" | "double" => Some(8),
         "uuid" | "timeuuid" => Some(16),
+        // `counter` is NOT fixed-8: CounterColumnType extends NumberType (not
+        // LongType) and does not override valueLengthIfFixed(), so a counter
+        // cell's on-disk value is a vint-length-prefixed CounterContext blob
+        // (header + shards), not a raw i64. Treating it as fixed-8 silently
+        // misaligned every subsequent field in the partition (roborev
+        // finding, review-first pass). Falls through to `None` below, which
+        // reads it exactly like blob — the vint-length envelope is what
+        // matters for staying aligned; this module doesn't further interpret
+        // the CounterContext's internal shard structure.
         _ => None,
     }
+}
+
+/// Column types this module can decode without misaligning the cursor.
+///
+/// Cassandra's row format serializes a "complex" column (collection/tuple/
+/// UDT/vector) as a categorically different wire structure — an optional
+/// complex-deletion time, then a count-prefixed set of (path, cell) pairs —
+/// not the single simple `Cell` this module's `read_cell` decodes. Treating a
+/// complex column as simple doesn't just read the wrong length, it reads the
+/// wrong SHAPE, silently misaligning every subsequent row/field while still
+/// reporting `rows_decoded == true` (roborev finding, review-first pass: the
+/// module doc already claimed this was surfaced honestly — it was not,
+/// because nothing actually checked for it). Prose-matched, not a byte-level
+/// verification against Cassandra 5.0 source (unavailable in this
+/// environment) — kept conservative (allowlist, not denylist) so an unknown
+/// type name bails rather than being assumed simple.
+pub fn is_simple_scalar_type(type_name: &str) -> bool {
+    let t = type_name.trim().to_ascii_lowercase();
+    matches!(
+        t.as_str(),
+        "boolean"
+            | "tinyint"
+            | "smallint"
+            | "int"
+            | "date"
+            | "float"
+            | "bigint"
+            | "timestamp"
+            | "time"
+            | "double"
+            | "uuid"
+            | "timeuuid"
+            | "text"
+            | "varchar"
+            | "ascii"
+            | "blob"
+            | "varint"
+            | "decimal"
+            | "inet"
+            | "counter"
+    )
 }
 
 /// Format a 16-byte table id as a canonical UUID string
@@ -97,7 +147,11 @@ pub fn format_table_id(id: &[u8; 16]) -> String {
 /// input.
 pub fn parse_table_id(s: &str) -> Option<[u8; 16]> {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
-    if hex.len() != 32 {
+    // `hex.len()` is a BYTE length; a non-ASCII multi-byte char could pass a
+    // `!= 32` byte-length guard while still slicing across a UTF-8 char
+    // boundary below and panicking — a public API taking untrusted input
+    // must return None, never panic (roborev finding, review-first pass).
+    if !hex.is_ascii() || hex.len() != 32 {
         return None;
     }
     let mut out = [0u8; 16];
@@ -127,5 +181,44 @@ mod tests {
         let s = "d6de7150-8448-11f1-bf5a-bf4cbc47cb4a";
         let id = parse_table_id(s).expect("parse");
         assert_eq!(format_table_id(&id), s);
+    }
+
+    #[test]
+    fn counter_is_not_fixed_length() {
+        // Regression: CounterColumnType does not override valueLengthIfFixed()
+        // — a counter cell is a vint-length-prefixed CounterContext blob, not
+        // a raw fixed-8 i64 (roborev finding, review-first pass).
+        assert_eq!(cql_fixed_len("counter"), None);
+    }
+
+    #[test]
+    fn simple_scalar_type_allowlist_excludes_complex_types() {
+        for t in [
+            "int", "bigint", "text", "blob", "uuid", "counter", "decimal", "varint", "inet",
+        ] {
+            assert!(is_simple_scalar_type(t), "{t} should be a simple scalar");
+        }
+        for t in [
+            "list<text>",
+            "set<int>",
+            "map<text, int>",
+            "frozen<list<int>>",
+            "tuple<int, text>",
+            "vector<float, 4>",
+            "some_udt_name",
+        ] {
+            assert!(
+                !is_simple_scalar_type(t),
+                "{t} must bail, not be treated as a simple scalar"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_table_id_rejects_non_ascii_without_panicking() {
+        // A multi-byte UTF-8 char can pass a byte-length `!= 32` guard while
+        // still slicing across a char boundary — must return None, not panic
+        // (roborev finding, review-first pass).
+        assert_eq!(parse_table_id("d6de7150-8448-11f1-bf5a-bf4cbc47cb4€"), None);
     }
 }
