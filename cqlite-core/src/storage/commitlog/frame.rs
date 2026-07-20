@@ -159,7 +159,9 @@ impl<'a> FrameWalker<'a> {
         if computed != stored_crc {
             // An invalid marker over an all-zero region is the normal clean end;
             // otherwise it is a torn/garbage marker (tolerate as truncation).
-            let all_zero = self.bytes[pos..pos + SYNC_MARKER_SIZE].iter().all(|&b| b == 0);
+            let all_zero = self.bytes[pos..pos + SYNC_MARKER_SIZE]
+                .iter()
+                .all(|&b| b == 0);
             self.truncated_end = !all_zero;
             return Ok(None);
         }

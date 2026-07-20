@@ -44,12 +44,8 @@ pub async fn execute_read_commitlog_command(
         ));
     }
 
-    let reader = CommitLogReader::open(file_path).with_context(|| {
-        format!(
-            "Failed to open CommitLog segment {}",
-            file_path.display()
-        )
-    })?;
+    let reader = CommitLogReader::open(file_path)
+        .with_context(|| format!("Failed to open CommitLog segment {}", file_path.display()))?;
 
     match format {
         OutputFormat::Json => render_json(&reader, limit),

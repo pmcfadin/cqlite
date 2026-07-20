@@ -27,7 +27,9 @@
 //! than guessing byte offsets — each mutation record is independently CRC-framed
 //! and length-delimited, so bailing on one body never disturbs the others.
 
-use crate::storage::commitlog::schema::{cql_fixed_len, format_table_id, CommitLogSchema, SchemaSet};
+use crate::storage::commitlog::schema::{
+    cql_fixed_len, format_table_id, CommitLogSchema, SchemaSet,
+};
 use crate::{Error, Result};
 
 // ---- UnfilteredRowIterator flags -----------------------------------------
@@ -372,31 +374,19 @@ impl<'a> Cursor<'a> {
         Ok(a)
     }
 
-    /// Decode a Cassandra unsigned VInt (`writeUnsignedVInt`): the leading byte's
-    /// high bits count the number of *extra* bytes; the value is big-endian.
+    /// Decode a Cassandra unsigned VInt (`writeUnsignedVInt`).
+    ///
+    /// Delegates to [`crate::parser::vint::decode_unsigned`] — the ONE canonical
+    /// read-side VInt decoder (Issue #1638, Epic J/J4), already used by the
+    /// SSTable reader and already fuzzed (`fuzz/fuzz_targets/fuzz_vint.rs`) —
+    /// rather than maintaining a second, independent bit-assembly here. (An
+    /// earlier local reimplementation had a 9-byte shift-overflow bug that the
+    /// canonical decoder already special-cases correctly.)
     fn uvint(&mut self) -> Result<u64> {
-        let first = self.u8()?;
-        // `leading_ones()` on a u8 is 0..=8: the count of `1` continuation-marker
-        // bits, i.e. the number of *extra* value bytes that follow.
-        let extra = first.leading_ones() as usize;
-        if extra == 0 {
-            return Ok(first as u64);
-        }
-        if extra == 8 {
-            // All value bits are in the 8 following bytes; the lead byte (0xFF)
-            // contributes none. Shifting a u8 by 8 would overflow, so special-case.
-            let mut val = 0u64;
-            for _ in 0..8 {
-                val = (val << 8) | self.u8()? as u64;
-            }
-            return Ok(val);
-        }
-        let mask = 0xffu8 >> extra;
-        let mut val = (first & mask) as u64;
-        for _ in 0..extra {
-            val = (val << 8) | self.u8()? as u64;
-        }
-        Ok(val)
+        let (value, consumed) =
+            crate::parser::vint::decode_unsigned(&self.bytes[self.pos..]).map_err(|_| short())?;
+        self.pos += consumed;
+        Ok(value)
     }
 }
 
@@ -420,7 +410,10 @@ mod tests {
             table: "users".into(),
             partition_key: vec![ColumnSpec::new("id", "int")],
             clustering: vec![],
-            columns: vec![ColumnSpec::new("age", "int"), ColumnSpec::new("name", "text")],
+            columns: vec![
+                ColumnSpec::new("age", "int"),
+                ColumnSpec::new("name", "text"),
+            ],
         }
     }
 

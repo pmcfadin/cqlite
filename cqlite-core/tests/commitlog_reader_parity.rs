@@ -60,7 +60,10 @@ fn users_schema() -> CommitLogSchema {
         table: "users".into(),
         partition_key: vec![ColumnSpec::new("id", "int")],
         clustering: vec![],
-        columns: vec![ColumnSpec::new("age", "int"), ColumnSpec::new("name", "text")],
+        columns: vec![
+            ColumnSpec::new("age", "int"),
+            ColumnSpec::new("name", "text"),
+        ],
     }
 }
 
@@ -73,7 +76,10 @@ fn find_fixture(dir: &PathBuf, prefix: &str) -> PathBuf {
             return e.path();
         }
     }
-    panic!("no fixture starting with {prefix:?} under {}", dir.display());
+    panic!(
+        "no fixture starting with {prefix:?} under {}",
+        dir.display()
+    );
 }
 
 /// Requirement: mutation stream decoding matches ground truth.
@@ -127,9 +133,10 @@ fn decoded_mutations_match_inserted_set() {
                             .map(|v| String::from_utf8_lossy(v).into_owned())
                     }
                     "age" => {
-                        age = cell.value.as_ref().map(|v| {
-                            i32::from_be_bytes([v[0], v[1], v[2], v[3]])
-                        })
+                        age = cell
+                            .value
+                            .as_ref()
+                            .map(|v| i32::from_be_bytes([v[0], v[1], v[2], v[3]]))
                     }
                     other => panic!("unexpected column {other}"),
                 }
