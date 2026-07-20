@@ -61,11 +61,19 @@ impl AbortReason {
     /// The valid, closed [`cqlite_core::observability::ErrorCategory`] label this
     /// reason maps onto for the canonical `cqlite.error.category` dimension of
     /// `cqlite.errors.total`, so existing category rollups keep working while the
-    /// new `cqlite.flight.abort_reason` attribute carries the fine detail. Benign
-    /// aborts reuse the existing `"cancelled"` category; a malformed ticket keeps
-    /// its `"query"` category; a genuine internal fault stays `"other"` — exactly
-    /// the categories [`crate::obs::record_status_error`]'s code mapping produced
-    /// before this change (behavior-preserving for the coarse dimension).
+    /// new `cqlite.flight.abort_reason` attribute carries the fine detail.
+    ///
+    /// Only `internal → "other"` and `ticket_invalid → "query"` are preserved
+    /// from [`crate::obs::record_status_error`]'s old code mapping. The benign
+    /// aborts (`client_cancel`, `admission_shed`, `snapshot_retired`,
+    /// `superseded_split`) are DELIBERATELY re-categorized from the old catch-all
+    /// `"other"` bucket to `"cancelled"` (matching the `catalog.rs` doc): they are
+    /// expected terminal states under load, not faults. Consequence, intended and
+    /// not a regression: any dashboard keying flight error-rate on
+    /// `category="other"` will see that bucket SHRINK as benign aborts drain to
+    /// `"cancelled"` — `cqlite.errors.total` still increments exactly once per
+    /// abort, and the new `cqlite.flight.abort_reason` attribute carries the
+    /// authoritative fine-grained reason.
     fn error_category(self) -> obs::ErrorCategory {
         use obs::ErrorCategory;
         match self {
@@ -132,8 +140,9 @@ impl AbortContext {
 /// [`crate::obs::record_status_error`] on the `do_get` abort path. It:
 ///
 /// * increments `cqlite.errors.total` once with `cqlite.subsystem = "flight"`, a
-///   VALID closed `cqlite.error.category` (derived from the reason, preserving
-///   the coarse-dimension behavior), AND the NEW bounded attribute
+///   VALID closed `cqlite.error.category` (derived from the reason — see
+///   [`AbortReason::error_category`] for the intentional benign→`"cancelled"`
+///   re-categorization), AND the NEW bounded attribute
 ///   `cqlite.flight.abort_reason = reason.label()`; and
 /// * emits a structured `tracing` event at the reason-appropriate LEVEL
 ///   (benign → `debug`, `internal` → `error`, `ticket_invalid` → `warn`),

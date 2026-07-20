@@ -264,10 +264,64 @@ fn do_get_aborts_carry_site_stamped_abort_reason() {
         );
     }
 
+    // ---- Scenario 2b: containment escape → internal (issue #1430 backstop) -
+    // A directory entry whose resolved path ESCAPES the table dir is the #1430
+    // security backstop, NOT a benign teardown. It MUST be attributed to
+    // `internal` (ERROR / coarse `other`), never demoted to the benign
+    // `superseded_split` / `cancelled` bucket — the exact signal this backstop
+    // exists to surface (roborev BLOCKER 1, issue #2681).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let (_temp, data_dir) = build_fixture();
+        let table_dir = data_dir.join(KS).join(TBL);
+        let snap_dir = make_snapshot(&table_dir, "snap_escape");
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        // First query warms the cache from the snapshot dir.
+        rt.block_on(async {
+            let resp = svc
+                .do_get(Request::new(Ticket::new(ticket_bytes(Some("snap_escape")))))
+                .await
+                .expect("first snapshot do_get warms");
+            let mut stream = resp.into_inner();
+            while stream.next().await.is_some() {}
+        });
+        // Plant an escaping symlink named like a Data.db INSIDE the snapshot dir:
+        // its target lives outside the table dir, so the warm probe's per-entry
+        // containment check (issue #1430) rejects it on the next request.
+        let outside = tempfile::TempDir::new().unwrap();
+        let escapee = outside.path().join("nb-99-big-Data.db");
+        std::fs::write(&escapee, b"x").unwrap();
+        symlink(&escapee, snap_dir.join("nb-99-big-Data.db")).unwrap();
+        mc.reset();
+        let code = rt.block_on(async {
+            svc.do_get(Request::new(Ticket::new(ticket_bytes(Some("snap_escape")))))
+                .await
+                .err()
+                .expect("a containment escape must abort the do_get")
+                .code()
+        });
+        let metrics = mc.flush_and_collect();
+        assert!(
+            abort_count(&metrics, "internal") >= 1.0,
+            "a containment escape (issue #1430 backstop) must increment \
+             cqlite.errors.total{{abort_reason=internal}}, got {} (code={code:?})",
+            abort_count(&metrics, "internal")
+        );
+        assert_eq!(
+            abort_count(&metrics, "superseded_split"),
+            0.0,
+            "a containment escape must NOT be demoted to the benign superseded_split bucket"
+        );
+    }
+
     // ---- Scenario 3: admission shed → admission_shed ----------------------
     // Hold the sole admission permit, then drive a further do_get past the
     // ceiling: it sheds with UNAVAILABLE, stamped admission_shed at the site.
-    {
+    // Capture this window's metrics for BOTH the scenario assertions AND the
+    // bounded-attribute invariant below (it is a window that DOES carry error
+    // points — a fresh empty DELTA window would assert the invariant vacuously).
+    let shed_metrics = {
         let (_temp, data_dir) = build_fixture();
         let admission = Admission::new(AdmissionConfig {
             max_concurrent_scans: 1,
@@ -305,25 +359,32 @@ fn do_get_aborts_carry_site_stamped_abort_reason() {
             0.0,
             "an admission shed must NOT be attributed to internal"
         );
-    }
+        metrics
+    };
 
     // ---- Bounded-attribute invariant over every collected error point ------
-    // The final collect window (scenario 3) must carry only bounded attribute
-    // keys on cqlite.errors.total — never a ticket, key, or message.
-    let metrics = mc.flush_and_collect();
-    if let Some(errs) = metrics.find(catalog::ERRORS_TOTAL) {
-        for p in &errs.points {
-            for (k, _) in &p.attributes {
-                assert!(
-                    [
-                        catalog::attr::ERROR_CATEGORY,
-                        catalog::attr::SUBSYSTEM,
-                        catalog::attr::FLIGHT_ABORT_REASON,
-                    ]
-                    .contains(&k.as_str()),
-                    "cqlite.errors.total carries unbounded attribute key {k:?}"
-                );
-            }
+    // Assert over scenario 3's window (captured above) — it carries ≥1 real
+    // error point (the admission_shed abort). A fresh `flush_and_collect()` here
+    // would be an EMPTY DELTA window (no metric-producing op since the scenario-3
+    // collect), so the loop would never run and the invariant would be vacuous.
+    let errs = shed_metrics
+        .find(catalog::ERRORS_TOTAL)
+        .expect("scenario 3 recorded at least one cqlite.errors.total point");
+    assert!(
+        !errs.points.is_empty(),
+        "the bounded-attribute invariant must run over ≥1 real error point"
+    );
+    for p in &errs.points {
+        for (k, _) in &p.attributes {
+            assert!(
+                [
+                    catalog::attr::ERROR_CATEGORY,
+                    catalog::attr::SUBSYSTEM,
+                    catalog::attr::FLIGHT_ABORT_REASON,
+                ]
+                .contains(&k.as_str()),
+                "cqlite.errors.total carries unbounded attribute key {k:?}"
+            );
         }
     }
 }

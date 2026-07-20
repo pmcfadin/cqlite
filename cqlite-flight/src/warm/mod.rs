@@ -65,17 +65,33 @@ pub enum WarmError {
         /// Underlying I/O error.
         source: std::io::Error,
     },
-    /// A `*-Data.db` directory entry seen during the staleness probe was rejected:
-    /// its resolved path escaped the table directory (issue #1430 containment) or
-    /// it could not be `stat`ed. Fail-closed exactly like [`Probe`] — treated as
+    /// A `*-Data.db`/`manifest.json` directory entry seen during the staleness
+    /// probe was rejected because its resolved path ESCAPED the table directory
+    /// (issue #1430 containment backstop). This is a SECURITY-relevant signal — a
+    /// symlink/path-escape attempt — kept typed and DISTINCT from the benign
+    /// [`ProbeEntrySuperseded`] torn-down case so the abort taxonomy (issue #2681)
+    /// can surface it at ERROR / `internal` rather than demoting it to a benign
+    /// DEBUG "cancelled" bucket. Fail-closed exactly like [`Probe`] — treated as
+    /// "changed" (full re-resolve), NEVER silently skipped.
+    #[error("warm-handle probe rejected entry {path} (containment escape): {reason}")]
+    ProbeEntryContainment {
+        /// The offending directory entry whose resolved path escaped the dir.
+        path: PathBuf,
+        /// The containment-failure detail.
+        reason: String,
+    },
+    /// A `*-Data.db` directory entry seen during the staleness probe could not be
+    /// `stat`ed (a racing removal / torn-down or superseded generation under the
+    /// reader). Benign teardown — distinct from the security-relevant
+    /// [`ProbeEntryContainment`]. Fail-closed exactly like [`Probe`] — treated as
     /// "changed" (full re-resolve), NEVER silently skipped into a smaller
     /// generation set that could mask a generation and serve a stale warm hit
     /// (issue #2310).
-    #[error("warm-handle probe rejected entry {path}: {reason}")]
-    ProbeEntry {
+    #[error("warm-handle probe rejected entry {path} (superseded/torn down): {reason}")]
+    ProbeEntrySuperseded {
         /// The offending directory entry.
         path: PathBuf,
-        /// Why it was rejected (containment escape / stat failure).
+        /// Why it was rejected (stat failure / torn-down).
         reason: String,
     },
     /// An added generation failed to open during a rebuild (e.g. a corrupt
@@ -92,6 +108,29 @@ pub enum WarmError {
     /// needed to open readers. Internal fault; the warm set is untouched.
     #[error("warm-handle runtime unavailable: {0}")]
     Runtime(String),
+}
+
+impl WarmError {
+    /// The SSTable generation number resolved at this error's site, when the
+    /// error carries a specific `*-Data.db` path (issue #2681, spec Req 2).
+    ///
+    /// The generation is parsed from the offending file name (e.g.
+    /// `nb-12-big-Data.db` → `12`), mirroring
+    /// [`identity::GenerationId::resolve`]'s name parse — authoritative local
+    /// knowledge at the abort site, never inferred from the gRPC code/message
+    /// (no-heuristics #28). `None` for the errors with no single resolved
+    /// generation ([`Cancelled`](Self::Cancelled),
+    /// [`Probe`](Self::Probe) — a whole-directory failure —,
+    /// [`Runtime`](Self::Runtime)).
+    pub fn resolved_generation(&self) -> Option<u64> {
+        let path = match self {
+            WarmError::ProbeEntryContainment { path, .. }
+            | WarmError::ProbeEntrySuperseded { path, .. }
+            | WarmError::Open { path, .. } => path,
+            WarmError::Cancelled | WarmError::Probe { .. } | WarmError::Runtime(_) => return None,
+        };
+        identity::generation_of(path)
+    }
 }
 
 /// A pre-resolved, pre-parsed reader set handed to the merge producer for one
@@ -132,4 +171,59 @@ pub fn ddl_hash(ddl: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     ddl.hash(&mut h);
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_generation_parses_from_path_bearing_variants() {
+        // Issue #2681 (spec Req 2): a path-bearing warm error carries the SSTable
+        // generation resolved at its site, parsed from the `*-Data.db` name.
+        let path = PathBuf::from("/ks/tbl/nb-12-big-Data.db");
+        assert_eq!(
+            WarmError::ProbeEntryContainment {
+                path: path.clone(),
+                reason: "escape".into(),
+            }
+            .resolved_generation(),
+            Some(12)
+        );
+        assert_eq!(
+            WarmError::ProbeEntrySuperseded {
+                path: path.clone(),
+                reason: "torn down".into(),
+            }
+            .resolved_generation(),
+            Some(12)
+        );
+        assert_eq!(
+            WarmError::Open {
+                path,
+                source: cqlite_core::Error::internal("boom"),
+            }
+            .resolved_generation(),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn resolved_generation_is_none_for_directory_wide_errors() {
+        // No single generation is resolvable for a cancel, a whole-directory
+        // probe failure, or a runtime failure.
+        assert_eq!(WarmError::Cancelled.resolved_generation(), None);
+        assert_eq!(
+            WarmError::Probe {
+                path: PathBuf::from("/ks/tbl"),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            }
+            .resolved_generation(),
+            None
+        );
+        assert_eq!(
+            WarmError::Runtime("no runtime".into()).resolved_generation(),
+            None
+        );
+    }
 }

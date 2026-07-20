@@ -41,7 +41,9 @@ impl GenerationId {
     /// be `stat`ed (missing/racing removal) so the caller treats it as
     /// not-present rather than fabricating an identity.
     pub fn resolve(path: &Path) -> Option<Self> {
-        let generation = generation_of(path);
+        // A parse miss degrades to 0 (the inode identity is authoritative; the
+        // generation number is only a cross-check — see the type doc).
+        let generation = generation_of(path).unwrap_or(0);
         let (device, inode) = device_inode(path)?;
         Some(Self {
             device,
@@ -52,16 +54,15 @@ impl GenerationId {
 }
 
 /// Best-effort parse of the generation number from a Cassandra SSTable file name
-/// such as `nb-12-big-Data.db` → `12`. Returns 0 when not parseable.
+/// such as `nb-12-big-Data.db` → `Some(12)`. `None` when not parseable.
 ///
 /// Mirrors `producer::generation_of` (kept independent so the warm module has no
 /// dependency on producer internals). Cross-referenced against the authoritative
-/// inode identity above, so a parse miss (0) never alone determines the key.
-fn generation_of(path: &Path) -> u64 {
+/// inode identity above, so a parse miss never alone determines the key.
+pub(crate) fn generation_of(path: &Path) -> Option<u64> {
     path.file_name()
         .and_then(|n| n.to_str())
         .and_then(|name| name.split('-').find_map(|seg| seg.parse::<u64>().ok()))
-        .unwrap_or(0)
 }
 
 #[cfg(unix)]

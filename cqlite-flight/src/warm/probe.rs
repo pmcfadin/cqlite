@@ -91,8 +91,9 @@ const MANIFEST_FILE: &str = "manifest.json";
 /// pin a stale/incorrect warm hit — exactly the class of escape the cold
 /// `DirSource::data_paths` / warm `enumerate_generations` containment filters
 /// already close for `Data.db`. A containment violation here is a SECURITY
-/// ERROR, not a fallback trigger: it is surfaced as [`WarmError::ProbeEntry`]
-/// rather than treated as "absent" — the merely-absent case (no manifest, or a
+/// ERROR, not a fallback trigger: it is surfaced as
+/// [`WarmError::ProbeEntryContainment`] rather than treated as "absent" — the
+/// merely-absent case (no manifest, or a
 /// benign read failure) stays `Ok(None)` and DOES fall through to the
 /// authoritative listing (the existing "optimization only" invariant), but a
 /// violating PRESENT entry must abort the request rather than silently
@@ -101,7 +102,10 @@ const MANIFEST_FILE: &str = "manifest.json";
 pub(super) fn read_manifest_checked(dir: &Path) -> Result<Option<Vec<u8>>, WarmError> {
     let path = dir.join(MANIFEST_FILE);
     if let Err(reason) = crate::pathsafe::assert_within("manifest", dir, &path) {
-        return Err(WarmError::ProbeEntry {
+        // Containment escape (issue #1430 backstop) — the security-relevant
+        // variant, surfaced at ERROR/`internal` by the abort taxonomy (#2681),
+        // never demoted to the benign teardown bucket.
+        return Err(WarmError::ProbeEntryContainment {
             path,
             reason: reason.to_string(),
         });
@@ -172,11 +176,11 @@ pub fn probe_generation_set(
 /// * Per-file containment (issue #1430) mirrors the cold-path
 ///   `DirSource::data_paths` filter: a SYMLINK inside an otherwise-valid dir can
 ///   resolve to a `Data.db` OUTSIDE it. Here it is fail-closed as
-///   [`WarmError::ProbeEntry`] (treated as changed) rather than silently
-///   excluded, so a poisoned entry can never produce a stale warm hit.
+///   [`WarmError::ProbeEntryContainment`] (treated as changed) rather than
+///   silently excluded, so a poisoned entry can never produce a stale warm hit.
 /// * A `*-Data.db` we can list but cannot `stat` is likewise fail-closed as
-///   [`WarmError::ProbeEntry`] — a FAILED stat is treated as changed, distinct
-///   from a genuinely-not-an-SSTable filename (a benign, non-error skip).
+///   [`WarmError::ProbeEntrySuperseded`] — a FAILED stat is treated as changed,
+///   distinct from a genuinely-not-an-SSTable filename (a benign, non-error skip).
 pub(super) fn enumerate_generations(dir: &Path) -> Result<Vec<GenerationEntry>, WarmError> {
     let read = std::fs::read_dir(dir).map_err(|source| WarmError::Probe {
         path: dir.to_path_buf(),
@@ -203,7 +207,10 @@ pub(super) fn enumerate_generations(dir: &Path) -> Result<Vec<GenerationEntry>, 
         // Per-file containment (issue #1430), mirroring the cold path but
         // fail-closed: an escaping entry aborts the probe (treated as changed).
         if let Err(reason) = crate::pathsafe::assert_within("sstable", dir, &path) {
-            return Err(WarmError::ProbeEntry {
+            // Containment escape (issue #1430 backstop) — the security-relevant
+            // variant, surfaced at ERROR/`internal` by the abort taxonomy
+            // (#2681), never demoted to the benign teardown bucket.
+            return Err(WarmError::ProbeEntryContainment {
                 path,
                 reason: reason.to_string(),
             });
@@ -217,7 +224,9 @@ pub(super) fn enumerate_generations(dir: &Path) -> Result<Vec<GenerationEntry>, 
                     .err()
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| "Data.db entry could not be resolved".to_string());
-                return Err(WarmError::ProbeEntry { path, reason });
+                // A racing removal / torn-down generation under the reader — the
+                // benign teardown variant (superseded_split), NOT a security signal.
+                return Err(WarmError::ProbeEntrySuperseded { path, reason });
             }
         }
     }
@@ -258,7 +267,12 @@ mod tests {
 
         let err = enumerate_generations(table.path())
             .expect_err("an escaping symlink Data.db must fail the probe, not enumerate");
-        assert!(matches!(err, WarmError::ProbeEntry { .. }), "got {err:?}");
+        // A containment escape is the SECURITY-relevant variant (issue #1430
+        // backstop), never the benign superseded/torn-down one.
+        assert!(
+            matches!(err, WarmError::ProbeEntryContainment { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -279,7 +293,12 @@ mod tests {
 
         let err = enumerate_generations(dir.path())
             .expect_err("an unstatable Data.db must fail the probe, not be skipped");
-        assert!(matches!(err, WarmError::ProbeEntry { .. }), "got {err:?}");
+        // A racing/torn-down (unstatable) entry is the BENIGN superseded variant,
+        // never the security-relevant containment one.
+        assert!(
+            matches!(err, WarmError::ProbeEntrySuperseded { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -331,10 +350,14 @@ mod tests {
         std::fs::write(&secret, &payload).unwrap();
         symlink(&secret, dir.path().join(MANIFEST_FILE)).unwrap();
 
-        // The direct helper must reject it outright.
+        // The direct helper must reject it outright — a containment escape is the
+        // security-relevant variant (issue #1430 backstop).
         let err = read_manifest_checked(dir.path())
             .expect_err("an escaping manifest.json must fail containment, not be read");
-        assert!(matches!(err, WarmError::ProbeEntry { .. }), "got {err:?}");
+        assert!(
+            matches!(err, WarmError::ProbeEntryContainment { .. }),
+            "got {err:?}"
+        );
 
         // The fast path (attacker supplies a `cached_manifest` matching the
         // secret's bytes, simulating a forged/leaked-then-replayed manifest)
@@ -343,7 +366,10 @@ mod tests {
         write_data(dir.path(), "nb-1-big-Data.db");
         let err = probe_generation_set(dir.path(), true, Some(&payload), &CancelFlag::new())
             .expect_err("a containment violation must abort the probe, not fall back");
-        assert!(matches!(err, WarmError::ProbeEntry { .. }), "got {err:?}");
+        assert!(
+            matches!(err, WarmError::ProbeEntryContainment { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
