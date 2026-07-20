@@ -145,6 +145,11 @@ pub struct TableDiscovery {
 fn entry_is_dir(entry: &std::fs::DirEntry) -> bool {
     match entry.file_type() {
         Ok(ft) if ft.is_dir() => true,
+        // A symlinked dir is INTENTIONALLY not followed/counted (this arm
+        // short-circuits before the `Path::is_dir` stat fallback below, which
+        // WOULD follow the link): a deliberate safety choice so the walk never
+        // descends a symlink into a snapshot/hardlink tree (or an out-of-tree
+        // target) and double-counts or loops. Plain files are likewise not dirs.
         Ok(ft) if ft.is_file() || ft.is_symlink() => false,
         // Unknown d_type or a file_type error: fall back to a stat.
         _ => entry.path().is_dir(),
@@ -199,6 +204,17 @@ pub fn discover_tables(data_dir: &Path) -> TableDiscovery {
             let Some(name) = name.to_str() else {
                 continue;
             };
+            // Defensive skip of any `snapshots`/`backups` dir sitting directly
+            // under the keyspace. In the REAL Cassandra layout these live UNDER
+            // the table dir (`<keyspace>/<table>/snapshots/<snap>/*-Data.db`,
+            // `<keyspace>/<table>/backups/…`), NOT as keyspace-level siblings, so
+            // this name-skip is largely belt-and-braces. The ACTUAL property that
+            // keeps a nested snapshot/backup `Data.db` from being counted is
+            // NON-RECURSION: the walk descends exactly two levels (keyspace →
+            // table) and `dir_has_data_db` inspects only a dir's DIRECT children,
+            // so a `<table>/snapshots/<snap>/*-Data.db` is never reached — the
+            // table dir is counted once for its own live `*-Data.db` and the
+            // nested snapshot tree is invisible to the walk.
             if name == "snapshots" || name == "backups" {
                 continue;
             }
@@ -621,23 +637,34 @@ mod tests {
         }
     }
 
-    /// Issue #2684 spec Requirement 2: a UUID-suffixed table dir counts exactly
-    /// once; `snapshots/`/`backups/` subdirs and a non-table entry are excluded;
-    /// and the walk is structural (readdir name check), never a content parse.
+    /// Issue #2684 spec Requirement 2, modeling the REAL on-disk layout: a
+    /// UUID-suffixed table dir counts EXACTLY ONCE even though it also contains
+    /// the genuine Cassandra `snapshots/`/`backups/` subtrees (which, in real
+    /// Cassandra, live UNDER the table dir — `<keyspace>/<table>/snapshots/<snap>/`
+    /// — as hardlinks to the live SSTables, NOT as keyspace-level siblings). The
+    /// nested snapshot/backup `Data.db` hardlinks must NOT be double-counted; the
+    /// non-recursive two-level walk (keyspace → table, direct-children `Data.db`
+    /// check) is what guarantees this. A dir with no direct `Data.db` is excluded.
     #[test]
     fn discover_counts_genuine_table_dirs_only() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let root = tmp.path();
-        // A UUID-suffixed table dir with a Data.db — the genuine table.
-        make_table_dir(root, "ks", "users-8f3a9c2e11114b0d9c7e2a1b3d4f5e6a", true);
-        // snapshots/ and backups/ sibling dirs directly under the keyspace must
-        // NOT be counted (even though they may contain Data.db hardlinks).
-        let snap = root.join("ks").join("snapshots").join("snap1");
-        std::fs::create_dir_all(&snap).expect("snapshots dir");
+        // A UUID-suffixed table dir with a live Data.db — the genuine table.
+        let table = "users-8f3a9c2e11114b0d9c7e2a1b3d4f5e6a";
+        make_table_dir(root, "ks", table, true);
+        let table_dir = root.join("ks").join(table);
+
+        // REAL LAYOUT: snapshots/ and backups/ live UNDER the table dir and hold
+        // hardlinked *-Data.db copies of the live SSTable. These nested Data.db
+        // files must NOT be counted (they are not the table's own live children,
+        // and the non-recursive walk never descends into them).
+        let snap = table_dir.join("snapshots").join("snap1");
+        std::fs::create_dir_all(&snap).expect("nested snapshots dir");
         std::fs::write(snap.join("nb-1-big-Data.db"), b"x").expect("snap data");
-        let backup = root.join("ks").join("backups");
-        std::fs::create_dir_all(&backup).expect("backups dir");
+        let backup = table_dir.join("backups").join("bkp1");
+        std::fs::create_dir_all(&backup).expect("nested backups dir");
         std::fs::write(backup.join("nb-1-big-Data.db"), b"x").expect("backup data");
+
         // A directory with NO Data.db — a non-table entry, excluded.
         make_table_dir(root, "ks", "not_a_table", false);
         // A stray plain file directly under the keyspace — excluded (not a dir).
@@ -646,7 +673,9 @@ mod tests {
         let d = discover_tables(root);
         assert_eq!(
             d.tables, 1,
-            "only the UUID-suffixed users table dir counts (snapshots/backups/non-table excluded)"
+            "the users table counts EXACTLY once — its nested snapshots/ and \
+             backups/ Data.db hardlinks are not double-counted (non-recursion), \
+             and the no-Data.db dir is excluded"
         );
         assert_eq!(d.keyspaces, 1, "one keyspace contains a genuine table");
     }
