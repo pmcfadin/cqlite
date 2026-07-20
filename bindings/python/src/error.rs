@@ -421,6 +421,10 @@ mod tests {
                 Error::InvalidFormat(_) => { /* Maps to CqliteError */ }
                 Error::UnsupportedFormat(_) => { /* Maps to CqliteError */ }
                 Error::UnsupportedVersion { .. } => { /* Maps to CqliteError */ }
+                // CommitLog reader (#2389) — not bound yet (v1 is library+CLI only),
+                // same Data-category handling as the sibling SSTable-format errors above.
+                Error::UnsupportedCommitLogVersion { .. } => { /* Maps to CqliteError */ }
+                Error::CorruptCommitLogFrame(_) => { /* Maps to CqliteError */ }
                 Error::InvalidPath(_) => { /* Maps to CqliteError */ }
                 Error::TypeConversion(_) => { /* Maps to CqliteError */ }
                 Error::Storage(_) => { /* Maps to CqliteError */ }
