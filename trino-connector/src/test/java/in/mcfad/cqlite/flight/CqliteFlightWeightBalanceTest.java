@@ -44,13 +44,66 @@ class CqliteFlightWeightBalanceTest {
                 TABLE, resp, "dc1", 8815, Optional.empty(), Set.of(), k);
     }
 
+    /**
+     * The balance fixture: SIX ranges that CONTIGUOUSLY TILE the whole signed-64-bit ring from
+     * {@link Long#MIN_VALUE} to {@link Long#MAX_VALUE} (each range's start is the previous range's
+     * end, half-open {@code (start, end]}), with deliberately unequal spans — three "heavy" ranges
+     * of ~8 units and three "light" ranges of ~1 unit, an 8× variation. Boundaries are chosen so
+     * each range's rotation head ({@code floorMod(startToken, 3)}) spreads over the three owners.
+     *
+     * <p>An overlapping fixture would be worthless evidence: {@link
+     * CqliteFlightSplitManager#validateRingCoverage} rejects overlaps, so such a topology can never
+     * reach {@code buildSplits} in production ({@code ringTilesTheRingExactlyOnce} asserts this
+     * fixture passes that guard).
+     */
+    private static final long[] TILING_BOUNDARIES = {
+        Long.MIN_VALUE,
+        -8540159293384051678L,
+        -7856946549913327548L,
+        -2391244602147534484L,
+        3074457345618258583L,
+        8540159293384051650L,
+        Long.MAX_VALUE,
+    };
+
+    /** The contiguous unequal-span tiling above, as read-replica ranges sharing one owner set. */
+    private static List<ReplicaInfo> contiguousUnequalRing() {
+        List<ReplicaInfo> ranges = new ArrayList<>();
+        for (int i = 0; i + 1 < TILING_BOUNDARIES.length; i++) {
+            ranges.add(new ReplicaInfo(
+                    Long.toString(TILING_BOUNDARIES[i]),
+                    Long.toString(TILING_BOUNDARIES[i + 1]),
+                    Map.of("dc1", OWNERS)));
+        }
+        return ranges;
+    }
+
+    /**
+     * The balance fixture is a topology that can actually reach {@code buildSplits}: it tiles the
+     * ring exactly once, so the fail-closed coverage guard accepts it (no overlap, no gap). Also
+     * pins the deliberate span inequality the balance property is claimed under (≥8×).
+     */
+    @Test
+    void balanceFixtureTilesTheRingExactlyOnceWithUnequalSpans() {
+        List<ReplicaInfo> ranges = contiguousUnequalRing();
+        CqliteFlightSplitManager.validateRingCoverage(ranges); // must not throw
+        BigInteger max = BigInteger.ZERO;
+        BigInteger min = null;
+        for (ReplicaInfo r : ranges) {
+            BigInteger span = TokenRangeSlicer.span(r.startToken(), r.endToken());
+            max = max.max(span);
+            min = min == null ? span : min.min(span);
+        }
+        assertTrue(max.compareTo(min.multiply(BigInteger.valueOf(8))) >= 0,
+                "fixture spans vary by at least 8x (max " + max + ", min " + min + ")");
+    }
+
     @Test
     void perOwnerSpanBalancesWithin1_25xOfMeanUnderUnequalWeights() {
-        // Six ranges, spans varying 8× (800 vs 100). Start tokens set each range's rotation head
-        // (floorMod(start, 3)) so the heavy ranges' remainder slice spreads across all owners.
-        List<ReplicaInfo> ranges = List.of(
-                range(0, 800), range(1, 800), range(2, 800),   // heads 0,1,2 (heavy)
-                range(3, 100), range(4, 100), range(5, 100));  // heads 0,1,2 (light)
+        // A CONTIGUOUS ring tiling (MIN..MAX) with 8x-unequal spans — the only shape that reaches
+        // buildSplits in production. Boundaries set each range's rotation head (floorMod(start, 3))
+        // so heavy and light ranges' remainder slices spread across all three owners.
+        List<ReplicaInfo> ranges = contiguousUnequalRing();
         var splits = build(ringOf(ranges), 4);
         assertEquals(6 * 4, splits.size(), "K=4 slices per range");
 
@@ -121,16 +174,55 @@ class CqliteFlightWeightBalanceTest {
     }
 
     @Test
-    void aggregateSplitWeightIsTheClampedSumOfItsSlices() {
+    void aggregateSplitWeightIsTheClampedSumOfItsRanges() {
+        // The aggregate path builds at K=1 (see CqliteFlightSplitManager#getSplits), so its
+        // members are PARENT ranges. Well below the aggregate cap → strictly proportional.
         List<ReplicaInfo> ranges = List.of(range(0, 400), range(1000, 400), range(2000, 400));
-        List<CqliteFlightSplit> slices = build(ringOf(ranges), 4);
-        double expectedSum = slices.stream().mapToDouble(CqliteFlightSplit::weightProportion).sum();
+        List<CqliteFlightSplit> members = build(ringOf(ranges), 1);
+        double expectedSum = members.stream().mapToDouble(CqliteFlightSplit::weightProportion).sum();
+        assertTrue(expectedSum < CqliteFlightAggregateSplit.MAX_AGGREGATE_WEIGHT_PROPORTION,
+                "this fixture is in the un-saturated regime");
         CqliteFlightAggregateSplit agg = new CqliteFlightAggregateSplit(
-                "ks", "t", "ddl", new ArrayList<>(slices), Optional.empty(), "{}", "{}");
+                "ks", "t", "ddl", new ArrayList<>(members), Optional.empty(), "{}", "{}");
         assertEquals(SplitWeight.fromProportion(CqliteFlightSplit.clampProportion(expectedSum)),
-                agg.getSplitWeight(), "aggregate weight is the clamped sum of its slice proportions");
+                agg.getSplitWeight(), "aggregate weight is the clamped sum of its range proportions");
         assertTrue(agg.getSplitWeight().getRawValue()
-                        >= slices.get(0).getSplitWeight().getRawValue(),
-                "the fan-out weight is at least a single slice's weight");
+                        >= members.get(0).getSplitWeight().getRawValue(),
+                "the fan-out weight is at least a single range's weight");
+    }
+
+    /**
+     * The aggregate weight's clamp boundary and SATURATED regime (issue #2680 roborev). Weights are
+     * normalized so a mean-span member is 1.0 → the raw sum equals the member count. A fan-out just
+     * under the cap stays strictly proportional; a larger one saturates at
+     * {@link CqliteFlightAggregateSplit#MAX_AGGREGATE_WEIGHT_PROPORTION} rather than growing toward
+     * the 1000 single-split cap (past a node's admission budget more weight changes no scheduling
+     * decision — see that constant's rationale).
+     */
+    @Test
+    void aggregateWeightSaturatesAtTheAggregateCap() {
+        int cap = (int) CqliteFlightAggregateSplit.MAX_AGGREGATE_WEIGHT_PROPORTION;
+        SplitWeight justUnder = aggregateWeightOverEqualRanges(cap - 10);
+        assertEquals(SplitWeight.fromProportion(cap - 10.0), justUnder,
+                "below the cap the fan-out weight is exactly the member count (mean-span members)");
+
+        SplitWeight saturated = aggregateWeightOverEqualRanges(cap * 3);
+        assertEquals(SplitWeight.fromProportion(CqliteFlightAggregateSplit.MAX_AGGREGATE_WEIGHT_PROPORTION),
+                saturated, "a 3x-cap fan-out saturates at the aggregate cap, not at 1000");
+        assertTrue(saturated.getRawValue()
+                        < SplitWeight.fromProportion(CqliteFlightSplit.MAX_WEIGHT_PROPORTION).getRawValue(),
+                "the saturated aggregate weight stays below the single-split maximum");
+    }
+
+    /** The aggregate weight over {@code count} equal-span (hence mean-span, proportion 1.0) ranges. */
+    private static SplitWeight aggregateWeightOverEqualRanges(int count) {
+        List<ReplicaInfo> ranges = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            ranges.add(range(i * 1000L, 400));
+        }
+        List<CqliteFlightSplit> members = build(ringOf(ranges), 1);
+        assertEquals(count, members.size(), "one member per range at K=1");
+        return new CqliteFlightAggregateSplit(
+                "ks", "t", "ddl", members, Optional.empty(), "{}", "{}").getSplitWeight();
     }
 }
