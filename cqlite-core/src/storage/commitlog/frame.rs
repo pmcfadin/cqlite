@@ -63,8 +63,6 @@ pub struct FrameWalker<'a> {
     section_end: usize,
     /// Whether we are positioned inside an open section.
     in_section: bool,
-    /// Set when the current section's body is torn (marker points past EOF).
-    torn_section: bool,
     /// Set when the walk ended on a torn tail rather than clean padding.
     truncated_end: bool,
     /// Terminal flag once [`FrameStep::End`]/[`FrameStep::Truncated`] is reached.
@@ -85,7 +83,6 @@ impl<'a> FrameWalker<'a> {
             cursor: 0,
             section_end: 0,
             in_section: false,
-            torn_section: false,
             truncated_end: false,
             done: false,
         }
@@ -194,7 +191,6 @@ impl<'a> FrameWalker<'a> {
             self.section_end = self.bytes.len();
             self.cursor = pos + SYNC_MARKER_SIZE;
             self.in_section = true;
-            self.torn_section = true;
             self.truncated_end = true;
             return Ok(Some(()));
         }
@@ -207,7 +203,6 @@ impl<'a> FrameWalker<'a> {
         self.section_end = next;
         self.cursor = pos + SYNC_MARKER_SIZE;
         self.in_section = true;
-        self.torn_section = false;
         Ok(Some(()))
     }
 
@@ -254,7 +249,14 @@ impl<'a> FrameWalker<'a> {
         }
         // Record extends past the section boundary but is within the file: the
         // marker/section framing disagrees with the record length — corrupt.
-        if end > self.section_end && !self.torn_section {
+        // No `&& !self.torn_section` guard here: in a torn section
+        // section_end == bytes.len() == len, so `end > self.section_end`
+        // would imply `end > len`, which the EOF check above already caught
+        // and returned Truncated for — this branch is unreachable with
+        // torn_section true regardless, so an explicit exemption clause only
+        // obscured that invariant and invited a future edit to make it live
+        // and wrong (roborev finding, review-first pass).
+        if end > self.section_end {
             return Err(Error::CorruptCommitLogFrame(format!(
                 "record at offset {cur} (len {size}) overruns section end {}",
                 self.section_end

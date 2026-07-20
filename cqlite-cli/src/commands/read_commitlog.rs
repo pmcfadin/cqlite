@@ -63,32 +63,55 @@ struct UpdateView {
     has_partition_deletion: bool,
 }
 
-/// `(views, mutation_count, truncated, errored, limited)`. `truncated`/
-/// `errored` are only meaningful when `limited` is false — if `--limit` cut
-/// iteration short, the segment's true tail state (torn? corrupt?) was never
-/// reached, so reporting `false` for either would be an authoritative-looking
-/// "clean" verdict that was never actually determined (roborev finding,
-/// review-first pass).
-fn collect(
-    reader: &CommitLogReader,
-    limit: Option<usize>,
-) -> (Vec<UpdateView>, usize, bool, bool, bool) {
+/// Result of draining the mutation stream for display. `truncated`/`errored`
+/// are only meaningful when `limited` is false — if `--limit` cut iteration
+/// short, the segment's true tail state (torn? corrupt?) was never reached,
+/// so reporting `false` for either would be an authoritative-looking "clean"
+/// verdict that was never actually determined (roborev finding, review-first
+/// pass). A growing tuple return here had become hard to read across three
+/// roborev rounds of new fields — switched to a named struct.
+struct Collected {
+    views: Vec<UpdateView>,
+    mutation_count: usize,
+    truncated: bool,
+    errored: bool,
+    limited: bool,
+    /// `false` if ANY mutation in the stream had `updates_complete == false`
+    /// — i.e. a batch mutation whose partition updates were only partially
+    /// reported (the common case for the no-schema CLI path: a multi-table
+    /// batch previously reported only its first update with no signal that
+    /// more existed) (roborev finding, review-first pass).
+    all_updates_complete: bool,
+}
+
+fn collect(reader: &CommitLogReader, limit: Option<usize>) -> Collected {
     // `--limit 0` must yield zero results, not "the first mutation slipped in
     // before the bound check ran" — the per-mutation/per-update checks below
     // only fire after already pushing, so 0 needs its own short-circuit
     // (roborev finding, review-first pass).
     if limit == Some(0) {
-        return (Vec::new(), 0, false, false, true);
+        return Collected {
+            views: Vec::new(),
+            mutation_count: 0,
+            truncated: false,
+            errored: false,
+            limited: true,
+            all_updates_complete: true,
+        };
     }
     let mut views = Vec::new();
     let mut mutation_count = 0usize;
     let mut errored = false;
     let mut limited = false;
+    let mut all_updates_complete = true;
     let mut it = reader.mutations();
     for res in it.by_ref() {
         match res {
             Ok(mutation) => {
                 mutation_count += 1;
+                if !mutation.updates_complete {
+                    all_updates_complete = false;
+                }
                 for upd in &mutation.updates {
                     views.push(UpdateView {
                         table_id: upd.table_id_uuid(),
@@ -134,7 +157,14 @@ fn collect(
             }
         }
     }
-    (views, mutation_count, it.truncated(), errored, limited)
+    Collected {
+        views,
+        mutation_count,
+        truncated: it.truncated(),
+        errored,
+        limited,
+        all_updates_complete,
+    }
 }
 
 fn render_text(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
@@ -147,19 +177,26 @@ fn render_text(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
         desc.compression_class.as_deref().unwrap_or("none")
     );
 
-    let (views, mutation_count, truncated, errored, limited) = collect(reader, limit);
-    println!("  mutations:   {mutation_count}");
-    if limited {
+    let c = collect(reader, limit);
+    println!("  mutations:   {}", c.mutation_count);
+    if c.limited {
         println!("  truncated:   not determined (--limit stopped before the segment's true end)");
     } else {
-        println!("  truncated:   {truncated}");
+        println!("  truncated:   {}", c.truncated);
     }
-    if errored {
+    if c.errored {
         println!("  note:        stream ended on a corrupt record (typed decode error)");
+    }
+    if !c.all_updates_complete {
+        println!(
+            "  note:        at least one mutation's partition updates were only \
+             partially reported (no schema, or an unmodeled construct — see \
+             --format json for per-update rows_decoded)"
+        );
     }
     println!();
 
-    for (i, v) in views.iter().enumerate() {
+    for (i, v) in c.views.iter().enumerate() {
         println!("[{i}] table={} pk=0x{}", v.table_id, v.partition_key_hex);
         if v.has_partition_deletion {
             println!("    partition-deletion");
@@ -179,7 +216,7 @@ fn render_text(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
     // silently exited 0 (roborev finding, review-first pass). Output above
     // (the mutations decoded before the corruption) is already on stdout;
     // this only affects the process exit code + the one-line stderr report.
-    if errored {
+    if c.errored {
         anyhow::bail!(
             "CommitLog stream ended on a corrupt record (typed decode error) — \
              output above reflects only the mutations decoded before the corruption"
@@ -190,8 +227,9 @@ fn render_text(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
 
 fn render_json(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
     let desc = reader.descriptor();
-    let (views, mutation_count, truncated, errored, limited) = collect(reader, limit);
-    let updates: Vec<serde_json::Value> = views
+    let c = collect(reader, limit);
+    let updates: Vec<serde_json::Value> = c
+        .views
         .iter()
         .map(|v| {
             serde_json::json!({
@@ -209,12 +247,12 @@ fn render_json(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
     // truncated/decode_error, plus an explicit `limited` marker, rather than
     // an authoritative-looking "clean" verdict that was never determined
     // (roborev finding, review-first pass).
-    let (truncated_json, decode_error_json) = if limited {
+    let (truncated_json, decode_error_json) = if c.limited {
         (serde_json::Value::Null, serde_json::Value::Null)
     } else {
         (
-            serde_json::Value::Bool(truncated),
-            serde_json::Value::Bool(errored),
+            serde_json::Value::Bool(c.truncated),
+            serde_json::Value::Bool(c.errored),
         )
     };
     let out = serde_json::json!({
@@ -223,17 +261,22 @@ fn render_json(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
             "id": desc.id,
             "compression": desc.compression_class,
         },
-        "mutation_count": mutation_count,
+        "mutation_count": c.mutation_count,
         "truncated": truncated_json,
         "decode_error": decode_error_json,
-        "limited": limited,
+        "limited": c.limited,
+        // false when at least one mutation's partition updates were only
+        // partially reported (no schema, or an unmodeled construct) — the
+        // common no-schema CLI path with a multi-table batch mutation
+        // (roborev finding, review-first pass).
+        "all_updates_complete": c.all_updates_complete,
         "updates": updates,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
     // Non-zero exit on mid-stream corruption, same rationale as render_text —
     // the JSON (already valid on stdout, including "decode_error": true) is
     // unaffected; only the process exit code + stderr error report change.
-    if errored {
+    if c.errored {
         anyhow::bail!(
             "CommitLog stream ended on a corrupt record (typed decode error) — \
              see \"decode_error\": true in the JSON above"

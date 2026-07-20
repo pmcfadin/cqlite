@@ -61,7 +61,18 @@ const CELL_USE_ROW_TTL: u8 = 0x10;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mutation {
     /// The partition updates carried by this mutation (one per table touched).
+    /// May be a PREFIX of the mutation's true update count — see
+    /// [`Mutation::updates_complete`].
     pub updates: Vec<PartitionUpdate>,
+    /// `false` when a batch mutation declared more partition updates than
+    /// `updates` contains — the loop stops at the first update whose body
+    /// isn't fully consumed (no schema, or an unmodeled construct), since a
+    /// partial decode can't locate the next update's offset without the
+    /// schema. This is the common case for `open()` with no schemas: a
+    /// multi-table batch silently reported only its first update with no
+    /// signal that more existed, until this field was added (roborev
+    /// finding, review-first pass).
+    pub updates_complete: bool,
 }
 
 /// A single-table partition update within a mutation.
@@ -140,20 +151,27 @@ pub fn decode_mutation(body: &[u8], schemas: &SchemaSet) -> Result<Mutation> {
         )));
     }
     let mut updates = Vec::with_capacity(num_updates.min(1024) as usize);
+    let mut updates_complete = true;
     for _ in 0..num_updates {
         // Each update is decoded either fully (cursor left at the next update) or
         // partially (structural fields only — no schema, or an unmodeled
         // construct). A partial decode cannot locate the following update's
         // offset without the schema, so we stop the update loop and return what
         // we have. The record's frame CRC already proved the bytes are intact;
-        // an under-reported batch is honest, not corruption.
+        // an under-reported batch is honest, not corruption — updates_complete
+        // makes that honesty visible to the caller instead of a silent
+        // truncation (roborev finding, review-first pass).
         let (update, consumed_fully) = decode_partition_update(&mut c, schemas)?;
         updates.push(update);
         if !consumed_fully {
+            updates_complete = false;
             break;
         }
     }
-    Ok(Mutation { updates })
+    Ok(Mutation {
+        updates,
+        updates_complete,
+    })
 }
 
 fn decode_partition_update(
@@ -169,7 +187,16 @@ fn decode_partition_update(
         table_id,
         partition_key,
         column_names: Vec::new(),
-        has_partition_deletion: false,
+        // Set from the authoritative iter_flags bit immediately, before any
+        // early return — has_partition_deletion is a structural fact readable
+        // right here, independent of rows_decoded, so it must not silently
+        // default to false on the static-row/empty-partition paths below.
+        // Those early returns previously left it false even when the
+        // partition genuinely carried a deletion, reporting an
+        // authoritative-looking "not deleted" to callers (CLI JSON, library
+        // consumers) that was simply never checked (roborev finding, review-
+        // first pass).
+        has_partition_deletion: iter_flags & ITER_HAS_PARTITION_DELETION != 0,
         rows: Vec::new(),
         rows_decoded: false,
     };
@@ -204,8 +231,6 @@ fn decode_partition_update(
         return Ok((update, false));
     }
     update.column_names = read_column_names(c)?;
-
-    update.has_partition_deletion = iter_flags & ITER_HAS_PARTITION_DELETION != 0;
 
     // Constructs we do not fully model: bail structurally (honest, no guessing).
     // The cursor is left mid-body, so this update is NOT fully consumed.
