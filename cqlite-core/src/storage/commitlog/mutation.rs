@@ -187,9 +187,21 @@ fn decode_partition_update(
     let _min_ttl = c.uvint()?;
 
     let has_static = iter_flags & ITER_HAS_STATIC_ROW != 0;
-    // Static columns block precedes regular columns only when static is present.
     if has_static {
-        let _static_cols = read_column_names(c)?;
+        // Static rows: NOT modeled. Whether Cassandra's
+        // UnfilteredRowIteratorSerializer writes a static-columns block gated
+        // on this per-partition iterator flag (the prior assumption here), or
+        // unconditionally based on the table's static-column set regardless
+        // of whether THIS iterator instance carries a static row, is
+        // unverified against real Cassandra 5.0 source (unavailable in this
+        // environment — see the appendix-h doc). Bail BEFORE reading any
+        // columns block at all: under either assumption, guessing wrong here
+        // would misalign the cursor and — worse — would leave
+        // update.column_names populated with misparsed bytes that then get
+        // surfaced to callers (including the CLI's structural-only output)
+        // as if authoritative, even though rows_decoded is false (roborev
+        // finding, review-first pass).
+        return Ok((update, false));
     }
     update.column_names = read_column_names(c)?;
 
@@ -197,7 +209,7 @@ fn decode_partition_update(
 
     // Constructs we do not fully model: bail structurally (honest, no guessing).
     // The cursor is left mid-body, so this update is NOT fully consumed.
-    if update.has_partition_deletion || has_static {
+    if update.has_partition_deletion {
         return Ok((update, false));
     }
 
@@ -265,14 +277,14 @@ fn decode_rows(
             let _ext = c.u8().map_err(|_| Unsupported)?;
         }
 
-        // Clustering values: schema.clustering is guaranteed empty here (see
-        // the bail above), so this never executes — kept for signature/shape
-        // stability until clustering decode is implemented as a follow-up.
-        let mut clustering = Vec::with_capacity(schema.clustering.len());
-        for col in &schema.clustering {
-            let v = read_typed_value(c, &col.type_name)?;
-            clustering.push(v);
-        }
+        // Clustering values: schema.clustering is guaranteed empty at this
+        // point (decode_rows bails to structural-only above whenever it
+        // isn't), so there is nothing to read here. No dead read-loop is kept
+        // around it — re-enabling clustering support means deliberately
+        // writing the ClusteringPrefix presence-header decode (see the bail
+        // site's comment), not just deleting the guard (roborev finding,
+        // review-first pass).
+        let clustering = Vec::new();
 
         // Liveness.
         if flags & ROW_HAS_TIMESTAMP != 0 {

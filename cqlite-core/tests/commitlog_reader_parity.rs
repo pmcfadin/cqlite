@@ -168,6 +168,7 @@ fn decoded_mutations_match_inserted_set() {
 #[test]
 fn truncated_segment_returns_clean_prefix_and_flags_truncation() {
     let dir = commitlog_dir();
+    let gt = load_ground_truth(&dir);
     let clean = find_fixture(&dir, "truncated-");
     let reader = CommitLogReader::open(&clean).expect("open truncated segment");
 
@@ -184,7 +185,19 @@ fn truncated_segment_returns_clean_prefix_and_flags_truncation() {
             Err(_) => saw_err = true,
         }
     }
-    assert!(count > 0, "some mutations decode before the tear");
+    // The fixture generator tears ~40 bytes before the clean end, which its
+    // own comment documents as landing "after several clean records" — i.e.
+    // only the last record is torn. Asserting a real lower bound (derived
+    // from the ground truth, not a guess) catches a regression that decodes
+    // far fewer records than it should; `count > 0` alone would pass even if
+    // the reader dropped 90% of the pre-tear records (roborev finding,
+    // review-first pass).
+    assert!(
+        count >= gt.inserts.len() - 1,
+        "expected at least {} of {} inserts to decode before the tear, got {count}",
+        gt.inserts.len() - 1,
+        gt.inserts.len()
+    );
     // Exactly one of these outcomes must hold, matching the comment above: the
     // walker either reaches a torn tail cleanly (truncated()) or the fixture's
     // cut point lands mid-record and surfaces as a typed Err first. Asserting

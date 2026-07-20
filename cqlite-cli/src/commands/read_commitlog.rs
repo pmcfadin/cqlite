@@ -81,6 +81,17 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> (Vec<UpdateView>, 
                         row_count: upd.rows.len(),
                         has_partition_deletion: upd.has_partition_deletion,
                     });
+                    // Also bound emitted view rows by `limit`, not just the
+                    // mutation count: a single mutation can carry many
+                    // updates, and this CLI is the memory-bounded surface the
+                    // streaming design is meant to protect — `--limit 1`
+                    // must not still materialize thousands of rows from one
+                    // mutation (roborev finding, review-first pass).
+                    if let Some(n) = limit {
+                        if views.len() >= n {
+                            break;
+                        }
+                    }
                 }
             }
             Err(_) => {
@@ -91,7 +102,12 @@ fn collect(reader: &CommitLogReader, limit: Option<usize>) -> (Vec<UpdateView>, 
             }
         }
         if let Some(n) = limit {
-            if mutation_count >= n {
+            // Stop on whichever bound is hit first: mutation_count (the
+            // documented meaning of --limit) or views.len() (the actual
+            // memory/display bound the inner break above enforces per
+            // mutation — without this, a later mutation could still push
+            // views past n even after an earlier one was capped).
+            if mutation_count >= n || views.len() >= n {
                 break;
             }
         }
@@ -130,6 +146,19 @@ fn render_text(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
             v.row_count, v.rows_decoded
         );
     }
+    // Mid-stream corruption must exit non-zero, matching this module's own
+    // documented "fails closed... surfaced here as a non-zero exit" claim —
+    // that previously held only for open-time failures (compressed/encrypted/
+    // unsupported-version), not a corrupt record found while streaming, which
+    // silently exited 0 (roborev finding, review-first pass). Output above
+    // (the mutations decoded before the corruption) is already on stdout;
+    // this only affects the process exit code + the one-line stderr report.
+    if errored {
+        anyhow::bail!(
+            "CommitLog stream ended on a corrupt record (typed decode error) — \
+             output above reflects only the mutations decoded before the corruption"
+        );
+    }
     Ok(())
 }
 
@@ -161,6 +190,15 @@ fn render_json(reader: &CommitLogReader, limit: Option<usize>) -> Result<()> {
         "updates": updates,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
+    // Non-zero exit on mid-stream corruption, same rationale as render_text —
+    // the JSON (already valid on stdout, including "decode_error": true) is
+    // unaffected; only the process exit code + stderr error report change.
+    if errored {
+        anyhow::bail!(
+            "CommitLog stream ended on a corrupt record (typed decode error) — \
+             see \"decode_error\": true in the JSON above"
+        );
+    }
     Ok(())
 }
 

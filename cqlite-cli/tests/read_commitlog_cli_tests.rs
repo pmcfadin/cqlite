@@ -17,17 +17,25 @@ fn commitlog_dir() -> PathBuf {
 }
 
 fn clean_fixture() -> PathBuf {
+    find_fixture("clean-")
+}
+
+fn corrupt_crc_fixture() -> PathBuf {
+    find_fixture("corrupt-crc-")
+}
+
+fn find_fixture(prefix: &str) -> PathBuf {
     let dir = commitlog_dir();
     for entry in std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read commitlog dir {}: {e}", dir.display()))
         .flatten()
     {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("clean-") && name.ends_with(".log") {
+        if name.starts_with(prefix) && name.ends_with(".log") {
             return entry.path();
         }
     }
-    panic!("no clean-*.log fixture under {}", dir.display());
+    panic!("no {prefix}*.log fixture under {}", dir.display());
 }
 
 /// Ground-truth table id recorded alongside the fixture.
@@ -109,4 +117,35 @@ fn read_commitlog_text_reports_segment_header() {
         "text output must report the segment header, got: {stdout}"
     );
     assert!(stdout.contains("version:     7"), "reports version 7");
+}
+
+/// Requirement: a mid-stream corrupt record must exit non-zero, not silently
+/// succeed with a `decode_error` field buried in the output (roborev finding,
+/// review-first pass) — a script piping this command must be able to detect
+/// the failure from the exit code alone.
+#[test]
+fn read_commitlog_exits_non_zero_on_corrupt_stream() {
+    let fixture = corrupt_crc_fixture();
+    let output = Command::cargo_bin("cqlite")
+        .expect("cqlite binary should be built")
+        .arg("--quiet")
+        .arg("read-commitlog")
+        .arg(&fixture)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("read-commitlog command should execute");
+
+    assert!(
+        !output.status.success(),
+        "a corrupt-CRC segment must exit non-zero, not silently succeed"
+    );
+    // The already-decoded prefix is still valid JSON on stdout.
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must still be valid JSON");
+    assert_eq!(
+        parsed["decode_error"], true,
+        "decode_error must be reported"
+    );
 }

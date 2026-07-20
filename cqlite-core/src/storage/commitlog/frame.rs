@@ -311,3 +311,78 @@ fn read_i32_be(b: &[u8], off: usize) -> i32 {
 fn read_u32_be(b: &[u8], off: usize) -> u32 {
     u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SEGMENT_ID: i64 = 1234;
+
+    fn push_marker(buf: &mut Vec<u8>, pos: usize, next_marker: i32) {
+        buf.extend_from_slice(&next_marker.to_be_bytes());
+        buf.extend_from_slice(&marker_crc(SEGMENT_ID, pos).to_be_bytes());
+    }
+
+    fn push_record(buf: &mut Vec<u8>, body: &[u8]) {
+        let size = body.len() as i32;
+        let size_bytes = size.to_be_bytes();
+        let mut h = crc32fast::Hasher::new();
+        h.update(&size_bytes);
+        let size_crc = h.finalize();
+        buf.extend_from_slice(&size_bytes);
+        buf.extend_from_slice(&size_crc.to_be_bytes());
+        buf.extend_from_slice(body);
+        let mut h = crc32fast::Hasher::new();
+        h.update(&size_bytes);
+        h.update(body);
+        buf.extend_from_slice(&h.finalize().to_be_bytes());
+    }
+
+    /// Regression for the roborev finding that the `SectionDone` fix (a
+    /// non-final section's padding must finish THAT section, not the whole
+    /// segment) had zero test coverage — every committed fixture is
+    /// single-section. Builds a real two-section segment byte-for-byte per
+    /// this module's own documented layout: section 1 (one record + zero
+    /// padding to the next marker), section 2 (one record, then a clean
+    /// natural end at true EOF).
+    #[test]
+    fn walks_records_across_multiple_sync_sections() {
+        let mut buf = Vec::new();
+        // Section 1: marker at 0, one record, 8 bytes of zero padding.
+        let record1 = b"section-one-record";
+        push_marker(&mut buf, 0, 0 /* placeholder, patched below */);
+        push_record(&mut buf, record1);
+        buf.extend_from_slice(&[0u8; 8]); // padding to the next marker
+        let section2_marker_pos = buf.len();
+        // Patch section 1's marker to point at section 2's marker (its own
+        // section_end), now that we know the offset.
+        let next1 = section2_marker_pos as i32;
+        buf[0..4].copy_from_slice(&next1.to_be_bytes());
+        buf[4..8].copy_from_slice(&marker_crc(SEGMENT_ID, 0).to_be_bytes());
+
+        // Section 2: marker, one record, then true EOF (no trailing padding
+        // needed — section_end == bytes.len() makes this the final section).
+        let record2 = b"section-two-record";
+        let record2_start = section2_marker_pos + SYNC_MARKER_SIZE;
+        let final_len = record2_start + 4 + 4 + record2.len() + 4;
+        push_marker(&mut buf, section2_marker_pos, final_len as i32);
+        push_record(&mut buf, record2);
+        assert_eq!(buf.len(), final_len, "test construction sanity check");
+
+        let mut walker = FrameWalker::new(&buf, SEGMENT_ID, 0);
+        let mut records = Vec::new();
+        loop {
+            match walker.next_frame().expect("no corruption in this fixture") {
+                FrameStep::Record(b) => records.push(b.to_vec()),
+                FrameStep::End => break,
+                FrameStep::Truncated => panic!("expected a clean end, not Truncated"),
+            }
+        }
+        assert_eq!(
+            records,
+            vec![record1.to_vec(), record2.to_vec()],
+            "both sections' records must be yielded — a regression that treats \
+             section 1's padding as segment-end would silently drop record2"
+        );
+    }
+}
