@@ -87,22 +87,26 @@ struct FieldVisitor {
 
 impl Visit for FieldVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
-        self.fields.insert(field.name().to_string(), value.to_string());
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
         if field.name() == "snapshot_generation" {
             self.snapshot_generation = Some(value);
         }
-        self.fields.insert(field.name().to_string(), value.to_string());
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields.insert(field.name().to_string(), value.to_string());
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields.insert(field.name().to_string(), value.to_string());
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
@@ -128,11 +132,14 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
         if !visitor.fields.contains_key(ABORT_REASON_FIELD) {
             return;
         }
-        self.events.lock().expect("events lock").push(CapturedEvent {
-            level: *event.metadata().level(),
-            fields: visitor.fields,
-            snapshot_generation: visitor.snapshot_generation,
-        });
+        self.events
+            .lock()
+            .expect("events lock")
+            .push(CapturedEvent {
+                level: *event.metadata().level(),
+                fields: visitor.fields,
+                snapshot_generation: visitor.snapshot_generation,
+            });
     }
 }
 
@@ -221,7 +228,10 @@ fn ticket_bytes(snapshot: Option<&str>) -> Vec<u8> {
 fn make_snapshot(table_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let dst = table_dir.join("snapshots").join(name);
     std::fs::create_dir_all(&dst).expect("mk snapshot dir");
-    for entry in std::fs::read_dir(table_dir).expect("read table dir").flatten() {
+    for entry in std::fs::read_dir(table_dir)
+        .expect("read table dir")
+        .flatten()
+    {
         let path = entry.path();
         if path.is_file() {
             let target = dst.join(entry.file_name());
@@ -315,11 +325,7 @@ fn benign_teardown_emits_debug_event_with_nonnull_generation() {
     let abort = events
         .iter()
         .find(|e| e.abort_reason() == Some("superseded_split"))
-        .unwrap_or_else(|| {
-            panic!(
-                "expected a superseded_split abort event, captured: {events:?}"
-            )
-        });
+        .unwrap_or_else(|| panic!("expected a superseded_split abort event, captured: {events:?}"));
 
     // (1) reason-appropriate LEVEL: a benign teardown logs at DEBUG.
     assert_eq!(
@@ -382,9 +388,7 @@ fn containment_escape_emits_error_event_with_context() {
     let abort = events
         .iter()
         .find(|e| e.abort_reason() == Some("internal"))
-        .unwrap_or_else(|| {
-            panic!("expected an internal abort event, captured: {events:?}")
-        });
+        .unwrap_or_else(|| panic!("expected an internal abort event, captured: {events:?}"));
 
     // (1) reason-appropriate LEVEL: a genuine internal fault logs at ERROR.
     assert_eq!(
