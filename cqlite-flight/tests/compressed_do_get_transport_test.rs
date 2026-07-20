@@ -77,25 +77,39 @@ const BLOB_DDL: &str = "CREATE TABLE test_comp.incompressible_uncompressed_chunk
 
 // ======================== fixture gating ========================
 
-/// Resolve a `test_comp` table directory, or report why the case must be skipped.
+/// Whether an absent fixture must HARD-FAIL rather than skip.
 ///
-/// Under `CQLITE_REQUIRE_FIXTURES=1` an absent fixture is a HARD FAILURE naming
-/// the missing table instead of a skip, so a lane that is supposed to have the
-/// corpus can never go green vacuously.
-fn fixture_or_skip(table: &str) -> Option<PathBuf> {
+/// Matches the repo-wide predicate (`cqlite-core/tests/decompressed_chunk_cache_tests.rs`):
+/// only `1`/`true`/`TRUE` mean require-fixtures, so a lane that explicitly sets
+/// `CQLITE_REQUIRE_FIXTURES=0` stays lenient instead of hard-failing.
+fn require_fixtures() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
+/// Resolve a `test_comp` table, or report why the case must be skipped.
+///
+/// The lookup walks every candidate `sstables/` root (env then in-repo) and
+/// returns the root the fixture was ACTUALLY found under, so the service and the
+/// golden always read the same corpus. Under `CQLITE_REQUIRE_FIXTURES=1` an
+/// absent fixture is a HARD FAILURE naming the missing table instead of a skip,
+/// so a lane that is supposed to have the corpus can never go green vacuously.
+fn fixture_or_skip(table: &str) -> Option<fixture_support::ResolvedFixture> {
     match fixture_support::table_dir_by_prefix(KEYSPACE, table, BIG_TAG) {
-        Some(dir) => Some(dir),
+        Some(found) => Some(found),
         None => {
-            let root = fixture_support::sstables_root_or_repo_default();
+            let roots: Vec<String> = fixture_support::candidate_sstables_roots()
+                .iter()
+                .map(|r| r.display().to_string())
+                .collect();
             let msg = format!(
-                "{KEYSPACE}.{table}: no <{table}-*>/{BIG_TAG}-Data.db under {} \
+                "{KEYSPACE}.{table}: no <{table}-*>/{BIG_TAG}-Data.db under any of [{}] \
                  (compressed corpus absent)",
-                root.display()
+                roots.join(", ")
             );
-            assert!(
-                std::env::var_os("CQLITE_REQUIRE_FIXTURES").is_none(),
-                "CQLITE_REQUIRE_FIXTURES=1: {msg}"
-            );
+            assert!(!require_fixtures(), "CQLITE_REQUIRE_FIXTURES=1: {msg}");
             eprintln!("SKIP: {msg}");
             None
         }
@@ -265,6 +279,17 @@ fn golden_cells<T>(
     out
 }
 
+/// Rows the server ACTUALLY emitted, summed across batches before any keying.
+///
+/// The `(pk, ck)`-keyed decode maps below COLLAPSE duplicates, so a
+/// chunk-stitching regression that re-emits a chunk (stitch offset restart, an
+/// overlapping window) would produce identical tuples that dedup away and leave
+/// the keyed count matching the golden. Asserting this raw total catches the
+/// duplication BEFORE the dedup hides it.
+fn raw_row_total(batches: &[RecordBatch]) -> usize {
+    batches.iter().map(|b| b.num_rows()).sum()
+}
+
 /// Decode every returned row as `(pk, ck) -> text cell`.
 fn text_rows(batches: &[RecordBatch], cell: &str) -> HashMap<(i32, i32), String> {
     let mut out = HashMap::new();
@@ -309,15 +334,15 @@ fn blob_rows(batches: &[RecordBatch], cell: &str) -> HashMap<(i32, i32), Vec<u8>
 /// decompress counter: rows must equal the golden exactly, and the stitching
 /// plane must have run (`decompress_call_count() >= 1`).
 fn assert_compressed_text_scan_matches_golden(table: &str) {
-    let Some(dir) = fixture_or_skip(table) else {
+    let Some(found) = fixture_or_skip(table) else {
         return;
     };
-    assert_has_compression_info(&dir, table);
-    let golden = text_golden(&dir, "body");
+    assert_has_compression_info(&found.dir, table);
+    let golden = text_golden(&found.dir, "body");
 
     SSTableReader::reset_decompress_calls();
     let batches = run_do_get(
-        fixture_support::sstables_root_or_repo_default(),
+        found.sstables_root.clone(),
         serde_json::json!({"keyspace": KEYSPACE, "table": table, "ddl": text_ddl(table)}),
     );
     let decompressed = SSTableReader::decompress_call_count();
@@ -326,6 +351,14 @@ fn assert_compressed_text_scan_matches_golden(table: &str) {
     assert!(
         !rows.is_empty(),
         "{table}: a present fixture returning ZERO rows is a failure, never a pass"
+    );
+    assert_eq!(
+        raw_row_total(&batches),
+        golden.len(),
+        "{table}: the server must EMIT exactly the golden's {} rows, got {} before dedup — \
+         a mismatch here that the keyed count below misses is a duplicate emission",
+        golden.len(),
+        raw_row_total(&batches)
     );
     assert_eq!(
         rows.len(),
@@ -398,15 +431,15 @@ fn compressed_do_get_short_final_chunk_matches_golden() {
 #[serial]
 fn compressed_do_get_incompressible_raw_chunks_match_golden() {
     let table = "incompressible_uncompressed_chunk";
-    let Some(dir) = fixture_or_skip(table) else {
+    let Some(found) = fixture_or_skip(table) else {
         return;
     };
-    assert_has_compression_info(&dir, table);
-    let golden = blob_golden(&dir, "payload");
+    assert_has_compression_info(&found.dir, table);
+    let golden = blob_golden(&found.dir, "payload");
 
     SSTableReader::reset_decompress_calls();
     let batches = run_do_get(
-        fixture_support::sstables_root_or_repo_default(),
+        found.sstables_root.clone(),
         serde_json::json!({"keyspace": KEYSPACE, "table": table, "ddl": BLOB_DDL}),
     );
     let decompressed = SSTableReader::decompress_call_count();
@@ -415,6 +448,14 @@ fn compressed_do_get_incompressible_raw_chunks_match_golden() {
     assert!(
         !rows.is_empty(),
         "{table}: a present fixture returning ZERO rows is a failure, never a pass"
+    );
+    assert_eq!(
+        raw_row_total(&batches),
+        golden.len(),
+        "{table}: the server must EMIT exactly the golden's {} rows, got {} before dedup — \
+         a duplicate raw-chunk passthrough would collapse away in the keyed count below",
+        golden.len(),
+        raw_row_total(&batches)
     );
     assert_eq!(
         rows.len(),
@@ -438,17 +479,23 @@ fn compressed_do_get_incompressible_raw_chunks_match_golden() {
 // ======================== LIMIT-k (spec Req 1, scenario 3) ========================
 
 /// **LIMIT-k over the compressed path (spec Req 1, scenario 3).** A ticket
-/// carrying `limit = k` against a 600-row compressed table must return at most
+/// carrying `limit = k` against a 600-row compressed table must return EXACTLY
 /// `k` rows, each a member of the golden.
+///
+/// The golden is verified to hold more than `k` rows, so `== k` (not `<= k`) is
+/// the assertion that has teeth: a merely-bounded check would also pass an
+/// implementation that truncated to one row or stopped early on the compressed
+/// path. Asserting it on the RAW batch total additionally catches a duplicate
+/// emission the keyed map would collapse.
 #[test]
 #[serial]
 fn compressed_do_get_limit_bounds_result_and_matches_golden() {
     let table = "lz4_table";
-    let Some(dir) = fixture_or_skip(table) else {
+    let Some(found) = fixture_or_skip(table) else {
         return;
     };
     let k = 25u64;
-    let golden = text_golden(&dir, "body");
+    let golden = text_golden(&found.dir, "body");
     assert!(
         golden.len() as u64 > k,
         "{table} golden ({}) must exceed the limit {k} for the bound to be meaningful",
@@ -457,7 +504,7 @@ fn compressed_do_get_limit_bounds_result_and_matches_golden() {
 
     SSTableReader::reset_decompress_calls();
     let batches = run_do_get(
-        fixture_support::sstables_root_or_repo_default(),
+        found.sstables_root.clone(),
         serde_json::json!({
             "keyspace": KEYSPACE,
             "table": table,
@@ -468,13 +515,19 @@ fn compressed_do_get_limit_bounds_result_and_matches_golden() {
     let decompressed = SSTableReader::decompress_call_count();
 
     let rows = text_rows(&batches, "body");
-    assert!(
-        !rows.is_empty(),
-        "{table}: LIMIT-{k} scan must return > 0 rows"
+    let k_usize = usize::try_from(k).expect("limit fits usize");
+    assert_eq!(
+        raw_row_total(&batches),
+        k_usize,
+        "{table}: LIMIT {k} over a {}-row golden must EMIT exactly {k} rows, got {} — \
+         fewer means the compressed path stopped early, more means it overran the limit",
+        golden.len(),
+        raw_row_total(&batches)
     );
-    assert!(
-        rows.len() as u64 <= k,
-        "{table}: LIMIT {k} must bound the compressed-path result to <= {k} rows, got {}",
+    assert_eq!(
+        rows.len(),
+        k_usize,
+        "{table}: LIMIT {k} must yield exactly {k} DISTINCT (pk, ck) rows, got {}",
         rows.len()
     );
     for (key, body) in &rows {
@@ -504,25 +557,32 @@ fn compressed_do_get_limit_bounds_result_and_matches_golden() {
 #[serial]
 fn uncompressed_control_do_get_leaves_decompress_counter_at_zero() {
     let table = "uncompressed_table";
-    let Some(dir) = fixture_or_skip(table) else {
+    let Some(found) = fixture_or_skip(table) else {
         return;
     };
-    let info = dir.join(format!("{BIG_TAG}-CompressionInfo.db"));
+    let info = found.dir.join(format!("{BIG_TAG}-CompressionInfo.db"));
     assert!(
         !info.exists(),
         "the control table must have NO CompressionInfo.db (found {})",
         info.display()
     );
-    let golden = text_golden(&dir, "body");
+    let golden = text_golden(&found.dir, "body");
 
     SSTableReader::reset_decompress_calls();
     let batches = run_do_get(
-        fixture_support::sstables_root_or_repo_default(),
+        found.sstables_root.clone(),
         serde_json::json!({"keyspace": KEYSPACE, "table": table, "ddl": text_ddl(table)}),
     );
     let decompressed = SSTableReader::decompress_call_count();
 
     let rows = text_rows(&batches, "body");
+    assert_eq!(
+        raw_row_total(&batches),
+        golden.len(),
+        "{table}: the control must EMIT exactly the golden's {} rows, got {} before dedup",
+        golden.len(),
+        raw_row_total(&batches)
+    );
     assert_eq!(
         rows, golden,
         "{table}: the control must still return its golden rows exactly"
@@ -539,12 +599,21 @@ fn uncompressed_control_do_get_leaves_decompress_counter_at_zero() {
 
 /// Open a `do_get` over real transport, read `read_batches` batches, then DROP
 /// the decode stream, the client and the channel WITHOUT draining — leaving the
-/// server to observe the disconnect. Returns the still-running server task.
+/// server to observe the disconnect.
+///
+/// Returns the still-running server task AND the number of batches actually
+/// read, which the caller MUST assert equals `read_batches`: a ticket/DDL/schema
+/// regression that makes `do_get` error on the first poll reads zero batches, so
+/// the producer never parks and the in-flight level never leaves its baseline —
+/// a green "no leak" verdict from a stream that exercised nothing.
 async fn do_get_drop_after(
     svc: CqliteFlightService,
     ticket: Vec<u8>,
     read_batches: usize,
-) -> tokio::task::JoinHandle<Result<(), tonic::transport::Error>> {
+) -> (
+    tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    usize,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback");
@@ -570,14 +639,15 @@ async fn do_get_drop_after(
     while read < read_batches {
         match rb.next().await {
             Some(Ok(_batch)) => read += 1,
-            // Fewer batches than requested before EOF/err — still a valid
-            // "client stops early" scenario; proceed to drop.
+            // EOF or a Status error before `read_batches`. NOT silently
+            // tolerated: the caller asserts `read == read_batches`, so this
+            // becomes a clean failure rather than an accidental green.
             _ => break,
         }
     }
     drop(rb);
     drop(client);
-    server
+    (server, read)
 }
 
 /// Poll the process-wide `do_get` in-flight level until it drops to `<= baseline`
@@ -611,10 +681,10 @@ async fn await_in_flight_settled(baseline: i64, timeout: Duration) -> i64 {
 #[serial]
 fn compressed_do_get_client_drop_midstream_releases_producer() {
     let table = "lz4_table";
-    let Some(dir) = fixture_or_skip(table) else {
+    let Some(found) = fixture_or_skip(table) else {
         return;
     };
-    assert_has_compression_info(&dir, table);
+    assert_has_compression_info(&found.dir, table);
 
     let ticket = serde_json::to_vec(&serde_json::json!({
         "keyspace": KEYSPACE,
@@ -623,20 +693,35 @@ fn compressed_do_get_client_drop_midstream_releases_producer() {
     }))
     .expect("ticket json");
 
+    const WANT_BATCHES: usize = 2;
+
     // batch_size = 1 → one row per batch, so the producer fills the bounded
     // channel and parks while the client is still reading.
-    let svc = CqliteFlightService::new(fixture_support::sstables_root_or_repo_default(), 1);
+    let svc = CqliteFlightService::new(found.sstables_root.clone(), 1);
     let rt = tokio::runtime::Runtime::new().expect("runtime");
-    rt.block_on(async move {
+    let (baseline, level, read) = rt.block_on(async move {
         let baseline = cqlite_flight::obs::in_flight_level("do_get");
-        let server = do_get_drop_after(svc, ticket, 2).await;
+        let (server, read) = do_get_drop_after(svc, ticket, WANT_BATCHES).await;
         let level = await_in_flight_settled(baseline, Duration::from_secs(30)).await;
-        assert!(
-            level <= baseline,
-            "do_get in-flight level must return to its {baseline} baseline after the client \
-             drops midstream on the COMPRESSED (chunk-stitching) path (got {level}); a higher \
-             level means the merge producer is still parked in its blocking send"
-        );
         server.abort();
+        (baseline, level, read)
     });
+    // Shut the runtime down BEFORE asserting. On a genuine producer leak — the
+    // bug under test — a panic inside `block_on` would drop the Runtime during
+    // unwind, and `Runtime::drop` waits on started blocking tasks: the leak
+    // would surface as a HANG instead of a clean failure.
+    rt.shutdown_timeout(Duration::from_secs(5));
+
+    assert_eq!(
+        read, WANT_BATCHES,
+        "the client must have read exactly {WANT_BATCHES} batches before dropping (got {read}); \
+         a stream that ended early never parked the producer, so the in-flight assertion below \
+         would prove nothing"
+    );
+    assert!(
+        level <= baseline,
+        "do_get in-flight level must return to its {baseline} baseline after the client \
+         drops midstream on the COMPRESSED (chunk-stitching) path (got {level}); a higher \
+         level means the merge producer is still parked in its blocking send"
+    );
 }
