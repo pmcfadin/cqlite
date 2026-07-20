@@ -120,7 +120,7 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
 
         Error::Serialization { .. } | Error::TypeConversion(_) => ErrorCategory::Serialization,
 
-        Error::Corruption(_) => ErrorCategory::Corruption,
+        Error::Corruption(_) | Error::CorruptCommitLogFrame(_) => ErrorCategory::Corruption,
 
         Error::Schema(_) | Error::Table(_) => ErrorCategory::Schema,
 
@@ -128,7 +128,8 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         | Error::CqlParse(_)
         | Error::InvalidFormat(_)
         | Error::UnsupportedFormat(_)
-        | Error::UnsupportedVersion { .. } => ErrorCategory::Parsing,
+        | Error::UnsupportedVersion { .. }
+        | Error::UnsupportedCommitLogVersion { .. } => ErrorCategory::Parsing,
 
         Error::Storage(_)
         | Error::Memory(_)
