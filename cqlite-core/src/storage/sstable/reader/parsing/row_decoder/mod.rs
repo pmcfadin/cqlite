@@ -489,6 +489,10 @@ impl RowHeader {
         crate::storage::sstable::reader::compaction_row::RowLiveness {
             has_marker: self.timestamp.is_some(),
             expires_at_seconds: self.liveness_expires_at_seconds,
+            // Issue #2374/#2789: the authoritative marker write timestamp (µs)
+            // from the row header — the last-write-wins key the cross-generation
+            // fold uses. Never inferred (no-heuristics, #28).
+            marker_timestamp: self.timestamp,
         }
     }
 

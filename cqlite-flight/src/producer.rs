@@ -1058,6 +1058,15 @@ impl MergeProducer {
         Ok(())
     }
 
+    /// True when `column` is a partition- or clustering-key column of the scan's
+    /// schema (the merger surfaces these as pseudo-cells). Used by the
+    /// read-visibility rule (issue #2374/#2789) so a key-only reconciled row is
+    /// not mistaken for one carrying live data.
+    fn is_primary_key_column(&self, column: &str) -> bool {
+        self.schema.partition_keys.iter().any(|k| k.name == column)
+            || self.schema.clustering_keys.iter().any(|c| c.name == column)
+    }
+
     /// Reconstruct one logical row from a merged entry, or `None` for a row
     /// tombstone. Cell tombstones are dropped so the column reads as null.
     ///
@@ -1076,15 +1085,6 @@ impl MergeProducer {
     /// corruption (e.g. a map key whose `cell_path` bytes do not decode under the
     /// declared key type). Such a failure is propagated as a `Merge` error rather
     /// than silently dropping the row (issue #2324, no-heuristics / no-silent-loss).
-    /// True when `column` is a partition- or clustering-key column of the scan's
-    /// schema (the merger surfaces these as pseudo-cells). Used by the
-    /// read-visibility rule (issue #2374/#2789) so a key-only reconciled row is
-    /// not mistaken for one carrying live data.
-    fn is_primary_key_column(&self, column: &str) -> bool {
-        self.schema.partition_keys.iter().any(|k| k.name == column)
-            || self.schema.clustering_keys.iter().any(|c| c.name == column)
-    }
-
     pub(crate) fn entry_to_row(
         &self,
         partition_key: &[u8],
