@@ -44,8 +44,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use cqlite_core::observability::{self as obs, catalog};
 use cqlite_core::schema::{TableSchema, UdtRegistry};
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::Platform;
@@ -57,6 +59,48 @@ use super::identity::{GenerationId, GenerationSet};
 use super::metrics::{RefreshOutcome, WarmMetrics};
 use super::probe::{self, GenerationEntry, ProbeOutcome};
 use super::{WarmError, WarmSet};
+
+/// Process-wide level backing `cqlite.flight.warm_tables` (issue #2684) — the
+/// current number of tables with a live warm reader set. Set to the
+/// post-mutation `Inner.tables.len()` at each registry mutation site (rebuild
+/// insert / `evict_to_budget` removal) while the `Inner` lock is held, so the
+/// remove-then-reinsert transient a rebuild performs never dips the reading.
+///
+/// A process-wide `static` (not per-registry state) mirrors
+/// [`crate::saturation::blocking_tasks_in_use_level`]: production runs exactly
+/// one [`WarmTableRegistry`], and a level reader consumable without an OTel stack
+/// lets up/down tests assert the gauge moves. Tests that read it exactly use one
+/// `#[test]` per binary (one process), as `issue_2370_gauge_readback_test.rs`
+/// documents for the other process-global gauges.
+static WARM_TABLES: AtomicI64 = AtomicI64::new(0);
+
+/// Read the current process-wide warm-table level (issue #2684) — the same value
+/// that drives `cqlite.flight.warm_tables`. Feature-independent (maintained
+/// regardless of the `observability` OTel feature; only the emission is gated),
+/// mirroring [`crate::saturation::blocking_tasks_in_use_level`].
+pub fn warm_table_count() -> i64 {
+    WARM_TABLES.load(Ordering::SeqCst)
+}
+
+/// Record the post-mutation warm-table count: store the process-wide level AND
+/// emit the gauge (total-only, no attributes — matching the saturation gauges).
+/// Called under the `Inner` lock so the emitted value is the exact current size.
+///
+/// Counts tables with a LIVE (non-empty) warm reader set — the spec's definition
+/// ("tables with a live warm reader set"). A rebuild against an empty
+/// on-disk generation set can leave a table entry with zero readers (the
+/// generation was retired from disk); such an entry is not a live warm table, so
+/// it is excluded — which makes retirement observably DECREMENT the gauge.
+fn record_warm_tables(inner: &Inner) {
+    let live = inner
+        .tables
+        .values()
+        .filter(|t| !t.readers.is_empty())
+        .count();
+    let level = i64::try_from(live).unwrap_or(i64::MAX);
+    WARM_TABLES.store(level, Ordering::SeqCst);
+    obs::record_gauge(catalog::FLIGHT_WARM_TABLES, level, &[]);
+}
 
 /// The logical-table half of the warm cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -603,6 +647,11 @@ impl WarmTableRegistry {
                 manifest,
             },
         );
+        // Emit `cqlite.flight.warm_tables` (issue #2684) post-insert while the
+        // `Inner` lock is held: the count is exact, and emitting AFTER the swap
+        // avoids the remove-then-reinsert transient dip (this rebuild removed the
+        // same key earlier). `evict_to_budget` below emits again if it removes.
+        record_warm_tables(&inner);
 
         // Enforce the byte budget (LRU eviction), never evicting a generation in
         // THIS request's returned set.
@@ -636,6 +685,7 @@ impl WarmTableRegistry {
                 // Nothing evictable without dropping the current request's set.
                 break;
             };
+            let mut table_removed = false;
             if let Some(t) = inner.tables.get_mut(&vkey) {
                 // Issue #2059 fix round (review Medium): a CAPACITY eviction here is
                 // NOT a generation removal — the victim generation is still fully
@@ -657,7 +707,16 @@ impl WarmTableRegistry {
                 t.readers.retain(|r| r.id != vid);
                 if t.readers.is_empty() {
                     inner.tables.remove(&vkey);
+                    table_removed = true;
                 }
+            }
+            if table_removed {
+                // A table left the warm set: emit the post-removal count (issue
+                // #2684). Only a WHOLE-table removal changes the live-table
+                // count; evicting one generation of a still-warm
+                // multi-generation table does not, so the gauge is emitted
+                // exactly when the level moves.
+                record_warm_tables(inner);
             }
             inner.used_bytes = inner.used_bytes.saturating_sub(vbytes);
             evicted += 1;

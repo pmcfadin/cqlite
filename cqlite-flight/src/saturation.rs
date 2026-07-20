@@ -28,6 +28,7 @@
 //! in every build.
 
 use std::future::Future;
+use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Once;
 use std::time::Duration;
@@ -113,6 +114,110 @@ pub fn read_proc_rss_bytes() -> Option<u64> {
 /// (saturates at `i64::MAX`, unreachable for a real thread/fd/RSS reading).
 fn as_gauge(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
+}
+
+// --- tables_discovered: readdir-only table-dir walk (issue #2684) ----------
+//
+// Counts the `<keyspace>/<table[-uuid]>` SSTable directories currently VISIBLE
+// under `--data-dir`, using directory reads ONLY — never a stat-for-generation,
+// open, or parse — so the cold-start invariant (#2385) holds: sampling produces
+// zero `INDEX_PARSES_TOTAL` delta. Classification is STRUCTURAL (directory
+// layout: a dir directly containing a `*-Data.db` NAME), never inferred from
+// file contents (#28 no-heuristics).
+
+/// The result of one discovery walk: genuine table dirs and the keyspaces that
+/// contain at least one of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TableDiscovery {
+    /// Genuine `<keyspace>/<table>` SSTable directories found across all
+    /// keyspaces.
+    pub tables: u64,
+    /// Keyspace directories that contain at least one counted table dir.
+    pub keyspaces: u64,
+}
+
+/// Whether `dir` DIRECTLY contains a `*-Data.db` entry (readdir name check only
+/// — no stat, no open, no generation parse). This is the sole, structural
+/// "is a genuine table dir" test (matches the `DirSource` `-Data.db` prior art).
+fn dir_has_data_db(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.ends_with("-Data.db"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Walk `data_dir` with readdir only and count genuine `<keyspace>/<table>`
+/// SSTable directories (issue #2684).
+///
+/// A keyspace is any directory directly under `data_dir`. Within it, a table dir
+/// is any directory whose name is NOT `snapshots`/`backups` that directly
+/// contains a `*-Data.db` entry — this covers both `<table>` and
+/// `<table>-<uuid>` layouts, counts a UUID-suffixed dir exactly once, and
+/// excludes the `snapshots/`/`backups/` subtrees and any non-table entry. A
+/// `data_dir` that is empty, unreadable, or points at a directory with no table
+/// dirs yields `tables = 0` (an inert/wrong mount reads zero immediately).
+pub fn discover_tables(data_dir: &Path) -> TableDiscovery {
+    let mut out = TableDiscovery::default();
+    let Ok(keyspaces) = std::fs::read_dir(data_dir) else {
+        return out;
+    };
+    for ks in keyspaces.flatten() {
+        let ks_path = ks.path();
+        if !ks_path.is_dir() {
+            continue;
+        }
+        let Ok(tables) = std::fs::read_dir(&ks_path) else {
+            continue;
+        };
+        let mut ks_tables: u64 = 0;
+        for tbl in tables.flatten() {
+            let name = tbl.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name == "snapshots" || name == "backups" {
+                continue;
+            }
+            let tbl_path = tbl.path();
+            if !tbl_path.is_dir() {
+                continue;
+            }
+            if dir_has_data_db(&tbl_path) {
+                ks_tables = ks_tables.saturating_add(1);
+            }
+        }
+        if ks_tables > 0 {
+            out.tables = out.tables.saturating_add(ks_tables);
+            out.keyspaces = out.keyspaces.saturating_add(1);
+        }
+    }
+    out
+}
+
+/// Log the discovered table/keyspace count EXACTLY ONCE, after the first sample
+/// (issue #2684) — so an inert/empty mount (`discovered 0 tables ...`) is visible
+/// in logs even without a metrics stack (same spirit as the #2128 OTel-inert
+/// warn). `Once`-guarded, co-located with the sampler like
+/// [`log_platform_support_once`].
+fn log_tables_discovered_once(discovery: &TableDiscovery, data_dir: &Path) {
+    static LOGGED: Once = Once::new();
+    LOGGED.call_once(|| {
+        tracing::info!(
+            "discovered {} tables across {} keyspaces under {}",
+            discovery.tables,
+            discovery.keyspaces,
+            data_dir.display()
+        );
+    });
 }
 
 // --- Flight blocking-task gauge --------------------------------------------
@@ -225,8 +330,16 @@ pub(crate) fn sample_ticks() -> u64 {
 }
 
 /// Perform one collection tick: read each `/proc` gauge and record ONLY the ones
-/// that returned `Some` (a `None` reader emits no sample — absence, never `0`).
-fn sample_once() {
+/// that returned `Some` (a `None` reader emits no sample — absence, never `0`),
+/// then walk `data_dir` (readdir only, issue #2684) and record
+/// `cqlite.flight.tables_discovered`. Returns the discovery result so the caller
+/// can emit the one-time startup log line after the first sample.
+///
+/// Unlike the `/proc` gauges, `tables_discovered` is emitted UNCONDITIONALLY
+/// (including `0`): a `0` here is an authoritative reading of an empty/wrong
+/// mount, NOT the "absence" a `None` /proc reader represents — surfacing an inert
+/// mount is the whole point.
+fn sample_once(data_dir: &Path) -> TableDiscovery {
     if let Some(threads) = read_proc_threads() {
         obs::record_gauge(catalog::PROC_THREADS, as_gauge(threads), &[]);
     }
@@ -236,7 +349,14 @@ fn sample_once() {
     if let Some(rss) = read_proc_rss_bytes() {
         obs::record_gauge(catalog::PROC_RSS_BYTES, as_gauge(rss), &[]);
     }
+    let discovery = discover_tables(data_dir);
+    obs::record_gauge(
+        catalog::FLIGHT_TABLES_DISCOVERED,
+        as_gauge(discovery.tables),
+        &[],
+    );
     SAMPLE_TICKS.fetch_add(1, Ordering::SeqCst);
+    discovery
 }
 
 /// Log the platform's `/proc` support state EXACTLY ONCE (design D2), so an
@@ -268,7 +388,7 @@ fn log_platform_support_once() {
 /// server. Because the initial sample runs before the select loop, the sampler
 /// always performs at least one collection tick even if shutdown is already
 /// pending (deterministic, no reliance on interval first-tick timing).
-pub async fn run_sampler<S>(interval: Duration, shutdown: S)
+pub async fn run_sampler<S>(interval: Duration, data_dir: std::path::PathBuf, shutdown: S)
 where
     S: Future<Output = ()>,
 {
@@ -277,12 +397,17 @@ where
     // Immediate startup sample; the periodic ticker then fires after each full
     // `interval` (never an extra immediate tick — `interval_at` from `now +
     // interval` — so the cadence stays regular).
-    sample_once();
+    let first = sample_once(&data_dir);
+    // One-time startup log line (issue #2684) after the first walk, so an
+    // empty/wrong mount is visible in logs even without a metrics stack.
+    log_tables_discovered_once(&first, &data_dir);
     let start = tokio::time::Instant::now() + interval;
     let mut ticker = tokio::time::interval_at(start, interval);
     loop {
         tokio::select! {
-            _ = ticker.tick() => sample_once(),
+            _ = ticker.tick() => {
+                sample_once(&data_dir);
+            }
             _ = &mut shutdown => break,
         }
     }
@@ -392,7 +517,8 @@ mod tests {
     #[test]
     fn sample_once_advances_tick_and_skips_none_readers() {
         let before = sample_ticks();
-        sample_once();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        sample_once(tmp.path());
         assert!(
             sample_ticks() > before,
             "a collection tick is counted even when every /proc reader is None"
@@ -451,16 +577,114 @@ mod tests {
         );
     }
 
+    /// Build a `<data_dir>/<keyspace>/<table>/` dir and (optionally) drop a
+    /// `*-Data.db` name into it. `data_only=false` makes a table dir WITHOUT any
+    /// Data.db (a non-table entry that must NOT be counted).
+    fn make_table_dir(data_dir: &Path, keyspace: &str, table: &str, with_data: bool) {
+        let dir = data_dir.join(keyspace).join(table);
+        std::fs::create_dir_all(&dir).expect("create table dir");
+        if with_data {
+            std::fs::write(dir.join("nb-1-big-Data.db"), b"x").expect("write data.db");
+        }
+    }
+
+    /// Issue #2684 spec Requirement 2: a UUID-suffixed table dir counts exactly
+    /// once; `snapshots/`/`backups/` subdirs and a non-table entry are excluded;
+    /// and the walk is structural (readdir name check), never a content parse.
+    #[test]
+    fn discover_counts_genuine_table_dirs_only() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        // A UUID-suffixed table dir with a Data.db — the genuine table.
+        make_table_dir(root, "ks", "users-8f3a9c2e11114b0d9c7e2a1b3d4f5e6a", true);
+        // snapshots/ and backups/ sibling dirs directly under the keyspace must
+        // NOT be counted (even though they may contain Data.db hardlinks).
+        let snap = root.join("ks").join("snapshots").join("snap1");
+        std::fs::create_dir_all(&snap).expect("snapshots dir");
+        std::fs::write(snap.join("nb-1-big-Data.db"), b"x").expect("snap data");
+        let backup = root.join("ks").join("backups");
+        std::fs::create_dir_all(&backup).expect("backups dir");
+        std::fs::write(backup.join("nb-1-big-Data.db"), b"x").expect("backup data");
+        // A directory with NO Data.db — a non-table entry, excluded.
+        make_table_dir(root, "ks", "not_a_table", false);
+        // A stray plain file directly under the keyspace — excluded (not a dir).
+        std::fs::write(root.join("ks").join("README.txt"), b"x").expect("stray file");
+
+        let d = discover_tables(root);
+        assert_eq!(
+            d.tables, 1,
+            "only the UUID-suffixed users table dir counts (snapshots/backups/non-table excluded)"
+        );
+        assert_eq!(d.keyspaces, 1, "one keyspace contains a genuine table");
+    }
+
+    /// Issue #2684 spec Requirement 1: bidirectional — remove a table dir and the
+    /// count falls; add one and it rises; an empty dir reads 0.
+    #[test]
+    fn discover_is_bidirectional_and_zero_on_empty() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        assert_eq!(
+            discover_tables(root).tables,
+            0,
+            "an empty/wrong mount reads zero immediately"
+        );
+
+        make_table_dir(root, "ks1", "a", true);
+        make_table_dir(root, "ks1", "b", true);
+        make_table_dir(root, "ks2", "c", true);
+        let d = discover_tables(root);
+        assert_eq!(d.tables, 3, "three genuine table dirs across two keyspaces");
+        assert_eq!(d.keyspaces, 2);
+
+        // Remove one table dir → the count falls.
+        std::fs::remove_dir_all(root.join("ks1").join("b")).expect("remove table dir");
+        assert_eq!(
+            discover_tables(root).tables,
+            2,
+            "removing a table dir lowers the discovered count"
+        );
+
+        // Add a new table dir → the count rises.
+        make_table_dir(root, "ks2", "d", true);
+        assert_eq!(
+            discover_tables(root).tables,
+            3,
+            "a newly-appeared table dir raises the discovered count"
+        );
+    }
+
+    /// Issue #2684 spec Requirement 3 (cold-start invariant #2385): a full
+    /// `sample_once` walk over a populated dir performs no SSTable open/parse —
+    /// exercised here as a smoke test (the OTel `INDEX_PARSES_TOTAL` zero-delta
+    /// assertion lives in the observability-testing capture harness). Confirms
+    /// the walk sees the fixture and the tick still advances.
+    #[test]
+    fn sample_once_walks_data_dir_without_panicking() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        make_table_dir(tmp.path(), "ks", "t", true);
+        let before = sample_ticks();
+        let d = sample_once(tmp.path());
+        assert_eq!(d.tables, 1, "sample_once walks the data dir and counts");
+        assert!(sample_ticks() > before, "the tick advances");
+    }
+
     /// Stage 3.2: the sampler performs ≥1 collection tick and its handle RESOLVES
     /// after the shutdown signal (it does not run forever, does not busy-spin) —
     /// asserted on task completion, never a wall-clock sleep.
     #[tokio::test]
     async fn sampler_ticks_at_least_once_then_stops_on_shutdown() {
         let base = sample_ticks();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path().to_path_buf();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let handle = tokio::spawn(run_sampler(Duration::from_millis(5), async move {
-            let _ = rx.await;
-        }));
+        let handle = tokio::spawn(run_sampler(
+            Duration::from_millis(5),
+            data_dir,
+            async move {
+                let _ = rx.await;
+            },
+        ));
 
         // Signal shutdown; `run_sampler`'s unconditional pre-loop `sample_once()`
         // (not an interval-tick race) guarantees ≥1 collection has already

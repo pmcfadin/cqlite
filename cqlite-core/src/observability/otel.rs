@@ -350,6 +350,9 @@ struct Instruments {
     proc_fds: Gauge<i64>,
     proc_rss_bytes: Gauge<i64>,
     flight_blocking_tasks_in_use: Gauge<i64>,
+    // Flight table-visibility gauges (#2684).
+    flight_tables_discovered: Gauge<i64>,
+    flight_warm_tables: Gauge<i64>,
 }
 
 fn instruments() -> &'static Instruments {
@@ -700,6 +703,18 @@ fn instruments() -> &'static Instruments {
                 .with_unit(catalog::unit::THREADS)
                 .with_description("Flight spawn_blocking tasks currently outstanding (#2419).")
                 .build(),
+            flight_tables_discovered: m
+                .i64_gauge(catalog::FLIGHT_TABLES_DISCOVERED)
+                .with_unit(catalog::unit::ENTRIES)
+                .with_description(
+                    "Table dirs visible under --data-dir, sampled by readdir on the ~2s tick (#2684).",
+                )
+                .build(),
+            flight_warm_tables: m
+                .i64_gauge(catalog::FLIGHT_WARM_TABLES)
+                .with_unit(catalog::unit::ENTRIES)
+                .with_description("Tables with a live warm reader set in the registry (#2684).")
+                .build(),
         }
     })
 }
@@ -806,6 +821,8 @@ pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValu
         catalog::PROC_FDS => &i.proc_fds,
         catalog::PROC_RSS_BYTES => &i.proc_rss_bytes,
         catalog::FLIGHT_BLOCKING_TASKS_IN_USE => &i.flight_blocking_tasks_in_use,
+        catalog::FLIGHT_TABLES_DISCOVERED => &i.flight_tables_discovered,
+        catalog::FLIGHT_WARM_TABLES => &i.flight_warm_tables,
         _ => {
             meter().i64_gauge(name).build().record(value, attributes);
             return;

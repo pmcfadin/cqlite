@@ -668,4 +668,22 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         interpretation: "Rises with concurrent do_get scans and returns to baseline; a level pinned near the blocking-pool size with flat rpc.rows is blocking-pool saturation. Distinct from admission.in_use.",
         round_item: "blocking-pool pressure watch (#2419/#2313)",
     },
+    MetricDoc {
+        name: catalog::FLIGHT_TABLES_DISCOVERED,
+        kind: MetricKind::Gauge,
+        unit: catalog::unit::ENTRIES,
+        summary: "Table dirs visible under --data-dir, re-sampled by a readdir-only walk on the ~2s saturation tick (no SSTable opens). Undersampled at ~2s vs a longer scrape interval (#2661).",
+        attributes: &[],
+        interpretation: "Rises when a table appears on disk and falls when one is removed; a wrong or empty --data-dir reads 0 immediately (an inert mount, visible before the first query errors).",
+        round_item: "inert-mount watch (#2684)",
+    },
+    MetricDoc {
+        name: catalog::FLIGHT_WARM_TABLES,
+        kind: MetricKind::Gauge,
+        unit: catalog::unit::ENTRIES,
+        summary: "Tables with a live warm reader set in the flight WarmTableRegistry (atomic-backed at the registry mutation sites, not sampler-driven).",
+        attributes: &[],
+        interpretation: "Rises on the first serve of a previously-unseen table and falls on eviction/retirement; pinned at capacity with steady eviction churn means the warm byte budget is small vs the working set. Distinct from tables_discovered (visible on disk).",
+        round_item: "warm-working-set watch (#2684)",
+    },
 ];

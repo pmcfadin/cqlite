@@ -623,6 +623,45 @@ pub const PROC_RSS_BYTES: &str = "cqlite.proc.rss_bytes";
 /// different resources. No high-cardinality attributes.
 pub const FLIGHT_BLOCKING_TASKS_IN_USE: &str = "cqlite.flight.blocking_tasks_in_use";
 
+/// `cqlite.flight.tables_discovered` — gauge `{entry}` (issue #2684).
+///
+/// Number of `<keyspace>/<table>` SSTable directories currently VISIBLE under
+/// the server's `--data-dir`, re-sampled on the same ~2s saturation tick as the
+/// `cqlite.proc.*` gauges. Each tick does a readdir-only walk (keyspace dirs →
+/// table dirs), counting a table dir iff it directly contains a `*-Data.db`
+/// entry (name check only — NO stat-for-generation, NO open, NO parse), so the
+/// cold-start invariant (#2385) holds: sampling never increments
+/// [`INDEX_PARSES_TOTAL`]. `snapshots/` and `backups/` subtrees are excluded and
+/// UUID-suffixed table dirs are counted correctly.
+///
+/// **Healthy vs alarming**: RISES when a new table appears on disk (new table, a
+/// fixed mount) and FALLS when a table is dropped/removed; a wrong or empty
+/// `--data-dir` reads **0** immediately, surfacing an inert mount before the
+/// first query errors lazily. **Undersampling caveat (#2661)**: sampled every
+/// ~2s, so a Prometheus scrape at a longer interval can miss a short-lived
+/// transition — same caveat as the rest of the #2419 saturation family. No
+/// high-cardinality attributes (total-only; the per-keyspace breakdown lives in
+/// the one-time startup log line, never as a metric label).
+pub const FLIGHT_TABLES_DISCOVERED: &str = "cqlite.flight.tables_discovered";
+
+/// `cqlite.flight.warm_tables` — gauge `{entry}` (issue #2684).
+///
+/// Current number of tables with a live warm reader set in the flight
+/// `WarmTableRegistry` (`Inner.tables.len()`). Atomic-backed at the registry's
+/// mutation sites (independent of the sampler cadence): the post-mutation
+/// `.len()` is emitted while the registry lock is held at the `rebuild()` insert
+/// and `evict_to_budget()` removal, so the remove-then-reinsert transient the
+/// rebuild performs never dips the reading.
+///
+/// **Healthy vs alarming**: RISES on the first serve of a previously-unseen
+/// table (a `do_get` rebuild insert) and FALLS on eviction/retirement (budget
+/// LRU or generation turnover). A level pinned at capacity with steady eviction
+/// churn means the warm byte budget is small versus the working set. No
+/// high-cardinality attributes (total-only). DISTINCT from
+/// [`FLIGHT_TABLES_DISCOVERED`] (what is VISIBLE on disk): this is what is
+/// actually OPENED and served warm.
+pub const FLIGHT_WARM_TABLES: &str = "cqlite.flight.warm_tables";
+
 /// `cqlite.errors.total` — counter `{error}`.
 ///
 /// Total errors observed, the canonical error-rate signal (issue #1038).
@@ -882,17 +921,26 @@ pub const ALL_METRICS: &[&str] = &[
     PROC_FDS,
     PROC_RSS_BYTES,
     FLIGHT_BLOCKING_TASKS_IN_USE,
+    // Flight table-visibility gauges (#2684)
+    FLIGHT_TABLES_DISCOVERED,
+    FLIGHT_WARM_TABLES,
 ];
 
-/// The five saturation gauges added by issue #2419 (WS2). Grouped for the
-/// distinctness/registration tests and #2426's operator reference so they can be
-/// presented as one section without re-listing them by hand.
+/// The saturation gauges added by issue #2419 (WS2), extended by the #2684
+/// flight table-visibility gauges. Grouped for the distinctness/registration
+/// tests and #2426's operator reference so they can be presented as one section
+/// without re-listing them by hand.
 pub const SATURATION_GAUGES: &[&str] = &[
     MERGE_EGRESS_CHANNEL_DEPTH,
     PROC_THREADS,
     PROC_FDS,
     PROC_RSS_BYTES,
     FLIGHT_BLOCKING_TASKS_IN_USE,
+    // Flight table-visibility gauges (#2684): sampler-driven tables_discovered +
+    // atomic-backed warm_tables. Grouped here so the dedicated-otel-arm +
+    // namespaced/unique tests cover them.
+    FLIGHT_TABLES_DISCOVERED,
+    FLIGHT_WARM_TABLES,
 ];
 
 /// The five `cqlite.flight.admission.*` gauges/counters from issue #2420 (WS4),
@@ -1133,6 +1181,9 @@ mod tests {
             FLIGHT_BLOCKING_TASKS_IN_USE,
             "cqlite.flight.blocking_tasks_in_use"
         );
+        // Flight table-visibility gauges (#2684).
+        assert_eq!(FLIGHT_TABLES_DISCOVERED, "cqlite.flight.tables_discovered");
+        assert_eq!(FLIGHT_WARM_TABLES, "cqlite.flight.warm_tables");
         // Units from the design naming table (#2419 design D4).
         assert_eq!(unit::FDS, "{fd}");
         assert_eq!(unit::ENTRIES, "{entry}");
@@ -1155,6 +1206,8 @@ mod tests {
             "PROC_FDS",
             "PROC_RSS_BYTES",
             "FLIGHT_BLOCKING_TASKS_IN_USE",
+            "FLIGHT_TABLES_DISCOVERED",
+            "FLIGHT_WARM_TABLES",
         ] {
             let arm = format!("catalog::{ident} =>");
             assert!(
@@ -1177,6 +1230,33 @@ mod tests {
             }
         }
         assert_ne!(FLIGHT_BLOCKING_TASKS_IN_USE, FLIGHT_ADMISSION_IN_USE);
+    }
+
+    #[test]
+    fn flight_table_visibility_gauges_are_registered_namespaced_and_total_only() {
+        // Issue #2684: the two flight table-visibility gauges must be catalogued
+        // (so the registration/uniqueness + operator-doc checks cover them),
+        // rooted under `cqlite.flight.`, carry the `{entry}` unit, appear in the
+        // saturation-gauge group (so the dedicated-otel-arm scan covers them),
+        // and be DISTINCT from each other and from the blocking-task gauge.
+        for m in [FLIGHT_TABLES_DISCOVERED, FLIGHT_WARM_TABLES] {
+            assert!(ALL_METRICS.contains(&m), "{m} must be catalogued");
+            assert!(m.starts_with("cqlite.flight."), "{m} must be namespaced");
+            assert!(
+                SATURATION_GAUGES.contains(&m),
+                "{m} must be in the saturation-gauge group"
+            );
+            assert_eq!(
+                ALL_METRICS.iter().filter(|n| *n == &m).count(),
+                1,
+                "{m} must appear exactly once in ALL_METRICS"
+            );
+        }
+        assert_eq!(FLIGHT_TABLES_DISCOVERED, "cqlite.flight.tables_discovered");
+        assert_eq!(FLIGHT_WARM_TABLES, "cqlite.flight.warm_tables");
+        assert_ne!(FLIGHT_TABLES_DISCOVERED, FLIGHT_WARM_TABLES);
+        assert_ne!(FLIGHT_WARM_TABLES, FLIGHT_BLOCKING_TASKS_IN_USE);
+        assert_eq!(unit::ENTRIES, "{entry}");
     }
 
     #[test]

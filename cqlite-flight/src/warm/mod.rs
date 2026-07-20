@@ -42,7 +42,7 @@ pub mod registry;
 
 pub use identity::{GenerationId, GenerationSet};
 pub use metrics::{RefreshOutcome, WarmMetrics, WarmMetricsSnapshot};
-pub use registry::{TableKey, WarmTableRegistry};
+pub use registry::{warm_table_count, TableKey, WarmTableRegistry};
 
 /// Errors from the warm-handle path.
 ///
