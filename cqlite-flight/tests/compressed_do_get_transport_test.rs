@@ -468,7 +468,10 @@ fn compressed_do_get_limit_bounds_result_and_matches_golden() {
     let decompressed = SSTableReader::decompress_call_count();
 
     let rows = text_rows(&batches, "body");
-    assert!(!rows.is_empty(), "{table}: LIMIT-{k} scan must return > 0 rows");
+    assert!(
+        !rows.is_empty(),
+        "{table}: LIMIT-{k} scan must return > 0 rows"
+    );
     assert!(
         rows.len() as u64 <= k,
         "{table}: LIMIT {k} must bound the compressed-path result to <= {k} rows, got {}",
