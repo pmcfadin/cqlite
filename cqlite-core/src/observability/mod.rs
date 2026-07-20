@@ -261,7 +261,10 @@ pub fn record_error_with_attrs(err: &Error, subsystem: &'static str, extra: &[At
                 catalog::attr::ERROR_CATEGORY,
                 err.obs_category().as_str(),
             ));
-            attrs.push(opentelemetry::KeyValue::new(catalog::attr::SUBSYSTEM, subsystem));
+            attrs.push(opentelemetry::KeyValue::new(
+                catalog::attr::SUBSYSTEM,
+                subsystem,
+            ));
             otel::add_counter(catalog::ERRORS_TOTAL, 1, &attrs);
             otel::mark_span_error(err.obs_category());
         } else {
