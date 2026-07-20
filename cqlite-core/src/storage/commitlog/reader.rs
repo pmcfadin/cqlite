@@ -1,12 +1,21 @@
-//! `CommitLogReader` — streaming decode of a Cassandra 5.0 CommitLog segment
-//! into mutations (issue #2389).
+//! `CommitLogReader` — decode of a Cassandra 5.0 CommitLog segment into
+//! mutations (issue #2389).
 //!
 //! Opens a segment file, parses its [descriptor](super::descriptor)
 //! authoritatively (version-gated, CRC-checked), fails closed on a
 //! compressed/encrypted payload (design decision D3), and exposes a **lazy**
-//! iterator over decoded mutations — one sync-section/record at a time, never
+//! iterator over decoded MUTATIONS — one sync-section/record at a time, never
 //! materializing the whole mutation set up front (design decision D4 / the
 //! `oom-audit` structural expectation).
+//!
+//! **Memory posture, stated precisely (roborev finding, review-first pass —
+//! this doc previously oversold it as "streaming"):** the decode side is
+//! genuinely lazy, but opening a reader reads the entire segment FILE into
+//! one `Vec<u8>` up front (bounded by [`MAX_SEGMENT_BYTES`]) — it does not
+//! mmap or chunk the file itself. For a Cassandra-default 32 MB segment this
+//! is well inside CQLite's <128MB target; a caller inspecting many segments
+//! should still bound how many `CommitLogReader`s it keeps open
+//! simultaneously, since each one holds its full segment in memory.
 
 use std::fs;
 use std::path::Path;

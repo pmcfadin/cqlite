@@ -153,7 +153,14 @@ impl<'a> FrameWalker<'a> {
         if pos + SYNC_MARKER_SIZE > self.bytes.len() {
             // Distinguish a clean end (nothing but absence) from a torn write:
             // any leftover non-marker bytes present but < 8 is a torn tail.
-            self.truncated_end = pos < self.bytes.len();
+            // `|=`, not `=`: a prior torn section may have already set this
+            // true, and this branch reaching `pos < len` false (e.g. a
+            // section whose records happen to fill the buffer exactly) must
+            // not silently downgrade it back to a clean end — the exact bug
+            // this fix's neighboring CleanEnd-arm change was meant to close,
+            // just at a second assignment site (roborev finding, review-
+            // first pass).
+            self.truncated_end |= pos < self.bytes.len();
             return Ok(None);
         }
         let next_marker = read_i32_be(self.bytes, pos);
@@ -171,7 +178,8 @@ impl<'a> FrameWalker<'a> {
             let all_zero = self.bytes[pos..pos + SYNC_MARKER_SIZE]
                 .iter()
                 .all(|&b| b == 0);
-            self.truncated_end = !all_zero;
+            // `|=` for the same monotonicity reason as above.
+            self.truncated_end |= !all_zero;
             return Ok(None);
         }
         let next = next_marker as usize;
@@ -384,5 +392,37 @@ mod tests {
             "both sections' records must be yielded — a regression that treats \
              section 1's padding as segment-end would silently drop record2"
         );
+    }
+
+    /// Regression: `truncated_end` was assigned (`=`) rather than OR-ed
+    /// (`|=`) at two sites in `open_section`, so it could be silently
+    /// downgraded from true back to false after a torn section had already
+    /// set it. Trips exactly when a torn section's one record happens to end
+    /// precisely at EOF: the section finishes via `SectionDone` (not
+    /// `CleanEnd`), re-enters `open_section` at `marker_pos == bytes.len()`,
+    /// and that branch's `pos < len` is false — with a plain `=` this wiped
+    /// truncated_end back to false and reported a clean End for a genuinely
+    /// torn segment (roborev finding, review-first pass).
+    #[test]
+    fn torn_section_whose_record_ends_exactly_at_eof_still_reports_truncated() {
+        // Marker's own CRC covers only (segment_id, marker_pos) — NOT the
+        // next_marker value — so next_marker can point arbitrarily far past
+        // EOF while the marker itself still validates, exactly like a real
+        // segment whose section was truncated mid-write.
+        let mut buf = Vec::new();
+        push_marker(&mut buf, 0, 999_999); // far past EOF -> torn section
+        push_record(&mut buf, b"last-record-fills-the-buffer-exactly");
+
+        let mut walker = FrameWalker::new(&buf, SEGMENT_ID, 0);
+        match walker.next_frame().expect("valid record") {
+            FrameStep::Record(_) => {}
+            other => panic!("expected the one record, got {other:?}"),
+        }
+        match walker.next_frame().expect("no corruption") {
+            FrameStep::Truncated => {}
+            other => panic!(
+                "expected Truncated (torn section, record ends exactly at EOF), got {other:?}"
+            ),
+        }
     }
 }

@@ -195,7 +195,14 @@ fn parse_params(json: &str) -> (Option<String>, bool) {
             )
         }
     });
-    let encrypted = obj.contains_key("encryptionContext") || obj.contains_key("encryption");
+    // Same present-but-null hazard as compression above: `contains_key` alone
+    // treats `{"encryptionContext": null}` as "encrypted", making
+    // CommitLogReader fail closed on a perfectly valid unencrypted segment
+    // (roborev finding, review-first pass — the fix above only covered
+    // compression, not this symmetric key).
+    let encrypted = ["encryptionContext", "encryption"]
+        .iter()
+        .any(|k| obj.get(*k).is_some_and(|v| !v.is_null()));
     (compression_class, encrypted)
 }
 
@@ -312,6 +319,18 @@ mod tests {
         // regression for a roborev finding (review-first pass).
         let params = r#"{"compression":null}"#;
         let bytes = build_header(7, 9, params);
+        let desc = CommitLogDescriptor::parse(&bytes).expect("parse");
+        assert_eq!(desc.compression_class, None);
+        assert!(!desc.is_unsupported_payload());
+    }
+
+    #[test]
+    fn encryption_key_null_parses_as_unencrypted() {
+        // Same present-but-null hazard as compression, for the symmetric
+        // encryption keys — a fourth-round roborev finding after the
+        // compression fix above didn't cover this key (review-first pass).
+        let params = r#"{"compression":null,"encryptionContext":null}"#;
+        let bytes = build_header(7, 11, params);
         let desc = CommitLogDescriptor::parse(&bytes).expect("parse");
         assert_eq!(desc.compression_class, None);
         assert!(!desc.is_unsupported_payload());

@@ -73,6 +73,13 @@ fn collect(
     reader: &CommitLogReader,
     limit: Option<usize>,
 ) -> (Vec<UpdateView>, usize, bool, bool, bool) {
+    // `--limit 0` must yield zero results, not "the first mutation slipped in
+    // before the bound check ran" — the per-mutation/per-update checks below
+    // only fire after already pushing, so 0 needs its own short-circuit
+    // (roborev finding, review-first pass).
+    if limit == Some(0) {
+        return (Vec::new(), 0, false, false, true);
+    }
     let mut views = Vec::new();
     let mut mutation_count = 0usize;
     let mut errored = false;
