@@ -1,6 +1,7 @@
 package in.mcfad.cqlite.flight;
 
 import io.trino.spi.HostAddress;
+import io.trino.spi.SplitWeight;
 import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.ArrayList;
@@ -48,5 +49,20 @@ public record CqliteFlightAggregateSplit(
             }
         }
         return addresses;
+    }
+
+    /**
+     * The finalize split fans out to every range's partial, so its {@link SplitWeight} is the
+     * clamped SUM of the per-slice weight proportions it covers (issue #2680) — proportional to
+     * the total token span merged. Clamped to Trino's valid {@code fromProportion} range so an
+     * empty or extreme fan-out never yields a zero weight or an exception.
+     */
+    @Override
+    public SplitWeight getSplitWeight() {
+        double sum = 0.0;
+        for (CqliteFlightSplit range : ranges) {
+            sum += range.weightProportion();
+        }
+        return SplitWeight.fromProportion(CqliteFlightSplit.clampProportion(sum));
     }
 }
