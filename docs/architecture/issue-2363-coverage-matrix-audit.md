@@ -164,7 +164,7 @@ no gRPC, `cqlite-flight/src/*_tests.rs`); **L2** = real gRPC transport
 
 | Cell | Core | Flight | Verdict |
 |---|---|---|---|
-| BIG nb × LZ4 / Snappy / Zstd / Deflate | COVERED (`issue_1082` full-scan vs goldens over `test_comp/*`; `issue_1104` stitch stream) — fixture-presence-gated (SKIP when `test_comp` binaries absent) | **POINT-READ COVERED / SCAN UNCOVERED** — `do_get_over_transport_real_compressed_fixture` (`do_get_transport_test.rs:289+`) and `point_read_corpus_parity_test` dual-path tests decode a REAL compressed `nb-big` fixture over the real transport (point lookup); but no compressed **scan/stitch** fixture ever reaches the Flight producer | PARTIAL |
+| BIG nb × LZ4 / Snappy / Zstd / Deflate | COVERED (`issue_1082` full-scan vs goldens over `test_comp/*`; `issue_1104` stitch stream) — the `test_comp` binaries are force-committed as of #2373, so the lane no longer SKIPs on a stock checkout | **COVERED (#2373)** — point-read coverage (`do_get_over_transport_real_compressed_fixture`, `point_read_corpus_parity_test`) PLUS scan/stitch coverage over real transport (`compressed_do_get_transport_test.rs`): per-codec full scan vs golden, both chunk-boundary edge tables, LIMIT-k, midstream drop, with `decompress_call_count()` routing evidence against an uncompressed control | COVERED |
 | BIG nb × UNCOMPRESSED (#2361 arm) | COVERED (`full_index_stream_tests.rs` asserts Streamed branch; `issue_592`, `reader_compression_tests`) | COVERED (`do_get_transport_test.rs:176` + `streaming_tests` writer fixtures — all uncompressed by construction) | COVERED |
 | BTI da × LZ4 | COVERED (`issue_1580_scan_token_order_oracle.rs:140` + BTI suites over `test_da`) | UNCOVERED | PARTIAL |
 | BTI da × Snappy / Zstd / Deflate / UNCOMPRESSED | **UNCOVERED — zero fixtures exist** (whole BTI compression axis rests on one LZ4 corpus) | UNCOVERED | UNCOVERED |
@@ -178,11 +178,23 @@ transport — but only as a **point read** (`do_get_over_transport_real_compress
 with no overlap**: the live kit cannot reproduce #2361-class bugs, and the in-repo Flight tests have
 no scan/stitch net under the compressed path the field actually runs.
 
+**Update (#2373):** the in-repo half of this inversion is resolved — `compressed_do_get_transport_test.rs`
+now drives the compressed SCAN/stitch path through Flight `do_get` over real transport. The live-testbed
+half (the kit still cannot reproduce #2361-class uncompressed-arm bugs) remains open.
+
 ### Candidate holes (verify/file)
-- **HOLE-FMT-1**: compressed (stitching) BIG-nb corpus fixtures through Flight do_get **on the
-  scan/stitch path** — compressed *point-read* transport coverage already exists
-  (`do_get_over_transport_real_compressed_fixture`), but the live testbed's actual compressed-SCAN
-  path has no in-repo E2E net.
+- **HOLE-FMT-1** — **CLOSED for the in-repo Flight axis** (#2373, `cqlite-flight/tests/
+  compressed_do_get_transport_test.rs`): compressed (stitching) BIG-nb corpus fixtures now run
+  through Flight do_get **on the scan/stitch path** over real gRPC transport — full scan vs the
+  `nb-1-big-Data.db.jsonl` golden for all four codecs (LZ4/Snappy/Deflate/Zstd), both
+  chunk-boundary edge tables (`short_final_chunk`, `incompressible_uncompressed_chunk`), LIMIT-k,
+  and a midstream client drop. Routing is proven by the public
+  `SSTableReader::decompress_call_count()` (`>= 1` per compressed case) against an
+  `uncompressed_table` control pinned at `0`. The `test_comp` binaries are force-committed, so the
+  lane executes on a stock checkout. **Still open: the LIVE-testbed half** — the field kit's
+  compressed-scan path remains unexercised by an automated in-repo lane, tracked as the separate
+  testbed follow-up (#2377 cluster); the field-testbed inversion above is therefore only half
+  resolved.
 - **HOLE-FMT-2**: BTI compression-axis fixtures missing (Snappy/Zstd/Deflate/uncompressed-BTI) —
   fixture commissioning; constrained by corpus-regen freeze (#2222) / fixture epic #2303.
 - **HOLE-FMT-3** (adjudication, P3): Branch C compressed offset-window arm is dead-defensive for
@@ -251,7 +263,7 @@ UNCOVERED or PARTIAL.
 | **#2370** — Concurrent do_get integration coverage (N≥8 streams; in_flight/phase.active settle + mid-flight read-back; process thread budget; uncompressed variant) | CONC-1..4, QS-3 | P1 |
 | **#2371** — Shadowed data through the real do_get transport (row-set asserts; TTL + range-tombstone seams; sparse predicate+LIMIT at rpc; upgrade seam pin count→set) | SHAD-1,2,3,6 + QS-1 | P2 |
 | **#2372** — BTI (da) E2E via Flight do_get + testbed BTI variant (SummaryReader boundary-key risk — may be red on first run) | BTI-1 | P2 |
-| **#2373** — Compressed (stitching) BIG-nb through Flight do_get (close the testbed-inversion gap) | FMT-1 | P2 |
+| **#2373** — Compressed (stitching) BIG-nb through Flight do_get (close the testbed-inversion gap) — **in-repo Flight axis SHIPPED**; live-testbed half still open | FMT-1 | P2 |
 | **#2374** — Query-semantics oracle routed through Flight do_get (parity lane) | SHAD-4 | P2 |
 | **#2375** — Aggregate/count(*) through real do_get (`DoGetInput::Aggregate` rpc-layer test) | QS-2 | P2 |
 | **#2376** — #2352 clearSnapshot regression at Flight transport + generation turnover during in-flight scan | FI-1, FI-3 | P2 |
