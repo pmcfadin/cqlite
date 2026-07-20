@@ -11,7 +11,6 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 
-import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
@@ -68,16 +67,7 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
         // scan reads one immutable file set per host; in live mode this is Optional.empty().
         // Fails closed — a create error on a PRIMARY host propagates (naming host + snapshot)
         // and the query fails; that host must have the snapshot, no failover is possible without it.
-        // Weight-balanced sub-splitting applies to the SCAN path only (issue #2680 roborev).
-        // An aggregated handle produces exactly ONE finalize split whose PageSource fans out
-        // SEQUENTIALLY (one blocking DoGet per range, on a single driver on a single node), so
-        // slicing it K-ways multiplies its serialized round trips K× for ZERO balancing benefit —
-        // there is nothing to spread across nodes. Sub-splitting exists to spread MANY splits
-        // over MANY nodes; with one split that is a straight latency regression. So the
-        // aggregate path builds at K=1 (parent-range granularity, pre-#2680 fan-out).
-        int subSplitsPerRange = handle.isAggregated() ? 1 : config.subSplitsPerRange();
-        Set<String> primaryHosts =
-                distinctReplicaHosts(replicas, config.localDatacenter(), subSplitsPerRange);
+        Set<String> primaryHosts = distinctReplicaHosts(replicas, config.localDatacenter());
         // Resolve the reuse window ONCE and thread it into availableHosts below, so the ticket name
         // and the per-fallback-host availability creation operate on the EXACT same window even if
         // the freshness window would otherwise roll between the two calls (issue #2356 roborev,
@@ -100,8 +90,7 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                         allReplicaHosts(replicas, config.localDatacenter()))
                 : Set.of();
         List<CqliteFlightSplit> ranges = buildSplits(
-                handle, replicas, config.localDatacenter(), config.flightPort(), snapshot, availableHosts,
-                subSplitsPerRange);
+                handle, replicas, config.localDatacenter(), config.flightPort(), snapshot, availableHosts);
 
         // Plan-time split pruning (issue #2679): when the pushed-down constraint FULLY binds
         // the partition key (equality on every PK column, or an IN over full keys), compute the
@@ -422,44 +411,17 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             int flightPort,
             Optional<String> snapshot,
             Set<String> availableSnapshotHosts) {
-        // K=1 delegating overload: one split per range, byte-identical to the pre-#2680 behavior.
-        return buildSplits(table, replicas, localDatacenter, flightPort, snapshot,
-                availableSnapshotHosts, 1);
-    }
-
-    /**
-     * Weight-balanced split-building (issue #2680): deterministically sub-split each read-replica
-     * token range into {@code subSplitsPerRange} equal-token-span slices at THIS single seam,
-     * then build one split per slice. Each slice inherits its parent range's owner set, its
-     * primary is the consecutive owner after the parent's rotated head (slice {@code i} →
-     * {@code rotated(parent)[i % n]}, {@link #orderedReplicaHostsForSlice}) so per-owner slice
-     * counts within a range differ by at most one and per-owner total token span converges to
-     * ~1/N of the total, and each split's {@link CqliteFlightSplit#getSplitWeight()} is
-     * proportional to its slice's token span (mean-span slice = standard). With
-     * {@code subSplitsPerRange == 1} this reduces to the pre-#2680 one-split-per-range behavior
-     * exactly.
-     */
-    public static List<CqliteFlightSplit> buildSplits(
-            CqliteFlightTableHandle table,
-            TokenRangeReplicasResponse replicas,
-            String localDatacenter,
-            int flightPort,
-            Optional<String> snapshot,
-            Set<String> availableSnapshotHosts,
-            int subSplitsPerRange) {
-        List<SlicedRange> sliced = sliceRanges(replicas.readReplicas(), subSplitsPerRange);
-        // Collect the emitted (slice, host, fallbacks) tuples and the total token span over ONLY
-        // emitted slices, so the mean-span weight scale (mean slice = standard) is exact.
-        List<EmittedSlice> emitted = new ArrayList<>();
-        BigInteger totalSpan = BigInteger.ZERO;
-        for (SlicedRange sr : sliced) {
+        List<CqliteFlightSplit> splits = new ArrayList<>();
+        for (ReplicaInfo range : replicas.readReplicas()) {
             // Sidecar returns replicas as "ip:storage_port"; the flight server listens on
-            // flightPort at the same host, so keep only the host. The ordered list's first entry
-            // is this slice's rotated primary (issue #2680 spreads slices across the parent's owners).
-            List<String> ordered = orderedReplicaHostsForSlice(
-                    sr.replicasByDatacenter(), localDatacenter, sr.parentRotationKey(), sr.sliceIndex());
+            // flightPort at the same host, so keep only the host. The ordered list's first
+            // entry is exactly the pickReplica choice; the primary is a deterministic per-range
+            // rotation keyed on the range start token (issue #2397) so RF==N ranges spread
+            // across owners instead of collapsing onto the lexicographic head.
+            List<String> ordered =
+                    orderedReplicaHosts(range.replicasByDatacenter(), localDatacenter, range.startToken());
             if (ordered.isEmpty()) {
-                continue; // slice of a range with no known replica — nothing to read
+                continue; // range with no known replica — nothing to read
             }
             String host = ordered.get(0);
             List<String> fallbacks = new ArrayList<>();
@@ -469,82 +431,29 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                     fallbacks.add(candidate);
                 }
             }
-            BigInteger span = TokenRangeSlicer.span(sr.start(), sr.end());
-            totalSpan = totalSpan.add(span);
-            emitted.add(new EmittedSlice(sr.start(), sr.end(), host, fallbacks, span));
-        }
-        int numSlices = emitted.size();
-        List<CqliteFlightSplit> splits = new ArrayList<>(numSlices);
-        for (EmittedSlice es : emitted) {
-            // #2228: equal endpoints (start == end) denote the FULL ring — the Cassandra convention
-            // for a range `(T, T]` — not the empty set (the slicer never emits an empty slice).
-            boolean wraparound = es.start() >= es.end();
-            double weight = weightProportion(es.span(), totalSpan, numSlices);
+            long start = range.startToken();
+            long end = range.endToken();
+            // #2228: equal endpoints (start == end) denote the FULL ring — the
+            // Cassandra convention for a range `(T, T]` — not the empty set. The
+            // Sidecar can emit this for single-token/single-node topologies.
+            // Treating it as wraparound makes the flight-side filter accept every
+            // token (`token > T || token <= T`), so `SELECT *` scans everything
+            // instead of silently returning 0 rows.
+            boolean wraparound = start >= end;
             splits.add(new CqliteFlightSplit(
                     table.keyspace(),
                     table.table(),
                     table.ddl(),
-                    es.host(),
+                    host,
                     flightPort,
-                    es.start(),
-                    es.end(),
+                    start,
+                    end,
                     wraparound,
                     snapshot,
-                    es.fallbacks(),
-                    weight));
+                    fallbacks));
         }
         return splits;
     }
-
-    /**
-     * A slice's {@link CqliteFlightSplit#weightProportion()} (issue #2680): its token span
-     * relative to the mean slice span ({@code span * numSlices / totalSpan}), so a mean-span slice
-     * is {@code 1.0} (= {@link io.trino.spi.SplitWeight#standard()}). Clamping to Trino's valid
-     * range happens in the split's constructor. Degenerate inputs degrade to the standard weight.
-     */
-    private static double weightProportion(BigInteger span, BigInteger totalSpan, int numSlices) {
-        if (numSlices <= 0 || totalSpan.signum() == 0) {
-            return CqliteFlightSplit.STANDARD_WEIGHT_PROPORTION;
-        }
-        return span.doubleValue() * numSlices / totalSpan.doubleValue();
-    }
-
-    /**
-     * Expand each read-replica range into {@code subSplitsPerRange} equal-token-span slices
-     * (issue #2680) — the SINGLE slicing seam every consumer (scan split construction, the
-     * snapshot host chooser) draws from, so slicing, rotation, and weight are reasoned about once.
-     * Each {@link SlicedRange} carries the parent's start token (the rotation key) and the slice's
-     * index within the parent so the primary lands on the consecutive rotated owner.
-     */
-    static List<SlicedRange> sliceRanges(List<ReplicaInfo> ranges, int subSplitsPerRange) {
-        List<SlicedRange> out = new ArrayList<>();
-        for (ReplicaInfo range : ranges) {
-            List<TokenRangeSlicer.Slice> slices =
-                    TokenRangeSlicer.slice(range.startToken(), range.endToken(), subSplitsPerRange);
-            for (int i = 0; i < slices.size(); i++) {
-                TokenRangeSlicer.Slice sl = slices.get(i);
-                out.add(new SlicedRange(
-                        sl.start(), sl.end(), range.replicasByDatacenter(), range.startToken(), i));
-            }
-        }
-        return out;
-    }
-
-    /**
-     * One equal-span slice of a parent read-replica range (issue #2680): its half-open
-     * {@code (start, end]} tokens, the parent's owner set (inherited verbatim), the parent's
-     * start token as the rotation key, and the slice's index within the parent (0-based) so the
-     * primary is chosen as the consecutive rotated owner.
-     */
-    record SlicedRange(
-            long start,
-            long end,
-            Map<String, List<String>> replicasByDatacenter,
-            long parentRotationKey,
-            int sliceIndex) {}
-
-    /** A slice's emitted split data plus its token span, for the two-pass weight computation. */
-    private record EmittedSlice(long start, long end, String host, List<String> fallbacks, BigInteger span) {}
 
     /**
      * The range's replica hosts in try order (issues #2241, #2397): the primary first, then
@@ -564,29 +473,6 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
      */
     static List<String> orderedReplicaHosts(
             Map<String, List<String>> replicasByDatacenter, String localDatacenter, long rotationKey) {
-        // Slice index 0 is the parent's rotated head, so this is byte-identical to the pre-#2680
-        // (pre-slicing) ordering — the K=1 identity for a whole range.
-        return orderedReplicaHostsForSlice(replicasByDatacenter, localDatacenter, rotationKey, 0);
-    }
-
-    /**
-     * The slice's replica hosts in try order (issues #2241, #2397, #2680): its primary first, then
-     * the parent range's other owners as ordered availability fallbacks (full owner set retained),
-     * mapped to bare hosts via {@link #hostOnly} and de-duplicated preserving order.
-     *
-     * <p>Weight-balanced slice→owner assignment (issue #2680): the primary is the consecutive owner
-     * after the PARENT range's rotated head — slice {@code i}'s head index into the sorted eligible
-     * owners is {@code (floorMod(parentRotationKey, n) + sliceIndex) mod n}. So within one parent,
-     * consecutive slices land on consecutive owners (per-owner slice counts differ by at most one),
-     * and the remainder owner varies with the parent's rotation key, spreading remainders across
-     * ranges — per-owner total token span converges to ~1/n independent of inter-range weight skew.
-     * Slice index 0 is exactly the parent's rotated head, so K=1 reproduces the pre-#2680 ordering.
-     * Rotation is applied WITHIN the local-datacenter owner set when that DC owns the range (DC
-     * preference preserved), else across the whole owner set; other datacenters are appended sorted.
-     */
-    static List<String> orderedReplicaHostsForSlice(
-            Map<String, List<String>> replicasByDatacenter, String localDatacenter,
-            long parentRotationKey, int sliceIndex) {
         List<String> primaryGroup;
         List<String> tailGroup;
         List<String> local = localDatacenter != null ? replicasByDatacenter.get(localDatacenter) : null;
@@ -606,10 +492,7 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                     .collect(java.util.stream.Collectors.toList());
             tailGroup = List.of();
         }
-        int n = primaryGroup.size();
-        // Consecutive-owner head for this slice; sliceIndex is small (< K <= 64), no overflow.
-        int head = n <= 1 ? 0 : Math.floorMod(Math.floorMod(parentRotationKey, n) + sliceIndex, n);
-        List<String> orderedAddresses = new ArrayList<>(rotate(primaryGroup, head));
+        List<String> orderedAddresses = new ArrayList<>(rotate(primaryGroup, rotationKey));
         orderedAddresses.addAll(tailGroup);
         List<String> hosts = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
@@ -654,26 +537,11 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
      * snapshot must be created on (issue #2227).
      */
     static Set<String> distinctReplicaHosts(TokenRangeReplicasResponse replicas, String localDatacenter) {
-        // K=1 delegating overload: one primary per whole range (pre-#2680 behavior).
-        return distinctReplicaHosts(replicas, localDatacenter, 1);
-    }
-
-    /**
-     * The distinct set of replica hosts the scan's splits will read at SLICE granularity (issues
-     * #2227, #2680): the same rotated chooser used by {@link #buildSplits}, one primary per SLICE,
-     * deduplicated (insertion order, stable across re-planning). Because slicing happens at the
-     * single {@link #sliceRanges} seam, this equals exactly the set of per-slice primary hosts the
-     * splits pin — so a per-query snapshot is created on every host a split will read (fail-closed,
-     * #2227) even after weight-balanced sub-splitting spreads primaries across a range's owners.
-     */
-    static Set<String> distinctReplicaHosts(
-            TokenRangeReplicasResponse replicas, String localDatacenter, int subSplitsPerRange) {
         Set<String> hosts = new LinkedHashSet<>();
-        for (SlicedRange sr : sliceRanges(replicas.readReplicas(), subSplitsPerRange)) {
-            // pickReplicaForSlice returns the slice's rotated primary already as a bare host (via
-            // orderedReplicaHostsForSlice), so it is added directly — no second port strip.
-            String host = pickReplicaForSlice(
-                    sr.replicasByDatacenter(), localDatacenter, sr.parentRotationKey(), sr.sliceIndex());
+        for (ReplicaInfo range : replicas.readReplicas()) {
+            // pickReplica returns the rotated primary already as a bare host (via
+            // orderedReplicaHosts), so it is added directly — no second port strip.
+            String host = pickReplica(range.replicasByDatacenter(), localDatacenter, range.startToken());
             if (host != null) {
                 hosts.add(host);
             }
@@ -710,19 +578,7 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
      */
     static String pickReplica(
             Map<String, List<String>> replicasByDatacenter, String localDatacenter, long rotationKey) {
-        return pickReplicaForSlice(replicasByDatacenter, localDatacenter, rotationKey, 0);
-    }
-
-    /**
-     * Choose the rotated primary for one SLICE (issue #2680): the head of
-     * {@link #orderedReplicaHostsForSlice}, i.e. the consecutive owner after the parent's rotated
-     * head. Returns {@code null} for a range with no known replica.
-     */
-    static String pickReplicaForSlice(
-            Map<String, List<String>> replicasByDatacenter, String localDatacenter,
-            long parentRotationKey, int sliceIndex) {
-        List<String> ordered = orderedReplicaHostsForSlice(
-                replicasByDatacenter, localDatacenter, parentRotationKey, sliceIndex);
+        List<String> ordered = orderedReplicaHosts(replicasByDatacenter, localDatacenter, rotationKey);
         return ordered.isEmpty() ? null : ordered.get(0);
     }
 

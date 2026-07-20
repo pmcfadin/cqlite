@@ -184,9 +184,10 @@ impl MergeProducer {
             // (`entry_to_row` → None) are skipped without counting a row.
             let Some(row) = self.entry_to_row(
                 &key.key,
-                entry.row_data,
+                *entry,
                 &mut pk_cache,
                 assemble_cols.as_ref(),
+                self.now_secs,
             )?
             else {
                 continue;

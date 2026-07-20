@@ -59,16 +59,12 @@ class CqliteFlightSplitPruningWiringTest {
     }
 
     private static CqliteFlightConfig config(URI sidecarUri, boolean pruningEnabled) {
-        return config(sidecarUri, pruningEnabled, CqliteFlightConfig.DEFAULT_SUB_SPLITS_PER_RANGE);
-    }
-
-    private static CqliteFlightConfig config(URI sidecarUri, boolean pruningEnabled, int subSplitsPerRange) {
         return new CqliteFlightConfig(
                 sidecarUri, 8815, "dc1", GroupByPushdownPolicy.AUTOMATIC, 0.5, 3000,
                 ReadMode.LIVE, Optional.empty(),
                 CqliteFlightConfig.DEFAULT_SNAPSHOT_REUSE_WINDOW_MILLIS,
                 CqliteFlightConfig.DEFAULT_SNAPSHOT_RETIRE_GRACE_MILLIS,
-                pruningEnabled, subSplitsPerRange);
+                pruningEnabled);
     }
 
     /**
@@ -303,48 +299,6 @@ class CqliteFlightSplitPruningWiringTest {
             List<ConnectorSplit> splits = drain(mgr.getSplits(null, null, handle, null, constraint));
             assertTrue(splits.size() > 1,
                     "an extractor under-count on a composite PK → full fan-out (never drop rows)");
-        } finally {
-            server.stop(0);
-        }
-    }
-
-    /**
-     * Weight-balanced sub-splitting composes with pruning (issue #2680): with K=4 a fully-bound PK
-     * over a WIDE covering range prunes to exactly ONE slice whose token range is STRICTLY NARROWER
-     * than the parent range (for K>1 on a non-degenerate span). The wide range is sub-split, and only
-     * the single covering slice survives — a tighter server-side range than #2679's one whole range.
-     */
-    @Test
-    void k4FullyBoundPointReadPrunesToOneSliceNarrowerThanParent() throws Exception {
-        long token = Murmur3Token.token(new byte[] {0, 0, 0, 0x2A}); // int 42 (a mid-ring token)
-        // A wide covering range (parentLo, parentHi] centered on the token, tiling the ring with
-        // fillers. w is a fixed mid-ring window well clear of both extremes (no signed overflow).
-        long w = 1L << 40;
-        long parentLo = token - w;
-        long parentHi = token + w;
-        String json = "{\"writeReplicas\":[],\"readReplicas\":["
-                + rangeJson(Long.MIN_VALUE, parentLo, true)
-                + rangeJson(parentLo, parentHi, false)
-                + rangeJson(parentHi, Long.MAX_VALUE, false)
-                + "]}";
-        HttpServer server = startFakeSidecar(json);
-        try {
-            URI uri = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
-            SidecarClient sidecar = new SidecarClient(uri);
-            var mgr = new CqliteFlightSplitManager(config(uri, true, 4), sidecar, liveSnapshots());
-            CqliteFlightTableHandle handle = new CqliteFlightTableHandle("ks", "t", DDL);
-            var constraint = new Constraint(TupleDomain.<ColumnHandle>withColumnDomains(Map.of(
-                    ID_INT, Domain.singleValue(INTEGER, 42L))), Constant.TRUE, Map.of());
-
-            List<ConnectorSplit> splits = drain(mgr.getSplits(null, null, handle, null, constraint));
-            assertEquals(1, splits.size(), "K=4 point read prunes to exactly one covering slice");
-            CqliteFlightSplit s = (CqliteFlightSplit) splits.get(0);
-            assertTrue(Murmur3Token.tokenInRange(token, s.tokenStart(), s.tokenEnd(), s.wraparound()),
-                    "the single emitted slice covers the key's token");
-            java.math.BigInteger sliceSpan = TokenRangeSlicer.span(s.tokenStart(), s.tokenEnd());
-            java.math.BigInteger parentSpan = TokenRangeSlicer.span(parentLo, parentHi);
-            assertTrue(sliceSpan.compareTo(parentSpan) < 0,
-                    "the pruned slice is strictly narrower than the parent range (K>1)");
         } finally {
             server.stop(0);
         }

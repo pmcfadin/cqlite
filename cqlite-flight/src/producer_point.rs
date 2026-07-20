@@ -203,7 +203,12 @@ impl MergeProducer {
             // a cancel takes effect mid-partition — not after buffering the whole
             // partition. Output stays byte-identical (same reconciliation, same
             // order, same batching) to the buffered `drive_merge`.
-            Some(mut merger) => self.drive_merge_over(&mut merger, cancel, sink, progress, label),
+            Some(merger) => {
+                // Issue #2374/#2789: thread the read-time reconciliation clock so
+                // the point-read merge expires TTL cells with parity to core.
+                let mut merger = merger.with_now_secs(Some(self.now_secs));
+                self.drive_merge_over(&mut merger, cancel, sink, progress, label)
+            }
         }
     }
 }

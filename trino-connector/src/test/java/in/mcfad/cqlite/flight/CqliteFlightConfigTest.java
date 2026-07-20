@@ -44,42 +44,6 @@ class CqliteFlightConfigTest {
                 config.snapshotRetireGraceNanos());
         // Plan-time split pruning defaults ON (issue #2679).
         assertEquals(CqliteFlightConfig.DEFAULT_SPLIT_PRUNING_ENABLED, config.splitPruningEnabled());
-        // Weight-balanced sub-splitting defaults to 4 (issue #2680).
-        assertEquals(CqliteFlightConfig.DEFAULT_SUB_SPLITS_PER_RANGE, config.subSplitsPerRange());
-        assertEquals(4, config.subSplitsPerRange());
-    }
-
-    @Test
-    void parsesSubSplitsPerRange() {
-        Map<String, String> m = base();
-        m.put("cqlite.sub-splits-per-range", "8");
-        assertEquals(8, CqliteFlightConfig.fromMap(m).subSplitsPerRange());
-    }
-
-    @Test
-    void acceptsSubSplitsPerRangeAtBounds() {
-        Map<String, String> lo = base();
-        lo.put("cqlite.sub-splits-per-range", "1");
-        assertEquals(1, CqliteFlightConfig.fromMap(lo).subSplitsPerRange(),
-                "K=1 (identity, one split per range) is the minimum");
-
-        Map<String, String> hi = base();
-        hi.put("cqlite.sub-splits-per-range", "64");
-        assertEquals(64, CqliteFlightConfig.fromMap(hi).subSplitsPerRange());
-    }
-
-    @Test
-    void rejectsSubSplitsPerRangeBelowMinimum() {
-        Map<String, String> m = base();
-        m.put("cqlite.sub-splits-per-range", "0");
-        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
-    }
-
-    @Test
-    void rejectsSubSplitsPerRangeAboveMaximum() {
-        Map<String, String> m = base();
-        m.put("cqlite.sub-splits-per-range", "65");
-        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
     }
 
     @Test
