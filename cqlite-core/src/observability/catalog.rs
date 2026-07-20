@@ -646,8 +646,10 @@ pub const FLIGHT_TABLES_DISCOVERED: &str = "cqlite.flight.tables_discovered";
 
 /// `cqlite.flight.warm_tables` — gauge `{entry}` (issue #2684).
 ///
-/// Current number of tables with a live warm reader set in the flight
-/// `WarmTableRegistry` (`Inner.tables.len()`). Atomic-backed at the registry's
+/// The count of tables with a live (non-empty) warm reader set in the flight
+/// `WarmTableRegistry` (a retired table leaves a zero-reader entry until the next
+/// rebuild, so the reading filters those out rather than using the raw map size).
+/// Atomic-backed at the registry's
 /// mutation sites (independent of the sampler cadence): the post-mutation
 /// `.len()` is emitted while the registry lock is held at the `rebuild()` insert
 /// and `evict_to_budget()` removal, so the remove-then-reinsert transient the

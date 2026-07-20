@@ -136,6 +136,21 @@ pub struct TableDiscovery {
     pub keyspaces: u64,
 }
 
+/// Whether a readdir entry is a directory, using the readdir-provided `d_type`
+/// (`DirEntry::file_type`) so the walk stays genuinely readdir-only — NO stat
+/// syscall on the filesystems that populate `d_type` (the common case). Only when
+/// the filesystem reports an `Unknown` file type (or the `file_type` call itself
+/// errors) do we fall back to a `Path::is_dir` stat, so correctness holds
+/// everywhere while the fast path avoids the per-entry stat.
+fn entry_is_dir(entry: &std::fs::DirEntry) -> bool {
+    match entry.file_type() {
+        Ok(ft) if ft.is_dir() => true,
+        Ok(ft) if ft.is_file() || ft.is_symlink() => false,
+        // Unknown d_type or a file_type error: fall back to a stat.
+        _ => entry.path().is_dir(),
+    }
+}
+
 /// Whether `dir` DIRECTLY contains a `*-Data.db` entry (readdir name check only
 /// — no stat, no open, no generation parse). This is the sole, structural
 /// "is a genuine table dir" test (matches the `DirSource` `-Data.db` prior art).
@@ -171,10 +186,10 @@ pub fn discover_tables(data_dir: &Path) -> TableDiscovery {
         return out;
     };
     for ks in keyspaces.flatten() {
-        let ks_path = ks.path();
-        if !ks_path.is_dir() {
+        if !entry_is_dir(&ks) {
             continue;
         }
+        let ks_path = ks.path();
         let Ok(tables) = std::fs::read_dir(&ks_path) else {
             continue;
         };
@@ -187,10 +202,10 @@ pub fn discover_tables(data_dir: &Path) -> TableDiscovery {
             if name == "snapshots" || name == "backups" {
                 continue;
             }
-            let tbl_path = tbl.path();
-            if !tbl_path.is_dir() {
+            if !entry_is_dir(&tbl) {
                 continue;
             }
+            let tbl_path = tbl.path();
             if dir_has_data_db(&tbl_path) {
                 ks_tables = ks_tables.saturating_add(1);
             }
@@ -335,11 +350,18 @@ pub(crate) fn sample_ticks() -> u64 {
 /// `cqlite.flight.tables_discovered`. Returns the discovery result so the caller
 /// can emit the one-time startup log line after the first sample.
 ///
+/// The `data_dir` walk (a `readdir` tree-scan whose cost scales with keyspaces ×
+/// tables, and which can block on a slow/network-backed mount) is offloaded to a
+/// `tokio::task::spawn_blocking` pool thread so it NEVER stalls a runtime worker
+/// polling in-flight `do_get` scan futures (roborev, issue #2684). If that
+/// blocking task fails to join (e.g. runtime shutdown), this tick simply skips the
+/// `tables_discovered` emission and returns an empty discovery — never a panic.
+///
 /// Unlike the `/proc` gauges, `tables_discovered` is emitted UNCONDITIONALLY
 /// (including `0`): a `0` here is an authoritative reading of an empty/wrong
 /// mount, NOT the "absence" a `None` /proc reader represents — surfacing an inert
 /// mount is the whole point.
-fn sample_once(data_dir: &Path) -> TableDiscovery {
+async fn sample_once(data_dir: &Path) -> TableDiscovery {
     if let Some(threads) = read_proc_threads() {
         obs::record_gauge(catalog::PROC_THREADS, as_gauge(threads), &[]);
     }
@@ -349,13 +371,24 @@ fn sample_once(data_dir: &Path) -> TableDiscovery {
     if let Some(rss) = read_proc_rss_bytes() {
         obs::record_gauge(catalog::PROC_RSS_BYTES, as_gauge(rss), &[]);
     }
-    let discovery = discover_tables(data_dir);
+    // Every tick counts as a completed collection (the work-probe), independent of
+    // the offloaded walk's outcome.
+    SAMPLE_TICKS.fetch_add(1, Ordering::SeqCst);
+    // Run the blocking readdir tree-scan OFF the async executor.
+    let dir = data_dir.to_path_buf();
+    let discovery = match tokio::task::spawn_blocking(move || discover_tables(&dir)).await {
+        Ok(discovery) => discovery,
+        Err(_join_err) => {
+            // The blocking task failed to join (runtime teardown); skip this
+            // tick's emission rather than panicking.
+            return TableDiscovery::default();
+        }
+    };
     obs::record_gauge(
         catalog::FLIGHT_TABLES_DISCOVERED,
         as_gauge(discovery.tables),
         &[],
     );
-    SAMPLE_TICKS.fetch_add(1, Ordering::SeqCst);
     discovery
 }
 
@@ -397,7 +430,7 @@ where
     // Immediate startup sample; the periodic ticker then fires after each full
     // `interval` (never an extra immediate tick — `interval_at` from `now +
     // interval` — so the cadence stays regular).
-    let first = sample_once(&data_dir);
+    let first = sample_once(&data_dir).await;
     // One-time startup log line (issue #2684) after the first walk, so an
     // empty/wrong mount is visible in logs even without a metrics stack.
     log_tables_discovered_once(&first, &data_dir);
@@ -406,7 +439,7 @@ where
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                sample_once(&data_dir);
+                sample_once(&data_dir).await;
             }
             _ = &mut shutdown => break,
         }
@@ -514,11 +547,11 @@ mod tests {
     /// and confirming it never panics and always advances the tick probe,
     /// regardless of platform (on non-`/proc` platforms all three readers are
     /// `None` and no gauge is recorded, yet the tick still counts).
-    #[test]
-    fn sample_once_advances_tick_and_skips_none_readers() {
+    #[tokio::test]
+    async fn sample_once_advances_tick_and_skips_none_readers() {
         let before = sample_ticks();
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        sample_once(tmp.path());
+        sample_once(tmp.path()).await;
         assert!(
             sample_ticks() > before,
             "a collection tick is counted even when every /proc reader is None"
@@ -659,12 +692,12 @@ mod tests {
     /// exercised here as a smoke test (the OTel `INDEX_PARSES_TOTAL` zero-delta
     /// assertion lives in the observability-testing capture harness). Confirms
     /// the walk sees the fixture and the tick still advances.
-    #[test]
-    fn sample_once_walks_data_dir_without_panicking() {
+    #[tokio::test]
+    async fn sample_once_walks_data_dir_without_panicking() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         make_table_dir(tmp.path(), "ks", "t", true);
         let before = sample_ticks();
-        let d = sample_once(tmp.path());
+        let d = sample_once(tmp.path()).await;
         assert_eq!(d.tables, 1, "sample_once walks the data dir and counts");
         assert!(sample_ticks() > before, "the tick advances");
     }

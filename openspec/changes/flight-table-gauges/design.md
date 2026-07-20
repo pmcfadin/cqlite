@@ -37,8 +37,10 @@ HashMap<TableKey, TableWarm>` size IS the metric. Mutation sites:
   key earlier (`registry.rs:519`), so a naive inc-on-insert/dec-on-remove would transiently dip.
 - `evict_to_budget()` removal (`registry.rs:659`) — the true LRU/generation-turnover removal.
 
-Chosen approach: emit the **post-mutation `inner.tables.len()`** (while the `Inner` lock is held) at the end
-of `rebuild` and `evict_to_budget` via `obs::record_gauge(catalog::FLIGHT_WARM_TABLES, len as i64, &[])`.
+Chosen approach: emit **the count of tables with a live (non-empty) warm reader set** (while the `Inner` lock
+is held) at the end of `rebuild` and `evict_to_budget` via `obs::record_gauge(catalog::FLIGHT_WARM_TABLES,
+len as i64, &[])`. Filtering to non-empty reader sets (rather than the raw `inner.tables.len()`) is what makes
+retirement observably decrement the gauge — a retired table leaves a zero-reader entry until the next rebuild.
 This avoids the remove-then-reinsert dip and is always exact. Also expose a feature-independent level reader
 `warm_table_count() -> i64` (mirroring `saturation::blocking_tasks_in_use_level()`) so up/down tests can
 read the current value without an OTel stack.
