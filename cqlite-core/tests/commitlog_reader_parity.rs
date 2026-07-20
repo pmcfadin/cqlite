@@ -13,7 +13,7 @@
 //! never silently passes on missing data.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cqlite_core::storage::commitlog::{
     parse_table_id, ColumnSpec, CommitLogReader, CommitLogSchema, SchemaSet,
@@ -47,7 +47,7 @@ struct InsertRow {
     age: i32,
 }
 
-fn load_ground_truth(dir: &PathBuf) -> GroundTruth {
+fn load_ground_truth(dir: &Path) -> GroundTruth {
     let path = dir.join("commitlog-ground-truth.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read ground truth {}: {e}", path.display()));
@@ -67,7 +67,7 @@ fn users_schema() -> CommitLogSchema {
     }
 }
 
-fn find_fixture(dir: &PathBuf, prefix: &str) -> PathBuf {
+fn find_fixture(dir: &Path, prefix: &str) -> PathBuf {
     let entries = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read commitlog dir {}: {e}", dir.display()));
     for e in entries.flatten() {
