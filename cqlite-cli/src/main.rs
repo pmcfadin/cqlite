@@ -933,6 +933,16 @@ async fn run_main() -> Result<()> {
             )
             .await
         }
+        Some(Commands::ReadCommitlog {
+            file,
+            format,
+            limit,
+        }) => {
+            commands::read_commitlog::execute_read_commitlog_command(
+                &file, format, limit, cli.quiet,
+            )
+            .await
+        }
         Some(Commands::Info {
             path,
             format,

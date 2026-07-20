@@ -225,3 +225,41 @@ fn simple_table_data_file() -> Option<std::path::PathBuf> {
     }
     None
 }
+
+// ---------------------------------------------------------------------------
+// 6. CommitLog segment parser (issue #2389) — descriptor, frame walk, mutation
+//    decode. Contract: arbitrary bytes never panic/hang/OOM.
+// ---------------------------------------------------------------------------
+use crate::storage::commitlog::descriptor::CommitLogDescriptor;
+use crate::storage::commitlog::frame::{FrameStep, FrameWalker};
+use crate::storage::commitlog::mutation::decode_mutation;
+use crate::storage::commitlog::schema::SchemaSet;
+
+/// Drive every CommitLog parsing layer over arbitrary bytes.
+///
+/// Exercises (1) descriptor header parsing, (2) the sync-marker/record frame
+/// walker, and (3) the mutation-body decoder — each on the raw fuzz input, with
+/// a hard iteration cap so a crafted marker chain can never hang the fuzzer.
+pub fn fuzz_commitlog_segment(data: &[u8]) {
+    // 1. Descriptor header.
+    let _ = CommitLogDescriptor::parse(data);
+
+    // 2. Frame walk + mutation decode of each yielded record. Segment id and
+    //    body-start are arbitrary here (0) — we are fuzzing the walker's
+    //    robustness on hostile bytes, not a real segment's semantics.
+    let schemas = SchemaSet::new();
+    let mut walker = FrameWalker::new(data, 0, 0);
+    let mut guard: u32 = 0;
+    while guard < 1_000_000 {
+        guard += 1;
+        match walker.next_frame() {
+            Ok(FrameStep::Record(body)) => {
+                let _ = decode_mutation(body, &schemas);
+            }
+            _ => break,
+        }
+    }
+
+    // 3. Decode the raw bytes directly as a mutation body.
+    let _ = decode_mutation(data, &schemas);
+}
