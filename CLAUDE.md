@@ -133,6 +133,9 @@ support, delta-export, profiling, feature-flag builds, fuzz runs): `docs/develop
 
 ```
 cqlite-core/     # Core library (SSTable parsing, query engine)
+                 #   storage/commitlog/ — Cassandra 5.0 CommitLog segment reader (#2389),
+                 #   sibling of storage/sstable/ and storage/write_engine/ (Cassandra's
+                 #   CommitLog, NOT CQLite's own write_engine::wal)
 cqlite-cli/      # Command-line interface
 bindings/python/ # Python bindings (PyO3) — M4 complete
 bindings/node/   # Node.js bindings (napi-rs) — Phase 3 complete
