@@ -84,6 +84,7 @@ impl CompactionRow {
                     // A live `ScanRow::Row` never carries a coexisting row deletion
                     // (a row tombstone arrives as a `ScanRow::Marker`, handled below).
                     row_deletion: None,
+                    row_liveness: RowLiveness::default(),
                 }
             }
             // A row tombstone marker becomes a row tombstone.
@@ -114,6 +115,7 @@ impl CompactionRow {
                 }],
                 complex: Vec::new(),
                 row_deletion: None,
+                row_liveness: RowLiveness::default(),
             },
             // Any other marker (null row, cell tombstone, …) collapses to a single
             // `value` cell, exactly as the pre-#1334 fallback did.
@@ -127,6 +129,7 @@ impl CompactionRow {
                 }],
                 complex: Vec::new(),
                 row_deletion: None,
+                row_liveness: RowLiveness::default(),
             },
         };
         CompactionRow {
@@ -157,6 +160,86 @@ pub enum CompactionBound {
     Bottom,
     /// After all clustering keys (end of partition).
     Top,
+}
+
+/// Primary-key (row-marker) liveness surfaced on a live compaction row so a
+/// READ consumer can apply Cassandra's row-visibility rule (issue #2374/#2789).
+///
+/// A row is visible to a `SELECT` iff it has at least one live data cell OR a
+/// LIVE primary-key liveness marker (`HAS_TIMESTAMP`, whose TTL — if any — has
+/// not expired). Compaction (the WRITE path) does NOT consult this — it retains
+/// an expired marker within gc_grace for byte-parity — so this is carry-only for
+/// the read side (Flight `do_get` / cross-generation read merge), never a write
+/// decision. No-heuristics (#28): both fields come from the authoritative
+/// on-disk row header, never inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RowLiveness {
+    /// Whether the row carried a primary-key liveness marker (`HAS_TIMESTAMP` —
+    /// i.e. it was INSERTed, not created implicitly by a data-cell UPDATE).
+    pub has_marker: bool,
+    /// Marker expiry (epoch seconds) when the liveness marker carries a TTL
+    /// (`HAS_TTL`); `None` when the marker is live-forever (no TTL). Only
+    /// meaningful when `has_marker` is `true`. Reinterpreted UNSIGNED upstream
+    /// so a post-2038 expiry is not wrapped negative.
+    pub expires_at_seconds: Option<i64>,
+    /// The marker's authoritative WRITE timestamp in microseconds (the row
+    /// header liveness `timestamp`), when present. Populated from the on-disk
+    /// row header only (no-heuristics, #28) — never inferred. Carries the
+    /// last-write-wins key for [`Self::merge`] so a cross-generation fold keeps
+    /// the NEWER liveness marker outright (a newer TTL'd marker can supersede an
+    /// older live-forever one, and vice-versa) instead of a most-permissive
+    /// union. `None` when `has_marker` is `false`.
+    pub marker_timestamp: Option<i64>,
+}
+
+impl RowLiveness {
+    /// `true` when the primary-key liveness marker is present AND still live at
+    /// `now_secs` (no TTL, or its expiry is strictly in the future). Matches
+    /// `Cell.isLive`: live iff `now < localExpirationTime`.
+    pub fn marker_live_at(&self, now_secs: i64) -> bool {
+        self.has_marker && self.expires_at_seconds.is_none_or(|s| s > now_secs)
+    }
+
+    /// Fold two liveness markers across generations by Cassandra
+    /// last-write-wins on the marker WRITE timestamp (issue #2374/#2789): the
+    /// marker with the higher [`marker_timestamp`](Self::marker_timestamp) wins
+    /// OUTRIGHT — its expiry / live-forever state is taken as-is, so a newer
+    /// TTL'd marker supersedes an older live-forever one (and vice-versa). Later
+    /// expiry is only a TIE-BREAK when the timestamps compare equal (or both are
+    /// absent). A generation with no marker contributes nothing, so the surviving
+    /// marker (if any) is carried through unchanged.
+    ///
+    /// This replaces the former most-permissive union, which unconditionally let
+    /// a live-forever marker win regardless of write order and diverged from
+    /// Cassandra for a reverse-timestamp reinsertion (older live-forever, newer
+    /// expired TTL): the union reported the row VISIBLE where Cassandra keeps the
+    /// newer expired liveness and HIDES it.
+    pub fn merge(self, other: RowLiveness) -> RowLiveness {
+        match (self.has_marker, other.has_marker) {
+            (false, false) => RowLiveness::default(),
+            (true, false) => self,
+            (false, true) => other,
+            (true, true) => {
+                // Both generations carry a marker: last-write-wins on the
+                // authoritative write timestamp; later expiry breaks a tie.
+                let self_wins = match (self.marker_timestamp, other.marker_timestamp) {
+                    (Some(a), Some(b)) if a != b => a > b,
+                    // Equal (or one/both absent) timestamps → tie-break on the
+                    // later expiry, treating live-forever (`None`) as the latest.
+                    _ => match (self.expires_at_seconds, other.expires_at_seconds) {
+                        (None, _) => true,
+                        (_, None) => false,
+                        (Some(a), Some(b)) => a >= b,
+                    },
+                };
+                if self_wins {
+                    self
+                } else {
+                    other
+                }
+            }
+        }
+    }
 }
 
 /// Live-or-tombstone payload of a [`CompactionRow`].
@@ -232,6 +315,11 @@ pub enum CompactionRowData {
         /// deletion (no surviving cells) is a [`Self::Tombstone`], not a `Live`
         /// with this field set.
         row_deletion: Option<(i64, i32)>,
+        /// Primary-key (row-marker) liveness of this row (issue #2374/#2789),
+        /// carried so a READ consumer can hide a row whose only content is an
+        /// EXPIRED liveness marker plus already-tombstoned cells. Carry-only for
+        /// reads — the compaction WRITE path ignores it (byte-parity preserved).
+        row_liveness: RowLiveness,
     },
 }
 
@@ -319,4 +407,91 @@ pub struct ComplexElement {
     /// as a cell value). Distinct from `is_deleted`: an empty-value live element
     /// is not a tombstone.
     pub has_empty_value: bool,
+}
+
+#[cfg(test)]
+mod row_liveness_tests {
+    use super::RowLiveness;
+
+    fn marker(ts: i64, expires_at_seconds: Option<i64>) -> RowLiveness {
+        RowLiveness {
+            has_marker: true,
+            expires_at_seconds,
+            marker_timestamp: Some(ts),
+        }
+    }
+
+    /// Issue #2374/#2789: the cross-generation fold is Cassandra last-write-wins
+    /// on the marker WRITE timestamp, NOT a most-permissive union. A newer
+    /// EXPIRED-TTL marker supersedes an older live-forever marker for a key-only
+    /// row → the row is HIDDEN once `now` passes the newer marker's expiry.
+    ///
+    /// Pre-fix (union) this returned live-forever → `marker_live_at` true → the
+    /// read path wrongly reported the row VISIBLE.
+    #[test]
+    fn newer_expired_ttl_supersedes_older_live_forever() {
+        // gen A: INSERT live-forever @ts=200; gen B: INSERT ... USING TTL @ts=300
+        // whose marker has since EXPIRED (expiry at epoch second 1_000).
+        let gen_a = marker(200, None);
+        let gen_b = marker(300, Some(1_000));
+
+        let merged = gen_a.merge(gen_b);
+        // The NEWER (ts=300) expired marker wins outright.
+        assert_eq!(merged.marker_timestamp, Some(300));
+        assert_eq!(merged.expires_at_seconds, Some(1_000));
+        // Row is HIDDEN once now > expiry.
+        assert!(
+            !merged.marker_live_at(2_000),
+            "newer expired-TTL marker must hide the key-only row (timestamp-LWW)"
+        );
+        // Fold order must not matter.
+        let merged_rev = gen_b.merge(gen_a);
+        assert_eq!(merged_rev.marker_timestamp, Some(300));
+        assert!(!merged_rev.marker_live_at(2_000));
+    }
+
+    /// Reverse of the above: a newer live-forever marker supersedes an older
+    /// expired-TTL one → the key-only row is VISIBLE.
+    #[test]
+    fn newer_live_forever_supersedes_older_expired_ttl() {
+        // gen A: expired-TTL @ts=200 (expiry epoch second 500); gen B: live-forever @ts=300.
+        let gen_a = marker(200, Some(500));
+        let gen_b = marker(300, None);
+
+        let merged = gen_a.merge(gen_b);
+        assert_eq!(merged.marker_timestamp, Some(300));
+        assert_eq!(merged.expires_at_seconds, None);
+        assert!(
+            merged.marker_live_at(2_000),
+            "newer live-forever marker must keep the key-only row visible (timestamp-LWW)"
+        );
+        // Fold order must not matter.
+        assert!(gen_b.merge(gen_a).marker_live_at(2_000));
+    }
+
+    /// Equal timestamps → tie-break on the later expiry (live-forever latest).
+    #[test]
+    fn equal_timestamps_tie_break_on_later_expiry() {
+        let live_forever = marker(300, None);
+        let ttl = marker(300, Some(500));
+        assert_eq!(live_forever.merge(ttl).expires_at_seconds, None);
+        assert_eq!(ttl.merge(live_forever).expires_at_seconds, None);
+
+        let earlier = marker(300, Some(400));
+        let later = marker(300, Some(900));
+        assert_eq!(earlier.merge(later).expires_at_seconds, Some(900));
+        assert_eq!(later.merge(earlier).expires_at_seconds, Some(900));
+    }
+
+    /// A generation with no marker contributes nothing.
+    #[test]
+    fn absent_marker_carries_the_present_one_through() {
+        let present = marker(300, Some(500));
+        assert_eq!(present.merge(RowLiveness::default()), present);
+        assert_eq!(RowLiveness::default().merge(present), present);
+        assert_eq!(
+            RowLiveness::default().merge(RowLiveness::default()),
+            RowLiveness::default()
+        );
+    }
 }

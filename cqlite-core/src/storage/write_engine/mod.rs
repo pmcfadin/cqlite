@@ -53,6 +53,15 @@ pub use merge::KWayMerger;
 pub use merge::{build_single_partition_merger, build_single_partition_merger_with_registry};
 #[cfg(feature = "write-support")]
 pub use merge_policy::STCSPolicy;
+
+/// Read-time TTL "now" clock (epoch seconds), the authoritative reconciliation
+/// instant the core read path uses (issue #1741/#1853). Re-exported (issue
+/// #2789) so an out-of-crate merge consumer — the Flight producer — threads the
+/// SAME `now` into its k-way merger's TTL expiry as a `SELECT`, honoring the
+/// debug-only `CQLITE_TTL_NOW_OVERRIDE_SECS` pin in tests and wall-clock in
+/// production, rather than re-deriving it (no divergence, no new env read).
+#[doc(hidden)]
+pub use crate::storage::sstable::reader::parsing::row_decoder::now_clock::now_epoch_secs as read_time_now_secs;
 #[cfg(feature = "write-support")]
 pub use mutation::{
     CellOperation, ClusteringBound, ClusteringKey, DecoratedKey, Mutation, PartitionKey,

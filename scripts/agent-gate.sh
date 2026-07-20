@@ -1331,7 +1331,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle flight-query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -2215,6 +2215,48 @@ run_query_semantics_oracle() {
   if env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
       cargo test -p cqlite-core --features "state_machine cli-helpers" \
         --test query_semantics_oracle_parity >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# flight-query-semantics-oracle: the QUERY-SEMANTICS parity lane routed through the
+# FLIGHT do_get path (issue #2374), the sibling of query-semantics-oracle above. The
+# in-core lane never exercises the Flight producer/merge path (it drives
+# cqlite_core::Database directly), so a read-time reconciliation regression in the
+# Flight producer would pass the in-core oracle. This lane replays the SAME oracle
+# cases through a REAL in-process do_get at a PINNED `now` and asserts the post-
+# reconciliation result set matches — including read-time TTL expiry (issue #2789).
+# Same fixture policy + SKIP/fail-closed contract as its sibling: fail-closed
+# (CQLITE_REQUIRE_FIXTURES=1) when the committed test_compaction_tombstone_ttl
+# fixtures are present, loud SKIP (never silent PASS) when CQLITE_DATASETS_ROOT is
+# unset or the committed keyspace is absent. NOT in DATASET_COMPONENTS: self-guarding.
+run_flight_query_semantics_oracle() {
+  local name=flight-query-semantics-oracle
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  local committed_ks="${CQLITE_DATASETS_ROOT:-}/sstables/test_compaction_tombstone_ttl"
+  if [ -z "${CQLITE_DATASETS_ROOT:-}" ] || [ ! -d "$committed_ks" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (CQLITE_DATASETS_ROOT unset or committed test_compaction_tombstone_ttl fixtures absent)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  echo ">>> [$name] query-semantics parity oracle vs Flight do_get (#2374/#2789)"
+  if env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+      cargo test -p cqlite-flight \
+        --test query_semantics_flight_parity >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -4136,6 +4178,7 @@ dispatch_component() {
   check_no_unexpected_zero_tests "Pass 2 (write-support)" "$log2"' ;;
     compaction-byte-parity) run_compaction_byte_parity ;;
     query-semantics-oracle) run_query_semantics_oracle ;;
+    flight-query-semantics-oracle) run_flight_query_semantics_oracle ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
     delivery-telemetry) run_delivery_telemetry ;;
