@@ -126,6 +126,19 @@ pub struct DecodedCell {
 pub fn decode_mutation(body: &[u8], schemas: &SchemaSet) -> Result<Mutation> {
     let mut c = Cursor::new(body);
     let num_updates = c.uvint()?;
+    // Guard against a maliciously huge declared count spinning the loop below:
+    // each update needs at least a few bytes (a 16-byte table id alone), so a
+    // count exceeding the body length is already provably impossible — reject
+    // it outright rather than relying on each iteration's short-read failure
+    // to terminate a `for _ in 0..num_updates` driven by an untrusted u64
+    // (roborev finding — a hang risk even though it fails fast today, review-
+    // first pass).
+    if num_updates > body.len() as u64 {
+        return Err(Error::CorruptCommitLogFrame(format!(
+            "mutation declares {num_updates} updates, impossible for a {}-byte body",
+            body.len()
+        )));
+    }
     let mut updates = Vec::with_capacity(num_updates.min(1024) as usize);
     for _ in 0..num_updates {
         // Each update is decoded either fully (cursor left at the next update) or

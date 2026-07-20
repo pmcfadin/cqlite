@@ -133,10 +133,13 @@ fn decoded_mutations_match_inserted_set() {
                             .map(|v| String::from_utf8_lossy(v).into_owned())
                     }
                     "age" => {
-                        age = cell
-                            .value
-                            .as_ref()
-                            .map(|v| i32::from_be_bytes([v[0], v[1], v[2], v[3]]))
+                        age = cell.value.as_ref().map(|v| {
+                            let b: [u8; 4] = v
+                                .as_slice()
+                                .try_into()
+                                .unwrap_or_else(|_| panic!("age cell value not 4 bytes: {v:?}"));
+                            i32::from_be_bytes(b)
+                        })
                     }
                     other => panic!("unexpected column {other}"),
                 }
@@ -169,18 +172,29 @@ fn truncated_segment_returns_clean_prefix_and_flags_truncation() {
     let reader = CommitLogReader::open(&clean).expect("open truncated segment");
 
     let mut count = 0usize;
+    let mut saw_err = false;
     let mut it = reader.mutations();
     for res in it.by_ref() {
         // Cleanly-decoded records before the tear are returned; a torn body is
         // reported as end-of-stream (truncation), never a panic. A structural
         // decode may still hit corruption if the tear lands mid-record — that is
         // surfaced as a typed Err, which is acceptable (no panic).
-        if res.is_ok() {
-            count += 1;
+        match res {
+            Ok(_) => count += 1,
+            Err(_) => saw_err = true,
         }
     }
     assert!(count > 0, "some mutations decode before the tear");
-    assert!(it.truncated(), "truncation must be surfaced to the caller");
+    // Exactly one of these outcomes must hold, matching the comment above: the
+    // walker either reaches a torn tail cleanly (truncated()) or the fixture's
+    // cut point lands mid-record and surfaces as a typed Err first. Asserting
+    // only truncated() made this test fixture-offset-fragile — regenerating
+    // with a different insert set could shift the tear into the Err case and
+    // fail confusingly (roborev finding, review-first pass).
+    assert!(
+        it.truncated() || saw_err,
+        "torn tail must surface as either Iterator::truncated() or a typed Err, not silently"
+    );
 }
 
 /// Requirement: malformed input never panics (corrupt CRC).

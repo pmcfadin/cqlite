@@ -126,7 +126,16 @@ impl<'a> FrameWalker<'a> {
                 }
                 RecordOutcome::CleanEnd => {
                     self.done = true;
-                    return Ok(FrameStep::End);
+                    // A torn section (opened past-EOF marker) sets truncated_end
+                    // at open time; honor it here too, not just in open_section's
+                    // own None path — otherwise hitting padding inside a torn
+                    // section's remaining bytes silently downgrades Truncated to
+                    // a clean End (roborev finding, review-first pass).
+                    return Ok(if self.truncated_end {
+                        FrameStep::Truncated
+                    } else {
+                        FrameStep::End
+                    });
                 }
                 RecordOutcome::Truncated => {
                     self.done = true;
@@ -166,12 +175,19 @@ impl<'a> FrameWalker<'a> {
             return Ok(None);
         }
         let next = next_marker as usize;
-        // Marker is valid but points past EOF → the section body is torn.
+        // Marker is valid but points past EOF → the section body is torn. This
+        // section necessarily runs to true end-of-file (nothing can follow a
+        // marker that already overruns the buffer), so the walk is guaranteed
+        // to terminate truncated — set that now, not just on the eventual
+        // "no more marker bytes" path, so a CleanEnd/SectionDone reached while
+        // still inside this torn section doesn't get reported as a clean end
+        // (roborev finding, review-first pass).
         if next > self.bytes.len() {
             self.section_end = self.bytes.len();
             self.cursor = pos + SYNC_MARKER_SIZE;
             self.in_section = true;
             self.torn_section = true;
+            self.truncated_end = true;
             return Ok(Some(()));
         }
         // A marker must point strictly forward past its own 8 bytes.
@@ -196,13 +212,31 @@ impl<'a> FrameWalker<'a> {
         if cur >= self.section_end {
             return Ok(RecordOutcome::SectionDone);
         }
-        if cur + 4 > len {
-            return Ok(RecordOutcome::Truncated);
+        // `is_final_section` distinguishes "this section runs to true EOF" from
+        // "more sections follow at self.section_end". Cassandra pads the tail of
+        // EVERY non-final section up to its next sync marker — a zeroed/short
+        // record header there means "done with THIS section, continue at the
+        // next marker" (SectionDone), not "the whole segment ends here"
+        // (CleanEnd/Truncated). Treating it as segment-end silently drops every
+        // mutation in all subsequent sections (roborev finding, review-first
+        // pass).
+        let is_final_section = self.section_end >= len;
+        if cur + 4 > self.section_end {
+            return Ok(if is_final_section {
+                RecordOutcome::Truncated
+            } else {
+                RecordOutcome::SectionDone
+            });
         }
         let size = read_i32_be(self.bytes, cur);
-        // Zeroed padding within the (last) section → clean end of segment.
+        // Zeroed padding: true clean end of the written segment only when this
+        // is the final section; otherwise it's just this section's padding.
         if size <= 0 {
-            return Ok(RecordOutcome::CleanEnd);
+            return Ok(if is_final_section {
+                RecordOutcome::CleanEnd
+            } else {
+                RecordOutcome::SectionDone
+            });
         }
         let size = size as usize;
         let end = cur + 4 + 4 + size + 4;

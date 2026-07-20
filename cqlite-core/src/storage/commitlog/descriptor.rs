@@ -175,12 +175,25 @@ fn parse_params(json: &str) -> (Option<String>, bool) {
         Some(o) => o,
         None => return (None, false),
     };
-    // Cassandra keys: "compression" -> {"class": ..., "options": {...}}.
+    // Cassandra keys: "compression" -> {"class": ..., "options": {...}}, but
+    // some configurations write `"compression": null` when compression is
+    // unset (rather than omitting the key). A present-but-null value must
+    // parse as "no compression" (None), same as an absent key — not fall
+    // through to the "<unknown>" sentinel, which would make CommitLogReader
+    // fail-closed on a perfectly valid uncompressed segment (roborev finding,
+    // review-first pass). Only a present, non-null value lacking a parseable
+    // `class` field is genuinely "some compression we can't identify".
     let compression_class = obj.get("compression").and_then(|c| {
-        c.get("class")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| Some("<unknown>".to_string()))
+        if c.is_null() {
+            None
+        } else {
+            Some(
+                c.get("class")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+            )
+        }
     });
     let encrypted = obj.contains_key("encryptionContext") || obj.contains_key("encryption");
     (compression_class, encrypted)
@@ -289,5 +302,18 @@ mod tests {
         let desc = CommitLogDescriptor::parse(&bytes).expect("parse");
         assert_eq!(desc.compression_class.as_deref(), Some("LZ4Compressor"));
         assert!(desc.is_unsupported_payload());
+    }
+
+    #[test]
+    fn compression_null_parses_as_uncompressed_not_unknown() {
+        // Some configurations write `"compression": null` (key present,
+        // explicitly null) rather than omitting the key when compression is
+        // unset. This must NOT fail closed as "<unknown>" compression —
+        // regression for a roborev finding (review-first pass).
+        let params = r#"{"compression":null}"#;
+        let bytes = build_header(7, 9, params);
+        let desc = CommitLogDescriptor::parse(&bytes).expect("parse");
+        assert_eq!(desc.compression_class, None);
+        assert!(!desc.is_unsupported_payload());
     }
 }
