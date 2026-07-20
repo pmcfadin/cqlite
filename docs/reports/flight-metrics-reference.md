@@ -6,7 +6,7 @@ Operator-facing reference for every `cqlite.*` instrument CQLite emits over Arro
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
-Total instruments: **73**.
+Total instruments: **75**.
 
 ## All instruments
 
@@ -38,6 +38,8 @@ Total instruments: **73**.
 | `cqlite.flight.admission.wait_seconds` | histogram | `s` | _(none)_ | How long a do_get waited on acquire before it was admitted or rejected. | A near-zero distribution is healthy; a rising tail means requests are increasingly queuing for permits. |
 | `cqlite.flight.admission.waiting` | gauge | `1` | _(none)_ | do_get requests parked waiting for an admission permit — the backpressure signal. | Zero is healthy; a sustained non-zero value means offered concurrency exceeds the ceiling and requests are queuing. |
 | `cqlite.flight.blocking_tasks_in_use` | gauge | `{thread}` | _(none)_ | Flight spawn_blocking tasks currently outstanding (flight-managed proxy, NOT the global tokio pool queue depth). | Rises with concurrent do_get scans and returns to baseline; a level pinned near the blocking-pool size with flat rpc.rows is blocking-pool saturation. Distinct from admission.in_use. |
+| `cqlite.flight.tables_discovered` | gauge | `{entry}` | _(none)_ | Table dirs visible under --data-dir, re-sampled by a readdir-only walk on the ~2s saturation tick (no SSTable opens). Undersampled at ~2s vs a longer scrape interval (#2661). | Rises when a table appears on disk and falls when one is removed; a wrong or empty --data-dir reads 0 immediately (an inert mount, visible before the first query errors). |
+| `cqlite.flight.warm_tables` | gauge | `{entry}` | _(none)_ | Tables with a live warm reader set in the flight WarmTableRegistry (atomic-backed at the registry mutation sites, not sampler-driven). | Rises on the first serve of a previously-unseen table and falls on eviction/retirement; pinned at capacity with steady eviction churn means the warm byte budget is small vs the working set. Distinct from tables_discovered (visible on disk). |
 | `cqlite.flush.bytes` | counter | `By` | _(none)_ | Data.db bytes produced by memtable flushes. | Write volume landing on disk from flush; use with flush.duration for flush throughput. |
 | `cqlite.flush.duration` | histogram | `s` | _(none)_ | Memtable-to-SSTable flush durations. | A rising tail alongside a climbing memtable size means flush cannot drain the memtable fast enough. |
 | `cqlite.flush.rows` | counter | `{row}` | _(none)_ | Rows flushed from the memtable to L0 SSTables. | Should track write.mutations over time; a lag is the flush-behind signal. |
@@ -106,6 +108,8 @@ Metrics a #2399 round-template scoreboard item consumes. Round handoffs (#2367-s
 | `cqlite.flight.admission.wait_seconds` | admission saturation (#2420/#2399) |
 | `cqlite.flight.admission.waiting` | admission saturation (#2420/#2399) |
 | `cqlite.flight.blocking_tasks_in_use` | blocking-pool pressure watch (#2419/#2313) |
+| `cqlite.flight.tables_discovered` | inert-mount watch (#2684) |
+| `cqlite.flight.warm_tables` | warm-working-set watch (#2684) |
 | `cqlite.merge.egress_channel_depth` | egress backpressure watch (#2419/#2399) |
 | `cqlite.merge.producer_threads` | thread-budget watch (#2313/#2399) |
 | `cqlite.proc.fds` | fd-exhaustion watch (#2419/#2313) |

@@ -91,6 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         wait_budget: WaitBudget::Timeout(Duration::from_millis(args.admission_wait_timeout_ms)),
     });
     let admission_limit = admission.limit();
+    // Keep a copy of the data-dir for the saturation sampler's readdir-only
+    // table-discovery walk (issue #2684) before the service takes ownership.
+    let sampler_data_dir = args.data_dir.clone();
     let service = CqliteFlightService::with_admission(args.data_dir, args.batch_size, admission);
 
     // A coarse tonic transport backstop, generously ABOVE the admission ceiling:
@@ -118,8 +121,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // without perturbing the server's shutdown wiring (no leaked task). The
     // atomic-backed gauges (`egress_channel_depth`, `blocking_tasks_in_use`)
     // update at their own call sites, independent of this cadence.
+    // The sampler also drives `cqlite.flight.tables_discovered` (issue #2684) via
+    // a readdir-only walk of `sampler_data_dir` each tick, and emits the one-time
+    // `discovered N tables across M keyspaces under <data-dir>` startup log line
+    // after its first sample.
     let _sampler = tokio::spawn(cqlite_flight::saturation::run_sampler(
         cqlite_flight::saturation::DEFAULT_SAMPLE_INTERVAL,
+        sampler_data_dir,
         shutdown_signal(),
     ));
     // Graceful shutdown (issue #1473): on ctrl_c / SIGTERM, tonic stops
