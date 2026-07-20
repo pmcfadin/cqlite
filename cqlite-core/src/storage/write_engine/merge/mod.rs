@@ -3734,6 +3734,16 @@ impl KWayMerger {
                     row_ts,
                     RowData::Live { cells: kept },
                 );
+                // Issue #2374/#2789: carry the primary-key liveness marker forward
+                // when it survives the partition floor, so a key-only live row
+                // (INSERT with no/all-null regular columns) that coexists with an
+                // older covering partition tombstone stays VISIBLE through the read
+                // path. Dropped (default) when the marker did not survive the floor.
+                rebuilt = rebuilt.with_row_liveness(if marker_live {
+                    entry.row_liveness
+                } else {
+                    Default::default()
+                });
                 if !surviving_complex.is_empty() {
                     rebuilt = rebuilt.with_complex_deletions(surviving_complex);
                 }
@@ -4023,6 +4033,16 @@ impl KWayMerger {
                     row_ts,
                     RowData::Live { cells: kept },
                 );
+                // Issue #2374/#2789: carry the primary-key liveness marker forward
+                // when it survives the range floor, so a key-only live row (INSERT
+                // with no/all-null regular columns) that coexists with an older
+                // covering range tombstone stays VISIBLE through the read path.
+                // Dropped (default) when the marker did not survive the floor.
+                rebuilt = rebuilt.with_row_liveness(if marker_live {
+                    entry.row_liveness
+                } else {
+                    Default::default()
+                });
                 if !surviving_complex.is_empty() {
                     rebuilt = rebuilt.with_complex_deletions(surviving_complex);
                 }
@@ -13322,6 +13342,107 @@ mod issue_959_range_tombstone_fixes {
         assert!(
             KWayMerger::apply_range_shadowing(entry, &range, &schema).is_none(),
             "an older complex deletion is subsumed; nothing survives"
+        );
+    }
+
+    /// Issue #2374/#2789 (rust-reviewer BLOCKER 2): a key-only LIVE row (an
+    /// `INSERT` with only its primary-key liveness marker, e.g. no regular
+    /// columns / all-null regulars) that coexists with an OLDER covering RANGE
+    /// tombstone survives shadowing (its marker timestamp beats the floor). The
+    /// surviving `RowData::Live` rebuild in `apply_range_shadowing` must carry
+    /// the marker forward via `with_row_liveness` — before the fix it dropped to
+    /// `RowLiveness::default()` (has_marker=false), so the READ-path visibility
+    /// rule (`marker_live_at`) then wrongly HID the row. Cassandra returns it.
+    #[test]
+    fn key_only_live_row_keeps_marker_through_range_shadow() {
+        use crate::storage::sstable::reader::compaction_row::RowLiveness;
+        let schema = schema_int_ck(Default::default());
+        // Key-only live row at ck=2: only the clustering pseudo-cell (no data),
+        // liveness marker @200 (live-forever); covered by a range @100.
+        let entry = MergeEntry::new(
+            0,
+            dk(1),
+            Some(ck(2)),
+            200,
+            RowData::Live {
+                cells: vec![CellData::new("ck".to_string(), Value::Integer(2), 200)],
+            },
+        )
+        .with_row_liveness(RowLiveness {
+            has_marker: true,
+            expires_at_seconds: None,
+        });
+        let range = vec![(
+            dk(1),
+            rt(ClusteringBound::Bottom, ClusteringBound::Top, 100),
+        )];
+
+        let out = KWayMerger::apply_range_shadowing(entry, &range, &schema)
+            .expect("a key-only live row newer than the range must survive");
+        assert!(
+            out.row_liveness.marker_live_at(1_000),
+            "the surviving row must carry its liveness marker forward (BLOCKER 2, range)"
+        );
+    }
+
+    /// BLOCKER 2, partition variant: same key-only-live-row invariant through
+    /// `apply_partition_shadowing`.
+    #[test]
+    fn key_only_live_row_keeps_marker_through_partition_shadow() {
+        use crate::storage::sstable::reader::compaction_row::RowLiveness;
+        let schema = schema_int_ck(Default::default());
+        let _ = &schema; // schema unused by partition shadowing, kept for parity.
+        let entry = MergeEntry::new(
+            0,
+            dk(1),
+            Some(ck(2)),
+            200,
+            RowData::Live {
+                cells: vec![CellData::new("ck".to_string(), Value::Integer(2), 200)],
+            },
+        )
+        .with_row_liveness(RowLiveness {
+            has_marker: true,
+            expires_at_seconds: None,
+        });
+
+        let out = KWayMerger::apply_partition_shadowing(entry, Some((100, 0)))
+            .expect("a key-only live row newer than the partition floor must survive");
+        assert!(
+            out.row_liveness.marker_live_at(1_000),
+            "the surviving row must carry its liveness marker forward (BLOCKER 2, partition)"
+        );
+    }
+
+    /// BLOCKER 2 negative: a key-only row whose marker is OLDER-or-equal to the
+    /// covering floor does NOT survive as a phantom live row — the marker must
+    /// NOT be carried forward (marker_live stays false). Range case fully
+    /// shadows to `None`; the invariant is that no live-marker survivor leaks.
+    #[test]
+    fn key_only_expired_marker_does_not_survive_range_shadow() {
+        use crate::storage::sstable::reader::compaction_row::RowLiveness;
+        let schema = schema_int_ck(Default::default());
+        // Marker @80 (older than the range @100) → fully shadowed, no survivor.
+        let entry = MergeEntry::new(
+            0,
+            dk(1),
+            Some(ck(2)),
+            80,
+            RowData::Live {
+                cells: vec![CellData::new("ck".to_string(), Value::Integer(2), 80)],
+            },
+        )
+        .with_row_liveness(RowLiveness {
+            has_marker: true,
+            expires_at_seconds: None,
+        });
+        let range = vec![(
+            dk(1),
+            rt(ClusteringBound::Bottom, ClusteringBound::Top, 100),
+        )];
+        assert!(
+            KWayMerger::apply_range_shadowing(entry, &range, &schema).is_none(),
+            "a marker older than the covering range must not survive as a live row"
         );
     }
 }

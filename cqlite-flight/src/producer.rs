@@ -1102,6 +1102,22 @@ impl MergeProducer {
             RowData::Tombstone { .. } => return Ok(None),
         };
 
+        // Issue #2374/#2789 (roborev blocker): the row-visibility decision must be
+        // computed from the FULL, PRE-projection cell set — NOT the
+        // projection-restricted `row_cells` below. A row written by
+        // `UPDATE t SET v='x' WHERE id=1 AND ck=1` carries a live `v` data cell but
+        // NO primary-key liveness marker; under a PK-only projection (`SELECT id, ck`)
+        // or a `count(*)`/aggregation (needed = empty set), `assemble_read_cells`
+        // would drop `v` and the visibility check would wrongly hide the row.
+        // Cassandra returns it. Scan the full cells for any live (non-tombstone,
+        // non-deleted-element) cell whose column is not a primary-key column —
+        // mirroring the drop logic `assemble_read_cells` applies.
+        let has_live_data_cell = cells.iter().any(|c| {
+            !c.is_deleted
+                && !matches!(c.value, cqlite_core::Value::Tombstone(_))
+                && !self.is_primary_key_column(&c.column)
+        });
+
         // Issue #2324: the k-way merger emits every element of a non-frozen
         // collection (list/set/map) as its OWN cell, all sharing the column name.
         // Keying those by name (as `build_row_from_scan` does) would keep only the
@@ -1132,11 +1148,9 @@ impl MergeProducer {
         // fixture's `ttl_expired_live` ck=1) — and a re-emitted range/partition
         // marker carrier (empty `RowData::Live`) — would surface as a phantom
         // key-only null row, diverging from a core `SELECT`. The merger surfaces
-        // clustering columns as pseudo-cells, so a row_cells entry is "live data"
-        // only when its column is NOT a partition/clustering key.
-        let has_live_data_cell = row_cells
-            .iter()
-            .any(|(name, _)| !self.is_primary_key_column(name));
+        // clustering columns as pseudo-cells, so a cell is "live data" only when its
+        // column is NOT a partition/clustering key (`has_live_data_cell` is derived
+        // from the full pre-projection `cells` above, not the restricted `row_cells`).
         if !has_live_data_cell && !row_liveness.marker_live_at(now_secs) {
             return Ok(None);
         }
@@ -3190,6 +3204,111 @@ mod tests {
         // Count is non-nullable; sum/min/max are nullable.
         assert!(!s.field_with_name("agg0").unwrap().is_nullable());
         assert!(s.field_with_name("agg1").unwrap().is_nullable());
+    }
+
+    /// Issue #2374/#2789 (roborev BLOCKER 1): a row written ONLY by an UPDATE
+    /// (a live regular-column DATA cell, NO primary-key liveness marker) must
+    /// stay VISIBLE even when the projection drops that data column. Before the
+    /// fix the visibility check read the PROJECTION-RESTRICTED cells, so a
+    /// PK-only projection (`SELECT id`) or a `count(*)` (needed = empty set)
+    /// dropped the only live data cell → `has_live_data_cell = false` → and with
+    /// no marker the row was wrongly hidden. Cassandra returns it.
+    ///
+    /// The fix derives visibility from the FULL pre-projection cell set. This
+    /// test drives `entry_to_row` directly (WriteEngine always confers a row
+    /// marker on a regular-column write, so a genuinely marker-less row can only
+    /// be constructed here) with a marker-less entry carrying a live `name` cell.
+    #[test]
+    fn update_inserted_marker_less_row_survives_pk_only_and_count_projection() {
+        use cqlite_core::storage::sstable::reader::compaction_row::RowLiveness;
+        use cqlite_core::storage::write_engine::merge::{CellData, MergeEntry, RowData};
+        use cqlite_core::storage::write_engine::PartitionKey;
+        use cqlite_core::Value;
+        use std::collections::HashSet;
+
+        let schema = simple_schema();
+        let producer = MergeProducer::new(schema.clone(), 1024).unwrap();
+
+        // Build the entry an `UPDATE items SET name='x' WHERE id=1` reconciles to:
+        // a live `name` data cell, NO primary-key liveness marker (default = absent).
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let decorated = pk.to_decorated_key(&schema).unwrap();
+        let pk_bytes = decorated.key.clone();
+        let make_entry = || {
+            MergeEntry::new(
+                0,
+                decorated.clone(),
+                None,
+                100,
+                RowData::Live {
+                    cells: vec![CellData::new("name".into(), Value::text("x"), 100)],
+                },
+            )
+            .with_row_liveness(RowLiveness::default())
+        };
+
+        // Sanity: the entry carries NO liveness marker (so visibility can only come
+        // from the live data cell) — the exact shape the pre-fix code dropped.
+        assert!(
+            !make_entry().row_liveness.marker_live_at(200),
+            "the UPDATE-shaped entry must be marker-less"
+        );
+
+        // PK-only projection (`SELECT id`): `name` is dropped from row_cells, but
+        // the row MUST still be returned.
+        let mut cache = PartitionKeyCache::default();
+        let pk_only: HashSet<String> = ["id".to_string()].into_iter().collect();
+        let row = producer
+            .entry_to_row(&pk_bytes, make_entry(), &mut cache, Some(&pk_only), 200)
+            .unwrap();
+        assert!(
+            row.is_some(),
+            "UPDATE-inserted marker-less row hidden under PK-only projection (BLOCKER 1)"
+        );
+
+        // count(*) / aggregation: needed is the EMPTY set — every data cell would be
+        // dropped by projection, yet the row must still count.
+        let mut cache = PartitionKeyCache::default();
+        let empty: HashSet<String> = HashSet::new();
+        let row = producer
+            .entry_to_row(&pk_bytes, make_entry(), &mut cache, Some(&empty), 200)
+            .unwrap();
+        assert!(
+            row.is_some(),
+            "UPDATE-inserted marker-less row hidden under count(*) (empty needed) (BLOCKER 1)"
+        );
+
+        // Contrast: a row with NEITHER a live data cell NOR a live marker (all
+        // cells tombstoned) is still correctly HIDDEN — the visibility rule holds.
+        let mut cache = PartitionKeyCache::default();
+        let tomb_value = Value::Tombstone(Box::new(cqlite_core::types::TombstoneInfo {
+            deletion_time: 100,
+            tombstone_type: cqlite_core::types::TombstoneType::CellTombstone,
+            local_deletion_time: 0,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        }));
+        let tomb = MergeEntry::new(
+            0,
+            decorated.clone(),
+            None,
+            100,
+            RowData::Live {
+                cells: vec![CellData {
+                    value: tomb_value,
+                    ..CellData::new("name".into(), Value::text("x"), 100)
+                }],
+            },
+        )
+        .with_row_liveness(RowLiveness::default());
+        let row = producer
+            .entry_to_row(&pk_bytes, tomb, &mut cache, None, 200)
+            .unwrap();
+        assert!(
+            row.is_none(),
+            "a fully-tombstoned marker-less row must stay hidden"
+        );
     }
 
     /// Sum on a non-numeric source column is a bad spec → ProducerError.
