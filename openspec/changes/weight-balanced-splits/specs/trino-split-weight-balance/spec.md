@@ -6,8 +6,13 @@
 
 `CqliteFlightSplitManager` SHALL expand each Sidecar read-replica token range into K slices of equal
 token span (K = `cqlite.sub-splits-per-range`, integer config, default 4, minimum 1, maximum 64)
-**before** any downstream consumer runs — scan split construction, aggregate fan-out host selection,
-the snapshot host chooser, and plan-time pruning all operate on slices, never on unsliced ranges.
+**before** any downstream consumer runs — scan split construction, the snapshot host chooser, and
+plan-time pruning all operate on slices, never on unsliced ranges. Sub-splitting SHALL apply to the
+SCAN path only: an aggregated table handle plans exactly ONE finalize split whose page source fans
+out to its members SEQUENTIALLY on a single driver, so sub-splitting it would multiply its
+serialized DoGet round trips K× with no work to spread across nodes. The aggregate path SHALL
+therefore build at K=1 (parent-range granularity), and its snapshot host chooser SHALL be evaluated
+at that same K=1 granularity so every host a member reads still has a pinned snapshot.
 Slicing SHALL be deterministic (a pure function of the range tokens and K), SHALL use overflow-safe
 unsigned 64-bit token arithmetic, SHALL preserve the half-open `(start, end]` convention and the
 existing wraparound flag semantics per slice, SHALL cover the parent range exactly (no gaps, no
@@ -31,6 +36,15 @@ SHALL be identical to current behavior.
   ordinary ranges, the four slices cover the parent exactly, and every slice boundary token is assigned
   to exactly one slice under the server's `tokenInRange` semantics.
 
+#### Scenario: Aggregated handle is exempt from sub-splitting
+
+- **GIVEN** an aggregated table handle and `cqlite.sub-splits-per-range=4`
+- **WHEN** `getSplits` runs
+- **THEN** exactly one finalize split is emitted and its member ranges are the PARENT read-replica
+  ranges (count == range count, not range count × 4)
+- **AND** the non-aggregated scan path over the same topology and config still emits range count × 4
+  splits.
+
 #### Scenario: K=1 is the identity
 
 - **GIVEN** `cqlite.sub-splits-per-range=1`
@@ -51,8 +65,10 @@ failover orderings.
 
 #### Scenario: Unequal-weight fixture balances within 1.25x of mean
 
-- **GIVEN** an RF==N==3 fixture whose ranges share one owner set and whose token spans are deliberately
-  unequal (e.g. spans varying by 8× or more across ranges)
+- **GIVEN** an RF==N==3 fixture whose ranges share one owner set, CONTIGUOUSLY TILE the ring from
+  `Long.MIN_VALUE` to `Long.MAX_VALUE` (so the topology passes the fail-closed ring-coverage guard
+  and can actually reach `buildSplits`), and whose token spans are deliberately unequal (spans
+  varying by 8× or more across ranges)
 - **WHEN** splits are built with K=4
 - **THEN** for each owner, Σ(token span of slices whose primary is that owner) is ≤ 1.25× the mean
   per-owner Σ span
@@ -71,7 +87,10 @@ failover orderings.
 `CqliteFlightSplit.getSplitWeight()` SHALL return a weight proportional to the slice's token span,
 scaled so a mean-span slice reports `SplitWeight.standard()`, clamped to Trino's valid proportion
 range. `CqliteFlightAggregateSplit.getSplitWeight()` SHALL return the clamped sum of the same
-per-slice proportions over the slices it covers. No split SHALL report the SPI default by omission.
+per-member proportions over the ranges it covers, additionally clamped to a documented
+scheduler-meaningful aggregate maximum — the finalize split occupies ONE driver, so past roughly a
+node's admission budget more weight changes no scheduling decision and only starves the finalize
+node of co-scheduled work. No split SHALL report the SPI default by omission.
 
 #### Scenario: Weight tracks token span
 
@@ -79,6 +98,13 @@ per-slice proportions over the slices it covers. No split SHALL report the SPI d
 - **WHEN** their splits are constructed
 - **THEN** their `getSplitWeight()` values differ by a factor of ~3 (within clamping), and a
   mean-span slice reports the standard weight.
+
+#### Scenario: Aggregate weight saturates at the aggregate cap
+
+- **GIVEN** a finalize split whose member proportions sum well past the aggregate maximum
+- **WHEN** `getSplitWeight()` is called
+- **THEN** it returns exactly the aggregate maximum (not the 1000 single-split maximum), while a
+  fan-out below that maximum stays strictly proportional to the summed member proportions.
 
 #### Scenario: Extreme spans stay within Trino's valid weight range
 
