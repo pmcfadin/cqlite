@@ -918,6 +918,13 @@ impl CqliteFlightService {
                 // Spec Req 8: reuse a cached LIVE-mode resolution on a warm hit instead
                 // of re-running `DirSource::resolve` every request. A resolve failure is
                 // an escaping-path (`UnsafePath`) ticket fault.
+                //
+                // DELIBERATE asymmetry (issue #2681): a ticket-derived `UnsafePath`
+                // rejected HERE at resolve time is bad client input → `ticket_invalid`
+                // (WARN, client fault). A symlink containment escape DISCOVERED later
+                // by the warm probe (`WarmError::ProbeEntryContainment`, see
+                // `warm_error_abort_reason`) is `internal` (ERROR) — the #1430 security
+                // backstop surfacing an on-disk escape. The split is intentional.
                 let dir = svc
                     .resolve_dir(&ticket)
                     .map_err(|s| (s, AbortReason::TicketInvalid, None))?;

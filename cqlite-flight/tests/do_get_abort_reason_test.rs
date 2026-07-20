@@ -315,6 +315,38 @@ fn do_get_aborts_carry_site_stamped_abort_reason() {
         );
     }
 
+    // ---- Scenario 2c: malformed ticket → ticket_invalid -------------------
+    // A ticket whose bytes fail syntax validation is bad CLIENT input (a WARN,
+    // `query`-category fault), rejected pre-admission and stamped `ticket_invalid`
+    // at the validate site. Driven through the SAME public service surface as the
+    // other scenarios so the class is proven end-to-end into `cqlite.errors.total`,
+    // not merely at the unit-mapping level (roborev Low, issue #2681).
+    {
+        let (_temp, data_dir) = build_fixture();
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        mc.reset();
+        let code = rt.block_on(async {
+            // Not valid JSON → FlightTicket::from_bytes rejects it → invalid_argument.
+            svc.do_get(Request::new(Ticket::new(b"not-a-valid-ticket".to_vec())))
+                .await
+                .err()
+                .expect("a malformed ticket must abort the do_get")
+                .code()
+        });
+        let metrics = mc.flush_and_collect();
+        assert!(
+            abort_count(&metrics, "ticket_invalid") >= 1.0,
+            "a malformed ticket must increment \
+             cqlite.errors.total{{abort_reason=ticket_invalid}}, got {} (code={code:?})",
+            abort_count(&metrics, "ticket_invalid")
+        );
+        assert_eq!(
+            abort_count(&metrics, "internal"),
+            0.0,
+            "a malformed ticket (client fault) must NOT be attributed to internal"
+        );
+    }
+
     // ---- Scenario 3: admission shed → admission_shed ----------------------
     // Hold the sole admission permit, then drive a further do_get past the
     // ceiling: it sheds with UNAVAILABLE, stamped admission_shed at the site.
