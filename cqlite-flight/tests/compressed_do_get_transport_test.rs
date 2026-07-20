@@ -82,11 +82,23 @@ const BLOB_DDL: &str = "CREATE TABLE test_comp.incompressible_uncompressed_chunk
 /// Matches the repo-wide predicate (`cqlite-core/tests/decompressed_chunk_cache_tests.rs`):
 /// only `1`/`true`/`TRUE` mean require-fixtures, so a lane that explicitly sets
 /// `CQLITE_REQUIRE_FIXTURES=0` stays lenient instead of hard-failing.
+///
+/// BOTH fail-closed flags are honored, matching the repo's canonical pair
+/// (`tools/cassandra-parity/src/workflow_check/command.rs`: `["CQLITE_REQUIRE_FIXTURES",
+/// "CQLITE_PARITY_REQUIRE_DATASETS"]`). The lanes that actually arm fail-closed today
+/// (`ci.yml`, `scripts/local/pre-merge.sh`, `sstabledump-parity-gate.yml`) set the
+/// PARITY var, so honoring only the first would leave those lanes lenient (roborev 1977).
+/// This is belt-and-suspenders: the load-bearing guarantee is the force-committed
+/// `test_comp` corpus plus the per-lookup in-repo fallback.
 fn require_fixtures() -> bool {
-    matches!(
-        std::env::var("CQLITE_REQUIRE_FIXTURES").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE")
-    )
+    ["CQLITE_REQUIRE_FIXTURES", "CQLITE_PARITY_REQUIRE_DATASETS"]
+        .iter()
+        .any(|var| {
+            matches!(
+                std::env::var(var).ok().as_deref(),
+                Some("1") | Some("true") | Some("TRUE")
+            )
+        })
 }
 
 /// Resolve a `test_comp` table, or report why the case must be skipped.
