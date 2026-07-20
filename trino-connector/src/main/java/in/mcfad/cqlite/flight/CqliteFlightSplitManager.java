@@ -68,8 +68,16 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
         // scan reads one immutable file set per host; in live mode this is Optional.empty().
         // Fails closed — a create error on a PRIMARY host propagates (naming host + snapshot)
         // and the query fails; that host must have the snapshot, no failover is possible without it.
+        // Weight-balanced sub-splitting applies to the SCAN path only (issue #2680 roborev).
+        // An aggregated handle produces exactly ONE finalize split whose PageSource fans out
+        // SEQUENTIALLY (one blocking DoGet per range, on a single driver on a single node), so
+        // slicing it K-ways multiplies its serialized round trips K× for ZERO balancing benefit —
+        // there is nothing to spread across nodes. Sub-splitting exists to spread MANY splits
+        // over MANY nodes; with one split that is a straight latency regression. So the
+        // aggregate path builds at K=1 (parent-range granularity, pre-#2680 fan-out).
+        int subSplitsPerRange = handle.isAggregated() ? 1 : config.subSplitsPerRange();
         Set<String> primaryHosts =
-                distinctReplicaHosts(replicas, config.localDatacenter(), config.subSplitsPerRange());
+                distinctReplicaHosts(replicas, config.localDatacenter(), subSplitsPerRange);
         // Resolve the reuse window ONCE and thread it into availableHosts below, so the ticket name
         // and the per-fallback-host availability creation operate on the EXACT same window even if
         // the freshness window would otherwise roll between the two calls (issue #2356 roborev,
@@ -93,7 +101,7 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                 : Set.of();
         List<CqliteFlightSplit> ranges = buildSplits(
                 handle, replicas, config.localDatacenter(), config.flightPort(), snapshot, availableHosts,
-                config.subSplitsPerRange());
+                subSplitsPerRange);
 
         // Plan-time split pruning (issue #2679): when the pushed-down constraint FULLY binds
         // the partition key (equality on every PK column, or an IN over full keys), compute the
