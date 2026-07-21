@@ -1,0 +1,69 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>cqlite 0.16.0-rc1 — comparison</title><style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --fg:#e6edf3; --muted:#8b949e;
+          --green:#3fb950; --amber:#d29922; --red:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:28px; margin:0 0 4px; }
+  h2 { font-size:20px; margin:40px 0 12px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  h3 { font-size:16px; margin:28px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  nav { margin:0 0 24px; font-size:14px; }
+  nav a { color:var(--accent); text-decoration:none; margin-right:16px; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pass { background:rgba(63,185,80,.15); color:var(--green); }
+  .watch { background:rgba(210,153,34,.15); color:var(--amber); }
+  .fail { background:rgba(248,81,73,.15); color:var(--red); }
+  table { width:100%; border-collapse:collapse; margin:12px 0; background:var(--card); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  th,td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; vertical-align:top; }
+  th { background:#1c2128; color:var(--muted); font-weight:600; font-size:13px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:none; }
+  .good { color:var(--green); font-weight:600; }
+  .warnc { color:var(--amber); font-weight:600; }
+  .badc { color:var(--red); font-weight:600; }
+  code { background:#1c2128; padding:1px 6px; border-radius:4px; font-size:13px; }
+  figure { margin:18px 0; background:#0d1117; border:1px solid var(--border); border-radius:8px; padding:8px; }
+  figure img { width:100%; display:block; border-radius:4px; }
+  figcaption { color:var(--muted); font-size:13px; padding:8px 4px 2px; text-align:center; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media(max-width:720px){ .grid{grid-template-columns:1fr;} }
+  .callout { background:var(--card); border-left:3px solid var(--accent); padding:12px 16px; border-radius:0 8px 8px 0; margin:16px 0; }
+  .callout.green { border-left-color:var(--green); }
+  .callout.amber { border-left-color:var(--amber); }
+  .callout.red { border-left-color:var(--red); }
+  .missing { color:var(--amber); }
+  pre { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px; white-space:pre-wrap; font-size:13px; overflow-x:auto; }
+  footer { margin-top:48px; color:var(--muted); font-size:13px; border-top:1px solid var(--border); padding-top:16px; }
+</style></head><body><div class="wrap"><nav><a href="report.html">Verdict</a><a href="stability.html">Stability</a><a href="phases.html">Probes</a><a href="comparison.html">Comparison</a></nav>
+<h1>Comparison — 0.16.0-rc1 vs prior rounds &amp; the goals ladder</h1>
+<p class="sub">0.16.0-rc1 targeted fix-validation · flight <code>0.16.0-rc1@sha256:79c7907d</code> (multi-arch INDEX, src f4f13a7cb) · connector <code>0.16.0-rc1</code> · Trino 481 · Cassandra 5.0.8 RF=3 · 3× i4i.xlarge · ~1.70M partitions/node, 2 SSTable gens · 2026-07-21</p>
+
+<h2>Throughput / latency, round over round</h2>
+<table><thead><tr><th>Round</th><th>Threads</th><th>qps</th><th>p50</th><th>p99</th><th>errors</th><th>Notes</th></tr></thead><tbody>
+<tr><td>R11b / R12</td><td>8</td><td>~33–34</td><td>~242ms</td><td>~363ms</td><td>0</td><td>8-thread warm baselines</td></tr>
+<tr><td>soak-0.15</td><td>32</td><td>~39</td><td>798ms</td><td>1366ms</td><td>0</td><td>90-min steady block</td></tr>
+<tr><td><b>0.16.0-rc1</b></td><td>8</td><td>~35</td><td>226ms</td><td>328ms</td><td>0</td><td>comparability block (parity+ vs R12)</td></tr>
+<tr><td><b>0.16.0-rc1</b></td><td>32</td><td>~32</td><td>990ms</td><td>1255ms</td><td>0</td><td>3.5h main soak (flat, 0 err)</td></tr>
+</tbody></table>
+<p>The 8-thread block reproduces the R12 baseline closely (parity+). The 32-thread numbers sit in the
+same band as soak-0.15; the ~32–39 qps ceiling is unchanged because #2679 (which would have relieved
+keyed reads) is inert (#2806).</p>
+
+<h2>Lane-B goals ladder</h2>
+<table><thead><tr><th>Goal</th><th>Target</th><th>0.16.0-rc1</th><th>Status</th></tr></thead><tbody>
+<tr><td>B1 warm point-read latency</td><td>≤300ms</td><td>226ms @ 8-thr (floor-adj); ~990ms @ 32-thr</td><td class="pill watch">partial (thread-dependent)</td></tr>
+<tr><td>B2 throughput @ 32 threads</td><td>≥100 qps</td><td>~32 qps</td><td class="pill fail">not met (known ceiling)</td></tr>
+<tr><td>Zero client errors under load</td><td>0</td><td>0 / 402,932 queries</td><td class="pill pass">met</td></tr>
+<tr><td>Integrity (no silent loss)</td><td>0 delta</td><td>1,703,038 == 1,703,038</td><td class="pill pass">met</td></tr>
+<tr><td>Memory bounded (no leak)</td><td>flat</td><td>RSS flat 3.5h, 0 OOM</td><td class="pill pass">met</td></tr>
+<tr><td>Genuine-error SLI</td><td>low</td><td>0.026% (internal)</td><td class="pill pass">met (down from 0.89%)</td></tr>
+</tbody></table>
+
+<h2>Targeted-fix scorecard (this round's purpose)</h2>
+<table><thead><tr><th>Fix</th><th>Expected</th><th>Observed</th><th>Verdict</th></tr></thead><tbody>
+<tr><td>#2679 split pruning</td><td>keyed read → 1 split / 1 pod</td><td>13 splits / 3 pods (inert)</td><td class="pill fail">regressed → #2806</td></tr>
+<tr><td>#2349 UDT both paths</td><td>cold==warm==sstabledump</td><td>DDL parse fails first</td><td class="pill fail">blocked → #2807</td></tr>
+<tr><td>#2372 BTI over Flight</td><td>rows returned, not errored</td><td>no da corpus</td><td class="pill watch">could-not-observe</td></tr>
+<tr><td>#2681 abort taxonomy</td><td>reasons bucketed</td><td>client_cancel/admission_shed/internal correct</td><td class="pill pass">verified</td></tr>
+</tbody></table>
+<footer>Generated from <code>clusters/cqlite-rc1-artifacts/</code>. Grafana panels rendered server-side via the image-renderer sidecar (ad-hoc <code>cqlite-rc1-soak</code> dashboard, <code>host_name!=""</code> filtered), embedded as base64 data URIs. Field round pmcfadin/cqlite#2805.</footer></div></body></html>
