@@ -1,21 +1,27 @@
 package in.mcfad.cqlite.flight;
 
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DateType;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.RealType;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -26,9 +32,12 @@ import java.util.Optional;
  *
  * <p>The set of types accepted here is kept in lockstep with what
  * {@link ArrowToTrino} can materialize — see {@code ArrowTypeMapperTest} which
- * round-trips every accepted type. v1 supports scalar columns; complex CQL types
- * (collections, UDTs, tuples, decimal) are rejected at planning time with a clear
- * message rather than failing mid-scan.
+ * round-trips every accepted type. Scalar columns map to their Trino scalar type;
+ * Arrow {@code List}/{@code Struct}/{@code Map} (CQL collections, tuples, UDTs) map
+ * recursively to Trino {@code array}/{@code row}/{@code map}, reusing the scalar
+ * leaf mapping (issue #2815). A column is rejected at planning time (with a clear
+ * message rather than a mid-scan failure) only when a genuine LEAF type is
+ * unsupported (decimal, varint, sub-millisecond timestamp, …).
  */
 public final class ArrowTypeMapper {
     /** Arrow extension name the server attaches to uuid/timeuuid columns. */
@@ -37,6 +46,14 @@ public final class ArrowTypeMapper {
 
     /** Metadata key the server uses to declare a column's pushdown capability. */
     private static final String PUSHDOWN_KEY = "cqlite:pushdown";
+
+    /**
+     * Shared {@link TypeOperators} for constructing Trino {@link MapType}s (its
+     * constructor needs one to derive the key type's hash/equal operators).
+     * Stateless and thread-safe; a single instance is reused for every mapped map
+     * column.
+     */
+    private static final TypeOperators TYPE_OPERATORS = new TypeOperators();
 
     private ArrowTypeMapper() {}
 
@@ -48,6 +65,14 @@ public final class ArrowTypeMapper {
      * ever leaves predicates as a (correct) Trino residual.
      */
     public static PushdownCapability capabilityOf(Field field) {
+        // Complex columns (list/set → List, tuple/udt → Struct, map → Map) never
+        // support predicate/aggregate pushdown into their elements — force NONE
+        // regardless of any server-declared value, so a residual predicate is left
+        // (correctly) to Trino rather than pushed against a collection the server
+        // cannot compare element-wise.
+        if (isComplex(field.getType())) {
+            return PushdownCapability.NONE;
+        }
         String value = field.getMetadata().get(PUSHDOWN_KEY);
         if (value == null) {
             return PushdownCapability.NONE;
@@ -59,6 +84,13 @@ public final class ArrowTypeMapper {
         };
     }
 
+    /** True for the Arrow complex types the connector maps to array/row/map. */
+    private static boolean isComplex(ArrowType type) {
+        return type instanceof ArrowType.List
+                || type instanceof ArrowType.Struct
+                || type instanceof ArrowType.Map;
+    }
+
     /**
      * Map one Arrow field to a Trino {@link Type}, throwing when the column's
      * type is not supported. Callers that want to degrade per-column (hide the
@@ -67,15 +99,18 @@ public final class ArrowTypeMapper {
     public static Type toTrino(Field field) {
         return toTrinoOrEmpty(field).orElseThrow(() -> new UnsupportedOperationException(
                 "Unsupported Arrow type for column '" + field.getName() + "': " + field.getType()
-                        + " (the connector currently supports scalar columns)"));
+                        + " (an unsupported leaf type — e.g. decimal/varint — reached directly or"
+                        + " nested inside a collection/row/map)"));
     }
 
     /**
      * Resolve a column's Trino {@link Type}, or {@link Optional#empty()} when the
-     * Arrow type is not one the connector can materialize (decimal, varint,
-     * list/set/map, tuple, UDT). {@link CqliteFlightMetadata} uses this to omit
-     * unsupported columns from the Trino schema (hide + warn) rather than making
-     * the entire table unqueryable.
+     * Arrow type is not one the connector can materialize. Collections/rows/maps are
+     * mapped recursively; empty is returned only when a genuine LEAF type is
+     * unsupported (decimal, varint, sub-millisecond timestamp), whether that leaf is
+     * reached directly or nested inside a List/Struct/Map. {@link CqliteFlightMetadata}
+     * uses this to omit unsupported columns from the Trino schema (hide + warn) rather
+     * than making the entire table unqueryable.
      */
     public static Optional<Type> toTrinoOrEmpty(Field field) {
         // UUID is carried as FixedSizeBinary(16) tagged with the Arrow UUID
@@ -106,9 +141,80 @@ public final class ArrowTypeMapper {
             // native TIME whose precision mirrors the Arrow unit.
             case ArrowType.Time t -> timeType(t);
             case ArrowType.Timestamp ts -> timestampType(ts);
+            // Complex CQL types the server emits as Arrow List/Struct/Map. Each
+            // recurses on its child Field(s), reusing this same leaf mapping, and is
+            // unsupported only when a genuine LEAF recurses to empty (issue #2815).
+            //   list/set → List(element)                → array(E)
+            //   tuple/udt → Struct(f1,f2,…)             → row(f1 T1, f2 T2, …)
+            //   map      → Map(entries: Struct(key,value)) → map(K, V)
+            case ArrowType.List ignored -> listType(field).orElse(null);
+            case ArrowType.Struct ignored -> structType(field).orElse(null);
+            case ArrowType.Map ignored -> mapType(field).orElse(null);
             default -> null;
         };
         return Optional.ofNullable(mapped);
+    }
+
+    /**
+     * Map an Arrow {@code List} field to a Trino {@code array(E)}, recursing on its
+     * single element child through {@link #toTrinoOrEmpty}. Empty when the element
+     * leaf is unmappable (the whole column is then treated as unsupported).
+     */
+    private static Optional<Type> listType(Field field) {
+        List<Field> children = field.getChildren();
+        if (children.size() != 1) {
+            // A well-formed Arrow List has exactly one element child; anything else
+            // is a shape the connector does not model — fail closed.
+            return Optional.empty();
+        }
+        return toTrinoOrEmpty(children.get(0)).map(ArrayType::new);
+    }
+
+    /**
+     * Map an Arrow {@code Struct} field (CQL tuple/UDT) to a Trino
+     * {@code row(name type, …)}, preserving child field NAME and ORDER, recursing on
+     * each child. Empty when any child leaf is unmappable, or when the struct has no
+     * children (a zero-field row is not representable).
+     */
+    private static Optional<Type> structType(Field field) {
+        List<Field> children = field.getChildren();
+        if (children.isEmpty()) {
+            return Optional.empty();
+        }
+        List<RowType.Field> rowFields = new ArrayList<>(children.size());
+        for (Field child : children) {
+            Optional<Type> childType = toTrinoOrEmpty(child);
+            if (childType.isEmpty()) {
+                return Optional.empty();
+            }
+            rowFields.add(RowType.field(child.getName(), childType.get()));
+        }
+        return Optional.of(RowType.from(rowFields));
+    }
+
+    /**
+     * Map an Arrow {@code Map} field to a Trino {@code map(K, V)}. Arrow encodes a
+     * Map as {@code Map(entries: Struct(key, value))} (see the server's
+     * {@code cql_type_to_arrow_field}); this reads the entry struct's {@code key} /
+     * {@code value} children and recurses on each. Empty when the shape is unexpected
+     * or either the key or value leaf is unmappable.
+     */
+    private static Optional<Type> mapType(Field field) {
+        List<Field> children = field.getChildren();
+        if (children.size() != 1) {
+            return Optional.empty();
+        }
+        // The single child is the entries Struct(key, value).
+        List<Field> entryChildren = children.get(0).getChildren();
+        if (entryChildren.size() != 2) {
+            return Optional.empty();
+        }
+        Optional<Type> keyType = toTrinoOrEmpty(entryChildren.get(0));
+        Optional<Type> valueType = toTrinoOrEmpty(entryChildren.get(1));
+        if (keyType.isEmpty() || valueType.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(new MapType(keyType.get(), valueType.get(), TYPE_OPERATORS));
     }
 
     /**

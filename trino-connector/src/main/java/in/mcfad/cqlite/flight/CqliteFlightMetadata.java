@@ -62,14 +62,6 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
     private final CqliteFlightClient flight;
 
     /**
-     * Tables for which the "hiding unsupported-type columns" warning has already
-     * been logged, so a table is warned about at most once (getColumnHandles and
-     * getTableMetadata both funnel through {@link #supportedFields}). Concurrent-safe
-     * for multi-threaded planning.
-     */
-    private final Set<SchemaTableName> warnedHiddenColumns = ConcurrentHashMap.newKeySet();
-
-    /**
      * Per-{@code (keyspace, table)} memo of the non-aggregated logical row-count
      * statistics (issue #1336). One optimizer planning pass calls
      * {@link #getTableStatistics} repeatedly for the same table; memoizing here bounds
@@ -1113,7 +1105,7 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         CqliteFlightTableHandle handle = (CqliteFlightTableHandle) table;
         SchemaTableName tableName = new SchemaTableName(handle.keyspace(), handle.table());
         Map<String, ColumnHandle> handles = new LinkedHashMap<>();
-        for (Field field : supportedFields(tableName, arrowSchema(handle), warnedHiddenColumns)) {
+        for (Field field : supportedFields(tableName, arrowSchema(handle))) {
             handles.put(field.getName(), new CqliteFlightColumnHandle(
                     field.getName(), ArrowTypeMapper.toTrino(field), ArrowTypeMapper.capabilityOf(field)));
         }
@@ -1123,33 +1115,55 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
     /**
      * Filter an Arrow schema down to the columns whose type the connector can
      * materialize, hiding the rest from the Trino schema (owner decision, issue
-     * #2229: <em>hide + warn</em>). Columns of an unsupported type (decimal,
-     * varint, collections, tuples, UDTs) are omitted consistently from both the
-     * column handles and the table metadata, so DESCRIBE shows only supported
-     * columns and {@code SELECT *} succeeds. The first time a given table is seen
-     * with hidden columns, a single warning names them and their Arrow type.
+     * #2229: <em>hide + warn</em>). Columns whose type still cannot be mapped (an
+     * unsupported leaf: decimal, varint, sub-millisecond timestamp — reached directly
+     * or nested inside a collection/row/map) are omitted consistently from both the
+     * column handles and the table metadata, so DESCRIBE shows only supported columns
+     * and {@code SELECT *} succeeds. Collections/tuples/UDTs of supported leaves now
+     * project as Trino array/row/map (issue #2815).
+     *
+     * <p><b>Loud + durable (issue #2815):</b> the hidden-column WARNING is emitted on
+     * <em>every</em> projection that hides columns — NOT once per table per connector
+     * instance. A once-per-table guard made the drop invisible after the first
+     * DESCRIBE, defeating the whole point of "warn" (the field could see no log). A
+     * DDL-declared column is never silently dropped.
      *
      * <p>When <em>every</em> column is unsupported the table is genuinely
      * unqueryable, so we fail with a clear {@link StandardErrorCode#NOT_SUPPORTED}
      * error rather than presenting a zero-column table (which Trino handles poorly
      * and would silently return empty rows).
      */
+    static List<Field> supportedFields(SchemaTableName tableName, Schema schema) {
+        List<String> hidden = new ArrayList<>();
+        List<Field> supported = supportedFields(tableName, schema, hidden::add);
+        if (!hidden.isEmpty()) {
+            LOG.log(System.Logger.Level.WARNING,
+                    "Table " + tableName + ": hiding " + hidden.size()
+                            + " column(s) of unsupported type from the Trino schema: "
+                            + String.join(", ", hidden));
+        }
+        return supported;
+    }
+
+    /**
+     * Core of {@link #supportedFields(SchemaTableName, Schema)}, decoupled from the
+     * logger so the loud-hide behavior is unit-testable: every hidden column (as
+     * {@code "name (arrow <type>)"}) is reported to {@code hiddenSink}. A
+     * fully-unsupported table still fails loudly with {@link
+     * StandardErrorCode#NOT_SUPPORTED} rather than presenting a zero-column table.
+     */
     static List<Field> supportedFields(
-            SchemaTableName tableName, Schema schema, Set<SchemaTableName> warned) {
+            SchemaTableName tableName, Schema schema, java.util.function.Consumer<String> hiddenSink) {
         List<Field> supported = new ArrayList<>();
         List<String> hidden = new ArrayList<>();
         for (Field field : schema.getFields()) {
             if (ArrowTypeMapper.toTrinoOrEmpty(field).isPresent()) {
                 supported.add(field);
             } else {
-                hidden.add(field.getName() + " (arrow " + field.getType() + ")");
+                String descriptor = field.getName() + " (arrow " + field.getType() + ")";
+                hidden.add(descriptor);
+                hiddenSink.accept(descriptor);
             }
-        }
-        if (!hidden.isEmpty() && warned.add(tableName)) {
-            LOG.log(System.Logger.Level.WARNING,
-                    "Table " + tableName + ": hiding " + hidden.size()
-                            + " column(s) of unsupported type from the Trino schema: "
-                            + String.join(", ", hidden));
         }
         if (supported.isEmpty() && !schema.getFields().isEmpty()) {
             throw new TrinoException(StandardErrorCode.NOT_SUPPORTED,
@@ -1172,7 +1186,7 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         CqliteFlightTableHandle handle = (CqliteFlightTableHandle) table;
         SchemaTableName tableName = new SchemaTableName(handle.keyspace(), handle.table());
         List<ColumnMetadata> columns = new ArrayList<>();
-        for (Field field : supportedFields(tableName, arrowSchema(handle), warnedHiddenColumns)) {
+        for (Field field : supportedFields(tableName, arrowSchema(handle))) {
             columns.add(new ColumnMetadata(field.getName(), ArrowTypeMapper.toTrino(field)));
         }
         return new ConnectorTableMetadata(tableName, columns);

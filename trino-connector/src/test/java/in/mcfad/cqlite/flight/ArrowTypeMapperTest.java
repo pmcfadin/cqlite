@@ -113,14 +113,87 @@ class ArrowTypeMapperTest {
     }
 
     @Test
-    void complexTypesAreRejectedAtPlanning() {
-        // v1 supports scalar columns; collections/decimal must fail clearly at
-        // planning rather than crash mid-scan (mapper↔ArrowToTrino stay in lockstep).
-        Field child = scalar("item", new ArrowType.Int(32, true));
-        Field list = new Field("xs", FieldType.nullable(ArrowType.List.INSTANCE), List.of(child));
-        assertThrows(UnsupportedOperationException.class, () -> ArrowTypeMapper.toTrino(list));
-
+    void unmappableLeafScalarStillRejectedAtPlanning() {
+        // A genuinely-unsupported LEAF (decimal) must still fail clearly at planning
+        // rather than crash mid-scan (mapper↔ArrowToTrino stay in lockstep).
         Field decimal = scalar("d", new ArrowType.Decimal(38, 9, 128));
         assertThrows(UnsupportedOperationException.class, () -> ArrowTypeMapper.toTrino(decimal));
+    }
+
+    private static Field list(String name, Field element) {
+        return new Field(name, FieldType.nullable(ArrowType.List.INSTANCE), List.of(element));
+    }
+
+    private static Field struct(String name, Field... children) {
+        return new Field(name, FieldType.nullable(ArrowType.Struct.INSTANCE), List.of(children));
+    }
+
+    private static Field map(String name, Field key, Field value) {
+        // Arrow encodes Map as Map(entries: Struct(key, value)) — mirror the server.
+        Field entries = new Field("entries",
+                FieldType.notNullable(ArrowType.Struct.INSTANCE), List.of(key, value));
+        return new Field(name, FieldType.nullable(new ArrowType.Map(false)), List.of(entries));
+    }
+
+    @Test
+    void arrowListOfUtf8MapsToArrayOfVarchar() {
+        // list<frozen<udt>> is served as List(Utf8) (UDT elements decoded to strings,
+        // issue #2815); it must project as array(varchar), never hidden.
+        Field field = list("addrs", scalar("item", ArrowType.Utf8.INSTANCE));
+        io.trino.spi.type.Type mapped = ArrowTypeMapper.toTrinoOrEmpty(field).orElseThrow();
+        assertInstanceOf(io.trino.spi.type.ArrayType.class, mapped);
+        assertEquals(VarcharType.VARCHAR, ((io.trino.spi.type.ArrayType) mapped).getElementType());
+        // A complex column carries no pushdown into its elements.
+        assertEquals(PushdownCapability.NONE, ArrowTypeMapper.capabilityOf(field));
+    }
+
+    @Test
+    void arrowStructMapsToRowPreservingNamesAndOrder() {
+        Field field = struct("addr",
+                scalar("street", ArrowType.Utf8.INSTANCE),
+                scalar("zip", new ArrowType.Int(32, true)));
+        io.trino.spi.type.Type mapped = ArrowTypeMapper.toTrino(field);
+        io.trino.spi.type.RowType row = assertInstanceOf(io.trino.spi.type.RowType.class, mapped);
+        assertEquals(2, row.getFields().size());
+        assertEquals("street", row.getFields().get(0).getName().orElseThrow());
+        assertEquals(VarcharType.VARCHAR, row.getFields().get(0).getType());
+        assertEquals("zip", row.getFields().get(1).getName().orElseThrow());
+        assertEquals(IntegerType.INTEGER, row.getFields().get(1).getType());
+    }
+
+    @Test
+    void arrowMapMapsToTrinoMap() {
+        Field field = map("m",
+                new Field("key", FieldType.notNullable(ArrowType.Utf8.INSTANCE), List.of()),
+                new Field("value", FieldType.nullable(new ArrowType.Int(32, true)), List.of()));
+        io.trino.spi.type.Type mapped = ArrowTypeMapper.toTrino(field);
+        io.trino.spi.type.MapType m = assertInstanceOf(io.trino.spi.type.MapType.class, mapped);
+        assertEquals(VarcharType.VARCHAR, m.getKeyType());
+        assertEquals(IntegerType.INTEGER, m.getValueType());
+    }
+
+    @Test
+    void nestedCollectionMapsRecursively() {
+        // list<list<text>> → array(array(varchar)).
+        Field inner = list("item", scalar("item", ArrowType.Utf8.INSTANCE));
+        Field outer = list("xss", inner);
+        io.trino.spi.type.Type mapped = ArrowTypeMapper.toTrino(outer);
+        io.trino.spi.type.ArrayType a = assertInstanceOf(io.trino.spi.type.ArrayType.class, mapped);
+        io.trino.spi.type.ArrayType nested =
+                assertInstanceOf(io.trino.spi.type.ArrayType.class, a.getElementType());
+        assertEquals(VarcharType.VARCHAR, nested.getElementType());
+    }
+
+    @Test
+    void collectionOfUnmappableLeafIsUnsupported() {
+        // A list whose element leaf is unmappable (decimal) makes the WHOLE column
+        // unsupported — attributable to the leaf, not to it being a collection.
+        Field field = list("bad", scalar("item", new ArrowType.Decimal(38, 9, 128)));
+        assertTrue(ArrowTypeMapper.toTrinoOrEmpty(field).isEmpty());
+        // Same for a struct with one unmappable field.
+        Field row = struct("r",
+                scalar("ok", ArrowType.Utf8.INSTANCE),
+                scalar("bad", new ArrowType.Decimal(38, 9, 128)));
+        assertTrue(ArrowTypeMapper.toTrinoOrEmpty(row).isEmpty());
     }
 }

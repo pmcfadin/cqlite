@@ -114,6 +114,19 @@ log "load data + flush to SSTables"
 "${COMPOSE[@]}" exec -T cassandra cqlsh 172.42.0.2 < "$ROOT/trino-connector/docker/e2e-data.cql"
 "${COMPOSE[@]}" exec -T cassandra nodetool flush analytics
 
+# Substring assert helper for values whose EXACT rendering is not pinned (e.g. the
+# server-decoded UDT string inside an array element): assert the actual contains the
+# expected fragment rather than an exact match.
+assert_contains() {
+  local desc="$1" needle="$2" actual="$3"
+  if [[ "$actual" == *"$needle"* ]]; then
+    echo "PASS: $desc"
+  else
+    echo "FAIL: $desc — expected to contain [$needle], got [$actual]"
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
 log "wait for the connector to resolve the table via Sidecar (CQL session warmup)"
 for i in $(seq 1 36); do
   if trino "SELECT count(*) FROM cqlite.analytics.events" >/dev/null 2>&1; then break; fi
@@ -315,6 +328,58 @@ assert_eq "partial-predicate LIMIT 2 returns 2 rows"          '"2"' \
 # residual length filter were dropped, score>15 alone would yield 4 (incl. bob).
 assert_eq "partial-predicate LIMIT 5 applies residual (3 rows)" '"3"' \
   "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events WHERE score > 15 AND length(name) > 3 LIMIT 5)')"
+
+# Typed collection columns end-to-end (issue #2815). A list<frozen<udt>> column
+# must project as Trino array(varchar) (NOT be silently dropped), be resolvable by
+# SELECT, appear in SELECT *, and distinguish empty (→ empty array) from absent (→
+# null). Elements are the server-decoded UDT strings.
+log "wait for the connector to resolve analytics.contacts"
+for i in $(seq 1 36); do
+  if trino "SELECT count(*) FROM cqlite.analytics.contacts" >/dev/null 2>&1; then break; fi
+  sleep 5
+  [[ $i -eq 36 ]] && { echo "connector never resolved analytics.contacts"; exit 1; }
+done
+
+log "assert typed collection columns project + resolve (issue #2815)"
+# DESCRIBE shows the list<frozen<udt>> column as array(varchar) — the core no-drop
+# assertion. DESCRIBE renders one column per line as "<name> <type> ...".
+contacts_desc="$(trino 'DESCRIBE cqlite.analytics.contacts')"
+assert_contains "DESCRIBE shows addrs array(varchar)" 'addrs' "$contacts_desc"
+assert_contains "addrs typed as array(varchar)"       'array(varchar)' \
+  "$(grep 'addrs' <<<"$contacts_desc")"
+assert_contains "tags typed as array(varchar)"        'array(varchar)' \
+  "$(grep 'tags' <<<"$contacts_desc")"
+assert_contains "attrs typed as map(varchar, integer)" 'map(varchar, integer)' \
+  "$(grep 'attrs' <<<"$contacts_desc")"
+
+# SELECT of the collection column resolves (no "column cannot be resolved") and the
+# multi-element row has cardinality 2. cardinality() over the array is a
+# deterministic scalar independent of element rendering/order.
+assert_eq "SELECT addrs resolves; row 1 has 2 elements" '"2"' \
+  "$(trino 'SELECT cardinality(addrs) FROM cqlite.analytics.contacts WHERE id = 1')"
+assert_eq "list<text> tags row 1 has 2 elements"        '"2"' \
+  "$(trino 'SELECT cardinality(tags) FROM cqlite.analytics.contacts WHERE id = 1')"
+assert_eq "map attrs row 1 has 2 entries"               '"2"' \
+  "$(trino 'SELECT cardinality(attrs) FROM cqlite.analytics.contacts WHERE id = 1')"
+# The array elements are the server-decoded UDT strings — assert the street values
+# surface in the flattened elements (rendering-tolerant substring check).
+addrs_row1="$(trino "SELECT array_join(transform(addrs, x -> cast(x as varchar)), '|') FROM cqlite.analytics.contacts WHERE id = 1")"
+assert_contains "addrs element carries the decoded UDT (street)" '12 Oak St' "$addrs_row1"
+assert_contains "addrs second element carries the decoded UDT"   '9 Elm Ave' "$addrs_row1"
+
+# Empty vs absent are distinct: row 2 empty list → empty (non-null) array; row 3
+# absent → null. cardinality of an empty array is 0 and it IS NOT NULL; absent IS NULL.
+assert_eq "empty list → empty (non-null) array (cardinality 0)" '"0"' \
+  "$(trino 'SELECT cardinality(addrs) FROM cqlite.analytics.contacts WHERE id = 2')"
+assert_eq "empty list is NOT NULL"                              '"true"' \
+  "$(trino 'SELECT addrs IS NOT NULL FROM cqlite.analytics.contacts WHERE id = 2')"
+assert_eq "absent list → null"                                  '"true"' \
+  "$(trino 'SELECT addrs IS NULL FROM cqlite.analytics.contacts WHERE id = 3')"
+
+# SELECT * includes the addrs column and its value (project all, count the addrs
+# elements of row 1 via a subquery so the assertion is a deterministic scalar).
+assert_eq "SELECT * includes addrs (row 1 has 2)"              '"2"' \
+  "$(trino 'SELECT cardinality(addrs) FROM (SELECT * FROM cqlite.analytics.contacts) WHERE id = 1')"
 
 # Proof it reads SSTables (not live CQL): an unflushed row must be invisible.
 #

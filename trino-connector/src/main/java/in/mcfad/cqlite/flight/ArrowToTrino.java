@@ -4,15 +4,21 @@ import io.airlift.slice.Slices;
 import io.trino.spi.Page;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.MapBlockBuilder;
+import io.trino.spi.block.RowBlockBuilder;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DateType;
 import io.trino.spi.type.DateTimeEncoding;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.RealType;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimeZoneKey;
@@ -40,6 +46,9 @@ import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarBinaryVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.complex.ListVector;
+import org.apache.arrow.vector.complex.MapVector;
+import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 
 import java.util.HexFormat;
@@ -135,9 +144,90 @@ public final class ArrowToTrino {
             case TimeType t -> t.writeLong(builder, timePicos(vector, i));
             case VarcharType t -> t.writeSlice(builder, varcharSlice(vector, i));
             case VarbinaryType t -> t.writeSlice(builder, binarySlice(vector, i));
+            // Complex columns (issue #2815): recurse per element/field/entry into the
+            // existing scalar writers. MapType is checked before ArrayType because a
+            // MapVector IS-A ListVector — but the switch is on the Trino type, which
+            // is distinct (MapType vs ArrayType), so ordering is not load-bearing here.
+            case MapType t -> writeMap(t, (MapVector) vector, i, builder);
+            case ArrayType t -> writeArray(t, (ListVector) vector, i, builder);
+            case RowType t -> writeRow(t, (StructVector) vector, i, builder);
             default -> throw new UnsupportedOperationException(
                     "Unsupported Trino type for Arrow conversion: " + type);
         }
+    }
+
+    /**
+     * Materialize one Arrow {@code ListVector} cell into a Trino ARRAY block entry
+     * (issue #2815). Reads the element sub-range {@code [start, end)} from the list's
+     * single data vector and recurses to {@link #writeValue} for each element (a null
+     * element yields {@code appendNull}). The caller has already handled a null LIST
+     * cell (→ {@code appendNull}); an empty list produces an empty, non-null array.
+     */
+    private static void writeArray(ArrayType type, ListVector vector, int i, BlockBuilder builder) {
+        Type elementType = type.getElementType();
+        FieldVector dataVector = (FieldVector) vector.getDataVector();
+        int start = vector.getElementStartIndex(i);
+        int end = vector.getElementEndIndex(i);
+        ((ArrayBlockBuilder) builder).buildEntry(elementBuilder -> {
+            for (int e = start; e < end; e++) {
+                if (dataVector.isNull(e)) {
+                    elementBuilder.appendNull();
+                } else {
+                    writeValue(elementType, dataVector, e, elementBuilder);
+                }
+            }
+        });
+    }
+
+    /**
+     * Materialize one Arrow {@code StructVector} cell into a Trino ROW block entry
+     * (issue #2815), one field per child in declared name/order. The Trino
+     * {@link RowType} field order mirrors the Arrow struct child order (the mapper
+     * built the row type from the same children), so field {@code f} reads child
+     * vector {@code f}. A null field cell yields {@code appendNull}.
+     */
+    private static void writeRow(RowType type, StructVector vector, int i, BlockBuilder builder) {
+        List<RowType.Field> fields = type.getFields();
+        ((RowBlockBuilder) builder).buildEntry(fieldBuilders -> {
+            for (int f = 0; f < fields.size(); f++) {
+                FieldVector child = (FieldVector) vector.getChildByOrdinal(f);
+                BlockBuilder fieldBuilder = fieldBuilders.get(f);
+                if (child.isNull(i)) {
+                    fieldBuilder.appendNull();
+                } else {
+                    writeValue(fields.get(f).getType(), child, i, fieldBuilder);
+                }
+            }
+        });
+    }
+
+    /**
+     * Materialize one Arrow {@code MapVector} cell into a Trino MAP block entry
+     * (issue #2815). Arrow stores map entries as a {@code List<Struct(key, value)>};
+     * this reads the entry sub-range {@code [start, end)}, then for each entry reads
+     * the {@code key} (ordinal 0) and {@code value} (ordinal 1) children of the entry
+     * struct and recurses to {@link #writeValue}. The caller handled a null MAP cell;
+     * an empty map produces an empty, non-null map. A null map KEY is invalid in CQL
+     * and not expected; a null VALUE yields {@code appendNull} for that value.
+     */
+    private static void writeMap(MapType type, MapVector vector, int i, BlockBuilder builder) {
+        Type keyType = type.getKeyType();
+        Type valueType = type.getValueType();
+        StructVector entries = (StructVector) vector.getDataVector();
+        FieldVector keyVector = (FieldVector) entries.getChildByOrdinal(0);
+        FieldVector valueVector = (FieldVector) entries.getChildByOrdinal(1);
+        int start = vector.getElementStartIndex(i);
+        int end = vector.getElementEndIndex(i);
+        ((MapBlockBuilder) builder).buildEntry((keyBuilder, valueBuilder) -> {
+            for (int e = start; e < end; e++) {
+                writeValue(keyType, keyVector, e, keyBuilder);
+                if (valueVector.isNull(e)) {
+                    valueBuilder.appendNull();
+                } else {
+                    writeValue(valueType, valueVector, e, valueBuilder);
+                }
+            }
+        });
     }
 
     /**

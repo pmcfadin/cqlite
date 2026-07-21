@@ -56,3 +56,32 @@ INSERT INTO analytics.readings (device, ts, value) VALUES (2, 2, 22);
 INSERT INTO analytics.readings (device, ts, value) VALUES (2, 3, 33);
 INSERT INTO analytics.readings (device, ts, value) VALUES (2, 4, 44);
 INSERT INTO analytics.readings (device, ts, value) VALUES (2, 5, 55);
+
+-- Typed collection columns end-to-end (issue #2815). A list<frozen<udt>> column
+-- projects through the connector as Trino array(varchar) whose elements are the
+-- server-decoded UDT strings; a plain list<text> and a map<text,int> exercise the
+-- other collection shapes. Rows cover: multi-element, empty list, and absent (never
+-- set) — empty must return an empty (non-null) array, absent must return null.
+CREATE TYPE IF NOT EXISTS analytics.simpleaddr (street text, zip int);
+
+CREATE TABLE IF NOT EXISTS analytics.contacts (
+  id int PRIMARY KEY,
+  name text,
+  addrs list<frozen<simpleaddr>>,
+  tags list<text>,
+  attrs map<text, int>
+);
+
+-- Multi-element row: two UDT addresses, two tags, two map entries.
+INSERT INTO analytics.contacts (id, name, addrs, tags, attrs) VALUES (
+  1, 'alice',
+  [{street: '12 Oak St', zip: 94040}, {street: '9 Elm Ave', zip: 94041}],
+  ['home', 'work'],
+  {'a': 1, 'b': 2}
+);
+-- Empty-collection row: empty list/map are DISTINCT from absent (→ empty array).
+INSERT INTO analytics.contacts (id, name, addrs, tags, attrs) VALUES (
+  2, 'bob', [], [], {}
+);
+-- Absent row: addrs/tags/attrs never set (→ null).
+INSERT INTO analytics.contacts (id, name) VALUES (3, 'carol');
