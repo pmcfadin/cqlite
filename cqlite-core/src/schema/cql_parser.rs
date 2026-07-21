@@ -58,6 +58,25 @@ fn qualified_table_name(input: &str) -> IResult<&str, (Option<String>, String)> 
     }
 }
 
+/// Parse a UDT type reference, which may be keyspace-qualified
+/// (`keyspace.type_name`) or bare (`type_name`). Cassandra's `CREATE TABLE` /
+/// `describe` output ALWAYS emits UDT column types keyspace-qualified
+/// (e.g. `cassandra_easy_stress.addr`), so the grammar must accept the optional
+/// `keyspace.` prefix (issue #2807). The qualified name is RETAINED verbatim in
+/// the returned string: the downstream resolver
+/// ([`crate::schema::TableSchema::validate_udt_references`] /
+/// [`crate::schema::CqlType::parse`]) already splits `keyspace.udt`, so the
+/// keyspace is information it needs — it must not be dropped here.
+fn qualified_type_name(input: &str) -> IResult<&str, String> {
+    let (input, first) = identifier(input)?;
+    let (input, second) = opt(preceded(char('.'), identifier))(input)?;
+
+    match second {
+        Some(type_name) => Ok((input, format!("{}.{}", first, type_name))),
+        None => Ok((input, first)),
+    }
+}
+
 /// Maximum allowed CQL type nesting depth for the nom schema parser. Mirrors
 /// [`crate::parser::complex_types::ComplexTypeParser`] (`max_depth = 32`) and the
 /// [`crate::schema::CqlType`] string parser guard.
@@ -134,8 +153,10 @@ fn cql_type(input: &str) -> IResult<&str, String> {
                 )),
                 |(_, _, inner, _)| format!("frozen<{}>", inner),
             ),
-            // Simple types and UDTs
-            map(identifier, |name| name),
+            // Simple types and UDTs. UDT type names may be keyspace-qualified
+            // (`keyspace.type_name`), which Cassandra always emits (issue #2807);
+            // `qualified_type_name` accepts the optional prefix and retains it.
+            map(qualified_type_name, |name| name),
         ))(input)?;
 
         Ok((input, base))
