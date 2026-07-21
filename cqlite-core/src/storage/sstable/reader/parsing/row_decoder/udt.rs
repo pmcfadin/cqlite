@@ -997,7 +997,9 @@ impl V5CompressedLegacyParser {
                         let lookup_name = nested_type_name
                             .strip_prefix("udt:")
                             .unwrap_or(nested_type_name);
-                        if let Some(nested_udt) = registry.get_udt(&self.keyspace, lookup_name) {
+                        if let Some(nested_udt) =
+                            registry.get_udt_qualified(&self.keyspace, lookup_name)
+                        {
                             self.parse_nested_udt_from_registry(field_data, nested_udt, registry)?
                         } else {
                             Value::Blob(
@@ -1009,7 +1011,9 @@ impl V5CompressedLegacyParser {
                     }
                     CqlType::Udt(udt_name, inline_fields) => {
                         // Inline UDT type - prefer registry, fall back to inline fields (Issue #239)
-                        if let Some(nested_udt) = registry.get_udt(&self.keyspace, udt_name) {
+                        if let Some(nested_udt) =
+                            registry.get_udt_qualified(&self.keyspace, udt_name)
+                        {
                             self.parse_nested_udt_from_registry(field_data, nested_udt, registry)?
                         } else if !inline_fields.is_empty() {
                             // Issue #239: Use inline field definitions for nested UDTs
@@ -1031,7 +1035,7 @@ impl V5CompressedLegacyParser {
                                     .strip_prefix("udt:")
                                     .unwrap_or(nested_type_name);
                                 if let Some(nested_udt) =
-                                    registry.get_udt(&self.keyspace, lookup_name)
+                                    registry.get_udt_qualified(&self.keyspace, lookup_name)
                                 {
                                     let inner_value = self.parse_nested_udt_from_registry(
                                         field_data, nested_udt, registry,
@@ -1043,7 +1047,8 @@ impl V5CompressedLegacyParser {
                             }
                             CqlType::Udt(udt_name, inline_fields) => {
                                 // Prefer registry, fall back to inline fields (Issue #239)
-                                if let Some(nested_udt) = registry.get_udt(&self.keyspace, udt_name)
+                                if let Some(nested_udt) =
+                                    registry.get_udt_qualified(&self.keyspace, udt_name)
                                 {
                                     let inner_value = self.parse_nested_udt_from_registry(
                                         field_data, nested_udt, registry,

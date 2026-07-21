@@ -21,7 +21,7 @@ mod key_ordering;
 mod schema_comparator;
 mod udt_registry;
 
-pub use udt_registry::{udt_registry_from_cql, UdtRegistry};
+pub use udt_registry::{split_qualified_udt, udt_registry_from_cql, UdtRegistry};
 
 /// Test-only work counters for the derived-comparator caching path (issue #1709).
 ///
@@ -693,11 +693,10 @@ impl TableSchema {
         registry: &UdtRegistry,
     ) -> Result<()> {
         // A reference may be qualified as `keyspace.udt`; honor an explicit
-        // keyspace, otherwise resolve against the table's keyspace.
-        let (lookup_keyspace, bare_name) = match udt_name.split_once('.') {
-            Some((ks, name)) => (ks, name),
-            None => (self.keyspace.as_str(), udt_name),
-        };
+        // keyspace, otherwise resolve against the table's keyspace. Routes through
+        // the single shared splitter (issue #2807).
+        let (lookup_keyspace, bare_name) =
+            crate::schema::split_qualified_udt(udt_name, self.keyspace.as_str());
 
         if registry.contains_udt(lookup_keyspace, bare_name)
             || registry.contains_udt("system", bare_name)

@@ -161,6 +161,83 @@ fn quoted_case_sensitive_qualified_udt_resolves_against_registry() {
     }
 }
 
+/// Newly reachable via the grammar fix (#2807 addendum case a): a `CREATE TYPE`
+/// whose FIELD type is itself keyspace-qualified previously FAILED to parse (so it
+/// never registered); now it registers with a qualified field type that the NESTED
+/// registry lookups must resolve through the shared splitter. This drives the
+/// authoritative DDL→registry resolver over a two-level qualified UDT and asserts
+/// the inner UDT fully materializes.
+#[test]
+fn nested_qualified_udt_field_type_resolves() {
+    let ks = "cassandra_easy_stress";
+    let ddl = "CREATE TYPE cassandra_easy_stress.inner (v text); \
+        CREATE TYPE cassandra_easy_stress.outer (n frozen<cassandra_easy_stress.inner>);";
+    let registry = udt_registry_from_cql(ddl, ks);
+    assert!(registry.contains_udt(ks, "inner"));
+    assert!(registry.contains_udt(ks, "outer"));
+
+    let outer = CqlType::parse("frozen<cassandra_easy_stress.outer>").expect("outer type parses");
+    let resolved = registry.resolve_type(&outer, ks);
+    // frozen<outer> → outer{ n: frozen<inner> } → inner{ v: text }
+    let outer_fields = match &resolved {
+        CqlType::Frozen(i) => match i.as_ref() {
+            CqlType::Udt(name, fields) => {
+                assert_eq!(name, "outer");
+                fields
+            }
+            other => panic!("expected outer Udt, got {other:?}"),
+        },
+        other => panic!("expected Frozen, got {other:?}"),
+    };
+    let (_, n_type) = outer_fields
+        .iter()
+        .find(|(n, _)| n == "n")
+        .expect("field n");
+    // The nested qualified field type must have resolved to the full inner struct.
+    let inner_fields = match n_type {
+        CqlType::Frozen(i) => match i.as_ref() {
+            CqlType::Udt(name, fields) => {
+                assert_eq!(name, "inner");
+                fields
+            }
+            other => panic!("nested field must resolve to inner Udt, got {other:?}"),
+        },
+        CqlType::Udt(name, fields) => {
+            assert_eq!(name, "inner");
+            fields
+        }
+        other => panic!("nested field must resolve to inner Udt, got {other:?}"),
+    };
+    assert_eq!(inner_fields.len(), 1);
+    assert_eq!(inner_fields[0].0, "v");
+}
+
+/// Newly reachable (#2807 addendum case b): a qualified frozen UDT in a
+/// partition-KEY position. `parse_create_table` copies the column `data_type` into
+/// the `KeyColumn`, so the qualifier must survive there too and resolve.
+#[test]
+fn qualified_udt_in_partition_key_position_parses_and_resolves() {
+    let ks = "cassandra_easy_stress";
+    let schema = parse_cql_schema(
+        "CREATE TABLE cassandra_easy_stress.t (\
+            id frozen<cassandra_easy_stress.addr>, v text, PRIMARY KEY (id));",
+    )
+    .expect("qualified UDT in key position must parse (#2807)");
+
+    let pk = &schema.partition_keys[0];
+    assert_eq!(pk.name, "id");
+    assert_eq!(pk.data_type, "frozen<cassandra_easy_stress.addr>");
+
+    let registry =
+        udt_registry_from_cql("CREATE TYPE cassandra_easy_stress.addr (street text);", ks);
+    let resolved =
+        registry.resolve_type(&CqlType::parse(&pk.data_type).expect("key type parses"), ks);
+    assert!(
+        find_resolved_addr(&resolved).is_some(),
+        "partition-key UDT must resolve to a struct, got {resolved:?}"
+    );
+}
+
 /// Walk a (possibly collection-wrapped) resolved type and return the `addr` UDT's
 /// populated fields, or `None` if it never resolved to a struct.
 fn find_resolved_addr(ty: &CqlType) -> Option<&Vec<(String, CqlType)>> {

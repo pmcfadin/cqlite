@@ -10,6 +10,32 @@ use crate::types::UdtTypeDef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Split a possibly KEYSPACE-QUALIFIED UDT reference into `(lookup_keyspace,
+/// bare_name)`. This is the SINGLE authoritative split rule shared by every UDT
+/// lookup — the resolver ([`UdtRegistry::resolve_udt_reference`]), the read-path
+/// decode fallbacks ([`UdtRegistry::get_udt_qualified`]), and the writer's
+/// `resolve_registered_udt` (promoted here from the write path, roborev #1020).
+///
+/// Cassandra always emits UDT column types keyspace-qualified (`frozen<ks.addr>`,
+/// issue #2807) and the CQL parser now RETAINS that qualifier in `data_type`, but
+/// the registry is keyed by `(keyspace, bare_name)` (see [`UdtRegistry::get_udt`]).
+/// So any consumer of a `data_type` string that references a UDT MUST route its
+/// registry lookup through this split first — otherwise `ks.addr` never matches
+/// the bare-`addr` key and the value silently degrades to `BytesType`/`Blob`.
+///
+/// The split assumes an unquoted, dot-free keyspace name — the only form the CQL
+/// grammar and `describe` produce (a quoted case-sensitive UDT name is normalized
+/// to its bare, dot-free form by the quote-stripping `identifier` parser first).
+pub fn split_qualified_udt<'a>(
+    reference: &'a str,
+    default_keyspace: &'a str,
+) -> (&'a str, &'a str) {
+    match reference.split_once('.') {
+        Some((keyspace, bare_name)) => (keyspace, bare_name),
+        None => (default_keyspace, reference),
+    }
+}
+
 /// Build a [`UdtRegistry`] from every `CREATE TYPE` statement in a CQL DDL string
 /// (issue #2349).
 ///
@@ -74,6 +100,28 @@ impl UdtRegistry {
     /// Get a UDT definition by keyspace and name
     pub fn get_udt(&self, keyspace: &str, name: &str) -> Option<&UdtTypeDef> {
         self.udts.get(keyspace)?.get(name)
+    }
+
+    /// Look up a UDT by a reference that MAY be keyspace-qualified
+    /// (`keyspace.type_name`) and/or carry the schema-parse `udt:` prefix, routing
+    /// through the SINGLE shared splitter [`split_qualified_udt`] (also used by the
+    /// resolver and the writer): an explicit `keyspace.` prefix selects that
+    /// keyspace, otherwise `default_keyspace`. The registry is keyed by BARE name,
+    /// so the qualifier MUST be stripped before the HashMap lookup (issue #2807).
+    ///
+    /// This is the qualifier-aware entry point every registry-backed *decode*
+    /// fallback must use: Cassandra emits UDT column types keyspace-qualified
+    /// (`frozen<ks.addr>`), which the CQL parser now retains, so a plain
+    /// `get_udt(&self.keyspace, "ks.addr")` would MISS a bare-`addr`-keyed
+    /// registry and silently degrade the cell to `Blob`.
+    pub fn get_udt_qualified(
+        &self,
+        default_keyspace: &str,
+        reference: &str,
+    ) -> Option<&UdtTypeDef> {
+        let reference = reference.strip_prefix("udt:").unwrap_or(reference);
+        let (keyspace, bare_name) = split_qualified_udt(reference, default_keyspace);
+        self.get_udt(keyspace, bare_name)
     }
 
     /// Get all UDTs in a keyspace
@@ -273,10 +321,7 @@ impl UdtRegistry {
         keyspace: &str,
         depth: usize,
     ) -> Option<CqlType> {
-        let (lookup_keyspace, bare_name) = match udt_name.split_once('.') {
-            Some((ks, n)) => (ks, n),
-            None => (keyspace, udt_name),
-        };
+        let (lookup_keyspace, bare_name) = split_qualified_udt(udt_name, keyspace);
         let def = self
             .get_udt(lookup_keyspace, bare_name)
             .or_else(|| self.get_udt("system", bare_name))?;

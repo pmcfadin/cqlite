@@ -121,7 +121,7 @@ impl V5CompressedLegacyParser {
             } else if let Some(udt_def) = self
                 .udt_registry
                 .as_ref()
-                .and_then(|reg| reg.get_udt(&self.keyspace, &inner_type).cloned())
+                .and_then(|reg| reg.get_udt_qualified(&self.keyspace, &inner_type).cloned())
             {
                 // frozen<short_udt_name>: look up the concrete UDT definition in the
                 // registry (Issue #502).  This handles type strings like
