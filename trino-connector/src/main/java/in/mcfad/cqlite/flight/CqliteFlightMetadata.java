@@ -16,6 +16,7 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.expression.Call;
@@ -219,12 +220,22 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             return Optional.empty();
         }
 
+        // Precompute the fully-bound partition key's covering token(s) NOW (issue #2806),
+        // while the TYPED partition-key domain is still in hand. applyFilter pushes the PK
+        // predicate into filterJson and returns the summary UNENFORCED, so the enforced
+        // Constraint later handed to getSplits binds no columns — the bound key must ride on
+        // the handle for the split manager to prune (issue #2679). When this call does not
+        // fully bind the PK we INHERIT any tokens a prior applyFilter call attached: the PK,
+        // once equality-bound, stays bound across the iterative applyFilter calls, and a
+        // superset of covering ranges is always correct (never drops rows).
+        List<Long> boundKeyTokens = boundKeyTokensFor(table, constraint.getSummary());
+
         // Preserve any pushed-down LIMIT (#2129): this branch only runs for a
         // non-aggregated handle, so aggregation/finalize stay empty, but a prior
         // applyLimit's cap must NOT be dropped when the handle is rebuilt.
         CqliteFlightTableHandle newHandle = new CqliteFlightTableHandle(
                 table.keyspace(), table.table(), table.ddl(),
-                Optional.of(filterJson), Optional.empty(), Optional.empty(), table.limit());
+                Optional.of(filterJson), Optional.empty(), Optional.empty(), table.limit(), boundKeyTokens);
 
         // The residual expression Trino must still evaluate (the untranslatable
         // conjuncts, ANDed). Empty residual => TRUE (fully pushed).
@@ -239,6 +250,28 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
                 constraint.getSummary(),
                 remainingExpression,
                 false));
+    }
+
+    /**
+     * The covering Murmur3 token(s) to attach to the rebuilt handle for plan-time split
+     * pruning (issues #2806, #2679). Derives them from the TYPED summary via the single
+     * {@link CqliteFlightSplitManager#computeBoundTokens} authority (partitioner check +
+     * composite-PK arity guard + serialization, all fail-safe). When this call does not
+     * fully bind the partition key it INHERITS whatever tokens {@code table} already
+     * carries — a later mixed-predicate applyFilter call must not drop a PK bound by an
+     * earlier one.
+     */
+    private List<Long> boundKeyTokensFor(CqliteFlightTableHandle table, TupleDomain<ColumnHandle> summary) {
+        Optional<long[]> tokens =
+                CqliteFlightSplitManager.computeBoundTokens(table, summary, Partitioner.resolve());
+        if (tokens.isEmpty()) {
+            return table.boundKeyTokens();
+        }
+        List<Long> out = new ArrayList<>(tokens.get().length);
+        for (long token : tokens.get()) {
+            out.add(token);
+        }
+        return out;
     }
 
     /**
@@ -292,10 +325,13 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             return Optional.empty();
         }
 
+        // Preserve any precomputed bound-key tokens (issue #2806): a point read with a LIMIT
+        // (WHERE key = ? LIMIT n) has both applyFilter and applyLimit rebuild the handle; the
+        // pruning tokens attached by applyFilter must survive this rebuild.
         CqliteFlightTableHandle newHandle = new CqliteFlightTableHandle(
                 table.keyspace(), table.table(), table.ddl(),
                 table.filterJson(), table.aggregationJson(), table.finalizePlanJson(),
-                OptionalLong.of(limit));
+                OptionalLong.of(limit), table.boundKeyTokens());
 
         return Optional.of(new LimitApplicationResult<>(newHandle, false, false));
     }

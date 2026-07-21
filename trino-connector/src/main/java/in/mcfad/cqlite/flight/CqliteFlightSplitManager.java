@@ -2,6 +2,7 @@ package in.mcfad.cqlite.flight;
 
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorSession;
@@ -10,6 +11,7 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
+import io.trino.spi.predicate.TupleDomain;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -139,49 +141,27 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             if (!pruningEnabled) {
                 return ranges;
             }
-            if (constraint == null) {
-                return ranges;
+            // Authoritative bound-key source (issue #2806): applyFilter pushes the point-read PK
+            // predicate into filterJson and returns the summary UNENFORCED (honesty contract,
+            // #2164), so the enforced Constraint here binds NO columns — the bound key rides on
+            // the handle, precomputed where the TYPED partition-key domain was available. Prefer
+            // it; only when the handle carries none do we fall back to deriving from the
+            // split-time constraint (the enforced-constraint path and the direct unit tests).
+            long[] tokens;
+            if (!handle.boundKeyTokens().isEmpty()) {
+                List<Long> stored = handle.boundKeyTokens();
+                tokens = new long[stored.size()];
+                for (int i = 0; i < tokens.length; i++) {
+                    tokens[i] = stored.get(i);
+                }
+            } else {
+                TupleDomain<ColumnHandle> summary = constraint == null ? null : constraint.getSummary();
+                Optional<long[]> derived = computeBoundTokens(handle, summary, partitioner);
+                if (derived.isEmpty()) {
+                    return ranges;
+                }
+                tokens = derived.get();
             }
-            if (partitioner != Partitioner.MURMUR3) {
-                LOG.log(System.Logger.Level.DEBUG,
-                        () -> "Split pruning disabled: partitioner " + partitioner
-                                + " is not Murmur3Partitioner; using full fan-out for "
-                                + handle.keyspace() + "." + handle.table());
-                return ranges;
-            }
-            List<KeyColumn> partitionKey = PrimaryKeyExtractor.extract(handle.ddl()).partitionKey();
-            // Fail-safe composite-PK consistency guard (issue #2679 roborev): the pruning path
-            // builds a composite partition-key byte layout whose Murmur3 token is correct ONLY
-            // when EVERY partition-key component is present, in order. PrimaryKeyExtractor was
-            // built for estimateGroupRatio (#944) where a parse MISS is fail-safe — but here an
-            // UNDER-count on a composite PK (e.g. a quoted identifier containing ')' closes the
-            // composite group early, so PRIMARY KEY ((a,b)) resolves to [a]) is CATASTROPHIC:
-            // it builds a single-component raw-byte key, computes the WRONG token, maps to the
-            // wrong range, and SILENTLY DROPS the partition's rows. Cross-check the extracted
-            // partition-key column count against an INDEPENDENT, quote-aware arity scan of the
-            // same DDL; prune only when they agree. Any disagreement — or an indeterminate
-            // arity — means we cannot be certain we have all components in the right order, so
-            // we fall back to the full fan-out (always correct). This subsumes the
-            // single-component case (1 == 1) unchanged.
-            java.util.OptionalInt arity = PrimaryKeyExtractor.partitionKeyArity(handle.ddl());
-            if (arity.isEmpty() || arity.getAsInt() != partitionKey.size()) {
-                LOG.log(System.Logger.Level.DEBUG,
-                        () -> "Split pruning skipped for " + handle.keyspace() + "." + handle.table()
-                                + " (full fan-out): partition-key parse is not provably complete — "
-                                + "extractor resolved " + partitionKey.size() + " component(s) but the "
-                                + "independent quote-aware arity scan found "
-                                + (arity.isEmpty() ? "an indeterminate count" : arity.getAsInt())
-                                + "; refusing to prune on a possibly under-counted composite key");
-                return ranges;
-            }
-            BoundPartitionKeys bound = BoundPartitionKeys.compute(constraint.getSummary(), partitionKey);
-            if (!bound.isBound()) {
-                LOG.log(System.Logger.Level.DEBUG,
-                        () -> "Split pruning skipped for " + handle.keyspace() + "." + handle.table()
-                                + " (full fan-out): " + bound.skipReason());
-                return ranges;
-            }
-            long[] tokens = bound.tokens().orElseThrow();
             List<CqliteFlightSplit> pruned = new ArrayList<>();
             for (CqliteFlightSplit split : ranges) {
                 if (rangeCoversAnyToken(split, tokens)) {
@@ -211,6 +191,62 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                             + handle.keyspace() + "." + handle.table(), e);
             return ranges;
         }
+    }
+
+    /**
+     * Derive the Murmur3 covering token(s) for a fully-bound partition key from a TYPED
+     * {@link TupleDomain} summary, or {@link Optional#empty()} on ANY doubt (issue #2806).
+     *
+     * <p>This is the single authority for the fail-safe partitioner check, the composite-PK
+     * arity cross-check, and the {@link BoundPartitionKeys} serialization, shared by two
+     * callers: {@link CqliteFlightMetadata#applyFilter} precomputes the tokens here (where the
+     * typed partition-key domain is still in hand) and stores them on the handle, and
+     * {@link #pruneToBoundPartitionKey} calls it as the split-time fallback when the handle
+     * carries none. Empty means "do not prune" — the caller emits the always-correct full
+     * fan-out — and the reason is logged at DEBUG.
+     */
+    static Optional<long[]> computeBoundTokens(
+            CqliteFlightTableHandle handle, TupleDomain<ColumnHandle> summary, Partitioner partitioner) {
+        if (partitioner != Partitioner.MURMUR3) {
+            LOG.log(System.Logger.Level.DEBUG,
+                    () -> "Split pruning disabled: partitioner " + partitioner
+                            + " is not Murmur3Partitioner; using full fan-out for "
+                            + handle.keyspace() + "." + handle.table());
+            return Optional.empty();
+        }
+        List<KeyColumn> partitionKey = PrimaryKeyExtractor.extract(handle.ddl()).partitionKey();
+        // Fail-safe composite-PK consistency guard (issue #2679 roborev): the pruning path
+        // builds a composite partition-key byte layout whose Murmur3 token is correct ONLY
+        // when EVERY partition-key component is present, in order. PrimaryKeyExtractor was
+        // built for estimateGroupRatio (#944) where a parse MISS is fail-safe — but here an
+        // UNDER-count on a composite PK (e.g. a quoted identifier containing ')' closes the
+        // composite group early, so PRIMARY KEY ((a,b)) resolves to [a]) is CATASTROPHIC:
+        // it builds a single-component raw-byte key, computes the WRONG token, maps to the
+        // wrong range, and SILENTLY DROPS the partition's rows. Cross-check the extracted
+        // partition-key column count against an INDEPENDENT, quote-aware arity scan of the
+        // same DDL; prune only when they agree. Any disagreement — or an indeterminate
+        // arity — means we cannot be certain we have all components in the right order, so
+        // we fall back to the full fan-out (always correct). This subsumes the
+        // single-component case (1 == 1) unchanged.
+        java.util.OptionalInt arity = PrimaryKeyExtractor.partitionKeyArity(handle.ddl());
+        if (arity.isEmpty() || arity.getAsInt() != partitionKey.size()) {
+            LOG.log(System.Logger.Level.DEBUG,
+                    () -> "Split pruning skipped for " + handle.keyspace() + "." + handle.table()
+                            + " (full fan-out): partition-key parse is not provably complete — "
+                            + "extractor resolved " + partitionKey.size() + " component(s) but the "
+                            + "independent quote-aware arity scan found "
+                            + (arity.isEmpty() ? "an indeterminate count" : arity.getAsInt())
+                            + "; refusing to prune on a possibly under-counted composite key");
+            return Optional.empty();
+        }
+        BoundPartitionKeys bound = BoundPartitionKeys.compute(summary, partitionKey);
+        if (!bound.isBound()) {
+            LOG.log(System.Logger.Level.DEBUG,
+                    () -> "Split pruning skipped for " + handle.keyspace() + "." + handle.table()
+                            + " (full fan-out): " + bound.skipReason());
+            return Optional.empty();
+        }
+        return bound.tokens();
     }
 
     /** Does this split's {@code (start, end]} range (with wraparound) contain any of {@code tokens}? */

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.trino.spi.connector.ConnectorTableHandle;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 
@@ -33,6 +34,18 @@ import java.util.OptionalLong;
  * connector returns {@code limitGuaranteed = false} and Trino keeps a global
  * {@code Limit} above the scan. It is never set on an aggregated handle (the
  * aggregate already collapses the row set).
+ *
+ * <p>{@code boundKeyTokens} holds the Murmur3 token(s) of the fully-bound partition
+ * key, precomputed at {@link CqliteFlightMetadata#applyFilter} time (issue #2806) —
+ * where the TYPED partition-key domain is still available — and consumed by
+ * {@link CqliteFlightSplitManager#getSplits} for plan-time split pruning (issue
+ * #2679). This is REQUIRED because {@code applyFilter} pushes the point-read PK
+ * predicate into {@code filterJson} and returns the summary unenforced (the honesty
+ * contract, #2164), so the enforced {@code Constraint} handed to {@code getSplits}
+ * binds NO columns — the bound key must therefore ride on the handle, not the
+ * split-time constraint. Empty when the partition key is not fully bound (or pruning
+ * cannot be grounded); the split manager then falls back to the split-time
+ * constraint and, absent both, to the always-correct full fan-out.
  */
 public record CqliteFlightTableHandle(
         String keyspace,
@@ -41,8 +54,29 @@ public record CqliteFlightTableHandle(
         Optional<String> filterJson,
         Optional<String> aggregationJson,
         Optional<String> finalizePlanJson,
-        OptionalLong limit)
+        OptionalLong limit,
+        List<Long> boundKeyTokens)
         implements ConnectorTableHandle {
+
+    /**
+     * Compact constructor: keep {@code boundKeyTokens} an immutable list (records are
+     * shared across planning threads), tolerating {@code null} as an empty list.
+     */
+    public CqliteFlightTableHandle {
+        boundKeyTokens = boundKeyTokens == null ? List.of() : List.copyOf(boundKeyTokens);
+    }
+
+    /** Canonical-arity constructor without precomputed bound-key tokens (defaults to none). */
+    public CqliteFlightTableHandle(
+            String keyspace,
+            String table,
+            String ddl,
+            Optional<String> filterJson,
+            Optional<String> aggregationJson,
+            Optional<String> finalizePlanJson,
+            OptionalLong limit) {
+        this(keyspace, table, ddl, filterJson, aggregationJson, finalizePlanJson, limit, List.of());
+    }
 
     /** Convenience constructor for a handle with no pushed-down filter or aggregation. */
     public CqliteFlightTableHandle(String keyspace, String table, String ddl) {
