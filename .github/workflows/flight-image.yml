@@ -140,6 +140,14 @@ jobs:
     name: Publish multi-arch image
     runs-on: ubuntu-latest
     needs: build
+    # The build job carries an `if: !cancelled() && (preflight success|skipped)`
+    # guard (#2652). On the workflow_dispatch path preflight is *skipped*; once an
+    # ancestor is conditionally guarded, a downstream job on the default
+    # `success()` check is skipped unless it carries its own `!cancelled()` guard.
+    # Without this, an `image_tag` dispatch reported success while publishing NO
+    # tag — the merge/smoke jobs silently skipped (#2803). Gate on the build
+    # result explicitly so the multi-arch manifest is always assembled + tagged.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -307,6 +315,9 @@ jobs:
     name: Smoke (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     needs: merge
+    # See the merge job: same #2803 cascade — guard on the merge result so smoke
+    # runs on the dispatch path instead of silently skipping.
+    if: ${{ !cancelled() && needs.merge.result == 'success' }}
     permissions:
       contents: read
       packages: read
