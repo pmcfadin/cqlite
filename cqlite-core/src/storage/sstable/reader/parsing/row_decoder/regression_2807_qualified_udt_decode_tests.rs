@@ -94,20 +94,89 @@ fn unqualified_udt_type_name_still_decodes_to_struct() {
 }
 
 /// A genuinely-unregistered qualified reference must NOT falsely resolve: the
-/// split keyspace has no such UDT, so decode does not produce a populated struct
-/// (fail-open, never a fabricated type).
+/// split keyspace has no such UDT, so decode must not produce the registered UDT
+/// struct (fail-open, never a fabricated type). Fed the SAME 2-field payload the
+/// positive test uses, so the ONLY variable is the keyspace qualifier.
 #[test]
 fn qualified_reference_to_unknown_udt_does_not_resolve() {
     let parser = parser_with_registry();
-    let data = encode_udt(&["x"]);
+    let data = encode_udt(&["main st", "nyc"]);
 
-    // `other_ks.addr` splits to keyspace `other_ks`, which holds no `addr`.
+    // `other_ks.addr` splits to keyspace `other_ks`, which holds no `addr`; the
+    // non-regressive fallback (bare `other_ks.addr` in the default keyspace) also
+    // misses, so this must NOT decode to the registered `addr` struct.
     let result = parser.parse_raw_type_value(&data, 0, "other_ks.addr", "col", 0);
-    if let Ok((Value::Udt(udt), _)) = result {
-        assert_ne!(
-            udt.fields.len(),
-            2,
-            "an unknown-keyspace reference must not resolve to the registered addr struct"
-        );
+    assert!(
+        !matches!(result, Ok((Value::Udt(_), _))),
+        "unknown-keyspace qualified reference must not resolve to a UDT, got {result:?}"
+    );
+}
+
+/// Issue #2807 (addendum item 4): drive the SECOND silent-degradation site — the
+/// nested-field registry fallback in `parse_nested_udt_from_registry` (udt.rs) —
+/// through the decode surface. A three-level qualified nest
+/// (`outer{ m: mid }`, `mid{ leaf }`, `leaf{ v: text }`) forces a qualified
+/// `get_udt_qualified` lookup INSIDE the nested decoder, asserting the deepest
+/// field materializes as structured text, never a `Blob`.
+#[test]
+fn nested_qualified_udt_field_decodes_via_nested_registry_fallback() {
+    // A nested-UDT field typed as `Custom("udt:<qualified>")` — the exact shape
+    // `CqlType::parse` yields for a qualified UDT reference.
+    fn qualified_udt_field(qualified: &str) -> CqlType {
+        CqlType::Custom(format!("udt:{qualified}"))
     }
+
+    let mut reg = UdtRegistry::new();
+    reg.register_udt(
+        UdtTypeDef::new(KEYSPACE.to_string(), "leaf".to_string()).with_field(
+            "v".to_string(),
+            CqlType::Text,
+            true,
+        ),
+    );
+    reg.register_udt(
+        UdtTypeDef::new(KEYSPACE.to_string(), "mid".to_string()).with_field(
+            "leaf".to_string(),
+            qualified_udt_field("cassandra_easy_stress.leaf"),
+            true,
+        ),
+    );
+    reg.register_udt(
+        UdtTypeDef::new(KEYSPACE.to_string(), "outer".to_string()).with_field(
+            "m".to_string(),
+            qualified_udt_field("cassandra_easy_stress.mid"),
+            true,
+        ),
+    );
+    let parser = V5CompressedLegacyParser::new(KEYSPACE.to_string(), "t".to_string(), 0, 0, None)
+        .with_udt_registry(reg);
+
+    // Frame each level: one 4-byte-BE-prefixed field per UDT.
+    let leaf_bytes = encode_udt(&["deep"]); // leaf{ v = "deep" }
+    let mut mid_bytes = Vec::new();
+    mid_bytes.extend_from_slice(&(leaf_bytes.len() as i32).to_be_bytes());
+    mid_bytes.extend_from_slice(&leaf_bytes);
+    let mut outer_bytes = Vec::new();
+    outer_bytes.extend_from_slice(&(mid_bytes.len() as i32).to_be_bytes());
+    outer_bytes.extend_from_slice(&mid_bytes);
+
+    let (value, _off) = parser
+        .parse_raw_type_value(&outer_bytes, 0, "cassandra_easy_stress.outer", "col", 0)
+        .expect("qualified 3-level nested UDT must decode");
+
+    // outer.m → mid.leaf → leaf.v == "deep", all resolved via qualified lookups.
+    let outer = match value {
+        Value::Udt(u) => u,
+        other => panic!("outer must be Udt, got {other:?}"),
+    };
+    let mid = match outer.fields[0].value.as_ref() {
+        Some(Value::Udt(u)) => u,
+        other => panic!("outer.m must decode to a nested Udt, got {other:?} (Blob = the bug)"),
+    };
+    let leaf = match mid.fields[0].value.as_ref() {
+        Some(Value::Udt(u)) => u,
+        other => panic!("mid.leaf must decode to a nested Udt, got {other:?} (Blob = the bug)"),
+    };
+    assert_eq!(leaf.type_name, "leaf");
+    assert_eq!(leaf.fields[0].value, Some(Value::Text("deep".into())));
 }
