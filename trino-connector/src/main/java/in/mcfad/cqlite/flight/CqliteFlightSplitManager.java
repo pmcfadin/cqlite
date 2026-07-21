@@ -148,7 +148,11 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             // it; only when the handle carries none do we fall back to deriving from the
             // split-time constraint (the enforced-constraint path and the direct unit tests).
             long[] tokens;
-            if (!handle.boundKeyTokens().isEmpty()) {
+            // The handle-borne tokens are only ever attached under Murmur3 (applyFilter derives
+            // them via computeBoundTokens, which returns none for any other partitioner), so this
+            // fast path is Murmur3-only by construction. Gate on `partitioner` anyway so a
+            // non-Murmur3 split-time resolution can never consume Murmur3 tokens (fail-safe).
+            if (partitioner == Partitioner.MURMUR3 && !handle.boundKeyTokens().isEmpty()) {
                 List<Long> stored = handle.boundKeyTokens();
                 tokens = new long[stored.size()];
                 for (int i = 0; i < tokens.length; i++) {
@@ -207,6 +211,12 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
      */
     static Optional<long[]> computeBoundTokens(
             CqliteFlightTableHandle handle, TupleDomain<ColumnHandle> summary, Partitioner partitioner) {
+        // Cheap short-circuit BEFORE any DDL regex work: an absent/ALL/NONE summary binds no
+        // partition key, so it can never fully bind. This runs on every optimizer iteration for
+        // every table, so skip the extract/arity parse when there is provably nothing to bind.
+        if (summary == null || summary.isAll() || summary.isNone()) {
+            return Optional.empty();
+        }
         if (partitioner != Partitioner.MURMUR3) {
             LOG.log(System.Logger.Level.DEBUG,
                     () -> "Split pruning disabled: partitioner " + partitioner

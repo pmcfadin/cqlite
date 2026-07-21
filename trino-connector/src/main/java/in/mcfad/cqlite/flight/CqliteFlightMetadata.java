@@ -229,6 +229,16 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         // once equality-bound, stays bound across the iterative applyFilter calls, and a
         // superset of covering ranges is always correct (never drops rows).
         List<Long> boundKeyTokens = boundKeyTokensFor(table, constraint.getSummary());
+        if (boundKeyTokens.isEmpty()) {
+            // A filter WAS pushed but the partition key was not fully bound in the summary
+            // (the inert case this issue exists for, #2806) — e.g. a partial PK, a range, or a
+            // PK predicate that arrived via the expression channel with an ALL summary. Pruning
+            // stays correctly inert (full fan-out); logged at DEBUG so the field probe can see it.
+            LOG.log(System.Logger.Level.DEBUG,
+                    () -> "Split pruning inert for " + table.keyspace() + "." + table.table()
+                            + ": a filter was pushed but the constraint summary did not fully bind "
+                            + "the partition key; using full fan-out (always correct)");
+        }
 
         // Preserve any pushed-down LIMIT (#2129): this branch only runs for a
         // non-aggregated handle, so aggregation/finalize stay empty, but a prior
@@ -262,8 +272,18 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * earlier one.
      */
     private List<Long> boundKeyTokensFor(CqliteFlightTableHandle table, TupleDomain<ColumnHandle> summary) {
-        Optional<long[]> tokens =
-                CqliteFlightSplitManager.computeBoundTokens(table, summary, Partitioner.resolve());
+        Optional<long[]> tokens;
+        try {
+            tokens = CqliteFlightSplitManager.computeBoundTokens(table, summary, Partitioner.resolve());
+        } catch (RuntimeException e) {
+            // Pruning is a best-effort optimization (fail-safe by contract): a plan-time
+            // RuntimeException while deriving covering tokens must never fail the query. Fall
+            // back to whatever tokens the handle already carries (full fan-out if none).
+            LOG.log(System.Logger.Level.DEBUG,
+                    "Bound-key token precompute failed for " + table.keyspace() + "." + table.table()
+                            + "; leaving split pruning to the split-time fallback (full fan-out)", e);
+            return table.boundKeyTokens();
+        }
         if (tokens.isEmpty()) {
             return table.boundKeyTokens();
         }

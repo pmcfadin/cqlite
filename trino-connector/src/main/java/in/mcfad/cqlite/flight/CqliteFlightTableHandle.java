@@ -66,7 +66,7 @@ public record CqliteFlightTableHandle(
         boundKeyTokens = boundKeyTokens == null ? List.of() : List.copyOf(boundKeyTokens);
     }
 
-    /** Canonical-arity constructor without precomputed bound-key tokens (defaults to none). */
+    /** Legacy 7-arg constructor (pre-#2806); defaults {@code boundKeyTokens} to none. */
     public CqliteFlightTableHandle(
             String keyspace,
             String table,
