@@ -942,6 +942,12 @@ mod regression_1641_boundary_peek_tests;
 #[cfg(test)]
 mod regression_1795_overflow_tests;
 
+// Issue #2807: the DECODE surface for keyspace-qualified UDT type names — the
+// registry-backed fallback must split `ks.udt` before the bare-keyed lookup, or
+// the value silently degrades to `Blob`.
+#[cfg(test)]
+mod regression_2807_qualified_udt_decode_tests;
+
 impl V5CompressedLegacyParser {
     /// Create a new V5CompressedLegacy parser
     ///

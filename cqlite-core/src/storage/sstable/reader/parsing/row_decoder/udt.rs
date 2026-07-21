@@ -993,11 +993,11 @@ impl V5CompressedLegacyParser {
                 // Handle deeply nested UDTs (including FROZEN<udt> types)
                 let value = match &field_def.field_type {
                     CqlType::Custom(nested_type_name) => {
-                        // Issue #239: Handle "udt:" prefix from schema parsing
-                        let lookup_name = nested_type_name
-                            .strip_prefix("udt:")
-                            .unwrap_or(nested_type_name);
-                        if let Some(nested_udt) = registry.get_udt(&self.keyspace, lookup_name) {
+                        // `get_udt_qualified` owns "udt:" + keyspace-qualifier
+                        // normalization (Issue #239 / #2807).
+                        if let Some(nested_udt) =
+                            registry.get_udt_qualified(&self.keyspace, nested_type_name)
+                        {
                             self.parse_nested_udt_from_registry(field_data, nested_udt, registry)?
                         } else {
                             Value::Blob(
@@ -1009,7 +1009,9 @@ impl V5CompressedLegacyParser {
                     }
                     CqlType::Udt(udt_name, inline_fields) => {
                         // Inline UDT type - prefer registry, fall back to inline fields (Issue #239)
-                        if let Some(nested_udt) = registry.get_udt(&self.keyspace, udt_name) {
+                        if let Some(nested_udt) =
+                            registry.get_udt_qualified(&self.keyspace, udt_name)
+                        {
                             self.parse_nested_udt_from_registry(field_data, nested_udt, registry)?
                         } else if !inline_fields.is_empty() {
                             // Issue #239: Use inline field definitions for nested UDTs
@@ -1026,12 +1028,10 @@ impl V5CompressedLegacyParser {
                         // Handle FROZEN<udt_type> - the inner type may be a UDT
                         match inner.as_ref() {
                             CqlType::Custom(nested_type_name) => {
-                                // Issue #239: Handle "udt:" prefix from schema parsing
-                                let lookup_name = nested_type_name
-                                    .strip_prefix("udt:")
-                                    .unwrap_or(nested_type_name);
+                                // `get_udt_qualified` owns "udt:" + keyspace-qualifier
+                                // normalization (Issue #239 / #2807).
                                 if let Some(nested_udt) =
-                                    registry.get_udt(&self.keyspace, lookup_name)
+                                    registry.get_udt_qualified(&self.keyspace, nested_type_name)
                                 {
                                     let inner_value = self.parse_nested_udt_from_registry(
                                         field_data, nested_udt, registry,
@@ -1043,7 +1043,8 @@ impl V5CompressedLegacyParser {
                             }
                             CqlType::Udt(udt_name, inline_fields) => {
                                 // Prefer registry, fall back to inline fields (Issue #239)
-                                if let Some(nested_udt) = registry.get_udt(&self.keyspace, udt_name)
+                                if let Some(nested_udt) =
+                                    registry.get_udt_qualified(&self.keyspace, udt_name)
                                 {
                                     let inner_value = self.parse_nested_udt_from_registry(
                                         field_data, nested_udt, registry,

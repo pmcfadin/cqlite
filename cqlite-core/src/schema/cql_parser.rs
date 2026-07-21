@@ -3,6 +3,12 @@
 //! This module provides parsing capabilities for CQL CREATE TABLE statements
 //! to extract table schema information including table names, column definitions,
 //! partition keys, clustering keys, and type information.
+//!
+//! NOTE (file-size ratchet, epic #1116): this file is over the campsite
+//! source-line threshold and a split-by-responsibility is pending under #1116.
+//! Issue #2807 grew it by a small grammar fix (keyspace-qualified UDT names) and
+//! ran the gate with `CQLITE_ALLOW_FILE_GROWTH=1`; splitting the parser is out of
+//! scope for that bug fix.
 
 use crate::cql::{CqlCreateTable, CqlDataType};
 use crate::error::{Error, Result};
@@ -55,6 +61,34 @@ fn qualified_table_name(input: &str) -> IResult<&str, (Option<String>, String)> 
     match second {
         Some(table) => Ok((input, (Some(first), table))),
         None => Ok((input, (None, first))),
+    }
+}
+
+/// Parse a UDT type reference, which may be keyspace-qualified
+/// (`keyspace.type_name`) or bare (`type_name`). Cassandra's `CREATE TABLE` /
+/// `describe` output ALWAYS emits UDT column types keyspace-qualified
+/// (e.g. `cassandra_easy_stress.addr`), so the grammar must accept the optional
+/// `keyspace.` prefix (issue #2807). The qualified name is RETAINED verbatim in
+/// the returned `data_type` string — the keyspace is information downstream
+/// lookups need and MUST NOT be dropped here.
+///
+/// IMPORTANT for any NEW consumer of a `data_type` string: the registry is keyed
+/// by BARE UDT name, and `CqlType::parse` does NOT split the qualifier (it yields
+/// `Custom("udt:ks.addr")` intact). Only two places split `keyspace.udt`, both via
+/// the single shared [`crate::schema::split_qualified_udt`]:
+/// [`crate::schema::UdtRegistry::resolve_udt_reference`] (type resolution) and
+/// [`crate::schema::TableSchema::validate_udt_references`] (`ensure_udt_exists`);
+/// registry-backed *decode* lookups go through
+/// [`crate::schema::UdtRegistry::get_udt_qualified`]. A new consumer that calls
+/// `registry.get_udt(keyspace, name)` on a raw `data_type` WILL miss a qualified
+/// reference and silently degrade the value to `Blob` — split first.
+fn qualified_type_name(input: &str) -> IResult<&str, String> {
+    let (input, first) = identifier(input)?;
+    let (input, second) = opt(preceded(char('.'), identifier))(input)?;
+
+    match second {
+        Some(type_name) => Ok((input, format!("{}.{}", first, type_name))),
+        None => Ok((input, first)),
     }
 }
 
@@ -134,8 +168,13 @@ fn cql_type(input: &str) -> IResult<&str, String> {
                 )),
                 |(_, _, inner, _)| format!("frozen<{}>", inner),
             ),
-            // Simple types and UDTs
-            map(identifier, |name| name),
+            // Simple types and UDTs. UDT type names may be keyspace-qualified
+            // (`keyspace.type_name`), which Cassandra always emits (issue #2807);
+            // `qualified_type_name` accepts the optional prefix and retains it. The
+            // retained qualifier is later split on a single `.` by
+            // `UdtRegistry::get_udt_qualified`, which assumes an unquoted, dot-free
+            // keyspace name (the only form the grammar / `describe` produce).
+            qualified_type_name,
         ))(input)?;
 
         Ok((input, base))

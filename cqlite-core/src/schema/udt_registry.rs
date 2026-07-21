@@ -10,6 +10,32 @@ use crate::types::UdtTypeDef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Split a possibly KEYSPACE-QUALIFIED UDT reference into `(lookup_keyspace,
+/// bare_name)`. This is the SINGLE authoritative split rule shared by every UDT
+/// lookup — the resolver ([`UdtRegistry::resolve_udt_reference`]), the read-path
+/// decode fallbacks ([`UdtRegistry::get_udt_qualified`]), and the writer's
+/// `resolve_registered_udt` (promoted here from the write path, roborev #1020).
+///
+/// Cassandra always emits UDT column types keyspace-qualified (`frozen<ks.addr>`,
+/// issue #2807) and the CQL parser now RETAINS that qualifier in `data_type`, but
+/// the registry is keyed by `(keyspace, bare_name)` (see [`UdtRegistry::get_udt`]).
+/// So any consumer of a `data_type` string that references a UDT MUST route its
+/// registry lookup through this split first — otherwise `ks.addr` never matches
+/// the bare-`addr` key and the value silently degrades to `BytesType`/`Blob`.
+///
+/// The split assumes an unquoted, dot-free keyspace name — the only form the CQL
+/// grammar and `describe` produce (a quoted case-sensitive UDT name is normalized
+/// to its bare, dot-free form by the quote-stripping `identifier` parser first).
+pub fn split_qualified_udt<'a>(
+    reference: &'a str,
+    default_keyspace: &'a str,
+) -> (&'a str, &'a str) {
+    match reference.split_once('.') {
+        Some((keyspace, bare_name)) => (keyspace, bare_name),
+        None => (default_keyspace, reference),
+    }
+}
+
 /// Build a [`UdtRegistry`] from every `CREATE TYPE` statement in a CQL DDL string
 /// (issue #2349).
 ///
@@ -74,6 +100,49 @@ impl UdtRegistry {
     /// Get a UDT definition by keyspace and name
     pub fn get_udt(&self, keyspace: &str, name: &str) -> Option<&UdtTypeDef> {
         self.udts.get(keyspace)?.get(name)
+    }
+
+    /// Look up a UDT by a reference that MAY be keyspace-qualified
+    /// (`keyspace.type_name`) and/or carry the schema-parse `udt:` prefix, routing
+    /// through the SINGLE shared splitter [`split_qualified_udt`] (also used by the
+    /// resolver and the writer): an explicit `keyspace.` prefix selects that
+    /// keyspace, otherwise `default_keyspace`. The registry is keyed by BARE name,
+    /// so the qualifier MUST be stripped before the HashMap lookup (issue #2807).
+    ///
+    /// This is the qualifier-aware entry point every registry-backed *decode*
+    /// fallback must use: Cassandra emits UDT column types keyspace-qualified
+    /// (`frozen<ks.addr>`), which the CQL parser now retains, so a plain
+    /// `get_udt(&self.keyspace, "ks.addr")` would MISS a bare-`addr`-keyed
+    /// registry and silently degrade the cell to `Blob`.
+    ///
+    /// STRICTLY NON-REGRESSIVE: if the split lookup misses, it retries the ORIGINAL
+    /// (unsplit, `udt:`-stripped) reference against `default_keyspace`. This
+    /// preserves the exotic case of a registry entry whose BARE name legitimately
+    /// contains a dot (a quoted `"my.type"`) and the catch-all decode arms that may
+    /// hand this method a non-grammar-sourced string — neither must be broken by the
+    /// qualifier split.
+    ///
+    /// Two deliberate asymmetries vs the write path / resolver:
+    /// - Read-path resolution here is CASE-SENSITIVE, whereas the writer's
+    ///   `resolve_registered_udt` also does an unambiguous case-insensitive name
+    ///   fallback. This asymmetry is known and tracked as a follow-up; decode input
+    ///   is the authoritative on-disk/DDL casing, so exact match is correct today.
+    /// - There is intentionally NO `system`-keyspace fallback (unlike
+    ///   [`Self::resolve_udt_reference`] / [`super::TableSchema::ensure_udt_exists`]):
+    ///   the decode fallbacks never had one, and adding it here would change pre-fix
+    ///   decode semantics (a missing UDT must fall through unchanged, not silently
+    ///   bind to a same-named `system` type).
+    pub fn get_udt_qualified(
+        &self,
+        default_keyspace: &str,
+        reference: &str,
+    ) -> Option<&UdtTypeDef> {
+        let reference = reference.strip_prefix("udt:").unwrap_or(reference);
+        let (keyspace, bare_name) = split_qualified_udt(reference, default_keyspace);
+        self.get_udt(keyspace, bare_name)
+            // Non-regressive fallback: a bare name that itself contains a dot
+            // (quoted `"my.type"`) must still resolve against the default keyspace.
+            .or_else(|| self.get_udt(default_keyspace, reference))
     }
 
     /// Get all UDTs in a keyspace
@@ -273,10 +342,7 @@ impl UdtRegistry {
         keyspace: &str,
         depth: usize,
     ) -> Option<CqlType> {
-        let (lookup_keyspace, bare_name) = match udt_name.split_once('.') {
-            Some((ks, n)) => (ks, n),
-            None => (keyspace, udt_name),
-        };
+        let (lookup_keyspace, bare_name) = split_qualified_udt(udt_name, keyspace);
         let def = self
             .get_udt(lookup_keyspace, bare_name)
             .or_else(|| self.get_udt("system", bare_name))?;
@@ -514,6 +580,41 @@ mod resolve_tests {
     const DDL: &str = "\
 CREATE TYPE ks.address_type (street text, city text); \
 CREATE TYPE ks.contact_info (email text, address frozen<address_type>);";
+
+    #[test]
+    fn get_udt_qualified_splits_keyspace_and_strips_udt_prefix() {
+        let reg = udt_registry_from_cql(DDL, "ks");
+        // Qualified reference resolves via the explicit keyspace.
+        assert!(reg.get_udt_qualified("other", "ks.address_type").is_some());
+        // `udt:` prefix is normalized away.
+        assert!(reg.get_udt_qualified("ks", "udt:address_type").is_some());
+        // Bare reference resolves via the default keyspace.
+        assert!(reg.get_udt_qualified("ks", "address_type").is_some());
+        // Wrong explicit keyspace does not resolve.
+        assert!(reg.get_udt_qualified("ks", "nope.address_type").is_none());
+    }
+
+    /// Issue #2807 (addendum item 1): a registry entry whose BARE name legitimately
+    /// contains a dot (a quoted `"my.type"`) must STILL resolve — the unconditional
+    /// first-dot split would otherwise regress it, so `get_udt_qualified` retries
+    /// the original unsplit reference against the default keyspace.
+    #[test]
+    fn get_udt_qualified_non_regressive_for_dotted_bare_name() {
+        let mut reg = UdtRegistry::new();
+        reg.register_udt(
+            UdtTypeDef::new("ks".to_string(), "my.type".to_string()).with_field(
+                "v".to_string(),
+                CqlType::Text,
+                true,
+            ),
+        );
+        // Split would look up keyspace `my`/name `type` (miss); the fallback recovers
+        // the real bare-dotted entry in the default keyspace.
+        let got = reg
+            .get_udt_qualified("ks", "my.type")
+            .expect("dotted bare name resolves");
+        assert_eq!(got.name, "my.type");
+    }
 
     #[test]
     fn from_cql_registers_every_create_type() {

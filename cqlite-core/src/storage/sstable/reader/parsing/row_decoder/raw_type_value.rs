@@ -769,12 +769,10 @@ impl V5CompressedLegacyParser {
                         let value = if let Some(ref registry) = self.udt_registry {
                             match &field_def.field_type {
                                 CqlType::Custom(nested_type_name) => {
-                                    // Issue #239: Handle "udt:" prefix from schema parsing
-                                    let lookup_name = nested_type_name
-                                        .strip_prefix("udt:")
-                                        .unwrap_or(nested_type_name);
+                                    // `get_udt_qualified` owns "udt:" + keyspace-
+                                    // qualifier normalization (Issue #239 / #2807).
                                     if let Some(nested_udt) =
-                                        registry.get_udt(&self.keyspace, lookup_name)
+                                        registry.get_udt_qualified(&self.keyspace, nested_type_name)
                                     {
                                         self.parse_nested_udt_from_registry(
                                             field_data, nested_udt, registry,
@@ -789,7 +787,7 @@ impl V5CompressedLegacyParser {
                                 CqlType::Udt(udt_name, inline_fields) => {
                                     // Prefer registry, fall back to inline fields (Issue #239)
                                     if let Some(nested_udt) =
-                                        registry.get_udt(&self.keyspace, udt_name)
+                                        registry.get_udt_qualified(&self.keyspace, udt_name)
                                     {
                                         self.parse_nested_udt_from_registry(
                                             field_data, nested_udt, registry,
@@ -810,12 +808,10 @@ impl V5CompressedLegacyParser {
                                 }
                                 CqlType::Frozen(inner) => match inner.as_ref() {
                                     CqlType::Custom(nested_type_name) => {
-                                        // Issue #239: Handle "udt:" prefix from schema parsing
-                                        let lookup_name = nested_type_name
-                                            .strip_prefix("udt:")
-                                            .unwrap_or(nested_type_name);
-                                        if let Some(nested_udt) =
-                                            registry.get_udt(&self.keyspace, lookup_name)
+                                        // `get_udt_qualified` owns "udt:" + keyspace-
+                                        // qualifier normalization (Issue #239 / #2807).
+                                        if let Some(nested_udt) = registry
+                                            .get_udt_qualified(&self.keyspace, nested_type_name)
                                         {
                                             let inner_value = self.parse_nested_udt_from_registry(
                                                 field_data, nested_udt, registry,
@@ -831,7 +827,7 @@ impl V5CompressedLegacyParser {
                                     CqlType::Udt(udt_name, inline_fields) => {
                                         // Prefer registry, fall back to inline fields (Issue #239)
                                         if let Some(nested_udt) =
-                                            registry.get_udt(&self.keyspace, udt_name)
+                                            registry.get_udt_qualified(&self.keyspace, udt_name)
                                         {
                                             let inner_value = self.parse_nested_udt_from_registry(
                                                 field_data, nested_udt, registry,
@@ -924,7 +920,7 @@ impl V5CompressedLegacyParser {
                 // Try to look up as UDT in registry by short name (Issue #238)
                 // This handles cases like "address_type" which aren't in full marshal format
                 if let Some(ref registry) = self.udt_registry {
-                    if let Some(udt_def) = registry.get_udt(&self.keyspace, type_str) {
+                    if let Some(udt_def) = registry.get_udt_qualified(&self.keyspace, type_str) {
                         tracing::debug!(
                             "Frozen element '{}': found UDT '{}' in registry, parsing {} fields",
                             column_name,
@@ -992,13 +988,10 @@ impl V5CompressedLegacyParser {
                                 // Parse field value - handle nested UDTs specially (including FROZEN<udt>)
                                 let value = match &field_def.field_type {
                                     CqlType::Custom(nested_type_name) => {
-                                        // Issue #239: Handle "udt:" prefix from schema parsing
-                                        let lookup_name = nested_type_name
-                                            .strip_prefix("udt:")
-                                            .unwrap_or(nested_type_name);
-                                        // Check if this is a nested UDT
-                                        if let Some(nested_udt) =
-                                            registry.get_udt(&self.keyspace, lookup_name)
+                                        // `get_udt_qualified` owns "udt:" + keyspace-
+                                        // qualifier normalization (Issue #239 / #2807).
+                                        if let Some(nested_udt) = registry
+                                            .get_udt_qualified(&self.keyspace, nested_type_name)
                                         {
                                             // Recursively parse nested UDT
                                             self.parse_nested_udt_from_registry(
@@ -1012,7 +1005,7 @@ impl V5CompressedLegacyParser {
                                     CqlType::Udt(udt_name, inline_fields) => {
                                         // Prefer registry, fall back to inline fields (Issue #239)
                                         if let Some(nested_udt) =
-                                            registry.get_udt(&self.keyspace, udt_name)
+                                            registry.get_udt_qualified(&self.keyspace, udt_name)
                                         {
                                             self.parse_nested_udt_from_registry(
                                                 field_data, nested_udt, registry,
@@ -1036,8 +1029,8 @@ impl V5CompressedLegacyParser {
                                                 let lookup_name = nested_type_name
                                                     .strip_prefix("udt:")
                                                     .unwrap_or(nested_type_name);
-                                                if let Some(nested_udt) =
-                                                    registry.get_udt(&self.keyspace, lookup_name)
+                                                if let Some(nested_udt) = registry
+                                                    .get_udt_qualified(&self.keyspace, lookup_name)
                                                 {
                                                     let inner_value = self
                                                         .parse_nested_udt_from_registry(
@@ -1050,8 +1043,8 @@ impl V5CompressedLegacyParser {
                                             }
                                             CqlType::Udt(udt_name, inline_fields) => {
                                                 // Prefer registry, fall back to inline fields (Issue #239)
-                                                if let Some(nested_udt) =
-                                                    registry.get_udt(&self.keyspace, udt_name)
+                                                if let Some(nested_udt) = registry
+                                                    .get_udt_qualified(&self.keyspace, udt_name)
                                                 {
                                                     let inner_value = self
                                                         .parse_nested_udt_from_registry(

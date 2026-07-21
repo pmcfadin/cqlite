@@ -428,7 +428,7 @@ fn render_udt_reference(
     // `keyspace.udt` reference contributes its explicit keyspace + bare name to
     // the marshal (the `UserType(...)` carries an unqualified hex name —
     // roborev #1020 Finding 1).
-    let (ref_keyspace, bare_name) = split_qualified_udt(name, keyspace);
+    let (ref_keyspace, bare_name) = crate::schema::split_qualified_udt(name, keyspace);
     let mut out = String::from("org.apache.cassandra.db.marshal.UserType(");
     out.push_str(ref_keyspace);
     out.push(',');
@@ -443,35 +443,20 @@ fn render_udt_reference(
     out
 }
 
-/// Split a possibly KEYSPACE-QUALIFIED UDT reference `name` into its
-/// `(lookup_keyspace, bare_name)` (roborev #1020 Finding 1). A reference may be
-/// written `keyspace.udt` (the schema parser + validation honor this form — see
-/// `TableSchema::ensure_udt_exists`); when qualified, the explicit keyspace is
-/// used, otherwise the table's `default_keyspace`. The registry keys UDTs by
-/// `(keyspace, bare_name)` (see `UdtRegistry::get_udt`), so resolution everywhere
-/// MUST go through this split — otherwise `frozen<test_ks.person>` never matches
-/// the registry and silently falls back to `BytesType` (the exact #1020 bug, for
-/// qualified names).
-fn split_qualified_udt<'a>(name: &'a str, default_keyspace: &'a str) -> (&'a str, &'a str) {
-    match name.split_once('.') {
-        Some((ks, bare)) => (ks, bare),
-        None => (default_keyspace, name),
-    }
-}
-
 /// Resolve a UDT name in `registry` for `keyspace`: exact match first, then an
 /// unambiguous case-insensitive match (unquoted CQL identifiers are
 /// case-insensitive). Ambiguous case-insensitive matches resolve to `None`.
 ///
 /// `name` may be KEYSPACE-QUALIFIED (`keyspace.udt`); the explicit keyspace wins
-/// over `keyspace` when present (roborev #1020 Finding 1, via
-/// [`split_qualified_udt`]).
+/// over `keyspace` when present (roborev #1020 Finding 1, via the shared
+/// [`crate::schema::split_qualified_udt`], promoted here to the schema module in
+/// issue #2807 so the read path shares it).
 fn resolve_registered_udt<'a>(
     name: &str,
     keyspace: &str,
     registry: &'a UdtRegistry,
 ) -> Option<&'a UdtTypeDef> {
-    let (lookup_keyspace, bare_name) = split_qualified_udt(name, keyspace);
+    let (lookup_keyspace, bare_name) = crate::schema::split_qualified_udt(name, keyspace);
     if let Some(udt) = registry.get_udt(lookup_keyspace, bare_name) {
         return Some(udt);
     }
@@ -736,7 +721,7 @@ pub(crate) fn cql_type_references_udt(
             // `clean` may be KEYSPACE-QUALIFIED (`keyspace.udt`); resolve the
             // registry under the explicit keyspace when present, else `keyspace`
             // (roborev #1020 Finding 1, via `split_qualified_udt`).
-            let (lookup_keyspace, bare_name) = split_qualified_udt(clean, keyspace);
+            let (lookup_keyspace, bare_name) = crate::schema::split_qualified_udt(clean, keyspace);
             name.starts_with("udt:")
                 || registry.get_udt(lookup_keyspace, bare_name).is_some()
                 || registry

@@ -468,7 +468,7 @@ impl V5CompressedLegacyParser {
                 // correct for already-extracted cell value bytes.
                 // See Issue #481 regression fix.
                 if let Some(ref registry) = self.udt_registry {
-                    if registry.get_udt(&self.keyspace, other).is_some() {
+                    if registry.get_udt_qualified(&self.keyspace, other).is_some() {
                         tracing::debug!(
                             "parse_value_from_raw_bytes: type '{}' for '{}' resolved as UDT via registry, delegating to parse_raw_type_value",
                             other,
