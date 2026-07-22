@@ -108,20 +108,40 @@ git add -f trino-connector/src/test/resources/golden/all_scalars.arrows \
 
 The full stack works end-to-end: `SELECT` over `cqlite.<keyspace>.<table>`
 streams compaction-merged, token-range-deduped Arrow data back to Trino.
-Validated types include int/bigint/text/boolean/uuid/timestamp/date/time.
+Validated types include int/bigint/text/boolean/uuid/timestamp/date/time, plus
+collection/tuple/UDT columns as array/row/map (issue #2815).
 
-**v1 type support:** scalar columns, including CQL `time` (mapped to Trino
-`TIME(9)`, nanosecond precision). Complex CQL types (collections, UDTs, tuples,
-decimal, varint) are not yet materializable.
+**Type support:** scalar columns, including CQL `time` (mapped to Trino
+`TIME(9)`, nanosecond precision), **and collections/tuples/UDTs** (issue #2815):
 
-**Per-column degradation (issue #2229):** a column of an unsupported type no
-longer makes the whole table unqueryable. Such columns are *hidden* from the
-Trino schema — omitted from both the column handles and `DESCRIBE` — and a single
-warning per table names the hidden columns and their Arrow type. `SELECT *` and
-`SELECT`ing any supported column work normally; hidden columns cannot be
-referenced. If *every* column of a table is unsupported the table is genuinely
-unqueryable, so it fails fast with a clear `NOT_SUPPORTED` error rather than
-presenting a confusing zero-column table.
+| CQL | Trino |
+|-----|-------|
+| `list<E>` / `set<E>` | `array(E)` |
+| `tuple<A,B,…>` / UDT | `row(f1 A, f2 B, …)` (field names + order preserved) |
+| `map<K,V>` | `map(K, V)` |
+
+The element / field / key / value types are mapped **recursively**, so nested
+collections (`list<list<text>>` → `array(array(varchar))`) work too. Each leaf is
+limited to the connector's scalar leaf set — a collection whose leaf is an
+unsupported type (decimal, varint, sub-millisecond timestamp) is still treated as
+unsupported (hidden, see below). Complex columns carry no predicate/aggregate
+pushdown into their elements (they use `PushdownCapability.NONE`); a filter on a
+collection is left as a correct Trino residual.
+
+> **UDT elements render as `varchar`.** A `list<frozen<udt>>` projects as
+> `array(varchar)` whose elements are the **server-decoded UDT strings**, not a
+> typed `array(row(...))`. Fully-typed UDT rows are tracked in issue #2349.
+
+**Per-column degradation (issues #2229, #2815):** a column whose type still cannot
+be mapped (an unsupported leaf) no longer makes the whole table unqueryable. Such
+columns are *hidden* from the Trino schema — omitted from both the column handles
+and `DESCRIBE` — and a warning naming the hidden columns and their Arrow type is
+emitted on **every** schema projection (loud + durable, not once per table, so the
+drop stays visible after the first `DESCRIBE`). `SELECT *` and `SELECT`ing any
+supported column work normally; hidden columns cannot be referenced. A
+DDL-declared column is never silently dropped. If *every* column of a table is
+unsupported the table is genuinely unqueryable, so it fails fast with a clear
+`NOT_SUPPORTED` error rather than presenting a confusing zero-column table.
 
 Cassandra's default 16 vnodes produce 16 splits per table (each reads the SSTable
 filtered by token range) — correct, with split consolidation a future

@@ -56,3 +56,43 @@ INSERT INTO analytics.readings (device, ts, value) VALUES (2, 2, 22);
 INSERT INTO analytics.readings (device, ts, value) VALUES (2, 3, 33);
 INSERT INTO analytics.readings (device, ts, value) VALUES (2, 4, 44);
 INSERT INTO analytics.readings (device, ts, value) VALUES (2, 5, 55);
+
+-- Typed collection columns end-to-end (issue #2815). A list<frozen<udt>> column
+-- projects through the connector as Trino array(varchar) whose elements are the
+-- server-decoded UDT strings; a plain list<text> and a map<text,int> exercise the
+-- other collection shapes.
+--
+-- Empty-vs-absent semantics follow Cassandra 5.0: a NON-FROZEN empty collection is
+-- NOT stored (it writes no cells) and is therefore indistinguishable from absent —
+-- SELECT returns null in BOTH cases. Only a FROZEN collection is stored as a single
+-- self-describing value, so an empty FROZEN collection IS persisted and reads back as
+-- a non-null empty array. `notes frozen<list<text>>` carries that genuine
+-- empty-vs-null distinction; addrs/tags/attrs (all non-frozen) read null when empty.
+CREATE TYPE IF NOT EXISTS analytics.simpleaddr (street text, zip int);
+
+CREATE TABLE IF NOT EXISTS analytics.contacts (
+  id int PRIMARY KEY,
+  name text,
+  addrs list<frozen<simpleaddr>>,
+  tags list<text>,
+  attrs map<text, int>,
+  notes frozen<list<text>>
+);
+
+-- Multi-element row: two UDT addresses, two tags, two map entries, one frozen note.
+INSERT INTO analytics.contacts (id, name, addrs, tags, attrs, notes) VALUES (
+  1, 'alice',
+  [{street: '12 Oak St', zip: 94040}, {street: '9 Elm Ave', zip: 94041}],
+  ['home', 'work'],
+  {'a': 1, 'b': 2},
+  ['vip']
+);
+-- Empty-collection row: the NON-FROZEN empty list/map (addrs/tags/attrs) are NOT
+-- stored → read back as null (Cassandra parity, NOT an empty array). The FROZEN
+-- empty list `notes []` IS stored → reads back as a non-null empty array, so it is
+-- the one column that genuinely distinguishes empty from absent.
+INSERT INTO analytics.contacts (id, name, addrs, tags, attrs, notes) VALUES (
+  2, 'bob', [], [], {}, []
+);
+-- Absent row: addrs/tags/attrs/notes never set (→ null).
+INSERT INTO analytics.contacts (id, name) VALUES (3, 'carol');

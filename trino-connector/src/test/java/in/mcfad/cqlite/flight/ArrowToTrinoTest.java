@@ -3,10 +3,16 @@ package in.mcfad.cqlite.flight;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.SqlRow;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.RowType;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.VarcharType;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -17,6 +23,12 @@ import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.complex.ListVector;
+import org.apache.arrow.vector.complex.MapVector;
+import org.apache.arrow.vector.complex.StructVector;
+import org.apache.arrow.vector.complex.impl.NullableStructWriter;
+import org.apache.arrow.vector.complex.impl.UnionListWriter;
+import org.apache.arrow.vector.complex.impl.UnionMapWriter;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -500,6 +512,234 @@ class ArrowToTrinoTest {
         byte[] bytes = new byte[16];
         bytes[15] = 1;
         assertEquals("00000000-0000-0000-0000-000000000001", ArrowToTrino.formatUuid(bytes));
+    }
+
+    // ---- Complex-type materialization (issue #2815) ------------------------
+
+    @Test
+    void listOfTextMaterializesToArrayBlockNullAndEmptyDistinct() {
+        // list<text> / list<frozen<udt>> arrive as a ListVector of Utf8. Row 0 has two
+        // elements (the multi-UDT case), row 1 is a null list (never set → null block),
+        // row 2 is an empty list (→ empty, non-null array).
+        try (BufferAllocator allocator = new RootAllocator();
+                ListVector addrs = ListVector.empty("addrs", allocator)) {
+            UnionListWriter w = addrs.getWriter();
+            // Row 0: ["12 Oak St", "9 Elm Ave"] (server-decoded UDT strings).
+            w.setPosition(0);
+            w.startList();
+            w.writeVarChar("12 Oak St");
+            w.writeVarChar("9 Elm Ave");
+            w.endList();
+            // Row 1: null list — do NOT start a list, leave the validity bit clear.
+            addrs.setNull(1);
+            // Row 2: empty list.
+            w.setPosition(2);
+            w.startList();
+            w.endList();
+            addrs.setValueCount(3);
+
+            var root = new VectorSchemaRoot(List.of(addrs));
+            root.setRowCount(3);
+            var type = new ArrayType(VarcharType.VARCHAR);
+            var columns = List.of(new CqliteFlightColumnHandle("addrs", type));
+
+            Page page = ArrowToTrino.toPage(root, columns);
+            Block block = page.getBlock(0);
+
+            // Row 0: two VARCHAR elements, in order, equal to the decoded UDT strings.
+            assertFalse(block.isNull(0));
+            Block elems0 = (Block) type.getObject(block, 0);
+            assertEquals(2, elems0.getPositionCount());
+            assertEquals("12 Oak St", VarcharType.VARCHAR.getSlice(elems0, 0).toStringUtf8());
+            assertEquals("9 Elm Ave", VarcharType.VARCHAR.getSlice(elems0, 1).toStringUtf8());
+
+            // Row 1: never-set → null block entry.
+            assertTrue(block.isNull(1), "null list cell must stay null");
+
+            // Row 2: empty list → empty, NON-null array.
+            assertFalse(block.isNull(2), "empty list must be non-null");
+            Block elems2 = (Block) type.getObject(block, 2);
+            assertEquals(0, elems2.getPositionCount(), "empty list → zero elements");
+
+            root.close();
+        }
+    }
+
+    @Test
+    void structMaterializesToRowBlockPreservingFieldOrder() {
+        // A tuple/UDT arrives as a StructVector; the ROW block preserves field name+order.
+        try (BufferAllocator allocator = new RootAllocator();
+                StructVector addr = StructVector.empty("addr", allocator)) {
+            NullableStructWriter w = addr.getWriter();
+            w.setPosition(0);
+            w.start();
+            w.varChar("street").writeVarChar("12 Oak St");
+            w.integer("zip").writeInt(94040);
+            w.end();
+            addr.setValueCount(1);
+
+            var root = new VectorSchemaRoot(List.of(addr));
+            root.setRowCount(1);
+            var type = RowType.from(List.of(
+                    RowType.field("street", VarcharType.VARCHAR),
+                    RowType.field("zip", IntegerType.INTEGER)));
+            var columns = List.of(new CqliteFlightColumnHandle("addr", type));
+
+            Page page = ArrowToTrino.toPage(root, columns);
+            Block block = page.getBlock(0);
+            SqlRow row = (SqlRow) type.getObject(block, 0);
+            int idx = row.getRawIndex();
+            assertEquals("12 Oak St",
+                    VarcharType.VARCHAR.getSlice(row.getRawFieldBlock(0), idx).toStringUtf8());
+            assertEquals(94040, IntegerType.INTEGER.getInt(row.getRawFieldBlock(1), idx));
+
+            root.close();
+        }
+    }
+
+    @Test
+    void mapMaterializesToMapBlockFromEntryStruct() {
+        // A map<text,int> arrives as MapVector = List<Struct(key,value)>. The
+        // materializer must read the entry struct, not assume parallel vectors.
+        try (BufferAllocator allocator = new RootAllocator();
+                MapVector m = MapVector.empty("m", allocator, false)) {
+            UnionMapWriter w = m.getWriter();
+            w.setPosition(0);
+            w.startMap();
+            w.startEntry();
+            w.key().varChar().writeVarChar("a");
+            w.value().integer().writeInt(1);
+            w.endEntry();
+            w.startEntry();
+            w.key().varChar().writeVarChar("b");
+            w.value().integer().writeInt(2);
+            w.endEntry();
+            w.endMap();
+            m.setValueCount(1);
+
+            var root = new VectorSchemaRoot(List.of(m));
+            root.setRowCount(1);
+            var type = new MapType(VarcharType.VARCHAR, IntegerType.INTEGER, new TypeOperators());
+            var columns = List.of(new CqliteFlightColumnHandle("m", type));
+
+            Page page = ArrowToTrino.toPage(root, columns);
+            Block block = page.getBlock(0);
+            SqlMap sqlMap = (SqlMap) type.getObject(block, 0);
+            assertEquals(2, sqlMap.getSize());
+            Block keys = sqlMap.getRawKeyBlock();
+            Block values = sqlMap.getRawValueBlock();
+            int off = sqlMap.getRawOffset();
+            assertEquals("a", VarcharType.VARCHAR.getSlice(keys, off).toStringUtf8());
+            assertEquals(1, IntegerType.INTEGER.getInt(values, off));
+            assertEquals("b", VarcharType.VARCHAR.getSlice(keys, off + 1).toStringUtf8());
+            assertEquals(2, IntegerType.INTEGER.getInt(values, off + 1));
+
+            root.close();
+        }
+    }
+
+    @Test
+    void mapWithNullKeyFailsLoud() {
+        // A null map KEY violates the CQL contract (a Trino MAP entry cannot carry a
+        // null key). The materializer must throw a clear typed error naming the column,
+        // matching the fail-loud posture of requireVector / the timestamp guards, rather
+        // than silently emitting a corrupt block.
+        try (BufferAllocator allocator = new RootAllocator();
+                MapVector m = MapVector.empty("m", allocator, false)) {
+            UnionMapWriter w = m.getWriter();
+            w.setPosition(0);
+            w.startMap();
+            w.startEntry();
+            w.key().varChar().writeNull();
+            w.value().integer().writeInt(1);
+            w.endEntry();
+            w.endMap();
+            m.setValueCount(1);
+
+            var root = new VectorSchemaRoot(List.of(m));
+            root.setRowCount(1);
+            var type = new MapType(VarcharType.VARCHAR, IntegerType.INTEGER, new TypeOperators());
+            var columns = List.of(new CqliteFlightColumnHandle("m", type));
+
+            TrinoException ex = assertThrows(TrinoException.class,
+                    () -> ArrowToTrino.toPage(root, columns));
+            assertTrue(ex.getMessage().contains("null key"),
+                    "error must name the null-key contract violation, was: " + ex.getMessage());
+            assertTrue(ex.getMessage().contains("'m'"),
+                    "error must name the offending column, was: " + ex.getMessage());
+
+            root.close();
+        }
+    }
+
+    @Test
+    void listFrozenUdtProjectsAndMaterializesThroughMapperAndConverter() {
+        // Wiring evidence for the list<frozen<udt>> headline (issue #2815): resolve the
+        // column's Trino type from its Arrow FIELD via the REAL ArrowTypeMapper (as the
+        // connector does at planning time), then materialize the served List(Utf8) batch
+        // via ArrowToTrino.toPage — the same call chain used at scan time. The server
+        // emits UDT elements as decoded Utf8 strings, so the column is array(varchar) and
+        // each element equals the server-decoded UDT string.
+        try (BufferAllocator allocator = new RootAllocator();
+                ListVector addrs = ListVector.empty("addrs", allocator)) {
+            UnionListWriter w = addrs.getWriter();
+            w.setPosition(0);
+            w.startList();
+            w.writeVarChar("{street: 12 Oak St, zip: 94040}");
+            w.writeVarChar("{street: 9 Elm Ave, zip: 94041}");
+            w.endList();
+            addrs.setValueCount(1);
+
+            // Planning path: resolve the Trino type from the Arrow field.
+            io.trino.spi.type.Type resolved = ArrowTypeMapper.toTrino(addrs.getField());
+            ArrayType arrayType = (ArrayType) resolved;
+            assertEquals(VarcharType.VARCHAR, arrayType.getElementType());
+
+            var root = new VectorSchemaRoot(List.of(addrs));
+            root.setRowCount(1);
+            var columns = List.of(new CqliteFlightColumnHandle(
+                    "addrs", resolved, ArrowTypeMapper.capabilityOf(addrs.getField())));
+
+            // Scan path: materialize.
+            Page page = ArrowToTrino.toPage(root, columns);
+            Block elems = (Block) arrayType.getObject(page.getBlock(0), 0);
+            assertEquals(2, elems.getPositionCount());
+            assertEquals("{street: 12 Oak St, zip: 94040}",
+                    VarcharType.VARCHAR.getSlice(elems, 0).toStringUtf8());
+            assertEquals("{street: 9 Elm Ave, zip: 94041}",
+                    VarcharType.VARCHAR.getSlice(elems, 1).toStringUtf8());
+
+            root.close();
+        }
+    }
+
+    @Test
+    void nullElementWithinListMaterializesAsNullEntry() {
+        // A null ELEMENT inside a present, non-null list → a null block entry for that
+        // element (distinct from a null LIST cell).
+        try (BufferAllocator allocator = new RootAllocator();
+                ListVector xs = ListVector.empty("xs", allocator)) {
+            UnionListWriter w = xs.getWriter();
+            w.setPosition(0);
+            w.startList();
+            w.writeVarChar("present");
+            w.varChar().writeNull();
+            w.endList();
+            xs.setValueCount(1);
+
+            var root = new VectorSchemaRoot(List.of(xs));
+            root.setRowCount(1);
+            var type = new ArrayType(VarcharType.VARCHAR);
+            var columns = List.of(new CqliteFlightColumnHandle("xs", type));
+
+            Page page = ArrowToTrino.toPage(root, columns);
+            Block elems = (Block) type.getObject(page.getBlock(0), 0);
+            assertEquals(2, elems.getPositionCount());
+            assertEquals("present", VarcharType.VARCHAR.getSlice(elems, 0).toStringUtf8());
+            assertTrue(elems.isNull(1), "null element must materialize as a null entry");
+
+            root.close();
+        }
     }
 
     // Small holder so the double vector has a stable field name.
