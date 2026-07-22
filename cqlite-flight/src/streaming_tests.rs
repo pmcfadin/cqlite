@@ -1284,7 +1284,12 @@ fn metered_stream_ends_when_cancel_flag_trips_while_inner_parked() {
     let schema = simple_schema();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async move {
-        let schema_ref = Arc::new(MergeProducer::new(schema, 4).unwrap().arrow_schema().unwrap());
+        let schema_ref = Arc::new(
+            MergeProducer::new(schema, 4)
+                .unwrap()
+                .arrow_schema()
+                .unwrap(),
+        );
         // A channel whose sender is HELD (never sends, never drops): the inner
         // ReceiverStream polls Pending forever — the "merge parked, receiver alive"
         // shape that a bare Pending passthrough could never break out of.
@@ -1307,16 +1312,18 @@ fn metered_stream_ends_when_cancel_flag_trips_while_inner_parked() {
 
         // The schema message is emitted eagerly by the encoder even for an empty
         // result; pull it so the next poll reaches the parked inner stream.
-        let _schema_msg = tokio::time::timeout(std::time::Duration::from_secs(3), read_one(&mut stream))
-            .await
-            .expect("schema message arrives without a hang")
-            .expect("schema message present");
+        let _schema_msg =
+            tokio::time::timeout(std::time::Duration::from_secs(3), read_one(&mut stream))
+                .await
+                .expect("schema message arrives without a hang")
+                .expect("schema message present");
 
         // Trip the flag from "another thread" (a half-closed peer / transport reset).
         cancel.cancel();
 
         // Egress must end (schema-only stream, no batches) within a bound, not park.
-        let next = tokio::time::timeout(std::time::Duration::from_secs(3), read_one(&mut stream)).await;
+        let next =
+            tokio::time::timeout(std::time::Duration::from_secs(3), read_one(&mut stream)).await;
         let ended = next.expect("stream must resolve within 3s of the cancel, not park forever");
         assert!(
             ended.is_none(),
