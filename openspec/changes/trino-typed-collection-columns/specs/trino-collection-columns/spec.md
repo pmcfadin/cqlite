@@ -55,8 +55,9 @@ connector never advertises a column type it cannot build.
 - **AND** an empty list yields an empty (non-null) array
 
 #### Scenario: A list<frozen<udt>> column materializes end to end
-- **WHEN** a Flight batch delivers a `ListVector` of `Utf8` (server-decoded UDT strings) for a projected `array(varchar)` column
-- **THEN** each row's ARRAY block contains one VARCHAR element per UDT, equal to the server-decoded UDT string
+- **WHEN** a Flight batch delivers a `ListVector` of `Utf8` for a projected `array(varchar)` column
+- **THEN** each row's ARRAY block contains one VARCHAR element per on-disk UDT element (cardinality matches the on-disk element count), materialized non-null
+- **AND** the element VALUE decode for a frozen-UDT element (rendering the UDT as a string) is OUT OF SCOPE for this change — server-side decode of a frozen-UDT element inside a collection is tracked to #2349 (UDT-registry work); this change unblocks #2349 by getting the column onto the read path. For PRIMITIVE element types (e.g. `list<text>`) the decoded element values ARE materialized.
 
 #### Scenario: Mapper and materializer are kept in lockstep
 - **WHEN** the round-trip test enumerates every Arrow type `ArrowTypeMapper` accepts
@@ -66,8 +67,11 @@ connector never advertises a column type it cannot build.
 
 A Cassandra table with a `list<frozen<udt>>` column SHALL expose that column through the Trino connector:
 it MUST appear in `DESCRIBE`, be returned by `SELECT *`, and be resolvable by `SELECT <col>`. The returned
-value MUST be a Trino `array(varchar)` whose elements are the server-decoded UDT renderings, element-for-
-element consistent with the on-disk data.
+value MUST be a Trino `array(varchar)` whose cardinality matches the on-disk element count, element-for-
+element consistent with the on-disk data. The element-VALUE string decode for frozen-UDT elements (rendering
+each UDT as a string) is explicitly OUT OF SCOPE for this change and tracked to #2349 (UDT-registry work);
+this change unblocks #2349 by getting the column onto the read path. For PRIMITIVE element types
+(`list<text>`, `map<text,int>`) the decoded element values ARE returned.
 
 #### Scenario: DESCRIBE shows the collection column
 - **WHEN** a client runs `DESCRIBE` on a table with `addrs list<frozen<udt>>` through the connector
@@ -76,8 +80,9 @@ element consistent with the on-disk data.
 #### Scenario: SELECT of the collection column returns the elements
 - **WHEN** a client runs `SELECT addrs FROM <table>` through docker-compose Trino against a table whose row has two UDT elements
 - **THEN** the query resolves (no "column cannot be resolved" error)
-- **AND** the returned array has two elements, each the server-decoded UDT string
+- **AND** the returned array has two (non-null) elements, matching the on-disk element count
 - **AND** `SELECT *` on the same row includes the `addrs` column and its value
+- **AND** the element-VALUE string decode of each frozen-UDT element is NOT asserted here — it is tracked to #2349. For a PRIMITIVE-element collection (`list<text>` `tags`, `map<text,int>` `attrs`) the decoded element values ARE asserted (e.g. `tags` = `['home','work']`, `attrs['a']` = 1).
 
 #### Scenario: Empty and absent NON-FROZEN collections both read as null (Cassandra parity)
 - **WHEN** the table has one row where a non-frozen collection column (`addrs list<frozen<udt>>`, `tags list<text>`, or `attrs map<text,int>`) was set to the empty collection and one row where it was never set
