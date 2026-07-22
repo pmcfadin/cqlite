@@ -59,7 +59,15 @@ final class ReplicaFailoverStream implements AutoCloseable {
     private final byte[] ticket;
     private final StreamOpener opener;
 
-    private BatchStream stream;
+    // The active underlying stream and the early-close flag are read/written from TWO threads
+    // (issue #2680 / P0 #2782): the driver thread advances in {@link #next()} while Trino's
+    // cancellation thread calls {@link #close()} the instant a pushed LIMIT is satisfied on
+    // ANOTHER surplus split. Both are volatile so a close is visible to a concurrent open, and
+    // {@code next()} double-checks {@code closed} AFTER publishing a freshly-opened stream so a
+    // close that raced just ahead of the open still cancels it — otherwise that surplus split's
+    // DoGet gRPC blocks on undrained batches forever (the intermittent K>1 hang).
+    private volatile BatchStream stream;
+    private volatile boolean closed;
     private int hostIndex;
     private boolean started;
 
@@ -81,10 +89,27 @@ final class ReplicaFailoverStream implements AutoCloseable {
     boolean next() {
         while (true) {
             try {
-                if (stream == null) {
-                    stream = opener.open(hosts.get(hostIndex), port, ticket);
+                // An early close raced ahead of this advance (Trino cancelled a surplus split
+                // once the LIMIT was satisfied): stop WITHOUT opening a new stream, so a fresh
+                // DoGet is never started after close() already ran and cleared its reference.
+                if (closed) {
+                    return false;
                 }
-                boolean hasNext = stream.next();
+                BatchStream active = stream;
+                if (active == null) {
+                    active = opener.open(hosts.get(hostIndex), port, ticket);
+                    stream = active;
+                    // close() may have run between the null-check and publishing `active` above;
+                    // it would have found stream == null and cancelled nothing. Re-check under
+                    // the volatile flag and cancel THIS just-opened stream ourselves so its DoGet
+                    // gRPC cannot block on undrained batches (the intermittent K>1 #2782 hang).
+                    if (closed) {
+                        cancelActiveQuietly(active);
+                        stream = null;
+                        return false;
+                    }
+                }
+                boolean hasNext = active.next();
                 if (hasNext) {
                     started = true;
                 }
@@ -115,24 +140,35 @@ final class ReplicaFailoverStream implements AutoCloseable {
      */
     @Override
     public void close() {
-        if (stream != null) {
-            try {
-                stream.cancel();
-            } catch (RuntimeException ignore) {
-                // best-effort cancel + release; never let close throw
-            }
+        // Set the flag BEFORE touching the stream: a concurrent next() that has not yet opened
+        // its stream then sees `closed` and refuses to open one (or cancels the one it just
+        // published), so no surplus DoGet outlives this close (issue #2680 / P0 #2782).
+        closed = true;
+        BatchStream active = stream;
+        if (active != null) {
             stream = null;
+            cancelActiveQuietly(active);
+        }
+    }
+
+    /** Best-effort cancel of one underlying stream; never lets close/next throw. */
+    private static void cancelActiveQuietly(BatchStream active) {
+        try {
+            active.cancel();
+        } catch (RuntimeException ignore) {
+            // best-effort cancel + release; never let close throw
         }
     }
 
     private void closeStreamQuietly() {
-        if (stream != null) {
+        BatchStream active = stream;
+        if (active != null) {
+            stream = null;
             try {
-                stream.close();
+                active.close();
             } catch (RuntimeException ignore) {
                 // best-effort release
             }
-            stream = null;
         }
     }
 

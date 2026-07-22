@@ -9,14 +9,19 @@ import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -142,6 +147,74 @@ class CqliteFlightPageSourceDrainCancelTest {
         assertFalse(opened[0], "close before the first getNextSourcePage never opens a stream");
     }
 
+    // ---- Surplus-split early-close races (issue #2680 / P0 #2782, the intermittent K>1 hang) ----
+    // At the default K=4 a residual-LIMIT scan fans out to surplus splits; Trino cancels and closes
+    // them the instant the LIMIT is satisfied — from a DIFFERENT thread than the driver advancing
+    // the stream. If a close is a no-op because the stream is not yet opened (or is mid-open), the
+    // split's DoGet gRPC never gets cancelled and blocks on undrained batches → the 180s hang. These
+    // reproduce each racing state deterministically so a regression fails in ./gradlew build.
+
+    @Test
+    void closeThenNextNeverOpensAnOrphanStream() {
+        // close() arrived BEFORE this scheduled split's first getNextSourcePage() ran. A later
+        // next() must NOT open a fresh (uncancellable) DoGet — it must observe the close and finish.
+        boolean[] opened = {false};
+        var source = new CqliteFlightPageSource(
+                List.of("host"), 8815, COLUMNS, TICKET,
+                (h, p, t) -> {
+                    opened[0] = true;
+                    return new UnboundedStream(null);
+                });
+
+        source.close();
+        assertNull(source.getNextSourcePage(), "a next() after close finishes without opening a stream");
+
+        assertTrue(source.isFinished());
+        assertFalse(opened[0], "close before the first advance must prevent any orphan stream open");
+    }
+
+    @Test
+    void closeRacingAnInFlightOpenCancelsTheJustOpenedStream() {
+        // The hardest race: the driver thread is INSIDE opener.open() when Trino's cancel thread
+        // calls close(). close() sees stream == null (not yet published) and cancels nothing; the
+        // open then completes and publishes a live stream. Without the post-publish re-check that
+        // stream is an orphaned, uncancelled DoGet — the exact intermittent #2782 hang. The fix's
+        // double-check must cancel it and next() must return false rather than block on the
+        // never-ending stream.
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+            try (BufferAllocator allocator = new RootAllocator()) {
+                VectorSchemaRoot root = bigintRoot(allocator, 1L);
+                UnboundedStream up = new UnboundedStream(root);
+                CountDownLatch insideOpen = new CountDownLatch(1);
+                CountDownLatch closeIssued = new CountDownLatch(1);
+                AtomicReference<Boolean> hadNext = new AtomicReference<>();
+
+                var source = new CqliteFlightPageSource(
+                        List.of("host"), 8815, COLUMNS, TICKET,
+                        (h, p, t) -> {
+                            // Signal we are mid-open, then wait until close() has run so the open
+                            // deterministically publishes AFTER the close set its flag.
+                            insideOpen.countDown();
+                            await(closeIssued);
+                            return up;
+                        });
+
+                Thread driver = new Thread(() -> hadNext.set(source.getNextSourcePage() != null));
+                driver.start();
+                await(insideOpen);   // driver is blocked inside opener.open()
+                source.close();      // close BEFORE the open publishes the stream
+                closeIssued.countDown();
+                driver.join(Duration.ofSeconds(5).toMillis());
+
+                assertFalse(driver.isAlive(), "the driver's next() returned — no hang on the orphan stream");
+                assertEquals(Boolean.FALSE, hadNext.get(), "next() observes the close and yields no page");
+                assertEquals(1, up.cancelCalls, "the stream opened during the close is cancelled, not orphaned");
+                assertTrue(source.isFinished());
+                root.close();
+            }
+        });
+    }
+
     @Test
     void cancelReachesTheActiveFailoverStream() {
         try (BufferAllocator allocator = new RootAllocator()) {
@@ -168,6 +241,15 @@ class CqliteFlightPageSourceDrainCancelTest {
             assertEquals(1, fallback.cancelCalls, "cancel reaches the ACTIVE (failed-over) stream");
             assertTrue(fallback.cancelledBeforeClosed);
             good.close();
+        }
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            assertTrue(latch.await(5, java.util.concurrent.TimeUnit.SECONDS), "latch reached in time");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("interrupted awaiting latch", e);
         }
     }
 }
