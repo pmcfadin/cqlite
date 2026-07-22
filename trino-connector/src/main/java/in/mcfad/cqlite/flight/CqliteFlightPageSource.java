@@ -52,6 +52,14 @@ public class CqliteFlightPageSource implements ConnectorPageSource {
                 return null;
             }
             VectorSchemaRoot root = stream.getRoot();
+            if (root == null) {
+                // The cancel thread (Trino close()) nulled the active stream between next()
+                // returning true and this getRoot() read — the just-opened stream was cancelled
+                // and its batch is discarded on the cancel path. Treat as end-of-stream rather
+                // than NPE'ing into ArrowToTrino.toPage(null) (issues #2782/#2680).
+                finished = true;
+                return null;
+            }
             Page page = ArrowToTrino.toPage(root, columns);
             completedPositions += page.getPositionCount();
             return SourcePage.create(page);

@@ -287,6 +287,50 @@ class CqliteFlightPageSourceDrainCancelTest {
         }
     }
 
+    /** A stream that reports a batch is ready but whose root snapshot is already null (cancel race). */
+    private static final class NullRootAfterNextStream implements ReplicaFailoverStream.BatchStream {
+        int nextCalls;
+        int cancelCalls;
+
+        @Override
+        public boolean next() {
+            nextCalls++;
+            return true; // a batch is "ready" ...
+        }
+
+        @Override
+        public VectorSchemaRoot getRoot() {
+            return null; // ... but the cancel thread already nulled the active stream (getRoot snapshot)
+        }
+
+        @Override
+        public void cancel() {
+            cancelCalls++;
+        }
+
+        @Override
+        public void close() {}
+    }
+
+    @Test
+    void nullRootFromCancelRaceFinishesInsteadOfNpe() {
+        // Routes the cancel-race null root THROUGH CqliteFlightPageSource.getNextSourcePage() (not
+        // getRoot() in isolation): close() (Trino's cancel thread) nulled the active stream between
+        // next() returning true and the getRoot() read. getRoot() returns null; the page source must
+        // treat that as end-of-stream and return null rather than NPE inside ArrowToTrino.toPage(null)
+        // (issues #2782/#2680 — the fix that eliminates the relocated NPE, not just moves it).
+        NullRootAfterNextStream up = new NullRootAfterNextStream();
+        var source = new CqliteFlightPageSource(
+                List.of("host"), 8815, COLUMNS, TICKET, (h, p, t) -> up);
+
+        SourcePage page = source.getNextSourcePage();
+
+        assertNull(page, "a null root on the cancel race yields no page rather than NPE'ing");
+        assertTrue(source.isFinished(), "the page source finishes on the cancel-race null root");
+        assertEquals(0, source.getCompletedBytes(), "no positions counted for the discarded batch");
+        assertNull(source.getNextSourcePage(), "a subsequent poll stays finished");
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             assertTrue(latch.await(5, java.util.concurrent.TimeUnit.SECONDS), "latch reached in time");
