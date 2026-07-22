@@ -331,8 +331,11 @@ assert_eq "partial-predicate LIMIT 5 applies residual (3 rows)" '"3"' \
 
 # Typed collection columns end-to-end (issue #2815). A list<frozen<udt>> column
 # must project as Trino array(varchar) (NOT be silently dropped), be resolvable by
-# SELECT, appear in SELECT *, and distinguish empty (→ empty array) from absent (→
-# null). Elements are the server-decoded UDT strings.
+# SELECT, and appear in SELECT *. Elements are the server-decoded UDT strings.
+#
+# Empty-vs-absent follows Cassandra 5.0: a NON-FROZEN empty collection is not stored
+# and reads back as null (indistinguishable from absent); only a FROZEN empty
+# collection is stored as a non-null empty array. See e2e-data.cql.
 log "wait for the connector to resolve analytics.contacts"
 for i in $(seq 1 36); do
   if trino "SELECT count(*) FROM cqlite.analytics.contacts" >/dev/null 2>&1; then break; fi
@@ -344,13 +347,17 @@ log "assert typed collection columns project + resolve (issue #2815)"
 # DESCRIBE shows the list<frozen<udt>> column as array(varchar) — the core no-drop
 # assertion. DESCRIBE renders one column per line as "<name> <type> ...".
 contacts_desc="$(trino 'DESCRIBE cqlite.analytics.contacts')"
-assert_contains "DESCRIBE shows addrs array(varchar)" 'addrs' "$contacts_desc"
-assert_contains "addrs typed as array(varchar)"       'array(varchar)' \
-  "$(grep 'addrs' <<<"$contacts_desc")"
+# The no-drop guarantee: the addrs line must EXIST and carry array(varchar). Grep the
+# column line first (fails if the column was dropped), then assert its type — a plain
+# 'addrs' substring check would pass even if the column projected as the wrong type.
+addrs_line="$(grep 'addrs' <<<"$contacts_desc")"
+assert_contains "DESCRIBE shows addrs typed as array(varchar)" 'array(varchar)' "$addrs_line"
 assert_contains "tags typed as array(varchar)"        'array(varchar)' \
   "$(grep 'tags' <<<"$contacts_desc")"
 assert_contains "attrs typed as map(varchar, integer)" 'map(varchar, integer)' \
   "$(grep 'attrs' <<<"$contacts_desc")"
+assert_contains "notes (frozen list) typed as array(varchar)" 'array(varchar)' \
+  "$(grep 'notes' <<<"$contacts_desc")"
 
 # SELECT of the collection column resolves (no "column cannot be resolved") and the
 # multi-element row has cardinality 2. cardinality() over the array is a
@@ -367,14 +374,24 @@ addrs_row1="$(trino "SELECT array_join(transform(addrs, x -> cast(x as varchar))
 assert_contains "addrs element carries the decoded UDT (street)" '12 Oak St' "$addrs_row1"
 assert_contains "addrs second element carries the decoded UDT"   '9 Elm Ave' "$addrs_row1"
 
-# Empty vs absent are distinct: row 2 empty list → empty (non-null) array; row 3
-# absent → null. cardinality of an empty array is 0 and it IS NOT NULL; absent IS NULL.
-assert_eq "empty list → empty (non-null) array (cardinality 0)" '"0"' \
-  "$(trino 'SELECT cardinality(addrs) FROM cqlite.analytics.contacts WHERE id = 2')"
-assert_eq "empty list is NOT NULL"                              '"true"' \
-  "$(trino 'SELECT addrs IS NOT NULL FROM cqlite.analytics.contacts WHERE id = 2')"
-assert_eq "absent list → null"                                  '"true"' \
+# Empty-vs-absent, NON-FROZEN (Cassandra parity): a non-frozen empty collection is
+# NOT stored, so it is indistinguishable from absent — BOTH read as null. Row 2 set
+# addrs/tags/attrs to empty; row 3 never set them; both must be null.
+assert_eq "empty non-frozen list → null (not stored, id=2)"     '"true"' \
+  "$(trino 'SELECT addrs IS NULL FROM cqlite.analytics.contacts WHERE id = 2')"
+assert_eq "empty non-frozen map → null (not stored, id=2)"      '"true"' \
+  "$(trino 'SELECT attrs IS NULL FROM cqlite.analytics.contacts WHERE id = 2')"
+assert_eq "absent non-frozen list → null (id=3)"                '"true"' \
   "$(trino 'SELECT addrs IS NULL FROM cqlite.analytics.contacts WHERE id = 3')"
+# Empty-vs-absent, FROZEN: an empty frozen collection IS stored as a non-null empty
+# value, so it genuinely distinguishes empty (id=2 → empty non-null array,
+# cardinality 0) from absent (id=3 → null).
+assert_eq "empty frozen list → empty (non-null) array (cardinality 0, id=2)" '"0"' \
+  "$(trino 'SELECT cardinality(notes) FROM cqlite.analytics.contacts WHERE id = 2')"
+assert_eq "empty frozen list is NOT NULL (id=2)"                '"true"' \
+  "$(trino 'SELECT notes IS NOT NULL FROM cqlite.analytics.contacts WHERE id = 2')"
+assert_eq "absent frozen list → null (id=3)"                    '"true"' \
+  "$(trino 'SELECT notes IS NULL FROM cqlite.analytics.contacts WHERE id = 3')"
 
 # SELECT * includes the addrs column and its value (project all, count the addrs
 # elements of row 1 via a subquery so the assertion is a deterministic scalar).

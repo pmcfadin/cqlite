@@ -79,9 +79,14 @@ element consistent with the on-disk data.
 - **AND** the returned array has two elements, each the server-decoded UDT string
 - **AND** `SELECT *` on the same row includes the `addrs` column and its value
 
-#### Scenario: Empty and absent collections are distinguishable
-- **WHEN** the table has one row with an empty `addrs` list and one row where `addrs` was never set
-- **THEN** the empty-list row returns an empty (non-null) array
+#### Scenario: Empty and absent NON-FROZEN collections both read as null (Cassandra parity)
+- **WHEN** the table has one row where a non-frozen collection column (`addrs list<frozen<udt>>`, `tags list<text>`, or `attrs map<text,int>`) was set to the empty collection and one row where it was never set
+- **THEN** BOTH rows return null for that column — a non-frozen empty collection is not stored on disk (no cells are written), so it is indistinguishable from absent, exactly as Cassandra 5.0's `SELECT` returns null in both cases
+- **AND** the connector faithfully reflects on-disk reality (it reads nothing → yields null) rather than fabricating an empty array
+
+#### Scenario: An empty FROZEN collection is a stored, non-null empty array
+- **WHEN** the table has a `notes frozen<list<text>>` column, with one row set to the empty frozen list `[]` and one row where `notes` was never set
+- **THEN** the empty-frozen row returns an empty (non-null) array (`cardinality` = 0, `IS NOT NULL`) — a frozen collection is stored as a single self-describing value, so an empty frozen collection IS persisted and is distinguishable from absent
 - **AND** the never-set row returns null
 
 ### Requirement: Unsupported columns are surfaced loudly and durably, never silently dropped

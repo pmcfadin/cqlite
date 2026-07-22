@@ -207,8 +207,11 @@ public final class ArrowToTrino {
      * this reads the entry sub-range {@code [start, end)}, then for each entry reads
      * the {@code key} (ordinal 0) and {@code value} (ordinal 1) children of the entry
      * struct and recurses to {@link #writeValue}. The caller handled a null MAP cell;
-     * an empty map produces an empty, non-null map. A null map KEY is invalid in CQL
-     * and not expected; a null VALUE yields {@code appendNull} for that value.
+     * an empty map produces an empty, non-null map. A null map KEY violates the CQL
+     * contract (a Trino MAP block cannot carry a null key) and is rejected with a
+     * clear typed error — matching the fail-loud posture of {@link #requireVector} and
+     * the timestamp/date guards rather than silently emitting a corrupt block. A null
+     * VALUE yields {@code appendNull} for that value.
      */
     private static void writeMap(MapType type, MapVector vector, int i, BlockBuilder builder) {
         Type keyType = type.getKeyType();
@@ -220,6 +223,13 @@ public final class ArrowToTrino {
         int end = vector.getElementEndIndex(i);
         ((MapBlockBuilder) builder).buildEntry((keyBuilder, valueBuilder) -> {
             for (int e = start; e < end; e++) {
+                if (keyVector.isNull(e)) {
+                    throw new TrinoException(StandardErrorCode.GENERIC_INTERNAL_ERROR,
+                            "Map column '" + vector.getField().getName() + "' delivered a null key in the "
+                                    + "Arrow batch; a null map key violates the CQL contract and "
+                                    + "cannot be represented as a Trino MAP entry (schema drift or "
+                                    + "a corrupt Flight server response)");
+                }
                 writeValue(keyType, keyVector, e, keyBuilder);
                 if (valueVector.isNull(e)) {
                     valueBuilder.appendNull();

@@ -639,6 +639,40 @@ class ArrowToTrinoTest {
     }
 
     @Test
+    void mapWithNullKeyFailsLoud() {
+        // A null map KEY violates the CQL contract (a Trino MAP entry cannot carry a
+        // null key). The materializer must throw a clear typed error naming the column,
+        // matching the fail-loud posture of requireVector / the timestamp guards, rather
+        // than silently emitting a corrupt block.
+        try (BufferAllocator allocator = new RootAllocator();
+                MapVector m = MapVector.empty("m", allocator, false)) {
+            UnionMapWriter w = m.getWriter();
+            w.setPosition(0);
+            w.startMap();
+            w.startEntry();
+            w.key().varChar().writeNull();
+            w.value().integer().writeInt(1);
+            w.endEntry();
+            w.endMap();
+            m.setValueCount(1);
+
+            var root = new VectorSchemaRoot(List.of(m));
+            root.setRowCount(1);
+            var type = new MapType(VarcharType.VARCHAR, IntegerType.INTEGER, new TypeOperators());
+            var columns = List.of(new CqliteFlightColumnHandle("m", type));
+
+            TrinoException ex = assertThrows(TrinoException.class,
+                    () -> ArrowToTrino.toPage(root, columns));
+            assertTrue(ex.getMessage().contains("null key"),
+                    "error must name the null-key contract violation, was: " + ex.getMessage());
+            assertTrue(ex.getMessage().contains("'m'"),
+                    "error must name the offending column, was: " + ex.getMessage());
+
+            root.close();
+        }
+    }
+
+    @Test
     void listFrozenUdtProjectsAndMaterializesThroughMapperAndConverter() {
         // Wiring evidence for the list<frozen<udt>> headline (issue #2815): resolve the
         // column's Trino type from its Arrow FIELD via the REAL ArrowTypeMapper (as the
