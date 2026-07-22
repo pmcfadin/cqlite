@@ -439,16 +439,33 @@ log "assert weight-balanced sub-splitting + LIMIT-hang regression (issue #2680 /
 #     the LIMIT cancel raced. events has 5 rows here (the ghost row below is not flushed yet).
 assert_eq "K=4 multi-split full scan returns all rows"   '"5"' \
   "$(trino 'SELECT count(*) FROM cqlite.analytics.events')"
-# (b) Small pushed LIMIT completes within the harness timeout (the exact #2782 hang shape). A
-#     hang here trips run_with_timeout → FATAL, failing the lane. The subquery count is the
-#     deterministic scalar; the value proves the right rows came back, not just that it returned.
+# (b) Small pushed LIMIT under K=4 — asserted two ways so BOTH completion-without-hang AND the
+#     correct rows are proven:
+#   (b1) HANG guard: the bare pushed `LIMIT 2` (NO ORDER BY) keeps the multi-split early-cancel
+#        shape — Trino pushes the surplus-satisfying LIMIT and cancels the extra splits, the exact
+#        #2782 path. A hang here trips run_with_timeout → FATAL. count()==2 is 2 by construction
+#        (a count over LIMIT 2 always returns 2 given ≥2 base rows), so this asserts ONLY completion
+#        without hanging, not which rows came back — (b2) owns the row correctness.
 assert_eq "LIMIT 2 completes under K=4 (no #2782 hang)"  '"2"' \
   "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events LIMIT 2)')"
-# (c) Partial-predicate LIMIT (pushable score>15 conjunct + Trino residual length(name)>3) also
-#     completes and returns exactly its expected rows under K=4. Rows with score>15 AND len(name)>3:
-#     carol,dave,erin → LIMIT 2 must yield 2.
+#   (b2) CORRECTNESS: which rows came back. `ORDER BY id LIMIT 2` deterministically selects the two
+#        smallest ids — alice(1),bob(2) — and array_join(array_agg(id ORDER BY id)) pins them to the
+#        exact string "1,2". (The ORDER BY adds a Trino TopN that need not reproduce the cancel
+#        shape — (b1) owns the hang coverage — but it makes the returned rows deterministic.)
+assert_eq "LIMIT 2 returns the two smallest ids (1,2)"   '"1,2"' \
+  "$(trino "SELECT array_join(array_agg(id ORDER BY id), ',') FROM (SELECT id FROM cqlite.analytics.events ORDER BY id LIMIT 2)")"
+# (c) Partial-predicate LIMIT (pushable score>15 conjunct + Trino residual length(name)>3) under
+#     K=4, again asserted two ways:
+#   (c1) HANG guard: the bare pushed `LIMIT 2` with the partial predicate keeps the cancel shape;
+#        count()==2 proves completion-without-hang (2 by construction, not a which-rows check).
 assert_eq "partial-predicate LIMIT 2 completes under K=4" '"2"' \
   "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events WHERE score > 15 AND length(name) > 3 LIMIT 2)')"
+#   (c2) CORRECTNESS: rows with score>15 AND length(name)>3 are carol(3),dave(4),erin(5); `ORDER BY
+#        id LIMIT 2` pins the two smallest to "3,4". This also proves the residual length filter
+#        really applied: if it were dropped, bob(2) (score 20>15, len 3) would qualify and the
+#        smallest-2 would be "2,3".
+assert_eq "partial-predicate LIMIT 2 returns ids 3,4"    '"3,4"' \
+  "$(trino "SELECT array_join(array_agg(id ORDER BY id), ',') FROM (SELECT id FROM cqlite.analytics.events WHERE score > 15 AND length(name) > 3 ORDER BY id LIMIT 2)")"
 
 # Proof it reads SSTables (not live CQL): an unflushed row must be invisible.
 #
