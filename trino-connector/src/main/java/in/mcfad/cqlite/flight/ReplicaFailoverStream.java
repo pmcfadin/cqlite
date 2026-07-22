@@ -126,7 +126,16 @@ final class ReplicaFailoverStream implements AutoCloseable {
     }
 
     VectorSchemaRoot getRoot() {
-        return stream.getRoot();
+        // Single volatile read: close() (Trino's cancel thread) may null `stream` between next()
+        // returning true and this read on the driver thread. Snapshot it and, if the stream was
+        // just cancelled, return null (no current root) rather than NPE — the batch is discarded on
+        // the cancel path anyway. Non-blocking and idempotent, mirroring how next() finishes when
+        // closed (issue #2680).
+        BatchStream active = stream;
+        if (active == null) {
+            return null;
+        }
+        return active.getRoot();
     }
 
     /**

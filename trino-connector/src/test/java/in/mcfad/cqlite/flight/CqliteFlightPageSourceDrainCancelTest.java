@@ -156,8 +156,10 @@ class CqliteFlightPageSourceDrainCancelTest {
 
     @Test
     void closeThenNextNeverOpensAnOrphanStream() {
-        // close() arrived BEFORE this scheduled split's first getNextSourcePage() ran. A later
-        // next() must NOT open a fresh (uncancellable) DoGet — it must observe the close and finish.
+        // close() arrived BEFORE this scheduled split's first getNextSourcePage() ran. This covers
+        // the OUTER page-source guard: close() marks the page source finished, so a later
+        // getNextSourcePage() short-circuits and never opens a fresh (uncancellable) DoGet. The
+        // stream-level `closed` guard is exercised directly in streamNextAfterCloseFinishes below.
         boolean[] opened = {false};
         var source = new CqliteFlightPageSource(
                 List.of("host"), 8815, COLUMNS, TICKET,
@@ -241,6 +243,47 @@ class CqliteFlightPageSourceDrainCancelTest {
             assertEquals(1, fallback.cancelCalls, "cancel reaches the ACTIVE (failed-over) stream");
             assertTrue(fallback.cancelledBeforeClosed);
             good.close();
+        }
+    }
+
+    @Test
+    void streamNextAfterCloseFinishes() {
+        // Drives ReplicaFailoverStream directly (no page-source finished short-circuit) to exercise
+        // the stream-level `closed` guard: after close(), next() must observe the flag and return
+        // false WITHOUT opening a fresh stream — the guard that stops a surplus split's orphan DoGet.
+        boolean[] opened = {false};
+        var stream = new ReplicaFailoverStream(
+                List.of("host"), 8815, TICKET,
+                (h, p, t) -> {
+                    opened[0] = true;
+                    return new UnboundedStream(null);
+                });
+
+        stream.close();
+
+        assertFalse(stream.next(), "next() after close observes the stream-level closed flag");
+        assertFalse(opened[0], "a closed stream never opens an underlying DoGet");
+    }
+
+    @Test
+    void getRootAfterCloseNulledStreamDoesNotThrow() {
+        // close() (cancel thread) can null the underlying stream between next() returning true and
+        // getRoot() executing on the driver thread. getRoot() must snapshot the volatile and return
+        // null gracefully rather than NPE (issue #2680). Deterministic single-thread reproduction:
+        // advance, then close (nulls the stream), then call getRoot().
+        try (BufferAllocator allocator = new RootAllocator()) {
+            VectorSchemaRoot root = bigintRoot(allocator, 3L);
+            UnboundedStream up = new UnboundedStream(root);
+            var stream = new ReplicaFailoverStream(
+                    List.of("host"), 8815, TICKET, (h, p, t) -> up);
+
+            assertTrue(stream.next(), "first advance opens and publishes the stream");
+            assertNotNull(stream.getRoot(), "root available before close");
+
+            stream.close(); // nulls the volatile `stream`
+
+            assertNull(stream.getRoot(), "getRoot() after close returns null, never NPEs");
+            root.close();
         }
     }
 
