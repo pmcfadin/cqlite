@@ -418,6 +418,35 @@ assert_eq "absent frozen list → null (id=3)"                    '"true"' \
 assert_eq "SELECT * includes addrs (row 1 has 2)"              '"2"' \
   "$(trino 'SELECT cardinality(addrs) FROM (SELECT * FROM cqlite.analytics.contacts) WHERE id = 1')"
 
+# Weight-balanced sub-splitting + LIMIT-hang regression (issue #2680, guards the P0 #2782).
+#
+# The default `cqlite.sub-splits-per-range=4` (pinned in the catalog properties) means every
+# ordinary full scan below fans out to rangeCount × 4 Flight DoGet streams — the MULTI-STREAM
+# path. PR #2779 shipped exactly this and was reverted (#2791) because a small pushed `LIMIT`
+# hung 180s: Trino cancels the surplus splits once the LIMIT is satisfied and closes their page
+# sources EARLY, and an un-drained `DoGet` stream that was released but never CANCELLED left the
+# query hanging. Only this docker-compose E2E caught it. This block is the hard merge gate.
+#
+# Two independent defenses, both asserted here at the default K=4:
+#   (1) the drain fix — early close now explicitly cancels the active DoGet stream; and
+#   (2) LIMIT / point-read auto-plan at K=1, keeping the hang shape out of the multi-stream path.
+# The multi-split (K=4) path is exercised by the plain full scan; the LIMIT queries prove no hang.
+log "assert weight-balanced sub-splitting + LIMIT-hang regression (issue #2680 / P0 #2782)"
+# (a) Multi-split (K=4) full scan completes and is correct — this is the rangeCount×4 fan-out that
+#     the LIMIT cancel raced. events has 5 rows here (the ghost row below is not flushed yet).
+assert_eq "K=4 multi-split full scan returns all rows"   '"5"' \
+  "$(trino 'SELECT count(*) FROM cqlite.analytics.events')"
+# (b) Small pushed LIMIT completes within the harness timeout (the exact #2782 hang shape). A
+#     hang here trips run_with_timeout → FATAL, failing the lane. The subquery count is the
+#     deterministic scalar; the value proves the right rows came back, not just that it returned.
+assert_eq "LIMIT 2 completes under K=4 (no #2782 hang)"  '"2"' \
+  "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events LIMIT 2)')"
+# (c) Partial-predicate LIMIT (pushable score>15 conjunct + Trino residual length(name)>3) also
+#     completes and returns exactly its expected rows under K=4. Rows with score>15 AND len(name)>3:
+#     carol,dave,erin → LIMIT 2 must yield 2.
+assert_eq "partial-predicate LIMIT 2 completes under K=4" '"2"' \
+  "$(trino 'SELECT count(*) FROM (SELECT id FROM cqlite.analytics.events WHERE score > 15 AND length(name) > 3 LIMIT 2)')"
+
 # Proof it reads SSTables (not live CQL): an unflushed row must be invisible.
 #
 # On-disk-only is a `live`-mode contract, not `snapshot` mode (issue #2305):
