@@ -106,13 +106,41 @@ class CqliteFlightPageSourceFailoverTest {
     private static List<Long> drain(CqliteFlightPageSource source) {
         List<Long> out = new ArrayList<>();
         SourcePage page;
-        while ((page = source.getNextSourcePage()) != null) {
+        while (!source.isFinished()) {
+            page = nextPage(source);
+            if (page == null) {
+                continue; // fetch scheduled/in-flight — drove isBlocked(); poll again
+            }
             Block block = page.getBlock(0);
             for (int r = 0; r < page.getPositionCount(); r++) {
                 out.add(BigintType.BIGINT.getLong(block, r));
             }
         }
         return out;
+    }
+
+    /**
+     * Drive one non-blocking poll of the page source (issue #2680): the read runs on a background
+     * thread, so {@code getNextSourcePage()} returns {@code null} while a fetch is in flight and the
+     * driver would park on {@link CqliteFlightPageSource#isBlocked()}. This mirrors Trino's driver
+     * loop deterministically — poll, and if a fetch is pending, block on the signal before the next
+     * poll. A fetch ERROR is re-raised from the following {@code getNextSourcePage()}, exactly as
+     * Trino would observe it. Bounded so a genuine hang fails the test rather than wedging it.
+     */
+    static SourcePage nextPage(CqliteFlightPageSource source) {
+        SourcePage page = source.getNextSourcePage();
+        if (page != null || source.isFinished()) {
+            return page;
+        }
+        try {
+            source.isBlocked().get(10, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
+            // Fetch errors surface from getNextSourcePage(), not the blocked signal; ignore here.
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("interrupted awaiting the fetch", e);
+        }
+        return source.getNextSourcePage();
     }
 
     @Test
@@ -161,8 +189,10 @@ class CqliteFlightPageSourceFailoverTest {
         var source = new CqliteFlightPageSource(
                 List.of("downA", "downB"), 8815, COLUMNS, TICKET, opener);
 
-        // Loud failure — never a silent empty result (CQLite doctrine).
-        RuntimeException thrown = assertThrows(RuntimeException.class, source::getNextSourcePage);
+        // Loud failure — never a silent empty result (CQLite doctrine). The read runs on a
+        // background thread now, so the connect-class failure surfaces when the driver re-polls
+        // after the fetch completes exceptionally (issue #2680).
+        RuntimeException thrown = assertThrows(RuntimeException.class, () -> nextPage(source));
         assertTrue(ReplicaFailover.isConnectClass(thrown));
         assertTrue(source.isFinished());
         assertEquals(1, opener.opens.get("downA"));
@@ -182,8 +212,9 @@ class CqliteFlightPageSourceFailoverTest {
 
             // First page delivered from the primary.
             assertEquals(List.of(1L), drainOne(source));
-            // The mid-stream UNAVAILABLE must NOT trigger failover (would duplicate the row).
-            assertThrows(RuntimeException.class, source::getNextSourcePage);
+            // The mid-stream UNAVAILABLE must NOT trigger failover (would duplicate the row). It
+            // surfaces on the driver's next poll after the background fetch fails (issue #2680).
+            assertThrows(RuntimeException.class, () -> nextPage(source));
             assertTrue(source.isFinished());
             assertEquals(1, opener.opens.get("primary"));
             assertNull(opener.opens.get("fallback"), "committed stream must never retry a fallback");
@@ -192,7 +223,7 @@ class CqliteFlightPageSourceFailoverTest {
     }
 
     private static List<Long> drainOne(CqliteFlightPageSource source) {
-        SourcePage page = source.getNextSourcePage();
+        SourcePage page = nextPage(source);
         List<Long> out = new ArrayList<>();
         Block block = page.getBlock(0);
         for (int r = 0; r < page.getPositionCount(); r++) {

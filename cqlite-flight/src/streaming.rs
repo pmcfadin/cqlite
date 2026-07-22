@@ -12,6 +12,7 @@
 //! The retained `produce`/`produce_cancellable` collect path remains the
 //! byte-identity parity oracle and serves the aggregate route (bounded output).
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -301,6 +302,11 @@ pub(crate) fn spawn_streaming(
     // (client disconnect); `blocking_send` failure is the second, independent stop
     // signal. AA3 machinery (#1473) is reused, not replaced.
     let guard = cancel.drop_guard();
+    // The stream's egress-cancel race (issue #2680 / P0 #2782 hardening): an owned
+    // future that resolves when the shared flag trips from ANY source. Threaded into
+    // `MeteredDoGetStream` so a cancellation ends egress at the next poll even if the
+    // merge is parked between steps. Taken before the flag moves into `merge_cancel`.
+    let stream_cancelled = Box::pin(cancel.cancelled());
     // Clone for the sink's cancellation-aware backpressure race (issue #2264); the
     // remaining clone drives the between-step merge polling.
     let sink_cancel = cancel.clone();
@@ -370,6 +376,7 @@ pub(crate) fn spawn_streaming(
         Some(guard),
         probe.clone(),
         Some(handle.abort_handle()),
+        Some(stream_cancelled),
     );
     (encode_do_get(metered, schema_ref, probe), handle)
 }
@@ -429,7 +436,7 @@ pub(crate) async fn build_aggregate_response(
 
     let iter = futures::stream::iter(batches.into_iter().map(Ok::<_, ProducerError>));
     let probe = StreamProbe::default();
-    let metered = MeteredDoGetStream::new(Box::pin(iter), metrics, None, probe.clone(), None);
+    let metered = MeteredDoGetStream::new(Box::pin(iter), metrics, None, probe.clone(), None, None);
     Ok(encode_do_get(metered, schema_ref, probe))
 }
 
@@ -532,6 +539,15 @@ struct MeteredDoGetStream {
     /// defense-in-depth beyond the cancellation-aware send + `CancelGuard`. `None`
     /// for the aggregate route (already materialized — nothing to abort).
     abort: Option<tokio::task::AbortHandle>,
+    /// The shared cancel flag's async cancellation future (issue #2680 / P0 #2782
+    /// server hardening). Polled in `poll_next` ONLY when the inner stream would
+    /// otherwise park, so a cancellation tripped from ANY source — a half-closed
+    /// peer, a transport reset, or the drop guard — terminates egress at the next
+    /// poll instead of waiting for the merge to notice between steps. `None` for
+    /// the aggregate route (already materialized — nothing to interrupt). This is
+    /// defense-in-depth: it never fires on the normal delivery path (the inner
+    /// poll is biased first), and never regresses the existing drop-driven cancel.
+    cancelled: Option<Pin<Box<tokio_util::sync::WaitForCancellationFutureOwned>>>,
     probe: StreamProbe,
     rows: u64,
     bytes: u64,
@@ -556,12 +572,14 @@ impl MeteredDoGetStream {
         guard: Option<CancelGuard>,
         probe: StreamProbe,
         abort: Option<tokio::task::AbortHandle>,
+        cancelled: Option<Pin<Box<tokio_util::sync::WaitForCancellationFutureOwned>>>,
     ) -> Self {
         Self {
             inner,
             metrics: Some(metrics),
             guard,
             abort,
+            cancelled,
             probe,
             rows: 0,
             bytes: 0,
@@ -662,7 +680,26 @@ impl Stream for MeteredDoGetStream {
                 this.finalize(!this.errored);
                 Poll::Ready(None)
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                // The inner stream (bounded channel) has no batch ready. Race the
+                // shared cancel flag (issue #2680 / P0 #2782 server hardening): if a
+                // cancellation has been requested from ANY source — a half-closed
+                // peer, a transport reset, or the response-stream drop guard — end
+                // egress NOW rather than parking until the merge notices it between
+                // steps. Polled ONLY here (the delivery arm above already returned),
+                // so the normal fast path is untouched. On cancel, terminate the
+                // stream cleanly (`None`): the emitted prefix is finalized and the
+                // merge is stopped via the guard/abort — no truncated result is
+                // presented as complete because the client is already departing.
+                if let Some(cancelled) = this.cancelled.as_mut() {
+                    if cancelled.as_mut().poll(cx).is_ready() {
+                        this.disarm_guard();
+                        this.finalize(!this.errored);
+                        return Poll::Ready(None);
+                    }
+                }
+                Poll::Pending
+            }
         }
     }
 }

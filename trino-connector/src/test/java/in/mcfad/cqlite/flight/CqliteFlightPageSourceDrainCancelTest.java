@@ -10,42 +10,96 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Supplier;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Early-close drain cancel on the scan page source (issue #2782, the P0 that reverted PR #2779).
+ * Early-close cancel on the scan page source (issue #2782, the P0 that reverted PR #2779; root-fixed
+ * under #2680).
  *
- * <p>When Trino satisfies a pushed {@code LIMIT} it CANCELS the remaining splits and closes their
- * page sources EARLY — while server batches are still queued and undrained. The prior code merely
- * released the handle ({@code handle.close()}) and the gRPC {@code DoGet} kept waiting on the
- * unconsumed batches, hanging the query for the full 180s harness timeout. The fix explicitly
- * CANCELS the active underlying Flight stream on early close: idempotent, non-blocking, and
- * propagated through {@link ReplicaFailoverStream} to the currently-active underlying stream. This
- * holds at ANY split count (K=1 included), so an un-consumed stream can never block completion.
+ * <p><b>The real root cause.</b> The Arrow {@link org.apache.arrow.flight.FlightStream#next()} read
+ * BLOCKS the calling thread on a {@code LinkedBlockingQueue.take()} until the server delivers the
+ * next batch. The reverted code ran that read DIRECTLY on the Trino driver thread inside
+ * {@code getNextSourcePage()}. When Trino satisfies a pushed {@code LIMIT} it cancels the surplus
+ * splits from another thread ({@code Driver.close()}), but that close {@code tryLock}s and FAILS
+ * while the driver thread is still pinned in a deadline-less {@code next()} — so {@code close()} (and
+ * therefore {@link ReplicaFailoverStream#close()} → {@code FlightStream.cancel()}) was DEFERRED
+ * forever and the query hung for the full 180s harness timeout. The close→cancel wiring the prior
+ * three commits added was correct but could never RUN.
+ *
+ * <p><b>The fix.</b> {@link CqliteFlightPageSource} runs the blocking read on a background executor
+ * and implements {@code isBlocked()}, so {@code getNextSourcePage()} NEVER blocks the driver thread
+ * (it returns {@code null} while a fetch is in flight). Trino then runs {@code close()} on the freed
+ * driver thread the instant the LIMIT is satisfied; {@code close()} cancels the active Flight stream,
+ * which unblocks the parked background {@code next()} via the queue-sentinel the gRPC cancel
+ * enqueues — non-blocking, idempotent, and it never drains the remaining batches.
  */
 class CqliteFlightPageSourceDrainCancelTest {
     private static final byte[] TICKET = new byte[] {9, 9};
     private static final List<CqliteFlightColumnHandle> COLUMNS =
             List.of(new CqliteFlightColumnHandle("v", BigintType.BIGINT));
 
-    /** A batch stream that never ends, so a full drain would block forever — cancel must break it. */
+    /**
+     * A batch stream whose {@code next()} BLOCKS (like a real {@link
+     * org.apache.arrow.flight.FlightStream} parked on {@code queue.take()}) until {@code cancel()}
+     * or {@code close()} releases it — modelling the exact wait the #2782 hang got stuck in. After
+     * release it reports end-of-stream (the gRPC cancel delivers no more batches). It NEVER blocks
+     * the caller after cancel, so a correct page source unblocks within the test's bound.
+     */
+    private static final class BlockingUntilCancelledStream implements ReplicaFailoverStream.BatchStream {
+        private final CountDownLatch released = new CountDownLatch(1);
+        volatile int cancelCalls;
+        volatile int closeCalls;
+        volatile boolean cancelledBeforeClosed;
+        volatile boolean nextEntered;
+
+        @Override
+        public boolean next() {
+            nextEntered = true;
+            try {
+                // Park exactly like FlightStream.next()'s queue.take(); a real cancel enqueues a
+                // sentinel that unblocks it. Here cancel()/close() count down the latch.
+                released.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return false; // released → no further batch (the cancelled DoGet delivers nothing more)
+        }
+
+        @Override
+        public VectorSchemaRoot getRoot() {
+            return null;
+        }
+
+        @Override
+        public void cancel() {
+            if (closeCalls == 0) {
+                cancelledBeforeClosed = true;
+            }
+            cancelCalls++;
+            released.countDown(); // unpark a parked next(), exactly as FlightStream.cancel() does
+        }
+
+        @Override
+        public void close() {
+            closeCalls++;
+            released.countDown();
+        }
+    }
+
+    /** A batch stream that yields one batch per poll forever — a full drain would never end. */
     private static final class UnboundedStream implements ReplicaFailoverStream.BatchStream {
         private final VectorSchemaRoot root;
-        int cancelCalls;
-        int closeCalls;
-        boolean cancelledBeforeClosed;
+        volatile int cancelCalls;
+        volatile int closeCalls;
+        volatile boolean cancelledBeforeClosed;
 
         UnboundedStream(VectorSchemaRoot root) {
             this.root = root;
@@ -53,9 +107,7 @@ class CqliteFlightPageSourceDrainCancelTest {
 
         @Override
         public boolean next() {
-            // Always another batch: draining this to completion would never return — the whole
-            // point of the #2782 hang. An early cancel must NOT drain.
-            return true;
+            return true; // always another batch: draining to completion would never return
         }
 
         @Override
@@ -88,169 +140,140 @@ class CqliteFlightPageSourceDrainCancelTest {
         return root;
     }
 
+    // ---- The P0 #2782 root-cause proof (issue #2680) ---------------------------------------------
+
+    /**
+     * <b>The regression test for the real root cause.</b> A page source whose Flight read BLOCKS
+     * (never yields a batch) is closed early — exactly what Trino does to a surplus split once a
+     * pushed LIMIT is satisfied. Two properties must hold, both within a hard bound:
+     *
+     * <ol>
+     *   <li>{@code getNextSourcePage()} must NOT block the calling (driver) thread even though the
+     *       underlying {@code next()} blocks — it schedules the read on a background thread and
+     *       returns {@code null}. On the reverted {@code b18b9a05} code this call blocks the driver
+     *       thread forever inside {@code next()} and the {@code assertTimeoutPreemptively} FAILS.</li>
+     *   <li>{@code close()} (running on the freed driver thread) cancels the active stream, which
+     *       unblocks the parked background read — so the source finishes without a hang.</li>
+     * </ol>
+     */
     @Test
-    void earlyCloseCancelsUndrainedStreamWithoutBlocking() {
-        try (BufferAllocator allocator = new RootAllocator()) {
-            VectorSchemaRoot root = bigintRoot(allocator, 1L);
-            UnboundedStream up = new UnboundedStream(root);
+    void earlyCloseUnblocksAParkedReadWithoutPinningTheDriverThread() {
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+            BlockingUntilCancelledStream blocking = new BlockingUntilCancelledStream();
             var source = new CqliteFlightPageSource(
-                    List.of("host"), 8815, COLUMNS, TICKET, (h, p, t) -> up);
+                    List.of("host"), 8815, COLUMNS, TICKET, (h, p, t) -> blocking);
 
-            // Pull ONE page (some but not all batches delivered), then close early like Trino does
-            // once a LIMIT is satisfied. close() must CANCEL the active stream and return — a
-            // drain-to-end would spin on the unbounded stream forever (the #2782 hang).
-            SourcePage first = source.getNextSourcePage();
-            assertNotNull(first, "first page delivered before the early close");
+            // (1) The read blocks, but this poll must return promptly (fetch runs off-thread).
+            assertNull(source.getNextSourcePage(),
+                    "getNextSourcePage returns null while the background fetch is in flight — "
+                            + "it must NOT block the driver thread in next() (the #2782 hang)");
 
-            source.close(); // must not block on the never-ending stream
+            // Let the background fetch actually enter the blocking next() before we close.
+            awaitNextEntered(blocking);
+
+            // (2) Close from this (driver) thread — must cancel + unblock the parked read, not hang.
+            source.close();
 
             assertTrue(source.isFinished(), "closed source reports finished");
-            assertEquals(1, up.cancelCalls, "early close cancels the underlying DoGet exactly once");
-            assertTrue(up.cancelledBeforeClosed, "cancel signalled (not a plain drain-then-close)");
-            root.close();
-        }
-    }
-
-    @Test
-    void secondCloseIsANoOp() {
-        try (BufferAllocator allocator = new RootAllocator()) {
-            VectorSchemaRoot root = bigintRoot(allocator, 5L);
-            UnboundedStream up = new UnboundedStream(root);
-            var source = new CqliteFlightPageSource(
-                    List.of("host"), 8815, COLUMNS, TICKET, (h, p, t) -> up);
-            assertNotNull(source.getNextSourcePage());
-
-            source.close();
-            source.close(); // idempotent: the wrapper cleared its reference after the first cancel
-
-            assertEquals(1, up.cancelCalls, "cancel is issued once; a second close is a harmless no-op");
-            root.close();
-        }
-    }
-
-    @Test
-    void closeBeforeAnyPageDoesNotThrowAndDoesNotOpen() {
-        // Trino may close a scheduled-but-never-started split (a satisfied LIMIT before this split
-        // ran). No underlying stream was ever opened, so close must be a quiet no-op.
-        Map<String, Supplier<ReplicaFailoverStream.BatchStream>> byHost = new LinkedHashMap<>();
-        boolean[] opened = {false};
-        var source = new CqliteFlightPageSource(
-                List.of("host"), 8815, COLUMNS, TICKET,
-                (h, p, t) -> {
-                    opened[0] = true;
-                    return new UnboundedStream(null);
-                });
-
-        source.close();
-
-        assertTrue(source.isFinished());
-        assertFalse(opened[0], "close before the first getNextSourcePage never opens a stream");
-    }
-
-    // ---- Surplus-split early-close races (issue #2680 / P0 #2782, the intermittent K>1 hang) ----
-    // At the default K=4 a residual-LIMIT scan fans out to surplus splits; Trino cancels and closes
-    // them the instant the LIMIT is satisfied — from a DIFFERENT thread than the driver advancing
-    // the stream. If a close is a no-op because the stream is not yet opened (or is mid-open), the
-    // split's DoGet gRPC never gets cancelled and blocks on undrained batches → the 180s hang. These
-    // reproduce each racing state deterministically so a regression fails in ./gradlew build.
-
-    @Test
-    void closeThenNextNeverOpensAnOrphanStream() {
-        // close() arrived BEFORE this scheduled split's first getNextSourcePage() ran. This covers
-        // the OUTER page-source guard: close() marks the page source finished, so a later
-        // getNextSourcePage() short-circuits and never opens a fresh (uncancellable) DoGet. The
-        // stream-level `closed` guard is exercised directly in streamNextAfterCloseFinishes below.
-        boolean[] opened = {false};
-        var source = new CqliteFlightPageSource(
-                List.of("host"), 8815, COLUMNS, TICKET,
-                (h, p, t) -> {
-                    opened[0] = true;
-                    return new UnboundedStream(null);
-                });
-
-        source.close();
-        assertNull(source.getNextSourcePage(), "a next() after close finishes without opening a stream");
-
-        assertTrue(source.isFinished());
-        assertFalse(opened[0], "close before the first advance must prevent any orphan stream open");
-    }
-
-    @Test
-    void closeRacingAnInFlightOpenCancelsTheJustOpenedStream() {
-        // The hardest race: the driver thread is INSIDE opener.open() when Trino's cancel thread
-        // calls close(). close() sees stream == null (not yet published) and cancels nothing; the
-        // open then completes and publishes a live stream. Without the post-publish re-check that
-        // stream is an orphaned, uncancelled DoGet — the exact intermittent #2782 hang. The fix's
-        // double-check must cancel it and next() must return false rather than block on the
-        // never-ending stream.
-        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
-            try (BufferAllocator allocator = new RootAllocator()) {
-                VectorSchemaRoot root = bigintRoot(allocator, 1L);
-                UnboundedStream up = new UnboundedStream(root);
-                CountDownLatch insideOpen = new CountDownLatch(1);
-                CountDownLatch closeIssued = new CountDownLatch(1);
-                AtomicReference<Boolean> hadNext = new AtomicReference<>();
-
-                var source = new CqliteFlightPageSource(
-                        List.of("host"), 8815, COLUMNS, TICKET,
-                        (h, p, t) -> {
-                            // Signal we are mid-open, then wait until close() has run so the open
-                            // deterministically publishes AFTER the close set its flag.
-                            insideOpen.countDown();
-                            await(closeIssued);
-                            return up;
-                        });
-
-                Thread driver = new Thread(() -> hadNext.set(source.getNextSourcePage() != null));
-                driver.start();
-                await(insideOpen);   // driver is blocked inside opener.open()
-                source.close();      // close BEFORE the open publishes the stream
-                closeIssued.countDown();
-                driver.join(Duration.ofSeconds(5).toMillis());
-
-                assertFalse(driver.isAlive(), "the driver's next() returned — no hang on the orphan stream");
-                assertEquals(Boolean.FALSE, hadNext.get(), "next() observes the close and yields no page");
-                assertEquals(1, up.cancelCalls, "the stream opened during the close is cancelled, not orphaned");
-                assertTrue(source.isFinished());
-                root.close();
-            }
+            assertEquals(1, blocking.cancelCalls, "early close cancels the underlying DoGet exactly once");
+            assertTrue(blocking.cancelledBeforeClosed, "cancel signalled (not a plain drain-then-close)");
         });
     }
 
     @Test
-    void cancelReachesTheActiveFailoverStream() {
-        try (BufferAllocator allocator = new RootAllocator()) {
-            // The primary is down: the failover wrapper opens it, fails over (connect-class) to
-            // the fallback, delivers a batch from the fallback, then the operator closes early.
-            // The cancel must reach the ACTIVE (fallback) stream — not the dead primary.
-            VectorSchemaRoot good = bigintRoot(allocator, 7L);
-            UnboundedStream fallback = new UnboundedStream(good);
-            var opener = new ReplicaFailoverStream.StreamOpener() {
-                @Override
-                public ReplicaFailoverStream.BatchStream open(String host, int port, byte[] ticket) {
-                    if (host.equals("down")) {
-                        throw CallStatus.UNAVAILABLE.withDescription("refused").toRuntimeException();
-                    }
-                    return fallback;
-                }
-            };
+    void secondCloseIsANoOp() {
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+            BlockingUntilCancelledStream blocking = new BlockingUntilCancelledStream();
             var source = new CqliteFlightPageSource(
-                    List.of("down", "up"), 8815, COLUMNS, TICKET, opener);
+                    List.of("host"), 8815, COLUMNS, TICKET, (h, p, t) -> blocking);
+            assertNull(source.getNextSourcePage());
+            awaitNextEntered(blocking); // the fetch published the stream before parking in next()
 
-            assertNotNull(source.getNextSourcePage(), "batch served by the fallback after failover");
             source.close();
+            source.close(); // idempotent: the wrapper cleared its reference after the first cancel
 
-            assertEquals(1, fallback.cancelCalls, "cancel reaches the ACTIVE (failed-over) stream");
-            assertTrue(fallback.cancelledBeforeClosed);
-            good.close();
-        }
+            assertEquals(1, blocking.cancelCalls, "cancel is issued once; a second close is a no-op");
+        });
     }
 
     @Test
+    void closeBeforeAnyPollDoesNotThrowAndDoesNotOpen() {
+        // Trino may close a scheduled-but-never-started split (a satisfied LIMIT before this split
+        // ran). No poll ever ran, so no stream was opened; close must be a quiet no-op.
+        boolean[] opened = {false};
+        var source = new CqliteFlightPageSource(
+                List.of("host"), 8815, COLUMNS, TICKET,
+                (h, p, t) -> {
+                    opened[0] = true;
+                    return new UnboundedStream(null);
+                });
+
+        source.close();
+
+        assertTrue(source.isFinished());
+        assertFalse(opened[0], "close before the first poll never opens a stream");
+    }
+
+    @Test
+    void closeThenPollNeverOpensAnOrphanStream() {
+        // close() arrived BEFORE this scheduled split's first poll. The page source is finished, so
+        // a later getNextSourcePage() short-circuits and never schedules a fetch / opens a DoGet.
+        boolean[] opened = {false};
+        var source = new CqliteFlightPageSource(
+                List.of("host"), 8815, COLUMNS, TICKET,
+                (h, p, t) -> {
+                    opened[0] = true;
+                    return new UnboundedStream(null);
+                });
+
+        source.close();
+        assertNull(source.getNextSourcePage(), "a poll after close finishes without scheduling a fetch");
+
+        assertTrue(source.isFinished());
+        assertFalse(opened[0], "close before the first poll must prevent any orphan stream open");
+    }
+
+    @Test
+    void cancelReachesTheActiveFailoverStream() {
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+            try (BufferAllocator allocator = new RootAllocator()) {
+                // The primary is down: the failover wrapper opens it, fails over (connect-class) to
+                // the fallback, delivers a batch from the fallback, then the operator closes early.
+                // The cancel must reach the ACTIVE (fallback) stream — not the dead primary.
+                VectorSchemaRoot good = bigintRoot(allocator, 7L);
+                UnboundedStream fallback = new UnboundedStream(good);
+                var opener = new ReplicaFailoverStream.StreamOpener() {
+                    @Override
+                    public ReplicaFailoverStream.BatchStream open(String host, int port, byte[] ticket) {
+                        if (host.equals("down")) {
+                            throw CallStatus.UNAVAILABLE.withDescription("refused").toRuntimeException();
+                        }
+                        return fallback;
+                    }
+                };
+                var source = new CqliteFlightPageSource(
+                        List.of("down", "up"), 8815, COLUMNS, TICKET, opener);
+
+                // Drive one non-blocking poll cycle so a batch is served by the fallback.
+                assertNull(source.getNextSourcePage()); // schedules the fetch off-thread
+                SourcePage page = pollUntilPageOrFinished(source);
+                assertTrue(page != null && page.getPositionCount() == 1,
+                        "batch served by the fallback after failover");
+                source.close();
+
+                assertEquals(1, fallback.cancelCalls, "cancel reaches the ACTIVE (failed-over) stream");
+                assertTrue(fallback.cancelledBeforeClosed);
+                good.close();
+            }
+        });
+    }
+
+    // ---- ReplicaFailoverStream-level guards (driven directly, no page source) --------------------
+
+    @Test
     void streamNextAfterCloseFinishes() {
-        // Drives ReplicaFailoverStream directly (no page-source finished short-circuit) to exercise
-        // the stream-level `closed` guard: after close(), next() must observe the flag and return
-        // false WITHOUT opening a fresh stream — the guard that stops a surplus split's orphan DoGet.
+        // After close(), next() must observe the stream-level `closed` flag and return false WITHOUT
+        // opening a fresh stream — the guard that stops a surplus split's orphan DoGet.
         boolean[] opened = {false};
         var stream = new ReplicaFailoverStream(
                 List.of("host"), 8815, TICKET,
@@ -268,9 +291,8 @@ class CqliteFlightPageSourceDrainCancelTest {
     @Test
     void getRootAfterCloseNulledStreamDoesNotThrow() {
         // close() (cancel thread) can null the underlying stream between next() returning true and
-        // getRoot() executing on the driver thread. getRoot() must snapshot the volatile and return
-        // null gracefully rather than NPE (issue #2680). Deterministic single-thread reproduction:
-        // advance, then close (nulls the stream), then call getRoot().
+        // getRoot() executing on the fetch thread. getRoot() must snapshot the volatile and return
+        // null gracefully rather than NPE (issue #2680).
         try (BufferAllocator allocator = new RootAllocator()) {
             VectorSchemaRoot root = bigintRoot(allocator, 3L);
             UnboundedStream up = new UnboundedStream(root);
@@ -278,7 +300,7 @@ class CqliteFlightPageSourceDrainCancelTest {
                     List.of("host"), 8815, TICKET, (h, p, t) -> up);
 
             assertTrue(stream.next(), "first advance opens and publishes the stream");
-            assertNotNull(stream.getRoot(), "root available before close");
+            assertTrue(stream.getRoot() != null, "root available before close");
 
             stream.close(); // nulls the volatile `stream`
 
@@ -287,56 +309,25 @@ class CqliteFlightPageSourceDrainCancelTest {
         }
     }
 
-    /** A stream that reports a batch is ready but whose root snapshot is already null (cancel race). */
-    private static final class NullRootAfterNextStream implements ReplicaFailoverStream.BatchStream {
-        int nextCalls;
-        int cancelCalls;
-
-        @Override
-        public boolean next() {
-            nextCalls++;
-            return true; // a batch is "ready" ...
+    /** Wait (bounded) for the background fetch to enter the blocking {@code next()}. */
+    private static void awaitNextEntered(BlockingUntilCancelledStream blocking) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (!blocking.nextEntered && System.nanoTime() < deadline) {
+            Thread.sleep(5);
         }
-
-        @Override
-        public VectorSchemaRoot getRoot() {
-            return null; // ... but the cancel thread already nulled the active stream (getRoot snapshot)
-        }
-
-        @Override
-        public void cancel() {
-            cancelCalls++;
-        }
-
-        @Override
-        public void close() {}
+        assertTrue(blocking.nextEntered, "the background fetch entered the blocking next()");
     }
 
-    @Test
-    void nullRootFromCancelRaceFinishesInsteadOfNpe() {
-        // Routes the cancel-race null root THROUGH CqliteFlightPageSource.getNextSourcePage() (not
-        // getRoot() in isolation): close() (Trino's cancel thread) nulled the active stream between
-        // next() returning true and the getRoot() read. getRoot() returns null; the page source must
-        // treat that as end-of-stream and return null rather than NPE inside ArrowToTrino.toPage(null)
-        // (issues #2782/#2680 — the fix that eliminates the relocated NPE, not just moves it).
-        NullRootAfterNextStream up = new NullRootAfterNextStream();
-        var source = new CqliteFlightPageSource(
-                List.of("host"), 8815, COLUMNS, TICKET, (h, p, t) -> up);
-
-        SourcePage page = source.getNextSourcePage();
-
-        assertNull(page, "a null root on the cancel race yields no page rather than NPE'ing");
-        assertTrue(source.isFinished(), "the page source finishes on the cancel-race null root");
-        assertEquals(0, source.getCompletedBytes(), "no positions counted for the discarded batch");
-        assertNull(source.getNextSourcePage(), "a subsequent poll stays finished");
-    }
-
-    private static void await(CountDownLatch latch) {
-        try {
-            assertTrue(latch.await(5, java.util.concurrent.TimeUnit.SECONDS), "latch reached in time");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AssertionError("interrupted awaiting latch", e);
+    /** Poll the (non-blocking) page source until it yields a page or finishes; bounded. */
+    private static SourcePage pollUntilPageOrFinished(CqliteFlightPageSource source) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (System.nanoTime() < deadline) {
+            SourcePage page = source.getNextSourcePage();
+            if (page != null || source.isFinished()) {
+                return page;
+            }
+            source.isBlocked().get(5, TimeUnit.SECONDS);
         }
+        throw new AssertionError("page source neither yielded a page nor finished within the bound");
     }
 }

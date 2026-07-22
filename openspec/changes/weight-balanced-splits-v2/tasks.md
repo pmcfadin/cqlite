@@ -1,12 +1,22 @@
 # Tasks: Weight-balanced splits via drain-hardened sub-splitting
 
-## 1. Drain fix (prerequisite — lands + provable FIRST, #2782 root cause)
-- [x] 1.1 In the scan page source `close()` + the replica-failover stream wrapper, explicitly CANCEL the
-      active Flight `DoGet` stream on early close (not merely `handle.close()`); idempotent, non-blocking,
-      propagated to the currently-active underlying stream. (surface: `CqliteFlightPageSource.close`,
+## 1. Drain fix (prerequisite — lands + provable FIRST, #2782 ROOT CAUSE)
+- [x] 1.1 ROOT FIX: run the blocking Arrow `FlightStream.next()` read OFF the Trino driver thread — on a
+      background executor with a non-blocking `isBlocked()` signal — so the driver thread is never pinned in
+      a deadline-less `next()`. That is what lets Trino run `close()` on the freed driver thread; the prior
+      close→cancel wiring was correct but could never execute while the driver was blocked (the real #2782
+      hang). `close()` cancels the active Flight `DoGet` stream (`FlightStream.cancel()`, cross-thread), which
+      unblocks the parked background read; idempotent, non-blocking, propagated to the active underlying
+      stream. (surface: `CqliteFlightPageSource.getNextSourcePage`/`isBlocked`/`close`,
       `ReplicaFailoverStream.close`/`cancel`)
-- [x] 1.2 Unit test the cancel path with a fake/instrumented stream: early close cancels an un-drained
-      stream without blocking; second close is a no-op; cancel reaches the active failover stream.
+- [x] 1.2 Unit test the root cause with an instrumented BLOCKING stream: a poll does not pin the driver
+      thread even though `next()` blocks; an early close cancels + unblocks the parked read without hanging
+      (bounded, `assertTimeoutPreemptively`); second close is a no-op; cancel reaches the active failover
+      stream. Verified to FAIL on the reverted `b18b9a05` (deadline-less driver-blocking) page source.
+- [x] 1.3 SERVER hardening (defense-in-depth): the `do_get` response stream (`MeteredDoGetStream::poll_next`)
+      races its parked inner batch poll against the shared `CancelFlag` async cancellation, so a cancellation
+      from any source ends egress at the next poll rather than only when the merge notices it between steps.
+      Rust test: a parked stream (receiver alive, no batch ready) ends within a bound once the flag trips.
 
 ## 2. LIMIT-pushed + bound-key point read → K=1 (defense in depth)
 - [x] 2.1 In `getSplits`, compute effective K = 1 when `handle.limit().isPresent()` OR fully-bound point

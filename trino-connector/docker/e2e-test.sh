@@ -423,12 +423,15 @@ assert_eq "SELECT * includes addrs (row 1 has 2)"              '"2"' \
 # The default `cqlite.sub-splits-per-range=4` (pinned in the catalog properties) means every
 # ordinary full scan below fans out to rangeCount × 4 Flight DoGet streams — the MULTI-STREAM
 # path. PR #2779 shipped exactly this and was reverted (#2791) because a small pushed `LIMIT`
-# hung 180s: Trino cancels the surplus splits once the LIMIT is satisfied and closes their page
-# sources EARLY, and an un-drained `DoGet` stream that was released but never CANCELLED left the
-# query hanging. Only this docker-compose E2E caught it. This block is the hard merge gate.
+# hung 180s. ROOT CAUSE (#2680): the blocking Arrow `FlightStream.next()` read ran on the Trino
+# DRIVER THREAD, so when Trino cancelled a surplus split it could not run `close()` on that pinned
+# thread — the close→cancel of the un-drained `DoGet` never executed and the query hung. Only this
+# docker-compose E2E caught it. This block is the hard merge gate.
 #
 # Two independent defenses, both asserted here at the default K=4:
-#   (1) the drain fix — early close now explicitly cancels the active DoGet stream; and
+#   (1) the ROOT FIX — the page source reads OFF the driver thread (background executor +
+#       isBlocked()), so Trino runs close() on the freed driver and close() cancels the active
+#       DoGet stream (FlightStream.cancel(), which unblocks the parked read); and
 #   (2) LIMIT / point-read auto-plan at K=1, keeping the hang shape out of the multi-stream path.
 # The multi-split (K=4) path is exercised by the plain full scan; the LIMIT queries prove no hang.
 log "assert weight-balanced sub-splitting + LIMIT-hang regression (issue #2680 / P0 #2782)"

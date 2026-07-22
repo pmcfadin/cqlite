@@ -4,25 +4,48 @@
 
 ### Requirement: Early operator close cancels the Flight DoGet stream (P0 #2782 root fix)
 
-The scan page source SHALL explicitly cancel the underlying Flight `DoGet` stream when Trino closes the
-operator early — before the stream is fully drained, as happens once a pushed `LIMIT` is satisfied and the
-remaining splits are cancelled — rather than merely releasing the handle. Cancellation
-SHALL be idempotent and non-blocking, SHALL propagate through the replica-failover stream wrapper to the
-active underlying stream, and SHALL NOT wait to consume remaining server batches. This holds at ANY split
-count, so an un-consumed stream can never block query completion. This requirement is independent of
-sub-splitting and fixes the #2782 root cause even at K=1.
+The scan page source SHALL NOT run the blocking Arrow `FlightStream.next()` read (which parks the calling
+thread until the server delivers the next batch) on the Trino DRIVER THREAD: it SHALL perform the read on a
+background executor and report readiness through a non-blocking `isBlocked()` signal, so a poll returns
+promptly (yielding the driver) while a fetch is in flight. This is the P0 #2782 ROOT FIX: when the driver
+thread is pinned inside a deadline-less `next()`, Trino cannot run `close()` on it (the operator close
+`tryLock` fails), so the close→cancel wiring — however correct — can never execute and the query hangs for
+the full harness timeout. Freeing the driver thread lets Trino run `close()` the instant a pushed `LIMIT` is
+satisfied.
 
-#### Scenario: Early close cancels an un-drained stream without blocking
-- **GIVEN** a scan split whose Flight `DoGet` stream has delivered some but not all batches
-- **WHEN** Trino closes the page source early (operator cancelled after a satisfied LIMIT)
-- **THEN** the page source cancels the underlying Flight stream and returns from `close()` without
-  blocking on remaining batches
+On that early close the page source SHALL cancel the underlying Flight `DoGet` stream (via
+`FlightStream.cancel()`, which is callable cross-thread and unblocks a background read parked in `next()`)
+rather than merely releasing the handle. Cancellation SHALL be idempotent and non-blocking, SHALL propagate
+through the replica-failover stream wrapper to the active underlying stream, and SHALL NOT wait to consume
+remaining server batches. This holds at ANY split count, so an un-consumed stream can never block query
+completion. This requirement is independent of sub-splitting and fixes the #2782 root cause even at K=1.
+
+The Flight SERVER SHALL additionally harden its `do_get` egress (defense-in-depth): the response stream
+SHALL race its parked inner batch poll against the shared cancellation flag, so a cancellation tripped from
+ANY source — a half-closed peer, a transport reset, or the receiver-drop guard — terminates the scan at the
+next poll rather than waiting for the merge to notice it between steps. This SHALL NOT regress the existing
+drop-driven cancellation path.
+
+#### Scenario: A blocked early close unblocks the parked read without pinning the driver thread
+- **GIVEN** a scan split whose Flight `DoGet` read is BLOCKED (no batch yet delivered)
+- **WHEN** the page source is polled
+- **THEN** the poll returns promptly without blocking the calling (driver) thread — the read runs on a
+  background executor and the source reports blocked via `isBlocked()`
+- **WHEN** Trino then closes the page source early (operator cancelled after a satisfied LIMIT)
+- **THEN** the page source cancels the underlying Flight stream, which unblocks the parked background read,
+  and `close()` returns without blocking on remaining batches
 - **AND** calling `close()` again is a harmless no-op (idempotent)
 
 #### Scenario: Cancellation reaches the active failover stream
 - **GIVEN** a replica-failover stream wrapping an active underlying `DoGet` stream
 - **WHEN** the page source cancels on early close
 - **THEN** the cancel propagates to the currently-active underlying stream (not only the wrapper)
+
+#### Scenario: Server egress ends when the cancel flag trips while the merge is parked
+- **GIVEN** a `do_get` response stream whose inner merge is parked (no batch ready, the receiver still alive)
+- **WHEN** the shared cancellation flag is tripped from any source
+- **THEN** the response stream terminates cleanly at the next poll rather than parking until the merge
+  notices cancellation between steps
 
 ### Requirement: LIMIT-pushed and bound-key point reads plan at K=1 (defense in depth)
 
