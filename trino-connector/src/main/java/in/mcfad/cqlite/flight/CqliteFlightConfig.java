@@ -35,6 +35,13 @@ import java.util.Optional;
  * # partition key, emit splits only for the covering token range(s) instead of one per range.
  * # Default on; set false to force the full fan-out (the differential baseline).
  * cqlite.split-pruning-enabled=true                 # true | false
+ * # Weight-balanced split→pod assignment (issue #2680): deterministically sub-split each Sidecar
+ * # read-replica token range into K equal-token-span slices and rotate the slices across the
+ * # range's replica owners, so per-owner assigned weight converges to ~1/N of the total even when
+ * # per-range weights are very unequal. Default 4 (min 1, max 64); K=1 reproduces the pre-#2680
+ * # one-split-per-range behavior exactly. A pushed LIMIT or a fully-bound point read auto-plans at
+ * # K=1 (no benefit, and keeps the LIMIT shape out of the multi-stream path — issue #2782).
+ * cqlite.sub-splits-per-range=4                      # 1..64
  * </pre>
  */
 public record CqliteFlightConfig(
@@ -48,9 +55,26 @@ public record CqliteFlightConfig(
         Optional<String> snapshotTtl,
         long snapshotReuseWindowMillis,
         long snapshotRetireGraceMillis,
-        boolean splitPruningEnabled) {
+        boolean splitPruningEnabled,
+        int subSplitsPerRange) {
 
     public static final int DEFAULT_FLIGHT_PORT = 8815;
+
+    /**
+     * Weight-balanced split→pod assignment (issue #2680): number of equal-token-span slices each
+     * Sidecar read-replica token range is deterministically sub-split into before split
+     * construction. Default 4 balances skew reduction against DoGet fan-out (~48 ranges → ~192
+     * slices per full scan; per-DoGet overhead is small, #2681). K=1 reproduces the pre-#2680
+     * one-split-per-range behavior exactly. A pushed LIMIT or a fully-bound point read plans at
+     * K=1 regardless of this config (defense in depth against the #2782 hang).
+     */
+    public static final int DEFAULT_SUB_SPLITS_PER_RANGE = 4;
+
+    /** Minimum {@link #subSplitsPerRange} — 1 is the identity (one split per range). */
+    public static final int MIN_SUB_SPLITS_PER_RANGE = 1;
+
+    /** Maximum {@link #subSplitsPerRange} — bounds the DoGet fan-out per full scan. */
+    public static final int MAX_SUB_SPLITS_PER_RANGE = 64;
 
     /**
      * Plan-time split pruning (issue #2679) is ON by default: when a query's pushed-down
@@ -138,6 +162,11 @@ public record CqliteFlightConfig(
         if (snapshotRetireGraceMillis < 0) {
             throw new IllegalArgumentException(
                     "cqlite.snapshot-retire-grace-ms must be >= 0, got " + snapshotRetireGraceMillis);
+        }
+        if (subSplitsPerRange < MIN_SUB_SPLITS_PER_RANGE || subSplitsPerRange > MAX_SUB_SPLITS_PER_RANGE) {
+            throw new IllegalArgumentException(
+                    "cqlite.sub-splits-per-range must be in [" + MIN_SUB_SPLITS_PER_RANGE + ", "
+                            + MAX_SUB_SPLITS_PER_RANGE + "], got " + subSplitsPerRange);
         }
         try {
             // Fail fast on a configured value so large the ms→ns conversion would overflow long
@@ -263,9 +292,12 @@ public record CqliteFlightConfig(
         boolean splitPruning = config.containsKey("cqlite.split-pruning-enabled")
                 ? Boolean.parseBoolean(config.get("cqlite.split-pruning-enabled"))
                 : DEFAULT_SPLIT_PRUNING_ENABLED;
+        int subSplits = config.containsKey("cqlite.sub-splits-per-range")
+                ? Integer.parseInt(config.get("cqlite.sub-splits-per-range"))
+                : DEFAULT_SUB_SPLITS_PER_RANGE;
         return new CqliteFlightConfig(
                 URI.create(sidecar), port, dc, policy, ratio, statsTimeoutMs, readMode, snapshotTtl,
-                reuseWindowMs, retireGraceMs, splitPruning);
+                reuseWindowMs, retireGraceMs, splitPruning, subSplits);
     }
 
     /**

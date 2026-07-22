@@ -64,7 +64,8 @@ class CqliteFlightSplitPruningWiringTest {
                 ReadMode.LIVE, Optional.empty(),
                 CqliteFlightConfig.DEFAULT_SNAPSHOT_REUSE_WINDOW_MILLIS,
                 CqliteFlightConfig.DEFAULT_SNAPSHOT_RETIRE_GRACE_MILLIS,
-                pruningEnabled);
+                pruningEnabled,
+                CqliteFlightConfig.DEFAULT_SUB_SPLITS_PER_RANGE);
     }
 
     /**
