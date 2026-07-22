@@ -243,9 +243,17 @@ its replica’s <code dir="auto">cqlite-flight</code> endpoint with that token r
 <p>The split count follows the Sidecar’s token-range response for the ring — roughly
 <code dir="auto">nodes × vnodes_per_node</code> (e.g. a single node with Cassandra’s default 16 vnodes
 yields 16 splits; an N-node vnode ring scales up accordingly).</p>
-<p><strong>v1 type support:</strong> scalar columns (int, bigint, text, boolean, uuid, timestamp,
-…). Complex CQL types (collections, UDTs, tuples, decimal) are rejected at
-planning with a clear message rather than failing mid-scan.</p>
+<p><strong>Type support:</strong> scalar columns (int, bigint, text, boolean, uuid, timestamp, …)
+<strong>and collections/tuples/UDTs</strong> (issue #2815): <code dir="auto">list&#x3C;E></code>/<code dir="auto">set&#x3C;E></code> → <code dir="auto">array(E)</code>,
+<code dir="auto">tuple</code>/UDT → <code dir="auto">row(f1 A, …)</code> (field names + order preserved), <code dir="auto">map&#x3C;K,V></code> →
+<code dir="auto">map(K, V)</code>, mapped recursively (so <code dir="auto">list&#x3C;list&#x3C;text>></code> → <code dir="auto">array(array(varchar))</code>).
+Element/field/key/value types are limited to the connector’s scalar leaf set; a
+collection whose leaf is an unsupported type (decimal, varint, sub-millisecond
+timestamp) is still hidden. A <code dir="auto">list&#x3C;frozen&#x3C;udt>></code> projects as <code dir="auto">array(varchar)</code>
+whose elements are the server-decoded UDT strings — fully-typed UDT rows are
+tracked in issue #2349. A column whose type still cannot be mapped is hidden from
+the schema with a warning emitted on every projection (never silently dropped); a
+fully-unsupported table fails with a clear <code dir="auto">NOT_SUPPORTED</code> error.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="install-the-plugin">Install the plugin</h3><a class="sl-anchor-link" href="#install-the-plugin"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Install the plugin”</span></a></div>
 <p>A Trino plugin is <strong>not a single jar</strong> — Trino loads each plugin from an isolated
 classloader directory, so the connector jar must sit alongside all of its runtime

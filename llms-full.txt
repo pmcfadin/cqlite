@@ -14079,7 +14079,7 @@ The connector discovers nodes and token ranges through the Cassandra **Sidecar**
 
 The split count follows the Sidecar’s token-range response for the ring — roughly `nodes × vnodes_per_node` (e.g. a single node with Cassandra’s default 16 vnodes yields 16 splits; an N-node vnode ring scales up accordingly).
 
-**v1 type support:** scalar columns (int, bigint, text, boolean, uuid, timestamp, …). Complex CQL types (collections, UDTs, tuples, decimal) are rejected at planning with a clear message rather than failing mid-scan.
+**Type support:** scalar columns (int, bigint, text, boolean, uuid, timestamp, …) **and collections/tuples/UDTs** (issue #2815): `list<E>`/`set<E>` → `array(E)`, `tuple`/UDT → `row(f1 A, …)` (field names + order preserved), `map<K,V>` → `map(K, V)`, mapped recursively (so `list<list<text>>` → `array(array(varchar))`). Element/field/key/value types are limited to the connector’s scalar leaf set; a collection whose leaf is an unsupported type (decimal, varint, sub-millisecond timestamp) is still hidden. A `list<frozen<udt>>` projects as `array(varchar)` whose elements are the server-decoded UDT strings — fully-typed UDT rows are tracked in issue #2349. A column whose type still cannot be mapped is hidden from the schema with a warning emitted on every projection (never silently dropped); a fully-unsupported table fails with a clear `NOT_SUPPORTED` error.
 
 ### Install the plugin
 
