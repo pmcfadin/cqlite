@@ -1,0 +1,75 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>cqlite 0.16.0 GA — RC1 → GA comparison</title><style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --fg:#e6edf3; --muted:#8b949e;
+          --green:#3fb950; --amber:#d29922; --red:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:28px; margin:0 0 4px; }
+  h2 { font-size:20px; margin:40px 0 12px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  h3 { font-size:16px; margin:28px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  nav { margin:0 0 24px; font-size:14px; }
+  nav a { color:var(--accent); text-decoration:none; margin-right:16px; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pass { background:rgba(63,185,80,.15); color:var(--green); }
+  .watch { background:rgba(210,153,34,.15); color:var(--amber); }
+  .fail { background:rgba(248,81,73,.15); color:var(--red); }
+  table { width:100%; border-collapse:collapse; margin:12px 0; background:var(--card); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  th,td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; vertical-align:top; }
+  th { background:#1c2128; color:var(--muted); font-weight:600; font-size:13px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:none; }
+  .good { color:var(--green); font-weight:600; }
+  .warnc { color:var(--amber); font-weight:600; }
+  .badc { color:var(--red); font-weight:600; }
+  code { background:#1c2128; padding:1px 6px; border-radius:4px; font-size:13px; }
+  .callout { background:var(--card); border-left:3px solid var(--accent); padding:12px 16px; border-radius:0 8px 8px 0; margin:16px 0; }
+  .callout.green { border-left-color:var(--green); }
+  .callout.amber { border-left-color:var(--amber); }
+  .callout.red { border-left-color:var(--red); }
+  pre { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px; white-space:pre-wrap; font-size:13px; overflow-x:auto; }
+  footer { margin-top:48px; color:var(--muted); font-size:13px; border-top:1px solid var(--border); padding-top:16px; }
+</style></head><body><div class="wrap"><nav><a href="report.html">Verdict</a><a href="comparison.html">RC1 → GA comparison</a></nav>
+<h1>0.16.0-rc1 → 0.16.0 GA</h1>
+<p class="sub">What changed between the first release candidate and the shipped release. RC1 was a per-fix probe round + 3.5h soak (2026-07-21); GA was a targeted perf + fix re-verification (2026-07-23). Same test bed: 3× i4i.xlarge db (RF=3, 13 read-replica token ranges) + m5.xlarge app, Cassandra 5.0.8.</p>
+
+<div class="callout amber"><b>Read the methods before the numbers.</b> The two rounds were not run identically. RC1's split-pruning probe measured <code>do_get</code> counter deltas + <code>EXPLAIN</code> split counts (not per-query latency); GA measured 60-sample server-side <code>elapsedTimeMillis</code>. RC1's throughput came from a <b>3.5h soak</b>; GA's from a <b>180s loadtest</b>. Where a row isn't apples-to-apples it says so.</p></div>
+
+<h2>The three fixes that moved</h2>
+<table><thead><tr><th>Fix</th><th>0.16.0-rc1</th><th>0.16.0 GA</th><th>Change</th></tr></thead><tbody>
+<tr><td><b>#2806</b> / #2679 split pruning</td><td class="badc">REGRESSED / inert</td><td class="good">FIXED</td><td>13 splits (on==off) → <b>1 split</b>; the connector now reads the bound key from the pushed-down <code>filterJson</code> on the table handle instead of the empty <code>constraint.getSummary()</code></td></tr>
+<tr><td><b>#2807</b> UDT keyspace-qual parse</td><td class="badc">BLOCKED (parse crash)</td><td class="good">FIXED</td><td>rc1 <code>code: Char</code> crash at <code>frozen&lt;ks.udt&gt;</code> → all UDT tables now parse &amp; are queryable</td></tr>
+<tr><td><b>#2349</b> scalar <code>frozen&lt;udt&gt;</code></td><td class="badc">unreachable (behind #2807)</td><td class="good">VERIFIED</td><td>decodes to <code>{street: 2 Oak, zip: 10001}</code>, matches sstabledump</td></tr>
+<tr><td><b>#2815</b> <code>list&lt;frozen&lt;udt&gt;&gt;</code></td><td class="badc">column silently dropped (rc2)</td><td class="warnc">symptom fixed</td><td>column now present in schema + <code>SELECT *</code>; elements are raw serialized UDT bytes (correct data, not yet structured — 0.17 candidate)</td></tr>
+</tbody></table>
+
+<h2>Split pruning — from inert to a real win</h2>
+<p>The headline of the whole 0.16 cycle. In RC1 the optimization existed but never fired for the exact query class it targets:</p>
+<table><thead><tr><th><code>WHERE key = ?</code></th><th>0.16.0-rc1</th><th>0.16.0 GA</th></tr></thead><tbody>
+<tr><td>splits, pruning ON</td><td class="badc">13 (inert)</td><td class="good">1</td></tr>
+<tr><td>splits, pruning OFF</td><td>13</td><td>13</td></tr>
+<tr><td>ON vs OFF differential</td><td class="badc">none (identical)</td><td class="good">13 → 1</td></tr>
+<tr><td>per-query latency effect</td><td>not measurable (no fan-out change)</td><td class="good">p50 −18% (185 → 152 ms)</td></tr>
+<tr><td>coordinator CPU / query</td><td>—</td><td class="good">−4× (8 → 2 ms)</td></tr>
+</tbody></table>
+<p>RC1's verdict was <span class="pill fail">regressed → #2806</span>: the pruning logic was correct in isolation but read the wrong source, so keyed reads always fanned out to all 13 read-replica ranges. GA reads the bound key where <code>applyFilter</code> actually put it, and the point read collapses to the single owning split.</p>
+
+<h2>Throughput / latency, round over round</h2>
+<table><thead><tr><th>Round</th><th>Threads</th><th>qps</th><th>p50</th><th>p99</th><th>errors</th><th>Notes</th></tr></thead><tbody>
+<tr><td>soak-0.15</td><td>32</td><td>~39</td><td>798 ms</td><td>1366 ms</td><td>0</td><td>90-min steady block</td></tr>
+<tr><td>0.16.0-rc1</td><td>32</td><td>~32</td><td>990 ms</td><td>1255 ms</td><td>0</td><td>3.5h main soak (flat, 0 err)</td></tr>
+<tr><td><b>0.16.0 GA</b></td><td>32</td><td>~33</td><td>967 ms</td><td>1195 ms</td><td>0</td><td>180s loadtest, pruning ON</td></tr>
+</tbody></table>
+<p>Throughput and latency are statistically unchanged rc1 → GA (~32 → ~33 qps, p99 ~1255 → ~1195 ms). The ~32–39 qps ceiling persists across both because it is owned by the fan-out skew (<code>#2680</code>) and snapshot-resolve floor, not by split pruning. What pruning <i>does</i> change under load is the <b>cold ramp and tail</b>: GA pruning-ON reaches steady state faster (15.7 vs 9.9 qps at 30 s with pruning off) and holds a tighter p99.</p>
+
+<h2>What GA did not re-measure</h2>
+<p>GA was a targeted perf + fix re-verify, so a few dimensions RC1 covered were not repeated. These are gaps in the comparison, not regressions:</p>
+<table><thead><tr><th>Dimension</th><th>0.16.0-rc1</th><th>0.16.0 GA</th></tr></thead><tbody>
+<tr><td>Multi-hour drift soak</td><td class="pill pass">3.5h, flat, 0 err</td><td class="pill watch">not re-run (180s loadtest only)</td></tr>
+<tr><td>Integrity (start == end)</td><td class="pill pass">1,703,038 == 1,703,038</td><td class="pill watch">not re-run</td></tr>
+<tr><td>Memory / fd / thread stability</td><td class="pill pass">RSS flat, 0 OOM/restart</td><td class="pill watch">not captured (no Grafana)</td></tr>
+<tr><td>#2681 abort taxonomy</td><td class="pill pass">0.026% genuine-error SLI</td><td class="pill watch">not re-measured</td></tr>
+<tr><td>Snapshot grace-sweep</td><td class="pill pass">background 312→172, no query</td><td class="pill watch">not re-run</td></tr>
+</tbody></table>
+<p>The read-path stability characteristics were established sound in RC1's soak and there is no code path in the GA delta expected to change them; a full milestone soak on GA would confirm that if desired.</p>
+
+<footer>Generated from <code>clusters/cqlite-rc1-artifacts/</code> (RC1) and <code>clusters/cqlite-016final-perf-20260723-082527/</code> (GA). RC1 detail: <a href="../0.16.0-rc1/report.html">0.16.0-rc1 report</a>. Field round pmcfadin/cqlite#2805.</footer></div></body></html>
