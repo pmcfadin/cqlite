@@ -1,0 +1,72 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Process-global, byte-bounded, sharded key→partition-offset cache (issue #2059, Epic B / memory lane; Cassandra’s `AutoSavingCache`/`KeyCacheKey` key-cache model)."><title>cqlite_core::storage::cache::global_key_offset - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module global_key_offset</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.16.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module global_<wbr>key_<wbr>offset</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#design-openspecchangesbounded-key-cachedesignmd" title="Design (`openspec/changes/bounded-key-cache/design.md`)">Design (<code>openspec/changes/bounded-key-cache/design.md</code>)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>cache</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">cqlite_core</a>::<wbr><a href="../../index.html">storage</a>::<wbr><a href="../index.html">cache</a></div><h1>Module <span>global_<wbr>key_<wbr>offset</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/cqlite_core/storage/cache/global_key_offset.rs.html#1-1021">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Process-global, byte-bounded, sharded key→partition-offset cache (issue #2059,
+Epic B / memory lane; Cassandra’s <code>AutoSavingCache</code>/<code>KeyCacheKey</code> key-cache model).</p>
+<p>Replaces the per-reader <a href="super::KeyOffsetCache"><code>KeyOffsetCache</code></a> (#1570) with ONE
+process-global instance shared by every open <code>SSTableReader</code>, so aggregate resident
+key-offset memory is bounded by a single fixed global byte budget REGARDLESS of how
+many readers are concurrently open — never <code>N_readers × per_reader_cap</code> (the
+unbounded-aggregate hazard the flight <code>WarmTableRegistry</code> reintroduced by pinning one
+<code>Arc&lt;SSTableReader&gt;</code> per warm generation). Post-#2412 (Summary-guided lazy BIG index)
+a cache HIT skips the whole <code>Index.db</code> interval read; a MISS pays one interval parse
+then populates.</p>
+<h2 id="design-openspecchangesbounded-key-cachedesignmd"><a class="doc-anchor" href="#design-openspecchangesbounded-key-cachedesignmd">§</a>Design (<code>openspec/changes/bounded-key-cache/design.md</code>)</h2>
+<ul>
+<li><strong>Global, not per-table (§A).</strong> One instance shared by every reader. The generation
+identity in the key namespaces per-generation entries so one global byte budget bounds
+the whole process — Cassandra’s single global key cache, not N per-table caches. Note
+the contrast with <a href="../struct.DecompressedChunkCache.html" title="struct cqlite_core::storage::cache::DecompressedChunkCache"><code>DecompressedChunkCache</code></a>, which is
+<em>per-manager</em> and sized by the configurable <code>config.memory.block_cache.max_size</code>: this
+key cache is instead a true process-wide SINGLETON with a FIXED
+<a href="constant.DEFAULT_GLOBAL_KEY_CACHE_BYTES.html" title="constant cqlite_core::storage::cache::global_key_offset::DEFAULT_GLOBAL_KEY_CACHE_BYTES"><code>DEFAULT_GLOBAL_KEY_CACHE_BYTES</code></a> budget that ignores <code>max_size</code>. That is a deliberate
+design decision (design §B: “no new user knob”, the #2343 WS4 owner call), not an
+oversight — and not a resident-memory regression: occupancy is proportional to live
+entries, and the retired per-reader cache (#1570) already ignored <code>max_size</code> too.</li>
+<li><strong>Key = <code>(GenerationIdentity, raw partition key)</code> (§A, no-heuristics #28).</strong> The
+identity is the authoritative inode-stable identity (device+inode+size+generation,
+#2345) — never a path hash (paths rebind under snapshots, #2383, but the offsets are
+identical across a rebind, so the identity must be rebind-stable). The partition key
+is the FULL raw key bytes (collision-free by construction; hashing to a <code>u64</code> would
+admit a cross-key alias — the #1570 D1 guardrail). Two generations sharing a
+partition key never collide because the identity differs.</li>
+<li><strong>Fail-closed on identity mismatch (§C).</strong> A <code>get</code> supplies the querying reader’s
+CURRENT identity; an entry keyed on a different identity is always a MISS, so a stale
+entry from a removed/replaced generation can never serve a location for a generation
+that no longer holds it.</li>
+<li><strong>Byte-bounded LRU, sharded, nested-by-identity (§B/§F).</strong> Each shard holds a
+<code>HashMap&lt;GenerationIdentity, LruCache&lt;Box&lt;[u8]&gt;, _&gt;&gt;</code> — an inner per-generation LRU —
+plus a running resident-byte counter and a per-shard monotonic recency clock. Shard
+selection still hashes <code>(identity, key)</code> so a hot generation’s keys spread across ALL
+shards (the #2052-class contention mitigation is NOT collapsed to one shard-per-identity);
+a HIGH shard count (<a href="constant.DEFAULT_GLOBAL_KEY_CACHE_SHARDS.html" title="constant cqlite_core::storage::cache::global_key_offset::DEFAULT_GLOBAL_KEY_CACHE_SHARDS"><code>DEFAULT_GLOBAL_KEY_CACHE_SHARDS</code></a>) keeps the single global instance
+off the single-<code>Mutex</code> hot path — the hit path locks exactly ONE shard. Two structural
+wins over a flat <code>LruCache&lt;(identity, key), _&gt;</code>: (1) a <code>get</code>/lookup probes the inner LRU
+with a borrowed <code>&amp;[u8]</code> (<code>Box&lt;[u8]&gt;: Borrow&lt;[u8]&gt;</code>), so the hot hit/miss path allocates
+NO owned key — only <code>insert</code> (which must own the key anyway) allocates; (2) invalidation
+is a per-shard O(1) <code>HashMap</code> removal, never a full LRU scan.</li>
+<li><strong>Single global byte budget across nested LRUs (§B).</strong> The budget is still ONE aggregate
+byte cap, NOT a per-identity budget. Because entries live in separate inner LRUs, each
+entry carries a <code>seq</code> stamp from the per-shard recency clock (bumped on every get/insert);
+when a shard is over budget, eviction picks the globally-least-recently-used entry across
+ALL identities in that shard by comparing each inner LRU’s tail <code>seq</code> (<code>peek_lru</code>) and
+<code>pop_lru</code>-ing the minimum. This is the cross-identity recency signal that stops one hot
+generation from starving another and keeps the byte bound aggregate, not per-identity.</li>
+<li><strong>Invalidation by identity (§C).</strong> On generation removal / compaction / warm-registry
+evict, <a href="struct.GlobalKeyOffsetCache.html#method.invalidate" title="method cqlite_core::storage::cache::global_key_offset::GlobalKeyOffsetCache::invalidate"><code>invalidate</code></a> drops ALL entries for that
+identity by removing its inner <code>HashMap</code> entry from each shard — O(matching-shards) O(1)
+removals that never scan an unrelated identity’s entries. Dropped entries are counted by
+a DISTINCT <code>invalidations</code> counter (separate from budget <code>evictions</code>). A #2383
+rebind-by-inode does NOT invalidate (identity unchanged).</li>
+<li><strong>Poison-tolerant (§F).</strong> Every lock uses <code>lock().unwrap_or_else(|e| e.into_inner())</code>.
+No <code>unwrap()</code>/<code>expect()</code>.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.GenerationIdentity.html" title="struct cqlite_core::storage::cache::global_key_offset::GenerationIdentity">Generation<wbr>Identity</a></dt><dd>The authoritative inode-stable identity of one SSTable generation, the
+namespacing half of the cache key (design §A; mirrors the flight
+<code>warm::identity::GenerationId</code> #2345, extended with <code>size</code> per the #2383
+rebind gate). Two directory entries that are the same on-disk bytes share a
+<code>(device, inode)</code>; <code>generation</code> + <code>size</code> are carried as cross-checks so a
+recycled inode or a byte-changed generation is a DISTINCT identity — never a
+stale hit for changed bytes.</dd><dt><a class="struct" href="struct.GlobalKeyOffsetCache.html" title="struct cqlite_core::storage::cache::global_key_offset::GlobalKeyOffsetCache">Global<wbr>KeyOffset<wbr>Cache</a></dt><dd>The process-global, byte-bounded, sharded key→partition-offset cache.</dd><dt><a class="struct" href="struct.PartitionLoc.html" title="struct cqlite_core::storage::cache::global_key_offset::PartitionLoc">Partition<wbr>Loc</a></dt><dd>The resolved location of a partition, exactly what the index/trie descent
+produces.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_GLOBAL_KEY_CACHE_BYTES.html" title="constant cqlite_core::storage::cache::global_key_offset::DEFAULT_GLOBAL_KEY_CACHE_BYTES">DEFAULT_<wbr>GLOBAL_<wbr>KEY_<wbr>CACHE_<wbr>BYTES</a></dt><dd>Default global key-cache BYTE budget (a fixed named constant inside the
+<code>&lt;128MB</code> envelope — no new user knob, per design §B and the #2343 WS4 decision).</dd><dt><a class="constant" href="constant.DEFAULT_GLOBAL_KEY_CACHE_SHARDS.html" title="constant cqlite_core::storage::cache::global_key_offset::DEFAULT_GLOBAL_KEY_CACHE_SHARDS">DEFAULT_<wbr>GLOBAL_<wbr>KEY_<wbr>CACHE_<wbr>SHARDS</a></dt><dd>Default shard count (power of two). HIGHER than the per-reader default (#1570’s
+16) because a single global instance concentrates ALL reader traffic onto one
+cache, so the shard count must be high enough that the hit path never serializes
+(design §F, the explicit #2052-class mitigation).</dd></dl></section></div></main></body></html>

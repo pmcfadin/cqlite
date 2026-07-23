@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ExecutionHints","ParameterMetadata","PreparedContext","PreparedQuery","PreparedQueryBuilder","PreparedQueryStats"]};

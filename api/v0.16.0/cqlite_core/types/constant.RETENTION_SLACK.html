@@ -1,0 +1,48 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Retention force-copy slack (issue #1644, D2) — DOCUMENTED INTENT, see `Value::into_owned` for the actual implementation."><title>RETENTION_SLACK in cqlite_core::types - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc constant"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">RETENTION_SLACK</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.16.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In cqlite_<wbr>core::<wbr>types</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">cqlite_core</a>::<wbr><a href="index.html">types</a></div><h1>Constant <span class="constant">RETENTION_<wbr>SLACK</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/cqlite_core/types.rs.html#1160">Source</a> </span></div><pre class="rust item-decl"><code>pub const RETENTION_SLACK: <a class="primitive" href="https://doc.rust-lang.org/1.97.1/std/primitive.usize.html">usize</a> = _; // 4_096usize</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Retention force-copy slack (issue #1644, D2) — DOCUMENTED INTENT, see
+<a href="enum.Value.html#method.into_owned" title="method cqlite_core::types::Value::into_owned"><code>Value::into_owned</code></a> for the actual implementation.</p>
+<p>A borrowed <a href="enum.Value.html" title="enum cqlite_core::types::Value"><code>Value</code></a> payload is a refcounted <code>slice</code>/<code>slice_ref</code> view of a
+whole decompression chunk, so a tiny value can pin a large (e.g. 64 KB)
+chunk alive. The rule is “compact any payload whose backing is materially
+larger than the payload — <code>backing_capacity &gt; payload.len() + RETENTION_SLACK</code>”.</p>
+<p>[<code>bytes::Bytes::try_into_mut</code>] alone CANNOT detect an oversized backing: it
+succeeds whenever the <code>Bytes</code> is uniquely REFERENCED (refcount == 1),
+regardless of whether the payload is a small sub-slice of a much larger
+original allocation. A sole-owner sliver of a big chunk — the
+production-common case once the scan window advances past a chunk and drops
+its own reference, leaving a retained cell as the last borrower — succeeds
+there, and <code>BytesMut::from(bytes)</code> would REUSE the original oversized
+allocation rather than shrink it, so <code>Bytes::from(mutable)</code> would still pin
+the whole parent chunk.</p>
+<p>The only signals <code>bytes</code> exposes are the recovered
+[<code>bytes::BytesMut::capacity</code>] and the payload <a href="bytes::Bytes::len"><code>len</code></a>;
+neither the slice’s offset within its parent NOR the parent’s total size is
+observable. Critically, <code>capacity()</code> reflects only the remaining capacity of
+the ORIGINAL backing allocation AHEAD of this payload’s start (verified
+against <code>bytes</code> 1.12.1 — a 10-byte slice at offset 100 of a 64 KiB buffer
+recovers <code>capacity() == 65436</code>; a genuinely tight 10-byte <code>Bytes</code> recovers
+<code>capacity() == 10</code>). Bytes BEFORE the payload’s offset are invisible to it,
+so an ahead-capacity-only rule misses a small payload sliced near the END of
+a big chunk (a 4-byte value at offset 65_000 of a 64 KiB chunk recovers
+<code>capacity() ~= 536</code>, well under <code>RETENTION_SLACK</code>, yet still pins the whole
+64 KiB).</p>
+<p><a href="enum.Value.html#method.into_owned" title="method cqlite_core::types::Value::into_owned"><code>Value::into_owned</code></a> therefore keys the decision on absolute payload SIZE,
+since the danger is specifically “a SMALL payload pinning a LARGE backing”:</p>
+<ul>
+<li><strong>Small payloads (<code>len() &lt;= RETENTION_SLACK</code>) — unconditional, exact</strong>:
+always copied into a tight standalone <code>Bytes</code>, regardless of <code>capacity()</code>.
+This guarantees no small value pins a large parent no matter WHERE it sits
+in the original chunk (closes both the low-offset and high-offset cases).</li>
+<li><strong>Large payloads (<code>len() &gt; RETENTION_SLACK</code>) — best-effort, BOUNDED not
+proportional</strong>: kept unless the ahead-capacity heuristic <code>capacity() &gt; len() + RETENTION_SLACK</code> fires. This heuristic is blind to leading-offset
+waste: a large payload sole-owned near the END of its backing chunk can
+still pin the WHOLE chunk (the leftover waste can be many multiples of the
+payload’s own size, not merely “proportionally small” — e.g. a 5 KiB
+payload at offset 59 KiB of a 64 KiB chunk still pins the full 64 KiB).
+The residual leak is nonetheless BOUNDED — at most one chunk’s worth of
+retention per affected large value, never unbounded growth — and a full
+copy of a large value is comparatively expensive, so this is accepted as
+a known, tracked limitation (issue #2597) rather than fixed here; closing
+it fully needs provenance tracking (whether a <code>Bytes</code> originated from a
+window borrow) that the current <code>bytes</code> API alone cannot express.</li>
+</ul>
+</div></details></section></div></main></body></html>

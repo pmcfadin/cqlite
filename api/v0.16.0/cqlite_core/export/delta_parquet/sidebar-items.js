@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DeltaParquetCompression","DeltaParquetError"],"fn":["write_delta_records_to_bytes"],"struct":["DeltaParquetOptions","DeltaParquetWriter"]};
