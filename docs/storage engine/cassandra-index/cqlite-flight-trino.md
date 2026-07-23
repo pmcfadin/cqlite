@@ -33,7 +33,7 @@ CQLite's Arrow Flight server runs co-located on every Cassandra node and exposes
 |-------|---|---|
 | `CqliteFlightConnector` | Plugin entry point; composes Metadata, SplitManager, PageSource | `CqliteFlightConnector.java:15` |
 | `CqliteFlightMetadata` | Sidecar-backed metadata: keyspace existence, table DDL extraction, constraint translation | `CqliteFlightMetadata.java:48` |
-| `CqliteFlightSplitManager` | Token-range-replicas → splits (1 range → 1 replica); emits Flight endpoints | `CqliteFlightSplitManager.java` |
+| `CqliteFlightSplitManager` | Token-range-replicas → splits; each range is deterministically sub-split into `cqlite.sub-splits-per-range` (default 4) equal-token-span slices rotated across the range's replica owners for weight balance (issue #2680), one slice → one replica; a pushed `LIMIT` / point read / aggregate plans at K=1; emits Flight endpoints | `CqliteFlightSplitManager.java` |
 | `CqliteFlightPageSourceProvider` | Flight `DoGet` (Java arrow-flight) → `VectorSchemaRoot` → Trino `Page` | `CqliteFlightPageSourceProvider.java` |
 | `SidecarClient` | HTTP client for Cassandra Sidecar (ring, token-range-replicas, schema) | `sidecar/SidecarClient.java:23` |
 | `FlightTicketJson` | JSON serialization for tickets sent to server | `FlightTicketJson.java` |

@@ -116,6 +116,28 @@ public final class CqliteFlightClient {
             return stream;
         }
 
+        /**
+         * CANCEL the in-flight {@code DoGet} on an EARLY close (issue #2782), then release the
+         * client. When Trino satisfies a pushed {@code LIMIT} it closes the page source while
+         * server batches are still queued; without an explicit cancel the gRPC call kept waiting
+         * on undrained batches and the query hung. {@link FlightStream#cancel(String, Throwable)}
+         * sends the Flight-level stop signal (non-blocking — it does not drain), then the client
+         * is closed. Best-effort and safe to call once: the page source clears its reference
+         * afterward so it is never invoked twice.
+         */
+        public void cancel() {
+            try {
+                stream.cancel("split closed early (satisfied LIMIT / cancelled operator, #2782)", null);
+            } catch (Exception e) {
+                // best-effort: fall through to releasing the client regardless
+            }
+            try {
+                client.close();
+            } catch (Exception e) {
+                // best-effort
+            }
+        }
+
         @Override
         public void close() {
             try {

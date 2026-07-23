@@ -32,6 +32,20 @@ final class ReplicaFailoverStream implements AutoCloseable {
 
         @Override
         void close();
+
+        /**
+         * Explicitly CANCEL this stream on an EARLY close — before it is fully drained (issue
+         * #2782). Trino cancels the operator once a pushed {@code LIMIT} is satisfied and closes
+         * the page source while server batches are still queued; merely releasing the handle then
+         * left the underlying {@code DoGet} gRPC waiting on unconsumed batches and the query hung.
+         * Cancellation MUST be idempotent and NON-BLOCKING (it signals the server to stop and
+         * releases the client resources — it never waits to consume the remaining batches). The
+         * default releases the stream via {@link #close()}; the production {@code DoGet} adapter
+         * overrides it to first send the Flight-level cancel signal.
+         */
+        default void cancel() {
+            close();
+        }
     }
 
     /** Opens a {@link BatchStream} against one replica {@code host:port} for a ticket. */
@@ -45,7 +59,15 @@ final class ReplicaFailoverStream implements AutoCloseable {
     private final byte[] ticket;
     private final StreamOpener opener;
 
-    private BatchStream stream;
+    // The active underlying stream and the early-close flag are read/written from TWO threads
+    // (issue #2680 / P0 #2782): the driver thread advances in {@link #next()} while Trino's
+    // cancellation thread calls {@link #close()} the instant a pushed LIMIT is satisfied on
+    // ANOTHER surplus split. Both are volatile so a close is visible to a concurrent open, and
+    // {@code next()} double-checks {@code closed} AFTER publishing a freshly-opened stream so a
+    // close that raced just ahead of the open still cancels it — otherwise that surplus split's
+    // DoGet gRPC blocks on undrained batches forever (the intermittent K>1 hang).
+    private volatile BatchStream stream;
+    private volatile boolean closed;
     private int hostIndex;
     private boolean started;
 
@@ -67,10 +89,27 @@ final class ReplicaFailoverStream implements AutoCloseable {
     boolean next() {
         while (true) {
             try {
-                if (stream == null) {
-                    stream = opener.open(hosts.get(hostIndex), port, ticket);
+                // An early close raced ahead of this advance (Trino cancelled a surplus split
+                // once the LIMIT was satisfied): stop WITHOUT opening a new stream, so a fresh
+                // DoGet is never started after close() already ran and cleared its reference.
+                if (closed) {
+                    return false;
                 }
-                boolean hasNext = stream.next();
+                BatchStream active = stream;
+                if (active == null) {
+                    active = opener.open(hosts.get(hostIndex), port, ticket);
+                    stream = active;
+                    // close() may have run between the null-check and publishing `active` above;
+                    // it would have found stream == null and cancelled nothing. Re-check under
+                    // the volatile flag and cancel THIS just-opened stream ourselves so its DoGet
+                    // gRPC cannot block on undrained batches (the intermittent K>1 #2782 hang).
+                    if (closed) {
+                        cancelActiveQuietly(active);
+                        stream = null;
+                        return false;
+                    }
+                }
+                boolean hasNext = active.next();
                 if (hasNext) {
                     started = true;
                 }
@@ -87,22 +126,58 @@ final class ReplicaFailoverStream implements AutoCloseable {
     }
 
     VectorSchemaRoot getRoot() {
-        return stream.getRoot();
+        // Single volatile read: close() (Trino's cancel thread) may null `stream` between next()
+        // returning true and this read on the driver thread. Snapshot it and, if the stream was
+        // just cancelled, return null (no current root) rather than NPE — the batch is discarded on
+        // the cancel path anyway. Non-blocking and idempotent, mirroring how next() finishes when
+        // closed (issue #2680).
+        BatchStream active = stream;
+        if (active == null) {
+            return null;
+        }
+        return active.getRoot();
     }
 
+    /**
+     * Release this stream, CANCELLING the currently-active underlying {@code DoGet} stream
+     * (issue #2782). Trino calls this when it closes the page source — including EARLY, once a
+     * pushed {@code LIMIT} is satisfied and unconsumed server batches remain — so a plain
+     * release left the gRPC call blocked on undrained batches and the query hung. Cancel
+     * propagates the Flight-level stop signal to the ACTIVE underlying stream (not just the
+     * wrapper), is NON-BLOCKING (it never drains remaining batches), and is IDEMPOTENT: once
+     * released the reference is cleared, so a second {@code close()} is a harmless no-op.
+     */
     @Override
     public void close() {
-        closeStreamQuietly();
+        // Set the flag BEFORE touching the stream: a concurrent next() that has not yet opened
+        // its stream then sees `closed` and refuses to open one (or cancels the one it just
+        // published), so no surplus DoGet outlives this close (issue #2680 / P0 #2782).
+        closed = true;
+        BatchStream active = stream;
+        if (active != null) {
+            stream = null;
+            cancelActiveQuietly(active);
+        }
+    }
+
+    /** Best-effort cancel of one underlying stream; never lets close/next throw. */
+    private static void cancelActiveQuietly(BatchStream active) {
+        try {
+            active.cancel();
+        } catch (RuntimeException ignore) {
+            // best-effort cancel + release; never let close throw
+        }
     }
 
     private void closeStreamQuietly() {
-        if (stream != null) {
+        BatchStream active = stream;
+        if (active != null) {
+            stream = null;
             try {
-                stream.close();
+                active.close();
             } catch (RuntimeException ignore) {
                 // best-effort release
             }
-            stream = null;
         }
     }
 
@@ -124,6 +199,13 @@ final class ReplicaFailoverStream implements AutoCloseable {
                 @Override
                 public void close() {
                     handle.close();
+                }
+
+                @Override
+                public void cancel() {
+                    // Early close (satisfied LIMIT, #2782): signal the server-side DoGet to stop
+                    // and release the client, WITHOUT draining the remaining queued batches.
+                    handle.cancel();
                 }
             };
         };

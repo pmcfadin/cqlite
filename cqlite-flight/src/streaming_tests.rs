@@ -255,8 +255,14 @@ fn do_get_stream_surfaces_panic_as_internal_status_not_eof() {
         );
         let inner = Box::pin(ReceiverStream { rx });
         let pr = probe();
-        let metered =
-            MeteredDoGetStream::new(inner, RpcMetrics::start("do_get"), None, pr.clone(), None);
+        let metered = MeteredDoGetStream::new(
+            inner,
+            RpcMetrics::start("do_get"),
+            None,
+            pr.clone(),
+            None,
+            None,
+        );
         let mut stream = encode_do_get(metered, schema_ref, pr.clone());
 
         // First message is the schema; the panic must arrive as an `Err` Status
@@ -1259,4 +1265,69 @@ fn metrics_attribute_emitted_prefix_on_cancel() {
         "an early drop (client disconnect) must record exactly one error, \
          same as a returned Err used to before this rewrite"
     );
+}
+
+/// **Issue #2680 / P0 #2782 — server-side egress hardening.** A `do_get` response
+/// stream whose inner merge is PARKED (bounded channel empty, no batch ready, the
+/// receiver still alive so no send-failure fires) must terminate promptly when the
+/// shared [`CancelFlag`] trips from ANY source — a half-closed peer, a transport
+/// reset, or the drop guard — NOT wait for the merge to notice cancellation between
+/// steps. The `select!` in `MeteredDoGetStream::poll_next` races the parked inner
+/// poll against the flag's async cancellation and ends the stream cleanly (`None`).
+///
+/// FAILS on pre-hardening `poll_next` (a bare `Poll::Pending` passthrough): with the
+/// channel empty and its sender held, the inner stream parks forever and the stream
+/// never resolves, so this times out. PASSES with the fix because the cancellation
+/// arm fires at the next poll after the flag trips.
+#[test]
+fn metered_stream_ends_when_cancel_flag_trips_while_inner_parked() {
+    let schema = simple_schema();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let schema_ref = Arc::new(
+            MergeProducer::new(schema, 4)
+                .unwrap()
+                .arrow_schema()
+                .unwrap(),
+        );
+        // A channel whose sender is HELD (never sends, never drops): the inner
+        // ReceiverStream polls Pending forever — the "merge parked, receiver alive"
+        // shape that a bare Pending passthrough could never break out of.
+        let (_tx, rx) = mpsc::channel::<Result<RecordBatch, ProducerError>>(1);
+        let inner = Box::pin(ReceiverStream { rx });
+
+        let cancel = CancelFlag::new();
+        let guard = cancel.drop_guard();
+        let cancelled = Box::pin(cancel.cancelled());
+        let pr = probe();
+        let metered = MeteredDoGetStream::new(
+            inner,
+            RpcMetrics::start("do_get"),
+            Some(guard),
+            pr.clone(),
+            None,
+            Some(cancelled),
+        );
+        let mut stream = encode_do_get(metered, schema_ref, pr);
+
+        // The schema message is emitted eagerly by the encoder even for an empty
+        // result; pull it so the next poll reaches the parked inner stream.
+        let _schema_msg =
+            tokio::time::timeout(std::time::Duration::from_secs(3), read_one(&mut stream))
+                .await
+                .expect("schema message arrives without a hang")
+                .expect("schema message present");
+
+        // Trip the flag from "another thread" (a half-closed peer / transport reset).
+        cancel.cancel();
+
+        // Egress must end (schema-only stream, no batches) within a bound, not park.
+        let next =
+            tokio::time::timeout(std::time::Duration::from_secs(3), read_one(&mut stream)).await;
+        let ended = next.expect("stream must resolve within 3s of the cancel, not park forever");
+        assert!(
+            ended.is_none(),
+            "a cancelled parked stream ends cleanly (None), got a further message: {ended:?}"
+        );
+    });
 }
