@@ -72,7 +72,43 @@ LIMIT shape structurally out of the multi-stream path even if the drain fix regr
 - **WHEN** `getSplits` runs
 - **THEN** the emitted scan split count is range count × 4
 
-### Requirement: Read-replica token ranges are deterministically sub-split into K equal-span slices
+### Requirement: Aggregated handle is exempt from sub-splitting
+
+An aggregated table handle SHALL plan exactly ONE finalize split whose page source fans out to its member
+ranges sequentially on a single driver; sub-splitting it would multiply its serialized `DoGet` round trips
+K× with no work to spread. The aggregate path SHALL build at K=1 (parent-range granularity), and its
+snapshot host chooser SHALL be evaluated at that same K=1 granularity so every host a member reads has a
+pinned snapshot.
+
+#### Scenario: Aggregated handle is exempt from sub-splitting
+- **GIVEN** an aggregated table handle and `cqlite.sub-splits-per-range=4`
+- **WHEN** `getSplits` runs
+- **THEN** exactly one finalize split is emitted and its member ranges are the PARENT read-replica ranges
+  (count == range count, not range count × 4)
+- **AND** the non-aggregated eligible scan path over the same topology and config still emits range
+  count × 4 splits
+
+### Requirement: A docker-compose E2E LIMIT hang regression gates merge
+
+The `Flight ↔ Trino E2E` docker-compose lane SHALL include an assertion that a small pushed-`LIMIT` query
+(e.g. `SELECT count(*) FROM (SELECT id FROM <table> LIMIT 2)`) and a partial-predicate `LIMIT` query
+complete and return the expected rows within the harness timeout, exercised with the default
+`cqlite.sub-splits-per-range`. A hang or timeout on this lane SHALL block merge — the certification MUST NOT
+be armed for auto-merge over a red `flight-trino-e2e` result. This is the exact lane that caught #2782.
+
+#### Scenario: LIMIT 2 completes under the default sub-split configuration
+- **WHEN** the E2E runs `SELECT count(*) FROM (SELECT id FROM <table> LIMIT 2)` at the default
+  `cqlite.sub-splits-per-range`
+- **THEN** the query returns the expected row(s) within the harness timeout (no 180s hang)
+- **AND** a partial-predicate `LIMIT 2` query likewise returns exactly its expected rows
+
+#### Scenario: A red E2E blocks merge
+- **WHEN** the `flight-trino-e2e` lane reports a hang/timeout on the LIMIT regression
+- **THEN** the change is not merged (auto-merge is not armed over the red result)
+
+## MODIFIED Requirements
+
+### Requirement: Read-replica token ranges are deterministically sub-split into K equal-span slices before split construction
 
 `CqliteFlightSplitManager` SHALL expand each Sidecar read-replica token range into K slices of equal token
 span (K = `cqlite.sub-splits-per-range`, integer config, default 4, minimum 1, maximum 64) before any
@@ -102,22 +138,6 @@ replica owner set verbatim. With K=1 the emitted split set SHALL be identical to
 - **WHEN** `getSplits` runs
 - **THEN** the emitted splits (ranges, hosts, owner sets, count) are identical to the pre-change
   one-split-per-range behavior
-
-### Requirement: Aggregated handle is exempt from sub-splitting
-
-An aggregated table handle SHALL plan exactly ONE finalize split whose page source fans out to its member
-ranges sequentially on a single driver; sub-splitting it would multiply its serialized `DoGet` round trips
-K× with no work to spread. The aggregate path SHALL build at K=1 (parent-range granularity), and its
-snapshot host chooser SHALL be evaluated at that same K=1 granularity so every host a member reads has a
-pinned snapshot.
-
-#### Scenario: Aggregated handle is exempt from sub-splitting
-- **GIVEN** an aggregated table handle and `cqlite.sub-splits-per-range=4`
-- **WHEN** `getSplits` runs
-- **THEN** exactly one finalize split is emitted and its member ranges are the PARENT read-replica ranges
-  (count == range count, not range count × 4)
-- **AND** the non-aggregated eligible scan path over the same topology and config still emits range
-  count × 4 splits
 
 ### Requirement: Slice-to-owner assignment is weight-balanced and deterministic
 
@@ -190,21 +210,3 @@ requirement, is planned at parent-range granularity).
 - **GIVEN** a sliced RF==N topology
 - **WHEN** `distinctReplicaHosts` computes the snapshot host set
 - **THEN** it equals exactly the set of primary hosts over all emitted slices
-
-### Requirement: A docker-compose E2E LIMIT hang regression gates merge
-
-The `Flight ↔ Trino E2E` docker-compose lane SHALL include an assertion that a small pushed-`LIMIT` query
-(e.g. `SELECT count(*) FROM (SELECT id FROM <table> LIMIT 2)`) and a partial-predicate `LIMIT` query
-complete and return the expected rows within the harness timeout, exercised with the default
-`cqlite.sub-splits-per-range`. A hang or timeout on this lane SHALL block merge — the certification MUST NOT
-be armed for auto-merge over a red `flight-trino-e2e` result. This is the exact lane that caught #2782.
-
-#### Scenario: LIMIT 2 completes under the default sub-split configuration
-- **WHEN** the E2E runs `SELECT count(*) FROM (SELECT id FROM <table> LIMIT 2)` at the default
-  `cqlite.sub-splits-per-range`
-- **THEN** the query returns the expected row(s) within the harness timeout (no 180s hang)
-- **AND** a partial-predicate `LIMIT 2` query likewise returns exactly its expected rows
-
-#### Scenario: A red E2E blocks merge
-- **WHEN** the `flight-trino-e2e` lane reports a hang/timeout on the LIMIT regression
-- **THEN** the change is not merged (auto-merge is not armed over the red result)
