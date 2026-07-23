@@ -156,3 +156,55 @@ impl Iterator for MutationIter<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::commitlog::descriptor::tests::build_header;
+
+    fn write_segment(params: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        // A valid descriptor header alone is enough: open_with_schemas checks
+        // compression_class/encrypted BEFORE walking any frame body, so no sync
+        // marker / mutation bytes are needed to exercise the fail-closed guard.
+        let bytes = build_header(7, 1_689_012_345_678_i64, params);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("CommitLog-7-1.log");
+        fs::write(&path, &bytes).expect("write segment");
+        (dir, path)
+    }
+
+    #[test]
+    fn open_fails_closed_on_cassandra_shaped_compression() {
+        // Real Cassandra 5.0.2 params: compressionClass is a plain string. This
+        // is the exact key shape the descriptor's compression detection must
+        // recognize so open() returns the typed UnsupportedFormat error rather
+        // than walking into an undecodable compressed body (PR #2797 blocker).
+        let (_dir, path) = write_segment(r#"{"compressionClass":"LZ4Compressor"}"#);
+        assert!(matches!(
+            CommitLogReader::open(&path),
+            Err(Error::UnsupportedFormat(_))
+        ));
+    }
+
+    #[test]
+    fn open_fails_closed_on_cassandra_shaped_encryption() {
+        // Real Cassandra 5.0.2 params: encryption is declared via encCipher /
+        // encKeyAlias / encIV. open() must fail closed with UnsupportedFormat
+        // (PR #2797 blocker).
+        let (_dir, path) =
+            write_segment(r#"{"encCipher":"AES/CBC/PKCS5Padding","encKeyAlias":"testing:1"}"#);
+        assert!(matches!(
+            CommitLogReader::open(&path),
+            Err(Error::UnsupportedFormat(_))
+        ));
+    }
+
+    #[test]
+    fn open_succeeds_on_uncompressed_unencrypted_header() {
+        // Baseline: a plain `{}` descriptor is neither compressed nor encrypted,
+        // so the fail-closed guard must NOT fire on it.
+        let (_dir, path) = write_segment("{}");
+        let reader = CommitLogReader::open(&path).expect("plain segment opens");
+        assert!(!reader.descriptor().is_unsupported_payload());
+    }
+}

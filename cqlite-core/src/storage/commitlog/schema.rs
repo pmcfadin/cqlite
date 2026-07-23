@@ -70,12 +70,24 @@ pub type SchemaSet = HashMap<[u8; 16], CommitLogSchema>;
 /// `None` and are decoded with an unsigned-vint length prefix.
 pub fn cql_fixed_len(type_name: &str) -> Option<usize> {
     match type_name.trim().to_ascii_lowercase().as_str() {
-        "boolean" | "tinyint" => Some(1),
-        "smallint" => Some(2),
-        "int" | "date" | "float" => Some(4),
-        "bigint" | "timestamp" | "time" | "double" => Some(8),
+        "boolean" => Some(1),
+        "int" | "float" => Some(4),
+        "bigint" | "timestamp" | "double" => Some(8),
         "uuid" | "timeuuid" => Some(16),
-        // `counter` is NOT fixed-8: CounterColumnType extends NumberType (not
+        // `tinyint`/`smallint`/`date`/`time` are NOT fixed-length. Per Cassandra
+        // 5.0.2 marshal source, `ByteType`(tinyint)/`ShortType`(smallint) extend
+        // `NumberType`, and `SimpleDateType`(date)/`TimeType`(time) extend
+        // `TemporalType`; none of them — nor their parents — override
+        // `AbstractType.valueLengthIfFixed()`, so all four inherit
+        // `VARIABLE_LENGTH == -1` and are written via `writeWithVIntLength`
+        // (unsigned-vint length prefix + bytes), exactly like text/blob.
+        // Classifying them as `Fixed(1/2/4/8)` would read the first value byte
+        // as the vint length and misalign the cursor for every subsequent cell
+        // (mirrors the AUTHORITY NOTE in parser/repair_clustering.rs). They fall
+        // through to `None` below (the vint-length path) and stay simple scalars
+        // on the `is_simple_scalar_type` allowlist.
+        //
+        // `counter` is NOT fixed-8 either: CounterColumnType extends NumberType (not
         // LongType) and does not override valueLengthIfFixed(), so a counter
         // cell's on-disk value is a vint-length-prefixed CounterContext blob
         // (header + shards), not a raw i64. Treating it as fixed-8 silently
@@ -189,6 +201,21 @@ mod tests {
         // — a counter cell is a vint-length-prefixed CounterContext blob, not
         // a raw fixed-8 i64 (roborev finding, review-first pass).
         assert_eq!(cql_fixed_len("counter"), None);
+    }
+
+    #[test]
+    fn tinyint_smallint_date_time_are_not_fixed_length() {
+        // Regression: none of ByteType(tinyint)/ShortType(smallint)/
+        // SimpleDateType(date)/TimeType(time) override valueLengthIfFixed() in
+        // Cassandra 5.0.2 — they inherit VARIABLE_LENGTH and are written with a
+        // vint length prefix (writeWithVIntLength), exactly like text/blob.
+        // Treating them as Fixed(1/2/4/8) reads the first value byte as the vint
+        // length and misaligns every subsequent cell (PR #2797 blocker).
+        for t in ["tinyint", "smallint", "date", "time"] {
+            assert_eq!(cql_fixed_len(t), None, "{t} must be variable-length");
+            // Still a simple scalar — just a variable-length one.
+            assert!(is_simple_scalar_type(t), "{t} stays a simple scalar");
+        }
     }
 
     #[test]

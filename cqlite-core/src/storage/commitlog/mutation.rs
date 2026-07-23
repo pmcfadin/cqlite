@@ -602,6 +602,65 @@ mod tests {
         assert_eq!(cql_fixed_len("counter"), None);
     }
 
+    #[test]
+    fn tinyint_cell_stays_aligned_into_following_int_cell() {
+        // Regression (PR #2797 blocker): tinyint is vint-length-prefixed, not
+        // fixed-1. Before the fix, cql_fixed_len("tinyint") == Some(1) read the
+        // uvint LENGTH byte (0x01) as the value and left the cursor one byte
+        // behind, corrupting the following int cell. Hand-encode one row with a
+        // tinyint cell (value 5) followed by an int cell (value 42) and prove
+        // both decode with the cursor staying aligned across the tinyint.
+        let schema = CommitLogSchema {
+            keyspace: "commitlog_test".into(),
+            table: "gauges".into(),
+            partition_key: vec![ColumnSpec::new("id", "int")],
+            clustering: vec![],
+            columns: vec![
+                ColumnSpec::new("flag", "tinyint"),
+                ColumnSpec::new("count", "int"),
+            ],
+        };
+        let column_names = vec!["flag".to_string(), "count".to_string()];
+
+        let bytes: Vec<u8> = [
+            // Row flags: all columns present, nothing else.
+            ROW_HAS_ALL_COLUMNS,
+            // Cell 1 ("flag", tinyint): use-row-timestamp, then vint-length(1) + 0x05.
+            CELL_USE_ROW_TIMESTAMP,
+            0x01, // uvint length = 1
+            0x05, // the tinyint byte value 5
+            // Cell 2 ("count", int): use-row-timestamp, then fixed-4 big-endian 42.
+            CELL_USE_ROW_TIMESTAMP,
+            0x00,
+            0x00,
+            0x00,
+            0x2A,
+            // Terminator.
+            ROW_END_OF_PARTITION,
+        ]
+        .to_vec();
+
+        let mut c = Cursor::new(&bytes);
+        let rows = match decode_rows(&mut c, &schema, &column_names) {
+            Ok(rows) => rows,
+            Err(Unsupported) => panic!("row with a variable-length tinyint cell must decode"),
+        };
+        assert_eq!(rows.len(), 1);
+        let cells = &rows[0].cells;
+        let flag = cells.iter().find(|c| c.column == "flag").unwrap();
+        assert_eq!(
+            flag.value.as_deref(),
+            Some([0x05].as_ref()),
+            "tinyint value must be the single byte 5, not the vint length"
+        );
+        let count = cells.iter().find(|c| c.column == "count").unwrap();
+        assert_eq!(
+            count.value.as_deref(),
+            Some([0x00, 0x00, 0x00, 0x2A].as_ref()),
+            "int cell must stay aligned after the variable-length tinyint"
+        );
+    }
+
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len())
             .step_by(2)

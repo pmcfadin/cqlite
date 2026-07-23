@@ -166,6 +166,16 @@ impl CommitLogDescriptor {
 /// The params object is Cassandra's own authoritative descriptor metadata; we
 /// parse it as JSON (never sniff the payload). An unparseable/empty params
 /// string is treated as uncompressed+unencrypted (the `{}` baseline).
+///
+/// The key names are the ones Cassandra 5.0.2 actually writes in
+/// `CommitLogDescriptor.constructParametersString` /
+/// `EncryptionContext.toHeaderParameters`:
+/// - `compressionClass` (`COMPRESSION_CLASS_KEY`) — a plain STRING value (the
+///   compressor class name), NOT a nested `{"class": ...}` object.
+///   (`compressionParameters` also exists but is informational and unneeded
+///   for unsupported-payload detection.)
+/// - `encCipher` / `encKeyAlias` / `encIV` — the encryption-context keys; there
+///   is no `encryptionContext`/`encryption` key on the wire.
 fn parse_params(json: &str) -> (Option<String>, bool) {
     let value: serde_json::Value = match serde_json::from_str(json) {
         Ok(v) => v,
@@ -175,32 +185,22 @@ fn parse_params(json: &str) -> (Option<String>, bool) {
         Some(o) => o,
         None => return (None, false),
     };
-    // Cassandra keys: "compression" -> {"class": ..., "options": {...}}, but
-    // some configurations write `"compression": null` when compression is
-    // unset (rather than omitting the key). A present-but-null value must
-    // parse as "no compression" (None), same as an absent key — not fall
-    // through to the "<unknown>" sentinel, which would make CommitLogReader
-    // fail-closed on a perfectly valid uncompressed segment (roborev finding,
-    // review-first pass). Only a present, non-null value lacking a parseable
-    // `class` field is genuinely "some compression we can't identify".
-    let compression_class = obj.get("compression").and_then(|c| {
-        if c.is_null() {
-            None
-        } else {
-            Some(
-                c.get("class")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "<unknown>".to_string()),
-            )
-        }
-    });
-    // Same present-but-null hazard as compression above: `contains_key` alone
-    // treats `{"encryptionContext": null}` as "encrypted", making
-    // CommitLogReader fail closed on a perfectly valid unencrypted segment
-    // (roborev finding, review-first pass — the fix above only covered
-    // compression, not this symmetric key).
-    let encrypted = ["encryptionContext", "encryption"]
+    // `compressionClass` is a plain string. Some configurations write it as an
+    // explicit JSON `null` (key present, value null) when compression is unset,
+    // rather than omitting the key; a present-but-null value must parse as "no
+    // compression" (None), same as an absent key — never fail-closed on a valid
+    // uncompressed segment. An empty string is likewise treated as no
+    // compression. Only a present, non-null, non-empty string names a
+    // compressor the reader must refuse.
+    let compression_class = obj
+        .get("compressionClass")
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    // Encryption is declared by any of the real encryption-context keys being
+    // present with a non-null value. Same present-but-null hazard as
+    // compression: `{"encCipher": null}` is NOT encrypted.
+    let encrypted = ["encCipher", "encKeyAlias", "encIV"]
         .iter()
         .any(|k| obj.get(*k).is_some_and(|v| !v.is_null()));
     (compression_class, encrypted)
@@ -226,14 +226,17 @@ fn read_i64_be(b: &[u8], off: usize) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Build a descriptor header the same way Cassandra's `writeHeader` does,
     /// so the parser's CRC and field offsets are exercised in isolation. This
     /// is a *unit* fixture for offset math only; the authoritative correctness
     /// oracle is the real Cassandra-produced segment (see the integration test).
-    fn build_header(version: i32, id: i64, params: &str) -> Vec<u8> {
+    ///
+    /// `pub(crate)` so the [`super::super::reader`] public-surface tests can
+    /// build a Cassandra-shaped descriptor header without duplicating the CRC.
+    pub(crate) fn build_header(version: i32, id: i64, params: &str) -> Vec<u8> {
         let params_bytes = params.as_bytes();
         let mut out = Vec::new();
         out.extend_from_slice(&version.to_be_bytes());
@@ -304,7 +307,9 @@ mod tests {
 
     #[test]
     fn detects_compression_class_from_params() {
-        let params = r#"{"compression":{"class":"LZ4Compressor","options":{}}}"#;
+        // Real Cassandra 5.0.2 shape: `compressionClass` is a plain string
+        // (COMPRESSION_CLASS_KEY), not a nested {"class": ...} object.
+        let params = r#"{"compressionClass":"LZ4Compressor","compressionParameters":{}}"#;
         let bytes = build_header(7, 7, params);
         let desc = CommitLogDescriptor::parse(&bytes).expect("parse");
         assert_eq!(desc.compression_class.as_deref(), Some("LZ4Compressor"));
@@ -313,11 +318,11 @@ mod tests {
 
     #[test]
     fn compression_null_parses_as_uncompressed_not_unknown() {
-        // Some configurations write `"compression": null` (key present,
+        // Some configurations write `"compressionClass": null` (key present,
         // explicitly null) rather than omitting the key when compression is
-        // unset. This must NOT fail closed as "<unknown>" compression —
-        // regression for a roborev finding (review-first pass).
-        let params = r#"{"compression":null}"#;
+        // unset. This must NOT fail closed — regression for the present-but-null
+        // safety posture, now applied to the real key (PR #2797 blocker).
+        let params = r#"{"compressionClass":null}"#;
         let bytes = build_header(7, 9, params);
         let desc = CommitLogDescriptor::parse(&bytes).expect("parse");
         assert_eq!(desc.compression_class, None);
@@ -326,13 +331,27 @@ mod tests {
 
     #[test]
     fn encryption_key_null_parses_as_unencrypted() {
-        // Same present-but-null hazard as compression, for the symmetric
-        // encryption keys — a fourth-round roborev finding after the
-        // compression fix above didn't cover this key (review-first pass).
-        let params = r#"{"compression":null,"encryptionContext":null}"#;
+        // Same present-but-null hazard as compression, for the real encryption
+        // keys (encCipher/encKeyAlias/encIV) — a present-but-null encCipher is
+        // NOT encrypted (PR #2797 blocker).
+        let params = r#"{"compressionClass":null,"encCipher":null}"#;
         let bytes = build_header(7, 11, params);
         let desc = CommitLogDescriptor::parse(&bytes).expect("parse");
         assert_eq!(desc.compression_class, None);
         assert!(!desc.is_unsupported_payload());
+    }
+
+    #[test]
+    fn detects_encryption_from_real_context_keys() {
+        // Real Cassandra 5.0.2 shape: encryption is declared by encCipher /
+        // encKeyAlias / encIV, not an "encryptionContext"/"encryption" key
+        // (which Cassandra never writes). A present, non-null encCipher must
+        // make the segment an unsupported (encrypted) payload (PR #2797 blocker).
+        let params = r#"{"encCipher":"AES/CBC/PKCS5Padding","encKeyAlias":"testing:1"}"#;
+        let bytes = build_header(7, 13, params);
+        let desc = CommitLogDescriptor::parse(&bytes).expect("parse");
+        assert!(desc.encrypted);
+        assert!(desc.compression_class.is_none());
+        assert!(desc.is_unsupported_payload());
     }
 }
