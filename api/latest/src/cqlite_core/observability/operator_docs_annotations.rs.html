@@ -266,10 +266,10 @@
 <a href=#266 id=266 data-nosnippet>266</a>        name: catalog::ERRORS_TOTAL,
 <a href=#267 id=267 data-nosnippet>267</a>        kind: MetricKind::Counter,
 <a href=#268 id=268 data-nosnippet>268</a>        unit: catalog::unit::ERRORS,
-<a href=#269 id=269 data-nosnippet>269</a>        summary: <span class="string">"Canonical error-rate signal, keyed by bounded {category, subsystem}; eagerly registered at 0 on startup."</span>,
-<a href=#270 id=270 data-nosnippet>270</a>        attributes: <span class="kw-2">&amp;</span>[attr::ERROR_CATEGORY, attr::SUBSYSTEM],
-<a href=#271 id=271 data-nosnippet>271</a>        interpretation: <span class="string">"Absent metric name = error counting isn't wired (never 'no errors'); any sustained increase is the error-rate alarm."</span>,
-<a href=#272 id=272 data-nosnippet>272</a>        round_item: <span class="string">"error-rate watch (#2193/#2399)"</span>,
+<a href=#269 id=269 data-nosnippet>269</a>        summary: <span class="string">"Canonical error-rate signal, keyed by bounded {category, subsystem}; flight do_get aborts also carry flight.abort_reason; eagerly registered at 0 on startup."</span>,
+<a href=#270 id=270 data-nosnippet>270</a>        attributes: <span class="kw-2">&amp;</span>[attr::ERROR_CATEGORY, attr::SUBSYSTEM, attr::FLIGHT_ABORT_REASON],
+<a href=#271 id=271 data-nosnippet>271</a>        interpretation: <span class="string">"Absent metric name = error counting isn't wired (never 'no errors'); any sustained increase is the error-rate alarm; on subsystem=flight, split abort_reason to separate benign aborts (client_cancel/superseded_split/snapshot_retired/admission_shed) from genuine internal faults."</span>,
+<a href=#272 id=272 data-nosnippet>272</a>        round_item: <span class="string">"error-rate watch (#2193/#2399/#2681)"</span>,
 <a href=#273 id=273 data-nosnippet>273</a>    },
 <a href=#274 id=274 data-nosnippet>274</a>    MetricDoc {
 <a href=#275 id=275 data-nosnippet>275</a>        name: catalog::WRITE_MUTATIONS,
@@ -668,5 +668,23 @@
 <a href=#668 id=668 data-nosnippet>668</a>        interpretation: <span class="string">"Rises with concurrent do_get scans and returns to baseline; a level pinned near the blocking-pool size with flat rpc.rows is blocking-pool saturation. Distinct from admission.in_use."</span>,
 <a href=#669 id=669 data-nosnippet>669</a>        round_item: <span class="string">"blocking-pool pressure watch (#2419/#2313)"</span>,
 <a href=#670 id=670 data-nosnippet>670</a>    },
-<a href=#671 id=671 data-nosnippet>671</a>];
+<a href=#671 id=671 data-nosnippet>671</a>    MetricDoc {
+<a href=#672 id=672 data-nosnippet>672</a>        name: catalog::FLIGHT_TABLES_DISCOVERED,
+<a href=#673 id=673 data-nosnippet>673</a>        kind: MetricKind::Gauge,
+<a href=#674 id=674 data-nosnippet>674</a>        unit: catalog::unit::ENTRIES,
+<a href=#675 id=675 data-nosnippet>675</a>        summary: <span class="string">"Table dirs visible under --data-dir, re-sampled by a readdir-only walk on the ~2s saturation tick (no SSTable opens). Undersampled at ~2s vs a longer scrape interval (#2661)."</span>,
+<a href=#676 id=676 data-nosnippet>676</a>        attributes: <span class="kw-2">&amp;</span>[],
+<a href=#677 id=677 data-nosnippet>677</a>        interpretation: <span class="string">"Rises when a table appears on disk and falls when one is removed; a wrong or empty --data-dir reads 0 immediately (an inert mount, visible before the first query errors)."</span>,
+<a href=#678 id=678 data-nosnippet>678</a>        round_item: <span class="string">"inert-mount watch (#2684)"</span>,
+<a href=#679 id=679 data-nosnippet>679</a>    },
+<a href=#680 id=680 data-nosnippet>680</a>    MetricDoc {
+<a href=#681 id=681 data-nosnippet>681</a>        name: catalog::FLIGHT_WARM_TABLES,
+<a href=#682 id=682 data-nosnippet>682</a>        kind: MetricKind::Gauge,
+<a href=#683 id=683 data-nosnippet>683</a>        unit: catalog::unit::ENTRIES,
+<a href=#684 id=684 data-nosnippet>684</a>        summary: <span class="string">"Tables with a live warm reader set in the flight WarmTableRegistry (atomic-backed at the registry mutation sites, not sampler-driven)."</span>,
+<a href=#685 id=685 data-nosnippet>685</a>        attributes: <span class="kw-2">&amp;</span>[],
+<a href=#686 id=686 data-nosnippet>686</a>        interpretation: <span class="string">"Rises on the first serve of a previously-unseen table and falls on eviction/retirement; pinned at capacity with steady eviction churn means the warm byte budget is small vs the working set. Distinct from tables_discovered (visible on disk)."</span>,
+<a href=#687 id=687 data-nosnippet>687</a>        round_item: <span class="string">"warm-working-set watch (#2684)"</span>,
+<a href=#688 id=688 data-nosnippet>688</a>    },
+<a href=#689 id=689 data-nosnippet>689</a>];
 </code></pre></div></section></main></body></html>

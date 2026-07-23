@@ -1155,12 +1155,12 @@
 <a href=#1155 id=1155 data-nosnippet>1155</a>    ///
 <a href=#1156 id=1156 data-nosnippet>1156</a>    /// This test does not assert on READ_CALLS, but each successful
 <a href=#1157 id=1157 data-nosnippet>1157</a>    /// `read_compressed_chunk_at` here calls `record_read()` and thus MUTATES the
-<a href=#1158 id=1158 data-nosnippet>1158</a>    /// process-global counter. Any test that reads OR mutates READ_CALLS must be
-<a href=#1159 id=1159 data-nosnippet>1159</a>    /// `#[serial]` (issue #1946/#2006): without it this sibling could increment the
-<a href=#1160 id=1160 data-nosnippet>1160</a>    /// counter concurrently with `..._records_one_read_per_chunk` and flake its
-<a href=#1161 id=1161 data-nosnippet>1161</a>    /// post-`reset` delta assertion.
+<a href=#1158 id=1158 data-nosnippet>1158</a>    /// process-global counter. Any test that reads OR mutates READ_CALLS must share
+<a href=#1159 id=1159 data-nosnippet>1159</a>    /// the `#[serial(work_counters)]` group (issue #1946/#2006, normalized #2714): else
+<a href=#1160 id=1160 data-nosnippet>1160</a>    /// this sibling could bump it concurrently with `..._records_one_read_per_chunk`
+<a href=#1161 id=1161 data-nosnippet>1161</a>    /// and flake its post-`reset` delta assertion.
 <a href=#1162 id=1162 data-nosnippet>1162</a>    </span><span class="attr">#[test]
-<a href=#1163 id=1163 data-nosnippet>1163</a>    #[serial_test::serial]
+<a href=#1163 id=1163 data-nosnippet>1163</a>    #[serial_test::serial(work_counters)]
 <a href=#1164 id=1164 data-nosnippet>1164</a>    </span><span class="kw">fn </span>read_compressed_chunk_at_verifies_crc_before_returning() {
 <a href=#1165 id=1165 data-nosnippet>1165</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::compression_info::CompressionInfo;
 <a href=#1166 id=1166 data-nosnippet>1166</a>
@@ -1222,12 +1222,12 @@
 <a href=#1222 id=1222 data-nosnippet>1222</a>    /// Counters are a shared process-global, so this test serializes on the
 <a href=#1223 id=1223 data-nosnippet>1223</a>    /// `serial_test` mutex (the counter-test convention; issue #1071) — a stale
 <a href=#1224 id=1224 data-nosnippet>1224</a>    /// value from a parallel test cannot satisfy an assertion after the `reset`.
-<a href=#1225 id=1225 data-nosnippet>1225</a>    /// INVARIANT (issue #1946/#2006): EVERY test in this binary that reads OR
-<a href=#1226 id=1226 data-nosnippet>1226</a>    /// mutates READ_CALLS (i.e. calls `record_read()` via `read_compressed_chunk_at`
-<a href=#1227 id=1227 data-nosnippet>1227</a>    /// / `read_nb_format_chunk_data`, or `rwc::read_calls()`/`rwc::reset()`) must be
-<a href=#1228 id=1228 data-nosnippet>1228</a>    /// `#[serial]`, or its increments contaminate this delta assertion.
+<a href=#1225 id=1225 data-nosnippet>1225</a>    /// INVARIANT (issue #1946/#2006, normalized #2714 r1828): EVERY test in this `--lib`
+<a href=#1226 id=1226 data-nosnippet>1226</a>    /// binary that touches READ_CALLS (`record_read()` via `read_compressed_chunk_at` /
+<a href=#1227 id=1227 data-nosnippet>1227</a>    /// the windowed scan feed, or `rwc::read_calls()`/`rwc::reset()`) must share the ONE
+<a href=#1228 id=1228 data-nosnippet>1228</a>    /// `#[serial(work_counters)]` group — bare `#[serial]` is a DIFFERENT, non-serial group.
 <a href=#1229 id=1229 data-nosnippet>1229</a>    </span><span class="attr">#[test]
-<a href=#1230 id=1230 data-nosnippet>1230</a>    #[serial_test::serial]
+<a href=#1230 id=1230 data-nosnippet>1230</a>    #[serial_test::serial(work_counters)]
 <a href=#1231 id=1231 data-nosnippet>1231</a>    </span><span class="kw">fn </span>read_compressed_chunk_at_records_one_read_per_chunk() {
 <a href=#1232 id=1232 data-nosnippet>1232</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::compression_info::CompressionInfo;
 <a href=#1233 id=1233 data-nosnippet>1233</a>        <span class="kw">use </span><span class="kw">crate</span>::storage::sstable::read_work_counters <span class="kw">as </span>rwc;

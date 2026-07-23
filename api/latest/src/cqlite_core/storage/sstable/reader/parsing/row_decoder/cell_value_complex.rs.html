@@ -121,7 +121,7 @@
 <a href=#121 id=121 data-nosnippet>121</a>            } <span class="kw">else if let </span><span class="prelude-val">Some</span>(udt_def) = <span class="self">self
 <a href=#122 id=122 data-nosnippet>122</a>                </span>.udt_registry
 <a href=#123 id=123 data-nosnippet>123</a>                .as_ref()
-<a href=#124 id=124 data-nosnippet>124</a>                .and_then(|reg| reg.get_udt(<span class="kw-2">&amp;</span><span class="self">self</span>.keyspace, <span class="kw-2">&amp;</span>inner_type).cloned())
+<a href=#124 id=124 data-nosnippet>124</a>                .and_then(|reg| reg.get_udt_qualified(<span class="kw-2">&amp;</span><span class="self">self</span>.keyspace, <span class="kw-2">&amp;</span>inner_type).cloned())
 <a href=#125 id=125 data-nosnippet>125</a>            {
 <a href=#126 id=126 data-nosnippet>126</a>                <span class="comment">// frozen&lt;short_udt_name&gt;: look up the concrete UDT definition in the
 <a href=#127 id=127 data-nosnippet>127</a>                // registry (Issue #502).  This handles type strings like

@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["ClusteringOrder","CqlType"],"mod":["aggregator","cql_parser","discovery","json_exporter","parser","registry"],"struct":["ClusteringColumn","Column","KeyColumn","SchemaManager","TableSchema","UdtRegistry"],"type":["ColumnSpec"]};
+window.SIDEBAR_ITEMS = {"enum":["ClusteringOrder","CqlType"],"fn":["split_qualified_udt","udt_registry_from_cql"],"mod":["aggregator","cql_parser","discovery","json_exporter","parser","registry"],"struct":["ClusteringColumn","Column","KeyColumn","SchemaManager","TableSchema","UdtRegistry"],"type":["ColumnSpec"]};
