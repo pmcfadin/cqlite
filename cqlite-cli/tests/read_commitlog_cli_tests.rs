@@ -98,6 +98,75 @@ fn read_commitlog_json_reports_descriptor_and_mutations() {
     );
 }
 
+/// `--limit 1` stops before the segment's true tail, so `limited` is reported
+/// true and `truncated`/`decode_error` are JSON `null` (never a false-looking
+/// `false`) since the tail state was never reached (roborev finding).
+#[test]
+fn read_commitlog_limit_one_reports_limited_and_null_truncated() {
+    let fixture = clean_fixture();
+    let output = Command::cargo_bin("cqlite")
+        .expect("cqlite binary should be built for integration tests")
+        .arg("--quiet")
+        .arg("read-commitlog")
+        .arg(&fixture)
+        .arg("--format")
+        .arg("json")
+        .arg("--limit")
+        .arg("1")
+        .output()
+        .expect("read-commitlog command should execute");
+
+    assert!(
+        output.status.success(),
+        "read-commitlog --limit 1 exited non-zero: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    assert_eq!(parsed["limited"], true, "--limit 1 must report limited");
+    assert!(
+        parsed["truncated"].is_null(),
+        "truncated must be null when limited, not a false-looking false"
+    );
+    assert!(
+        parsed["decode_error"].is_null(),
+        "decode_error must be null when limited"
+    );
+}
+
+/// `--limit 0` yields zero mutations (its own short-circuit) and still reports
+/// `limited` true.
+#[test]
+fn read_commitlog_limit_zero_reports_zero_mutations() {
+    let fixture = clean_fixture();
+    let output = Command::cargo_bin("cqlite")
+        .expect("cqlite binary should be built for integration tests")
+        .arg("--quiet")
+        .arg("read-commitlog")
+        .arg(&fixture)
+        .arg("--format")
+        .arg("json")
+        .arg("--limit")
+        .arg("0")
+        .output()
+        .expect("read-commitlog command should execute");
+
+    assert!(
+        output.status.success(),
+        "read-commitlog --limit 0 exited non-zero: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    assert_eq!(
+        parsed["mutation_count"], 0,
+        "--limit 0 must decode zero mutations"
+    );
+    assert_eq!(parsed["limited"], true, "--limit 0 must report limited");
+}
+
 /// The text (default) format also succeeds end to end and reports the segment.
 #[test]
 fn read_commitlog_text_reports_segment_header() {

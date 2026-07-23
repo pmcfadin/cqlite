@@ -415,6 +415,19 @@ fn read_typed_value(c: &mut Cursor<'_>, type_name: &str) -> RowResult<Vec<u8>> {
 /// column name bytes.
 fn read_column_names(c: &mut Cursor<'_>) -> Result<Vec<String>> {
     let count = c.uvint()?;
+    // Guard the declared count against the cursor's remaining bytes before
+    // spinning the loop below `count` times on an untrusted u64: each column
+    // name needs at least its own 1-byte length vint, so a count exceeding the
+    // remaining bytes is provably impossible. Without this, a CRC-valid body of
+    // mostly 0x00 bytes (each decoding as a zero-length name) could turn a
+    // ~128MB body into ~128M Vec<String> entries (~3GB), defeating the <128MB
+    // memory target — the same class as decode_mutation's num_updates guard.
+    let remaining = c.remaining() as u64;
+    if count > remaining {
+        return Err(Error::CorruptCommitLogFrame(format!(
+            "column-names block declares {count} names, impossible for {remaining} remaining bytes"
+        )));
+    }
     let mut names = Vec::with_capacity(count.min(4096) as usize);
     for _ in 0..count {
         let len = c.uvint()? as usize;
@@ -433,6 +446,12 @@ struct Cursor<'a> {
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, pos: 0 }
+    }
+
+    /// Bytes not yet consumed — an upper bound for any count-prefixed block, so
+    /// a hostile declared count can be rejected before it drives a loop.
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.pos)
     }
 
     fn u8(&mut self) -> Result<u8> {
@@ -520,6 +539,10 @@ mod tests {
         let mut schemas: SchemaSet = HashMap::new();
         schemas.insert(id, users_schema());
         let m = decode_mutation(&body, &schemas).expect("decode");
+        // The unmodified ALICE_BODY declares num_updates=1 and the single
+        // update decodes fully under schema, so both updates are present and
+        // updates_complete is true (the positive branch of the field).
+        assert!(m.updates_complete);
         let u = &m.updates[0];
         assert!(u.rows_decoded);
         assert_eq!(u.rows.len(), 1);
@@ -658,6 +681,89 @@ mod tests {
             count.value.as_deref(),
             Some([0x00, 0x00, 0x00, 0x2A].as_ref()),
             "int cell must stay aligned after the variable-length tinyint"
+        );
+    }
+
+    #[test]
+    fn batch_declaring_more_updates_than_present_reports_incomplete() {
+        // ALICE_BODY declares num_updates=1 (leading uvint 0x01). Flip it to
+        // 0x02: the mutation now claims 2 partition updates but only one's
+        // worth of bytes exists. Decoded WITHOUT a schema, the first
+        // decode_partition_update structurally bails (consumed_fully=false)
+        // before a second iteration is attempted, so the loop stops after one
+        // update and honestly reports the shortfall (regression: this field
+        // was silently absent — a multi-table batch reported only its first
+        // update with no signal more existed).
+        let mut body = hex(ALICE_BODY);
+        body[0] = 0x02;
+        let m = decode_mutation(&body, &HashMap::new()).expect("decode");
+        assert_eq!(m.updates.len(), 1);
+        assert!(
+            !m.updates_complete,
+            "declared 2 updates but only 1 present must report updates_complete == false"
+        );
+    }
+
+    #[test]
+    fn static_row_bail_leaves_column_names_empty() {
+        // Minimal partition-update body: 16-byte table id + pk_len=0 +
+        // iter_flags=ITER_HAS_STATIC_ROW + the three EncodingStats uvints (read
+        // unconditionally BEFORE the static check). The static-row path is not
+        // modeled: it must bail to structural-only BEFORE reading any
+        // column-names block, so column_names stays empty rather than holding
+        // misparsed bytes surfaced as if authoritative (roborev finding).
+        let mut bytes = vec![0u8; 16]; // table_id
+        bytes.push(0x00); // pk_len = 0
+        bytes.push(ITER_HAS_STATIC_ROW); // iter_flags = 0x08
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00]); // EncodingStats: min ts, ldt, ttl
+        let (update, consumed_fully) =
+            decode_partition_update(&mut Cursor::new(&bytes), &SchemaSet::new()).expect("decode");
+        assert!(
+            !consumed_fully,
+            "static-row path must not report full consume"
+        );
+        assert!(!update.rows_decoded);
+        assert!(
+            update.column_names.is_empty(),
+            "static-row bail must happen before any column-names read"
+        );
+    }
+
+    #[test]
+    fn empty_partition_fast_path_surfaces_partition_deletion() {
+        // Minimal body: 16-byte table id + pk_len=0 +
+        // iter_flags=ITER_IS_EMPTY|ITER_HAS_PARTITION_DELETION (0x01|0x04 =
+        // 0x05). has_partition_deletion is set from iter_flags at struct
+        // construction, BEFORE the ITER_IS_EMPTY fast-return — this proves the
+        // fast-return path still surfaces the deletion flag (regression: the
+        // early returns previously left it false even when the partition
+        // carried a deletion).
+        let mut bytes = vec![0u8; 16]; // table_id
+        bytes.push(0x00); // pk_len = 0
+        bytes.push(ITER_IS_EMPTY | ITER_HAS_PARTITION_DELETION); // 0x05
+        let (update, consumed_fully) =
+            decode_partition_update(&mut Cursor::new(&bytes), &SchemaSet::new()).expect("decode");
+        assert!(
+            update.has_partition_deletion,
+            "empty-partition fast path must still surface the partition deletion"
+        );
+        assert!(update.rows_decoded, "empty partition is fully consumed");
+        assert!(consumed_fully);
+    }
+
+    #[test]
+    fn read_column_names_rejects_hostile_count() {
+        // A CRC-valid body could declare a huge column count with too few
+        // trailing bytes to back it; the count must be rejected against the
+        // cursor's remaining bytes BEFORE spinning the loop, not spun `count`
+        // times (each zero-length name is 1 byte, so count > remaining is
+        // provably impossible). Encode u64::MAX as an unsigned vint (0xFF then
+        // eight 0xFF bytes) with no trailing name bytes.
+        let bytes = [0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        let err = read_column_names(&mut Cursor::new(&bytes)).unwrap_err();
+        assert!(
+            matches!(err, Error::CorruptCommitLogFrame(_)),
+            "hostile column count must be rejected as a corrupt frame, got {err:?}"
         );
     }
 
