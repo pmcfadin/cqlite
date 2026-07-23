@@ -1,0 +1,64 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>cqlite 0.16.0 GA — verdict</title><style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --fg:#e6edf3; --muted:#8b949e;
+          --green:#3fb950; --amber:#d29922; --red:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:28px; margin:0 0 4px; }
+  h2 { font-size:20px; margin:40px 0 12px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  h3 { font-size:16px; margin:28px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  nav { margin:0 0 24px; font-size:14px; }
+  nav a { color:var(--accent); text-decoration:none; margin-right:16px; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pass { background:rgba(63,185,80,.15); color:var(--green); }
+  .watch { background:rgba(210,153,34,.15); color:var(--amber); }
+  .fail { background:rgba(248,81,73,.15); color:var(--red); }
+  table { width:100%; border-collapse:collapse; margin:12px 0; background:var(--card); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  th,td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; vertical-align:top; }
+  th { background:#1c2128; color:var(--muted); font-weight:600; font-size:13px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:none; }
+  .good { color:var(--green); font-weight:600; }
+  .warnc { color:var(--amber); font-weight:600; }
+  .badc { color:var(--red); font-weight:600; }
+  code { background:#1c2128; padding:1px 6px; border-radius:4px; font-size:13px; }
+  .callout { background:var(--card); border-left:3px solid var(--accent); padding:12px 16px; border-radius:0 8px 8px 0; margin:16px 0; }
+  .callout.green { border-left-color:var(--green); }
+  .callout.amber { border-left-color:var(--amber); }
+  .callout.red { border-left-color:var(--red); }
+  pre { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px; white-space:pre-wrap; font-size:13px; overflow-x:auto; }
+  footer { margin-top:48px; color:var(--muted); font-size:13px; border-top:1px solid var(--border); padding-top:16px; }
+</style></head><body><div class="wrap"><nav><a href="report.html">Verdict</a><a href="comparison.html">RC1 → GA comparison</a></nav>
+<h1>cqlite 0.16.0 GA — verdict</h1>
+<p class="sub">GA verification round before 0.17 · flight <code>v0.16.0@sha256:74b12ccd</code> (multi-arch INDEX; amd64 <code>a45cac03</code> / arm64 <code>f2f78d0b</code>; also <code>latest</code>) · connector <code>0.16.0</code> (Maven Central) · Trino 481 · Cassandra 5.0.8 RF=3 · 3× i4i.xlarge · ~2.5M partitions/node · 2026-07-23</p>
+
+<div class="callout green"><b>Verdict: 0.16.0 GA is sound — clear to move to 0.17.</b> All three tracked fixes that failed or were partial in the pre-release rounds now hold in the final release: <code>#2806</code> split pruning, <code>#2807</code> UDT parse, and <code>#2815</code> collection-column exposure. Split pruning delivers a measured <b>−18% p50 / −4× coordinator CPU</b> on isolated keyed reads. One residual (structured in-collection UDT decode) is a natural 0.17 follow-up, not a GA regression.</div>
+
+<h2>Fix scorecard — RC1 → GA</h2>
+<table><thead><tr><th>Fix</th><th>RC1 (pre-release)</th><th>0.16.0 GA</th><th>Verdict</th></tr></thead><tbody>
+<tr><td><b>#2806</b> / #2679 split pruning</td><td>Inert — 13 splits on/off, no benefit</td><td>1 split, −18% p50, −4× CPU</td><td class="pill pass">fixed</td></tr>
+<tr><td><b>#2807</b> UDT keyspace-qualified parse</td><td>Parse crash (<code>code: Char</code>), every UDT table unreadable</td><td>All UDT tables parse &amp; query</td><td class="pill pass">fixed</td></tr>
+<tr><td><b>#2349</b> scalar <code>frozen&lt;udt&gt;</code> decode</td><td>Blocked behind the parse crash</td><td><code>{street: 2 Oak, zip: 10001}</code> readable</td><td class="pill pass">verified</td></tr>
+<tr><td><b>#2815</b> <code>list&lt;frozen&lt;udt&gt;&gt;</code> silent drop</td><td>Column absent from schema (data-loss-class, found rc2)</td><td>Column present; <code>SELECT *</code> returns it</td><td class="pill pass">symptom fixed</td></tr>
+<tr><td>#2372 BTI (<code>da</code>) over Flight</td><td>Could-not-observe (no da corpus)</td><td>Not tested (no da corpus)</td><td class="pill watch">could-not-observe</td></tr>
+</tbody></table>
+
+<h2>Split-pruning perf (#2806) — the headline</h2>
+<p>Method: Trino server-side <code>elapsedTimeMillis</code> + <code>totalSplits</code> via the REST API, driven from the control node against the Trino service clusterIP (no port-forward, no wall-clock noise). 60 samples/mode = 3 warmed passes over 20 distinct keys. Kill-switch = <code>cqlite.split-pruning-enabled</code>, pods restarted between modes.</p>
+<table><thead><tr><th>Isolated <code>WHERE key = ?</code></th><th>splits</th><th>p50</th><th>p90</th><th>p99</th><th>coordinator CPU p50</th></tr></thead><tbody>
+<tr><td><b>pruning ON</b></td><td class="good">1</td><td class="good">152 ms</td><td>195 ms</td><td>257 ms</td><td class="good">2 ms</td></tr>
+<tr><td>pruning OFF</td><td>13</td><td>185 ms</td><td>208 ms</td><td>241 ms</td><td>8 ms</td></tr>
+</tbody></table>
+<p>Collapsing the 13-way fan-out to the single owning split cuts p50 latency <b>−18%</b> and coordinator CPU <b>−4×</b>. Smoke checks: <code>IN(2 keys)</code> ON=1 / OFF=13 splits; <code>WHERE key=? LIMIT 1</code> ON prunes / OFF full fan-out — all correct, identical rows, 0 errors either mode.</p>
+
+<h2>Sustained throughput — 32 threads, 180s</h2>
+<table><thead><tr><th>Mode</th><th>steady qps</th><th>p50</th><th>p99</th><th>cold ramp (30s: qps / p99)</th><th>errors</th></tr></thead><tbody>
+<tr><td>pruning ON</td><td>~33.0</td><td>~967 ms</td><td>~1195 ms</td><td>15.7 qps / 6384 ms</td><td>0</td></tr>
+<tr><td>pruning OFF</td><td>~33.9</td><td>~937 ms</td><td>~1462 ms</td><td>9.9 qps / 8492 ms</td><td>0</td></tr>
+</tbody></table>
+<p>Steady-state throughput is <b>equal</b> (~33 qps both) — pruning does not raise the throughput ceiling, which is owned by the known fan-out skew (<code>#2680</code>) and snapshot-resolve floor, not split count. But pruning ON has a markedly <b>faster cold ramp</b> and <b>better tail</b> (p99 −18% steady; 6384 vs 8492 ms cold) because 13× fan-out is expensive to warm.</p>
+
+<h2>UDT collections — #2815 fix, with a residual</h2>
+<div class="callout amber"><b>Symptom fixed, structured decode is the 0.17 follow-up.</b> In rc2 the <code>list&lt;frozen&lt;udt&gt;&gt;</code> column was <i>silently dropped</i> from the projected schema — a data-loss-class omission. In GA the column is back: <code>DESCRIBE udt_simple</code> lists <code>addrs</code> and <code>SELECT *</code> returns it. The residual: elements come back as <code>array(varchar)</code> of <b>raw serialized UDT bytes</b> (e.g. <code>0x000000053120456c6d0000000400002b67</code> = <code>"1 Elm"/11111</code>, decoded by hand and matched field-for-field against <code>sstabledump</code>), not a structured <code>array(row(street,zip))</code>. Data is correct and complete and reachable — it is simply not typed yet. Strictly better than rc2 (where the column vanished entirely); the deeper in-collection structured decode (<code>#2349</code>'s further target) is a clean 0.17 candidate, not a GA blocker.</div>
+
+<footer>Generated from <code>clusters/cqlite-016final-perf-20260723-082527/</code> (raw: <code>perf-out/*.tsv</code>, <code>loadtest-{ON,OFF}.log</code>, <code>final-verdict-summary.txt</code>). No Grafana panels this round — the cluster was torn down after the perf+correctness capture; numbers are Trino server-side stats and <code>sstabledump</code> ground truth. Field round pmcfadin/cqlite#2805.</footer></div></body></html>
