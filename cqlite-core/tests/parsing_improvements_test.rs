@@ -212,10 +212,7 @@ mod parsing_improvements_tests {
         // Test various data patterns that could cause false positives
 
         // Test case 1: 16-byte data that looks like UUID but isn't
-        let _fake_uuid_1 = [
-            b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h', b'i', b'j', b'k', b'l', b'm', b'n',
-            b'o', b'p',
-        ]; // 16 letters - should be text, not UUID
+        let _fake_uuid_1 = *b"abcdefghijklmnop"; // 16 letters - should be text, not UUID
 
         // Test case 2: 8-byte data that could be timestamp or bigint
         let _maybe_timestamp = 1234567890123456i64.to_be_bytes();

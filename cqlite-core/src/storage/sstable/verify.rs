@@ -2667,7 +2667,7 @@ mod tests {
         // base-name derivation accepts must resolve to the SAME base name the
         // reader uses for sibling lookup — never an Err (issue #1283, roborev).
         let p = PathBuf::from("/dir/nb-7-big-Statistics.db");
-        let set = build_component_set(&[p.clone()], p.clone())
+        let set = build_component_set(std::slice::from_ref(&p), p.clone())
             .expect("reader-accepted non-Data.db name must not error");
         assert_eq!(
             Some(set.base_name),
@@ -2690,7 +2690,8 @@ mod tests {
     #[test]
     fn build_component_set_standard_name_still_resolves_canonically() {
         let p = PathBuf::from("/dir/nb-3-big-Data.db");
-        let set = build_component_set(&[p.clone()], p).expect("standard name resolves");
+        let set = build_component_set(std::slice::from_ref(&p), p.clone())
+            .expect("standard name resolves");
         assert_eq!(set.base_name, "nb-3-big");
     }
 

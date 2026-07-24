@@ -1325,12 +1325,13 @@ impl RowCellStateMachine {
             | CassandraVersion::V5_0TypedCollections
             | CassandraVersion::V5_0WideRows
             | CassandraVersion::V5_0FormatG
-                if self.schema.is_none() => {
-                    return Err(Error::Schema(format!(
+                if self.schema.is_none() =>
+            {
+                return Err(Error::Schema(format!(
                         "Blob fallback not allowed for static row parsing in modern format {:?}. Schema is required.",
                         self.version
                     )));
-                }
+            }
             _ => {
                 // Legacy formats need schema when legacy-heuristics feature is disabled
                 #[cfg(not(feature = "legacy-heuristics"))]

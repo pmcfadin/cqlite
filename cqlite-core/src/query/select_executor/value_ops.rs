@@ -521,7 +521,7 @@ mod tests {
     /// `[-Inf, -0.0, +0.0, 1.0, +Inf, NaN, NaN]`.
     #[test]
     fn order_by_double_sort_matches_oracle() {
-        let mut v = vec![
+        let mut v = [
             Value::Float(1.0),
             Value::Float(f64::NAN),
             Value::Float(-0.0),

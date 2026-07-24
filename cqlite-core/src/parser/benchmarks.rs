@@ -225,7 +225,10 @@ impl ParserBenchmarks {
             }
         }
 
-        let iterations = self.target_file_size.checked_div(sample_size).unwrap_or(1000);
+        let iterations = self
+            .target_file_size
+            .checked_div(sample_size)
+            .unwrap_or(1000);
 
         for _ in 0..self.iterations {
             let start = Instant::now();

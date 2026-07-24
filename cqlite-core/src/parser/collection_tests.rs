@@ -665,7 +665,7 @@ mod edge_case_tests {
                 assert_eq!(inner1[0], Value::Integer(1));
                 assert_eq!(inner1[1], Value::Integer(2));
             } else {
-                panic!("Expected inner list at index 0, got: {:?}", &outer_list[0]);
+                panic!("Expected inner list at index 0, got: {:?}", outer_list[0]);
             }
 
             // Check second inner list

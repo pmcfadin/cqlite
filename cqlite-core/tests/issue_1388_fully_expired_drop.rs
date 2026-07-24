@@ -451,7 +451,7 @@ fn mixed_tombstone_and_live_sstable_not_dropped() {
     // Metadata classifier: the mixed SSTable is NOT fully expired (its authoritative
     // max_local_deletion_time is the live sentinel), so it is NOT in the drop-set —
     // even for a major compaction (empty outside set).
-    let drop_set = fully_expired_sstables(&[mixed_path.clone()], &[], Some(GC_BEFORE));
+    let drop_set = fully_expired_sstables(std::slice::from_ref(&mixed_path), &[], Some(GC_BEFORE));
     assert!(
         drop_set.is_empty(),
         "a mixed tombstone+live SSTable must never be classified fully expired (#1728 F1)"

@@ -378,7 +378,7 @@ mod tests {
         let cand = write_expiry_stats(tmp.path(), 1, 500, 10_000, 5_000);
         std::fs::remove_file(&cand).expect("remove Data.db to prove no read");
 
-        let dropped = fully_expired_sstables(&[cand.clone()], &[], Some(1_000));
+        let dropped = fully_expired_sstables(std::slice::from_ref(&cand), &[], Some(1_000));
         assert_eq!(
             dropped,
             vec![cand],
@@ -443,7 +443,7 @@ mod tests {
         let cand = write_expiry_stats(tmp.path(), 1, 500, 4_000, 1_000);
         // Outside min write ts (5_000) > candidate max_timestamp (4_000) ⇒ drop.
         let outside = write_expiry_stats(tmp.path(), 2, i32::MAX, 20_000, 5_000);
-        let dropped = fully_expired_sstables(&[cand.clone()], &[outside], Some(1_000));
+        let dropped = fully_expired_sstables(std::slice::from_ref(&cand), &[outside], Some(1_000));
         assert_eq!(
             dropped,
             vec![cand],
@@ -620,7 +620,7 @@ mod tests {
 
         // Core surface: `b` is the retained merge input (already deleted) ⇒ only `a`.
         let mut core_deleted = Vec::new();
-        reclaim_dropped_whole(&dropped_whole, &[b.clone()], |p| {
+        reclaim_dropped_whole(&dropped_whole, std::slice::from_ref(&b), |p| {
             core_deleted.push(p.to_path_buf())
         });
         assert_eq!(

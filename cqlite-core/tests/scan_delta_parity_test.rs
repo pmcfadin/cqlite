@@ -304,10 +304,9 @@ fn parse_range_tombstone_bound(v: &JsonValue) -> Option<JsonlRangeBound> {
     // sstabledump emits either `"start": {...}` or `"end": {...}` for each bound.
     let (is_start, inner) = if let Some(s) = v.get("start") {
         (true, s)
-    } else if let Some(e) = v.get("end") {
-        (false, e)
     } else {
-        return None;
+        let e = v.get("end")?;
+        (false, e)
     };
 
     let bound_type = inner.get("type").and_then(|t| t.as_str()).unwrap_or("");

@@ -239,7 +239,7 @@ fn boundary_raw_keys_match_sorted_first_last() {
         .iter()
         .map(|r| (encode_partition_key_for_bti_trie(r), r.clone()))
         .collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted.sort_by_key(|a| a.0);
     let expect_first = sorted.first().map(|(_, r)| r.clone()).unwrap();
     let expect_last = sorted.last().map(|(_, r)| r.clone()).unwrap();
 
@@ -292,7 +292,7 @@ fn entry_for(key: [u8; 9], hash_byte: u8, offset: u64) -> PartitionTrieEntry {
 /// Sort + de-duplicate exactly as [`PartitionsTrieWriter::finish`] does
 /// before emitting.
 fn sorted_unique(mut entries: Vec<PartitionTrieEntry>) -> Vec<PartitionTrieEntry> {
-    entries.sort_by(|a, b| a.key.cmp(&b.key));
+    entries.sort_by_key(|a| a.key);
     entries.dedup_by(|a, b| a.key == b.key);
     entries
 }

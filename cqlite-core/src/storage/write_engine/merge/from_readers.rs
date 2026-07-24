@@ -667,7 +667,7 @@ mod tests {
 
         let path_based = super::super::build_single_partition_merger(
             paths.clone(),
-            &[key_bytes.clone()],
+            std::slice::from_ref(&key_bytes),
             &schema,
             ScanCancel::default(),
         )
