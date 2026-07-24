@@ -30,9 +30,16 @@ on:
   pull_request_target:
     types: [closed]
   schedule:
-    # Hygiene sweep every 30 min (null-status -> Backlog; closed-PR safety net).
+    # Hygiene sweep every 30 min (null-status -> Backlog; closed-PR safety net;
+    # board->label mirror + drift-detector, issue #2855).
     - cron: '*/30 * * * *'
   workflow_dispatch: {}
+  # Low-latency board->label mirror correction (issue #2855): a hand-tampered
+  # status:* label (or a reopen) is reverted from the issue's board Status quickly
+  # rather than waiting up to 30 min for the cron sweep. The 30-min sweep remains
+  # the correctness guarantee; these events only reduce lag.
+  issues:
+    types: [edited, labeled, unlabeled, reopened]
 
 permissions:
   contents: read
@@ -133,10 +140,14 @@ jobs:
   # issue's own createdAt — never wall-clock-racing a brand-new item.
   # ---------------------------------------------------------------------------
   sweep:
-    if: github.event_name != 'pull_request_target'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       SWEEP_GRACE_MINUTES: '10'
+      # Board->label drift-detector grace (issue #2855): an OPEN issue younger than
+      # this is exempt from the detector so a just-added item (or a race between the
+      # mirror pass and this detector) does not flap the run red.
+      BLM_GRACE_SECS: '600'
     steps:
       - name: Guard token
         id: guard
@@ -145,6 +156,9 @@ jobs:
             echo "::error::PROJECTS_TOKEN not set — board sweep + claim reaper are NOT running. Add a PAT (or GitHub App token) with 'project' scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655) so this outage is visible instead of a silent green no-op."
             exit 1
           fi
+
+      - name: Checkout (for scripts/ci/board-label-mirror.sh)
+        uses: actions/checkout@v4
 
       - name: Reconcile board
         run: |
@@ -256,6 +270,58 @@ jobs:
 
           echo "Sweep complete: $backlogged issue(s) -> Backlog, $doned closed PR card(s) -> Done, $skipped_fresh fresh null-status issue(s) held back (within ${SWEEP_GRACE_MINUTES}m auto-add grace)."
 
+      # Board->label mirror (issue #2855): force every OPEN issue's board-derived
+      # status:* label to match its board Status (Ready->status:ready, In Progress->
+      # status:in-progress, In Review->status:in-review, Backlog/Done->none). The
+      # single-source mapping + mirror lives in scripts/ci/board-label-mirror.sh so
+      # the workflow and the shell test drive the SAME logic. Idempotent: a matching
+      # board makes no edit. Does NOT touch status:spec-review/status:addressing
+      # (transient skill-managed sub-markers, not board Status options).
+      - name: Mirror board Status -> status:* label
+        run: bash scripts/ci/board-label-mirror.sh mirror
+
+      # Drift-detector (issue #2855): AFTER the mirror pass, re-read (Status, labels)
+      # for every OPEN issue and FAIL the run (::error:: + non-zero) on any
+      # board-derived-label != Status disagreement (past the BLM_GRACE_SECS window,
+      # so a just-added item or an in-run race does not flap red). A red here means a
+      # re-drift or an out-of-band label write — surfaced, never silently tolerated.
+      - name: Drift-detect board vs label
+        run: bash scripts/ci/board-label-mirror.sh detect
+
+  # ---------------------------------------------------------------------------
+  # Event path (issue #2855): an issue was edited / (un)labeled / reopened. Re-assert
+  # ONLY that one issue's board-derived label from its board Status (low-latency
+  # correction of a hand-tampered label). Reuses the SAME mapping in
+  # scripts/ci/board-label-mirror.sh as the sweep — single source, no divergent copy.
+  # ---------------------------------------------------------------------------
+  mirror-one:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard token
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::PROJECTS_TOKEN not set — board->label mirror is NOT running. Add a PAT (or GitHub App token) with 'project' scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655/#2855)."
+            exit 1
+          fi
+
+      - name: Checkout (for scripts/ci/board-label-mirror.sh)
+        uses: actions/checkout@v4
+
+      # Pass the event-supplied issue number via a QUOTED env var (never inlined
+      # into run:) and validate it is a bare integer before use — the workflow
+      # command-injection guard (issue #2656 / check-workflow-injection.sh).
+      - name: Re-assert this issue's label from board Status
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          case "$ISSUE_NUMBER" in
+            ''|*[!0-9]*)
+              echo "::error::unexpected non-numeric issue number '$ISSUE_NUMBER'"; exit 1 ;;
+          esac
+          bash scripts/ci/board-label-mirror.sh mirror-one "$ISSUE_NUMBER"
+
   # ---------------------------------------------------------------------------
   # Scheduled path: CI-side claim reaper (issue #2655 / #2499 design).
   #
@@ -271,7 +337,7 @@ jobs:
   # Ready with a traceable comment, mirroring flow-board's manual reap.
   # ---------------------------------------------------------------------------
   reap-claims:
-    if: github.event_name != 'pull_request_target'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Needs write to delete stale refs/machine-claims/* refs (the top-level
