@@ -34,11 +34,21 @@ cleanup() { rm -rf "$TMP_ROOT" 2>/dev/null || true; }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# gh stub: simulates the board + issue labels from a TSV state file.
+# gh stub: simulates the board + issue labels from a TSV state file. Written to
+# be bash-3.2-safe (no `declare -A` / associative arrays) so it runs under stock
+# macOS /bin/bash exactly like it does under CI's bash-5 (issue #2855, F8) — an
+# `declare: -A: invalid option` death would red the whole tooling-tests component
+# for an environmental reason, indistinguishable from a real regression.
 #   STATE_FILE lines: number<TAB>status<TAB>createdAt<TAB>label,csv
-#   - `gh api graphql ...` (items query) -> the Projects v2 JSON, one page.
+#   - `gh api graphql ...` (items/node query) -> the Projects v2 JSON, one page.
 #   - `gh issue edit N --add-label X`     -> add X to #N's label csv.
 #   - `gh issue edit N --remove-label X`  -> remove X from #N's label csv.
+#   - `gh issue list --state open --label L --json number --jq …` -> the numbers
+#       of OPEN issues carrying label L, read from optional ISSUE_LIST_FILE
+#       (lines: label<TAB>number); empty when unset — models off-board issues.
+# Failure injection (fail-closed tests):
+#   GH_FAIL_GRAPHQL=1 -> `gh api graphql` prints an errors JSON and exits 1.
+#   GH_FAIL_EDIT=1    -> `gh issue edit` exits 1 without mutating state.
 # ---------------------------------------------------------------------------
 write_gh_stub() {
   cat >"$1" <<'EOF'
@@ -48,7 +58,36 @@ set -uo pipefail
 
 # --- gh api graphql ... : emit the board items JSON from STATE_FILE ---------
 if [ "${1:-}" = "api" ] && [ "${2:-}" = "graphql" ]; then
-  # Build the items JSON with jq from the TSV state file.
+  if [ -n "${GH_FAIL_GRAPHQL:-}" ]; then
+    printf '%s\n' '{"errors":[{"message":"Bad credentials"}]}'
+    exit 1
+  fi
+  # A node(id:) lookup (mirror-one by node id) — resolve one issue's project item
+  # directly. Emit the single-issue node JSON. The stub keys the node id as
+  # "node-<number>" so tests can pass a deterministic id.
+  wants_node=0
+  for a in "$@"; do
+    case "$a" in id=node-*) wants_node=1; node_num="${a#id=node-}" ;; esac
+  done
+  if [ "$wants_node" = 1 ]; then
+    jq -Rn --arg num "$node_num" '
+      ( [ inputs | select(length>0) | split("\t") | select(.[0]==$num) ] | first ) as $row
+      | if $row == null
+        then { data: { node: null } }
+        else { data: { node: {
+            number: ($row[0]|tonumber),
+            state: "OPEN",
+            createdAt: (if ($row[2]|length)>0 then $row[2] else null end),
+            labels: { nodes: ( if ($row[3]|length)>0
+                               then ($row[3]|split(",")|map({name:.})) else [] end ) },
+            projectItems: { nodes: [ {
+              project: { id: (env.PROJECT_ID // "PVT_stub") },
+              fieldValueByName: (if ($row[1]|length)>0 then {name: $row[1]} else null end)
+            } ] } } } }
+        end' "$STATE_FILE"
+    exit 0
+  fi
+  # Build the board items JSON with jq from the TSV state file.
   nodes=$(jq -Rn '
     [ inputs
       | select(length>0)
@@ -70,6 +109,22 @@ if [ "${1:-}" = "api" ] && [ "${2:-}" = "graphql" ]; then
   exit 0
 fi
 
+# --- gh issue list --state open --label L --json number --jq … --------------
+if [ "${1:-}" = "issue" ] && [ "${2:-}" = "list" ]; then
+  want_label=""
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --label) want_label="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [ -n "${ISSUE_LIST_FILE:-}" ] && [ -f "$ISSUE_LIST_FILE" ]; then
+    awk -F'\t' -v l="$want_label" '$1==l {print $2}' "$ISSUE_LIST_FILE"
+  fi
+  exit 0
+fi
+
 # --- gh issue edit N --add-label X / --remove-label X -----------------------
 if [ "${1:-}" = "issue" ] && [ "${2:-}" = "edit" ]; then
   num="${3:-}"
@@ -83,19 +138,27 @@ if [ "${1:-}" = "issue" ] && [ "${2:-}" = "edit" ]; then
     esac
   done
   [ -n "$op" ] || exit 0
+  if [ -n "${GH_FAIL_EDIT:-}" ]; then
+    exit 1
+  fi
   # record the edit for assertions
   printf '%s\t%s\t%s\n' "$num" "$op" "$lbl" >>"${EDIT_LOG:?EDIT_LOG not set}"
-  # mutate the state file's label csv for #num
+  # mutate the state file's label csv for #num (portable CSV, no associative arrays)
   tmp="$(mktemp)"
   while IFS=$'\t' read -r n st cr labels; do
     if [ "$n" = "$num" ]; then
-      # normalize csv into a set
       newl=""
-      IFS=',' read -ra arr <<<"$labels"
-      declare -A seen=()
-      for e in "${arr[@]}"; do [ -n "$e" ] && seen["$e"]=1; done
-      if [ "$op" = "add" ]; then seen["$lbl"]=1; else unset "seen[$lbl]"; fi
-      for k in "${!seen[@]}"; do newl="${newl:+$newl,}$k"; done
+      # split existing csv, dropping the target label (remove) or any dup (add);
+      # then append it once for add. `set -f` guards against globbing on labels.
+      set -f
+      old_ifs="$IFS"; IFS=','
+      for e in $labels; do
+        [ -n "$e" ] || continue
+        [ "$e" = "$lbl" ] && continue
+        newl="${newl:+$newl,}$e"
+      done
+      IFS="$old_ifs"; set +f
+      if [ "$op" = "add" ]; then newl="${newl:+$newl,}$lbl"; fi
       printf '%s\t%s\t%s\t%s\n' "$n" "$st" "$cr" "$newl" >>"$tmp"
     else
       printf '%s\t%s\t%s\t%s\n' "$n" "$st" "$cr" "$labels" >>"$tmp"
@@ -268,7 +331,15 @@ export GH_TOKEN="stub-token"
 offenders=""
 for f in "$REPO_ROOT"/.claude/skills/flow-*/SKILL.md; do
   [ -f "$f" ] || continue
-  if grep -Eq -- '(add|remove)-label +status:(ready|in-progress|in-review)' "$f"; then
+  # Broadened (F3): catch a board-derived label WRITE — `--add-label`/`--remove-label`
+  # AND a bare `gh issue create … --label "status:ready"` (the case the old narrow
+  # grep missed). The mirror DERIVES status:* from the board, so any skill SETTING
+  # one by hand is an offender. A READ filter (`gh issue list --label status:ready`,
+  # `gh search`, `gh pr list --label`) is legitimate (#2855 cheap discovery) and is
+  # excluded — match the write pattern, then drop lines that are read commands.
+  if grep -En -- '--(add-|remove-)?label[[:space:]]+["'"'"']?status:(ready|in-progress|in-review)' "$f" \
+       | grep -Ev -- '(issue|pr|search)[[:space:]]+(list|status)|gh[[:space:]]+search' \
+       | grep -q .; then
     offenders="${offenders} ${f}"
   fi
 done
@@ -290,6 +361,116 @@ if [ -x "$INJ" ] || [ -f "$INJ" ]; then
   fi
 else
   pass "check-workflow-injection.sh absent (skipped injection lint)"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. F3 regression: broadened grep catches `gh issue create --label "status:ready"`
+# ---------------------------------------------------------------------------
+tmp_skill_dir="$(mktemp -d "$TMP_ROOT/skill.XXXXXX")"
+cat >"$tmp_skill_dir/SKILL.md" <<'EOF'
+gh issue create --title "x" --body "y" --label "P2" --label "status:ready"
+EOF
+if grep -Eq -- '--(add-|remove-)?label[[:space:]]+["'"'"']?status:(ready|in-progress|in-review)' "$tmp_skill_dir/SKILL.md"; then
+  pass "F3 grep catches bare 'gh issue create --label \"status:ready\"' regression"
+else
+  fail "F3 grep does NOT catch 'gh issue create --label \"status:ready\"'"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. F1: gh api graphql failure -> BOTH mirror AND detect exit non-zero (never
+#     a silent-green "all consistent" with zero rows).
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+seed_state "$(printf '112\tReady\t%s\t' "$OLD_TS")"
+export GH_FAIL_GRAPHQL=1
+out_m="$(bash "$MIRROR" mirror 2>&1)"; rc_m=$?
+out_d="$(bash "$MIRROR" detect 2>&1)"; rc_d=$?
+unset GH_FAIL_GRAPHQL
+if [ "$rc_m" -ne 0 ] && [ "$rc_d" -ne 0 ] \
+  && printf '%s%s' "$out_m" "$out_d" | grep -q "::error::"; then
+  pass "F1: gh api graphql failure fails BOTH mirror and detect (non-zero + ::error::)"
+else
+  fail "F1: graphql failure not fail-closed (mirror rc=$rc_m detect rc=$rc_d): $out_m | $out_d"
+fi
+
+# ---------------------------------------------------------------------------
+# 13. F2: an OPEN issue carrying a board-derived label but NOT on the board ->
+#     detector FAILs (off-board stale label = wrong-grab hazard).
+# ---------------------------------------------------------------------------
+d="$(new_case)"
+# Board has only #113 (consistent). #199 is OPEN with status:ready but off-board.
+seed_state "$(printf '113\tReady\t%s\tstatus:ready' "$OLD_TS")"
+export ISSUE_LIST_FILE="$d/issuelist.tsv"
+printf 'status:ready\t199\n' >"$ISSUE_LIST_FILE"
+out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
+unset ISSUE_LIST_FILE
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "199"; then
+  pass "F2: off-board OPEN issue with a board-derived label fails the detector"
+else
+  fail "F2: off-board issue not detected (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
+# 14. F6: an unknown/renamed non-empty board Status -> mirror FAILs and does NOT
+#     strip labels (a board-schema change must not silently delete labels).
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+seed_state "$(printf '114\tStaging\t%s\tstatus:ready' "$OLD_TS")"
+out="$(bash "$MIRROR" mirror 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] \
+  && printf '%s' "$out" | grep -q "unknown board Status" \
+  && has_label 114 "status:ready"; then
+  pass "F6: unknown board Status fails the mirror and does NOT strip labels"
+else
+  fail "F6: unknown Status not fail-closed (rc=$rc, labels=$(labels_of 114)): $out"
+fi
+# and the detector likewise fails on an unknown Status
+out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "unknown board Status"; then
+  pass "F6: unknown board Status also fails the detector"
+else
+  fail "F6: unknown Status not caught by detector (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
+# 15. F7: a failing `gh issue edit` -> mirror exits non-zero + ::error:: (never a
+#     log line asserting an edit that never happened).
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+seed_state "$(printf '115\tReady\t%s\t' "$OLD_TS")"
+export GH_FAIL_EDIT=1
+out="$(bash "$MIRROR" mirror 2>&1)"; rc=$?
+unset GH_FAIL_EDIT
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "::error::" \
+  && ! printf '%s' "$out" | grep -q "^mirror: #115 .*+status:ready"; then
+  pass "F7: failed gh issue edit fails the mirror (no false success log)"
+else
+  fail "F7: failed edit not fail-closed (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
+# 16. F4: mirror-one by NODE id resolves the item directly and reconciles it.
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+seed_state "$(printf '116\tReady\t%s\t' "$OLD_TS")"
+bash "$MIRROR" mirror-one 116 node-116 >/dev/null 2>&1
+if has_label 116 "status:ready"; then
+  pass "F4: mirror-one resolves the item by node id and reconciles the label"
+else
+  fail "F4: mirror-one by node id did not reconcile: #116=$(labels_of 116)"
+fi
+
+# ---------------------------------------------------------------------------
+# 17. F2 (mirror-one): a #N that is NOT on the board -> mirror-one exits non-zero
+#     + ::error:: (never a silent no-op exit 0).
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+seed_state "$(printf '117\tReady\t%s\t' "$OLD_TS")"
+out="$(bash "$MIRROR" mirror-one 900 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "::error::"; then
+  pass "F2: mirror-one on an off-board issue fails (no silent no-op)"
+else
+  fail "F2: mirror-one off-board did not fail (rc=$rc): $out"
 fi
 
 # ---------------------------------------------------------------------------

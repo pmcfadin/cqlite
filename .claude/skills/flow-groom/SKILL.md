@@ -1,6 +1,6 @@
 ---
 name: flow-groom
-description: Turn a rough idea into one scoped, labeled GitHub issue (one P0–P3 + status:ready, testable acceptance criteria), and decide oracle-vs-design routing. First stage of the CQLite delivery pipeline. Use when the owner says "groom <idea>", "file an issue for X", or brings a rough idea to scope.
+description: Turn a rough idea into one scoped, labeled GitHub issue (one P0–P3, board Status set to Ready/Backlog, testable acceptance criteria), and decide oracle-vs-design routing. First stage of the CQLite delivery pipeline. Use when the owner says "groom <idea>", "file an issue for X", or brings a rough idea to scope.
 ---
 
 # flow-groom — idea → one scoped issue
@@ -19,16 +19,20 @@ You are the CQLite delivery lead. Turn a rough idea into exactly ONE well-scoped
      latitude, no oracle. These go through `flow-activate` (OpenSpec).
 3. **Write testable acceptance criteria.** Each criterion must map to a check (a test or an sstabledump
    parity comparison). Note any no-heuristics / public-surface (wiring-evidence) / memory-budget impact.
-4. **Create the issue** with exactly one priority label and `status:ready`:
+4. **Create the issue** with exactly one priority label. Do NOT set a `status:*` label — the board
+   Status you set in step 5 is the single source of truth, and the enforced board→label mirror
+   (issue #2855, `scripts/ci/board-label-mirror.sh`) DERIVES the `status:*` label from it. Writing
+   one here would be an out-of-band label the mirror's drift-detector reverts (and flags):
    ```bash
    gh issue create --title "<concise>" --body "<context + oracle/design + acceptance criteria>" \
-     --label "P2" --label "status:ready"
+     --label "P2"
    ```
-   (Pick P0–P3 deliberately; confirm priority with the owner if unsure.) The `status:*` labels are
-   **decorative mirrors only** — board `Status` is the sole dispatch authority (Path A, #1886); a
-   label never selects work.
+   (Pick P0–P3 deliberately; confirm priority with the owner if unsure.) The `status:*` labels are a
+   **one-way, board-DERIVED read-mirror** — board `Status` is the sole dispatch authority (Path A,
+   #1886); a label never selects work and is never set by hand.
 5. **Verify the board add — do NOT trust Project auto-add.** Auto-add has been observed missing all
-   new issues, so add the item explicitly and confirm it landed:
+   new issues, so add the item explicitly and confirm it landed; the mirror then projects its
+   `Status` to the matching `status:*` label (Ready→status:ready, etc.):
    ```bash
    gh project item-add 1 --owner pmcfadin --url <issue-url>
    gh project item-edit --project-id <id> --id <item-id> --field-id <status-field> \
