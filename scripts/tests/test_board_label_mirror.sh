@@ -330,27 +330,43 @@ fi
 export GH_TOKEN="stub-token"
 
 # ---------------------------------------------------------------------------
-# 9. Doctrine grep: no flow-* skill writes a board-derived status label
+# The doctrine check, factored into ONE helper (issue #2855, G5) so the
+# enforcement scan (test 9) AND the F3 regression (test 11) exercise the IDENTICAL
+# pipeline: match a board-derived label WRITE — `--add-label`/`--remove-label` AND
+# a bare `gh issue create … --label "status:ready"` — then drop lines that are READ
+# commands (`gh issue list --label status:ready`, `gh search`, `gh pr list --label`,
+# legitimate #2855 cheap discovery). The mirror DERIVES status:* from the board, so
+# any doc SETTING one by hand is an offender.
+#   blm_doctrine_hits FILE -> prints offending line(s); exit 0 iff any hit.
+blm_doctrine_hits() {
+  grep -En -- '--(add-|remove-)?label[[:space:]]+["'"'"']?status:(ready|in-progress|in-review)' "$1" \
+    | grep -Ev -- '(issue|pr|search)[[:space:]]+(list|status)|gh[[:space:]]+search'
+}
+
+# ---------------------------------------------------------------------------
+# 9. Doctrine grep: no flow-* skill / worker / flow-lead doc writes a board-derived
+#    status label. Extended set (G5): commands/worker.md + agents/flow-lead.md, not
+#    just skills. Counts scanned files and FAILs if ZERO were scanned (a vacuous
+#    green if skills/docs move or rename).
 # ---------------------------------------------------------------------------
 offenders=""
-for f in "$REPO_ROOT"/.claude/skills/flow-*/SKILL.md; do
+scanned=0
+for f in \
+  "$REPO_ROOT"/.claude/skills/flow-*/SKILL.md \
+  "$REPO_ROOT"/.claude/commands/worker.md \
+  "$REPO_ROOT"/.claude/agents/flow-lead.md; do
   [ -f "$f" ] || continue
-  # Broadened (F3): catch a board-derived label WRITE — `--add-label`/`--remove-label`
-  # AND a bare `gh issue create … --label "status:ready"` (the case the old narrow
-  # grep missed). The mirror DERIVES status:* from the board, so any skill SETTING
-  # one by hand is an offender. A READ filter (`gh issue list --label status:ready`,
-  # `gh search`, `gh pr list --label`) is legitimate (#2855 cheap discovery) and is
-  # excluded — match the write pattern, then drop lines that are read commands.
-  if grep -En -- '--(add-|remove-)?label[[:space:]]+["'"'"']?status:(ready|in-progress|in-review)' "$f" \
-       | grep -Ev -- '(issue|pr|search)[[:space:]]+(list|status)|gh[[:space:]]+search' \
-       | grep -q .; then
+  scanned=$((scanned + 1))
+  if blm_doctrine_hits "$f" | grep -q .; then
     offenders="${offenders} ${f}"
   fi
 done
-if [ -z "$offenders" ]; then
-  pass "No flow-* skill writes status:ready/in-progress/in-review"
+if [ "$scanned" -eq 0 ]; then
+  fail "Doctrine scan matched ZERO files — flow-*/worker/flow-lead docs moved or renamed (vacuous green guard, G5)"
+elif [ -z "$offenders" ]; then
+  pass "No flow-*/worker/flow-lead doc writes a board-derived status label ($scanned file(s) scanned)"
 else
-  fail "flow-* skill(s) still write a board-derived status label:${offenders}"
+  fail "doc(s) still write a board-derived status label:${offenders}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -368,16 +384,22 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 11. F3 regression: broadened grep catches `gh issue create --label "status:ready"`
+# 11. F3 regression: the SAME helper (blm_doctrine_hits) catches a write
+#     `gh issue create --label "status:ready"` AND does not flag a read-only
+#     `gh issue list --label status:ready` — exercising the identical pipeline
+#     (raw pattern + the -Ev read-command exclusion) the enforcement scan uses (G5).
 # ---------------------------------------------------------------------------
 tmp_skill_dir="$(mktemp -d "$TMP_ROOT/skill.XXXXXX")"
 cat >"$tmp_skill_dir/SKILL.md" <<'EOF'
 gh issue create --title "x" --body "y" --label "P2" --label "status:ready"
+gh issue list --label status:ready --json number
 EOF
-if grep -Eq -- '--(add-|remove-)?label[[:space:]]+["'"'"']?status:(ready|in-progress|in-review)' "$tmp_skill_dir/SKILL.md"; then
-  pass "F3 grep catches bare 'gh issue create --label \"status:ready\"' regression"
+hits="$(blm_doctrine_hits "$tmp_skill_dir/SKILL.md")"
+if printf '%s' "$hits" | grep -q "issue create" \
+  && ! printf '%s' "$hits" | grep -q "issue list"; then
+  pass "F3/G5 helper catches the create-write but excludes the list-read (same pipeline)"
 else
-  fail "F3 grep does NOT catch 'gh issue create --label \"status:ready\"'"
+  fail "F3/G5 helper wrong: hits=[$hits]"
 fi
 
 # ---------------------------------------------------------------------------
