@@ -232,8 +232,18 @@ LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
 #
 # CLAIM_CMD is the claim-heartbeat.sh entrypoint; overridable so the tests can
 # substitute a hermetic stub (no origin/network). Set CLAIM_CMD="" to disable
-# claim stamping entirely (e.g. a machine with no origin push rights).
-CLAIM_CMD="${CLAIM_CMD:-bash $REPO_ROOT/scripts/flow/claim-heartbeat.sh}"
+# claim stamping entirely (e.g. a machine with no origin push rights, or the
+# tooling tests, which must never touch origin/gh).
+#
+# Use `${VAR-default}` (NO colon), NOT `${VAR:-default}`: the colon form
+# substitutes the default for an EMPTY string too, which silently re-enabled the
+# real claim-heartbeat.sh (git push / gh pr list — network ops) whenever a caller
+# set CLAIM_CMD="" to disable it. That defeated the documented "set to empty to
+# disable" contract and let a slow/contended origin push or `gh pr list` WEDGE the
+# supervisor (issue #2849 — non-deterministic tooling-tests hang: the tests set
+# CLAIM_CMD="" but hit the real network path anyway). The colonless form preserves
+# an explicitly-empty override so disabling truly disables.
+CLAIM_CMD="${CLAIM_CMD-bash $REPO_ROOT/scripts/flow/claim-heartbeat.sh}"
 # The machine identity the claim ref is scoped to — must match what the reaper
 # clears. Defaults to claim-heartbeat.sh's own default (`hostname -s`), honoring
 # HEARTBEAT_MACHINE when the fleet overrides it.
@@ -1328,6 +1338,11 @@ main() {
   validate_numeric_knobs
   acquire_lock
   log "started: MAX_ISSUES=$MAX_ISSUES MAX_HOURS=$MAX_HOURS LOAD_MAX=$LOAD_MAX DISK_FLOOR_GB=$DISK_FLOOR_GB BREAKER_N=$BREAKER_N"
+  # #2655 machine-claim liveness is disabled when CLAIM_CMD is empty (a machine with
+  # no origin push rights, or the hermetic tooling tests). Announce it ONCE so a
+  # silently-unclaimed run is visible in the log rather than mistaken for a claim
+  # that simply never refreshed (stamp_claim/clear_claim otherwise return with no line).
+  [[ -n "$CLAIM_CMD" ]] || log "claim stamping DISABLED (CLAIM_CMD empty) — no machine-claim liveness ref this run (#2655)"
   while true; do
     [[ -f "$STOP_FILE" ]] && finalize_exit "stop-file" 0
     [[ $(($(date +%s) - START_TS)) -ge "$MAX_HOURS_SECS" ]] && finalize_exit "budget-wallclock" 0
