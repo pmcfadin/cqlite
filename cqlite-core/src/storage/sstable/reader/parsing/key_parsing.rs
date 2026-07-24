@@ -137,12 +137,11 @@ pub(crate) fn decode_key_component_impl(
                 return Err(Error::corruption("Invalid BigInt key component length"));
             }
         }
-        ComparatorType::Text => {
+        ComparatorType::Text
             // Validate UTF-8 for text keys
-            if std::str::from_utf8(component_data).is_err() {
+            if std::str::from_utf8(component_data).is_err() => {
                 return Err(Error::corruption("Invalid UTF-8 in text key component"));
             }
-        }
         _ => {
             // For other types, accept as-is for now
         }

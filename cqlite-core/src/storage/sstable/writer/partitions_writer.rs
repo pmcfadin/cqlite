@@ -237,7 +237,7 @@ impl PartitionsTrieWriter {
         // this is typically a no-op — but sorting defensively guarantees a valid
         // trie regardless of caller ordering and rejects duplicate keys.
         let mut entries = self.entries;
-        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        entries.sort_by_key(|a| a.key);
         for w in entries.windows(2) {
             if w[0].key == w[1].key {
                 return Err(Error::InvalidInput(

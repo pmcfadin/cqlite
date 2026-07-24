@@ -939,15 +939,12 @@ impl SSTableRowIteratorAdapter {
                 let mut ck_columns: Vec<(String, Value)> =
                     Vec::with_capacity(schema.clustering_keys.len());
                 for ck_col in &schema.clustering_keys {
-                    match simple
+                    {
+                        let pair = simple
                         .iter()
                         .find(|c| c.column == ck_col.name)
-                        .map(|c| (ck_col.name.clone(), c.value.clone()))
-                    {
-                        Some(pair) => ck_columns.push(pair),
-                        // A missing clustering column means we cannot form a valid
-                        // key — fall into the `None` bucket (unclustered row).
-                        None => return None,
+                        .map(|c| (ck_col.name.clone(), c.value.clone()))?;
+                        ck_columns.push(pair)
                     }
                 }
                 Some(ClusteringKey {
@@ -967,13 +964,12 @@ impl SSTableRowIteratorAdapter {
                 let mut ck_columns: Vec<(String, Value)> =
                     Vec::with_capacity(schema.clustering_keys.len());
                 for ck_col in &schema.clustering_keys {
-                    match clustering
+                    {
+                        let pair = clustering
                         .iter()
                         .find(|(name, _)| name == &ck_col.name)
-                        .map(|(name, v)| (name.clone(), v.clone()))
-                    {
-                        Some(pair) => ck_columns.push(pair),
-                        None => return None,
+                        .map(|(name, v)| (name.clone(), v.clone()))?;
+                        ck_columns.push(pair)
                     }
                 }
                 Some(ClusteringKey {

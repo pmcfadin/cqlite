@@ -78,7 +78,7 @@ impl AtomicQueryStats {
             (0, 0.0)
         } else {
             (
-                exec_time_us_sum / total_queries,
+                exec_time_us_sum.checked_div(total_queries).unwrap_or(0),
                 // Clamp the numerator: `total_queries` and `cache_hits` are
                 // read as independent `Relaxed` atomics, so a concurrent
                 // snapshot could observe `cache_hits > total_queries` and yield

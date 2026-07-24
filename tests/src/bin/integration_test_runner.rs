@@ -6,6 +6,10 @@
 //! - Performance validation
 //! - Edge case testing
 
+// Rust 1.97's async-block layout query is deeper than the default limit for
+// this binary's `#[tokio::main]` future (#2856); raise it so the crate compiles.
+#![recursion_limit = "256"]
+
 use clap::{Arg, Command};
 use cqlite_tests::{
     CLIIntegrationTestSuite, CLITestConfig, ComprehensiveIntegrationTestSuite,

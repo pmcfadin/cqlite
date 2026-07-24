@@ -269,15 +269,14 @@ impl RowCellStateMachine {
             | CassandraVersion::V5_0ComplexTypes
             | CassandraVersion::V5_0TypedCollections
             | CassandraVersion::V5_0WideRows
-            | CassandraVersion::V5_0FormatG => {
+            | CassandraVersion::V5_0FormatG
                 // Modern formats always require schema
-                if self.schema.is_none() {
+                if self.schema.is_none() => {
                     return Err(Error::Schema(format!(
                         "Schema is required for modern format {:?}. Blob fallback is disabled for modern format.",
                         self.version
                     )));
                 }
-            }
             _ => {
                 // For legacy formats and unspecified versions, be more permissive
                 // Only require schema if legacy-heuristics feature is explicitly disabled
@@ -1325,14 +1324,13 @@ impl RowCellStateMachine {
             | CassandraVersion::V5_0ComplexTypes
             | CassandraVersion::V5_0TypedCollections
             | CassandraVersion::V5_0WideRows
-            | CassandraVersion::V5_0FormatG => {
-                if self.schema.is_none() {
+            | CassandraVersion::V5_0FormatG
+                if self.schema.is_none() => {
                     return Err(Error::Schema(format!(
                         "Blob fallback not allowed for static row parsing in modern format {:?}. Schema is required.",
                         self.version
                     )));
                 }
-            }
             _ => {
                 // Legacy formats need schema when legacy-heuristics feature is disabled
                 #[cfg(not(feature = "legacy-heuristics"))]

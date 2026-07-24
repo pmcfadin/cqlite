@@ -142,7 +142,7 @@ impl RpcMetrics {
         self.bytes = self.bytes.saturating_add(bytes);
         let method = method_attr(self.method);
         if rows > 0 {
-            obs::add_counter(catalog::RPC_ROWS, rows, &[method.clone()]);
+            obs::add_counter(catalog::RPC_ROWS, rows, std::slice::from_ref(&method));
         }
         if bytes > 0 {
             obs::add_counter(catalog::RPC_BYTES, bytes, &[method]);

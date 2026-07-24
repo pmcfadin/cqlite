@@ -198,7 +198,7 @@ pub fn assemble_read_cells(
     }
 
     let mut out: RowCells = Vec::with_capacity(order.len());
-    for (name, accum) in order.into_iter().zip(accums.into_iter()) {
+    for (name, accum) in order.into_iter().zip(accums) {
         match accum {
             ColumnAccum::Simple(value) => out.push((name, value)),
             ColumnAccum::Complex(elements) => {

@@ -537,7 +537,7 @@ impl SchemaRegistry {
         let schemas = self.schemas.read().await;
         let mut results = Vec::new();
 
-        for (_table_id, entry) in schemas.iter() {
+        for entry in schemas.values() {
             // Apply query filters if provided
             if let Some(ref q) = query {
                 if !self.matches_query(&entry.schema, q) {
@@ -893,7 +893,7 @@ impl SchemaRegistry {
         let mut schema_infos = Vec::new();
 
         // Get all schemas in the keyspace
-        for (_table_id, entry) in self.schemas.read().await.iter() {
+        for entry in self.schemas.read().await.values() {
             if entry.schema.keyspace == keyspace {
                 // Try to get extended schema info
                 if let Ok(Some(schema_info)) = self
