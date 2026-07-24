@@ -101,29 +101,23 @@ impl SSTableReader {
 
         let mut entries = Vec::new();
 
-        // Decompress block data if compression is enabled
+        // Decompress block data if compression is enabled.
+        //
+        // Route the decompress through the single chunk decode plane
+        // (`ChunkSource::decompress_only`, issue #2165 / G2) — the same shape the
+        // stitch path uses (`data_access/mod.rs`), so `parsing/` no longer calls
+        // `Compression::decompress` inline. A failed decompress FAILS CLOSED with a
+        // corruption error; it is never a silent raw-bytes parse (no-heuristics, #28).
         let data = if let Some(compression_reader) = &self.compression_reader {
             tracing::debug!(
                 "parse_block_entries: Attempting block decompression with algorithm: {:?}",
                 compression_reader.algorithm()
             );
             let compression = Compression::new(*compression_reader.algorithm())?;
-            match compression.decompress(block_data) {
-                Ok(decompressed) => {
-                    tracing::debug!(
-                        "parse_block_entries: Block decompressed {} bytes to {} bytes",
-                        block_data.len(),
-                        decompressed.len()
-                    );
-                    decompressed
-                }
-                Err(e) => {
-                    tracing::debug!("parse_block_entries: Block decompression failed ({}), parsing raw data instead. First 32 bytes: {:02x?}",
-                        e, &block_data[..std::cmp::min(32, block_data.len())]);
-                    // Fall back to raw data
-                    block_data.to_vec()
-                }
-            }
+            super::super::chunk_source::ChunkSource::decompress_only(
+                Some(&compression),
+                block_data.to_vec(),
+            )?
         } else {
             tracing::debug!("parse_block_entries: No compression, using raw block data");
             block_data.to_vec()
@@ -1344,7 +1338,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_decompression_fallback_on_failure() {
+    async fn test_decompression_failure_is_fail_closed() {
+        // Issue #2165 / G2: a compressed block that fails to decompress must FAIL
+        // CLOSED (corruption error) — it must NOT silently fall back to parsing the
+        // raw compressed bytes as row data (no-heuristics, #28). This flips the former
+        // `test_decompression_fallback_on_failure`, which asserted the silent fallback.
         let reader = match create_test_reader("test_basic", "compression_test_table").await {
             Some(r) => r,
             None => {
@@ -1353,30 +1351,28 @@ mod tests {
             }
         };
 
-        // Verify this table has compression
+        // Verify this table has compression (drives the decompress branch)
         assert!(
             reader.compression_reader.is_some(),
             "Expected compression_test_table to have compression"
         );
 
-        // Pass invalid compressed data (should fall back to raw parsing)
+        // Bytes that cannot be decompressed by the declared algorithm.
         let invalid_compressed_data = vec![0xFF; 100];
 
         let result = reader.parse_block_entries(&invalid_compressed_data, None, false);
 
-        // Should attempt decompression, fail, then fall back to raw parsing
-        // The raw parsing will likely fail too (invalid data), but we verify
-        // the decompression fallback path is exercised
+        // FAIL CLOSED: an Err propagates, and no rows are produced from the raw bytes.
         match result {
-            Ok(_) => {
-                // If it somehow succeeds, that's fine
-            }
+            Ok(rows) => panic!(
+                "decompress failure must fail closed with an error, got {} rows",
+                rows.len()
+            ),
             Err(e) => {
                 let err_msg = e.to_string();
-                // Should not panic or crash, just return an error
                 assert!(
                     !err_msg.is_empty(),
-                    "Should produce a meaningful error message"
+                    "Should produce a meaningful corruption error message"
                 );
             }
         }
