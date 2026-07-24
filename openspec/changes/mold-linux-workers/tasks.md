@@ -25,8 +25,9 @@
 
 ## 5. Measurement (one-time, pre-merge; recorded on issue/PR)
 - [ ] 5.1 A/B on one EC2 worker on the post-#2856 toolchain: full gate + one `--lite`
-      round wall-clock, with/without mold, both numbers posted to #2859/PR
-      (EXTERNAL — cannot run from a macOS dev box; pending an EC2 Linux worker)
+      round wall-clock, with/without mold. OWNER WAIVED pre-merge (2026-07-24, in-session):
+      merge on green; numbers recorded POST-merge on the follow-up issue at the next
+      worker provisioning cycle.
 
 ## 6. Docs (same change)
 - [x] 6.1 `docs/development/gate-ops.md`: mold accelerator + stamp states
