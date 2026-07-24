@@ -110,6 +110,16 @@ if [ "${1:-}" = "api" ] && [ "${2:-}" = "graphql" ]; then
     { data: { node: { items: {
         pageInfo: { hasNextPage: false, endCursor: null },
         nodes: $nodes } } } }'
+  # Self-heal hook (issue #2855, G6): after the FIRST full-board emission (the
+  # detector's materialize pass), swap STATE_FILE to SELF_HEAL_TO so the per-issue
+  # self-heal RE-READ observes a mutated board — models a Status flip racing between
+  # the mirror and the detect step. Counter file keeps it a one-shot.
+  if [ -n "${SELF_HEAL_TO:-}" ]; then
+    cf="$STATE_FILE.sh_calls"
+    c=$(cat "$cf" 2>/dev/null || echo 0)
+    echo $((c + 1)) >"$cf"
+    if [ "$c" = 0 ]; then cp "$SELF_HEAL_TO" "$STATE_FILE"; fi
+  fi
   exit 0
 fi
 

@@ -245,29 +245,47 @@ blm_mirror_stream() {
   return "$rc"
 }
 
-# _blm_row_bad N STATUS LABELS [emit] -> return 0 if the row is consistent, 1 if
-# drifted (or the Status is unknown). When the 4th arg is "emit", print an
-# ::error:: annotation for each disagreement. Shared by the first-pass scan and
-# the self-heal re-check so both apply the identical rule.
-_blm_row_bad() {
-  local n="$1" status="$2" labels="$3" emit="${4:-}" desired dstat lbl bad=0
+# _blm_row_ok N STATUS LABELS -> PURE predicate: return 0 if the row is CONSISTENT
+# (board-derived label matches board Status), 1 if it drifted or the Status is
+# unknown. Emits NOTHING (annotation is split into _blm_row_annotate). Shared by
+# the first-pass scan and the self-heal re-check so both apply the identical rule.
+_blm_row_ok() {
+  local n="$1" status="$2" labels="$3" desired dstat lbl
   desired=$(blm_desired_label "$status"); dstat=$?
-  if [ "$dstat" -ne 0 ]; then
-    [ "$emit" = emit ] && echo "::error::issue #$n: unknown board Status '$status' — mapping not updated (issue #2855)"
-    return 1
-  fi
+  [ "$dstat" -ne 0 ] && return 1
   if [ -n "$desired" ] && ! _blm_csv_has "$labels" "$desired"; then
-    [ "$emit" = emit ] && echo "::error::issue #$n: board Status='$status' but label '$desired' is missing (labels: ${labels:-none})"
-    bad=1
+    return 1
   fi
   for lbl in $BLM_DERIVED_LABELS; do
     [ "$lbl" = "$desired" ] && continue
     if _blm_csv_has "$labels" "$lbl"; then
-      [ "$emit" = emit ] && echo "::error::issue #$n: board Status='$status' but carries stale board-derived label '$lbl'"
-      bad=1
+      return 1
     fi
   done
-  return "$bad"
+  return 0
+}
+
+# _blm_row_annotate N STATUS LABELS -> print an ::error:: annotation for each
+# board-derived-label ≠ Status disagreement on the row (the emission half, split
+# out of the predicate for G6). Always returns 0; callers use _blm_row_ok for the
+# verdict and this only to describe an already-known drift.
+_blm_row_annotate() {
+  local n="$1" status="$2" labels="$3" desired dstat lbl
+  desired=$(blm_desired_label "$status"); dstat=$?
+  if [ "$dstat" -ne 0 ]; then
+    echo "::error::issue #$n: unknown board Status '$status' — mapping not updated (issue #2855)"
+    return 0
+  fi
+  if [ -n "$desired" ] && ! _blm_csv_has "$labels" "$desired"; then
+    echo "::error::issue #$n: board Status='$status' but label '$desired' is missing (labels: ${labels:-none})"
+  fi
+  for lbl in $BLM_DERIVED_LABELS; do
+    [ "$lbl" = "$desired" ] && continue
+    if _blm_csv_has "$labels" "$lbl"; then
+      echo "::error::issue #$n: board Status='$status' but carries stale board-derived label '$lbl'"
+    fi
+  done
+  return 0
 }
 
 # _blm_offboard_check BOARD_FILE -> FAIL (return 1 + ::error::) when an OPEN issue
@@ -336,7 +354,7 @@ blm_detect_stream() {
       fi
     fi
     # First-pass: consistent -> nothing to do.
-    if _blm_row_bad "$n" "$status" "$labels"; then
+    if _blm_row_ok "$n" "$status" "$labels"; then
       continue
     fi
     # Candidate violation: self-heal by re-reading this one issue fresh. Only a
@@ -351,11 +369,13 @@ blm_detect_stream() {
       # board-vs-label drift; the off-board check below covers a lingering label.
       continue
     fi
-    # fresh is a single TSV row; re-check with emit so the annotation reflects the
-    # authoritative current state.
+    # fresh is a single TSV row; re-check the authoritative current state. A
+    # PERSISTENT drift is annotated (emission split from the predicate, G6) and
+    # counted; a raced Status flip that now agrees resolves silently.
     local fn fstatus fcreated flabels
     IFS=$'\t' read -r fn fstatus fcreated flabels <<<"$fresh"
-    if ! _blm_row_bad "$fn" "$fstatus" "$flabels" emit; then
+    if ! _blm_row_ok "$fn" "$fstatus" "$flabels"; then
+      _blm_row_annotate "$fn" "$fstatus" "$flabels"
       bad=$((bad + 1))
     fi
   done 3<"$board_file"
