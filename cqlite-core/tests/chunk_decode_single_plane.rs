@@ -39,12 +39,8 @@ fn scan_file(path: &Path, sites: &mut Vec<(String, usize)>, root: &Path) {
     if rel_str.contains("chunk_decompressor.rs")
         || rel_str.contains("bulletproof_reader.rs")
         || rel_str.contains("benchmarks/") // benchmarks are not query-path
-        || rel_str.contains("compaction.rs") // compaction read: out of scope (design.md)
-        // parsing/mod.rs and parsing/block_entries.rs: iterate_all_partitions / sequential_scan
-        // decode path (self.file + compression_reader model, not ReadAt+CompressionInfo+chunk-index).
-        // Migrating them to ChunkSource is a scoped follow-up (see design.md "Deferred / follow-up").
-        || rel_str.contains("parsing/mod.rs")
-        || rel_str.contains("parsing/block_entries.rs")
+        || rel_str.contains("compaction.rs")
+    // compaction read: out of scope (design.md)
     {
         return;
     }
@@ -264,11 +260,11 @@ async fn warm_cache_skips_decompress() {
 ///
 /// Drives the WINDOWED scan plane (`scan_stream` → `run_scan_stream_windowed` →
 /// `ChunkSource::new`), NOT `SSTableReader::scan()`: `scan()` on an nb/BIG SSTable
-/// takes the legacy `self.file` + `compression_reader` sequential path
-/// (`sequential_scan`) that is the scoped #2165 follow-up and never bumps
-/// `DECOMPRESS_CALLS`. `simple_table` is nb + Snappy multi-chunk, so
-/// `requires_chunk_stitching()` holds and `scan_stream` routes through the
-/// ChunkSource windowed decode plane this change consolidates.
+/// takes the sequential path (`sequential_scan` → `parse_block_entries`), which now
+/// routes its block decompress through `ChunkSource::decompress_only` (issue #2165)
+/// — an uncached decompress that never bumps `DECOMPRESS_CALLS`. `simple_table` is
+/// nb + Snappy multi-chunk, so `requires_chunk_stitching()` holds and `scan_stream`
+/// routes through the ChunkSource windowed decode plane this test asserts.
 #[tokio::test]
 #[serial_test::serial]
 async fn warm_windowed_scan_skips_decompress() {
