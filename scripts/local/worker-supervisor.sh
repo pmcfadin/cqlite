@@ -301,7 +301,7 @@ fi
 # and the "what we name in the page" set can never drift apart. `[c]argo`/`[c]laude` are
 # the bracket-trick forms (see below).
 PROC_MATCH_BUILD='[c]argo |[n]extest|[g]ate_slot_daemon'
-PROC_MATCH_WORKER='[c]laude.*-p.*--agent flow-lead'
+PROC_MATCH_WORKER='[c]laude.* (-p|--print)( |$).*--agent flow-lead'
 # Leftover-process probes (issue #2670): two families of prior-iteration debris block
 # the next spawn (HOLD-and-poll, same as load/disk), bounded SEPARATELY (roborev 1839)
 # so each needs its OWN count probe:
@@ -313,15 +313,21 @@ PROC_MATCH_WORKER='[c]laude.*-p.*--agent flow-lead'
 #       LEFTOVER_HOLD_MAX (reason `leftover-worker`).
 # The Claude match is keyed on the supervisor's OWN spawn shape — the unattended
 # headless launch `claude … -p … --agent flow-lead` (see WORKER_CMD, issue #2841) —
-# NOT a bare `claude`. The `-p` token is load-bearing: a plain interactive `claude`
-# REPL has neither `-p` nor `--agent flow-lead`, and a deliberate INTERACTIVE lead
-# session (`claude --agent flow-lead`, no `-p`) is likewise excluded, so a legitimate
-# hand-run lead/REPL on the box is not misdetected as a leftover worker. Only the
-# print-mode unattended spawn carries both `-p` and `--agent flow-lead`. LIMIT: an
+# NOT a bare `claude`. The print-mode token (`-p` or `--print`) is load-bearing and is
+# matched as a WHITESPACE-DELIMITED token ` (-p|--print)( |$)` (roborev #2841): an
+# UNANCHORED `-p` would also match the `-p` inside `--dangerously-skip-permissions`
+# (ski-P-ermissions), misclassifying an interactive `claude --dangerously-skip-permissions
+# --agent flow-lead` lead as a leftover worker. A plain interactive `claude` REPL has
+# neither the print token nor `--agent flow-lead`, and a deliberate INTERACTIVE lead
+# session (`claude --agent flow-lead`, no `-p`/`--print`) is likewise excluded, so a
+# legitimate hand-run lead/REPL on the box is not misdetected as a leftover worker. Only
+# the print-mode unattended spawn carries both the print token and `--agent flow-lead`. LIMIT: an
 # operator who deliberately runs the full `claude -p … --agent flow-lead` shape by hand
 # WILL be matched (correctly — by the one-worker-per-machine rule #1930). The current
 # iteration's own worker has already exited before preflight runs, so any print-mode
-# `--agent flow-lead` process seen here is from a prior iteration.
+# `--agent flow-lead` process seen here is from a prior iteration. The WORKER_CMD default
+# and this pattern are coupled: test_worker_supervisor.sh asserts PROC_MATCH_WORKER
+# actually matches the resolved default WORKER_CMD (anti-drift, roborev #2841).
 #
 # SELF-MATCH DEFUSED (roborev 1813, MED-HIGH): a live `bash -c` wrapper's OWN argv
 # contains these pattern strings, so a naive pattern would match the wrapper and report
