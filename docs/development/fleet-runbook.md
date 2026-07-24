@@ -29,11 +29,24 @@ issues itself). Other machines run pure **workers**. A lead is a worker with a h
 
 ```bash
 git clone https://github.com/pmcfadin/cqlite && cd cqlite
-bash scripts/bootstrap-agent-machine.sh        # or manually: sccache, cargo-nextest, bash>=4.3
+bash scripts/bootstrap-agent-machine.sh        # or manually: sccache, cargo-nextest, bash>=4.3, mold (Linux)
 bash test-data/scripts/fetch-datasets.sh       # real SSTable binaries — REQUIRED (see below)
 gh auth status                                  # must include the 'project' scope (board access)
 bash scripts/flow/claim.sh smoke               # preflight: prove origin accepts refs/claims/* (see below)
 ```
+
+**Linux workers — mold linker (#2859):** on Linux hosts bootstrap also provisions the **mold**
+linker (linking is the one build cost sccache cannot cache — every `--lite` round and full gate
+re-links every test binary) and wires it through a managed block in the **per-machine**
+`~/.cargo/config.toml`, after a link probe proves the toolchain accepts `-fuse-ld=mold`. It is
+advisory (a missing mold never fails a run) and never touches the repo-committed
+`.cargo/config.toml`. The gate's `accelerators:` line stamps `mold=linked` /
+`present-unconfigured` / `absent` on Linux; if you see `present-unconfigured` (mold installed but
+not wired), re-run `bash scripts/bootstrap-agent-machine.sh`. macOS is out of scope (mold is
+Linux-only; ld-prime is already fastest there) — no change and no token. **One-time cold rebuild
+at enablement:** adding the mold `rustflags` changes sccache's cache keys, so the first gate after
+mold is wired is a **cold rebuild** (no cache hits) — expected, one time per machine; subsequent
+runs are warm again.
 
 **Claim-ref preflight (#2665):** the cross-machine lock is a push to the `refs/claims/*` ref
 namespace on origin — `claim.sh smoke` creates, `ls-remote`s, and deletes a throwaway

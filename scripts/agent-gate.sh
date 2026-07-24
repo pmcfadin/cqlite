@@ -541,14 +541,69 @@ _sccache_health() {
   printf '%s' "$_SCCACHE_HEALTH"
 }
 
+# ---- mold link-accelerator state (issue #2859) ------------------------------
+# On Linux agent workers the link step is the one build cost sccache cannot cache
+# (every --lite round and full gate re-links every test binary from scratch), so
+# bootstrap-agent-machine.sh provisions the mold linker and wires it through a
+# managed block in the per-machine ~/.cargo/config.toml. The gate surfaces that
+# state on the accelerators: line so an installed-but-unwired worker (silent
+# degradation) is visible in the pasted block — exactly the contract sccache
+# follows. Three states, Linux hosts ONLY:
+#   linked                — mold on PATH AND the managed block is active in the
+#                           resolved cargo config (bootstrap wired it)
+#   present-unconfigured  — mold on PATH but no managed block (bootstrap not re-run)
+#   absent                — mold not on PATH
+# Darwin (and any non-Linux host) emits NO mold token: mold is Linux-only and a
+# permanent n/a token would churn every existing summary parser/fixture for zero
+# signal. Test hooks (issue #2859 self-test): AGENT_GATE_TEST_OS forces the host
+# family and AGENT_GATE_TEST_MOLD_STATE forces the detected state, so linked /
+# present-unconfigured / absent (and the Darwin no-token case) assert
+# deterministically without mold installed or a real ~/.cargo/config.toml.
+
+# _mold_block_active: true when the bootstrap-managed block is present in the
+# resolved per-machine cargo config (config.toml or the extension-less config).
+_mold_block_active() {
+  local cfg_dir="${CARGO_HOME:-$HOME/.cargo}"
+  grep -q '^# BEGIN cqlite-mold' "$cfg_dir/config.toml" 2>/dev/null && return 0
+  grep -q '^# BEGIN cqlite-mold' "$cfg_dir/config" 2>/dev/null && return 0
+  return 1
+}
+
+# _mold_state: resolve linked|present-unconfigured|absent, memoized.
+_MOLD_STATE=""
+_mold_state() {
+  [ -n "$_MOLD_STATE" ] && { printf '%s' "$_MOLD_STATE"; return; }
+  if [ -n "${AGENT_GATE_TEST_MOLD_STATE:-}" ]; then
+    _MOLD_STATE="$AGENT_GATE_TEST_MOLD_STATE"
+  elif ! command -v mold >/dev/null 2>&1; then
+    _MOLD_STATE=absent
+  elif _mold_block_active; then
+    _MOLD_STATE=linked
+  else
+    _MOLD_STATE=present-unconfigured
+  fi
+  printf '%s' "$_MOLD_STATE"
+}
+
+# _mold_accel_token: the ` mold=<state>` suffix on Linux hosts, empty elsewhere.
+_mold_accel_token() {
+  local os="${AGENT_GATE_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+  case "$os" in
+    Linux|linux) printf ' mold=%s' "$(_mold_state)" ;;
+    *) : ;; # Darwin/other: no token — byte-identical to pre-#2859 output
+  esac
+}
+
 # accelerators_line: the machine-checkable one-liner stamped into every SUMMARY
 # block (full, lite, and the emission selftest). Values: on|absent|off|serial.
 # See the ACCEL_* detection above (#1848). The trailing sccache-health token
-# (na|ok|warn, issue #2641) surfaces sccache's own corruption counters.
+# (na|ok|warn, issue #2641) surfaces sccache's own corruption counters. On Linux
+# a ` mold=linked|present-unconfigured|absent` token follows (issue #2859); Darwin
+# output is unchanged.
 accelerators_line() {
-  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s' \
+  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s' \
     "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}" \
-    "$(_sccache_health)"
+    "$(_sccache_health)" "$(_mold_accel_token)"
 }
 
 # ---- Per-gate core budget (issue #2640) -------------------------------------

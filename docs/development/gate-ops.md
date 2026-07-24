@@ -135,6 +135,46 @@ intentional opt-out is `off`, never `absent`, and never warns. Self-test coverag
 `scripts/tests/test_agent_gate_summary.sh` (cases 9a/9b assert the `off`/`absent`
 markers and the WARN).
 
+## mold linker accelerator — Linux only (issue #2859)
+
+Linking is the **one build cost sccache cannot cache**: every `--lite` round and
+full gate re-links every test binary from scratch (`debug = true`), so on a warm
+worker link time is a large slice of the remaining wall-clock. On Linux agent
+workers `scripts/bootstrap-agent-machine.sh` provisions the **mold** linker and
+wires it through a delimited managed block in the **per-machine** `~/.cargo/config.toml`
+(honoring `$CARGO_HOME`) — it never touches the repo-committed `.cargo/config.toml`,
+so GitHub-hosted CI runners (which have no mold) stay on their defaults.
+
+On **Linux** hosts the `accelerators:` line gains a trailing `mold=` token; on
+**macOS** the line is byte-identical to before (mold is Linux-only — Apple's
+ld-prime is already the fastest linker on macOS, so a permanent `n/a` token would
+churn every existing summary parser for zero signal):
+
+```
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked
+```
+
+State values (Linux only):
+- `mold=linked` — mold on `$PATH` **and** the bootstrap-managed block is active in
+  the resolved cargo config (the wired, fast path).
+- `mold=present-unconfigured` — mold on `$PATH` but **no** managed block (bootstrap
+  not re-run) → the installed-but-unwired silent-degradation the token exists to
+  surface; re-run `bash scripts/bootstrap-agent-machine.sh`.
+- `mold=absent` — mold not installed.
+
+Provisioning is **advisory** (mirrors sccache/nextest): a missing or uninstallable
+mold never fails the run. Bootstrap installs mold via the native package manager
+(apt/dnf/yum/pacman) and writes the managed block **only after a link probe** proves
+the resolved C compiler accepts `-fuse-ld=mold` (fail-safe: a probe failure warns
+and writes nothing — a machine never ends up with a config that breaks linking).
+When only `clang` passes the probe, the block adds `linker = "clang"` per triple.
+Self-test coverage: `scripts/tests/test_agent_gate_summary.sh` (case 9d asserts the
+three Linux states + the Darwin no-token contract) and
+`scripts/tests/test_bootstrap_agent_machine.sh` (case 6 asserts detection, install
+print-only, the link probe, the managed-block write, idempotency, user-config
+preservation, and the Darwin no-op). See fleet-runbook for the one-time sccache
+cold-rebuild note at enablement.
+
 ## Disk hygiene for multi-worktree gates (issue #1848)
 
 Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent

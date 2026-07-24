@@ -70,11 +70,34 @@ assert_accelerators() {
     echo "------- captured -------"; cat "$file"; echo "------------------------"
     return
   fi
+  # The optional trailing ` mold=<state>` token (issue #2859) appears on Linux
+  # hosts only; Darwin output ends at sccache-health, byte-identical to pre-change.
   if printf '%s\n' "$line" \
-       | grep -Eq '^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)$'; then
+       | grep -Eq '^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|present-unconfigured|absent))?$'; then
     ok "$label: accelerators line well-formed ($line)"
   else
     bad "$label: malformed accelerators line: '$line'"
+  fi
+}
+
+# assert_mold_token <label> <file> <expected>: assert the accelerators line's mold
+# token (issue #2859). <expected> is a state (linked|present-unconfigured|absent)
+# or the literal "none" to require NO mold token (the Darwin contract).
+assert_mold_token() {
+  local label="$1" file="$2" expected="$3" line
+  line=$(grep -E '^accelerators: ' "$file" 2>/dev/null | head -1)
+  if [ "$expected" = none ]; then
+    if printf '%s\n' "$line" | grep -q ' mold='; then
+      bad "$label: mold token present but expected none ($line)"
+    else
+      ok "$label: no mold token (Darwin contract)"
+    fi
+  else
+    if printf '%s\n' "$line" | grep -qE " mold=$expected(\$| )"; then
+      ok "$label: mold=$expected present"
+    else
+      bad "$label: expected mold=$expected, got: '$line'"
+    fi
   fi
 }
 
@@ -812,6 +835,31 @@ else
   bad "sccache-health: expected sccache-health=na when sccache not in use"
   grep '^accelerators:' "$tmp/health-na.txt" 2>/dev/null || cat "$tmp/health-na.txt"
 fi
+
+# 9d. mold link-accelerator token (issue #2859). On Linux the accelerators line
+#     carries a trailing `mold=linked|present-unconfigured|absent` token; on Darwin
+#     it carries NO mold token (byte-identical to pre-change). The host family is
+#     forced via AGENT_GATE_TEST_OS and the detected state via
+#     AGENT_GATE_TEST_MOLD_STATE, so all four cases assert deterministically without
+#     mold installed or a real ~/.cargo/config.toml.
+for state in linked present-unconfigured absent; do
+  mold_file="$tmp/mold-$state.txt"
+  AGENT_GATE_SUMMARY_FILE="$mold_file" \
+    AGENT_GATE_TEST_OS=Linux AGENT_GATE_TEST_MOLD_STATE="$state" \
+    bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  assert_mold_token "mold-linux-$state" "$mold_file" "$state"
+  # The whole line must also still pass the (mold-aware) well-formed check.
+  assert_accelerators "mold-linux-$state" "$mold_file"
+done
+
+# 9d-darwin. Darwin emits NO mold token even with a forced state present — the
+#            token is Linux-only; macOS output ends at sccache-health.
+mold_darwin="$tmp/mold-darwin.txt"
+AGENT_GATE_SUMMARY_FILE="$mold_darwin" \
+  AGENT_GATE_TEST_OS=Darwin AGENT_GATE_TEST_MOLD_STATE=linked \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-darwin" "$mold_darwin" none
+assert_accelerators "mold-darwin" "$mold_darwin"
 
 # ============================================================================
 # ISSUE #2078: FULL gate fails CLOSED when the fetched dataset corpus is absent.
