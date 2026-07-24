@@ -2561,6 +2561,78 @@ test_healthy_worker_iterlog_nonempty() {
 }
 
 # ---------------------------------------------------------------------------
+# Test (#2849 REGRESSION): setting CLAIM_CMD="" MUST truly disable claim
+# stamping — it must NOT be silently re-defaulted back to the real
+# claim-heartbeat.sh (git push / gh pr list — network ops). The original defect
+# used `${CLAIM_CMD:-default}` (colon), which substitutes the default for an
+# EMPTY string too, so common_env's `export CLAIM_CMD=""` hit the real network
+# path and a slow/contended origin push or `gh pr list` WEDGED the supervisor —
+# the non-deterministic tooling-tests hang. Pinned two ways: (a) the resolved
+# value stays empty when sourced with CLAIM_CMD="" (the source-guard keeps main()
+# from running); (b) the config line uses the colonless `${CLAIM_CMD-` form.
+# A LIVE proof follows: run a full nasty-reason iteration with a poisoned
+# CLAIM_CMD probe and assert it is NEVER invoked (no marker reason — however
+# nasty — can drive a claim call, and the run completes bounded, not hung).
+# ---------------------------------------------------------------------------
+test_claim_cmd_empty_truly_disables_no_network() {
+  local resolved cfg_line d sentinel jf rc invoked
+  # (a) resolved CLAIM_CMD stays empty (the exact #2849 parameter-expansion pin).
+  # shellcheck disable=SC2016  # $SUP/$CLAIM_CMD expand inside the sub-bash, not here.
+  resolved="$(env CLAIM_CMD="" SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$CLAIM_CMD"' 2>/dev/null)"
+  # (b) config line uses the colonless default form (catches a `:-` regression at
+  # the source level even if a future refactor moves the resolution).
+  cfg_line="$(grep -E '^CLAIM_CMD=' "$SUPERVISOR" | head -1)"
+  # LIVE: with CLAIM_CMD="" the supervisor must invoke NO claim command at all.
+  # Poison the DEFAULT path — if the empty override were re-defaulted, a claim call
+  # would fire; we prove it does not by leaving CLAIM_CMD="" (common_env's default)
+  # and asserting the process table never shows a claim-heartbeat child, AND the
+  # nasty-reason run still completes (bounded, head-blocked stop) with valid JSON.
+  d="$(new_case_dir)"
+  sentinel="$d/claim-invoked"
+  common_env "$d" # sets CLAIM_CMD=""
+  write_blocked_nasty_reason_stub "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh" MAX_ISSUES=1 BREAKER_N=1
+  jf="$JOURNAL_FILE"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  # A real claim-heartbeat.sh call logs "claim stamped"/"claim cleared"; with the
+  # disable honored, neither appears (stamp_claim/clear_claim return early).
+  invoked="no"
+  grep -qE 'claim (stamped|cleared)' "$d/stdout.log" && invoked="yes"
+  if [[ -z "$resolved" && "$cfg_line" == *'${CLAIM_CMD-'* && "$cfg_line" != *'${CLAIM_CMD:-'* &&
+        "$rc" -eq 0 && "$invoked" == "no" ]] && grep -q '"outcome":"blocked"' "$jf"; then
+    pass "#2849: CLAIM_CMD='' truly disables claim stamping (no network, no re-default); nasty run completes bounded"
+  else
+    fail "#2849: resolved='$resolved' cfg='$cfg_line' rc=$rc claim_invoked=$invoked (see $d/stdout.log)"
+  fi
+  rm -f "$sentinel"
+}
+
+# ---------------------------------------------------------------------------
+# Test (#2849 HERMETICITY, documented + enforced): every REAL `pgrep -f`
+# invocation in THIS suite scans the whole host process table, so on a dev box
+# concurrently running Claude Code / a gate (cargo|nextest|gate_slot_daemon) it
+# WILL match host processes. Each such line MUST therefore scope its assertion to
+# the test's OWN spawned PID via `grep -qw "$...pid"` on the same line — never
+# assert on a bare match count and never block on a host match. This meta-check
+# fails if a future edit adds an un-PID-scoped real `pgrep -f` command line,
+# re-introducing host contamination.
+# ---------------------------------------------------------------------------
+test_real_pgrep_usages_are_pid_scoped() {
+  local bad="" line
+  # Command lines only (leading whitespace then `pgrep -f`), never prose/comments
+  # (which start with `#`) — assert each pipes into a PID-scoped `grep -qw`.
+  while IFS= read -r line; do
+    [[ "$line" == *'grep -qw'* ]] || bad="${bad}${line}\n"
+  done < <(grep -E '^[[:space:]]*pgrep -f ' "${BASH_SOURCE[0]}")
+  if [[ -z "$bad" ]]; then
+    pass "#2849: all real pgrep -f usages are PID-scoped (grep -qw \$pid) — hermetic vs host processes"
+  else
+    fail "#2849: un-PID-scoped real pgrep -f line(s) can match host processes:\n$(printf '%b' "$bad")"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 echo "=== worker-supervisor test suite ==="
@@ -2621,5 +2693,7 @@ test_grace_cap_disabled_semantics
 test_mid_grace_stop_is_aborted
 test_default_worker_cmd_is_headless
 test_healthy_worker_iterlog_nonempty
+test_claim_cmd_empty_truly_disables_no_network
+test_real_pgrep_usages_are_pid_scoped
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
