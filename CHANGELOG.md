@@ -7,40 +7,245 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes. The next version's entries will collect here._
+
+## [v0.16.1] - 2026-07-23
+
+_The CommitLog release._ A patch on v0.16.0 that adds a second Cassandra on-disk
+format — CommitLog segment files — alongside SSTables. No breaking changes; the new
+module and CLI subcommand are purely additive.
+
+### Added
+
+- Cassandra 5.0 CommitLog reader: `cqlite_core::storage::commitlog` with
+  `CommitLogReader::open` / `open_with_schemas` and a lazy streaming `MutationIter`
+  (one record at a time, 128 MB segment cap) (#2389, PR #2797). Contributed by
+  @rustyrazorblade.
+- `read-commitlog` CLI subcommand (JSON and text output) alongside the SSTable
+  commands (#2389, PR #2797).
+- Appendix H of the SSTable definitive guide: CommitLog on-disk format documentation
+  (#2389, PR #2797).
+
+### Notes
+
+- The reader decodes the version-gated descriptor header (Cassandra 5.0 commitlog
+  version 7), CRC-framed sync sections with torn-tail tolerance, and schema-aware
+  mutation/cell decode for the common insert path. Unmodeled constructs (clustering
+  columns, static rows, collection/complex columns, deletions, range tombstones) are
+  reported structurally rather than misdecoded; compressed and encrypted segments and
+  version-8 segments (`storage_compatibility_mode: NONE/UPGRADING`) fail closed with a
+  typed error. No-heuristics throughout.
+- Scope is reader-only. The CommitLog writer (#2388), CDC tailing, encryption support,
+  and query/Flight integration are out of scope for this pass. Hostile-file hardening
+  follow-ups are tracked in #2838.
+
+## [v0.16.0] - 2026-07-22
+
+_Trino connector completeness & cancellation._ Closes two field-surfaced connector
+gaps on the v0.15.0 latency/throughput base: collection columns now project through
+Trino, and weight-balanced split fan-out ships with a root fix for a
+`LIMIT`-cancellation hang.
+
+### Added
+
+- Typed collection columns through Trino: `list`/`set`/`map` (including
+  `list<frozen<udt>>`) project as Trino `array`/`row`/`map` instead of being silently
+  dropped; unmappable columns are surfaced loudly. Primitive element types decode
+  fully; UDT element-value decode inside a collection remains tracked to #2349 (#2815,
+  PR #2816).
+- Weight-balanced split→pod assignment via K-way token-range sub-splitting
+  (`cqlite.sub-splits-per-range`, default 4) with span-proportional `SplitWeight`,
+  evening out the 2–4× per-pod CPU skew. Aggregate, pushed-`LIMIT`, and fully-bound
+  point reads are exempted to K=1 (#2680, PR #2833).
+- Plan-time split pruning for fully-bound partition keys — a point read prunes to the
+  covering split instead of fanning out (#2679, PR #2774; #2806, PR #2810).
+- UDT registry wired into both Flight read paths, cold and warm (#2349, PR #2761).
+- Keyspace-qualified UDT type names accepted on both read paths (#2807, PR #2808).
+- BTI (`da`) and compressed-chunk-stitching end-to-end Flight `do_get` coverage (#2372,
+  PR #2768; #2373, PR #2780); fine-grained `do_get` abort taxonomy and abort-path trace
+  (#2681, PR #2784); `tables_discovered` / `warm_tables` gauges (#2684, PR #2786).
+
+### Fixed
+
+- **P0 `LIMIT`-cancellation hang fixed at root**: a partial-predicate `LIMIT` under
+  sub-splitting could hang because the blocking Flight `DoGet` read ran on the Trino
+  driver thread, so operator close could never cancel it. The read now runs off the
+  driver thread (`isBlocked()`), letting close cross-cancel the stream; the server
+  egress path also races a cancel flag. Guarded by a docker-compose E2E `LIMIT`
+  regression test (#2782, PR #2833).
+- Read-time TTL/liveness reconciliation routed through `do_get` and validated by the
+  query-semantics oracle (#2374, #2789, PR #2800).
+
+### Changed
+
+- Recurring roborev blocker classes mechanized as `--lite` gate lints (#2656, PR
+  #2741).
+
+## [v0.15.0] - 2026-07-17
+
+_Trino latency, throughput & operations_ (epic #2403). Turns the field-validated read
+path into a fast, observable, overload-resilient one: warm throughput through Trino is
+up roughly **15×** versus the v0.14 field baseline (round-11b measured ~34 qps warm,
+p50 227ms / p99 366ms, server-side ~2ms, zero cold parses, at 80 threads with no
+OOMKills).
+
+### Added
+
+- Flight `do_get` admission control: bounded scan concurrency
+  (`--max-concurrent-scans`), `UNAVAILABLE` load-shedding, and phase-visible queueing;
+  the eager multi-generation merge is admitted through the same semaphore (#2420, PR
+  #2431; #2063, PR #2568).
+- Five in-process saturation gauges — blocking-task guard, merge egress depth, and an
+  fd/thread/RSS sampler on a 2s tick (#2419, PR #2547).
+- Operator-facing flight-metrics reference and a refreshed cqlite-flight Grafana
+  dashboard with a catalog-drift guard; `cqlite.errors.total` eagerly registered at 0
+  on startup (#2426, #2427, #2288).
+- Multi-node read fan-out: split primaries rotate across replica owners, so reads under
+  RF=N are no longer pinned to a single pod (#2397, PR #2409).
+- `tools/flight-loadgen` throughput harness (#2313, PR #2575); a `CQLITE_READ_PATH`
+  forcing knob plus point-vs-full differential lane (#1918); a public Performance page
+  with measured round-11b results (#2473, PR #2475).
+
+### Fixed
+
+- **P0 — silent row loss on large single-cell values**: rows with a single ≥~1MB cell
+  were silently dropped because a 1MB `row_size` heuristic rejected them as corrupt. It
+  is replaced with an authoritative remaining-bytes bound, per the no-heuristics mandate
+  (#2436, PR #2482).
+- v5 cell parsing hardening: overflow-safe cell bounds, `Float32`/varint parity, and a
+  varint arm that decodes a CQL varint as `Value::Varint` rather than a blob (#1795,
+  #1884, #1885, PR #2467, PR #2466).
+- `GROUP BY` float/double groups by the Cassandra comparator: NaN → one group, `±0.0`
+  distinct (#2074, PR #2488).
+- `CompressionInfo` fail-closed: `max_compressed_length == 0` is rejected at parse and
+  in the compressed-offset-window read instead of producing garbage (#2529, #2524);
+  compressed `CHUNK_READ_CALLS` accounting restored (#2167).
+- Complex-cell element TTL clamped to `i32::MAX`, matching the scalar reader (#2173);
+  snapshot-aware SSTable identity parsing handles ID-ful snapshots (#2384).
+
+### Changed / Performance
+
+- Connector snapshot-lifecycle closure — per-`(keyspace, table)` reader reuse plus warm
+  rebind (#2356, #2306, PR #2425); snapshot-retirement hardening with a background
+  grace-sweep (#2452, PR #2579). Trino connector advanced to `0.14.3` / `0.14.4`.
+- Lazy Summary-guided BIG index — `O(summary)` open, bounded point-lookup intervals,
+  and token-pushdown scans (#2412, #2413, PR #2440).
+- Row-granular point-read streaming — point reads and cache-warm merges drive the merge
+  row by row instead of materializing (#2423, PR #2434); the read-path merge streams
+  per-row via `StreamingMerger` (#2230).
+- Zero-copy `Bytes`-backed `Value` on the read path (#1644, PR #2598); binary-search
+  range shadowing in the merge core (#1669); a `MADV_RANDOM` point-read mmap (#2210) and
+  a global bounded key→partition-offset cache (#2059).
+- Uncompressed-SSTable compaction peak heap bounded from **410 → 54 MiB** via
+  row-granular streaming (#2299, PR #2421).
+
+## [v0.14.1] - 2026-07-13
+
+_Cold-start parse fix._ A patch on v0.14.0 that fixes the cold first-query-per-table
+parse cost v0.14.0 called out as a known limitation. No API or behavior changes — a
+pure performance fix.
+
+### Performance
+
+- Retired the redundant `SSTableIndex` from BIG reader open: `SSTableReader::open` no
+  longer builds a second in-memory index, so `Index.db` is parsed exactly once per open
+  (2 → 1), and the surviving build uses capacity hints (linearithmic, not quadratic)
+  (#2385, #2395, PR #2402).
+  - 200k-entry index build: 6.17s → 0.061s (~100×).
+  - Growth ratio (build time vs entry count): 15.5 → 4.96.
+  - Resident index memory: roughly halved per generation.
+
+## [v0.14.0] - 2026-07-13
+
+_Flight field-readiness._ The Arrow Flight server and Trino connector read path are now
+field-validated against a live, at-scale Cassandra deployment (round-9 field build;
+validation tracker #2367).
+
+### Added
+
+- Streaming `do_get` scan: the non-stitching scan path no longer materializes the whole
+  SSTable before the first emit — it walks the index lazily, applies `LIMIT`
+  effectively, and tears producers down on cancel via a Drop-join (#2361).
+- Resolve-phase parse-once warm registry: single-flight parse, rebind-by-inode, and
+  cancel-aware parse remove the CPU spin that hung `LIMIT`, `count(*)`, and point reads
+  at multi-million-partition scale (#2383).
+- `do_get` pushes PK-equality predicates toward partition point-read / prune instead of
+  a full merge scan (#2207).
+- Published Arrow Flight server + Trino connector user-docs page (#2115).
+
+### Changed
+
+- **BREAKING (config schema):** `MemoryConfig` collapsed to a single real caching knob —
+  `block_cache.max_size`, wired as the shared decompressed-chunk cache's byte budget
+  (Epic B / B2, #1568). The decorative `MemoryConfig.row_cache`, `MemoryConfig.query_cache`,
+  and `MemoryConfig.allocator` fields and the never-selected `CachePolicy::Lfu` /
+  `CachePolicy::Arc` variants (all wired to nothing at runtime) were removed. A config
+  that still names any removed field or variant now **fails closed** on deserialization
+  (`deny_unknown_fields` / unknown enum variant) rather than being silently ignored.
+  `Database::stats().memory_stats` keeps its shape but its block-cache numbers are now
+  the real cache's hits/misses/occupancy (a repeated cached read yields a non-zero
+  `block_cache_hit_rate()` instead of a structural `0.0`).
+- **Reader open path (perf):** `CompressionInfo.db` is now parsed **exactly once** per
+  reader open (was twice — a legacy `parse_binary` plus the modern `parse`), and the
+  compression algorithm is derived from that single authoritative parse. The legacy
+  `detect_and_initialize_compression` path — which also issued ~25 speculative
+  `exists()` generation-probe stats per open — is deleted; the component name is derived
+  deterministically from `SsTableDescriptor` (Epic G / G1, #1597). No read result
+  changes (byte-for-byte parity preserved).
+
 ### Removed
 
 - **BREAKING (public API):** deleted the dead SSTable reader stacks flagged by the
   read-path audit (Epic G / G1, #1597). Removed public items:
-  `cqlite_core::storage::sstable::SchemaAwareReader` (and the
-  `schema_aware_reader` module); the `chunked_data_reader` module and
-  `ChunkedDataReader`; `compression::StreamingDecompressor`,
-  `ChunkedDecompressionConfig`, and the duplicate legacy
-  `compression::CompressionInfo` / `ChunkInfo` parser (`parse` / `parse_binary`);
+  `cqlite_core::storage::sstable::SchemaAwareReader` (and the `schema_aware_reader`
+  module); the `chunked_data_reader` module and `ChunkedDataReader`;
+  `compression::StreamingDecompressor`, `ChunkedDecompressionConfig`, and the duplicate
+  legacy `compression::CompressionInfo` / `ChunkInfo` parser (`parse` / `parse_binary`);
   and the streaming half of `CompressionReader` (`read`, `read_streaming`,
-  `with_block_size`, `block_size`) — `CompressionReader` is now a plain
-  `{ algorithm }` field with `new()` + `algorithm()`. All were constructed only in
-  tests or had zero production consumers.
+  `with_block_size`, `block_size`) — `CompressionReader` is now a plain `{ algorithm }`
+  field with `new()` + `algorithm()`. All were constructed only in tests or had zero
+  production consumers.
 
-### Changed
+### Fixed
 
-- **Reader open path (perf):** `CompressionInfo.db` is now parsed **exactly once**
-  per reader open (was twice — a legacy `parse_binary` plus the modern `parse`),
-  and the compression algorithm is derived from that single authoritative parse.
-  The legacy `detect_and_initialize_compression` path — which also issued ~25
-  speculative `exists()` generation-probe stats per open — is deleted; the
-  component name is derived deterministically from `SsTableDescriptor` (Epic G /
-  G1, #1597). No read result changes (byte-for-byte parity preserved).
-- **BREAKING (config schema):** `MemoryConfig` collapsed to a single real caching
-  knob — `block_cache.max_size`, wired as the shared decompressed-chunk cache's
-  byte budget (Epic B / B2, #1568). The decorative `MemoryConfig.row_cache`,
-  `MemoryConfig.query_cache`, and `MemoryConfig.allocator` fields and the
-  never-selected `CachePolicy::Lfu` / `CachePolicy::Arc` variants (all wired to
-  nothing at runtime) were removed. A config that still names any removed field
-  or variant now **fails closed** on deserialization (`deny_unknown_fields` /
-  unknown enum variant) rather than being silently ignored. `Database::stats()
-  .memory_stats` keeps its shape but its block-cache numbers are now the real
-  cache's hits/misses/occupancy (a repeated cached read yields a non-zero
-  `block_cache_hit_rate()` instead of a structural `0.0`).
+- Warm-handles `ENOENT`: streaming merge producers no longer fail when a snapshot path
+  goes stale after `clearSnapshot` — a path-liveness gate re-opens by live path (#2352).
+- `do_get` snapshot-index reload/glob loop honors cancellation, so `LIMIT` queries no
+  longer hang and the in-flight gauge no longer sticks (#2264, #2157).
+- Flight producer `entry_to_row` no longer collapses multi-cell / collection columns via
+  HashMap overwrite (#2324).
+- Read-time reconciliation: a multi-generation `SELECT` applies read-time TTL /
+  partition / range-tombstone visibility (#1849); `scan_stream` single-generation path
+  returns rows on CQLite-written SSTables (#1897).
+- Write path honors `USING TTL` and per-cell expiration; surviving live TTL cells stay
+  byte-identical after compaction, including complex / collection / UDT elements (#1743,
+  #2038, #1538, #1537); non-frozen collection round-trip fixed (#2035).
+- Float/double ordering matches Cassandra (NaN last, `-0.0 < +0.0`) across `Value`
+  comparison, `ORDER BY`, `MIN`/`MAX` (#2010, #1870).
+- Point-lookup `WHERE pk = ?` returns typed columns and routes to the fast path instead
+  of the legacy column-less heuristic fork (#2066, #1802, #1750).
+- No-heuristics + parser hardening: blob decode no longer guesses on a hardcoded byte
+  pattern; recursion-depth guards, `duration` `try_from`, clamped capacities; typed
+  Zstd-dictionary rejection; checked Arrow collection offsets (#1630, #1414, #1723,
+  #1488, #1486).
+- Query-semantics oracle added so read-reconciliation bugs no longer pass physical-dump
+  parity green (#1742); compaction finalize path fsyncs directories (#1959).
+
+### Performance
+
+- Read/parse/export hot paths from the audit epics (B–G, J–M, AC–AE): boxed `Value`
+  variants (88B → ≤40B), byte-bounded result budgets replacing the 1M row-count cliff,
+  `LIMIT`/`OFFSET` pushed into the scan, streaming multi-generation merge + streaming
+  O(1) aggregates, a key→partition-offset cache, one-walk zero-copy BTI trie descent, a
+  single read-side VInt decoder, and capacity-hinted Arrow builders (#1583, #1582,
+  #1577, #1585, #1495, #1817).
+
+### CI / testing
+
+- Metadata-driven, feature-aware CI lanes replace the hand-maintained hardcoded test
+  lists; first green `main` since 2026-07-06 (#2359, #2039). Dataset skip-guard checks
+  `Data.db` so dataset-dependent tests skip rather than panic (#2065). De-flaked
+  wall-clock / global-counter / RSS-monotonic tests (#1776, #1774, #1539).
 
 ## [v0.13.0] - 2026-07-05
 
