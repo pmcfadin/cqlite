@@ -527,6 +527,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 21. G4: many-row board -> mirror reconciles EVERY issue (a child consuming the
+#     loop's stdin would silently skip rows; the dedicated-fd read must not).
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+seed_state \
+  "$(printf '301\tReady\t%s\t' "$OLD_TS")" \
+  "$(printf '302\tReady\t%s\t' "$OLD_TS")" \
+  "$(printf '303\tReady\t%s\t' "$OLD_TS")" \
+  "$(printf '304\tReady\t%s\t' "$OLD_TS")" \
+  "$(printf '305\tReady\t%s\t' "$OLD_TS")"
+bash "$MIRROR" mirror >/dev/null 2>&1
+if has_label 301 "status:ready" && has_label 302 "status:ready" \
+  && has_label 303 "status:ready" && has_label 304 "status:ready" \
+  && has_label 305 "status:ready"; then
+  pass "G4: mirror reconciles every row of a multi-issue board (no stdin-eaten skips)"
+else
+  fail "G4: some rows skipped: 301=$(labels_of 301) 302=$(labels_of 302) 303=$(labels_of 303) 304=$(labels_of 304) 305=$(labels_of 305)"
+fi
+
+# ---------------------------------------------------------------------------
 echo "----"
 echo "board-label-mirror: PASS=$PASS_COUNT FAIL=$FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]

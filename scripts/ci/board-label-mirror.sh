@@ -199,17 +199,22 @@ blm_item_by_node() {
     | @tsv' || return 1
 }
 
-# blm_mirror_stream — read the board TSV on stdin and idempotently reconcile each
-# issue's board-derived label via `gh issue edit`: add the desired label if absent,
-# remove each OTHER board-derived label that is present. spec-review / addressing
-# are never in BLM_DERIVED_LABELS, so they are never touched.
+# blm_mirror_stream BOARD_FILE — read the board TSV FILE and idempotently reconcile
+# each issue's board-derived label via `gh issue edit`: add the desired label if
+# absent, remove each OTHER board-derived label that is present. spec-review /
+# addressing are never in BLM_DERIVED_LABELS, so they are never touched.
+#
+# The board rows are read on a DEDICATED fd (3) so the `gh issue edit` children
+# inside the loop can never consume board rows off the loop's stdin and silently
+# skip issues (issue #2855, G4); each child's own stdin is also closed (</dev/null).
 #
 # FAIL-CLOSED: an UNKNOWN board Status never strips labels — it emits ::error:: and
 # fails (F6). A failed `gh issue edit` emits ::error:: and fails rather than logging
 # a success that never happened (F7). Returns non-zero if any row failed.
 blm_mirror_stream() {
+  local board_file="$1"
   local n status created labels desired dstat lbl rc=0
-  while IFS=$'\t' read -r n status created labels; do
+  while IFS=$'\t' read -r -u 3 n status created labels; do
     [ -n "$n" ] || continue
     desired=$(blm_desired_label "$status"); dstat=$?
     if [ "$dstat" -ne 0 ]; then
@@ -218,7 +223,7 @@ blm_mirror_stream() {
       continue
     fi
     if [ -n "$desired" ] && ! _blm_csv_has "$labels" "$desired"; then
-      if gh issue edit "$n" --add-label "$desired" >/dev/null; then
+      if gh issue edit "$n" --add-label "$desired" >/dev/null </dev/null; then
         echo "mirror: #$n Status='$status' +$desired"
       else
         echo "::error::issue #$n: failed to add label '$desired' (gh issue edit)"
@@ -228,7 +233,7 @@ blm_mirror_stream() {
     for lbl in $BLM_DERIVED_LABELS; do
       [ "$lbl" = "$desired" ] && continue
       if _blm_csv_has "$labels" "$lbl"; then
-        if gh issue edit "$n" --remove-label "$lbl" >/dev/null; then
+        if gh issue edit "$n" --remove-label "$lbl" >/dev/null </dev/null; then
           echo "mirror: #$n Status='$status' -$lbl"
         else
           echo "::error::issue #$n: failed to remove stale label '$lbl' (gh issue edit)"
@@ -236,7 +241,7 @@ blm_mirror_stream() {
         fi
       fi
     done
-  done
+  done 3<"$board_file"
   return "$rc"
 }
 
@@ -319,7 +324,10 @@ blm_detect_stream() {
   grace="${BLM_GRACE_SECS:-600}"
   now=$(date -u +%s)
   cutoff=$((now - grace))
-  while IFS=$'\t' read -r n status created labels; do
+  # Read board rows on a DEDICATED fd (3): the self-heal re-read (blm_board_stream)
+  # runs a `gh` child inside this loop, which would otherwise consume board rows
+  # off the loop's stdin and silently skip issues (issue #2855, G4).
+  while IFS=$'\t' read -r -u 3 n status created labels; do
     [ -n "$n" ] || continue
     if [ -n "$created" ]; then
       cepoch=$(_blm_iso_to_epoch "$created")
@@ -350,7 +358,7 @@ blm_detect_stream() {
     if ! _blm_row_bad "$fn" "$fstatus" "$flabels" emit; then
       bad=$((bad + 1))
     fi
-  done <"$board_file"
+  done 3<"$board_file"
 
   if ! _blm_offboard_check "$board_file"; then
     bad=$((bad + 1))
@@ -382,7 +390,7 @@ main() {
       # hole (issue #2855). A failed read never reaches the mirror.
       bf=$(mktemp) || return 1
       if ! blm_board_stream >"$bf"; then rm -f "$bf"; return 1; fi
-      blm_mirror_stream <"$bf"; rc=$?
+      blm_mirror_stream "$bf"; rc=$?
       rm -f "$bf"
       return "$rc"
       ;;
@@ -409,7 +417,7 @@ main() {
         echo "::error::mirror-one: issue #$2 produced no board row — it is not on the project board (auto-add miss?) or is closed. Not silently no-op'ing (issue #2855)."
         return 1
       fi
-      blm_mirror_stream <"$bf"; rc=$?
+      blm_mirror_stream "$bf"; rc=$?
       rm -f "$bf"
       return "$rc"
       ;;
