@@ -341,9 +341,20 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   one OpenSpec change `<slug>` ↔ one PR. Worktrees lack gitignored Data.db binaries — point
   `CQLITE_DATASETS_ROOT` at the main repo's `test-data/datasets`.
 - **Board = sole dispatch authority (Path A, #1886)**: the GitHub Project `Status` field
-  (`Backlog/Ready/In Progress/In Review/Done`); exactly one `P0`–`P3` per issue. `status:*` labels
-  are decorative, NEVER a selection source. New issues auto-land at `Backlog`. Empty Ready column =
-  no work ready → STOP. Board unreachable (auth/scope) → STOP and fix auth; never label-dispatch.
+  (`Backlog/Ready/In Progress/In Review/Done`); exactly one `P0`–`P3` per issue. New issues auto-land
+  at `Backlog`. Empty Ready column = no work ready → STOP. Board unreachable (auth/scope) → STOP and
+  fix auth; never label-dispatch.
+- **`status:*` labels = an ENFORCED read-mirror of board Status, for DISCOVERY only (#2855)**: the
+  `project-board-sync.yml` workflow is the *single writer*, deriving each OPEN issue's label from its
+  board Status (Ready→`status:ready`, In Progress→`status:in-progress`, In Review→`status:in-review`,
+  Backlog/Done→none) on the 30-min sweep + on issue events, and a drift-detector FAILs the run on any
+  disagreement. So the label is now *trustworthy* for **cheap server-side candidate discovery**
+  (`gh issue list --state open --label status:ready --json number,title` — no issue bodies, no board
+  pagination). It is NEVER the dispatch/claim authority: it is eventually-consistent (≤30-min lag), so
+  it only NARROWS candidates — the claim ref + a fresh board read at claim time remain the sole
+  double-work arbiter. flow-* skills no longer write the board-derived labels (they set board Status
+  only; the mirror follows); `status:spec-review`/`status:addressing` stay transient skill-managed
+  sub-markers the mirror does not touch.
 - **Claim protocol (cross-machine, #2665)**: THE lock is the slugless fixed-name ref
   `refs/claims/issue-<N>`, acquired via `bash scripts/flow/claim.sh claim <N>` — an atomic unique
   root-commit push that git arbitrates server-side, so a model-chosen slug or an identical-SHA base
