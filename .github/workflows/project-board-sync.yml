@@ -46,16 +46,20 @@ on:
 permissions:
   contents: read
 
-# Key the concurrency group PER event/target (issue #2855, F4): the mirror edits
-# labels with the PAT, so each --add/--remove-label re-triggers this workflow via
+# Key the concurrency group PER LANE (issue #2855, F4/G3): the mirror edits labels
+# with the PAT, so each --add/--remove-label re-triggers this workflow via
 # issues:[labeled,unlabeled]. A single shared serialized group would let a burst of
 # label events starve or block a pending pull_request_target:closed (closed-PR ->
-# Done safety net) or the scheduled sweep. Per-(event,target) groups keep those
-# distinct lanes independent; only repeated events for the SAME issue serialize.
-# NOTE: a ${{ }} expression in the concurrency group KEY is not a run: shell body,
-# so this is NOT the command-injection sink the guard flags — safe here.
+# Done safety net) or the scheduled sweep. So the group keys on the ISSUE/PR number
+# for those event lanes — only repeated events for the SAME issue serialize — but
+# collapses to the CONSTANT `sweep` key otherwise, so `schedule` and
+# `workflow_dispatch` share ONE group and their `sweep` + `reap-claims` board
+# writes serialize (they must NOT race / double-comment — G3). Keying on
+# github.event_name would split them into separate groups and let two sweeps run
+# concurrently. NOTE: a ${{ }} expression in the concurrency group KEY is not a
+# run: shell body, so this is NOT the command-injection sink the guard flags.
 concurrency:
-  group: project-board-sync-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || 'sweep' }}
+  group: project-board-sync-${{ github.event.issue.number && format('issue-{0}', github.event.issue.number) || github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || 'sweep' }}
   cancel-in-progress: false
 
 env:
