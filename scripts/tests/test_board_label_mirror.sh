@@ -58,8 +58,19 @@ set -uo pipefail
 
 # --- gh api graphql ... : emit the board items JSON from STATE_FILE ---------
 if [ "${1:-}" = "api" ] && [ "${2:-}" = "graphql" ]; then
+  # Count graphql calls so a test can fail a SPECIFIC call — e.g. the self-heal
+  # re-read but NOT the initial materialize (issue #2855, G6b F5 re-read-fails).
+  gqf="$STATE_FILE.gq_calls"
+  gqc=$(cat "$gqf" 2>/dev/null || echo 0)
+  echo $((gqc + 1)) >"$gqf"
   if [ -n "${GH_FAIL_GRAPHQL:-}" ]; then
     printf '%s\n' '{"errors":[{"message":"Bad credentials"}]}'
+    exit 1
+  fi
+  # GH_FAIL_GRAPHQL_AFTER=K -> succeed on calls 0..K-1, fail on call K and later.
+  # Models a re-read failure after a successful materialize (issue #2855, G6b).
+  if [ -n "${GH_FAIL_GRAPHQL_AFTER:-}" ] && [ "$gqc" -ge "$GH_FAIL_GRAPHQL_AFTER" ]; then
+    printf '%s\n' '{"errors":[{"message":"Bad credentials on re-read"}]}'
     exit 1
   fi
   # A node(id:) lookup (mirror-one by node id) — resolve one issue's project item
@@ -576,6 +587,82 @@ if has_label 301 "status:ready" && has_label 302 "status:ready" \
   pass "G4: mirror reconciles every row of a multi-issue board (no stdin-eaten skips)"
 else
   fail "G4: some rows skipped: 301=$(labels_of 301) 302=$(labels_of 302) 303=$(labels_of 303) 304=$(labels_of 304) 305=$(labels_of 305)"
+fi
+
+# ---------------------------------------------------------------------------
+# 22. G6b F5 self-heal RESOLVES -> detect exits 0. A first-pass drift that, on the
+#     self-heal RE-READ, is now consistent (Status flip raced between the mirror and
+#     detect) MUST NOT red the run. SELF_HEAL_TO swaps STATE_FILE to a consistent
+#     board AFTER the initial full-board materialize, so the per-issue re-read
+#     observes the healed state.
+# ---------------------------------------------------------------------------
+d="$(new_case)"
+# First-pass board: #310 is Ready but mislabeled status:in-progress (a drift).
+seed_state "$(printf '310\tReady\t%s\tstatus:in-progress' "$OLD_TS")"
+# Healed board the re-read will observe: #310 Ready + status:ready (consistent).
+printf '310\tReady\t%s\tstatus:ready\n' "$OLD_TS" >"$d/healed.tsv"
+export SELF_HEAL_TO="$d/healed.tsv"
+out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
+gq_seen=$(cat "$STATE_FILE.gq_calls" 2>/dev/null || echo 0)
+unset SELF_HEAL_TO
+if [ "$rc" -eq 0 ] && [ "$gq_seen" -ge 2 ]; then
+  pass "G6b F5: self-heal re-read that RESOLVES exits 0 (raced Status flip, $gq_seen graphql calls)"
+else
+  fail "G6b F5: self-heal-resolves should exit 0 with a re-read (rc=$rc, graphql=$gq_seen): $out"
+fi
+
+# ---------------------------------------------------------------------------
+# 23. G6b F5 self-heal PERSISTS -> detect exits 1. A drift that is STILL present on
+#     the self-heal re-read (no swap) MUST red the run — and the re-read actually
+#     ran (>=2 graphql calls: materialize + re-read), so the verdict is the
+#     authoritative current state, not the first pass alone.
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+seed_state "$(printf '311\tReady\t%s\tstatus:in-progress' "$OLD_TS")"
+out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
+gq_seen=$(cat "$STATE_FILE.gq_calls" 2>/dev/null || echo 0)
+if [ "$rc" -ne 0 ] && [ "$gq_seen" -ge 2 ] \
+  && printf '%s' "$out" | grep -q "::error::"; then
+  pass "G6b F5: persistent drift reds the run after a re-read ($gq_seen graphql calls)"
+else
+  fail "G6b F5: persistent drift should fail after re-read (rc=$rc, graphql=$gq_seen): $out"
+fi
+
+# ---------------------------------------------------------------------------
+# 24. G6b F5 self-heal RE-READ FAILS -> detect exits 1. The initial materialize
+#     succeeds (call 0) and observes a drift; the per-issue self-heal re-read
+#     (call 1) FAILS. The detector must NOT declare consistent on a failed re-read
+#     — it counts the candidate and reds the run (GH_FAIL_GRAPHQL_AFTER=1).
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+seed_state "$(printf '312\tReady\t%s\tstatus:in-progress' "$OLD_TS")"
+export GH_FAIL_GRAPHQL_AFTER=1
+out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
+unset GH_FAIL_GRAPHQL_AFTER
+if [ "$rc" -ne 0 ] \
+  && printf '%s' "$out" | grep -q "re-read (self-heal) failed"; then
+  pass "G6b F5: a FAILED self-heal re-read reds the run (never declares consistent)"
+else
+  fail "G6b F5: failed re-read not fail-closed (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
+# 25. G6b BLM_GRACE_SECS freshness skip -> a DRIFTED row with a FRESH createdAt and
+#     BLM_GRACE_SECS=600 is SKIPPED (auto-add/mirror-settle race), detect exits 0.
+#     Every other case pins BLM_GRACE_SECS=0, so this grace path is otherwise
+#     untested.
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+fresh_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# #313 is drifted (Ready but status:in-progress) but created just now.
+seed_state "$(printf '313\tReady\t%s\tstatus:in-progress' "$fresh_ts")"
+export BLM_GRACE_SECS=600
+out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
+unset BLM_GRACE_SECS
+if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q "::error::"; then
+  pass "G6b: a fresh-createdAt drift within BLM_GRACE_SECS is skipped (detect exits 0)"
+else
+  fail "G6b: grace-window skip failed (rc=$rc): $out"
 fi
 
 # ---------------------------------------------------------------------------
