@@ -109,27 +109,19 @@ impl SSTableReader {
             return Ok(entries);
         }
 
-        // Decompress block data if compression is enabled.
-        //
-        // Route the decompress through the single chunk decode plane
-        // (`ChunkSource::decompress_only`, issue #2165 / G2) — the same shape the
-        // stitch path uses (`data_access/mod.rs`), so `parsing/` no longer calls
+        // Decompress block data if compression is enabled. Route through the single
+        // chunk decode plane (`ChunkSource::decompress_only`, issue #2165 / G2) — the
+        // stitch-path shape (`data_access/mod.rs`) — so `parsing/` no longer calls
         // `Compression::decompress` inline. A failed decompress FAILS CLOSED with a
-        // corruption error; it is never a silent raw-bytes parse (no-heuristics, #28).
+        // corruption error; never a silent raw-bytes parse (no-heuristics, #28).
         //
-        // Reachability invariant (issue #2165): this compressed branch is effectively
-        // unreached on real files today — BTI-with-CompressionInfo routes to
-        // `bti_scan_with_metadata`, nb multi-chunk routes through
-        // `requires_chunk_stitching` → the stitch path, and uncompressed files take
-        // the `compression_reader == None` branch below. The fail-closed assumption
-        // (a decompress failure HERE == corruption) is therefore currently safe. It
-        // would NOT hold for Cassandra's incompressible-stored-raw chunk format
-        // (a chunk whose `len >= max_compressed_length` is stored uncompressed) if a
-        // future refactor ever re-wired a real compressed chunk through this branch:
-        // such a chunk would need the stitch path's `>= max_compressed_length` raw
-        // passthrough (see `stitch_all_chunks`), which is deliberately NOT duplicated
-        // here (dead code today). A future re-wirer MUST add it before relying on this
-        // branch for real compressed chunks.
+        // Reachability invariant (#2165): this compressed branch is effectively
+        // unreached on real files today (BTI+CompressionInfo → `bti_scan_with_metadata`;
+        // nb multi-chunk → `requires_chunk_stitching` stitch path; uncompressed →
+        // the `None` branch below), so fail-closed == corruption is currently safe.
+        // A future re-wirer sending real compressed chunks here MUST first add the
+        // stitch path's `len >= max_compressed_length` raw-passthrough (incompressible
+        // chunks are stored uncompressed) — deliberately NOT duplicated here (dead today).
         let data = if let Some(compression_reader) = &self.compression_reader {
             tracing::debug!(
                 "parse_block_entries: Attempting block decompression with algorithm: {:?}",
@@ -1317,8 +1309,8 @@ mod tests {
             .compression_reader
             .as_ref()
             .expect("simple_table should be compressed");
-        let compression = Compression::new(*compression_reader.algorithm())
-            .expect("valid compression algorithm");
+        let compression =
+            Compression::new(*compression_reader.algorithm()).expect("valid compression algorithm");
         let compressed = compression
             .compress(&block_data)
             .expect("compress synthetic block");
