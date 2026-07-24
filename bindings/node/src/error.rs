@@ -546,6 +546,10 @@ mod tests {
                 Error::InvalidFormat(_) => {}
                 Error::UnsupportedFormat(_) => {}
                 Error::UnsupportedVersion { .. } => {}
+                // CommitLog reader (#2389) — not bound yet (v1 is library+CLI only),
+                // same Data-category handling as the sibling SSTable-format errors above.
+                Error::UnsupportedCommitLogVersion { .. } => {}
+                Error::CorruptCommitLogFrame(_) => {}
                 Error::InvalidPath(_) => {}
                 Error::TypeConversion(_) => {}
                 Error::Storage(_) => {}

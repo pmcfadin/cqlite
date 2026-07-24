@@ -23,6 +23,7 @@ pub mod write;
 pub mod delta_export;
 pub mod docker;
 pub mod info;
+pub mod read_commitlog;
 pub mod read_sstable;
 pub mod verify;
 

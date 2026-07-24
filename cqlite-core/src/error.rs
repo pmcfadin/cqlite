@@ -49,6 +49,29 @@ pub enum Error {
     #[error("Unsupported SSTable version {version:?}: below supported floor {floor:?}")]
     UnsupportedVersion { version: String, floor: String },
 
+    /// Cassandra CommitLog segment descriptor version outside the supported
+    /// Cassandra 5.0-era range (issue #2389).
+    ///
+    /// The version is read authoritatively from the `CommitLogDescriptor`
+    /// header, never inferred from the filename or file size (no-heuristics).
+    /// A below/above-range version is rejected before the mutation stream is
+    /// touched, mirroring `BigVersionGates`/`BtiVersionGates`.
+    #[error("Unsupported CommitLog version {version}: supported range is {floor}..={ceiling}")]
+    UnsupportedCommitLogVersion {
+        version: i32,
+        floor: i32,
+        ceiling: i32,
+    },
+
+    /// A Cassandra CommitLog per-record frame failed structural validation:
+    /// a CRC mismatch (header or payload), an implausible record length, or a
+    /// corrupt sync marker (issue #2389).
+    ///
+    /// Distinct from a *torn tail* (clean truncation), which is reported to the
+    /// caller as end-of-segment rather than as an error.
+    #[error("Corrupt CommitLog frame: {0}")]
+    CorruptCommitLogFrame(String),
+
     /// Timeout error
     #[error("Operation timeout: {0}")]
     Timeout(String),
@@ -437,6 +460,8 @@ impl Error {
             Error::InvalidFormat(_) => false,
             Error::UnsupportedFormat(_) => false,
             Error::UnsupportedVersion { .. } => false,
+            Error::UnsupportedCommitLogVersion { .. } => false,
+            Error::CorruptCommitLogFrame(_) => false,
             Error::InvalidPath(_) => false,
             Error::InvalidState(_) => false,
             Error::Timeout(_) => false,
@@ -487,6 +512,8 @@ impl Error {
             Error::InvalidFormat(_) => ErrorCategory::Data,
             Error::UnsupportedFormat(_) => ErrorCategory::Data,
             Error::UnsupportedVersion { .. } => ErrorCategory::Data,
+            Error::UnsupportedCommitLogVersion { .. } => ErrorCategory::Data,
+            Error::CorruptCommitLogFrame(_) => ErrorCategory::Data,
             Error::InvalidPath(_) => ErrorCategory::System,
             Error::InvalidState(_) => ErrorCategory::Logic,
             Error::Timeout(_) => ErrorCategory::System,

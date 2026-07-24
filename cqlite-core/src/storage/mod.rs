@@ -6,6 +6,10 @@ pub mod cache;
 pub mod scan_cancel;
 pub mod sstable;
 
+/// Cassandra 5.0 CommitLog segment reader (issue #2389) — a second on-disk
+/// Cassandra format, sibling of `sstable` and `write_engine`.
+pub mod commitlog;
+
 // Canonical partition-key (de)serialization, shared by the read (query) path
 // and the write engine so the two never drift (Issue #586). Always compiled —
 // the scan path needs it even without `write-support`.

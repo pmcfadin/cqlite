@@ -331,6 +331,21 @@ pub enum Commands {
         #[arg(long)]
         verbose: bool,
     },
+    /// Low-level Cassandra CommitLog segment inspection and decode (issue #2389)
+    #[command(name = "read-commitlog")]
+    #[command(
+        long_about = "Decode a raw Cassandra 5.0 CommitLog segment (CommitLog-<version>-<id>.log) into its descriptor and mutation stream. Reports each mutation's table id, partition key, and column names; a compressed/encrypted or unsupported-version segment fails closed with a typed error. Example: cqlite read-commitlog ./test-data/datasets/commitlog/clean-CommitLog-7-1784558302598.log --format json"
+    )]
+    ReadCommitlog {
+        /// CommitLog segment file path
+        file: PathBuf,
+        /// Output format
+        #[arg(short, long, value_enum, default_value = "table")]
+        format: OutputFormat,
+        /// Limit the mutations and emitted partition updates (whichever bound is reached first)
+        #[arg(short, long)]
+        limit: Option<usize>,
+    },
     /// Display file metadata and statistics
     #[command(
         long_about = "Show SSTable or database file metadata, stats, and optional validation. Example: cqlite info ./test-data/datasets/sstables/test_basic --format json --detailed"

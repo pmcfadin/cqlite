@@ -1,0 +1,53 @@
+{
+  "cassandra_image": "cassandra:5.0.2",
+  "keyspace": "commitlog_test",
+  "table": "users",
+  "table_id": "d6de7150-8448-11f1-bf5a-bf4cbc47cb4a",
+  "schema": "CREATE TABLE commitlog_test.users (id int PRIMARY KEY, name text, age int)",
+  "primary_key": {
+    "partition": [
+      [
+        "id",
+        "int"
+      ]
+    ],
+    "clustering": []
+  },
+  "columns": [
+    [
+      "name",
+      "text"
+    ],
+    [
+      "age",
+      "int"
+    ]
+  ],
+  "inserts": [
+    {
+      "id": 1,
+      "name": "alice",
+      "age": 30
+    },
+    {
+      "id": 2,
+      "name": "bob",
+      "age": 25
+    },
+    {
+      "id": 3,
+      "name": "carol",
+      "age": 42
+    },
+    {
+      "id": 4,
+      "name": "dave",
+      "age": 37
+    },
+    {
+      "id": 5,
+      "name": "eve",
+      "age": 29
+    }
+  ]
+}

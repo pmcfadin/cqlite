@@ -58,6 +58,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_commitlog_frame"
+path = "fuzz_targets/fuzz_commitlog_frame.rs"
+test = false
+doc = false
+bench = false
+
 # Own workspace root: keeps `fuzz/` out of the main workspace automatically
 # (belt-and-suspenders with the root Cargo.toml `[workspace] exclude`).
 [workspace]
