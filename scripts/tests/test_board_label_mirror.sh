@@ -70,13 +70,17 @@ if [ "${1:-}" = "api" ] && [ "${2:-}" = "graphql" ]; then
     case "$a" in id=node-*) wants_node=1; node_num="${a#id=node-}" ;; esac
   done
   if [ "$wants_node" = 1 ]; then
-    jq -Rn --arg num "$node_num" '
+    # CLOSED_NODES (csv of issue numbers) models closed issues for the node lookup
+    # (issue #2855, G2): a closed issue emits state "CLOSED" so mirror-one exits 0.
+    node_state="OPEN"
+    case ",${CLOSED_NODES:-}," in *",${node_num},"*) node_state="CLOSED" ;; esac
+    jq -Rn --arg num "$node_num" --arg st "$node_state" '
       ( [ inputs | select(length>0) | split("\t") | select(.[0]==$num) ] | first ) as $row
       | if $row == null
         then { data: { node: null } }
         else { data: { node: {
             number: ($row[0]|tonumber),
-            state: "OPEN",
+            state: $st,
             createdAt: (if ($row[2]|length)>0 then $row[2] else null end),
             labels: { nodes: ( if ($row[3]|length)>0
                                then ($row[3]|split(",")|map({name:.})) else [] end ) },
@@ -491,6 +495,35 @@ if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "may be truncated"; then
   pass "G1: off-board list hitting --limit fails the detector (non-truncation assert)"
 else
   fail "G1: limit-truncation not caught (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
+# 19. G2: mirror-one on a CLOSED issue (routine triage label touch) -> exit 0, no
+#     ::error:: (a benign closed-issue label event must not red the run).
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+seed_state "$(printf '119\tReady\t%s\t' "$OLD_TS")"
+export CLOSED_NODES=119
+out="$(bash "$MIRROR" mirror-one 119 node-119 2>&1)"; rc=$?
+unset CLOSED_NODES
+if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q "::error::"; then
+  pass "G2: mirror-one on a closed issue exits 0 with no error"
+else
+  fail "G2: closed-issue mirror-one not benign (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
+# 20. G2: mirror-one on an OPEN but OFF-BOARD issue (via node id) still FAILs with
+#     ::error:: — the real off-board hazard is unchanged by the closed-state fix.
+# ---------------------------------------------------------------------------
+new_case >/dev/null
+# #900 is not in the board state at all -> node lookup returns null -> off-board.
+seed_state "$(printf '120\tReady\t%s\t' "$OLD_TS")"
+out="$(bash "$MIRROR" mirror-one 900 node-900 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "::error::"; then
+  pass "G2: mirror-one on an open off-board issue still fails (::error::)"
+else
+  fail "G2: open off-board mirror-one should still fail (rc=$rc): $out"
 fi
 
 # ---------------------------------------------------------------------------

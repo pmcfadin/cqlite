@@ -147,11 +147,13 @@ blm_board_stream() {
 # blm_item_by_node NODE_ID — emit the single board TSV row for the issue with the
 # given GraphQL node id, resolving its project item DIRECTLY (no whole-board scan)
 # via node(id){ projectItems }. Selects only the item in OUR PROJECT_ID. Emits
-# nothing (return 0) when the issue is not on our board — the caller (mirror-one)
-# treats an empty result as the "no board row" ::error:: case (F2). FAIL-CLOSED on
-# a gh/shape failure exactly like blm_board_stream.
+# nothing when the issue is not on our board — the caller (mirror-one) treats an
+# empty result as the "no board row" ::error:: case (F2). RETURNS 4 (no output)
+# when the issue exists but is CLOSED — a benign routine triage label touch on a
+# closed issue is NOT an error (issue #2855, G2). FAIL-CLOSED (return 1) on a
+# gh/shape failure exactly like blm_board_stream.
 blm_item_by_node() {
-  local node="$1" resp
+  local node="$1" resp state
   if ! resp=$(gh api graphql -f query='
     query($id: ID!) {
       node(id: $id) {
@@ -175,6 +177,13 @@ blm_item_by_node() {
   if ! printf '%s' "$resp" | jq -e '.data.node | (.==null) or has("projectItems")' >/dev/null 2>&1; then
     echo "::error::board→label mirror: unexpected GraphQL response for node '$node' — refusing to proceed (issue #2855)." >&2
     return 1
+  fi
+  # Distinguish CLOSED (benign, return 4, no row) from OPEN-off-board (empty row,
+  # caller emits the ::error::). issues:[labeled,unlabeled] fires on closed-issue
+  # triage tagging, which must not red the run (G2).
+  state=$(printf '%s' "$resp" | jq -r '.data.node.state // ""' 2>/dev/null)
+  if [ "$state" != "OPEN" ] && [ -n "$state" ]; then
+    return 4
   fi
   printf '%s' "$resp" | jq -r --arg pid "$PROJECT_ID" '
     .data.node
@@ -385,7 +394,13 @@ main() {
       # (no whole-board scan, F4). Without one (test/manual), fall back to a
       # client-side-filtered board scan.
       if [ -n "${3:-}" ]; then
-        if ! blm_item_by_node "$3" >"$bf"; then rm -f "$bf"; return 1; fi
+        blm_item_by_node "$3" >"$bf"; rc=$?
+        if [ "$rc" = 4 ]; then
+          rm -f "$bf"
+          echo "mirror-one: issue #$2 is closed — routine label touch, nothing to mirror (issue #2855)."
+          return 0
+        fi
+        if [ "$rc" != 0 ]; then rm -f "$bf"; return 1; fi
       else
         if ! blm_board_stream "$2" >"$bf"; then rm -f "$bf"; return 1; fi
       fi

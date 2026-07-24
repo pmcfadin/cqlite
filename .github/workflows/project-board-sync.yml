@@ -305,7 +305,12 @@ jobs:
   # scripts/ci/board-label-mirror.sh as the sweep — single source, no divergent copy.
   # ---------------------------------------------------------------------------
   mirror-one:
-    if: github.event_name == 'issues'
+    # Gate on OPEN state: issues:[labeled,unlabeled] fires for CLOSED issues too
+    # (routine triage tagging). A closed issue has no OPEN board row, so running
+    # mirror-one would exit 1 with an ::error:: on every benign closed-issue label
+    # touch — training readers to ignore this workflow's reds (issue #2855, G2).
+    # The script ALSO exits 0 gracefully on a closed issue as a safety net.
+    if: github.event_name == 'issues' && github.event.issue.state == 'open'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
