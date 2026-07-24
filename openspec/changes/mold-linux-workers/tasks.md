@@ -33,7 +33,7 @@
 - [x] 6.2 fleet-runbook: Linux worker provisioning step + one-time sccache cold rebuild note
 
 ## 7. Quality gates
-- [ ] 7.1 `--lite` green each round (summary-file redirect)
+- [x] 7.1 `--lite` green each round (summary-file redirect)
 - [ ] 7.2 rust-reviewer + roborev on the lite-green diff (review-first)
 - [ ] 7.3 flow-closer: ONE full gate of record → C intent audit (spec-auditor vs this
       change's specs/**) → final roborev → merge-on-green → finalize
