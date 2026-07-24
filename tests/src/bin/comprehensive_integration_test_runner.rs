@@ -1,3 +1,7 @@
+// Rust 1.97's async-block layout query can exceed the default recursion limit for
+// this test binary; raised in lockstep with the pin bump (#2856, ci-toolchain-policy.md rule 4).
+#![recursion_limit = "256"]
+
 /// Comprehensive Integration Test Runner
 ///
 /// Standalone executable for running the complete CQLite integration test suite.

@@ -37,11 +37,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Pin to the repo toolchain (rust-toolchain.toml = 1.88.0), issue #1990.
+      # Pin to the repo toolchain (rust-toolchain.toml = 1.97.1), issue #1990.
       # dtolnay/rust-toolchain cannot read the pin file, so pin the version ref
       # explicitly (bump alongside rust-toolchain.toml).
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Cache dependencies
         uses: actions/cache@v5

@@ -5,7 +5,7 @@
 # Run co-located with a Cassandra node, mounting its data dir read-only:
 #   docker run --rm -p 8815:8815 -v /var/lib/cassandra:/var/lib/cassandra:ro \
 #     cqlite-flight --data-dir /var/lib/cassandra/data --listen 0.0.0.0:8815
-FROM rust:1.85-bookworm AS build
+FROM rust:1.97-bookworm AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release -p cqlite-flight --features observability

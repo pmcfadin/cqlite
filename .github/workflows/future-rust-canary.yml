@@ -3,7 +3,7 @@ name: "Canary: future Rust (latest stable) — advisory"
 # ADVISORY / NON-REQUIRED forward-compatibility canary (issue #1990).
 #
 # Every other product-validation workflow pins the repository toolchain
-# (rust-toolchain.toml = 1.88.0) so CI matches local builds. THIS is the single
+# (rust-toolchain.toml = 1.97.1) so CI matches local builds. THIS is the single
 # deliberate exception: it builds the workspace on the *latest* `stable` rustc to
 # surface forward-incompatibilities (new trait-solver depth limits, deprecations,
 # tightened lints) BEFORE we bump the pin — exactly the class of drift that broke

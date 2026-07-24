@@ -43,7 +43,7 @@ jobs:
 
       - name: Setup Rust toolchain
         # Consolidated caching (issue #2649): shared composite keyed on
-        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.97.1).
         # cargo builds from cqlite-core/ still write the workspace-root target/,
         # so the composite's root-level cache is correct for these lanes.
         uses: ./.github/actions/setup-rust-ci
@@ -66,7 +66,7 @@ jobs:
 
       - name: Setup Rust toolchain
         # Consolidated caching (issue #2649): shared composite keyed on
-        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.97.1).
         # cargo builds from cqlite-core/ still write the workspace-root target/,
         # so the composite's root-level cache is correct for these lanes.
         uses: ./.github/actions/setup-rust-ci
@@ -99,7 +99,7 @@ jobs:
 
       - name: Setup Rust toolchain
         # Consolidated caching (issue #2649): shared composite keyed on
-        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.97.1).
         # cargo builds from cqlite-core/ still write the workspace-root target/,
         # so the composite's root-level cache is correct for these lanes.
         uses: ./.github/actions/setup-rust-ci
@@ -126,7 +126,7 @@ jobs:
 
       - name: Setup Rust toolchain
         # Consolidated caching (issue #2649): shared composite keyed on
-        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.97.1).
         # cargo builds from cqlite-core/ still write the workspace-root target/,
         # so the composite's root-level cache is correct for these lanes.
         uses: ./.github/actions/setup-rust-ci
@@ -155,7 +155,7 @@ jobs:
 
       - name: Setup Rust toolchain
         # Consolidated caching (issue #2649): shared composite keyed on
-        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.97.1).
         # cargo builds from cqlite-core/ still write the workspace-root target/,
         # so the composite's root-level cache is correct for these lanes.
         uses: ./.github/actions/setup-rust-ci

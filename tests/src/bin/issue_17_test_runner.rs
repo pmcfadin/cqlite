@@ -1,3 +1,7 @@
+// Rust 1.97's async-block layout query can exceed the default recursion limit for
+// this test binary; raised in lockstep with the pin bump (#2856, ci-toolchain-policy.md rule 4).
+#![recursion_limit = "256"]
+
 /// Issue #17 Test Runner - Core SSTable Reading Functionality Validation
 ///
 /// This binary provides a comprehensive test runner specifically for Issue #17:

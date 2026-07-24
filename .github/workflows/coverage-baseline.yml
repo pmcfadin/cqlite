@@ -26,7 +26,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      # Honor the repo toolchain pin (rust-toolchain.toml = 1.88.0), issue #1990.
+      # Honor the repo toolchain pin (rust-toolchain.toml = 1.97.1), issue #1990.
       # Omitting `toolchain:` makes setup-rust-toolchain read the pin file.
       # `cache: false` so caching is done by the explicit Swatinem step below with a
       # deliberate Cargo.lock-keyed key matching the repo's other rust caches, rather
