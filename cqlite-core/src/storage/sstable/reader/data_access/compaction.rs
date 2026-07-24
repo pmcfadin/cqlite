@@ -509,10 +509,10 @@ impl SSTableReader {
                 let mut values: Vec<crate::types::Value> =
                     Vec::with_capacity(schema.clustering_keys.len());
                 for ck in &schema.clustering_keys {
-                    {
-                        let cell = simple.iter().find(|c| c.column == ck.name)?;
-                        values.push(cell.value.clone())
-                    }
+                    // A missing clustering column means no valid key — fall into the
+                    // `None` (unclustered-row) bucket via `?`.
+                    let cell = simple.iter().find(|c| c.column == ck.name)?;
+                    values.push(cell.value.clone());
                 }
                 Some(values)
             }

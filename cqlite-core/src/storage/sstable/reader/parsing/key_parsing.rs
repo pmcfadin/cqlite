@@ -137,11 +137,15 @@ pub(crate) fn decode_key_component_impl(
                 return Err(Error::corruption("Invalid BigInt key component length"));
             }
         }
-        ComparatorType::Text
-            // Validate UTF-8 for text keys
-            if std::str::from_utf8(component_data).is_err() => {
+        // Validate UTF-8 for text keys. Keep this as an explicit arm (NOT a collapsed
+        // match guard) so the text-validation branch stays distinct from the `_` accept-as-is
+        // fallthrough — the type-dispatch boundary must remain structural (#2856).
+        #[allow(clippy::collapsible_match)]
+        ComparatorType::Text => {
+            if std::str::from_utf8(component_data).is_err() {
                 return Err(Error::corruption("Invalid UTF-8 in text key component"));
             }
+        }
         _ => {
             // For other types, accept as-is for now
         }

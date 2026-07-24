@@ -939,13 +939,13 @@ impl SSTableRowIteratorAdapter {
                 let mut ck_columns: Vec<(String, Value)> =
                     Vec::with_capacity(schema.clustering_keys.len());
                 for ck_col in &schema.clustering_keys {
-                    {
-                        let pair = simple
-                            .iter()
-                            .find(|c| c.column == ck_col.name)
-                            .map(|c| (ck_col.name.clone(), c.value.clone()))?;
-                        ck_columns.push(pair)
-                    }
+                    // A missing clustering column means no valid key — fall into the
+                    // `None` (unclustered-row) bucket via `?`.
+                    let pair = simple
+                        .iter()
+                        .find(|c| c.column == ck_col.name)
+                        .map(|c| (ck_col.name.clone(), c.value.clone()))?;
+                    ck_columns.push(pair);
                 }
                 Some(ClusteringKey {
                     columns: ck_columns,
@@ -964,13 +964,13 @@ impl SSTableRowIteratorAdapter {
                 let mut ck_columns: Vec<(String, Value)> =
                     Vec::with_capacity(schema.clustering_keys.len());
                 for ck_col in &schema.clustering_keys {
-                    {
-                        let pair = clustering
-                            .iter()
-                            .find(|(name, _)| name == &ck_col.name)
-                            .map(|(name, v)| (name.clone(), v.clone()))?;
-                        ck_columns.push(pair)
-                    }
+                    // A missing clustering column means no valid key — fall into the
+                    // `None` (unclustered-row) bucket via `?`.
+                    let pair = clustering
+                        .iter()
+                        .find(|(name, _)| name == &ck_col.name)
+                        .map(|(name, v)| (name.clone(), v.clone()))?;
+                    ck_columns.push(pair);
                 }
                 Some(ClusteringKey {
                     columns: ck_columns,
