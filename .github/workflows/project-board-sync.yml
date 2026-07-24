@@ -37,15 +37,25 @@ on:
   # Low-latency board->label mirror correction (issue #2855): a hand-tampered
   # status:* label (or a reopen) is reverted from the issue's board Status quickly
   # rather than waiting up to 30 min for the cron sweep. The 30-min sweep remains
-  # the correctness guarantee; these events only reduce lag.
+  # the correctness guarantee; these events only reduce lag. `edited` is
+  # deliberately OMITTED — it fires on title/body edits (pure noise for a label
+  # mirror) and each mirror label write already re-triggers labeled/unlabeled.
   issues:
-    types: [edited, labeled, unlabeled, reopened]
+    types: [labeled, unlabeled, reopened]
 
 permissions:
   contents: read
 
+# Key the concurrency group PER event/target (issue #2855, F4): the mirror edits
+# labels with the PAT, so each --add/--remove-label re-triggers this workflow via
+# issues:[labeled,unlabeled]. A single shared serialized group would let a burst of
+# label events starve or block a pending pull_request_target:closed (closed-PR ->
+# Done safety net) or the scheduled sweep. Per-(event,target) groups keep those
+# distinct lanes independent; only repeated events for the SAME issue serialize.
+# NOTE: a ${{ }} expression in the concurrency group KEY is not a run: shell body,
+# so this is NOT the command-injection sink the guard flags — safe here.
 concurrency:
-  group: project-board-sync
+  group: project-board-sync-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || 'sweep' }}
   cancel-in-progress: false
 
 env:
@@ -308,19 +318,23 @@ jobs:
       - name: Checkout (for scripts/ci/board-label-mirror.sh)
         uses: actions/checkout@v4
 
-      # Pass the event-supplied issue number via a QUOTED env var (never inlined
-      # into run:) and validate it is a bare integer before use — the workflow
-      # command-injection guard (issue #2656 / check-workflow-injection.sh).
+      # Pass the event-supplied issue number + node id via QUOTED env vars (never
+      # inlined into run:) and validate the number is a bare integer before use —
+      # the workflow command-injection guard (issue #2656 / check-workflow-
+      # injection.sh). The node id lets mirror-one resolve the issue's project item
+      # DIRECTLY (node(id){projectItems}) instead of paginating the whole board for
+      # one issue (issue #2855, F4).
       - name: Re-assert this issue's label from board Status
         env:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
         run: |
           set -euo pipefail
           case "$ISSUE_NUMBER" in
             ''|*[!0-9]*)
               echo "::error::unexpected non-numeric issue number '$ISSUE_NUMBER'"; exit 1 ;;
           esac
-          bash scripts/ci/board-label-mirror.sh mirror-one "$ISSUE_NUMBER"
+          bash scripts/ci/board-label-mirror.sh mirror-one "$ISSUE_NUMBER" "$ISSUE_NODE_ID"
 
   # ---------------------------------------------------------------------------
   # Scheduled path: CI-side claim reaper (issue #2655 / #2499 design).
