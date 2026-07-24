@@ -73,6 +73,9 @@ async fn poll_until_at_most(target: i64, timeout: Duration, read: impl Fn() -> i
 }
 
 #[test]
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 fn phase_active_and_in_flight_read_true_concurrent_count_then_settle() {
     // Big multi-SSTable fixture + batch_size 1 so each producer fills the 4-slot
     // do_get channel and PARKS while its slow consumer holds — keeping the RPC in

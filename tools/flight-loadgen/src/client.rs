@@ -59,6 +59,9 @@ pub async fn connect(
 /// `get_array_memory_size()` and then dropped before the next is polled — no
 /// `Vec<RecordBatch>` is ever held, so peak memory is O(one in-flight batch)
 /// regardless of result-set size (spec: memory-bound requirement).
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 pub async fn do_get_drain(
     client: &mut FlightServiceClient<Channel>,
     ticket_bytes: Vec<u8>,

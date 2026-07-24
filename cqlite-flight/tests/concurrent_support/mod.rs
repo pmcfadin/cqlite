@@ -169,6 +169,9 @@ pub fn point_ticket(key: &str) -> Vec<u8> {
 
 /// Run `do_get(ticket)` against `client`, fully draining the decoded stream, and
 /// return every `RecordBatch`.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 pub async fn do_get_batches(
     client: &mut FlightServiceClient<Channel>,
     ticket: Vec<u8>,
