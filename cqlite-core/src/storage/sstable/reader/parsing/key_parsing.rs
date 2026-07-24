@@ -139,7 +139,8 @@ pub(crate) fn decode_key_component_impl(
         }
         // Validate UTF-8 for text keys. Keep this as an explicit arm (NOT a collapsed
         // match guard) so the text-validation branch stays distinct from the `_` accept-as-is
-        // fallthrough — the type-dispatch boundary must remain structural (#2856).
+        // fallthrough — the type-dispatch boundary must remain structural (#2856). The
+        // `collapsible_match` rewrite into a guard would reroute valid Text keys through `_`.
         #[allow(clippy::collapsible_match)]
         ComparatorType::Text => {
             if std::str::from_utf8(component_data).is_err() {

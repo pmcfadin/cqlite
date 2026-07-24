@@ -939,8 +939,8 @@ impl SSTableRowIteratorAdapter {
                 let mut ck_columns: Vec<(String, Value)> =
                     Vec::with_capacity(schema.clustering_keys.len());
                 for ck_col in &schema.clustering_keys {
-                    // A missing clustering column means no valid key — fall into the
-                    // `None` (unclustered-row) bucket via `?`.
+                    // Any missing clustering column ⇒ the WHOLE key is discarded (the `?`
+                    // returns `None`, treating the row as unclustered).
                     let pair = simple
                         .iter()
                         .find(|c| c.column == ck_col.name)
@@ -964,8 +964,8 @@ impl SSTableRowIteratorAdapter {
                 let mut ck_columns: Vec<(String, Value)> =
                     Vec::with_capacity(schema.clustering_keys.len());
                 for ck_col in &schema.clustering_keys {
-                    // A missing clustering column means no valid key — fall into the
-                    // `None` (unclustered-row) bucket via `?`.
+                    // Any missing clustering column ⇒ the WHOLE key is discarded (the `?`
+                    // returns `None`, treating the row as unclustered).
                     let pair = clustering
                         .iter()
                         .find(|(name, _)| name == &ck_col.name)
