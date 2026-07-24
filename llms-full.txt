@@ -4932,10 +4932,15 @@ Primary source paths:
 
 Release announcements for CQLite. Each page covers what shipped and how to get it. For the complete, granular change list, see the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
 
-| Version                              | Date       | Highlights                                                                                                                              |
-| ------------------------------------ | ---------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| [v0.13.0](/cqlite/releases/v0-13-0/) | 2026-07-05 | Performance release — read-path + point-read + compressed-chunk wins · byte-bounded results · `Database.refresh()` · 3 breaking changes |
-| [v0.12.0](/cqlite/releases/v0-12-0/) | 2026-06-22 | Arrow Flight + Trino connector · CDC delta-export to Parquet · byte-for-byte compaction parity                                          |
+| Version                              | Date       | Highlights                                                                                                                                |
+| ------------------------------------ | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| [v0.16.1](/cqlite/releases/v0-16-1/) | 2026-07-23 | Reads a second Cassandra on-disk format — CommitLog segment files — via a library API and a `read-commitlog` CLI                          |
+| [v0.16.0](/cqlite/releases/v0-16-0/) | 2026-07-22 | Trino connector completeness — typed collection columns (array/row/map) · weight-balanced split fan-out · `LIMIT`-cancellation hang fixed |
+| [v0.15.0](/cqlite/releases/v0-15-0/) | 2026-07-17 | Trino latency/throughput/ops — \~15× warm throughput · admission control · saturation gauges · P0 silent-row-loss fix                     |
+| [v0.14.1](/cqlite/releases/v0-14-1/) | 2026-07-13 | Cold-start parse fix — `Index.db` parsed once per open · 200k-entry index build \~100× faster                                             |
+| [v0.14.0](/cqlite/releases/v0-14-0/) | 2026-07-13 | Flight field-readiness — Arrow Flight + Trino read path validated against a live at-scale Cassandra deployment · 2 breaking changes       |
+| [v0.13.0](/cqlite/releases/v0-13-0/) | 2026-07-05 | Performance release — read-path + point-read + compressed-chunk wins · byte-bounded results · `Database.refresh()` · 3 breaking changes   |
+| [v0.12.0](/cqlite/releases/v0-12-0/) | 2026-06-22 | Arrow Flight + Trino connector · CDC delta-export to Parquet · byte-for-byte compaction parity                                            |
 
 <!-- Convention: newest release first. Give each new release page a lower
      sidebar.order than the previous one so it sorts above older releases
@@ -5054,6 +5059,258 @@ npm install @cqlite/node                  # Node.js
 ```
 
 Full detail in the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md), and upgrade notes in the [v0.13 Migration Guide](https://github.com/pmcfadin/cqlite/blob/main/docs/development/v0.13-migration-guide.md).
+
+# CQLite v0.14.0
+
+> Flight field-readiness — the Arrow Flight server and Trino connector read path, validated against a live at-scale Cassandra deployment.
+
+# CQLite v0.14.0 — Flight field-readiness
+
+[Section titled “CQLite v0.14.0 — Flight field-readiness”](#cqlite-v0140--flight-field-readiness)
+
+Read and query Apache Cassandra 5.0 SSTables through Arrow Flight and Trino — no cluster required. This release takes the Flight read path from working to **field-validated**: the round-9 field build ran against a live, at-scale Cassandra deployment (validation tracker [#2367](https://github.com/pmcfadin/cqlite/issues/2367)).
+
+## ✈️ Field-validated Flight read path
+
+[Section titled “✈️ Field-validated Flight read path”](#️-field-validated-flight-read-path)
+
+* **Streaming `do_get` scan** — the scan path no longer materializes the whole SSTable before the first row. It walks the index lazily, applies `LIMIT` effectively, and tears producers down on cancel, so memory stays bounded (#2361).
+* **Parse-once warm registry** — the resolve phase stopped re-parsing per request at multi-million-partition scale. Single-flight parse plus rebind-by-inode removes the CPU spin that hung `LIMIT`, `count(*)`, and point reads (#2383).
+* **Predicate pushdown** — `do_get` pushes `WHERE pk = ?` toward a partition point-read or prune instead of a full merge scan (#2207).
+* **Cancellation that works** — the snapshot-index reload loop honors cancellation, so `LIMIT` queries no longer hang and the in-flight gauge no longer sticks (#2264, #2157).
+
+## ✅ Correctness & parity
+
+[Section titled “✅ Correctness & parity”](#-correctness--parity)
+
+* **No silent multi-cell collapse** — the Flight producer no longer overwrites multi-cell and collection columns through a HashMap (#2324).
+* **Read-time reconciliation** — a multi-generation `SELECT` applies read-time TTL, partition, and range-tombstone visibility (#1849).
+* **TTL round-trips through compaction** — the write path honors `USING TTL` and per-cell expiration; surviving live TTL cells stay byte-identical after compaction, including complex, collection, and UDT elements (#1743, #2038).
+* **Float ordering matches Cassandra** — `Value` comparison, `ORDER BY`, and `MIN`/`MAX` order floats as Cassandra does: NaN last, `-0.0 < +0.0` (#2010, #1870).
+* **No-heuristics hardening** — blob decode no longer guesses from a byte pattern; recursion-depth guards and clamped capacities protect the parser (#1630, #1414).
+
+## 🚀 Performance
+
+[Section titled “🚀 Performance”](#-performance)
+
+The read, parse, and export hot paths from the audit epics landed: boxed `Value` variants (88B → ≤40B), byte-bounded result budgets in place of the 1M-row cliff, `LIMIT`/`OFFSET` pushed into the scan, streaming multi-generation merge and O(1) aggregates, a key→partition-offset cache, and one-walk zero-copy BTI trie descent (#1583, #1582, #1577, #1585).
+
+## ⚠️ Breaking changes
+
+[Section titled “⚠️ Breaking changes”](#️-breaking-changes)
+
+* **Config schema** — `MemoryConfig` collapsed to one real caching knob, `block_cache.max_size`. The decorative `row_cache`, `query_cache`, and `allocator` fields and the unused `CachePolicy::Lfu`/`Arc` variants were removed; a config that still names them now fails closed on deserialization (#1568).
+* **Public API** — the dead SSTable reader stacks flagged by the read-path audit were deleted: `SchemaAwareReader`, `ChunkedDataReader`, `StreamingDecompressor`, the duplicate legacy `CompressionInfo`/`ChunkInfo` parser, and the streaming half of `CompressionReader`. All had zero production consumers (#1597).
+
+## Known limitations
+
+[Section titled “Known limitations”](#known-limitations)
+
+* **Cold first-query-per-table parse cost** — `SSTableReader::open` parses `Index.db` super-linearly (and twice per open), so the first query against a large table pays a cold parse cost at field scale. Fixed in **v0.14.1** (#2385, #2395).
+* **Reads are single-node-bound under RF=N** — under concurrency one pod does the work; throughput caps at one node (#2397).
+
+## Get it
+
+[Section titled “Get it”](#get-it)
+
+```bash
+brew install pmcfadin/cqlite/cqlite      # CLI (macOS + Linux)
+cargo add cqlite-core                     # Rust library
+pip install cqlite-py                     # Python
+npm install @cqlite/node                  # Node.js
+```
+
+Rust crates and the Python and Node bindings move `0.13.0 → 0.14.0` in lockstep. The Trino connector (`in.mcfad:cqlite-trino`) is versioned separately. Full detail in the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
+
+# CQLite v0.14.1
+
+> Cold-start parse fix — Index.db is parsed once per reader open, collapsing a quadratic index build to linearithmic.
+
+# CQLite v0.14.1 — cold-start parse fix
+
+[Section titled “CQLite v0.14.1 — cold-start parse fix”](#cqlite-v0141--cold-start-parse-fix)
+
+A patch release on [v0.14.0](/cqlite/releases/v0-14-0/). It fixes the cold first-query-per-table parse cost that v0.14.0 called out as a known limitation. No API or behavior changes — a pure performance fix.
+
+## 🚀 Cold-start parse fix
+
+[Section titled “🚀 Cold-start parse fix”](#-cold-start-parse-fix)
+
+`SSTableReader::open` no longer builds a second, redundant in-memory index. `Index.db` is now parsed exactly once per open (down from twice), and the surviving index build uses capacity hints so it grows linearithmically instead of quadratically (#2385, #2395).
+
+* 200k-entry index build: **6.17s → 0.061s** (\~100×).
+* Growth ratio (build time vs entry count): **15.5 → 4.96** — quadratic collapses to linearithmic.
+* Parses of `Index.db` per open: **2 → 1**.
+* Resident index memory: roughly halved per generation.
+
+At round-9 field validation, a cold `LIMIT` query took 4m17s at 1.42M partitions. With this fix the cold cost drops to seconds per generation.
+
+## Known limitations
+
+[Section titled “Known limitations”](#known-limitations)
+
+Unchanged from v0.14.0, minus the cold-start item fixed above:
+
+* **Reads are single-node-bound under RF=N** — under concurrency one pod does the work; throughput caps at one node (#2397).
+* **Warm scan setup overhead** — warm scans carry a fixed \~4–5s per-query resolve/merge-setup cost, so a `LIMIT 5` scan runs comparably to `LIMIT 100` (#2398).
+
+## Get it
+
+[Section titled “Get it”](#get-it)
+
+```bash
+brew install pmcfadin/cqlite/cqlite      # CLI (macOS + Linux)
+cargo add cqlite-core                     # Rust library
+pip install cqlite-py                     # Python
+npm install @cqlite/node                  # Node.js
+```
+
+Rust crates and the Python and Node bindings move `0.14.0 → 0.14.1` in lockstep. Full detail in the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
+
+# CQLite v0.15.0
+
+> Trino latency, throughput, and operations — roughly 15× warm throughput, admission control, in-process saturation gauges, and a P0 silent-row-loss fix.
+
+# CQLite v0.15.0 — Trino latency, throughput & operations
+
+[Section titled “CQLite v0.15.0 — Trino latency, throughput & operations”](#cqlite-v0150--trino-latency-throughput--operations)
+
+This release turns the field-validated read path from v0.14 into a fast, observable, overload-resilient one (epic [#2403](https://github.com/pmcfadin/cqlite/issues/2403)). Warm throughput through Trino is up roughly **15×** versus the v0.14 field baseline, the read hot paths were re-cut end to end, saturation is now legible in-process, and a P0 silent-row-loss class is gone.
+
+## 🚀 Warm Trino throughput up \~15×
+
+[Section titled “🚀 Warm Trino throughput up \~15×”](#-warm-trino-throughput-up-15)
+
+Round-11b field validation measured **\~34 qps warm, p50 227ms / p99 366ms through Trino**, with server-side work at \~2ms and zero cold parses on the warm path — at 80 concurrent threads with no OOMKills. The levers:
+
+* **Connector snapshot-lifecycle closure** — per-`(keyspace, table)` reader reuse plus warm rebind, so repeat queries no longer re-open from cold (#2356, #2306).
+* **Lazy Summary-guided BIG index** — `O(summary)` open, bounded point-lookup intervals, and token-pushdown scans, so a scan no longer decodes every partition body (#2412, #2413).
+* **Row-granular point-read streaming** — point reads and cache-warm merges drive the merge row by row instead of materializing (#2423).
+* **Multi-node read fan-out** — split primaries rotate across replica owners, so reads under RF=N are no longer pinned to a single pod (#2397).
+
+## 🛠️ Operations — admission control & saturation observability
+
+[Section titled “🛠️ Operations — admission control & saturation observability”](#️-operations--admission-control--saturation-observability)
+
+* **Flight `do_get` admission control** — bounded scan concurrency (`--max-concurrent-scans`), `UNAVAILABLE` load-shedding, and phase-visible queueing keep an overloaded server responsive instead of thrashing (#2420, #2063).
+* **Saturation gauges** — five in-process gauges (blocking-task guard, merge egress depth, and an fd/thread/RSS sampler on a 2s tick) make saturation legible during overload (#2419).
+* **Metrics surface** — `cqlite.errors.total` registers at 0 on startup; an operator-facing flight-metrics reference and a refreshed Grafana dashboard ship from the observability catalog (#2288, #2426, #2427).
+
+## ✅ Correctness & parity
+
+[Section titled “✅ Correctness & parity”](#-correctness--parity)
+
+* **P0 — silent row loss on large single-cell values** — rows with a single ≥\~1MB cell were silently dropped because a 1MB `row_size` heuristic rejected them as corrupt. It is replaced with an authoritative remaining-bytes bound, per the no-heuristics mandate (#2436).
+* **v5 cell parsing hardening** — overflow-safe cell bounds, `Float32`/varint parity, and a varint arm that decodes a CQL varint as `Value::Varint` rather than a blob (#1795, #1884, #1885).
+* **`GROUP BY` float/double** groups by the Cassandra comparator: NaN → one group, `±0.0` distinct (#2074).
+* **`CompressionInfo` fail-closed** — `max_compressed_length == 0` is rejected at parse and read instead of producing garbage (#2529, #2524).
+
+## 🚀 Read/write hot-path train
+
+[Section titled “🚀 Read/write hot-path train”](#-readwrite-hot-path-train)
+
+Zero-copy `Bytes`-backed `Value` on the read path (#1644); binary-search range shadowing in the merge core (#1669); a `MADV_RANDOM` point-read mmap and a global bounded key→partition-offset cache (#2210, #2059); and a compaction peak-heap drop from **410 → 54 MiB** via row-granular streaming (#2299).
+
+## Known limitations
+
+[Section titled “Known limitations”](#known-limitations)
+
+* **Windows Node CI** remains deferred debt; Linux and macOS Node bindings are unaffected (#1979).
+
+## Get it
+
+[Section titled “Get it”](#get-it)
+
+```bash
+brew install pmcfadin/cqlite/cqlite      # CLI (macOS + Linux)
+cargo add cqlite-core                     # Rust library
+pip install cqlite-py                     # Python
+npm install @cqlite/node                  # Node.js
+```
+
+Rust crates and the Python and Node bindings move `0.14.1 → 0.15.0` in lockstep. The Trino connector (`in.mcfad:cqlite-trino`, `0.14.4`) is versioned separately. Full detail in the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
+
+# CQLite v0.16.0
+
+> Trino connector completeness — typed collection columns projected as array/row/map, weight-balanced split fan-out, and a fixed LIMIT-cancellation hang.
+
+# CQLite v0.16.0 — Trino connector completeness & cancellation
+
+[Section titled “CQLite v0.16.0 — Trino connector completeness & cancellation”](#cqlite-v0160--trino-connector-completeness--cancellation)
+
+This release closes two field-surfaced connector gaps on top of the v0.15.0 latency/throughput base: Cassandra collection columns now project through Trino, and weight-balanced split fan-out ships with a root fix for a `LIMIT`-cancellation hang.
+
+## 🧩 Typed collection columns through Trino
+
+[Section titled “🧩 Typed collection columns through Trino”](#-typed-collection-columns-through-trino)
+
+`list`, `set`, and `map` columns — including `list<frozen<udt>>` — now project as Trino `array`, `row`, and `map` instead of being silently dropped from the schema. Unmappable columns are surfaced loudly rather than hidden. Primitive element types decode fully; UDT element-value decode inside a collection remains tracked to [#2349](https://github.com/pmcfadin/cqlite/issues/2349) (#2815).
+
+## ⚖️ Weight-balanced, hang-free sub-splitting
+
+[Section titled “⚖️ Weight-balanced, hang-free sub-splitting”](#️-weight-balanced-hang-free-sub-splitting)
+
+* **Weight-balanced split→pod assignment** — K-way token-range sub-splitting (`cqlite.sub-splits-per-range`, default 4) with span-proportional `SplitWeight`, evening out the 2–4× per-pod CPU skew that capped aggregate throughput. Aggregate, pushed-`LIMIT`, and fully-bound point reads are exempted to K=1 (#2680).
+* **P0 `LIMIT`-cancellation hang fixed at root** — a partial-predicate `LIMIT` under sub-splitting could hang because the blocking Flight `DoGet` read ran on the Trino driver thread, so operator close could never cancel it. The read now runs off the driver thread, letting close cross-cancel the stream; a docker-compose E2E `LIMIT` test guards it (#2782).
+
+## Also in this release
+
+[Section titled “Also in this release”](#also-in-this-release)
+
+* **UDT registry wired into both Flight read paths** (cold + warm) (#2349).
+* **Plan-time split pruning** for fully-bound partition keys — a point read prunes to the covering split instead of fanning out (#2679, #2806).
+* **Keyspace-qualified UDT type names** accepted on both read paths (#2807).
+* **Read-time TTL/liveness reconciliation** routed through `do_get` and validated by the query-semantics oracle (#2374, #2789).
+
+## Get it
+
+[Section titled “Get it”](#get-it)
+
+```bash
+brew install pmcfadin/cqlite/cqlite      # CLI (macOS + Linux)
+cargo add cqlite-core                     # Rust library
+pip install cqlite-py                     # Python
+npm install @cqlite/node                  # Node.js
+```
+
+Rust crates and the Python and Node bindings move `0.15.0 → 0.16.0` in lockstep. Full detail in the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
+
+# CQLite v0.16.1
+
+> A second Cassandra on-disk format — CQLite now reads CommitLog segment files via a library API and a read-commitlog CLI subcommand.
+
+# CQLite v0.16.1 — CommitLog reader
+
+[Section titled “CQLite v0.16.1 — CommitLog reader”](#cqlite-v0161--commitlog-reader)
+
+A patch release on [v0.16.0](/cqlite/releases/v0-16-0/). CQLite now reads a **second Cassandra on-disk format** — CommitLog segment files — alongside SSTables. No breaking changes; the new module and CLI subcommand are purely additive.
+
+## 📖 Cassandra 5.0 CommitLog reader
+
+[Section titled “📖 Cassandra 5.0 CommitLog reader”](#-cassandra-50-commitlog-reader)
+
+A `CommitLogReader` parses Cassandra 5.0 CommitLog segment files — the raw files Cassandra writes via `CommitLogSegment` — into a stream of decoded mutations. Contributed by @rustyrazorblade (#2389).
+
+* **Library API** — `cqlite_core::storage::commitlog`, with `CommitLogReader::open` / `open_with_schemas` and a lazy `MutationIter` that decodes one record at a time (128 MB segment cap).
+* **CLI** — a new `read-commitlog` subcommand with JSON and text output, alongside the existing SSTable commands.
+* **What it decodes** — the version-gated descriptor header (Cassandra 5.0 commitlog version 7), CRC-framed sync sections with torn-tail tolerance, and schema-aware mutation and cell decode for the common insert path.
+* **Honest bail, never a guess** — unmodeled constructs (clustering columns, static rows, collection and complex columns, deletions, range tombstones) are reported structurally rather than misdecoded; compressed and encrypted segments fail closed with a typed error. Format facts come from the descriptor header and supplied schema only.
+* **Verified against Cassandra source and real fixtures** — field-for-field adjudication against `cassandra-5.0.2` plus parity fixtures from a real Cassandra 5.0.2 node. Format documentation ships as Appendix H of the SSTable definitive guide.
+
+**Scope** — reader only. The CommitLog writer is a separate follow-on (#2388); CDC tailing, encryption, and query/Flight integration are out of scope for this pass. Version-8 segments (`storage_compatibility_mode: NONE/UPGRADING`) are rejected with a typed error, tracked as a follow-up.
+
+## Get it
+
+[Section titled “Get it”](#get-it)
+
+```bash
+brew install pmcfadin/cqlite/cqlite      # CLI (macOS + Linux)
+cargo add cqlite-core                     # Rust library
+pip install cqlite-py                     # Python
+npm install @cqlite/node                  # Node.js
+```
+
+Rust crates and the Python and Node bindings move `0.16.0 → 0.16.1` in lockstep. Full detail in the [CHANGELOG](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
 
 # SSTable Format Guide
 
