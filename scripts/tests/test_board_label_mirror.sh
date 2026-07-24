@@ -474,6 +474,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 18. G1: off-board `gh issue list` hits the --limit -> detector FAILs (a full
+#     page means the list may be truncated; refuse a possibly-partial scan).
+# ---------------------------------------------------------------------------
+d="$(new_case)"
+seed_state "$(printf '118\tReady\t%s\tstatus:ready' "$OLD_TS")"
+export ISSUE_LIST_FILE="$d/issuelist.tsv"
+# Return exactly BLM_OFFBOARD_LIMIT numbers for status:ready so count == limit.
+: >"$ISSUE_LIST_FILE"
+printf 'status:ready\t118\n' >>"$ISSUE_LIST_FILE"
+printf 'status:ready\t201\n' >>"$ISSUE_LIST_FILE"
+export BLM_OFFBOARD_LIMIT=2
+out="$(bash "$MIRROR" detect 2>&1)"; rc=$?
+unset ISSUE_LIST_FILE BLM_OFFBOARD_LIMIT
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "may be truncated"; then
+  pass "G1: off-board list hitting --limit fails the detector (non-truncation assert)"
+else
+  fail "G1: limit-truncation not caught (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
 echo "----"
 echo "board-label-mirror: PASS=$PASS_COUNT FAIL=$FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]

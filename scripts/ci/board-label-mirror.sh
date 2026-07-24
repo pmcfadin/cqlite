@@ -263,16 +263,29 @@ _blm_row_bad() {
 # wrong-grab hazard. Enumerated per label via `gh issue list`; a gh failure here
 # FAILs closed (never a silent "no offenders").
 _blm_offboard_check() {
-  local board_file="$1" lbl listed num rc=0
+  local board_file="$1" lbl listed num rc=0 limit count
+  # Bound the per-label list explicitly: `gh issue list` defaults to 30 and would
+  # SILENTLY truncate a larger set (there can be >30 status:ready in a burst),
+  # re-opening the silent-green-partial-read hole (issue #2855). Ask for a large
+  # cap and, if the returned count HITS that cap, fail closed — a full page means
+  # the list may be truncated and the off-board scan cannot be trusted.
+  # BLM_OFFBOARD_LIMIT overridable only for the test's non-truncation assertion.
+  limit="${BLM_OFFBOARD_LIMIT:-1000}"
   for lbl in $BLM_DERIVED_LABELS; do
-    if ! listed=$(gh issue list --state open --label "$lbl" --json number --jq '.[].number'); then
+    if ! listed=$(gh issue list --state open --label "$lbl" --limit "$limit" --json number --jq '.[].number'); then
       echo "::error::board→label mirror: 'gh issue list --label $lbl' failed — refusing to proceed on a partial off-board scan (issue #2855)."
+      rc=1
+      continue
+    fi
+    count=$(printf '%s\n' "$listed" | grep -c '[0-9]' || true)
+    if [ "$count" -ge "$limit" ]; then
+      echo "::error::board→label mirror: 'gh issue list --label $lbl' returned $count issue(s) == --limit ($limit) — the off-board scan may be truncated. Refusing to proceed on a possibly-partial list (issue #2855)."
       rc=1
       continue
     fi
     while IFS= read -r num; do
       [ -n "$num" ] || continue
-      if ! awk -F'\t' -v n="$num" '$1==n{found=1} END{exit found?0:1}' "$board_file"; then
+      if ! awk -F'\t' -v n="$num" '$1==n{found=1} END{exit found?0:1}' "$board_file" </dev/null; then
         echo "::error::issue #$num carries board-derived label '$lbl' but is NOT on the project board (auto-add miss?) — stale label = wrong-grab hazard. Add it to the board or strip the label (issue #2855)."
         rc=1
       fi
