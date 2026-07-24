@@ -80,7 +80,7 @@ fn write_row(id: i32, name: &str, timestamp: i64) -> Mutation {
 fn discover_inputs(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut found: Vec<(u64, PathBuf)> = Vec::new();
     collect(dir, &mut found, 8);
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|b| std::cmp::Reverse(b.0));
     found.into_iter().map(|(_, p)| p).collect()
 }
 

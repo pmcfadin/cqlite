@@ -199,7 +199,7 @@ fn discover_inputs(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     collect(dir, &mut found, 8);
     // newest generation first (run index 0 = newest)
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|b| std::cmp::Reverse(b.0));
     found.into_iter().map(|(_, p)| p).collect()
 }
 

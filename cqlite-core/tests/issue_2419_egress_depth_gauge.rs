@@ -149,7 +149,7 @@ fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
 
     let mut found = Vec::new();
     collect_inputs(&data_dir, &mut found, 8);
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|b| std::cmp::Reverse(b.0));
     let inputs: Vec<PathBuf> = found.into_iter().map(|(_, p)| p).collect();
     assert!(
         inputs.len() >= NUM_INPUTS,
