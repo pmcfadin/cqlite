@@ -70,6 +70,30 @@ EOF
   chmod +x "$path"
 }
 
+# issue #2841 (design decision A): a HEALTHY worker that emits activity to stdout
+# (as a real `claude -p --output-format stream-json --verbose` worker does) BEFORE
+# writing its finalize marker — so the supervisor's `>"$logfile"` redirect captures a
+# NON-EMPTY iter-N.log. Proves the watchdog has a live stream to scan under `-p`.
+write_verbose_finalize_stub() {
+  local path="$1" counter_file="$2"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+n=0
+[[ -f "$counter_file" ]] && n=\$(cat "$counter_file")
+n=\$((n + 1))
+echo "\$n" >"$counter_file"
+# Stream-style activity to stdout (captured into iter-N.log by the supervisor).
+echo '{"type":"system","subtype":"init"}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"dispatching subagent"}]}}'
+cat >"\$MARKER_FILE" <<JSON
+{"outcome":"finalized","issue":\$n,"pr":"https://github.com/pmcfadin/cqlite/pull/\$n","duration_s":1}
+JSON
+EOF
+  chmod +x "$path"
+}
+
 # Finalize stub that always claims the SAME issue/PR (roborev 1839): used to exercise
 # the per-PR auto-merge-stuck path (the same PR observed unmerged N times), distinct
 # from write_finalize_stub's incrementing PR (used for the healthy distinct-PR case).
@@ -1368,29 +1392,42 @@ test_finalized_unverified_not_counted_no_breaker() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 26 (#2670): PROC_PROBE discriminates the supervisor's OWN worker spawn
-# shape (`claude ... --agent worker`) from a legitimate interactive `claude`
-# session / a different-agent session. Portable PROPERTY proof is a pure-string
+# Test 26 (#2670 / #2841): PROC_PROBE discriminates the supervisor's OWN
+# unattended worker spawn shape (`claude … -p … --agent flow-lead …`, issue
+# #2841) from a legitimate INTERACTIVE `claude --agent flow-lead` lead session
+# (no `-p`) and a plain `claude` REPL. Portable PROPERTY proof is a pure-string
 # `grep -E` regex check (always runs, deterministic); the live-process PID check
 # is a bonus that SKIPs (never fails) if the control process never schedules
 # within the wait cap — an environmental non-result, not a property failure
 # (roborev 1819 finding 7).
 # ---------------------------------------------------------------------------
 test_proc_probe_discriminates_worker_claude() {
-  local pat='[c]laude.*--agent worker'
-  # Pure-string property proof (no live process): the pattern matches the worker
-  # argv shape and NOT a different-agent session.
-  if ! printf 'claude --agent worker resume the claim\n' | grep -qE "$pat" ||
-       printf 'claude --agent flow-lead review the board\n' | grep -qE "$pat"; then
-    fail "proc-probe: pure-string regex does not discriminate worker vs other-agent"
+  # Source the ACTUAL pattern from the script (anti-drift): a regex edit that
+  # broke discrimination would break this test, not silently pass a stale copy.
+  local pat
+  pat="$(grep -E "^PROC_MATCH_WORKER=" "$SUPERVISOR" | head -1 | sed -E "s/^PROC_MATCH_WORKER='(.*)'$/\1/")"
+  # Pure-string property proof (no live process): the pattern matches the
+  # unattended `-p` (and long-form `--print`) worker argv shape and NOT an
+  # interactive lead / plain REPL. The `-p` MUST be matched as a whitespace-
+  # delimited token (roborev #2841): a `claude --dangerously-skip-permissions
+  # --agent flow-lead` interactive lead has a `-p` INSIDE `ski-p-ermissions` but
+  # NO real print flag, and must NOT match.
+  if ! printf "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --agent flow-lead '/worker'\n" | grep -qE "$pat" ||
+       ! printf "claude --print --dangerously-skip-permissions --agent flow-lead '/worker'\n" | grep -qE "$pat" ||
+       printf 'claude --dangerously-skip-permissions --agent flow-lead review the board\n' | grep -qE "$pat" ||
+       printf 'claude --agent flow-lead review the board\n' | grep -qE "$pat" ||
+       printf 'claude\n' | grep -qE "$pat"; then
+    fail "proc-probe: pure-string regex does not discriminate -p/--print worker vs interactive lead (incl. skip-permissions) / REPL"
     return
   fi
-  # Bonus live check: spawn the two argv-shaped stubs and confirm the same
+  # Bonus live check: spawn the three argv-shaped stubs and confirm the same
   # discrimination against real PIDs.
-  bash -c 'exec -a "claude --agent worker resume the claim branch" sleep 30' &
+  bash -c "exec -a 'claude -p --dangerously-skip-permissions --agent flow-lead /worker' sleep 30" &
   local wpid=$!
   bash -c 'exec -a "claude --agent flow-lead review the board" sleep 30' &
   local ipid=$!
+  bash -c 'exec -a "claude" sleep 30' &
+  local rpid=$!
   local waited=0 control_up="no"
   while [[ "$waited" -lt 50 ]]; do
     pgrep -f "$pat" | grep -qw "$wpid" && { control_up="yes"; break; }
@@ -1398,19 +1435,20 @@ test_proc_probe_discriminates_worker_claude() {
     waited=$((waited + 1))
   done
   if [[ "$control_up" == "no" ]]; then
-    kill "$wpid" "$ipid" 2>/dev/null || true
-    wait "$wpid" "$ipid" 2>/dev/null || true
+    kill "$wpid" "$ipid" "$rpid" 2>/dev/null || true
+    wait "$wpid" "$ipid" "$rpid" 2>/dev/null || true
     skip "proc-probe (live): control worker process never scheduled within cap — pure-string proof held"
     return
   fi
-  local worker_matched="yes" interactive_matched="no"
+  local worker_matched="yes" interactive_matched="no" repl_matched="no"
   pgrep -f "$pat" | grep -qw "$ipid" && interactive_matched="yes"
-  kill "$wpid" "$ipid" 2>/dev/null || true
-  wait "$wpid" "$ipid" 2>/dev/null || true
-  if [[ "$worker_matched" == "yes" && "$interactive_matched" == "no" ]]; then
-    pass "proc-probe: matches --agent worker spawn, excludes interactive/other-agent claude"
+  pgrep -f "$pat" | grep -qw "$rpid" && repl_matched="yes"
+  kill "$wpid" "$ipid" "$rpid" 2>/dev/null || true
+  wait "$wpid" "$ipid" "$rpid" 2>/dev/null || true
+  if [[ "$worker_matched" == "yes" && "$interactive_matched" == "no" && "$repl_matched" == "no" ]]; then
+    pass "proc-probe: matches -p --agent flow-lead worker, excludes interactive lead + plain REPL"
   else
-    fail "proc-probe: worker_matched=$worker_matched interactive_matched=$interactive_matched"
+    fail "proc-probe: worker=$worker_matched interactive=$interactive_matched repl=$repl_matched"
   fi
 }
 
@@ -1570,14 +1608,17 @@ test_stop_file_honored_mid_hold() {
 # sanity run of the verbatim default probe: well-formed, and its worker-Claude
 # sub-probe is 0 with no worker running.
 test_probe_no_self_match() {
-  local pat='[c]laude.*--agent worker'
+  # Source the ACTUAL pattern from the script (anti-drift, roborev #2841): a naive
+  # hardcoded copy would silently desync from an edit to PROC_MATCH_WORKER.
+  local pat
+  pat="$(env -u PROC_MATCH_WORKER SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$PROC_MATCH_WORKER"' 2>/dev/null)"
   # PROPERTY proof (pure-string, always runs, deterministic): the bracketed pattern
-  # matches a REAL worker argv, and does NOT match a process whose argv literally
-  # contains the bracketed PATTERN TEXT (exactly as the probe's own `bash -c`
-  # wrapper does) — `[c]laude` = literal `c`+`laude`; the text `[c]laude` has `c`
-  # followed by `]`, so no match. This is the self-exclusion property.
-  if ! printf 'claude --agent worker resume the claim\n' | grep -qE "$pat" ||
-       printf 'wrap [c]laude.*--agent worker probe\n' | grep -qE "$pat"; then
+  # matches a REAL unattended `-p` worker argv, and does NOT match a process whose
+  # argv literally contains the bracketed PATTERN TEXT (exactly as the probe's own
+  # `bash -c` wrapper does) — `[c]laude` = literal `c`+`laude`; the text `[c]laude`
+  # has `c` followed by `]`, so no match. This is the self-exclusion property.
+  if ! printf "claude -p --dangerously-skip-permissions --agent flow-lead '/worker'\n" | grep -qE "$pat" ||
+       printf 'wrap %s probe\n' "$pat" | grep -qE "$pat"; then
     fail "probe self-match: pure-string regex fails the self-exclusion property"
     return
   fi
@@ -1590,17 +1631,17 @@ test_probe_no_self_match() {
   worker_probe="$(env -u PROC_PROBE_WORKER_CMD SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$PROC_PROBE_WORKER_CMD"' 2>/dev/null)"
   # shellcheck disable=SC2016
   build_probe="$(env -u PROC_PROBE_BUILD_CMD SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$PROC_PROBE_BUILD_CMD"' 2>/dev/null)"
-  [[ "$worker_probe" == *'[c]laude.*--agent worker'* && "$worker_probe" == *'grep -vxF'* &&
+  [[ "$worker_probe" == *"$pat"* && "$worker_probe" == *'grep -vxF'* &&
      "$build_probe" == *'[c]argo '* && "$build_probe" == *'grep -vxF'* ]] && defaulted="yes"
   if [[ "$defaulted" != "yes" ]]; then
     fail "probe self-match: default per-family probe strings missing bracket trick / self-exclusion: worker='${worker_probe:0:50}' build='${build_probe:0:50}'"
     return
   fi
-  # Bonus live check: real `claude --agent worker` stub matches, wrapper-text stub
-  # does not. SKIPs (never fails) if the control worker never schedules.
-  bash -c 'exec -a "claude --agent worker resume the claim" sleep 30' &
+  # Bonus live check: real `claude -p … --agent flow-lead` stub matches, wrapper-text
+  # stub does not. SKIPs (never fails) if the control worker never schedules.
+  bash -c "exec -a 'claude -p --dangerously-skip-permissions --agent flow-lead /worker' sleep 30" &
   local wpid=$!
-  bash -c 'exec -a "wrap [c]laude.*--agent worker probe" sleep 30' &
+  bash -c "exec -a 'wrap $pat probe' sleep 30" &
   local xpid=$!
   local waited=0 control_up="no"
   while [[ "$waited" -lt 50 ]]; do
@@ -2464,6 +2505,62 @@ test_claim_issue_learned_from_marker() {
 # No test function here by design — see comment in acquire_lock() itself.
 
 # ---------------------------------------------------------------------------
+# Test (#2841): the resolved DEFAULT WORKER_CMD (caller does not export one)
+# is a headless-executable invocation — source the supervisor with WORKER_CMD
+# unset (the source-guard keeps main() from running) and assert the resolved
+# value carries `-p`, `--dangerously-skip-permissions`, and `--agent flow-lead`,
+# and does NOT name the non-existent `--agent worker`. A future edit that drops
+# any of these fails here rather than shipping a silently-broken default.
+# ANTI-DRIFT (roborev #2841): also assert PROC_MATCH_WORKER actually MATCHES the
+# resolved default WORKER_CMD — a flag reorder or regex edit that desynced the
+# orphan-probe pattern from the spawn shape (the #2670 coupling) fails HERE.
+# ---------------------------------------------------------------------------
+test_default_worker_cmd_is_headless() {
+  local resolved pat
+  # shellcheck disable=SC2016  # $SUP/$WORKER_CMD expand inside the sub-bash, not here.
+  resolved="$(env -u WORKER_CMD SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$WORKER_CMD"' 2>/dev/null)"
+  # shellcheck disable=SC2016  # $SUP/$PROC_MATCH_WORKER expand inside the sub-bash, not here.
+  pat="$(env -u WORKER_CMD SUP="$SUPERVISOR" bash -c 'source "$SUP"; printf %s "$PROC_MATCH_WORKER"' 2>/dev/null)"
+  if [[ "$resolved" == *' -p '* && "$resolved" == *'--dangerously-skip-permissions'* &&
+        "$resolved" == *'--agent flow-lead'* && "$resolved" != *'--agent worker'* ]] &&
+     printf '%s' "$resolved" | grep -qE "$pat"; then
+    pass "default WORKER_CMD: headless (-p + skip-permissions + --agent flow-lead) AND matched by PROC_MATCH_WORKER"
+  else
+    fail "default WORKER_CMD: resolved='$resolved' pat='$pat' matched=$(printf '%s' "$resolved" | grep -qE "$pat" && echo yes || echo no)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test (#2841 / design decision A, R3): a HEALTHY worker whose stub emits stream
+# activity to stdout produces a NON-EMPTY iter-N.log (the redirect captures the
+# `-p --output-format stream-json --verbose` event stream the watchdog scans),
+# so the watchdog is not blinded under `-p`. The existing wedge classifier tests
+# (test_genuine_wedge_frozen_is_stuck etc.) cover the frozen-log+signature side.
+# ---------------------------------------------------------------------------
+test_healthy_worker_iterlog_nonempty() {
+  local d counter jf rc fcount logsize
+  d="$(new_case_dir)"
+  counter="$d/counter"
+  common_env "$d"
+  write_verbose_finalize_stub "$d/bin/worker.sh" "$counter"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=1
+  jf="$JOURNAL_FILE"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  fcount=$(jline_count "$jf" '"outcome":"finalized"')
+  logsize=0
+  [[ -f "$LOG_DIR/iter-1.log" ]] && logsize=$(wc -c <"$LOG_DIR/iter-1.log" | tr -d ' ')
+  if [[ "$rc" -eq 0 && "$fcount" -eq 1 && "$logsize" -gt 0 ]] &&
+     grep -q 'tool_use' "$LOG_DIR/iter-1.log"; then
+    pass "healthy worker: -p stream activity captured into non-empty iter-1.log ($logsize bytes)"
+  else
+    fail "healthy iter-log: rc=$rc finalized=$fcount logsize=$logsize (see $LOG_DIR/iter-1.log)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 echo "=== worker-supervisor test suite ==="
@@ -2522,5 +2619,7 @@ test_build_hold_clears_then_proceeds
 test_probe_list_derives_from_count_set
 test_grace_cap_disabled_semantics
 test_mid_grace_stop_is_aborted
+test_default_worker_cmd_is_headless
+test_healthy_worker_iterlog_nonempty
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

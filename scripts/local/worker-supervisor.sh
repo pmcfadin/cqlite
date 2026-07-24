@@ -254,9 +254,32 @@ detect_ncpu() {
 LOAD_MAX="${LOAD_MAX:-$(detect_ncpu)}"
 
 # Real invocation (documented default; every real fleet run should pin this
-# explicitly rather than rely on the default prompt text drifting).
+# explicitly rather than rely on the default prompt text drifting). Validated
+# headless launch (issue #2841) — each flag fixes a distinct spawn failure:
+#   -p (--print)                    non-interactive; runs the prompt to completion
+#                                   and exits (matches the one-shot-per-iteration
+#                                   model). WITHOUT it `claude` opens an interactive
+#                                   TUI and blocks on keyboard input forever.
+#   --output-format stream-json     with `-p`, emit a LIVE event stream to stdout
+#     --verbose                     (required by the CLI for stream-json under -p)
+#                                   so the supervisor's `>"$logfile"` redirect
+#                                   captures non-empty worker activity and the
+#                                   stuck-on-question watchdog (detect_prompt_signature
+#                                   /log_size on iter-N.log) keeps working. Without a
+#                                   stream flag `-p` writes only to the session
+#                                   transcript and iter-N.log stays 0 bytes (design
+#                                   decision A; see openspec change).
+#   --dangerously-skip-permissions  a supervisor-spawned session has no human to
+#                                   approve per-command prompts, so gh project / gh
+#                                   auth / git worktree / git -C would be auto-denied.
+#   --agent flow-lead               the registered orchestrator agent. `worker` is a
+#                                   /-command/skill (.claude/commands/worker.md), NOT
+#                                   a registered agent type — `--agent worker` exits 1.
+#   '/worker'                       the prompt: invoke the worker skill (single-issue
+#                                   session mode, #2090). The skill body carries the
+#                                   full contract, so the inline prompt stays minimal.
 if [[ -z "${WORKER_CMD:-}" ]]; then
-  WORKER_CMD="claude --agent worker 'Resume the existing issue-<N>-* claim branch on this machine if one exists; otherwise claim the next Ready issue from the board. Run it to completion (implement, gate, review, merge on green, finalize, telemetry stamp). Write the iteration marker as your last act, then exit.'"
+  WORKER_CMD="claude -p --output-format stream-json --verbose --dangerously-skip-permissions --agent flow-lead '/worker'"
 fi
 
 # NOTE: default probe commands are assigned via explicit if/then blocks, not a
@@ -278,7 +301,7 @@ fi
 # and the "what we name in the page" set can never drift apart. `[c]argo`/`[c]laude` are
 # the bracket-trick forms (see below).
 PROC_MATCH_BUILD='[c]argo |[n]extest|[g]ate_slot_daemon'
-PROC_MATCH_WORKER='[c]laude.*--agent worker'
+PROC_MATCH_WORKER='[c]laude.* (-p|--print)( |$).*--agent flow-lead'
 # Leftover-process probes (issue #2670): two families of prior-iteration debris block
 # the next spawn (HOLD-and-poll, same as load/disk), bounded SEPARATELY (roborev 1839)
 # so each needs its OWN count probe:
@@ -288,13 +311,23 @@ PROC_MATCH_WORKER='[c]laude.*--agent worker'
 #   (2) an orphaned worker Claude CLI from a prior iteration (a SIGTERM'd-wrapper
 #       survivor and stuck-on-question hazard) — NON-self-clearing; gets the TIGHT
 #       LEFTOVER_HOLD_MAX (reason `leftover-worker`).
-# The Claude match is keyed on the supervisor's OWN spawn shape — `--agent worker`
-# (see WORKER_CMD) — NOT a bare `claude`. A plain interactive `claude` REPL, or a
-# different-agent session (`--agent flow-lead`), never carries that marker, so a
-# legitimate interactive session on the box is not matched. LIMIT: an operator who
-# deliberately runs `claude --agent worker` by hand WILL be matched (correctly — by the
-# one-worker-per-machine rule #1930). The current iteration's own worker has already
-# exited before preflight runs, so any `--agent worker` seen here is from a prior iteration.
+# The Claude match is keyed on the supervisor's OWN spawn shape — the unattended
+# headless launch `claude … -p … --agent flow-lead` (see WORKER_CMD, issue #2841) —
+# NOT a bare `claude`. The print-mode token (`-p` or `--print`) is load-bearing and is
+# matched as a WHITESPACE-DELIMITED token ` (-p|--print)( |$)` (roborev #2841): an
+# UNANCHORED `-p` would also match the `-p` inside `--dangerously-skip-permissions`
+# (ski-P-ermissions), misclassifying an interactive `claude --dangerously-skip-permissions
+# --agent flow-lead` lead as a leftover worker. A plain interactive `claude` REPL has
+# neither the print token nor `--agent flow-lead`, and a deliberate INTERACTIVE lead
+# session (`claude --agent flow-lead`, no `-p`/`--print`) is likewise excluded, so a
+# legitimate hand-run lead/REPL on the box is not misdetected as a leftover worker. Only
+# the print-mode unattended spawn carries both the print token and `--agent flow-lead`. LIMIT: an
+# operator who deliberately runs the full `claude -p … --agent flow-lead` shape by hand
+# WILL be matched (correctly — by the one-worker-per-machine rule #1930). The current
+# iteration's own worker has already exited before preflight runs, so any print-mode
+# `--agent flow-lead` process seen here is from a prior iteration. The WORKER_CMD default
+# and this pattern are coupled: test_worker_supervisor.sh asserts PROC_MATCH_WORKER
+# actually matches the resolved default WORKER_CMD (anti-drift, roborev #2841).
 #
 # SELF-MATCH DEFUSED (roborev 1813, MED-HIGH): a live `bash -c` wrapper's OWN argv
 # contains these pattern strings, so a naive pattern would match the wrapper and report
