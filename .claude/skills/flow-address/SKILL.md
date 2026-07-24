@@ -22,18 +22,20 @@ Resolve them in the worktree and reply per thread.
    fix is yours to make; a **genuine design/scope** question goes to the owner via `AskUserQuestion`
    (one at a time). Push back with a reason where a suggestion is wrong, rather than complying blindly.
 4. **Fix in the worktree** (`.claude/worktrees/issue-<N>-<slug>`), spawning `sstable-developer` for
-   non-trivial code changes. Set exactly one lifecycle label (clear the others first):
+   non-trivial code changes. Set the transient `addressing` sub-marker (a skill-managed marker the
+   board→label mirror #2855 does not own); clear the sibling transient `spec-review` marker. Do NOT
+   write status:ready/in-progress/in-review — those are the mirror's, derived from the board Status:
    ```bash
-   gh issue edit <N> --remove-label status:in-review --remove-label status:in-progress \
-     --remove-label status:spec-review --remove-label status:ready --add-label status:addressing
+   gh issue edit <N> --remove-label status:spec-review --add-label status:addressing
    ```
 5. **Re-verify** what the change touched: re-run `scripts/agent-gate.sh` (with `CQLITE_DATASETS_ROOT` at
    the main repo) and re-run C (`spec-auditor`) if requirements/tests changed; roborev again if code
    changed materially.
 6. **Push + reply.** `git -C <worktree> push`, then reply on each `$PR` thread with what changed (commit
-   ref), and flip back to exactly one lifecycle label:
+   ref), and clear the transient `addressing` sub-marker. The board stays `In Review` (PR still open),
+   so the mirror keeps `status:in-review` — do NOT hand-write it:
    ```bash
-   gh issue edit <N> --remove-label status:addressing --add-label status:in-review
+   gh issue edit <N> --remove-label status:addressing
    ```
 7. **Re-certify and re-arm merge-on-green (#2667).** The owner's comments are input, NOT a merge
    gate — unless a comment is an explicit `HOLD:` or raises a product/scope question. After addressing

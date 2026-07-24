@@ -73,14 +73,16 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    Confirm with `python3 scripts/delivery-telemetry.py lint`.
 5. **Set the board to Done + release the claim.** The PR-merged / issue-closed server-side automation
    should already have moved the Project item to `Status=Done` (it fires even when you merge from the
-   phone/web — no `flow-*` run needed); if it hasn't, set it yourself, else flip the `status:*` label in
-   the fallback (the Project-vs-labels detection snippet is in `flow-board`):
+   phone/web — no `flow-*` run needed); if it hasn't, set it yourself:
    ```bash
-   # If you must set it yourself, run the flow-board detection snippet first (it switches to the
-   # project-capable account — the EMU flip otherwise makes this write fail silently):
-   # gh project item-edit <item-id> --field Status --single-select-option-id <Done>   # when have_project=1
-   gh issue edit <N> --remove-label status:in-review --add-label status:done 2>/dev/null || true
+   # Run the flow-board detection snippet first (it switches to the project-capable account — the EMU
+   # flip otherwise makes this write fail silently), then set the board Status only:
+   gh project item-edit <item-id> --field Status --single-select-option-id <Done>   # when have_project=1
    ```
+   Do NOT write any `status:*` label here. Done → no board-derived label (board→label mirror #2855:
+   Backlog/Done carry none), and the mirror only reconciles OPEN issues, so a leftover label on the
+   now-closed issue is irrelevant to discovery (`--state open`) and to the detector; a reopen fires
+   the mirror's `issues: reopened` trigger and re-derives from board Status.
    Releasing the claim = deleting the CLAIM REF `refs/claims/issue-<N>` via `claim.sh release` (#2665 — the
    ref is THE cross-machine lock); deleting the `issue-<N>-<slug>` branch is plumbing cleanup of the merged
    PR head, not the lock. Both happen in step 6 below. After finalize, nothing for this issue may remain

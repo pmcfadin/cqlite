@@ -31,12 +31,12 @@ never gate stdout or review churn.
    In an **attended** session you may ask when you can't confirm approval; in an **unattended** session NEVER
    ask — **park** per the #2666 park-and-resume protocol (post ONE structured question comment + add the
    `needs-decision` label + write a `blocked`/`reason: seam1-approval` marker + EXIT), never `AskUserQuestion`.
-   Oracle-driven: a pinned parity/repro test exists or is written first. Set exactly one
-   lifecycle label — clear ALL `status:*` first so the issue never carries two (oracle issues arrive at
-   `status:ready`, design issues at `status:spec-review`):
+   Oracle-driven: a pinned parity/repro test exists or is written first. Clear the transient
+   skill-managed sub-markers (`spec-review`/`addressing`) so the issue does not carry a stale one — do
+   NOT write a `status:in-progress` label: the board→label mirror (#2855) derives it from the board
+   Status you set, and reverts any hand-written board-derived label on its next pass:
    ```bash
-   gh issue edit <N> --remove-label status:ready --remove-label status:spec-review \
-     --remove-label status:addressing --remove-label status:in-review --add-label status:in-progress
+   gh issue edit <N> --remove-label status:spec-review --remove-label status:addressing
    ```
    (`--remove-label` is a no-op for labels not present, so this is safe regardless of the starting state.)
    Set the Project `Status=In Progress` too. **Run the `flow-board` detection snippet FIRST** — it does
@@ -120,13 +120,14 @@ never gate stdout or review churn.
    this push sends the implementation commits. Use a closing keyword (`Closes #<N>`) so merge auto-closes
    the issue, then refresh the heartbeat (#2089):
    ```bash
-   gh issue edit <N> --remove-label status:in-progress --add-label status:in-review
    git -C <worktree> push -u origin issue-<N>-<slug>
    gh pr create --base main --head issue-<N>-<slug> --fill   # ensure body has "Closes #<N>"
    scripts/flow/claim-heartbeat.sh beat <N>                  # PR-open stage transition
    # Board → In Review fires via GitHub's "Pull request linked to issue" built-in. Belt-and-suspenders:
    # run the flow-board detection snippet first (switches to the project-capable account), then
-   # gh project item-edit ... Status=In Review when have_project=1; else the label above + loud ⚠️ warning.
+   # gh project item-edit ... Status=In Review when have_project=1. Do NOT write a status:in-review
+   # label — the board→label mirror (#2855) derives it from the board Status; if have_project=0 print
+   # the loud ⚠️ board-unavailable warning so the owner knows the board (and thus the mirror) is stale.
    ```
    **GitHub API resilience:** `gh pr create` / `gh issue comment` ride the **GraphQL** bucket, which
    throttles **separately** from REST (each 5k pts/hr, independent per-bucket windows). If GraphQL is
