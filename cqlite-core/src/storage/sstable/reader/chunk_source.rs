@@ -184,22 +184,28 @@ impl<'a> ChunkSource<'a> {
         Ok(self.cache.insert(key, decompressed))
     }
 
-    /// Decompress-only helper for the BIG reverse path: decompress without caching.
+    /// Decompress-only helper for already-CRC-validated compressed buffers: decompress
+    /// without caching.
     ///
-    /// Preserves the uncached behavior of the BIG reverse/seek window path
-    /// (`decompress_partition_window` via `block_io::read_compressed_chunk_at`) — no B1
-    /// cache insertion, no DECOMPRESS_CALLS counter (separate work_counters::add_chunk_decompressed).
-    /// This exists ONLY to consolidate the `Compression::decompress` call site into this
-    /// module while changing zero runtime behavior on the reverse path.
+    /// Consumers (all uncached — no B1 cache insertion, no DECOMPRESS_CALLS counter;
+    /// their own counters, e.g. work_counters::add_chunk_decompressed, apply):
+    /// - the BIG reverse/seek window path (`decompress_partition_window` via
+    ///   `block_io::read_compressed_chunk_at`),
+    /// - the stitch path (`stitch_all_chunks`, `data_access/mod.rs`),
+    /// - the sequential-scan block decode (`parse_block_entries`, issue #2165).
+    ///
+    /// This exists to consolidate the `Compression::decompress` call site into this
+    /// module while changing zero runtime behavior on those paths.
     pub(crate) fn decompress_only(
         compression: Option<&Compression>,
         compressed: Vec<u8>,
     ) -> Result<Vec<u8>> {
         if let Some(c) = compression {
+            let compressed_len = compressed.len();
             c.decompress(&compressed).map_err(|e| {
                 Error::corruption(format!(
-                    "ChunkSource: reverse-path decompress failed: {}",
-                    e
+                    "ChunkSource: decompress failed ({} compressed bytes): {}",
+                    compressed_len, e
                 ))
             })
         } else {

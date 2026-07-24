@@ -101,6 +101,14 @@ impl SSTableReader {
 
         let mut entries = Vec::new();
 
+        // An empty block is a no-op regardless of compression: `read_next_block`
+        // can yield `Ok(Some(Vec::new()))` for a zero-length block, and an empty
+        // buffer is not valid compressed input. Short-circuit BEFORE any decompress
+        // so the enclosing scan continues instead of failing closed on empty bytes.
+        if block_data.is_empty() {
+            return Ok(entries);
+        }
+
         // Decompress block data if compression is enabled.
         //
         // Route the decompress through the single chunk decode plane
@@ -108,6 +116,20 @@ impl SSTableReader {
         // stitch path uses (`data_access/mod.rs`), so `parsing/` no longer calls
         // `Compression::decompress` inline. A failed decompress FAILS CLOSED with a
         // corruption error; it is never a silent raw-bytes parse (no-heuristics, #28).
+        //
+        // Reachability invariant (issue #2165): this compressed branch is effectively
+        // unreached on real files today — BTI-with-CompressionInfo routes to
+        // `bti_scan_with_metadata`, nb multi-chunk routes through
+        // `requires_chunk_stitching` → the stitch path, and uncompressed files take
+        // the `compression_reader == None` branch below. The fail-closed assumption
+        // (a decompress failure HERE == corruption) is therefore currently safe. It
+        // would NOT hold for Cassandra's incompressible-stored-raw chunk format
+        // (a chunk whose `len >= max_compressed_length` is stored uncompressed) if a
+        // future refactor ever re-wired a real compressed chunk through this branch:
+        // such a chunk would need the stitch path's `>= max_compressed_length` raw
+        // passthrough (see `stitch_all_chunks`), which is deliberately NOT duplicated
+        // here (dead code today). A future re-wirer MUST add it before relying on this
+        // branch for real compressed chunks.
         let data = if let Some(compression_reader) = &self.compression_reader {
             tracing::debug!(
                 "parse_block_entries: Attempting block decompression with algorithm: {:?}",
@@ -1287,8 +1309,22 @@ mod tests {
         block_data.extend_from_slice(&[0, 0, 0, 0]); // deletion_time
         block_data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]); // unknown 8-byte field
 
+        // Compress the synthetic block with the reader's declared algorithm so the
+        // fail-closed decompress (issue #2165) succeeds and the format dispatch this
+        // test asserts on is actually reached. A raw/uncompressed buffer would now
+        // error on decompress BEFORE any dispatch, silently voiding this coverage.
+        let compression_reader = reader
+            .compression_reader
+            .as_ref()
+            .expect("simple_table should be compressed");
+        let compression = Compression::new(*compression_reader.algorithm())
+            .expect("valid compression algorithm");
+        let compressed = compression
+            .compress(&block_data)
+            .expect("compress synthetic block");
+
         // Try parsing - should route to V5CompressedLegacyParser
-        let result = reader.parse_block_entries(&block_data, None, false);
+        let result = reader.parse_block_entries(&compressed, None, false);
 
         // We expect either success or a specific parsing error (not a dispatch error)
         match result {
@@ -1297,6 +1333,14 @@ mod tests {
             }
             Err(e) => {
                 let err_msg = e.to_string();
+                // Decompress must have SUCCEEDED — otherwise dispatch was never reached
+                // and this test would pass vacuously (issue #2165: fail-closed decompress
+                // errors before dispatch on a raw buffer).
+                assert!(
+                    !err_msg.contains("decompress"),
+                    "block must decompress so dispatch is reached, got decompress error: {}",
+                    err_msg
+                );
                 // Should not be a format dispatch error
                 assert!(
                     !err_msg.contains("Unknown format") && !err_msg.contains("Not implemented"),
@@ -1362,20 +1406,60 @@ mod tests {
 
         let result = reader.parse_block_entries(&invalid_compressed_data, None, false);
 
-        // FAIL CLOSED: an Err propagates, and no rows are produced from the raw bytes.
+        // FAIL CLOSED: the DECOMPRESS path must return a corruption error (not just
+        // any error), and no rows may be produced from the raw bytes.
         match result {
             Ok(rows) => panic!(
                 "decompress failure must fail closed with an error, got {} rows",
                 rows.len()
             ),
             Err(e) => {
+                assert!(
+                    matches!(e, Error::Corruption(_)),
+                    "decompress failure must surface as Error::Corruption, got: {:?}",
+                    e
+                );
                 let err_msg = e.to_string();
                 assert!(
-                    !err_msg.is_empty(),
-                    "Should produce a meaningful corruption error message"
+                    err_msg.contains("decompress"),
+                    "corruption error should name the decompress failure, got: {}",
+                    err_msg
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_empty_block_on_compressed_reader_is_noop() {
+        // Issue #2165: `read_next_block` can yield an empty block; on a COMPRESSED
+        // reader the empty buffer must NOT reach decompress (which would fail closed
+        // and abort the whole scan). It must short-circuit to Ok(empty entries) so
+        // the enclosing scan continues.
+        let reader = match create_test_reader("test_basic", "compression_test_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+        assert!(
+            reader.compression_reader.is_some(),
+            "Expected compression_test_table to have compression"
+        );
+
+        let empty: Vec<u8> = Vec::new();
+        let result = reader.parse_block_entries(&empty, None, false);
+
+        assert!(
+            result.is_ok(),
+            "empty block on a compressed reader must be a no-op, got: {:?}",
+            result
+        );
+        assert_eq!(
+            result.unwrap().len(),
+            0,
+            "empty block must yield zero entries"
+        );
     }
 
     // ========================================================================
