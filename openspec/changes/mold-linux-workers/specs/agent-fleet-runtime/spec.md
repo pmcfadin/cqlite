@@ -65,10 +65,12 @@ written only after a successful link probe proving the resolved C compiler accep
 ### Requirement: The gate summary SHALL stamp mold state on Linux hosts
 
 On Linux, every `scripts/agent-gate.sh` summary's `accelerators:` line SHALL carry a
-`mold=` token with one of three states: `linked` (binary present and the managed block is
-active in the resolved cargo config), `present-unconfigured` (binary present, block
-absent), or `absent` (binary missing). On Darwin the `accelerators:` line SHALL be
-unchanged (no mold token).
+`mold=` token with one of four states: `linked` (binary present and the managed block is
+active in the resolved cargo config), `overridden` (managed block active but a non-empty
+`RUSTFLAGS` is exported in the gate environment, which suppresses cargo's
+`target.rustflags` so the wired `-fuse-ld=mold` is NOT applied), `present-unconfigured`
+(binary present, block absent), or `absent` (binary missing). On Darwin the
+`accelerators:` line SHALL be unchanged (no mold token).
 
 #### Scenario: configured Linux worker stamps linked
 - **GIVEN** a Linux host with mold installed and the managed block active
@@ -84,6 +86,13 @@ unchanged (no mold token).
 - **GIVEN** a Linux host without mold
 - **WHEN** the gate emits its summary
 - **THEN** the `accelerators:` line SHALL contain `mold=absent`
+
+#### Scenario: a global RUSTFLAGS override is visible
+- **GIVEN** a Linux host with the managed block active AND a non-empty `RUSTFLAGS`
+  exported in the gate environment
+- **WHEN** the gate emits its summary
+- **THEN** the `accelerators:` line SHALL contain `mold=overridden` (never a bare
+  `linked`, which would misreport a mold link that env RUSTFLAGS actually suppresses)
 
 #### Scenario: Darwin summary unchanged
 - **WHEN** the gate emits its summary on a macOS host

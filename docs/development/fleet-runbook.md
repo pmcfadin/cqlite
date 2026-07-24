@@ -40,13 +40,16 @@ linker (linking is the one build cost sccache cannot cache — every `--lite` ro
 re-links every test binary) and wires it through a managed block in the **per-machine**
 `~/.cargo/config.toml`, after a link probe proves the toolchain accepts `-fuse-ld=mold`. It is
 advisory (a missing mold never fails a run) and never touches the repo-committed
-`.cargo/config.toml`. The gate's `accelerators:` line stamps `mold=linked` /
+`.cargo/config.toml`. The gate's `accelerators:` line stamps `mold=linked` / `overridden` /
 `present-unconfigured` / `absent` on Linux; if you see `present-unconfigured` (mold installed but
 not wired), re-run `bash scripts/bootstrap-agent-machine.sh`. macOS is out of scope (mold is
-Linux-only; ld-prime is already fastest there) — no change and no token. **One-time cold rebuild
-at enablement:** adding the mold `rustflags` changes sccache's cache keys, so the first gate after
-mold is wired is a **cold rebuild** (no cache hits) — expected, one time per machine; subsequent
-runs are warm again.
+Linux-only; ld-prime is already fastest there) — no change and no token. **Never export a global
+`RUSTFLAGS` on a worker:** env `RUSTFLAGS` suppresses cargo's `target.rustflags` entirely, so the
+wired `-fuse-ld=mold` goes silently inert — the gate stamps `mold=overridden` to surface exactly
+this footgun; scope any `RUSTFLAGS` per-command instead. **One-time cold rebuild at enablement:**
+adding the mold `rustflags` changes sccache's cache keys, so the first gate after mold is wired is
+a **cold rebuild** (no cache hits) — expected, one time per machine; subsequent runs are warm
+again.
 
 **Claim-ref preflight (#2665):** the cross-machine lock is a push to the `refs/claims/*` ref
 namespace on origin — `claim.sh smoke` creates, `ls-remote`s, and deletes a throwaway

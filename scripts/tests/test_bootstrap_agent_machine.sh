@@ -130,6 +130,24 @@ stub_net() {
   mk_stub "$1" cargo '[ "$1" = --version ] && echo "cargo 1.88.0"; exit 0'
 }
 
+# mk_hermetic_bin <dir>: a stub-only PATH dir with symlinked coreutils + a Linux
+# `uname` stub, so the missing-mold cases (6g/6h) never depend on the host having (or
+# NOT having) apt-get/dnf/etc. On a real Linux runner `/usr/bin/apt-get` exists, which
+# would otherwise flip the "no supported package manager" assertion and turn the FULL
+# gate RED via tooling-tests (#2859 blocker D). No package-manager binaries are linked;
+# callers add exactly the ones they intend to detect.
+mk_hermetic_bin() {
+  local dir="$1" t p
+  mkdir -p "$dir"
+  for t in bash dirname mktemp grep cp cat sed awk mkdir rm ln mv touch chmod \
+           head tail tr sort cut wc stat env git find xargs basename date sleep expr; do
+    p=$(type -P "$t" 2>/dev/null) || continue
+    [ -n "$p" ] && ln -sf "$p" "$dir/$t" 2>/dev/null || true
+  done
+  mk_stub "$dir" uname 'echo Linux; exit 0'
+  stub_net "$dir"  # gh/roborev/cargo stubs — no live network from these cases
+}
+
 # 6a. mold present + cc passes the probe -> managed block written, both Linux
 #     triples, NO linker line (default cc accepts -fuse-ld=mold).
 sbA=$(mktemp -d "$tmp/moldA.XXXXXX"); stubA="$tmp/stubA"; mkdir -p "$stubA"
@@ -248,12 +266,14 @@ else
 fi
 
 # 6g. missing mold + a supported package manager -> prints the install command in
-#     default (no --yes) mode and installs NOTHING; writes no linker config.
-sbG=$(mktemp -d "$tmp/moldG.XXXXXX"); stubG="$tmp/stubG"; mkdir -p "$stubG"
+#     default (no --yes) mode and installs NOTHING; writes no linker config. Runs in
+#     a HERMETIC stub-only PATH (blocker D): the ONLY package manager visible is the
+#     apt-get stub we add, regardless of what the host has installed.
+sbG=$(mktemp -d "$tmp/moldG.XXXXXX"); stubG="$tmp/stubG"
+mk_hermetic_bin "$stubG"
 tripG="$stubG/tripwire.log"; : >"$tripG"
-mk_stub "$stubG" uname 'echo Linux; exit 0'
 mk_stub "$stubG" apt-get "echo \"apt-get \$*\" >>\"$tripG\"; exit 0"
-outG=$(PATH="$stubG:/usr/bin:/bin" HOME="$sbG" CARGO_HOME="$sbG/.cargo" \
+outG=$(PATH="$stubG" HOME="$sbG" CARGO_HOME="$sbG/.cargo" \
   bash "$BOOTSTRAP" --skip-smoke 2>&1)
 if printf '%s' "$outG" | grep -q "mold MISSING" \
    && printf '%s' "$outG" | grep -q "install mold:.*apt-get install -y mold" \
@@ -262,18 +282,56 @@ if printf '%s' "$outG" | grep -q "mold MISSING" \
   ok "mold: missing + apt prints install command, installs nothing, writes no config"
 else
   bad "mold: missing+apt path did not print-only (tripwire=$(cat "$tripG" 2>/dev/null))"
+  printf '%s\n' "$outG" | grep -i mold
 fi
 
-# 6h. missing mold + NO supported package manager -> warn, no config.
-sbH=$(mktemp -d "$tmp/moldH.XXXXXX"); stubH="$tmp/stubH"; mkdir -p "$stubH"
-mk_stub "$stubH" uname 'echo Linux; exit 0'
-outH=$(PATH="$stubH:/usr/bin:/bin" HOME="$sbH" CARGO_HOME="$sbH/.cargo" \
+# 6h. missing mold + NO supported package manager -> warn, no config. HERMETIC PATH
+#     (blocker D) so no host apt-get/dnf/etc. is visible.
+sbH=$(mktemp -d "$tmp/moldH.XXXXXX"); stubH="$tmp/stubH"
+mk_hermetic_bin "$stubH"
+outH=$(PATH="$stubH" HOME="$sbH" CARGO_HOME="$sbH/.cargo" \
   bash "$BOOTSTRAP" --skip-smoke 2>&1)
 if printf '%s' "$outH" | grep -q "no supported package manager" \
    && [ ! -f "$sbH/.cargo/config.toml" ]; then
   ok "mold: missing + no package manager warns and writes no config"
 else
   bad "mold: missing + no-manager path missed the warn or wrote config"
+  printf '%s\n' "$outH" | grep -i mold
+fi
+
+# 6j. legacy extension-less ~/.cargo/config (blocker A): the block must be written
+#     INTO the existing `config` cargo actually reads — NOT a shadow `config.toml`
+#     that cargo would silently prefer, dropping the user's whole config.
+sbJ=$(mktemp -d "$tmp/moldJ.XXXXXX"); mkdir -p "$sbJ/.cargo"
+printf '[net]\nretry = 4\n' >"$sbJ/.cargo/config"
+PATH="$stubA:$PATH" HOME="$sbJ" CARGO_HOME="$sbJ/.cargo" \
+  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+if grep -q '^# BEGIN cqlite-mold' "$sbJ/.cargo/config" \
+   && grep -qx 'retry = 4' "$sbJ/.cargo/config" \
+   && [ ! -f "$sbJ/.cargo/config.toml" ]; then
+  ok "mold: writes into the legacy extension-less ~/.cargo/config (no shadow config.toml)"
+else
+  bad "mold: legacy config handling wrong (shadow config.toml or lost user config)"
+  ls -la "$sbJ/.cargo" 2>/dev/null
+fi
+
+# 6k. pre-existing user [target.<triple>-unknown-linux-gnu] OUTSIDE the markers
+#     (blocker B): appending our block would be a TOML table redefinition = cargo
+#     parse error on every invocation. Bootstrap must WARN and write NOTHING, leaving
+#     the file byte-identical.
+sbK=$(mktemp -d "$tmp/moldK.XXXXXX"); mkdir -p "$sbK/.cargo"
+cfgK="$sbK/.cargo/config.toml"
+printf '[target.x86_64-unknown-linux-gnu]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgK"
+beforeK=$(cat "$cfgK")
+outK=$(PATH="$stubA:$PATH" HOME="$sbK" CARGO_HOME="$sbK/.cargo" \
+  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+if printf '%s' "$outK" | grep -q "existing \[target" \
+   && [ "$beforeK" = "$(cat "$cfgK")" ] \
+   && ! grep -q '^# BEGIN cqlite-mold' "$cfgK"; then
+  ok "mold: pre-existing [target.<triple>] section -> warn, file byte-identical, no block"
+else
+  bad "mold: pre-existing target section not fail-safe (block written or file changed)"
+  echo "--- config ---"; cat "$cfgK"; echo "--------------"
 fi
 
 # 6i. the repository's committed .cargo/config.toml is never touched.

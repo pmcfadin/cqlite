@@ -65,6 +65,22 @@ toolchain so the recorded delta is mold-vs-lld (x86_64) and mold-vs-bfd (aarch64
 the fleet will actually run. Target-level `rustflags` in cargo config are additive over the
 toolchain's default linker choice; mold takes precedence via `-fuse-ld`.
 
+## Decision 4: RUSTFLAGS precedence — keep rustflags, add a fourth `overridden` state (CHOSEN)
+
+Cargo applies a config `target.<triple>.rustflags` ONLY when no higher-precedence flag
+source is set; a non-empty environment `RUSTFLAGS` **suppresses** the config value
+entirely (it does not merge). So on a worker that exports a global `RUSTFLAGS`, the managed
+block's `-fuse-ld=mold` is silently inert and a bare `mold=linked` stamp would LIE. We keep
+the config-`rustflags` mechanism (it is the one wiring seen identically by every cargo
+invocation — see Decision 1) and make the dishonesty impossible instead: the gate stamps a
+fourth state `mold=overridden` whenever a non-empty `RUSTFLAGS` is present at stamp time and
+the managed block is active. The fleet rule (fleet-runbook, same change) is therefore:
+**never export a global `RUSTFLAGS` on a worker** — scope it per-command (as the gate's own
+clippy/minimal-build components already do). A wrapper-linker (`[target].linker = mold`)
+would not be RUSTFLAGS-suppressible, but it is rejected for now: it needs mold's own
+`ld`-compatible driver wiring and diverges from the trivial `-fuse-ld` probe, and the
+`overridden` stamp fully closes the honesty gap at zero extra machinery.
+
 ## Known cost
 
 Adding rustflags changes sccache cache keys → one cold rebuild per machine at enablement.

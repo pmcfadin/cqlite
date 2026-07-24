@@ -157,6 +157,11 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked
 State values (Linux only):
 - `mold=linked` — mold on `$PATH` **and** the bootstrap-managed block is active in
   the resolved cargo config (the wired, fast path).
+- `mold=overridden` — the managed block is active but a **non-empty `RUSTFLAGS`** is
+  exported in the gate environment: env `RUSTFLAGS` suppresses cargo's
+  `target.rustflags` entirely, so the wired `-fuse-ld=mold` is NOT applied and a
+  bare `linked` would lie. **Never export a global `RUSTFLAGS` on a worker** — scope
+  it per-command (as the gate's own clippy/minimal-build components do).
 - `mold=present-unconfigured` — mold on `$PATH` but **no** managed block (bootstrap
   not re-run) → the installed-but-unwired silent-degradation the token exists to
   surface; re-run `bash scripts/bootstrap-agent-machine.sh`.
@@ -169,7 +174,8 @@ the resolved C compiler accepts `-fuse-ld=mold` (fail-safe: a probe failure warn
 and writes nothing — a machine never ends up with a config that breaks linking).
 When only `clang` passes the probe, the block adds `linker = "clang"` per triple.
 Self-test coverage: `scripts/tests/test_agent_gate_summary.sh` (case 9d asserts the
-three Linux states + the Darwin no-token contract) and
+four Linux states — incl. `overridden` and a no-override real-detection case — plus
+the Darwin no-token contract) and
 `scripts/tests/test_bootstrap_agent_machine.sh` (case 6 asserts detection, install
 print-only, the link probe, the managed-block write, idempotency, user-config
 preservation, and the Darwin no-op). See fleet-runbook for the one-time sccache

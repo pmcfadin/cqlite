@@ -9,9 +9,11 @@
 # What it verifies:
 #   1. Rust toolchain (cargo) — needed to build + to `cargo install` on Linux.
 #   2. Accelerators the gate auto-detects (issue #1848): sccache, cargo-nextest,
-#      modern bash (>=4.3 for parallel component lanes). Detection here MIRRORS
-#      the gate's ACCEL_* block (scripts/agent-gate.sh, "sccache auto-detect" /
-#      "cargo-nextest auto-detect" / "ACCEL_LANES") so the two can never disagree
+#      modern bash (>=4.3 for parallel component lanes), and — on Linux only —
+#      the mold linker (issue #2859), wired via a managed block in the per-machine
+#      ~/.cargo/config.toml. Detection here MIRRORS the gate's ACCEL_* block
+#      (scripts/agent-gate.sh, "sccache auto-detect" / "cargo-nextest auto-detect"
+#      / "ACCEL_LANES" / "mold link-accelerator") so the two can never disagree
 #      about whether an accelerator is present. The final health check below
 #      re-reads the state straight from the gate to reconcile.
 #   3. gh auth + the `project` scope (Path A board dispatch, #1886).
@@ -39,7 +41,7 @@ for arg in "$@"; do
     --yes|-y) AUTO_YES=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     -h|--help)
-      sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "bootstrap: unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -119,15 +121,24 @@ mold_target_section() {
 # mold_write_block <linker>: (re)write the managed block in the per-machine cargo
 # config. Strips any prior block (and one blank line immediately preceding it) so
 # re-runs are byte-idempotent, preserves everything else, then appends the block
-# with both Linux target triples.
+# with both Linux target triples. Writes into whichever config file cargo actually
+# reads — `config.toml` wins when both exist, else the extension-less `config` —
+# so a machine that only has the legacy `~/.cargo/config` never gets a shadow
+# `config.toml` that cargo silently prefers, dropping the user's whole config.
 mold_write_block() {
   local linker="$1"
   local cfg_dir cfg_file preserved
   cfg_dir="${CARGO_HOME:-$HOME/.cargo}"
-  cfg_file="$cfg_dir/config.toml"
   if ! mkdir -p "$cfg_dir" 2>/dev/null; then
     warn "could not create $cfg_dir — skipping mold linker config"
     return 0
+  fi
+  if [ -f "$cfg_dir/config.toml" ]; then
+    cfg_file="$cfg_dir/config.toml"
+  elif [ -f "$cfg_dir/config" ]; then
+    cfg_file="$cfg_dir/config"
+  else
+    cfg_file="$cfg_dir/config.toml"
   fi
   preserved=$(mktemp) || { warn "mktemp failed — skipping mold linker config"; return 0; }
   if [ -f "$cfg_file" ]; then
@@ -147,6 +158,15 @@ mold_write_block() {
     ' "$cfg_file" >"$preserved"
   else
     : >"$preserved"
+  fi
+  # Fail-safe: a user-defined [target.<triple>-unknown-linux-gnu] section OUTSIDE
+  # our markers would collide with the block we append (TOML table redefinition =
+  # cargo parse error on EVERY invocation). Never risk it — warn and write nothing,
+  # leaving the file byte-identical.
+  if grep -Eq '^\[target\.(x86_64|aarch64)-unknown-linux-gnu\]' "$preserved"; then
+    warn "existing [target.<triple>-unknown-linux-gnu] section in $cfg_file — writing NO mold block (a second table would be a cargo parse error); add \"-C link-arg=-fuse-ld=mold\" to that section by hand, or remove it and re-run bootstrap"
+    rm -f "$preserved"
+    return 0
   fi
   {
     cat "$preserved"
@@ -260,8 +280,10 @@ if [ "$PLATFORM" = linux ]; then
     mold_configure_linux
   else
     warn "mold MISSING — $MOLD_COST"
-    if have apt-get || have apt; then
+    if have apt-get; then
       run_or_print mold sudo apt-get install -y mold
+    elif have apt; then
+      run_or_print mold sudo apt install -y mold
     elif have dnf; then
       run_or_print mold sudo dnf install -y mold
     elif have yum; then

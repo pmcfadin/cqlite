@@ -548,28 +548,39 @@ _sccache_health() {
 # managed block in the per-machine ~/.cargo/config.toml. The gate surfaces that
 # state on the accelerators: line so an installed-but-unwired worker (silent
 # degradation) is visible in the pasted block — exactly the contract sccache
-# follows. Three states, Linux hosts ONLY:
+# follows. Four states, Linux hosts ONLY:
 #   linked                — mold on PATH AND the managed block is active in the
 #                           resolved cargo config (bootstrap wired it)
+#   overridden            — a non-empty RUSTFLAGS is exported in the gate
+#                           environment: env RUSTFLAGS SUPPRESSES cargo's
+#                           target.rustflags entirely, so the managed block's
+#                           -fuse-ld=mold is NOT applied and a bare `linked` would
+#                           LIE. This is the exact footgun the token exists to
+#                           surface (never export global RUSTFLAGS on a worker).
 #   present-unconfigured  — mold on PATH but no managed block (bootstrap not re-run)
 #   absent                — mold not on PATH
 # Darwin (and any non-Linux host) emits NO mold token: mold is Linux-only and a
 # permanent n/a token would churn every existing summary parser/fixture for zero
 # signal. Test hooks (issue #2859 self-test): AGENT_GATE_TEST_OS forces the host
-# family and AGENT_GATE_TEST_MOLD_STATE forces the detected state, so linked /
-# present-unconfigured / absent (and the Darwin no-token case) assert
-# deterministically without mold installed or a real ~/.cargo/config.toml.
+# family and AGENT_GATE_TEST_MOLD_STATE forces the detected state, so the four
+# states (and the Darwin no-token case) assert deterministically without mold
+# installed or a real ~/.cargo/config.toml.
+
+# The EXACT managed-block begin marker bootstrap-agent-machine.sh writes. Match the
+# full line (grep -Fxq) — NOT a prefix — so a user's own `# BEGIN cqlite-mold-...`
+# comment can never false-positive as the managed block.
+_MOLD_BEGIN_MARKER='# BEGIN cqlite-mold (managed by scripts/bootstrap-agent-machine.sh — do not edit inside)'
 
 # _mold_block_active: true when the bootstrap-managed block is present in the
 # resolved per-machine cargo config (config.toml or the extension-less config).
 _mold_block_active() {
   local cfg_dir="${CARGO_HOME:-$HOME/.cargo}"
-  grep -q '^# BEGIN cqlite-mold' "$cfg_dir/config.toml" 2>/dev/null && return 0
-  grep -q '^# BEGIN cqlite-mold' "$cfg_dir/config" 2>/dev/null && return 0
+  grep -Fxq "$_MOLD_BEGIN_MARKER" "$cfg_dir/config.toml" 2>/dev/null && return 0
+  grep -Fxq "$_MOLD_BEGIN_MARKER" "$cfg_dir/config" 2>/dev/null && return 0
   return 1
 }
 
-# _mold_state: resolve linked|present-unconfigured|absent, memoized.
+# _mold_state: resolve linked|overridden|present-unconfigured|absent, memoized.
 _MOLD_STATE=""
 _mold_state() {
   [ -n "$_MOLD_STATE" ] && { printf '%s' "$_MOLD_STATE"; return; }
@@ -577,6 +588,10 @@ _mold_state() {
     _MOLD_STATE="$AGENT_GATE_TEST_MOLD_STATE"
   elif ! command -v mold >/dev/null 2>&1; then
     _MOLD_STATE=absent
+  elif [ -n "${RUSTFLAGS:-}" ] && _mold_block_active; then
+    # Managed block present but a global RUSTFLAGS suppresses it → honest signal
+    # that the wired -fuse-ld=mold is NOT in effect.
+    _MOLD_STATE=overridden
   elif _mold_block_active; then
     _MOLD_STATE=linked
   else
@@ -598,8 +613,8 @@ _mold_accel_token() {
 # block (full, lite, and the emission selftest). Values: on|absent|off|serial.
 # See the ACCEL_* detection above (#1848). The trailing sccache-health token
 # (na|ok|warn, issue #2641) surfaces sccache's own corruption counters. On Linux
-# a ` mold=linked|present-unconfigured|absent` token follows (issue #2859); Darwin
-# output is unchanged.
+# a ` mold=linked|overridden|present-unconfigured|absent` token follows (issue
+# #2859); Darwin output is unchanged.
 accelerators_line() {
   printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s' \
     "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}" \

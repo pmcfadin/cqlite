@@ -73,7 +73,7 @@ assert_accelerators() {
   # The optional trailing ` mold=<state>` token (issue #2859) appears on Linux
   # hosts only; Darwin output ends at sccache-health, byte-identical to pre-change.
   if printf '%s\n' "$line" \
-       | grep -Eq '^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|present-unconfigured|absent))?$'; then
+       | grep -Eq '^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?$'; then
     ok "$label: accelerators line well-formed ($line)"
   else
     bad "$label: malformed accelerators line: '$line'"
@@ -837,12 +837,11 @@ else
 fi
 
 # 9d. mold link-accelerator token (issue #2859). On Linux the accelerators line
-#     carries a trailing `mold=linked|present-unconfigured|absent` token; on Darwin
-#     it carries NO mold token (byte-identical to pre-change). The host family is
-#     forced via AGENT_GATE_TEST_OS and the detected state via
-#     AGENT_GATE_TEST_MOLD_STATE, so all four cases assert deterministically without
-#     mold installed or a real ~/.cargo/config.toml.
-for state in linked present-unconfigured absent; do
+#     carries a trailing `mold=linked|overridden|present-unconfigured|absent` token;
+#     on Darwin it carries NO mold token (byte-identical to pre-change). The host
+#     family is forced via AGENT_GATE_TEST_OS and the detected state via
+#     AGENT_GATE_TEST_MOLD_STATE, so all four states assert deterministically here.
+for state in linked overridden present-unconfigured absent; do
   mold_file="$tmp/mold-$state.txt"
   AGENT_GATE_SUMMARY_FILE="$mold_file" \
     AGENT_GATE_TEST_OS=Linux AGENT_GATE_TEST_MOLD_STATE="$state" \
@@ -860,6 +859,62 @@ AGENT_GATE_SUMMARY_FILE="$mold_darwin" \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
 assert_mold_token "mold-darwin" "$mold_darwin" none
 assert_accelerators "mold-darwin" "$mold_darwin"
+
+# 9e. REAL detection (NO AGENT_GATE_TEST_MOLD_STATE override): exercise the actual
+#     `command -v mold` + `_mold_block_active` + RUSTFLAGS branches. A stub `mold` is
+#     put first on PATH and CARGO_HOME points at a temp dir we (don't) seed with the
+#     managed block, so linked / overridden / present-unconfigured are decided by the
+#     gate's real logic. The block marker must be the EXACT full line the writer emits
+#     (prefix matching would let a user's own `# BEGIN cqlite-mold-*` comment
+#     false-positive) — asserted by the notours case below.
+mold_bin="$tmp/mold-bin"; mkdir -p "$mold_bin"
+printf '#!/usr/bin/env bash\n[ "$1" = --version ] && echo "mold 2.4.0"\nexit 0\n' >"$mold_bin/mold"
+chmod +x "$mold_bin/mold"
+MOLD_MARK='# BEGIN cqlite-mold (managed by scripts/bootstrap-agent-machine.sh — do not edit inside)'
+
+# 9e-i. mold on PATH + managed block in config.toml -> linked (real detection).
+ch1=$(mktemp -d "$tmp/mold-ch1.XXXXXX")
+printf '%s\n[target.x86_64-unknown-linux-gnu]\nrustflags = ["-C", "link-arg=-fuse-ld=mold"]\n# END cqlite-mold\n' "$MOLD_MARK" >"$ch1/config.toml"
+mf1="$tmp/mold-real-linked.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf1" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch1" RUSTFLAGS='' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-linked" "$mf1" linked
+
+# 9e-ii. managed block in the extension-less `config` file -> linked (both names read).
+ch2=$(mktemp -d "$tmp/mold-ch2.XXXXXX")
+printf '%s\n# END cqlite-mold\n' "$MOLD_MARK" >"$ch2/config"
+mf2="$tmp/mold-real-legacy.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf2" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch2" RUSTFLAGS='' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-legacy-config" "$mf2" linked
+
+# 9e-iii. mold on PATH, NO managed block -> present-unconfigured (real detection).
+ch3=$(mktemp -d "$tmp/mold-ch3.XXXXXX")
+mf3="$tmp/mold-real-unconf.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf3" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch3" RUSTFLAGS='' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-unconfigured" "$mf3" present-unconfigured
+
+# 9e-iv. managed block active BUT a non-empty RUSTFLAGS exported -> overridden.
+mf4="$tmp/mold-real-overridden.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf4" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch1" RUSTFLAGS='-C target-cpu=native' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-overridden" "$mf4" overridden
+
+# 9e-v. marker alignment: a user's own `# BEGIN cqlite-mold-notours` comment (a
+#       PREFIX of, but not equal to, the managed marker) must NOT be detected as the
+#       block -> present-unconfigured, proving exact-full-line matching.
+ch5=$(mktemp -d "$tmp/mold-ch5.XXXXXX")
+printf '# BEGIN cqlite-mold-notours my own note\n[build]\njobs = 2\n' >"$ch5/config.toml"
+mf5="$tmp/mold-real-notours.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf5" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch5" RUSTFLAGS='' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-marker-alignment" "$mf5" present-unconfigured
 
 # ============================================================================
 # ISSUE #2078: FULL gate fails CLOSED when the fetched dataset corpus is absent.

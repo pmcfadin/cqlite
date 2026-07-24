@@ -188,9 +188,20 @@ block (full **and** `--lite`) carries a machine-checkable line:
 accelerators: sccache=on nextest=on lanes=on
 ```
 
+On **Linux** the line additionally carries a `mold=` token (byte-identical / no token
+on macOS):
+
+```
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked
+```
+
 - **`sccache`** — cross-worktree compile cache (~25.6% faster fresh builds).
 - **`nextest`** — parallel `core-tests` (the gate's long pole).
 - **`lanes`** — parallel gate components (needs bash ≥4.3 for `wait -n`).
+- **`mold`** (issue #2859, **Linux only**) — the fast linker, wired via a per-machine
+  `~/.cargo/config.toml` managed block. States: `mold=linked` (wired) · `overridden`
+  (a global `RUSTFLAGS` is suppressing the wired flags — don't export one on a worker)
+  · `present-unconfigured` (installed but not wired — re-run bootstrap) · `absent`.
 
 State values: **`on`** (detected & used) · **`absent`** (missing → the gate prints a
 loud `WARN:` on STDERR with the one-line install command) · **`off`** (intentionally

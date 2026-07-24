@@ -36,6 +36,12 @@ accelerators: sccache=on nextest=on lanes=on sccache-health=ok
 - **`sccache`** — cross-worktree compile cache (~25.6% faster fresh builds).
 - **`nextest`** — parallel `core-tests` (the gate's long pole).
 - **`lanes`** — parallel gate components (needs bash ≥4.3 for `wait -n`).
+- **`mold`** (issue #2859, **Linux only** — no token on macOS) — the fast linker,
+  wired via a per-machine `~/.cargo/config.toml` managed block. On Linux the line
+  gains a trailing `mold=linked | overridden | present-unconfigured | absent` token:
+  `overridden` means a global `RUSTFLAGS` is suppressing the wired flags (don't
+  export one on a worker); `present-unconfigured` means mold is installed but not
+  wired — re-run bootstrap.
 
 States: **`on`** (detected & used) · **`absent`** (missing → the gate prints a loud
 `WARN:` with the install command) · **`off`** (intentionally disabled via
@@ -44,8 +50,8 @@ States: **`on`** (detected & used) · **`absent`** (missing → the gate prints 
 a machine can otherwise run ~3x slower with no signal. Install commands:
 
 ```bash
-brew install sccache cargo-nextest bash     # macOS
-cargo install sccache cargo-nextest         # Linux (bash via the distro package manager)
+brew install sccache cargo-nextest bash          # macOS (mold is Linux-only)
+cargo install sccache cargo-nextest              # Linux (bash + mold via the distro package manager)
 ```
 
 ## Datasets and CQLITE_DATASETS_ROOT
