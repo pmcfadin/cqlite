@@ -125,16 +125,31 @@ and the supervisor — not a bare loop — guards the machine:
 bash scripts/local/worker-supervisor.sh          # defaults: MAX_ISSUES=4, 8h ceiling
 ```
 
+Each iteration spawns a headless worker with the validated invocation (issue #2841):
+
+```bash
+claude -p --output-format stream-json --verbose --dangerously-skip-permissions --agent flow-lead '/worker'
+```
+
+`-p` runs the prompt to completion and exits (no interactive TUI to block on); `--agent flow-lead`
+is the registered orchestrator (`worker` is a `/`-command/skill, **not** an agent — `--agent worker`
+exits 1); `--dangerously-skip-permissions` lets an unattended session run `gh`/`git` without a human
+approving each prompt; `--output-format stream-json --verbose` streams the worker's live activity to
+stdout so the supervisor's per-iteration redirect captures it (see monitoring, below). Override the
+whole command with `WORKER_CMD` if needed; the default is what the supervisor uses when you don't.
+
 What it guarantees:
 
 - **One issue per session**: each iteration rehydrates from the board, resumes this machine's own
   claim branch first (crash recovery), else claims the next Ready item, works it to merged +
   finalized, and exits. Empty Ready = cheap no-op + backoff.
 - **It cannot overload the box**: preflight holds the next iteration while load is high, a dead
-  iteration's cargo/gate processes **or an orphaned worker Claude CLI** (`--agent worker`, #2670)
+  iteration's cargo/gate processes **or an orphaned worker Claude CLI** (the unattended
+  `claude -p … --agent flow-lead` spawn shape, #2670/#2841)
   linger, or disk is low — it waits, it never spins. A flock makes a second supervisor on the same
-  machine refuse to start. (The Claude probe keys on the supervisor's own `--agent worker` spawn
-  shape, so a legitimate interactive `claude` REPL or a different-agent session is not matched.) A
+  machine refuse to start. (The Claude probe keys on the supervisor's own `-p … --agent flow-lead`
+  spawn shape, so a legitimate interactive `claude` REPL or an interactive `claude --agent flow-lead`
+  lead session — neither carries `-p` — is not matched.) A
   hold cannot latch it silently: every hold pass re-checks the stop-file and the wall-clock budget,
   and a leftover hold that never clears stops the loop loudly, paging the surviving PIDs (#2670).
   The two leftover families are bounded **separately** (#2670): a non-self-clearing orphaned worker
@@ -170,7 +185,13 @@ What it guarantees:
   **parks** (posts a `needs-decision` question comment + EXITs) rather than waiting — the supervisor
   judges it `parked-on-owner` and pages the owner once. A worker that nonetheless gets stuck on an
   interactive prompt is caught mid-iteration by a log-tail watchdog and paged as `stuck-on-question`.
-  **Neither counts toward the crash breaker.**
+  **Neither counts toward the crash breaker.** The watchdog reads the per-iteration capture at
+  `$LOG_DIR/iter-<N>.log` — under `-p` a worker writes its narrative to the session transcript, not
+  stdout, so the supervisor's default `WORKER_CMD` adds `--output-format stream-json --verbose`
+  precisely so the redirect captures a live event stream; the watchdog's "prompt signature in the
+  tail AND log size frozen across two scans" logic then works, and the log stays useful to a human
+  (a wedged worker's byte size freezes exactly when the stream stops). **Watch a live worker** with
+  `tail -f "$LOG_DIR/iter-$(ls -1 "$LOG_DIR" | grep -oE 'iter-[0-9]+' | sort -t- -k2 -n | tail -1 | cut -d- -f2).log"` (or simply `tail -f "$LOG_DIR"/iter-*.log`).
 
 **Per-iteration verdicts** (one journal line each):
 
