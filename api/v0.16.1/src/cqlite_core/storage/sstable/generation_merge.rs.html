@@ -1,0 +1,832 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/generation_merge.rs`."><title>generation_merge.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/</div>generation_merge.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Cross-generation read reconciliation for the SSTable manager (issues #883,
+<a href=#2 id=2 data-nosnippet>2</a>//! #885, #957, #1579).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! When a table directory holds more than one SSTable generation, plain
+<a href=#5 id=5 data-nosnippet>5</a>//! concatenation of each reader's live rows is wrong: the same
+<a href=#6 id=6 data-nosnippet>6</a>//! `(partition, clustering)` row can appear in several generations, and a
+<a href=#7 id=7 data-nosnippet>7</a>//! row/cell tombstone in a newer generation suppresses only its OWN generation's
+<a href=#8 id=8 data-nosnippet>8</a>//! copy — so concatenation duplicates overwritten rows and resurrects rows deleted
+<a href=#9 id=9 data-nosnippet>9</a>//! in a later generation. These helpers reconcile across generations with the
+<a href=#10 id=10 data-nosnippet>10</a>//! authoritative [`KWayMerger`](crate::storage::write_engine::KWayMerger) — the
+<a href=#11 id=11 data-nosnippet>11</a>//! same last-write-wins + tombstone-shadowing logic compaction uses — so the read
+<a href=#12 id=12 data-nosnippet>12</a>//! path returns Cassandra's merged, deduplicated, tombstone-honouring result.
+<a href=#13 id=13 data-nosnippet>13</a>//!
+<a href=#14 id=14 data-nosnippet>14</a>//! Three drivers, ONE reconciliation kernel (the merger's `step()`):
+<a href=#15 id=15 data-nosnippet>15</a>//!
+<a href=#16 id=16 data-nosnippet>16</a>//! - [`merge_generations_for_read`] — materializing plain read (`scan`,
+<a href=#17 id=17 data-nosnippet>17</a>//!   partition-targeted point reads). Collects the reconciled rows into a `Vec`
+<a href=#18 id=18 data-nosnippet>18</a>//!   in Cassandra token order.
+<a href=#19 id=19 data-nosnippet>19</a>//! - [`merge_generations_for_read_with_metadata`] — the `WRITETIME`/`TTL`
+<a href=#20 id=20 data-nosnippet>20</a>//!   projection sibling; additionally surfaces the winning cell's per-cell write
+<a href=#21 id=21 data-nosnippet>21</a>//!   metadata.
+<a href=#22 id=22 data-nosnippet>22</a>//! - [`stream_generations_for_read`] — the STREAMING plain read (`scan_stream`,
+<a href=#23 id=23 data-nosnippet>23</a>//!   issue #1579 / D3). Feeds each stepped partition straight into a bounded
+<a href=#24 id=24 data-nosnippet>24</a>//!   channel instead of collecting the whole table, so live heap is O(one
+<a href=#25 id=25 data-nosnippet>25</a>//!   partition + channel) and time-to-first-row is O(first partition), not
+<a href=#26 id=26 data-nosnippet>26</a>//!   O(full merge).
+<a href=#27 id=27 data-nosnippet>27</a>//!
+<a href=#28 id=28 data-nosnippet>28</a>//! All three yield partitions in the merger's `DecoratedKey` order = `(token,
+<a href=#29 id=29 data-nosnippet>29</a>//! key)`, which is byte-identical to [`scan_merge::sort_by_token_order`]. The
+<a href=#30 id=30 data-nosnippet>30</a>//! materializing paths still apply that stable sort as a no-op guard; the
+<a href=#31 id=31 data-nosnippet>31</a>//! streaming path relies on the merger's order directly (issue #1579).
+<a href=#32 id=32 data-nosnippet>32</a>//!
+<a href=#33 id=33 data-nosnippet>33</a>//! Extracted from `sstable/mod.rs` (issue #1116 campsite split): behaviour of the
+<a href=#34 id=34 data-nosnippet>34</a>//! two materializing helpers is unchanged apart from the new `target_key`
+<a href=#35 id=35 data-nosnippet>35</a>//! partition-targeting parameter (issue #1579, point-read path).
+<a href=#36 id=36 data-nosnippet>36</a>//!
+<a href=#37 id=37 data-nosnippet>37</a>//! The whole module is gated on `write-support` at its `mod` declaration in the
+<a href=#38 id=38 data-nosnippet>38</a>//! parent (`sstable/mod.rs`).
+<a href=#39 id=39 data-nosnippet>39</a>//!
+<a href=#40 id=40 data-nosnippet>40</a>//! NOTE (#1116 file-size): already over the 800-line target on `origin/main`; the
+<a href=#41 id=41 data-nosnippet>41</a>//! #2063 admission acquires add a few lines. Splitting is tracked under epic #1116.
+<a href=#42 id=42 data-nosnippet>42</a>
+<a href=#43 id=43 data-nosnippet>43</a></span><span class="kw">use </span>std::collections::{HashMap, HashSet};
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span>std::path::PathBuf;
+<a href=#45 id=45 data-nosnippet>45</a><span class="kw">use </span>std::sync::Arc;
+<a href=#46 id=46 data-nosnippet>46</a>
+<a href=#47 id=47 data-nosnippet>47</a><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#48 id=48 data-nosnippet>48</a></span><span class="kw">use </span>tokio::sync::{mpsc, oneshot};
+<a href=#49 id=49 data-nosnippet>49</a>
+<a href=#50 id=50 data-nosnippet>50</a><span class="kw">use </span><span class="kw">super</span>::reader::parsing::row_decoder::now_clock::now_epoch_secs;
+<a href=#51 id=51 data-nosnippet>51</a><span class="kw">use </span><span class="kw">super</span>::reader::parsing::row_decoder::partition_shadow::{
+<a href=#52 id=52 data-nosnippet>52</a>    merged_row_shadowed_by_partition, PartitionShadow,
+<a href=#53 id=53 data-nosnippet>53</a>};
+<a href=#54 id=54 data-nosnippet>54</a><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#55 id=55 data-nosnippet>55</a></span><span class="kw">use </span><span class="kw">super</span>::stream_merge_probe;
+<a href=#56 id=56 data-nosnippet>56</a><span class="kw">use super</span>::{reader, scan_merge};
+<a href=#57 id=57 data-nosnippet>57</a><span class="kw">use </span><span class="kw">crate</span>::storage::write_engine::merge::{CellData, KWayMerger, MergeEntry, MergeStep, RowData};
+<a href=#58 id=58 data-nosnippet>58</a><span class="kw">use </span><span class="kw">crate</span>::types::{CellWriteMetadata, TableId <span class="kw">as </span>CqlTableId};
+<a href=#59 id=59 data-nosnippet>59</a><span class="kw">use crate</span>::{<span class="prelude-ty">Result</span>, RowCells, RowKey, ScanRow, Value};
+<a href=#60 id=60 data-nosnippet>60</a>
+<a href=#61 id=61 data-nosnippet>61</a><span class="doccomment">/// One reconciled metadata row inside the merge task, before per-cell metadata is
+<a href=#62 id=62 data-nosnippet>62</a>/// attached: `(partition key bytes, ScanRow row carrier, [(column,
+<a href=#63 id=63 data-nosnippet>63</a>/// write_timestamp_micros)])`.
+<a href=#64 id=64 data-nosnippet>64</a></span><span class="kw">type </span>MergedMetaRow = (Vec&lt;u8&gt;, ScanRow, Vec&lt;(String, i64)&gt;);
+<a href=#65 id=65 data-nosnippet>65</a>
+<a href=#66 id=66 data-nosnippet>66</a><span class="doccomment">/// Post-merge read-time visibility for the multi-generation read path (issue #1849).
+<a href=#67 id=67 data-nosnippet>67</a>///
+<a href=#68 id=68 data-nosnippet>68</a>/// A `SELECT` over a table directory with more than one SSTable generation routes
+<a href=#69 id=69 data-nosnippet>69</a>/// through the [`KWayMerger`], which performs cross-generation last-write-wins +
+<a href=#70 id=70 data-nosnippet>70</a>/// tombstone RECONCILIATION but NOT read-time TTL expiry / partition-deletion
+<a href=#71 id=71 data-nosnippet>71</a>/// visibility. Historically that let a multi-gen read return TTL-expired (or
+<a href=#72 id=72 data-nosnippet>72</a>/// partition-shadowed) cells as live, even after #1741 fixed the single-gen path.
+<a href=#73 id=73 data-nosnippet>73</a>///
+<a href=#74 id=74 data-nosnippet>74</a>/// This runs the merger's already-reconciled output through the SAME single-gen
+<a href=#75 id=75 data-nosnippet>75</a>/// [`PartitionShadow`] per-cell decision (`cell_shadowed_or_expired`) and row-level
+<a href=#76 id=76 data-nosnippet>76</a>/// partition-shadow decision (`merged_row_shadowed_by_partition`), so there is ONE
+<a href=#77 id=77 data-nosnippet>77</a>/// read-visibility implementation across single- and multi-generation reads. It adds
+<a href=#78 id=78 data-nosnippet>78</a>/// READ visibility only — reconciliation and the compaction/write path are untouched
+<a href=#79 id=79 data-nosnippet>79</a>/// (AC6). Range-tombstone shadowing of covered older cells is already applied by the
+<a href=#80 id=80 data-nosnippet>80</a>/// merger (#933); read-time cell/row TTL expiry is the gap this closes.
+<a href=#81 id=81 data-nosnippet>81</a></span><span class="kw">struct </span>ReadShadow {
+<a href=#82 id=82 data-nosnippet>82</a>    <span class="doccomment">/// Read-time TTL clock (epoch seconds), captured ONCE per scan so a scan crossing
+<a href=#83 id=83 data-nosnippet>83</a>    /// an expiration-second boundary decides every row with the same `now` — matching
+<a href=#84 id=84 data-nosnippet>84</a>    /// the single-gen parser's per-scan clock capture (issue #1849 AC4). Honours the
+<a href=#85 id=85 data-nosnippet>85</a>    /// `CQLITE_TTL_NOW_OVERRIDE_SECS` debug test seam via [`now_epoch_secs`].
+<a href=#86 id=86 data-nosnippet>86</a>    </span>now_secs: i64,
+<a href=#87 id=87 data-nosnippet>87</a>    <span class="doccomment">/// Names of the primary-key (partition + clustering) columns, surfaced by the
+<a href=#88 id=88 data-nosnippet>88</a>    /// compaction reader as pseudo-cells. Excluded from the row-level DATA-cell
+<a href=#89 id=89 data-nosnippet>89</a>    /// timestamp aggregate so only real data cells drive the partition-shadow row
+<a href=#90 id=90 data-nosnippet>90</a>    /// decision — matching the single-gen fold, which ignores pk/ck pseudo-cells.
+<a href=#91 id=91 data-nosnippet>91</a>    </span>key_columns: HashSet&lt;String&gt;,
+<a href=#92 id=92 data-nosnippet>92</a>}
+<a href=#93 id=93 data-nosnippet>93</a>
+<a href=#94 id=94 data-nosnippet>94</a><span class="kw">impl </span>ReadShadow {
+<a href=#95 id=95 data-nosnippet>95</a>    <span class="kw">fn </span>new(schema: <span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::TableSchema, now_secs: i64) -&gt; <span class="self">Self </span>{
+<a href=#96 id=96 data-nosnippet>96</a>        <span class="kw">let </span><span class="kw-2">mut </span>key_columns =
+<a href=#97 id=97 data-nosnippet>97</a>            HashSet::with_capacity(schema.partition_keys.len() + schema.clustering_keys.len());
+<a href=#98 id=98 data-nosnippet>98</a>        <span class="kw">for </span>k <span class="kw">in </span><span class="kw-2">&amp;</span>schema.partition_keys {
+<a href=#99 id=99 data-nosnippet>99</a>            key_columns.insert(k.name.clone());
+<a href=#100 id=100 data-nosnippet>100</a>        }
+<a href=#101 id=101 data-nosnippet>101</a>        <span class="kw">for </span>k <span class="kw">in </span><span class="kw-2">&amp;</span>schema.clustering_keys {
+<a href=#102 id=102 data-nosnippet>102</a>            key_columns.insert(k.name.clone());
+<a href=#103 id=103 data-nosnippet>103</a>        }
+<a href=#104 id=104 data-nosnippet>104</a>        <span class="self">Self </span>{
+<a href=#105 id=105 data-nosnippet>105</a>            now_secs,
+<a href=#106 id=106 data-nosnippet>106</a>            key_columns,
+<a href=#107 id=107 data-nosnippet>107</a>        }
+<a href=#108 id=108 data-nosnippet>108</a>    }
+<a href=#109 id=109 data-nosnippet>109</a>
+<a href=#110 id=110 data-nosnippet>110</a>    <span class="doccomment">/// Filter one merged `RowData::Live` row's cells for read visibility given the
+<a href=#111 id=111 data-nosnippet>111</a>    /// partition-tombstone `cover` (`markedForDeleteAt` µs, or `None`). Returns `None`
+<a href=#112 id=112 data-nosnippet>112</a>    /// when the WHOLE row is hidden (partition-shadowed), else the surviving cells
+<a href=#113 id=113 data-nosnippet>113</a>    /// with cell tombstones plus TTL-expired / partition-shadowed data cells dropped.
+<a href=#114 id=114 data-nosnippet>114</a>    </span><span class="kw">fn </span>filter_live(<span class="kw-2">&amp;</span><span class="self">self</span>, cover: <span class="prelude-ty">Option</span>&lt;i64&gt;, cells: Vec&lt;CellData&gt;) -&gt; <span class="prelude-ty">Option</span>&lt;Vec&lt;CellData&gt;&gt; {
+<a href=#115 id=115 data-nosnippet>115</a>        <span class="kw">let </span>now = <span class="self">self</span>.now_secs;
+<a href=#116 id=116 data-nosnippet>116</a>        <span class="kw">let </span><span class="kw-2">mut </span>kept = Vec::with_capacity(cells.len());
+<a href=#117 id=117 data-nosnippet>117</a>        <span class="comment">// Fold over REAL data cells (kept AND dropped) so a partition tombstone that
+<a href=#118 id=118 data-nosnippet>118</a>        // shadows every data cell is recognised at the row level — mirrors the
+<a href=#119 id=119 data-nosnippet>119</a>        // single-gen `agg_max_cell_ts` fold in `row_data.rs`.
+<a href=#120 id=120 data-nosnippet>120</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>max_data_ts: <span class="prelude-ty">Option</span>&lt;i64&gt; = <span class="prelude-val">None</span>;
+<a href=#121 id=121 data-nosnippet>121</a>        <span class="kw">for </span>cell <span class="kw">in </span>cells {
+<a href=#122 id=122 data-nosnippet>122</a>            <span class="comment">// A cell tombstone is never live data (a deleted column is absent).
+<a href=#123 id=123 data-nosnippet>123</a>            </span><span class="kw">if </span><span class="macro">matches!</span>(cell.value, Value::Tombstone(<span class="kw">_</span>)) {
+<a href=#124 id=124 data-nosnippet>124</a>                <span class="kw">continue</span>;
+<a href=#125 id=125 data-nosnippet>125</a>            }
+<a href=#126 id=126 data-nosnippet>126</a>            <span class="comment">// Primary-key (partition + clustering) pseudo-cells are STRUCTURAL: the
+<a href=#127 id=127 data-nosnippet>127</a>            // compaction reader surfaces clustering columns as simple cells and both
+<a href=#128 id=128 data-nosnippet>128</a>            // the single-gen read loop and the merger's `apply_partition_shadowing`
+<a href=#129 id=129 data-nosnippet>129</a>            // leave them untouched (never subjected to the read-time shadow/expiry
+<a href=#130 id=130 data-nosnippet>130</a>            // drop). Keep them verbatim and out of the `max_data_ts` fold, so a row
+<a href=#131 id=131 data-nosnippet>131</a>            // kept alive by a newer DATA cell under a partition tombstone never loses
+<a href=#132 id=132 data-nosnippet>132</a>            // its clustering-key value (a pseudo-cell whose own `ts &lt;= cover` must NOT
+<a href=#133 id=133 data-nosnippet>133</a>            // be stripped) — otherwise the multi-gen path would emit a malformed row
+<a href=#134 id=134 data-nosnippet>134</a>            // diverging from the single-gen path (issue #1849; roborev multi-gen finding).
+<a href=#135 id=135 data-nosnippet>135</a>            </span><span class="kw">if </span><span class="self">self</span>.key_columns.contains(<span class="kw-2">&amp;</span>cell.column) {
+<a href=#136 id=136 data-nosnippet>136</a>                kept.push(cell);
+<a href=#137 id=137 data-nosnippet>137</a>                <span class="kw">continue</span>;
+<a href=#138 id=138 data-nosnippet>138</a>            }
+<a href=#139 id=139 data-nosnippet>139</a>            <span class="kw">let </span>eff_ts = <span class="prelude-val">Some</span>(cell.timestamp);
+<a href=#140 id=140 data-nosnippet>140</a>            <span class="kw">let </span>eff_exp = cell_expiry_secs(<span class="kw-2">&amp;</span>cell);
+<a href=#141 id=141 data-nosnippet>141</a>            <span class="kw">let </span>dropped = PartitionShadow::cell_shadowed_or_expired(cover, now, eff_ts, eff_exp);
+<a href=#142 id=142 data-nosnippet>142</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(t) = eff_ts {
+<a href=#143 id=143 data-nosnippet>143</a>                max_data_ts = <span class="prelude-val">Some</span>(max_data_ts.map_or(t, |m| m.max(t)));
+<a href=#144 id=144 data-nosnippet>144</a>            }
+<a href=#145 id=145 data-nosnippet>145</a>            <span class="kw">if </span>!dropped {
+<a href=#146 id=146 data-nosnippet>146</a>                kept.push(cell);
+<a href=#147 id=147 data-nosnippet>147</a>            }
+<a href=#148 id=148 data-nosnippet>148</a>        }
+<a href=#149 id=149 data-nosnippet>149</a>        <span class="kw">if </span>merged_row_shadowed_by_partition(cover, max_data_ts) {
+<a href=#150 id=150 data-nosnippet>150</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#151 id=151 data-nosnippet>151</a>        }
+<a href=#152 id=152 data-nosnippet>152</a>        <span class="prelude-val">Some</span>(kept)
+<a href=#153 id=153 data-nosnippet>153</a>    }
+<a href=#154 id=154 data-nosnippet>154</a>}
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a><span class="doccomment">/// The read-time expiry instant (epoch seconds) of a merged cell, or `None` when it
+<a href=#157 id=157 data-nosnippet>157</a>/// is not an expiring cell. An expiring cell's `localDeletionTime` is its
+<a href=#158 id=158 data-nosnippet>158</a>/// `localExpirationTime`; it is reinterpreted UNSIGNED so a post-2038 expiry stored
+<a href=#159 id=159 data-nosnippet>159</a>/// as a negative `i32` bit pattern (oa/da `hasUIntDeletionTime`) is not wrapped
+<a href=#160 id=160 data-nosnippet>160</a>/// negative and wrongly treated as long-expired — matching the single-gen unsigned
+<a href=#161 id=161 data-nosnippet>161</a>/// LDT handling in `row_data.rs` (issue #1849 AC4).
+<a href=#162 id=162 data-nosnippet>162</a></span><span class="kw">fn </span>cell_expiry_secs(cell: <span class="kw-2">&amp;</span>CellData) -&gt; <span class="prelude-ty">Option</span>&lt;i64&gt; {
+<a href=#163 id=163 data-nosnippet>163</a>    cell.ttl<span class="question-mark">?</span>;
+<a href=#164 id=164 data-nosnippet>164</a>    cell.local_deletion_time.map(|s| (s <span class="kw">as </span>u32) <span class="kw">as </span>i64)
+<a href=#165 id=165 data-nosnippet>165</a>}
+<a href=#166 id=166 data-nosnippet>166</a>
+<a href=#167 id=167 data-nosnippet>167</a><span class="doccomment">/// The partition-level `markedForDeleteAt` (µs) carried by the synthetic
+<a href=#168 id=168 data-nosnippet>168</a>/// partition-tombstone carrier entry of a merged partition (issue #1072), or `None`
+<a href=#169 id=169 data-nosnippet>169</a>/// when the partition has no tombstone. Used as the read-side partition-shadow cover
+<a href=#170 id=170 data-nosnippet>170</a>/// across the partition's rows (issue #1849).
+<a href=#171 id=171 data-nosnippet>171</a></span><span class="kw">fn </span>partition_cover(rows: <span class="kw-2">&amp;</span>[MergeEntry]) -&gt; <span class="prelude-ty">Option</span>&lt;i64&gt; {
+<a href=#172 id=172 data-nosnippet>172</a>    rows.iter()
+<a href=#173 id=173 data-nosnippet>173</a>        .find_map(|e| e.partition_deletion.map(|(mfda, _ldt)| mfda))
+<a href=#174 id=174 data-nosnippet>174</a>}
+<a href=#175 id=175 data-nosnippet>175</a>
+<a href=#176 id=176 data-nosnippet>176</a><span class="doccomment">/// Convert one reconciled partition's merge rows into the live scan rows the read
+<a href=#177 id=177 data-nosnippet>177</a>/// path emits: drop cell tombstones, drop row tombstones, drop rows left empty.
+<a href=#178 id=178 data-nosnippet>178</a>///
+<a href=#179 id=179 data-nosnippet>179</a>/// The single emission kernel shared by the materializing plain merge and the
+<a href=#180 id=180 data-nosnippet>180</a>/// streaming driver so tombstone filtering can never drift between them (issue
+<a href=#181 id=181 data-nosnippet>181</a>/// #1334: emit the interned-name `ScanRow` carrier the read path consumes).
+<a href=#182 id=182 data-nosnippet>182</a></span><span class="kw">fn </span>partition_live_rows(
+<a href=#183 id=183 data-nosnippet>183</a>    row_key: <span class="kw-2">&amp;</span>RowKey,
+<a href=#184 id=184 data-nosnippet>184</a>    rows: Vec&lt;MergeEntry&gt;,
+<a href=#185 id=185 data-nosnippet>185</a>    shadow: <span class="kw-2">&amp;</span>ReadShadow,
+<a href=#186 id=186 data-nosnippet>186</a>) -&gt; Vec&lt;(RowKey, ScanRow)&gt; {
+<a href=#187 id=187 data-nosnippet>187</a>    <span class="comment">// Issue #1849: partition-tombstone cover for this partition's rows, applied as a
+<a href=#188 id=188 data-nosnippet>188</a>    // read-side shadow floor alongside per-cell read-time TTL expiry (post-merge).
+<a href=#189 id=189 data-nosnippet>189</a>    </span><span class="kw">let </span>cover = partition_cover(<span class="kw-2">&amp;</span>rows);
+<a href=#190 id=190 data-nosnippet>190</a>    <span class="kw">let </span><span class="kw-2">mut </span>out = Vec::new();
+<a href=#191 id=191 data-nosnippet>191</a>    <span class="kw">for </span>entry <span class="kw">in </span>rows {
+<a href=#192 id=192 data-nosnippet>192</a>        <span class="kw">match </span>entry.row_data {
+<a href=#193 id=193 data-nosnippet>193</a>            RowData::Live { cells } =&gt; {
+<a href=#194 id=194 data-nosnippet>194</a>                <span class="comment">// Read-time visibility: drop cell tombstones + TTL-expired /
+<a href=#195 id=195 data-nosnippet>195</a>                // partition-shadowed data cells; `None` hides the whole row.
+<a href=#196 id=196 data-nosnippet>196</a>                </span><span class="kw">let </span><span class="prelude-val">Some</span>(surviving) = shadow.filter_live(cover, cells) <span class="kw">else </span>{
+<a href=#197 id=197 data-nosnippet>197</a>                    <span class="kw">continue</span>;
+<a href=#198 id=198 data-nosnippet>198</a>                };
+<a href=#199 id=199 data-nosnippet>199</a>                <span class="kw">let </span>row_cells: RowCells = surviving
+<a href=#200 id=200 data-nosnippet>200</a>                    .into_iter()
+<a href=#201 id=201 data-nosnippet>201</a>                    .map(|c| (Arc::from(c.column.as_str()), c.value))
+<a href=#202 id=202 data-nosnippet>202</a>                    .collect();
+<a href=#203 id=203 data-nosnippet>203</a>                <span class="kw">if </span>!row_cells.is_empty() {
+<a href=#204 id=204 data-nosnippet>204</a>                    out.push((row_key.clone(), ScanRow::Row(row_cells)));
+<a href=#205 id=205 data-nosnippet>205</a>                }
+<a href=#206 id=206 data-nosnippet>206</a>            }
+<a href=#207 id=207 data-nosnippet>207</a>            <span class="comment">// Row tombstone: the row is deleted across all generations — suppress.
+<a href=#208 id=208 data-nosnippet>208</a>            </span>RowData::Tombstone { .. } =&gt; {}
+<a href=#209 id=209 data-nosnippet>209</a>        }
+<a href=#210 id=210 data-nosnippet>210</a>    }
+<a href=#211 id=211 data-nosnippet>211</a>    out
+<a href=#212 id=212 data-nosnippet>212</a>}
+<a href=#213 id=213 data-nosnippet>213</a>
+<a href=#214 id=214 data-nosnippet>214</a><span class="doccomment">/// Reconcile multiple SSTable generations into the single authoritative live-row
+<a href=#215 id=215 data-nosnippet>215</a>/// set, returning them materialized in Cassandra token order (issue #883).
+<a href=#216 id=216 data-nosnippet>216</a>///
+<a href=#217 id=217 data-nosnippet>217</a>/// This drives the same [`KWayMerger`](crate::storage::write_engine::KWayMerger)
+<a href=#218 id=218 data-nosnippet>218</a>/// the compaction path uses, so reconciliation is byte-for-byte the
+<a href=#219 id=219 data-nosnippet>219</a>/// last-write-wins + tombstone-shadowing logic (`merge_partition_rows`): per-cell
+<a href=#220 id=220 data-nosnippet>220</a>/// LWW by write timestamp, row/cell tombstones shadow older cells, and
+<a href=#221 id=221 data-nosnippet>221</a>/// fully-deleted rows are dropped. The merger manages its own reader
+<a href=#222 id=222 data-nosnippet>222</a>/// threads/runtimes internally, so it runs on a blocking task.
+<a href=#223 id=223 data-nosnippet>223</a>///
+<a href=#224 id=224 data-nosnippet>224</a>/// `start_key`/`end_key` bound the merged output to the same inclusive
+<a href=#225 id=225 data-nosnippet>225</a>/// `[start_key, end_key]` key range the per-reader
+<a href=#226 id=226 data-nosnippet>226</a>/// [`scan`](reader::SSTableReader::scan) applies (skip `key &lt; start`, skip
+<a href=#227 id=227 data-nosnippet>227</a>/// `key &gt; end`, using `RowKey`'s `Ord`) — Issue #957. The range filter runs
+<a href=#228 id=228 data-nosnippet>228</a>/// before `limit`, matching the per-reader scan order (range then limit).
+<a href=#229 id=229 data-nosnippet>229</a>///
+<a href=#230 id=230 data-nosnippet>230</a>/// `target_key` restricts the output to a SINGLE partition (the point-read path,
+<a href=#231 id=231 data-nosnippet>231</a>/// issue #1579): keep only the partition whose raw key bytes equal `target_key`
+<a href=#232 id=232 data-nosnippet>232</a>/// and STOP as soon as it is found. Partition keys are unique in the merger's
+<a href=#233 id=233 data-nosnippet>233</a>/// output, so once the target is seen nothing later can match — this avoids
+<a href=#234 id=234 data-nosnippet>234</a>/// converting every other partition to `ScanRow` and decoding past the target,
+<a href=#235 id=235 data-nosnippet>235</a>/// while remaining byte-identical to the caller's former
+<a href=#236 id=236 data-nosnippet>236</a>/// `retain(|r| r.key == partition_key)`. `target_key` and the range bounds are
+<a href=#237 id=237 data-nosnippet>237</a>/// not combined by any current caller (point reads pass `None`/`None` bounds).
+<a href=#238 id=238 data-nosnippet>238</a>///
+<a href=#239 id=239 data-nosnippet>239</a>/// With `None` target and `None`/`None` bounds the output is byte-for-byte the
+<a href=#240 id=240 data-nosnippet>240</a>/// full reconciled set.
+<a href=#241 id=241 data-nosnippet>241</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>merge_generations_for_read(
+<a href=#242 id=242 data-nosnippet>242</a>    reader_list: <span class="kw-2">&amp;</span>[Arc&lt;reader::SSTableReader&gt;],
+<a href=#243 id=243 data-nosnippet>243</a>    schema: <span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::TableSchema,
+<a href=#244 id=244 data-nosnippet>244</a>    start_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#245 id=245 data-nosnippet>245</a>    end_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#246 id=246 data-nosnippet>246</a>    limit: <span class="prelude-ty">Option</span>&lt;usize&gt;,
+<a href=#247 id=247 data-nosnippet>247</a>    target_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#248 id=248 data-nosnippet>248</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow)&gt;&gt; {
+<a href=#249 id=249 data-nosnippet>249</a>    <span class="comment">// Issue #2063: one operation-level scan-admission permit; rationale + cancellation
+<a href=#250 id=250 data-nosnippet>250</a>    // shape in `scan_admission.rs` `# Scope`. Moved into the closure below.
+<a href=#251 id=251 data-nosnippet>251</a>    </span><span class="kw">let </span>admission = reader::scan_stream_windowed::scan_admission::admit().<span class="kw">await</span>;
+<a href=#252 id=252 data-nosnippet>252</a>
+<a href=#253 id=253 data-nosnippet>253</a>    <span class="comment">// Own the bounds/target so the merge body can use them without borrowing
+<a href=#254 id=254 data-nosnippet>254</a>    // across the await; cheap clone of the key bytes.
+<a href=#255 id=255 data-nosnippet>255</a>    </span><span class="kw">let </span>start_key = start_key.cloned();
+<a href=#256 id=256 data-nosnippet>256</a>    <span class="kw">let </span>end_key = end_key.cloned();
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="kw">let </span>target_key = target_key.map(|k| k.as_bytes().to_vec());
+<a href=#258 id=258 data-nosnippet>258</a>
+<a href=#259 id=259 data-nosnippet>259</a>    <span class="kw">let </span>paths = ordered_generation_paths(reader_list);
+<a href=#260 id=260 data-nosnippet>260</a>    <span class="kw">let </span>schema = schema.clone();
+<a href=#261 id=261 data-nosnippet>261</a>
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="kw">let </span><span class="kw-2">mut </span>merged = tokio::task::spawn_blocking(<span class="kw">move </span>|| -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow)&gt;&gt; {
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="kw">let </span>_admission = admission; <span class="comment">// #2063: hold across the detached blocking work.
+<a href=#264 id=264 data-nosnippet>264</a>                                    // Issue #1849: capture the read-time TTL clock ONCE per scan.
+<a href=#265 id=265 data-nosnippet>265</a>        </span><span class="kw">let </span>shadow = ReadShadow::new(<span class="kw-2">&amp;</span>schema, now_epoch_secs());
+<a href=#266 id=266 data-nosnippet>266</a>        <span class="kw">let </span><span class="kw-2">mut </span>merger = KWayMerger::new(paths, <span class="kw-2">&amp;</span>schema)<span class="question-mark">?</span>;
+<a href=#267 id=267 data-nosnippet>267</a>        <span class="kw">let </span><span class="kw-2">mut </span>out = Vec::new();
+<a href=#268 id=268 data-nosnippet>268</a>        <span class="kw">while let </span>MergeStep::Partition { key, rows } = merger.step()<span class="question-mark">? </span>{
+<a href=#269 id=269 data-nosnippet>269</a>            <span class="kw">let </span>row_key = RowKey::new(key.key.clone());
+<a href=#270 id=270 data-nosnippet>270</a>
+<a href=#271 id=271 data-nosnippet>271</a>            <span class="comment">// Partition-targeted point read (#1579): keep ONLY the target and stop.
+<a href=#272 id=272 data-nosnippet>272</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>target) = target_key {
+<a href=#273 id=273 data-nosnippet>273</a>                <span class="kw">if </span>row_key.as_bytes() != target.as_slice() {
+<a href=#274 id=274 data-nosnippet>274</a>                    <span class="kw">continue</span>;
+<a href=#275 id=275 data-nosnippet>275</a>                }
+<a href=#276 id=276 data-nosnippet>276</a>                out.extend(partition_live_rows(<span class="kw-2">&amp;</span>row_key, rows, <span class="kw-2">&amp;</span>shadow));
+<a href=#277 id=277 data-nosnippet>277</a>                <span class="kw">break</span>;
+<a href=#278 id=278 data-nosnippet>278</a>            }
+<a href=#279 id=279 data-nosnippet>279</a>
+<a href=#280 id=280 data-nosnippet>280</a>            <span class="comment">// Full / range scan: inclusive [start, end] on `RowKey` order (#957).
+<a href=#281 id=281 data-nosnippet>281</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>start) = start_key {
+<a href=#282 id=282 data-nosnippet>282</a>                <span class="kw">if </span><span class="kw-2">&amp;</span>row_key &lt; start {
+<a href=#283 id=283 data-nosnippet>283</a>                    <span class="kw">continue</span>;
+<a href=#284 id=284 data-nosnippet>284</a>                }
+<a href=#285 id=285 data-nosnippet>285</a>            }
+<a href=#286 id=286 data-nosnippet>286</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>end) = end_key {
+<a href=#287 id=287 data-nosnippet>287</a>                <span class="kw">if </span><span class="kw-2">&amp;</span>row_key &gt; end {
+<a href=#288 id=288 data-nosnippet>288</a>                    <span class="kw">continue</span>;
+<a href=#289 id=289 data-nosnippet>289</a>                }
+<a href=#290 id=290 data-nosnippet>290</a>            }
+<a href=#291 id=291 data-nosnippet>291</a>            out.extend(partition_live_rows(<span class="kw-2">&amp;</span>row_key, rows, <span class="kw-2">&amp;</span>shadow));
+<a href=#292 id=292 data-nosnippet>292</a>        }
+<a href=#293 id=293 data-nosnippet>293</a>        <span class="prelude-val">Ok</span>(out)
+<a href=#294 id=294 data-nosnippet>294</a>    })
+<a href=#295 id=295 data-nosnippet>295</a>    .<span class="kw">await
+<a href=#296 id=296 data-nosnippet>296</a>    </span>.map_err(|e| <span class="kw">crate</span>::Error::Storage(<span class="macro">format!</span>(<span class="string">"cross-generation read merge task: {e}"</span>)))<span class="question-mark">??</span>;
+<a href=#297 id=297 data-nosnippet>297</a>
+<a href=#298 id=298 data-nosnippet>298</a>    <span class="comment">// Match the plain-scan contract: the merger already emits partitions in
+<a href=#299 id=299 data-nosnippet>299</a>    // Cassandra token order with clustering rows contiguous within a partition.
+<a href=#300 id=300 data-nosnippet>300</a>    // Preserve that with a stable TOKEN-order sort (issue #1580), then apply
+<a href=#301 id=301 data-nosnippet>301</a>    // LIMIT. The sort is a no-op ordering-wise when the input is already
+<a href=#302 id=302 data-nosnippet>302</a>    // token-ordered; it only guards against a stray divergence.
+<a href=#303 id=303 data-nosnippet>303</a>    </span>scan_merge::sort_by_token_order(<span class="kw-2">&amp;mut </span>merged, limit, |(k, <span class="kw">_</span>)| k);
+<a href=#304 id=304 data-nosnippet>304</a>    <span class="prelude-val">Ok</span>(merged)
+<a href=#305 id=305 data-nosnippet>305</a>}
+<a href=#306 id=306 data-nosnippet>306</a>
+<a href=#307 id=307 data-nosnippet>307</a><span class="doccomment">/// Partition-SEEKING sibling of [`merge_generations_for_read`] for the
+<a href=#308 id=308 data-nosnippet>308</a>/// multi-candidate `WHERE pk = ?` point read (issue #2096).
+<a href=#309 id=309 data-nosnippet>309</a>///
+<a href=#310 id=310 data-nosnippet>310</a>/// Where [`merge_generations_for_read`] with a `target_key` still builds the
+<a href=#311 id=311 data-nosnippet>311</a>/// FULL-SCAN `KWayMerger::new` and sequentially DECODES every partition with token
+<a href=#312 id=312 data-nosnippet>312</a>/// &lt;= the target before breaking (O(partitions-below-target)), this reuses the
+<a href=#313 id=313 data-nosnippet>313</a>/// Flight point path's partition-SEEKING merger
+<a href=#314 id=314 data-nosnippet>314</a>/// ([`build_single_partition_merger_from_readers`](crate::storage::write_engine::build_single_partition_merger_from_readers),
+<a href=#315 id=315 data-nosnippet>315</a>/// #2207/#2346): each candidate seeks straight to the target partition's `Data.db`
+<a href=#316 id=316 data-nosnippet>316</a>/// offset (BTI trie / `Index.db`), or fail-safe filter-scans one SSTable when its
+<a href=#317 id=317 data-nosnippet>317</a>/// index is unavailable, then reconciles through the SAME `KWayMerger`
+<a href=#318 id=318 data-nosnippet>318</a>/// (`from_row_iterators`, run_index = position). The read-visibility kernel is
+<a href=#319 id=319 data-nosnippet>319</a>/// IDENTICAL to the materializing helper — the same [`ReadShadow`] (#1849) captured
+<a href=#320 id=320 data-nosnippet>320</a>/// ONCE, the same [`partition_live_rows`] emission + token-order guard, and
+<a href=#321 id=321 data-nosnippet>321</a>/// candidates ordered NEWEST→OLDEST like [`ordered_generation_paths`] — so the
+<a href=#322 id=322 data-nosnippet>322</a>/// output is byte-for-byte `merge_generations_for_read(.., Some(target))`, only
+<a href=#323 id=323 data-nosnippet>323</a>/// over O(target) work. Blocking builder + `step()` run on `spawn_blocking`.
+<a href=#324 id=324 data-nosnippet>324</a></span><span class="attr">#[cfg(all(feature = <span class="string">"write-support"</span>, not(feature = <span class="string">"tombstones"</span>)))]
+<a href=#325 id=325 data-nosnippet>325</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>seek_merge_generations_for_read(
+<a href=#326 id=326 data-nosnippet>326</a>    candidates: <span class="kw-2">&amp;</span>[Arc&lt;reader::SSTableReader&gt;],
+<a href=#327 id=327 data-nosnippet>327</a>    schema: <span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::TableSchema,
+<a href=#328 id=328 data-nosnippet>328</a>    target_key: <span class="kw-2">&amp;</span>RowKey,
+<a href=#329 id=329 data-nosnippet>329</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow)&gt;&gt; {
+<a href=#330 id=330 data-nosnippet>330</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::scan_cancel::ScanCancel;
+<a href=#331 id=331 data-nosnippet>331</a>    <span class="kw">use </span><span class="kw">crate</span>::storage::write_engine::merge::build_single_partition_merger_from_readers;
+<a href=#332 id=332 data-nosnippet>332</a>
+<a href=#333 id=333 data-nosnippet>333</a>    <span class="comment">// Issue #2063: one operation-level scan-admission permit; ONLY call site is the
+<a href=#334 id=334 data-nosnippet>334</a>    // top-level `scan_partition_clustering`, never nested. Rationale + cancellation
+<a href=#335 id=335 data-nosnippet>335</a>    // shape in `scan_admission.rs` `# Scope`.
+<a href=#336 id=336 data-nosnippet>336</a>    </span><span class="kw">let </span>admission = reader::scan_stream_windowed::scan_admission::admit().<span class="kw">await</span>;
+<a href=#337 id=337 data-nosnippet>337</a>
+<a href=#338 id=338 data-nosnippet>338</a>    <span class="comment">// NEWEST→OLDEST like `ordered_generation_paths`, so the seeking merger's
+<a href=#339 id=339 data-nosnippet>339</a>    // run_index (= position) equals the full-scan merger's LWW tie-break rank.
+<a href=#340 id=340 data-nosnippet>340</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>ordered: Vec&lt;Arc&lt;reader::SSTableReader&gt;&gt; = candidates.to_vec();
+<a href=#341 id=341 data-nosnippet>341</a>    ordered.sort_by(|a, b| b.generation.cmp(<span class="kw-2">&amp;</span>a.generation));
+<a href=#342 id=342 data-nosnippet>342</a>
+<a href=#343 id=343 data-nosnippet>343</a>    <span class="kw">let </span>schema = schema.clone();
+<a href=#344 id=344 data-nosnippet>344</a>    <span class="kw">let </span>target_bytes = target_key.as_bytes().to_vec();
+<a href=#345 id=345 data-nosnippet>345</a>
+<a href=#346 id=346 data-nosnippet>346</a>    <span class="kw">let </span><span class="kw-2">mut </span>merged = tokio::task::spawn_blocking(<span class="kw">move </span>|| -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow)&gt;&gt; {
+<a href=#347 id=347 data-nosnippet>347</a>        <span class="kw">let </span>_admission = admission; <span class="comment">// #2063: hold across the detached blocking work.
+<a href=#348 id=348 data-nosnippet>348</a>                                    // Issue #1849: same read-visibility kernel `merge_generations_for_read`
+<a href=#349 id=349 data-nosnippet>349</a>                                    // applies (read-time TTL clock captured ONCE), REQUIRED for byte-identity.
+<a href=#350 id=350 data-nosnippet>350</a>        </span><span class="kw">let </span>shadow = ReadShadow::new(<span class="kw-2">&amp;</span>schema, now_epoch_secs());
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="kw">let </span>keys = [target_bytes.clone()];
+<a href=#352 id=352 data-nosnippet>352</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(<span class="kw-2">mut </span>merger) =
+<a href=#353 id=353 data-nosnippet>353</a>            build_single_partition_merger_from_readers(ordered, <span class="kw-2">&amp;</span>keys, <span class="kw-2">&amp;</span>schema, ScanCancel::new())<span class="question-mark">?
+<a href=#354 id=354 data-nosnippet>354</a>        </span><span class="kw">else </span>{
+<a href=#355 id=355 data-nosnippet>355</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(Vec::new()); <span class="comment">// no candidate holds the target
+<a href=#356 id=356 data-nosnippet>356</a>        </span>};
+<a href=#357 id=357 data-nosnippet>357</a>        <span class="kw">let </span><span class="kw-2">mut </span>out = Vec::new();
+<a href=#358 id=358 data-nosnippet>358</a>        <span class="kw">while let </span>MergeStep::Partition { key, rows } = merger.step()<span class="question-mark">? </span>{
+<a href=#359 id=359 data-nosnippet>359</a>            <span class="kw">let </span>row_key = RowKey::new(key.key.clone());
+<a href=#360 id=360 data-nosnippet>360</a>            <span class="comment">// A fail-safe filter-scan run could surface a prefix-collision key; keep
+<a href=#361 id=361 data-nosnippet>361</a>            // only the exact target and stop once seen (partition keys are unique).
+<a href=#362 id=362 data-nosnippet>362</a>            </span><span class="kw">if </span>row_key.as_bytes() != target_bytes.as_slice() {
+<a href=#363 id=363 data-nosnippet>363</a>                <span class="kw">continue</span>;
+<a href=#364 id=364 data-nosnippet>364</a>            }
+<a href=#365 id=365 data-nosnippet>365</a>            out.extend(partition_live_rows(<span class="kw-2">&amp;</span>row_key, rows, <span class="kw-2">&amp;</span>shadow));
+<a href=#366 id=366 data-nosnippet>366</a>            <span class="kw">break</span>;
+<a href=#367 id=367 data-nosnippet>367</a>        }
+<a href=#368 id=368 data-nosnippet>368</a>        <span class="prelude-val">Ok</span>(out)
+<a href=#369 id=369 data-nosnippet>369</a>    })
+<a href=#370 id=370 data-nosnippet>370</a>    .<span class="kw">await
+<a href=#371 id=371 data-nosnippet>371</a>    </span>.map_err(|e| {
+<a href=#372 id=372 data-nosnippet>372</a>        <span class="kw">crate</span>::Error::Storage(<span class="macro">format!</span>(<span class="string">"seeking cross-generation read merge task: {e}"</span>))
+<a href=#373 id=373 data-nosnippet>373</a>    })<span class="question-mark">??</span>;
+<a href=#374 id=374 data-nosnippet>374</a>
+<a href=#375 id=375 data-nosnippet>375</a>    <span class="comment">// Parity guard with the materializing helper: stable TOKEN-order sort (no-op for
+<a href=#376 id=376 data-nosnippet>376</a>    // a single partition, kept for byte-parity, issue #1580).
+<a href=#377 id=377 data-nosnippet>377</a>    </span>scan_merge::sort_by_token_order(<span class="kw-2">&amp;mut </span>merged, <span class="prelude-val">None</span>, |(k, <span class="kw">_</span>)| k);
+<a href=#378 id=378 data-nosnippet>378</a>    <span class="prelude-val">Ok</span>(merged)
+<a href=#379 id=379 data-nosnippet>379</a>}
+<a href=#380 id=380 data-nosnippet>380</a>
+<a href=#381 id=381 data-nosnippet>381</a><span class="doccomment">/// Metadata-aware sibling of [`merge_generations_for_read`] for the
+<a href=#382 id=382 data-nosnippet>382</a>/// `WRITETIME(col)` / `TTL(col)` projection path (Issue #885).
+<a href=#383 id=383 data-nosnippet>383</a>///
+<a href=#384 id=384 data-nosnippet>384</a>/// Reconciles multiple SSTable generations with the same
+<a href=#385 id=385 data-nosnippet>385</a>/// [`KWayMerger`](crate::storage::write_engine::KWayMerger) (per-cell LWW +
+<a href=#386 id=386 data-nosnippet>386</a>/// row/cell tombstone shadowing) and additionally surfaces the **winning** cell's
+<a href=#387 id=387 data-nosnippet>387</a>/// per-cell write metadata:
+<a href=#388 id=388 data-nosnippet>388</a>///
+<a href=#389 id=389 data-nosnippet>389</a>/// - `write_timestamp_micros` comes straight from the winning `CellData`
+<a href=#390 id=390 data-nosnippet>390</a>///   (`reconcile_cluster` keeps each surviving cell's own timestamp), so it is the
+<a href=#391 id=391 data-nosnippet>391</a>///   WRITETIME of the cell that actually won cross-generation LWW.
+<a href=#392 id=392 data-nosnippet>392</a>/// - `expiration` (TTL) is recovered best-effort from the per-reader
+<a href=#393 id=393 data-nosnippet>393</a>///   `scan_with_cell_metadata` outputs: for each surviving `(key, column)` we take
+<a href=#394 id=394 data-nosnippet>394</a>///   the newest reader-surfaced metadata and attach its expiration only when its
+<a href=#395 id=395 data-nosnippet>395</a>///   timestamp matches the merge winner. Absent/mismatched ⇒ `None`.
+<a href=#396 id=396 data-nosnippet>396</a>///
+<a href=#397 id=397 data-nosnippet>397</a>/// `start_key`/`end_key`/`target_key`/`limit` behave exactly as in
+<a href=#398 id=398 data-nosnippet>398</a>/// [`merge_generations_for_read`], keeping this definitionally in lockstep with
+<a href=#399 id=399 data-nosnippet>399</a>/// the plain helper. When `target_key` is `Some`, the best-effort TTL scan is also
+<a href=#400 id=400 data-nosnippet>400</a>/// bounded to that single partition (issue #1579, point-read path).
+<a href=#401 id=401 data-nosnippet>401</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>merge_generations_for_read_with_metadata(
+<a href=#402 id=402 data-nosnippet>402</a>    reader_list: <span class="kw-2">&amp;</span>[Arc&lt;reader::SSTableReader&gt;],
+<a href=#403 id=403 data-nosnippet>403</a>    schema: <span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::TableSchema,
+<a href=#404 id=404 data-nosnippet>404</a>    start_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#405 id=405 data-nosnippet>405</a>    end_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#406 id=406 data-nosnippet>406</a>    limit: <span class="prelude-ty">Option</span>&lt;usize&gt;,
+<a href=#407 id=407 data-nosnippet>407</a>    target_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#408 id=408 data-nosnippet>408</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;(RowKey, ScanRow, HashMap&lt;String, CellWriteMetadata&gt;)&gt;&gt; {
+<a href=#409 id=409 data-nosnippet>409</a>    <span class="comment">// Issue #2063: one operation-level scan-admission permit. Held as an OUTER future
+<a href=#410 id=410 data-nosnippet>410</a>    // guard across the async per-reader `scan_with_cell_metadata` loop (cancellation
+<a href=#411 id=411 data-nosnippet>411</a>    // there is clean — no detached blocking work exists yet, so early release is
+<a href=#412 id=412 data-nosnippet>412</a>    // harmless), THEN MOVED into the `spawn_blocking` merge closure below so the permit
+<a href=#413 id=413 data-nosnippet>413</a>    // is held until the detached blocking work TERMINATES. This matches the plain/seek
+<a href=#414 id=414 data-nosnippet>414</a>    // helpers: no phase both runs detached blocking work AND has released the permit.
+<a href=#415 id=415 data-nosnippet>415</a>    </span><span class="kw">let </span>admission = reader::scan_stream_windowed::scan_admission::admit().<span class="kw">await</span>;
+<a href=#416 id=416 data-nosnippet>416</a>
+<a href=#417 id=417 data-nosnippet>417</a>    <span class="comment">// Own the bounds so the merge body can use them without borrowing across the
+<a href=#418 id=418 data-nosnippet>418</a>    // await; cheap clone of the key bytes. Mirrors the plain helper.
+<a href=#419 id=419 data-nosnippet>419</a>    </span><span class="kw">let </span>owned_start = start_key.cloned();
+<a href=#420 id=420 data-nosnippet>420</a>    <span class="kw">let </span>owned_end = end_key.cloned();
+<a href=#421 id=421 data-nosnippet>421</a>    <span class="kw">let </span>target_bytes = target_key.map(|k| k.as_bytes().to_vec());
+<a href=#422 id=422 data-nosnippet>422</a>
+<a href=#423 id=423 data-nosnippet>423</a>    <span class="comment">// Best-effort TTL source: gather each reader's own per-cell metadata and keep,
+<a href=#424 id=424 data-nosnippet>424</a>    // per (row-key bytes, column), the entry with the newest write timestamp. The
+<a href=#425 id=425 data-nosnippet>425</a>    // merger surfaces accurate WRITETIME but no TTL, so this recovers expiration
+<a href=#426 id=426 data-nosnippet>426</a>    // for the winning cell when the reader format carries it. For a point read the
+<a href=#427 id=427 data-nosnippet>427</a>    // scan is bounded to the target partition (#1579); otherwise to the read range.
+<a href=#428 id=428 data-nosnippet>428</a>    </span><span class="kw">let </span>table_id = CqlTableId::from(<span class="macro">format!</span>(<span class="string">"{}.{}"</span>, schema.keyspace, schema.table).as_str());
+<a href=#429 id=429 data-nosnippet>429</a>    <span class="kw">let </span><span class="kw-2">mut </span>ttl_lookup: HashMap&lt;(Vec&lt;u8&gt;, String), CellWriteMetadata&gt; = HashMap::new();
+<a href=#430 id=430 data-nosnippet>430</a>    <span class="kw">for </span>reader <span class="kw">in </span>reader_list {
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="kw">let </span>(ttl_start, ttl_end): (<span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;, <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;) = <span class="kw">match </span>target_key {
+<a href=#432 id=432 data-nosnippet>432</a>            <span class="prelude-val">Some</span>(t) =&gt; (<span class="prelude-val">Some</span>(t), <span class="prelude-val">Some</span>(t)),
+<a href=#433 id=433 data-nosnippet>433</a>            <span class="prelude-val">None </span>=&gt; (owned_start.as_ref(), owned_end.as_ref()),
+<a href=#434 id=434 data-nosnippet>434</a>        };
+<a href=#435 id=435 data-nosnippet>435</a>        <span class="kw">let </span>per_reader = reader
+<a href=#436 id=436 data-nosnippet>436</a>            .scan_with_cell_metadata(<span class="kw-2">&amp;</span>table_id, ttl_start, ttl_end, <span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(schema))
+<a href=#437 id=437 data-nosnippet>437</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#438 id=438 data-nosnippet>438</a>        <span class="kw">for </span>(row_key, _value, meta) <span class="kw">in </span>per_reader {
+<a href=#439 id=439 data-nosnippet>439</a>            <span class="kw">for </span>(column, cell_meta) <span class="kw">in </span>meta {
+<a href=#440 id=440 data-nosnippet>440</a>                ttl_lookup
+<a href=#441 id=441 data-nosnippet>441</a>                    .entry((row_key.as_bytes().to_vec(), column))
+<a href=#442 id=442 data-nosnippet>442</a>                    .and_modify(|existing| {
+<a href=#443 id=443 data-nosnippet>443</a>                        <span class="kw">if </span>cell_meta.write_timestamp_micros &gt; existing.write_timestamp_micros {
+<a href=#444 id=444 data-nosnippet>444</a>                            <span class="kw-2">*</span>existing = cell_meta.clone();
+<a href=#445 id=445 data-nosnippet>445</a>                        }
+<a href=#446 id=446 data-nosnippet>446</a>                    })
+<a href=#447 id=447 data-nosnippet>447</a>                    .or_insert(cell_meta);
+<a href=#448 id=448 data-nosnippet>448</a>            }
+<a href=#449 id=449 data-nosnippet>449</a>        }
+<a href=#450 id=450 data-nosnippet>450</a>    }
+<a href=#451 id=451 data-nosnippet>451</a>
+<a href=#452 id=452 data-nosnippet>452</a>    <span class="kw">let </span>paths = ordered_generation_paths(reader_list);
+<a href=#453 id=453 data-nosnippet>453</a>    <span class="kw">let </span>merge_schema = schema.clone();
+<a href=#454 id=454 data-nosnippet>454</a>    <span class="kw">let </span>start_key = owned_start;
+<a href=#455 id=455 data-nosnippet>455</a>    <span class="kw">let </span>end_key = owned_end;
+<a href=#456 id=456 data-nosnippet>456</a>    <span class="kw">let </span>target_for_merge = target_bytes;
+<a href=#457 id=457 data-nosnippet>457</a>
+<a href=#458 id=458 data-nosnippet>458</a>    <span class="kw">let </span>merged_rows = tokio::task::spawn_blocking(<span class="kw">move </span>|| -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;MergedMetaRow&gt;&gt; {
+<a href=#459 id=459 data-nosnippet>459</a>        <span class="kw">let </span>_admission = admission; <span class="comment">// #2063: hold across the detached blocking work.
+<a href=#460 id=460 data-nosnippet>460</a>                                    // Issue #1849: capture the read-time TTL clock ONCE per scan.
+<a href=#461 id=461 data-nosnippet>461</a>        </span><span class="kw">let </span>shadow = ReadShadow::new(<span class="kw-2">&amp;</span>merge_schema, now_epoch_secs());
+<a href=#462 id=462 data-nosnippet>462</a>        <span class="kw">let </span><span class="kw-2">mut </span>merger = KWayMerger::new(paths, <span class="kw-2">&amp;</span>merge_schema)<span class="question-mark">?</span>;
+<a href=#463 id=463 data-nosnippet>463</a>        <span class="kw">let </span><span class="kw-2">mut </span>out = Vec::new();
+<a href=#464 id=464 data-nosnippet>464</a>        <span class="kw">while let </span>MergeStep::Partition { key, rows } = merger.step()<span class="question-mark">? </span>{
+<a href=#465 id=465 data-nosnippet>465</a>            <span class="kw">let </span>row_key = RowKey::new(key.key.clone());
+<a href=#466 id=466 data-nosnippet>466</a>
+<a href=#467 id=467 data-nosnippet>467</a>            <span class="comment">// Partition-targeted point read (#1579): keep ONLY the target and stop.
+<a href=#468 id=468 data-nosnippet>468</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>target) = target_for_merge {
+<a href=#469 id=469 data-nosnippet>469</a>                <span class="kw">if </span>row_key.as_bytes() != target.as_slice() {
+<a href=#470 id=470 data-nosnippet>470</a>                    <span class="kw">continue</span>;
+<a href=#471 id=471 data-nosnippet>471</a>                }
+<a href=#472 id=472 data-nosnippet>472</a>                push_metadata_rows(<span class="kw-2">&amp;</span>key.key, rows, <span class="kw-2">&amp;mut </span>out, <span class="kw-2">&amp;</span>shadow);
+<a href=#473 id=473 data-nosnippet>473</a>                <span class="kw">break</span>;
+<a href=#474 id=474 data-nosnippet>474</a>            }
+<a href=#475 id=475 data-nosnippet>475</a>
+<a href=#476 id=476 data-nosnippet>476</a>            <span class="comment">// Full / range scan: inclusive [start, end] on `RowKey` order (#957).
+<a href=#477 id=477 data-nosnippet>477</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>start) = start_key {
+<a href=#478 id=478 data-nosnippet>478</a>                <span class="kw">if </span><span class="kw-2">&amp;</span>row_key &lt; start {
+<a href=#479 id=479 data-nosnippet>479</a>                    <span class="kw">continue</span>;
+<a href=#480 id=480 data-nosnippet>480</a>                }
+<a href=#481 id=481 data-nosnippet>481</a>            }
+<a href=#482 id=482 data-nosnippet>482</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>end) = end_key {
+<a href=#483 id=483 data-nosnippet>483</a>                <span class="kw">if </span><span class="kw-2">&amp;</span>row_key &gt; end {
+<a href=#484 id=484 data-nosnippet>484</a>                    <span class="kw">continue</span>;
+<a href=#485 id=485 data-nosnippet>485</a>                }
+<a href=#486 id=486 data-nosnippet>486</a>            }
+<a href=#487 id=487 data-nosnippet>487</a>            push_metadata_rows(<span class="kw-2">&amp;</span>key.key, rows, <span class="kw-2">&amp;mut </span>out, <span class="kw-2">&amp;</span>shadow);
+<a href=#488 id=488 data-nosnippet>488</a>        }
+<a href=#489 id=489 data-nosnippet>489</a>        <span class="prelude-val">Ok</span>(out)
+<a href=#490 id=490 data-nosnippet>490</a>    })
+<a href=#491 id=491 data-nosnippet>491</a>    .<span class="kw">await
+<a href=#492 id=492 data-nosnippet>492</a>    </span>.map_err(|e| <span class="kw">crate</span>::Error::Storage(<span class="macro">format!</span>(<span class="string">"cross-generation metadata merge task: {e}"</span>)))<span class="question-mark">??</span>;
+<a href=#493 id=493 data-nosnippet>493</a>
+<a href=#494 id=494 data-nosnippet>494</a>    <span class="comment">// Attach per-cell metadata: WRITETIME from the merge winner, TTL recovered from
+<a href=#495 id=495 data-nosnippet>495</a>    // the reader lookup only when its timestamp matches the winner.
+<a href=#496 id=496 data-nosnippet>496</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>results: Vec&lt;(RowKey, ScanRow, HashMap&lt;String, CellWriteMetadata&gt;)&gt; =
+<a href=#497 id=497 data-nosnippet>497</a>        Vec::with_capacity(merged_rows.len());
+<a href=#498 id=498 data-nosnippet>498</a>    <span class="kw">for </span>(key_bytes, value, timestamps) <span class="kw">in </span>merged_rows {
+<a href=#499 id=499 data-nosnippet>499</a>        <span class="kw">let </span><span class="kw-2">mut </span>meta_map: HashMap&lt;String, CellWriteMetadata&gt; =
+<a href=#500 id=500 data-nosnippet>500</a>            HashMap::with_capacity(timestamps.len());
+<a href=#501 id=501 data-nosnippet>501</a>        <span class="kw">for </span>(column, write_ts) <span class="kw">in </span>timestamps {
+<a href=#502 id=502 data-nosnippet>502</a>            <span class="kw">let </span>expiration = ttl_lookup
+<a href=#503 id=503 data-nosnippet>503</a>                .get(<span class="kw-2">&amp;</span>(key_bytes.clone(), column.clone()))
+<a href=#504 id=504 data-nosnippet>504</a>                .filter(|m| m.write_timestamp_micros == write_ts)
+<a href=#505 id=505 data-nosnippet>505</a>                .and_then(|m| m.expiration.clone());
+<a href=#506 id=506 data-nosnippet>506</a>            meta_map.insert(
+<a href=#507 id=507 data-nosnippet>507</a>                column,
+<a href=#508 id=508 data-nosnippet>508</a>                CellWriteMetadata {
+<a href=#509 id=509 data-nosnippet>509</a>                    write_timestamp_micros: write_ts,
+<a href=#510 id=510 data-nosnippet>510</a>                    expiration,
+<a href=#511 id=511 data-nosnippet>511</a>                },
+<a href=#512 id=512 data-nosnippet>512</a>            );
+<a href=#513 id=513 data-nosnippet>513</a>        }
+<a href=#514 id=514 data-nosnippet>514</a>        results.push((RowKey::new(key_bytes), value, meta_map));
+<a href=#515 id=515 data-nosnippet>515</a>    }
+<a href=#516 id=516 data-nosnippet>516</a>
+<a href=#517 id=517 data-nosnippet>517</a>    <span class="comment">// Stable TOKEN-order sort (issue #1580), then LIMIT — identical ordering to the
+<a href=#518 id=518 data-nosnippet>518</a>    // plain merge path; the metadata payload rides in the tuple's tail.
+<a href=#519 id=519 data-nosnippet>519</a>    </span>scan_merge::sort_by_token_order(<span class="kw-2">&amp;mut </span>results, limit, |(k, <span class="kw">_</span>, <span class="kw">_</span>)| k);
+<a href=#520 id=520 data-nosnippet>520</a>    <span class="prelude-val">Ok</span>(results)
+<a href=#521 id=521 data-nosnippet>521</a>}
+<a href=#522 id=522 data-nosnippet>522</a>
+<a href=#523 id=523 data-nosnippet>523</a><span class="doccomment">/// Convert one reconciled partition's merge rows into metadata-carrying rows: the
+<a href=#524 id=524 data-nosnippet>524</a>/// live cells plus each surviving cell's `(column, write_timestamp)`. Shared by the
+<a href=#525 id=525 data-nosnippet>525</a>/// range and point-targeted branches of the metadata merge so the tombstone
+<a href=#526 id=526 data-nosnippet>526</a>/// filtering + timestamp capture live once.
+<a href=#527 id=527 data-nosnippet>527</a></span><span class="kw">fn </span>push_metadata_rows(
+<a href=#528 id=528 data-nosnippet>528</a>    key_bytes: <span class="kw-2">&amp;</span>[u8],
+<a href=#529 id=529 data-nosnippet>529</a>    rows: Vec&lt;MergeEntry&gt;,
+<a href=#530 id=530 data-nosnippet>530</a>    out: <span class="kw-2">&amp;mut </span>Vec&lt;MergedMetaRow&gt;,
+<a href=#531 id=531 data-nosnippet>531</a>    shadow: <span class="kw-2">&amp;</span>ReadShadow,
+<a href=#532 id=532 data-nosnippet>532</a>) {
+<a href=#533 id=533 data-nosnippet>533</a>    <span class="comment">// Issue #1849: same read-side partition cover + per-cell TTL/shadow filter as the
+<a href=#534 id=534 data-nosnippet>534</a>    // plain path, so the WRITETIME/TTL projection agrees with `SELECT *`.
+<a href=#535 id=535 data-nosnippet>535</a>    </span><span class="kw">let </span>cover = partition_cover(<span class="kw-2">&amp;</span>rows);
+<a href=#536 id=536 data-nosnippet>536</a>    <span class="kw">for </span>entry <span class="kw">in </span>rows {
+<a href=#537 id=537 data-nosnippet>537</a>        <span class="kw">if let </span>RowData::Live { cells } = entry.row_data {
+<a href=#538 id=538 data-nosnippet>538</a>            <span class="comment">// `filter_live` drops cell tombstones + TTL-expired / partition-shadowed
+<a href=#539 id=539 data-nosnippet>539</a>            // data cells; `None` hides the whole row (partition-shadowed).
+<a href=#540 id=540 data-nosnippet>540</a>            </span><span class="kw">let </span><span class="prelude-val">Some</span>(surviving) = shadow.filter_live(cover, cells) <span class="kw">else </span>{
+<a href=#541 id=541 data-nosnippet>541</a>                <span class="kw">continue</span>;
+<a href=#542 id=542 data-nosnippet>542</a>            };
+<a href=#543 id=543 data-nosnippet>543</a>            <span class="kw">let </span><span class="kw-2">mut </span>row_cells: RowCells = Vec::with_capacity(surviving.len());
+<a href=#544 id=544 data-nosnippet>544</a>            <span class="kw">let </span><span class="kw-2">mut </span>timestamps: Vec&lt;(String, i64)&gt; = Vec::with_capacity(surviving.len());
+<a href=#545 id=545 data-nosnippet>545</a>            <span class="kw">for </span>c <span class="kw">in </span>surviving {
+<a href=#546 id=546 data-nosnippet>546</a>                timestamps.push((c.column.clone(), c.timestamp));
+<a href=#547 id=547 data-nosnippet>547</a>                row_cells.push((Arc::from(c.column.as_str()), c.value));
+<a href=#548 id=548 data-nosnippet>548</a>            }
+<a href=#549 id=549 data-nosnippet>549</a>            <span class="kw">if </span>!row_cells.is_empty() {
+<a href=#550 id=550 data-nosnippet>550</a>                out.push((key_bytes.to_vec(), ScanRow::Row(row_cells), timestamps));
+<a href=#551 id=551 data-nosnippet>551</a>            }
+<a href=#552 id=552 data-nosnippet>552</a>        }
+<a href=#553 id=553 data-nosnippet>553</a>        <span class="comment">// Row tombstones suppress the row entirely (no emission).
+<a href=#554 id=554 data-nosnippet>554</a>    </span>}
+<a href=#555 id=555 data-nosnippet>555</a>}
+<a href=#556 id=556 data-nosnippet>556</a>
+<a href=#557 id=557 data-nosnippet>557</a><span class="doccomment">/// STREAMING cross-generation reconciliation for `scan_stream` (issue #1579 / D3).
+<a href=#558 id=558 data-nosnippet>558</a>///
+<a href=#559 id=559 data-nosnippet>559</a>/// Runs the authoritative [`KWayMerger`](crate::storage::write_engine::KWayMerger)
+<a href=#560 id=560 data-nosnippet>560</a>/// on a blocking task and feeds each stepped partition's live rows STRAIGHT into a
+<a href=#561 id=561 data-nosnippet>561</a>/// bounded channel via `blocking_send` (backpressure preserved), instead of
+<a href=#562 id=562 data-nosnippet>562</a>/// collecting the entire reconciled table, sorting it, and dribbling it. Live heap
+<a href=#563 id=563 data-nosnippet>563</a>/// is therefore O(one partition + channel), and the first row is available after
+<a href=#564 id=564 data-nosnippet>564</a>/// the first partition rather than after the whole merge.
+<a href=#565 id=565 data-nosnippet>565</a>///
+<a href=#566 id=566 data-nosnippet>566</a>/// Reconciliation is byte-identical to [`merge_generations_for_read`] (shared
+<a href=#567 id=567 data-nosnippet>567</a>/// `partition_live_rows` kernel), and the emission order is the merger's
+<a href=#568 id=568 data-nosnippet>568</a>/// `DecoratedKey` = `(token, key)` order — byte-identical to the collect+sort
+<a href=#569 id=569 data-nosnippet>569</a>/// path's [`scan_merge::sort_by_token_order`] output (issue #1579 ordering
+<a href=#570 id=570 data-nosnippet>570</a>/// guardrail).
+<a href=#571 id=571 data-nosnippet>571</a>///
+<a href=#572 id=572 data-nosnippet>572</a>/// Construction (`KWayMerger::new`, which opens the input files) happens on the
+<a href=#573 id=573 data-nosnippet>573</a>/// blocking task; its success/failure is signalled back over a oneshot BEFORE any
+<a href=#574 id=574 data-nosnippet>574</a>/// streaming, so the caller can FALL BACK to the lazy per-reader streaming merge on
+<a href=#575 id=575 data-nosnippet>575</a>/// a construction error exactly as the materializing `scan` falls back to
+<a href=#576 id=576 data-nosnippet>576</a>/// concatenation. A runtime `step()` error mid-stream is delivered as an `Err`
+<a href=#577 id=577 data-nosnippet>577</a>/// item on the channel (the consumer sees it), matching the lazy path's read-error
+<a href=#578 id=578 data-nosnippet>578</a>/// behaviour.
+<a href=#579 id=579 data-nosnippet>579</a>///
+<a href=#580 id=580 data-nosnippet>580</a>/// This is a deliberate, documented error-path asymmetry (issue #1579): the
+<a href=#581 id=581 data-nosnippet>581</a>/// caller's fallback-to-concatenation only ever applies to the CONSTRUCTION
+<a href=#582 id=582 data-nosnippet>582</a>/// failure above (nothing has been streamed yet, so falling back cannot mix
+<a href=#583 id=583 data-nosnippet>583</a>/// reconciled and unreconciled rows). A `step()` failure after some partitions
+<a href=#584 id=584 data-nosnippet>584</a>/// were already emitted downstream is NEVER retried/fallen-back — it ends the
+<a href=#585 id=585 data-nosnippet>585</a>/// stream via the `Err` channel item instead. That is safer than it sounds: the
+<a href=#586 id=586 data-nosnippet>586</a>/// materializing `merge_generations_for_read` has no equivalent mid-collection
+<a href=#587 id=587 data-nosnippet>587</a>/// failure signal — a `step()` error there simply propagates the whole call as
+<a href=#588 id=588 data-nosnippet>588</a>/// `Err` before any partial `Vec` is returned to the caller. The streaming
+<a href=#589 id=589 data-nosnippet>589</a>/// driver's `Err` item preserves the same "no half-reconciled result surfaces
+<a href=#590 id=590 data-nosnippet>590</a>/// silently" guarantee while still letting the caller observe exactly how many
+<a href=#591 id=591 data-nosnippet>591</a>/// good rows it already received.
+<a href=#592 id=592 data-nosnippet>592</a></span><span class="attr">#[cfg(not(feature = <span class="string">"tombstones"</span>))]
+<a href=#593 id=593 data-nosnippet>593</a></span><span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">async fn </span>stream_generations_for_read(
+<a href=#594 id=594 data-nosnippet>594</a>    reader_list: <span class="kw-2">&amp;</span>[Arc&lt;reader::SSTableReader&gt;],
+<a href=#595 id=595 data-nosnippet>595</a>    schema: <span class="kw-2">&amp;</span><span class="kw">crate</span>::schema::TableSchema,
+<a href=#596 id=596 data-nosnippet>596</a>    start_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#597 id=597 data-nosnippet>597</a>    end_key: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>RowKey&gt;,
+<a href=#598 id=598 data-nosnippet>598</a>    buffer_size: usize,
+<a href=#599 id=599 data-nosnippet>599</a>) -&gt; <span class="prelude-ty">Result</span>&lt;mpsc::Receiver&lt;<span class="prelude-ty">Result</span>&lt;(RowKey, ScanRow)&gt;&gt;&gt; {
+<a href=#600 id=600 data-nosnippet>600</a>    <span class="kw">let </span>start_key = start_key.cloned();
+<a href=#601 id=601 data-nosnippet>601</a>    <span class="kw">let </span>end_key = end_key.cloned();
+<a href=#602 id=602 data-nosnippet>602</a>    <span class="kw">let </span>paths = ordered_generation_paths(reader_list);
+<a href=#603 id=603 data-nosnippet>603</a>    <span class="kw">let </span>schema = schema.clone();
+<a href=#604 id=604 data-nosnippet>604</a>
+<a href=#605 id=605 data-nosnippet>605</a>    <span class="kw">let </span>(ready_tx, ready_rx) = oneshot::channel::&lt;<span class="prelude-ty">Result</span>&lt;()&gt;&gt;();
+<a href=#606 id=606 data-nosnippet>606</a>    <span class="kw">let </span>(out_tx, out_rx) = mpsc::channel::&lt;<span class="prelude-ty">Result</span>&lt;(RowKey, ScanRow)&gt;&gt;(buffer_size.max(<span class="number">1</span>));
+<a href=#607 id=607 data-nosnippet>607</a>
+<a href=#608 id=608 data-nosnippet>608</a>    tokio::task::spawn_blocking(<span class="kw">move </span>|| {
+<a href=#609 id=609 data-nosnippet>609</a>        <span class="comment">// Issue #1849: capture the read-time TTL clock ONCE per scan.
+<a href=#610 id=610 data-nosnippet>610</a>        </span><span class="kw">let </span>shadow = ReadShadow::new(<span class="kw-2">&amp;</span>schema, now_epoch_secs());
+<a href=#611 id=611 data-nosnippet>611</a>        <span class="kw">let </span><span class="kw-2">mut </span>merger = <span class="kw">match </span>KWayMerger::new(paths, <span class="kw-2">&amp;</span>schema) {
+<a href=#612 id=612 data-nosnippet>612</a>            <span class="prelude-val">Ok</span>(m) =&gt; {
+<a href=#613 id=613 data-nosnippet>613</a>                <span class="comment">// Signal readiness; if the caller already dropped, stop.
+<a href=#614 id=614 data-nosnippet>614</a>                </span><span class="kw">if </span>ready_tx.send(<span class="prelude-val">Ok</span>(())).is_err() {
+<a href=#615 id=615 data-nosnippet>615</a>                    <span class="kw">return</span>;
+<a href=#616 id=616 data-nosnippet>616</a>                }
+<a href=#617 id=617 data-nosnippet>617</a>                m
+<a href=#618 id=618 data-nosnippet>618</a>            }
+<a href=#619 id=619 data-nosnippet>619</a>            <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#620 id=620 data-nosnippet>620</a>                <span class="comment">// Let the caller fall back to the lazy per-reader streaming merge.
+<a href=#621 id=621 data-nosnippet>621</a>                </span><span class="kw">let _ </span>= ready_tx.send(<span class="prelude-val">Err</span>(e));
+<a href=#622 id=622 data-nosnippet>622</a>                <span class="kw">return</span>;
+<a href=#623 id=623 data-nosnippet>623</a>            }
+<a href=#624 id=624 data-nosnippet>624</a>        };
+<a href=#625 id=625 data-nosnippet>625</a>
+<a href=#626 id=626 data-nosnippet>626</a>        <span class="kw">loop </span>{
+<a href=#627 id=627 data-nosnippet>627</a>            <span class="kw">let </span>step = <span class="kw">match </span>merger.step() {
+<a href=#628 id=628 data-nosnippet>628</a>                <span class="prelude-val">Ok</span>(s) =&gt; s,
+<a href=#629 id=629 data-nosnippet>629</a>                <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#630 id=630 data-nosnippet>630</a>                    <span class="kw">let _ </span>= out_tx.blocking_send(<span class="prelude-val">Err</span>(e));
+<a href=#631 id=631 data-nosnippet>631</a>                    <span class="kw">return</span>;
+<a href=#632 id=632 data-nosnippet>632</a>                }
+<a href=#633 id=633 data-nosnippet>633</a>            };
+<a href=#634 id=634 data-nosnippet>634</a>            <span class="kw">let </span>(key, rows) = <span class="kw">match </span>step {
+<a href=#635 id=635 data-nosnippet>635</a>                MergeStep::Partition { key, rows } =&gt; (key, rows),
+<a href=#636 id=636 data-nosnippet>636</a>                MergeStep::Complete =&gt; <span class="kw">return</span>,
+<a href=#637 id=637 data-nosnippet>637</a>            };
+<a href=#638 id=638 data-nosnippet>638</a>
+<a href=#639 id=639 data-nosnippet>639</a>            <span class="kw">let </span>row_key = RowKey::new(key.key.clone());
+<a href=#640 id=640 data-nosnippet>640</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>start) = start_key {
+<a href=#641 id=641 data-nosnippet>641</a>                <span class="kw">if </span><span class="kw-2">&amp;</span>row_key &lt; start {
+<a href=#642 id=642 data-nosnippet>642</a>                    <span class="kw">continue</span>;
+<a href=#643 id=643 data-nosnippet>643</a>                }
+<a href=#644 id=644 data-nosnippet>644</a>            }
+<a href=#645 id=645 data-nosnippet>645</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>end) = end_key {
+<a href=#646 id=646 data-nosnippet>646</a>                <span class="kw">if </span><span class="kw-2">&amp;</span>row_key &gt; end {
+<a href=#647 id=647 data-nosnippet>647</a>                    <span class="kw">continue</span>;
+<a href=#648 id=648 data-nosnippet>648</a>                }
+<a href=#649 id=649 data-nosnippet>649</a>            }
+<a href=#650 id=650 data-nosnippet>650</a>
+<a href=#651 id=651 data-nosnippet>651</a>            <span class="kw">let </span>live = partition_live_rows(<span class="kw-2">&amp;</span>row_key, rows, <span class="kw-2">&amp;</span>shadow);
+<a href=#652 id=652 data-nosnippet>652</a>            <span class="comment">// Issue #1579: the streaming producer holds ONE partition's rows
+<a href=#653 id=653 data-nosnippet>653</a>            // resident at a time — record the window (not the whole table) so the
+<a href=#654 id=654 data-nosnippet>654</a>            // memory guard observes O(window).
+<a href=#655 id=655 data-nosnippet>655</a>            </span>stream_merge_probe::record_resident(live.len() <span class="kw">as </span>u64);
+<a href=#656 id=656 data-nosnippet>656</a>            <span class="kw">for </span>entry <span class="kw">in </span>live {
+<a href=#657 id=657 data-nosnippet>657</a>                <span class="kw">if </span>out_tx.blocking_send(<span class="prelude-val">Ok</span>(entry)).is_err() {
+<a href=#658 id=658 data-nosnippet>658</a>                    <span class="kw">return</span>; <span class="comment">// consumer dropped
+<a href=#659 id=659 data-nosnippet>659</a>                </span>}
+<a href=#660 id=660 data-nosnippet>660</a>            }
+<a href=#661 id=661 data-nosnippet>661</a>        }
+<a href=#662 id=662 data-nosnippet>662</a>    });
+<a href=#663 id=663 data-nosnippet>663</a>
+<a href=#664 id=664 data-nosnippet>664</a>    <span class="kw">match </span>ready_rx.<span class="kw">await </span>{
+<a href=#665 id=665 data-nosnippet>665</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Ok</span>(())) =&gt; <span class="prelude-val">Ok</span>(out_rx),
+<a href=#666 id=666 data-nosnippet>666</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Err</span>(e)) =&gt; <span class="prelude-val">Err</span>(e),
+<a href=#667 id=667 data-nosnippet>667</a>        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(<span class="kw">crate</span>::Error::Storage(
+<a href=#668 id=668 data-nosnippet>668</a>            <span class="string">"cross-generation streaming merge task ended before signalling readiness"</span>.to_string(),
+<a href=#669 id=669 data-nosnippet>669</a>        )),
+<a href=#670 id=670 data-nosnippet>670</a>    }
+<a href=#671 id=671 data-nosnippet>671</a>}
+<a href=#672 id=672 data-nosnippet>672</a>
+<a href=#673 id=673 data-nosnippet>673</a><span class="doccomment">/// The merger expects inputs ordered newest → oldest (run_index 0 = newest) for
+<a href=#674 id=674 data-nosnippet>674</a>/// its stable tie-break; the reader `Vec` order is discovery-dependent, so sort
+<a href=#675 id=675 data-nosnippet>675</a>/// explicitly by generation descending and collect the input `Data.db` paths.
+<a href=#676 id=676 data-nosnippet>676</a></span><span class="kw">fn </span>ordered_generation_paths(reader_list: <span class="kw-2">&amp;</span>[Arc&lt;reader::SSTableReader&gt;]) -&gt; Vec&lt;PathBuf&gt; {
+<a href=#677 id=677 data-nosnippet>677</a>    <span class="kw">let </span><span class="kw-2">mut </span>ordered: Vec&lt;<span class="kw-2">&amp;</span>Arc&lt;reader::SSTableReader&gt;&gt; = reader_list.iter().collect();
+<a href=#678 id=678 data-nosnippet>678</a>    ordered.sort_by(|a, b| b.generation.cmp(<span class="kw-2">&amp;</span>a.generation));
+<a href=#679 id=679 data-nosnippet>679</a>    ordered.iter().map(|r| r.file_path()).collect()
+<a href=#680 id=680 data-nosnippet>680</a>}
+<a href=#681 id=681 data-nosnippet>681</a>
+<a href=#682 id=682 data-nosnippet>682</a><span class="attr">#[cfg(test)]
+<a href=#683 id=683 data-nosnippet>683</a></span><span class="kw">mod </span>tests {
+<a href=#684 id=684 data-nosnippet>684</a>    <span class="doccomment">//! Issue #1849: deterministic pins for the post-merge read-visibility filter,
+<a href=#685 id=685 data-nosnippet>685</a>    //! independent of on-disk fixtures. The end-to-end multi-generation proof lives
+<a href=#686 id=686 data-nosnippet>686</a>    //! in `tests/issue_1849_multigen_tombstone_ttl_shadow.rs`.
+<a href=#687 id=687 data-nosnippet>687</a>    </span><span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#688 id=688 data-nosnippet>688</a>
+<a href=#689 id=689 data-nosnippet>689</a>    <span class="kw">fn </span>shadow(now_secs: i64) -&gt; ReadShadow {
+<a href=#690 id=690 data-nosnippet>690</a>        ReadShadow {
+<a href=#691 id=691 data-nosnippet>691</a>            now_secs,
+<a href=#692 id=692 data-nosnippet>692</a>            key_columns: HashSet::new(),
+<a href=#693 id=693 data-nosnippet>693</a>        }
+<a href=#694 id=694 data-nosnippet>694</a>    }
+<a href=#695 id=695 data-nosnippet>695</a>
+<a href=#696 id=696 data-nosnippet>696</a>    <span class="kw">fn </span>shadow_with_keys(now_secs: i64, keys: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str]) -&gt; ReadShadow {
+<a href=#697 id=697 data-nosnippet>697</a>        ReadShadow {
+<a href=#698 id=698 data-nosnippet>698</a>            now_secs,
+<a href=#699 id=699 data-nosnippet>699</a>            key_columns: keys.iter().map(|k| k.to_string()).collect(),
+<a href=#700 id=700 data-nosnippet>700</a>        }
+<a href=#701 id=701 data-nosnippet>701</a>    }
+<a href=#702 id=702 data-nosnippet>702</a>
+<a href=#703 id=703 data-nosnippet>703</a>    <span class="kw">fn </span>live_cell(column: <span class="kw-2">&amp;</span>str, ts: i64) -&gt; CellData {
+<a href=#704 id=704 data-nosnippet>704</a>        CellData::new(column.to_string(), Value::Integer(<span class="number">1</span>), ts)
+<a href=#705 id=705 data-nosnippet>705</a>    }
+<a href=#706 id=706 data-nosnippet>706</a>
+<a href=#707 id=707 data-nosnippet>707</a>    <span class="kw">fn </span>expiring_cell(column: <span class="kw-2">&amp;</span>str, ts: i64, ldt: i32) -&gt; CellData {
+<a href=#708 id=708 data-nosnippet>708</a>        <span class="kw">let </span><span class="kw-2">mut </span>c = CellData::new(column.to_string(), Value::Integer(<span class="number">1</span>), ts);
+<a href=#709 id=709 data-nosnippet>709</a>        c.ttl = <span class="prelude-val">Some</span>(<span class="number">60</span>);
+<a href=#710 id=710 data-nosnippet>710</a>        c.local_deletion_time = <span class="prelude-val">Some</span>(ldt);
+<a href=#711 id=711 data-nosnippet>711</a>        c
+<a href=#712 id=712 data-nosnippet>712</a>    }
+<a href=#713 id=713 data-nosnippet>713</a>
+<a href=#714 id=714 data-nosnippet>714</a>    <span class="doccomment">/// A TTL-expired data cell (past `localDeletionTime`) is dropped while a
+<a href=#715 id=715 data-nosnippet>715</a>    /// live-forever sibling survives; the row itself stays (not partition-shadowed).
+<a href=#716 id=716 data-nosnippet>716</a>    </span><span class="attr">#[test]
+<a href=#717 id=717 data-nosnippet>717</a>    </span><span class="kw">fn </span>filter_live_drops_ttl_expired_cell_keeps_live() {
+<a href=#718 id=718 data-nosnippet>718</a>        <span class="kw">let </span>now = <span class="number">2_000_000i64</span>;
+<a href=#719 id=719 data-nosnippet>719</a>        <span class="kw">let </span>cells = <span class="macro">vec!</span>[
+<a href=#720 id=720 data-nosnippet>720</a>            live_cell(<span class="string">"name"</span>, <span class="number">100</span>),
+<a href=#721 id=721 data-nosnippet>721</a>            expiring_cell(<span class="string">"token"</span>, <span class="number">100</span>, <span class="number">1_000</span>), <span class="comment">// expired: 1000 &lt;= now
+<a href=#722 id=722 data-nosnippet>722</a>        </span>];
+<a href=#723 id=723 data-nosnippet>723</a>        <span class="kw">let </span>kept = shadow(now).filter_live(<span class="prelude-val">None</span>, cells).expect(<span class="string">"row visible"</span>);
+<a href=#724 id=724 data-nosnippet>724</a>        <span class="kw">let </span>names: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = kept.iter().map(|c| c.column.as_str()).collect();
+<a href=#725 id=725 data-nosnippet>725</a>        <span class="macro">assert_eq!</span>(names, <span class="macro">vec!</span>[<span class="string">"name"</span>], <span class="string">"expired `token` must be dropped"</span>);
+<a href=#726 id=726 data-nosnippet>726</a>    }
+<a href=#727 id=727 data-nosnippet>727</a>
+<a href=#728 id=728 data-nosnippet>728</a>    <span class="doccomment">/// A cell tombstone is never live data (dropped like the single-gen path).
+<a href=#729 id=729 data-nosnippet>729</a>    </span><span class="attr">#[test]
+<a href=#730 id=730 data-nosnippet>730</a>    </span><span class="kw">fn </span>filter_live_drops_cell_tombstone() {
+<a href=#731 id=731 data-nosnippet>731</a>        <span class="kw">let </span><span class="kw-2">mut </span>tomb = CellData::new(<span class="string">"gone"</span>.to_string(), Value::Integer(<span class="number">0</span>), <span class="number">100</span>);
+<a href=#732 id=732 data-nosnippet>732</a>        tomb.value = Value::Tombstone(Box::new(<span class="kw">crate</span>::types::TombstoneInfo {
+<a href=#733 id=733 data-nosnippet>733</a>            deletion_time: <span class="number">100</span>,
+<a href=#734 id=734 data-nosnippet>734</a>            tombstone_type: <span class="kw">crate</span>::types::TombstoneType::CellTombstone,
+<a href=#735 id=735 data-nosnippet>735</a>            local_deletion_time: <span class="number">0</span>,
+<a href=#736 id=736 data-nosnippet>736</a>            ttl: <span class="prelude-val">None</span>,
+<a href=#737 id=737 data-nosnippet>737</a>            range_start: <span class="prelude-val">None</span>,
+<a href=#738 id=738 data-nosnippet>738</a>            range_end: <span class="prelude-val">None</span>,
+<a href=#739 id=739 data-nosnippet>739</a>        }));
+<a href=#740 id=740 data-nosnippet>740</a>        <span class="kw">let </span>kept = shadow(<span class="number">0</span>)
+<a href=#741 id=741 data-nosnippet>741</a>            .filter_live(<span class="prelude-val">None</span>, <span class="macro">vec!</span>[live_cell(<span class="string">"keep"</span>, <span class="number">100</span>), tomb])
+<a href=#742 id=742 data-nosnippet>742</a>            .expect(<span class="string">"row visible"</span>);
+<a href=#743 id=743 data-nosnippet>743</a>        <span class="macro">assert_eq!</span>(kept.len(), <span class="number">1</span>);
+<a href=#744 id=744 data-nosnippet>744</a>        <span class="macro">assert_eq!</span>(kept[<span class="number">0</span>].column, <span class="string">"keep"</span>);
+<a href=#745 id=745 data-nosnippet>745</a>    }
+<a href=#746 id=746 data-nosnippet>746</a>
+<a href=#747 id=747 data-nosnippet>747</a>    <span class="doccomment">/// A row whose every data cell is shadowed by the partition tombstone (all data
+<a href=#748 id=748 data-nosnippet>748</a>    /// older than `markedForDeleteAt`) is hidden entirely (`None`); a row with a cell
+<a href=#749 id=749 data-nosnippet>749</a>    /// strictly newer than the deletion survives.
+<a href=#750 id=750 data-nosnippet>750</a>    </span><span class="attr">#[test]
+<a href=#751 id=751 data-nosnippet>751</a>    </span><span class="kw">fn </span>filter_live_partition_cover_hides_fully_shadowed_row() {
+<a href=#752 id=752 data-nosnippet>752</a>        <span class="kw">let </span>cover = <span class="prelude-val">Some</span>(<span class="number">2_000i64</span>);
+<a href=#753 id=753 data-nosnippet>753</a>        <span class="comment">// All data older/equal to the cover → whole row hidden.
+<a href=#754 id=754 data-nosnippet>754</a>        </span><span class="kw">let </span>hidden =
+<a href=#755 id=755 data-nosnippet>755</a>            shadow(<span class="number">0</span>).filter_live(cover, <span class="macro">vec!</span>[live_cell(<span class="string">"a"</span>, <span class="number">1_000</span>), live_cell(<span class="string">"b"</span>, <span class="number">2_000</span>)]);
+<a href=#756 id=756 data-nosnippet>756</a>        <span class="macro">assert!</span>(hidden.is_none(), <span class="string">"fully-shadowed row must be hidden"</span>);
+<a href=#757 id=757 data-nosnippet>757</a>        <span class="comment">// A cell strictly newer than the cover → row survives (and keeps newer cell).
+<a href=#758 id=758 data-nosnippet>758</a>        </span><span class="kw">let </span>kept = shadow(<span class="number">0</span>)
+<a href=#759 id=759 data-nosnippet>759</a>            .filter_live(cover, <span class="macro">vec!</span>[live_cell(<span class="string">"a"</span>, <span class="number">1_000</span>), live_cell(<span class="string">"b"</span>, <span class="number">3_000</span>)])
+<a href=#760 id=760 data-nosnippet>760</a>            .expect(<span class="string">"row visible"</span>);
+<a href=#761 id=761 data-nosnippet>761</a>        <span class="kw">let </span>names: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = kept.iter().map(|c| c.column.as_str()).collect();
+<a href=#762 id=762 data-nosnippet>762</a>        <span class="macro">assert_eq!</span>(names, <span class="macro">vec!</span>[<span class="string">"b"</span>], <span class="string">"older `a` shadowed, newer `b` survives"</span>);
+<a href=#763 id=763 data-nosnippet>763</a>    }
+<a href=#764 id=764 data-nosnippet>764</a>
+<a href=#765 id=765 data-nosnippet>765</a>    <span class="doccomment">/// A row kept alive by a DATA cell newer than the partition tombstone (a
+<a href=#766 id=766 data-nosnippet>766</a>    /// post-delete resurrecting UPDATE) must retain its clustering-key pseudo-cell
+<a href=#767 id=767 data-nosnippet>767</a>    /// even when that pseudo-cell's own write timestamp is `&lt;= cover`. The shadow/
+<a href=#768 id=768 data-nosnippet>768</a>    /// expiry drop is STRUCTURALLY skipped for key columns (matching the single-gen
+<a href=#769 id=769 data-nosnippet>769</a>    /// path + the merger), so the surviving row is never emitted missing its
+<a href=#770 id=770 data-nosnippet>770</a>    /// clustering-key value (issue #1849; roborev multi-gen finding).
+<a href=#771 id=771 data-nosnippet>771</a>    </span><span class="attr">#[test]
+<a href=#772 id=772 data-nosnippet>772</a>    </span><span class="kw">fn </span>filter_live_keeps_clustering_key_under_partition_cover() {
+<a href=#773 id=773 data-nosnippet>773</a>        <span class="kw">let </span>cover = <span class="prelude-val">Some</span>(<span class="number">2_000i64</span>);
+<a href=#774 id=774 data-nosnippet>774</a>        <span class="comment">// `ck` is a clustering pseudo-cell with ts &lt;= cover (would be dropped if the
+<a href=#775 id=775 data-nosnippet>775</a>        // shadow test were applied to it); `data` is a newer resurrecting cell; `old`
+<a href=#776 id=776 data-nosnippet>776</a>        // is a stale data cell that MUST be shadowed away.
+<a href=#777 id=777 data-nosnippet>777</a>        </span><span class="kw">let </span>cells = <span class="macro">vec!</span>[
+<a href=#778 id=778 data-nosnippet>778</a>            live_cell(<span class="string">"ck"</span>, <span class="number">1_000</span>),
+<a href=#779 id=779 data-nosnippet>779</a>            live_cell(<span class="string">"old"</span>, <span class="number">1_000</span>),
+<a href=#780 id=780 data-nosnippet>780</a>            live_cell(<span class="string">"data"</span>, <span class="number">3_000</span>),
+<a href=#781 id=781 data-nosnippet>781</a>        ];
+<a href=#782 id=782 data-nosnippet>782</a>        <span class="kw">let </span>kept = shadow_with_keys(<span class="number">0</span>, <span class="kw-2">&amp;</span>[<span class="string">"ck"</span>])
+<a href=#783 id=783 data-nosnippet>783</a>            .filter_live(cover, cells)
+<a href=#784 id=784 data-nosnippet>784</a>            .expect(<span class="string">"row survives via newer `data` cell"</span>);
+<a href=#785 id=785 data-nosnippet>785</a>        <span class="kw">let </span>names: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = kept.iter().map(|c| c.column.as_str()).collect();
+<a href=#786 id=786 data-nosnippet>786</a>        <span class="macro">assert!</span>(
+<a href=#787 id=787 data-nosnippet>787</a>            names.contains(<span class="kw-2">&amp;</span><span class="string">"ck"</span>),
+<a href=#788 id=788 data-nosnippet>788</a>            <span class="string">"clustering-key pseudo-cell must be retained, got {names:?}"
+<a href=#789 id=789 data-nosnippet>789</a>        </span>);
+<a href=#790 id=790 data-nosnippet>790</a>        <span class="macro">assert!</span>(
+<a href=#791 id=791 data-nosnippet>791</a>            names.contains(<span class="kw-2">&amp;</span><span class="string">"data"</span>),
+<a href=#792 id=792 data-nosnippet>792</a>            <span class="string">"newer resurrecting data cell must survive, got {names:?}"
+<a href=#793 id=793 data-nosnippet>793</a>        </span>);
+<a href=#794 id=794 data-nosnippet>794</a>        <span class="macro">assert!</span>(
+<a href=#795 id=795 data-nosnippet>795</a>            !names.contains(<span class="kw-2">&amp;</span><span class="string">"old"</span>),
+<a href=#796 id=796 data-nosnippet>796</a>            <span class="string">"stale data cell shadowed by the partition tombstone must be dropped, got {names:?}"
+<a href=#797 id=797 data-nosnippet>797</a>        </span>);
+<a href=#798 id=798 data-nosnippet>798</a>    }
+<a href=#799 id=799 data-nosnippet>799</a>
+<a href=#800 id=800 data-nosnippet>800</a>    <span class="doccomment">/// A clustering-key pseudo-cell does NOT by itself keep a row alive: a row whose
+<a href=#801 id=801 data-nosnippet>801</a>    /// only non-key data is fully shadowed is still hidden even though the key cell is
+<a href=#802 id=802 data-nosnippet>802</a>    /// retained-eligible (the key cell is excluded from the `max_data_ts` fold).
+<a href=#803 id=803 data-nosnippet>803</a>    </span><span class="attr">#[test]
+<a href=#804 id=804 data-nosnippet>804</a>    </span><span class="kw">fn </span>filter_live_key_cell_does_not_resurrect_shadowed_row() {
+<a href=#805 id=805 data-nosnippet>805</a>        <span class="kw">let </span>cover = <span class="prelude-val">Some</span>(<span class="number">2_000i64</span>);
+<a href=#806 id=806 data-nosnippet>806</a>        <span class="kw">let </span>cells = <span class="macro">vec!</span>[live_cell(<span class="string">"ck"</span>, <span class="number">1_000</span>), live_cell(<span class="string">"old"</span>, <span class="number">1_000</span>)];
+<a href=#807 id=807 data-nosnippet>807</a>        <span class="kw">let </span>hidden = shadow_with_keys(<span class="number">0</span>, <span class="kw-2">&amp;</span>[<span class="string">"ck"</span>]).filter_live(cover, cells);
+<a href=#808 id=808 data-nosnippet>808</a>        <span class="macro">assert!</span>(
+<a href=#809 id=809 data-nosnippet>809</a>            hidden.is_none(),
+<a href=#810 id=810 data-nosnippet>810</a>            <span class="string">"a key pseudo-cell alone must not keep a fully-shadowed row visible"
+<a href=#811 id=811 data-nosnippet>811</a>        </span>);
+<a href=#812 id=812 data-nosnippet>812</a>    }
+<a href=#813 id=813 data-nosnippet>813</a>
+<a href=#814 id=814 data-nosnippet>814</a>    <span class="doccomment">/// AC4 post-2038: an expiring cell whose `localDeletionTime` is a post-2038
+<a href=#815 id=815 data-nosnippet>815</a>    /// instant stored as a NEGATIVE `i32` bit pattern is reinterpreted UNSIGNED, so
+<a href=#816 id=816 data-nosnippet>816</a>    /// it reads as a large FUTURE expiry (not wrongly wrapped negative / long-expired).
+<a href=#817 id=817 data-nosnippet>817</a>    </span><span class="attr">#[test]
+<a href=#818 id=818 data-nosnippet>818</a>    </span><span class="kw">fn </span>cell_expiry_secs_reinterprets_post_2038_unsigned() {
+<a href=#819 id=819 data-nosnippet>819</a>        <span class="comment">// 2039-ish epoch seconds &gt; i32::MAX, stored as the wrapping `as i32`.
+<a href=#820 id=820 data-nosnippet>820</a>        </span><span class="kw">let </span>future: i64 = <span class="number">2_200_000_000</span>;
+<a href=#821 id=821 data-nosnippet>821</a>        <span class="kw">let </span>stored = future <span class="kw">as </span>u32 <span class="kw">as </span>i32; <span class="comment">// negative bit pattern
+<a href=#822 id=822 data-nosnippet>822</a>        </span><span class="kw">let </span>c = expiring_cell(<span class="string">"token"</span>, <span class="number">100</span>, stored);
+<a href=#823 id=823 data-nosnippet>823</a>        <span class="macro">assert_eq!</span>(
+<a href=#824 id=824 data-nosnippet>824</a>            cell_expiry_secs(<span class="kw-2">&amp;</span>c),
+<a href=#825 id=825 data-nosnippet>825</a>            <span class="prelude-val">Some</span>(future),
+<a href=#826 id=826 data-nosnippet>826</a>            <span class="string">"post-2038 LDT must reinterpret unsigned to a future expiry"
+<a href=#827 id=827 data-nosnippet>827</a>        </span>);
+<a href=#828 id=828 data-nosnippet>828</a>        <span class="comment">// A non-expiring (no-TTL) cell has no expiry.
+<a href=#829 id=829 data-nosnippet>829</a>        </span><span class="macro">assert_eq!</span>(cell_expiry_secs(<span class="kw-2">&amp;</span>live_cell(<span class="string">"x"</span>, <span class="number">100</span>)), <span class="prelude-val">None</span>);
+<a href=#830 id=830 data-nosnippet>830</a>    }
+<a href=#831 id=831 data-nosnippet>831</a>}
+</code></pre></div></section></main></body></html>
