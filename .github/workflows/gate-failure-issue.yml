@@ -1,0 +1,252 @@
+name: Gate Nightly Failure Issue Automation
+
+# Signal routing only (issue #2662). The nightly full-gate backstop
+# (`.github/workflows/gate.yml`, "Nightly agent-gate (deep check)") went dead all
+# of July 2026 — 12 consecutive `cancelled` runs at the old 75m timeout — and
+# NOBODY WAS PAGED, because a `cancelled` (or `timed_out`) conclusion surfaces
+# only on the Actions dashboard. This workflow closes that silent-death gap: when
+# the gate lane completes with a RED conclusion (`failure`, `cancelled`, or
+# `timed_out`) on a SCHEDULED or MAIN-BRANCH run, it files/updates ONE
+# deduplicated `gate-nightly-failure` tracking issue so a dead backstop can never
+# again go unnoticed for weeks. On a green (`success`) run it posts a "resolved"
+# comment on that open issue (never auto-closes — a human confirms + closes).
+#
+# Modelled on the sibling `parity-failure-issue.yml` safety patterns. It is
+# deliberately SELF-CONTAINED (plain `gh` CLI, no external fingerprint script):
+# the gate emits a single run-level verdict, not per-scenario parity failures, so
+# one pinned tracking issue is the right granularity — no fingerprinting needed.
+#
+# NON-GATING: this job never changes the gate lane's result — the `gh` writes are
+# each `|| warn`-guarded, and the routing decision + issue lookups fail toward a
+# no-op / retry rather than reddening the run. It never auto-closes. (The hosted
+# `GITHUB_TOKEN` is always present, so there is deliberately no token off-switch —
+# a dead-code guard that only reads `secrets.GITHUB_TOKEN` would be a false one.)
+#
+# SECURITY: this workflow consumes an UNTRUSTED `workflow_run` payload. It NEVER
+# interpolates event fields into a `run:` shell — every event value is passed via
+# a quoted `env:` var (the `run:` bodies reference only `$SHELL_VARS`), and the
+# origin run is allowlist-validated fail-closed before any issue write. In
+# particular `github.event.workflow_run.head_branch` is passed via env only (it is
+# in the injection lint's attacker-controlled set).
+
+on:
+  workflow_run:
+    workflows:
+      - "Nightly agent-gate (deep check)"
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "gate.yml workflow_run id to (re)process (manual replay/test)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+  # `gh run view` reads ANOTHER workflow run's metadata (the manual-replay path);
+  # that requires actions:read. Minimal + complete for this job.
+  actions: read
+
+concurrency:
+  # CONSTANT group (not keyed on the per-run id) so ALL invocations of this
+  # automation serialize into one queue. Two near-simultaneous gate completions
+  # (e.g. the nightly schedule overlapping a dispatch) must NOT both `gh issue
+  # list` -> find none -> `gh issue create` a duplicate tracking issue; a
+  # constant group makes the second wait for the first. cancel-in-progress: false
+  # so the queued run still executes (it may be the one that flips red -> resolve).
+  group: gate-failure-issue
+  cancel-in-progress: false
+
+jobs:
+  file-gate-failure-issue:
+    runs-on: ubuntu-latest
+    # gh CLI calls only (issue lookup/file/resolve); 10m is ample headroom.
+    timeout-minutes: 10
+    # Coarse pre-filter over TRUSTED GitHub-computed fields (event name /
+    # conclusion). The validate step below re-checks fail-closed (branch/event
+    # allowlist) before any issue write. A manual workflow_dispatch always enters
+    # (replay path). React to any terminal conclusion; the validate step maps it
+    # to file (red) / resolve (green) / no-op.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event != 'pull_request' &&
+       (github.event.workflow_run.conclusion == 'failure' ||
+        github.event.workflow_run.conclusion == 'cancelled' ||
+        github.event.workflow_run.conclusion == 'timed_out' ||
+        github.event.workflow_run.conclusion == 'success'))
+    env:
+      # Pass untrusted payload fields as env vars, NEVER inline into a run: shell.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      SERVER_URL: ${{ github.server_url }}
+      WR_EVENT: ${{ github.event.workflow_run.event }}
+      WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      WR_NAME: ${{ github.event.workflow_run.name }}
+      WR_URL: ${{ github.event.workflow_run.html_url }}
+      WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      DISPATCH_RUN_ID: ${{ github.event.inputs.run_id }}
+      TRIGGER: ${{ github.event_name }}
+      GATE_WORKFLOW_NAME: "Nightly agent-gate (deep check)"
+      ISSUE_LABEL: "gate-nightly-failure"
+    steps:
+      # Checkout so the validate step can call the extracted routing decision
+      # (scripts/ci/gate-failure-mode.sh). Keep the token out of .git/config —
+      # this lane runs no authenticated git.
+      - name: Checkout (for the routing decision script)
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate origin + determine mode (allowlist, fail-closed)
+        id: validate
+        run: |
+          set -euo pipefail
+          # Outputs: proceed (true/false), mode (file|resolve|none), run_url, conclusion.
+          emit() {
+            {
+              echo "proceed=$1"
+              echo "mode=$2"
+              echo "run_url=$3"
+              echo "conclusion=$4"
+            } >> "$GITHUB_OUTPUT"
+          }
+          DECIDE="scripts/ci/gate-failure-mode.sh"
+
+          if [ "${TRIGGER}" = "workflow_dispatch" ]; then
+            # Manual replay/test: the caller supplies an arbitrary run_id. The
+            # numeric check + allowlist live in the decision script; here we fetch
+            # the TARGET run's authoritative metadata (the one network step) so the
+            # decision is a pure function of already-resolved fields. Fetch is
+            # best-effort — a fetch failure yields empty fields -> decision `none`.
+            # DISPATCH_RUN_ID is passed via a quoted env var, never inlined.
+            R_NAME=""; R_BRANCH=""; R_EVENT=""; R_CONCLUSION=""; R_URL=""
+            if printf '%s' "${DISPATCH_RUN_ID:-}" | grep -Eq '^[0-9]+$'; then
+              META="$(gh run view "${DISPATCH_RUN_ID}" \
+                --json workflowName,headBranch,event,conclusion,url 2>/dev/null)" || META=""
+              if [ -n "${META}" ]; then
+                R_NAME="$(printf '%s' "${META}" | jq -r '.workflowName // ""')"
+                R_BRANCH="$(printf '%s' "${META}" | jq -r '.headBranch // ""')"
+                R_EVENT="$(printf '%s' "${META}" | jq -r '.event // ""')"
+                R_CONCLUSION="$(printf '%s' "${META}" | jq -r '.conclusion // ""')"
+                R_URL="$(printf '%s' "${META}" | jq -r '.url // ""')"
+              else
+                echo "::warning::could not fetch metadata for run ${DISPATCH_RUN_ID:-<none>} — decision will be 'none'."
+              fi
+            fi
+            MODE="$(bash "${DECIDE}" \
+              --trigger workflow_dispatch --gate-name "${GATE_WORKFLOW_NAME}" \
+              --name "${R_NAME}" --event "${R_EVENT}" --branch "${R_BRANCH}" \
+              --conclusion "${R_CONCLUSION}" --run-id "${DISPATCH_RUN_ID:-}")"
+            # Defensive: an empty/unexpected token is treated as `none` (no action).
+            MODE="${MODE:-none}"
+            if [ "${MODE}" != "file" ] && [ "${MODE}" != "resolve" ]; then
+              echo "::notice::replay of run ${DISPATCH_RUN_ID:-<none>} -> no action (see decision reason above)."
+              emit false none "" ""; exit 0
+            fi
+            echo "manual replay validated (conclusion '${R_CONCLUSION}', mode '${MODE}') — proceeding"
+            emit true "${MODE}" "${R_URL}" "${R_CONCLUSION}"; exit 0
+          fi
+
+          # Automatic workflow_run path. All fields come from the untrusted
+          # workflow_run payload via quoted env vars; the decision script applies
+          # the allowlist (schedule, or workflow_dispatch of the gate on main) and
+          # the conclusion->mode mapping.
+          MODE="$(bash "${DECIDE}" \
+            --trigger workflow_run --gate-name "${GATE_WORKFLOW_NAME}" \
+            --name "${WR_NAME}" --event "${WR_EVENT}" --branch "${WR_HEAD_BRANCH}" \
+            --conclusion "${WR_CONCLUSION}")"
+          # Defensive: an empty/unexpected token is treated as `none` (no action).
+          MODE="${MODE:-none}"
+          if [ "${MODE}" != "file" ] && [ "${MODE}" != "resolve" ]; then
+            echo "::notice::gate run '${WR_CONCLUSION}' on '${WR_EVENT}' -> no action (see decision reason above)."
+            emit false none "" ""; exit 0
+          fi
+          echo "gate run concluded '${WR_CONCLUSION}' (mode '${MODE}') — proceeding"
+          emit true "${MODE}" "${WR_URL}" "${WR_CONCLUSION}"
+
+      - name: File / update the gate-failure tracking issue (RED)
+        if: >-
+          steps.validate.outputs.proceed == 'true' &&
+          steps.validate.outputs.mode == 'file'
+        env:
+          RUN_URL: ${{ steps.validate.outputs.run_url }}
+          CONCLUSION: ${{ steps.validate.outputs.conclusion }}
+        run: |
+          set -euo pipefail
+          # Ensure the dedup label exists (idempotent; needs issues:write, which we
+          # hold). GH_REPO gives every gh call explicit repo context.
+          gh label create "${ISSUE_LABEL}" \
+            --repo "${GH_REPO}" \
+            --color B60205 \
+            --description "Nightly gate.yml deep-check backstop is failing (issue #2662)" \
+            2>/dev/null || true
+
+          # Assemble the body from shell vars ONLY (no GitHub-expression
+          # interpolation; no command substitution on data). Every interpolated
+          # value is a `%s` ARGUMENT (never part of the format string), so a `%` in
+          # a value is printed literally rather than eaten as a conversion spec.
+          # Bullet lines pass the `- label: ` prefix as a `%s` arg too, so no
+          # format string begins with `-` (which printf could parse as an option).
+          {
+            printf "The nightly full-gate backstop (\`.github/workflows/gate.yml\`, \"%s\") concluded **%s** on its latest run.\n\n" \
+              "${GATE_WORKFLOW_NAME}" "${CONCLUSION}"
+            printf '%s%s\n' '- Run: ' "${RUN_URL:-<run url unavailable>}"
+            printf '%s%s\n' '- Origin event: ' "${WR_EVENT:-<n/a>}"
+            printf '%s%s\n\n' '- Branch: ' "${WR_HEAD_BRANCH:-<n/a>}"
+            printf '%s\n' "A \`cancelled\`/\`timed_out\` conclusion means the deep-check did NOT certify \`main\` this night (issue #2662 — the silent-death mode that hid a dead backstop for all of July). A \`failure\` conclusion means a real gate-component FAIL: open the run above and inspect the uploaded \`agent-gate-summary\` artifact for the failing component."
+            printf '\n%s\n' "This issue is auto-updated on each subsequent red night and gets a resolved comment on the next green night; a human confirms + closes it."
+          } > gate-failure-body.md
+
+          # Dedup by the label: update the CANONICAL open tracking issue if present.
+          # Canonical = the OLDEST (lowest issue number) so a rare create-race that
+          # produced two issues still converges on ONE going forward (`min`, not
+          # `.[0]` which depends on gh's default newest-first ordering). `|| true`
+          # so a transient gh/API blip on the lookup does NOT abort the step
+          # (set -e) and silently drop the night's alert — an empty EXISTING falls
+          # through to a create attempt (itself || warn-guarded). At worst a blip
+          # creates a second issue (recoverable); dropping the alert is not.
+          EXISTING="$(gh issue list --repo "${GH_REPO}" --label "${ISSUE_LABEL}" \
+            --state open --limit 100 --json number --jq 'map(.number) | min // ""' \
+            2>/dev/null || true)"
+          if [ -n "${EXISTING}" ]; then
+            echo "Updating existing gate-failure issue #${EXISTING}"
+            gh issue comment "${EXISTING}" --repo "${GH_REPO}" --body-file gate-failure-body.md \
+              || echo "::warning::failed to comment on issue #${EXISTING} (non-gating)."
+          else
+            echo "Creating new gate-failure tracking issue"
+            gh issue create --repo "${GH_REPO}" \
+              --title "Nightly gate.yml deep-check RED — backstop not certifying main" \
+              --label "${ISSUE_LABEL}" \
+              --body-file gate-failure-body.md \
+              || echo "::warning::failed to create gate-failure issue (non-gating)."
+          fi
+
+      - name: Resolve tracking issue on a green run (comment only, never close)
+        if: >-
+          steps.validate.outputs.proceed == 'true' &&
+          steps.validate.outputs.mode == 'resolve'
+        env:
+          RUN_URL: ${{ steps.validate.outputs.run_url }}
+        run: |
+          set -euo pipefail
+          # `|| true`: a transient gh/API blip on the lookup must not abort the
+          # step (set -e). An empty result is treated as "no open issue" (the
+          # resolve comment is best-effort; a missed comment is harmless — the
+          # RED-path filing is the load-bearing side).
+          EXISTING="$(gh issue list --repo "${GH_REPO}" --label "${ISSUE_LABEL}" \
+            --state open --limit 100 --json number --jq 'map(.number) | min // ""' \
+            2>/dev/null || true)"
+          if [ -z "${EXISTING}" ]; then
+            echo "::notice::no open gate-failure issue to resolve — green run, nothing to do."
+            exit 0
+          fi
+          # Interpolated value passed as a `%s` ARGUMENT (never in the format
+          # string), so a `%` in the run URL is treated literally.
+          {
+            printf 'Nightly gate deep-check is GREEN again on run %s (conclusion: success).\n' \
+              "${RUN_URL:-<run url unavailable>}"
+            printf '%s\n' "The backstop certified \`main\`. A human can close this issue after confirming the run."
+          } > gate-resolve-body.md
+          gh issue comment "${EXISTING}" --repo "${GH_REPO}" --body-file gate-resolve-body.md \
+            || echo "::warning::failed to comment resolve on issue #${EXISTING} (non-gating)."

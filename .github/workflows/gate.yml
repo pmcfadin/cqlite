@@ -50,14 +50,34 @@ jobs:
   gate:
     name: Full agent gate
     runs-on: ubuntu-latest
-    # A full gate run (napi + maturin builds, full workspace test set, smoke
-    # over the corpus) is comparable in weight to node-ci/python-ci. On a
-    # COLD cache (first run, or after GH's 7-day cache eviction / branch
-    # scoping) the workspace compiles from scratch before any tests run; an
-    # observed cold run reached ~11/17 components in 45m before timing out.
-    # Warm runs (Swatinem cache restored) are far faster, but a nightly backstop
-    # must not depend on a warm cache, so budget for the cold case.
-    timeout-minutes: 75
+    # Timeout budget (issue #2662). MEASURED EVIDENCE: from Jul 6 -> Jul 17 this
+    # lane was CANCELLED 12 nights in a row — every run hit the old 75m
+    # `timeout-minutes` and was killed ~76m in. A `cancelled` conclusion pages
+    # nobody, so the backstop was silently dead all month (the alert wiring in
+    # `gate-failure-issue.yml`, added alongside this change, closes that gap).
+    #
+    # A full gate run (napi + maturin builds, full workspace test set, smoke over
+    # the corpus) is comparable in weight to node-ci/python-ci. On a COLD cache
+    # (first run, or after GH's 7-day cache eviction / branch scoping) the whole
+    # workspace + both binding modules compile from scratch before any tests run;
+    # an observed cold run reached only ~11/17 components in 45m before timing
+    # out. Warm runs (Swatinem cache restored) are far faster, but a nightly
+    # backstop must not depend on a warm cache, so budget for the cold case.
+    #
+    # Two changes buy the headroom: (1) the heaviest nightly-only add — the
+    # `CQLITE_CLIPPY_FULL=1` full-matrix clippy that compiles the source-built
+    # DuckDB C++ amalgamation + the OpenTelemetry/OTLP stack — is split into the
+    # parallel `clippy-full` job in this workflow, off this job's critical path;
+    # (2) this timeout is raised 75 -> 180m. 180m is a deliberate over-provision
+    # (~4x the 45m/11-components cold observation) so a slow-but-healthy cold
+    # night yields a REAL verdict instead of a cancel. REVISIT this number with
+    # the measured end-to-end runtime from the #2662 verification dispatch
+    # (acceptance #4) — tighten toward measured + margin once one true cold run
+    # completes. Also confirm the July cancels were timeout-not-hang (a slow run,
+    # not a hung/stuck component) from that dispatch's per-component timings
+    # before trusting the raise; a genuinely hung component would need a
+    # per-component watchdog rather than a bigger job budget.
+    timeout-minutes: 180
 
     # Cap peak compile memory pressure (issue #1269). The full gate compiles the
     # workspace + both binding modules and runs the full test set; the runner
@@ -218,14 +238,16 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           CQLITE_REQUIRE_FIXTURES: '1'
           AGENT_GATE_SUMMARY_FILE: ${{ github.workspace }}/agent-gate-summary.txt
-          # Full-matrix clippy backstop (issue #1844). The routine local gate runs a
-          # SCOPED per-package clippy that skips the source-built DuckDB C++
-          # amalgamation (cqlite-cli `duckdb-tests`) and the OpenTelemetry/OTLP stack
-          # (`observability`/`observability-testing`) — pure per-gate tax locally. This
-          # nightly deep-check restores the historical
-          # `cargo clippy --workspace --all-targets --all-features -D warnings` pass so
-          # any lint behind those excluded features is still caught within 24h.
-          CQLITE_CLIPPY_FULL: '1'
+          # NOTE (issue #2662): CQLITE_CLIPPY_FULL is deliberately NOT set here.
+          # The full-matrix clippy backstop (issue #1844) — which compiles the
+          # source-built DuckDB C++ amalgamation (cqlite-cli `duckdb-tests`) + the
+          # OpenTelemetry/OTLP stack (`observability`/`observability-testing`) that
+          # the routine SCOPED per-package clippy skips — now runs in its own
+          # parallel `clippy-full` job in this workflow, to keep that heavy compile
+          # off this job's timeout budget. This step still runs the FULL gate
+          # (never `--only`, so the run "counts" as the gate — the run is stamped
+          # PASS/FAIL, never PARTIAL) with the gate's own SCOPED clippy component;
+          # the two jobs together restore the historical nightly clippy coverage.
         run: bash scripts/agent-gate.sh
 
       # Legibility (issue #1269) — resource state after the gate, on success or
@@ -251,3 +273,93 @@ jobs:
           path: agent-gate-summary.txt
           if-no-files-found: warn
           retention-days: 14
+
+  # Full-matrix clippy backstop (issue #1844), split off the main gate job's
+  # critical path (issue #2662). The routine local gate runs a SCOPED per-package
+  # clippy that skips the source-built DuckDB C++ amalgamation (cqlite-cli
+  # `duckdb-tests`) and the OpenTelemetry/OTLP stack (`observability`/
+  # `observability-testing`) — pure per-gate tax locally. Compiling those under
+  # `--all-features` is the single heaviest nightly-only add, so it ran as
+  # CQLITE_CLIPPY_FULL=1 INSIDE the gate job and consumed a large slice of the 75m
+  # that the gate then blew past. Running it as its own PARALLEL job restores the
+  # historical `cargo clippy --workspace --all-targets --all-features -D warnings`
+  # coverage within 24h while keeping it off the gate job's timeout budget. This
+  # is the EXACT command the gate script runs when CQLITE_CLIPPY_FULL=1
+  # (scripts/agent-gate.sh `run_clippy`). A FAIL here reds the workflow run just
+  # as a gate-component FAIL does, so the alert wiring in gate-failure-issue.yml
+  # surfaces it.
+  clippy-full:
+    name: Full-matrix clippy (--all-features)
+    runs-on: ubuntu-latest
+    # Clippy of the whole workspace under --all-features compiles the DuckDB C++
+    # amalgamation + the OTel stack from source on a cold cache — heavy, but far
+    # lighter than the full gate (no binding builds, no test set, no datasets,
+    # no smoke corpus). 90m is generous cold headroom; revisit with the measured
+    # runtime from the #2662 verification dispatch (acceptance #4).
+    timeout-minutes: 90
+    # Same peak-memory bounding as the gate job (issue #1269): the --all-features
+    # compile of duckdb-sys + the OTel crates is memory-heavy; cap codegen
+    # parallelism and disable incremental so peak RAM stays under the ceiling.
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # Clippy needs no history (no file-size ratchet here); keep the token
+          # out of .git/config — this lane runs no authenticated git.
+          persist-credentials: false
+
+      # The --all-features compile of the DuckDB amalgamation can sit near the
+      # runner's disk ceiling (issue #722). Reclaim the big unused toolchains with
+      # the same INLINE cleanup the gate job uses (no third-party @main action ref
+      # before a compile step). Leaves the toolcache ROOT in place.
+      - name: Free disk space (issue #722, #2662)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost || true
+          sudo docker image prune --all --force || true
+          df -h / | tail -1
+
+      # Pinned to rust-toolchain.toml (1.97.1) via the @1.97.1 ref — the #1990
+      # policy method for dtolnay/rust-toolchain, which CANNOT read the pin file
+      # (see docs/development/ci-toolchain-policy.md). Requests clippy explicitly
+      # (this lane's whole purpose), matching the gate job's Setup Rust step.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct cache key from the gate job: the --all-features build graph
+          # (duckdb-sys, OTel) differs from the gate's default-feature graph, so
+          # a shared key would thrash both. cache-on-failure keeps a cold night
+          # from re-compiling everything the next night.
+          key: gate-clippy-full-${{ hashFiles('**/Cargo.lock') }}
+          cache-on-failure: true
+
+      # OOM headroom (issue #1269), mirroring the gate job: provision a swapfile
+      # on /mnt so the peak of the parallel --all-features compile spills to swap
+      # rather than tripping the OOM killer. Inline, guarded against a residual
+      # runner swap.
+      - name: Add swap space
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile || true
+          sudo fallocate -l 13G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+
+      # The historical full-matrix clippy pass (issue #1844). This is byte-for-byte
+      # the command scripts/agent-gate.sh runs for its `clippy` component when
+      # CQLITE_CLIPPY_FULL=1, so this job is a faithful stand-in for that env on
+      # the split-out lane. RUSTFLAGS=-D warnings makes any lint a hard failure.
+      - name: Full-matrix clippy
+        run: env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features

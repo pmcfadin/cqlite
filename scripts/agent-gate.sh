@@ -19,8 +19,9 @@
 #                      so no other component reuses them). parquet/arrow stay linted.
 #                      Set CQLITE_CLIPPY_FULL=1 to run the historical
 #                      `--workspace --all-targets --all-features` matrix instead; the
-#                      nightly gate.yml deep-check sets it so the otel/duckdb-inclusive
-#                      lint still runs within 24h (coverage moved, not deleted).
+#                      nightly gate.yml deep-check runs that full matrix in its own
+#                      parallel `clippy-full` job (issue #2662) so the otel/duckdb-
+#                      inclusive lint still runs within 24h (coverage moved, not deleted).
 #   core-tests         cargo test -p cqlite-core --features cli-helpers (CI skip-list applied)
 #   scan-offload-guard cargo test -p cqlite-core --features cli-helpers,scan-offload-probe
 #                      --test issue_1143_scan_offload_thread (windowed-scan parse
@@ -1907,9 +1908,11 @@ record_result() { # <name> <status> <seconds>
 # Coverage of the excluded features is NOT deleted — it moves to a nightly full
 # matrix: set CQLITE_CLIPPY_FULL=1 to run the historical
 # `--workspace --all-targets --all-features` pass instead. `.github/workflows/gate.yml`
-# (the nightly deep-check) sets it, so the full otel/duckdb-inclusive lint still runs
-# within 24h. The explicit per-package feature lists below can drift as features are
-# added; that nightly `--all-features` pass is the backstop that catches any omission.
+# (the nightly deep-check) runs that full matrix in a dedicated parallel `clippy-full`
+# job (issue #2662) — the `gate` job itself runs the full gate with this SCOPED clippy —
+# so the full otel/duckdb-inclusive lint still runs within 24h. The explicit per-package
+# feature lists below can drift as features are added; that nightly `--all-features` pass
+# is the backstop that catches any omission.
 run_clippy() {
   if [ "${CQLITE_CLIPPY_FULL:-0}" = 1 ]; then
     env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
@@ -2541,7 +2544,11 @@ run_kit_dashboard_drift() {
 # scripts/tests/test_agent_gate_delta.sh (#1892), which drives the hidden
 # --delta-classify hook + --delta entry guards + --delta-...-emit-summary-selftest
 # to assert the test/docs-only fail-closed re-cert policy and DISTINCT delta
-# markers (hermetic — classification/emission only, never runs cargo). SKIP-aware:
+# markers (hermetic — classification/emission only, never runs cargo). Also runs
+# scripts/tests/test_gate_failure_mode.sh (#2662), which pins the decision table
+# of scripts/ci/gate-failure-mode.sh — the routing logic behind the nightly
+# gate-failure alert workflow, which is otherwise untestable (it only fires on a
+# real workflow_run event). Pure/offline, no gh/network. SKIP-aware:
 # the summary test's truncation case relies on a python3 reader, so with no
 # python3 we record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
 run_tooling_tests() {
@@ -2781,7 +2788,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
@@ -2790,7 +2797,8 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1; then
+     bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -3498,7 +3506,7 @@ run_delta() {
     "delta-anchor: $anchor_sha (full-gate PASS commit)"
     "delta-anchor-run-id: $anchor_run_id"
     "gate-of-record: full agent-gate.sh run at $anchor_sha (this DELTA re-certifies a test/docs-only diff; it is NOT a substitute for the full gate)"
-    "nightly-backstop: .github/workflows/gate.yml deep-check re-runs the FULL gate on main (CQLITE_CLIPPY_FULL=1)"
+    "nightly-backstop: .github/workflows/gate.yml deep-check re-runs the FULL gate on main (gate job = scoped clippy; full --all-features clippy in the parallel clippy-full job, #2662)"
   )
 
   # FAIL-CLOSED: any production file in the diff refuses the delta re-cert. Name the
