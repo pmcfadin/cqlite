@@ -541,14 +541,96 @@ _sccache_health() {
   printf '%s' "$_SCCACHE_HEALTH"
 }
 
+# ---- mold link-accelerator state (issue #2859) ------------------------------
+# On Linux agent workers the link step is the one build cost sccache cannot cache
+# (every --lite round and full gate re-links every test binary from scratch), so
+# bootstrap-agent-machine.sh provisions the mold linker and wires it through a
+# managed block in the per-machine ~/.cargo/config.toml. The gate surfaces that
+# state on the accelerators: line so an installed-but-unwired worker (silent
+# degradation) is visible in the pasted block — exactly the contract sccache
+# follows. Four states, Linux hosts ONLY:
+#   linked                — mold on PATH AND the managed block is active in the
+#                           resolved cargo config (bootstrap wired it)
+#   overridden            — a non-empty RUSTFLAGS is exported in the gate
+#                           environment: env RUSTFLAGS SUPPRESSES cargo's
+#                           target.rustflags entirely, so the managed block's
+#                           -fuse-ld=mold is NOT applied and a bare `linked` would
+#                           LIE. This is the exact footgun the token exists to
+#                           surface (never export global RUSTFLAGS on a worker).
+#   present-unconfigured  — mold on PATH but no managed block (bootstrap not re-run)
+#   absent                — mold not on PATH
+# Darwin (and any non-Linux host) emits NO mold token: mold is Linux-only and a
+# permanent n/a token would churn every existing summary parser/fixture for zero
+# signal. Test hooks (issue #2859 self-test): AGENT_GATE_TEST_OS forces the host
+# family and AGENT_GATE_TEST_MOLD_STATE forces the detected state, so the four
+# states (and the Darwin no-token case) assert deterministically without mold
+# installed or a real ~/.cargo/config.toml.
+
+# The EXACT managed-block begin marker bootstrap-agent-machine.sh writes. Match the
+# full line (grep -Fxq) — NOT a prefix — so a user's own `# BEGIN cqlite-mold-...`
+# comment can never false-positive as the managed block.
+_MOLD_BEGIN_MARKER='# BEGIN cqlite-mold (managed by scripts/bootstrap-agent-machine.sh — do not edit inside)'
+
+# _mold_block_active: true when the bootstrap-managed block is present in the
+# per-machine cargo config file cargo ACTUALLY reads. Cargo prefers the
+# extension-less `config` over `config.toml` when BOTH exist (a documented legacy
+# precedence), so we probe ONLY the effective file — checking both would report
+# `linked` on a both-files machine where the block sits in the ignored `config.toml`.
+_mold_block_active() {
+  local cfg_dir="${CARGO_HOME:-$HOME/.cargo}" f
+  if [ -f "$cfg_dir/config" ]; then
+    f="$cfg_dir/config"
+  elif [ -f "$cfg_dir/config.toml" ]; then
+    f="$cfg_dir/config.toml"
+  else
+    return 1
+  fi
+  grep -Fxq "$_MOLD_BEGIN_MARKER" "$f" 2>/dev/null
+}
+
+# _mold_state: resolve linked|overridden|present-unconfigured|absent, memoized.
+# A non-empty RUSTFLAGS **or** CARGO_ENCODED_RUSTFLAGS in the gate environment
+# suppresses cargo's target.rustflags entirely (encoded takes even higher
+# precedence), so either one turns an otherwise-`linked` state into `overridden`.
+_MOLD_STATE=""
+_mold_state() {
+  [ -n "$_MOLD_STATE" ] && { printf '%s' "$_MOLD_STATE"; return; }
+  if [ -n "${AGENT_GATE_TEST_MOLD_STATE:-}" ]; then
+    _MOLD_STATE="$AGENT_GATE_TEST_MOLD_STATE"
+  elif ! command -v mold >/dev/null 2>&1; then
+    _MOLD_STATE=absent
+  elif { [ -n "${RUSTFLAGS:-}" ] || [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; } \
+       && _mold_block_active; then
+    # Managed block present but a global (encoded-)RUSTFLAGS suppresses it →
+    # honest signal that the wired -fuse-ld=mold is NOT in effect.
+    _MOLD_STATE=overridden
+  elif _mold_block_active; then
+    _MOLD_STATE=linked
+  else
+    _MOLD_STATE=present-unconfigured
+  fi
+  printf '%s' "$_MOLD_STATE"
+}
+
+# _mold_accel_token: the ` mold=<state>` suffix on Linux hosts, empty elsewhere.
+_mold_accel_token() {
+  local os="${AGENT_GATE_TEST_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+  case "$os" in
+    Linux|linux) printf ' mold=%s' "$(_mold_state)" ;;
+    *) : ;; # Darwin/other: no token — byte-identical to pre-#2859 output
+  esac
+}
+
 # accelerators_line: the machine-checkable one-liner stamped into every SUMMARY
 # block (full, lite, and the emission selftest). Values: on|absent|off|serial.
 # See the ACCEL_* detection above (#1848). The trailing sccache-health token
-# (na|ok|warn, issue #2641) surfaces sccache's own corruption counters.
+# (na|ok|warn, issue #2641) surfaces sccache's own corruption counters. On Linux
+# a ` mold=linked|overridden|present-unconfigured|absent` token follows (issue
+# #2859); Darwin output is unchanged.
 accelerators_line() {
-  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s' \
+  printf 'accelerators: sccache=%s nextest=%s lanes=%s sccache-health=%s%s' \
     "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}" \
-    "$(_sccache_health)"
+    "$(_sccache_health)" "$(_mold_accel_token)"
 }
 
 # ---- Per-gate core budget (issue #2640) -------------------------------------

@@ -70,11 +70,34 @@ assert_accelerators() {
     echo "------- captured -------"; cat "$file"; echo "------------------------"
     return
   fi
+  # The optional trailing ` mold=<state>` token (issue #2859) appears on Linux
+  # hosts only; Darwin output ends at sccache-health, byte-identical to pre-change.
   if printf '%s\n' "$line" \
-       | grep -Eq '^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)$'; then
+       | grep -Eq '^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?$'; then
     ok "$label: accelerators line well-formed ($line)"
   else
     bad "$label: malformed accelerators line: '$line'"
+  fi
+}
+
+# assert_mold_token <label> <file> <expected>: assert the accelerators line's mold
+# token (issue #2859). <expected> is a state (linked|present-unconfigured|absent)
+# or the literal "none" to require NO mold token (the Darwin contract).
+assert_mold_token() {
+  local label="$1" file="$2" expected="$3" line
+  line=$(grep -E '^accelerators: ' "$file" 2>/dev/null | head -1)
+  if [ "$expected" = none ]; then
+    if printf '%s\n' "$line" | grep -q ' mold='; then
+      bad "$label: mold token present but expected none ($line)"
+    else
+      ok "$label: no mold token (Darwin contract)"
+    fi
+  else
+    if printf '%s\n' "$line" | grep -qE " mold=$expected(\$| )"; then
+      ok "$label: mold=$expected present"
+    else
+      bad "$label: expected mold=$expected, got: '$line'"
+    fi
   fi
 }
 
@@ -812,6 +835,107 @@ else
   bad "sccache-health: expected sccache-health=na when sccache not in use"
   grep '^accelerators:' "$tmp/health-na.txt" 2>/dev/null || cat "$tmp/health-na.txt"
 fi
+
+# 9d. mold link-accelerator token (issue #2859). On Linux the accelerators line
+#     carries a trailing `mold=linked|overridden|present-unconfigured|absent` token;
+#     on Darwin it carries NO mold token (byte-identical to pre-change). The host
+#     family is forced via AGENT_GATE_TEST_OS and the detected state via
+#     AGENT_GATE_TEST_MOLD_STATE, so all four states assert deterministically here.
+for state in linked overridden present-unconfigured absent; do
+  mold_file="$tmp/mold-$state.txt"
+  AGENT_GATE_SUMMARY_FILE="$mold_file" \
+    AGENT_GATE_TEST_OS=Linux AGENT_GATE_TEST_MOLD_STATE="$state" \
+    bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+  assert_mold_token "mold-linux-$state" "$mold_file" "$state"
+  # The whole line must also still pass the (mold-aware) well-formed check.
+  assert_accelerators "mold-linux-$state" "$mold_file"
+done
+
+# 9d-darwin. Darwin emits NO mold token even with a forced state present — the
+#            token is Linux-only; macOS output ends at sccache-health.
+mold_darwin="$tmp/mold-darwin.txt"
+AGENT_GATE_SUMMARY_FILE="$mold_darwin" \
+  AGENT_GATE_TEST_OS=Darwin AGENT_GATE_TEST_MOLD_STATE=linked \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-darwin" "$mold_darwin" none
+assert_accelerators "mold-darwin" "$mold_darwin"
+
+# 9e. REAL detection (NO AGENT_GATE_TEST_MOLD_STATE override): exercise the actual
+#     `command -v mold` + `_mold_block_active` + RUSTFLAGS branches. A stub `mold` is
+#     put first on PATH and CARGO_HOME points at a temp dir we (don't) seed with the
+#     managed block, so linked / overridden / present-unconfigured are decided by the
+#     gate's real logic. The block marker must be the EXACT full line the writer emits
+#     (prefix matching would let a user's own `# BEGIN cqlite-mold-*` comment
+#     false-positive) — asserted by the notours case below.
+mold_bin="$tmp/mold-bin"; mkdir -p "$mold_bin"
+printf '#!/usr/bin/env bash\n[ "$1" = --version ] && echo "mold 2.4.0"\nexit 0\n' >"$mold_bin/mold"
+chmod +x "$mold_bin/mold"
+MOLD_MARK='# BEGIN cqlite-mold (managed by scripts/bootstrap-agent-machine.sh — do not edit inside)'
+
+# 9e-i. mold on PATH + managed block in config.toml -> linked (real detection).
+ch1=$(mktemp -d "$tmp/mold-ch1.XXXXXX")
+printf '%s\n[target.x86_64-unknown-linux-gnu]\nrustflags = ["-C", "link-arg=-fuse-ld=mold"]\n# END cqlite-mold\n' "$MOLD_MARK" >"$ch1/config.toml"
+mf1="$tmp/mold-real-linked.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf1" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch1" RUSTFLAGS='' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-linked" "$mf1" linked
+
+# 9e-ii. managed block in the extension-less `config` file -> linked (both names read).
+ch2=$(mktemp -d "$tmp/mold-ch2.XXXXXX")
+printf '%s\n# END cqlite-mold\n' "$MOLD_MARK" >"$ch2/config"
+mf2="$tmp/mold-real-legacy.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf2" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch2" RUSTFLAGS='' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-legacy-config" "$mf2" linked
+
+# 9e-iii. mold on PATH, NO managed block -> present-unconfigured (real detection).
+ch3=$(mktemp -d "$tmp/mold-ch3.XXXXXX")
+mf3="$tmp/mold-real-unconf.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf3" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch3" RUSTFLAGS='' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-unconfigured" "$mf3" present-unconfigured
+
+# 9e-iv. managed block active BUT a non-empty RUSTFLAGS exported -> overridden.
+mf4="$tmp/mold-real-overridden.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf4" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch1" RUSTFLAGS='-C target-cpu=native' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-overridden" "$mf4" overridden
+
+# 9e-iv-b. CARGO_ENCODED_RUSTFLAGS (higher precedence than RUSTFLAGS, same
+#          suppression) also -> overridden, even with RUSTFLAGS empty.
+mf4b="$tmp/mold-real-overridden-encoded.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf4b" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch1" RUSTFLAGS='' \
+  CARGO_ENCODED_RUSTFLAGS=$'-C\x1ftarget-cpu=native' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-overridden-encoded" "$mf4b" overridden
+
+# 9e-vi. BOTH config files present, block ONLY in the ignored config.toml (cargo reads
+#        the extension-less `config`) -> present-unconfigured, proving the detector
+#        probes the EFFECTIVE file, not either-of-both.
+ch6=$(mktemp -d "$tmp/mold-ch6.XXXXXX")
+printf '[net]\nretry = 1\n' >"$ch6/config"
+printf '%s\n# END cqlite-mold\n' "$MOLD_MARK" >"$ch6/config.toml"
+mf6="$tmp/mold-real-bothfiles.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf6" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch6" RUSTFLAGS='' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-both-files-precedence" "$mf6" present-unconfigured
+
+# 9e-v. marker alignment: a user's own `# BEGIN cqlite-mold-notours` comment (a
+#       PREFIX of, but not equal to, the managed marker) must NOT be detected as the
+#       block -> present-unconfigured, proving exact-full-line matching.
+ch5=$(mktemp -d "$tmp/mold-ch5.XXXXXX")
+printf '# BEGIN cqlite-mold-notours my own note\n[build]\njobs = 2\n' >"$ch5/config.toml"
+mf5="$tmp/mold-real-notours.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf5" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch5" RUSTFLAGS='' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-marker-alignment" "$mf5" present-unconfigured
 
 # ============================================================================
 # ISSUE #2078: FULL gate fails CLOSED when the fetched dataset corpus is absent.

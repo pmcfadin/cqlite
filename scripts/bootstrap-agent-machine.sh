@@ -9,9 +9,11 @@
 # What it verifies:
 #   1. Rust toolchain (cargo) — needed to build + to `cargo install` on Linux.
 #   2. Accelerators the gate auto-detects (issue #1848): sccache, cargo-nextest,
-#      modern bash (>=4.3 for parallel component lanes). Detection here MIRRORS
-#      the gate's ACCEL_* block (scripts/agent-gate.sh, "sccache auto-detect" /
-#      "cargo-nextest auto-detect" / "ACCEL_LANES") so the two can never disagree
+#      modern bash (>=4.3 for parallel component lanes), and — on Linux only —
+#      the mold linker (issue #2859), wired via a managed block in the per-machine
+#      ~/.cargo/config.toml. Detection here MIRRORS the gate's ACCEL_* block
+#      (scripts/agent-gate.sh, "sccache auto-detect" / "cargo-nextest auto-detect"
+#      / "ACCEL_LANES" / "mold link-accelerator") so the two can never disagree
 #      about whether an accelerator is present. The final health check below
 #      re-reads the state straight from the gate to reconcile.
 #   3. gh auth + the `project` scope (Path A board dispatch, #1886).
@@ -39,7 +41,7 @@ for arg in "$@"; do
     --yes|-y) AUTO_YES=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     -h|--help)
-      sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "bootstrap: unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -80,6 +82,150 @@ brew_or_cargo() {
   else
     echo "cargo install $2"
   fi
+}
+
+# ---- mold link accelerator helpers (Linux only, issue #2859) ----
+# mold is the fast Linux linker; linking is the one build cost sccache cannot
+# cache, so every --lite round and full gate re-links every test binary from
+# scratch. These helpers detect/install mold, prove the toolchain accepts it via a
+# link probe, and wire it through a delimited managed block in the PER-MACHINE
+# ~/.cargo/config.toml (honoring $CARGO_HOME). They NEVER touch the repo-committed
+# .cargo/config.toml, are idempotent (replace-the-block), and preserve all content
+# outside the markers. All of this is inert on non-Linux hosts (gated by the caller).
+MOLD_BEGIN='# BEGIN cqlite-mold (managed by scripts/bootstrap-agent-machine.sh — do not edit inside)'
+MOLD_END='# END cqlite-mold'
+
+# mold_link_probe <compiler>: true iff <compiler> links a trivial program with
+# -fuse-ld=mold (proves the toolchain will not break linking before we write config).
+mold_link_probe() {
+  local cc="$1"
+  have "$cc" || return 1
+  local d
+  d=$(mktemp -d 2>/dev/null) || return 1
+  printf 'int main(void){return 0;}\n' >"$d/probe.c"
+  local rc=0
+  "$cc" -fuse-ld=mold "$d/probe.c" -o "$d/probe" >/dev/null 2>&1 || rc=1
+  rm -rf "$d"
+  return $rc
+}
+
+# mold_target_section <triple> <linker>: emit one cargo [target.<triple>] section
+# routing linking through mold; adds `linker = "<linker>"` only when non-empty.
+mold_target_section() {
+  local triple="$1" linker="$2"
+  printf '[target.%s]\n' "$triple"
+  [ -n "$linker" ] && printf 'linker = "%s"\n' "$linker"
+  printf 'rustflags = ["-C", "link-arg=-fuse-ld=mold"]\n'
+}
+
+# mold_write_block <linker>: (re)write the managed block in the per-machine cargo
+# config. Strips any prior block (and one blank line immediately preceding it) so
+# re-runs are byte-idempotent, preserves everything else, then appends the block
+# with both Linux target triples. Writes into whichever config file cargo actually
+# reads — the extension-less `config` WINS when both exist (a documented legacy
+# precedence cargo warns about), else `config.toml` — so a machine that only has
+# the legacy `~/.cargo/config` never gets a shadow file that cargo would ignore,
+# and a both-files machine never has the block land in the ignored file.
+mold_write_block() {
+  local linker="$1"
+  local cfg_dir cfg_file preserved
+  cfg_dir="${CARGO_HOME:-$HOME/.cargo}"
+  if ! mkdir -p "$cfg_dir" 2>/dev/null; then
+    warn "could not create $cfg_dir — skipping mold linker config"
+    return 0
+  fi
+  if [ -f "$cfg_dir/config" ]; then
+    cfg_file="$cfg_dir/config"
+  elif [ -f "$cfg_dir/config.toml" ]; then
+    cfg_file="$cfg_dir/config.toml"
+  else
+    cfg_file="$cfg_dir/config.toml"
+  fi
+  preserved=$(mktemp) || { warn "mktemp failed — skipping mold linker config"; return 0; }
+  if [ -f "$cfg_file" ]; then
+    awk -v b="$MOLD_BEGIN" -v e="$MOLD_END" '
+      { lines[NR] = $0 }
+      END {
+        start = 0
+        for (i = 1; i <= NR; i++) if (lines[i] == b) { start = i; break }
+        if (start == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
+        endi = 0
+        for (i = start; i <= NR; i++) if (lines[i] == e) { endi = i; break }
+        if (endi == 0) endi = NR
+        rmstart = start
+        if (start > 1 && lines[start-1] == "") rmstart = start - 1
+        for (i = 1; i <= NR; i++) if (i < rmstart || i > endi) print lines[i]
+      }
+    ' "$cfg_file" >"$preserved"
+  else
+    : >"$preserved"
+  fi
+  # Fail-safe #1: a user-defined [target.<triple>-unknown-linux-gnu] section OUTSIDE
+  # our markers would collide with the block we append (TOML table redefinition =
+  # cargo parse error on EVERY invocation). Never risk it — warn and write nothing,
+  # leaving the file byte-identical.
+  if grep -Eq '^\[target\.(x86_64|aarch64)-unknown-linux-gnu\]' "$preserved"; then
+    warn "existing [target.<triple>-unknown-linux-gnu] section in $cfg_file — writing NO mold block (a second table would be a cargo parse error); add \"-C link-arg=-fuse-ld=mold\" to that section by hand, or remove it and re-run bootstrap"
+    rm -f "$preserved"
+    return 0
+  fi
+  # Fail-safe #2: a pre-existing [build] rustflags (or a dotted build.rustflags) is
+  # first-match-wins over our target.rustflags — writing the block would SILENTLY
+  # disable the user's global flags. Same posture: warn and write nothing.
+  if awk '
+      /^\[build\]/ { inbuild = 1; next }
+      /^\[/        { inbuild = 0 }
+      inbuild && /^[[:space:]]*rustflags[[:space:]]*=/ { found = 1 }
+      /^[[:space:]]*build\.rustflags[[:space:]]*=/     { found = 1 }
+      END { exit(found ? 0 : 1) }
+    ' "$preserved"; then
+    warn "existing [build] rustflags in $cfg_file — writing NO mold block (target.rustflags would silently disable the user's build rustflags); add \"-C link-arg=-fuse-ld=mold\" to that rustflags list by hand, or remove it and re-run bootstrap"
+    rm -f "$preserved"
+    return 0
+  fi
+  # Atomic write: build the new content in a temp file in the SAME directory, then
+  # rename over the target — so an ENOSPC/interrupt mid-write can never leave a
+  # truncated config (which would break every cargo invocation). Resolve a symlink
+  # to its target so we never silently replace a symlinked config with a plain file.
+  local write_target="$cfg_file" tmpw
+  if [ -L "$cfg_file" ]; then
+    write_target=$(readlink -f "$cfg_file" 2>/dev/null || echo "$cfg_file")
+  fi
+  tmpw=$(mktemp "$(dirname "$write_target")/.cqlite-mold.XXXXXX" 2>/dev/null) \
+    || { warn "mktemp failed in $(dirname "$write_target") — skipping mold linker config"; rm -f "$preserved"; return 0; }
+  {
+    cat "$preserved"
+    [ -s "$preserved" ] && printf '\n'
+    printf '%s\n' "$MOLD_BEGIN"
+    mold_target_section "x86_64-unknown-linux-gnu" "$linker"
+    printf '\n'
+    mold_target_section "aarch64-unknown-linux-gnu" "$linker"
+    printf '%s\n' "$MOLD_END"
+  } >"$tmpw"
+  rm -f "$preserved"
+  if mv -f "$tmpw" "$write_target"; then
+    ok "wrote mold managed block to $cfg_file (both Linux target triples${linker:+, linker=$linker})"
+  else
+    warn "could not install mold config at $write_target — original left intact"
+    rm -f "$tmpw"
+  fi
+}
+
+# mold_configure_linux: link-probe cc (then clang) and, on success, wire mold via
+# the managed block. Fail-safe: if no compiler accepts -fuse-ld=mold, WARN and
+# write NOTHING (a machine must never end up with a config that breaks linking).
+mold_configure_linux() {
+  local linker=""
+  if mold_link_probe cc; then
+    ok "link probe passed (cc accepts -fuse-ld=mold)"
+  elif mold_link_probe clang; then
+    linker="clang"
+    ok 'link probe passed (clang accepts -fuse-ld=mold; managed block sets linker = "clang")'
+  else
+    warn "link probe FAILED — no C compiler accepts -fuse-ld=mold; writing NO linker config (fail-safe)"
+    return 0
+  fi
+  mold_write_block "$linker"
 }
 
 echo "CQLite agent-machine bootstrap (issue #1921) — platform: $PLATFORM"
@@ -147,6 +293,45 @@ else
     info "note: macOS ships bash 3.2; brew's bash lands on PATH ahead of /bin/bash"
   else
     info "install a newer bash via your distro package manager (apt/dnf/pacman)"
+  fi
+fi
+
+# ---- 2b. Link accelerator: mold (Linux only, issue #2859) ----
+# Advisory, mirroring the sccache/nextest ok/warn pattern: a missing or
+# uninstallable mold never fails the run. macOS is out of scope (mold is
+# Linux-only; Apple's ld-prime is already the fastest linker there) — this whole
+# section is skipped on Darwin, so Darwin output is byte-identical to pre-change.
+if [ "$PLATFORM" = linux ]; then
+  hdr "Link accelerator: mold (Linux, issue #2859)"
+  MOLD_COST="linking is the one build cost sccache cannot cache — every --lite round and full gate re-links every test binary from scratch (GNU bfd/lld are materially slower, especially on aarch64/Graviton)"
+  if have mold; then
+    ok "mold present ($(mold --version 2>/dev/null | head -1)) — fast Linux linker"
+    # Probe the toolchain, then wire mold via the per-machine cargo config block.
+    mold_configure_linux
+  else
+    warn "mold MISSING — $MOLD_COST"
+    if have apt-get; then
+      run_or_print mold sudo apt-get install -y mold
+    elif have apt; then
+      run_or_print mold sudo apt install -y mold
+    elif have dnf; then
+      run_or_print mold sudo dnf install -y mold
+    elif have yum; then
+      run_or_print mold sudo yum install -y mold
+    elif have pacman; then
+      run_or_print mold sudo pacman -S --noconfirm mold
+    else
+      warn "no supported package manager (apt/dnf/yum/pacman) found — install mold manually"
+    fi
+    # Under --yes the install above may have just placed mold on PATH; wire it NOW
+    # (probe + managed block) so one --yes run delivers the FULL acceleration. In
+    # print-only mode nothing was installed, so keep the re-run hint instead.
+    if [ "$AUTO_YES" = 1 ] && have mold; then
+      ok "mold now present ($(mold --version 2>/dev/null | head -1)) — configuring linker"
+      mold_configure_linux
+    else
+      info "linker config is written only after mold is installed AND a link probe passes — re-run bootstrap once mold is on PATH"
+    fi
   fi
 fi
 
