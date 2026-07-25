@@ -121,10 +121,74 @@ impl CompressedScanWindow {
         }
     }
 
-    /// Serve `[start, end)` from this window, refilling (one coalesced,
-    /// chunk-aligned `read_compressed_offset_window` call) iff not already
-    /// covered. `span` is `end - start`; `data_section_end` bounds the last
-    /// window so it never reads past the data section.
+    /// Fetch chunk-aligned decompressed bytes `[aligned_from, aligned_from +
+    /// len)` via the reader's existing `read_compressed_offset_window`, sized
+    /// to cover at least up to `need_until` and rounded UP to a `chunk_length`
+    /// boundary (never past `data_section_end`). `greedy` additionally pads the
+    /// size out to `COMPRESSED_SCAN_WINDOW_TARGET_BYTES` (the coalescing win,
+    /// used for a fresh fill); a non-greedy call (an append onto an existing
+    /// window, see [`Self::slice`]) fetches only the minimum needed, so
+    /// repeated appends cannot make the window balloon past `max(target,
+    /// largest partition span)`.
+    async fn fetch_aligned(
+        reader: &SSTableReader,
+        source: &dyn super::super::read_at::ReadAt,
+        ci: &crate::storage::sstable::compression_info::CompressionInfo,
+        chunk_length: u64,
+        aligned_from: u64,
+        need_until: u64,
+        data_section_end: u64,
+        greedy: bool,
+    ) -> Result<Vec<u8>> {
+        let remaining = data_section_end.saturating_sub(aligned_from);
+        let minimal = need_until.saturating_sub(aligned_from);
+        let want = if greedy {
+            minimal
+                .max(COMPRESSED_SCAN_WINDOW_TARGET_BYTES)
+                .min(remaining)
+        } else {
+            minimal.min(remaining)
+        };
+        let raw_end = aligned_from + want;
+        let rounded_end = raw_end.div_ceil(chunk_length) * chunk_length;
+        let window_end = rounded_end.min(aligned_from + remaining);
+        let window_len = window_end - aligned_from;
+        let Ok(window_len_u32) = u32::try_from(window_len) else {
+            return Err(Error::corruption(format!(
+                "walk_in_range_partition_slices: coalesced compressed window length \
+                 {window_len} overflows u32 (issue #2877)"
+            )));
+        };
+        // `source` is the walk's SCAN-intent plane (issue #2876), threaded through
+        // so this coalescing window is a CONSUMER of that plane, never a bypass of
+        // it.
+        reader
+            .read_compressed_offset_window(source, ci, aligned_from, window_len_u32)
+            .await
+    }
+
+    /// Serve `[start, end)` from this window, refilling iff not already
+    /// covered. `data_section_end` bounds the last window so it never reads
+    /// past the data section.
+    ///
+    /// Two distinct refill shapes (issue #2877 roborev finding, High —
+    /// correctness): a naive "always resume exactly where the previous window
+    /// ended" is WRONG whenever the current partition does not start exactly
+    /// there.
+    /// - **Straddle** (`start` is still inside the buffered window but `end`
+    ///   runs past it — the common case once many small partitions have been
+    ///   served from one big window): APPEND new chunk-aligned bytes onto the
+    ///   tail, preserving the already-decompressed prefix, so a chunk already
+    ///   paid for is never re-decompressed.
+    /// - **Gap** (`start` is beyond the buffered window entirely — e.g. the
+    ///   out-of-range run SKIPPED between a compressed wraparound scan's two
+    ///   segments, which are never read so the window never advances for
+    ///   them; or the very first fill): REALIGN directly to the chunk
+    ///   containing `start`, discarding whatever was buffered. Blindly
+    ///   "continuing" from the stale tail here either UNDERFLOWS (`start -
+    ///   self.start` when the stale tail is ahead of `start`) or leaves the
+    ///   window short of `start` entirely (a false corruption error) —
+    ///   exactly the bug this fixes.
     async fn slice(
         &mut self,
         reader: &SSTableReader,
@@ -132,48 +196,67 @@ impl CompressedScanWindow {
         ci: &crate::storage::sstable::compression_info::CompressionInfo,
         start: u64,
         end: u64,
-        span: u64,
         data_section_end: u64,
     ) -> Result<&[u8]> {
-        if !self.filled || start < self.start || end > self.start + self.bytes.len() as u64 {
-            let chunk_length = ci.chunk_length as u64;
-            if chunk_length == 0 {
-                return Err(Error::corruption(
-                    "walk_in_range_partition_slices: CompressionInfo chunk_length is \
-                     zero (issue #2877)"
-                        .to_string(),
-                ));
-            }
-            // Resume exactly where the previous chunk-aligned window ended (by
-            // construction that boundary is itself chunk-aligned, see the type
-            // doc); the very first window aligns DOWN to the chunk containing
-            // this partition's start.
-            let aligned_start = if self.filled {
-                self.start + self.bytes.len() as u64
-            } else {
-                (start / chunk_length) * chunk_length
-            };
-            let remaining = data_section_end.saturating_sub(aligned_start);
-            let want = span.max(COMPRESSED_SCAN_WINDOW_TARGET_BYTES).min(remaining);
-            let raw_end = aligned_start + want;
-            let rounded_end = raw_end.div_ceil(chunk_length) * chunk_length;
-            let window_end = rounded_end.min(aligned_start + remaining);
-            let window_len = window_end - aligned_start;
-            let Ok(window_len_u32) = u32::try_from(window_len) else {
-                return Err(Error::corruption(format!(
-                    "walk_in_range_partition_slices: coalesced compressed window \
-                     length {window_len} overflows u32 (issue #2877)"
-                )));
-            };
-            // `source` is the walk's SCAN-intent plane (issue #2876), threaded
-            // through so this coalescing window is a CONSUMER of that plane, never
-            // a bypass of it.
-            self.bytes = reader
-                .read_compressed_offset_window(source, ci, aligned_start, window_len_u32)
+        let chunk_length = ci.chunk_length as u64;
+        if chunk_length == 0 {
+            return Err(Error::corruption(
+                "walk_in_range_partition_slices: CompressionInfo chunk_length is zero \
+                 (issue #2877)"
+                    .to_string(),
+            ));
+        }
+        let have_end = if self.filled {
+            self.start + self.bytes.len() as u64
+        } else {
+            0
+        };
+
+        if !self.filled || start < self.start || end > have_end {
+            if self.filled && start >= self.start && start <= have_end {
+                // Straddle: append.
+                let extra = Self::fetch_aligned(
+                    reader,
+                    source,
+                    ci,
+                    chunk_length,
+                    have_end,
+                    end,
+                    data_section_end,
+                    false,
+                )
                 .await?;
-            self.start = aligned_start;
+                self.bytes.extend_from_slice(&extra);
+            } else {
+                // Gap (or the very first fill, or a defensive `start <
+                // self.start`): realign fresh, discarding the stale buffer.
+                let aligned_start = (start / chunk_length) * chunk_length;
+                self.bytes = Self::fetch_aligned(
+                    reader,
+                    source,
+                    ci,
+                    chunk_length,
+                    aligned_start,
+                    end,
+                    data_section_end,
+                    true,
+                )
+                .await?;
+                self.start = aligned_start;
+            }
             self.filled = true;
         }
+
+        // Drop any now-dead prefix (the walk visits partitions in strictly
+        // ascending offset order): bounds memory without touching the
+        // chunk-aligned TAIL boundary, so it can never cause a chunk to be
+        // re-decompressed.
+        if start > self.start {
+            let drop_n = (start - self.start) as usize;
+            self.bytes.drain(0..drop_n.min(self.bytes.len()));
+            self.start = start;
+        }
+
         let lo = (start - self.start) as usize;
         let hi = (end - self.start) as usize;
         if hi > self.bytes.len() {
@@ -432,15 +515,7 @@ impl SSTableReader {
                     // decompressed once, not once per partition it contains.
                     std::borrow::Cow::Borrowed(
                         compressed_window
-                            .slice(
-                                self,
-                                scan_source.as_ref(),
-                                ci,
-                                start,
-                                end,
-                                span,
-                                data_section_end,
-                            )
+                            .slice(self, scan_source.as_ref(), ci, start, end, data_section_end)
                             .await?,
                     )
                 } else {
