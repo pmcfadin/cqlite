@@ -13,8 +13,7 @@
 //! helper serves BOTH read intents, so each caller passes the source its intent
 //! selects. The scan-shaped walks (`summary_scan.rs`'s Summary-guided partition
 //! walk, `full_index_scan.rs` / `full_index_stream.rs`'s full-`Index.db`
-//! enumeration, and `get_cached_data`'s compressed branch reached from
-//! `read_value_at_offset_for_scan`) pass the reader's UNADVISED
+//! enumeration, and the windowed scan) pass the reader's UNADVISED
 //! `scan_positional_source`, because they read Data.db largely sequentially and the
 //! advised mapping's readahead suppression is exactly backwards for them (the
 //! #2210 × #1940 cross-path regression). A genuine point lookup — `get_cached_data`

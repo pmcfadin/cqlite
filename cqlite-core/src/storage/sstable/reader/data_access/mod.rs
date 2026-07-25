@@ -555,31 +555,18 @@ impl SSTableReader {
     ///
     /// Reads Data.db through the reader's dedicated `MADV_RANDOM` point mapping
     /// ([`point_source`](Self::point_source), issue #2210), which is the right
-    /// advice for a scattered point fault. The index-driven SCAN calls
-    /// [`read_value_at_offset_for_scan`](Self::read_value_at_offset_for_scan)
-    /// instead — same decode, but on the unadvised scan plane (issue #2876).
+    /// advice for a scattered fault.
+    ///
+    /// Note (issue #2876, roborev job 4634): the index-driven range scan in
+    /// `sequential.rs` also uses THIS point-intent entry, and that is deliberate.
+    /// It looks like a scan, but `Index::get_range` yields entries in raw key-BYTE
+    /// order while Data.db is laid out in Murmur3 TOKEN order — uncorrelated for the
+    /// default partitioner — so its access really is scattered and `MADV_RANDOM` is
+    /// correct. The genuinely sequential walks (the Summary-guided walk, the full
+    /// index scan/stream, the windowed scan) reach the unadvised scan plane through
+    /// the positional helpers below, which take their plane from the caller.
     pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<ScanRow>> {
         self.read_value_at_offset_via(self.point_source.as_ref(), offset, size)
-            .await
-    }
-
-    /// SCAN-intent sibling of [`read_value_at_offset`](Self::read_value_at_offset)
-    /// (issue #2876): identical decode, but every Data.db byte — the partition
-    /// body AND its covering `CRC.db` chunks — is read through the reader's
-    /// unadvised scan mapping ([`scan_positional_source`](Self::scan_positional_source)).
-    ///
-    /// The index-driven range scan (`sequential.rs`) walks `Index.db` entries in
-    /// token order, so its Data.db access is mostly sequential and MUST NOT be
-    /// served from the `MADV_RANDOM` point mapping: that advice suppresses kernel
-    /// readahead, turning the walk into one ~4 KiB page fault per partition instead
-    /// of one ~128 KiB readahead window per many (the #2210 × #1940 cross-path
-    /// regression).
-    pub(in crate::storage::sstable::reader) async fn read_value_at_offset_for_scan(
-        &self,
-        offset: u64,
-        size: u32,
-    ) -> Result<Option<ScanRow>> {
-        self.read_value_at_offset_via(self.scan_positional_source.as_ref(), offset, size)
             .await
     }
 

@@ -76,10 +76,10 @@ async fn concurrent_point_reads(
 /// cursor mutex).
 ///
 /// `point_source` is the wrapped plane: `read_value_at_offset` is the POINT-intent
-/// entry point (issue #2876 — the scan-intent sibling is
-/// `read_value_at_offset_for_scan`, which `sequential.rs`'s index-driven scan
-/// calls), so a point read must reach the reader's dedicated `MADV_RANDOM`
-/// point-read mapping (issue #2210) and this convoy proof belongs on that plane.
+/// entry point (issue #2876), so a point read must reach the reader's dedicated
+/// `MADV_RANDOM` point-read mapping (issue #2210) and this convoy proof belongs on
+/// that plane. The genuinely sequential walks reach the unadvised scan plane via the
+/// positional helpers, which take their plane from the caller.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn eight_concurrent_point_reads_do_not_convoy() {
     let Some(path) = find_data_db("test_basic", "uncompressed_table") else {
@@ -557,8 +557,8 @@ async fn summary_guided_uncompressed_scan_walk_avoids_point_source() {
 ///
 /// The scan-plane split must not sweep the point path along with it: issue #2210
 /// gave point lookups an advised mapping precisely because their faults are
-/// scattered, and `read_value_at_offset` is the point-intent offset read (the
-/// index-driven scan uses its scan-intent sibling). So a `read_value_at_offset`
+/// scattered, and `read_value_at_offset` is the point-intent offset read. So a
+/// `read_value_at_offset`
 /// must read `point_source` and must NOT touch `scan_positional_source` — on a
 /// COMPRESSED reader (whose window comes from `read_compressed_offset_window`) as
 /// well as an UNCOMPRESSED one (raw bytes + `CRC.db` verification).
