@@ -254,6 +254,9 @@ fn cell_to_json(batch: &RecordBatch, col: &str, i: usize) -> Result<serde_json::
 
 /// Drive one `do_get` in-process and decode every returned batch into rows of
 /// the oracle's `id`/`ck`/`v` projection.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_rows(
     svc: &CqliteFlightService,
     ticket: Vec<u8>,

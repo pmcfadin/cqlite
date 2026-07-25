@@ -94,6 +94,9 @@ fn point_ticket(uuid: &str) -> Vec<u8> {
 }
 
 /// Total rows returned by a `do_get`.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_row_count(svc: &CqliteFlightService, ticket: Vec<u8>) -> usize {
     let resp = svc
         .do_get(Request::new(Ticket::new(ticket)))

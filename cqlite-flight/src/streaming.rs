@@ -450,6 +450,10 @@ pub(crate) async fn build_aggregate_response(
 /// counted. `record_encoder_error` now routes it through the shared
 /// error-observability hook and bumps `probe.errors_recorded`, so the failure is
 /// visible and deterministically observable in tests.
+// The stream item's `Err` is `tonic::Status`, whose size is fixed by the
+// arrow-flight `FlightService`/`DoGetStream` contract; boxing it (clippy's
+// suggestion) would violate the trait-mandated stream item type (#2856).
+#[allow(clippy::result_large_err)]
 fn encode_do_get(
     batch_stream: impl Stream<Item = Result<RecordBatch, FlightError>> + Send + 'static,
     schema_ref: Arc<ArrowSchema>,

@@ -94,7 +94,7 @@ async fn write_n_partitions(dir: &Path, n: i32, format: SSTableFormat) -> SSTabl
             (key, vec![m])
         })
         .collect();
-    partitions.sort_by(|a, b| a.0.token.cmp(&b.0.token));
+    partitions.sort_by_key(|a| a.0.token);
 
     for (key, muts) in partitions {
         writer.write_partition(key, muts).unwrap();

@@ -939,16 +939,13 @@ impl SSTableRowIteratorAdapter {
                 let mut ck_columns: Vec<(String, Value)> =
                     Vec::with_capacity(schema.clustering_keys.len());
                 for ck_col in &schema.clustering_keys {
-                    match simple
+                    // Any missing clustering column ⇒ the WHOLE key is discarded (the `?`
+                    // returns `None`, treating the row as unclustered).
+                    let pair = simple
                         .iter()
                         .find(|c| c.column == ck_col.name)
-                        .map(|c| (ck_col.name.clone(), c.value.clone()))
-                    {
-                        Some(pair) => ck_columns.push(pair),
-                        // A missing clustering column means we cannot form a valid
-                        // key — fall into the `None` bucket (unclustered row).
-                        None => return None,
-                    }
+                        .map(|c| (ck_col.name.clone(), c.value.clone()))?;
+                    ck_columns.push(pair);
                 }
                 Some(ClusteringKey {
                     columns: ck_columns,
@@ -967,14 +964,13 @@ impl SSTableRowIteratorAdapter {
                 let mut ck_columns: Vec<(String, Value)> =
                     Vec::with_capacity(schema.clustering_keys.len());
                 for ck_col in &schema.clustering_keys {
-                    match clustering
+                    // Any missing clustering column ⇒ the WHOLE key is discarded (the `?`
+                    // returns `None`, treating the row as unclustered).
+                    let pair = clustering
                         .iter()
                         .find(|(name, _)| name == &ck_col.name)
-                        .map(|(name, v)| (name.clone(), v.clone()))
-                    {
-                        Some(pair) => ck_columns.push(pair),
-                        None => return None,
-                    }
+                        .map(|(name, v)| (name.clone(), v.clone()))?;
+                    ck_columns.push(pair);
                 }
                 Some(ClusteringKey {
                     columns: ck_columns,
@@ -6333,7 +6329,7 @@ mod tests {
             .write(&StatisticsMetadata::new(), None)
             .expect("write valid Statistics.db");
         assert!(
-            all_input_stats_readable(&[good_data.clone()]),
+            all_input_stats_readable(std::slice::from_ref(&good_data)),
             "a well-formed input with a valid Statistics.db must be readable"
         );
 
@@ -6343,7 +6339,7 @@ mod tests {
         std::fs::write(&missing_data, b"").expect("touch missing-stats Data.db");
         // (deliberately write NO nb-2-big-Statistics.db)
         assert!(
-            !all_input_stats_readable(&[missing_data.clone()]),
+            !all_input_stats_readable(std::slice::from_ref(&missing_data)),
             "an input whose Statistics.db is missing must NOT be provably deletion-free"
         );
 
@@ -6355,7 +6351,7 @@ mod tests {
         std::fs::write(tmp.path().join("nb-3-big-Statistics.db"), b"\x00\x00")
             .expect("write truncated Statistics.db");
         assert!(
-            !all_input_stats_readable(&[corrupt_data.clone()]),
+            !all_input_stats_readable(std::slice::from_ref(&corrupt_data)),
             "an input whose Statistics.db is unparseable at the top level must fail closed"
         );
 
@@ -12557,7 +12553,7 @@ mod issue_929_bare_udt_compaction {
         );
 
         // The header gate must report NO complex UDT columns for this input.
-        let plan = udt_columns_eligible_for_normalization(&[input.data_path.clone()]);
+        let plan = udt_columns_eligible_for_normalization(std::slice::from_ref(&input.data_path));
         assert!(
             plan.eligible_marshals.is_empty() && plan.conflicts.is_empty(),
             "a simple-cell input must not be reported as eligible or conflicting"
@@ -12906,7 +12902,7 @@ mod issue_929_bare_udt_compaction {
         );
 
         // The plan copies the nested marshal verbatim (NOT a registry re-render).
-        let plan = udt_columns_eligible_for_normalization(&[input.data_path.clone()]);
+        let plan = udt_columns_eligible_for_normalization(std::slice::from_ref(&input.data_path));
         assert_eq!(
             plan.eligible_marshals.get("addr").map(String::as_str),
             Some(outer_marshal.as_str()),
@@ -12998,7 +12994,7 @@ mod issue_929_bare_udt_compaction {
         // `addr` is absent from the input header, so it is registry-normalized.
         crate::storage::write_engine::merge::apply_udt_marshals_from_inputs(
             &mut new_schema,
-            &[input.data_path.clone()],
+            std::slice::from_ref(&input.data_path),
             Some(&registry),
         )
         .expect("apply");
@@ -13016,7 +13012,7 @@ mod issue_929_bare_udt_compaction {
         let mut bare_again = bare_udt_schema();
         crate::storage::write_engine::merge::apply_udt_marshals_from_inputs(
             &mut bare_again,
-            &[input.data_path.clone()],
+            std::slice::from_ref(&input.data_path),
             None,
         )
         .expect("apply no-registry");
@@ -13044,7 +13040,7 @@ mod issue_929_bare_udt_compaction {
         let dir = tempfile::TempDir::new().expect("dir");
         let bogus = dir.path().join("nb-1-big-Data.db");
 
-        let plan = udt_columns_eligible_for_normalization(&[bogus.clone()]);
+        let plan = udt_columns_eligible_for_normalization(std::slice::from_ref(&bogus));
         assert!(
             !plan.headers_verified,
             "an unreadable header must leave the plan unverified"

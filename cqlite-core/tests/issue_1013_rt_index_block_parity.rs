@@ -400,10 +400,9 @@ fn parse_golden(path: &Path) -> (Vec<GoldenRange>, Vec<i64>) {
 fn parse_bound(row: &JsonValue) -> Option<(bool, bool, Vec<i64>, i64)> {
     let (is_start, inner) = if let Some(s) = row.get("start") {
         (true, s)
-    } else if let Some(e) = row.get("end") {
-        (false, e)
     } else {
-        return None;
+        let e = row.get("end")?;
+        (false, e)
     };
     let bound_type = inner.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let is_inclusive = match bound_type {

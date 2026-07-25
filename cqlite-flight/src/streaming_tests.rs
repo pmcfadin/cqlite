@@ -373,6 +373,9 @@ fn collect_batches(producer: &MergeProducer, dir: &std::path::Path) -> Vec<Recor
     producer.produce(&DirSource::new(dir)).unwrap()
 }
 
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn drain_stream(stream: DoGetStream) -> Vec<RecordBatch> {
     use arrow_flight::decode::FlightRecordBatchStream;
     let mapped = stream.map(|r| r.map_err(|s| FlightError::ExternalError(Box::new(s))));

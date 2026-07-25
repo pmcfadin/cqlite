@@ -262,6 +262,11 @@ impl RowCellStateMachine {
         // For modern formats, ensure schema is available before processing
         // Only enforce schema requirements for explicitly identified modern formats
         match self.version {
+            // Keep this as an explicit modern-format arm (NOT a collapsed match guard):
+            // the no-heuristics boundary — "modern formats reject blob fallback" — must stay
+            // structurally distinct from the legacy `_` arm below (#28, #2856). The
+            // `collapsible_match` rewrite into a guard would reroute modern+schema through `_`.
+            #[allow(clippy::collapsible_match)]
             CassandraVersion::V5_0NewBig
             | CassandraVersion::V5_0Bti
             | CassandraVersion::V5_0NewBigFormat
@@ -1318,6 +1323,11 @@ impl RowCellStateMachine {
         // For modern formats, check if we have schema before attempting to parse static columns
         // This prevents blob fallback for unknown columns in modern formats
         match self.version {
+            // Explicit modern-format arm (NOT a collapsed match guard): the no-heuristics
+            // boundary — modern static-row parsing rejects blob fallback — must stay
+            // structurally distinct from the legacy `_` arm below (#28, #2856). The
+            // `collapsible_match` rewrite into a guard would reroute modern+schema through `_`.
+            #[allow(clippy::collapsible_match)]
             CassandraVersion::V5_0NewBig
             | CassandraVersion::V5_0Bti
             | CassandraVersion::V5_0NewBigFormat
@@ -1640,5 +1650,79 @@ mod tests {
             header.local_deletion_time.is_none(),
             "header with no local_deletion_time is not a row tombstone"
         );
+    }
+
+    // ---- No-heuristics boundary regression tests (#28 / #2856) ----
+    //
+    // Pin the modern-format arms in `process` and `parse_static_row_impl` as an
+    // explicit branch, structurally distinct from the legacy `_` arm: a modern
+    // version with no schema is rejected (blob fallback disabled), and with a schema
+    // it proceeds WITHOUT falling through to the legacy path.
+
+    fn empty_modern_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "ks".to_string(),
+            table: "t".to_string(),
+            partition_keys: vec![],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn modern_process_without_schema_rejects_blob_fallback() {
+        let mut sm = RowCellStateMachine::with_version(CassandraVersion::V5_0NewBig);
+        match sm.process(&[0x01]) {
+            Err(Error::Schema(msg)) => assert!(
+                msg.contains("Schema is required for modern format"),
+                "expected modern-format schema-required error, got: {msg}"
+            ),
+            other => {
+                panic!("modern format without schema must return Error::Schema, got: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn modern_process_with_schema_proceeds_past_boundary() {
+        let mut sm = RowCellStateMachine::with_schema_and_version(
+            empty_modern_schema(),
+            ComparatorType::Blob,
+            CassandraVersion::V5_0NewBig,
+        );
+        // Schema present ⇒ the modern arm's `if schema.is_none()` is false, so the match
+        // falls through to the byte loop (NOT the legacy `_` arm); empty input consumes
+        // nothing and returns Ok(0). This proves modern+schema never takes the legacy path.
+        assert_eq!(sm.process(&[]).unwrap(), 0);
+    }
+
+    #[test]
+    fn modern_static_row_without_schema_rejects_blob_fallback() {
+        let mut sm = RowCellStateMachine::with_version(CassandraVersion::V5_0NewBig);
+        // Flag byte 0x40 sets the static-row-present bit so parsing reaches the
+        // schema-boundary match (a byte without 0x40 short-circuits to Ok before it).
+        match sm.parse_static_row(&[0x40, 0x00]) {
+            Err(Error::Schema(msg)) => assert!(
+                msg.contains("Blob fallback not allowed for static row parsing"),
+                "expected static-row modern-format schema-required error, got: {msg}"
+            ),
+            other => {
+                panic!("modern static row without schema must return Error::Schema, got: {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn modern_static_row_with_schema_proceeds_past_boundary() {
+        let mut sm = RowCellStateMachine::with_schema_and_version(
+            empty_modern_schema(),
+            ComparatorType::Blob,
+            CassandraVersion::V5_0NewBig,
+        );
+        // Flag 0x40 (static row present) + VInt 0x00 (zero static columns); schema present
+        // ⇒ the modern arm proceeds (no legacy path) and parses an empty static row.
+        assert!(sm.parse_static_row(&[0x40, 0x00]).is_ok());
     }
 }

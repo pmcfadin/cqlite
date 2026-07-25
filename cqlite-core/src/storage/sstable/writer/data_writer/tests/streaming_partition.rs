@@ -210,7 +210,7 @@ fn streaming_matches_whole_slice_for_static_and_regular_rows() {
     let (old_bytes, old_offset, old_blocks, old_emit) =
         run_whole_slice(&schema, &key, &all_mutations, None, &[]);
 
-    let static_ops = resolve_static_ops(&[static_m.clone()], &schema, None);
+    let static_ops = resolve_static_ops(std::slice::from_ref(&static_m), &schema, None);
     let (new_bytes, new_offset, new_blocks, new_emit) = run_streaming(
         &schema,
         &key,
@@ -444,7 +444,11 @@ fn streaming_split_mid_partition_matches_unbroken_batch_for_static_and_tombstone
         local_deletion_time: 250,
     };
     let range_tombstones = vec![rt];
-    let static_ops = resolve_static_ops(&[static_m.clone()], &schema, Some(pt.deletion_time));
+    let static_ops = resolve_static_ops(
+        std::slice::from_ref(&static_m),
+        &schema,
+        Some(pt.deletion_time),
+    );
 
     let (unbroken_bytes, unbroken_offset, unbroken_blocks, unbroken_emit) = run_streaming(
         &schema,

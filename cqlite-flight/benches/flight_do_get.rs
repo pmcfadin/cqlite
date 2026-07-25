@@ -124,6 +124,9 @@ async fn serve_and_connect(
 
 /// Run ONE `do_get` over the real transport with `client` and return the decoded
 /// batches (the throughput unit is total rows decoded).
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_batches(
     client: &mut FlightServiceClient<Channel>,
     ticket: Vec<u8>,

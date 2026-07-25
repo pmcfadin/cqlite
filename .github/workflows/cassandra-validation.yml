@@ -89,7 +89,7 @@ jobs:
 
       - name: Setup Rust toolchain
         # Consolidated caching (issue #2649): shared composite keyed on
-        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.88.0).
+        # Cargo.lock+toolchain, defaulting to the rust-toolchain.toml pin (1.97.1).
         uses: ./.github/actions/setup-rust-ci
         with:
           cache-key: cassandra-validation

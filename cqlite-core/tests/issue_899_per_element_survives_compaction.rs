@@ -186,7 +186,7 @@ fn per_element_metadata_survives_compaction_of_real_cassandra_sstable() {
         .enable_all()
         .build()
         .expect("runtime");
-    let (min_ts, min_ldt, min_ttl) = compute_baseline_min(&[input.clone()]);
+    let (min_ts, min_ldt, min_ttl) = compute_baseline_min(std::slice::from_ref(&input));
     let _ = (min_ts, min_ldt, min_ttl); // baselines are seeded inside compact_sstables
     let report = rt
         .block_on(compact_sstables(

@@ -336,13 +336,10 @@ async fn test_generation_number_parsing() {
                 None
             } else {
                 // Parse as u64 but reject values > i64::MAX to match expected behavior
-                parts[1].parse::<u64>().ok().and_then(|val| {
-                    if val <= i64::MAX as u64 {
-                        Some(val)
-                    } else {
-                        None
-                    }
-                })
+                parts[1]
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|&val| val <= i64::MAX as u64)
             }
         } else {
             None

@@ -119,7 +119,7 @@ jobs:
 
       - name: Setup Rust toolchain
         # No `toolchain:` input: setup-rust-toolchain reads rust-toolchain.toml
-        # (pinned 1.88.0) instead of overriding it with stable (issue #1990).
+        # (pinned 1.97.1) instead of overriding it with stable (issue #1990).
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Cache Rust dependencies

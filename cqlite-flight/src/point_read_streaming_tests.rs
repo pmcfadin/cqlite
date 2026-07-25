@@ -389,7 +389,7 @@ fn point_read_streaming_is_byte_identical_to_buffered() {
     let buffered = {
         let mut merger = build_single_partition_merger(
             paths.clone(),
-            &[key.clone()],
+            std::slice::from_ref(&key),
             &schema,
             ScanCancel::default(),
         )

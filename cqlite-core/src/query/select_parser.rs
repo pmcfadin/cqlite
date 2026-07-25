@@ -1469,7 +1469,7 @@ mod tests {
             if let SelectExpression::Literal(Value::BigInt(1)) = &exprs[0] {
                 // Success
             } else {
-                panic!("Expected literal BigInt 1, got: {:?}", &exprs[0]);
+                panic!("Expected literal BigInt 1, got: {:?}", exprs[0]);
             }
         } else {
             panic!("Expected Columns in SELECT clause");

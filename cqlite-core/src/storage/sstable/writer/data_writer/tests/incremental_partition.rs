@@ -171,7 +171,7 @@ fn incremental_matches_whole_slice_for_static_and_regular_rows() {
     // Incremental path resolves statics upfront (matching compaction's own
     // guarantee that the static carrier is a single, already-reconciled
     // entry — stage 5c-iv's design note).
-    let static_ops = resolve_static_ops(&[static_m.clone()], &schema, None);
+    let static_ops = resolve_static_ops(std::slice::from_ref(&static_m), &schema, None);
     let (new_bytes, new_offset, new_blocks, new_emit) = run_incremental(
         &schema,
         &key,
@@ -425,7 +425,11 @@ fn incremental_matches_whole_slice_for_combined_static_tombstones_and_rows() {
     let (old_bytes, old_offset, old_blocks, old_emit) =
         run_whole_slice(&schema, &key, &all_mutations, Some(&pt), &range_tombstones);
 
-    let static_ops = resolve_static_ops(&[static_m.clone()], &schema, Some(pt.deletion_time));
+    let static_ops = resolve_static_ops(
+        std::slice::from_ref(&static_m),
+        &schema,
+        Some(pt.deletion_time),
+    );
     let (new_bytes, new_offset, new_blocks, new_emit) = run_incremental(
         &schema,
         &key,

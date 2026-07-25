@@ -94,7 +94,7 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
 
     // Sort generations by number (newest first)
     let mut generations: Vec<SSTableGeneration> = generations_map.into_values().collect();
-    generations.sort_by(|a, b| b.generation.cmp(&a.generation));
+    generations.sort_by_key(|b| std::cmp::Reverse(b.generation));
 
     // Log summary for debugging
     tracing::debug!(

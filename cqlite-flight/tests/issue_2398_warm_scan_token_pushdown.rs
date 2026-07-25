@@ -137,6 +137,9 @@ fn full_scan_ticket() -> Vec<u8> {
 
 /// Drive the in-process `do_get` handler and fully drain the decoded stream,
 /// returning the total row count.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_rows(svc: &CqliteFlightService, ticket: Vec<u8>) -> usize {
     let resp = svc
         .do_get(Request::new(Ticket::new(ticket)))

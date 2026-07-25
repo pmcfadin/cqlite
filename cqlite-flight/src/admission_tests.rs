@@ -109,6 +109,9 @@ async fn settle() {
     }
 }
 
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn decode(stream: <CqliteFlightService as FlightService>::DoGetStream) -> Vec<RecordBatch> {
     let mapped = stream.map(|r| r.map_err(|s| FlightError::ExternalError(Box::new(s))));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(mapped);

@@ -147,6 +147,9 @@ fn assert_has_compression_info(dir: &Path, table: &str) {
 /// Stand up a real loopback tonic server serving `svc`, connect a real
 /// `FlightServiceClient` (retrying until it accepts), run `do_get(ticket)`, and
 /// return every decoded `RecordBatch` through the real `FlightRecordBatchStream`.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_batches_over_transport(
     svc: CqliteFlightService,
     ticket: Vec<u8>,
@@ -618,6 +621,9 @@ fn uncompressed_control_do_get_leaves_decompress_counter_at_zero() {
 /// regression that makes `do_get` error on the first poll reads zero batches, so
 /// the producer never parks and the in-flight level never leaves its baseline —
 /// a green "no leak" verdict from a stream that exercised nothing.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_drop_after(
     svc: CqliteFlightService,
     ticket: Vec<u8>,

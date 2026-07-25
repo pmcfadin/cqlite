@@ -338,7 +338,7 @@ pub(super) async fn seek_merge_generations_for_read(
     // NEWEST→OLDEST like `ordered_generation_paths`, so the seeking merger's
     // run_index (= position) equals the full-scan merger's LWW tie-break rank.
     let mut ordered: Vec<Arc<reader::SSTableReader>> = candidates.to_vec();
-    ordered.sort_by(|a, b| b.generation.cmp(&a.generation));
+    ordered.sort_by_key(|b| std::cmp::Reverse(b.generation));
 
     let schema = schema.clone();
     let target_bytes = target_key.as_bytes().to_vec();
@@ -675,7 +675,7 @@ pub(super) async fn stream_generations_for_read(
 /// explicitly by generation descending and collect the input `Data.db` paths.
 fn ordered_generation_paths(reader_list: &[Arc<reader::SSTableReader>]) -> Vec<PathBuf> {
     let mut ordered: Vec<&Arc<reader::SSTableReader>> = reader_list.iter().collect();
-    ordered.sort_by(|a, b| b.generation.cmp(&a.generation));
+    ordered.sort_by_key(|b| std::cmp::Reverse(b.generation));
     ordered.iter().map(|r| r.file_path()).collect()
 }
 

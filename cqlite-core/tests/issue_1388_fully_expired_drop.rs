@@ -147,7 +147,7 @@ fn flush_batch(data_dir: &Path, wal_dir: &Path, schema: &TableSchema, muts: Vec<
 fn discover_inputs(dir: &Path) -> Vec<PathBuf> {
     let mut found: Vec<(u64, PathBuf)> = Vec::new();
     collect(dir, &mut found, 8);
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|b| std::cmp::Reverse(b.0));
     found.into_iter().map(|(_, p)| p).collect()
 }
 
@@ -451,7 +451,7 @@ fn mixed_tombstone_and_live_sstable_not_dropped() {
     // Metadata classifier: the mixed SSTable is NOT fully expired (its authoritative
     // max_local_deletion_time is the live sentinel), so it is NOT in the drop-set —
     // even for a major compaction (empty outside set).
-    let drop_set = fully_expired_sstables(&[mixed_path.clone()], &[], Some(GC_BEFORE));
+    let drop_set = fully_expired_sstables(std::slice::from_ref(&mixed_path), &[], Some(GC_BEFORE));
     assert!(
         drop_set.is_empty(),
         "a mixed tombstone+live SSTable must never be classified fully expired (#1728 F1)"

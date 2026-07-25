@@ -8,11 +8,6 @@
 //! `FlightDescriptor.cmd` (for `get_flight_info`/`get_schema`) or as the
 //! `Ticket.ticket` bytes (for `do_get`).
 
-// The Flight gRPC trait mandates `tonic::Status` as the error type, which is
-// large; helpers returning `Result<_, Status>` mirror it so they compose with the
-// trait methods. Boxing would only add churn at every call site.
-#![allow(clippy::result_large_err)]
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -361,6 +356,8 @@ impl CqliteFlightService {
     }
 
     /// Parse the table schema from the ticket's CQL DDL.
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     fn parse_schema(ticket: &FlightTicket) -> Result<TableSchema, Status> {
         parse_cql_schema(&ticket.ddl)
             .map_err(|e| Status::invalid_argument(format!("invalid ddl: {e}")))
@@ -370,6 +367,8 @@ impl CqliteFlightService {
     /// (spec Req 8: schema parse elided on a warm hit). The CQL parse runs OUTSIDE
     /// the cache lock; a rare concurrent first-parse of the same DDL just parses
     /// twice (both correct), never holds the lock across the parse.
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     fn cached_schema(&self, ticket: &FlightTicket) -> Result<Arc<TableSchema>, Status> {
         if let Some(hit) = self
             .caches
@@ -396,6 +395,8 @@ impl CqliteFlightService {
     /// request — never cached (roborev 1639, issue #2310 finding 2 round 3; see
     /// [`SetupCaches`] for why a directory-resolve cache is unsound). This
     /// mirrors the pre-PR cold posture exactly.
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     fn resolve_dir(&self, ticket: &FlightTicket) -> Result<PathBuf, Status> {
         let dir = DirSource::resolve(
             &self.data_dir,
@@ -410,6 +411,8 @@ impl CqliteFlightService {
 
     /// Build a producer for a ticket, applying its token-range/predicate/projection
     /// filters. Used by every RPC so the Arrow schema reflects the projection.
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     fn build_producer(&self, ticket: &FlightTicket) -> Result<MergeProducer, Status> {
         let schema = self.cached_schema(ticket)?;
         let spec = ScanSpec::from_ticket(ticket, &schema)?;
@@ -433,6 +436,8 @@ impl CqliteFlightService {
     }
 
     /// Arrow schema for a ticket (no SSTable access required).
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     fn arrow_schema_for(&self, ticket: &FlightTicket) -> Result<ArrowSchema, Status> {
         Ok(self.build_producer(ticket)?.arrow_schema()?)
     }
@@ -517,6 +522,8 @@ impl FlightService for CqliteFlightService {
         .await
     }
 
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     async fn handshake(
         &self,
         request: Request<Streaming<HandshakeRequest>>,
@@ -532,6 +539,8 @@ impl FlightService for CqliteFlightService {
         })
     }
 
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     async fn list_flights(
         &self,
         request: Request<Criteria>,
@@ -546,6 +555,8 @@ impl FlightService for CqliteFlightService {
         })
     }
 
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     async fn poll_flight_info(
         &self,
         request: Request<FlightDescriptor>,
@@ -560,6 +571,8 @@ impl FlightService for CqliteFlightService {
         })
     }
 
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     async fn do_put(
         &self,
         request: Request<Streaming<FlightData>>,
@@ -576,6 +589,8 @@ impl FlightService for CqliteFlightService {
         })
     }
 
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     async fn do_exchange(
         &self,
         request: Request<Streaming<FlightData>>,
@@ -604,6 +619,8 @@ impl FlightService for CqliteFlightService {
         .await
     }
 
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     async fn list_actions(
         &self,
         request: Request<Empty>,
@@ -629,6 +646,8 @@ impl FlightService for CqliteFlightService {
 /// error-rate signal (subsystem `flight`). `RpcMetrics` emits the request
 /// counter, latency histogram, and in-flight gauge on drop, so returning the
 /// result here (which drops `metrics` at the call site) closes the RPC.
+// `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+#[allow(clippy::result_large_err)]
 fn finish<T>(metrics: &mut RpcMetrics, result: Result<T, Status>) -> Result<T, Status> {
     match &result {
         Ok(_) => metrics.ok(),
@@ -862,6 +881,8 @@ impl CqliteFlightService {
     /// how many times it is retried, so it must fail with its own status
     /// immediately: never wait behind the admission semaphore, never consume a
     /// permit, never surface as a retry-inviting `UNAVAILABLE`.
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     fn validate_do_get_ticket(&self, request: Request<Ticket>) -> Result<FlightTicket, Status> {
         Ok(FlightTicket::from_bytes(&request.into_inner().ticket)?)
     }
@@ -886,6 +907,8 @@ impl CqliteFlightService {
     /// F1) so a client disconnect during resolve stops it instead of running to
     /// completion; `do_get_inner`'s `CancelGuard` still covers this whole
     /// `.await` for the future-drop case.
+    // `tonic::Status` Err is large but mandated by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     async fn do_get_resolve(
         &self,
         ticket: FlightTicket,
@@ -1086,6 +1109,8 @@ mod tests {
         FlightDescriptor::new_cmd(ticket.to_bytes().unwrap())
     }
 
+    // `tonic::Status`/`FlightError` Err is large but fixed by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     async fn decode(
         stream: <CqliteFlightService as FlightService>::DoGetStream,
     ) -> Vec<RecordBatch> {
@@ -1974,6 +1999,8 @@ mod tests {
     }
 
     #[test]
+    // `tonic::Status`/`FlightError` Err is large but fixed by the Flight gRPC service trait contract (#2856).
+    #[allow(clippy::result_large_err)]
     fn do_get_empty_table_emits_schema_only() {
         // An existing table directory with no SSTables → valid empty result that
         // still carries the Arrow schema (via FlightDataEncoder `with_schema`).

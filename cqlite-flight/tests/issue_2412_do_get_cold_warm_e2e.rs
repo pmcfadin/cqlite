@@ -103,6 +103,9 @@ fn real_fixture_dirs() -> Option<(PathBuf, PathBuf)> {
 /// value-level correctness check (matches the convention used across the
 /// #2310/#2412 warm-hit wiring-evidence tests), proving the cold and warm runs
 /// resolve byte-identical content, not merely "some rows."
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_sorted_names(svc: &CqliteFlightService, ticket: Vec<u8>) -> Vec<String> {
     let resp = svc
         .do_get(Request::new(Ticket::new(ticket)))

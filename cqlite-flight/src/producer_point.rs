@@ -118,7 +118,7 @@ impl MergeProducer {
             }
             let columns: Vec<(String, Value)> = pk_names
                 .iter()
-                .zip(values.into_iter())
+                .zip(values)
                 .map(|(name, v)| ((*name).to_string(), v))
                 .collect();
             let decorated = match PartitionKey::new(columns).to_decorated_key(&self.schema) {

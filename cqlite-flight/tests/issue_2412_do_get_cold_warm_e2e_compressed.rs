@@ -78,6 +78,9 @@ fn real_fixture_dirs() -> Option<(PathBuf, PathBuf)> {
 /// Drive `do_get` and decode every batch into sorted `compressed_json` values —
 /// a value-level correctness check proving the cold and warm runs resolve
 /// byte-identical content, not merely "some rows."
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_sorted_values(svc: &CqliteFlightService, ticket: Vec<u8>) -> Vec<String> {
     let resp = svc
         .do_get(Request::new(Ticket::new(ticket)))

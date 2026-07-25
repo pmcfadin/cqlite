@@ -1,7 +1,7 @@
 # CI toolchain policy (issue #1990)
 
 **Single source of truth for the Rust toolchain is `rust-toolchain.toml`** (currently
-`channel = "1.88.0"`). CI must match what contributors build locally. This page records
+`channel = "1.97.1"`). CI must match what contributors build locally. This page records
 which workflows honor that pin and the one deliberate exception.
 
 ## Why this exists
@@ -27,10 +27,10 @@ Both were toolchain drift, not source-logic regressions.
      input it reads `rust-toolchain.toml`. Passing `toolchain: stable` overrides the pin file
      (this is what broke Compaction Parity).
    - **`./.github/actions/setup-rust-ci`** (local composite) — **omit** `toolchain:`. Its default
-     is already the pin (`1.88.0`).
+     is already the pin (`1.97.1`).
    - **`dtolnay/rust-toolchain`** — this action **cannot** read `rust-toolchain.toml`; it requires
      a toolchain via the `@<ref>` tag or the `toolchain:` input. Pin it **explicitly**:
-     `uses: dtolnay/rust-toolchain@1.88.0`. (In-repo `cargo` invocations already prefer the pin
+     `uses: dtolnay/rust-toolchain@1.97.1`. (In-repo `cargo` invocations already prefer the pin
      file over `rustup default`, but the explicit ref avoids installing an unused `stable` and
      pins out-of-repo `cargo install` steps too.)
 
@@ -46,16 +46,24 @@ Both were toolchain drift, not source-logic regressions.
    PR-required check. A red run is an early-warning signal to investigate forward-incompat
    before bumping the pin — not a merge blocker.
 
-4. **Source is forward-compatible:** `cqlite-cli`'s crate roots (`src/lib.rs`, `src/main.rs`)
-   carry `#![recursion_limit = "256"]` so the crate builds on 1.88.0 **and** 1.96+.
+4. **Source is forward-compatible:** crate roots hosting a large `#[tokio::main]`/async body carry
+   `#![recursion_limit = "256"]` so the crate builds across toolchains — the compiler's async-block
+   layout query overflows the default depth limit (128) on newer rustc (1.96+ hit `cqlite-cli`; 1.97
+   additionally hit the `tests/` integration-test binaries). Sites: `cqlite-cli` (`src/lib.rs`,
+   `src/main.rs`) and the `tests/src/bin/` runners `integration_test_runner`,
+   `compatibility_test_runner`, `complex_type_validation_runner`,
+   `comprehensive_integration_test_runner`, `cql_validation_test_runner`, `issue_17_real_test`,
+   `issue_17_test_runner`, `performance_validator`. When a pin bump reveals
+   `error: queries overflow the depth limit!` on a new crate root, add the attribute there and list
+   it here.
 
 ## Lane classification
 
 | Category | Toolchain | Workflows |
 |----------|-----------|-----------|
-| Honors pin (omit `toolchain:` → reads `rust-toolchain.toml`) | 1.88.0 | `compaction-parity`, `observability-gate`, `cassandra-validation`, `perf-regression`, `e2e-readback`, `ci-minimal-features`, `coverage-baseline`; `sstabledump-parity-gate`, `pr-gate` (via `setup-rust-ci` default) |
-| Honors pin (explicit `@1.88.0` — dtolnay can't read the pin file) | 1.88.0 | `ci`, `gate`, `cassandra-parity`, `compression-corruption-parity`, `cql-type-parity`, `tombstone-ttl-parity`, `smoke-tests`, `delta-roundtrip`, `flight-ci`, `live-cell-compaction-parity`, `quality-gates`, `exhaustive-regeneration`, `docs-site`, `node-ci`, `python-ci`, `coverage` |
-| Already pinned (pre-existing) | 1.88.0 | `nightly-docker-parity` |
+| Honors pin (omit `toolchain:` → reads `rust-toolchain.toml`, or `setup-rust-ci` default) | 1.97.1 | `compaction-parity`, `observability-gate`, `cassandra-validation`, `perf-regression`, `e2e-readback`, `ci-minimal-features`, `coverage-baseline`; `ci`, `flight-ci`, `sstabledump-parity-gate`, `pr-gate` (via `setup-rust-ci` default) |
+| Honors pin (explicit `@1.97.1` — dtolnay can't read the pin file) | 1.97.1 | `gate`, `cassandra-parity`, `smoke-tests`, `delta-roundtrip`, `live-cell-compaction-parity`, `quality-gates`, `exhaustive-regeneration`, `parity-regen-matrix`, `soak-resource-leak`, `docs-site`, `node-ci`, `python-ci`, `coverage` |
+| Already pinned (pre-existing) | 1.97.1 | `nightly-docker-parity` |
 | **Advisory stable canary (the ONE exception)** | latest `stable` | `future-rust-canary` |
 | Nightly toolchain (legitimately needs nightly) | `nightly` | `fuzz` |
 | Release / publish artifacts (deliberately track `stable`; out of scope) | `stable` | `release`, `api-docs`, `python-release`, `node-release` |
@@ -71,17 +79,22 @@ with `rust-toolchain.toml`, or CI silently drifts from the pin again. Exact file
 on the next pin bump:
 
 1. `rust-toolchain.toml` — update `channel` (the source of truth).
-2. `.github/actions/setup-rust-ci/action.yml` — the composite action hardcodes `1.88.0` as
+2. `.github/actions/setup-rust-ci/action.yml` — the composite action hardcodes the pin as
    its `toolchain` input **default**, which its `rustup toolchain install` + `rustup
    default` step consumes. Every workflow that calls it without a `toolchain:` input
-   (e.g. `sstabledump-parity-gate.yml`, `pr-gate.yml`) inherits this default — bump it.
-3. Every literal `dtolnay/rust-toolchain@<old>` ref — grep
-   `dtolnay/rust-toolchain@` under `.github/workflows/` and bump each `@1.88.0`
+   (e.g. `sstabledump-parity-gate.yml`, `pr-gate.yml`) inherits this default — bump it to
+   the new pin.
+3. Every literal `dtolnay/rust-toolchain@<old-pin>` ref — grep
+   `dtolnay/rust-toolchain@` under `.github/workflows/` and bump each to the new pin
    (these action refs cannot read the pin file; see policy rule 1).
-4. `nightly-docker-parity.yml` — passes an explicit `toolchain: 1.88.0` to `setup-rust-ci`.
+4. `nightly-docker-parity.yml` — passes an explicit `toolchain: <old-pin>` to `setup-rust-ci`;
+   bump it to the new pin.
 5. Re-check the prebuilt coverage-tool pins (`cargo-tarpaulin@<ver>`,
    `cargo-llvm-cov@<ver>` in `coverage.yml` / `coverage-baseline.yml`) still run on the
-   new toolchain.
+   new toolchain. (Prebuilt binaries are toolchain-independent, so a bump usually needs no
+   change here — but confirm the pinned versions support the new rustc's LLVM/coverage format.)
+6. `cqlite-flight/Dockerfile` — the build stage hardcodes `FROM rust:<major.minor>-bookworm`;
+   bump it to the new pin's `major.minor` (e.g. `rust:1.97-bookworm`).
 
 Lanes that **omit** `toolchain:` (`actions-rust-lang/setup-rust-toolchain@v1` callers)
 follow the pin file automatically — no action needed for those.

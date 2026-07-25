@@ -14,7 +14,7 @@
 // tui::events::run_tui<B>()}`"). It is a large async event loop, not a genuine
 // type-recursion bug, so a benign limit bump is the correct fix (a source
 // refactor would split that async fn into smaller awaited helpers — out of
-// scope here). Compiles on every supported toolchain (1.88.0 pin and forward)
+// scope here). Compiles on every supported toolchain (the pin and forward)
 // and does not change runtime behavior.
 #![recursion_limit = "256"]
 

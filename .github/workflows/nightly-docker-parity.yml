@@ -205,7 +205,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-rust-ci
         with:
-          toolchain: 1.88.0
+          toolchain: 1.97.1
           components: ''
           cache-key: nightly-docker-parity
 

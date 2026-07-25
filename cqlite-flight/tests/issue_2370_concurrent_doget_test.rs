@@ -71,6 +71,9 @@ enum Shape {
 /// fast-connecting client could complete its whole `do_get` before a
 /// slower-connecting sibling even issues its RPC, undermining the "N truly
 /// concurrent" claim.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn run_shape(
     addr: std::net::SocketAddr,
     shape: Shape,

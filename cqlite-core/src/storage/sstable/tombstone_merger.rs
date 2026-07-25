@@ -359,7 +359,7 @@ impl TombstoneMerger {
     ) -> Result<Option<ScanRow>> {
         // Sort by write time (newest first)
         let mut sorted_entries = collection_entries;
-        sorted_entries.sort_by(|a, b| b.metadata.write_time.cmp(&a.metadata.write_time));
+        sorted_entries.sort_by_key(|b| std::cmp::Reverse(b.metadata.write_time));
 
         // Issue #1334: generations now carry whole rows (`ScanRow`), not bare
         // collection values, so reconciliation reduces to last-write-wins with

@@ -65,6 +65,9 @@ const WIDE_DDL: &str = "CREATE TABLE test_da.wide_table (\
 /// Stand up a real loopback tonic server serving `svc`, connect a real
 /// `FlightServiceClient` (retrying until it accepts), run `do_get(ticket)`, and
 /// return every decoded `RecordBatch` through the real `FlightRecordBatchStream`.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_batches_over_transport(
     svc: CqliteFlightService,
     ticket: Vec<u8>,

@@ -136,6 +136,9 @@ async fn do_get_stream_over_transport(
 /// Same real-transport round-trip as [`do_get_rows_over_transport`] but returns
 /// every decoded `RecordBatch` so a caller can assert on the actual column set
 /// and cell values (not just the row count).
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_batches_over_transport(
     svc: CqliteFlightService,
     ticket: Vec<u8>,
@@ -600,6 +603,9 @@ fn do_get_over_transport_reads_live_set_not_snapshot() {
 /// draining it. Returns once the stream is dropped, leaving the server to observe
 /// the client disconnect. The server task is left running so the test can then
 /// observe the server-side in-flight accounting settle.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_drop_after(
     svc: CqliteFlightService,
     ticket: Vec<u8>,
