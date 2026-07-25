@@ -8,8 +8,11 @@ name: Project Board Sync
 #   2. New issues can land with a NULL Status (race with Auto-add). -> sweep
 #      null-status OPEN issues into Backlog.
 #
-# Requires a repo secret PROJECTS_TOKEN: a PAT (or GitHub App token) with the
-# `project` scope. The default GITHUB_TOKEN CANNOT write user/org Projects v2.
+# Requires a repo secret PROJECTS_TOKEN: a PAT (or GitHub App token) with BOTH
+#   * `project` scope — Projects v2 read/write (Status field mutations), and
+#   * repo `issues` read/write — the board->label mirror edits issue labels via
+#     `gh issue edit --add-label/--remove-label` and reads via `gh issue list`.
+# The default GITHUB_TOKEN CANNOT write user/org Projects v2.
 # If the secret is ABSENT the token-guarded jobs emit a LOUD `::error::`
 # annotation and FAIL (issue #2655) — a persistent red run is the alert that
 # board hygiene + claim reaping have silently stopped working, instead of the
@@ -85,7 +88,7 @@ jobs:
         id: guard
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::error::PROJECTS_TOKEN not set — board sync is NOT running. Add a PAT (or GitHub App token) with 'project' scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655) so this outage is visible instead of a silent green no-op."
+            echo "::error::PROJECTS_TOKEN not set — board sync is NOT running. Add a PAT (or GitHub App token) with 'project' (Projects v2 read/write) AND repo 'issues' read/write scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655) so this outage is visible instead of a silent green no-op."
             exit 1
           fi
 
@@ -167,7 +170,7 @@ jobs:
         id: guard
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::error::PROJECTS_TOKEN not set — board sweep + claim reaper are NOT running. Add a PAT (or GitHub App token) with 'project' scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655) so this outage is visible instead of a silent green no-op."
+            echo "::error::PROJECTS_TOKEN not set — board sweep + claim reaper are NOT running. Add a PAT (or GitHub App token) with 'project' (Projects v2 read/write) AND repo 'issues' read/write scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655) so this outage is visible instead of a silent green no-op."
             exit 1
           fi
 
@@ -331,7 +334,7 @@ jobs:
       - name: Guard token
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::error::PROJECTS_TOKEN not set — board->label mirror is NOT running. Add a PAT (or GitHub App token) with 'project' scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655/#2855)."
+            echo "::error::PROJECTS_TOKEN not set — board->label mirror is NOT running. Add a PAT (or GitHub App token) with 'project' (Projects v2 read/write) AND repo 'issues' read/write scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655/#2855)."
             exit 1
           fi
 
@@ -384,7 +387,7 @@ jobs:
       - name: Guard token
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::error::PROJECTS_TOKEN not set — claim reaper is NOT running. Add a PAT (or GitHub App token) with 'project' scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655) so this outage is visible instead of a silent green no-op."
+            echo "::error::PROJECTS_TOKEN not set — claim reaper is NOT running. Add a PAT (or GitHub App token) with 'project' (Projects v2 read/write) AND repo 'issues' read/write scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655) so this outage is visible instead of a silent green no-op."
             exit 1
           fi
 

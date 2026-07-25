@@ -67,13 +67,14 @@ _blm_iso_to_epoch() {
   jq -rn --arg d "$1" 'try ($d|fromdateiso8601|tostring) catch ""' 2>/dev/null
 }
 
-# blm_require_token — fail loud (::error:: + non-zero) when the project-scoped
-# PAT is absent, mirroring the workflow's existing "Guard token" posture (#2655).
-# The mirror/detector cannot read user Projects v2 without it, so a missing token
+# blm_require_token — fail loud (::error:: + non-zero) when the PAT is absent,
+# mirroring the workflow's existing "Guard token" posture (#2655). The mirror needs
+# BOTH `project` scope (read Projects v2 Status) AND repo `issues` read/write (edit
+# labels via `gh issue edit`, enumerate via `gh issue list`), so a missing token
 # must FAIL the run rather than silently skip.
 blm_require_token() {
   if [ -z "${GH_TOKEN:-}" ]; then
-    echo "::error::PROJECTS_TOKEN not set — board→label mirror is NOT running. Add a PAT (or GitHub App token) with 'project' scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655/#2855) instead of silently skipping the mirror/detector."
+    echo "::error::PROJECTS_TOKEN not set — board→label mirror is NOT running. Add a PAT (or GitHub App token) with 'project' (Projects v2 read/write) AND repo 'issues' read/write scope as repo secret PROJECTS_TOKEN. Failing loudly (issue #2655/#2855) instead of silently skipping the mirror/detector."
     return 1
   fi
   return 0
