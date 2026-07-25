@@ -61,6 +61,8 @@ concurrency:
 jobs:
   file-gate-failure-issue:
     runs-on: ubuntu-latest
+    # gh CLI calls only (issue lookup/file/resolve); 10m is ample headroom.
+    timeout-minutes: 10
     # Coarse pre-filter over TRUSTED GitHub-computed fields (event name /
     # conclusion). The validate step below re-checks fail-closed (branch/event
     # allowlist) before any issue write. A manual workflow_dispatch always enters
