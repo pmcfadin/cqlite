@@ -37,7 +37,6 @@ PASS=0
 FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
-inf() { printf 'info - %s\n' "$1"; }
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-nested.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -137,29 +136,60 @@ else
   bad "integrity guard summary was not RESULT: FAIL"
 fi
 
-# --- Property 4: same-checkout concurrency -------------------------------------
-# Two gate self-test lanes run concurrently in ONE checkout must both pass — the
-# proof that every fixture/tmp path is a per-run namespace (no cross-lane collision).
-# Uses the fast, no-cargo summary self-test so the added cost stays bounded (the two
-# instances overlap). SKIP-aware: the summary self-test needs python3 for its
-# truncation-reader cases.
-if command -v python3 >/dev/null 2>&1; then
-  cflagA="$tmp/concA.done"; cflagB="$tmp/concB.done"
-  ( bash "$SCRIPT_DIR/test_agent_gate_summary.sh" >"$tmp/concA.log" 2>&1; echo $? >"$cflagA" ) &
-  cpidA=$!
-  ( bash "$SCRIPT_DIR/test_agent_gate_summary.sh" >"$tmp/concB.log" 2>&1; echo $? >"$cflagB" ) &
-  cpidB=$!
-  wait "$cpidA"; wait "$cpidB"
-  rcA=$(cat "$cflagA" 2>/dev/null); rcB=$(cat "$cflagB" 2>/dev/null)
-  if [ "$rcA" = 0 ] && [ "$rcB" = 0 ]; then
-    ok "two concurrent summary self-test lanes in one checkout both passed"
-  else
-    bad "concurrent self-test lanes collided (rcA=$rcA rcB=$rcB)"
-    echo "------- lane A tail -------"; tail -15 "$tmp/concA.log"; echo "---------------------------"
-    echo "------- lane B tail -------"; tail -15 "$tmp/concB.log"; echo "---------------------------"
-  fi
+# --- Property 3b: SIDE-lane (backgrounded subshell) clobber path ----------------
+# record_result runs both on the MAIN foreground lane AND inside backgrounded SIDE-lane
+# subshells. In a subshell the guard must NOT emit+exit (that would only kill the
+# subshell — the clobber silently lost — and write a false mid-run terminal block a
+# poller misreads); it records a marker + returns 1. The post-drain conversion then
+# turns the marker into a terminal summary-integrity FAIL. Both halves are driven
+# deterministically via the AGENT_GATE_INTEGRITY_SELFTEST=side / =marker hooks.
+side_out="$tmp/side.out"
+env AGENT_GATE_SUMMARY_FILE="$tmp/side-integ.txt" AGENT_GATE_INTEGRITY_SELFTEST=side \
+  bash "$FAKE_GATE" >"$side_out" 2>/dev/null
+if grep -q 'side-integrity-selftest: rc=1 marker=yes' "$side_out" \
+   && grep -q 'side-integrity-selftest: summary-untouched=yes' "$side_out"; then
+  ok "SIDE-lane clobber records a marker + returns 1 WITHOUT emitting a mid-run terminal block"
 else
-  inf "python3 absent — skipping the concurrency lane (summary self-test needs it)"
+  bad "SIDE-lane clobber path wrong"
+  echo "------- side-selftest out -------"; cat "$side_out"; echo "---------------------------------"
+fi
+
+marker_sum="$tmp/marker-integ.txt"
+env AGENT_GATE_SUMMARY_FILE="$marker_sum" AGENT_GATE_INTEGRITY_SELFTEST=marker \
+  bash "$FAKE_GATE" >/dev/null 2>&1
+if grep -q 'summary-integrity: FAIL' "$marker_sum" && grep -q 'RESULT: FAIL' "$marker_sum"; then
+  ok "post-drain marker conversion -> terminal summary carries summary-integrity FAIL + RESULT FAIL"
+else
+  bad "post-drain marker conversion did not produce a terminal integrity FAIL"
+  echo "------- marker summary -------"; cat "$marker_sum" 2>/dev/null; echo "-----------------------------"
+fi
+
+# --- Property 4: same-checkout concurrency on the historically-racy self-test ----
+# Two concurrent test_agent_gate_parity_report.sh lanes in ONE checkout must both pass.
+# This is the file whose FIXED mutated-manifest fixture used to race across lanes (one
+# lane's EXIT trap rm'ing the other's live fixture — the residual #2874 kill surface);
+# with the per-run mktemp fixture each lane is isolated. Warm (~4-5s); SKIP-aware (the
+# parity-report test degrades to its fast no-cargo SKIP path, which still exercises the
+# per-run fixture create+trap-rm) so no python3 dependency. The two lanes overlap, so
+# the added cost is ~one warm parity-report run.
+real_repo=$(cd "$SCRIPT_DIR/../.." && pwd)
+cflagA="$tmp/concA.rc"; cflagB="$tmp/concB.rc"
+( bash "$SCRIPT_DIR/test_agent_gate_parity_report.sh" >"$tmp/concA.log" 2>&1; echo $? >"$cflagA" ) &
+( bash "$SCRIPT_DIR/test_agent_gate_parity_report.sh" >"$tmp/concB.log" 2>&1; echo $? >"$cflagB" ) &
+wait
+rcA=$(cat "$cflagA" 2>/dev/null); rcB=$(cat "$cflagB" 2>/dev/null)
+if [ "$rcA" = 0 ] && [ "$rcB" = 0 ]; then
+  ok "two concurrent parity-report self-test lanes in one checkout both passed"
+else
+  bad "concurrent parity-report lanes collided (rcA=$rcA rcB=$rcB)"
+  echo "------- lane A tail -------"; tail -15 "$tmp/concA.log"; echo "---------------------------"
+  echo "------- lane B tail -------"; tail -15 "$tmp/concB.log"; echo "---------------------------"
+fi
+# No per-run mutated-manifest fixture may leak into the tree after the concurrent run.
+if ls "$real_repo"/test-data/.tmp-parity-manifest-mutated* >/dev/null 2>&1; then
+  bad "a per-run mutated-manifest fixture leaked into test-data/ after the concurrent run"
+else
+  ok "no mutated-manifest fixture leaked into test-data/ after the concurrent run"
 fi
 
 echo "----"

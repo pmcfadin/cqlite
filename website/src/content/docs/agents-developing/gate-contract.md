@@ -296,13 +296,27 @@ read it:
   marker), `cat` that file — it is always complete.
 
 > **Concurrency caveat (#1175):** the default `$PWD/.agent-gate-summary.txt` is
-> per-*checkout*, not per-run. If you run multiple gates concurrently **in the same
-> checkout**, each MUST set a unique `AGENT_GATE_SUMMARY_FILE` or they will clobber
-> each other's recovery artifact. Separate worktrees get distinct repo roots and so
-> distinct default paths — already isolated, which is CQLite's normal model. The
-> `run-id:` line lets a caller that captured the invocation's run-id confirm it is
-> reading the right run; a caller with no expected run-id and a fully-lost stream
-> cannot disambiguate two same-checkout runs, so it must use a unique path.
+> per-*checkout*, not per-run. If you run multiple **top-level** gates concurrently
+> **in the same checkout**, each MUST set a unique `AGENT_GATE_SUMMARY_FILE` or they
+> will clobber each other's recovery artifact. Separate worktrees get distinct repo
+> roots and so distinct default paths — already isolated, which is CQLite's normal
+> model. The `run-id:` line lets a caller that captured the invocation's run-id
+> confirm it is reading the right run; a caller with no expected run-id and a
+> fully-lost stream cannot disambiguate two same-checkout runs, so it must use a
+> unique path.
+>
+> **Nested / self-test sub-gates are auto-isolated (#2874):** a gate spawned by an
+> enclosing gate inherits `AGENT_GATE_PARENT_RUN_ID`; if it does not pin its own
+> `AGENT_GATE_SUMMARY_FILE` it defaults to its OWN `$LOG_DIR/summary.txt` (never the
+> checkout default) and stamps `nested-under: <parent-run-id>`, so a nested run can
+> never clobber the parent gate of record. And a mid-run summary clobber (a foreign
+> `run-id` appearing in the file) is caught at the next component boundary with a
+> named **`summary-integrity: FAIL`** line + `RESULT: FAIL`, never a bare
+> `INCOMPLETE` death. The old #2751 workaround (run the full gate *without*
+> `AGENT_GATE_SUMMARY_FILE`) is therefore obsolete — the summary-file redirect is the
+> default again, and running it alongside a peer lane's gate self-tests on one box is
+> safe. (Two *top-level* full gates sharing one checkout default still need distinct
+> paths, per the caveat above.)
 
 The path the gate used is also echoed on the `summary-file:` line inside the
 block, and a copy is kept in the `logs:` bundle. The streamed copy is best-effort

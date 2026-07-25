@@ -218,7 +218,7 @@ docs/sstable-guide-audit/
 /.agent-gate-delta-summary.txt
 
 # parity-report self-test probe (issue #1338): removed by trap, ignored as a safety net
-test-data/.tmp-parity-manifest-mutated.yml
+test-data/.tmp-parity-manifest-mutated*
 
 # Unified perf history ledger (issue #1566, Epic A / A5): the A-series benches and
 # scripts/profile_report.py append per-metric run records to

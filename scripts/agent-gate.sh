@@ -1717,14 +1717,21 @@ SUMMARY_WRITE_FAILED=0
 # with the real block on normal completion. Best-effort: if we cannot write the
 # sentinel (unwritable path) we do not abort here; emit_summary's authoritative
 # write guard catches an unwritable path at the end and forces a FAIL.
-{
+# SENTINEL_WROTE (#2874 review finding 6): record whether OUR run-id sentinel actually
+# landed. If it did NOT (unwritable path), a later summary that lacks our run-id is a
+# STALE prior-run block / unwritable file — NOT a live foreign clobber — so the
+# integrity guard names that cause accurately instead of blaming a "foreign run-id".
+SENTINEL_WROTE=0
+if {
   echo "$SUMMARY_START_MARKER"
   echo "run-id: $RUN_ID"
   [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
   [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
   echo "RESULT: INCOMPLETE (gate did not finish)"
   echo "$SUMMARY_END_MARKER"
-} > "$SUMMARY_FILE" 2>/dev/null || true
+} > "$SUMMARY_FILE" 2>/dev/null; then
+  SENTINEL_WROTE=1
+fi
 
 # emit_summary <result> [meta-line ...]
 #
@@ -1766,7 +1773,7 @@ emit_summary() {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
-  [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
+      [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
@@ -1830,7 +1837,7 @@ emit_summary() {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
-  [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
+      [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
@@ -1854,7 +1861,7 @@ emit_summary() {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
-  [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
+      [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
@@ -1869,25 +1876,63 @@ emit_summary() {
 # with a NAMED cause. The startup sentinel and emit_summary both stamp $SUMMARY_FILE
 # with `run-id: $RUN_ID`, and nothing in a healthy run rewrites the file mid-run
 # (emit_summary runs only at the very end). So if, at a component boundary, the file
-# exists but no longer carries THIS run's run-id, a FOREIGN gate (a nested or
-# concurrent run that wrote the same path) clobbered it. Rather than let that surface
-# an hour later as a bare INCOMPLETE death (the #2751/#2874 field cost: ~1h/re-run),
-# stop NOW: rewrite the summary with a `summary-integrity: FAIL` line naming the
-# expected run-id and exit non-zero. emit_summary rewrites the file with our OWN
-# run-id, so the emitted FAIL block is itself valid. A missing file is fine (a
-# component may simply not have written yet — never a clobber). Cost: one `grep -q`
-# per component (~30/run), negligible. Belt-and-suspenders to emit_summary's existing
-# end-of-run run-id re-grep (which stays as the final backstop). NOTE: on the serial
-# MAIN foreground lane (where tooling-tests — the dominant clobber site — runs), the
-# `exit 1` propagates and stops the whole gate immediately with the named line intact.
+# exists but no longer carries THIS run's run-id, either a FOREIGN gate clobbered it
+# (a nested/concurrent run that wrote the same path) or — when our own startup sentinel
+# never landed (SENTINEL_WROTE=0) — the path is unwritable and we are seeing a stale
+# prior-run block. Either way, rather than let it surface an hour later as a bare
+# INCOMPLETE death (the #2751/#2874 field cost: ~1h/re-run), fail NOW with a named
+# cause. Cost: one `grep -q` per component (~30/run), negligible; a belt-and-suspenders
+# to emit_summary's end-of-run run-id re-grep (the final backstop).
+#
+# LANE-AWARENESS (#2874 review finding 1): record_result runs both on the serial MAIN
+# FOREGROUND lane and inside BACKGROUNDED SIDE-lane subshells (`run_side_component &`).
+# `emit_summary FAIL; exit 1` is only safe on the foreground lane — in a subshell it
+# would (a) merely kill the subshell (SIDE_LANE_EXIT stays 0, the .result already
+# exists → the clobber is SILENTLY LOST and the terminal emit can overwrite with PASS),
+# and (b) write a COMPLETE mid-run FAIL block that a summary-file poller misreads as the
+# terminal verdict. So off the foreground lane we instead drop a marker file that the
+# post-drain fail-closed check (_apply_integrity_marker) converts into a terminal FAIL,
+# and `return 1` without emitting. On the MAIN foreground lane (where tooling-tests —
+# the dominant clobber site — runs) the immediate `exit 1` still stops the whole gate
+# at once with the named line intact.
 _assert_summary_integrity() {
   [ -f "$SUMMARY_FILE" ] || return 0
   grep -qF "run-id: $RUN_ID" "$SUMMARY_FILE" 2>/dev/null && return 0
-  echo "⚠️ agent-gate: summary-integrity FAIL after [${1:-<component>}]: $SUMMARY_FILE no longer carries run-id: $RUN_ID (foreign run-id detected mid-run) (#2874)" >&2
+  local comp="${1:-<component>}" reason
+  if [ "${SENTINEL_WROTE:-0}" = 1 ]; then
+    reason="foreign run-id detected mid-run; expected $RUN_ID"
+  else
+    reason="summary-file unwritable / stale prior-run block; expected $RUN_ID"
+  fi
+  # In a subshell (SIDE lane), $$ is unchanged but BASHPID differs; record a marker and
+  # return non-zero — never emit/exit. (bash 3.2 lacks BASHPID → falls back to $$ ==
+  # foreground, which is correct there: 3.2 has no parallel pool, everything is serial.)
+  if [ "${BASHPID:-$$}" != "$$" ]; then
+    printf '%s\t%s\n' "$comp" "$reason" > "$LOG_DIR/summary-integrity.fail" 2>/dev/null || true
+    echo "⚠️ agent-gate: summary-integrity FAIL after [$comp] ($reason) — recorded for post-drain fail-close (#2874)" >&2
+    return 1
+  fi
+  echo "⚠️ agent-gate: summary-integrity FAIL after [$comp] ($reason) (#2874)" >&2
   emit_summary FAIL \
-    "summary-integrity: FAIL (foreign run-id detected mid-run; expected $RUN_ID)" \
-    "detected-after-component: ${1:-<component>}"
+    "summary-integrity: FAIL ($reason)" \
+    "detected-after-component: $comp"
   exit 1
+}
+
+# _apply_integrity_marker (#2874 review finding 1): consume a SIDE-lane summary-integrity
+# marker left by a backgrounded component that could not safely emit+exit. Called after
+# the component lanes drain (before the terminal emit_summary): it forces OVERALL=FAIL
+# and sets a named terminal line so a SIDE-lane clobber is NEVER silently lost to a
+# false-green summary. No-op when no marker exists.
+SUMMARY_INTEGRITY_LINE=""
+_apply_integrity_marker() {
+  [ -f "$LOG_DIR/summary-integrity.fail" ] || return 0
+  local m comp reason
+  m=$(cat "$LOG_DIR/summary-integrity.fail" 2>/dev/null)
+  comp=${m%%$'\t'*}; reason=${m#*$'\t'}
+  echo "agent-gate: summary-integrity FAIL recorded by a SIDE-lane component '$comp' ($reason)" >&2
+  OVERALL=FAIL
+  SUMMARY_INTEGRITY_LINE="summary-integrity: FAIL ($reason; detected-after-component: $comp)"
 }
 
 # gate_push_signal <result> <branch> <short-sha> <fail-components> (#2667)
@@ -1946,24 +1991,54 @@ if [ "$SELFTEST" -eq 1 ]; then
   exit 0
 fi
 
-# #2874 hidden self-test hook: exercise the mid-run summary-integrity guard in
-# isolation, deterministically (no component, no timing race). When
-# AGENT_GATE_INTEGRITY_SELFTEST=1 the caller has pinned AGENT_GATE_SUMMARY_FILE to a
-# throwaway path; we SEED it with a FOREIGN run-id (simulating a clobber) and then run
-# the SAME _assert_summary_integrity a component boundary runs — it must rewrite a
-# named `summary-integrity: FAIL` block and exit non-zero. If the guard fails to fire
-# we exit 0 with a BUG marker so the self-test catches a regression either way.
-if [ "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" = 1 ]; then
-  {
-    echo "$SUMMARY_START_MARKER"
-    echo "run-id: /tmp/agent-gate.FOREIGN-$$"
-    echo "RESULT: INCOMPLETE (foreign)"
-    echo "$SUMMARY_END_MARKER"
-  } > "$SUMMARY_FILE"
-  _assert_summary_integrity "integrity-selftest"
-  echo "integrity-selftest: BUG — guard did NOT fire on a foreign run-id" >&2
-  exit 0
-fi
+# #2874 hidden self-test hooks: exercise the mid-run summary-integrity guard in
+# isolation, deterministically (no component, no timing race). The caller pins
+# AGENT_GATE_SUMMARY_FILE to a throwaway path. Modes (AGENT_GATE_INTEGRITY_SELFTEST):
+#   1     — MAIN foreground lane: seed a FOREIGN run-id then run _assert_summary_integrity
+#           at top level (BASHPID==$$); it must rewrite a named `summary-integrity: FAIL`
+#           block and exit non-zero. A BUG marker on stdout if the guard fails to fire.
+#   side  — SIDE lane: seed a FOREIGN run-id then run the guard inside a subshell
+#           (BASHPID!=$$); it must record a marker file + return 1 WITHOUT emitting or
+#           exiting (the summary file stays the seeded foreign block — no mid-run
+#           terminal block). Prints rc/marker/summary-untouched for the self-test.
+#   marker — post-drain conversion: plant a marker file then run _apply_integrity_marker
+#           + emit_summary; the terminal summary must carry `summary-integrity: FAIL`
+#           and RESULT: FAIL (a SIDE-lane clobber is never lost to a false-green).
+case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
+  1)
+    {
+      echo "$SUMMARY_START_MARKER"
+      echo "run-id: /tmp/agent-gate.FOREIGN-$$"
+      echo "RESULT: INCOMPLETE (foreign)"
+      echo "$SUMMARY_END_MARKER"
+    } > "$SUMMARY_FILE"
+    _assert_summary_integrity "integrity-selftest"
+    echo "integrity-selftest: BUG — guard did NOT fire on a foreign run-id" >&2
+    exit 0 ;;
+  side)
+    {
+      echo "$SUMMARY_START_MARKER"
+      echo "run-id: /tmp/agent-gate.FOREIGN-$$"
+      echo "RESULT: INCOMPLETE (foreign)"
+      echo "$SUMMARY_END_MARKER"
+    } > "$SUMMARY_FILE"
+    ( _assert_summary_integrity "side-selftest" ); _side_rc=$?
+    printf 'side-integrity-selftest: rc=%s marker=%s\n' "$_side_rc" \
+      "$([ -f "$LOG_DIR/summary-integrity.fail" ] && echo yes || echo no)"
+    if grep -qF "run-id: /tmp/agent-gate.FOREIGN-$$" "$SUMMARY_FILE" 2>/dev/null; then
+      echo "side-integrity-selftest: summary-untouched=yes"
+    else
+      echo "side-integrity-selftest: summary-untouched=no"
+    fi
+    exit 0 ;;
+  marker)
+    printf '%s\t%s\n' "smoke" "foreign run-id detected mid-run; expected $RUN_ID" \
+      > "$LOG_DIR/summary-integrity.fail"
+    _apply_integrity_marker
+    emit_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
+      ${SUMMARY_INTEGRITY_LINE:+"$SUMMARY_INTEGRITY_LINE"}
+    exit 0 ;;
+esac
 
 # record_result <name> <status> <seconds>
 # Components may run concurrently in the bounded pool (issue #1737). A backgrounded
@@ -4548,6 +4623,10 @@ if [ "$SIDE_LANE_EXIT" -ne 0 ]; then
   echo "agent-gate: SIDE lane exited with status $SIDE_LANE_EXIT (subshell failure)" >&2
   OVERALL=FAIL
 fi
+# #2874: consume a SIDE-lane summary-integrity marker (a backgrounded component that
+# detected a mid-run clobber could not safely emit+exit) → force FAIL + a named
+# terminal line, so a SIDE-lane clobber is never silently lost to a false-green.
+_apply_integrity_marker
 
 # Reconstruct the summary arrays from per-component result files (issue #1737):
 # the bounded pool ran components in backgrounded subshells that cannot write the
@@ -4576,6 +4655,8 @@ fi
 SUMMARY_META+=("ci-pins: $PINS")
 SUMMARY_META+=("$(accelerators_line)")
 SUMMARY_META+=("$(cpu_budget_line)")
+# #2874: a SIDE-lane mid-run summary clobber surfaces as a named terminal line.
+[ -n "$SUMMARY_INTEGRITY_LINE" ] && SUMMARY_META+=("$SUMMARY_INTEGRITY_LINE")
 if [ -n "$ONLY" ]; then
   SUMMARY_META+=("mode: PARTIAL (--only $ONLY) - does NOT count as the gate")
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL

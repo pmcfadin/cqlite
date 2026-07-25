@@ -104,6 +104,12 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   watchdog-killed (#1855). A queued gate ≠ hung gate: under load it prints `waiting for gate slot`.
 - Defaults if `AGENT_GATE_SUMMARY_FILE` unset (per-checkout; give concurrent gates in ONE checkout
   unique paths): `.agent-gate-summary.txt` / `.agent-gate-lite-summary.txt` / `.agent-gate-delta-summary.txt`.
+  **Nested exception (#2874):** a gate started with `AGENT_GATE_PARENT_RUN_ID` in its env (i.e. spawned
+  by an enclosing gate) and no explicit `AGENT_GATE_SUMMARY_FILE` defaults to its OWN
+  `$LOG_DIR/summary.txt` (never the checkout default) and stamps `nested-under: <parent-run-id>`, so a
+  nested/self-test sub-gate can never clobber the parent's summary. A mid-run summary clobber (foreign
+  run-id) is caught at the next component boundary with a named `summary-integrity: FAIL` line + FAIL,
+  never a bare INCOMPLETE.
 - clippy is scoped per-package (#1844): whole workspace `-D warnings` but skips the source-built
   DuckDB amalgamation (cqlite-cli `duckdb-tests`) + OTel stack (`observability`/
   `observability-testing`); parquet/arrow stay linted. `CQLITE_CLIPPY_FULL=1` (nightly `gate.yml`)
