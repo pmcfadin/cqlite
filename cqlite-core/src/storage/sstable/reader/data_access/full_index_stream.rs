@@ -262,11 +262,16 @@ impl SSTableReader {
                 )));
             };
 
+            // SCAN intent (issue #2876): a full-`Index.db` stream walks Data.db in
+            // ascending offset order, so its body reads and (uncompressed) `CRC.db`
+            // covering-chunk reads use the reader's UNADVISED
+            // `scan_positional_source`, not the `MADV_RANDOM` point mapping (#2210).
+            let scan_source = self.scan_positional_source.clone();
             let control = if let Some(ci) = self.compression_info.as_deref() {
                 // Rare non-nb compressed non-stitching branch: unchanged per-partition
                 // windowed read (issue #2366 targets the uncompressed field case only).
                 let raw = self
-                    .read_compressed_offset_window(ci, data_offset, size)
+                    .read_compressed_offset_window(scan_source.as_ref(), ci, data_offset, size)
                     .await?;
                 self.emit_partition_slice(i, &raw, &parser, schema, emit)?
             } else {
@@ -290,7 +295,12 @@ impl SSTableReader {
                     // O(N/window) read-pattern evidence for issue #2366.
                     crate::storage::sstable::read_work_counters::record_seek();
                     window = self
-                        .read_uncompressed_verified(&self.file, absolute_offset, want as usize)
+                        .read_uncompressed_verified(
+                            scan_source.as_ref(),
+                            &self.file,
+                            absolute_offset,
+                            want as usize,
+                        )
                         .await?;
                     window_filled = true;
                 }

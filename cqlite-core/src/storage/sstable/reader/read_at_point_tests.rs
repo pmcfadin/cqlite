@@ -75,13 +75,11 @@ async fn concurrent_point_reads(
 /// because positioned reads on a shared source are independent (`&self`, no
 /// cursor mutex).
 ///
-/// `read_value_at_offset`'s UNCOMPRESSED branch (`get_cached_data`) is wrapped
-/// here, not `point_source`: it is reached by every index-driven scan
-/// (`sequential.rs`) as well as the rare index-less point-lookup fallback
-/// (`big_point.rs`), so issue #2876 repointed it at `scan_positional_source` —
-/// the shared plane must NOT alias the reader's dedicated `MADV_RANDOM`
-/// point-read mapping (issue #2210), which is exactly backwards for a scan's
-/// mostly-sequential access pattern.
+/// `point_source` is the wrapped plane: `read_value_at_offset` is the POINT-intent
+/// entry point (issue #2876 — the scan-intent sibling is
+/// `read_value_at_offset_for_scan`, which `sequential.rs`'s index-driven scan
+/// calls), so a point read must reach the reader's dedicated `MADV_RANDOM`
+/// point-read mapping (issue #2210) and this convoy proof belongs on that plane.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn eight_concurrent_point_reads_do_not_convoy() {
     let Some(path) = find_data_db("test_basic", "uncompressed_table") else {
@@ -96,8 +94,8 @@ async fn eight_concurrent_point_reads_do_not_convoy() {
     // --- Control: a lock-holding source serializes (reproduces the convoy). ---
     let control = {
         let mut reader = open_reader(&path).await.expect("open control reader");
-        let real = reader.clone_scan_positional_source();
-        reader.set_scan_positional_source(Arc::new(SerializingReadAt::new(real, delay)));
+        let real = reader.clone_point_source();
+        reader.set_point_source(Arc::new(SerializingReadAt::new(real, delay)));
         let reader = Arc::new(reader);
         concurrent_point_reads(reader, &offsets, size).await
     };
@@ -106,24 +104,20 @@ async fn eight_concurrent_point_reads_do_not_convoy() {
     let calls = Arc::new(AtomicUsize::new(0));
     let treatment = {
         let mut reader = open_reader(&path).await.expect("open treatment reader");
-        let real = reader.clone_scan_positional_source();
-        reader.set_scan_positional_source(Arc::new(SleepingReadAt::new(
-            real,
-            delay,
-            calls.clone(),
-        )));
+        let real = reader.clone_point_source();
+        reader.set_point_source(Arc::new(SleepingReadAt::new(real, delay, calls.clone())));
         let reader = Arc::new(reader);
         concurrent_point_reads(reader, &offsets, size).await
     };
 
     // Routing proof (deterministic; this is what is RED on `main`, where
     // get_cached_data/verify_uncompressed_range still lock `self.file` and never
-    // touch `scan_positional_source`): the read path must reach the injected
+    // touch a positional source): the point read path must reach the injected
     // source.
     assert!(
         calls.load(Ordering::Relaxed) >= offsets.len(),
-        "read path must route through `scan_positional_source` (>= {} reads); got {} \
-         — a 0 here means the read path no longer uses scan_positional_source",
+        "point read path must route through `point_source` (>= {} reads); got {} \
+         — a 0 here means the point read path no longer uses point_source",
         offsets.len(),
         calls.load(Ordering::Relaxed)
     );
@@ -179,26 +173,42 @@ async fn concurrent_point_reads_return_correct_bytes() {
     }
 }
 
-/// Build a genuine COMPRESSED BIG ("nb") SSTable with a USABLE `Summary.db`
-/// (issue #2876): `N` single-int-PK partitions via the production `WriteEngine`
-/// (a valid uncompressed BIG Data.db + Index.db/Summary.db/Statistics.db), then
-/// LZ4-compress the flushed Data.db IN PLACE — the same recipe
+/// Number of partitions every Summary-guided fixture below writes. Comfortably
+/// over the default `min_index_interval` (128, see
+/// `issue_2412_wraparound_scan.rs`'s identical rationale) so `Summary.db` carries
+/// multiple samples spanning distinct `Index.db` positions — a single-sample
+/// summary would make `stream_all_partitions_for_query`'s summary-guided branch
+/// untestable (it requires non-empty `Summary.db` entries). Also the EXACT row
+/// count the walk must emit, so a walk that silently emits nothing (or a
+/// fallback that emits a different shape) cannot pass.
+#[cfg(all(feature = "write-support", feature = "lz4"))]
+const SUMMARY_FIXTURE_PARTITIONS: i32 = 400;
+
+/// Build a genuine BIG ("nb") SSTable with a USABLE `Summary.db` (issue #2876):
+/// [`SUMMARY_FIXTURE_PARTITIONS`] single-int-PK partitions via the production
+/// `WriteEngine` (a valid uncompressed BIG Data.db + Index.db / Summary.db /
+/// Statistics.db / CRC.db) and, when `compress` is set, the flushed Data.db
+/// LZ4-compressed IN PLACE — the same recipe
 /// `issue_1293_compressed_big_reverse_seek.rs` established. CQLite's own write
-/// surface never emits compression (issue #1406 claim boundary), so this is the
+/// surface never emits compression (issue #1406 claim boundary), so that is the
 /// only way to get a genuine compressed-nb fixture without a fetched real-
 /// Cassandra dataset (whose small tables don't reliably clear the
-/// `min_index_interval` sampling threshold either). `N` is comfortably over the
-/// default `min_index_interval` (128) so `Summary.db` carries multiple samples —
-/// a single-sample summary would make `stream_all_partitions_for_query`'s
-/// summary-guided branch untestable (it requires non-empty `Summary.db` entries).
+/// `min_index_interval` sampling threshold either).
 ///
-/// Sound because the uncompressed-BIG Data.db is HEADERLESS (data starts at byte
-/// 0) and `Index.db` offsets are in the uncompressed domain — exactly what the
-/// compressed reader assumes (`CompressionInfo` chunk offsets are relative to
-/// `Data.db` byte 0), so re-chunking + compressing the bytes in place needs no
-/// change to Index.db/Summary.db/Statistics.db.
+/// `compress = false` keeps the writer's UNCOMPRESSED output verbatim —
+/// including its `CRC.db`, which is what makes the uncompressed scan's
+/// `verify_uncompressed_range` CRC reads observable (issue #2876 Finding 1).
+///
+/// Compressing in place is sound because the uncompressed-BIG Data.db is
+/// HEADERLESS (data starts at byte 0) and `Index.db` offsets are in the
+/// uncompressed domain — exactly what the compressed reader assumes
+/// (`CompressionInfo` chunk offsets are relative to `Data.db` byte 0), so
+/// re-chunking + compressing the bytes in place needs no change to
+/// Index.db/Summary.db/Statistics.db.
 #[cfg(all(feature = "write-support", feature = "lz4"))]
-async fn build_compressed_summary_guided_fixture() -> (
+async fn build_summary_guided_fixture(
+    compress: bool,
+) -> (
     tempfile::TempDir,
     std::path::PathBuf,
     crate::schema::TableSchema,
@@ -214,10 +224,7 @@ async fn build_compressed_summary_guided_fixture() -> (
 
     const KS: &str = "issue_2876_ks";
     const TBL: &str = "items";
-    /// Comfortably over the default `min_index_interval` (128, see
-    /// `issue_2412_wraparound_scan.rs`'s identical rationale) so `Summary.db`
-    /// carries multiple samples spanning distinct `Index.db` positions.
-    const N: i32 = 400;
+    const N: i32 = SUMMARY_FIXTURE_PARTITIONS;
     /// Small chunks so the fixture's LZ4-compressed Data.db spans several
     /// compressed chunks, not just one.
     const CHUNK_SIZE: usize = 4096;
@@ -283,6 +290,13 @@ async fn build_compressed_summary_guided_fixture() -> (
     let (data_path, base) =
         locate_data_db_under(&data_dir).expect("no *-Data.db produced under data_dir");
 
+    if !compress {
+        // Keep the writer's genuine UNCOMPRESSED output (Data.db + CRC.db) as-is:
+        // the CRC.db is exactly what makes the uncompressed scan's
+        // `verify_uncompressed_range` reads observable (issue #2876, Finding 1).
+        return (temp, data_path, schema);
+    }
+
     // Compress Data.db in place (issue #1293 recipe).
     let uncompressed = std::fs::read(&data_path).expect("read uncompressed Data.db");
     let compressor = create_compressor(CompressionAlgorithm::Lz4).expect("lz4 compressor");
@@ -331,42 +345,52 @@ fn locate_data_db_under(dir: &std::path::Path) -> Option<(std::path::PathBuf, St
     None
 }
 
-/// Regression test (issue #2876): the Summary-guided COMPRESSED scan walk —
-/// `stream_all_partitions_for_query` → `stream_partitions_summary_guided_compaction`
-/// → `walk_in_range_partition_slices` (`summary_scan.rs`) →
-/// `read_compressed_offset_window` (`compressed_offset.rs`) — must NOT read
-/// Data.db through the reader's dedicated `MADV_RANDOM` point-read mapping
-/// (`point_source`). That advice exists to suppress kernel readahead for
-/// scattered point-lookup faults (issue #2210); on this mostly-sequential walk it
-/// was exactly backwards, forcing one 4 KiB page fault per partition instead of
-/// the ~128 KiB read-ahead window (the #2210 × #1940 cross-path regression).
+/// Drive `stream_all_partitions_for_query` over a Summary-guided fixture with a
+/// call-counting spy on BOTH positional planes, and return
+/// `(rows_seen, point_reads, scan_reads, partitions_parsed)`.
 ///
-/// RED before the fix: `compressed_offset.rs` passed `self.point_source` into
-/// the shared offset-window reader, so every partition slice the walk
-/// decompresses bumps the spy installed on `point_source` below. GREEN after the
-/// fix: the walk reads through the new `scan_positional_source` instead, so the
-/// spy on `point_source` sees ZERO calls while the walk still emits every row
-/// (never a silent 0-rows pass — CLAUDE.md's dataset-dependent-test guardrail).
+/// Shared by the compressed and uncompressed scan-plane regressions below so the
+/// preconditions, the spy installation, and the branch proof are written ONCE.
+/// `partitions_parsed` comes from the thread-local
+/// [`StreamWalkScope`](crate::storage::sstable::work_counters::stream_walk_scope::StreamWalkScope)
+/// (issue #2428): it counts ONLY the per-partition
+/// `add_stream_walk_partition_parsed()` increments executed by THIS test's own
+/// inline walk, so it is a POSITIVE, pollution-immune proof that
+/// `walk_in_range_partition_slices` — the Summary-guided branch, not the
+/// full-ring fallback — actually ran.
 #[cfg(all(feature = "write-support", feature = "lz4"))]
-#[tokio::test]
-async fn summary_guided_compressed_scan_walk_avoids_point_source() {
+async fn summary_guided_scan_plane_probe(
+    compress: bool,
+) -> (usize, usize, usize, u64, tempfile::TempDir) {
     use std::ops::ControlFlow;
 
     use super::compaction_row::CompactionRow;
     use crate::storage::scan_cancel::ScanCancel;
+    use crate::storage::sstable::work_counters::stream_walk_scope::StreamWalkScope;
 
-    let (_temp, data_path, schema) = build_compressed_summary_guided_fixture().await;
+    let (temp, data_path, schema) = build_summary_guided_fixture(compress).await;
     let mut reader = open_reader(&data_path)
         .await
-        .expect("open compressed fixture reader");
+        .expect("open summary-guided fixture reader");
 
     // Fixture preconditions (fail LOUD, never silently skip: this fixture is
     // built in-test, not a fetched dataset that can legitimately be absent) —
-    // the walk under test requires compression, a raw-key Index.db, no BTI
-    // trie, and a `Summary.db` with at least one sample.
-    assert!(
+    // the walk under test requires a raw-key Index.db, no BTI trie, a
+    // `Summary.db` with at least one sample, and the requested compression state.
+    assert_eq!(
         reader.compression_info.is_some(),
-        "fixture must be a genuine compressed nb SSTable"
+        compress,
+        "fixture compression state must match the requested one (compress={compress})"
+    );
+    // The uncompressed fixture MUST carry the writer's `CRC.db`: the covering-chunk
+    // CRC read is the very I/O this scenario proves stays off the point plane
+    // (issue #2876, Finding 1). A missing CRC.db would make the whole scenario
+    // vacuously green.
+    assert_eq!(
+        reader.crc_reader.is_some(),
+        !compress,
+        "uncompressed fixture must carry CRC.db (and the compressed one must not) — \
+         the CRC read is the I/O under test"
     );
     assert!(
         reader.index_reader.is_some(),
@@ -387,16 +411,32 @@ async fn summary_guided_compressed_scan_walk_avoids_point_source() {
          the summary-guided walk under test requires a usable Summary.db"
     );
 
-    let calls = Arc::new(AtomicUsize::new(0));
-    let real = reader.clone_point_source();
+    // Independent spies on the two planes: `point_source` (the dedicated
+    // `MADV_RANDOM` point mapping, issue #2210) and `scan_positional_source` (the
+    // unadvised scan mapping, issue #2876). They are separate reader fields, so
+    // replacing one never redirects the other — even on the Buffered/Direct
+    // backends where both start out as clones of the same backing source.
+    let point_calls = Arc::new(AtomicUsize::new(0));
+    let scan_calls = Arc::new(AtomicUsize::new(0));
+    let real_point = reader.clone_point_source();
     reader.set_point_source(Arc::new(SleepingReadAt::new(
-        real,
+        real_point,
         Duration::ZERO,
-        calls.clone(),
+        point_calls.clone(),
+    )));
+    let real_scan = reader.clone_scan_positional_source();
+    reader.set_scan_positional_source(Arc::new(SleepingReadAt::new(
+        real_scan,
+        Duration::ZERO,
+        scan_calls.clone(),
     )));
 
     let scan_cancel = ScanCancel::default();
     let mut rows_seen = 0usize;
+    // Scope opened on THIS thread around the inline walk (default `#[tokio::test]`
+    // drives every `.await` on the test's own thread), so the count is exactly
+    // this walk's partition parses.
+    let scope = StreamWalkScope::new();
     reader
         .stream_all_partitions_for_query(
             Some(&schema),
@@ -408,22 +448,195 @@ async fn summary_guided_compressed_scan_walk_avoids_point_source() {
             },
         )
         .await
-        .expect("summary-guided compressed scan walk");
+        .expect("summary-guided scan walk");
+    let partitions_parsed = scope.count();
+    drop(scope);
 
-    // Non-vacuity (never let a dataset-dependent assertion pass on zero rows,
-    // per CLAUDE.md): the fixture wrote 400 partitions, so the walk must emit
-    // them, proving the summary-guided branch — not some fallback — ran.
-    assert!(
-        rows_seen > 0,
-        "the summary-guided walk must have emitted rows; got 0 — the fixture or the \
-         summary-guided routing itself is broken, not just the point_source wiring"
+    (
+        rows_seen,
+        point_calls.load(Ordering::Relaxed),
+        scan_calls.load(Ordering::Relaxed),
+        partitions_parsed,
+        temp,
+    )
+}
+
+/// Regression test (issue #2876): the Summary-guided COMPRESSED scan walk —
+/// `stream_all_partitions_for_query` → `stream_partitions_summary_guided_compaction`
+/// → `walk_in_range_partition_slices` (`summary_scan.rs`) →
+/// `read_compressed_offset_window` (`compressed_offset.rs`) — must NOT read
+/// Data.db through the reader's dedicated `MADV_RANDOM` point-read mapping
+/// (`point_source`). That advice exists to suppress kernel readahead for
+/// scattered point-lookup faults (issue #2210); on this mostly-sequential walk it
+/// was exactly backwards, forcing one 4 KiB page fault per partition instead of
+/// the ~128 KiB read-ahead window (the #2210 × #1940 cross-path regression).
+///
+/// Three assertions, none of which a broken walk can satisfy (roborev #2882
+/// Finding 3): the walk emits EXACTLY the fixture's partition count, the
+/// Summary-guided branch is POSITIVELY proven to have run (that many partition
+/// parses recorded on this thread + non-zero reads on the scan plane), and the
+/// point plane is untouched.
+#[cfg(all(feature = "write-support", feature = "lz4"))]
+#[tokio::test]
+#[serial_test::serial(work_counters)]
+async fn summary_guided_compressed_scan_walk_avoids_point_source() {
+    let (rows_seen, point_reads, scan_reads, partitions_parsed, _temp) =
+        summary_guided_scan_plane_probe(true).await;
+
+    // Non-vacuity: the fixture wrote exactly this many single-row partitions, so
+    // an under-emitting walk (or a fallback with a different emit shape) fails
+    // here instead of passing on 0 rows (CLAUDE.md's dataset-test guardrail).
+    assert_eq!(
+        rows_seen, SUMMARY_FIXTURE_PARTITIONS as usize,
+        "the summary-guided walk must emit exactly one row per fixture partition"
     );
+    // POSITIVE branch proof: `walk_in_range_partition_slices` bumped its
+    // per-partition work probe once per partition. The full-ring fallback bumps a
+    // DIFFERENT site (`drain_compaction_window`) once per partition too, so this is
+    // paired with the scan-plane read proof below, which the fallback (a cursor
+    // walk on `self.file`) cannot satisfy.
+    assert_eq!(
+        partitions_parsed, SUMMARY_FIXTURE_PARTITIONS as u64,
+        "the Summary-guided walk must parse exactly one body per fixture partition"
+    );
+    assert!(
+        scan_reads > 0,
+        "the Summary-guided compressed walk must read Data.db through \
+         `scan_positional_source`; got 0 reads there — the branch under test did not run"
+    );
+    assert_eq!(
+        point_reads, 0,
+        "the Summary-guided compressed scan walk must not read Data.db through the \
+         MADV_RANDOM point_source mapping (issue #2876)"
+    );
+}
+
+/// Regression test (issue #2876, roborev #2882 Finding 1): the Summary-guided
+/// UNCOMPRESSED scan walk must ALSO keep every Data.db read off the
+/// `MADV_RANDOM` point mapping — including the `CRC.db` covering-chunk reads.
+///
+/// The uncompressed walk (`walk_in_range_partition_slices` →
+/// `read_uncompressed_verified` → `verify_uncompressed_range`) reads each covering
+/// `CRC.db` chunk before handing back bytes (issue #1396). Verifying a 64 KiB
+/// chunk on the point plane is exactly the readahead-suppressed access the split
+/// exists to avoid, so the scan-side verifier must read the scan plane.
+///
+/// RED before the fix: `verify_uncompressed_range` hardcoded `self.point_source`,
+/// so the walk bumps the point spy. GREEN after: the CRC read follows the caller's
+/// plane, so the point spy stays at zero while the walk still emits every row.
+#[cfg(all(feature = "write-support", feature = "lz4"))]
+#[tokio::test]
+#[serial_test::serial(work_counters)]
+async fn summary_guided_uncompressed_scan_walk_avoids_point_source() {
+    let (rows_seen, point_reads, scan_reads, partitions_parsed, _temp) =
+        summary_guided_scan_plane_probe(false).await;
 
     assert_eq!(
-        calls.load(Ordering::Relaxed),
-        0,
-        "the Summary-guided compressed scan walk must not read Data.db through the \
-         MADV_RANDOM point_source mapping (issue #2876) — got {} call(s)",
-        calls.load(Ordering::Relaxed)
+        rows_seen, SUMMARY_FIXTURE_PARTITIONS as usize,
+        "the summary-guided walk must emit exactly one row per fixture partition"
     );
+    assert_eq!(
+        partitions_parsed, SUMMARY_FIXTURE_PARTITIONS as u64,
+        "the Summary-guided walk must parse exactly one body per fixture partition"
+    );
+    assert!(
+        scan_reads > 0,
+        "the Summary-guided uncompressed walk must read Data.db (its CRC.db covering \
+         chunks) through `scan_positional_source`; got 0 reads there"
+    );
+    assert_eq!(
+        point_reads, 0,
+        "the Summary-guided uncompressed scan walk must not read Data.db through the \
+         MADV_RANDOM point_source mapping — including its CRC.db covering-chunk reads \
+         (issue #2876, Finding 1)"
+    );
+}
+
+/// Regression test (issue #2876, roborev #2882 Finding 2): a genuine POINT read
+/// must still go through the reader's dedicated `MADV_RANDOM` point mapping.
+///
+/// The scan-plane split must not sweep the point path along with it: issue #2210
+/// gave point lookups an advised mapping precisely because their faults are
+/// scattered, and `read_value_at_offset` is the point-intent offset read (the
+/// index-driven scan uses its scan-intent sibling). So a `read_value_at_offset`
+/// must read `point_source` and must NOT touch `scan_positional_source` — on a
+/// COMPRESSED reader (whose window comes from `read_compressed_offset_window`) as
+/// well as an UNCOMPRESSED one (raw bytes + `CRC.db` verification).
+///
+/// RED before the fix: the shared helpers hardcoded `scan_positional_source`, so
+/// the point read reached the UNADVISED plane — for the compressed reader the
+/// point spy stayed at exactly 0.
+#[cfg(all(feature = "write-support", feature = "lz4"))]
+#[tokio::test]
+#[serial_test::serial(work_counters)]
+async fn point_offset_read_uses_advised_point_source() {
+    // A window comfortably inside the fixture's data section, spanning several
+    // small partitions; `read_value_at_offset` returns the raw bytes without
+    // parsing, so any in-bounds window exercises the plane routing.
+    const OFFSET: u64 = 0;
+    const SIZE: u32 = 64;
+
+    for compress in [false, true] {
+        let (_temp, data_path, _schema) = build_summary_guided_fixture(compress).await;
+        let mut reader = open_reader(&data_path)
+            .await
+            .expect("open summary-guided fixture reader");
+        assert_eq!(
+            reader.compression_info.is_some(),
+            compress,
+            "fixture compression state must match the requested one"
+        );
+
+        let point_calls = Arc::new(AtomicUsize::new(0));
+        let scan_calls = Arc::new(AtomicUsize::new(0));
+        let real_point = reader.clone_point_source();
+        reader.set_point_source(Arc::new(SleepingReadAt::new(
+            real_point,
+            Duration::ZERO,
+            point_calls.clone(),
+        )));
+        let real_scan = reader.clone_scan_positional_source();
+        reader.set_scan_positional_source(Arc::new(SleepingReadAt::new(
+            real_scan,
+            Duration::ZERO,
+            scan_calls.clone(),
+        )));
+
+        let row = reader
+            .read_value_at_offset(OFFSET, SIZE)
+            .await
+            .expect("point offset read")
+            .expect("point offset read must return the raw window");
+        // Non-vacuity: the read really produced the requested window.
+        match &row {
+            crate::types::ScanRow::RawRow(bytes) => assert_eq!(
+                bytes.len(),
+                SIZE as usize,
+                "point offset read must return exactly the requested window"
+            ),
+            other => panic!("expected a RawRow window, got {other:?}"),
+        }
+
+        assert!(
+            point_calls.load(Ordering::Relaxed) > 0,
+            "a point offset read on a {} reader must read Data.db through the advised \
+             `point_source` mapping (issue #2210); got 0 reads there",
+            if compress {
+                "compressed"
+            } else {
+                "uncompressed"
+            }
+        );
+        assert_eq!(
+            scan_calls.load(Ordering::Relaxed),
+            0,
+            "a point offset read on a {} reader must not read Data.db through the \
+             scan-side plane (issue #2876, Finding 2)",
+            if compress {
+                "compressed"
+            } else {
+                "uncompressed"
+            }
+        );
+    }
 }

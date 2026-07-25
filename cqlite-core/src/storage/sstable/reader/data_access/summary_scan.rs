@@ -261,12 +261,25 @@ impl SSTableReader {
                     )));
                 };
 
+                // SCAN intent (issue #2876): this forward Summary-guided walk reads
+                // Data.db in mostly-ascending order, so every read — the partition
+                // body AND (uncompressed) its covering `CRC.db` chunks — goes
+                // through the reader's UNADVISED `scan_positional_source`, never the
+                // `MADV_RANDOM` point mapping whose readahead suppression (#2210)
+                // would cost this walk ~one 4 KiB fault per partition.
+                let scan_source = self.scan_positional_source.clone();
                 let raw = if let Some(ci) = self.compression_info.as_deref() {
-                    self.read_compressed_offset_window(ci, start, size).await?
+                    self.read_compressed_offset_window(scan_source.as_ref(), ci, start, size)
+                        .await?
                 } else {
                     let absolute_offset = start + self.actual_header_size as u64;
-                    self.read_uncompressed_verified(&self.file, absolute_offset, size as usize)
-                        .await?
+                    self.read_uncompressed_verified(
+                        scan_source.as_ref(),
+                        &self.file,
+                        absolute_offset,
+                        size as usize,
+                    )
+                    .await?
                 };
 
                 // Structural coverage (Signal B): the slice must decode as exactly

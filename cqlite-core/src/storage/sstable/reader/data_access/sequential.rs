@@ -156,7 +156,15 @@ impl SSTableReader {
                     i, entry.offset, file_offset, entry.size
                 );
 
-                if let Some(value) = self.read_value_at_offset(file_offset, entry.size).await? {
+                // SCAN intent (issue #2876): this walks the index's entries in
+                // order, so it uses the scan-plane sibling of
+                // `read_value_at_offset` — same decode, but off the reader's
+                // UNADVISED mapping instead of the `MADV_RANDOM` point one (#2210),
+                // whose readahead suppression is exactly backwards here.
+                if let Some(value) = self
+                    .read_value_at_offset_for_scan(file_offset, entry.size)
+                    .await?
+                {
                     tracing::debug!(
                         "SSTableReader::scan - Successfully read value at offset {}",
                         entry.offset

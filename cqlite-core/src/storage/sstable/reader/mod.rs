@@ -983,21 +983,15 @@ impl SSTableReader {
     /// Clone the reader's shared positional point source (issue #1573 convoy
     /// scenario). Test-only: lets a test wrap the real source in a slow/serializing
     /// decorator, then reinstall it via [`set_point_source`](Self::set_point_source).
-    ///
-    /// Sole caller (issue #2876) is the write-support+lz4-gated compressed-fixture
-    /// regression test in `read_at_point_tests.rs`, so this is gated identically —
-    /// under the minimal-build feature set (no `write-support`) that test does not
-    /// exist and this method would otherwise be flagged dead code under `-D warnings`.
-    #[cfg(all(test, feature = "write-support", feature = "lz4"))]
+    #[cfg(test)]
     pub(crate) fn clone_point_source(&self) -> Arc<dyn read_at::ReadAt> {
         self.point_source.clone()
     }
 
     /// Replace the reader's point source (issue #1573 convoy scenario). Test-only;
     /// requires `&mut self`, so it must be called BEFORE the reader is shared
-    /// behind an `Arc` across the concurrent point reads under test. Gated
-    /// identically to [`clone_point_source`](Self::clone_point_source) — see there.
-    #[cfg(all(test, feature = "write-support", feature = "lz4"))]
+    /// behind an `Arc` across the concurrent point reads under test.
+    #[cfg(test)]
     pub(crate) fn set_point_source(&mut self, src: Arc<dyn read_at::ReadAt>) {
         self.point_source = src;
     }
@@ -1005,15 +999,21 @@ impl SSTableReader {
     /// Clone the reader's scan-side positional source (issue #2876). Test-only:
     /// mirrors [`clone_point_source`](Self::clone_point_source) for the sibling
     /// scan-side plane.
-    #[cfg(test)]
+    ///
+    /// Sole callers are the write-support+lz4-gated Summary-guided scan-plane
+    /// regressions in `read_at_point_tests.rs`, so this is gated identically —
+    /// under the minimal-build feature set (no `write-support`) those tests do not
+    /// exist and this method would otherwise be flagged dead code under `-D warnings`.
+    #[cfg(all(test, feature = "write-support", feature = "lz4"))]
     pub(crate) fn clone_scan_positional_source(&self) -> Arc<dyn read_at::ReadAt> {
         self.scan_positional_source.clone()
     }
 
     /// Replace the reader's scan-side positional source (issue #2876). Test-only;
     /// mirrors [`set_point_source`](Self::set_point_source) — requires `&mut self`,
-    /// so call it BEFORE the reader is shared behind an `Arc`.
-    #[cfg(test)]
+    /// so call it BEFORE the reader is shared behind an `Arc`. Gated identically to
+    /// [`clone_scan_positional_source`](Self::clone_scan_positional_source).
+    #[cfg(all(test, feature = "write-support", feature = "lz4"))]
     pub(crate) fn set_scan_positional_source(&mut self, src: Arc<dyn read_at::ReadAt>) {
         self.scan_positional_source = src;
     }
