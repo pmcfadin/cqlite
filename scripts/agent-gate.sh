@@ -1609,6 +1609,12 @@ fi
 # resolution below uses it to default a nested run to a PRIVATE path so it can never
 # write the enclosing checkout's shared default and clobber the parent gate of record.
 INHERITED_PARENT_RUN_ID="${AGENT_GATE_PARENT_RUN_ID:-}"
+# #2874: record whether the caller EXPLICITLY provided AGENT_GATE_SUMMARY_FILE (before
+# we de-export it). The integrity self-test hooks (which seed a foreign block into the
+# resolved summary path) fail closed unless this is 1 — a clobber-prevention script must
+# never ship a hook that clobbers the checkout default.
+EXPLICIT_SUMMARY_FILE=0
+[ -n "${AGENT_GATE_SUMMARY_FILE:-}" ] && EXPLICIT_SUMMARY_FILE=1
 
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
 # Per-run nonce (#1175 roborev finding 1): the LOG_DIR is a fresh per-run mktemp
@@ -1644,7 +1650,10 @@ fi
 if [ -n "${AGENT_GATE_SUMMARY_FILE:-}" ]; then
   SUMMARY_FILE="$AGENT_GATE_SUMMARY_FILE"
 elif [ "$NESTED_RUN" -eq 1 ]; then
-  SUMMARY_FILE="$LOG_DIR/summary.txt"
+  # DISTINCT from the LOG_SUMMARY_FILE archival copy ($LOG_DIR/summary.txt), so
+  # emit_summary's `cp SUMMARY_FILE -> LOG_SUMMARY_FILE` is a real copy, not a
+  # same-file no-op (#2874 review finding 4).
+  SUMMARY_FILE="$LOG_DIR/summary-primary.txt"
 elif [ "$LITE" -eq 1 ]; then
   SUMMARY_FILE="$REPO_ROOT/.agent-gate-lite-summary.txt"
 elif [ "$DELTA" -eq 1 ]; then
@@ -1655,10 +1664,13 @@ elif [ "$DELTA" -eq 1 ]; then
 else
   SUMMARY_FILE="$REPO_ROOT/.agent-gate-summary.txt"
 fi
-# #2874: a nested run stamps `nested-under: <parent-run-id>` in its summary block
-# for traceability (emitted alongside the optional MODE line, see the emit spots).
+# #2874: stamp `nested-under: <parent-run-id>` whenever this run was spawned by an
+# enclosing gate (INHERITED_PARENT_RUN_ID non-empty) — INDEPENDENT of the summary
+# redirect decision (review finding 6). A nested run that pins its own
+# AGENT_GATE_SUMMARY_FILE (the common self-test shape, and the #2751 shape) is still
+# traceably marked nested, decoupling traceability from whether the path was redirected.
 NESTED_UNDER_LINE=""
-[ "$NESTED_RUN" -eq 1 ] && NESTED_UNDER_LINE="nested-under: $INHERITED_PARENT_RUN_ID"
+[ -n "$INHERITED_PARENT_RUN_ID" ] && NESTED_UNDER_LINE="nested-under: $INHERITED_PARENT_RUN_ID"
 # Resolve a caller-provided RELATIVE AGENT_GATE_SUMMARY_FILE against the caller's
 # original CWD, not the repo root we cd'd into (#1175 roborev finding 1). Absolute
 # paths are used verbatim; the unset default above is already absolute.
@@ -1706,6 +1718,17 @@ OVERALL=PASS
 # final exit logic forces a non-zero / FAIL outcome on this so a green gate can
 # never silently lack its promised recovery artifact (#1175 roborev finding 1).
 SUMMARY_WRITE_FAILED=0
+
+# FAIL CLOSED for the integrity self-test hooks (#2874 review finding 5) — checked HERE,
+# BEFORE the startup sentinel writes $SUMMARY_FILE, so a hook invoked without an explicit
+# AGENT_GATE_SUMMARY_FILE never touches the checkout default at all (not even the INCOMPLETE
+# sentinel). Those hooks seed a FOREIGN block into the resolved path; a clobber-prevention
+# script must never ship a hook that can clobber the checkout default. The hooks THEMSELVES
+# run later (they need emit_summary/_assert_summary_integrity, defined below).
+if [ "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" != 0 ] && [ "$EXPLICIT_SUMMARY_FILE" != 1 ]; then
+  echo "agent-gate: AGENT_GATE_INTEGRITY_SELFTEST requires an explicit AGENT_GATE_SUMMARY_FILE (refusing to touch the checkout default) (#2874)" >&2
+  exit 2
+fi
 
 # Startup invalidation (#1175 roborev finding 2): a stale .agent-gate-summary.txt
 # from a PREVIOUS run must never survive into THIS run. If the current run exits
@@ -1913,6 +1936,18 @@ _assert_summary_integrity() {
     return 1
   fi
   echo "⚠️ agent-gate: summary-integrity FAIL after [$comp] ($reason) (#2874)" >&2
+  # MAIN foreground lane: tear the still-live SIDE-lane sub-pool down BEFORE exiting, so
+  # `exit 1` here (the first mid-lane exit in the script) does not orphan its cargo/
+  # maturin/node builds against the shared target dir on an already-freed concurrency
+  # slot (review finding 2). Best-effort: process-group kill if the shell put the sub-pool
+  # in its own group, else the subshell PID; a brief `wait` reaps it. This is the ONE
+  # place mid-lane teardown is needed — every other early exit precedes launch_components.
+  if [ -n "${SIDE_LANE_PID:-}" ]; then
+    echo "agent-gate: killing live SIDE-lane sub-pool (pid $SIDE_LANE_PID) before integrity exit; some backgrounded builds may already be spawned (#2874)" >&2
+    kill -- -"$SIDE_LANE_PID" 2>/dev/null || kill "$SIDE_LANE_PID" 2>/dev/null || true
+    pkill -P "$SIDE_LANE_PID" 2>/dev/null || true
+    wait "$SIDE_LANE_PID" 2>/dev/null || true
+  fi
   emit_summary FAIL \
     "summary-integrity: FAIL ($reason)" \
     "detected-after-component: $comp"
@@ -2004,6 +2039,7 @@ fi
 #   marker — post-drain conversion: plant a marker file then run _apply_integrity_marker
 #           + emit_summary; the terminal summary must carry `summary-integrity: FAIL`
 #           and RESULT: FAIL (a SIDE-lane clobber is never lost to a false-green).
+# (fail-closed guard for these hooks ran earlier, before the startup sentinel — #2874)
 case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
   1)
     {
@@ -4540,6 +4576,9 @@ run_side_component() {
 # Track which components were selected and which lane (fail-closed check after lanes drain).
 declare -a SELECTED_MAIN=() SELECTED_SIDE=()
 SIDE_LANE_EXIT=0
+# #2874: PID of the backgrounded SIDE-lane sub-pool while it is live (empty otherwise),
+# so a MAIN-lane integrity `exit 1` can tear it down before exiting (review finding 2).
+SIDE_LANE_PID=""
 
 # launch_components: two-lane bounded model (issues #1737, #2657). The MAIN lane
 # runs every selected shared-target cargo component (those that build cqlite-core
@@ -4591,10 +4630,15 @@ launch_components() {
     done
     wait
   ) &
-  local side_pid=$!
+  # GLOBAL (#2874 review finding 2): the MAIN-lane integrity guard's `exit 1` fires
+  # while this SIDE-lane sub-pool is still live; it must be able to tear it down first
+  # so orphaned cargo/maturin/node builds don't keep thrashing the shared target dir
+  # on an already-freed concurrency slot. See _assert_summary_integrity's MAIN branch.
+  SIDE_LANE_PID=$!
   # MAIN lane: serial, foreground (shared target dir, no intra-lane parallelism).
   for c in "${main_lane[@]+"${main_lane[@]}"}"; do dispatch_component "$c"; done
-  wait "$side_pid" || SIDE_LANE_EXIT=$?
+  wait "$SIDE_LANE_PID" || SIDE_LANE_EXIT=$?
+  SIDE_LANE_PID=""
 }
 
 launch_components

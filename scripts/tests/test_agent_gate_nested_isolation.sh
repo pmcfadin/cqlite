@@ -85,7 +85,7 @@ nested_summary_path=$(summary_path_of "$nested_out")
 case "$nested_summary_path" in
   "$DEFAULT_SUMMARY")
     bad "nested run wrote the checkout default ($nested_summary_path) instead of its own log dir" ;;
-  */agent-gate.*/summary.txt)
+  */agent-gate.*/summary-primary.txt)
     ok "nested run wrote its OWN private log dir ($nested_summary_path)" ;;
   *)
     bad "nested run summary-file was unexpected: '$nested_summary_path'" ;;
@@ -98,6 +98,10 @@ else
 fi
 
 # --- Property 2: explicit summary path still wins even when nested --------------
+# The explicit path is honored (no private redirect), AND — per review finding 6 —
+# `nested-under:` is stamped whenever the run was spawned by an enclosing gate,
+# INDEPENDENT of the redirect decision. So the real property to assert is the PATH
+# (explicit wins), not the absence of the nested-under stamp.
 pinned="$tmp/pinned.txt"
 env AGENT_GATE_PARENT_RUN_ID="/tmp/agent-gate.PARENT-FAKE" AGENT_GATE_SUMMARY_FILE="$pinned" \
   bash "$FAKE_GATE" --emit-summary-selftest >/dev/null 2>&1
@@ -106,12 +110,19 @@ if [ -s "$pinned" ] && grep -q 'RESULT: PASS' "$pinned"; then
 else
   bad "nested caller's explicit AGENT_GATE_SUMMARY_FILE was NOT honored"
 fi
-# An explicit-path nested run must NOT be treated as nested (no private redirect), so
-# it also must not stamp nested-under.
-if grep -q 'nested-under:' "$pinned"; then
-  bad "explicit-path run wrongly marked itself nested-under"
+# The explicit path must be the ONE written — the run must NOT redirect to a private
+# $LOG_DIR path (that is the property; traceability via nested-under is orthogonal).
+pinned_path=$(summary_path_of "$pinned")
+if [ "$pinned_path" = "$pinned" ]; then
+  ok "explicit-path nested run wrote exactly the pinned path (no private redirect)"
 else
-  ok "explicit-path run is not marked nested (explicit wins cleanly)"
+  bad "explicit-path nested run wrote '$pinned_path', not the pinned '$pinned'"
+fi
+# And it IS still traceably marked nested (decoupled from the redirect, finding 6).
+if grep -q "nested-under: /tmp/agent-gate.PARENT-FAKE" "$pinned"; then
+  ok "explicit-path nested run is still stamped nested-under (traceability decoupled from redirect)"
+else
+  bad "explicit-path nested run lost its nested-under traceability stamp"
 fi
 
 # --- Property 3: mid-run summary-integrity guard names the failure -------------
@@ -164,32 +175,91 @@ else
   echo "------- marker summary -------"; cat "$marker_sum" 2>/dev/null; echo "-----------------------------"
 fi
 
+# --- Property 3c (WIRING): the guard is actually called from record_result ----------
+# All the hook-driven properties above call _assert_summary_integrity /
+# _apply_integrity_marker DIRECTLY; deleting either real call site would leave them
+# green while the mechanism is inert on a real gate (the "green tests on the wrong
+# surface" class this change exists to close). Pin both call sites — structurally AND
+# end-to-end (review finding 1).
+#
+# Structural: record_result's body must call _assert_summary_integrity "$1", and a bare
+# _apply_integrity_marker call must appear AFTER `launch_components` and BEFORE the
+# terminal `emit_summary "$OVERALL"`.
+rr_body=$(awk '/^record_result\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$GATE")
+if printf '%s\n' "$rr_body" | grep -q '_assert_summary_integrity "\$1"'; then
+  ok "WIRING: record_result() body calls _assert_summary_integrity \"\$1\""
+else
+  bad "WIRING: record_result() does NOT call the integrity guard — mechanism inert on a real gate"
+fi
+lc_ln=$(grep -n '^launch_components$' "$GATE" | head -1 | cut -d: -f1)
+apply_ln=$(grep -nE '^[[:space:]]*_apply_integrity_marker[[:space:]]*$' "$GATE" | tail -1 | cut -d: -f1)
+# The TERMINAL full-gate emit (with "${SUMMARY_META[@]}"), which is the LAST such call
+# in the file — the lite/delta paths emit the same shape earlier and exit before here.
+emit_ln=$(grep -nE '^[[:space:]]*emit_summary "\$OVERALL" "\$\{SUMMARY_META' "$GATE" | tail -1 | cut -d: -f1)
+if [ -n "$lc_ln" ] && [ -n "$apply_ln" ] && [ -n "$emit_ln" ] \
+   && [ "$apply_ln" -gt "$lc_ln" ] && [ "$apply_ln" -lt "$emit_ln" ]; then
+  ok "WIRING: _apply_integrity_marker runs after launch_components and before terminal emit_summary (lines $lc_ln<$apply_ln<$emit_ln)"
+else
+  bad "WIRING: _apply_integrity_marker call not in the post-drain/pre-emit region (launch=$lc_ln apply=$apply_ln emit=$emit_ln)"
+fi
+
+# End-to-end: a REAL `--only file-size` run whose summary carries a FOREIGN run-id must
+# die non-zero with the named line — proving record_result invokes the guard in a real
+# gate, not just via the hooks. The summary is seeded then made READ-ONLY so the startup
+# sentinel cannot overwrite it (the foreign block survives to file-size's record_result).
+e2e_sum="$tmp/e2e-foreign.txt"
+{ echo '==== AGENT-GATE SUMMARY ===='; echo 'run-id: /tmp/agent-gate.FOREIGN-E2E'
+  echo 'RESULT: INCOMPLETE'; echo '==== END AGENT-GATE SUMMARY ===='; } > "$e2e_sum"
+chmod 0444 "$e2e_sum"
+e2e_out="$tmp/e2e.out"
+if env AGENT_GATE_SUMMARY_FILE="$e2e_sum" bash "$FAKE_GATE" --only file-size >"$e2e_out" 2>&1; then
+  bad "WIRING e2e: real --only file-size did NOT fail on a foreign summary (guard not reached from record_result)"
+else
+  ok "WIRING e2e: real --only file-size dies non-zero on a foreign summary (guard wired into record_result)"
+fi
+chmod 0644 "$e2e_sum" 2>/dev/null || true
+if grep -q 'summary-integrity: FAIL' "$e2e_out"; then
+  ok "WIRING e2e: the death carries the named 'summary-integrity: FAIL' line"
+else
+  bad "WIRING e2e: no named 'summary-integrity: FAIL' line in the real-gate output"
+  echo "------- e2e out tail -------"; tail -20 "$e2e_out"; echo "---------------------------"
+fi
+
 # --- Property 4: same-checkout concurrency on the historically-racy self-test ----
 # Two concurrent test_agent_gate_parity_report.sh lanes in ONE checkout must both pass.
 # This is the file whose FIXED mutated-manifest fixture used to race across lanes (one
 # lane's EXIT trap rm'ing the other's live fixture — the residual #2874 kill surface);
-# with the per-run mktemp fixture each lane is isolated. Warm (~4-5s); SKIP-aware (the
-# parity-report test degrades to its fast no-cargo SKIP path, which still exercises the
-# per-run fixture create+trap-rm) so no python3 dependency. The two lanes overlap, so
-# the added cost is ~one warm parity-report run.
+# with the per-run mktemp fixture each lane is isolated. To keep the probe CHEAP and
+# targeted (review finding 3), both lanes run with PARITY_REPORT_MANIFEST pointed at a
+# NONEXISTENT path so each takes the fast no-cargo SKIP path — which still creates and
+# trap-rm's its per-run mktemp fixture (the operation that used to race), WITHOUT the
+# two cargo-backed nested `--only parity-report` gates a full run would spawn. Cost:
+# ~two fast SKIP runs (no cargo compile); no python3 dependency; the lanes overlap.
 real_repo=$(cd "$SCRIPT_DIR/../.." && pwd)
+# Capture the PRE-EXISTING per-run fixture set (a peer lane may legitimately hold one)
+# so the leak check asserts our two lanes ADD none — never couples to peer state
+# (review finding 8).
+fixtures_before=$(ls -1 "$real_repo"/test-data/.tmp-parity-manifest-mutated* 2>/dev/null | sort)
 cflagA="$tmp/concA.rc"; cflagB="$tmp/concB.rc"
-( bash "$SCRIPT_DIR/test_agent_gate_parity_report.sh" >"$tmp/concA.log" 2>&1; echo $? >"$cflagA" ) &
-( bash "$SCRIPT_DIR/test_agent_gate_parity_report.sh" >"$tmp/concB.log" 2>&1; echo $? >"$cflagB" ) &
+( PARITY_REPORT_MANIFEST="$tmp/no-such-manifest.yml" \
+    bash "$SCRIPT_DIR/test_agent_gate_parity_report.sh" >"$tmp/concA.log" 2>&1; echo $? >"$cflagA" ) &
+( PARITY_REPORT_MANIFEST="$tmp/no-such-manifest.yml" \
+    bash "$SCRIPT_DIR/test_agent_gate_parity_report.sh" >"$tmp/concB.log" 2>&1; echo $? >"$cflagB" ) &
 wait
 rcA=$(cat "$cflagA" 2>/dev/null); rcB=$(cat "$cflagB" 2>/dev/null)
 if [ "$rcA" = 0 ] && [ "$rcB" = 0 ]; then
-  ok "two concurrent parity-report self-test lanes in one checkout both passed"
+  ok "two concurrent parity-report self-test lanes (fast SKIP path) in one checkout both passed"
 else
   bad "concurrent parity-report lanes collided (rcA=$rcA rcB=$rcB)"
   echo "------- lane A tail -------"; tail -15 "$tmp/concA.log"; echo "---------------------------"
   echo "------- lane B tail -------"; tail -15 "$tmp/concB.log"; echo "---------------------------"
 fi
-# No per-run mutated-manifest fixture may leak into the tree after the concurrent run.
-if ls "$real_repo"/test-data/.tmp-parity-manifest-mutated* >/dev/null 2>&1; then
-  bad "a per-run mutated-manifest fixture leaked into test-data/ after the concurrent run"
+# Our two lanes must ADD no per-run mutated-manifest fixture (set unchanged vs before).
+fixtures_after=$(ls -1 "$real_repo"/test-data/.tmp-parity-manifest-mutated* 2>/dev/null | sort)
+if [ "$fixtures_before" = "$fixtures_after" ]; then
+  ok "the concurrent lanes left the test-data/ mutated-manifest fixture set unchanged (each trap-rm'd its own)"
 else
-  ok "no mutated-manifest fixture leaked into test-data/ after the concurrent run"
+  bad "the concurrent lanes changed the test-data/ fixture set (before='$fixtures_before' after='$fixtures_after')"
 fi
 
 echo "----"

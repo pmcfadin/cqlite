@@ -40,19 +40,26 @@ shopt -s nullglob
 # under <dir>/*.sh (the linter itself, full-line comments, and `# hermetic-lint-allow`
 # lines excluded). Two file-level grep passes — no per-line subprocess fan-out.
 #   Rule A: a mktemp template whose X-run is not TRAILING — 3+ X's immediately followed
-#           by another path/token char (digit, '.', '/', '-', '_', or a letter OTHER
-#           THAN uppercase 'X', so the run's own trailing X's do not self-match). macOS
-#           mktemp requires the X's to be the last chars of the template.
+#           by ANY character that continues the template rather than terminating it.
+#           Inverted class (review finding 7): flag `X{3,}` followed by anything that is
+#           NOT one of {another X, whitespace, a quote/backtick, a shell token terminator
+#           `)`/`;`/`|`/`&`/`}`}. This catches suffixes an allowlist misses — `$$`,
+#           `${suffix}`, `~`, `%`, `@`, `+`, `,` — while a genuinely trailing X-run
+#           (`"...XXXXXX"`, `$(mktemp ...XXXXXX)`, `...XXXXXX;`, end-of-line) is NOT
+#           flagged. macOS mktemp requires the X's to be the last chars of the template.
 #   Rule B: a FIXED `.tmp-<name>.<ext>` fixture literal (the retired shared-name
 #           convention). A per-run mktemp name ends in `XXXXXX` with no extension.
 scan_dir() {
   local dir="$1" f list=() line rest file base content trimmed rule
   list=("$dir"/*.sh)
   [ "${#list[@]}" -gt 0 ] || return 0        # nullglob: no files -> nothing to scan
+  # Inverted trailing-char class; built via double quotes so the embedded ' and ` are
+  # literal ERE members. Excludes X, whitespace, quotes/backtick, and ) ; | & }.
+  local rule_a_re="X{3,}[^X[:space:]\"'\`);|&}]"
   local raw
   raw=$(
     {
-      grep -HnE 'mktemp' "${list[@]}" 2>/dev/null | grep -E 'X{3,}[0-9A-WY-Za-z._/-]' | sed 's/^/A	/'
+      grep -HnE 'mktemp' "${list[@]}" 2>/dev/null | grep -E "$rule_a_re" | sed 's/^/A	/'
       grep -HnE '\.tmp-[A-Za-z0-9_-]+\.(yml|yaml|json|txt|md|db|cql)' "${list[@]}" 2>/dev/null | sed 's/^/B	/'
     }
   )
@@ -97,6 +104,12 @@ printf '%s\n' '#!/usr/bin/env bash' 'x=$(mktemp "/tmp/foo.XXXXXX.yml")' > "$prob
 printf '%s\n' '#!/usr/bin/env bash' 'MUT="$REPO_ROOT/test-data/.tmp-parity-manifest-mutated.yml"' > "$probe/bad_fixed.sh"
 printf '%s\n' '#!/usr/bin/env bash' 'ok=$(mktemp "/tmp/z.XXXXXX.yml") # hermetic-lint-allow' > "$probe/allow_marked.sh"
 printf '%s\n' '#!/usr/bin/env bash' 'good=$(mktemp "/tmp/ok.XXXXXX")' > "$probe/clean.sh"
+# $-suffixed (review finding 7): a template whose X-run is followed by `$$`/`${...}` is
+# equally macOS-unsafe — the inverted class must catch it (an allowlist missed it).
+printf '%s\n' '#!/usr/bin/env bash' 'd=$(mktemp "/tmp/x.XXXXXX$$")' > "$probe/bad_dollar.sh"
+# Paren-terminated UNQUOTED trailing-X template must NOT be flagged (the terminator
+# exclusion): `$(mktemp /tmp/ok.XXXXXX)` is safe.
+printf '%s\n' '#!/usr/bin/env bash' 'p=$(mktemp /tmp/ok2.XXXXXX)' > "$probe/clean_paren.sh"
 
 pv=$(scan_dir "$probe")
 
@@ -104,6 +117,11 @@ if grep -q "^A	$probe/bad_mktemp.sh:" <<<"$pv"; then
   ok "self-verify: detector catches a non-terminal-X mktemp template (Rule A live)"
 else
   bad "self-verify: detector MISSED a non-terminal-X mktemp template (Rule A went inert)"
+fi
+if grep -q "^A	$probe/bad_dollar.sh:" <<<"$pv"; then
+  ok "self-verify: detector catches an X-run followed by \$\$ (inverted class covers \$-suffix)"
+else
+  bad "self-verify: detector MISSED an X-run followed by \$\$ (inverted class regressed)"
 fi
 if grep -q "^B	$probe/bad_fixed.sh:" <<<"$pv"; then
   ok "self-verify: detector catches a fixed '.tmp-*.yml' fixture name (Rule B live)"
@@ -119,6 +137,11 @@ if grep -q "$probe/clean.sh:" <<<"$pv"; then
   bad "self-verify: false-positive on a clean terminal-XXXXXX template"
 else
   ok "self-verify: no false-positive on a clean terminal-XXXXXX template"
+fi
+if grep -q "$probe/clean_paren.sh:" <<<"$pv"; then
+  bad "self-verify: false-positive on a paren-terminated trailing-X template"
+else
+  ok "self-verify: no false-positive on a paren-terminated trailing-X template"
 fi
 
 echo "----"

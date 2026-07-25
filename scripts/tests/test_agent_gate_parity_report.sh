@@ -29,7 +29,12 @@ GATE="$SCRIPT_DIR/../agent-gate.sh"
 # caller's summary file (the tooling-tests component scrubs it too).
 unset AGENT_GATE_SUMMARY_FILE
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
-MANIFEST="$REPO_ROOT/test-data/cassandra-parity-manifest.yml"
+# The manifest the PASS/FAIL render cases use. Env-overridable (matching the
+# parity-report component's own `${PARITY_REPORT_MANIFEST:-...}`, agent-gate.sh) so a
+# caller can point it at a nonexistent path to force the fast no-cargo SKIP path — used
+# by test_agent_gate_nested_isolation.sh's concurrency probe to exercise the per-run
+# fixture create+trap-rm cheaply, without cargo-backed nested gates (#2874 review).
+MANIFEST="${PARITY_REPORT_MANIFEST:-$REPO_ROOT/test-data/cassandra-parity-manifest.yml}"
 REPORT_REL="docs/reports/cassandra-test-parity.md"
 # The FAIL case's mutated manifest MUST live at <repo-root>/test-data/<file> so
 # the tool's repo_root() = manifest.canonicalize().parent().parent() resolves to the
