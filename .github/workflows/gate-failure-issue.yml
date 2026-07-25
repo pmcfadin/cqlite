@@ -94,6 +94,15 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Checkout so the validate step can call the extracted routing decision
+      # (scripts/ci/gate-failure-mode.sh). Keep the token out of .git/config —
+      # this lane runs no authenticated git.
+      - name: Checkout (for the routing decision script)
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
       - name: Validate origin + determine mode (allowlist, fail-closed)
         id: validate
         if: steps.guard.outputs.skip != 'true'
@@ -108,80 +117,51 @@ jobs:
               echo "conclusion=$4"
             } >> "$GITHUB_OUTPUT"
           }
-          # Map a terminal conclusion to an action: red -> file, green -> resolve.
-          mode_for_conclusion() {
-            case "$1" in
-              failure|cancelled|timed_out) echo "file" ;;
-              success) echo "resolve" ;;
-              *) echo "none" ;;
-            esac
-          }
+          DECIDE="scripts/ci/gate-failure-mode.sh"
 
           if [ "${TRIGGER}" = "workflow_dispatch" ]; then
-            # Manual replay/test: the caller supplies an arbitrary run_id. Validate
-            # it independently the SAME way the auto path validates — a replay must
-            # target a REAL gate.yml run on schedule/main. Fail-closed.
-            if [ -z "${DISPATCH_RUN_ID:-}" ]; then
-              echo "::warning::workflow_dispatch replay requires a 'run_id' input — none given; no issue filed."
-              emit false none "" ""; exit 0
-            fi
-            if ! printf '%s' "${DISPATCH_RUN_ID}" | grep -Eq '^[0-9]+$'; then
-              echo "::warning::run_id '${DISPATCH_RUN_ID}' is not numeric — no issue filed."
-              emit false none "" ""; exit 0
-            fi
+            # Manual replay/test: the caller supplies an arbitrary run_id. The
+            # numeric check + allowlist live in the decision script; here we fetch
+            # the TARGET run's authoritative metadata (the one network step) so the
+            # decision is a pure function of already-resolved fields. Fetch is
+            # best-effort — a fetch failure yields empty fields -> decision `none`.
             # DISPATCH_RUN_ID is passed via a quoted env var, never inlined.
-            META="$(gh run view "${DISPATCH_RUN_ID}" \
-              --json workflowName,headBranch,event,conclusion,url 2>/dev/null)" || META=""
-            if [ -z "${META}" ]; then
-              echo "::warning::could not fetch metadata for run ${DISPATCH_RUN_ID} — no issue filed."
-              emit false none "" ""; exit 0
+            R_NAME=""; R_BRANCH=""; R_EVENT=""; R_CONCLUSION=""; R_URL=""
+            if printf '%s' "${DISPATCH_RUN_ID:-}" | grep -Eq '^[0-9]+$'; then
+              META="$(gh run view "${DISPATCH_RUN_ID}" \
+                --json workflowName,headBranch,event,conclusion,url 2>/dev/null)" || META=""
+              if [ -n "${META}" ]; then
+                R_NAME="$(printf '%s' "${META}" | jq -r '.workflowName // ""')"
+                R_BRANCH="$(printf '%s' "${META}" | jq -r '.headBranch // ""')"
+                R_EVENT="$(printf '%s' "${META}" | jq -r '.event // ""')"
+                R_CONCLUSION="$(printf '%s' "${META}" | jq -r '.conclusion // ""')"
+                R_URL="$(printf '%s' "${META}" | jq -r '.url // ""')"
+              else
+                echo "::warning::could not fetch metadata for run ${DISPATCH_RUN_ID:-<none>} — decision will be 'none'."
+              fi
             fi
-            R_NAME="$(printf '%s' "${META}" | jq -r '.workflowName // ""')"
-            R_BRANCH="$(printf '%s' "${META}" | jq -r '.headBranch // ""')"
-            R_EVENT="$(printf '%s' "${META}" | jq -r '.event // ""')"
-            R_CONCLUSION="$(printf '%s' "${META}" | jq -r '.conclusion // ""')"
-            R_URL="$(printf '%s' "${META}" | jq -r '.url // ""')"
-            if [ "${R_NAME}" != "${GATE_WORKFLOW_NAME}" ]; then
-              echo "::warning::replay target run ${DISPATCH_RUN_ID} workflow '${R_NAME:-<none>}' is not the gate lane — no issue filed."
-              emit false none "" ""; exit 0
-            fi
-            if [ "${R_EVENT}" = "pull_request" ]; then
-              echo "::warning::replay target run ${DISPATCH_RUN_ID} is a pull_request-origin run — no issue filed."
-              emit false none "" ""; exit 0
-            fi
-            # gate.yml runs only on schedule (main) or workflow_dispatch; require main.
-            if [ "${R_BRANCH}" != "main" ]; then
-              echo "::notice::replay target run ${DISPATCH_RUN_ID} head branch '${R_BRANCH:-<none>}' is not main — no issue filed."
-              emit false none "" ""; exit 0
-            fi
-            MODE="$(mode_for_conclusion "${R_CONCLUSION}")"
+            MODE="$(bash "${DECIDE}" \
+              --trigger workflow_dispatch --gate-name "${GATE_WORKFLOW_NAME}" \
+              --name "${R_NAME}" --event "${R_EVENT}" --branch "${R_BRANCH}" \
+              --conclusion "${R_CONCLUSION}" --run-id "${DISPATCH_RUN_ID:-}")"
             if [ "${MODE}" = "none" ]; then
-              echo "::notice::replay target run ${DISPATCH_RUN_ID} concluded '${R_CONCLUSION:-<none>}' — nothing to do."
+              echo "::notice::replay of run ${DISPATCH_RUN_ID:-<none>} -> no action (see decision reason above)."
               emit false none "" ""; exit 0
             fi
             echo "manual replay validated (conclusion '${R_CONCLUSION}', mode '${MODE}') — proceeding"
             emit true "${MODE}" "${R_URL}" "${R_CONCLUSION}"; exit 0
           fi
 
-          # Automatic workflow_run path. Origin event must be schedule, or a
-          # workflow_dispatch of the gate on main (a feature-branch dispatch of
-          # the gate — e.g. a maintainer testing — must NOT file the backstop
-          # issue). WR_HEAD_BRANCH is untrusted -> compared via a quoted env var.
-          case "${WR_EVENT}" in
-            schedule)
-              : ;;
-            workflow_dispatch)
-              if [ "${WR_HEAD_BRANCH:-}" != "main" ]; then
-                echo "::notice::gate dispatch on non-main branch '${WR_HEAD_BRANCH:-<none>}' — no issue filed."
-                emit false none "" ""; exit 0
-              fi ;;
-            *)
-              echo "::notice::origin event '${WR_EVENT}' is not schedule/workflow_dispatch — no issue filed."
-              emit false none "" ""; exit 0 ;;
-          esac
-          MODE="$(mode_for_conclusion "${WR_CONCLUSION}")"
+          # Automatic workflow_run path. All fields come from the untrusted
+          # workflow_run payload via quoted env vars; the decision script applies
+          # the allowlist (schedule, or workflow_dispatch of the gate on main) and
+          # the conclusion->mode mapping.
+          MODE="$(bash "${DECIDE}" \
+            --trigger workflow_run --gate-name "${GATE_WORKFLOW_NAME}" \
+            --name "${WR_NAME}" --event "${WR_EVENT}" --branch "${WR_HEAD_BRANCH}" \
+            --conclusion "${WR_CONCLUSION}")"
           if [ "${MODE}" = "none" ]; then
-            echo "::notice::gate run concluded '${WR_CONCLUSION}' — nothing to do."
+            echo "::notice::gate run '${WR_CONCLUSION}' on '${WR_EVENT}' -> no action (see decision reason above)."
             emit false none "" ""; exit 0
           fi
           echo "gate run concluded '${WR_CONCLUSION}' (mode '${MODE}') — proceeding"
@@ -218,8 +198,12 @@ jobs:
           } > gate-failure-body.md
 
           # Dedup by the label: update the one open tracking issue if present.
+          # `|| true` so a transient gh/API blip on the lookup does NOT abort the
+          # step (set -e) and silently drop the night's alert — an empty EXISTING
+          # falls through to a create attempt (itself || warn-guarded). At worst a
+          # blip creates a second issue (recoverable); dropping the alert is not.
           EXISTING="$(gh issue list --repo "${GH_REPO}" --label "${ISSUE_LABEL}" \
-            --state open --json number --jq '.[0].number // ""')"
+            --state open --json number --jq '.[0].number // ""' 2>/dev/null || true)"
           if [ -n "${EXISTING}" ]; then
             echo "Updating existing gate-failure issue #${EXISTING}"
             gh issue comment "${EXISTING}" --repo "${GH_REPO}" --body-file gate-failure-body.md \
@@ -242,8 +226,12 @@ jobs:
           RUN_URL: ${{ steps.validate.outputs.run_url }}
         run: |
           set -euo pipefail
+          # `|| true`: a transient gh/API blip on the lookup must not abort the
+          # step (set -e). An empty result is treated as "no open issue" (the
+          # resolve comment is best-effort; a missed comment is harmless — the
+          # RED-path filing is the load-bearing side).
           EXISTING="$(gh issue list --repo "${GH_REPO}" --label "${ISSUE_LABEL}" \
-            --state open --json number --jq '.[0].number // ""')"
+            --state open --json number --jq '.[0].number // ""' 2>/dev/null || true)"
           if [ -z "${EXISTING}" ]; then
             echo "::notice::no open gate-failure issue to resolve — green run, nothing to do."
             exit 0

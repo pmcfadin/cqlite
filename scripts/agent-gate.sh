@@ -2544,7 +2544,11 @@ run_kit_dashboard_drift() {
 # scripts/tests/test_agent_gate_delta.sh (#1892), which drives the hidden
 # --delta-classify hook + --delta entry guards + --delta-...-emit-summary-selftest
 # to assert the test/docs-only fail-closed re-cert policy and DISTINCT delta
-# markers (hermetic — classification/emission only, never runs cargo). SKIP-aware:
+# markers (hermetic — classification/emission only, never runs cargo). Also runs
+# scripts/tests/test_gate_failure_mode.sh (#2662), which pins the decision table
+# of scripts/ci/gate-failure-mode.sh — the routing logic behind the nightly
+# gate-failure alert workflow, which is otherwise untestable (it only fires on a
+# real workflow_run event). Pure/offline, no gh/network. SKIP-aware:
 # the summary test's truncation case relies on a python3 reader, so with no
 # python3 we record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
 run_tooling_tests() {
@@ -2784,7 +2788,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
@@ -2793,7 +2797,8 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_claim_lock.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1; then
+     bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
