@@ -46,8 +46,13 @@ permissions:
   actions: read
 
 concurrency:
-  # Serialize so two near-simultaneous completions cannot race the create/comment.
-  group: gate-failure-issue-${{ github.event.workflow_run.id || github.run_id }}
+  # CONSTANT group (not keyed on the per-run id) so ALL invocations of this
+  # automation serialize into one queue. Two near-simultaneous gate completions
+  # (e.g. the nightly schedule overlapping a dispatch) must NOT both `gh issue
+  # list` -> find none -> `gh issue create` a duplicate tracking issue; a
+  # constant group makes the second wait for the first. cancel-in-progress: false
+  # so the queued run still executes (it may be the one that flips red -> resolve).
+  group: gate-failure-issue
   cancel-in-progress: false
 
 jobs:
