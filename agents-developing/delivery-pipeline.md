@@ -144,7 +144,8 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
 
 - **Backlog** = GitHub issues; the Project `Status` field is the authoritative lifecycle
   (`Backlog → Ready → In Progress → In Review → Done`). Each issue carries one `P0`–`P3`; `status:*`
-  labels are decorative only (Path A, #1886 — see [the claim board](#the-shared-claim-board)).
+  labels are an **enforced read-mirror of board Status for discovery only** (Path A, #1886; #2855 — see
+  [the claim board](#the-shared-claim-board)).
 - **1:1:1:1** — one issue ↔ one worktree/branch `issue-<N>-<slug>` ↔ one OpenSpec change `<slug>` ↔ one
   PR. Worktrees branch from `origin/main` and lack the gitignored `Data.db` binaries — run the gate with
   `CQLITE_DATASETS_ROOT` pointed at the main repo's `test-data/datasets`.
@@ -166,10 +167,21 @@ board and normalize the `Status` options. The built-in workflow automations (mer
 assigned → `In Progress`) cannot be set via CLI; the script prints the manual web-UI step for them.
 
 **Path A — the board is the sole dispatch authority (issue #1886):** work is selected and claimed by
-the Project `Status` field ONLY. `status:*` labels are **decorative and non-authoritative** — never use
-them to select or claim work. If the `project` scope or the board is **unreachable, STOP and fix the auth**
-(`gh auth refresh -s project`) — do **not** fall back to labels to find work. An empty `Ready` column means
-no work is ready (near a release it is *meant* to drain to zero), not a cue to dredge labels.
+the Project `Status` field ONLY. If the `project` scope or the board is **unreachable, STOP and fix the
+auth** (`gh auth refresh -s project`) — do **not** fall back to labels to select work. An empty `Ready`
+column means no work is ready (near a release it is *meant* to drain to zero), not a cue to dredge labels.
+
+**`status:*` labels — an enforced read-mirror for cheap discovery (issue #2855):** the labels are no
+longer decorative. `.github/workflows/project-board-sync.yml` is the *single writer*, deriving each OPEN
+issue's `status:*` label from its board Status (Ready→`status:ready`, In Progress→`status:in-progress`,
+In Review→`status:in-review`, Backlog/Done→none) on the 30-min sweep + on issue events, with a
+drift-detector that FAILs the run on any label≠Status disagreement. So a session MAY *narrow* candidates
+cheaply and server-side with `gh issue list --state open --label status:ready --json number,title` (no
+issue bodies, no board pagination). But the label is **eventually-consistent (≤30-min lag) and NEVER the
+dispatch/claim authority**: it only narrows the candidate set — the selection decision is by live board
+`Status`, and the claim ref plus a fresh board read at claim time remain the sole double-work arbiter.
+flow-* skills no longer write the board-derived labels (they set board Status only; the mirror follows);
+`status:spec-review`/`status:addressing` stay transient skill-managed sub-markers the mirror does not touch.
 
 ## The claim protocol (no duplicate work)
 

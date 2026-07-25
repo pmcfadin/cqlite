@@ -248,7 +248,8 @@ if two gates do overlap neither oversubscribes the CPU. No manual <code dir="aut
 <ul>
 <li><strong>Backlog</strong> = GitHub issues; the Project <code dir="auto">Status</code> field is the authoritative lifecycle
 (<code dir="auto">Backlog → Ready → In Progress → In Review → Done</code>). Each issue carries one <code dir="auto">P0</code>–<code dir="auto">P3</code>; <code dir="auto">status:*</code>
-labels are decorative only (Path A, #1886 — see <a href="#the-shared-claim-board">the claim board</a>).</li>
+labels are an <strong>enforced read-mirror of board Status for discovery only</strong> (Path A, #1886; #2855 — see
+<a href="#the-shared-claim-board">the claim board</a>).</li>
 <li><strong>1:1:1:1</strong> — one issue ↔ one worktree/branch <code dir="auto">issue-&#x3C;N>-&#x3C;slug></code> ↔ one OpenSpec change <code dir="auto">&#x3C;slug></code> ↔ one
 PR. Worktrees branch from <code dir="auto">origin/main</code> and lack the gitignored <code dir="auto">Data.db</code> binaries — run the gate with
 <code dir="auto">CQLITE_DATASETS_ROOT</code> pointed at the main repo’s <code dir="auto">test-data/datasets</code>.</li>
@@ -267,10 +268,20 @@ fresh even when an action came from the phone or web with no <code dir="auto">fl
 board and normalize the <code dir="auto">Status</code> options. The built-in workflow automations (merge/close → <code dir="auto">Done</code>,
 assigned → <code dir="auto">In Progress</code>) cannot be set via CLI; the script prints the manual web-UI step for them.</p>
 <p><strong>Path A — the board is the sole dispatch authority (issue #1886):</strong> work is selected and claimed by
-the Project <code dir="auto">Status</code> field ONLY. <code dir="auto">status:*</code> labels are <strong>decorative and non-authoritative</strong> — never use
-them to select or claim work. If the <code dir="auto">project</code> scope or the board is <strong>unreachable, STOP and fix the auth</strong>
-(<code dir="auto">gh auth refresh -s project</code>) — do <strong>not</strong> fall back to labels to find work. An empty <code dir="auto">Ready</code> column means
-no work is ready (near a release it is <em>meant</em> to drain to zero), not a cue to dredge labels.</p>
+the Project <code dir="auto">Status</code> field ONLY. If the <code dir="auto">project</code> scope or the board is <strong>unreachable, STOP and fix the
+auth</strong> (<code dir="auto">gh auth refresh -s project</code>) — do <strong>not</strong> fall back to labels to select work. An empty <code dir="auto">Ready</code>
+column means no work is ready (near a release it is <em>meant</em> to drain to zero), not a cue to dredge labels.</p>
+<p><strong><code dir="auto">status:*</code> labels — an enforced read-mirror for cheap discovery (issue #2855):</strong> the labels are no
+longer decorative. <code dir="auto">.github/workflows/project-board-sync.yml</code> is the <em>single writer</em>, deriving each OPEN
+issue’s <code dir="auto">status:*</code> label from its board Status (Ready→<code dir="auto">status:ready</code>, In Progress→<code dir="auto">status:in-progress</code>,
+In Review→<code dir="auto">status:in-review</code>, Backlog/Done→none) on the 30-min sweep + on issue events, with a
+drift-detector that FAILs the run on any label≠Status disagreement. So a session MAY <em>narrow</em> candidates
+cheaply and server-side with <code dir="auto">gh issue list --state open --label status:ready --json number,title</code> (no
+issue bodies, no board pagination). But the label is <strong>eventually-consistent (≤30-min lag) and NEVER the
+dispatch/claim authority</strong>: it only narrows the candidate set — the selection decision is by live board
+<code dir="auto">Status</code>, and the claim ref plus a fresh board read at claim time remain the sole double-work arbiter.
+flow-* skills no longer write the board-derived labels (they set board Status only; the mirror follows);
+<code dir="auto">status:spec-review</code>/<code dir="auto">status:addressing</code> stay transient skill-managed sub-markers the mirror does not touch.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="the-claim-protocol-no-duplicate-work">The claim protocol (no duplicate work)</h2><a class="sl-anchor-link" href="#the-claim-protocol-no-duplicate-work"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “The claim protocol (no duplicate work)”</span></a></div>
 <p>Before working an item, a session claims it so no two sessions — <strong>including two sessions authenticated
 as the same GitHub user on different machines</strong> — work the same item. Because assignee <code dir="auto">@me</code> is identical
