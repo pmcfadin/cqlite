@@ -42,6 +42,151 @@ use crate::types::ScanRow;
 use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 use crate::{Error, Result, RowKey};
 
+/// Target size (bytes) of the coalesced, chunk-aligned compressed-scan read
+/// window (issue #2877), mirroring the uncompressed non-stitching walk's
+/// `SEQUENTIAL_WINDOW_TARGET_BYTES` (`full_index_stream.rs`, 4 MiB) precedent.
+/// See [`CompressedScanWindow`] for why the window's end is always rounded UP
+/// to a `CompressionInfo.chunk_length` boundary rather than cut at the target
+/// byte count exactly.
+const COMPRESSED_SCAN_WINDOW_TARGET_BYTES: u64 = 4 * 1024 * 1024;
+
+/// A chunk-aligned sliding window over the DECOMPRESSED bytes of a compressed
+/// scan, keyed to the UNCOMPRESSED data-section offset domain (issue #2877).
+///
+/// `walk_in_range_partition_slices` used to call
+/// [`read_compressed_offset_window`](SSTableReader::read_compressed_offset_window)
+/// once PER PARTITION. That helper maps `[start, start+size)` onto
+/// `CompressionInfo.db` chunks and decompresses every chunk it touches with no
+/// cross-call memoisation — so a 16-64 KiB chunk holding many narrow partitions
+/// was read + decompressed once per partition it contains, entirely bypassing
+/// the Epic B decompressed-chunk cache on this hot path (the issue's root
+/// cause). This window instead accumulates consecutive in-range partitions and
+/// refills in ONE coalesced call whenever the current partition's span is not
+/// already covered.
+///
+/// # Why chunk-ALIGNED, not just chunk-sized
+///
+/// A window boundary that falls in the MIDDLE of a chunk would make that chunk
+/// get decompressed twice: once as the tail of window N, once again as the
+/// head of window N+1 (both calls independently map their own `[start, end)`
+/// onto `CompressionInfo.chunk_length`-sized chunks and decompress whichever
+/// they touch). Rounding every refill's end UP to the next
+/// `chunk_length` boundary — and always resuming the NEXT window exactly at the
+/// previous window's end — means windows tile the byte space with NO gaps and
+/// NO overlaps at chunk granularity, so each chunk is decompressed by EXACTLY
+/// ONE window's read call across the whole scan (the acceptance criterion this
+/// window exists to satisfy).
+///
+/// # Interaction with issue #2876
+///
+/// This still calls the reader's existing
+/// [`read_compressed_offset_window`](SSTableReader::read_compressed_offset_window)
+/// method unchanged — it only calls it FEWER, LARGER, chunk-aligned times. So
+/// whichever positional source that method reads through (the `MADV_RANDOM`
+/// point mapping pre-#2876, or the unadvised scan-friendly mapping post-#2876)
+/// benefits from this coalescing without this module needing to know which:
+/// fewer, larger, sequential, chunk-aligned reads are exactly what an unadvised
+/// readahead-friendly mapping wants, and this coalescing does not reach into
+/// `point_source`/`scan_mmap` itself, so it cannot defeat whichever plane
+/// #2876 wires underneath.
+///
+/// # Preserved invariants
+///
+/// - **CRC-before-decompress ordering** (guardrail #1411/#1773): unchanged —
+///   every chunk still goes through `read_compressed_offset_window`'s
+///   CRC-validated chunk reader, just fewer times.
+/// - **`partition_slice_fully_consumed`** (Signal B): unchanged — still checked
+///   per partition against the slice this window serves.
+/// - **Memory bound**: `max(COMPRESSED_SCAN_WINDOW_TARGET_BYTES, largest
+///   partition span)`, rounded up to at most one extra `chunk_length` (a few
+///   tens of KiB) — comfortably within the `<128MB` target and `<=4MiB`
+///   per-window budget the issue specifies.
+struct CompressedScanWindow {
+    /// Decompressed bytes of `[start, start + bytes.len())` in the UNCOMPRESSED
+    /// data-section offset domain. Empty until the first refill.
+    bytes: Vec<u8>,
+    /// Start offset of `bytes`, in the same domain. Meaningless while `filled`
+    /// is `false`.
+    start: u64,
+    /// Whether `bytes`/`start` hold a real window yet.
+    filled: bool,
+}
+
+impl CompressedScanWindow {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            start: 0,
+            filled: false,
+        }
+    }
+
+    /// Serve `[start, end)` from this window, refilling (one coalesced,
+    /// chunk-aligned `read_compressed_offset_window` call) iff not already
+    /// covered. `span` is `end - start`; `data_section_end` bounds the last
+    /// window so it never reads past the data section.
+    async fn slice(
+        &mut self,
+        reader: &SSTableReader,
+        source: &dyn super::super::read_at::ReadAt,
+        ci: &crate::storage::sstable::compression_info::CompressionInfo,
+        start: u64,
+        end: u64,
+        span: u64,
+        data_section_end: u64,
+    ) -> Result<&[u8]> {
+        if !self.filled || start < self.start || end > self.start + self.bytes.len() as u64 {
+            let chunk_length = ci.chunk_length as u64;
+            if chunk_length == 0 {
+                return Err(Error::corruption(
+                    "walk_in_range_partition_slices: CompressionInfo chunk_length is \
+                     zero (issue #2877)"
+                        .to_string(),
+                ));
+            }
+            // Resume exactly where the previous chunk-aligned window ended (by
+            // construction that boundary is itself chunk-aligned, see the type
+            // doc); the very first window aligns DOWN to the chunk containing
+            // this partition's start.
+            let aligned_start = if self.filled {
+                self.start + self.bytes.len() as u64
+            } else {
+                (start / chunk_length) * chunk_length
+            };
+            let remaining = data_section_end.saturating_sub(aligned_start);
+            let want = span.max(COMPRESSED_SCAN_WINDOW_TARGET_BYTES).min(remaining);
+            let raw_end = aligned_start + want;
+            let rounded_end = raw_end.div_ceil(chunk_length) * chunk_length;
+            let window_end = rounded_end.min(aligned_start + remaining);
+            let window_len = window_end - aligned_start;
+            let Ok(window_len_u32) = u32::try_from(window_len) else {
+                return Err(Error::corruption(format!(
+                    "walk_in_range_partition_slices: coalesced compressed window \
+                     length {window_len} overflows u32 (issue #2877)"
+                )));
+            };
+            // `source` is the walk's SCAN-intent plane (issue #2876), threaded
+            // through so this coalescing window is a CONSUMER of that plane, never
+            // a bypass of it.
+            self.bytes = reader
+                .read_compressed_offset_window(source, ci, aligned_start, window_len_u32)
+                .await?;
+            self.start = aligned_start;
+            self.filled = true;
+        }
+        let lo = (start - self.start) as usize;
+        let hi = (end - self.start) as usize;
+        if hi > self.bytes.len() {
+            return Err(Error::corruption(format!(
+                "walk_in_range_partition_slices: coalesced compressed window short by \
+                 {} bytes (issue #2877)",
+                hi - self.bytes.len()
+            )));
+        }
+        Ok(&self.bytes[lo..hi])
+    }
+}
+
 /// Half-open `(start_excl, end_incl]` token bound pushed into the per-SSTable walk
 /// (issue #2413 Option A). Mirrors the flight `TokenFilter` half-open semantics
 /// exactly (including the `start == end` FULL-ring convention, #2228); the flight
@@ -198,6 +343,11 @@ impl SSTableReader {
         let mut prev_key: Option<(i64, Vec<u8>)> = None;
         let mut index = 0usize;
         let mut emitted_any = false;
+        // Coalesced, chunk-aligned compressed-scan window (issue #2877): serves
+        // consecutive in-range partitions from one decompressed window instead
+        // of one `read_compressed_offset_window` call per partition. Unused
+        // (never filled) on the uncompressed branch.
+        let mut compressed_window = CompressedScanWindow::new();
         let Some(mut current) = stream.next().await? else {
             // Zero entries from the start offset: nothing in range (or empty).
             return Ok(FullIndexStreamOutcome::Streamed);
@@ -267,24 +417,49 @@ impl SSTableReader {
                 // through the reader's UNADVISED `scan_positional_source`, never the
                 // `MADV_RANDOM` point mapping whose readahead suppression (#2210)
                 // would cost this walk ~one 4 KiB fault per partition.
+                //
+                // The #2877 coalescing window is the CONSUMER of that plane, never a
+                // bypass of it: it makes the SAME scan-plane reads fewer and larger
+                // (chunk-aligned), which is precisely what the unadvised mapping's
+                // kernel readahead rewards.
                 let scan_source = self.scan_positional_source.clone();
-                let raw = if let Some(ci) = self.compression_info.as_deref() {
-                    self.read_compressed_offset_window(scan_source.as_ref(), ci, start, size)
-                        .await?
+                let raw: std::borrow::Cow<'_, [u8]> = if let Some(ci) =
+                    self.compression_info.as_deref()
+                {
+                    // Coalesced chunk-aligned window (issue #2877) — the SAME
+                    // `read_compressed_offset_window` call as before, just made
+                    // fewer/larger times so a chunk covering many partitions is
+                    // decompressed once, not once per partition it contains.
+                    std::borrow::Cow::Borrowed(
+                        compressed_window
+                            .slice(
+                                self,
+                                scan_source.as_ref(),
+                                ci,
+                                start,
+                                end,
+                                span,
+                                data_section_end,
+                            )
+                            .await?,
+                    )
                 } else {
                     let absolute_offset = start + self.actual_header_size as u64;
-                    self.read_uncompressed_verified(
-                        scan_source.as_ref(),
-                        &self.file,
-                        absolute_offset,
-                        size as usize,
+                    std::borrow::Cow::Owned(
+                        self.read_uncompressed_verified(
+                            scan_source.as_ref(),
+                            &self.file,
+                            absolute_offset,
+                            size as usize,
+                        )
+                        .await?,
                     )
-                    .await?
                 };
+                let raw: &[u8] = &raw;
 
                 // Structural coverage (Signal B): the slice must decode as exactly
                 // one complete partition. Mid-walk failure = fail-closed.
-                if !self.partition_slice_fully_consumed(parser, &raw, schema)? {
+                if !self.partition_slice_fully_consumed(parser, raw, schema)? {
                     return Err(Error::corruption(format!(
                         "walk_in_range_partition_slices: partition {index} slice not fully \
                          consumed (truncated/corrupt body, issue #2412)"
@@ -295,7 +470,7 @@ impl SSTableReader {
                 // token range must keep this near its in-range slice, not O(all).
                 crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
                 emitted_any = true;
-                match decode(&raw)? {
+                match decode(raw)? {
                     ControlFlow::Continue(()) => {}
                     ControlFlow::Break(()) => return Ok(FullIndexStreamOutcome::Streamed),
                 }
