@@ -936,6 +936,16 @@ impl SSTableReader {
     /// the unadvised scan mapping; a future point caller passes the advised one and
     /// gets the right advice without editing this helper.
     ///
+    /// SCOPE NOTE (#2876): `source` governs the **CRC chunk reads only**. The payload
+    /// bytes below are read through `file` — a seek-based [`BlockSource`], which is NOT
+    /// an mmap and therefore carries no `madvise` advice on any backend. So the
+    /// uncompressed path never suffered the MADV_RANDOM readahead suppression this
+    /// issue fixes (that regression was mmap-specific, hence compressed-walk-specific),
+    /// and threading the plane here closes the CRC-read half completely: after this
+    /// change NO read on an uncompressed scan touches an advised mapping. The
+    /// separate cost on this path is the shared `file` mutex serializing concurrent
+    /// scans (#815's domain), which is deliberately out of scope here.
+    ///
     /// Future uncompressed offset reads MUST call this instead of doing their own
     /// `seek` + `read_exact`, so the CRC check can never be forgotten again.
     pub(in crate::storage::sstable::reader) async fn read_uncompressed_verified(

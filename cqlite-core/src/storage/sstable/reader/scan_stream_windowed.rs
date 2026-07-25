@@ -517,7 +517,8 @@ impl SSTableReader {
         // decompression (`decode_scan_chunk`). Neither may run on the small async
         // worker pool — decode CPU on the reactor is the Epic F starvation the
         // parse-offload (#1143) and IO-offload (#1593) fixes exist to prevent. The
-        // read is now a SYNCHRONOUS positional read on `self.point_source` for
+        // read is now a SYNCHRONOUS positional read on `self.scan_positional_source`
+        // (issue #2876 — the unadvised scan plane, NOT the MADV_RANDOM point plane) for
         // EVERY backend (issue #1940 restructure): no `tokio::fs`, no
         // `futures::executor::block_on`, and therefore ZERO blocking-pool
         // amplification (the former `block_on(read_next_block_parts(..))` re-
@@ -537,7 +538,8 @@ impl SSTableReader {
         .await;
         // `cursor` is retained in the signature for the caller's data-section-start
         // convention (and the non-windowed branch of the same scan functions), but
-        // the windowed feed now reads positionally via `point_source`, so it does
+        // the windowed feed now reads positionally via `scan_positional_source`
+        // (issue #2876), so it does
         // not use the cursor's file handle or chunk index.
         let _ = cursor;
 
@@ -635,8 +637,9 @@ impl SSTableReader {
     /// (mirroring the parse half — one offload per scan, never per chunk, which
     /// would over-spawn; per-scan admission is F4's scope).
     ///
-    /// The read is a SYNCHRONOUS positional read on `reader.point_source` (issue
-    /// #1940 restructure): a `pread`-style call carrying its offset as a parameter,
+    /// The read is a SYNCHRONOUS positional read on `reader.scan_positional_source`
+    /// (issue #1940 restructure; repointed off the MADV_RANDOM point plane onto the
+    /// unadvised scan plane by #2876): a `pread`-style call carrying its offset as a parameter,
     /// which touches NO tokio reactor/timer and completes fully on THIS blocking
     /// thread for every backend (mmap = resident slice; `O_DIRECT` = aligned pread;
     /// buffered = `pread` on a dedicated `std::fs::File`). This deliberately
