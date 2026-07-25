@@ -246,10 +246,17 @@ then prints the gate’s <code dir="auto">accelerators:</code> line as a health 
 <p>Every optional accelerator the gate depends on is auto-detected, and every SUMMARY
 block (full <strong>and</strong> <code dir="auto">--lite</code>) carries a machine-checkable line:</p>
 <div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">accelerators: sccache=on nextest=on lanes=on</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="accelerators: sccache=on nextest=on lanes=on"><div></div></button></div></figure></div>
+<p>On <strong>Linux</strong> the line additionally carries a <code dir="auto">mold=</code> token (byte-identical / no token
+on macOS):</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked"><div></div></button></div></figure></div>
 <ul>
 <li><strong><code dir="auto">sccache</code></strong> — cross-worktree compile cache (~25.6% faster fresh builds).</li>
 <li><strong><code dir="auto">nextest</code></strong> — parallel <code dir="auto">core-tests</code> (the gate’s long pole).</li>
 <li><strong><code dir="auto">lanes</code></strong> — parallel gate components (needs bash ≥4.3 for <code dir="auto">wait -n</code>).</li>
+<li><strong><code dir="auto">mold</code></strong> (issue #2859, <strong>Linux only</strong>) — the fast linker, wired via a per-machine
+<code dir="auto">~/.cargo/config.toml</code> managed block. States: <code dir="auto">mold=linked</code> (wired) · <code dir="auto">overridden</code>
+(a global <code dir="auto">RUSTFLAGS</code> is suppressing the wired flags — don’t export one on a worker)
+· <code dir="auto">present-unconfigured</code> (installed but not wired — re-run bootstrap) · <code dir="auto">absent</code>.</li>
 </ul>
 <p>State values: <strong><code dir="auto">on</code></strong> (detected &#x26; used) · <strong><code dir="auto">absent</code></strong> (missing → the gate prints a
 loud <code dir="auto">WARN:</code> on STDERR with the one-line install command) · <strong><code dir="auto">off</code></strong> (intentionally

@@ -695,9 +695,16 @@ Every optional accelerator the gate depends on is auto-detected, and every SUMMA
 accelerators: sccache=on nextest=on lanes=on
 ```
 
+On **Linux** the line additionally carries a `mold=` token (byte-identical / no token on macOS):
+
+```plaintext
+accelerators: sccache=on nextest=on lanes=on sccache-health=ok mold=linked
+```
+
 * **`sccache`** — cross-worktree compile cache (\~25.6% faster fresh builds).
 * **`nextest`** — parallel `core-tests` (the gate’s long pole).
 * **`lanes`** — parallel gate components (needs bash ≥4.3 for `wait -n`).
+* **`mold`** (issue #2859, **Linux only**) — the fast linker, wired via a per-machine `~/.cargo/config.toml` managed block. States: `mold=linked` (wired) · `overridden` (a global `RUSTFLAGS` is suppressing the wired flags — don’t export one on a worker) · `present-unconfigured` (installed but not wired — re-run bootstrap) · `absent`.
 
 State values: **`on`** (detected & used) · **`absent`** (missing → the gate prints a loud `WARN:` on STDERR with the one-line install command) · **`off`** (intentionally disabled via `CQLITE_DISABLE_SCCACHE` / `CQLITE_DISABLE_NEXTEST` / `AGENT_GATE_JOBS=1`; **no warn**) · **`lanes=serial`** (degraded by bash <4.3). An intentional opt-out is `off`, never `absent`. This exists because a machine silently ran \~3x slower for weeks with sccache and nextest both un-installed and no signal. If a pasted SUMMARY shows `absent`, install the tool — the state is visible in the block, not just scrollback.
 
