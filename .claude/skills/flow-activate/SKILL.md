@@ -48,7 +48,8 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
    gh issue edit <N> --add-assignee @me
    # have_project=1: gh project item-edit ... --field Status --single-select-option-id <In Progress>
    # (have_project=0 cannot occur here — Path A eligibility in step 2 already required a reachable board.
-   #  A status:in-progress label write is a decorative mirror for humans only, never a dispatch source.)
+   #  Do NOT write a status:in-progress label — the board→label mirror (#2855) derives it from the
+   #  board Status you just set; a hand-written board-derived label is reverted on the next mirror pass.)
    scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes refs/heartbeats/<machine> (#2089)
    ```
    If `claim.sh claim` reports `CLAIM LOST`, you did NOT win — do not create the worktree; take the next
@@ -64,9 +65,12 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
    - the proposal summary + Non-goals,
    - the spec requirements + `#### Scenario:` blocks **verbatim**,
    - the recommended design (chosen + what it beat),
-   then flip the label and wait:
+   then set the transient spec-review sub-marker and wait:
    ```bash
-   gh issue edit <N> --remove-label status:ready --add-label status:spec-review
+   # spec-review is a transient skill-managed sub-marker (NOT a board Status option) — the
+   # board→label mirror (#2855) does not touch it. Do NOT write status:ready/in-progress/in-review;
+   # those labels are the mirror's now, derived from the board Status you set.
+   gh issue edit <N> --add-label status:spec-review
    ```
    Do not start `flow-implement`. Approval is the owner's seam.
 7. **Drop the spec render after approval (issue #2085).** The inline render exists only to get the owner's

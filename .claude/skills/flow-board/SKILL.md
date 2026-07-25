@@ -57,25 +57,34 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
 
 ## Steps
 
-1. **Render the board.** If `have_project=1`, render from the Project:
+1. **Cheap candidate discovery (#2855).** `status:*` is now an ENFORCED read-mirror of board Status
+   (written only by `project-board-sync.yml`), so it is server-side filterable and cheap for
+   *narrowing* the candidate set without pulling issue bodies or paginating every board item:
+   ```bash
+   gh issue list --state open --label status:ready --json number,title
+   ```
+   This is discovery only — it narrows candidates. It is **eventually consistent** (≤30-min mirror lag)
+   and is **NEVER the dispatch/claim authority**: you MUST still confirm each candidate against the
+   live board `Status` in step 6 and acquire the claim ref before working it.
+2. **Render the board.** If `have_project=1`, render from the Project (the authoritative view):
    ```bash
    gh project item-list "$project_number" --owner "$project_owner" --format json --limit 200
    ```
    Show, per item: `#N (slug)  P?  Status  assignee  PR/CI  worktree`. Group by `Status`
    (`Backlog → Ready → In Progress → In Review → Done`); each `In Progress` item MUST show its assignee
    (the claiming session/owner). If `have_project=0`, you may render a **read-only** status view from
-   labels (NOT a dispatch source — see Path A note above):
+   the mirrored labels (NOT a dispatch source — see Path A note above):
    ```bash
    gh issue list --state open --json number,title,labels,assignees,url --limit 100
    ```
    Bucket by `status:*`; read the `P?` label as priority; show assignee from `assignees`. This view is
    informational only — no claim/selection happens without the board.
-2. **PRs + CI:**
+3. **PRs + CI:**
    ```bash
    gh pr list --state open --json number,headRefName,title,reviewDecision,url --limit 100
    ```
    For each `issue-*` PR, check required CI; an `In Review` PR is only owner-actionable once CI is green.
-3. **Worktrees + claim refs:** `git worktree list` — confirm each in-flight issue maps 1:1:1:1
+4. **Worktrees + claim refs:** `git worktree list` — confirm each in-flight issue maps 1:1:1:1
    (issue ↔ worktree ↔ change ↔ PR); flag orphans. List the claim locks on origin — the slugless
    fixed-name **claim refs** are now THE lock (#2665); the `issue-<N>-<slug>` branch is only PR plumbing:
    ```bash
@@ -97,7 +106,7 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    the only evidence until a beat appears. Ref layout + age-bucket semantics are documented in
    `scripts/flow/claim-heartbeat.sh`'s header — this skill only consumes `list`, never reimplements the
    parsing.
-4. **Reconcile + reap.** Cross-check the board against GitHub-side state:
+5. **Reconcile + reap.** Cross-check the board against GitHub-side state:
    - **Drift:** a PR that is **merged** (or its issue closed) while the item is still `In Progress`
      (or `In Review`) → flag for transition to `Done` (the server-side automation should do this; if it
      hasn't, set it: `gh project item-edit ... --field Status --single-select-option-id <Done>` or flip
@@ -106,7 +115,7 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
      commits" guesswork, which false-positived on long no-commit implementation phases and
      false-negatived on a push-then-idle machine. The rule now has two conditions, both required:
      ```bash
-     # 1. heartbeat age for the claiming machine, from the fleet view (step 3a):
+     # 1. heartbeat age for the claiming machine, from the fleet view (step 4a):
      scripts/flow/claim-heartbeat.sh list   # age column for the issue's machine
      # 2. no open PR for the issue:
      gh pr list --state open --search "issue-<N>" --json number --jq 'length'
@@ -163,10 +172,10 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    - An item with a fresh heartbeat (age ≤ 4h) is **not** touched by either rule. An item with an open PR
      that is **still moving** (head advanced or review activity within 4h) is a live review-wait — surface
      it as in-review as normal. Do not silently steal a live claim.
-5. **Surface ONE next thing.** Pick the furthest-along item waiting on the owner — in order: a
+6. **Surface ONE next thing.** Pick the furthest-along item waiting on the owner — in order: a
    green-CI PR to merge (Seam 2), a committed spec to approve (Seam 1), an addressing PR with replies,
-   an **orphaned endgame** just flagged adopt-eligible by step 4 (a stalled certified PR the owner should
-   adopt/merge), then an item just reaped by step 4 (now `Status=Ready`, ready to reclaim). Drive that one (render the
+   an **orphaned endgame** just flagged adopt-eligible by step 5 (a stalled certified PR the owner should
+   adopt/merge), then an item just reaped by step 5 (now `Status=Ready`, ready to reclaim). Drive that one (render the
    spec inline / show the PR), or — if nothing waits — offer a short **claim-aware** pick-list: only items
    whose **board `Status=Ready`** AND
    have **no** `refs/claims/issue-<N>` claim ref and **no** legacy `issue-<N>-*` branch on origin
