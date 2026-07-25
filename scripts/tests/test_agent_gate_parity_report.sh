@@ -31,14 +31,19 @@ unset AGENT_GATE_SUMMARY_FILE
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 MANIFEST="$REPO_ROOT/test-data/cassandra-parity-manifest.yml"
 REPORT_REL="docs/reports/cassandra-test-parity.md"
-# The FAIL case's mutated manifest MUST live at <repo-root>/test-data/<file>.yml so
+# The FAIL case's mutated manifest MUST live at <repo-root>/test-data/<file> so
 # the tool's repo_root() = manifest.canonicalize().parent().parent() resolves to the
 # real repo and lint's file-existence checks pass — only then does --check reach the
 # genuine STALE render-mismatch path instead of bailing on lint errors (#1338). A
-# mktemp dir path would fail lint identically to a real staleness and let the FAIL
-# case pass for the wrong reason. It is removed on exit (even on failure) so it never
-# pollutes the working tree.
-MUT="$REPO_ROOT/test-data/.tmp-parity-manifest-mutated.yml"
+# mktemp DIR path would fail lint identically to a real staleness and let the FAIL
+# case pass for the wrong reason, so it must stay under test-data/.
+# #2874: PER-RUN unique name (mktemp, terminal XXXXXX — macOS-safe) instead of a
+# FIXED `.tmp-parity-manifest-mutated.yml`. The fixed name was a cross-lane delete
+# race: two concurrent lanes running this self-test in one checkout shared the file,
+# and one lane's EXIT trap `rm`'d the other's live fixture (a residual #2874 kill
+# surface). The trap below removes ONLY this run's file. It is removed on exit (even
+# on failure) so it never pollutes the working tree.
+MUT=$(mktemp "$REPO_ROOT/test-data/.tmp-parity-manifest-mutated.XXXXXX")
 
 PASS=0
 FAIL=0

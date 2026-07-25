@@ -1602,6 +1602,14 @@ elif [ "$DELTA" -eq 1 ]; then
   SUMMARY_MODE_LINE="MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of record; gate of record = the full agent-gate.sh PASS at anchor $DELTA_ANCHOR)"
 fi
 
+# #2874: capture the INHERITED parent-run marker (exported by an ENCLOSING gate)
+# NOW, before we mint our own RUN_ID and export our own marker below. A non-empty
+# value means THIS invocation is nested inside another gate's component run (e.g.
+# a tooling-tests self-test recursively invoking agent-gate.sh). The summary-path
+# resolution below uses it to default a nested run to a PRIVATE path so it can never
+# write the enclosing checkout's shared default and clobber the parent gate of record.
+INHERITED_PARENT_RUN_ID="${AGENT_GATE_PARENT_RUN_ID:-}"
+
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
 # Per-run nonce (#1175 roborev finding 1): the LOG_DIR is a fresh per-run mktemp
 # path, so it uniquely identifies THIS invocation. We stamp it into every SUMMARY
@@ -1619,16 +1627,38 @@ RUN_ID="$LOG_DIR"
 # The lite run uses a DISTINCT default recovery filename (issue #1821) so it can
 # never clobber the full gate's recovery artifact, and so `cat`-ing the default
 # after a lite run can never be misread as the full gate's result.
-if [ "$LITE" -eq 1 ]; then
-  SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-lite-summary.txt}"
+# #2874: nested-run summary isolation. A nested invocation is one that started with
+# an ENCLOSING gate's run marker in its env (INHERITED_PARENT_RUN_ID) and did NOT
+# pin its own AGENT_GATE_SUMMARY_FILE. Such a run defaults its summary to a PRIVATE
+# path inside its OWN mktemp log dir — NEVER the enclosing checkout's shared default
+# (.agent-gate-summary.txt / -lite- / -delta-), which the parent gate of record is
+# using. This structurally closes the same-checkout default-path clobber vector for
+# EVERY nested invocation, present and future, independent of any self-test's own
+# unset/pin discipline (the residual kill surface after #2751 closed the env vector).
+# An explicit AGENT_GATE_SUMMARY_FILE from the nested caller still WINS (self-tests
+# keep pinning it to assert on summary content).
+NESTED_RUN=0
+if [ -n "$INHERITED_PARENT_RUN_ID" ] && [ -z "${AGENT_GATE_SUMMARY_FILE:-}" ]; then
+  NESTED_RUN=1
+fi
+if [ -n "${AGENT_GATE_SUMMARY_FILE:-}" ]; then
+  SUMMARY_FILE="$AGENT_GATE_SUMMARY_FILE"
+elif [ "$NESTED_RUN" -eq 1 ]; then
+  SUMMARY_FILE="$LOG_DIR/summary.txt"
+elif [ "$LITE" -eq 1 ]; then
+  SUMMARY_FILE="$REPO_ROOT/.agent-gate-lite-summary.txt"
 elif [ "$DELTA" -eq 1 ]; then
   # DISTINCT delta recovery filename (issue #1892) so a delta run can never clobber
   # the full or lite recovery artifact, and `cat`-ing it can never be misread as
   # the full gate's result.
-  SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-delta-summary.txt}"
+  SUMMARY_FILE="$REPO_ROOT/.agent-gate-delta-summary.txt"
 else
-  SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-summary.txt}"
+  SUMMARY_FILE="$REPO_ROOT/.agent-gate-summary.txt"
 fi
+# #2874: a nested run stamps `nested-under: <parent-run-id>` in its summary block
+# for traceability (emitted alongside the optional MODE line, see the emit spots).
+NESTED_UNDER_LINE=""
+[ "$NESTED_RUN" -eq 1 ] && NESTED_UNDER_LINE="nested-under: $INHERITED_PARENT_RUN_ID"
 # Resolve a caller-provided RELATIVE AGENT_GATE_SUMMARY_FILE against the caller's
 # original CWD, not the repo root we cd'd into (#1175 roborev finding 1). Absolute
 # paths are used verbatim; the unset default above is already absolute.
@@ -1659,6 +1689,13 @@ if ! export -n AGENT_GATE_SUMMARY_FILE 2>/dev/null; then
   echo "agent-gate: WARN export -n AGENT_GATE_SUMMARY_FILE failed; unsetting instead (#2751)" >&2
   unset AGENT_GATE_SUMMARY_FILE
 fi
+# #2874: export THIS run's marker so ANY gate we spawn (present or future) detects it
+# is nested and defaults to a PRIVATE summary path (never this checkout's shared
+# default), structurally closing the same-checkout default-path clobber vector
+# regardless of self-test discipline. Distinct from the AGENT_GATE_SUMMARY_FILE we
+# just de-exported: this marker is a NONCE ($RUN_ID = the per-run mktemp log dir),
+# never a path a child would write, so exporting it can never itself cause a clobber.
+export AGENT_GATE_PARENT_RUN_ID="$RUN_ID"
 # Keep a copy under the logs bundle for archival.
 LOG_SUMMARY_FILE="$LOG_DIR/summary.txt"
 declare -a NAMES=() STATUSES=() TIMES=()
@@ -1684,6 +1721,7 @@ SUMMARY_WRITE_FAILED=0
   echo "$SUMMARY_START_MARKER"
   echo "run-id: $RUN_ID"
   [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
+  [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
   echo "RESULT: INCOMPLETE (gate did not finish)"
   echo "$SUMMARY_END_MARKER"
 } > "$SUMMARY_FILE" 2>/dev/null || true
@@ -1728,6 +1766,7 @@ emit_summary() {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
+  [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
@@ -1791,6 +1830,7 @@ emit_summary() {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
+  [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
@@ -1814,6 +1854,7 @@ emit_summary() {
       echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
       [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
+  [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
@@ -1822,6 +1863,31 @@ emit_summary() {
       echo "$SUMMARY_END_MARKER"
     } 2>/dev/null || true
   fi
+}
+
+# _assert_summary_integrity <component> (#2874): mid-run summary-clobber detection
+# with a NAMED cause. The startup sentinel and emit_summary both stamp $SUMMARY_FILE
+# with `run-id: $RUN_ID`, and nothing in a healthy run rewrites the file mid-run
+# (emit_summary runs only at the very end). So if, at a component boundary, the file
+# exists but no longer carries THIS run's run-id, a FOREIGN gate (a nested or
+# concurrent run that wrote the same path) clobbered it. Rather than let that surface
+# an hour later as a bare INCOMPLETE death (the #2751/#2874 field cost: ~1h/re-run),
+# stop NOW: rewrite the summary with a `summary-integrity: FAIL` line naming the
+# expected run-id and exit non-zero. emit_summary rewrites the file with our OWN
+# run-id, so the emitted FAIL block is itself valid. A missing file is fine (a
+# component may simply not have written yet — never a clobber). Cost: one `grep -q`
+# per component (~30/run), negligible. Belt-and-suspenders to emit_summary's existing
+# end-of-run run-id re-grep (which stays as the final backstop). NOTE: on the serial
+# MAIN foreground lane (where tooling-tests — the dominant clobber site — runs), the
+# `exit 1` propagates and stops the whole gate immediately with the named line intact.
+_assert_summary_integrity() {
+  [ -f "$SUMMARY_FILE" ] || return 0
+  grep -qF "run-id: $RUN_ID" "$SUMMARY_FILE" 2>/dev/null && return 0
+  echo "⚠️ agent-gate: summary-integrity FAIL after [${1:-<component>}]: $SUMMARY_FILE no longer carries run-id: $RUN_ID (foreign run-id detected mid-run) (#2874)" >&2
+  emit_summary FAIL \
+    "summary-integrity: FAIL (foreign run-id detected mid-run; expected $RUN_ID)" \
+    "detected-after-component: ${1:-<component>}"
+  exit 1
 }
 
 # gate_push_signal <result> <branch> <short-sha> <fail-components> (#2667)
@@ -1880,6 +1946,25 @@ if [ "$SELFTEST" -eq 1 ]; then
   exit 0
 fi
 
+# #2874 hidden self-test hook: exercise the mid-run summary-integrity guard in
+# isolation, deterministically (no component, no timing race). When
+# AGENT_GATE_INTEGRITY_SELFTEST=1 the caller has pinned AGENT_GATE_SUMMARY_FILE to a
+# throwaway path; we SEED it with a FOREIGN run-id (simulating a clobber) and then run
+# the SAME _assert_summary_integrity a component boundary runs — it must rewrite a
+# named `summary-integrity: FAIL` block and exit non-zero. If the guard fails to fire
+# we exit 0 with a BUG marker so the self-test catches a regression either way.
+if [ "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" = 1 ]; then
+  {
+    echo "$SUMMARY_START_MARKER"
+    echo "run-id: /tmp/agent-gate.FOREIGN-$$"
+    echo "RESULT: INCOMPLETE (foreign)"
+    echo "$SUMMARY_END_MARKER"
+  } > "$SUMMARY_FILE"
+  _assert_summary_integrity "integrity-selftest"
+  echo "integrity-selftest: BUG — guard did NOT fire on a foreign run-id" >&2
+  exit 0
+fi
+
 # record_result <name> <status> <seconds>
 # Components may run concurrently in the bounded pool (issue #1737). A backgrounded
 # subshell CANNOT mutate the parent's NAMES/STATUSES/TIMES arrays or OVERALL, so
@@ -1888,6 +1973,9 @@ fi
 # drains. This keeps the SUMMARY block deterministic regardless of finish order.
 record_result() { # <name> <status> <seconds>
   printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
+  # #2874: every component records its verdict through here, so this is the natural
+  # component-boundary chokepoint for the mid-run summary-integrity guard.
+  _assert_summary_integrity "$1"
 }
 
 # run_clippy: the `clippy` component's command (issue #1844). By default it runs a
@@ -2767,6 +2855,41 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_sublanes.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (parallel sub-lane scheduling self-test #2657); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # gate self-test hermeticity lint (#2874): no python3 needed, always runs (pure
+  # static scan of scripts/tests/*.sh). FAILs the component if a macOS-unsafe mktemp
+  # template (non-trailing X's) or a FIXED `.tmp-*` fixture name is (re)introduced —
+  # the residual same-checkout/self-test-fixture sharing that killed full gates of
+  # record. A failure FAILs the component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_gate_selftest_hermetic.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gate_selftest_hermetic.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (gate self-test hermeticity lint #2874); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # nested/concurrent-gate isolation regression self-test (#2874): the concurrency
+  # phase is python3-SKIP-aware internally; the nested-clobber, explicit-wins, and
+  # mid-run summary-integrity phases need no python3 and always run. Proves a nested
+  # gate cannot clobber the parent gate of record's summary and that a foreign run-id
+  # is caught with a NAMED FAIL (never a bare INCOMPLETE). A failure FAILs the
+  # component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_nested_isolation.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_nested_isolation.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (nested-gate isolation self-test #2874); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
