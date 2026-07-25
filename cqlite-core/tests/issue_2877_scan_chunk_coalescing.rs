@@ -1,13 +1,17 @@
 //! Issue #2877 — TDD pin: the Summary-guided compressed scan walk
-//! (`walk_in_range_partition_slices`, `summary_scan.rs`) must decompress each
+//! (`walk_in_range_partition_slices`, `summary_scan/mod.rs`) must decompress each
 //! covering `CompressionInfo.db` chunk ONCE across a full-table scan, never once
 //! per contained partition.
 //!
-//! `#![cfg(feature = "write-support")]`: this file drives `SSTableWriter` /
-//! `WriteEngine` mutations to build fixtures, both gated behind `write-support`
-//! (mirrors `issue_1495_arrow_accessor_parity`'s `arrow`-gating convention) — a
-//! `--no-default-features` test build without it must not even try to compile
-//! this target.
+//! `#![cfg(all(feature = "write-support", feature = "lz4"))]`: this file drives
+//! `SSTableWriter` / `WriteEngine` mutations to build fixtures (gated behind
+//! `write-support`, mirroring `issue_1495_arrow_accessor_parity`'s `arrow`-gating
+//! convention) AND repacks them through `create_compressor(Lz4)`, which returns
+//! `Err("feature 'lz4' required")` when `lz4` is off. BOTH gates therefore matter,
+//! and they must match the target's `required-features` in `Cargo.toml` exactly —
+//! declaring only `write-support` there let `cargo test --no-default-features
+//! --features write-support` run this file and panic on that `Err` (roborev round
+//! 2, blocker C).
 //!
 //! ## The bug being pinned
 //!
@@ -53,7 +57,7 @@
 //! `tests/` file is its own process and every test below is `#[serial]` (mirrors
 //! `decompressed_chunk_cache_tests.rs`).
 
-#![cfg(feature = "write-support")]
+#![cfg(all(feature = "write-support", feature = "lz4"))]
 
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -88,11 +92,26 @@ const REPACK_CHUNK_SIZE: usize = 2048;
 /// `REPACK_CHUNK_SIZE` chunks, short enough to keep the fixture tiny and fast.
 const PAYLOAD: &str = "cqlite-2877-chunk-coalescing-payload-0123456789";
 
-/// `COMPRESSED_SCAN_WINDOW_TARGET_BYTES` in `summary_scan.rs` (private to that
-/// module, so mirrored here as a test-side constant): the multi-window fixture
-/// below deliberately exceeds `2x` this so the walk MUST refill at least twice,
-/// exercising the straddle/append path, not just the initial fill.
+/// `COMPRESSED_SCAN_WINDOW_TARGET_BYTES` in
+/// `summary_scan/compressed_scan_window.rs` (private to that module, so mirrored
+/// here as a test-side constant): the multi-window fixture below deliberately
+/// exceeds `2x` this so the walk MUST refill at least twice, exercising the
+/// straddle/append path, not just the initial fill — AND (roborev round 2) it is
+/// the RAMP's steady-state ceiling, never the size of a fresh fill.
 const WINDOW_TARGET_BYTES: usize = 4 * 1024 * 1024;
+
+/// Shared shape of the MULTI-WINDOW fixture (the straddle/gap/ramp tests below):
+/// ~20 KiB per partition * 440 partitions ~= 8.8 MiB uncompressed — comfortably
+/// over TWO window targets — packed into 64 KiB chunks, so the window boundary
+/// falls INSIDE a partition (20 KiB does not divide the 4 MiB target evenly) and
+/// the data section spans well over a hundred chunks.
+const N_LARGE: i32 = 440;
+const LARGE_MIN_PAYLOAD_LEN: usize = 20 * 1024;
+const LARGE_REPACK_CHUNK_SIZE: usize = 64 * 1024;
+/// Chunks a FLAT (un-ramped) 4 MiB greedy first fill would touch at
+/// `LARGE_REPACK_CHUNK_SIZE`: `4 MiB / 64 KiB`. The ramp's whole point is that a
+/// fresh fill costs ~ONE chunk instead of this many.
+const FLAT_FILL_CHUNKS: u64 = (WINDOW_TARGET_BYTES / LARGE_REPACK_CHUNK_SIZE) as u64;
 
 fn schema() -> TableSchema {
     TableSchema {
@@ -309,16 +328,9 @@ async fn full_scan_decompresses_each_chunk_once_not_once_per_partition() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn large_multi_window_scan_serves_every_partition_correctly() {
-    const N_LARGE: i32 = 440;
-    // ~20 KiB/partition * 440 partitions ≈ 8.8 MiB uncompressed data — comfortably
-    // over TWO window targets, forcing at least one full refill (not just the
-    // initial fill), and with 64 KiB chunks the boundary falls inside a
-    // partition almost certainly (20 KiB does not divide the 4 MiB target evenly).
-    const MIN_PAYLOAD_LEN: usize = 20 * 1024;
-    const LARGE_REPACK_CHUNK_SIZE: usize = 64 * 1024;
-
     let (_temp, data_path, chunk_count, data_section_len) =
-        compressed_fixture_with_index(N_LARGE, MIN_PAYLOAD_LEN, LARGE_REPACK_CHUNK_SIZE).await;
+        compressed_fixture_with_index(N_LARGE, LARGE_MIN_PAYLOAD_LEN, LARGE_REPACK_CHUNK_SIZE)
+            .await;
     assert!(
         data_section_len > 2 * WINDOW_TARGET_BYTES,
         "fixture must exceed 2x the window target ({} bytes) to force at least \
@@ -334,6 +346,7 @@ async fn large_multi_window_scan_serves_every_partition_correctly() {
     let sch = schema();
 
     SSTableReader::reset_decompress_calls();
+    SSTableReader::reset_scan_window_counters();
     let cancel = ScanCancel::new();
     let mut ids = Vec::new();
     reader
@@ -351,6 +364,7 @@ async fn large_multi_window_scan_serves_every_partition_correctly() {
              partition straddling a window boundary",
         );
     let decompress_calls = SSTableReader::decompress_call_count();
+    let refills = SSTableReader::scan_window_refill_count();
 
     ids.sort_unstable();
     let expected: Vec<i32> = (1..=N_LARGE).collect();
@@ -365,6 +379,224 @@ async fn large_multi_window_scan_serves_every_partition_correctly() {
          refills (a boundary-straddling partition's append must fetch only the \
          NEW bytes beyond what the window already buffered, never re-fetch the \
          chunk it just appended past): expected {chunk_count}, got {decompress_calls}"
+    );
+    // Steady-state proof (issue #2877 roborev blocker A): the RAMP must not turn a
+    // long scan into a per-chunk read walk. Doubling from one 64 KiB chunk reaches
+    // the 4 MiB steady state in 7 refills (64+128+...+4096 KiB ~= 7.9 MiB of the
+    // ~8.8 MiB fixture), so the whole scan costs a handful of refills — vs
+    // `chunk_count` (>130) if the window never grew.
+    const MAX_STEADY_STATE_REFILLS: u64 = 16;
+    assert!(
+        refills <= MAX_STEADY_STATE_REFILLS,
+        "the window must RAMP to its 4 MiB steady state: covering {chunk_count} \
+         chunks took {refills} refills, but a ramping window needs <= \
+         {MAX_STEADY_STATE_REFILLS} (a per-chunk refill walk would need \
+         ~{chunk_count})"
+    );
+}
+
+/// Issue #2877 roborev round 2 (blocker A): a FRESH fill must not unconditionally
+/// read + LZ4-decompress the full 4 MiB steady-state target. A `decode` closure
+/// that returns `ControlFlow::Break` after the FIRST row terminates the walk
+/// immediately, so the scan's whole I/O + decompression cost must be ~ONE
+/// `chunk_length` — the ramp's first step. A flat 4 MiB greedy floor instead reads
+/// and decompresses `4 MiB / 64 KiB` = 64 chunks of mostly never-visited partition
+/// bodies, undercutting the walk's own early termination.
+///
+/// RED against the flat-floor code (`decompress_calls == 64`, `refills == 1` with a
+/// 4 MiB window); GREEN against the ramp (`decompress_calls == 1`).
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn early_terminating_decode_pays_about_one_chunk_not_the_full_target() {
+    let (_temp, data_path, chunk_count, data_section_len) =
+        compressed_fixture_with_index(N_LARGE, LARGE_MIN_PAYLOAD_LEN, LARGE_REPACK_CHUNK_SIZE)
+            .await;
+    assert!(
+        data_section_len > 2 * WINDOW_TARGET_BYTES && (chunk_count as u64) > FLAT_FILL_CHUNKS,
+        "fixture must hold MANY more chunks ({chunk_count}) than a flat 4 MiB fill \
+         would touch ({FLAT_FILL_CHUNKS}), else 'one chunk vs the whole target' is \
+         not observable (data_section_len {data_section_len})"
+    );
+
+    let reader = open_reader(&data_path).await;
+    let sch = schema();
+
+    SSTableReader::reset_decompress_calls();
+    SSTableReader::reset_scan_window_counters();
+    let cancel = ScanCancel::new();
+    let mut rows = 0usize;
+    reader
+        .stream_all_partitions_for_query(Some(&sch), &cancel, None, |_row| {
+            rows += 1;
+            // Early termination: the caller is done after one row (a LIMIT 1 / a
+            // satisfied downstream token filter).
+            Ok(ControlFlow::Break(()))
+        })
+        .await
+        .expect("an early-terminating summary-guided compressed scan must succeed");
+    let decompress_calls = SSTableReader::decompress_call_count();
+    let refills = SSTableReader::scan_window_refill_count();
+
+    assert_eq!(
+        rows, 1,
+        "the closure must have broken after exactly one row"
+    );
+    assert_eq!(
+        refills, 1,
+        "one partition served means exactly ONE window fill, got {refills}"
+    );
+    // A ramped first fill covers one chunk_length (rounded up to the chunk
+    // boundary): 1 chunk for this fixture, 2 only if the first partition itself
+    // straddled a chunk boundary. Anything at/near FLAT_FILL_CHUNKS means the
+    // greedy floor is still flat.
+    const MAX_EARLY_TERMINATION_CHUNKS: u64 = 2;
+    assert!(
+        decompress_calls <= MAX_EARLY_TERMINATION_CHUNKS,
+        "an early-terminating decode must pay ~ONE chunk, not the whole 4 MiB \
+         target: decompressed {decompress_calls} chunks (a flat 4 MiB fresh fill \
+         costs {FLAT_FILL_CHUNKS}; the ramp's first step costs \
+         <= {MAX_EARLY_TERMINATION_CHUNKS}) — issue #2877 roborev blocker A"
+    );
+}
+
+/// Issue #2877 roborev round 2 (blocker A, narrow-range half): a token range
+/// holding a handful of partitions must not mature the ramp — it reads roughly its
+/// own span, not the 4 MiB steady-state target. Same mechanism as the
+/// early-termination test, driven through the token-pushdown path the Flight warm
+/// split actually uses.
+///
+/// RED against the flat floor (the single fresh fill alone decompresses
+/// `FLAT_FILL_CHUNKS` = 64 chunks for a range spanning ~3); GREEN against the ramp.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn narrow_token_range_does_not_mature_the_ramp() {
+    let (_temp, data_path, chunk_count, _data_len) =
+        compressed_fixture_with_index(N_LARGE, LARGE_MIN_PAYLOAD_LEN, LARGE_REPACK_CHUNK_SIZE)
+            .await;
+    assert!(
+        (chunk_count as u64) > FLAT_FILL_CHUNKS,
+        "fixture must hold more chunks ({chunk_count}) than a flat fresh fill \
+         touches ({FLAT_FILL_CHUNKS})"
+    );
+
+    // Authoritative tokens (never assumed), ascending — the order Index.db is
+    // physically written in. Pick a 3-partition window in the MIDDLE of the ring.
+    let mut by_token: Vec<(i32, i64)> = (1..=N_LARGE)
+        .map(|id| (id, cassandra_murmur3_token(&key_bytes(id))))
+        .collect();
+    by_token.sort_by_key(|(_, tok)| *tok);
+    const RANGE_PARTITIONS: usize = 3;
+    let lo_rank = (N_LARGE as usize) / 2;
+    let start_excl = by_token[lo_rank].1;
+    let end_incl = by_token[lo_rank + RANGE_PARTITIONS].1;
+    assert!(start_excl < end_incl, "must be a non-wraparound range");
+    let expected: Vec<i32> = by_token[lo_rank + 1..=lo_rank + RANGE_PARTITIONS]
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+
+    let reader = open_reader(&data_path).await;
+    let bound = ScanTokenBound {
+        start_excl,
+        end_incl,
+        wraparound: false,
+    };
+    SSTableReader::reset_decompress_calls();
+    SSTableReader::reset_scan_window_counters();
+    let cancel = ScanCancel::new();
+    let mut ids = Vec::new();
+    reader
+        .stream_all_partitions_for_query(None, &cancel, Some(bound), |row| {
+            let key_bytes: &[u8] = &row.key.0;
+            ids.push(i32::from_be_bytes(
+                key_bytes.try_into().expect("4-byte int PK"),
+            ));
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .expect("a narrow-range summary-guided compressed scan must succeed");
+    let decompress_calls = SSTableReader::decompress_call_count();
+
+    ids.sort_unstable();
+    let mut want = expected.clone();
+    want.sort_unstable();
+    assert_eq!(
+        ids, want,
+        "the narrow range must still emit exactly its in-range partitions"
+    );
+    // 3 partitions * ~20 KiB span ~= 60 KiB, so a ramping walk touches a couple of
+    // 64 KiB chunks. A flat 4 MiB floor decompresses FLAT_FILL_CHUNKS on the very
+    // first fill regardless of how narrow the range is.
+    const MAX_NARROW_RANGE_CHUNKS: u64 = 8;
+    assert!(
+        decompress_calls <= MAX_NARROW_RANGE_CHUNKS,
+        "a {RANGE_PARTITIONS}-partition token range must decompress ~its own span \
+         ({MAX_NARROW_RANGE_CHUNKS} chunks max), not the 4 MiB target \
+         ({FLAT_FILL_CHUNKS} chunks): got {decompress_calls} — issue #2877 roborev \
+         blocker A"
+    );
+}
+
+/// Issue #2877 roborev round 2 (blocker B): draining the dead prefix for EVERY
+/// partition served shifts all remaining window bytes each time — over a 4 MiB
+/// window holding thousands of narrow partitions that is quadratic byte copying,
+/// negating the coalescing win. Reclamation must instead be O(REFILLS).
+///
+/// The oracle is the number of prefix-compaction memmoves the window performs
+/// across one full scan (`scan_window_prefix_compaction_count`). What this DOES
+/// cover: the number of memmove EVENTS, which is the whole difference between the
+/// two shapes (per-partition vs per-refill) — with a bounded number of events each
+/// bounded by the window size, total copied bytes is linear in the data section.
+/// What it does NOT cover: the exact byte volume of each memmove (the harness has
+/// no allocator/`memcpy` instrumentation), so this pins the asymptotics, not a
+/// constant factor.
+///
+/// RED against the per-partition drain (`compactions == N_LARGE - 1` = 439);
+/// GREEN against per-refill reclamation (a handful).
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn full_scan_prefix_reclamation_is_per_refill_not_per_partition() {
+    let (_temp, data_path, chunk_count, data_section_len) =
+        compressed_fixture_with_index(N_LARGE, LARGE_MIN_PAYLOAD_LEN, LARGE_REPACK_CHUNK_SIZE)
+            .await;
+    assert!(
+        data_section_len > 2 * WINDOW_TARGET_BYTES,
+        "fixture must exceed 2x the window target so MANY partitions are served \
+         per window, got {data_section_len} bytes"
+    );
+
+    let reader = open_reader(&data_path).await;
+    let sch = schema();
+
+    SSTableReader::reset_decompress_calls();
+    SSTableReader::reset_scan_window_counters();
+    let cancel = ScanCancel::new();
+    let mut rows = 0usize;
+    reader
+        .stream_all_partitions_for_query(Some(&sch), &cancel, None, |_row| {
+            rows += 1;
+            Ok(ControlFlow::Continue(()))
+        })
+        .await
+        .expect("full compressed scan must succeed");
+    let compactions = SSTableReader::scan_window_prefix_compaction_count();
+    let refills = SSTableReader::scan_window_refill_count();
+    let decompress_calls = SSTableReader::decompress_call_count();
+
+    assert_eq!(
+        rows, N_LARGE as usize,
+        "every partition must still be decoded exactly once"
+    );
+    assert_eq!(
+        decompress_calls, chunk_count as u64,
+        "reclaiming lazily must not re-decompress any chunk: expected \
+         {chunk_count}, got {decompress_calls}"
+    );
+    assert!(
+        compactions <= refills,
+        "dead-prefix reclamation must be O(refills) ({refills}), not \
+         O(partitions) ({N_LARGE}): {compactions} memmoves — issue #2877 roborev \
+         blocker B (quadratic byte copying across a 4 MiB window's partitions)"
     );
 }
 
@@ -393,7 +625,7 @@ async fn wraparound_compressed_scan_reads_both_disjoint_segments() {
     const MIN_PAYLOAD_LEN: usize = 20 * 1024;
     const WRAP_REPACK_CHUNK_SIZE: usize = 64 * 1024;
 
-    let (_temp, data_path, _chunk_count, data_len) =
+    let (_temp, data_path, chunk_count, data_len) =
         compressed_fixture_with_index(N_WRAP, MIN_PAYLOAD_LEN, WRAP_REPACK_CHUNK_SIZE).await;
     assert!(
         data_len > 2 * WINDOW_TARGET_BYTES,
@@ -441,6 +673,8 @@ async fn wraparound_compressed_scan_reads_both_disjoint_segments() {
         end_incl,
         wraparound: true,
     };
+    SSTableReader::reset_decompress_calls();
+    SSTableReader::reset_scan_window_counters();
     let cancel = ScanCancel::new();
     let mut ids = Vec::new();
     reader
@@ -459,7 +693,6 @@ async fn wraparound_compressed_scan_reads_both_disjoint_segments() {
              realigning fresh",
         );
     ids.sort_unstable();
-
     assert_eq!(
         ids,
         expected,
@@ -468,5 +701,22 @@ async fn wraparound_compressed_scan_reads_both_disjoint_segments() {
          coalescing window",
         expected_low.len(),
         expected_high.len()
+    );
+    // Token pushdown must survive the ramp (issue #2877 roborev blocker A): the two
+    // in-range segments hold only a small fraction of the fixture's N_WRAP
+    // partitions, so the walk must decompress roughly THEIR span — NOT the whole
+    // data section. Because a gap-realign RESETS the ramp, the second segment
+    // re-earns its read-ahead from one chunk instead of inheriting the first
+    // segment's matured floor. The 2x slack absorbs chunk-boundary rounding and the
+    // ramp's own doubling overshoot on each segment.
+    let in_range = expected_low.len() + expected_high.len();
+    let in_range_chunks = (in_range * MIN_PAYLOAD_LEN).div_ceil(WRAP_REPACK_CHUNK_SIZE) as u64;
+    let ceiling = in_range_chunks * 2;
+    let decompress_calls = SSTableReader::decompress_call_count();
+    assert!(
+        decompress_calls <= ceiling,
+        "a wraparound range covering {in_range} partitions (~{in_range_chunks} \
+         chunks) must decompress <= {ceiling} chunks, not the whole \
+         {chunk_count}-chunk section: got {decompress_calls}"
     );
 }
