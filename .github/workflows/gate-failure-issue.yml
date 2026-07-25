@@ -1,0 +1,251 @@
+name: Gate Nightly Failure Issue Automation
+
+# Signal routing only (issue #2662). The nightly full-gate backstop
+# (`.github/workflows/gate.yml`, "Nightly agent-gate (deep check)") went dead all
+# of July 2026 — 12 consecutive `cancelled` runs at the old 75m timeout — and
+# NOBODY WAS PAGED, because a `cancelled` (or `timed_out`) conclusion surfaces
+# only on the Actions dashboard. This workflow closes that silent-death gap: when
+# the gate lane completes with a RED conclusion (`failure`, `cancelled`, or
+# `timed_out`) on a SCHEDULED or MAIN-BRANCH run, it files/updates ONE
+# deduplicated `gate-nightly-failure` tracking issue so a dead backstop can never
+# again go unnoticed for weeks. On a green (`success`) run it posts a "resolved"
+# comment on that open issue (never auto-closes — a human confirms + closes).
+#
+# Modelled on the sibling `parity-failure-issue.yml` safety patterns. It is
+# deliberately SELF-CONTAINED (plain `gh` CLI, no external fingerprint script):
+# the gate emits a single run-level verdict, not per-scenario parity failures, so
+# one pinned tracking issue is the right granularity — no fingerprinting needed.
+#
+# NON-GATING + fail-open: this job never changes the gate lane's result. Absent an
+# issue-write token it is a `::notice::` no-op (exit 0). It never auto-closes.
+#
+# SECURITY: this workflow consumes an UNTRUSTED `workflow_run` payload. It NEVER
+# interpolates event fields into a `run:` shell — every event value is passed via
+# a quoted `env:` var (the `run:` bodies reference only `$SHELL_VARS`), and the
+# origin run is allowlist-validated fail-closed before any issue write. In
+# particular `github.event.workflow_run.head_branch` is passed via env only (it is
+# in the injection lint's attacker-controlled set).
+
+on:
+  workflow_run:
+    workflows:
+      - "Nightly agent-gate (deep check)"
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "gate.yml workflow_run id to (re)process (manual replay/test)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+  # `gh run view` reads ANOTHER workflow run's metadata (the manual-replay path);
+  # that requires actions:read. Minimal + complete for this job.
+  actions: read
+
+concurrency:
+  # Serialize so two near-simultaneous completions cannot race the create/comment.
+  group: gate-failure-issue-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  file-gate-failure-issue:
+    runs-on: ubuntu-latest
+    # Coarse pre-filter over TRUSTED GitHub-computed fields (event name /
+    # conclusion). The validate step below re-checks fail-closed (branch/event
+    # allowlist) before any issue write. A manual workflow_dispatch always enters
+    # (replay path). React to any terminal conclusion; the validate step maps it
+    # to file (red) / resolve (green) / no-op.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event != 'pull_request' &&
+       (github.event.workflow_run.conclusion == 'failure' ||
+        github.event.workflow_run.conclusion == 'cancelled' ||
+        github.event.workflow_run.conclusion == 'timed_out' ||
+        github.event.workflow_run.conclusion == 'success'))
+    env:
+      # Pass untrusted payload fields as env vars, NEVER inline into a run: shell.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      SERVER_URL: ${{ github.server_url }}
+      WR_EVENT: ${{ github.event.workflow_run.event }}
+      WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      WR_NAME: ${{ github.event.workflow_run.name }}
+      WR_URL: ${{ github.event.workflow_run.html_url }}
+      WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      DISPATCH_RUN_ID: ${{ github.event.inputs.run_id }}
+      TRIGGER: ${{ github.event_name }}
+      GATE_WORKFLOW_NAME: "Nightly agent-gate (deep check)"
+      ISSUE_LABEL: "gate-nightly-failure"
+    steps:
+      - name: Guard token (fail-open, non-gating)
+        id: guard
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::GITHUB_TOKEN absent — skipping gate-failure issue automation (non-gating no-op)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate origin + determine mode (allowlist, fail-closed)
+        id: validate
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # Outputs: proceed (true/false), mode (file|resolve|none), run_url, conclusion.
+          emit() {
+            {
+              echo "proceed=$1"
+              echo "mode=$2"
+              echo "run_url=$3"
+              echo "conclusion=$4"
+            } >> "$GITHUB_OUTPUT"
+          }
+          # Map a terminal conclusion to an action: red -> file, green -> resolve.
+          mode_for_conclusion() {
+            case "$1" in
+              failure|cancelled|timed_out) echo "file" ;;
+              success) echo "resolve" ;;
+              *) echo "none" ;;
+            esac
+          }
+
+          if [ "${TRIGGER}" = "workflow_dispatch" ]; then
+            # Manual replay/test: the caller supplies an arbitrary run_id. Validate
+            # it independently the SAME way the auto path validates — a replay must
+            # target a REAL gate.yml run on schedule/main. Fail-closed.
+            if [ -z "${DISPATCH_RUN_ID:-}" ]; then
+              echo "::warning::workflow_dispatch replay requires a 'run_id' input — none given; no issue filed."
+              emit false none "" ""; exit 0
+            fi
+            if ! printf '%s' "${DISPATCH_RUN_ID}" | grep -Eq '^[0-9]+$'; then
+              echo "::warning::run_id '${DISPATCH_RUN_ID}' is not numeric — no issue filed."
+              emit false none "" ""; exit 0
+            fi
+            # DISPATCH_RUN_ID is passed via a quoted env var, never inlined.
+            META="$(gh run view "${DISPATCH_RUN_ID}" \
+              --json workflowName,headBranch,event,conclusion,url 2>/dev/null)" || META=""
+            if [ -z "${META}" ]; then
+              echo "::warning::could not fetch metadata for run ${DISPATCH_RUN_ID} — no issue filed."
+              emit false none "" ""; exit 0
+            fi
+            R_NAME="$(printf '%s' "${META}" | jq -r '.workflowName // ""')"
+            R_BRANCH="$(printf '%s' "${META}" | jq -r '.headBranch // ""')"
+            R_EVENT="$(printf '%s' "${META}" | jq -r '.event // ""')"
+            R_CONCLUSION="$(printf '%s' "${META}" | jq -r '.conclusion // ""')"
+            R_URL="$(printf '%s' "${META}" | jq -r '.url // ""')"
+            if [ "${R_NAME}" != "${GATE_WORKFLOW_NAME}" ]; then
+              echo "::warning::replay target run ${DISPATCH_RUN_ID} workflow '${R_NAME:-<none>}' is not the gate lane — no issue filed."
+              emit false none "" ""; exit 0
+            fi
+            if [ "${R_EVENT}" = "pull_request" ]; then
+              echo "::warning::replay target run ${DISPATCH_RUN_ID} is a pull_request-origin run — no issue filed."
+              emit false none "" ""; exit 0
+            fi
+            # gate.yml runs only on schedule (main) or workflow_dispatch; require main.
+            if [ "${R_BRANCH}" != "main" ]; then
+              echo "::notice::replay target run ${DISPATCH_RUN_ID} head branch '${R_BRANCH:-<none>}' is not main — no issue filed."
+              emit false none "" ""; exit 0
+            fi
+            MODE="$(mode_for_conclusion "${R_CONCLUSION}")"
+            if [ "${MODE}" = "none" ]; then
+              echo "::notice::replay target run ${DISPATCH_RUN_ID} concluded '${R_CONCLUSION:-<none>}' — nothing to do."
+              emit false none "" ""; exit 0
+            fi
+            echo "manual replay validated (conclusion '${R_CONCLUSION}', mode '${MODE}') — proceeding"
+            emit true "${MODE}" "${R_URL}" "${R_CONCLUSION}"; exit 0
+          fi
+
+          # Automatic workflow_run path. Origin event must be schedule, or a
+          # workflow_dispatch of the gate on main (a feature-branch dispatch of
+          # the gate — e.g. a maintainer testing — must NOT file the backstop
+          # issue). WR_HEAD_BRANCH is untrusted -> compared via a quoted env var.
+          case "${WR_EVENT}" in
+            schedule)
+              : ;;
+            workflow_dispatch)
+              if [ "${WR_HEAD_BRANCH:-}" != "main" ]; then
+                echo "::notice::gate dispatch on non-main branch '${WR_HEAD_BRANCH:-<none>}' — no issue filed."
+                emit false none "" ""; exit 0
+              fi ;;
+            *)
+              echo "::notice::origin event '${WR_EVENT}' is not schedule/workflow_dispatch — no issue filed."
+              emit false none "" ""; exit 0 ;;
+          esac
+          MODE="$(mode_for_conclusion "${WR_CONCLUSION}")"
+          if [ "${MODE}" = "none" ]; then
+            echo "::notice::gate run concluded '${WR_CONCLUSION}' — nothing to do."
+            emit false none "" ""; exit 0
+          fi
+          echo "gate run concluded '${WR_CONCLUSION}' (mode '${MODE}') — proceeding"
+          emit true "${MODE}" "${WR_URL}" "${WR_CONCLUSION}"
+
+      - name: File / update the gate-failure tracking issue (RED)
+        if: >-
+          steps.guard.outputs.skip != 'true' &&
+          steps.validate.outputs.proceed == 'true' &&
+          steps.validate.outputs.mode == 'file'
+        env:
+          RUN_URL: ${{ steps.validate.outputs.run_url }}
+          CONCLUSION: ${{ steps.validate.outputs.conclusion }}
+        run: |
+          set -euo pipefail
+          # Ensure the dedup label exists (idempotent; needs issues:write, which we
+          # hold). GH_REPO gives every gh call explicit repo context.
+          gh label create "${ISSUE_LABEL}" \
+            --repo "${GH_REPO}" \
+            --color B60205 \
+            --description "Nightly gate.yml deep-check backstop is failing (issue #2662)" \
+            2>/dev/null || true
+
+          # Assemble the body from shell vars ONLY (no GitHub-expression
+          # interpolation; no command substitution on data). printf treats each
+          # value as literal text.
+          {
+            printf '%s\n\n' "The nightly full-gate backstop (\`.github/workflows/gate.yml\`, \"${GATE_WORKFLOW_NAME}\") concluded **${CONCLUSION}** on its latest run."
+            printf '%s\n' "- Run: ${RUN_URL:-<run url unavailable>}"
+            printf '%s\n' "- Origin event: ${WR_EVENT:-<n/a>}"
+            printf '%s\n\n' "- Branch: ${WR_HEAD_BRANCH:-<n/a>}"
+            printf '%s\n' "A \`cancelled\`/\`timed_out\` conclusion means the deep-check did NOT certify \`main\` this night (issue #2662 — the silent-death mode that hid a dead backstop for all of July). A \`failure\` conclusion means a real gate-component FAIL: open the run above and inspect the uploaded \`agent-gate-summary\` artifact for the failing component."
+            printf '\n%s\n' "This issue is auto-updated on each subsequent red night and gets a resolved comment on the next green night; a human confirms + closes it."
+          } > gate-failure-body.md
+
+          # Dedup by the label: update the one open tracking issue if present.
+          EXISTING="$(gh issue list --repo "${GH_REPO}" --label "${ISSUE_LABEL}" \
+            --state open --json number --jq '.[0].number // ""')"
+          if [ -n "${EXISTING}" ]; then
+            echo "Updating existing gate-failure issue #${EXISTING}"
+            gh issue comment "${EXISTING}" --repo "${GH_REPO}" --body-file gate-failure-body.md \
+              || echo "::warning::failed to comment on issue #${EXISTING} (non-gating)."
+          else
+            echo "Creating new gate-failure tracking issue"
+            gh issue create --repo "${GH_REPO}" \
+              --title "Nightly gate.yml deep-check RED — backstop not certifying main" \
+              --label "${ISSUE_LABEL}" \
+              --body-file gate-failure-body.md \
+              || echo "::warning::failed to create gate-failure issue (non-gating)."
+          fi
+
+      - name: Resolve tracking issue on a green run (comment only, never close)
+        if: >-
+          steps.guard.outputs.skip != 'true' &&
+          steps.validate.outputs.proceed == 'true' &&
+          steps.validate.outputs.mode == 'resolve'
+        env:
+          RUN_URL: ${{ steps.validate.outputs.run_url }}
+        run: |
+          set -euo pipefail
+          EXISTING="$(gh issue list --repo "${GH_REPO}" --label "${ISSUE_LABEL}" \
+            --state open --json number --jq '.[0].number // ""')"
+          if [ -z "${EXISTING}" ]; then
+            echo "::notice::no open gate-failure issue to resolve — green run, nothing to do."
+            exit 0
+          fi
+          {
+            printf '%s\n' "Nightly gate deep-check is GREEN again on run ${RUN_URL:-<run url unavailable>} (conclusion: success)."
+            printf '%s\n' "The backstop certified \`main\`. A human can close this issue after confirming the run."
+          } > gate-resolve-body.md
+          gh issue comment "${EXISTING}" --repo "${GH_REPO}" --body-file gate-resolve-body.md \
+            || echo "::warning::failed to comment resolve on issue #${EXISTING} (non-gating)."
