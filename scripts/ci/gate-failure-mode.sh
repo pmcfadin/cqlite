@@ -36,16 +36,25 @@ BRANCH=""       # the run's head branch
 CONCLUSION=""   # the run's conclusion (failure|cancelled|timed_out|success|…)
 RUN_ID=""       # the run id (required numeric on the workflow_dispatch replay path)
 
+# Every value-taking flag needs a following value; a trailing flag with none
+# would make `shift 2` fail under `set -e` (abort -> silent alert drop). Guard it.
+need_val() {
+  if [ "$#" -lt 2 ]; then
+    echo "gate-failure-mode: missing value for $1 — none" >&2
+    echo none
+    exit 0
+  fi
+}
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --trigger)    TRIGGER="${2:-}"; shift 2 ;;
-    --gate-name)  GATE_NAME="${2:-}"; shift 2 ;;
-    --name)       RUN_NAME="${2:-}"; shift 2 ;;
-    --event)      EVENT="${2:-}"; shift 2 ;;
-    --branch)     BRANCH="${2:-}"; shift 2 ;;
-    --conclusion) CONCLUSION="${2:-}"; shift 2 ;;
-    --run-id)     RUN_ID="${2:-}"; shift 2 ;;
-    *) echo "gate-failure-mode: unknown argument '$1'" >&2; echo none; exit 0 ;;
+    --trigger)    need_val "$@"; TRIGGER="$2"; shift 2 ;;
+    --gate-name)  need_val "$@"; GATE_NAME="$2"; shift 2 ;;
+    --name)       need_val "$@"; RUN_NAME="$2"; shift 2 ;;
+    --event)      need_val "$@"; EVENT="$2"; shift 2 ;;
+    --branch)     need_val "$@"; BRANCH="$2"; shift 2 ;;
+    --conclusion) need_val "$@"; CONCLUSION="$2"; shift 2 ;;
+    --run-id)     need_val "$@"; RUN_ID="$2"; shift 2 ;;
+    *) echo "gate-failure-mode: unknown argument '$1' — none" >&2; echo none; exit 0 ;;
   esac
 done
 

@@ -16,8 +16,11 @@ name: Gate Nightly Failure Issue Automation
 # the gate emits a single run-level verdict, not per-scenario parity failures, so
 # one pinned tracking issue is the right granularity — no fingerprinting needed.
 #
-# NON-GATING + fail-open: this job never changes the gate lane's result. Absent an
-# issue-write token it is a `::notice::` no-op (exit 0). It never auto-closes.
+# NON-GATING: this job never changes the gate lane's result — the `gh` writes are
+# each `|| warn`-guarded, and the routing decision + issue lookups fail toward a
+# no-op / retry rather than reddening the run. It never auto-closes. (The hosted
+# `GITHUB_TOKEN` is always present, so there is deliberately no token off-switch —
+# a dead-code guard that only reads `secrets.GITHUB_TOKEN` would be a false one.)
 #
 # SECURITY: this workflow consumes an UNTRUSTED `workflow_run` payload. It NEVER
 # interpolates event fields into a `run:` shell — every event value is passed via
@@ -85,27 +88,16 @@ jobs:
       GATE_WORKFLOW_NAME: "Nightly agent-gate (deep check)"
       ISSUE_LABEL: "gate-nightly-failure"
     steps:
-      - name: Guard token (fail-open, non-gating)
-        id: guard
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::notice::GITHUB_TOKEN absent — skipping gate-failure issue automation (non-gating no-op)."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          fi
-
       # Checkout so the validate step can call the extracted routing decision
       # (scripts/ci/gate-failure-mode.sh). Keep the token out of .git/config —
       # this lane runs no authenticated git.
       - name: Checkout (for the routing decision script)
-        if: steps.guard.outputs.skip != 'true'
         uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Validate origin + determine mode (allowlist, fail-closed)
         id: validate
-        if: steps.guard.outputs.skip != 'true'
         run: |
           set -euo pipefail
           # Outputs: proceed (true/false), mode (file|resolve|none), run_url, conclusion.
@@ -144,7 +136,9 @@ jobs:
               --trigger workflow_dispatch --gate-name "${GATE_WORKFLOW_NAME}" \
               --name "${R_NAME}" --event "${R_EVENT}" --branch "${R_BRANCH}" \
               --conclusion "${R_CONCLUSION}" --run-id "${DISPATCH_RUN_ID:-}")"
-            if [ "${MODE}" = "none" ]; then
+            # Defensive: an empty/unexpected token is treated as `none` (no action).
+            MODE="${MODE:-none}"
+            if [ "${MODE}" != "file" ] && [ "${MODE}" != "resolve" ]; then
               echo "::notice::replay of run ${DISPATCH_RUN_ID:-<none>} -> no action (see decision reason above)."
               emit false none "" ""; exit 0
             fi
@@ -160,7 +154,9 @@ jobs:
             --trigger workflow_run --gate-name "${GATE_WORKFLOW_NAME}" \
             --name "${WR_NAME}" --event "${WR_EVENT}" --branch "${WR_HEAD_BRANCH}" \
             --conclusion "${WR_CONCLUSION}")"
-          if [ "${MODE}" = "none" ]; then
+          # Defensive: an empty/unexpected token is treated as `none` (no action).
+          MODE="${MODE:-none}"
+          if [ "${MODE}" != "file" ] && [ "${MODE}" != "resolve" ]; then
             echo "::notice::gate run '${WR_CONCLUSION}' on '${WR_EVENT}' -> no action (see decision reason above)."
             emit false none "" ""; exit 0
           fi
@@ -169,7 +165,6 @@ jobs:
 
       - name: File / update the gate-failure tracking issue (RED)
         if: >-
-          steps.guard.outputs.skip != 'true' &&
           steps.validate.outputs.proceed == 'true' &&
           steps.validate.outputs.mode == 'file'
         env:
@@ -186,24 +181,32 @@ jobs:
             2>/dev/null || true
 
           # Assemble the body from shell vars ONLY (no GitHub-expression
-          # interpolation; no command substitution on data). printf treats each
-          # value as literal text.
+          # interpolation; no command substitution on data). Every interpolated
+          # value is a `%s` ARGUMENT (never part of the format string), so a `%` in
+          # a value is printed literally rather than eaten as a conversion spec.
+          # Bullet lines pass the `- label: ` prefix as a `%s` arg too, so no
+          # format string begins with `-` (which printf could parse as an option).
           {
-            printf '%s\n\n' "The nightly full-gate backstop (\`.github/workflows/gate.yml\`, \"${GATE_WORKFLOW_NAME}\") concluded **${CONCLUSION}** on its latest run."
-            printf '%s\n' "- Run: ${RUN_URL:-<run url unavailable>}"
-            printf '%s\n' "- Origin event: ${WR_EVENT:-<n/a>}"
-            printf '%s\n\n' "- Branch: ${WR_HEAD_BRANCH:-<n/a>}"
+            printf "The nightly full-gate backstop (\`.github/workflows/gate.yml\`, \"%s\") concluded **%s** on its latest run.\n\n" \
+              "${GATE_WORKFLOW_NAME}" "${CONCLUSION}"
+            printf '%s%s\n' '- Run: ' "${RUN_URL:-<run url unavailable>}"
+            printf '%s%s\n' '- Origin event: ' "${WR_EVENT:-<n/a>}"
+            printf '%s%s\n\n' '- Branch: ' "${WR_HEAD_BRANCH:-<n/a>}"
             printf '%s\n' "A \`cancelled\`/\`timed_out\` conclusion means the deep-check did NOT certify \`main\` this night (issue #2662 — the silent-death mode that hid a dead backstop for all of July). A \`failure\` conclusion means a real gate-component FAIL: open the run above and inspect the uploaded \`agent-gate-summary\` artifact for the failing component."
             printf '\n%s\n' "This issue is auto-updated on each subsequent red night and gets a resolved comment on the next green night; a human confirms + closes it."
           } > gate-failure-body.md
 
-          # Dedup by the label: update the one open tracking issue if present.
-          # `|| true` so a transient gh/API blip on the lookup does NOT abort the
-          # step (set -e) and silently drop the night's alert — an empty EXISTING
-          # falls through to a create attempt (itself || warn-guarded). At worst a
-          # blip creates a second issue (recoverable); dropping the alert is not.
+          # Dedup by the label: update the CANONICAL open tracking issue if present.
+          # Canonical = the OLDEST (lowest issue number) so a rare create-race that
+          # produced two issues still converges on ONE going forward (`min`, not
+          # `.[0]` which depends on gh's default newest-first ordering). `|| true`
+          # so a transient gh/API blip on the lookup does NOT abort the step
+          # (set -e) and silently drop the night's alert — an empty EXISTING falls
+          # through to a create attempt (itself || warn-guarded). At worst a blip
+          # creates a second issue (recoverable); dropping the alert is not.
           EXISTING="$(gh issue list --repo "${GH_REPO}" --label "${ISSUE_LABEL}" \
-            --state open --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+            --state open --limit 100 --json number --jq 'map(.number) | min // ""' \
+            2>/dev/null || true)"
           if [ -n "${EXISTING}" ]; then
             echo "Updating existing gate-failure issue #${EXISTING}"
             gh issue comment "${EXISTING}" --repo "${GH_REPO}" --body-file gate-failure-body.md \
@@ -219,7 +222,6 @@ jobs:
 
       - name: Resolve tracking issue on a green run (comment only, never close)
         if: >-
-          steps.guard.outputs.skip != 'true' &&
           steps.validate.outputs.proceed == 'true' &&
           steps.validate.outputs.mode == 'resolve'
         env:
@@ -231,13 +233,17 @@ jobs:
           # resolve comment is best-effort; a missed comment is harmless — the
           # RED-path filing is the load-bearing side).
           EXISTING="$(gh issue list --repo "${GH_REPO}" --label "${ISSUE_LABEL}" \
-            --state open --json number --jq '.[0].number // ""' 2>/dev/null || true)"
+            --state open --limit 100 --json number --jq 'map(.number) | min // ""' \
+            2>/dev/null || true)"
           if [ -z "${EXISTING}" ]; then
             echo "::notice::no open gate-failure issue to resolve — green run, nothing to do."
             exit 0
           fi
+          # Interpolated value passed as a `%s` ARGUMENT (never in the format
+          # string), so a `%` in the run URL is treated literally.
           {
-            printf '%s\n' "Nightly gate deep-check is GREEN again on run ${RUN_URL:-<run url unavailable>} (conclusion: success)."
+            printf 'Nightly gate deep-check is GREEN again on run %s (conclusion: success).\n' \
+              "${RUN_URL:-<run url unavailable>}"
             printf '%s\n' "The backstop certified \`main\`. A human can close this issue after confirming the run."
           } > gate-resolve-body.md
           gh issue comment "${EXISTING}" --repo "${GH_REPO}" --body-file gate-resolve-body.md \

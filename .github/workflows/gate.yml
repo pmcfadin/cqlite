@@ -73,7 +73,10 @@ jobs:
     # night yields a REAL verdict instead of a cancel. REVISIT this number with
     # the measured end-to-end runtime from the #2662 verification dispatch
     # (acceptance #4) — tighten toward measured + margin once one true cold run
-    # completes.
+    # completes. Also confirm the July cancels were timeout-not-hang (a slow run,
+    # not a hung/stuck component) from that dispatch's per-component timings
+    # before trusting the raise; a genuinely hung component would need a
+    # per-component watchdog rather than a bigger job budget.
     timeout-minutes: 180
 
     # Cap peak compile memory pressure (issue #1269). The full gate compiles the

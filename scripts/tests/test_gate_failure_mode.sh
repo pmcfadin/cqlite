@@ -8,9 +8,9 @@
 # decision table so a regression is caught by the gate's `tooling-tests`
 # component instead of merging undetected.
 #
-# Fast + hermetic: no network, no `gh`, no datasets. Per-run mktemp scratch with
-# a TERMINAL XXXXXX (macOS-safe); AGENT_GATE_SUMMARY_FILE is unset so a nested
-# invocation can never clobber a parent gate's summary (#2751/#2874).
+# Fast + hermetic: no network, no `gh`, no datasets, no scratch files.
+# AGENT_GATE_SUMMARY_FILE is unset so a nested invocation can never clobber a
+# parent gate's summary (#2751/#2874).
 #
 # Run standalone:   bash scripts/tests/test_gate_failure_mode.sh
 set -uo pipefail
@@ -19,9 +19,6 @@ unset AGENT_GATE_SUMMARY_FILE 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE_SH="$SCRIPT_DIR/../ci/gate-failure-mode.sh"
 GATE_NAME="Nightly agent-gate (deep check)"
-
-T=$(mktemp -d "${TMPDIR:-/tmp}/gate-failure-mode-test.XXXXXX")
-trap 'rm -rf "$T"' EXIT
 
 PASS=0
 FAIL=0
@@ -42,93 +39,87 @@ expect() {
   fi
 }
 
-# --- auto workflow_run path --------------------------------------------------
-# Scheduled red conclusions -> file.
+# expect_reason <stderr-substring> <description> <args...> — assert the decision
+# is `none` AND the stderr reason contains <stderr-substring>, so distinct
+# rejection branches (e.g. pull_request vs allowlist) are distinguishable, not
+# just uniformly "none".
+expect_reason() {
+  local needle="$1" desc="$2"
+  shift 2
+  local out err
+  err="$(bash "$MODE_SH" "$@" 2>&1 >/dev/null)" || true
+  out="$(bash "$MODE_SH" "$@" 2>/dev/null)" || true
+  if [ "$out" != "none" ]; then
+    bad "$desc (mode '$out', wanted 'none')"
+    return
+  fi
+  case "$err" in
+    *"$needle"*) ok "$desc" ;;
+    *) bad "$desc (reason '$err' lacks '$needle')" ;;
+  esac
+}
+
+# --- auto workflow_run path: conclusion -> mode ------------------------------
 for c in failure cancelled timed_out; do
   expect file "workflow_run schedule $c -> file" \
     --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
     --event schedule --branch main --conclusion "$c"
 done
-
-# Scheduled green -> resolve.
 expect resolve "workflow_run schedule success -> resolve" \
   --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event schedule --branch main --conclusion success
-
-# workflow_dispatch origin on main -> honored (red -> file).
 expect file "workflow_run dispatch-on-main failure -> file" \
   --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event workflow_dispatch --branch main --conclusion failure
-
-# workflow_dispatch origin on a NON-main branch -> none (feature-branch test).
-expect none "workflow_run dispatch on non-main branch -> none" \
-  --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
-  --event workflow_dispatch --branch issue-2662-x --conclusion failure
-
-# pull_request origin -> none (never file for a PR run).
-expect none "workflow_run pull_request origin -> none" \
-  --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
-  --event pull_request --branch main --conclusion failure
-
-# Wrong workflow name -> none (belt-and-suspenders even on the auto path).
-expect none "workflow_run wrong workflow name -> none" \
-  --trigger workflow_run --gate-name "$GATE_NAME" --name "Some Other Lane" \
-  --event schedule --branch main --conclusion failure
-
-# Unknown/non-terminal conclusion on an allowlisted origin -> none.
 expect none "workflow_run schedule startup_failure -> none" \
   --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event schedule --branch main --conclusion startup_failure
 
-# Unknown origin event (e.g. push) -> none.
-expect none "workflow_run push origin -> none" \
+# --- auto path rejections, each with a DISTINCT stderr reason -----------------
+expect_reason "is not the gate lane" "wrong workflow name -> none (name reason)" \
+  --trigger workflow_run --gate-name "$GATE_NAME" --name "Some Other Lane" \
+  --event schedule --branch main --conclusion failure
+expect_reason "pull_request" "pull_request origin -> none (pr reason)" \
+  --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
+  --event pull_request --branch main --conclusion failure
+expect_reason "not schedule/workflow_dispatch" "push origin -> none (allowlist reason)" \
   --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event push --branch main --conclusion failure
+expect_reason "non-main branch" "dispatch on non-main branch -> none (branch reason)" \
+  --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
+  --event workflow_dispatch --branch issue-2662-x --conclusion failure
 
-# --- manual replay (workflow_dispatch of the alert workflow) ------------------
-# Valid numeric run_id, gate lane, schedule/main, red -> file.
+# --- manual replay path ------------------------------------------------------
 expect file "replay valid numeric run_id red -> file" \
   --trigger workflow_dispatch --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event schedule --branch main --conclusion cancelled --run-id 12345
-
-# Valid replay of a green run -> resolve.
 expect resolve "replay valid run_id green -> resolve" \
   --trigger workflow_dispatch --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event schedule --branch main --conclusion success --run-id 12345
-
-# Absent run_id on replay -> none.
-expect none "replay absent run_id -> none" \
+expect_reason "requires a run_id" "replay absent run_id -> none (missing-run-id reason)" \
   --trigger workflow_dispatch --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event schedule --branch main --conclusion failure
-
-# Non-numeric run_id on replay -> none.
-expect none "replay non-numeric run_id -> none" \
+expect_reason "is not numeric" "replay non-numeric run_id -> none (numeric reason)" \
   --trigger workflow_dispatch --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event schedule --branch main --conclusion failure --run-id "12; rm -rf /"
-
-# Replay whose target is a DIFFERENT workflow -> none.
 expect none "replay wrong workflow name -> none" \
   --trigger workflow_dispatch --gate-name "$GATE_NAME" --name "Another Workflow" \
   --event schedule --branch main --conclusion failure --run-id 999
-
-# Replay of a pull_request-origin run -> none.
 expect none "replay pull_request-origin target -> none" \
   --trigger workflow_dispatch --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event pull_request --branch main --conclusion failure --run-id 999
-
-# Replay of a non-main dispatch target -> none.
 expect none "replay non-main dispatch target -> none" \
   --trigger workflow_dispatch --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event workflow_dispatch --branch feature --conclusion failure --run-id 999
 
-# --- misc robustness ---------------------------------------------------------
-# Missing --gate-name -> none (fail-closed).
-expect none "missing gate-name -> none" \
+# --- argument robustness -----------------------------------------------------
+expect_reason "gate-name is required" "missing gate-name -> none (required reason)" \
   --trigger workflow_run --name "$GATE_NAME" \
   --event schedule --branch main --conclusion failure
-
-# Unknown argument -> none (fail-closed).
-expect none "unknown argument -> none" \
+expect_reason "missing value for --conclusion" "trailing flag with no value -> none" \
+  --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
+  --event schedule --branch main --conclusion
+expect_reason "unknown argument" "unknown argument -> none (unknown reason)" \
   --trigger workflow_run --gate-name "$GATE_NAME" --name "$GATE_NAME" \
   --event schedule --branch main --conclusion failure --bogus x
 
