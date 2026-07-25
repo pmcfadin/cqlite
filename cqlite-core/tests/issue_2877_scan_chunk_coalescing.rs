@@ -113,6 +113,50 @@ const LARGE_REPACK_CHUNK_SIZE: usize = 64 * 1024;
 /// fresh fill costs ~ONE chunk instead of this many.
 const FLAT_FILL_CHUNKS: u64 = (WINDOW_TARGET_BYTES / LARGE_REPACK_CHUNK_SIZE) as u64;
 
+/// Lower bound on the coalescing window's REFILL count for a full scan of a
+/// `data_section_len`-byte compressed data section packed into
+/// `repack_chunk_size` chunks — i.e. the wiring evidence these tests need.
+///
+/// Why a POSITIVE bound is required, not just the ceilings the rest of this file
+/// asserts. Every other oracle here is an UPPER bound (`decompress_calls ==
+/// chunk_count`, `refills <= 16`, `compactions <= refills`), and upper bounds are
+/// all satisfied by a window that does no coalescing WALK at all — one giant fill
+/// covering the whole data section still decompresses each chunk exactly once,
+/// takes 1 refill, and compacts 0 times, so `compactions <= refills` degenerates
+/// to `0 <= 1`. That shape is a real regression (it destroys the ramp: bounded
+/// read-ahead, early termination, and token pushdown all collapse) yet it passes
+/// every ceiling. `refills >= this` is the assert that pins the STREAMING
+/// tiling — the window must refill as the scan advances, which is only possible if
+/// the coalescing walk under test actually ran (CQLite's wiring-evidence rule: the
+/// public surface must demonstrably exercise the feature).
+///
+/// Verified by mutation (not assumed): replacing the ramped floor with
+/// `data_section_end` (one whole-section fill) leaves
+/// `full_scan_decompresses_each_chunk_once_not_once_per_partition` GREEN and is
+/// caught only by the refill floors below.
+///
+/// A total BYPASS — `stream_all_partitions_for_query` routing to
+/// `stream_all_partitions_for_compaction` when the Summary/Index pair is unusable
+/// — is caught by the existing `decompress_calls == chunk_count` asserts instead,
+/// because the stitch path decompresses via the deliberately UNCOUNTED
+/// `ChunkSource::decompress_only` (`decompress_calls` observes 0, verified by
+/// forcing that branch). The refill floor catches it too, so both a bypass and a
+/// degenerate window now fail loudly.
+///
+/// Derivation (an upper bound on bytes-per-refill inverted): the window tiles
+/// `[0, data_section_len)` with no gaps and no overlaps, and one refill reads
+/// `max(this partition's span, ramped floor)` rounded UP to a chunk boundary. The
+/// floor is capped at `WINDOW_TARGET_BYTES` and every partition in these fixtures
+/// is orders of magnitude smaller than that, so no refill can cover more than
+/// `WINDOW_TARGET_BYTES + repack_chunk_size` bytes. Hence at least
+/// `ceil(data_section_len / (WINDOW_TARGET_BYTES + repack_chunk_size))` refills.
+/// Deliberately conservative (the RAMP means real runs need more — the ~8.8 MiB
+/// fixture below takes ~8), so a fixture retune cannot make it flaky, only
+/// weaker.
+fn min_refills_for_full_scan(data_section_len: usize, repack_chunk_size: usize) -> u64 {
+    (data_section_len as u64).div_ceil((WINDOW_TARGET_BYTES + repack_chunk_size) as u64)
+}
+
 fn schema() -> TableSchema {
     TableSchema {
         keyspace: KS.to_string(),
@@ -275,7 +319,7 @@ async fn compressed_fixture_with_index(
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn full_scan_decompresses_each_chunk_once_not_once_per_partition() {
-    let (_temp, data_path, chunk_count, _data_len) =
+    let (_temp, data_path, chunk_count, data_section_len) =
         compressed_fixture_with_index(N, 0, REPACK_CHUNK_SIZE).await;
     assert!(
         chunk_count > 4 && (chunk_count as i32) < N / 2,
@@ -287,6 +331,7 @@ async fn full_scan_decompresses_each_chunk_once_not_once_per_partition() {
     let sch = schema();
 
     SSTableReader::reset_decompress_calls();
+    SSTableReader::reset_scan_window_counters();
     let cancel = ScanCancel::new();
     let mut rows = 0usize;
     reader
@@ -297,10 +342,27 @@ async fn full_scan_decompresses_each_chunk_once_not_once_per_partition() {
         .await
         .expect("summary-guided compressed scan must succeed");
     let decompress_calls = SSTableReader::decompress_call_count();
+    let refills = SSTableReader::scan_window_refill_count();
 
     assert_eq!(
         rows, N as usize,
         "the scan must decode every partition exactly once"
+    );
+    // WIRING EVIDENCE (see `min_refills_for_full_scan`): the chunk-count assert
+    // below is an UPPER bound, so it cannot distinguish "the coalescing window
+    // served this scan" from "the window was bypassed entirely". This fixture is
+    // one window's worth of data, so the floor is the minimum meaningful one: the
+    // window must have been entered at least once.
+    let min_refills = min_refills_for_full_scan(data_section_len, REPACK_CHUNK_SIZE).max(1);
+    assert!(
+        refills >= min_refills,
+        "the scan must have routed through the coalescing window: expected >= \
+         {min_refills} refills for a {data_section_len}-byte data section in \
+         {REPACK_CHUNK_SIZE}-byte chunks (ceil(len / (4 MiB + chunk)), floored at \
+         1), got {refills} — 0 means the Summary-guided walk never entered the \
+         window (e.g. it FELL BACK to stream_all_partitions_for_compaction) and \
+         this test's chunk-count assert proved nothing (issue #2877 wiring \
+         evidence)"
     );
     assert_eq!(
         decompress_calls, chunk_count as u64,
@@ -379,6 +441,21 @@ async fn large_multi_window_scan_serves_every_partition_correctly() {
          refills (a boundary-straddling partition's append must fetch only the \
          NEW bytes beyond what the window already buffered, never re-fetch the \
          chunk it just appended past): expected {chunk_count}, got {decompress_calls}"
+    );
+    // WIRING EVIDENCE (see `min_refills_for_full_scan`): every other assert here is
+    // an UPPER bound, so all of them are satisfied by a single whole-data-section
+    // fill that never STREAMS — i.e. the straddle/append path this test exists to
+    // pin would never execute and the test would still pass (verified by mutation).
+    // This fixture exceeds 2x the window target, so it must refill at least twice.
+    let min_refills = min_refills_for_full_scan(data_section_len, LARGE_REPACK_CHUNK_SIZE).max(2);
+    assert!(
+        refills >= min_refills,
+        "the multi-window scan must have routed through the coalescing window at \
+         least {min_refills} times: {data_section_len} bytes / (4 MiB + \
+         {LARGE_REPACK_CHUNK_SIZE}-byte chunk) rounded up, floored at 2 (the \
+         fixture exceeds 2x the window target), got {refills} — 1 means one giant \
+         non-streaming fill and 0 means the window was bypassed; either way the \
+         straddle/append path under test never ran (issue #2877 wiring evidence)"
     );
     // Steady-state proof (issue #2877 roborev blocker A): the RAMP must not turn a
     // long scan into a per-chunk read walk. Doubling from one 64 KiB chunk reaches
@@ -591,6 +668,21 @@ async fn full_scan_prefix_reclamation_is_per_refill_not_per_partition() {
         decompress_calls, chunk_count as u64,
         "reclaiming lazily must not re-decompress any chunk: expected \
          {chunk_count}, got {decompress_calls}"
+    );
+    // WIRING EVIDENCE (see `min_refills_for_full_scan`): `compactions <= refills`
+    // is only a meaningful ceiling over a REAL denominator. A window that never
+    // streams (one whole-section fill) reports `refills == 1, compactions == 0`,
+    // and a bypassed window reports `0 <= 0` — both vacuous, both passing. Pin the
+    // refill floor FIRST so the O(refills) claim below is about a walk that
+    // genuinely refilled many times while serving hundreds of partitions.
+    let min_refills = min_refills_for_full_scan(data_section_len, LARGE_REPACK_CHUNK_SIZE).max(2);
+    assert!(
+        refills >= min_refills,
+        "the full scan must have routed through the coalescing window at least \
+         {min_refills} times: {data_section_len} bytes / (4 MiB + \
+         {LARGE_REPACK_CHUNK_SIZE}-byte chunk) rounded up, floored at 2 (the \
+         fixture exceeds 2x the window target), got {refills} — 0 or 1 would make \
+         the O(refills) assert below vacuously true (issue #2877 wiring evidence)"
     );
     assert!(
         compactions <= refills,

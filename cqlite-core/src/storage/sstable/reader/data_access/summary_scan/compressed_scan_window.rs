@@ -25,14 +25,25 @@ use crate::{Error, Result};
 /// after ramping up to it.
 const COMPRESSED_SCAN_WINDOW_TARGET_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Hard ceiling on the ramped greedy floor (issue #2877 roborev, blocker A): the
+/// Hard ceiling on the ramped greedy FLOOR (issue #2877 roborev, blocker A): the
 /// ramp doubles `chunk_length` per refill but can never ask for more than the
 /// steady-state target, so `chunk_length << ramp` is clamped here and the ramp
 /// counter stops advancing once the clamp binds. Equal to
 /// [`COMPRESSED_SCAN_WINDOW_TARGET_BYTES`] by construction — named separately
 /// because it is the ramp's *invariant*, asserted directly by the unit tests
-/// below (a hostile `CompressionInfo.chunk_length` must not be able to lift the
-/// window past it).
+/// below.
+///
+/// Scope, precisely (it bounds the FLOOR, not the WINDOW): a refill's length is
+/// `max(minimal, floor)` rounded UP to a `chunk_length` boundary, so the window
+/// can legitimately exceed this cap by (a) up to one `chunk_length` of alignment
+/// rounding and (b) however much a SINGLE partition larger than the floor needs
+/// (`minimal`, deliberately never `min`-ed — the large-partition case must not
+/// regress). Concretely, `CompressionInfo::parse` admits a `chunk_length` up to
+/// 256 MiB, and an 8 MiB `chunk_length` therefore yields an 8 MiB window even
+/// though the floor clamps at 4 MiB. What the cap DOES guarantee is that
+/// read-ahead — bytes fetched beyond what the current partition needs — is
+/// bounded by the target plus one chunk, which is what the memory derivation
+/// under "Preserved invariants" below spends (`+ one chunk_length`).
 const COMPRESSED_SCAN_WINDOW_RAMP_MAX_BYTES: u64 = COMPRESSED_SCAN_WINDOW_TARGET_BYTES;
 
 /// Process-global count of coalesced window REFILLS — one per
@@ -153,6 +164,10 @@ impl SSTableReader {
 ///   roborev, blocker B): the already-served prefix is dropped at REFILL time
 ///   ([`Self::compact_prefix`]) rather than after every partition, so serving
 ///   thousands of narrow partitions out of one window costs zero byte copying.
+///   Mechanism, precisely: a per-refill `Vec::drain` of the dead prefix plus an
+///   advance of [`Self::start`](Self#structfield.start). There is deliberately NO
+///   separate logical-`head` offset field — draining once per refill is already
+///   O(refills), and one field fewer means one fewer invariant to keep.
 ///   Compaction drops only from the FRONT, so the chunk-aligned TAIL boundary
 ///   (`self.start + bytes.len()`) is invariant under it and a chunk already paid
 ///   for can never be re-decompressed.
@@ -493,25 +508,56 @@ mod tests {
                 .all(|f| *f == COMPRESSED_SCAN_WINDOW_RAMP_MAX_BYTES),
             "past the cap the floor must hold steady: {seen:?}"
         );
-        assert!(
-            w.ramp <= 32,
-            "the ramp counter must stop advancing at the cap, got {}",
+        // The COUNTER itself must stop, not merely the floor it computes: 64 KiB
+        // << 6 == 4 MiB == COMPRESSED_SCAN_WINDOW_RAMP_MAX_BYTES, so `advance_ramp`
+        // takes exactly 6 steps and then becomes a no-op — even though the loop
+        // above called it 12 times. An upper-bound assert (`<= 32`) would pass with
+        // `advance_ramp`'s clamp guard DELETED (12 calls ⇒ ramp 12), pinning
+        // nothing; `assert_eq!` is what makes "the counter stops at the cap" a
+        // real claim.
+        const EXPECTED_RAMP_AT_CAP: u32 = 6;
+        assert_eq!(
+            w.ramp,
+            EXPECTED_RAMP_AT_CAP,
+            "the ramp COUNTER must stop advancing at the cap after exactly \
+             {EXPECTED_RAMP_AT_CAP} steps (chunk_length {chunk_length} << \
+             {EXPECTED_RAMP_AT_CAP} == {} == the cap \
+             {COMPRESSED_SCAN_WINDOW_RAMP_MAX_BYTES}), got {}",
+            chunk_length << EXPECTED_RAMP_AT_CAP,
             w.ramp
         );
     }
 
-    /// A chunk_length at or above the cap must clamp to the cap immediately and
-    /// never advance the ramp (nothing to ramp toward).
+    /// A chunk_length at or above the cap must clamp the ramped FLOOR to the cap
+    /// immediately and never advance the ramp (nothing to ramp toward).
+    ///
+    /// Note what this does NOT claim: the cap bounds the FLOOR, not the window. An
+    /// 8 MiB `chunk_length` (`CompressionInfo::parse` admits up to 256 MiB) still
+    /// yields an 8 MiB window, because every refill rounds UP to a `chunk_length`
+    /// boundary — asserted directly below so the distinction stays documented in
+    /// executable form.
     #[test]
-    fn oversized_chunk_length_clamps_immediately() {
+    fn oversized_chunk_length_clamps_the_floor_immediately() {
         let mut w = CompressedScanWindow::new();
         let chunk_length = 8 * 1024 * 1024u64;
         assert_eq!(
             w.ramped_floor(chunk_length),
-            COMPRESSED_SCAN_WINDOW_RAMP_MAX_BYTES
+            COMPRESSED_SCAN_WINDOW_RAMP_MAX_BYTES,
+            "the FLOOR clamps at the cap"
         );
         w.advance_ramp(chunk_length);
         assert_eq!(w.ramp, 0, "the ramp must not advance once the clamp binds");
+        // The resulting WINDOW is one whole chunk, i.e. ABOVE the cap: a refill's
+        // length is the floor rounded up to a chunk boundary.
+        let floor = w.ramped_floor(chunk_length);
+        let window_len = floor.div_ceil(chunk_length) * chunk_length;
+        assert_eq!(
+            window_len, chunk_length,
+            "an oversized chunk_length yields a window of one chunk ({chunk_length} \
+             bytes), which EXCEEDS the floor cap \
+             {COMPRESSED_SCAN_WINDOW_RAMP_MAX_BYTES} — the cap bounds read-AHEAD, \
+             not the window"
+        );
     }
 
     /// Compaction drops only from the FRONT: the chunk-aligned tail boundary a
@@ -526,7 +572,13 @@ mod tests {
         };
         let tail_before = w.start + w.bytes.len() as u64;
         w.compact_prefix(1040);
-        assert_eq!(w.start, 1040, "the live head must advance to the request");
+        // There is NO separate logical-head field: reclamation is a per-refill
+        // `Vec::drain` of the dead prefix plus an advance of `self.start` (equally
+        // O(refills), one field fewer).
+        assert_eq!(
+            w.start, 1040,
+            "`self.start` must advance to the requested live-from offset"
+        );
         assert_eq!(
             w.start + w.bytes.len() as u64,
             tail_before,
@@ -537,14 +589,25 @@ mod tests {
             w.bytes[0], 40,
             "the surviving bytes must be the live suffix"
         );
-        // Idempotent / no-op for a head at or below the current start.
-        let calls = SSTableReader::scan_window_prefix_compaction_count();
-        w.compact_prefix(1000);
-        w.compact_prefix(1040);
+        // Idempotent / no-op for a `live_from` at or below the current `start`.
+        // Asserted on
+        // this window's OWN state rather than on the process-global
+        // `scan_window_prefix_compaction_count()`: that counter is shared by every
+        // test in the lib binary, so snapshotting it here would go non-deterministic
+        // the moment any sibling test drives the compressed walk under cargo's
+        // parallel intra-binary threads (the recurring flake class of
+        // `big_locate_b4_repeat_zero_reprobe`). "Must not copy" IS local
+        // invariance — `bytes.len()` and `start` unchanged.
+        let len_before = w.bytes.len();
+        let start_before = w.start;
+        let first_byte_before = w.bytes[0];
+        w.compact_prefix(1000); // strictly below `start` ⇒ nothing to drop
+        w.compact_prefix(1040); // exactly `start` ⇒ nothing to drop
         assert_eq!(
-            SSTableReader::scan_window_prefix_compaction_count(),
-            calls,
-            "a no-op compaction must not copy (or count)"
+            (w.bytes.len(), w.start, w.bytes[0]),
+            (len_before, start_before, first_byte_before),
+            "a no-op compaction must not copy: buffer length, start offset, and the \
+             first live byte must all be unchanged"
         );
     }
 }
