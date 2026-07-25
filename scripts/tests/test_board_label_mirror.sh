@@ -508,16 +508,37 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 17. F2 (mirror-one): a #N that is NOT on the board -> mirror-one exits non-zero
-#     + ::error:: (never a silent no-op exit 0).
+# 17. M1: an off-board OPEN #N carrying a STALE board-derived label -> mirror-one
+#     FAILs (non-zero + ::error::): a stale derived label needs correcting.
+# ---------------------------------------------------------------------------
+d="$(new_case)"
+seed_state "$(printf '117\tReady\t%s\t' "$OLD_TS")"
+export ISSUE_LIST_FILE="$d/issuelist.tsv"
+# #900 is off-board but carries status:ready (stale) -> must error.
+printf 'status:ready\t900\n' >"$ISSUE_LIST_FILE"
+out="$(bash "$MIRROR" mirror-one 900 2>&1)"; rc=$?
+unset ISSUE_LIST_FILE
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "::error::" \
+  && printf '%s' "$out" | grep -q "stale board-derived label"; then
+  pass "M1: mirror-one on off-board issue WITH a stale status label fails (::error::)"
+else
+  fail "M1: mirror-one off-board-with-stale-label did not fail (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
+# 17b. M1: an off-board OPEN #N with NO board-derived label (benign non-status
+#      label touch on an auto-add-missed issue) -> mirror-one exits 0 with a
+#      ::notice::, NOT ::error:: — must not train readers to ignore reds (M1/G2).
 # ---------------------------------------------------------------------------
 new_case >/dev/null
-seed_state "$(printf '117\tReady\t%s\t' "$OLD_TS")"
-out="$(bash "$MIRROR" mirror-one 900 2>&1)"; rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "::error::"; then
-  pass "F2: mirror-one on an off-board issue fails (no silent no-op)"
+seed_state "$(printf '118\tReady\t%s\t' "$OLD_TS")"
+# ISSUE_LIST_FILE unset -> gh issue list returns nothing -> #901 has no derived label.
+out="$(bash "$MIRROR" mirror-one 901 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q "::error::" \
+  && printf '%s' "$out" | grep -q "::notice::"; then
+  pass "M1: mirror-one on off-board issue with NO derived label exits 0 (::notice::)"
 else
-  fail "F2: mirror-one off-board did not fail (rc=$rc): $out"
+  fail "M1: off-board-no-derived-label should be a benign notice (rc=$rc): $out"
 fi
 
 # ---------------------------------------------------------------------------
@@ -556,17 +577,21 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 20. G2: mirror-one on an OPEN but OFF-BOARD issue (via node id) still FAILs with
-#     ::error:: — the real off-board hazard is unchanged by the closed-state fix.
+# 20. G2/M1: mirror-one on an OPEN but OFF-BOARD issue (via node id) that carries a
+#     STALE board-derived label still FAILs with ::error:: — the real stale-label
+#     hazard is unchanged by the closed-state + benign-touch (M1) fixes.
 # ---------------------------------------------------------------------------
-new_case >/dev/null
+d="$(new_case)"
 # #900 is not in the board state at all -> node lookup returns null -> off-board.
 seed_state "$(printf '120\tReady\t%s\t' "$OLD_TS")"
+export ISSUE_LIST_FILE="$d/issuelist.tsv"
+printf 'status:ready\t900\n' >"$ISSUE_LIST_FILE"
 out="$(bash "$MIRROR" mirror-one 900 node-900 2>&1)"; rc=$?
+unset ISSUE_LIST_FILE
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "::error::"; then
-  pass "G2: mirror-one on an open off-board issue still fails (::error::)"
+  pass "G2/M1: mirror-one on an open off-board issue WITH a stale label still fails (::error::)"
 else
-  fail "G2: open off-board mirror-one should still fail (rc=$rc): $out"
+  fail "G2/M1: open off-board mirror-one with stale label should fail (rc=$rc): $out"
 fi
 
 # ---------------------------------------------------------------------------

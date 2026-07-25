@@ -199,6 +199,28 @@ blm_item_by_node() {
     | @tsv' || return 1
 }
 
+# blm_offboard_derived_label ISSUE_NUMBER — echo the first board-derived label
+# (status:ready/in-progress/in-review) the OPEN off-board issue currently carries,
+# empty if none. Enumerated via `gh issue list --label` per derived label — the same
+# mechanism _blm_offboard_check uses (the workflow PAT can read it). Lets mirror-one
+# tell a STALE derived label on an off-board issue (needs correction -> ::error::)
+# from a benign non-status label touch on an auto-add-missed issue (nothing to
+# mirror -> ::notice::) — issue #2855, M1. A gh failure RETURNS 1 (fail-closed) so a
+# transient list failure is never mistaken for "no derived label" -> silent exit 0.
+blm_offboard_derived_label() {
+  local want="$1" lbl listed num
+  for lbl in $BLM_DERIVED_LABELS; do
+    if ! listed=$(gh issue list --state open --label "$lbl" --json number --jq '.[].number'); then
+      return 1
+    fi
+    while IFS= read -r num; do
+      [ "$num" = "$want" ] && { echo "$lbl"; return 0; }
+    done <<<"$listed"
+  done
+  echo ""
+  return 0
+}
+
 # blm_mirror_stream BOARD_FILE — read the board TSV FILE and idempotently reconcile
 # each issue's board-derived label via `gh issue edit`: add the desired label if
 # absent, remove each OTHER board-derived label that is present. spec-review /
@@ -434,8 +456,22 @@ main() {
       fi
       if [ ! -s "$bf" ]; then
         rm -f "$bf"
-        echo "::error::mirror-one: issue #$2 produced no board row — it is not on the project board (auto-add miss?) or is closed. Not silently no-op'ing (issue #2855)."
-        return 1
+        # Off-board OPEN issue. Only ::error:: (red the run) when it carries a STALE
+        # board-derived status:* label that needs correcting; a benign non-status
+        # label touch (P2/needs-decision/flow-meta) on an auto-add-missed issue with
+        # NO derived label is a ::notice:: + exit 0, not a red run (issue #2855, M1).
+        local off_lbl off_rc
+        off_lbl=$(blm_offboard_derived_label "$2"); off_rc=$?
+        if [ "$off_rc" -ne 0 ]; then
+          echo "::error::mirror-one: issue #$2 is off-board and 'gh issue list' failed while checking for a stale board-derived label — refusing to declare benign (issue #2855)."
+          return 1
+        fi
+        if [ -n "$off_lbl" ]; then
+          echo "::error::mirror-one: issue #$2 carries stale board-derived label '$off_lbl' but is NOT on the project board (auto-add miss?) — stale label = wrong-grab hazard. Add it to the board or strip the label (issue #2855)."
+          return 1
+        fi
+        echo "::notice::mirror-one: issue #$2 is not on the project board and carries no board-derived status label — benign label touch, nothing to mirror (issue #2855)."
+        return 0
       fi
       blm_mirror_stream "$bf"; rc=$?
       rm -f "$bf"

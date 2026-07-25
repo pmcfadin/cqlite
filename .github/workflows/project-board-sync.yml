@@ -309,12 +309,22 @@ jobs:
   # scripts/ci/board-label-mirror.sh as the sweep — single source, no divergent copy.
   # ---------------------------------------------------------------------------
   mirror-one:
-    # Gate on OPEN state: issues:[labeled,unlabeled] fires for CLOSED issues too
-    # (routine triage tagging). A closed issue has no OPEN board row, so running
-    # mirror-one would exit 1 with an ::error:: on every benign closed-issue label
-    # touch — training readers to ignore this workflow's reds (issue #2855, G2).
-    # The script ALSO exits 0 gracefully on a closed issue as a safety net.
-    if: github.event_name == 'issues' && github.event.issue.state == 'open'
+    # Gate on OPEN state AND a status:* (or empty) label: issues:[labeled,unlabeled]
+    # fires for CLOSED issues too (routine triage tagging) AND for every non-status
+    # label touch (P2, needs-decision, flow-meta …). A closed issue has no OPEN board
+    # row, and a non-status label touch on an auto-add-missed OPEN issue has no board
+    # row either, so running mirror-one would exit 1 with an ::error:: on every benign
+    # label event — training readers to ignore this workflow's reds and drowning the
+    # load-bearing "persistent red == PROJECTS_TOKEN outage" signal (issue #2855, M1/G2).
+    # So skip unless the touched label is a board-derived status:* one (a hand-tampered
+    # derived label needing correction). github.event.label.name is empty for the
+    # `reopened` event, which the `== ''` clause deliberately lets through. The script
+    # ALSO exits 0 gracefully on a closed / off-board-no-derived-label issue as a
+    # defence in depth.
+    if: >-
+      github.event_name == 'issues'
+      && github.event.issue.state == 'open'
+      && (github.event.label.name == '' || startsWith(github.event.label.name, 'status:'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
