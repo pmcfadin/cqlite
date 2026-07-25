@@ -15,16 +15,25 @@
 //! read SYNCHRONOUSLY on the `spawn_blocking` thread, with zero nested async and
 //! zero blocking-pool amplification.
 //!
-//! These helpers read via the reader's `point_source` — the positional
+//! These helpers read via the reader's `scan_positional_source` (issue #2876; was
+//! `point_source` under the original #1940 restructure) — the positional
 //! [`ReadAt`](super::read_at::ReadAt) plane built once at open for EVERY backend
-//! (buffered = `pread` on a dedicated `std::fs::File`; mmap = a resident slice;
-//! `O_DIRECT` = an aligned positioned read). A positional read carries its offset
-//! as a parameter and touches no tokio reactor/timer, so it completes fully on the
-//! calling (blocking) thread — no `tokio::fs`, no `block_on`, no second blocking
-//! thread. `read_at.rs`'s module docs anticipated exactly this adoption ("shaped so
-//! the windowed streaming scan can adopt it later"). Decompression continues to run
-//! in `decode_scan_chunk` on the same blocking thread (the D2 substrate placement,
-//! unchanged).
+//! (buffered = `pread` on a dedicated `std::fs::File`; mmap = a resident slice over
+//! the SAME unadvised mapping the scan backend uses; `O_DIRECT` = an aligned
+//! positioned read). A positional read carries its offset as a parameter and
+//! touches no tokio reactor/timer, so it completes fully on the calling (blocking)
+//! thread — no `tokio::fs`, no `block_on`, no second blocking thread. `read_at.rs`'s
+//! module docs anticipated exactly this adoption ("shaped so the windowed streaming
+//! scan can adopt it later"). Decompression continues to run in `decode_scan_chunk`
+//! on the same blocking thread (the D2 substrate placement, unchanged).
+//!
+//! This whole feed is scan-only (`feed_compressed_chunks` / `feed_uncompressed_pieces`
+//! are driven exclusively by the windowed streaming scan, never a point lookup), so
+//! EVERY read here uses `scan_positional_source`, never the reader's dedicated
+//! `MADV_RANDOM` point-read mapping (`point_source`, issue #2210) — that advice
+//! suppresses kernel readahead, which is exactly backwards for this mostly-
+//! sequential feed (issue #2876, the #2210 × #1940 cross-path regression this file
+//! was the other half of).
 //!
 //! Byte-parity + integrity are preserved verbatim from the former cursor path:
 //! - **compressed NB** (`CompressionInfo` present): the same per-chunk record
@@ -99,7 +108,7 @@ impl SSTableReader {
     /// [`io_error_with_context`] (never collapsed to `Error::other`).
     ///
     /// The `record_io_read_thread` probe fires HERE, at the actual
-    /// `point_source.read_exact_at` call site (not at the top of the feed closure),
+    /// `scan_positional_source.read_exact_at` call site (not at the top of the feed closure),
     /// so the #1940 no-nesting guard records the thread that performs the real read
     /// — making its `io_read_thread == decode_thread` equality a true detector of a
     /// read dispatched off the feed thread. Compiled only under `scan-offload-probe`.
@@ -118,7 +127,7 @@ impl SSTableReader {
             // mmap/plain-file backends it defers to `read_exact_at` and `scratch`
             // stays empty, so those paths are byte-for-byte unchanged (#1940).
             match self
-                .point_source
+                .scan_positional_source
                 .read_exact_at_reusing(offset, buf, scratch)
             {
                 Ok(()) => return Ok(()),
@@ -137,7 +146,7 @@ impl SSTableReader {
         }
     }
 
-    /// Read compressed chunk `chunk_index` SYNCHRONOUSLY via `point_source`,
+    /// Read compressed chunk `chunk_index` SYNCHRONOUSLY via `scan_positional_source`,
     /// verifying its trailing CRC32 before returning the compressed payload (issue
     /// #1940). Returns `Ok(None)` at EOF (past the last chunk, or the degenerate
     /// empty trailing chunk, issue #2225). Mirrors `read_nb_format_chunk_data`'s
@@ -154,7 +163,7 @@ impl SSTableReader {
             // Callers gate on `compression_info.is_some()`; a None here is a bug.
             None => return Ok(None),
         };
-        let file_size = self.point_source.len();
+        let file_size = self.scan_positional_source.len();
 
         if chunk_index >= comp_info.chunk_offsets.len() {
             return Ok(None); // EOF
@@ -278,7 +287,7 @@ impl SSTableReader {
     }
 
     /// Read the next bounded piece of an UNCOMPRESSED-NB data section
-    /// SYNCHRONOUSLY via `point_source`, starting at byte `pos` (an absolute
+    /// SYNCHRONOUSLY via `scan_positional_source`, starting at byte `pos` (an absolute
     /// Data.db offset). Returns `Ok(None)` at EOF, else `Ok(Some((piece, next_pos)))`.
     /// Every `CRC.db` chunk covering the piece is verified (once per reader
     /// lifetime) BEFORE the piece is returned — from the resident bytes when a
@@ -289,7 +298,7 @@ impl SSTableReader {
         pos: u64,
         direct_scratch: &mut DirectScratch,
     ) -> Result<Option<(Vec<u8>, u64)>> {
-        let file_size = self.point_source.len();
+        let file_size = self.scan_positional_source.len();
         let remaining = file_size.saturating_sub(pos);
         if remaining == 0 {
             return Ok(None); // EOF
@@ -328,7 +337,7 @@ impl SSTableReader {
                     // backends this defers to `read_exact_at` (scratch stays empty),
                     // so those paths are unchanged.
                     let mut cbuf = vec![0u8; (hi - lo) as usize];
-                    self.point_source
+                    self.scan_positional_source
                         .read_exact_at_reusing(lo, &mut cbuf, direct_scratch)
                         .map_err(|e| {
                             Error::corruption(format!(
@@ -377,7 +386,7 @@ impl SSTableReader {
         // as `Error::memory`, never a panic. Authoritative metadata, no heuristic.
         let mut scratch: Vec<u8> = Vec::new();
         if let Some(ci) = reader.compression_info.as_ref() {
-            let file_size = reader.point_source.len();
+            let file_size = reader.scan_positional_source.len();
             let max_record = (0..ci.chunk_offsets.len())
                 .filter_map(|i| ci.compressed_chunk_size(i, file_size))
                 .max()

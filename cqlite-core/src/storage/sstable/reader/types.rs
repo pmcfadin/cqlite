@@ -252,6 +252,19 @@ pub struct SSTableReader {
     /// source is intentionally shaped so scans could adopt it later (audit F3)
     /// without requiring it now.
     pub(crate) point_source: std::sync::Arc<dyn super::read_at::ReadAt>,
+    /// Positional source for SCAN-side offset reads (issue #2876): the
+    /// Summary-guided compressed partition walk (`compressed_offset.rs`) and the
+    /// windowed streaming scan feed (`scan_stream_windowed_read.rs`) read Data.db
+    /// positionally too, but they must NOT share [`point_source`](Self::point_source)
+    /// — that source is deliberately advised `MADV_RANDOM` for a large mmap-backed
+    /// file (issue #2210) to suppress kernel readahead for scattered point faults,
+    /// which is exactly backwards for a mostly-sequential scan walk (one 4 KiB page
+    /// fault per positional read, #2210 × #1940 cross-path regression). Built once
+    /// at open from the SAME unadvised mapping [`scan_source`](Self::scan_source)
+    /// already uses for the mmap backend (an `Arc` clone, no new mapping / fd,
+    /// #1143 preserved); the Direct/Buffered backends have no per-mapping advice
+    /// concept, so they share `point_source` unchanged.
+    pub(crate) scan_positional_source: std::sync::Arc<dyn super::read_at::ReadAt>,
     /// SSTable header information
     pub(crate) header: SSTableHeader,
     /// Parser for SSTable format

@@ -643,14 +643,23 @@ impl SSTableReader {
             self.read_compressed_offset_window(comp_info, block_offset, size)
                 .await?
         } else {
-            // UNCOMPRESSED offset read. Positioned read on the shared point source
-            // (issue #1573, C2): no cursor mutex is held across this I/O, so
-            // concurrent point reads do not convoy. The covering CRC.db chunks were
-            // already verified by `verify_uncompressed_range` before we got here
-            // (issue #1396), so these bytes are integrity-checked too.
+            // UNCOMPRESSED offset read. Positioned read on the SCAN-side positional
+            // source (issue #2876, was `point_source` under issue #1573/C2): no
+            // cursor mutex is held across this I/O, so concurrent reads do not
+            // convoy. `get_cached_data` is reached both by genuine point lookups
+            // (the rare index-less/legacy fallback in `big_point.rs`) and by every
+            // index-driven scan (`sequential.rs`), so it must NOT use the dedicated
+            // `MADV_RANDOM` point mapping (issue #2210) — that advice is a
+            // deliberate loss for a scan's mostly-sequential access pattern. The
+            // covering CRC.db chunks were already verified by
+            // `verify_uncompressed_range` before we got here (issue #1396, still on
+            // `point_source` — that helper is also reached directly by the
+            // protected point-lookup paths in `bti_point.rs` / `big_promoted.rs`),
+            // so these bytes are integrity-checked too.
             model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
             let mut buffer = vec![0u8; size as usize];
-            self.point_source.read_exact_at(block_offset, &mut buffer)?;
+            self.scan_positional_source
+                .read_exact_at(block_offset, &mut buffer)?;
             buffer
         };
 
