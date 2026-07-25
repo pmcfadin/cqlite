@@ -1,0 +1,37 @@
+version: 1
+project:
+  name: cqlite
+datasets_root_env: CQLITE_DATASETS_ROOT
+toolchains:
+  - kind: rust
+    version: "stable"
+    components: [clippy, rustfmt]
+    targets: [wasm32-unknown-unknown]
+    # cargo-nextest --locked (unpinned): on latest stable (verified 1.97.1,
+    # 2026-07-24) the newest nextest builds fine, but it ships a build-time
+    # "locked-tripwire" that FAILS unless installed with --locked. So keep
+    # --locked; the old @0.9.114 rustc-version pin is no longer needed.
+    accelerators: [sccache, "cargo-nextest --locked"]
+  - kind: python
+    version: "3.9"
+  - kind: node
+    version: "18"
+datasets:
+  - run: "bash test-data/scripts/fetch-datasets.sh"
+    env:
+      CQLITE_DATASETS_ROOT: "{repo_root}/test-data/datasets"
+env:
+  RUSTFLAGS: "-D warnings"
+  # NOTE: do NOT set RUSTC_WRAPPER=sccache here. Profile env is applied to every
+  # onboard command, including `cargo install sccache` — wrapping rustc with a
+  # not-yet-built sccache deadlocks the toolchain step. cqlite's agent-gate.sh
+  # auto-detects sccache and wires it in itself; these two vars are all it needs.
+  SCCACHE_DIR: "/home/ubuntu/.cache/sccache"
+  SCCACHE_CACHE_SIZE: "30G"
+  CQLITE_DATASETS_ROOT: "{repo_root}/test-data/datasets"
+verify:
+  run: "bash scripts/bootstrap-agent-machine.sh"
+  expect: "All checks green."
+hooks:
+  post_toolchain: []
+  pre_verify: []
