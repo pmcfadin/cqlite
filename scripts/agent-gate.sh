@@ -572,15 +572,26 @@ _sccache_health() {
 _MOLD_BEGIN_MARKER='# BEGIN cqlite-mold (managed by scripts/bootstrap-agent-machine.sh — do not edit inside)'
 
 # _mold_block_active: true when the bootstrap-managed block is present in the
-# resolved per-machine cargo config (config.toml or the extension-less config).
+# per-machine cargo config file cargo ACTUALLY reads. Cargo prefers the
+# extension-less `config` over `config.toml` when BOTH exist (a documented legacy
+# precedence), so we probe ONLY the effective file — checking both would report
+# `linked` on a both-files machine where the block sits in the ignored `config.toml`.
 _mold_block_active() {
-  local cfg_dir="${CARGO_HOME:-$HOME/.cargo}"
-  grep -Fxq "$_MOLD_BEGIN_MARKER" "$cfg_dir/config.toml" 2>/dev/null && return 0
-  grep -Fxq "$_MOLD_BEGIN_MARKER" "$cfg_dir/config" 2>/dev/null && return 0
-  return 1
+  local cfg_dir="${CARGO_HOME:-$HOME/.cargo}" f
+  if [ -f "$cfg_dir/config" ]; then
+    f="$cfg_dir/config"
+  elif [ -f "$cfg_dir/config.toml" ]; then
+    f="$cfg_dir/config.toml"
+  else
+    return 1
+  fi
+  grep -Fxq "$_MOLD_BEGIN_MARKER" "$f" 2>/dev/null
 }
 
 # _mold_state: resolve linked|overridden|present-unconfigured|absent, memoized.
+# A non-empty RUSTFLAGS **or** CARGO_ENCODED_RUSTFLAGS in the gate environment
+# suppresses cargo's target.rustflags entirely (encoded takes even higher
+# precedence), so either one turns an otherwise-`linked` state into `overridden`.
 _MOLD_STATE=""
 _mold_state() {
   [ -n "$_MOLD_STATE" ] && { printf '%s' "$_MOLD_STATE"; return; }
@@ -588,9 +599,10 @@ _mold_state() {
     _MOLD_STATE="$AGENT_GATE_TEST_MOLD_STATE"
   elif ! command -v mold >/dev/null 2>&1; then
     _MOLD_STATE=absent
-  elif [ -n "${RUSTFLAGS:-}" ] && _mold_block_active; then
-    # Managed block present but a global RUSTFLAGS suppresses it → honest signal
-    # that the wired -fuse-ld=mold is NOT in effect.
+  elif { [ -n "${RUSTFLAGS:-}" ] || [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; } \
+       && _mold_block_active; then
+    # Managed block present but a global (encoded-)RUSTFLAGS suppresses it →
+    # honest signal that the wired -fuse-ld=mold is NOT in effect.
     _MOLD_STATE=overridden
   elif _mold_block_active; then
     _MOLD_STATE=linked

@@ -122,9 +122,10 @@ mold_target_section() {
 # config. Strips any prior block (and one blank line immediately preceding it) so
 # re-runs are byte-idempotent, preserves everything else, then appends the block
 # with both Linux target triples. Writes into whichever config file cargo actually
-# reads — `config.toml` wins when both exist, else the extension-less `config` —
-# so a machine that only has the legacy `~/.cargo/config` never gets a shadow
-# `config.toml` that cargo silently prefers, dropping the user's whole config.
+# reads — the extension-less `config` WINS when both exist (a documented legacy
+# precedence cargo warns about), else `config.toml` — so a machine that only has
+# the legacy `~/.cargo/config` never gets a shadow file that cargo would ignore,
+# and a both-files machine never has the block land in the ignored file.
 mold_write_block() {
   local linker="$1"
   local cfg_dir cfg_file preserved
@@ -133,10 +134,10 @@ mold_write_block() {
     warn "could not create $cfg_dir — skipping mold linker config"
     return 0
   fi
-  if [ -f "$cfg_dir/config.toml" ]; then
-    cfg_file="$cfg_dir/config.toml"
-  elif [ -f "$cfg_dir/config" ]; then
+  if [ -f "$cfg_dir/config" ]; then
     cfg_file="$cfg_dir/config"
+  elif [ -f "$cfg_dir/config.toml" ]; then
+    cfg_file="$cfg_dir/config.toml"
   else
     cfg_file="$cfg_dir/config.toml"
   fi
@@ -159,7 +160,7 @@ mold_write_block() {
   else
     : >"$preserved"
   fi
-  # Fail-safe: a user-defined [target.<triple>-unknown-linux-gnu] section OUTSIDE
+  # Fail-safe #1: a user-defined [target.<triple>-unknown-linux-gnu] section OUTSIDE
   # our markers would collide with the block we append (TOML table redefinition =
   # cargo parse error on EVERY invocation). Never risk it — warn and write nothing,
   # leaving the file byte-identical.
@@ -168,6 +169,30 @@ mold_write_block() {
     rm -f "$preserved"
     return 0
   fi
+  # Fail-safe #2: a pre-existing [build] rustflags (or a dotted build.rustflags) is
+  # first-match-wins over our target.rustflags — writing the block would SILENTLY
+  # disable the user's global flags. Same posture: warn and write nothing.
+  if awk '
+      /^\[build\]/ { inbuild = 1; next }
+      /^\[/        { inbuild = 0 }
+      inbuild && /^[[:space:]]*rustflags[[:space:]]*=/ { found = 1 }
+      /^[[:space:]]*build\.rustflags[[:space:]]*=/     { found = 1 }
+      END { exit(found ? 0 : 1) }
+    ' "$preserved"; then
+    warn "existing [build] rustflags in $cfg_file — writing NO mold block (target.rustflags would silently disable the user's build rustflags); add \"-C link-arg=-fuse-ld=mold\" to that rustflags list by hand, or remove it and re-run bootstrap"
+    rm -f "$preserved"
+    return 0
+  fi
+  # Atomic write: build the new content in a temp file in the SAME directory, then
+  # rename over the target — so an ENOSPC/interrupt mid-write can never leave a
+  # truncated config (which would break every cargo invocation). Resolve a symlink
+  # to its target so we never silently replace a symlinked config with a plain file.
+  local write_target="$cfg_file" tmpw
+  if [ -L "$cfg_file" ]; then
+    write_target=$(readlink -f "$cfg_file" 2>/dev/null || echo "$cfg_file")
+  fi
+  tmpw=$(mktemp "$(dirname "$write_target")/.cqlite-mold.XXXXXX" 2>/dev/null) \
+    || { warn "mktemp failed in $(dirname "$write_target") — skipping mold linker config"; rm -f "$preserved"; return 0; }
   {
     cat "$preserved"
     [ -s "$preserved" ] && printf '\n'
@@ -176,9 +201,14 @@ mold_write_block() {
     printf '\n'
     mold_target_section "aarch64-unknown-linux-gnu" "$linker"
     printf '%s\n' "$MOLD_END"
-  } >"$cfg_file"
+  } >"$tmpw"
   rm -f "$preserved"
-  ok "wrote mold managed block to $cfg_file (both Linux target triples${linker:+, linker=$linker})"
+  if mv -f "$tmpw" "$write_target"; then
+    ok "wrote mold managed block to $cfg_file (both Linux target triples${linker:+, linker=$linker})"
+  else
+    warn "could not install mold config at $write_target — original left intact"
+    rm -f "$tmpw"
+  fi
 }
 
 # mold_configure_linux: link-probe cc (then clang) and, on success, wire mold via
@@ -293,7 +323,15 @@ if [ "$PLATFORM" = linux ]; then
     else
       warn "no supported package manager (apt/dnf/yum/pacman) found — install mold manually"
     fi
-    info "linker config is written only after mold is installed AND a link probe passes — re-run bootstrap once mold is on PATH"
+    # Under --yes the install above may have just placed mold on PATH; wire it NOW
+    # (probe + managed block) so one --yes run delivers the FULL acceleration. In
+    # print-only mode nothing was installed, so keep the re-run hint instead.
+    if [ "$AUTO_YES" = 1 ] && have mold; then
+      ok "mold now present ($(mold --version 2>/dev/null | head -1)) — configuring linker"
+      mold_configure_linux
+    else
+      info "linker config is written only after mold is installed AND a link probe passes — re-run bootstrap once mold is on PATH"
+    fi
   fi
 fi
 

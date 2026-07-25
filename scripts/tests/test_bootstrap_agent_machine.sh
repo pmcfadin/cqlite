@@ -61,8 +61,14 @@ mkshim cargo
 mkshim roborev
 mkshim gh
 
+# Sandbox HOME/CARGO_HOME for these whole-script runs so the Linux mold branch can
+# NEVER mutate the host's real ~/.cargo/config when this runs inside tooling-tests
+# on a Linux gate box that has mold + a working cc (issue #2859 blocker 2).
+host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
+
 # Run with the shims FIRST on PATH, default mode (no --yes), skipping the smoke.
-run_out=$(PATH="$tmp:$PATH" bash "$BOOTSTRAP" --skip-smoke 2>&1); run_rc=$?
+run_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
+  bash "$BOOTSTRAP" --skip-smoke 2>&1); run_rc=$?
 
 if [ "$run_rc" -eq 0 ]; then
   ok "default (no --yes) run exits 0"
@@ -92,7 +98,8 @@ done
 #        still has coreutils but no sccache; assert the guidance line appears. ---
 # Reset the tripwire so the no-install assertion below reflects ONLY this run.
 : >"$tripwire"
-guard_out=$(PATH="$tmp:/usr/bin:/bin" bash "$BOOTSTRAP" --skip-smoke 2>&1)
+guard_out=$(PATH="$tmp:/usr/bin:/bin" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
+  bash "$BOOTSTRAP" --skip-smoke 2>&1)
 if printf '%s' "$guard_out" | grep -Eq "install sccache:|sccache MISSING"; then
   ok "missing accelerator prints install guidance (does not auto-install)"
 else
@@ -108,7 +115,6 @@ fi
 # All cases below stub `uname` (to simulate the OS), `mold`, and the C compilers,
 # and point HOME/CARGO_HOME at a sandbox so the managed block is written to a
 # throwaway ~/.cargo/config.toml — never the real one and never the repo's.
-REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 mk_stub() {
   # mk_stub <dir> <name> <body>
@@ -119,7 +125,14 @@ $body
 EOF
   chmod +x "$dir/$name"
 }
-count_begin() { grep -c '^# BEGIN cqlite-mold' "$1" 2>/dev/null || echo 0; }
+# count_begin <file>: number of managed-block BEGIN markers. grep -c already prints
+# a count (0 on no match) AND exits 1 — a `|| echo 0` would DOUBLE-print "0\n0", so
+# capture the count and default an empty (missing-file) result to 0 instead.
+count_begin() {
+  local n
+  n=$(grep -c '^# BEGIN cqlite-mold' "$1" 2>/dev/null)
+  echo "${n:-0}"
+}
 # Stub gh + roborev + cargo so the (unrelated) auth/agent/toolchain sections stay
 # fast and offline during these mold cases, which run bootstrap under the full PATH
 # with CARGO_HOME pointed at a throwaway dir (a real `cargo --version` there would
@@ -334,12 +347,81 @@ else
   echo "--- config ---"; cat "$cfgK"; echo "--------------"
 fi
 
-# 6i. the repository's committed .cargo/config.toml is never touched.
-repo_cfg="$REPO_ROOT/.cargo/config.toml"
-if [ -e "$repo_cfg" ]; then
-  bad "mold: repo .cargo/config.toml exists unexpectedly (test assumes it does not)"
+# 6l. BOTH config files exist (blocker 1): cargo prefers the extension-less `config`,
+#     so the block must land THERE, not in the ignored `config.toml`.
+sbL=$(mktemp -d "$tmp/moldL.XXXXXX"); mkdir -p "$sbL/.cargo"
+printf '[net]\nretry = 1\n' >"$sbL/.cargo/config"
+printf '[net]\nretry = 2\n' >"$sbL/.cargo/config.toml"
+tomlL_before=$(cat "$sbL/.cargo/config.toml")
+PATH="$stubA:$PATH" HOME="$sbL" CARGO_HOME="$sbL/.cargo" \
+  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+if grep -q '^# BEGIN cqlite-mold' "$sbL/.cargo/config" \
+   && ! grep -q '^# BEGIN cqlite-mold' "$sbL/.cargo/config.toml" \
+   && [ "$tomlL_before" = "$(cat "$sbL/.cargo/config.toml")" ]; then
+  ok "mold: both files present -> block lands in the effective 'config', config.toml untouched"
 else
-  ok "mold: repo-committed .cargo/config.toml left untouched (managed block is per-machine)"
+  bad "mold: both-files precedence wrong (block in the ignored config.toml)"
+  echo "--- config ---"; cat "$sbL/.cargo/config"; echo "--- config.toml ---"; cat "$sbL/.cargo/config.toml"
+fi
+
+# 6m. pre-existing [build] rustflags (blocker 3): our target.rustflags would silently
+#     disable it (first-match-wins), so bootstrap must WARN and write NOTHING.
+sbM=$(mktemp -d "$tmp/moldM.XXXXXX"); mkdir -p "$sbM/.cargo"
+cfgM="$sbM/.cargo/config.toml"
+printf '[build]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgM"
+beforeM=$(cat "$cfgM")
+outM=$(PATH="$stubA:$PATH" HOME="$sbM" CARGO_HOME="$sbM/.cargo" \
+  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+if printf '%s' "$outM" | grep -q "existing \[build\] rustflags" \
+   && [ "$beforeM" = "$(cat "$cfgM")" ] \
+   && ! grep -q '^# BEGIN cqlite-mold' "$cfgM"; then
+  ok "mold: pre-existing [build] rustflags -> warn, file byte-identical, no block"
+else
+  bad "mold: [build] rustflags not fail-safe (block written or file changed)"
+  echo "--- config ---"; cat "$cfgM"; echo "--------------"
+fi
+
+# 6n. --yes INSTALLS then WIRES (blocker 4): the install stub places `mold` on PATH,
+#     and the same run must re-detect it and write the managed block — one --yes run
+#     delivers the full acceleration, not just the install. Runs a COPY of bootstrap in
+#     a fake repo so the --yes dataset-fetch path is a fast no-op (no such script → no
+#     network), never the real fetch-datasets.sh.
+nrepo="$tmp/n-repo"; mkdir -p "$nrepo/scripts"
+cp "$BOOTSTRAP" "$nrepo/scripts/bootstrap-agent-machine.sh"
+sbN=$(mktemp -d "$tmp/moldN.XXXXXX"); mkdir -p "$sbN/.cargo"; stubN="$tmp/stubN"
+mk_hermetic_bin "$stubN"
+mk_stub "$stubN" cc 'exit 0'
+mk_stub "$stubN" sudo 'exec "$@"'   # passthrough so `sudo apt-get …` runs the stub
+# apt-get stub: on `install … mold`, drop a real `mold` executable onto PATH.
+apt_body='installed=0; for a in "$@"; do [ "$a" = mold ] && installed=1; done; if [ "$installed" = 1 ]; then printf "#!/usr/bin/env bash\n[ \"\$1\" = --version ] && echo \"mold 2.4.0\"\nexit 0\n" > "'"$stubN/mold"'"; chmod +x "'"$stubN/mold"'"; fi; exit 0'
+mk_stub "$stubN" apt-get "$apt_body"
+PATH="$stubN" HOME="$sbN" CARGO_HOME="$sbN/.cargo" \
+  bash "$nrepo/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
+if grep -q '^# BEGIN cqlite-mold' "$sbN/.cargo/config.toml" 2>/dev/null; then
+  ok "mold: --yes installs mold then wires the managed block in the same run"
+else
+  bad "mold: --yes installed but never wired the linker config"
+  ls -la "$sbN/.cargo" 2>/dev/null
+fi
+
+# 6i. the repo's committed .cargo/config.toml is never touched (blocker 7): run a COPY
+#     of bootstrap whose BASH_SOURCE-derived REPO_ROOT is a fake repo that HAS a
+#     .cargo/config.toml, with HOME/CARGO_HOME sandboxed elsewhere. The block must go
+#     to the per-machine CARGO_HOME and the fake repo config must be byte-identical.
+fakerepo="$tmp/fakerepo"; mkdir -p "$fakerepo/scripts" "$fakerepo/.cargo"
+cp "$BOOTSTRAP" "$fakerepo/scripts/bootstrap-agent-machine.sh"
+repo_cfg="$fakerepo/.cargo/config.toml"
+printf '[registries.example]\nindex = "sparse+https://example.invalid/"\n' >"$repo_cfg"
+repo_before=$(cat "$repo_cfg")
+sbI=$(mktemp -d "$tmp/moldI.XXXXXX"); mkdir -p "$sbI/.cargo"
+PATH="$stubA:$PATH" HOME="$sbI" CARGO_HOME="$sbI/.cargo" \
+  bash "$fakerepo/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1
+if [ "$repo_before" = "$(cat "$repo_cfg")" ] \
+   && grep -q '^# BEGIN cqlite-mold' "$sbI/.cargo/config.toml"; then
+  ok "mold: repo-committed .cargo/config.toml untouched; block written to per-machine CARGO_HOME"
+else
+  bad "mold: repo config was mutated OR block did not land in CARGO_HOME"
+  echo "--- repo cfg now ---"; cat "$repo_cfg"; echo "--------------------"
 fi
 
 echo

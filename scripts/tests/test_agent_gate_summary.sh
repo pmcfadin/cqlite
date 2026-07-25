@@ -905,6 +905,27 @@ PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf4" \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
 assert_mold_token "mold-real-overridden" "$mf4" overridden
 
+# 9e-iv-b. CARGO_ENCODED_RUSTFLAGS (higher precedence than RUSTFLAGS, same
+#          suppression) also -> overridden, even with RUSTFLAGS empty.
+mf4b="$tmp/mold-real-overridden-encoded.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf4b" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch1" RUSTFLAGS='' \
+  CARGO_ENCODED_RUSTFLAGS=$'-C\x1ftarget-cpu=native' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-overridden-encoded" "$mf4b" overridden
+
+# 9e-vi. BOTH config files present, block ONLY in the ignored config.toml (cargo reads
+#        the extension-less `config`) -> present-unconfigured, proving the detector
+#        probes the EFFECTIVE file, not either-of-both.
+ch6=$(mktemp -d "$tmp/mold-ch6.XXXXXX")
+printf '[net]\nretry = 1\n' >"$ch6/config"
+printf '%s\n# END cqlite-mold\n' "$MOLD_MARK" >"$ch6/config.toml"
+mf6="$tmp/mold-real-bothfiles.txt"
+PATH="$mold_bin:$PATH" AGENT_GATE_SUMMARY_FILE="$mf6" \
+  AGENT_GATE_TEST_OS=Linux CARGO_HOME="$ch6" RUSTFLAGS='' \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_mold_token "mold-real-both-files-precedence" "$mf6" present-unconfigured
+
 # 9e-v. marker alignment: a user's own `# BEGIN cqlite-mold-notours` comment (a
 #       PREFIX of, but not equal to, the managed marker) must NOT be detected as the
 #       block -> present-unconfigured, proving exact-full-line matching.
