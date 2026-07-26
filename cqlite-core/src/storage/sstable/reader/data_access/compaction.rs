@@ -660,20 +660,16 @@ impl SSTableReader {
             .unwrap_or(usize::MAX);
 
         let mut chunk_count = 0;
-        // Issue #2819 (B4): the Summary-guided read path
-        // (`compressed_offset.rs`) is instrumented for `stream_cold_fault` /
-        // `stream_decompress`, but a BTI/`da` table (and any Summary-guided
-        // FellBack) routes HERE — so instrument the page-in + decompress on this
-        // full-ring fallback too, or those scans would advertise 5 sub-phases yet
-        // emit only 3. A single `Cell<bool>` gate keeps the non-flight compaction
-        // path free of `Instant::now()`; this runs on the per-SSTable producer
-        // thread where the flight per-request sink is installed.
+        // Issue #2819 (B4): a BTI/`da` table (and any Summary-guided FellBack)
+        // routes HERE, not the instrumented `compressed_offset.rs` path — so time
+        // the page-in (`stream_cold_fault`) + decompress (`stream_decompress`) on
+        // this full-ring fallback too, or a BTI scan would emit only 3 of the 5
+        // sub-phases. The `Cell<bool>` gate keeps the non-flight compaction path
+        // free of `Instant::now()`; runs on the producer thread (sink installed).
         let time_reads = crate::observability::stream_subphase::sink_active();
         loop {
-            // Cold body-chunk page-in — the `stream_cold_fault` scope. Timed
-            // manually because `read_next_block` is async (`stream_subphase::timed`
-            // wraps only a sync closure); `record_nanos` self-gates to a no-op with
-            // no sink installed.
+            // Cold body-chunk page-in. Timed manually (async — `timed` wraps only a
+            // sync closure); `record_nanos` self-gates to a no-op with no sink.
             let read_start = time_reads.then(std::time::Instant::now);
             let next_block = self.read_next_block(&cursor).await?;
             if let Some(start) = read_start {
@@ -705,9 +701,8 @@ impl SSTableReader {
                 compressed_chunk
             } else if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
-                // Issue #2819 (B4): LZ4 decompress — the `stream_decompress` scope.
-                // Reached only for a genuinely compressed chunk (past the
-                // incompressible-raw branch), so an uncompressed table records none.
+                // Issue #2819 (B4): LZ4 decompress — the `stream_decompress` scope
+                // (reached only for a genuinely compressed chunk).
                 crate::observability::stream_subphase::timed(
                     crate::observability::StreamSubPhase::Decompress,
                     || compression.decompress(&compressed_chunk),

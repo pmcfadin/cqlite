@@ -340,23 +340,14 @@ pub(crate) fn spawn_streaming(
         // is the FIRST act here and its Drop decrements on every exit path
         // (normal, error, cancel, panic).
         let _blocking_guard = crate::saturation::BlockingTaskGuard::enter();
-        // Issue #2819: per-request in-`stream` sub-phase accumulator. Installed on
-        // THIS merge consumer thread (so `stream_merge`/`stream_encode`/
-        // `stream_grpc_write` scopes on this thread record into it, and cqlite-core
-        // propagates the SAME `Arc` onto the per-SSTable producer thread for
-        // `stream_cold_fault`/`stream_decompress`); emitted ONCE at teardown.
-        //
-        // Roborev B1 — the emitter MUST record its samples BEFORE any egress
-        // sender is released, or a client scraping metrics at end-of-stream races
-        // the recording. Both channel senders — `sink`'s `tx` (dropped inside
-        // `run_merge_catching_panics` when the closure returns) and `error_tx`
-        // (dropped at the end of THIS closure) — must still be alive when the
-        // emitter flushes, so the receiver has not yet seen the channel close.
-        // Locals drop in REVERSE declaration order, so declaring `_subphase_emit`
-        // AFTER `error_tx` makes it drop FIRST: emit samples → THEN `error_tx`
-        // drops (closes the channel / ends the client stream) → THEN
-        // `_subphase_install` uninstalls the thread-local (so a reused
-        // blocking-pool thread never leaks this RPC's sink).
+        // Issue #2819: per-request in-`stream` sub-phase accumulator, installed on
+        // THIS merge consumer thread; emitted ONCE at teardown. Roborev B1 — the
+        // emitter MUST flush its samples BEFORE any egress sender is released, or a
+        // client scraping metrics at end-of-stream races the recording. Locals drop
+        // in REVERSE declaration order, so `_subphase_emit` is declared AFTER
+        // `error_tx` to drop FIRST: emit → then `error_tx` drops (closing the
+        // channel / ending the client stream) → then `_subphase_install`
+        // uninstalls the thread-local (no leak onto a reused blocking-pool thread).
         let subphase = Arc::new(cqlite_core::observability::StreamSubPhaseTimings::default());
         let _subphase_install =
             cqlite_core::observability::stream_subphase::install(Some(subphase.clone()));

@@ -341,7 +341,11 @@ mod tests {
             assert_eq!(pull_wait_nanos(), 0);
             add_pull_wait_nanos(100);
             add_pull_wait_nanos(50);
-            assert_eq!(pull_wait_nanos(), 150, "recv-wait accumulates monotonically");
+            assert_eq!(
+                pull_wait_nanos(),
+                150,
+                "recv-wait accumulates monotonically"
+            );
         })
         .join()
         .expect("thread joins");
