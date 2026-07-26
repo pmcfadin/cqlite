@@ -357,6 +357,9 @@ PR report — prose summaries are not accepted.
 commit: <short-sha> branch: <branch> dirty: yes|no
 datasets: <N> Data.db files under <CQLITE_DATASETS_ROOT>
 ci-pins: DATASET_TAG: <tag>  DATASET_ASSET: <asset>  DATASET_SHA256: <sha>  
+tree-start: <head-sha12> dirty: yes|no digest: <digest12>
+tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
+tree-integrity: PASS
 fmt:               PASS|FAIL (<Ns>)
 clippy:            PASS|FAIL (<Ns>)
 core-tests:        PASS|FAIL (<Ns>)
@@ -378,6 +381,9 @@ RESULT: PASS
 commit: <short-sha> branch: <branch> dirty: yes|no
 datasets: <N> Data.db files under <CQLITE_DATASETS_ROOT>
 ci-pins: ...
+tree-start: <head-sha12> dirty: yes|no digest: <digest12>
+tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
+tree-integrity: PASS
 mode: PARTIAL (--only fmt,clippy) - does NOT count as the gate
 fmt:               PASS (<Ns>)
 clippy:            PASS (<Ns>)
@@ -386,6 +392,47 @@ summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PARTIAL
 ==== END AGENT-GATE SUMMARY ====
 ```
+
+## A mid-run tree mutation invalidates the run (#2926)
+
+The gate captures a **tree identity** at start — HEAD, the dirty flag, and a
+content-sensitive digest of every uncommitted tracked change plus every untracked,
+non-ignored file — re-verifies it at every component boundary and once immediately
+before the terminal emit, and **FAILs CLOSED** on any mismatch:
+
+```
+tree-integrity: FAIL (tree-mutated-midrun; head <a>→<b>; changed: <paths…> (+N more); detected-after-component: <c>)
+RESULT: FAIL
+```
+
+Why it exists: `commit:`/`dirty:` are stamped at *emit* time, so a worktree edited while
+the gate ran used to emit a block attributing **mixed-tree results to the final sha** —
+indistinguishable from a real certification. This is reachable without breaking the
+one-worker rule (#1930): a lead legitimately runs a closer (gating) and a fixer
+(editing) that overlap on one worktree.
+
+Contract:
+
+- **A closer MUST read `tree-integrity:` alongside `RESULT:`** before trusting a
+  summary. `RESULT: PASS` with anything other than `tree-integrity: PASS` cannot occur;
+  a block whose `tree-start:`/`tree-end:` digests differ is not a certification.
+- The guard covers the full gate, `--lite`, `--delta` and `--only`. Only `--list`,
+  `--python-build-verify`, the concurrency stub and the self-test emission modes are
+  exempt (they stamp a synthetic `selftest` identity).
+- The startup `INCOMPLETE` sentinel carries `tree-start:` (and no `tree-end:`), so even
+  a killed gate records the tree it began on.
+- **There is no bypass.** No environment variable turns a mutated run green. The one
+  knob, `AGENT_GATE_TREE_HASH_CAP_BYTES` (default 8 MiB), only caps content hashing of
+  oversized *untracked* files and is itself stamped as `tree-hash-cap:`.
+- Exclusions are the repo's own `.gitignore` rules plus the run's own summary file. One
+  named non-fatal class: a `Cargo.lock`-**only** difference stamps
+  `tree-integrity: PASS (lockfile-settled: …)` (the gate runs cargo without `--locked`,
+  #2962); a lockfile change alongside anything else is fatal.
+- **Stated limitation**: gitignored *inputs* — chiefly the fetched
+  `test-data/datasets/**` SSTable binaries — are outside the digest. Their stability is
+  covered by the existing `datasets:` and `ci-pins:` stamps, not by this guard.
+- Recovery: re-run on a stable tree. The FAIL names the changed paths; see
+  `docs/development/gate-ops.md`.
 
 ## Parity CI tier contracts
 

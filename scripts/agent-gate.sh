@@ -182,6 +182,10 @@
 #                      exits before running any component, so there is no recursion.
 #                      SKIP-aware: no python3 -> SKIP (the selftest's truncation
 #                      assertion needs a python reader), never silent PASS.
+#                      Also runs scripts/tests/test_agent_gate_tree_integrity.sh
+#                      (#2926) — proves a gate whose worktree mutates MID-RUN cannot
+#                      certify, and that an unmutated run still does (hermetic fake
+#                      checkouts + a stub cargo; nothing compiles, ~3s).
 #                      Also runs scripts/tests/test_generator_keyspace_scoping.sh
 #                      (#1232) — fails if a generate-*.sh enumerates the whole
 #                      SSTable corpus and grep -z filters by keyspace; needs no
@@ -1742,6 +1746,309 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     exit 2 ;;
 esac
 
+# #2926 tree-integrity self-test hooks — SAME fail-closed discipline as #2874's, checked
+# BEFORE the startup sentinel and before any tree work. The mutating modes WRITE INTO THE
+# CHECKOUT, so they refuse unless the caller pinned its own throwaway AGENT_GATE_SUMMARY_FILE
+# (never the checkout default) and every mutation target is an existing, repo-relative path.
+# NOTE this is a TEST SEAM, never a bypass: no mode here can turn a mutated run green.
+case "${AGENT_GATE_TREE_SELFTEST:-0}" in
+  0|capture|clean|boundary|side|terminal) : ;;
+  *)
+    echo "agent-gate: invalid AGENT_GATE_TREE_SELFTEST='${AGENT_GATE_TREE_SELFTEST}' (expected one of: 0 capture clean boundary side terminal) (#2926)" >&2
+    exit 2 ;;
+esac
+if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
+  if [ "$EXPLICIT_SUMMARY_FILE" != 1 ]; then
+    echo "agent-gate: AGENT_GATE_TREE_SELFTEST requires an explicit AGENT_GATE_SUMMARY_FILE (refusing to touch the checkout default) (#2926)" >&2
+    exit 2
+  fi
+  for _tsp in ${AGENT_GATE_TREE_SELFTEST_MUTATE:-}; do
+    case "$_tsp" in
+      /*|*..*)
+        echo "agent-gate: AGENT_GATE_TREE_SELFTEST_MUTATE must list repo-relative paths (got '$_tsp') (#2926)" >&2
+        exit 2 ;;
+    esac
+    if [ ! -f "$REPO_ROOT/$_tsp" ]; then
+      echo "agent-gate: AGENT_GATE_TREE_SELFTEST_MUTATE path '$_tsp' does not exist under $REPO_ROOT (#2926)" >&2
+      exit 2
+    fi
+  done
+fi
+
+# ===========================================================================
+# TREE IDENTITY (#2926): a gate run whose worktree mutates mid-run SHALL NOT certify.
+#
+# The `commit:`/`dirty:` stamps are written at SUMMARY-EMIT time and nothing used to
+# read tree state at gate START, so a worktree mutated while the gate ran emitted a
+# block attributing MIXED-TREE results to the FINAL sha — formally indistinguishable
+# from a legitimate certification (field incident 2026-07-26, PR #2916). Three
+# components also derive their own SCOPE from git mid-run (file-size's base, --lite's
+# blast radius, --delta's fail-closed classification), so a mid-run commit can change
+# WHICH tests a run even selects.
+#
+# Remedy (mirrors the #2874 summary-integrity mechanism exactly — same three hook
+# points, same lane-aware marker): capture a TREE IDENTITY at start, re-verify it at
+# every `record_result` boundary and once immediately before the terminal emit, and
+# FAIL CLOSED on mismatch with a named `tree-integrity: FAIL (tree-mutated-midrun; …)`
+# line. There is NO bypass: no environment variable turns a mutated run green.
+#
+# The identity is a DIGEST OF A PER-PATH CONTENT MANIFEST, never of `git status`
+# output: appending to an ALREADY-modified file (the dominant mid-run-fix shape)
+# leaves the porcelain listing byte-identical while the content hash moves.
+# ===========================================================================
+
+# Per-file content-hash cap for UNTRACKED files (the ONLY knob, and it is a
+# PERFORMANCE knob, not a bypass — see the no-bypass contract above). Above the cap an
+# untracked file is recorded by size+mtime instead of by content hash, which can only
+# WEAKEN detection for one oversized untracked blob; it can never suppress a detected
+# mutation, and any use (or any non-default value) is stamped as `tree-hash-cap:`.
+TREE_HASH_CAP_DEFAULT=8388608
+TREE_HASH_CAP_BYTES="${AGENT_GATE_TREE_HASH_CAP_BYTES:-$TREE_HASH_CAP_DEFAULT}"
+case "$TREE_HASH_CAP_BYTES" in
+  ''|*[!0-9]*) TREE_HASH_CAP_BYTES="$TREE_HASH_CAP_DEFAULT" ;;
+esac
+TREE_GUARDED=0            # 1 once a start identity was captured (the guard is live)
+TREE_MUTATED=0            # 1 once a non-lockfile mid-run mutation was detected
+TREE_MARKER_SEEN=0        # 1 once a SIDE-lane marker has been consumed
+TREE_START_HEAD=""; TREE_START_DIRTY=""; TREE_START_DIGEST=""
+TREE_END_HEAD=""; TREE_END_DIRTY=""; TREE_END_DIGEST=""
+TREE_CAP_FALLBACKS=0
+TREE_START_LINE="tree-start: (not captured)"
+TREE_END_LINE="tree-end: (not captured)"
+TREE_INTEGRITY_LINE="tree-integrity: SKIP (no capture)"
+TREE_HASH_CAP_LINE=""
+declare -a TREE_META_LINES=()
+
+# Exclusions are the repo's OWN ignore rules (`--exclude-standard`) plus exactly ONE
+# explicit carve-out: the run's own summary file (and its `.integrity-fail.*` siblings)
+# when the caller pinned a RELATIVE, in-repo path — a file this gate writes twice by
+# contract. Nothing else is excluded: an over-broad exclusion re-opens the hole, so
+# docs/**, *.md, test-data/** and openspec/** all stay INSIDE the digest.
+# (Cargo.lock is NOT excluded — it is a named non-fatal class, see _tree_change_class.)
+TREE_EXCLUDE_REL=""
+case "$SUMMARY_FILE" in
+  "$REPO_ROOT"/*) TREE_EXCLUDE_REL="${SUMMARY_FILE#"$REPO_ROOT"/}" ;;
+esac
+_tree_excluded() {
+  [ -n "$TREE_EXCLUDE_REL" ] || return 1
+  case "$1" in
+    "$TREE_EXCLUDE_REL") return 0 ;;
+    "$TREE_EXCLUDE_REL".integrity-fail.*) return 0 ;;
+  esac
+  return 1
+}
+
+# _tree_digest_file <file> -> a content digest of <file>. sha256 where available;
+# `git hash-object` is the last resort so the guard can NEVER go inert for want of a
+# hashing tool (git is already a hard dependency of every gate mode).
+TREE_SHA_TOOL=""
+_tree_digest_file() {
+  if [ -z "$TREE_SHA_TOOL" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then TREE_SHA_TOOL=sha256sum
+    elif command -v shasum >/dev/null 2>&1; then TREE_SHA_TOOL=shasum
+    else TREE_SHA_TOOL=git; fi
+  fi
+  case "$TREE_SHA_TOOL" in
+    sha256sum) sha256sum < "$1" | awk '{print $1}' ;;
+    shasum)    shasum -a 256 < "$1" | awk '{print $1}' ;;
+    *)         git --no-optional-locks hash-object --no-filters --stdin < "$1" ;;
+  esac
+}
+
+_tree_short() { printf '%.12s' "${1:-?}"; }
+
+# _tree_in_list <needle> <haystack...>
+_tree_in_list() {
+  local n="$1"; shift
+  local x
+  for x in ${@+"$@"}; do [ "$x" = "$n" ] && return 0; done
+  return 1
+}
+
+# _tree_identity <manifest-out>
+#
+# Write the NUL-framed per-path manifest to <manifest-out> (plus an escaped,
+# newline-framed view at <manifest-out>.report used ONLY to name changed paths on
+# failure) and print "<head>\t<dirty>\t<digest>\t<cap-fallbacks>". rc 1 iff git cannot
+# be consulted at all.
+#
+# Manifest records (NUL-TERMINATED, path LAST so a path containing a tab or a newline
+# cannot forge a field or a record):
+#   H<TAB><head-sha|unborn>
+#   T<TAB><blob-sha|DELETED|NONFILE|LINK:target|SIZE:n:MTIME:t><TAB><mode><TAB><path>
+#   U<TAB>… same shape, for untracked non-ignored paths
+#
+# Side-effect freedom (a guard that mutates the repo to check the repo did not mutate
+# is the wrong trade): EVERY git call passes --no-optional-locks so nothing refreshes/
+# rewrites $GIT_DIR/index (which also makes it safe to call from the ~8 concurrent
+# SIDE-lane subshells), and `git hash-object` runs WITHOUT -w so hashes are computed
+# and NOTHING is written to the object database (git worktrees SHARE the ODB with the
+# root checkout). No temporary index, no `git add`, no working-tree write; the only
+# files created live under $LOG_DIR (a per-run mktemp dir outside the repo).
+_tree_identity() {
+  local out="$1"
+  local head dirty=no nl=$'\n'
+  head=$(git --no-optional-locks rev-parse HEAD 2>/dev/null) || head=""
+  if [ -z "$head" ]; then
+    git --no-optional-locks rev-parse --git-dir >/dev/null 2>&1 || return 1
+    head="unborn"
+  fi
+
+  local p
+  local -a tpaths=() upaths=()
+  # Tracked side: every path differing from HEAD in the INDEX or the WORKING TREE
+  # (content, mode, add, delete). --no-renames so a rename shows as delete+add rather
+  # than collapsing to the new name only.
+  while IFS= read -r -d '' p; do
+    _tree_excluded "$p" || tpaths+=("$p")
+  done < <(
+    if [ "$head" = unborn ]; then
+      git --no-optional-locks ls-files -z
+    else
+      git --no-optional-locks diff --name-only -z --no-renames HEAD --
+    fi | LC_ALL=C sort -z
+  )
+  # Untracked side: --exclude-standard is what makes .gitignore the exclusion set.
+  while IFS= read -r -d '' p; do
+    _tree_excluded "$p" || upaths+=("$p")
+  done < <(git --no-optional-locks ls-files --others --exclude-standard -z | LC_ALL=C sort -z)
+
+  # Oversized UNTRACKED files (one batched find, never a fork per file).
+  local -a bigpaths=()
+  if [ "${#upaths[@]}" -gt 0 ]; then
+    # `xargs -0 find …` would append the paths AFTER the expression (find requires them
+    # BEFORE it), so the paths are placed explicitly via `sh -c … "$@"`.
+    while IFS= read -r -d '' p; do bigpaths+=("$p"); done < <(
+      printf '%s\0' "${upaths[@]}" \
+        | TREE_CAP="$TREE_HASH_CAP_BYTES" xargs -0 \
+            sh -c 'find -H "$@" -size "+${TREE_CAP}c" -type f -print0 2>/dev/null' sh
+    )
+  fi
+
+  local -a tags=() vals=() modes=() paths=() batch=()
+  local fallbacks=0 tag mode value h
+  local -a src=()
+  for tag in T U; do
+    if [ "$tag" = T ]; then src=(${tpaths[@]+"${tpaths[@]}"}); else src=(${upaths[@]+"${upaths[@]}"}); fi
+    for p in ${src[@]+"${src[@]}"}; do
+      if [ -L "$p" ]; then
+        # A symlink's git blob IS its target; never follow it (a dangling link would
+        # abort the whole hash-object batch).
+        mode=120000; value="LINK:$(readlink "$p" 2>/dev/null || echo '?')"
+      elif [ -f "$p" ]; then
+        if [ -x "$p" ]; then mode=100755; else mode=100644; fi
+        if [ "${#bigpaths[@]}" -gt 0 ] && [ "$tag" = U ] && _tree_in_list "$p" "${bigpaths[@]}"; then
+          value="SIZE:$(wc -c < "$p" 2>/dev/null | tr -d ' '):MTIME:$(_tree_mtime "$p")"
+          fallbacks=$(( fallbacks + 1 ))
+        else
+          case "$p" in
+            *"$nl"*)
+              # --stdin-paths is newline-delimited, so a path containing a newline is
+              # hashed on its own rather than corrupting the batch.
+              value=$(git --no-optional-locks hash-object --no-filters -- "$p" 2>/dev/null) || value=""
+              [ -n "$value" ] || value="UNHASHABLE" ;;
+            *) value="@H@"; batch+=("$p") ;;
+          esac
+        fi
+      elif [ -e "$p" ]; then
+        mode=none; value=NONFILE          # directory / submodule / fifo
+      else
+        mode=none; value=DELETED
+      fi
+      tags+=("$tag"); vals+=("$value"); modes+=("$mode"); paths+=("$p")
+    done
+  done
+
+  # ONE batched `git hash-object --stdin-paths` (no -w) for every ordinary file.
+  local -a hashes=()
+  if [ "${#batch[@]}" -gt 0 ]; then
+    printf '%s\n' "${batch[@]}" \
+      | git --no-optional-locks hash-object --no-filters --stdin-paths > "$out.hashes" 2>/dev/null
+    while IFS= read -r h; do hashes+=("$h"); done < "$out.hashes"
+    rm -f "$out.hashes" 2>/dev/null || true
+    if [ "${#hashes[@]}" -ne "${#batch[@]}" ]; then
+      # The batch aborted (unreadable file, …). Re-hash per file rather than emit a
+      # SHORT manifest — a short manifest could mask a mutation.
+      hashes=()
+      for p in "${batch[@]}"; do
+        h=$(git --no-optional-locks hash-object --no-filters -- "$p" 2>/dev/null) || h=""
+        [ -n "$h" ] || h="UNHASHABLE"
+        hashes+=("$h")
+      done
+    fi
+  fi
+
+  local i k=0 esc
+  {
+    printf 'H\t%s\0' "$head"
+    printf 'H\t%s\n' "$head" >&3
+    for (( i = 0; i < ${#paths[@]}; i++ )); do
+      value="${vals[$i]}"
+      if [ "$value" = "@H@" ]; then value="${hashes[$k]}"; k=$(( k + 1 )); fi
+      printf '%s\t%s\t%s\t%s\0' "${tags[$i]}" "$value" "${modes[$i]}" "${paths[$i]}"
+      esc=${paths[$i]//$nl/\\n}
+      printf '%s\t%s\t%s\t%s\n' "${tags[$i]}" "$value" "${modes[$i]}" "$esc" >&3
+    done
+  } > "$out" 3> "$out.report"
+
+  [ "${#paths[@]}" -gt 0 ] && dirty=yes
+  printf '%s\t%s\t%s\t%s\n' "$head" "$dirty" "$(_tree_digest_file "$out")" "$fallbacks"
+}
+
+# _tree_mtime <path> -> mtime (ns where the platform's stat offers it, else seconds).
+TREE_STAT_FLAVOR=""
+_tree_mtime() {
+  if [ -z "$TREE_STAT_FLAVOR" ]; then
+    if stat -c %Y . >/dev/null 2>&1; then TREE_STAT_FLAVOR=gnu
+    elif stat -f %m . >/dev/null 2>&1; then TREE_STAT_FLAVOR=bsd
+    else TREE_STAT_FLAVOR=none; fi
+  fi
+  case "$TREE_STAT_FLAVOR" in
+    gnu) stat -c '%.9Y' -- "$1" 2>/dev/null || echo unknown ;;
+    bsd) stat -f '%m' -- "$1" 2>/dev/null || echo unknown ;;
+    *)   echo unknown ;;
+  esac
+}
+
+# _tree_cap_stamp: stamp `tree-hash-cap:` when the knob is non-default OR the
+# size+mtime fallback was actually used (so a weakened capture is never invisible).
+_tree_cap_stamp() {
+  if [ "$TREE_HASH_CAP_BYTES" != "$TREE_HASH_CAP_DEFAULT" ] || [ "${TREE_CAP_FALLBACKS:-0}" -gt 0 ]; then
+    TREE_HASH_CAP_LINE="tree-hash-cap: $TREE_HASH_CAP_BYTES bytes (${TREE_CAP_FALLBACKS:-0} untracked file(s) recorded by size+mtime)"
+  fi
+}
+
+# _tree_capture_start: the ONE start capture. Runs after summary-path resolution and
+# BEFORE the startup sentinel, run_lite, run_delta and acquire_gate_slot, so every
+# guarded mode is covered by a single capture.
+_tree_capture_start() {
+  local id
+  if ! id=$(_tree_identity "$LOG_DIR/tree-identity.start"); then
+    TREE_GUARDED=0
+    TREE_START_LINE="tree-start: (capture unavailable — no git worktree)"
+    TREE_END_LINE="tree-end: (capture unavailable — no git worktree)"
+    TREE_INTEGRITY_LINE="tree-integrity: SKIP (capture unavailable — no git worktree)"
+    return 0
+  fi
+  IFS=$'\t' read -r TREE_START_HEAD TREE_START_DIRTY TREE_START_DIGEST TREE_CAP_FALLBACKS <<<"$id"
+  TREE_GUARDED=1
+  TREE_START_LINE="tree-start: $(_tree_short "$TREE_START_HEAD") dirty: $TREE_START_DIRTY digest: $(_tree_short "$TREE_START_DIGEST")"
+  TREE_END_LINE="tree-end: (not captured)"
+  TREE_INTEGRITY_LINE="tree-integrity: PENDING"
+  _tree_cap_stamp
+}
+
+# Synthetic-identity modes: they never certify a real tree and several need to emit a
+# block with NO git state at all. They stamp the `selftest` identity so the block SHAPE
+# stays uniform. (--list and --python-build-verify exit before LOG_DIR even exists.)
+if [ "$SELFTEST" -eq 1 ] || [ "$LITE_AGG_SELFTEST" -eq 1 ] || [ -n "${CQLITE_GATE_STUB_RUNDIR:-}" ]; then
+  TREE_START_LINE="tree-start: selftest dirty: no digest: selftest"
+  TREE_END_LINE="tree-end: selftest dirty: no digest: selftest"
+  TREE_INTEGRITY_LINE="tree-integrity: PASS (selftest)"
+else
+  _tree_capture_start
+fi
+
 # Startup invalidation (#1175 roborev finding 2): a stale .agent-gate-summary.txt
 # from a PREVIOUS run must never survive into THIS run. If the current run exits
 # early (dataset preflight fail, any pre-emit `exit 1`) or can't write later, a
@@ -1762,6 +2069,11 @@ if {
   echo "run-id: $RUN_ID"
   [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
   [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
+  # #2926: the sentinel carries `tree-start:` (and NO `tree-end:` — there is no end
+  # yet), so even a gate that is killed mid-run leaves an artifact recording the tree
+  # it BEGAN on. Its terminal line stays exactly `RESULT: INCOMPLETE (gate did not
+  # finish)` — the #2908 liveness placeholder is unchanged.
+  echo "$TREE_START_LINE"
   echo "RESULT: INCOMPLETE (gate did not finish)"
   echo "$SUMMARY_END_MARKER"
 } > "$SUMMARY_FILE" 2>/dev/null; then
@@ -1949,8 +2261,20 @@ _integrity_fail_block() {
   # ${@+"$@"} not "$@": under `set -u` on bash < 4.4 (macOS /bin/bash 3.2, which this script
   # supports) an empty "$@" is treated as unbound and aborts — the MAIN-lane call passes zero meta
   # (job-2108 MED). ${@+"$@"} expands to nothing when empty, to the quoted args otherwise.
+  #
+  # #2926: this block is assembled INDEPENDENTLY of emit_summary (it is the no-clobber
+  # publish path), so it must thread the tree-provenance lines itself — otherwise a
+  # mutated-AND-clobbered run would emit a block missing them. Incoming `tree-*` meta
+  # lines are dropped and re-emitted from the live globals below, so exactly ONE
+  # authoritative set appears no matter which caller supplied the meta.
   local line
-  for line in ${@+"$@"}; do echo "$line"; done
+  for line in ${@+"$@"}; do
+    case "$line" in
+      tree-start:*|tree-end:*|tree-integrity:*|tree-hash-cap:*) continue ;;
+    esac
+    echo "$line"
+  done
+  _tree_meta_lines
   echo "logs: $LOG_DIR"
   echo "summary-file: $SUMMARY_FILE (NOT rewritten — live peer owns it)"
   echo "integrity-fail-sibling: $sibling"
@@ -2092,6 +2416,223 @@ _emit_terminal_summary() {
   emit_summary "$result" "$@"
 }
 
+# ---------------------------------------------------------------------------
+# #2926 tree-integrity verification (start capture lives above the startup sentinel).
+# ---------------------------------------------------------------------------
+
+# _tree_changed_paths <a.report> <b.report>: the paths whose manifest RECORD differs
+# between the two captures (content, mode, presence), one per line. Sort temporaries
+# are derived from <b> (which is per-lane unique) so concurrent SIDE-lane callers
+# sharing the start report can never race each other.
+_tree_changed_paths() {
+  local a="$1" b="$2"
+  LC_ALL=C sort "$a" > "$b.cmp-a" 2>/dev/null || return 0
+  LC_ALL=C sort "$b" > "$b.cmp-b" 2>/dev/null || return 0
+  LC_ALL=C comm -3 "$b.cmp-a" "$b.cmp-b" 2>/dev/null \
+    | sed 's/^\t//' \
+    | awk -F'\t' 'NF >= 4 && $4 != "" { print $4 }' \
+    | LC_ALL=C sort -u
+  rm -f "$b.cmp-a" "$b.cmp-b" 2>/dev/null || true
+}
+
+# _tree_change_class <a.report> <b.report> <head-a> <head-b>
+#   -> "<class><TAB><rendered detail>", class ∈ lockfile | other
+#
+# `Cargo.lock` is a NAMED NON-FATAL CLASS, not an exclusion: the gate runs cargo
+# WITHOUT --locked/--frozen, so the first cargo component may legitimately re-resolve
+# a stale lockfile — a tracked-file mutation caused by the gate itself. A lockfile-ONLY
+# difference is stamped `lockfile-settled` and proceeds; a lockfile accompanied by ANY
+# other change is a full mutation FAIL. Follow-up #2962 adds --locked to the gate's
+# cargo invocations, after which this carve-out SHOULD BE DELETED.
+_tree_change_class() {
+  local a="$1" b="$2" head_a="$3" head_b="$4"
+  local list n cls=other rendered p lock="" nonlock=0 before after
+  list=$(_tree_changed_paths "$a" "$b")
+  n=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    n=$(( n + 1 ))
+    case "$p" in
+      Cargo.lock|*/Cargo.lock) [ -n "$lock" ] || lock="$p" ;;
+      *) nonlock=1 ;;
+    esac
+  done <<<"$list"
+  if [ "$head_a" = "$head_b" ] && [ "$n" -gt 0 ] && [ "$nonlock" -eq 0 ] && [ -n "$lock" ]; then
+    before=$(awk -F'\t' -v p="$lock" '$4 == p { print $2; exit }' "$a" 2>/dev/null)
+    after=$(awk -F'\t' -v p="$lock" '$4 == p { print $2; exit }' "$b" 2>/dev/null)
+    printf 'lockfile\t%s %s→%s\n' "$lock" \
+      "$(_tree_short "${before:-unmodified}")" "$(_tree_short "${after:-unmodified}")"
+    return 0
+  fi
+  # Render at most 5 paths, then an explicit count of the remainder.
+  rendered=""
+  local shown=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ "$shown" -lt 5 ]; then
+      rendered="${rendered:+$rendered }$p"
+      shown=$(( shown + 1 ))
+    fi
+  done <<<"$list"
+  [ "$n" -gt "$shown" ] && rendered="$rendered (+$(( n - shown )) more)"
+  [ -n "$rendered" ] || rendered="(head only — no in-scope path differs)"
+  printf '%s\t%s\n' "$cls" "$rendered"
+}
+
+# _tree_set_end <head> <dirty> <digest>: record the latest observed identity.
+_tree_set_end() {
+  TREE_END_HEAD="$1"; TREE_END_DIRTY="$2"; TREE_END_DIGEST="$3"
+  TREE_END_LINE="tree-end: $(_tree_short "$1") dirty: $2 digest: $(_tree_short "$3")"
+}
+
+# _tree_fail_reason <head-b> <rendered-paths> — the NAMED failure text. It deliberately
+# contains no `RESULT:` token, so #2908's poll predicates (`grep -q 'RESULT:'` and the
+# corrected `grep -qE 'RESULT: (PASS|FAIL)'`) behave exactly as they do today.
+_tree_fail_reason() {
+  printf 'tree-mutated-midrun; head %s→%s; changed: %s' \
+    "$(_tree_short "$TREE_START_HEAD")" "$(_tree_short "$1")" "$2"
+}
+
+# _assert_tree_integrity <component> — the component-boundary check, called from the
+# `record_result` chokepoint right after _assert_summary_integrity (summary-integrity
+# = who owns the artifact, evaluated first; tree-integrity = what the artifact
+# describes). LANE-AWARE, exactly like #2874: on the MAIN foreground lane a mismatch
+# stops the run NOW with the named block (saving the rest of an hour-long gate); inside
+# a BACKGROUNDED SIDE-lane subshell it must NEVER emit_summary/exit (that would only
+# kill the subshell and leave the detection to be overwritten by a later PASS), so it
+# appends to a marker file that the post-drain _apply_tree_integrity_marker converts
+# into OVERALL=FAIL plus the named terminal line.
+_assert_tree_integrity() {
+  [ "$TREE_GUARDED" -eq 1 ] || return 0
+  local comp="${1:-<component>}"
+  local probe="$LOG_DIR/tree-identity.probe.${BASHPID:-$$}"
+  local id head dirty digest fb cls rendered reason
+  id=$(_tree_identity "$probe") || return 0
+  IFS=$'\t' read -r head dirty digest fb <<<"$id"
+  if [ "$digest" = "$TREE_START_DIGEST" ]; then
+    rm -f "$probe" "$probe.report" 2>/dev/null || true
+    return 0
+  fi
+  IFS=$'\t' read -r cls rendered <<<"$(
+    _tree_change_class "$LOG_DIR/tree-identity.start.report" "$probe.report" "$TREE_START_HEAD" "$head")"
+  rm -f "$probe" "$probe.report" 2>/dev/null || true
+  # lockfile-settled: non-fatal here; the terminal capture stamps it.
+  [ "$cls" = lockfile ] && return 0
+  reason=$(_tree_fail_reason "$head" "$rendered")
+  if [ "${BASHPID:-$$}" != "$$" ]; then
+    # APPEND (never truncate): two concurrent SIDE-lane detections must not corrupt
+    # each other, and the reader consumes only the FIRST complete line.
+    printf '%s\t%s\n' "$comp" "$reason" >> "$LOG_DIR/tree-integrity.fail" 2>/dev/null || true
+    echo "⚠️ agent-gate: tree-integrity FAIL after [$comp] ($reason) — recorded for post-drain fail-close (#2926)" >&2
+    return 1
+  fi
+  echo "⚠️ agent-gate: tree-integrity FAIL after [$comp] ($reason) (#2926)" >&2
+  # MAIN foreground lane: tear the still-live SIDE-lane sub-pool down BEFORE exiting so
+  # this mid-lane exit does not orphan its cargo builds against the shared target dir
+  # (same teardown _assert_summary_integrity performs).
+  if [ -n "${SIDE_LANE_PID:-}" ]; then
+    echo "agent-gate: killing live SIDE-lane sub-pool (pid $SIDE_LANE_PID) before tree-integrity exit (#2926)" >&2
+    pkill -P "$SIDE_LANE_PID" 2>/dev/null || true
+    kill "$SIDE_LANE_PID" 2>/dev/null || true
+    wait "$SIDE_LANE_PID" 2>/dev/null || true
+  fi
+  TREE_MUTATED=1
+  OVERALL=FAIL
+  _tree_set_end "$head" "$dirty" "$digest"
+  TREE_INTEGRITY_LINE="tree-integrity: FAIL ($reason; detected-after-component: $comp)"
+  _emit_terminal_summary FAIL \
+    "$TREE_START_LINE" "$TREE_END_LINE" "$TREE_INTEGRITY_LINE" \
+    "detected-after-component: $comp" || true
+  exit 1
+}
+
+# _apply_tree_integrity_marker: consume a SIDE-lane marker after the lanes drain (before
+# the terminal emit) → OVERALL=FAIL + the named terminal line, so a SIDE-lane detection
+# is NEVER lost to a false-green. No-op when no marker exists; idempotent.
+_apply_tree_integrity_marker() {
+  [ -f "$LOG_DIR/tree-integrity.fail" ] || return 0
+  [ "$TREE_MARKER_SEEN" -eq 1 ] && return 0
+  local m comp reason
+  m=$(head -n1 "$LOG_DIR/tree-integrity.fail" 2>/dev/null)
+  comp=${m%%$'\t'*}; reason=${m#*$'\t'}
+  TREE_MARKER_SEEN=1
+  TREE_MUTATED=1
+  OVERALL=FAIL
+  TREE_INTEGRITY_LINE="tree-integrity: FAIL ($reason; detected-after-component: $comp)"
+  echo "agent-gate: tree-integrity FAIL recorded by a SIDE-lane component '$comp' ($reason) (#2926)" >&2
+  return 0
+}
+
+# _tree_finalize: the TERMINAL capture — the authoritative check, run immediately
+# before every terminal emit (full, --lite, --delta, --only). A mutation landing after
+# the LAST component boundary is still caught here; this is the one check that can
+# never be skipped. Forces OVERALL=FAIL on detection (so `--only` reports FAIL rather
+# than PARTIAL, and every mode's exit status follows). rc 1 iff mutated.
+_tree_finalize() {
+  _apply_tree_integrity_marker
+  [ "$TREE_GUARDED" -eq 1 ] || return 0
+  local id head dirty digest fb cls rendered
+  if ! id=$(_tree_identity "$LOG_DIR/tree-identity.end"); then
+    TREE_MUTATED=1
+    OVERALL=FAIL
+    TREE_END_LINE="tree-end: (terminal capture failed)"
+    TREE_END_DIGEST="unavailable"
+    TREE_INTEGRITY_LINE="tree-integrity: FAIL (terminal capture failed — the tree cannot be proven unchanged)"
+    return 1
+  fi
+  IFS=$'\t' read -r head dirty digest fb <<<"$id"
+  _tree_set_end "$head" "$dirty" "$digest"
+  TREE_CAP_FALLBACKS=$(( TREE_CAP_FALLBACKS + fb ))
+  _tree_cap_stamp
+  # A SIDE-lane marker already named the component; keep its more specific line even if
+  # the tree was reverted before the terminal capture.
+  [ "$TREE_MARKER_SEEN" -eq 1 ] && return 1
+  if [ "$digest" = "$TREE_START_DIGEST" ]; then
+    TREE_INTEGRITY_LINE="tree-integrity: PASS"
+    return 0
+  fi
+  IFS=$'\t' read -r cls rendered <<<"$(
+    _tree_change_class "$LOG_DIR/tree-identity.start.report" "$LOG_DIR/tree-identity.end.report" \
+      "$TREE_START_HEAD" "$head")"
+  if [ "$cls" = lockfile ]; then
+    TREE_INTEGRITY_LINE="tree-integrity: PASS (lockfile-settled: $rendered)"
+    return 0
+  fi
+  TREE_MUTATED=1
+  OVERALL=FAIL
+  TREE_INTEGRITY_LINE="tree-integrity: FAIL ($(_tree_fail_reason "$head" "$rendered"); detected-after-component: <terminal>)"
+  return 1
+}
+
+# _tree_meta_lines: the provenance lines every SUMMARY block carries. Lazily performs
+# the terminal capture if a caller reached an emit without one, so NO emission path can
+# publish a block whose `tree-end:` was never taken.
+_tree_meta_lines() {
+  if [ "$TREE_GUARDED" -eq 1 ] && [ -z "$TREE_END_DIGEST" ]; then
+    _tree_finalize
+  fi
+  printf '%s\n' "$TREE_START_LINE"
+  printf '%s\n' "$TREE_END_LINE"
+  printf '%s\n' "$TREE_INTEGRITY_LINE"
+  [ -n "$TREE_HASH_CAP_LINE" ] && printf '%s\n' "$TREE_HASH_CAP_LINE"
+  return 0
+}
+
+# _tree_meta_array: populate the global TREE_META_LINES array (bash 3.2 has no
+# namerefs), for the emit sites that build a SUMMARY_META array.
+_tree_meta_array() {
+  TREE_META_LINES=()
+  local l
+  while IFS= read -r l; do TREE_META_LINES+=("$l"); done < <(_tree_meta_lines)
+}
+
+# _tree_result <proposed-result>: FAIL overrides any other verdict once a mid-run
+# mutation is detected. A mutation is a VERDICT, never a liveness state — it is never
+# reported as INCOMPLETE, and never as PARTIAL or REFUSED.
+_tree_result() {
+  if [ "$TREE_MUTATED" -eq 1 ]; then printf 'FAIL\n'; else printf '%s\n' "$1"; fi
+}
+
 # gate_push_signal <result> <branch> <short-sha> <fail-components> (#2667)
 #
 # Fire ONE advisory push at final-SUMMARY time so a backgrounded FULL gate
@@ -2132,6 +2673,10 @@ if [ "$SELFTEST" -eq 1 ]; then
     "ci-pins: (selftest)"
     "$(accelerators_line)"
     "$(cpu_budget_line)"
+    # #2926: synthetic tree identity — the block SHAPE stays uniform with no git state.
+    "$TREE_START_LINE"
+    "$TREE_END_LINE"
+    "$TREE_INTEGRITY_LINE"
   )
   for i in "${!NAMES[@]}"; do
     meta+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
@@ -2253,7 +2798,82 @@ record_result() { # <name> <status> <seconds>
   # #2874: every component records its verdict through here, so this is the natural
   # component-boundary chokepoint for the mid-run summary-integrity guard.
   _assert_summary_integrity "$1"
+  # #2926: …and for the mid-run tree-mutation guard. Ordering is deliberate:
+  # summary-integrity (who owns the artifact) first, then tree-integrity (what the
+  # artifact describes). If both fire, both named lines appear and RESULT is FAIL once.
+  _assert_tree_integrity "$1"
 }
+
+# #2926 hidden self-test hooks: exercise the tree-integrity guard deterministically —
+# no cargo, no sleep, no timing race. The START capture already happened (above the
+# startup sentinel), so a mutation performed HERE is genuinely mid-run. The caller pins
+# AGENT_GATE_SUMMARY_FILE to a throwaway path in a fake checkout (see
+# scripts/tests/test_agent_gate_tree_integrity.sh). Modes (AGENT_GATE_TREE_SELFTEST):
+#   capture  — print THIS run's start identity (head/dirty/digest/fallbacks) and exit 0,
+#              optionally copying the manifest to AGENT_GATE_TREE_SELFTEST_MANIFEST_OUT.
+#              Drives the REAL _tree_identity, so digest-sensitivity cases (porcelain-
+#              identical append, mode flip, deletion, untracked lifecycle) assert on the
+#              production capture, not on a test double.
+#   clean    — NO mutation: a boundary check + terminal finalize + terminal emit. The
+#              control that proves the guard is not hardwired to FAIL.
+#   boundary — mutate, then record_result on the MAIN lane: must emit the named FAIL
+#              block and exit non-zero.
+#   side     — mutate, then run the boundary check inside a SUBSHELL (SIDE lane): it must
+#              record a marker and return non-zero WITHOUT emitting/exiting; the
+#              post-drain apply + terminal emit must then publish the named FAIL.
+#   terminal — mutate AFTER the last boundary, then finalize + emit: still FAIL.
+# AGENT_GATE_TREE_SELFTEST_MUTATE is a space-separated list of repo-relative files to
+# append to; AGENT_GATE_TREE_SELFTEST_COMMIT=1 additionally commits (moving HEAD).
+if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
+  _tree_selftest_mutate() {
+    local f
+    for f in ${AGENT_GATE_TREE_SELFTEST_MUTATE:-}; do
+      printf 'tree-selftest mutation\n' >> "$REPO_ROOT/$f"
+    done
+    if [ "${AGENT_GATE_TREE_SELFTEST_COMMIT:-0}" = 1 ]; then
+      git -C "$REPO_ROOT" commit -aqm "tree-selftest mid-run commit" >/dev/null 2>&1 || true
+    fi
+  }
+  case "$AGENT_GATE_TREE_SELFTEST" in
+    capture)
+      if [ -n "${AGENT_GATE_TREE_SELFTEST_MANIFEST_OUT:-}" ]; then
+        cp "$LOG_DIR/tree-identity.start" "$AGENT_GATE_TREE_SELFTEST_MANIFEST_OUT" 2>/dev/null || true
+      fi
+      printf 'tree-selftest: guarded=%s head=%s dirty=%s digest=%s fallbacks=%s\n' \
+        "$TREE_GUARDED" "$TREE_START_HEAD" "$TREE_START_DIRTY" "$TREE_START_DIGEST" "$TREE_CAP_FALLBACKS"
+      printf 'tree-selftest: start-line=%s\n' "$TREE_START_LINE"
+      printf 'tree-selftest: cap-line=%s\n' "${TREE_HASH_CAP_LINE:-<none>}"
+      exit 0 ;;
+    clean|boundary|terminal)
+      [ "$AGENT_GATE_TREE_SELFTEST" = clean ] || _tree_selftest_mutate
+      if [ "$AGENT_GATE_TREE_SELFTEST" != terminal ]; then
+        record_result "tree-selftest" PASS 0     # MAIN lane: may emit + exit 1
+      fi
+      _tree_finalize || true
+      _tree_meta_array
+      _emit_terminal_summary "$(_tree_result "$OVERALL")" \
+        "commit: selftest branch: selftest dirty: no" "${TREE_META_LINES[@]}" || true
+      printf 'tree-selftest: mode=%s overall=%s mutated=%s\n' \
+        "$AGENT_GATE_TREE_SELFTEST" "$OVERALL" "$TREE_MUTATED"
+      case "$OVERALL" in PASS) exit 0 ;; *) exit 1 ;; esac ;;
+    side)
+      _tree_selftest_mutate
+      ( _assert_tree_integrity "side-selftest" ); _tree_side_rc=$?
+      printf 'tree-selftest: side-rc=%s marker=%s\n' "$_tree_side_rc" \
+        "$([ -f "$LOG_DIR/tree-integrity.fail" ] && echo yes || echo no)"
+      # The subshell must NOT have emitted a terminal block: the summary file still holds
+      # our INCOMPLETE sentinel at this point.
+      printf 'tree-selftest: sentinel-intact=%s\n' \
+        "$(grep -q 'RESULT: INCOMPLETE' "$SUMMARY_FILE" 2>/dev/null && echo yes || echo no)"
+      _apply_tree_integrity_marker
+      _tree_finalize || true
+      _tree_meta_array
+      _emit_terminal_summary "$(_tree_result "$OVERALL")" \
+        "commit: selftest branch: selftest dirty: no" "${TREE_META_LINES[@]}" || true
+      printf 'tree-selftest: mode=side overall=%s mutated=%s\n' "$OVERALL" "$TREE_MUTATED"
+      case "$OVERALL" in PASS) exit 0 ;; *) exit 1 ;; esac ;;
+  esac
+fi
 
 # run_clippy: the `clippy` component's command (issue #1844). By default it runs a
 # SCOPED per-package clippy that lints the whole workspace with -D warnings WITHOUT
@@ -3197,6 +3817,23 @@ run_tooling_tests() {
     return 0
   fi
 
+  # mid-run tree-mutation guard self-test (#2926): no python3/cargo needed, always runs
+  # (hermetic — fake checkouts under one per-run mktemp, a stub `cargo`, no compile).
+  # Proves a gate whose worktree mutates mid-run cannot certify (MAIN lane, SIDE lane,
+  # terminal, --only/--lite/--delta) AND that an unmutated run still does — the two
+  # halves are the discrimination proof. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_tree_integrity.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_integrity.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (tree-integrity self-test #2926); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
@@ -3699,6 +4336,12 @@ run_lite() {
   # FAIL was invisible in the block and left OVERALL=PASS → a false-green lite report.
   aggregate_lite_components
 
+  # #2926: --lite is MORE scope-sensitive than the full gate, not less — run_scoped_tests
+  # derives its blast radius from `git diff` read MID-RUN, and --lite is the mode that
+  # runs during the fix rounds (exactly when a second writer is editing). Terminal
+  # capture here; forces OVERALL=FAIL on a mid-run mutation.
+  _tree_finalize || true
+
   declare -a SUMMARY_META=()
   SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
   SUMMARY_META+=("lite-scope: file-size fmt clippy roborev-lints scoped-tests (full gate NOT run — run it once before merge)")
@@ -3708,6 +4351,8 @@ run_lite() {
   [ -n "$PYTHON_TIER_NOTE" ] && SUMMARY_META+=("$PYTHON_TIER_NOTE")
   SUMMARY_META+=("$(accelerators_line)")
   SUMMARY_META+=("$(cpu_budget_line)")
+  _tree_meta_array   # #2926
+  SUMMARY_META+=("${TREE_META_LINES[@]}")
   local i
   for i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
@@ -3939,10 +4584,13 @@ run_delta() {
     echo "    (bindings/node/__test__/), and shell self-tests (scripts/tests/*.sh). A .rs" >&2
     echo "    that is not a --test target (nested helper mods, src *_test(s).rs," >&2
     echo "    scripts/*.rs, the excluded fuzz/ crate) and any other file require the full gate." >&2
-    emit_summary REFUSED \
+    _tree_finalize || true   # #2926
+    _tree_meta_array
+    emit_summary "$(_tree_result REFUSED)" \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
       "$(accelerators_line)" \
+      "${TREE_META_LINES[@]}" \
       "${file_meta[@]}" \
       "refusal: $n_offending file(s) --delta cannot re-certify — a full gate is required (--delta executes only rust files that ARE a Cargo --test target [authoritative, not glob-based], bindings/python/tests, *.md docs, bindings/node/__test__/ jest tests, and scripts/tests/*.sh; everything else needs the full gate)"
     [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
@@ -3961,10 +4609,13 @@ run_delta() {
     echo "--- [delta] REFUSED: bindings/node/__test__/* changed but the node native module is not built (or node/npm unavailable)." >&2
     echo "    --delta never builds with cargo; build it first (cd bindings/node && npm run build)" >&2
     echo "    or run a fresh FULL gate: scripts/agent-gate.sh" >&2
-    emit_summary REFUSED \
+    _tree_finalize || true   # #2926
+    _tree_meta_array
+    emit_summary "$(_tree_result REFUSED)" \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN — refused before execution)" \
       "$(accelerators_line)" \
+      "${TREE_META_LINES[@]}" \
       "${file_meta[@]}" \
       "refusal: node bindings/node/__test__/* changed but the native module is not built (--delta never builds with cargo) — run 'cd bindings/node && npm run build' or a full gate (scripts/agent-gate.sh)"
     [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
@@ -4033,20 +4684,29 @@ run_delta() {
     echo "--- [delta] REFUSED: bindings/python/tests/* changed but the python tier did NOT run (${PYTHON_TIER_NOTE:-python-tier: not run})." >&2
     echo "    --delta cannot re-certify changed bindings/python/tests/* files without the python tier;" >&2
     echo "    a fresh FULL gate is required: scripts/agent-gate.sh" >&2
+    _tree_finalize || true   # #2926
     declare -a SUMMARY_META=()
     SUMMARY_META+=("${anchor_meta[@]}")
     SUMMARY_META+=("delta-scope: file-size fmt scoped-tests (python tier REQUIRED but did NOT run — re-cert incomplete)")
     SUMMARY_META+=("${PYTHON_TIER_NOTE:-python-tier: NOT RUN — python-binding tests NOT validated by this delta run}")
     SUMMARY_META+=("$(accelerators_line)")
+    _tree_meta_array
+    SUMMARY_META+=("${TREE_META_LINES[@]}")
     SUMMARY_META+=("${file_meta[@]}")
     for i in "${!DN[@]}"; do
       SUMMARY_META+=("$(printf '%-18s %s (%s)' "${DN[$i]}:" "${DS[$i]}" "${DT[$i]}")")
     done
     SUMMARY_META+=("refusal: python tier skipped — cannot re-certify changed bindings/python/tests/* files; run the full gate (scripts/agent-gate.sh)")
-    emit_summary REFUSED "${SUMMARY_META[@]}"
+    emit_summary "$(_tree_result REFUSED)" "${SUMMARY_META[@]}"
     [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
     exit 1
   fi
+
+  # #2926: terminal capture before the block is built. --delta's entire premise is that
+  # `anchor..HEAD` is test/docs-only, classified from git MID-RUN — if the tree moves
+  # after that classification, the set that was classified is not the set that was
+  # executed and the fail-closed classification is void.
+  _tree_finalize || true
 
   declare -a SUMMARY_META=()
   SUMMARY_META+=("${anchor_meta[@]}")
@@ -4062,6 +4722,8 @@ run_delta() {
   [ -n "$PYTHON_TIER_NOTE" ] && SUMMARY_META+=("$PYTHON_TIER_NOTE")
   SUMMARY_META+=("$(accelerators_line)")
   SUMMARY_META+=("$(cpu_budget_line)")
+  _tree_meta_array   # #2926
+  SUMMARY_META+=("${TREE_META_LINES[@]}")
   SUMMARY_META+=("${file_meta[@]}")
   for i in "${!DN[@]}"; do
     SUMMARY_META+=("$(printf '%-18s %s (%s)' "${DN[$i]}:" "${DS[$i]}" "${DT[$i]}")")
@@ -4226,6 +4888,8 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   SUMMARY_META+=("lite-scope: file-size fmt clippy scoped-tests (aggregate selftest)")
   SUMMARY_META+=("$(accelerators_line)")
   SUMMARY_META+=("$(cpu_budget_line)")
+  # #2926: synthetic tree identity (no git state needed for the aggregation self-test).
+  SUMMARY_META+=("$TREE_START_LINE" "$TREE_END_LINE" "$TREE_INTEGRITY_LINE")
   for _i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$_i]}:" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
   done
@@ -4869,6 +5533,10 @@ fi
 # detected a mid-run clobber could not safely emit+exit) → force FAIL + a named
 # terminal line, so a SIDE-lane clobber is never silently lost to a false-green.
 _apply_integrity_marker
+# #2926: same post-drain contract for a SIDE-lane TREE-integrity marker (a backgrounded
+# component that detected a mid-run tree mutation could not safely emit+exit) → force
+# FAIL + a named terminal line, so a SIDE-lane detection is never lost to a false-green.
+_apply_tree_integrity_marker
 
 # Reconstruct the summary arrays from per-component result files (issue #1737):
 # the bounded pool ran components in backgrounded subshells that cannot write the
@@ -4883,6 +5551,12 @@ for _c in "${COMPONENTS[@]}"; do
   NAMES+=("$_c"); STATUSES+=("$_st"); TIMES+=("${_secs}s")
   [ "$_st" = FAIL ] && OVERALL=FAIL
 done
+
+# #2926: the TERMINAL tree capture — the authoritative check, taken AFTER the last
+# component boundary and BEFORE the block is built, so a mutation landing in that
+# window is still caught. Forces OVERALL=FAIL on detection (which also keeps a mutated
+# `--only` run from being promoted to PARTIAL below).
+_tree_finalize || true
 
 declare -a SUMMARY_META=()
 SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
@@ -4899,6 +5573,9 @@ SUMMARY_META+=("$(accelerators_line)")
 SUMMARY_META+=("$(cpu_budget_line)")
 # #2874: a SIDE-lane mid-run summary clobber surfaces as a named terminal line.
 [ -n "$SUMMARY_INTEGRITY_LINE" ] && SUMMARY_META+=("$SUMMARY_INTEGRITY_LINE")
+# #2926: tree provenance (tree-start / tree-end / tree-integrity [/ tree-hash-cap]).
+_tree_meta_array
+SUMMARY_META+=("${TREE_META_LINES[@]}")
 if [ -n "$ONLY" ]; then
   SUMMARY_META+=("mode: PARTIAL (--only $ONLY) - does NOT count as the gate")
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL
