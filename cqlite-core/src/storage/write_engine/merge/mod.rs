@@ -576,6 +576,27 @@ mod channel_depth;
 #[cfg(feature = "write-support")]
 mod egress_budget;
 
+/// Test/observability hook (issue #2765): the adaptive per-channel egress
+/// capacity a NEW merge would receive at `active_merges` concurrent merges —
+/// `clamp(EGRESS_ROW_BUDGET / active_merges, MIN_CAP, 256)`. Doc-hidden; lets an
+/// integration test derive an ADAPTIVE backpressure threshold instead of
+/// hard-coding the pre-#2765 fixed 256.
+#[cfg(feature = "write-support")]
+#[doc(hidden)]
+pub fn egress_channel_capacity_for(active_merges: usize) -> usize {
+    egress_budget::capacity_for(active_merges)
+}
+
+/// Test/observability hook (issue #2765): the live process-global count of
+/// in-flight k-way merges (the `cqlite.merge.active_merges` gauge value).
+/// Doc-hidden; used with [`egress_channel_capacity_for`] to compute the current
+/// adaptive per-channel capacity from an integration test.
+#[cfg(feature = "write-support")]
+#[doc(hidden)]
+pub fn active_merge_count() -> usize {
+    egress_budget::active_count()
+}
+
 // Issue #2361: join-on-drop / backpressured-teardown coverage for the streaming
 // merge adapter.
 #[cfg(all(test, feature = "write-support"))]

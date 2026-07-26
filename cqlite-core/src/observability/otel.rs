@@ -346,6 +346,8 @@ struct Instruments {
     flight_admission_waiting: Gauge<i64>,
     // Saturation instrumentation (#2419, WS2 of epic #2313).
     merge_egress_channel_depth: Gauge<i64>,
+    // Adaptive egress-budget concurrency gauge (#2765).
+    merge_active_merges: Gauge<i64>,
     proc_threads: Gauge<i64>,
     proc_fds: Gauge<i64>,
     proc_rss_bytes: Gauge<i64>,
@@ -683,6 +685,13 @@ fn instruments() -> &'static Instruments {
                 .with_unit(catalog::unit::ENTRIES)
                 .with_description("Live occupancy of the bounded merge egress sync_channel (#2419).")
                 .build(),
+            merge_active_merges: m
+                .i64_gauge(catalog::MERGE_ACTIVE_MERGES)
+                .with_unit(catalog::unit::MERGES)
+                .with_description(
+                    "Live concurrent k-way merges — divisor of the adaptive egress budget (#2765).",
+                )
+                .build(),
             proc_threads: m
                 .i64_gauge(catalog::PROC_THREADS)
                 .with_unit(catalog::unit::THREADS)
@@ -817,6 +826,7 @@ pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValu
         catalog::FLIGHT_ADMISSION_IN_USE => &i.flight_admission_in_use,
         catalog::FLIGHT_ADMISSION_WAITING => &i.flight_admission_waiting,
         catalog::MERGE_EGRESS_CHANNEL_DEPTH => &i.merge_egress_channel_depth,
+        catalog::MERGE_ACTIVE_MERGES => &i.merge_active_merges,
         catalog::PROC_THREADS => &i.proc_threads,
         catalog::PROC_FDS => &i.proc_fds,
         catalog::PROC_RSS_BYTES => &i.proc_rss_bytes,

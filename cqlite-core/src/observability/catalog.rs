@@ -557,8 +557,9 @@ pub const MERGE_ACTIVE_MERGES: &str = "cqlite.merge.active_merges";
 
 /// `cqlite.merge.egress_channel_depth` — gauge `{entry}` (issue #2419, WS2).
 ///
-/// Live occupancy of the bounded producer→consumer `sync_channel` (capacity
-/// `STREAMING_CHANNEL_CAPACITY` = 256, `merge/mod.rs`) that carries merged
+/// Live occupancy of the bounded producer→consumer `sync_channel` (capacity up
+/// to `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent
+/// merges — see [`MERGE_ACTIVE_MERGES`] / issue #2765, `merge/mod.rs`) that carries merged
 /// entries from each per-input producer thread toward the consumer (the k-way
 /// merge that feeds the Flight `do_get` egress or the write-engine compaction
 /// output). `std::sync::mpsc::sync_channel` exposes no `len()`, so occupancy is
@@ -964,6 +965,7 @@ pub const ALL_METRICS: &[&str] = &[
 /// without re-listing them by hand.
 pub const SATURATION_GAUGES: &[&str] = &[
     MERGE_EGRESS_CHANNEL_DEPTH,
+    MERGE_ACTIVE_MERGES,
     PROC_THREADS,
     PROC_FDS,
     PROC_RSS_BYTES,
@@ -1235,6 +1237,7 @@ mod tests {
         let otel_src = include_str!("otel.rs");
         for ident in [
             "MERGE_EGRESS_CHANNEL_DEPTH",
+            "MERGE_ACTIVE_MERGES",
             "PROC_THREADS",
             "PROC_FDS",
             "PROC_RSS_BYTES",

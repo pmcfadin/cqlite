@@ -636,7 +636,7 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         name: catalog::MERGE_EGRESS_CHANNEL_DEPTH,
         kind: MetricKind::Gauge,
         unit: catalog::unit::ENTRIES,
-        summary: "Live occupancy of the bounded merge egress sync_channel (cap 256) feeding do_get / compaction.",
+        summary: "Live occupancy of the bounded merge egress sync_channel (cap up to 256, adaptively reduced under concurrent merges — #2765) feeding do_get / compaction.",
         attributes: &[],
         interpretation: "Near zero = consumer keeping up (or a stalled producer); riding near capacity = producer outrunning a slower consumer (back-pressured egress).",
         round_item: "egress backpressure watch (#2419/#2399)",

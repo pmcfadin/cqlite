@@ -200,21 +200,27 @@ fn real_merger_drop_returns_its_active_merge_slot() {
     let paths = flush_n_sstables_sync(&mut engine, 1);
     let schema = create_test_schema();
 
-    let returned = (0..64).any(|_| {
+    // A CONCLUSIVE attempt requires BOTH halves in a quiet window: the build
+    // strictly incremented the count (`held > before` — teeth against a
+    // regression that stopped REGISTERING the slot) AND the drop returned it
+    // (`after <= before` — teeth against a missing DECREMENT). Ambient churn from
+    // a parallel test that breaks either half is simply not a quiet window, so
+    // that attempt is retried — it is NEVER treated as a free pass. A real leak
+    // keeps `after` permanently elevated, failing EVERY attempt.
+    let proven = (0..256).any(|_| {
         let before = egress_budget::active_count();
-        {
+        let held = {
             let _m = KWayMerger::new_cancellable(paths.clone(), &schema, ScanCancel::default())
                 .expect("merger builds");
-            // While alive the merger holds its slot (our +1, plus any ambient).
-            assert!(egress_budget::active_count() > before || before > 0);
-        }
-        // After drop our contribution is gone; in a quiet window the count is
-        // back at (or below) the pre-build baseline.
-        egress_budget::active_count() <= before
+            egress_budget::active_count()
+        };
+        let after = egress_budget::active_count();
+        held > before && after <= before
     });
     assert!(
-        returned,
-        "a real KWayMerger drop must return its active-merge slot (no leak)"
+        proven,
+        "a real KWayMerger must register its active-merge slot on build and \
+         return it on drop (no leak)"
     );
 }
 

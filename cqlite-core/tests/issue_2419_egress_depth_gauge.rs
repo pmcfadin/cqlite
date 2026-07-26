@@ -190,21 +190,33 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
 
     // Construct the merger WITHOUT stepping: `KWayMerger::new` does not seed its
     // heap ("populated on first step"), so every producer races ahead filling
-    // its own 256-entry channel and blocks on `send` once full — none received
-    // yet. Each producer's channel can hold at most STREAMING_CHANNEL_CAPACITY
-    // (256) successfully-sent-and-buffered entries (a blocked 257th send has NOT
-    // yet incremented the gauge), so the theoretical ceiling is
-    // `NUM_INPUTS * 256` — a much higher bound than the threshold below, which
-    // is deliberately conservative (a lower bound, never an exact target) to
-    // stay robust to producer-fill-rate timing.
+    // its OWN egress channel and blocks on `send` once full — none received yet.
+    // Issue #2765: that channel's capacity is now ADAPTIVE — up to 256, but
+    // `clamp(EGRESS_ROW_BUDGET / active_merges, MIN_CAP, 256)` under concurrent
+    // merges — so the theoretical ceiling is `NUM_INPUTS * per_channel_cap`, NOT
+    // a hard-coded `NUM_INPUTS * 256`. The threshold below is derived from the
+    // LIVE adaptive capacity (a conservative fraction of that ceiling, never an
+    // exact target) so a future concurrent merge in this binary shrinks the cap
+    // WITHOUT pushing the threshold out of reach (the pre-#2765 fixed-256
+    // assumption would 10s-timeout in that case).
     let merger = KWayMerger::new(inputs, &schema).expect("KWayMerger::new");
+
+    // Read the adaptive per-channel capacity this merger actually got. Reading
+    // AFTER construction only ever LOWERS the estimate (a concurrent merge would
+    // raise `active_merge_count`, shrinking `capacity_for`), so the derived
+    // threshold stays reachable — never above the true ceiling.
+    let per_channel_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
+        cqlite_core::storage::write_engine::merge::active_merge_count(),
+    );
 
     // MID-MERGE: poll (bounded, fail-loud) until the gauge POSITIVELY records a
     // reading proving multiple channels are genuinely backed up concurrently —
     // never inferred from an absent/stale window. If `channel_depth::sent()`
     // were removed from `forward_row`, this loop would exhaust its deadline and
-    // fail explicitly.
-    let backpressure_threshold = (NUM_INPUTS as f64) * 150.0;
+    // fail explicitly. Half the adaptive ceiling (`NUM_INPUTS * cap`) requires
+    // more than one full channel's worth (for NUM_INPUTS >= 2), so it still
+    // proves CONCURRENT multi-channel backpressure, adaptively.
+    let backpressure_threshold = (NUM_INPUTS as f64) * (per_channel_cap as f64) * 0.5;
     let mid_deadline = Instant::now() + Duration::from_secs(10);
     let mut mid_reached = false;
     let mut mid_last_seen: Option<f64> = None;

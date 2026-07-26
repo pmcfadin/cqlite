@@ -57,6 +57,14 @@
 //! as concurrency climbs, instead of every channel holding a fixed 256. Do NOT
 //! read this as a strict `≤ EGRESS_ROW_BUDGET` global bound.
 //!
+//! The snapshot is taken ONCE at construction and never revised, so it is
+//! order-dependent, not fair: a long-lived merge that starts during a burst
+//! stays PINNED at its low snapshot cap for its entire life, even after the
+//! burst clears and concurrency drops back to one. Conversely a merge that
+//! starts while the process is idle keeps the full 256 per channel even as later
+//! merges arriving during ITS lifetime are squeezed toward [`MIN_CAP`] — the
+//! throttle falls on the newcomers, not the incumbent.
+//!
 //! This budget is ORTHOGONAL to the #2419 `channel_depth` gauge: that gauge
 //! observes live occupancy; this bounds the per-channel capacity ceiling. Kept
 //! out of `merge/mod.rs` to bound that file.
@@ -104,8 +112,9 @@ fn record_active(active: usize) {
     );
 }
 
-/// Current live process-global active-merge count (test observation hook).
-#[cfg(test)]
+/// Current live process-global active-merge count (test/observability hook —
+/// mirrors the [`MERGE_ACTIVE_MERGES`](crate::observability::catalog::MERGE_ACTIVE_MERGES)
+/// gauge, exposed to integration tests via `merge::active_merge_count`).
 pub(super) fn active_count() -> usize {
     ACTIVE.load(Ordering::SeqCst)
 }
