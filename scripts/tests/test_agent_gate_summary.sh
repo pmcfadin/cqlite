@@ -779,13 +779,18 @@ fi
 #     to force the sccache accelerator state, AGENT_GATE_TEST_SCCACHE_ERRORS to
 #     force the error sum) so na/ok/warn assert deterministically without sccache
 #     installed and without PATH surgery.
+#     These three asserts match `sccache-health=<v>` as a FIELD (`( |$)` — the same
+#     idiom as assert_mold_token), never end-anchored on the value: further trailing
+#     accelerator tokens (` mold=` #2859, and any future one) must not break them
+#     (issue #2903). The value itself stays exact — `ok( |$)` cannot match `okay`,
+#     and the whole-line grammar is still asserted by assert_accelerators.
 #
 # 9c-i. sccache in use, ZERO error counters -> sccache-health=ok, NO corruption WARN.
 health_err="$tmp/health-ok.stderr"
 AGENT_GATE_SUMMARY_FILE="$tmp/health-ok.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$health_err"
-if grep -qE '^accelerators: .* sccache-health=ok$' "$tmp/health-ok.txt"; then
+if grep -qE '^accelerators: .* sccache-health=ok( |$)' "$tmp/health-ok.txt"; then
   ok "sccache-health: on + 0 errors -> sccache-health=ok"
 else
   bad "sccache-health: expected sccache-health=ok for on + 0 errors"
@@ -801,7 +806,7 @@ fi
 AGENT_GATE_SUMMARY_FILE="$tmp/health-warn.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=3 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/health-warn.stderr"
-if grep -qE '^accelerators: .* sccache-health=warn$' "$tmp/health-warn.txt"; then
+if grep -qE '^accelerators: .* sccache-health=warn( |$)' "$tmp/health-warn.txt"; then
   ok "sccache-health: on + >0 errors -> sccache-health=warn"
 else
   bad "sccache-health: expected sccache-health=warn for on + >0 errors"
@@ -829,7 +834,7 @@ fi
 AGENT_GATE_SUMMARY_FILE="$tmp/health-na.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=off \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/health-na.stderr"
-if grep -qE '^accelerators: .* sccache-health=na$' "$tmp/health-na.txt"; then
+if grep -qE '^accelerators: .* sccache-health=na( |$)' "$tmp/health-na.txt"; then
   ok "sccache-health: sccache not in use -> sccache-health=na"
 else
   bad "sccache-health: expected sccache-health=na when sccache not in use"
