@@ -39,20 +39,30 @@ use cqlite_core::storage::write_engine::{
     CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::Value;
+use cqlite_flight::obs::{
+    PHASE_STREAM_COLD_FAULT, PHASE_STREAM_DECOMPRESS, PHASE_STREAM_ENCODE, PHASE_STREAM_GRPC_WRITE,
+    PHASE_STREAM_MERGE,
+};
 use cqlite_flight::service::CqliteFlightService;
 
 mod fixture_support;
 
 const BIG_TAG: &str = "nb-1-big";
 const COMP_KS: &str = "test_comp";
+/// BTI (`da`) compressed corpus (issue #2819 B4): a `da` table routes the
+/// streaming read through the full-ring fallback, NOT the Summary-guided path.
+const BTI_TAG: &str = "da-2-bti";
+const DA_KS: &str = "test_da";
 
-/// The five bounded in-`stream` sub-phase `cqlite.rpc.phase` values.
+/// The five bounded in-`stream` sub-phase `cqlite.rpc.phase` values, sourced from
+/// the production `PHASE_STREAM_*` constants (never hardcoded strings — so a value
+/// rename cannot silently desync the test's expectations from what is emitted).
 const SUBPHASES: [&str; 5] = [
-    "stream_cold_fault",
-    "stream_decompress",
-    "stream_merge",
-    "stream_encode",
-    "stream_grpc_write",
+    PHASE_STREAM_COLD_FAULT,
+    PHASE_STREAM_DECOMPRESS,
+    PHASE_STREAM_MERGE,
+    PHASE_STREAM_ENCODE,
+    PHASE_STREAM_GRPC_WRITE,
 ];
 
 /// The bounded attribute keys any phase.duration point may carry.
@@ -96,6 +106,40 @@ fn lz4_fixture_or_skip() -> Option<fixture_support::ResolvedFixture> {
     }
 }
 
+/// Resolve the BTI (`da`) compressed `wide_table`, or skip (hard-fail under
+/// `CQLITE_REQUIRE_FIXTURES=1`). 3 partitions × 300 clustering rows = 900 rows
+/// across many compressed chunks, so its full-ring fallback page-in +
+/// decompress genuinely exercise `stream_cold_fault` / `stream_decompress`.
+fn bti_wide_fixture_or_skip() -> Option<fixture_support::ResolvedFixture> {
+    match fixture_support::table_dir_by_prefix(DA_KS, "wide_table", BTI_TAG) {
+        Some(found) => {
+            let info = found.dir.join(format!("{BTI_TAG}-CompressionInfo.db"));
+            assert!(
+                info.is_file(),
+                "test_da.wide_table must ship a CompressionInfo.db for the BTI decompress \
+                 sub-phase assertion to mean anything (looked at {})",
+                info.display()
+            );
+            Some(found)
+        }
+        None => {
+            let msg = "test_da.wide_table BTI compressed corpus absent";
+            assert!(!require_fixtures(), "CQLITE_REQUIRE_FIXTURES=1: {msg}");
+            eprintln!("SKIP: {msg}");
+            None
+        }
+    }
+}
+
+fn bti_wide_ticket() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "keyspace": DA_KS,
+        "table": "wide_table",
+        "ddl": "CREATE TABLE test_da.wide_table (pk int, ck int, payload text, PRIMARY KEY (pk, ck))",
+    }))
+    .expect("ticket json")
+}
+
 fn lz4_ticket(limit: Option<u64>) -> Vec<u8> {
     let mut t = serde_json::json!({
         "keyspace": COMP_KS,
@@ -108,20 +152,41 @@ fn lz4_ticket(limit: Option<u64>) -> Vec<u8> {
     serde_json::to_vec(&t).expect("ticket json")
 }
 
-/// A `(phase_value -> (histogram_sum_seconds, sample_count))` map for the
-/// sub-phase points recorded on `cqlite.rpc.phase.duration`.
-fn subphase_points(m: &testing::CapturedMetrics) -> HashMap<String, (f64, u64)> {
-    let mut out = HashMap::new();
+/// A `(phase_value -> Vec<(histogram_sum_seconds, sample_count)>)` map of EVERY
+/// recorded `cqlite.rpc.phase.duration` sub-phase point.
+///
+/// A `Vec` per value — NOT a scalar map that a duplicate would silently overwrite
+/// — so `subphase_samples_are_bounded_per_rpc_not_per_row` can assert there is
+/// EXACTLY ONE point per value (a per-row/per-batch emission bug that produced a
+/// second point would otherwise vanish into a `HashMap::insert` and pass
+/// vacuously).
+fn subphase_point_lists(m: &testing::CapturedMetrics) -> HashMap<String, Vec<(f64, u64)>> {
+    let mut out: HashMap<String, Vec<(f64, u64)>> = HashMap::new();
     if let Some(entry) = m.find(catalog::RPC_PHASE_DURATION) {
         for p in &entry.points {
             for (k, v) in &p.attributes {
                 if k == catalog::attr::RPC_PHASE && SUBPHASES.contains(&v.as_str()) {
-                    out.insert(v.clone(), (p.value, p.count));
+                    out.entry(v.clone()).or_default().push((p.value, p.count));
                 }
             }
         }
     }
     out
+}
+
+/// The collapsed `(phase_value -> (summed_seconds, summed_sample_count))` view for
+/// tests that only need presence/positivity. In a correct run each value has
+/// exactly one point (proven by `subphase_samples_are_bounded_per_rpc_not_per_row`
+/// via [`subphase_point_lists`]), so the sum is that single point.
+fn subphase_points(m: &testing::CapturedMetrics) -> HashMap<String, (f64, u64)> {
+    subphase_point_lists(m)
+        .into_iter()
+        .map(|(k, pts)| {
+            let seconds = pts.iter().map(|p| p.0).sum();
+            let count = pts.iter().map(|p| p.1).sum();
+            (k, (seconds, count))
+        })
+        .collect()
 }
 
 /// Sum of the `stream` (top-level) phase duration recorded for this do_get.
@@ -296,6 +361,59 @@ fn compressed_do_get_records_at_least_four_positive_subphases() {
     );
 }
 
+/// Blocker 4 (full coverage on BTI/`da`): a compressed BTI table routes the
+/// streaming read through the full-ring fallback
+/// (`stream_all_partitions_for_compaction`), NOT the Summary-guided
+/// `compressed_offset.rs` path — so its page-in + decompress must ALSO record
+/// `stream_cold_fault` / `stream_decompress`, or a BTI scan would emit only 3 of
+/// the 5 advertised sub-phases.
+#[test]
+#[serial]
+fn bti_compressed_do_get_records_cold_fault_and_decompress() {
+    let Some(found) = bti_wide_fixture_or_skip() else {
+        return;
+    };
+    let mc = testing::metrics_capture();
+    let svc = CqliteFlightService::new(found.sstables_root.clone(), 8);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    mc.reset();
+    rt.block_on(do_get_drain_all(&svc, bti_wide_ticket()));
+    let metrics = mc.flush_and_collect();
+
+    let subs = subphase_points(&metrics);
+    // The whole point of B4: cold-fault + decompress record on the BTI fallback
+    // read path too (not just the Summary-guided BIG path).
+    assert!(
+        subs.contains_key(PHASE_STREAM_COLD_FAULT) && subs.contains_key(PHASE_STREAM_DECOMPRESS),
+        "a compressed BTI (da) scan (full-ring fallback path) must record BOTH \
+         stream_cold_fault and stream_decompress, got {:?}",
+        subs.keys().collect::<Vec<_>>()
+    );
+    // Merge/encode/grpc still record on the merge/egress thread — all 5 present.
+    for phase in [
+        PHASE_STREAM_MERGE,
+        PHASE_STREAM_ENCODE,
+        PHASE_STREAM_GRPC_WRITE,
+    ] {
+        assert!(
+            subs.contains_key(phase),
+            "BTI do_get must still record {phase}, got {:?}",
+            subs.keys().collect::<Vec<_>>()
+        );
+    }
+    for (phase, (seconds, count)) in &subs {
+        assert!(
+            *seconds > 0.0,
+            "recorded BTI sub-phase {phase} must be positive, got {seconds}"
+        );
+        assert!(
+            *count >= 1,
+            "BTI sub-phase {phase} must have at least one recorded sample"
+        );
+    }
+}
+
 /// Requirement 1, scenario 3: an uncompressed-fixture run never invokes
 /// decompression, so it records NO `stream_decompress` sample — while the other
 /// sub-phases still record theirs.
@@ -374,13 +492,20 @@ fn slow_client_inflates_grpc_write_but_not_cold_fault() {
         "a stalled client must inflate stream_grpc_write (stalled {stalled_grpc}s vs \
          prompt {prompt_grpc}s) — the egress park is attributed to grpc_write"
     );
-    // Cold-fault is feed-thread page-in of the SAME small fixture; the client stall
-    // does not touch it, so it stays well below the stalled grpc_write. A send-side
-    // stall can never inflate cold-IO latency (distinct threads, disjoint scopes).
+    // Cold-fault is producer-thread page-in of the SAME small fixture; the client
+    // stall does not touch it. Rather than a host-dependent absolute threshold
+    // (#2642 flake class), compare the DELTAS between the two runs: the injected
+    // ~40ms-per-batch park lands entirely in grpc_write, so the grpc_write delta
+    // dwarfs any cold_fault perturbation (which reads identical bytes both runs).
+    // A send-side stall can never leak into cold-IO latency (disjoint scopes,
+    // distinct threads).
+    let grpc_delta = stalled_grpc - prompt_grpc;
+    let cold_delta = (stalled_cold - prompt_cold).abs();
     assert!(
-        stalled_cold < stalled_grpc,
-        "the client stall must NOT inflate stream_cold_fault: stalled cold_fault \
-         ({stalled_cold}s) must stay below the inflated stream_grpc_write ({stalled_grpc}s)"
+        grpc_delta > cold_delta,
+        "the client stall must inflate stream_grpc_write FAR more than it perturbs \
+         stream_cold_fault (grpc delta {grpc_delta}s vs |cold delta| {cold_delta}s) — \
+         cold-IO latency is isolated from the send-side park"
     );
     assert!(
         prompt_cold > 0.0 && stalled_cold > 0.0,
@@ -524,22 +649,33 @@ fn subphase_samples_are_bounded_per_rpc_not_per_row() {
     rt.block_on(do_get_drain_all(&svc, lz4_ticket(None)));
     let metrics = mc.flush_and_collect();
 
-    let subs = subphase_points(&metrics);
+    let subs = subphase_point_lists(&metrics);
     assert!(
         !subs.is_empty(),
         "the many-batch scan must record sub-phase samples"
     );
     assert!(
         subs.len() <= SUBPHASES.len(),
-        "at most one point per sub-phase value ({} <= {})",
+        "at most one distinct value per sub-phase ({} <= {})",
         subs.len(),
         SUBPHASES.len()
     );
-    for (phase, (_seconds, count)) in &subs {
+    for (phase, points) in &subs {
+        // EXACTLY ONE point per value — a per-row/per-batch emission bug would
+        // produce a second point here, which a scalar map would have hidden.
         assert_eq!(
-            *count, 1,
-            "sub-phase {phase} must be emitted EXACTLY once per RPC (got {count} samples) — \
-             bounded per RPC, never once per row/batch"
+            points.len(),
+            1,
+            "sub-phase {phase} must record exactly ONE point per RPC, got {points:?}"
+        );
+        // And that single point's histogram sample count is 1 — emitted once at
+        // stream teardown, never once per row/batch (independent of the many
+        // batches this scan produced with batch_size = 1).
+        assert_eq!(
+            points[0].1, 1,
+            "sub-phase {phase} must be emitted EXACTLY once per RPC (got {} samples) — \
+             bounded per RPC, never once per row/batch",
+            points[0].1
         );
     }
 }
