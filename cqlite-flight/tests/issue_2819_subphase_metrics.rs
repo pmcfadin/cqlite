@@ -166,7 +166,13 @@ fn subphase_point_lists(m: &testing::CapturedMetrics) -> HashMap<String, Vec<(f6
         for p in &entry.points {
             for (k, v) in &p.attributes {
                 if k == catalog::attr::RPC_PHASE && SUBPHASES.contains(&v.as_str()) {
-                    out.entry(v.clone()).or_default().push((p.value, p.count));
+                    // `cqlite.rpc.phase.duration` is a HISTOGRAM, so every point
+                    // carries a sample count (`Some`); a `None` here would mean the
+                    // instrument silently changed kind (issue #2819 L4).
+                    let count = p
+                        .count
+                        .expect("phase.duration is a histogram → sample count present");
+                    out.entry(v.clone()).or_default().push((p.value, count));
                 }
             }
         }
@@ -323,8 +329,8 @@ fn compressed_do_get_records_at_least_four_positive_subphases() {
     assert!(
         subs.len() >= 4,
         "a completed compressed do_get must record >= 4 distinct sub-phase samples \
-         (got {}: {:?}) — cold-fault/decompress on the feed thread plus \
-         merge/encode/grpc-write on the merge/egress thread",
+         (got {}: {:?}) — cold-fault/decompress on the per-SSTable producer thread \
+         plus merge/encode/grpc-write on the merge/egress thread",
         subs.len(),
         subs.keys().collect::<Vec<_>>()
     );
@@ -338,17 +344,30 @@ fn compressed_do_get_records_at_least_four_positive_subphases() {
 
     let rpc_wall = metrics.counter_sum(catalog::RPC_DURATION);
     assert!(rpc_wall > 0.0, "cqlite.rpc.duration must be recorded");
+    // cold_fault/decompress are `fetch_add`-SUMMED across N concurrent per-SSTable
+    // producer threads, so their sum can EXCEED the `stream` wall time (they
+    // overlap in wall-clock) — no single-interval upper bound holds for them (a
+    // 2-generation fixture would give ~N× wall). Only the single-threaded
+    // merge/encode/grpc-write buckets are true sub-intervals of the RPC.
+    let single_threaded = [
+        PHASE_STREAM_MERGE,
+        PHASE_STREAM_ENCODE,
+        PHASE_STREAM_GRPC_WRITE,
+    ];
     for (phase, (seconds, count)) in &subs {
         assert!(
             *seconds > 0.0,
             "recorded sub-phase {phase} must have a positive duration, got {seconds}"
         );
-        // Each sub-phase is a sub-interval of the RPC, so its duration cannot
-        // exceed the RPC wall time (small multiplicative slack for measurement).
-        assert!(
-            *seconds <= rpc_wall * 1.5 + 0.01,
-            "sub-phase {phase} ({seconds}s) must not exceed the RPC wall time ({rpc_wall}s)"
-        );
+        if single_threaded.contains(&phase.as_str()) {
+            // A single-threaded bucket is a sub-interval of the RPC (small
+            // multiplicative slack for measurement).
+            assert!(
+                *seconds <= rpc_wall * 1.5 + 0.01,
+                "single-threaded sub-phase {phase} ({seconds}s) must not exceed the \
+                 RPC wall time ({rpc_wall}s)"
+            );
+        }
         assert!(
             *count >= 1,
             "sub-phase {phase} must have at least one recorded sample"

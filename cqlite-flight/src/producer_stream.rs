@@ -42,13 +42,6 @@ use crate::cancel::CancelFlag;
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
 
-/// Elapsed nanoseconds since `start`, clamped into a `u64` (a scan long enough
-/// to overflow `u64` nanoseconds — ~584 years — is unreachable).
-#[inline]
-fn elapsed_nanos(start: Instant) -> u64 {
-    start.elapsed().as_nanos().min(u64::MAX as u128) as u64
-}
-
 /// Per-request in-`stream` sub-phase accumulator for the row-drive loop (issue
 /// #2819 B2/B3).
 ///
@@ -97,6 +90,22 @@ impl RowSubPhaseAccum {
     #[inline]
     fn add_encode(&mut self, nanos: u64) {
         self.encode_nanos = self.encode_nanos.saturating_add(nanos);
+    }
+
+    /// Time `f` and fold its elapsed into the `stream_merge` bucket (merge CPU),
+    /// or run it bare when inert. For pure-CPU merge work with NO blocking recv
+    /// inside — the per-row `entry_to_row` materialize. (`step_row` is timed
+    /// inline instead, because it must SUBTRACT the recv-wait delta.)
+    #[inline]
+    fn time_merge<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        if self.active() {
+            let start = Instant::now();
+            let out = f();
+            self.add_merge(stream_subphase::elapsed_nanos(start));
+            out
+        } else {
+            f()
+        }
     }
 }
 
@@ -178,7 +187,7 @@ impl MergeProducer {
         if accum.active() {
             let start = Instant::now();
             let out = self.flush(buffer);
-            accum.add_encode(elapsed_nanos(start));
+            accum.add_encode(stream_subphase::elapsed_nanos(start));
             out
         } else {
             self.flush(buffer)
@@ -257,7 +266,7 @@ impl MergeProducer {
                 let wait_before = stream_subphase::pull_wait_nanos();
                 let start = Instant::now();
                 let out = stepper.step_row();
-                let elapsed = elapsed_nanos(start);
+                let elapsed = stream_subphase::elapsed_nanos(start);
                 let wait = stream_subphase::pull_wait_nanos().saturating_sub(wait_before);
                 accum.add_merge(elapsed.saturating_sub(wait));
                 out
@@ -305,20 +314,9 @@ impl MergeProducer {
             // (`entry_to_row` → None) are skipped without counting a row.
             //
             // Issue #2819 (B2): per-row materialize is merge CPU — fold its time
-            // into the same `stream_merge` bucket (no recv-wait here — this is
-            // pure decode/assembly on the merge consumer thread).
-            let materialized = if accum.active() {
-                let start = Instant::now();
-                let out = self.entry_to_row(
-                    &key.key,
-                    *entry,
-                    &mut pk_cache,
-                    assemble_cols.as_ref(),
-                    self.now_secs,
-                );
-                accum.add_merge(elapsed_nanos(start));
-                out
-            } else {
+            // into the same `stream_merge` bucket via `time_merge` (no recv-wait
+            // here — pure decode/assembly on the merge consumer thread).
+            let materialized = accum.time_merge(|| {
                 self.entry_to_row(
                     &key.key,
                     *entry,
@@ -326,7 +324,7 @@ impl MergeProducer {
                     assemble_cols.as_ref(),
                     self.now_secs,
                 )
-            };
+            });
             let Some(row) = materialized? else {
                 continue;
             };
