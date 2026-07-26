@@ -5,8 +5,12 @@ drift — re-grep before editing. Every stage names the surface it exercises. Te
 and must fail on pre-change `main`.
 
 **Currency rule (design D0): the ceiling is CAPACITY bytes (`get_array_memory_size()`); #2825's cap
-is PAYLOAD bytes. Convert only through `cqlite_flight::batch_bytes::BATCH_BYTES_CAPACITY_FACTOR` /
-`worst_case_batch_capacity_bytes`. Never add a payload figure to a capacity figure.**
+is PAYLOAD bytes. Convert only through `worst_case_batch_capacity_bytes` (the factor ALONE
+under-states by `SLACK × n_array_nodes`). Never add a payload figure to a capacity figure.**
+
+**Placement rule (design D2, owner-decided): credit is RESERVED BEFORE `rows_to_record_batch`, then
+trued up DOWNWARD to the realized capacity. Charging an already-built batch bounds at 16 MiB and is
+rejected.**
 
 ## Stage 0 — fixtures + red tests (write these BEFORE the governor)
 - [ ] 0.1 REUSE the merged `cqlite-flight/src/wide_row_fixture.rs` (#2825) —
@@ -33,23 +37,51 @@ is PAYLOAD bytes. Convert only through `cqlite_flight::batch_bytes::BATCH_BYTES_
 - [ ] 0.7 Add the **deferred-release test**: after exactly one batch is yielded its credit is STILL
   charged, and is released only when the next batch is yielded.
   (flight-streaming-egress: deferred credit release)
-- [ ] 0.8 Add the **composition test**: `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES +
-  worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, n_array_nodes, 0) ≤ 16 MiB`, computed
+- [ ] 0.8 Add the **composition test**: `max(DEFAULT_MAX_INFLIGHT_EGRESS_BYTES,
+  worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, n_array_nodes, 0)) ≤ 16 MiB`, computed
   from the imported constants (no hard-coded `2`, no hard-coded `8 MiB`).
   (flight-streaming-egress: capacity denomination)
+- [ ] 0.9 Add the **reserve-before-materialize test**: with the pool exhausted the producer parks
+  having built NOTHING (no `RecordBatch` materialized while a reservation is pending), and a
+  parked-on-reservation producer wakes on cancel. Must FAIL on a charge-at-emit implementation.
+  (flight-streaming-egress: reserve before materialize)
+- [ ] 0.10 Add the **both-loops test**: the ceiling holds through `drive_merge` AND
+  `drive_merge_streaming`. (flight-streaming-egress: reserve before materialize)
+- [ ] 0.11 Add the **true-up-down test** (charged credit tracks realized capacity, not the
+  reservation) and the **fail-closed test** (`actual > reserved` terminates with the invariant error
+  and leaks no credit). (flight-streaming-egress: true-up downward)
 
 ## Stage 1 — the credit governor
 - [ ] 1.1 Add an `EgressCredit` / `EgressPermit` type (semaphore-backed, permits in KiB, rounding
-  UP) plus `EgressBudget` (bounded / unbounded). No `unwrap()`/`expect()`.
+  UP) plus `EgressBudget` (bounded / unbounded), with `reserve(estimate) → permit` and
+  `permit.true_up_down(actual)`. No `unwrap()`/`expect()`.
   (flight-streaming-egress: peak resident payload)
+- [ ] 1.1a Add an **Arrow array-NODE counter** over the producer's `ArrowSchema` (list = 2, map = 4
+  …), computed once per merge — no such helper exists in the tree.
+  (flight-streaming-egress: capacity denomination)
 - [ ] 1.2 Change the egress channel element to a `CreditedBatch` owning the `RecordBatch` + its
   `EgressPermit` (`streaming.rs:300`), so release is RAII on every path. Update the direct
   channel-constructing test helpers in `streaming_tests.rs`.
   (flight-streaming-egress: credit release)
-- [ ] 1.3 Charge in `ChannelSink::emit` (`streaming.rs:149-188`): acquire
-  `min(ceil(capacity_bytes/KiB), pool_total)` permits INSIDE the existing biased `select!` that
-  races `cancel.cancelled()`, before `tx.reserve()`. The clamp is the deadlock-avoidance rule —
+- [ ] 1.3 Extend `BatchSink` (`producer.rs:396`) with the pre-materialization reservation step
+  (`CollectSink`'s is a no-op) and rework ALL SIX streaming flush sites — `producer.rs:997,1005,1015`
+  and `producer_stream.rs:214,222,232` — into ONE owning helper running
+  `reserve(worst_case_batch_capacity_bytes(byte_cap.accumulated(), n_array_nodes, 0))` →
+  `flush_buffer` → true-up-down → `emit`, so a build site cannot materialize without a reservation.
+  `byte_cap.accumulated()` is already exactly the estimate for the rows being flushed at each of the
+  six sites — verify that before touching anything else.
+  (flight-streaming-egress: reserve before materialize / true-up downward)
+- [ ] 1.3a Acquire `min(ceil(reservation/KiB), pool_total)` permits INSIDE a biased `select!` that
+  races `cancel.cancelled()` (same pattern as `ChannelSink::emit`'s `tx.reserve()`, which runs on a
+  `spawn_blocking` thread under `Handle::block_on`). The clamp is the deadlock-avoidance rule —
   comment it as such. (flight-streaming-egress: deadlock-avoidance)
+- [ ] 1.3b Fail closed when `actual > reserved`: terminal internal error naming the violated
+  estimator-conservatism invariant, permit dropped normally, batch NOT emitted. Never true up.
+  (flight-streaming-egress: true-up downward)
+- [ ] 1.3c Document the cross-issue invariant at BOTH ends — a comment at the reservation site
+  pointing at `arrow_size_tests.rs`'s property test, and a line in `arrow_size.rs`'s conservatism
+  section naming this ceiling as a dependent consumer.
+  (flight-streaming-egress: estimator-conservatism dependency)
 - [ ] 1.4 Release in `MeteredDoGetStream` via a single `deferred: Option<EgressPermit>` slot —
   assigning the next batch's permit drops the previous one, so at most one batch sits downstream of
   the credit boundary (the encoder prefetch, `streaming.rs:381`). `Drop` (`streaming.rs:711`)
@@ -59,7 +91,8 @@ is PAYLOAD bytes. Convert only through `cqlite_flight::batch_bytes::BATCH_BYTES_
   (flight-streaming-egress: peak resident payload)
 
 ## Stage 2 — configuration plumbing (wiring evidence)
-- [ ] 2.1 Add `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` (**6 MiB of capacity**) +
+- [ ] 2.1 Add `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` (**6 MiB of capacity — confirm against design
+  D4a, which recommends 8 MiB; the owner picks**) +
   `ENV_MAX_INFLIGHT_EGRESS_BYTES` (`CQLITE_MAX_INFLIGHT_EGRESS_BYTES`), documenting the derivation
   from `BATCH_BYTES_CAPACITY_FACTOR × DEFAULT_MAX_BATCH_BYTES` against B4 ≤16Mi.
   (flight-streaming-egress: CLI configurability / capacity denomination)
@@ -86,10 +119,11 @@ is PAYLOAD bytes. Convert only through `cqlite_flight::batch_bytes::BATCH_BYTES_
   `#[cfg(test)]` `IN_FLIGHT_ALLOWANCE` from the production derivation; no 57,344 figure; replace
   "deliberately not a config knob" with a pointer to `--max-inflight-egress-bytes`.
   (flight-streaming-egress: doc-comment requirement)
-- [ ] 3.2 Document the `ceiling + one maximum batch` contract at the governor's definition site in
-  CAPACITY currency, using the SAME derivation the composition test asserts, and NAME the terms
-  outside the governed set (the producer's parked pre-credit batch, an over-cap single row, the
-  per-node slack). (flight-streaming-egress: deadlock-avoidance)
+- [ ] 3.2 Document the `max(ceiling, one maximum batch)` contract at the governor's definition site
+  in CAPACITY currency, using the SAME derivation the composition test asserts, and NAME the
+  residency outside the governed set (the `Vec<QueryRow>` row buffer, an over-cap single row, the
+  aggregate route). Do NOT list a parked pre-credit batch — design A eliminated it.
+  (flight-streaming-egress: deadlock-avoidance)
 - [ ] 3.3 Truth up `cqlite-flight/src/batch_bytes.rs`: the module doc's `~7 × 8 MiB ≈ 56 MiB`
   count-bounded paragraph and the "becomes true only once #2821 lands / TARGET for the dependent
   issue" framing (`:66-93`), plus `worst_case_batch_capacity_bytes`'s "Until that ceiling lands…"

@@ -9,15 +9,19 @@ independent of the total result size **and independent of row width**, applying 
 merge when the consumer is slow.
 
 The governed quantity is each batch's `RecordBatch::get_array_memory_size()` — Arrow buffer
-**CAPACITY** bytes, the quantity `MeteredDoGetStream::poll_next` already meters for metrics. That
-capacity SHALL be charged against a per-stream in-flight byte ceiling before the batch enters the
-egress channel, and the charge SHALL be released when the batch has left the stream toward the
-client. The guaranteed contract is:
+**CAPACITY** bytes, the quantity `MeteredDoGetStream::poll_next` already meters for metrics. Credit
+for that capacity SHALL be **reserved before the batch is materialized** (see the
+reserve-before-materialize requirement), trued up to the realized capacity once it exists, and
+released only when the batch has left the stream toward the client. No materialized-but-uncharged
+`RecordBatch` SHALL exist on the egress path. The guaranteed contract is:
 
-> peak charged in-flight egress **capacity** ≤ **`ceiling + one maximum batch`**
+> peak charged in-flight egress **capacity** ≤ **`max(ceiling, one maximum batch)`**
 
-and NOT `ceiling` — see the deadlock-avoidance requirement below for why the one-batch residual is
-structural, and for the terms that sit outside the governed set.
+The `+ one maximum batch` additive term of the pre-reservation design is GONE: it existed only
+because a producer could hold a materialized, uncharged batch while parked. The remaining
+`max(...)` is the deadlock-avoidance clamp — an oversized batch may take the whole pool and is
+resident at its own size — see the deadlock-avoidance requirement, which also names every residency
+term that remains outside the governed set.
 
 This byte ceiling SHALL compose with, and SHALL NOT replace, the existing `DO_GET_CHANNEL_CAPACITY`
 batch-count channel; whichever bound is reached first governs.
@@ -28,8 +32,8 @@ batch-count channel; whichever bound is reached first governs.
   issue #2825), whose per-batch capacity is large enough that the byte ceiling binds before the
   4-deep batch-count channel does
 - **WHEN** a client reads ONE batch and then stops polling
-- **THEN** the observed peak charged in-flight capacity bytes never exceed the configured ceiling
-  plus the largest single batch capacity observed on that stream
+- **THEN** the observed peak charged in-flight capacity bytes never exceed
+  `max(configured ceiling, largest single batch capacity observed on that stream)`
 - **AND** the assertion is on measured `get_array_memory_size()` BYTES (and batch counts), never on
   a wall-clock threshold
 - **AND** this test FAILS on pre-change `main`, where egress residency is bounded only by a batch
@@ -65,22 +69,35 @@ Two byte currencies meet at this boundary and SHALL be named explicitly wherever
   doubles from zero, which is why it cannot be a trigger but IS the right unit for a residency
   ceiling.
 
-The per-stream ceiling SHALL be denominated in capacity bytes. Any composition of the per-batch cap
-with the per-stream ceiling SHALL convert through the published constant
-`cqlite_flight::batch_bytes::BATCH_BYTES_CAPACITY_FACTOR` (and `worst_case_batch_capacity_bytes`),
-NEVER through a locally re-derived factor and NEVER by comparing a payload figure with a capacity
-figure directly. Code and docs SHALL NOT state a composition that adds `DEFAULT_MAX_BATCH_BYTES`
-(payload) to the ceiling (capacity) as if the two were the same unit.
+The per-stream ceiling SHALL be denominated in capacity bytes. Any conversion of a payload figure
+into capacity — the reservation amount, the composition against B4, any documented bound — SHALL go
+through `cqlite_flight::batch_bytes::worst_case_batch_capacity_bytes` /
+`BATCH_BYTES_CAPACITY_FACTOR`, NEVER through a locally re-derived factor and NEVER by comparing a
+payload figure with a capacity figure directly. Code and docs SHALL NOT state a composition that
+adds `DEFAULT_MAX_BATCH_BYTES` (payload) to the ceiling (capacity) as if the two were the same unit.
+
+A conversion SHALL NOT be written as a bare `payload × BATCH_BYTES_CAPACITY_FACTOR`: the published
+worst case also carries `BATCH_BYTES_PER_COLUMN_SLACK × n_array_nodes` of fixed per-array-node
+allocation, so the factor alone UNDER-states capacity. `n_array_nodes` SHALL be counted as Arrow
+array NODES over the projected output schema (a `list<text>` column is two, a `map<text,text>`
+column is four), computed once per merge, not as a column count.
 
 #### Scenario: the composition is asserted from the published constants, not hard-coded
 
 - **GIVEN** `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` and `cqlite_flight::batch_bytes`'s
   `DEFAULT_MAX_BATCH_BYTES` / `BATCH_BYTES_CAPACITY_FACTOR` / `worst_case_batch_capacity_bytes`
-- **WHEN** a test computes `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES + worst_case_batch_capacity_bytes(
-  DEFAULT_MAX_BATCH_BYTES, n_array_nodes, 0)` for a small flat schema
+- **WHEN** a test computes `max(DEFAULT_MAX_INFLIGHT_EGRESS_BYTES, worst_case_batch_capacity_bytes(
+  DEFAULT_MAX_BATCH_BYTES, n_array_nodes, 0))` for a small flat schema
 - **THEN** the result is ≤ 16 MiB (the ratified B4 per-query working set at concurrency 1), so a
   later change to EITHER constant that breaks the composition fails this test rather than silently
   invalidating the doctrine
+
+#### Scenario: array nodes are counted, not columns
+
+- **GIVEN** a projected output schema containing a `map<text,text>` column
+- **WHEN** the reservation's slack term is computed
+- **THEN** that column contributes four array nodes, not one, so the reservation is not
+  under-stated for nested schemas
 
 #### Scenario: no locally re-derived payload→capacity factor exists
 
@@ -89,24 +106,119 @@ figure directly. Code and docs SHALL NOT state a composition that adds `DEFAULT_
   `BATCH_BYTES_CAPACITY_FACTOR` / `worst_case_batch_capacity_bytes`, with no second definition of
   the factor `2` and no undocumented fudge
 
+### Requirement: egress credit is reserved BEFORE a batch is materialized
+
+The producer SHALL acquire the batch's capacity credit at the batch boundary, BEFORE
+`rows_to_record_batch` allocates anything, and SHALL park awaiting credit with only the row buffer
+resident. A `RecordBatch` SHALL NEVER exist on the egress path without credit already held for it.
+
+The reservation amount SHALL be derived from the payload estimate the producer already maintains
+for the rows about to be materialized (#2825's `BatchByteCap` running accumulator, itself the sum of
+`estimate_arrow_row_bytes`), converted to capacity with `worst_case_batch_capacity_bytes(estimate,
+n_array_nodes, 0)`. No second estimator SHALL be introduced.
+
+This SHALL apply at EVERY streaming build site — both the partition-at-a-time merge loop
+(`drive_merge`) and the row-granular loop (`drive_merge_streaming`), at all three of their flush
+points (the byte-cap cut, the row-cap cut, and the end-of-merge tail). The reserve → build →
+true-up → emit sequence SHALL be structured so a build site cannot materialize without a
+reservation (a single owning helper, or a reservation value `emit` consumes) rather than left as an
+unenforced calling convention. The collect/parity sink SHALL be unaffected (its reservation is a
+no-op), so the collect path stays byte-identical.
+
+Parking on credit SHALL race the shared cancel flag in the same biased `select!` that the channel
+reservation already uses, so a client disconnect wakes a producer parked on credit exactly as it
+wakes one parked on a full channel, and pins no blocking-pool thread.
+
+#### Scenario: no materialized batch is ever uncharged
+
+- **GIVEN** a stream whose pool is exhausted by batches already in flight
+- **WHEN** the producer reaches the next batch boundary
+- **THEN** it parks BEFORE building the batch, with only the row buffer resident, and the observed
+  charged in-flight capacity plus zero uncharged batches accounts for every `RecordBatch` alive on
+  the egress path
+
+#### Scenario: both producer loops reserve
+
+- **WHEN** the same ceiling test is driven through the partition-at-a-time merge loop and through
+  the row-granular streaming loop
+- **THEN** both observe the bound, because both reserve at all of their flush points — a governor
+  wired into only one loop would leave the other unbounded
+
+#### Scenario: a producer parked on a pre-materialization reservation wakes on cancellation
+
+- **GIVEN** a producer parked awaiting credit before building a batch
+- **WHEN** the shared cancel flag trips
+- **THEN** it stops promptly, materializes nothing, and pins no blocking-pool thread
+
+### Requirement: the reservation is trued up DOWNWARD after materialization, never upward
+
+Because the estimator is deliberately conservative, the reservation will usually exceed the realized
+`get_array_memory_size()`. Immediately after materialization the governor SHALL measure the real
+capacity and RELEASE the excess (`reserved − actual`), so over-reservation lasts only for the
+materialization window and does not starve the pool or serialize the stream.
+
+The governor SHALL NEVER true up upward. If the realized capacity exceeds the reservation, a bound
+this change guarantees has been violated: the governor SHALL fail closed — surface a terminal
+internal error naming the violated invariant, drop the permit on the normal path, and NOT emit the
+batch while silently exceeding the pool. Overshoot SHALL NOT be absorbed by quietly acquiring more
+credit (which can deadlock) or by ignoring it.
+
+#### Scenario: an over-reserved batch returns its excess immediately
+
+- **GIVEN** a shape whose payload estimate materially over-states the realized capacity
+- **WHEN** a batch is built under a reservation
+- **THEN** the charged credit after materialization equals the realized capacity (within the
+  KiB rounding quantum), not the reservation, and the pool admits further batches accordingly
+
+#### Scenario: an under-reservation fails closed rather than exceeding the pool
+
+- **GIVEN** an injected/simulated batch whose realized capacity exceeds its reservation
+- **WHEN** the true-up runs
+- **THEN** the stream terminates with an internal error identifying the violated
+  estimate-conservatism invariant, no credit is leaked, and the pool is fully released
+
+### Requirement: the bound depends on #2825's estimator-conservatism contract
+
+This change's memory bound now rests on a contract owned by another module, and that dependency
+SHALL be named as a cross-issue invariant at both ends rather than left implicit:
+
+> `Σ estimate_arrow_row_bytes(columns, row) >= arrow_payload_bytes(batch)` (issue #2825,
+> `cqlite-core/src/export/arrow_size.rs`, property-tested) **and** realized capacity
+> `<= worst_case_batch_capacity_bytes(payload, n_array_nodes, 0)`.
+
+If either leg is weakened, this change's ceiling silently under-reserves. The reservation site SHALL
+carry a comment naming the invariant and pointing at the property test that enforces it, and
+`arrow_size.rs`'s conservatism section SHALL name this ceiling as a dependent consumer, so a future
+change to the estimator cannot be made without meeting the dependency.
+
+#### Scenario: the invariant is documented at both ends
+
+- **WHEN** the reservation site and `arrow_size.rs`'s conservatism section are read
+- **THEN** each names the other, and the reservation site points at the property test that enforces
+  `Σ estimate >= payload`
+
 ### Requirement: the byte ceiling never deadlocks, and the honest bound is stated
 
 A single record batch MAY be larger than the entire configured ceiling. The egress governor SHALL
-therefore always admit at least one batch when zero bytes are in flight, by clamping a batch's
-credit request to the pool total. No batch of any size SHALL be able to wedge a stream.
+therefore always admit at least one batch when zero bytes are in flight, by clamping a reservation
+to the pool total. No batch of any size SHALL be able to wedge a stream.
 
-Because a clamped batch is charged at most the whole ceiling while resident, the guaranteed bound is
-`ceiling + one maximum batch`. The code and its doc comments SHALL state this bound honestly, SHALL
-NOT claim a bound of `ceiling`, and SHALL name the terms that sit OUTSIDE the governed set rather
-than let a reader assume the governor covers them:
+Because a clamped batch is charged at most the whole ceiling while resident at its own size, the
+guaranteed bound is `max(ceiling, one maximum batch)`. The code and its doc comments SHALL state
+this bound honestly and SHALL name the residency that remains OUTSIDE the governed set rather than
+let a reader assume the ceiling covers everything:
 
-1. **The producer's pre-credit batch.** `emit` receives an already-materialized batch and only then
-   acquires credit, so one batch can be resident while parked and uncharged. This is the
-   pre-existing "+1 send-in-flight" residency term (it exists today against the channel), unchanged
-   by this change — but it is not covered by the ceiling and SHALL be documented as such.
+1. **The producer's row buffer** (`Vec<QueryRow>`, up to `batch_size` rows or one byte-cap's worth of
+   payload, plus per-value Rust overhead) is resident while rows accumulate, while the producer is
+   parked on a reservation, and during materialization (buffer and batch overlap until the buffer is
+   cleared). It is not a `RecordBatch` and is not metered by `get_array_memory_size()`. This term is
+   PRE-EXISTING and unchanged by this change, but it is un-governed and SHALL be documented.
 2. **A single row wider than #2825's per-batch cap**, which leaves as a one-row batch at its own
-   natural width (`worst_case_batch_capacity_bytes`'s `max(cap, widest_row_payload)` term).
-3. **`BATCH_BYTES_PER_COLUMN_SLACK × n_array_nodes`** of fixed per-array-node allocation.
+   natural width (`worst_case_batch_capacity_bytes`'s `max(cap, widest_row_payload)` term) — a
+   property of the data, not slack in the mechanism.
+3. **The aggregate route** (`aggregate_paths`), which materializes its partial batches into a `Vec`
+   and does not pass through the credit governor at all. Bounded by group count by construction; an
+   explicit non-goal of this change and SHALL be stated as such, not implied to be covered.
 
 #### Scenario: a batch larger than the whole ceiling is still delivered
 
@@ -119,27 +231,30 @@ than let a reader assume the governor covers them:
 #### Scenario: the stated bound matches the enforced bound
 
 - **WHEN** the wide-row ceiling test measures peak charged in-flight capacity against
-  `ceiling + max observed batch capacity`
+  `max(ceiling, max observed batch capacity)`
 - **THEN** the assertion passes, and the same derivation appears in the governor's doc comment so
   the documented contract and the tested bound cannot drift apart
 
 #### Scenario: the un-governed residency terms are named, not hidden
 
 - **WHEN** a reader consults the governor's doc comment
-- **THEN** it states the three terms above explicitly (the parked pre-credit batch, an over-cap
-  single row, the per-node slack), so nobody reads `ceiling + one maximum batch` as covering the
-  producer's own hand
+- **THEN** it states the three terms above explicitly (the row buffer, an over-cap single row, the
+  aggregate route), and does NOT list a parked pre-credit batch — reserve-before-materialize
+  eliminated that term rather than documenting it
 
 ### Requirement: credit release is deferred by one batch so the encoder prefetch stays inside the bound
 
 `MeteredDoGetStream` is constructed UPSTREAM of the Flight encoder (`encode_do_get(metered, …)`),
 and `FlightDataEncoderBuilder`'s stream can pull one batch ahead of yielding it. Releasing a batch's
 credit at the instant `poll_next` yields it would therefore leave that batch resident with its
-credit already returned, making the true bound `ceiling + 2 × one maximum batch`.
+credit already returned — reintroducing exactly the class of un-charged resident batch that
+reserve-before-materialize eliminated on the producer side, and making the true bound
+`max(ceiling, one maximum batch) + one maximum batch`.
 
 The stream SHALL therefore hold the yielded batch's permit in a single deferred slot and release it
 only when the NEXT batch is yielded (and on `Drop`). At most one batch is downstream of the credit
-boundary at any time, which is what makes `ceiling + one maximum batch` true as stated.
+boundary at any time, and it is still charged — which is what makes `max(ceiling, one maximum
+batch)` true as stated.
 
 #### Scenario: the yielded batch's credit is still charged while the encoder holds it
 
@@ -187,8 +302,11 @@ side, so no measurement asymmetry can drift the pool.
 
 The `cqlite-flight` server SHALL expose the per-stream egress byte ceiling as a
 `--max-inflight-egress-bytes` argument backed by the `CQLITE_MAX_INFLIGHT_EGRESS_BYTES` environment
-variable and a `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` constant of **6 MiB of CAPACITY bytes**,
-mirroring the merged `--max-batch-bytes` / `CQLITE_MAX_BATCH_BYTES` / `DEFAULT_MAX_BATCH_BYTES`
+variable and a `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` constant denominated in **CAPACITY bytes**,
+currently **6 MiB** pending the owner's re-evaluation under design A (design D4a recommends 8 MiB:
+with the additive term gone, any ceiling ≤ 8 MiB yields the same `max(...)` worst case while a
+larger one buys buffering for free). Whatever value is chosen, the composition test above SHALL
+hold. Plumbing mirrors the merged `--max-batch-bytes` / `CQLITE_MAX_BATCH_BYTES` / `DEFAULT_MAX_BATCH_BYTES`
 plumbing precedent from issue #2825 (itself modelled on `--max-concurrent-scans`).
 
 The value SHALL be plumbed const → clap `Args` → a `CqliteFlightService` field set by a builder
@@ -217,14 +335,14 @@ embedder.
 - **WHEN** the server parses its arguments
 - **THEN** the parsed ceiling equals the environment value, and an explicit flag overrides it
 
-#### Scenario: the default is 6 MiB and the composition fits B4
+#### Scenario: the default ceiling composes inside B4
 
 - **WHEN** neither the flag nor the environment variable is set
-- **THEN** the ceiling is `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` = 6 MiB of capacity
+- **THEN** the ceiling is `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`, denominated in capacity bytes
 - **AND** composing it with #2825's merged 4 MiB payload cap through
-  `BATCH_BYTES_CAPACITY_FACTOR = 2` gives `6 MiB + (2 × 4 MiB) = 14 MiB` of capacity for
-  `ceiling + one maximum batch`, inside the ratified **B4 ≤16Mi per-query working set at
-  concurrency 1** with ~2 MiB of headroom (less `BATCH_BYTES_PER_COLUMN_SLACK × n_array_nodes`)
+  `worst_case_batch_capacity_bytes` gives `max(ceiling, 2 × 4 MiB + slack) ≈ 8 MiB` of capacity for
+  the guaranteed bound at any ceiling ≤ 8 MiB — inside the ratified **B4 ≤16Mi per-query working
+  set at concurrency 1** with ~8 MiB of headroom
 
 #### Scenario: an embedder can opt out to an unbounded budget
 
@@ -237,7 +355,8 @@ embedder.
 The per-stream byte ceiling SHALL NOT change admission `K`, its default, or its shedding policy. The
 two governors SHALL remain independent: `K` bounds concurrently admitted scans server-wide, the byte
 ceiling bounds capacity in flight within one stream. The documented server-wide worst case SHALL be
-`K × (per-stream ceiling + one maximum batch)` — `K × 14 MiB` at the defaults.
+`K × max(per-stream ceiling, one maximum batch)` — `K × 8 MiB` at the merged batch cap for any
+ceiling ≤ 8 MiB.
 
 #### Scenario: admission behaviour is unchanged
 
@@ -274,14 +393,18 @@ dated analysis snapshots and SHALL NOT be rewritten by this change.
 ### Requirement: the #2825 byte-cap documentation is corrected to state the now-enforced composition
 
 Issue #2825 shipped documentation that scoped its own guarantee honestly by describing per-stream
-egress residency as still count-bounded and the 14 MiB composition as a TARGET for this issue. This
+egress residency as still count-bounded and the 14 MiB additive composition as a TARGET for this
+issue. This
 change makes those statements false, and SHALL update them in the same change that makes them false:
 
 - `cqlite-flight/src/batch_bytes.rs`'s module documentation SHALL no longer state that `do_get` is
-  count-bounded at `~7 × 8 MiB ≈ 56 MiB` per stream, nor that the 14 MiB composition "becomes true
-  only once #2821 lands" / "is a TARGET for the dependent issue". It SHALL instead state that the
-  per-stream capacity ceiling is enforced here, name the default, and RETAIN the payload-vs-capacity
-  currency explanation and the published-constant conversion, which remain correct.
+  count-bounded at `~7 × 8 MiB ≈ 56 MiB` per stream, nor that the composition "becomes true only
+  once #2821 lands" / "is a TARGET for the dependent issue". It SHALL instead state the enforced
+  per-stream capacity ceiling and its bound `max(ceiling, one maximum batch)`, name the default, and
+  RETAIN the payload-vs-capacity currency explanation and the published-constant conversion, which
+  remain correct. Its `6 + 8 = 14 MiB` sketch SHALL be replaced by the delivered arithmetic (the
+  additive term does not exist under reserve-before-materialize), and
+  `DEFAULT_MAX_BATCH_BYTES` SHALL NOT change.
 - `worst_case_batch_capacity_bytes`'s doc comment SHALL likewise drop "Until that ceiling lands,
   egress residency is count-bounded, not byte-bounded".
 - `docs/flight-trino/JOURNAL.md`'s "B4 composition for issue #2821" bullet SHALL be corrected from a
@@ -298,8 +421,10 @@ No other historical document SHALL be rewritten.
 #### Scenario: the Flight/Trino journal states the composition as enforced
 
 - **WHEN** the B4-composition entry in `docs/flight-trino/JOURNAL.md` is read after this change
-- **THEN** it states `6 + 8 = 14 MiB` as the enforced composition (not a prospective one), keeps the
-  payload-vs-capacity correction that motivates it, and points at this issue as the delivery
+- **THEN** it states the enforced composition `max(ceiling, one maximum batch) ≈ 8 MiB` (not the
+  prospective `6 + 8 = 14 MiB` additive sketch), records that reserve-before-materialize is what
+  removed the additive term, keeps the payload-vs-capacity correction that motivates the currency,
+  and points at this issue as the delivery
 
 ### Requirement: the wide-row fixture is the merged synthetic one, reused not duplicated
 
