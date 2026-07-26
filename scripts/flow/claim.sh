@@ -45,7 +45,12 @@
 # LEGACY GUARD (mixed-fleet safety): older workers still branch-lock with a
 # `refs/heads/issue-<N>-*` branch. `claim` refuses if any such branch exists on
 # origin (treat the issue as already-claimed) and names the resume command above
-# in its refusal. There is NO tip-based re-entrancy exemption: a work branch is
+# in its refusal — but ONLY when the issue has ZERO open PRs. An older-fleet worker
+# holds only the BRANCH, so `claim-ref=free` is true while it works, and advertising
+# the empty-lease adopt would hand an ACTIVE issue to a second machine. With an open
+# PR (or an unreadable PR list) the refusal prints `remediation=withheld open-prs=<n>`
+# instead: fail closed, because the readers run printed remediations literally (#2945).
+# There is NO tip-based re-entrancy exemption: a work branch is
 # cut from origin/main and carries ordinary commits, so its tip NEVER carries the
 # machine=/actor= claim trailers — the old "all-ours -> no block" escape hatch was
 # unreachable dead code (#2945). New claims never create these branches — the
@@ -73,15 +78,23 @@
 #   adopt  <N> --expect <old-sha>|none [--reason <why>] [--actor <id>]
 #                                             compare-and-swap the ref (adoption/resume).
 #                                             --expect <old-sha>: the ref must still be <old-sha>.
+#                                             A hex value MUST be a full object name (40/64 hex);
+#                                             a truncated sha is a usage error, never a lost race.
 #                                             --expect none:      the ref must NOT exist (empty
 #                                             lease) — the resume path for an issue whose
 #                                             `issue-<N>-*` branch outlived its claim; --reason
 #                                             is REQUIRED and is recorded in the claim commit.
-#                                             An EMPTY --expect '' is a usage error on purpose.
+#                                             An EMPTY --expect '' is a usage error on purpose,
+#                                             as is a --reason with nothing recordable in it
+#                                             ('   ', '---', '…'): the record must say WHY.
 #                                             RE-ENTRANT: if the ref is already held by THIS
 #                                             machine+actor, adopt reports ADOPTED (re-entrant)
 #                                             exit 0 — a retry after a confirm-read blip must
-#                                             never abandon an issue we still hold.
+#                                             never abandon an issue we still hold. In CAS mode
+#                                             that verdict names BOTH shas
+#                                             (re-entrant, lease-mismatch expected=/actual=), so a
+#                                             VIOLATED compare-and-swap is never reported as a
+#                                             satisfied one.
 #   release <N> [--force] [--actor <id>]      delete the ref; without --force requires holder identity
 #                                             (machine+actor) + no open PR, and deletes via CAS lease.
 #                                             --force = reaper/adopt: unconditional delete.
@@ -437,7 +450,25 @@ cmd_claim() {
     return 1
   fi
   if [ -n "$LEGACY_BRANCHES" ]; then
-    emit "LOST issue=$issue reason=legacy-branch-lock detail=$LEGACY_BRANCHES exists on $REMOTE claim-ref=free remediation='bash scripts/flow/claim.sh adopt $issue --expect none --reason <why>' (that branch may be an older-fleet branch lock, a parked/reaped resume, or a merged-but-undeleted branch; if it is YOURS to continue, the quoted empty-lease adopt takes the FREE claim ref atomically — git rejects it if any machine holds the ref)"
+    # The refusal must be ACTIONABLE without being DANGEROUS (#2945 review). "git
+    # rejects it if any machine holds the ref" does NOT cover the case this guard
+    # exists for: an OLDER-fleet worker locks with the BRANCH and holds no claim ref,
+    # so `claim-ref=free` is true for it and the advertised empty-lease adopt WOULD
+    # succeed — a second machine on an actively-worked issue. Prose hedging ("if it
+    # is YOURS") is not a control: the readers are agents that run printed
+    # remediations literally. So the copy-pasteable command is printed ONLY when the
+    # endgame is demonstrably orphaned — zero open PRs on this issue's branch — using
+    # the same gh signal `release` already trusts for "somebody's endgame is live".
+    # Unknown (gh missing/failed, -1) withholds too: fail closed, never advertise a
+    # hand-away on an unread signal.
+    local prs remedy
+    prs="$(open_pr_count "$issue")"
+    if [ "$prs" = "0" ]; then
+      remedy="remediation='bash scripts/flow/claim.sh adopt $issue --expect none --reason <why>' open-prs=0 (no open PR: that branch is an older-fleet branch lock, a parked/reaped resume, or a merged-but-undeleted branch; the quoted empty-lease adopt takes the FREE claim ref atomically — git rejects it if any machine holds the claim ref)"
+    else
+      remedy="remediation=withheld open-prs=$prs (an open PR — or, at -1, an unreadable PR list — means someone's endgame may be LIVE, and an older-fleet worker holds only the BRANCH, so an empty-lease adopt WOULD succeed and create a SECOND writer; confirm ownership via the board and the PR author first, then see 'bash scripts/flow/claim.sh -h')"
+    fi
+    emit "LOST issue=$issue reason=legacy-branch-lock detail=$LEGACY_BRANCHES exists on $REMOTE claim-ref=free $remedy"
     return 2
   fi
 
@@ -550,27 +581,56 @@ cmd_adopt() {
   # expanding to "" must NEVER silently turn a compare-and-swap into a create.
   # The empty lease is opt-in via the explicit literal `none`.
   [ -n "$expect" ] || die_usage "adopt requires --expect <old-sha> (CAS against a HELD ref) or --expect none (empty lease: the claim ref must NOT exist — the sanctioned resume when an issue-<N>-* branch outlived its claim, #2945). An empty --expect '' is rejected on purpose."
+  # A hex --expect must be a FULL object name (40 hex sha1 / 64 hex sha256). Length
+  # was unchecked (#2945 review), and both failure shapes MISREPORT a caller bug:
+  # a TRUNCATED sha (`--expect abc123`, e.g. a bad `cut` in a caller) builds a lease
+  # git cannot resolve, so the push fails and the confirm read reports ADOPT-LOST —
+  # a race-loss verdict for a usage error — while a SHORT all-zero value (`--expect 0`)
+  # slipped into the all-zero branch below and silently became a CREATE instead of a
+  # compare-and-swap. This file is otherwise rigorous about separating usage / infra /
+  # lost-race, so both are now usage errors (exit 64).
   case "$expect" in
     none) mode="empty" ;;
     *[!0-9a-fA-F]*) die_usage "adopt: --expect takes a hex sha or the literal 'none' (got '$expect')" ;;
+    *)
+      case "${#expect}" in
+        40 | 64) : ;;
+        *) die_usage "adopt: --expect needs a FULL object name — 40 hex (sha1) or 64 hex (sha256) — or the literal 'none' (got '$expect', ${#expect} chars). A truncated sha cannot be resolved as a lease and would read as a lost race." ;;
+      esac
+      ;;
   esac
-  # An ALL-ZERO expected value is git's own "the ref must not exist", so it carries
-  # exactly the `none` intent — route it through the same AUDITED path (--reason
-  # required) instead of leaving a quiet create-with-no-record. Verified against the
-  # real origin: `--expect 000…0` does create the ref, so it cannot stay unaudited.
+  # An ALL-ZERO expected value (at full object-name length) is git's own "the ref must
+  # not exist", so it carries exactly the `none` intent — route it through the same
+  # AUDITED path (--reason required) instead of leaving a quiet create-with-no-record.
+  # Verified against the real origin: `--expect 000…0` does create the ref, so it
+  # cannot stay unaudited.
   case "$expect" in
     *[!0]*) : ;;
     *) mode="empty" ;;
   esac
 
-  local extra=""
+  # VALIDATE THE RECORDED TOKEN, NOT THE RAW TEXT (#2945 review). The audit value
+  # is what lands in the claim commit, so gating on `[ -n "$reason" ]` let '   ',
+  # '---', '…' or an expansion like "$UNSET_VAR " through and recorded them as
+  # `reason=unspecified` — indistinguishable from supplying no reason at all, which
+  # defeats the "record WHY" requirement. Sanitize FIRST, then require a token that
+  # actually says something: not the `unspecified` sentinel sanitize_field falls back
+  # to (so a literal `--reason unspecified` is refused too — it records nothing), and
+  # at least 3 recordable characters. Same fail-closed direction as `--expect ''`.
+  local extra="" reason_token=""
+  if [ -n "$reason" ]; then
+    reason_token="$(sanitize_field "$reason")"
+    if [ "$reason_token" = "unspecified" ] || [ "${#reason_token}" -lt 3 ]; then
+      die_usage "adopt: --reason must carry at least 3 recordable characters ([A-Za-z0-9._:/#-]); '$reason' records as '$reason_token', which is indistinguishable from no reason at all"
+    fi
+  fi
   if [ "$mode" = "empty" ]; then
     # The resume is a judgement call, so it MUST be self-documenting: the claim
     # commit records who took it (machine/actor/ts) AND why (reason).
-    [ -n "$reason" ] || die_usage "adopt --expect none requires --reason <why> (the resume is recorded in the claim commit: who took it AND why)"
-    extra="mode=empty-lease reason=$(sanitize_field "$reason")"
-  elif [ -n "$reason" ]; then
-    extra="mode=cas reason=$(sanitize_field "$reason")"
+    [ -n "$reason_token" ] || die_usage "adopt --expect none requires --reason <why> (the resume is recorded in the claim commit: who took it AND why)"
+    extra="mode=empty-lease reason=$reason_token"
+  elif [ -n "$reason_token" ]; then
+    extra="mode=cas reason=$reason_token"
   fi
 
   local sha lease adopt_err=""
@@ -634,8 +694,17 @@ cmd_adopt() {
   # nobody else can take it either. `cmd_claim` has had this identity check on both
   # of its failure paths from the start; `adopt` is now the ONLY way past the legacy
   # guard, so it needs the same idempotence.
+  # In CAS mode the same situation ALSO covers a VIOLATED compare-and-swap: the ref
+  # is at some Y != our --expect X, and Y happens to be ours. We still hold it (so
+  # exit 2 would abandon it), but reporting a plain `ADOPTED … from=X` would print a
+  # value the ref never had and make a FAILED CAS indistinguishable from a satisfied
+  # one. So the CAS path gets its OWN verdict naming BOTH shas (#2945 review).
   if [ -n "$now" ] && holder_is_us "$now" "$actor"; then
-    emit "ADOPTED issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_desc "$now") from=$expect (re-entrant)"
+    if [ "$mode" = "empty" ]; then
+      emit "ADOPTED issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_desc "$now") from=$expect (re-entrant)"
+    else
+      emit "ADOPTED issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_desc "$now") (re-entrant, lease-mismatch expected=$expect actual=$now — we DO hold the ref, but the compare-and-swap precondition did NOT hold)"
+    fi
     return 0
   fi
   emit "ADOPT-LOST issue=$issue ref=refs/claims/issue-$issue expected=$expect actual=${now:-<gone>} $(holder_token "$now")"
