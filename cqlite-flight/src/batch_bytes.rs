@@ -92,6 +92,11 @@
 //!      = 12 MiB   <=  16 MiB (B4 at concurrency 1)
 //! ```
 //!
+//! Both sides of that `<=` are governed egress capacity. The producer's row
+//! buffer and the encoder's queued `FlightData` are further server-side terms
+//! that live in the remaining B4 headroom and are NOT deducted here, so this is
+//! not a total per-query working-set bound (roborev job 12 F3).
+//!
 //! **Read "SERVER-SIDE" literally.** The governed quantity is the capacity bytes
 //! the SERVER holds on the egress path — rows being materialized, batches queued
 //! in the `do_get` channel, and yielded batches the consumer has not yet dropped.

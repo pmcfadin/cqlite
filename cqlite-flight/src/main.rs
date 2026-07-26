@@ -80,7 +80,10 @@ struct Args {
     /// = max(12 MiB, ~8.4 MiB) = 12 MiB PER STREAM at the shipped defaults —
     /// size a deployment against that, not against the 8 MiB one-batch figure.
     /// The bound is over SERVER-SIDE residency: bytes this process holds on the
-    /// egress path. Batches a client retains after receiving them are the
+    /// egress path. It covers GOVERNED EGRESS CAPACITY only, so it is a floor
+    /// for sizing rather than a per-stream total: the row buffer and the
+    /// encoder's queued `FlightData` (~4 MiB at defaults) are additional
+    /// server-side memory on the same stream and are not counted here. Batches a client retains after receiving them are the
     /// client's memory and are deliberately not charged here. `0` degrades to
     /// strict one-batch-at-a-time egress, never a hang.
     #[arg(

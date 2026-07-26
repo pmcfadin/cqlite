@@ -396,8 +396,8 @@ consumer that retains batch N while awaiting N+1 would HANG the stream (the defe
 the credit, the producer parks in `EgressCredit::reserve`, and the batch the consumer waits for can
 never be built). The stream SHALL NOT be hangable by any consumer behaviour.
 
-`MeteredDoGetStream` SHALL therefore release the OLDEST deferred permit when, and only when, all of
-the following hold at a `Poll::Pending`:
+`MeteredDoGetStream` SHALL therefore release deferred permits OLDEST-FIRST when, and only when, all
+of the following hold at a `Poll::Pending`:
 
 1. the inner stream declined to yield (the channel is empty, so no batch is on its way);
 2. a reservation is parked on the credit pool RIGHT NOW — observed as a GAUGE maintained by an RAII
@@ -412,7 +412,23 @@ valve that could lose that race is not a valve. Releasing there is CORRECT rathe
 concession — see the server-side-residency framing above: the retained batch's bytes are the
 consumer's, and the governor correctly stops charging for them.
 
-Each firing SHALL be counted so "the valve fires on the normal path" is a test-detectable
+The release SHALL be SIZED against observed facts, never assumed to be enough: releasing a single
+permit and returning `Pending` is NOT sufficient and SHALL NOT be the behaviour. Whenever the oldest
+deferred permit charges less than the parked reservation needs — i.e. whenever batch capacities are
+non-uniform — one release leaves the producer parked, and at that point NO wakeup source remains
+(the receiver waker needs a send from the parked producer, and the park signal needs a NEW park that
+cannot occur while the producer is already awaiting), so the stream wedges outright: the exact
+failure this requirement forbids.
+
+The valve SHALL therefore release oldest-first until the credit the pool can give the parked
+reservation reaches what that reservation is asking for, and SHALL stop at that instant — NOT ONE
+PERMIT FURTHER. Both quantities SHALL be read from observed gauges (the parked reservation's want,
+maintained by the same RAII guard as the parked-now gauge so a cancelled park clears it, and the
+pool's free credit accumulated from the permits actually returned) rather than inferred, so that a
+producer charging concurrently cannot induce over-release. A blanket drain of the deferred slot is
+FORBIDDEN: it would silently loosen the bound the valve exists to protect.
+
+Each permit released SHALL be counted so "the valve fires on the normal path" is a test-detectable
 regression rather than a silent loosening of the bound.
 
 #### Scenario: a retaining consumer still makes progress
@@ -430,9 +446,23 @@ regression rather than a silent loosening of the bound.
   parked
 - **THEN** repeated speculative `Pending` polls do NOT release that credit
 - **AND WHEN** a reservation larger than the free pool is started and provably parks
-- **THEN** the next poll releases exactly one deferred permit and the parked reservation is admitted
+- **THEN** the next poll releases that one deferred permit — the minimum that admits the parked
+  reservation — and the parked reservation is admitted
 - **AND** a full drain through the real Flight encoder — which drops each batch before asking for the
   next — fires the valve zero times
+
+#### Scenario: non-uniform batch capacities do not wedge the stream
+
+- **GIVEN** a retaining consumer holding SEVERAL deferred permits whose capacities are deliberately
+  NON-UNIFORM, oldest smallest — so releasing only the oldest frees strictly less than the parked
+  reservation needs
+- **THEN** the valve releases oldest-first until the reservation is admitted, and every row is
+  delivered
+- **AND** the test carries a liveness timeout rather than a correctness threshold (#2642), since the
+  regression it guards is a HANG
+- **AND** constraining the valve to a single release per poll SHALL make this scenario fail — the
+  uniform-capacity scenarios above cannot detect that defect, which is why this one is required
+  (roborev job 12 F1)
 
 ### Requirement: egress credit is released on every stream-termination path
 

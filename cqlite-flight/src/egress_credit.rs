@@ -144,8 +144,18 @@ pub(crate) use crate::egress_observation::EgressObservation;
 ///
 /// ```text
 /// 12 MiB = 12,582,912 B -> 12288 permits  >=  8198  =>  no clamp
-/// contract = max(12 MiB, 8,394,752 B) = 12 MiB  <=  16 MiB (B4), 4 MiB spare
+/// contract = max(12 MiB, 8,394,752 B) = 12 MiB  <=  16 MiB (B4)
 /// ```
+///
+/// **What the `<= 16 MiB` comparison does and does NOT say.** Both sides are
+/// read in GOVERNED EGRESS CAPACITY only — the quantity this pool meters. Two
+/// server-side terms on the same query are real but sit OUTSIDE this accounting
+/// and are not deducted above: the producer's `Vec<QueryRow>` row buffer
+/// (resident alongside the batch until `buffer.clear()`) and the encoder's
+/// queued `FlightData` (an encoded copy of up to one batch's payload, ~4 MiB at
+/// defaults). So the headroom between 12 MiB and B4's 16 MiB is NOT free space
+/// to spend — it is where those terms live. Do not restate this line as a total
+/// per-query working-set bound (roborev job 12 F3).
 ///
 /// * **Guaranteed**: a single worst-case reservation fits without clamping for
 ///   every schema of at most **2048 Arrow array nodes** — `permits_for` of a
@@ -165,8 +175,10 @@ pub(crate) use crate::egress_observation::EgressObservation;
 /// * Narrow shapes are unaffected either way — the 4-deep batch-count channel
 ///   binds first there (a 192 KiB narrow batch is ~64 to the pool).
 ///
-/// `max(12 MiB, 8 MiB + ~2n KiB) ≤ 16 MiB` — inside the ratified **B4 ≤16Mi
-/// per-query working set at concurrency 1**, asserted from the imported
+/// `max(12 MiB, 8 MiB + ~2n KiB) ≤ 16 MiB` — the GOVERNED EGRESS CAPACITY is
+/// inside the ratified **B4 ≤16Mi per-query working set at concurrency 1**
+/// (the row buffer and the encoder's queued `FlightData` are additional
+/// server-side terms outside this figure, per the note above), asserted from the imported
 /// constants by `egress_credit_tests::composition_stays_inside_b4`, with the
 /// no-clamp property pinned by
 /// `egress_credit_tests::a_worst_case_default_reservation_does_not_clamp`.
