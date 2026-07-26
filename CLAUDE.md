@@ -379,6 +379,13 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   deletes the ref (refuses under an open PR without `--force`). Maintain the liveness heartbeat
   (`scripts/flow/claim-heartbeat.sh beat <N>`, refreshed at claim + every stage transition);
   `flow-board` reaps deterministically (age > 4h AND no open PR) (#2089).
+  **The lock is a plain `git push`, so git — not just `gh` — must be authenticated (#2942).** They
+  are separate credential paths: an authenticated `gh` with an unwired git fails every claim with
+  `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
+  retryable)` instead of the old misleading `reason=infra (transient — retry)` — do not retry it,
+  fix the box (`gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes`, which also
+  probes board access functionally rather than trusting the `project` scope string). The three
+  worker-environment deltas and the messages that identify them: `docs/development/fleet-runbook.md`.
 - **Supervisor-authored machine claim + CI reaper (#2655/#2499)**: liveness is now MECHANISM-driven,
   not prose. `worker-supervisor.sh` stamps `refs/machine-claims/<machine>` (issue+supervisor-PID+ts)
   via `claim-heartbeat.sh stamp` at every spawn, refreshes it each iteration, and clears it on a

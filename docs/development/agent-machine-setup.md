@@ -18,12 +18,35 @@ without it, it prints the exact command for each gap. It verifies, in order:
 2. **Gate accelerators** (issue #1848) — `sccache`, `cargo-nextest`, modern bash
    (≥4.3). Detection mirrors the gate's own `ACCEL_*` block, so the script and
    `scripts/agent-gate.sh` can never disagree.
-3. **`gh` auth + the `project` scope** — the board is the sole dispatch authority
-   (Path A, #1886). Missing scope → `gh auth refresh -s project`.
+3. **`gh` auth + board access** — the board is the sole dispatch authority
+   (Path A, #1886). The verdict is a **read-only functional probe** of the board, not
+   a `project` scope-string match (#2942 — see the deltas below); the scope check
+   survives only as a cheap pre-filter. Missing scope → `gh auth refresh -s project`.
+   Point it elsewhere with `CQLITE_PROJECT_OWNER` / `CQLITE_PROJECT_NUMBER`.
+3b. **git push credentials** (#2942) — a *separate* credential path from `gh`.
+   Under `--yes` it configures one; the token value is never written to disk.
 4. **roborev** — installed, and this machine's *configured* agent resolves.
 5. **Datasets** + `CQLITE_DATASETS_ROOT` guidance.
 6. **Health check** — runs the gate's fmt smoke and prints the authoritative
    `accelerators:` line.
+
+## Three deltas that fail with a message pointing away from the cause (#2942)
+
+Each of these cost a worker a diagnosis round-trip on a Linux box. They are listed by
+the **message you will actually see**, because none of the three reads as its real cause.
+The bootstrap now checks the first two and fails loudly; the third is a hand-typed footgun.
+
+| You see | Real cause | Working form |
+|---|---|---|
+| `fatal: could not read Username for 'https://github.com'` | `gh` is authenticated but **git is not** — they are separate credential paths. `scripts/flow/claim.sh` + `claim-heartbeat.sh` push with plain git on 10+ call sites, so the claim protocol itself does not work. | `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes` (configures a helper that dereferences `$GH_TOKEN` at call time). |
+| `gh project …` fails for a missing **`read:org`** scope on a token whose scopes DO include `project` | A scope match is evidence about a token, not about the operation. `gh project item-edit` needs `read:org`; the equivalent GraphQL mutation does not. | Widen the token (`gh auth refresh -s read:org`), **or** do board writes through the `updateProjectV2ItemFieldValue` GraphQL mutation — it succeeds with the same token. |
+| `stale info` from a **bare** `git push --force-with-lease`, even when local and remote refs demonstrably match | The bare form leases against a remote-tracking ref your checkout may never have fetched. | Always the explicit CAS form: `git push --force-with-lease=<ref>:<sha>` (what the flow scripts already use). |
+
+**Claim verdicts encode this too (#2942).** An unauthenticated claim push now reports
+`CLAIM: ERROR reason=auth … (NOT retryable …)` and names the fix. It used to report
+`reason=infra … (transient — retry)`, which sent workers into a retry loop on a machine
+fault that can never self-clear. `reason=infra (transient — retry)` still means what it
+says: a real blip, retry it.
 
 ## Accelerators: what the SUMMARY line means
 

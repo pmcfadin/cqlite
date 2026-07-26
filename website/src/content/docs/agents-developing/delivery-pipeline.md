@@ -208,6 +208,18 @@ lock**.
    (`claim.sh verify <N>` re-checks holder identity later); on `CLAIM LOST`, back off and take the next
    eligible item.
 
+**Machine prerequisite: git itself must be authenticated (issue #2942).** The lock is a plain `git push`,
+and `gh` auth is a *separate* credential path — a box with an authenticated `gh` CLI but no git credential
+helper fails every claim with `fatal: could not read Username for 'https://github.com'`, so the claim
+protocol does not work at all while `gh auth status` reports a healthy machine. `claim.sh` classifies that
+signature as **`CLAIM: ERROR reason=auth … (NOT retryable)`** naming the fix, *not* the old
+`reason=infra … (transient — retry)` that sent workers into a retry loop on a fault which can never
+self-clear; `reason=infra (transient — retry)` continues to mean a genuine, retryable blip. Fix a box with
+`gh auth setup-git` or `bash scripts/bootstrap-agent-machine.sh --yes`, whose preflight checks git push
+credentials (configuring a helper that dereferences `$GH_TOKEN` at call time — never writing the token to
+disk) and probes **board access functionally** instead of trusting the `project` scope string. Full delta
+list with the identifying messages: `docs/development/fleet-runbook.md`.
+
 Another machine that finds an existing claim can `git fetch` the branch to **resume** that work instead of
 colliding; a **reaped** claim is adopted via compare-and-swap — `claim.sh adopt <N> --expect <old-sha>`,
 which replaces the ref with force-with-lease so a resurrected original holder loses the lease and detects
