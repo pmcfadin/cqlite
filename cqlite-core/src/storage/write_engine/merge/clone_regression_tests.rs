@@ -75,6 +75,7 @@ fn merger_over_runs(runs: Vec<Vec<MergeEntry>>, schema: TableSchema) -> KWayMerg
         max_purgeable_timestamp: None,
         schema_arc: std::sync::Arc::new(schema.clone()),
         schema,
+        _egress_slot: None,
     }
 }
 

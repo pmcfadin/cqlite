@@ -173,19 +173,21 @@ impl SSTableRowIteratorAdapter {
     /// caller-supplied `Arc<SSTableReader>` directly via
     /// [`drive_compaction_stream`]. See the module doc for the file-lifetime
     /// and UDT-registry contract differences from the path-based `open`.
+    ///
+    /// `channel_capacity` (issue #2765) is the merge-scoped adaptive egress
+    /// capacity snapshotted ONCE by the `KWayMerger` constructor and shared by
+    /// every source channel of that merge.
     pub(crate) fn open_from_reader(
         reader: Arc<SSTableReader>,
         run_index: usize,
         schema: &TableSchema,
         scan_cancel: ScanCancel,
         token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
+        channel_capacity: usize,
     ) -> Result<Self> {
         let schema = schema.clone();
         // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
         let adapter_cancel = scan_cancel.clone();
-        // Issue #2765: register this starting merge and derive its per-merge
-        // channel capacity from the now-live concurrency (see `egress_budget`).
-        let (channel_capacity, budget_guard) = egress_budget::begin_merge();
         let (sender, receiver) = std::sync::mpsc::sync_channel(channel_capacity);
         // Issue #2419 roborev job 1733: this adapter's own sent-count, shared
         // with the producer thread — see `SSTableRowIteratorAdapter`'s field doc.
@@ -223,7 +225,8 @@ impl SSTableRowIteratorAdapter {
             scan_cancel: adapter_cancel,
             sent_count,
             received_count: 0,
-            _budget_guard: budget_guard,
+            #[cfg(test)]
+            egress_channel_capacity: channel_capacity,
         })
     }
 
@@ -316,6 +319,10 @@ impl KWayMerger {
         }
         schema.validate_dropped_columns()?;
 
+        // Issue #2765: register this k-way merge ONCE and snapshot the adaptive
+        // per-channel egress capacity shared by every source channel below.
+        let (channel_capacity, egress_slot) = egress_budget::begin_merge();
+
         let mut runs = Vec::with_capacity(readers.len());
         for (run_index, reader) in readers.into_iter().enumerate() {
             let adapter = SSTableRowIteratorAdapter::open_from_reader(
@@ -324,6 +331,7 @@ impl KWayMerger {
                 schema,
                 scan_cancel.clone(),
                 token_bound,
+                channel_capacity,
             )?;
             runs.push(RunReader::new(
                 Box::new(adapter) as Box<dyn SSTableRowIterator>
@@ -341,6 +349,7 @@ impl KWayMerger {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            _egress_slot: Some(egress_slot),
         })
     }
 }

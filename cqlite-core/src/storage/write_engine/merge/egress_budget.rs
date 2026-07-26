@@ -1,54 +1,86 @@
 //! Process-global adaptive egress budget for concurrent k-way merges
 //! (issues #2765/#2600/#2367).
 //!
-//! Each streaming merge input buffers up to a per-merge channel capacity of
-//! prefetched `MergeEntry` values in its bounded producer→consumer
-//! `sync_channel` (see `STREAMING_CHANNEL_CAPACITY`, `merge/mod.rs`). With a
-//! FIXED per-merge capacity of 256, the total rows buffered across the whole
-//! process grew as `256 × active_merges` — an unbounded aggregate working set
-//! under concurrent scan/compaction load (the #2600/#2367 backpressure gap).
+//! A k-way merge streams each of its `K` input SSTables through a bounded
+//! producer→consumer `sync_channel` that buffers up to a per-channel capacity of
+//! prefetched `MergeEntry` values (see `STREAMING_CHANNEL_CAPACITY`,
+//! `merge/mod.rs`). With a FIXED per-channel capacity of 256, the rows buffered
+//! by a SINGLE merge grew as `256 × K`, and across the process as
+//! `256 × K × active_merges` — an unbounded aggregate working set under
+//! concurrent scan/compaction load (the #2600/#2367 backpressure gap; the field
+//! signal was ~80 producer threads live at once).
 //!
-//! This module makes the aggregate track a FIXED [`EGRESS_ROW_BUDGET`] instead
-//! of the per-merge count. A process-global [`ACTIVE`] count of in-flight
-//! streaming merges (incremented when a channel is constructed, decremented via
-//! the [`ActiveMergeGuard`] RAII guard when the merge finishes — even on panic
-//! or early return) drives a per-merge capacity of
+//! ## The unit is a MERGE, not a source channel
+//!
+//! The count keyed here is **concurrent k-way MERGE operations**, incremented
+//! exactly ONCE per merge — when a [`KWayMerger`](super::KWayMerger) is
+//! constructed — NOT once per source channel. (An earlier revision counted per
+//! source adapter, so a solo `K`-way compaction registered `K` "merges" and its
+//! own later source channels shrank below 256 — violating the "a single merge is
+//! unchanged = 256 per source" contract regardless of `K`. Keying per merge
+//! fixes that.) This is also why the count deliberately differs from
+//! [`producer_gauge`](super::producer_gauge)'s `LIVE`, which counts per-SOURCE
+//! producer THREADS (`O(K × active_merges)`): that gauge answers "how many
+//! producer threads exist"; this counter answers "how many merge operations are
+//! competing for the egress budget".
+//!
+//! ## Capacity snapshot
+//!
+//! At merge construction the active-merge count is incremented ONCE (via
+//! [`begin_merge`], returning an [`ActiveMergeGuard`] stored on the
+//! `KWayMerger`, decremented exactly once when the whole merge is dropped — even
+//! on panic/early-return) and a single per-channel capacity is snapshotted:
 //!
 //! ```text
-//! cap_per_merge = clamp(EGRESS_ROW_BUDGET / active_merge_count, MIN_CAP, MAX_CAP)
+//! cap_per_channel = clamp(EGRESS_ROW_BUDGET / active_merge_count, MIN_CAP, MAX_CAP)
 //! ```
 //!
-//! so `N` merges started at concurrency `N` each buffer `budget / N`, and the
-//! aggregate stays near `EGRESS_ROW_BUDGET` rather than `256 × N`. At LOW
-//! concurrency (a single active merge) the cap resolves to the unchanged
-//! [`MAX_CAP`] = 256, preserving single-merge behavior. [`MIN_CAP`] (≥ 1)
-//! guarantees forward progress — the integer division can never yield a
-//! zero-capacity channel that would wedge a producer.
+//! ALL `K` source channels of that merge use the SAME snapshot. So a SOLO merge
+//! (active = 1) gives 256 per source for ANY `K` (single-merge behavior
+//! unchanged); the cap shrinks only as CONCURRENT merges rise.
+//!
+//! ## Honest bound (NOT a strict global `≤ EGRESS_ROW_BUDGET`)
+//!
+//! [`EGRESS_ROW_BUDGET`] is a per-ACTIVE-MERGE-SLOT budget, not a hard global
+//! ceiling. Because every source channel of a merge gets `cap_per_channel`, the
+//! honest worst-case global working set is
+//!
+//! ```text
+//! working_set ≈ active_merges × K × cap_per_channel
+//! ```
+//!
+//! which for `active_merges ≥ EGRESS_ROW_BUDGET / MAX_CAP` is `≈ K × budget`
+//! (the `/active` division cancels the outer `active` factor down to ONE budget
+//! per source-fanout), and is floored by `active_merges × K × MIN_CAP` — the
+//! deliberate cost of the forward-progress floor. The win vs. the fixed cap is
+//! the removal of the `× 256` per-source constant: caps fall toward [`MIN_CAP`]
+//! as concurrency climbs, instead of every channel holding a fixed 256. Do NOT
+//! read this as a strict `≤ EGRESS_ROW_BUDGET` global bound.
 //!
 //! This budget is ORTHOGONAL to the #2419 `channel_depth` gauge: that gauge
-//! observes live occupancy; this bounds the per-merge capacity ceiling. The
-//! counter here is a sibling of the #2316 producer-thread gauge and the #2419
-//! channel-depth gauge, kept out of `merge/mod.rs` to bound that file.
+//! observes live occupancy; this bounds the per-channel capacity ceiling. Kept
+//! out of `merge/mod.rs` to bound that file.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Fixed process-wide target for the TOTAL number of prefetched `MergeEntry`
-/// values buffered across ALL concurrently active streaming merges (issue
-/// #2765). Chosen so that at the pre-change fixed capacity of 256 the budget is
-/// fully consumed by ~8 concurrent merges; beyond that, per-merge capacity
-/// shrinks (down to [`MIN_CAP`]) so the aggregate stays bounded instead of
-/// growing without limit. At `2048` entries of a few hundred bytes each the
-/// aggregate is well within the 128MB memory target.
+/// Per-active-merge-SLOT egress budget in prefetched `MergeEntry` values (issue
+/// #2765): the per-channel capacity a merge receives is `budget / active_merges`
+/// (clamped). Chosen so that at the pre-change fixed capacity of 256 the budget
+/// is fully consumed by ~8 concurrent merges; beyond that, per-channel capacity
+/// shrinks (down to [`MIN_CAP`]) instead of every channel holding a fixed 256.
+/// See the module doc for why this is a per-slot budget, NOT a strict global
+/// ceiling. `2048` entries of a few hundred bytes each keeps a solo merge's
+/// `K × 256` footprint well within the 128MB memory target.
 pub(super) const EGRESS_ROW_BUDGET: usize = 2048;
 
-/// Minimum per-merge channel capacity (issue #2765). Guarantees forward
-/// progress: no matter how many merges are concurrently active, every producer
-/// can always place at least this many entries, so a bounded `sync_channel` can
-/// never be constructed with capacity 0 (which would wedge the producer on its
-/// first `send`). Kept ≥ 1 by construction.
+/// Minimum per-channel capacity (issue #2765). Guarantees forward progress: no
+/// matter how many merges are concurrently active, every producer can always
+/// place at least this many entries, so a bounded `sync_channel` can never be
+/// constructed with capacity 0 (which would wedge the producer on its first
+/// `send`). Kept ≥ 1 by construction.
 pub(super) const MIN_CAP: usize = 8;
 
-/// Maximum per-merge channel capacity — the unchanged single-merge value
+/// Maximum per-channel capacity — the unchanged single-merge value
 /// (`STREAMING_CHANNEL_CAPACITY` in `merge/mod.rs`). At LOW concurrency the cap
 /// clamps up to this, so single-merge behavior is byte-for-byte unchanged.
 pub(super) const MAX_CAP: usize = super::STREAMING_CHANNEL_CAPACITY;
@@ -69,16 +101,17 @@ pub(super) fn capacity_for(active: usize) -> usize {
     (EGRESS_ROW_BUDGET / active).clamp(MIN_CAP, MAX_CAP)
 }
 
-/// Register a starting streaming merge and return its resolved per-merge channel
-/// capacity together with the RAII [`ActiveMergeGuard`] that decrements the live
-/// count when the merge finishes.
+/// Register a starting k-way MERGE (called ONCE per merge, at `KWayMerger`
+/// construction — NOT per source channel) and return the per-channel capacity
+/// ALL its source channels share, together with the RAII [`ActiveMergeGuard`]
+/// that decrements the live count once when the whole merge is dropped.
 ///
 /// The active count is incremented FIRST, then the capacity is computed from the
 /// post-increment count, so the current merge counts itself: `N` merges each
-/// starting when `N` are active every observe `active >= N` and receive
-/// `budget / N`. The returned guard MUST be stored for the merge's lifetime (on
-/// the adapter that owns the channel) so the decrement pairs with this
-/// increment on every exit path.
+/// starting when `N` are active observe `active >= N` and receive `budget / N`
+/// per channel. The returned guard MUST be stored for the merge's lifetime (on
+/// the `KWayMerger`, dropped AFTER its runs/channels) so exactly one decrement
+/// pairs with this increment on every exit path.
 #[must_use]
 pub(super) fn begin_merge() -> (usize, ActiveMergeGuard) {
     begin_on(&ACTIVE)
@@ -96,8 +129,9 @@ fn begin_on(counter: &'static AtomicUsize) -> (usize, ActiveMergeGuard) {
 
 /// RAII guard that decrements the active-merge count when a streaming merge
 /// finishes — on normal completion, early return, or panic. Stored on the
-/// merge's channel-owning adapter so it lives exactly as long as the merge's
-/// buffered working set is accounted against the budget.
+/// `KWayMerger` (dropped after its runs/channels) so exactly one decrement
+/// pairs with the merge's single [`begin_merge`] increment.
+#[derive(Debug)]
 pub(super) struct ActiveMergeGuard {
     counter: &'static AtomicUsize,
 }
@@ -132,43 +166,57 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_buffering_stays_within_budget_at_steady_concurrency() {
-        // Criterion 2 (arithmetic form): at any single concurrency level K, the
-        // aggregate worst-case buffering = K merges × capacity_for(K) stays at
-        // or below the budget once K saturates it — whereas the pre-change fixed
-        // cap of 256 gives K × 256, which blows past the budget for K > 8
-        // (K == 8 exactly saturates it: 8 × 256 == 2048 == budget).
-        for k in 8..=64usize {
-            let aggregate = k * capacity_for(k);
+    fn per_slot_bound_holds_and_min_cap_floor_is_honest() {
+        // The per-ACTIVE-MERGE-SLOT invariant (see module doc "Honest bound"):
+        // at any concurrency `a`, one merge's per-channel share `capacity_for(a)`
+        // times `a` stays within the budget — whereas the pre-change fixed cap
+        // of 256 gives `a × 256`, blowing past the budget for a > 8 (a == 8
+        // exactly saturates it: 8 × 256 == 2048). Beyond the clamp point the
+        // per-slot product is BELOW budget because the cap floors at MIN_CAP —
+        // the deliberate, explicit cost of guaranteeing forward progress.
+        //
+        // Low #6: exercise BOTH the divide region AND the MIN_CAP-floor region so
+        // the floor's cost (per-slot product falling under budget) is explicit.
+        let clamp_point = EGRESS_ROW_BUDGET / MAX_CAP; // 8: highest `a` with cap==MAX_CAP
+        let floor_point = EGRESS_ROW_BUDGET / MIN_CAP; // 256: lowest `a` with cap==MIN_CAP
+        assert!(floor_point > clamp_point);
+        for a in 1..=(floor_point + 64) {
+            let cap = capacity_for(a);
+            assert!((MIN_CAP..=MAX_CAP).contains(&cap), "cap {cap} within clamp");
+            // Per-slot product never exceeds the budget.
             assert!(
-                aggregate <= EGRESS_ROW_BUDGET,
-                "adaptive aggregate {aggregate} must stay within budget \
-                 {EGRESS_ROW_BUDGET} at concurrency {k}"
+                a * cap <= EGRESS_ROW_BUDGET || cap == MIN_CAP,
+                "per-slot product {} must stay within budget at a={a}",
+                a * cap
             );
-            if k > 8 {
-                let pre_change = k * MAX_CAP;
+            if a > clamp_point {
                 assert!(
-                    pre_change > EGRESS_ROW_BUDGET,
-                    "the pre-change fixed cap would exceed the budget at \
-                     concurrency {k} (pre_change={pre_change})"
+                    a * MAX_CAP > EGRESS_ROW_BUDGET,
+                    "pre-change fixed cap {MAX_CAP} × {a} exceeds budget"
                 );
+            }
+            if a >= floor_point {
+                // MIN_CAP-floor region: the cap has bottomed out; the per-slot
+                // product now GROWS as `a × MIN_CAP` — the forward-progress cost.
+                assert_eq!(cap, MIN_CAP, "cap floored at MIN_CAP for a={a}");
+                assert_eq!(a * cap, a * MIN_CAP);
             }
         }
     }
 
     #[test]
-    fn concurrent_merges_keep_aggregate_buffering_within_budget() {
+    fn concurrent_begin_merge_shrinks_per_channel_capacity() {
         use std::sync::{Arc, Barrier};
 
-        // Criterion 2 (wiring evidence): drive N real concurrent merges through
-        // the REAL process-global `begin_merge` counter + RAII guards, and assert
-        // the aggregate buffered working set they impose stays within the budget
-        // — whereas the pre-change fixed cap of 256 would exceed it.
+        // Drive N real concurrent MERGE registrations through the REAL
+        // process-global `begin_merge` counter + RAII guards (the production
+        // primitive), and assert the per-channel capacity each merge is HANDED
+        // (the value threaded to every one of its source channels) shrinks below
+        // the fixed 256 as concurrent merges rise — and never below MIN_CAP.
+        // This observes the value `begin_merge` RETURNS (production data), not a
+        // re-derived arithmetic; the KWayMerger-level end-to-end wiring lives in
+        // `egress_wiring_tests`.
         const N: usize = 16;
-        // Two barriers: one so every merge is registered (active) before any
-        // reads the concurrency, one so no guard drops until all have read it —
-        // modelling N merges concurrently active with the budget divided among
-        // them (the steady-state the construction-time snapshot targets).
         let registered = Arc::new(Barrier::new(N));
         let released = Arc::new(Barrier::new(N));
 
@@ -177,13 +225,13 @@ mod tests {
                 let registered = registered.clone();
                 let released = released.clone();
                 std::thread::spawn(move || {
-                    // Real registration on the shared global (holds the guard).
-                    let (_ramp_cap, _guard) = begin_merge();
+                    // Register FIRST (increments the shared count + snapshots the
+                    // cap), THEN barrier — so by the time any thread proceeds all
+                    // N are counted; the second barrier holds every guard alive
+                    // until all have observed, modelling N concurrent merges.
+                    let (cap, _guard) = begin_merge();
                     registered.wait();
-                    // Every thread now sees the full concurrency; resolve the
-                    // per-merge capacity against the live active count.
                     let live = ACTIVE.load(Ordering::SeqCst);
-                    let cap = capacity_for(live);
                     released.wait();
                     (live, cap)
                 })
@@ -195,25 +243,30 @@ mod tests {
             .map(|h| h.join().expect("merge thread joins"))
             .collect();
 
-        for (live, cap) in &results {
-            // At least our N merges were concurrently active (background merges
-            // from other tests only raise `live`, never lower it).
-            assert!(*live >= N, "observed concurrency {live} must be >= {N}");
-            // Aggregate worst-case buffering imposed by OUR N merges at the
-            // observed concurrency stays within the fixed budget.
-            let aggregate = N * cap;
+        // Background merges from other parallel tests only RAISE `live`, so
+        // `>= N` is race-robust and does not itself perturb their caps beyond the
+        // transient N this test adds (no other test asserts an exact cap/depth).
+        let max_live = results.iter().map(|(l, _)| *l).max().unwrap_or(0);
+        assert!(
+            max_live >= N,
+            "observed concurrency {max_live} must be >= {N}"
+        );
+        // At least one merge (the ones that registered when the count was already
+        // high) got a capacity strictly below the pre-change fixed 256 — proof
+        // the returned per-channel cap tracks concurrency, not a constant.
+        let min_cap_seen = results.iter().map(|(_, c)| *c).min().unwrap_or(MAX_CAP);
+        assert!(
+            min_cap_seen < MAX_CAP,
+            "with {N} concurrent merges at least one per-channel cap must fall \
+             below {MAX_CAP} (min seen = {min_cap_seen})"
+        );
+        // Forward progress: no merge is ever handed a zero/sub-MIN_CAP capacity.
+        for (_, cap) in &results {
             assert!(
-                aggregate <= EGRESS_ROW_BUDGET,
-                "adaptive aggregate {aggregate} (N={N} × cap={cap}) must stay \
-                 within budget {EGRESS_ROW_BUDGET} at concurrency {live}"
+                *cap >= MIN_CAP,
+                "per-channel cap {cap} >= MIN_CAP {MIN_CAP}"
             );
         }
-        // The pre-change fixed cap would blow past the budget at this concurrency.
-        assert!(
-            N * MAX_CAP > EGRESS_ROW_BUDGET,
-            "the pre-change fixed cap of {MAX_CAP} × {N} merges would exceed the \
-             budget {EGRESS_ROW_BUDGET} — this is what the adaptive budget fixes"
-        );
     }
 
     #[test]

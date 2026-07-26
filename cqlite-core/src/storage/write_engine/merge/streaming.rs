@@ -949,6 +949,7 @@ mod tests {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         }
     }
 

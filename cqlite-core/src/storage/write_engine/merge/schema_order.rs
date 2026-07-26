@@ -174,6 +174,7 @@ mod tests {
             max_purgeable_timestamp: None,
             schema_arc: Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         }
     }
 
