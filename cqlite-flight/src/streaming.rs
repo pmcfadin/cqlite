@@ -348,9 +348,13 @@ pub(crate) fn spawn_streaming(
         // `error_tx` to drop FIRST: emit → then `error_tx` drops (closing the
         // channel / ending the client stream) → then `_subphase_install`
         // uninstalls the thread-local (no leak onto a reused blocking-pool thread).
+        // Roborev M1 — install the sink ONLY when metrics are actually collected;
+        // with the meter off, `install(None)` makes every timing site inert (ZERO
+        // `Instant::now()` on the hot loop for a meter-off build).
         let subphase = Arc::new(cqlite_core::observability::StreamSubPhaseTimings::default());
-        let _subphase_install =
-            cqlite_core::observability::stream_subphase::install(Some(subphase.clone()));
+        let _subphase_install = cqlite_core::observability::stream_subphase::install(
+            cqlite_core::observability::metrics_active().then(|| subphase.clone()),
+        );
         let error_tx = tx.clone();
         let _subphase_emit = crate::obs::StreamSubPhaseEmitter::new(subphase);
         let mut sink = ChannelSink {

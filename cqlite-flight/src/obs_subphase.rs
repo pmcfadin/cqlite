@@ -85,25 +85,20 @@ fn emit_stream_subphase_samples(timings: &StreamSubPhaseTimings) {
 /// records whatever sub-phase time it accrued.
 pub struct StreamSubPhaseEmitter {
     timings: Arc<StreamSubPhaseTimings>,
-    emitted: bool,
 }
 
 impl StreamSubPhaseEmitter {
     /// Wrap the per-request accumulator so its samples are emitted at drop.
     pub fn new(timings: Arc<StreamSubPhaseTimings>) -> Self {
-        Self {
-            timings,
-            emitted: false,
-        }
+        Self { timings }
     }
 }
 
 impl Drop for StreamSubPhaseEmitter {
     fn drop(&mut self) {
-        if self.emitted {
-            return;
-        }
-        self.emitted = true;
+        // `Drop` runs exactly once, so the emission is unconditional (no
+        // "already-emitted" guard is reachable). A sub-phase that accumulated no
+        // time emits no sample (`emit_stream_subphase_samples` skips zero buckets).
         emit_stream_subphase_samples(&self.timings);
     }
 }

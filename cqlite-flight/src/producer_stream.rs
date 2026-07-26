@@ -447,6 +447,32 @@ mod tests {
         }
     }
 
+    /// A [`RowStepper`] that sleeps in `step_row` and attributes MOST of that
+    /// sleep to the pull-wait accumulator (simulating a BLOCKING merge-input recv)
+    /// before completing — so a test can prove the drive loop SUBTRACTS recv-wait
+    /// from the `stream_merge` bucket (issue #2819 B2).
+    struct RecvWaitStepper {
+        sleep: std::time::Duration,
+        injected_wait_nanos: u64,
+        done: bool,
+    }
+
+    impl RowStepper for RecvWaitStepper {
+        fn step_row(&mut self) -> Result<StreamingStep, cqlite_core::Error> {
+            if self.done {
+                return Ok(StreamingStep::Complete);
+            }
+            std::thread::sleep(self.sleep);
+            // The recv-wait a real `step_row` incurs while pulling the next entry,
+            // logged by the merge-input recv site.
+            cqlite_core::observability::stream_subphase::add_pull_wait_nanos(
+                self.injected_wait_nanos,
+            );
+            self.done = true;
+            Ok(StreamingStep::Complete)
+        }
+    }
+
     /// Build one wide partition (`pk = 1`, `WIDTH` clustering rows) in a single
     /// SSTable and return its table dir (temp dir kept alive by the caller).
     fn wide_partition() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -664,5 +690,55 @@ mod tests {
         for (b, s) in buffered.iter().zip(streamed.iter()) {
             assert_eq!(b, s, "streaming batch must be byte-identical to buffered");
         }
+    }
+
+    /// B2 (recv-wait exclusion): the drive loop must SUBTRACT the blocking
+    /// merge-input recv-wait from the `stream_merge` bucket, so `stream_merge` is
+    /// merge CPU only. A stub `step_row` sleeps ~40ms and attributes ~30ms of it
+    /// to the pull-wait accumulator (as the real recv site would); the recorded
+    /// `stream_merge` must then land BELOW that injected recv-wait — a
+    /// metric-vs-metric check (recorded merge bucket vs injected wait), NO
+    /// host-latency threshold. Without the subtraction `stream_merge` would be the
+    /// full ~40ms step wall, i.e. ABOVE the 30ms wait.
+    #[test]
+    fn stream_merge_excludes_recv_wait() {
+        use cqlite_core::observability::{stream_subphase, StreamSubPhase, StreamSubPhaseTimings};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let schema = clustering_schema();
+        let producer = MergeProducer::new(schema, 8192).unwrap();
+
+        // Install a sink on THIS (drive) thread so the accumulator records into it.
+        let timings = Arc::new(StreamSubPhaseTimings::default());
+        let _install = stream_subphase::install(Some(timings.clone()));
+
+        let injected_wait_nanos = Duration::from_millis(30).as_nanos() as u64;
+        let mut stepper = RecvWaitStepper {
+            sleep: Duration::from_millis(40),
+            injected_wait_nanos,
+            done: false,
+        };
+
+        let mut batches = Vec::new();
+        {
+            let mut sink = CollectSink(&mut batches);
+            producer
+                .drive_merge_streaming(
+                    &mut stepper,
+                    &CancelFlag::new(),
+                    &mut sink,
+                    &ScanProgress::default(),
+                    AccessPath::FullScan.label(),
+                )
+                .expect("drive succeeds");
+        }
+
+        let merge = timings.nanos(StreamSubPhase::Merge);
+        assert!(
+            merge < injected_wait_nanos,
+            "stream_merge ({merge} ns) must EXCLUDE the injected recv-wait \
+             ({injected_wait_nanos} ns) — the B2 subtraction regressed"
+        );
     }
 }
