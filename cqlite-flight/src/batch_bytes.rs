@@ -330,8 +330,12 @@ pub fn split_rows_into_batches<'a>(
 /// array nodes (see [`BATCH_BYTES_PER_COLUMN_SLACK`]).
 ///
 /// Derived from the published constants alone:
-/// `BATCH_BYTES_CAPACITY_FACTOR * max(cap, widest_row_payload)
-///  + BATCH_BYTES_PER_COLUMN_SLACK * n_array_nodes`.
+///
+/// ```text
+/// BATCH_BYTES_CAPACITY_FACTOR * max(cap, widest_row_payload)
+///     + BATCH_BYTES_PER_COLUMN_SLACK * n_array_nodes
+/// ```
+///
 /// This is the quantity issue #2821's per-stream ceiling will compose with to
 /// state its `ceiling + one maximum batch` bound against B4's ≤16Mi. Until that
 /// ceiling lands, egress residency is count-bounded, not byte-bounded — see the
