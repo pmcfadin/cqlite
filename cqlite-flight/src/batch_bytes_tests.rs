@@ -778,6 +778,87 @@ fn split_rows_into_batches_applies_the_same_dual_boundary() {
     assert!(split_rows_into_batches(&columns, &[], 8192, 1).is_empty());
 }
 
+/// A row carrying a wide-but-LEGAL collection still batches several rows at a
+/// time (issue #2825 review C2).
+///
+/// The estimator's node budget used to be shared across a whole row, so a single
+/// collection near Cassandra's classic 65,535-element limit failed the row's
+/// estimate closed to `usize::MAX`; `cut_before` then fired on every following
+/// row and the stream degraded to ONE row per batch indefinitely. This is the
+/// batching-level guard for that: the same rows must group several-per-batch at
+/// a cap their real payload comfortably fits, and the grouping must still be
+/// bounded by the cap.
+#[test]
+fn wide_collection_rows_still_batch_several_at_a_time() {
+    use cqlite_core::export::arrow_payload_bytes as payload;
+    use cqlite_core::query::{ColumnInfo, QueryRow};
+    use cqlite_core::schema::CqlType;
+    use cqlite_core::types::{DataType, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const ENTRIES: i32 = 40_000;
+    const ROWS: usize = 8;
+
+    let columns = vec![ColumnInfo {
+        name: "m".into(),
+        data_type: DataType::Map,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(CqlType::Map(
+            Box::new(CqlType::Text),
+            Box::new(CqlType::Int),
+        )),
+    }];
+    let rows: Vec<QueryRow> = (0..ROWS)
+        .map(|_| {
+            let mut values: HashMap<Arc<str>, Value> = HashMap::new();
+            values.insert(
+                Arc::from("m"),
+                Value::Map(
+                    (0..ENTRIES)
+                        .map(|j| {
+                            (
+                                Value::Text(format!("k{j}").into_bytes().into()),
+                                Value::Integer(j),
+                            )
+                        })
+                        .collect(),
+                ),
+            );
+            QueryRow::with_interned_values(cqlite_core::RowKey::new(Vec::new()), values)
+        })
+        .collect();
+
+    // Non-vacuity: one row's realized payload must be a real, sub-cap size.
+    let one = cqlite_core::export::rows_to_record_batch(&columns, &rows[..1]).expect("convert");
+    let one_payload = payload(&one);
+    assert!(
+        one_payload > 100_000 && one_payload * 2 < DEFAULT_MAX_BATCH_BYTES,
+        "fixture is vacuous or over-cap: {one_payload} B/row against the \
+         {DEFAULT_MAX_BATCH_BYTES}-byte default cap"
+    );
+
+    let groups = split_rows_into_batches(&columns, &rows, 8192, DEFAULT_MAX_BATCH_BYTES);
+    assert_eq!(groups.iter().map(|g| g.len()).sum::<usize>(), ROWS);
+    assert!(
+        groups.iter().all(|g| g.len() > 1),
+        "wide-collection rows degraded to one row per batch: group sizes {:?}",
+        groups.iter().map(|g| g.len()).collect::<Vec<_>>()
+    );
+    // Still bounded: every group's realized payload is at or below the cap.
+    for g in &groups {
+        let batch = cqlite_core::export::rows_to_record_batch(&columns, g).expect("convert");
+        assert!(
+            payload(&batch) <= DEFAULT_MAX_BATCH_BYTES,
+            "a group of {} rows realized {} B, over the cap",
+            g.len(),
+            payload(&batch)
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Requirement 9: throughput evidence lives OUTSIDE the correctness path
 // ---------------------------------------------------------------------------

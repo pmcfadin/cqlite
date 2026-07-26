@@ -285,7 +285,11 @@ admission precedent is deliberate and is recorded here rather than discovered la
 1. Pre-batch accumulation; `get_array_memory_size()` is the **test oracle only** §(a).
 2. Cap denominated in **Arrow payload bytes**, with `BATCH_BYTES_CAPACITY_FACTOR = 2`
    published so consumers can convert to capacity §(b). **#2821's 12 MiB arithmetic
-   is revised to `6 MiB ceiling + 8 MiB worst-case batch = 14 MiB < 16Mi`.**
+   is revised to `6 MiB ceiling + 8 MiB worst-case batch = 14 MiB < 16Mi`** — a
+   TARGET for #2821 to enforce, not a bound this change puts in force: until that
+   per-stream byte ceiling exists, `do_get` residency stays COUNT-bounded at ~7
+   batches (`~56 MiB` worst case), because `streaming.rs`'s
+   `get_array_memory_size()` reading feeds metrics only.
 3. `DEFAULT_MAX_BATCH_BYTES = 4 MiB` — the decided default, verified to leave the
    narrow row-cap binding under every available estimate §(c).
 4. New `cqlite_core::export::estimate_arrow_row_bytes`; `result_budget.rs`

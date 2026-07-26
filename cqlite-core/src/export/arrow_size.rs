@@ -41,12 +41,19 @@
 //! | `ARROW_VALIDITY_BYTES` | every slot | the slot's validity **bit**; `n` bytes ≥ `ceil(n/8)` |
 //! | content | every slot | the slot's data-buffer bytes |
 //! | `ARROW_CELL_OVERHEAD_BYTES` | variable-width slots | its offsets entry + the buffer's trailing `n+1`-th entry |
-//! | `ARROW_COLUMN_SLACK_BYTES` | once per projected **column** | array nodes that correspond to no slot at all |
+//! | `ARROW_COLUMN_SLACK_BYTES` | once per **column whose builder materializes childless array nodes** | those nodes' empty offsets buffers |
 //!
 //! The per-cell terms are therefore tight (a 1000-element `list<int>` estimates
-//! ~1.2× its realized payload, not ~9×), and a wide fixed-width schema pays
-//! ~13 B/column/row rather than ~1 KB/row — so the row-cap, not the byte-cap,
-//! still binds on narrow shapes.
+//! ~1.2× its realized payload, not ~9×), and the residual is charged ONLY where
+//! a childless node can exist — the flat `list`/`set`/`map` builders, whose
+//! `MapArray`/`ListArray` always materialize a rendered `Utf8` child (see
+//! [`column_slack_bytes`]). A fixed-width column materializes exactly one array
+//! node with one data buffer, no offsets and no children, so it pays no residual
+//! at all: an `int` column costs `1 + 4 = 5` B/row against ~4.1 B/row realized.
+//! A 100-column `int` row therefore estimates 500 B and a full 8192-row batch
+//! 4,096,000 B — still inside the 4 MiB default, so the ROW-cap keeps binding on
+//! wide narrow-cell schemas up to 102 `int` columns (issue #2825 review C1;
+//! charging the residual per column put that cliff at 40 columns).
 //!
 //! # Conservatism is a contract, not an aspiration
 //!
@@ -70,25 +77,47 @@
 //!
 //! # Hardening
 //!
-//! The walk is **iterative** (an explicit worklist, never recursion), bounded by
-//! [`MAX_ESTIMATE_NODES`], and every arithmetic step is saturating. A fan-out is
-//! tested against the remaining budget **before** it is pushed, so a corrupt
-//! collection cannot transiently balloon the worklist. A value deeper or wider
-//! than the node budget, or one whose widths would overflow `usize`, **fails
-//! closed** to `usize::MAX` — which trips the byte-cap and cuts the batch, the
-//! safe direction. It never panics and never hangs.
+//! The walk is **iterative** (an explicit worklist) and every arithmetic step is
+//! saturating. Two budgets, both reset **per column**, bound the work:
+//!
+//! * [`MAX_ESTIMATE_NODES`] caps the **branching** slots — those that can queue
+//!   further slots. Only a branching slot ever enters the worklist, so the
+//!   worklist can never hold more entries than the budget (a stronger form of
+//!   the pre-push fan-out check it replaces), and a value nested deeper than the
+//!   budget fails closed.
+//! * [`MAX_ESTIMATE_LEAF_SLOTS`] caps the leaf slots charged inline. A leaf costs
+//!   no worklist entry and no structural node, so a collection's ELEMENT COUNT —
+//!   the one dimension a legal Cassandra row pushes to 65,535 — no longer
+//!   consumes the structural budget (issue #2825 review C2): a 65,535-entry
+//!   `map<text,text>` spends ONE node rather than 131,070, and is estimated
+//!   exactly instead of failing closed and degrading the stream to one row per
+//!   batch for the rest of the scan.
+//!
+//! Per-column budgets mean one wide column can no longer starve the columns
+//! after it. A row that exhausts either budget, or whose widths would overflow
+//! `usize`, **fails closed** to `usize::MAX` — which trips the byte-cap and cuts
+//! the batch, the safe direction. It never panics and never hangs.
 
 use crate::query::{ColumnInfo, QueryRow};
 use crate::schema::CqlType;
 use crate::types::{DataType, Value};
 
-// The rendered-representation bounds (`charge_rendered`, `json_render_bytes`)
-// live in a child module so this file stays under the campsite threshold
-// (epic #1116). A child module sees this module's private items.
+// Column shape resolution (`column_shape`, `column_slack_bytes`, `branches`)
+// and the rendered-representation bounds (`charge_rendered`,
+// `json_render_bytes`) live in child modules so this file stays under the
+// campsite threshold (epic #1116). A child module sees this module's private
+// items, and this module re-exposes theirs to each other.
+#[path = "arrow_size_shape.rs"]
+mod shape;
+
 #[path = "arrow_size_render.rs"]
 mod render;
 
 use render::RENDER_CONTAINER_BYTES;
+use shape::{
+    branches, column_shape, column_slack_bytes, unwrap_frozen_type, unwrap_frozen_value, Shape,
+    TextFidelity,
+};
 
 // ============================================================================
 // Structural constants
@@ -118,29 +147,49 @@ const ARROW_VALIDITY_BYTES: usize = 1;
 /// byte here (the second one a variable-width slot pays) is deliberate margin.
 const ARROW_CELL_OVERHEAD_BYTES: usize = 2 * ARROW_OFFSET_BYTES + ARROW_VALIDITY_BYTES;
 
-/// Residual slack charged ONCE per projected **column** per row — never per
-/// cell, per element or per field.
+/// Residual slack charged ONCE per row for a column that materializes Arrow
+/// array nodes corresponding to no value slot — never per cell, per element or
+/// per field, and **never for a column that has no such node** (see
+/// [`column_slack_bytes`]).
 ///
-/// Derivation: a column can materialize Arrow array nodes that correspond to no
-/// value slot at all, and each such node still carries an empty 4-byte offsets
-/// buffer. The tight case is the flat `DataType::Map` builder, whose `MapArray`
-/// always materializes a key `Utf8` and a value `Utf8` child even for a cell
-/// with zero entries: `2 × 4 = 8` bytes with no slot to attach them to. (The
-/// high-fidelity path charges such nodes explicitly — see `charge_cql`'s
-/// empty-collection rule — so this stays a residual, not the mechanism.)
+/// Derivation: each childless node still carries an empty 4-byte offsets buffer.
+/// The tight case is the flat `DataType::Map` builder, whose `MapArray` always
+/// materializes a key `Utf8` and a value `Utf8` child even for a cell with zero
+/// entries: `2 × 4 = 8` bytes with no slot to attach them to. (The high-fidelity
+/// path charges such nodes explicitly — see `charge_cql`'s empty-collection
+/// rule — so this stays a residual, not the mechanism.)
 ///
 /// Charged per row because the accumulate-as-you-push cap needs a per-row
 /// number and a per-batch term has nowhere to live; per COLUMN rather than per
 /// SLOT so it cannot multiply by a cell's element count.
 const ARROW_COLUMN_SLACK_BYTES: usize = 2 * ARROW_OFFSET_BYTES;
 
-/// Maximum number of value/type nodes one row's estimate may visit.
+/// Maximum number of **branching** slots one COLUMN's estimate may queue — a
+/// slot that can fan out into further slots (a collection, a map, a struct, or a
+/// rendered container).
 ///
-/// A row whose values nest or fan out past this budget fails closed to
-/// `usize::MAX` (cut the batch) instead of spending unbounded time. Sized well
-/// above any legitimate Cassandra row shape (a 4-column row of 1000-element
-/// collections visits ~4000 nodes).
+/// Leaf slots do not count against it (they never enter the worklist — see
+/// [`MAX_ESTIMATE_LEAF_SLOTS`]), so this bounds the value's *structure*: nesting
+/// depth and container-of-container fan-out, neither of which a legitimate
+/// Cassandra schema drives anywhere near 65,536. A column exceeding it fails
+/// closed to `usize::MAX` (cut the batch) instead of spending unbounded time,
+/// and because only branching slots are queued the worklist itself can never
+/// exceed this many entries.
+///
+/// Reset per column (issue #2825 review C2): one wide column can no longer
+/// starve the columns after it.
 pub const MAX_ESTIMATE_NODES: usize = 65_536;
+
+/// Maximum number of **leaf** slots one COLUMN's estimate may charge inline.
+///
+/// A leaf costs no worklist entry, so this is purely a linear-work bound: it
+/// exists so a `Value` tree far larger than any decoded Cassandra row still
+/// terminates in bounded time. Sized ~8× above the largest legal single cell
+/// (Cassandra's classic 65,535-element collection limit is 131,070 leaf slots
+/// for a `map`), so the shapes review C2 called out — one near-limit collection,
+/// or several thousand-element collections per row — are estimated exactly
+/// rather than failing closed.
+pub const MAX_ESTIMATE_LEAF_SLOTS: usize = 1 << 20;
 
 // ============================================================================
 // Public API
@@ -191,13 +240,16 @@ pub fn estimate_arrow_row_bytes(columns: &[ColumnInfo], row: &QueryRow) -> usize
     let mut est = Estimator::new();
     for col in columns {
         let cell = row.values.get(col.name.as_str());
-        // The per-column residual, charged exactly once per column per row.
-        est.add(ARROW_COLUMN_SLACK_BYTES);
-        // Charge the column's own slot DIRECTLY rather than through the
-        // worklist: a scalar column pushes no children, so the narrow path
-        // never allocates the stack at all (`Vec::new` does not allocate until
-        // its first push). Only collection/struct cells reach `drain`.
-        est.charge_slot(column_shape(col), cell);
+        let shape = column_shape(col);
+        // Both node budgets are per COLUMN (review C2).
+        est.begin_column();
+        // The per-column residual, charged exactly once per row and only for a
+        // column whose builder materializes a childless array node (review C1).
+        est.add(column_slack_bytes(&shape));
+        // A LEAF column is charged in place, so the narrow path never allocates
+        // the worklist at all (`Vec::new` does not allocate until its first
+        // push). Only collection/struct cells reach `drain`.
+        est.charge_child(shape, cell);
         est.drain();
         if est.total == usize::MAX {
             return usize::MAX;
@@ -232,131 +284,22 @@ pub fn arrow_payload_bytes(batch: &arrow::record_batch::RecordBatch) -> usize {
 }
 
 // ============================================================================
-// Shape resolution
-// ============================================================================
-
-/// How one Arrow slot is produced, mirroring `convert_column_to_array`'s
-/// dispatch so the estimate tracks the converter rather than guessing.
-#[derive(Clone, Copy)]
-enum Shape<'a> {
-    /// High-fidelity CQL-typed slot (`build_typed_value_array` and the typed
-    /// scalar builders).
-    Cql(&'a CqlType),
-    /// Flat `DataType` dispatch (the legacy builders), carrying whether the
-    /// column's CQL type makes `build_string_array` take its STRICT branch.
-    Flat(&'a DataType, TextFidelity),
-    /// A REAL `Utf8` array slot whose content is `ValueFormatter::format_value`'s
-    /// rendering — `build_string_array`, and each element slot of
-    /// `build_list_array` / `build_map_array`. Pays the variable-width slot
-    /// overhead.
-    RenderedSlot,
-    /// NOT an array slot of its own: a sub-part of an enclosing slot's single
-    /// rendered string (a container element rendered inline). Pays content only.
-    RenderedInline,
-}
-
-/// Whether a column's CQL type is an AUTHORITATIVE text type, which makes
-/// `build_string_array` take its `strict_text` branch: it borrows the `&str`
-/// after a NON-lossy `str::from_utf8` and hard-errors on invalid UTF-8, rather
-/// than rendering through the lossy `ValueFormatter::format_value`. The two
-/// branches have different byte behaviour (`s.len()` versus up to `3 * s.len()`
-/// of U+FFFD expansion), so the estimate must distinguish them.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TextFidelity {
-    /// `cql_type` is `Text`/`Ascii`/`Varchar`: exact, non-lossy.
-    Strict,
-    /// No authoritative text type: `format_value`'s lossy rendering.
-    Lossy,
-}
-
-/// Resolve a column to its Arrow slot shape, mirroring `convert_column_to_array`
-/// exactly: only the high-fidelity CQL arms take the typed path; everything else
-/// (including `Text`/`Blob`/numeric CQL types) falls through to the flat
-/// `data_type` dispatch — `convert_column_to_array` dispatches those on
-/// `data_type` alone, so the estimate must too.
-fn column_shape(col: &ColumnInfo) -> Shape<'_> {
-    let mut fidelity = TextFidelity::Lossy;
-    if let Some(cql) = &col.cql_type {
-        let effective = unwrap_frozen_type(cql);
-        match effective {
-            CqlType::Text | CqlType::Ascii | CqlType::Varchar => {
-                // Falls through to the flat dispatch, but tells it which
-                // `build_string_array` branch the converter will take.
-                fidelity = TextFidelity::Strict;
-            }
-            CqlType::Date
-            | CqlType::Time
-            | CqlType::Decimal
-            | CqlType::Varint
-            | CqlType::Duration
-            | CqlType::Uuid
-            | CqlType::TimeUuid
-            | CqlType::Inet
-            | CqlType::Counter
-            | CqlType::List(_)
-            | CqlType::Set(_)
-            | CqlType::Map(_, _)
-            | CqlType::Tuple(_)
-            | CqlType::Udt(_, _) => return Shape::Cql(effective),
-            // Exhaustive by design (no `_` arm): a new `CqlType` variant is a
-            // COMPILE error here, so it can never be silently under-estimated.
-            CqlType::Boolean
-            | CqlType::TinyInt
-            | CqlType::SmallInt
-            | CqlType::Int
-            | CqlType::BigInt
-            | CqlType::Float
-            | CqlType::Double
-            | CqlType::Blob
-            | CqlType::Timestamp
-            | CqlType::Frozen(_)
-            | CqlType::Custom(_) => {}
-        }
-    }
-    Shape::Flat(&col.data_type, fidelity)
-}
-
-/// Unwrap nested `Frozen` wrappers to the effective type (mirrors
-/// `arrow_convert::unwrap_frozen_type`). Bounded: `Frozen` nesting comes from a
-/// parsed schema, and the loop is capped so a pathological type cannot spin.
-fn unwrap_frozen_type(mut t: &CqlType) -> &CqlType {
-    for _ in 0..MAX_FROZEN_DEPTH {
-        match t {
-            CqlType::Frozen(inner) => t = inner,
-            _ => return t,
-        }
-    }
-    t
-}
-
-/// Unwrap nested `Value::Frozen` wrappers (mirrors
-/// `arrow_convert::unwrap_frozen_value`), bounded the same way.
-fn unwrap_frozen_value(mut v: &Value) -> &Value {
-    for _ in 0..MAX_FROZEN_DEPTH {
-        match v {
-            Value::Frozen(inner) => v = inner,
-            _ => return v,
-        }
-    }
-    v
-}
-
-/// Cap on `Frozen` unwrap iterations — a bound, not a semantic limit: real
-/// schemas nest at most once or twice.
-const MAX_FROZEN_DEPTH: usize = 16;
-
-// ============================================================================
 // The iterative estimator
 // ============================================================================
 
 /// Iterative worklist over (slot shape, slot value) pairs.
 ///
 /// One popped item is exactly one Arrow array slot; children (collection
-/// elements, map entries, struct fields) are pushed as further slots. The stack
-/// is lazily allocated, so a row of scalar columns never heap-allocates.
+/// elements, map entries, struct fields) are charged as further slots. Only
+/// BRANCHING children are queued — a leaf child is charged where it is found —
+/// so the worklist is bounded by [`MAX_ESTIMATE_NODES`] and is lazily allocated:
+/// a row of scalar columns never heap-allocates.
 struct Estimator<'a> {
     total: usize,
+    /// Remaining branching slots for the CURRENT column.
     budget: usize,
+    /// Remaining inline leaf charges for the CURRENT column.
+    leaf_budget: usize,
     stack: Vec<(Shape<'a>, Option<&'a Value>)>,
 }
 
@@ -365,12 +308,16 @@ impl<'a> Estimator<'a> {
         Self {
             total: 0,
             budget: MAX_ESTIMATE_NODES,
+            leaf_budget: MAX_ESTIMATE_LEAF_SLOTS,
             stack: Vec::new(),
         }
     }
 
-    fn push(&mut self, shape: Shape<'a>, value: Option<&'a Value>) {
-        self.stack.push((shape, value));
+    /// Start a fresh column: both budgets are per COLUMN, so one wide column's
+    /// fan-out cannot starve the columns after it (review C2).
+    fn begin_column(&mut self) {
+        self.budget = MAX_ESTIMATE_NODES;
+        self.leaf_budget = MAX_ESTIMATE_LEAF_SLOTS;
     }
 
     fn add(&mut self, bytes: usize) {
@@ -383,15 +330,56 @@ impl<'a> Estimator<'a> {
         self.stack.clear();
     }
 
-    /// Charge exactly ONE Arrow array slot, pushing any child slots it implies.
+    /// Charge ONE child slot: a branching child is queued (spending one
+    /// structural node), a leaf child is charged in place (spending one leaf
+    /// slot and no worklist entry).
     ///
-    /// Spends one node from the budget and fails closed when it is exhausted.
-    fn charge_slot(&mut self, shape: Shape<'a>, value: Option<&'a Value>) {
-        if self.budget == 0 {
+    /// Both budgets are checked BEFORE the child is queued or walked, so neither
+    /// the worklist nor the walk can transiently overrun. The inline leaf charge
+    /// re-enters [`Self::charge_slot`] exactly once — [`branches`] answers
+    /// `false` only for shape/value pairs that queue nothing — so the call depth
+    /// is 2 and never grows with the value's depth; the debug assertion pins it.
+    pub(super) fn charge_child(&mut self, shape: Shape<'a>, value: Option<&'a Value>) {
+        if branches(shape, value) {
+            if self.budget == 0 {
+                self.saturate();
+                return;
+            }
+            self.budget -= 1;
+            self.stack.push((shape, value));
+            return;
+        }
+        if self.leaf_budget == 0 {
             self.saturate();
             return;
         }
-        self.budget -= 1;
+        self.leaf_budget -= 1;
+        let queued = self.stack.len();
+        self.charge_slot(shape, value);
+        debug_assert_eq!(
+            self.stack.len(),
+            queued,
+            "a slot `branches` called a leaf queued children"
+        );
+    }
+
+    /// Charge a whole fan-out of child slots, stopping as soon as the estimate
+    /// has been saturated so a pathological cell is not walked to its end.
+    pub(super) fn charge_children<I>(&mut self, items: I)
+    where
+        I: IntoIterator<Item = (Shape<'a>, Option<&'a Value>)>,
+    {
+        for (shape, value) in items {
+            if self.total == usize::MAX {
+                return;
+            }
+            self.charge_child(shape, value);
+        }
+    }
+
+    /// Charge exactly ONE Arrow array slot, charging or queueing any child slots
+    /// it implies. The budgets are spent by [`Self::charge_child`], never here.
+    fn charge_slot(&mut self, shape: Shape<'a>, value: Option<&'a Value>) {
         // Every slot pays its validity bit, rounded up to a whole byte.
         self.add(ARROW_VALIDITY_BYTES);
         let value = value.map(unwrap_frozen_value);
@@ -462,7 +450,7 @@ impl<'a> Estimator<'a> {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
                 match value {
                     Some(Value::List(items) | Value::Set(items)) if !items.is_empty() => {
-                        self.push_all(items.iter().map(|v| (Shape::Cql(inner), Some(v))));
+                        self.charge_children(items.iter().map(|v| (Shape::Cql(inner), Some(v))));
                     }
                     // Empty, null or absent: `build_typed_value_array` still
                     // materializes one child array per DECLARED nesting level,
@@ -470,11 +458,11 @@ impl<'a> Estimator<'a> {
                     // declared chain covers a `list<list<…>>` whose depth no
                     // per-slot constant could bound (review B2).
                     Some(Value::List(_) | Value::Set(_) | Value::Null) | None => {
-                        self.push(Shape::Cql(inner), None);
+                        self.charge_child(Shape::Cql(inner), None);
                     }
                     // Shape mismatch: the converter either errors (no batch) or
                     // renders. Charge the render bound, never zero.
-                    Some(other) => self.push(Shape::RenderedSlot, Some(other)),
+                    Some(other) => self.charge_child(Shape::RenderedSlot, Some(other)),
                 }
             }
             // MapArray: the row's offsets entry, plus a key and a value child
@@ -483,24 +471,20 @@ impl<'a> Estimator<'a> {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
                 match value {
                     Some(Value::Map(pairs)) if !pairs.is_empty() => {
-                        if !self.reserve(pairs.len().saturating_mul(2)) {
-                            return;
-                        }
-                        for (k, v) in pairs {
-                            self.push(Shape::Cql(key_type), Some(k));
-                            self.push(Shape::Cql(val_type), Some(v));
-                        }
+                        self.charge_children(pairs.iter().flat_map(|(k, v)| {
+                            [
+                                (Shape::Cql(key_type), Some(k)),
+                                (Shape::Cql(val_type), Some(v)),
+                            ]
+                        }));
                     }
                     // Empty/null/absent: both child arrays still exist — charge
                     // the declared key and value type chains (review B2).
                     Some(Value::Map(_) | Value::Null) | None => {
-                        if !self.reserve(2) {
-                            return;
-                        }
-                        self.push(Shape::Cql(key_type), None);
-                        self.push(Shape::Cql(val_type), None);
+                        self.charge_child(Shape::Cql(key_type), None);
+                        self.charge_child(Shape::Cql(val_type), None);
                     }
-                    Some(other) => self.push(Shape::RenderedSlot, Some(other)),
+                    Some(other) => self.charge_child(Shape::RenderedSlot, Some(other)),
                 }
             }
             // StructArray: no offsets; every DECLARED field materializes a child
@@ -514,13 +498,10 @@ impl<'a> Estimator<'a> {
                     _ => &[],
                 };
                 let n = element_types.len().max(items.len());
-                if !self.reserve(n) {
-                    return;
-                }
-                for i in 0..n {
+                self.charge_children((0..n).map(|i| {
                     let shape = element_types.get(i).map_or(Shape::RenderedSlot, Shape::Cql);
-                    self.push(shape, items.get(i));
-                }
+                    (shape, items.get(i))
+                }));
             }
             CqlType::Udt(_, udt_fields) => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES.saturating_add(RENDER_CONTAINER_BYTES));
@@ -528,19 +509,15 @@ impl<'a> Estimator<'a> {
                     Some(Value::Udt(udt)) => Some(udt.as_ref()),
                     _ => None,
                 };
-                let extras = udt.map_or(0, |u| u.fields.len());
-                if !self.reserve(udt_fields.len().saturating_add(extras)) {
-                    return;
-                }
-                for (name, field_type) in udt_fields {
+                self.charge_children(udt_fields.iter().map(|(name, field_type)| {
                     let field_value = udt.and_then(|u| {
                         u.fields
                             .iter()
                             .find(|f| &f.name == name)
                             .and_then(|f| f.value.as_ref())
                     });
-                    self.push(Shape::Cql(field_type), field_value);
-                }
+                    (Shape::Cql(field_type), field_value)
+                }));
                 // A value carrying fields the declared type does not name still
                 // costs something on the render fallback (`format_udt` emits
                 // `{name: value, …}`), so charge the NAME and its separators
@@ -551,14 +528,17 @@ impl<'a> Estimator<'a> {
                         .iter()
                         .filter(|f| !udt_fields.iter().any(|(n, _)| n == &f.name));
                     for f in extra {
+                        if self.total == usize::MAX {
+                            return;
+                        }
                         self.add(f.name.len().saturating_add(RENDER_CONTAINER_BYTES));
-                        self.push(Shape::RenderedInline, f.value.as_ref());
+                        self.charge_child(Shape::RenderedInline, f.value.as_ref());
                     }
                 }
             }
             // Unreachable after `unwrap_frozen_type`, but kept explicit so the
             // match stays exhaustive without a `_` arm.
-            CqlType::Frozen(inner) => self.push(Shape::Cql(inner), value),
+            CqlType::Frozen(inner) => self.charge_child(Shape::Cql(inner), value),
         }
     }
 
@@ -608,20 +588,19 @@ impl<'a> Estimator<'a> {
             DataType::List | DataType::Set => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
                 if let Some(Value::List(items) | Value::Set(items)) = value {
-                    self.push_all(items.iter().map(|v| (Shape::RenderedSlot, Some(v))));
+                    self.charge_children(items.iter().map(|v| (Shape::RenderedSlot, Some(v))));
                 }
             }
             // `build_map_array`: MapArray with rendered Utf8 keys and values.
             DataType::Map => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
                 if let Some(Value::Map(pairs)) = value {
-                    if !self.reserve(pairs.len().saturating_mul(2)) {
-                        return;
-                    }
-                    for (k, v) in pairs {
-                        self.push(Shape::RenderedSlot, Some(k));
-                        self.push(Shape::RenderedSlot, Some(v));
-                    }
+                    self.charge_children(pairs.iter().flat_map(|(k, v)| {
+                        [
+                            (Shape::RenderedSlot, Some(k)),
+                            (Shape::RenderedSlot, Some(v)),
+                        ]
+                    }));
                 }
             }
             // Fallback to `build_string_array` — same two branches.
@@ -634,32 +613,6 @@ impl<'a> Estimator<'a> {
                 charge_string(self, value);
             }
         }
-    }
-
-    /// Queue a whole fan-out, testing the node budget **before** anything is
-    /// pushed: a corrupt collection claiming 1e8 elements fails closed instead
-    /// of transiently materializing 1e8 worklist entries (review N1).
-    fn push_all<I>(&mut self, items: I)
-    where
-        I: ExactSizeIterator<Item = (Shape<'a>, Option<&'a Value>)>,
-    {
-        if !self.reserve(items.len()) {
-            return;
-        }
-        for item in items {
-            self.stack.push(item);
-        }
-    }
-
-    /// Fail closed when a fan-out of `n` slots already exceeds the remaining
-    /// node budget. Returns `false` when the estimate has been saturated and the
-    /// caller must stop.
-    fn reserve(&mut self, n: usize) -> bool {
-        if n > self.budget {
-            self.saturate();
-            return false;
-        }
-        true
     }
 }
 

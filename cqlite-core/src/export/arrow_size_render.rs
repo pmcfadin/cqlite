@@ -121,7 +121,7 @@ impl<'a> Estimator<'a> {
                     RENDER_CONTAINER_BYTES
                         .saturating_add(items.len().saturating_mul(RENDER_SEPARATOR_BYTES)),
                 );
-                self.push_all(items.iter().map(|v| (Shape::RenderedInline, Some(v))));
+                self.charge_children(items.iter().map(|v| (Shape::RenderedInline, Some(v))));
             }
             Value::Map(pairs) => {
                 self.add(
@@ -132,24 +132,23 @@ impl<'a> Estimator<'a> {
                             .saturating_mul(RENDER_SEPARATOR_BYTES),
                     ),
                 );
-                if !self.reserve(pairs.len().saturating_mul(2)) {
-                    return;
-                }
-                for (k, v) in pairs {
-                    self.push(Shape::RenderedInline, Some(k));
-                    self.push(Shape::RenderedInline, Some(v));
-                }
+                self.charge_children(pairs.iter().flat_map(|(k, v)| {
+                    [
+                        (Shape::RenderedInline, Some(k)),
+                        (Shape::RenderedInline, Some(v)),
+                    ]
+                }));
             }
             Value::Udt(udt) => {
                 self.add(RENDER_CONTAINER_BYTES);
-                if !self.reserve(udt.fields.len()) {
-                    return;
-                }
                 for f in &udt.fields {
+                    if self.total == usize::MAX {
+                        return;
+                    }
                     // `format_udt` emits `name: value` pairs — the name and both
                     // separators are charged here, the value as a child node.
                     self.add(f.name.len().saturating_add(RENDER_CONTAINER_BYTES));
-                    self.push(Shape::RenderedInline, f.value.as_ref());
+                    self.charge_child(Shape::RenderedInline, f.value.as_ref());
                 }
             }
             // Unreachable after `unwrap_frozen_value`; kept so the match is

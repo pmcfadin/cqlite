@@ -537,6 +537,27 @@ fn shape_corpus() -> Vec<Shape> {
             .collect(),
     });
 
+    // The 1-BYTE-MARGIN point of the whole `ARROW_COLUMN_SLACK_BYTES` derivation
+    // (review nit): a flat `DataType::Map` with a SINGLE row whose cell is empty
+    // realizes 17 bytes — map offsets `2 * 4`, the always-present null buffer
+    // `ceil(1/8)`, and the key and value `Utf8` children's empty offsets buffers
+    // `4 + 4` — against 18 charged. Every other flat-map shape has 48 rows, over
+    // which the residual amortizes away, so a change to the constant would slip
+    // through unnoticed without this shape.
+    shapes.push(Shape {
+        name: "flat map single empty row",
+        columns: vec![col("m", DataType::Map, None)],
+        rows: vec![row(vec![("m", Value::Map(Vec::new()))])],
+    });
+
+    // Same, with the cell ABSENT rather than empty: `build_map_array` takes its
+    // null branch and still materializes both children.
+    shapes.push(Shape {
+        name: "flat map single absent row",
+        columns: vec![col("m", DataType::Map, None)],
+        rows: vec![row(vec![])],
+    });
+
     shapes.push(Shape {
         name: "flat tuple rendered",
         columns: vec![col("tp", DataType::Tuple, None)],
@@ -700,12 +721,15 @@ fn estimate_is_within_a_bounded_multiple_of_the_payload() {
         ("map<text,bigint>", 2),
         ("map<text,list<text>> nested", 3),
         ("flat list rendered", 3),
-        // Multi-column narrow: dominated by the per-COLUMN residual, which is
-        // the term that must NOT scale with cell count.
-        ("fixed-width scalars", 3),
+        // Multi-column narrow: these are where a residual charged for a column
+        // that has no childless array node shows up (review C1). Both are now
+        // pinned at the smallest whole number above their measured ratio
+        // (1.18 and 2.55), so re-introducing the residual for a fixed-width or
+        // single-node column FAILS here.
+        ("fixed-width scalars", 2),
         ("flat text/blob/int", 2),
         ("flat json rendered", 5),
-        ("high-fidelity scalars", 4),
+        ("high-fidelity scalars", 3),
     ];
     for (name, multiple) in cases {
         let shape = shape_corpus()
@@ -762,32 +786,48 @@ fn per_column_residual_does_not_scale_with_element_count() {
     );
 }
 
-/// A wide fixed-width schema still lets the ROW-cap bind at the 4 MiB default:
-/// the per-row estimate for 30 `int` columns must leave room for a full
-/// 8192-row batch (review B3 — a per-slot slack put this at ~4,000 rows).
+/// A wide fixed-width schema still lets the ROW-cap bind at the 4 MiB default.
+///
+/// Placed PAST the predicted break point, not before it (review C1): charging
+/// the per-column residual for a fixed-width column cost 13 B/column/row and put
+/// the byte-cap's binding point at 40 `int` columns — so a 30-column guard sat
+/// just under the cliff and reported green while an ordinary 40–100-column
+/// `int` table was already being cut at ~1.3 MB of real payload. A fixed-width
+/// column now costs 5 B/row (`1` validity + `4` content), which keeps the
+/// row-cap binding through 102 columns; both sizes below are above the OLD
+/// cliff, and 100 is the largest ordinary-schema width the issue names.
 #[test]
 fn a_wide_fixed_width_row_still_fits_a_full_default_batch() {
-    const N_COLS: i32 = 30;
     const DEFAULT_CAP: usize = 4 * 1024 * 1024;
     const BATCH_ROWS: usize = 8192;
-    let names: Vec<String> = (0..N_COLS).map(|i| format!("c{i}")).collect();
-    let columns: Vec<ColumnInfo> = names
-        .iter()
-        .map(|n| col(n, DataType::Integer, Some(CqlType::Int)))
-        .collect();
-    let r = row(names
-        .iter()
-        .zip(0..N_COLS)
-        .map(|(n, i)| (n.as_str(), Value::Integer(i)))
-        .collect());
-    let per_row = estimate_arrow_row_bytes(&columns, &r);
-    assert!(
-        per_row.saturating_mul(BATCH_ROWS) <= DEFAULT_CAP,
-        "a {N_COLS}-column int row estimates {per_row} B, so the byte-cap would \
-         cut at {} rows — below the {BATCH_ROWS}-row batch size, a throughput \
-         regression on a narrow shape",
-        DEFAULT_CAP / per_row.max(1)
-    );
+    for n_cols in [64i32, 100i32] {
+        let names: Vec<String> = (0..n_cols).map(|i| format!("c{i}")).collect();
+        let columns: Vec<ColumnInfo> = names
+            .iter()
+            .map(|n| col(n, DataType::Integer, Some(CqlType::Int)))
+            .collect();
+        let r = row(names
+            .iter()
+            .zip(0..n_cols)
+            .map(|(n, i)| (n.as_str(), Value::Integer(i)))
+            .collect());
+        let per_row = estimate_arrow_row_bytes(&columns, &r);
+        assert!(
+            per_row.saturating_mul(BATCH_ROWS) <= DEFAULT_CAP,
+            "a {n_cols}-column int row estimates {per_row} B, so the byte-cap \
+             would cut at {} rows — below the {BATCH_ROWS}-row batch size, a \
+             throughput regression on a narrow shape",
+            DEFAULT_CAP / per_row.max(1)
+        );
+        // And the estimate is still an UPPER bound on what such a batch really
+        // costs, so the headroom above is real rather than an under-count.
+        let rows: Vec<QueryRow> = (0..64).map(|_| r.clone()).collect();
+        let batch = rows_to_record_batch(&columns, &rows).expect("convert");
+        assert!(
+            per_row.saturating_mul(rows.len()) >= arrow_payload_bytes(&batch),
+            "{n_cols}-column int row under-counts the realized payload"
+        );
+    }
 }
 
 /// The conservatism property is DISCRIMINATING, not a tautology.
@@ -976,17 +1016,41 @@ fn text_width_drives_the_estimate_on_both_dispatch_paths() {
 // Requirement 3: pathological values fail closed
 // ---------------------------------------------------------------------------
 
-/// A collection whose element count exceeds the node budget saturates instead of
-/// spinning — no panic, no unbounded work, and the returned width trips the cap.
+/// `list<frozen<list<int>>>` whose CONTAINER fan-out exceeds the structural node
+/// budget saturates instead of spinning — no panic, no unbounded work, and the
+/// returned width trips the cap.
+///
+/// Container elements are what the branching budget counts (review C2): each
+/// inner list can itself fan out, so each spends a node and enters the worklist.
+fn nested_list_of_lists(n: usize) -> Value {
+    Value::List((0..n).map(|_| Value::List(Vec::new())).collect())
+}
+
 #[test]
-fn oversized_collection_fails_closed_to_a_saturated_width() {
+fn oversized_container_fanout_fails_closed_to_a_saturated_width() {
+    let columns = vec![col(
+        "l",
+        DataType::List,
+        Some(CqlType::List(Box::new(CqlType::List(Box::new(
+            CqlType::Int,
+        ))))),
+    )];
+    let r = row(vec![("l", nested_list_of_lists(MAX_ESTIMATE_NODES + 1))]);
+    assert_eq!(estimate_arrow_row_bytes(&columns, &r), usize::MAX);
+}
+
+/// A LEAF fan-out past [`MAX_ESTIMATE_LEAF_SLOTS`] also fails closed: leaves cost
+/// no worklist entry and no structural node, but the linear-work bound still
+/// holds, so a `Value` tree far larger than any decoded Cassandra row terminates.
+#[test]
+fn oversized_leaf_fanout_fails_closed_to_a_saturated_width() {
     let columns = vec![col(
         "l",
         DataType::List,
         Some(CqlType::List(Box::new(CqlType::Int))),
     )];
     let huge = Value::List(
-        (0..(MAX_ESTIMATE_NODES + 1) as i32)
+        (0..(MAX_ESTIMATE_LEAF_SLOTS + 1) as i32)
             .map(Value::Integer)
             .collect(),
     );
@@ -1022,25 +1086,155 @@ fn saturating_arithmetic_never_wraps() {
         col(
             "l1",
             DataType::List,
-            Some(CqlType::List(Box::new(CqlType::Int))),
+            Some(CqlType::List(Box::new(CqlType::List(Box::new(
+                CqlType::Int,
+            ))))),
         ),
         col("b2", DataType::Blob, Some(CqlType::Blob)),
         col("b3", DataType::Blob, Some(CqlType::Blob)),
     ];
     let r = row(vec![
         ("b0", blob(8)),
-        (
-            "l1",
-            Value::List(
-                (0..(MAX_ESTIMATE_NODES + 1) as i32)
-                    .map(Value::Integer)
-                    .collect(),
-            ),
-        ),
+        ("l1", nested_list_of_lists(MAX_ESTIMATE_NODES + 1)),
         ("b2", blob(8)),
         ("b3", blob(8)),
     ]);
     assert_eq!(estimate_arrow_row_bytes(&columns, &r), usize::MAX);
+}
+
+/// Wide-but-LEGAL collections are estimated exactly rather than failing closed
+/// (review C2).
+///
+/// Before the per-column, leaf-exempt budgets, a single non-frozen collection
+/// near Cassandra's classic 65,535-element limit — or a few thousand elements
+/// across ~20 columns — exhausted one shared 65,536-node row budget and pinned
+/// the row's width at `usize::MAX`. `cut_before` then fired for EVERY subsequent
+/// row, so the stream degraded to one row per batch indefinitely on an ordinary
+/// (if ill-advised) schema. Each shape below exceeded that old budget.
+#[test]
+fn wide_legal_collections_do_not_fail_closed_and_still_bound_the_payload() {
+    const DEFAULT_CAP: usize = 4 * 1024 * 1024;
+
+    // (name, columns, one row) — each over the OLD 65,536-node ROW budget.
+    let one_near_limit_map = {
+        let columns = vec![col(
+            "m",
+            DataType::Map,
+            Some(CqlType::Map(
+                Box::new(CqlType::Text),
+                Box::new(CqlType::Int),
+            )),
+        )];
+        // 40,000 entries = 80,000 slots under the old accounting.
+        let r = row(vec![(
+            "m",
+            Value::Map(
+                (0..40_000i32)
+                    .map(|j| (text(&format!("k{j}")), Value::Integer(j)))
+                    .collect(),
+            ),
+        )]);
+        ("one near-limit map<text,int>", columns, r)
+    };
+    let twenty_collection_columns = {
+        let names: Vec<String> = (0..20).map(|i| format!("l{i}")).collect();
+        let columns: Vec<ColumnInfo> = names
+            .iter()
+            .map(|n| {
+                col(
+                    n,
+                    DataType::List,
+                    Some(CqlType::List(Box::new(CqlType::Int))),
+                )
+            })
+            .collect();
+        // 20 x 3,500 = 70,000 slots under the old accounting.
+        let r = row(names
+            .iter()
+            .map(|n| {
+                (
+                    n.as_str(),
+                    Value::List((0..3_500i32).map(Value::Integer).collect()),
+                )
+            })
+            .collect());
+        ("20 x list<int> of 3,500", columns, r)
+    };
+
+    for (name, columns, r) in [one_near_limit_map, twenty_collection_columns] {
+        let per_row = estimate_arrow_row_bytes(&columns, &r);
+        assert!(
+            per_row < usize::MAX,
+            "shape '{name}': the estimate failed closed on a LEGAL collection \
+             width, which degrades the stream to one row per batch"
+        );
+        // Real payload allows several rows per 4 MiB batch, so the byte-cap must
+        // let several rows in — the throughput property the cliff destroyed.
+        let rows_per_batch = DEFAULT_CAP / per_row.max(1);
+        assert!(
+            rows_per_batch > 1,
+            "shape '{name}': {per_row} B/row admits only {rows_per_batch} row(s) \
+             per {DEFAULT_CAP}-byte batch"
+        );
+        // And the estimate is still an UPPER bound on the realized payload: the
+        // cliff is fixed by counting correctly, not by under-counting.
+        let rows: Vec<QueryRow> = (0..3).map(|_| r.clone()).collect();
+        let batch = rows_to_record_batch(&columns, &rows).expect("convert");
+        let realized = arrow_payload_bytes(&batch);
+        assert!(
+            realized > 100_000,
+            "shape '{name}' is vacuous: {realized} B"
+        );
+        assert!(
+            per_row.saturating_mul(rows.len()) >= realized,
+            "shape '{name}': estimate {per_row}/row UNDER-COUNTS realized \
+             payload {realized} over {} rows",
+            rows.len()
+        );
+    }
+}
+
+/// One wide column no longer starves the columns after it: the budgets are per
+/// COLUMN, so a row whose first column consumes a large share still estimates
+/// its remaining columns exactly.
+#[test]
+fn the_node_budget_is_per_column_not_per_row() {
+    let wide = || {
+        col(
+            "w",
+            DataType::List,
+            Some(CqlType::List(Box::new(CqlType::Int))),
+        )
+    };
+    let names: Vec<String> = (0..8).map(|i| format!("w{i}")).collect();
+    let columns: Vec<ColumnInfo> = names
+        .iter()
+        .map(|n| ColumnInfo {
+            name: n.clone(),
+            ..wide()
+        })
+        .collect();
+    // 8 x 30,000 = 240,000 slots — 3.6x the old shared ROW budget.
+    let r = row(names
+        .iter()
+        .map(|n| {
+            (
+                n.as_str(),
+                Value::List((0..30_000i32).map(Value::Integer).collect()),
+            )
+        })
+        .collect());
+    let per_row = estimate_arrow_row_bytes(&columns, &r);
+    assert!(
+        per_row < usize::MAX,
+        "a per-ROW budget starved the tail columns"
+    );
+    let batch = rows_to_record_batch(&columns, std::slice::from_ref(&r)).expect("convert");
+    let realized = arrow_payload_bytes(&batch);
+    assert!(
+        per_row >= realized,
+        "estimate {per_row} under-counts realized payload {realized}"
+    );
 }
 
 /// A `Frozen` chain deeper than the unwrap bound terminates without panicking.

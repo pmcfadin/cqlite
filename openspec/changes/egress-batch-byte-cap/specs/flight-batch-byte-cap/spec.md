@@ -87,8 +87,27 @@ The estimator SHALL also be bounded ABOVE: the structural slack it charges per
 Arrow slot MUST NOT scale with a cell's element count, or a collection-heavy or
 wide-schema row would be over-estimated by a multiple and the byte-cap would cut
 batches far short of the configured size. Per-buffer costs SHALL therefore be
-charged once per projected COLUMN, and the residual per-slot costs SHALL be
-derived from Arrow's buffer layout rather than fitted to the validation corpus.
+charged at most once per projected COLUMN, and the residual per-slot costs SHALL
+be derived from Arrow's buffer layout rather than fitted to the validation corpus.
+
+The per-column residual SHALL be charged ONLY for a column whose builder can
+materialize an Arrow array node corresponding to no value slot. A column whose
+Arrow representation is a single node with no children — every fixed-width
+builder in particular — SHALL NOT be charged it, so a fixed-width column costs
+its validity byte plus its content width and no more. A row of 100 fixed-width
+`int` columns SHALL therefore still admit a full `batch_size` batch under
+`DEFAULT_MAX_BATCH_BYTES`.
+
+The estimator's work bounds SHALL be scoped so that a LEGAL Cassandra row shape
+never fails closed: the budget that bounds structural fan-out SHALL be applied
+per COLUMN rather than per row, and a slot that cannot fan out further SHALL NOT
+consume it. A single collection near Cassandra's classic 65,535-element limit, or
+several thousand-element collections spread across a row's columns, SHALL be
+estimated exactly rather than saturating — a saturated width cuts every
+subsequent batch after one row, which is a throughput cliff rather than a
+conservative memory decision. Pathological STRUCTURE (nesting or
+container-of-container fan-out beyond the budget) SHALL still fail closed, and no
+relaxation SHALL be achieved by under-counting.
 
 #### Scenario: the summed estimate is at least the realized batch payload across a shape corpus
 
@@ -129,13 +148,44 @@ derived from Arrow's buffer layout rather than fitted to the validation corpus.
   batch under the default cap, so the row-cap remains the binding boundary on
   narrow shapes
 
+#### Scenario: a wide fixed-width row is guarded PAST the point the byte-cap would bind
+
+- **GIVEN** rows of 64 and of 100 fixed-width `int` columns — both wider than the
+  point at which charging the per-column residual for a fixed-width column would
+  have made the byte-cap bind
+- **WHEN** each row's estimate is multiplied by `batch_size`
+- **THEN** the product is at or below `DEFAULT_MAX_BATCH_BYTES`, so the ROW-cap
+  still binds, and the estimate is still at or above the realized payload of a
+  batch of those rows
+
+#### Scenario: a single flat map cell with one row pins the per-column residual
+
+- **GIVEN** a flat (untyped) `map` column with exactly ONE row whose cell is empty
+  or absent — the tightest case of the residual's derivation, where the childless
+  key and value child arrays are not amortized over many rows
+- **WHEN** the shape is estimated and converted
+- **THEN** the estimate is at or above the realized payload, so a change to the
+  residual constant fails on this shape rather than passing silently
+
 #### Scenario: a pathological value fails closed rather than panicking
 
-- **GIVEN** a deeply nested collection value beyond the estimator's node budget,
-  or a value whose widths would overflow `usize`
+- **GIVEN** a deeply nested collection value beyond the estimator's structural
+  node budget, a container fan-out beyond it, a leaf fan-out beyond the linear
+  work bound, or a value whose widths would overflow `usize`
 - **WHEN** it is estimated
 - **THEN** the estimator returns a saturated (large) width and the batch is cut,
   with no panic, no overflow, and no unbounded recursion
+
+#### Scenario: a wide but legal collection is estimated exactly rather than failing closed
+
+- **GIVEN** a row with one collection cell near Cassandra's classic
+  65,535-element limit, and separately a row with thousands of elements in each of
+  ~20 collection columns
+- **WHEN** each is estimated and then batched at the default cap
+- **THEN** neither estimate saturates, the resulting batches hold more than one
+  row where the real payload allows it, and every estimate is still at or above
+  the realized payload — the cliff is removed by counting correctly, not by
+  under-counting
 
 ### Requirement: The relationship between the estimate, the payload bytes, and the reported Arrow memory size is stated with a named tolerance
 
@@ -347,6 +397,15 @@ per-stream in-flight ceiling can derive its guaranteed bound of
 `ceiling + one maximum batch` and demonstrate it fits the ratified B4 budget of
 ≤16Mi per-query working set at concurrency 1.
 
+The documentation of that composition MUST NOT state the composed
+`ceiling + one maximum batch` figure as a bound already in force. It SHALL state
+plainly that this change guarantees a bound on ONE batch only; that per-stream
+egress residency remains COUNT-bounded at roughly seven batches (approximately
+56 MiB worst case at the default cap) because the `get_array_memory_size()`
+reading taken on the streaming path feeds metrics only and gates nothing; and
+that the composed figure becomes true only once issue #2821 enforces a per-stream
+byte ceiling.
+
 #### Scenario: the worst-case per-batch capacity is derivable from the named constants
 
 - **GIVEN** `DEFAULT_MAX_BATCH_BYTES`, the capacity factor and the per-array-node
@@ -365,11 +424,21 @@ per-stream in-flight ceiling can derive its guaranteed bound of
 
 #### Scenario: the B4 arithmetic for the dependent issue is recorded in the metered currency
 
-- **GIVEN** that the egress path meters batch bytes with
-  `get_array_memory_size()` (capacity currency)
+- **GIVEN** that the streaming egress path reads batch bytes with
+  `get_array_memory_size()` (capacity currency) for its metrics
 - **WHEN** the composition with issue #2821's per-stream ceiling is documented
 - **THEN** the arithmetic is stated in that same capacity currency and shown to sit
   inside B4's ≤16Mi at concurrency 1, rather than mixing payload and capacity figures
+
+#### Scenario: the composed bound is not presented as already in force
+
+- **GIVEN** the module documentation of the byte-cap
+- **WHEN** the #2821 composition section is read by the implementer of that issue
+- **THEN** it states that only the per-batch bound holds today, that per-stream
+  residency is still count-bounded at ~7 batches (~56 MiB worst case) because the
+  streaming path's `get_array_memory_size()` reading is metrics-only, and that the
+  composed `ceiling + one maximum batch` figure holds only after #2821 enforces
+  the per-stream byte ceiling
 
 ### Requirement: The stale 57,344-row egress figure is corrected in the throughput manifest
 
