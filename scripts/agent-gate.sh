@@ -1945,8 +1945,11 @@ _integrity_fail_block() {
   # Carry the full SUMMARY_META (commit/branch/dirty, datasets, ci-pins, accelerators, cpu-budget
   # and the per-component results table) so the FAIL block is not information-poorer than a normal
   # terminal FAIL (review job-2107 MED#2). Callers pass "${SUMMARY_META[@]}" where available.
+  # ${@+"$@"} not "$@": under `set -u` on bash < 4.4 (macOS /bin/bash 3.2, which this script
+  # supports) an empty "$@" is treated as unbound and aborts — the MAIN-lane call passes zero meta
+  # (job-2108 MED). ${@+"$@"} expands to nothing when empty, to the quoted args otherwise.
   local line
-  for line in "$@"; do echo "$line"; done
+  for line in ${@+"$@"}; do echo "$line"; done
   echo "logs: $LOG_DIR"
   echo "summary-file: $SUMMARY_FILE (NOT rewritten — live peer owns it)"
   echo "integrity-fail-sibling: $sibling"
@@ -1971,9 +1974,10 @@ _publish_integrity_fail() {
   # RUN_ID is the unique mktemp LOG DIR *path* — basename it so the sibling filename has no slashes
   # (still unique: mktemp -d basenames don't collide). Sibling sits NEXT TO the contended path.
   local sibling="$SUMMARY_FILE.integrity-fail.$(basename "$RUN_ID")"
-  _integrity_fail_block "$reason" "$comp" "$sibling" "$@" > "$LOG_SUMMARY_FILE" 2>/dev/null || true
-  _integrity_fail_block "$reason" "$comp" "$sibling" "$@" > "$sibling" 2>/dev/null || true
-  _integrity_fail_block "$reason" "$comp" "$sibling" "$@"   # STDOUT — reaches a foreground/redirect caller
+  # ${@+"$@"} (not "$@") — empty-"$@"-under-set-u-on-bash-3.2 safety (job-2108 MED); see _integrity_fail_block.
+  _integrity_fail_block "$reason" "$comp" "$sibling" ${@+"$@"} > "$LOG_SUMMARY_FILE" 2>/dev/null || true
+  _integrity_fail_block "$reason" "$comp" "$sibling" ${@+"$@"} > "$sibling" 2>/dev/null || true
+  _integrity_fail_block "$reason" "$comp" "$sibling" ${@+"$@"}   # STDOUT — reaches a foreground/redirect caller
   echo "⚠️ agent-gate: summary-integrity: FAIL ($reason) — detected-after-component: $comp; RESULT: FAIL. Contended path $SUMMARY_FILE left intact for its live owner; verdict in $LOG_SUMMARY_FILE and $sibling (#2874)" >&2
 }
 
@@ -2081,7 +2085,7 @@ _emit_terminal_summary() {
     fi
     OVERALL=FAIL
     SUMMARY_WRITE_FAILED=1
-    _publish_integrity_fail "$reason" "$comp" "$@"
+    _publish_integrity_fail "$reason" "$comp" ${@+"$@"}   # ${@+"$@"}: empty-safe under set -u on bash 3.2
     return 1
   fi
   emit_summary "$result" "$@"
@@ -3684,7 +3688,10 @@ run_lite() {
   for i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
-  emit_summary "$OVERALL" "${SUMMARY_META[@]}"
+  # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
+  # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
+  # via SUMMARY_WRITE_FAILED when one does).
+  _emit_terminal_summary "$OVERALL" "${SUMMARY_META[@]}" || true
 
   if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
     echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2
@@ -4035,7 +4042,10 @@ run_delta() {
   for i in "${!DN[@]}"; do
     SUMMARY_META+=("$(printf '%-18s %s (%s)' "${DN[$i]}:" "${DS[$i]}" "${DT[$i]}")")
   done
-  emit_summary "$OVERALL" "${SUMMARY_META[@]}"
+  # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
+  # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
+  # via SUMMARY_WRITE_FAILED when one does).
+  _emit_terminal_summary "$OVERALL" "${SUMMARY_META[@]}" || true
 
   if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
     echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2
@@ -4195,7 +4205,10 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   for _i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$_i]}:" "${STATUSES[$_i]}" "${TIMES[$_i]}")")
   done
-  emit_summary "$OVERALL" "${SUMMARY_META[@]}"
+  # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
+  # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
+  # via SUMMARY_WRITE_FAILED when one does).
+  _emit_terminal_summary "$OVERALL" "${SUMMARY_META[@]}" || true
   [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || exit 1
   case "$OVERALL" in PASS) exit 0 ;; *) exit 1 ;; esac
 fi
