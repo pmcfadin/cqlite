@@ -703,7 +703,7 @@ fn estimate_is_within_a_bounded_multiple_of_the_payload() {
         // Multi-column narrow: dominated by the per-COLUMN residual, which is
         // the term that must NOT scale with cell count.
         ("fixed-width scalars", 3),
-        ("flat text/blob/int", 3),
+        ("flat text/blob/int", 2),
         ("flat json rendered", 5),
         ("high-fidelity scalars", 4),
     ];
@@ -903,6 +903,56 @@ fn variable_width_content_drives_the_estimate() {
     assert!(
         d >= 64 * 1024 - 16,
         "estimate difference {d} is below the content difference"
+    );
+}
+
+/// A `Value::Text` NESTED in a rendered container is charged for the worst-case
+/// `String::from_utf8_lossy` expansion (3 bytes per input byte), while a
+/// TOP-LEVEL text cell is charged exactly (review B5).
+///
+/// Both `build_string_array` branches borrow a top-level `Value::Text` after a
+/// non-lossy `str::from_utf8` and hard-error on invalid UTF-8, so `s.len()` is
+/// exact there. A nested one reaches `ValueFormatter::format_value`, which uses
+/// `from_utf8_lossy` — each invalid byte becomes a 3-byte U+FFFD. The estimator
+/// must not depend on the issue-#1644 "text is UTF-8-validated at construction"
+/// invariant, which the type does not enforce.
+#[test]
+fn nested_rendered_text_is_charged_for_lossy_utf8_expansion() {
+    const N: usize = 64;
+    let top = vec![col("t", DataType::Text, None)];
+    let nested = vec![col("l", DataType::List, None)];
+    let flat_row = row(vec![("t", text(&"a".repeat(N)))]);
+    let nested_row = row(vec![("l", Value::List(vec![text(&"a".repeat(N))]))]);
+
+    let top_estimate = estimate_arrow_row_bytes(&top, &flat_row);
+    let nested_estimate = estimate_arrow_row_bytes(&nested, &nested_row);
+    // Top-level: exact, so the estimate stays close to the content length.
+    assert!(
+        top_estimate < N * 2,
+        "top-level text over-charged: {top_estimate} for {N} content bytes"
+    );
+    // Nested: at least 3x the content, covering the U+FFFD expansion.
+    assert!(
+        nested_estimate >= N * 3,
+        "nested rendered text charged {nested_estimate} for {N} content bytes — \
+         below the 3x from_utf8_lossy worst case"
+    );
+
+    // And the property still holds against the real converter for a value whose
+    // bytes are NOT valid UTF-8 — the case the expansion exists for.
+    let invalid = Value::List(vec![Value::Text(vec![0xFFu8; N].into())]);
+    let invalid_row = row(vec![("l", invalid)]);
+    let estimated = estimate_arrow_row_bytes(&nested, &invalid_row);
+    let batch = rows_to_record_batch(&nested, std::slice::from_ref(&invalid_row)).expect("convert");
+    let realized = arrow_payload_bytes(&batch);
+    assert!(
+        realized >= N * 3,
+        "the converter did not expand the invalid bytes ({realized} for {N}) — \
+         the fixture no longer exercises lossy rendering"
+    );
+    assert!(
+        estimated >= realized,
+        "estimate {estimated} under-counts the lossy-expanded payload {realized}"
     );
 }
 

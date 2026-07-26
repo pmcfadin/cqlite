@@ -571,14 +571,21 @@ impl<'a> Estimator<'a> {
     /// unlike the high-fidelity path, the flat builders have a FIXED one-level
     /// child shape, so a constant suffices.
     fn charge_flat(&mut self, dt: &DataType, fidelity: TextFidelity, value: Option<&'a Value>) {
-        // `build_string_array`'s two branches: an authoritative text column
-        // borrows the value's own bytes (`s.len()`, hard error on invalid
-        // UTF-8), everything else renders lossily (up to 3x). Both reach this
-        // function through the SAME flat `data_type` arms, so the branch is
-        // selected here rather than by the shape (review B5).
-        let charge_string = |est: &mut Self, value: Option<&'a Value>| match fidelity {
-            TextFidelity::Strict => est.add(text_content_bytes(value)),
-            TextFidelity::Lossy => est.charge_rendered(value),
+        // `build_string_array`'s two branches, which both reach this function
+        // through the SAME flat `data_type` arms — so the branch is selected
+        // here rather than by the shape (review B5).
+        let charge_string = |est: &mut Self, value: Option<&'a Value>| match (fidelity, value) {
+            // BOTH branches borrow a `Value::Text`'s own bytes after a NON-lossy
+            // `str::from_utf8` and hard-error on invalid UTF-8, so a top-level
+            // text cell is exactly `s.len()` — no U+FFFD expansion. (The lossy
+            // `format_value` path applies only to a `Value::Text` NESTED in a
+            // rendered container; `charge_rendered` charges 3x there.)
+            (_, Some(Value::Text(s))) => est.add(s.len()),
+            // Strict: every other variant makes the builder hard-error, so no
+            // batch exists to charge for.
+            (TextFidelity::Strict, _) => {}
+            // Lossy: `ValueFormatter::format_value` renders it.
+            (TextFidelity::Lossy, v) => est.charge_rendered(v),
         };
         match dt {
             DataType::Boolean | DataType::TinyInt => self.add(1),
