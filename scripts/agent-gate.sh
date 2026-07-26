@@ -1764,6 +1764,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
     echo "agent-gate: AGENT_GATE_TREE_SELFTEST requires an explicit AGENT_GATE_SUMMARY_FILE (refusing to touch the checkout default) (#2926)" >&2
     exit 2
   fi
+  # shellcheck disable=SC2086  # intentional word-split over the space-separated list
   for _tsp in ${AGENT_GATE_TREE_SELFTEST_MUTATE:-}; do
     case "$_tsp" in
       /*|*..*)
@@ -2835,6 +2836,7 @@ record_result() { # <name> <status> <seconds>
 if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
   _tree_selftest_mutate() {
     local f
+    # shellcheck disable=SC2086  # intentional word-split over the space-separated list
     for f in ${AGENT_GATE_TREE_SELFTEST_MUTATE:-}; do
       printf 'tree-selftest mutation\n' >> "$REPO_ROOT/$f"
     done
