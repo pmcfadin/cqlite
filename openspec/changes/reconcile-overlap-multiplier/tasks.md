@@ -15,7 +15,11 @@
 ## 2. Benchmark
 
 - [x] 2.1 Add `cqlite-core/benches/reconcile_overlap.rs` + its `[[bench]]` declaration in
-      `cqlite-core/Cargo.toml` (`required-features = ["write-support"]`, matching `compaction`).
+      `cqlite-core/Cargo.toml`. As-planned wording said `required-features = ["write-support"]`; what
+      landed instead **matches `compaction`** as intended — a bare `[[bench]]` (`harness = false`, no
+      `required-features`) plus an in-file `#[cfg(not(feature = "write-support"))]` no-op `main`, the
+      same pattern as `benches/compaction.rs:456`. Equivalent gating, and it keeps the target compiling
+      (as a no-op) under `--no-default-features` instead of vanishing from the build graph.
 - [x] 2.2 Drive the merge through `KWayMerger::new_from_readers` (`merge/from_readers.rs:302`) with
       `with_now_secs` (`merge/mod.rs:2622`). **Surface exercised:** public `KWayMerger` drain.
       No new `pub` item on the reconcile path.
@@ -33,7 +37,7 @@
       `threshold_pct` entry.
 - [x] 2.7 Document the one-line run command in `cqlite-core/benches/README.md`.
 
-## 3. Measurement run (COMPLETE — 2 valid runs, re-measured after the review-round fixture fixes; run-start load1m 0.73 / 0.66, peak FOREIGN CPU 0.20 of 16 cores)
+## 3. Measurement run (COMPLETE — 2 valid runs, re-measured after the review-round fixture fixes AND the owner-decided setup-bias re-measure; run-start load1m 0.14 / 0.51, peak per-interval FOREIGN CPU 0.946 of 16 cores, 27/27 arms gated per run — matches record §1)
 
 - [x] 3.1 Confirm no concurrent full gate and a 1-minute load average under the ceiling; record it.
 - [x] 3.2 Run the full matrix; capture machine specs + commit SHA.
@@ -95,13 +99,28 @@
 - [x] 5.2 `rust-reviewer` + roborev on the lite-green diff, BEFORE the full gate (review-first).
       Two rounds; 3 blockers fixed with everything re-measured, 2 findings deferred to #2898 / #2899.
 - [x] 5.3 Open the PR (#2892); hand the endgame to `flow-closer`.
-- [x] 5.4 ONE full `scripts/agent-gate.sh` of record — **`RESULT: PASS`, 30/30 components**, at
-      certified SHA `c7a2af4c` (post-rebase onto `origin/main` `0031fdf6`), `dirty: no`,
-      `datasets: 144 Data.db files under /data/datasets`. The `#2751` workaround noted as-planned was
-      NOT needed: `AGENT_GATE_SUMMARY_FILE` worked as documented. Verbatim block posted on PR #2892.
-- [x] 5.5 `spec-auditor` (C) anchored to `openspec/changes/reconcile-overlap-multiplier/specs/**` —
-      **C: PASS**, all 8 requirements `satisfied`; the owner-approved (2026-07-26) saturated-anchor
-      amendment verified consistent across spec, design, README and this file, with the void rule
-      intact for the saturated control.
+- [x] 5.4 ONE full `scripts/agent-gate.sh` of record — **`RESULT: PASS`, all components PASS, zero
+      FAILs**, `dirty: no`, `datasets: 144 Data.db files under /data/datasets`,
+      `cores-per-gate=16`. An earlier full PASS at `c7a2af4c` was **invalidated** when the instrument
+      was rebuilt for the setup-bias re-measure; the gate of record is the LATER run, taken after the
+      final rebase onto `origin/main` (its `commit:` line names the certified SHA — a commit cannot
+      cite its own hash, so it is not repeated here). **This docs-only task/record correction was
+      re-certified by `scripts/agent-gate.sh --delta` against that full PASS**, which fails closed on
+      any non-docs/test diff. The `#2751` workaround noted as-planned was NOT needed:
+      `AGENT_GATE_SUMMARY_FILE` worked as documented. Both verbatim blocks posted on PR #2892.
+- [x] 5.5 `spec-auditor` (C) anchored to `openspec/changes/reconcile-overlap-multiplier/specs/**`.
+      An earlier C PASS was **voided** along with its run (instrument rebuilt, every published number
+      changed), so C was **re-run against the new numbers**. Re-run verdict: **7/8 requirements
+      `satisfied`; Requirement 6 `partial`** on one blocking docs-only finding (F1) — the record's
+      run-metadata row claimed the measurement commit was a "reachable ancestor of the branch head",
+      false after the rebase and unactionable after a squash merge. Fixed in this commit: the row now
+      states the non-ancestry plainly, proves byte-identity of all seven instrument blobs, and gives
+      the `refs/measurements/issue-2043-run-562f14aa` preservation ref + fetch command so a reader can
+      actually obtain the measured instrument. The auditor independently re-derived **every** published
+      figure from the §2 table (all 20 `cost(k)/cost(1)` and 20 `D` cells, p=1689/q=1127 ⇒ the band
+      ⇔ o ∈ [1.17, 1.83], the f/S(o) tables, the o=2 drain, the out-of-sample `field_blend` deltas) and
+      confirmed no stale pre-re-measure figure survives as live. The owner-approved (2026-07-26)
+      saturated-anchor amendment was verified consistent across spec, design, README and this file,
+      with the general void rule intact for the saturated control.
 - [ ] 5.6 Final roborev pass → merge-on-green → `flow-finalize` (archive, telemetry stamp via
       telemetry PR, worktree + branch removal, issue close).

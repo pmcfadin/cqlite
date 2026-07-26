@@ -49,7 +49,7 @@ numbers below are from the **corrected** fixture and are not comparable to the p
 | | |
 |---|---|
 | Machine | AWS `r7iz`-class, Intel Xeon Platinum 8488C, **16 vCPU**, 30 GiB RAM, Linux 6.17.0-1019-aws x86_64 |
-| Commit | **`562f14aa`** (`issue-2043-reconcile-overlap-multiplier`), `bench` profile (release + debuginfo). Reachable ancestor of the branch head — check it out to build exactly the instrument that produced every number below. |
+| Commit | **`562f14aa`** (`issue-2043-reconcile-overlap-multiplier`), `bench` profile (release + debuginfo). **Not an ancestor of the merged commit** (the branch was rebased after this run, then squash-merged, so no branch SHA is reachable from `main`) — but the instrument is **byte-identical** at both: all seven bench files (`benches/reconcile_overlap.rs`, `benches/fixtures/{mod,multigen,validity_guard}.rs`, `benches/README.md`, `benches/perf-gate.json`, `cqlite-core/Cargo.toml`) have the same blob SHA at `562f14aa` and at the certified head. The commit is **preserved on origin** so this citation stays obtainable — fetch and check it out to build exactly the instrument that produced every number below:<br>`git fetch origin 'refs/measurements/*:refs/measurements/*'`<br>`git checkout refs/measurements/issue-2043-run-562f14aa` |
 | Toolchain | rustc 1.97.1 (pinned `rust-toolchain.toml`) |
 | Criterion | 20 samples/arm, 1 s warm-up, ≥5 s measurement, **`SamplingMode::Flat`**; medians reported |
 | Run 1 | **2026-07-26T17:47:42Z → 17:51:37Z**, run-start load1m **0.14**, **max per-interval foreign CPU 0.726 cores**, 633 gated intervals, **27/27 arms gated** |
