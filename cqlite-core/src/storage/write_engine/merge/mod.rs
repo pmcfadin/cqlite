@@ -304,8 +304,21 @@ impl RunReader {
     fn refill_buffer(&mut self) -> Result<()> {
         let mut bytes_buffered = 0;
 
+        // Issue #2819 (B2): when a flight sub-phase sink is installed on this merge
+        // consumer thread, time the BLOCKING `reader.next()` recv and add it to the
+        // thread-local pull-wait accumulator, so the row-drive loop can EXCLUDE that
+        // producer-starvation / cold-IO wait from `stream_merge` (which is meant to
+        // be merge CPU). A single `Cell<bool>` check gates it — the non-flight
+        // compaction path pays nothing (no `Instant::now`).
+        let time_recv = crate::observability::stream_subphase::sink_active();
         while bytes_buffered < self.buffer_size {
-            match self.reader.next() {
+            let recv_start = time_recv.then(std::time::Instant::now);
+            let next = self.reader.next();
+            if let Some(start) = recv_start {
+                let nanos = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                crate::observability::stream_subphase::add_pull_wait_nanos(nanos);
+            }
+            match next {
                 Some(Ok(entry)) => {
                     // Estimate entry size for buffer management
                     bytes_buffered += Self::estimate_entry_size(&entry);

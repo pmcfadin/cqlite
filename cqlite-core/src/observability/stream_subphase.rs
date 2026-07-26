@@ -2,12 +2,22 @@
 //! (issue #2819).
 //!
 //! The Flight `do_get` `stream` phase (`cqlite-flight`) is a CONCURRENT pipeline:
-//! the merge consumer runs on one `spawn_blocking` thread, each input SSTable is
-//! scanned on its own producer thread, and the cold body-chunk page-in + LZ4
-//! decompress run on a feed `spawn_blocking` thread. To attribute WHERE the
-//! in-`stream` time goes (cold-IO vs decompress vs merge vs encode vs gRPC-write)
-//! WITHOUT a profiler, the flight side installs a per-request accumulator and each
-//! pipeline thread adds its own elapsed wall time into the right bucket.
+//! the merge consumer runs on one `spawn_blocking` thread and each input SSTable
+//! is scanned on its own producer thread, where the cold body-chunk page-in + LZ4
+//! decompress physically happen (synchronously, on that producer thread — NOT a
+//! separate `spawn_blocking` feed thread). To attribute WHERE the in-`stream` time
+//! goes (cold-IO vs decompress vs merge vs encode vs gRPC-write) WITHOUT a
+//! profiler, the flight side installs a per-request accumulator and each pipeline
+//! thread adds its own elapsed wall time into the right bucket.
+//!
+//! Thread-locals are NOT inherited across a thread spawn, so the per-request sink
+//! is propagated EXPLICITLY at each spawn site: the merge closure installs it on
+//! the merge consumer thread, and [`current`] captures it there so the per-SSTable
+//! producer thread can re-[`install`] the SAME `Arc`. A deeper `spawn_blocking`
+//! feed thread (the windowed-scan page-in path) is NOT reached by this
+//! propagation and is therefore NOT covered — the instrumented Summary-guided /
+//! full-ring compaction read paths run their page-in on the producer thread, which
+//! IS covered.
 //!
 //! This module owns the crate-side half of that seam so the `cqlite-core` scan
 //! path (which is where cold-fault + decompress physically happen) can push into
@@ -20,6 +30,10 @@
 //!   [`StreamSubPhaseGuard`]. [`current`] reads it (so a spawn site can propagate
 //!   the SAME `Arc` onto a child scan thread); [`timed`] times a closure and
 //!   attributes it to a sub-phase on the installed sink.
+//! * A thread-local recv-wait accumulator ([`add_pull_wait_nanos`] /
+//!   [`pull_wait_nanos`]) the merge consumer thread uses to EXCLUDE the blocking
+//!   merge-input channel wait from `stream_merge` (issue #2819 B2 — that wait is
+//!   producer starvation / cold-IO, not merge CPU).
 //!
 //! # Zero-cost when absent
 //!
@@ -36,14 +50,15 @@
 //! panic / unwind), so a reused blocking-pool thread never leaks one RPC's `Arc`
 //! into another RPC or an unrelated thread.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 /// One of the five in-`stream` data-plane sub-phases (issue #2819). Which thread
 /// records each is fixed by the pipeline architecture: `ColdFault`/`Decompress`
-/// on the feed thread, `Merge`/`Encode` on the merge consumer thread, `GrpcWrite`
+/// on the per-SSTable producer thread (where the page-in + decompress run
+/// synchronously), `Merge`/`Encode` on the merge consumer thread, `GrpcWrite`
 /// on the egress thread. The flight side maps these to the bounded
 /// `cqlite.rpc.phase` values `stream_cold_fault` / `stream_decompress` /
 /// `stream_merge` / `stream_encode` / `stream_grpc_write`.
@@ -89,10 +104,18 @@ impl StreamSubPhaseTimings {
         }
     }
 
-    /// Add `nanos` to `phase`'s counter (saturating, `Relaxed` — the counters are
-    /// independent per-sub-phase totals with no ordering dependency).
+    /// Add `nanos` to `phase`'s counter (SATURATING, `Relaxed` — the counters are
+    /// independent per-sub-phase totals with no ordering dependency). A `cold_fault`
+    /// / `decompress` counter can be written by SEVERAL concurrent producer
+    /// threads sharing one `Arc`, so the add is an atomic CAS loop (`fetch_update`),
+    /// which both stays correct under concurrent writers AND saturates rather than
+    /// wrapping on the (practically unreachable) `u64` nanosecond overflow.
     pub fn add_nanos(&self, phase: StreamSubPhase, nanos: u64) {
-        self.counter(phase).fetch_add(nanos, Ordering::Relaxed);
+        let _ = self
+            .counter(phase)
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_add(nanos))
+            });
     }
 
     /// Read `phase`'s accumulated nanoseconds (a snapshot; a concurrently-running
@@ -109,6 +132,20 @@ thread_local! {
     /// cheap thread-local read with no lazy init.
     static CURRENT_SINK: RefCell<Option<Arc<StreamSubPhaseTimings>>> =
         const { RefCell::new(None) };
+
+    /// Fast `Cell<bool>` mirror of "a sink is installed on this thread", kept in
+    /// lock-step with `CURRENT_SINK` by [`install`] + the guard's `Drop`. A hot
+    /// caller (the merge-input recv-wait site) gates its `Instant::now()` on this
+    /// single `Cell` load instead of a `RefCell` borrow + `Arc` clone (issue #2819
+    /// B3) — so a non-flight scan pays effectively nothing.
+    static SINK_ACTIVE: Cell<bool> = const { Cell::new(false) };
+
+    /// Running merge-input channel recv-wait accrued on THIS (merge consumer)
+    /// thread, in nanoseconds (issue #2819 B2). The row-drive loop snapshots it
+    /// around each `step_row` and subtracts the delta from that step's wall time,
+    /// so the blocking wait for a producer to deliver the next entry (producer
+    /// starvation / cold-IO) is EXCLUDED from `stream_merge` — leaving merge CPU.
+    static PULL_WAIT_NANOS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// RAII guard restoring the previous sub-phase sink on drop — panic-safe, so a
@@ -116,12 +153,14 @@ thread_local! {
 #[must_use = "the sink is uninstalled when the guard is dropped"]
 pub struct StreamSubPhaseGuard {
     prev: Option<Arc<StreamSubPhaseTimings>>,
+    prev_active: bool,
 }
 
 impl Drop for StreamSubPhaseGuard {
     fn drop(&mut self) {
         let prev = self.prev.take();
         CURRENT_SINK.with(|c| *c.borrow_mut() = prev);
+        SINK_ACTIVE.with(|c| c.set(self.prev_active));
     }
 }
 
@@ -130,8 +169,32 @@ impl Drop for StreamSubPhaseGuard {
 /// "no sink" (used when a scan-thread spawn captured `None` from a non-flight
 /// caller) — still restoring the prior value on drop.
 pub fn install(sink: Option<Arc<StreamSubPhaseTimings>>) -> StreamSubPhaseGuard {
+    let active = sink.is_some();
     let prev = CURRENT_SINK.with(|c| std::mem::replace(&mut *c.borrow_mut(), sink));
-    StreamSubPhaseGuard { prev }
+    let prev_active = SINK_ACTIVE.with(|c| c.replace(active));
+    StreamSubPhaseGuard { prev, prev_active }
+}
+
+/// Whether a flight sub-phase sink is installed on this thread — a cheap
+/// `Cell<bool>` load (no `RefCell` borrow, no `Arc` clone). A hot caller uses it
+/// to skip `Instant::now()` entirely on the non-flight path (issue #2819 B3).
+pub fn sink_active() -> bool {
+    SINK_ACTIVE.with(|c| c.get())
+}
+
+/// Add merge-input channel recv-wait (`nanos`) to this thread's running pull-wait
+/// total (issue #2819 B2). Recorded only by the merge consumer thread, at the
+/// blocking `SSTableRowIterator::next` recv site, so the row-drive loop can
+/// subtract it from `stream_merge`. A plain thread-local `Cell` add — cheap, and
+/// never touched on the non-flight path (the caller gates on [`sink_active`]).
+pub fn add_pull_wait_nanos(nanos: u64) {
+    PULL_WAIT_NANOS.with(|c| c.set(c.get().saturating_add(nanos)));
+}
+
+/// This thread's running merge-input recv-wait total, in nanoseconds (issue #2819
+/// B2). The drive loop reads it before/after each `step_row` and uses the delta.
+pub fn pull_wait_nanos() -> u64 {
+    PULL_WAIT_NANOS.with(|c| c.get())
 }
 
 /// The current thread's installed sub-phase sink, if any. A scan-thread spawn
@@ -250,5 +313,49 @@ mod tests {
         assert!(current().is_none());
         record_nanos(StreamSubPhase::Merge, 999); // must not panic
         assert!(current().is_none());
+    }
+
+    #[test]
+    fn sink_active_mirrors_install_and_restores_on_drop() {
+        assert!(!sink_active(), "no sink installed at start");
+        {
+            let sink = Arc::new(StreamSubPhaseTimings::default());
+            let _g = install(Some(sink));
+            assert!(sink_active(), "sink_active tracks an installed sink");
+            {
+                // A nested `None` install (a non-flight child capture) flips the
+                // fast bool off, then restores the outer `true` on drop.
+                let _none = install(None);
+                assert!(!sink_active(), "nested None install deactivates");
+            }
+            assert!(sink_active(), "outer sink restored after nested drop");
+        }
+        assert!(!sink_active(), "sink_active cleared once the guard drops");
+    }
+
+    #[test]
+    fn pull_wait_accumulates_on_this_thread() {
+        // A fresh thread starts at zero (thread-locals do not leak across
+        // threads); the accumulator is a plain running total.
+        std::thread::spawn(|| {
+            assert_eq!(pull_wait_nanos(), 0);
+            add_pull_wait_nanos(100);
+            add_pull_wait_nanos(50);
+            assert_eq!(pull_wait_nanos(), 150, "recv-wait accumulates monotonically");
+        })
+        .join()
+        .expect("thread joins");
+    }
+
+    #[test]
+    fn add_nanos_saturates_rather_than_wrapping() {
+        let sink = StreamSubPhaseTimings::default();
+        sink.add_nanos(StreamSubPhase::Merge, u64::MAX);
+        sink.add_nanos(StreamSubPhase::Merge, 10);
+        assert_eq!(
+            sink.nanos(StreamSubPhase::Merge),
+            u64::MAX,
+            "a second add saturates at u64::MAX instead of wrapping to a tiny value"
+        );
     }
 }

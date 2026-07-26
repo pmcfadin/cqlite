@@ -660,7 +660,32 @@ impl SSTableReader {
             .unwrap_or(usize::MAX);
 
         let mut chunk_count = 0;
-        while let Some(compressed_chunk) = self.read_next_block(&cursor).await? {
+        // Issue #2819 (B4): the Summary-guided read path
+        // (`compressed_offset.rs`) is instrumented for `stream_cold_fault` /
+        // `stream_decompress`, but a BTI/`da` table (and any Summary-guided
+        // FellBack) routes HERE — so instrument the page-in + decompress on this
+        // full-ring fallback too, or those scans would advertise 5 sub-phases yet
+        // emit only 3. A single `Cell<bool>` gate keeps the non-flight compaction
+        // path free of `Instant::now()`; this runs on the per-SSTable producer
+        // thread where the flight per-request sink is installed.
+        let time_reads = crate::observability::stream_subphase::sink_active();
+        loop {
+            // Cold body-chunk page-in — the `stream_cold_fault` scope. Timed
+            // manually because `read_next_block` is async (`stream_subphase::timed`
+            // wraps only a sync closure); `record_nanos` self-gates to a no-op with
+            // no sink installed.
+            let read_start = time_reads.then(std::time::Instant::now);
+            let next_block = self.read_next_block(&cursor).await?;
+            if let Some(start) = read_start {
+                let nanos = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                crate::observability::stream_subphase::record_nanos(
+                    crate::observability::StreamSubPhase::ColdFault,
+                    nanos,
+                );
+            }
+            let Some(compressed_chunk) = next_block else {
+                break;
+            };
             // Cooperative cancellation (issue #2264, roborev round 3): a poll
             // every 256 chunks catches the edge case `drain_compaction_window`'s
             // per-PARTITION poll cannot — a single partition so wide it spans
@@ -680,7 +705,14 @@ impl SSTableReader {
                 compressed_chunk
             } else if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
-                compression.decompress(&compressed_chunk).map_err(|e| {
+                // Issue #2819 (B4): LZ4 decompress — the `stream_decompress` scope.
+                // Reached only for a genuinely compressed chunk (past the
+                // incompressible-raw branch), so an uncompressed table records none.
+                crate::observability::stream_subphase::timed(
+                    crate::observability::StreamSubPhase::Decompress,
+                    || compression.decompress(&compressed_chunk),
+                )
+                .map_err(|e| {
                     Error::corruption(format!(
                         "stream_all_partitions_for_compaction: Failed to decompress chunk {}: {}",
                         chunk_count, e

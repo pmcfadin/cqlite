@@ -466,7 +466,7 @@ macro_rules! collect_points_impl {
                             // For histograms, expose the running sum so a test can
                             // assert "something was recorded" and read total magnitude.
                             value: to_f64(dp.sum()),
-                            count: dp.count() as u64,
+                            count: dp.count(),
                             attributes: attrs(dp.attributes()),
                         });
                     }
@@ -474,6 +474,8 @@ macro_rules! collect_points_impl {
                 MetricData::ExponentialHistogram(hist) => {
                     for dp in hist.data_points() {
                         out.push(MetricPoint {
+                            // ExponentialHistogram's `count()` is `usize` (unlike
+                            // Histogram's `u64`), so this cast is load-bearing.
                             value: to_f64(dp.sum()),
                             count: dp.count() as u64,
                             attributes: attrs(dp.attributes()),
