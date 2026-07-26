@@ -479,6 +479,15 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         round_item: "thread-budget watch (#2313/#2399)",
     },
     MetricDoc {
+        name: catalog::MERGE_ACTIVE_MERGES,
+        kind: MetricKind::Gauge,
+        unit: catalog::unit::MERGES,
+        summary: "Live concurrent k-way merges — the divisor of the adaptive egress budget (#2765).",
+        attributes: &[],
+        interpretation: "Per-channel capacity is clamp(EGRESS_ROW_BUDGET/active, MIN_CAP, 256); a level well above budget/256 means concurrent merges are being throttled toward MIN_CAP.",
+        round_item: "egress-backpressure watch (#2765/#2367)",
+    },
+    MetricDoc {
         name: catalog::RPC_REQUESTS,
         kind: MetricKind::Counter,
         unit: catalog::unit::DIMENSIONLESS,

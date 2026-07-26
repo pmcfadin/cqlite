@@ -50,6 +50,8 @@ pub mod unit {
     pub const FDS: &str = "{fd}";
     /// A count of channel entries / queued items (UCUM annotation, issue #2419).
     pub const ENTRIES: &str = "{entry}";
+    /// A count of concurrent k-way merge operations (UCUM annotation, #2765).
+    pub const MERGES: &str = "{merge}";
 }
 
 /// Bounded attribute keys for catalog metrics.
