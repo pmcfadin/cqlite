@@ -48,6 +48,17 @@ use crate::{Error, Result, RowKey};
 // COMPRESSED `Data.db` needs.
 mod compressed_scan_window;
 
+// COMBINED-INTERACTION regression for the #2876 read-intent split x the #2877
+// coalescing window: every widened read this walk issues must land on the
+// UNADVISED scan plane and none on the `MADV_RANDOM` point plane — a property of
+// the PAIR that neither fix's own tests can observe. Lives in-crate (not
+// `cqlite-core/tests/`) because the per-plane spies and plane setters are
+// `#[cfg(test)] pub(crate)`; lives HERE rather than beside
+// `reader::read_at_point_tests` so it does not grow the already-over-threshold
+// `reader/mod.rs` (campsite rule, epic #1116).
+#[cfg(test)]
+mod scan_plane_coalescing_tests;
+
 use compressed_scan_window::CompressedScanWindow;
 
 /// Half-open `(start_excl, end_incl]` token bound pushed into the per-SSTable walk
@@ -283,33 +294,32 @@ impl SSTableReader {
                 //
                 // The #2877 coalescing window is the CONSUMER of that plane, never a
                 // bypass of it: it makes the SAME scan-plane reads fewer and larger
-                // (chunk-aligned), which is precisely what the unadvised mapping's
-                // kernel readahead rewards.
+                // (chunk-aligned, ramped to 4 MiB), which is precisely what the
+                // unadvised mapping's kernel readahead rewards. Issuing them on the
+                // advised point plane instead would reinstate the #2876 field
+                // regression while every per-PR test stayed green — the combined
+                // interaction `cqlite-core/tests/issue_2877_scan_chunk_coalescing.rs`
+                // pins (CASSANDRA-15452's lesson: a userspace scan buffer only helps
+                // when it reads the plane that actually reads ahead).
                 let scan_source = self.scan_positional_source.clone();
-                let raw: std::borrow::Cow<'_, [u8]> = if let Some(ci) =
-                    self.compression_info.as_deref()
-                {
-                    // Coalesced chunk-aligned window (issue #2877) — the SAME
-                    // `read_compressed_offset_window` call as before, just made
-                    // fewer/larger times so a chunk covering many partitions is
-                    // decompressed once, not once per partition it contains.
-                    std::borrow::Cow::Borrowed(
-                        compressed_window
-                            .slice(self, scan_source.as_ref(), ci, start, end, data_section_end)
-                            .await?,
-                    )
-                } else {
-                    let absolute_offset = start + self.actual_header_size as u64;
-                    std::borrow::Cow::Owned(
-                        self.read_uncompressed_verified(
-                            scan_source.as_ref(),
-                            &self.file,
-                            absolute_offset,
-                            size as usize,
+                let raw: std::borrow::Cow<'_, [u8]> =
+                    if let Some(ci) = self.compression_info.as_deref() {
+                        std::borrow::Cow::Borrowed(
+                            compressed_window
+                                .slice(self, scan_source.as_ref(), ci, start, end, data_section_end)
+                                .await?,
                         )
-                        .await?,
-                    )
-                };
+                    } else {
+                        std::borrow::Cow::Owned(
+                            self.read_uncompressed_verified(
+                                scan_source.as_ref(),
+                                &self.file,
+                                start + self.actual_header_size as u64,
+                                size as usize,
+                            )
+                            .await?,
+                        )
+                    };
                 let raw: &[u8] = &raw;
 
                 // Structural coverage (Signal B): the slice must decode as exactly

@@ -149,8 +149,6 @@ impl SSTableReader {
 /// - **CRC-before-decompress ordering** (guardrail #1411/#1773): unchanged —
 ///   every chunk still goes through `read_compressed_offset_window`'s
 ///   CRC-validated chunk reader, just fewer times.
-/// - **`partition_slice_fully_consumed`** (Signal B): unchanged — still checked
-///   per partition against the slice this window serves.
 /// - **SCAN-plane reads** (issue #2876, and the reason the two fixes are
 ///   inseparable): every refill is issued on the positional plane the WALK hands
 ///   in — the reader's UNADVISED `scan_positional_source` — never the
@@ -158,8 +156,11 @@ impl SSTableReader {
 ///   complementary halves of one mechanism: bigger sequential reads only pay off
 ///   on a mapping that reads ahead, and CASSANDRA-15452 is the upstream precedent
 ///   for the failure mode (their userspace scan buffer was defeated by the layer
-///   underneath it). Pinned end-to-end by the combined per-plane read-count test
-///   in `scan_plane_coalescing_tests`, which requires zero point-plane reads.
+///   underneath it). Pinned end-to-end by
+///   `cqlite-core/tests/issue_2877_scan_chunk_coalescing.rs`'s combined test,
+///   which counts reads PER PLANE and requires zero on the point plane.
+/// - **`partition_slice_fully_consumed`** (Signal B): unchanged — still checked
+///   per partition against the slice this window serves.
 /// - **Dead-prefix reclamation is O(refills), not O(partitions)** (issue #2877
 ///   roborev, blocker B): the already-served prefix is dropped at REFILL time
 ///   ([`Self::compact_prefix`]) rather than after every partition, so serving
