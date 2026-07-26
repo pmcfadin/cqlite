@@ -144,6 +144,17 @@ fn shape_corpus() -> Vec<Shape> {
         rows: vec![row(vec![("b", blob(65_536))])],
     });
 
+    // `cql_type` and `data_type` DISAGREE. `convert_column_to_array` dispatches
+    // `Text`/`Ascii`/`Varchar` on `data_type` alone, so this column is built by
+    // `build_binary_array`, not `build_string_array` — an estimate that routed
+    // it to the typed TEXT arm would charge zero content for a `blob` value and
+    // under-count the whole column.
+    shapes.push(Shape {
+        name: "text cql type over a blob data type",
+        columns: vec![col("b", DataType::Blob, Some(CqlType::Text))],
+        rows: (0..32).map(|i| row(vec![("b", blob(300 + i))])).collect(),
+    });
+
     shapes.push(Shape {
         name: "all null",
         columns: vec![

@@ -242,8 +242,9 @@ enum Shape<'a> {
     /// High-fidelity CQL-typed slot (`build_typed_value_array` and the typed
     /// scalar builders).
     Cql(&'a CqlType),
-    /// Flat `DataType` dispatch (the legacy builders).
-    Flat(&'a DataType),
+    /// Flat `DataType` dispatch (the legacy builders), carrying whether the
+    /// column's CQL type makes `build_string_array` take its STRICT branch.
+    Flat(&'a DataType, TextFidelity),
     /// A REAL `Utf8` array slot whose content is `ValueFormatter::format_value`'s
     /// rendering — `build_string_array`, and each element slot of
     /// `build_list_array` / `build_map_array`. Pays the variable-width slot
@@ -254,26 +255,36 @@ enum Shape<'a> {
     RenderedInline,
 }
 
+/// Whether a column's CQL type is an AUTHORITATIVE text type, which makes
+/// `build_string_array` take its `strict_text` branch: it borrows the `&str`
+/// after a NON-lossy `str::from_utf8` and hard-errors on invalid UTF-8, rather
+/// than rendering through the lossy `ValueFormatter::format_value`. The two
+/// branches have different byte behaviour (`s.len()` versus up to `3 * s.len()`
+/// of U+FFFD expansion), so the estimate must distinguish them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextFidelity {
+    /// `cql_type` is `Text`/`Ascii`/`Varchar`: exact, non-lossy.
+    Strict,
+    /// No authoritative text type: `format_value`'s lossy rendering.
+    Lossy,
+}
+
 /// Resolve a column to its Arrow slot shape, mirroring `convert_column_to_array`
-/// exactly: the high-fidelity CQL arms take the typed path; everything else
-/// (numeric CQL types, `Blob`, an absent CQL type) falls through to the flat
-/// `data_type` dispatch.
-///
-/// `Text`/`Ascii`/`Varchar` are routed to the typed arm even though the
-/// converter reaches them through `build_string_array`, because that builder's
-/// `strict_text` branch — taken for exactly these three CQL types — borrows the
-/// `&str` after a NON-lossy `str::from_utf8` and hard-errors on invalid UTF-8.
-/// Its byte behaviour is the typed one (`s.len()`), not the lossy rendered one
-/// (up to `3 * s.len()`), so charging it as flat text would over-estimate every
-/// authoritative text column by ~3x.
+/// exactly: only the high-fidelity CQL arms take the typed path; everything else
+/// (including `Text`/`Blob`/numeric CQL types) falls through to the flat
+/// `data_type` dispatch — `convert_column_to_array` dispatches those on
+/// `data_type` alone, so the estimate must too.
 fn column_shape(col: &ColumnInfo) -> Shape<'_> {
+    let mut fidelity = TextFidelity::Lossy;
     if let Some(cql) = &col.cql_type {
         let effective = unwrap_frozen_type(cql);
         match effective {
-            CqlType::Text
-            | CqlType::Ascii
-            | CqlType::Varchar
-            | CqlType::Date
+            CqlType::Text | CqlType::Ascii | CqlType::Varchar => {
+                // Falls through to the flat dispatch, but tells it which
+                // `build_string_array` branch the converter will take.
+                fidelity = TextFidelity::Strict;
+            }
+            CqlType::Date
             | CqlType::Time
             | CqlType::Decimal
             | CqlType::Varint
@@ -302,7 +313,7 @@ fn column_shape(col: &ColumnInfo) -> Shape<'_> {
             | CqlType::Custom(_) => {}
         }
     }
-    Shape::Flat(&col.data_type)
+    Shape::Flat(&col.data_type, fidelity)
 }
 
 /// Unwrap nested `Frozen` wrappers to the effective type (mirrors
@@ -386,7 +397,7 @@ impl<'a> Estimator<'a> {
         let value = value.map(unwrap_frozen_value);
         match shape {
             Shape::Cql(t) => self.charge_cql(t, value),
-            Shape::Flat(dt) => self.charge_flat(dt, value),
+            Shape::Flat(dt, fidelity) => self.charge_flat(dt, fidelity, value),
             Shape::RenderedSlot => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
                 self.charge_rendered(value);
@@ -559,7 +570,16 @@ impl<'a> Estimator<'a> {
     /// [`ARROW_COLUMN_SLACK_BYTES`], which is derived from exactly that case —
     /// unlike the high-fidelity path, the flat builders have a FIXED one-level
     /// child shape, so a constant suffices.
-    fn charge_flat(&mut self, dt: &DataType, value: Option<&'a Value>) {
+    fn charge_flat(&mut self, dt: &DataType, fidelity: TextFidelity, value: Option<&'a Value>) {
+        // `build_string_array`'s two branches: an authoritative text column
+        // borrows the value's own bytes (`s.len()`, hard error on invalid
+        // UTF-8), everything else renders lossily (up to 3x). Both reach this
+        // function through the SAME flat `data_type` arms, so the branch is
+        // selected here rather than by the shape (review B5).
+        let charge_string = |est: &mut Self, value: Option<&'a Value>| match fidelity {
+            TextFidelity::Strict => est.add(text_content_bytes(value)),
+            TextFidelity::Lossy => est.charge_rendered(value),
+        };
         match dt {
             DataType::Boolean | DataType::TinyInt => self.add(1),
             DataType::SmallInt => self.add(2),
@@ -571,10 +591,10 @@ impl<'a> Estimator<'a> {
                 self.add(binary_content_bytes(value));
             }
             // `build_string_array`: raw text when the column is authoritative
-            // text, otherwise the rendered form. `charge_rendered` bounds both.
+            // text, otherwise the lossy rendered form.
             DataType::Text | DataType::Json => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
-                self.charge_rendered(value);
+                charge_string(self, value);
             }
             // `build_list_array`: ListArray<Utf8> whose elements are rendered —
             // each element is a REAL child slot, not an inline sub-render.
@@ -597,14 +617,14 @@ impl<'a> Estimator<'a> {
                     }
                 }
             }
-            // Fallback to `build_string_array`'s rendered representation.
+            // Fallback to `build_string_array` — same two branches.
             DataType::Tuple
             | DataType::Udt
             | DataType::Frozen
             | DataType::Tombstone
             | DataType::Null => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
-                self.charge_rendered(value);
+                charge_string(self, value);
             }
         }
     }
