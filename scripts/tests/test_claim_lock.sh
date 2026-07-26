@@ -358,15 +358,24 @@ fi
 echo "TEST 14: push WINS but the confirm ls-remote fails → ERROR infra (exit 1), never a false LOST"
 # ===========================================================================
 # A git shim passes `push` through (the claim really lands) but fails every
-# ls-remote — so the post-push WIN confirmation cannot read the ref. That must be
-# treated as infra (retryable, exit 1), NOT a bogus LOST on a claim we hold.
+# ls-remote of a CLAIM ref — so the post-push WIN confirmation cannot read the ref.
+# That must be treated as infra (retryable, exit 1), NOT a bogus LOST on a claim we
+# hold. The shim deliberately leaves the legacy-branch enumeration
+# (`ls-remote --heads issue-<N>-*`) readable: since #2945 that guard fails CLOSED on
+# an unreadable enumeration and returns BEFORE any push, so a blanket ls-remote
+# failure would never reach the push at all (that whole-remote outage case is
+# TEST 9's / claim-resume.test.sh TEST 6's).
 SHIMF="$T/shim-git-lsfail"
 mkdir -p "$SHIMF"
 cat >"$SHIMF/git" <<SHIM
 #!/usr/bin/env bash
+is_ls=0; is_claims=0
 for a in "\$@"; do
-  if [ "\$a" = "ls-remote" ]; then exit 1; fi   # simulate: ls-remote unreachable
+  [ "\$a" = "ls-remote" ] && is_ls=1
+  case "\$a" in refs/claims/*) is_claims=1 ;; esac
 done
+# simulate: reading a CLAIM ref is unreachable (branch enumeration still works)
+if [ "\$is_ls" = 1 ] && [ "\$is_claims" = 1 ]; then exit 1; fi
 exec "$REALGIT" "\$@"
 SHIM
 chmod +x "$SHIMF/git"
