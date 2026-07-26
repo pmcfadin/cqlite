@@ -499,10 +499,28 @@ mod tests {
         // threads. If the clamp defeats the shrink precondition (a huge budget
         // where even 64 concurrency stays at the 256 clamp), skip: the property is
         // unobservable within a bounded workload, not violated.
+        // UNCONDITIONAL kernel-path proof (env-INDEPENDENT — uses the compile-time
+        // DEFAULT budget/floor via `capacity_from`): at the crossover concurrency
+        // the default kernel shrinks below the 256 ceiling. So even when the
+        // threaded phase below is skipped under a large env override, this test
+        // always proves the shrink math.
+        let default_crossover = EGRESS_ROW_BUDGET / MAX_CAP + 1;
+        assert!(
+            capacity_from(default_crossover, EGRESS_ROW_BUDGET, MIN_CAP) < MAX_CAP,
+            "default kernel must shrink below {MAX_CAP} at concurrency {default_crossover}"
+        );
+
         let counter: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
         let floor = min_cap();
         let n = (budget() / MAX_CAP + 8).min(64);
         if capacity_for(n) >= MAX_CAP {
+            eprintln!(
+                "SKIP: concurrent_begin_shrinks_per_channel_capacity — budget={} \
+                 min_cap={} defeats the bounded-workload shrink precondition \
+                 (clamp={n}); default kernel path asserted above",
+                budget(),
+                floor
+            );
             return;
         }
         let registered = Arc::new(Barrier::new(n));

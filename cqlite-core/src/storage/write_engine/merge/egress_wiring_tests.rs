@@ -50,6 +50,17 @@ use tempfile::TempDir;
 /// 9` both designs keep every source at 256 (indistinguishable), so K=10 here.
 const K: usize = 10;
 
+/// Serializes the two tests in this file that drive the PROCESS-GLOBAL `ACTIVE`
+/// count (`real_merger_drop_returns_its_active_merge_slot` holds a pinned global
+/// baseline; `concurrency_drives_real_per_channel_cap_below_max` deliberately
+/// holds many real mergers on that same global). Under cargo's default
+/// intra-binary parallelism these would otherwise overlap — the sibling's hold
+/// window landing inside the leak test's drain poll spuriously trips the leak
+/// assert (#2451 shared-global flake). Each acquires this lock for its whole
+/// body; a poisoned lock (a panicking sibling) is recovered so one failure never
+/// cascades into a lock-poison error in the other.
+static EGRESS_GLOBAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn config_for(temp_dir: &TempDir) -> WriteEngineConfig {
     WriteEngineConfig::new(
         temp_dir.path().join("data"),
@@ -211,6 +222,11 @@ fn strip_index_siblings(data_path: &std::path::Path) {
 /// that would make build+drop net-zero vacuously).
 #[test]
 fn real_merger_drop_returns_its_active_merge_slot() {
+    // Serialize against the other global-`ACTIVE` test (see the lock's doc).
+    let _global = EGRESS_GLOBAL_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let temp = TempDir::new().expect("temp dir");
     let mut engine = WriteEngine::new(config_for(&temp)).expect("engine");
     let paths = flush_n_sstables_sync(&mut engine, 1);
@@ -343,6 +359,25 @@ fn needs_scan_point_read_shares_snapshot_and_registers_one_slot() {
 /// lower the cap, so `< MAX_CAP` is monotone-safe (cannot flake high).
 #[test]
 fn concurrency_drives_real_per_channel_cap_below_max() {
+    // Serialize against the other global-`ACTIVE` test (see the lock's doc).
+    let _global = EGRESS_GLOBAL_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // UNCONDITIONAL kernel-path proof (independent of any env override): at the
+    // crossover concurrency `budget/MAX_CAP + 1` the resolved capacity kernel is
+    // provably below the 256 ceiling — `budget / (budget/MAX_CAP + 1) < MAX_CAP`
+    // holds for ANY budget. So even when the real-merger phase below is skipped
+    // (a huge budget defeats a BOUNDED workload), this test still proves the
+    // throttle math shrinks with concurrency.
+    let crossover = egress_budget::budget() / egress_budget::MAX_CAP + 1;
+    assert!(
+        egress_budget::capacity_for(crossover) < egress_budget::MAX_CAP,
+        "kernel must shrink below {} at concurrency {crossover} (budget={})",
+        egress_budget::MAX_CAP,
+        egress_budget::budget()
+    );
+
     let temp = TempDir::new().expect("temp dir");
     let mut engine = WriteEngine::new(config_for(&temp)).expect("engine");
     let paths = flush_n_sstables_sync(&mut engine, 1);
@@ -351,10 +386,18 @@ fn concurrency_drives_real_per_channel_cap_below_max() {
     // Sized from the RESOLVED budget, but CLAMPED to 64 so a pathological
     // `CQLITE_EGRESS_ROW_BUDGET` can't spawn thousands of real mergers/FDs. If the
     // clamp defeats the shrink precondition (a huge budget where even a 65th merge
-    // stays at the 256 clamp), skip: the property is unobservable within a bounded
-    // workload, not violated.
+    // stays at the 256 clamp), skip the real-merger phase (the kernel assertion
+    // above already proved the math): the property is unobservable within a
+    // bounded workload, not violated.
     let hold_count = (egress_budget::budget() / egress_budget::MAX_CAP + 1).min(64);
     if egress_budget::capacity_for(hold_count + 1) >= egress_budget::MAX_CAP {
+        eprintln!(
+            "SKIP: concurrency_drives_real_per_channel_cap_below_max — \
+             budget={} min_cap={} defeats the bounded-workload shrink precondition \
+             (clamp={hold_count}); kernel path asserted above",
+            egress_budget::budget(),
+            egress_budget::min_cap()
+        );
         return;
     }
     let mut held = Vec::with_capacity(hold_count);
