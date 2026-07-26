@@ -2,16 +2,18 @@
 //! #2819).
 //!
 //! A sibling of [`crate::obs`] (campsite rule, epic #1116), re-exported through it
-//! so call sites keep the stable `crate::obs::{...}` path. This module owns:
+//! (`pub use crate::obs_subphase::…` in `obs.rs`) so call sites keep the stable
+//! `crate::obs::{...}` path. This module owns:
 //!
 //! * the five bounded `cqlite.rpc.phase` VALUES that decompose the `stream`
 //!   phase (`stream_cold_fault`, `stream_decompress`, `stream_merge`,
 //!   `stream_encode`, `stream_grpc_write`), and
 //! * [`StreamSubPhaseEmitter`], the RAII that flushes the per-request accumulator
 //!   (five `AtomicU64` nanos counters filled on the concurrent pipeline threads
-//!   via `cqlite_core::observability::stream_subphase`) into exactly one
-//!   `cqlite.rpc.phase.duration` sample per sub-phase that recorded time, once at
-//!   stream teardown.
+//!   via `cqlite_core::observability::stream_subphase` — cold-fault/decompress on
+//!   the per-SSTable PRODUCER thread, merge/encode on the merge consumer thread,
+//!   gRPC-write on the egress thread) into exactly one `cqlite.rpc.phase.duration`
+//!   sample per sub-phase that recorded time, once at stream teardown.
 //!
 //! No new metric name or attribute key is introduced (Non-goal #1): the samples
 //! ride the EXISTING `cqlite.rpc.phase.duration` histogram and the EXISTING
@@ -26,9 +28,9 @@ use std::sync::Arc;
 use cqlite_core::observability::StreamSubPhaseTimings;
 use cqlite_core::observability::{self as obs, catalog, AttrValue, StreamSubPhase};
 
-/// See the module docs. Cold body-chunk page-in (cold-IO latency), feed thread.
+/// See the module docs. Cold body-chunk page-in (cold-IO latency), producer thread.
 pub const PHASE_STREAM_COLD_FAULT: &str = "stream_cold_fault";
-/// LZ4 chunk decompression, feed thread.
+/// LZ4 chunk decompression, producer thread.
 pub const PHASE_STREAM_DECOMPRESS: &str = "stream_decompress";
 /// k-way merge + reconcile + row materialize, merge consumer thread.
 pub const PHASE_STREAM_MERGE: &str = "stream_merge";

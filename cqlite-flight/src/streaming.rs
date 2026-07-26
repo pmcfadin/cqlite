@@ -167,9 +167,11 @@ impl BatchSink for ChannelSink {
         // Issue #2819: the `stream_grpc_write` sub-phase wraps ONLY the egress
         // channel `reserve()`/send here — INCLUDING the backpressure park while a
         // slow client is not draining. This runs on the merge/egress thread and
-        // shares no code interval with the feed-thread `stream_cold_fault` scope
-        // (`scan_stream_windowed_read.rs`), so a client stall inflates
-        // `stream_grpc_write` but can never inflate `stream_cold_fault`.
+        // shares no code interval with the producer-thread `stream_cold_fault`
+        // scope (`data_access/compressed_offset.rs` on the Summary-guided read,
+        // `data_access/compaction.rs` on the full-ring fallback), so a client
+        // stall inflates `stream_grpc_write` but can never inflate
+        // `stream_cold_fault`.
         cqlite_core::observability::stream_subphase::timed(
             cqlite_core::observability::StreamSubPhase::GrpcWrite,
             || {
@@ -341,16 +343,25 @@ pub(crate) fn spawn_streaming(
         // Issue #2819: per-request in-`stream` sub-phase accumulator. Installed on
         // THIS merge consumer thread (so `stream_merge`/`stream_encode`/
         // `stream_grpc_write` scopes on this thread record into it, and cqlite-core
-        // propagates the SAME `Arc` onto the per-SSTable producer + feed threads for
-        // `stream_cold_fault`/`stream_decompress`); emitted ONCE at teardown. Drop
-        // order (reverse of declaration): the emitter flushes the samples first,
-        // THEN the install guard uninstalls the thread-local — so a reused
-        // blocking-pool thread never leaks this RPC's sink.
+        // propagates the SAME `Arc` onto the per-SSTable producer thread for
+        // `stream_cold_fault`/`stream_decompress`); emitted ONCE at teardown.
+        //
+        // Roborev B1 — the emitter MUST record its samples BEFORE any egress
+        // sender is released, or a client scraping metrics at end-of-stream races
+        // the recording. Both channel senders — `sink`'s `tx` (dropped inside
+        // `run_merge_catching_panics` when the closure returns) and `error_tx`
+        // (dropped at the end of THIS closure) — must still be alive when the
+        // emitter flushes, so the receiver has not yet seen the channel close.
+        // Locals drop in REVERSE declaration order, so declaring `_subphase_emit`
+        // AFTER `error_tx` makes it drop FIRST: emit samples → THEN `error_tx`
+        // drops (closes the channel / ends the client stream) → THEN
+        // `_subphase_install` uninstalls the thread-local (so a reused
+        // blocking-pool thread never leaks this RPC's sink).
         let subphase = Arc::new(cqlite_core::observability::StreamSubPhaseTimings::default());
         let _subphase_install =
             cqlite_core::observability::stream_subphase::install(Some(subphase.clone()));
-        let _subphase_emit = crate::obs_subphase::StreamSubPhaseEmitter::new(subphase);
         let error_tx = tx.clone();
+        let _subphase_emit = crate::obs::StreamSubPhaseEmitter::new(subphase);
         let mut sink = ChannelSink {
             tx,
             produced,

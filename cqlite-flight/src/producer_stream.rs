@@ -26,8 +26,13 @@
 //! Lives in its own module (not `producer.rs`) because that file is over the
 //! campsite file-size threshold (epic #1116).
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use arrow::record_batch::RecordBatch;
 use cqlite_core::export::{estimate_arrow_row_bytes, rows_to_record_batch};
+use cqlite_core::observability::stream_subphase;
+use cqlite_core::observability::{StreamSubPhase, StreamSubPhaseTimings};
 use cqlite_core::query::{PartitionKeyCache, QueryRow};
 use cqlite_core::storage::write_engine::merge::{StreamingMerger, StreamingStep};
 use cqlite_core::storage::write_engine::{DecoratedKey, KWayMerger};
@@ -36,6 +41,73 @@ use crate::batch_bytes::BatchByteCap;
 use crate::cancel::CancelFlag;
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
+
+/// Elapsed nanoseconds since `start`, clamped into a `u64` (a scan long enough
+/// to overflow `u64` nanoseconds — ~584 years — is unreachable).
+#[inline]
+fn elapsed_nanos(start: Instant) -> u64 {
+    start.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
+/// Per-request in-`stream` sub-phase accumulator for the row-drive loop (issue
+/// #2819 B2/B3).
+///
+/// Resolves the flight per-request sub-phase sink ONCE before the loop (a single
+/// thread-local read + `Arc` clone, NOT per row — B3) and folds merge + encode
+/// CPU nanos into plain `u64` locals as the loop runs. The locals are written
+/// into the shared `AtomicU64` counters EXACTLY ONCE, on [`Drop`] — so an early
+/// return (a cooperative cancel, a `LIMIT` break, or a `?`-propagated error)
+/// still records the work already done, and a full scan makes ONE `fetch_add`
+/// per sub-phase regardless of row/batch count.
+///
+/// `stream_merge` is merge CPU only: each `step_row`'s BLOCKING merge-input recv
+/// wait (producer starvation / cold-IO, timed by the recv site into the
+/// thread-local `pull_wait_nanos` accumulator) is subtracted from that step's
+/// wall time before it is added here (B2) — so a slow producer inflates neither
+/// `stream_merge` nor cold-fault falsely.
+///
+/// When no sink is installed (every non-flight caller) the accumulator is inert:
+/// [`Self::active`] is `false`, so the hot loop skips `Instant::now()` entirely
+/// and `Drop` records nothing.
+struct RowSubPhaseAccum {
+    sink: Option<Arc<StreamSubPhaseTimings>>,
+    merge_nanos: u64,
+    encode_nanos: u64,
+}
+
+impl RowSubPhaseAccum {
+    fn new() -> Self {
+        Self {
+            sink: stream_subphase::current(),
+            merge_nanos: 0,
+            encode_nanos: 0,
+        }
+    }
+
+    #[inline]
+    fn active(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    #[inline]
+    fn add_merge(&mut self, nanos: u64) {
+        self.merge_nanos = self.merge_nanos.saturating_add(nanos);
+    }
+
+    #[inline]
+    fn add_encode(&mut self, nanos: u64) {
+        self.encode_nanos = self.encode_nanos.saturating_add(nanos);
+    }
+}
+
+impl Drop for RowSubPhaseAccum {
+    fn drop(&mut self) {
+        if let Some(sink) = &self.sink {
+            sink.add_nanos(StreamSubPhase::Merge, self.merge_nanos);
+            sink.add_nanos(StreamSubPhase::Encode, self.encode_nanos);
+        }
+    }
+}
 
 /// Abstraction over the ROW-granular streaming stepper — the streaming analogue
 /// of `producer::PartitionStepper` (issue #2230).
@@ -91,15 +163,26 @@ impl MergeProducer {
         Ok(batch)
     }
 
-    /// [`Self::flush`] with its Arrow-encode wall time attributed to the
-    /// `stream_encode` in-`stream` sub-phase (issue #2819). Runs on the merge
-    /// consumer thread, where the flight per-request sub-phase sink is installed;
-    /// a no-op wrapper (no timing) for every non-flight caller with no sink.
-    fn flush_timed(&self, buffer: &mut Vec<QueryRow>) -> Result<RecordBatch, ProducerError> {
-        cqlite_core::observability::stream_subphase::timed(
-            cqlite_core::observability::StreamSubPhase::Encode,
-            || self.flush(buffer),
-        )
+    /// [`Self::flush`] with its Arrow-encode wall time accumulated into the
+    /// `stream_encode` in-`stream` sub-phase LOCAL (issue #2819 B3). Encode runs
+    /// on the merge consumer thread (once per emitted batch, not per row); the
+    /// nanos are folded into `accum`'s plain `u64` and flushed into the shared
+    /// atomic exactly once when the drive loop ends. When no flight sink is
+    /// installed (`accum` inert), there is no `Instant::now()` — a no-op wrapper
+    /// for every non-flight caller.
+    fn flush_accum(
+        &self,
+        buffer: &mut Vec<QueryRow>,
+        accum: &mut RowSubPhaseAccum,
+    ) -> Result<RecordBatch, ProducerError> {
+        if accum.active() {
+            let start = Instant::now();
+            let out = self.flush(buffer);
+            accum.add_encode(elapsed_nanos(start));
+            out
+        } else {
+            self.flush(buffer)
+        }
     }
 
     /// Drive the row-merge loop over `stepper` one reconciled row at a time,
@@ -129,6 +212,11 @@ impl MergeProducer {
         let mut meter = ScanProgressMeter::new(progress, access_path);
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
         let mut emitted: u64 = 0;
+        // Issue #2819 (B2/B3): resolve the flight sub-phase sink ONCE here and
+        // accumulate merge/encode CPU into locals, flushed to the shared atomics
+        // on this accumulator's Drop (covers every early return below). Inert
+        // (no `Instant::now`) when no flight sink is installed.
+        let mut accum = RowSubPhaseAccum::new();
         // Issue #2825: the SAME dual-boundary accumulator `drive_merge` uses — a
         // cap wired into only one egress path would leave the other unbounded.
         let mut byte_cap = BatchByteCap::new(self.max_batch_bytes);
@@ -159,13 +247,23 @@ impl MergeProducer {
             // NEVER masked as a clean `Cancelled` abort — only an actual
             // cancellation maps to `ProducerError::Cancelled`.
             //
-            // Issue #2819: the reconcile/materialize step is the `stream_merge`
-            // sub-phase (k-way merge + LWW/tombstone/TTL reconcile + `entry_to_row`
-            // pulled from the per-input channels), on the merge consumer thread.
-            let step = cqlite_core::observability::stream_subphase::timed(
-                cqlite_core::observability::StreamSubPhase::Merge,
-                || stepper.step_row(),
-            )
+            // Issue #2819 (B2): the reconcile step is the `stream_merge` sub-phase
+            // (k-way merge + LWW/tombstone/TTL reconcile), on the merge consumer
+            // thread — but `step_row` also does the BLOCKING merge-input recv while
+            // it pulls the next entry, so time the step and SUBTRACT the recv-wait
+            // delta the recv site logged (`pull_wait_nanos`) to leave merge CPU
+            // only. Materialize (`entry_to_row`) is added to the same bucket below.
+            let step = if accum.active() {
+                let wait_before = stream_subphase::pull_wait_nanos();
+                let start = Instant::now();
+                let out = stepper.step_row();
+                let elapsed = elapsed_nanos(start);
+                let wait = stream_subphase::pull_wait_nanos().saturating_sub(wait_before);
+                accum.add_merge(elapsed.saturating_sub(wait));
+                out
+            } else {
+                stepper.step_row()
+            }
             .map_err(|e| match e {
                 cqlite_core::Error::Cancelled => ProducerError::Cancelled,
                 other => ProducerError::Merge(other),
@@ -205,14 +303,31 @@ impl MergeProducer {
             // Build the row so predicates can reference any projected-out column
             // too (`assemble_cols` includes filter-referenced columns); carriers
             // (`entry_to_row` → None) are skipped without counting a row.
-            let Some(row) = self.entry_to_row(
-                &key.key,
-                *entry,
-                &mut pk_cache,
-                assemble_cols.as_ref(),
-                self.now_secs,
-            )?
-            else {
+            //
+            // Issue #2819 (B2): per-row materialize is merge CPU — fold its time
+            // into the same `stream_merge` bucket (no recv-wait here — this is
+            // pure decode/assembly on the merge consumer thread).
+            let materialized = if accum.active() {
+                let start = Instant::now();
+                let out = self.entry_to_row(
+                    &key.key,
+                    *entry,
+                    &mut pk_cache,
+                    assemble_cols.as_ref(),
+                    self.now_secs,
+                );
+                accum.add_merge(elapsed_nanos(start));
+                out
+            } else {
+                self.entry_to_row(
+                    &key.key,
+                    *entry,
+                    &mut pk_cache,
+                    assemble_cols.as_ref(),
+                    self.now_secs,
+                )
+            };
+            let Some(row) = materialized? else {
                 continue;
             };
             // Count a row materialised/examined by the scan (BEFORE the predicate
@@ -231,14 +346,14 @@ impl MergeProducer {
             // an empty buffer.
             let width = estimate_arrow_row_bytes(&self.columns, &row);
             if byte_cap.cut_before(width).is_yes() {
-                sink.emit(self.flush_timed(&mut buffer)?)?;
+                sink.emit(self.flush_accum(&mut buffer, &mut accum)?)?;
                 byte_cap.reset();
             }
             buffer.push(row);
             emitted += 1;
             byte_cap.accumulate(width);
             if buffer.len() >= self.batch_size {
-                sink.emit(self.flush_timed(&mut buffer)?)?;
+                sink.emit(self.flush_accum(&mut buffer, &mut accum)?)?;
                 byte_cap.reset();
             }
             // LIMIT reached (counted post-filter): stop the merge early.
@@ -250,7 +365,7 @@ impl MergeProducer {
         }
 
         if !buffer.is_empty() {
-            sink.emit(self.flush_timed(&mut buffer)?)?;
+            sink.emit(self.flush_accum(&mut buffer, &mut accum)?)?;
         }
         Ok(())
     }
