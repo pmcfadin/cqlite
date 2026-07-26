@@ -317,6 +317,15 @@ harness = false
 name = "compaction"
 harness = false
 
+# Reconcile generation-overlap multiplier instrument (issue #2043, epic #2817 M9):
+# per-row k-way-merge cost for clusters spanning k SSTable generations, k ∈
+# {1,2,5,10,20} × collision mix, at a pinned `now`. ADVISORY-only in
+# benches/perf-gate.json — a measurement instrument must never block a merge.
+# Synthesizes its own generations, so it needs no vendored dataset corpus.
+[[bench]]
+name = "reconcile_overlap"
+harness = false
+
 [[bench]]
 name = "concurrent_scan"
 harness = false

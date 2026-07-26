@@ -94,6 +94,7 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 | `read` | added (#538), point-read reworked (#1562), chunk cache (#1567) | Read suite (needs `--features cli-helpers`): `get_partition_big`, `get_partition_bti`, `point_lookup_repeated`, `clustering_slice`, `full_scan`, `type_heavy` over the fixtures via the public query API. `get_partition_*` are **real** partition-targeted point reads (`WHERE id = <unquoted-uuid>`, #949/#956), asserted at setup to report a targeted `AccessPath` (not the old `SELECT * … LIMIT 1` scan proxy). `point_lookup_repeated` (#1567) measures the steady-state **cached** repeat point read — Criterion warms up, so the target chunk is decompressed once and served from the shared decompressed-chunk cache thereafter (`Arc::clone`, no re-read/re-decompress). `_bti` / `point_lookup_repeated` skip-register when the optional `test_da` corpus is absent. |
 | `write` | added (#539, #574) | Write suite (needs `--features write-support`): `ingest_wal_on`, `ingest_wal_off`, and `flush` — see below. |
 | `compaction` | added (#1646) | Compaction / k-way-merge suite (needs `--features write-support`): `narrow`, `wide`, `tombstone_heavy` — full multi-generation STCS compaction over flushed L0 SSTables — see below. |
+| `reconcile_overlap` | added (#2043) | **Advisory measurement instrument** (needs `--features write-support`): per-row `KWayMerger` drain cost for row clusters spanning **k** SSTable generations, k ∈ {1,2,5,10,20} × collision mix {`disjoint`, `lww_overwrite`, `tombstone`, `ttl_expiring`, `field_blend`}, at a **pinned `now`**. Pins the 0.17 throughput program's generation-overlap derate term — see below. |
 | `observability_overhead` | added (#1043) | Zero-overhead-when-disabled gate: `read_scan` (needs `cli-helpers`) and `write_merge` (needs `write-support`). The SAME bench source runs under the default build vs `--features observability` with export disabled; the two arms are compared by `scripts/ci/observability_overhead.sh` — see below. |
 | `concurrent_scan` | added (#917), **gated** (#1564) | Aggregate throughput of N ∈ {1,2,4,8} concurrent `get_all_entries()` scans against one shared `Arc<SSTableReader>`, for the buffered and mmap backends (needs `--features cli-helpers`). Gated via a **concurrency scaling floor** (not absolute time) — see below. |
 | `read_while_write` | added (#1143), **gated** (#1564) | Reader-side scan latency with ~6 full-scan readers running concurrently with ~2 sustained-ingest writers (needs `--features cli-helpers,write-support`). Gated on the Criterion **median** (strict, 25% threshold); the p99 tail is printed to stderr for local diagnosis and owned by the A2 tail-latency harness (#1563). |
@@ -151,6 +152,33 @@ routine. Throughput is reported as compacted rows/second (`Throughput::Elements`
 | `compaction/narrow` | **Strictly gated** — strict pass/fail | Many small single-row partitions (`UUID` PK, no clustering) across the L0 SSTables. The CPU-bound merge-core probe; stable enough for strict regression detection. |
 | `compaction/wide` | **Advisory** — reported, never fails CI | A few fat partitions, each SSTable contributing a disjoint clustering slice so the merged partition is the union of all of them. Memory/data-shaped by design — **O2's dhat budget is its guard, not this wall clock** — so it is advisory. |
 | `compaction/tombstone_heavy` | **Strictly gated** — strict pass/fail | Live rows shadowed by row/range/cell tombstones in a later generation, exercising the reconcile + range-shadowing path. CPU-bound; strictly gated. |
+
+### `reconcile_overlap` — the generation-overlap multiplier instrument (Issue #2043, epic #2817 M9)
+
+**One-line run command** (needs no vendored dataset corpus — every generation is
+synthesized by the write engine, because controlled `k` is the independent variable
+and the fetched corpus is single-generation):
+
+```bash
+cargo bench -p cqlite-core --features write-support --bench reconcile_overlap
+```
+
+Smoke it (one iteration per arm; the numbers are NOT measurements) with
+`CQLITE_BENCH_ALLOW_LOAD=1 … --bench reconcile_overlap -- --test`.
+
+| Aspect | Contract |
+|---|---|
+| **Matrix** | `reconcile_overlap/<mix>/k<N>` for `mix` ∈ {`disjoint`, `lww_overwrite`, `tombstone`, `ttl_expiring`, `field_blend`} × `k` ∈ {1, 2, 5, 10, 20} — 25 arms. |
+| **Timed region** | The FULL `KWayMerger` drain (`new_from_readers` → `step()` to `Complete`): producer/adapter setup, `BinaryHeap` refill, cluster assembly, `MergeEntry` construction AND reconciliation. The §3 term it pins is a whole-scan derate, so isolating the private reconcile call would understate the multiplier. Reader **open** is hoisted out (opened once per arm, `Arc`-cloned per iteration — the warm-handle shape). |
+| **Denominator** | `Throughput::Elements(output_rows)` — reconciled OUTPUT rows. The derived multiplier is `cost(k)/cost(1)` per mix. |
+| **Observables** | Each arm prints `input_rows`, `output_rows`, `collisions_per_row`, `output_partitions`, `live_cells`, `tombstone_cells`, `row_tombstones` before timing, all read off the public `MergeStep` stream. `input_rows` is OBSERVED (the sum of each generation's own single-run drain), not inferred from the mutation count. Purge counts are **zero by construction**: a read merge has `gc_before_secs = None` and `purge_safe = false`, so the gc-grace purge stage is a strict no-op. |
+| **`now`** | Pinned through `KWayMerger::with_now_secs(Some(1_700_000_000))`. **Never** `CQLITE_TTL_NOW_OVERRIDE_SECS` — that seam is `#[cfg(debug_assertions)]` and compiles out of the release profile `cargo bench` uses, silently falling back to the wall clock. The `ttl_expiring` fixture makes such a fallback detectable: each row carries one cell expired at the pin and one live at the pin but expired at any present-day wall clock, and the bench asserts **exactly one expiry per row**. No-TTL arms pass `None` (a strict no-op), keeping the expiry machinery out of their measurement. |
+| **Load guard** | The 1-minute load average is printed at run start and the run **fails closed** above **2.00** (numbers taken under load are void). `CQLITE_BENCH_ALLOW_LOAD=1` opts out visibly and marks the run as non-measurement. |
+| **Gate policy** | **ADVISORY ONLY.** The 25 ids appear in `perf-gate.json` under `advisory_benches` with **no** `benches` entry and no `threshold_pct`, and `perf-regression.yml` does not run this target — an instrument whose numbers move with fixture tuning must never block a merge. |
+| **Anchor** | `disjoint/k1` is validated against the published ~2.0 µs/row narrow-disjoint-singleton figure (`docs/research/phase2-verify-stage2.md:226-232`) before any multiplier is derived; out of band ⇒ the run is void. |
+
+Measured curve, derived multiplier and verdict:
+[`docs/research/issue-2043-reconcile-overlap-multiplier.md`](../../docs/research/issue-2043-reconcile-overlap-multiplier.md).
 
 ## Performance regression gate (Issues #540, #572)
 

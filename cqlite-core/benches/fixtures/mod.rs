@@ -30,6 +30,12 @@
 
 use std::path::PathBuf;
 
+/// k-parameterized multi-generation overlap fixtures (issue #2043 / M9). Kept in
+/// its own file (`fixtures/multigen.rs`) rather than inlined here so this shared
+/// module stays small — every bench target compiles its own copy of it.
+#[cfg(feature = "write-support")]
+pub mod multigen;
+
 /// Fixed RNG seed shared by every bench. Any key/partition/value selection that
 /// is "random" must draw from [`seeded_rng`] so the selected set is byte-for-byte
 /// identical across runs and machines — the core determinism guarantee of #537.
