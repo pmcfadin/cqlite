@@ -382,7 +382,11 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
 
 - **M11 (#2825) — T4 byte-bounded batch (NEW, P2).** Cap MB/batch (finish on whichever of row-cap 8192 /
   byte-cap trips first). *Accept:* wide-row batches stay under a configured byte ceiling; the
-  57,344-row Arrow egress buffer stops scaling to ~8MB/batch on wide rows (helps B4). ~1.0–1.1×
+  ~49,152-row Arrow egress buffer — `(DO_GET_CHANNEL_CAPACITY = 4 + ~2 in-flight) × 8192`; the
+  earlier 57,344 figure over-counted by folding in the `#[cfg(test)]`-only `IN_FLIGHT_ALLOWANCE = 3`
+  (`cqlite-flight/src/streaming.rs:86-87`, correction recorded at
+  `docs/research/phase2-verify-parallelism.md:94-100`) — stops scaling to ~8MB/batch on wide rows
+  (helps B4). ~1.0–1.1×
   throughput — filed as a **robustness/correctness** lever, not throughput. **Dep:** none. **Dedup:**
   NEW connector/server surface; #1476/#2230 are the read-path analogue.
 

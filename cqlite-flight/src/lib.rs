@@ -10,6 +10,10 @@
 
 pub mod admission;
 pub mod agg;
+// Byte-bounded Arrow egress batches (issue #2825): the dual row-cap / byte-cap
+// batch boundary shared by BOTH producer drive loops, plus the published
+// payload-to-capacity conversion constants issue #2821 composes on.
+pub mod batch_bytes;
 pub mod cancel;
 pub mod filter;
 pub mod obs;
@@ -40,6 +44,15 @@ pub mod warm;
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub mod test_fixtures;
+
+// Deterministic, self-contained synthetic wide/narrow row shapes for the
+// byte-cap suite (issue #2825). Gated behind `test-util` for the same reason as
+// `test_fixtures`: the shapes must reach BOTH the in-crate unit tests and a
+// separate integration-test binary, which a `pub(crate)` module cannot do, but
+// they must never compile into the production library/binary.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub mod wide_row_fixture;
 
 pub mod ticket;
 

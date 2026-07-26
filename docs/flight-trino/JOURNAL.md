@@ -608,3 +608,83 @@ Format:
 - **Files:** `cqlite-flight/src/admission.rs` (`WaitBudget` enum,
   `SlowAcquireOutcome`), `admission_tests.rs` (`cfg()` + new test),
   `main.rs` (explicit `WaitBudget::Timeout` construction).
+
+---
+
+## 2026-07-26 — Byte-bounded Arrow egress batches: `--max-batch-bytes` (issue #2825, T4/M11)
+
+- **What:** the egress batch boundary is now **dual** — a batch is finished on
+  whichever of the row-cap (`--batch-size`, default 8192) or a new **byte-cap**
+  trips FIRST, enforced at BOTH build sites (`producer.rs`'s `drive_merge` and
+  `producer_stream.rs`'s `drive_merge_streaming`) plus the aggregate route.
+- **Why:** the batch was previously bounded by row count alone, so its byte size
+  was `batch_size × row_width` — unbounded in schema shape. A table with a 64 KiB
+  blob column produced a 512 MiB batch from the same code path that produced a
+  192 KiB batch for `cassandra_easy_stress.keyvalue`, and the ratified B4 budget
+  (≤16Mi per-query working set at concurrency 1) cannot be held by a bound stated
+  in rows. `checked_value_bytes` already named the missing remedy in its own error
+  text ("reduce the batch row count (byte-bounded batching)").
+
+### Operator knob
+
+| | |
+|---|---|
+| CLI flag | `--max-batch-bytes <BYTES>` |
+| Environment | `CQLITE_MAX_BATCH_BYTES` |
+| Default | `4194304` (4 MiB), `cqlite_flight::batch_bytes::DEFAULT_MAX_BATCH_BYTES` |
+| Startup log | `max_batch_bytes=<value>`, beside `batch_size` / `max_concurrent_scans` |
+| Disable | set to `usize::MAX` (row-cap becomes the sole boundary) |
+
+- **Currency — read this before budgeting memory.** The cap is denominated in
+  Arrow **payload** bytes: the sum of buffer *lengths*, recursively including
+  child data (`cqlite_core::export::arrow_payload_bytes`). It is **not**
+  denominated in `RecordBatch::get_array_memory_size()`, which reports buffer
+  *capacity*: the construction path grows `MutableBuffer` by power-of-two
+  doubling from zero, so reported memory runs up to ~2× the payload (measured
+  1.001×–1.80× across shapes against arrow 53 — blob-heavy batches hug 1.0,
+  many-small-string batches approach 1.8). Payload bytes are estimable before the
+  batch exists and monotonic in row count; capacity is neither, which is why it
+  cannot be the trigger.
+- **Converting to capacity currency.** Published constants:
+  `BATCH_BYTES_CAPACITY_FACTOR = 2` and `BATCH_BYTES_PER_COLUMN_SLACK = 1024`, with
+  `worst_case_batch_capacity_bytes(cap, n_columns) = 2 × cap + 1024 × n_columns`.
+  At the 4 MiB default that is ~8 MiB of resident capacity per batch.
+- **B4 composition for issue #2821.** The per-stream in-flight ceiling must be
+  budgeted in the SAME capacity currency `streaming.rs` already meters, giving
+  `ceiling + one maximum batch`. With a 6 MiB ceiling: `6 + 8 = 14 MiB < 16Mi`,
+  inside B4 at concurrency 1. The naive `4 + 8 = 12 MiB` reading mixes payload and
+  capacity — a 4 MiB *payload* cap is an 8 MiB *capacity* batch, so an 8 MiB
+  ceiling would land at exactly 16 MiB with zero headroom.
+- **Sizing the default.** 4 MiB keeps the row-cap binding on every narrow shape
+  measured in-tree (`issue_1494` fixture ~20 B/row → ~192 KiB/batch, ~22× headroom;
+  the field model at ~180 B/row → 1.47 MB, ~2.9×; even the pessimistic 300 B/row
+  figure → 2.34 MiB), so narrow-path batch boundaries are byte-identical to
+  pre-change and there is no throughput regression.
+- **Liveness.** Push-then-test: a batch is cut only when the buffer is non-empty
+  AND the accumulated estimate has reached the cap. A single row wider than the
+  whole cap is delivered as a one-row batch — never dropped, never a stall.
+  `--max-batch-bytes 0` and `1` degrade to one row per batch rather than hanging.
+- **On by default everywhere** — deliberately unlike `Admission::unconstrained()`:
+  an unbounded batch is a memory-safety hazard, not a policy choice, so
+  `CqliteFlightService::new`, `MergeProducer::new` and `with_spec` all carry the
+  4 MiB cap. Library embedders opt OUT with `with_max_batch_bytes(usize::MAX)`.
+- **How the decision is made.** `cqlite_core::export::estimate_arrow_row_bytes`
+  reports a conservative per-row payload width from the authoritative `ColumnInfo`
+  CQL types plus the decoded values (no-heuristics, #28); a running accumulator
+  advances by exactly one row's estimate per push and resets on flush, so the
+  boundary is decided BEFORE `rows_to_record_batch` allocates. The estimator's
+  walk is iterative, node-budgeted and saturating: a pathological value fails
+  closed (cut the batch), never panics or hangs.
+- **Files:** new `cqlite-core/src/export/arrow_size.rs` (+ `arrow_size_tests.rs`),
+  new `cqlite-flight/src/batch_bytes.rs` (+ `batch_bytes_tests.rs`), new
+  `cqlite-flight/src/wide_row_fixture.rs`, new
+  `cqlite-flight/tests/issue_2825_max_batch_bytes_e2e.rs`; minimal edits to
+  `producer.rs`, `producer_stream.rs`, `service.rs`, `main.rs`, `lib.rs`,
+  `export/mod.rs`.
+- **Verified:** 11 estimator tests (incl. the conservatism property test over a
+  20-shape corpus), 19 in-crate byte-cap tests, 4 end-to-end tests that start the
+  REAL server binary and stream a REAL `do_get` (CLI flag, env var, default +
+  startup log, content invariance). `issue_1494_producer_mem_budget` unchanged
+  under `--features dhat-heap`.
+- **Next:** issue #2821 consumes `BATCH_BYTES_CAPACITY_FACTOR` for its 6 MiB
+  per-stream egress ceiling.

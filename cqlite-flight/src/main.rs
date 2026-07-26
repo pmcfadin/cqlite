@@ -12,6 +12,7 @@ use cqlite_flight::admission::{
     Admission, AdmissionConfig, WaitBudget, DEFAULT_MAX_CONCURRENT_SCANS, DEFAULT_WAIT_TIMEOUT_MS,
     ENV_MAX_CONCURRENT_SCANS, ENV_WAIT_TIMEOUT_MS,
 };
+use cqlite_flight::batch_bytes::{DEFAULT_MAX_BATCH_BYTES, ENV_MAX_BATCH_BYTES};
 use cqlite_flight::service::CqliteFlightService;
 use cqlite_flight::shutdown::shutdown_signal;
 use std::time::Duration;
@@ -48,6 +49,20 @@ struct Args {
     /// budget are absorbed transparently with no client-visible error.
     #[arg(long, env = ENV_WAIT_TIMEOUT_MS, default_value_t = DEFAULT_WAIT_TIMEOUT_MS)]
     admission_wait_timeout_ms: u64,
+
+    /// Maximum Arrow PAYLOAD bytes per record batch (issue #2825, T4). A batch is
+    /// finished on whichever of `--batch-size` or this cap trips FIRST, so a wide
+    /// (blob/text) schema can no longer produce an unbounded
+    /// `batch_size x row_width` batch. Denominated in payload bytes (the sum of
+    /// Arrow buffer lengths), NOT `get_array_memory_size()`, which reports buffer
+    /// capacity and runs up to `BATCH_BYTES_CAPACITY_FACTOR` (2x) higher; a
+    /// consumer budgeting resident memory uses
+    /// `cqlite_flight::batch_bytes::worst_case_batch_capacity_bytes`. The 4 MiB
+    /// default leaves the row-cap binding on every narrow shape, so narrow-path
+    /// batch boundaries are unchanged. A single row wider than the cap is still
+    /// delivered, as a one-row batch; `0` and `1` degrade to one row per batch.
+    #[arg(long, env = ENV_MAX_BATCH_BYTES, default_value_t = DEFAULT_MAX_BATCH_BYTES)]
+    max_batch_bytes: usize,
 }
 
 #[tokio::main]
@@ -94,7 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keep a copy of the data-dir for the saturation sampler's readdir-only
     // table-discovery walk (issue #2684) before the service takes ownership.
     let sampler_data_dir = args.data_dir.clone();
-    let service = CqliteFlightService::with_admission(args.data_dir, args.batch_size, admission);
+    let service = CqliteFlightService::with_admission(args.data_dir, args.batch_size, admission)
+        // Issue #2825: the byte-cap half of the dual batch boundary.
+        .with_max_batch_bytes(args.max_batch_bytes);
 
     // A coarse tonic transport backstop, generously ABOVE the admission ceiling:
     // it guards the HTTP/2 accept loop / stream table from a client opening far
@@ -109,6 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         %listen,
         batch_size = args.batch_size,
+        max_batch_bytes = args.max_batch_bytes,
         max_concurrent_scans = admission_limit,
         admission_wait_timeout_ms = args.admission_wait_timeout_ms,
         max_concurrent_streams,
