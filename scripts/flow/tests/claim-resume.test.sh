@@ -11,14 +11,34 @@
 #
 # These tests pin the sanctioned replacement: `adopt <N> --expect none --reason <why>`
 # (git's EMPTY LEASE = "the ref must not exist"), the safety direction (a HELD ref
-# still refuses), a REAL two-machine race on that path (git arbitrates, exactly one
-# winner), and the guard's fail-CLOSED behaviour on an enumeration outage
-# (#2677 item 2 — an outage must never read as "no legacy branch").
+# still refuses), its RE-ENTRANCY (a retry after a confirm blip must not abandon an
+# issue we hold), a REAL two-machine race on that path, the guard's fail-CLOSED
+# behaviour on an enumeration outage (#2677 item 2), and the IDENTITY-FORGERY
+# hardening of the two user-controlled fields (--reason, --actor) that land in the
+# very commit message the holder-identity parser reads.
+#
+# WRITES ARE WITNESSED, NOT INFERRED: a `post-receive` hook on the bare origin logs
+# every ACCEPTED ref update ("<ref> <old> <new>"), so tests assert how many writes
+# the SERVER applied and from what old value. Counting refs afterwards cannot do
+# that — an exact ref is structurally <=1, and every claimant reads its verdict back
+# AFTER all the pushes, so last-writer-wins satisfies a ref count.
+#
+# WHERE THE EMPTY LEASE IS ACTUALLY PROVEN (measured, mutation-verified):
+# replacing `--force-with-lease=<ref>:` with a plain `git push --force` is caught
+# DETERMINISTICALLY by TEST 2/TEST 10 (a second claimant whose ref advertisement is
+# FRESH — it saw the holder's ref — sends that sha as the update's old value, so
+# --force overwrites it: the hook log shows TWO applied updates and the holder loses
+# its claim). It is NOT reliably caught by the concurrent race in TEST 3: when both
+# claimants' advertisements say "absent", each sends an all-zero old value and git's
+# own protocol-level stale-info check rejects the second push regardless of the
+# lease. So TEST 3 pins the CONCURRENCY invariants (exactly one winner, exactly one
+# accepted create, the loser fails loudly) and TEST 2/10 are the LEASE oracle — do
+# not "simplify" either one into the other.
 #
 # Fast + hermetic: a mktemp BARE repo stands in for origin plus two clones playing
-# machines A and B (each overriding CLAIM_MACHINE). No network, no GitHub, no gh
-# (neither `claim` nor `adopt` uses it). No wall-clock assertions — every verdict is
-# a git-ref state or an exit code.
+# machines A and B (each overriding CLAIM_MACHINE). No network, no GitHub; `gh` is
+# stubbed only where `release` consults it. No wall-clock assertions — every verdict
+# is a git-ref state, a receive-hook record, or an exit code.
 #
 # Run standalone:  bash scripts/flow/tests/claim-resume.test.sh
 #
@@ -26,7 +46,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAIM="$SCRIPT_DIR/../claim.sh"
-REALGIT="$(command -v git)"   # absolute git, for the ls-remote shim in TEST 6
+REALGIT="$(command -v git)"   # absolute git, for the shims in TESTS 6/9/10
 
 PASS=0
 FAIL=0
@@ -42,7 +62,22 @@ trap 'rm -rf "$T"' EXIT
 ORIGIN="$T/origin.git"
 A="$T/A"
 B="$T/B"
+HOOKLOG="$T/accepted-updates.log"
+ZEROS=0000000000000000000000000000000000000000
 g init --bare -q "$ORIGIN"
+
+# post-receive fires ONLY for ref updates the remote actually APPLIED, so this log
+# is ground truth for "how many writes did the server accept, and from what old
+# value" — the property a race test must assert.
+cat >"$ORIGIN/hooks/post-receive" <<HOOK
+#!/usr/bin/env bash
+while read -r old new ref; do
+  printf '%s %s %s\n' "\$ref" "\$old" "\$new" >>"$HOOKLOG"
+done
+HOOK
+chmod +x "$ORIGIN/hooks/post-receive"
+: >"$HOOKLOG"
+
 g clone -q "$ORIGIN" "$A" 2>/dev/null
 g clone -q "$ORIGIN" "$B" 2>/dev/null
 (
@@ -54,14 +89,41 @@ g clone -q "$ORIGIN" "$B" 2>/dev/null
 )
 ( cd "$B" && g fetch -q origin )
 
+# `gh` stub: `release` (without --force) refuses when it cannot check for an open
+# PR, and the real gh cannot talk to a local bare repo. The stub answers "no open
+# PRs" so the holder-release round trip is exercised, not the gh-missing branch
+# (which test_claim_lock.sh already covers).
+GHSHIM="$T/shim-gh"
+mkdir -p "$GHSHIM"
+cat >"$GHSHIM/gh" <<'GH'
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = "list" ] && exit 0; done
+exit 1
+GH
+chmod +x "$GHSHIM/gh"
+
 # runA/runB — claim.sh from clone A/B as a distinct machine. The function EXIT CODE
 # is claim.sh's, so callers use `out=$(runA ...); rc=$?`.
 runA() { ( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
 runB() { ( cd "$B" && CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
+# …with the gh stub on PATH (release only).
+runA_gh() { ( cd "$A" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
+runB_gh() { ( cd "$B" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" "$@" ); }
 
 ref_sha()      { g -C "$A" ls-remote origin "refs/claims/issue-$1" | awk '{print $1}' | head -1; }
 ref_count()    { g -C "$A" ls-remote origin "refs/claims/issue-$1" | wc -l | tr -d ' '; }
 branch_exists() { [ -n "$(g -C "$A" ls-remote --heads origin "$1" | awk '{print $1}')" ]; }
+
+# accepted_updates <issue> — how many ref updates the SERVER applied to this claim
+# ref (from the post-receive log).
+accepted_updates() { grep -c "^refs/claims/issue-$1 " "$HOOKLOG" 2>/dev/null || true; }
+# accepted_olds <issue> — the OLD value of each applied update (a create is all-zeros).
+accepted_olds()    { awk -v r="refs/claims/issue-$1" '$1==r {print $2}' "$HOOKLOG" 2>/dev/null; }
+
+# line_field <line> <key> — pull `<key>=<value>` out of a CLAIM: line using the same
+# exact-key/first-match token semantics claim.sh's own msg_field uses, so assertions
+# test the RECORD, not a verbatim rendering of the whole line.
+line_field() { printf '%s' "$1" | tr ' ' '\n' | grep -m1 "^$2=" | sed "s/^$2=//"; }
 
 # push_work_branch <branch> [msg] — an ORDINARY work branch on origin: cut from
 # main, an ordinary commit on top. Its tip carries NO claim trailers, which is
@@ -117,6 +179,12 @@ else
   fail "expected ADOPTED exit 0 with a ref; got rc=$rcAdopt ref='$adoptSha'
 $outAdopt"
 fi
+# The server applied exactly ONE update, and it was a CREATE (old = all-zeros).
+if [ "$(accepted_updates 2001)" = "1" ] && [ "$(accepted_olds 2001)" = "$ZEROS" ]; then
+  ok "the resume was a single server-accepted CREATE (old=all-zeros), not an overwrite"
+else
+  fail "expected 1 accepted create for issue-2001; got $(accepted_updates 2001) update(s), olds='$(accepted_olds 2001)'"
+fi
 runB verify 2001 >/dev/null 2>&1; rcVerify=$?
 [ "$rcVerify" -eq 0 ] && ok "the adopter now VERIFIES as holder (exit 0)" \
   || fail "expected verify exit 0 for the adopter, got $rcVerify"
@@ -127,19 +195,48 @@ branch_exists "issue-2001-owner-approved-spec" \
   && ok "the resumed work branch is left untouched on origin" \
   || fail "the resume path deleted/moved the work branch"
 
-# Criterion 1: the command records WHO took it and WHY.
+# Criterion 1: the command records WHO took it and WHY. Assert PROPERTIES of the
+# record (it re-extracts as one whitespace-free token that still carries the
+# operator's words), not a verbatim sanitized string — a format-coupled literal
+# would break on any future sanitizer tweak without any behaviour regressing.
 statusOut=$( cd "$B" && CLAIM_MACHINE=machineB bash "$CLAIM" status 2001 )
-if printf '%s\n' "$statusOut" | grep -q 'machine=machineB' \
-   && printf '%s\n' "$statusOut" | grep -q 'reason=resume-of-#1883:-owner-approved-OpenSpec-change-lives-on-the-branch'; then
-  ok "the claim record carries who (machine=machineB) AND why (sanitized one-token reason)"
+statusMachine=$(line_field "$statusOut" machine)
+statusReason=$(line_field "$statusOut" reason)
+if [ "$statusMachine" = "machineB" ] && [ -n "$statusReason" ] \
+   && [ "$statusReason" = "${statusReason%%[[:space:]]*}" ] \
+   && printf '%s' "$statusReason" | grep -q 'resume' \
+   && printf '%s' "$statusReason" | grep -q '1883'; then
+  ok "the record round-trips as who=machineB + a single whitespace-free reason token carrying the operator's words"
 else
-  fail "claim record missing holder and/or reason:
+  fail "claim record missing holder and/or a well-formed reason (machine='$statusMachine' reason='$statusReason'):
 $statusOut"
 fi
-[ "$(printf '%s\n' "$statusOut" | grep -c 'CLAIM: STATUS')" = "1" ] \
-  && ok "a multi-word reason stays ONE parseable status line" \
-  || fail "reason sanitization leaked whitespace into the record:
+if [ "$(printf '%s\n' "$statusOut" | grep -c 'CLAIM: STATUS issue=2001 ')" = "1" ] \
+   && printf '%s\n' "$statusOut" | grep -q 'reason='; then
+  ok "a multi-word reason stays ONE parseable status ROW that still reports reason="
+else
+  fail "reason sanitization leaked whitespace into the record (or the row lost reason=):
 $statusOut"
+fi
+
+# Round trip: a resume-adopted claim must be RELEASABLE by its holder. `release`
+# (no --force) is holder-gated AND CAS-deleted, so if the resume record ever broke
+# identity parsing the issue would be permanently unreleasable.
+outRelease=$(runB_gh release 2001); rcRelease=$?
+if [ "$rcRelease" -eq 0 ] && printf '%s\n' "$outRelease" | grep -q 'CLAIM: RELEASED' \
+   && [ -z "$(ref_sha 2001)" ]; then
+  ok "the resume-adopted claim releases cleanly by its holder (exit 0, ref gone)"
+else
+  fail "expected RELEASED exit 0 with the ref gone; got rc=$rcRelease ref='$(ref_sha 2001)'
+$outRelease"
+fi
+outAfter=$(runA claim 2001); rcAfter=$?
+if [ "$rcAfter" -eq 2 ] && printf '%s\n' "$outAfter" | grep -q 'reason=legacy-branch-lock'; then
+  ok "after the release the surviving work branch still guards a plain claim (exit 2)"
+else
+  fail "expected the branch guard to still refuse a plain claim; got rc=$rcAfter
+$outAfter"
+fi
 
 # ===========================================================================
 echo "TEST 2: HELD claim ref + branch present — the resume path is still REFUSED (exit 2, holder keeps it)"
@@ -162,67 +259,115 @@ else
   fail "expected ADOPT-LOST exit 2 with the ref intact; got rc=$rcSteal held=$heldSha now=$stillSha
 $outSteal"
 fi
+# THE lease oracle (see the header): machineB's advertisement SAW the holder's ref,
+# so its push carries that sha as the update's old value. `--force-with-lease=<ref>:`
+# demands all-zeros → the server refuses and applies NOTHING. A plain `--force`
+# would be ACCEPTED here, giving two applied updates and evicting the holder — which
+# is exactly how this assertion kills that mutant, deterministically.
+if [ "$(accepted_updates 2002)" = "1" ] && [ "$(accepted_olds 2002)" = "$ZEROS" ]; then
+  ok "the refused resume produced NO server-accepted write (still exactly one applied update: the holder's create)"
+else
+  fail "expected exactly 1 applied create for issue-2002; got $(accepted_updates 2002) update(s), olds='$(accepted_olds 2002)'"
+fi
 runA verify 2002 >/dev/null 2>&1; rcHolderStill=$?
 [ "$rcHolderStill" -eq 0 ] && ok "the original holder still verifies after the refused attempt" \
   || fail "holder lost its claim to a refused resume (verify rc=$rcHolderStill)"
 
 # ===========================================================================
-echo "TEST 3: two machines RACE the resume path — exactly one winner (git arbitrates)"
+echo "TEST 3: two machines RACE the resume path — exactly one SERVER-ACCEPTED create (git arbitrates), 5 rounds"
 # ===========================================================================
-push_work_branch "issue-2003-resumable"
-( cd "$B" && g fetch -q origin )
 # Real competing pushes: both machines are released from a FIFO barrier and run the
 # empty-lease adopt concurrently against the same origin. Nothing is mocked — the
-# remote's ref update is the arbiter.
-mkfifo "$T/gate-a" "$T/gate-b"
-( head -1 <"$T/gate-a" >/dev/null 2>&1
-  runA adopt 2003 --expect none --reason "racing machineA" >"$T/race-a.out" 2>&1
-  echo "$?" >"$T/race-a.rc" ) &
-pidA=$!
-( head -1 <"$T/gate-b" >/dev/null 2>&1
-  runB adopt 2003 --expect none --reason "racing machineB" >"$T/race-b.out" 2>&1
-  echo "$?" >"$T/race-b.rc" ) &
-pidB=$!
-( echo go >"$T/gate-a" ) &
-writerA=$!
-( echo go >"$T/gate-b" ) &
-writerB=$!
-wait "$pidA" "$pidB" 2>/dev/null
-# Never `wait` on the fifo writers: a writer blocks until its reader opens, so a
-# child that died before opening would hang the suite. The racers are done here,
-# so any still-blocked writer is simply killed.
-kill "$writerA" "$writerB" 2>/dev/null || true
-rcRaceA="$(cat "$T/race-a.rc" 2>/dev/null || echo missing)"
-rcRaceB="$(cat "$T/race-b.rc" 2>/dev/null || echo missing)"
-winners=0
-[ "$rcRaceA" = "0" ] && winners=$((winners+1))
-[ "$rcRaceB" = "0" ] && winners=$((winners+1))
-raceRef=$(ref_sha 2003)
-raceRefs=$(ref_count 2003)
-adoptedLines=$(cat "$T/race-a.out" "$T/race-b.out" 2>/dev/null | grep -c 'CLAIM: ADOPTED')
-if [ "$winners" -eq 1 ] && [ "$raceRefs" = "1" ] && [ "$adoptedLines" = "1" ] && [ -n "$raceRef" ]; then
-  ok "concurrent empty-lease adopts: exactly one exit-0 ADOPTED winner, exactly one claim ref"
-else
-  fail "expected exactly one winner and one ref; got winners=$winners refs=$raceRefs adopted-lines=$adoptedLines rcA=$rcRaceA rcB=$rcRaceB
-A: $(cat "$T/race-a.out" 2>/dev/null)
-B: $(cat "$T/race-b.out" 2>/dev/null)"
-fi
-# The loser must never report success. (It reports ADOPT-LOST when it reads the
-# winner's ref, or a RETRYABLE infra ERROR if its push was rejected before the
-# winner's create landed — never ADOPTED, and never a bogus "nobody holds it" win.)
-if [ "$rcRaceA" = "0" ]; then loserOut="$T/race-b.out"; else loserOut="$T/race-a.out"; fi
-if ! grep -q 'CLAIM: ADOPTED' "$loserOut" 2>/dev/null; then
-  ok "the losing machine never printed ADOPTED"
-else
-  fail "the losing machine reported ADOPTED — double-claim:
-$(cat "$loserOut")"
-fi
-# And the surviving ref really belongs to the winner, not a torn state.
-winnerVerify=2
-if [ "$rcRaceA" = "0" ]; then runA verify 2003 >/dev/null 2>&1; winnerVerify=$?
-elif [ "$rcRaceB" = "0" ]; then runB verify 2003 >/dev/null 2>&1; winnerVerify=$?; fi
-[ "$winnerVerify" -eq 0 ] && ok "the winner verifies as the holder of the single surviving ref" \
-  || fail "the race winner does not verify as holder (rc=$winnerVerify)"
+# remote's ref update is the arbiter, and the post-receive log is the witness.
+# Repeated over distinct issue ids because a single interleaving proves little.
+raceRounds=0; raceOk=0; raceAtomic=0; raceLoser=0; raceWinnerVerified=0; raceDiag=""
+for id in 2101 2102 2103 2104 2105; do
+  raceRounds=$((raceRounds+1))
+  push_work_branch "issue-${id}-resumable"
+  ( cd "$B" && g fetch -q origin )
+  rm -f "$T/gate-a" "$T/gate-b"
+  mkfifo "$T/gate-a" "$T/gate-b"
+  ( head -1 <"$T/gate-a" >/dev/null 2>&1
+    runA adopt "$id" --expect none --reason "racing machineA" >"$T/race-a.out" 2>&1
+    echo "$?" >"$T/race-a.rc" ) &
+  pidA=$!
+  ( head -1 <"$T/gate-b" >/dev/null 2>&1
+    runB adopt "$id" --expect none --reason "racing machineB" >"$T/race-b.out" 2>&1
+    echo "$?" >"$T/race-b.rc" ) &
+  pidB=$!
+  ( echo go >"$T/gate-a" ) &
+  writerA=$!
+  ( echo go >"$T/gate-b" ) &
+  writerB=$!
+  wait "$pidA" "$pidB" 2>/dev/null
+  # Never `wait` on the fifo writers: a writer blocks until its reader opens, so a
+  # child that died before opening would hang the suite. The racers are done here,
+  # so any still-blocked writer is simply killed.
+  kill "$writerA" "$writerB" 2>/dev/null || true
+  rcRaceA="$(cat "$T/race-a.rc" 2>/dev/null || echo missing)"
+  rcRaceB="$(cat "$T/race-b.rc" 2>/dev/null || echo missing)"
+  winners=0
+  [ "$rcRaceA" = "0" ] && winners=$((winners+1))
+  [ "$rcRaceB" = "0" ] && winners=$((winners+1))
+  raceRef=$(ref_sha "$id")
+  adoptedLines=$(cat "$T/race-a.out" "$T/race-b.out" 2>/dev/null | grep -c 'CLAIM: ADOPTED')
+  if [ "$winners" -eq 1 ] && [ "$(ref_count "$id")" = "1" ] && [ "$adoptedLines" = "1" ] && [ -n "$raceRef" ]; then
+    raceOk=$((raceOk+1))
+  else
+    raceDiag="$raceDiag
+  round $id: winners=$winners refs=$(ref_count "$id") adopted-lines=$adoptedLines rcA=$rcRaceA rcB=$rcRaceB
+  A: $(cat "$T/race-a.out" 2>/dev/null)
+  B: $(cat "$T/race-b.out" 2>/dev/null)"
+  fi
+  # The concurrency invariant, from the SERVER's own record: exactly ONE update was
+  # applied to the claim ref and it was a create (old=all-zeros) — so no claimant
+  # ever overwrote another's create, and the surviving ref is not a torn/second write.
+  # (The lease itself is proven in TEST 2/10 — see the header for why a both-see-
+  # absent race cannot discriminate it.)
+  updates=$(accepted_updates "$id")
+  olds=$(accepted_olds "$id")
+  if [ "$updates" = "1" ] && [ "$olds" = "$ZEROS" ]; then
+    raceAtomic=$((raceAtomic+1))
+  else
+    raceDiag="$raceDiag
+  round $id: server accepted $updates update(s) to refs/claims/issue-$id, olds='$olds' (want 1 create)"
+  fi
+  # The loser must fail LOUDLY: never ADOPTED, and never a vacuous silent exit —
+  # exit 2 with ADOPT-LOST (it read the winner's ref) or exit 1 with ERROR infra
+  # (its push was rejected before the winner's create was visible).
+  if [ "$rcRaceA" = "0" ]; then loserOut="$T/race-b.out"; loserRc="$rcRaceB"; else loserOut="$T/race-a.out"; loserRc="$rcRaceA"; fi
+  loserText="$(cat "$loserOut" 2>/dev/null)"
+  loserVerdict=1
+  printf '%s\n' "$loserText" | grep -q 'CLAIM: ADOPTED' && loserVerdict=0
+  if printf '%s\n' "$loserText" | grep -q 'CLAIM: ADOPT-LOST'; then :
+  elif printf '%s\n' "$loserText" | grep -q 'CLAIM: ERROR' && printf '%s\n' "$loserText" | grep -q 'infra'; then :
+  else loserVerdict=0
+  fi
+  case "$loserRc" in 1 | 2) : ;; *) loserVerdict=0 ;; esac
+  if [ "$loserVerdict" -eq 1 ]; then
+    raceLoser=$((raceLoser+1))
+  else
+    raceDiag="$raceDiag
+  round $id: loser rc=$loserRc verdict not in {ADOPT-LOST, ERROR infra}: $loserText"
+  fi
+  # And the surviving ref really belongs to the winner, not a torn state.
+  winnerVerify=2
+  if [ "$rcRaceA" = "0" ]; then runA verify "$id" >/dev/null 2>&1; winnerVerify=$?
+  elif [ "$rcRaceB" = "0" ]; then runB verify "$id" >/dev/null 2>&1; winnerVerify=$?; fi
+  [ "$winnerVerify" -eq 0 ] && raceWinnerVerified=$((raceWinnerVerified+1))
+done
+[ "$raceOk" -eq "$raceRounds" ] \
+  && ok "concurrent empty-lease adopts: exactly one exit-0 ADOPTED winner, every round ($raceRounds/$raceRounds)" \
+  || fail "expected one winner per round; $raceOk/$raceRounds rounds clean$raceDiag"
+[ "$raceAtomic" -eq "$raceRounds" ] \
+  && ok "the SERVER accepted exactly one create per raced ref ($raceAtomic/$raceRounds) — the update is atomic, not last-writer-wins" \
+  || fail "atomicity witness failed: $raceAtomic/$raceRounds rounds had a single all-zeros create$raceDiag"
+[ "$raceLoser" -eq "$raceRounds" ] \
+  && ok "the loser fails loudly every round (exit 1|2 with ADOPT-LOST or ERROR infra, never ADOPTED)" \
+  || fail "loser contract failed in $((raceRounds - raceLoser))/$raceRounds rounds$raceDiag"
+[ "$raceWinnerVerified" -eq "$raceRounds" ] \
+  && ok "the winner verifies as the holder of the single surviving ref, every round" \
+  || fail "the race winner did not verify as holder in $((raceRounds - raceWinnerVerified))/$raceRounds rounds$raceDiag"
 
 # ===========================================================================
 echo "TEST 4: --expect fail-closed — empty '' is a usage error; only the literal 'none' opts into the empty lease"
@@ -241,6 +386,27 @@ outJunk=$(runB adopt 2004 --expect "HEAD~1" 2>&1); rcJunk=$?
 [ "$rcJunk" -eq 64 ] && ok "a non-hex, non-'none' --expect is a usage error (exit 64)" \
   || fail "expected exit 64 for --expect HEAD~1; got rc=$rcJunk
 $outJunk"
+# A non-numeric issue is a usage error on every subcommand (no ref namespace games).
+argRc=""
+for sub in "claim 20x4" "verify 20x4" "release 20x4" "adopt 20x4 --expect none --reason why"; do
+  # shellcheck disable=SC2086  # deliberate word-split of the fixed arg list
+  runB $sub >/dev/null 2>&1
+  argRc="$argRc $?"
+done
+[ "$argRc" = " 64 64 64 64" ] \
+  && ok "a non-numeric issue number is a usage error (exit 64) on claim/verify/release/adopt" \
+  || fail "expected 64 from every subcommand for a non-numeric issue; got rcs='$argRc'"
+# A valid-hex but WRONG --expect against a FREE ref must NOT create the ref: CAS-on-
+# absent stays a refusal, so no refactor can quietly route it into the empty lease.
+WRONG=1111111111111111111111111111111111111111
+outWrong=$(runB adopt 2044 --expect "$WRONG" --reason "cas against a ref that is not there"); rcWrong=$?
+if [ "$rcWrong" -eq 2 ] && printf '%s\n' "$outWrong" | grep -q 'CLAIM: ADOPT-LOST' \
+   && printf '%s\n' "$outWrong" | grep -q 'actual=<gone>' && [ -z "$(ref_sha 2044)" ]; then
+  ok "a wrong-sha CAS on a FREE ref refuses (exit 2, actual=<gone>) and creates nothing"
+else
+  fail "expected ADOPT-LOST exit 2 with actual=<gone> and no ref; got rc=$rcWrong ref='$(ref_sha 2044)'
+$outWrong"
+fi
 
 # ===========================================================================
 echo "TEST 5: adopt --expect none REQUIRES --reason (the record must say why)"
@@ -253,11 +419,17 @@ else
   fail "expected exit 64 demanding --reason with no ref created; got rc=$rcNoWhy ref='$noRef5'
 $outNoWhy"
 fi
+outBlankWhy=$(runB adopt 2005 --expect none --reason "" 2>&1); rcBlankWhy=$?
+if [ "$rcBlankWhy" -eq 64 ] && [ -z "$(ref_sha 2005)" ]; then
+  ok "an EMPTY --reason '' is also a usage error (exit 64) — an unset shell variable cannot slip through"
+else
+  fail "expected exit 64 for --reason ''; got rc=$rcBlankWhy ref='$(ref_sha 2005)'
+$outBlankWhy"
+fi
 # An ALL-ZERO --expect is git's own "must not exist": same intent as `none`, so it
 # takes the same AUDITED route rather than a quiet unrecorded create. (Verified on
 # the real origin: an all-zero lease DOES create the ref.)
-ZERO=0000000000000000000000000000000000000000
-outZeroNoWhy=$(runB adopt 2005 --expect "$ZERO" 2>&1); rcZeroNoWhy=$?
+outZeroNoWhy=$(runB adopt 2005 --expect "$ZEROS" 2>&1); rcZeroNoWhy=$?
 zeroRef=$(ref_sha 2005)
 if [ "$rcZeroNoWhy" -eq 64 ] && [ -z "$zeroRef" ]; then
   ok "an all-zero --expect also demands --reason (exit 64) — no unaudited create-with-no-record"
@@ -265,7 +437,7 @@ else
   fail "expected exit 64 and no ref for an all-zero --expect without --reason; got rc=$rcZeroNoWhy ref='$zeroRef'
 $outZeroNoWhy"
 fi
-outZero=$(runB adopt 2005 --expect "$ZERO" --reason "all-zero lease with a recorded why"); rcZero=$?
+outZero=$(runB adopt 2005 --expect "$ZEROS" --reason "all-zero lease with a recorded why"); rcZero=$?
 if [ "$rcZero" -eq 0 ] && printf '%s\n' "$outZero" | grep -q 'CLAIM: ADOPTED' && [ -n "$(ref_sha 2005)" ]; then
   ok "an all-zero --expect WITH --reason acquires the free ref (exit 0, recorded)"
 else
@@ -334,6 +506,245 @@ else
   fail "expected CLAIM: HELD exit 0; got rc=$rcPlain ref='$plainRef'
 $outPlain"
 fi
+
+# ===========================================================================
+echo "TEST 9: the empty-lease push FAILING while the ref is ABSENT is retryable infra (exit 1), never a lost race"
+# ===========================================================================
+# #2677 direction for the resume path: nobody holds the ref, so a rejected push is
+# an infrastructure failure. A shim fails ONLY `push` and lets every read through.
+SHIMP="$T/shim-push-fail"
+mkdir -p "$SHIMP"
+cat >"$SHIMP/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = "push" ] && exit 128; done
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMP/git"
+outPushFail=$( cd "$B" && PATH="$SHIMP:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" adopt 2009 --expect none --reason "push blocked by an outage" 2>&1 ); rcPushFail=$?
+if [ "$rcPushFail" -eq 1 ] && printf '%s\n' "$outPushFail" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outPushFail" | grep -q 'infra' \
+   && ! printf '%s\n' "$outPushFail" | grep -q 'ADOPT-LOST' \
+   && [ -z "$(ref_sha 2009)" ] && [ "$(accepted_updates 2009)" = "0" ]; then
+  ok "empty-lease push failure over an ABSENT ref → ERROR infra exit 1, no ADOPT-LOST, nothing created"
+else
+  fail "expected ERROR infra exit 1 with no ref/no ADOPT-LOST; got rc=$rcPushFail ref='$(ref_sha 2009)' updates=$(accepted_updates 2009)
+$outPushFail"
+fi
+
+# ===========================================================================
+echo "TEST 10: adopt is RE-ENTRANT — a retry after a confirm-read blip must never abandon a claim we hold"
+# ===========================================================================
+# Reproduce the reported sequence exactly: a shim fails ONLY the post-push
+# `ls-remote refs/claims/*` confirm, so the push LANDS and adopt still reports the
+# retryable ERROR whose documented remedy is "retry".
+SHIMC="$T/shim-claims-lookup-fail"
+mkdir -p "$SHIMC"
+cat >"$SHIMC/git" <<SHIM
+#!/usr/bin/env bash
+saw_ls=0; saw_claims=0
+for a in "\$@"; do
+  [ "\$a" = "ls-remote" ] && saw_ls=1
+  case "\$a" in refs/claims/*) saw_claims=1 ;; esac
+done
+if [ "\$saw_ls" = 1 ] && [ "\$saw_claims" = 1 ]; then exit 128; fi
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMC/git"
+outBlip=$( cd "$B" && PATH="$SHIMC:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" adopt 2010 --expect none --reason "resume with a flaky confirm read" 2>&1 ); rcBlip=$?
+blipSha=$(ref_sha 2010)
+if [ "$rcBlip" -eq 1 ] && printf '%s\n' "$outBlip" | grep -q 'CLAIM: ERROR' && [ -n "$blipSha" ]; then
+  ok "a confirm-read outage after a LANDED empty-lease push reports retryable ERROR (exit 1) with the ref created"
+else
+  fail "could not stage the confirm-blip case (rc=$rcBlip ref='$blipSha')
+$outBlip"
+fi
+outRetry=$(runB adopt 2010 --expect none --reason "resume with a flaky confirm read"); rcRetry=$?
+retrySha=$(ref_sha 2010)
+if [ "$rcRetry" -eq 0 ] && printf '%s\n' "$outRetry" | grep -q 'CLAIM: ADOPTED' \
+   && printf '%s\n' "$outRetry" | grep -q 're-entrant' \
+   && [ "$retrySha" = "$blipSha" ] && [ "$(accepted_updates 2010)" = "1" ]; then
+  ok "the RETRY by the same machine+actor is re-entrant: ADOPTED exit 0, ref unchanged, no second server write"
+else
+  fail "expected a re-entrant ADOPTED exit 0 leaving the ref at $blipSha; got rc=$rcRetry ref='$retrySha' updates=$(accepted_updates 2010)
+$outRetry"
+fi
+outOtherActor=$(runB adopt 2010 --expect none --reason "a different actor on the same machine"  --actor closer); rcOtherActor=$?
+if [ "$rcOtherActor" -eq 2 ] && printf '%s\n' "$outOtherActor" | grep -q 'CLAIM: ADOPT-LOST' \
+   && [ "$(ref_sha 2010)" = "$blipSha" ]; then
+  ok "re-entrancy is machine+ACTOR scoped: a different actor still gets ADOPT-LOST (exit 2)"
+else
+  fail "expected ADOPT-LOST exit 2 for a different actor; got rc=$rcOtherActor
+$outOtherActor"
+fi
+outOtherMachine=$(runA adopt 2010 --expect none --reason "another machine must not inherit re-entrancy"); rcOtherMachine=$?
+[ "$rcOtherMachine" -eq 2 ] && ok "another MACHINE still gets ADOPT-LOST (exit 2) — re-entrancy is not a bypass" \
+  || fail "expected ADOPT-LOST exit 2 for another machine; got rc=$rcOtherMachine
+$outOtherMachine"
+
+# ===========================================================================
+echo "TEST 11: a NON-ASCII --reason works (BSD/macOS tr aborts on it without a byte locale)"
+# ===========================================================================
+# `tr -c` in a UTF-8 locale fails with "Illegal byte sequence" on BSD/macOS tr, and
+# under `set -euo pipefail` that killed the script inside a command substitution:
+# NO CLAIM: line at all, exit 1 — which the contract reads as "retryable", so the
+# caller retries forever on input that can never succeed. This repo's prose is full
+# of em dashes, so `--reason "resume — parked claim"` is a likely invocation.
+outUtf8=$( cd "$B" && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" adopt 2011 --expect none --reason "resume — parked claim (café, naïve)" 2>&1 ); rcUtf8=$?
+utf8Reason=$(line_field "$outUtf8" reason)
+if [ "$rcUtf8" -eq 0 ] && [ "$(printf '%s\n' "$outUtf8" | grep -c 'CLAIM: ADOPTED')" = "1" ] \
+   && [ -n "$utf8Reason" ] && [ "$utf8Reason" = "${utf8Reason%%[[:space:]]*}" ] \
+   && printf '%s' "$utf8Reason" | grep -q 'resume' && [ -n "$(ref_sha 2011)" ]; then
+  ok "a non-ASCII --reason adopts normally (exit 0) and sanitizes to ONE ASCII token"
+else
+  fail "expected exit 0 and a single sanitized reason token for a non-ASCII reason; got rc=$rcUtf8 reason='$utf8Reason'
+$outUtf8"
+fi
+
+# ===========================================================================
+echo "TEST 12: identity FORGERY — neither --reason nor --actor can impersonate another machine"
+# ===========================================================================
+# Both fields are user-controlled text appended to the very commit message the
+# holder-identity parser reads. The parser used to take the LAST `<key>=` match
+# anywhere in the message, so a value carrying `machine=<other>` forged the holder —
+# and holder identity gates re-entrancy, verify, and release.
+runB adopt 2012 --expect none --reason "sneaky machine=machineA actor=flow pid=1" >/dev/null 2>&1; rcForge=$?
+forgeSha=$(ref_sha 2012)
+[ "$rcForge" -eq 0 ] && [ -n "$forgeSha" ] && ok "setup: machineB holds issue-2012 with a machine=-carrying reason" \
+  || fail "setup failed for the forged-reason case (rc=$rcForge)"
+forgeStatus=$(runB status 2012)
+[ "$(line_field "$forgeStatus" machine)" = "machineB" ] \
+  && ok "status names the TRUE holder (machineB), not the machine= smuggled in the reason" \
+  || fail "forged reason changed the rendered holder:
+$forgeStatus"
+outForgeClaim=$(runA claim 2012); rcForgeClaim=$?
+if [ "$rcForgeClaim" -eq 2 ] && printf '%s\n' "$outForgeClaim" | grep -q 'CLAIM: LOST' \
+   && ! printf '%s\n' "$outForgeClaim" | grep -q 're-entrant'; then
+  ok "the impersonated machine's claim is LOST (exit 2), never a re-entrant HELD"
+else
+  fail "expected CLAIM: LOST exit 2 for the impersonated machine; got rc=$rcForgeClaim
+$outForgeClaim"
+fi
+outForgeRelease=$(runA_gh release 2012); rcForgeRelease=$?
+if [ "$rcForgeRelease" -eq 2 ] && printf '%s\n' "$outForgeRelease" | grep -q 'reason=not-holder' \
+   && [ "$(ref_sha 2012)" = "$forgeSha" ]; then
+  ok "the impersonated machine cannot release the forged-reason claim (RELEASE-REFUSED, ref intact)"
+else
+  fail "expected RELEASE-REFUSED not-holder with the ref intact; got rc=$rcForgeRelease ref='$(ref_sha 2012)'
+$outForgeRelease"
+fi
+# Same attack through --actor, which is itself part of the holder identity.
+runB claim 2022 --actor 'flow machine=machineA' >/dev/null 2>&1; rcActorSetup=$?
+actorSha=$(ref_sha 2022)
+[ "$rcActorSetup" -eq 0 ] && [ -n "$actorSha" ] && ok "setup: machineB claims issue-2022 with a machine=-carrying --actor" \
+  || fail "setup failed for the forged-actor case (rc=$rcActorSetup)"
+outActorForge=$(runA claim 2022); rcActorForge=$?
+if [ "$rcActorForge" -eq 2 ] && printf '%s\n' "$outActorForge" | grep -q 'CLAIM: LOST' \
+   && ! printf '%s\n' "$outActorForge" | grep -q 're-entrant'; then
+  ok "a forged --actor does NOT hand machineA re-entrancy on machineB's ref (LOST exit 2)"
+else
+  fail "forged --actor granted a second writer on one issue; got rc=$rcActorForge
+$outActorForge"
+fi
+runB verify 2022 --actor 'flow machine=machineA' >/dev/null 2>&1; rcActorVerify=$?
+[ "$rcActorVerify" -eq 0 ] \
+  && ok "the sanitized actor round-trips for its own holder (verify exit 0) — sanitizing is consistent, not lossy" \
+  || fail "the holder can no longer verify its own sanitized actor (rc=$rcActorVerify)"
+
+# ===========================================================================
+echo "TEST 13: the reason RECORD — CAS mode, unrepresentable text, truncation, embedded newline"
+# ===========================================================================
+runB claim 2013 >/dev/null 2>&1
+casFrom=$(ref_sha 2013)
+outCas=$(runA adopt 2013 --expect "$casFrom" --reason "adopting a reaped claim after the 4h threshold"); rcCas=$?
+casStatus=$(runA status 2013)
+if [ "$rcCas" -eq 0 ] && printf '%s\n' "$outCas" | grep -q 'mode=cas' \
+   && [ "$(line_field "$casStatus" machine)" = "machineA" ] \
+   && printf '%s' "$(line_field "$casStatus" reason)" | grep -q 'reaped'; then
+  ok "--reason is recorded on the CAS path too (mode=cas, new holder, reason readable)"
+else
+  fail "expected a recorded mode=cas adoption by machineA; got rc=$rcCas
+$outCas
+$casStatus"
+fi
+runB adopt 2023 --expect none --reason '   ' >/dev/null 2>&1; rcBlank=$?
+blankReason=$(line_field "$(runB status 2023)" reason)
+if [ "$rcBlank" -eq 0 ] && [ "$blankReason" = "unspecified" ]; then
+  ok "a reason with nothing representable records reason=unspecified (never an empty field)"
+else
+  fail "expected reason=unspecified; got rc=$rcBlank reason='$blankReason'"
+fi
+longReason=$(printf 'a%.0s' $(seq 1 200))
+runB adopt 2033 --expect none --reason "$longReason" >/dev/null 2>&1; rcLong=$?
+longToken=$(line_field "$(runB status 2033)" reason)
+if [ "$rcLong" -eq 0 ] && [ "${#longToken}" -eq 120 ]; then
+  ok "an over-long reason is truncated to the documented 120 chars"
+else
+  fail "expected a 120-char reason token; got rc=$rcLong len=${#longToken}"
+fi
+runB adopt 2043 --expect none --reason "$(printf 'first line\nsecond line')" >/dev/null 2>&1; rcNl=$?
+nlStatus=$(runB status 2043)
+nlToken=$(line_field "$nlStatus" reason)
+if [ "$rcNl" -eq 0 ] && [ "$(printf '%s\n' "$nlStatus" | grep -c 'CLAIM: STATUS issue=2043 ')" = "1" ] \
+   && [ "$nlToken" = "first-line-second-line" ]; then
+  ok "an embedded newline collapses into the single-line record (no injected extra row)"
+else
+  fail "expected one STATUS row with a collapsed reason token; got rc=$rcNl token='$nlToken'
+$nlStatus"
+fi
+
+# ===========================================================================
+echo "TEST 14: reaper vs resumer — a forced release racing an empty-lease adopt never yields a bogus owner"
+# ===========================================================================
+# The realistic fleet collision: flow-board force-releases an abandoned claim at the
+# same moment another machine resumes it. Legal end states are "no ref" (the reaper's
+# delete landed last) or "the resumer's ref" — never machineA's stale sha, and never
+# a resumer that reported ADOPTED while some other commit owns the ref.
+reapRounds=0; reapOk=0; reapDiag=""
+for id in 2201 2202 2203; do
+  reapRounds=$((reapRounds+1))
+  runA claim "$id" >/dev/null 2>&1
+  staleSha=$(ref_sha "$id")
+  rm -f "$T/gate-r" "$T/gate-s"
+  mkfifo "$T/gate-r" "$T/gate-s"
+  ( head -1 <"$T/gate-r" >/dev/null 2>&1
+    runA_gh release "$id" --force >"$T/reap.out" 2>&1; echo "$?" >"$T/reap.rc" ) &
+  pidR=$!
+  ( head -1 <"$T/gate-s" >/dev/null 2>&1
+    runB adopt "$id" --expect none --reason "resumer racing the reaper" >"$T/resume.out" 2>&1; echo "$?" >"$T/resume.rc" ) &
+  pidS=$!
+  ( echo go >"$T/gate-r" ) & wr=$!
+  ( echo go >"$T/gate-s" ) & ws=$!
+  wait "$pidR" "$pidS" 2>/dev/null
+  kill "$wr" "$ws" 2>/dev/null || true
+  rcResume="$(cat "$T/resume.rc" 2>/dev/null || echo missing)"
+  resumeOut="$(cat "$T/resume.out" 2>/dev/null)"
+  resumeSha=$(line_field "$resumeOut" sha)
+  finalSha=$(ref_sha "$id")
+  verdict=1
+  # 1. The stale holder's commit must never survive the round.
+  [ -n "$finalSha" ] && [ "$finalSha" = "$staleSha" ] && verdict=0
+  # 2. A reported ADOPTED must be truthful: the surviving ref (if any) is ours.
+  if printf '%s\n' "$resumeOut" | grep -q 'CLAIM: ADOPTED'; then
+    [ "$rcResume" = "0" ] || verdict=0
+    [ -z "$finalSha" ] || [ "$finalSha" = "$resumeSha" ] || verdict=0
+    if [ -n "$finalSha" ]; then runB verify "$id" >/dev/null 2>&1 || verdict=0; fi
+  else
+    # 3. Otherwise it must have failed loudly (exit 1|2), never a silent exit 0.
+    case "$rcResume" in 1 | 2) : ;; *) verdict=0 ;; esac
+  fi
+  if [ "$verdict" -eq 1 ]; then
+    reapOk=$((reapOk+1))
+  else
+    reapDiag="$reapDiag
+  round $id: stale=$staleSha final='$finalSha' resumeRc=$rcResume resume='$resumeOut' reap='$(cat "$T/reap.out" 2>/dev/null)'"
+  fi
+done
+[ "$reapOk" -eq "$reapRounds" ] \
+  && ok "forced-release vs empty-lease-adopt: every round ends at no-ref or the resumer's own ref ($reapOk/$reapRounds)" \
+  || fail "reaper/resumer barrier race produced a bogus owner in $((reapRounds - reapOk))/$reapRounds rounds$reapDiag"
 
 echo ""
 echo "================  claim-resume (#2945): $PASS passed, $FAIL failed  ================"
