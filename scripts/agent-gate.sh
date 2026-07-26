@@ -1232,9 +1232,11 @@ apply_fixture_preflight() {
       echo "agent-gate: only committed byte-parity references are present; the FETCHED validation corpus is missing, so dataset components would SKIP and the gate would falsely PASS." >&2
       echo "agent-gate: remedy: bash test-data/scripts/fetch-datasets.sh  (or point CQLITE_DATASETS_ROOT at a checkout that has it)" >&2
       echo "agent-gate: intentional opt-out (SKIP, stamped in the SUMMARY): AGENT_GATE_ALLOW_MISSING_FIXTURES=1" >&2
+      _tree_meta_array   # #2926: every emitted block carries the tree provenance
       emit_summary FAIL \
         "preflight: FAIL (canonical corpus $CANONICAL_FIXTURE_KEYSPACE absent under $CQLITE_DATASETS_ROOT/sstables — only committed byte-parity refs present)" \
         "missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP; overall verdict FAIL" \
+        "${TREE_META_LINES[@]}" \
         "hint: bash test-data/scripts/fetch-datasets.sh  (opt-out: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 restores SKIP + stamps this block)"
       exit 1 ;;
   esac
@@ -2357,9 +2359,15 @@ _assert_summary_integrity() {
     _publish_integrity_fail "$reason" "$comp"
     exit 1
   fi
+  # #2926: carry the tree provenance here too (this branch assembles its own block, so
+  # it would otherwise be the one summary-integrity FAIL that lacks it). The lazy
+  # terminal capture inside _tree_meta_lines means a run that is BOTH clobbered AND
+  # mutated emits BOTH named lines under a single RESULT: FAIL.
+  _tree_meta_array
   emit_summary FAIL \
     "summary-integrity: FAIL ($reason)" \
-    "detected-after-component: $comp"
+    "detected-after-component: $comp" \
+    "${TREE_META_LINES[@]}"
   exit 1
 }
 
@@ -4463,9 +4471,11 @@ run_delta() {
   if ! anchor_sha=$(git rev-parse --verify -q "${anchor}^{commit}" 2>/dev/null) || [ -z "$anchor_sha" ]; then
     echo "--- [delta] ERROR: anchor '$anchor' does not resolve to a commit." >&2
     echo "    Pass the commit the full gate PASSed at (a sha, tag, or ref)." >&2
+    _tree_meta_array   # #2926
     emit_summary ERROR \
       "delta-anchor: $anchor (UNRESOLVED)" \
       "$(accelerators_line)" \
+      "${TREE_META_LINES[@]}" \
       "error: anchor does not resolve to a commit — cannot re-certify"
     exit 2
   fi
@@ -4478,9 +4488,11 @@ run_delta() {
   if [ -z "$anchor_run_id" ] && [ -n "$DELTA_ANCHOR_SUMMARY_FILE" ]; then
     if [ ! -f "$DELTA_ANCHOR_SUMMARY_FILE" ]; then
       echo "--- [delta] ERROR: --anchor-summary-file '$DELTA_ANCHOR_SUMMARY_FILE' not found." >&2
+      _tree_meta_array   # #2926
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
+        "${TREE_META_LINES[@]}" \
         "error: --anchor-summary-file not found: $DELTA_ANCHOR_SUMMARY_FILE"
       exit 2
     fi
@@ -4489,18 +4501,22 @@ run_delta() {
        || grep -qF "==== AGENT-GATE DELTA SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null; then
       echo "--- [delta] ERROR: --anchor-summary-file is not a FULL-gate SUMMARY block." >&2
       echo "    A delta re-cert must anchor to a full agent-gate.sh PASS, not a lite/delta run." >&2
+      _tree_meta_array   # #2926
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
+        "${TREE_META_LINES[@]}" \
         "error: anchor summary is not a full-gate SUMMARY block (lite/delta cannot anchor a delta)"
       exit 2
     fi
     if ! grep -qE '^RESULT: PASS' "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null; then
       echo "--- [delta] ERROR: --anchor-summary-file did not record RESULT: PASS." >&2
       echo "    A delta re-cert must anchor to a full-gate PASS." >&2
+      _tree_meta_array   # #2926
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
+        "${TREE_META_LINES[@]}" \
         "error: anchor summary RESULT is not PASS — cannot anchor a delta re-cert"
       exit 2
     fi
@@ -5003,8 +5019,10 @@ if selected_needs_datasets; then
     # run's run-id (#1175 finding 2). The startup sentinel already guarantees no
     # stale PASS survives; this makes the early exit explicit for a caller reading
     # the recovery path.
+    _tree_meta_array   # #2926
     emit_summary FAIL \
       "preflight: FAIL (no Data.db files under $CQLITE_DATASETS_ROOT/sstables)" \
+      "${TREE_META_LINES[@]}" \
       "hint: bash test-data/scripts/fetch-datasets.sh"
     exit 1
   fi

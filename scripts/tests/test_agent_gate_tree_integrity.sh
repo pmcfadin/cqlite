@@ -579,6 +579,48 @@ else
   bad "helper modes: --list output changed"
 fi
 
+# --- summary-integrity AND tree-integrity firing in the SAME run ----------------
+# The #2874 guard assembles its own block (it is the no-clobber publish path), so the
+# tree provenance must be threaded through it too. Seed a FOREIGN run-id at a
+# READ-ONLY summary path (our startup sentinel cannot land -> the summary guard fires
+# at the first boundary) while the stub cargo mutates the tree in the same component.
+coex="$tmp/coexist-summary.txt"
+{ echo '==== AGENT-GATE SUMMARY ===='; echo 'run-id: /tmp/agent-gate.FOREIGN-COEXIST'
+  echo 'RESULT: INCOMPLETE'; echo '==== END AGENT-GATE SUMMARY ===='; } > "$coex"
+chmod 0444 "$coex"
+out="$tmp/coexist.out"
+FAKE_CARGO_MUTATE="$r4/README.md" run_gate "$r4" "$coex" "$out" --only fmt; rc=$?
+chmod 0644 "$coex" 2>/dev/null || true
+if grep -q 'summary-integrity: FAIL' "$out" \
+   && grep -q 'tree-integrity: FAIL (tree-mutated-midrun;' "$out" \
+   && grep -q '^RESULT: FAIL' "$out" && ! grep -q '^RESULT: PASS' "$out" && [ "$rc" -ne 0 ]; then
+  ok "coexistence: a clobbered AND mutated run emits BOTH named lines under a single RESULT: FAIL"
+else
+  bad "coexistence: the two guards do not compose (rc=$rc)"
+  grep -E 'summary-integrity|tree-integrity|^RESULT:' "$out" 2>/dev/null | head
+fi
+( cd "$r4" && git checkout -q -- README.md )
+
+# --- an early preflight FAIL still carries the provenance ------------------------
+# emit_summary sites that assemble their own meta (not via SUMMARY_META) must stamp the
+# lines too, or a run that dies before the terminal emit has no tree provenance at all.
+sum="$tmp/preflight.txt"; out="$tmp/preflight.out"
+mkdir -p "$tmp/empty-datasets"
+( cd "$r4" && PATH="$STUBBIN:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+    CQLITE_DATASETS_ROOT="$tmp/empty-datasets" \
+    bash "$r4/scripts/agent-gate.sh" --only core-tests >"$out" 2>&1 ); rc=$?
+if grep -q '^preflight: FAIL' "$sum" 2>/dev/null; then
+  if grep -q '^tree-start: ' "$sum" && grep -q '^tree-end: ' "$sum" && grep -q '^tree-integrity: ' "$sum"; then
+    ok "early exit: a dataset-preflight FAIL block still carries tree-start/tree-end/tree-integrity"
+  else
+    bad "early exit: the preflight FAIL block has no tree provenance"
+    cat "$sum" 2>/dev/null
+  fi
+else
+  bad "early exit: the preflight FAIL path was not reached (rc=$rc) — case not exercised"
+  head -20 "$out" 2>/dev/null
+fi
+
 echo "=== phase 5: structural wiring (the mechanism cannot go inert) =============="
 
 if awk '/^record_result\(\) \{/,/^\}/' "$GATE" | grep -q '_assert_tree_integrity "\$1"'; then
