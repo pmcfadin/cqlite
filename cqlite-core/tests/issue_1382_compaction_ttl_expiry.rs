@@ -508,24 +508,26 @@ fn expired_past_grace_retained_under_overlap_gate() {
 }
 
 // ===========================================================================
-// Acceptance criterion 5 — Cassandra byte-oracle. DEFERRED to issue #1387
-// (fixture commissioning). Fail-closed: skip unless CQLITE_REQUIRE_FIXTURES=1,
+// Acceptance criterion 5 — Cassandra byte-oracle. DEFERRED to issue #1387/#1538
+// (fixture commissioning). Fail-closed on its OWN opt-in CQLITE_TTL_ORACLE_FIXTURES
+// (#2884: NOT the global CQLITE_REQUIRE_FIXTURES): skip when the opt-in is unset,
 // panic if fixtures are present-but-incomplete, never a 0-comparison pass.
 // ===========================================================================
 
 /// Outcome of the deferred #1387 TTL byte-oracle slot, factored out of the test so
 /// the env→outcome mapping is exercised by a unit test WITHOUT a process-global env
-/// mutation (env writes race sibling tests in the same binary).
+/// mutation (env writes race sibling tests in the same binary). Each variant carries
+/// the opt-in path so a panic message can never desync from the decision it explains.
 #[derive(Debug, PartialEq, Eq)]
 enum TtlOracleDecision {
     /// `CQLITE_TTL_ORACLE_FIXTURES` points at an existing path → the fixtures were
     /// commissioned but the comparison is not yet wired: fail-closed.
-    WirePending,
+    WirePending(String),
     /// `CQLITE_TTL_ORACLE_FIXTURES` is set but its path does not exist → a
     /// misconfigured opt-in: fail-closed (you asked for these fixtures explicitly).
-    MissingRequested,
-    /// The opt-in is unset → the fixtures are genuinely deferred (issue #1387/#1538),
-    /// so skipping is correct and carries NO false-pass risk.
+    MissingRequested(String),
+    /// The opt-in is unset (or empty) → the fixtures are genuinely deferred (issue
+    /// #1387/#1538), so skipping is correct and carries NO false-pass risk.
     Skip,
 }
 
@@ -538,42 +540,46 @@ enum TtlOracleDecision {
 /// nightly gate (gate.yml) and every parity lane set `CQLITE_REQUIRE_FIXTURES=1`
 /// job-wide, so reading it here made a KNOWN-deferred placeholder panic on cold CI
 /// runners while local gates (which do not export it job-wide) skipped — the whole
-/// CI-vs-local divergence. Decoupling is oracle-preserving: this test holds no byte
-/// oracle; the authoritative one lives in
-/// `issue_1387_tombstone_ttl_compaction_byte_parity::ttl_expired_live_compaction_byte_for_byte`.
+/// CI-vs-local divergence. Decoupling is oracle-preserving: this test holds no
+/// RUNNING oracle (see the caller's comment for what actually covers this scenario
+/// today). An empty-string opt-in is treated as unset → Skip.
 fn ttl_oracle_decision(fixture_root: Option<&str>) -> TtlOracleDecision {
-    match fixture_root {
-        Some(root) if Path::new(root).exists() => TtlOracleDecision::WirePending,
-        Some(_) => TtlOracleDecision::MissingRequested,
+    match fixture_root.filter(|s| !s.is_empty()) {
+        Some(root) if Path::new(root).exists() => TtlOracleDecision::WirePending(root.to_string()),
+        Some(root) => TtlOracleDecision::MissingRequested(root.to_string()),
         None => TtlOracleDecision::Skip,
     }
 }
 
 #[test]
-fn expired_ttl_matches_cassandra_byte_oracle_deferred_1387() {
+fn deferred_1387_ttl_byte_oracle_keys_only_on_own_opt_in() {
     // Status update (#1410 / #1387): the #1387 fixture commissioning DID land the
-    // `test_compaction_tombstone_ttl/ttl_expired_live-*` Cassandra reference, and the
-    // authoritative byte-oracle for the expired-TTL scenario now lives in
-    // `issue_1387_tombstone_ttl_compaction_byte_parity::ttl_expired_live_compaction_byte_for_byte`.
-    // #1410 fixed the localDeletionTime baseline (lengths now match), but that byte
-    // test is BLOCKED on #1538: byte parity needs an EXPIRING `WriteWithTtl` cell with
-    // an authoritative pinned `localExpirationTime`, which the current API cannot supply.
-    // This slot stays a fail-closed skip keyed on its OWN opt-in
-    // `CQLITE_TTL_ORACLE_FIXTURES` (a hand-curated byte-oracle #1387 did not commission
-    // under this name) so no CI gate false-passes; the real coverage is the #1387 byte
-    // test above once #1538 lands. Issue #2884: this is deliberately NOT keyed on the
-    // global `CQLITE_REQUIRE_FIXTURES` flag — see `ttl_oracle_decision`.
+    // `test_compaction_tombstone_ttl/ttl_expired_live-*` Cassandra reference. The
+    // authoritative BYTE-oracle for the expired-TTL scenario lives in
+    // `issue_1387_tombstone_ttl_compaction_byte_parity::ttl_expired_live_compaction_byte_for_byte`,
+    // but that test is `#[ignore]`d, BLOCKED on #1538 (byte parity needs an EXPIRING
+    // `WriteWithTtl` cell with an authoritative pinned `localExpirationTime`, which the
+    // current API cannot supply) — it activates once #1538 lands. The RUNNING
+    // fail-closed coverage for this expired-TTL scenario today is therefore NOT this
+    // slot but: (a) the `query-semantics-oracle` gate component — a semantic-parity
+    // oracle over the committed `ttl_expired_live` fixture at a pinned `now`
+    // (query_semantics_oracle_parity.rs) — plus (b) issue_1387's non-ignored
+    // fixture-integrity test. This slot stays a fail-closed skip keyed on its OWN
+    // opt-in `CQLITE_TTL_ORACLE_FIXTURES` (a hand-curated byte-oracle #1387 did not
+    // commission under this name) so no CI gate false-passes.
+    //
+    // #2884: MUST delegate to `ttl_oracle_decision`; do NOT read
+    // `CQLITE_REQUIRE_FIXTURES` here — that global flag is set job-wide by the nightly
+    // gate and made this known-deferred placeholder panic on cold CI runners only.
     let fixture_root = std::env::var("CQLITE_TTL_ORACLE_FIXTURES").ok();
     match ttl_oracle_decision(fixture_root.as_deref()) {
-        TtlOracleDecision::WirePending => {
-            let root = fixture_root.unwrap_or_default();
+        TtlOracleDecision::WirePending(root) => {
             panic!(
                 "issue #1387 TTL byte-oracle fixtures present at {root} but the comparison is \
-                 not yet implemented; wire it here once #1387 lands"
+                 not yet implemented; wire it here once #1538 lands"
             );
         }
-        TtlOracleDecision::MissingRequested => {
-            let root = fixture_root.unwrap_or_default();
+        TtlOracleDecision::MissingRequested(root) => {
             panic!(
                 "CQLITE_TTL_ORACLE_FIXTURES set to {root} but that path does not exist \
                  (point it at the #1387 TTL byte-oracle fixtures once they commission)"
@@ -581,22 +587,22 @@ fn expired_ttl_matches_cassandra_byte_oracle_deferred_1387() {
         }
         TtlOracleDecision::Skip => {
             eprintln!(
-                "[SKIP] expired_ttl_matches_cassandra_byte_oracle_deferred_1387: \
+                "[SKIP] deferred_1387_ttl_byte_oracle_keys_only_on_own_opt_in: \
                  fixtures pending issue #1387"
             );
         }
     }
 }
 
-/// Issue #2884 regression: the deferred #1387 TTL byte-oracle slot must SKIP (never
-/// panic) when its own opt-in `CQLITE_TTL_ORACLE_FIXTURES` is unset, regardless of the
-/// global `CQLITE_REQUIRE_FIXTURES` fail-closed switch. Pre-fix the test read
-/// `CQLITE_REQUIRE_FIXTURES` and panicked at :543 on any cold CI runner (the nightly
-/// gate sets it job-wide) while local gates skipped — the whole CI-vs-local divergence.
-/// This asserts the mapping through the pure decision function (no process-global env
-/// mutation, which would race sibling tests in this binary).
+/// Issue #2884 regression (env→outcome mapping): the deferred #1387 TTL byte-oracle
+/// slot keys ONLY on its own opt-in `CQLITE_TTL_ORACLE_FIXTURES`, never the global
+/// `CQLITE_REQUIRE_FIXTURES` fail-closed switch. Pre-fix the test read
+/// `CQLITE_REQUIRE_FIXTURES` and panicked on any cold CI runner (the nightly gate sets
+/// it job-wide) while local gates skipped — the whole CI-vs-local divergence. Asserted
+/// through the pure decision function (no process-global env mutation, which would race
+/// sibling tests in this binary).
 #[test]
-fn ttl_oracle_decision_ignores_global_require_fixtures_flag() {
+fn ttl_oracle_decision_keys_only_on_own_opt_in() {
     // Unset own opt-in → SKIP, whatever the global CQLITE_REQUIRE_FIXTURES is. The
     // decision function does not consult the global flag at all (#2884).
     assert_eq!(
@@ -605,14 +611,48 @@ fn ttl_oracle_decision_ignores_global_require_fixtures_flag() {
         "deferred TTL oracle must skip when its own opt-in is unset, even under \
          CQLITE_REQUIRE_FIXTURES=1"
     );
+    // Empty-string opt-in is treated as unset → SKIP (an exported-but-empty env var).
+    assert_eq!(
+        ttl_oracle_decision(Some("")),
+        TtlOracleDecision::Skip,
+        "an empty CQLITE_TTL_ORACLE_FIXTURES must behave as unset"
+    );
     // Own opt-in set to a non-existent path → fail-closed misconfiguration (the
     // meaningful strict case now keys on the opt-in, not the global flag).
     let missing = std::env::temp_dir().join("cqlite-2884-nonexistent-ttl-oracle-fixtures");
     assert!(!missing.exists());
+    let missing_str = missing.to_str().expect("temp path is valid UTF-8");
     assert_eq!(
-        ttl_oracle_decision(missing.to_str()),
-        TtlOracleDecision::MissingRequested,
+        ttl_oracle_decision(Some(missing_str)),
+        TtlOracleDecision::MissingRequested(missing_str.to_string()),
         "an explicitly-requested but absent fixture path must fail closed"
+    );
+    // Own opt-in set to an EXISTING dir → fail-closed wire-pending (fixtures present
+    // but the byte comparison is not yet implemented, blocked on #1538).
+    let present = TempDir::new().expect("tempdir");
+    let present_str = present.path().to_str().expect("temp path is valid UTF-8");
+    assert_eq!(
+        ttl_oracle_decision(Some(present_str)),
+        TtlOracleDecision::WirePending(present_str.to_string()),
+        "a present opt-in fixture path must fail closed as wire-pending"
+    );
+}
+
+/// Issue #2884 structural regression: pin the fix at the SOURCE-BODY level — this
+/// test binary must NOT read the global `CQLITE_REQUIRE_FIXTURES` flag anywhere. The
+/// source is embedded at COMPILE time via `include_str!` (no runtime FS dependency,
+/// no env mutation), so the assert scans the whole module and a future edit that
+/// reintroduces a live process-env lookup of the global flag — the exact CI-vs-local
+/// divergence — fails here. The needle is assembled with `concat!` so this guard does
+/// not match its own source.
+#[test]
+fn source_never_reads_global_require_fixtures_flag() {
+    let src = include_str!("issue_1382_compaction_ttl_expiry.rs");
+    let live_lookup = concat!("env::var(\"", "CQLITE_REQUIRE_FIXTURES", "\")");
+    assert!(
+        !src.contains(live_lookup),
+        "this test binary must never gate on the global CQLITE_REQUIRE_FIXTURES flag \
+         (#2884): key the deferred TTL oracle on CQLITE_TTL_ORACLE_FIXTURES instead"
     );
 }
 
