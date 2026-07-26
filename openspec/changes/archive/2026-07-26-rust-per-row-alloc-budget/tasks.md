@@ -30,12 +30,16 @@
       the L4 verdict + the L5 result. Update CLAUDE.md only if a user-facing surface changed (it does not).
 
 ## 5. Gate / review / audit (endgame — via flow-implement → flow-closer)
-- [ ] 5.1 `scripts/agent-gate.sh --lite` green each fix round (summary-file redirect).
-- [ ] 5.2 Review-first on the lite-green diff: `rust-reviewer` + roborev; triage blockers/nits per
+- [x] 5.1 `scripts/agent-gate.sh --lite` green each fix round (summary-file redirect).
+- [x] 5.2 Review-first on the lite-green diff: `rust-reviewer` + roborev; triage blockers/nits per
       `docs/development/roborev-severity.md`.
-- [ ] 5.3 Open PR (`Closes #1883`).
-- [ ] 5.4 flow-closer: ONE full `scripts/agent-gate.sh` → C (`spec-auditor` anchored to
+- [x] 5.3 Open PR (`Closes #1883`) — PR #2904, squashed to `4c299d14`.
+- [x] 5.4 flow-closer: ONE full `scripts/agent-gate.sh` → C (`spec-auditor` anchored to
       `openspec/changes/rust-per-row-alloc-budget/specs/**`) → final roborev → merge-on-green → finalize.
+      Gate of record: full PASS at anchor `5cd27667` (29 components, 0 FAIL), re-certified for the
+      markdown-only tail by `--delta` at `483be63d` and `5ba89e2c`. C: PASS (all 4 requirements
+      `satisfied`). roborev: clean of blockers (1 Medium + 3 Low all fixed pre-merge; 4 nits
+      deferred to #2928).
 
 ## 6. Implementation notes (measured outcomes)
 
