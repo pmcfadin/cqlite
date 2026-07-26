@@ -198,7 +198,14 @@ impl SSTableRowIteratorAdapter {
         // spawning (see `SSTableRowIteratorAdapter::open`'s identical rationale).
         producer_gauge::spawned();
 
+        // Issue #2819: capture the flight per-request sub-phase sink on the CALLING
+        // (merge consumer) thread and re-install it at the top of this producer
+        // thread, so the feed thread it later spawns inherits it and the scan's
+        // page-in/decompress reach the request's accumulator. `None` (no-op) for
+        // every non-flight caller.
+        let subphase_sink = crate::observability::stream_subphase::current();
         let producer = match std::thread::Builder::new().spawn(move || {
+            let _subphase_guard = crate::observability::stream_subphase::install(subphase_sink);
             Self::producer_thread_from_reader(
                 reader,
                 run_index,

@@ -101,14 +101,22 @@ pub mod attr {
     /// success/error-rate dashboards.
     pub const RPC_STATUS: &str = "cqlite.rpc.status";
     /// `do_get` execution phase (issue #2162; `"admission"` added #2420
-    /// roborev-1700; `"validate"` added #2420 roborev-1702). Bounded to the
-    /// closed set `"validate"`, `"admission"`, `"resolve"`, `"merge_setup"`,
-    /// `"stream"` — a `&'static str` from a fixed slot table, never a
-    /// per-query, per-ticket, key, or query-text value. Used as the bounded
-    /// dimension on [`super::RPC_PHASE_DURATION`] so a stalled `do_get`
-    /// localizes to a phase (time piling up in `merge_setup`, queued behind the
-    /// admission semaphore in `admission`, or stuck parsing/validating a
-    /// malformed ticket in `validate`) from metrics alone.
+    /// roborev-1700; `"validate"` added #2420 roborev-1702; the `stream_*`
+    /// in-`stream` sub-phase values added #2819). Bounded to a closed set: the
+    /// five top-level phases `"validate"`, `"admission"`, `"resolve"`,
+    /// `"merge_setup"`, `"stream"`, PLUS the five in-`stream` data-plane
+    /// sub-phase values `"stream_cold_fault"`, `"stream_decompress"`,
+    /// `"stream_merge"`, `"stream_encode"`, `"stream_grpc_write"` (issue #2819) —
+    /// a `&'static str` from fixed slot tables, never a per-query, per-ticket,
+    /// key, or query-text value. Used as the bounded dimension on
+    /// [`super::RPC_PHASE_DURATION`] so a stalled `do_get` localizes to a phase
+    /// (time piling up in `merge_setup`, queued behind the admission semaphore in
+    /// `admission`, stuck parsing a malformed ticket in `validate`, or — within
+    /// `stream` — attributed across cold-IO page-in, LZ4 decompress, merge,
+    /// encode, and gRPC-write) from metrics alone. The `stream_*` sub-phase
+    /// values appear ONLY on [`super::RPC_PHASE_DURATION`] for the `do_get`
+    /// method; the [`super::RPC_PHASE_ACTIVE`] gauge carries ONLY the five
+    /// top-level phases (issue #2819 owner decision).
     pub const RPC_PHASE: &str = "cqlite.rpc.phase";
     /// Reason a `SELECT` fell back to a degraded (full-scan) read path
     /// (issue #2163). Values come from
@@ -780,9 +788,22 @@ pub const RPC_BYTES: &str = "cqlite.rpc.bytes";
 /// tickets) that emits zero rows still localizes to a phase. `cqlite.rpc.duration`
 /// already includes admission wait time in the RPC total; this is the per-phase
 /// breakdown field triage uses to localize WHERE that time went (e.g. #2398).
+///
+/// In-`stream` sub-phase decomposition (issue #2819): within the `stream` phase,
+/// this same histogram ALSO carries five bounded in-`stream` sub-phase values on
+/// the `do_get` method — `stream_cold_fault` (cold body-chunk page-in),
+/// `stream_decompress` (LZ4), `stream_merge` (k-way merge + reconcile +
+/// materialize), `stream_encode` (Arrow encode), and `stream_grpc_write` (egress
+/// channel reserve/send, incl. backpressure park — CLIENT-PACED, not server cost).
+/// They are recorded on the CONCURRENT threads of the streaming read pipeline, so
+/// they OVERLAP in wall-clock and do NOT sum to the `stream` phase; the top-level
+/// `stream` sample keeps its meaning as the whole data-plane total. The field
+/// signal is the cold−warm delta on `stream_cold_fault` (the cold-IO latency
+/// bucket), read directly off this histogram — not a sum. Bounded to ≤5 sub-phase
+/// samples per RPC, emitted once at stream teardown (never per row/chunk).
 /// Bounded attributes: [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed
-/// five-value set). NEVER carries a ticket, key, token range, or query-text
-/// attribute.
+/// five top-level values plus the five `stream_*` sub-phase values). NEVER carries
+/// a ticket, key, token range, or query-text attribute.
 pub const RPC_PHASE_DURATION: &str = "cqlite.rpc.phase.duration";
 
 /// `cqlite.rpc.phase.active` — gauge `1` (issue #2361; `admission` phase added

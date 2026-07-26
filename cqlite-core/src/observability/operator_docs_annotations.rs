@@ -536,10 +536,10 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         name: catalog::RPC_PHASE_DURATION,
         kind: MetricKind::Histogram,
         unit: catalog::unit::SECONDS,
-        summary: "Per-phase do_get wall time across the closed set validate/admission/resolve/merge_setup/stream.",
+        summary: "Per-phase do_get wall time: the top-level validate/admission/resolve/merge_setup/stream, plus (within stream, do_get only) the in-stream sub-phases stream_cold_fault/stream_decompress/stream_merge/stream_encode/stream_grpc_write.",
         attributes: &[attr::RPC_METHOD, attr::RPC_PHASE],
-        interpretation: "Localizes WHERE a slow do_get spent time: piling up in merge_setup, queued in admission, or stuck parsing in validate.",
-        round_item: "do_get phase breakdown (#2398/#2399)",
+        interpretation: "Localizes WHERE a slow do_get spent time: piling up in merge_setup, queued in admission, or stuck parsing in validate. Within stream the sub-phases run on concurrent pipeline threads and OVERLAP (they do NOT sum to stream) — read the cold-warm delta on stream_cold_fault as the cold-IO latency bucket; stream_grpc_write is CLIENT-PACED (egress park/wake), not server cost.",
+        round_item: "do_get phase + in-stream sub-phase breakdown (#2398/#2399/#2819)",
     },
     MetricDoc {
         name: catalog::RPC_PHASE_ACTIVE,

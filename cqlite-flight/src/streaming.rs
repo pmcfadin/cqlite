@@ -164,26 +164,38 @@ impl BatchSink for ChannelSink {
         // an async worker) and drives the `select!` to completion.
         let handle = tokio::runtime::Handle::current();
         let cancelled = self.cancel.cancelled();
-        handle.block_on(async {
-            tokio::select! {
-                // Bias the send arm so a ready permit is taken deterministically
-                // even if cancellation fires in the same poll — a batch that CAN be
-                // delivered without blocking is, keeping normal-path behaviour and
-                // the stream/collect byte-parity identical.
-                biased;
-                permit = self.tx.reserve() => match permit {
-                    // Receiver still present: deliver this batch.
-                    Ok(permit) => {
-                        permit.send(Ok(batch));
-                        Ok(())
+        // Issue #2819: the `stream_grpc_write` sub-phase wraps ONLY the egress
+        // channel `reserve()`/send here — INCLUDING the backpressure park while a
+        // slow client is not draining. This runs on the merge/egress thread and
+        // shares no code interval with the feed-thread `stream_cold_fault` scope
+        // (`scan_stream_windowed_read.rs`), so a client stall inflates
+        // `stream_grpc_write` but can never inflate `stream_cold_fault`.
+        cqlite_core::observability::stream_subphase::timed(
+            cqlite_core::observability::StreamSubPhase::GrpcWrite,
+            || {
+                handle.block_on(async {
+                    tokio::select! {
+                        // Bias the send arm so a ready permit is taken
+                        // deterministically even if cancellation fires in the same
+                        // poll — a batch that CAN be delivered without blocking is,
+                        // keeping normal-path behaviour and the stream/collect
+                        // byte-parity identical.
+                        biased;
+                        permit = self.tx.reserve() => match permit {
+                            // Receiver still present: deliver this batch.
+                            Ok(permit) => {
+                                permit.send(Ok(batch));
+                                Ok(())
+                            }
+                            // Receiver dropped (client gone): stop the merge.
+                            Err(_) => Err(ProducerError::Cancelled),
+                        },
+                        // Client disconnected while parked waiting for a slot.
+                        _ = cancelled => Err(ProducerError::Cancelled),
                     }
-                    // Receiver dropped (client gone): stop the merge.
-                    Err(_) => Err(ProducerError::Cancelled),
-                },
-                // Client disconnected while we were parked waiting for a slot.
-                _ = cancelled => Err(ProducerError::Cancelled),
-            }
-        })
+                })
+            },
+        )
     }
 }
 
@@ -326,6 +338,18 @@ pub(crate) fn spawn_streaming(
         // is the FIRST act here and its Drop decrements on every exit path
         // (normal, error, cancel, panic).
         let _blocking_guard = crate::saturation::BlockingTaskGuard::enter();
+        // Issue #2819: per-request in-`stream` sub-phase accumulator. Installed on
+        // THIS merge consumer thread (so `stream_merge`/`stream_encode`/
+        // `stream_grpc_write` scopes on this thread record into it, and cqlite-core
+        // propagates the SAME `Arc` onto the per-SSTable producer + feed threads for
+        // `stream_cold_fault`/`stream_decompress`); emitted ONCE at teardown. Drop
+        // order (reverse of declaration): the emitter flushes the samples first,
+        // THEN the install guard uninstalls the thread-local — so a reused
+        // blocking-pool thread never leaks this RPC's sink.
+        let subphase = Arc::new(cqlite_core::observability::StreamSubPhaseTimings::default());
+        let _subphase_install =
+            cqlite_core::observability::stream_subphase::install(Some(subphase.clone()));
+        let _subphase_emit = crate::obs::StreamSubPhaseEmitter::new(subphase);
         let error_tx = tx.clone();
         let mut sink = ChannelSink {
             tx,

@@ -79,7 +79,7 @@ Total instruments: **76**.
 | `cqlite.rpc.duration` | histogram | `s` | `cqlite.rpc.method`<br>`cqlite.rpc.status` | Arrow Flight RPC handler durations (includes admission wait time). | Watch do_get p99; localize a rising tail with rpc.phase.duration. |
 | `cqlite.rpc.in_flight` | gauge | `1` | `cqlite.rpc.method` | Arrow Flight RPCs currently being handled. | A sustained-high value with flat rpc.rows is a stall; distinct from admission.in_use (all RPCs, not just admitted scans). |
 | `cqlite.rpc.phase.active` | gauge | `1` | `cqlite.rpc.method`<br>`cqlite.rpc.phase` | In-flight phase a do_get is CURRENTLY in (1 on entry, 0 on exit) — visible before the phase completes. | stream=1 for a whole hang exposes a wedged do_get that phase.duration would never record; admission=1 exposes an admission queue wait. |
-| `cqlite.rpc.phase.duration` | histogram | `s` | `cqlite.rpc.method`<br>`cqlite.rpc.phase` | Per-phase do_get wall time across the closed set validate/admission/resolve/merge_setup/stream. | Localizes WHERE a slow do_get spent time: piling up in merge_setup, queued in admission, or stuck parsing in validate. |
+| `cqlite.rpc.phase.duration` | histogram | `s` | `cqlite.rpc.method`<br>`cqlite.rpc.phase` | Per-phase do_get wall time: the top-level validate/admission/resolve/merge_setup/stream, plus (within stream, do_get only) the in-stream sub-phases stream_cold_fault/stream_decompress/stream_merge/stream_encode/stream_grpc_write. | Localizes WHERE a slow do_get spent time: piling up in merge_setup, queued in admission, or stuck parsing in validate. Within stream the sub-phases run on concurrent pipeline threads and OVERLAP (they do NOT sum to stream) — read the cold-warm delta on stream_cold_fault as the cold-IO latency bucket; stream_grpc_write is CLIENT-PACED (egress park/wake), not server cost. |
 | `cqlite.rpc.requests` | counter | `1` | `cqlite.rpc.method`<br>`cqlite.rpc.status` | Arrow Flight RPC requests served, tagged by method + ok/error. | Compute per-method error rate from the status arm; a rising error fraction is the RPC-health alarm. |
 | `cqlite.rpc.rows` | counter | `{row}` | `cqlite.rpc.method` | Rows returned to clients by do_get (emitted per record batch). | Climbing = healthy long scan; flat while rpc.in_flight>0 = a stalled do_get. |
 | `cqlite.sstable.index_interval_parses_total` | counter | `1` | _(none)_ | Bounded Summary-guided Index.db interval parses (one per point lookup); distinct from whole-file parses. | Grows ~1 per point lookup; a cold lazy open adds 0. Whole-file spikes stay visible on index_parses_total. |
@@ -127,7 +127,7 @@ Metrics a #2399 round-template scoreboard item consumes. Round handoffs (#2367-s
 | `cqlite.proc.threads` | thread-budget watch (#2419/#2313) |
 | `cqlite.rpc.duration` | do_get latency (#2367/#2399) |
 | `cqlite.rpc.phase.active` | do_get hang detection (#2361/#2399) |
-| `cqlite.rpc.phase.duration` | do_get phase breakdown (#2398/#2399) |
+| `cqlite.rpc.phase.duration` | do_get phase + in-stream sub-phase breakdown (#2398/#2399/#2819) |
 | `cqlite.rpc.requests` | rpc-error-rate watch (#2399) |
 | `cqlite.rpc.rows` | do_get progress (#2367/#2399) |
 | `cqlite.sstable.index_interval_parses_total` | index-parse audit (#2367/#2399) |

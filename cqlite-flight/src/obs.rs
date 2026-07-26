@@ -22,10 +22,13 @@
 //! keys, queries, or payloads.
 
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use cqlite_core::observability::{self as obs, catalog, AttrValue};
+use cqlite_core::observability::{
+    self as obs, catalog, AttrValue, StreamSubPhase, StreamSubPhaseTimings,
+};
 use tonic::Request;
 
 /// Subsystem label for [`obs::record_error`] from the Flight service.
@@ -230,6 +233,99 @@ const RPC_PHASES: [&str; 5] = [
     PHASE_MERGE_SETUP,
     PHASE_STREAM,
 ];
+
+/// In-`stream` data-plane sub-phase `cqlite.rpc.phase` values (issue #2819).
+///
+/// These decompose the `stream` phase into the five concurrent-pipeline stages,
+/// each recorded as a `cqlite.rpc.phase.duration` histogram sample tagged with
+/// this bounded value. They are a CLOSED, STATIC set — never a ticket/key/query
+/// value — but, per the owner decision, are emitted ONLY on
+/// `cqlite.rpc.phase.duration` for the `do_get` method: they are NOT added to
+/// [`RPC_PHASES`] (so the top-level five-phase ordered cursor and the
+/// `cqlite.rpc.phase.active` gauge keep their exact 5-value meaning). No new
+/// metric name or attribute key is introduced — the existing
+/// `cqlite.rpc.phase.duration` histogram and `cqlite.rpc.phase` attribute carry
+/// them.
+///
+/// `stream_grpc_write` is client-paced (egress channel park/wake), not server
+/// cost — flagged as such in the operator-doc catalog annotation.
+pub const PHASE_STREAM_COLD_FAULT: &str = "stream_cold_fault";
+/// See [`PHASE_STREAM_COLD_FAULT`].
+pub const PHASE_STREAM_DECOMPRESS: &str = "stream_decompress";
+/// See [`PHASE_STREAM_COLD_FAULT`].
+pub const PHASE_STREAM_MERGE: &str = "stream_merge";
+/// See [`PHASE_STREAM_COLD_FAULT`].
+pub const PHASE_STREAM_ENCODE: &str = "stream_encode";
+/// See [`PHASE_STREAM_COLD_FAULT`].
+pub const PHASE_STREAM_GRPC_WRITE: &str = "stream_grpc_write";
+
+/// The closed set of in-`stream` sub-phase `(StreamSubPhase, value)` pairs
+/// (issue #2819), in the fixed order the teardown emitter walks them.
+const STREAM_SUBPHASES: [(StreamSubPhase, &str); 5] = [
+    (StreamSubPhase::ColdFault, PHASE_STREAM_COLD_FAULT),
+    (StreamSubPhase::Decompress, PHASE_STREAM_DECOMPRESS),
+    (StreamSubPhase::Merge, PHASE_STREAM_MERGE),
+    (StreamSubPhase::Encode, PHASE_STREAM_ENCODE),
+    (StreamSubPhase::GrpcWrite, PHASE_STREAM_GRPC_WRITE),
+];
+
+/// Emit one `cqlite.rpc.phase.duration` sample per in-`stream` sub-phase that
+/// accumulated any wall time (issue #2819), tagged with the `do_get` method and
+/// the bounded `cqlite.rpc.phase = stream_*` value. Bounded to ≤5 samples per RPC
+/// (one per sub-phase that recorded time), emitted ONCE at stream teardown — never
+/// once per row/chunk. A sub-phase that recorded nothing emits no sample (never a
+/// fabricated zero), matching [`PhaseTimer`]'s "a phase never entered records none"
+/// invariant. The sub-phases run on concurrent pipeline threads and OVERLAP in
+/// wall-clock, so they are NOT expected to sum to the `stream` phase duration.
+fn emit_stream_subphase_samples(timings: &StreamSubPhaseTimings) {
+    let method = method_attr("do_get");
+    for (phase, value) in STREAM_SUBPHASES {
+        let nanos = timings.nanos(phase);
+        if nanos == 0 {
+            continue;
+        }
+        let seconds = nanos as f64 / 1_000_000_000.0;
+        obs::record_histogram(
+            catalog::RPC_PHASE_DURATION,
+            seconds,
+            &[
+                method.clone(),
+                (catalog::attr::RPC_PHASE, AttrValue::StaticStr(value)),
+            ],
+        );
+    }
+}
+
+/// RAII emitter that flushes the per-request in-`stream` sub-phase samples exactly
+/// once at teardown (issue #2819). Constructed inside the merge closure alongside
+/// the [`PhaseTimer`]; its [`Drop`] emits the accumulated sub-phase histogram
+/// samples on EVERY exit path (normal completion, error, cancel, panic), mirroring
+/// `PhaseTimer`'s own drop-driven emission — so a stalled or errored `do_get` still
+/// records whatever sub-phase time it accrued.
+pub struct StreamSubPhaseEmitter {
+    timings: Arc<StreamSubPhaseTimings>,
+    emitted: bool,
+}
+
+impl StreamSubPhaseEmitter {
+    /// Wrap the per-request accumulator so its samples are emitted at drop.
+    pub fn new(timings: Arc<StreamSubPhaseTimings>) -> Self {
+        Self {
+            timings,
+            emitted: false,
+        }
+    }
+}
+
+impl Drop for StreamSubPhaseEmitter {
+    fn drop(&mut self) {
+        if self.emitted {
+            return;
+        }
+        self.emitted = true;
+        emit_stream_subphase_samples(&self.timings);
+    }
+}
 
 /// Normalise a phase label to its bounded slot, so an unexpected value can never
 /// leak as a metric attribute (it maps to [`RPC_PHASES`]'s first entry, never an

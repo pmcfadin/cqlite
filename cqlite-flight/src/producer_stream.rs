@@ -91,6 +91,17 @@ impl MergeProducer {
         Ok(batch)
     }
 
+    /// [`Self::flush`] with its Arrow-encode wall time attributed to the
+    /// `stream_encode` in-`stream` sub-phase (issue #2819). Runs on the merge
+    /// consumer thread, where the flight per-request sub-phase sink is installed;
+    /// a no-op wrapper (no timing) for every non-flight caller with no sink.
+    fn flush_timed(&self, buffer: &mut Vec<QueryRow>) -> Result<RecordBatch, ProducerError> {
+        cqlite_core::observability::stream_subphase::timed(
+            cqlite_core::observability::StreamSubPhase::Encode,
+            || self.flush(buffer),
+        )
+    }
+
     /// Drive the row-merge loop over `stepper` one reconciled row at a time,
     /// appending full-row batches (issue #2230).
     ///
@@ -147,7 +158,15 @@ impl MergeProducer {
             // I/O/corruption error that happens to race a client disconnect is
             // NEVER masked as a clean `Cancelled` abort — only an actual
             // cancellation maps to `ProducerError::Cancelled`.
-            let step = stepper.step_row().map_err(|e| match e {
+            //
+            // Issue #2819: the reconcile/materialize step is the `stream_merge`
+            // sub-phase (k-way merge + LWW/tombstone/TTL reconcile + `entry_to_row`
+            // pulled from the per-input channels), on the merge consumer thread.
+            let step = cqlite_core::observability::stream_subphase::timed(
+                cqlite_core::observability::StreamSubPhase::Merge,
+                || stepper.step_row(),
+            )
+            .map_err(|e| match e {
                 cqlite_core::Error::Cancelled => ProducerError::Cancelled,
                 other => ProducerError::Merge(other),
             })?;
@@ -212,14 +231,14 @@ impl MergeProducer {
             // an empty buffer.
             let width = estimate_arrow_row_bytes(&self.columns, &row);
             if byte_cap.cut_before(width).is_yes() {
-                sink.emit(self.flush(&mut buffer)?)?;
+                sink.emit(self.flush_timed(&mut buffer)?)?;
                 byte_cap.reset();
             }
             buffer.push(row);
             emitted += 1;
             byte_cap.accumulate(width);
             if buffer.len() >= self.batch_size {
-                sink.emit(self.flush(&mut buffer)?)?;
+                sink.emit(self.flush_timed(&mut buffer)?)?;
                 byte_cap.reset();
             }
             // LIMIT reached (counted post-filter): stop the merge early.
@@ -231,7 +250,7 @@ impl MergeProducer {
         }
 
         if !buffer.is_empty() {
-            sink.emit(self.flush(&mut buffer)?)?;
+            sink.emit(self.flush_timed(&mut buffer)?)?;
         }
         Ok(())
     }

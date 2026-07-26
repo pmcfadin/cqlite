@@ -661,6 +661,11 @@ impl SSTableRowIteratorAdapter {
         // correct-by-construction — no ordering race is possible.
         producer_gauge::spawned();
 
+        // Issue #2819: propagate the flight per-request sub-phase sink (if any)
+        // captured on the calling thread onto this producer thread, so its feed
+        // thread's page-in/decompress reach the request's accumulator. `None`
+        // (no-op) for compaction / CLI callers.
+        let subphase_sink = crate::observability::stream_subphase::current();
         // Spawn the producer thread via `Builder::spawn` (rather than the
         // panic-on-failure `std::thread::spawn`) so an OS thread-creation failure
         // is a recoverable `Err`, not a process abort: the gauge increment above
@@ -670,6 +675,7 @@ impl SSTableRowIteratorAdapter {
         // collides with any runtime on the calling thread (Issue #587) and adds no
         // worker threads beyond itself (Issue #2316).
         let producer = match std::thread::Builder::new().spawn(move || {
+            let _subphase_guard = crate::observability::stream_subphase::install(subphase_sink);
             Self::producer_thread(
                 path_buf,
                 run_index,
