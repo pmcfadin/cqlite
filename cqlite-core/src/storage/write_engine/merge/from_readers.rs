@@ -69,8 +69,8 @@ use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::SSTableReader;
 
 use super::{
-    producer_gauge, KWayMerger, MergeEntry, MergeProducerError, RunReader, SSTableRowIterator,
-    SSTableRowIteratorAdapter, STREAMING_CHANNEL_CAPACITY,
+    egress_budget, producer_gauge, KWayMerger, MergeEntry, MergeProducerError, RunReader,
+    SSTableRowIterator, SSTableRowIteratorAdapter,
 };
 
 /// Drive `reader`'s compaction stream into `sender`, converting each row via
@@ -183,7 +183,10 @@ impl SSTableRowIteratorAdapter {
         let schema = schema.clone();
         // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
         let adapter_cancel = scan_cancel.clone();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
+        // Issue #2765: register this starting merge and derive its per-merge
+        // channel capacity from the now-live concurrency (see `egress_budget`).
+        let (channel_capacity, budget_guard) = egress_budget::begin_merge();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(channel_capacity);
         // Issue #2419 roborev job 1733: this adapter's own sent-count, shared
         // with the producer thread — see `SSTableRowIteratorAdapter`'s field doc.
         let sent_count = Arc::new(AtomicI64::new(0));
@@ -220,6 +223,7 @@ impl SSTableRowIteratorAdapter {
             scan_cancel: adapter_cancel,
             sent_count,
             received_count: 0,
+            _budget_guard: budget_guard,
         })
     }
 

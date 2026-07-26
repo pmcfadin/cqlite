@@ -490,6 +490,15 @@ struct SSTableRowIteratorAdapter {
     /// makes ([`Self::next`]'s normal consumption). Only ever touched by the
     /// thread holding `&mut self` (never shared), so a plain `i64`.
     received_count: i64,
+    /// RAII guard (issue #2765) that keeps this merge counted in the
+    /// process-global active-merge total for as long as its channel buffers
+    /// rows against the adaptive egress budget. Decrements on drop — even on
+    /// panic/early-return — so the per-merge capacity of subsequently-started
+    /// merges reflects the true live concurrency. Held (never read) purely for
+    /// its drop; dropped as a field AFTER this struct's `Drop` tears down the
+    /// channel (receiver dropped + producer joined), so it is released only once
+    /// this merge's buffered working set is provably gone.
+    _budget_guard: egress_budget::ActiveMergeGuard,
 }
 
 /// Poll interval for the cancel-aware blocking `recv` in
@@ -530,12 +539,18 @@ impl From<Error> for MergeProducerError {
     }
 }
 
-/// Number of pre-fetched `MergeEntry` objects buffered per source in the
-/// streaming channel. Each entry is typically a few hundred bytes; at 256
-/// entries per source and 10 sources that is a few hundred KB — well within the
-/// 128MB budget. The value is a balance between producer/consumer
-/// synchronization overhead (lower = more context switches) and memory footprint
-/// (higher = more buffering).
+/// MAXIMUM number of pre-fetched `MergeEntry` objects buffered per source in the
+/// streaming channel — the capacity used at LOW concurrency (a single active
+/// merge). Each entry is typically a few hundred bytes; at 256 entries per
+/// source and 10 sources that is a few hundred KB — well within the 128MB
+/// budget. The value is a balance between producer/consumer synchronization
+/// overhead (lower = more context switches) and memory footprint (higher = more
+/// buffering).
+///
+/// Issue #2765: this is now the UPPER clamp of an adaptive per-merge capacity —
+/// under concurrent merges the effective capacity shrinks (see
+/// [`egress_budget`]) so the aggregate buffered working set across all merges
+/// tracks a fixed budget instead of growing as `256 × active_merges`.
 #[cfg(feature = "write-support")]
 const STREAMING_CHANNEL_CAPACITY: usize = 256;
 
@@ -549,6 +564,12 @@ mod producer_gauge;
 // `cqlite.merge.egress_channel_depth`. Sibling module to bound this file.
 #[cfg(feature = "write-support")]
 mod channel_depth;
+
+// Adaptive egress budget (issue #2765): process-global active-merge count that
+// makes the per-merge `sync_channel` capacity track a FIXED aggregate row
+// budget instead of a fixed 256 per merge. Sibling module to bound this file.
+#[cfg(feature = "write-support")]
+mod egress_budget;
 
 // Issue #2361: join-on-drop / backpressured-teardown coverage for the streaming
 // merge adapter.
@@ -601,7 +622,13 @@ impl SSTableRowIteratorAdapter {
         // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
         let adapter_cancel = scan_cancel.clone();
 
-        let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
+        // Issue #2765: register this starting merge in the process-global
+        // active-merge count and derive its per-merge channel capacity from the
+        // now-live concurrency (increment-first, so the current merge counts
+        // itself). The returned guard is stored on the adapter and decrements
+        // the count when this merge is torn down.
+        let (channel_capacity, budget_guard) = egress_budget::begin_merge();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(channel_capacity);
         // Issue #2419 roborev job 1733: this adapter's own sent-count, shared
         // with the producer thread so `Drop` can read its post-join-stable value
         // for the egress-depth reconcile (see the field doc).
@@ -653,6 +680,7 @@ impl SSTableRowIteratorAdapter {
             scan_cancel: adapter_cancel,
             sent_count,
             received_count: 0,
+            _budget_guard: budget_guard,
         })
     }
 
