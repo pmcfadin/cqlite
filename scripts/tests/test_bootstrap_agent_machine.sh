@@ -652,16 +652,44 @@ mk_hermetic_bin "$stub7e"
 mk_stub "$stub7e" gh 'exit 0'   # setup-git is a no-op -> the fallback helper is used
 repo7e="$tmp/repo7e"; mk_fake_repo "$repo7e" "https://github.com/pmcfadin/cqlite.git"
 gc7e="$sb7e/gitconfig"
-for _ in 1 2 3; do
+for _ in 1 2; do
   PATH="$stub7e" HOME="$sb7e" CARGO_HOME="$sb7e/.cargo" GIT_CONFIG_GLOBAL="$gc7e" \
     GH_TOKEN="$FAKE_TOKEN" bash "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
 done
+out7e=$(PATH="$stub7e" HOME="$sb7e" CARGO_HOME="$sb7e/.cargo" GIT_CONFIG_GLOBAL="$gc7e" \
+  GH_TOKEN="$FAKE_TOKEN" bash "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
 helper_count=$(grep -c 'x-access-token' "$gc7e" 2>/dev/null); helper_count="${helper_count:-0}"
 if [ "$helper_count" = 1 ]; then
   ok "cred: repeated --yes runs keep exactly one credential helper (idempotent)"
 else
   bad "cred: helper stacked across re-runs (count=$helper_count)"
   [ -f "$gc7e" ] && cat "$gc7e"
+fi
+# On the re-run the probe SUCCEEDS, so the verdict comes from the ok branch — and its
+# advisories must see the HOST-SCOPED key this script itself writes. A bare
+# `credential.helper` lookup would go silent on exactly the config it just created,
+# muting the caveat that matters most to a systemd/cron worker.
+if printf '%s' "$out7e" | grep -q 'reads \$GH_TOKEN from the ENVIRONMENT'; then
+  ok "cred: env-dependency caveat fires for the HOST-SCOPED helper the script writes"
+else
+  bad "cred: env-dependency caveat missed a host-scoped helper"
+  printf '%s\n' "$out7e" | grep -i -A2 "git push credentials"
+fi
+
+# 7i. Same blind spot on the other advisory: a host-scoped helper at REPO-LOCAL scope
+#     with no global one must still raise the "a fresh clone won't inherit it" note.
+sb7i=$(mktemp -d "$tmp/cred7i.XXXXXX"); stub7i="$tmp/stub7i"
+mk_hermetic_bin "$stub7i"
+repo7i="$tmp/repo7i"; mk_fake_repo "$repo7i" "https://github.com/pmcfadin/cqlite.git"
+git -C "$repo7i" config --local --add 'credential.https://github.com.helper' \
+  '!f(){ test "$1" = get || exit 0; echo username=x; echo password=local-only-secret; };f'
+out7i=$(PATH="$stub7i" HOME="$sb7i" CARGO_HOME="$sb7i/.cargo" GIT_CONFIG_GLOBAL="$sb7i/gitconfig" \
+  GH_TOKEN="" bash "$repo7i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+if printf '%s' "$out7i" | grep -q 'REPO-LOCAL scope only'; then
+  ok "cred: repo-local-scope note fires for a HOST-SCOPED local helper"
+else
+  bad "cred: repo-local-scope note missed a host-scoped local helper"
+  printf '%s\n' "$out7i" | grep -i -A3 "git push credentials"
 fi
 
 # --- 8. Board check is a FUNCTIONAL, READ-ONLY probe (issue #2942) ----------
@@ -703,6 +731,8 @@ EOF
 }
 
 # run_board_case <name> <scopes> <missing> <project-rc> <api-rc> -> sets BOARD_OUT/BOARD_LOG
+# CQLITE_PROJECT_ACCOUNT is pinned to the stub's account so these cases exercise the
+# VERDICT logic with no account switch in play (switching has its own cases below).
 run_board_case() {
   local name="$1" scopes="$2" missing="$3" prc="$4" arc="$5"
   local sb stub repo
@@ -712,7 +742,35 @@ run_board_case() {
   mk_board_gh "$stub" "$BOARD_LOG" "$scopes" "$missing" "$prc" "$arc"
   repo="$tmp/repo-board-$name"; mk_fake_repo "$repo" "https://github.com/pmcfadin/cqlite.git"
   BOARD_OUT=$(PATH="$stub" HOME="$sb" CARGO_HOME="$sb/.cargo" GIT_CONFIG_GLOBAL="$sb/gitconfig" \
+    CQLITE_PROJECT_ACCOUNT=tester \
     GH_TOKEN="" bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+}
+
+# run_board_auth_case <name> <auth-status-body> [env...] -> BOARD_OUT/BOARD_LOG
+# Like run_board_case but the caller supplies the VERBATIM `gh auth status` body, so a
+# multi-account host can be modelled exactly. `gh project`/`gh api` always succeed, so
+# any non-green verdict is attributable purely to which account's stanza was parsed.
+run_board_auth_case() {
+  local name="$1" body="$2"; shift 2
+  local sb stub repo
+  sb=$(mktemp -d "$tmp/bauth-$name.XXXXXX"); stub="$tmp/stub-bauth-$name"
+  mk_hermetic_bin "$stub"
+  BOARD_LOG="$tmp/gh-bauth-$name.log"; : >"$BOARD_LOG"
+  printf '%s\n' "$body" >"$tmp/authbody-$name.txt"
+  cat >"$stub/gh" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$BOARD_LOG"
+case "\$1" in
+  auth) [ "\$2" = status ] && cat "$tmp/authbody-$name.txt"; exit 0 ;;
+  project) exit 0 ;;
+  api)     echo "PVT_kwStubProjectId"; exit 0 ;;
+  *)       exit 0 ;;
+esac
+EOF
+  chmod +x "$stub/gh"
+  repo="$tmp/repo-bauth-$name"; mk_fake_repo "$repo" "https://github.com/pmcfadin/cqlite.git"
+  BOARD_OUT=$(PATH="$stub" HOME="$sb" CARGO_HOME="$sb/.cargo" GIT_CONFIG_GLOBAL="$sb/gitconfig" \
+    GH_TOKEN="" "$@" bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 }
 
 # 8a. THE false-OK case: `project` scope present, `read:org` missing, `gh project`
@@ -779,6 +837,158 @@ if printf '%s' "$BOARD_OUT" | grep -Eq '\[warn\].*(UNREACHABLE|BOTH probes faile
 else
   bad "board: null-project GraphQL reply was treated as a working fallback"
   printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board #"
+fi
+
+# 8g. READ-ONLY project access ('read:project', no 'project') with a clean probe and
+#     no gh-reported missing scopes. Board WRITES — the whole dispatch loop — still
+#     fail, so an unqualified ok as the section's LAST word would be a false OK even
+#     though an earlier line warned about the scope.
+run_board_case readonlyscope "'read:project', 'repo', 'workflow'" "" 0 0
+if printf '%s' "$BOARD_OUT" | grep -Eq '\[ok\].*board #1.*reachable'; then
+  bad "board: read-only project scope still printed an unqualified 'reachable' ok"
+elif printf '%s' "$BOARD_OUT" | grep -Eq "\[warn\].*board READ works.*'project' WRITE scope is MISSING"; then
+  ok "board: read-only project scope -> READ-works warn naming the missing WRITE scope"
+else
+  bad "board: read-only project scope produced neither the ok nor the expected warn"
+  printf '%s\n' "$BOARD_OUT" | grep -i -A2 "board"
+fi
+
+# --- 8h. The verdict must be attributed to the ACTIVE account ----------------
+# `gh auth status` prints one stanza PER logged-in account and the active one is not
+# guaranteed first, so a whole-output grep can read a DIFFERENT account's scopes than
+# the one every gh call uses. This repo documents the exact hazard
+# (.claude/skills/flow-board/SKILL.md): the active account silently flips to an EMU
+# account lacking `project`, and board writes then degrade SILENTLY. Both cases below
+# are built so a whole-output grep gives the WRONG verdict.
+
+# 8h-i. ACTIVE account is clean; a NON-active account reports missing scopes. A
+#       whole-output grep sees that stray line and wrongly qualifies the verdict.
+run_board_auth_case active-clean 'github.com
+  ✓ Logged in to github.com account other-emu (keyring)
+  - Active account: false
+  - Token scopes: '"'"'project'"'"', '"'"'repo'"'"'
+  ! Missing required token scopes: '"'"'read:org'"'"'
+  ✓ Logged in to github.com account pmcfadin (keyring)
+  - Active account: true
+  - Token scopes: '"'"'project'"'"', '"'"'read:org'"'"', '"'"'repo'"'"''
+if printf '%s' "$BOARD_OUT" | grep -Eq "\[ok\].*board #1.*reachable as 'pmcfadin'"; then
+  ok "board: a NON-active account's missing-scopes line does not qualify the verdict"
+else
+  bad "board: verdict read a non-active account's stanza"
+  printf '%s\n' "$BOARD_OUT" | grep -i -A2 "board\|account"
+fi
+
+# 8h-ii. A NON-active account listed FIRST has 'project'; the ACTIVE one does not. A
+#        whole-output `grep 'Token scopes:' | head -1` picks the wrong stanza and would
+#        greenlight a machine whose dispatch writes all fail.
+run_board_auth_case active-noproject 'github.com
+  ✓ Logged in to github.com account other-emu (keyring)
+  - Active account: false
+  - Token scopes: '"'"'project'"'"', '"'"'read:org'"'"', '"'"'repo'"'"'
+  ✓ Logged in to github.com account pmcfadin (keyring)
+  - Active account: true
+  - Token scopes: '"'"'read:project'"'"', '"'"'repo'"'"''
+if ! printf '%s' "$BOARD_OUT" | grep -Eq '\[ok\].*board #1.*reachable' \
+   && printf '%s' "$BOARD_OUT" | grep -q "'project' scope MISSING on gh account 'pmcfadin'"; then
+  ok "board: scopes are read from the ACTIVE stanza, not the first one printed"
+else
+  bad "board: scopes were read from a non-active (first-listed) account"
+  printf '%s\n' "$BOARD_OUT" | grep -i -A2 "scope\|board #"
+fi
+
+# 8h-iii. The operator must be able to see WHICH account the verdict is about.
+if printf '%s' "$BOARD_OUT" | grep -q "measuring gh account 'pmcfadin'"; then
+  ok "board: names the account the verdict is about"
+else
+  bad "board: verdict does not name the account it measured"
+fi
+
+# --- 8i. Probe the account board dispatch actually uses ----------------------
+# flow-board forces CQLITE_PROJECT_ACCOUNT active before EVERY board op. Probing as
+# whatever happens to be active measures a different identity: with an EMU account
+# active, bootstrap would shout "board UNREACHABLE — a session must STOP" about a
+# machine where flow-board switches and works fine. Mirroring the switch is required —
+# and because it mutates real gh state, the operator's account must be RESTORED.
+mk_switch_gh() {
+  # mk_switch_gh <dir> <log> <statefile> <acctA> <acctB>  (acctA starts active)
+  local dir="$1" log="$2" state="$3" a="$4" b="$5"
+  printf '%s' "$a" >"$state"
+  cat >"$dir/gh" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$log"
+cur=\$(cat "$state" 2>/dev/null)
+case "\$1" in
+  auth)
+    case "\$2" in
+      status)
+        echo "github.com"
+        for acct in $a $b; do
+          echo "  ✓ Logged in to github.com account \$acct (keyring)"
+          if [ "\$acct" = "\$cur" ]; then echo "  - Active account: true"
+          else echo "  - Active account: false"; fi
+          echo "  - Token scopes: 'project', 'read:org', 'repo'"
+        done
+        exit 0 ;;
+      switch)
+        shift 2
+        while [ \$# -gt 0 ]; do
+          [ "\$1" = --user ] && printf '%s' "\$2" >"$state"
+          shift
+        done
+        exit 0 ;;
+      *) exit 0 ;;
+    esac ;;
+  project) exit 0 ;;
+  api)     echo "PVT_kwStubProjectId"; exit 0 ;;
+  *)       exit 0 ;;
+esac
+EOF
+  chmod +x "$dir/gh"
+}
+
+sb8i=$(mktemp -d "$tmp/board8i.XXXXXX"); stub8i="$tmp/stub8i"
+mk_hermetic_bin "$stub8i"
+log8i="$tmp/gh8i.log"; : >"$log8i"; state8i="$tmp/gh8i.state"
+mk_switch_gh "$stub8i" "$log8i" "$state8i" other-emu pmcfadin   # EMU active at start
+repo8i="$tmp/repo8i"; mk_fake_repo "$repo8i" "https://github.com/pmcfadin/cqlite.git"
+out8i=$(PATH="$stub8i" HOME="$sb8i" CARGO_HOME="$sb8i/.cargo" GIT_CONFIG_GLOBAL="$sb8i/gitconfig" \
+  GH_TOKEN="" bash "$repo8i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+if grep -q -- 'auth switch --user pmcfadin' "$log8i"; then
+  ok "board: switches to CQLITE_PROJECT_ACCOUNT before probing (mirrors flow-board)"
+else
+  bad "board: never switched to the board account — probes a different identity than dispatch uses"
+fi
+if grep -q -- 'auth switch --user other-emu' "$log8i" && [ "$(cat "$state8i")" = other-emu ]; then
+  ok "board: RESTORES the operator's active account after the probe (a check must not mutate)"
+else
+  bad "board: left the active account switched to '$(cat "$state8i")' — a check mutated host state"
+fi
+if printf '%s' "$out8i" | grep -Eq '\[ok\].*board #1.*reachable' ; then
+  ok "board: reports reachable for the account dispatch actually uses"
+else
+  bad "board: did not reach a green verdict after switching to the board account"
+  printf '%s\n' "$out8i" | grep -i -A2 "board #"
+fi
+
+# 8j. With an env token, gh ignores the keyring and `gh auth switch` cannot change the
+#     identity — attempting it would be theatre, and mutating host state for a no-op
+#     is worse than not trying.
+sb8j=$(mktemp -d "$tmp/board8j.XXXXXX"); stub8j="$tmp/stub8j"
+mk_hermetic_bin "$stub8j"
+log8j="$tmp/gh8j.log"; : >"$log8j"; state8j="$tmp/gh8j.state"
+mk_switch_gh "$stub8j" "$log8j" "$state8j" other-emu pmcfadin
+repo8j="$tmp/repo8j"; mk_fake_repo "$repo8j" "https://github.com/pmcfadin/cqlite.git"
+out8j=$(PATH="$stub8j" HOME="$sb8j" CARGO_HOME="$sb8j/.cargo" GIT_CONFIG_GLOBAL="$sb8j/gitconfig" \
+  GH_TOKEN="$FAKE_TOKEN" bash "$repo8j/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+if ! grep -q -- 'auth switch' "$log8j" && [ "$(cat "$state8j")" = other-emu ]; then
+  ok "board: an env token suppresses the switch entirely (no pointless host mutation)"
+else
+  bad "board: attempted an account switch while GH_TOKEN was in force"
+fi
+if printf '%s' "$out8j" | grep -q "from GH_TOKEN in the environment"; then
+  ok "board: names the env token as the identity source"
+else
+  bad "board: did not disclose that the identity came from GH_TOKEN"
 fi
 
 # 8e. The probe is READ-ONLY: across every case above, the bootstrap must never

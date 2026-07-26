@@ -22,7 +22,11 @@ without it, it prints the exact command for each gap. It verifies, in order:
    (Path A, #1886). The verdict is a **read-only functional probe** of the board, not
    a `project` scope-string match (#2942 — see the deltas below); the scope check
    survives only as a cheap pre-filter. Missing scope → `gh auth refresh -s project`.
-   Point it elsewhere with `CQLITE_PROJECT_OWNER` / `CQLITE_PROJECT_NUMBER`.
+   Scopes are read from the **active account's** stanza only, and the probe runs as
+   `CQLITE_PROJECT_ACCOUNT` — the same account `flow-board` forces active before every
+   board op — switching back afterwards so a *check* never leaves your active account
+   changed. The output names the account it measured. Point it elsewhere with
+   `CQLITE_PROJECT_OWNER` / `CQLITE_PROJECT_NUMBER` / `CQLITE_PROJECT_ACCOUNT`.
    It also checks **git push credentials** (#2942) — a *separate* credential path from
    `gh`. Under `--yes` it configures one, **scoped to the origin host**, and the token
    value is never written to disk.
@@ -42,6 +46,15 @@ The bootstrap now checks the first two and fails loudly; the third is a hand-typ
 | `fatal: could not read Username for 'https://github.com'` | `gh` is authenticated but **git is not** — they are separate credential paths. `scripts/flow/claim.sh` + `claim-heartbeat.sh` push with plain git on 10+ call sites, so the claim protocol itself does not work. | `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes` (configures an origin-host-scoped helper that dereferences `$GH_TOKEN` at call time). |
 | `gh project …` fails for a missing **`read:org`** scope on a token whose scopes DO include `project` | A scope match is evidence about a token, not about the operation. `gh project item-edit` needs `read:org`; the equivalent GraphQL mutation does not. | Widen the token (`gh auth refresh -s read:org`), **or** do board writes through the `updateProjectV2ItemFieldValue` GraphQL mutation — it succeeds with the same token. |
 | `stale info` from a **bare** `git push --force-with-lease`, even when local and remote refs demonstrably match | The bare form leases against a remote-tracking ref your checkout may never have fetched. | Always the explicit CAS form: `git push --force-with-lease=<ref>:<sha>` (what the flow scripts already use). |
+
+**A note on *which account* any of this is about.** `gh auth status` prints one stanza
+**per logged-in account**, and the active one is not guaranteed first — so a plain grep
+of its output can report a different account's scopes than the one your commands will
+actually use. The documented instance is in `.claude/skills/flow-board/SKILL.md`: gh's
+active account silently flips to an EMU account lacking `project`, and every board write
+then degrades to labels **silently**. When diagnosing a board problem, always establish
+the active account first (`gh auth status` → `Active account: true`), and remember
+`flow-board` forces `CQLITE_PROJECT_ACCOUNT` active before each board op.
 
 **Claim verdicts encode this too (#2942).** An unauthenticated push now reports
 `CLAIM: ERROR reason=auth … (NOT retryable …)` and names the fix, for `claim.sh`'s

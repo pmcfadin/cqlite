@@ -59,7 +59,11 @@ loudly rather than reporting a healthy machine. Search for the message you actua
   and succeeds with the same token. Fix: `gh auth refresh -s read:org`, or route board WRITES
   through that mutation (which is what `project-board-sync.yml` already does). The bootstrap's
   board check is now a read-only functional probe for exactly this reason — it can no longer print
-  "board dispatch works" on the strength of the scope string.
+  "board dispatch works" on the strength of the scope string. It also reads scopes from the
+  **active account's** stanza only and probes as `CQLITE_PROJECT_ACCOUNT` (the account `flow-board`
+  forces active), restoring your previous account afterwards: `gh auth status` prints one stanza per
+  logged-in account, so a whole-output grep can describe an account your commands never use — the
+  EMU-account flip documented in `.claude/skills/flow-board/SKILL.md`.
 - **`stale info` from a bare `git push --force-with-lease`**, even when local and remote refs
   demonstrably match — the bare form leases against a remote-tracking ref this checkout may never
   have fetched. Always use the explicit CAS form `git push --force-with-lease=<ref>:<sha>`, which

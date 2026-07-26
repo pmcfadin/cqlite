@@ -20,14 +20,17 @@
 #      from a READ-ONLY functional probe of the board, never from the `project`
 #      scope string (issue #2942): a token can carry `project` and still fail
 #      `gh project item-edit` for a missing `read:org` while the equivalent
-#      `updateProjectV2ItemFieldValue` GraphQL mutation works. Overridable with
-#      CQLITE_PROJECT_OWNER / CQLITE_PROJECT_NUMBER.
+#      `updateProjectV2ItemFieldValue` GraphQL mutation works. Scopes are read from
+#      the ACTIVE account's stanza only, and the probe runs as the account flow-board
+#      forces active, restoring the operator's account afterwards. Overridable with
+#      CQLITE_PROJECT_OWNER / CQLITE_PROJECT_NUMBER / CQLITE_PROJECT_ACCOUNT.
 #   3b. git push CREDENTIALS (issue #2942) — separate from `gh` auth. The claim
 #      protocol (scripts/flow/claim.sh, claim-heartbeat.sh) pushes with plain git
 #      on 10+ call sites, so an authenticated gh with an unauthenticated git means
 #      the cross-machine lock does not work. Under --yes this configures a
-#      credential path, preferring `gh auth setup-git`, else a helper that
-#      dereferences $GH_TOKEN at call time. The token is never written to disk.
+#      credential path scoped to the origin host, preferring `gh auth setup-git`,
+#      else a helper that dereferences $GH_TOKEN at call time. The token is never
+#      written to disk.
 #   4. roborev installed and its LOCAL config resolves — roborev follows THIS
 #      machine's configured agent (commonly codex via .roborev.toml); we warn
 #      only if the local config is broken, never prescribe an agent.
@@ -52,7 +55,7 @@ for arg in "$@"; do
     --yes|-y) AUTO_YES=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     -h|--help)
-      sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "bootstrap: unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -355,9 +358,40 @@ fi
 # SAME token. A scope match is evidence about a token, not about the operation.
 # The scope check survives as a cheap PRE-FILTER; the verdict comes from a probe.
 # The probe is strictly READ-ONLY — a bootstrap must never mutate a real board item.
+#
+# Both facts the verdict rests on must also be attributed to the RIGHT IDENTITY.
+# `gh auth status` prints one stanza PER logged-in account on a host and the active
+# one is not guaranteed first, so a plain grep can read a different account's scopes
+# than the one every gh call will use — this repo has a documented instance
+# (.claude/skills/flow-board/SKILL.md: the active account silently flips to an EMU
+# account lacking `project`, and board writes then degrade SILENTLY). And `flow-board`
+# FORCES CQLITE_PROJECT_ACCOUNT active before any board op, so probing as whatever
+# account happens to be active measures a different identity than board dispatch uses.
+# Both are the same defect this section exists to remove, one level up: a verdict
+# derived from something other than the operation actually performed.
 BOARD_OWNER="${CQLITE_PROJECT_OWNER:-pmcfadin}"
 BOARD_NUMBER="${CQLITE_PROJECT_NUMBER:-1}"
+BOARD_ACCOUNT="${CQLITE_PROJECT_ACCOUNT:-pmcfadin}"   # same var flow-board honors
 BOARD_GRAPHQL_WRITE="updateProjectV2ItemFieldValue"
+
+# gh_active_block <auth-status-output> — ONLY the active account's stanza. Stanzas
+# start at a "Logged in to <host> account <name>" line; the active one carries
+# "Active account: true". Falls back to the whole output when no such marker exists
+# (older gh / single account), so this never returns empty.
+gh_active_block() {
+  printf '%s\n' "$1" | awk '
+    /Logged in to/ { n++ }
+    { blk[n] = blk[n] $0 "\n"; if ($0 ~ /Active account: true/) active = n }
+    END {
+      if (active) { printf "%s", blk[active]; exit }
+      for (i = 0; i <= n; i++) printf "%s", blk[i]
+    }'
+}
+
+# gh_block_account <stanza> — the account name a stanza belongs to ("" if unknown).
+gh_block_account() {
+  printf '%s\n' "$1" | sed -n 's/.*Logged in to [^ ]* account \([^ ][^ ]*\).*/\1/p' | head -1
+}
 
 # board_graphql_read <owner> <number> — READ-ONLY projectV2 lookup, the read
 # counterpart of the write fallback, so its result says whether that fallback is
@@ -384,21 +418,50 @@ if have gh; then
   auth_out=$(gh auth status 2>&1); auth_rc=$?
   if [ "$auth_rc" -eq 0 ]; then
     ok "gh authenticated"
-    # Token-boundary match on the scopes line so a scope like 'project:read-only'
-    # (or any 'xprojecty' substring) can never false-positive as 'project'.
-    scopes_line=$(printf '%s\n' "$auth_out" | grep "Token scopes:" | head -1)
+    # ---- attribute every fact below to the ACTIVE account, and say which one ----
+    ACTIVE_BLOCK=$(gh_active_block "$auth_out")
+    ACTIVE_ACCOUNT=$(gh_block_account "$ACTIVE_BLOCK")
+    # An env token outranks the keyring, so there is exactly ONE identity and
+    # `gh auth switch` cannot change it — detect that up front rather than
+    # attempting (and reporting) a switch that could never take effect.
+    GH_ENV_TOKEN=0
+    [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ] && GH_ENV_TOKEN=1
+    info "measuring gh account '${ACTIVE_ACCOUNT:-<unknown>}'$([ "$GH_ENV_TOKEN" = 1 ] && printf ' (from GH_TOKEN in the environment)')"
+
+    # Mirror flow-board: it forces CQLITE_PROJECT_ACCOUNT active before EVERY board
+    # op, so probing as a different account would answer a question nobody asks —
+    # loudly failing a box where dispatch works, or greenlighting an account dispatch
+    # never uses. Switching mutates real gh state, so we only switch when we must and
+    # we always switch BACK; a failed restore is a loud warn, never a silent leftover.
+    BOARD_SWITCHED=0
+    PRE_PROBE_ACCOUNT="$ACTIVE_ACCOUNT"   # what the operator had active; restored below
+    if [ "$GH_ENV_TOKEN" = 0 ] && [ -n "$ACTIVE_ACCOUNT" ] && [ "$ACTIVE_ACCOUNT" != "$BOARD_ACCOUNT" ]; then
+      if gh auth switch --user "$BOARD_ACCOUNT" >/dev/null 2>&1; then
+        BOARD_SWITCHED=1
+        info "temporarily switched gh's active account '$ACTIVE_ACCOUNT' -> '$BOARD_ACCOUNT' for the probe (what flow-board does); will switch back"
+        auth_out=$(gh auth status 2>&1)
+        ACTIVE_BLOCK=$(gh_active_block "$auth_out")
+        ACTIVE_ACCOUNT=$(gh_block_account "$ACTIVE_BLOCK")
+      else
+        info "could not switch to '$BOARD_ACCOUNT' (CQLITE_PROJECT_ACCOUNT) — probing as '$ACTIVE_ACCOUNT'; flow-board would attempt the same switch"
+      fi
+    fi
+
+    # Token-boundary match on the ACTIVE account's scopes line so a scope like
+    # 'project:read-only' (or any 'xprojecty' substring) can never false-positive.
+    scopes_line=$(printf '%s\n' "$ACTIVE_BLOCK" | grep "Token scopes:" | head -1)
     scope_prefilter=0
     if printf '%s\n' "$scopes_line" | grep -qE "(^|[ ,'])project([ ,']|$)"; then
       scope_prefilter=1
-      info "pre-filter: 'project' scope present (NOT the verdict — the probe below decides)"
+      info "pre-filter: 'project' scope present on '${ACTIVE_ACCOUNT:-<unknown>}' (NOT the verdict — the probe below decides)"
     else
-      warn "'project' scope MISSING — the board is the SOLE dispatch authority (Path A). Fix:"
+      warn "'project' scope MISSING on gh account '${ACTIVE_ACCOUNT:-<unknown>}' — the board is the SOLE dispatch authority (Path A). Fix:"
       info "gh auth refresh -s project"
     fi
     # gh's OWN declaration that the ACTIVE token lacks scopes gh requires. This is
     # the discriminator behind the observed false OK: scopes include 'project',
     # `read:org` is missing, and `gh project item-edit` fails on that alone.
-    missing_scopes=$(printf '%s\n' "$auth_out" | grep -i "Missing required token scopes" | head -1)
+    missing_scopes=$(printf '%s\n' "$ACTIVE_BLOCK" | grep -i "Missing required token scopes" | head -1)
     missing_list="${missing_scopes##*scopes:}"; missing_list="${missing_list# }"
     # READ-ONLY probe 1: can `gh project` see the board at all?
     board_read=1
@@ -406,19 +469,41 @@ if have gh; then
     # READ-ONLY probe 2: does the GraphQL projectV2 surface answer with this token?
     graphql_read=1
     board_graphql_read "$BOARD_OWNER" "$BOARD_NUMBER" || graphql_read=0
-    if [ "$board_read" = 1 ] && [ -z "$missing_scopes" ]; then
-      ok "board #$BOARD_NUMBER ($BOARD_OWNER) reachable — 'gh project' read probe OK, no missing token scopes"
+
+    # Restore the operator's account BEFORE reporting: running a CHECK must not leave
+    # the active account changed.
+    if [ "$BOARD_SWITCHED" = 1 ]; then
+      if gh auth switch --user "$PRE_PROBE_ACCOUNT" >/dev/null 2>&1; then
+        info "restored gh's active account to '$PRE_PROBE_ACCOUNT'"
+      else
+        warn "could NOT restore gh's active account — it is left as '$BOARD_ACCOUNT'. Fix: gh auth switch --user $PRE_PROBE_ACCOUNT"
+      fi
+    fi
+
+    # An unqualified ok requires ALL THREE: the read probe passed, gh reports no
+    # missing required scopes, AND the 'project' WRITE scope is present. Without the
+    # last one a read-only token (e.g. read:project) would print the earlier
+    # "'project' scope MISSING" warn and then a reassuring ok as the section's LAST
+    # word, while every dispatch write still fails.
+    if [ "$board_read" = 1 ] && [ -z "$missing_scopes" ] && [ "$scope_prefilter" = 1 ]; then
+      ok "board #$BOARD_NUMBER ($BOARD_OWNER) reachable as '${ACTIVE_ACCOUNT:-<unknown>}' — 'gh project' read probe OK, 'project' scope present, no missing token scopes"
     elif [ "$board_read" = 1 ]; then
-      warn "board READ works but gh reports the active token is MISSING required scopes ($missing_list) — 'gh project item-edit' can still FAIL for read:org"
+      board_dq=""
+      [ "$scope_prefilter" = 0 ] && board_dq="the 'project' WRITE scope is MISSING"
+      if [ -n "$missing_scopes" ]; then
+        [ -n "$board_dq" ] && board_dq="$board_dq; "
+        board_dq="${board_dq}gh reports missing required scopes ($missing_list)"
+      fi
+      warn "board READ works as '${ACTIVE_ACCOUNT:-<unknown>}' but $board_dq — board WRITES ('gh project item-edit') can still FAIL"
       info "board WRITES: fall back to the GraphQL \`$BOARD_GRAPHQL_WRITE\` mutation (it succeeds with the SAME token; graphql projectV2 read probe: $([ "$graphql_read" = 1 ] && echo OK || echo FAILED))"
-      info "or widen the token:  gh auth refresh -s read:org"
+      info "or widen the token:  gh auth refresh -s project -s read:org"
     elif [ "$graphql_read" = 1 ]; then
-      warn "'gh project' CANNOT use board #$BOARD_NUMBER ($BOARD_OWNER)$([ "$scope_prefilter" = 1 ] && printf ' even though the scope pre-filter passed')${missing_list:+ — gh reports missing required scopes ($missing_list)}"
+      warn "'gh project' CANNOT use board #$BOARD_NUMBER ($BOARD_OWNER) as '${ACTIVE_ACCOUNT:-<unknown>}'$([ "$scope_prefilter" = 1 ] && printf ' even though the scope pre-filter passed')${missing_list:+ — gh reports missing required scopes ($missing_list)}"
       info "the GraphQL projectV2 read probe SUCCEEDED with the same token — board WRITES must go through the \`$BOARD_GRAPHQL_WRITE\` mutation, not \`gh project item-edit\`"
       info "or widen the token:  gh auth refresh -s read:org"
     else
-      warn "board #$BOARD_NUMBER ($BOARD_OWNER) UNREACHABLE — BOTH probes failed ('gh project view' and the GraphQL projectV2 read). Path A: a session with no board access must STOP, never label-dispatch"
-      info "check the owner/number (CQLITE_PROJECT_OWNER / CQLITE_PROJECT_NUMBER), then: gh auth refresh -s project -s read:org"
+      warn "board #$BOARD_NUMBER ($BOARD_OWNER) UNREACHABLE as '${ACTIVE_ACCOUNT:-<unknown>}' — BOTH probes failed ('gh project view' and the GraphQL projectV2 read). Path A: a session with no board access must STOP, never label-dispatch"
+      info "check the account (CQLITE_PROJECT_ACCOUNT=$BOARD_ACCOUNT) and owner/number (CQLITE_PROJECT_OWNER / CQLITE_PROJECT_NUMBER), then: gh auth refresh -s project -s read:org"
       info "neither 'gh project item-edit' nor the \`$BOARD_GRAPHQL_WRITE\` GraphQL fallback can work until a probe passes"
     fi
   else
@@ -474,22 +559,32 @@ git_cred_probe() {
   printf '%s\n' "$out" | grep -q '^password=.'
 }
 
-# git_global_helper_configured — 0 iff ANY global credential helper exists, scoped
-# (credential.https://host.helper) or not (credential.helper).
+# Both helper-inspection predicates below use a --get-regexp over the whole
+# `credential.*.helper` key space rather than the bare `credential.helper` key. The
+# helper THIS script writes is host-scoped (credential.https://<host>.helper), as is
+# anything `gh auth setup-git` writes — so a bare-key lookup would miss exactly the
+# configurations the script itself creates, and the two advisories that matter most to
+# an unattended worker would go silent on the very machines they were written for.
+
+# git_global_helper_configured — 0 iff ANY global credential helper exists, scoped or not.
 git_global_helper_configured() {
   git config --global --get-regexp '^credential\..*helper$' >/dev/null 2>&1
 }
 
-# git_env_token_helper_active <host> — 0 iff a configured helper for <host> is an
-# ENV-DEREFERENCING one, at any scope. Used to attach the "$GH_TOKEN must be exported"
-# caveat to an otherwise-green verdict. Both markers must appear in the SAME helper
-# value (grep is line-wise, one value per line): a helper with a token BAKED IN also
-# says x-access-token but has no environment dependency, and claiming otherwise would
-# be its own small misattribution.
+# git_local_helper_configured — 0 iff ANY repo-local credential helper exists.
+git_local_helper_configured() {
+  git -C "$REPO_ROOT" config --local --get-regexp '^credential\..*helper$' >/dev/null 2>&1
+}
+
+# git_env_token_helper_active — 0 iff a configured helper (any scope, any host key) is
+# an ENV-DEREFERENCING one. Used to attach the "$GH_TOKEN must be exported" caveat to
+# an otherwise-green verdict. Both markers must appear in the SAME line (--get-regexp
+# prints one key+value per line): a helper with a token BAKED IN also says
+# x-access-token but has no environment dependency, and claiming otherwise would be
+# its own small misattribution.
 git_env_token_helper_active() {
-  { git config --global --get-all "credential.https://$1.helper" 2>/dev/null
-    git config --global --get-all credential.helper 2>/dev/null
-    git -C "$REPO_ROOT" config --get-all credential.helper 2>/dev/null
+  { git config --global --get-regexp '^credential\..*helper$' 2>/dev/null
+    git -C "$REPO_ROOT" config --get-regexp '^credential\..*helper$' 2>/dev/null
   } | grep -F 'x-access-token' | grep -qF 'GH_TOKEN'
 }
 
@@ -538,12 +633,11 @@ elif [ "$GIT_ORIGIN_KIND" = other ]; then
   info "origin is a '$GIT_ORIGIN_KIND' remote (neither http(s) nor SSH) — no credential helper applies"
 elif git_cred_probe "$GIT_ORIGIN_HOST"; then
   ok "git push credentials resolve for $GIT_ORIGIN_HOST (a helper answers with a non-empty secret)"
-  if git -C "$REPO_ROOT" config --local --get-all credential.helper >/dev/null 2>&1 \
-     && ! git_global_helper_configured; then
+  if git_local_helper_configured && ! git_global_helper_configured; then
     info "note: the helper is configured at REPO-LOCAL scope only — a fresh clone or a"
     info "      new checkout on this box will NOT inherit it. Re-run with --yes to add a global one."
   fi
-  if git_env_token_helper_active "$GIT_ORIGIN_HOST"; then
+  if git_env_token_helper_active; then
     info "note: that helper reads \$GH_TOKEN from the ENVIRONMENT, so it works only in shells"
     info "      where GH_TOKEN is exported — a systemd/cron worker started without it will"
     info "      fail every push. For unattended workers prefer:  gh auth setup-git"
