@@ -27,11 +27,12 @@
 //! campsite file-size threshold (epic #1116).
 
 use arrow::record_batch::RecordBatch;
-use cqlite_core::export::rows_to_record_batch;
+use cqlite_core::export::{estimate_arrow_row_bytes, rows_to_record_batch};
 use cqlite_core::query::{PartitionKeyCache, QueryRow};
 use cqlite_core::storage::write_engine::merge::{StreamingMerger, StreamingStep};
 use cqlite_core::storage::write_engine::{DecoratedKey, KWayMerger};
 
+use crate::batch_bytes::BatchByteCap;
 use crate::cancel::CancelFlag;
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
@@ -117,6 +118,9 @@ impl MergeProducer {
         let mut meter = ScanProgressMeter::new(progress, access_path);
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
         let mut emitted: u64 = 0;
+        // Issue #2825: the SAME dual-boundary accumulator `drive_merge` uses — a
+        // cap wired into only one egress path would leave the other unbounded.
+        let mut byte_cap = BatchByteCap::new(self.max_batch_bytes);
         // Issue #1817: one partition-key decode cache for the whole merge; each
         // partition's rows arrive consecutively, so its key decodes once.
         let mut pk_cache = PartitionKeyCache::default();
@@ -201,10 +205,22 @@ impl MergeProducer {
                     continue;
                 }
             }
+            // Dual row-cap / byte-cap boundary (issue #2825): estimate the row's
+            // Arrow payload width BEFORE it moves into the buffer and cut on the
+            // row that WOULD cross the cap. Test-then-push, so a row wider than
+            // the whole cap still leaves as a one-row batch instead of flushing
+            // an empty buffer.
+            let width = estimate_arrow_row_bytes(&self.columns, &row);
+            if byte_cap.cut_before(width).is_yes() {
+                sink.emit(self.flush(&mut buffer)?)?;
+                byte_cap.reset();
+            }
             buffer.push(row);
             emitted += 1;
+            byte_cap.accumulate(width);
             if buffer.len() >= self.batch_size {
                 sink.emit(self.flush(&mut buffer)?)?;
+                byte_cap.reset();
             }
             // LIMIT reached (counted post-filter): stop the merge early.
             if let Some(cap) = limit {

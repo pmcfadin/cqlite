@@ -222,6 +222,19 @@ required-features = ["work-counters", "write-support"]
 name = "issue_1869_big_clustering_slice_readat"
 required-features = ["work-counters", "write-support"]
 
+# Summary-guided compressed scan chunk-coalescing (issue #2877). It is
+# `#![cfg(all(feature = "write-support", feature = "lz4"))]` and BOTH gates are
+# load-bearing (roborev round 2, blocker C): `write-support` for the
+# `SSTableWriter`/`WriteEngine` mutations that build the fixture, and `lz4` because
+# the fixture is repacked through `create_compressor(CompressionAlgorithm::Lz4)`,
+# which returns `Err("feature 'lz4' required")` without it. Declaring only
+# `write-support` here let `cargo test --no-default-features --features
+# write-support` RUN the target, where it panicked on that Err. The `#![cfg]` and
+# these `required-features` must always agree.
+[[test]]
+name = "issue_2877_scan_chunk_coalescing"
+required-features = ["write-support", "lz4"]
+
 # Statistics.db single-TOC-walk oracle (issue #2148). `#![cfg(feature =
 # "cli-helpers")]` — the `toc_walk_metrics` counter getters/`reset` +
 # `record_toc_walk` live behind `cli-helpers` — so it only compiles+runs with that

@@ -685,3 +685,33 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       Never spend time on Read/Write-based symlink workarounds for this
       again — it is a disk problem, not a task-output-quota problem, and the
       fix is the same `rm -rf <idle-worktree>/target` reclaim as always.
+  23. **2026-07-26 — the gate summary file is PRE-SEEDED, so the documented
+      poll predicate `grep -q 'RESULT:'` false-fires within seconds of gate
+      start.** `agent-gate.sh` writes `RESULT: INCOMPLETE (gate did not
+      finish)` into `AGENT_GATE_SUMMARY_FILE` at launch (so a killed gate
+      leaves an honest verdict rather than an empty file). A `flow-closer`
+      polling for the substring `RESULT:` therefore concludes the gate is
+      done ~seconds in and reads a non-terminal summary — which, if trusted,
+      looks like a mysterious instant FAIL/INCOMPLETE rather than a
+      still-running gate. **Standing lesson:** poll for a TERMINAL verdict
+      only — `grep -qE '^RESULT: (PASS|FAIL)'` — never the bare `RESULT:`
+      substring. Worth fixing in the CLAUDE.md gate-invocation recipe and the
+      `flow-closer` prompt template, since every closer inherits the wrong
+      predicate from the docs. Found by the #2043 closer, which caught it
+      itself and switched predicates rather than reporting a bogus verdict.
+  24. **2026-07-26 — `CQLITE_DATASETS_ROOT` is NOT necessarily
+      `<repo>/test-data/datasets`; on a fetched box the canonical corpus can
+      live entirely outside the checkout (here `/data/datasets`).** The lead
+      briefed a closer with the repo-relative path from CLAUDE.md's worktree
+      guidance; the in-repo tree contains only the committed JSONL byte-parity
+      refs, so the FULL gate fail-fasted in ~20s with
+      `preflight: FAIL (canonical corpus test_basic absent ...)` +
+      `missing-fixtures: FAIL-CLOSED (#2078)`. `fetch-datasets.sh` revealed the
+      real location ("already present in /data/datasets; skipping download").
+      **Standing lesson:** before briefing a gate-running subagent, resolve the
+      corpus location empirically (`find <candidate> -name '*Data.db' | wc -l`,
+      and check `test_basic` specifically) rather than passing the doc path
+      through. And never "fix" this class of failure with
+      `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` — that restores SKIPs and buys a
+      vacuous PASS, which is exactly what #2078's fail-closed exists to
+      prevent.

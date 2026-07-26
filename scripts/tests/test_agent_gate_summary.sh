@@ -779,13 +779,18 @@ fi
 #     to force the sccache accelerator state, AGENT_GATE_TEST_SCCACHE_ERRORS to
 #     force the error sum) so na/ok/warn assert deterministically without sccache
 #     installed and without PATH surgery.
+#     These three asserts match `sccache-health=<v>` as a FIELD (`( |$)` — the same
+#     idiom as assert_mold_token), never end-anchored on the value: further trailing
+#     accelerator tokens (` mold=` #2859, and any future one) must not break them
+#     (issue #2903). The value itself stays exact — `ok( |$)` cannot match `okay`,
+#     and the whole-line grammar is still asserted by assert_accelerators.
 #
 # 9c-i. sccache in use, ZERO error counters -> sccache-health=ok, NO corruption WARN.
 health_err="$tmp/health-ok.stderr"
 AGENT_GATE_SUMMARY_FILE="$tmp/health-ok.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$health_err"
-if grep -qE '^accelerators: .* sccache-health=ok$' "$tmp/health-ok.txt"; then
+if grep -qE '^accelerators: .* sccache-health=ok( |$)' "$tmp/health-ok.txt"; then
   ok "sccache-health: on + 0 errors -> sccache-health=ok"
 else
   bad "sccache-health: expected sccache-health=ok for on + 0 errors"
@@ -801,7 +806,7 @@ fi
 AGENT_GATE_SUMMARY_FILE="$tmp/health-warn.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=3 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/health-warn.stderr"
-if grep -qE '^accelerators: .* sccache-health=warn$' "$tmp/health-warn.txt"; then
+if grep -qE '^accelerators: .* sccache-health=warn( |$)' "$tmp/health-warn.txt"; then
   ok "sccache-health: on + >0 errors -> sccache-health=warn"
 else
   bad "sccache-health: expected sccache-health=warn for on + >0 errors"
@@ -829,7 +834,7 @@ fi
 AGENT_GATE_SUMMARY_FILE="$tmp/health-na.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=off \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/health-na.stderr"
-if grep -qE '^accelerators: .* sccache-health=na$' "$tmp/health-na.txt"; then
+if grep -qE '^accelerators: .* sccache-health=na( |$)' "$tmp/health-na.txt"; then
   ok "sccache-health: sccache not in use -> sccache-health=na"
 else
   bad "sccache-health: expected sccache-health=na when sccache not in use"
@@ -1190,8 +1195,16 @@ fi
 safe="$tmp/2751-parent-safe.txt"
 printf '%s\n' "$SENTINEL" >"$safe"
 rm -f "$tt_repo"/.agent-gate-*summary.txt  # widen: covers lite/delta default siblings too
+# #2874: also scrub AGENT_GATE_PARENT_RUN_ID so this case tests the #2751 env-scrub
+# in ISOLATION. When this self-test itself runs INSIDE the gate (the tooling-tests
+# component), the enclosing gate exports AGENT_GATE_PARENT_RUN_ID; without this scrub
+# the child would be (correctly, per #2874) detected as NESTED and redirect its
+# summary to its own private log dir instead of the repo-root default this case
+# asserts. Neutralizing the #2874 marker keeps the two mechanisms orthogonal — the
+# nested-redirect behavior has its own regression test (test_agent_gate_nested_isolation.sh).
 ( export AGENT_GATE_SUMMARY_FILE="$safe"; cd "$tt_repo" \
-    && env -u AGENT_GATE_SUMMARY_FILE bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
+    && env -u AGENT_GATE_SUMMARY_FILE -u AGENT_GATE_PARENT_RUN_ID \
+       bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
 if grep -q "$SENTINEL" "$safe" 2>/dev/null; then
   ok "2751-scrub-prevents-clobber: env -u AGENT_GATE_SUMMARY_FILE leaves the parent's summary file intact"
 else

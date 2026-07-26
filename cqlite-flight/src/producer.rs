@@ -25,7 +25,9 @@ use std::path::{Path, PathBuf};
 use arrow::datatypes::{Field as ArrowField, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 
-use cqlite_core::export::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
+use cqlite_core::export::{
+    build_arrow_schema, estimate_arrow_row_bytes, rows_to_record_batch, ArrowConvertError,
+};
 use cqlite_core::query::{
     build_row_from_scan_cached, AccessPath, ColumnInfo, PartitionKeyCache, QueryRow,
 };
@@ -36,6 +38,7 @@ use cqlite_core::types::{DataType, RowCells, ScanRow};
 use cqlite_core::RowKey;
 
 use crate::agg::{AggError, AggPlan};
+use crate::batch_bytes::{BatchByteCap, DEFAULT_MAX_BATCH_BYTES};
 use crate::cancel::CancelFlag;
 use crate::filter::ScanSpec;
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
@@ -326,6 +329,15 @@ pub struct MergeProducer {
     pub(crate) schema: TableSchema,
     pub(crate) columns: Vec<ColumnInfo>,
     pub(crate) batch_size: usize,
+    /// Per-batch Arrow PAYLOAD byte ceiling (issue #2825). A batch is finished on
+    /// whichever of `batch_size` or this cap trips FIRST, so a wide-row schema can
+    /// no longer produce an unbounded `batch_size × row_width` batch. Defaults to
+    /// [`DEFAULT_MAX_BATCH_BYTES`] on EVERY construction path — see
+    /// [`MergeProducer::with_max_batch_bytes`] for why this diverges from the
+    /// opt-in `Admission::unconstrained()` precedent. Read by BOTH drive loops
+    /// (`drive_merge` here and `drive_merge_streaming` in `producer_stream`), so
+    /// `pub(crate)`.
+    pub(crate) max_batch_bytes: usize,
     pub(crate) spec: ScanSpec,
     /// Aggregation pushdown plan (issue #841). When `Some`, the producer emits
     /// PARTIAL aggregate rows under [`Self::partial_columns`] instead of full
@@ -420,6 +432,9 @@ impl MergeProducer {
             schema,
             columns,
             batch_size: batch_size.max(1),
+            // Issue #2825: on by DEFAULT on every construction path — an
+            // unbounded egress batch is a memory hazard, not a policy choice.
+            max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
             spec,
             agg: None,
             partial_columns: None,
@@ -427,6 +442,31 @@ impl MergeProducer {
             // Issue #2374/#2789: capture the read-time reconciliation clock once.
             now_secs: Self::reconciliation_now_secs(),
         })
+    }
+
+    /// Override the per-batch Arrow **payload** byte cap (issue #2825).
+    ///
+    /// The cap is already ON at [`DEFAULT_MAX_BATCH_BYTES`] from
+    /// [`Self::new`]/[`Self::with_spec`]; this is the wiring point for the
+    /// `--max-batch-bytes` / `CQLITE_MAX_BATCH_BYTES` operator knob and for tests.
+    ///
+    /// **Deliberate divergence from the `--max-concurrent-scans` precedent.**
+    /// `CqliteFlightService::new` leaves admission `unconstrained()` so a library
+    /// embedder keeps pre-#2420 behaviour; the byte-cap instead defaults ON
+    /// everywhere, because an unbounded batch is a memory-safety hazard rather
+    /// than a policy choice, the 4 MiB default is a no-op on every narrow shape,
+    /// and issue #2821 could not state a bound for the library path otherwise.
+    /// An embedder that genuinely wants the old behaviour passes `usize::MAX`.
+    ///
+    /// Consumes and returns `self` for chaining.
+    pub fn with_max_batch_bytes(mut self, max_batch_bytes: usize) -> Self {
+        self.max_batch_bytes = max_batch_bytes;
+        self
+    }
+
+    /// The per-batch Arrow payload byte cap in force (issue #2825).
+    pub fn max_batch_bytes(&self) -> usize {
+        self.max_batch_bytes
     }
 
     /// Attach the authoritative UDT registry (issue #2349), resolving every
@@ -887,6 +927,10 @@ impl MergeProducer {
         let mut meter = ScanProgressMeter::new(progress, access_path);
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
         let mut emitted: u64 = 0;
+        // Issue #2825: running payload-byte estimate for the rows currently
+        // buffered. Advanced by exactly one row's estimate per push and reset on
+        // every flush — the buffer is never re-measured.
+        let mut byte_cap = BatchByteCap::new(self.max_batch_bytes);
         // Issue #1817: one partition-key decode cache for the whole merge; each
         // partition's rows arrive consecutively, so its key decodes once.
         let mut pk_cache = PartitionKeyCache::default();
@@ -946,10 +990,20 @@ impl MergeProducer {
                         continue;
                     }
                 }
+                // Dual row-cap / byte-cap boundary (issue #2825), test-then-push:
+                // cut on the row that WOULD cross the cap, before it joins the
+                // buffer. `batch_bytes.rs` documents the rule and its one-row floor.
+                let width = estimate_arrow_row_bytes(&self.columns, &row);
+                if byte_cap.cut_before(width).is_yes() {
+                    sink.emit(self.flush_buffer(&mut buffer)?)?;
+                    byte_cap.reset();
+                }
                 buffer.push(row);
                 emitted += 1;
+                byte_cap.accumulate(width);
                 if buffer.len() >= self.batch_size {
                     sink.emit(self.flush_buffer(&mut buffer)?)?;
+                    byte_cap.reset();
                 }
                 // LIMIT reached (counted post-filter): stop the merge early.
                 if let Some(cap) = limit {
@@ -994,7 +1048,19 @@ impl MergeProducer {
             return Ok(Vec::new());
         }
         let columns = self.output_columns();
-        Ok(vec![rows_to_record_batch(columns, &partial_rows)?])
+        // Issue #2825: the aggregate route materializes one PARTIAL row per
+        // GROUP BY group in one go rather than through the incremental buffer,
+        // so the dual row-cap / byte-cap boundary is applied after the fact —
+        // no egress batch escapes the cap on any route.
+        crate::batch_bytes::split_rows_into_batches(
+            columns,
+            &partial_rows,
+            self.batch_size,
+            self.max_batch_bytes,
+        )
+        .into_iter()
+        .map(|group| rows_to_record_batch(columns, group).map_err(ProducerError::from))
+        .collect()
     }
 
     /// Drive the aggregate-merge loop over `merger`, folding surviving rows into
