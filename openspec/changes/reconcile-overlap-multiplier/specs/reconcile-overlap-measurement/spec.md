@@ -40,13 +40,40 @@ compiles out of the release profile that `cargo bench` uses.
 - **THEN** there are no occurrences
 
 ### Requirement: The harness is anchored to the published singleton baseline
-The `disjoint` / k=1 arm SHALL be validated against the published ~2.0 µs/row narrow-disjoint-singleton
-figure (`docs/research/phase2-verify-stage2.md:226-232`) before any multiplier is derived, so that a
-mis-built harness cannot silently produce a wrong slope.
+The `disjoint` control SHALL be validated against the published ~2.0 µs/row
+narrow-disjoint-singleton figure (`docs/research/phase2-verify-stage2.md:226-232`) before any
+multiplier is derived, so that a mis-built harness cannot silently produce a wrong slope.
 
-#### Scenario: An anchor outside the accepted band voids the run
-- **WHEN** the `disjoint` k=1 arm reports a per-row cost that differs from the published singleton baseline by more than the band stated in the record
+**The anchor is the SATURATED `disjoint` control — the mean per-row cost over k ≥ 5.** (Amended
+2026-07-26, owner decision, issue #2043.) The anchor as originally written — `disjoint`/k=1 — is a
+whole-drain WALL time produced by a SINGLE producer stream, which is not the quantity the published
+figure reports; comparing them measured two different things and would have voided a harness that
+the saturated control shows to be sound. The `k = 1` arm SHALL still be reported, and any deviation
+from the anchor SHALL be carried in the record as an **explained deviation** naming its measured
+mechanism — never silently dropped, and never used to weaken the void rule below.
+
+#### Scenario: An out-of-band saturated anchor voids the run
+- **WHEN** the saturated `disjoint` control (the mean per-row cost over k ≥ 5) reports a per-row cost that differs from the published singleton baseline by more than the band stated in the record
 - **THEN** the run is declared void, no multiplier is derived from it, and the record states the discrepancy instead of a verdict
+
+#### Scenario: The k=1 arm's deviation is explained by a measured mechanism, not waved away
+- **WHEN** the `disjoint` k=1 arm's per-row cost differs materially from the saturated anchor
+- **THEN** the record states the ratio and attributes it to a mechanism measured by a control arm of the same instrument — one that holds output rows, cells and collision count fixed and varies only the producer-stream count — rather than declaring the run void or ignoring the difference
+
+### Requirement: Each arm's collision shape is verified before it is timed
+Every arm SHALL assert, before timing, that the reconciled output it will measure actually exhibits
+the collision shape that arm documents, and that each generation's contribution is independent of
+`k`. A fixture whose shape silently degenerates (for example a row tombstone reconciled away at
+flush time, leaving a cell-less row tombstone where live-cells-vs-tombstone was intended) SHALL NOT
+be able to emit numbers.
+
+#### Scenario: A degenerate fixture fails instead of reporting a time
+- **WHEN** an arm's reconciled output does not match the row, live-cell, cell-tombstone, row-tombstone and coexisting-row-deletion census implied by its documented collision mix
+- **THEN** the arm fails loudly and no timing is reported for it
+
+#### Scenario: Composition does not vary with k
+- **WHEN** the same generation index is built for two different `k` values of one mix
+- **THEN** that generation contributes an identical census in both, so `cost(k)/cost(1)` varies cluster depth only
 
 ### Requirement: Measurements are rejected when taken on a loaded machine
 The record SHALL carry the machine specification, the commit SHA, and the 1-minute load average

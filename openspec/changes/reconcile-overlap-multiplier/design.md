@@ -52,8 +52,15 @@ generation with ascending timestamps — precisely the overlap shape — but at 
 The generalization is the k parameter plus a collision-mix selector; no new I/O machinery.
 
 **Matrix:** k ∈ {1, 2, 5, 10, 20} × mix ∈ {`disjoint`, `lww_overwrite`, `tombstone`, `ttl_expiring`,
-`field_blend`}. k=1 anchors the curve against the published ~2.0 µs/row singleton figure — if the
-`disjoint`/k=1 arm does not land near it, the harness is wrong and the run is void (see spec).
+`field_blend`}, plus a two-arm producer-count control (`producer_control/{p1,p2}`: same rows, cells
+and `o = 1`, differing only in producer-stream count).
+
+**Anchor** (amended 2026-07-26, owner decision — see the spec delta): the **saturated `disjoint`
+control**, the mean per-row cost over k ≥ 5, is what is checked against the published ~2.0 µs/row
+singleton figure; out of band ⇒ the harness is wrong and the run is void. `disjoint`/k=1 was the
+original anchor, but it is a whole-drain WALL time from a SINGLE producer stream — not the quantity
+the published figure reports — so it is now reported as an EXPLAINED deviation whose mechanism the
+`producer_control` arms measure.
 
 **Why synthetic and not `CQLITE_DATASETS_ROOT`.** Controlled k is the entire independent variable, and
 the vendored corpus is single-generation — it cannot supply k>1 at all. The bench therefore synthesizes
