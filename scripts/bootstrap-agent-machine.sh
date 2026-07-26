@@ -380,9 +380,10 @@ board_graphql_read() {
 
 hdr "GitHub board access + project scope (Path A, #1886)"
 if have gh; then
-  if gh auth status >/dev/null 2>&1; then
+  # ONE invocation: capture output and status together (gh auth status hits the API).
+  auth_out=$(gh auth status 2>&1); auth_rc=$?
+  if [ "$auth_rc" -eq 0 ]; then
     ok "gh authenticated"
-    auth_out=$(gh auth status 2>&1)
     # Token-boundary match on the scopes line so a scope like 'project:read-only'
     # (or any 'xprojecty' substring) can never false-positive as 'project'.
     scopes_line=$(printf '%s\n' "$auth_out" | grep "Token scopes:" | head -1)
@@ -439,17 +440,54 @@ fi
 #
 # The probe is `git credential fill`: it runs the CONFIGURED helper chain and answers
 # exactly the question that matters ("would git find a credential for this host?")
-# without contacting the network and without pushing anything. Prompts are disabled
-# two ways so it can never hang a headless bootstrap — an askpass pointing at a
-# deliberately nonexistent command, plus GIT_TERMINAL_PROMPT=0. The filled credential
-# goes to /dev/null: it is never printed, logged, or stored.
-GIT_CRED_HELPER='!f(){ test "$1" = get || exit 0; echo username=x-access-token; echo "password=${GH_TOKEN:-${GITHUB_TOKEN:-}}"; };f'
+# without contacting the network and without pushing anything. The filled credential
+# is held only in a local shell variable — never printed, logged, or stored.
+#
+# The helper DECLINES (exit 1) when no token is in the environment rather than
+# emitting an empty password. That matters because git treats a `password=` line as
+# satisfied even when the value is EMPTY, so an empty-emitting helper produces a
+# green probe on a machine where every push fails. This is highly reachable: --yes
+# writes the helper globally and PERSISTENTLY while $GH_TOKEN is a per-shell env var,
+# so bootstrapping in an interactive shell and then running the supervisor from
+# systemd/cron would otherwise yield a green bootstrap and a dead claim protocol —
+# the very "validated the configuration, not the operation" defect this change exists
+# to kill. The probe correspondingly requires a NON-EMPTY password, not exit 0.
+GIT_CRED_HELPER='!f(){ test "$1" = get || exit 0; t="${GH_TOKEN:-${GITHUB_TOKEN:-}}"; [ -n "$t" ] || exit 1; echo username=x-access-token; echo "password=$t"; };f'
 
+# git_cred_probe <host> — 0 iff the configured helper chain yields a non-empty
+# secret for <host>. Three hang guards, because this runs inside the gate's
+# tooling-tests against a developer's REAL helper chain:
+#   - GIT_TERMINAL_PROMPT=0 + a deliberately nonexistent askpass stop GIT's own prompt;
+#   - `timeout` bounds a HELPER SUBPROCESS, which neither variable governs — a Git
+#     Credential Manager device-code/browser flow, a credential-cache waiting on a
+#     dead daemon socket, or a locked osxkeychain would otherwise block indefinitely.
+# The output is captured into a variable rather than piped into grep so that grep -q
+# closing the pipe early can never turn a SIGPIPE into a false "no credential".
 git_cred_probe() {
-  printf 'protocol=https\nhost=%s\n\n' "$1" \
+  local host="$1" out to=""
+  command -v timeout >/dev/null 2>&1 && to="timeout 10"
+  # shellcheck disable=SC2086  # $to is an intentional (possibly empty) command prefix
+  out=$(printf 'protocol=https\nhost=%s\n\n' "$host" \
     | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=cqlite-bootstrap-no-askpass \
       SSH_ASKPASS=cqlite-bootstrap-no-askpass \
-      git -C "$REPO_ROOT" credential fill >/dev/null 2>&1
+      $to git -C "$REPO_ROOT" credential fill 2>/dev/null) || true
+  printf '%s\n' "$out" | grep -q '^password=.'
+}
+
+# git_global_helper_configured — 0 iff ANY global credential helper exists, scoped
+# (credential.https://host.helper) or not (credential.helper).
+git_global_helper_configured() {
+  git config --global --get-regexp '^credential\..*helper$' >/dev/null 2>&1
+}
+
+# git_env_token_helper_active <host> — 0 iff the helper answering for <host> is OUR
+# $GH_TOKEN-dereferencing one, at any scope. Used to attach the env-var dependency
+# caveat to an otherwise-green verdict.
+git_env_token_helper_active() {
+  { git config --global --get-all "credential.https://$1.helper" 2>/dev/null
+    git config --global --get-all credential.helper 2>/dev/null
+    git -C "$REPO_ROOT" config --get-all credential.helper 2>/dev/null
+  } | grep -qF 'x-access-token'
 }
 
 # git_origin_host <url> — host of an http(s) origin ("" for any other form). The
@@ -494,13 +532,18 @@ elif [ "$GIT_ORIGIN_KIND" = ssh ]; then
   ok "origin is an SSH remote — git push authenticates via SSH keys, not a credential helper (no helper needed)"
   info "verify separately if pushes fail:  ssh -T git@github.com"
 elif [ "$GIT_ORIGIN_KIND" = other ]; then
-  info "origin ($GIT_ORIGIN_URL) is neither http(s) nor SSH — no credential helper applies"
+  info "origin is a '$GIT_ORIGIN_KIND' remote (neither http(s) nor SSH) — no credential helper applies"
 elif git_cred_probe "$GIT_ORIGIN_HOST"; then
-  ok "git push credentials resolve for $GIT_ORIGIN_HOST (a credential helper answers)"
+  ok "git push credentials resolve for $GIT_ORIGIN_HOST (a helper answers with a non-empty secret)"
   if git -C "$REPO_ROOT" config --local --get-all credential.helper >/dev/null 2>&1 \
-     && ! git config --global --get-all credential.helper >/dev/null 2>&1; then
+     && ! git_global_helper_configured; then
     info "note: the helper is configured at REPO-LOCAL scope only — a fresh clone or a"
     info "      new checkout on this box will NOT inherit it. Re-run with --yes to add a global one."
+  fi
+  if git_env_token_helper_active "$GIT_ORIGIN_HOST"; then
+    info "note: that helper reads \$GH_TOKEN from the ENVIRONMENT, so it works only in shells"
+    info "      where GH_TOKEN is exported — a systemd/cron worker started without it will"
+    info "      fail every push. For unattended workers prefer:  gh auth setup-git"
   fi
 else
   warn "git push has NO credentials for $GIT_ORIGIN_HOST — an authenticated 'gh' does NOT authenticate git"
@@ -531,14 +574,26 @@ else
         # asks — the token itself never lands on disk, so rotating it needs no
         # reconfiguration and a leaked ~/.gitconfig leaks no credential. (Decision 2
         # of the worker-env-preflight change: explicitly NOT ~/.git-credentials.)
-        info "configuring a global credential.helper that dereferences \$GH_TOKEN at call time (the token is NOT written to disk)"
-        # Idempotence: never stack a second copy of our helper on a re-run. Reaching
-        # here with one already present means the token itself is the problem.
-        if git config --global --get-all credential.helper 2>/dev/null | grep -qF 'x-access-token'; then
-          warn "a \$GH_TOKEN-style helper is ALREADY in the global git config yet the probe still fails — check that GH_TOKEN is valid/unexpired (not re-adding it)"
-        elif git config --global --add credential.helper "$GIT_CRED_HELPER" 2>/dev/null \
+        #
+        # HOST-SCOPED, never a bare [credential] helper. An unscoped helper offers the
+        # GitHub token to EVERY https host git talks to — a submodule, a cargo/pip git
+        # dependency, a mistyped clone, or any host that answers 401 would receive it.
+        # `gh auth setup-git` (the preferred path this falls back FROM) scopes per host,
+        # so an unscoped fallback would make --yes strictly less safe than its own
+        # preferred branch. "A leaked ~/.gitconfig leaks no credential" is true of the
+        # env-var indirection but says nothing about who git hands the token TO.
+        cred_key="credential.https://$GIT_ORIGIN_HOST.helper"
+        info "configuring $cred_key to dereference \$GH_TOKEN at call time (scoped to $GIT_ORIGIN_HOST; the token is NOT written to disk)"
+        # Idempotence: never stack a second copy on a re-run. The check is the EXACT
+        # key we write — a copy scoped to some other host is unrelated and must not
+        # suppress this one.
+        if git config --global --get-all "$cred_key" 2>/dev/null | grep -qF 'x-access-token'; then
+          warn "a \$GH_TOKEN-style helper is ALREADY configured for $GIT_ORIGIN_HOST yet the probe still fails — check that GH_TOKEN is set, valid and unexpired (not re-adding it)"
+        elif git config --global --add "$cred_key" "$GIT_CRED_HELPER" 2>/dev/null \
            && git_cred_probe "$GIT_ORIGIN_HOST"; then
-          ok "git credentials configured via a \$GH_TOKEN-dereferencing helper (no secret written to disk)"
+          ok "git credentials configured for $GIT_ORIGIN_HOST via a \$GH_TOKEN-dereferencing helper (no secret written to disk)"
+          info "this helper reads \$GH_TOKEN from the ENVIRONMENT — an unattended worker (systemd/cron)"
+          info "started without GH_TOKEN exported will still fail every push; prefer 'gh auth setup-git' there"
         else
           warn "could not configure a working git credential helper — fix manually: gh auth setup-git"
         fi

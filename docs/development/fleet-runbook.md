@@ -45,10 +45,14 @@ loudly rather than reporting a healthy machine. Search for the message you actua
   `scripts/flow/claim-heartbeat.sh` push with plain `git` on 10+ call sites, so the claim protocol
   — the cross-machine lock — simply does not work while `gh auth status` reports a happy machine.
   Fix: `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes`, which configures a
-  helper that dereferences `$GH_TOKEN` **at call time** (the token itself is never written to disk,
-  so rotating it needs no reconfiguration). Related: an unauthenticated claim push now reports
+  helper **scoped to the origin host** that dereferences `$GH_TOKEN` **at call time** (the token
+  itself is never written to disk, so rotating it needs no reconfiguration). Because that helper
+  reads the environment, it only works in shells where `GH_TOKEN` is exported — for an unattended
+  systemd/cron worker prefer `gh auth setup-git`. Related: an unauthenticated push now reports
   `CLAIM: ERROR reason=auth … (NOT retryable …)` — it used to say `reason=infra … (transient —
-  retry)` and send workers into a retry loop on a fault that can never self-clear.
+  retry)` and send workers into a retry loop on a fault that can never self-clear. That
+  classification covers `claim.sh` (`claim`/`adopt`/`release`/`smoke`) only; `claim-heartbeat.sh`
+  surfaces git's raw error on its own pushes and does not classify them.
 - **A `gh project` failure citing a missing `read:org` scope on a token whose scopes DO include
   `project`** — a scope match is evidence about a token, not about the operation. `gh project
   item-edit` needs `read:org`; the `updateProjectV2ItemFieldValue` GraphQL mutation does **not**

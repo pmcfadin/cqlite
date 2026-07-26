@@ -168,7 +168,7 @@ mk_hermetic_bin() {
   local dir="$1" t p
   mkdir -p "$dir"
   for t in bash dirname mktemp grep cp cat sed awk mkdir rm ln mv touch chmod \
-           head tail tr sort cut wc stat env git find xargs basename date sleep expr; do
+           head tail tr sort cut wc stat env git find xargs basename date sleep expr timeout; do
     p=$(type -P "$t" 2>/dev/null) || continue
     [ -n "$p" ] && ln -sf "$p" "$dir/$t" 2>/dev/null || true
   done
@@ -517,6 +517,18 @@ else
   bad "cred: --yes did not configure the \$GH_TOKEN fallback helper"
   [ -f "$gc7b" ] && { echo "--- gitconfig ---"; cat "$gc7b"; echo "-----------------"; }
 fi
+# The helper MUST be host-scoped. A bare [credential] helper offers the GitHub token
+# to every https host git talks to (submodules, cargo/pip git deps, a mistyped clone,
+# anything answering 401) — and `gh auth setup-git`, the path this falls back FROM,
+# scopes per host, so an unscoped fallback is strictly less safe than the preferred one.
+if [ -f "$gc7b" ] \
+   && git config --file "$gc7b" --get-all 'credential.https://github.com.helper' 2>/dev/null | grep -qF 'x-access-token' \
+   && ! git config --file "$gc7b" --get-all credential.helper 2>/dev/null | grep -qF 'x-access-token'; then
+  ok "cred: fallback helper is HOST-SCOPED (credential.https://github.com.helper), not a bare credential.helper"
+else
+  bad "cred: fallback helper is host-UNSCOPED — the token would be offered to every https host"
+  [ -f "$gc7b" ] && { echo "--- gitconfig ---"; cat "$gc7b"; echo "-----------------"; }
+fi
 # The whole point of Decision 2: no file written by the bootstrap holds the secret.
 leak7b=$(grep -rlF "$FAKE_TOKEN" "$sb7b" "$gc7b" "$repo7b" 2>/dev/null | head -5)
 if [ -z "$leak7b" ]; then
@@ -565,6 +577,71 @@ if printf '%s' "$out7d" | grep -qi "SSH" \
 else
   bad "cred: SSH origin case wrote a helper or did not report the SSH path"
   [ -f "$gc7d" ] && cat "$gc7d"
+fi
+
+# 7f. FUNCTIONAL confinement of the config 7b actually produced: github.com gets a
+#     credential, an unrelated host gets NOTHING. This is the assertion that would
+#     have caught a bare [credential] helper regardless of how it was written.
+cred_fill_host() {
+  # cred_fill_host <config> <host> -> prints the resolved password line, if any
+  printf 'protocol=https\nhost=%s\n\n' "$2" \
+    | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=nonexistent-askpass SSH_ASKPASS=nonexistent-askpass \
+      GIT_CONFIG_GLOBAL="$1" GIT_CONFIG_NOSYSTEM=1 GH_TOKEN="$FAKE_TOKEN" \
+      git -C "$tmp" credential fill 2>/dev/null | grep '^password=.' || true
+}
+if [ -n "$(cred_fill_host "$gc7b" github.com)" ] \
+   && [ -z "$(cred_fill_host "$gc7b" evil.example)" ] \
+   && [ -z "$(cred_fill_host "$gc7b" gitlab.com)" ]; then
+  ok "cred: helper answers for github.com and NOT for evil.example / gitlab.com"
+else
+  bad "cred: helper leaks the token to non-origin hosts (or fails for the origin host)"
+fi
+
+# 7g. Helper installed but GH_TOKEN absent from the environment — the reachable
+#     production case, since --yes writes the helper GLOBALLY and PERSISTENTLY while
+#     GH_TOKEN is per-shell (bootstrap interactively, then run the worker from
+#     systemd/cron). git treats an empty `password=` as satisfied, so an
+#     exit-status-only probe would report ok while every push fails.
+sb7g=$(mktemp -d "$tmp/cred7g.XXXXXX"); stub7g="$tmp/stub7g"
+mk_hermetic_bin "$stub7g"
+repo7g="$tmp/repo7g"; mk_fake_repo "$repo7g" "https://github.com/pmcfadin/cqlite.git"
+gc7g="$sb7g/gitconfig"
+cp "$gc7b" "$gc7g" 2>/dev/null || :   # the exact helper config --yes produced in 7b
+out7g=$(PATH="$stub7g" HOME="$sb7g" CARGO_HOME="$sb7g/.cargo" GIT_CONFIG_GLOBAL="$gc7g" \
+  GH_TOKEN="" GITHUB_TOKEN="" bash "$repo7g/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+if printf '%s' "$out7g" | grep -q "\[warn\].*git push has NO credentials" \
+   && ! printf '%s' "$out7g" | grep -Eq '\[ok\].*git push credentials resolve'; then
+  ok "cred: helper present but GH_TOKEN unset -> WARN (an empty password is not a credential)"
+else
+  bad "cred: empty-token case reported ok — probe accepted an empty password"
+  printf '%s\n' "$out7g" | grep -i -A2 "git push"
+fi
+
+# 7h. A HANGING credential helper must not hang the bootstrap. Neither
+#     GIT_TERMINAL_PROMPT nor GIT_ASKPASS governs a helper SUBPROCESS — real cases are
+#     a Git Credential Manager device-code/browser flow, credential-cache waiting on a
+#     dead daemon socket, and a locked osxkeychain. This matters beyond the operator:
+#     section 3 above runs the real bootstrap against the real REPO_ROOT, so
+#     `tooling-tests` probes a developer's ACTUAL helper chain and a hang there would
+#     stall the gate of record. This is a deadlock/liveness guard, not a latency
+#     budget: the helper sleeps 120s, the probe's own bound is 10s, and the outer
+#     ceiling is 60s — ~6x slack, so host load can never flip it.
+if command -v timeout >/dev/null 2>&1; then
+  sb7h=$(mktemp -d "$tmp/cred7h.XXXXXX"); stub7h="$tmp/stub7h"
+  mk_hermetic_bin "$stub7h"
+  repo7h="$tmp/repo7h"; mk_fake_repo "$repo7h" "https://github.com/pmcfadin/cqlite.git"
+  gc7h="$sb7h/gitconfig"
+  git config --file "$gc7h" --add 'credential.https://github.com.helper' '!f(){ sleep 120; };f'
+  rc7h=0
+  timeout 60 env PATH="$stub7h" HOME="$sb7h" CARGO_HOME="$sb7h/.cargo" GIT_CONFIG_GLOBAL="$gc7h" \
+    GH_TOKEN="" bash "$repo7h/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7h=$?
+  if [ "$rc7h" -ne 124 ]; then
+    ok "cred: a hanging credential helper is bounded — bootstrap still completes (rc=$rc7h)"
+  else
+    bad "cred: bootstrap HUNG on a blocking credential helper (killed at the outer ceiling)"
+  fi
+else
+  echo "skip - cred: hanging-helper guard needs 'timeout' (absent on this host)"
 fi
 
 # 7e. Re-running --yes must not STACK a second copy of the helper. Bootstrap is
@@ -671,12 +748,17 @@ else
 fi
 
 # 8c. Fully healthy token: probe succeeds, gh reports no missing scopes -> an ok.
+#     The assertion names PROBE-DERIVED text on purpose: a looser `[ok].*board` also
+#     matches the old scope-string verdict ("[ok] 'project' scope present — board
+#     dispatch works"), so it would pass against the very bug this section exists to
+#     catch. In a change about false OKs, a test that passes against the bug is the
+#     one thing that must not ship.
 run_board_case healthy "'project', 'read:org', 'repo', 'workflow'" "" 0 0
-if printf '%s' "$BOARD_OUT" | grep -Eq '\[ok\].*board'; then
-  ok "board: healthy token + successful probe reports ok"
+if printf '%s' "$BOARD_OUT" | grep -Eq "\[ok\].*board #1 \(pmcfadin\) reachable.*read probe OK"; then
+  ok "board: healthy token reports ok with a PROBE-derived verdict"
 else
-  bad "board: healthy token did not produce an ok verdict"
-  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board"
+  bad "board: healthy token did not produce a probe-derived ok verdict"
+  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board #"
 fi
 
 # 8d. Unreachable board (both probes fail) -> a loud warn, never a scope-based pass.

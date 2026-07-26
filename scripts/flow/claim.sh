@@ -132,6 +132,12 @@ emit_auth() {
 # CREDENTIAL/AUTHORIZATION failure rather than a network/outage one. Deliberately
 # conservative: anything unrecognized stays an infra (retryable) verdict, so the
 # #2665 contract can only ever be narrowed by a signature we positively identify.
+# Every pattern below is unambiguously credential-shaped. Two candidates were
+# deliberately REJECTED because they are emitted by non-credential faults too, and
+# misclassifying a transient as permanent is the one direction #2665 says never to
+# move: `403 Forbidden` (a proxy or edge outage returns it; GitHub's rate-limit text
+# is `HTTP 403`, so nothing real is lost) and `remote: Repository not found` (seen
+# during brief degradations and in the window right after a token rotation).
 git_stderr_is_auth() {
   case "$1" in
     *"could not read Username"*      | *"could not read Password"*        | \
@@ -139,8 +145,7 @@ git_stderr_is_auth() {
     *"terminal prompts disabled"*    | *"Invalid username or token"*      | \
     *"Invalid username or password"* | *"Permission denied (publickey)"*  | \
     *"Permission to "*" denied"*     | *"Write access to repository not granted"* | \
-    *"remote: Repository not found"* | *"Support for password authentication was removed"* | \
-    *"403 Forbidden"*                | *"401 Unauthorized"*)
+    *"Support for password authentication was removed"* | *"401 Unauthorized"*)
       return 0 ;;
   esac
   return 1
@@ -439,7 +444,9 @@ cmd_adopt() {
   # read can diagnose. On a public repo the confirm read succeeds and would report
   # ADOPT-LOST — blaming the lease for what is a broken machine. A lease mismatch
   # says "stale info", never an auth signature, so this cannot swallow a real CAS loss.
-  if [ -n "$adopt_err" ] && git_stderr_is_auth "$adopt_err"; then
+  # No `[ -n "$adopt_err" ]` pre-guard: it was redundant (an empty string matches no
+  # signature) and it read as if empty stderr were a meaningful state to skip on.
+  if git_stderr_is_auth "$adopt_err"; then
     emit_auth "issue=$issue detail=adopt-cas-push-unauthenticated ref=refs/claims/issue-$issue"
     return 1
   fi

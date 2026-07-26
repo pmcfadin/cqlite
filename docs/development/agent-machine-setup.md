@@ -23,8 +23,9 @@ without it, it prints the exact command for each gap. It verifies, in order:
    a `project` scope-string match (#2942 — see the deltas below); the scope check
    survives only as a cheap pre-filter. Missing scope → `gh auth refresh -s project`.
    Point it elsewhere with `CQLITE_PROJECT_OWNER` / `CQLITE_PROJECT_NUMBER`.
-3b. **git push credentials** (#2942) — a *separate* credential path from `gh`.
-   Under `--yes` it configures one; the token value is never written to disk.
+   It also checks **git push credentials** (#2942) — a *separate* credential path from
+   `gh`. Under `--yes` it configures one, **scoped to the origin host**, and the token
+   value is never written to disk.
 4. **roborev** — installed, and this machine's *configured* agent resolves.
 5. **Datasets** + `CQLITE_DATASETS_ROOT` guidance.
 6. **Health check** — runs the gate's fmt smoke and prints the authoritative
@@ -38,15 +39,22 @@ The bootstrap now checks the first two and fails loudly; the third is a hand-typ
 
 | You see | Real cause | Working form |
 |---|---|---|
-| `fatal: could not read Username for 'https://github.com'` | `gh` is authenticated but **git is not** — they are separate credential paths. `scripts/flow/claim.sh` + `claim-heartbeat.sh` push with plain git on 10+ call sites, so the claim protocol itself does not work. | `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes` (configures a helper that dereferences `$GH_TOKEN` at call time). |
+| `fatal: could not read Username for 'https://github.com'` | `gh` is authenticated but **git is not** — they are separate credential paths. `scripts/flow/claim.sh` + `claim-heartbeat.sh` push with plain git on 10+ call sites, so the claim protocol itself does not work. | `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes` (configures an origin-host-scoped helper that dereferences `$GH_TOKEN` at call time). |
 | `gh project …` fails for a missing **`read:org`** scope on a token whose scopes DO include `project` | A scope match is evidence about a token, not about the operation. `gh project item-edit` needs `read:org`; the equivalent GraphQL mutation does not. | Widen the token (`gh auth refresh -s read:org`), **or** do board writes through the `updateProjectV2ItemFieldValue` GraphQL mutation — it succeeds with the same token. |
 | `stale info` from a **bare** `git push --force-with-lease`, even when local and remote refs demonstrably match | The bare form leases against a remote-tracking ref your checkout may never have fetched. | Always the explicit CAS form: `git push --force-with-lease=<ref>:<sha>` (what the flow scripts already use). |
 
-**Claim verdicts encode this too (#2942).** An unauthenticated claim push now reports
-`CLAIM: ERROR reason=auth … (NOT retryable …)` and names the fix. It used to report
-`reason=infra … (transient — retry)`, which sent workers into a retry loop on a machine
-fault that can never self-clear. `reason=infra (transient — retry)` still means what it
-says: a real blip, retry it.
+**Claim verdicts encode this too (#2942).** An unauthenticated push now reports
+`CLAIM: ERROR reason=auth … (NOT retryable …)` and names the fix, for `claim.sh`'s
+`claim`, `adopt`, `release` and `smoke`. It used to report `reason=infra … (transient —
+retry)`, which sent workers into a retry loop on a machine fault that can never
+self-clear. `reason=infra (transient — retry)` still means what it says: a real blip,
+retry it. **Scope:** this classification covers `claim.sh` only —
+`claim-heartbeat.sh` surfaces git's raw error on its pushes and does not classify.
+
+**The `--yes` credential helper reads `$GH_TOKEN` from the environment.** That is
+deliberate (no secret on disk), but it means the helper only works in shells where
+`GH_TOKEN` is exported — a systemd/cron worker started without it will still fail every
+push. For unattended workers prefer `gh auth setup-git`.
 
 ## Accelerators: what the SUMMARY line means
 

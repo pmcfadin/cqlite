@@ -214,11 +214,15 @@ helper fails every claim with `fatal: could not read Username for 'https://githu
 protocol does not work at all while `gh auth status` reports a healthy machine. `claim.sh` classifies that
 signature as **`CLAIM: ERROR reason=auth … (NOT retryable)`** naming the fix, *not* the old
 `reason=infra … (transient — retry)` that sent workers into a retry loop on a fault which can never
-self-clear; `reason=infra (transient — retry)` continues to mean a genuine, retryable blip. Fix a box with
-`gh auth setup-git` or `bash scripts/bootstrap-agent-machine.sh --yes`, whose preflight checks git push
-credentials (configuring a helper that dereferences `$GH_TOKEN` at call time — never writing the token to
-disk) and probes **board access functionally** instead of trusting the `project` scope string. Full delta
-list with the identifying messages: `docs/development/fleet-runbook.md`.
+self-clear; `reason=infra (transient — retry)` continues to mean a genuine, retryable blip. That
+classification covers `claim.sh` (`claim`/`adopt`/`release`/`smoke`) only — `claim-heartbeat.sh` surfaces
+git's raw error on its own pushes. Fix a box with `gh auth setup-git` or
+`bash scripts/bootstrap-agent-machine.sh --yes`, whose preflight checks git push credentials (configuring
+a helper **scoped to the origin host** that dereferences `$GH_TOKEN` at call time — never writing the
+token to disk; because it reads the environment it works only where `GH_TOKEN` is exported, so prefer
+`gh auth setup-git` for systemd/cron workers) and probes **board access functionally** instead of trusting
+the `project` scope string. Full delta list with the identifying messages:
+`docs/development/fleet-runbook.md`.
 
 Another machine that finds an existing claim can `git fetch` the branch to **resume** that work instead of
 colliding; a **reaped** claim is adopted via compare-and-swap — `claim.sh adopt <N> --expect <old-sha>`,

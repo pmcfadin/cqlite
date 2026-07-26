@@ -592,6 +592,60 @@ else
 $outNet"
 fi
 
+# (c) `403 Forbidden` must NOT be treated as auth. A proxy or edge outage returns it,
+# and turning a transient into a permanent stop is the one direction the #2665
+# contract says never to move. (GitHub's rate-limit text is `HTTP 403`.)
+F403="$T/shim-git-403"
+mk_push_fail_shim "$F403" "fatal: unable to access 'https://github.com/x.git/': The requested URL returned error: 403 Forbidden"
+rc=0; out403=$( cd "$A" && PATH="$F403:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 24 ) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out403" | grep -q 'reason=infra' \
+   && ! printf '%s\n' "$out403" | grep -q 'reason=auth'; then
+  ok "(c) a 403 stays a RETRYABLE transient (an edge/proxy outage is not a credential fault)"
+else
+  bad "(c) expected reason=infra for a 403; got rc=$rc
+$out403"
+fi
+
+# (d) adopt: the CAS push is unauthenticated. The confirm read succeeds on a public
+# repo, so without the auth check this reports ADOPT-LOST — blaming the lease for a
+# broken machine.
+runA claim 25 >/dev/null
+oldsha25=$(ref_sha 25)
+rc=0; outAdoptAuth=$( cd "$B" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineB bash "$CLAIM" adopt 25 --expect "$oldsha25" ) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$outAdoptAuth" | grep -q 'reason=auth' \
+   && ! printf '%s\n' "$outAdoptAuth" | grep -q 'ADOPT-LOST'; then
+  ok "(d) adopt under an auth failure → reason=auth, never ADOPT-LOST"
+else
+  bad "(d) expected adopt reason=auth exit 1 with no ADOPT-LOST; got rc=$rc
+$outAdoptAuth"
+fi
+
+# (e) release --force (the reaper path): an unauthenticated delete is not transient.
+runA claim 26 >/dev/null
+rc=0; outRelAuth=$( cd "$A" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 26 --force ) || rc=$?
+ref26=$(ref_sha 26)
+if [ "$rc" -eq 1 ] && printf '%s\n' "$outRelAuth" | grep -q 'reason=auth' \
+   && ! printf '%s\n' "$outRelAuth" | grep -q 'transient' \
+   && [ -n "$ref26" ]; then
+  ok "(e) release --force under an auth failure → reason=auth (ref intact, no false RELEASED)"
+else
+  bad "(e) expected release reason=auth exit 1 with the ref intact; got rc=$rc ref=$ref26
+$outRelAuth"
+fi
+
+# (f) smoke: the preflight's whole job is diagnosing the remote, so blaming the
+# refs/claims/* namespace for a credential fault sends the operator hunting the
+# wrong thing on a brand-new box.
+rc=0; outSmokeAuth=$( cd "$A" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$outSmokeAuth" | grep -q 'SMOKE-FAIL' \
+   && printf '%s\n' "$outSmokeAuth" | grep -q 'reason=auth' \
+   && ! printf '%s\n' "$outSmokeAuth" | grep -q 'push-rejected'; then
+  ok "(f) smoke under an auth failure → reason=auth, not 'does origin permit refs/claims/*?'"
+else
+  bad "(f) expected SMOKE-FAIL reason=auth; got rc=$rc
+$outSmokeAuth"
+fi
+
 # ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
