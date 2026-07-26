@@ -75,7 +75,9 @@
 //! ≥6 s window), with the mean kept as reported context. Every arm must pass
 //! `CpuWatch::end_arm`, and [`overlap::bench_matrix`] asserts that the number of
 //! GATED arms equals the number of arms run — so a skipped or unreadable sample can
-//! never leave an ungated Criterion number in the record.
+//! never leave an ungated Criterion number in the record. `SamplingMode::Flat` is
+//! pinned so that every PUBLISHED sample is a uniformly long window the foreign-CPU
+//! figure can actually resolve at `USER_HZ` granularity (see the call site).
 //!
 //! `CQLITE_BENCH_ALLOW_LOAD=1` opts out of every tier, visibly, for a
 //! smoke/`--test` run whose numbers are discarded.
@@ -130,7 +132,7 @@ mod overlap {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use criterion::{black_box, BenchmarkId, Criterion, Throughput};
+    use criterion::{black_box, BenchmarkId, Criterion, SamplingMode, Throughput};
 
     use cqlite_core::platform::Platform;
     use cqlite_core::schema::TableSchema;
@@ -714,7 +716,30 @@ mod overlap {
         group
             .sample_size(20)
             .warm_up_time(Duration::from_secs(1))
-            .measurement_time(Duration::from_secs(5));
+            .measurement_time(Duration::from_secs(5))
+            // FLAT sampling, pinned rather than left to `Auto` (issue #2043). Two
+            // reasons, both about this instrument specifically:
+            //
+            // 1. `Auto` picks LINEAR for the cheap arms and FLAT for the expensive
+            //    ones (its rule is "would the linear plan exceed 2× the target
+            //    time?"), so the matrix would sample its k = 1 and its k = 20 arms
+            //    by DIFFERENT schemes — and linear's first samples run `d`, `2d`,
+            //    `3d`… iterations, i.e. a few tens of milliseconds. Flat gives every
+            //    arm the same scheme and every sample the same iteration count.
+            // 2. Those short linear samples are also too short for the validity
+            //    guard's foreign-CPU figure to RESOLVE its ceiling at USER_HZ
+            //    granularity (`validity_guard::MIN_GATEABLE_TOTAL_TICKS`): a 54 ms
+            //    window advances ~86 `/proc/stat` ticks on 16 cores, where ONE stray
+            //    tick reads as 0.19 cores. Under Flat every PUBLISHED sample is
+            //    `measurement_time / sample_size` (250 ms, ~400 ticks) or longer, so
+            //    every published sample is gated on a resolvable window and only
+            //    Criterion's discarded warm-up probes are unresolvable.
+            //
+            // Criterion's own caveat for Flat — that it cannot fit the per-iteration
+            // slope — does not apply to what this record publishes: with iterations
+            // of 20–240 ms this bench is squarely in the "very long-running" regime
+            // Flat exists for, and the reported figure is the per-sample median.
+            .sampling_mode(SamplingMode::Flat);
 
         // `--list` enumeration must be FREE. This target's fixture synthesis, probe
         // drain and per-generation drains run OUTSIDE `bench_function` (they produce
