@@ -31,18 +31,28 @@ Upstream anchors (Cassandra 5.0.8):
 - `org.apache.cassandra.db.SerializationHeader` (presence/length handling)
 
 Rules of thumb:
-- Length prefixes that *are* present — `text`/`blob` cell values and **every** non-frozen collection
-  cell **path** — are **unsigned** VInt (`ValueAccessor.writeWithVIntLength` → `writeUnsignedVInt32`,
-  `ValueAccessor.java:170-174`; paths via `ByteBufferUtil.writeWithVIntLength`,
-  `CollectionType.java:361-366`).
-- **A non-frozen collection cell VALUE is not uniformly prefixed** (`AbstractType.writeValue`,
-  `AbstractType.java:535-552`): non-frozen `set<T>` has an **empty** value
-  (`SetType.java:105-108`); a **fixed-width** value type is written **raw with no prefix**
-  (`AbstractType.java:538-543`); only a **variable-width** value type gets the unsigned-VInt prefix
-  (`:550-552`).
+- Length prefixes that *are* present are **unsigned** VInt (`ValueAccessor.writeWithVIntLength` →
+  `writeUnsignedVInt32`, `ValueAccessor.java:171-175`; paths via `ByteBufferUtil.writeWithVIntLength`,
+  `CollectionType.java:361-366`). That covers `text`/`blob` simple cell values and **both** the path and
+  the value of **every** non-frozen collection cell.
+- **A non-frozen collection cell VALUE is ALWAYS unsigned-VInt-length-prefixed — even for a fixed-width
+  element type** (`list<int>`, `map<text,bigint>`). `Cell.Serializer.serialize` writes it as
+  `header.getType(column).writeValue(...)` (`Cell.java:303-304`), and `header.getType(column)` is the
+  **column's** type — the collection type, not the element type (`SerializationHeader.java:160-163`,
+  `:250-257`). `CollectionType`/`ListType`/`MapType`/`SetType` never override `valueLengthIfFixed()`, so
+  they are `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`) and `writeValue` always takes the
+  `writeWithVIntLength` branch (`:550-552`).
+- **Where the fixed-width no-prefix rule DOES apply: SIMPLE (non-collection) cells.** Only scalar types
+  override `valueLengthIfFixed()` (e.g. `Int32Type` → `4`, `Int32Type.java:156-159`), so only a simple
+  cell can take the raw-bytes branch (`AbstractType.java:538-543`).
+- **One real collection exception, flag-driven not width-driven**: a non-frozen `set<T>` cell has **no
+  value bytes at all** — the element is the path, `SetType.valueComparator()` is `EmptyType.instance`
+  (`SetType.java:106-109`), so `HAS_EMPTY_VALUE_MASK` (`0x04`) is set and no length/value is written or
+  read (`Cell.java:271-277`, `:303-304`, `:310`).
 - **Exception — fixed 4-byte BE i32, not VInt**: tuple/UDT field lengths and *frozen* collection
   counts/element lengths (`TupleType.buildValue`, `CollectionSerializer.writeCollectionSize`).
-- Every VInt in `Data.db` is unsigned **except** the three components of a `duration` value. Scoped to
+- Every VInt in `Data.db` is unsigned **except** the three components of a serialized `DurationType`
+  payload — wherever that payload occurs, including nested in a collection/tuple/UDT. Scoped to
   `Data.db`: `Index.db`'s promoted-index width delta is a signed VInt (`IndexInfo.java:96,111-112`).
 
 ## ZigZag (Signed VInt) — Where It Actually Applies
@@ -70,17 +80,27 @@ encodes the result as an unsigned VInt. In Cassandra it is reached through
 | 1000 | 2000 | `0x87 0xD0` |
 | -1000 | 1999 | `0x87 0xCF` |
 
-**Where ZigZag actually appears in a `Data.db` row/cell VALUE** — exactly one place:
-- The `duration` cell value: three consecutive **signed** VInts (months, days, nanos).
+**Where ZigZag actually appears in `Data.db`** — inside a serialized `DurationType` payload, and
+nowhere else:
+- A `duration` payload is three consecutive **signed** VInts (months, days, nanos).
   `DurationSerializer.serialize` calls `output.writeVInt(...)` three times
-  (`DurationSerializer.java:43-51`). ZigZag is genuinely required here — a negative CQL duration
+  (`DurationSerializer.java:34,49-51`). ZigZag is genuinely required here — a negative CQL duration
   makes every non-zero component negative (`Duration.java:101-110`). See Appendix A.
+- **This is not limited to a top-level `duration` cell.** Wherever a `duration` is *nested*, the same
+  three signed VInts sit inside the enclosing value's bytes while the cell's own type is something
+  else: `frozen<list<duration>>`, `map<text, frozen<tuple<duration,int>>>`, a UDT field declared
+  `duration`. Cassandra models exactly this recursion — `DurationType.referencesDuration()` returns
+  `true` (`DurationType.java:96-99`) and `TupleType.referencesDuration()` recurses over `allTypes()`
+  (`TupleType.java:125-128`), and `UserType extends TupleType` inherits it (`UserType.java:52`).
+  A decoder must therefore reach the signed-VInt path by *type descent*, not by checking whether the
+  column type is `duration`.
 
-**Where ZigZag does NOT appear in `Data.db`**: every other field. Structural lengths, counts, and the
-row/cell temporal deltas are all unsigned (next section).
+**Where ZigZag does NOT appear in `Data.db`**: every **structural** field. Length prefixes, counts, and
+the row/cell temporal deltas are all unsigned (next section), no matter how deeply a `duration` is
+nested inside the value they frame.
 
-**Scope this claim to `Data.db` values — signed VInt is not unique to `duration` across the whole
-component set.** The promoted index inside `Index.db` also uses a signed VInt: `IndexInfo.Serializer`
+**Signed VInt is not unique to `duration` across the whole component set.** The promoted index inside
+`Index.db` also uses a signed VInt, and mixes both variants in one struct: `IndexInfo.Serializer`
 writes the block offset unsigned but the **width delta signed** —
 `out.writeUnsignedVInt(info.offset)` then `out.writeVInt(info.width - WIDTH_BASE)` with
 `WIDTH_BASE = 64 * 1024` (`IndexInfo.java:96,111-112`), read back as `in.readVInt() + WIDTH_BASE`
@@ -89,8 +109,11 @@ ZigZag also appears in the internode messaging serialization path, which is not 
 
 **Implementation references** (`cqlite-core/src/storage/serialization/vint.rs::encode_signed()` =
 ZigZag + unsigned VInt):
-- `Data.db` `duration` value — three `encode_signed` calls in
-  `cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs:232-234`.
+- `Data.db` `duration` payload — three `encode_signed` calls in
+  `cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs:232-234`. Nesting is handled by
+  recursion, not by a top-level type check: `serialize_value_into` recurses into map keys/values, frozen
+  collection elements, and `Value::Frozen` inners (`encoding.rs:303-315`), so a nested `duration` reaches
+  the same three signed VInts.
 - `Index.db` promoted-index width delta — `encode_signed(width_delta, buf)` in
   `cqlite-core/src/storage/sstable/writer/index_writer.rs:667`; the read side zigzag-decodes to invert
   it (`cqlite-core/src/storage/sstable/promoted_index_reader.rs`).
@@ -457,12 +480,21 @@ DecoratedKey {
 
 ## Key Takeaways
 - Expect VInt before variable-sized payloads; decode, then slice the value.
-- **VInt in `Data.db` is UNSIGNED**: structural lengths/counts *and* the timestamp/TTL/localDeletionTime
-  deltas all use `writeUnsignedVInt`/`writeUnsignedVInt32` (`SerializationHeader.java:165-184`).
-- **ZigZag (signed VInt) appears in exactly one `Data.db` row/cell VALUE**: the three components of a
-  `duration` value (`DurationSerializer.java:49-51`). No other `Data.db` field uses it — but the claim
-  is scoped to `Data.db`: the `Index.db` promoted index also writes a **signed** VInt for its
-  per-block width delta, `writeVInt(info.width - WIDTH_BASE)` (`IndexInfo.java:96,111-112`).
+- **Every STRUCTURAL VInt in `Data.db` is UNSIGNED**: lengths/counts *and* the
+  timestamp/TTL/localDeletionTime deltas all use `writeUnsignedVInt`/`writeUnsignedVInt32`
+  (`SerializationHeader.java:165-184`).
+- **ZigZag (signed VInt) in `Data.db` appears only inside a serialized `DurationType` payload** — its
+  three components (`DurationSerializer.java:49-51`) — **wherever that payload occurs**, including
+  nested inside a collection, tuple, or UDT (`DurationType.referencesDuration()`,
+  `DurationType.java:96-99`; `TupleType.referencesDuration()` recurses over `allTypes()`,
+  `TupleType.java:125-128`). No other `Data.db` field uses it. Scoped to `Data.db`: the `Index.db`
+  promoted index also writes a **signed** VInt for its per-block width delta,
+  `writeVInt(info.width - WIDTH_BASE)` (`IndexInfo.java:96,111-112`).
+- **A non-frozen collection cell length-prefixes BOTH path and value with an unsigned VInt**, fixed-width
+  element types included (`Cell.java:303-304` → the *column's* collection type, which is
+  `VARIABLE_LENGTH`). The `valueLengthIfFixed()` raw-bytes shortcut is a **simple-cell** rule
+  (`AbstractType.java:538-543`); a non-frozen `set<T>`'s missing value is `HAS_EMPTY_VALUE_MASK`, a flag,
+  not a width.
 - Signedness is invisible in the bytes (`0x05` = `5` unsigned, `-3` ZigZag) — take it from the
   field's serializer, never guess from the data.
 - **Exception — not VInt at all**: tuple/UDT field lengths and frozen-collection counts/element
@@ -477,7 +509,7 @@ DecoratedKey {
 - Cassandra 5.0.8: `SerializationHeader` — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java`
 - Cassandra 5.0.8: `rows` — `https://github.com/apache/cassandra/tree/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows`
 - Cassandra 5.0.8: `VIntCoding` (ZigZag ⇄ unsigned VInt) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/vint/VIntCoding.java`
-- Cassandra 5.0.8: `DurationSerializer` (the one signed-VInt `Data.db` value) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/serializers/DurationSerializer.java`
+- Cassandra 5.0.8: `DurationSerializer` (the only signed-VInt payload in `Data.db`, nesting included) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/serializers/DurationSerializer.java`
 - Cassandra 5.0.8: `IndexInfo` (signed-VInt promoted-index width delta in `Index.db`) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/IndexInfo.java`
 - Cassandra 5.0.8: `CollectionSerializer` (frozen collection fixed-width framing) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/serializers/CollectionSerializer.java`
 - Cassandra 5.0.8: `TupleType` (tuple/UDT `i32`-BE field framing) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/TupleType.java`

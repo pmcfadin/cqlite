@@ -60,19 +60,26 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
   i32**, not VInt: `CollectionSerializer.pack` writes the count via `writeCollectionSize`
   (`putInt`, `CollectionSerializer.java:67-70`) and each element via `writeValue`
   (`putInt` + bytes, `:82-92`); `-1` = NULL element. See Chapter 5, "Frozen Collection Serialization".
-- **Non-frozen collection cells** frame the **path** and the **value** by *different* rules — each
-  element is its own cell, so the framing differs from the frozen form:
-  - The cell **path** is **always** unsigned-VInt-length-prefixed:
-    `CollectionType.CollectionPathSerializer.serialize` → `ByteBufferUtil.writeWithVIntLength`
-    (`CollectionType.java:361-366`), which is `writeUnsignedVInt32(remaining)` + bytes
-    (`ByteBufferUtil.java:356-360`).
-  - The cell **value** is **not** uniform — `AbstractType.writeValue` (`AbstractType.java:535-552`)
-    branches on `valueLengthIfFixed()`: for non-frozen `set<T>` the value is **empty** (the element is
-    the path; `SetType.valueComparator()` → `EmptyType.instance`, `SetType.java:105-108`);
-    **fixed-width** value types (e.g. `list<int>`, `map<text,int>` values) are written **raw with no
-    length prefix** (`accessor.write(value, out)`, `AbstractType.java:538-543`); **variable-width**
-    value types (e.g. `list<text>`) get an unsigned-VInt length + bytes
-    (`accessor.writeWithVIntLength(value, out)`, `AbstractType.java:550-552`).
+- **Non-frozen collection cells** length-prefix **both** the cell **path** and the cell **value** with
+  an unsigned VInt — each element is its own cell, so the framing differs from the frozen form:
+  - The cell **path**: `CollectionType.CollectionPathSerializer.serialize` →
+    `ByteBufferUtil.writeWithVIntLength` (`CollectionType.java:361-366`), which is
+    `writeUnsignedVInt32(remaining)` + bytes (`ByteBufferUtil.java:356-360`).
+  - The cell **value**, *including when the element/value type is fixed-width* (`list<int>`,
+    `map<text,bigint>`): `Cell.Serializer.serialize` calls
+    `header.getType(column).writeValue(...)` (`Cell.java:303-304`), and `header.getType(column)` is the
+    **column's** type — the collection type, never the element type
+    (`SerializationHeader.java:160-163`, map built from `column.type` at `:250-257`).
+    `CollectionType`/`ListType`/`MapType`/`SetType` do not override `valueLengthIfFixed()`, so they
+    inherit `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`) and `writeValue` always takes
+    the `else` branch → `accessor.writeWithVIntLength(...)` (`:550-552`).
+  - **Exception**: a non-frozen `set<T>` cell carries **no value bytes**. The element is the path and
+    `SetType.valueComparator()` is `EmptyType.instance` (`SetType.java:106-109`), so the cell sets
+    `HAS_EMPTY_VALUE_MASK` (`0x04`) and `writeValue` is never reached (`Cell.java:271-277`, `:303-304`;
+    read side `:310`). Flag-driven, not width-driven.
+  - The `valueLengthIfFixed() >= 0` raw-bytes branch (`AbstractType.java:538-543`) fires only for
+    **simple (non-collection)** cells, whose scalar type overrides it (e.g. `Int32Type` → `4`,
+    `Int32Type.java:156-159`).
 
   See Chapter 5, "Non-Frozen Collection Serialization".
 - **Tuple and UDT field lengths** use **4-byte BE signed int** (not VInt), with no field count on
@@ -82,13 +89,18 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
 
 ## Key Takeaways
 - Primitive numeric and time types are fixed-width big-endian values.
-- Cell values for strings and blobs are length-prefixed with **unsigned** VInt (never ZigZag).
+- Cell values for strings and blobs are length-prefixed with **unsigned** VInt (never ZigZag). So is
+  **every** non-frozen collection cell value, fixed-width element types included — the fixed-width
+  no-prefix rule is a **simple-cell** rule.
 - Frozen collection counts and element lengths, and tuple/UDT field lengths, are fixed 4-byte BE
   signed int (-1 = null), **not** VInt.
-- `duration` is the only `Data.db` row/cell **value** made of signed (ZigZag) VInts; every length
-  prefix, timestamp, TTL, and deletion delta in `Data.db` is unsigned. Signed VInt is not unique to
-  `duration` across the whole component set — `Index.db`'s promoted index writes a signed width delta
-  (`IndexInfo.java:96,111-112`). See Appendix B.
+- Signed (ZigZag) VInts in `Data.db` occur only inside a serialized `DurationType` payload — its
+  months/days/nanos — **wherever that payload appears**, including nested inside a collection, tuple, or
+  UDT (`frozen<list<duration>>`, a `duration` UDT field). Cassandra tracks this recursion via
+  `referencesDuration()` (`DurationType.java:96-99`; `TupleType.java:125-128` recurses over
+  `allTypes()`). Every structural VInt in `Data.db` — length prefix, count, timestamp/TTL/deletion delta
+  — is unsigned. Signed VInt is not unique to `duration` across the whole component set either:
+  `Index.db`'s promoted index writes a signed width delta (`IndexInfo.java:96,111-112`). See Appendix B.
 - Fixed-element vectors (e.g., `vector<float,n>`) are raw concatenated elements with no length prefix.
 - Serialization is schema-driven; `SerializationHeader` and the `db.marshal` types define exact encodings.
 
