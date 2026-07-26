@@ -107,6 +107,12 @@ pub enum ProducerError {
     /// closed rather than silently exceeding the published ceiling.
     #[error(transparent)]
     EgressCredit(#[from] crate::egress_credit::EgressCreditInvariant),
+    /// The per-stream egress credit pool could not charge a reservation (issue
+    /// #2821). Fails the stream closed rather than proceeding with an UNCHARGED
+    /// reservation, which would put a batch on the egress path outside the
+    /// published memory bound.
+    #[error(transparent)]
+    EgressCreditUnavailable(#[from] crate::egress_credit::EgressCreditUnavailable),
 }
 
 /// Source of the SSTable `Data.db` files to merge for one table.

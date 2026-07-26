@@ -16,8 +16,8 @@
 //!
 //! ```text
 //! one maximum batch = worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, nodes, 0)
-//!                   = 2 * 4 MiB + 1 KiB * nodes  =  8 MiB + ~n KiB
-//! contract          = max(8 MiB, 8 MiB + ~n KiB) =  8 MiB + ~n KiB  <<  16 MiB (B4)
+//!                   = 2 * 4 MiB + 2 KiB * nodes  =  8 MiB + ~2n KiB
+//! contract          = max(12 MiB, 8 MiB + ~2n KiB) = 12 MiB  <=  16 MiB (B4)
 //! ```
 //!
 //! It is a `max`, not a sum: under reserve-before-materialize every resident
@@ -64,31 +64,70 @@
 //! uncharged batch. Reserving before materializing eliminated that term rather
 //! than documenting it.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-/// Default per-stream in-flight egress ceiling: **8 MiB of CAPACITY bytes**.
+pub(crate) use crate::egress_observation::EgressObservation;
+
+/// Default per-stream in-flight egress ceiling: **12 MiB of CAPACITY bytes**.
 ///
-/// Derived against the merged #2825 per-batch PAYLOAD cap, in capacity currency:
-/// one maximum batch is
-/// `worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, nodes, 0)
-/// = BATCH_BYTES_CAPACITY_FACTOR × 4 MiB + 1 KiB × nodes ≈ 8 MiB`. Because the
-/// guaranteed bound is `max(ceiling, one maximum batch)`, EVERY ceiling ≤ 8 MiB
-/// yields the identical worst case — so a smaller default buys nothing in B4
-/// terms while making the deadlock-avoidance clamp the normal case (a worst-case
-/// full batch would always take the whole pool and run the wide-row path
-/// lock-step with the batch-count channel dead behind it). 8 MiB is therefore the
-/// largest value that does not widen the worst case, and it admits ~2 typical
-/// batches (measured capacity/payload factor 1.0–1.8) or ~42 narrow-shape ones.
+/// # Why not 8 MiB — admission is gated by the RESERVATION, not the realized size
 ///
-/// `max(8 MiB, 8 MiB + ~n KiB) ≤ 16 MiB` — inside the ratified **B4 ≤16Mi
+/// A reservation is taken BEFORE the batch exists, so it is the full published
+/// worst case for the buffered payload — and it is that figure, not the
+/// trued-down realized one, that must fit in the pool or the deadlock-avoidance
+/// clamp ([`EgressCredit::reserve`]) engages. At the merged defaults over a small
+/// flat three-node schema:
+///
+/// ```text
+/// one worst-case reservation
+///   = worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 3, 0)
+///   = 2 × 4 MiB + 2 KiB × 3 = 8,394,752 B   -> permits_for(..) = 8198
+/// an 8 MiB pool                             ->  8 MiB / 1 KiB  = 8192 permits
+/// 8198 > 8192  =>  EVERY byte-cap-cut batch would clamp to the WHOLE pool
+/// ```
+///
+/// A clamped reservation holds the entire pool, so the producer cannot begin
+/// materializing batch N+1 until batch N has completely left the stream: strict
+/// lock-step with the 4-deep batch-count channel as dead weight — the exact
+/// outcome design D4a rejected 6 MiB to avoid, on exactly the wide-row workload
+/// this ceiling exists for. The 8 MiB default missed it by precisely the
+/// `BATCH_BYTES_PER_COLUMN_SLACK × n_array_nodes` term (6 KiB at three nodes).
+///
+/// # What 12 MiB actually buys — stated honestly
+///
+/// ```text
+/// 12 MiB = 12,582,912 B -> 12288 permits  >=  8198  =>  no clamp
+/// contract = max(12 MiB, 8,394,752 B) = 12 MiB  <=  16 MiB (B4), 4 MiB spare
+/// ```
+///
+/// * **Guaranteed**: a single worst-case reservation fits without clamping for
+///   every schema of at most **2048 Arrow array nodes** — `permits_for` of a
+///   full-cap reservation is `8192 + 2 × n_array_nodes`, so the clamp engages
+///   from `n_array_nodes ≥ 2049` (a very wide or deeply nested projection; a
+///   `map<text,text>` column is four nodes). At that width the documented clamp
+///   behaviour takes over: the batch acquires the whole pool, is delivered, and
+///   is the only thing resident — correct, just lock-step.
+/// * **Workload-dependent, NOT guaranteed**: after the true-down to the realized
+///   `get_array_memory_size()` (measured capacity/payload factor 1.0–1.8 ⇒
+///   4–7.2 MiB for a full 4 MiB payload batch), the residual pool can often admit
+///   a second reservation, so the stream typically overlaps two batches. Whether
+///   it does depends on the shape's realized factor: at 1.8× one resident batch
+///   leaves 4.8 MiB, under the 8.2 MiB a second full reservation asks for, and
+///   the producer parks until the first batch drains. No claim is made that two
+///   full-size batches are always in flight.
+/// * Narrow shapes are unaffected either way — the 4-deep batch-count channel
+///   binds first there (a 192 KiB narrow batch is ~64 to the pool).
+///
+/// `max(12 MiB, 8 MiB + ~n KiB) ≤ 16 MiB` — inside the ratified **B4 ≤16Mi
 /// per-query working set at concurrency 1**, asserted from the imported
-/// constants by `egress_credit_tests::composition_stays_inside_b4`.
-pub const DEFAULT_MAX_INFLIGHT_EGRESS_BYTES: usize = 8 * 1024 * 1024;
+/// constants by `egress_credit_tests::composition_stays_inside_b4`, with the
+/// no-clamp property pinned by
+/// `egress_credit_tests::a_worst_case_default_reservation_does_not_clamp`.
+pub const DEFAULT_MAX_INFLIGHT_EGRESS_BYTES: usize = 12 * 1024 * 1024;
 
 /// Environment variable backing `--max-inflight-egress-bytes`.
 pub const ENV_MAX_INFLIGHT_EGRESS_BYTES: &str = "CQLITE_MAX_INFLIGHT_EGRESS_BYTES";
@@ -96,7 +135,7 @@ pub const ENV_MAX_INFLIGHT_EGRESS_BYTES: &str = "CQLITE_MAX_INFLIGHT_EGRESS_BYTE
 /// Accounting quantum for one semaphore permit, in capacity bytes.
 ///
 /// A `tokio::sync::Semaphore` counts permits, so the ceiling is expressed as
-/// `ceil(ceiling / QUANTUM)` permits — 8 MiB is 8192 permits, comfortably inside
+/// `ceil(ceiling / QUANTUM)` permits — 12 MiB is 12288 permits, comfortably inside
 /// `Semaphore::MAX_PERMITS`. Every conversion rounds **UP**, so the quantisation
 /// is always conservative (a stream is charged at least what it holds).
 pub const EGRESS_CREDIT_QUANTUM_BYTES: usize = 1024;
@@ -164,7 +203,36 @@ pub struct EgressCreditInvariant {
     pub actual: usize,
 }
 
+/// The credit pool could not charge a reservation, so no batch may be built
+/// under it.
+///
+/// A `tokio::sync::Semaphore` acquire fails ONLY on a closed semaphore, and this
+/// pool is never closed today (it lives exactly as long as its stream). It is
+/// surfaced as a terminal error anyway, in the same shape as
+/// [`EgressCreditInvariant`]: degrading to an UNCHARGED reservation would let a
+/// batch reach the egress path with zero credit — silently voiding the memory
+/// bound this module publishes — which is the opposite of the fail-closed posture
+/// every other branch here takes. Failing the stream is recoverable and visible;
+/// an unbounded stream is neither.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "egress credit pool unavailable: a reservation of {requested} B ({permits} permits) could not \
+     be charged because the per-stream credit pool is closed — the stream fails closed rather than \
+     putting an uncharged batch on the egress path (issue #2821)"
+)]
+pub struct EgressCreditUnavailable {
+    /// Capacity bytes the reservation asked for.
+    pub requested: usize,
+    /// Permits the (possibly clamped) acquire attempted to take.
+    pub permits: u32,
+}
+
 /// Permits needed for `bytes`, rounding UP (conservative) and saturating.
+///
+/// The `u32` narrowing saturates rather than wrapping: on a 64-bit target a
+/// `usize::MAX` reservation would need more permits than `u32` can hold, and
+/// `u32::MAX` is far above `Semaphore::MAX_PERMITS`, so such a request is clamped
+/// to the pool total by the caller — never silently reduced by a wrap.
 fn permits_for(bytes: usize) -> u32 {
     let permits = bytes.div_ceil(EGRESS_CREDIT_QUANTUM_BYTES);
     u32::try_from(permits).unwrap_or(u32::MAX)
@@ -173,127 +241,6 @@ fn permits_for(bytes: usize) -> u32 {
 /// Bytes accounted for `permits` permits, saturating.
 fn bytes_for(permits: u32) -> u64 {
     u64::from(permits).saturating_mul(EGRESS_CREDIT_QUANTUM_BYTES as u64)
-}
-
-// ---------------------------------------------------------------------------
-// Observation seam
-// ---------------------------------------------------------------------------
-
-/// Feature-independent observation of the credit governor, maintained with cheap
-/// `Relaxed` atomics exactly like `StreamProbe::produced_batches`.
-///
-/// Test-only in intent (no new OTel metric — issue #2821 non-goal), but always
-/// compiled so production simply carries a throwaway [`Default`] instance.
-#[derive(Clone, Default)]
-pub(crate) struct EgressObservation {
-    inner: Arc<EgressCounters>,
-}
-
-#[derive(Default)]
-struct EgressCounters {
-    /// Permit bytes currently held (reservations AND charged batches).
-    charged: AtomicU64,
-    peak_charged: AtomicU64,
-    /// REALIZED `get_array_memory_size()` of every materialized batch still on
-    /// the egress path. This is the quantity the published bound is about.
-    resident: AtomicU64,
-    peak_resident: AtomicU64,
-    /// Reservations granted (a batch may be materialized only under one).
-    reservations_granted: AtomicU64,
-    /// Batches materialized under a reservation.
-    batches_materialized: AtomicU64,
-    /// Largest single-batch realized capacity observed on this stream.
-    largest_batch: AtomicU64,
-}
-
-impl EgressObservation {
-    fn charge(&self, bytes: u64) {
-        let now = self.inner.charged.fetch_add(bytes, Ordering::Relaxed) + bytes;
-        self.inner.peak_charged.fetch_max(now, Ordering::Relaxed);
-    }
-
-    fn uncharge(&self, bytes: u64) {
-        // Saturating by construction: `fetch_update` cannot wrap below zero.
-        let _ = self
-            .inner
-            .charged
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(bytes))
-            });
-    }
-
-    fn record_reservation(&self) {
-        self.inner
-            .reservations_granted
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn record_materialized(&self, actual: u64) {
-        self.inner
-            .batches_materialized
-            .fetch_add(1, Ordering::Relaxed);
-        self.inner
-            .largest_batch
-            .fetch_max(actual, Ordering::Relaxed);
-        let now = self.inner.resident.fetch_add(actual, Ordering::Relaxed) + actual;
-        self.inner.peak_resident.fetch_max(now, Ordering::Relaxed);
-    }
-
-    fn release_resident(&self, actual: u64) {
-        let _ = self
-            .inner
-            .resident
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(actual))
-            });
-    }
-}
-
-/// Read side of the observation seam. Like `StreamProbe`'s counters these are
-/// maintained unconditionally (the writes are cheap `Relaxed` atomics) but only
-/// READ by tests — production carries a throwaway instance and never inspects it,
-/// so the readers are `allow(dead_code)` outside `cfg(test)` rather than
-/// `cfg(test)`-gated (which would make the seam itself conditional).
-#[cfg_attr(not(test), allow(dead_code))]
-impl EgressObservation {
-    /// Permit bytes currently held by live reservations/permits.
-    pub(crate) fn charged_bytes(&self) -> u64 {
-        self.inner.charged.load(Ordering::Relaxed)
-    }
-
-    /// High-water mark of [`Self::charged_bytes`].
-    pub(crate) fn peak_charged_bytes(&self) -> u64 {
-        self.inner.peak_charged.load(Ordering::Relaxed)
-    }
-
-    /// Realized capacity bytes of materialized batches currently on the egress
-    /// path (producer → channel → the stream's deferred slot).
-    pub(crate) fn resident_capacity_bytes(&self) -> u64 {
-        self.inner.resident.load(Ordering::Relaxed)
-    }
-
-    /// High-water mark of [`Self::resident_capacity_bytes`] — the quantity the
-    /// `max(ceiling, one maximum batch)` contract bounds.
-    pub(crate) fn peak_resident_capacity_bytes(&self) -> u64 {
-        self.inner.peak_resident.load(Ordering::Relaxed)
-    }
-
-    /// Reservations granted over the stream's lifetime.
-    pub(crate) fn reservations_granted(&self) -> u64 {
-        self.inner.reservations_granted.load(Ordering::Relaxed)
-    }
-
-    /// Batches materialized over the stream's lifetime. Can never exceed
-    /// [`Self::reservations_granted`] — that is the reserve-before-materialize
-    /// property, observable rather than merely asserted in prose.
-    pub(crate) fn batches_materialized(&self) -> u64 {
-        self.inner.batches_materialized.load(Ordering::Relaxed)
-    }
-
-    /// Largest single-batch realized capacity observed on this stream.
-    pub(crate) fn largest_batch_capacity_bytes(&self) -> u64 {
-        self.inner.largest_batch.load(Ordering::Relaxed)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -338,29 +285,41 @@ impl EgressCredit {
     /// Reserve credit for a batch that will report at most `capacity_bytes` of
     /// `get_array_memory_size()`, BEFORE it is materialized.
     ///
-    /// **Deadlock-avoidance clamp.** A single `RecordBatch` may be larger than
-    /// the entire configured ceiling (at the merged defaults a worst-case full
-    /// batch is ~8 MiB of capacity, and an operator may configure a far smaller
-    /// ceiling). Acquiring `n` permits from a pool of `N < n` would block
-    /// forever, wedging the stream and hanging the client. The reservation is
-    /// therefore clamped to the pool total: when everything else has drained, an
-    /// oversized batch acquires the WHOLE pool and proceeds. Progress is
-    /// guaranteed for a batch of any size — which is precisely why the honest
-    /// contract is `max(ceiling, one maximum batch)` and not `ceiling`.
+    /// **Deadlock-avoidance clamp.** A single reservation may be larger than the
+    /// entire configured ceiling — an operator may configure a small ceiling, a
+    /// row may be wider than the whole per-batch cap, or a projection may carry
+    /// enough array nodes that the slack term alone pushes past the pool (from
+    /// `n_array_nodes ≥ 4097` at the shipped defaults; see
+    /// [`DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`]). Acquiring `n` permits from a pool
+    /// of `N < n` would block forever, wedging the stream and hanging the client.
+    /// The reservation is therefore clamped to the pool total: when everything
+    /// else has drained, an oversized batch acquires the WHOLE pool and proceeds.
+    /// Progress is guaranteed for a batch of any size — which is precisely why
+    /// the honest contract is `max(ceiling, one maximum batch)` and not
+    /// `ceiling`.
+    ///
+    /// A clamp is not free: the clamped batch holds the entire pool, so the
+    /// stream runs strictly lock-step while it is resident. Every clamp is
+    /// counted ([`EgressObservation::reservations_clamped`]) precisely so
+    /// "the default ceiling makes the clamp routine" is a test-detectable
+    /// regression rather than an invisible throughput cliff.
     ///
     /// Parking here is safe on the caller's `spawn_blocking` thread; the caller
     /// races this future against the shared cancel flag (see
     /// `ChannelSink::reserve`) so a client disconnect wakes a producer parked on
     /// credit exactly as it wakes one parked on a full channel.
-    pub(crate) async fn reserve(&self, capacity_bytes: usize) -> EgressReservation {
+    pub(crate) async fn reserve(
+        &self,
+        capacity_bytes: usize,
+    ) -> Result<EgressReservation, EgressCreditUnavailable> {
         let want = permits_for(capacity_bytes);
         let take = want.min(self.total_permits);
         let permit = match &self.sem {
             Some(sem) => {
-                // `acquire_many_owned` errors ONLY on a closed semaphore, and this
-                // pool is never closed (it lives as long as the stream). Degrade
-                // to an inert permit rather than `unwrap` in library code.
-                Arc::clone(sem).acquire_many_owned(take).await.ok()
+                if take < want {
+                    self.obs.record_clamped();
+                }
+                Some(self.acquire(sem, take, capacity_bytes).await?)
             }
             None => None,
         };
@@ -370,14 +329,57 @@ impl EgressCredit {
         };
         self.obs.charge(charged);
         self.obs.record_reservation();
-        EgressReservation {
+        Ok(EgressReservation {
             permit: EgressPermit {
                 permit,
                 charged_bytes: charged,
                 resident_bytes: 0,
-                obs: self.obs.clone(),
+                obs: Some(self.obs.clone()),
             },
             reserved_bytes: capacity_bytes,
+        })
+    }
+
+    /// Take `take` permits, recording the PARK when they are not immediately
+    /// available and failing closed when the pool is closed.
+    ///
+    /// The `try_acquire_many_owned` probe first is not an optimisation: it is what
+    /// makes "the producer is now pressed against the ceiling" an observable event
+    /// rather than an inference from elapsed time. There is at most one reserver
+    /// per stream, so `try_acquire`'s ability to barge ahead of a queued waiter
+    /// cannot starve anyone here.
+    async fn acquire(
+        &self,
+        sem: &Arc<Semaphore>,
+        take: u32,
+        capacity_bytes: usize,
+    ) -> Result<OwnedSemaphorePermit, EgressCreditUnavailable> {
+        let closed = || EgressCreditUnavailable {
+            requested: capacity_bytes,
+            permits: take,
+        };
+        match Arc::clone(sem).try_acquire_many_owned(take) {
+            Ok(permit) => Ok(permit),
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                self.obs.record_parked();
+                Arc::clone(sem)
+                    .acquire_many_owned(take)
+                    .await
+                    .map_err(|_| closed())
+            }
+            // Fail CLOSED (not an uncharged reservation): see
+            // [`EgressCreditUnavailable`].
+            Err(tokio::sync::TryAcquireError::Closed) => Err(closed()),
+        }
+    }
+
+    /// Close the pool, so every subsequent reservation fails closed. Test-only:
+    /// production never closes a live stream's pool, which is exactly why the
+    /// closed branch needs an explicit test rather than an assumption.
+    #[cfg(test)]
+    pub(crate) fn close_for_test(&self) {
+        if let Some(sem) = &self.sem {
+            sem.close();
         }
     }
 }
@@ -405,12 +407,7 @@ impl EgressReservation {
     /// never fail closed — so the collect path stays byte-identical.
     pub(crate) fn inert() -> Self {
         Self {
-            permit: EgressPermit {
-                permit: None,
-                charged_bytes: 0,
-                resident_bytes: 0,
-                obs: EgressObservation::default(),
-            },
+            permit: EgressPermit::inert(),
             reserved_bytes: usize::MAX,
         }
     }
@@ -466,23 +463,42 @@ pub(crate) struct EgressPermit {
     permit: Option<OwnedSemaphorePermit>,
     charged_bytes: u64,
     resident_bytes: u64,
-    obs: EgressObservation,
+    /// The observation seam this permit reports through, or `None` for an INERT
+    /// permit — one issued outside the governed set (the collect sink and the
+    /// aggregate route). `None`, not a throwaway [`EgressObservation`]: an inert
+    /// permit must account for nothing on BOTH inert routes, and an observation
+    /// nobody can read is indistinguishable from a real one that was silently
+    /// dropped. It also keeps the inert path allocation-free (no per-batch
+    /// `Arc<EgressCounters>`).
+    ///
+    /// Note this is NOT the same as `permit: None`: an explicitly UNBOUNDED
+    /// budget (`EgressBudget::unbounded`) holds no semaphore permit but is still
+    /// observed, so residency stays visible where it is merely un-governed.
+    obs: Option<EgressObservation>,
 }
 
 impl EgressPermit {
-    /// A permit charging nothing — the aggregate route and the collect sink,
-    /// which are outside the governed set by construction.
+    /// A permit charging nothing and observing nothing — the aggregate route and
+    /// the collect sink, which are outside the governed set by construction.
     pub(crate) fn inert() -> Self {
         Self {
             permit: None,
             charged_bytes: 0,
             resident_bytes: 0,
-            obs: EgressObservation::default(),
+            obs: None,
         }
     }
 
     /// Release the difference between the reservation and the realized capacity.
     fn true_up_down(&mut self, actual: usize) {
+        let Some(obs) = self.obs.as_ref() else {
+            // Inert: no credit to return, and nothing to record. Leaving
+            // `resident_bytes` at zero keeps the two inert routes
+            // (`EgressReservation::inert().materialize(..)` and
+            // `CreditedBatch::uncredited`, which never materializes at all)
+            // byte-identical in what they account for.
+            return;
+        };
         if let Some(permit) = self.permit.as_mut() {
             let held = u32::try_from(permit.num_permits()).unwrap_or(u32::MAX);
             // Never below what the batch actually occupies, never above what is
@@ -494,12 +510,12 @@ impl EgressPermit {
                     drop(excess);
                     let released = bytes_for(release);
                     self.charged_bytes = self.charged_bytes.saturating_sub(released);
-                    self.obs.uncharge(released);
+                    obs.uncharge(released);
                 }
             }
         }
         self.resident_bytes = actual as u64;
-        self.obs.record_materialized(self.resident_bytes);
+        obs.record_materialized(self.resident_bytes);
     }
 
     /// Capacity bytes this permit currently charges against the pool.
@@ -507,12 +523,21 @@ impl EgressPermit {
     pub(crate) fn charged_bytes(&self) -> u64 {
         self.charged_bytes
     }
+
+    /// Realized capacity bytes this permit accounts as resident. Zero for an
+    /// inert permit on BOTH inert routes — see [`Self::obs`].
+    #[cfg(test)]
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        self.resident_bytes
+    }
 }
 
 impl Drop for EgressPermit {
     fn drop(&mut self) {
-        self.obs.uncharge(self.charged_bytes);
-        self.obs.release_resident(self.resident_bytes);
+        if let Some(obs) = self.obs.as_ref() {
+            obs.uncharge(self.charged_bytes);
+            obs.release_resident(self.resident_bytes);
+        }
         // The inner `OwnedSemaphorePermit`'s own `Drop` returns the permits to
         // the pool; nothing else is needed for release.
     }

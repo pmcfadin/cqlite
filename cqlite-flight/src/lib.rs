@@ -22,6 +22,10 @@ pub mod egress_credit;
 // The single owning `reserve -> build -> true-up -> emit` batch-boundary helper
 // shared by both producer drive loops (issue #2821).
 mod egress_flush;
+// The credit governor's observation seam (charged/resident high-water marks and
+// the reservation lifecycle counters), split out of `egress_credit.rs` under the
+// campsite rule (epic #1116).
+mod egress_observation;
 pub mod filter;
 // The `do_get` drain side: metrics attribution, cancellation, and the deferred
 // egress-credit slot (split out of `streaming.rs`, epic #1116).

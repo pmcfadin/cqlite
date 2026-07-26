@@ -32,6 +32,21 @@ impl MergeProducer {
         Ok(count_arrow_array_nodes(&schema))
     }
 
+    /// Re-derive the payload estimate of exactly the rows in `buffer`, the way
+    /// the running accumulator was built (one `BatchByteCap::row_width` per row,
+    /// saturating).
+    ///
+    /// Debug-only: this is the O(rows) recomputation the incremental accumulator
+    /// exists to avoid, used solely to keep the accumulator ⇄ buffer invariant in
+    /// [`Self::flush_credited`] enforced rather than merely documented.
+    #[cfg(debug_assertions)]
+    fn recomputed_buffer_payload(&self, buffer: &[QueryRow]) -> usize {
+        let columns = self.output_columns();
+        buffer.iter().fold(0usize, |acc, row| {
+            acc.saturating_add(BatchByteCap::row_width(columns, row))
+        })
+    }
+
     /// Reserve egress credit for the buffered rows, materialize them under that
     /// credit, true the reservation down to the realized capacity, and emit.
     ///
@@ -72,6 +87,20 @@ impl MergeProducer {
         byte_cap: &mut BatchByteCap,
         n_array_nodes: usize,
     ) -> Result<(), ProducerError> {
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(
+                byte_cap.accumulated(),
+                self.recomputed_buffer_payload(buffer),
+                "flush_credited: `byte_cap.accumulated()` must describe EXACTLY the rows in \
+                 `buffer` — a call site that flushed without resetting (or reset without \
+                 flushing) would under-reserve here and trip the fail-closed path (issue #2821)"
+            );
+            assert!(
+                !buffer.is_empty() || byte_cap.accumulated() == 0,
+                "flush_credited: an empty buffer must carry a zero accumulator"
+            );
+        }
         // Payload estimate → CAPACITY reservation. Two currencies meet here and
         // only here on the producer side (design D0): `accumulated()` is PAYLOAD
         // bytes, everything downstream of this line is CAPACITY bytes.

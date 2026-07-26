@@ -80,7 +80,10 @@ impl From<ProducerError> for Status {
             | ProducerError::Panicked { .. }
             // A violated egress-credit invariant (issue #2821) — fail closed as
             // an internal fault rather than emit on a false account.
-            | ProducerError::EgressCredit(_) => Status::internal(msg),
+            | ProducerError::EgressCredit(_)
+            // A closed/unavailable egress credit pool (issue #2821) — fail
+            // closed rather than stream uncharged.
+            | ProducerError::EgressCreditUnavailable(_) => Status::internal(msg),
         }
     }
 }
@@ -164,7 +167,8 @@ pub(crate) fn producer_error_abort_reason(e: &ProducerError) -> AbortReason {
         | ProducerError::Predicate(_)
         | ProducerError::Discovery { .. }
         | ProducerError::Panicked { .. }
-        | ProducerError::EgressCredit(_) => AbortReason::Internal,
+        | ProducerError::EgressCredit(_)
+        | ProducerError::EgressCreditUnavailable(_) => AbortReason::Internal,
     }
 }
 

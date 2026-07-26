@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Fields, Schema as ArrowSchema};
+use arrow::record_batch::RecordBatch;
 
 use super::*;
 use crate::batch_bytes::{
@@ -19,6 +20,10 @@ use crate::batch_bytes::{
 
 /// The ratified B4 per-query working set at concurrency 1.
 const B4_WORKING_SET_BYTES: usize = 16 * 1024 * 1024;
+
+/// A live pool never refuses a reservation; only a CLOSED one does, and that
+/// path has its own dedicated test.
+const POOL_OPEN: &str = "a live credit pool must grant the reservation";
 
 fn credit(ceiling: usize) -> (EgressCredit, EgressObservation) {
     let obs = EgressObservation::default();
@@ -55,20 +60,163 @@ fn composition_stays_inside_b4() {
     );
 }
 
-/// Every ceiling at or below one maximum batch yields the IDENTICAL worst case —
-/// the reason the default is the largest such value (design D4a). A regression
-/// that made the bound additive again (`ceiling + one maximum batch`) would break
-/// this equality.
+/// Every ceiling at or below one maximum batch yields the IDENTICAL worst case
+/// (design D4a) — a regression that made the bound additive again
+/// (`ceiling + one maximum batch`) would break this equality.
+///
+/// And the corrected half of D4a: the SHIPPED default is deliberately ABOVE one
+/// maximum batch. Sitting at or below it is what made the deadlock clamp the
+/// normal case, because admission is gated on the pre-materialization
+/// RESERVATION, not on the trued-down realized size.
 #[test]
-fn any_ceiling_below_one_max_batch_has_the_same_worst_case() {
+fn a_ceiling_below_one_max_batch_does_not_widen_the_worst_case() {
     let one_max_batch = worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 3, 0);
-    for ceiling in [1024, 6 * 1024 * 1024, DEFAULT_MAX_INFLIGHT_EGRESS_BYTES] {
+    for ceiling in [1024, 6 * 1024 * 1024, 8 * 1024 * 1024] {
         assert_eq!(
             ceiling.max(one_max_batch),
             one_max_batch,
             "ceiling {ceiling} should not widen the worst case"
         );
     }
+    assert!(
+        DEFAULT_MAX_INFLIGHT_EGRESS_BYTES > one_max_batch,
+        "the shipped default ({DEFAULT_MAX_INFLIGHT_EGRESS_BYTES} B) must clear ONE worst-case \
+         reservation ({one_max_batch} B), or every byte-cap-cut batch clamps to the whole pool \
+         and the stream runs lock-step"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Requirement: the shipped default does not make the clamp the normal case
+// ---------------------------------------------------------------------------
+
+/// Permits in a pool of `ceiling` bytes — the quantity the clamp compares
+/// against, computed the way the governor computes it.
+fn pool_permits(ceiling: usize) -> u64 {
+    (ceiling.div_ceil(EGRESS_CREDIT_QUANTUM_BYTES)) as u64
+}
+
+/// A worst-case reservation over the merged wide-row fixture's schema shape
+/// (`id int, payload blob, label text` — three array nodes) is admitted at the
+/// SHIPPED defaults WITHOUT tripping the deadlock clamp.
+///
+/// This is the regression guard for the 8 MiB default, which missed by exactly
+/// the per-node slack term:
+///
+/// ```text
+/// want = worst_case_batch_capacity_bytes(4 MiB, 3, 0) = 8,394,752 B = 8198 permits
+/// 8 MiB pool  = 8192 permits  ->  8198 > 8192  -> CLAMP on every byte-cap cut
+/// 12 MiB pool = 12288 permits ->  8198 <= 12288 -> admitted, 4090 permits spare
+/// ```
+#[tokio::test]
+async fn a_worst_case_default_reservation_does_not_clamp() {
+    let nodes = 3;
+    let want = worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, nodes, 0);
+    let (credit, obs) = credit(DEFAULT_MAX_INFLIGHT_EGRESS_BYTES);
+
+    let reservation = credit.reserve(want).await.expect(POOL_OPEN);
+
+    assert_eq!(
+        obs.reservations_clamped(),
+        0,
+        "a full byte-cap-cut batch ({want} B, {} permits) clamped against the shipped {} B pool \
+         ({} permits): every such batch would then hold the ENTIRE pool and the stream would run \
+         lock-step with the batch-count channel dead behind it",
+        want.div_ceil(EGRESS_CREDIT_QUANTUM_BYTES),
+        DEFAULT_MAX_INFLIGHT_EGRESS_BYTES,
+        pool_permits(DEFAULT_MAX_INFLIGHT_EGRESS_BYTES)
+    );
+    assert_eq!(
+        obs.charged_bytes(),
+        want as u64,
+        "an unclamped reservation charges exactly what it asked for"
+    );
+    assert!(
+        obs.charged_bytes() < DEFAULT_MAX_INFLIGHT_EGRESS_BYTES as u64,
+        "a clamped reservation would hold the whole pool"
+    );
+    drop(reservation);
+}
+
+/// PAST the break point: a schema wide enough that the per-node slack alone
+/// pushes one reservation past the ceiling DOES clamp — and the documented
+/// behaviour holds there (the batch is still admitted, holding the entire pool,
+/// with nothing else admissible beside it).
+///
+/// `permits_for(2 × 4 MiB + 2 KiB × nodes) = 8192 + 2 × nodes`, so against the
+/// 12288-permit default pool the boundary is exactly 2048 nodes.
+#[tokio::test]
+async fn the_clamp_engages_only_past_the_documented_schema_width() {
+    // Spare permits after one full-cap batch, converted back into array NODES at
+    // the published per-node slack — derived from the constants, never hard-coded.
+    let spare_permits = pool_permits(DEFAULT_MAX_INFLIGHT_EGRESS_BYTES) as usize
+        - DEFAULT_MAX_BATCH_BYTES * BATCH_BYTES_CAPACITY_FACTOR / EGRESS_CREDIT_QUANTUM_BYTES;
+    let boundary = spare_permits * EGRESS_CREDIT_QUANTUM_BYTES / BATCH_BYTES_PER_COLUMN_SLACK;
+    assert_eq!(boundary, 2048, "the documented no-clamp schema width");
+
+    for (nodes, expect_clamp) in [(boundary, false), (boundary + 1, true)] {
+        let want = worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, nodes, 0);
+        let (credit, obs) = credit(DEFAULT_MAX_INFLIGHT_EGRESS_BYTES);
+        let reservation = credit.reserve(want).await.expect(POOL_OPEN);
+
+        assert_eq!(
+            obs.reservations_clamped(),
+            u64::from(expect_clamp),
+            "at {nodes} array nodes the clamp should{} engage",
+            if expect_clamp { "" } else { " NOT" }
+        );
+        if expect_clamp {
+            // The documented clamp behaviour: charged at most the whole pool,
+            // still admitted, and the only thing that can be resident.
+            assert_eq!(
+                obs.charged_bytes(),
+                DEFAULT_MAX_INFLIGHT_EGRESS_BYTES as u64,
+                "a clamped reservation holds the ENTIRE pool"
+            );
+            let mut beside = Box::pin(credit.reserve(EGRESS_CREDIT_QUANTUM_BYTES));
+            assert!(
+                futures::poll!(&mut beside).is_pending(),
+                "nothing may be admitted beside a clamped batch"
+            );
+        } else {
+            assert_eq!(obs.charged_bytes(), want as u64);
+        }
+        drop(reservation);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Requirement: a pool that cannot charge fails CLOSED
+// ---------------------------------------------------------------------------
+
+/// A closed credit pool surfaces a terminal error instead of degrading to an
+/// UNCHARGED reservation. Proceeding uncharged would put a batch on the egress
+/// path outside the published bound — a silently voided memory bound, where every
+/// other branch of this module fails closed.
+#[tokio::test]
+async fn a_closed_pool_fails_closed_rather_than_reserving_uncharged() {
+    let (credit, obs) = credit(64 * 1024);
+    credit.close_for_test();
+
+    let Err(err) = credit.reserve(8 * 1024).await else {
+        panic!("a closed pool must fail closed, not yield an uncharged reservation");
+    };
+    assert_eq!(err.requested, 8 * 1024);
+    assert_eq!(err.permits, 8);
+    assert!(
+        err.to_string().contains("fails closed"),
+        "the error must state the posture, got: {err}"
+    );
+    assert_eq!(
+        obs.reservations_granted(),
+        0,
+        "no reservation may be granted on a closed pool"
+    );
+    assert_eq!(obs.charged_bytes(), 0);
+
+    // It is a terminal INTERNAL fault on the wire, like the invariant violation.
+    let status = tonic::Status::from(crate::producer::ProducerError::from(err));
+    assert_eq!(status.code(), tonic::Code::Internal);
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +292,7 @@ fn the_slack_term_is_what_the_bare_factor_would_miss() {
 #[tokio::test]
 async fn a_reservation_larger_than_the_pool_is_still_granted() {
     let (credit, obs) = credit(4 * 1024);
-    let reservation = credit.reserve(64 * 1024).await;
+    let reservation = credit.reserve(64 * 1024).await.expect(POOL_OPEN);
     let permit = reservation
         .materialize(60 * 1024)
         .expect("under reservation");
@@ -159,7 +307,7 @@ async fn a_reservation_larger_than_the_pool_is_still_granted() {
 async fn degenerate_ceilings_still_admit_one_batch() {
     for ceiling in [0usize, 1usize] {
         let (credit, _obs) = credit(ceiling);
-        let first = credit.reserve(1024 * 1024).await;
+        let first = credit.reserve(1024 * 1024).await.expect(POOL_OPEN);
         let permit = first.materialize(512 * 1024).expect("granted");
         // One quantum is the floor of a bounded pool.
         assert_eq!(permit.charged_bytes(), EGRESS_CREDIT_QUANTUM_BYTES as u64);
@@ -169,7 +317,7 @@ async fn degenerate_ceilings_still_admit_one_batch() {
         let mut second = Box::pin(credit.reserve(1024));
         assert!(futures::poll!(&mut second).is_pending());
         drop(permit);
-        let _ = second.await;
+        let _ = second.await.expect(POOL_OPEN);
     }
 }
 
@@ -187,6 +335,7 @@ async fn an_exhausted_pool_parks_the_next_reservation() {
     let held = credit
         .reserve(8 * 1024)
         .await
+        .expect(POOL_OPEN)
         .materialize(8 * 1024)
         .expect("granted");
     assert_eq!(obs.charged_bytes(), 8 * 1024);
@@ -199,7 +348,7 @@ async fn an_exhausted_pool_parks_the_next_reservation() {
 
     drop(held);
     assert_eq!(obs.charged_bytes(), 0);
-    let granted = parked.await;
+    let granted = parked.await.expect(POOL_OPEN);
     assert_eq!(obs.reservations_granted(), 2);
     assert_eq!(obs.batches_materialized(), 1, "nothing built yet");
     drop(granted);
@@ -216,7 +365,7 @@ async fn an_exhausted_pool_parks_the_next_reservation() {
 #[tokio::test]
 async fn an_over_reserved_batch_returns_its_excess() {
     let (credit, obs) = credit(64 * 1024);
-    let reservation = credit.reserve(48 * 1024).await;
+    let reservation = credit.reserve(48 * 1024).await.expect(POOL_OPEN);
     assert_eq!(obs.charged_bytes(), 48 * 1024, "full reservation held");
 
     let permit = reservation
@@ -232,7 +381,7 @@ async fn an_over_reserved_batch_returns_its_excess() {
 
     // The returned credit is genuinely available again: a second reservation
     // that would NOT have fitted under the original one now resolves.
-    let second = credit.reserve(56 * 1024).await;
+    let second = credit.reserve(56 * 1024).await.expect(POOL_OPEN);
     assert_eq!(obs.charged_bytes(), 62 * 1024);
     drop(second);
     drop(permit);
@@ -245,7 +394,7 @@ async fn an_over_reserved_batch_returns_its_excess() {
 #[tokio::test]
 async fn an_under_reservation_fails_closed() {
     let (credit, obs) = credit(64 * 1024);
-    let reservation = credit.reserve(8 * 1024).await;
+    let reservation = credit.reserve(8 * 1024).await.expect(POOL_OPEN);
     let Err(err) = reservation.materialize(8 * 1024 + 1) else {
         panic!("an under-reservation must fail closed, not yield a permit");
     };
@@ -278,11 +427,13 @@ async fn dropping_a_permit_returns_the_whole_pool() {
     let a = credit
         .reserve(8 * 1024)
         .await
+        .expect(POOL_OPEN)
         .materialize(8 * 1024)
         .expect("a");
     let b = credit
         .reserve(8 * 1024)
         .await
+        .expect(POOL_OPEN)
         .materialize(8 * 1024)
         .expect("b");
     assert_eq!(obs.charged_bytes(), 16 * 1024);
@@ -302,7 +453,7 @@ async fn dropping_a_permit_returns_the_whole_pool() {
 #[tokio::test]
 async fn an_abandoned_reservation_releases_its_credit() {
     let (credit, obs) = credit(16 * 1024);
-    let reservation = credit.reserve(16 * 1024).await;
+    let reservation = credit.reserve(16 * 1024).await.expect(POOL_OPEN);
     assert_eq!(obs.charged_bytes(), 16 * 1024);
     drop(reservation);
     assert_eq!(obs.charged_bytes(), 0);
@@ -323,6 +474,33 @@ fn the_inert_reservation_needs_no_runtime_and_never_fails_closed() {
     assert_eq!(permit.charged_bytes(), 0);
 }
 
+/// The TWO inert routes account identically — for nothing.
+///
+/// The collect path reaches an inert permit through
+/// `EgressReservation::inert().materialize(..)`; the aggregate path builds one
+/// directly via `CreditedBatch::uncredited`, never materializing. Before this was
+/// made explicit the first recorded residency into a throwaway observation nobody
+/// can read while the second recorded nothing at all — two different answers for
+/// the same "outside the governed set" state, either of which could mislead a
+/// reader of the seam.
+#[test]
+fn both_inert_routes_account_for_nothing() {
+    let collect = EgressReservation::inert()
+        .materialize(64 * 1024)
+        .expect("inert reservations never fail closed");
+    let empty = RecordBatch::new_empty(Arc::new(ArrowSchema::empty()));
+    let (_batch, aggregate) = CreditedBatch::uncredited(empty).split();
+
+    assert_eq!(collect.charged_bytes(), aggregate.charged_bytes());
+    assert_eq!(collect.resident_bytes(), aggregate.resident_bytes());
+    assert_eq!(collect.charged_bytes(), 0);
+    assert_eq!(
+        collect.resident_bytes(),
+        0,
+        "an inert permit must not publish residency it cannot report"
+    );
+}
+
 /// An unbounded budget applies no ceiling: reservations resolve immediately
 /// however large, and nothing is charged (the embedder opt-out).
 #[tokio::test]
@@ -330,7 +508,8 @@ async fn an_unbounded_budget_charges_nothing() {
     let obs = EgressObservation::default();
     let credit = EgressCredit::new(EgressBudget::unbounded(), obs.clone());
     let reservation = futures::FutureExt::now_or_never(credit.reserve(usize::MAX))
-        .expect("an unbounded budget resolves a reservation of any size immediately");
+        .expect("an unbounded budget resolves a reservation of any size immediately")
+        .expect(POOL_OPEN);
     let permit = reservation
         .materialize(1024)
         .expect("no ceiling to violate");
@@ -345,6 +524,11 @@ async fn an_unbounded_budget_charges_nothing() {
 #[tokio::test]
 async fn quantisation_always_rounds_up() {
     let (credit, _obs) = credit(4 * 1024);
-    let permit = credit.reserve(1).await.materialize(1).expect("granted");
+    let permit = credit
+        .reserve(1)
+        .await
+        .expect(POOL_OPEN)
+        .materialize(1)
+        .expect("granted");
     assert_eq!(permit.charged_bytes(), EGRESS_CREDIT_QUANTUM_BYTES as u64);
 }

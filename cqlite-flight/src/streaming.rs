@@ -194,7 +194,10 @@ impl BatchSink for ChannelSink {
                 // poll — matching `emit`'s bias, keeping normal-path behaviour and
                 // the stream/collect byte-parity identical.
                 biased;
-                reservation = credit.reserve(capacity_bytes) => Ok(reservation),
+                // A pool that cannot charge the reservation fails the stream
+                // CLOSED (issue #2821): an uncharged reservation would put a
+                // batch on the egress path outside the published bound.
+                reservation = credit.reserve(capacity_bytes) => Ok(reservation?),
                 // Client disconnected while we were parked waiting for credit.
                 // Nothing has been materialized, so nothing is abandoned.
                 _ = cancelled => Err(ProducerError::Cancelled),
