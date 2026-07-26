@@ -18,7 +18,9 @@
 //! `paths` list, identical to the full-scan merger, so reconciliation ties break
 //! the same way.
 
-use super::{KWayMerger, MergeEntry, RunReader, SSTableRowIterator, SSTableRowIteratorAdapter};
+use super::{
+    egress_budget, KWayMerger, MergeEntry, RunReader, SSTableRowIterator, SSTableRowIteratorAdapter,
+};
 use crate::schema::{TableSchema, UdtRegistry};
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::{CompactionRow, SSTableReader};
@@ -84,6 +86,11 @@ impl KWayMerger {
             now_secs: None,
             purge_safe: false,
             max_purgeable_timestamp: None,
+            // Issue #2765: the point-read builders open their fail-safe adapters
+            // (and snapshot the shared capacity) OUTSIDE this constructor, then
+            // attach the matching slot guard via `with_egress_slot`. A merger
+            // built directly from pre-supplied runs registers no slot.
+            _egress_slot: None,
         })
     }
 }
@@ -114,6 +121,13 @@ struct SinglePartitionFilterRun {
 }
 
 impl SSTableRowIterator for SinglePartitionFilterRun {
+    /// Issue #2765: delegate the egress-capacity observation to the wrapped
+    /// adapter so the point-read fail-safe channel is observable by wiring tests.
+    #[cfg(test)]
+    fn egress_channel_capacity(&self) -> Option<usize> {
+        self.inner.egress_channel_capacity()
+    }
+
     fn next(&mut self) -> Option<Result<MergeEntry>> {
         loop {
             match self.inner.next() {
@@ -202,6 +216,15 @@ pub fn build_single_partition_merger_with_registry(
 
     let key_set: std::collections::HashSet<Vec<u8>> = keys.iter().cloned().collect();
 
+    // Issue #2765 (LAZY registration): a point read whose candidates ALL seek
+    // (`PathProbe::Seeked` → in-memory `VecRun`s, ZERO egress channels) buffers
+    // NOTHING, so it must NOT occupy an active-merge slot — else high-QPS Flight
+    // point reads would inflate the process-global count and throttle a
+    // concurrent channel-backed compaction/full-scan toward `MIN_CAP`. Defer
+    // `begin_merge` to the FIRST `NeedsScan` egress channel and memoize its
+    // snapshot so every channel in THIS merge still shares ONE capacity.
+    let mut egress: Option<(usize, egress_budget::ActiveMergeGuard)> = None;
+
     let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
     for (run_index, path) in paths.iter().enumerate() {
         // Cooperative cancellation (#2264): honour a cancel BEFORE each candidate's
@@ -246,12 +269,15 @@ pub fn build_single_partition_merger_with_registry(
             PathProbe::NeedsScan => {
                 // Fail-safe: scan this ONE SSTable, forwarding only the target
                 // partitions. The missing index costs speed, never correctness.
+                // Snapshot the shared capacity on the FIRST egress channel only.
+                let channel_capacity = egress.get_or_insert_with(egress_budget::begin_merge).0;
                 let adapter = SSTableRowIteratorAdapter::open(
                     path,
                     run_index,
                     schema,
                     udt_registry.cloned(),
                     scan_cancel.clone(),
+                    channel_capacity,
                 )?;
                 runs.push(Box::new(SinglePartitionFilterRun {
                     inner: adapter,
@@ -262,9 +288,16 @@ pub fn build_single_partition_merger_with_registry(
     }
 
     if runs.is_empty() {
+        // No candidate produced a run; any snapshot guard drops here.
         return Ok(None);
     }
-    Ok(Some(KWayMerger::from_row_iterators(runs, schema)?))
+    let merger = KWayMerger::from_row_iterators(runs, schema)?;
+    // Attach the slot ONLY if a `NeedsScan` egress channel was actually opened;
+    // an all-`Seeked` (channel-less) point read registers no slot.
+    Ok(Some(match egress {
+        Some((_, guard)) => merger.with_egress_slot(guard),
+        None => merger,
+    }))
 }
 
 /// Reader-based analogue of [`build_single_partition_merger`] (issue #2346):
@@ -296,6 +329,12 @@ pub fn build_single_partition_merger_from_readers(
     let keys: &[Vec<u8>] = &canonical;
 
     let key_set: std::collections::HashSet<Vec<u8>> = keys.iter().cloned().collect();
+
+    // Issue #2765 (LAZY registration, see the path-based builder above): occupy an
+    // active-merge slot ONLY when a `NeedsScan` egress channel is actually opened;
+    // an all-`Seeked` point read buffers nothing and registers no slot. The
+    // snapshot is memoized so every channel in THIS merge shares ONE capacity.
+    let mut egress: Option<(usize, egress_budget::ActiveMergeGuard)> = None;
 
     let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
     for (run_index, reader) in readers.into_iter().enumerate() {
@@ -336,12 +375,15 @@ pub fn build_single_partition_merger_from_readers(
                 // still available here.
                 // Point-read fail-safe: a specific-key filter, not a range scan —
                 // no token bound is pushed (issue #2412; the key set bounds it).
+                // Snapshot the shared capacity on the FIRST egress channel only.
+                let channel_capacity = egress.get_or_insert_with(egress_budget::begin_merge).0;
                 let adapter = SSTableRowIteratorAdapter::open_from_reader(
                     reader,
                     run_index,
                     schema,
                     scan_cancel.clone(),
                     None,
+                    channel_capacity,
                 )?;
                 runs.push(Box::new(SinglePartitionFilterRun {
                     inner: adapter,
@@ -352,9 +394,15 @@ pub fn build_single_partition_merger_from_readers(
     }
 
     if runs.is_empty() {
+        // No candidate produced a run; any snapshot guard drops here.
         return Ok(None);
     }
-    Ok(Some(KWayMerger::from_row_iterators(runs, schema)?))
+    let merger = KWayMerger::from_row_iterators(runs, schema)?;
+    // Attach the slot ONLY if a `NeedsScan` egress channel was actually opened.
+    Ok(Some(match egress {
+        Some((_, guard)) => merger.with_egress_slot(guard),
+        None => merger,
+    }))
 }
 
 /// Probe an ALREADY-OPEN `reader` for every requested key via the core seek

@@ -2,8 +2,9 @@
 //!
 //! Backs the [`crate::observability::catalog::MERGE_EGRESS_CHANNEL_DEPTH`] gauge
 //! with a process-global live count of merged DATA entries currently buffered in
-//! the bounded producer→consumer `sync_channel` (capacity
-//! `STREAMING_CHANNEL_CAPACITY` = 256, `merge/mod.rs`). `std::sync::mpsc`'s
+//! the bounded producer→consumer `sync_channel` (capacity up to
+//! `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent
+//! merges — see `merge/egress_budget.rs`). `std::sync::mpsc`'s
 //! `sync_channel` exposes no `len()`, so occupancy is tracked explicitly, exactly
 //! as the #2316 producer-thread gauge tracks live producer threads:
 //!

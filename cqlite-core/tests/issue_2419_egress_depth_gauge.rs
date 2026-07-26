@@ -35,11 +35,11 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-/// Rows per input SSTable. MUST exceed the merge's 256-entry channel capacity
-/// (`STREAMING_CHANNEL_CAPACITY`, private to `merge/mod.rs`) so every producer
-/// fills its own channel and blocks on `send`, staying backed up (none received)
-/// until the merge is stepped — mirroring `issue_2316_producer_gauge.rs`'s
-/// identical rationale for its own gauge.
+/// Rows per input SSTable. MUST exceed the merge's per-channel capacity (up to
+/// `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent merges
+/// — #2765; private to `merge/mod.rs`) so every producer fills its own channel
+/// and blocks on `send`, staying backed up (none received) until the merge is
+/// stepped — mirroring `issue_2316_producer_gauge.rs`'s identical rationale.
 const ROWS_PER_INPUT: i32 = 400;
 const NUM_INPUTS: usize = 4;
 
@@ -190,21 +190,39 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
 
     // Construct the merger WITHOUT stepping: `KWayMerger::new` does not seed its
     // heap ("populated on first step"), so every producer races ahead filling
-    // its own 256-entry channel and blocks on `send` once full — none received
-    // yet. Each producer's channel can hold at most STREAMING_CHANNEL_CAPACITY
-    // (256) successfully-sent-and-buffered entries (a blocked 257th send has NOT
-    // yet incremented the gauge), so the theoretical ceiling is
-    // `NUM_INPUTS * 256` — a much higher bound than the threshold below, which
-    // is deliberately conservative (a lower bound, never an exact target) to
-    // stay robust to producer-fill-rate timing.
+    // its OWN egress channel and blocks on `send` once full — none received yet.
+    // Issue #2765: that channel's capacity is now ADAPTIVE — up to 256, but
+    // `clamp(EGRESS_ROW_BUDGET / active_merges, MIN_CAP, 256)` under concurrent
+    // merges — so the theoretical ceiling is `NUM_INPUTS * per_channel_cap`, NOT
+    // a hard-coded `NUM_INPUTS * 256`. The threshold below is derived from the
+    // LIVE adaptive capacity (a conservative fraction of that ceiling, never an
+    // exact target) so a future concurrent merge in this binary shrinks the cap
+    // WITHOUT pushing the threshold out of reach (the pre-#2765 fixed-256
+    // assumption would 10s-timeout in that case).
+    // Sample the live active-merge count BEFORE and AFTER construction and derive
+    // the per-channel capacity from the HIGHER count (→ the LOWER capacity).
+    // `max(before+1, after)` (this merger counts itself via the `+1`) is a safe
+    // lower bound on the true snapshot GIVEN this single-test binary has no
+    // ambient merges, and stays conservative under monotonically-RISING
+    // concurrency. (It is NOT a universal bound: an ambient merge that both
+    // starts AND finishes between the two reads would make the true snapshot
+    // `before+2` while this derives `before+1` → an over-estimate. That cannot
+    // happen here — one test per binary — so the derivation is exact.)
+    let before = cqlite_core::storage::write_engine::merge::active_merge_count();
     let merger = KWayMerger::new(inputs, &schema).expect("KWayMerger::new");
+    let after = cqlite_core::storage::write_engine::merge::active_merge_count();
+    let per_channel_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
+        (before + 1).max(after),
+    );
 
     // MID-MERGE: poll (bounded, fail-loud) until the gauge POSITIVELY records a
     // reading proving multiple channels are genuinely backed up concurrently —
     // never inferred from an absent/stale window. If `channel_depth::sent()`
     // were removed from `forward_row`, this loop would exhaust its deadline and
-    // fail explicitly.
-    let backpressure_threshold = (NUM_INPUTS as f64) * 150.0;
+    // fail explicitly. Half the adaptive ceiling (`NUM_INPUTS * cap`) requires
+    // more than one full channel's worth (for NUM_INPUTS >= 2), so it still
+    // proves CONCURRENT multi-channel backpressure, adaptively.
+    let backpressure_threshold = (NUM_INPUTS as f64) * (per_channel_cap as f64) * 0.5;
     let mid_deadline = Instant::now() + Duration::from_secs(10);
     let mut mid_reached = false;
     let mut mid_last_seen: Option<f64> = None;

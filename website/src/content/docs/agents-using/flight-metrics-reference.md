@@ -14,7 +14,7 @@ Operator-facing reference for every `cqlite.*` instrument CQLite emits over Arro
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
-Total instruments: **75**.
+Total instruments: **76**.
 
 ## All instruments
 
@@ -54,7 +54,8 @@ Total instruments: **75**.
 | `cqlite.flush.sstables` | counter | `{sstable}` | _(none)_ | L0 SSTables created by memtable flushes. | Feeds compaction.lag; a high rate with rising lag means L0 is accumulating faster than compaction clears it. |
 | `cqlite.memtable.rows` | gauge | `{row}` | _(none)_ | Buffered rows in the active memtable. | Same sawtooth shape as memtable.size_bytes; a rising floor signals flush pressure. |
 | `cqlite.memtable.size_bytes` | gauge | `By` | _(none)_ | Current approximate in-memory size of the active memtable. | Sawtooth (rise then drop at flush) is healthy; a monotonic climb means flush is not keeping up. |
-| `cqlite.merge.egress_channel_depth` | gauge | `{entry}` | _(none)_ | Live occupancy of the bounded merge egress sync_channel (cap 256) feeding do_get / compaction. | Near zero = consumer keeping up (or a stalled producer); riding near capacity = producer outrunning a slower consumer (back-pressured egress). |
+| `cqlite.merge.active_merges` | gauge | `{merge}` | _(none)_ | Live concurrent k-way merges — the divisor of the adaptive egress budget (#2765). | Per-channel capacity is clamp(EGRESS_ROW_BUDGET/active, MIN_CAP, 256); a level well above budget/256 means concurrent merges are being throttled toward MIN_CAP. |
+| `cqlite.merge.egress_channel_depth` | gauge | `{entry}` | _(none)_ | Live occupancy of the bounded merge egress sync_channel (cap up to 256, adaptively reduced under concurrent merges — #2765) feeding do_get / compaction. | Near zero = consumer keeping up (or a stalled producer); riding near capacity = producer outrunning a slower consumer (back-pressured egress). |
 | `cqlite.merge.producer_threads` | gauge | `{thread}` | _(none)_ | Live OS producer threads the k-way merge currently holds (one per input SSTable). | Bounded by O(M) inputs and returns to baseline at merge completion; a stuck-high value is a thread leak (#2316). |
 | `cqlite.merge.rows_in` | counter | `{row}` | _(none)_ | Input rows consumed at the k-way merge reconcile boundary (once per merge). | Compare with merge.rows_out; the gap is rows removed by last-write-wins collapse and tombstone suppression. |
 | `cqlite.merge.rows_out` | counter | `{row}` | _(none)_ | Rows emitted by the merge reconcile boundary post-reconciliation. | See merge.rows_in; rows_out much smaller than rows_in means heavy reconciliation. |
@@ -118,6 +119,7 @@ Metrics a #2399 round-template scoreboard item consumes. Round handoffs (#2367-s
 | `cqlite.flight.blocking_tasks_in_use` | blocking-pool pressure watch (#2419/#2313) |
 | `cqlite.flight.tables_discovered` | inert-mount watch (#2684) |
 | `cqlite.flight.warm_tables` | warm-working-set watch (#2684) |
+| `cqlite.merge.active_merges` | egress-backpressure watch (#2765/#2367) |
 | `cqlite.merge.egress_channel_depth` | egress backpressure watch (#2419/#2399) |
 | `cqlite.merge.producer_threads` | thread-budget watch (#2313/#2399) |
 | `cqlite.proc.fds` | fd-exhaustion watch (#2419/#2313) |

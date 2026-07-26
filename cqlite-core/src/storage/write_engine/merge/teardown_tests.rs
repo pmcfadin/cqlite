@@ -3,7 +3,8 @@
 //! on a full `SyncSender::send`.
 //!
 //! The regression this guards: a producer that has filled the bounded channel
-//! (`STREAMING_CHANNEL_CAPACITY`) is parked inside `send`. A naive
+//! (capacity up to `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under
+//! concurrent merges — #2765) is parked inside `send`. A naive
 //! join-on-drop that did NOT first close the channel would DEADLOCK — the join
 //! waits for a thread that is itself waiting for channel space that will never
 //! come. `SSTableRowIteratorAdapter::drop` therefore drops the receiver (waking
@@ -101,9 +102,10 @@ fn write_fixture(n: i32) -> (TempDir, std::path::PathBuf) {
 }
 
 /// Dropping a merger whose producer is BLOCKED on a full channel must not
-/// deadlock (issue #2361). The fixture holds far more partitions than
-/// `STREAMING_CHANNEL_CAPACITY` (256), and the test NEVER steps the merger, so
-/// the producer fills the channel and parks in `send`. The drop at end of scope
+/// deadlock (issue #2361). The fixture holds far more partitions than the
+/// per-channel capacity (up to `STREAMING_CHANNEL_CAPACITY` = 256, adaptively
+/// reduced under concurrent merges — #2765), and the test NEVER steps the merger,
+/// so the producer fills the channel and parks in `send`. The drop at end of scope
 /// must close the channel and join the producer without hanging — reaching the
 /// final assertion IS the proof (a regressed teardown would hang here).
 #[test]

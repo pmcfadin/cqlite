@@ -320,6 +320,16 @@ cargo build --package cqlite-core --features parquet
 cargo test --package cqlite-core --features parquet
 ```
 
+## Runtime tuning knobs (env)
+
+Parsed once per process; unset = shipped default (behavior unchanged).
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `CQLITE_READ_PATH` | `auto` | Force the read path (`auto`/`point`/`compact`), issue #1918. |
+| `CQLITE_EGRESS_ROW_BUDGET` | `2048` | Adaptive merge egress budget (issue #2765): per-channel `sync_channel` capacity = `clamp(budget / concurrent_merges, min_cap, 256)`. Raise to allow more prefetch buffering per merge under concurrency; lower to cap aggregate memory. Missing/unparseable/zero → default. **Residual K-linear dimension**: the budget divides by merge COUNT only, not per-merge fanout K, so a single wide merge still buffers up to `K × 256` entries (~60MB at K=100) invariant to concurrency — intended ("solo merge unchanged for any K"); the high-K envelope is covered by the #2895 loadgen sweep. |
+| `CQLITE_EGRESS_MIN_CAP` | `8` | Forward-progress floor for the above (clamped to `[1, 256]`; budget forced `≥ min_cap`). The floor engages only at very high concurrency (`budget / min_cap` ≈ 256 concurrent merges at defaults). **Inert-throttle cases** (per-channel cap constant, never shrinks with concurrency): setting this `≥ 256` (floor meets the 256 ceiling), OR a budget `< 2 × min_cap` (degenerate range, cap pinned at `min_cap`). The DEFAULTS (2048/8) do NOT disable the throttle — it engages above 8 concurrent merges. A one-time `tracing::warn!` fires on exactly these two inert cases. Fresh loadgen validation tracked in #2895. |
+
 ## Fuzzing (issue #1614)
 
 Policy (nightly-only, out of the stable gate, workspace-excluded) is in `CLAUDE.md`. Run details:

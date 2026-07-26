@@ -26,7 +26,8 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-/// Rows per input SSTable. MUST exceed the merge's 256-entry channel capacity so
+/// Rows per input SSTable. MUST exceed the merge's channel capacity (up to 256,
+/// adaptively reduced under concurrent merges — #2765) so
 /// every producer blocks on `send` and stays alive (uncollapsed live count) until
 /// the merge drains it — giving a deterministic window where the gauge reads `M`.
 const ROWS_PER_INPUT: i32 = 400;
@@ -160,7 +161,8 @@ fn producer_threads_gauge_rises_and_returns_to_baseline() {
     let (baseline_ts, baseline_ldt, baseline_ttl) = compute_baseline_min(&inputs);
 
     // Construct the merger: all M producers spawn and — with ROWS_PER_INPUT > the
-    // 256-entry channel capacity — block on `send`, so none decrements before the
+    // channel capacity (up to 256, adaptively reduced under concurrent merges —
+    // #2765) — block on `send`, so none decrements before the
     // snapshot below. The gauge was incremented once per producer at spawn.
     let merger = KWayMerger::new(inputs, &schema).expect("KWayMerger::new");
 

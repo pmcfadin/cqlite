@@ -32,7 +32,8 @@
 //!
 //! ## Memory Budget (Issue #754 groundwork, Issue #827 streaming read)
 //!
-//! The bounded `sync_channel` (capacity [`STREAMING_CHANNEL_CAPACITY`]) limits
+//! The bounded `sync_channel` (capacity up to [`STREAMING_CHANNEL_CAPACITY`],
+//! adaptively reduced under concurrent merges — see [`egress_budget`]) limits
 //! how many converted `MergeEntry` values from each source live in memory
 //! simultaneously between producer and consumer. The consumer/heap pulls
 //! lazily via cursors, so the channel acts as a backpressure valve.
@@ -397,6 +398,17 @@ impl RunReader {
 pub trait SSTableRowIterator: Send {
     /// Get the next row from this SSTable
     fn next(&mut self) -> Option<Result<MergeEntry>>;
+
+    /// Test-only observation hook (issue #2765): the bounded egress
+    /// `sync_channel` capacity this run's producer→consumer channel was
+    /// constructed with — i.e. the EXACT argument passed to `sync_channel`, so a
+    /// wiring test can prove the adaptive per-channel capacity actually reaches
+    /// the construction site. `None` for runs that have no such channel
+    /// (synthetic/seeked `Vec`-backed iterators).
+    #[cfg(test)]
+    fn egress_channel_capacity(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Async-to-sync bridge (`block_on_async`) with a cached, long-lived runtime
@@ -421,9 +433,10 @@ pub(crate) use async_bridge::block_on_async;
 /// [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
 /// which decompresses one chunk at a time, drains every fully-decoded partition
 /// out of the window, and forwards each entry one at a time into a bounded
-/// `sync_channel`. The channel capacity is [`STREAMING_CHANNEL_CAPACITY`]
-/// entries; once the channel is full the producer blocks until the consumer
-/// (the main merge thread) pulls the next entry.
+/// `sync_channel`. The channel capacity is up to [`STREAMING_CHANNEL_CAPACITY`]
+/// entries, adaptively reduced under concurrent merges (see [`egress_budget`]);
+/// once the channel is full the producer blocks until the consumer (the main
+/// merge thread) pulls the next entry.
 ///
 /// The bounded window plus the bounded channel together make end-to-end peak
 /// memory independent of total input size: a source's decompressed content is
@@ -490,6 +503,12 @@ struct SSTableRowIteratorAdapter {
     /// makes ([`Self::next`]'s normal consumption). Only ever touched by the
     /// thread holding `&mut self` (never shared), so a plain `i64`.
     received_count: i64,
+    /// Test-only (issue #2765): the exact `sync_channel` capacity this adapter's
+    /// egress channel was built with — the merge-scoped adaptive snapshot the
+    /// constructor threaded in. Observed via [`SSTableRowIterator::egress_channel_capacity`]
+    /// so a wiring test proves the budget reaches BOTH construction sites.
+    #[cfg(test)]
+    egress_channel_capacity: usize,
 }
 
 /// Poll interval for the cancel-aware blocking `recv` in
@@ -530,12 +549,13 @@ impl From<Error> for MergeProducerError {
     }
 }
 
-/// Number of pre-fetched `MergeEntry` objects buffered per source in the
-/// streaming channel. Each entry is typically a few hundred bytes; at 256
-/// entries per source and 10 sources that is a few hundred KB — well within the
-/// 128MB budget. The value is a balance between producer/consumer
-/// synchronization overhead (lower = more context switches) and memory footprint
-/// (higher = more buffering).
+/// MAXIMUM pre-fetched `MergeEntry` objects buffered per source in the streaming
+/// channel — the capacity used at LOW concurrency (a single active merge). Each
+/// entry is a few hundred bytes; balances producer/consumer sync overhead
+/// against memory footprint. Issue #2765: now the UPPER clamp of an adaptive
+/// per-merge capacity (see [`egress_budget`]) — under concurrent merges the
+/// effective capacity shrinks so the aggregate buffered working set tracks a
+/// fixed budget instead of growing as `256 × active_merges`.
 #[cfg(feature = "write-support")]
 const STREAMING_CHANNEL_CAPACITY: usize = 256;
 
@@ -550,10 +570,28 @@ mod producer_gauge;
 #[cfg(feature = "write-support")]
 mod channel_depth;
 
+// Adaptive egress budget (issue #2765): process-global active-merge count that
+// makes the per-merge `sync_channel` capacity track a FIXED aggregate row
+// budget instead of a fixed 256 per merge. Sibling module to bound this file.
+// Also owns the doc-hidden `egress_channel_capacity_for` / `active_merge_count`
+// integration-test hooks and the `KWayMerger::with_egress_slot` builder (kept
+// there, not inline here, per the #1116 campsite file-size rule).
+#[cfg(feature = "write-support")]
+mod egress_budget;
+#[cfg(feature = "write-support")]
+pub use egress_budget::{active_merge_count, egress_channel_capacity_for};
+
 // Issue #2361: join-on-drop / backpressured-teardown coverage for the streaming
 // merge adapter.
 #[cfg(all(test, feature = "write-support"))]
 mod teardown_tests;
+
+// Issue #2765: end-to-end wiring evidence that the adaptive egress-budget
+// capacity snapshot reaches BOTH channel-construction sites (`open`,
+// `open_from_reader`) and is keyed per k-way MERGE (all source channels of one
+// merge share ONE snapshot), in a sibling file to bound this one.
+#[cfg(all(test, feature = "write-support"))]
+mod egress_wiring_tests;
 
 // Issue #1664: `MergeEntry` double-clone regression guard (kept in a sibling
 // file, not inline here, per the #1116 campsite file-size rule).
@@ -589,19 +627,24 @@ impl SSTableRowIteratorAdapter {
     /// and stored on `MergeEntry.clustering_key` so `merge_partition_rows` groups
     /// and reconciles distinct clustering rows correctly. The clustering columns
     /// are left in the cells as well, since the read-back path expects them there.
+    ///
+    /// `channel_capacity` (issue #2765) is the merge-scoped adaptive egress
+    /// capacity snapshotted ONCE by the `KWayMerger` constructor and shared by
+    /// every source channel of that merge — never derived per adapter here.
     fn open(
         path: &Path,
         run_index: usize,
         schema: &TableSchema,
         udt_registry: Option<crate::schema::UdtRegistry>,
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
+        channel_capacity: usize,
     ) -> Result<Self> {
         let path_buf = path.to_path_buf();
         let schema = schema.clone();
         // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
         let adapter_cancel = scan_cancel.clone();
 
-        let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(channel_capacity);
         // Issue #2419 roborev job 1733: this adapter's own sent-count, shared
         // with the producer thread so `Drop` can read its post-join-stable value
         // for the egress-depth reconcile (see the field doc).
@@ -653,6 +696,8 @@ impl SSTableRowIteratorAdapter {
             scan_cancel: adapter_cancel,
             sent_count,
             received_count: 0,
+            #[cfg(test)]
+            egress_channel_capacity: channel_capacity,
         })
     }
 
@@ -1292,6 +1337,14 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
             }
         }
     }
+
+    /// Issue #2765 wiring hook: the exact adaptive capacity this adapter's egress
+    /// `sync_channel` was constructed with (the merge-scoped snapshot the
+    /// constructor threaded in).
+    #[cfg(test)]
+    fn egress_channel_capacity(&self) -> Option<usize> {
+        Some(self.egress_channel_capacity)
+    }
 }
 
 /// Cancel-aware teardown (issue #2361): trip the scan token, close the channel,
@@ -1444,6 +1497,14 @@ pub struct KWayMerger {
     /// compaction ignores this field entirely: `purge_safe == true` already proves
     /// there is no non-included overlapping SSTable, so the bound is `+inf`.
     max_purgeable_timestamp: Option<i64>,
+    /// Adaptive egress-budget slot (issue #2765). `Some` for a real
+    /// channel-backed merge: the RAII guard that counts this merge in the
+    /// process-global active-merge total, so the per-channel capacity of OTHER
+    /// concurrent merges tracks true concurrency. Declared LAST so it drops AFTER
+    /// `runs` (channels torn down), decrementing the count exactly once at merge
+    /// end — even on panic/early-return. `None` for test-only mergers built from
+    /// pre-supplied runs that never registered a slot. See [`egress_budget`].
+    _egress_slot: Option<egress_budget::ActiveMergeGuard>,
 }
 
 /// Report returned by [`compact_sstables`].
@@ -2559,6 +2620,11 @@ impl KWayMerger {
         // cancel-aware Drop teardown). See
         // [`SSTableReader::stream_all_partitions_cancellable`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_cancellable)'s
         // doc for why a partition-granular producer budget cannot be correct.
+        // Issue #2765: register this k-way merge ONCE and snapshot the adaptive
+        // per-channel egress capacity; ALL source channels below share it, so a
+        // solo compaction gets 256 per source regardless of input count.
+        let (channel_capacity, egress_slot) = egress_budget::begin_merge();
+
         let mut runs = Vec::with_capacity(input_paths.len());
         for (run_index, path) in input_paths.iter().enumerate() {
             let adapter = SSTableRowIteratorAdapter::open(
@@ -2567,6 +2633,7 @@ impl KWayMerger {
                 schema,
                 udt_registry.clone(),
                 scan_cancel.clone(),
+                channel_capacity,
             )?;
             runs.push(RunReader::new(Box::new(adapter)));
         }
@@ -2592,6 +2659,7 @@ impl KWayMerger {
             // conservative (no purging) until a caller supplies the min outside
             // timestamp via `with_max_purgeable_timestamp`.
             max_purgeable_timestamp: None,
+            _egress_slot: Some(egress_slot),
         })
     }
 
@@ -2636,6 +2704,10 @@ impl KWayMerger {
         self.max_purgeable_timestamp = max_purgeable_timestamp;
         self
     }
+
+    // `with_egress_slot` (issue #2765) lives in `egress_budget.rs` (its own
+    // `impl KWayMerger` block) to keep this over-threshold file from growing
+    // (#1116 campsite rule).
 
     /// Perform a full merge to the output writer
     ///
@@ -4946,6 +5018,7 @@ mod tests {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         };
 
         // Drive the real merger. Order the input so the live (newer-file) entry is
@@ -5069,6 +5142,7 @@ mod tests {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         };
 
         // Pass in heap-routing order (run_index ascending): B then A.
@@ -5217,6 +5291,7 @@ mod tests {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         };
 
         // Heap-routing order (run_index ascending): A then B.
@@ -5367,6 +5442,7 @@ mod tests {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         };
 
         // Heap-routing order (run_index ascending): newer file first — exactly what
@@ -5516,6 +5592,7 @@ mod tests {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         };
 
         let merged = merger
@@ -5650,6 +5727,7 @@ mod tests {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         };
 
         let merged = merger
@@ -5746,6 +5824,7 @@ mod tests {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         };
 
         let merged = merger
@@ -7147,6 +7226,7 @@ mod merge_property_tests {
                     max_purgeable_timestamp: None,
                     schema: schema.clone(),
                     schema_arc: std::sync::Arc::new(schema.clone()),
+                    _egress_slot: None,
                 };
                 let real_merged = merger.merge_partition_rows(merge_entries.clone())
                     .expect("merge_partition_rows must not fail");
@@ -7274,6 +7354,7 @@ mod merge_property_tests {
                     max_purgeable_timestamp: None,
                     schema: schema.clone(),
                     schema_arc: std::sync::Arc::new(schema.clone()),
+                    _egress_slot: None,
                 };
                 let merged = merger.merge_partition_rows(vec![live_entry, tombstone_entry])
                     .expect("merge_partition_rows must not fail");
@@ -7486,6 +7567,7 @@ mod streaming_tests {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         };
 
         // Drain all partitions and verify ordering + completeness.
@@ -9529,6 +9611,7 @@ mod issue_822_merge_ordering_semantics {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         }
     }
 
@@ -10427,6 +10510,7 @@ mod issue_886_empty_partition_skip {
             max_purgeable_timestamp: None,
             schema_arc: std::sync::Arc::new(schema.clone()),
             schema,
+            _egress_slot: None,
         }
     }
 
@@ -10726,6 +10810,7 @@ mod issue_912_row_tombstone_clustering_identity {
             max_purgeable_timestamp: None,
             schema: schema.clone(),
             schema_arc: std::sync::Arc::new(schema.clone()),
+            _egress_slot: None,
         };
         let merged = merger
             .merge_partition_rows(vec![e5, e9])
@@ -11119,6 +11204,7 @@ mod issue_873_preserve_row_tombstone_ldt {
             max_purgeable_timestamp: None,
             schema: schema.clone(),
             schema_arc: std::sync::Arc::new(schema.clone()),
+            _egress_slot: None,
         };
 
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -11667,6 +11753,7 @@ mod issue_845_gc_grace_purge {
             now_secs: None,
             purge_safe,
             max_purgeable_timestamp: None,
+            _egress_slot: None,
         };
 
         // PARTIAL compaction (purge_safe = false): the purgeable row tombstone is
@@ -11722,6 +11809,7 @@ mod issue_845_gc_grace_purge {
             now_secs: None,
             purge_safe,
             max_purgeable_timestamp: bound,
+            _egress_slot: None,
         };
 
         // A whole-partition range-tombstone CARRIER entry (issue #933): empty
@@ -12233,6 +12321,7 @@ mod issue_845_gc_grace_purge {
             max_purgeable_timestamp: None,
             schema: write_schema.clone(),
             schema_arc: std::sync::Arc::new(write_schema.clone()),
+            _egress_slot: None,
         };
 
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
