@@ -32,6 +32,7 @@ use cqlite_core::storage::sstable::reader::SSTableReader;
 use crate::admission::Admission;
 use crate::batch_bytes::DEFAULT_MAX_BATCH_BYTES;
 use crate::cancel::CancelFlag;
+use crate::egress_credit::EgressBudget;
 use crate::filter::{FilterError, ScanSpec};
 use crate::obs::{rpc_span, AbortContext, AbortReason, RpcMetrics};
 use crate::producer::{DirSource, MergeProducer, ProducerError};
@@ -76,7 +77,13 @@ impl From<ProducerError> for Status {
             | ProducerError::Predicate(_)
             // A panic on the blocking pool (issue #1476, roborev B1) is a server
             // fault surfaced mid-stream, same class as any other internal error.
-            | ProducerError::Panicked { .. } => Status::internal(msg),
+            | ProducerError::Panicked { .. }
+            // A violated egress-credit invariant (issue #2821) — fail closed as
+            // an internal fault rather than emit on a false account.
+            | ProducerError::EgressCredit(_)
+            // A closed/unavailable egress credit pool (issue #2821) — fail
+            // closed rather than stream uncharged.
+            | ProducerError::EgressCreditUnavailable(_) => Status::internal(msg),
         }
     }
 }
@@ -159,7 +166,9 @@ pub(crate) fn producer_error_abort_reason(e: &ProducerError) -> AbortReason {
         | ProducerError::Convert(_)
         | ProducerError::Predicate(_)
         | ProducerError::Discovery { .. }
-        | ProducerError::Panicked { .. } => AbortReason::Internal,
+        | ProducerError::Panicked { .. }
+        | ProducerError::EgressCredit(_)
+        | ProducerError::EgressCreditUnavailable(_) => AbortReason::Internal,
     }
 }
 
@@ -305,6 +314,11 @@ pub struct CqliteFlightService {
     /// `batch_size` or this cap trips first. Defaults to
     /// [`DEFAULT_MAX_BATCH_BYTES`] on every construction path.
     max_batch_bytes: usize,
+    /// Per-stream in-flight egress CAPACITY byte ceiling (issue #2821), handed
+    /// to every streaming `do_get`. A DIFFERENT currency from
+    /// [`Self::max_batch_bytes`] (Arrow PAYLOAD, one batch). Defaults to
+    /// `egress_credit::DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` everywhere.
+    egress_budget: EgressBudget,
 }
 
 impl CqliteFlightService {
@@ -341,6 +355,10 @@ impl CqliteFlightService {
             // every narrow shape. Opt out explicitly with
             // `with_max_batch_bytes(usize::MAX)`.
             max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+            // Issue #2821: follows #2825's posture, not admission's — a byte
+            // credit can only DELAY a producer, never turn a working query into
+            // an error. Opt out with `with_egress_budget(EgressBudget::unbounded())`.
+            egress_budget: EgressBudget::default(),
         }
     }
 
@@ -359,6 +377,22 @@ impl CqliteFlightService {
     /// (to log the configured value) and the byte-cap tests.
     pub fn max_batch_bytes(&self) -> usize {
         self.max_batch_bytes
+    }
+
+    /// Override the per-stream in-flight egress **capacity** byte ceiling (issue
+    /// #2821) — the wiring point for `--max-inflight-egress-bytes` /
+    /// `CQLITE_MAX_INFLIGHT_EGRESS_BYTES`, and the explicit
+    /// [`EgressBudget::unbounded`] opt-out for an embedder. Already active at the
+    /// default from [`Self::new`]/[`Self::with_admission`].
+    pub fn with_egress_budget(mut self, budget: EgressBudget) -> Self {
+        self.egress_budget = budget;
+        self
+    }
+
+    /// The per-stream egress byte ceiling in force (issue #2821) — for `main`
+    /// (to log the configured value) and the ceiling tests.
+    pub fn egress_budget(&self) -> EgressBudget {
+        self.egress_budget
     }
 
     /// The service's admission ceiling (issue #2420) — for `main` (to log the
@@ -888,6 +922,9 @@ impl CqliteFlightService {
                     schema_ref,
                     metrics,
                     crate::streaming::DO_GET_CHANNEL_CAPACITY,
+                    // Issue #2821: the configured per-stream egress byte ceiling
+                    // reaches the sole production streaming spawn site.
+                    self.egress_budget,
                     crate::streaming::StreamProbe::default(),
                     cancel,
                     timer,

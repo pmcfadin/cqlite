@@ -438,6 +438,17 @@ fuzz = []
 # NOT in defaults.
 bench-internals = []
 
+# Shared Arrow row-shape corpus (issues #2825/#2932) — gates a single
+# `#[doc(hidden)] pub mod export::arrow_shape_corpus` exposing the row shapes the
+# estimator's conservatism contract is validated against, so `cqlite-flight`'s
+# fail-closed published-capacity-bound guard can assert over the SAME corpus
+# instead of a hand-written subset (which is how the #2932 gap appeared). TEST
+# SUPPORT ONLY and NOT in defaults: without this feature the module does not
+# exist, so every default build / gate / CI run is byte-identical. `cqlite-flight`
+# enables it from its `[dev-dependencies]`, so the production flight binary never
+# links it.
+arrow-shape-corpus = ["arrow"]
+
 # Legacy heuristics support (backward compatibility for pre-5.0 formats)
 # NOT enabled in default CI configuration - opt-in only
 legacy-heuristics = []

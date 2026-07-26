@@ -63,34 +63,62 @@
 //! (below), so a batch whose rows all fit is cut BEFORE the row that would
 //! cross, never after it.
 //!
-//! # What this change guarantees, and what it does NOT (issue #2821)
+//! # What this bounds, and how it composes with the per-stream ceiling
 //!
-//! **Guaranteed here, today: a bound on ONE batch.** At the 4 MiB default, over
-//! a schema whose rows fit the cap, an emitted batch is ≤4 MiB of payload and
-//! therefore ≤`2 × 4 MiB = 8 MiB` of capacity — see
+//! **Bounded here: ONE batch.** At the 4 MiB default, over a schema whose rows
+//! fit the cap, an emitted batch is ≤4 MiB of payload and therefore
+//! ≤`2 × 4 MiB + 2 KiB × n_array_nodes = 8 MiB + ~2n KiB` of capacity — see
 //! [`worst_case_batch_capacity_bytes`], and add the wider row's bytes for a
-//! deployment whose rows can individually exceed the cap.
+//! deployment whose rows can individually exceed the cap. (The `+ 2 KiB × nodes`
+//! term is not decoration: on a tiny batch the fixed per-array-node allocations
+//! ARE the whole reported size — see [`BATCH_BYTES_PER_COLUMN_SLACK`].)
 //!
-//! **NOT guaranteed here: per-stream egress residency.** The `do_get` path is
-//! still **count**-bounded, not byte-bounded: `streaming.rs`'s
-//! `DO_GET_CHANNEL_CAPACITY` is 4 batches plus up to ~3 more in flight
-//! (`IN_FLIGHT_ALLOWANCE`), so worst-case resident egress is
-//! `~7 × 8 MiB ≈ 56 MiB` per stream, NOT 14 MiB. The
-//! `get_array_memory_size()` reading that `streaming.rs` takes per batch is fed
-//! to **metrics only** — no admission or backpressure decision consumes it — so
-//! it does not bound residency. What this change does for that number is make it
-//! *finite and stated*: before it, one batch was `batch_size × row_width`, so the
-//! product was unbounded in schema shape.
+//! **Bounded next door: per-stream egress RESIDENCY.** Issue #2821 delivered
+//! `cqlite_flight::egress_credit` — a per-stream in-flight ceiling denominated in
+//! **capacity** bytes (`--max-inflight-egress-bytes`, default
+//! `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` = 12 MiB), enforced by reserving credit
+//! BEFORE each batch is materialized and releasing it when the batch has left the
+//! stream. So `do_get` is no longer merely count-bounded: the
+//! `get_array_memory_size()` reading `streaming.rs` takes is still fed to metrics,
+//! but the reservation path now makes a real backpressure decision in the same
+//! currency.
 //!
-//! **The composition becomes true only once #2821 lands.** When #2821 enforces a
-//! per-stream in-flight ceiling denominated in **capacity** currency, its
-//! guaranteed bound is `ceiling + one maximum batch`; with a 6 MiB ceiling that
-//! is `6 + 8 = 14 MiB < 16Mi`, inside B4 at concurrency 1. (The naive
-//! `4 + 8 = 12 MiB` reading of the task framing mixes payload and capacity: a
-//! 4 MiB *payload* cap is an 8 MiB *capacity* batch, so an 8 MiB ceiling would
-//! land at exactly 16 MiB with zero headroom.) Until that ceiling exists and
-//! actually gates production, the 14 MiB figure is a TARGET for the dependent
-//! issue, not a property of this tree.
+//! **The delivered composition, in capacity currency:**
+//!
+//! ```text
+//! peak SERVER-SIDE in-flight egress capacity
+//!     <= max(ceiling, one maximum batch)
+//!      = max(12 MiB, 2 * 4 MiB + 2 KiB * nodes)
+//!      = 12 MiB   <=  16 MiB (B4 at concurrency 1)
+//! ```
+//!
+//! Both sides of that `<=` are governed egress capacity. The producer's row
+//! buffer and the encoder's queued `FlightData` are further server-side terms
+//! that live in the remaining B4 headroom and are NOT deducted here, so this is
+//! not a total per-query working-set bound (roborev job 12 F3).
+//!
+//! **Read "SERVER-SIDE" literally.** The governed quantity is the capacity bytes
+//! the SERVER holds on the egress path — rows being materialized, batches queued
+//! in the `do_get` channel, and yielded batches the consumer has not yet dropped.
+//! It is NOT a bound on total resident bytes including consumer-held batches: a
+//! batch a client retains after receiving it is the client's memory, which the
+//! server can neither free nor reuse, so the governor stops charging for it (that
+//! release is `MeteredDoGetStream::open_safety_valve`, and it is also what stops
+//! a retaining consumer from wedging the stream). A consumer that accumulates
+//! every batch it is handed is bounded by its OWN budget, not by this figure.
+//!
+//! The ceiling deliberately sits ABOVE one maximum batch: a reservation is taken
+//! at the FULL published worst case before the batch exists, so a ceiling that
+//! merely equals it would clamp every byte-cap-cut batch to the whole pool and run
+//! the stream lock-step — see `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`.
+//!
+//! It is a `max`, not the `ceiling + one maximum batch` sum this module's
+//! pre-#2821 text projected: reserve-before-materialize removed the additive term
+//! (which existed only because a parked producer could hold a materialized but
+//! UNCHARGED batch). The `max` survives because a batch larger than the whole
+//! ceiling is clamped to the pool total and is then the only thing resident.
+//! (The naive `4 + 8 = 12 MiB` reading of the task framing mixes payload and
+//! capacity: a 4 MiB *payload* cap is an 8 MiB *capacity* batch.)
 //!
 //! # Liveness
 //!
@@ -146,12 +174,45 @@ pub const BATCH_BYTES_CAPACITY_FACTOR: usize = 2;
 /// Fixed capacity slack allowed **per Arrow array node**, on top of
 /// [`BATCH_BYTES_CAPACITY_FACTOR`] × cap.
 ///
-/// Every Arrow array carries small fixed allocations that do not scale with the
-/// payload (a 64-byte-aligned minimum allocation per buffer, the validity
-/// buffer, an empty-array's offsets buffer). On a batch that is mostly one wide
-/// column these round to nothing; on a wide-schema batch of tiny rows they are
-/// the whole reported size, so a capacity bound stated purely as a multiple of
-/// the payload would be wrong for that shape.
+/// Every Arrow array carries fixed allocations that do not scale with the
+/// payload (the `ArrayData`/`Buffer` structs themselves, a 64-byte-aligned
+/// minimum allocation per buffer, the validity buffer, an empty-array's offsets
+/// buffer — and, dominating all of them, the **1 KiB default values buffer**
+/// `GenericStringBuilder`/`GenericBinaryBuilder` allocate, which every `Utf8` or
+/// `Binary` column carries however few bytes it holds). On a batch that is mostly
+/// one wide column these round to nothing; on a batch of tiny rows they are the
+/// whole reported size, so a capacity bound stated purely as a multiple of the
+/// payload would be wrong for that shape.
+///
+/// **2048, corrected from 1024 (issue #2932, found in the #2821 review).** With
+/// 1024 this function was NOT an upper bound for text/blob schemas. 1024 was
+/// under the real
+/// fixed cost of the commonest node there is: a `Utf8`/`Binary` array built by
+/// `export::arrow_convert` reports **1208 B** at any length from 0 up (arrow 53 —
+/// 1024 values buffer + 64 offsets + the struct overhead). A two-`text`-column
+/// batch of three short rows therefore reports 2416 B against a `2 × payload +
+/// 1024 × 2` = 2186 B bound — which #2821's fail-closed reservation turned from a
+/// silently-loose doc claim into a terminal `do_get` error.
+///
+/// **Enforcement, precisely.** Two tests, and the claim is exactly what they
+/// assert — no more:
+///
+/// * `batch_bytes_tests::the_capacity_bound_holds_for_tiny_batches` pins the six
+///   hand-written shapes including the exact two-`text`-column regression.
+/// * `batch_bytes_tests::the_capacity_bound_holds_over_the_shared_shape_corpus`
+///   asserts `get_array_memory_size() <= worst_case_batch_capacity_bytes(Σ
+///   estimate, nodes, 0)` over EVERY shape in the SHARED corpus
+///   (`cqlite_core::export::arrow_shape_corpus` — the same shapes the estimator's
+///   conservatism contract is validated against), each at full row count AND
+///   truncated to one row. That reaches `FixedSizeBinary(16)` (uuid/timeuuid),
+///   boolean/decimal/varint/timestamp/date/time/counter, tuple and UDT
+///   (`Struct`), `set`, 8-deep nesting, `frozen`, and the `cql_type = None` flat
+///   dispatch arms that route through different builders.
+///
+/// Measured worst case across that corpus is **1188 B per node** (a one-row
+/// `Utf8` batch), so 2048 carries 860 B of margin; the guard FAILS at 1024. The
+/// cost is 1 KiB more reservation per array node — 3 KiB on a three-node schema
+/// against a multi-MiB batch.
 ///
 /// Denominated in array NODES, not output columns: a flat scalar column is one
 /// node, but a `list<text>` column is two (the `ListArray` and its `Utf8`
@@ -161,7 +222,7 @@ pub const BATCH_BYTES_CAPACITY_FACTOR: usize = 2;
 /// term under-states their fixed allocations. (At the 4 MiB default the
 /// `2 × cap` term dominates by three orders of magnitude either way; the
 /// distinction bites only for a tiny cap over a deeply nested schema.)
-pub const BATCH_BYTES_PER_COLUMN_SLACK: usize = 1024;
+pub const BATCH_BYTES_PER_COLUMN_SLACK: usize = 2048;
 
 /// Whether the caller should finish the current batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,10 +397,11 @@ pub fn split_rows_into_batches<'a>(
 ///     + BATCH_BYTES_PER_COLUMN_SLACK * n_array_nodes
 /// ```
 ///
-/// This is the quantity issue #2821's per-stream ceiling will compose with to
-/// state its `ceiling + one maximum batch` bound against B4's ≤16Mi. Until that
-/// ceiling lands, egress residency is count-bounded, not byte-bounded — see the
-/// module documentation.
+/// This is the quantity issue #2821's per-stream ceiling composes with to state
+/// its delivered `max(ceiling, one maximum batch)` bound against B4's ≤16Mi, and
+/// the exact conversion `cqlite_flight::egress_credit` uses to turn a payload
+/// estimate into the pre-materialization capacity reservation — see the module
+/// documentation.
 ///
 /// The `max(..)` term is honest, not slack. The boundary is test-then-push, so a
 /// batch is cut BEFORE the row that would cross the cap — but a row cannot be
