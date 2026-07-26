@@ -328,8 +328,11 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
     `test_alloc_probe` counting allocator. **Measured** over 8 rows in one partition: **narrow (3 cols) = 41
     allocations (5/row)**, **wide (32 cols) = 273 (34/row)** — ~1 allocation per cell plus ~2 fixed per row.
     The dominant per-row cost is the #1644 retention compaction (`Value::into_owned`'s TIER-1 copy of a small
-    payload), NOT hashing and NOT key handling. Verified RED-on-revert: dropping the per-cell intern (#1334)
-    takes narrow 41 → **89** and wide 273 → **785** (exactly +2 per cell).
+    payload), NOT hashing and NOT key handling. Two differential controls, both verified RED-on-revert:
+    dropping the per-cell intern (#1334) takes narrow 41 → **89** and wide 273 → **785** (exactly +2 per
+    cell), and dropping the map's capacity hint (#1584) takes narrow 41 → **49** (+1 per row of rehash
+    growth). Each property is gated by a strict `<` against a pre-fix reference, not by the absolute
+    constant alone.
   - **Scope correction (measured).** #1883's premise — that this ratchet would gate #1447/#1445/#1446 — does
     not hold: those are **binding-layer** fixes (#1447 = `bindings/node` `ExecuteNativeTask::compute`; #1446 =
     Node JsString interning; #1445 = Python `Row` ordering). Reverting the clone→move *in this crate* is

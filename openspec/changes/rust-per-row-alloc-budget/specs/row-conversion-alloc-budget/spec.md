@@ -33,10 +33,11 @@ slack SHALL be documented with its reason.
 
 ### Requirement: The ratchet turns the row-conversion allocation properties this crate owns into regression gates
 
-The per-row allocation-budget test SHALL be shaped so that emitting fresh per-cell key strings — reverting the
-`Arc<str>` column-name interning the conversion relies on (#1334) — pushes the measured allocation count above
-the baseline, failing the test; restoring the intern returns it to green. The negative-control delta SHALL be
-documented in-test.
+The per-row allocation-budget test SHALL gate BOTH allocation properties this conversion owns, each with its own
+differential control asserted by a strict `<` against a reference implementation of the pre-fix behaviour (an
+absolute constant alone is insufficient — a constant can be re-measured upward by a later reader, a differential
+cannot): (a) per-cell `Arc<str>` column-name interning (#1334), and (b) the single sized value map (#1584).
+Restoring each fix returns the test to green. The negative-control deltas SHALL be documented in-test.
 
 **Scope correction (measured, supersedes the original #1447/#1445/#1446 framing).** #1883 was filed on the
 premise that this ratchet would gate #1447 (clone→move) and #1445/#1446 (key interning). Those three fixes are
@@ -56,6 +57,12 @@ binding crates, tracked as follow-up issue #2894.
 - **THEN** the measured allocations grow with the projected-column count and exceed the baseline, failing the
   test (measured: narrow 41 → 89, wide 273 → 785, exactly +2 allocations per cell)
 - **AND** restoring the interned handle returns the test to PASS
+
+#### Scenario: Dropping the row map's capacity hint trips the budget
+- **GIVEN** the per-row allocation-budget test at its measured baseline
+- **WHEN** the row-value map is built unsized (`HashMap::new()`) instead of capacity-hinted (#1584)
+- **THEN** rehash growth adds one allocation per row and the test FAILS (measured: narrow 41 → 49)
+- **AND** restoring the capacity hint returns the test to PASS
 
 #### Scenario: The clone→move control is recorded as measured-neutral rather than asserted
 - **GIVEN** the per-row allocation-budget test at its measured baseline
