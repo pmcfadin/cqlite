@@ -57,10 +57,11 @@ use std::time::Instant;
 
 /// One of the five in-`stream` data-plane sub-phases (issue #2819). Which thread
 /// records each is fixed by the pipeline architecture: `ColdFault`/`Decompress`
-/// on the per-SSTable producer thread (where the page-in + decompress run
-/// synchronously), `Merge`/`Encode` on the merge consumer thread, `GrpcWrite`
-/// on the egress thread. The flight side maps these to the bounded
-/// `cqlite.rpc.phase` values `stream_cold_fault` / `stream_decompress` /
+/// on the per-SSTable PRODUCER thread(s) (where the page-in + decompress run
+/// synchronously), and `Merge`/`Encode`/`GrpcWrite` all on the MERGE-CONSUMER
+/// `spawn_blocking` thread (`GrpcWrite` is `ChannelSink::emit`, which runs on that
+/// thread, NOT a separate egress thread). The flight side maps these to the
+/// bounded `cqlite.rpc.phase` values `stream_cold_fault` / `stream_decompress` /
 /// `stream_merge` / `stream_encode` / `stream_grpc_write`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamSubPhase {
@@ -79,11 +80,12 @@ pub enum StreamSubPhase {
 /// Per-request accumulator of in-`stream` sub-phase wall time, in nanoseconds.
 ///
 /// Five `AtomicU64` counters so RAII scopes running on the CONCURRENT pipeline
-/// threads (feed / merge consumer / egress) all `fetch_add` into the same shared
-/// instance lock-free. The sub-phases OVERLAP in wall-clock (the pipeline is
-/// concurrent), so the counters are NOT expected to sum to the `stream` phase's
-/// duration — the load-bearing signal is the cold−warm delta on the cold-fault
-/// counter (issue #2819, amended accounting model).
+/// threads (the per-SSTable producer thread(s) and the merge-consumer thread) all
+/// `fetch_add` into the same shared instance lock-free. The sub-phases OVERLAP in
+/// wall-clock (the pipeline is concurrent), so the counters are NOT expected to
+/// sum to the `stream` phase's duration — the load-bearing signal is the
+/// cold−warm delta on the cold-fault counter (issue #2819, amended accounting
+/// model).
 #[derive(Debug, Default)]
 pub struct StreamSubPhaseTimings {
     cold_fault_nanos: AtomicU64,
@@ -119,7 +121,7 @@ impl StreamSubPhaseTimings {
     }
 
     /// Read `phase`'s accumulated nanoseconds (a snapshot; a concurrently-running
-    /// feed thread may add more after this read — acceptable, the emission is a
+    /// producer thread may add more after this read — acceptable, the emission is a
     /// best-effort per-RPC snapshot at teardown).
     pub fn nanos(&self, phase: StreamSubPhase) -> u64 {
         self.counter(phase).load(Ordering::Relaxed)
@@ -199,8 +201,8 @@ pub fn pull_wait_nanos() -> u64 {
 
 /// The current thread's installed sub-phase sink, if any. A scan-thread spawn
 /// site calls this on the PARENT thread and re-[`install`]s the captured value on
-/// the CHILD thread, so the feed thread's page-in/decompress reach the request's
-/// accumulator.
+/// the CHILD thread, so the per-SSTable producer thread's page-in/decompress reach
+/// the request's accumulator.
 pub fn current() -> Option<Arc<StreamSubPhaseTimings>> {
     CURRENT_SINK.with(|c| c.borrow().clone())
 }

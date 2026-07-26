@@ -944,6 +944,15 @@ impl SSTableReader {
     ) -> Result<Vec<u8>> {
         use tokio::io::AsyncReadExt;
 
+        // Issue #2819: attribute the UNCOMPRESSED body page-in (CRC verify + disk
+        // read) to `stream_cold_fault` — this is the Summary-guided / full-index
+        // scan read for an uncompressed table (CQLite's own write-surface output
+        // plus uncompressed Cassandra tables), so cold-fault must record here too,
+        // not only on the compressed window. No `stream_decompress` (correctly
+        // absent). `scoped` is None (zero cost) with no flight sink installed.
+        let _cold = crate::observability::stream_subphase::scoped(
+            crate::observability::StreamSubPhase::ColdFault,
+        );
         let size = u32::try_from(len).map_err(|_| {
             Error::corruption(format!(
                 "uncompressed read length {len} exceeds u32 range for CRC verification \
