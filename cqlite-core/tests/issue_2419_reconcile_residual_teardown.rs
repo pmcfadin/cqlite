@@ -48,11 +48,13 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-/// Rows per input SSTable. MUST exceed the merge's 256-entry channel capacity
-/// (`STREAMING_CHANNEL_CAPACITY`, private to `merge/mod.rs`) so every producer
-/// fills its own channel and blocks on `send`, staying backed up (none received)
-/// until teardown — mirroring `issue_2419_egress_depth_gauge.rs`'s identical
-/// rationale.
+/// Rows per input SSTable. MUST be ≥ the merge's MAXIMUM 256-entry channel
+/// capacity (`STREAMING_CHANNEL_CAPACITY`, private to `merge/mod.rs`) so every
+/// producer fills its own channel and blocks on `send`, staying backed up (none
+/// received) until teardown — mirroring `issue_2419_egress_depth_gauge.rs`'s
+/// identical rationale. Issue #2765: the channel capacity is now ADAPTIVE (up to
+/// 256), so the backpressure threshold below is derived from the live per-channel
+/// capacity, not the hard-coded 256.
 const ROWS_PER_INPUT: i32 = 400;
 const NUM_INPUTS: usize = 4;
 
@@ -200,20 +202,29 @@ fn cancelled_backed_up_merge_reconciles_egress_depth_to_baseline_on_drop() {
 
     // Construct a CANCELLABLE merger WITHOUT stepping: `KWayMerger::new` seeds no
     // heap ("populated on first step"), so every producer races ahead filling its
-    // own 256-entry channel and blocks on `send` once full — none received yet.
-    // Because we never step, `received_count` stays 0 and the buffered entries
-    // ARE the residual the teardown must reconcile. `new_cancellable` (vs `new`)
-    // drives the cancel-aware Drop path used by the Flight `do_get` merge.
+    // own egress channel (capacity up to 256, adaptive under concurrent merges —
+    // #2765) and blocks on `send` once full — none received yet. Because we never
+    // step, `received_count` stays 0 and the buffered entries ARE the residual
+    // the teardown must reconcile. `new_cancellable` (vs `new`) drives the
+    // cancel-aware Drop path used by the Flight `do_get` merge.
     let cancel = ScanCancel::default();
     let merger = KWayMerger::new_cancellable(inputs, &schema, cancel.clone())
         .expect("KWayMerger::new_cancellable");
+
+    // Derive the threshold from the LIVE adaptive per-channel capacity (reading
+    // AFTER construction only ever LOWERS the estimate, keeping the threshold
+    // reachable) instead of assuming a fixed 256 — otherwise an operator setting
+    // `CQLITE_EGRESS_ROW_BUDGET` low would deterministically 10s-timeout here.
+    let per_channel_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
+        cqlite_core::storage::write_engine::merge::active_merge_count(),
+    );
 
     // MID-MERGE: poll (bounded, fail-loud) until the gauge POSITIVELY records a
     // reading proving multiple channels are genuinely backed up concurrently —
     // never inferred from an absent/stale window. If `channel_depth::sent()` were
     // unwired, this loop would exhaust its deadline and fail explicitly. This
     // reading is the proof that a genuine `residual > 0` exists BEFORE teardown.
-    let backpressure_threshold = (NUM_INPUTS as f64) * 150.0;
+    let backpressure_threshold = (NUM_INPUTS as f64) * (per_channel_cap as f64) * 0.5;
     let mid_deadline = Instant::now() + Duration::from_secs(10);
     let mut mid_reached = false;
     let mut mid_last_seen: Option<f64> = None;

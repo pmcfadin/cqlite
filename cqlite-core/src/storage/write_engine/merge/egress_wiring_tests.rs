@@ -295,3 +295,43 @@ fn needs_scan_point_read_shares_snapshot_and_registers_one_slot() {
         "a channel-backed point read must occupy exactly one active-merge slot"
     );
 }
+
+/// Low #3 — end-to-end proof the adaptive throttle actually FIRES in production
+/// (not just against the private atomic): build and HOLD `budget/MAX_CAP + 1`
+/// real `KWayMerger`s so the next merge registers past the 256 clamp, then build
+/// one more and assert EVERY one of its source channels got a capacity strictly
+/// below `MAX_CAP`. A refactor that made `begin_merge` return `MAX_CAP` while
+/// still incrementing `ACTIVE` (silently dead throttle) fails HERE. Ambient
+/// merges from parallel tests only raise the live count → lower the cap further,
+/// so `< MAX_CAP` is monotone-safe (cannot flake high).
+#[test]
+fn concurrency_drives_real_per_channel_cap_below_max() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut engine = WriteEngine::new(config_for(&temp)).expect("engine");
+    let paths = flush_n_sstables_sync(&mut engine, 1);
+    let schema = create_test_schema();
+
+    // `budget / MAX_CAP` merges exactly saturate the 256 clamp; one MORE forces
+    // the next snapshot strictly below it (2048/9 = 227 < 256 at the defaults).
+    let hold_count = egress_budget::EGRESS_ROW_BUDGET / egress_budget::MAX_CAP + 1;
+    let mut held = Vec::with_capacity(hold_count);
+    for _ in 0..hold_count {
+        held.push(
+            KWayMerger::new_cancellable(paths.clone(), &schema, ScanCancel::default())
+                .expect("held merger"),
+        );
+    }
+    // Built while all `hold_count` mergers are still alive (owned by `held`).
+    let extra = KWayMerger::new_cancellable(paths.clone(), &schema, ScanCancel::default())
+        .expect("extra merger");
+    let caps = source_caps(&extra);
+    assert!(!caps.is_empty(), "the extra merger has an egress channel");
+    assert!(
+        caps.iter().all(|&c| c < egress_budget::MAX_CAP),
+        "with {hold_count}+ concurrent merges the new merge's per-channel caps \
+         must fall below {} — the adaptive throttle firing end-to-end (got \
+         {caps:?})",
+        egress_budget::MAX_CAP
+    );
+    drop(held); // keep the held mergers alive until AFTER the assertion above
+}

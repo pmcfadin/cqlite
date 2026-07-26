@@ -573,29 +573,13 @@ mod channel_depth;
 // Adaptive egress budget (issue #2765): process-global active-merge count that
 // makes the per-merge `sync_channel` capacity track a FIXED aggregate row
 // budget instead of a fixed 256 per merge. Sibling module to bound this file.
+// Also owns the doc-hidden `egress_channel_capacity_for` / `active_merge_count`
+// integration-test hooks and the `KWayMerger::with_egress_slot` builder (kept
+// there, not inline here, per the #1116 campsite file-size rule).
 #[cfg(feature = "write-support")]
 mod egress_budget;
-
-/// Test/observability hook (issue #2765): the adaptive per-channel egress
-/// capacity a NEW merge would receive at `active_merges` concurrent merges —
-/// `clamp(EGRESS_ROW_BUDGET / active_merges, MIN_CAP, 256)`. Doc-hidden; lets an
-/// integration test derive an ADAPTIVE backpressure threshold instead of
-/// hard-coding the pre-#2765 fixed 256.
 #[cfg(feature = "write-support")]
-#[doc(hidden)]
-pub fn egress_channel_capacity_for(active_merges: usize) -> usize {
-    egress_budget::capacity_for(active_merges)
-}
-
-/// Test/observability hook (issue #2765): the live process-global count of
-/// in-flight k-way merges (the `cqlite.merge.active_merges` gauge value).
-/// Doc-hidden; used with [`egress_channel_capacity_for`] to compute the current
-/// adaptive per-channel capacity from an integration test.
-#[cfg(feature = "write-support")]
-#[doc(hidden)]
-pub fn active_merge_count() -> usize {
-    egress_budget::active_count()
-}
+pub use egress_budget::{active_merge_count, egress_channel_capacity_for};
 
 // Issue #2361: join-on-drop / backpressured-teardown coverage for the streaming
 // merge adapter.
@@ -2721,27 +2705,9 @@ impl KWayMerger {
         self
     }
 
-    /// Attach the adaptive egress-budget slot guard (issue #2765) to a merger
-    /// whose source channels were opened OUTSIDE its constructor — the point-read
-    /// builders (`build_single_partition_merger*`) open their fail-safe adapters,
-    /// with the shared capacity snapshot, before calling
-    /// [`from_row_iterators`](Self::from_row_iterators), then move the matching
-    /// guard onto the built merger here so it decrements exactly once at merge
-    /// end. See [`egress_budget::begin_merge`].
-    ///
-    /// Takes the guard BY VALUE (not `Option`), so it is impossible to call this
-    /// with `None` and silently un-register a live merge; the `debug_assert`
-    /// additionally catches a double-attach that would drop a still-live guard
-    /// early and under-count concurrency.
-    #[must_use]
-    pub(crate) fn with_egress_slot(mut self, egress_slot: egress_budget::ActiveMergeGuard) -> Self {
-        debug_assert!(
-            self._egress_slot.is_none(),
-            "with_egress_slot must not overwrite a live active-merge slot"
-        );
-        self._egress_slot = Some(egress_slot);
-        self
-    }
+    // `with_egress_slot` (issue #2765) lives in `egress_budget.rs` (its own
+    // `impl KWayMerger` block) to keep this over-threshold file from growing
+    // (#1116 campsite rule).
 
     /// Perform a full merge to the output writer
     ///

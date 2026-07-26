@@ -169,12 +169,20 @@ static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// Record the operator-facing `cqlite.merge.active_merges` gauge (issue #2765),
 /// mirroring the `producer_gauge::record` pattern. Called ONLY for the real
-/// global path (`begin_merge`), never for the per-test private-atomic path, so
-/// the gauge always reflects the true process-wide concurrency.
-fn record_active(active: usize) {
+/// global path (`begin_merge` / its guard's drop), never for the per-test
+/// private-atomic path, so the gauge always reflects the true process-wide
+/// concurrency.
+///
+/// Low #4: re-reads [`ACTIVE`] HERE, immediately before publishing, rather than
+/// recording a value latched before a concurrent begin/drop. The `fetch_add`/
+/// `fetch_sub` and this record are not one atomic, so recording the pre-computed
+/// count could publish out-of-order samples that under-report the live level;
+/// re-reading makes the publish last-write-wins-convergent to the current count
+/// (still lock-free).
+fn record_active() {
     observability::record_gauge(
         observability::catalog::MERGE_ACTIVE_MERGES,
-        active as i64,
+        ACTIVE.load(Ordering::SeqCst) as i64,
         &[],
     );
 }
@@ -242,8 +250,11 @@ pub(super) fn begin_merge() -> (usize, ActiveMergeGuard) {
 fn begin_on(counter: &'static AtomicUsize, record: bool) -> (usize, ActiveMergeGuard) {
     let active = counter.fetch_add(1, Ordering::SeqCst) + 1;
     if record {
-        record_active(active);
+        // Low #4: publish the freshest global level, not the latched `active`.
+        record_active();
     }
+    // `capacity_for` snapshots from THIS merge's own post-increment count, which
+    // is what the merge must be sized by — independent of the gauge re-read.
     (capacity_for(active), ActiveMergeGuard { counter, record })
 }
 
@@ -260,24 +271,78 @@ pub(super) struct ActiveMergeGuard {
 
 impl Drop for ActiveMergeGuard {
     fn drop(&mut self) {
-        let active = self.counter.fetch_sub(1, Ordering::SeqCst) - 1;
+        self.counter.fetch_sub(1, Ordering::SeqCst);
         if self.record {
-            record_active(active);
+            // Low #4: re-read the global count so a concurrent begin/drop can't
+            // leave the gauge under-reporting the live level.
+            record_active();
         }
     }
+}
+
+impl super::KWayMerger {
+    /// Attach the adaptive egress-budget slot guard (issue #2765) to a merger
+    /// whose source channels were opened OUTSIDE its constructor — the point-read
+    /// builders (`build_single_partition_merger*`) open their fail-safe adapters,
+    /// with the shared capacity snapshot, before calling `from_row_iterators`,
+    /// then move the matching guard onto the built merger here so it decrements
+    /// exactly once at merge end. See [`begin_merge`].
+    ///
+    /// Takes the guard BY VALUE (not `Option`), so it is impossible to call this
+    /// with `None` and silently un-register a live merge; the `debug_assert`
+    /// additionally catches a double-attach that would drop a still-live guard
+    /// early and under-count concurrency. Kept in this sibling module (not
+    /// `merge/mod.rs`) to bound that over-threshold file (#1116).
+    #[must_use]
+    pub(crate) fn with_egress_slot(mut self, egress_slot: ActiveMergeGuard) -> Self {
+        debug_assert!(
+            self._egress_slot.is_none(),
+            "with_egress_slot must not overwrite a live active-merge slot"
+        );
+        self._egress_slot = Some(egress_slot);
+        self
+    }
+}
+
+/// Doc-hidden integration-test hook (issue #2765): the adaptive per-channel
+/// egress capacity a NEW merge would receive at `active_merges` concurrent
+/// merges — `clamp(EGRESS_ROW_BUDGET / active_merges, MIN_CAP, 256)`. Lets an
+/// integration test derive an ADAPTIVE backpressure threshold instead of
+/// hard-coding the pre-#2765 fixed 256. Re-exported from `merge`.
+#[doc(hidden)]
+pub fn egress_channel_capacity_for(active_merges: usize) -> usize {
+    capacity_for(active_merges)
+}
+
+/// Doc-hidden integration-test hook (issue #2765): the live process-global count
+/// of in-flight k-way merges (the `cqlite.merge.active_merges` gauge value).
+/// Used with [`egress_channel_capacity_for`] to compute the current adaptive
+/// per-channel capacity from an integration test. Re-exported from `merge`.
+#[doc(hidden)]
+pub fn active_merge_count() -> usize {
+    active_count()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Evaluate the capacity kernel against the SHIPPED DEFAULTS, bypassing the
+    /// env-reading `capacity_for` — so exporting `CQLITE_EGRESS_*` (an operator
+    /// knob this change added) can never break these compile-time-constant
+    /// assertions. The env plumbing itself is covered by
+    /// `env_knobs_resolve_validate_and_drive_capacity`.
+    fn cap_default(active: usize) -> usize {
+        capacity_from(active, EGRESS_ROW_BUDGET, MIN_CAP)
+    }
+
     #[test]
     fn low_concurrency_resolves_to_max_cap() {
         // Criterion 1: a single active merge gets the unchanged 256 cap.
-        assert_eq!(capacity_for(1), MAX_CAP);
+        assert_eq!(cap_default(1), MAX_CAP);
         assert_eq!(MAX_CAP, 256);
         // Zero active (defensive) is floored to 1 → MAX_CAP, never a div-by-zero.
-        assert_eq!(capacity_for(0), MAX_CAP);
+        assert_eq!(cap_default(0), MAX_CAP);
     }
 
     #[test]
@@ -321,17 +386,17 @@ mod tests {
     #[test]
     fn capacity_shrinks_with_concurrency_but_never_below_min() {
         // Budget divided among concurrent merges, clamped to the ceiling.
-        assert_eq!(capacity_for(8), EGRESS_ROW_BUDGET / 8); // exactly 256 (== MAX_CAP)
-        assert_eq!(capacity_for(16), EGRESS_ROW_BUDGET / 16); // 128
-                                                              // Very high concurrency clamps to MIN_CAP (never 0 → forward progress).
-        assert_eq!(capacity_for(usize::MAX), MIN_CAP);
+        assert_eq!(cap_default(8), EGRESS_ROW_BUDGET / 8); // exactly 256 (== MAX_CAP)
+        assert_eq!(cap_default(16), EGRESS_ROW_BUDGET / 16); // 128
+                                                             // Very high concurrency clamps to MIN_CAP (never 0 → forward progress).
+        assert_eq!(cap_default(usize::MAX), MIN_CAP);
         assert!(MIN_CAP >= 1, "MIN_CAP must guarantee at least one slot");
     }
 
     #[test]
     fn per_slot_bound_holds_and_min_cap_floor_is_honest() {
         // The per-ACTIVE-MERGE-SLOT invariant (see module doc "Honest bound"):
-        // at any concurrency `a`, one merge's per-channel share `capacity_for(a)`
+        // at any concurrency `a`, one merge's per-channel share `cap_default(a)`
         // times `a` stays within the budget — whereas the pre-change fixed cap
         // of 256 gives `a × 256`, blowing past the budget for a > 8 (a == 8
         // exactly saturates it: 8 × 256 == 2048). Beyond the clamp point the
@@ -344,7 +409,7 @@ mod tests {
         let floor_point = EGRESS_ROW_BUDGET / MIN_CAP; // 256: lowest `a` with cap==MIN_CAP
         assert!(floor_point > clamp_point);
         for a in 1..=(floor_point + 64) {
-            let cap = capacity_for(a);
+            let cap = cap_default(a);
             assert!((MIN_CAP..=MAX_CAP).contains(&cap), "cap {cap} within clamp");
             // Per-slot product never exceeds the budget.
             assert!(
