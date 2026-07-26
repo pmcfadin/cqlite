@@ -40,6 +40,7 @@ use cqlite_core::RowKey;
 use crate::agg::{AggError, AggPlan};
 use crate::batch_bytes::{BatchByteCap, DEFAULT_MAX_BATCH_BYTES};
 use crate::cancel::CancelFlag;
+use crate::egress_credit::{CreditedBatch, EgressReservation};
 use crate::filter::ScanSpec;
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
 use crate::ticket::Aggregation;
@@ -100,6 +101,13 @@ pub enum ProducerError {
         /// extracted verbatim; anything else is a fixed placeholder).
         message: String,
     },
+    /// A materialized batch reported MORE capacity than the credit reserved for
+    /// it before it was built (issue #2821). The estimator-conservatism contract
+    /// this change's memory bound rests on has been violated, so the stream fails
+    /// closed with a terminal internal error rather than silently exceeding the
+    /// published per-stream ceiling.
+    #[error(transparent)]
+    EgressCredit(#[from] crate::egress_credit::EgressCreditInvariant),
 }
 
 /// Source of the SSTable `Data.db` files to merge for one table.
@@ -394,9 +402,25 @@ impl PartitionStepper for KWayMerger {
 /// produced. A sink `emit` may report [`ProducerError::Cancelled`] to stop the
 /// merge — the streaming sink returns it when the consumer (client) is gone.
 pub(crate) trait BatchSink {
-    /// Accept one produced batch, or return [`ProducerError::Cancelled`] to stop
-    /// the merge (the consumer has disconnected).
-    fn emit(&mut self, batch: RecordBatch) -> Result<(), ProducerError>;
+    /// Reserve egress credit for a batch whose realized
+    /// `RecordBatch::get_array_memory_size()` will be at most
+    /// `capacity_bytes`, BEFORE the batch is materialized (issue #2821).
+    ///
+    /// `capacity_bytes` is in CAPACITY currency — the caller
+    /// ([`MergeProducer::flush_credited`]) has already converted the producer's
+    /// PAYLOAD estimate through
+    /// [`crate::batch_bytes::worst_case_batch_capacity_bytes`]. A sink with no
+    /// egress residency to govern (the collect/parity path) returns
+    /// [`EgressReservation::inert`], which needs no Tokio runtime.
+    ///
+    /// May park (applying backpressure) and may report
+    /// [`ProducerError::Cancelled`] when the consumer disconnects while parked.
+    fn reserve(&mut self, capacity_bytes: usize) -> Result<EgressReservation, ProducerError>;
+
+    /// Accept one produced batch and the credit charged for it, or return
+    /// [`ProducerError::Cancelled`] to stop the merge (the consumer has
+    /// disconnected).
+    fn emit(&mut self, batch: CreditedBatch) -> Result<(), ProducerError>;
 }
 
 /// Collect-into-`Vec` sink — the retained, byte-identical parity path used by
@@ -405,8 +429,16 @@ pub(crate) trait BatchSink {
 pub(crate) struct CollectSink<'a>(pub(crate) &'a mut Vec<RecordBatch>);
 
 impl BatchSink for CollectSink<'_> {
-    fn emit(&mut self, batch: RecordBatch) -> Result<(), ProducerError> {
-        self.0.push(batch);
+    /// No-op (issue #2821): the collect path materializes into a `Vec` the
+    /// caller already budgets for — it has no bounded egress channel to govern —
+    /// so its reservation is inert and the path stays byte-identical AND free of
+    /// any Tokio-runtime requirement.
+    fn reserve(&mut self, _capacity_bytes: usize) -> Result<EgressReservation, ProducerError> {
+        Ok(EgressReservation::inert())
+    }
+
+    fn emit(&mut self, batch: CreditedBatch) -> Result<(), ProducerError> {
+        self.0.push(batch.into_batch());
         Ok(())
     }
 }
@@ -512,7 +544,11 @@ impl MergeProducer {
     /// registry (issue #2349) onto every input reader so a `frozen<UDT>` cell
     /// inside a collection decodes structurally. With no registry this is
     /// behaviourally identical to the prior `KWayMerger::new_cancellable`.
-    fn open_cold_merger(
+    ///
+    /// `pub(crate)` so the egress-budget suite can drive the partition-at-a-time
+    /// `drive_merge` loop directly against a real `ChannelSink` (issue #2821's
+    /// both-loops evidence) without going through the collect path.
+    pub(crate) fn open_cold_merger(
         &self,
         paths: Vec<PathBuf>,
         cancel: &CancelFlag,
@@ -627,7 +663,7 @@ impl MergeProducer {
 
     /// The output column set: partial aggregate columns under aggregation, else
     /// the projected row columns.
-    fn output_columns(&self) -> &[ColumnInfo] {
+    pub(crate) fn output_columns(&self) -> &[ColumnInfo] {
         match &self.partial_columns {
             Some(partial) => partial,
             None => &self.columns,
@@ -931,6 +967,10 @@ impl MergeProducer {
         // buffered. Advanced by exactly one row's estimate per push and reset on
         // every flush — the buffer is never re-measured.
         let mut byte_cap = BatchByteCap::new(self.max_batch_bytes);
+        // Issue #2821: Arrow array NODES over the projected output schema,
+        // counted ONCE per merge and fed to every pre-materialization egress
+        // reservation (the per-node slack term the bare capacity factor misses).
+        let n_array_nodes = self.egress_array_nodes()?;
         // Issue #1817: one partition-key decode cache for the whole merge; each
         // partition's rows arrive consecutively, so its key decodes once.
         let mut pk_cache = PartitionKeyCache::default();
@@ -995,15 +1035,13 @@ impl MergeProducer {
                 // buffer. `batch_bytes.rs` documents the rule and its one-row floor.
                 let width = estimate_arrow_row_bytes(&self.columns, &row);
                 if byte_cap.cut_before(width).is_yes() {
-                    sink.emit(self.flush_buffer(&mut buffer)?)?;
-                    byte_cap.reset();
+                    self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
                 }
                 buffer.push(row);
                 emitted += 1;
                 byte_cap.accumulate(width);
                 if buffer.len() >= self.batch_size {
-                    sink.emit(self.flush_buffer(&mut buffer)?)?;
-                    byte_cap.reset();
+                    self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
                 }
                 // LIMIT reached (counted post-filter): stop the merge early.
                 if let Some(cap) = limit {
@@ -1015,7 +1053,7 @@ impl MergeProducer {
         }
 
         if !buffer.is_empty() {
-            sink.emit(self.flush_buffer(&mut buffer)?)?;
+            self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
         }
         Ok(())
     }
@@ -1285,7 +1323,16 @@ impl MergeProducer {
         self.merge_paths(paths, &CancelFlag::new())
     }
 
-    fn flush_buffer(&self, buffer: &mut Vec<QueryRow>) -> Result<RecordBatch, ProducerError> {
+    /// Convert `buffer`'s rows into an Arrow batch and clear it.
+    ///
+    /// `pub(crate)` so the shared reserve → build → true-up → emit helper
+    /// ([`MergeProducer::flush_credited`], `egress_flush.rs`) can drive BOTH
+    /// drive loops' six flush points through one owning code path (issue #2821);
+    /// `producer_stream.rs`'s former private duplicate was folded into this one.
+    pub(crate) fn flush_buffer(
+        &self,
+        buffer: &mut Vec<QueryRow>,
+    ) -> Result<RecordBatch, ProducerError> {
         let batch = rows_to_record_batch(&self.columns, buffer)?;
         buffer.clear();
         Ok(batch)

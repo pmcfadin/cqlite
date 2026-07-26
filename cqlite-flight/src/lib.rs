@@ -15,7 +15,17 @@ pub mod agg;
 // payload-to-capacity conversion constants issue #2821 composes on.
 pub mod batch_bytes;
 pub mod cancel;
+// Per-stream in-flight egress capacity-byte credit governor (issue #2821): the
+// reserve-before-materialize credit pool, its RAII permit, the `CreditedBatch`
+// channel element, and the `--max-inflight-egress-bytes` constants.
+pub mod egress_credit;
+// The single owning `reserve -> build -> true-up -> emit` batch-boundary helper
+// shared by both producer drive loops (issue #2821).
+mod egress_flush;
 pub mod filter;
+// The `do_get` drain side: metrics attribution, cancellation, and the deferred
+// egress-credit slot (split out of `streaming.rs`, epic #1116).
+mod metered_stream;
 pub mod obs;
 pub mod obs_abort;
 pub mod pathsafe;

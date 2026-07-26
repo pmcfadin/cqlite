@@ -26,8 +26,7 @@
 //! Lives in its own module (not `producer.rs`) because that file is over the
 //! campsite file-size threshold (epic #1116).
 
-use arrow::record_batch::RecordBatch;
-use cqlite_core::export::{estimate_arrow_row_bytes, rows_to_record_batch};
+use cqlite_core::export::estimate_arrow_row_bytes;
 use cqlite_core::query::{PartitionKeyCache, QueryRow};
 use cqlite_core::storage::write_engine::merge::{StreamingMerger, StreamingStep};
 use cqlite_core::storage::write_engine::{DecoratedKey, KWayMerger};
@@ -81,16 +80,6 @@ impl MergeProducer {
         self.drive_merge_streaming(&mut stream, cancel, sink, progress, access_path)
     }
 
-    /// Convert `buffer`'s rows into an Arrow batch and clear it — the streaming
-    /// equivalent of `MergeProducer::flush_buffer` (kept here so that private
-    /// helper need not widen its visibility and force a signature rewrap in the
-    /// over-threshold `producer.rs`).
-    fn flush(&self, buffer: &mut Vec<QueryRow>) -> Result<RecordBatch, ProducerError> {
-        let batch = rows_to_record_batch(&self.columns, buffer)?;
-        buffer.clear();
-        Ok(batch)
-    }
-
     /// Drive the row-merge loop over `stepper` one reconciled row at a time,
     /// appending full-row batches (issue #2230).
     ///
@@ -121,6 +110,9 @@ impl MergeProducer {
         // Issue #2825: the SAME dual-boundary accumulator `drive_merge` uses — a
         // cap wired into only one egress path would leave the other unbounded.
         let mut byte_cap = BatchByteCap::new(self.max_batch_bytes);
+        // Issue #2821: the SAME per-merge array-node count `drive_merge` uses —
+        // a governor wired into only one loop would leave the other unbounded.
+        let n_array_nodes = self.egress_array_nodes()?;
         // Issue #1817: one partition-key decode cache for the whole merge; each
         // partition's rows arrive consecutively, so its key decodes once.
         let mut pk_cache = PartitionKeyCache::default();
@@ -212,15 +204,13 @@ impl MergeProducer {
             // an empty buffer.
             let width = estimate_arrow_row_bytes(&self.columns, &row);
             if byte_cap.cut_before(width).is_yes() {
-                sink.emit(self.flush(&mut buffer)?)?;
-                byte_cap.reset();
+                self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
             }
             buffer.push(row);
             emitted += 1;
             byte_cap.accumulate(width);
             if buffer.len() >= self.batch_size {
-                sink.emit(self.flush(&mut buffer)?)?;
-                byte_cap.reset();
+                self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
             }
             // LIMIT reached (counted post-filter): stop the merge early.
             if let Some(cap) = limit {
@@ -231,7 +221,7 @@ impl MergeProducer {
         }
 
         if !buffer.is_empty() {
-            sink.emit(self.flush(&mut buffer)?)?;
+            self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
         }
         Ok(())
     }
