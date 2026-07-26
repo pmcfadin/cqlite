@@ -99,3 +99,31 @@ the ratchet adjudicate L4**, vs. requiring a speculative L4 hoist up front.
   non-deterministic). Confirmed no ordering assertion downstream.
 - **Feature gating** — the test must be gated `#[cfg(all(test, feature = "state_machine", not(feature = "dhat-heap")))]`
   to match the allocator's gate, else it fails to find `measure` under a dhat build.
+
+
+---
+
+## Amendments during implementation (2026-07-26)
+
+Three of this design's assumptions did not survive contact with the code. Recorded here so the
+design reads as what was actually built, not what was planned.
+
+1. **Decision 2's negative controls were half wrong.** #1447/#1445/#1446 are **binding-layer** fixes
+   (Node `ExecuteNativeTask::compute`, Node JsString interning, Python `Row` ordering), not
+   `cqlite-core` ones, so no test in this crate can gate them. Measured: reverting clone→move inside
+   `build_row_from_scan_cached` is exactly allocation-neutral (41 vs 41 narrow, 273 vs 273 wide) —
+   `Value::Text` is `Bytes`-backed (clone = refcount bump) and `Value::into_owned`'s TIER-1
+   compaction (#1644) copies a small payload either way. The clone control was therefore DROPPED as
+   vacuous rather than asserted; the intern control (#1334) is kept and is strong (+2 allocations per
+   cell). Binding-layer probe → **#2894**.
+2. **Decision 4's "L5 preserves the call boundary" was wrong.** `row_values` moves directly into
+   `QueryRow.values`, so the hasher swap is necessarily a **public type change**. It was implemented
+   (via a `RowValues` alias, rippling through cqlite-core/cqlite-flight/cqlite-cli) and then
+   **reverted before merge**: it also contradicts the `rustc-hash` invariant in
+   `cqlite-core/Cargo.toml` (#1590 E8 — not for untrusted string keys; column names come from the
+   file's serialization header on the default path), and no benchmark was run to quantify the win.
+   Deferred to **#2901**. Corollary worth recording: the alloc ratchet is **hasher-independent**
+   (identical 41/273 either way), so it could never have served as L5's wiring evidence — a
+   `type_name_of_val(row.values.hasher())` assertion was needed for that.
+3. **L4 is a measured 1.0× no-op**, as Decision 4 allowed for: the partition-key path costs zero
+   per-row allocations (`RowKey` is `Arc<[u8]>`; `PartitionKeyCache` #1817 hoists the decode).

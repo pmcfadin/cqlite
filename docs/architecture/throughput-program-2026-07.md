@@ -272,7 +272,7 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
 | M1 → #2819 | NEW / EXTEND #1686 | Split `stream` RPC phase into data-plane sub-phases | P2 | — |
 | M2 → #2820 | NEW | L1 batch fan-in `sync_channel`, co-designed with #2765 | P1 | M0 (informs), #2765 co-design |
 | M3 → #2765 | EXTEND #2765 | Productionize adaptive egress budget + fan-out-past-drain + L1 256-cap co-design | P2 | M2 |
-| M4 → #1883 | EXTEND #1883 | L5 FxHash + L4 RowKey Arc hoist cheap bundle | P2 | — |
+| M4 → #1883 | EXTEND #1883 | per-row alloc ratchet DELIVERED; L4 measured 1.0× no-op; L5 deferred → #2901 | P2 | — |
 | M5 → #2680 | EXTEND #2680 | Re-land: K=2 opt-in rotation + early-close cancel fix + admission-resize + #2792 required | P1 | #2782, #2792 |
 | M6 → #2821 | NEW | Streaming `do_get` result-budget wiring gap | P2 | — |
 | M7 → #2822 | NEW (investigate) | L3 reconcile singleton fast-path | P3 | M0 + M9 (overlap data) |
@@ -322,12 +322,34 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
   lands (no #2600 re-fire). **Dep:** M2. **Dedup:** extends #2765 (inventory: "extend #2765, don't
   refile").
 
-- **M4 (#1883) — L5 FxHash + L4 RowKey Arc hoist bundle (EXTEND #1883, P2).** Swap the per-row
-  `HashMap<Arc<str>,Value>` (`row_build.rs:246`) to `FxHashMap`; hoist `RowKey(Arc<[u8]>)` build
-  outside `for entry in rows`. *Accept:* SipHash disappears from the row hot path (profile); alloc
-  count/row drops by one on multi-row-partition tables (#1883 dhat ratchet); ~1.04×+1.05–1.09× on the
-  multi-row-partition fixture, **1.0× credited on single-row-partition** (do not claim a field win the
-  profile can't support). **Dep:** none. **Dedup:** L4 lives under #1883 (already 0.17); L5 folds in.
+- **M4 (#1883) — per-row alloc ratchet DELIVERED; L4 measured no-op; L5 deferred.**
+
+  - **Per-row allocation ratchet — DONE.** At the public `build_row_from_scan_cached`, using the in-crate
+    `test_alloc_probe` counting allocator. **Measured** over 8 rows in one partition: **narrow (3 cols) = 41
+    allocations (5/row)**, **wide (32 cols) = 273 (34/row)** — ~1 allocation per cell plus ~2 fixed per row.
+    The dominant per-row cost is the #1644 retention compaction (`Value::into_owned`'s TIER-1 copy of a small
+    payload), NOT hashing and NOT key handling. Verified RED-on-revert: dropping the per-cell intern (#1334)
+    takes narrow 41 → **89** and wide 273 → **785** (exactly +2 per cell).
+  - **Scope correction (measured).** #1883's premise — that this ratchet would gate #1447/#1445/#1446 — does
+    not hold: those are **binding-layer** fixes (#1447 = `bindings/node` `ExecuteNativeTask::compute`; #1446 =
+    Node JsString interning; #1445 = Python `Row` ordering). Reverting the clone→move *in this crate* is
+    exactly allocation-neutral (41 vs 41, 273 vs 273) because `Value::Text` is `Bytes`-backed and TIER-1
+    compaction copies small payloads either way. Binding-layer probe → **#2894**.
+  - **L4 (RowKey `Arc` hoist) — measured 1.0× / NO-OP, not implemented.** The partition-key path costs **zero**
+    per-row allocations: `RowKey` is `Arc<[u8]>` (clone = refcount bump) and `PartitionKeyCache` (#1817)
+    already hoists the partition-constant decode. No hoistable per-row `Arc` allocation exists, so **no field
+    win is claimed and no follow-up is filed** for L4.
+  - **L5 (FxHash row map) — implemented, then REVERTED before merge; deferred to #2901.** Implementing it
+    established two things the design had not anticipated: (a) it is a **public breaking API change** —
+    `row_values` moves straight into `QueryRow.values`, so the hasher cannot change without changing that
+    public field's type, rippling through `cqlite-core`/`cqlite-flight`/`cqlite-cli`; and (b) it **contradicts
+    the `rustc-hash` invariant** in `cqlite-core/Cargo.toml` (#1590 E8 — reserved for integer/digest keys, NOT
+    untrusted string keys), since on the default read path column names come from the file's `Statistics.db`
+    serialization header and are attacker-controlled for a hostile SSTable, where FxHash's easy collisions give
+    O(N²) per-row inserts. **No benchmark was run, so the projected ~1.04× stays a projection and no L5 win is
+    claimed.** Revisit behind a measurement + a HashDoS answer + an API plan: **#2901**.
+
+  **Dep:** none. **Dedup:** L4 lived under #1883; L5 split out to #2901.
 
 - **M5 (#2680) — #2680 re-land (EXTEND #2680, P1).** Default **K=1** (byte-identical pre-#2680), **opt-in
   K=2** (the sub-split *rotation* carries flight-pod balance — NOT `getSplitWeight()`, which is

@@ -31,42 +31,62 @@ slack SHALL be documented with its reason.
 - **WHEN** `cargo test -p cqlite-core` runs
 - **THEN** the per-row allocation-budget test is compiled and executed (it is not silently skipped)
 
-### Requirement: The ratchet turns the #1447 clone→move and #1445/#1446 interning fixes into regression gates
+### Requirement: The ratchet turns the row-conversion allocation properties this crate owns into regression gates
 
-The per-row allocation-budget test SHALL be shaped so that re-introducing a per-row value clone (reverting
-#1447 `into_iter`→`iter().clone()`) OR emitting fresh per-cell key strings (reverting the #1445/#1446 key
-interning) pushes the measured allocation count above the baseline, failing the test; restoring the fixes
-returns it to green. The negative-control deltas (how many allocations each revert adds) SHALL be documented
-in-test.
+The per-row allocation-budget test SHALL be shaped so that emitting fresh per-cell key strings — reverting the
+`Arc<str>` column-name interning the conversion relies on (#1334) — pushes the measured allocation count above
+the baseline, failing the test; restoring the intern returns it to green. The negative-control delta SHALL be
+documented in-test.
 
-#### Scenario: Reverting the clone→move fix trips the budget
-- **GIVEN** the per-row allocation-budget test at its measured baseline
-- **WHEN** the row-conversion value insert is changed from a move (`into_owned`/`into_iter`) back to a
-  per-row clone
-- **THEN** the measured allocations-per-row exceed the baseline and the test FAILS
-- **AND** reverting that change back to the move returns the test to PASS
+**Scope correction (measured, supersedes the original #1447/#1445/#1446 framing).** #1883 was filed on the
+premise that this ratchet would gate #1447 (clone→move) and #1445/#1446 (key interning). Those three fixes are
+**binding-layer**: #1447 is `bindings/node/src/database.rs` (`ExecuteNativeTask::compute`), #1446 is Node
+JsString interning, #1445 is Python `Row` ordering. No `cqlite-core` test can gate code in the binding crates.
+Measured directly: reverting the clone→move *inside `build_row_from_scan_cached`* is **exactly
+allocation-neutral** (41 vs 41 narrow, 273 vs 273 wide), because `Value::Text` is `Bytes`-backed (clone is a
+refcount bump) and `Value::into_owned`'s TIER-1 compaction (#1644) copies a small payload either way. A clone
+control here would therefore be VACUOUS. The test SHALL NOT assert a control it cannot make fail, and SHALL
+document this measurement in-test. Ratcheting #1447/#1445/#1446 requires an allocation probe inside the
+binding crates, tracked as follow-up issue #2894.
 
-#### Scenario: Dropping per-cell key interning trips the budget on the wide fixture
+#### Scenario: Dropping per-cell key interning trips the budget
 - **GIVEN** the per-row allocation-budget test at its measured baseline
 - **WHEN** the key handling is changed to allocate a fresh key string per projected cell instead of reusing
   the interned `Arc<str>`
-- **THEN** the measured allocations grow with the projected-column count and exceed the wide-fixture
-  baseline, failing the test
+- **THEN** the measured allocations grow with the projected-column count and exceed the baseline, failing the
+  test (measured: narrow 41 → 89, wide 273 → 785, exactly +2 allocations per cell)
+- **AND** restoring the interned handle returns the test to PASS
 
-### Requirement: The row-conversion map uses a non-cryptographic hasher without adding per-row allocations (L5)
+#### Scenario: The clone→move control is recorded as measured-neutral rather than asserted
+- **GIVEN** the per-row allocation-budget test at its measured baseline
+- **WHEN** the row-conversion value insert is changed from a move (`into_owned`) back to a per-cell clone
+- **THEN** the measured allocation count is UNCHANGED (the fix is not observable in this crate)
+- **AND** the test documents that measurement and its cause instead of asserting a vacuous control
 
-The per-row `row_values` map in `build_row_from_scan_cached` SHALL use `rustc_hash::FxHashMap`
-(the workspace's already-vendored `rustc-hash` dependency) instead of the default SipHash `HashMap`, so
-SipHash is removed from the row hot path. This change SHALL preserve the capacity hint and SHALL NOT change
-the conversion's observable output (same keys, same values, same row shape). The per-row allocation-budget
-ratchet SHALL confirm the hasher swap adds no per-row allocation (alloc-neutral).
+### Requirement: L5 (FxHashMap row map) is DEFERRED, not delivered in this change
 
-#### Scenario: FxHashMap swap is output-equivalent and alloc-neutral
-- **GIVEN** a scan result converted by `build_row_from_scan_cached`
-- **WHEN** the `row_values` map is backed by `FxHashMap` (capacity-hinted) rather than std `HashMap`
-- **THEN** the produced row has identical keys and values to the std-`HashMap` behaviour
-- **AND** the per-row allocation-budget test still passes at (or below) its baseline — the hasher swap adds
-  no per-row heap allocation
+L5 — swapping the per-row `row_values` map to `rustc_hash::FxHashMap` — was implemented during this change and
+then **deliberately reverted before merge** on the owner's decision. It SHALL NOT ship here. Two facts, both
+discovered by implementing it, drove the reversal:
+
+1. **It is a PUBLIC breaking API change.** `row_values` moves directly into `QueryRow.values`, so the hasher
+   cannot change without changing that public field's type (the working implementation added
+   `pub type RowValues` and rippled through `cqlite-core`, `cqlite-flight` and `cqlite-cli`).
+2. **It contradicts a written invariant.** `cqlite-core/Cargo.toml` reserves `rustc-hash` for
+   "integer/digest-keyed hot-path maps only — NOT for maps exposed to untrusted string keys (#1590, E8)".
+   `QueryRow.values` is string-keyed, and on the default read path those column names come from the file's
+   `Statistics.db` serialization header — attacker-controlled for a hostile SSTable, where FxHash's easy
+   collisions give O(N²) per-row inserts.
+
+Combined with the fact that **no row-conversion benchmark was run** (so the projected ~1.04× stayed a
+projection), the change SHALL NOT claim an L5 win. Revisiting L5 — behind a measured benchmark, a HashDoS
+answer, and an API plan — is tracked as issue #2901.
+
+#### Scenario: The row map keeps its default hasher in this change
+- **GIVEN** the per-row conversion `build_row_from_scan_cached`
+- **WHEN** this change is merged
+- **THEN** `QueryRow.values` is still the default-hasher `HashMap<Arc<str>, Value>` (no public type change)
+- **AND** no throughput multiplier is claimed for L5 anywhere in the change's docs
 
 ### Requirement: The L4 RowKey-hoist question is adjudicated by the ratchet's measurement, not by a speculative hoist
 
