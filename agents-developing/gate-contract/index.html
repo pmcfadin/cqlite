@@ -333,13 +333,39 @@ marker), <code dir="auto">cat</code> that file — it is always complete.</p>
 </ul>
 <blockquote>
 <p><strong>Concurrency caveat (#1175):</strong> the default <code dir="auto">$PWD/.agent-gate-summary.txt</code> is
-per-<em>checkout</em>, not per-run. If you run multiple gates concurrently <strong>in the same
-checkout</strong>, each MUST set a unique <code dir="auto">AGENT_GATE_SUMMARY_FILE</code> or they will clobber
-each other’s recovery artifact. Separate worktrees get distinct repo roots and so
-distinct default paths — already isolated, which is CQLite’s normal model. The
-<code dir="auto">run-id:</code> line lets a caller that captured the invocation’s run-id confirm it is
-reading the right run; a caller with no expected run-id and a fully-lost stream
-cannot disambiguate two same-checkout runs, so it must use a unique path.</p>
+per-<em>checkout</em>, not per-run. If you run multiple <strong>top-level</strong> gates concurrently
+<strong>in the same checkout</strong>, each MUST set a unique <code dir="auto">AGENT_GATE_SUMMARY_FILE</code> or they
+will clobber each other’s recovery artifact. Separate worktrees get distinct repo
+roots and so distinct default paths — already isolated, which is CQLite’s normal
+model. The <code dir="auto">run-id:</code> line lets a caller that captured the invocation’s run-id
+confirm it is reading the right run; a caller with no expected run-id and a
+fully-lost stream cannot disambiguate two same-checkout runs, so it must use a
+unique path.</p>
+<p><strong>Nested / self-test sub-gates are auto-isolated (#2874):</strong> a gate spawned by an
+enclosing gate inherits <code dir="auto">AGENT_GATE_PARENT_RUN_ID</code>; if it does not pin its own
+<code dir="auto">AGENT_GATE_SUMMARY_FILE</code> it defaults to its OWN <code dir="auto">$LOG_DIR/summary-primary.txt</code> (never the
+checkout default) and stamps <code dir="auto">nested-under: &#x3C;parent-run-id></code>, so a nested run can
+never clobber the parent gate of record. And a mid-run summary clobber (a foreign
+<code dir="auto">run-id</code> appearing in the file) is caught at the next component boundary — and at the
+terminal emit — with a named <strong><code dir="auto">summary-integrity: FAIL</code></strong> line + <code dir="auto">RESULT: FAIL</code>, never
+a bare <code dir="auto">INCOMPLETE</code> death. The old #2751 workaround (run the full gate <em>without</em>
+<code dir="auto">AGENT_GATE_SUMMARY_FILE</code>) is therefore obsolete — the summary-file redirect is the
+default again, and running it alongside a peer lane’s gate self-tests on one box is
+safe. (Two <em>top-level</em> full gates sharing one checkout default still need distinct
+paths, per the caveat above.)</p>
+<p><strong>No-clobber + reader contract (#2874).</strong> When a gate finds the contended path already
+holding a FOREIGN <code dir="auto">run-id</code> (a live peer owns it — the only way this arises is two
+top-level gates sharing one checkout-default path), it <strong>does not rewrite that path</strong>:
+it publishes its own FAIL verdict to a non-clobbering sibling
+<code dir="auto">&#x3C;summary-file>.integrity-fail.&#x3C;run-id></code> plus the <code dir="auto">logs:</code> bundle (and stdout/stderr) and
+exits non-zero, deliberately leaving the peer’s block on the pinned path rather than
+clobbering it. The reader contract that makes this safe: <strong>the process exit code is
+primary, and any pinned-path block MUST be validated by its <code dir="auto">run-id:</code> line</strong> before you
+trust it — a block whose <code dir="auto">run-id</code> is not the one you launched (even <code dir="auto">RESULT: PASS</code>) is a
+peer’s verdict, not yours. On a <code dir="auto">run-id</code> mismatch (or a non-zero exit with a foreign
+block at the path), read the <code dir="auto">.integrity-fail.&#x3C;run-id></code> sibling / <code dir="auto">logs:</code> bundle for your
+run’s verdict. A closer polling the summary file should glob <code dir="auto">"$SUMMARY_FILE".integrity-fail.*</code>
+and reject any block whose <code dir="auto">run-id</code> differs from the one it launched.</p>
 </blockquote>
 <p>The path the gate used is also echoed on the <code dir="auto">summary-file:</code> line inside the
 block, and a copy is kept in the <code dir="auto">logs:</code> bundle. The streamed copy is best-effort
