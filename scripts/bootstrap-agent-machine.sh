@@ -71,6 +71,20 @@ esac
 
 WARNINGS=0
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---- bounded execution (issue #2942) ----
+# GNU coreutils installs its timeout as `gtimeout` on stock macOS, so resolving only
+# `timeout` leaves every bound below INERT on macOS — which is the fleet's platform and
+# the one where two of the three hang scenarios live (a locked osxkeychain, a Git
+# Credential Manager browser flow). Resolve both, and degrade visibly (unbounded) only
+# when neither exists.
+TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+# bounded <secs> <cmd...> — run <cmd...> under the resolved timeout binary if there is
+# one, else run it directly. Use `env VAR=... cmd` when the call needs env prefixes.
+bounded() {
+  local secs="$1"; shift
+  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$secs" "$@"; else "$@"; fi
+}
 ok()   { printf '  \033[32m[ok]\033[0m   %s\n' "$1"; }
 warn() { printf '  \033[33m[warn]\033[0m %s\n' "$1"; WARNINGS=$((WARNINGS + 1)); }
 info() { printf '         %s\n' "$1"; }
@@ -370,9 +384,28 @@ fi
 # Both are the same defect this section exists to remove, one level up: a verdict
 # derived from something other than the operation actually performed.
 BOARD_OWNER="${CQLITE_PROJECT_OWNER:-pmcfadin}"
-BOARD_NUMBER="${CQLITE_PROJECT_NUMBER:-1}"
 BOARD_ACCOUNT="${CQLITE_PROJECT_ACCOUNT:-pmcfadin}"   # same var flow-board honors
+BOARD_TITLE="${PROJECT_TITLE:-CQLite Delivery}"       # same title setup-project-board.sh uses
 BOARD_GRAPHQL_WRITE="updateProjectV2ItemFieldValue"
+# CQLITE_PROJECT_NUMBER must NOT be defaulted to a guess. flow-board reads
+# `project_number="${CQLITE_PROJECT_NUMBER:-}"` and sets have_project=0 → "board
+# unreachable, STOP" when it is unset, so defaulting to 1 here would print a green
+# "board reachable" on a box where every flow-* skill refuses to dispatch — the same
+# false green this section exists to kill, one layer out. Unset is a REPORTABLE STATE.
+BOARD_NUMBER="${CQLITE_PROJECT_NUMBER:-}"
+BOARD_NUMBER_SRC=env
+[ -z "$BOARD_NUMBER" ] && BOARD_NUMBER_SRC=unset
+
+# board_discover_number <owner> <title> — resolve the board number by TITLE, the way
+# test-data/scripts/setup-project-board.sh does, so an unset env var can still be
+# diagnosed precisely ("it is #N, you just haven't exported it") instead of vaguely.
+# Needs jq (as that script does); prints nothing when unavailable or not found.
+board_discover_number() {
+  have jq || return 0
+  bounded 20 gh project list --owner "$1" --format json --limit 200 2>/dev/null \
+    | jq -r --arg t "$2" '(.projects // [])[] | select(.title == $t) | .number' 2>/dev/null \
+    | head -n1
+}
 
 # gh_active_block <auth-status-output> — ONLY the active account's stanza. Stanzas
 # start at a "Logged in to <host> account <name>" line; the active one carries
@@ -401,15 +434,30 @@ gh_block_account() {
 # Tries user-owned first (what project-board-sync.yml uses), then org-owned.
 board_graphql_read() {
   local owner="$1" number="$2" id
-  id=$(gh api graphql -f owner="$owner" -F number="$number" \
+  [ -n "$number" ] || return 1
+  id=$(bounded 20 gh api graphql -f owner="$owner" -F number="$number" \
         -f query='query($owner:String!,$number:Int!){user(login:$owner){projectV2(number:$number){id}}}' \
         --jq '.data.user.projectV2.id' 2>/dev/null)
   if [ -z "$id" ] || [ "$id" = null ]; then
-    id=$(gh api graphql -f owner="$owner" -F number="$number" \
+    id=$(bounded 20 gh api graphql -f owner="$owner" -F number="$number" \
           -f query='query($owner:String!,$number:Int!){organization(login:$owner){projectV2(number:$number){id}}}' \
           --jq '.data.organization.projectV2.id' 2>/dev/null)
   fi
   [ -n "$id" ] && [ "$id" != null ]
+}
+
+# restore_board_account — put the operator's active gh account back. Idempotent, and
+# installed as a TRAP: between the switch and the restore sit network calls, so a hang
+# plus Ctrl-C, or a supervisor SIGTERM, would otherwise kill the script mid-bracket and
+# SILENTLY leave the active account changed. A check must never mutate host state.
+restore_board_account() {
+  [ "${BOARD_SWITCHED:-0}" = 1 ] || return 0
+  BOARD_SWITCHED=0
+  if gh auth switch --user "$PRE_PROBE_ACCOUNT" >/dev/null 2>&1; then
+    info "restored gh's active account to '$PRE_PROBE_ACCOUNT'"
+  else
+    warn "could NOT restore gh's active account — it is left as '$BOARD_ACCOUNT'. Fix: gh auth switch --user $PRE_PROBE_ACCOUNT"
+  fi
 }
 
 hdr "GitHub board access + project scope (Path A, #1886)"
@@ -438,6 +486,10 @@ if have gh; then
     if [ "$GH_ENV_TOKEN" = 0 ] && [ -n "$ACTIVE_ACCOUNT" ] && [ "$ACTIVE_ACCOUNT" != "$BOARD_ACCOUNT" ]; then
       if gh auth switch --user "$BOARD_ACCOUNT" >/dev/null 2>&1; then
         BOARD_SWITCHED=1
+        # Arm the restore BEFORE anything that can hang or be interrupted.
+        trap 'restore_board_account' EXIT
+        trap 'restore_board_account; exit 130' INT
+        trap 'restore_board_account; exit 143' TERM
         info "temporarily switched gh's active account '$ACTIVE_ACCOUNT' -> '$BOARD_ACCOUNT' for the probe (what flow-board does); will switch back"
         auth_out=$(gh auth status 2>&1)
         ACTIVE_BLOCK=$(gh_active_block "$auth_out")
@@ -463,29 +515,46 @@ if have gh; then
     # `read:org` is missing, and `gh project item-edit` fails on that alone.
     missing_scopes=$(printf '%s\n' "$ACTIVE_BLOCK" | grep -i "Missing required token scopes" | head -1)
     missing_list="${missing_scopes##*scopes:}"; missing_list="${missing_list# }"
-    # READ-ONLY probe 1: can `gh project` see the board at all?
-    board_read=1
-    gh project view "$BOARD_NUMBER" --owner "$BOARD_OWNER" >/dev/null 2>&1 || board_read=0
-    # READ-ONLY probe 2: does the GraphQL projectV2 surface answer with this token?
-    graphql_read=1
-    board_graphql_read "$BOARD_OWNER" "$BOARD_NUMBER" || graphql_read=0
-
-    # Restore the operator's account BEFORE reporting: running a CHECK must not leave
-    # the active account changed.
-    if [ "$BOARD_SWITCHED" = 1 ]; then
-      if gh auth switch --user "$PRE_PROBE_ACCOUNT" >/dev/null 2>&1; then
-        info "restored gh's active account to '$PRE_PROBE_ACCOUNT'"
-      else
-        warn "could NOT restore gh's active account — it is left as '$BOARD_ACCOUNT'. Fix: gh auth switch --user $PRE_PROBE_ACCOUNT"
-      fi
+    # Resolve the board number when it is not exported, so the gap can be reported
+    # precisely rather than papered over with a guess.
+    if [ "$BOARD_NUMBER_SRC" = unset ]; then
+      BOARD_NUMBER="$(board_discover_number "$BOARD_OWNER" "$BOARD_TITLE")"
+      [ -n "$BOARD_NUMBER" ] && BOARD_NUMBER_SRC=discovered
     fi
+
+    # READ-ONLY probes, both BOUNDED: they sit between the account switch and its
+    # restore, so an unbounded hang here is what strands the operator's account.
+    board_read=0
+    graphql_read=0
+    if [ -n "$BOARD_NUMBER" ]; then
+      bounded 20 gh project view "$BOARD_NUMBER" --owner "$BOARD_OWNER" >/dev/null 2>&1 && board_read=1
+      board_graphql_read "$BOARD_OWNER" "$BOARD_NUMBER" && graphql_read=1
+    fi
+
+    # Restore the operator's account BEFORE reporting (the trap is the backstop for an
+    # interrupt; this is the normal path, and it is idempotent with the trap).
+    restore_board_account
 
     # An unqualified ok requires ALL THREE: the read probe passed, gh reports no
     # missing required scopes, AND the 'project' WRITE scope is present. Without the
     # last one a read-only token (e.g. read:project) would print the earlier
     # "'project' scope MISSING" warn and then a reassuring ok as the section's LAST
     # word, while every dispatch write still fails.
-    if [ "$board_read" = 1 ] && [ -z "$missing_scopes" ] && [ "$scope_prefilter" = 1 ]; then
+    # An unexported CQLITE_PROJECT_NUMBER is a DISPATCH BLOCKER even when every probe
+    # passes, because flow-board defaults it to empty and stops. Report it first: it is
+    # the one gap the operator can fix with a single export.
+    if [ "$BOARD_NUMBER_SRC" != env ]; then
+      if [ "$BOARD_NUMBER_SRC" = discovered ]; then
+        warn "CQLITE_PROJECT_NUMBER is NOT exported — flow-* skills default it to EMPTY and STOP ('board unreachable'), whatever this probe says"
+        info "the board titled '$BOARD_TITLE' is #$BOARD_NUMBER — export it:  export CQLITE_PROJECT_NUMBER=$BOARD_NUMBER"
+      else
+        warn "CQLITE_PROJECT_NUMBER is NOT exported and no board titled '$BOARD_TITLE' could be resolved for owner '$BOARD_OWNER' — flow-* skills will STOP (Path A: no board, no dispatch)"
+        info "run:  bash test-data/scripts/setup-project-board.sh    (it discovers/creates the board and prints the export line)"
+      fi
+    fi
+
+    if [ "$board_read" = 1 ] && [ -z "$missing_scopes" ] && [ "$scope_prefilter" = 1 ] \
+       && [ "$BOARD_NUMBER_SRC" = env ]; then
       ok "board #$BOARD_NUMBER ($BOARD_OWNER) reachable as '${ACTIVE_ACCOUNT:-<unknown>}' — 'gh project' read probe OK, 'project' scope present, no missing token scopes"
     elif [ "$board_read" = 1 ]; then
       board_dq=""
@@ -494,7 +563,11 @@ if have gh; then
         [ -n "$board_dq" ] && board_dq="$board_dq; "
         board_dq="${board_dq}gh reports missing required scopes ($missing_list)"
       fi
-      warn "board READ works as '${ACTIVE_ACCOUNT:-<unknown>}' but $board_dq — board WRITES ('gh project item-edit') can still FAIL"
+      if [ "$BOARD_NUMBER_SRC" != env ]; then
+        [ -n "$board_dq" ] && board_dq="$board_dq; "
+        board_dq="${board_dq}CQLITE_PROJECT_NUMBER is not exported"
+      fi
+      warn "board READ works as '${ACTIVE_ACCOUNT:-<unknown>}' but $board_dq — board dispatch can still FAIL"
       info "board WRITES: fall back to the GraphQL \`$BOARD_GRAPHQL_WRITE\` mutation (it succeeds with the SAME token; graphql projectV2 read probe: $([ "$graphql_read" = 1 ] && echo OK || echo FAILED))"
       info "or widen the token:  gh auth refresh -s project -s read:org"
     elif [ "$graphql_read" = 1 ]; then
@@ -502,7 +575,7 @@ if have gh; then
       info "the GraphQL projectV2 read probe SUCCEEDED with the same token — board WRITES must go through the \`$BOARD_GRAPHQL_WRITE\` mutation, not \`gh project item-edit\`"
       info "or widen the token:  gh auth refresh -s read:org"
     else
-      warn "board #$BOARD_NUMBER ($BOARD_OWNER) UNREACHABLE as '${ACTIVE_ACCOUNT:-<unknown>}' — BOTH probes failed ('gh project view' and the GraphQL projectV2 read). Path A: a session with no board access must STOP, never label-dispatch"
+      warn "board #${BOARD_NUMBER:-<unresolved>} ($BOARD_OWNER) UNREACHABLE as '${ACTIVE_ACCOUNT:-<unknown>}' — BOTH probes failed ('gh project view' and the GraphQL projectV2 read). Path A: a session with no board access must STOP, never label-dispatch"
       info "check the account (CQLITE_PROJECT_ACCOUNT=$BOARD_ACCOUNT) and owner/number (CQLITE_PROJECT_OWNER / CQLITE_PROJECT_NUMBER), then: gh auth refresh -s project -s read:org"
       info "neither 'gh project item-edit' nor the \`$BOARD_GRAPHQL_WRITE\` GraphQL fallback can work until a probe passes"
     fi
@@ -549,13 +622,11 @@ GIT_CRED_HELPER='!f(){ test "$1" = get || exit 0; t="${GH_TOKEN:-${GITHUB_TOKEN:
 # The output is captured into a variable rather than piped into grep so that grep -q
 # closing the pipe early can never turn a SIGPIPE into a false "no credential".
 git_cred_probe() {
-  local host="$1" out to=""
-  command -v timeout >/dev/null 2>&1 && to="timeout 10"
-  # shellcheck disable=SC2086  # $to is an intentional (possibly empty) command prefix
+  local host="$1" out
   out=$(printf 'protocol=https\nhost=%s\n\n' "$host" \
-    | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=cqlite-bootstrap-no-askpass \
+    | bounded 10 env GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=cqlite-bootstrap-no-askpass \
       SSH_ASKPASS=cqlite-bootstrap-no-askpass \
-      $to git -C "$REPO_ROOT" credential fill 2>/dev/null) || true
+      git -C "$REPO_ROOT" credential fill 2>/dev/null) || true
   printf '%s\n' "$out" | grep -q '^password=.'
 }
 

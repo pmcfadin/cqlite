@@ -56,6 +56,14 @@ export GIT_CONFIG_GLOBAL="$tmp/global-gitconfig"
 export GIT_CONFIG_NOSYSTEM=1
 : >"$GIT_CONFIG_GLOBAL"
 
+# --- BOARD env isolation (issue #2942) -------------------------------------
+# The board section reads CQLITE_PROJECT_{OWNER,NUMBER,ACCOUNT} and PROJECT_TITLE from
+# the environment, and a worker shell commonly EXPORTS them (the fleet exports
+# CQLITE_PROJECT_NUMBER). Inheriting them makes this suite's verdict depend on the shell
+# it runs in — it silently masked the entire "number not exported" path until a case was
+# written for it. Clear them once; every case sets exactly what it means to test.
+unset CQLITE_PROJECT_NUMBER CQLITE_PROJECT_OWNER CQLITE_PROJECT_ACCOUNT PROJECT_TITLE
+
 mkshim() {
   # mkshim <name>: a fake tool that records "install"/"add" invocations and is
   # otherwise a harmless no-op (version/status queries succeed emptily).
@@ -168,7 +176,8 @@ mk_hermetic_bin() {
   local dir="$1" t p
   mkdir -p "$dir"
   for t in bash dirname mktemp grep cp cat sed awk mkdir rm ln mv touch chmod \
-           head tail tr sort cut wc stat env git find xargs basename date sleep expr timeout; do
+           head tail tr sort cut wc stat env git find xargs basename date sleep expr \
+           timeout gtimeout; do   # BOTH: stock macOS has only gtimeout (GNU coreutils)
     p=$(type -P "$t" 2>/dev/null) || continue
     [ -n "$p" ] && ln -sf "$p" "$dir/$t" 2>/dev/null || true
   done
@@ -607,14 +616,49 @@ mk_hermetic_bin "$stub7g"
 repo7g="$tmp/repo7g"; mk_fake_repo "$repo7g" "https://github.com/pmcfadin/cqlite.git"
 gc7g="$sb7g/gitconfig"
 cp "$gc7b" "$gc7g" 2>/dev/null || :   # the exact helper config --yes produced in 7b
+# Guard the guard: an EMPTY $gc7g would satisfy the warn assertion for the wrong
+# reason (no helper at all), making this case vacuous.
+if ! grep -q 'x-access-token' "$gc7g" 2>/dev/null; then
+  bad "cred: 7g precondition FAILED — no helper installed, the warn below would be vacuous"
+fi
 out7g=$(PATH="$stub7g" HOME="$sb7g" CARGO_HOME="$sb7g/.cargo" GIT_CONFIG_GLOBAL="$gc7g" \
   GH_TOKEN="" GITHUB_TOKEN="" bash "$repo7g/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if printf '%s' "$out7g" | grep -q "\[warn\].*git push has NO credentials" \
    && ! printf '%s' "$out7g" | grep -Eq '\[ok\].*git push credentials resolve'; then
-  ok "cred: helper present but GH_TOKEN unset -> WARN (an empty password is not a credential)"
+  ok "cred: helper present but GH_TOKEN unset -> WARN (a declining helper is not a credential)"
 else
-  bad "cred: empty-token case reported ok — probe accepted an empty password"
+  bad "cred: empty-token case reported ok — probe accepted a non-answer"
   printf '%s\n' "$out7g" | grep -i -A2 "git push"
+fi
+
+# 7g-ii. The case the `^password=.` check exists for, which nothing covered: a helper
+#        that ANSWERS with a literal EMPTY password line. git treats `password=` as
+#        satisfied, so `git credential fill` exits 0 — an exit-status-only probe reports
+#        a green machine on which every push fails. Our own helper declines instead of
+#        emitting empty (7g), so without this case the non-empty check could be reverted
+#        to an exit-status check with the suite still fully green.
+sb7ge=$(mktemp -d "$tmp/cred7ge.XXXXXX"); stub7ge="$tmp/stub7ge"
+mk_hermetic_bin "$stub7ge"
+repo7ge="$tmp/repo7ge"; mk_fake_repo "$repo7ge" "https://github.com/pmcfadin/cqlite.git"
+gc7ge="$sb7ge/gitconfig"
+git config --file "$gc7ge" --add 'credential.https://github.com.helper' \
+  '!f(){ test "$1" = get || exit 0; echo username=x-access-token; echo "password="; };f'
+# Sanity: git itself considers this helper "satisfied" (exit 0) — that is the trap.
+if printf 'protocol=https\nhost=github.com\n\n' \
+   | GIT_CONFIG_GLOBAL="$gc7ge" GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+     GIT_ASKPASS=nonexistent-askpass git -C "$tmp" credential fill >/dev/null 2>&1; then
+  ok "cred: (precondition) git credential fill EXITS 0 on an empty password — the trap is real"
+else
+  bad "cred: (precondition) expected git to accept an empty password line"
+fi
+out7ge=$(PATH="$stub7ge" HOME="$sb7ge" CARGO_HOME="$sb7ge/.cargo" GIT_CONFIG_GLOBAL="$gc7ge" \
+  GH_TOKEN="" GITHUB_TOKEN="" bash "$repo7ge/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+if printf '%s' "$out7ge" | grep -q "\[warn\].*git push has NO credentials" \
+   && ! printf '%s' "$out7ge" | grep -Eq '\[ok\].*git push credentials resolve'; then
+  ok "cred: a helper answering with an EMPTY password is not accepted as a credential"
+else
+  bad "cred: empty-password helper reported ok — the probe trusted exit status"
+  printf '%s\n' "$out7ge" | grep -i -A2 "git push"
 fi
 
 # 7h. A HANGING credential helper must not hang the bootstrap. Neither
@@ -626,22 +670,47 @@ fi
 #     stall the gate of record. This is a deadlock/liveness guard, not a latency
 #     budget: the helper sleeps 120s, the probe's own bound is 10s, and the outer
 #     ceiling is 60s — ~6x slack, so host load can never flip it.
-if command -v timeout >/dev/null 2>&1; then
+#     Resolution MUST match the script's (timeout || gtimeout): the fleet is macOS,
+#     where GNU coreutils installs `gtimeout` — keying this case off `timeout` alone
+#     would skip it on the one platform whose hang scenarios (locked osxkeychain, a GCM
+#     browser flow) motivated the bound, leaving it uncovered exactly where it matters.
+TIMEOUT_BIN_TEST="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+if [ -n "$TIMEOUT_BIN_TEST" ]; then
   sb7h=$(mktemp -d "$tmp/cred7h.XXXXXX"); stub7h="$tmp/stub7h"
   mk_hermetic_bin "$stub7h"
   repo7h="$tmp/repo7h"; mk_fake_repo "$repo7h" "https://github.com/pmcfadin/cqlite.git"
   gc7h="$sb7h/gitconfig"
   git config --file "$gc7h" --add 'credential.https://github.com.helper' '!f(){ sleep 120; };f'
   rc7h=0
-  timeout 60 env PATH="$stub7h" HOME="$sb7h" CARGO_HOME="$sb7h/.cargo" GIT_CONFIG_GLOBAL="$gc7h" \
+  "$TIMEOUT_BIN_TEST" 60 env PATH="$stub7h" HOME="$sb7h" CARGO_HOME="$sb7h/.cargo" GIT_CONFIG_GLOBAL="$gc7h" \
     GH_TOKEN="" bash "$repo7h/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7h=$?
   if [ "$rc7h" -ne 124 ]; then
     ok "cred: a hanging credential helper is bounded — bootstrap still completes (rc=$rc7h)"
   else
     bad "cred: bootstrap HUNG on a blocking credential helper (killed at the outer ceiling)"
   fi
+  # 7h-ii. The same guard on a STOCK-macOS-SHAPED host: GNU coreutils present only as
+  #        `gtimeout`, no plain `timeout`. The fleet is macOS and two of the three hang
+  #        scenarios are macOS-only, so a bound that resolves `timeout` alone is inert
+  #        exactly where it is needed — and a Linux-only CI would never notice.
+  sb7hm=$(mktemp -d "$tmp/cred7hm.XXXXXX"); stub7hm="$tmp/stub7hm"
+  mk_hermetic_bin "$stub7hm"
+  rm -f "$stub7hm/timeout"                          # <- the macOS shape
+  ln -sf "$TIMEOUT_BIN_TEST" "$stub7hm/gtimeout"
+  repo7hm="$tmp/repo7hm"; mk_fake_repo "$repo7hm" "https://github.com/pmcfadin/cqlite.git"
+  gc7hm="$sb7hm/gitconfig"
+  git config --file "$gc7hm" --add 'credential.https://github.com.helper' '!f(){ sleep 120; };f'
+  rc7hm=0
+  "$TIMEOUT_BIN_TEST" 60 env PATH="$stub7hm" HOME="$sb7hm" CARGO_HOME="$sb7hm/.cargo" \
+    GIT_CONFIG_GLOBAL="$gc7hm" GH_TOKEN="" \
+    bash "$repo7hm/scripts/bootstrap-agent-machine.sh" --skip-smoke >/dev/null 2>&1 || rc7hm=$?
+  if [ "$rc7hm" -ne 124 ]; then
+    ok "cred: the hang bound also applies on a gtimeout-only (macOS-shaped) host (rc=$rc7hm)"
+  else
+    bad "cred: bootstrap HUNG on a gtimeout-only host — the bound is inert on macOS"
+  fi
 else
-  echo "skip - cred: hanging-helper guard needs 'timeout' (absent on this host)"
+  echo "skip - cred: hanging-helper guard needs timeout/gtimeout (neither on this host)"
 fi
 
 # 7e. Re-running --yes must not STACK a second copy of the helper. Bootstrap is
@@ -742,7 +811,7 @@ run_board_case() {
   mk_board_gh "$stub" "$BOARD_LOG" "$scopes" "$missing" "$prc" "$arc"
   repo="$tmp/repo-board-$name"; mk_fake_repo "$repo" "https://github.com/pmcfadin/cqlite.git"
   BOARD_OUT=$(PATH="$stub" HOME="$sb" CARGO_HOME="$sb/.cargo" GIT_CONFIG_GLOBAL="$sb/gitconfig" \
-    CQLITE_PROJECT_ACCOUNT=tester \
+    CQLITE_PROJECT_ACCOUNT=tester CQLITE_PROJECT_NUMBER=1 \
     GH_TOKEN="" bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 }
 
@@ -769,8 +838,12 @@ esac
 EOF
   chmod +x "$stub/gh"
   repo="$tmp/repo-bauth-$name"; mk_fake_repo "$repo" "https://github.com/pmcfadin/cqlite.git"
+  # Caller overrides go through `env`: a VAR=value coming from "$@" is the result of an
+  # expansion, so bash would treat it as a COMMAND NAME, not an assignment — the
+  # override would silently do nothing and the case would assert against the default.
   BOARD_OUT=$(PATH="$stub" HOME="$sb" CARGO_HOME="$sb/.cargo" GIT_CONFIG_GLOBAL="$sb/gitconfig" \
-    GH_TOKEN="" "$@" bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+    CQLITE_PROJECT_NUMBER=1 \
+    GH_TOKEN="" env "$@" bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 }
 
 # 8a. THE false-OK case: `project` scope present, `read:org` missing, `gh project`
@@ -952,7 +1025,7 @@ log8i="$tmp/gh8i.log"; : >"$log8i"; state8i="$tmp/gh8i.state"
 mk_switch_gh "$stub8i" "$log8i" "$state8i" other-emu pmcfadin   # EMU active at start
 repo8i="$tmp/repo8i"; mk_fake_repo "$repo8i" "https://github.com/pmcfadin/cqlite.git"
 out8i=$(PATH="$stub8i" HOME="$sb8i" CARGO_HOME="$sb8i/.cargo" GIT_CONFIG_GLOBAL="$sb8i/gitconfig" \
-  GH_TOKEN="" bash "$repo8i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  CQLITE_PROJECT_NUMBER=1 GH_TOKEN="" bash "$repo8i/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if grep -q -- 'auth switch --user pmcfadin' "$log8i"; then
   ok "board: switches to CQLITE_PROJECT_ACCOUNT before probing (mirrors flow-board)"
 else
@@ -979,7 +1052,7 @@ log8j="$tmp/gh8j.log"; : >"$log8j"; state8j="$tmp/gh8j.state"
 mk_switch_gh "$stub8j" "$log8j" "$state8j" other-emu pmcfadin
 repo8j="$tmp/repo8j"; mk_fake_repo "$repo8j" "https://github.com/pmcfadin/cqlite.git"
 out8j=$(PATH="$stub8j" HOME="$sb8j" CARGO_HOME="$sb8j/.cargo" GIT_CONFIG_GLOBAL="$sb8j/gitconfig" \
-  GH_TOKEN="$FAKE_TOKEN" bash "$repo8j/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  CQLITE_PROJECT_NUMBER=1 GH_TOKEN="$FAKE_TOKEN" bash "$repo8j/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
 if ! grep -q -- 'auth switch' "$log8j" && [ "$(cat "$state8j")" = other-emu ]; then
   ok "board: an env token suppresses the switch entirely (no pointless host mutation)"
 else
@@ -991,9 +1064,86 @@ else
   bad "board: did not disclose that the identity came from GH_TOKEN"
 fi
 
-# 8e. The probe is READ-ONLY: across every case above, the bootstrap must never
-#     have invoked a board-mutating gh call.
-mutating=$(cat "$tmp"/gh-board-*.log 2>/dev/null \
+# --- 8k. CQLITE_PROJECT_NUMBER unset is a DISPATCH BLOCKER -------------------
+# flow-board reads `${CQLITE_PROJECT_NUMBER:-}` and STOPs when it is empty. A bootstrap
+# that defaulted the number to a guess would print a green "board reachable" on a box
+# where every flow-* skill refuses to dispatch — the same false green, one layer out.
+# 8k-i: the board is discoverable by title -> warn naming the exact export line.
+sb8k=$(mktemp -d "$tmp/board8k.XXXXXX"); stub8k="$tmp/stub8k"
+mk_hermetic_bin "$stub8k"
+jqp=$(type -P jq 2>/dev/null) && ln -sf "$jqp" "$stub8k/jq"
+cat >"$stub8k/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  auth) [ "$2" = status ] && { echo "github.com"
+        echo "  ✓ Logged in to github.com account tester (keyring)"
+        echo "  - Active account: true"
+        echo "  - Token scopes: 'project', 'read:org', 'repo'"; }; exit 0 ;;
+  project)
+    [ "$2" = list ] && { echo '{"projects":[{"title":"CQLite Delivery","number":7}]}'; exit 0; }
+    exit 0 ;;
+  api) echo "PVT_kwStubProjectId"; exit 0 ;;
+  *)   exit 0 ;;
+esac
+EOF
+chmod +x "$stub8k/gh"
+repo8k="$tmp/repo8k"; mk_fake_repo "$repo8k" "https://github.com/pmcfadin/cqlite.git"
+out8k=$(PATH="$stub8k" HOME="$sb8k" CARGO_HOME="$sb8k/.cargo" GIT_CONFIG_GLOBAL="$sb8k/gitconfig" \
+  CQLITE_PROJECT_ACCOUNT=tester GH_TOKEN="" bash "$repo8k/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+if printf '%s' "$out8k" | grep -Eq '\[ok\].*board #.*reachable'; then
+  bad "board: unexported CQLITE_PROJECT_NUMBER still produced a green 'reachable' verdict"
+elif printf '%s' "$out8k" | grep -q 'CQLITE_PROJECT_NUMBER is NOT exported'; then
+  ok "board: unexported CQLITE_PROJECT_NUMBER is reported as a dispatch blocker"
+else
+  bad "board: unexported CQLITE_PROJECT_NUMBER neither warned nor blocked the green verdict"
+  printf '%s\n' "$out8k" | grep -i -A2 "board"
+fi
+if [ -n "$jqp" ]; then
+  if printf '%s' "$out8k" | grep -q 'export CQLITE_PROJECT_NUMBER=7'; then
+    ok "board: discovers the number by title and prints the exact export line"
+  else
+    bad "board: did not resolve the board by title / print the export line"
+    printf '%s\n' "$out8k" | grep -i "PROJECT_NUMBER"
+  fi
+else
+  echo "skip - board: title discovery needs jq (absent on this host)"
+fi
+
+# 8k-ii: not discoverable -> point at setup-project-board.sh, still no green.
+run_board_auth_case nonumber 'github.com
+  ✓ Logged in to github.com account pmcfadin (keyring)
+  - Active account: true
+  - Token scopes: '"'"'project'"'"', '"'"'read:org'"'"', '"'"'repo'"'"'' CQLITE_PROJECT_NUMBER=
+if ! printf '%s' "$BOARD_OUT" | grep -Eq '\[ok\].*board #.*reachable' \
+   && printf '%s' "$BOARD_OUT" | grep -q 'setup-project-board.sh'; then
+  ok "board: unresolvable board number -> no green, points at setup-project-board.sh"
+else
+  bad "board: unresolvable board number did not block the green verdict"
+  printf '%s\n' "$BOARD_OUT" | grep -i -A2 "board"
+fi
+
+# 8l. The account restore must be armed by a TRAP, not just an inline block: two
+#     network calls sit between the switch and the restore, so an interrupt or a
+#     supervisor SIGTERM in that window would strand the operator's active account.
+if grep -q "trap 'restore_board_account' EXIT" "$BOOTSTRAP" \
+   && grep -q "trap 'restore_board_account; exit 130' INT" "$BOOTSTRAP" \
+   && grep -q "trap 'restore_board_account; exit 143' TERM" "$BOOTSTRAP"; then
+  ok "board: account restore is armed on EXIT/INT/TERM, not only the happy path"
+else
+  bad "board: no EXIT/INT/TERM trap arming the account restore"
+fi
+# ...and the probes it brackets must be BOUNDED, so the window cannot hang open.
+if grep -q 'bounded 20 gh project view' "$BOOTSTRAP" \
+   && grep -q 'bounded 20 gh api graphql' "$BOOTSTRAP"; then
+  ok "board: both probes inside the switch/restore bracket are time-bounded"
+else
+  bad "board: an unbounded probe sits between the account switch and its restore"
+fi
+
+# 8e. The probe is READ-ONLY: across EVERY board case above, the bootstrap must never
+#     have invoked a board-mutating gh call. The glob covers all three log families —
+#     the identity-switching cases most of all, where a mutating call would matter most.
+mutating=$(cat "$tmp"/gh-board-*.log "$tmp"/gh-bauth-*.log "$tmp"/gh8i.log "$tmp"/gh8j.log 2>/dev/null \
   | grep -Ei 'item-edit|item-add|item-delete|item-archive|--field|mutation' | head -5)
 if [ -z "$mutating" ]; then
   ok "board: probe never invoked a mutating gh/board operation"
