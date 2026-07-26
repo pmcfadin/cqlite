@@ -42,6 +42,33 @@ use crate::types::ScanRow;
 use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 use crate::{Error, Result, RowKey};
 
+// Coalesced, chunk-aligned compressed-scan read window (issue #2877), extracted
+// so this walk module stays under the campsite-rule source target (epic #1116).
+// The walk owns the enumeration; the window owns the one piece of per-scan state a
+// COMPRESSED `Data.db` needs.
+mod compressed_scan_window;
+
+// COMBINED-INTERACTION regression for the #2876 read-intent split x the #2877
+// coalescing window: every widened read this walk issues must land on the
+// UNADVISED scan plane and none on the `MADV_RANDOM` point plane — a property of
+// the PAIR that neither fix's own tests can observe. Lives in-crate (not
+// `cqlite-core/tests/`) because the per-plane spies and plane setters are
+// `#[cfg(test)] pub(crate)`; lives HERE rather than beside
+// `reader::read_at_point_tests` so it does not grow the already-over-threshold
+// `reader/mod.rs` (campsite rule, epic #1116).
+//
+// Feature-gated on BOTH `write-support` (the `SSTableWriter`/`WriteEngine` mutations
+// that build the fixture) and `lz4` (the fixture is repacked through
+// `create_compressor(CompressionAlgorithm::Lz4)`, which errors without it) — the
+// same pair the `issue_2877_scan_chunk_coalescing` integration target declares in
+// `required-features`. Without the gate the `minimal-build` gate component
+// (`cargo test -p cqlite-core --no-default-features --features all-compression
+// --lib --no-run`) fails to compile this module's imports.
+#[cfg(all(test, feature = "write-support", feature = "lz4"))]
+mod scan_plane_coalescing_tests;
+
+use compressed_scan_window::CompressedScanWindow;
+
 /// Half-open `(start_excl, end_incl]` token bound pushed into the per-SSTable walk
 /// (issue #2413 Option A). Mirrors the flight `TokenFilter` half-open semantics
 /// exactly (including the `start == end` FULL-ring convention, #2228); the flight
@@ -198,6 +225,11 @@ impl SSTableReader {
         let mut prev_key: Option<(i64, Vec<u8>)> = None;
         let mut index = 0usize;
         let mut emitted_any = false;
+        // Coalesced, chunk-aligned compressed-scan window (issue #2877): serves
+        // consecutive in-range partitions from one decompressed window instead
+        // of one `read_compressed_offset_window` call per partition. Unused
+        // (never filled) on the uncompressed branch.
+        let mut compressed_window = CompressedScanWindow::new();
         let Some(mut current) = stream.next().await? else {
             // Zero entries from the start offset: nothing in range (or empty).
             return Ok(FullIndexStreamOutcome::Streamed);
@@ -267,24 +299,40 @@ impl SSTableReader {
                 // through the reader's UNADVISED `scan_positional_source`, never the
                 // `MADV_RANDOM` point mapping whose readahead suppression (#2210)
                 // would cost this walk ~one 4 KiB fault per partition.
+                //
+                // The #2877 coalescing window is the CONSUMER of that plane, never a
+                // bypass of it: it makes the SAME scan-plane reads fewer and larger
+                // (chunk-aligned, ramped to 4 MiB), which is precisely what the
+                // unadvised mapping's kernel readahead rewards. Issuing them on the
+                // advised point plane instead would reinstate the #2876 field
+                // regression while every per-PR test stayed green — the combined
+                // interaction `cqlite-core/tests/issue_2877_scan_chunk_coalescing.rs`
+                // pins (CASSANDRA-15452's lesson: a userspace scan buffer only helps
+                // when it reads the plane that actually reads ahead).
                 let scan_source = self.scan_positional_source.clone();
-                let raw = if let Some(ci) = self.compression_info.as_deref() {
-                    self.read_compressed_offset_window(scan_source.as_ref(), ci, start, size)
-                        .await?
-                } else {
-                    let absolute_offset = start + self.actual_header_size as u64;
-                    self.read_uncompressed_verified(
-                        scan_source.as_ref(),
-                        &self.file,
-                        absolute_offset,
-                        size as usize,
-                    )
-                    .await?
-                };
+                let raw: std::borrow::Cow<'_, [u8]> =
+                    if let Some(ci) = self.compression_info.as_deref() {
+                        std::borrow::Cow::Borrowed(
+                            compressed_window
+                                .slice(self, scan_source.as_ref(), ci, start, end, data_section_end)
+                                .await?,
+                        )
+                    } else {
+                        std::borrow::Cow::Owned(
+                            self.read_uncompressed_verified(
+                                scan_source.as_ref(),
+                                &self.file,
+                                start + self.actual_header_size as u64,
+                                size as usize,
+                            )
+                            .await?,
+                        )
+                    };
+                let raw: &[u8] = &raw;
 
                 // Structural coverage (Signal B): the slice must decode as exactly
                 // one complete partition. Mid-walk failure = fail-closed.
-                if !self.partition_slice_fully_consumed(parser, &raw, schema)? {
+                if !self.partition_slice_fully_consumed(parser, raw, schema)? {
                     return Err(Error::corruption(format!(
                         "walk_in_range_partition_slices: partition {index} slice not fully \
                          consumed (truncated/corrupt body, issue #2412)"
@@ -295,7 +343,7 @@ impl SSTableReader {
                 // token range must keep this near its in-range slice, not O(all).
                 crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
                 emitted_any = true;
-                match decode(&raw)? {
+                match decode(raw)? {
                     ControlFlow::Continue(()) => {}
                     ControlFlow::Break(()) => return Ok(FullIndexStreamOutcome::Streamed),
                 }
