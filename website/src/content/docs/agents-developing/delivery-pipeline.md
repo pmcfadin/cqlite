@@ -199,7 +199,8 @@ lock**.
 
 1. **Eligibility** — the item is `Ready` AND has **no** `refs/claims/issue-<N>` claim ref
    (`bash scripts/flow/claim.sh status <N>`) and **no** legacy `issue-<N>-*` branch on origin (mixed-fleet
-   safety; older workers still branch-lock).
+   safety; older workers still branch-lock). A surviving branch over a **free** claim ref is not a dead
+   end — see *Resuming past the legacy-branch guard* below.
 2. **Claim** — `bash scripts/flow/claim.sh claim <N>` acquires the lock (`CLAIM HELD` exit 0 / `CLAIM LOST`
    exit 2); only then create the worktree + branch and set assignee `@me` + `Status=In Progress` for board
    visibility. `flow-activate` claims immediately — before any spec work; oracle-driven issues claim in
@@ -227,7 +228,25 @@ the `project` scope string. Full delta list with the identifying messages:
 Another machine that finds an existing claim can `git fetch` the branch to **resume** that work instead of
 colliding; a **reaped** claim is adopted via compare-and-swap — `claim.sh adopt <N> --expect <old-sha>`,
 which replaces the ref with force-with-lease so a resurrected original holder loses the lease and detects
-the loss immediately (fixes the #2467/#2499 two-writer race). The claiming session also maintains a
+the loss immediately (fixes the #2467/#2499 two-writer race).
+
+**Resuming past the legacy-branch guard (issue #2945)** — when the claim ref is **free** but an
+`issue-<N>-*` branch still stands on origin (a parked/reaped/released claim, an owner-approved spec that
+lives on that branch, or just a merged-but-undeleted PR branch), `claim` refuses with
+`reason=legacy-branch-lock … claim-ref=free` and prints the ONE sanctioned resume:
+
+```bash
+bash scripts/flow/claim.sh adopt <N> --expect none --reason "<why you are resuming>"
+```
+
+`--expect none` is git's **empty lease** ("this ref must not exist"), so the create is still arbitrated
+server-side: a machine that actually holds the claim ref keeps it and the resumer gets `ADOPT-LOST`
+(exit 2), and two machines racing the resume still yield exactly one winner. `--reason` is **required** —
+it is recorded in the claim commit next to who took it (machine/actor/ts) and rendered by
+`claim.sh status`, so a resume is auditable. Retrying after a transient `ERROR reason=infra` is safe: an
+adopt whose ref is already held by *this* machine+actor reports `ADOPTED … (re-entrant)` exit 0 rather
+than abandoning an issue you own. This is the only sanctioned way past that refusal — **never hand-craft
+a claim commit or push the ref directly** (the field failure that motivated #2945). The claiming session also maintains a
 liveness **heartbeat** (`scripts/flow/claim-heartbeat.sh beat <N>` — a cheap origin git ref under
 `refs/heartbeats/<machine>`, never a GitHub API call — refreshed at claim time and on every stage
 transition: activate/implement/gate/PR). `flow-board` reaps **abandoned claims deterministically** (issue
