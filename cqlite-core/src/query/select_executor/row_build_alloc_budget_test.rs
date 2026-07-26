@@ -28,27 +28,44 @@ const NARROW_COLS: usize = 3;
 /// allocations growing with the projected-column count.
 const WIDE_COLS: usize = 32;
 
-// MEASURED absolute budgets, as of this commit. Shape: roughly
-// `1 (the sized row map) + 1 per cell (Value::into_owned's TIER-1 compaction of a
-// small payload, #1644)` per row, PLUS exactly ONE fixed allocation for the
-// `Vec::with_capacity(RATCHET_ROWS)` that collects the rows — that collector sits
-// OUTSIDE the per-row loop, which is why neither total is an exact multiple of
-// `RATCHET_ROWS` (41 = 8*5 + 1, 273 = 8*34 + 1).
+// MEASURED allocation budget, expressed as a FORMULA over the fixture rather than
+// as two hard-coded totals, so that editing `RATCHET_ROWS` / `*_COLS` cannot
+// silently decouple the budget from what it pins (a smaller fixture with a
+// stale-but-larger constant would keep passing while constraining nothing).
+//
+// The pinned quantity is the per-row and PER-CELL cost:
+//
+//   total = COLLECTOR + RATCHET_ROWS * (PER_ROW_FIXED + PER_CELL * cols)
+//
+// which reproduces the measured totals exactly: narrow 1 + 8*(2 + 1*3) = **41**,
+// wide 1 + 8*(2 + 1*32) = **273**.
+//
+// `PER_CELL = 1` is the `Value::into_owned` TIER-1 compaction (#1644) — a small
+// payload is copied into a tight allocation. `PER_ROW_FIXED = 2` is MEASURED, not
+// derived: one of the two is the sized row map (#1584); the second is not
+// attributed here, and deliberately not guessed at.
 //
 // Asserted as `<=`, so an improvement ratchets DOWN without failing.
 //
-// RETUNING (read before raising either number): these totals also pin std/
-// `hashbrown`/`bytes` internals (table sizing at capacity 4 vs 33,
-// `Bytes::copy_from_slice` on the TIER-1 path), so a toolchain or `bytes` bump can
-// shift them without any change here. Distinguish the two cases before editing:
-// a dependency-driven shift moves the FIXED part and leaves the per-cell slope
-// intact (wide - narrow stays 29*8 = 232), whereas a real regression changes the
-// SLOPE. Re-derive by temporarily setting a budget to 1 and reading the actual
-// count out of the assertion message. Never raise a budget without first checking
-// that the two differential controls below still pass — they, not these constants,
-// are what make the interning and capacity-hint properties un-rot-able.
-const NARROW_ALLOC_BUDGET: u64 = 41;
-const WIDE_ALLOC_BUDGET: u64 = 273;
+// RETUNING (read before raising this): the totals also pin std/`hashbrown`/`bytes`
+// internals (table sizing, `Bytes::copy_from_slice` on the TIER-1 path), so a
+// toolchain or `bytes` bump can shift them with no change here. Tell the two cases
+// apart by the SLOPE: a dependency-driven shift moves `PER_ROW_FIXED` and leaves
+// `PER_CELL` at 1 (equivalently, `wide - narrow` stays `29 * RATCHET_ROWS = 232`),
+// whereas a real per-cell regression changes `PER_CELL`. Re-derive by temporarily
+// setting a constant to 0 and reading the actual count out of the assertion
+// message. Never raise a number without first confirming the two differential
+// controls below still pass — they, not these constants, are what make the
+// interning and capacity-hint properties un-rot-able.
+const PER_CELL_ALLOCS: u64 = 1;
+const PER_ROW_FIXED_ALLOCS: u64 = 2;
+const COLLECTOR_ALLOCS: u64 = 1;
+
+/// The measured allocation budget for a `cols`-wide fixture over [`RATCHET_ROWS`]
+/// rows. Derived from the fixture so the two track together.
+fn alloc_budget(cols: usize) -> u64 {
+    COLLECTOR_ALLOCS + RATCHET_ROWS as u64 * (PER_ROW_FIXED_ALLOCS + PER_CELL_ALLOCS * cols as u64)
+}
 
 /// Build `RATCHET_ROWS` scan entries of `cols` text columns, all in ONE
 /// partition, with every column name pre-interned exactly as the decoder hands
@@ -147,6 +164,12 @@ fn convert_current(
 fn build_row_from_scan_cached_holds_the_per_row_alloc_budget() {
     use crate::test_alloc_probe::measure;
 
+    // NOTE: production also applies a `project()` filter to each cell. These
+    // references omit it deliberately — `ratchet_inputs` drives an EMPTY projection
+    // (SELECT *), where that filter admits every cell, so the omission is
+    // behaviour-preserving here and keeps each reference a standalone reproduction
+    // of the pre-fix code (the property a parameterized shared helper would lose).
+    // A future fixture with a NON-EMPTY projection must add the filter to both.
     /// PRE-#1334: allocate a fresh key string per projected cell instead of
     /// moving the decoder's interned `Arc<str>` handle.
     fn reference_pre_intern(
@@ -177,6 +200,12 @@ fn build_row_from_scan_cached_holds_the_per_row_alloc_budget() {
         out
     }
 
+    // NOTE: production also applies a `project()` filter to each cell. These
+    // references omit it deliberately — `ratchet_inputs` drives an EMPTY projection
+    // (SELECT *), where that filter admits every cell, so the omission is
+    // behaviour-preserving here and keeps each reference a standalone reproduction
+    // of the pre-fix code (the property a parameterized shared helper would lose).
+    // A future fixture with a NON-EMPTY projection must add the filter to both.
     /// PRE-#1584: build the row map UNSIZED (`HashMap::new()`), so it reallocates
     /// its table as the row's cells fill it instead of taking one sized
     /// allocation. Identical output; strictly more allocations.
@@ -206,10 +235,17 @@ fn build_row_from_scan_cached_holds_the_per_row_alloc_budget() {
         out
     }
 
-    for (label, cols, budget) in [
-        ("narrow", NARROW_COLS, NARROW_ALLOC_BUDGET),
-        ("wide", WIDE_COLS, WIDE_ALLOC_BUDGET),
-    ] {
+    for (label, cols) in [("narrow", NARROW_COLS), ("wide", WIDE_COLS)] {
+        let budget = alloc_budget(cols);
+
+        // Warm-up (roborev): the current impl is measured FIRST, so any one-time
+        // lazy initialization reachable from the conversion path would be charged
+        // to it and to neither reference — biasing every strict-`<` against the
+        // thing under test, and doing so nondeterministically depending on what
+        // else ran first in this test binary. Burn one discarded conversion.
+        let (warm, warm_schema) = ratchet_inputs(cols);
+        drop(convert_current(warm, &warm_schema));
+
         let (inputs, schema) = ratchet_inputs(cols);
         let (inputs_ref, _) = ratchet_inputs(cols);
         let (inputs_unsized, _) = ratchet_inputs(cols);
