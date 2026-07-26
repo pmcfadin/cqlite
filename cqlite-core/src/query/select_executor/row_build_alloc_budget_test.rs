@@ -29,42 +29,67 @@ const NARROW_COLS: usize = 3;
 const WIDE_COLS: usize = 32;
 
 // MEASURED allocation budget, expressed as a FORMULA over the fixture rather than
-// as two hard-coded totals, so that editing `RATCHET_ROWS` / `*_COLS` cannot
-// silently decouple the budget from what it pins (a smaller fixture with a
-// stale-but-larger constant would keep passing while constraining nothing).
+// as hard-coded totals, so editing `RATCHET_ROWS` / `*_COLS` cannot silently
+// decouple the budget from what it pins:
 //
-// The pinned quantity is the per-row and PER-CELL cost:
+//   total = FIXED_SETUP + RATCHET_ROWS * (PER_ROW_MAP + PER_CELL * cols)
 //
-//   total = COLLECTOR + RATCHET_ROWS * (PER_ROW_FIXED + PER_CELL * cols)
+// Reproduces the measured totals exactly: narrow 9 + 8*(1 + 1*3) = **41**,
+// wide 9 + 8*(1 + 1*32) = **273**.
 //
-// which reproduces the measured totals exactly: narrow 1 + 8*(2 + 1*3) = **41**,
-// wide 1 + 8*(2 + 1*32) = **273**.
+// The three terms are SEPARATELY measured, not fitted — solved from two row counts
+// (narrow at 8 rows = 41, at 4 rows = 25 => 4 allocations per row, constant 9) and
+// confirmed against the wide fixture independently:
 //
-// `PER_CELL = 1` is the `Value::into_owned` TIER-1 compaction (#1644) — a small
-// payload is copied into a tight allocation. `PER_ROW_FIXED = 2` is MEASURED, not
-// derived: one of the two is the sized row map (#1584); the second is not
-// attributed here, and deliberately not guessed at.
+//   FIXED_SETUP  = 9  ONCE per measured call, NOT per row: the
+//                     `Vec::with_capacity(RATCHET_ROWS)` collector, plus the FIRST
+//                     row's `PartitionKeyCache` MISS, which pays the whole
+//                     `decode_partition_key_columns` (decoded-column `Vec`, the
+//                     name `String`, its `Arc<str>` intern, the interned `Vec`) and
+//                     the PK value's first `Bytes` promotion inside the measured
+//                     region. Rows 2..N hit the cache and pay none of it.
+//   PER_ROW_MAP  = 1  the single sized row map (#1584).
+//   PER_CELL     = 1  `Value::into_owned`'s TIER-1 compaction (#1644) — a small
+//                     payload copied into a tight allocation.
+//
+// Keeping FIXED_SETUP OUT of the per-row term is load-bearing (issue #2904
+// roborev): folding it in as a per-row constant made the budget correct only at
+// RATCHET_ROWS=8 — raising the row count silently LOOSENED the ratchet, and
+// lowering it failed spuriously while the message blamed toolchain drift.
 //
 // Asserted as `<=`, so an improvement ratchets DOWN without failing.
 //
-// RETUNING (read before raising this): the totals also pin std/`hashbrown`/`bytes`
-// internals (table sizing, `Bytes::copy_from_slice` on the TIER-1 path), so a
-// toolchain or `bytes` bump can shift them with no change here. Tell the two cases
-// apart by the SLOPE: a dependency-driven shift moves `PER_ROW_FIXED` and leaves
-// `PER_CELL` at 1 (equivalently, `wide - narrow` stays `29 * RATCHET_ROWS = 232`),
-// whereas a real per-cell regression changes `PER_CELL`. Re-derive by temporarily
-// setting a constant to 0 and reading the actual count out of the assertion
-// message. Never raise a number without first confirming the two differential
-// controls below still pass — they, not these constants, are what make the
-// interning and capacity-hint properties un-rot-able.
+// RETUNING (read before raising any of these): the totals also pin std/
+// `hashbrown`/`bytes` internals (table sizing, `Bytes::copy_from_slice` on the
+// TIER-1 path), so a toolchain or `bytes` bump can shift them with no change here.
+// Tell the cases apart by WHICH term moves: a dependency-driven shift moves
+// FIXED_SETUP and/or PER_ROW_MAP and leaves PER_CELL at 1 (equivalently,
+// `wide - narrow` stays `29 * RATCHET_ROWS`), whereas a real per-cell regression
+// changes PER_CELL. Re-derive any term by temporarily zeroing it and reading the
+// actual count out of the assertion message; re-derive the SPLIT by measuring at
+// two different `RATCHET_ROWS` values. Never raise a number without first
+// confirming the two differential controls below still pass — they, not these
+// constants, are what make the interning and capacity-hint properties un-rot-able.
 const PER_CELL_ALLOCS: u64 = 1;
-const PER_ROW_FIXED_ALLOCS: u64 = 2;
-const COLLECTOR_ALLOCS: u64 = 1;
+const PER_ROW_MAP_ALLOCS: u64 = 1;
+const FIXED_SETUP_ALLOCS: u64 = 9;
+
+// The `reference_unsized_map` control below is only non-vacuous while the narrow
+// fixture's insert count (`NARROW_COLS` cells + 1 reconstructed PK column) exceeds
+// hashbrown's first growth threshold (3). At or below it an UNSIZED map also takes
+// exactly one table allocation, the two counts converge, and the strict `<` fails
+// spuriously — looking like a regression when production is correct.
+const _: () = assert!(
+    NARROW_COLS + 1 > 3,
+    "narrow fixture must exceed hashbrown's first growth threshold or the \
+     unsized-map control (#1584) becomes vacuous"
+);
 
 /// The measured allocation budget for a `cols`-wide fixture over [`RATCHET_ROWS`]
-/// rows. Derived from the fixture so the two track together.
+/// rows. Derived from the fixture so the two track together, with the one-time
+/// setup cost kept OUT of the per-row term.
 fn alloc_budget(cols: usize) -> u64 {
-    COLLECTOR_ALLOCS + RATCHET_ROWS as u64 * (PER_ROW_FIXED_ALLOCS + PER_CELL_ALLOCS * cols as u64)
+    FIXED_SETUP_ALLOCS + RATCHET_ROWS as u64 * (PER_ROW_MAP_ALLOCS + PER_CELL_ALLOCS * cols as u64)
 }
 
 /// Build `RATCHET_ROWS` scan entries of `cols` text columns, all in ONE
@@ -164,14 +189,6 @@ fn convert_current(
 fn build_row_from_scan_cached_holds_the_per_row_alloc_budget() {
     use crate::test_alloc_probe::measure;
 
-    // NOTE: production also applies a `project()` filter to each cell. These
-    // references omit it deliberately — `ratchet_inputs` drives an EMPTY projection
-    // (SELECT *), where that filter admits every cell, so the omission is
-    // behaviour-preserving here and keeps each reference a standalone reproduction
-    // of the pre-fix code (the property a parameterized shared helper would lose).
-    // A future fixture with a NON-EMPTY projection must add the filter to both.
-    /// PRE-#1334: allocate a fresh key string per projected cell instead of
-    /// moving the decoder's interned `Arc<str>` handle.
     fn reference_pre_intern(
         inputs: Vec<(RowKey, ScanRow)>,
         schema: &crate::schema::TableSchema,
@@ -200,15 +217,6 @@ fn build_row_from_scan_cached_holds_the_per_row_alloc_budget() {
         out
     }
 
-    // NOTE: production also applies a `project()` filter to each cell. These
-    // references omit it deliberately — `ratchet_inputs` drives an EMPTY projection
-    // (SELECT *), where that filter admits every cell, so the omission is
-    // behaviour-preserving here and keeps each reference a standalone reproduction
-    // of the pre-fix code (the property a parameterized shared helper would lose).
-    // A future fixture with a NON-EMPTY projection must add the filter to both.
-    /// PRE-#1584: build the row map UNSIZED (`HashMap::new()`), so it reallocates
-    /// its table as the row's cells fill it instead of taking one sized
-    /// allocation. Identical output; strictly more allocations.
     fn reference_unsized_map(
         inputs: Vec<(RowKey, ScanRow)>,
         schema: &crate::schema::TableSchema,

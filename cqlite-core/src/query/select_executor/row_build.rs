@@ -288,7 +288,7 @@ pub fn build_row_from_scan_cached(
 /// Gated at the DECLARATION on `not(dhat-heap)`: the #1668 dhat allocator and
 /// `test_alloc_probe`'s CountingAllocator are mutually exclusive global
 /// allocators, so under `--all-features` the probe is configured out entirely.
-#[cfg(all(test, not(feature = "dhat-heap")))]
+#[cfg(all(test, feature = "state_machine", not(feature = "dhat-heap")))]
 #[path = "row_build_alloc_budget_test.rs"]
 mod alloc_budget_test;
 
