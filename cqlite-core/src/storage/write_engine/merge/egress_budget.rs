@@ -155,12 +155,15 @@ fn resolved() -> (usize, usize) {
             std::env::var(BUDGET_ENV).ok().as_deref(),
             std::env::var(MIN_CAP_ENV).ok().as_deref(),
         );
-        // One-time operator signal (issue #2765): warn when the resolved knobs
-        // leave the adaptive throttle INERT — either the floor meets the ceiling
+        // One-time operator signal (issue #2765): warn on the two inert-throttle
+        // configs this predicate covers — the floor meets the ceiling
         // (`min_cap >= MAX_CAP`, so every channel is 256 at any concurrency) or
-        // the range is degenerate (`budget <= 2 × min_cap`, so the cap is pinned
-        // at `min_cap` regardless of concurrency). Silent-off is the trap this
-        // closes; runs once (OnceLock init).
+        // the range is degenerate (`budget < 2 × min_cap`, i.e. `budget / min_cap
+        // <= 1`, so the cap is pinned at `min_cap` regardless of concurrency).
+        // NOTE: this does NOT cover a very LARGE budget (e.g. 1_000_000), where
+        // caps stay at 256 until ~`budget / MAX_CAP` concurrent merges with no
+        // warn — that direction is intentionally un-warned here (no behavior
+        // change). Runs once (OnceLock init).
         if min_cap >= MAX_CAP || budget / min_cap <= 1 {
             tracing::warn!(
                 budget,

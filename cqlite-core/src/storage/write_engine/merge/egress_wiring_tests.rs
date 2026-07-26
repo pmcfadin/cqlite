@@ -193,16 +193,22 @@ fn strip_index_siblings(data_path: &std::path::Path) {
 /// leave the process-global active-merge count exactly where it started — proof
 /// the RAII guard's decrement fires on a real merger drop.
 ///
-/// A single `.any()` quiet window (the prior shape) accepted the FIRST clean
-/// build, so a PROBABILISTIC leak (say one build in ten failing to decrement)
-/// could still pass on a lucky window. This instead requires the invariant to
-/// hold across several INDEPENDENT quiet windows AND treats a leak OBSERVED in a
-/// quiet window as immediately FATAL: an attempt is a "quiet window" only when
-/// the build moved the count by EXACTLY our `+1` (`mid == before + 1`, so no
-/// ambient merge touched it during the build); in such a window the drop MUST
-/// return the count (`after <= before`) or it is a proven leak. We require
-/// `REQUIRED_WINDOWS` such windows within a small ceiling; ambient-perturbed
-/// attempts are skipped (retried), never counted as a pass.
+/// ONE baseline `before0` is pinned BEFORE the loop and NEVER re-sampled: we run
+/// `ATTEMPTS` build/drop cycles, then assert the count has returned to
+/// `<= before0`. Every build increments and every drop must decrement, so the
+/// NET effect of the whole run is zero — but a PROBABILISTIC leak (say one build
+/// in ten whose guard fails to decrement) leaves the count PERMANENTLY elevated
+/// at `before0 + leaked`, regardless of WHICH cycle leaked. A prior "re-sample
+/// `before` each attempt + count quiet windows" shape absorbed a leaked slot into
+/// the next attempt's baseline, so a 1-in-10 leak still passed — this catches it
+/// because the single pinned baseline cannot absorb an unpaired decrement.
+///
+/// Ambient churn from parallel tests is tolerated by a BOUNDED POLL of the final
+/// read (a transiently-elevated ambient merge drains within the deadline); our
+/// OWN leaked slots never drain, so a leak stays > `before0` and fails. A
+/// separate check that some build raised the count above `before0` keeps the
+/// registration side honest (guards against a "stopped incrementing" regression
+/// that would make build+drop net-zero vacuously).
 #[test]
 fn real_merger_drop_returns_its_active_merge_slot() {
     let temp = TempDir::new().expect("temp dir");
@@ -210,48 +216,40 @@ fn real_merger_drop_returns_its_active_merge_slot() {
     let paths = flush_n_sstables_sync(&mut engine, 1);
     let schema = create_test_schema();
 
-    const REQUIRED_WINDOWS: usize = 3;
-    const CEILING: usize = 48;
-    let mut converged_windows = 0usize;
-    for _ in 0..CEILING {
-        let before = egress_budget::active_count();
+    const ATTEMPTS: usize = 20;
+    let before0 = egress_budget::active_count();
+    let mut observed_increment = false;
+    for _ in 0..ATTEMPTS {
         let merger = KWayMerger::new_cancellable(paths.clone(), &schema, ScanCancel::default())
             .expect("merger builds");
-        let mid = egress_budget::active_count();
-        // Conclusive only if the BUILD window was strictly quiet (our `+1` alone);
-        // otherwise ambient churn makes the reading ambiguous → drop + retry.
-        let quiet_build = mid == before + 1;
-        drop(merger); // channel close + producer join (ms) — may span ambient churn
-        if !quiet_build {
-            continue;
+        // While held, our merger's slot must lift the count above the pinned
+        // baseline at least once across the run (registration fires).
+        if egress_budget::active_count() > before0 {
+            observed_increment = true;
         }
-        // Post-drop is BOUNDED-POLLED, not a single fatal read: the `mid → after`
-        // interval spans a full drop (join), so an ambient `begin_merge` landing
-        // there transiently raises the count. A genuine leak stays PINNED above
-        // `before` forever (never converges); a transient ambient merge is
-        // balanced by its own later drop and clears within the window. A window
-        // that never converges is treated as AMBIGUOUS (skipped), never a fatal
-        // leak assert — so ambient churn cannot spuriously fail the full gate.
-        let deadline = Instant::now() + Duration::from_millis(500);
-        let mut returned = egress_budget::active_count() <= before;
-        while !returned && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-            returned = egress_budget::active_count() <= before;
-        }
-        if returned {
-            converged_windows += 1;
-            if converged_windows >= REQUIRED_WINDOWS {
-                break;
-            }
-        }
+        drop(merger); // channel close + producer join; guard MUST decrement here
     }
     assert!(
-        converged_windows >= REQUIRED_WINDOWS,
-        "in {CEILING} attempts, fewer than {REQUIRED_WINDOWS} quiet windows saw the \
-         active-merge count return to baseline after a real KWayMerger drop (saw \
-         {converged_windows}). A genuine missing-decrement leak keeps the count \
-         PINNED above baseline so NO window ever converges — that is the failure \
-         this asserts; a merely-busy suite would still converge in some window."
+        observed_increment,
+        "no build ever raised the active-merge count above the baseline \
+         ({before0}) — registration (begin_merge increment) appears unwired"
+    );
+
+    // Bounded-poll the FINAL count back to the pinned baseline: a transient
+    // ambient merge drains within the deadline; an unpaired OUR decrement (a
+    // leak on ANY of the {ATTEMPTS} cycles) stays permanently elevated and fails.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut returned = egress_budget::active_count() <= before0;
+    while !returned && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        returned = egress_budget::active_count() <= before0;
+    }
+    assert!(
+        returned,
+        "active-merge slot LEAKED: after {ATTEMPTS} build/drop cycles the count \
+         ({}) stayed above the pinned pre-loop baseline ({before0}) — a guard's \
+         decrement did not fire on at least one drop",
+        egress_budget::active_count()
     );
 }
 
