@@ -89,12 +89,29 @@ jobs:
           "release version agreement"
           -- bash scripts/bump-version.sh check
 
+      - name: Flight Dockerfile Rust-pin lockstep (#2870)
+        if: steps.classify.outputs.docs_only != 'true'
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "flight dockerfile rust-pin"
+          -- bash scripts/ci/check-dockerfile-rust-pin.sh
+
       - name: Setup Rust
         if: steps.classify.outputs.docs_only != 'true'
         uses: ./.github/actions/setup-rust-ci
         with:
           components: rustfmt,clippy
           cache-key: pr-gate
+
+      - name: Cargo.lock freshness (--locked, #2870)
+        if: steps.classify.outputs.docs_only != 'true'
+        # Cargo.lock is tracked and the flight image build resolves --locked; a
+        # manifest edit that leaves the lock stale must fail HERE on the required
+        # surface (fork PRs, workflow-only PRs), not only at the later image build.
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "cargo lock freshness" -- bash -e -u -o pipefail -c '
+            cargo metadata --locked --format-version 1 > /dev/null
+          '
 
       - name: Rust format check
         if: steps.classify.outputs.docs_only != 'true'

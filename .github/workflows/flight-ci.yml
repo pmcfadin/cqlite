@@ -54,14 +54,6 @@ jobs:
           components: rustfmt,clippy
           cache-key: flight
 
-      - name: Verify Cargo.lock is up to date (--locked)
-        # issue #2870: Cargo.lock is tracked and the flight image build resolves
-        # --locked. Assert on the PR that the committed lockfile is consistent
-        # with the manifests, so a stale lock fails HERE (fast, on the PR) rather
-        # than only later at the main/tag image build. --locked makes cargo
-        # refuse to update the lock and exit non-zero, naming the inconsistency.
-        run: cargo metadata --locked --format-version 1 > /dev/null
-
       - name: rustfmt
         run: cargo fmt --package cqlite-flight -- --check
 
