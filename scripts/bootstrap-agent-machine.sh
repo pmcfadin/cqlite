@@ -16,7 +16,18 @@
 #      / "ACCEL_LANES" / "mold link-accelerator") so the two can never disagree
 #      about whether an accelerator is present. The final health check below
 #      re-reads the state straight from the gate to reconcile.
-#   3. gh auth + the `project` scope (Path A board dispatch, #1886).
+#   3. gh auth + BOARD ACCESS (Path A board dispatch, #1886). The verdict comes
+#      from a READ-ONLY functional probe of the board, never from the `project`
+#      scope string (issue #2942): a token can carry `project` and still fail
+#      `gh project item-edit` for a missing `read:org` while the equivalent
+#      `updateProjectV2ItemFieldValue` GraphQL mutation works. Overridable with
+#      CQLITE_PROJECT_OWNER / CQLITE_PROJECT_NUMBER.
+#   3b. git push CREDENTIALS (issue #2942) — separate from `gh` auth. The claim
+#      protocol (scripts/flow/claim.sh, claim-heartbeat.sh) pushes with plain git
+#      on 10+ call sites, so an authenticated gh with an unauthenticated git means
+#      the cross-machine lock does not work. Under --yes this configures a
+#      credential path, preferring `gh auth setup-git`, else a helper that
+#      dereferences $GH_TOKEN at call time. The token is never written to disk.
 #   4. roborev installed and its LOCAL config resolves — roborev follows THIS
 #      machine's configured agent (commonly codex via .roborev.toml); we warn
 #      only if the local config is broken, never prescribe an agent.
@@ -26,7 +37,7 @@
 #
 # Usage:
 #   bash scripts/bootstrap-agent-machine.sh            # check + print install cmds
-#   bash scripts/bootstrap-agent-machine.sh --yes      # also auto-run brew/cargo installs
+#   bash scripts/bootstrap-agent-machine.sh --yes      # also auto-run installs + git credentials
 #   bash scripts/bootstrap-agent-machine.sh --skip-smoke   # skip the final gate run
 #   bash scripts/bootstrap-agent-machine.sh --help
 set -uo pipefail
@@ -41,7 +52,7 @@ for arg in "$@"; do
     --yes|-y) AUTO_YES=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     -h|--help)
-      sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "bootstrap: unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -335,25 +346,189 @@ if [ "$PLATFORM" = linux ]; then
   fi
 fi
 
-# ---- 3. gh auth + project scope (Path A, #1886) ----
-hdr "GitHub CLI auth + project scope (Path A, #1886)"
+# ---- 3. GitHub board access + project scope (Path A, #1886; #2942) ----
+# The board is the SOLE dispatch authority, so "can this machine use the board?"
+# must be answered by TRYING it. Until #2942 this section matched the `project`
+# scope STRING and declared "board dispatch works" — and a box was observed where
+# that scope IS present, `gh project item-edit` fails for a missing `read:org`, and
+# the equivalent `updateProjectV2ItemFieldValue` GraphQL mutation succeeds with the
+# SAME token. A scope match is evidence about a token, not about the operation.
+# The scope check survives as a cheap PRE-FILTER; the verdict comes from a probe.
+# The probe is strictly READ-ONLY — a bootstrap must never mutate a real board item.
+BOARD_OWNER="${CQLITE_PROJECT_OWNER:-pmcfadin}"
+BOARD_NUMBER="${CQLITE_PROJECT_NUMBER:-1}"
+BOARD_GRAPHQL_WRITE="updateProjectV2ItemFieldValue"
+hdr "GitHub board access + project scope (Path A, #1886)"
 if have gh; then
   if gh auth status >/dev/null 2>&1; then
     ok "gh authenticated"
+    auth_out=$(gh auth status 2>&1)
     # Token-boundary match on the scopes line so a scope like 'project:read-only'
     # (or any 'xprojecty' substring) can never false-positive as 'project'.
-    scopes_line=$(gh auth status 2>&1 | grep "Token scopes:" | head -1)
+    scopes_line=$(printf '%s\n' "$auth_out" | grep "Token scopes:" | head -1)
     if printf '%s\n' "$scopes_line" | grep -qE "(^|[ ,'])project([ ,']|$)"; then
-      ok "'project' scope present — board dispatch works"
+      info "pre-filter: 'project' scope present (NOT the verdict — the probe below decides)"
     else
       warn "'project' scope MISSING — the board is the SOLE dispatch authority (Path A). Fix:"
       info "gh auth refresh -s project"
+    fi
+    # gh's OWN declaration that the ACTIVE token lacks scopes gh requires. This is
+    # the discriminator behind the observed false OK: scopes include 'project',
+    # `read:org` is missing, and `gh project item-edit` fails on that alone.
+    missing_scopes=$(printf '%s\n' "$auth_out" | grep -i "Missing required token scopes" | head -1)
+    missing_list="${missing_scopes##*scopes:}"; missing_list="${missing_list# }"
+    # READ-ONLY probe 1: can `gh project` see the board at all?
+    board_read=1
+    gh project view "$BOARD_NUMBER" --owner "$BOARD_OWNER" >/dev/null 2>&1 || board_read=0
+    # READ-ONLY probe 2: does the GraphQL projectV2 surface answer with this token?
+    # This is the read counterpart of the write fallback, so its result tells the
+    # operator whether the fallback path is actually available.
+    graphql_read=1
+    gh api graphql -f owner="$BOARD_OWNER" -F number="$BOARD_NUMBER" \
+      -f query='query($owner:String!,$number:Int!){user(login:$owner){projectV2(number:$number){id title}}}' \
+      >/dev/null 2>&1 || graphql_read=0
+    if [ "$board_read" = 1 ] && [ -z "$missing_scopes" ]; then
+      ok "board #$BOARD_NUMBER ($BOARD_OWNER) reachable — 'gh project' read probe OK, no missing token scopes"
+    elif [ "$board_read" = 1 ]; then
+      warn "board READ works but gh reports the active token is MISSING required scopes ($missing_list) — 'gh project item-edit' can still FAIL for read:org"
+      info "board WRITES: fall back to the GraphQL \`$BOARD_GRAPHQL_WRITE\` mutation (it succeeds with the SAME token; graphql projectV2 read probe: $([ "$graphql_read" = 1 ] && echo OK || echo FAILED))"
+      info "or widen the token:  gh auth refresh -s read:org"
+    elif [ "$graphql_read" = 1 ]; then
+      warn "'gh project' CANNOT use board #$BOARD_NUMBER ($BOARD_OWNER) even though the scope pre-filter passed${missing_list:+ — gh reports missing required scopes ($missing_list)}"
+      info "the GraphQL projectV2 read probe SUCCEEDED with the same token — board WRITES must go through the \`$BOARD_GRAPHQL_WRITE\` mutation, not \`gh project item-edit\`"
+      info "or widen the token:  gh auth refresh -s read:org"
+    else
+      warn "board #$BOARD_NUMBER ($BOARD_OWNER) UNREACHABLE — BOTH probes failed ('gh project view' and the GraphQL projectV2 read). Path A: a session with no board access must STOP, never label-dispatch"
+      info "check the owner/number (CQLITE_PROJECT_OWNER / CQLITE_PROJECT_NUMBER), then: gh auth refresh -s project -s read:org"
+      info "neither 'gh project item-edit' nor the \`$BOARD_GRAPHQL_WRITE\` GraphQL fallback can work until a probe passes"
     fi
   else
     warn "gh not authenticated — run: gh auth login (then gh auth refresh -s project)"
   fi
 else
   warn "gh CLI NOT installed — $(brew_or_cargo gh gh 2>/dev/null || echo 'install GitHub CLI: https://cli.github.com')"
+fi
+
+# ---- 3b. git push credentials (issue #2942) ----
+# `gh` auth and `git` auth are SEPARATE credential paths. An authenticated gh CLI is
+# NOT evidence that a raw `git push` can authenticate — and the flow tooling
+# (scripts/flow/claim.sh, scripts/flow/claim-heartbeat.sh) pushes with plain git on
+# 10+ call sites (the claim ref, the adoption CAS, release, heartbeats). On a box
+# where only gh is wired, every one of those fails with
+#     fatal: could not read Username for 'https://github.com'
+# so the claim protocol — the cross-machine lock the whole fleet depends on — simply
+# does not work, while `gh auth status` reports a happy machine.
+#
+# The probe is `git credential fill`: it runs the CONFIGURED helper chain and answers
+# exactly the question that matters ("would git find a credential for this host?")
+# without contacting the network and without pushing anything. Prompts are disabled
+# two ways so it can never hang a headless bootstrap — an askpass pointing at a
+# deliberately nonexistent command, plus GIT_TERMINAL_PROMPT=0. The filled credential
+# goes to /dev/null: it is never printed, logged, or stored.
+GIT_CRED_HELPER='!f(){ test "$1" = get || exit 0; echo username=x-access-token; echo "password=${GH_TOKEN:-${GITHUB_TOKEN:-}}"; };f'
+
+git_cred_probe() {
+  printf 'protocol=https\nhost=%s\n\n' "$1" \
+    | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=cqlite-bootstrap-no-askpass \
+      SSH_ASKPASS=cqlite-bootstrap-no-askpass \
+      git -C "$REPO_ROOT" credential fill >/dev/null 2>&1
+}
+
+# git_origin_host <url> — host of an http(s) origin ("" for any other form). The
+# path is stripped FIRST so an '@' inside the path can never be mistaken for the
+# user[:password]@ prefix.
+git_origin_host() {
+  local url="$1" rest hostport
+  case "$url" in
+    https://*) rest="${url#https://}" ;;
+    http://*)  rest="${url#http://}" ;;
+    *) return 0 ;;
+  esac
+  hostport="${rest%%/*}"
+  printf '%s' "${hostport#*@}"
+}
+
+hdr "git push credentials (issue #2942)"
+# Classify origin BEFORE probing: only an http(s) remote uses a credential helper.
+# An SSH remote authenticates with a key (a helper is irrelevant), and a local/file
+# remote needs no credential at all — mislabeling either would send an operator
+# after the wrong fix, which is the exact failure mode this whole change exists to end.
+GIT_ORIGIN_URL=""; GIT_ORIGIN_HOST=""; GIT_ORIGIN_KIND=none
+if have git; then
+  GIT_ORIGIN_URL=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
+  case "$GIT_ORIGIN_URL" in
+    "")                    GIT_ORIGIN_KIND=none ;;
+    https://*|http://*)    GIT_ORIGIN_KIND=https; GIT_ORIGIN_HOST=$(git_origin_host "$GIT_ORIGIN_URL") ;;
+    ssh://*|git+ssh://*)   GIT_ORIGIN_KIND=ssh ;;
+    *@*:*)                 GIT_ORIGIN_KIND=ssh ;;   # scp-like git@host:owner/repo.git
+    *)                     GIT_ORIGIN_KIND=other ;; # file:// or a local path
+  esac
+  [ "$GIT_ORIGIN_KIND" = https ] && [ -z "$GIT_ORIGIN_HOST" ] && GIT_ORIGIN_KIND=other
+fi
+
+if ! have git; then
+  warn "git NOT installed — the claim protocol pushes with plain git"
+elif [ "$GIT_ORIGIN_KIND" = none ]; then
+  warn "no 'origin' remote in $REPO_ROOT — cannot check push credentials"
+elif [ "$GIT_ORIGIN_KIND" = ssh ]; then
+  # SSH (git@host:… / ssh://…): git authenticates with your SSH key, and an https
+  # credential helper is irrelevant. Report it and configure nothing.
+  ok "origin is an SSH remote — git push authenticates via SSH keys, not a credential helper (no helper needed)"
+  info "verify separately if pushes fail:  ssh -T git@github.com"
+elif [ "$GIT_ORIGIN_KIND" = other ]; then
+  info "origin ($GIT_ORIGIN_URL) is neither http(s) nor SSH — no credential helper applies"
+elif git_cred_probe "$GIT_ORIGIN_HOST"; then
+  ok "git push credentials resolve for $GIT_ORIGIN_HOST (a credential helper answers)"
+  if git -C "$REPO_ROOT" config --local --get-all credential.helper >/dev/null 2>&1 \
+     && ! git config --global --get-all credential.helper >/dev/null 2>&1; then
+    info "note: the helper is configured at REPO-LOCAL scope only — a fresh clone or a"
+    info "      new checkout on this box will NOT inherit it. Re-run with --yes to add a global one."
+  fi
+else
+  warn "git push has NO credentials for $GIT_ORIGIN_HOST — an authenticated 'gh' does NOT authenticate git"
+  info "symptom: every push fails with  fatal: could not read Username for 'https://$GIT_ORIGIN_HOST'"
+  info "impact: scripts/flow/claim.sh + claim-heartbeat.sh push on 10+ call sites — the claim protocol does not work"
+  info "fix:    gh auth setup-git    (preferred; wires gh as git's credential helper)"
+  info "        or re-run with --yes to configure a helper that reads \$GH_TOKEN at call time"
+  if [ "$AUTO_YES" = 1 ]; then
+    cred_fixed=0
+    # Preferred form: let gh wire itself in. Verified by RE-PROBING — on the box
+    # that motivated #2942 the gh credential path was precisely what was not wired,
+    # so "the command exited 0" is not evidence.
+    if have gh && gh auth status >/dev/null 2>&1; then
+      info "configuring: gh auth setup-git"
+      if gh auth setup-git >/dev/null 2>&1 && git_cred_probe "$GIT_ORIGIN_HOST"; then
+        ok "git credentials configured via 'gh auth setup-git' (no secret written to disk)"
+        cred_fixed=1
+      else
+        info "'gh auth setup-git' did not yield a usable credential — falling back to the \$GH_TOKEN helper"
+      fi
+    fi
+    if [ "$cred_fixed" = 0 ]; then
+      if [ -z "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+        warn "cannot auto-configure: neither GH_TOKEN nor GITHUB_TOKEN is set in this environment"
+        info "export GH_TOKEN=<token>, then re-run:  bash scripts/bootstrap-agent-machine.sh --yes"
+      else
+        # The value written is a shell snippet that DEREFERENCES $GH_TOKEN when git
+        # asks — the token itself never lands on disk, so rotating it needs no
+        # reconfiguration and a leaked ~/.gitconfig leaks no credential. (Decision 2
+        # of the worker-env-preflight change: explicitly NOT ~/.git-credentials.)
+        info "configuring a global credential.helper that dereferences \$GH_TOKEN at call time (the token is NOT written to disk)"
+        # Idempotence: never stack a second copy of our helper on a re-run. Reaching
+        # here with one already present means the token itself is the problem.
+        if git config --global --get-all credential.helper 2>/dev/null | grep -qF 'x-access-token'; then
+          warn "a \$GH_TOKEN-style helper is ALREADY in the global git config yet the probe still fails — check that GH_TOKEN is valid/unexpired (not re-adding it)"
+        elif git config --global --add credential.helper "$GIT_CRED_HELPER" 2>/dev/null \
+           && git_cred_probe "$GIT_ORIGIN_HOST"; then
+          ok "git credentials configured via a \$GH_TOKEN-dereferencing helper (no secret written to disk)"
+        else
+          warn "could not configure a working git credential helper — fix manually: gh auth setup-git"
+        fi
+      fi
+    fi
+  else
+    info "(re-run with --yes to auto-configure)"
+  fi
 fi
 
 # ---- 4. roborev (follows LOCAL machine config — never pin an agent, #1921 owner correction) ----

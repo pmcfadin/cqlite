@@ -41,6 +41,21 @@ trap 'rm -rf "$tmp"' EXIT
 tripwire="$tmp/tripwire.log"
 : >"$tripwire"
 
+# --- GLOBAL git-config isolation (issue #2942) -----------------------------
+# The bootstrap's git-credential section READS the configured helper chain and,
+# under --yes, WRITES a helper into the user's GLOBAL git config. This self-test
+# must never touch (or be perturbed by) the host machine's real credential setup —
+# clobbering it would break the live delivery session running on this box. These
+# two exports are inherited by EVERY bootstrap child below, so the isolation holds
+# for cases added later without remembering to opt in:
+#   GIT_CONFIG_GLOBAL   redirects `git config --global` + global reads to a throwaway
+#   GIT_CONFIG_NOSYSTEM ignores /etc/gitconfig, so a host-wide helper cannot leak in
+# (HOME is sandboxed per case as well; GIT_CONFIG_GLOBAL is the belt to that braces —
+# it also covers an XDG_CONFIG_HOME that survives a HOME override.)
+export GIT_CONFIG_GLOBAL="$tmp/global-gitconfig"
+export GIT_CONFIG_NOSYSTEM=1
+: >"$GIT_CONFIG_GLOBAL"
+
 mkshim() {
   # mkshim <name>: a fake tool that records "install"/"add" invocations and is
   # otherwise a harmless no-op (version/status queries succeed emptily).
@@ -422,6 +437,260 @@ if [ "$repo_before" = "$(cat "$repo_cfg")" ] \
 else
   bad "mold: repo config was mutated OR block did not land in CARGO_HOME"
   echo "--- repo cfg now ---"; cat "$repo_cfg"; echo "--------------------"
+fi
+
+# --- 7. git push credentials (issue #2942) ---------------------------------
+# `gh` auth and `git` auth are SEPARATE credential paths: an authenticated gh CLI is
+# NOT evidence that a raw `git push` can authenticate, and scripts/flow/claim.sh +
+# claim-heartbeat.sh push with plain git on 10+ call sites. Every case below runs a
+# COPY of bootstrap inside a throwaway git repo with a sandboxed HOME and its OWN
+# GIT_CONFIG_GLOBAL, so the credential write under --yes can only ever land in the
+# sandbox — never in this machine's real global git config.
+
+# mk_fake_repo <dir> <origin-url>: a throwaway git repo holding a COPY of bootstrap
+# at <dir>/scripts/, with `origin` set to <origin-url> and NO repo-local credential
+# helper. The copy makes BASH_SOURCE-derived REPO_ROOT resolve to <dir>, so the
+# credential probe reads THIS remote/config, never the real checkout's — and the
+# --yes dataset fetch is a fast no-op (no test-data/scripts/fetch-datasets.sh here).
+mk_fake_repo() {
+  local dir="$1" url="$2"
+  mkdir -p "$dir/scripts"
+  cp "$BOOTSTRAP" "$dir/scripts/bootstrap-agent-machine.sh"
+  git -c init.defaultBranch=main init -q "$dir" >/dev/null 2>&1
+  git -C "$dir" remote add origin "$url" >/dev/null 2>&1
+}
+
+FAKE_TOKEN='ghp_FAKEtoken2942FAKEtoken2942FAKEtoken'
+
+# 7a. HTTPS origin, NO credential helper anywhere, default (no --yes) mode ->
+#     must WARN (never `ok`), print the identifying `could not read Username`
+#     symptom + remediation, and write NOTHING.
+sb7a=$(mktemp -d "$tmp/cred7a.XXXXXX"); stub7a="$tmp/stub7a"
+mk_hermetic_bin "$stub7a"
+repo7a="$tmp/repo7a"; mk_fake_repo "$repo7a" "https://github.com/pmcfadin/cqlite.git"
+gc7a="$sb7a/gitconfig"   # deliberately absent
+out7a=$(PATH="$stub7a" HOME="$sb7a" CARGO_HOME="$sb7a/.cargo" GIT_CONFIG_GLOBAL="$gc7a" \
+  GH_TOKEN="" GITHUB_TOKEN="" bash "$repo7a/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+if printf '%s' "$out7a" | grep -q "git push credentials"; then
+  ok "cred: bootstrap emits the git-credential section"
+else
+  bad "cred: git-credential section MISSING from bootstrap output"
+fi
+if printf '%s' "$out7a" | grep -q "\[warn\].*git push" \
+   && printf '%s' "$out7a" | grep -q "could not read Username" \
+   && printf '%s' "$out7a" | grep -q "gh auth setup-git"; then
+  ok "cred: no helper -> warn naming the 'could not read Username' symptom + remediation"
+else
+  bad "cred: no-helper case did not warn with the symptom/remediation"
+  printf '%s\n' "$out7a" | grep -i -A3 "credential"
+fi
+if printf '%s' "$out7a" | grep -Eq '\[ok\].*(git push credentials|git credentials).*(resolve|configured)'; then
+  bad "cred: reported OK for git push credentials while no helper is configured"
+else
+  ok "cred: authenticated gh alone is NOT reported as git push credentials"
+fi
+if [ ! -f "$gc7a" ]; then
+  ok "cred: default (no --yes) run wrote NO global git config"
+else
+  bad "cred: default run wrote a global git config"; cat "$gc7a"
+fi
+
+# 7b. --yes with `gh auth setup-git` a no-op -> falls back to the $GH_TOKEN helper.
+#     The config must carry the LITERAL `$GH_TOKEN` (dereferenced at call time) and
+#     must NOT contain the token value; nothing the bootstrap wrote may contain it.
+sb7b=$(mktemp -d "$tmp/cred7b.XXXXXX"); stub7b="$tmp/stub7b"
+mk_hermetic_bin "$stub7b"
+gh7b_log="$tmp/gh7b.log"; : >"$gh7b_log"
+mk_stub "$stub7b" gh "echo \"\$*\" >>\"$gh7b_log\"; exit 0"   # setup-git succeeds but wires nothing
+repo7b="$tmp/repo7b"; mk_fake_repo "$repo7b" "https://github.com/pmcfadin/cqlite.git"
+gc7b="$sb7b/gitconfig"
+out7b=$(PATH="$stub7b" HOME="$sb7b" CARGO_HOME="$sb7b/.cargo" GIT_CONFIG_GLOBAL="$gc7b" \
+  GH_TOKEN="$FAKE_TOKEN" bash "$repo7b/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+if grep -q "auth setup-git" "$gh7b_log"; then
+  ok "cred: --yes prefers 'gh auth setup-git' first"
+else
+  bad "cred: --yes never attempted 'gh auth setup-git'"
+fi
+if [ -f "$gc7b" ] && grep -q 'x-access-token' "$gc7b" && grep -qF 'GH_TOKEN' "$gc7b"; then
+  ok "cred: --yes fell back to a helper that dereferences \$GH_TOKEN at call time"
+else
+  bad "cred: --yes did not configure the \$GH_TOKEN fallback helper"
+  [ -f "$gc7b" ] && { echo "--- gitconfig ---"; cat "$gc7b"; echo "-----------------"; }
+fi
+# The whole point of Decision 2: no file written by the bootstrap holds the secret.
+leak7b=$(grep -rlF "$FAKE_TOKEN" "$sb7b" "$gc7b" "$repo7b" 2>/dev/null | head -5)
+if [ -z "$leak7b" ]; then
+  ok "cred: token VALUE never written to disk by the bootstrap"
+else
+  bad "cred: token value leaked into: $leak7b"
+fi
+if printf '%s' "$out7b" | grep -Eq '\[ok\].*git.*credential'; then
+  ok "cred: --yes run reports the configured credential path as ok"
+else
+  bad "cred: --yes run never confirmed a working credential path"
+  printf '%s\n' "$out7b" | grep -i -A2 "credential"
+fi
+
+# 7c. --yes where `gh auth setup-git` genuinely works -> use it, and do NOT also
+#     add the $GH_TOKEN fallback helper (preferred form wins, Decision 2).
+sb7c=$(mktemp -d "$tmp/cred7c.XXXXXX"); stub7c="$tmp/stub7c"
+mk_hermetic_bin "$stub7c"
+mk_stub "$stub7c" gh 'if [ "$1" = auth ] && [ "$2" = setup-git ]; then
+  git config --global --add credential.helper "!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=stub-helper-secret; };f"
+fi
+exit 0'
+repo7c="$tmp/repo7c"; mk_fake_repo "$repo7c" "https://github.com/pmcfadin/cqlite.git"
+gc7c="$sb7c/gitconfig"
+out7c=$(PATH="$stub7c" HOME="$sb7c" CARGO_HOME="$sb7c/.cargo" GIT_CONFIG_GLOBAL="$gc7c" \
+  GH_TOKEN="$FAKE_TOKEN" bash "$repo7c/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+if [ -f "$gc7c" ] && grep -q 'gh-stub' "$gc7c" && ! grep -q 'x-access-token' "$gc7c" \
+   && printf '%s' "$out7c" | grep -q "gh auth setup-git"; then
+  ok "cred: a working 'gh auth setup-git' is preferred; no \$GH_TOKEN fallback added"
+else
+  bad "cred: working setup-git path did not win (fallback added or not reported)"
+  [ -f "$gc7c" ] && { echo "--- gitconfig ---"; cat "$gc7c"; echo "-----------------"; }
+fi
+
+# 7d. SSH origin -> the https credential helper is irrelevant; report it and write
+#     nothing, even under --yes.
+sb7d=$(mktemp -d "$tmp/cred7d.XXXXXX"); stub7d="$tmp/stub7d"
+mk_hermetic_bin "$stub7d"
+repo7d="$tmp/repo7d"; mk_fake_repo "$repo7d" "git@github.com:pmcfadin/cqlite.git"
+gc7d="$sb7d/gitconfig"
+out7d=$(PATH="$stub7d" HOME="$sb7d" CARGO_HOME="$sb7d/.cargo" GIT_CONFIG_GLOBAL="$gc7d" \
+  GH_TOKEN="$FAKE_TOKEN" bash "$repo7d/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke 2>&1)
+if printf '%s' "$out7d" | grep -qi "SSH" \
+   && ! { [ -f "$gc7d" ] && grep -q 'x-access-token' "$gc7d"; }; then
+  ok "cred: SSH origin reported as its own credential path; no helper written"
+else
+  bad "cred: SSH origin case wrote a helper or did not report the SSH path"
+  [ -f "$gc7d" ] && cat "$gc7d"
+fi
+
+# 7e. Re-running --yes must not STACK a second copy of the helper. Bootstrap is
+#     documented as idempotent, and a credential.helper list that grows every run
+#     is a real footgun (git consults each entry in order).
+sb7e=$(mktemp -d "$tmp/cred7e.XXXXXX"); stub7e="$tmp/stub7e"
+mk_hermetic_bin "$stub7e"
+mk_stub "$stub7e" gh 'exit 0'   # setup-git is a no-op -> the fallback helper is used
+repo7e="$tmp/repo7e"; mk_fake_repo "$repo7e" "https://github.com/pmcfadin/cqlite.git"
+gc7e="$sb7e/gitconfig"
+for _ in 1 2 3; do
+  PATH="$stub7e" HOME="$sb7e" CARGO_HOME="$sb7e/.cargo" GIT_CONFIG_GLOBAL="$gc7e" \
+    GH_TOKEN="$FAKE_TOKEN" bash "$repo7e/scripts/bootstrap-agent-machine.sh" --yes --skip-smoke >/dev/null 2>&1
+done
+helper_count=$(grep -c 'x-access-token' "$gc7e" 2>/dev/null); helper_count="${helper_count:-0}"
+if [ "$helper_count" = 1 ]; then
+  ok "cred: repeated --yes runs keep exactly one credential helper (idempotent)"
+else
+  bad "cred: helper stacked across re-runs (count=$helper_count)"
+  [ -f "$gc7e" ] && cat "$gc7e"
+fi
+
+# --- 8. Board check is a FUNCTIONAL, READ-ONLY probe (issue #2942) ----------
+# The false OK this exists to prevent: a token whose scopes INCLUDE `project` while
+# `gh project` still fails for a missing `read:org`, and the equivalent
+# `updateProjectV2ItemFieldValue` GraphQL mutation succeeds with the SAME token. A
+# scope-string match therefore proves nothing about the operation, and must never be
+# the verdict.
+
+# mk_board_gh <dir> <log> <scopes> <missing-scopes|""> <gh-project-rc> <gh-api-rc>
+mk_board_gh() {
+  local dir="$1" log="$2" scopes="$3" missing="$4" prc="$5" arc="$6"
+  local missing_echo=""
+  [ -n "$missing" ] && missing_echo="echo \"  ! Missing required token scopes: $missing\""
+  cat >"$dir/gh" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$log"
+case "\$1" in
+  auth)
+    if [ "\$2" = status ]; then
+      echo "github.com"
+      echo "  ✓ Logged in to github.com account tester (GH_TOKEN)"
+      echo "  - Token scopes: $scopes"
+      $missing_echo
+    fi
+    exit 0 ;;
+  project) exit $prc ;;
+  api)     exit $arc ;;
+  *)       exit 0 ;;
+esac
+EOF
+  chmod +x "$dir/gh"
+}
+
+# run_board_case <name> <scopes> <missing> <project-rc> <api-rc> -> sets BOARD_OUT/BOARD_LOG
+run_board_case() {
+  local name="$1" scopes="$2" missing="$3" prc="$4" arc="$5"
+  local sb stub repo
+  sb=$(mktemp -d "$tmp/board-$name.XXXXXX"); stub="$tmp/stub-board-$name"
+  mk_hermetic_bin "$stub"
+  BOARD_LOG="$tmp/gh-board-$name.log"; : >"$BOARD_LOG"
+  mk_board_gh "$stub" "$BOARD_LOG" "$scopes" "$missing" "$prc" "$arc"
+  repo="$tmp/repo-board-$name"; mk_fake_repo "$repo" "https://github.com/pmcfadin/cqlite.git"
+  BOARD_OUT=$(PATH="$stub" HOME="$sb" CARGO_HOME="$sb/.cargo" GIT_CONFIG_GLOBAL="$sb/gitconfig" \
+    GH_TOKEN="" bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+}
+
+# 8a. THE false-OK case: `project` scope present, `read:org` missing, `gh project`
+#     unusable, GraphQL fine. Today's scope-string check prints an unqualified
+#     "board dispatch works" here — that verdict must be impossible.
+run_board_case falseok "'project', 'repo', 'workflow'" "'read:org'" 1 0
+if printf '%s' "$BOARD_OUT" | grep -q "board dispatch works"; then
+  bad "board: scope-present-but-gh-project-unusable STILL prints 'board dispatch works'"
+else
+  ok "board: scope present + gh project unusable -> no unqualified 'board dispatch works'"
+fi
+if printf '%s' "$BOARD_OUT" | grep -q "updateProjectV2ItemFieldValue"; then
+  ok "board: names the updateProjectV2ItemFieldValue GraphQL write fallback"
+else
+  bad "board: never named the updateProjectV2ItemFieldValue fallback"
+  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board"
+fi
+if printf '%s' "$BOARD_OUT" | grep -qi "read:org"; then
+  ok "board: surfaces the read:org scope gap gh itself reports"
+else
+  bad "board: did not surface the read:org gap"
+fi
+
+# 8b. `gh project` READ works but gh still reports missing required scopes — the
+#     write (`item-edit`) can fail. Still not an unqualified success.
+run_board_case partial "'project', 'repo', 'workflow'" "'read:org'" 0 0
+if ! printf '%s' "$BOARD_OUT" | grep -q "board dispatch works" \
+   && printf '%s' "$BOARD_OUT" | grep -q "updateProjectV2ItemFieldValue"; then
+  ok "board: read-OK + missing required scopes -> qualified verdict naming the fallback"
+else
+  bad "board: read-OK + missing scopes reported as unqualified success"
+  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board"
+fi
+
+# 8c. Fully healthy token: probe succeeds, gh reports no missing scopes -> an ok.
+run_board_case healthy "'project', 'read:org', 'repo', 'workflow'" "" 0 0
+if printf '%s' "$BOARD_OUT" | grep -Eq '\[ok\].*board'; then
+  ok "board: healthy token + successful probe reports ok"
+else
+  bad "board: healthy token did not produce an ok verdict"
+  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board"
+fi
+
+# 8d. Unreachable board (both probes fail) -> a loud warn, never a scope-based pass.
+run_board_case unreachable "'project', 'repo', 'workflow'" "" 1 1
+if printf '%s' "$BOARD_OUT" | grep -Eq '\[warn\].*board' \
+   && ! printf '%s' "$BOARD_OUT" | grep -q "board dispatch works"; then
+  ok "board: both probes failing -> warn (scope match never rescues the verdict)"
+else
+  bad "board: unreachable board did not warn"
+  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board"
+fi
+
+# 8e. The probe is READ-ONLY: across every case above, the bootstrap must never
+#     have invoked a board-mutating gh call.
+mutating=$(cat "$tmp"/gh-board-*.log 2>/dev/null \
+  | grep -Ei 'item-edit|item-add|item-delete|item-archive|--field|mutation' | head -5)
+if [ -z "$mutating" ]; then
+  ok "board: probe never invoked a mutating gh/board operation"
+else
+  bad "board: probe issued a MUTATING call: $mutating"
 fi
 
 echo
