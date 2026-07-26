@@ -47,12 +47,18 @@
 //! A 27-arm run spans minutes, so one up-front load sample certifies nothing about
 //! the arms that run last. Validity is therefore enforced in two tiers:
 //!
-//! 1. **Run start:** the 1-minute load average must be ≤ [`LOAD_CEILING`] before
+//! 1. **Run start:** the 1-minute load average must be ≤ [`load_ceiling`] before
 //!    the instrument adds any load of its own — else the run fails closed.
 //! 2. **Every arm:** the **foreign** (not-this-process) CPU consumed during that
-//!    arm's TIMED region must stay under `FOREIGN_CPU_CEILING_CORES`, computed
+//!    arm's TIMED region must stay under [`foreign_cpu_ceiling`], computed
 //!    from `/proc/stat` minus this process's own `utime+stime` and printed per
 //!    arm. Exceeding it voids the arm and fails the run.
+//!
+//! BOTH ceilings scale with the host's core count (a fixed figure tuned for the
+//! 16-core reference box would admit 4× as much relative interference on a 4-core
+//! one) and BOTH are printed in the run header, so a record always shows the values
+//! actually enforced. On 16 cores they are the `2.00` / `1.00` cores the banked runs
+//! enforced.
 //!
 //! Tier 2 is deliberately NOT a per-arm loadavg check: `KWayMerger` runs one
 //! producer thread per generation, so the run's OWN parallelism pushes `loadavg`
@@ -100,6 +106,9 @@ use criterion::{criterion_group, criterion_main, Criterion};
 #[path = "fixtures/mod.rs"]
 mod fixtures;
 
+#[path = "profiling/mod.rs"]
+mod profiling;
+
 // Included HERE rather than declared inside `fixtures/mod.rs`: that module is
 // `#[path]`-included by every bench target, so declaring the multigen fixtures
 // there would make ~10 targets compile them for the benefit of this one.
@@ -107,11 +116,52 @@ mod fixtures;
 #[path = "fixtures/multigen.rs"]
 mod multigen;
 
-/// 1-minute load-average ceiling for a VALID measurement run. The reference box is
-/// 16 cores, so 2.0 is ~12% busy — enough headroom for an editor/ssh session, far
-/// below anything that perturbs a single-threaded merge drain.
+/// Per-CORE 1-minute load-average budget for a VALID measurement run: the machine
+/// must be under ~12.5 % busy before the instrument adds any load of its own —
+/// enough headroom for an editor/ssh session, far below anything that perturbs a
+/// merge drain.
+///
+/// Derived from the host's core count rather than fixed (roborev, issue #2043): an
+/// absolute `2.0` tuned for the 16-core reference box admits a **50 %-busy**
+/// 4-core box, silently weakening the "loaded measurements are void" guarantee by
+/// 4×. The enforced figure is [`load_ceiling`] and is printed in the run header, so
+/// every record shows what was actually enforced. On the 16-core reference box it is
+/// exactly the `2.0` the banked runs enforced, so no banked number shifts.
 #[cfg(feature = "write-support")]
-const LOAD_CEILING: f64 = 2.0;
+const LOAD_CEILING_PER_CORE: f64 = 0.125;
+
+/// Floor for [`load_ceiling`] on very small hosts: at 1–4 cores the per-core budget
+/// (0.125–0.5) would sit inside the noise of an otherwise-idle box's own loadavg
+/// decay, so the gate would fail on nothing. 0.5 keeps a 4-core host at the same
+/// 12.5 % it derives anyway and never goes stricter than that.
+#[cfg(feature = "write-support")]
+const LOAD_CEILING_FLOOR: f64 = 0.5;
+
+/// Foreign-CPU budget per CORE, in cores: 1/16 core per core is ~6 % of the box —
+/// enough for an ssh/editor session, far below anything that perturbs a merge drain.
+/// Derived for the same reason as [`LOAD_CEILING_PER_CORE`]: a fixed `1.0` core is
+/// 6 % of a 16-core box but **25 %** of a 4-core one. See [`foreign_cpu_ceiling`];
+/// on the 16-core reference box it is exactly the `1.00` the banked runs enforced.
+#[cfg(feature = "write-support")]
+const FOREIGN_CPU_CEILING_PER_CORE: f64 = 0.0625;
+
+/// Floor for [`foreign_cpu_ceiling`], in cores — a tiny host still gets a quarter
+/// core of slack, below which sampling jitter alone would void arms.
+#[cfg(feature = "write-support")]
+const FOREIGN_CPU_CEILING_FLOOR: f64 = 0.25;
+
+/// The enforced 1-minute load ceiling on a host with `cores` cores.
+#[cfg(feature = "write-support")]
+fn load_ceiling(cores: f64) -> f64 {
+    (LOAD_CEILING_PER_CORE * cores).max(LOAD_CEILING_FLOOR)
+}
+
+/// The enforced per-arm FOREIGN-CPU ceiling, in whole cores, on a host with `cores`
+/// cores. Exceeding it VOIDS the arm.
+#[cfg(feature = "write-support")]
+fn foreign_cpu_ceiling(cores: f64) -> f64 {
+    (FOREIGN_CPU_CEILING_PER_CORE * cores).max(FOREIGN_CPU_CEILING_FLOOR)
+}
 
 #[cfg(feature = "write-support")]
 mod overlap {
@@ -132,7 +182,7 @@ mod overlap {
         build_multigen_sized, MultigenFixture, OverlapMix, CLUSTERS_PER_GEN, K_VALUES, OVERLAP_CK,
         PINNED_NOW_SECS, PRODUCER_CONTROL_CK,
     };
-    use super::LOAD_CEILING;
+    use super::{foreign_cpu_ceiling, load_ceiling};
 
     /// Materialized cells a FULLY-LIVE reconciled row of the fixture table
     /// carries: the clustering column `ck` plus the three value columns `v0`,
@@ -200,12 +250,20 @@ mod overlap {
             .skip(1)
             .filter_map(|f| f.parse::<u64>().ok())
             .collect();
-        // user nice system idle iowait irq softirq steal …
+        // user nice system idle iowait irq softirq steal [guest guest_nice]
         if fields.len() < 5 {
             return None;
         }
-        let total: u64 = fields.iter().sum();
-        let idle = fields[3] + fields[4];
+        // Sum ONLY user..=steal (the first EIGHT fields, when present). The kernel
+        // reports `guest`/`guest_nice` as a SUBSET already counted inside
+        // `user`/`nice`, so summing them double-counts every guest jiffy: on a KVM
+        // host both `total` and `busy` inflate and `foreign_cores =
+        // (busy - own)/total * cores` skews toward OVER-reporting, i.e. spurious
+        // voided arms (roborev, issue #2043). The slice is length-clamped, so a
+        // short/extended `/proc/stat` line can never panic here.
+        let busy_fields = &fields[..fields.len().min(8)];
+        let total: u64 = busy_fields.iter().copied().sum();
+        let idle = fields[3].saturating_add(fields[4]);
         let me = std::fs::read_to_string("/proc/self/stat").ok()?;
         // Field 2 is `(comm)`, which may contain spaces; split after the last ')'.
         let tail = &me[me.rfind(')')? + 1..];
@@ -218,7 +276,10 @@ mod overlap {
         if f.len() < 15 {
             return None;
         }
-        let own = f[11] + f[12] + f[13] + f[14];
+        let own = f[11]
+            .saturating_add(f[12])
+            .saturating_add(f[13])
+            .saturating_add(f[14]);
         Some(CpuTicks { total, idle, own })
     }
 
@@ -237,6 +298,12 @@ mod overlap {
     #[derive(Debug)]
     struct CpuWatch {
         cores: f64,
+        /// Enforced per-arm foreign-CPU ceiling in cores, derived from `cores`
+        /// ([`foreign_cpu_ceiling`]) and printed in the header + per arm.
+        foreign_ceiling: f64,
+        /// Enforced run-start 1-minute load ceiling, derived from `cores`
+        /// ([`load_ceiling`]) and printed in the header.
+        load_ceiling: f64,
         max_foreign: f64,
         samples: usize,
         load_min: f64,
@@ -246,8 +313,11 @@ mod overlap {
 
     impl CpuWatch {
         fn new() -> Self {
+            let cores = std::thread::available_parallelism().map_or(1.0, |n| n.get() as f64);
             Self {
-                cores: std::thread::available_parallelism().map_or(1.0, |n| n.get() as f64),
+                cores,
+                foreign_ceiling: foreign_cpu_ceiling(cores),
+                load_ceiling: load_ceiling(cores),
                 max_foreign: 0.0,
                 samples: 0,
                 load_min: f64::MAX,
@@ -267,8 +337,8 @@ mod overlap {
             load
         }
 
-        /// Fail closed unless FOREIGN CPU over `before..now` stayed under
-        /// [`FOREIGN_CPU_CEILING_CORES`]. Returns the measured foreign-core figure
+        /// Fail closed unless FOREIGN CPU over `before..now` stayed under the
+        /// host-derived `foreign_ceiling`. Returns the measured foreign-core figure
         /// for the arm's observables line.
         fn check_foreign(&mut self, site: &str, before: Option<CpuTicks>) -> Option<f64> {
             let (before, after) = (before?, cpu_ticks()?);
@@ -283,12 +353,14 @@ mod overlap {
             let foreign_cores = busy.saturating_sub(own) as f64 / total as f64 * self.cores;
             self.max_foreign = self.max_foreign.max(foreign_cores);
             self.samples += 1;
-            if !load_opt_out() && foreign_cores > FOREIGN_CPU_CEILING_CORES {
+            let ceiling = self.foreign_ceiling;
+            if !load_opt_out() && foreign_cores > ceiling {
                 panic!(
                     "reconcile_overlap: {foreign_cores:.2} cores of FOREIGN CPU were busy while \
-                     {site} was timed, over the {FOREIGN_CPU_CEILING_CORES:.2}-core ceiling — that \
+                     {site} was timed, over the {ceiling:.2}-core ceiling ({} cores) — that \
                      arm's number is void. Quiesce the machine and re-run, or set \
-                     CQLITE_BENCH_ALLOW_LOAD=1 to smoke-run with discarded numbers."
+                     CQLITE_BENCH_ALLOW_LOAD=1 to smoke-run with discarded numbers.",
+                    self.cores as u64
                 );
             }
             Some(foreign_cores)
@@ -305,28 +377,29 @@ mod overlap {
             } else {
                 println!(
                     "reconcile_overlap: foreign_cpu_cores samples={} max={:.2} \
-                     ceiling={FOREIGN_CPU_CEILING_CORES:.2} cores={:.0}",
-                    self.samples, self.max_foreign, self.cores
+                     ceiling={:.2} cores={:.0}",
+                    self.samples, self.max_foreign, self.foreign_ceiling, self.cores
                 );
             }
             if self.load_samples > 0 {
+                // The producer count is `KWayMerger`'s one thread per generation at
+                // the matrix's LARGEST k — derived from `K_VALUES`, never a literal,
+                // so editing the matrix can never emit a wrong figure into the
+                // operator-facing validity summary the record quotes (roborev,
+                // issue #2043).
+                let max_k = K_VALUES.iter().copied().max().unwrap_or(0);
                 println!(
                     "reconcile_overlap: load1m samples={} min={:.2} max={:.2} spread={:.2} \
-                     (INFORMATIONAL — includes this run's own {:.0} producer threads at k=20)",
+                     (INFORMATIONAL — includes this run's own {max_k} producer threads at \
+                     k={max_k})",
                     self.load_samples,
                     self.load_min,
                     self.load_max,
                     self.load_max - self.load_min,
-                    20.0
                 );
             }
         }
     }
-
-    /// Foreign (not-this-process) CPU a timed arm may tolerate, in whole cores. One
-    /// core of ~16 is ≈6 % of the box: enough for an ssh/editor session, far below
-    /// anything that perturbs a merge drain. Exceeding it VOIDS the arm.
-    const FOREIGN_CPU_CEILING_CORES: f64 = 1.0;
 
     /// Print the run header (machine spec + load) and fail closed when the machine
     /// is not quiesced BEFORE the instrument adds any load of its own: numbers taken
@@ -334,11 +407,14 @@ mod overlap {
     /// is then enforced by [`CpuWatch::check_foreign`], which is immune to this run's
     /// own threads. `CQLITE_BENCH_ALLOW_LOAD=1` opts out of both, visibly.
     fn assert_quiesced(watch: &mut CpuWatch) {
-        let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
         let allow = load_opt_out();
+        // Both ceilings are DERIVED from this host's core count, so the header
+        // prints the values actually enforced for this run (roborev, issue #2043).
+        let (cores, load_ceiling, foreign_ceiling) =
+            (watch.cores, watch.load_ceiling, watch.foreign_ceiling);
         println!(
-            "reconcile_overlap: cores={cores} load_ceiling={LOAD_CEILING:.2} \
-             foreign_cpu_ceiling_cores={FOREIGN_CPU_CEILING_CORES:.2} allow_load={allow}"
+            "reconcile_overlap: cores={cores:.0} load_ceiling={load_ceiling:.2} \
+             foreign_cpu_ceiling_cores={foreign_ceiling:.2} allow_load={allow}"
         );
         if allow {
             println!(
@@ -353,12 +429,12 @@ mod overlap {
             return;
         }
         match load {
-            Some(l) if l <= LOAD_CEILING => {}
+            Some(l) if l <= load_ceiling => {}
             _ => panic!(
                 "reconcile_overlap: 1-minute load average {load_str} at run start exceeds the \
-                 {LOAD_CEILING:.2} ceiling (or is unavailable — the probe is Linux-only) — a \
-                 measurement taken here is void. Quiesce the machine and re-run, or set \
-                 CQLITE_BENCH_ALLOW_LOAD=1 to smoke-run with discarded numbers."
+                 {load_ceiling:.2} ceiling for this {cores:.0}-core host (or is unavailable — the \
+                 probe is Linux-only) — a measurement taken here is void. Quiesce the machine and \
+                 re-run, or set CQLITE_BENCH_ALLOW_LOAD=1 to smoke-run with discarded numbers."
             ),
         }
     }
@@ -693,9 +769,9 @@ mod overlap {
         });
         let foreign = watch.check_foreign(&arm_id, cpu_before);
         println!(
-            "reconcile_overlap/{arm_id}: foreign_cpu_cores={} (ceiling \
-             {FOREIGN_CPU_CEILING_CORES:.2})",
-            foreign.map_or_else(|| "unavailable".to_string(), |f| format!("{f:.3}"))
+            "reconcile_overlap/{arm_id}: foreign_cpu_cores={} (ceiling {:.2})",
+            foreign.map_or_else(|| "unavailable".to_string(), |f| format!("{f:.3}")),
+            watch.foreign_ceiling
         );
 
         // Readers (and the fixture temp dir behind them) drop here, before the next
@@ -714,68 +790,107 @@ mod overlap {
         id_param: String,
     }
 
+    /// Criterion id group of the producer-count control pair.
+    const PRODUCER_CONTROL_GROUP: &str = "producer_control";
+
+    /// Every arm this target runs, in run order: the full k × mix matrix followed by
+    /// the producer-count control pair. Built as data so the arm IDS have exactly ONE
+    /// definition, shared by the measuring path and `--list` enumeration.
+    fn arm_specs() -> Vec<ArmSpec> {
+        let mut specs: Vec<ArmSpec> = Vec::new();
+        for mix in OverlapMix::ALL {
+            for k in K_VALUES {
+                specs.push(ArmSpec {
+                    mix,
+                    k,
+                    ck_per_gen: OVERLAP_CK,
+                    id_group: mix.id(),
+                    id_param: format!("k{k}"),
+                });
+            }
+        }
+        // Producer-count control: identical rows, cells and collisions (o = 1);
+        // ONE producer (p1, a double-width single generation) vs TWO (p2, the
+        // standard-width k=2 fixture). The measured mechanism behind the k=1
+        // anchor's excess over the saturated control, as a real arm.
+        specs.push(ArmSpec {
+            mix: OverlapMix::Disjoint,
+            k: 1,
+            ck_per_gen: PRODUCER_CONTROL_CK,
+            id_group: PRODUCER_CONTROL_GROUP,
+            id_param: "p1".to_string(),
+        });
+        specs.push(ArmSpec {
+            mix: OverlapMix::Disjoint,
+            k: 2,
+            ck_per_gen: OVERLAP_CK,
+            id_group: PRODUCER_CONTROL_GROUP,
+            id_param: "p2".to_string(),
+        });
+        specs
+    }
+
+    /// Criterion's `--list` enumerates benchmark ids and measures NOTHING.
+    fn list_only() -> bool {
+        std::env::args().any(|a| a == "--list")
+    }
+
     /// The full k × mix matrix, plus the producer-count control pair.
     pub(super) fn bench_matrix(c: &mut Criterion) {
-        let mut watch = CpuWatch::new();
-        assert_quiesced(&mut watch);
+        let specs = arm_specs();
 
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime for overlap readers");
-        let mut census: std::collections::HashMap<String, Vec<DrainStats>> =
-            std::collections::HashMap::new();
         let mut group = c.benchmark_group("reconcile_overlap");
         group
             .sample_size(20)
             .warm_up_time(Duration::from_secs(1))
             .measurement_time(Duration::from_secs(5));
 
-        for mix in OverlapMix::ALL {
-            for k in K_VALUES {
-                run_arm(
-                    &mut group,
-                    &rt,
-                    &mut watch,
-                    &mut census,
-                    ArmSpec {
-                        mix,
-                        k,
-                        ck_per_gen: OVERLAP_CK,
-                        id_group: mix.id(),
-                        id_param: format!("k{k}"),
-                    },
-                );
+        // `--list` enumeration must be FREE. This target's fixture synthesis, probe
+        // drain and per-generation drains run OUTSIDE `bench_function` (they produce
+        // the census that makes a timed number trustworthy), so a naive list run
+        // would flush all 27 arms' generations and could even fail closed in
+        // `assert_quiesced`/`check_foreign` while measuring nothing (roborev, issue
+        // #2043). Register the ids from the SAME `arm_specs()` the measuring path
+        // uses — criterion never executes a routine in list mode, and this branch is
+        // unreachable in any measuring run (`--test` included), so nothing measured
+        // changes.
+        if list_only() {
+            println!(
+                "reconcile_overlap: --list — enumerating {} arm ids only; no fixture is built, \
+                 no validity gate runs and nothing is measured",
+                specs.len()
+            );
+            for arm in &specs {
+                group.bench_function(BenchmarkId::new(arm.id_group, &arm.id_param), |b| {
+                    b.iter(|| ())
+                });
+            }
+            group.finish();
+            return;
+        }
+
+        let mut watch = CpuWatch::new();
+        assert_quiesced(&mut watch);
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime for overlap readers");
+        let mut census: std::collections::HashMap<String, Vec<DrainStats>> =
+            std::collections::HashMap::new();
+
+        let mut control: Vec<DrainStats> = Vec::new();
+        for arm in specs {
+            let is_control = arm.id_group == PRODUCER_CONTROL_GROUP;
+            let stats = run_arm(&mut group, &rt, &mut watch, &mut census, arm);
+            if is_control {
+                control.push(stats);
             }
         }
 
-        // Producer-count control: identical rows, cells and collisions (o = 1);
-        // ONE producer (p1, a double-width single generation) vs TWO (p2, the
-        // standard-width k=2 fixture). The measured mechanism behind the k=1
-        // anchor's excess over the saturated control, as a real arm.
-        let p1 = run_arm(
-            &mut group,
-            &rt,
-            &mut watch,
-            &mut census,
-            ArmSpec {
-                mix: OverlapMix::Disjoint,
-                k: 1,
-                ck_per_gen: PRODUCER_CONTROL_CK,
-                id_group: "producer_control",
-                id_param: "p1".to_string(),
-            },
-        );
-        let p2 = run_arm(
-            &mut group,
-            &rt,
-            &mut watch,
-            &mut census,
-            ArmSpec {
-                mix: OverlapMix::Disjoint,
-                k: 2,
-                ck_per_gen: OVERLAP_CK,
-                id_group: "producer_control",
-                id_param: "p2".to_string(),
-            },
-        );
+        let [p1, p2] = control.as_slice() else {
+            panic!(
+                "producer_control: exactly 2 control arms must have run, got {}",
+                control.len()
+            )
+        };
         assert_eq!(
             (p1.output_rows, p1.live_cells, p1.tombstone_cells),
             (p2.output_rows, p2.live_cells, p2.tombstone_cells),
@@ -805,5 +920,18 @@ fn bench_reconcile_overlap(c: &mut Criterion) {
     overlap::bench_matrix(c);
 }
 
-criterion_group!(benches, bench_reconcile_overlap);
+// Shared criterion config, as every other gated bench in this crate declares it:
+// `profiling::configure()` attaches the pprof sampler so `--profile-time <secs>`
+// writes a flamegraph (`benches/profiling/mod.rs`). That matters most HERE — this
+// is the target whose purpose is decomposing where per-row k-cost goes. It is
+// measurement-NEUTRAL: `configure()` returns `Criterion::default()` plus a
+// profiler criterion activates only under `--profile-time`, and this bench's group
+// sets `sample_size`/`warm_up_time`/`measurement_time` explicitly regardless. ONE
+// group serves both feature states because both `bench_reconcile_overlap` variants
+// share the name.
+criterion_group!(
+    name = benches;
+    config = profiling::configure();
+    targets = bench_reconcile_overlap
+);
 criterion_main!(benches);

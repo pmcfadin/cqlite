@@ -97,10 +97,25 @@ pub const EXPIRED_LDT_SECS: i32 = (PINNED_NOW_SECS - 3_600) as i32;
 /// wall-clock fallback, two would.
 pub const LIVE_LDT_SECS: i32 = (PINNED_NOW_SECS + 3_600) as i32;
 
-/// TTL stamped on the expiring cells. Only its presence matters for expiry (the
-/// authoritative decision uses the explicit `local_deletion_time` above); it is
-/// kept well below both LDTs so `ldt - ttl` (the parity tombstone LDT) is a
-/// sane, non-saturating creation instant.
+/// TTL stamped on the expiring cells. Only its presence matters for expiry here:
+/// the authoritative decision uses the explicit `local_deletion_time` above
+/// ([`EXPIRED_LDT_SECS`] / [`LIVE_LDT_SECS`]) against the pinned `now`, so this
+/// value changes no count this bench asserts. It is kept far below both LDTs so
+/// `ldt - ttl` (the LDT a parity consumer derives for an expiring cell) stays
+/// positive and never saturates.
+///
+/// **Un-shaped relationship, deliberately left as measured (issue #2043 roborev):**
+/// `ldt - ttl` is NOT this cell's own creation instant. [`TS_BASE`] puts every
+/// cell's WRITE timestamp at ~1.6e9 s while the LDTs are pinned relative to
+/// [`PINNED_NOW_SECS`] (~1.7e9 s), so `ldt - ttl` lands ~3 years AFTER the cell was
+/// written. Nothing in the current fixture or bench compares the two, which is why
+/// the constants are left untouched (re-deriving them changes on-disk bytes and
+/// would void the banked k-curve). A consumer that DOES relate them — issue #848's
+/// tombstone-vs-expiring tie-break, which weighs an expiring cell's derived
+/// tombstone LDT against write timestamps — must first re-derive the fixture so
+/// `ldt - ttl == base_ts / 1_000_000` for each generation, i.e. pin the LDTs
+/// relative to [`TS_BASE`] (or move [`TS_BASE`] up to [`PINNED_NOW_SECS`]'s decade)
+/// instead of only to [`PINNED_NOW_SECS`], and re-measure.
 pub const FIXTURE_TTL_SECS: u32 = 600;
 
 /// Partitions per generation.
