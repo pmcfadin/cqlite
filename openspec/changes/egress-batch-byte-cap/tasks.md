@@ -52,11 +52,14 @@ headroom — put nothing there. `cqlite-flight/src/streaming_tests.rs` is 1,336/
 - [x] 2.2 Content-bytes walk: hardened per the `memtable.rs:227` precedent —
       iterative worklist, node budget, `saturating_add` throughout, fails closed to
       a saturated width. No `unwrap()`/`expect()`. No panic on nesting depth.
-- [x] 2.3 Structural addends: a named `ARROW_CELL_OVERHEAD_BYTES` per cell (offsets
-      entry + validity bit rounded up) for variable-width Arrow outputs, and a
-      per-**element** addend for `List`/`Set`/`Map`/`Tuple`/UDT child arrays. This
+- [x] 2.3 Structural addends: a named `ARROW_CELL_OVERHEAD_BYTES` per cell (two
+      offsets entries — its own plus the buffer's trailing `n+1`-th — and the
+      validity bit rounded up) for variable-width Arrow outputs, and the same
+      addend per **element** for `List`/`Set`/`Map`/`Tuple`/UDT child arrays. This
       is the term every existing estimator omits and is what makes the estimate
-      conservative rather than an under-count.
+      conservative rather than an under-count. Per-BUFFER slack is charged once
+      per projected column (`ARROW_COLUMN_SLACK_BYTES`), never per slot, so it
+      cannot multiply by a cell's element count (review B3).
 - [x] 2.4 Re-export from `cqlite-core/src/export/mod.rs` beside
       `rows_to_record_batch` (mod.rs:57). Do **not** change
       `cqlite-core/src/query/result_budget.rs` visibility — see design §(d).
@@ -79,9 +82,13 @@ headroom — put nothing there. `cqlite-flight/src/streaming_tests.rs` is 1,336/
 - [x] 3.2 Add `cqlite-flight/src/batch_bytes_tests.rs` wired via `#[path]` (the
       `admission.rs`/`admission_tests.rs` precedent), holding the accumulator unit
       tests and the wide-row fixture tests.
-- [x] 3.3 Push-then-test ordering so a batch is cut only when the buffer is
-      non-empty — the one-row floor of design §(e). Clamp semantics for `0`/`1`
-      documented next to the `batch_size.max(1)` precedent.
+- [x] 3.3 **Test-then-push** ordering so a batch is cut BEFORE the row that would
+      cross the cap is appended, and only when the buffer is non-empty — the
+      one-row floor of design §(e). (Revised from push-then-test in the review
+      round for issue #2825 B1: cutting ON the crossing row let a batch reach
+      `cap - 1 + widest_row`, which the published bound omitted. The bound is now
+      `max(cap, widest_row_payload)`.) Clamp semantics for `0`/`1` documented next
+      to the `batch_size.max(1)` precedent.
 
 ## 4. Producer wiring (both paths — minimal edits)
 

@@ -234,10 +234,15 @@ re-exported from `export/mod.rs` next to `rows_to_record_batch`. It walks
   per-variant shape, hardened like the memtable estimator: iterative, node-capped,
   `saturating_add` throughout, fails closed to a large value rather than panicking);
 - a per-cell **structural addend** `ARROW_CELL_OVERHEAD_BYTES` covering the
-  offsets entry (4 B for `Utf8`/`Binary`/`List`/`Map`) and the validity bit
-  (rounded up to 1 B) — the term every existing estimator omits;
+  offsets entry (4 B for `Utf8`/`Binary`/`List`/`Map`), the buffer's trailing
+  `n+1`-th offsets entry, and the validity bit (rounded up to 1 B) — the term
+  every existing estimator omits;
 - for collection/struct columns, a per-**element** structural addend, because a
-  `ListArray` pays child offsets + child validity per element, not per row.
+  `ListArray` pays child offsets + child validity per element, not per row;
+- a single per-**column** residual `ARROW_COLUMN_SLACK_BYTES` for array nodes
+  that correspond to no slot (the flat `MapArray`'s always-present empty `Utf8`
+  children). Charged per column, never per slot, so the estimate cannot inflate
+  with a cell's element count (#2825 review B3).
 
 Conservatism is a **contract, not an aspiration**: the spec requires a property
 test over a corpus of shapes asserting
@@ -285,7 +290,10 @@ admission precedent is deliberate and is recorded here rather than discovered la
    narrow row-cap binding under every available estimate §(c).
 4. New `cqlite_core::export::estimate_arrow_row_bytes`; `result_budget.rs`
    untouched; conservatism enforced by a property test §(d).
-5. Push-then-test one-row floor; `0`/`1` clamp to one row per batch §(e).
+5. Test-then-push one-row floor (revised from push-then-test in the #2825 review
+   round, B1: the cut is decided BEFORE the crossing row is appended, bounding a
+   batch at `max(cap, widest_row_payload)` rather than `cap + widest_row`);
+   `0`/`1` clamp to one row per batch §(e).
 6. Cap on by default on every construction path §(f).
 7. `--max-batch-bytes` / `CQLITE_MAX_BATCH_BYTES` / `DEFAULT_MAX_BATCH_BYTES`,
    mirroring `admission.rs:43/51` + `main.rs:43`, echoed in the `main.rs:109-116`

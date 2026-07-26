@@ -647,8 +647,15 @@ Format:
   cannot be the trigger.
 - **Converting to capacity currency.** Published constants:
   `BATCH_BYTES_CAPACITY_FACTOR = 2` and `BATCH_BYTES_PER_COLUMN_SLACK = 1024`, with
-  `worst_case_batch_capacity_bytes(cap, n_columns) = 2 × cap + 1024 × n_columns`.
-  At the 4 MiB default that is ~8 MiB of resident capacity per batch.
+  `worst_case_batch_capacity_bytes(cap, n_array_nodes, widest_row_payload)
+  = 2 × max(cap, widest_row_payload) + 1024 × n_array_nodes`. For a schema whose
+  widest row fits the cap that is `2 × cap + slack` — ~8 MiB of resident capacity
+  per batch at the 4 MiB default. The `max(..)` term is honest, not slack: one row
+  cannot be split across Arrow batches, so a schema with a single over-cap row
+  emits it alone at its own natural width, and nothing downstream clamps that
+  (`arrow_convert.rs`'s `checked_value_bytes` only *rejects* a cumulative column
+  length above `i32::MAX`). The slack term is denominated in Arrow array NODES:
+  a `map<text,text>` column is four nodes, not one.
 - **B4 composition for issue #2821.** The per-stream in-flight ceiling must be
   budgeted in the SAME capacity currency `streaming.rs` already meters, giving
   `ceiling + one maximum batch`. With a 6 MiB ceiling: `6 + 8 = 14 MiB < 16Mi`,
@@ -660,8 +667,11 @@ Format:
   the field model at ~180 B/row → 1.47 MB, ~2.9×; even the pessimistic 300 B/row
   figure → 2.34 MiB), so narrow-path batch boundaries are byte-identical to
   pre-change and there is no throughput regression.
-- **Liveness.** Push-then-test: a batch is cut only when the buffer is non-empty
-  AND the accumulated estimate has reached the cap. A single row wider than the
+- **Liveness.** Test-then-push: the candidate row's width is tested against the
+  accumulator FIRST, and the batch is cut only when the buffer is non-empty AND
+  adding the row would take it past the cap — so an emitted batch's payload is at
+  or below the cap outright, with no `+ one crossing row` overshoot. An empty
+  buffer always accepts the row, however wide, so a single row wider than the
   whole cap is delivered as a one-row batch — never dropped, never a stall.
   `--max-batch-bytes 0` and `1` degrade to one row per batch rather than hanging.
 - **On by default everywhere** — deliberately unlike `Admission::unconstrained()`:
@@ -672,17 +682,25 @@ Format:
   reports a conservative per-row payload width from the authoritative `ColumnInfo`
   CQL types plus the decoded values (no-heuristics, #28); a running accumulator
   advances by exactly one row's estimate per push and resets on flush, so the
-  boundary is decided BEFORE `rows_to_record_batch` allocates. The estimator's
-  walk is iterative, node-budgeted and saturating: a pathological value fails
-  closed (cut the batch), never panics or hangs.
-- **Files:** new `cqlite-core/src/export/arrow_size.rs` (+ `arrow_size_tests.rs`),
+  boundary is decided BEFORE `rows_to_record_batch` allocates. Arrow buffer
+  *lengths* are exact (measured: a one-row `Int32` column is 4 B, a nine-row
+  `Boolean` column is `ceil(9/8) = 2` B), so the estimate is built from real
+  per-slot costs — a validity byte per slot, two offsets entries per
+  variable-width slot (its own plus the buffer's trailing `n+1`-th) — plus one
+  small residual per COLUMN, never a large fudge per cell. The estimator's walk is
+  iterative, node-budgeted and saturating, and a fan-out is tested against the
+  budget BEFORE it is queued: a pathological value fails closed (cut the batch),
+  never panics or hangs.
+- **Files:** new `cqlite-core/src/export/arrow_size.rs` (+ `arrow_size_render.rs`,
+  `arrow_size_tests.rs`),
   new `cqlite-flight/src/batch_bytes.rs` (+ `batch_bytes_tests.rs`), new
   `cqlite-flight/src/wide_row_fixture.rs`, new
   `cqlite-flight/tests/issue_2825_max_batch_bytes_e2e.rs`; minimal edits to
   `producer.rs`, `producer_stream.rs`, `service.rs`, `main.rs`, `lib.rs`,
   `export/mod.rs`.
-- **Verified:** 11 estimator tests (incl. the conservatism property test over a
-  20-shape corpus), 19 in-crate byte-cap tests, 4 end-to-end tests that start the
+- **Verified:** 14 estimator tests (incl. the conservatism property test over a
+  28-shape corpus and the bounded-multiple test over the collection-heavy and
+  multi-column shapes), 20 in-crate byte-cap tests, 4 end-to-end tests that start the
   REAL server binary and stream a REAL `do_get` (CLI flag, env var, default +
   startup log, content invariance). `issue_1494_producer_mem_budget` unchanged
   under `--features dhat-heap`.

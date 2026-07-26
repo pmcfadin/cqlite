@@ -13,14 +13,14 @@
 //!
 //! # The mechanism
 //!
-//! [`BatchByteCap`] is a running accumulator: each buffered row's
-//! [`estimate_arrow_row_bytes`] width is fed to
-//! [`push_width`](BatchByteCap::push_width) as the row enters the buffer, and
-//! the producer flushes when EITHER the row-cap or
-//! this byte-cap trips — whichever comes first. The decision is made **before**
-//! `rows_to_record_batch` allocates anything: building a batch to discover it is
-//! oversized is a report, not a cap, and `RecordBatch::get_array_memory_size()`
-//! is only readable after every value has been copied.
+//! [`BatchByteCap`] is a running accumulator: each candidate row's
+//! [`estimate_arrow_row_bytes`] width is tested against the accumulator with
+//! [`cut_before`](BatchByteCap::cut_before) **before** the row joins the buffer,
+//! and the producer flushes when EITHER the row-cap or this byte-cap trips —
+//! whichever comes first. The decision is made before `rows_to_record_batch`
+//! allocates anything: building a batch to discover it is oversized is a report,
+//! not a cap, and `RecordBatch::get_array_memory_size()` is only readable after
+//! every value has been copied.
 //!
 //! # Currency: payload bytes, and the published capacity conversion
 //!
@@ -39,30 +39,54 @@
 //!
 //! ```text
 //! worst_case_get_array_memory_size
-//!     <= BATCH_BYTES_CAPACITY_FACTOR * cap
-//!        + BATCH_BYTES_PER_COLUMN_SLACK * n_columns
+//!     <= BATCH_BYTES_CAPACITY_FACTOR * max(cap, widest_row_payload)
+//!        + BATCH_BYTES_PER_COLUMN_SLACK * n_array_nodes
 //! ```
+//!
+//! # The `max(cap, widest_row_payload)` term is not a fudge
+//!
+//! One row cannot be split across two Arrow batches, so a schema whose single
+//! widest row exceeds the whole cap has an **inherent, unbounded** overshoot:
+//! that row leaves as a one-row batch of its own natural size (the alternative
+//! is dropping it or stalling). The cap therefore bounds a batch at
+//! `max(cap, widest_row_payload)` payload bytes — which reduces to plain `cap`
+//! for every schema whose widest row fits, and the overshoot is a property of
+//! the DATA, not slack in the mechanism.
+//!
+//! Nothing in the conversion path imposes a smaller per-cell ceiling that would
+//! bound the term for us: `arrow_convert.rs`'s `checked_value_bytes` guard
+//! rejects only a *cumulative* `Utf8`/`Binary` column length above
+//! `i32::MAX` (2 GiB — the 32-bit Arrow offset limit) and returns an error
+//! rather than clamping, so the honest per-row ceiling is that same ~2 GiB.
+//!
+//! The mechanism itself never overshoots: the boundary is **test-then-push**
+//! (below), so a batch whose rows all fit is cut BEFORE the row that would
+//! cross, never after it.
 //!
 //! # Composition with the per-stream egress ceiling (issue #2821)
 //!
-//! At the 4 MiB default that worst case is `2 × 4 MiB = 8 MiB` of capacity per
-//! resident batch. Issue #2821's per-stream in-flight ceiling must therefore be
-//! budgeted in **capacity** currency too — `streaming.rs` already meters
-//! `get_array_memory_size()` — giving a guaranteed bound of
-//! `ceiling + one maximum batch`. With a 6 MiB ceiling that is
-//! `6 + 8 = 14 MiB < 16Mi`, inside B4 at concurrency 1. (The naive
-//! `4 + 8 = 12 MiB` reading of the task framing mixes payload and capacity: a
-//! 4 MiB *payload* cap is an 8 MiB *capacity* batch, so an 8 MiB ceiling would
-//! land at exactly 16 MiB with zero headroom.)
+//! At the 4 MiB default, with a schema whose rows fit the cap, that worst case
+//! is `2 × 4 MiB = 8 MiB` of capacity per resident batch. Issue #2821's
+//! per-stream in-flight ceiling must therefore be budgeted in **capacity**
+//! currency too — `streaming.rs` already meters `get_array_memory_size()` —
+//! giving a guaranteed bound of `ceiling + one maximum batch`. With a 6 MiB
+//! ceiling that is `6 + 8 = 14 MiB < 16Mi`, inside B4 at concurrency 1. (The
+//! naive `4 + 8 = 12 MiB` reading of the task framing mixes payload and
+//! capacity: a 4 MiB *payload* cap is an 8 MiB *capacity* batch, so an 8 MiB
+//! ceiling would land at exactly 16 MiB with zero headroom.) A deployment whose
+//! rows can individually exceed the cap must carry the wider row's bytes in that
+//! composition — see [`worst_case_batch_capacity_bytes`].
 //!
 //! # Liveness
 //!
-//! Push-then-test: a batch is cut only when the buffer is **non-empty** and the
-//! accumulated estimate has reached the cap. A single row wider than the whole
-//! cap is delivered as a one-row batch — never dropped, never a stall. Caps of
-//! `0` and `1` therefore degrade to one row per batch rather than hanging — the
-//! same *outcome* `batch_size.max(1)` gives the row-cap, reached by the ordering
-//! rule instead of by clamping the operator's configured value.
+//! Test-then-push: the crossing row's width is tested against the accumulator
+//! FIRST, and the batch is cut only when the buffer is **non-empty** and adding
+//! the row would take it past the cap. An empty buffer always accepts the row,
+//! however wide — so a single row wider than the whole cap is delivered as a
+//! one-row batch, never dropped and never a stall. Caps of `0` and `1`
+//! therefore degrade to one row per batch rather than hanging — the same
+//! *outcome* `batch_size.max(1)` gives the row-cap, reached by the ordering rule
+//! instead of by clamping the operator's configured value.
 
 use cqlite_core::export::estimate_arrow_row_bytes;
 use cqlite_core::query::{ColumnInfo, QueryRow};
@@ -104,7 +128,7 @@ pub const ENV_MAX_BATCH_BYTES: &str = "CQLITE_MAX_BATCH_BYTES";
 /// meters, with no undocumented fudge factor.
 pub const BATCH_BYTES_CAPACITY_FACTOR: usize = 2;
 
-/// Fixed capacity slack allowed **per output column**, on top of
+/// Fixed capacity slack allowed **per Arrow array node**, on top of
 /// [`BATCH_BYTES_CAPACITY_FACTOR`] × cap.
 ///
 /// Every Arrow array carries small fixed allocations that do not scale with the
@@ -113,6 +137,15 @@ pub const BATCH_BYTES_CAPACITY_FACTOR: usize = 2;
 /// column these round to nothing; on a wide-schema batch of tiny rows they are
 /// the whole reported size, so a capacity bound stated purely as a multiple of
 /// the payload would be wrong for that shape.
+///
+/// Denominated in array NODES, not output columns: a flat scalar column is one
+/// node, but a `list<text>` column is two (the `ListArray` and its `Utf8`
+/// child) and a `map<text,text>` column is four (map, entries struct, key
+/// `Utf8`, value `Utf8`). Callers with a flat schema pass the column count;
+/// callers with nested columns must count the child arrays too, or the slack
+/// term under-states their fixed allocations. (At the 4 MiB default the
+/// `2 × cap` term dominates by three orders of magnitude either way; the
+/// distinction bites only for a tiny cap over a deeply nested schema.)
 pub const BATCH_BYTES_PER_COLUMN_SLACK: usize = 1024;
 
 /// Whether the caller should finish the current batch.
@@ -152,7 +185,7 @@ pub struct BatchByteCap {
 impl BatchByteCap {
     /// Build an accumulator enforcing `cap` payload bytes per batch.
     ///
-    /// `cap` is used exactly as given, including `0` and `1`: the push-then-test
+    /// `cap` is used exactly as given, including `0` and `1`: the test-then-push
     /// rule makes those degrade to one row per batch rather than hang, so no
     /// clamp is needed (and clamping would silently misreport the operator's
     /// configuration). `usize::MAX` effectively disables the byte-cap, leaving
@@ -182,35 +215,45 @@ impl BatchByteCap {
         self.rows
     }
 
-    /// Account for one row that has just been pushed into the buffer, and report
-    /// whether the batch must now be finished.
+    /// **Test-then-push**: must the currently buffered rows be finished BEFORE a
+    /// row of `width` payload bytes is appended?
     ///
-    /// **Push-then-test** (the one-row floor): the row is always counted first,
-    /// so the answer can only be [`ShouldFlush::Yes`] with at least one row in
-    /// the buffer. A row whose estimate exceeds the entire cap therefore leaves
-    /// as a one-row batch instead of triggering a flush of an empty buffer,
-    /// which would loop without progress.
+    /// Answering before the row joins the buffer is what bounds a batch at `cap`
+    /// rather than at `cap - 1 + width_of_crossing_row`: the batch is cut on the
+    /// row that WOULD cross, so the crossing row starts the next batch instead
+    /// of overshooting this one (issue #2825 review B1).
     ///
-    /// `width` is saturating-added, so a fail-closed `usize::MAX` estimate
-    /// (a pathological value, see `estimate_arrow_row_bytes`) pins the
-    /// accumulator at the ceiling and cuts the batch rather than wrapping.
-    pub fn push_width(&mut self, width: usize) -> ShouldFlush {
-        self.accumulated = self.accumulated.saturating_add(width);
-        self.rows = self.rows.saturating_add(1);
-        // `rows >= 1` unconditionally here — the row was counted first. Stated
-        // as a real conjunct rather than an assertion so a future edit that
-        // moves the increment cannot silently break the one-row floor.
-        if self.rows > 0 && self.accumulated >= self.cap {
+    /// The one-row floor is the `self.rows > 0` conjunct: an **empty buffer
+    /// always accepts the row**, however wide, so a row wider than the entire
+    /// cap leaves as a one-row batch and can never trigger a flush of nothing
+    /// (which would loop without progress). Caps of `0` and `1` therefore
+    /// degrade to one row per batch rather than hanging.
+    ///
+    /// Saturating: a fail-closed `usize::MAX` width (a pathological value, see
+    /// `estimate_arrow_row_bytes`) compares at the ceiling instead of wrapping.
+    pub fn cut_before(&self, width: usize) -> ShouldFlush {
+        if self.rows > 0 && self.accumulated.saturating_add(width) > self.cap {
             ShouldFlush::Yes
         } else {
             ShouldFlush::No
         }
     }
 
-    /// Estimate `row`'s Arrow payload width for the projected `columns` and
-    /// account for it — the form both producers use.
-    pub fn push_row(&mut self, columns: &[ColumnInfo], row: &QueryRow) -> ShouldFlush {
-        self.push_width(estimate_arrow_row_bytes(columns, row))
+    /// Account for one row of `width` payload bytes that has just been appended
+    /// to the buffer. Call AFTER [`Self::cut_before`] has been honoured.
+    ///
+    /// `width` is saturating-added, so a `usize::MAX` estimate pins the
+    /// accumulator at the ceiling rather than wrapping.
+    pub fn accumulate(&mut self, width: usize) {
+        self.accumulated = self.accumulated.saturating_add(width);
+        self.rows = self.rows.saturating_add(1);
+    }
+
+    /// Estimate `row`'s Arrow payload width for the projected `columns` — the
+    /// quantity both [`Self::cut_before`] and [`Self::accumulate`] take, computed
+    /// once per row by the caller so it is never estimated twice.
+    pub fn row_width(columns: &[ColumnInfo], row: &QueryRow) -> usize {
+        estimate_arrow_row_bytes(columns, row)
     }
 
     /// Clear the accumulator for the next batch. Called wherever the buffer is
@@ -230,7 +273,7 @@ impl BatchByteCap {
 /// it never passes through the incremental buffer, so it needs the boundary
 /// applied after the fact. The row path uses [`BatchByteCap`] directly.
 ///
-/// Never yields an empty group: the same push-then-test rule applies, so a
+/// Never yields an empty group: the same test-then-push rule applies, so a
 /// single over-cap row becomes a one-row group. An empty input yields no groups.
 pub fn split_rows_into_batches<'a>(
     columns: &[ColumnInfo],
@@ -243,9 +286,18 @@ pub fn split_rows_into_batches<'a>(
     let mut byte_cap = BatchByteCap::new(cap);
     let mut start = 0usize;
     for (i, row) in rows.iter().enumerate() {
-        let byte_full = byte_cap.push_row(columns, row).is_yes();
-        let len = i + 1 - start;
-        if len >= max_rows || byte_full {
+        let width = BatchByteCap::row_width(columns, row);
+        // Cut BEFORE the crossing row, so the group that ends here holds only
+        // rows that fit — the same rule the two incremental producers apply.
+        // `cut_before` is `No` while the group is empty, so `start < i` holds
+        // here and the pushed group is never empty.
+        if byte_cap.cut_before(width).is_yes() {
+            groups.push(&rows[start..i]);
+            start = i;
+            byte_cap.reset();
+        }
+        byte_cap.accumulate(width);
+        if i + 1 - start >= max_rows {
             groups.push(&rows[start..=i]);
             start = i + 1;
             byte_cap.reset();
@@ -258,18 +310,36 @@ pub fn split_rows_into_batches<'a>(
 }
 
 /// Worst-case resident size, in `get_array_memory_size()` (capacity) bytes, of
-/// ONE emitted batch produced under `cap` with `n_columns` output columns.
+/// ONE emitted batch produced under `cap` over a schema whose widest single row
+/// contributes `widest_row_payload` payload bytes, with `n_array_nodes` Arrow
+/// array nodes (see [`BATCH_BYTES_PER_COLUMN_SLACK`]).
 ///
 /// Derived from the published constants alone:
-/// `BATCH_BYTES_CAPACITY_FACTOR * cap + BATCH_BYTES_PER_COLUMN_SLACK * n_columns`.
+/// `BATCH_BYTES_CAPACITY_FACTOR * max(cap, widest_row_payload)
+///  + BATCH_BYTES_PER_COLUMN_SLACK * n_array_nodes`.
 /// This is the quantity issue #2821's per-stream ceiling composes with to state
 /// its `ceiling + one maximum batch` bound against B4's ≤16Mi.
 ///
+/// The `max(..)` term is honest, not slack. The boundary is test-then-push, so a
+/// batch is cut BEFORE the row that would cross the cap — but a row cannot be
+/// split across Arrow batches, so a row wider than the whole cap is emitted
+/// alone at its own natural width. Callers whose rows are known to fit the cap
+/// pass `0` (or any value ≤ `cap`) and get the familiar
+/// `FACTOR * cap + slack` bound; callers that cannot rule out a wider row must
+/// state that row's payload here. Nothing downstream clamps it —
+/// `arrow_convert.rs`'s `checked_value_bytes` guard only *rejects* a cumulative
+/// column length above `i32::MAX`, so ~2 GiB is the only structural ceiling.
+///
 /// Saturating: an operator-configured `usize::MAX` cap reports `usize::MAX`
 /// rather than wrapping.
-pub fn worst_case_batch_capacity_bytes(cap: usize, n_columns: usize) -> usize {
-    cap.saturating_mul(BATCH_BYTES_CAPACITY_FACTOR)
-        .saturating_add(BATCH_BYTES_PER_COLUMN_SLACK.saturating_mul(n_columns))
+pub fn worst_case_batch_capacity_bytes(
+    cap: usize,
+    n_array_nodes: usize,
+    widest_row_payload: usize,
+) -> usize {
+    cap.max(widest_row_payload)
+        .saturating_mul(BATCH_BYTES_CAPACITY_FACTOR)
+        .saturating_add(BATCH_BYTES_PER_COLUMN_SLACK.saturating_mul(n_array_nodes))
 }
 
 #[cfg(test)]

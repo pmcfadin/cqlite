@@ -83,11 +83,20 @@ authoritative `ColumnInfo` CQL types and the decoded values, never by inference
 from byte patterns, and MUST be saturating and recursion-bounded so a pathological
 value fails closed instead of panicking or hanging.
 
+The estimator SHALL also be bounded ABOVE: the structural slack it charges per
+Arrow slot MUST NOT scale with a cell's element count, or a collection-heavy or
+wide-schema row would be over-estimated by a multiple and the byte-cap would cut
+batches far short of the configured size. Per-buffer costs SHALL therefore be
+charged once per projected COLUMN, and the residual per-slot costs SHALL be
+derived from Arrow's buffer layout rather than fitted to the validation corpus.
+
 #### Scenario: the summed estimate is at least the realized batch payload across a shape corpus
 
 - **GIVEN** a corpus of row shapes covering fixed-width columns, `text`, `blob`,
-  `list`/`set`, `map`, `tuple`/UDT, all-null rows, empty strings and empty
-  collections
+  `list`/`set`, `map`, `tuple`/UDT, JSON, collections nested more than one level
+  deep (including an empty or null cell of such a type, whose declared type tree
+  still materializes one Arrow array per level), a UDT with an empty declared
+  field list, all-null rows, empty strings and empty collections
 - **WHEN** each shape's rows are both estimated and converted with
   `rows_to_record_batch`
 - **THEN** for every shape the summed estimate is **greater than or equal to** the
@@ -110,6 +119,16 @@ value fails closed instead of panicking or hanging.
 - **THEN** the test FAILS, so a future type addition cannot silently introduce an
   under-estimate
 
+#### Scenario: the estimate stays within a bounded multiple of the realized payload
+
+- **GIVEN** the collection-heavy and multi-column shapes of the corpus — where a
+  slack charged per slot rather than per column would inflate the estimate most
+- **WHEN** each shape's summed estimate is compared with its realized payload
+- **THEN** the estimate is within a small, explicitly asserted multiple of the
+  payload, and a wide fixed-width row still leaves room for a full `batch_size`
+  batch under the default cap, so the row-cap remains the binding boundary on
+  narrow shapes
+
 #### Scenario: a pathological value fails closed rather than panicking
 
 - **GIVEN** a deeply nested collection value beyond the estimator's node budget,
@@ -124,24 +143,41 @@ The byte-cap SHALL be normatively denominated in Arrow **payload** bytes. Becaus
 `get_array_memory_size()` reports Arrow buffer **capacity**, which the batch
 construction path grows by power-of-two doubling, the implementation SHALL publish
 a named capacity conversion constant such that every emitted batch satisfies
-`get_array_memory_size() <= capacity_factor * cap + per_column_slack`. The
-specification MUST NOT assert that an emitted batch's `get_array_memory_size()` is
-less than or equal to the cap.
+`get_array_memory_size() <= capacity_factor * max(cap, widest_row_payload)
++ per_array_node_slack * array_nodes`. The specification MUST NOT assert that an
+emitted batch's `get_array_memory_size()` is less than or equal to the cap.
+
+The `max(cap, widest_row_payload)` term SHALL be stated explicitly rather than
+folded into slack: one row cannot be split across Arrow batches, so a row wider
+than the whole cap is an inherent overshoot of the DATA, not of the mechanism. For
+a schema whose widest row fits the cap the bound SHALL reduce to
+`capacity_factor * cap + per_array_node_slack * array_nodes`.
 
 #### Scenario: every emitted wide-row batch stays within the declared capacity tolerance
 
 - **GIVEN** the wide-row fixture scanned under a configured cap
 - **WHEN** each emitted batch's `get_array_memory_size()` is read
 - **THEN** every batch satisfies
-  `get_array_memory_size() <= capacity_factor * cap + per_column_slack` using the
-  published constants, with no batch exceeding the tolerance
+  `get_array_memory_size() <= capacity_factor * max(cap, widest_row_payload)
+  + per_array_node_slack * array_nodes` using the published constants, with no
+  batch exceeding the tolerance
 
 #### Scenario: the payload bound is asserted tightly and separately
 
-- **GIVEN** the same emitted batches
+- **GIVEN** the same emitted batches, over a fixture whose every row fits the cap
 - **WHEN** each batch's payload bytes (buffer lengths, recursive) are summed
-- **THEN** every batch of two or more rows has payload bytes at or below the cap —
-  the tight bound holds in the cap's own currency, independent of allocator capacity
+- **THEN** every batch has payload bytes at or below the cap outright — the
+  boundary cuts BEFORE the row that would cross, so there is no `+ one row`
+  allowance — and the bound holds in the cap's own currency, independent of
+  allocator capacity
+
+#### Scenario: a crossing row that is a large fraction of the cap does not overshoot it
+
+- **GIVEN** a fixture whose rows are each a large fraction of the configured cap
+  (so a boundary that appended the crossing row before testing would emit batches
+  well above the cap)
+- **WHEN** the table is scanned on both egress paths
+- **THEN** every emitted batch's payload bytes are at or below the cap
 
 #### Scenario: the tolerance is expressed as named constants
 
@@ -313,10 +349,19 @@ per-stream in-flight ceiling can derive its guaranteed bound of
 
 #### Scenario: the worst-case per-batch capacity is derivable from the named constants
 
-- **GIVEN** `DEFAULT_MAX_BATCH_BYTES`, the capacity factor and the per-column slack
+- **GIVEN** `DEFAULT_MAX_BATCH_BYTES`, the capacity factor and the per-array-node
+  slack
 - **WHEN** a consumer computes the worst-case resident size of one emitted batch
 - **THEN** the value follows from those constants alone, with no undocumented
   fudge factor, and is documented next to the knob
+
+#### Scenario: the published bound names the single-over-cap-row term
+
+- **GIVEN** a schema whose widest single row exceeds the configured cap
+- **WHEN** the worst-case per-batch bound is computed
+- **THEN** the published function takes that row's payload as an explicit
+  parameter and reports `capacity_factor * max(cap, widest_row_payload) + slack`,
+  so a dependent budget cannot silently inherit a bound that omits the term
 
 #### Scenario: the B4 arithmetic for the dependent issue is recorded in the metered currency
 

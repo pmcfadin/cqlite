@@ -64,11 +64,12 @@ pub mod parquet;
 pub use arrow_convert::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
 
 // Re-export the byte estimator beside the converter it models (issue #2825).
+// Deliberately narrow: the structural charging constants stay PRIVATE to
+// `arrow_size` (review N4) — they are tuning parameters of the estimate, not a
+// semver contract. `MAX_ESTIMATE_NODES` is public because the fail-closed
+// behaviour it defines IS part of the contract.
 #[cfg(feature = "arrow")]
-pub use arrow_size::{
-    arrow_payload_bytes, estimate_arrow_row_bytes, ARROW_CELL_OVERHEAD_BYTES, ARROW_OFFSET_BYTES,
-    ARROW_SLOT_SLACK_BYTES, ARROW_VALIDITY_BYTES, MAX_ESTIMATE_NODES,
-};
+pub use arrow_size::{arrow_payload_bytes, estimate_arrow_row_bytes, MAX_ESTIMATE_NODES};
 
 // Delta-scan Arrow schema derivation (Epic #696, Issue #703 / DS7).
 // Requires both `delta-scan` (for the CDC envelope model) and `arrow` (for

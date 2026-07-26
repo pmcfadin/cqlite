@@ -210,9 +210,10 @@ fn narrow_rows_still_finish_batches_on_the_row_cap() {
 // Requirement 2: the decision precedes materialization
 // ---------------------------------------------------------------------------
 
-/// No oversized batch is ever allocated: every emitted batch's realized payload
-/// respects the cap (up to the last row that crossed it), so the wide batch that
-/// the row-cap alone would have built was never constructed at all.
+/// No oversized batch is ever allocated: because the cut happens BEFORE the
+/// crossing row is appended, every emitted batch's realized payload is at or
+/// below the cap outright — no `+ one row` allowance. The wide batch the row-cap
+/// alone would have built was never constructed at all.
 #[test]
 fn no_oversized_batch_is_ever_allocated() {
     let (_temp, dir, schema) = wide_fixture(WIDE_ROWS, WIDE_PAYLOAD);
@@ -231,37 +232,90 @@ fn no_oversized_batch_is_ever_allocated() {
     );
     for (i, b) in batches.iter().enumerate() {
         let payload = arrow_payload_bytes(b);
-        // A batch is cut on the row that CROSSES the cap, so the last row's
-        // width is the allowed excess. Every row here is the same width.
+        // Every fixture row fits the cap, so `max(cap, widest_row) == cap`.
         assert!(
-            payload <= WIDE_CAP + per_row_payload_bound(),
-            "batch {i} realized {payload} payload bytes, above the cap {WIDE_CAP}"
+            payload <= WIDE_CAP,
+            "batch {i} realized {payload} payload bytes, above the cap {WIDE_CAP} \
+             — the boundary overshot by appending the crossing row"
         );
     }
 }
 
 /// Upper bound on one wide fixture row's realized payload contribution — the
-/// allowed excess of the row that crosses the cap.
-fn per_row_payload_bound() -> usize {
-    WIDE_PAYLOAD + 256
+/// width a batch may reach when a SINGLE row is wider than the whole cap.
+fn per_row_payload_bound(payload_len: usize) -> usize {
+    payload_len + 256
 }
 
-/// The running estimate is per-row and reset on flush: pushing N rows then
-/// resetting leaves the accumulator at zero, and each push advances it by that
-/// row's width only.
+/// The accumulator is test-then-push: `cut_before` decides on the row that is
+/// about to be appended, `accumulate` records it, and `reset` clears both.
 #[test]
 fn accumulator_is_incremental_and_reset_on_flush() {
     let mut cap = BatchByteCap::new(1000);
     assert_eq!(cap.accumulated(), 0);
-    assert_eq!(cap.push_width(300), ShouldFlush::No);
-    assert_eq!(cap.accumulated(), 300);
-    assert_eq!(cap.push_width(300), ShouldFlush::No);
-    assert_eq!(cap.accumulated(), 600);
-    assert_eq!(cap.push_width(500), ShouldFlush::Yes);
-    assert_eq!(cap.accumulated(), 1100);
+    for width in [300, 300, 300] {
+        assert_eq!(cap.cut_before(width), ShouldFlush::No);
+        cap.accumulate(width);
+    }
+    assert_eq!(cap.accumulated(), 900);
+    // 900 + 300 would be 1200 > 1000, so the CURRENT batch is cut first and the
+    // crossing row starts the next one — the accumulated payload of the emitted
+    // batch stays at or below the cap.
+    assert_eq!(cap.cut_before(300), ShouldFlush::Yes);
     cap.reset();
     assert_eq!(cap.accumulated(), 0);
-    assert_eq!(cap.push_width(1), ShouldFlush::No);
+    assert_eq!(cap.rows(), 0);
+    cap.accumulate(300);
+    assert_eq!(cap.accumulated(), 300);
+    // Exactly reaching the cap is NOT a crossing: 300 + 700 == 1000 fits.
+    assert_eq!(cap.cut_before(700), ShouldFlush::No);
+    cap.accumulate(700);
+    assert_eq!(cap.cut_before(1), ShouldFlush::Yes);
+}
+
+/// The bound a batch's payload may reach is `max(cap, widest_row)` — cutting
+/// BEFORE the crossing row, not after it. Asserted directly on the accumulator
+/// over an adversarial width sequence, so it holds independently of any fixture.
+#[test]
+fn accumulated_payload_never_exceeds_max_of_cap_and_widest_row() {
+    const CAP: usize = 1000;
+    // A crossing row that is a LARGE fraction of the cap (900) is the case a
+    // push-then-test boundary overshoots on: it would emit 900 + 900 = 1800.
+    let widths = [100usize, 900, 900, 1, 999, 5000, 2, 1000, 1];
+    let widest = widths.iter().copied().max().unwrap_or(0);
+    let mut cap = BatchByteCap::new(CAP);
+    let mut emitted: Vec<usize> = Vec::new();
+    for w in widths {
+        if cap.cut_before(w).is_yes() {
+            emitted.push(cap.accumulated());
+            cap.reset();
+        }
+        cap.accumulate(w);
+    }
+    emitted.push(cap.accumulated());
+    assert!(emitted.len() > 1, "degenerate: {emitted:?}");
+    assert_eq!(
+        emitted.iter().sum::<usize>(),
+        widths.iter().sum::<usize>(),
+        "a row's width was lost or double-counted: {emitted:?}"
+    );
+    for (i, bytes) in emitted.iter().enumerate() {
+        assert!(
+            *bytes <= CAP.max(widest),
+            "batch {i} accumulated {bytes} bytes, above max(cap {CAP}, widest row {widest})"
+        );
+    }
+    // And the ONLY batch allowed past the cap is the one carrying the single
+    // over-cap row alone.
+    assert_eq!(
+        emitted
+            .iter()
+            .filter(|b| **b > CAP)
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![5000],
+        "a batch other than the lone over-cap row exceeded the cap: {emitted:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -269,10 +323,10 @@ fn accumulator_is_incremental_and_reset_on_flush() {
 // ---------------------------------------------------------------------------
 
 /// Every emitted batch stays inside the PUBLISHED capacity tolerance
-/// `BATCH_BYTES_CAPACITY_FACTOR * cap + BATCH_BYTES_PER_COLUMN_SLACK * columns`,
-/// and — separately and tightly — every multi-row batch's PAYLOAD bytes are at
-/// or below the cap. Both bounds are expressed through the named constants, not
-/// inline literals.
+/// `BATCH_BYTES_CAPACITY_FACTOR * max(cap, widest_row) + slack * array_nodes`,
+/// and — separately and tightly — every batch's PAYLOAD bytes are at or below
+/// the cap (every fixture row fits it). Both bounds are expressed through the
+/// named constants, not inline literals.
 #[test]
 fn emitted_batches_respect_the_payload_and_capacity_bounds() {
     let (_temp, dir, schema) = wide_fixture(WIDE_ROWS, WIDE_PAYLOAD);
@@ -281,39 +335,63 @@ fn emitted_batches_respect_the_payload_and_capacity_bounds() {
     let batches = scan_merge(&p, &dir);
     assert_non_vacuous(&batches, WIDE_ROWS as usize, "capacity tolerance");
 
-    let capacity_bound = worst_case_batch_capacity_bytes(WIDE_CAP, n_columns);
+    // Rows here are ~4 KiB against a 64 KiB cap; the widest-row term is
+    // absorbed by `max(..)` and the bound reduces to `2 * cap + slack`.
+    let capacity_bound =
+        worst_case_batch_capacity_bytes(WIDE_CAP, n_columns, per_row_payload_bound(WIDE_PAYLOAD));
+    assert_eq!(
+        capacity_bound,
+        worst_case_batch_capacity_bytes(WIDE_CAP, n_columns, 0),
+        "the fixture's widest row should fit the cap"
+    );
     for (i, b) in batches.iter().enumerate() {
         assert!(
             b.get_array_memory_size() <= capacity_bound,
             "batch {i}: get_array_memory_size {} exceeds the published tolerance {capacity_bound}",
             b.get_array_memory_size()
         );
-        // Tight payload bound, in the cap's own currency: a batch of two or more
-        // rows must sit at or below the cap once its final row is excluded — the
-        // cut happens ON the crossing row.
-        if b.num_rows() >= 2 {
-            let payload = arrow_payload_bytes(b);
-            assert!(
-                payload <= WIDE_CAP + per_row_payload_bound(),
-                "batch {i}: payload {payload} above cap {WIDE_CAP}"
-            );
-        }
+        let payload = arrow_payload_bytes(b);
+        assert!(
+            payload <= WIDE_CAP,
+            "batch {i}: payload {payload} above cap {WIDE_CAP}"
+        );
     }
 }
 
 /// The published capacity conversion is derivable from the named constants
-/// alone, with no hidden fudge factor.
+/// alone, with no hidden fudge factor — including the `max(cap, widest_row)`
+/// term that a schema with a single over-cap row pays.
 #[test]
 fn worst_case_capacity_follows_from_the_named_constants() {
     assert_eq!(
-        worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 3),
+        worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 3, 0),
         DEFAULT_MAX_BATCH_BYTES * BATCH_BYTES_CAPACITY_FACTOR + BATCH_BYTES_PER_COLUMN_SLACK * 3
     );
+    // A widest row at or below the cap does not move the bound...
+    assert_eq!(
+        worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 3, DEFAULT_MAX_BATCH_BYTES),
+        worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 3, 0)
+    );
+    // ...and a row WIDER than the cap moves it by exactly that row, because one
+    // row cannot be split across Arrow batches.
+    let fat_row = 3 * DEFAULT_MAX_BATCH_BYTES;
+    assert_eq!(
+        worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 3, fat_row),
+        fat_row * BATCH_BYTES_CAPACITY_FACTOR + BATCH_BYTES_PER_COLUMN_SLACK * 3
+    );
     // Saturating: an unbounded cap reports the ceiling, never a wrapped value.
-    assert_eq!(worst_case_batch_capacity_bytes(usize::MAX, 8), usize::MAX);
+    assert_eq!(
+        worst_case_batch_capacity_bytes(usize::MAX, 8, 0),
+        usize::MAX
+    );
+    assert_eq!(
+        worst_case_batch_capacity_bytes(0, 8, usize::MAX),
+        usize::MAX
+    );
     // The #2821 composition: 6 MiB ceiling + one worst-case 4 MiB-payload batch
-    // stays inside B4's 16Mi at concurrency 1.
-    let one_batch = worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 16);
+    // stays inside B4's 16Mi at concurrency 1 — for a schema whose widest row
+    // fits the cap, which is the precondition #2821 must carry.
+    let one_batch = worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 16, 0);
     assert!(
         6 * 1024 * 1024 + one_batch <= 16 * 1024 * 1024,
         "6 MiB ceiling + one max batch ({one_batch}) breaks the B4 budget"
@@ -333,9 +411,12 @@ fn worst_case_capacity_follows_from_the_named_constants() {
 #[test]
 fn rows_wider_than_the_cap_are_emitted_one_per_batch() {
     const N: i32 = 6;
-    let (_temp, dir, schema) = wide_fixture(N, 8192);
+    const PAYLOAD: usize = 8192;
+    const TINY_CAP: usize = 64;
+    let (_temp, dir, schema) = wide_fixture(N, PAYLOAD);
+    let n_columns = schema.columns.len();
     // Cap far below one row's width.
-    let p = producer(schema, BIG_BATCH_SIZE, 64);
+    let p = producer(schema, BIG_BATCH_SIZE, TINY_CAP);
     let batches = scan_merge(&p, &dir);
     assert_eq!(total_rows(&batches), N as usize, "a row was dropped");
     assert_eq!(
@@ -343,8 +424,56 @@ fn rows_wider_than_the_cap_are_emitted_one_per_batch() {
         N as usize,
         "expected exactly one batch per over-cap row"
     );
+    // The published bound in the regime where the widest row EXCEEDS the cap:
+    // `max(cap, widest_row)`, i.e. the row's own width — the inherent overshoot
+    // of a boundary that cannot split a row across batches (review B1).
+    let widest = per_row_payload_bound(PAYLOAD);
+    let capacity_bound = worst_case_batch_capacity_bytes(TINY_CAP, n_columns, widest);
     for (i, b) in batches.iter().enumerate() {
         assert_eq!(b.num_rows(), 1, "batch {i} is not a one-row batch");
+        let payload = arrow_payload_bytes(b);
+        assert!(
+            payload > TINY_CAP,
+            "batch {i}: payload {payload} does not exceed the cap — the fixture \
+             no longer exercises the over-cap row case"
+        );
+        assert!(
+            payload <= TINY_CAP.max(widest),
+            "batch {i}: payload {payload} exceeds max(cap {TINY_CAP}, widest row {widest})"
+        );
+        assert!(
+            b.get_array_memory_size() <= capacity_bound,
+            "batch {i}: get_array_memory_size {} exceeds the published tolerance {capacity_bound}",
+            b.get_array_memory_size()
+        );
+    }
+}
+
+/// A crossing row that is a LARGE fraction of the cap does not overshoot it —
+/// the case the published bound was wrong about (review B1). With ~8 KiB rows
+/// under a ~12 KiB cap, a push-then-test boundary would emit ~20 KiB batches
+/// (1.7x the cap); test-then-push emits one row per batch, all at or under it.
+#[test]
+fn a_crossing_row_that_is_a_large_fraction_of_the_cap_does_not_overshoot() {
+    const N: i32 = 8;
+    const PAYLOAD: usize = 8192;
+    const CAP: usize = 12 * 1024;
+    let (_temp, dir, schema) = wide_fixture(N, PAYLOAD);
+    let p = producer(schema, BIG_BATCH_SIZE, CAP);
+    for (label, batches) in [
+        ("merge", scan_merge(&p, &dir)),
+        ("streaming", scan_streaming(&p, &dir)),
+    ] {
+        assert_eq!(total_rows(&batches), N as usize, "{label}: rows lost");
+        assert!(batches.len() > 1, "{label}: degenerate single batch");
+        for (i, b) in batches.iter().enumerate() {
+            let payload = arrow_payload_bytes(b);
+            assert!(
+                payload <= CAP,
+                "{label} batch {i}: payload {payload} overshot the cap {CAP} — \
+                 the batch was cut AFTER the crossing row, not before it"
+            );
+        }
     }
 }
 
@@ -378,40 +507,54 @@ fn zero_and_one_byte_caps_degrade_to_one_row_per_batch() {
     }
 }
 
-/// The accumulator never reports a flush with an empty buffer, for any cap —
-/// the push-then-test invariant that makes the one-row floor total.
+/// The accumulator never asks for a flush with an empty buffer, for ANY cap and
+/// ANY width — the test-then-push invariant that makes the one-row floor total.
 #[test]
 fn accumulator_only_flushes_with_at_least_one_row_counted() {
     for cap in [0usize, 1, 64, DEFAULT_MAX_BATCH_BYTES, usize::MAX] {
+        for width in [0usize, 1, 65, 4 * 1024 * 1024, usize::MAX] {
+            let mut acc = BatchByteCap::new(cap);
+            assert_eq!(acc.rows(), 0, "cap {cap}: fresh accumulator holds rows");
+            assert_eq!(
+                acc.accumulated(),
+                0,
+                "cap {cap}: fresh accumulator holds bytes"
+            );
+            // The one-row floor: an EMPTY buffer accepts every width, including
+            // the fail-closed `usize::MAX` sentinel and a width far over the
+            // cap. Asking to flush here would loop without progress.
+            assert_eq!(
+                acc.cut_before(width),
+                ShouldFlush::No,
+                "cap {cap}, width {width}: asked to flush an EMPTY buffer"
+            );
+            acc.accumulate(width);
+            assert_eq!(acc.rows(), 1, "cap {cap}, width {width}: row not counted");
+            assert_eq!(
+                acc.accumulated(),
+                width,
+                "cap {cap}, width {width}: width wrapped"
+            );
+
+            acc.reset();
+            assert_eq!(acc.rows(), 0, "cap {cap}: reset left rows behind");
+            assert_eq!(acc.accumulated(), 0, "cap {cap}: reset left bytes behind");
+        }
+
+        // With one row already buffered, a second row is admitted only while the
+        // running total would stay within the cap — so caps of 0 and 1 cut after
+        // every non-degenerate row instead of hanging.
         let mut acc = BatchByteCap::new(cap);
-        assert_eq!(acc.rows(), 0, "cap {cap}: fresh accumulator holds rows");
+        acc.accumulate(1);
         assert_eq!(
-            acc.accumulated(),
-            0,
-            "cap {cap}: fresh accumulator holds bytes"
-        );
-
-        // Even the fail-closed saturating width only trips AFTER the row has
-        // been counted, so the flush it asks for always has a row to carry.
-        assert_eq!(acc.push_width(usize::MAX), ShouldFlush::Yes, "cap {cap}");
-        assert_eq!(acc.rows(), 1, "cap {cap}: flushed without counting the row");
-        assert_eq!(acc.accumulated(), usize::MAX, "cap {cap}: width wrapped");
-
-        acc.reset();
-        assert_eq!(acc.rows(), 0, "cap {cap}: reset left rows behind");
-
-        // A zero-width row is still a row: a `0` cap cuts after it rather than
-        // asking for an empty flush.
-        assert_eq!(
-            acc.push_width(0),
-            if cap == 0 {
-                ShouldFlush::Yes
-            } else {
+            acc.cut_before(1),
+            if cap >= 2 {
                 ShouldFlush::No
+            } else {
+                ShouldFlush::Yes
             },
-            "cap {cap}: wrong decision for a zero-width row"
+            "cap {cap}: wrong decision for the second row"
         );
-        assert_eq!(acc.rows(), 1, "cap {cap}");
     }
 }
 
@@ -576,7 +719,11 @@ fn without_the_byte_cap_the_wide_scan_is_one_oversized_row_cut_batch() {
              above the cap {WIDE_CAP} — the byte-cut tests would be vacuous"
         );
         // And it breaks the capacity tolerance the capped run satisfies.
-        let bound = worst_case_batch_capacity_bytes(WIDE_CAP, schema.columns.len());
+        let bound = worst_case_batch_capacity_bytes(
+            WIDE_CAP,
+            schema.columns.len(),
+            per_row_payload_bound(WIDE_PAYLOAD),
+        );
         assert!(
             batches.iter().any(|b| b.get_array_memory_size() > bound),
             "pre-change control: the uncapped batch already fits the tolerance"

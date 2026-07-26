@@ -57,6 +57,15 @@ fn blob(n: usize) -> Value {
     Value::Blob(vec![0xABu8; n].into())
 }
 
+/// `list<list<…<text>>>` nested `depth` levels deep.
+fn nested_list_type(depth: usize) -> CqlType {
+    let mut t = CqlType::Text;
+    for _ in 0..depth {
+        t = CqlType::List(Box::new(t));
+    }
+    t
+}
+
 /// The shape corpus required by spec Requirement 3: fixed-width columns, `text`,
 /// `blob`, `list`/`set`, `map`, `tuple`/UDT, all-null rows, empty strings and
 /// empty collections — plus the flat (`cql_type = None`) dispatch arms, which the
@@ -225,6 +234,107 @@ fn shape_corpus() -> Vec<Shape> {
                     ("l", Value::List(Vec::new())),
                     ("m", Value::Map(Vec::new())),
                 ])
+            })
+            .collect(),
+    });
+
+    // Nesting DEEPER than one level, empty at the leaf: `build_typed_value_array`
+    // materializes one `ListArray` per DECLARED level whatever the value holds,
+    // each carrying an empty 4-byte offsets buffer, so a per-value-only estimate
+    // under-counts by ~4 bytes per level (review B2). Both the empty-collection
+    // and the null spelling of the same cell.
+    shapes.push(Shape {
+        name: "deeply nested empty list",
+        columns: vec![col("l", DataType::List, Some(nested_list_type(8)))],
+        rows: vec![row(vec![("l", Value::List(Vec::new()))])],
+    });
+
+    shapes.push(Shape {
+        name: "deeply nested null list",
+        columns: vec![col("l", DataType::List, Some(nested_list_type(8)))],
+        rows: (0..4)
+            .map(|_| row(vec![("l", Value::Null)]))
+            .chain(std::iter::once(row(vec![])))
+            .collect(),
+    });
+
+    shapes.push(Shape {
+        name: "map<text,list<text>> nested",
+        columns: vec![col(
+            "m",
+            DataType::Map,
+            Some(CqlType::Map(
+                Box::new(CqlType::Text),
+                Box::new(CqlType::List(Box::new(CqlType::Text))),
+            )),
+        )],
+        rows: (0..24)
+            .map(|i| {
+                row(vec![(
+                    "m",
+                    Value::Map(
+                        (0..=i)
+                            .map(|j| {
+                                (
+                                    text(&format!("k{j}")),
+                                    // Every other entry's list is EMPTY: the
+                                    // declared element type's child array still
+                                    // exists.
+                                    Value::List(
+                                        (0..(j % 3)).map(|e| text(&format!("e{e}"))).collect(),
+                                    ),
+                                )
+                            })
+                            .collect(),
+                    ),
+                )])
+            })
+            .collect(),
+    });
+
+    // A UDT whose DECLARED field list is empty (the unresolved-named-UDT case
+    // `arrow_convert` documents): the converter takes the Utf8 fallback and
+    // renders `{name: value, …}`, so every field NAME reaches the payload
+    // (review B4).
+    shapes.push(Shape {
+        name: "udt with empty declared fields",
+        columns: vec![col(
+            "u",
+            DataType::Udt,
+            Some(CqlType::Udt("unresolved".into(), Vec::new())),
+        )],
+        rows: (0..16)
+            .map(|i| {
+                row(vec![(
+                    "u",
+                    Value::Udt(Box::new(UdtValue {
+                        type_name: "unresolved".into(),
+                        keyspace: "ks".into(),
+                        fields: vec![
+                            UdtField {
+                                name: format!("a_long_field_name_{i}"),
+                                value: Some(text(&"v".repeat(i as usize % 20))),
+                            },
+                            UdtField {
+                                name: "second_field".into(),
+                                value: Some(Value::Integer(i)),
+                            },
+                        ],
+                    })),
+                )])
+            })
+            .collect(),
+    });
+
+    shapes.push(Shape {
+        name: "tuple with empty declared elements",
+        columns: vec![col("tp", DataType::Tuple, Some(CqlType::Tuple(Vec::new())))],
+        rows: (0..8)
+            .map(|i| {
+                row(vec![(
+                    "tp",
+                    Value::Tuple(vec![Value::Integer(i), text("tail")]),
+                )])
             })
             .collect(),
     });
@@ -433,6 +543,29 @@ fn shape_corpus() -> Vec<Shape> {
             .collect(),
     });
 
+    // `Value::Json` through the flat `DataType::Json` arm — `json_render_bytes`
+    // is the most intricate charging arm and was otherwise exercised only by the
+    // fail-closed depth test (review N5).
+    shapes.push(Shape {
+        name: "flat json rendered",
+        columns: vec![col("j", DataType::Json, None)],
+        rows: (0..24)
+            .map(|i| {
+                row(vec![(
+                    "j",
+                    Value::Json(Box::new(serde_json::json!({
+                        "id": i,
+                        "name": "a\"quoted\"\u{1F600}name",
+                        "tags": ["x", "yy", "zzz"],
+                        "nested": {"flag": true, "none": null, "ratio": 1.5},
+                        "empty_arr": [],
+                        "empty_obj": {},
+                    }))),
+                )])
+            })
+            .collect(),
+    });
+
     // Single-row batches: arrow's short-buffer length rounding is proportionally
     // largest here, so they are the tightest case for the per-slot slack.
     shapes.push(Shape {
@@ -531,17 +664,42 @@ fn estimate_is_conservative_across_shape_corpus() {
     }
 }
 
-/// The estimator must not be so loose that it is useless: on realistic wide
-/// shapes it stays within a bounded multiple of the realized payload, so the cap
-/// cuts batches near the configured size rather than at one row.
+/// The estimator must not be so loose that it is useless: it stays within a
+/// bounded multiple of the realized payload, so the cap cuts batches near the
+/// configured size rather than far short of it.
+///
+/// Covers the COLLECTION-heavy and MULTI-COLUMN shapes as well as the wide ones
+/// (review B3): those are exactly where a slack charged per SLOT instead of per
+/// COLUMN inflates the estimate — a `list<int>` cell of 1000 elements or a
+/// 30-column fixed-width row is where an over-estimate turns into a real
+/// batching regression, so the looseness is measured there, not only where it
+/// amortizes away.
 #[test]
 fn estimate_is_within_a_bounded_multiple_of_the_payload() {
-    // Wide shapes only — a narrow fixed-width shape is dominated by the fixed
-    // per-slot slack by construction.
-    for name in ["text wide", "blob wide", "blob single row"] {
+    // (shape, allowed multiple). The multiples are TIGHT — each is the smallest
+    // whole number above the shape's measured ratio — so a regression in the
+    // charging model shows up here rather than being absorbed.
+    let cases: &[(&str, usize)] = &[
+        ("text wide", 2),
+        ("blob wide", 2),
+        ("blob single row", 2),
+        // Collection-heavy: the per-element charge is what must stay tight.
+        ("list<int>", 2),
+        ("set<text>", 2),
+        ("map<text,bigint>", 2),
+        ("map<text,list<text>> nested", 3),
+        ("flat list rendered", 3),
+        // Multi-column narrow: dominated by the per-COLUMN residual, which is
+        // the term that must NOT scale with cell count.
+        ("fixed-width scalars", 3),
+        ("flat text/blob/int", 3),
+        ("flat json rendered", 5),
+        ("high-fidelity scalars", 4),
+    ];
+    for (name, multiple) in cases {
         let shape = shape_corpus()
             .into_iter()
-            .find(|s| s.name == name)
+            .find(|s| &s.name == name)
             .unwrap_or_else(|| panic!("missing corpus shape '{name}'"));
         let estimated: usize = shape
             .rows
@@ -551,10 +709,74 @@ fn estimate_is_within_a_bounded_multiple_of_the_payload() {
         let batch = rows_to_record_batch(&shape.columns, &shape.rows).expect("convert");
         let realized = arrow_payload_bytes(&batch);
         assert!(
-            estimated <= realized.saturating_mul(2),
-            "shape '{name}': estimate {estimated} is more than 2x the realized payload {realized}"
+            estimated <= realized.saturating_mul(*multiple),
+            "shape '{name}': estimate {estimated} is more than {multiple}x the \
+             realized payload {realized}"
         );
     }
+}
+
+/// The per-column residual is charged ONCE PER COLUMN, never per cell (review
+/// B3): growing a collection cell's ELEMENT COUNT by 100x must grow the estimate
+/// by roughly the elements' own Arrow cost, not by 100 slack charges.
+///
+/// Pinned as a ratio against the realized payload so it cannot be satisfied by
+/// simply shrinking a constant: a per-slot slack of `S` would show up here as
+/// `~S/4` extra bytes per `int` element.
+#[test]
+fn per_column_residual_does_not_scale_with_element_count() {
+    let columns = vec![col(
+        "l",
+        DataType::List,
+        Some(CqlType::List(Box::new(CqlType::Int))),
+    )];
+    let big = row(vec![(
+        "l",
+        Value::List((0..1000).map(Value::Integer).collect()),
+    )]);
+    let estimated = estimate_arrow_row_bytes(&columns, &big);
+    let batch = rows_to_record_batch(&columns, std::slice::from_ref(&big)).expect("convert");
+    let realized = arrow_payload_bytes(&batch);
+    assert!(realized >= 4000, "vacuous: {realized} realized bytes");
+    assert!(
+        estimated >= realized,
+        "estimate {estimated} under-counts {realized}"
+    );
+    // 1000 int elements: ~4 KB realized. A per-SLOT slack of 32 would put this
+    // at ~9x.
+    assert!(
+        estimated <= realized.saturating_mul(3) / 2,
+        "estimate {estimated} is more than 1.5x the realized payload {realized} \
+         — the residual is scaling with element count, not column count"
+    );
+}
+
+/// A wide fixed-width schema still lets the ROW-cap bind at the 4 MiB default:
+/// the per-row estimate for 30 `int` columns must leave room for a full
+/// 8192-row batch (review B3 — a per-slot slack put this at ~4,000 rows).
+#[test]
+fn a_wide_fixed_width_row_still_fits_a_full_default_batch() {
+    const N_COLS: i32 = 30;
+    const DEFAULT_CAP: usize = 4 * 1024 * 1024;
+    const BATCH_ROWS: usize = 8192;
+    let names: Vec<String> = (0..N_COLS).map(|i| format!("c{i}")).collect();
+    let columns: Vec<ColumnInfo> = names
+        .iter()
+        .map(|n| col(n, DataType::Integer, Some(CqlType::Int)))
+        .collect();
+    let r = row(names
+        .iter()
+        .zip(0..N_COLS)
+        .map(|(n, i)| (n.as_str(), Value::Integer(i)))
+        .collect());
+    let per_row = estimate_arrow_row_bytes(&columns, &r);
+    assert!(
+        per_row.saturating_mul(BATCH_ROWS) <= DEFAULT_CAP,
+        "a {N_COLS}-column int row estimates {per_row} B, so the byte-cap would \
+         cut at {} rows — below the {BATCH_ROWS}-row batch size, a throughput \
+         regression on a narrow shape",
+        DEFAULT_CAP / per_row.max(1)
+    );
 }
 
 /// The conservatism property is DISCRIMINATING, not a tautology.

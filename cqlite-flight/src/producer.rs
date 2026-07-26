@@ -991,14 +991,20 @@ impl MergeProducer {
                     }
                 }
                 // Dual row-cap / byte-cap boundary (issue #2825): estimate the
-                // row's Arrow payload width BEFORE it is moved into the buffer,
-                // then account for it. `push_width` is push-then-test, so a row
-                // wider than the whole cap still leaves as a one-row batch.
+                // row's Arrow payload width BEFORE it is moved into the buffer
+                // and cut the batch on the row that WOULD cross the cap, so the
+                // emitted batch holds only rows that fit. `cut_before` answers
+                // `No` on an empty buffer, so a row wider than the whole cap
+                // still leaves as a one-row batch.
                 let width = estimate_arrow_row_bytes(&self.columns, &row);
+                if byte_cap.cut_before(width).is_yes() {
+                    sink.emit(self.flush_buffer(&mut buffer)?)?;
+                    byte_cap.reset();
+                }
                 buffer.push(row);
                 emitted += 1;
-                let byte_full = byte_cap.push_width(width).is_yes();
-                if buffer.len() >= self.batch_size || byte_full {
+                byte_cap.accumulate(width);
+                if buffer.len() >= self.batch_size {
                     sink.emit(self.flush_buffer(&mut buffer)?)?;
                     byte_cap.reset();
                 }

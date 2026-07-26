@@ -27,18 +27,40 @@
 //! that need a capacity figure convert with the published capacity factor
 //! (`cqlite_flight::batch_bytes::BATCH_BYTES_CAPACITY_FACTOR`).
 //!
+//! # The charging model, from first principles
+//!
+//! Arrow buffer **lengths are exact** — measured against this tree's arrow 53, a
+//! one-row `Int32` column is 4 bytes, a nine-row `Boolean` column is
+//! `ceil(9/8) = 2` bytes, and a null buffer is `ceil(n/8)` (absent entirely when
+//! a column has no nulls). Nothing is rounded up to an allocator quantum, so the
+//! estimate is built from the three real per-slot costs and one small per-column
+//! residual — **never** from a large fudge charged per cell:
+//!
+//! | term | charged | covers |
+//! |---|---|---|
+//! | [`ARROW_VALIDITY_BYTES`] | every slot | the slot's validity **bit**; `n` bytes ≥ `ceil(n/8)` |
+//! | content | every slot | the slot's data-buffer bytes |
+//! | [`ARROW_CELL_OVERHEAD_BYTES`] | variable-width slots | its offsets entry + the buffer's trailing `n+1`-th entry |
+//! | [`ARROW_COLUMN_SLACK_BYTES`] | once per projected **column** | array nodes that correspond to no slot at all |
+//!
+//! The per-cell terms are therefore tight (a 1000-element `list<int>` estimates
+//! ~1.2× its realized payload, not ~9×), and a wide fixed-width schema pays
+//! ~13 B/column/row rather than ~1 KB/row — so the row-cap, not the byte-cap,
+//! still binds on narrow shapes.
+//!
 //! # Conservatism is a contract, not an aspiration
 //!
 //! `Σ estimate_arrow_row_bytes(columns, row) >= arrow_payload_bytes(batch)` for
 //! every shape, enforced by the property test in `arrow_size_tests.rs` over a
 //! corpus covering fixed-width columns, `text`, `blob`, `list`/`set`, `map`,
-//! `tuple`/UDT, all-null rows, empty strings and empty collections. The three
-//! pre-existing per-`Value` estimators are all *under*-estimators for this
-//! purpose (see the issue-#2825 design §d): `Value::size_estimate` models the
-//! SERIALIZED size (a 1-byte vint prefix where Arrow spends a 4-byte offset plus
-//! a validity bit), and `memory::estimate_value_size` /
-//! `Memtable::estimate_value_size` are content-only. None is Arrow-aware, and an
-//! under-estimator cannot found a memory bound.
+//! `tuple`/UDT, JSON, deeply nested empty collections, all-null rows, empty
+//! strings and empty collections. The three pre-existing per-`Value` estimators
+//! are all *under*-estimators for this purpose (see the issue-#2825 design §d):
+//! `Value::size_estimate` models the SERIALIZED size (a 1-byte vint prefix where
+//! Arrow spends a 4-byte offset plus a validity bit), and
+//! `memory::estimate_value_size` / `Memtable::estimate_value_size` are
+//! content-only. None is Arrow-aware, and an under-estimator cannot found a
+//! memory bound.
 //!
 //! # No-heuristics (issue #28)
 //!
@@ -49,49 +71,68 @@
 //! # Hardening
 //!
 //! The walk is **iterative** (an explicit worklist, never recursion), bounded by
-//! [`MAX_ESTIMATE_NODES`], and every arithmetic step is saturating. A value
-//! deeper or wider than the node budget, or one whose widths would overflow
-//! `usize`, **fails closed** to `usize::MAX` — which trips the byte-cap and cuts
-//! the batch, the safe direction. It never panics and never hangs.
+//! [`MAX_ESTIMATE_NODES`], and every arithmetic step is saturating. A fan-out is
+//! tested against the remaining budget **before** it is pushed, so a corrupt
+//! collection cannot transiently balloon the worklist. A value deeper or wider
+//! than the node budget, or one whose widths would overflow `usize`, **fails
+//! closed** to `usize::MAX` — which trips the byte-cap and cuts the batch, the
+//! safe direction. It never panics and never hangs.
 
 use crate::query::{ColumnInfo, QueryRow};
 use crate::schema::CqlType;
 use crate::types::{DataType, Value};
 
+// The rendered-representation bounds (`charge_rendered`, `json_render_bytes`)
+// live in a child module so this file stays under the campsite threshold
+// (epic #1116). A child module sees this module's private items.
+#[path = "arrow_size_render.rs"]
+mod render;
+
+use render::RENDER_CONTAINER_BYTES;
+
 // ============================================================================
-// Published structural constants
+// Structural constants
 // ============================================================================
+//
+// Deliberately NOT part of the crate's public surface (issue #2825 review N4):
+// these are tuning parameters of the estimate, not a contract. The public
+// surface is `estimate_arrow_row_bytes` / `arrow_payload_bytes` /
+// `MAX_ESTIMATE_NODES`.
 
 /// Width of one Arrow 32-bit offset entry (`Utf8`/`Binary`/`List`/`Map`).
-pub const ARROW_OFFSET_BYTES: usize = 4;
+const ARROW_OFFSET_BYTES: usize = 4;
 
-/// Validity charged per Arrow slot. Arrow spends one **bit**; this rounds up to
-/// a whole byte so a short batch — whose validity buffer length is dominated by
-/// allocator rounding rather than by `ceil(n/8)` — is still covered.
-pub const ARROW_VALIDITY_BYTES: usize = 1;
+/// Validity charged per Arrow slot. Arrow spends one **bit** per slot, so a
+/// buffer over `n` slots is `ceil(n / 8)` bytes long; charging one whole byte
+/// per slot covers that for every `n` with room to spare.
+const ARROW_VALIDITY_BYTES: usize = 1;
 
-/// Per-cell structural overhead of a **variable-width** Arrow slot: its offsets
-/// entry plus its validity byte.
+/// Per-cell structural overhead of a **variable-width** Arrow slot, charged on
+/// top of the universal per-slot validity byte.
 ///
-/// This is the term every pre-existing estimator omits, and the reason a
-/// content-only sum is an under-count. A trailing offsets entry (`n + 1` offsets
-/// for `n` slots) and small-buffer allocator rounding are absorbed by
-/// [`ARROW_SLOT_SLACK_BYTES`].
-pub const ARROW_CELL_OVERHEAD_BYTES: usize = ARROW_OFFSET_BYTES + ARROW_VALIDITY_BYTES;
+/// Derivation (not a fitted constant): an offsets buffer over `n` slots is
+/// `(n + 1) * 4` bytes — one entry per slot plus a trailing entry. Charging
+/// **two** entries per slot covers the trailing entry however few slots the
+/// buffer has, with `n = 1` the tight case: realized
+/// `4 * (1 + 1) + ceil(1/8) = 9`, charged `4 + 4 + 1 = 9`. The extra validity
+/// byte here (the second one a variable-width slot pays) is deliberate margin.
+const ARROW_CELL_OVERHEAD_BYTES: usize = 2 * ARROW_OFFSET_BYTES + ARROW_VALIDITY_BYTES;
 
-/// Fixed slack charged on **every** Arrow slot (fixed-width or variable-width).
+/// Residual slack charged ONCE per projected **column** per row — never per
+/// cell, per element or per field.
 ///
-/// Covers the per-buffer costs that are NOT proportional to the slot count and
-/// so cannot be amortized by a strictly per-row estimator: chiefly the trailing
-/// `n + 1`-th offsets entry of each variable-width buffer, which a one-row batch
-/// pays in full. Measured against arrow 53 the tightest corpus shape (a one-row
-/// 64 KiB blob) needs only 2 bytes here; 32 leaves an order of magnitude of
-/// headroom while costing a narrow 3-column row ~100 B — three orders below the
-/// 4 MiB default cap, so the row-cap still binds on every narrow shape.
+/// Derivation: a column can materialize Arrow array nodes that correspond to no
+/// value slot at all, and each such node still carries an empty 4-byte offsets
+/// buffer. The tight case is the flat `DataType::Map` builder, whose `MapArray`
+/// always materializes a key `Utf8` and a value `Utf8` child even for a cell
+/// with zero entries: `2 × 4 = 8` bytes with no slot to attach them to. (The
+/// high-fidelity path charges such nodes explicitly — see `charge_cql`'s
+/// empty-collection rule — so this stays a residual, not the mechanism.)
 ///
-/// Charged per slot rather than per batch deliberately: the accumulate-as-you-
-/// push cap needs a per-row number, and a per-batch term has nowhere to live.
-pub const ARROW_SLOT_SLACK_BYTES: usize = 32;
+/// Charged per row because the accumulate-as-you-push cap needs a per-row
+/// number and a per-batch term has nowhere to live; per COLUMN rather than per
+/// SLOT so it cannot multiply by a cell's element count.
+const ARROW_COLUMN_SLACK_BYTES: usize = 2 * ARROW_OFFSET_BYTES;
 
 /// Maximum number of value/type nodes one row's estimate may visit.
 ///
@@ -100,44 +141,6 @@ pub const ARROW_SLOT_SLACK_BYTES: usize = 32;
 /// above any legitimate Cassandra row shape (a 4-column row of 1000-element
 /// collections visits ~4000 nodes).
 pub const MAX_ESTIMATE_NODES: usize = 65_536;
-
-// ---- Rendered-representation bounds -----------------------------------------
-//
-// Columns with no authoritative CQL type (and the `Tuple`/`Udt`/`Frozen`/
-// `Tombstone`/`Null` flat arms) are converted by `build_string_array`, which
-// renders the value through `ValueFormatter::format_value`. These bound that
-// rendering; each is an upper bound on the corresponding `format_value` arm.
-
-/// `"true"` / `"false"`.
-const RENDER_BOOL_BYTES: usize = 8;
-/// Any integral variant rendered as decimal (`i64::MIN` is 20 chars).
-const RENDER_INT_BYTES: usize = 24;
-/// `f32`/`f64` via `{}`/`{:e}`, plus `NaN`/`Infinity`.
-const RENDER_FLOAT_BYTES: usize = 40;
-/// `"a8f167f0-ebe7-4f20-a386-31ff138bec3b"`.
-const RENDER_UUID_BYTES: usize = 40;
-/// `YYYY-MM-DD HH:MM:SS.fff+0000` or `<invalid-timestamp:-9223372036854775808>`.
-const RENDER_TIMESTAMP_BYTES: usize = 48;
-/// `YYYY-MM-DD` or the `<invalid-date:…>` fallback.
-const RENDER_DATE_BYTES: usize = 48;
-/// `HH:MM:SS.nnnnnnnnn` or the `<invalid-time:…>` fallback.
-const RENDER_TIME_BYTES: usize = 48;
-/// Full IPv6 text form, or the invalid-length fallback.
-const RENDER_INET_BYTES: usize = 64;
-/// `"{months}mo{days}d{nanos}ns"` at the widest.
-const RENDER_DURATION_BYTES: usize = 64;
-/// `"<deleted@{i64}>"`.
-const RENDER_TOMBSTONE_BYTES: usize = 40;
-/// `"null"`.
-const RENDER_NULL_BYTES: usize = 8;
-/// Brackets plus the `", "` separators a rendered container adds around its
-/// (separately charged) children.
-const RENDER_CONTAINER_BYTES: usize = 8;
-/// Decimal digits produced per magnitude byte (`log10(256) < 2.41`), rounded up.
-const DECIMAL_DIGITS_PER_BYTE: usize = 3;
-/// `ValueFormatter::format_decimal`'s zero-padding ceiling: past this the render
-/// switches to bounded exponent form, so padding can never exceed it.
-const DECIMAL_SCALE_RENDER_CAP: usize = 1_000_001;
 
 // ============================================================================
 // Public API
@@ -188,6 +191,8 @@ pub fn estimate_arrow_row_bytes(columns: &[ColumnInfo], row: &QueryRow) -> usize
     let mut est = Estimator::new();
     for col in columns {
         let cell = row.values.get(col.name.as_str());
+        // The per-column residual, charged exactly once per column per row.
+        est.add(ARROW_COLUMN_SLACK_BYTES);
         // Charge the column's own slot DIRECTLY rather than through the
         // worklist: a scalar column pushes no children, so the narrow path
         // never allocates the stack at all (`Vec::new` does not allocate until
@@ -239,20 +244,36 @@ enum Shape<'a> {
     Cql(&'a CqlType),
     /// Flat `DataType` dispatch (the legacy builders).
     Flat(&'a DataType),
-    /// `build_string_array`'s permissive arm: the value is rendered through
-    /// `ValueFormatter::format_value` into a `Utf8` slot.
-    Rendered,
+    /// A REAL `Utf8` array slot whose content is `ValueFormatter::format_value`'s
+    /// rendering — `build_string_array`, and each element slot of
+    /// `build_list_array` / `build_map_array`. Pays the variable-width slot
+    /// overhead.
+    RenderedSlot,
+    /// NOT an array slot of its own: a sub-part of an enclosing slot's single
+    /// rendered string (a container element rendered inline). Pays content only.
+    RenderedInline,
 }
 
 /// Resolve a column to its Arrow slot shape, mirroring `convert_column_to_array`
-/// exactly: only the high-fidelity CQL arms take the typed path; everything else
-/// (including `Text`/`Blob`/numeric CQL types) falls through to the flat
+/// exactly: the high-fidelity CQL arms take the typed path; everything else
+/// (numeric CQL types, `Blob`, an absent CQL type) falls through to the flat
 /// `data_type` dispatch.
+///
+/// `Text`/`Ascii`/`Varchar` are routed to the typed arm even though the
+/// converter reaches them through `build_string_array`, because that builder's
+/// `strict_text` branch — taken for exactly these three CQL types — borrows the
+/// `&str` after a NON-lossy `str::from_utf8` and hard-errors on invalid UTF-8.
+/// Its byte behaviour is the typed one (`s.len()`), not the lossy rendered one
+/// (up to `3 * s.len()`), so charging it as flat text would over-estimate every
+/// authoritative text column by ~3x.
 fn column_shape(col: &ColumnInfo) -> Shape<'_> {
     if let Some(cql) = &col.cql_type {
         let effective = unwrap_frozen_type(cql);
         match effective {
-            CqlType::Date
+            CqlType::Text
+            | CqlType::Ascii
+            | CqlType::Varchar
+            | CqlType::Date
             | CqlType::Time
             | CqlType::Decimal
             | CqlType::Varint
@@ -275,9 +296,6 @@ fn column_shape(col: &ColumnInfo) -> Shape<'_> {
             | CqlType::BigInt
             | CqlType::Float
             | CqlType::Double
-            | CqlType::Text
-            | CqlType::Ascii
-            | CqlType::Varchar
             | CqlType::Blob
             | CqlType::Timestamp
             | CqlType::Frozen(_)
@@ -363,14 +381,17 @@ impl<'a> Estimator<'a> {
             return;
         }
         self.budget -= 1;
-        // Every slot pays its validity bit (rounded to a byte) plus the fixed
-        // per-slot slack that absorbs the trailing offsets entry.
-        self.add(ARROW_VALIDITY_BYTES.saturating_add(ARROW_SLOT_SLACK_BYTES));
+        // Every slot pays its validity bit, rounded up to a whole byte.
+        self.add(ARROW_VALIDITY_BYTES);
         let value = value.map(unwrap_frozen_value);
         match shape {
             Shape::Cql(t) => self.charge_cql(t, value),
             Shape::Flat(dt) => self.charge_flat(dt, value),
-            Shape::Rendered => self.charge_rendered(value),
+            Shape::RenderedSlot => {
+                self.add(ARROW_CELL_OVERHEAD_BYTES);
+                self.charge_rendered(value);
+            }
+            Shape::RenderedInline => self.charge_rendered(value),
         }
     }
 
@@ -412,13 +433,14 @@ impl<'a> Estimator<'a> {
             // Utf8 carrying a formatted rendering of a bounded scalar.
             CqlType::Inet => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
-                self.add(RENDER_INET_BYTES);
+                self.add(render::RENDER_INET_BYTES);
             }
             CqlType::Duration => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
-                self.add(RENDER_DURATION_BYTES);
+                self.add(render::RENDER_DURATION_BYTES);
             }
-            // Opaque custom type: `build_string_array`'s permissive render.
+            // Opaque custom type: `build_string_array`'s permissive render into
+            // this one Utf8 slot.
             CqlType::Custom(_) => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
                 self.charge_rendered(value);
@@ -427,48 +449,78 @@ impl<'a> Estimator<'a> {
             // per element.
             CqlType::List(inner) | CqlType::Set(inner) => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
-                if let Some(Value::List(items) | Value::Set(items)) = value {
-                    self.push_all(items.iter().map(|v| (Shape::Cql(inner), Some(v))));
-                } else if let Some(other) = value {
+                match value {
+                    Some(Value::List(items) | Value::Set(items)) if !items.is_empty() => {
+                        self.push_all(items.iter().map(|v| (Shape::Cql(inner), Some(v))));
+                    }
+                    // Empty, null or absent: `build_typed_value_array` still
+                    // materializes one child array per DECLARED nesting level,
+                    // each carrying an empty 4-byte offsets buffer. Charging the
+                    // declared chain covers a `list<list<…>>` whose depth no
+                    // per-slot constant could bound (review B2).
+                    Some(Value::List(_) | Value::Set(_) | Value::Null) | None => {
+                        self.push(Shape::Cql(inner), None);
+                    }
                     // Shape mismatch: the converter either errors (no batch) or
                     // renders. Charge the render bound, never zero.
-                    self.push(Shape::Rendered, Some(other));
+                    Some(other) => self.push(Shape::RenderedSlot, Some(other)),
                 }
             }
             // MapArray: the row's offsets entry, plus a key and a value child
-            // slot per entry (the entries struct's own slot is the key slot's
-            // slack, which is charged per pop).
+            // slot per entry (the entries struct itself carries no buffers).
             CqlType::Map(key_type, val_type) => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
-                if let Some(Value::Map(pairs)) = value {
-                    for (k, v) in pairs {
-                        self.push(Shape::Cql(key_type), Some(k));
-                        self.push(Shape::Cql(val_type), Some(v));
+                match value {
+                    Some(Value::Map(pairs)) if !pairs.is_empty() => {
+                        if !self.reserve(pairs.len().saturating_mul(2)) {
+                            return;
+                        }
+                        for (k, v) in pairs {
+                            self.push(Shape::Cql(key_type), Some(k));
+                            self.push(Shape::Cql(val_type), Some(v));
+                        }
                     }
-                    self.check_budget(pairs.len().saturating_mul(2));
-                } else if let Some(other) = value {
-                    self.push(Shape::Rendered, Some(other));
+                    // Empty/null/absent: both child arrays still exist — charge
+                    // the declared key and value type chains (review B2).
+                    Some(Value::Map(_) | Value::Null) | None => {
+                        if !self.reserve(2) {
+                            return;
+                        }
+                        self.push(Shape::Cql(key_type), None);
+                        self.push(Shape::Cql(val_type), None);
+                    }
+                    Some(other) => self.push(Shape::RenderedSlot, Some(other)),
                 }
             }
             // StructArray: no offsets; every DECLARED field materializes a child
-            // slot for this row whether or not the value carries it.
+            // slot for this row whether or not the value carries it. The extra
+            // variable-width overhead covers the Utf8 fallback the converter
+            // takes when the declared field list is empty.
             CqlType::Tuple(element_types) => {
+                self.add(ARROW_CELL_OVERHEAD_BYTES.saturating_add(RENDER_CONTAINER_BYTES));
                 let items: &[Value] = match value {
                     Some(Value::Tuple(items) | Value::List(items)) => items,
                     _ => &[],
                 };
                 let n = element_types.len().max(items.len());
+                if !self.reserve(n) {
+                    return;
+                }
                 for i in 0..n {
-                    let shape = element_types.get(i).map_or(Shape::Rendered, Shape::Cql);
+                    let shape = element_types.get(i).map_or(Shape::RenderedSlot, Shape::Cql);
                     self.push(shape, items.get(i));
                 }
-                self.check_budget(n);
             }
             CqlType::Udt(_, udt_fields) => {
+                self.add(ARROW_CELL_OVERHEAD_BYTES.saturating_add(RENDER_CONTAINER_BYTES));
                 let udt = match value {
                     Some(Value::Udt(udt)) => Some(udt.as_ref()),
                     _ => None,
                 };
+                let extras = udt.map_or(0, |u| u.fields.len());
+                if !self.reserve(udt_fields.len().saturating_add(extras)) {
+                    return;
+                }
                 for (name, field_type) in udt_fields {
                     let field_value = udt.and_then(|u| {
                         u.fields
@@ -479,18 +531,18 @@ impl<'a> Estimator<'a> {
                     self.push(Shape::Cql(field_type), field_value);
                 }
                 // A value carrying fields the declared type does not name still
-                // costs something on any render fallback — charge them too.
+                // costs something on the render fallback (`format_udt` emits
+                // `{name: value, …}`), so charge the NAME and its separators
+                // too — matching `charge_rendered`'s UDT arm (review B4).
                 if let Some(u) = udt {
                     let extra = u
                         .fields
                         .iter()
                         .filter(|f| !udt_fields.iter().any(|(n, _)| n == &f.name));
                     for f in extra {
-                        self.push(Shape::Rendered, f.value.as_ref());
+                        self.add(f.name.len().saturating_add(RENDER_CONTAINER_BYTES));
+                        self.push(Shape::RenderedInline, f.value.as_ref());
                     }
-                    self.check_budget(udt_fields.len().saturating_add(u.fields.len()));
-                } else {
-                    self.check_budget(udt_fields.len());
                 }
             }
             // Unreachable after `unwrap_frozen_type`, but kept explicit so the
@@ -501,6 +553,12 @@ impl<'a> Estimator<'a> {
 
     /// Charge a flat-`DataType` slot (the legacy builders). Exhaustive over
     /// [`DataType`] — a new variant is a compile error.
+    ///
+    /// The empty-collection child arrays these builders always materialize
+    /// (`ListArray<Utf8>` / `MapArray<Utf8, Utf8>`) are covered by
+    /// [`ARROW_COLUMN_SLACK_BYTES`], which is derived from exactly that case —
+    /// unlike the high-fidelity path, the flat builders have a FIXED one-level
+    /// child shape, so a constant suffices.
     fn charge_flat(&mut self, dt: &DataType, value: Option<&'a Value>) {
         match dt {
             DataType::Boolean | DataType::TinyInt => self.add(1),
@@ -518,22 +576,25 @@ impl<'a> Estimator<'a> {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
                 self.charge_rendered(value);
             }
-            // `build_list_array`: ListArray<Utf8> whose elements are rendered.
+            // `build_list_array`: ListArray<Utf8> whose elements are rendered —
+            // each element is a REAL child slot, not an inline sub-render.
             DataType::List | DataType::Set => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
                 if let Some(Value::List(items) | Value::Set(items)) = value {
-                    self.push_all(items.iter().map(|v| (Shape::Rendered, Some(v))));
+                    self.push_all(items.iter().map(|v| (Shape::RenderedSlot, Some(v))));
                 }
             }
             // `build_map_array`: MapArray with rendered Utf8 keys and values.
             DataType::Map => {
                 self.add(ARROW_CELL_OVERHEAD_BYTES);
                 if let Some(Value::Map(pairs)) = value {
-                    for (k, v) in pairs {
-                        self.push(Shape::Rendered, Some(k));
-                        self.push(Shape::Rendered, Some(v));
+                    if !self.reserve(pairs.len().saturating_mul(2)) {
+                        return;
                     }
-                    self.check_budget(pairs.len().saturating_mul(2));
+                    for (k, v) in pairs {
+                        self.push(Shape::RenderedSlot, Some(k));
+                        self.push(Shape::RenderedSlot, Some(v));
+                    }
                 }
             }
             // Fallback to `build_string_array`'s rendered representation.
@@ -548,112 +609,45 @@ impl<'a> Estimator<'a> {
         }
     }
 
-    /// Charge the `Utf8` rendering of `value` via `ValueFormatter::format_value`.
-    ///
-    /// Leaf variants get a constant bound; container variants charge their
-    /// bracket/separator overhead here and push their children as further
-    /// rendered slots (each child's own per-slot slack makes this strictly
-    /// conservative versus the single joined string arrow actually stores).
-    fn charge_rendered(&mut self, value: Option<&'a Value>) {
-        let Some(value) = value else {
-            return;
-        };
-        match unwrap_frozen_value(value) {
-            Value::Null => self.add(RENDER_NULL_BYTES),
-            Value::Boolean(_) => self.add(RENDER_BOOL_BYTES),
-            Value::TinyInt(_)
-            | Value::SmallInt(_)
-            | Value::Integer(_)
-            | Value::BigInt(_)
-            | Value::Counter(_) => self.add(RENDER_INT_BYTES),
-            Value::Float(_) | Value::Float32(_) => self.add(RENDER_FLOAT_BYTES),
-            Value::Text(s) => self.add(s.len()),
-            // `0x`-prefixed lowercase hex: two chars per byte.
-            Value::Blob(b) => self.add(
-                b.len()
-                    .saturating_mul(2)
-                    .saturating_add(RENDER_CONTAINER_BYTES),
-            ),
-            Value::Timestamp(_) => self.add(RENDER_TIMESTAMP_BYTES),
-            Value::Date(_) => self.add(RENDER_DATE_BYTES),
-            Value::Time(_) => self.add(RENDER_TIME_BYTES),
-            Value::Uuid(_) => self.add(RENDER_UUID_BYTES),
-            Value::Varint(b) => self.add(
-                b.len()
-                    .saturating_mul(DECIMAL_DIGITS_PER_BYTE)
-                    .saturating_add(RENDER_CONTAINER_BYTES),
-            ),
-            // Digits, plus `format_decimal`'s bounded zero padding (past
-            // `DECIMAL_SCALE_RENDER_CAP` it switches to exponent form).
-            Value::Decimal { scale, unscaled } => self.add(
-                unscaled
-                    .len()
-                    .saturating_mul(DECIMAL_DIGITS_PER_BYTE)
-                    .saturating_add((scale.unsigned_abs() as usize).min(DECIMAL_SCALE_RENDER_CAP))
-                    .saturating_add(RENDER_CONTAINER_BYTES),
-            ),
-            Value::Duration { .. } => self.add(RENDER_DURATION_BYTES),
-            Value::Inet(_) => self.add(RENDER_INET_BYTES),
-            Value::Tombstone(_) => self.add(RENDER_TOMBSTONE_BYTES),
-            Value::Json(json) => {
-                let bytes = json_render_bytes(json, &mut self.budget);
-                self.add(bytes);
-            }
-            Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
-                self.add(RENDER_CONTAINER_BYTES);
-                self.push_all(items.iter().map(|v| (Shape::Rendered, Some(v))));
-            }
-            Value::Map(pairs) => {
-                self.add(RENDER_CONTAINER_BYTES);
-                for (k, v) in pairs {
-                    self.push(Shape::Rendered, Some(k));
-                    self.push(Shape::Rendered, Some(v));
-                }
-                self.check_budget(pairs.len().saturating_mul(2));
-            }
-            Value::Udt(udt) => {
-                self.add(RENDER_CONTAINER_BYTES);
-                for f in &udt.fields {
-                    self.add(f.name.len().saturating_add(RENDER_CONTAINER_BYTES));
-                    self.push(Shape::Rendered, f.value.as_ref());
-                }
-                self.check_budget(udt.fields.len());
-            }
-            // Unreachable after `unwrap_frozen_value`; kept so the match is
-            // exhaustive without a `_` arm.
-            Value::Frozen(_) => self.add(RENDER_CONTAINER_BYTES),
-        }
-    }
-
+    /// Queue a whole fan-out, testing the node budget **before** anything is
+    /// pushed: a corrupt collection claiming 1e8 elements fails closed instead
+    /// of transiently materializing 1e8 worklist entries (review N1).
     fn push_all<I>(&mut self, items: I)
     where
-        I: Iterator<Item = (Shape<'a>, Option<&'a Value>)>,
+        I: ExactSizeIterator<Item = (Shape<'a>, Option<&'a Value>)>,
     {
-        let mut pushed = 0usize;
+        if !self.reserve(items.len()) {
+            return;
+        }
         for item in items {
             self.stack.push(item);
-            pushed = pushed.saturating_add(1);
         }
-        self.check_budget(pushed);
     }
 
-    /// Fail closed when a single fan-out already exceeds the remaining node
-    /// budget, so a pathologically wide collection saturates immediately rather
-    /// than after draining the worklist.
-    fn check_budget(&mut self, pushed: usize) {
-        if pushed > self.budget {
+    /// Fail closed when a fan-out of `n` slots already exceeds the remaining
+    /// node budget. Returns `false` when the estimate has been saturated and the
+    /// caller must stop.
+    fn reserve(&mut self, n: usize) -> bool {
+        if n > self.budget {
             self.saturate();
+            return false;
         }
+        true
     }
 }
 
 /// Bytes a `Value::Text` contributes to a `Utf8` slot (`0` when absent/null).
+///
+/// Exact, not tripled: this is the STRICT typed path, where `build_string_array`
+/// borrows the `&str` after a non-lossy `str::from_utf8` and hard-errors on
+/// invalid UTF-8 (so no replacement-character expansion is possible). The lossy
+/// rendered path charges 3× instead — see `charge_rendered`.
 fn text_content_bytes(value: Option<&Value>) -> usize {
     match value {
         Some(Value::Text(s)) => s.len(),
         // A wrong-variant value makes the converter fail closed (no batch); a
         // rendered fallback is bounded by the render arms. Charge nothing extra
-        // here — the slot overhead and slack are already charged.
+        // here — the slot overhead is already charged.
         _ => 0,
     }
 }
@@ -664,59 +658,6 @@ fn binary_content_bytes(value: Option<&Value>) -> usize {
         Some(Value::Blob(b)) => b.len(),
         _ => 0,
     }
-}
-
-/// Bounded upper bound on `serde_json::Value::to_string().len()`.
-///
-/// Iterative with its own share of the caller's node budget, so a deeply nested
-/// JSON document cannot recurse or spin. Returns `usize::MAX` when the budget is
-/// exhausted (fail closed).
-fn json_render_bytes(root: &serde_json::Value, budget: &mut usize) -> usize {
-    let mut total = 0usize;
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if *budget == 0 {
-            return usize::MAX;
-        }
-        *budget -= 1;
-        match node {
-            serde_json::Value::Null => total = total.saturating_add(RENDER_NULL_BYTES),
-            serde_json::Value::Bool(_) => total = total.saturating_add(RENDER_BOOL_BYTES),
-            serde_json::Value::Number(_) => total = total.saturating_add(RENDER_FLOAT_BYTES),
-            // JSON string escaping can expand a byte to `\u00XX` (6 chars).
-            serde_json::Value::String(s) => {
-                total = total.saturating_add(
-                    s.len()
-                        .saturating_mul(6)
-                        .saturating_add(RENDER_CONTAINER_BYTES),
-                )
-            }
-            serde_json::Value::Array(items) => {
-                total = total.saturating_add(
-                    RENDER_CONTAINER_BYTES.saturating_add(items.len().saturating_mul(2)),
-                );
-                if items.len() > *budget {
-                    return usize::MAX;
-                }
-                stack.extend(items.iter());
-            }
-            serde_json::Value::Object(map) => {
-                total = total.saturating_add(RENDER_CONTAINER_BYTES);
-                if map.len() > *budget {
-                    return usize::MAX;
-                }
-                for (k, v) in map {
-                    total = total.saturating_add(
-                        k.len()
-                            .saturating_mul(6)
-                            .saturating_add(RENDER_CONTAINER_BYTES),
-                    );
-                    stack.push(v);
-                }
-            }
-        }
-    }
-    total
 }
 
 #[cfg(test)]
