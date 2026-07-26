@@ -282,6 +282,16 @@ pub fn build_row_from_scan_cached(
     })
 }
 
+/// Issue #1883 (M4): per-row allocation-count ratchet. A CHILD module of
+/// `row_build` (so it may drive the private `PartitionKeyCache::columns_for`),
+/// kept in its own file to hold this one under the campsite threshold (#1116).
+/// Gated at the DECLARATION on `not(dhat-heap)`: the #1668 dhat allocator and
+/// `test_alloc_probe`'s CountingAllocator are mutually exclusive global
+/// allocators, so under `--all-features` the probe is configured out entirely.
+#[cfg(all(test, feature = "state_machine", not(feature = "dhat-heap")))]
+#[path = "row_build_alloc_budget_test.rs"]
+mod alloc_budget_test;
+
 #[cfg(test)]
 mod tests {
     use super::super::predicate::evaluate_predicates;

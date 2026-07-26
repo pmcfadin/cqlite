@@ -150,8 +150,8 @@ C(N) is **2.5–3.5×, not 4×** (P2:stage2 §3).
 |---|---|:--:|---|---|
 | **L1** batch fan-in `sync_channel` | util **1.5–1.9× rig-narrow ceiling**; single-stream ~1.05–1.15× field; **raises C(N) + N_drain_sat** | M | Med (co-design #2765 same channel; cut msg-capacity for B4; keep #2419 gauge/#2361 cancel-recv) | P2:row-engine (SURVIVES-weakened) — **#1 lever, prerequisite for C(N) and fan-out** |
 | **L3** reconcile singleton fast-path | disjoint-narrow **~1.20× upper**; **field-w/-TTL/overlap ~1.03–1.08×** | M–L | High (byte-parity; query-semantics + point-vs-full oracles load-bearing) | **Disposition unresolved — see §4 tension flag** (P2:stage2 ranks #2 / P2:row-engine WEAKENED) |
-| **L4** `RowKey` Arc hoist (#1883) | **1.05–1.09× multi-row-partition only; 1.0× single-row of any width** | S–M | Low | P2:row-engine (SURVIVES re-scoped) — win governed by clustering fan-out, unknown from profile |
-| **L5** FxHash `row_values` map | ~1.04× narrow & wide | S | Low | P2:row-engine (SURVIVES) — target confirmed still SipHash |
+| **L4** `RowKey` Arc hoist (#1883) | ~~1.05–1.09× multi-row-partition~~ → **MEASURED 1.0× no-op, see §7 M4** | S–M | Low | P2:row-engine (SURVIVES re-scoped) — win governed by clustering fan-out, unknown from profile |
+| **L5** FxHash `row_values` map | ~~~1.04×~~ → **deferred #2901, unmeasured, see §7 M4** | S | Low | P2:row-engine (SURVIVES) — target confirmed still SipHash |
 | **L2** inline/thread-less merge | ~1.4–1.8× narrow single-stream; **≤1.0× wide/field → not credited in field stack** | L | High (shape-fragile; A/B-gated) | P2:row-engine (SURVIVES narrow-only) |
 | **#2680** weight-balanced sub-splits | util (skew fix) up to 2–4× on *lagging* pods; **0× on one pod** | M | Med (P0 #2782 hang; needs early-close drain fix) | P2:parallelism P-A (SOUND) — K=2 rotation carries flight-pod balance, NOT SplitWeight |
 | **#2765** adaptive egress budget (+ fan-out T6) | stability enabler; bounds fan-in growth; unlocks higher useful concurrency | M | Med (bounds fan-in only, not the 57k-row Arrow egress) | P2:parallelism L4/L3 |
@@ -162,7 +162,7 @@ C(N) is **2.5–3.5×, not 4×** (P2:stage2 §3).
 | **Decoded-partition cache** (K-A/K-D) | **~1.5–3× keyed IF the skew is real — UNMEASURED** | L | High (3.5× decoded size, B4; #2037 overlap) | P2:caching §4 — gate on measured access distribution |
 
 **Sequence (P2:stage2 §8):** **L1 → L3 → fan-out-past-drain (gated #2765)**. L1 is both the biggest
-single-stream lever and the enabler of C(N); nothing scales without it. L5+L4 are a near-free warm-up
+single-stream lever and the enabler of C(N); nothing scales without it. L5+L4 were projected as a near-free warm-up (both since retired by measurement — §7 M4); a near-free warm-up
 bundle. #2680 re-land runs in parallel on the connector tier.
 
 **§4 tension flag (phase2-vs-phase2, L3 disposition — UNRESOLVED):** P2:stage2 §6 ranks L3 the **#2
@@ -272,7 +272,7 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
 | M1 → #2819 | NEW / EXTEND #1686 | Split `stream` RPC phase into data-plane sub-phases | P2 | — |
 | M2 → #2820 | NEW | L1 batch fan-in `sync_channel`, co-designed with #2765 | P1 | M0 (informs), #2765 co-design |
 | M3 → #2765 | EXTEND #2765 | Productionize adaptive egress budget + fan-out-past-drain + L1 256-cap co-design | P2 | M2 |
-| M4 → #1883 | EXTEND #1883 | L5 FxHash + L4 RowKey Arc hoist cheap bundle | P2 | — |
+| M4 → #1883 | EXTEND #1883 | per-row alloc ratchet DELIVERED; L4 measured 1.0× no-op; L5 deferred → #2901 | P2 | — |
 | M5 → #2680 | EXTEND #2680 | Re-land: K=2 opt-in rotation + early-close cancel fix + admission-resize + #2792 required | P1 | #2782, #2792 |
 | M6 → #2821 | NEW | Streaming `do_get` result-budget wiring gap | P2 | — |
 | M7 → #2822 | NEW (investigate) | L3 reconcile singleton fast-path | P3 | M0 + M9 (overlap data) |
@@ -322,12 +322,42 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
   lands (no #2600 re-fire). **Dep:** M2. **Dedup:** extends #2765 (inventory: "extend #2765, don't
   refile").
 
-- **M4 (#1883) — L5 FxHash + L4 RowKey Arc hoist bundle (EXTEND #1883, P2).** Swap the per-row
-  `HashMap<Arc<str>,Value>` (`row_build.rs:246`) to `FxHashMap`; hoist `RowKey(Arc<[u8]>)` build
-  outside `for entry in rows`. *Accept:* SipHash disappears from the row hot path (profile); alloc
-  count/row drops by one on multi-row-partition tables (#1883 dhat ratchet); ~1.04×+1.05–1.09× on the
-  multi-row-partition fixture, **1.0× credited on single-row-partition** (do not claim a field win the
-  profile can't support). **Dep:** none. **Dedup:** L4 lives under #1883 (already 0.17); L5 folds in.
+- **M4 (#1883) — per-row alloc ratchet DELIVERED; L4 measured no-op; L5 deferred.**
+
+  - **Per-row allocation ratchet — DONE.** At the public `build_row_from_scan_cached`, using the in-crate
+    `test_alloc_probe` counting allocator. **Measured**, with the one-time setup cost held SEPARATE from the
+    per-row rate (they were initially conflated; separating them is what makes the budget valid at any row
+    count): **9 allocations once** — the result-collector `Vec` plus the first row's `PartitionKeyCache` MISS,
+    which pays the whole `decode_partition_key_columns` inside the measured region — plus a steady-state
+    **4 allocations/row narrow (3 cols)** and **33/row wide (32 cols)**, i.e. `1 sized row map + 1 per cell`.
+    Totals at 8 rows: **41 narrow, 273 wide**. Solved from two row counts (8 rows = 41, 4 rows = 25) and
+    confirmed independently against the wide fixture; the budget holds at 4, 8 and 16 rows. The dominant
+    per-row cost is the #1644 retention compaction (`Value::into_owned`'s TIER-1 copy of a small payload),
+    NOT hashing and NOT key handling. Two differential controls, both verified RED-on-revert:
+    dropping the per-cell intern (#1334) takes narrow 41 → **89** and wide 273 → **785** (exactly +2 per
+    cell), and dropping the map's capacity hint (#1584) takes narrow 41 → **49** (+1 per row of rehash
+    growth). Each property is gated by a strict `<` against a pre-fix reference, not by the absolute
+    constant alone.
+  - **Scope correction (measured).** #1883's premise — that this ratchet would gate #1447/#1445/#1446 — does
+    not hold: those are **binding-layer** fixes (#1447 = `bindings/node` `ExecuteNativeTask::compute`; #1446 =
+    Node JsString interning; #1445 = Python `Row` ordering). Reverting the clone→move *in this crate* is
+    exactly allocation-neutral (41 vs 41, 273 vs 273) because `Value::Text` is `Bytes`-backed and TIER-1
+    compaction copies small payloads either way. Binding-layer probe → **#2894**.
+  - **L4 (RowKey `Arc` hoist) — measured 1.0× / NO-OP, not implemented.** The partition-key path costs **zero**
+    per-row allocations: `RowKey` is `Arc<[u8]>` (clone = refcount bump) and `PartitionKeyCache` (#1817)
+    already hoists the partition-constant decode. No hoistable per-row `Arc` allocation exists, so **no field
+    win is claimed and no follow-up is filed** for L4.
+  - **L5 (FxHash row map) — implemented, then REVERTED before merge; deferred to #2901.** Implementing it
+    established two things the design had not anticipated: (a) it is a **public breaking API change** —
+    `row_values` moves straight into `QueryRow.values`, so the hasher cannot change without changing that
+    public field's type, rippling through `cqlite-core`/`cqlite-flight`/`cqlite-cli`; and (b) it **contradicts
+    the `rustc-hash` invariant** in `cqlite-core/Cargo.toml` (#1590 E8 — reserved for integer/digest keys, NOT
+    untrusted string keys), since on the default read path column names come from the file's `Statistics.db`
+    serialization header and are attacker-controlled for a hostile SSTable, where FxHash's easy collisions give
+    O(N²) per-row inserts. **No benchmark was run, so the projected ~1.04× stays a projection and no L5 win is
+    claimed.** Revisit behind a measurement + a HashDoS answer + an API plan: **#2901**.
+
+  **Dep:** none. **Dedup:** L4 lived under #1883; L5 split out to #2901.
 
 - **M5 (#2680) — #2680 re-land (EXTEND #2680, P1).** Default **K=1** (byte-identical pre-#2680), **opt-in
   K=2** (the sub-split *rotation* carries flight-pod balance — NOT `getSplitWeight()`, which is
