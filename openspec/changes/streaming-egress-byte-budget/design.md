@@ -122,7 +122,7 @@ consumes — it must not be an unenforced calling convention a future build site
 `n_array_nodes` is counted ONCE per merge by walking the producer's already-built `ArrowSchema`
 recursively (a `map<text,text>` column is four nodes). No such helper exists in the tree yet; this
 change adds it. **Note the slack term is not optional:** a bare `estimate × BATCH_BYTES_CAPACITY_FACTOR`
-under-reserves by `1 KiB × n_array_nodes`, because the published worst case is
+under-reserves by `BATCH_BYTES_PER_COLUMN_SLACK × n_array_nodes`, because the published worst case is
 `FACTOR × payload + SLACK × nodes`.
 
 **Why the true-up down is required, not an optimization.** `estimate_arrow_row_bytes` is
@@ -180,7 +180,7 @@ one maximum batch (capacity)
   = worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, n_array_nodes, widest_row_payload)
   = BATCH_BYTES_CAPACITY_FACTOR * max(4 MiB, widest_row_payload)
       + BATCH_BYTES_PER_COLUMN_SLACK * n_array_nodes
-  = 2 * 4 MiB + 1 KiB * n_array_nodes                    (schema whose widest row fits the cap)
+  = 2 * 4 MiB + 2 KiB * n_array_nodes                    (schema whose widest row fits the cap)
   = 8 MiB + ~n KiB
 
 contract  = max(ceiling, one maximum batch)
@@ -260,7 +260,7 @@ exact amount that was charged.
 ## D4 — Configuration: mirror the merged `--max-batch-bytes` precedent
 
 ```
-DEFAULT_MAX_INFLIGHT_EGRESS_BYTES: usize = 8 * 1024 * 1024   // 8 MiB of CAPACITY bytes
+DEFAULT_MAX_INFLIGHT_EGRESS_BYTES: usize = 12 * 1024 * 1024  // 12 MiB of CAPACITY bytes
 ENV_MAX_INFLIGHT_EGRESS_BYTES: &str = "CQLITE_MAX_INFLIGHT_EGRESS_BYTES"
 --max-inflight-egress-bytes   #[arg(long, env = …, default_value_t = …)]
 ```
@@ -280,42 +280,93 @@ this change follows #2825: `new()` applies `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`, 
 out explicitly via `with_egress_budget(EgressBudget::unbounded())`. This is no longer a departure
 from precedent — it is the sibling of the merged one.
 
-## D4a — Re-evaluating the ceiling under design A: 8 MiB (owner decision, APPLIED)
+## D4a — Re-evaluating the ceiling under design A: 12 MiB (CORRECTED in review)
 
 6 MiB was approved under the additive model (`ceiling + one max batch ≤ 16Mi` ⇒ ceiling ≤ 8, take 6
 for headroom). **That model is gone**, so the value must be re-derived rather than inherited.
 
-Under `max(ceiling, one maximum batch)` with one maximum batch = 8 MiB + slack:
+### The correction: admission is gated on the RESERVATION, not the realized size
 
-| ceiling | worst case | full-size batches admitted concurrently | narrow-shape batches (192 KiB) |
+The first revision of this section chose 8 MiB on the reasoning that "every ceiling ≤ one maximum
+batch yields the identical `max(...)` worst case, so take the largest such value". Both halves are
+true and the conclusion was still wrong, because the deadlock clamp does not compare the ceiling
+with the *realized* batch — a reservation is taken BEFORE the batch exists, at the full published
+worst case, and it is THAT figure the pool must admit:
+
+```text
+one worst-case reservation (3 array nodes, the merged wide-row fixture's shape)
+  = worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 3, 0)
+  = 2 × 4 MiB + 2 KiB × 3 = 8,394,752 B  ->  permits_for(..) = 8198
+8 MiB pool = 8,388,608 B                 ->  8192 permits
+8198 > 8192  =>  EVERY byte-cap-cut batch clamps to the WHOLE pool
+```
+
+An 8 MiB default therefore produced exactly the outcome this section rejected 6 MiB to avoid —
+strict lock-step on the wide-row path with the 4-deep channel as dead weight — missing by precisely
+the `BATCH_BYTES_PER_COLUMN_SLACK × n_array_nodes` term (6 KiB at three nodes).
+
+### 12 MiB
+
+```text
+12 MiB = 12,582,912 B = 12288 permits  >=  8198   =>  no clamp
+contract = max(12 MiB, 8,394,752 B) = 12 MiB  <=  16 MiB (B4), 4 MiB spare
+```
+
+| ceiling | worst case | one worst-case reservation admitted? | narrow-shape batches (192 KiB) |
 |---|---|---|---|
-| 6 MiB | 8 MiB + slack | **1** (every full batch trips the clamp and takes the whole pool) | 32 |
-| 8 MiB | 8 MiB + slack | 1 exactly-fitting, or 2 typical (measured factor 1.0–1.8 ⇒ 4–7.2 MiB) | 42 |
+| 6 MiB | 8 MiB + slack | **no** — clamps to the whole pool | 32 |
+| 8 MiB | 8 MiB + slack | **no** — clamps by 6 permits | 42 |
+| **12 MiB** | **12 MiB** | **yes**, 4090 permits spare | 64 |
 
-**Recommendation: 8 MiB.** Reasoning:
-1. **Identical worst-case memory.** Any ceiling ≤ 8 MiB yields the same `max(...)` = 8 MiB + slack,
-   so 6 MiB buys nothing in B4 terms — it is strictly dominated.
-2. **6 MiB makes the clamp the normal case, not the corner.** A worst-case-shaped full batch is
-   8 MiB of capacity against a 6 MiB pool, so it always takes the whole pool: the pipeline degrades
-   to lock-step on exactly the wide-row workloads this issue exists for, and the 4-deep channel
-   becomes dead weight behind it.
-3. **8 MiB nearly makes the clamp unreachable for in-spec schemas** — `ceiling ≥
-   worst_case_batch_capacity_bytes(cap, nodes, 0)` holds except for the `1 KiB × n_array_nodes`
-   slack, so the deadlock clamp becomes a genuine corner case (over-cap rows, tiny operator-set
-   ceilings) instead of routine behaviour. A ceiling of `worst_case_batch_capacity_bytes(
-   DEFAULT_MAX_BATCH_BYTES, typical_nodes, 0)` rounded up would make it exactly unreachable, at the
-   cost of a default that is not a round number.
-4. Narrow shapes are governed by the 4-deep channel at both values (32 vs 42 batches ≫ 4), so
-   neither value regresses the narrow path.
+**What 12 MiB buys, stated honestly** (the standing "state the bound honestly" requirement):
 
-**APPLIED**: the owner chose 8 MiB and `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` ships at that value; the
-spec text and the proposal were updated to match. Either value satisfies the composition test, so a
-future change remains a one-constant change.
+1. **Guaranteed**: a single worst-case reservation is admitted without clamping for every schema of
+   at most **2048 Arrow array nodes** — `permits_for(2 × cap + 2 KiB × nodes) = 8192 + 2 × nodes`,
+   so the clamp engages from `n_array_nodes ≥ 2049` (a very wide or deeply nested projection; a
+   `map<text,text>` column is four nodes). Past that width the documented clamp behaviour takes
+   over: the batch acquires the whole pool, is still delivered, and is the only thing resident.
+2. **Workload-dependent, NOT guaranteed**: after the true-down to the realized
+   `get_array_memory_size()` (measured factor 1.0–1.8 ⇒ 4–7.2 MiB for a full 4 MiB payload batch),
+   the residual pool can often admit a second reservation, so the stream typically overlaps two
+   batches. At the 1.8× end one resident batch leaves 4.8 MiB — under the 8.2 MiB a second full
+   reservation asks for — and the producer parks until the first drains. No claim is made that two
+   full-size batches are always in flight; the previous text's "admits ~2 typical batches" was such
+   a claim and is withdrawn.
+3. **Worst case unchanged in kind**: `max(12 MiB, 8 MiB + slack) = 12 MiB` is 4 MiB below the B4
+   ceiling-of-the-ceiling, and the composition test asserts it from the imported constants.
+4. Narrow shapes are governed by the 4-deep channel at every candidate value (32–64 batches ≫ 4),
+   so none of them regresses the narrow path.
+
+**Guards**: `egress_credit_tests::a_worst_case_default_reservation_does_not_clamp` (FAILS at an
+8 MiB default) and `::the_clamp_engages_only_past_the_documented_schema_width` (pins BOTH sides of
+the 2048-node boundary, including the documented behaviour once the clamp does engage);
+`egress_budget_tests::the_default_ceiling_does_not_clamp_a_real_byte_cap_cut_stream` is the
+end-to-end wiring evidence over a genuine multi-batch drain at the shipped defaults.
 
 **Why the ceiling is bounded at all.** B4 ratifies ≤16Mi as the per-query working set at concurrency
 1; `max(ceiling, 8 MiB + slack) ≤ 16 MiB` gives a hard ceiling-of-the-ceiling of 16 MiB, and the
 composition test asserts it from the imported constants so raising either constant fails the build
 rather than silently voiding B4.
+
+## D4b — `BATCH_BYTES_PER_COLUMN_SLACK` corrected to 2 KiB (issue #2821 review)
+
+The published payload→capacity conversion allowed 1 KiB of fixed allocation per Arrow array node.
+That is under the real fixed cost of the commonest node there is: a `Utf8`/`Binary` array built by
+`export::arrow_convert` reports **1208 B** at any length from zero up (arrow 53 — the string
+builder's 1 KiB default values buffer, plus offsets and struct overhead). So a two-`text`-column
+batch of three short rows reports 2416 B against a `2 × payload + 1024 × 2` = 2186 B bound.
+
+Under #2825 alone that was a loose doc claim with no runtime consequence. #2821's
+reserve-before-materialize turns the same conversion into an ENFORCED reservation that fails closed,
+so the understatement became a terminal `Status::internal` on every narrow-table `do_get` (7
+real-transport tests). The fix is the published constant, not a local fudge at the reservation site
+— the spec forbids a second definition of the conversion.
+
+`BATCH_BYTES_PER_COLUMN_SLACK = 2048` covers the measured 1208 with 840 B of margin per node, and is
+enforced over a tiny-batch corpus (two-text, empty string, text+blob+int, `list<text>`,
+`map<text,text>`, all-null) by `batch_bytes_tests::the_capacity_bound_holds_for_tiny_batches`, which
+FAILS at 1024. Cost: 1 KiB more reservation per array node — 6 KiB on a three-node schema against a
+multi-MiB batch — and the no-clamp schema width above becomes 2048 nodes instead of 4096.
 
 ## D5 — Composition with the existing governors
 
@@ -325,14 +376,14 @@ Four independent bounds, none removed, whichever binds first wins:
 |---|---|---|---|
 | `DO_GET_CHANNEL_CAPACITY = 4` | batch **count** in flight | — | per stream |
 | `DEFAULT_MAX_BATCH_BYTES = 4 MiB` (#2825, merged) | ONE batch | payload | per batch |
-| **new** in-flight byte credit (6 MiB approved; 8 MiB recommended, D4a) | **bytes** in flight | **capacity** | per stream |
+| **new** in-flight byte credit (**12 MiB**, D4a as corrected) | **bytes** in flight | **capacity** | per stream |
 | Admission `K = 64` | concurrent admitted scans | — | per server |
 
 At narrow row widths the 4-deep channel still binds first and the byte-cap is a no-op (#2825
 measured ~20–300 B/row shapes at 22×–1.7× headroom), so narrow-row behaviour must be proven
 unregressed. At wide row widths the per-batch cap bounds each batch and this ceiling bounds how many
 may be resident — which is the entire point. Server-wide worst case is
-`K × max(ceiling, one maximum batch)` = `K × ~8 MiB` at the merged batch cap; this change makes that
+`K × max(ceiling, one maximum batch)` = `K × 12 MiB` at the merged batch cap; this change makes that
 product finite in bytes for the first time.
 
 ## D6 — Documentation corrections (scoped)

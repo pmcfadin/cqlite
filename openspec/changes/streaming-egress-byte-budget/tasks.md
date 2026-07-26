@@ -13,7 +13,8 @@ trued up DOWNWARD to the realized capacity. Charging an already-built batch boun
 rejected.**
 
 **Delivered deltas from the authored plan (both applied to the spec/design in the same change):**
-1. `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` ships at **8 MiB** (task 2.1 / design D4a, owner-decided).
+1. `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` ships at **12 MiB** (task 2.1 / design D4a as corrected in
+   review: 8 MiB clamps every worst-case reservation by 3 permits).
 2. The deferred permit is released at the **TOP of the next `poll_next`**, not when the next batch is
    YIELDED (task 1.4). Release-on-next-yield DEADLOCKS a one-batch-deep pool — reachable at the
    DEFAULT ceiling — and the top-of-poll point is strictly tighter anyway, because
@@ -110,8 +111,8 @@ rejected.**
   (flight-streaming-egress: peak resident payload)
 
 ## Stage 2 — configuration plumbing (wiring evidence)
-- [x] 2.1 Add `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` (**6 MiB of capacity — confirm against design
-  D4a, which recommends 8 MiB; the owner picks**) +
+- [x] 2.1 Add `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` (**12 MiB of capacity — design D4a as corrected
+  in review: the ceiling must clear one worst-case RESERVATION, so 6/8 MiB both clamp**) +
   `ENV_MAX_INFLIGHT_EGRESS_BYTES` (`CQLITE_MAX_INFLIGHT_EGRESS_BYTES`), documenting the derivation
   from `BATCH_BYTES_CAPACITY_FACTOR × DEFAULT_MAX_BATCH_BYTES` against B4 ≤16Mi.
   (flight-streaming-egress: CLI configurability / capacity denomination)

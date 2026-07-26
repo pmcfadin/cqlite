@@ -76,7 +76,8 @@ wide table at any value of K.
   residency that remains outside the governed set (the producer's `Vec<QueryRow>` row buffer, a
   single row wider than the per-batch cap, the aggregate route) is named rather than implied away.
 - **A new configuration knob mirroring the merged `--max-batch-bytes` precedent**:
-  `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` (**8 MiB of capacity**, the owner's D4a decision) + `CQLITE_MAX_INFLIGHT_EGRESS_BYTES`
+  `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` (**12 MiB of capacity**, D4a as corrected in review — the
+  smallest round value that admits one worst-case RESERVATION without clamping) + `CQLITE_MAX_INFLIGHT_EGRESS_BYTES`
   env const + a `--max-inflight-egress-bytes` clap arg, plumbed const → `Args` → service field
   (builder mirroring `with_max_batch_bytes`) → the sole production spawn site
   `spawn_streaming_from_readers` → `spawn_streaming` → `ChannelSink` → the producer's reservation

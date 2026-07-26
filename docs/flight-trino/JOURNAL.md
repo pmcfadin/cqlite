@@ -648,7 +648,10 @@ Format:
 - **Converting to capacity currency.** Published constants:
   `BATCH_BYTES_CAPACITY_FACTOR = 2` and `BATCH_BYTES_PER_COLUMN_SLACK = 1024`, with
   `worst_case_batch_capacity_bytes(cap, n_array_nodes, widest_row_payload)
-  = 2 × max(cap, widest_row_payload) + 1024 × n_array_nodes`. For a schema whose
+  = 2 × max(cap, widest_row_payload) + 2048 × n_array_nodes` (the per-node term was
+  corrected from 1024 in the #2821 review: a `Utf8`/`Binary` array reports 1208 B of
+  fixed allocation at any length, so the old value under-stated capacity for
+  tiny batches and made #2821's fail-closed reservation reject narrow tables). For a schema whose
   widest row fits the cap that is `2 × cap + slack` — ~8 MiB of resident capacity
   per batch at the 4 MiB default. The `max(..)` term is honest, not slack: one row
   cannot be split across Arrow batches, so a schema with a single over-cap row
@@ -659,9 +662,13 @@ Format:
 - **B4 composition — DELIVERED by issue #2821.** The per-stream in-flight
   ceiling is budgeted in the SAME capacity currency `streaming.rs` meters
   (`cqlite-flight/src/egress_credit.rs`, `--max-inflight-egress-bytes`, default
-  8 MiB), and the enforced bound is
-  `max(ceiling, one maximum batch) = max(8 MiB, 2 × 4 MiB + slack) ≈ 8 MiB < 16Mi`
-  — inside B4 at concurrency 1 with ~8 MiB of headroom. It is a `max`, not the
+  **12 MiB**), and the enforced bound is
+  `max(ceiling, one maximum batch) = max(12 MiB, 2 × 4 MiB + slack) = 12 MiB ≤ 16Mi`
+  — inside B4 at concurrency 1 with 4 MiB of headroom. The ceiling sits ABOVE one
+  maximum batch on purpose: admission is gated on the pre-materialization
+  RESERVATION (8,394,752 B = 8198 permits at three array nodes), so an 8 MiB pool
+  (8192 permits) would clamp every byte-cap-cut batch to the whole pool and run the
+  wide-row path lock-step. It is a `max`, not the
   `ceiling + one maximum batch` sum this entry originally projected:
   **reserve-before-materialize removed the additive term.** Credit is acquired at
   the batch boundary BEFORE `rows_to_record_batch` runs and trued up DOWN to the
@@ -715,5 +722,8 @@ Format:
   REAL server binary and stream a REAL `do_get` (CLI flag, env var, default +
   startup log, content invariance). `issue_1494_producer_mem_budget` unchanged
   under `--features dhat-heap`.
-- **Next:** issue #2821 consumes `BATCH_BYTES_CAPACITY_FACTOR` for its 6 MiB
-  per-stream egress ceiling.
+- **Next:** issue #2821 consumes `BATCH_BYTES_CAPACITY_FACTOR` for its per-stream
+  egress ceiling — DELIVERED at **12 MiB** (see the B4 composition bullet above;
+  the 6 MiB figure this entry originally projected came from the superseded
+  additive model, and 8 MiB was corrected in review because it clamped every
+  full-size reservation).

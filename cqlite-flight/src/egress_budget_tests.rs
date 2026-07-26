@@ -98,6 +98,32 @@ fn contract_bytes(ceiling_bytes: u64, largest_observed_batch: u64) -> u64 {
     ceiling_bytes.max(largest_observed_batch)
 }
 
+/// Wait until the producer has PARKED on the exhausted credit pool.
+///
+/// Saturation is observed as the park EVENT the governor publishes
+/// (`EgressObservation::parked`), never as elapsed time and never as "one
+/// `yield_now` should be enough": a peak-residency sample taken before the
+/// producer has run up against the ceiling makes the bound assertion weaker than
+/// it reads. Waiting for the event ALSO makes the test non-vacuous — a fixture
+/// that stopped saturating the pool fails here instead of quietly asserting
+/// nothing.
+///
+/// The `timeout` is a LIVENESS bound on a parked blocking-pool thread (the
+/// merged `cancelled_emit_under_backpressure_returns_cancelled` precedent), not a
+/// correctness threshold (#2642): the assertion is on the park counter, and the
+/// timeout only converts a hang into a readable failure.
+async fn await_pool_saturated(obs: &crate::egress_credit::EgressObservation) {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        // `notify_one` stores a permit when no waiter is registered, so a park
+        // that happens between the check and the await cannot be missed.
+        while obs.reservations_parked() == 0 {
+            obs.parked().await;
+        }
+    })
+    .await
+    .expect("the producer must park on the exhausted egress pool while the consumer is stopped");
+}
+
 // ---------------------------------------------------------------------------
 // Requirement: peak resident payload is bounded, independent of row width
 // ---------------------------------------------------------------------------
@@ -130,8 +156,8 @@ fn slow_consumer_bounds_inflight_egress_capacity_bytes() {
         );
         let _schema_msg = stream.next().await.expect("schema");
         let _first = stream.next().await.expect("first batch");
-        // Give the producer every opportunity to run ahead, then observe.
-        tokio::task::yield_now().await;
+        // Sample only once the producer is provably pressed against the ceiling.
+        await_pool_saturated(&pr.egress).await;
 
         let obs = &pr.egress;
         let largest = obs.largest_batch_capacity_bytes();
@@ -141,6 +167,10 @@ fn slow_consumer_bounds_inflight_egress_capacity_bytes() {
         // channel — is what binds at this shape.
         assert!(largest > 0, "no batch was materialized (vacuous fixture)");
         assert!(peak > 0, "no residency was observed (vacuous fixture)");
+        assert!(
+            obs.reservations_parked() > 0,
+            "the byte ceiling never applied backpressure — the sample proves nothing"
+        );
         assert!(
             largest.saturating_mul(DO_GET_CHANNEL_CAPACITY as u64) > WIDE_CEILING as u64,
             "fixture drift: {DO_GET_CHANNEL_CAPACITY} batches of {largest} B would fit \
@@ -397,6 +427,13 @@ fn a_batch_larger_than_the_whole_ceiling_is_still_delivered() {
             obs.largest_batch_capacity_bytes() > EGRESS_CREDIT_QUANTUM_BYTES as u64,
             "the fixture's batches must exceed the ceiling for this to prove the clamp"
         );
+        // The clamp really engaged here — the counter that the shipped-default
+        // test asserts is ZERO is non-trivially observable on this path.
+        assert_eq!(
+            obs.reservations_clamped(),
+            obs.reservations_granted(),
+            "every reservation against a one-quantum pool must clamp"
+        );
         assert_eq!(obs.charged_bytes(), 0);
     });
 }
@@ -412,8 +449,12 @@ fn a_batch_larger_than_the_whole_ceiling_is_still_delivered() {
 /// rather than `... + one maximum batch`: `MeteredDoGetStream` is upstream of the
 /// Flight encoder, which holds the yielded `RecordBatch` while encoding it. A
 /// "simplification" to release-on-yield fails this test.
+///
+/// Release is keyed on the CONSUMER DROPPING the batch, not on the consumer
+/// asking for the next one (see `metered_stream::DeferredCredit`), so this test
+/// drops A explicitly before asking for B.
 #[test]
-fn a_yielded_batch_keeps_its_credit_until_the_next_is_requested() {
+fn a_yielded_batch_keeps_its_credit_until_the_consumer_drops_it() {
     let schema = fx::wide_row_schema();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async move {
@@ -442,6 +483,7 @@ fn a_yielded_batch_keeps_its_credit_until_the_next_is_requested() {
             let permit = credit
                 .reserve(actual * 4)
                 .await
+                .expect("pool open")
                 .materialize(actual)
                 .expect("granted");
             tx.send(Ok(CreditedBatch::new(batch, permit)))
@@ -461,18 +503,21 @@ fn a_yielded_batch_keeps_its_credit_until_the_next_is_requested() {
         let obs = pr.egress.clone();
         assert_eq!(obs.resident_capacity_bytes(), caps[0] + caps[1]);
 
-        let _a = metered.next().await.expect("batch A").expect("ok");
+        let a = metered.next().await.expect("batch A").expect("ok");
         assert_eq!(
             obs.resident_capacity_bytes(),
             caps[0] + caps[1],
-            "A is deferred (still charged) and B is still queued"
+            "A is deferred (still charged) and B is still queued — a release-on-yield \
+             implementation returns A's credit here while the encoder still holds A"
         );
 
+        drop(a);
         let _b = metered.next().await.expect("batch B").expect("ok");
         assert_eq!(
             obs.resident_capacity_bytes(),
             caps[1],
-            "asking for B released A's credit; B is now the deferred one"
+            "A was dropped by the consumer, so the next poll returned its credit; B is now \
+             the deferred one"
         );
 
         drop(metered);
@@ -482,6 +527,96 @@ fn a_yielded_batch_keeps_its_credit_until_the_next_is_requested() {
             "dropping the stream must release the deferred permit"
         );
         assert_eq!(obs.charged_bytes(), 0);
+    });
+}
+
+/// A SPECULATIVE poll — one that returns `Pending` while the consumer is still
+/// holding the previously yielded batch — must NOT return that batch's credit.
+///
+/// `MeteredDoGetStream` is `pub(crate)` and polled directly (a `select!` arm,
+/// `futures::poll!`, this suite). Releasing at the top of every `poll_next` is
+/// safe only for a consumer that drops batch N before asking for N+1 — true of
+/// `FlightDataEncoder`, but a bound that rests on a downstream consumer's polling
+/// discipline is not a bound. Credit is therefore keyed on the batch's Arrow data
+/// actually being dropped.
+#[test]
+fn a_speculative_pending_poll_does_not_release_a_held_batchs_credit() {
+    let schema = fx::narrow_row_schema();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let producer = MergeProducer::new(schema, 8192).expect("producer");
+        let arrow_schema = Arc::new(producer.arrow_schema().expect("schema"));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&arrow_schema),
+            arrow_schema
+                .fields()
+                .iter()
+                .map(|f| arrow::array::new_null_array(f.data_type(), 1))
+                .collect(),
+        )
+        .expect("batch");
+        let actual = batch.get_array_memory_size();
+
+        let pr = StreamProbe::default();
+        let obs = pr.egress.clone();
+        let credit = EgressCredit::new(EgressBudget::bytes(1024 * 1024), obs.clone());
+        // `tx` stays ALIVE, so the channel is empty-but-open: a further poll
+        // parks rather than terminating the stream.
+        let (tx, rx) = mpsc::channel::<Result<CreditedBatch, ProducerError>>(4);
+        let permit = credit
+            .reserve(actual * 4)
+            .await
+            .expect("pool open")
+            .materialize(actual)
+            .expect("granted");
+        tx.send(Ok(CreditedBatch::new(batch, permit)))
+            .await
+            .expect("send");
+
+        let mut metered = MeteredDoGetStream::new(
+            Box::pin(ReceiverStream { rx }),
+            RpcMetrics::start("do_get"),
+            None,
+            pr.clone(),
+            None,
+            None,
+        );
+        let held = metered.next().await.expect("batch").expect("ok");
+        let charged_while_held = obs.charged_bytes();
+        assert!(charged_while_held > 0, "vacuous: nothing was charged");
+
+        // The speculative poll: the consumer still owns `held`.
+        {
+            let mut speculative = metered.next();
+            assert!(
+                futures::poll!(&mut speculative).is_pending(),
+                "the channel is empty-but-open, so this poll must park"
+            );
+        }
+        assert_eq!(
+            obs.charged_bytes(),
+            charged_while_held,
+            "a speculative Pending poll released the credit for a batch the consumer is \
+             still holding — the memory bound is voided by a consumer that polls before it \
+             is done with the data"
+        );
+        assert_eq!(obs.resident_capacity_bytes(), actual as u64);
+
+        // Once the consumer really is done with it, the next poll reaps it — so
+        // holding across `Pending` cannot wedge a producer parked on the pool.
+        drop(held);
+        {
+            let mut after = metered.next();
+            assert!(futures::poll!(&mut after).is_pending());
+        }
+        assert_eq!(
+            obs.charged_bytes(),
+            0,
+            "credit must be returned once the consumer drops the batch"
+        );
+        assert_eq!(obs.resident_capacity_bytes(), 0);
+        drop(tx);
+        drop(metered);
     });
 }
 
@@ -555,6 +690,7 @@ fn a_mid_stream_producer_error_does_not_strand_credit() {
         let permit = credit
             .reserve(actual * 4)
             .await
+            .expect("pool open")
             .materialize(actual)
             .expect("granted");
         tx.send(Ok(CreditedBatch::new(batch, permit)))
@@ -604,7 +740,12 @@ fn a_producer_parked_on_credit_wakes_on_cancellation() {
         let pr = StreamProbe::default();
         let credit = EgressCredit::new(EgressBudget::bytes(4096), pr.egress.clone());
         // Exhaust the pool and hold it for the whole test.
-        let _held = credit.reserve(4096).await.materialize(4096).expect("held");
+        let _held = credit
+            .reserve(4096)
+            .await
+            .expect("pool open")
+            .materialize(4096)
+            .expect("held");
 
         let cancel = CancelFlag::new();
         let (tx, _rx) = mpsc::channel::<Result<CreditedBatch, ProducerError>>(4);
@@ -679,6 +820,186 @@ fn an_unbounded_budget_reverts_to_the_structural_bound() {
 
         drop(stream);
         let _ = handle.await;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Requirement: the SHIPPED default does not make the deadlock clamp routine
+// ---------------------------------------------------------------------------
+
+/// At the shipped defaults — the 4 MiB per-batch payload cap and the default
+/// egress ceiling — a real streamed `do_get` over the merged wide-row fixture
+/// cuts on the byte-cap and NEVER trips the deadlock clamp.
+///
+/// The defect this pins: admission is gated on the pre-materialization
+/// RESERVATION (the full published worst case), not on the trued-down realized
+/// size. A ceiling that does not clear ONE worst-case reservation makes every
+/// full-size batch take the entire pool, so the producer cannot start batch N+1
+/// until batch N has completely left the stream — strict lock-step, with the
+/// 4-deep batch-count channel as dead weight, on exactly the wide-row workload
+/// this ceiling exists for. `egress_credit_tests` pins the arithmetic; this pins
+/// that the shipped default reaches a real stream and that a real byte-cap cut
+/// happens under it.
+///
+/// Sharpness, stated honestly: the SHARP guard is the arithmetic one
+/// (`egress_credit_tests::a_worst_case_default_reservation_does_not_clamp`, which
+/// FAILS at an 8 MiB default). This end-to-end case cannot be sharp — a batch cut
+/// by the byte-cap accumulates at most `cap - (width of the crossing row)`, so its
+/// reservation lands just UNDER the worst case unless the row width happens to
+/// divide the cap exactly. It is wiring evidence that the default is the value a
+/// real stream governs by, and it holds the clamp counter at zero over a genuine
+/// multi-batch drain.
+#[test]
+fn the_default_ceiling_does_not_clamp_a_real_byte_cap_cut_stream() {
+    // Comfortably over the DEFAULT 4 MiB payload cap, so the byte-cap cuts at
+    // least once; far under the 8192-row row-cap, so the cut can only be the
+    // byte one.
+    const BIG_ROWS: i32 = 80;
+    const BIG_PAYLOAD: usize = 64 * 1024;
+
+    let schema: TableSchema = fx::wide_row_schema();
+    let (_temp, _data, dir) =
+        build_sstables(&schema, vec![fx::wide_row_mutations(BIG_ROWS, BIG_PAYLOAD)]);
+    // NOTE: no `with_max_batch_bytes` — the SHIPPED default per-batch cap.
+    let producer = MergeProducer::with_spec(schema, 8192, crate::filter::ScanSpec::default())
+        .expect("producer");
+    let paths = producer
+        .resolve_paths(&DirSource::new(&dir))
+        .expect("resolve");
+    let schema_ref = Arc::new(producer.arrow_schema().expect("arrow schema"));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let pr = StreamProbe::default();
+        let (stream, handle) = spawn_streaming(
+            producer,
+            MergeInput::Paths(paths),
+            schema_ref,
+            RpcMetrics::start("do_get"),
+            DO_GET_CHANNEL_CAPACITY,
+            // The SHIPPED default ceiling.
+            EgressBudget::default(),
+            pr.clone(),
+            CancelFlag::new(),
+            timer(),
+        );
+        let rows: usize = decode_all(stream).await.iter().map(|b| b.num_rows()).sum();
+        let _ = handle.await;
+
+        let obs = &pr.egress;
+        assert_eq!(rows, BIG_ROWS as usize, "vacuous fixture");
+        assert!(
+            obs.batches_materialized() > 1,
+            "the DEFAULT byte-cap must have cut this stream (row-cap is 8192 rows over \
+             {BIG_ROWS} rows), got {} batches",
+            obs.batches_materialized()
+        );
+        assert_eq!(
+            obs.reservations_clamped(),
+            0,
+            "{} of {} reservations clamped to the WHOLE pool at the shipped defaults: every \
+             byte-cap-cut batch then runs the stream lock-step",
+            obs.reservations_clamped(),
+            obs.reservations_granted()
+        );
+        assert_eq!(obs.charged_bytes(), 0, "credit leaked after a clean drain");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Requirement: the fail-closed path terminates THE STREAM
+// ---------------------------------------------------------------------------
+
+/// A sink whose reservation is deliberately one byte, whatever the producer asks
+/// for — the "estimator-conservatism contract broke" simulation the fail-closed
+/// scenario calls for, applied at a REAL producer batch boundary.
+struct UnderReservingSink {
+    tx: mpsc::Sender<Result<CreditedBatch, ProducerError>>,
+    credit: EgressCredit,
+}
+
+impl BatchSink for UnderReservingSink {
+    fn reserve(&mut self, _capacity_bytes: usize) -> Result<EgressReservation, ProducerError> {
+        let credit = self.credit.clone();
+        Ok(tokio::runtime::Handle::current().block_on(async move { credit.reserve(1).await })?)
+    }
+
+    fn emit(&mut self, batch: CreditedBatch) -> Result<(), ProducerError> {
+        self.tx
+            .blocking_send(Ok(batch))
+            .map_err(|_| ProducerError::Cancelled)
+    }
+}
+
+/// The fail-closed path proven END TO END, not just on the helper: a realized
+/// capacity above its reservation at a real producer batch boundary terminates
+/// the RESPONSE STREAM with `Status::internal` naming the violated invariant, and
+/// strands no credit.
+#[test]
+fn an_under_reservation_terminates_the_response_stream_with_internal() {
+    let (_temp, producer, paths, schema_ref) = wide_setup(WIDE_BATCH_CAP);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let pr = StreamProbe::default();
+        let credit = EgressCredit::new(EgressBudget::bytes(WIDE_CEILING), pr.egress.clone());
+        let (tx, rx) =
+            mpsc::channel::<Result<CreditedBatch, ProducerError>>(DO_GET_CHANNEL_CAPACITY);
+        let cancel = CancelFlag::new();
+        let error_tx = tx.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            let mut sink = UnderReservingSink { tx, credit };
+            let progress = crate::scan_progress::ScanProgress::default();
+            // The REAL terminal-error forwarding used by `spawn_streaming`.
+            run_merge_catching_panics(&error_tx, move || {
+                producer.produce_streaming(paths, &cancel, &mut sink, &progress, || {})
+            });
+        });
+
+        let metered = MeteredDoGetStream::new(
+            Box::pin(ReceiverStream { rx }),
+            RpcMetrics::start("do_get"),
+            None,
+            pr.clone(),
+            None,
+            None,
+        );
+        // The REAL encoded response stream, so the assertion is on the gRPC
+        // `Status` a client would see.
+        let mut stream = encode_do_get(metered, schema_ref, pr.clone());
+        let mut terminal: Option<Status> = None;
+        while let Some(item) = stream.next().await {
+            if let Err(status) = item {
+                terminal = Some(status);
+                break;
+            }
+        }
+        drop(stream);
+        handle.await.expect("merge task joins");
+
+        let status = terminal.expect("the stream must terminate with the invariant error");
+        assert_eq!(
+            status.code(),
+            tonic::Code::Internal,
+            "a violated credit invariant is an internal fault, got: {status:?}"
+        );
+        assert!(
+            status.message().contains("estimator-conservatism")
+                || status.message().contains("egress credit invariant"),
+            "the status must name the violated invariant, got: {}",
+            status.message()
+        );
+        assert_eq!(
+            pr.egress.charged_bytes(),
+            0,
+            "the fail-closed path stranded credit"
+        );
+        assert_eq!(pr.egress.resident_capacity_bytes(), 0);
+        assert_eq!(
+            pr.egress.batches_materialized(),
+            0,
+            "no batch may be accounted on a false reservation"
+        );
     });
 }
 

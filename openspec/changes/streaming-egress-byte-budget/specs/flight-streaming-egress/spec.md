@@ -106,6 +106,32 @@ column is four), computed once per merge, not as a column count.
   `BATCH_BYTES_CAPACITY_FACTOR` / `worst_case_batch_capacity_bytes`, with no second definition of
   the factor `2` and no undocumented fudge
 
+### Requirement: the published payload→capacity conversion holds for TINY batches
+
+Making the conversion an ENFORCED, fail-closed reservation means it SHALL be a true upper bound in
+the regime where the fixed per-array-node allocations — not the `BATCH_BYTES_CAPACITY_FACTOR`
+growth term — dominate `get_array_memory_size()`. `BATCH_BYTES_PER_COLUMN_SLACK` SHALL therefore
+cover the largest fixed allocation an Arrow array built by `export::arrow_convert` carries at ANY
+length (measured 1208 B for a `Utf8`/`Binary` node against arrow 53: the string builder's 1 KiB
+default values buffer plus offsets and struct overhead). A conversion that holds only for
+payload-dominated batches is not a bound: under this change it turns every narrow-table `do_get`
+into a terminal internal error.
+
+The correction SHALL be made to the published constant, never as a local allowance at the
+reservation site (see the no-second-definition requirement above).
+
+#### Scenario: the bound holds where the fixed per-node cost dominates
+
+- **GIVEN** batches whose payload is small relative to their array count — two `text` columns of
+  three short rows, a single empty string, `text`+`blob`+`int`, `list<text>`, `map<text,text>`, and
+  an all-null row over a variable-width schema
+- **WHEN** each is materialized through the real converter and compared with
+  `worst_case_batch_capacity_bytes(Σ estimate_arrow_row_bytes, n_array_nodes, 0)` — exactly the
+  quantity the reservation computes
+- **THEN** the realized `get_array_memory_size()` is within the bound for every shape
+- **AND** each shape is asserted to be fixed-cost-dominated (capacity > 2 × estimate), so the test
+  cannot go vacuous by drifting into the payload-dominated regime
+
 ### Requirement: egress credit is reserved BEFORE a batch is materialized
 
 The producer SHALL acquire the batch's capacity credit at the batch boundary, BEFORE
@@ -176,6 +202,17 @@ credit (which can deadlock) or by ignoring it.
 - **WHEN** the true-up runs
 - **THEN** the stream terminates with an internal error identifying the violated
   estimate-conservatism invariant, no credit is leaked, and the pool is fully released
+- **AND** this is proven through the RESPONSE STREAM (the error raised at a real producer batch
+  boundary reaches the encoded `do_get` stream as `Status::internal`), not only on the credit
+  helper
+
+#### Scenario: a credit pool that cannot charge fails closed rather than reserving uncharged
+
+- **GIVEN** a per-stream credit pool that cannot grant a reservation (a closed semaphore)
+- **WHEN** the producer reserves before materializing
+- **THEN** the reservation surfaces a terminal internal error, no reservation is recorded as
+  granted, and no batch is placed on the egress path under an UNCHARGED reservation — the memory
+  bound is never degraded silently in exchange for continuing to stream
 
 ### Requirement: the bound depends on #2825's estimator-conservatism contract
 
@@ -205,7 +242,15 @@ to the pool total. No batch of any size SHALL be able to wedge a stream.
 
 Because a clamped batch is charged at most the whole ceiling while resident at its own size, the
 guaranteed bound is `max(ceiling, one maximum batch)`. The code and its doc comments SHALL state
-this bound honestly and SHALL name the residency that remains OUTSIDE the governed set rather than
+this bound honestly. In particular they SHALL state WHEN the clamp still engages at the shipped
+default rather than implying it is unreachable: `permits_for(2 × cap + 2 KiB × n_array_nodes)
+= 8192 + 2 × n_array_nodes` against a 12288-permit pool, so a projection of **2049 or more Arrow
+array nodes** (or a row wider than the ceiling, or an operator-configured small ceiling) still clamps —
+and the documented lock-step behaviour then applies. They SHALL likewise NOT claim a guaranteed
+number of concurrently admitted batches: whether a second full-size reservation fits after the
+true-down depends on the shape's realized capacity/payload factor.
+
+The doc comments SHALL also name the residency that remains OUTSIDE the governed set rather than
 let a reader assume the ceiling covers everything:
 
 1. **The producer's row buffer** (`Vec<QueryRow>`, up to `batch_size` rows or one byte-cap's worth of
@@ -227,6 +272,15 @@ let a reader assume the ceiling covers everything:
 - **WHEN** the client consumes the stream
 - **THEN** every batch is delivered and the stream terminates normally
 - **AND** a naive non-clamping implementation hangs on this scenario (the test is the guard)
+
+#### Scenario: the shipped default admits one worst-case reservation, and the clamp boundary is pinned
+
+- **GIVEN** a credit pool at `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` and a reservation of
+  `worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, n_array_nodes, 0)`
+- **WHEN** the reservation is taken at the documented no-clamp width and one array node past it
+- **THEN** no clamp occurs at or below the documented width, the clamp DOES occur one node past it,
+  and at that point the documented behaviour holds — the batch is still admitted, it holds the
+  ENTIRE pool, and nothing else can be admitted beside it
 
 #### Scenario: the stated bound matches the enforced bound
 
@@ -251,32 +305,46 @@ credit already returned — reintroducing exactly the class of un-charged reside
 reserve-before-materialize eliminated on the producer side, and making the true bound
 `max(ceiling, one maximum batch) + one maximum batch`.
 
-The stream SHALL therefore hold the yielded batch's permit in a single deferred slot and release it
-only when the consumer comes back for the NEXT batch — i.e. at the TOP of the following `poll_next`,
-before the inner stream is polled — and on `Drop`. At most one batch is downstream of the credit
-boundary at any time, and it is still charged, which is what makes `max(ceiling, one maximum batch)`
-true as stated.
+The stream SHALL therefore hold each yielded batch's permit in a deferred slot and release it only
+once the batch's Arrow data is no longer referenced downstream, observed at the TOP of a later
+`poll_next` (before the inner stream is polled) and unconditionally on `Drop` and on every terminal
+arm. At most one batch is downstream of the credit boundary at a time in production, and it is still
+charged, which is what makes `max(ceiling, one maximum batch)` true as stated.
 
-**That release point, and not "when the next batch is yielded", is required in BOTH directions:**
+**The release point is constrained from BOTH sides, and SHALL NOT rest on the consumer's polling
+discipline:**
 
 - *Correctness.* `FlightDataEncoder::poll_next` (arrow-flight 53.4.1, `encode.rs:400-436`) polls its
   inner stream ONLY when its `FlightData` queue is empty — that is, after `encode_batch` has
   consumed and dropped the previous `RecordBatch`. Releasing at the top of the next poll therefore
-  releases at the first instant the previous batch is provably gone, which is strictly TIGHTER than
-  releasing when the next batch is yielded.
+  releases at the first instant the previous batch is provably gone, strictly TIGHTER than releasing
+  when the next batch is yielded. But `MeteredDoGetStream` is `pub(crate)` and polled directly, and
+  an unconditional release at the top of `poll_next` would return credit for a batch a speculative
+  poller (a `select!` arm, `futures::poll!`) is still holding. The release SHALL therefore be keyed
+  on the batch data's own liveness, so a consumer that still holds a yielded batch keeps paying for
+  it — including across a poll that returns `Pending`.
 - *Liveness.* Releasing only when the next batch is YIELDED deadlocks any stream whose pool is one
   batch deep: the deferred permit holds the whole pool, the producer parks reserving the next batch,
-  and the consumer waits for that batch. At the merged defaults a worst-case full batch is exactly
-  the whole pool, so that cycle is reachable in the DEFAULT configuration, not merely a corner case.
-  A test SHALL cover this (a ceiling smaller than one batch, driven end to end): the release-on-yield
-  variant hangs on it.
+  and the consumer waits for that batch. At the merged defaults a resident batch plus a worst-case
+  reservation already exceed the ceiling, so that cycle is reachable in the DEFAULT configuration,
+  not merely a corner case. A test SHALL cover this (a ceiling smaller than one batch, driven end to
+  end): the release-on-yield variant hangs on it. Keying the release on data liveness preserves
+  liveness for the production encoder, which has dropped the batch before it re-polls.
 
 #### Scenario: the yielded batch's credit is still charged while the encoder holds it
 
 - **GIVEN** a stream whose consumer has taken exactly one batch and has not polled again
 - **WHEN** the charged in-flight total is observed
 - **THEN** it still includes the just-yielded batch's capacity — the permit has not been released —
-  and it is released only once the consumer polls for the following batch
+  and it is released on a later poll, once the consumer has dropped the batch
+
+#### Scenario: a speculative Pending poll does not release a held batch's credit
+
+- **GIVEN** a consumer that still holds a yielded batch and polls the stream again while the inner
+  stream has nothing ready (the poll returns `Pending`)
+- **THEN** that batch's credit remains charged across the `Pending` return
+- **AND** once the consumer drops the batch, the next poll returns the credit, so a producer parked
+  on the pool is not wedged
 
 #### Scenario: dropping the stream releases the deferred permit
 
@@ -317,11 +385,13 @@ side, so no measurement asymmetry can drift the pool.
 
 The `cqlite-flight` server SHALL expose the per-stream egress byte ceiling as a
 `--max-inflight-egress-bytes` argument backed by the `CQLITE_MAX_INFLIGHT_EGRESS_BYTES` environment
-variable and a `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` constant denominated in **CAPACITY bytes**, set to **8 MiB**
-(the owner's decision under design A / D4a: with the additive term gone, every ceiling ≤ 8 MiB
-yields the IDENTICAL `max(...)` worst case, so 6 MiB is strictly dominated — it buys nothing in B4
-terms while making the deadlock clamp the normal case on exactly the wide-row workloads this change
-exists for). The composition test above SHALL hold at that value. Plumbing mirrors the merged `--max-batch-bytes` / `CQLITE_MAX_BATCH_BYTES` / `DEFAULT_MAX_BATCH_BYTES`
+variable and a `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` constant denominated in **CAPACITY bytes**, set
+to **12 MiB** (design A / D4a as corrected in review). The default SHALL be at least one worst-case
+RESERVATION — `worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, n_array_nodes, 0)` — not
+merely at or below one maximum batch: admission is gated on the pre-materialization reservation, so
+a smaller ceiling makes the deadlock clamp fire on EVERY byte-cap-cut batch and runs the stream
+lock-step on exactly the wide-row workloads this change exists for (at 8 MiB: 8198 permits wanted
+against 8192 held). The composition test above SHALL hold at that value. Plumbing mirrors the merged `--max-batch-bytes` / `CQLITE_MAX_BATCH_BYTES` / `DEFAULT_MAX_BATCH_BYTES`
 plumbing precedent from issue #2825 (itself modelled on `--max-concurrent-scans`).
 
 The value SHALL be plumbed const → clap `Args` → a `CqliteFlightService` field set by a builder
@@ -354,10 +424,13 @@ embedder.
 
 - **WHEN** neither the flag nor the environment variable is set
 - **THEN** the ceiling is `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`, denominated in capacity bytes
-- **AND** that constant is **8 MiB**, so composing it with #2825's merged 4 MiB payload cap through
-  `worst_case_batch_capacity_bytes` gives `max(8 MiB, 2 × 4 MiB + slack) ≈ 8 MiB` of capacity for
+- **AND** that constant is **12 MiB**, so composing it with #2825's merged 4 MiB payload cap through
+  `worst_case_batch_capacity_bytes` gives `max(12 MiB, 2 × 4 MiB + slack) = 12 MiB` of capacity for
   the guaranteed bound — inside the ratified **B4 ≤16Mi per-query working set at concurrency 1**
-  with ~8 MiB of headroom
+  with 4 MiB of headroom
+- **AND** a worst-case reservation at that default is admitted WITHOUT clamping (a test asserts the
+  clamp counter is zero for `worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 3, 0)`), so
+  the deadlock clamp is not the normal case
 
 #### Scenario: an embedder can opt out to an unbounded budget
 
