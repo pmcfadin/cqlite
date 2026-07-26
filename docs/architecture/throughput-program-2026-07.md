@@ -129,6 +129,47 @@ compaction generation-overlap ~1.1–1.5×, deduped by the connector's one-repli
 ~1.01–1.05×, not 1.3–2×; cold cache is a **latency** term, not a throughput derate — P2:stage2 §1).
 C(N) is **2.5–3.5×, not 4×** (P2:stage2 §3).
 
+**Gen-overlap term — now MEASURED (#2043 / M9,
+[`docs/research/issue-2043-reconcile-overlap-multiplier.md`](../research/issue-2043-reconcile-overlap-multiplier.md)).**
+The ~1.1–1.5× above was the one factor in the chain with nothing behind it; the measured k-curve
+(k ∈ {1,2,5,10,20} × 5 collision mixes through the public `KWayMerger` drain, at a pinned `now`)
+replaces the band with a function of the **overlap factor `o`** = generations per delivered row:
+
+```
+D(o) = (q + p·o) / (q + p)      p = 1.689 µs/input-row,  q = 1.127 µs/delivered-row
+                                 (the `disjoint`+`ttl_expiring` OLS fit — lowest residual of four —
+                                  over the saturated k ≥ 5 arms;
+                                  o=1 ⇒ 2.82 µs/row FITTED — the measured saturated control is 2.81)
+  o   1.0   1.25   1.5   1.75   2.0   3.0   4.0
+  D  1.00  1.15  1.30  1.45  1.60  2.20  2.80      ← computed from the p, q above
+```
+
+Three corrections to how the term must be used:
+1. **It is a row-DUPLICATION term, not an SSTable-COUNT term.** Measured: the disjoint control is
+   flat in k (2851/2738/2829 ns/row at k = 5/10/20, no monotone trend) — reading 20 generations
+   instead of 5 costs nothing per delivered row when no cluster spans two of them. The whole
+   multiplier comes from the overwrite/update rate relative to compaction cadence.
+2. **The floor is exact, and it is 1.00× not 1.1×.** An insert-once table (time-series/append-only,
+   a primary connector target) has `o = 1.0` ⇒ the term should be **dropped**, not carried at 1.1×.
+3. **The ceiling is optimistic for update-bearing tables.** `1.1–1.5×` implies `o ∈ [1.17, 1.83]`;
+   at an ordinary STCS SSTables-per-read p99 of 3–4 the term is **2.2–2.8×**, outside the band.
+
+The `o` substituted below — **`o_field` = 1.25–1.5, central 1.35 ⇒ D ≈ 1.15–1.30, central ~1.21** — is
+an **ASSUMPTION, NOT A MEASUREMENT** (STCS-derived expected-k band; the vendored corpus is
+single-generation so field `o` is unmeasurable locally). **#2818 (M0) is the measurement that
+replaces it**; because the model is closed-form in `o`, substituting a measured `o` needs no
+re-derivation and no re-run. TTL expiry at a pinned `now` was measured **free** (the `ttl_expiring`
+arm tracks `lww_overwrite` to 0.9 %, inside run-to-run spread), so no separate TTL derate term is
+warranted; deletion load, by contrast, costs **+3.9 %** over plain overwrite (the `tombstone` arm's
+marginal cost is 1580 vs 1507 ns per extra input row), so it is inside the `p` term, not free.
+
+Per-drain SETUP is amortized, not caveated: the bench's timed region contains `new_from_readers`
+(one producer-thread spawn + one adapter open per generation), so the arm width was raised 4× — on
+the PARTITION count, because `MergeStep::Partition` materializes a whole partition at a time — and
+each arm's setup share is MEASURED and printed: **0.20–0.24 % at k = 1, 0.37–0.85 % at k = 20**,
+which moves any multiplier by ≤0.6 %. The figures above are therefore per-ROW costs, not per-scan
+fixed cost smeared over a thousand rows (owner decision 2026-07-26).
+
 **Which stack reaches what:**
 - **A4 Stage-1 / B3 Stage-1 / B3 Stage-2 / B2:** the width credit (up to ~4 vCPU × C(N)) × the L1/L3
   per-stream residual clears all of these at the central band.
@@ -165,14 +206,33 @@ C(N) is **2.5–3.5×, not 4×** (P2:stage2 §3).
 single-stream lever and the enabler of C(N); nothing scales without it. L5+L4 were projected as a near-free warm-up (both since retired by measurement — §7 M4); a near-free warm-up
 bundle. #2680 re-land runs in parallel on the connector tier.
 
-**§4 tension flag (phase2-vs-phase2, L3 disposition — UNRESOLVED):** P2:stage2 §6 ranks L3 the **#2
-highest-value ceiling lever** (it attacks the measured ~2µs/row singleton machinery = the true ceiling
-once L1 lands; ~1.20× disjoint-narrow). P2:row-engine §4 rules it **WEAKENED** (field data with
-TTL/overlap **never hits** the fast-path; ~1.03–1.08×, and pushed toward the low end). The disagreement
-is entirely about **field cluster shape** (singleton vs multi-generation overlap) — which is exactly
-what the reconcile-overlap multiplier (#2043 repoint, §7) and the i4i in-`stream` re-profile would
-measure. **Resolution: L3's slot is gated on that overlap data; do not commit it as a headline lever
-until the field cluster shape is measured.**
+**§4 tension flag (phase2-vs-phase2, L3 disposition — RESOLVED CONDITIONALLY, #2043 / M9):**
+P2:stage2 §6 ranks L3 the **#2 highest-value ceiling lever** (it attacks the measured ~2µs/row
+singleton machinery = the true ceiling once L1 lands; ~1.20× disjoint-narrow). P2:row-engine §4 rules
+it **WEAKENED** (field data with TTL/overlap **never hits** the fast-path; ~1.03–1.08×, and pushed
+toward the low end). The disagreement is entirely about **field cluster shape** (singleton vs
+multi-generation overlap).
+
+**The overlap data now exists** —
+[`docs/research/issue-2043-reconcile-overlap-multiplier.md`](../research/issue-2043-reconcile-overlap-multiplier.md)
+§6 — and it resolves the disposition **conditionally, with the arithmetic written out**. L3's saving
+is a fixed ~0.47 µs/row (= `1 − 1/1.20` of the 2.81 µs/row at `o = 1`), and overlap attacks
+it **twice**: it destroys fast-path eligibility `f(o) ≈ max(0, 2 − o)` AND it grows the denominator
+the saving divides into (the overlap cost is entirely per-INPUT-row decode/heap/resolve, which a
+singleton fast-path cannot touch). `S(o) = 1/(1 − 0.47·f(o)/(q + p·o))`:
+
+| `o` | 1.0 | 1.1 | 1.25 | **1.35** | 1.5 | 1.75 | ≥2.0 (or ANY `o` with TTL/tombstones) |
+|---|---|---|---|---|---|---|---|
+| **L3** | **1.20×** | 1.16× | 1.12× | **1.10×** | 1.07× | 1.03× | **≈1.00×** |
+
+⇒ **P2:stage2's 1.20× is correct only at `o = 1.0` on a TTL-free, tombstone-free table** (its rig
+fixture exactly); **P2:row-engine's 1.03–1.08× is correct for `o ≳ 1.5`, or for ANY `o` once a queried
+column carries TTL** (TTL was measured *free* in the merge yet still disqualifies the cluster — a pure
+eligibility loss with no compensating saving). At §3's **assumed** central `o ≈ 1.35`, L3 is **~1.10×**.
+**Resolution: L3 does NOT earn the #2 headline slot — keep it off the headline lever list and sequence
+it after L1 and after M0 (#2818).** The final call needs exactly two field numbers from M0 — the
+row-duplication distribution (`o`) and whether queried columns carry TTL — after which the table above
+yields the disposition with no further measurement.
 
 **Other phase2-vs-phase2 tensions flagged:**
 - **C(N) magnitude.** P2:stage2 defends central **C(N) 3×** (pod-vs-core). P2:parallelism is more
@@ -275,9 +335,9 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
 | M4 → #1883 | EXTEND #1883 | per-row alloc ratchet DELIVERED; L4 measured 1.0× no-op; L5 deferred → #2901 | P2 | — |
 | M5 → #2680 | EXTEND #2680 | Re-land: K=2 opt-in rotation + early-close cancel fix + admission-resize + #2792 required | P1 | #2782, #2792 |
 | M6 → #2821 | NEW | Streaming `do_get` result-budget wiring gap | P2 | — |
-| M7 → #2822 | NEW (investigate) | L3 reconcile singleton fast-path | P3 | M0 + M9 (overlap data) |
+| M7 → #2822 | NEW (investigate) | L3 reconcile singleton fast-path — **demoted off the headline list** (~1.10× at the assumed field `o`, §4) | P3 | M0 (M9 ✅ delivered) |
 | M8 → #2823 | NEW | L2 inline/thread-less merge (A/B-gated, narrow-only) | P3 | M2 |
-| M9 → #2043 | EXTEND #2043 | Repoint WS7 to pin the reconcile **overlap** multiplier | P3 | — |
+| M9 → #2043 | EXTEND #2043 | Repoint WS7 to pin the reconcile **overlap** multiplier — **✅ DELIVERED**, §3 term now `D(o)`; L3 resolved conditionally (§4) | P3 | — |
 | M10 → #2824 | RESPEC #1518-adjacent (NEW) | `madvise(WILLNEED)` under Auto-mmap + `MADV_DONTNEED` post-scan | P3 | M0 (re-measure) |
 | M11 → #2825 | NEW | T4 byte-bounded batch sizing | P2 | — |
 | M12 → #2826 | NEW | T1+T2 bulk `ArrowToTrino` per-column copy + async prefetch | P3 | M2/M3 (post-server) |
@@ -385,8 +445,13 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
   `ReconcileState` construction + the winner map. *Accept:* the same PR extends
   `query_semantics_oracle_parity.rs` AND `point_vs_full_differential.rs` with a
   singleton/TTL-collision/tombstone case (so `--lite` exercises the fast-path vs the full path at a
-  pinned `now`); demonstrates ~1.20× on the disjoint-narrow-no-TTL fixture. **Dep:** M0 + M9 (the
-  field cluster-shape / overlap data — **its disposition is unresolved, §4**). **Dedup:** NEW; #2213
+  pinned `now`); demonstrates ~1.20× on the disjoint-narrow-no-TTL fixture. **Dep:** M0 only — **M9
+  (#2043) is ✅ delivered** and its overlap data resolves L3's disposition CONDITIONALLY (§4): the
+  1.20× holds only at overlap factor `o = 1.0` on a TTL-free, tombstone-free table, and L3 falls to
+  **~1.10× at the assumed field `o ≈ 1.35`** and to ≈1.00× on any table with a TTL'd queried column
+  — so **L3 is demoted off the headline lever list**, and M0's row-duplication + TTL-presence numbers
+  are the only inputs still needed to settle it (see
+  [the record](../research/issue-2043-reconcile-overlap-multiplier.md) §6). **Dedup:** NEW; #2213
   (Murmur3 per-comparison) is a minor complement.
 
 - **M8 (#2823) — L2 inline/thread-less merge (NEW, A/B-gated, P3).** For `k` inputs ≤ threshold + single
@@ -395,11 +460,19 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
   the narrow few-SSTable fixture; **≤1.0× wide → not credited in the field stack**; byte-parity
   oracles green. **Dep:** M2. **Dedup:** NEW — no prior inline-merge bypass in `git log`.
 
-- **M9 (#2043) — #2043 repoint (EXTEND #2043, P3).** Repoint WS7 to pin the reconcile **overlap multiplier**
-  at field compaction state (the base is already ~2µs/row measured, machinery-dominated — NOT the
-  `[ASSUMED]` 10–500ns/row). *Accept:* reports reconcile ns/row for clusters spanning k generations
-  with real LWW/tombstone/TTL collisions; tightens the §3 derate's 1.1–1.5× gen-overlap term and
-  resolves the L3 disposition (§4). **Dep:** none. **Dedup:** re-scopes the existing #2043 spike.
+- **M9 (#2043) — #2043 repoint (EXTEND #2043, P3). ✅ DELIVERED (2026-07-26).** Repointed WS7 to pin
+  the reconcile **overlap multiplier** at field compaction state (the base was already ~2µs/row
+  measured, machinery-dominated — NOT the `[ASSUMED]` 10–500ns/row). *Delivered:*
+  `cqlite-core/benches/reconcile_overlap.rs` (advisory instrument, 25 arms = k ∈ {1,2,5,10,20} × 5
+  collision mixes through the public `KWayMerger` drain at a `now` pinned via `with_now_secs`, plus 2
+  producer-count control arms; every arm asserts its collision-shape census before timing) +
+  [`docs/research/issue-2043-reconcile-overlap-multiplier.md`](../research/issue-2043-reconcile-overlap-multiplier.md).
+  *Outcome:* the §3 gen-overlap term is now a **function of the overlap factor `o`**,
+  `D(o) = (q + p·o)/(q + p)` with p = 1.689 µs/input-row and q = 1.127 µs/delivered-row (§3) — SSTable
+  count is free, row duplication is the whole term, the floor is 1.00× (insert-once) and the ceiling
+  reaches 2.2–2.8× at an ordinary STCS p99. Field `o` remains an explicit **assumption** (1.25–1.5,
+  central 1.35) pending M0. **L3's disposition is resolved conditionally** (§4): ~1.10× at the assumed
+  central `o`, so it does **not** earn the #2 headline slot. **Dep:** none. **Unblocks:** M7 (#2822).
 
 - **M10 (#2824) — madvise(WILLNEED) respec (NEW, P3).** Flip `Auto` to issue the already-built
   `madvise(MADV_WILLNEED)` at open (`reader/mod.rs:1052`, currently gated off by `PrefetchMode::Auto →
