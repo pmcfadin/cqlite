@@ -106,7 +106,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   unique paths): `.agent-gate-summary.txt` / `.agent-gate-lite-summary.txt` / `.agent-gate-delta-summary.txt`.
   **Nested exception (#2874):** a gate started with `AGENT_GATE_PARENT_RUN_ID` in its env (i.e. spawned
   by an enclosing gate) and no explicit `AGENT_GATE_SUMMARY_FILE` defaults to its OWN
-  `$LOG_DIR/summary.txt` (never the checkout default) and stamps `nested-under: <parent-run-id>`, so a
+  `$LOG_DIR/summary-primary.txt` (never the checkout default) and stamps `nested-under: <parent-run-id>`, so a
   nested/self-test sub-gate can never clobber the parent's summary. A mid-run summary clobber (foreign
   run-id) is caught at the next component boundary with a named `summary-integrity: FAIL` line + FAIL,
   never a bare INCOMPLETE.

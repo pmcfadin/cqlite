@@ -307,7 +307,7 @@ read it:
 >
 > **Nested / self-test sub-gates are auto-isolated (#2874):** a gate spawned by an
 > enclosing gate inherits `AGENT_GATE_PARENT_RUN_ID`; if it does not pin its own
-> `AGENT_GATE_SUMMARY_FILE` it defaults to its OWN `$LOG_DIR/summary.txt` (never the
+> `AGENT_GATE_SUMMARY_FILE` it defaults to its OWN `$LOG_DIR/summary-primary.txt` (never the
 > checkout default) and stamps `nested-under: <parent-run-id>`, so a nested run can
 > never clobber the parent gate of record. And a mid-run summary clobber (a foreign
 > `run-id` appearing in the file) is caught at the next component boundary with a
