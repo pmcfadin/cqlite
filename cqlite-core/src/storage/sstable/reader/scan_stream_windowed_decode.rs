@@ -104,15 +104,7 @@ impl SSTableReader {
             super::super::data_access::NS_WINDOWED_CHUNK,
             self.chunk_cache_id,
         );
-        // Issue #2819: attribute the LZ4 decompress wall time to the
-        // `stream_decompress` sub-phase on the flight per-request sink (no-op when
-        // unset). Reached only past the cache-hit / incompressible-raw /
-        // no-compressor early exits — none of which decompress — so an
-        // uncompressed-fixture run records NO `stream_decompress` sample.
-        let decoded = crate::observability::stream_subphase::timed(
-            crate::observability::StreamSubPhase::Decompress,
-            || chunk_source.decode_borrowed(key, &compressed),
-        )?;
+        let decoded = chunk_source.decode_borrowed(key, &compressed)?;
         Ok((decoded, compressed))
     }
 }

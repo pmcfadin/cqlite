@@ -661,16 +661,7 @@ impl SSTableReader {
         max_compressed_length: usize,
     ) -> Option<Error> {
         let io_failed_feed = Arc::clone(io_failed);
-        // Issue #2819: propagate the flight per-request sub-phase sink onto the feed
-        // `spawn_blocking` thread (where page-in + decompress physically run), so
-        // their `stream_cold_fault` / `stream_decompress` wall time reaches the
-        // request's accumulator. Captured on THIS (producer) thread; re-installed
-        // inside the closure via a panic-safe RAII guard that clears it on exit, so
-        // a reused blocking-pool thread never leaks the sink. `None` for every
-        // non-flight caller (compaction / CLI) — then a no-op.
-        let subphase_sink = crate::observability::stream_subphase::current();
         let feed = tokio::task::spawn_blocking(move || -> Option<Error> {
-            let _subphase_guard = crate::observability::stream_subphase::install(subphase_sink);
             // Panic/early-exit guard (roborev finding, issue #1593). `raw_tx` is
             // captured (moved) into this closure and drops when the closure
             // returns OR unwinds; the parse half reads a `raw_tx` close with

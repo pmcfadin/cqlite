@@ -137,13 +137,27 @@ pub(super) fn read_compressed_offset_window_impl(
         // corrupt/out-of-range offset or size. Returning the partial `assembled`
         // bytes as `Ok` would silently truncate; this must surface as a typed,
         // non-recoverable corruption error instead.
-        let Some(compressed) = block_io::read_compressed_chunk_at(
-            positional_source,
-            comp_info,
-            chunk_idx,
-            file_size,
-            0,
-        )?
+        // Issue #2819: attribute the synchronous body-chunk page-in (positional
+        // read + CRC) to the `stream_cold_fault` sub-phase on the flight
+        // per-request sink (no-op when no sink is installed — every non-flight
+        // caller). This wraps ONLY the read, on the per-SSTable scan (producer)
+        // thread; it shares no code interval with the egress `stream_grpc_write`
+        // scope, which is measured on the merge/egress thread in
+        // `cqlite-flight`'s `ChannelSink::emit` — so a slow client's send-park can
+        // never inflate cold-fault.
+        let chunk = crate::observability::stream_subphase::timed(
+            crate::observability::StreamSubPhase::ColdFault,
+            || {
+                block_io::read_compressed_chunk_at(
+                    positional_source,
+                    comp_info,
+                    chunk_idx,
+                    file_size,
+                    0,
+                )
+            },
+        )?;
+        let Some(compressed) = chunk
         else {
             return Err(Error::corruption(format!(
                 "compressed offset read requires chunk {chunk_idx} past EOF for range \
@@ -164,9 +178,18 @@ pub(super) fn read_compressed_offset_window_impl(
             // exactly one such module). CRC is already validated above by
             // `read_compressed_chunk_at` (guardrail #1411), so we never decode bytes
             // that failed their inline CRC32.
-            let out = super::super::chunk_source::ChunkSource::decompress_only(
-                Some(compression),
-                compressed,
+            // Issue #2819: attribute the LZ4 decompress to the `stream_decompress`
+            // sub-phase (no-op when no sink is installed). Reached only for a
+            // genuinely compressed chunk (past the incompressible-raw fallback
+            // above), so an uncompressed table records NO `stream_decompress`.
+            let out = crate::observability::stream_subphase::timed(
+                crate::observability::StreamSubPhase::Decompress,
+                || {
+                    super::super::chunk_source::ChunkSource::decompress_only(
+                        Some(compression),
+                        compressed,
+                    )
+                },
             )?;
             super::model::DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
             out

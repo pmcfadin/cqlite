@@ -248,17 +248,9 @@ impl SSTableReader {
         if buf.capacity() > cap_before {
             rwc::record_chunk_path_alloc();
         }
-        // Issue #2819: attribute the synchronous body-chunk page-in wall time to
-        // the `stream_cold_fault` sub-phase on the flight per-request sink (no-op
-        // when no sink is installed — every non-flight caller). This wraps ONLY
-        // the page-in read, on the feed thread; it shares no code interval with the
-        // egress `stream_grpc_write` scope (a different file, a different thread),
-        // so a slow client can never inflate cold-fault.
-        let read_result = crate::observability::stream_subphase::timed(
-            crate::observability::StreamSubPhase::ColdFault,
-            || self.positional_read_exact_retry_once(chunk_offset, &mut buf, direct_scratch),
-        );
-        if let Err(e) = read_result {
+        if let Err(e) =
+            self.positional_read_exact_retry_once(chunk_offset, &mut buf, direct_scratch)
+        {
             // Return the scratch's capacity to the caller so the next read reuses it.
             buf.clear();
             *scratch = buf;
