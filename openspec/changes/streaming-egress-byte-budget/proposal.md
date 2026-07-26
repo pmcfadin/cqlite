@@ -8,6 +8,15 @@ default, its configuration surface, and the honesty of the stated bound are all 
 that need a written contract before code. (Contrast: an SSTable decode bug would be a plain issue +
 pinned parity test.)
 
+## Status after #2825
+Issue **#2825 (byte-bounded Arrow egress batch sizing, PR #2906) has MERGED**. It caps ONE batch at
+`DEFAULT_MAX_BATCH_BYTES = 4 MiB` of Arrow **payload** and publishes
+`BATCH_BYTES_CAPACITY_FACTOR = 2` + `worst_case_batch_capacity_bytes(...)` explicitly so this change
+can convert that guarantee into the **capacity** currency `streaming.rs` meters. Its own module docs
+state that per-stream egress residency is still count-bounded (`~7 × 8 MiB ≈ 56 MiB`) and that the
+14 MiB composition is a TARGET for this issue. **This change makes that statement true, and updates
+it.**
+
 ## Why (measured problem)
 Source of truth: `docs/research/phase2-verify-parallelism.md` §2 and the issue.
 
@@ -38,30 +47,46 @@ would leave per-stream residency proportional to row width forever, which cannot
 wide table at any value of K.
 
 ## What changes
-- **A per-stream in-flight byte credit governor on the streaming egress.** `ChannelSink::emit`
-  charges each batch's `get_array_memory_size()` against a per-stream byte ceiling before the batch
-  enters the channel; the credit is returned when the batch leaves the stream toward the client.
-  Per-stream residency becomes bounded in BYTES, independent of row width.
+- **A per-stream in-flight CAPACITY-byte credit governor on the streaming egress.**
+  `ChannelSink::emit` charges each batch's `get_array_memory_size()` (Arrow buffer **capacity** —
+  the quantity `streaming.rs:647` already meters) against a per-stream ceiling before the batch
+  enters the channel; the credit rides with the batch as an RAII permit and is returned when the
+  batch has left the stream toward the client. Per-stream residency becomes bounded in BYTES,
+  independent of row width.
+- **Denominated in capacity, converted from #2825 through its published constant.** The per-batch
+  cap is payload-denominated; this ceiling is capacity-denominated; the two currencies are named at
+  the boundary and converted with `cqlite_flight::batch_bytes::BATCH_BYTES_CAPACITY_FACTOR`, never
+  with a locally re-derived factor and never by adding a payload figure to a capacity figure.
 - **An explicitly stated, honest bound.** A single batch may exceed the whole ceiling, so `emit`
   MUST always be able to admit one batch when nothing else is in flight (otherwise the stream
-  deadlocks). The guaranteed contract is therefore **`ceiling + one maximum batch`**, NOT
-  `ceiling`. The residual one-batch term is capped by issue **#2825 (T4 byte-bounded batch
-  sizing)**, the named follow-on.
-- **A new configuration knob mirroring the admission-K precedent exactly**:
-  `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` (**8 MiB**) + `CQLITE_MAX_INFLIGHT_EGRESS_BYTES` env const +
-  a `--max-inflight-egress-bytes` clap arg, plumbed const → `Args` → service field (builder
-  mirroring `with_admission`) → `spawn_streaming` → `ChannelSink`.
-- **Composition, not replacement.** The byte ceiling sits alongside the 4-deep batch-count channel
-  and admission K; whichever binds first wins. No existing bound is removed.
+  deadlocks). The guaranteed contract is therefore **`ceiling + one maximum batch`**, NOT `ceiling`
+  — and the terms outside the governed set (the producer's parked pre-credit batch, a single row
+  wider than the per-batch cap, the per-node slack) are named rather than implied away.
+- **A new configuration knob mirroring the merged `--max-batch-bytes` precedent**:
+  `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` (**6 MiB of capacity**) + `CQLITE_MAX_INFLIGHT_EGRESS_BYTES`
+  env const + a `--max-inflight-egress-bytes` clap arg, plumbed const → `Args` → service field
+  (builder mirroring `with_max_batch_bytes`) → the sole production spawn site
+  `spawn_streaming_from_readers` → `spawn_streaming` → `ChannelSink`. On by default on every
+  construction path, with an explicit unbounded opt-out for embedders.
+- **The composition, in capacity currency**: `6 MiB ceiling + (2 × 4 MiB payload cap) = 14 MiB`,
+  inside the ratified B4 ≤16Mi per-query working set at concurrency 1, with ~2 MiB headroom. A test
+  asserts it from the constants so neither can drift out from under B4.
+- **Composition, not replacement.** The byte ceiling sits alongside the 4-deep batch-count channel,
+  #2825's per-batch cap, and admission K; whichever binds first wins. No existing bound is removed.
 - **The `DO_GET_CHANNEL_CAPACITY` doc comment is corrected and revised** to state the real
   production residency (~(4+2)×8192 ≈ 49,152 rows, row-width dependent), to stop citing the
   `#[cfg(test)]` `IN_FLIGHT_ALLOWANCE` as production, and to point at the new byte knob instead of
   claiming the depth is deliberately unconfigurable.
+- **#2825's own documentation is truthed up in the same change that makes it stale**:
+  `cqlite-flight/src/batch_bytes.rs`'s module docs (the `~56 MiB` count-bounded claim and the
+  "14 MiB is a TARGET for #2821" framing) and `docs/flight-trino/JOURNAL.md:659-665`'s prospective
+  B4-composition bullet, which the #2906 review deliberately assigned to this issue.
 
 ## Non-goals
-- **Not** byte-bounded *batch construction* — capping the size of an individual batch is issue
-  **#2825 (T4)**. This change bounds how many bytes may be in flight; #2825 bounds the one-batch
-  residual term. They compose; neither subsumes the other.
+- **Not** byte-bounded *batch construction* — capping an individual batch is issue **#2825 (T4)**,
+  MERGED. This change bounds how many bytes may be in flight; #2825 bounds the one-batch residual
+  term. They compose; neither subsumes the other, and this change does not alter #2825's cap, its
+  default, or its currency.
 - **Not** a change to admission K, its default, its shedding policy, or `--max-concurrent-scans`.
 - **Not** a change to the 4-deep `DO_GET_CHANNEL_CAPACITY` value itself (only its doc comment).
 - **Not** plumbing `QueryConfig::n` / `result_budget` into `cqlite-flight`. The core result budget
@@ -71,18 +96,19 @@ wide table at any value of K.
   bounded per-group.
 - **Not** a rewrite of the historical phase-research docs. `docs/research/phase2-verify-parallelism.md`
   §2 already records the 49,152-vs-57,344 correction as a finding, and
-  `docs/architecture/throughput-program-2026-07.md:385` belongs to manifest item **M11 / #2825**,
-  which corrects its own line. This change touches only the source doc comment it is already
-  revising.
+  `docs/architecture/throughput-program-2026-07.md` M11 was #2825's line. This change touches only
+  the doc text its own behaviour falsifies: the `DO_GET_CHANNEL_CAPACITY` comment,
+  `batch_bytes.rs`'s residency paragraphs, and the JOURNAL's B4-composition bullet.
 - **Not** a new OTel metric. In-flight bytes are exposed through the existing test-only
   `StreamProbe`, consistent with how `produced_batches` is observed today.
 
 ## Doctrine impact
 - **No-heuristics (#28):** unaffected. `get_array_memory_size()` is an authoritative Arrow-reported
   size, not a byte-pattern inference; no type or format is guessed anywhere in this change.
-- **Memory budget:** this change exists to *serve* the <128MB / B4 ≤16Mi posture. With the 8 MiB
-  default, `ceiling + one maximum batch` sits inside B4 ≤16Mi at concurrency 1 for any batch under
-  ~8 MiB; #2825 turns that from a `batch_size`-dependent hope into an enforced property.
+- **Memory budget:** this change exists to *serve* the <128MB / B4 ≤16Mi posture. With the 6 MiB
+  capacity default and #2825's merged 4 MiB payload cap, `ceiling + one maximum batch` is
+  `6 + (2 × 4) = 14 MiB` of capacity — inside B4 ≤16Mi at concurrency 1 with ~2 MiB headroom, and
+  enforced by both governors rather than dependent on `batch_size` and row width.
 - **Public binding surfaces:** Python/Node/CLI unaffected. The only new public surface is the
   `cqlite-flight` server CLI flag + env var and the `CqliteFlightService` builder.
 - **Wiring evidence (#949/#963):** the knob must be reachable end-to-end from the
