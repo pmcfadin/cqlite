@@ -8,17 +8,20 @@ cold-fault, decompress, merge, encode, and gRPC-write — each recorded as a `cq
 histogram sample tagged with a distinct, closed-set value of the `cqlite.rpc.phase` attribute
 (`stream_cold_fault`, `stream_decompress`, `stream_merge`, `stream_encode`, `stream_grpc_write`). A
 sub-phase that a given `do_get` never entered SHALL record no sample for that value (never a
-fabricated zero). The decomposition SHALL account for the same wall time the `stream` phase covers, so
-`stream`'s existing meaning as the data-plane total is unchanged.
+fabricated zero). The sub-phases are measured on the CONCURRENT threads of the streaming read pipeline
+(page-in + decompress on the per-SSTable feed thread; merge + encode on the merge consumer thread;
+gRPC-write on the egress thread), so they OVERLAP in wall-clock time and SHALL NOT be expected to sum
+to the `stream` phase's duration. The top-level `stream` phase SHALL retain its exact meaning as the
+whole data-plane wall-clock total, unchanged by this decomposition.
 
 #### Scenario: A completed do_get over a real fixture records at least four distinct sub-phase samples
 - **GIVEN** a `cqlite-flight` `do_get` run over a real multi-row, compressed SSTable fixture that faults in cold body chunks, reconciles, encodes, and streams batches to the client
 - **WHEN** the whole response stream is drained and the emitted metrics are captured
 - **THEN** `cqlite.rpc.phase.duration` carries at least one sample for at least four of the bounded sub-phase values (`stream_cold_fault`, `stream_decompress`, `stream_merge`, `stream_encode`, `stream_grpc_write`), each tagged with the `do_get` method
 
-#### Scenario: A dashboard can sum in-stream cost across the sub-phases
+#### Scenario: Each recorded sub-phase is a positive share of the RPC wall time
 - **WHEN** the captured `cqlite.rpc.phase.duration` samples for a completed `do_get` are grouped by the `cqlite.rpc.phase` attribute
-- **THEN** the sub-phase samples' durations sum to within measurement slack of the `stream` phase's own recorded duration, so the sub-phases attribute (rather than merely re-label) the in-`stream` cost
+- **THEN** each recorded sub-phase's duration is greater than zero and no greater than the RPC's total wall time (`cqlite.rpc.duration`), and the top-level `stream` sample continues to represent the whole data-plane wall-clock total — the sub-phases attribute the in-`stream` cost across concurrent pipeline stages WITHOUT summing to it (they overlap in wall-clock, so their sum may exceed `stream`)
 
 #### Scenario: A sub-phase never entered records no sample
 - **GIVEN** a `do_get` whose plan performs no work in one specific sub-phase (e.g. an uncompressed-fixture run that never invokes decompression)
@@ -27,18 +30,20 @@ fabricated zero). The decomposition SHALL account for the same wall time the `st
 
 ### Requirement: The cold-fault sub-phase is isolable from send park/wake
 The `stream_cold_fault` sub-phase SHALL measure only the synchronous SSTable body page-in (cold-IO
-latency) and SHALL NOT include the channel send/backpressure park time, which SHALL be attributed to a
-disjoint `stream_grpc_write` sub-phase. The two SHALL never overlap in wall time, so cold-IO latency is
-readable off the dashboard independently of client-drain speed (without a profiler).
+latency) on the read feed thread, and SHALL NOT include the channel send/backpressure park time, which
+SHALL be attributed to a disjoint `stream_grpc_write` sub-phase measured on the egress thread. The two
+scopes SHALL share no code interval and run on distinct threads, so a send-side stall cannot inflate
+`stream_cold_fault` — cold-IO latency is readable off the dashboard independently of client-drain speed
+(without a profiler).
 
 #### Scenario: A slow client inflates gRPC-write but not cold-fault
 - **GIVEN** two `do_get` runs over the same cold fixture: one drained promptly and one whose client deliberately stalls draining the channel so the producer parks in `sink.emit`
 - **WHEN** the emitted `cqlite.rpc.phase.duration` samples are captured for both
 - **THEN** the stalled run's `stream_grpc_write` duration is materially larger than the prompt run's, while its `stream_cold_fault` duration is not inflated by the client stall (cold-fault reflects page-in latency only)
 
-#### Scenario: The cold-fault and gRPC-write timing scopes are provably disjoint
+#### Scenario: The cold-fault and gRPC-write timing scopes are measured disjointly
 - **WHEN** the stream-loop instrumentation is inspected
-- **THEN** the `stream_cold_fault` scope wraps only the reader body-chunk page-in and closes before any batch reaches `sink.emit`, and the `stream_grpc_write` scope wraps only the channel `reserve()`/send — so no wall-clock interval is counted under both
+- **THEN** `stream_cold_fault` is measured only around the reader body-chunk page-in on the feed thread, and `stream_grpc_write` only around the egress channel `reserve()`/send on the merge/egress thread — the two scopes share no code interval and run on distinct threads, so a send-side park/wake interval is never counted under `stream_cold_fault`
 
 #### Scenario: The cold-warm delta on cold-fault is readable as the cold-IO bucket
 - **GIVEN** the same full-scan `do_get` run cold (first touch) and again warm (pages resident)
