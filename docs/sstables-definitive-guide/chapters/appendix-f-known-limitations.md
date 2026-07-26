@@ -72,6 +72,33 @@ Non-frozen collections are serialized as multiple cells (complex columns):
 
 Complex columns set the `ROW_HAS_COMPLEX_DELETION` flag (0x40).
 
+### Zero-length collection element value: `HAS_EMPTY_VALUE` on the whole-column writers
+
+**Status**: KNOWN GAP (Issue #2970)
+
+Cassandra decides the presence of a cell's value length + bytes from the `HAS_EMPTY_VALUE` flag
+(`0x04`), which it sets from `cell.valueSize() > 0` — a **size** test, not a type test
+(`Cell.java:271`, `:277-278`, `:303-304`; read side `:310`, `:329-339`). A zero-length value is
+therefore written as `flags |= 0x04` with **no** length VInt and **no** bytes.
+
+CQLite implements that rule correctly on:
+
+- the reader — `.../reader/parsing/row_decoder/complex_column.rs::parse_complex_cell_value()`
+  (`:1012`, `:1128`) reads a value length only when neither `IS_DELETED` nor `HAS_EMPTY_VALUE` is set;
+- the per-element writer — `.../writer/data_writer/complex.rs::write_complex_element_cell()`
+  (`:884-891`, `:960-969`) derives the flag and emits the length only when it is clear;
+- `write_set_complex_cells()` (`:594`), which always sets `CELL_HAS_EMPTY_VALUE` and writes no value.
+
+**The gap**: the *whole-column* writers `write_map_complex_cells()` (`:646`) and
+`write_list_complex_cells()` (`:705`) hardcode `flags = 0` (`:683`, `:737`) and call
+`encode_unsigned(len)` unconditionally (`:694`, `:747`). An element whose serialized value is
+zero-length — a `map<text,text>` entry with value `''`, an empty blob in a `list<blob>` — is emitted as
+`flags=0` + `0x00` where Cassandra emits `flags=0x04` + nothing.
+
+**Impact**: CQLite's own reader round-trips such an SSTable (it accepts the explicit `0x00` length), but
+a strict Cassandra reader desynchronizes the cell stream at that element. Non-empty values, sets, and
+the per-element path are unaffected.
+
 ### Static Row Support
 
 **Status**: IMPLEMENTED (Issue #379)

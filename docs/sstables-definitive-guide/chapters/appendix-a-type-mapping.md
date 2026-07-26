@@ -60,23 +60,28 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
   i32**, not VInt: `CollectionSerializer.pack` writes the count via `writeCollectionSize`
   (`putInt`, `CollectionSerializer.java:67-70`) and each element via `writeValue`
   (`putInt` + bytes, `:82-92`); `-1` = NULL element. See Chapter 5, "Frozen Collection Serialization".
-- **Non-frozen collection cells** length-prefix **both** the cell **path** and the cell **value** with
-  an unsigned VInt — each element is its own cell, so the framing differs from the frozen form:
-  - The cell **path**: `CollectionType.CollectionPathSerializer.serialize` →
+- **Non-frozen collection cells** always length-prefix the cell **path** with an unsigned VInt, and
+  length-prefix the cell **value** *iff* `HAS_EMPTY_VALUE` (`0x04`) is clear — each element is its own
+  cell, so the framing differs from the frozen form:
+  - The cell **path** (never flag-gated): `CollectionType.CollectionPathSerializer.serialize` →
     `ByteBufferUtil.writeWithVIntLength` (`CollectionType.java:361-366`), which is
     `writeUnsignedVInt32(remaining)` + bytes (`ByteBufferUtil.java:356-360`).
-  - The cell **value**, *including when the element/value type is fixed-width* (`list<int>`,
-    `map<text,bigint>`): `Cell.Serializer.serialize` calls
+  - The cell **value** is present only when `HAS_EMPTY_VALUE` is clear, and that flag is
+    **size-driven, not type-driven**: `Cell.Serializer.serialize` sets it from `cell.valueSize() > 0`
+    (`Cell.java:271`, `:277-278`) and writes the value only `if (hasValue)` (`:303-304`); the reader
+    mirrors it (`:310`, `:329-339`). So a **zero-length value carries no length VInt and no bytes** —
+    not a `0x00`. Instances of that one rule: a non-frozen `set<T>` element (datum in the path,
+    `SetType.valueComparator()` is `EmptyType.instance`, `SetType.java:106-109`), any zero-length value
+    (`map<text,text>` entry `-> ''`, empty blob in a `list<blob>`), and an element tombstone
+    (`IS_DELETED`, `Cell.java:264`).
+  - **When the value IS present it is length-prefixed even for a fixed-width element/value type**
+    (`list<int>`, `map<text,bigint>`): `Cell.Serializer.serialize` calls
     `header.getType(column).writeValue(...)` (`Cell.java:303-304`), and `header.getType(column)` is the
     **column's** type — the collection type, never the element type
     (`SerializationHeader.java:160-163`, map built from `column.type` at `:250-257`).
     `CollectionType`/`ListType`/`MapType`/`SetType` do not override `valueLengthIfFixed()`, so they
-    inherit `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`) and `writeValue` always takes
+    inherit `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`) and `writeValue` takes
     the `else` branch → `accessor.writeWithVIntLength(...)` (`:550-552`).
-  - **Exception**: a non-frozen `set<T>` cell carries **no value bytes**. The element is the path and
-    `SetType.valueComparator()` is `EmptyType.instance` (`SetType.java:106-109`), so the cell sets
-    `HAS_EMPTY_VALUE_MASK` (`0x04`) and `writeValue` is never reached (`Cell.java:271-277`, `:303-304`;
-    read side `:310`). Flag-driven, not width-driven.
   - The `valueLengthIfFixed() >= 0` raw-bytes branch (`AbstractType.java:538-543`) fires only for
     **simple (non-collection)** cells, whose scalar type overrides it (e.g. `Int32Type` → `4`,
     `Int32Type.java:156-159`).
@@ -90,8 +95,9 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
 ## Key Takeaways
 - Primitive numeric and time types are fixed-width big-endian values.
 - Cell values for strings and blobs are length-prefixed with **unsigned** VInt (never ZigZag). So is
-  **every** non-frozen collection cell value, fixed-width element types included — the fixed-width
-  no-prefix rule is a **simple-cell** rule.
+  every non-frozen collection cell value **that is present at all** (i.e. `HAS_EMPTY_VALUE` clear),
+  fixed-width element types included — the fixed-width no-prefix rule is a **simple-cell** rule, and a
+  zero-length collection value is omitted entirely rather than written as a `0x00` length.
 - Frozen collection counts and element lengths, and tuple/UDT field lengths, are fixed 4-byte BE
   signed int (-1 = null), **not** VInt.
 - Signed (ZigZag) VInts in `Data.db` occur only inside a serialized `DurationType` payload — its

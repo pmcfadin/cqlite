@@ -39,7 +39,7 @@ Unsigned VInt (`writeUnsignedVInt` / `writeUnsignedVInt32`):
 |-------|-------------|--------|
 | Variable-width **simple** cell value length (`text`, `blob`, `varint`, `decimal`, `duration`) | `writeWithVIntLength` → `writeUnsignedVInt32` | `ValueAccessor.java:171-175` |
 | Non-frozen collection cell path length (**always** present) | `ByteBufferUtil.writeWithVIntLength` | `CollectionType.java:361-366`, `ByteBufferUtil.java:356-360` |
-| Non-frozen collection cell **value** length (**always** present, even for a fixed-width element type) | `writeWithVIntLength` → `writeUnsignedVInt32` | `AbstractType.java:550-552`, `ValueAccessor.java:171-175` |
+| Non-frozen collection cell **value** length (present iff `HAS_EMPTY_VALUE` is clear — and then present even for a fixed-width element type) | `writeWithVIntLength` → `writeUnsignedVInt32` | `Cell.java:271,303-304`, `AbstractType.java:550-552`, `ValueAccessor.java:171-175` |
 | Clustering-prefix header (2 bits per clustering column, one VInt per batch of ≤32 columns) | `writeUnsignedVInt(makeHeader(...))` | `ClusteringPrefix.java:455-475` |
 | `row_size` and `prev_size` (`previousUnfilteredSize`) | `writeUnsignedVInt` | `UnfilteredSerializer.java:199-202` |
 | Complex-column cell count | `writeUnsignedVInt32(data.cellsCount())` | `UnfilteredSerializer.java:277` |
@@ -62,8 +62,9 @@ only.** `AbstractType.writeValue` (`AbstractType.java:535-552`) branches on `val
 `>= 0` writes the raw bytes with no prefix (`:538-543`), otherwise it writes an unsigned-VInt length
 + bytes (`:550-552`). The type consulted is the *column's* type, so for a non-frozen collection
 column the branch is decided by `ListType`/`SetType`/`MapType` — none of which override
-`valueLengthIfFixed()` — and the value is therefore **always** length-prefixed. See "Non-Frozen
-Collection Serialization" below.
+`valueLengthIfFixed()` — so **whenever a value is written at all it is length-prefixed**. Whether a
+value is written at all is a separate, earlier decision made by the `HAS_EMPTY_VALUE` flag
+(`Cell.java:271`, `:303-304`). See "Non-Frozen Collection Serialization" below.
 
 Not VInt at all — fixed-width 4-byte big-endian `i32`: frozen-collection counts and element lengths,
 and tuple/UDT field lengths. See "Frozen Collection Serialization" and "UDTs" below.
@@ -180,7 +181,8 @@ Non-frozen collections are stored as multiple cells, one per element or entry. E
 [local_deletion_time: unsigned VInt32 if deleted/expiring (and not USE_ROW_TTL_MASK)]
 [ttl: unsigned VInt32 if expiring (and not USE_ROW_TTL_MASK)]
 [cell_path: unsigned VInt length + bytes]  ← ALWAYS length-prefixed
-[value: unsigned VInt length + bytes]      ← ALWAYS length-prefixed, unless HAS_EMPTY_VALUE_MASK
+[value: unsigned VInt length + bytes]      ← present iff HAS_EMPTY_VALUE_MASK is CLEAR;
+                                              when present, ALWAYS length-prefixed
 ```
 
 Field order and presence are authoritative in `Cell.Serializer.serialize` (`Cell.java:268-305`,
@@ -188,30 +190,46 @@ layout comment at `:242-259`) — note local deletion time comes **before** TTL.
 preceded by an unsigned-VInt cell count (`UnfilteredSerializer.java:277`) and, when
 `HAS_COMPLEX_DELETION` is set, a deletion time.
 
-**Both the path and the value are unsigned-VInt-length-prefixed — including when the element type is
-fixed-width:**
+**The path is always unsigned-VInt-length-prefixed. The value is unsigned-VInt-length-prefixed *iff*
+`HAS_EMPTY_VALUE` (`0x04`) is clear — and when present it is length-prefixed even for a fixed-width
+element type:**
 
 - **`cell_path` — always** an unsigned-VInt length + bytes.
   `CollectionType.CollectionPathSerializer.serialize` calls
   `ByteBufferUtil.writeWithVIntLength(path.get(0), out)` (`CollectionType.java:361-366`), and
   `writeWithVIntLength` is `out.writeUnsignedVInt32(bytes.remaining())` followed by the bytes
-  (`ByteBufferUtil.java:356-360`).
-- **`value` — always** an unsigned-VInt length + bytes, for `list<int>` exactly as for `list<text>`.
-  `Cell.Serializer.serialize` writes the value as
-  `header.getType(column).writeValue(cell.value(), cell.accessor(), out)` (`Cell.java:303-304`).
+  (`ByteBufferUtil.java:356-360`). The path is not gated by any flag.
+- **`value` — present iff `HAS_EMPTY_VALUE` (`0x04`) is CLEAR, and that flag is SIZE-driven, not
+  type-driven.** `Cell.Serializer.serialize` computes `boolean hasValue = cell.valueSize() > 0;`
+  (`Cell.java:271`), sets `flags |= HAS_EMPTY_VALUE_MASK` when `!hasValue` (`:277-278`), and writes
+  the value only `if (hasValue)` (`:303-304`). The reader mirrors it exactly:
+  `boolean hasValue = (flags & HAS_EMPTY_VALUE_MASK) == 0;` (`:310`) and only then does it consume a
+  length + bytes (`:329-339`; `skip` at `:381`, `:399-400`). So a **zero-length value carries no
+  length VInt and no bytes** — the flag *replaces* the `0x00` length a reader might expect. Three
+  common situations hit this, and the unifying rule is the **flag**, not any one of them:
+    1. a non-frozen `set<T>` element — the datum lives in the cell **path** and
+       `SetType.valueComparator()` is `EmptyType.instance` (`SetType.java:106-109`), so the value is
+       always zero-length;
+    2. **any** genuinely zero-length value — e.g. a `map<text,text>` entry whose value is `''`, or an
+       empty blob element in a `list<blob>`. `set<T>` is just the case where this holds for *every*
+       element;
+    3. an **element tombstone** (`IS_DELETED`, `0x01`) — a deleted element has no value bytes
+       (`HAS_EMPTY_VALUE_MASK`'s own comment at `Cell.java:264` calls out the tombstone case).
+- **When a value IS present, it is unsigned-VInt-length-prefixed even for a fixed-width element
+  type** — `list<int>` exactly as `list<text>`. `Cell.Serializer.serialize` writes it as
+  `header.getType(column).writeValue(cell.value(), cell.accessor(), out)` (`Cell.java:303-304`), and
   `header.getType(column)` yields the **column's** type — the *collection* type, never the element
   type (`SerializationHeader.java:160-163`; the header's per-column map is built from `column.type`,
   `:250-257`). `ListType`, `SetType`, `MapType`, and their `CollectionType` base do **not** override
   `valueLengthIfFixed()`, so they inherit `AbstractType`'s `VARIABLE_LENGTH = -1`
-  (`AbstractType.java:62`, `:490-493`). `AbstractType.writeValue` therefore always takes the `else`
+  (`AbstractType.java:62`, `:490-493`). `AbstractType.writeValue` therefore takes the `else`
   branch → `accessor.writeWithVIntLength(value, out)` (`:550-552`) →
   `out.writeUnsignedVInt32(size(value))` + bytes (`ValueAccessor.java:171-175`).
-- **The one real exception — a non-frozen `set<T>` cell has no value bytes at all**, and it is
-  **flag-driven, not fixed-width-driven**. The element lives in the cell path, and
-  `SetType.valueComparator()` is `EmptyType.instance` (`SetType.java:106-109`), so `cell.valueSize()`
-  is 0, the cell sets `HAS_EMPTY_VALUE_MASK` (`0x04`), and `writeValue` is never called
-  (`Cell.java:271-277` write side; the reader mirrors it at `:310`, `:329-339`). No length and no
-  value are written or read.
+
+Cassandra's own layout comment states both conditions together: the value size "is present unless
+either the cell has the `HAS_EMPTY_VALUE_MASK`, or the value for columns of this type have a fixed
+length" (`Cell.java:254-255`). For a collection cell the second condition can never fire, so the
+flag is the only gate.
 
 > **Common misreading.** "Fixed-width types skip the length prefix" is a genuine Cassandra rule, but
 > it lives one level down — at the **simple (non-collection) cell**, where `header.getType(column)` is
@@ -219,14 +237,17 @@ fixed-width:**
 > `Int32Type.java:156-159`). For a complex/collection cell the same call returns the collection type,
 > which never overrides it, so the raw-bytes branch at `AbstractType.java:538-543` can never fire for
 > a collection cell. Reading `list<int>` as raw 4-byte values silently desynchronizes the cell stream.
+> The mirror-image misreading is just as costly: reading a length VInt for a cell whose flags carry
+> `HAS_EMPTY_VALUE` — a `map<text,text>` entry with an `''` value, for instance — consumes the *next*
+> cell's flag byte as a length. **Always branch on the flag first.**
 
 **Cell Path and Value by Collection Type**:
 
 | Collection Type | cell_path (always unsigned-VInt length + bytes) | cell_value | Value framing |
 |-----------------|-----------------------------------------------|------------|---------------|
-| `list<T>` | TimeUUID (16 bytes) | Serialized element | Unsigned-VInt length + bytes, whether `T` is fixed- or variable-width |
-| `set<T>` | Serialized element | Empty (0 bytes) | None — `HAS_EMPTY_VALUE_MASK` set, no length and no value bytes |
-| `map<K,V>` | Serialized key | Serialized value | Unsigned-VInt length + bytes, whether `V` is fixed- or variable-width |
+| `list<T>` | TimeUUID (16 bytes) | Serialized element | Unsigned-VInt length + bytes whether `T` is fixed- or variable-width — **unless** `HAS_EMPTY_VALUE` is set (zero-length element, or tombstone), then nothing |
+| `set<T>` | Serialized element | Empty (0 bytes) | None — `HAS_EMPTY_VALUE_MASK` always set, no length and no value bytes |
+| `map<K,V>` | Serialized key | Serialized value | Unsigned-VInt length + bytes whether `V` is fixed- or variable-width — **unless** `HAS_EMPTY_VALUE` is set (e.g. value `''`, or tombstone), then nothing |
 
 **List Element Ordering**:
 
@@ -251,10 +272,15 @@ length prefix on a non-frozen collection cell.
 
 Sets use the element value itself as the `cell_path` for efficient membership testing. The
 `cell_value` is always empty — `SetType.valueComparator()` is `EmptyType.instance`
-(`SetType.java:106-109`) — so the cell sets `HAS_EMPTY_VALUE_MASK` (`0x04`) and writes zero value
-bytes (`Cell.java:264`, `:271-277`, `:303-304`). This lets Cassandra check set membership by looking
-for a cell with a matching path. Note this omission is driven by the **flag**, not by the element
-type's width: a `set<int>` and a `set<text>` both carry no value bytes.
+(`SetType.java:106-109`) — so `cell.valueSize()` is 0, the cell sets `HAS_EMPTY_VALUE_MASK` (`0x04`)
+and writes zero value bytes (`Cell.java:264`, `:271`, `:277-278`, `:303-304`). This lets Cassandra
+check set membership by looking for a cell with a matching path.
+
+A `set<T>` is **not** a special case in the serializer — it is simply the collection whose values are
+*always* zero-length, so it hits the general `HAS_EMPTY_VALUE` path on every cell. Nothing about `set`
+is type-cased: the same code path omits the value for a `map<text,text>` entry whose value is `''`.
+And the omission is driven by the **flag**, not by the element type's width: a `set<int>` and a
+`set<text>` both carry no value bytes.
 
 **Example** (`set<text>`, 2 elements) — path length-prefixed, value absent entirely:
 ```
@@ -292,15 +318,40 @@ A fixed-width *value* type changes nothing. Verbatim bytes for `metadata_map map
 cell flags
 ```
 
+**An empty map value takes the flag path, not a `0x00` length.** Because `HAS_EMPTY_VALUE` is decided
+by `cell.valueSize() > 0` (`Cell.java:271`), an entry whose value is the empty string is framed like a
+set element — path present, value gone entirely. Schematically, for `map<text,text>` entry
+`"k" -> ''`:
+```
+0C  01 6B
+^   ^  ^
+|   |  "k"
+|   VInt path len = 1
+cell flags (0x08 USE_ROW_TIMESTAMP | 0x04 HAS_EMPTY_VALUE) — no value length, no value bytes
+```
+A reader that unconditionally reads a value-length VInt here consumes the next cell's flag byte and
+desynchronizes. Note this is distinct from a NULL: a NULL map *value* is not expressible in CQL, and a
+NULL top-level column is represented by absence from the column subset, never by a cell.
+
 **Implementation References** (CQLite):
 - Frozen collections: `cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs::serialize_value_into()`
   (its `write_len_prefixed_i32` helper emits the fixed 4-byte BE prefixes);
   reader `.../reader/parsing/row_decoder/frozen.rs::parse_frozen_{list,set,map}_value()`
-- Non-frozen collections: `.../writer/data_writer/complex.rs::write_{list,set,map}_complex_cells()`
-  — unconditionally emits the value length VInt (`encode_unsigned(value_scratch.len() …)`,
-  `complex.rs:747`, `:966`), guarded only by the `CELL_HAS_EMPTY_VALUE` flag, never by element width;
-  reader `.../reader/parsing/row_decoder/complex_column.rs::parse_complex_cell_value()` (`:973`)
-  unconditionally `parse_vuint`s it (`:1136`). Both sides match Cassandra.
+- Non-frozen collections — **the length prefix is never element-width-driven on either side**, but the
+  two writer paths differ on the `HAS_EMPTY_VALUE` gate:
+  - Reader `.../reader/parsing/row_decoder/complex_column.rs::parse_complex_cell_value()` (`:973`)
+    is correct: it decodes the flag byte (`has_empty_value = (flags & 0x04) != 0`, `:1012`) and only
+    `parse_vuint`s a value length when neither `IS_DELETED` nor `HAS_EMPTY_VALUE` is set
+    (`:1128`, `:1136`).
+  - Per-element writer `.../writer/data_writer/complex.rs::write_complex_element_cell()` (`:863`) is
+    correct: it derives the flag (`:884-891`) and emits the length + bytes only when
+    `HAS_EMPTY_VALUE` is clear (`:960-969`). `write_set_complex_cells()` (`:594`) likewise always
+    sets `CELL_HAS_EMPTY_VALUE` and writes no value.
+  - **Known gap (issue #2970)**: the *whole-column* writers `write_map_complex_cells()` (`:646`) and
+    `write_list_complex_cells()` (`:705`) hardcode `flags = 0` (`:683`, `:737`) and emit
+    `encode_unsigned(len)` unconditionally (`:694`, `:747`). A zero-length element value therefore
+    goes out as `flags=0` + `0x00` where Cassandra writes `flags=0x04` + nothing — a strict Cassandra
+    reader desynchronizes. See Appendix F.
 - The fixed-width no-prefix rule lives on the **simple**-cell path:
   `.../writer/data_writer/encoding.rs::cell_value_uses_length_prefix()` (`:461`, issue #1672), used by
   `write_cell_value_into()` (`:353`) which `cells.rs` calls for simple cells (`:63`, `:108`, `:200`,

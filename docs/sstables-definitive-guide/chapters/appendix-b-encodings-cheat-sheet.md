@@ -33,22 +33,31 @@ Upstream anchors (Cassandra 5.0.8):
 Rules of thumb:
 - Length prefixes that *are* present are **unsigned** VInt (`ValueAccessor.writeWithVIntLength` →
   `writeUnsignedVInt32`, `ValueAccessor.java:171-175`; paths via `ByteBufferUtil.writeWithVIntLength`,
-  `CollectionType.java:361-366`). That covers `text`/`blob` simple cell values and **both** the path and
-  the value of **every** non-frozen collection cell.
-- **A non-frozen collection cell VALUE is ALWAYS unsigned-VInt-length-prefixed — even for a fixed-width
-  element type** (`list<int>`, `map<text,bigint>`). `Cell.Serializer.serialize` writes it as
+  `CollectionType.java:361-366`). That covers `text`/`blob` simple cell values, the path of **every**
+  non-frozen collection cell, and the value of every non-frozen collection cell that *has* one.
+- **A non-frozen collection cell PATH is always length-prefixed; its VALUE is length-prefixed *iff*
+  `HAS_EMPTY_VALUE` (`0x04`) is clear.** That flag is **size-driven, not type-driven**:
+  `Cell.Serializer.serialize` sets it from `cell.valueSize() > 0` (`Cell.java:271`, `:277-278`) and
+  writes the value only `if (hasValue)` (`:303-304`); the reader mirrors it at `:310`, `:329-339`
+  (`skip` at `:381`, `:399-400`). So **no length VInt and no bytes** are written for a zero-length
+  value — the flag replaces the `0x00` a reader might expect. Three instances of the one rule:
+  a non-frozen `set<T>` element (datum lives in the path; `SetType.valueComparator()` is
+  `EmptyType.instance`, `SetType.java:106-109` → always zero-length); **any** zero-length value
+  (a `map<text,text>` entry with value `''`, an empty blob in `list<blob>`); an element **tombstone**
+  (`IS_DELETED`, `0x01` — see the mask's own comment at `Cell.java:264`).
+- **When a value IS present it is unsigned-VInt-length-prefixed even for a fixed-width element type**
+  (`list<int>`, `map<text,bigint>`). `Cell.Serializer.serialize` writes it as
   `header.getType(column).writeValue(...)` (`Cell.java:303-304`), and `header.getType(column)` is the
   **column's** type — the collection type, not the element type (`SerializationHeader.java:160-163`,
   `:250-257`). `CollectionType`/`ListType`/`MapType`/`SetType` never override `valueLengthIfFixed()`, so
-  they are `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`) and `writeValue` always takes the
+  they are `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`) and `writeValue` takes the
   `writeWithVIntLength` branch (`:550-552`).
 - **Where the fixed-width no-prefix rule DOES apply: SIMPLE (non-collection) cells.** Only scalar types
   override `valueLengthIfFixed()` (e.g. `Int32Type` → `4`, `Int32Type.java:156-159`), so only a simple
-  cell can take the raw-bytes branch (`AbstractType.java:538-543`).
-- **One real collection exception, flag-driven not width-driven**: a non-frozen `set<T>` cell has **no
-  value bytes at all** — the element is the path, `SetType.valueComparator()` is `EmptyType.instance`
-  (`SetType.java:106-109`), so `HAS_EMPTY_VALUE_MASK` (`0x04`) is set and no length/value is written or
-  read (`Cell.java:271-277`, `:303-304`, `:310`).
+  cell can take the raw-bytes branch (`AbstractType.java:538-543`). Cassandra's layout comment states
+  both gates at once — the value size "is present unless either the cell has the
+  `HAS_EMPTY_VALUE_MASK`, or the value for columns of this type have a fixed length"
+  (`Cell.java:254-255`); for a collection cell only the first can ever fire.
 - **Exception — fixed 4-byte BE i32, not VInt**: tuple/UDT field lengths and *frozen* collection
   counts/element lengths (`TupleType.buildValue`, `CollectionSerializer.writeCollectionSize`).
 - Every VInt in `Data.db` is unsigned **except** the three components of a serialized `DurationType`
