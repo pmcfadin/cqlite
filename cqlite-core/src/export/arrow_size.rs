@@ -69,6 +69,18 @@
 //! content-only. None is Arrow-aware, and an under-estimator cannot found a
 //! memory bound.
 //!
+//! # Cross-issue dependency: a per-stream MEMORY BOUND rests on that contract
+//!
+//! `cqlite-flight`'s per-stream in-flight egress ceiling (issue #2821,
+//! `cqlite-flight/src/egress_credit.rs`) reserves credit for a batch BEFORE it is
+//! materialized, converting THIS estimate into Arrow capacity bytes with
+//! `worst_case_batch_capacity_bytes`. The reservation is a true upper bound on
+//! the realized `get_array_memory_size()` ONLY while the conservatism above
+//! holds; weaken it and that published memory bound is silently voided (the
+//! governor then fails closed with a terminal internal error rather than
+//! exceeding its pool, but the stream breaks). Any change here that could make
+//! the estimate non-conservative must be made together with that consumer.
+//!
 //! # No-heuristics (issue #28)
 //!
 //! Width is derived from the authoritative `ColumnInfo` CQL/flat types plus the

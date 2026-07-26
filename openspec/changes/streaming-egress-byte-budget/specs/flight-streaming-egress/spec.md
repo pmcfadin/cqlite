@@ -252,16 +252,31 @@ reserve-before-materialize eliminated on the producer side, and making the true 
 `max(ceiling, one maximum batch) + one maximum batch`.
 
 The stream SHALL therefore hold the yielded batch's permit in a single deferred slot and release it
-only when the NEXT batch is yielded (and on `Drop`). At most one batch is downstream of the credit
-boundary at any time, and it is still charged — which is what makes `max(ceiling, one maximum
-batch)` true as stated.
+only when the consumer comes back for the NEXT batch — i.e. at the TOP of the following `poll_next`,
+before the inner stream is polled — and on `Drop`. At most one batch is downstream of the credit
+boundary at any time, and it is still charged, which is what makes `max(ceiling, one maximum batch)`
+true as stated.
+
+**That release point, and not "when the next batch is yielded", is required in BOTH directions:**
+
+- *Correctness.* `FlightDataEncoder::poll_next` (arrow-flight 53.4.1, `encode.rs:400-436`) polls its
+  inner stream ONLY when its `FlightData` queue is empty — that is, after `encode_batch` has
+  consumed and dropped the previous `RecordBatch`. Releasing at the top of the next poll therefore
+  releases at the first instant the previous batch is provably gone, which is strictly TIGHTER than
+  releasing when the next batch is yielded.
+- *Liveness.* Releasing only when the next batch is YIELDED deadlocks any stream whose pool is one
+  batch deep: the deferred permit holds the whole pool, the producer parks reserving the next batch,
+  and the consumer waits for that batch. At the merged defaults a worst-case full batch is exactly
+  the whole pool, so that cycle is reachable in the DEFAULT configuration, not merely a corner case.
+  A test SHALL cover this (a ceiling smaller than one batch, driven end to end): the release-on-yield
+  variant hangs on it.
 
 #### Scenario: the yielded batch's credit is still charged while the encoder holds it
 
-- **GIVEN** a stream whose consumer has taken exactly one batch
+- **GIVEN** a stream whose consumer has taken exactly one batch and has not polled again
 - **WHEN** the charged in-flight total is observed
 - **THEN** it still includes the just-yielded batch's capacity — the permit has not been released —
-  and it is released only once the following batch is yielded
+  and it is released only once the consumer polls for the following batch
 
 #### Scenario: dropping the stream releases the deferred permit
 
@@ -302,11 +317,11 @@ side, so no measurement asymmetry can drift the pool.
 
 The `cqlite-flight` server SHALL expose the per-stream egress byte ceiling as a
 `--max-inflight-egress-bytes` argument backed by the `CQLITE_MAX_INFLIGHT_EGRESS_BYTES` environment
-variable and a `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` constant denominated in **CAPACITY bytes**,
-currently **6 MiB** pending the owner's re-evaluation under design A (design D4a recommends 8 MiB:
-with the additive term gone, any ceiling ≤ 8 MiB yields the same `max(...)` worst case while a
-larger one buys buffering for free). Whatever value is chosen, the composition test above SHALL
-hold. Plumbing mirrors the merged `--max-batch-bytes` / `CQLITE_MAX_BATCH_BYTES` / `DEFAULT_MAX_BATCH_BYTES`
+variable and a `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` constant denominated in **CAPACITY bytes**, set to **8 MiB**
+(the owner's decision under design A / D4a: with the additive term gone, every ceiling ≤ 8 MiB
+yields the IDENTICAL `max(...)` worst case, so 6 MiB is strictly dominated — it buys nothing in B4
+terms while making the deadlock clamp the normal case on exactly the wide-row workloads this change
+exists for). The composition test above SHALL hold at that value. Plumbing mirrors the merged `--max-batch-bytes` / `CQLITE_MAX_BATCH_BYTES` / `DEFAULT_MAX_BATCH_BYTES`
 plumbing precedent from issue #2825 (itself modelled on `--max-concurrent-scans`).
 
 The value SHALL be plumbed const → clap `Args` → a `CqliteFlightService` field set by a builder
@@ -339,10 +354,10 @@ embedder.
 
 - **WHEN** neither the flag nor the environment variable is set
 - **THEN** the ceiling is `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`, denominated in capacity bytes
-- **AND** composing it with #2825's merged 4 MiB payload cap through
-  `worst_case_batch_capacity_bytes` gives `max(ceiling, 2 × 4 MiB + slack) ≈ 8 MiB` of capacity for
-  the guaranteed bound at any ceiling ≤ 8 MiB — inside the ratified **B4 ≤16Mi per-query working
-  set at concurrency 1** with ~8 MiB of headroom
+- **AND** that constant is **8 MiB**, so composing it with #2825's merged 4 MiB payload cap through
+  `worst_case_batch_capacity_bytes` gives `max(8 MiB, 2 × 4 MiB + slack) ≈ 8 MiB` of capacity for
+  the guaranteed bound — inside the ratified **B4 ≤16Mi per-query working set at concurrency 1**
+  with ~8 MiB of headroom
 
 #### Scenario: an embedder can opt out to an unbounded budget
 

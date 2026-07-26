@@ -76,7 +76,7 @@ wide table at any value of K.
   residency that remains outside the governed set (the producer's `Vec<QueryRow>` row buffer, a
   single row wider than the per-batch cap, the aggregate route) is named rather than implied away.
 - **A new configuration knob mirroring the merged `--max-batch-bytes` precedent**:
-  `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` (**6 MiB of capacity**, pending the D4a re-evaluation) + `CQLITE_MAX_INFLIGHT_EGRESS_BYTES`
+  `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` (**8 MiB of capacity**, the owner's D4a decision) + `CQLITE_MAX_INFLIGHT_EGRESS_BYTES`
   env const + a `--max-inflight-egress-bytes` clap arg, plumbed const → `Args` → service field
   (builder mirroring `with_max_batch_bytes`) → the sole production spawn site
   `spawn_streaming_from_readers` → `spawn_streaming` → `ChannelSink` → the producer's reservation
@@ -85,9 +85,9 @@ wide table at any value of K.
 - **The composition, in capacity currency**: `max(ceiling, 2 × 4 MiB payload cap + slack) ≈ 8 MiB`
   for any ceiling ≤ 8 MiB — inside the ratified B4 ≤16Mi per-query working set at concurrency 1 with
   ~8 MiB headroom. A test asserts it from the imported constants so neither can drift out from under
-  B4. **Open parameter for the owner**: with the additive term gone, 6 MiB is strictly dominated by
-  8 MiB (same worst case, but at 6 MiB every full-size batch trips the deadlock clamp and the stream
-  runs lock-step) — design D4a recommends 8 MiB.
+  B4. **Owner decision, APPLIED**: the shipped default is 8 MiB — with the additive term gone,
+  6 MiB is strictly dominated (same worst case, but at 6 MiB every full-size batch trips the
+  deadlock clamp and the stream runs lock-step). See design D4a.
 - **Composition, not replacement.** The byte ceiling sits alongside the 4-deep batch-count channel,
   #2825's per-batch cap, and admission K; whichever binds first wins. No existing bound is removed.
 - **The `DO_GET_CHANNEL_CAPACITY` doc comment is corrected and revised** to state the real

@@ -656,12 +656,23 @@ Format:
   (`arrow_convert.rs`'s `checked_value_bytes` only *rejects* a cumulative column
   length above `i32::MAX`). The slack term is denominated in Arrow array NODES:
   a `map<text,text>` column is four nodes, not one.
-- **B4 composition for issue #2821.** The per-stream in-flight ceiling must be
-  budgeted in the SAME capacity currency `streaming.rs` already meters, giving
-  `ceiling + one maximum batch`. With a 6 MiB ceiling: `6 + 8 = 14 MiB < 16Mi`,
-  inside B4 at concurrency 1. The naive `4 + 8 = 12 MiB` reading mixes payload and
-  capacity — a 4 MiB *payload* cap is an 8 MiB *capacity* batch, so an 8 MiB
-  ceiling would land at exactly 16 MiB with zero headroom.
+- **B4 composition — DELIVERED by issue #2821.** The per-stream in-flight
+  ceiling is budgeted in the SAME capacity currency `streaming.rs` meters
+  (`cqlite-flight/src/egress_credit.rs`, `--max-inflight-egress-bytes`, default
+  8 MiB), and the enforced bound is
+  `max(ceiling, one maximum batch) = max(8 MiB, 2 × 4 MiB + slack) ≈ 8 MiB < 16Mi`
+  — inside B4 at concurrency 1 with ~8 MiB of headroom. It is a `max`, not the
+  `ceiling + one maximum batch` sum this entry originally projected:
+  **reserve-before-materialize removed the additive term.** Credit is acquired at
+  the batch boundary BEFORE `rows_to_record_batch` runs and trued up DOWN to the
+  realized `get_array_memory_size()`, so a parked producer can no longer hold a
+  materialized-but-uncharged batch — the term that made the bound additive. What
+  remains is the deadlock-avoidance clamp: a batch larger than the whole ceiling
+  takes the entire pool and is then the only thing resident, hence `max`. The
+  payload-vs-capacity correction that motivates the currency still stands: the
+  naive `4 + 8 = 12 MiB` reading mixes payload with capacity — a 4 MiB *payload*
+  cap is an 8 MiB *capacity* batch — which is why every conversion goes through
+  `worst_case_batch_capacity_bytes`, never a bare factor.
 - **Sizing the default.** 4 MiB keeps the row-cap binding on every narrow shape
   measured in-tree (`issue_1494` fixture ~20 B/row → ~192 KiB/batch, ~22× headroom;
   the field model at ~180 B/row → 1.47 MB, ~2.9×; even the pessimistic 300 B/row

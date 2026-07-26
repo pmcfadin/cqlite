@@ -78,10 +78,8 @@ impl From<ProducerError> for Status {
             // A panic on the blocking pool (issue #1476, roborev B1) is a server
             // fault surfaced mid-stream, same class as any other internal error.
             | ProducerError::Panicked { .. }
-            // A violated egress-credit invariant (issue #2821): the realized
-            // batch capacity exceeded its pre-materialization reservation, so
-            // the published per-stream memory bound no longer holds. Fail closed
-            // as an internal fault rather than emit on a false account.
+            // A violated egress-credit invariant (issue #2821) — fail closed as
+            // an internal fault rather than emit on a false account.
             | ProducerError::EgressCredit(_) => Status::internal(msg),
         }
     }
@@ -312,13 +310,10 @@ pub struct CqliteFlightService {
     /// `batch_size` or this cap trips first. Defaults to
     /// [`DEFAULT_MAX_BATCH_BYTES`] on every construction path.
     max_batch_bytes: usize,
-    /// Per-stream in-flight egress CAPACITY byte ceiling (issue #2821) handed to
-    /// every streaming `do_get` this service serves. Distinct currency from
-    /// [`Self::max_batch_bytes`]: that caps ONE batch in Arrow PAYLOAD bytes,
-    /// this caps how many `get_array_memory_size()` bytes may be in flight on one
-    /// stream. Defaults to
-    /// [`crate::egress_credit::DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`] on every
-    /// construction path.
+    /// Per-stream in-flight egress CAPACITY byte ceiling (issue #2821), handed
+    /// to every streaming `do_get`. A DIFFERENT currency from
+    /// [`Self::max_batch_bytes`] (Arrow PAYLOAD, one batch). Defaults to
+    /// `egress_credit::DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` everywhere.
     egress_budget: EgressBudget,
 }
 
@@ -356,11 +351,9 @@ impl CqliteFlightService {
             // every narrow shape. Opt out explicitly with
             // `with_max_batch_bytes(usize::MAX)`.
             max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
-            // Issue #2821: the egress byte ceiling follows #2825's posture, not
-            // admission's — a byte credit can only ever DELAY a producer, never
-            // turn a working query into an error, so an unbounded egress stream
-            // is a memory hazard rather than a policy choice. Opt out explicitly
-            // with `with_egress_budget(EgressBudget::unbounded())`.
+            // Issue #2821: follows #2825's posture, not admission's — a byte
+            // credit can only DELAY a producer, never turn a working query into
+            // an error. Opt out with `with_egress_budget(EgressBudget::unbounded())`.
             egress_budget: EgressBudget::default(),
         }
     }
@@ -383,15 +376,10 @@ impl CqliteFlightService {
     }
 
     /// Override the per-stream in-flight egress **capacity** byte ceiling (issue
-    /// #2821) — the wiring point for the `--max-inflight-egress-bytes` /
-    /// `CQLITE_MAX_INFLIGHT_EGRESS_BYTES` knob, and the explicit opt-out for an
-    /// embedder that wants the pre-#2821 batch-count-only bound
-    /// ([`EgressBudget::unbounded`]).
-    ///
-    /// The ceiling is already active at
-    /// [`crate::egress_credit::DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`] from
-    /// [`Self::new`]/[`Self::with_admission`]; this changes the configured value.
-    /// Consumes and returns `self` for chaining.
+    /// #2821) — the wiring point for `--max-inflight-egress-bytes` /
+    /// `CQLITE_MAX_INFLIGHT_EGRESS_BYTES`, and the explicit
+    /// [`EgressBudget::unbounded`] opt-out for an embedder. Already active at the
+    /// default from [`Self::new`]/[`Self::with_admission`].
     pub fn with_egress_budget(mut self, budget: EgressBudget) -> Self {
         self.egress_budget = budget;
         self

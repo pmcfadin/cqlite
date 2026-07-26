@@ -79,6 +79,20 @@ fn narrow_setup() -> (
     (temp, producer, paths, schema_ref)
 }
 
+/// Decode every record batch off a real `do_get` response stream.
+// The stream item's `Err` is `tonic::Status`, whose size is fixed by the
+// arrow-flight `FlightService` contract (#2856).
+#[allow(clippy::result_large_err)]
+async fn decode_all(stream: DoGetStream) -> Vec<RecordBatch> {
+    let mapped = stream.map(|r| r.map_err(|s| FlightError::ExternalError(Box::new(s))));
+    let mut decoded = arrow_flight::decode::FlightRecordBatchStream::new_from_flight_data(mapped);
+    let mut out = Vec::new();
+    while let Some(b) = decoded.next().await {
+        out.push(b.expect("decode"));
+    }
+    out
+}
+
 /// The guaranteed contract, computed the SAME way the governor's doc states it.
 fn contract_bytes(ceiling_bytes: u64, largest_observed_batch: u64) -> u64 {
     ceiling_bytes.max(largest_observed_batch)
@@ -239,13 +253,7 @@ fn a_full_drain_stays_bounded_and_matches_the_collect_path() {
             CancelFlag::new(),
             timer(),
         );
-        let mapped = stream.map(|r| r.map_err(|s| FlightError::ExternalError(Box::new(s))));
-        let mut decoded =
-            arrow_flight::decode::FlightRecordBatchStream::new_from_flight_data(mapped);
-        let mut batches = Vec::new();
-        while let Some(b) = decoded.next().await {
-            batches.push(b.expect("decode"));
-        }
+        let batches = decode_all(stream).await;
         let _ = handle.await;
 
         let obs = &pr.egress;
@@ -375,13 +383,7 @@ fn a_batch_larger_than_the_whole_ceiling_is_still_delivered() {
             CancelFlag::new(),
             timer(),
         );
-        let mapped = stream.map(|r| r.map_err(|s| FlightError::ExternalError(Box::new(s))));
-        let mut decoded =
-            arrow_flight::decode::FlightRecordBatchStream::new_from_flight_data(mapped);
-        let mut rows = 0usize;
-        while let Some(b) = decoded.next().await {
-            rows += b.expect("decode").num_rows();
-        }
+        let rows: usize = decode_all(stream).await.iter().map(|b| b.num_rows()).sum();
         let _ = handle.await;
 
         assert_eq!(

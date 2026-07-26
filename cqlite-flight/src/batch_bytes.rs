@@ -63,34 +63,39 @@
 //! (below), so a batch whose rows all fit is cut BEFORE the row that would
 //! cross, never after it.
 //!
-//! # What this change guarantees, and what it does NOT (issue #2821)
+//! # What this bounds, and how it composes with the per-stream ceiling
 //!
-//! **Guaranteed here, today: a bound on ONE batch.** At the 4 MiB default, over
-//! a schema whose rows fit the cap, an emitted batch is ≤4 MiB of payload and
-//! therefore ≤`2 × 4 MiB = 8 MiB` of capacity — see
-//! [`worst_case_batch_capacity_bytes`], and add the wider row's bytes for a
-//! deployment whose rows can individually exceed the cap.
+//! **Bounded here: ONE batch.** At the 4 MiB default, over a schema whose rows
+//! fit the cap, an emitted batch is ≤4 MiB of payload and therefore
+//! ≤`2 × 4 MiB = 8 MiB` of capacity — see [`worst_case_batch_capacity_bytes`],
+//! and add the wider row's bytes for a deployment whose rows can individually
+//! exceed the cap.
 //!
-//! **NOT guaranteed here: per-stream egress residency.** The `do_get` path is
-//! still **count**-bounded, not byte-bounded: `streaming.rs`'s
-//! `DO_GET_CHANNEL_CAPACITY` is 4 batches plus up to ~3 more in flight
-//! (`IN_FLIGHT_ALLOWANCE`), so worst-case resident egress is
-//! `~7 × 8 MiB ≈ 56 MiB` per stream, NOT 14 MiB. The
-//! `get_array_memory_size()` reading that `streaming.rs` takes per batch is fed
-//! to **metrics only** — no admission or backpressure decision consumes it — so
-//! it does not bound residency. What this change does for that number is make it
-//! *finite and stated*: before it, one batch was `batch_size × row_width`, so the
-//! product was unbounded in schema shape.
+//! **Bounded next door: per-stream egress RESIDENCY.** Issue #2821 delivered
+//! `cqlite_flight::egress_credit` — a per-stream in-flight ceiling denominated in
+//! **capacity** bytes (`--max-inflight-egress-bytes`, default
+//! `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` = 8 MiB), enforced by reserving credit
+//! BEFORE each batch is materialized and releasing it when the batch has left the
+//! stream. So `do_get` is no longer merely count-bounded: the
+//! `get_array_memory_size()` reading `streaming.rs` takes is still fed to metrics,
+//! but the reservation path now makes a real backpressure decision in the same
+//! currency.
 //!
-//! **The composition becomes true only once #2821 lands.** When #2821 enforces a
-//! per-stream in-flight ceiling denominated in **capacity** currency, its
-//! guaranteed bound is `ceiling + one maximum batch`; with a 6 MiB ceiling that
-//! is `6 + 8 = 14 MiB < 16Mi`, inside B4 at concurrency 1. (The naive
-//! `4 + 8 = 12 MiB` reading of the task framing mixes payload and capacity: a
-//! 4 MiB *payload* cap is an 8 MiB *capacity* batch, so an 8 MiB ceiling would
-//! land at exactly 16 MiB with zero headroom.) Until that ceiling exists and
-//! actually gates production, the 14 MiB figure is a TARGET for the dependent
-//! issue, not a property of this tree.
+//! **The delivered composition, in capacity currency:**
+//!
+//! ```text
+//! peak in-flight egress capacity <= max(ceiling, one maximum batch)
+//!                                 = max(8 MiB, 2 * 4 MiB + 1 KiB * nodes)
+//!                                 ~ 8 MiB   <<  16 MiB (B4 at concurrency 1)
+//! ```
+//!
+//! It is a `max`, not the `ceiling + one maximum batch` sum this module's
+//! pre-#2821 text projected: reserve-before-materialize removed the additive term
+//! (which existed only because a parked producer could hold a materialized but
+//! UNCHARGED batch). The `max` survives because a batch larger than the whole
+//! ceiling is clamped to the pool total and is then the only thing resident.
+//! (The naive `4 + 8 = 12 MiB` reading of the task framing mixes payload and
+//! capacity: a 4 MiB *payload* cap is an 8 MiB *capacity* batch.)
 //!
 //! # Liveness
 //!
@@ -336,10 +341,11 @@ pub fn split_rows_into_batches<'a>(
 ///     + BATCH_BYTES_PER_COLUMN_SLACK * n_array_nodes
 /// ```
 ///
-/// This is the quantity issue #2821's per-stream ceiling will compose with to
-/// state its `ceiling + one maximum batch` bound against B4's ≤16Mi. Until that
-/// ceiling lands, egress residency is count-bounded, not byte-bounded — see the
-/// module documentation.
+/// This is the quantity issue #2821's per-stream ceiling composes with to state
+/// its delivered `max(ceiling, one maximum batch)` bound against B4's ≤16Mi, and
+/// the exact conversion `cqlite_flight::egress_credit` uses to turn a payload
+/// estimate into the pre-materialization capacity reservation — see the module
+/// documentation.
 ///
 /// The `max(..)` term is honest, not slack. The boundary is test-then-push, so a
 /// batch is cut BEFORE the row that would cross the cap — but a row cannot be

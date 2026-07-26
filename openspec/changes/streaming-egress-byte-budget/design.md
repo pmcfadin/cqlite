@@ -67,7 +67,7 @@ headroom, and unfixable by tuning the ceiling because the binding term is `2 × 
 Reserving first deletes that term outright (see D2).
 
 Mechanism: a shared `EgressCredit` backed by a `tokio::sync::Semaphore` whose permits are the
-ceiling expressed in a coarse unit (KiB) — a 6 MiB ceiling is 6144 permits, comfortably inside
+ceiling expressed in a coarse unit (KiB) — the 8 MiB default is 8192 permits, comfortably inside
 `Semaphore::MAX_PERMITS`, with rounding always **upward** (conservative). The producer acquires
 `ceil(reservation / 1KiB)` permits (clamped, see D2b) at the batch boundary and then `tx.reserve()`s
 the channel slot at emit, both in the **same biased `select!`** that already races
@@ -159,7 +159,8 @@ conservatism section naming this ceiling as a dependent consumer.
 ## D2b — The deadlock-avoidance clamp and the honest bound (the load-bearing decision)
 
 A single `RecordBatch` may be larger than the entire ceiling — at the merged defaults it routinely
-is (a full 4 MiB-payload batch is up to 8 MiB of capacity against a 6 MiB ceiling). A naive "acquire
+is (a full 4 MiB-payload batch is up to 8 MiB of capacity against an 8 MiB ceiling, and an operator
+may configure a far smaller one). A naive "acquire
 `n` permits from a pool of `N < n`" blocks forever: the stream wedges and the client hangs.
 
 **Rule: the governor MUST always admit at least one batch when zero bytes are in flight.**
@@ -183,7 +184,7 @@ one maximum batch (capacity)
   = 8 MiB + ~n KiB
 
 contract  = max(ceiling, one maximum batch)
-          = max(6 MiB, 8 MiB + ~n KiB)                   (or max(8, 8+~n KiB) at the D4a value)
+          = max(8 MiB, 8 MiB + ~n KiB)                   (8 MiB = the shipped D4a default)
           = 8 MiB + ~n KiB   <<   16 MiB  (ratified B4 per-query working set at concurrency 1)
 headroom  = ~8 MiB
 ```
@@ -219,11 +220,19 @@ instant it yielded a batch, that prefetched batch would be resident with its cre
 — reintroducing on the consumer side exactly the uncharged-resident-batch class D2 deleted on the
 producer side, and making the true bound `max(ceiling, max batch) + max batch` = 16 MiB. Instead
 `MeteredDoGetStream` holds the yielded batch's credit in a single `deferred: Option<EgressPermit>`
-slot and releases it when the NEXT batch is yielded (assigning the new permit drops the old). At
-most one batch is downstream of the credit boundary at any time, so the contract holds as stated.
-Cost: one batch's credit is held slightly longer — accepted, because a contract the code actually
-satisfies is worth more than a tighter one it does not. **This is the subtlest decision in the
-change; do not "simplify" it into release-on-yield.**
+slot and releases it at the TOP of the NEXT `poll_next`, before polling the inner stream. **This
+release point, not "when the next batch is yielded", is what implementation found to be required —
+in both directions.** *Correctness*: `FlightDataEncoder::poll_next` (arrow-flight 53.4.1,
+`encode.rs:400-436`) polls its inner stream ONLY when its `FlightData` queue is empty, i.e. after
+`encode_batch` consumed and dropped the previous `RecordBatch` — so the top of the next poll is the
+first instant the previous batch is provably gone, strictly tighter than release-on-next-yield.
+*Liveness*: release-on-next-yield DEADLOCKS whenever the pool is one batch deep (the deferred permit
+holds the whole pool → the producer parks reserving the next batch → the consumer waits for that
+batch). At the merged defaults a worst-case full batch is exactly the whole pool, so that cycle is
+reachable in the DEFAULT configuration; the end-to-end tiny-ceiling test hangs under that variant
+(verified by temporarily reverting the release point). At most one batch is downstream of the credit
+boundary at any time, so the contract holds as stated. **This is the subtlest decision in the change;
+do not "simplify" it into release-on-yield.**
 
 ## D3 — Credit release must be leak-proof on every termination path
 
@@ -251,7 +260,7 @@ exact amount that was charged.
 ## D4 — Configuration: mirror the merged `--max-batch-bytes` precedent
 
 ```
-DEFAULT_MAX_INFLIGHT_EGRESS_BYTES: usize = 6 * 1024 * 1024   // 6 MiB of CAPACITY bytes
+DEFAULT_MAX_INFLIGHT_EGRESS_BYTES: usize = 8 * 1024 * 1024   // 8 MiB of CAPACITY bytes
 ENV_MAX_INFLIGHT_EGRESS_BYTES: &str = "CQLITE_MAX_INFLIGHT_EGRESS_BYTES"
 --max-inflight-egress-bytes   #[arg(long, env = …, default_value_t = …)]
 ```
@@ -271,7 +280,7 @@ this change follows #2825: `new()` applies `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`, 
 out explicitly via `with_egress_budget(EgressBudget::unbounded())`. This is no longer a departure
 from precedent — it is the sibling of the merged one.
 
-## D4a — Re-evaluating the ceiling under design A: RECOMMEND 8 MiB (owner decision)
+## D4a — Re-evaluating the ceiling under design A: 8 MiB (owner decision, APPLIED)
 
 6 MiB was approved under the additive model (`ceiling + one max batch ≤ 16Mi` ⇒ ceiling ≤ 8, take 6
 for headroom). **That model is gone**, so the value must be re-derived rather than inherited.
@@ -299,8 +308,9 @@ Under `max(ceiling, one maximum batch)` with one maximum batch = 8 MiB + slack:
 4. Narrow shapes are governed by the 4-deep channel at both values (32 vs 42 batches ≫ 4), so
    neither value regresses the narrow path.
 
-Not applied unilaterally: the spec keeps the approved 6 MiB and this section is the recommendation.
-Either value satisfies the composition test, so switching is a one-constant change.
+**APPLIED**: the owner chose 8 MiB and `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` ships at that value; the
+spec text and the proposal were updated to match. Either value satisfies the composition test, so a
+future change remains a one-constant change.
 
 **Why the ceiling is bounded at all.** B4 ratifies ≤16Mi as the per-query working set at concurrency
 1; `max(ceiling, 8 MiB + slack) ≤ 16 MiB` gives a hard ceiling-of-the-ceiling of 16 MiB, and the
