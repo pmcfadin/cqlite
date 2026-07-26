@@ -246,9 +246,15 @@ marker. Composition rules:
 
 Three hooks, mirroring #2874 exactly:
 
-1. **Start** — immediately after summary-path resolution / sentinel write (:1760–1769), before
-   `run_lite` (:4243), `run_delta` (:4250) and `acquire_gate_slot` (:4257) so all guarded modes are
-   covered by one capture. Stored as `$LOG_DIR/tree-identity.start` + `TREE_START_DIGEST`.
+1. **Start** — immediately after summary-path resolution / sentinel write, before `run_lite`,
+   `run_delta` and `acquire_gate_slot`, so all guarded modes are covered by one capture. Stored as
+   `$LOG_DIR/tree-identity.start` + `TREE_START_DIGEST`. The FULL gate then **re-captures** right
+   after `acquire_gate_slot` returns (`_tree_recapture_after_slot`): with the machine cap pinned to
+   1, a gate can sit in `waiting for gate slot` for the length of another 20–25 min run, during
+   which it has executed nothing and certifies nothing — the certification window must begin when
+   work begins. `--lite`/`--delta` exit before that call site and keep the early capture; the
+   startup sentinel deliberately keeps the pre-queue `tree-start:` (it records the tree the process
+   began on).
 2. **Component boundary** — inside `record_result` (:2251), alongside `_assert_summary_integrity`.
    On the MAIN foreground lane a mismatch stops the run immediately with the named FAIL block (the
    ~1 h saving). Off the foreground lane (`[ "${BASHPID:-$$}" != "$$" ]`, the SIDE-lane subshells) it
@@ -263,6 +269,15 @@ Three hooks, mirroring #2874 exactly:
 Ordering with the existing guard: `summary-integrity` (who owns the artifact) is evaluated first,
 then `tree-integrity` (what the artifact describes); if both fire, both lines appear and `RESULT`
 is `FAIL` once.
+
+**Every capture validates itself before anyone compares it.** `_tree_identity` returns rc 2 — a
+fail-closed condition distinct from rc 1 "no git worktree, SKIP" — when the manifest's first record
+is not `H<TAB><head>` or the digest is not a full-length hex hash. The printed identity is then
+split by `_tree_split_identity`, never by `IFS=$'\t' read` (tab is IFS *whitespace*, so `read`
+collapses an empty field and shifts later fields left), and each field is re-validated. The
+comparison is over **head + dirty + digest**, never the digest alone. Without all three, a hash tool
+that merely exits non-zero produced an empty digest that compared EQUAL and stamped
+`tree-integrity: PASS` on a mutated tree.
 
 ## 9. Test design (discriminating by construction)
 

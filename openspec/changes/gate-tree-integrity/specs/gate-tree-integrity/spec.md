@@ -57,10 +57,28 @@ be NUL-framed so that a path containing a newline cannot forge a manifest line.
 - **WHEN** a tracked file is removed from the working tree
 - **THEN** the manifest SHALL record that path as deleted and the digest SHALL differ
 
-#### Scenario: an untracked file added, changed, then removed yields three distinct digests
+#### Scenario: the untracked-file lifecycle is tracked as a CONTENT identity
 - **WHEN** an untracked, non-ignored file is created, then appended to, then deleted
-- **THEN** each of the three states SHALL produce a digest distinct from the others and from the
-  original clean-tree digest
+- **THEN** the digest after the creation SHALL differ from the baseline digest, and the digest after
+  the append SHALL differ from both
+- **AND** the digest after the deletion SHALL RETURN TO the baseline digest — the identity is a
+  content identity, not a counter, and removing the file genuinely restores the earlier tree
+- **AND** removing an untracked file that was PRESENT at the baseline capture SHALL change the
+  digest, which is the property that makes an untracked-file deletion mid-run detectable
+
+#### Scenario: a capture that cannot be validated fails closed instead of comparing equal
+- **GIVEN** the hashing tool exits non-zero, or the manifest write fails or is truncated, so the
+  capture produces no usable digest
+- **WHEN** the gate reaches any boundary or the terminal emit
+- **THEN** the run SHALL NOT emit `RESULT: PASS`: it SHALL emit `RESULT: FAIL` with a named
+  `tree-integrity: FAIL` line stating the tree cannot be proven unchanged, and exit non-zero
+- **AND** this SHALL hold whether or not the tree was actually mutated, and SHALL NOT be reported as
+  the "no git worktree" SKIP
+
+#### Scenario: the comparison covers the whole identity, not the digest alone
+- **WHEN** a later capture's HEAD sha, dirty flag or digest differs from the start capture's
+- **THEN** the identities SHALL be treated as different — a block SHALL never stamp
+  `tree-integrity: PASS` while its own `tree-start:`/`tree-end:` lines disagree
 
 #### Scenario: an unchanged tree hashes identically on two consecutive captures
 - **WHEN** the tree identity is captured twice with no intervening change inside the digest scope
@@ -171,6 +189,15 @@ is established and never emit a certification of a real tree).
 - **WHEN** the tree mutates during an `--only` run
 - **THEN** the block SHALL carry the named `tree-integrity: FAIL` line and `RESULT: FAIL`, not `PARTIAL`
 
+#### Scenario: the full gate's certification window begins when its slot is granted
+- **GIVEN** the machine-wide concurrency cap can hold a full gate in `waiting for gate slot` for the
+  length of another run, during which it has executed nothing and certifies nothing
+- **WHEN** the worktree is edited while the gate is queued and then left untouched once work begins
+- **THEN** the full gate SHALL (re-)capture its start identity immediately after the slot is granted
+  and SHALL certify normally — the queue SHALL NOT be inside the guarded window
+- **AND** `--lite` and `--delta`, which never queue and exit before that point, SHALL keep the
+  capture taken before their own first component
+
 #### Scenario: helper modes remain exempt and unchanged
 - **WHEN** `--list`, `--python-build-verify` or the concurrency-stub mode is invoked
 - **THEN** no tree-identity capture SHALL be required and their behaviour and output SHALL be unchanged
@@ -195,6 +222,24 @@ documented as a stated limitation covered by the existing `datasets:` and `ci-pi
 - **WHEN** `AGENT_GATE_SUMMARY_FILE` resolves to a non-ignored path under the repository root
 - **THEN** that path and its `integrity-fail` siblings SHALL be excluded from the digest, and no other
   untracked path SHALL be excluded on their account
+
+#### Scenario: the carve-out matches however the in-repo path is spelled
+- **GIVEN** git reports only normalized repo-root-relative paths
+- **WHEN** the caller pins the summary path in a non-canonical form — relative, `./…`, containing
+  `..`, or absolute — that still resolves under the repository root
+- **THEN** the path SHALL be canonicalized before comparison so the carve-out matches, because the
+  gate creates that file only AFTER the start capture and a missed carve-out is a guaranteed false FAIL
+- **AND** a path resolving outside the repository root SHALL simply not be excluded
+
+#### Scenario: a tab inside a changed path cannot corrupt the lockfile classification
+- **WHEN** a changed path contains a TAB character (for example an untracked file whose name begins
+  `Cargo.lock<TAB>`)
+- **THEN** the failure report SHALL name the whole path and the non-fatal lockfile class SHALL NOT
+  fire on a fragment of it — such a change SHALL be a normal fatal mutation
+
+#### Scenario: every settled lockfile is named in the stamp
+- **WHEN** more than one lockfile is re-resolved by the gate's own cargo invocations and nothing else differs
+- **THEN** the `lockfile-settled` stamp SHALL name every changed lockfile with its before/after hash
 
 #### Scenario: a lockfile settled by the gate's own cargo resolution is stamped, not fatal
 - **WHEN** the only difference between the start and end manifests is `Cargo.lock`
@@ -259,6 +304,13 @@ sleep.
 - **WHEN** the self-test appends to an already-modified tracked file mid-run
 - **THEN** it SHALL assert both that `git status --porcelain` output is unchanged and that the run
   did not certify
+
+#### Scenario: the mutating self-test hooks refuse a live checkout
+- **GIVEN** the hooks append to — and optionally commit into — `$REPO_ROOT`
+- **WHEN** they are invoked against a checkout that does not carry the disposable-fixture marker file
+- **THEN** the gate SHALL refuse with a non-zero exit before writing anything, leaving the working
+  tree and HEAD untouched
+- **AND** with the marker present the same invocation SHALL run and still fail closed on the mutation
 
 #### Scenario: the self-test is hermetic and leaves no shared fixtures
 - **WHEN** two instances of the self-test run concurrently in one checkout
