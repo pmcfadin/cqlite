@@ -37,8 +37,8 @@ Unsigned VInt (`writeUnsignedVInt` / `writeUnsignedVInt32`):
 
 | Field | Writer call | Source |
 |-------|-------------|--------|
-| Variable-width cell value length (`text`, `blob`, `varint`, `decimal`, `duration`) | `writeWithVIntLength` → `writeUnsignedVInt32` | `ValueAccessor.java:171-175` |
-| Non-frozen collection cell path length | `ByteBufferUtil.writeWithVIntLength` | `CollectionType.java:361-366`, `ByteBufferUtil.java:356-358` |
+| Variable-width cell value length (`text`, `blob`, `varint`, `decimal`, `duration`) | `writeWithVIntLength` → `writeUnsignedVInt32` | `ValueAccessor.java:170-174` |
+| Non-frozen collection cell path length (**always** present) | `ByteBufferUtil.writeWithVIntLength` | `CollectionType.java:361-366`, `ByteBufferUtil.java:356-360` |
 | Clustering-prefix header (2 bits per clustering column, one VInt per batch of ≤32 columns) | `writeUnsignedVInt(makeHeader(...))` | `ClusteringPrefix.java:455-475` |
 | `row_size` and `prev_size` (`previousUnfilteredSize`) | `writeUnsignedVInt` | `UnfilteredSerializer.java:199-202` |
 | Complex-column cell count | `writeUnsignedVInt32(data.cellsCount())` | `UnfilteredSerializer.java:277` |
@@ -46,7 +46,13 @@ Unsigned VInt (`writeUnsignedVInt` / `writeUnsignedVInt32`):
 | Row/cell timestamp, TTL, and local-deletion-time deltas | `writeTimestamp` / `writeTTL` / `writeLocalDeletionTime` | `SerializationHeader.java:165-184` |
 
 Signed (ZigZag) VInt — exactly one field in a `Data.db` payload: a `duration` value's months, days,
-and nanos, each `writeVInt` (`DurationSerializer.java:43-51`).
+and nanos, each `writeVInt` (`DurationSerializer.java:43-51`). This is a `Data.db` statement only;
+other components do use signed VInt (notably the `Index.db` promoted-index width delta,
+`IndexInfo.java:96,111-112`).
+
+Note that a **fixed-width** cell value carries **no** length prefix at all — `AbstractType.writeValue`
+takes the `valueLengthIfFixed() >= 0` branch and writes the raw bytes
+(`AbstractType.java:535-552`); the length comes from the schema type.
 
 Not VInt at all — fixed-width 4-byte big-endian `i32`: frozen-collection counts and element lengths,
 and tuple/UDT field lengths. See "Frozen Collection Serialization" and "UDTs" below.
@@ -162,70 +168,98 @@ Non-frozen collections are stored as multiple cells, one per element or entry. E
 [timestamp: unsigned VInt if not USE_ROW_TIMESTAMP_MASK]
 [local_deletion_time: unsigned VInt32 if deleted/expiring (and not USE_ROW_TTL_MASK)]
 [ttl: unsigned VInt32 if expiring (and not USE_ROW_TTL_MASK)]
-[cell_path: unsigned VInt length + bytes]  ← See table below
-[value: unsigned VInt length + bytes]      ← See table below
+[cell_path: unsigned VInt length + bytes]  ← ALWAYS length-prefixed
+[value: framing depends on the value type — see below]
 ```
 
 Field order and presence are authoritative in `Cell.Serializer.serialize` (`Cell.java:268-305`,
 layout comment at `:242-259`) — note local deletion time comes **before** TTL. The complex column is
 preceded by an unsigned-VInt cell count (`UnfilteredSerializer.java:277`) and, when
-`HAS_COMPLEX_DELETION` is set, a deletion time. The path prefix is
-`ByteBufferUtil.writeWithVIntLength` (`CollectionType.java:361-366`); the value prefix is
-`AbstractType.writeValue` → `ValueAccessor.writeWithVIntLength` (`AbstractType.java:535-552`), and is
-**omitted entirely** for fixed-width element types (`valueLengthIfFixed() >= 0`).
+`HAS_COMPLEX_DELETION` is set, a deletion time.
+
+**The path and the value do *not* share one framing rule:**
+
+- **`cell_path` — always** an unsigned-VInt length + bytes.
+  `CollectionType.CollectionPathSerializer.serialize` calls
+  `ByteBufferUtil.writeWithVIntLength(path.get(0), out)` (`CollectionType.java:361-366`), and
+  `writeWithVIntLength` is `out.writeUnsignedVInt32(bytes.remaining())` followed by the bytes
+  (`ByteBufferUtil.java:356-360`).
+- **`value` — three cases**, decided by `AbstractType.writeValue` (`AbstractType.java:535-552`) on
+  `valueLengthIfFixed()`:
+  1. **Non-frozen `set<T>`: the value is EMPTY.** The element is carried as the cell path, and
+     `SetType.valueComparator()` returns `EmptyType.instance` (`SetType.java:105-108`). An empty value
+     sets `HAS_EMPTY_VALUE_MASK` (`0x04`) in the cell flags and writes **no** value bytes at all
+     (`Cell.java:264,271-278,303-304`).
+  2. **Fixed-width value type** (e.g. `list<int>`, or the value half of `map<text,int>`): written
+     **RAW, with NO length prefix** — the `valueLengthIfFixed() >= 0` branch calls
+     `accessor.write(value, out)` (`AbstractType.java:538-543`). The reader recovers the length from
+     the schema type, not from the bytes.
+  3. **Variable-width value type** (e.g. `list<text>`, or the value half of `map<int,text>`):
+     **unsigned VInt length + bytes** — the `else` branch calls
+     `accessor.writeWithVIntLength(value, out)` (`AbstractType.java:550-552`), which is
+     `writeUnsignedVInt32(size)` + bytes (`ValueAccessor.java:170-174`).
 
 **Cell Path and Value by Collection Type**:
 
-| Collection Type | cell_path | cell_value |
-|-----------------|-----------|------------|
-| `list<T>` | TimeUUID (16 bytes) | Serialized element |
-| `set<T>` | Serialized element | Empty (0 bytes) |
-| `map<K,V>` | Serialized key | Serialized value |
+| Collection Type | cell_path (always unsigned-VInt length + bytes) | cell_value | Value framing |
+|-----------------|-----------------------------------------------|------------|---------------|
+| `list<T>` | TimeUUID (16 bytes) | Serialized element | Raw (no prefix) if `T` fixed-width; else unsigned-VInt length + bytes |
+| `set<T>` | Serialized element | Empty (0 bytes) | None — `HAS_EMPTY_VALUE_MASK` set, no value bytes |
+| `map<K,V>` | Serialized key | Serialized value | Raw (no prefix) if `V` fixed-width; else unsigned-VInt length + bytes |
 
 **List Element Ordering**:
 
 Lists use TimeUUID (UUID version 1) for the `cell_path` to maintain insertion order. TimeUUIDs are time-sortable, ensuring elements remain in the order they were written. Each element gets a unique TimeUUID generated at write time.
 
-**Example** (list with 2 integers):
+**Example** (`list<int>`, 2 elements) — `int` is fixed-width, so the value carries **no** length prefix
+while the path still does (`10` = unsigned VInt 16):
 ```
 Cell 1:
-  path: f35cf98a-220c-11ef-8b04-f4ff7ffcf681 (16 bytes, TimeUUID)
-  value: 00 00 00 2A (4 bytes, int 42)
+  path:  10 | f35cf98a-220c-11ef-8b04-f4ff7ffcf681   (VInt len 16, then 16 bytes TimeUUID)
+  value:      00 00 00 2A                            (raw, no prefix — int 42)
 
 Cell 2:
-  path: f35cf98b-220c-11ef-8b04-f4ff7ffcf681 (16 bytes, TimeUUID)
-  value: 00 00 00 64 (4 bytes, int 100)
+  path:  10 | f35cf98b-220c-11ef-8b04-f4ff7ffcf681   (VInt len 16, then 16 bytes TimeUUID)
+  value:      00 00 00 64                            (raw, no prefix — int 100)
 ```
 
 **Set Element Storage**:
 
-Sets use the element value itself as the `cell_path` for efficient membership testing. The `cell_value` is always empty (0 bytes). This allows Cassandra to check set membership by looking for a cell with a matching path.
+Sets use the element value itself as the `cell_path` for efficient membership testing. The
+`cell_value` is always empty — `SetType.valueComparator()` is `EmptyType.instance`
+(`SetType.java:105-108`) — so the cell sets `HAS_EMPTY_VALUE_MASK` (`0x04`) and writes zero value
+bytes (`Cell.java:264,271-278,303-304`). This lets Cassandra check set membership by looking for a
+cell with a matching path.
 
-**Example** (set with 2 text values):
+**Example** (`set<text>`, 2 elements) — path length-prefixed, value absent entirely:
 ```
 Cell 1:
-  path: 61 6C 70 68 61 (5 bytes, "alpha")
-  value: (empty, 0 bytes)
+  path:  05 | 61 6C 70 68 61   (VInt len 5, then "alpha")
+  value: (none — HAS_EMPTY_VALUE_MASK set in flags)
 
 Cell 2:
-  path: 62 65 74 61 (4 bytes, "beta")
-  value: (empty, 0 bytes)
+  path:  04 | 62 65 74 61      (VInt len 4, then "beta")
+  value: (none — HAS_EMPTY_VALUE_MASK set in flags)
 ```
 
 **Map Entry Storage**:
 
 Maps use the serialized key as the `cell_path` and the serialized value as the `cell_value`. This allows efficient key lookups.
 
-**Example** (map with 2 entries: 1->"one", 2->"two"):
+**Example** (`map<int,text>`, 2 entries: 1->"one", 2->"two") — the path is length-prefixed, and the
+`text` value is variable-width so it is length-prefixed too:
 ```
 Cell 1:
-  path: 00 00 00 01 (4 bytes, int key 1)
-  value: 6F 6E 65 (3 bytes, "one")
+  path:  04 | 00 00 00 01   (VInt len 4, then int key 1)
+  value: 03 | 6F 6E 65      (VInt len 3, then "one")
 
 Cell 2:
-  path: 00 00 00 02 (4 bytes, int key 2)
-  value: 74 77 6F (3 bytes, "two")
+  path:  04 | 00 00 00 02   (VInt len 4, then int key 2)
+  value: 03 | 74 77 6F      (VInt len 3, then "two")
 ```
+
+For a `map<text,int>` the value half instead appears raw: `path: 03 | 6F 6E 65`, `value: 00 00 00 01`
+with no value prefix.
 
 **Implementation References** (CQLite):
 - Frozen collections: `cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs::serialize_value_into()`
