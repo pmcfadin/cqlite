@@ -56,22 +56,33 @@ impl<T> Stream for ReceiverStream<T> {
 /// * Releasing only when the NEXT batch is *yielded* is the other obvious
 ///   implementation, and it DEADLOCKS: the deferred permit can hold the whole
 ///   pool while the producer parks reserving the next batch and the consumer
-///   waits for that batch. At the shipped defaults a resident batch plus a
-///   worst-case reservation already exceed the ceiling, so the cycle is
-///   reachable in the DEFAULT configuration, not only in a corner case.
+///   waits for that batch.
 ///
 /// Keying on `Weak::strong_count() == 0` satisfies both: the production encoder
 /// has dropped the batch by the time it re-polls, so credit is returned exactly
-/// as promptly as before (no deadlock), while a consumer that is still holding
-/// the data keeps paying for it (no voided bound). Conservative in the safe
-/// direction — a consumer that retains a single column keeps the credit charged,
-/// because that column's buffers are genuinely still resident.
+/// as promptly as before, while a consumer that is still holding the data keeps
+/// paying for it (no voided bound). Conservative in the safe direction — a
+/// consumer that retains a single column keeps the credit charged, because that
+/// column's buffers are genuinely still resident.
+///
+/// # It cannot wedge the stream: the safety valve
+///
+/// Keying on the data's liveness moves the dependence from the consumer's POLL
+/// discipline to its DROP discipline, and a consumer that retains batch N while
+/// awaiting N+1 would otherwise hang: the deferred permit holds the credit, the
+/// producer parks in `EgressCredit::reserve`, and the batch the consumer is
+/// waiting for can never be built. `MeteredDoGetStream::open_safety_valve`
+/// closes that cycle — see it for the predicate and for why releasing the credit
+/// there is CORRECT rather than a concession.
+///
+/// No consumer behaviour can wedge this stream.
 struct DeferredCredit {
-    /// The held credit. Never READ — the permit's `Drop` IS the release, so
-    /// removing it from `deferred` (or clearing the vec) returns the bytes to the
-    /// pool. Keeping it drop-only is deliberate: there is no second, hand-audited
-    /// release path that could drift from the charged amount.
-    #[allow(dead_code)]
+    /// The held credit. The permit's `Drop` IS the release, so removing it from
+    /// `deferred` (or clearing the vec) returns the bytes to the pool — there is
+    /// deliberately no second, hand-audited release path that could drift from
+    /// the charged amount. Its `charged_bytes()` is READ (never written) by
+    /// [`MeteredDoGetStream::open_safety_valve`] to test whether the whole pool
+    /// is held by consumer-retained batches.
     permit: EgressPermit,
     /// One weak handle per column of the yielded batch. Empty for a zero-column
     /// batch, which holds no buffers and is therefore released immediately.
@@ -149,6 +160,16 @@ pub(crate) struct MeteredDoGetStream {
     /// Cleared on every terminal arm and by `Drop`, so a client disconnect
     /// returns the credit. **Do not "simplify" this into release-on-yield.**
     deferred: Vec<DeferredCredit>,
+    /// Owned future resolving the next time the producer PARKS on the exhausted
+    /// credit pool (issue #2821 review R1). Polled only in the `Pending` arm,
+    /// exactly like [`Self::cancelled`], and re-armed after each resolution.
+    ///
+    /// Registering this before returning `Pending` is what makes the safety
+    /// valve race-free: without it a producer that parks in the window between
+    /// the wedge check and the `Pending` return would never wake the stream
+    /// again. Unconditional — an ungoverned (unbounded/inert) stream simply
+    /// never signals, and the valve's predicate never holds for it.
+    park_signal: Pin<Box<dyn Future<Output = ()> + Send>>,
     probe: StreamProbe,
     rows: u64,
     bytes: u64,
@@ -175,6 +196,7 @@ impl MeteredDoGetStream {
         abort: Option<tokio::task::AbortHandle>,
         cancelled: Option<Pin<Box<tokio_util::sync::WaitForCancellationFutureOwned>>>,
     ) -> Self {
+        let park_signal = probe.egress.parked_owned();
         Self {
             inner,
             metrics: Some(metrics),
@@ -182,6 +204,7 @@ impl MeteredDoGetStream {
             abort,
             cancelled,
             deferred: Vec::new(),
+            park_signal,
             probe,
             rows: 0,
             bytes: 0,
@@ -217,6 +240,76 @@ impl MeteredDoGetStream {
     /// that returns `Pending`.
     fn reap_deferred(&mut self) {
         self.deferred.retain(|d| !d.is_dropped_downstream());
+    }
+
+    /// **The safety valve**: force-release the OLDEST deferred permit when the
+    /// stream is wedged, so no consumer behaviour can hang `do_get`.
+    ///
+    /// Run ONLY from the `Poll::Pending` arm, after `reap_deferred` and after the
+    /// inner stream has declined to yield. The wedge predicate is the conjunction
+    /// of three facts, each observed rather than assumed:
+    ///
+    /// 1. **The channel is empty.** The inner poll returned `Pending`, so no
+    ///    batch is on its way to this stream.
+    /// 2. **The producer is parked on the credit pool.**
+    ///    [`EgressObservation::parked_now`] is a GAUGE maintained by an RAII
+    ///    guard around the semaphore await, so it counts producers blocked *right
+    ///    now*, not parks that have since been satisfied or abandoned.
+    /// 3. **Every charged byte is held by a deferred (consumer-retained) batch.**
+    ///    Summing the deferred permits' own `charged_bytes` and comparing against
+    ///    the pool's total charge means the ONLY way to free credit is for the
+    ///    consumer to drop a batch — which it may never do.
+    ///
+    /// In that state the cycle is closed: the producer waits on credit, the
+    /// credit waits on the consumer, and the consumer waits on the producer.
+    /// Releasing one permit breaks it. The producer is woken by the semaphore,
+    /// builds the next batch, and its send wakes this stream through the receiver
+    /// waker registered by the `Pending` poll — so no extra wakeup is needed
+    /// here.
+    ///
+    /// **Why releasing is correct, not a compromise.** The published bound
+    /// governs **server-side residency** — the bytes the SERVER holds and can
+    /// still act on. A batch the consumer has taken and is retaining is the
+    /// consumer's memory; the governor charging for it would be metering
+    /// something it no longer controls, and doing so is precisely what closes the
+    /// cycle above. So the valve does not loosen the bound: it restores the
+    /// bound's actual subject. The reframing is stated in
+    /// [`crate::egress_credit::DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`].
+    ///
+    /// One permit per firing, oldest first: the minimum that can restore
+    /// progress, and the batch that has been out longest is the one least likely
+    /// to still be in genuine use. Every firing is counted
+    /// ([`EgressObservation::safety_valve_releases`]), so "the valve fires on the
+    /// normal path" is a test-detectable regression rather than a silent
+    /// loosening — against a consumer that drops batch N before N+1 exists
+    /// (including `FlightDataEncoder`) it never fires at all.
+    fn open_safety_valve(&mut self) {
+        if self.deferred.is_empty() {
+            return;
+        }
+        let obs = &self.probe.egress;
+        if obs.parked_now() == 0 {
+            return;
+        }
+        let deferred_charged = self
+            .deferred
+            .iter()
+            .fold(0u64, |acc, d| acc.saturating_add(d.permit.charged_bytes()));
+        if deferred_charged == 0 || deferred_charged < obs.charged_bytes() {
+            // Someone other than a consumer-retained batch holds credit (a
+            // queued batch, an in-flight reservation): the producer's park will
+            // clear on its own, so this is backpressure, not a wedge.
+            return;
+        }
+        // Dropping the permit IS the release (see `DeferredCredit::permit`).
+        drop(self.deferred.remove(0));
+        obs.record_safety_valve_release();
+        tracing::debug!(
+            deferred_remaining = self.deferred.len(),
+            "egress safety valve: released a consumer-retained batch's credit to unwedge the \
+             stream (the consumer is holding a yielded batch while awaiting the next one; \
+             those bytes are consumer-side residency, outside the server-side bound)"
+        );
     }
 
     /// The merge is finished (completed or errored); disarm so we do not cancel a
@@ -324,6 +417,27 @@ impl Stream for MeteredDoGetStream {
                         return Poll::Ready(None);
                     }
                 }
+                // Issue #2821 review R1 — the SAFETY VALVE. Register for the
+                // producer's next park BEFORE testing the wedge predicate, so a
+                // park that happens after the test still wakes this stream (a
+                // `Notify` permit is stored when no waiter is registered, so a
+                // park on either side of the window is caught exactly once).
+                // Without this registration the valve would lose a race it can
+                // never recover from: nothing else will ever poll a stream whose
+                // consumer is waiting on the batch the wedged producer cannot
+                // build.
+                //
+                // Loop because a resolved signal must be RE-ARMED and the
+                // replacement polled, or the replacement never registers. At most
+                // two iterations in practice — `Notify` stores a single permit —
+                // and the trip count is bounded structurally rather than assumed.
+                for _ in 0..4 {
+                    if this.park_signal.as_mut().poll(cx).is_pending() {
+                        break;
+                    }
+                    this.park_signal = this.probe.egress.parked_owned();
+                }
+                this.open_safety_valve();
                 Poll::Pending
             }
         }

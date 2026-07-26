@@ -77,6 +77,13 @@ test-util = []
 dhat-heap = []
 
 [dev-dependencies]
+# Enable cqlite-core's SHARED Arrow row-shape corpus (issue #2932) for TESTS
+# ONLY, so `batch_bytes_tests::the_capacity_bound_holds_over_the_shared_shape_corpus`
+# asserts the published payload->capacity conversion over exactly the corpus the
+# estimator's conservatism contract is validated against — rather than a
+# hand-written subset, which is how the slack under-count reached a fail-closed
+# runtime check. Dev-only: `cargo build -p cqlite-flight` does not compile it.
+cqlite-core = { path = "../cqlite-core", features = ["arrow", "arrow-shape-corpus"] }
 tempfile = { workspace = true }
 # `test-util` enables the paused/auto-advancing Tokio clock (`tokio::time::pause`)
 # so the #2420 admission-control tests drive the permit-wait timeout

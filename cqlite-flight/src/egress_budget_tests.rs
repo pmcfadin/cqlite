@@ -299,6 +299,15 @@ fn a_full_drain_stays_bounded_and_matches_the_collect_path() {
             "expected many batches over {WIDE_ROWS} wide rows, got {}",
             obs.batches_materialized()
         );
+        // The safety valve is for a RETAINING consumer only: the real Flight
+        // encoder drops each batch before asking for the next, so a full drain
+        // through it must never need the valve (issue #2821 review R1).
+        assert_eq!(
+            obs.safety_valve_releases(),
+            0,
+            "the safety valve fired on the ORDINARY encoder drain — it is returning credit \
+             for server-resident data and loosening the published bound"
+        );
         assert_eq!(obs.charged_bytes(), 0, "credit leaked after a clean drain");
 
         let got = arrow::compute::concat_batches(&batches[0].schema(), &batches).expect("concat");
@@ -352,9 +361,32 @@ fn both_producer_loops_reserve_before_materializing() {
             let mut rows = 0usize;
             let mut n_batches = 0usize;
             while let Some(item) = rx.recv().await {
-                let batch = item.expect("streamed batch").into_batch();
+                // Issue #2821 review R3: take the batch WITH its permit and keep
+                // the permit alive for exactly as long as this test holds the
+                // data. `into_batch()` drops the permit the instant the batch is
+                // received, so residency would be UNCHARGED for the whole time
+                // the batch is held and `peak_resident_capacity_bytes()` would
+                // under-report — making the contract assertion below close to
+                // self-fulfilling.
+                let (batch, permit) = item.expect("streamed batch").split();
+                // The SHARP form of that: asserted at the instant of the hold,
+                // not inferred from a high-water mark. With the permit dropped at
+                // receive time this FAILS the moment this batch is the only one
+                // outstanding — which is exactly the hole the peak assertion had.
+                let batch_bytes = batch.get_array_memory_size() as u64;
+                assert!(
+                    pr.egress.resident_capacity_bytes() >= batch_bytes,
+                    "batch {n_batches}: this test holds {batch_bytes} B of Arrow data but the \
+                     governor accounts only {} B as resident — residency is UNCHARGED while \
+                     the consumer holds the batch",
+                    pr.egress.resident_capacity_bytes()
+                );
                 rows += batch.num_rows();
                 n_batches += 1;
+                // Explicit order: the data goes first, then the credit that
+                // accounts for it. Never the reverse.
+                drop(batch);
+                drop(permit);
             }
             handle.await.expect("join").expect("merge");
 
@@ -618,6 +650,264 @@ fn a_speculative_pending_poll_does_not_release_a_held_batchs_credit() {
         drop(tx);
         drop(metered);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Requirement: NO consumer behaviour can wedge the stream (the safety valve)
+// ---------------------------------------------------------------------------
+
+/// Drive the real streaming producer into a `MeteredDoGetStream` and drain it,
+/// RETAINING every yielded batch across the await for the next one. Returns the
+/// probe and the total rows delivered.
+///
+/// The `timeout` is a LIVENESS bound (the `await_pool_saturated` /
+/// `cancelled_emit_under_backpressure_returns_cancelled` precedent), never a
+/// correctness threshold (#2642): a wedged stream would otherwise hang the whole
+/// test binary instead of failing readably.
+async fn drain_metered_retaining(
+    producer: MergeProducer,
+    paths: Vec<PathBuf>,
+    ceiling: usize,
+) -> (StreamProbe, usize) {
+    let pr = StreamProbe::default();
+    let credit = EgressCredit::new(EgressBudget::bytes(ceiling), pr.egress.clone());
+    let (tx, rx) = mpsc::channel::<Result<CreditedBatch, ProducerError>>(DO_GET_CHANNEL_CAPACITY);
+    let cancel = CancelFlag::new();
+    let sink_cancel = cancel.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        let mut sink = ChannelSink {
+            tx,
+            produced: Arc::new(AtomicUsize::new(0)),
+            cancel: sink_cancel.clone(),
+            credit,
+        };
+        let progress = crate::scan_progress::ScanProgress::default();
+        producer.produce_streaming(paths, &sink_cancel, &mut sink, &progress, || {})
+    });
+
+    let mut metered = MeteredDoGetStream::new(
+        Box::pin(ReceiverStream { rx }),
+        RpcMetrics::start("do_get"),
+        None,
+        pr.clone(),
+        None,
+        None,
+    );
+
+    // `held` is the whole point: batch N stays alive across the `.await` that
+    // asks for N+1.
+    let mut held: Vec<RecordBatch> = Vec::new();
+    let mut rows = 0usize;
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(item) = metered.next().await {
+            let batch = item.expect("streamed batch");
+            rows += batch.num_rows();
+            held.push(batch);
+        }
+    })
+    .await;
+    assert!(
+        drained.is_ok(),
+        "the do_get stream WEDGED: the producer is parked on credit held by a batch the \
+         consumer is still retaining, and the consumer is awaiting a batch that can never be \
+         built — the safety valve did not fire"
+    );
+    handle.await.expect("join").expect("merge");
+    assert!(!held.is_empty(), "vacuous: nothing was retained");
+    drop(held);
+    drop(metered);
+    (pr, rows)
+}
+
+/// A RETAINING consumer — one that holds every yielded batch alive while awaiting
+/// the next — still makes progress, and the safety valve is what makes that true.
+///
+/// This is the failure mode keying credit release on the batch's LIVENESS
+/// introduces (issue #2821 review R1): the deferred permit holds the credit, the
+/// producer parks in `EgressCredit::reserve`, and the batch the consumer is
+/// waiting for can never be built. Without
+/// `MeteredDoGetStream::open_safety_valve` this test HANGS rather than failing an
+/// assertion — hence the liveness timeout in `drain_metered`.
+///
+/// Note what is being asserted about MEMORY: the retained batches are the
+/// CONSUMER's memory. The governor correctly stops charging for bytes it no
+/// longer controls, because the published bound governs SERVER-SIDE residency —
+/// see `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`.
+#[test]
+fn a_retaining_consumer_still_makes_progress() {
+    let (_temp, producer, paths, _schema_ref) = wide_setup(WIDE_BATCH_CAP);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let (pr, rows) = drain_metered_retaining(producer, paths, WIDE_CEILING).await;
+        let obs = &pr.egress;
+        assert_eq!(
+            rows, WIDE_ROWS as usize,
+            "vacuous fixture — no rows streamed"
+        );
+        assert!(
+            obs.batches_materialized() > 4,
+            "vacuous fixture: {} batch(es)",
+            obs.batches_materialized()
+        );
+        // Non-vacuity of the SCENARIO: the ceiling really did press the producer
+        // against the pool while the consumer was holding data.
+        assert!(
+            obs.reservations_parked() > 0,
+            "the producer never parked, so this drain never reached the wedge state and \
+             proves nothing about the safety valve"
+        );
+        assert!(
+            obs.safety_valve_releases() > 0,
+            "the stream drained without the valve firing — the retaining consumer never \
+             actually wedged it, so this test is not exercising the R1 scenario"
+        );
+        assert_eq!(obs.charged_bytes(), 0, "credit leaked");
+        assert_eq!(obs.resident_capacity_bytes(), 0);
+    });
+}
+
+/// The valve fires ONLY in the wedge state, asserted on BOTH sides of the
+/// predicate in one deterministic scenario — no reliance on a race being won.
+///
+/// This is what stops the valve from quietly loosening the bound. A valve that
+/// fired on ordinary backpressure would return credit for a batch still resident
+/// on the SERVER, which is precisely the uncharged-resident-batch class the whole
+/// governor exists to eliminate.
+///
+/// Sequence:
+/// 1. Two credited batches are queued; the consumer takes A and RETAINS it.
+/// 2. A speculative `Pending` poll with **no producer parked** — the valve must
+///    NOT fire even though a deferred permit holds credit.
+/// 3. A reservation larger than the free pool is started and PARKS (awaited on
+///    the governor's own park event, never on elapsed time — #2642). Now the
+///    wedge predicate holds, and the next poll must fire the valve exactly once
+///    and let the parked reservation through.
+#[test]
+fn the_safety_valve_fires_only_when_the_stream_is_wedged() {
+    let schema = fx::wide_row_schema();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let producer = MergeProducer::new(schema, 8192).expect("producer");
+        let arrow_schema = Arc::new(producer.arrow_schema().expect("schema"));
+        let one_row = |fill: u8| {
+            let cols: Vec<arrow::array::ArrayRef> = vec![
+                Arc::new(arrow::array::Int32Array::from(vec![fill as i32])),
+                Arc::new(arrow::array::BinaryArray::from(vec![Some(
+                    vec![fill; 64 * 1024].as_slice(),
+                )])),
+                Arc::new(arrow::array::StringArray::from(vec![Some("row")])),
+            ];
+            RecordBatch::try_new(Arc::clone(&arrow_schema), cols).expect("batch")
+        };
+
+        let pr = StreamProbe::default();
+        let obs = pr.egress.clone();
+        // Sized so ONE batch's realized capacity (~65 KiB) fits without the
+        // deadlock clamp, but TWO cannot: with A retained, a second same-sized
+        // reservation must park. Both halves are asserted below, so a fixture
+        // drift in either direction fails loudly instead of going vacuous.
+        const CEILING: usize = 96 * 1024;
+        let credit = EgressCredit::new(EgressBudget::bytes(CEILING), obs.clone());
+        // `tx` stays alive, so the channel is empty-but-open and a further poll
+        // parks rather than terminating the stream.
+        let (tx, rx) = mpsc::channel::<Result<CreditedBatch, ProducerError>>(4);
+        let batch = one_row(1);
+        let actual = batch.get_array_memory_size();
+        assert!(
+            actual <= CEILING && actual * 2 > CEILING,
+            "fixture drift: one batch is {actual} B against a {CEILING} B pool — the scenario \
+             needs exactly one batch to fit (no deadlock clamp) and two not to (so the second \
+             reservation parks)"
+        );
+        let permit = credit
+            .reserve(actual)
+            .await
+            .expect("pool open")
+            .materialize(actual)
+            .expect("granted");
+        tx.send(Ok(CreditedBatch::new(batch, permit)))
+            .await
+            .expect("send");
+
+        let mut metered = MeteredDoGetStream::new(
+            Box::pin(ReceiverStream { rx }),
+            RpcMetrics::start("do_get"),
+            None,
+            pr.clone(),
+            None,
+            None,
+        );
+
+        // (1) Take A and RETAIN it.
+        let held = metered.next().await.expect("batch A").expect("ok");
+        assert_eq!(obs.charged_bytes(), permits_bytes(actual));
+        assert_eq!(obs.safety_valve_releases(), 0);
+
+        // (2) No producer is parked: the valve must NOT fire, even though a
+        //     deferred permit holds the entire charge.
+        for _ in 0..3 {
+            let mut speculative = metered.next();
+            assert!(
+                futures::poll!(&mut speculative).is_pending(),
+                "the channel is empty-but-open, so this poll must park"
+            );
+        }
+        assert_eq!(
+            obs.safety_valve_releases(),
+            0,
+            "the valve fired with NO producer parked — it is releasing credit for \
+             server-resident data on the ordinary backpressure path"
+        );
+        assert_eq!(
+            obs.charged_bytes(),
+            permits_bytes(actual),
+            "A's credit was returned while nothing was wedged"
+        );
+
+        // (3) Park a reservation that cannot fit beside A's charge.
+        let parking = tokio::spawn({
+            let credit = credit.clone();
+            async move { credit.reserve(actual).await.map(|r| r.materialize(actual)) }
+        });
+        await_pool_saturated(&obs).await;
+        assert_eq!(
+            obs.parked_now(),
+            1,
+            "exactly one reservation must be parked"
+        );
+
+        // The wedge predicate now holds: poll, and the valve fires exactly once.
+        {
+            let mut wedged = metered.next();
+            let _ = futures::poll!(&mut wedged);
+        }
+        assert_eq!(
+            obs.safety_valve_releases(),
+            1,
+            "the stream is wedged (producer parked, channel empty, the whole charge held by \
+             a batch the consumer retains) and the valve did not fire — this consumer hangs"
+        );
+        // The parked reservation gets through, which is the point.
+        let unparked = tokio::time::timeout(std::time::Duration::from_secs(60), parking)
+            .await
+            .expect("the parked reservation must be admitted once the valve fires")
+            .expect("join");
+        drop(unparked.expect("pool open").expect("granted"));
+
+        // The retained batch is still ALIVE — its bytes are the consumer's
+        // residency now, deliberately outside the server-side bound.
+        assert_eq!(held.num_rows(), 1);
+        drop(held);
+        drop(tx);
+        drop(metered);
+        assert_eq!(obs.charged_bytes(), 0, "credit leaked");
+    });
+}
+
+/// Permit bytes charged for `actual` capacity bytes: permits round UP to the
+/// quantum, so the charge is quantised, never the raw byte count.
+fn permits_bytes(actual: usize) -> u64 {
+    (actual.div_ceil(EGRESS_CREDIT_QUANTUM_BYTES) * EGRESS_CREDIT_QUANTUM_BYTES) as u64
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +1191,11 @@ fn the_default_ceiling_does_not_clamp_a_real_byte_cap_cut_stream() {
              byte-cap-cut batch then runs the stream lock-step",
             obs.reservations_clamped(),
             obs.reservations_granted()
+        );
+        assert_eq!(
+            obs.safety_valve_releases(),
+            0,
+            "the safety valve fired at the SHIPPED defaults on an ordinary encoder drain"
         );
         assert_eq!(obs.charged_bytes(), 0, "credit leaked after a clean drain");
     });

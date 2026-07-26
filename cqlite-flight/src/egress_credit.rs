@@ -361,7 +361,10 @@ impl EgressCredit {
         match Arc::clone(sem).try_acquire_many_owned(take) {
             Ok(permit) => Ok(permit),
             Err(tokio::sync::TryAcquireError::NoPermits) => {
-                self.obs.record_parked();
+                // RAII: the `parked_now` gauge the stream's safety valve reads
+                // must fall again whether this future completes OR is dropped
+                // mid-park by a cancelled stream.
+                let _park = self.obs.park();
                 Arc::clone(sem)
                     .acquire_many_owned(take)
                     .await
@@ -519,7 +522,11 @@ impl EgressPermit {
     }
 
     /// Capacity bytes this permit currently charges against the pool.
-    #[cfg(test)]
+    ///
+    /// Read by `MeteredDoGetStream`'s safety valve to decide whether the pool is
+    /// held ENTIRELY by deferred (consumer-retained) batches — the half of the
+    /// wedge predicate that distinguishes "the producer is waiting for the
+    /// consumer to drop data" from "the producer is waiting for the channel".
     pub(crate) fn charged_bytes(&self) -> u64 {
         self.charged_bytes
     }

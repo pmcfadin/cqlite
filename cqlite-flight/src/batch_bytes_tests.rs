@@ -166,6 +166,101 @@ fn the_capacity_bound_holds_for_tiny_batches() {
     }
 }
 
+/// The published capacity bound over the **SHARED** shape corpus — every shape
+/// the estimator's conservatism contract is validated against
+/// (`cqlite_core::export::arrow_shape_corpus`), each converted BOTH at its full
+/// row count and truncated to a single row.
+///
+/// This is the guard that makes the claim on
+/// [`BATCH_BYTES_PER_COLUMN_SLACK`] true rather than aspirational (issue #2932).
+/// The hand-written list above covers `text`/`blob`/`int`/`list`/`map`; the
+/// corpus additionally reaches `FixedSizeBinary(16)` (uuid/timeuuid),
+/// boolean/decimal/varint/timestamp/date/time/counter, tuple and UDT (`Struct`),
+/// `set`, 8-deep nested collections, `frozen`, and the `cql_type = None` flat
+/// dispatch arms that route through DIFFERENT builders (`build_binary_array`,
+/// `build_list_array`, `build_map_array`, `build_string_array`).
+///
+/// Why every shape is also run at ONE row: the fixed per-array-node allocations
+/// are what the slack term pays for, and they dominate exactly when the payload
+/// is tiny. A corpus run at full row count is payload-dominated for most shapes
+/// and would not exercise the term at all.
+///
+/// Under #2821 an uncovered shape whose fixed cost exceeds the slack does not
+/// under-report a metric — the pre-materialization reservation fails closed and
+/// terminates a live `do_get`. That is why this is a hard bound assertion and not
+/// a documented tolerance.
+#[test]
+fn the_capacity_bound_holds_over_the_shared_shape_corpus() {
+    use cqlite_core::export::arrow_shape_corpus::shape_corpus;
+    use cqlite_core::export::{estimate_arrow_row_bytes, rows_to_record_batch};
+    use cqlite_core::query::{ColumnInfo, QueryRow};
+
+    /// `get_array_memory_size() <= worst_case_batch_capacity_bytes(Σ estimate,
+    /// nodes, 0)` — EXACTLY the quantity the #2821 reservation computes.
+    /// Returns `true` when the fixed per-node cost (not the `2 ×` growth factor)
+    /// dominates, so the caller can prove the corpus exercises that regime.
+    fn assert_bound(name: &str, columns: &[ColumnInfo], rows: &[QueryRow]) -> bool {
+        let batch = rows_to_record_batch(columns, rows)
+            .unwrap_or_else(|e| panic!("shape '{name}' failed to convert: {e}"));
+        let estimate = rows.iter().fold(0usize, |acc, r| {
+            acc.saturating_add(estimate_arrow_row_bytes(columns, r))
+        });
+        let nodes = crate::egress_credit::count_arrow_array_nodes(batch.schema_ref());
+        let bound = worst_case_batch_capacity_bytes(estimate, nodes, 0);
+        let capacity = batch.get_array_memory_size();
+        assert!(
+            capacity <= bound,
+            "shape '{name}': get_array_memory_size {capacity} exceeds the published bound \
+             {bound} (estimate {estimate} payload bytes over {nodes} array nodes) — \
+             BATCH_BYTES_PER_COLUMN_SLACK ({BATCH_BYTES_PER_COLUMN_SLACK}) understates this \
+             shape's fixed per-array allocations, so every #2821 reservation for it fails \
+             CLOSED and terminates the do_get"
+        );
+        assert!(
+            batch.num_rows() == rows.len(),
+            "shape '{name}' is vacuous: {} of {} rows converted",
+            batch.num_rows(),
+            rows.len()
+        );
+        capacity > BATCH_BYTES_CAPACITY_FACTOR.saturating_mul(estimate)
+    }
+
+    let corpus = shape_corpus();
+    assert!(
+        corpus.len() >= 20,
+        "the shared corpus shrank to {} shapes — the coverage this guard claims is gone",
+        corpus.len()
+    );
+    let mut fixed_cost_dominated = 0usize;
+    let mut asserted = 0usize;
+    for shape in &corpus {
+        if assert_bound(shape.name, &shape.columns, &shape.rows) {
+            fixed_cost_dominated += 1;
+        }
+        asserted += 1;
+        // One row: the regime the per-node slack exists for.
+        if let Some(first) = shape.rows.first() {
+            let one = std::slice::from_ref(first);
+            let name = format!("{} [one row]", shape.name);
+            if assert_bound(&name, &shape.columns, one) {
+                fixed_cost_dominated += 1;
+            }
+            asserted += 1;
+        }
+    }
+    assert!(
+        asserted >= 40,
+        "only {asserted} shape/row-count combinations asserted the bound"
+    );
+    // Non-vacuity: the corpus really does exercise the fixed-per-node regime,
+    // not only payload-dominated batches where the `2 ×` factor swamps the slack.
+    assert!(
+        fixed_cost_dominated >= 10,
+        "only {fixed_cost_dominated} of {asserted} corpus batches are fixed-cost dominated — \
+         this run proves little about BATCH_BYTES_PER_COLUMN_SLACK"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Fixture plumbing
 // ---------------------------------------------------------------------------

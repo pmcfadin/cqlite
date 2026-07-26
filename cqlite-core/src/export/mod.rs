@@ -56,6 +56,16 @@ mod arrow_decimal;
 #[cfg(feature = "arrow")]
 pub mod arrow_size;
 
+// The SHARED Arrow row-shape corpus (issues #2825/#2932). Compiled only for this
+// crate's own tests or under the opt-in `arrow-shape-corpus` feature, which
+// `cqlite-flight` enables as a DEV-dependency so its published-capacity-bound
+// guard runs over the same shapes the estimator's conservatism contract does.
+// A default `cargo build -p cqlite-core` links none of it (the `fuzz` /
+// `bench-internals` / `work-counters` precedent).
+#[cfg(all(feature = "arrow", any(test, feature = "arrow-shape-corpus")))]
+#[doc(hidden)]
+pub mod arrow_shape_corpus;
+
 #[cfg(feature = "parquet")]
 pub mod parquet;
 

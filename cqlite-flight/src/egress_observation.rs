@@ -12,6 +12,8 @@
 //! the writes are cheap `Relaxed` atomics, exactly like `StreamProbe`'s, so
 //! production simply carries a throwaway [`Default`] instance and never reads it.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -39,6 +41,18 @@ struct EgressCounters {
     /// Reservations that could not be taken immediately and PARKED on the
     /// exhausted pool — the deterministic "the ceiling is now binding" event.
     reservations_parked: AtomicU64,
+    /// Reservations parked on the pool RIGHT NOW — a gauge, not a counter.
+    /// Maintained by the RAII [`ParkGuard`], so a reservation future dropped
+    /// while parked (a cancelled stream) decrements it too. Read by
+    /// `MeteredDoGetStream`'s safety valve as the "the producer cannot proceed"
+    /// half of its wedge predicate (issue #2821 review R1).
+    parked_now: AtomicU64,
+    /// Deferred permits force-released by the safety valve because the stream
+    /// was wedged: the producer parked, the channel empty, and every charged
+    /// byte held by a batch the CONSUMER is still retaining. Zero on every
+    /// normal path — a non-zero count means the governor stopped charging for
+    /// consumer-held bytes so the stream could make progress.
+    safety_valve_releases: AtomicU64,
     /// Reservations clamped to the whole pool by the deadlock-avoidance clamp
     /// (see [`EgressCredit::reserve`]). A non-zero count means the stream is
     /// running lock-step: the clamped batch is charged for the ENTIRE pool.
@@ -52,6 +66,13 @@ struct EgressCounters {
     /// stores a permit when no waiter is registered, so the signal cannot be lost
     /// in the gap between a check and an await.
     parked_signal: tokio::sync::Notify,
+    /// The SAME event, on a SEPARATE `Notify` for `MeteredDoGetStream`'s safety
+    /// valve. Deliberately not shared with [`Self::parked_signal`]: `notify_one`
+    /// wakes exactly one waiter, so a single `Notify` with both a test observer
+    /// and the stream registered would have each of them randomly stealing the
+    /// other's wakeup — silently converting the valve into a best-effort
+    /// mechanism and the saturation helper into a flaky one.
+    parked_valve_signal: tokio::sync::Notify,
 }
 
 impl EgressObservation {
@@ -77,11 +98,31 @@ impl EgressObservation {
     }
 
     /// One reservation could not be taken immediately and is about to park.
-    pub(crate) fn record_parked(&self) {
+    ///
+    /// Returns an RAII [`ParkGuard`] that must be held for exactly as long as
+    /// the reservation is parked: it maintains the `parked_now` GAUGE the
+    /// safety valve reads, and releasing it on `Drop` is what keeps that gauge
+    /// correct when a parked reservation future is dropped rather than
+    /// completed (a cancelled stream), instead of leaving the gauge stuck high
+    /// and making the valve fire on a stream that is not wedged.
+    #[must_use = "the park gauge is only correct while the guard is held"]
+    pub(crate) fn park(&self) -> ParkGuard {
         self.inner
             .reservations_parked
             .fetch_add(1, Ordering::Relaxed);
+        self.inner.parked_now.fetch_add(1, Ordering::Relaxed);
+        // Notify AFTER the gauge is raised, so a waiter woken by either signal
+        // observes `parked_now > 0` (the safety valve's wedge predicate).
         self.inner.parked_signal.notify_one();
+        self.inner.parked_valve_signal.notify_one();
+        ParkGuard { obs: self.clone() }
+    }
+
+    /// Count one deferred permit force-released by the stream's safety valve.
+    pub(crate) fn record_safety_valve_release(&self) {
+        self.inner
+            .safety_valve_releases
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// One reservation was clamped to the pool total (deadlock avoidance).
@@ -152,6 +193,19 @@ impl EgressObservation {
         self.inner.reservations_parked.load(Ordering::Relaxed)
     }
 
+    /// Reservations parked on the pool AT THIS INSTANT (gauge). The "producer
+    /// cannot proceed" half of the safety valve's wedge predicate.
+    pub(crate) fn parked_now(&self) -> u64 {
+        self.inner.parked_now.load(Ordering::Relaxed)
+    }
+
+    /// Deferred permits force-released by the stream's safety valve. ZERO is the
+    /// healthy state: every normal consumer (including `FlightDataEncoder`)
+    /// drops batch N before batch N+1 exists, so the valve never fires.
+    pub(crate) fn safety_valve_releases(&self) -> u64 {
+        self.inner.safety_valve_releases.load(Ordering::Relaxed)
+    }
+
     /// Reservations clamped to the whole pool (deadlock avoidance). ZERO is the
     /// healthy state at the shipped defaults: a clamped batch runs the stream
     /// lock-step, so this counter is the regression guard for a ceiling that is
@@ -170,6 +224,19 @@ impl EgressObservation {
         self.inner.parked_signal.notified().await
     }
 
+    /// The same signal as [`Self::parked`], as an OWNED future.
+    ///
+    /// `MeteredDoGetStream` must register for this wakeup *before* it returns
+    /// `Pending`, or the safety valve loses a race it cannot recover from: if
+    /// the producer parks in the window between the stream's wedge check and
+    /// its `Pending` return, nothing would ever poll the stream again. `Notify`
+    /// stores a permit when no waiter is registered, so a park on either side of
+    /// the window wakes the stream exactly once either way.
+    pub(crate) fn parked_owned(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move { inner.parked_valve_signal.notified().await })
+    }
+
     /// Batches materialized over the stream's lifetime. Can never exceed
     /// [`Self::reservations_granted`] — that is the reserve-before-materialize
     /// property, observable rather than merely asserted in prose.
@@ -180,5 +247,31 @@ impl EgressObservation {
     /// Largest single-batch realized capacity observed on this stream.
     pub(crate) fn largest_batch_capacity_bytes(&self) -> u64 {
         self.inner.largest_batch.load(Ordering::Relaxed)
+    }
+}
+
+/// RAII marker that one reservation is parked on the exhausted credit pool.
+///
+/// Held for exactly the duration of the semaphore await in
+/// [`crate::egress_credit::EgressCredit::reserve`], so the `parked_now` gauge is
+/// correct on BOTH exits: a reservation that eventually acquires its permits,
+/// and one whose future is dropped mid-park because the stream was cancelled.
+/// A gauge maintained by paired increment/decrement calls would leak on the
+/// second path and leave the stream's safety valve believing a departed producer
+/// is still parked.
+pub(crate) struct ParkGuard {
+    obs: EgressObservation,
+}
+
+impl Drop for ParkGuard {
+    fn drop(&mut self) {
+        // Saturating by construction: `fetch_update` cannot wrap below zero.
+        let _ = self
+            .obs
+            .inner
+            .parked_now
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
     }
 }
