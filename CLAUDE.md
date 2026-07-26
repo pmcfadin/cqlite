@@ -387,8 +387,12 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `issue-<N>-*` branch outlived its claim ref** (released/reaped/parked claim, or a
   merged-but-undeleted branch) = `claim.sh adopt <N> --expect none --reason <why>` (#2945) — git's
   empty lease, so the create is still server-arbitrated (a machine actually holding the ref keeps
-  it, `ADOPT-LOST`) and the claim commit records who took it AND why. That is the ONLY sanctioned
-  way past `reason=legacy-branch-lock`; never hand-craft a claim commit. `claim.sh release <N>`
+  it, `ADOPT-LOST`) and the claim commit records who took it AND why (a `--reason` with nothing
+  recordable in it is a usage error, not a silent `reason=unspecified`). That is the ONLY sanctioned
+  way past `reason=legacy-branch-lock`; never hand-craft a claim commit. The refusal only PRINTS
+  that command at `open-prs=0`: an older-fleet worker locks with the BRANCH and holds no claim ref,
+  so with an open PR (or an unreadable PR list) it prints `remediation=withheld open-prs=<n>` and
+  you confirm ownership via the board + PR author before resuming. `claim.sh release <N>`
   deletes the ref (refuses under an open PR without `--force`). Maintain the liveness heartbeat
   (`scripts/flow/claim-heartbeat.sh beat <N>`, refreshed at claim + every stage transition);
   `flow-board` reaps deterministically (age > 4h AND no open PR) (#2089).

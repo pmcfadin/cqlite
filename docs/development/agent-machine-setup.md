@@ -134,6 +134,8 @@ parked, or reaped issue, or a merged-but-undeleted branch), `claim` refuses with
 `reason=legacy-branch-lock` and prints the one sanctioned resume:
 `bash scripts/flow/claim.sh adopt <N> --expect none --reason <why>` (#2945) — git's empty
 lease, so the create is still server-arbitrated and the claim commit records who + why.
+That command is printed only at `open-prs=0`; with an open PR (or an unreadable PR list)
+the refusal says `remediation=withheld open-prs=<n>` — confirm ownership before resuming.
 
 ## Full doctrine
 
