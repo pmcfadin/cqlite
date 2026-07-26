@@ -54,6 +54,16 @@ Configuration is in `.clippy.toml` (MSRV: 1.85.0).
 - Memory target: <128MB for large files
 - Prefer authoritative metadata over heuristics
 
+### Dependencies and `Cargo.lock`
+
+`Cargo.lock` is **tracked** (issue #2870): the workspace ships binaries and the
+`cqlite-flight` image build resolves dependencies with `--locked`. Any change to a
+manifest (adding, removing, or bumping a dependency) MUST be accompanied by a
+refreshed `Cargo.lock` in the same commit — run `cargo build` (or
+`cargo update -p <crate>` for a targeted bump) and commit the resulting lockfile.
+A manifest edit that leaves the lockfile stale will fail the image build's `--locked`
+resolution rather than silently re-resolving.
+
 ## Testing
 
 ### Requirements

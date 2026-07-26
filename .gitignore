@@ -1,6 +1,13 @@
 # Rust
 target/
-Cargo.lock
+# Cargo.lock IS tracked (issue #2870): the workspace ships binaries
+# (cqlite-flight, cqlite-cli) and the flight image build resolves --locked, so a
+# committed lockfile is the precondition that makes the cargo-chef cook layer's
+# cache key stable and reproducible. Do NOT re-ignore it.
+# The fuzz crate (fuzz/Cargo.toml) is its OWN separate workspace (issue #1614),
+# excluded from the main one and built only under nightly by its own workflow —
+# its lockfile is not part of any shipped image build, so keep it untracked.
+fuzz/Cargo.lock
 *.pdb
 
 # Parity failure-artifact bundles (issue #1027) — CI-only forensics, never committed
