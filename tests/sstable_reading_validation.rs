@@ -209,11 +209,8 @@ async fn test_file_creation_performance() -> Result<()> {
     let _sstable_path = harness.create_test_sstable("perf_test", test_data).await?;
     let duration = start_time.elapsed();
 
-    // File creation should be fast (under 1 second)
-    assert!(
-        duration.as_secs() < 1,
-        "File creation took too long: {duration:?}"
-    );
+    // Record timing (do not assert on wall-clock latency — #2642/#2902).
+    println!("[perf-record] test sstable creation: {duration:?}");
 
     Ok(())
 }

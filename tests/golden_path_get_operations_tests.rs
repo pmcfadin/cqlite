@@ -94,13 +94,6 @@ async fn test_golden_path_simple_get_operation() -> Result<()> {
     // Assertions: Basic functionality
     println!("✅ Get operation completed in {get_duration:?}");
 
-    // Performance assertion: Should complete within reasonable time
-    assert!(
-        get_duration.as_millis() < 100,
-        "Get operation took too long: {:?}ms",
-        get_duration.as_millis()
-    );
-
     // Log result for analysis
     match result {
         Some(value) => {
@@ -139,12 +132,8 @@ async fn test_golden_path_get_with_bloom_filter_validation() -> Result<()> {
         let result = reader.get(&table_id, &test_key).await?;
         let get_duration = start_time.elapsed();
 
-        // Assertions: Bloom filter should make this fast
-        assert!(
-            get_duration.as_micros() < 5000, // Should be very fast with bloom filter
-            "Bloom filter lookup took too long: {:?}μs for non-existent key",
-            get_duration.as_micros()
-        );
+        // Record timing (do not assert on wall-clock latency — #2642/#2902).
+        println!("[perf-record] bloom filter lookup (non-existent key): {get_duration:?}");
 
         assert!(
             result.is_none(),
@@ -180,19 +169,6 @@ async fn test_golden_path_get_performance_benchmarks() -> Result<()> {
     let total_duration = start_time.elapsed();
     let avg_duration = total_duration / test_keys.len() as u32;
 
-    // Performance assertions
-    assert!(
-        avg_duration.as_micros() < 1000,
-        "Average get operation too slow: {:?}μs",
-        avg_duration.as_micros()
-    );
-
-    assert!(
-        total_duration.as_millis() < 500,
-        "Batch get operations took too long: {:?}ms",
-        total_duration.as_millis()
-    );
-
     println!(
         "✅ Performance benchmark: {} keys processed in {:?} (avg: {:?}, found: {})",
         test_keys.len(),
@@ -222,11 +198,8 @@ async fn test_golden_path_get_edge_cases() -> Result<()> {
     let _result = reader.get(&table_id, &long_key).await?;
     let duration = start_time.elapsed();
 
-    assert!(
-        duration.as_millis() < 50,
-        "Long key lookup should still be efficient: {:?}ms",
-        duration.as_millis()
-    );
+    // Record timing (do not assert on wall-clock latency — #2642/#2902).
+    println!("[perf-record] long key lookup: {duration:?}");
 
     // Edge case 3: Binary key with null bytes
     let binary_key = RowKey::from([0u8, 1u8, 255u8, 0u8, 42u8].as_ref());
@@ -282,12 +255,8 @@ async fn test_golden_path_get_integration_validation() -> Result<()> {
     let _result = reader.get(&table_id, &test_key).await?;
     let duration = start_time.elapsed();
 
-    // Integration validation: All components should work efficiently together
-    assert!(
-        duration.as_millis() < 10,
-        "Integrated get operation should be very fast: {:?}ms",
-        duration.as_millis()
-    );
+    // Record timing (do not assert on wall-clock latency — #2642/#2902).
+    println!("[perf-record] integrated get operation: {duration:?}");
 
     println!("✅ Integration validation completed - all components working together");
     Ok(())
@@ -324,24 +293,12 @@ async fn test_golden_path_concurrent_get_operations() -> Result<()> {
         let (id, get_result, duration) =
             handle_result.map_err(|e| Error::internal(format!("Task failed: {e}")))?;
 
-        // Each operation should complete reasonably fast
-        assert!(
-            duration.as_millis() < 100,
-            "Concurrent get operation {} took too long: {:?}ms",
-            id,
-            duration.as_millis()
-        );
+        // Record timing (do not assert on wall-clock latency — #2642/#2902).
+        println!("[perf-record] concurrent get operation {id}: {duration:?}");
 
         // Operation should not fail
         get_result?;
     }
-
-    // Total concurrent execution should be efficient
-    assert!(
-        total_duration.as_millis() < 1000,
-        "Concurrent operations took too long: {:?}ms",
-        total_duration.as_millis()
-    );
 
     println!("✅ Concurrent get operations completed in {total_duration:?}");
     Ok(())

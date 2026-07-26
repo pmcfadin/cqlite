@@ -139,13 +139,6 @@ async fn test_golden_path_full_table_scan() -> Result<()> {
     println!("✅ Full table scan completed in {scan_duration:?}");
     println!("✅ Found {} entries in full scan", results.len());
 
-    // Performance assertion: Should complete in reasonable time
-    assert!(
-        scan_duration.as_millis() < 1000,
-        "Full table scan took too long: {:?}ms",
-        scan_duration.as_millis()
-    );
-
     // Verify results are in ascending Murmur3 token order (then key bytes for equal tokens),
     // matching the on-disk order specified in the SSTable format spec (§5, Appendix B §313).
     for i in 1..results.len() {
@@ -191,13 +184,6 @@ async fn test_golden_path_range_scan_with_boundaries() -> Result<()> {
     println!("✅ Range scan completed in {scan_duration:?}");
     println!("✅ Range scan found {} entries", results.len());
 
-    // Performance assertion: Range scans should be fast
-    assert!(
-        scan_duration.as_millis() < 500,
-        "Range scan took too long: {:?}ms",
-        scan_duration.as_millis()
-    );
-
     // Verify all results are within range
     for (key, _value) in &results {
         assert!(
@@ -241,14 +227,6 @@ async fn test_golden_path_limited_scan_operations() -> Result<()> {
             "Scan should respect limit: got {}, expected max {}",
             results.len(),
             limit
-        );
-
-        // Limited scans should be very fast
-        assert!(
-            scan_duration.as_millis() < 100,
-            "Limited scan ({}) took too long: {:?}ms",
-            limit,
-            scan_duration.as_millis()
         );
 
         println!(
@@ -296,13 +274,6 @@ async fn test_golden_path_prefix_scan_operations() -> Result<()> {
         println!("  Found key: {key_str}");
     }
 
-    // Performance assertion
-    assert!(
-        scan_duration.as_millis() < 200,
-        "Prefix scan took too long: {:?}ms",
-        scan_duration.as_millis()
-    );
-
     Ok(())
 }
 
@@ -328,26 +299,6 @@ async fn test_golden_path_scan_performance_benchmarks() -> Result<()> {
         let duration = start_time.elapsed();
 
         benchmark_results.insert(name, (duration, results.len()));
-
-        // Individual performance assertions
-        match name {
-            "limited_10" => assert!(
-                duration.as_millis() < 50,
-                "Limited scan (10) should be very fast: {:?}ms",
-                duration.as_millis()
-            ),
-            "limited_100" => assert!(
-                duration.as_millis() < 200,
-                "Limited scan (100) should be fast: {:?}ms",
-                duration.as_millis()
-            ),
-            "full_scan" => assert!(
-                duration.as_millis() < 1000,
-                "Full scan should complete reasonably fast: {:?}ms",
-                duration.as_millis()
-            ),
-            _ => {}
-        }
     }
 
     // Print benchmark results
@@ -447,11 +398,8 @@ async fn test_golden_path_scan_edge_cases() -> Result<()> {
         .await?;
     let duration = start_time.elapsed();
 
-    assert!(
-        duration.as_millis() < 2000,
-        "Large limit scan should still be efficient: {:?}ms",
-        duration.as_millis()
-    );
+    // Record timing (do not assert on wall-clock latency — #2642/#2902).
+    println!("[perf-record] large limit scan: {duration:?}");
 
     // Edge case 4: Empty key range scan
     let empty_start = RowKey::from(b"".as_slice());
@@ -516,14 +464,6 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
 
         let scan_results = scan_result?;
 
-        // Each scan should complete reasonably fast
-        assert!(
-            duration.as_millis() < 500,
-            "Concurrent scan {} took too long: {:?}ms",
-            id,
-            duration.as_millis()
-        );
-
         println!(
             "✅ Concurrent scan {} found {} entries in {:?}",
             id,
@@ -531,13 +471,6 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
             duration
         );
     }
-
-    // Total concurrent execution should be efficient
-    assert!(
-        total_duration.as_millis() < 2000,
-        "Concurrent scans took too long: {:?}ms",
-        total_duration.as_millis()
-    );
 
     println!("✅ All concurrent scan operations completed in {total_duration:?}");
     Ok(())
@@ -573,12 +506,8 @@ async fn test_golden_path_scan_integration_validation() -> Result<()> {
     );
     // NOTE: cache_hits field is not available, use cache_hit_rate instead
 
-    // 4. Integration validation
-    assert!(
-        scan_duration.as_millis() < 300,
-        "Integrated scan should be efficient: {:?}ms",
-        scan_duration.as_millis()
-    );
+    // 4. Record timing (do not assert on wall-clock latency — #2642/#2902).
+    println!("[perf-record] integrated scan: {scan_duration:?}");
 
     // 5. Verify scan results consistency with get operations
     if !results.is_empty() {

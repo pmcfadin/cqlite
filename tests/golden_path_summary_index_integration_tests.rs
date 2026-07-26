@@ -287,12 +287,8 @@ async fn test_golden_path_integrated_summary_index_operations() -> Result<()> {
         let result = reader.get(&table_id, test_key).await?;
         let lookup_duration = start_time.elapsed();
 
-        // Integrated lookup should be very efficient
-        assert!(
-            lookup_duration.as_millis() < 20,
-            "Integrated summary/index lookup should be very fast: {:?}ms",
-            lookup_duration.as_millis()
-        );
+        // Record timing (do not assert on wall-clock latency — #2642/#2902).
+        println!("[perf-record] integrated summary/index lookup: {lookup_duration:?}");
 
         match result {
             Some(value) => {
@@ -344,22 +340,6 @@ async fn test_golden_path_summary_index_range_efficiency() -> Result<()> {
             .scan(&table_id, Some(&start_key), Some(&end_key), limit, None)
             .await?;
         let scan_duration = start_time.elapsed();
-
-        // Summary/index should make range scans efficient
-        let max_duration_ms = match test_name {
-            "small_range" => 50,
-            "medium_range" => 200,
-            "large_range" => 500,
-            _ => 1000,
-        };
-
-        assert!(
-            scan_duration.as_millis() < max_duration_ms,
-            "Range scan '{}' should be efficient: {:?}ms (max: {}ms)",
-            test_name,
-            scan_duration.as_millis(),
-            max_duration_ms
-        );
 
         println!(
             "✅ Range scan '{}': {} entries in {:?}",
@@ -491,12 +471,9 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
         let result = reader.get(&table_id, &test_key).await?;
         let lookup_duration = start_time.elapsed();
 
-        // Even if bloom passes, summary/index should make lookup efficient
-        assert!(
-            lookup_duration.as_millis() < 50,
-            "Summary/index lookup should be efficient even after bloom pass: {:?}ms for {}",
-            lookup_duration.as_millis(),
-            key_str
+        // Record timing (do not assert on wall-clock latency — #2642/#2902).
+        println!(
+            "[perf-record] summary/index lookup after bloom pass ({key_str}): {lookup_duration:?}"
         );
 
         match result {
@@ -532,13 +509,6 @@ async fn test_golden_path_multi_level_index_traversal() -> Result<()> {
         let lookup_duration = start_time.elapsed();
 
         traversal_times.push(lookup_duration);
-
-        // Each multi-level traversal should be efficient
-        assert!(
-            lookup_duration.as_millis() < 25,
-            "Multi-level index traversal should be fast: {:?}ms",
-            lookup_duration.as_millis()
-        );
     }
 
     // Calculate traversal statistics
@@ -555,19 +525,6 @@ async fn test_golden_path_multi_level_index_traversal() -> Result<()> {
     );
     println!("   Average: {avg_time:?}");
     println!("   Min: {min_time:?}, Max: {max_time:?}");
-
-    // Performance assertions for batch traversals
-    assert!(
-        avg_time.as_micros() < 5000,
-        "Average multi-level traversal should be very efficient: {:?}μs",
-        avg_time.as_micros()
-    );
-
-    assert!(
-        max_time.as_millis() < 50,
-        "Maximum traversal time should be reasonable: {:?}ms",
-        max_time.as_millis()
-    );
 
     Ok(())
 }
@@ -745,13 +702,8 @@ async fn test_golden_path_summary_index_performance_integration() -> Result<()> 
             (scenario_duration, avg_duration, found_count),
         );
 
-        // Performance assertions per scenario
-        assert!(
-            avg_duration.as_micros() < 10000,
-            "Scenario '{}' average lookup should be efficient: {:?}μs",
-            scenario_name,
-            avg_duration.as_micros()
-        );
+        // Record timing (do not assert on wall-clock latency — #2642/#2902).
+        println!("[perf-record] scenario '{scenario_name}' average lookup: {avg_duration:?}");
 
         println!(
             "✅ Scenario '{}': {} keys in {:?} (avg: {:?}, found: {})",
@@ -777,12 +729,6 @@ async fn test_golden_path_summary_index_performance_integration() -> Result<()> 
         let overall_avg = total_time / total_operations as u32;
         println!(
             "✅ Overall performance: {total_operations} operations in {total_time:?} (avg: {overall_avg:?})"
-        );
-
-        assert!(
-            overall_avg.as_micros() < 15000,
-            "Overall average performance should be good: {:?}μs",
-            overall_avg.as_micros()
         );
     }
 

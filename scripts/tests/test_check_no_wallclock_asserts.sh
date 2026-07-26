@@ -78,6 +78,59 @@ if ! bash "$GUARD" "$tmp/allowed.rs" >/dev/null 2>&1; then
 fi
 echo "OK: perf-gate-allow escape hatch respected"
 
+# 3b. Scan-surface extension (issue #2902): the DEFAULT roots must now cover the
+# workspace-root tests/*.rs integration files (the #2720 gap), scanned
+# NON-RECURSIVELY. Build a throwaway fake repo so the copied guard derives its
+# REPO_ROOT from its own location, then assert the default (no-arg) scan flags a
+# top-level tests/*.rs violation but does NOT descend into a subtree.
+fakeroot="$tmp/fakerepo"
+mkdir -p "$fakeroot/scripts/tests" "$fakeroot/tests/deep"
+cp "$GUARD" "$fakeroot/scripts/tests/check-no-wallclock-asserts.sh"
+cat >"$fakeroot/tests/planted.rs" <<'RS'
+#[tokio::test]
+async fn planted_top_level() {
+    let start = std::time::Instant::now();
+    let elapsed = start.elapsed();
+    assert!(elapsed.as_millis() < 5, "planted top-level violation");
+}
+RS
+cat >"$fakeroot/tests/deep/nested.rs" <<'RS'
+#[tokio::test]
+async fn planted_deep() {
+    let start = std::time::Instant::now();
+    let elapsed = start.elapsed();
+    assert!(elapsed.as_millis() < 5, "planted deep (must NOT be scanned)");
+}
+RS
+fake_guard="$fakeroot/scripts/tests/check-no-wallclock-asserts.sh"
+default_out="$(bash "$fake_guard" 2>&1)" && default_rc=0 || default_rc=$?
+if [ "$default_rc" -eq 0 ]; then
+  echo "FAIL: default scan did NOT flag a top-level tests/*.rs violation (surface not extended)"
+  echo "$default_out"
+  exit 1
+fi
+if ! grep -q 'tests/planted.rs' <<<"$default_out"; then
+  echo "FAIL: default scan output did not name the top-level tests/planted.rs offender"
+  echo "$default_out"
+  exit 1
+fi
+if grep -q 'nested.rs' <<<"$default_out"; then
+  echo "FAIL: default scan RECURSED into a tests/ subtree (must be top-level only, #2902/#2705)"
+  echo "$default_out"
+  exit 1
+fi
+echo "OK: default scan covers top-level tests/*.rs and does not recurse into subtrees"
+
+# Removing the top-level offender makes the default scan clean even though the deep
+# (unscanned) subtree violation remains — proving the non-recursive boundary.
+rm -f "$fakeroot/tests/planted.rs"
+if ! bash "$fake_guard" >/dev/null 2>&1; then
+  echo "FAIL: default scan still failed after removing the top-level offender (a deep subtree file was scanned?)"
+  bash "$fake_guard" || true
+  exit 1
+fi
+echo "OK: default scan is clean once the top-level offender is removed (subtree stays deferred)"
+
 # 4. the real, retired correctness test path must be clean.
 if ! bash "$GUARD" >/dev/null 2>&1; then
   echo "FAIL: the real correctness test path still contains a wall-clock threshold assert"

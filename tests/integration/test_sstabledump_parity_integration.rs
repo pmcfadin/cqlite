@@ -411,7 +411,8 @@ mod integration_tests {
         }
         
         let elapsed = start_time.elapsed();
-        assert!(elapsed.as_millis() < 100, "Schema parsing should be fast");
+        // Record timing (do not assert on wall-clock latency — #2642/#2902).
+        println!("[perf-record] schema-driven parsing (1000 ops): {elapsed:?}");
     }
 
     /// Memory safety test for large nested structures
@@ -511,9 +512,6 @@ mod performance_tests {
         let schema_time = start.elapsed();
         
         println!("Schema-driven parsing: {} operations in {:?}", iterations, schema_time);
-        
-        // Performance should be consistent and fast
-        assert!(schema_time.as_millis() < 1000, "Schema parsing should be under 1 second for 10k ops");
     }
 
     #[tokio::test]
