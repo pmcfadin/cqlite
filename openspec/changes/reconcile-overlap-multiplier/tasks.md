@@ -63,6 +63,9 @@
       the §4 L3 tension flag (:168-175) to cite the record.
 - [x] 4.5 Post the L3 finding to #2822 (M7) — it is blocked on this data.
       Posted: https://github.com/pmcfadin/cqlite/issues/2822#issuecomment-5081770565
+      Corrected after the review-round re-measurement (verdict unchanged; p/q and the withdrawn
+      "shadowed rows are cheaper" finding updated):
+      https://github.com/pmcfadin/cqlite/issues/2822#issuecomment-5082035250
 
 ## 5. Quality stages
 
