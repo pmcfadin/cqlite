@@ -594,6 +594,24 @@ impl SSTableReader {
             }
         };
 
+        // Build the SCAN-side positional source (issue #2876): the Summary-guided
+        // compressed partition walk and the windowed streaming scan feed must NOT
+        // share `point_source` — for the mmap backend that source is deliberately
+        // advised `MADV_RANDOM` above (issue #2210) to help scattered point faults,
+        // which is exactly backwards for a mostly-sequential scan (one 4 KiB page
+        // fault per positional read instead of the ~128 KiB read-ahead window).
+        // Always the SAME unadvised mapping `ScanSource::Mapped` already holds — an
+        // `Arc` clone, no new mapping / fd (#1143: the scan mapping is never
+        // advised). The Direct/Buffered backends have no per-mapping advice
+        // concept, so they share `point_source` unchanged (no behavior change for
+        // those backends).
+        let scan_positional_source: Arc<dyn read_at::ReadAt> = match &scan_source {
+            ScanSource::Mapped(mmap) => Arc::new(read_at::MmapReadAt::new(mmap.clone())),
+            #[cfg(unix)]
+            ScanSource::Direct { .. } => point_source.clone(),
+            ScanSource::Buffered { .. } => point_source.clone(),
+        };
+
         // Parse header - read available bytes, not a fixed size
         // NOTE: For NB format files (Cassandra 4.x+), Data.db often contains compressed row data
         // with no embedded header. The header.rs module detects this via filename pattern and
@@ -914,6 +932,7 @@ impl SSTableReader {
             file,
             scan_source,
             point_source,
+            scan_positional_source,
             header,
             parser,
             index,
@@ -975,6 +994,28 @@ impl SSTableReader {
     #[cfg(test)]
     pub(crate) fn set_point_source(&mut self, src: Arc<dyn read_at::ReadAt>) {
         self.point_source = src;
+    }
+
+    /// Clone the reader's scan-side positional source (issue #2876). Test-only:
+    /// mirrors [`clone_point_source`](Self::clone_point_source) for the sibling
+    /// scan-side plane.
+    ///
+    /// Sole callers are the write-support+lz4-gated Summary-guided scan-plane
+    /// regressions in `read_at_point_tests.rs`, so this is gated identically —
+    /// under the minimal-build feature set (no `write-support`) those tests do not
+    /// exist and this method would otherwise be flagged dead code under `-D warnings`.
+    #[cfg(all(test, feature = "write-support", feature = "lz4"))]
+    pub(crate) fn clone_scan_positional_source(&self) -> Arc<dyn read_at::ReadAt> {
+        self.scan_positional_source.clone()
+    }
+
+    /// Replace the reader's scan-side positional source (issue #2876). Test-only;
+    /// mirrors [`set_point_source`](Self::set_point_source) — requires `&mut self`,
+    /// so call it BEFORE the reader is shared behind an `Arc`. Gated identically to
+    /// [`clone_scan_positional_source`](Self::clone_scan_positional_source).
+    #[cfg(all(test, feature = "write-support", feature = "lz4"))]
+    pub(crate) fn set_scan_positional_source(&mut self, src: Arc<dyn read_at::ReadAt>) {
+        self.scan_positional_source = src;
     }
 
     /// Whether this reader's block source is backed by direct I/O.

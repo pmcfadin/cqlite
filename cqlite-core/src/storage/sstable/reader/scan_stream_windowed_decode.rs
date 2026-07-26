@@ -88,7 +88,14 @@ impl SSTableReader {
             chunk_offsets: vec![],
         };
         let chunk_source = super::super::chunk_source::ChunkSource::new(
-            self.point_source.as_ref(), // unused by decode_borrowed
+            // Correct-by-intent: this is a SCAN path, so hand it the unadvised
+            // scan plane (issue #2876). `decode_borrowed` performs no I/O today, so
+            // this is inert — but `ChunkSource::chunk()` CAN read, and a future
+            // fallback here (a decode-error re-read, or a chunk absent from the
+            // caller's buffer) would otherwise silently route full-scan I/O back
+            // through the MADV_RANDOM point mapping and re-create #2876 with no
+            // test failure. Free to get right now; a trap to leave wrong.
+            self.scan_positional_source.as_ref(),
             &comp_info_dummy,
             compression.as_ref(),
             &self.chunk_cache,

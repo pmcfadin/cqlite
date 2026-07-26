@@ -582,11 +582,15 @@ impl SSTableReader {
                  at Data.db offset 0x{offset:x}"
             ))
         })?;
-        // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
-        self.verify_uncompressed_range(offset, size).await?;
+        // Verify the covering CRC.db chunk(s) BEFORE returning any bytes, on the
+        // SAME plane the bytes themselves come off (issue #2876): this is a POINT
+        // path, so both stay on the advised `MADV_RANDOM` mapping (issue #2210).
+        let point_source = self.point_source.clone();
+        self.verify_uncompressed_range(point_source.as_ref(), offset, size)
+            .await?;
 
         let mut buf = vec![0u8; len];
-        self.point_source.read_exact_at(offset, &mut buf)?;
+        point_source.read_exact_at(offset, &mut buf)?;
         Ok(buf)
     }
 }

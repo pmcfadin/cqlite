@@ -156,6 +156,27 @@ impl SSTableReader {
                     i, entry.offset, file_offset, entry.size
                 );
 
+                // POINT intent, deliberately (issue #2876, roborev job 4634).
+                //
+                // This legacy index path looks like a scan but does NOT read
+                // sequentially: `Index::get_range` walks `sorted_keys`, i.e. raw
+                // key-BYTE order (index.rs:270-277), while Data.db is laid out in
+                // Murmur3 TOKEN order. For the default partitioner those two orders
+                // are uncorrelated, so these reads are genuinely scattered and
+                // `MADV_RANDOM` is the CORRECT advice — the same reasoning that put
+                // point lookups on the advised plane in #2210. Routing them to the
+                // scan plane would invite readahead that mostly fetches pages this
+                // walk never touches.
+                //
+                // Do NOT "fix" this by sorting `entries` by `entry.offset` before
+                // reading to make the access sequential: `results` is sorted into
+                // token order AFTER the loop (`sort_by_token_order`, see below) and
+                // `limit` is applied AFTER that sort, so LIMIT N must mean "the N
+                // token-smallest partitions". Read order is independent of result
+                // order here, so an offset-ordered read is safe in principle — but
+                // it is a separate optimization with its own regression-test burden,
+                // NOT part of removing a wrong advice from the true scan walks.
+                // Tracked as follow-up; this line stays on the point plane.
                 if let Some(value) = self.read_value_at_offset(file_offset, entry.size).await? {
                     tracing::debug!(
                         "SSTableReader::scan - Successfully read value at offset {}",

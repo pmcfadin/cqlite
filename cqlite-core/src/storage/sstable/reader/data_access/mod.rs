@@ -551,8 +551,40 @@ impl SSTableReader {
         }
     }
 
-    /// Read value at a specific offset with caching
+    /// Read value at a specific offset with caching — the POINT-intent entry.
+    ///
+    /// Reads Data.db through the reader's dedicated `MADV_RANDOM` point mapping
+    /// ([`point_source`](Self::point_source), issue #2210), which is the right
+    /// advice for a scattered fault.
+    ///
+    /// Note (issue #2876, roborev job 4634): the index-driven range scan in
+    /// `sequential.rs` also uses THIS point-intent entry, and that is deliberate.
+    /// It looks like a scan, but `Index::get_range` yields entries in raw key-BYTE
+    /// order while Data.db is laid out in Murmur3 TOKEN order — uncorrelated for the
+    /// default partitioner — so its access really is scattered and `MADV_RANDOM` is
+    /// correct. The genuinely sequential walks (the Summary-guided walk, the full
+    /// index scan/stream, the windowed scan) reach the unadvised scan plane through
+    /// the positional helpers below, which take their plane from the caller.
     pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<ScanRow>> {
+        self.read_value_at_offset_via(self.point_source.as_ref(), offset, size)
+            .await
+    }
+
+    /// Shared body of the two offset-read entry points, parameterized by the
+    /// positional plane its caller's read intent selects (issue #2876).
+    ///
+    /// `source` is threaded all the way down — through the `CRC.db` verifier AND
+    /// the byte read / compressed-window decode — so a read never mixes planes:
+    /// no helper below hardcodes one, which is what made an index-driven scan's CRC
+    /// reads land on the advised point mapping while its bodies came off the scan
+    /// mapping (roborev #2882, Finding 1) and, symmetrically, made a genuine point
+    /// lookup lose the advised mapping entirely (Finding 2).
+    async fn read_value_at_offset_via(
+        &self,
+        source: &dyn super::read_at::ReadAt,
+        offset: u64,
+        size: u32,
+    ) -> Result<Option<ScanRow>> {
         // Size must be non-zero for offset-based reading
         if size == 0 {
             return Err(Error::corruption(format!(
@@ -567,8 +599,10 @@ impl SSTableReader {
         // chunk(s) covering [offset, offset+size) BEFORE returning any bytes. A
         // mismatch is a typed Error::Corruption naming the chunk + offset (never
         // wrong values / never a silent result). No-op when no CRC.db is present
-        // (compressed tables / BTI / absent-CRC.db warn-and-proceed).
-        self.verify_uncompressed_range(offset, size).await?;
+        // (compressed tables / BTI / absent-CRC.db warn-and-proceed). The CRC read
+        // uses the CALLER's plane (issue #2876): a scan's covering-chunk reads are
+        // part of its sequential walk, not scattered point faults.
+        self.verify_uncompressed_range(source, offset, size).await?;
 
         // Read + decompress in ONE decode plane (issue #1598, G2). `get_cached_data`
         // returns the final DECODED window: for a compressed Data.db it routes through
@@ -577,7 +611,7 @@ impl SSTableReader {
         // now resolves inside `ChunkSource`), or the CRC.db-verified raw bytes for an
         // uncompressed one. There is no second decode here — doing so used to
         // double-decompress the compressed path (and skip its inline CRC, the #1411 bug).
-        let data = self.get_cached_data(offset, size).await?;
+        let data = self.get_cached_data(source, offset, size).await?;
 
         // Preserve raw data until schema is available. Pre-#1334 this offset-read
         // placeholder returned a bare `Value::Blob` of the row's raw value bytes,
@@ -617,8 +651,18 @@ impl SSTableReader {
     /// runs `verify_uncompressed_range` before calling this, so a hit returns
     /// bytes verified when they were first inserted.
     ///
+    /// `source` is the positional plane the CALLER's read intent selected (issue
+    /// #2876) — the advised point mapping for a point lookup, the unadvised scan
+    /// mapping for the index-driven scan. It is threaded in rather than read off
+    /// `self` precisely because this helper serves BOTH intents.
+    ///
     /// [`DecompressedChunkCache`]: crate::storage::cache::DecompressedChunkCache
-    async fn get_cached_data(&self, block_offset: u64, size: u32) -> Result<Vec<u8>> {
+    async fn get_cached_data(
+        &self,
+        source: &dyn super::read_at::ReadAt,
+        block_offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>> {
         // The shared B1 cache tracks its own hit/miss counters (issue #1567). The
         // ranged BIG-point key carries `size` as its aux discriminant so two reads at
         // the same offset with different sizes can never alias (roborev #1567).
@@ -640,17 +684,23 @@ impl SSTableReader {
             // backing read HERE (point-read site only), symmetric with the uncompressed
             // branch below (#2167) — scan callers of the shared helper must NOT bump it.
             model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
-            self.read_compressed_offset_window(comp_info, block_offset, size)
+            self.read_compressed_offset_window(source, comp_info, block_offset, size)
                 .await?
         } else {
-            // UNCOMPRESSED offset read. Positioned read on the shared point source
-            // (issue #1573, C2): no cursor mutex is held across this I/O, so
-            // concurrent point reads do not convoy. The covering CRC.db chunks were
-            // already verified by `verify_uncompressed_range` before we got here
-            // (issue #1396), so these bytes are integrity-checked too.
+            // UNCOMPRESSED offset read. Positioned read on the caller's positional
+            // plane (issue #1573/C2 for the lock-free part, issue #2876 for the
+            // plane): no cursor mutex is held across this I/O, so concurrent reads
+            // do not convoy. `get_cached_data` is reached both by genuine point
+            // lookups (`big_point.rs`) and by every index-driven scan
+            // (`sequential.rs`), so the plane comes from the caller's intent — a
+            // point read keeps the dedicated `MADV_RANDOM` mapping (issue #2210), a
+            // scan takes the unadvised one, for which that readahead suppression is
+            // a deliberate loss. The covering CRC.db chunks were already verified on
+            // the SAME plane by `verify_uncompressed_range` (issue #1396), so these
+            // bytes are integrity-checked too.
             model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
             let mut buffer = vec![0u8; size as usize];
-            self.point_source.read_exact_at(block_offset, &mut buffer)?;
+            source.read_exact_at(block_offset, &mut buffer)?;
             buffer
         };
 
@@ -674,7 +724,21 @@ impl SSTableReader {
     ///
     /// No-op when this reader has no `CRC.db` (compressed tables carry inline
     /// per-chunk CRCs; BTI ships none; an absent `CRC.db` is warn-and-proceed).
-    async fn verify_uncompressed_range(&self, offset: u64, size: u32) -> Result<()> {
+    ///
+    /// `source` is the positional plane the CALLER's read intent selected (issue
+    /// #2876). A chunk CRC read is I/O on the same Data.db bytes the caller is
+    /// about to consume, so it belongs on the caller's plane: a scan's
+    /// covering-chunk reads are part of its sequential walk (the advised
+    /// `MADV_RANDOM` point mapping would suppress readahead over a whole 64 KiB
+    /// chunk), while a point lookup's stay on the advised mapping (issue #2210).
+    /// This is why the plane is a parameter and never read off `self` here —
+    /// hardcoding it split one logical read across two planes (roborev #2882).
+    async fn verify_uncompressed_range(
+        &self,
+        source: &dyn super::read_at::ReadAt,
+        offset: u64,
+        size: u32,
+    ) -> Result<()> {
         let Some(crc) = self.crc_reader.as_deref() else {
             return Ok(());
         };
@@ -698,12 +762,13 @@ impl SSTableReader {
                 ))
             })?;
         // Each covering chunk is CRC'd over its on-disk bytes via a positioned
-        // read on the shared point source (issue #1573, C2): the verifier never
-        // holds a cursor mutex across I/O, so it neither convoys concurrent point
-        // reads nor disturbs any scan cursor's position.
+        // read on the caller's plane (issue #1573 C2 for the lock-free part, issue
+        // #2876 for the plane): the verifier never holds a cursor mutex across I/O,
+        // so it neither convoys concurrent point reads nor disturbs any scan
+        // cursor's position.
         self.verify_covering_chunks(crc, offset, end, |lo, hi, chunk| {
             let mut buf = vec![0u8; (hi - lo) as usize];
-            self.point_source.read_exact_at(lo, &mut buf).map_err(|e| {
+            source.read_exact_at(lo, &mut buf).map_err(|e| {
                 Error::corruption(format!(
                     "failed to read uncompressed chunk {chunk} at Data.db offset 0x{lo:x} for CRC verification: {e}"
                 ))
@@ -722,8 +787,15 @@ impl SSTableReader {
     /// that does not fall on a chunk boundary) re-reads just that one chunk so the
     /// CRC-before-use guarantee holds regardless of header alignment. Same CRC32
     /// algorithm, chunk layout, memoization, and mismatch/typed-error semantics as
-    /// [`Self::verify_uncompressed_range`].
-    async fn verify_uncompressed_section_in_buffer(&self, base: u64, section: &[u8]) -> Result<()> {
+    /// [`Self::verify_uncompressed_range`] — including its `source` contract: the
+    /// straddling-chunk re-read uses the CALLER's positional plane (issue #2876),
+    /// never a hardcoded one.
+    async fn verify_uncompressed_section_in_buffer(
+        &self,
+        source: &dyn super::read_at::ReadAt,
+        base: u64,
+        section: &[u8],
+    ) -> Result<()> {
         let Some(crc) = self.crc_reader.as_deref() else {
             return Ok(());
         };
@@ -751,7 +823,7 @@ impl SSTableReader {
             } else {
                 // Chunk extends below `base` (unaligned header) — read just it.
                 let mut buf = vec![0u8; (hi - lo) as usize];
-                self.point_source.read_exact_at(lo, &mut buf).map_err(|e| {
+                source.read_exact_at(lo, &mut buf).map_err(|e| {
                     Error::corruption(format!(
                         "failed to read uncompressed chunk {chunk} at Data.db offset 0x{lo:x} for CRC verification: {e}"
                     ))
@@ -841,13 +913,31 @@ impl SSTableReader {
     /// `offset` is an ABSOLUTE Data.db file offset (post-header). `file` is the
     /// handle to read the range from — the shared point-read handle
     /// ([`Self::file`]) or a scan-local cursor's private handle (issue #815).
-    /// CRC verification always uses the reader's own handle, so it is independent
-    /// of `file` and never disturbs a scan cursor's position.
+    /// CRC verification reads positionally via `source` instead, so it is
+    /// independent of `file` and never disturbs a scan cursor's position.
+    ///
+    /// `source` is the positional plane the CALLER's read intent selects (issue
+    /// #2876), threaded through for the CRC chunk reads exactly as in
+    /// [`Self::verify_uncompressed_range`]. Every caller today is a scan walk
+    /// (`summary_scan.rs`, `full_index_scan.rs`, `full_index_stream.rs`) and passes
+    /// the unadvised scan mapping; a future point caller passes the advised one and
+    /// gets the right advice without editing this helper.
+    ///
+    /// SCOPE NOTE (#2876): `source` governs the **CRC chunk reads only**. The payload
+    /// bytes below are read through `file` — a seek-based [`BlockSource`], which is NOT
+    /// an mmap and therefore carries no `madvise` advice on any backend. So the
+    /// uncompressed path never suffered the MADV_RANDOM readahead suppression this
+    /// issue fixes (that regression was mmap-specific, hence compressed-walk-specific),
+    /// and threading the plane here closes the CRC-read half completely: after this
+    /// change NO read on an uncompressed scan touches an advised mapping. The
+    /// separate cost on this path is the shared `file` mutex serializing concurrent
+    /// scans (#815's domain), which is deliberately out of scope here.
     ///
     /// Future uncompressed offset reads MUST call this instead of doing their own
     /// `seek` + `read_exact`, so the CRC check can never be forgotten again.
     pub(in crate::storage::sstable::reader) async fn read_uncompressed_verified(
         &self,
+        source: &dyn super::read_at::ReadAt,
         file: &tokio::sync::Mutex<super::source::BlockSource>,
         offset: u64,
         len: usize,
@@ -861,7 +951,7 @@ impl SSTableReader {
             ))
         })?;
         // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
-        self.verify_uncompressed_range(offset, size).await?;
+        self.verify_uncompressed_range(source, offset, size).await?;
 
         let mut buf = vec![0u8; len];
         {

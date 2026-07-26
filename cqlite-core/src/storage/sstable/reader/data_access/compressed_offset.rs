@@ -1,12 +1,25 @@
 //! CRC-validated compressed offset-read window (issue #1773).
 //!
-//! The compressed offset-read point-lookup path
+//! The compressed offset-read path
 //! ([`read_value_at_offset`](super::super::SSTableReader::read_value_at_offset) →
-//! `get_cached_data`) used to read `size` raw bytes at an offset and LZ4-decompress
+//! `get_cached_data`, and the Summary-guided compressed scan walk in
+//! `summary_scan.rs`) used to read `size` raw bytes at an offset and LZ4-decompress
 //! them WITHOUT validating the trailing 4-byte inline per-chunk CRC32 — re-introducing
 //! the #1411 CRC bypass on a latent path (unreachable today via `get`, but live the
 //! moment `find_entry` hits for a compressed table). This module carries the helper
 //! that routes that case through the shared CRC-enforcing chunk reader.
+//!
+//! The positional plane is the CALLER's, never hardcoded here (issue #2876): this
+//! helper serves BOTH read intents, so each caller passes the source its intent
+//! selects. The scan-shaped walks (`summary_scan.rs`'s Summary-guided partition
+//! walk, `full_index_scan.rs` / `full_index_stream.rs`'s full-`Index.db`
+//! enumeration, and the windowed scan) pass the reader's UNADVISED
+//! `scan_positional_source`, because they read Data.db largely sequentially and the
+//! advised mapping's readahead suppression is exactly backwards for them (the
+//! #2210 × #1940 cross-path regression). A genuine point lookup — `get_cached_data`
+//! reached from `read_value_at_offset` — passes the dedicated `MADV_RANDOM`
+//! `point_source`, keeping the advice issue #2210 gave it. (`bti_point.rs` /
+//! `big_promoted.rs` read `point_source` directly and do not route through here.)
 
 use std::sync::atomic::Ordering;
 
@@ -25,9 +38,15 @@ impl SSTableReader {
     /// offset) that scan / `scan_for_key` return, never garbage. No heuristics: the
     /// authoritative CRC trailer is checked, never inferred.
     ///
+    /// `source` is the positional plane the CALLER's read intent selects (issue
+    /// #2876) — see the module doc. It is a parameter rather than a field read so
+    /// that this one helper can serve the scan walks and the point offset read
+    /// without either losing its intended mapping advice.
+    ///
     /// [`read_compressed_chunk_at`]: super::super::block_io::read_compressed_chunk_at
-    pub(super) async fn read_compressed_offset_window(
+    pub(in crate::storage::sstable::reader) async fn read_compressed_offset_window(
         &self,
+        source: &dyn super::super::read_at::ReadAt,
         comp_info: &crate::storage::sstable::compression_info::CompressionInfo,
         block_offset: u64,
         size: u32,
@@ -41,7 +60,7 @@ impl SSTableReader {
             .transpose()?;
 
         read_compressed_offset_window_impl(
-            self.point_source.as_ref(),
+            source,
             comp_info,
             compression.as_ref(),
             self.stats.file_size,
@@ -58,7 +77,7 @@ impl SSTableReader {
 ///
 /// [`CompressionInfo`]: crate::storage::sstable::compression_info::CompressionInfo
 pub(super) fn read_compressed_offset_window_impl(
-    point_source: &dyn super::super::read_at::ReadAt,
+    positional_source: &dyn super::super::read_at::ReadAt,
     comp_info: &crate::storage::sstable::compression_info::CompressionInfo,
     compression: Option<&crate::storage::sstable::compression::Compression>,
     file_size: u64,
@@ -118,8 +137,13 @@ pub(super) fn read_compressed_offset_window_impl(
         // corrupt/out-of-range offset or size. Returning the partial `assembled`
         // bytes as `Ok` would silently truncate; this must surface as a typed,
         // non-recoverable corruption error instead.
-        let Some(compressed) =
-            block_io::read_compressed_chunk_at(point_source, comp_info, chunk_idx, file_size, 0)?
+        let Some(compressed) = block_io::read_compressed_chunk_at(
+            positional_source,
+            comp_info,
+            chunk_idx,
+            file_size,
+            0,
+        )?
         else {
             return Err(Error::corruption(format!(
                 "compressed offset read requires chunk {chunk_idx} past EOF for range \

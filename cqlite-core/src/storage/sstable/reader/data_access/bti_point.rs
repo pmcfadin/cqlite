@@ -166,7 +166,12 @@ impl SSTableReader {
         // transferred from disk EXACTLY ONCE (issue #1573 roborev), preserving the
         // CRC-before-use ordering and the CRC algorithm unchanged.
         if self.crc_reader.is_some() {
-            self.verify_uncompressed_section_in_buffer(header_size, &whole)
+            // POINT intent (issue #2876): the only I/O the verifier can still need
+            // is the straddling-chunk re-read below `header_size`, and this is a
+            // point path, so it stays on the advised `MADV_RANDOM` mapping (#2210) —
+            // the same plane the section itself was just read from.
+            let point_source = self.point_source.clone();
+            self.verify_uncompressed_section_in_buffer(point_source.as_ref(), header_size, &whole)
                 .await?;
         }
         Ok(whole)

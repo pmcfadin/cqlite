@@ -233,16 +233,26 @@ impl SSTableReader {
             // Read the partition's Data.db slice into the UNCOMPRESSED byte domain,
             // then parse it with the NB-aware V5 block parser — the same producer
             // `sequential_scan` uses.
+            // SCAN intent (issue #2876): a full-`Index.db` enumeration walks Data.db
+            // in ascending offset order, so both the body read and the uncompressed
+            // `CRC.db` covering-chunk reads use the reader's UNADVISED
+            // `scan_positional_source`, not the `MADV_RANDOM` point mapping (#2210).
+            let scan_source = self.scan_positional_source.clone();
             let raw = if let Some(ci) = self.compression_info.as_deref() {
                 // Compressed: `data_offset` is an uncompressed-domain offset; map it
                 // to the covering compression chunk(s) and decompress.
-                self.read_compressed_offset_window(ci, data_offset, size)
+                self.read_compressed_offset_window(scan_source.as_ref(), ci, data_offset, size)
                     .await?
             } else {
                 // Uncompressed: raw file offset = data_offset + header (0 for `nb`).
                 let absolute_offset = data_offset + self.actual_header_size as u64;
-                self.read_uncompressed_verified(&self.file, absolute_offset, size as usize)
-                    .await?
+                self.read_uncompressed_verified(
+                    scan_source.as_ref(),
+                    &self.file,
+                    absolute_offset,
+                    size as usize,
+                )
+                .await?
             };
 
             // Completeness + corruption Signal B (issue #2302, roborev jobs 1606 +
