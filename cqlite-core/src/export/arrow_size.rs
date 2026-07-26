@@ -5,7 +5,7 @@
 //! The `cqlite-flight` egress path finishes a record batch on **row count**
 //! alone, so a batch's byte size is `batch_size × row_width` — an unbounded
 //! function of schema shape. Bounding it needs a byte decision made **while rows
-//! accumulate**, before any [`RecordBatch`] exists: building the batch to
+//! accumulate**, before any `RecordBatch` exists: building the batch to
 //! discover it is too big defeats the purpose, so
 //! `RecordBatch::get_array_memory_size()` cannot be the production trigger (it
 //! is only readable *after* every value has been allocated and copied).
@@ -38,10 +38,10 @@
 //!
 //! | term | charged | covers |
 //! |---|---|---|
-//! | [`ARROW_VALIDITY_BYTES`] | every slot | the slot's validity **bit**; `n` bytes ≥ `ceil(n/8)` |
+//! | `ARROW_VALIDITY_BYTES` | every slot | the slot's validity **bit**; `n` bytes ≥ `ceil(n/8)` |
 //! | content | every slot | the slot's data-buffer bytes |
-//! | [`ARROW_CELL_OVERHEAD_BYTES`] | variable-width slots | its offsets entry + the buffer's trailing `n+1`-th entry |
-//! | [`ARROW_COLUMN_SLACK_BYTES`] | once per projected **column** | array nodes that correspond to no slot at all |
+//! | `ARROW_CELL_OVERHEAD_BYTES` | variable-width slots | its offsets entry + the buffer's trailing `n+1`-th entry |
+//! | `ARROW_COLUMN_SLACK_BYTES` | once per projected **column** | array nodes that correspond to no slot at all |
 //!
 //! The per-cell terms are therefore tight (a 1000-element `list<int>` estimates
 //! ~1.2× its realized payload, not ~9×), and a wide fixed-width schema pays
@@ -567,7 +567,7 @@ impl<'a> Estimator<'a> {
     ///
     /// The empty-collection child arrays these builders always materialize
     /// (`ListArray<Utf8>` / `MapArray<Utf8, Utf8>`) are covered by
-    /// [`ARROW_COLUMN_SLACK_BYTES`], which is derived from exactly that case —
+    /// `ARROW_COLUMN_SLACK_BYTES`, which is derived from exactly that case —
     /// unlike the high-fidelity path, the flat builders have a FIXED one-level
     /// child shape, so a constant suffices.
     fn charge_flat(&mut self, dt: &DataType, fidelity: TextFidelity, value: Option<&'a Value>) {
