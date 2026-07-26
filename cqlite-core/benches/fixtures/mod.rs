@@ -30,11 +30,13 @@
 
 use std::path::PathBuf;
 
-/// k-parameterized multi-generation overlap fixtures (issue #2043 / M9). Kept in
-/// its own file (`fixtures/multigen.rs`) rather than inlined here so this shared
-/// module stays small — every bench target compiles its own copy of it.
-#[cfg(feature = "write-support")]
-pub mod multigen;
+// The k-parameterized multi-generation overlap fixtures (issue #2043 / M9) live in
+// `fixtures/multigen.rs` but are deliberately NOT declared here: this module is
+// `#[path]`-included by EVERY bench target, so a `pub mod multigen;` would make all
+// ~10 targets compile those ~570 lines for the benefit of one. `reconcile_overlap.rs`
+// — its only consumer — includes it directly with
+// `#[path = "fixtures/multigen.rs"] mod multigen;`, and multigen refers back to the
+// shared helpers as `crate::fixtures::…`.
 
 /// Fixed RNG seed shared by every bench. Any key/partition/value selection that
 /// is "random" must draw from [`seeded_rng`] so the selected set is byte-for-byte
