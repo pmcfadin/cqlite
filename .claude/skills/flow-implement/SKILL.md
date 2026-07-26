@@ -91,6 +91,10 @@ never gate stdout or review churn.
         scripts/agent-gate.sh --lite > lite-<N>.log 2>&1 < /dev/null
       cat /tmp/lite-<N>.txt   # the complete LITE block (default recovery: .agent-gate-lite-summary.txt)
       ```
+      **Reader contract (#2874):** the exit code is primary, and before trusting the block's
+      `RESULT:` confirm its `run-id:` line is the run you launched — the no-clobber guard can leave a
+      foreign peer's block on a shared pinned path (unreachable with a unique path, but verify). On a
+      `run-id` mismatch, read the sibling `/tmp/lite-<N>.txt.integrity-fail.*` / `logs:` bundle instead.
       Lite runs fmt + file-size + FULL-workspace clippy + blast-radius-scoped tests (~1-5 min). It is the
       FAST ITERATION gate, NOT the gate of record; its distinct `MODE: lite` block must NEVER be pasted as
       the full SUMMARY.

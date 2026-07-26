@@ -216,9 +216,15 @@ docs/sstable-guide-audit/
 /.agent-gate-lite-summary.txt
 # agent-gate --delta caller-known summary (distinct recovery path, issue #1892)
 /.agent-gate-delta-summary.txt
+# agent-gate summary-integrity FAIL siblings for the checkout-default paths (#2874): the
+# no-clobber live-peer publish drops "<default-summary>.integrity-fail.<run-id>" next to the
+# pinned path; ignore them so an incident never dirties the tree (job-2107 LOW#1).
+/.agent-gate-summary.txt.integrity-fail.*
+/.agent-gate-lite-summary.txt.integrity-fail.*
+/.agent-gate-delta-summary.txt.integrity-fail.*
 
 # parity-report self-test probe (issue #1338): removed by trap, ignored as a safety net
-test-data/.tmp-parity-manifest-mutated.yml
+test-data/.tmp-parity-manifest-mutated*
 
 # Unified perf history ledger (issue #1566, Epic A / A5): the A-series benches and
 # scripts/profile_report.py append per-metric run records to

@@ -86,6 +86,16 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    SUMMARY ====` block (start marker → `RESULT:` → end marker). **Never read `gate-<N>.log`
    into your context** — the SUMMARY file is the only gate text you retain. `--lite` never
    substitutes for this run.
+   **Reader contract — VERIFY the run-id, don't trust a bare block (#2874).** The pinned
+   summary path is not unconditionally your verdict. The gate's no-clobber guard deliberately
+   leaves a *foreign* run's block on the pinned path when a live peer owns it (only possible on
+   a shared checkout-default path — your unique `mktemp`/`/tmp/gate-<N>.txt` path makes it
+   unreachable, but verify anyway as defense-in-depth). So when you read `/tmp/gate-<N>.txt`:
+   the process **exit code is primary**, and you MUST confirm the block's `run-id:` line is the
+   run you launched before trusting `RESULT:`. If the `run-id` doesn't match (a peer's block —
+   even `RESULT: PASS`), your verdict is at the sibling `/tmp/gate-<N>.txt.integrity-fail.*`
+   (glob it) or the run's `logs:` bundle — read that instead, and treat a `summary-integrity:
+   FAIL` line as a hard FAIL, never a bare INCOMPLETE.
 2. **C — intent audit (design-routed only).** You have no `Agent` tool, so you **emit a
    NEEDS-SPAWN packet and end your turn** — the lead spawns `spec-auditor` (explicit model)
    anchored to `openspec/changes/<slug>/specs/**` and re-invokes you with its verdict:

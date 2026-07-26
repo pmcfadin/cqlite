@@ -1195,8 +1195,16 @@ fi
 safe="$tmp/2751-parent-safe.txt"
 printf '%s\n' "$SENTINEL" >"$safe"
 rm -f "$tt_repo"/.agent-gate-*summary.txt  # widen: covers lite/delta default siblings too
+# #2874: also scrub AGENT_GATE_PARENT_RUN_ID so this case tests the #2751 env-scrub
+# in ISOLATION. When this self-test itself runs INSIDE the gate (the tooling-tests
+# component), the enclosing gate exports AGENT_GATE_PARENT_RUN_ID; without this scrub
+# the child would be (correctly, per #2874) detected as NESTED and redirect its
+# summary to its own private log dir instead of the repo-root default this case
+# asserts. Neutralizing the #2874 marker keeps the two mechanisms orthogonal — the
+# nested-redirect behavior has its own regression test (test_agent_gate_nested_isolation.sh).
 ( export AGENT_GATE_SUMMARY_FILE="$safe"; cd "$tt_repo" \
-    && env -u AGENT_GATE_SUMMARY_FILE bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
+    && env -u AGENT_GATE_SUMMARY_FILE -u AGENT_GATE_PARENT_RUN_ID \
+       bash scripts/agent-gate.sh --emit-summary-selftest ) >/dev/null 2>&1
 if grep -q "$SENTINEL" "$safe" 2>/dev/null; then
   ok "2751-scrub-prevents-clobber: env -u AGENT_GATE_SUMMARY_FILE leaves the parent's summary file intact"
 else
