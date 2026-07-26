@@ -95,6 +95,9 @@
 #      maps an ls-remote/push/delete failure to ERROR (exit 1), so a network blip never
 #      makes a worker conclude it LOST/does-not-hold/RELEASED. `claim` also never reports
 #      LOST when nobody holds the ref (a failed push whose re-read finds it absent).
+#      ALSO exit 1: `CLAIM ERROR reason=auth` — a push git could not AUTHENTICATE
+#      (issue #2942). Same exit code (callers keep treating 1 as "not a race"), but the
+#      verdict is explicitly NOT retryable: retrying cannot fix a missing credential.
 #   64 usage error
 #
 # ---END-HELP---
@@ -112,7 +115,44 @@ emit()      { echo "CLAIM: $*"; }
 # a worker conclude it lost ownership.
 emit_infra() { emit "ERROR reason=infra $* (transient — retry)"; }
 
+# emit_auth <line> — a push git could not AUTHENTICATE (issue #2942). This is a
+# MACHINE-CONFIGURATION fault, not a blip: it cannot self-clear, so it must never
+# wear the `transient — retry` wording. Observed: a box with an authenticated `gh`
+# but no git credential helper failed every claim push and was reported as
+# `reason=infra ... (transient — retry)`, sending the worker into a retry loop on an
+# operation that can never succeed. Callers pair this with `return 1` (same exit code
+# as infra — still "not a race-loss" — but the text names the fix, not a retry).
+# The remediation is deliberately fixed text: git's raw stderr is NEVER echoed,
+# because a remote URL can carry an embedded token.
+emit_auth() {
+  emit "ERROR reason=auth $* (NOT retryable — git cannot authenticate to $REMOTE; fix credentials: 'gh auth setup-git' or 'bash scripts/bootstrap-agent-machine.sh --yes', then re-run)"
+}
+
+# git_stderr_is_auth <captured-stderr> — 0 iff the text carries the signature of a
+# CREDENTIAL/AUTHORIZATION failure rather than a network/outage one. Deliberately
+# conservative: anything unrecognized stays an infra (retryable) verdict, so the
+# #2665 contract can only ever be narrowed by a signature we positively identify.
+git_stderr_is_auth() {
+  case "$1" in
+    *"could not read Username"*      | *"could not read Password"*        | \
+    *"Authentication failed"*        | *"authentication failed"*          | \
+    *"terminal prompts disabled"*    | *"Invalid username or token"*      | \
+    *"Invalid username or password"* | *"Permission denied (publickey)"*  | \
+    *"Permission to "*" denied"*     | *"Write access to repository not granted"* | \
+    *"remote: Repository not found"* | *"Support for password authentication was removed"* | \
+    *"403 Forbidden"*                | *"401 Unauthorized"*)
+      return 0 ;;
+  esac
+  return 1
+}
+
 REMOTE="${CLAIM_REMOTE:-origin}"
+
+# Never let a remote operation block on an interactive credential prompt: an
+# unattended worker would hang forever instead of failing with a diagnosable
+# verdict (issue #2942). With prompts disabled git fails fast and its stderr
+# carries the `could not read Username` signature emit_auth keys on.
+export GIT_TERMINAL_PROMPT=0
 
 print_help() {
   awk 'NR>=2 && /^# ---END-HELP---/{exit} NR>=2 {sub(/^# ?/,""); print}' "$0"
@@ -284,11 +324,22 @@ cmd_claim() {
   fi
 
   # Build our unique claim commit and attempt the atomic create.
-  local sha
+  local sha push_err
   sha="$(build_claim_commit "$issue" "$actor")"
-  if git push "$REMOTE" "${sha}:refs/claims/issue-${issue}" >/dev/null 2>&1; then
+  # Capture the push's stderr (stdout discarded) so a CREDENTIAL failure can be told
+  # apart from a race-loss and from a genuine transient (issue #2942). The captured
+  # text is only ever CLASSIFIED, never emitted — a remote URL can embed a token.
+  if push_err="$(git push "$REMOTE" "${sha}:refs/claims/issue-${issue}" 2>&1 >/dev/null)"; then
     : # push accepted — confirm below.
   else
+    # Auth is checked FIRST and independently of the re-read: on a public repo an
+    # unauthenticated box still ls-remotes fine (so the ref reads as absent and the
+    # old code called it a transient), while on a private repo BOTH fail. Either way
+    # the cause is the same permanent, non-retryable credential fault.
+    if git_stderr_is_auth "$push_err"; then
+      emit_auth "issue=$issue detail=claim-push-unauthenticated ref=refs/claims/issue-$issue"
+      return 1
+    fi
     # Push failed. Distinguish a genuine race-loss (another holder present) from
     # an infra failure (remote unreachable, or a push error with NO holder) — a
     # LOST verdict must NEVER be emitted when nobody actually holds the ref.
@@ -376,14 +427,22 @@ cmd_adopt() {
   require_numeric_issue "$issue" adopt
   [ -n "$expect" ] || die_usage "adopt requires --expect <old-sha>"
 
-  local sha
+  local sha adopt_err=""
   sha="$(build_claim_commit "$issue" "$actor")"
   # Compare-and-swap: replace the ref ONLY if origin is still at <old-sha>. We
   # ignore the push exit here and let the infra-AWARE confirm read below decide —
   # mirroring cmd_claim exactly, so a lease-mismatch, a TOCTOU, and an infra blip
   # are told apart by the READ, never by the push's opaque non-zero.
-  git push --force-with-lease="refs/claims/issue-${issue}:${expect}" \
-        "$REMOTE" "${sha}:refs/claims/issue-${issue}" >/dev/null 2>&1 || true
+  adopt_err="$(git push --force-with-lease="refs/claims/issue-${issue}:${expect}" \
+        "$REMOTE" "${sha}:refs/claims/issue-${issue}" 2>&1 >/dev/null)" || true
+  # ...with ONE exception (issue #2942): a CREDENTIAL failure is not something the
+  # read can diagnose. On a public repo the confirm read succeeds and would report
+  # ADOPT-LOST — blaming the lease for what is a broken machine. A lease mismatch
+  # says "stale info", never an auth signature, so this cannot swallow a real CAS loss.
+  if [ -n "$adopt_err" ] && git_stderr_is_auth "$adopt_err"; then
+    emit_auth "issue=$issue detail=adopt-cas-push-unauthenticated ref=refs/claims/issue-$issue"
+    return 1
+  fi
 
   # Confirm via the infra-AWARE lookup: a lookup failure is infra (retryable,
   # exit 1), NEVER a false ADOPT-LOST on a claim we actually landed. If the read
@@ -478,21 +537,32 @@ cmd_release() {
     fi
     # Compare-and-swap delete: remove the ref ONLY if it is still at <sha> we just
     # read and own — a ref that changed under us (adopted/reaped) fails the lease.
-    if git push "$REMOTE" --force-with-lease="refs/claims/issue-${issue}:${sha}" \
-          ":refs/claims/issue-${issue}" >/dev/null 2>&1; then
+    local rel_err
+    if rel_err="$(git push "$REMOTE" --force-with-lease="refs/claims/issue-${issue}:${sha}" \
+          ":refs/claims/issue-${issue}" 2>&1 >/dev/null)"; then
       emit "RELEASED issue=$issue ref=refs/claims/issue-$issue sha=$sha (cas)"
       return 0
     fi
-    # CAS delete failed: the ref changed under us OR the remote is unreachable —
-    # either way a retryable ERROR (exit 1), never a silent success.
+    # CAS delete failed: an unauthenticated push is a permanent machine fault, not
+    # something a retry fixes (#2942); anything else is the ref changing under us OR
+    # an unreachable remote — a retryable ERROR (exit 1), never a silent success.
+    if git_stderr_is_auth "$rel_err"; then
+      emit_auth "issue=$issue detail=release-cas-delete-unauthenticated sha=$sha"
+      return 1
+    fi
     emit_infra "issue=$issue detail=cas-delete-failed-on-$REMOTE (ref changed or remote unreachable) sha=$sha"
     return 1
   fi
 
   # --force: reaper/adopt semantics — unconditional delete, no identity/PR gate.
-  if git push "$REMOTE" --delete "refs/claims/issue-${issue}" >/dev/null 2>&1; then
+  local force_err
+  if force_err="$(git push "$REMOTE" --delete "refs/claims/issue-${issue}" 2>&1 >/dev/null)"; then
     emit "RELEASED issue=$issue ref=refs/claims/issue-$issue sha=$sha (force)"
     return 0
+  fi
+  if git_stderr_is_auth "$force_err"; then
+    emit_auth "issue=$issue detail=release-force-delete-unauthenticated sha=$sha"
+    return 1
   fi
   emit_infra "issue=$issue detail=delete-failed-on-$REMOTE sha=$sha"
   return 1
@@ -560,7 +630,15 @@ cmd_smoke() {
   ref="refs/claims/smoke-${nonce}"
   note "smoke preflight: does $REMOTE accept a push to refs/claims/* ? (ref=$ref)"
   sha="$(build_claim_commit "smoke" "smoke")" || { emit "SMOKE-FAIL remote=$REMOTE reason=commit-build"; return 1; }
-  if ! git push "$REMOTE" "${sha}:${ref}" >/dev/null 2>&1; then
+  local smoke_err
+  if ! smoke_err="$(git push "$REMOTE" "${sha}:${ref}" 2>&1 >/dev/null)"; then
+    # An unauthenticated git is the #1 reason this preflight fails on a fresh box,
+    # and blaming the ref namespace sends the operator hunting the wrong thing
+    # (#2942) — so name the credential fault when the stderr says so.
+    if git_stderr_is_auth "$smoke_err"; then
+      emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=auth (git cannot authenticate — NOT a namespace restriction; fix with 'gh auth setup-git' or 'bash scripts/bootstrap-agent-machine.sh --yes')"
+      return 1
+    fi
     emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=push-rejected (does $REMOTE permit the refs/claims/* namespace?)"
     return 1
   fi

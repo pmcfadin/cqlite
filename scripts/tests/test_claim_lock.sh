@@ -517,6 +517,82 @@ $statusOut"
 fi
 
 # ===========================================================================
+echo "TEST 20: an AUTH failure is reason=auth (never 'transient — retry'); a real transient still is"
+# ===========================================================================
+# Issue #2942. A box whose `gh` is authenticated but whose GIT has no credential
+# helper fails every claim push with `fatal: could not read Username`. That is a
+# machine-configuration fault that CANNOT self-clear, yet it was reported as
+#   CLAIM: ERROR reason=infra detail=push-rejected-but-ref-absent (transient — retry)
+# telling the worker to retry the one thing guaranteed never to work. The auth
+# signature must produce a DISTINCT non-retryable verdict — and, per the #2665
+# contract, a genuine transient must still report as the retryable infra error.
+#
+# Both shims fail only `push` (ls-remote passes through, as it does for a public
+# repo readable anonymously) and differ ONLY in the stderr git emits.
+mk_push_fail_shim() {
+  # mk_push_fail_shim <dir> <stderr-line>
+  mkdir -p "$1"
+  cat >"$1/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "push" ]; then
+    echo "$2" >&2
+    exit 128
+  fi
+done
+exec "$REALGIT" "\$@"
+SHIM
+  chmod +x "$1/git"
+}
+
+# (a) credential failure -> reason=auth, no "transient", no retry advice.
+AUTHSHIM="$T/shim-git-noauth"
+mk_push_fail_shim "$AUTHSHIM" "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+rc=0; outAuth=$( cd "$A" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 20 ) || rc=$?
+rcAuth=$rc
+if [ "$rcAuth" -eq 1 ] && printf '%s\n' "$outAuth" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outAuth" | grep -q 'reason=auth' \
+   && printf '%s\n' "$outAuth" | grep -q 'NOT retryable' \
+   && ! printf '%s\n' "$outAuth" | grep -q 'transient' \
+   && ! printf '%s\n' "$outAuth" | grep -q -- '— retry' \
+   && ! printf '%s\n' "$outAuth" | grep -q 'CLAIM: LOST'; then
+  ok "(a) unauthenticated push → CLAIM ERROR reason=auth, no transient/retry advice"
+else
+  bad "(a) expected reason=auth exit 1 with no transient/retry wording; got rc=$rcAuth
+$outAuth"
+fi
+# The verdict must name the remediation, not just the fault.
+if printf '%s\n' "$outAuth" | grep -q 'gh auth setup-git' \
+   || printf '%s\n' "$outAuth" | grep -q 'bootstrap-agent-machine'; then
+  ok "(a) auth verdict names the remediation"
+else
+  bad "(a) auth verdict named no remediation:
+$outAuth"
+fi
+# It must NOT echo git's raw stderr (a remote URL can carry an embedded secret).
+if ! printf '%s\n' "$outAuth" | grep -q 'terminal prompts disabled'; then
+  ok "(a) auth verdict does not echo raw git stderr"
+else
+  bad "(a) auth verdict echoed raw git stderr (secret-leak surface):
+$outAuth"
+fi
+
+# (b) genuine transient (unreachable host) -> unchanged retryable infra verdict.
+NETSHIM="$T/shim-git-netfail"
+mk_push_fail_shim "$NETSHIM" "fatal: unable to access 'https://github.com/x.git/': Could not resolve host: github.com"
+rc=0; outNet=$( cd "$A" && PATH="$NETSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 21 ) || rc=$?
+rcNet=$rc
+if [ "$rcNet" -eq 1 ] && printf '%s\n' "$outNet" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outNet" | grep -q 'reason=infra' \
+   && printf '%s\n' "$outNet" | grep -q 'transient' \
+   && ! printf '%s\n' "$outNet" | grep -q 'reason=auth'; then
+  ok "(b) genuine transient still reports the retryable infra verdict (#2665 contract intact)"
+else
+  bad "(b) expected reason=infra transient exit 1; got rc=$rcNet
+$outNet"
+fi
+
+# ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi
