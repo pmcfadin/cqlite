@@ -78,6 +78,10 @@
 #                                             `issue-<N>-*` branch outlived its claim; --reason
 #                                             is REQUIRED and is recorded in the claim commit.
 #                                             An EMPTY --expect '' is a usage error on purpose.
+#                                             RE-ENTRANT: if the ref is already held by THIS
+#                                             machine+actor, adopt reports ADOPTED (re-entrant)
+#                                             exit 0 — a retry after a confirm-read blip must
+#                                             never abandon an issue we still hold.
 #   release <N> [--force] [--actor <id>]      delete the ref; without --force requires holder identity
 #                                             (machine+actor) + no open PR, and deletes via CAS lease.
 #                                             --force = reaper/adopt: unconditional delete.
@@ -94,6 +98,11 @@
 #            re-entrancy / cross-release). Tests also use it to simulate multiple
 #            machines from one clone.
 #   actor    --actor <id>, else CLAIM_ACTOR, else "flow" — a sub-machine role.
+#            SANITIZED to one token before it is written OR compared (see
+#            sanitize_field): the actor is part of the holder identity and lands in
+#            the same commit message the identity parser reads, so an unsanitized
+#            actor (e.g. `--actor 'flow machine=other'`) could forge a holder and win
+#            false re-entrancy on someone else's claim (#2945).
 #   The holder identity that `verify`/`release` match is machine+actor.
 #
 # ENV
@@ -217,8 +226,35 @@ humanize_age() {
 this_machine() { printf '%s\n' "${CLAIM_MACHINE:-$(hostname -s)}"; }
 
 # msg_field <message> <key> — extract "<key>=<value>" (value is a non-space run).
+#
+# EXACT-KEY, FIRST-MATCH, ANCHORED PER TOKEN (identity-forgery hardening, #2945).
+# The old implementation was `sed "s/.*<key>=\([^ ]*\).*/\1/"`: the leading `.*` is
+# GREEDY, so the LAST occurrence won and any key was matched as a SUBSTRING. Since
+# free-text `--reason`/`--actor` values are appended to the very message this parser
+# reads, a value carrying `machine=<other>` could FORGE holder identity — and holder
+# identity is what gates re-entrancy, verify, and release. Fixing that at the parser
+# is the root fix: split the message on whitespace, compare each token's key for
+# EQUALITY (so neither `holder-machine=` nor an appended `machine=` in a later field
+# can answer for `machine`), and return the FIRST match — the trailers this script
+# writes itself, which always precede any user-supplied field. Sanitizing the
+# user-controlled fields (see sanitize_field) is the second, independent layer.
 msg_field() {
-  printf '%s' "$1" | sed -n "s/.*${2}=\\([^ ]*\\).*/\\1/p" | head -1
+  local msg="$1" key="$2" tok glob_was_off=0
+  # Word-splitting needs the tokens UNGLOBBED: a forged message may contain '*'.
+  case "$-" in *f*) glob_was_off=1 ;; esac
+  set -f
+  # shellcheck disable=SC2086  # deliberate word-split of the claim message
+  for tok in $msg; do
+    case "$tok" in
+      "$key"=*)
+        printf '%s\n' "${tok#*=}"
+        [ "$glob_was_off" = 1 ] || set +f
+        return 0
+        ;;
+    esac
+  done
+  [ "$glob_was_off" = 1 ] || set +f
+  return 0
 }
 
 # remote_claim_sha <N> — SHA of refs/claims/issue-<N> on origin ("" if absent).
@@ -245,19 +281,33 @@ remote_claim_lookup() {
   return 0
 }
 
-# sanitize_reason <text> — collapse a free-text reason into ONE parseable token.
-# The claim message is parsed as `<key>=<non-space-run>`, so a reason containing
-# spaces would be silently truncated at the first space. Keeps [A-Za-z0-9._:/#-],
-# maps every other run (spaces, newlines, quotes, shell metacharacters) to a
-# single '-', trims leading/trailing '-', caps at 120 chars, and never prints an
-# empty token.
-sanitize_reason() {
+# sanitize_field <text> — collapse a free-text value into ONE parseable token.
+# Applied to EVERY user-controlled field that lands in the claim message: --reason
+# AND --actor (the latter is part of the holder identity, so an unsanitized actor
+# was itself a forgery vector, #2945). The message is parsed as
+# `<key>=<non-space-run>`, so a value containing spaces would be truncated at the
+# first space. Keeps [A-Za-z0-9._:/#-] — note '=' is NOT kept, so a value can never
+# introduce a new `key=` pair — maps every other run (spaces, newlines, quotes,
+# shell metacharacters) to a single '-', trims leading/trailing '-', caps at 120
+# chars, and never prints an empty token.
+#
+# LC_ALL=C on BOTH tr and sed is load-bearing: BSD/macOS `tr` aborts with
+# "Illegal byte sequence" on non-ASCII input under a UTF-8 locale, and a `--reason`
+# with an em dash is a likely invocation in this repo. Under `set -euo pipefail`
+# that failure inside a command substitution killed the whole script — no `CLAIM:`
+# line at all and a bogus exit 1 the contract reads as "retryable".
+sanitize_field() {
   local s
-  s="$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9._:/#-' '-' | sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//')"
-  s="$(printf '%.120s' "$s")"
+  s="$(printf '%s' "${1:-}" | LC_ALL=C tr -c 'A-Za-z0-9._:/#-' '-' | LC_ALL=C sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//')"
+  s="$(LC_ALL=C printf '%.120s' "$s")"
   [ -n "$s" ] || s="unspecified"
   printf '%s\n' "$s"
 }
+
+# resolve_actor <raw> — the actor identity, sanitized to one token. Sanitizing at
+# the ARG BOUNDARY (every subcommand, before any comparison) keeps the written
+# record and the identity match on exactly the same value.
+resolve_actor() { sanitize_field "${1:-}"; }
 
 # build_claim_commit <N> <actor> [extra-fields] — create a UNIQUE root commit
 # (empty tree, no parent) and print its SHA. The nonce guarantees distinct SHAs
@@ -361,6 +411,7 @@ cmd_claim() {
     esac
   done
   require_numeric_issue "$issue" claim
+  actor="$(resolve_actor "$actor")"
 
   # Pre-check: an existing claim ref that is OURS is re-entrant (idempotent win).
   local existing
@@ -459,6 +510,7 @@ cmd_verify() {
     esac
   done
   require_numeric_issue "$issue" verify
+  actor="$(resolve_actor "$actor")"
 
   # ls-remote failure is INFRA (retryable), not "you don't hold it" — never let a
   # network blip make a worker conclude it lost ownership.
@@ -493,6 +545,7 @@ cmd_adopt() {
     esac
   done
   require_numeric_issue "$issue" adopt
+  actor="$(resolve_actor "$actor")"
   # An EMPTY --expect stays a USAGE ERROR (fail closed): an unset shell variable
   # expanding to "" must NEVER silently turn a compare-and-swap into a create.
   # The empty lease is opt-in via the explicit literal `none`.
@@ -515,9 +568,9 @@ cmd_adopt() {
     # The resume is a judgement call, so it MUST be self-documenting: the claim
     # commit records who took it (machine/actor/ts) AND why (reason).
     [ -n "$reason" ] || die_usage "adopt --expect none requires --reason <why> (the resume is recorded in the claim commit: who took it AND why)"
-    extra="mode=empty-lease reason=$(sanitize_reason "$reason")"
+    extra="mode=empty-lease reason=$(sanitize_field "$reason")"
   elif [ -n "$reason" ]; then
-    extra="mode=cas reason=$(sanitize_reason "$reason")"
+    extra="mode=cas reason=$(sanitize_field "$reason")"
   fi
 
   local sha lease adopt_err=""
@@ -571,6 +624,20 @@ cmd_adopt() {
     return 1
   fi
   fetch_claim "$issue"
+  # RE-ENTRANCY (#2945): the ref is not our NEW sha, but it may already be OURS —
+  # the documented remedy for the `ERROR reason=infra` paths above is "retry", and a
+  # retry builds a FRESH claim commit whose empty-lease push is then correctly
+  # rejected (the ref now exists, because the first attempt's push DID land and only
+  # its confirm read failed). Without this check that lands on ADOPT-LOST — exit 2,
+  # which workers read as "you did not win, take the next item" — so a machine
+  # abandons an issue it demonstrably owns WHILE STILL HOLDING the claim ref, and
+  # nobody else can take it either. `cmd_claim` has had this identity check on both
+  # of its failure paths from the start; `adopt` is now the ONLY way past the legacy
+  # guard, so it needs the same idempotence.
+  if [ -n "$now" ] && holder_is_us "$now" "$actor"; then
+    emit "ADOPTED issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_desc "$now") from=$expect (re-entrant)"
+    return 0
+  fi
   emit "ADOPT-LOST issue=$issue ref=refs/claims/issue-$issue expected=$expect actual=${now:-<gone>} $(holder_token "$now")"
   return 2
 }
@@ -617,6 +684,7 @@ cmd_release() {
     esac
   done
   require_numeric_issue "$issue" release
+  actor="$(resolve_actor "$actor")"
 
   # ls-remote failure is INFRA (retryable), not "already absent" — never delete-
   # or claim-absent on a network blip.
