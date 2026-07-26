@@ -136,28 +136,31 @@ The ~1.1–1.5× above was the one factor in the chain with nothing behind it; t
 replaces the band with a function of the **overlap factor `o`** = generations per delivered row:
 
 ```
-D(o) = (q + p·o) / (q + p)      p ≈ 1.53 µs/input-row,  q ≈ 1.26 µs/delivered-row
-                                 (o=1 ⇒ 2.79 µs/row, measured)
+D(o) = (q + p·o) / (q + p)      p = 1.644 µs/input-row,  q = 1.180 µs/delivered-row
+                                 (the `disjoint`+`field_blend` OLS fit over the saturated k ≥ 5 arms;
+                                  o=1 ⇒ 2.82 µs/row FITTED — the measured saturated control is 2.82)
   o   1.0   1.25   1.5   1.75   2.0   3.0   4.0
-  D  1.00  1.14  1.28  1.42  1.56  2.12  2.68
+  D  1.00  1.15  1.29  1.44  1.58  2.16  2.75      ← computed from the p, q above
 ```
 
 Three corrections to how the term must be used:
 1. **It is a row-DUPLICATION term, not an SSTable-COUNT term.** Measured: the disjoint control is
-   flat in k (2876/2753/2791 ns/row at k = 5/10/20) — reading 20 generations instead of 5 costs
+   flat in k (2858/2782/2830 ns/row at k = 5/10/20) — reading 20 generations instead of 5 costs
    nothing per delivered row when no cluster spans two of them. The whole multiplier comes from the
    overwrite/update rate relative to compaction cadence.
 2. **The floor is exact, and it is 1.00× not 1.1×.** An insert-once table (time-series/append-only,
    a primary connector target) has `o = 1.0` ⇒ the term should be **dropped**, not carried at 1.1×.
 3. **The ceiling is optimistic for update-bearing tables.** `1.1–1.5×` implies `o ∈ [1.2, 1.9]`; at
-   an ordinary STCS SSTables-per-read p99 of 3–4 the term is **2.1–2.7×**, outside the band.
+   an ordinary STCS SSTables-per-read p99 of 3–4 the term is **2.2–2.8×**, outside the band.
 
-The `o` substituted below — **`o_field` = 1.25–1.5, central 1.35 ⇒ D ≈ 1.14–1.28, central ~1.2** — is
+The `o` substituted below — **`o_field` = 1.25–1.5, central 1.35 ⇒ D ≈ 1.15–1.29, central ~1.21** — is
 an **ASSUMPTION, NOT A MEASUREMENT** (STCS-derived expected-k band; the vendored corpus is
 single-generation so field `o` is unmeasurable locally). **#2818 (M0) is the measurement that
 replaces it**; because the model is closed-form in `o`, substituting a measured `o` needs no
 re-derivation and no re-run. TTL expiry at a pinned `now` was measured **free** (the `ttl_expiring`
-arm tracks `lww_overwrite` to 0.1 %), so no separate TTL derate term is warranted.
+arm tracks `lww_overwrite` to 0.4 %), so no separate TTL derate term is warranted; deletion load, by
+contrast, costs **+3.0 %** over plain overwrite (the `tombstone` arm's marginal cost is 1577 vs
+1531 ns per extra input row), so it is inside the `p` term, not free.
 
 **Which stack reaches what:**
 - **A4 Stage-1 / B3 Stage-1 / B3 Stage-2 / B2:** the width credit (up to ~4 vCPU × C(N)) × the L1/L3
@@ -205,7 +208,7 @@ multi-generation overlap).
 **The overlap data now exists** —
 [`docs/research/issue-2043-reconcile-overlap-multiplier.md`](../research/issue-2043-reconcile-overlap-multiplier.md)
 §6 — and it resolves the disposition **conditionally, with the arithmetic written out**. L3's saving
-is a fixed ~0.47 µs/row (= `1 − 1/1.20` of the measured 2.79 µs/row at `o = 1`), and overlap attacks
+is a fixed ~0.47 µs/row (= `1 − 1/1.20` of the 2.82 µs/row at `o = 1`), and overlap attacks
 it **twice**: it destroys fast-path eligibility `f(o) ≈ max(0, 2 − o)` AND it grows the denominator
 the saving divides into (the overlap cost is entirely per-INPUT-row decode/heap/resolve, which a
 singleton fast-path cannot touch). `S(o) = 1/(1 − 0.47·f(o)/(q + p·o))`:
@@ -453,12 +456,13 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
   the reconcile **overlap multiplier** at field compaction state (the base was already ~2µs/row
   measured, machinery-dominated — NOT the `[ASSUMED]` 10–500ns/row). *Delivered:*
   `cqlite-core/benches/reconcile_overlap.rs` (advisory instrument, 25 arms = k ∈ {1,2,5,10,20} × 5
-  collision mixes through the public `KWayMerger` drain at a `now` pinned via `with_now_secs`) +
+  collision mixes through the public `KWayMerger` drain at a `now` pinned via `with_now_secs`, plus 2
+  producer-count control arms; every arm asserts its collision-shape census before timing) +
   [`docs/research/issue-2043-reconcile-overlap-multiplier.md`](../research/issue-2043-reconcile-overlap-multiplier.md).
   *Outcome:* the §3 gen-overlap term is now a **function of the overlap factor `o`**,
-  `D(o) = (q + p·o)/(q + p)` with p ≈ 1.53 µs/input-row and q ≈ 1.26 µs/delivered-row (§3) — SSTable
+  `D(o) = (q + p·o)/(q + p)` with p = 1.644 µs/input-row and q = 1.180 µs/delivered-row (§3) — SSTable
   count is free, row duplication is the whole term, the floor is 1.00× (insert-once) and the ceiling
-  reaches 2.1–2.7× at an ordinary STCS p99. Field `o` remains an explicit **assumption** (1.25–1.5,
+  reaches 2.2–2.8× at an ordinary STCS p99. Field `o` remains an explicit **assumption** (1.25–1.5,
   central 1.35) pending M0. **L3's disposition is resolved conditionally** (§4): ~1.10× at the assumed
   central `o`, so it does **not** earn the #2 headline slot. **Dep:** none. **Unblocks:** M7 (#2822).
 
