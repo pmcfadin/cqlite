@@ -49,12 +49,26 @@ pub(crate) mod arrow_columnar;
 #[cfg(feature = "arrow")]
 mod arrow_decimal;
 
+// Conservative pre-materialization Arrow payload-byte estimator (issue #2825):
+// the per-row width the `cqlite-flight` byte-cap accumulates BEFORE
+// `rows_to_record_batch` allocates a batch. Its own file — `arrow_convert.rs` is
+// far over the campsite threshold (epic #1116).
+#[cfg(feature = "arrow")]
+pub mod arrow_size;
+
 #[cfg(feature = "parquet")]
 pub mod parquet;
 
 // Re-export the public arrow_convert API at the `export` module level.
 #[cfg(feature = "arrow")]
 pub use arrow_convert::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
+
+// Re-export the byte estimator beside the converter it models (issue #2825).
+#[cfg(feature = "arrow")]
+pub use arrow_size::{
+    arrow_payload_bytes, estimate_arrow_row_bytes, ARROW_CELL_OVERHEAD_BYTES, ARROW_OFFSET_BYTES,
+    ARROW_SLOT_SLACK_BYTES, ARROW_VALIDITY_BYTES, MAX_ESTIMATE_NODES,
+};
 
 // Delta-scan Arrow schema derivation (Epic #696, Issue #703 / DS7).
 // Requires both `delta-scan` (for the CDC envelope model) and `arrow` (for
