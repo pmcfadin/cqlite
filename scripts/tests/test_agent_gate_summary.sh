@@ -61,6 +61,21 @@ trap 'rm -rf "$tmp"' EXIT
 # visible in the pasted block. Assert the line exists with all three keys and a
 # recognized state value (backward-compatible extension; the older markers still
 # assert via assert_complete).
+#
+# Two-tier assertion contract for the accelerators line (issues #2903/#2914). The
+# line GROWS tokens over time (` sccache-health=` #2641, ` mold=` #2859, and more
+# to come), and ` mold=` is Linux-only — so an end-anchored per-token assert is a
+# latent, host-conditional break. Therefore:
+#   tier 1 (tolerant): every PER-TOKEN assert matches its token as a FIELD via the
+#     `( |$)` idiom (assert_mold_token / accel_health_token_is), so an appended
+#     token can never redden it. The token's VALUE is still matched exactly.
+#   tier 2 (strict): ONE whole-line grammar, $ACCEL_LINE_RE below, enumerating every
+#     legal token. It is the deliberate canary: adding a token to agent-gate.sh
+#     without extending this grammar reddens exactly one well-named check that says
+#     "update the grammar" — instead of N misleading per-token failures. Do NOT
+#     relax it to a `.*` tail; that is the failure mode this design prevents.
+ACCEL_LINE_RE='^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?$'
+
 assert_accelerators() {
   local label="$1" file="$2"
   local line
@@ -72,8 +87,7 @@ assert_accelerators() {
   fi
   # The optional trailing ` mold=<state>` token (issue #2859) appears on Linux
   # hosts only; Darwin output ends at sccache-health, byte-identical to pre-change.
-  if printf '%s\n' "$line" \
-       | grep -Eq '^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?$'; then
+  if printf '%s\n' "$line" | grep -Eq "$ACCEL_LINE_RE"; then
     ok "$label: accelerators line well-formed ($line)"
   else
     bad "$label: malformed accelerators line: '$line'"
@@ -99,6 +113,17 @@ assert_mold_token() {
       bad "$label: expected mold=$expected, got: '$line'"
     fi
   fi
+}
+
+# accel_health_token_is <file> <expected>: PREDICATE (rc 0/1, silent) — does the
+# accelerators line carry `sccache-health=<expected>` as a FIELD? Tier-1 idiom, so a
+# further trailing token (` mold=` #2859, any future one) cannot break it; the value
+# is still exact, `ok( |$)` never matches `okay`. Shared by the 9c asserts and by the
+# 9c-iv regression guard, which needs to assert both the TRUE and the FALSE outcome.
+accel_health_token_is() {
+  local file="$1" expected="$2"
+  grep -E '^accelerators: ' "$file" 2>/dev/null | head -1 \
+    | grep -qE " sccache-health=$expected( |\$)"
 }
 
 # assert_exit <label> <actual-rc> <expected-rc>: assert a captured exit status.
@@ -790,7 +815,7 @@ health_err="$tmp/health-ok.stderr"
 AGENT_GATE_SUMMARY_FILE="$tmp/health-ok.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$health_err"
-if grep -qE '^accelerators: .* sccache-health=ok( |$)' "$tmp/health-ok.txt"; then
+if accel_health_token_is "$tmp/health-ok.txt" ok; then
   ok "sccache-health: on + 0 errors -> sccache-health=ok"
 else
   bad "sccache-health: expected sccache-health=ok for on + 0 errors"
@@ -806,7 +831,7 @@ fi
 AGENT_GATE_SUMMARY_FILE="$tmp/health-warn.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=3 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/health-warn.stderr"
-if grep -qE '^accelerators: .* sccache-health=warn( |$)' "$tmp/health-warn.txt"; then
+if accel_health_token_is "$tmp/health-warn.txt" warn; then
   ok "sccache-health: on + >0 errors -> sccache-health=warn"
 else
   bad "sccache-health: expected sccache-health=warn for on + >0 errors"
@@ -834,11 +859,54 @@ fi
 AGENT_GATE_SUMMARY_FILE="$tmp/health-na.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=off \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/health-na.stderr"
-if grep -qE '^accelerators: .* sccache-health=na( |$)' "$tmp/health-na.txt"; then
+if accel_health_token_is "$tmp/health-na.txt" na; then
   ok "sccache-health: sccache not in use -> sccache-health=na"
 else
   bad "sccache-health: expected sccache-health=na when sccache not in use"
   grep '^accelerators:' "$tmp/health-na.txt" 2>/dev/null || cat "$tmp/health-na.txt"
+fi
+
+# 9c-iv. Regression guard for the NEXT appended accelerators token (issue #2914).
+#        #2859 appended a Linux-only ` mold=` token and silently reddened three
+#        end-anchored 9c asserts on every Linux host (green on Darwin, so it landed).
+#        This case pins the two-tier contract documented at $ACCEL_LINE_RE by
+#        synthesizing tomorrow's token on a COPY of a REAL emitted summary — the gate
+#        script and its output are untouched, this is a test-side mutation only.
+future_accel="$tmp/health-future-token.txt"
+sed 's/^accelerators: .*/& lto=thin/' "$tmp/health-ok.txt" >"$future_accel"
+if grep -qE '^accelerators: .* sccache-health=ok( .*)? lto=thin$' "$future_accel"; then
+  ok "accel-future-token: guard fixture really carries an unknown trailing token"
+else
+  bad "accel-future-token: guard fixture did not gain a trailing token (guard is vacuous)"
+  grep '^accelerators:' "$future_accel" 2>/dev/null || cat "$future_accel"
+fi
+# Tier 1: the per-token health assert must survive the unknown trailing token.
+if accel_health_token_is "$future_accel" ok; then
+  ok "accel-future-token: sccache-health assert survives an unknown trailing token"
+else
+  bad "accel-future-token: an appended token broke the sccache-health assert (#2914 regression)"
+  grep '^accelerators:' "$future_accel" 2>/dev/null || cat "$future_accel"
+fi
+# ...and must NOT have been weakened into accepting a WRONG value, nor a value of
+# which the truth is a prefix/superstring. Tolerating a new token != tolerating a
+# bad health state.
+wrong_val_ok=1
+for wrong in warn na o okay; do
+  if accel_health_token_is "$future_accel" "$wrong"; then
+    bad "accel-future-token: health assert wrongly matched sccache-health=$wrong (value check weakened)"
+    wrong_val_ok=0
+  fi
+done
+if [ "$wrong_val_ok" -eq 1 ]; then
+  ok "accel-future-token: wrong/partial health values still FAIL (value matched exactly)"
+fi
+# Tier 2: the whole-line grammar is the canary and must REJECT the unknown token, so
+# a future token addition produces one actionable "extend the grammar" failure rather
+# than silence. If this ever goes green, the grammar has been relaxed to a `.*` tail.
+if grep -E '^accelerators: ' "$future_accel" | head -1 | grep -Eq "$ACCEL_LINE_RE"; then
+  bad "accel-future-token: whole-line grammar accepted an unknown token (canary disarmed)"
+else
+  ok "accel-future-token: whole-line grammar still REJECTS an unknown token (canary armed)"
 fi
 
 # 9d. mold link-accelerator token (issue #2859). On Linux the accelerators line
