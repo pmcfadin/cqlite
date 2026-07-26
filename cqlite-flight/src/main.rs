@@ -76,9 +76,13 @@ struct Args {
     /// is Arrow PAYLOAD bytes; convert between them only with
     /// `cqlite_flight::batch_bytes::worst_case_batch_capacity_bytes`. A single
     /// batch may exceed the whole ceiling and is still delivered (it takes the
-    /// whole pool), so the guaranteed bound is
-    /// `max(ceiling, one maximum batch)` ~ 8 MiB at the defaults. `0` degrades
-    /// to strict one-batch-at-a-time egress, never a hang.
+    /// whole pool), so the guaranteed bound is `max(ceiling, one maximum batch)`
+    /// = max(12 MiB, ~8.4 MiB) = 12 MiB PER STREAM at the shipped defaults —
+    /// size a deployment against that, not against the 8 MiB one-batch figure.
+    /// The bound is over SERVER-SIDE residency: bytes this process holds on the
+    /// egress path. Batches a client retains after receiving them are the
+    /// client's memory and are deliberately not charged here. `0` degrades to
+    /// strict one-batch-at-a-time egress, never a hang.
     #[arg(
         long,
         env = ENV_MAX_INFLIGHT_EGRESS_BYTES,

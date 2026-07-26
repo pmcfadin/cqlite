@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! Guaranteed contract:
-//!     peak charged in-flight egress CAPACITY <= max(ceiling, one maximum batch)
+//!     peak SERVER-SIDE in-flight egress CAPACITY <= max(ceiling, one maximum batch)
 //! ```
 //!
 //! At the merged defaults, in capacity currency:
@@ -19,6 +19,33 @@
 //!                   = 2 * 4 MiB + 2 KiB * nodes  =  8 MiB + ~2n KiB
 //! contract          = max(12 MiB, 8 MiB + ~2n KiB) = 12 MiB  <=  16 MiB (B4)
 //! ```
+//!
+//! # WHAT the bound is over: SERVER-SIDE residency
+//!
+//! The governed quantity is the Arrow capacity bytes **the server holds** on the
+//! egress path: rows being materialized, batches queued in the `do_get` channel,
+//! and batches yielded downstream that the consumer has **not yet dropped**.
+//!
+//! It is **NOT** a bound on total resident bytes including consumer-held
+//! batches. Once a consumer takes a batch and keeps it, those bytes are the
+//! CONSUMER's memory: the server cannot free them, cannot reuse them, and cannot
+//! make any decision about them — so the governor stops charging for them rather
+//! than metering something it no longer controls. Concretely, a consumer that
+//! retains every batch it is handed will accumulate arbitrarily much Arrow data
+//! in its own heap; that is its own budget, and this ceiling neither claims nor
+//! could enforce anything about it.
+//!
+//! That is not a weakening of the guarantee — it is the guarantee's actual
+//! subject, and it is what makes the stream unwedgeable. Charging a
+//! consumer-retained batch against the server's pool would let a consumer that
+//! holds batch N while awaiting N+1 deadlock the stream; releasing it is exactly
+//! `MeteredDoGetStream::open_safety_valve`, which fires ONLY in that state (the
+//! producer parked, the channel empty, the whole charge held by retained
+//! batches) and never on the ordinary path, where `FlightDataEncoder` drops each
+//! batch before asking for the next.
+//!
+//! The 12 MiB ceiling and the B4 ≤16Mi composition below are stated over exactly
+//! this quantity.
 //!
 //! It is a `max`, not a sum: under reserve-before-materialize every resident
 //! `RecordBatch` on the egress path holds credit, so their summed charged
@@ -59,6 +86,10 @@
 //! 4. **The Flight encoder's `FlightData` queue**, downstream of the credit
 //!    boundary: `FlightDataEncoder` encodes one `RecordBatch` into queued
 //!    protobuf messages and drops the batch. PRE-EXISTING and unchanged.
+//! 5. **Batches a consumer chooses to RETAIN** after they have been yielded —
+//!    consumer-side residency by definition, and released from the pool by the
+//!    safety valve when retaining them would otherwise wedge the stream. See
+//!    "WHAT the bound is over" above.
 //!
 //! Note what is NOT on that list: a parked producer holding a materialized but
 //! uncharged batch. Reserving before materializing eliminated that term rather
@@ -73,6 +104,18 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub(crate) use crate::egress_observation::EgressObservation;
 
 /// Default per-stream in-flight egress ceiling: **12 MiB of CAPACITY bytes**.
+///
+/// # What it bounds: SERVER-SIDE residency
+///
+/// 12 MiB is the ceiling on the Arrow capacity bytes **the server holds** on one
+/// stream's egress path — rows being materialized, batches queued in the `do_get`
+/// channel, and yielded batches the consumer has not yet dropped. It is **not** a
+/// bound on total resident bytes including consumer-held batches: a batch a
+/// consumer takes and retains is the consumer's memory, so the governor stops
+/// charging for bytes it no longer controls (see the module documentation's
+/// "WHAT the bound is over", and `MeteredDoGetStream::open_safety_valve`, which
+/// is what makes retaining safe rather than a hang). Every figure below is
+/// stated over exactly that quantity.
 ///
 /// # Why not 8 MiB — admission is gated by the RESERVATION, not the realized size
 ///
@@ -122,7 +165,7 @@ pub(crate) use crate::egress_observation::EgressObservation;
 /// * Narrow shapes are unaffected either way — the 4-deep batch-count channel
 ///   binds first there (a 192 KiB narrow batch is ~64 to the pool).
 ///
-/// `max(12 MiB, 8 MiB + ~n KiB) ≤ 16 MiB` — inside the ratified **B4 ≤16Mi
+/// `max(12 MiB, 8 MiB + ~2n KiB) ≤ 16 MiB` — inside the ratified **B4 ≤16Mi
 /// per-query working set at concurrency 1**, asserted from the imported
 /// constants by `egress_credit_tests::composition_stays_inside_b4`, with the
 /// no-clamp property pinned by
@@ -289,7 +332,8 @@ impl EgressCredit {
     /// entire configured ceiling — an operator may configure a small ceiling, a
     /// row may be wider than the whole per-batch cap, or a projection may carry
     /// enough array nodes that the slack term alone pushes past the pool (from
-    /// `n_array_nodes ≥ 4097` at the shipped defaults; see
+    /// `n_array_nodes ≥ 2049` at the shipped defaults — `8192 + 2 × nodes`
+    /// permits wanted against a 12288-permit pool; see
     /// [`DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`]). Acquiring `n` permits from a pool
     /// of `N < n` would block forever, wedging the stream and hanging the client.
     /// The reservation is therefore clamped to the pool total: when everything

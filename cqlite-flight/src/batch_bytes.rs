@@ -67,9 +67,11 @@
 //!
 //! **Bounded here: ONE batch.** At the 4 MiB default, over a schema whose rows
 //! fit the cap, an emitted batch is ≤4 MiB of payload and therefore
-//! ≤`2 × 4 MiB = 8 MiB` of capacity — see [`worst_case_batch_capacity_bytes`],
-//! and add the wider row's bytes for a deployment whose rows can individually
-//! exceed the cap.
+//! ≤`2 × 4 MiB + 2 KiB × n_array_nodes = 8 MiB + ~2n KiB` of capacity — see
+//! [`worst_case_batch_capacity_bytes`], and add the wider row's bytes for a
+//! deployment whose rows can individually exceed the cap. (The `+ 2 KiB × nodes`
+//! term is not decoration: on a tiny batch the fixed per-array-node allocations
+//! ARE the whole reported size — see [`BATCH_BYTES_PER_COLUMN_SLACK`].)
 //!
 //! **Bounded next door: per-stream egress RESIDENCY.** Issue #2821 delivered
 //! `cqlite_flight::egress_credit` — a per-stream in-flight ceiling denominated in
@@ -84,10 +86,21 @@
 //! **The delivered composition, in capacity currency:**
 //!
 //! ```text
-//! peak in-flight egress capacity <= max(ceiling, one maximum batch)
-//!                                 = max(12 MiB, 2 * 4 MiB + 2 KiB * nodes)
-//!                                 = 12 MiB   <=  16 MiB (B4 at concurrency 1)
+//! peak SERVER-SIDE in-flight egress capacity
+//!     <= max(ceiling, one maximum batch)
+//!      = max(12 MiB, 2 * 4 MiB + 2 KiB * nodes)
+//!      = 12 MiB   <=  16 MiB (B4 at concurrency 1)
 //! ```
+//!
+//! **Read "SERVER-SIDE" literally.** The governed quantity is the capacity bytes
+//! the SERVER holds on the egress path — rows being materialized, batches queued
+//! in the `do_get` channel, and yielded batches the consumer has not yet dropped.
+//! It is NOT a bound on total resident bytes including consumer-held batches: a
+//! batch a client retains after receiving it is the client's memory, which the
+//! server can neither free nor reuse, so the governor stops charging for it (that
+//! release is `MeteredDoGetStream::open_safety_valve`, and it is also what stops
+//! a retaining consumer from wedging the stream). A consumer that accumulates
+//! every batch it is handed is bounded by its OWN budget, not by this figure.
 //!
 //! The ceiling deliberately sits ABOVE one maximum batch: a reservation is taken
 //! at the FULL published worst case before the batch exists, so a ceiling that
@@ -174,12 +187,27 @@ pub const BATCH_BYTES_CAPACITY_FACTOR: usize = 2;
 /// 1024 values buffer + 64 offsets + the struct overhead). A two-`text`-column
 /// batch of three short rows therefore reports 2416 B against a `2 × payload +
 /// 1024 × 2` = 2186 B bound — which #2821's fail-closed reservation turned from a
-/// silently-loose doc claim into a terminal `do_get` error. 2048 covers the
-/// measured 1208 with 840 B of margin per node, and is enforced over the whole
-/// `arrow_size_tests` shape corpus by
-/// `batch_bytes_tests::the_capacity_bound_holds_for_tiny_batches`. The cost is
-/// 1 KiB more reservation per array node — 3 KiB on a three-node schema against a
-/// multi-MiB batch.
+/// silently-loose doc claim into a terminal `do_get` error.
+///
+/// **Enforcement, precisely.** Two tests, and the claim is exactly what they
+/// assert — no more:
+///
+/// * `batch_bytes_tests::the_capacity_bound_holds_for_tiny_batches` pins the six
+///   hand-written shapes including the exact two-`text`-column regression.
+/// * `batch_bytes_tests::the_capacity_bound_holds_over_the_shared_shape_corpus`
+///   asserts `get_array_memory_size() <= worst_case_batch_capacity_bytes(Σ
+///   estimate, nodes, 0)` over EVERY shape in the SHARED corpus
+///   (`cqlite_core::export::arrow_shape_corpus` — the same shapes the estimator's
+///   conservatism contract is validated against), each at full row count AND
+///   truncated to one row. That reaches `FixedSizeBinary(16)` (uuid/timeuuid),
+///   boolean/decimal/varint/timestamp/date/time/counter, tuple and UDT
+///   (`Struct`), `set`, 8-deep nesting, `frozen`, and the `cql_type = None` flat
+///   dispatch arms that route through different builders.
+///
+/// Measured worst case across that corpus is **1188 B per node** (a one-row
+/// `Utf8` batch), so 2048 carries 860 B of margin; the guard FAILS at 1024. The
+/// cost is 1 KiB more reservation per array node — 3 KiB on a three-node schema
+/// against a multi-MiB batch.
 ///
 /// Denominated in array NODES, not output columns: a flat scalar column is one
 /// node, but a `list<text>` column is two (the `ListArray` and its `Utf8`

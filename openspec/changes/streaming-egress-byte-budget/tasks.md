@@ -156,6 +156,33 @@ rejected.**
   `docs/architecture/throughput-program-2026-07.md` — out of scope by design.
   (flight-streaming-egress: doc-comment requirement)
 
+## Stage 3b — review round 3 (roborev R1-R5)
+- [x] 3b.1 **R1 safety valve**: `MeteredDoGetStream::open_safety_valve` releases the oldest deferred
+  permit when the channel is empty AND a reservation is parked NOW (`parked_now` gauge via the RAII
+  `ParkGuard`) AND the whole charge is held by consumer-retained batches; the stream registers for
+  the producer's next park on its OWN `Notify` before returning `Pending`, so the valve cannot lose
+  the race. (flight-streaming-egress: no consumer behaviour can wedge the stream)
+- [x] 3b.2 **R1 reframing**: the published bound is stated as **SERVER-SIDE residency** — and
+  explicitly NOT as total resident bytes including consumer-held batches — in
+  `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`, the `egress_credit` module doc, `batch_bytes.rs`'s
+  composition section, the spec delta, design D2b/D2c, the proposal and the JOURNAL.
+- [x] 3b.3 **R1 tests**: `a_retaining_consumer_still_makes_progress` (verified to HANG without the
+  valve) + `the_safety_valve_fires_only_when_the_stream_is_wedged` (both directions, deterministic)
+  + `safety_valve_releases() == 0` on the two real-encoder drains.
+- [x] 3b.4 **R2 corpus**: the shape corpus moves to `cqlite_core::export::arrow_shape_corpus` behind
+  the opt-in `arrow-shape-corpus` feature (dev-dependency only for `cqlite-flight`), and
+  `the_capacity_bound_holds_over_the_shared_shape_corpus` asserts the published bound over every
+  shape at full row count AND at one row. Measured worst case 1188 B/node; FAILS at slack = 1024.
+  (flight-streaming-egress: tiny-batch conversion requirement)
+- [x] 3b.5 **R3**: `both_producer_loops_reserve_before_materializing` holds the `EgressPermit` for
+  as long as the batch (`split()` instead of `into_batch()`) and asserts residency AT THE INSTANT of
+  the hold; proven to fail under the old form.
+- [x] 3b.6 **R4**: the `--max-inflight-egress-bytes` help text states 12 MiB per stream (not ~8 MiB)
+  and the server-side framing.
+- [x] 3b.7 **R5**: stale arithmetic swept — the clamp threshold is `n_array_nodes >= 2049` (not
+  4097), `~2n KiB` (not `~n KiB`), and the one-maximum-batch figure carries its `+ 2 KiB x nodes`
+  term everywhere it appears.
+
 ## Stage 4 — gate + audit + review (definition of done)
 - [x] 4.1 `RUSTFLAGS="-D warnings"` clean; no `unwrap()`/`expect()` in library code; no wall-clock
   threshold assert in any correctness test.

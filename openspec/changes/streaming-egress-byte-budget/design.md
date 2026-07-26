@@ -15,7 +15,7 @@ re-greps.
 |---|---|
 | `cqlite-flight/src/batch_bytes.rs:126` | `DEFAULT_MAX_BATCH_BYTES = 4 * 1024 * 1024` — per-batch **payload** cap (#2825) |
 | `cqlite-flight/src/batch_bytes.rs:144` | `BATCH_BYTES_CAPACITY_FACTOR = 2` — the published payload→capacity conversion, explicitly "published so a consumer — notably issue #2821's per-stream in-flight ceiling — can convert" |
-| `cqlite-flight/src/batch_bytes.rs:164` | `BATCH_BYTES_PER_COLUMN_SLACK = 1024`, per Arrow array **node** |
+| `cqlite-flight/src/batch_bytes.rs:164` | `BATCH_BYTES_PER_COLUMN_SLACK = 1024`, per Arrow array **node** (the tree AS FOUND; corrected to `2048` by this change — see D4b) |
 | `cqlite-flight/src/batch_bytes.rs:356` | `worst_case_batch_capacity_bytes(cap, n_array_nodes, widest_row_payload)` |
 | `cqlite-flight/src/batch_bytes.rs:66-93` | the module doc block this change must truth-up (the `~56 MiB` count-bounded claim + "TARGET for #2821") |
 | `cqlite-flight/src/streaming.rs:59-66` | `DO_GET_CHANNEL_CAPACITY: usize = 4` (batches) + the doc comment that mis-derives the bound and declares the depth "deliberately not a config knob" |
@@ -159,8 +159,8 @@ conservatism section naming this ceiling as a dependent consumer.
 ## D2b — The deadlock-avoidance clamp and the honest bound (the load-bearing decision)
 
 A single `RecordBatch` may be larger than the entire ceiling — at the merged defaults it routinely
-is (a full 4 MiB-payload batch is up to 8 MiB of capacity against an 8 MiB ceiling, and an operator
-may configure a far smaller one). A naive "acquire
+is (a full 4 MiB-payload batch is up to `8 MiB + ~2n KiB` of capacity, and an operator may configure a
+ceiling far below that). A naive "acquire
 `n` permits from a pool of `N < n`" blocks forever: the stream wedges and the client hangs.
 
 **Rule: the governor MUST always admit at least one batch when zero bytes are in flight.**
@@ -171,7 +171,16 @@ size; no deadlock is reachable.
 
 The price is stated openly rather than hidden:
 
-> **Guaranteed contract: peak charged in-flight egress CAPACITY ≤ `max(ceiling, one maximum batch)`.**
+> **Guaranteed contract: peak SERVER-SIDE in-flight egress CAPACITY ≤ `max(ceiling, one maximum batch)`.**
+
+**"SERVER-SIDE" is the operative word, and it is a definition, not a hedge.** The governed set is
+the capacity bytes the SERVER holds on one stream's egress path: rows being materialized, batches
+queued in the `do_get` channel, and yielded batches the consumer has not yet dropped. It is **NOT**
+a bound on total resident bytes including consumer-held batches. Once a consumer takes a batch and
+retains it, those bytes are the CONSUMER's memory — the server can neither free nor reuse them — so
+the governor stops charging for bytes it no longer controls. See D2c: that framing is exactly what
+makes the safety valve correct rather than a compromise, and it is why no consumer behaviour can
+hang `do_get`.
 
 **The arithmetic, in capacity currency, at the merged defaults:**
 
@@ -181,12 +190,12 @@ one maximum batch (capacity)
   = BATCH_BYTES_CAPACITY_FACTOR * max(4 MiB, widest_row_payload)
       + BATCH_BYTES_PER_COLUMN_SLACK * n_array_nodes
   = 2 * 4 MiB + 2 KiB * n_array_nodes                    (schema whose widest row fits the cap)
-  = 8 MiB + ~n KiB
+  = 8 MiB + ~2n KiB
 
 contract  = max(ceiling, one maximum batch)
-          = max(8 MiB, 8 MiB + ~n KiB)                   (8 MiB = the shipped D4a default)
-          = 8 MiB + ~n KiB   <<   16 MiB  (ratified B4 per-query working set at concurrency 1)
-headroom  = ~8 MiB
+          = max(12 MiB, 8 MiB + ~2n KiB)                 (12 MiB = the shipped D4a default)
+          = 12 MiB           <    16 MiB  (ratified B4 per-query working set at concurrency 1)
+headroom  = 4 MiB
 ```
 
 All terms are capacity. Why `max` and not `+`: under reserve-before-materialize every resident
@@ -233,6 +242,48 @@ reachable in the DEFAULT configuration; the end-to-end tiny-ceiling test hangs u
 (verified by temporarily reverting the release point). At most one batch is downstream of the credit
 boundary at any time, so the contract holds as stated. **This is the subtlest decision in the change;
 do not "simplify" it into release-on-yield.**
+
+## D2c — The safety valve: nothing a consumer does can wedge the stream (review R1)
+
+Keying the deferred release on the batch DATA's liveness (`Weak::strong_count() == 0` per column)
+removed the dependence on the consumer's POLL discipline — but replaced it with a dependence on its
+DROP discipline, and that failure mode is strictly worse. A consumer that retains batch N while
+awaiting N+1 HANGS: the deferred permit holds the credit, the producer parks in
+`EgressCredit::reserve`, and the batch the consumer is waiting for can never be built. At the
+shipped defaults a resident batch plus a worst-case reservation already exceed the ceiling, so the
+cycle is reachable in the DEFAULT configuration, not only in a corner case. An under-charged metric
+is a reporting defect; a hung `do_get` is an outage.
+
+`MeteredDoGetStream::open_safety_valve` closes it. From the `Poll::Pending` arm only, and only when
+all three of the following hold, it releases the OLDEST deferred permit:
+
+1. **The channel is empty** — the inner poll returned `Pending`, so no batch is on its way.
+2. **A reservation is parked RIGHT NOW** — `EgressObservation::parked_now()`, a GAUGE maintained by
+   an RAII `ParkGuard` around the semaphore await. A gauge, not the cumulative park counter: a park
+   that has since been satisfied, or one whose future was DROPPED by a cancelled stream, must not
+   read as "parked", or the valve would fire on a healthy stream and quietly loosen the bound.
+3. **Every charged byte is held by a deferred (consumer-retained) batch** — summing the deferred
+   permits' own `charged_bytes` against the pool total. If anything else holds credit (a queued
+   batch, an in-flight reservation) the producer's park will clear on its own: that is ordinary
+   backpressure, not a wedge.
+
+**Race-freedom is part of the mechanism, not an afterthought.** The stream registers for the
+producer's next park (an owned `Notify` future) BEFORE returning `Pending`, so a park landing in the
+window between the wedge check and the return still wakes it — otherwise nothing would ever poll a
+stream whose consumer is waiting on the batch the wedged producer cannot build. That signal is a
+SEPARATE `Notify` from the one the saturation test helper waits on: `notify_one` wakes exactly one
+waiter, so a shared signal would have each of them randomly stealing the other's wakeup.
+
+**Why releasing is correct rather than a compromise.** Per D2b's framing, the bound governs
+SERVER-SIDE residency. A batch the consumer has taken and is retaining is the consumer's memory:
+charging it against the server's pool meters something the server cannot free, cannot reuse and
+cannot act on — and doing so is precisely what closes the deadlock cycle. So the valve does not
+loosen the bound; it restores the bound's actual subject. The 12 MiB ceiling and the B4 composition
+stand unchanged over that quantity.
+
+One permit per firing, oldest first: the minimum that can restore progress. Every firing is counted
+(`EgressObservation::safety_valve_releases`), and the real-encoder drains assert that count is ZERO
+— so "the valve fires on the normal path" is a test-detectable regression, not a silent loosening.
 
 ## D3 — Credit release must be leak-proof on every termination path
 
@@ -338,7 +389,8 @@ contract = max(12 MiB, 8,394,752 B) = 12 MiB  <=  16 MiB (B4), 4 MiB spare
    so none of them regresses the narrow path.
 
 **Guards**: `egress_credit_tests::a_worst_case_default_reservation_does_not_clamp` (FAILS at an
-8 MiB default) and `::the_clamp_engages_only_past_the_documented_schema_width` (pins BOTH sides of
+8 MiB default; the clamp threshold at the shipped defaults is `n_array_nodes ≥ 2049`, not the 4097
+the 1 KiB slack implied) and `::the_clamp_engages_only_past_the_documented_schema_width` (pins BOTH sides of
 the 2048-node boundary, including the documented behaviour once the clamp does engage);
 `egress_budget_tests::the_default_ceiling_does_not_clamp_a_real_byte_cap_cut_stream` is the
 end-to-end wiring evidence over a genuine multi-batch drain at the shipped defaults.
@@ -364,11 +416,23 @@ real-transport tests). The fix is the published constant, not a local fudge at t
 against merged #2825 code and fixed HERE because #2821 is blocked on it: a two-file change #2821
 immediately depends on does not justify a separate issue → branch → gate → merge → rebase cycle.
 
-`BATCH_BYTES_PER_COLUMN_SLACK = 2048` covers the measured 1208 with 840 B of margin per node, and is
-enforced over a tiny-batch corpus (two-text, empty string, text+blob+int, `list<text>`,
-`map<text,text>`, all-null) by `batch_bytes_tests::the_capacity_bound_holds_for_tiny_batches`, which
-FAILS at 1024. Cost: 1 KiB more reservation per array node — 6 KiB on a three-node schema against a
-multi-MiB batch — and the no-clamp schema width above becomes 2048 nodes instead of 4096.
+`BATCH_BYTES_PER_COLUMN_SLACK = 2048` covers the measured 1208 with 840 B of margin per node.
+
+**Enforcement matches the claim (review R2).** The original guard hand-wrote six shapes (two-text,
+empty string, text+blob+int, `list<text>`, `map<text,text>`, all-null) while the constant's doc
+claimed enforcement "over the whole `arrow_size_tests` shape corpus" — which was private and unused.
+That left `FixedSizeBinary(16)` (uuid/timeuuid), the fixed-width scalars, tuple/UDT (`Struct`),
+`set`, deep nesting, `frozen` and the `cql_type = None` flat dispatch arms unverified against a
+bound that #2821 turned into a FAIL-CLOSED runtime check. The corpus therefore moves to
+`cqlite_core::export::arrow_shape_corpus` behind the opt-in `arrow-shape-corpus` feature (the
+`fuzz`/`bench-internals` precedent; `cqlite-flight` enables it as a DEV-dependency only, so no
+production build links it), and
+`batch_bytes_tests::the_capacity_bound_holds_over_the_shared_shape_corpus` asserts the bound over
+every shape at full row count AND truncated to one row — the regime the per-node term exists for.
+Measured worst case across that corpus is **1188 B per node** (a one-row `Utf8` batch), so 2048
+keeps 860 B of margin; both guards FAIL at 1024. Cost: 1 KiB more reservation per array node — 6 KiB
+on a three-node schema against a multi-MiB batch — and the no-clamp schema width above becomes 2048
+nodes instead of 4096.
 
 ## D5 — Composition with the existing governors
 

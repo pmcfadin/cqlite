@@ -15,7 +15,22 @@ reserve-before-materialize requirement), trued up to the realized capacity once 
 released only when the batch has left the stream toward the client. No materialized-but-uncharged
 `RecordBatch` SHALL exist on the egress path. The guaranteed contract is:
 
-> peak charged in-flight egress **capacity** ≤ **`max(ceiling, one maximum batch)`**
+> peak **SERVER-SIDE** in-flight egress **capacity** ≤ **`max(ceiling, one maximum batch)`**
+
+**The bound's subject is SERVER-SIDE residency, and the published wording SHALL say so.** The
+governed set is the capacity bytes the SERVER holds on one stream's egress path: rows being
+materialized, batches queued in the `do_get` channel, and yielded batches the consumer has not yet
+dropped. It is **NOT** a bound on total resident bytes including consumer-held batches. Once a
+consumer takes a batch and retains it, those bytes are the CONSUMER's memory — the server can
+neither free nor reuse them — so the governor SHALL stop charging for bytes it no longer controls
+rather than metering something it cannot act on. A consumer that accumulates every batch it is
+handed is bounded by its own budget, and this ceiling neither claims nor could enforce anything
+about it.
+
+That framing is load-bearing, not a caveat: charging a consumer-retained batch against the server's
+pool is exactly what would let a retaining consumer DEADLOCK the stream (see the safety-valve
+requirement). No document, doc comment, CLI help string or spec sentence SHALL state or imply that
+the ceiling bounds total resident bytes including consumer-held batches.
 
 The `+ one maximum batch` additive term of the pre-reservation design is GONE: it existed only
 because a producer could hold a materialized, uncharged batch while parked. The remaining
@@ -120,6 +135,15 @@ into a terminal internal error.
 The correction SHALL be made to the published constant, never as a local allowance at the
 reservation site (see the no-second-definition requirement above).
 
+**The enforcement claim SHALL match the enforcement.** The bound SHALL be asserted over the SAME
+row-shape corpus the estimator's conservatism contract is validated against — one shared corpus, reused
+rather than re-listed — covering at minimum `FixedSizeBinary(16)` (uuid/timeuuid), the fixed-width
+scalars (boolean/decimal/varint/timestamp/date/time/counter), tuple and UDT (`Struct`), `set`,
+deeply nested collections, `frozen`, and the `cql_type = None` flat dispatch arms that route through
+different builders. Each shape SHALL additionally be asserted at ONE row, the regime in which the
+fixed per-array-node allocations dominate. A hand-written subset is how the under-count reached a
+fail-closed runtime check in the first place, and SHALL NOT be the guard.
+
 #### Scenario: the bound holds where the fixed per-node cost dominates
 
 - **GIVEN** batches whose payload is small relative to their array count — two `text` columns of
@@ -131,6 +155,17 @@ reservation site (see the no-second-definition requirement above).
 - **THEN** the realized `get_array_memory_size()` is within the bound for every shape
 - **AND** each shape is asserted to be fixed-cost-dominated (capacity > 2 × estimate), so the test
   cannot go vacuous by drifting into the payload-dominated regime
+
+#### Scenario: the bound is asserted over the shared shape corpus, not a hand-written subset
+
+- **GIVEN** the shape corpus the estimator's conservatism contract is validated against, exposed for
+  reuse rather than duplicated
+- **WHEN** each shape is converted at its full row count AND truncated to one row
+- **THEN** `get_array_memory_size()` is at or below
+  `worst_case_batch_capacity_bytes(Σ estimate_arrow_row_bytes, n_array_nodes, 0)` for every one
+- **AND** the run is non-vacuous: a stated minimum number of those batches are fixed-cost dominated,
+  so the assertion exercises `BATCH_BYTES_PER_COLUMN_SLACK` rather than the growth factor
+- **AND** the guard FAILS at the previous `1024` value
 
 ### Requirement: egress credit is reserved BEFORE a batch is materialized
 
@@ -329,7 +364,8 @@ discipline:**
   reservation already exceed the ceiling, so that cycle is reachable in the DEFAULT configuration,
   not merely a corner case. A test SHALL cover this (a ceiling smaller than one batch, driven end to
   end): the release-on-yield variant hangs on it. Keying the release on data liveness preserves
-  liveness for the production encoder, which has dropped the batch before it re-polls.
+  liveness for the production encoder, which has dropped the batch before it re-polls — and for
+  every other consumer via the safety valve required below.
 
 #### Scenario: the yielded batch's credit is still charged while the encoder holds it
 
@@ -351,6 +387,52 @@ discipline:**
 - **GIVEN** a stream holding a deferred permit for the last yielded batch
 - **WHEN** the stream is dropped
 - **THEN** the deferred permit is released and the full pool is available again
+
+### Requirement: no consumer behaviour can wedge the stream — the safety valve
+
+Keying credit release on the batch data's liveness removes the dependence on the consumer's POLL
+discipline but introduces a dependence on its DROP discipline, and that failure mode is WORSE: a
+consumer that retains batch N while awaiting N+1 would HANG the stream (the deferred permit holds
+the credit, the producer parks in `EgressCredit::reserve`, and the batch the consumer waits for can
+never be built). The stream SHALL NOT be hangable by any consumer behaviour.
+
+`MeteredDoGetStream` SHALL therefore release the OLDEST deferred permit when, and only when, all of
+the following hold at a `Poll::Pending`:
+
+1. the inner stream declined to yield (the channel is empty, so no batch is on its way);
+2. a reservation is parked on the credit pool RIGHT NOW — observed as a GAUGE maintained by an RAII
+   guard around the semaphore await, so it falls again even when a parked reservation future is
+   DROPPED by a cancelled stream, never as an inference from a cumulative park counter; and
+3. every charged byte is held by a deferred (consumer-retained) batch, so the only way to free
+   credit is for the consumer to drop one.
+
+The stream SHALL register for the producer's next park BEFORE returning `Pending`, on a signal
+distinct from any test-observer signal, so a park that lands after the wedge check still wakes it; a
+valve that could lose that race is not a valve. Releasing there is CORRECT rather than a
+concession — see the server-side-residency framing above: the retained batch's bytes are the
+consumer's, and the governor correctly stops charging for them.
+
+Each firing SHALL be counted so "the valve fires on the normal path" is a test-detectable
+regression rather than a silent loosening of the bound.
+
+#### Scenario: a retaining consumer still makes progress
+
+- **GIVEN** a consumer driving the real streaming producer through `MeteredDoGetStream` that holds
+  every yielded batch alive across the await for the next one, under a ceiling small enough that the
+  producer provably parks
+- **THEN** every row is delivered and the stream terminates
+- **AND** without the valve this scenario HANGS rather than failing an assertion, so the test carries
+  a liveness timeout (never a correctness threshold — #2642)
+
+#### Scenario: the valve fires only in the wedge state
+
+- **GIVEN** a stream holding a deferred permit for a batch the consumer retains, with NO reservation
+  parked
+- **THEN** repeated speculative `Pending` polls do NOT release that credit
+- **AND WHEN** a reservation larger than the free pool is started and provably parks
+- **THEN** the next poll releases exactly one deferred permit and the parked reservation is admitted
+- **AND** a full drain through the real Flight encoder — which drops each batch before asking for the
+  next — fires the valve zero times
 
 ### Requirement: egress credit is released on every stream-termination path
 
@@ -443,8 +525,8 @@ embedder.
 The per-stream byte ceiling SHALL NOT change admission `K`, its default, or its shedding policy. The
 two governors SHALL remain independent: `K` bounds concurrently admitted scans server-wide, the byte
 ceiling bounds capacity in flight within one stream. The documented server-wide worst case SHALL be
-`K × max(per-stream ceiling, one maximum batch)` — `K × 8 MiB` at the merged batch cap for any
-ceiling ≤ 8 MiB.
+`K × max(per-stream ceiling, one maximum batch)` of SERVER-SIDE residency — `K × 12 MiB` at the
+shipped defaults (`max(12 MiB, 2 × 4 MiB + 2 KiB × nodes)`).
 
 #### Scenario: admission behaviour is unchanged
 
@@ -509,7 +591,8 @@ No other historical document SHALL be rewritten.
 #### Scenario: the Flight/Trino journal states the composition as enforced
 
 - **WHEN** the B4-composition entry in `docs/flight-trino/JOURNAL.md` is read after this change
-- **THEN** it states the enforced composition `max(ceiling, one maximum batch) ≈ 8 MiB` (not the
+- **THEN** it states the enforced composition `max(ceiling, one maximum batch) = 12 MiB` of
+  SERVER-SIDE residency at the shipped defaults (not the
   prospective `6 + 8 = 14 MiB` additive sketch), records that reserve-before-materialize is what
   removed the additive term, keeps the payload-vs-capacity correction that motivates the currency,
   and points at this issue as the delivery

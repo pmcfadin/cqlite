@@ -83,12 +83,19 @@ wide table at any value of K.
   `spawn_streaming_from_readers` → `spawn_streaming` → `ChannelSink` → the producer's reservation
   step (`BatchSink`, both merge loops). On by default on every
   construction path, with an explicit unbounded opt-out for embedders.
-- **The composition, in capacity currency**: `max(ceiling, 2 × 4 MiB payload cap + slack) ≈ 8 MiB`
-  for any ceiling ≤ 8 MiB — inside the ratified B4 ≤16Mi per-query working set at concurrency 1 with
-  ~8 MiB headroom. A test asserts it from the imported constants so neither can drift out from under
-  B4. **Owner decision, APPLIED**: the shipped default is 8 MiB — with the additive term gone,
-  6 MiB is strictly dominated (same worst case, but at 6 MiB every full-size batch trips the
-  deadlock clamp and the stream runs lock-step). See design D4a.
+- **The composition, in capacity currency**:
+  `max(ceiling, 2 × 4 MiB payload cap + 2 KiB × n_array_nodes) = max(12 MiB, ~8.4 MiB) = 12 MiB` of
+  **SERVER-SIDE** residency — inside the ratified B4 ≤16Mi per-query working set at concurrency 1
+  with 4 MiB headroom. A test asserts it from the imported constants so neither can drift out from
+  under B4. **Owner decision, APPLIED**: the shipped default is **12 MiB** — admission is gated on
+  the pre-materialization RESERVATION, so 6 MiB and 8 MiB both clamp every full-size batch to the
+  whole pool and run the stream lock-step. See design D4a.
+- **What "SERVER-SIDE" means, stated up front**: the bound is over the capacity bytes the SERVER
+  holds on the egress path — being materialized, queued in the `do_get` channel, or yielded but not
+  yet dropped by the consumer. It is NOT a bound on total resident bytes including consumer-held
+  batches: a batch a client retains is the client's memory, so the governor stops charging for bytes
+  it no longer controls. That framing is what makes the safety valve (design D2c) correct, and it is
+  why no consumer behaviour can hang `do_get`.
 - **Composition, not replacement.** The byte ceiling sits alongside the 4-deep batch-count channel,
   #2825's per-batch cap, and admission K; whichever binds first wins. No existing bound is removed.
 - **The `DO_GET_CHANNEL_CAPACITY` doc comment is corrected and revised** to state the real
@@ -124,9 +131,9 @@ wide table at any value of K.
 - **No-heuristics (#28):** unaffected. `get_array_memory_size()` is an authoritative Arrow-reported
   size, not a byte-pattern inference; no type or format is guessed anywhere in this change.
 - **Memory budget:** this change exists to *serve* the <128MB / B4 ≤16Mi posture. With #2825's
-  merged 4 MiB payload cap, `max(ceiling, one maximum batch)` is ~8 MiB of capacity at any ceiling
-  ≤ 8 MiB — inside B4 ≤16Mi at concurrency 1 with ~8 MiB headroom, and enforced by both governors
-  rather than dependent on `batch_size` and row width.
+  merged 4 MiB payload cap, `max(ceiling, one maximum batch)` is 12 MiB of SERVER-SIDE capacity at
+  the shipped 12 MiB default — inside B4 ≤16Mi at concurrency 1 with 4 MiB headroom, and enforced by
+  both governors rather than dependent on `batch_size` and row width.
 - **Public binding surfaces:** Python/Node/CLI unaffected. The only new public surface is the
   `cqlite-flight` server CLI flag + env var and the `CqliteFlightService` builder.
 - **Wiring evidence (#949/#963):** the knob must be reachable end-to-end from the

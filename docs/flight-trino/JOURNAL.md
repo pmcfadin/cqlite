@@ -646,15 +646,15 @@ Format:
   batch exists and monotonic in row count; capacity is neither, which is why it
   cannot be the trigger.
 - **Converting to capacity currency.** Published constants:
-  `BATCH_BYTES_CAPACITY_FACTOR = 2` and `BATCH_BYTES_PER_COLUMN_SLACK = 1024`, with
+  `BATCH_BYTES_CAPACITY_FACTOR = 2` and `BATCH_BYTES_PER_COLUMN_SLACK = 2048`, with
   `worst_case_batch_capacity_bytes(cap, n_array_nodes, widest_row_payload)
   = 2 × max(cap, widest_row_payload) + 2048 × n_array_nodes` (the per-node term was
   corrected from 1024 by issue #2932, found in the #2821 review: with 1024 this was
   not an upper bound at all for text/blob schemas — a `Utf8`/`Binary` array reports 1208 B of
   fixed allocation at any length, so the old value under-stated capacity for
   tiny batches and made #2821's fail-closed reservation reject narrow tables). For a schema whose
-  widest row fits the cap that is `2 × cap + slack` — ~8 MiB of resident capacity
-  per batch at the 4 MiB default. The `max(..)` term is honest, not slack: one row
+  widest row fits the cap that is `2 × cap + 2 KiB × n_array_nodes` — ~8 MiB
+  (+ ~2n KiB) of resident capacity per batch at the 4 MiB default. The `max(..)` term is honest, not slack: one row
   cannot be split across Arrow batches, so a schema with a single over-cap row
   emits it alone at its own natural width, and nothing downstream clamps that
   (`arrow_convert.rs`'s `checked_value_bytes` only *rejects* a cumulative column
@@ -664,8 +664,18 @@ Format:
   ceiling is budgeted in the SAME capacity currency `streaming.rs` meters
   (`cqlite-flight/src/egress_credit.rs`, `--max-inflight-egress-bytes`, default
   **12 MiB**), and the enforced bound is
-  `max(ceiling, one maximum batch) = max(12 MiB, 2 × 4 MiB + slack) = 12 MiB ≤ 16Mi`
-  — inside B4 at concurrency 1 with 4 MiB of headroom. The ceiling sits ABOVE one
+  `max(ceiling, one maximum batch) = max(12 MiB, 2 × 4 MiB + 2 KiB × nodes) = 12 MiB ≤ 16Mi`
+  — inside B4 at concurrency 1 with 4 MiB of headroom. **The bound is over
+  SERVER-SIDE residency**: the capacity bytes this process holds on the egress path
+  (rows being materialized, batches queued in the `do_get` channel, and yielded
+  batches the consumer has not yet dropped). It is NOT a bound on total resident
+  bytes including consumer-held batches — a batch a client retains after receiving
+  it is the client's memory, which the server can neither free nor reuse, so the
+  governor stops charging for it. That release is `MeteredDoGetStream::open_safety_valve`
+  (issue #2821 review R1), which fires ONLY when the stream is otherwise wedged
+  (producer parked on credit, channel empty, the whole charge held by retained
+  batches) and never on the ordinary encoder path — so no consumer behaviour can
+  hang `do_get`, and the 12 MiB figure an operator sizes against stays honest. The ceiling sits ABOVE one
   maximum batch on purpose: admission is gated on the pre-materialization
   RESERVATION (8,394,752 B = 8198 permits at three array nodes), so an 8 MiB pool
   (8192 permits) would clamp every byte-cap-cut batch to the whole pool and run the
