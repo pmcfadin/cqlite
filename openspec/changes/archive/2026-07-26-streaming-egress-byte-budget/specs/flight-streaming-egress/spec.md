@@ -41,6 +41,15 @@ term that remains outside the governed set.
 This byte ceiling SHALL compose with, and SHALL NOT replace, the existing `DO_GET_CHANNEL_CAPACITY`
 batch-count channel; whichever bound is reached first governs.
 
+#### Scenario: slow consumer does not grow server memory
+
+- **GIVEN** a table producing at least 4× the channel capacity in batches
+- **WHEN** a client reads ONE batch and then pauses
+- **THEN** the producer blocks after at most (channel capacity + in-flight
+  allowance) further batches — verified by a batch-count/work-counter budget
+  (or alloc-budget) assertion that FAILS on pre-change `main`, where all
+  batches materialize regardless of consumer progress
+
 #### Scenario: slow consumer bounds in-flight egress bytes on a wide-row fixture
 
 - **GIVEN** the synthetic wide-row fixture (`cqlite-flight/src/wide_row_fixture.rs`, merged with
