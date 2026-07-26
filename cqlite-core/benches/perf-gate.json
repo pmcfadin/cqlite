@@ -1,10 +1,36 @@
 {
   "_comment": "Performance regression gate policy (Issue #572). The CI workflow .github/workflows/perf-regression.yml runs these benches on both the PR and main on the SAME runner and fails if any STRICT bench's Criterion median regresses by more than its threshold_pct. ADVISORY benches are always reported but never cause a non-zero exit, regardless of delta — they exist to document cost, not to block merges. To adjust, edit bench entries here; see cqlite-core/benches/README.md.",
   "default_threshold_pct": 10,
+  "_comment_reconcile_overlap": "issue #2043 (epic #2817 M9) — the reconcile_overlap/* ids below are a MEASUREMENT INSTRUMENT, registered advisory-only: they carry no threshold_pct and deliberately have NO entry in `benches`, so they can never fail (or be compared by) the gate. perf-regression.yml does not run the `reconcile_overlap` target at all; its numbers live in docs/research/issue-2043-reconcile-overlap-multiplier.md.",
   "advisory_benches": [
     "write/ingest_wal_on",
     "compaction/wide",
-    "flight/do_get"
+    "flight/do_get",
+    "reconcile_overlap/disjoint/k1",
+    "reconcile_overlap/disjoint/k2",
+    "reconcile_overlap/disjoint/k5",
+    "reconcile_overlap/disjoint/k10",
+    "reconcile_overlap/disjoint/k20",
+    "reconcile_overlap/lww_overwrite/k1",
+    "reconcile_overlap/lww_overwrite/k2",
+    "reconcile_overlap/lww_overwrite/k5",
+    "reconcile_overlap/lww_overwrite/k10",
+    "reconcile_overlap/lww_overwrite/k20",
+    "reconcile_overlap/tombstone/k1",
+    "reconcile_overlap/tombstone/k2",
+    "reconcile_overlap/tombstone/k5",
+    "reconcile_overlap/tombstone/k10",
+    "reconcile_overlap/tombstone/k20",
+    "reconcile_overlap/ttl_expiring/k1",
+    "reconcile_overlap/ttl_expiring/k2",
+    "reconcile_overlap/ttl_expiring/k5",
+    "reconcile_overlap/ttl_expiring/k10",
+    "reconcile_overlap/ttl_expiring/k20",
+    "reconcile_overlap/field_blend/k1",
+    "reconcile_overlap/field_blend/k2",
+    "reconcile_overlap/field_blend/k5",
+    "reconcile_overlap/field_blend/k10",
+    "reconcile_overlap/field_blend/k20"
   ],
   "benches": [
     {
