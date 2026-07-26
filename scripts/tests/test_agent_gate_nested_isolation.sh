@@ -243,6 +243,27 @@ else
   bad "marker mode: sibling missing the terminal FAIL verdict"
   echo "------- marker sibling ($msib) -------"; cat "$msib" 2>/dev/null; echo "-----------------------------"
 fi
+# --- Property 3d (job-2107 MED#1): marker-LESS terminal detection ---------------
+# A peer that writes the contended path AFTER the last component boundary leaves no marker; the
+# terminal emit must STILL detect it on the observable condition alone, not clobber, and force FAIL.
+tnm_out="$tmp/tnm.out"
+env AGENT_GATE_SUMMARY_FILE="$tmp/tnm-integ.txt" AGENT_GATE_INTEGRITY_SELFTEST=terminal-nomarker \
+  bash "$FAKE_GATE" >"$tnm_out" 2>/dev/null
+if grep -q 'terminal-nomarker-selftest: contended-untouched=yes sibling=yes overall=FAIL rc=1' "$tnm_out"; then
+  ok "terminal detection (no marker): foreign peer at terminal → no clobber + sibling + forced FAIL (MED#1)"
+else
+  bad "terminal no-marker detection wrong (marker-less clobber window reopened)"
+  echo "------- tnm out -------"; cat "$tnm_out" 2>/dev/null; echo "----------------------"
+fi
+# The published sibling on the marker-less path must ALSO carry the SUMMARY_META (job-2107 MED#2:
+# a live-peer FAIL block keeps the commit/branch meta, not just reason/component).
+tnm_sib=$(printf '%s\n' "$tmp/tnm-integ.txt".integrity-fail.* | head -1)
+if [ -f "$tnm_sib" ] && grep -q 'commit: selftest branch: selftest' "$tnm_sib"; then
+  ok "live-peer FAIL block preserves SUMMARY_META (component/commit context not dropped) — MED#2"
+else
+  bad "live-peer FAIL block dropped SUMMARY_META"
+  echo "------- tnm sibling ($tnm_sib) -------"; cat "$tnm_sib" 2>/dev/null; echo "----------------------"
+fi
 
 # --- Property 3c (WIRING): the guard is actually called from record_result ----------
 # All the hook-driven properties above call _assert_summary_integrity /

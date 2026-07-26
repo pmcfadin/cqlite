@@ -108,8 +108,15 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   by an enclosing gate) and no explicit `AGENT_GATE_SUMMARY_FILE` defaults to its OWN
   `$LOG_DIR/summary-primary.txt` (never the checkout default) and stamps `nested-under: <parent-run-id>`, so a
   nested/self-test sub-gate can never clobber the parent's summary. A mid-run summary clobber (foreign
-  run-id) is caught at the next component boundary with a named `summary-integrity: FAIL` line + FAIL,
-  never a bare INCOMPLETE.
+  run-id) is caught at the next component boundary — and at the terminal emit — with a named
+  `summary-integrity: FAIL` line + `RESULT: FAIL`, never a bare INCOMPLETE. **No-clobber + reader
+  contract (#2874):** when the contended path is found holding a FOREIGN `run-id` (a live peer owns
+  it) the gate does NOT rewrite that path; it publishes its own FAIL verdict to a non-clobbering
+  sibling `<summary-file>.integrity-fail.<run-id>` + the `logs:` bundle (+ stdout/stderr) and exits
+  non-zero, deliberately leaving the peer's block on the pinned path. A reader therefore MUST treat
+  the process EXIT CODE as primary and MUST verify the `run-id:` line matches the run it launched
+  before trusting a pinned-path block — a mismatched/foreign `run-id` block (even `RESULT: PASS`) is a
+  peer's, not yours; on a mismatch, read the `.integrity-fail.<run-id>` sibling / `logs:` bundle instead.
 - clippy is scoped per-package (#1844): whole workspace `-D warnings` but skips the source-built
   DuckDB amalgamation (cqlite-cli `duckdb-tests`) + OTel stack (`observability`/
   `observability-testing`); parquet/arrow stay linted. `CQLITE_CLIPPY_FULL=1` (nightly `gate.yml`)

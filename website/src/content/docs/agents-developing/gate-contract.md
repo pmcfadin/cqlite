@@ -310,13 +310,27 @@ read it:
 > `AGENT_GATE_SUMMARY_FILE` it defaults to its OWN `$LOG_DIR/summary-primary.txt` (never the
 > checkout default) and stamps `nested-under: <parent-run-id>`, so a nested run can
 > never clobber the parent gate of record. And a mid-run summary clobber (a foreign
-> `run-id` appearing in the file) is caught at the next component boundary with a
-> named **`summary-integrity: FAIL`** line + `RESULT: FAIL`, never a bare
-> `INCOMPLETE` death. The old #2751 workaround (run the full gate *without*
+> `run-id` appearing in the file) is caught at the next component boundary — and at the
+> terminal emit — with a named **`summary-integrity: FAIL`** line + `RESULT: FAIL`, never
+> a bare `INCOMPLETE` death. The old #2751 workaround (run the full gate *without*
 > `AGENT_GATE_SUMMARY_FILE`) is therefore obsolete — the summary-file redirect is the
 > default again, and running it alongside a peer lane's gate self-tests on one box is
 > safe. (Two *top-level* full gates sharing one checkout default still need distinct
 > paths, per the caveat above.)
+>
+> **No-clobber + reader contract (#2874).** When a gate finds the contended path already
+> holding a FOREIGN `run-id` (a live peer owns it — the only way this arises is two
+> top-level gates sharing one checkout-default path), it **does not rewrite that path**:
+> it publishes its own FAIL verdict to a non-clobbering sibling
+> `<summary-file>.integrity-fail.<run-id>` plus the `logs:` bundle (and stdout/stderr) and
+> exits non-zero, deliberately leaving the peer's block on the pinned path rather than
+> clobbering it. The reader contract that makes this safe: **the process exit code is
+> primary, and any pinned-path block MUST be validated by its `run-id:` line** before you
+> trust it — a block whose `run-id` is not the one you launched (even `RESULT: PASS`) is a
+> peer's verdict, not yours. On a `run-id` mismatch (or a non-zero exit with a foreign
+> block at the path), read the `.integrity-fail.<run-id>` sibling / `logs:` bundle for your
+> run's verdict. A closer polling the summary file should glob `"$SUMMARY_FILE".integrity-fail.*`
+> and reject any block whose `run-id` differs from the one it launched.
 
 The path the gate used is also echoed on the `summary-file:` line inside the
 block, and a copy is kept in the `logs:` bundle. The streamed copy is best-effort
