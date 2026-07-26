@@ -122,16 +122,33 @@ pub const FIXTURE_TTL_SECS: u32 = 600;
 pub const OVERLAP_PARTITIONS: usize = 16;
 
 /// Clustering rows per partition, per generation. `OVERLAP_PARTITIONS *
-/// OVERLAP_CK` = 1024 clusters per generation — enough rows that per-row cost
-/// dominates per-scan fixed cost, small enough that k=20 stays a few-ms iteration.
-pub const OVERLAP_CK: usize = 64;
+/// OVERLAP_CK` = **4096 clusters per generation**.
+///
+/// Sized so per-row work DOMINATES per-scan setup at the matrix's largest k (owner
+/// decision 2026-07-26, issue #2043). `KWayMerger::new_from_readers` spawns one OS
+/// producer thread + opens one adapter PER GENERATION, all inside the timed region;
+/// that cost is fixed per drain and grows with k, so at a small row count it lands
+/// in the numerator of `cost(k)/cost(1)` and biases the multiplier UPWARD with k —
+/// while a real compaction over millions of rows amortizes it to nothing. At the
+/// previous 64 (1024 clusters/generation) the bench's own `SetupCensus`
+/// (`benches/reconcile_overlap.rs`) measured that share at **0.65–0.86 % at k = 1 but
+/// 2.4–4.8 % at k = 20**, i.e. a ~2.3 % upward bias on the k = 20 multiplier.
+/// Quadrupling the width leaves the setup cost unchanged and quadruples the per-row
+/// work, putting the k = 20 residual **under 1 %** — and the residual is MEASURED and
+/// printed per arm rather than assumed, so the record publishes a setup-corrected
+/// multiplier beside the raw one.
+///
+/// Still bounded: a k = 20 iteration is ~0.2 s and a generation is 4096 rows of a
+/// 5-column table, so the fixture stays a few MB on disk and the whole 27-arm matrix
+/// stays a single-digit-minute run.
+pub const OVERLAP_CK: usize = 256;
 
 /// Clusters (`(pk, ck)` pairs) each generation writes.
 pub const CLUSTERS_PER_GEN: usize = OVERLAP_PARTITIONS * OVERLAP_CK;
 
 /// Clustering rows per partition per generation for the **producer-count control**
 /// arm (issue #2043 §3): DOUBLE the matrix width, so a ONE-generation fixture
-/// holds the same 2048 clusters — and the same cell count — as the TWO-generation
+/// holds the same `2 × CLUSTERS_PER_GEN` clusters — and the same cell count — as the TWO-generation
 /// `disjoint/k2` arm. Comparing those two arms changes only the number of
 /// producer/adapter streams the drain fans in, which is the measured mechanism
 /// behind the k=1 anchor deviation.
