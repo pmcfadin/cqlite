@@ -1759,10 +1759,21 @@ case "${AGENT_GATE_TREE_SELFTEST:-0}" in
     echo "agent-gate: invalid AGENT_GATE_TREE_SELFTEST='${AGENT_GATE_TREE_SELFTEST}' (expected one of: 0 capture clean boundary side terminal) (#2926)" >&2
     exit 2 ;;
 esac
+TREE_SELFTEST_FIXTURE_MARKER=".agent-gate-tree-selftest-fixture"
 if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
   if [ "$EXPLICIT_SUMMARY_FILE" != 1 ]; then
     echo "agent-gate: AGENT_GATE_TREE_SELFTEST requires an explicit AGENT_GATE_SUMMARY_FILE (refusing to touch the checkout default) (#2926)" >&2
     exit 2
+  fi
+  # #2926 review B5: ANY mode that can write into the checkout requires a DISPOSABLE
+  # fixture, proven by a marker file at the repo root. Checked here, before the sentinel
+  # and before any tree work, so a live checkout is refused with nothing written.
+  if [ -n "${AGENT_GATE_TREE_SELFTEST_MUTATE:-}" ] || [ "${AGENT_GATE_TREE_SELFTEST_COMMIT:-0}" = 1 ]; then
+    if [ ! -f "$REPO_ROOT/$TREE_SELFTEST_FIXTURE_MARKER" ]; then
+      echo "agent-gate: AGENT_GATE_TREE_SELFTEST_MUTATE/_COMMIT would mutate $REPO_ROOT, which carries no" >&2
+      echo "            $TREE_SELFTEST_FIXTURE_MARKER marker — refusing to write into a live checkout (#2926)" >&2
+      exit 2
+    fi
   fi
   # shellcheck disable=SC2086  # intentional word-split over the space-separated list
   for _tsp in ${AGENT_GATE_TREE_SELFTEST_MUTATE:-}; do
@@ -1812,6 +1823,8 @@ case "$TREE_HASH_CAP_BYTES" in
 esac
 TREE_GUARDED=0            # 1 once a start identity was captured (the guard is live)
 TREE_MUTATED=0            # 1 once a non-lockfile mid-run mutation was detected
+TREE_CAPTURE_FAILED=0     # 1 when a capture ran but could not be validated (fail closed)
+TREE_CAPTURE_FAIL_REASON="tree-capture-failed; the tree cannot be proven unchanged"
 TREE_MARKER_SEEN=0        # 1 once a SIDE-lane marker has been consumed
 TREE_START_HEAD=""; TREE_START_DIRTY=""; TREE_START_DIGEST=""
 TREE_END_HEAD=""; TREE_END_DIRTY=""; TREE_END_DIGEST=""
@@ -1828,10 +1841,34 @@ declare -a TREE_META_LINES=()
 # contract. Nothing else is excluded: an over-broad exclusion re-opens the hole, so
 # docs/**, *.md, test-data/** and openspec/** all stay INSIDE the digest.
 # (Cargo.lock is NOT excluded — it is a named non-fatal class, see _tree_change_class.)
-TREE_EXCLUDE_REL=""
-case "$SUMMARY_FILE" in
-  "$REPO_ROOT"/*) TREE_EXCLUDE_REL="${SUMMARY_FILE#"$REPO_ROOT"/}" ;;
-esac
+#
+# The carve-out compares CANONICAL forms (#2926 review B3): git always reports
+# normalized repo-root-relative paths, so a raw prefix strip of a caller-pinned path
+# that is not already canonical (`./x.txt`, `sub/../x.txt`, a symlinked path, an
+# absolute path through a symlinked root) would fail to match and the run's OWN summary
+# file — written twice by contract, and written for the FIRST time only AFTER the start
+# capture — would look like a mid-run mutation on every such run.
+#
+# _tree_canon_rel <path> -> the repo-root-relative NORMALIZED path on stdout; rc 1 when
+# the path does not resolve to a location under the repo root. The directory is resolved
+# with `cd … && pwd -P` (which normalizes `.`, `..`, duplicate slashes and symlinked
+# directory components) and the final component is appended verbatim, so a symlinked
+# FILE is compared under the name git knows it by.
+_tree_canon_rel() {
+  local p="$1" d b
+  [ -n "$p" ] || return 1
+  d=$(dirname -- "$p") || return 1
+  b=$(basename -- "$p") || return 1
+  d=$(cd "$d" 2>/dev/null && pwd -P) || return 1
+  case "$b" in ''|.|..) return 1 ;; esac
+  case "$d" in
+    "$TREE_REPO_ROOT_PHYS")   printf '%s\n' "$b" ;;
+    "$TREE_REPO_ROOT_PHYS"/*) printf '%s/%s\n' "${d#"$TREE_REPO_ROOT_PHYS"/}" "$b" ;;
+    *) return 1 ;;
+  esac
+}
+TREE_REPO_ROOT_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && pwd -P) || TREE_REPO_ROOT_PHYS="$REPO_ROOT"
+TREE_EXCLUDE_REL="$(_tree_canon_rel "$SUMMARY_FILE" || true)"
 _tree_excluded() {
   [ -n "$TREE_EXCLUDE_REL" ] || return 1
   case "$1" in
@@ -1844,18 +1881,71 @@ _tree_excluded() {
 # _tree_digest_file <file> -> a content digest of <file>. sha256 where available;
 # `git hash-object` is the last resort so the guard can NEVER go inert for want of a
 # hashing tool (git is already a hard dependency of every gate mode).
+#
+# The tool/stat probes are memoized in TREE_SHA_TOOL/TREE_STAT_FLAVOR, which are set by
+# _tree_probe_tools ONCE at script level. Probing lazily inside these helpers memoized
+# NOTHING (#2926 review): both helpers only ever run inside a command substitution
+# (`$(_tree_identity …)`, `$(_tree_digest_file …)`), whose assignments die with the
+# subshell — so the `command -v`/`stat` probes re-ran per capture and per file.
 TREE_SHA_TOOL=""
+TREE_STAT_FLAVOR=""
+_tree_probe_tools() {
+  if command -v sha256sum >/dev/null 2>&1; then TREE_SHA_TOOL=sha256sum
+  elif command -v shasum >/dev/null 2>&1; then TREE_SHA_TOOL=shasum
+  else TREE_SHA_TOOL=git; fi
+  if stat -c %Y . >/dev/null 2>&1; then TREE_STAT_FLAVOR=gnu
+  elif stat -f %m . >/dev/null 2>&1; then TREE_STAT_FLAVOR=bsd
+  else TREE_STAT_FLAVOR=none; fi
+}
+_tree_probe_tools
+
 _tree_digest_file() {
-  if [ -z "$TREE_SHA_TOOL" ]; then
-    if command -v sha256sum >/dev/null 2>&1; then TREE_SHA_TOOL=sha256sum
-    elif command -v shasum >/dev/null 2>&1; then TREE_SHA_TOOL=shasum
-    else TREE_SHA_TOOL=git; fi
-  fi
   case "$TREE_SHA_TOOL" in
     sha256sum) sha256sum < "$1" | awk '{print $1}' ;;
     shasum)    shasum -a 256 < "$1" | awk '{print $1}' ;;
     *)         git --no-optional-locks hash-object --no-filters --stdin < "$1" ;;
   esac
+}
+
+# _tree_digest_ok <digest>: a capture digest is USABLE only when it is a full-length
+# lowercase hex hash. #2926 review B1: _tree_identity used to print whatever
+# _tree_digest_file produced — including NOTHING when the hash tool exited non-zero or
+# the manifest write to $LOG_DIR failed (ENOSPC on a 40-60 min run) — and rc 0. The
+# empty field then collapsed under `IFS=$'\t' read` and the digest-only comparison
+# matched, stamping `tree-integrity: PASS` on a demonstrably mutated tree. A digest that
+# cannot be validated is now a FAIL-CLOSED condition, never a comparison input.
+# sha256sum/shasum produce 64 hex chars; the `git hash-object` last resort produces 40
+# (sha1 repo) or 64 (sha256 repo).
+_tree_digest_ok() {
+  case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
+  case "${#1}" in
+    64) return 0 ;;
+    40) [ "$TREE_SHA_TOOL" = git ] || return 1; return 0 ;;
+  esac
+  return 1
+}
+
+# _tree_split_identity <line>: split "<head>\t<dirty>\t<digest>\t<fallbacks>" into
+# TREE_F_HEAD/TREE_F_DIRTY/TREE_F_DIGEST/TREE_F_FB and VALIDATE every field. rc 1 when
+# the line is malformed or any field fails validation.
+#
+# `IFS=$'\t' read -r a b c d` is NOT used (#2926 review B1): tab is IFS *whitespace*, so
+# read collapses runs of it and an empty field silently shifts later fields left —
+# `head<TAB>dirty<TAB><TAB>0` bound the digest to the fallbacks value `0`. The explicit
+# %%/# split below preserves empty fields exactly.
+TREE_F_HEAD=""; TREE_F_DIRTY=""; TREE_F_DIGEST=""; TREE_F_FB=""
+_tree_split_identity() {
+  local line="$1" tab=$'\t' rest
+  TREE_F_HEAD=""; TREE_F_DIRTY=""; TREE_F_DIGEST=""; TREE_F_FB=""
+  case "$line" in *"$tab"*"$tab"*"$tab"*) ;; *) return 1 ;; esac
+  TREE_F_HEAD="${line%%$tab*}";   rest="${line#*$tab}"
+  TREE_F_DIRTY="${rest%%$tab*}";  rest="${rest#*$tab}"
+  TREE_F_DIGEST="${rest%%$tab*}"; TREE_F_FB="${rest#*$tab}"
+  [ -n "$TREE_F_HEAD" ] || return 1
+  case "$TREE_F_DIRTY" in yes|no) ;; *) return 1 ;; esac
+  case "$TREE_F_FB" in ''|*[!0-9]*) return 1 ;; esac
+  _tree_digest_ok "$TREE_F_DIGEST" || return 1
+  return 0
 }
 
 _tree_short() { printf '%.12s' "${1:-?}"; }
@@ -1872,8 +1962,12 @@ _tree_in_list() {
 #
 # Write the NUL-framed per-path manifest to <manifest-out> (plus an escaped,
 # newline-framed view at <manifest-out>.report used ONLY to name changed paths on
-# failure) and print "<head>\t<dirty>\t<digest>\t<cap-fallbacks>". rc 1 iff git cannot
-# be consulted at all.
+# failure) and print "<head>\t<dirty>\t<digest>\t<cap-fallbacks>".
+#   rc 0 — a VALIDATED identity was printed
+#   rc 1 — git cannot be consulted at all (no worktree): the guard SKIPs
+#   rc 2 — the capture ran but could not be validated (hash tool failed, manifest write
+#          failed/truncated, first record not `H<TAB><head>`): FAIL CLOSED. #2926 review
+#          B1 — a capture that cannot be trusted must never reach the comparison.
 #
 # Manifest records (NUL-TERMINATED, path LAST so a path containing a tab or a newline
 # cannot forge a field or a record):
@@ -1981,7 +2075,12 @@ _tree_identity() {
     fi
   fi
 
-  local i k=0 esc
+  # The `.report` view is TAB-DELIMITED and parsed with `awk -F'\t'` ($4 = path), so a
+  # TAB inside a path (or inside a LINK: target) must be escaped exactly like a newline
+  # (#2926 review B6): an unescaped tab truncated $4, which both named the wrong path in
+  # the failure line AND fed the Cargo.lock classifier a fragment, so the non-fatal
+  # lockfile carve-out could misfire on a path that merely LOOKS like a lockfile.
+  local i k=0 esc escv tab=$'\t'
   {
     printf 'H\t%s\0' "$head"
     printf 'H\t%s\n' "$head" >&3
@@ -1989,23 +2088,28 @@ _tree_identity() {
       value="${vals[$i]}"
       if [ "$value" = "@H@" ]; then value="${hashes[$k]}"; k=$(( k + 1 )); fi
       printf '%s\t%s\t%s\t%s\0' "${tags[$i]}" "$value" "${modes[$i]}" "${paths[$i]}"
-      esc=${paths[$i]//$nl/\\n}
-      printf '%s\t%s\t%s\t%s\n' "${tags[$i]}" "$value" "${modes[$i]}" "$esc" >&3
+      esc=${paths[$i]//$nl/\\n};  esc=${esc//$tab/\\t}
+      escv=${value//$nl/\\n};     escv=${escv//$tab/\\t}
+      printf '%s\t%s\t%s\t%s\n' "${tags[$i]}" "$escv" "${modes[$i]}" "$esc" >&3
     done
   } > "$out" 3> "$out.report"
 
   [ "${#paths[@]}" -gt 0 ] && dirty=yes
-  printf '%s\t%s\t%s\t%s\n' "$head" "$dirty" "$(_tree_digest_file "$out")" "$fallbacks"
+
+  # Validate our OWN output before anyone can compare it (#2926 review B1).
+  local first="" digest
+  IFS= read -r -d '' first < "$out" 2>/dev/null || first=""
+  [ "$first" = "H${tab}${head}" ] || return 2
+  IFS= read -r first < "$out.report" 2>/dev/null || first=""
+  [ "$first" = "H${tab}${head}" ] || return 2
+  digest=$(_tree_digest_file "$out") || return 2
+  _tree_digest_ok "$digest" || return 2
+  printf '%s\t%s\t%s\t%s\n' "$head" "$dirty" "$digest" "$fallbacks"
 }
 
 # _tree_mtime <path> -> mtime (ns where the platform's stat offers it, else seconds).
-TREE_STAT_FLAVOR=""
+# TREE_STAT_FLAVOR is probed once by _tree_probe_tools (see above).
 _tree_mtime() {
-  if [ -z "$TREE_STAT_FLAVOR" ]; then
-    if stat -c %Y . >/dev/null 2>&1; then TREE_STAT_FLAVOR=gnu
-    elif stat -f %m . >/dev/null 2>&1; then TREE_STAT_FLAVOR=bsd
-    else TREE_STAT_FLAVOR=none; fi
-  fi
   case "$TREE_STAT_FLAVOR" in
     gnu) stat -c '%.9Y' -- "$1" 2>/dev/null || echo unknown ;;
     bsd) stat -f '%m' -- "$1" 2>/dev/null || echo unknown ;;
@@ -2021,24 +2125,58 @@ _tree_cap_stamp() {
   fi
 }
 
-# _tree_capture_start: the ONE start capture. Runs after summary-path resolution and
-# BEFORE the startup sentinel, run_lite, run_delta and acquire_gate_slot, so every
-# guarded mode is covered by a single capture.
+# _tree_capture_start: the start capture. Runs after summary-path resolution and BEFORE
+# the startup sentinel, run_lite, run_delta and acquire_gate_slot, so every guarded mode
+# is covered; the full gate RE-captures once its slot is granted (_tree_recapture_after_slot).
 _tree_capture_start() {
-  local id
-  if ! id=$(_tree_identity "$LOG_DIR/tree-identity.start"); then
+  local id rc
+  id=$(_tree_identity "$LOG_DIR/tree-identity.start"); rc=$?
+  if [ "$rc" -eq 1 ]; then
     TREE_GUARDED=0
+    TREE_CAPTURE_FAILED=0
     TREE_START_LINE="tree-start: (capture unavailable — no git worktree)"
     TREE_END_LINE="tree-end: (capture unavailable — no git worktree)"
     TREE_INTEGRITY_LINE="tree-integrity: SKIP (capture unavailable — no git worktree)"
     return 0
   fi
-  IFS=$'\t' read -r TREE_START_HEAD TREE_START_DIRTY TREE_START_DIGEST TREE_CAP_FALLBACKS <<<"$id"
+  # rc 2 (or a field that fails validation): the capture RAN but cannot be trusted. The
+  # tree can never be proven unchanged from here, so the run is doomed to FAIL — it is
+  # NOT downgraded to SKIP, which is reserved for "there is no git worktree" (#2926 B1).
+  if [ "$rc" -ne 0 ] || ! _tree_split_identity "$id"; then
+    TREE_GUARDED=1
+    TREE_CAPTURE_FAILED=1
+    TREE_START_HEAD=""; TREE_START_DIRTY=""; TREE_START_DIGEST=""
+    TREE_START_LINE="tree-start: (capture failed — identity could not be validated)"
+    TREE_END_LINE="tree-end: (not captured)"
+    TREE_INTEGRITY_LINE="tree-integrity: FAIL ($TREE_CAPTURE_FAIL_REASON)"
+    echo "⚠️ agent-gate: tree-integrity start capture could not be validated — failing closed (#2926)" >&2
+    return 0
+  fi
+  TREE_CAPTURE_FAILED=0
+  TREE_START_HEAD="$TREE_F_HEAD"; TREE_START_DIRTY="$TREE_F_DIRTY"
+  TREE_START_DIGEST="$TREE_F_DIGEST"; TREE_CAP_FALLBACKS="$TREE_F_FB"
   TREE_GUARDED=1
   TREE_START_LINE="tree-start: $(_tree_short "$TREE_START_HEAD") dirty: $TREE_START_DIRTY digest: $(_tree_short "$TREE_START_DIGEST")"
   TREE_END_LINE="tree-end: (not captured)"
   TREE_INTEGRITY_LINE="tree-integrity: PENDING"
   _tree_cap_stamp
+}
+
+# _tree_recapture_after_slot: the FULL gate's authoritative start capture (#2926 review
+# B4). With CQLITE_GATE_MAX_CONCURRENCY pinned to 1, `acquire_gate_slot` can block for
+# the length of another 20-25 minute run; during that queue the gate has executed
+# NOTHING and certifies NOTHING, so a tree edit while queued must not invalidate a run
+# that has not started. The certification window begins when WORK begins: re-capture
+# here, immediately after the slot is granted. --lite/--delta exit before that call site
+# (and --only self-exempts inside acquire_gate_slot but still passes through it), so
+# those modes simply certify from the capture that precedes their own first component.
+# The startup sentinel deliberately keeps the EARLY tree-start it was written with — it
+# records the tree the process began on; the emitted block records the guarded window.
+_tree_recapture_after_slot() {
+  [ "$TREE_GUARDED" -eq 1 ] || return 0
+  [ "$TREE_CAPTURE_FAILED" -eq 1 ] && return 0
+  _tree_capture_start
+  return 0
 }
 
 # Synthetic-identity modes: they never certify a real tree and several need to emit a
@@ -2455,22 +2593,27 @@ _tree_changed_paths() {
 # cargo invocations, after which this carve-out SHOULD BE DELETED.
 _tree_change_class() {
   local a="$1" b="$2" head_a="$3" head_b="$4"
-  local list n cls=other rendered p lock="" nonlock=0 before after
+  local list n cls=other rendered p locks=0 nonlock=0 before after detail=""
   list=$(_tree_changed_paths "$a" "$b")
   n=0
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     n=$(( n + 1 ))
     case "$p" in
-      Cargo.lock|*/Cargo.lock) [ -n "$lock" ] || lock="$p" ;;
+      Cargo.lock|*/Cargo.lock) locks=$(( locks + 1 )) ;;
       *) nonlock=1 ;;
     esac
   done <<<"$list"
-  if [ "$head_a" = "$head_b" ] && [ "$n" -gt 0 ] && [ "$nonlock" -eq 0 ] && [ -n "$lock" ]; then
-    before=$(awk -F'\t' -v p="$lock" '$4 == p { print $2; exit }' "$a" 2>/dev/null)
-    after=$(awk -F'\t' -v p="$lock" '$4 == p { print $2; exit }' "$b" 2>/dev/null)
-    printf 'lockfile\t%s %s→%s\n' "$lock" \
-      "$(_tree_short "${before:-unmodified}")" "$(_tree_short "${after:-unmodified}")"
+  if [ "$head_a" = "$head_b" ] && [ "$n" -gt 0 ] && [ "$nonlock" -eq 0 ] && [ "$locks" -gt 0 ]; then
+    # Name EVERY settled lockfile, not just the first (#2926 review): a workspace can
+    # re-resolve several, and a stamp that hides the rest under-reports what moved.
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      before=$(awk -F'\t' -v p="$p" '$4 == p { print $2; exit }' "$a" 2>/dev/null)
+      after=$(awk -F'\t' -v p="$p" '$4 == p { print $2; exit }' "$b" 2>/dev/null)
+      detail="${detail:+$detail }$p $(_tree_short "${before:-unmodified}")→$(_tree_short "${after:-unmodified}")"
+    done <<<"$list"
+    printf 'lockfile\t%s\n' "$detail"
     return 0
   fi
   # Render at most 5 paths, then an explicit count of the remainder.
@@ -2514,20 +2657,48 @@ _tree_fail_reason() {
 _assert_tree_integrity() {
   [ "$TREE_GUARDED" -eq 1 ] || return 0
   local comp="${1:-<component>}"
+  # A start capture that could not be validated already doomed the run; say so at the
+  # first boundary rather than spending the rest of the gate (#2926 review B1).
+  if [ "$TREE_CAPTURE_FAILED" -eq 1 ]; then
+    _tree_boundary_fail "$comp" "$TREE_CAPTURE_FAIL_REASON"
+    return $?
+  fi
   local probe="$LOG_DIR/tree-identity.probe.${BASHPID:-$$}"
-  local id head dirty digest fb cls rendered reason
-  id=$(_tree_identity "$probe") || return 0
-  IFS=$'\t' read -r head dirty digest fb <<<"$id"
-  if [ "$digest" = "$TREE_START_DIGEST" ]; then
+  local id rc head dirty digest cls rendered
+  id=$(_tree_identity "$probe"); rc=$?
+  if [ "$rc" -ne 0 ] || ! _tree_split_identity "$id"; then
+    rm -f "$probe" "$probe.report" 2>/dev/null || true
+    # rc 1 = git momentarily unavailable: the authoritative terminal capture decides.
+    # rc 2 / an unvalidatable identity = fail closed here.
+    [ "$rc" -eq 1 ] && return 0
+    _tree_boundary_fail "$comp" "$TREE_CAPTURE_FAIL_REASON"
+    return $?
+  fi
+  head="$TREE_F_HEAD"; dirty="$TREE_F_DIRTY"; digest="$TREE_F_DIGEST"
+  # Compare the WHOLE identity, never the digest alone (#2926 review B1): head, dirty
+  # flag and digest must all match for the tree to be the one this run began on.
+  if [ "$head" = "$TREE_START_HEAD" ] && [ "$dirty" = "$TREE_START_DIRTY" ] \
+     && [ "$digest" = "$TREE_START_DIGEST" ]; then
     rm -f "$probe" "$probe.report" 2>/dev/null || true
     return 0
   fi
-  IFS=$'\t' read -r cls rendered <<<"$(
-    _tree_change_class "$LOG_DIR/tree-identity.start.report" "$probe.report" "$TREE_START_HEAD" "$head")"
+  # Split explicitly (not with `IFS=$'\t' read`, which collapses empty tab-delimited
+  # fields — #2926 review B1) so an empty rendering can never shift the CLASS field.
+  cls=$(_tree_change_class "$LOG_DIR/tree-identity.start.report" "$probe.report" "$TREE_START_HEAD" "$head")
+  rendered="${cls#*$'\t'}"; cls="${cls%%$'\t'*}"
   rm -f "$probe" "$probe.report" 2>/dev/null || true
   # lockfile-settled: non-fatal here; the terminal capture stamps it.
   [ "$cls" = lockfile ] && return 0
-  reason=$(_tree_fail_reason "$head" "$rendered")
+  _tree_set_end "$head" "$dirty" "$digest"
+  _tree_boundary_fail "$comp" "$(_tree_fail_reason "$head" "$rendered")"
+  return $?
+}
+
+# _tree_boundary_fail <component> <reason> — the LANE-AWARE fail-closed action shared by
+# every boundary detection (mutation, or a capture that cannot be validated). MAIN lane:
+# emit the named block and exit 1. SIDE lane: record a marker, return 1, never emit.
+_tree_boundary_fail() {
+  local comp="$1" reason="$2"
   if [ "${BASHPID:-$$}" != "$$" ]; then
     # APPEND (never truncate): two concurrent SIDE-lane detections must not corrupt
     # each other, and the reader consumes only the FIRST complete line.
@@ -2547,7 +2718,6 @@ _assert_tree_integrity() {
   fi
   TREE_MUTATED=1
   OVERALL=FAIL
-  _tree_set_end "$head" "$dirty" "$digest"
   TREE_INTEGRITY_LINE="tree-integrity: FAIL ($reason; detected-after-component: $comp)"
   _emit_terminal_summary FAIL \
     "$TREE_START_LINE" "$TREE_END_LINE" "$TREE_INTEGRITY_LINE" \
@@ -2580,8 +2750,23 @@ _apply_tree_integrity_marker() {
 _tree_finalize() {
   _apply_tree_integrity_marker
   [ "$TREE_GUARDED" -eq 1 ] || return 0
-  local id head dirty digest fb cls rendered
-  if ! id=$(_tree_identity "$LOG_DIR/tree-identity.end"); then
+  # The terminal manifest path is PER-LANE (#2926 review B7): _tree_finalize is reachable
+  # from a backgrounded SIDE-lane subshell (via _tree_meta_lines/_tree_meta_array on the
+  # integrity-fail publish path), and a fixed filename let two lanes write one file.
+  local endbase="$LOG_DIR/tree-identity.end.${BASHPID:-$$}"
+  local id rc head dirty digest cls rendered
+  if [ "$TREE_CAPTURE_FAILED" -eq 1 ]; then
+    TREE_MUTATED=1
+    OVERALL=FAIL
+    TREE_END_LINE="tree-end: (start capture failed)"
+    TREE_END_DIGEST="unavailable"
+    TREE_INTEGRITY_LINE="tree-integrity: FAIL ($TREE_CAPTURE_FAIL_REASON; detected-after-component: <start>)"
+    return 1
+  fi
+  id=$(_tree_identity "$endbase"); rc=$?
+  # rc 1 (no git) AND rc 2 (capture ran but could not be validated) BOTH land here: the
+  # tree cannot be proven unchanged, so the run fails closed either way.
+  if [ "$rc" -ne 0 ] || ! _tree_split_identity "$id"; then
     TREE_MUTATED=1
     OVERALL=FAIL
     TREE_END_LINE="tree-end: (terminal capture failed)"
@@ -2589,20 +2774,22 @@ _tree_finalize() {
     TREE_INTEGRITY_LINE="tree-integrity: FAIL (terminal capture failed — the tree cannot be proven unchanged)"
     return 1
   fi
-  IFS=$'\t' read -r head dirty digest fb <<<"$id"
+  head="$TREE_F_HEAD"; dirty="$TREE_F_DIRTY"; digest="$TREE_F_DIGEST"
   _tree_set_end "$head" "$dirty" "$digest"
-  TREE_CAP_FALLBACKS=$(( TREE_CAP_FALLBACKS + fb ))
+  TREE_CAP_FALLBACKS=$(( TREE_CAP_FALLBACKS + TREE_F_FB ))
   _tree_cap_stamp
   # A SIDE-lane marker already named the component; keep its more specific line even if
   # the tree was reverted before the terminal capture.
   [ "$TREE_MARKER_SEEN" -eq 1 ] && return 1
-  if [ "$digest" = "$TREE_START_DIGEST" ]; then
+  # head + dirty + digest, never the digest alone (#2926 review B1).
+  if [ "$head" = "$TREE_START_HEAD" ] && [ "$dirty" = "$TREE_START_DIRTY" ] \
+     && [ "$digest" = "$TREE_START_DIGEST" ]; then
     TREE_INTEGRITY_LINE="tree-integrity: PASS"
     return 0
   fi
-  IFS=$'\t' read -r cls rendered <<<"$(
-    _tree_change_class "$LOG_DIR/tree-identity.start.report" "$LOG_DIR/tree-identity.end.report" \
-      "$TREE_START_HEAD" "$head")"
+  cls=$(_tree_change_class "$LOG_DIR/tree-identity.start.report" "$endbase.report" \
+          "$TREE_START_HEAD" "$head")
+  rendered="${cls#*$'\t'}"; cls="${cls%%$'\t'*}"
   if [ "$cls" = lockfile ]; then
     TREE_INTEGRITY_LINE="tree-integrity: PASS (lockfile-settled: $rendered)"
     return 0
@@ -2629,7 +2816,18 @@ _tree_meta_lines() {
 
 # _tree_meta_array: populate the global TREE_META_LINES array (bash 3.2 has no
 # namerefs), for the emit sites that build a SUMMARY_META array.
+#
+# The lazy finalize runs HERE, in the CURRENT shell, before the process substitution
+# (#2926 review B2): `< <(_tree_meta_lines)` runs its body in a SUBSHELL, so a
+# _tree_finalize triggered from inside it would set OVERALL=FAIL/TREE_MUTATED=1 in that
+# subshell and lose them — only the printed text would survive. Every PASS-capable emit
+# site happens to call _tree_finalize explicitly first today, but "one refactor away
+# from a false green" is not an acceptable posture for the guard whose job is to fail
+# closed.
 _tree_meta_array() {
+  if [ "$TREE_GUARDED" -eq 1 ] && [ -z "$TREE_END_DIGEST" ]; then
+    _tree_finalize || true
+  fi
   TREE_META_LINES=()
   local l
   while IFS= read -r l; do TREE_META_LINES+=("$l"); done < <(_tree_meta_lines)
@@ -2834,8 +3032,23 @@ record_result() { # <name> <status> <seconds>
 # AGENT_GATE_TREE_SELFTEST_MUTATE is a space-separated list of repo-relative files to
 # append to; AGENT_GATE_TREE_SELFTEST_COMMIT=1 additionally commits (moving HEAD).
 if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
+  # #2926 review B5: the mutating modes WRITE INTO — and with …_COMMIT=1 COMMIT INTO —
+  # $REPO_ROOT. Requiring only an explicit summary path did not stop that from being a
+  # LIVE checkout, which is exactly the hazard that stranded shared checkouts earlier.
+  # A DISPOSABLE-CHECKOUT MARKER is now mandatory: the fixture must carry
+  # `.agent-gate-tree-selftest-fixture` at its root (mkrepo in
+  # scripts/tests/test_agent_gate_tree_integrity.sh writes it). Absent -> refuse loudly,
+  # exit 2, before a single byte is written.
+  _tree_selftest_require_fixture() {
+    [ -f "$REPO_ROOT/$TREE_SELFTEST_FIXTURE_MARKER" ] && return 0
+    echo "agent-gate: AGENT_GATE_TREE_SELFTEST=$AGENT_GATE_TREE_SELFTEST would MUTATE $REPO_ROOT," >&2
+    echo "            which is not a disposable fixture: $TREE_SELFTEST_FIXTURE_MARKER is missing." >&2
+    echo "            Refusing to write/commit into a live checkout (#2926)." >&2
+    exit 2
+  }
   _tree_selftest_mutate() {
     local f
+    _tree_selftest_require_fixture
     # shellcheck disable=SC2086  # intentional word-split over the space-separated list
     for f in ${AGENT_GATE_TREE_SELFTEST_MUTATE:-}; do
       printf 'tree-selftest mutation\n' >> "$REPO_ROOT/$f"
@@ -4937,6 +5150,10 @@ fi
 # free, so at most N full gates run at once across worktrees + the root checkout.
 # --lite already returned above; --only PARTIAL runs self-exempt inside.
 acquire_gate_slot
+
+# #2926: the full gate's certification window begins HERE — after the (possibly very
+# long) queue for that slot, when work actually begins. See _tree_recapture_after_slot.
+_tree_recapture_after_slot
 
 # file-size runs first and needs no dataset, so it executes before the dataset
 # preflight (which exits early when data is missing).

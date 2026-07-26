@@ -59,6 +59,11 @@ mkrepo() { # mkrepo <name> -> echoes the repo path
   local root="$tmp/$1"
   mkdir -p "$root/scripts"
   cp "$GATE" "$root/scripts/agent-gate.sh"
+  # The DISPOSABLE-CHECKOUT MARKER (#2926 review B5): the gate's mutating self-test hooks
+  # refuse to write into any checkout that does not carry it, so they can never append to
+  # — or commit into — a live repo. Committed, so it is inside the digest yet clean.
+  printf 'disposable fixture for scripts/tests/test_agent_gate_tree_integrity.sh\n' \
+                              > "$root/.agent-gate-tree-selftest-fixture"
   printf 'hello\n'            > "$root/README.md"
   printf 'lock v1\n'          > "$root/Cargo.lock"
   printf 'docs body\n'        > "$root/NOTES.md"
@@ -99,16 +104,19 @@ run_gate() { # run_gate <repo> <summary-file> <out-file> [-- gate args…]  (env
 
 # capture_identity <repo> <field> [env KEY=VAL …] — drive the REAL start capture through
 # the `capture` hook and echo one field of the identity it produced.
+# `${1+"$@"}` (never a bare "$@" or "${@:2}"): on bash 3.2 — the floor agent-gate.sh
+# declares, and macOS's /bin/bash — expanding an EMPTY "$@"/"${@:2}" under `set -u` is an
+# unbound-variable error, and the common call passes no extra env (#2926 review B8).
 capture_identity() {
   local repo="$1" field="$2"; shift 2
   local raw
-  raw=$( cd "$repo" && env "$@" \
+  raw=$( cd "$repo" && env ${1+"$@"} \
            AGENT_GATE_SUMMARY_FILE="$tmp/capture-sentinel.txt" \
            AGENT_GATE_TREE_SELFTEST=capture \
            bash "$repo/scripts/agent-gate.sh" 2>/dev/null )
   printf '%s\n' "$raw" | sed -n "s/.*[ =]${field}=\([^ ]*\).*/\1/p" | head -1
 }
-digest_of() { capture_identity "$1" digest "${@:2}"; }
+digest_of() { local r="$1"; shift; capture_identity "$r" digest ${1+"$@"}; }
 
 porcelain_of() { ( cd "$1" && git --no-optional-locks status --porcelain ); }
 odb_count_of()  { find "$1/.git/objects" -type f 2>/dev/null | wc -l | tr -d ' '; }
@@ -402,6 +410,86 @@ else
 fi
 ( cd "$r3" && git checkout -q -- Cargo.lock README.md )
 
+# --- B1: A FAILING HASH TOOL MUST NOT CERTIFY (the headline regression) -----------
+# _tree_identity used to print whatever the hash tool produced and return 0. With an
+# empty digest, `IFS=$'\t' read` (tab is IFS-WHITESPACE) collapsed the empty field and
+# bound `digest` to the fallbacks value `0`; the digest-ONLY comparison then matched and
+# the run stamped `tree-integrity: PASS` on a mutated tree — with a self-contradicting
+# `tree-start: … dirty: no` / `tree-end: … dirty: yes` in the very same block.
+BADHASH="$tmp/badhash"; mkdir -p "$BADHASH"
+printf '#!/bin/sh\nexit 3\n' > "$BADHASH/sha256sum"; chmod +x "$BADHASH/sha256sum"
+printf '#!/bin/sh\nexit 3\n' > "$BADHASH/shasum";    chmod +x "$BADHASH/shasum"
+# The tree is ALREADY dirty before the run, so the mid-run append moves NEITHER the head
+# nor the dirty flag: the digest is the only signal, and an unvalidated (empty) digest is
+# the whole failure. This is the strict form of the case.
+printf 'pre-existing modification\n' >> "$r3/README.md"
+sum="$tmp/hook-badhash.txt"
+( cd "$r3" && PATH="$BADHASH:$PATH" env AGENT_GATE_SUMMARY_FILE="$sum" \
+    AGENT_GATE_TREE_SELFTEST=terminal AGENT_GATE_TREE_SELFTEST_MUTATE=README.md \
+    bash "$r3/scripts/agent-gate.sh" >"$tmp/hook-badhash.out" 2>&1 ); rc=$?
+miss=()
+grep -q '^RESULT: FAIL' "$sum" 2>/dev/null || miss+=("RESULT:-FAIL")
+grep -q '^RESULT: PASS' "$sum" 2>/dev/null && miss+=("UNEXPECTED-RESULT:-PASS")
+grep -q '^tree-integrity: FAIL (' "$sum" 2>/dev/null || miss+=("named-tree-integrity-FAIL")
+grep -q '^tree-integrity: PASS' "$sum" 2>/dev/null && miss+=("UNEXPECTED-tree-integrity:-PASS")
+[ "$rc" -ne 0 ] || miss+=("non-zero-exit(got $rc)")
+if [ "${#miss[@]}" -eq 0 ]; then
+  ok "B1: a FAILING hash tool + a mutated tree does NOT certify (capture failure is fail-closed)"
+else
+  bad "B1: a run whose hash tool failed still certified: ${miss[*]}"
+  grep -E '^tree-|^RESULT:' "$sum" 2>/dev/null
+fi
+# …and the same with NO mutation: an unvalidatable capture can never be a PASS either,
+# because an unproven tree is exactly what this guard exists to refuse.
+sum="$tmp/hook-badhash-clean.txt"
+( cd "$r3" && PATH="$BADHASH:$PATH" env AGENT_GATE_SUMMARY_FILE="$sum" \
+    AGENT_GATE_TREE_SELFTEST=clean \
+    bash "$r3/scripts/agent-gate.sh" >"$tmp/hook-badhash-clean.out" 2>&1 ); rc=$?
+if [ "$rc" -ne 0 ] && grep -q '^RESULT: FAIL' "$sum" && ! grep -q '^tree-integrity: PASS' "$sum"; then
+  ok "B1: an UNMUTATED run whose hash tool fails also refuses to certify (no unproven PASS)"
+else
+  bad "B1: an unvalidatable capture certified on an unmutated tree (rc=$rc)"
+  grep -E '^tree-|^RESULT:' "$sum" 2>/dev/null
+fi
+# No emitted block may claim PASS while its own start/end lines disagree.
+for f in "$tmp/hook-badhash.txt" "$tmp/hook-badhash-clean.txt" "$tmp/hook-clean.txt"; do
+  s_d=$(sed -n 's/^tree-start: .*dirty: \([^ ]*\).*/\1/p' "$f" | head -1)
+  e_d=$(sed -n 's/^tree-end: .*dirty: \([^ ]*\).*/\1/p' "$f" | head -1)
+  if grep -q '^tree-integrity: PASS' "$f" 2>/dev/null && [ -n "$s_d" ] && [ "$s_d" != "$e_d" ]; then
+    bad "B1: $(basename "$f") stamps PASS while tree-start/tree-end disagree (dirty $s_d vs $e_d)"
+  else
+    ok "B1: $(basename "$f") never stamps PASS over a self-contradicting start/end pair"
+  fi
+done
+( cd "$r3" && git checkout -q -- README.md )
+
+# --- B5: the mutating hook REFUSES a checkout that is not a disposable fixture ----
+r5=$(mkrepo guard-repo)
+rm -f "$r5/.agent-gate-tree-selftest-fixture"
+before_bytes=$(wc -c < "$r5/README.md" | tr -d ' ')
+head5_before=$( cd "$r5" && git rev-parse HEAD )
+( cd "$r5" && env AGENT_GATE_SUMMARY_FILE="$tmp/hook-guard.txt" \
+    AGENT_GATE_TREE_SELFTEST=terminal AGENT_GATE_TREE_SELFTEST_MUTATE=README.md \
+    AGENT_GATE_TREE_SELFTEST_COMMIT=1 \
+    bash "$r5/scripts/agent-gate.sh" >"$tmp/hook-guard.out" 2>&1 ); rc=$?
+after_bytes=$(wc -c < "$r5/README.md" | tr -d ' ')
+head5_after=$( cd "$r5" && git rev-parse HEAD )
+if [ "$rc" -eq 2 ] && [ "$before_bytes" = "$after_bytes" ] && [ "$head5_before" = "$head5_after" ] \
+   && grep -q 'refusing to write into a live checkout' "$tmp/hook-guard.out"; then
+  ok "B5: the mutating self-test hook refuses (exit 2) a checkout without the disposable-fixture marker — nothing written, no commit"
+else
+  bad "B5: the hook wrote into / committed to a non-fixture checkout (rc=$rc bytes $before_bytes->$after_bytes head $head5_before->$head5_after)"
+fi
+# …and the control: WITH the marker the very same invocation runs (and fails closed on
+# the mutation), so the guard is a fixture check, not a disabled hook.
+printf 'disposable\n' > "$r5/.agent-gate-tree-selftest-fixture"
+( cd "$r5" && git add -A && git "${GIT_ID[@]}" commit -qm marker ) >/dev/null 2>&1
+sum="$tmp/hook-guard-ok.txt"
+( cd "$r5" && env AGENT_GATE_SUMMARY_FILE="$sum" \
+    AGENT_GATE_TREE_SELFTEST=terminal AGENT_GATE_TREE_SELFTEST_MUTATE=README.md \
+    bash "$r5/scripts/agent-gate.sh" >"$tmp/hook-guard-ok.out" 2>&1 ); rc=$?
+assert_named_fail "B5 control (marker present)" "$sum" "$rc"
+
 # --- NO BYPASS ------------------------------------------------------------------
 sum="$tmp/hook-nobypass.txt"
 ( cd "$r3" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=terminal \
@@ -483,6 +571,94 @@ else
   cat "$r4/in-repo-summary.txt" 2>/dev/null
 fi
 rm -f "$r4/in-repo-summary.txt"
+
+# --- B3: NON-CANONICAL in-repo summary paths are excluded too ---------------------
+# git always reports normalized repo-root-relative paths, so a raw prefix strip could
+# not match `./x`, `sub/../x` or an absolute path carrying `/./`. Every one of these is
+# a path the gate WRITES (sentinel + terminal emit) and writes for the first time AFTER
+# the start capture, so a missed carve-out is a GUARANTEED false FAIL, not a rare one.
+mkdir -p "$r4/sub"
+for spec in "./in-repo-summary.txt" "sub/../in-repo-summary.txt" "ABS/./in-repo-summary.txt" "ABS/sub/../in-repo-summary.txt"; do
+  case "$spec" in ABS/*) pinned="$r4/${spec#ABS/}" ;; *) pinned="$spec" ;; esac
+  out="$tmp/only-relsum-nc.out"
+  ( cd "$r4" && PATH="$STUBBIN:$PATH" AGENT_GATE_SUMMARY_FILE="$pinned" \
+      bash "$r4/scripts/agent-gate.sh" --only fmt >"$out" 2>&1 ); rc=$?
+  if grep -q '^tree-integrity: PASS$' "$r4/in-repo-summary.txt" 2>/dev/null && [ "$rc" -eq 3 ]; then
+    ok "B3: a non-canonical in-repo summary path ('$spec') is canonicalized and excluded"
+  else
+    bad "B3: '$spec' tripped the guard (rc=$rc)"
+    grep -E '^tree-|^RESULT:' "$r4/in-repo-summary.txt" 2>/dev/null
+  fi
+  rm -f "$r4/in-repo-summary.txt"
+done
+rmdir "$r4/sub" 2>/dev/null || true
+
+# --- B6: a TAB in a changed path must not corrupt the lockfile classification ------
+# The `.report` view is parsed with `awk -F'\t'` ($4 = path). With tabs unescaped, an
+# untracked file literally named "Cargo.lock<TAB>extra" presents $4 == "Cargo.lock" —
+# the NON-FATAL lockfile carve-out fires and the run CERTIFIES a real mutation.
+tabpath="$r4/$(printf 'Cargo.lock\textra')"
+sum="$tmp/only-tab.txt"; out="$tmp/only-tab.out"
+FAKE_CARGO_MUTATE="$tabpath" run_gate "$r4" "$sum" "$out" --only fmt; rc=$?
+assert_named_fail "B6 (a tabbed path that mimics Cargo.lock in field 4)" "$sum" "$rc"
+if grep -q 'lockfile-settled' "$sum" 2>/dev/null; then
+  bad "B6: a tabbed path was misclassified as a settled lockfile — the carve-out misfired"
+else
+  ok "B6: the tabbed path is NOT misclassified as a lockfile (tabs are escaped in the report)"
+fi
+rm -f "$tabpath"
+
+# --- B4: an edit while QUEUED for a gate slot is outside the certification window --
+# With CQLITE_GATE_MAX_CONCURRENCY=1 a full gate can sit in `waiting for gate slot` for
+# a whole other run; it has executed nothing and certifies nothing, so the window must
+# begin when the slot is granted. Sequenced DETERMINISTICALLY (no sleep): a stub python3
+# performs the edit and only THEN execs the real slot daemon, which is what writes the
+# ready file the gate blocks on.
+REAL_PY=$(command -v python3 2>/dev/null || true)
+if [ -n "$REAL_PY" ]; then
+  r6=$(mkrepo queue-repo)
+  mkdir -p "$r6/scripts/lib"
+  cp "$SCRIPT_DIR/../lib/gate_slot_daemon.py" "$r6/scripts/lib/gate_slot_daemon.py" 2>/dev/null || true
+  ( cd "$r6" && git add -A && git "${GIT_ID[@]}" commit -qm daemon ) >/dev/null 2>&1
+  QSTUB="$tmp/qstub"; mkdir -p "$QSTUB"
+  cp "$STUBBIN/cargo" "$QSTUB/cargo"
+  cat > "$QSTUB/python3" <<QPY
+#!/usr/bin/env bash
+case "\$*" in
+  *gate_slot_daemon.py*)
+    [ -n "\${FAKE_QUEUE_MUTATE:-}" ] && printf 'edited while queued\n' >> "\$FAKE_QUEUE_MUTATE" ;;
+esac
+exec "$REAL_PY" "\$@"
+QPY
+  chmod +x "$QSTUB/python3"
+  pre_digest=$(digest_of "$r6")
+  sum="$tmp/queue.txt"; out="$tmp/queue.out"
+  mkdir -p "$tmp/empty-datasets"
+  ( cd "$r6" && PATH="$QSTUB:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+      CQLITE_GATE_SLOTS_DIR="$tmp/slots" CQLITE_GATE_MAX_CONCURRENCY=1 \
+      CQLITE_DATASETS_ROOT="$tmp/empty-datasets" \
+      FAKE_QUEUE_MUTATE="$r6/README.md" \
+      bash "$r6/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+  q_start=$(sed -n 's/^tree-start: .*digest: //p' "$sum" | head -1)
+  q_end=$(sed -n 's/^tree-end: .*digest: //p' "$sum" | head -1)
+  post_digest=$(digest_of "$r6")
+  if grep -q '^tree-integrity: PASS$' "$sum" 2>/dev/null \
+     && [ -n "$q_start" ] && [ "$q_start" = "$q_end" ]; then
+    ok "B4: an edit landing WHILE QUEUED for a gate slot does not invalidate the run (window starts at slot grant)"
+  else
+    bad "B4: a pre-work edit tripped the guard (rc=$rc)"
+    grep -E '^tree-|^RESULT:' "$sum" 2>/dev/null
+  fi
+  if [ -n "$pre_digest" ] && [ "$pre_digest" != "$post_digest" ] \
+     && [ "$q_start" = "${post_digest:0:12}" ]; then
+    ok "B4: the block's tree-start is the POST-queue re-capture, not the pre-queue one (the edit really happened)"
+  else
+    bad "B4: the start identity was not re-captured after the slot (pre=$pre_digest post=$post_digest start=$q_start)"
+  fi
+  ( cd "$r6" && git checkout -q -- README.md )
+else
+  ok "B4: SKIP — python3 unavailable, the slot daemon (and therefore the queue) cannot run here"
+fi
 
 # --- G: --lite ------------------------------------------------------------------
 sum="$tmp/lite-mut.txt"; out="$tmp/lite-mut.out"
@@ -628,15 +804,45 @@ if awk '/^record_result\(\) \{/,/^\}/' "$GATE" | grep -q '_assert_tree_integrity
 else
   bad "WIRING: record_result() does NOT call the tree guard — the mechanism is inert on a real gate"
 fi
-cap_ln=$(grep -n '^  _tree_capture_start$' "$GATE" | head -1 | cut -d: -f1)
+cap_ln=$(grep -n '^  _tree_capture_start$' "$GATE" | tail -1 | cut -d: -f1)
 lite_ln=$(grep -n '^  run_lite$' "$GATE" | head -1 | cut -d: -f1)
 delta_ln=$(grep -n '^  run_delta "\$DELTA_ANCHOR"$' "$GATE" | head -1 | cut -d: -f1)
 slot_ln=$(grep -n '^acquire_gate_slot$' "$GATE" | tail -1 | cut -d: -f1)
+recap_ln=$(grep -n '^_tree_recapture_after_slot$' "$GATE" | tail -1 | cut -d: -f1)
 if [ -n "$cap_ln" ] && [ -n "$lite_ln" ] && [ -n "$delta_ln" ] && [ -n "$slot_ln" ] \
    && [ "$cap_ln" -lt "$lite_ln" ] && [ "$cap_ln" -lt "$delta_ln" ] && [ "$cap_ln" -lt "$slot_ln" ]; then
   ok "WIRING: the start capture precedes run_lite, run_delta and acquire_gate_slot (all modes guarded)"
 else
   bad "WIRING: start capture is not before the mode dispatch (capture=$cap_ln lite=$lite_ln delta=$delta_ln slot=$slot_ln)"
+fi
+# B4: the FULL gate's window opens where work opens — strictly AFTER the slot grant.
+if [ -n "$recap_ln" ] && [ -n "$slot_ln" ] && [ "$recap_ln" -gt "$slot_ln" ]; then
+  ok "WIRING: _tree_recapture_after_slot runs AFTER acquire_gate_slot (the queue is outside the window)"
+else
+  bad "WIRING: the post-slot re-capture is missing or misplaced (recap=$recap_ln slot=$slot_ln)"
+fi
+# B2: the lazy finalize must run in the CURRENT shell, before the process substitution,
+# or its OVERALL=FAIL/TREE_MUTATED=1 die in the subshell and only the text survives.
+mabody=$(awk '/^_tree_meta_array\(\) \{/,/^\}/' "$GATE")
+fin_at=$(printf '%s\n' "$mabody" | grep -n '_tree_finalize' | head -1 | cut -d: -f1)
+sub_at=$(printf '%s\n' "$mabody" | grep -n '< <(_tree_meta_lines)' | head -1 | cut -d: -f1)
+if [ -n "$fin_at" ] && [ -n "$sub_at" ] && [ "$fin_at" -lt "$sub_at" ]; then
+  ok "WIRING: _tree_meta_array finalizes in the current shell BEFORE the process substitution"
+else
+  bad "WIRING: _tree_meta_array's finalize would run inside the < <(…) subshell (fail-closed assignment discarded)"
+fi
+# B7: every capture artifact a SIDE lane can write must be per-lane, terminal included.
+if awk '/^_tree_finalize\(\) \{/,/^\}/' "$GATE" | grep -q 'tree-identity\.end\.\${BASHPID' \
+   && grep -q 'tree-identity\.probe\.\${BASHPID' "$GATE"; then
+  ok "WIRING: both the boundary probe AND the terminal capture use per-lane paths (no SIDE-lane race)"
+else
+  bad "WIRING: the terminal capture path is not per-lane — concurrent SIDE lanes would race it"
+fi
+# B1: the identity is never split with `IFS=$'\t' read` (which collapses empty fields).
+if awk '/^_tree_capture_start\(\) \{/,/^\}/' "$GATE" | grep -q "IFS=\$'\\\\t' read -r TREE_START_HEAD"; then
+  bad "WIRING: the start identity is still split with IFS=\$'\\t' read (empty fields collapse)"
+else
+  ok "WIRING: the identity is split by _tree_split_identity, which preserves empty fields and validates each"
 fi
 n_final=$(grep -c '_tree_finalize' "$GATE")
 if [ "$n_final" -ge 5 ]; then
