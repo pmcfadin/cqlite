@@ -56,7 +56,15 @@ mod compressed_scan_window;
 // `#[cfg(test)] pub(crate)`; lives HERE rather than beside
 // `reader::read_at_point_tests` so it does not grow the already-over-threshold
 // `reader/mod.rs` (campsite rule, epic #1116).
-#[cfg(test)]
+//
+// Feature-gated on BOTH `write-support` (the `SSTableWriter`/`WriteEngine` mutations
+// that build the fixture) and `lz4` (the fixture is repacked through
+// `create_compressor(CompressionAlgorithm::Lz4)`, which errors without it) — the
+// same pair the `issue_2877_scan_chunk_coalescing` integration target declares in
+// `required-features`. Without the gate the `minimal-build` gate component
+// (`cargo test -p cqlite-core --no-default-features --features all-compression
+// --lib --no-run`) fails to compile this module's imports.
+#[cfg(all(test, feature = "write-support", feature = "lz4"))]
 mod scan_plane_coalescing_tests;
 
 use compressed_scan_window::CompressedScanWindow;
