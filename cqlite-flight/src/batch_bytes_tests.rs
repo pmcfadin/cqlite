@@ -29,6 +29,144 @@ use crate::testutil::build_sstables;
 use crate::wide_row_fixture as fx;
 
 // ---------------------------------------------------------------------------
+// The published capacity conversion on TINY batches (issue #2821 review)
+// ---------------------------------------------------------------------------
+
+/// `worst_case_batch_capacity_bytes` must bound `get_array_memory_size()` for a
+/// batch whose payload is SMALL, where the fixed per-array-node allocations —
+/// not the `2 ×` growth factor — are the whole reported size.
+///
+/// This is the case the published conversion was wrong about. Every `Utf8` /
+/// `Binary` array reports 1208 B at any length (arrow 53: the string builder's
+/// 1 KiB default values buffer + offsets + struct overhead), so a two-`text`
+/// batch of three short rows reports 2416 B against the old
+/// `2 × payload + 1024 × 2` = 2186 B bound. Under #2821's fail-closed
+/// reservation that stopped being a loose doc claim and became a terminal
+/// `do_get` error on every narrow table — which is why the bound is asserted
+/// here rather than only for the wide shapes below.
+#[test]
+fn the_capacity_bound_holds_for_tiny_batches() {
+    use cqlite_core::export::{estimate_arrow_row_bytes, rows_to_record_batch};
+    use cqlite_core::query::{ColumnInfo, QueryRow};
+    use cqlite_core::schema::CqlType;
+    use cqlite_core::types::{DataType, Value};
+    use cqlite_core::RowKey;
+    use std::collections::HashMap;
+
+    fn col(position: usize, name: &str, data_type: DataType, cql_type: CqlType) -> ColumnInfo {
+        ColumnInfo {
+            name: name.into(),
+            data_type,
+            nullable: true,
+            position,
+            table_name: None,
+            cql_type: Some(cql_type),
+        }
+    }
+    fn row(pairs: Vec<(&str, Value)>) -> QueryRow {
+        let mut values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+        for (k, v) in pairs {
+            values.insert(k.into(), v);
+        }
+        QueryRow {
+            values,
+            key: RowKey::new(Vec::new()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        }
+    }
+
+    let text = |s: &str| Value::Text(s.as_bytes().to_vec().into());
+    let shapes: Vec<(&str, Vec<ColumnInfo>, Vec<QueryRow>)> = vec![
+        (
+            // The exact shape that failed: two `text` columns, three short rows.
+            "two text columns, three short rows",
+            vec![
+                col(0, "k", DataType::Text, CqlType::Text),
+                col(1, "v", DataType::Text, CqlType::Text),
+            ],
+            vec![
+                row(vec![("k", text("k1")), ("v", text("v1"))]),
+                row(vec![("k", text("k2")), ("v", text("v2"))]),
+                row(vec![("k", text("k3")), ("v", text("v3"))]),
+            ],
+        ),
+        (
+            "one text column, one empty string",
+            vec![col(0, "t", DataType::Text, CqlType::Text)],
+            vec![row(vec![("t", text(""))])],
+        ),
+        (
+            "text + blob + int, one row",
+            vec![
+                col(0, "t", DataType::Text, CqlType::Text),
+                col(1, "b", DataType::Blob, CqlType::Blob),
+                col(2, "i", DataType::Integer, CqlType::Int),
+            ],
+            vec![row(vec![
+                ("t", text("x")),
+                ("b", Value::Blob(vec![1, 2, 3].into())),
+                ("i", Value::Integer(7)),
+            ])],
+        ),
+        (
+            "list<text>, one row",
+            vec![col(
+                0,
+                "l",
+                DataType::List,
+                CqlType::List(Box::new(CqlType::Text)),
+            )],
+            vec![row(vec![("l", Value::List(vec![text("a")]))])],
+        ),
+        (
+            "map<text,text>, one row",
+            vec![col(
+                0,
+                "m",
+                DataType::Map,
+                CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Text)),
+            )],
+            vec![row(vec![("m", Value::Map(vec![(text("k"), text("v"))]))])],
+        ),
+        (
+            "all-null row over a variable-width schema",
+            vec![
+                col(0, "t", DataType::Text, CqlType::Text),
+                col(1, "b", DataType::Blob, CqlType::Blob),
+            ],
+            vec![row(vec![])],
+        ),
+    ];
+
+    for (name, columns, rows) in shapes {
+        let batch = rows_to_record_batch(&columns, &rows).expect("convert");
+        // EXACTLY the quantity the #2821 reservation computes: the accumulated
+        // per-row payload ESTIMATE, converted through the published worst case.
+        let estimate = rows.iter().fold(0usize, |acc, r| {
+            acc.saturating_add(estimate_arrow_row_bytes(&columns, r))
+        });
+        let nodes = crate::egress_credit::count_arrow_array_nodes(batch.schema_ref());
+        let bound = worst_case_batch_capacity_bytes(estimate, nodes, 0);
+        let capacity = batch.get_array_memory_size();
+        assert!(
+            capacity <= bound,
+            "shape '{name}': get_array_memory_size {capacity} exceeds the published bound \
+             {bound} (estimate {estimate} payload bytes over {nodes} array nodes) — the \
+             per-node slack understates Arrow's fixed per-array allocations, which makes \
+             every #2821 reservation for this shape fail closed"
+        );
+        // Non-vacuity: the fixed per-node cost really does dominate here, which
+        // is the regime this test exists for.
+        assert!(
+            capacity > 2 * estimate,
+            "shape '{name}' is payload-dominated ({capacity} <= 2 x {estimate}) and proves \
+             nothing about the per-node slack"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Fixture plumbing
 // ---------------------------------------------------------------------------
 

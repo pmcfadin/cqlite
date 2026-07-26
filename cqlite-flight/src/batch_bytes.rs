@@ -74,7 +74,7 @@
 //! **Bounded next door: per-stream egress RESIDENCY.** Issue #2821 delivered
 //! `cqlite_flight::egress_credit` — a per-stream in-flight ceiling denominated in
 //! **capacity** bytes (`--max-inflight-egress-bytes`, default
-//! `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` = 8 MiB), enforced by reserving credit
+//! `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES` = 12 MiB), enforced by reserving credit
 //! BEFORE each batch is materialized and releasing it when the batch has left the
 //! stream. So `do_get` is no longer merely count-bounded: the
 //! `get_array_memory_size()` reading `streaming.rs` takes is still fed to metrics,
@@ -85,9 +85,14 @@
 //!
 //! ```text
 //! peak in-flight egress capacity <= max(ceiling, one maximum batch)
-//!                                 = max(8 MiB, 2 * 4 MiB + 1 KiB * nodes)
-//!                                 ~ 8 MiB   <<  16 MiB (B4 at concurrency 1)
+//!                                 = max(12 MiB, 2 * 4 MiB + 2 KiB * nodes)
+//!                                 = 12 MiB   <=  16 MiB (B4 at concurrency 1)
 //! ```
+//!
+//! The ceiling deliberately sits ABOVE one maximum batch: a reservation is taken
+//! at the FULL published worst case before the batch exists, so a ceiling that
+//! merely equals it would clamp every byte-cap-cut batch to the whole pool and run
+//! the stream lock-step — see `DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`.
 //!
 //! It is a `max`, not the `ceiling + one maximum batch` sum this module's
 //! pre-#2821 text projected: reserve-before-materialize removed the additive term
@@ -151,12 +156,28 @@ pub const BATCH_BYTES_CAPACITY_FACTOR: usize = 2;
 /// Fixed capacity slack allowed **per Arrow array node**, on top of
 /// [`BATCH_BYTES_CAPACITY_FACTOR`] × cap.
 ///
-/// Every Arrow array carries small fixed allocations that do not scale with the
-/// payload (a 64-byte-aligned minimum allocation per buffer, the validity
-/// buffer, an empty-array's offsets buffer). On a batch that is mostly one wide
-/// column these round to nothing; on a wide-schema batch of tiny rows they are
-/// the whole reported size, so a capacity bound stated purely as a multiple of
-/// the payload would be wrong for that shape.
+/// Every Arrow array carries fixed allocations that do not scale with the
+/// payload (the `ArrayData`/`Buffer` structs themselves, a 64-byte-aligned
+/// minimum allocation per buffer, the validity buffer, an empty-array's offsets
+/// buffer — and, dominating all of them, the **1 KiB default values buffer**
+/// `GenericStringBuilder`/`GenericBinaryBuilder` allocate, which every `Utf8` or
+/// `Binary` column carries however few bytes it holds). On a batch that is mostly
+/// one wide column these round to nothing; on a batch of tiny rows they are the
+/// whole reported size, so a capacity bound stated purely as a multiple of the
+/// payload would be wrong for that shape.
+///
+/// **2048, corrected from 1024 (issue #2821 review).** 1024 was under the real
+/// fixed cost of the commonest node there is: a `Utf8`/`Binary` array built by
+/// `export::arrow_convert` reports **1208 B** at any length from 0 up (arrow 53 —
+/// 1024 values buffer + 64 offsets + the struct overhead). A two-`text`-column
+/// batch of three short rows therefore reports 2416 B against a `2 × payload +
+/// 1024 × 2` = 2186 B bound — which #2821's fail-closed reservation turned from a
+/// silently-loose doc claim into a terminal `do_get` error. 2048 covers the
+/// measured 1208 with 840 B of margin per node, and is enforced over the whole
+/// `arrow_size_tests` shape corpus by
+/// `batch_bytes_tests::the_capacity_bound_holds_for_tiny_batches`. The cost is
+/// 1 KiB more reservation per array node — 3 KiB on a three-node schema against a
+/// multi-MiB batch.
 ///
 /// Denominated in array NODES, not output columns: a flat scalar column is one
 /// node, but a `list<text>` column is two (the `ListArray` and its `Utf8`
@@ -166,7 +187,7 @@ pub const BATCH_BYTES_CAPACITY_FACTOR: usize = 2;
 /// term under-states their fixed allocations. (At the 4 MiB default the
 /// `2 × cap` term dominates by three orders of magnitude either way; the
 /// distinction bites only for a tiny cap over a deeply nested schema.)
-pub const BATCH_BYTES_PER_COLUMN_SLACK: usize = 1024;
+pub const BATCH_BYTES_PER_COLUMN_SLACK: usize = 2048;
 
 /// Whether the caller should finish the current batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
