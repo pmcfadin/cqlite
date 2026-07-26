@@ -2,7 +2,9 @@
 
 ## 1. Fixture
 
-- [x] 1.1 Add a k-parameterized multi-generation builder to `cqlite-core/benches/fixtures/mod.rs`,
+- [x] 1.1 Add a k-parameterized multi-generation builder to `cqlite-core/benches/fixtures/multigen.rs`
+      (a new sibling module re-exported from `fixtures/mod.rs`; as-planned wording said `mod.rs`, but it
+      landed in its own file to keep `mod.rs` under the file-size ratchet),
       generalizing the same-`(pk, ck)`-across-generations pattern of
       `benches/compaction.rs::build_tombstone_heavy` (:307). Signature takes `k` and a collision-mix
       selector; built on `open_write_engine()` (:340) + `seeded_rng()` (:40).
@@ -17,8 +19,13 @@
 - [x] 2.2 Drive the merge through `KWayMerger::new_from_readers` (`merge/from_readers.rs:302`) with
       `with_now_secs` (`merge/mod.rs:2622`). **Surface exercised:** public `KWayMerger` drain.
       No new `pub` item on the reconcile path.
-- [x] 2.3 Emit `Throughput::Elements` over merged output rows; capture collisions-per-row and
-      `PurgeCounts` per arm.
+- [x] 2.3 Emit `Throughput::Elements` over merged output rows; capture collisions-per-row per arm.
+      **`PurgeCounts` was NOT captured, by design:** it is a private struct in `merge/mod.rs` (:2388)
+      with no public accessor, so reading it from a bench would have required adding a `pub` surface
+      purely for instrumentation. The record instead documents `purges=0(read-merge)` as a **justified
+      structural zero** — the read-merge path performs no purges by mechanism, not by measurement — so
+      the quantity this task wanted is accounted for without widening the public API. As-planned
+      wording ("capture `PurgeCounts`") is superseded by that disposition.
 - [x] 2.4 Matrix: k ∈ {1, 2, 5, 10, 20} × {`disjoint`, `lww_overwrite`, `tombstone`, `ttl_expiring`,
       `field_blend`}. `ttl_expiring` pins `now`; no-TTL arms pass `None`.
 - [x] 2.5 Assert a positive output row count per arm (never a 0-row vacuous pass).
@@ -47,7 +54,8 @@
       tombstone kind depended on `k`, confounding depth with composition. Both fixed (row tombstones
       now stamped BELOW their generation's live cells; `generation_mutations` takes no `k`), every arm
       now asserts a full collision-shape census + cross-k composition invariance, and the whole matrix
-      was re-run twice at commit `6f894d67`. All published numbers, fits, `D(o)`, the §6 L3 table and
+      was re-run twice at commit `620eea70` (recorded pre-rebase as `6f894d67`; same tree, see the
+      record's §1 commit row). All published numbers, fits, `D(o)`, the §6 L3 table and
       the verdicts are recomputed from the NEW runs. Verdicts unchanged; finding "a shadowed row is
       cheaper" WITHDRAWN as a fixture artifact (deletion collisions cost +3.0 % over plain overwrite).
 
@@ -69,12 +77,17 @@
 
 ## 5. Quality stages
 
-- [ ] 5.1 `--lite` green each fix round (summary-file redirect).
-- [ ] 5.2 `rust-reviewer` + roborev on the lite-green diff, BEFORE the full gate (review-first).
-- [ ] 5.3 Open the PR; hand the endgame to `flow-closer`.
-- [ ] 5.4 ONE full `scripts/agent-gate.sh` of record — serialized against any other gate on this box.
-      Per the #2751 workaround, run WITHOUT `AGENT_GATE_SUMMARY_FILE` and read
-      `<worktree>/.agent-gate-summary.txt`.
-- [ ] 5.5 `spec-auditor` (C) anchored to `openspec/changes/reconcile-overlap-multiplier/specs/**`.
+- [x] 5.1 `--lite` green each fix round (summary-file redirect).
+- [x] 5.2 `rust-reviewer` + roborev on the lite-green diff, BEFORE the full gate (review-first).
+      Two rounds; 3 blockers fixed with everything re-measured, 2 findings deferred to #2898 / #2899.
+- [x] 5.3 Open the PR (#2892); hand the endgame to `flow-closer`.
+- [x] 5.4 ONE full `scripts/agent-gate.sh` of record — **`RESULT: PASS`, 30/30 components**, at
+      certified SHA `c7a2af4c` (post-rebase onto `origin/main` `0031fdf6`), `dirty: no`,
+      `datasets: 144 Data.db files under /data/datasets`. The `#2751` workaround noted as-planned was
+      NOT needed: `AGENT_GATE_SUMMARY_FILE` worked as documented. Verbatim block posted on PR #2892.
+- [x] 5.5 `spec-auditor` (C) anchored to `openspec/changes/reconcile-overlap-multiplier/specs/**` —
+      **C: PASS**, all 8 requirements `satisfied`; the owner-approved (2026-07-26) saturated-anchor
+      amendment verified consistent across spec, design, README and this file, with the void rule
+      intact for the saturated control.
 - [ ] 5.6 Final roborev pass → merge-on-green → `flow-finalize` (archive, telemetry stamp via
       telemetry PR, worktree + branch removal, issue close).

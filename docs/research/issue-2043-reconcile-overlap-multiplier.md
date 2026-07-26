@@ -41,7 +41,7 @@ numbers below are from the **corrected** fixture and are not comparable to the p
 | | |
 |---|---|
 | Machine | AWS `r7iz`-class, Intel Xeon Platinum 8488C, **16 vCPU**, 30 GiB RAM, Linux 6.17.0-1019-aws x86_64 |
-| Commit | **`6f894d67`** (`issue-2043-reconcile-overlap-multiplier`), `bench` profile (release + debuginfo) |
+| Commit | **`620eea70`** (`issue-2043-reconcile-overlap-multiplier`), `bench` profile (release + debuginfo). Check this SHA out to inspect exactly what was measured. The runs were originally recorded against `6f894d67`, the pre-rebase identity of this same commit; the branch was later rebased onto `origin/main` for the merge gate, so `6f894d67` is no longer reachable and `620eea70` is the citable equivalent — its `cqlite-core/benches` tree is **byte-identical** (tree `7685daa8`) to the run commit's. See the note below on post-measurement instrument changes. |
 | Toolchain | rustc 1.97.1 (pinned `rust-toolchain.toml`) |
 | Criterion | 20 samples/arm, 1 s warm-up, ≥5 s measurement; medians reported |
 | Run 1 | **2026-07-26T04:14:15Z → 04:18:11Z**, run-start load1m **0.73**, **max foreign CPU 0.14 cores** |
@@ -320,7 +320,19 @@ disposition arithmetically — **this bench does not need to be re-run.**
 - `field_blend`'s composition (25 % singleton, 25 % per-column blend, 25 % tombstone, 25 % expiring)
   is a **modelling choice**, not a measured field distribution. It is used as the headline fit and as
   a sanity point on the `D(o)` curve, never as the source of `o_field`.
-- Every number in this record comes from the two runs in §1 at commit `6f894d67`, including the
+- Every number in this record comes from the two runs in §1 at commit `620eea70`, including the
   producer-count decomposition in §3 (`producer_control/{p1,p2}` are arms of the matrix run, not a
   side experiment). Nothing is extrapolated beyond the fitted curve. One run was refused by the
   run-start load gate and produced no numbers; it is listed in §1.
+- **The instrument changed after these numbers were measured, and the changes are guard/config-only.**
+  Between the run commit `620eea70` and the merged tip, `cqlite-core/benches/reconcile_overlap.rs`
+  gained: host-derived validity ceilings (the tier-1/tier-2 thresholds are now computed from the
+  host's core count and printed in the run header, instead of hard-coded constants — on this 16-vCPU
+  box they evaluate to the same **2.00 / 1.00 core** the banked runs enforced), the `/proc/stat`
+  guest-tick exclusion in the foreign-CPU probe, a `--list` mode that enumerates benchmark ids and
+  measures nothing, and a `--profile-time` flamegraph profiler. `fixtures/multigen.rs` changed in
+  **comments only**. What did NOT change: the **timed region** (the `b.iter` closure — same `drain`,
+  same shape-divergence assert, same `black_box`) and the **sampling configuration**
+  (`sample_size(20)`, 1 s warm-up, 5 s measurement, `Throughput::Elements(output_rows)`) are
+  byte-identical to the run commit. So the published medians remain re-derivable, but a re-run on the
+  tip exercises the newer guards — reproduce against `620eea70` if you want the exact instrument.
