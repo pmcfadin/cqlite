@@ -26,20 +26,30 @@
       `threshold_pct` entry.
 - [x] 2.7 Document the one-line run command in `cqlite-core/benches/README.md`.
 
-## 3. Measurement run (COMPLETE — 2 valid runs at load1m 0.28 / 0.84, ceiling 2.00)
+## 3. Measurement run (COMPLETE — 2 valid runs, re-measured after the review-round fixture fixes; run-start load1m 0.73 / 0.66, peak FOREIGN CPU 0.20 of 16 cores)
 
 - [x] 3.1 Confirm no concurrent full gate and a 1-minute load average under the ceiling; record it.
 - [x] 3.2 Run the full matrix; capture machine specs + commit SHA.
-- [x] 3.3 Validate the `disjoint` k=1 anchor against the published ~2.0 µs/row singleton figure
+- [x] 3.3 Validate the anchor against the published ~2.0 µs/row singleton figure
       (`docs/research/phase2-verify-stage2.md:226-232`). Out of band ⇒ void the run, fix the harness,
       re-run. Do not derive a multiplier from a void run.
-      **Result:** the saturated control lands at 2.81 µs/row = **1.41×** the published anchor (in the
-      stated ±50 % band); the literal k=1 point is 2.76× and OUT of band, with the cause measured
-      (1.97× single-producer inflation, predicted 1.79× by Phase-0's own producer/coordinator stage
-      split). Both the spec-mandated `cost(k)/cost(1)` and the pipeline-matched derate are published,
-      and the record states the discrepancy rather than quietly picking a comparable — see the
-      record §3.
+      **Result:** the anchor (amended by owner decision to the SATURATED `disjoint` control, mean of
+      k ≥ 5) lands at **2.82 µs/row = 1.41×** the published figure, inside the stated ±50 % band. The
+      k=1 point is 2.70× the published figure and 1.92× the anchor, and that deviation is now
+      DECOMPOSED by measured arms with no residual: 1.106× scan width × 1.424× (1→2 producers,
+      `producer_control/{p1,p2}`) × 1.216× (2→5+ producers) = 1.916×, against Phase-0's own 1.79×
+      producer/coordinator prediction for the producer-only part (measured 1.73×). Both the
+      spec-mandated `cost(k)/cost(1)` and the pipeline-matched derate are published — record §3.
 - [x] 3.4 Re-run `ttl_expiring` at a later wall-clock time to prove expiry determinism.
+- [x] 3.5 **Review round 2 (roborev blockers) — fixture fixed and EVERYTHING re-measured.** The
+      `tombstone` arm's row tombstone was reconciled away at FLUSH time (leaving a cell-less row
+      tombstone, so the live-vs-row-tombstone collision never reached the merge); `field_blend`'s
+      tombstone kind depended on `k`, confounding depth with composition. Both fixed (row tombstones
+      now stamped BELOW their generation's live cells; `generation_mutations` takes no `k`), every arm
+      now asserts a full collision-shape census + cross-k composition invariance, and the whole matrix
+      was re-run twice at commit `6f894d67`. All published numbers, fits, `D(o)`, the §6 L3 table and
+      the verdicts are recomputed from the NEW runs. Verdicts unchanged; finding "a shadowed row is
+      cheaper" WITHDRAWN as a fixture artifact (deletion collisions cost +3.0 % over plain overwrite).
 
 ## 4. Record + doc updates
 
