@@ -207,16 +207,21 @@ fn cancelled_backed_up_merge_reconciles_egress_depth_to_baseline_on_drop() {
     // step, `received_count` stays 0 and the buffered entries ARE the residual
     // the teardown must reconcile. `new_cancellable` (vs `new`) drives the
     // cancel-aware Drop path used by the Flight `do_get` merge.
+    // Sample the live active-merge count BEFORE and AFTER construction and derive
+    // the per-channel capacity from the HIGHER count (→ the LOWER capacity),
+    // instead of assuming a fixed 256 — otherwise an operator setting
+    // `CQLITE_EGRESS_ROW_BUDGET` low would deterministically 10s-timeout here. An
+    // after-only read is NOT monotone: if an ambient merge COMPLETES in the
+    // window, `capacity_for(after)` could EXCEED this merger's true snapshot and
+    // push the threshold above the real ceiling. `max(before+1, after)` (this
+    // merger counts itself) is a safe lower bound regardless of ambient churn.
     let cancel = ScanCancel::default();
+    let before = cqlite_core::storage::write_engine::merge::active_merge_count();
     let merger = KWayMerger::new_cancellable(inputs, &schema, cancel.clone())
         .expect("KWayMerger::new_cancellable");
-
-    // Derive the threshold from the LIVE adaptive per-channel capacity (reading
-    // AFTER construction only ever LOWERS the estimate, keeping the threshold
-    // reachable) instead of assuming a fixed 256 — otherwise an operator setting
-    // `CQLITE_EGRESS_ROW_BUDGET` low would deterministically 10s-timeout here.
+    let after = cqlite_core::storage::write_engine::merge::active_merge_count();
     let per_channel_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
-        cqlite_core::storage::write_engine::merge::active_merge_count(),
+        (before + 1).max(after),
     );
 
     // MID-MERGE: poll (bounded, fail-loud) until the gauge POSITIVELY records a

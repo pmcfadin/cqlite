@@ -20,11 +20,13 @@
 //!
 //! Why equality (not `== 256`): asserting an exact value would race any
 //! concurrent test that legitimately drives the process-global active-merge
-//! count (e.g. `egress_budget::tests::concurrent_begin_merge_shrinks…`) — the
-//! #2451 flake class. Equality + the [`egress_budget`](super::egress_budget)
-//! unit tests (`capacity_for(1) == 256`, shrink-under-concurrency) together
-//! establish the "solo K-way merge = 256 per source" contract (AC#1) without a
-//! wall-clock/shared-global race.
+//! count — the #2451 flake class. Equality here + the shrink-under-concurrency
+//! property (proven end-to-end on the REAL global by
+//! [`concurrency_drives_real_per_channel_cap_below_max`] below, and
+//! deterministically against a PRIVATE atomic by
+//! `egress_budget::tests::concurrent_begin_shrinks_per_channel_capacity`)
+//! together establish the "solo K-way merge = 256 per source" contract (AC#1)
+//! without a wall-clock/shared-global race.
 
 use super::{build_single_partition_merger, egress_budget, KWayMerger};
 use crate::platform::Platform;
@@ -301,9 +303,17 @@ fn needs_scan_point_read_shares_snapshot_and_registers_one_slot() {
 /// real `KWayMerger`s so the next merge registers past the 256 clamp, then build
 /// one more and assert EVERY one of its source channels got a capacity strictly
 /// below `MAX_CAP`. A refactor that made `begin_merge` return `MAX_CAP` while
-/// still incrementing `ACTIVE` (silently dead throttle) fails HERE. Ambient
-/// merges from parallel tests only raise the live count → lower the cap further,
-/// so `< MAX_CAP` is monotone-safe (cannot flake high).
+/// still incrementing `ACTIVE` (silently dead throttle) fails HERE.
+///
+/// `hold_count` is sized from the RESOLVED (env-overridable) budget — NOT the
+/// compile-time constant — because the production path (`capacity_for` →
+/// `resolved()`) uses the resolved budget too; a compile-time size would fail
+/// under `CQLITE_EGRESS_ROW_BUDGET=8192` (still 9 holds → extra at active=10 →
+/// `8192/10` clamps back to 256). With `hold_count = budget/MAX_CAP + 1` OUR own
+/// mergers force `active ≥ hold_count`, so the extra's snapshot
+/// `capacity_for(≥ hold_count+1) = budget/(budget/MAX_CAP + 2) < MAX_CAP` holds
+/// regardless of the resolved budget; ambient merges only raise the count →
+/// lower the cap, so `< MAX_CAP` is monotone-safe (cannot flake high).
 #[test]
 fn concurrency_drives_real_per_channel_cap_below_max() {
     let temp = TempDir::new().expect("temp dir");
@@ -311,9 +321,7 @@ fn concurrency_drives_real_per_channel_cap_below_max() {
     let paths = flush_n_sstables_sync(&mut engine, 1);
     let schema = create_test_schema();
 
-    // `budget / MAX_CAP` merges exactly saturate the 256 clamp; one MORE forces
-    // the next snapshot strictly below it (2048/9 = 227 < 256 at the defaults).
-    let hold_count = egress_budget::EGRESS_ROW_BUDGET / egress_budget::MAX_CAP + 1;
+    let hold_count = egress_budget::budget() / egress_budget::MAX_CAP + 1;
     let mut held = Vec::with_capacity(hold_count);
     for _ in 0..hold_count {
         held.push(

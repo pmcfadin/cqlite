@@ -199,14 +199,19 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
     // exact target) so a future concurrent merge in this binary shrinks the cap
     // WITHOUT pushing the threshold out of reach (the pre-#2765 fixed-256
     // assumption would 10s-timeout in that case).
+    // Sample the live active-merge count BEFORE and AFTER construction and derive
+    // the per-channel capacity from the HIGHER count (→ the LOWER capacity). An
+    // after-only read is NOT monotone: if an ambient merge COMPLETES between
+    // construction and the read, `active_merge_count` drops and
+    // `capacity_for(after)` could EXCEED this merger's true snapshot, pushing the
+    // threshold above the real ceiling → a spurious 10s timeout. `max(before+1,
+    // after)` (this merger counts itself via the `+1`) is a safe lower bound on
+    // the true capacity regardless of ambient churn in the window.
+    let before = cqlite_core::storage::write_engine::merge::active_merge_count();
     let merger = KWayMerger::new(inputs, &schema).expect("KWayMerger::new");
-
-    // Read the adaptive per-channel capacity this merger actually got. Reading
-    // AFTER construction only ever LOWERS the estimate (a concurrent merge would
-    // raise `active_merge_count`, shrinking `capacity_for`), so the derived
-    // threshold stays reachable — never above the true ceiling.
+    let after = cqlite_core::storage::write_engine::merge::active_merge_count();
     let per_channel_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
-        cqlite_core::storage::write_engine::merge::active_merge_count(),
+        (before + 1).max(after),
     );
 
     // MID-MERGE: poll (bounded, fail-loud) until the gauge POSITIVELY records a

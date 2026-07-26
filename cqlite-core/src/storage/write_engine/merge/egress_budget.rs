@@ -57,6 +57,12 @@
 //! as concurrency climbs, instead of every channel holding a fixed 256. Do NOT
 //! read this as a strict `≤ EGRESS_ROW_BUDGET` global bound.
 //!
+//! Residual K-linear dimension: the budget divides by merge COUNT only, never by
+//! per-merge fanout `K`, so a SINGLE wide merge still buffers up to `K × 256`
+//! entries (~60MB at `K = 100`) invariant to concurrency — intended (the owner's
+//! "a solo merge is unchanged for any `K`" contract). The high-`K` envelope is
+//! validated by the #2895 loadgen sweep (deferred follow-up).
+//!
 //! The snapshot is taken ONCE at construction and never revised, so it is
 //! order-dependent, not fair: a long-lived merge that starts during a burst
 //! stays PINNED at its low snapshot cap for its entire life, even after the
@@ -220,6 +226,14 @@ fn capacity_from(active: usize, budget: usize, min_cap: usize) -> usize {
 #[cfg(test)]
 pub(super) fn min_cap() -> usize {
     resolved().1
+}
+
+/// The runtime-resolved egress budget (env-overridable). Used by the wiring test
+/// to size its concurrency against the SAME budget the production path resolves,
+/// so it stays correct under an operator `CQLITE_EGRESS_ROW_BUDGET` override.
+#[cfg(test)]
+pub(super) fn budget() -> usize {
+    resolved().0
 }
 
 /// Register a starting k-way MERGE (called ONCE per merge, at `KWayMerger`
@@ -436,28 +450,35 @@ mod tests {
     fn concurrent_begin_shrinks_per_channel_capacity() {
         use std::sync::{Arc, Barrier};
 
-        // Drive N concurrent MERGE registrations through the EXACT production
+        // Drive `n` concurrent MERGE registrations through the EXACT production
         // increment/snapshot primitive (`begin_on`), but against a PRIVATE atomic
         // (issue #2451 isolation, mirroring the pairing test) so this test can
         // NEVER inflate the shared global `ACTIVE` and shrink a parallel
         // merger-building test's caps. Assert the per-channel capacity a merge is
         // HANDED shrinks below the fixed 256 as concurrent merges rise — and
-        // never below MIN_CAP. (KWayMerger-level end-to-end wiring, on the real
-        // global, lives in `egress_wiring_tests`.)
+        // never below the resolved floor. (KWayMerger-level end-to-end wiring, on
+        // the real global, lives in `egress_wiring_tests`.)
+        //
+        // `n` is sized from the RESOLVED budget (not a fixed 16): `begin_on` calls
+        // the env-resolved `capacity_for`, so under `CQLITE_EGRESS_ROW_BUDGET=8192`
+        // a fixed 16 would leave `8192/16 == 512` clamped back to 256 and never
+        // shrink. `budget/MAX_CAP + 8` guarantees the last-registering thread sees
+        // `capacity_for(n) = budget/(budget/MAX_CAP + 8) < MAX_CAP` for any budget.
         let counter: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
-        const N: usize = 16;
-        let registered = Arc::new(Barrier::new(N));
-        let released = Arc::new(Barrier::new(N));
+        let floor = min_cap();
+        let n = budget() / MAX_CAP + 8;
+        let registered = Arc::new(Barrier::new(n));
+        let released = Arc::new(Barrier::new(n));
 
-        let handles: Vec<_> = (0..N)
+        let handles: Vec<_> = (0..n)
             .map(|_| {
                 let registered = registered.clone();
                 let released = released.clone();
                 std::thread::spawn(move || {
                     // Register FIRST (increments the PRIVATE count + snapshots the
-                    // cap), THEN barrier — so all N are counted before any reads;
+                    // cap), THEN barrier — so all `n` are counted before any reads;
                     // the second barrier holds every guard alive until all have
-                    // observed, modelling N concurrent merges. `record = false`:
+                    // observed, modelling `n` concurrent merges. `record = false`:
                     // never touch the process-global operator gauge.
                     let (cap, _guard) = begin_on(counter, false);
                     registered.wait();
@@ -473,26 +494,27 @@ mod tests {
             .map(|h| h.join().expect("merge thread joins"))
             .collect();
 
-        // The private atomic is touched ONLY by this test's N threads, so the
-        // observed concurrency is EXACTLY N (deterministic, not `>=`).
+        // The private atomic is touched ONLY by this test's `n` threads, so the
+        // observed concurrency is EXACTLY `n` (deterministic, not `>=`).
         let max_live = results.iter().map(|(l, _)| *l).max().unwrap_or(0);
         assert_eq!(
-            max_live, N,
-            "private-atomic concurrency must be exactly {N}"
+            max_live, n,
+            "private-atomic concurrency must be exactly {n}"
         );
         // The merges that registered while the count was already high got a
         // capacity strictly below the pre-change fixed 256 — the shrink property.
         let min_cap_seen = results.iter().map(|(_, c)| *c).min().unwrap_or(MAX_CAP);
         assert!(
             min_cap_seen < MAX_CAP,
-            "with {N} concurrent merges at least one per-channel cap must fall \
+            "with {n} concurrent merges at least one per-channel cap must fall \
              below {MAX_CAP} (min seen = {min_cap_seen})"
         );
-        // Forward progress: no merge is ever handed a zero/sub-MIN_CAP capacity.
+        // Forward progress: no merge is ever handed a sub-floor capacity (uses the
+        // RESOLVED floor, so it holds under a `CQLITE_EGRESS_MIN_CAP` override).
         for (_, cap) in &results {
             assert!(
-                *cap >= MIN_CAP,
-                "per-channel cap {cap} >= MIN_CAP {MIN_CAP}"
+                *cap >= floor,
+                "per-channel cap {cap} >= resolved floor {floor}"
             );
         }
         // Every guard dropped on join → the private count returns to zero.
