@@ -159,6 +159,28 @@ else
   bad "contended summary path was rewritten (live peer clobbered)"
   echo "------- contended path -------"; cat "$integ" 2>/dev/null; echo "-----------------------"
 fi
+# The named FAIL block must actually LAND at caller-reachable NON-clobbering paths (review job-2106
+# LOW: the private/sibling write is `|| true`, so a silent dark path would leave the suite green).
+# Assert BOTH the co-located sibling ($integ.integrity-fail.<run-id>) AND the private log named in
+# the stderr line carry the full named block.
+sib=$(printf '%s\n' "$integ".integrity-fail.* | head -1)
+priv=$(sed -n 's/.*verdict in \([^ ]*\) and .*/\1/p' "$integ_err" | head -1)
+sib_ok=0
+[ -f "$sib" ] \
+  && grep -q 'summary-integrity: FAIL (foreign run-id detected mid-run;' "$sib" \
+  && grep -q 'detected-after-component:' "$sib" \
+  && grep -q 'RESULT: FAIL' "$sib" && sib_ok=1
+priv_ok=0
+[ -n "$priv" ] && [ -f "$priv" ] \
+  && grep -q 'summary-integrity: FAIL (foreign run-id detected mid-run;' "$priv" \
+  && grep -q 'RESULT: FAIL' "$priv" && priv_ok=1
+if [ "$sib_ok" = 1 ] && [ "$priv_ok" = 1 ]; then
+  ok "verdict published to non-clobbering sibling + private log (both carry the named FAIL block)"
+else
+  bad "verdict not fully published to sibling ($sib_ok) / private log ($priv_ok)"
+  echo "------- sibling ($sib) -------"; cat "$sib" 2>/dev/null
+  echo "------- private ($priv) -------"; cat "$priv" 2>/dev/null; echo "-----------------------"
+fi
 
 # --- Property 3a: invalid selftest selector fails closed BEFORE any gate work ----
 # A typo like `Side` (with an explicit summary file) must NOT fall through and run a REAL gate;
@@ -195,14 +217,31 @@ else
   echo "------- side-selftest out -------"; cat "$side_out"; echo "---------------------------------"
 fi
 
+# marker mode exercises the SIDE-lane post-drain conversion in the LIVE-PEER case: the terminal
+# path must publish FAIL to the private log + sibling WITHOUT clobbering the contended peer block
+# (ratified job-2106 contract — this is the SIDE-lane analogue of Property 3's MAIN-lane no-clobber).
 marker_sum="$tmp/marker-integ.txt"
+marker_out="$tmp/marker.out"
 env AGENT_GATE_SUMMARY_FILE="$marker_sum" AGENT_GATE_INTEGRITY_SELFTEST=marker \
-  bash "$FAKE_GATE" >/dev/null 2>&1
-if grep -q 'summary-integrity: FAIL' "$marker_sum" && grep -q 'RESULT: FAIL' "$marker_sum"; then
-  ok "post-drain marker conversion -> terminal summary carries summary-integrity FAIL + RESULT FAIL"
+  bash "$FAKE_GATE" >"$marker_out" 2>/dev/null
+if grep -q 'marker-integrity-selftest: contended-untouched=yes sibling=yes' "$marker_out"; then
+  ok "post-drain marker conversion (live peer): contended path intact + sibling written"
 else
-  bad "post-drain marker conversion did not produce a terminal integrity FAIL"
+  bad "post-drain marker conversion clobbered the peer or skipped the sibling"
+  echo "------- marker out -------"; cat "$marker_out" 2>/dev/null; echo "-------------------------"
+fi
+if grep -q 'run-id: /tmp/agent-gate.FOREIGN-' "$marker_sum" && ! grep -q 'RESULT: FAIL' "$marker_sum"; then
+  ok "marker mode: contended path still the foreign peer block (SIDE-lane live peer NOT clobbered)"
+else
+  bad "marker mode: contended path was rewritten (peer clobbered)"
   echo "------- marker summary -------"; cat "$marker_sum" 2>/dev/null; echo "-----------------------------"
+fi
+msib=$(printf '%s\n' "$marker_sum".integrity-fail.* | head -1)
+if [ -f "$msib" ] && grep -q 'summary-integrity: FAIL' "$msib" && grep -q 'RESULT: FAIL' "$msib"; then
+  ok "marker mode: sibling carries summary-integrity FAIL + RESULT FAIL (verdict never lost)"
+else
+  bad "marker mode: sibling missing the terminal FAIL verdict"
+  echo "------- marker sibling ($msib) -------"; cat "$msib" 2>/dev/null; echo "-----------------------------"
 fi
 
 # --- Property 3c (WIRING): the guard is actually called from record_result ----------
@@ -213,8 +252,8 @@ fi
 # end-to-end (review finding 1).
 #
 # Structural: record_result's body must call _assert_summary_integrity "$1", and a bare
-# _apply_integrity_marker call must appear AFTER `launch_components` and BEFORE the
-# terminal `emit_summary "$OVERALL"`.
+# _apply_integrity_marker call must appear AFTER `launch_components` and BEFORE the full-gate
+# terminal `_emit_terminal_summary "$OVERALL"` (the shared MAIN/SIDE no-clobber emit).
 rr_body=$(awk '/^record_result\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$GATE")
 if printf '%s\n' "$rr_body" | grep -q '_assert_summary_integrity "\$1"'; then
   ok "WIRING: record_result() body calls _assert_summary_integrity \"\$1\""
@@ -223,12 +262,13 @@ else
 fi
 lc_ln=$(grep -n '^launch_components$' "$GATE" | head -1 | cut -d: -f1)
 apply_ln=$(grep -nE '^[[:space:]]*_apply_integrity_marker[[:space:]]*$' "$GATE" | tail -1 | cut -d: -f1)
-# The TERMINAL full-gate emit (with "${SUMMARY_META[@]}"), which is the LAST such call
-# in the file — the lite/delta paths emit the same shape earlier and exit before here.
-emit_ln=$(grep -nE '^[[:space:]]*emit_summary "\$OVERALL" "\$\{SUMMARY_META' "$GATE" | tail -1 | cut -d: -f1)
+# The TERMINAL full-gate emit is now `_emit_terminal_summary "$OVERALL" "${SUMMARY_META[@]}"` (the
+# shared no-clobber contract). The lite/delta paths still emit_summary the same shape and exit
+# earlier, so we target the full-gate terminal by its distinct function name.
+emit_ln=$(grep -nE '^[[:space:]]*_emit_terminal_summary "\$OVERALL" "\$\{SUMMARY_META' "$GATE" | tail -1 | cut -d: -f1)
 if [ -n "$lc_ln" ] && [ -n "$apply_ln" ] && [ -n "$emit_ln" ] \
    && [ "$apply_ln" -gt "$lc_ln" ] && [ "$apply_ln" -lt "$emit_ln" ]; then
-  ok "WIRING: _apply_integrity_marker runs after launch_components and before terminal emit_summary (lines $lc_ln<$apply_ln<$emit_ln)"
+  ok "WIRING: _apply_integrity_marker runs after launch_components and before terminal _emit_terminal_summary (lines $lc_ln<$apply_ln<$emit_ln)"
 else
   bad "WIRING: _apply_integrity_marker call not in the post-drain/pre-emit region (launch=$lc_ln apply=$apply_ln emit=$emit_ln)"
 fi

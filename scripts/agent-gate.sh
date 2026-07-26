@@ -1929,6 +1929,49 @@ emit_summary() {
 # and `return 1` without emitting. On the MAIN foreground lane (where tooling-tests —
 # the dominant clobber site — runs) the immediate `exit 1` still stops the whole gate
 # at once with the named line intact.
+# _integrity_fail_block <reason> <comp> <sibling-path> → print the canonical named
+# summary-integrity FAIL block to stdout. Shared by every no-clobber publish path so the
+# block shape is identical wherever it lands.
+_integrity_fail_block() {
+  local reason="$1" comp="$2" sibling="$3"
+  echo
+  echo "$SUMMARY_START_MARKER"
+  echo "run-id: $RUN_ID"
+  [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
+  [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
+  echo "summary-integrity: FAIL ($reason)"
+  echo "detected-after-component: $comp"
+  echo "note: contended summary path left intact for its live owner; verdict published to private log + sibling, never the contended path (#2874)"
+  echo "logs: $LOG_DIR"
+  echo "summary-file: $SUMMARY_FILE (NOT rewritten — live peer owns it)"
+  echo "integrity-fail-sibling: $sibling"
+  echo "RESULT: FAIL"
+  echo "$SUMMARY_END_MARKER"
+}
+
+# _publish_integrity_fail <reason> <comp>  (#2874 ratified review job-2106 contract)
+# Publish a summary-integrity FAIL for the foreign-LIVE-PEER case (SENTINEL_WROTE=1: our startup
+# sentinel landed, then a peer wrote the same path) WITHOUT clobbering the contended $SUMMARY_FILE.
+# Reconciles job-2105 (never clobber the live peer) with job-2106 (never leave the caller-pinned
+# path holding a foreign block that becomes a foreign PASS) by making the verdict discoverable at
+# caller-reachable places that are NOT the contended path:
+#   (a) our OWN private log summary ($LOG_SUMMARY_FILE);
+#   (b) a NON-CLOBBERING sibling next to the contended path ($SUMMARY_FILE.integrity-fail.$RUN_ID);
+#   (c) the full named block on STDOUT (survives for a foreground/redirect caller);
+#   (d) a named line to STDERR naming both artifacts.
+# The caller still drives a non-zero exit. Used by BOTH the MAIN foreground lane and the SIDE-lane
+# post-drain terminal path (one shared contract).
+_publish_integrity_fail() {
+  local reason="$1" comp="$2"
+  # RUN_ID is the unique mktemp LOG DIR *path* — basename it so the sibling filename has no slashes
+  # (still unique: mktemp -d basenames don't collide). Sibling sits NEXT TO the contended path.
+  local sibling="$SUMMARY_FILE.integrity-fail.$(basename "$RUN_ID")"
+  _integrity_fail_block "$reason" "$comp" "$sibling" > "$LOG_SUMMARY_FILE" 2>/dev/null || true
+  _integrity_fail_block "$reason" "$comp" "$sibling" > "$sibling" 2>/dev/null || true
+  _integrity_fail_block "$reason" "$comp" "$sibling"   # STDOUT — reaches a foreground/redirect caller
+  echo "⚠️ agent-gate: summary-integrity: FAIL ($reason) — detected-after-component: $comp; RESULT: FAIL. Contended path $SUMMARY_FILE left intact for its live owner; verdict in $LOG_SUMMARY_FILE and $sibling (#2874)" >&2
+}
+
 _assert_summary_integrity() {
   [ -f "$SUMMARY_FILE" ] || return 0
   grep -qF "run-id: $RUN_ID" "$SUMMARY_FILE" 2>/dev/null && return 0
@@ -1958,37 +2001,26 @@ _assert_summary_integrity() {
   # place mid-lane teardown is needed — every other early exit precedes launch_components.
   if [ -n "${SIDE_LANE_PID:-}" ]; then
     echo "agent-gate: killing live SIDE-lane sub-pool (pid $SIDE_LANE_PID) before integrity exit; some backgrounded builds may already be spawned (#2874)" >&2
-    # Review finding (LOW-but-dangerous): `kill -- -PID` (negative = process GROUP) targets the
-    # GATE'S OWN process group when the sub-pool was NOT put in its own job-control group (the
-    # common no-`set -m` subshell case) — it would signal the gate itself. Signal the sub-pool
-    # PID and its direct children only.
-    kill "$SIDE_LANE_PID" 2>/dev/null || true
+    # Reap the sub-pool's CHILDREN FIRST (review job-2106): once the sub-pool subshell itself is
+    # killed its children reparent to PID 1, after which `pkill -P $SIDE_LANE_PID` matches nothing
+    # and the cargo/maturin builds this teardown exists to stop are orphaned against the shared
+    # target dir. So pkill -P (direct children) BEFORE killing the subshell, then wait. The
+    # negative-PID group form is dropped: the subshell is not in the gate's own group, so it would
+    # only risk signalling an unrelated process group that happens to share that id — no benefit.
     pkill -P "$SIDE_LANE_PID" 2>/dev/null || true
+    kill "$SIDE_LANE_PID" 2>/dev/null || true
     wait "$SIDE_LANE_PID" 2>/dev/null || true
   fi
-  # Review finding (HIGH counter-clobber): branch on SENTINEL_WROTE. When =1, OUR startup sentinel
-  # DID land on this path, so a foreign run-id now means a LIVE PEER owns the contended summary file
-  # — calling emit_summary here would rewrite $SUMMARY_FILE and clobber that peer's summary, the exact
-  # harm this change exists to prevent. Write OUR named FAIL block to the PRIVATE log path only, print
-  # the named line to stderr, and exit non-zero. Spec req 2 stays satisfied: it requires a named-line
-  # summary + a non-zero exit, NOT a write to the contended path. When =0 (our sentinel never landed →
-  # the path is unwritable / a stale prior-run block, no live owner) the normal emit is safe.
+  # Branch on SENTINEL_WROTE (review job-2105 + ratified job-2106 reconciliation). When =1, OUR
+  # startup sentinel DID land on this path, so a foreign run-id now means a LIVE PEER owns the
+  # contended summary file — rewriting it via emit_summary would clobber that peer (job-2105), yet
+  # leaving the pinned path holding the peer's block risks a poller reading its later foreign PASS
+  # (job-2106). _publish_integrity_fail resolves both: it never touches the contended path but
+  # publishes the named FAIL block to our private log + a non-clobbering sibling + stdout + stderr.
+  # When =0 (our sentinel never landed → path unwritable / stale block, no live owner) emit_summary
+  # is safe (it self-detects the unwritable write and forces FAIL to the private log).
   if [ "${SENTINEL_WROTE:-0}" = 1 ]; then
-    {
-      echo
-      echo "$SUMMARY_START_MARKER"
-      echo "run-id: $RUN_ID"
-      [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
-      [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
-      echo "summary-integrity: FAIL ($reason)"
-      echo "detected-after-component: $comp"
-      echo "note: contended summary path left intact for its live owner; named block written to private log (#2874)"
-      echo "logs: $LOG_DIR"
-      echo "summary-file: $LOG_SUMMARY_FILE (private; contended path NOT rewritten)"
-      echo "RESULT: FAIL"
-      echo "$SUMMARY_END_MARKER"
-    } > "$LOG_SUMMARY_FILE" 2>/dev/null || true
-    echo "⚠️ agent-gate: summary-integrity: FAIL ($reason) — detected-after-component: $comp; RESULT: FAIL; contended path left intact for its live owner, named block in $LOG_SUMMARY_FILE (#2874)" >&2
+    _publish_integrity_fail "$reason" "$comp"
     exit 1
   fi
   emit_summary FAIL \
@@ -2003,6 +2035,9 @@ _assert_summary_integrity() {
 # and sets a named terminal line so a SIDE-lane clobber is NEVER silently lost to a
 # false-green summary. No-op when no marker exists.
 SUMMARY_INTEGRITY_LINE=""
+INTEGRITY_MARKER_SEEN=0
+INTEGRITY_MARKER_COMP=""
+INTEGRITY_MARKER_REASON=""
 _apply_integrity_marker() {
   [ -f "$LOG_DIR/summary-integrity.fail" ] || return 0
   local m comp reason
@@ -2013,6 +2048,25 @@ _apply_integrity_marker() {
   echo "agent-gate: summary-integrity FAIL recorded by a SIDE-lane component '$comp' ($reason)" >&2
   OVERALL=FAIL
   SUMMARY_INTEGRITY_LINE="summary-integrity: FAIL ($reason; detected-after-component: $comp)"
+  INTEGRITY_MARKER_SEEN=1
+  INTEGRITY_MARKER_COMP="$comp"
+  INTEGRITY_MARKER_REASON="$reason"
+}
+
+# _emit_terminal_summary <result> <meta-line...>  (#2874 ratified job-2106: one MAIN/SIDE contract)
+# The single terminal-summary emit. When a SIDE-lane recorded a foreign-live-peer clobber marker
+# AND that peer still owns the contended path (SENTINEL_WROTE=1 and $SUMMARY_FILE no longer carries
+# our run-id), route the FAIL verdict through the no-clobber publish helper instead of letting
+# emit_summary rewrite the contended path — the same contract the MAIN foreground lane obeys.
+# Returns non-zero in that case (caller relies on OVERALL=FAIL to exit non-zero); otherwise defers
+# to emit_summary. This closes the job-2106 MEDIUM (the SIDE terminal emit used to clobber the peer).
+_emit_terminal_summary() {
+  if [ "${INTEGRITY_MARKER_SEEN:-0}" = 1 ] && [ "${SENTINEL_WROTE:-0}" = 1 ] \
+     && [ -f "$SUMMARY_FILE" ] && ! grep -qF "run-id: $RUN_ID" "$SUMMARY_FILE" 2>/dev/null; then
+    _publish_integrity_fail "$INTEGRITY_MARKER_REASON" "$INTEGRITY_MARKER_COMP"
+    return 1
+  fi
+  emit_summary "$@"
 }
 
 # gate_push_signal <result> <branch> <short-sha> <fail-components> (#2667)
@@ -2084,9 +2138,12 @@ fi
 #           (BASHPID!=$$); it must record a marker file + return 1 WITHOUT emitting or
 #           exiting (the summary file stays the seeded foreign block — no mid-run
 #           terminal block). Prints rc/marker/summary-untouched for the self-test.
-#   marker — post-drain conversion: plant a marker file then run _apply_integrity_marker
-#           + emit_summary; the terminal summary must carry `summary-integrity: FAIL`
-#           and RESULT: FAIL (a SIDE-lane clobber is never lost to a false-green).
+#   marker — post-drain conversion, LIVE-PEER case: seed a foreign block on the contended path,
+#           plant a marker, then run _apply_integrity_marker + _emit_terminal_summary. The verdict
+#           must land as FAIL on the private log + a non-clobbering sibling (never rewriting the
+#           contended path — ratified job-2106 no-clobber contract); prints contended-untouched +
+#           sibling for the self-test (a SIDE-lane clobber is never lost to a false-green, and the
+#           live peer is never clobbered).
 # (fail-closed guard for these hooks ran earlier, before the startup sentinel — #2874)
 case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
   1)
@@ -2116,11 +2173,26 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     fi
     exit 0 ;;
   marker)
+    # Simulate a SIDE-lane foreign-LIVE-PEER clobber that was detected + recorded: a peer owns the
+    # contended path (foreign run-id, and it will later become a foreign PASS), and a SIDE lane left
+    # a marker. The post-drain terminal path (_apply_integrity_marker → _emit_terminal_summary) MUST
+    # publish FAIL to the private log + non-clobbering sibling WITHOUT rewriting the contended path
+    # (ratified job-2106 no-clobber contract). SENTINEL_WROTE=1 here (writable throwaway took our
+    # startup sentinel before we seeded the foreign block).
+    {
+      echo "$SUMMARY_START_MARKER"
+      echo "run-id: /tmp/agent-gate.FOREIGN-$$"
+      echo "RESULT: PASS (foreign live peer)"
+      echo "$SUMMARY_END_MARKER"
+    } > "$SUMMARY_FILE"
     printf '%s\t%s\n' "smoke" "foreign run-id detected mid-run; expected $RUN_ID" \
-      > "$LOG_DIR/summary-integrity.fail"
+      >> "$LOG_DIR/summary-integrity.fail"
     _apply_integrity_marker
-    emit_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
-      ${SUMMARY_INTEGRITY_LINE:+"$SUMMARY_INTEGRITY_LINE"}
+    _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
+      ${SUMMARY_INTEGRITY_LINE:+"$SUMMARY_INTEGRITY_LINE"} || true
+    printf 'marker-integrity-selftest: contended-untouched=%s sibling=%s\n' \
+      "$(grep -qF 'run-id: /tmp/agent-gate.FOREIGN-' "$SUMMARY_FILE" 2>/dev/null && echo yes || echo no)" \
+      "$([ -f "$SUMMARY_FILE.integrity-fail.$(basename "$RUN_ID")" ] && echo yes || echo no)"
     exit 0 ;;
 esac
 
@@ -4756,7 +4828,10 @@ fi
 for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
-emit_summary "$OVERALL" "${SUMMARY_META[@]}"
+# #2874 (ratified job-2106): route the terminal emit through the shared MAIN/SIDE contract, so a
+# SIDE-lane foreign-live-peer clobber publishes FAIL to the private log + sibling instead of
+# rewriting the peer's contended path. OVERALL is already FAIL in that case → exit 1 below.
+_emit_terminal_summary "$OVERALL" "${SUMMARY_META[@]}" || true
 
 # #2667: full-gate completion push-signal. This line is reached ONLY by the full
 # gate and by --only (never --lite/--delta/selftest, which exit earlier), so we
