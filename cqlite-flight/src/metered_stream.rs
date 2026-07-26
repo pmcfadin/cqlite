@@ -6,8 +6,10 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
+use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use arrow_flight::error::FlightError;
 use futures::Stream;
@@ -31,6 +33,62 @@ impl<T> Stream for ReceiverStream<T> {
     type Item = T;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
         self.rx.poll_recv(cx)
+    }
+}
+
+/// Egress credit for a batch that has been handed downstream but whose Arrow
+/// data may still be referenced by the consumer (issue #2821).
+///
+/// The permit is released when — and only when — nothing downstream references
+/// the batch's arrays any more, observed through a `Weak` handle per column
+/// rather than inferred from the consumer's polling discipline. That distinction
+/// is the whole point:
+///
+/// * Releasing at the top of every `poll_next` (the obvious implementation) is
+///   correct ONLY for a consumer that drops batch N before asking for N+1. That
+///   happens to be exactly what `FlightDataEncoder` does (arrow-flight 53.4.1,
+///   `encode.rs:400-436`: it polls `inner` only once its `FlightData` queue is
+///   empty, and `encode_batch` consumes and drops the `RecordBatch`) — but
+///   `MeteredDoGetStream` is `pub(crate)` and polled directly in tests, and a
+///   speculative poll (a `select!` arm, `futures::poll!`) from a consumer still
+///   holding the batch would return the credit for resident data and silently
+///   void the published bound.
+/// * Releasing only when the NEXT batch is *yielded* is the other obvious
+///   implementation, and it DEADLOCKS: the deferred permit can hold the whole
+///   pool while the producer parks reserving the next batch and the consumer
+///   waits for that batch. At the shipped defaults a resident batch plus a
+///   worst-case reservation already exceed the ceiling, so the cycle is
+///   reachable in the DEFAULT configuration, not only in a corner case.
+///
+/// Keying on `Weak::strong_count() == 0` satisfies both: the production encoder
+/// has dropped the batch by the time it re-polls, so credit is returned exactly
+/// as promptly as before (no deadlock), while a consumer that is still holding
+/// the data keeps paying for it (no voided bound). Conservative in the safe
+/// direction — a consumer that retains a single column keeps the credit charged,
+/// because that column's buffers are genuinely still resident.
+struct DeferredCredit {
+    /// The held credit. Never READ — the permit's `Drop` IS the release, so
+    /// removing it from `deferred` (or clearing the vec) returns the bytes to the
+    /// pool. Keeping it drop-only is deliberate: there is no second, hand-audited
+    /// release path that could drift from the charged amount.
+    #[allow(dead_code)]
+    permit: EgressPermit,
+    /// One weak handle per column of the yielded batch. Empty for a zero-column
+    /// batch, which holds no buffers and is therefore released immediately.
+    columns: Vec<Weak<dyn Array>>,
+}
+
+impl DeferredCredit {
+    fn new(batch: &RecordBatch, permit: EgressPermit) -> Self {
+        Self {
+            permit,
+            columns: batch.columns().iter().map(Arc::downgrade).collect(),
+        }
+    }
+
+    /// `true` once nothing downstream holds any of the batch's arrays.
+    fn is_dropped_downstream(&self) -> bool {
+        self.columns.iter().all(|col| col.strong_count() == 0)
     }
 }
 
@@ -64,7 +122,8 @@ pub(crate) struct MeteredDoGetStream {
     /// defense-in-depth: it never fires on the normal delivery path (the inner
     /// poll is biased first), and never regresses the existing drop-driven cancel.
     cancelled: Option<Pin<Box<tokio_util::sync::WaitForCancellationFutureOwned>>>,
-    /// DEFERRED egress credit for the most recently yielded batch (issue #2821).
+    /// DEFERRED egress credit for batches already handed downstream (issue
+    /// #2821).
     ///
     /// This stream is constructed UPSTREAM of `FlightDataEncoderBuilder`, and the
     /// encoder holds the `RecordBatch` we hand it while it encodes. Releasing the
@@ -74,24 +133,22 @@ pub(crate) struct MeteredDoGetStream {
     /// on the producer side, and making the true bound
     /// `max(ceiling, one maximum batch) + one maximum batch`.
     ///
-    /// So the permit is parked here and released at the TOP of the NEXT
-    /// `poll_next`. That instant is provably safe AND deadlock-free:
+    /// So each permit is parked here and reaped at the top of a later
+    /// `poll_next`, once [`DeferredCredit::is_dropped_downstream`] shows the
+    /// consumer has released the data (see [`DeferredCredit`] for why the release
+    /// point is keyed on the data's liveness rather than on a poll). Against the
+    /// production encoder this reaps on the very next poll — identical timing to
+    /// a release at the top of `poll_next`, with none of its dependence on
+    /// consumer discipline.
     ///
-    /// * **Safe** — `FlightDataEncoder::poll_next` (arrow-flight 53.4.1,
-    ///   `encode.rs:400-436`) polls this stream ONLY when its `FlightData` queue
-    ///   is empty, i.e. after `encode_batch` has consumed and dropped the
-    ///   previous `RecordBatch`. At most one batch is downstream of the credit
-    ///   boundary at any time, and it is still charged.
-    /// * **Deadlock-free** — releasing only when the NEXT batch is *yielded*
-    ///   would wedge any stream whose pool is one batch deep (the deferred permit
-    ///   holds the whole pool; the producer parks reserving the next batch; the
-    ///   consumer waits for that batch — a cycle). At the merged defaults a
-    ///   worst-case full batch is exactly the whole pool, so that cycle is
-    ///   reachable in the DEFAULT configuration, not just a corner case.
+    /// A `Vec` rather than a single slot: a consumer that holds several yielded
+    /// batches at once keeps paying for all of them. It cannot grow without
+    /// bound — unreleased credit stops the producer, which is precisely the
+    /// intended backpressure.
     ///
-    /// `Drop` releases it too, so a client disconnect returns the credit.
-    /// **Do not "simplify" this into release-on-yield.**
-    deferred: Option<EgressPermit>,
+    /// Cleared on every terminal arm and by `Drop`, so a client disconnect
+    /// returns the credit. **Do not "simplify" this into release-on-yield.**
+    deferred: Vec<DeferredCredit>,
     probe: StreamProbe,
     rows: u64,
     bytes: u64,
@@ -124,7 +181,7 @@ impl MeteredDoGetStream {
             guard,
             abort,
             cancelled,
-            deferred: None,
+            deferred: Vec::new(),
             probe,
             rows: 0,
             bytes: 0,
@@ -151,6 +208,17 @@ impl MeteredDoGetStream {
         }
     }
 
+    /// Return the credit of every deferred batch the consumer has finished with.
+    ///
+    /// Run at the TOP of `poll_next`, before the inner stream is polled: a
+    /// producer parked on an exhausted pool must see the credit of the batches
+    /// the consumer already dropped, or a one-batch-deep pool would deadlock.
+    /// Batches the consumer still holds stay charged — including across a poll
+    /// that returns `Pending`.
+    fn reap_deferred(&mut self) {
+        self.deferred.retain(|d| !d.is_dropped_downstream());
+    }
+
     /// The merge is finished (completed or errored); disarm so we do not cancel a
     /// flag whose task has already exited.
     fn disarm_guard(&mut self) {
@@ -173,11 +241,12 @@ impl Stream for MeteredDoGetStream {
         // the match arms below need `&mut this`.
         let span = this.span.clone();
         let _entered = span.enter();
-        // Issue #2821: the consumer is asking for the NEXT batch, so the encoder
-        // has finished with (and dropped) the previous one — release its credit
-        // now. See the `deferred` field doc for why this instant, and not the
-        // instant the next batch is yielded, is both correct and deadlock-free.
-        this.deferred = None;
+        // Issue #2821: return the credit of every previously-yielded batch the
+        // consumer has finished with, BEFORE polling the inner stream — a
+        // producer parked on the pool must be able to make progress on this
+        // poll. A batch the consumer is still holding keeps its credit, even if
+        // this poll goes on to return `Pending`. See `DeferredCredit`.
+        this.reap_deferred();
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(credited))) => {
                 let (batch, permit) = credited.split();
@@ -200,11 +269,14 @@ impl Stream for MeteredDoGetStream {
                 // publish the running rows and bump the per-batch emission count so
                 // a slow-consumer test can observe forward progress mid-stream.
                 this.probe.record_batch_emitted(this.rows);
-                // Hold this batch's credit until the consumer asks for the next.
-                this.deferred = Some(permit);
+                // Hold this batch's credit until the consumer drops the batch.
+                this.deferred.push(DeferredCredit::new(&batch, permit));
                 Poll::Ready(Some(Ok(batch)))
             }
             Poll::Ready(Some(Err(err))) => {
+                // Terminal: nothing further will be yielded, so release every
+                // deferred permit here rather than waiting for `Drop`.
+                this.deferred.clear();
                 this.errored = true;
                 this.disarm_guard();
                 this.finalize(false);
@@ -225,6 +297,9 @@ impl Stream for MeteredDoGetStream {
                 Poll::Ready(Some(Err(FlightError::ExternalError(Box::new(status)))))
             }
             Poll::Ready(None) => {
+                // Terminal: no further batch can be produced, so no credit needs
+                // to stay charged (see the error arm).
+                this.deferred.clear();
                 this.disarm_guard();
                 this.finalize(!this.errored);
                 Poll::Ready(None)
@@ -242,6 +317,8 @@ impl Stream for MeteredDoGetStream {
                 // presented as complete because the client is already departing.
                 if let Some(cancelled) = this.cancelled.as_mut() {
                     if cancelled.as_mut().poll(cx).is_ready() {
+                        // Terminal (see the error arm).
+                        this.deferred.clear();
                         this.disarm_guard();
                         this.finalize(!this.errored);
                         return Poll::Ready(None);
@@ -262,12 +339,12 @@ impl Drop for MeteredDoGetStream {
         let span = self.span.clone();
         let _entered = span.enter();
 
-        // Issue #2821: return the deferred batch's egress credit explicitly, so
+        // Issue #2821: return every deferred batch's egress credit explicitly, so
         // release on a client disconnect is stated at the site rather than
         // resting on field-drop order. Dropping `inner` then drops every batch
         // still queued in the channel, each releasing its own permit — RAII, so
         // no termination path can strand credit.
-        self.deferred = None;
+        self.deferred.clear();
 
         // Roborev round 4: `self.metrics` is still `Some` here ONLY when this
         // stream is being dropped BEFORE it ever reached its own terminal poll
