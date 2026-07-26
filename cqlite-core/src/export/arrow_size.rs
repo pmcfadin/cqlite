@@ -188,8 +188,12 @@ pub fn estimate_arrow_row_bytes(columns: &[ColumnInfo], row: &QueryRow) -> usize
     let mut est = Estimator::new();
     for col in columns {
         let cell = row.values.get(col.name.as_str());
-        est.push(column_shape(col), cell);
-        est.run();
+        // Charge the column's own slot DIRECTLY rather than through the
+        // worklist: a scalar column pushes no children, so the narrow path
+        // never allocates the stack at all (`Vec::new` does not allocate until
+        // its first push). Only collection/struct cells reach `drain`.
+        est.charge_slot(column_shape(col), cell);
+        est.drain();
         if est.total == usize::MAX {
             return usize::MAX;
         }
@@ -350,24 +354,30 @@ impl<'a> Estimator<'a> {
         self.stack.clear();
     }
 
-    /// Drain the worklist, charging each slot.
-    fn run(&mut self) {
+    /// Charge exactly ONE Arrow array slot, pushing any child slots it implies.
+    ///
+    /// Spends one node from the budget and fails closed when it is exhausted.
+    fn charge_slot(&mut self, shape: Shape<'a>, value: Option<&'a Value>) {
+        if self.budget == 0 {
+            self.saturate();
+            return;
+        }
+        self.budget -= 1;
+        // Every slot pays its validity bit (rounded to a byte) plus the fixed
+        // per-slot slack that absorbs the trailing offsets entry.
+        self.add(ARROW_VALIDITY_BYTES.saturating_add(ARROW_SLOT_SLACK_BYTES));
+        let value = value.map(unwrap_frozen_value);
+        match shape {
+            Shape::Cql(t) => self.charge_cql(t, value),
+            Shape::Flat(dt) => self.charge_flat(dt, value),
+            Shape::Rendered => self.charge_rendered(value),
+        }
+    }
+
+    /// Drain the worklist, charging each queued child slot.
+    fn drain(&mut self) {
         while let Some((shape, value)) = self.stack.pop() {
-            if self.budget == 0 {
-                self.saturate();
-                return;
-            }
-            self.budget -= 1;
-            // Every slot pays its validity bit (rounded to a byte) plus the
-            // fixed per-slot slack that absorbs the trailing offsets entry and
-            // arrow's short-buffer length rounding.
-            self.add(ARROW_VALIDITY_BYTES.saturating_add(ARROW_SLOT_SLACK_BYTES));
-            let value = value.map(unwrap_frozen_value);
-            match shape {
-                Shape::Cql(t) => self.charge_cql(t, value),
-                Shape::Flat(dt) => self.charge_flat(dt, value),
-                Shape::Rendered => self.charge_rendered(value),
-            }
+            self.charge_slot(shape, value);
             if self.total == usize::MAX {
                 return;
             }

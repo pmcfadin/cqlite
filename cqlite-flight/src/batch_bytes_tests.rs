@@ -378,22 +378,40 @@ fn zero_and_one_byte_caps_degrade_to_one_row_per_batch() {
     }
 }
 
-/// The accumulator itself never reports a flush with an empty buffer, for any
-/// cap — the push-then-test invariant that makes the one-row floor total.
+/// The accumulator never reports a flush with an empty buffer, for any cap —
+/// the push-then-test invariant that makes the one-row floor total.
 #[test]
-fn accumulator_never_flushes_an_empty_buffer() {
+fn accumulator_only_flushes_with_at_least_one_row_counted() {
     for cap in [0usize, 1, 64, DEFAULT_MAX_BATCH_BYTES, usize::MAX] {
         let mut acc = BatchByteCap::new(cap);
-        // A fresh accumulator has flushed nothing.
-        assert_eq!(acc.accumulated(), 0);
-        // Even a saturating width only trips AFTER the row is counted.
-        let decision = acc.push_width(usize::MAX);
-        if cap == usize::MAX {
-            assert_eq!(decision, ShouldFlush::Yes, "cap {cap}");
-        } else {
-            assert_eq!(decision, ShouldFlush::Yes, "cap {cap}");
-        }
-        assert_eq!(acc.accumulated(), usize::MAX, "cap {cap} wrapped");
+        assert_eq!(acc.rows(), 0, "cap {cap}: fresh accumulator holds rows");
+        assert_eq!(
+            acc.accumulated(),
+            0,
+            "cap {cap}: fresh accumulator holds bytes"
+        );
+
+        // Even the fail-closed saturating width only trips AFTER the row has
+        // been counted, so the flush it asks for always has a row to carry.
+        assert_eq!(acc.push_width(usize::MAX), ShouldFlush::Yes, "cap {cap}");
+        assert_eq!(acc.rows(), 1, "cap {cap}: flushed without counting the row");
+        assert_eq!(acc.accumulated(), usize::MAX, "cap {cap}: width wrapped");
+
+        acc.reset();
+        assert_eq!(acc.rows(), 0, "cap {cap}: reset left rows behind");
+
+        // A zero-width row is still a row: a `0` cap cuts after it rather than
+        // asking for an empty flush.
+        assert_eq!(
+            acc.push_width(0),
+            if cap == 0 {
+                ShouldFlush::Yes
+            } else {
+                ShouldFlush::No
+            },
+            "cap {cap}: wrong decision for a zero-width row"
+        );
+        assert_eq!(acc.rows(), 1, "cap {cap}");
     }
 }
 

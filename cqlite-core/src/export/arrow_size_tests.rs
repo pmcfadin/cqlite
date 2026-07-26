@@ -557,6 +557,103 @@ fn estimate_is_within_a_bounded_multiple_of_the_payload() {
     }
 }
 
+/// The conservatism property is DISCRIMINATING, not a tautology.
+///
+/// Spec Requirement 3 asks that a column type the converter handles but the
+/// estimator does not model FAIL the property test. Two mechanisms enforce that
+/// here. First, `column_shape`/`charge_cql`/`charge_flat` match [`CqlType`] and
+/// [`DataType`] EXHAUSTIVELY with no wildcard arm, so a newly added variant is a
+/// *compile* error before it can ever be under-counted. Second — proven below —
+/// an estimator that models a type's CONTENT but forgets its Arrow structural
+/// overhead (the exact failure mode of `Value::size_estimate`,
+/// `memory::estimate_value_size` and `Memtable::estimate_value_size`, and the
+/// likeliest shape of a careless future arm) UNDER-counts real corpus shapes and
+/// so trips the assertion.
+#[test]
+fn the_conservatism_property_catches_a_content_only_estimator() {
+    /// A deliberately unmodelled estimator: raw content bytes, zero Arrow
+    /// structural overhead. Recursion is fine here — the corpus is shallow and
+    /// this is test-only scaffolding, not the production walk.
+    fn content_only(v: &Value) -> usize {
+        match v {
+            Value::Null | Value::Tombstone(_) => 0,
+            Value::Boolean(_) | Value::TinyInt(_) => 1,
+            Value::SmallInt(_) => 2,
+            Value::Integer(_) | Value::Float32(_) | Value::Date(_) => 4,
+            Value::BigInt(_)
+            | Value::Counter(_)
+            | Value::Float(_)
+            | Value::Timestamp(_)
+            | Value::Time(_) => 8,
+            Value::Uuid(_) => 16,
+            Value::Duration { .. } => 16,
+            Value::Text(s) => s.len(),
+            Value::Blob(b) => b.len(),
+            Value::Varint(b) => b.len(),
+            Value::Inet(b) => b.len(),
+            Value::Decimal { unscaled, .. } => unscaled.len(),
+            Value::Json(j) => j.to_string().len(),
+            Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
+                items.iter().map(content_only).sum()
+            }
+            Value::Map(pairs) => pairs
+                .iter()
+                .map(|(k, v)| content_only(k) + content_only(v))
+                .sum(),
+            Value::Udt(u) => u
+                .fields
+                .iter()
+                .filter_map(|f| f.value.as_ref())
+                .map(content_only)
+                .sum(),
+            Value::Frozen(inner) => content_only(inner),
+        }
+    }
+
+    let mut under_counted: Vec<&str> = Vec::new();
+    for shape in shape_corpus() {
+        let naive: usize = shape
+            .rows
+            .iter()
+            .map(|r| {
+                shape
+                    .columns
+                    .iter()
+                    .filter_map(|c| r.values.get(c.name.as_str()))
+                    .map(content_only)
+                    .sum::<usize>()
+            })
+            .sum();
+        let batch = rows_to_record_batch(&shape.columns, &shape.rows).expect("convert");
+        if naive < arrow_payload_bytes(&batch) {
+            under_counted.push(shape.name);
+        }
+    }
+    assert!(
+        !under_counted.is_empty(),
+        "a content-only estimator under-counted NOTHING — the conservatism \
+         property test cannot detect an unmodelled type and is a tautology"
+    );
+    // And the real estimator covers every one of those same shapes (the
+    // property test above asserts this for the whole corpus).
+    for name in &under_counted {
+        let shape = shape_corpus()
+            .into_iter()
+            .find(|s| &s.name == name)
+            .unwrap_or_else(|| panic!("missing shape '{name}'"));
+        let estimated: usize = shape
+            .rows
+            .iter()
+            .map(|r| estimate_arrow_row_bytes(&shape.columns, r))
+            .sum();
+        let batch = rows_to_record_batch(&shape.columns, &shape.rows).expect("convert");
+        assert!(
+            estimated >= arrow_payload_bytes(&batch),
+            "shape '{name}' under-counted by the REAL estimator"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Requirement 3: width sensitivity
 // ---------------------------------------------------------------------------

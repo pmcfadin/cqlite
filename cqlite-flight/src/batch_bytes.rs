@@ -14,8 +14,9 @@
 //! # The mechanism
 //!
 //! [`BatchByteCap`] is a running accumulator: each buffered row's
-//! [`estimate_arrow_row_bytes`] width is [`push`](BatchByteCap::push)ed as the
-//! row enters the buffer, and the producer flushes when EITHER the row-cap or
+//! [`estimate_arrow_row_bytes`] width is fed to
+//! [`push_width`](BatchByteCap::push_width) as the row enters the buffer, and
+//! the producer flushes when EITHER the row-cap or
 //! this byte-cap trips — whichever comes first. The decision is made **before**
 //! `rows_to_record_batch` allocates anything: building a batch to discover it is
 //! oversized is a report, not a cap, and `RecordBatch::get_array_memory_size()`
@@ -59,8 +60,9 @@
 //! Push-then-test: a batch is cut only when the buffer is **non-empty** and the
 //! accumulated estimate has reached the cap. A single row wider than the whole
 //! cap is delivered as a one-row batch — never dropped, never a stall. Caps of
-//! `0` and `1` degrade to one row per batch rather than hanging, the same clamp
-//! posture as `batch_size.max(1)`.
+//! `0` and `1` therefore degrade to one row per batch rather than hanging — the
+//! same *outcome* `batch_size.max(1)` gives the row-cap, reached by the ordering
+//! rule instead of by clamping the operator's configured value.
 
 use cqlite_core::export::estimate_arrow_row_bytes;
 use cqlite_core::query::{ColumnInfo, QueryRow};
@@ -173,6 +175,13 @@ impl BatchByteCap {
         self.accumulated
     }
 
+    /// Rows accumulated into the current batch since the last [`Self::reset`].
+    /// A [`ShouldFlush::Yes`] can only ever be reported with this at 1 or more —
+    /// the one-row floor.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
     /// Account for one row that has just been pushed into the buffer, and report
     /// whether the batch must now be finished.
     ///
@@ -188,6 +197,9 @@ impl BatchByteCap {
     pub fn push_width(&mut self, width: usize) -> ShouldFlush {
         self.accumulated = self.accumulated.saturating_add(width);
         self.rows = self.rows.saturating_add(1);
+        // `rows >= 1` unconditionally here — the row was counted first. Stated
+        // as a real conjunct rather than an assertion so a future edit that
+        // moves the increment cannot silently break the one-row floor.
         if self.rows > 0 && self.accumulated >= self.cap {
             ShouldFlush::Yes
         } else {
