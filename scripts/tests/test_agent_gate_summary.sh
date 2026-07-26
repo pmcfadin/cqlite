@@ -67,19 +67,49 @@ trap 'rm -rf "$tmp"' EXIT
 # to come), and ` mold=` is Linux-only — so an end-anchored per-token assert is a
 # latent, host-conditional break. Therefore:
 #   tier 1 (tolerant): every PER-TOKEN assert matches its token as a FIELD via the
-#     `( |$)` idiom (assert_mold_token / accel_health_token_is), so an appended
-#     token can never redden it. The token's VALUE is still matched exactly.
+#     whole-token idiom (mold_token_is / accel_health_token_is, both used by the
+#     asserts above them), so an appended token can never redden it. The token's
+#     VALUE is still matched exactly.
 #   tier 2 (strict): ONE whole-line grammar, $ACCEL_LINE_RE below, enumerating every
 #     legal token. It is the deliberate canary: adding a token to agent-gate.sh
-#     without extending this grammar reddens exactly one well-named check that says
-#     "update the grammar" — instead of N misleading per-token failures. Do NOT
-#     relax it to a `.*` tail; that is the failure mode this design prevents.
+#     without extending this grammar reddens EVERY assert_accelerators call site
+#     (~7 of them) with the same `malformed accelerators line: '<the line>'` message,
+#     which names the offending line and points here. That is loud and uniform by
+#     design — one grammar to extend, not N per-token asserts to chase. Do NOT relax
+#     it to a `.*` tail; that is the failure mode this design prevents.
 ACCEL_LINE_RE='^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial) sccache-health=(na|ok|warn)( mold=(linked|overridden|present-unconfigured|absent))?$'
+
+# accel_line_of <file>: print the FIRST `accelerators: ` line of <file> (rc 0), or
+# print nothing (rc 1). `grep -m1` + capture-to-a-variable, deliberately with NO
+# pipeline: this script runs under `set -uo pipefail`, where a
+# `grep … | head -1 | grep -q` pipeline can return 141 because the leftmost grep is
+# SIGPIPEd by head's early exit — which corrupts the exit status of every PREDICATE
+# built on it (a wrong-value NEGATIVE assert would then "pass" without testing
+# anything). Every helper below captures the line here first, then matches it
+# in-memory, so no predicate rc in this file can be SIGPIPEd.
+accel_line_of() {
+  local file="$1" line
+  line=$(grep -m1 -E '^accelerators: ' "$file" 2>/dev/null) || return 1
+  printf '%s\n' "$line"
+}
+
+# body_mentions <text> <needle>: PREDICATE (rc 0/1) — does <text> contain <needle>
+# on a NON-comment line? Same pipefail hazard as above and it really bites here: the
+# `printf … | grep -v … | grep -q` shape this replaces was observed returning 141
+# (leftmost grep SIGPIPEd by `grep -q`'s early exit) on a function body large enough
+# to outlive the pipe buffer — reddening a POSITIVE structural assert at random and,
+# worse, silently GREENING the negative one below it. Comment-stripping happens in a
+# command substitution (rc irrelevant); the match is an in-memory `[[ == ]]`.
+body_mentions() {
+  local text="$1" needle="$2" stripped
+  stripped=$(grep -v '^[[:space:]]*#' <<<"$text")
+  [[ $stripped == *"$needle"* ]]
+}
 
 assert_accelerators() {
   local label="$1" file="$2"
   local line
-  line=$(grep -E '^accelerators: ' "$file" 2>/dev/null | head -1)
+  line=$(accel_line_of "$file")
   if [ -z "$line" ]; then
     bad "$label: no 'accelerators:' line in SUMMARY block (file: $file)"
     echo "------- captured -------"; cat "$file"; echo "------------------------"
@@ -87,43 +117,50 @@ assert_accelerators() {
   fi
   # The optional trailing ` mold=<state>` token (issue #2859) appears on Linux
   # hosts only; Darwin output ends at sccache-health, byte-identical to pre-change.
-  if printf '%s\n' "$line" | grep -Eq "$ACCEL_LINE_RE"; then
+  if [[ $line =~ $ACCEL_LINE_RE ]]; then
     ok "$label: accelerators line well-formed ($line)"
   else
     bad "$label: malformed accelerators line: '$line'"
   fi
 }
 
+# accel_token_is <file> <key> <expected>: PREDICATE (rc 0/1, silent) — does the
+# accelerators line carry `<key>=<expected>` as a WHOLE space-delimited FIELD? This is
+# the tier-1 idiom: a further trailing token (` mold=` #2859, any future one) cannot
+# break it, while the value stays exact (`ok` never matches `okay`, `linked` never
+# matches `linkedX`). The quoted `$expected` inside the case pattern is literal, so a
+# value can never act as a glob; there is no pipeline, so the rc is never SIGPIPEd.
+accel_token_is() {
+  local file="$1" key="$2" expected="$3" line
+  line=$(accel_line_of "$file") || return 1
+  case " $line " in
+    *" $key=$expected "*) return 0 ;;
+  esac
+  return 1
+}
+
+# mold_token_is <file> <expected>  /  accel_health_token_is <file> <expected>:
+# the two tier-1 per-token predicates. Both are shared by the asserts below/above and
+# by the 9c-iv regression guard, which must assert both the TRUE and the FALSE outcome.
+mold_token_is()          { accel_token_is "$1" mold "$2"; }
+accel_health_token_is()  { accel_token_is "$1" sccache-health "$2"; }
+
 # assert_mold_token <label> <file> <expected>: assert the accelerators line's mold
 # token (issue #2859). <expected> is a state (linked|present-unconfigured|absent)
 # or the literal "none" to require NO mold token (the Darwin contract).
 assert_mold_token() {
   local label="$1" file="$2" expected="$3" line
-  line=$(grep -E '^accelerators: ' "$file" 2>/dev/null | head -1)
+  line=$(accel_line_of "$file")
   if [ "$expected" = none ]; then
-    if printf '%s\n' "$line" | grep -q ' mold='; then
-      bad "$label: mold token present but expected none ($line)"
-    else
-      ok "$label: no mold token (Darwin contract)"
-    fi
+    case " $line " in
+      *" mold="*) bad "$label: mold token present but expected none ($line)" ;;
+      *)          ok  "$label: no mold token (Darwin contract)" ;;
+    esac
+  elif mold_token_is "$file" "$expected"; then
+    ok "$label: mold=$expected present"
   else
-    if printf '%s\n' "$line" | grep -qE " mold=$expected(\$| )"; then
-      ok "$label: mold=$expected present"
-    else
-      bad "$label: expected mold=$expected, got: '$line'"
-    fi
+    bad "$label: expected mold=$expected, got: '$line'"
   fi
-}
-
-# accel_health_token_is <file> <expected>: PREDICATE (rc 0/1, silent) — does the
-# accelerators line carry `sccache-health=<expected>` as a FIELD? Tier-1 idiom, so a
-# further trailing token (` mold=` #2859, any future one) cannot break it; the value
-# is still exact, `ok( |$)` never matches `okay`. Shared by the 9c asserts and by the
-# 9c-iv regression guard, which needs to assert both the TRUE and the FALSE outcome.
-accel_health_token_is() {
-  local file="$1" expected="$2"
-  grep -E '^accelerators: ' "$file" 2>/dev/null | head -1 \
-    | grep -qE " sccache-health=$expected( |\$)"
 }
 
 # assert_exit <label> <actual-rc> <expected-rc>: assert a captured exit status.
@@ -586,7 +623,7 @@ fi
 #     routing: no second cqlite-py exclusion loop over a package set. Extracting
 #     the function body with awk is deterministic (top-level `}` ends it).
 rst_body=$(awk '/^run_scoped_tests\(\)/{f=1} f{print} f&&/^\}/{exit}' "$GATE")
-if printf '%s\n' "$rst_body" | grep -v '^[[:space:]]*#' | grep -q 'classify_scoped_plan'; then
+if body_mentions "$rst_body" 'classify_scoped_plan'; then
   ok "py-route: executor (run_scoped_tests) consumes classify_scoped_plan (single routing source)"
 else
   bad "py-route: run_scoped_tests no longer calls classify_scoped_plan — routing has been duplicated or forked from the asserted plan"
@@ -594,7 +631,7 @@ fi
 # The executor must not re-implement the cqlite-py exclusion itself: outside
 # comments, 'cqlite-py' must not appear in run_scoped_tests (the exclusion lives
 # only in classify_scoped_plan, which the py-route cases assert directly).
-if printf '%s\n' "$rst_body" | grep -v '^[[:space:]]*#' | grep -q 'cqlite-py'; then
+if body_mentions "$rst_body" 'cqlite-py'; then
   bad "py-route: run_scoped_tests re-implements cqlite-py routing inline (must come from classify_scoped_plan only)"
   printf '%s\n' "$rst_body" | grep -v '^[[:space:]]*#' | grep -n 'cqlite-py'
 else
@@ -654,7 +691,7 @@ fi
 # 7g. Executor consumes the SINGLE compile-check routing function (issue #2658):
 #     an executor-only edit must not fork the compile-check plan. Structurally
 #     assert run_scoped_tests invokes classify_core_dependent_compile_check.
-if printf '%s\n' "$rst_body" | grep -v '^[[:space:]]*#' | grep -q 'classify_core_dependent_compile_check'; then
+if body_mentions "$rst_body" 'classify_core_dependent_compile_check'; then
   ok "core-dep: executor (run_scoped_tests) consumes classify_core_dependent_compile_check (single source)"
 else
   bad "core-dep: run_scoped_tests does not call classify_core_dependent_compile_check — compile-check routing forked"
@@ -872,24 +909,44 @@ fi
 #        This case pins the two-tier contract documented at $ACCEL_LINE_RE by
 #        synthesizing tomorrow's token on a COPY of a REAL emitted summary — the gate
 #        script and its output are untouched, this is a test-side mutation only.
+#        The sentinel is deliberately `__unknown-future-token__=x`, a string nobody
+#        could ever legitimately ship as an accelerator token: a plausible name (say
+#        `lto=thin`) would turn this guard into a false accusation on the day someone
+#        correctly adds that token AND extends $ACCEL_LINE_RE.
+#        The base fixture forces OS=Linux + mold=linked + sccache-health=ok so the
+#        line deterministically carries BOTH tier-1 tokens on any host, and the
+#        sentinel lands immediately after ` mold=` — the position tomorrow's token
+#        will actually occupy.
+FUTURE_TOKEN='__unknown-future-token__=x'
+future_base="$tmp/health-future-base.txt"
 future_accel="$tmp/health-future-token.txt"
-sed 's/^accelerators: .*/& lto=thin/' "$tmp/health-ok.txt" >"$future_accel"
-if grep -qE '^accelerators: .* sccache-health=ok( .*)? lto=thin$' "$future_accel"; then
-  ok "accel-future-token: guard fixture really carries an unknown trailing token"
+AGENT_GATE_SUMMARY_FILE="$future_base" \
+  AGENT_GATE_TEST_OS=Linux AGENT_GATE_TEST_MOLD_STATE=linked \
+  AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+# The UNMUTATED base must satisfy the grammar — otherwise the canary below would be
+# "armed" by a pre-existing defect rather than by the synthesized token.
+assert_accelerators "accel-future-token-base" "$future_base"
+sed "s/^accelerators: .*/& $FUTURE_TOKEN/" "$future_base" >"$future_accel"
+if grep -qF " mold=linked $FUTURE_TOKEN" "$future_accel"; then
+  ok "accel-future-token: guard fixture really carries an unknown token after ' mold='"
 else
   bad "accel-future-token: guard fixture did not gain a trailing token (guard is vacuous)"
   grep '^accelerators:' "$future_accel" 2>/dev/null || cat "$future_accel"
 fi
-# Tier 1: the per-token health assert must survive the unknown trailing token.
+# Tier 1: BOTH per-token asserts must survive the unknown trailing token — including
+# assert_mold_token, whose token is the last one today and so is the most exposed.
 if accel_health_token_is "$future_accel" ok; then
   ok "accel-future-token: sccache-health assert survives an unknown trailing token"
 else
   bad "accel-future-token: an appended token broke the sccache-health assert (#2914 regression)"
   grep '^accelerators:' "$future_accel" 2>/dev/null || cat "$future_accel"
 fi
-# ...and must NOT have been weakened into accepting a WRONG value, nor a value of
+assert_mold_token "accel-future-token" "$future_accel" linked
+# ...and neither may have been weakened into accepting a WRONG value, nor a value of
 # which the truth is a prefix/superstring. Tolerating a new token != tolerating a
-# bad health state.
+# bad token value. (The negative direction is asserted through the same predicates
+# the asserts above are built from.)
 wrong_val_ok=1
 for wrong in warn na o okay; do
   if accel_health_token_is "$future_accel" "$wrong"; then
@@ -897,13 +954,21 @@ for wrong in warn na o okay; do
     wrong_val_ok=0
   fi
 done
+for wrong in absent overridden present-unconfigured linke linkedx; do
+  if mold_token_is "$future_accel" "$wrong"; then
+    bad "accel-future-token: mold assert wrongly matched mold=$wrong (value check weakened)"
+    wrong_val_ok=0
+  fi
+done
 if [ "$wrong_val_ok" -eq 1 ]; then
-  ok "accel-future-token: wrong/partial health values still FAIL (value matched exactly)"
+  ok "accel-future-token: wrong/partial health+mold values still FAIL (values matched exactly)"
 fi
 # Tier 2: the whole-line grammar is the canary and must REJECT the unknown token, so
-# a future token addition produces one actionable "extend the grammar" failure rather
-# than silence. If this ever goes green, the grammar has been relaxed to a `.*` tail.
-if grep -E '^accelerators: ' "$future_accel" | head -1 | grep -Eq "$ACCEL_LINE_RE"; then
+# a future token addition reddens the assert_accelerators call sites with an
+# actionable "malformed accelerators line" naming the line — rather than passing in
+# silence. If this ever goes green, the grammar has been relaxed to a `.*` tail.
+future_line=$(accel_line_of "$future_accel")
+if [[ $future_line =~ $ACCEL_LINE_RE ]]; then
   bad "accel-future-token: whole-line grammar accepted an unknown token (canary disarmed)"
 else
   ok "accel-future-token: whole-line grammar still REJECTS an unknown token (canary armed)"
@@ -1175,7 +1240,7 @@ fi
 #      invokes it — otherwise an executor edit could silently drop aggregation while
 #      these cases stay green. Extract the function body with awk (top-level `}` ends it).
 rl_body=$(awk '/^run_lite\(\)/{f=1} f{print} f&&/^\}/{exit}' "$GATE")
-if printf '%s\n' "$rl_body" | grep -v '^[[:space:]]*#' | grep -q 'aggregate_lite_components'; then
+if body_mentions "$rl_body" 'aggregate_lite_components'; then
   ok "2121-structural: run_lite invokes aggregate_lite_components (lite OVERALL aggregation single-sourced)"
 else
   bad "2121-structural: run_lite no longer calls aggregate_lite_components — lite OVERALL aggregation lost"
