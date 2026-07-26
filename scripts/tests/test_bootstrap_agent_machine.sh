@@ -612,7 +612,13 @@ case "\$1" in
     fi
     exit 0 ;;
   project) exit $prc ;;
-  api)     exit $arc ;;
+  # The GraphQL probe demands a NON-EMPTY project id — `gh api graphql` exits 0 on a
+  # query that RESOLVES TO NULL, so an exit code alone would be a false OK. api-rc
+  # 'null' simulates exactly that: a clean exit carrying no project.
+  api)
+    if [ "$arc" = null ]; then exit 0; fi
+    [ "$arc" = 0 ] && echo "PVT_kwStubProjectId"
+    exit "$arc" ;;
   *)       exit 0 ;;
 esac
 EOF
@@ -681,6 +687,16 @@ if printf '%s' "$BOARD_OUT" | grep -Eq '\[warn\].*board' \
 else
   bad "board: unreachable board did not warn"
   printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board"
+fi
+
+# 8f. GraphQL exits 0 but resolves to NO project (wrong owner kind / wrong number).
+#     An exit-code-only probe would call that reachable — it must not.
+run_board_case nullproject "'project', 'repo', 'workflow'" "" 1 null
+if printf '%s' "$BOARD_OUT" | grep -Eq '\[warn\].*(UNREACHABLE|BOTH probes failed)'; then
+  ok "board: GraphQL exit 0 with a null project counts as a FAILED probe, not reachable"
+else
+  bad "board: null-project GraphQL reply was treated as a working fallback"
+  printf '%s\n' "$BOARD_OUT" | grep -i -A3 "board #"
 fi
 
 # 8e. The probe is READ-ONLY: across every case above, the bootstrap must never

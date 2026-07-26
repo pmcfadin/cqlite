@@ -358,6 +358,26 @@ fi
 BOARD_OWNER="${CQLITE_PROJECT_OWNER:-pmcfadin}"
 BOARD_NUMBER="${CQLITE_PROJECT_NUMBER:-1}"
 BOARD_GRAPHQL_WRITE="updateProjectV2ItemFieldValue"
+
+# board_graphql_read <owner> <number> — READ-ONLY projectV2 lookup, the read
+# counterpart of the write fallback, so its result says whether that fallback is
+# actually available on this token. Success requires a NON-EMPTY project id:
+# `gh api graphql` exits 0 on a well-formed query that resolves to null (e.g. an
+# org-owned board queried as a user), which would otherwise read as a false OK.
+# Tries user-owned first (what project-board-sync.yml uses), then org-owned.
+board_graphql_read() {
+  local owner="$1" number="$2" id
+  id=$(gh api graphql -f owner="$owner" -F number="$number" \
+        -f query='query($owner:String!,$number:Int!){user(login:$owner){projectV2(number:$number){id}}}' \
+        --jq '.data.user.projectV2.id' 2>/dev/null)
+  if [ -z "$id" ] || [ "$id" = null ]; then
+    id=$(gh api graphql -f owner="$owner" -F number="$number" \
+          -f query='query($owner:String!,$number:Int!){organization(login:$owner){projectV2(number:$number){id}}}' \
+          --jq '.data.organization.projectV2.id' 2>/dev/null)
+  fi
+  [ -n "$id" ] && [ "$id" != null ]
+}
+
 hdr "GitHub board access + project scope (Path A, #1886)"
 if have gh; then
   if gh auth status >/dev/null 2>&1; then
@@ -366,7 +386,9 @@ if have gh; then
     # Token-boundary match on the scopes line so a scope like 'project:read-only'
     # (or any 'xprojecty' substring) can never false-positive as 'project'.
     scopes_line=$(printf '%s\n' "$auth_out" | grep "Token scopes:" | head -1)
+    scope_prefilter=0
     if printf '%s\n' "$scopes_line" | grep -qE "(^|[ ,'])project([ ,']|$)"; then
+      scope_prefilter=1
       info "pre-filter: 'project' scope present (NOT the verdict — the probe below decides)"
     else
       warn "'project' scope MISSING — the board is the SOLE dispatch authority (Path A). Fix:"
@@ -381,12 +403,8 @@ if have gh; then
     board_read=1
     gh project view "$BOARD_NUMBER" --owner "$BOARD_OWNER" >/dev/null 2>&1 || board_read=0
     # READ-ONLY probe 2: does the GraphQL projectV2 surface answer with this token?
-    # This is the read counterpart of the write fallback, so its result tells the
-    # operator whether the fallback path is actually available.
     graphql_read=1
-    gh api graphql -f owner="$BOARD_OWNER" -F number="$BOARD_NUMBER" \
-      -f query='query($owner:String!,$number:Int!){user(login:$owner){projectV2(number:$number){id title}}}' \
-      >/dev/null 2>&1 || graphql_read=0
+    board_graphql_read "$BOARD_OWNER" "$BOARD_NUMBER" || graphql_read=0
     if [ "$board_read" = 1 ] && [ -z "$missing_scopes" ]; then
       ok "board #$BOARD_NUMBER ($BOARD_OWNER) reachable — 'gh project' read probe OK, no missing token scopes"
     elif [ "$board_read" = 1 ]; then
@@ -394,7 +412,7 @@ if have gh; then
       info "board WRITES: fall back to the GraphQL \`$BOARD_GRAPHQL_WRITE\` mutation (it succeeds with the SAME token; graphql projectV2 read probe: $([ "$graphql_read" = 1 ] && echo OK || echo FAILED))"
       info "or widen the token:  gh auth refresh -s read:org"
     elif [ "$graphql_read" = 1 ]; then
-      warn "'gh project' CANNOT use board #$BOARD_NUMBER ($BOARD_OWNER) even though the scope pre-filter passed${missing_list:+ — gh reports missing required scopes ($missing_list)}"
+      warn "'gh project' CANNOT use board #$BOARD_NUMBER ($BOARD_OWNER)$([ "$scope_prefilter" = 1 ] && printf ' even though the scope pre-filter passed')${missing_list:+ — gh reports missing required scopes ($missing_list)}"
       info "the GraphQL projectV2 read probe SUCCEEDED with the same token — board WRITES must go through the \`$BOARD_GRAPHQL_WRITE\` mutation, not \`gh project item-edit\`"
       info "or widen the token:  gh auth refresh -s read:org"
     else
