@@ -209,6 +209,7 @@ fn capacity_from(active: usize, budget: usize, min_cap: usize) -> usize {
 
 /// The runtime-resolved minimum per-channel capacity (env-overridable). Used by
 /// the wiring tests' clamp-range assertions so they track an override too.
+#[cfg(test)]
 pub(super) fn min_cap() -> usize {
     resolved().1
 }
