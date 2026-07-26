@@ -190,11 +190,18 @@ fn strip_index_siblings(data_path: &std::path::Path) {
 
 /// Baseline-return (Low #3): building then dropping a REAL `KWayMerger` must
 /// leave the process-global active-merge count exactly where it started — proof
-/// the RAII guard's decrement fires on a real merger drop (not just the
-/// private-atomic pairing test). Retried to tolerate transient ambient merges
-/// from parallel tests: a genuine missing-decrement leak elevates the count
-/// PERMANENTLY, so it would fail EVERY attempt, whereas ambient noise clears in
-/// some quiet window.
+/// the RAII guard's decrement fires on a real merger drop.
+///
+/// A single `.any()` quiet window (the prior shape) accepted the FIRST clean
+/// build, so a PROBABILISTIC leak (say one build in ten failing to decrement)
+/// could still pass on a lucky window. This instead requires the invariant to
+/// hold across several INDEPENDENT quiet windows AND treats a leak OBSERVED in a
+/// quiet window as immediately FATAL: an attempt is a "quiet window" only when
+/// the build moved the count by EXACTLY our `+1` (`mid == before + 1`, so no
+/// ambient merge touched it during the build); in such a window the drop MUST
+/// return the count (`after <= before`) or it is a proven leak. We require
+/// `REQUIRED_WINDOWS` such windows within a small ceiling; ambient-perturbed
+/// attempts are skipped (retried), never counted as a pass.
 #[test]
 fn real_merger_drop_returns_its_active_merge_slot() {
     let temp = TempDir::new().expect("temp dir");
@@ -202,27 +209,36 @@ fn real_merger_drop_returns_its_active_merge_slot() {
     let paths = flush_n_sstables_sync(&mut engine, 1);
     let schema = create_test_schema();
 
-    // A CONCLUSIVE attempt requires BOTH halves in a quiet window: the build
-    // strictly incremented the count (`held > before` — teeth against a
-    // regression that stopped REGISTERING the slot) AND the drop returned it
-    // (`after <= before` — teeth against a missing DECREMENT). Ambient churn from
-    // a parallel test that breaks either half is simply not a quiet window, so
-    // that attempt is retried — it is NEVER treated as a free pass. A real leak
-    // keeps `after` permanently elevated, failing EVERY attempt.
-    let proven = (0..256).any(|_| {
+    const REQUIRED_WINDOWS: usize = 3;
+    const CEILING: usize = 24;
+    let mut quiet_windows = 0usize;
+    for _ in 0..CEILING {
         let before = egress_budget::active_count();
-        let held = {
+        let mid = {
             let _m = KWayMerger::new_cancellable(paths.clone(), &schema, ScanCancel::default())
                 .expect("merger builds");
             egress_budget::active_count()
         };
         let after = egress_budget::active_count();
-        held > before && after <= before
-    });
+        // Only a strictly-quiet build window (our `+1` alone) is conclusive;
+        // otherwise ambient churn makes the reading ambiguous → skip + retry.
+        if mid == before + 1 {
+            assert!(
+                after <= before,
+                "active-merge slot LEAKED on drop (before={before}, mid={mid}, \
+                 after={after}) — the guard's decrement did not fire"
+            );
+            quiet_windows += 1;
+            if quiet_windows >= REQUIRED_WINDOWS {
+                break;
+            }
+        }
+    }
     assert!(
-        proven,
-        "a real KWayMerger must register its active-merge slot on build and \
-         return it on drop (no leak)"
+        quiet_windows >= REQUIRED_WINDOWS,
+        "needed {REQUIRED_WINDOWS} quiet windows to prove build-increment + \
+         drop-decrement (saw {quiet_windows} in {CEILING} attempts) — the suite \
+         was too busy to observe a clean window, not a pass"
     );
 }
 

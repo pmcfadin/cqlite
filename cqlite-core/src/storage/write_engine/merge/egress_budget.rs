@@ -84,15 +84,21 @@
 //!
 //! A missing/unparseable/zero value falls back to the default (never panics).
 //!
-//! ## AC#3 grounding (throughput evidence)
+//! ## AC#3 grounding (throughput evidence) — NOT "gap closed"
+//!
+//! With the DEFAULT budget `2048` / `MAX_CAP` `256` the throttle is INERT at ≤ 8
+//! concurrent merges (`2048 / 8 = 256`, i.e. the cap stays at the pre-change
+//! 256): it ENGAGES (per-channel cap falls below 256) only ABOVE 8 concurrent
+//! merges, and the [`MIN_CAP`] floor only at `budget / min_cap` ≈ 256 concurrent
+//! merges. So this change does NOT by itself "close" the #2600/#2367
+//! backpressure gap — it installs the MECHANISM (and the operator knobs to tune
+//! it); whether the DEFAULT bounds are the right ones at field concurrency is
+//! validated/tuned by the **#2895** flight-loadgen sweep (deferred follow-up).
 //!
 //! The reverted `STREAMING_CHANNEL_CAPACITY = 32` experiment in #2765 measured
 //! the egress-channel depth SHRINKING at FLAT qps and p99 — i.e. the buffering
 //! was slack, not a throughput floor, so bounding it does not cost throughput at
-//! the concurrency levels tested. [`MIN_CAP`] only engages at very high
-//! concurrency (`budget / min_cap` ≈ 256 concurrent merges at the defaults), so
-//! typical loads never touch the floor. A fresh flight-loadgen sweep validating
-//! these defaults end-to-end is tracked in **#2895** (deferred follow-up).
+//! the concurrency levels tested.
 //!
 //! This budget is ORTHOGONAL to the #2419 `channel_depth` gauge: that gauge
 //! observes live occupancy; this bounds the per-channel capacity ceiling. Kept
@@ -174,21 +180,18 @@ fn resolve_budget(env_budget: Option<&str>, env_min_cap: Option<&str>) -> (usize
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// Record the operator-facing `cqlite.merge.active_merges` gauge (issue #2765),
-/// mirroring the `producer_gauge::record` pattern. Called ONLY for the real
-/// global path (`begin_merge` / its guard's drop), never for the per-test
-/// private-atomic path, so the gauge always reflects the true process-wide
-/// concurrency.
+/// mirroring the `producer_gauge::record` pattern: publish the post-transition
+/// `level` the caller already computed from its own `fetch_add`/`fetch_sub`.
 ///
-/// Low #4: re-reads [`ACTIVE`] HERE, immediately before publishing, rather than
-/// recording a value latched before a concurrent begin/drop. The `fetch_add`/
-/// `fetch_sub` and this record are not one atomic, so recording the pre-computed
-/// count could publish out-of-order samples that under-report the live level;
-/// re-reading makes the publish last-write-wins-convergent to the current count
-/// (still lock-free).
-fn record_active() {
+/// The gauge is EVENTUALLY-CONSISTENT, not strictly synchronized: the atomic
+/// update and this record are two separate steps, so two concurrent transitions
+/// can publish out of order and the gauge may briefly show a stale level until
+/// the NEXT begin/drop re-publishes — the same lock-free convention as
+/// `producer_gauge`. A lock/seqlock would be overkill for a diagnostic gauge.
+fn record_active(level: usize) {
     observability::record_gauge(
         observability::catalog::MERGE_ACTIVE_MERGES,
-        ACTIVE.load(Ordering::SeqCst) as i64,
+        level as i64,
         &[],
     );
 }
@@ -247,50 +250,56 @@ pub(super) fn budget() -> usize {
 /// per channel. The returned guard MUST be stored for the merge's lifetime (on
 /// the `KWayMerger`, dropped AFTER its runs/channels) so exactly one decrement
 /// pairs with this increment on every exit path.
+///
+/// Always targets the process-global [`ACTIVE`] and always publishes the gauge —
+/// no injectable atomic and no `record` branch on this hot path (the per-test
+/// private-atomic seam is the `#[cfg(test)]`-only [`begin_on_for_test`]).
 #[must_use]
 pub(super) fn begin_merge() -> (usize, ActiveMergeGuard) {
-    begin_on(&ACTIVE, true)
+    let active = ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+    record_active(active);
+    (capacity_for(active), ActiveMergeGuard)
 }
 
-/// Increment `counter`, resolve the capacity from the post-increment count, and
-/// return a guard bound to `counter`. Parameterized over the atomic (mirroring
-/// `channel_depth::adjust`) so a test can drive this EXACT increment/guard-drop
-/// pairing against a PRIVATE atomic — deterministic, never racing the other
-/// tests in this binary that drive real merges through the shared [`ACTIVE`].
-///
-/// `record` gates the operator gauge: `true` ONLY for the real global path
-/// ([`begin_merge`]), `false` for per-test private atomics, so a test can never
-/// publish a bogus `cqlite.merge.active_merges` level from a private count.
-fn begin_on(counter: &'static AtomicUsize, record: bool) -> (usize, ActiveMergeGuard) {
-    let active = counter.fetch_add(1, Ordering::SeqCst) + 1;
-    if record {
-        // Low #4: publish the freshest global level, not the latched `active`.
-        record_active();
-    }
-    // `capacity_for` snapshots from THIS merge's own post-increment count, which
-    // is what the merge must be sized by — independent of the gauge re-read.
-    (capacity_for(active), ActiveMergeGuard { counter, record })
-}
-
-/// RAII guard that decrements the active-merge count when a streaming merge
-/// finishes — on normal completion, early return, or panic. Stored on the
-/// `KWayMerger` (dropped after its runs/channels) so exactly one decrement
-/// pairs with the merge's single [`begin_merge`] increment.
+/// RAII guard that decrements the process-global active-merge count (and
+/// re-publishes the gauge) when a streaming merge finishes — on normal
+/// completion, early return, or panic. Stored on the `KWayMerger` (dropped after
+/// its runs/channels) so exactly one decrement pairs with the merge's single
+/// [`begin_merge`] increment.
 #[derive(Debug)]
-pub(super) struct ActiveMergeGuard {
-    counter: &'static AtomicUsize,
-    /// Whether to re-record the operator gauge on decrement — see [`begin_on`].
-    record: bool,
-}
+pub(super) struct ActiveMergeGuard;
 
 impl Drop for ActiveMergeGuard {
     fn drop(&mut self) {
+        let level = ACTIVE.fetch_sub(1, Ordering::SeqCst) - 1;
+        record_active(level);
+    }
+}
+
+/// Test-only injectable seam: run the EXACT increment/capacity/guard-drop pairing
+/// [`begin_merge`] uses, but against a PRIVATE `&'static AtomicUsize` (a
+/// `Box::leak`ed per-test counter) and WITHOUT touching the process-global gauge
+/// — so a test can drive deterministic concurrency without racing the shared
+/// [`ACTIVE`] or publishing a bogus `cqlite.merge.active_merges` level (#2451
+/// isolation). The returned guard decrements that private counter on drop.
+#[cfg(test)]
+pub(super) fn begin_on_for_test(counter: &'static AtomicUsize) -> (usize, TestMergeGuard) {
+    let active = counter.fetch_add(1, Ordering::SeqCst) + 1;
+    (capacity_for(active), TestMergeGuard { counter })
+}
+
+/// Test-only counterpart of [`ActiveMergeGuard`] bound to a private atomic; its
+/// drop decrements that counter only (never the global gauge). See
+/// [`begin_on_for_test`].
+#[cfg(test)]
+pub(super) struct TestMergeGuard {
+    counter: &'static AtomicUsize,
+}
+
+#[cfg(test)]
+impl Drop for TestMergeGuard {
+    fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::SeqCst);
-        if self.record {
-            // Low #4: re-read the global count so a concurrent begin/drop can't
-            // leave the gauge under-reporting the live level.
-            record_active();
-        }
     }
 }
 
@@ -306,9 +315,10 @@ impl super::KWayMerger {
     /// with `None` and silently un-register a live merge; the `debug_assert`
     /// additionally catches a double-attach that would drop a still-live guard
     /// early and under-count concurrency. Kept in this sibling module (not
-    /// `merge/mod.rs`) to bound that over-threshold file (#1116).
+    /// `merge/mod.rs`) to bound that over-threshold file (#1116). `pub(super)`
+    /// (matching [`ActiveMergeGuard`]'s visibility) — uncallable outside `merge`.
     #[must_use]
-    pub(crate) fn with_egress_slot(mut self, egress_slot: ActiveMergeGuard) -> Self {
+    pub(super) fn with_egress_slot(mut self, egress_slot: ActiveMergeGuard) -> Self {
         debug_assert!(
             self._egress_slot.is_none(),
             "with_egress_slot must not overwrite a live active-merge slot"
@@ -480,7 +490,7 @@ mod tests {
                     // the second barrier holds every guard alive until all have
                     // observed, modelling `n` concurrent merges. `record = false`:
                     // never touch the process-global operator gauge.
-                    let (cap, _guard) = begin_on(counter, false);
+                    let (cap, _guard) = begin_on_for_test(counter);
                     registered.wait();
                     let live = counter.load(Ordering::SeqCst);
                     released.wait();
@@ -536,11 +546,11 @@ mod tests {
         let counter: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
         assert_eq!(counter.load(Ordering::SeqCst), 0);
         {
-            let (cap0, _g0) = begin_on(counter, false);
+            let (cap0, _g0) = begin_on_for_test(counter);
             assert_eq!(counter.load(Ordering::SeqCst), 1);
             assert_eq!(cap0, capacity_for(1), "first merge sees active=1");
             {
-                let (cap1, _g1) = begin_on(counter, false);
+                let (cap1, _g1) = begin_on_for_test(counter);
                 assert_eq!(counter.load(Ordering::SeqCst), 2);
                 assert_eq!(cap1, capacity_for(2), "second merge sees active=2");
             }

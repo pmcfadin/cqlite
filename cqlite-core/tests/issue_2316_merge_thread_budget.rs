@@ -62,9 +62,10 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-/// Rows per input SSTable. Must EXCEED the merge's `STREAMING_CHANNEL_CAPACITY`
-/// (256) so every producer fills its bounded channel and blocks on `send` before
-/// the merge starts draining — guaranteeing all `M` producers are alive at once
+/// Rows per input SSTable. Must EXCEED the merge's per-channel capacity (up to
+/// `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent merges
+/// — #2765) so every producer fills its bounded channel and blocks on `send`
+/// before the merge starts draining — guaranteeing all `M` producers are alive at once
 /// at the sampling point (deterministic peak, no timing race).
 const ROWS_PER_INPUT: i32 = 400;
 
@@ -336,7 +337,8 @@ fn merge_bounds_producer_threads_to_o_m() {
 
     // Construct the merger: this spawns all M producer threads. Each producer
     // opens its reader and streams into the bounded channel; with ROWS_PER_INPUT
-    // (> the 256-entry channel capacity) every producer fills its channel and
+    // (> the channel capacity, up to 256 and adaptively reduced under concurrent
+    // merges — #2765) every producer fills its channel and
     // blocks on `send` — so all M are alive at once and stay alive until `merge()`
     // below drains them. Pre-change: each producer ALSO holds a multi-threaded
     // runtime (num_cpus workers). Post-change: a current_thread runtime, 0 workers.

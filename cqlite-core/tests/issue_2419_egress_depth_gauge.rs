@@ -35,11 +35,11 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-/// Rows per input SSTable. MUST exceed the merge's 256-entry channel capacity
-/// (`STREAMING_CHANNEL_CAPACITY`, private to `merge/mod.rs`) so every producer
-/// fills its own channel and blocks on `send`, staying backed up (none received)
-/// until the merge is stepped — mirroring `issue_2316_producer_gauge.rs`'s
-/// identical rationale for its own gauge.
+/// Rows per input SSTable. MUST exceed the merge's per-channel capacity (up to
+/// `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent merges
+/// — #2765; private to `merge/mod.rs`) so every producer fills its own channel
+/// and blocks on `send`, staying backed up (none received) until the merge is
+/// stepped — mirroring `issue_2316_producer_gauge.rs`'s identical rationale.
 const ROWS_PER_INPUT: i32 = 400;
 const NUM_INPUTS: usize = 4;
 

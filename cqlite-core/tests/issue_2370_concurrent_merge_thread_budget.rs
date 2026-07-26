@@ -35,8 +35,9 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-/// Rows per input SSTable. Must EXCEED the merge's `STREAMING_CHANNEL_CAPACITY`
-/// (256) so every producer fills its bounded channel and blocks on `send`, so all
+/// Rows per input SSTable. Must EXCEED the merge's per-channel capacity (up to
+/// `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent merges
+/// — #2765) so every producer fills its bounded channel and blocks on `send`, so all
 /// producers of all mergers are alive at once at the sampling point.
 const ROWS_PER_INPUT: i32 = 400;
 
