@@ -325,10 +325,15 @@ are in flight-loadgen/perf terms with the number each must demonstrate.
 - **M4 (#1883) — per-row alloc ratchet DELIVERED; L4 measured no-op; L5 deferred.**
 
   - **Per-row allocation ratchet — DONE.** At the public `build_row_from_scan_cached`, using the in-crate
-    `test_alloc_probe` counting allocator. **Measured** over 8 rows in one partition: **narrow (3 cols) = 41
-    allocations (5/row)**, **wide (32 cols) = 273 (34/row)** — ~1 allocation per cell plus ~2 fixed per row.
-    The dominant per-row cost is the #1644 retention compaction (`Value::into_owned`'s TIER-1 copy of a small
-    payload), NOT hashing and NOT key handling. Two differential controls, both verified RED-on-revert:
+    `test_alloc_probe` counting allocator. **Measured**, with the one-time setup cost held SEPARATE from the
+    per-row rate (they were initially conflated; separating them is what makes the budget valid at any row
+    count): **9 allocations once** — the result-collector `Vec` plus the first row's `PartitionKeyCache` MISS,
+    which pays the whole `decode_partition_key_columns` inside the measured region — plus a steady-state
+    **4 allocations/row narrow (3 cols)** and **33/row wide (32 cols)**, i.e. `1 sized row map + 1 per cell`.
+    Totals at 8 rows: **41 narrow, 273 wide**. Solved from two row counts (8 rows = 41, 4 rows = 25) and
+    confirmed independently against the wide fixture; the budget holds at 4, 8 and 16 rows. The dominant
+    per-row cost is the #1644 retention compaction (`Value::into_owned`'s TIER-1 copy of a small payload),
+    NOT hashing and NOT key handling. Two differential controls, both verified RED-on-revert:
     dropping the per-cell intern (#1334) takes narrow 41 → **89** and wide 273 → **785** (exactly +2 per
     cell), and dropping the map's capacity hint (#1584) takes narrow 41 → **49** (+1 per row of rehash
     growth). Each property is gated by a strict `<` against a pre-fix reference, not by the absolute

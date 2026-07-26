@@ -21,8 +21,10 @@ slack SHALL be documented with its reason.
 - **GIVEN** a synthesized wide result (a `PartitionKeyCache` plus a set of projected cells) representative
   of a scan row
 - **WHEN** `build_row_from_scan_cached` is invoked inside `test_alloc_probe::measure`
-- **THEN** the reported allocation count divided by the number of rows converted is less than or equal to
-  the documented measured baseline
+- **THEN** the reported allocation count is less than or equal to a measured budget of the form
+  `one-time setup + rows * (per-row + per-cell * columns)`, where the one-time term is held SEPARATE from
+  the per-row term rather than amortized into it — a per-row quotient would fold the first row's
+  `PartitionKeyCache` miss into the steady-state rate and make the budget valid at only one row count
 - **AND** the same assertion holds for both a narrow (few-column) and a wide (many-column) fixture
 
 #### Scenario: The counting-allocator test lane is available in the default test build
