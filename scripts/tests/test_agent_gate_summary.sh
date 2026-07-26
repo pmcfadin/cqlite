@@ -80,6 +80,26 @@ assert_accelerators() {
   fi
 }
 
+# assert_health_token <label> <file> <expected>: assert the accelerators line's
+# `sccache-health` token (issue #2641) as a WHITESPACE-DELIMITED TOKEN, independent
+# of where it sits in the line.
+#
+# Issue #2907: these assertions previously anchored `sccache-health=<v>$` at
+# end-of-line. That silently broke the moment #2859 appended the Linux-only `mold=`
+# token AFTER it — green on Darwin (no token by contract), red on every Linux box,
+# for ANY diff including a no-op on `main`, which made the gate of record
+# unreachable on Linux. Match the token, never the end of the line, so the next
+# appended token cannot resurrect this.
+assert_health_token() {
+  local label="$1" file="$2" expected="$3" line
+  line=$(grep -E '^accelerators: ' "$file" 2>/dev/null | head -1)
+  if printf '%s\n' "$line" | grep -qE " sccache-health=$expected(\$| )"; then
+    ok "$label -> sccache-health=$expected"
+  else
+    bad "$label: expected sccache-health=$expected, got: '$line'"
+  fi
+}
+
 # assert_mold_token <label> <file> <expected>: assert the accelerators line's mold
 # token (issue #2859). <expected> is a state (linked|present-unconfigured|absent)
 # or the literal "none" to require NO mold token (the Darwin contract).
@@ -780,26 +800,13 @@ fi
 #     force the error sum) so na/ok/warn assert deterministically without sccache
 #     installed and without PATH surgery.
 #
-# 9c. sccache-health tri-state (issue #2641).
-#
-# NOTE (issue #2907): these three assertions match `sccache-health=<v>( |$)`, NOT
-# `...=<v>$`. The `accelerators:` line is an ordered token list that later tokens
-# get APPENDED to — 9d's `mold=` token (Linux-only; absent on Darwin by contract)
-# already sits after `sccache-health=`. An end-of-line anchor therefore passed on
-# macOS and FAILED on every Linux box, taking `tooling-tests` — and with it the
-# whole gate of record — red for ANY diff, including a no-op on `main`. Do not
-# re-anchor these with `$`; match the token, not the end of the line.
 # 9c-i. sccache in use, ZERO error counters -> sccache-health=ok, NO corruption WARN.
 health_err="$tmp/health-ok.stderr"
 AGENT_GATE_SUMMARY_FILE="$tmp/health-ok.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=0 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$health_err"
-if grep -qE '^accelerators: .* sccache-health=ok( |$)' "$tmp/health-ok.txt"; then
-  ok "sccache-health: on + 0 errors -> sccache-health=ok"
-else
-  bad "sccache-health: expected sccache-health=ok for on + 0 errors"
-  grep '^accelerators:' "$tmp/health-ok.txt" 2>/dev/null || cat "$tmp/health-ok.txt"
-fi
+assert_health_token "sccache-health: on + 0 errors" "$tmp/health-ok.txt" ok
+assert_accelerators "sccache-health-ok" "$tmp/health-ok.txt"
 if grep -q 'WARN:.*corrupted or torn cache' "$health_err"; then
   bad "sccache-health: emitted a corruption WARN with ZERO error counters"
 else
@@ -810,12 +817,8 @@ fi
 AGENT_GATE_SUMMARY_FILE="$tmp/health-warn.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=on AGENT_GATE_TEST_SCCACHE_ERRORS=3 \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/health-warn.stderr"
-if grep -qE '^accelerators: .* sccache-health=warn( |$)' "$tmp/health-warn.txt"; then
-  ok "sccache-health: on + >0 errors -> sccache-health=warn"
-else
-  bad "sccache-health: expected sccache-health=warn for on + >0 errors"
-  grep '^accelerators:' "$tmp/health-warn.txt" 2>/dev/null || cat "$tmp/health-warn.txt"
-fi
+assert_health_token "sccache-health: on + >0 errors" "$tmp/health-warn.txt" warn
+assert_accelerators "sccache-health-warn" "$tmp/health-warn.txt"
 if grep -qE 'WARN: sccache reports 3 cache .* corrupted or torn cache' "$tmp/health-warn.stderr"; then
   ok "sccache-health: LOUD WARN emitted (naming count + inspect command) on non-zero error counters"
 else
@@ -838,12 +841,8 @@ fi
 AGENT_GATE_SUMMARY_FILE="$tmp/health-na.txt" \
   AGENT_GATE_TEST_SCCACHE_STATE=off \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>"$tmp/health-na.stderr"
-if grep -qE '^accelerators: .* sccache-health=na( |$)' "$tmp/health-na.txt"; then
-  ok "sccache-health: sccache not in use -> sccache-health=na"
-else
-  bad "sccache-health: expected sccache-health=na when sccache not in use"
-  grep '^accelerators:' "$tmp/health-na.txt" 2>/dev/null || cat "$tmp/health-na.txt"
-fi
+assert_health_token "sccache-health: sccache not in use" "$tmp/health-na.txt" na
+assert_accelerators "sccache-health-na" "$tmp/health-na.txt"
 
 # 9d. mold link-accelerator token (issue #2859). On Linux the accelerators line
 #     carries a trailing `mold=linked|overridden|present-unconfigured|absent` token;
