@@ -2960,6 +2960,22 @@ run_tooling_tests() {
     return 0
   fi
 
+  # flight Dockerfile Rust-pin lockstep guard (#2870): no python3/Docker/cargo
+  # needed, always runs. Mechanizes #1990 — asserts cqlite-flight/Dockerfile has
+  # exactly one `FROM rust:` line matching rust-toolchain.toml's channel. A
+  # failure FAILs the component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_check_dockerfile_rust_pin.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_check_dockerfile_rust_pin.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (flight Dockerfile rust-pin lockstep); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # parity-report component self-test (#1338): no python3 needed, always runs. A
   # failure FAILs the component, mirroring the keyspace-scoping guard semantics.
   echo ">>> [$name] bash scripts/tests/test_agent_gate_parity_report.sh"

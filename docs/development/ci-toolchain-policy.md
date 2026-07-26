@@ -93,14 +93,15 @@ on the next pin bump:
    `cargo-llvm-cov@<ver>` in `coverage.yml` / `coverage-baseline.yml`) still run on the
    new toolchain. (Prebuilt binaries are toolchain-independent, so a bump usually needs no
    change here — but confirm the pinned versions support the new rustc's LLVM/coverage format.)
-6. `cqlite-flight/Dockerfile` — since issue #2870 the cargo-chef split means **multiple**
-   `FROM rust:<version>-bookworm` lines, and every one must move together (a divergent pin
-   makes the `chef`/`planner`/`builder` stages compile against different toolchains). Bump
-   **both** the `chef` stage (`FROM rust:<pin>-bookworm AS chef`) and — since `planner` and
-   `builder` derive `FROM chef` — confirm no stage reintroduces a second literal `rust:` base.
-   Grep `^FROM rust:` in the Dockerfile and assert every match names the same full pin as
-   `rust-toolchain.toml`'s `channel` (currently `rust:1.97.1-bookworm` ↔ `1.97.1`). Also keep
-   the pinned `cargo-chef --version` current if a toolchain bump requires a newer chef.
+6. `cqlite-flight/Dockerfile` — since issue #2870 the cargo-chef split has a **single**
+   `FROM rust:<pin>-bookworm AS chef` line; the `planner` and `builder` stages both derive
+   `FROM chef`, so they inherit the pin and carry no `rust:` base of their own. Bump that one
+   `chef` line to `rust:<new-pin>-bookworm` (matching `rust-toolchain.toml`'s `channel`,
+   currently `rust:1.97.1-bookworm` ↔ `1.97.1`) and do NOT reintroduce a second literal
+   `FROM rust:` base. This is **mechanized**: `scripts/ci/check-dockerfile-rust-pin.sh` (run in
+   the gate's `tooling-tests` component via `scripts/tests/test_check_dockerfile_rust_pin.sh`)
+   FAILs if the pin drifts from the channel or a second `FROM rust:` line appears. Also keep the
+   pinned `cargo-chef --version` current if a toolchain bump requires a newer chef.
 
 Lanes that **omit** `toolchain:` (`actions-rust-lang/setup-rust-toolchain@v1` callers)
 follow the pin file automatically — no action needed for those.

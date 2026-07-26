@@ -11,9 +11,12 @@
 # reuses the expensive `cook` layer instead of recompiling the whole dependency
 # tree (per architecture, under the release profile's codegen-units=1 + fat LTO).
 #
-# #1990 LOCKSTEP: every `FROM rust:1.97.1-bookworm` line below (chef → builder,
-# and the `chef` alias reused by planner/builder) MUST move together with
-# rust-toolchain.toml on a toolchain bump. See docs/development/ci-toolchain-policy.md.
+# #1990 LOCKSTEP: there is a SINGLE `FROM rust:1.97.1-bookworm AS chef` line below
+# (planner and builder both `FROM chef`, so they inherit the pin — they carry no
+# `rust:` base of their own). That one line MUST move together with
+# rust-toolchain.toml's `channel` on a toolchain bump; scripts/ci/check-dockerfile-rust-pin.sh
+# mechanizes it (exactly one `FROM rust:` line, matching the pin). See
+# docs/development/ci-toolchain-policy.md.
 
 # --- chef: install cargo-chef once; a stable, near-permanently-cached layer. ---
 FROM rust:1.97.1-bookworm AS chef
@@ -33,7 +36,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 #     the final build cannot reuse — a silent no-op that recompiles anyway (D3).
 FROM chef AS builder
 COPY --from=planner /src/recipe.json recipe.json
-RUN cargo chef cook --release -p cqlite-flight --features observability --recipe-path recipe.json
+RUN cargo chef cook --release --locked -p cqlite-flight --features observability --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --locked -p cqlite-flight --features observability
 

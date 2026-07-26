@@ -117,10 +117,15 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
         # Per-architecture GHA layer cache (issue #2870). The scope is keyed on
-        # PLATFORM_PAIR (e.g. flight-linux-amd64 / flight-linux-arm64) so the
+        # PLATFORM_PAIR (flight-linux-amd64 / flight-linux-arm64) so the
         # concurrent native amd64/arm64 legs never evict one another's cook
         # layer. mode=max exports intermediate layers — the cargo-chef `cook`
-        # layer is an intermediate, so it must be exported to be reused.
+        # layer is an intermediate, so it must be exported to be reused. The
+        # amd64 scope is SHARED with flight-ci.yml's main-branch image job, which
+        # is the frequent warm PRODUCER (a cache-to write from an infrequent v*
+        # tag ref is ref-scoped and effectively dead). RESIDUAL: arm64 has no
+        # frequent main-branch producer, so flight-linux-arm64 warms only at
+        # release time — accepted (registry-cache backend is a separate follow-up).
         cache-from: type=gha,scope=flight-${{ env.PLATFORM_PAIR }}
         cache-to: type=gha,mode=max,scope=flight-${{ env.PLATFORM_PAIR }}
 
