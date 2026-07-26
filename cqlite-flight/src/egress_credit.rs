@@ -311,17 +311,24 @@ impl EgressCredit {
         match budget.ceiling_bytes() {
             Some(ceiling) => {
                 let total_permits = permits_for(ceiling).max(1);
+                // Publish the pool size so the stream's safety valve can compute
+                // FREE credit (`pool_total - charged`) and release the minimum
+                // that unblocks a parked producer, instead of guessing.
+                obs.set_pool_total_bytes(bytes_for(total_permits));
                 Self {
                     sem: Some(Arc::new(Semaphore::new(total_permits as usize))),
                     total_permits,
                     obs,
                 }
             }
-            None => Self {
-                sem: None,
-                total_permits: 0,
-                obs,
-            },
+            None => {
+                obs.set_pool_total_bytes(0);
+                Self {
+                    sem: None,
+                    total_permits: 0,
+                    obs,
+                }
+            }
         }
     }
 
@@ -405,10 +412,13 @@ impl EgressCredit {
         match Arc::clone(sem).try_acquire_many_owned(take) {
             Ok(permit) => Ok(permit),
             Err(tokio::sync::TryAcquireError::NoPermits) => {
-                // RAII: the `parked_now` gauge the stream's safety valve reads
-                // must fall again whether this future completes OR is dropped
-                // mid-park by a cancelled stream.
-                let _park = self.obs.park();
+                // RAII: the `parked_now`/`parked_want` gauges the stream's safety
+                // valve reads must fall again whether this future completes OR is
+                // dropped mid-park by a cancelled stream. The want is the CLAMPED
+                // permit count (what this acquire actually asks the pool for), so
+                // the valve sizes its release against a figure the pool can
+                // always satisfy.
+                let _park = self.obs.park(bytes_for(take));
                 Arc::clone(sem)
                     .acquire_many_owned(take)
                     .await

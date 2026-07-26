@@ -262,10 +262,33 @@ impl MeteredDoGetStream {
     ///
     /// In that state the cycle is closed: the producer waits on credit, the
     /// credit waits on the consumer, and the consumer waits on the producer.
-    /// Releasing one permit breaks it. The producer is woken by the semaphore,
+    /// Releasing ENOUGH credit breaks it. The producer is woken by the semaphore,
     /// builds the next batch, and its send wakes this stream through the receiver
     /// waker registered by the `Pending` poll — so no extra wakeup is needed
     /// here.
+    ///
+    /// # Why the release is sized, and why ONE permit is not enough
+    ///
+    /// A single firing must restore progress on its own. This arm returns
+    /// `Pending` without arranging to be re-entered, and by construction nothing
+    /// else will re-enter it: the producer is parked (so it emits no wakeup), the
+    /// channel is empty (so it emits none either), and the consumer is awaiting
+    /// the batch the parked producer cannot build. So a valve that released one
+    /// permit and returned `Pending` would WEDGE the stream outright whenever the
+    /// oldest deferred permit charges less than the parked reservation needs —
+    /// i.e. whenever the batches have non-uniform capacities (roborev job 12 F1).
+    ///
+    /// The release is therefore sized against observed facts rather than assumed
+    /// to be enough: [`EgressObservation::parked_want_bytes`] is what the parked
+    /// reservation is asking the pool for, and
+    /// `pool_total_bytes - charged_bytes` is what the pool can already give it.
+    /// Deferred permits are released oldest-first until the second reaches the
+    /// first, and NOT ONE FURTHER — the loop exits the instant the producer can
+    /// proceed, so a wedge costs the minimum credit that restores progress and
+    /// never a blanket drain of the deferred slot (which would silently loosen
+    /// the bound the valve exists to protect). The parked reservation is clamped
+    /// to the pool total before it parks, so the target is always reachable; the
+    /// loop is bounded by the deferred slot regardless.
     ///
     /// **Why releasing is correct, not a compromise.** The published bound
     /// governs **server-side residency** — the bytes the SERVER holds and can
@@ -276,9 +299,8 @@ impl MeteredDoGetStream {
     /// bound's actual subject. The reframing is stated in
     /// [`crate::egress_credit::DEFAULT_MAX_INFLIGHT_EGRESS_BYTES`].
     ///
-    /// One permit per firing, oldest first: the minimum that can restore
-    /// progress, and the batch that has been out longest is the one least likely
-    /// to still be in genuine use. Every firing is counted
+    /// Oldest first: the batch that has been out longest is the one least likely
+    /// to still be in genuine use. Every permit released is counted
     /// ([`EgressObservation::safety_valve_releases`]), so "the valve fires on the
     /// normal path" is a test-detectable regression rather than a silent
     /// loosening — against a consumer that drops batch N before N+1 exists
@@ -288,28 +310,47 @@ impl MeteredDoGetStream {
             return;
         }
         let obs = &self.probe.egress;
+        // `Acquire`: this also makes the matching `parked_want_bytes` visible.
         if obs.parked_now() == 0 {
             return;
         }
+        let charged = obs.charged_bytes();
         let deferred_charged = self
             .deferred
             .iter()
             .fold(0u64, |acc, d| acc.saturating_add(d.permit.charged_bytes()));
-        if deferred_charged == 0 || deferred_charged < obs.charged_bytes() {
+        if deferred_charged == 0 || deferred_charged < charged {
             // Someone other than a consumer-retained batch holds credit (a
             // queued batch, an in-flight reservation): the producer's park will
             // clear on its own, so this is backpressure, not a wedge.
             return;
         }
-        // Dropping the permit IS the release (see `DeferredCredit::permit`).
-        drop(self.deferred.remove(0));
-        obs.record_safety_valve_release();
-        tracing::debug!(
-            deferred_remaining = self.deferred.len(),
-            "egress safety valve: released a consumer-retained batch's credit to unwedge the \
-             stream (the consumer is holding a yielded batch while awaiting the next one; \
-             those bytes are consumer-side residency, outside the server-side bound)"
-        );
+        // How much the parked reservation needs, and how much the pool can
+        // already give it. `free` is tracked incrementally from the permits this
+        // loop actually returns rather than re-read from the pool, so a producer
+        // concurrently charging against the pool cannot make the loop release
+        // MORE than the wedge requires.
+        let want = obs.parked_want_bytes();
+        let mut free = obs.pool_total_bytes().saturating_sub(charged);
+        let mut released = 0u64;
+        while free < want && !self.deferred.is_empty() {
+            // Dropping the permit IS the release (see `DeferredCredit::permit`).
+            let oldest = self.deferred.remove(0);
+            free = free.saturating_add(oldest.permit.charged_bytes());
+            drop(oldest);
+            obs.record_safety_valve_release();
+            released = released.saturating_add(1);
+        }
+        if released > 0 {
+            tracing::debug!(
+                released,
+                deferred_remaining = self.deferred.len(),
+                want_bytes = want,
+                "egress safety valve: released consumer-retained batches' credit to unwedge the \
+                 stream (the consumer is holding yielded batches while awaiting the next one; \
+                 those bytes are consumer-side residency, outside the server-side bound)"
+            );
+        }
     }
 
     /// The merge is finished (completed or errored); disarm so we do not cancel a

@@ -904,6 +904,186 @@ fn the_safety_valve_fires_only_when_the_stream_is_wedged() {
     });
 }
 
+/// A wedge whose OLDEST deferred permit is too SMALL to unblock the producer —
+/// i.e. NON-UNIFORM batch capacities — must be cleared by a SINGLE firing.
+///
+/// This is the shape every other valve test is structurally unable to reach
+/// (roborev job 12 F1): they all stream `wide_row_fixture`'s uniform
+/// `WIDE_PAYLOAD` rows, so `c_oldest == c_newest` and releasing one permit always
+/// happens to be enough. Here batch A is a fraction of batches B and C, and the
+/// parked reservation needs more than A alone frees.
+///
+/// Why one firing must suffice: the `Poll::Pending` arm that runs the valve
+/// returns WITHOUT arranging to be re-entered, and by construction nothing else
+/// will re-enter it — the producer is parked (so it emits no wakeup), the channel
+/// is empty (so it emits none either), and the consumer is awaiting the batch the
+/// parked producer cannot build. A valve that released one permit per poll and
+/// then returned `Pending` therefore hangs `do_get` outright in this state; the
+/// `timeout` below is a LIVENESS bound that converts that hang into a readable
+/// failure (never a wall-clock threshold — #2642).
+///
+/// Both halves are asserted, because a fix that merely drained the deferred slot
+/// would restore liveness while silently loosening the bound the valve protects:
+///
+/// * LIVENESS — the next batch really arrives.
+/// * MINIMALITY — exactly the two oldest permits are released. The third
+///   retained batch's credit stays charged, so the valve released the least that
+///   restores progress and not a byte more.
+#[test]
+fn the_safety_valve_clears_a_wedge_with_non_uniform_batch_capacities() {
+    let schema = fx::wide_row_schema();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let producer = MergeProducer::new(schema, 8192).expect("producer");
+        let arrow_schema = Arc::new(producer.arrow_schema().expect("schema"));
+        let one_row = |fill: u8, payload: usize| {
+            let cols: Vec<arrow::array::ArrayRef> = vec![
+                Arc::new(arrow::array::Int32Array::from(vec![fill as i32])),
+                Arc::new(arrow::array::BinaryArray::from(vec![Some(
+                    vec![fill; payload].as_slice(),
+                )])),
+                Arc::new(arrow::array::StringArray::from(vec![Some("row")])),
+            ];
+            RecordBatch::try_new(Arc::clone(&arrow_schema), cols).expect("batch")
+        };
+
+        // NON-UNIFORM capacities: one small batch, then two large ones.
+        const SMALL: usize = 8 * 1024;
+        const LARGE: usize = 64 * 1024;
+        let queued = vec![one_row(1, SMALL), one_row(2, LARGE), one_row(3, LARGE)];
+        let charges: Vec<u64> = queued
+            .iter()
+            .map(|b| permits_bytes(b.get_array_memory_size()))
+            .collect();
+        assert!(
+            charges[0].saturating_add(EGRESS_CREDIT_QUANTUM_BYTES as u64) < charges[1],
+            "fixture drift: the oldest batch charges {} B and the next {} B — the scenario needs \
+             the OLDEST permit to be too small to admit the parked reservation on its own, which \
+             is exactly what the uniform-payload valve tests cannot express",
+            charges[0],
+            charges[1]
+        );
+
+        let pr = StreamProbe::default();
+        let obs = pr.egress.clone();
+        // Sized to EXACTLY the three batches: once all three are out and retained
+        // the pool has zero free credit, so the next reservation must park.
+        let ceiling = usize::try_from(charges.iter().sum::<u64>()).expect("fits");
+        let credit = EgressCredit::new(EgressBudget::bytes(ceiling), obs.clone());
+        // `tx` stays alive, so the channel is empty-but-open and a further poll
+        // parks rather than terminating the stream.
+        let (tx, rx) = mpsc::channel::<Result<CreditedBatch, ProducerError>>(4);
+        for batch in queued {
+            let actual = batch.get_array_memory_size();
+            let permit = credit
+                .reserve(actual)
+                .await
+                .expect("pool open")
+                .materialize(actual)
+                .expect("granted");
+            tx.send(Ok(CreditedBatch::new(batch, permit)))
+                .await
+                .expect("send");
+        }
+        assert_eq!(
+            obs.reservations_parked(),
+            0,
+            "the three queued batches must fit the pool exactly, with no park"
+        );
+
+        let mut metered = MeteredDoGetStream::new(
+            Box::pin(ReceiverStream { rx }),
+            RpcMetrics::start("do_get"),
+            None,
+            pr.clone(),
+            None,
+            None,
+        );
+
+        // Take all three and RETAIN them: the whole charge is now held by
+        // consumer-retained batches, oldest (smallest) first.
+        let mut held: Vec<RecordBatch> = Vec::new();
+        for _ in 0..3 {
+            held.push(metered.next().await.expect("queued batch").expect("ok"));
+        }
+        assert_eq!(
+            obs.charged_bytes(),
+            ceiling as u64,
+            "vacuous: the pool is not exhausted, so nothing will park"
+        );
+        assert_eq!(obs.safety_valve_releases(), 0);
+
+        // The parked reservation asks for ONE QUANTUM more than the oldest
+        // deferred permit can free — so releasing A alone leaves it parked.
+        let want = usize::try_from(charges[0]).expect("fits") + 1;
+        let next_batch = one_row(4, 1024);
+        let next_actual = next_batch.get_array_memory_size();
+        assert!(
+            next_actual <= want,
+            "fixture drift: the follow-on batch ({next_actual} B) must fit its own reservation \
+             ({want} B)"
+        );
+        let parking = tokio::spawn({
+            let credit = credit.clone();
+            let tx = tx.clone();
+            async move {
+                let permit = credit
+                    .reserve(want)
+                    .await
+                    .expect("pool open")
+                    .materialize(next_actual)
+                    .expect("granted");
+                tx.send(Ok(CreditedBatch::new(next_batch, permit)))
+                    .await
+                    .expect("send");
+            }
+        });
+        await_pool_saturated(&obs).await;
+        assert_eq!(
+            obs.parked_now(),
+            1,
+            "exactly one reservation must be parked"
+        );
+
+        // ONE poll (the `.await` polls once, then sleeps until woken) must clear
+        // the wedge. The timeout is a liveness bound, not a threshold.
+        let delivered = tokio::time::timeout(std::time::Duration::from_secs(60), metered.next())
+            .await
+            .expect(
+                "the do_get stream WEDGED: the safety valve released only the OLDEST deferred \
+                 permit, which was too small to admit the parked reservation, and returned \
+                 Pending with nothing left to poll it again",
+            )
+            .expect("a batch")
+            .expect("ok");
+        assert_eq!(delivered.num_rows(), 1);
+        parking.await.expect("join");
+
+        // MINIMALITY: A and B were released (A alone was not enough); C was NOT.
+        assert_eq!(
+            obs.safety_valve_releases(),
+            2,
+            "the valve released {} deferred permit(s); 2 is the minimum that admits the parked \
+             reservation, so fewer wedges the stream and more drains credit the bound still \
+             governs",
+            obs.safety_valve_releases()
+        );
+        assert_eq!(
+            obs.charged_bytes(),
+            charges[2] + permits_bytes(next_actual),
+            "the valve drained deferred credit beyond the wedge: the third retained batch's \
+             charge must survive, or the bound has been quietly loosened"
+        );
+
+        assert_eq!(held.len(), 3, "every yielded batch is still retained");
+        drop(held);
+        drop(delivered);
+        drop(tx);
+        drop(metered);
+        assert_eq!(obs.charged_bytes(), 0, "credit leaked");
+    });
+}
+
 /// Permit bytes charged for `actual` capacity bytes: permits round UP to the
 /// quantum, so the charge is quantised, never the raw byte count.
 fn permits_bytes(actual: usize) -> u64 {

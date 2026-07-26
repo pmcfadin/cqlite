@@ -46,7 +46,31 @@ struct EgressCounters {
     /// while parked (a cancelled stream) decrements it too. Read by
     /// `MeteredDoGetStream`'s safety valve as the "the producer cannot proceed"
     /// half of its wedge predicate (issue #2821 review R1).
+    ///
+    /// Written with `Release` and read with `Acquire` (the only non-`Relaxed`
+    /// accesses here) so that a reader observing `> 0` is guaranteed to also see
+    /// the matching [`Self::parked_want`] contribution. The safety valve sizes
+    /// its release from that pairing, so a torn read of the two gauges would let
+    /// it under-release and re-open the wedge it exists to close.
     parked_now: AtomicU64,
+    /// Capacity bytes the currently-parked reservation(s) are waiting to acquire
+    /// — a gauge paired with [`Self::parked_now`] and maintained by the same
+    /// RAII [`ParkGuard`].
+    ///
+    /// This is what makes the safety valve's release MINIMAL rather than a
+    /// blanket drain: the valve releases deferred permits oldest-first only until
+    /// the pool's free credit reaches this figure, and stops. A sum (not a max)
+    /// because it is a gauge; there is at most one reserver per stream (see
+    /// `EgressCredit::acquire`), so the two coincide in practice and the sum is
+    /// the conservative direction when they would not.
+    parked_want: AtomicU64,
+    /// Total capacity bytes the pool can hand out, published once by
+    /// `EgressCredit::new` (zero for an unbounded/inert budget).
+    ///
+    /// Free credit is `pool_total - charged`, which is what lets the safety valve
+    /// compute how much it must release instead of releasing one permit and
+    /// hoping that was enough.
+    pool_total: AtomicU64,
     /// Deferred permits force-released by the safety valve because the stream
     /// was wedged: the producer parked, the channel empty, and every charged
     /// byte held by a batch the CONSUMER is still retaining. Zero on every
@@ -97,25 +121,40 @@ impl EgressObservation {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// One reservation could not be taken immediately and is about to park.
+    /// One reservation of `want_bytes` could not be taken immediately and is
+    /// about to park.
     ///
     /// Returns an RAII [`ParkGuard`] that must be held for exactly as long as
-    /// the reservation is parked: it maintains the `parked_now` GAUGE the
-    /// safety valve reads, and releasing it on `Drop` is what keeps that gauge
-    /// correct when a parked reservation future is dropped rather than
-    /// completed (a cancelled stream), instead of leaving the gauge stuck high
-    /// and making the valve fire on a stream that is not wedged.
-    #[must_use = "the park gauge is only correct while the guard is held"]
-    pub(crate) fn park(&self) -> ParkGuard {
+    /// the reservation is parked: it maintains the `parked_now` and
+    /// `parked_want` GAUGES the safety valve reads, and releasing it on `Drop`
+    /// is what keeps them correct when a parked reservation future is dropped
+    /// rather than completed (a cancelled stream), instead of leaving them stuck
+    /// high and making the valve fire on a stream that is not wedged.
+    #[must_use = "the park gauges are only correct while the guard is held"]
+    pub(crate) fn park(&self, want_bytes: u64) -> ParkGuard {
         self.inner
             .reservations_parked
             .fetch_add(1, Ordering::Relaxed);
-        self.inner.parked_now.fetch_add(1, Ordering::Relaxed);
-        // Notify AFTER the gauge is raised, so a waiter woken by either signal
+        // `parked_want` is raised BEFORE `parked_now`, and `parked_now`'s
+        // `Release` pairs with the valve's `Acquire` load: a valve that sees the
+        // park at all also sees the amount it must free.
+        self.inner
+            .parked_want
+            .fetch_add(want_bytes, Ordering::Relaxed);
+        self.inner.parked_now.fetch_add(1, Ordering::Release);
+        // Notify AFTER the gauges are raised, so a waiter woken by either signal
         // observes `parked_now > 0` (the safety valve's wedge predicate).
         self.inner.parked_signal.notify_one();
         self.inner.parked_valve_signal.notify_one();
-        ParkGuard { obs: self.clone() }
+        ParkGuard {
+            obs: self.clone(),
+            want_bytes,
+        }
+    }
+
+    /// Publish the pool's total capacity, once, at pool construction.
+    pub(crate) fn set_pool_total_bytes(&self, bytes: u64) {
+        self.inner.pool_total.store(bytes, Ordering::Relaxed);
     }
 
     /// Count one deferred permit force-released by the stream's safety valve.
@@ -195,8 +234,23 @@ impl EgressObservation {
 
     /// Reservations parked on the pool AT THIS INSTANT (gauge). The "producer
     /// cannot proceed" half of the safety valve's wedge predicate.
+    ///
+    /// `Acquire`, pairing with [`Self::park`]'s `Release`: a caller that sees a
+    /// park must also see that park's [`Self::parked_want_bytes`] contribution.
     pub(crate) fn parked_now(&self) -> u64 {
-        self.inner.parked_now.load(Ordering::Relaxed)
+        self.inner.parked_now.load(Ordering::Acquire)
+    }
+
+    /// Capacity bytes the parked reservation(s) are waiting for (gauge). Zero
+    /// when nothing is parked. The safety valve releases only enough deferred
+    /// credit to reach this figure.
+    pub(crate) fn parked_want_bytes(&self) -> u64 {
+        self.inner.parked_want.load(Ordering::Relaxed)
+    }
+
+    /// Total capacity bytes the pool can hand out; zero for an unbounded budget.
+    pub(crate) fn pool_total_bytes(&self) -> u64 {
+        self.inner.pool_total.load(Ordering::Relaxed)
     }
 
     /// Deferred permits force-released by the stream's safety valve. ZERO is the
@@ -261,17 +315,32 @@ impl EgressObservation {
 /// is still parked.
 pub(crate) struct ParkGuard {
     obs: EgressObservation,
+    /// The amount this park contributed to `parked_want`, returned on `Drop` so
+    /// the two gauges fall together.
+    want_bytes: u64,
 }
 
 impl Drop for ParkGuard {
     fn drop(&mut self) {
+        // Lowered in the MIRROR of `park`'s order (`parked_now` first): a valve
+        // that races this drop then reads a stale `parked_now > 0` alongside an
+        // already-cleared `parked_want`, which makes it release NOTHING — the
+        // safe direction, since a departed producer needs no unwedging.
+        //
         // Saturating by construction: `fetch_update` cannot wrap below zero.
         let _ = self
             .obs
             .inner
             .parked_now
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .fetch_update(Ordering::Release, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
+        let _ =
+            self.obs
+                .inner
+                .parked_want
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(self.want_bytes))
+                });
     }
 }
