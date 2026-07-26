@@ -255,7 +255,7 @@ cycle is reachable in the DEFAULT configuration, not only in a corner case. An u
 is a reporting defect; a hung `do_get` is an outage.
 
 `MeteredDoGetStream::open_safety_valve` closes it. From the `Poll::Pending` arm only, and only when
-all three of the following hold, it releases the OLDEST deferred permit:
+all three of the following hold, it releases deferred permits OLDEST-FIRST:
 
 1. **The channel is empty** — the inner poll returned `Pending`, so no batch is on its way.
 2. **A reservation is parked RIGHT NOW** — `EgressObservation::parked_now()`, a GAUGE maintained by
@@ -281,9 +281,33 @@ cannot act on — and doing so is precisely what closes the deadlock cycle. So t
 loosen the bound; it restores the bound's actual subject. The 12 MiB ceiling and the B4 composition
 stand unchanged over that quantity.
 
-One permit per firing, oldest first: the minimum that can restore progress. Every firing is counted
-(`EgressObservation::safety_valve_releases`), and the real-encoder drains assert that count is ZERO
-— so "the valve fires on the normal path" is a test-detectable regression, not a silent loosening.
+**The release is SIZED, not one-per-firing.** An earlier revision of this design released exactly
+one permit per firing, on the reasoning that one is "the minimum that can restore progress". That is
+WRONG whenever batch capacities are non-uniform: admission only guarantees
+`charged <= T - take + c_newest`, so releasing `c_oldest < c_newest` leaves the producer parked —
+and at that point no wakeup source survives (the receiver waker needs a send from the parked
+producer; the park signal needs a NEW park, which cannot happen while the producer is already inside
+`acquire_many_owned().await`). The stream is never polled again and wedges outright: the very
+failure the valve exists to prevent (roborev job 12 F1).
+
+The valve therefore releases oldest-first in a loop, `while free < want`, where `want` is
+`EgressObservation::parked_want_bytes()` — the parked reservation's own (already clamped, so always
+reachable) ask, carried by the same RAII `ParkGuard` as `parked_now` so a cancelled park clears it —
+and `free` is `pool_total_bytes - charged_bytes` thereafter accumulated from the permits this loop
+actually returns. Reading `free` incrementally rather than re-polling the pool means a producer
+charging concurrently cannot induce over-release. The loop exits the instant `free >= want` and NOT
+ONE PERMIT FURTHER: a wedge costs the minimum credit that restores progress, and a blanket drain of
+the deferred slot is forbidden because it would silently loosen the bound the valve protects.
+
+**Why not self-wake instead of looping?** Passing `cx` and calling `wake_by_ref()` after a single
+release looks equivalent and is not. After a release the wedge predicate is STILL true — `charged`
+and `deferred_charged` fall by the same amount — so the re-entered valve fires again immediately,
+busy-spinning and draining the entire deferred slot before the woken producer can re-charge. That
+converts a hang into a silent loosening of the bound, which is worse: the hang is loud.
+
+Every permit released is counted (`EgressObservation::safety_valve_releases`), and the real-encoder
+drains assert that count is ZERO — so "the valve fires on the normal path" is a test-detectable
+regression, not a silent loosening.
 
 ## D3 — Credit release must be leak-proof on every termination path
 

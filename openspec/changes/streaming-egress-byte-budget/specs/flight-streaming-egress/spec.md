@@ -539,7 +539,8 @@ embedder.
 - **AND** that constant is **12 MiB**, so composing it with #2825's merged 4 MiB payload cap through
   `worst_case_batch_capacity_bytes` gives `max(12 MiB, 2 × 4 MiB + slack) = 12 MiB` of capacity for
   the guaranteed bound — inside the ratified **B4 ≤16Mi per-query working set at concurrency 1**
-  with 4 MiB of headroom
+  with 4 MiB of headroom — headroom occupied by the ungoverned server-side terms (the producer row
+  buffer, the encoder's queued `FlightData`), NOT free space
 - **AND** a worst-case reservation at that default is admitted WITHOUT clamping (a test asserts the
   clamp counter is zero for `worst_case_batch_capacity_bytes(DEFAULT_MAX_BATCH_BYTES, 3, 0)`), so
   the deadlock clamp is not the normal case

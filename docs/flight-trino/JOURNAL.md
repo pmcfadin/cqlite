@@ -665,7 +665,8 @@ Format:
   (`cqlite-flight/src/egress_credit.rs`, `--max-inflight-egress-bytes`, default
   **12 MiB**), and the enforced bound is
   `max(ceiling, one maximum batch) = max(12 MiB, 2 × 4 MiB + 2 KiB × nodes) = 12 MiB ≤ 16Mi`
-  — inside B4 at concurrency 1 with 4 MiB of headroom. **The bound is over
+  — inside B4 at concurrency 1 with 4 MiB of headroom, which is where the row buffer and the
+  encoder's queued `FlightData` live rather than free space to spend. **The bound is over
   SERVER-SIDE residency**: the capacity bytes this process holds on the egress path
   (rows being materialized, batches queued in the `do_get` channel, and yielded
   batches the consumer has not yet dropped). It is NOT a bound on total resident

@@ -157,8 +157,9 @@ rejected.**
   (flight-streaming-egress: doc-comment requirement)
 
 ## Stage 3b — review round 3 (roborev R1-R5)
-- [x] 3b.1 **R1 safety valve**: `MeteredDoGetStream::open_safety_valve` releases the oldest deferred
-  permit when the channel is empty AND a reservation is parked NOW (`parked_now` gauge via the RAII
+- [x] 3b.1 **R1 safety valve**: `MeteredDoGetStream::open_safety_valve` releases deferred permits
+  oldest-first, `while free < want` and not one permit further (see 3c.1), when the channel is empty
+  AND a reservation is parked NOW (`parked_now` gauge via the RAII
   `ParkGuard`) AND the whole charge is held by consumer-retained batches; the stream registers for
   the producer's next park on its OWN `Notify` before returning `Pending`, so the valve cannot lose
   the race. (flight-streaming-egress: no consumer behaviour can wedge the stream)
@@ -182,6 +183,28 @@ rejected.**
 - [x] 3b.7 **R5**: stale arithmetic swept — the clamp threshold is `n_array_nodes >= 2049` (not
   4097), `~2n KiB` (not `~n KiB`), and the one-maximum-batch figure carries its `+ 2 KiB x nodes`
   term everywhere it appears.
+
+## Stage 3c — review round 4 (roborev job 12 + C round 2)
+- [x] 3c.1 **F1 (blocker) valve liveness**: the one-permit-per-firing release wedged the stream on
+  non-uniform batch capacities — one release could leave the producer parked with no surviving
+  wakeup source. `open_safety_valve` now releases oldest-first `while free < want`, with `want` =
+  `EgressObservation::parked_want_bytes()` (new gauge on the same RAII `ParkGuard`, so a cancelled
+  park clears it) and `free` accumulated from the permits actually returned, exiting the instant
+  `free >= want` and not one permit further. Self-waking a single release was rejected: the wedge
+  predicate stays true after a release, so it would busy-drain the deferred slot. Pinned by
+  `the_safety_valve_clears_a_wedge_with_non_uniform_batch_capacities` (8 KiB vs 64 KiB charges, a
+  fixture-drift assert, a 60 s liveness timeout, and minimality asserted from both sides).
+  (flight-streaming-egress: no consumer behaviour can wedge the stream)
+- [x] 3c.2 **F3 B4 claim scope**: the `<= 16 MiB (B4)` composition is stated over governed egress
+  capacity only; dropped the "4 MiB spare" phrasing and named the excluded server-side terms (the
+  producer row buffer, the encoder's queued `FlightData`) at every site, including the operator-facing
+  CLI help, which now reads as a sizing floor rather than a per-stream total.
+  (flight-streaming-egress: doc-comment requirement)
+- [x] 3c.3 **C round 2**: `spec.md`, `design.md` D2c, this file and the `metered_stream.rs` headline
+  described the superseded one-permit valve; all corrected so no artifact ratifies the defect.
+- [ ] 3c.4 **F2 (nit, deferred to #2938)**: `egress_flush.rs` derives node count/payload from
+  `output_columns()` while `flush_buffer` materializes from `self.columns`; identical on every
+  credited path today, so latent.
 
 ## Stage 4 — gate + audit + review (definition of done)
 - [x] 4.1 `RUSTFLAGS="-D warnings"` clean; no `unwrap()`/`expect()` in library code; no wall-clock

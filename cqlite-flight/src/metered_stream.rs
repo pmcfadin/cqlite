@@ -242,8 +242,9 @@ impl MeteredDoGetStream {
         self.deferred.retain(|d| !d.is_dropped_downstream());
     }
 
-    /// **The safety valve**: force-release the OLDEST deferred permit when the
-    /// stream is wedged, so no consumer behaviour can hang `do_get`.
+    /// **The safety valve**: force-release deferred permits OLDEST-FIRST — as
+    /// many as the parked reservation needs and no more — when the stream is
+    /// wedged, so no consumer behaviour can hang `do_get`.
     ///
     /// Run ONLY from the `Poll::Pending` arm, after `reap_deferred` and after the
     /// inner stream has declined to yield. The wedge predicate is the conjunction
