@@ -513,12 +513,44 @@ fn expired_past_grace_retained_under_overlap_gate() {
 // panic if fixtures are present-but-incomplete, never a 0-comparison pass.
 // ===========================================================================
 
+/// Outcome of the deferred #1387 TTL byte-oracle slot, factored out of the test so
+/// the env→outcome mapping is exercised by a unit test WITHOUT a process-global env
+/// mutation (env writes race sibling tests in the same binary).
+#[derive(Debug, PartialEq, Eq)]
+enum TtlOracleDecision {
+    /// `CQLITE_TTL_ORACLE_FIXTURES` points at an existing path → the fixtures were
+    /// commissioned but the comparison is not yet wired: fail-closed.
+    WirePending,
+    /// `CQLITE_TTL_ORACLE_FIXTURES` is set but its path does not exist → a
+    /// misconfigured opt-in: fail-closed (you asked for these fixtures explicitly).
+    MissingRequested,
+    /// The opt-in is unset → the fixtures are genuinely deferred (issue #1387/#1538),
+    /// so skipping is correct and carries NO false-pass risk.
+    Skip,
+}
+
+/// Map this test's OWN opt-in (`CQLITE_TTL_ORACLE_FIXTURES`) to a decision.
+///
+/// Issue #2884: this slot must key ONLY on its own opt-in — NOT the global
+/// `CQLITE_REQUIRE_FIXTURES` fail-closed switch. The global flag governs COMMITTED
+/// fixtures whose absence indicates a broken checkout; this deferred oracle's
+/// fixtures were never committed (they are known-absent, pending #1387/#1538). The
+/// nightly gate (gate.yml) and every parity lane set `CQLITE_REQUIRE_FIXTURES=1`
+/// job-wide, so reading it here made a KNOWN-deferred placeholder panic on cold CI
+/// runners while local gates (which do not export it job-wide) skipped — the whole
+/// CI-vs-local divergence. Decoupling is oracle-preserving: this test holds no byte
+/// oracle; the authoritative one lives in
+/// `issue_1387_tombstone_ttl_compaction_byte_parity::ttl_expired_live_compaction_byte_for_byte`.
+fn ttl_oracle_decision(fixture_root: Option<&str>) -> TtlOracleDecision {
+    match fixture_root {
+        Some(root) if Path::new(root).exists() => TtlOracleDecision::WirePending,
+        Some(_) => TtlOracleDecision::MissingRequested,
+        None => TtlOracleDecision::Skip,
+    }
+}
+
 #[test]
 fn expired_ttl_matches_cassandra_byte_oracle_deferred_1387() {
-    let strict = matches!(
-        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
-        Ok("1") | Ok("true")
-    );
     // Status update (#1410 / #1387): the #1387 fixture commissioning DID land the
     // `test_compaction_tombstone_ttl/ttl_expired_live-*` Cassandra reference, and the
     // authoritative byte-oracle for the expired-TTL scenario now lives in
@@ -529,28 +561,59 @@ fn expired_ttl_matches_cassandra_byte_oracle_deferred_1387() {
     // This slot stays a fail-closed skip keyed on its OWN opt-in
     // `CQLITE_TTL_ORACLE_FIXTURES` (a hand-curated byte-oracle #1387 did not commission
     // under this name) so no CI gate false-passes; the real coverage is the #1387 byte
-    // test above once #1538 lands. Fail closed only in strict mode.
+    // test above once #1538 lands. Issue #2884: this is deliberately NOT keyed on the
+    // global `CQLITE_REQUIRE_FIXTURES` flag — see `ttl_oracle_decision`.
     let fixture_root = std::env::var("CQLITE_TTL_ORACLE_FIXTURES").ok();
-    match fixture_root {
-        Some(root) if Path::new(&root).exists() => {
+    match ttl_oracle_decision(fixture_root.as_deref()) {
+        TtlOracleDecision::WirePending => {
+            let root = fixture_root.unwrap_or_default();
             panic!(
                 "issue #1387 TTL byte-oracle fixtures present at {root} but the comparison is \
                  not yet implemented; wire it here once #1387 lands"
             );
         }
-        _ => {
-            if strict {
-                panic!(
-                    "CQLITE_REQUIRE_FIXTURES set but issue #1387 TTL byte-oracle fixtures are \
-                     absent (set CQLITE_TTL_ORACLE_FIXTURES once #1387 commissions them)"
-                );
-            }
+        TtlOracleDecision::MissingRequested => {
+            let root = fixture_root.unwrap_or_default();
+            panic!(
+                "CQLITE_TTL_ORACLE_FIXTURES set to {root} but that path does not exist \
+                 (point it at the #1387 TTL byte-oracle fixtures once they commission)"
+            );
+        }
+        TtlOracleDecision::Skip => {
             eprintln!(
                 "[SKIP] expired_ttl_matches_cassandra_byte_oracle_deferred_1387: \
                  fixtures pending issue #1387"
             );
         }
     }
+}
+
+/// Issue #2884 regression: the deferred #1387 TTL byte-oracle slot must SKIP (never
+/// panic) when its own opt-in `CQLITE_TTL_ORACLE_FIXTURES` is unset, regardless of the
+/// global `CQLITE_REQUIRE_FIXTURES` fail-closed switch. Pre-fix the test read
+/// `CQLITE_REQUIRE_FIXTURES` and panicked at :543 on any cold CI runner (the nightly
+/// gate sets it job-wide) while local gates skipped — the whole CI-vs-local divergence.
+/// This asserts the mapping through the pure decision function (no process-global env
+/// mutation, which would race sibling tests in this binary).
+#[test]
+fn ttl_oracle_decision_ignores_global_require_fixtures_flag() {
+    // Unset own opt-in → SKIP, whatever the global CQLITE_REQUIRE_FIXTURES is. The
+    // decision function does not consult the global flag at all (#2884).
+    assert_eq!(
+        ttl_oracle_decision(None),
+        TtlOracleDecision::Skip,
+        "deferred TTL oracle must skip when its own opt-in is unset, even under \
+         CQLITE_REQUIRE_FIXTURES=1"
+    );
+    // Own opt-in set to a non-existent path → fail-closed misconfiguration (the
+    // meaningful strict case now keys on the opt-in, not the global flag).
+    let missing = std::env::temp_dir().join("cqlite-2884-nonexistent-ttl-oracle-fixtures");
+    assert!(!missing.exists());
+    assert_eq!(
+        ttl_oracle_decision(missing.to_str()),
+        TtlOracleDecision::MissingRequested,
+        "an explicitly-requested but absent fixture path must fail closed"
+    );
 }
 
 // ===========================================================================
