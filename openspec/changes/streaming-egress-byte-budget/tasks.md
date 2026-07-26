@@ -23,6 +23,13 @@ rejected.**
 3. The `actual > reserved` fail-closed path logs at `tracing::error!` rather than firing a
    `debug_assert!` (task 1.3b): a debug-only abort would turn its own coverage into a panic while
    leaving release builds silent.
+4. **File-size ratchet override.** `producer.rs` (3396 → 3431) and `service.rs` (2068 → 2101) are
+   already 3–4× over the ~800 campsite target and both grew, so the gate runs with
+   `CQLITE_ALLOW_FILE_GROWTH=1`. The growth is the mandated plumbing only — `BatchSink::reserve` +
+   the `ProducerError::EgressCredit` variant in `producer.rs`, the `egress_budget` field + builder +
+   spawn-site argument in `service.rs` — and every piece of NEW logic went into new files
+   (`egress_credit.rs`, `egress_flush.rs`, `metered_stream.rs`, which also took 238 lines OUT of
+   `streaming.rs`, 768 → 614). Splitting those two files is epic #1116, out of scope for #2821.
 
 ## Stage 0 — fixtures + red tests (write these BEFORE the governor)
 - [x] 0.1 REUSE the merged `cqlite-flight/src/wide_row_fixture.rs` (#2825) —

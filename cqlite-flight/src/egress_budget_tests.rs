@@ -142,7 +142,7 @@ fn slow_consumer_bounds_inflight_egress_capacity_bytes() {
         assert!(largest > 0, "no batch was materialized (vacuous fixture)");
         assert!(peak > 0, "no residency was observed (vacuous fixture)");
         assert!(
-            largest * DO_GET_CHANNEL_CAPACITY as u64 > WIDE_CEILING as u64,
+            largest.saturating_mul(DO_GET_CHANNEL_CAPACITY as u64) > WIDE_CEILING as u64,
             "fixture drift: {DO_GET_CHANNEL_CAPACITY} batches of {largest} B would fit \
              under the {WIDE_CEILING} B ceiling, so the count governor still binds first \
              and this assertion proves nothing"
@@ -213,8 +213,9 @@ fn narrow_rows_stay_channel_governed() {
         );
         // The ceiling did not reduce how far the producer may run ahead: the
         // whole channel's worth of narrow batches costs a tiny fraction of it.
-        let channel_worth = obs.largest_batch_capacity_bytes()
-            * (DO_GET_CHANNEL_CAPACITY + IN_FLIGHT_ALLOWANCE) as u64;
+        let channel_worth = obs
+            .largest_batch_capacity_bytes()
+            .saturating_mul((DO_GET_CHANNEL_CAPACITY + IN_FLIGHT_ALLOWANCE) as u64);
         assert!(
             channel_worth < DEFAULT_MAX_INFLIGHT_EGRESS_BYTES as u64,
             "the byte ceiling would bind before the channel at this narrow shape"
