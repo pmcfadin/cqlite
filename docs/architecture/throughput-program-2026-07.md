@@ -150,8 +150,8 @@ C(N) is **2.5–3.5×, not 4×** (P2:stage2 §3).
 |---|---|:--:|---|---|
 | **L1** batch fan-in `sync_channel` | util **1.5–1.9× rig-narrow ceiling**; single-stream ~1.05–1.15× field; **raises C(N) + N_drain_sat** | M | Med (co-design #2765 same channel; cut msg-capacity for B4; keep #2419 gauge/#2361 cancel-recv) | P2:row-engine (SURVIVES-weakened) — **#1 lever, prerequisite for C(N) and fan-out** |
 | **L3** reconcile singleton fast-path | disjoint-narrow **~1.20× upper**; **field-w/-TTL/overlap ~1.03–1.08×** | M–L | High (byte-parity; query-semantics + point-vs-full oracles load-bearing) | **Disposition unresolved — see §4 tension flag** (P2:stage2 ranks #2 / P2:row-engine WEAKENED) |
-| **L4** `RowKey` Arc hoist (#1883) | **1.05–1.09× multi-row-partition only; 1.0× single-row of any width** | S–M | Low | P2:row-engine (SURVIVES re-scoped) — win governed by clustering fan-out, unknown from profile |
-| **L5** FxHash `row_values` map | ~1.04× narrow & wide | S | Low | P2:row-engine (SURVIVES) — target confirmed still SipHash |
+| **L4** `RowKey` Arc hoist (#1883) | ~~1.05–1.09× multi-row-partition~~ → **MEASURED 1.0× no-op, see §7 M4** | S–M | Low | P2:row-engine (SURVIVES re-scoped) — win governed by clustering fan-out, unknown from profile |
+| **L5** FxHash `row_values` map | ~~~1.04×~~ → **deferred #2901, unmeasured, see §7 M4** | S | Low | P2:row-engine (SURVIVES) — target confirmed still SipHash |
 | **L2** inline/thread-less merge | ~1.4–1.8× narrow single-stream; **≤1.0× wide/field → not credited in field stack** | L | High (shape-fragile; A/B-gated) | P2:row-engine (SURVIVES narrow-only) |
 | **#2680** weight-balanced sub-splits | util (skew fix) up to 2–4× on *lagging* pods; **0× on one pod** | M | Med (P0 #2782 hang; needs early-close drain fix) | P2:parallelism P-A (SOUND) — K=2 rotation carries flight-pod balance, NOT SplitWeight |
 | **#2765** adaptive egress budget (+ fan-out T6) | stability enabler; bounds fan-in growth; unlocks higher useful concurrency | M | Med (bounds fan-in only, not the 57k-row Arrow egress) | P2:parallelism L4/L3 |
@@ -162,7 +162,7 @@ C(N) is **2.5–3.5×, not 4×** (P2:stage2 §3).
 | **Decoded-partition cache** (K-A/K-D) | **~1.5–3× keyed IF the skew is real — UNMEASURED** | L | High (3.5× decoded size, B4; #2037 overlap) | P2:caching §4 — gate on measured access distribution |
 
 **Sequence (P2:stage2 §8):** **L1 → L3 → fan-out-past-drain (gated #2765)**. L1 is both the biggest
-single-stream lever and the enabler of C(N); nothing scales without it. L5+L4 are a near-free warm-up
+single-stream lever and the enabler of C(N); nothing scales without it. L5+L4 were projected as a near-free warm-up (both since retired by measurement — §7 M4); a near-free warm-up
 bundle. #2680 re-land runs in parallel on the connector tier.
 
 **§4 tension flag (phase2-vs-phase2, L3 disposition — UNRESOLVED):** P2:stage2 §6 ranks L3 the **#2

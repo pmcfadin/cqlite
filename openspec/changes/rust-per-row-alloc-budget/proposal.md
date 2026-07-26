@@ -38,7 +38,7 @@ Fold in the one cheap, profile-supportable row-hot-path win from epic #2817 M4:
 - **L5 — FxHash `row_values` map**: swap the per-row `HashMap<Arc<str>, Value>` (SipHash,
   `row_build.rs:246`) to `FxHashMap` using the **already-vendored** `rustc-hash = "1.1"`
   (`cqlite-core/Cargo.toml:76`, already used at `aggregation.rs:20`). SipHash disappears from the row hot
-  path. Expected ~1.04× narrow & wide; the alloc-budget test does not regress (hasher swap is
+  path. (SUPERSEDED — L5 deferred to #2901, no measured win claimed) Expected ~1.04× narrow & wide; the alloc-budget test does not regress (hasher swap is
   alloc-neutral — the ratchet's job here is to prove L5 introduces no new per-row allocation).
 
 ## L4 — surfaced, not committed (a design question for the owner)

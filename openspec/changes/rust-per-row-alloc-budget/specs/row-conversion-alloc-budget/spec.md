@@ -6,8 +6,10 @@
 
 CQLite SHALL provide a `cqlite-core` test that measures the number of heap allocations performed by the
 public per-row conversion `build_row_from_scan_cached` (re-exported at `select_executor/mod.rs`) using the
-in-crate counting global allocator (`crate::test_alloc_probe::measure`), and SHALL assert that the
-allocations-per-row do not exceed a **measured, documented baseline**. The test SHALL drive the real public
+in-crate counting global allocator (`crate::test_alloc_probe::measure`), and SHALL assert that the total
+allocations do not exceed a **measured, documented baseline** of the form
+`one-time setup + rows * (per-row + per-cell * columns)` — the one-time term held SEPARATE from the per-row
+rate, never amortized into it. The test SHALL drive the real public
 conversion surface (not a private helper), so a regression on the row hot path is observed end-to-end. The
 test SHALL be gated to the counting-allocator build
 (`#[cfg(all(test, feature = "state_machine", not(feature = "dhat-heap")))]`) so it never conflicts with the

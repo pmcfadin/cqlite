@@ -61,6 +61,13 @@ revert trips it.
 
 ## Decision 3 — Baseline: measured `<=`, asserted per-row, tolerance-free where deterministic
 
+> **SUPERSEDED in implementation (amendment 4, see below).** The "divided per row" part of this
+> decision was WRONG and was rejected during review: a per-row quotient folds the once-per-measurement
+> setup cost (the first row's `PartitionKeyCache` miss) into the steady-state rate, making the budget
+> valid at exactly one row count. The shipped form separates them:
+> `FIXED_SETUP(9) + rows * (PER_ROW_MAP(1) + PER_CELL(1) * cols)`. The rest of this decision —
+> measured `<=`, tolerance-free, documented numbers — stands.
+
 **Chosen.** Run the harness, record the observed `allocations` for narrow + wide, and assert
 `allocs <= observed` (with the count divided per row where the fixture is multi-row). The counting
 allocator is deterministic for a fixed input, so no statistical tolerance is needed (unlike the V8/tracemalloc
@@ -127,3 +134,10 @@ design reads as what was actually built, not what was planned.
    `type_name_of_val(row.values.hasher())` assertion was needed for that.
 3. **L4 is a measured 1.0× no-op**, as Decision 4 allowed for: the partition-key path costs zero
    per-row allocations (`RowKey` is `Arc<[u8]>`; `PartitionKeyCache` #1817 hoists the decode).
+4. **Decision 3's per-row quotient was wrong.** Asserting `allocs / rows <= baseline` amortizes the
+   one-time setup (collector `Vec` + the first row's `PartitionKeyCache` MISS paying the whole
+   `decode_partition_key_columns` inside the measured region) into the per-row rate, so the budget only
+   holds at the row count it was derived at — raising `RATCHET_ROWS` silently LOOSENS the ratchet and
+   lowering it fails spuriously. The shipped budget separates the terms:
+   `FIXED_SETUP(9) + rows * (PER_ROW_MAP(1) + PER_CELL(1) * cols)`, measured by solving across two row
+   counts and verified to hold at 1/2/4/8/16 rows.
