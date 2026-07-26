@@ -480,14 +480,17 @@ git_global_helper_configured() {
   git config --global --get-regexp '^credential\..*helper$' >/dev/null 2>&1
 }
 
-# git_env_token_helper_active <host> — 0 iff the helper answering for <host> is OUR
-# $GH_TOKEN-dereferencing one, at any scope. Used to attach the env-var dependency
-# caveat to an otherwise-green verdict.
+# git_env_token_helper_active <host> — 0 iff a configured helper for <host> is an
+# ENV-DEREFERENCING one, at any scope. Used to attach the "$GH_TOKEN must be exported"
+# caveat to an otherwise-green verdict. Both markers must appear in the SAME helper
+# value (grep is line-wise, one value per line): a helper with a token BAKED IN also
+# says x-access-token but has no environment dependency, and claiming otherwise would
+# be its own small misattribution.
 git_env_token_helper_active() {
   { git config --global --get-all "credential.https://$1.helper" 2>/dev/null
     git config --global --get-all credential.helper 2>/dev/null
     git -C "$REPO_ROOT" config --get-all credential.helper 2>/dev/null
-  } | grep -qF 'x-access-token'
+  } | grep -F 'x-access-token' | grep -qF 'GH_TOKEN'
 }
 
 # git_origin_host <url> — host of an http(s) origin ("" for any other form). The
