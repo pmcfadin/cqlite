@@ -304,21 +304,11 @@ impl RunReader {
     fn refill_buffer(&mut self) -> Result<()> {
         let mut bytes_buffered = 0;
 
-        // Issue #2819 (B2): when a flight sub-phase sink is installed on this merge
-        // consumer thread, time the BLOCKING `reader.next()` recv and add it to the
-        // thread-local pull-wait accumulator, so the row-drive loop can EXCLUDE that
-        // producer-starvation / cold-IO wait from `stream_merge` (which is meant to
-        // be merge CPU). A single `Cell<bool>` check gates it — the non-flight
-        // compaction path pays nothing (no `Instant::now`).
-        let time_recv = crate::observability::stream_subphase::sink_active();
         while bytes_buffered < self.buffer_size {
-            let recv_start = time_recv.then(std::time::Instant::now);
-            let next = self.reader.next();
-            if let Some(start) = recv_start {
-                crate::observability::stream_subphase::add_pull_wait_nanos(
-                    crate::observability::stream_subphase::elapsed_nanos(start),
-                );
-            }
+            // Issue #2819 (B2): time the BLOCKING recv into the pull-wait
+            // accumulator so the row-drive loop excludes it from `stream_merge`
+            // (zero cost when no flight sink is installed).
+            let next = crate::observability::stream_subphase::time_recv(|| self.reader.next());
             match next {
                 Some(Ok(entry)) => {
                     // Estimate entry size for buffer management
@@ -675,12 +665,11 @@ impl SSTableRowIteratorAdapter {
         // correct-by-construction — no ordering race is possible.
         producer_gauge::spawned();
 
-        // Issue #2819: propagate the flight per-request sub-phase sink onto this
-        // path-based producer thread too (thread-locals are NOT inherited across a
-        // spawn), so a merge built from PATHS (`MergeInput::Paths` — the byte-parity
-        // oracle, `open_cold_merger`, the point-read `NeedsScan` fallback) records
-        // cold_fault/decompress just like the warm reader-based `open_from_reader`.
-        // `None` (no-op) for every non-flight caller.
+        // Issue #2819: propagate the sub-phase sink onto this path-based producer
+        // thread too (thread-locals are not inherited across a spawn), so a
+        // paths-built merge records cold_fault/decompress like `open_from_reader`.
+        // `None` (no-op) for non-flight callers. (This file is far over the #1116
+        // campsite target; the +2 lines are the minimal correct propagation.)
         let subphase_sink = crate::observability::stream_subphase::current();
 
         // Spawn the producer thread via `Builder::spawn` (rather than the

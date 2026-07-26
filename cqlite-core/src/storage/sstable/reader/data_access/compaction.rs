@@ -660,24 +660,20 @@ impl SSTableReader {
             .unwrap_or(usize::MAX);
 
         let mut chunk_count = 0;
-        // Issue #2819 (B4): a BTI/`da` table (and any Summary-guided FellBack)
-        // routes HERE, not the instrumented `compressed_offset.rs` path — so time
-        // the page-in (`stream_cold_fault`) + decompress (`stream_decompress`) on
-        // this full-ring fallback too, or a BTI scan would emit only 3 of the 5
-        // sub-phases. The `Cell<bool>` gate keeps the non-flight compaction path
-        // free of `Instant::now()`; runs on the producer thread (sink installed).
-        let time_reads = crate::observability::stream_subphase::sink_active();
         loop {
-            // Cold body-chunk page-in. Timed manually (async — `timed` wraps only a
-            // sync closure); `record_nanos` self-gates to a no-op with no sink.
-            let read_start = time_reads.then(std::time::Instant::now);
-            let next_block = self.read_next_block(&cursor).await?;
-            if let Some(start) = read_start {
-                crate::observability::stream_subphase::record_elapsed(
+            // Issue #2819 (B4): a BTI/`da` table (and any Summary-guided FellBack)
+            // routes HERE, not the instrumented `compressed_offset.rs` path, so time
+            // the page-in (cold_fault) + decompress (below) on this fallback too, or
+            // a BTI scan would emit only 3 of 5 sub-phases. `scoped` is None (zero
+            // cost) with no flight sink; the block scopes it to just the `.await`.
+            // (#1116: this reader is over the campsite target; these are the minimal
+            // instrumentation lines — full gate run with CQLITE_ALLOW_FILE_GROWTH=1.)
+            let next_block = {
+                let _t = crate::observability::stream_subphase::scoped(
                     crate::observability::StreamSubPhase::ColdFault,
-                    start,
                 );
-            }
+                self.read_next_block(&cursor).await?
+            };
             let Some(compressed_chunk) = next_block else {
                 break;
             };

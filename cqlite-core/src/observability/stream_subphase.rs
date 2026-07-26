@@ -105,10 +105,10 @@ impl StreamSubPhaseTimings {
     }
 
     /// Add `nanos` to `phase`'s counter (SATURATING, `Relaxed` — the counters are
-    /// independent per-sub-phase totals with no ordering dependency). A `cold_fault`
-    /// / `decompress` counter can be written by SEVERAL concurrent producer
-    /// threads sharing one `Arc`, so the add is an atomic CAS loop (`fetch_update`),
-    /// which both stays correct under concurrent writers AND saturates rather than
+    /// independent per-sub-phase totals with no ordering dependency). A plain
+    /// `fetch_add` would already be atomic and correct under the several concurrent
+    /// producer threads that share one `Arc` and write `cold_fault`/`decompress`;
+    /// the CAS loop (`fetch_update`) is used SOLELY so the add SATURATES instead of
     /// wrapping on the (practically unreachable) `u64` nanosecond overflow.
     pub fn add_nanos(&self, phase: StreamSubPhase, nanos: u64) {
         let _ = self
@@ -248,6 +248,46 @@ pub fn record_nanos(phase: StreamSubPhase, nanos: u64) {
 /// page-in). No-op with no sink installed.
 pub fn record_elapsed(phase: StreamSubPhase, start: Instant) {
     record_nanos(phase, elapsed_nanos(start));
+}
+
+/// RAII timer that records the elapsed wall time into `phase` when dropped. The
+/// tight-scope counterpart of [`timed`] for an ASYNC region that a sync closure
+/// cannot wrap (e.g. an `.await`ed page-in): bind it in a `{ let _t = …; expr }`
+/// block so it drops the instant the region ends. Recorded only if a sink is
+/// installed on this thread.
+pub struct SubPhaseTimer {
+    phase: StreamSubPhase,
+    start: Instant,
+}
+
+impl Drop for SubPhaseTimer {
+    fn drop(&mut self) {
+        record_elapsed(self.phase, self.start);
+    }
+}
+
+/// A [`SubPhaseTimer`] for `phase`, or `None` (zero `Instant::now`) when no sink
+/// is installed — so a non-flight caller pays nothing.
+pub fn scoped(phase: StreamSubPhase) -> Option<SubPhaseTimer> {
+    sink_active().then(|| SubPhaseTimer {
+        phase,
+        start: Instant::now(),
+    })
+}
+
+/// Time `f` (a BLOCKING merge-input recv) and add its elapsed to this thread's
+/// pull-wait accumulator IF a sink is installed, so the row-drive loop can
+/// EXCLUDE it from `stream_merge` (issue #2819 B2). Zero `Instant::now` when
+/// inert, so the non-flight compaction merge pays nothing.
+pub fn time_recv<T>(f: impl FnOnce() -> T) -> T {
+    if sink_active() {
+        let start = Instant::now();
+        let out = f();
+        add_pull_wait_nanos(elapsed_nanos(start));
+        out
+    } else {
+        f()
+    }
 }
 
 #[cfg(test)]

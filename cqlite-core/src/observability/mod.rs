@@ -176,6 +176,23 @@ pub fn add_counter(name: &'static str, value: u64, attrs: &[Attr]) {
     }
 }
 
+/// Whether metrics are actually being collected — the `observability` feature is
+/// compiled in AND a meter provider is installed (`otel::metrics_active`). Every
+/// `record_*` here already gates on this, so it is a no-op when false; exposing it
+/// lets a caller SKIP building per-request timing state whose samples would only
+/// be discarded (issue #2819 M1 — the "zero-cost when the meter is off" promise).
+#[inline]
+pub fn metrics_active() -> bool {
+    #[cfg(feature = "observability")]
+    {
+        otel::metrics_active()
+    }
+    #[cfg(not(feature = "observability"))]
+    {
+        false
+    }
+}
+
 /// Record `value` into the histogram identified by a [`catalog`] name (durations
 /// in seconds, sizes in bytes — see the catalog docs). No-op when off.
 #[inline]
