@@ -30,6 +30,7 @@ use tracing::Instrument;
 use cqlite_core::storage::sstable::reader::SSTableReader;
 
 use crate::admission::Admission;
+use crate::batch_bytes::DEFAULT_MAX_BATCH_BYTES;
 use crate::cancel::CancelFlag;
 use crate::filter::{FilterError, ScanSpec};
 use crate::obs::{rpc_span, AbortContext, AbortReason, RpcMetrics};
@@ -299,6 +300,11 @@ pub struct CqliteFlightService {
     /// Shared (`Arc` inside [`Admission`]) across the `Clone`d per-RPC handles so
     /// every request throttles against the same permit pool.
     admission: Admission,
+    /// Per-batch Arrow PAYLOAD byte ceiling handed to every producer this
+    /// service builds (issue #2825). A batch is finished on whichever of
+    /// `batch_size` or this cap trips first. Defaults to
+    /// [`DEFAULT_MAX_BATCH_BYTES`] on every construction path.
+    max_batch_bytes: usize,
 }
 
 impl CqliteFlightService {
@@ -329,7 +335,30 @@ impl CqliteFlightService {
             warm: Arc::new(WarmTableRegistry::new()),
             caches: Arc::new(SetupCaches::default()),
             admission,
+            // Issue #2825: unlike admission, the byte-cap is ON by default on
+            // EVERY construction path — an unbounded egress batch is a memory
+            // hazard, not a policy choice, and the 4 MiB default is a no-op on
+            // every narrow shape. Opt out explicitly with
+            // `with_max_batch_bytes(usize::MAX)`.
+            max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
         }
+    }
+
+    /// Override the per-batch Arrow **payload** byte cap (issue #2825) — the
+    /// wiring point for the `--max-batch-bytes` / `CQLITE_MAX_BATCH_BYTES` knob.
+    ///
+    /// The cap is already active at [`DEFAULT_MAX_BATCH_BYTES`] from
+    /// [`Self::new`]/[`Self::with_admission`]; this changes the configured value.
+    /// Consumes and returns `self` for chaining.
+    pub fn with_max_batch_bytes(mut self, max_batch_bytes: usize) -> Self {
+        self.max_batch_bytes = max_batch_bytes;
+        self
+    }
+
+    /// The per-batch Arrow payload byte cap in force (issue #2825) — for `main`
+    /// (to log the configured value) and the byte-cap tests.
+    pub fn max_batch_bytes(&self) -> usize {
+        self.max_batch_bytes
     }
 
     /// The service's admission ceiling (issue #2420) — for `main` (to log the
@@ -425,6 +454,9 @@ impl CqliteFlightService {
         // An empty registry (a DDL with no `CREATE TYPE`) is a no-op.
         let registry = cqlite_core::schema::udt_registry_from_cql(&ticket.ddl, &ticket.keyspace);
         let producer = MergeProducer::with_spec((*schema).clone(), self.batch_size, spec)?
+            // Issue #2825: the configured byte-cap reaches every producer this
+            // service builds, on every route.
+            .with_max_batch_bytes(self.max_batch_bytes)
             .with_udt_registry(registry);
         // Aggregation pushdown (issue #841): when the ticket carries an
         // aggregation spec, the producer emits PARTIAL aggregate rows under the
