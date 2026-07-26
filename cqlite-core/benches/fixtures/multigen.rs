@@ -118,30 +118,45 @@ pub const LIVE_LDT_SECS: i32 = (PINNED_NOW_SECS + 3_600) as i32;
 /// instead of only to [`PINNED_NOW_SECS`], and re-measure.
 pub const FIXTURE_TTL_SECS: u32 = 600;
 
-/// Partitions per generation.
-pub const OVERLAP_PARTITIONS: usize = 16;
-
-/// Clustering rows per partition, per generation. `OVERLAP_PARTITIONS *
-/// OVERLAP_CK` = **4096 clusters per generation**.
+/// Partitions per generation. `OVERLAP_PARTITIONS * OVERLAP_CK` = **4096 clusters
+/// per generation**.
 ///
-/// Sized so per-row work DOMINATES per-scan setup at the matrix's largest k (owner
-/// decision 2026-07-26, issue #2043). `KWayMerger::new_from_readers` spawns one OS
-/// producer thread + opens one adapter PER GENERATION, all inside the timed region;
-/// that cost is fixed per drain and grows with k, so at a small row count it lands
-/// in the numerator of `cost(k)/cost(1)` and biases the multiplier UPWARD with k —
-/// while a real compaction over millions of rows amortizes it to nothing. At the
-/// previous 64 (1024 clusters/generation) the bench's own `SetupCensus`
+/// **This — not [`OVERLAP_CK`] — is the knob the arm width was quadrupled on** (owner
+/// decision 2026-07-26, issue #2043; 16 → 64).
+///
+/// Why the width had to grow at all: `KWayMerger::new_from_readers` spawns one OS
+/// producer thread + opens one adapter PER GENERATION, all inside the timed region, so
+/// per-drain setup is a fixed cost that GROWS with k. Against a ~1024-row denominator
+/// it lands in the numerator of `cost(k)/cost(1)` and biases the multiplier UPWARD
+/// with k — while a real compaction over millions of rows amortizes it to nothing. At
+/// the original 16 × 64 = 1024 clusters/generation the bench's own `SetupCensus`
 /// (`benches/reconcile_overlap.rs`) measured that share at **0.65–0.86 % at k = 1 but
-/// 2.4–4.8 % at k = 20**, i.e. a ~2.3 % upward bias on the k = 20 multiplier.
-/// Quadrupling the width leaves the setup cost unchanged and quadruples the per-row
-/// work, putting the k = 20 residual **under 1 %** — and the residual is MEASURED and
-/// printed per arm rather than assumed, so the record publishes a setup-corrected
-/// multiplier beside the raw one.
+/// 2.4–4.8 % at k = 20**: a ~2.3 % upward bias on the k = 20 multiplier.
 ///
-/// Still bounded: a k = 20 iteration is ~0.2 s and a generation is 4096 rows of a
-/// 5-column table, so the fixture stays a few MB on disk and the whole 27-arm matrix
-/// stays a single-digit-minute run.
-pub const OVERLAP_CK: usize = 256;
+/// Why the PARTITION count and not the clustering width: `MergeStep::Partition`
+/// materializes **one whole partition's reconciled rows at a time**, so rows-per-
+/// partition is itself a first-order determinant of per-row merge cost. Growing
+/// `OVERLAP_CK` therefore changes the quantity being measured at the same time as it
+/// amortizes setup — measured, not assumed: a 16 × 256 variant of this matrix moved the
+/// saturated `disjoint` anchor from 2.82 to **3.02 µs/row (+7 %, and +12.6 % at
+/// k = 20 alone, where a partition batch reaches 20 × 256 rows)**, which would have
+/// confounded the amortization fix with a partition-width change and pushed the anchor
+/// out of the record's ±50 % band. Scaling PARTITIONS instead leaves rows-per-
+/// partition-per-generation at 64 — byte-for-byte the shape the k-curve was banked on —
+/// and quadruples the denominator anyway.
+///
+/// Result: setup share is now **0.2–0.3 % at k = 1 and ≤1.0 % at k = 20** (measured and
+/// printed per arm, never assumed), so the record's raw and setup-corrected multipliers
+/// agree to well under 1 %. Still bounded: a k = 20 iteration is ~0.25 s, a generation
+/// is 4096 rows of a 5-column table, and the 27-arm matrix stays a single-digit-minute
+/// run.
+pub const OVERLAP_PARTITIONS: usize = 64;
+
+/// Clustering rows per partition, per generation. Deliberately UNCHANGED at 64 while
+/// the arm width grew 4× — see [`OVERLAP_PARTITIONS`] for why this is the wrong knob
+/// to scale (it changes the `MergeStep::Partition` batch width, i.e. the quantity
+/// being measured).
+pub const OVERLAP_CK: usize = 64;
 
 /// Clusters (`(pk, ck)` pairs) each generation writes.
 pub const CLUSTERS_PER_GEN: usize = OVERLAP_PARTITIONS * OVERLAP_CK;

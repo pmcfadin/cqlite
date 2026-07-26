@@ -18,10 +18,11 @@
 //! unreadable `/proc` and the arm's Criterion number was still published as if
 //! validated): an **unreadable** probe PANICS exactly like an over-ceiling
 //! sample, and [`CpuWatch::end_arm`] additionally refuses an arm that was not
-//! actually gated — it requires a minimum number of gated intervals AND that the
-//! gated intervals cover ≥ [`MIN_GATED_WALL_FRACTION`] of that arm's timed wall
-//! clock. The caller then asserts that EVERY arm passed through `end_arm`
-//! ([`CpuWatch::arms_gated`]), so a skipped sample can never pass as a gated arm.
+//! actually gated — it requires a minimum number of gated intervals AND that at most
+//! [`MAX_UNRESOLVABLE_WALL_FRACTION`] of that arm's timed wall clock sat in intervals
+//! too short to resolve. The caller then asserts that EVERY arm passed through
+//! `end_arm` ([`CpuWatch::arms_gated`]), so a skipped sample can never pass as a
+//! gated arm.
 //!
 //! ## Why the foreign-CPU window is per INTERVAL, not per arm
 //!
@@ -32,6 +33,11 @@
 //! (roborev, issue #2043). The bench therefore drives Criterion through
 //! `iter_custom` and calls [`CpuWatch::observe_interval`] once per **batch**; the
 //! gate is the per-interval **maximum**, and the mean is kept as reported context.
+//!
+//! The interval must still be long enough for the figure to RESOLVE the ceiling at
+//! `USER_HZ` granularity — see [`MIN_GATEABLE_TOTAL_TICKS`], which is derived from
+//! the ceiling rather than picked, and why the bench pins `SamplingMode::Flat` so
+//! that every PUBLISHED sample is a uniformly long, resolvable window.
 //!
 //! ## Why not a per-arm loadavg gate
 //!
@@ -90,20 +96,43 @@ const FOREIGN_CPU_CEILING_PER_CORE: f64 = 0.0625;
 /// core of slack, below which sampling jitter alone would void arms.
 const FOREIGN_CPU_CEILING_FLOOR: f64 = 0.25;
 
-/// Minimum `/proc/stat` tick advance for an interval to be GATEABLE at all.
-///
-/// `USER_HZ` is 100, so a host tick is 10 ms of ONE cpu's capacity; with NOHZ idle
-/// accounting a very short interval can legitimately show a zero (or 1–2 tick)
-/// advance, from which no foreign-CPU figure can be computed. Criterion's own
-/// sample batches are ≥ `measurement_time / sample_size` (250 ms with this bench's
-/// configuration) and clear this bar by ~2 orders of magnitude; the intervals that
-/// do not are Criterion's first few warm-up probes. They are COUNTED as ungated and
-/// bounded by [`MIN_GATED_WALL_FRACTION`], never silently ignored.
-const MIN_GATEABLE_TOTAL_TICKS: u64 = 8;
+/// Fraction of the foreign-CPU CEILING that one `USER_HZ` tick of misattribution is
+/// allowed to represent. Sets the interval-length floor below which the foreign-CPU
+/// figure cannot RESOLVE the ceiling it is compared against — see
+/// [`MIN_GATEABLE_TOTAL_TICKS`].
+const TICK_RESOLUTION_FRACTION_OF_CEILING: f64 = 0.10;
 
-/// Fraction of an arm's TIMED wall clock that MUST have been covered by gated
-/// intervals for the arm to count as validated.
-const MIN_GATED_WALL_FRACTION: f64 = 0.90;
+/// Minimum `/proc/stat` tick advance for an interval's foreign-CPU figure to be
+/// RESOLVABLE, and therefore gateable.
+///
+/// The figure is `(busy − own)/total × cores`, so its granularity is `cores/total`
+/// cores per `/proc/stat` tick: ONE tick landing on a background task moves it by
+/// that much. Requiring that granularity to be ≤
+/// [`TICK_RESOLUTION_FRACTION_OF_CEILING`] of the ceiling `0.0625 × cores` gives
+/// `total ≥ 1 / (0.10 × 0.0625) = 160` ticks — **independent of the core count**,
+/// because both the numerator and the ceiling scale with `cores`. At `USER_HZ = 100`
+/// that is 1.6 s of aggregate CPU capacity: 100 ms of wall clock on a 16-core box.
+///
+/// This is a measurement-resolution bound, not slack. Below it the gate would be
+/// deciding on noise: a **54 ms** interval on 16 cores advances ~86 ticks, so a
+/// single stray tick reads as **0.19 cores** and six of them as a spurious
+/// **1.05-core "burst"** — which is exactly how this instrument voided an otherwise
+/// clean run on one of Criterion's short warm-up probes (issue #2043). Every
+/// PUBLISHED sample is uniformly ≥ `measurement_time / sample_size` (250 ms, ~400
+/// ticks) because the bench pins `SamplingMode::Flat`, so no published sample is
+/// ever unresolvable; the only unresolvable intervals are Criterion's warm-up
+/// probes, whose data it discards. They are still COUNTED, and bounded by
+/// [`MAX_UNRESOLVABLE_WALL_FRACTION`] — never silently ignored.
+const MIN_GATEABLE_TOTAL_TICKS: u64 = 160;
+
+/// Ceiling on the share of an arm's TIMED wall clock that may sit in intervals too
+/// short to resolve (see [`MIN_GATEABLE_TOTAL_TICKS`]). Under `SamplingMode::Flat`
+/// those are Criterion's warm-up probes only — 1 s of warm-up against ≥5 s of
+/// measurement, i.e. ~2 % in practice on the reference box — so 25 % is a wide
+/// margin that still fails CLOSED the moment the sampling loop stops being shaped
+/// the way this gate assumes (e.g. a host whose per-sample wall clock is itself
+/// unresolvable).
+const MAX_UNRESOLVABLE_WALL_FRACTION: f64 = 0.25;
 
 /// Minimum number of gated intervals per arm. This bench runs 20 Criterion samples
 /// per arm, so anything near or below half of that means the sampling loop is not
@@ -277,8 +306,10 @@ pub struct CpuWatch {
     arm_total_ticks: u64,
     arm_intervals: usize,
     arm_gated: usize,
+    arm_short: usize,
     arm_wall: Duration,
     arm_gated_wall: Duration,
+    arm_unresolvable_wall: Duration,
     // Loadavg (informational after run start).
     load_min: f64,
     load_max: f64,
@@ -312,8 +343,10 @@ impl CpuWatch {
             arm_total_ticks: 0,
             arm_intervals: 0,
             arm_gated: 0,
+            arm_short: 0,
             arm_wall: Duration::ZERO,
             arm_gated_wall: Duration::ZERO,
+            arm_unresolvable_wall: Duration::ZERO,
             load_min: f64::MAX,
             load_max: f64::MIN,
             load_samples: 0,
@@ -349,8 +382,10 @@ impl CpuWatch {
         self.arm_total_ticks = 0;
         self.arm_intervals = 0;
         self.arm_gated = 0;
+        self.arm_short = 0;
         self.arm_wall = Duration::ZERO;
         self.arm_gated_wall = Duration::ZERO;
+        self.arm_unresolvable_wall = Duration::ZERO;
     }
 
     /// Sample the counters at the START of one timed interval (one Criterion
@@ -381,9 +416,12 @@ impl CpuWatch {
         };
         let total = after.total.saturating_sub(before.total);
         if total < MIN_GATEABLE_TOTAL_TICKS {
-            // Readable, but too short to resolve at 10 ms tick granularity. Counted,
-            // and bounded by the gated-wall-fraction check in `end_arm`.
+            // Readable, but too short for the foreign figure to RESOLVE the ceiling
+            // at `USER_HZ` granularity. Counted, and bounded by the unresolvable-wall
+            // check in `end_arm`.
             self.short_intervals += 1;
+            self.arm_short += 1;
+            self.arm_unresolvable_wall += wall;
             return;
         }
         let busy = total.saturating_sub(after.idle.saturating_sub(before.idle));
@@ -416,14 +454,19 @@ impl CpuWatch {
     }
 
     /// Close the arm and REFUSE it unless it was really gated: enough gated
-    /// intervals, gated intervals covering ≥ [`MIN_GATED_WALL_FRACTION`] of the
-    /// timed wall clock, and this process's own CPU actually advancing over a
-    /// multi-second CPU-bound region.
+    /// intervals, at most [`MAX_UNRESOLVABLE_WALL_FRACTION`] of the timed wall clock
+    /// in intervals too short to resolve, and this process's own CPU actually
+    /// advancing over a multi-second CPU-bound region.
     pub fn end_arm(&mut self, site: &str) -> ArmForeign {
         let fraction = if self.arm_wall.is_zero() {
             0.0
         } else {
             self.arm_gated_wall.as_secs_f64() / self.arm_wall.as_secs_f64()
+        };
+        let unresolvable = if self.arm_wall.is_zero() {
+            1.0
+        } else {
+            self.arm_unresolvable_wall.as_secs_f64() / self.arm_wall.as_secs_f64()
         };
         if self.arm_gated < MIN_GATED_INTERVALS {
             self.void(
@@ -433,15 +476,16 @@ impl CpuWatch {
                     self.arm_gated, self.arm_intervals
                 ),
             );
-        } else if fraction < MIN_GATED_WALL_FRACTION {
+        } else if unresolvable > MAX_UNRESOLVABLE_WALL_FRACTION {
             self.void(
                 site,
                 &format!(
-                    "gated intervals cover only {:.1} % of the arm's {:.1} s timed wall clock \
-                     (minimum {:.0} %)",
-                    fraction * 100.0,
+                    "{:.1} % of the arm's {:.1} s timed wall clock sat in {} interval(s) too short \
+                     to resolve the foreign-CPU ceiling at USER_HZ granularity (maximum {:.0} %)",
+                    unresolvable * 100.0,
                     self.arm_wall.as_secs_f64(),
-                    MIN_GATED_WALL_FRACTION * 100.0
+                    self.arm_short,
+                    MAX_UNRESOLVABLE_WALL_FRACTION * 100.0
                 ),
             );
         } else if self.arm_wall >= OWN_TICK_SELF_CHECK_WALL && self.arm_own_ticks == 0 {
@@ -586,7 +630,8 @@ pub fn assert_quiesced(watch: &mut CpuWatch) {
     }
 }
 
-/// Self-test of the two `/proc` parsers, over CAPTURED samples plus the live files.
+/// Self-test of the two `/proc` parsers and of the resolution derivation, over
+/// CAPTURED samples plus the live files.
 ///
 /// Runs on EVERY invocation of the bench target (measuring, `--test` and `--list`
 /// alike) rather than as `#[cfg(test)]`: this target is `harness = false`, so a
@@ -595,6 +640,19 @@ pub fn assert_quiesced(watch: &mut CpuWatch) {
 /// extraction (the roborev finding this guards: a wrong positional offset silently
 /// yielding `own = 0`) fails the run instead of quietly inflating foreign CPU.
 pub fn assert_probe_parsers_sound() {
+    // The interval-length floor is DERIVED from the ceiling, not picked: one
+    // `/proc/stat` tick of misattribution must move the foreign figure by no more than
+    // `TICK_RESOLUTION_FRACTION_OF_CEILING` of the ceiling. Asserted rather than only
+    // commented, so editing either input without re-deriving the other fails the run.
+    let derived =
+        (1.0 / (TICK_RESOLUTION_FRACTION_OF_CEILING * FOREIGN_CPU_CEILING_PER_CORE)).ceil() as u64;
+    assert_eq!(
+        MIN_GATEABLE_TOTAL_TICKS, derived,
+        "MIN_GATEABLE_TOTAL_TICKS must equal 1/(TICK_RESOLUTION_FRACTION_OF_CEILING × \
+         FOREIGN_CPU_CEILING_PER_CORE) — the tick count at which one stray tick is a \
+         fraction {TICK_RESOLUTION_FRACTION_OF_CEILING} of the foreign-CPU ceiling"
+    );
+
     // Captured `/proc/self/stat` (a `comm` containing BOTH a space and a `)`, and a
     // negative `tpgid`, so the offset arithmetic is exercised where it is fragile):
     // utime=111 stime=222 cutime=3 cstime=4 ⇒ 340.
