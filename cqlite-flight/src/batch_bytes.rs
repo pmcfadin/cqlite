@@ -166,7 +166,9 @@ pub const BATCH_BYTES_CAPACITY_FACTOR: usize = 2;
 /// whole reported size, so a capacity bound stated purely as a multiple of the
 /// payload would be wrong for that shape.
 ///
-/// **2048, corrected from 1024 (issue #2821 review).** 1024 was under the real
+/// **2048, corrected from 1024 (issue #2932, found in the #2821 review).** With
+/// 1024 this function was NOT an upper bound for text/blob schemas. 1024 was
+/// under the real
 /// fixed cost of the commonest node there is: a `Utf8`/`Binary` array built by
 /// `export::arrow_convert` reports **1208 B** at any length from 0 up (arrow 53 —
 /// 1024 values buffer + 64 offsets + the struct overhead). A two-`text`-column

@@ -649,7 +649,8 @@ Format:
   `BATCH_BYTES_CAPACITY_FACTOR = 2` and `BATCH_BYTES_PER_COLUMN_SLACK = 1024`, with
   `worst_case_batch_capacity_bytes(cap, n_array_nodes, widest_row_payload)
   = 2 × max(cap, widest_row_payload) + 2048 × n_array_nodes` (the per-node term was
-  corrected from 1024 in the #2821 review: a `Utf8`/`Binary` array reports 1208 B of
+  corrected from 1024 by issue #2932, found in the #2821 review: with 1024 this was
+  not an upper bound at all for text/blob schemas — a `Utf8`/`Binary` array reports 1208 B of
   fixed allocation at any length, so the old value under-stated capacity for
   tiny batches and made #2821's fail-closed reservation reject narrow tables). For a schema whose
   widest row fits the cap that is `2 × cap + slack` — ~8 MiB of resident capacity

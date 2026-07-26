@@ -348,7 +348,7 @@ end-to-end wiring evidence over a genuine multi-batch drain at the shipped defau
 composition test asserts it from the imported constants so raising either constant fails the build
 rather than silently voiding B4.
 
-## D4b — `BATCH_BYTES_PER_COLUMN_SLACK` corrected to 2 KiB (issue #2821 review)
+## D4b — `BATCH_BYTES_PER_COLUMN_SLACK` corrected to 2 KiB (issue #2932, found in the #2821 review)
 
 The published payload→capacity conversion allowed 1 KiB of fixed allocation per Arrow array node.
 That is under the real fixed cost of the commonest node there is: a `Utf8`/`Binary` array built by
@@ -360,7 +360,9 @@ Under #2825 alone that was a loose doc claim with no runtime consequence. #2821'
 reserve-before-materialize turns the same conversion into an ENFORCED reservation that fails closed,
 so the understatement became a terminal `Status::internal` on every narrow-table `do_get` (7
 real-transport tests). The fix is the published constant, not a local fudge at the reservation site
-— the spec forbids a second definition of the conversion.
+— the spec forbids a second definition of the conversion. The defect is tracked as **#2932 (P1)**
+against merged #2825 code and fixed HERE because #2821 is blocked on it: a two-file change #2821
+immediately depends on does not justify a separate issue → branch → gate → merge → rebase cycle.
 
 `BATCH_BYTES_PER_COLUMN_SLACK = 2048` covers the measured 1208 with 840 B of margin per node, and is
 enforced over a tiny-batch corpus (two-text, empty string, text+blob+int, `list<text>`,
