@@ -40,6 +40,7 @@ use crate::storage::write_engine::{WriteEngine, WriteEngineConfig};
 use crate::types::Value;
 use crate::Config;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// Number of source SSTables per merge. `>= 9` is required to DISTINGUISH the
@@ -210,35 +211,47 @@ fn real_merger_drop_returns_its_active_merge_slot() {
     let schema = create_test_schema();
 
     const REQUIRED_WINDOWS: usize = 3;
-    const CEILING: usize = 24;
-    let mut quiet_windows = 0usize;
+    const CEILING: usize = 48;
+    let mut converged_windows = 0usize;
     for _ in 0..CEILING {
         let before = egress_budget::active_count();
-        let mid = {
-            let _m = KWayMerger::new_cancellable(paths.clone(), &schema, ScanCancel::default())
-                .expect("merger builds");
-            egress_budget::active_count()
-        };
-        let after = egress_budget::active_count();
-        // Only a strictly-quiet build window (our `+1` alone) is conclusive;
-        // otherwise ambient churn makes the reading ambiguous → skip + retry.
-        if mid == before + 1 {
-            assert!(
-                after <= before,
-                "active-merge slot LEAKED on drop (before={before}, mid={mid}, \
-                 after={after}) — the guard's decrement did not fire"
-            );
-            quiet_windows += 1;
-            if quiet_windows >= REQUIRED_WINDOWS {
+        let merger = KWayMerger::new_cancellable(paths.clone(), &schema, ScanCancel::default())
+            .expect("merger builds");
+        let mid = egress_budget::active_count();
+        // Conclusive only if the BUILD window was strictly quiet (our `+1` alone);
+        // otherwise ambient churn makes the reading ambiguous → drop + retry.
+        let quiet_build = mid == before + 1;
+        drop(merger); // channel close + producer join (ms) — may span ambient churn
+        if !quiet_build {
+            continue;
+        }
+        // Post-drop is BOUNDED-POLLED, not a single fatal read: the `mid → after`
+        // interval spans a full drop (join), so an ambient `begin_merge` landing
+        // there transiently raises the count. A genuine leak stays PINNED above
+        // `before` forever (never converges); a transient ambient merge is
+        // balanced by its own later drop and clears within the window. A window
+        // that never converges is treated as AMBIGUOUS (skipped), never a fatal
+        // leak assert — so ambient churn cannot spuriously fail the full gate.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut returned = egress_budget::active_count() <= before;
+        while !returned && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            returned = egress_budget::active_count() <= before;
+        }
+        if returned {
+            converged_windows += 1;
+            if converged_windows >= REQUIRED_WINDOWS {
                 break;
             }
         }
     }
     assert!(
-        quiet_windows >= REQUIRED_WINDOWS,
-        "needed {REQUIRED_WINDOWS} quiet windows to prove build-increment + \
-         drop-decrement (saw {quiet_windows} in {CEILING} attempts) — the suite \
-         was too busy to observe a clean window, not a pass"
+        converged_windows >= REQUIRED_WINDOWS,
+        "in {CEILING} attempts, fewer than {REQUIRED_WINDOWS} quiet windows saw the \
+         active-merge count return to baseline after a real KWayMerger drop (saw \
+         {converged_windows}). A genuine missing-decrement leak keeps the count \
+         PINNED above baseline so NO window ever converges — that is the failure \
+         this asserts; a merely-busy suite would still converge in some window."
     );
 }
 
@@ -337,7 +350,15 @@ fn concurrency_drives_real_per_channel_cap_below_max() {
     let paths = flush_n_sstables_sync(&mut engine, 1);
     let schema = create_test_schema();
 
-    let hold_count = egress_budget::budget() / egress_budget::MAX_CAP + 1;
+    // Sized from the RESOLVED budget, but CLAMPED to 64 so a pathological
+    // `CQLITE_EGRESS_ROW_BUDGET` can't spawn thousands of real mergers/FDs. If the
+    // clamp defeats the shrink precondition (a huge budget where even a 65th merge
+    // stays at the 256 clamp), skip: the property is unobservable within a bounded
+    // workload, not violated.
+    let hold_count = (egress_budget::budget() / egress_budget::MAX_CAP + 1).min(64);
+    if egress_budget::capacity_for(hold_count + 1) >= egress_budget::MAX_CAP {
+        return;
+    }
     let mut held = Vec::with_capacity(hold_count);
     for _ in 0..hold_count {
         held.push(

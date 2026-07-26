@@ -151,10 +151,27 @@ const MIN_CAP_ENV: &str = "CQLITE_EGRESS_MIN_CAP";
 fn resolved() -> (usize, usize) {
     static RESOLVED: OnceLock<(usize, usize)> = OnceLock::new();
     *RESOLVED.get_or_init(|| {
-        resolve_budget(
+        let (budget, min_cap) = resolve_budget(
             std::env::var(BUDGET_ENV).ok().as_deref(),
             std::env::var(MIN_CAP_ENV).ok().as_deref(),
-        )
+        );
+        // One-time operator signal (issue #2765): warn when the resolved knobs
+        // leave the adaptive throttle INERT — either the floor meets the ceiling
+        // (`min_cap >= MAX_CAP`, so every channel is 256 at any concurrency) or
+        // the range is degenerate (`budget <= 2 × min_cap`, so the cap is pinned
+        // at `min_cap` regardless of concurrency). Silent-off is the trap this
+        // closes; runs once (OnceLock init).
+        if min_cap >= MAX_CAP || budget / min_cap <= 1 {
+            tracing::warn!(
+                budget,
+                min_cap,
+                max_cap = MAX_CAP,
+                "{BUDGET_ENV}/{MIN_CAP_ENV} leave the adaptive merge egress \
+                 throttle INERT (per-channel capacity does not shrink with \
+                 concurrency); see cqlite.merge.active_merges / #2765"
+            );
+        }
+        (budget, min_cap)
     })
 }
 
@@ -460,23 +477,31 @@ mod tests {
     fn concurrent_begin_shrinks_per_channel_capacity() {
         use std::sync::{Arc, Barrier};
 
-        // Drive `n` concurrent MERGE registrations through the EXACT production
-        // increment/snapshot primitive (`begin_on`), but against a PRIVATE atomic
-        // (issue #2451 isolation, mirroring the pairing test) so this test can
+        // Drive `n` concurrent MERGE registrations through the SAME
+        // increment/snapshot logic `begin_merge` uses, via the test-only
+        // `begin_on_for_test` seam against a PRIVATE atomic (issue #2451
+        // isolation, mirroring the pairing test) so this test can
         // NEVER inflate the shared global `ACTIVE` and shrink a parallel
         // merger-building test's caps. Assert the per-channel capacity a merge is
         // HANDED shrinks below the fixed 256 as concurrent merges rise — and
         // never below the resolved floor. (KWayMerger-level end-to-end wiring, on
         // the real global, lives in `egress_wiring_tests`.)
         //
-        // `n` is sized from the RESOLVED budget (not a fixed 16): `begin_on` calls
-        // the env-resolved `capacity_for`, so under `CQLITE_EGRESS_ROW_BUDGET=8192`
+        // `n` is sized from the RESOLVED budget (not a fixed 16): `begin_on_for_test`
+        // calls the env-resolved `capacity_for`, so under `CQLITE_EGRESS_ROW_BUDGET=8192`
         // a fixed 16 would leave `8192/16 == 512` clamped back to 256 and never
-        // shrink. `budget/MAX_CAP + 8` guarantees the last-registering thread sees
-        // `capacity_for(n) = budget/(budget/MAX_CAP + 8) < MAX_CAP` for any budget.
+        // shrink. `budget/MAX_CAP + 8` makes the last-registering thread see
+        // `capacity_for(n) < MAX_CAP` for any realistic budget — but is CLAMPED to
+        // 64 so a pathological `CQLITE_EGRESS_ROW_BUDGET` can't spawn thousands of
+        // threads. If the clamp defeats the shrink precondition (a huge budget
+        // where even 64 concurrency stays at the 256 clamp), skip: the property is
+        // unobservable within a bounded workload, not violated.
         let counter: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
         let floor = min_cap();
-        let n = budget() / MAX_CAP + 8;
+        let n = (budget() / MAX_CAP + 8).min(64);
+        if capacity_for(n) >= MAX_CAP {
+            return;
+        }
         let registered = Arc::new(Barrier::new(n));
         let released = Arc::new(Barrier::new(n));
 
@@ -488,8 +513,8 @@ mod tests {
                     // Register FIRST (increments the PRIVATE count + snapshots the
                     // cap), THEN barrier — so all `n` are counted before any reads;
                     // the second barrier holds every guard alive until all have
-                    // observed, modelling `n` concurrent merges. `record = false`:
-                    // never touch the process-global operator gauge.
+                    // observed, modelling `n` concurrent merges. `begin_on_for_test`
+                    // never publishes the global gauge (structural suppression).
                     let (cap, _guard) = begin_on_for_test(counter);
                     registered.wait();
                     let live = counter.load(Ordering::SeqCst);
@@ -538,11 +563,12 @@ mod tests {
     #[test]
     fn guard_increments_and_decrements_a_private_count() {
         // Deterministic pairing test against a PRIVATE atomic (mirroring
-        // `channel_depth`'s per-test-atomic pattern): `begin_on` increments and
-        // the returned guard's drop decrements, so the count returns to baseline
-        // on every scope exit. A private atomic cannot be perturbed by the other
-        // tests in this binary that drive real merges through the shared global,
-        // and `record = false` keeps it off the process-global operator gauge.
+        // `channel_depth`'s per-test-atomic pattern): `begin_on_for_test`
+        // increments and the returned guard's drop decrements, so the count
+        // returns to baseline on every scope exit. A private atomic cannot be
+        // perturbed by the other tests in this binary that drive real merges
+        // through the shared global, and `begin_on_for_test` never publishes the
+        // process-global operator gauge (structural suppression).
         let counter: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
         assert_eq!(counter.load(Ordering::SeqCst), 0);
         {

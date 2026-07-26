@@ -210,11 +210,14 @@ fn cancelled_backed_up_merge_reconciles_egress_depth_to_baseline_on_drop() {
     // Sample the live active-merge count BEFORE and AFTER construction and derive
     // the per-channel capacity from the HIGHER count (→ the LOWER capacity),
     // instead of assuming a fixed 256 — otherwise an operator setting
-    // `CQLITE_EGRESS_ROW_BUDGET` low would deterministically 10s-timeout here. An
-    // after-only read is NOT monotone: if an ambient merge COMPLETES in the
-    // window, `capacity_for(after)` could EXCEED this merger's true snapshot and
-    // push the threshold above the real ceiling. `max(before+1, after)` (this
-    // merger counts itself) is a safe lower bound regardless of ambient churn.
+    // `CQLITE_EGRESS_ROW_BUDGET` low would deterministically 10s-timeout here.
+    // `max(before+1, after)` (this merger counts itself via the `+1`) is a safe
+    // lower bound on the true snapshot GIVEN this single-test binary has no
+    // ambient merges, and stays conservative under monotonically-RISING
+    // concurrency. (NOT a universal bound: an ambient merge that both starts AND
+    // finishes between the two reads would make the true snapshot `before+2`
+    // while this derives `before+1`; that cannot happen here — one test per
+    // binary — so the derivation is exact.)
     let cancel = ScanCancel::default();
     let before = cqlite_core::storage::write_engine::merge::active_merge_count();
     let merger = KWayMerger::new_cancellable(inputs, &schema, cancel.clone())

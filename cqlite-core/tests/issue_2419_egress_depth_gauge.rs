@@ -200,13 +200,14 @@ fn egress_depth_gauge_rises_and_returns_to_baseline() {
     // WITHOUT pushing the threshold out of reach (the pre-#2765 fixed-256
     // assumption would 10s-timeout in that case).
     // Sample the live active-merge count BEFORE and AFTER construction and derive
-    // the per-channel capacity from the HIGHER count (→ the LOWER capacity). An
-    // after-only read is NOT monotone: if an ambient merge COMPLETES between
-    // construction and the read, `active_merge_count` drops and
-    // `capacity_for(after)` could EXCEED this merger's true snapshot, pushing the
-    // threshold above the real ceiling → a spurious 10s timeout. `max(before+1,
-    // after)` (this merger counts itself via the `+1`) is a safe lower bound on
-    // the true capacity regardless of ambient churn in the window.
+    // the per-channel capacity from the HIGHER count (→ the LOWER capacity).
+    // `max(before+1, after)` (this merger counts itself via the `+1`) is a safe
+    // lower bound on the true snapshot GIVEN this single-test binary has no
+    // ambient merges, and stays conservative under monotonically-RISING
+    // concurrency. (It is NOT a universal bound: an ambient merge that both
+    // starts AND finishes between the two reads would make the true snapshot
+    // `before+2` while this derives `before+1` → an over-estimate. That cannot
+    // happen here — one test per binary — so the derivation is exact.)
     let before = cqlite_core::storage::write_engine::merge::active_merge_count();
     let merger = KWayMerger::new(inputs, &schema).expect("KWayMerger::new");
     let after = cqlite_core::storage::write_engine::merge::active_merge_count();
