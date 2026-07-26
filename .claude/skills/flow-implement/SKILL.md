@@ -62,6 +62,11 @@ never gate stdout or review churn.
      # re-read; a UNIQUE root commit means a different-slug or identical-base
      # competitor can no longer double-claim. Adopting a reaped claim instead?
      # Use: bash scripts/flow/claim.sh adopt <N> --expect <old-sha>.
+     # RESUMING an issue whose issue-<N>-* branch outlived its claim ref (the
+     # `reason=legacy-branch-lock` refusal, which prints this command verbatim)?
+     # Use: bash scripts/flow/claim.sh adopt <N> --expect none --reason <why>
+     # (#2945 — git's empty lease: still server-arbitrated, records who + why).
+     # NEVER hand-craft a claim commit to get past the guard.
      if ! bash scripts/flow/claim.sh claim <N>; then
        echo "CLAIM LOST — another machine holds refs/claims/issue-<N>. Take the next item (or fetch to RESUME)."; exit 0
      fi

@@ -37,6 +37,8 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
    if ! bash scripts/flow/claim.sh claim <N>; then
      echo "CLAIM LOST — another session holds refs/claims/issue-<N>. Take the next item."
      # (Adopting a reaped claim instead? Use: bash scripts/flow/claim.sh adopt <N> --expect <old-sha>)
+     # (Refused with reason=legacy-branch-lock — a FREE claim ref but an issue-<N>-* branch
+     #  still on origin? Resume it: claim.sh adopt <N> --expect none --reason <why>, #2945)
    fi
    # CLAIM HELD → set up the worktree + branch. The branch is naming/PR plumbing, NOT the lock:
    wt=".claude/worktrees/issue-<N>-<slug>"

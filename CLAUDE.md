@@ -383,7 +383,12 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `issue-<N>-<slug>` branch is now **PR plumbing, NOT the lock**. Acquire the claim ref FIRST, then
   worktree+branch; set assignee + `Status=In Progress`. `claim.sh verify <N>` confirms you hold it;
   adopting a reaped claim = `claim.sh adopt <N> --expect <old-sha>` (compare-and-swap, so a
-  resurrected original holder loses the lease immediately — #2467/#2499); `claim.sh release <N>`
+  resurrected original holder loses the lease immediately — #2467/#2499); **resuming an issue whose
+  `issue-<N>-*` branch outlived its claim ref** (released/reaped/parked claim, or a
+  merged-but-undeleted branch) = `claim.sh adopt <N> --expect none --reason <why>` (#2945) — git's
+  empty lease, so the create is still server-arbitrated (a machine actually holding the ref keeps
+  it, `ADOPT-LOST`) and the claim commit records who took it AND why. That is the ONLY sanctioned
+  way past `reason=legacy-branch-lock`; never hand-craft a claim commit. `claim.sh release <N>`
   deletes the ref (refuses under an open PR without `--force`). Maintain the liveness heartbeat
   (`scripts/flow/claim-heartbeat.sh beat <N>`, refreshed at claim + every stage transition);
   `flow-board` reaps deterministically (age > 4h AND no open PR) (#2089).
