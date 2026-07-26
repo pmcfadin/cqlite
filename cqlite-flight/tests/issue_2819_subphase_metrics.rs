@@ -4,9 +4,9 @@
 //!
 //! The `stream` RPC phase is decomposed into five bounded `cqlite.rpc.phase`
 //! values on the EXISTING `cqlite.rpc.phase.duration` histogram (no new metric
-//! name / attribute key): `stream_cold_fault` + `stream_decompress` (feed thread),
-//! `stream_merge` + `stream_encode` (merge consumer thread), `stream_grpc_write`
-//! (egress thread). Per the amended (pipeline-correct) accounting model, the
+//! name / attribute key): `stream_cold_fault` + `stream_decompress` (per-SSTable
+//! producer thread), `stream_merge` + `stream_encode` + `stream_grpc_write` (all
+//! on the merge-consumer thread). Per the amended (pipeline-correct) accounting model, the
 //! sub-phases run on CONCURRENT threads and OVERLAP in wall-clock — they are NOT
 //! asserted to sum to `stream`. These tests exercise the REAL production `do_get`
 //! (warm reader path → `spawn_streaming_from_readers`), draining the whole stream,
@@ -330,7 +330,7 @@ fn compressed_do_get_records_at_least_four_positive_subphases() {
         subs.len() >= 4,
         "a completed compressed do_get must record >= 4 distinct sub-phase samples \
          (got {}: {:?}) — cold-fault/decompress on the per-SSTable producer thread \
-         plus merge/encode/grpc-write on the merge/egress thread",
+         plus merge/encode/grpc-write on the merge-consumer thread",
         subs.len(),
         subs.keys().collect::<Vec<_>>()
     );
@@ -409,7 +409,7 @@ fn bti_compressed_do_get_records_cold_fault_and_decompress() {
          stream_cold_fault and stream_decompress, got {:?}",
         subs.keys().collect::<Vec<_>>()
     );
-    // Merge/encode/grpc still record on the merge/egress thread — all 5 present.
+    // Merge/encode/grpc still record on the merge-consumer thread — all 5 present.
     for phase in [
         PHASE_STREAM_MERGE,
         PHASE_STREAM_ENCODE,
@@ -455,8 +455,18 @@ fn uncompressed_do_get_records_no_decompress_subphase() {
          sample, got {:?}",
         subs.keys().collect::<Vec<_>>()
     );
-    // The other data-plane sub-phases still record on the merge/egress thread:
-    // merge (reconcile/materialize), encode (Arrow), and grpc-write (egress).
+    // M1/M2: the uncompressed body page-in IS instrumented (read_uncompressed_verified),
+    // so cold_fault MUST record even on this uncompressed shape — the common local
+    // case (CQLite's own write-surface output). This is the assertion that keeps
+    // M1's coverage hole from being invisible.
+    assert!(
+        subs.contains_key("stream_cold_fault"),
+        "an uncompressed do_get must STILL record stream_cold_fault (the body page-in \
+         is timed on the uncompressed read path too), got {:?}",
+        subs.keys().collect::<Vec<_>>()
+    );
+    // The other data-plane sub-phases still record on the merge-consumer thread:
+    // merge (reconcile/materialize), encode (Arrow), and grpc-write (egress send).
     for phase in ["stream_merge", "stream_encode", "stream_grpc_write"] {
         assert!(
             subs.contains_key(phase),
@@ -467,7 +477,7 @@ fn uncompressed_do_get_records_no_decompress_subphase() {
 }
 
 /// Requirement 2: a slow client inflates `stream_grpc_write` (the egress park) but
-/// not `stream_cold_fault` (feed-thread page-in) — the two are measured on
+/// not `stream_cold_fault` (producer-thread page-in) — the two are measured on
 /// DISTINCT threads with no shared code interval, so client-drain speed cannot
 /// leak into cold-IO latency.
 #[test]

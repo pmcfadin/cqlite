@@ -11,9 +11,10 @@
 //! * [`StreamSubPhaseEmitter`], the RAII that flushes the per-request accumulator
 //!   (five `AtomicU64` nanos counters filled on the concurrent pipeline threads
 //!   via `cqlite_core::observability::stream_subphase` — cold-fault/decompress on
-//!   the per-SSTable PRODUCER thread, merge/encode on the merge consumer thread,
-//!   gRPC-write on the egress thread) into exactly one `cqlite.rpc.phase.duration`
-//!   sample per sub-phase that recorded time, once at stream teardown.
+//!   the per-SSTable PRODUCER thread(s), and merge/encode/gRPC-write all on the
+//!   merge-consumer thread — `ChannelSink::emit` runs there, not a separate egress
+//!   thread) into exactly one `cqlite.rpc.phase.duration` sample per sub-phase
+//!   that recorded time, once at stream teardown.
 //!
 //! No new metric name or attribute key is introduced (Non-goal #1): the samples
 //! ride the EXISTING `cqlite.rpc.phase.duration` histogram and the EXISTING
@@ -32,12 +33,12 @@ use cqlite_core::observability::{self as obs, catalog, AttrValue, StreamSubPhase
 pub const PHASE_STREAM_COLD_FAULT: &str = "stream_cold_fault";
 /// LZ4 chunk decompression, producer thread.
 pub const PHASE_STREAM_DECOMPRESS: &str = "stream_decompress";
-/// k-way merge + reconcile + row materialize, merge consumer thread.
+/// k-way merge + reconcile + row materialize, merge-consumer thread.
 pub const PHASE_STREAM_MERGE: &str = "stream_merge";
-/// Arrow `RecordBatch` encode, merge consumer thread.
+/// Arrow `RecordBatch` encode, merge-consumer thread.
 pub const PHASE_STREAM_ENCODE: &str = "stream_encode";
-/// Egress channel `reserve()`/send incl. backpressure park, egress thread —
-/// CLIENT-PACED.
+/// Egress channel `reserve()`/send incl. backpressure park, on the merge-consumer
+/// thread (`ChannelSink::emit`, not a separate egress thread) — CLIENT-PACED.
 pub const PHASE_STREAM_GRPC_WRITE: &str = "stream_grpc_write";
 
 /// The closed set of in-`stream` sub-phase `(StreamSubPhase, value)` pairs, in the

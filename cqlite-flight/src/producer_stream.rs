@@ -447,13 +447,16 @@ mod tests {
         }
     }
 
-    /// A [`RowStepper`] that sleeps in `step_row` and attributes MOST of that
-    /// sleep to the pull-wait accumulator (simulating a BLOCKING merge-input recv)
-    /// before completing — so a test can prove the drive loop SUBTRACTS recv-wait
-    /// from the `stream_merge` bucket (issue #2819 B2).
+    /// A [`RowStepper`] that sleeps in `step_row` and attributes 3/4 of the
+    /// MEASURED sleep to the pull-wait accumulator (simulating a BLOCKING
+    /// merge-input recv) before completing — so a test can prove the drive loop
+    /// SUBTRACTS recv-wait from the `stream_merge` bucket (issue #2819 B2). The
+    /// injected wait is a fraction of the ACTUAL elapsed sleep (recorded in
+    /// `actual_nanos`), not a hardcoded constant, so the assertion is
+    /// host-independent (no #2642 wall-clock race).
     struct RecvWaitStepper {
         sleep: std::time::Duration,
-        injected_wait_nanos: u64,
+        actual_nanos: u64,
         done: bool,
     }
 
@@ -462,12 +465,13 @@ mod tests {
             if self.done {
                 return Ok(StreamingStep::Complete);
             }
+            let t = std::time::Instant::now();
             std::thread::sleep(self.sleep);
-            // The recv-wait a real `step_row` incurs while pulling the next entry,
-            // logged by the merge-input recv site.
-            cqlite_core::observability::stream_subphase::add_pull_wait_nanos(
-                self.injected_wait_nanos,
-            );
+            let actual = cqlite_core::observability::stream_subphase::elapsed_nanos(t);
+            self.actual_nanos = actual;
+            // Attribute 3/4 of the MEASURED sleep to recv-wait, as the real recv
+            // site would — a fraction of what actually elapsed, never a constant.
+            cqlite_core::observability::stream_subphase::add_pull_wait_nanos(actual * 3 / 4);
             self.done = true;
             Ok(StreamingStep::Complete)
         }
@@ -694,12 +698,14 @@ mod tests {
 
     /// B2 (recv-wait exclusion): the drive loop must SUBTRACT the blocking
     /// merge-input recv-wait from the `stream_merge` bucket, so `stream_merge` is
-    /// merge CPU only. A stub `step_row` sleeps ~40ms and attributes ~30ms of it
-    /// to the pull-wait accumulator (as the real recv site would); the recorded
-    /// `stream_merge` must then land BELOW that injected recv-wait — a
-    /// metric-vs-metric check (recorded merge bucket vs injected wait), NO
-    /// host-latency threshold. Without the subtraction `stream_merge` would be the
-    /// full ~40ms step wall, i.e. ABOVE the 30ms wait.
+    /// merge CPU only. A stub `step_row` sleeps, attributes 3/4 of the MEASURED
+    /// sleep to the pull-wait accumulator (as the real recv site would), then
+    /// completes. `stream_merge` must land BELOW that injected 3/4 (leaving ≈1/4)
+    /// — a CORRECTNESS metric-vs-metric check (recorded merge bucket vs the
+    /// recorded recv-wait, both derived from the SAME measured sleep), NOT a
+    /// host-latency threshold (no #2642 wall-clock race — neither side is a
+    /// constant). Without the subtraction `stream_merge` ≈ the full measured sleep,
+    /// i.e. ABOVE the injected 3/4, so it fails closed at any host speed.
     #[test]
     fn stream_merge_excludes_recv_wait() {
         use cqlite_core::observability::{stream_subphase, StreamSubPhase, StreamSubPhaseTimings};
@@ -713,10 +719,9 @@ mod tests {
         let timings = Arc::new(StreamSubPhaseTimings::default());
         let _install = stream_subphase::install(Some(timings.clone()));
 
-        let injected_wait_nanos = Duration::from_millis(30).as_nanos() as u64;
         let mut stepper = RecvWaitStepper {
             sleep: Duration::from_millis(40),
-            injected_wait_nanos,
+            actual_nanos: 0,
             done: false,
         };
 
@@ -734,11 +739,16 @@ mod tests {
                 .expect("drive succeeds");
         }
 
+        // Injected recv-wait = 3/4 of the MEASURED sleep; merge must be the
+        // remaining ≈1/4, strictly below the injected wait regardless of host speed.
+        let injected_wait = stepper.actual_nanos * 3 / 4;
         let merge = timings.nanos(StreamSubPhase::Merge);
         assert!(
-            merge < injected_wait_nanos,
+            merge < injected_wait,
             "stream_merge ({merge} ns) must EXCLUDE the injected recv-wait \
-             ({injected_wait_nanos} ns) — the B2 subtraction regressed"
+             ({injected_wait} ns, 3/4 of the {} ns measured sleep) — the B2 \
+             subtraction regressed",
+            stepper.actual_nanos
         );
     }
 }
