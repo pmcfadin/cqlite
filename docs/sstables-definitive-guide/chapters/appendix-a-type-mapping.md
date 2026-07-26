@@ -15,9 +15,12 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
 
 ## Worked Examples
 
-- Nested collection (map<text, list<int>>), 2 entries:
-  - Encoding: count (VInt) -> for each entry: key (VInt len + UTF-8), value list (VInt elem count -> each int as 4 bytes)
-  - Size rule of thumb: total_size ~= size(VInt(count)) + sum[ size(VInt(|key|)) + |key| + size(VInt(list_len)) + 4*list_len ]
+- Nested frozen collection (`frozen<map<text, frozen<list<int>>>>`), 2 entries:
+  - Encoding: entry count (**4-byte BE i32**) -> for each entry: key (4-byte BE i32 len + UTF-8),
+    then value (4-byte BE i32 len + the inner list's own blob: 4-byte BE i32 elem count ->
+    each element 4-byte BE i32 len + 4 int bytes). Every prefix inside a frozen blob is
+    fixed-width, **not** VInt.
+  - Size rule of thumb: total_size ~= 4 + sum[ (4 + |key|) + (4 + |inner_list_blob|) ]
 
 - UDT with optional fields (frozen):
   - Encoding: for each field in definition order: **4-byte BE signed int** length + value bytes; null field uses length = 0xFFFFFFFF (-1 as signed int)
@@ -53,14 +56,25 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
 
 ## Notes
 
-- **Collection element lengths** (list, set, map) use unsigned VInt encoding (`CollectionSerializer.java:43,51`). See Appendix B for VInt details.
-- **Tuple and UDT field lengths** use **4-byte BE signed int** (not VInt). Null fields are encoded as 0xFFFFFFFF (-1). Source: `TupleType.java:345-359`.
+- **Frozen collection counts and element lengths** (`frozen<list/set/map>`) use **fixed 4-byte BE
+  i32**, not VInt: `CollectionSerializer.pack` writes the count via `writeCollectionSize`
+  (`putInt`, `CollectionSerializer.java:67-70`) and each element via `writeValue`
+  (`putInt` + bytes, `:82-92`); `-1` = NULL element. See Chapter 5, "Frozen Collection Serialization".
+- **Non-frozen collection cells** carry an unsigned-VInt length on the cell **path** and on the cell
+  **value** (`ByteBufferUtil.writeWithVIntLength` → `writeUnsignedVInt32`,
+  `CollectionType.java:361-366`) — the per-element framing differs from the frozen form because each
+  element is its own cell. See Chapter 5, "Non-Frozen Collection Serialization".
+- **Tuple and UDT field lengths** use **4-byte BE signed int** (not VInt), with no field count on
+  disk. Null fields are encoded as 0xFFFFFFFF (-1). Source: `TupleType.java:341-364`;
+  `UserType extends TupleType` (`UserType.java:52,194`), so the two are byte-identical.
 - **Vector types**: fixed-element vectors (`vector<float,n>`) write no length prefix -- layout is exactly `n x elementSize` bytes concatenated. Source: `VectorType.java:477-493`, `FixedLengthSerializer`.
 
 ## Key Takeaways
 - Primitive numeric and time types are fixed-width big-endian values.
-- Strings and blobs are length-prefixed with VInt; collection counts and element lengths also use unsigned VInt.
-- Tuple and UDT field lengths use 4-byte BE signed int; -1 (0xFFFFFFFF) = null.
+- Cell values for strings and blobs are length-prefixed with **unsigned** VInt (never ZigZag).
+- Frozen collection counts and element lengths, and tuple/UDT field lengths, are fixed 4-byte BE
+  signed int (-1 = null), **not** VInt.
+- `duration` is the only `Data.db` value made of signed (ZigZag) VInts.
 - Fixed-element vectors (e.g., `vector<float,n>`) are raw concatenated elements with no length prefix.
 - Serialization is schema-driven; `SerializationHeader` and the `db.marshal` types define exact encodings.
 

@@ -23,7 +23,7 @@ This table summarizes how common primitive CQL types map to on-disk encodings in
 | `uuid` | 128-bit UUID | 16 | Network byte order |
 | `timeuuid` | 128-bit time-based UUID | 16 | Includes timestamp fields |
 | `inet` | 4 or 16 bytes | -- | IPv4 = 4 bytes, IPv6 = 16 bytes |
-| `duration` | variable (months VInt, days VInt, nanos VInt) | -- | Triplet of signed (zigzag) VInts. All three components use zigzag-signed VInt encoding even though months and days are non-negative by CQL contract. Source: `DurationType.java:33-34`. |
+| `duration` | variable (months VInt, days VInt, nanos VInt) | -- | Triplet of **signed (ZigZag) VInts** — `output.writeVInt(...)` ×3. This is the ONLY `Data.db` field that uses signed VInt; every other VInt is unsigned. ZigZag is genuinely needed: a negative CQL duration makes all non-zero components negative (`Duration.java:101-110`). Source: `DurationSerializer.java:43-51`. |
 
 Reference: `SerializationHeader` defines type info carried in partition/row serialization.
 
