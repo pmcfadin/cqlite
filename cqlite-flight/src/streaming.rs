@@ -349,7 +349,7 @@ pub(crate) fn spawn_streaming(
         let subphase = Arc::new(cqlite_core::observability::StreamSubPhaseTimings::default());
         let _subphase_install =
             cqlite_core::observability::stream_subphase::install(Some(subphase.clone()));
-        let _subphase_emit = crate::obs::StreamSubPhaseEmitter::new(subphase);
+        let _subphase_emit = crate::obs_subphase::StreamSubPhaseEmitter::new(subphase);
         let error_tx = tx.clone();
         let mut sink = ChannelSink {
             tx,

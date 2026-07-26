@@ -475,7 +475,10 @@ fn subphases_add_no_new_metric_or_attribute_key() {
             }
         }
     }
-    assert!(saw_subphase, "at least one sub-phase sample must be present");
+    assert!(
+        saw_subphase,
+        "at least one sub-phase sample must be present"
+    );
 
     // The catalog contains no metric name resembling a new sub-phase metric.
     for name in catalog::ALL_METRICS {

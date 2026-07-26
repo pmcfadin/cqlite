@@ -157,8 +157,7 @@ pub(super) fn read_compressed_offset_window_impl(
                 )
             },
         )?;
-        let Some(compressed) = chunk
-        else {
+        let Some(compressed) = chunk else {
             return Err(Error::corruption(format!(
                 "compressed offset read requires chunk {chunk_idx} past EOF for range \
                  [{start}, {end}) — corrupt or out-of-range offset/size"
