@@ -65,35 +65,102 @@
 //! merges arriving during ITS lifetime are squeezed toward [`MIN_CAP`] — the
 //! throttle falls on the newcomers, not the incumbent.
 //!
+//! ## Operator knobs
+//!
+//! Both bounds are runtime-overridable env knobs (parsed ONCE per process — see
+//! [`resolved`] — never on the per-merge hot path), defaulting to the shipped
+//! values so behavior is unchanged when unset:
+//!
+//! * `CQLITE_EGRESS_ROW_BUDGET` → [`EGRESS_ROW_BUDGET`] (default `2048`): the
+//!   per-active-merge-slot budget divided among a merge's channels.
+//! * `CQLITE_EGRESS_MIN_CAP` → [`MIN_CAP`] (default `8`): the forward-progress
+//!   floor, clamped to `[1, MAX_CAP]`; the budget is forced `≥ min_cap`.
+//!
+//! A missing/unparseable/zero value falls back to the default (never panics).
+//!
+//! ## AC#3 grounding (throughput evidence)
+//!
+//! The reverted `STREAMING_CHANNEL_CAPACITY = 32` experiment in #2765 measured
+//! the egress-channel depth SHRINKING at FLAT qps and p99 — i.e. the buffering
+//! was slack, not a throughput floor, so bounding it does not cost throughput at
+//! the concurrency levels tested. [`MIN_CAP`] only engages at very high
+//! concurrency (`budget / min_cap` ≈ 256 concurrent merges at the defaults), so
+//! typical loads never touch the floor. A fresh flight-loadgen sweep validating
+//! these defaults end-to-end is tracked in **#2895** (deferred follow-up).
+//!
 //! This budget is ORTHOGONAL to the #2419 `channel_depth` gauge: that gauge
 //! observes live occupancy; this bounds the per-channel capacity ceiling. Kept
 //! out of `merge/mod.rs` to bound that file.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use crate::observability;
 
-/// Per-active-merge-SLOT egress budget in prefetched `MergeEntry` values (issue
-/// #2765): the per-channel capacity a merge receives is `budget / active_merges`
-/// (clamped). Chosen so that at the pre-change fixed capacity of 256 the budget
-/// is fully consumed by ~8 concurrent merges; beyond that, per-channel capacity
-/// shrinks (down to [`MIN_CAP`]) instead of every channel holding a fixed 256.
-/// See the module doc for why this is a per-slot budget, NOT a strict global
-/// ceiling. `2048` entries of a few hundred bytes each keeps a solo merge's
-/// `K × 256` footprint well within the 128MB memory target.
+/// DEFAULT per-active-merge-SLOT egress budget in prefetched `MergeEntry` values
+/// (issue #2765) — overridable at runtime by [`BUDGET_ENV`]. The per-channel
+/// capacity a merge receives is `budget / active_merges` (clamped). Chosen so
+/// that at the pre-change fixed capacity of 256 the budget is fully consumed by
+/// ~8 concurrent merges; beyond that, per-channel capacity shrinks (down to
+/// [`MIN_CAP`]) instead of every channel holding a fixed 256. See the module doc
+/// for why this is a per-slot budget, NOT a strict global ceiling. `2048`
+/// entries of a few hundred bytes each keeps a solo merge's `K × 256` footprint
+/// well within the 128MB memory target.
 pub(super) const EGRESS_ROW_BUDGET: usize = 2048;
 
-/// Minimum per-channel capacity (issue #2765). Guarantees forward progress: no
-/// matter how many merges are concurrently active, every producer can always
-/// place at least this many entries, so a bounded `sync_channel` can never be
-/// constructed with capacity 0 (which would wedge the producer on its first
-/// `send`). Kept ≥ 1 by construction.
+/// DEFAULT minimum per-channel capacity (issue #2765) — overridable at runtime
+/// by [`MIN_CAP_ENV`]. Guarantees forward progress: no matter how many merges
+/// are concurrently active, every producer can always place at least this many
+/// entries, so a bounded `sync_channel` can never be constructed with capacity 0
+/// (which would wedge the producer on its first `send`). Kept ≥ 1 by
+/// construction, in both the default and the resolved-override path.
 pub(super) const MIN_CAP: usize = 8;
 
 /// Maximum per-channel capacity — the unchanged single-merge value
 /// (`STREAMING_CHANNEL_CAPACITY` in `merge/mod.rs`). At LOW concurrency the cap
-/// clamps up to this, so single-merge behavior is byte-for-byte unchanged.
+/// clamps up to this, so single-merge behavior is byte-for-byte unchanged. NOT
+/// operator-overridable (it is the memory-bounded ceiling of one channel).
 pub(super) const MAX_CAP: usize = super::STREAMING_CHANNEL_CAPACITY;
+
+/// Operator env knob overriding [`EGRESS_ROW_BUDGET`] (issue #2765). Parsed ONCE
+/// per process (see [`resolved`]); a missing/unparseable/zero value falls back
+/// to the default, and the result is clamped `≥ resolved MIN_CAP`.
+const BUDGET_ENV: &str = "CQLITE_EGRESS_ROW_BUDGET";
+
+/// Operator env knob overriding [`MIN_CAP`] (issue #2765). Parsed ONCE per
+/// process; a missing/unparseable/zero value falls back to the default, and the
+/// result is clamped to `[1, MAX_CAP]` (the ≥1 forward-progress invariant).
+const MIN_CAP_ENV: &str = "CQLITE_EGRESS_MIN_CAP";
+
+/// The resolved `(budget, min_cap)` pair, read from the environment ONCE per
+/// process into a `OnceLock` (mirroring `select_executor::forcing`'s cached-env
+/// pattern) so env parsing is OFF the per-merge hot path. Every `capacity_for`
+/// call reads this cached tuple, never `std::env`.
+fn resolved() -> (usize, usize) {
+    static RESOLVED: OnceLock<(usize, usize)> = OnceLock::new();
+    *RESOLVED.get_or_init(|| {
+        resolve_budget(
+            std::env::var(BUDGET_ENV).ok().as_deref(),
+            std::env::var(MIN_CAP_ENV).ok().as_deref(),
+        )
+    })
+}
+
+/// Pure resolver over the two raw env values (injectable seam for tests — the
+/// #2451-safe alternative to mutating real process env in a shared-binary test).
+/// Validates/clamps defensively and NEVER panics: a `None`/unparseable/zero
+/// value falls back to the default; `min_cap` is clamped to `[1, MAX_CAP]` (the
+/// forward-progress invariant) and `budget` to `≥ min_cap` (so `budget/1` can
+/// never fall below the floor). Returns `(budget, min_cap)`.
+fn resolve_budget(env_budget: Option<&str>, env_min_cap: Option<&str>) -> (usize, usize) {
+    let parse = |raw: Option<&str>| {
+        raw.and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|&v| v > 0)
+    };
+    let min_cap = parse(env_min_cap).unwrap_or(MIN_CAP).clamp(1, MAX_CAP);
+    let budget = parse(env_budget).unwrap_or(EGRESS_ROW_BUDGET).max(min_cap);
+    (budget, min_cap)
+}
 
 /// Process-global live count of in-flight streaming merges. Incremented by
 /// [`begin_merge`] when a merge's egress channel is constructed and decremented
@@ -119,15 +186,31 @@ pub(super) fn active_count() -> usize {
     ACTIVE.load(Ordering::SeqCst)
 }
 
-/// Resolve the per-merge channel capacity for a given live active-merge count.
+/// Resolve the per-merge channel capacity for a given live active-merge count,
+/// using the runtime-[`resolved`] `(budget, min_cap)` (env-overridable).
 ///
-/// `clamp(EGRESS_ROW_BUDGET / active, MIN_CAP, MAX_CAP)`. `active` is floored at
-/// 1 (via [`usize::max`]) so the division is always well-defined and the result
-/// is never 0 — combined with the [`MIN_CAP`] clamp this is doubly safe against
-/// a zero-capacity channel.
+/// `clamp(budget / active, min_cap, MAX_CAP)`. `active` is floored at 1 (via
+/// [`usize::max`]) so the division is always well-defined and the result is
+/// never 0 — combined with the `min_cap ≥ 1` clamp this is doubly safe against a
+/// zero-capacity channel.
 pub(super) fn capacity_for(active: usize) -> usize {
+    let (budget, min_cap) = resolved();
+    capacity_from(active, budget, min_cap)
+}
+
+/// The pure `clamp(budget / active, min_cap, MAX_CAP)` kernel — shared by
+/// [`capacity_for`] (resolved values) and the override test (injected values).
+/// `min_cap ≤ MAX_CAP` is guaranteed by [`resolve_budget`], so the clamp bounds
+/// are always valid.
+fn capacity_from(active: usize, budget: usize, min_cap: usize) -> usize {
     let active = active.max(1);
-    (EGRESS_ROW_BUDGET / active).clamp(MIN_CAP, MAX_CAP)
+    (budget / active).clamp(min_cap, MAX_CAP)
+}
+
+/// The runtime-resolved minimum per-channel capacity (env-overridable). Used by
+/// the wiring tests' clamp-range assertions so they track an override too.
+pub(super) fn min_cap() -> usize {
+    resolved().1
 }
 
 /// Register a starting k-way MERGE (called ONCE per merge, at `KWayMerger`
@@ -194,6 +277,44 @@ mod tests {
         assert_eq!(MAX_CAP, 256);
         // Zero active (defensive) is floored to 1 → MAX_CAP, never a div-by-zero.
         assert_eq!(capacity_for(0), MAX_CAP);
+    }
+
+    #[test]
+    fn env_knobs_resolve_validate_and_drive_capacity() {
+        // Inject via the PURE seam (`resolve_budget`), never real process env, so
+        // this cannot perturb the OnceLock other tests observe (#2451-safe).
+        // Unset → the shipped defaults (behavior unchanged when the knobs absent).
+        assert_eq!(resolve_budget(None, None), (EGRESS_ROW_BUDGET, MIN_CAP));
+
+        // A clean override flows through the SAME clamp kernel `capacity_for` uses.
+        let (budget, min_cap) = resolve_budget(Some("4096"), Some("16"));
+        assert_eq!((budget, min_cap), (4096, 16));
+        assert_eq!(capacity_from(1, budget, min_cap), MAX_CAP); // 4096 clamps to 256
+        assert_eq!(capacity_from(16, budget, min_cap), 256); // 4096/16 = 256
+        assert_eq!(capacity_from(4096, budget, min_cap), 16); // floors at the raised min_cap
+
+        // Defensive: missing / unparseable / zero each fall back to the default,
+        // never a panic.
+        assert_eq!(
+            resolve_budget(Some(""), Some("nope")),
+            (EGRESS_ROW_BUDGET, MIN_CAP)
+        );
+        assert_eq!(
+            resolve_budget(Some("0"), Some("0")),
+            (EGRESS_ROW_BUDGET, MIN_CAP)
+        );
+        assert_eq!(resolve_budget(Some("  1024  "), None), (1024, MIN_CAP)); // trims
+
+        // Invariants: min_cap clamped to [1, MAX_CAP]; budget forced ≥ min_cap so
+        // `budget/1` can never dip under the forward-progress floor.
+        let (b, m) = resolve_budget(Some("10"), Some("100000"));
+        assert_eq!(m, MAX_CAP, "min_cap clamped down to MAX_CAP");
+        assert_eq!(b, MAX_CAP, "budget raised to ≥ min_cap");
+        assert!(m >= 1, "forward-progress floor: min_cap ≥ 1");
+        assert!(
+            capacity_from(usize::MAX, b, m) >= 1,
+            "never a zero-capacity channel"
+        );
     }
 
     #[test]

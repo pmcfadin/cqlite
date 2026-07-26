@@ -90,9 +90,9 @@ fn assert_single_shared_snapshot(caps: &[usize], site: &str) {
          shrink the later sources below the first."
     );
     assert!(
-        (egress_budget::MIN_CAP..=egress_budget::MAX_CAP).contains(&first),
+        (egress_budget::min_cap()..=egress_budget::MAX_CAP).contains(&first),
         "{site}: shared cap {first} must be within [{}, {}]",
-        egress_budget::MIN_CAP,
+        egress_budget::min_cap(),
         egress_budget::MAX_CAP
     );
 }
@@ -287,7 +287,7 @@ fn needs_scan_point_read_shares_snapshot_and_registers_one_slot() {
         "both point-read fail-safe channels must share ONE snapshot: {caps:?}"
     );
     assert!(
-        (egress_budget::MIN_CAP..=egress_budget::MAX_CAP).contains(&first),
+        (egress_budget::min_cap()..=egress_budget::MAX_CAP).contains(&first),
         "shared cap {first} within clamp"
     );
     assert!(
