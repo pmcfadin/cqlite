@@ -126,25 +126,55 @@ else
 fi
 
 # --- Property 3: mid-run summary-integrity guard names the failure -------------
+# LIVE-PEER case (SENTINEL_WROTE=1: the writable throwaway path took our startup sentinel, then a
+# foreign run-id appears — a live peer owns it). The guard MUST name the failure on stderr + exit
+# non-zero WITHOUT rewriting the contended summary path; rewriting it would clobber the live peer
+# (HIGH counter-clobber review finding).
 integ="$tmp/integ.txt"
 integ_err="$tmp/integ.err"
 if env AGENT_GATE_SUMMARY_FILE="$integ" AGENT_GATE_INTEGRITY_SELFTEST=1 \
      bash "$FAKE_GATE" >/dev/null 2>"$integ_err"; then
   bad "integrity guard did NOT exit non-zero on a foreign run-id (silent pass)"
-  echo "------- summary -------"; cat "$integ" 2>/dev/null; echo "-----------------------"
+  echo "------- stderr -------"; cat "$integ_err" 2>/dev/null; echo "-----------------------"
 else
   ok "integrity guard exits non-zero on a mid-run foreign run-id"
 fi
-if grep -q 'summary-integrity: FAIL (foreign run-id detected mid-run;' "$integ"; then
-  ok "integrity guard writes a NAMED 'summary-integrity: FAIL' line"
+if grep -q 'summary-integrity: FAIL (foreign run-id detected mid-run;' "$integ_err"; then
+  ok "integrity guard names the failure on stderr ('summary-integrity: FAIL')"
 else
-  bad "integrity guard did not write the named 'summary-integrity: FAIL' line"
-  echo "------- summary -------"; cat "$integ" 2>/dev/null; echo "-----------------------"
+  bad "integrity guard did not name the failure on stderr"
+  echo "------- stderr -------"; cat "$integ_err" 2>/dev/null; echo "-----------------------"
 fi
-if grep -q 'RESULT: FAIL' "$integ"; then
-  ok "integrity guard summary is RESULT: FAIL (never a bare INCOMPLETE)"
+if grep -q 'RESULT: FAIL' "$integ_err"; then
+  ok "integrity guard names RESULT: FAIL on stderr (never a bare INCOMPLETE)"
 else
-  bad "integrity guard summary was not RESULT: FAIL"
+  bad "integrity guard did not name RESULT: FAIL on stderr"
+  echo "------- stderr -------"; cat "$integ_err" 2>/dev/null; echo "-----------------------"
+fi
+# The CONTENDED path must be LEFT INTACT — the live peer's (seeded foreign) block survives and our
+# FAIL block never overwrote it. This is the HIGH counter-clobber fix's core assertion.
+if grep -q 'run-id: /tmp/agent-gate.FOREIGN' "$integ" && ! grep -q 'RESULT: FAIL' "$integ"; then
+  ok "contended summary path left intact (live peer NOT clobbered) — HIGH counter-clobber fix"
+else
+  bad "contended summary path was rewritten (live peer clobbered)"
+  echo "------- contended path -------"; cat "$integ" 2>/dev/null; echo "-----------------------"
+fi
+
+# --- Property 3a: invalid selftest selector fails closed BEFORE any gate work ----
+# A typo like `Side` (with an explicit summary file) must NOT fall through and run a REAL gate;
+# it must exit 2 with a named error before the startup sentinel (review finding: MEDIUM).
+badsel_out="$tmp/badsel.out"
+if env AGENT_GATE_SUMMARY_FILE="$tmp/badsel.txt" AGENT_GATE_INTEGRITY_SELFTEST=Side \
+     bash "$FAKE_GATE" --only file-size >"$badsel_out" 2>&1; then
+  bad "invalid AGENT_GATE_INTEGRITY_SELFTEST=Side did NOT fail closed (ran a gate)"
+else
+  badsel_rc=$?
+  if [ "$badsel_rc" = 2 ] && grep -q 'invalid AGENT_GATE_INTEGRITY_SELFTEST' "$badsel_out"; then
+    ok "invalid selftest selector exits 2 with a named error before any gate work"
+  else
+    bad "invalid selftest selector wrong failure (rc=$badsel_rc)"
+    echo "------- badsel out -------"; cat "$badsel_out" 2>/dev/null; echo "-------------------------"
+  fi
 fi
 
 # --- Property 3b: SIDE-lane (backgrounded subshell) clobber path ----------------
@@ -218,10 +248,15 @@ else
   ok "WIRING e2e: real --only file-size dies non-zero on a foreign summary (guard wired into record_result)"
 fi
 chmod 0644 "$e2e_sum" 2>/dev/null || true
-if grep -q 'summary-integrity: FAIL' "$e2e_out"; then
-  ok "WIRING e2e: the death carries the named 'summary-integrity: FAIL' line"
+# Assert the SPECIFIC route this e2e actually exercises (review finding): the summary is chmod-0444,
+# so our startup sentinel could not land (SENTINEL_WROTE=0) and the guard fires the *unwritable /
+# stale prior-run* branch, detected after the `file-size` component. Pinning the exact reason +
+# component keeps this from passing via any other 'summary-integrity: FAIL' path.
+if grep -q 'summary-integrity: FAIL (summary-file unwritable / stale prior-run block' "$e2e_out" \
+   && grep -q 'detected-after-component: file-size' "$e2e_out"; then
+  ok "WIRING e2e: death carries the SPECIFIC named line (unwritable route, detected-after-component: file-size)"
 else
-  bad "WIRING e2e: no named 'summary-integrity: FAIL' line in the real-gate output"
+  bad "WIRING e2e: missing the SPECIFIC 'summary-integrity: FAIL (summary-file unwritable...)' + 'detected-after-component: file-size' lines"
   echo "------- e2e out tail -------"; tail -20 "$e2e_out"; echo "---------------------------"
 fi
 

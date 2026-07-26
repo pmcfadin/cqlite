@@ -1729,6 +1729,17 @@ if [ "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" != 0 ] && [ "$EXPLICIT_SUMMARY_FILE" 
   echo "agent-gate: AGENT_GATE_INTEGRITY_SELFTEST requires an explicit AGENT_GATE_SUMMARY_FILE (refusing to touch the checkout default) (#2874)" >&2
   exit 2
 fi
+# Review finding (MEDIUM): validate the selftest selector STRICTLY, BEFORE any gate work. The
+# dispatch `case` below has no default arm, so an unrecognized value (e.g. a `Side` typo) would
+# silently fall through and run a REAL full gate under the pinned throwaway summary path. Accept
+# only the four known selectors; anything else is a caller error → exit 2 now (before the startup
+# sentinel and any component).
+case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
+  0|1|side|marker) : ;;
+  *)
+    echo "agent-gate: invalid AGENT_GATE_INTEGRITY_SELFTEST='${AGENT_GATE_INTEGRITY_SELFTEST}' (expected one of: 0 1 side marker) (#2874)" >&2
+    exit 2 ;;
+esac
 
 # Startup invalidation (#1175 roborev finding 2): a stale .agent-gate-summary.txt
 # from a PREVIOUS run must never survive into THIS run. If the current run exits
@@ -1931,7 +1942,10 @@ _assert_summary_integrity() {
   # return non-zero — never emit/exit. (bash 3.2 lacks BASHPID → falls back to $$ ==
   # foreground, which is correct there: 3.2 has no parallel pool, everything is serial.)
   if [ "${BASHPID:-$$}" != "$$" ]; then
-    printf '%s\t%s\n' "$comp" "$reason" > "$LOG_DIR/summary-integrity.fail" 2>/dev/null || true
+    # Review finding (marker race): APPEND (not truncate) so two concurrent SIDE-lane detections
+    # cannot corrupt each other's record — a single short `printf` to an O_APPEND fd is atomic under
+    # PIPE_BUF, and the reader (_apply_integrity_marker) consumes only the FIRST complete line.
+    printf '%s\t%s\n' "$comp" "$reason" >> "$LOG_DIR/summary-integrity.fail" 2>/dev/null || true
     echo "⚠️ agent-gate: summary-integrity FAIL after [$comp] ($reason) — recorded for post-drain fail-close (#2874)" >&2
     return 1
   fi
@@ -1944,9 +1958,38 @@ _assert_summary_integrity() {
   # place mid-lane teardown is needed — every other early exit precedes launch_components.
   if [ -n "${SIDE_LANE_PID:-}" ]; then
     echo "agent-gate: killing live SIDE-lane sub-pool (pid $SIDE_LANE_PID) before integrity exit; some backgrounded builds may already be spawned (#2874)" >&2
-    kill -- -"$SIDE_LANE_PID" 2>/dev/null || kill "$SIDE_LANE_PID" 2>/dev/null || true
+    # Review finding (LOW-but-dangerous): `kill -- -PID` (negative = process GROUP) targets the
+    # GATE'S OWN process group when the sub-pool was NOT put in its own job-control group (the
+    # common no-`set -m` subshell case) — it would signal the gate itself. Signal the sub-pool
+    # PID and its direct children only.
+    kill "$SIDE_LANE_PID" 2>/dev/null || true
     pkill -P "$SIDE_LANE_PID" 2>/dev/null || true
     wait "$SIDE_LANE_PID" 2>/dev/null || true
+  fi
+  # Review finding (HIGH counter-clobber): branch on SENTINEL_WROTE. When =1, OUR startup sentinel
+  # DID land on this path, so a foreign run-id now means a LIVE PEER owns the contended summary file
+  # — calling emit_summary here would rewrite $SUMMARY_FILE and clobber that peer's summary, the exact
+  # harm this change exists to prevent. Write OUR named FAIL block to the PRIVATE log path only, print
+  # the named line to stderr, and exit non-zero. Spec req 2 stays satisfied: it requires a named-line
+  # summary + a non-zero exit, NOT a write to the contended path. When =0 (our sentinel never landed →
+  # the path is unwritable / a stale prior-run block, no live owner) the normal emit is safe.
+  if [ "${SENTINEL_WROTE:-0}" = 1 ]; then
+    {
+      echo
+      echo "$SUMMARY_START_MARKER"
+      echo "run-id: $RUN_ID"
+      [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
+      [ -n "$NESTED_UNDER_LINE" ] && echo "$NESTED_UNDER_LINE"
+      echo "summary-integrity: FAIL ($reason)"
+      echo "detected-after-component: $comp"
+      echo "note: contended summary path left intact for its live owner; named block written to private log (#2874)"
+      echo "logs: $LOG_DIR"
+      echo "summary-file: $LOG_SUMMARY_FILE (private; contended path NOT rewritten)"
+      echo "RESULT: FAIL"
+      echo "$SUMMARY_END_MARKER"
+    } > "$LOG_SUMMARY_FILE" 2>/dev/null || true
+    echo "⚠️ agent-gate: summary-integrity: FAIL ($reason) — detected-after-component: $comp; RESULT: FAIL; contended path left intact for its live owner, named block in $LOG_SUMMARY_FILE (#2874)" >&2
+    exit 1
   fi
   emit_summary FAIL \
     "summary-integrity: FAIL ($reason)" \
@@ -1963,7 +2006,9 @@ SUMMARY_INTEGRITY_LINE=""
 _apply_integrity_marker() {
   [ -f "$LOG_DIR/summary-integrity.fail" ] || return 0
   local m comp reason
-  m=$(cat "$LOG_DIR/summary-integrity.fail" 2>/dev/null)
+  # First complete line only (review finding: concurrent SIDE writers append; one intact record
+  # is enough to force the terminal FAIL — never parse a possibly-interleaved whole-file cat).
+  m=$(head -n1 "$LOG_DIR/summary-integrity.fail" 2>/dev/null)
   comp=${m%%$'\t'*}; reason=${m#*$'\t'}
   echo "agent-gate: summary-integrity FAIL recorded by a SIDE-lane component '$comp' ($reason)" >&2
   OVERALL=FAIL
@@ -2029,9 +2074,12 @@ fi
 # #2874 hidden self-test hooks: exercise the mid-run summary-integrity guard in
 # isolation, deterministically (no component, no timing race). The caller pins
 # AGENT_GATE_SUMMARY_FILE to a throwaway path. Modes (AGENT_GATE_INTEGRITY_SELFTEST):
-#   1     — MAIN foreground lane: seed a FOREIGN run-id then run _assert_summary_integrity
-#           at top level (BASHPID==$$); it must rewrite a named `summary-integrity: FAIL`
-#           block and exit non-zero. A BUG marker on stdout if the guard fails to fire.
+#   1     — MAIN foreground lane, LIVE-PEER case (SENTINEL_WROTE=1: the writable throwaway path
+#           took our startup sentinel): seed a FOREIGN run-id then run _assert_summary_integrity
+#           at top level (BASHPID==$$). It must write a named `summary-integrity: FAIL` block to
+#           its PRIVATE log + the named line to stderr, exit non-zero, and LEAVE THE CONTENDED
+#           path intact (never clobber the live peer). A BUG marker on stdout if the guard fails
+#           to fire.
 #   side  — SIDE lane: seed a FOREIGN run-id then run the guard inside a subshell
 #           (BASHPID!=$$); it must record a marker file + return 1 WITHOUT emitting or
 #           exiting (the summary file stays the seeded foreign block — no mid-run
