@@ -205,6 +205,13 @@ pub fn current() -> Option<Arc<StreamSubPhaseTimings>> {
     CURRENT_SINK.with(|c| c.borrow().clone())
 }
 
+/// Clamped nanoseconds elapsed since `start` — the ONE place the `Instant`→`u64`
+/// clamp lives (issue #2819 L3), reused by every sub-phase timing site. A scan
+/// long enough to overflow `u64` nanoseconds (~584 years) is unreachable.
+pub fn elapsed_nanos(start: Instant) -> u64 {
+    start.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
 /// Time `f` and, IF a sink is installed on this thread, attribute its elapsed
 /// wall time to `phase`. When no sink is installed (every non-flight caller) this
 /// is a single thread-local peek plus the bare closure — no `Instant::now()`, no
@@ -218,8 +225,7 @@ pub fn timed<T>(phase: StreamSubPhase, f: impl FnOnce() -> T) -> T {
         Some(sink) => {
             let start = Instant::now();
             let out = f();
-            let elapsed = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-            sink.add_nanos(phase, elapsed);
+            sink.add_nanos(phase, elapsed_nanos(start));
             out
         }
     }
@@ -234,6 +240,14 @@ pub fn record_nanos(phase: StreamSubPhase, nanos: u64) {
             sink.add_nanos(phase, nanos);
         }
     });
+}
+
+/// [`record_nanos`] the wall time elapsed since `start` into `phase` — the
+/// manual-timing counterpart of [`timed`] for an ASYNC call site that cannot wrap
+/// a sync closure (e.g. the full-ring fallback's async `read_next_block`
+/// page-in). No-op with no sink installed.
+pub fn record_elapsed(phase: StreamSubPhase, start: Instant) {
+    record_nanos(phase, elapsed_nanos(start));
 }
 
 #[cfg(test)]

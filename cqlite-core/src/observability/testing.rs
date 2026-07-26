@@ -262,11 +262,13 @@ pub struct MetricEntry {
 pub struct MetricPoint {
     /// The aggregated value (counter sum, gauge value, or histogram sum).
     pub value: f64,
-    /// Number of recorded samples aggregated into this point: the histogram
-    /// sample count for a histogram data point (issue #2819 — lets a test prove a
-    /// sub-phase is emitted ONCE per RPC, not once per row), or `1` for a
-    /// sum/gauge point (a single aggregated value).
-    pub count: u64,
+    /// Number of recorded samples aggregated into a HISTOGRAM data point
+    /// (`Some(n)` — issue #2819, lets a test prove a sub-phase is emitted ONCE per
+    /// RPC, not once per row), or `None` for a sum/gauge point (which carries an
+    /// aggregated VALUE, not a sample count — a counter incremented 500× is one
+    /// point with `value = 500`, so a "recorded once" assertion must never read a
+    /// non-histogram point's count as a one-sample observation, issue #2819 L4).
+    pub count: Option<u64>,
     /// The bounded attributes as `(key, value-as-string)` pairs.
     pub attributes: Vec<(String, String)>,
 }
@@ -446,7 +448,7 @@ macro_rules! collect_points_impl {
                     for dp in sum.data_points() {
                         out.push(MetricPoint {
                             value: to_f64(dp.value()),
-                            count: 1,
+                            count: None,
                             attributes: attrs(dp.attributes()),
                         });
                     }
@@ -455,7 +457,7 @@ macro_rules! collect_points_impl {
                     for dp in gauge.data_points() {
                         out.push(MetricPoint {
                             value: to_f64(dp.value()),
-                            count: 1,
+                            count: None,
                             attributes: attrs(dp.attributes()),
                         });
                     }
@@ -466,7 +468,7 @@ macro_rules! collect_points_impl {
                             // For histograms, expose the running sum so a test can
                             // assert "something was recorded" and read total magnitude.
                             value: to_f64(dp.sum()),
-                            count: dp.count(),
+                            count: Some(dp.count()),
                             attributes: attrs(dp.attributes()),
                         });
                     }
@@ -477,7 +479,7 @@ macro_rules! collect_points_impl {
                             // ExponentialHistogram's `count()` is `usize` (unlike
                             // Histogram's `u64`), so this cast is load-bearing.
                             value: to_f64(dp.sum()),
-                            count: dp.count() as u64,
+                            count: Some(dp.count() as u64),
                             attributes: attrs(dp.attributes()),
                         });
                     }

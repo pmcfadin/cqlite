@@ -673,10 +673,9 @@ impl SSTableReader {
             let read_start = time_reads.then(std::time::Instant::now);
             let next_block = self.read_next_block(&cursor).await?;
             if let Some(start) = read_start {
-                let nanos = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-                crate::observability::stream_subphase::record_nanos(
+                crate::observability::stream_subphase::record_elapsed(
                     crate::observability::StreamSubPhase::ColdFault,
-                    nanos,
+                    start,
                 );
             }
             let Some(compressed_chunk) = next_block else {
