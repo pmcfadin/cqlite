@@ -41,11 +41,11 @@
       (`docs/research/phase2-verify-stage2.md:226-232`). Out of band ⇒ void the run, fix the harness,
       re-run. Do not derive a multiplier from a void run.
       **Result:** the anchor (amended by owner decision to the SATURATED `disjoint` control, mean of
-      k ≥ 5) lands at **2.82 µs/row = 1.41×** the published figure, inside the stated ±50 % band. The
-      k=1 point is 2.70× the published figure and 1.92× the anchor, and that deviation is now
-      DECOMPOSED by measured arms with no residual: 1.106× scan width × 1.424× (1→2 producers,
-      `producer_control/{p1,p2}`) × 1.216× (2→5+ producers) = 1.916×, against Phase-0's own 1.79×
-      producer/coordinator prediction for the producer-only part (measured 1.73×). Both the
+      k ≥ 5) lands at **2.81 µs/row = 1.40×** the published figure, inside the stated ±50 % band. The
+      k=1 point is 2.72× the published figure and 1.937× the anchor, and that deviation is now
+      DECOMPOSED by measured arms with no residual: 1.118× scan width × 1.429× (1→2 producers,
+      `producer_control/{p1,p2}`) × 1.212× (2→5+ producers) = 1.937×, against Phase-0's own 1.79×
+      producer/coordinator prediction for the producer-only part (measured 1.733×). Both the
       spec-mandated `cost(k)/cost(1)` and the pipeline-matched derate are published — record §3.
 - [x] 3.4 Re-run `ttl_expiring` at a later wall-clock time to prove expiry determinism.
 - [x] 3.5 **Review round 2 (roborev blockers) — fixture fixed and EVERYTHING re-measured.** The
@@ -54,10 +54,24 @@
       tombstone kind depended on `k`, confounding depth with composition. Both fixed (row tombstones
       now stamped BELOW their generation's live cells; `generation_mutations` takes no `k`), every arm
       now asserts a full collision-shape census + cross-k composition invariance, and the whole matrix
-      was re-run twice at commit `620eea70` (recorded pre-rebase as `6f894d67`; same tree, see the
-      record's §1 commit row). All published numbers, fits, `D(o)`, the §6 L3 table and
+      was re-run twice. All published numbers, fits, `D(o)`, the §6 L3 table and
       the verdicts are recomputed from the NEW runs. Verdicts unchanged; finding "a shadowed row is
-      cheaper" WITHDRAWN as a fixture artifact (deletion collisions cost +3.0 % over plain overwrite).
+      cheaper" WITHDRAWN as a fixture artifact (deletion collisions cost more than plain overwrite).
+- [x] 3.6 **Review round 4 (roborev + owner decision 2026-07-26) — validity guard made genuinely
+      fail-closed and EVERYTHING re-measured with per-drain setup amortized.** (a) The tier-2 probe
+      returned `None` on an unreadable `/proc`, printed `foreign_cpu_cores=unavailable`, and published
+      the arm's number as if validated — it now PANICS on an unreadable probe, gates the per-interval
+      MAXIMUM (`iter_custom` per sample batch) instead of a whole-arm mean, derives `cores` from the
+      same `/proc/stat` the busy figure comes from, extracts own-ticks through a self-tested pure
+      `own_ticks_from`, and the run asserts `arms_gated == arms`. The interval-length floor is DERIVED
+      (one stray tick ≤10 % of the ceiling ⇒ 160 ticks) and `SamplingMode::Flat` is pinned so no
+      published sample is ever too short to gate. (b) The timed region contains `new_from_readers`
+      (k thread spawns + k adapter opens), which at ~1024 rows/arm biased `cost(k)/cost(1)` upward
+      with k; the arm width was quadrupled on the PARTITION count (16 → 64, leaving the
+      `MergeStep::Partition` batch width invariant — the rejected `ck` = 256 variant moved the anchor
+      +7 %) and every arm now MEASURES and prints its setup share (0.20–0.24 % at k = 1, 0.37–0.85 %
+      at k = 20 ⇒ ≤0.6 % effect on any multiplier). Whole matrix re-run twice at commit `562f14aa`;
+      p/q, `D(o)`, the band⇔`o` mapping and the §6 L3 table recomputed. **No verdict changed.**
 
 ## 4. Record + doc updates
 
