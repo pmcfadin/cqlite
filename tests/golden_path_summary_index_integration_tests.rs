@@ -281,6 +281,7 @@ async fn test_golden_path_integrated_summary_index_operations() -> Result<()> {
     //     health_metrics.compression_enabled
     // );
 
+    let mut processed = 0usize;
     for test_key in &test_keys {
         // Test integrated lookup (should use summary -> index -> data)
         let start_time = Instant::now();
@@ -302,7 +303,15 @@ async fn test_golden_path_integrated_summary_index_operations() -> Result<()> {
                 println!("ℹ️  No data found via integrated lookup (expected for test keys)");
             }
         }
+        processed += 1;
     }
+
+    // Load-immune STRUCTURAL invariant: every key was probed exactly once.
+    assert_eq!(
+        processed,
+        test_keys.len(),
+        "each integrated test key should be probed exactly once"
+    );
 
     Ok(())
 }
@@ -347,6 +356,16 @@ async fn test_golden_path_summary_index_range_efficiency() -> Result<()> {
             results.len(),
             scan_duration
         );
+
+        // Load-immune per-scenario STRUCTURAL invariant (replaces the retired
+        // wall-clock assert): the bounded range scan must honor its row limit.
+        if let Some(lim) = limit {
+            assert!(
+                results.len() <= lim,
+                "range scan '{test_name}' must honor its limit {lim}: got {} rows",
+                results.len()
+            );
+        }
     }
 
     Ok(())
@@ -526,6 +545,18 @@ async fn test_golden_path_multi_level_index_traversal() -> Result<()> {
     println!("   Average: {avg_time:?}");
     println!("   Min: {min_time:?}, Max: {max_time:?}");
 
+    // Load-immune STRUCTURAL invariants: every key produced a traversal sample,
+    // and min <= max holds for the measured set (ordering, not a wall-clock bound).
+    assert_eq!(
+        traversal_times.len(),
+        traversal_test_keys.len(),
+        "each traversal key should produce exactly one lookup sample"
+    );
+    assert!(
+        min_time <= max_time,
+        "min traversal time {min_time:?} must not exceed max {max_time:?}"
+    );
+
     Ok(())
 }
 
@@ -697,6 +728,13 @@ async fn test_golden_path_summary_index_performance_integration() -> Result<()> 
         let scenario_duration = start_time.elapsed();
         let avg_duration = scenario_duration / test_keys.len() as u32;
 
+        // Load-immune STRUCTURAL invariant: hits cannot exceed keys probed.
+        assert!(
+            found_count <= test_keys.len(),
+            "scenario '{scenario_name}' found {found_count} cannot exceed probed {}",
+            test_keys.len()
+        );
+
         scenario_results.insert(
             scenario_name,
             (scenario_duration, avg_duration, found_count),
@@ -716,10 +754,7 @@ async fn test_golden_path_summary_index_performance_integration() -> Result<()> 
     }
 
     // Overall performance validation
-    let total_operations: usize = scenario_results
-        .values()
-        .map(|(_, _, found)| *found as usize)
-        .sum();
+    let total_operations: usize = scenario_results.values().map(|(_, _, found)| *found).sum();
     let total_time: std::time::Duration = scenario_results
         .values()
         .map(|(duration, _, _)| *duration)
@@ -731,6 +766,13 @@ async fn test_golden_path_summary_index_performance_integration() -> Result<()> 
             "✅ Overall performance: {total_operations} operations in {total_time:?} (avg: {overall_avg:?})"
         );
     }
+
+    // Load-immune STRUCTURAL invariant: all three access-pattern scenarios ran.
+    assert_eq!(
+        scenario_results.len(),
+        3,
+        "all three access-pattern scenarios should be recorded"
+    );
 
     println!("✅ Summary/index performance integration validated");
     Ok(())

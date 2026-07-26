@@ -76,11 +76,15 @@ else
   # deliberate-delay LOWER bound — so a full recursive sweep is deferred (cf. the #2705
   # src/ deferral; #2720 tracks the remainder). Scan a subtree explicitly by passing its
   # path as an arg.
-  if compgen -G "$REPO_ROOT/tests/*.rs" >/dev/null 2>&1; then
-    for f in "$REPO_ROOT"/tests/*.rs; do
-      ROOTS+=("$f")
-    done
-  fi
+  # nullglob so a checkout with no top-level tests/*.rs yields ZERO iterations
+  # rather than the literal unexpanded glob string "$REPO_ROOT/tests/*.rs" (which
+  # rs_files would then try to open as a path and skip) — self-documenting and
+  # hazard-free.
+  shopt -s nullglob
+  for f in "$REPO_ROOT"/tests/*.rs; do
+    ROOTS+=("$f")
+  done
+  shopt -u nullglob
 fi
 
 if [ "${#ROOTS[@]}" -eq 0 ]; then

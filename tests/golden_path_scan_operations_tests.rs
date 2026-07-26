@@ -274,6 +274,16 @@ async fn test_golden_path_prefix_scan_operations() -> Result<()> {
         println!("  Found key: {key_str}");
     }
 
+    // Load-immune STRUCTURAL invariant: a bounded prefix sub-range can never
+    // return more rows than an unbounded full scan of the same table.
+    let full = reader.scan(&table_id, None, None, None, None).await?;
+    assert!(
+        results.len() <= full.len(),
+        "prefix sub-range scan ({} rows) cannot exceed the full scan ({} rows)",
+        results.len(),
+        full.len()
+    );
+
     Ok(())
 }
 
@@ -301,10 +311,29 @@ async fn test_golden_path_scan_performance_benchmarks() -> Result<()> {
         benchmark_results.insert(name, (duration, results.len()));
     }
 
-    // Print benchmark results
-    for (name, (duration, count)) in benchmark_results {
+    // Print benchmark results (timing recorded, not asserted — #2642/#2902).
+    for (name, (duration, count)) in &benchmark_results {
         println!("✅ Benchmark {name}: {count} entries in {duration:?}");
     }
+
+    // Load-immune STRUCTURAL invariants (replace the retired wall-clock asserts):
+    // limits are honored and the unbounded scan is a superset of the bounded one.
+    let limited_10 = benchmark_results["limited_10"].1;
+    let limited_100 = benchmark_results["limited_100"].1;
+    let full_scan = benchmark_results["full_scan"].1;
+    assert!(
+        limited_10 <= 10,
+        "limited_10 scan must honor its limit: got {limited_10} rows (> 10)"
+    );
+    assert!(
+        limited_100 <= 100,
+        "limited_100 scan must honor its limit: got {limited_100} rows (> 100)"
+    );
+    assert!(
+        full_scan >= limited_100,
+        "full (unbounded) scan must return at least as many rows as the limited_100 \
+         scan: full={full_scan} < limited_100={limited_100}"
+    );
 
     Ok(())
 }
@@ -393,13 +422,21 @@ async fn test_golden_path_scan_edge_cases() -> Result<()> {
 
     // Edge case 3: Scan with very large limit
     let start_time = Instant::now();
-    let _results = reader
+    let large_limit_results = reader
         .scan(&table_id, None, None, Some(1_000_000), None)
         .await?;
     let duration = start_time.elapsed();
 
     // Record timing (do not assert on wall-clock latency — #2642/#2902).
     println!("[perf-record] large limit scan: {duration:?}");
+
+    // Load-immune STRUCTURAL invariant: a scan never returns more rows than its
+    // requested limit (the limit is an upper bound).
+    assert!(
+        large_limit_results.len() <= 1_000_000,
+        "large-limit scan must honor its 1_000_000 cap: got {} rows",
+        large_limit_results.len()
+    );
 
     // Edge case 4: Empty key range scan
     let empty_start = RowKey::from(b"".as_slice());
@@ -458,6 +495,7 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
     let total_duration = start_time.elapsed();
 
     // Verify all concurrent scans completed successfully
+    let mut processed = 0usize;
     for handle_result in results {
         let (id, scan_result, duration) =
             handle_result.map_err(|e| Error::internal(format!("Task failed: {e}")))?;
@@ -470,9 +508,21 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
             scan_results.len(),
             duration
         );
+
+        // Load-immune STRUCTURAL invariant: scan i honors its limit of 10*i.
+        let limit = 10 * id;
+        assert!(
+            scan_results.len() <= limit,
+            "concurrent scan {id} must honor its limit {limit}: got {} rows",
+            scan_results.len()
+        );
+        processed += 1;
     }
 
     println!("✅ All concurrent scan operations completed in {total_duration:?}");
+
+    // Load-immune STRUCTURAL invariant: every spawned concurrent scan completed.
+    assert_eq!(processed, 5, "all 5 concurrent scans should complete");
     Ok(())
 }
 

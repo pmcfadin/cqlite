@@ -85,6 +85,13 @@ echo "OK: perf-gate-allow escape hatch respected"
 # top-level tests/*.rs violation but does NOT descend into a subtree.
 fakeroot="$tmp/fakerepo"
 mkdir -p "$fakeroot/scripts/tests" "$fakeroot/tests/deep"
+# Canonicalize to the PHYSICAL path (pwd -P): on macOS $TMPDIR lives under
+# /var -> /private/var, and the guard derives REPO_ROOT via a logical `pwd`. If we
+# left $fakeroot logical, the guard's ROOTS would be `/var/...` while python's
+# os.getcwd() is physical `/private/var/...`, and os.path.relpath would emit a
+# `../`-laden path that the containment check below would (correctly) reject as
+# an escape. Pinning the physical path keeps relpath fake-repo-relative.
+fakeroot="$(cd "$fakeroot" && pwd -P)"
 cp "$GUARD" "$fakeroot/scripts/tests/check-no-wallclock-asserts.sh"
 cat >"$fakeroot/tests/planted.rs" <<'RS'
 #[tokio::test]
@@ -103,7 +110,9 @@ async fn planted_deep() {
 }
 RS
 fake_guard="$fakeroot/scripts/tests/check-no-wallclock-asserts.sh"
-default_out="$(bash "$fake_guard" 2>&1)" && default_rc=0 || default_rc=$?
+# Run from $fakeroot so the guard's relpath output is fake-repo-relative (used by
+# the containment assert below).
+default_out="$(cd "$fakeroot" && bash "$fake_guard" 2>&1)" && default_rc=0 || default_rc=$?
 if [ "$default_rc" -eq 0 ]; then
   echo "FAIL: default scan did NOT flag a top-level tests/*.rs violation (surface not extended)"
   echo "$default_out"
@@ -120,6 +129,34 @@ if grep -q 'nested.rs' <<<"$default_out"; then
   exit 1
 fi
 echo "OK: default scan covers top-level tests/*.rs and does not recurse into subtrees"
+
+# Positive containment (finding #5): every reported offender must live UNDER the
+# fake repo — i.e. the copied guard derived REPO_ROOT from its OWN location, not
+# from the real checkout. A REPO_ROOT-derivation regression that scanned the real
+# tree would surface paths escaping $fakeroot via `../` (or an absolute path),
+# which we reject; each reported path must also resolve to a real file under it.
+offenders="$(grep -E '^  [^ ].*:[0-9]+:' <<<"$default_out" || true)"
+if [ -z "$offenders" ]; then
+  echo "FAIL: containment check found no offender lines to verify (output format changed?)"
+  echo "$default_out"
+  exit 1
+fi
+while IFS= read -r offender_line; do
+  [ -n "$offender_line" ] || continue
+  offender_path="${offender_line#  }"
+  offender_path="${offender_path%%:*}"
+  case "$offender_path" in
+    /* | *../*)
+      echo "FAIL: guard reported an offender OUTSIDE the fake repo: '$offender_path' (REPO_ROOT derivation regressed to the real checkout)"
+      exit 1
+      ;;
+  esac
+  if [ ! -f "$fakeroot/$offender_path" ]; then
+    echo "FAIL: guard-reported offender '$offender_path' does not resolve under \$fakeroot (containment broken)"
+    exit 1
+  fi
+done <<<"$offenders"
+echo "OK: every reported offender is contained under the fake repo (REPO_ROOT derived locally)"
 
 # Removing the top-level offender makes the default scan clean even though the deep
 # (unscanned) subtree violation remains — proving the non-recursive boundary.

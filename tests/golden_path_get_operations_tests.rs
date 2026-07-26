@@ -127,21 +127,58 @@ async fn test_golden_path_get_with_bloom_filter_validation() -> Result<()> {
         RowKey::from(b"absent_data_xyz".as_ref()),
     ];
 
-    for test_key in non_existent_keys {
-        let start_time = Instant::now();
-        let result = reader.get(&table_id, &test_key).await?;
-        let get_duration = start_time.elapsed();
+    // Assert the bloom fast path DIRECTLY, not via a wall-clock threshold (the
+    // #2642/#2902 flake) — same two load-immune signals as
+    // test_golden_path_bloom_summary_index_coordination:
+    //  1. STRUCTURAL: a bloom filter is actually loaded (branch reachable).
+    //  2. BEHAVIORAL: an absent-key `get()` must NOT advance the process-global
+    //     `SSTableReader::scan_for_key_call_count()` (issue #831). Retry to stay
+    //     robust against a concurrent test bumping the global counter: a genuine
+    //     regression scans on every attempt, a healthy fast path shows a zero
+    //     delta on at least one.
+    let health = reader.get_health_metrics().await?;
+    assert!(
+        health.bloom_filter_enabled,
+        "fixture SSTable must have a bloom filter loaded for the fast-path check to be meaningful"
+    );
 
-        // Record timing (do not assert on wall-clock latency — #2642/#2902).
-        println!("[perf-record] bloom filter lookup (non-existent key): {get_duration:?}");
+    for test_key in non_existent_keys {
+        let mut observed_zero_delta = false;
+        let mut last_delta = u64::MAX;
+        let mut last_duration = std::time::Duration::ZERO;
+        for _ in 0..5 {
+            let scans_before = SSTableReader::scan_for_key_call_count();
+            let start_time = Instant::now();
+            let result = reader.get(&table_id, &test_key).await?;
+            last_duration = start_time.elapsed();
+            let scans_after = SSTableReader::scan_for_key_call_count();
+
+            assert!(
+                result.is_none(),
+                "Should not find value for definitely non-existent key: {test_key:?}"
+            );
+
+            last_delta = scans_after.saturating_sub(scans_before);
+            if last_delta == 0 {
+                observed_zero_delta = true;
+                break;
+            }
+        }
 
         assert!(
-            result.is_none(),
-            "Should not find value for definitely non-existent key: {test_key:?}"
+            observed_zero_delta,
+            "Bloom filter should short-circuit absent-key lookup before scan_for_key \
+             for {test_key:?}; every attempt advanced scan_for_key (last delta \
+             {last_delta}), the bloom fast path regressed"
+        );
+
+        // Non-asserting diagnostic (no wall-clock threshold — #2642/#2902).
+        println!(
+            "  absent-key {test_key:?} short-circuited in {last_duration:?} (no scan_for_key)"
         );
     }
 
-    println!("✅ Bloom filter validation completed - all lookups were efficient");
+    println!("✅ Bloom filter validation completed - all absent-key lookups short-circuited");
     Ok(())
 }
 
@@ -158,11 +195,14 @@ async fn test_golden_path_get_performance_benchmarks() -> Result<()> {
         .collect::<Vec<_>>();
 
     let start_time = Instant::now();
-    let mut found_count = 0;
+    let mut found_count = 0usize;
+    let mut miss_count = 0usize;
 
     for key in &test_keys {
-        if let Some(_value) = reader.get(&table_id, key).await? {
+        if reader.get(&table_id, key).await?.is_some() {
             found_count += 1;
+        } else {
+            miss_count += 1;
         }
     }
 
@@ -175,6 +215,21 @@ async fn test_golden_path_get_performance_benchmarks() -> Result<()> {
         total_duration,
         avg_duration,
         found_count
+    );
+
+    // Load-immune STRUCTURAL invariant (replaces the retired wall-clock asserts):
+    // every probed key is accounted for as exactly one hit or one miss, and hits
+    // never exceed the number of keys probed.
+    assert_eq!(
+        found_count + miss_count,
+        test_keys.len(),
+        "hit/miss counts must sum to the number of keys probed: {found_count} + {miss_count} != {}",
+        test_keys.len()
+    );
+    assert!(
+        found_count <= test_keys.len(),
+        "hit count {found_count} cannot exceed keys probed {}",
+        test_keys.len()
     );
 
     Ok(())
@@ -289,6 +344,7 @@ async fn test_golden_path_concurrent_get_operations() -> Result<()> {
     let total_duration = start_time.elapsed();
 
     // Verify all concurrent operations completed successfully
+    let mut processed = 0usize;
     for handle_result in results {
         let (id, get_result, duration) =
             handle_result.map_err(|e| Error::internal(format!("Task failed: {e}")))?;
@@ -298,9 +354,16 @@ async fn test_golden_path_concurrent_get_operations() -> Result<()> {
 
         // Operation should not fail
         get_result?;
+        processed += 1;
     }
 
     println!("✅ Concurrent get operations completed in {total_duration:?}");
+
+    // Load-immune STRUCTURAL invariant: every spawned concurrent get completed.
+    assert_eq!(
+        processed, 10,
+        "all 10 concurrent get operations should complete"
+    );
     Ok(())
 }
 

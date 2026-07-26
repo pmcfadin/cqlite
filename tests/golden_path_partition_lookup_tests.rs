@@ -194,6 +194,14 @@ async fn test_golden_path_multi_partition_scanning() -> Result<()> {
     // Record timing (do not assert on wall-clock latency — #2642/#2902).
     println!("[perf-record] average partition lookup: {avg_lookup_time:?}");
 
+    // Load-immune STRUCTURAL invariant: the hit count cannot exceed the number
+    // of partitions probed.
+    assert!(
+        found_partitions <= partition_keys.len(),
+        "found partitions {found_partitions} cannot exceed probed {}",
+        partition_keys.len()
+    );
+
     Ok(())
 }
 
@@ -242,6 +250,13 @@ async fn test_golden_path_partition_boundary_scanning() -> Result<()> {
             unique_partition_prefixes.len()
         );
     }
+
+    // Load-immune STRUCTURAL invariant: the bounded boundary scan honors its limit.
+    assert!(
+        results.len() <= 100,
+        "partition boundary scan must honor its limit of 100: got {} rows",
+        results.len()
+    );
 
     Ok(())
 }
@@ -295,6 +310,19 @@ async fn test_golden_path_clustering_key_operations() -> Result<()> {
         range_duration
     );
 
+    // Load-immune STRUCTURAL invariants: every clustering key was probed exactly
+    // once, and the bounded range scan honors its limit.
+    assert_eq!(
+        clustering_results.len(),
+        clustering_keys.len(),
+        "each clustering key should be probed exactly once"
+    );
+    assert!(
+        range_results.len() <= 50,
+        "clustering range scan must honor its limit of 50: got {} rows",
+        range_results.len()
+    );
+
     Ok(())
 }
 
@@ -313,30 +341,65 @@ async fn test_golden_path_partition_bloom_filter_efficiency() -> Result<()> {
         "missing_partition_boundary_test",
     ];
 
-    let mut bloom_test_times = Vec::new();
+    // Assert the bloom fast path DIRECTLY, not via a wall-clock threshold (the
+    // #2642/#2902 flake). Two load-immune signals, mirroring
+    // test_golden_path_bloom_summary_index_coordination:
+    //  1. STRUCTURAL: the reader actually loaded a bloom filter, so the bloom
+    //     pre-check branch in `get()` is reachable (else the check is vacuous).
+    //  2. BEHAVIORAL: an absent-key `get()` must NOT advance the process-global
+    //     `SSTableReader::scan_for_key_call_count()` (issue #831) — the bloom
+    //     short-circuits before the sequential scan fallback. The counter is
+    //     process-global and this binary runs tests concurrently, so we retry:
+    //     a genuine regression scans on EVERY attempt (delta >= 1 always), while
+    //     a concurrent test's scan is sporadic, so a healthy fast path shows a
+    //     zero delta on at least one attempt.
+    let health = reader.get_health_metrics().await?;
+    assert!(
+        health.bloom_filter_enabled,
+        "fixture SSTable must have a bloom filter loaded for the fast-path check to be meaningful"
+    );
 
     for partition_name in &non_existent_partitions {
         let partition_key = RowKey::from(partition_name.as_bytes());
 
-        let start_time = Instant::now();
-        let result = reader.get(&table_id, &partition_key).await?;
-        let lookup_duration = start_time.elapsed();
+        let mut observed_zero_delta = false;
+        let mut last_delta = u64::MAX;
+        let mut last_duration = std::time::Duration::ZERO;
+        for _ in 0..5 {
+            let scans_before = SSTableReader::scan_for_key_call_count();
+            let start_time = Instant::now();
+            let result = reader.get(&table_id, &partition_key).await?;
+            last_duration = start_time.elapsed();
+            let scans_after = SSTableReader::scan_for_key_call_count();
 
-        bloom_test_times.push(lookup_duration);
+            // Should be None for non-existent partitions — checked on EVERY attempt.
+            assert!(
+                result.is_none(),
+                "Non-existent partition should return None: {partition_name}"
+            );
 
-        // Should be None for non-existent partitions
+            last_delta = scans_after.saturating_sub(scans_before);
+            if last_delta == 0 {
+                observed_zero_delta = true;
+                break;
+            }
+        }
+
         assert!(
-            result.is_none(),
-            "Non-existent partition should return None: {partition_name}"
+            observed_zero_delta,
+            "Bloom filter should short-circuit absent-key lookup before scan_for_key \
+             for {partition_name}; every attempt advanced scan_for_key (last delta \
+             {last_delta}), the bloom fast path regressed"
+        );
+
+        // Non-asserting diagnostic (no wall-clock threshold — #2642/#2902).
+        println!(
+            "  absent-partition '{partition_name}' short-circuited in {last_duration:?} (no scan_for_key)"
         );
     }
 
-    let avg_bloom_time =
-        bloom_test_times.iter().sum::<std::time::Duration>() / bloom_test_times.len() as u32;
-
-    println!("✅ Bloom filter efficiency test: average lookup time {avg_bloom_time:?}");
     println!(
-        "✅ All {} non-existent partition lookups were efficient",
+        "✅ Bloom filter efficiency verified: all {} non-existent partition lookups short-circuited the bloom fast path",
         non_existent_partitions.len()
     );
 
@@ -412,6 +475,14 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
         range_duration
     );
 
+    // Load-immune STRUCTURAL invariant: the bounded summary-assisted range scan
+    // honors its limit.
+    assert!(
+        range_results.len() <= 25,
+        "summary-assisted range scan must honor its limit of 25: got {} rows",
+        range_results.len()
+    );
+
     Ok(())
 }
 
@@ -467,17 +538,31 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
     let concurrent_total = concurrent_start.elapsed();
 
     // Verify concurrent operations
+    let mut concurrent_processed = 0usize;
     for handle_result in concurrent_results {
         let (id, lookup_result, duration) =
             handle_result.map_err(|e| Error::internal(format!("Task failed: {e}")))?;
 
         lookup_result?; // Verify no errors
+        concurrent_processed += 1;
 
         // Record timing (do not assert on wall-clock latency — #2642/#2902).
         println!("[perf-record] concurrent partition lookup {id}: {duration:?}");
     }
 
     println!("✅ Concurrent partition benchmark: 10 lookups in {concurrent_total:?}");
+
+    // Load-immune STRUCTURAL invariants: the batch hit count cannot exceed the
+    // keys probed, and every spawned concurrent lookup completed successfully.
+    assert!(
+        found_count <= partition_keys.len(),
+        "batch found_count {found_count} cannot exceed probed {}",
+        partition_keys.len()
+    );
+    assert_eq!(
+        concurrent_processed, 10,
+        "all 10 concurrent partition lookups should complete"
+    );
 
     Ok(())
 }
