@@ -490,14 +490,11 @@ struct SSTableRowIteratorAdapter {
     /// makes ([`Self::next`]'s normal consumption). Only ever touched by the
     /// thread holding `&mut self` (never shared), so a plain `i64`.
     received_count: i64,
-    /// RAII guard (issue #2765) that keeps this merge counted in the
-    /// process-global active-merge total for as long as its channel buffers
-    /// rows against the adaptive egress budget. Decrements on drop — even on
-    /// panic/early-return — so the per-merge capacity of subsequently-started
-    /// merges reflects the true live concurrency. Held (never read) purely for
-    /// its drop; dropped as a field AFTER this struct's `Drop` tears down the
-    /// channel (receiver dropped + producer joined), so it is released only once
-    /// this merge's buffered working set is provably gone.
+    /// RAII guard (issue #2765) keeping this merge counted in the process-global
+    /// active-merge total while its channel buffers rows against the adaptive
+    /// egress budget. Decrements on drop (even on panic/early-return); dropped as
+    /// a field AFTER this struct's `Drop` tears the channel down, so it releases
+    /// only once this merge's buffered working set is provably gone.
     _budget_guard: egress_budget::ActiveMergeGuard,
 }
 
@@ -539,18 +536,13 @@ impl From<Error> for MergeProducerError {
     }
 }
 
-/// MAXIMUM number of pre-fetched `MergeEntry` objects buffered per source in the
-/// streaming channel — the capacity used at LOW concurrency (a single active
-/// merge). Each entry is typically a few hundred bytes; at 256 entries per
-/// source and 10 sources that is a few hundred KB — well within the 128MB
-/// budget. The value is a balance between producer/consumer synchronization
-/// overhead (lower = more context switches) and memory footprint (higher = more
-/// buffering).
-///
-/// Issue #2765: this is now the UPPER clamp of an adaptive per-merge capacity —
-/// under concurrent merges the effective capacity shrinks (see
-/// [`egress_budget`]) so the aggregate buffered working set across all merges
-/// tracks a fixed budget instead of growing as `256 × active_merges`.
+/// MAXIMUM pre-fetched `MergeEntry` objects buffered per source in the streaming
+/// channel — the capacity used at LOW concurrency (a single active merge). Each
+/// entry is a few hundred bytes; balances producer/consumer sync overhead
+/// against memory footprint. Issue #2765: now the UPPER clamp of an adaptive
+/// per-merge capacity (see [`egress_budget`]) — under concurrent merges the
+/// effective capacity shrinks so the aggregate buffered working set tracks a
+/// fixed budget instead of growing as `256 × active_merges`.
 #[cfg(feature = "write-support")]
 const STREAMING_CHANNEL_CAPACITY: usize = 256;
 
@@ -622,11 +614,8 @@ impl SSTableRowIteratorAdapter {
         // Held on the adapter for cancel-aware recv + Drop teardown (issue #2361).
         let adapter_cancel = scan_cancel.clone();
 
-        // Issue #2765: register this starting merge in the process-global
-        // active-merge count and derive its per-merge channel capacity from the
-        // now-live concurrency (increment-first, so the current merge counts
-        // itself). The returned guard is stored on the adapter and decrements
-        // the count when this merge is torn down.
+        // Issue #2765: derive the per-merge channel capacity from the now-live
+        // merge concurrency (increment-first); the guard is stored on the adapter.
         let (channel_capacity, budget_guard) = egress_budget::begin_merge();
         let (sender, receiver) = std::sync::mpsc::sync_channel(channel_capacity);
         // Issue #2419 roborev job 1733: this adapter's own sent-count, shared

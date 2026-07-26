@@ -126,7 +126,7 @@ mod tests {
         // Budget divided among concurrent merges, clamped to the ceiling.
         assert_eq!(capacity_for(8), EGRESS_ROW_BUDGET / 8); // exactly 256 (== MAX_CAP)
         assert_eq!(capacity_for(16), EGRESS_ROW_BUDGET / 16); // 128
-        // Very high concurrency clamps to MIN_CAP (never 0 → forward progress).
+                                                              // Very high concurrency clamps to MIN_CAP (never 0 → forward progress).
         assert_eq!(capacity_for(usize::MAX), MIN_CAP);
         assert!(MIN_CAP >= 1, "MIN_CAP must guarantee at least one slot");
     }
