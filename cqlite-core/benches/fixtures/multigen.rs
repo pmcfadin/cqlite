@@ -14,11 +14,13 @@
 //! ## `now` is pinned through the API, never the env var
 //!
 //! The TTL-bearing mixes are measured at [`PINNED_NOW_SECS`], threaded into the
-//! merge via `KWayMerger::with_now_secs`. The read-path env seam
-//! `CQLITE_TTL_NOW_OVERRIDE_SECS` is `#[cfg(debug_assertions)]` and compiles OUT
-//! of the release profile `cargo bench` uses, where it silently falls back to the
-//! wall clock — a bench pinned that way would drift run to run. This module must
-//! therefore never mention that variable.
+//! merge via `KWayMerger::with_now_secs`. The read-path TTL-`now` override env
+//! seam (`reader/parsing/row_decoder/now_clock.rs:61`) is
+//! `#[cfg(debug_assertions)]` and compiles OUT of the release profile
+//! `cargo bench` uses, where it silently falls back to the wall clock — a bench
+//! pinned that way would drift run to run. Neither this module nor the bench
+//! reads that variable, and by contract neither even names it (see
+//! `benches/README.md` for the operator-facing explanation).
 
 #![cfg(feature = "write-support")]
 

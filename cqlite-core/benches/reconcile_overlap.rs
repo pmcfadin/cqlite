@@ -33,9 +33,11 @@
 //! ## `now` is pinned through the API
 //!
 //! TTL-bearing arms pin reconcile-time `now` with `KWayMerger::with_now_secs(Some(
-//! PINNED_NOW_SECS))`. The `CQLITE_TTL_NOW_OVERRIDE_SECS` read-path seam is
-//! `#[cfg(debug_assertions)]` and compiles OUT of the release profile `cargo bench`
-//! uses, silently falling back to the wall clock — so it is never used here. The
+//! PINNED_NOW_SECS))`. The read-path TTL-`now` override env seam
+//! (`reader/parsing/row_decoder/now_clock.rs:61`) is `#[cfg(debug_assertions)]` and
+//! compiles OUT of the release profile `cargo bench`
+//! uses, silently falling back to the wall clock — so it is never used here (by
+//! contract this source does not even name that variable). The
 //! fixture makes that fallback DETECTABLE: each `ttl_expiring` row carries one cell
 //! expired at the pin and one that is live at the pin but expired at any present-day
 //! wall clock, and the bench asserts exactly ONE expiry per row.
@@ -183,8 +185,8 @@ mod overlap {
             KWayMerger::new_from_readers(readers.to_vec(), schema, ScanCancel::new(), None)
                 .expect("build KWayMerger over overlap fixture readers")
                 // Issue #2043 / design D2: pin `now` through the API. NEVER via
-                // CQLITE_TTL_NOW_OVERRIDE_SECS (debug-only; compiles out of the
-                // release profile `cargo bench` uses).
+                // the debug-only read-path TTL-`now` override env seam, which
+                // compiles out of the release profile `cargo bench` uses.
                 .with_now_secs(now_secs);
 
         let mut stats = DrainStats::default();
