@@ -715,3 +715,28 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` — that restores SKIPs and buys a
       vacuous PASS, which is exactly what #2078's fail-closed exists to
       prevent.
+  25. **2026-07-26 — re-read the ISSUE STATE at claim time, not just the claim ref
+      and branch: a CLOSED issue is indistinguishable from an abandoned one by
+      the lock signals alone.** A lead working #2043 had read #1883 at session
+      start (genuinely OPEN, board `In Progress`, spec Seam-1 approved, spec-only
+      branch on origin). Hours later, on finishing #2043, it claimed #1883 and
+      created a worktree — but a *different* session had delivered #1883 in the
+      meantime (PR #2904 merged, issue CLOSED COMPLETED, OpenSpec change
+      archived). Every signal the claim protocol checks was clean and *looked
+      like an abandoned claim to adopt*: no `refs/claims/issue-1883` (the finisher
+      released it on completion), no `issue-1883-*` branch (deleted on merge), and
+      a stale board `Status=In Progress`. The near-miss was caught only
+      incidentally — `git rebase origin/main` replayed the stale spec commit and
+      printed the parent, `chore(#1883): archive rust-per-row-alloc-budget …`,
+      which is what revealed the work was already done. **Standing lesson:** the
+      absence of a claim ref + absence of a branch is ambiguous — it means EITHER
+      "abandoned, adopt it" OR "finished, stay away." The disambiguator is the
+      issue's own state. Re-read `gh issue view <N> --json state,stateReason`
+      IMMEDIATELY before `claim.sh claim`, and treat `CLOSED` as a hard stop
+      regardless of board Status (the board mirror lags; a completed issue's
+      board item is routinely left stale by the finishing session). Note the
+      deleted branch is itself weak evidence of completion — a finished 1:1:1:1
+      cycle deletes its branch, so branch-absence + issue-CLOSED is the
+      already-shipped signature. Cost here: one wasted claim/worktree cycle and a
+      duplicate spec commit that had to be discarded; cost had it gone unnoticed:
+      a second PR re-implementing merged work.
