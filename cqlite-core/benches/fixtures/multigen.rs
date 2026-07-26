@@ -6,10 +6,38 @@
 //! collision-mix selector, so a bench can measure how per-row merge cost grows
 //! with cluster depth (`docs/research/issue-2043-reconcile-overlap-multiplier.md`).
 //!
-//! Built on [`super::seeded_rng`] and the public `WriteEngine` flush API, so it is
-//! deterministic and needs **no** vendored dataset corpus (`CQLITE_DATASETS_ROOT`
-//! is never consulted): controlled `k` is the independent variable and the
-//! vendored corpus is single-generation, so it cannot supply `k > 1` at all.
+//! Built on [`crate::fixtures::seeded_rng`] and the public `WriteEngine` flush
+//! API, so it is deterministic and needs **no** vendored dataset corpus
+//! (`CQLITE_DATASETS_ROOT` is never consulted): controlled `k` is the independent
+//! variable and the vendored corpus is single-generation, so it cannot supply
+//! `k > 1` at all.
+//!
+//! ## Every generation's contribution is k-INVARIANT (issue #2043 roborev)
+//!
+//! [`generation_mutations`] deliberately takes **no `k` parameter**: generation
+//! `g` writes byte-identically whether the arm is k = 1 or k = 20 (same RNG
+//! sequence, same column sets, same tombstone kinds). A composition that varied
+//! with k would confound *cluster depth* with *cell/tombstone population* in the
+//! `cost(k)/cost(1)` ratio the record derives, which is exactly the confound an
+//! earlier `(generation + k) % 2` alternation introduced. The bench asserts this
+//! invariance across arms (per-generation census, `reconcile_overlap.rs`).
+//!
+//! ## Why in-generation tombstones sit BELOW the live cells
+//!
+//! The flush writer reconciles *within* a generation
+//! (`writer/data_writer/rows.rs::merge_row_group`): the newest `DeleteRow` wins
+//! and shadows every cell with `timestamp <= deletion_ts`, and a pure row
+//! tombstone carries no liveness. A row tombstone written ABOVE its generation's
+//! live cells therefore collapses that generation to a **cell-less** row
+//! tombstone before the merge ever sees it — so the "live cells vs row
+//! tombstone" shape would never reach `KWayMerger` and the arm would silently
+//! measure tombstone-vs-tombstone. Row tombstones are consequently stamped at
+//! [`TS_ROW_TOMBSTONE_OFFSET`] (strictly below the live cells), which is the real
+//! Cassandra coexistence shape (issue #932: a row deletion older than the
+//! surviving cells is kept alongside them) and is present at **every k,
+//! including k = 1**. Cell tombstones stay ABOVE their column's live cell
+//! ([`TS_CELL_TOMBSTONE_OFFSET`]) because a surviving cell tombstone is the point
+//! of that half of the arm and per-column LWW keeps it without shadowing the row.
 //!
 //! ## `now` is pinned through the API, never the env var
 //!
@@ -86,6 +114,14 @@ pub const OVERLAP_CK: usize = 64;
 /// Clusters (`(pk, ck)` pairs) each generation writes.
 pub const CLUSTERS_PER_GEN: usize = OVERLAP_PARTITIONS * OVERLAP_CK;
 
+/// Clustering rows per partition per generation for the **producer-count control**
+/// arm (issue #2043 §3): DOUBLE the matrix width, so a ONE-generation fixture
+/// holds the same 2048 clusters — and the same cell count — as the TWO-generation
+/// `disjoint/k2` arm. Comparing those two arms changes only the number of
+/// producer/adapter streams the drain fans in, which is the measured mechanism
+/// behind the k=1 anchor deviation.
+pub const PRODUCER_CONTROL_CK: usize = OVERLAP_CK * 2;
+
 /// The collision shape a fixture's generations present to the merge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlapMix {
@@ -98,9 +134,13 @@ pub enum OverlapMix {
     /// timestamps — pure last-write-wins overwrite. The cluster depth IS k.
     LwwOverwrite,
     /// Same `(pk, ck)` in every generation, and each generation additionally
-    /// tombstones the lower half of its own clustering range (row tombstone) and
-    /// cell-tombstones one column of the upper half — so both tombstone kinds
-    /// collide with live cells at every k, including k=1.
+    /// tombstones the lower half of its own clustering range (row tombstone,
+    /// stamped BELOW that generation's live cells so both survive the flush —
+    /// see the module docs) and cell-tombstones one column of the upper half —
+    /// so both tombstone kinds collide with live cells at every k, including
+    /// k=1. Across generations the newer generation's row deletion also shadows
+    /// the older generation's cells, so the merge does real deletion-vs-cell
+    /// comparison work at every depth.
     Tombstone,
     /// Same `(pk, ck)` in every generation, where each row carries one
     /// already-expired expiring cell and one not-yet-expired expiring cell at
@@ -164,25 +204,43 @@ pub struct MultigenFixture {
     pub k: usize,
     /// The mix this fixture was built for.
     pub mix: OverlapMix,
-    /// Total rows written across all generations — the merge's INPUT row count
-    /// (the reconcile work), used to derive collisions-per-output-row.
-    pub input_rows: u64,
+    /// Clustering rows per partition each generation writes (= [`OVERLAP_CK`]
+    /// for the matrix arms; doubled for the producer-count control arm).
+    pub ck_per_gen: usize,
+    /// Total **mutations** handed to `WriteEngine::write` across all generations.
+    ///
+    /// This is a MUTATION count, NOT the merge's input row count: a generation's
+    /// live write and its in-generation tombstone are two mutations that the
+    /// flush writer reconciles into ONE on-disk row. For the merge's actual input
+    /// row count use the bench's observed per-generation drain
+    /// (`reconcile_overlap.rs::observed_input_rows`), which reads what the
+    /// readers really emit.
+    pub mutations_written: u64,
     // Holds the temp dir alive: an `Arc<SSTableReader>` handed to
     // `new_from_readers` maps/reads these files for its whole lifetime, so the
     // fixture must outlive every merger built from it.
     _tmp: tempfile::TempDir,
 }
 
-/// Build a `k`-generation fixture for `mix`.
+/// Build a `k`-generation fixture for `mix` with `ck_per_gen` clustering rows per
+/// partition per generation ([`OVERLAP_CK`] for every matrix arm).
 ///
-/// Writes each generation into its own memtable and flushes it, with NO merge
-/// policy installed, so exactly `k` `Data.db` files remain uncompacted. Asserts
-/// that count before returning: a fixture that silently compacted (or failed to
-/// flush) would measure the wrong k.
-pub fn build_multigen(k: usize, mix: OverlapMix) -> MultigenFixture {
+/// Writes each generation into its own memtable and flushes it with compaction
+/// DISABLED (`WriteEngineConfig::auto_compaction = false`), so exactly `k`
+/// `Data.db` files remain uncompacted. Asserts that count before returning: a
+/// fixture that silently compacted (or failed to flush) would measure the wrong k.
+///
+/// The non-default width exists for the producer-count control arm (issue #2043
+/// §3): holding the row and cell count fixed while changing only the number of
+/// producers requires a 1-generation fixture as wide as a 2-generation one.
+pub fn build_multigen_sized(k: usize, mix: OverlapMix, ck_per_gen: usize) -> MultigenFixture {
     use cqlite_core::schema::parse_cql_schema;
 
     assert!(k >= 1, "k must be >= 1");
+    assert!(
+        ck_per_gen >= 2 && ck_per_gen % 4 == 0,
+        "ck_per_gen must be a positive multiple of 4 (the mixes split by halves and by slot % 4)"
+    );
     let schema = parse_cql_schema(OVERLAP_TABLE_CQL).expect("parse overlap-fixture schema");
     let tmp = tempfile::TempDir::new().expect("temp dir for overlap fixture");
     let data_dir = tmp.path().join("data");
@@ -194,10 +252,10 @@ pub fn build_multigen(k: usize, mix: OverlapMix) -> MultigenFixture {
         .expect("tokio runtime for overlap fixture flush");
 
     let mut oldest_first = Vec::with_capacity(k);
-    let mut input_rows = 0u64;
-    let mut rng = super::seeded_rng();
+    let mut mutations_written = 0u64;
+    let mut rng = crate::fixtures::seeded_rng();
     for generation in 0..k {
-        input_rows += write_generation(&mut engine, mix, generation, k, &mut rng);
+        mutations_written += write_generation(&mut engine, mix, generation, ck_per_gen, &mut rng);
         let info = rt
             .block_on(engine.flush())
             .expect("overlap fixture flush must not error")
@@ -216,7 +274,7 @@ pub fn build_multigen(k: usize, mix: OverlapMix) -> MultigenFixture {
         sstable_dir.display()
     );
     assert!(
-        input_rows > 0,
+        mutations_written > 0,
         "overlap fixture (k={k}, mix={}) wrote no rows",
         mix.id()
     );
@@ -228,13 +286,22 @@ pub fn build_multigen(k: usize, mix: OverlapMix) -> MultigenFixture {
         schema,
         k,
         mix,
-        input_rows,
+        ck_per_gen,
+        mutations_written,
         _tmp: tmp,
     }
 }
 
 /// `WriteEngine` over [`OVERLAP_TABLE_CQL`] with a huge flush threshold (the
-/// builder flushes explicitly, one flush per generation) and durability DISABLED.
+/// builder flushes explicitly, one flush per generation), durability DISABLED and
+/// **compaction disabled**.
+///
+/// `auto_compaction = false` is explicit rather than incidental: `WriteEngineConfig::new`
+/// defaults it to `true`, which installs the default STCS merge policy. The
+/// generations happen to survive anyway because the builder never calls
+/// `maintenance_step()`, but relying on that is a latent trap — turning the policy
+/// off means "exactly k uncompacted generations" is guaranteed by configuration,
+/// not by an omission.
 ///
 /// Durability off is a *setup-cost* choice only: the fixture is untimed scaffolding
 /// for a read-side merge measurement, and `SyncEachWrite` would fsync once per
@@ -242,9 +309,10 @@ pub fn build_multigen(k: usize, mix: OverlapMix) -> MultigenFixture {
 fn open_fixture_engine(dir: &Path, schema: &TableSchema) -> WriteEngine {
     use cqlite_core::storage::write_engine::{Durability, WriteEngineConfig};
 
-    let cfg = WriteEngineConfig::new(dir.join("data"), dir.join("wal"), schema.clone())
+    let mut cfg = WriteEngineConfig::new(dir.join("data"), dir.join("wal"), schema.clone())
         .with_flush_threshold(usize::MAX)
         .with_durability(Durability::Disabled);
+    cfg.auto_compaction = false;
     WriteEngine::new(cfg).expect("build overlap-fixture write engine")
 }
 
@@ -267,13 +335,26 @@ const TS_BASE: i64 = 1_600_000_000_000_000;
 /// in-generation tombstone offsets never reach the next generation.
 const TS_GEN_STRIDE: i64 = 1_000_000;
 
+/// Offset (micros) of a generation's ROW tombstone relative to that generation's
+/// live cells: strictly **below** them, so the flush writer keeps both (the
+/// issue-#932 coexistence shape) instead of shadowing the cells away. See the
+/// module docs. Magnitude stays far under [`TS_GEN_STRIDE`], so a generation's
+/// tombstone never reaches into the previous generation's window.
+const TS_ROW_TOMBSTONE_OFFSET: i64 = -1;
+
+/// Offset (micros) of a generation's CELL tombstone relative to that generation's
+/// live cells: strictly **above** them, so per-column last-write-wins keeps the
+/// tombstone as the surviving value of that one column.
+const TS_CELL_TOMBSTONE_OFFSET: i64 = 1;
+
 /// Write one generation's mutations into `engine`'s memtable, returning the
-/// number of rows (mutations) written.
+/// number of mutations written (NOT rows — see
+/// [`MultigenFixture::mutations_written`]).
 fn write_generation(
     engine: &mut WriteEngine,
     mix: OverlapMix,
     generation: usize,
-    k: usize,
+    ck_per_gen: usize,
     rng: &mut rand::rngs::StdRng,
 ) -> u64 {
     use rand::Rng;
@@ -281,15 +362,15 @@ fn write_generation(
     let base_ts = TS_BASE + (generation as i64) * TS_GEN_STRIDE;
     let mut written = 0u64;
     for pk in 0..OVERLAP_PARTITIONS as i32 {
-        for slot in 0..OVERLAP_CK as i32 {
+        for slot in 0..ck_per_gen as i32 {
             // `Disjoint` shifts each generation into its own ck window so no
             // cluster is ever shared; every other mix reuses the same window.
             let ck = match mix {
-                OverlapMix::Disjoint => (generation as i32) * OVERLAP_CK as i32 + slot,
+                OverlapMix::Disjoint => (generation as i32) * ck_per_gen as i32 + slot,
                 _ => slot,
             };
             let tag: u32 = rng.gen();
-            for m in generation_mutations(mix, pk, ck, slot, generation, k, base_ts, tag) {
+            for m in generation_mutations(mix, pk, ck, slot, generation, ck_per_gen, base_ts, tag) {
                 engine.write(m).expect("overlap fixture write");
                 written += 1;
             }
@@ -299,32 +380,43 @@ fn write_generation(
 }
 
 /// The mutations one `(pk, ck)` cluster receives from `generation` under `mix`.
+///
+/// **Takes no `k`.** Generation `g`'s contribution is identical at every k, so
+/// `cost(k)/cost(1)` varies only cluster DEPTH, never the cell/tombstone
+/// population (see the module docs on k-invariance).
 fn generation_mutations(
     mix: OverlapMix,
     pk: i32,
     ck: i32,
     slot: i32,
     generation: usize,
-    k: usize,
+    ck_per_gen: usize,
     base_ts: i64,
     tag: u32,
 ) -> Vec<cqlite_core::storage::write_engine::Mutation> {
-    let half = (OVERLAP_CK / 2) as i32;
+    let half = (ck_per_gen / 2) as i32;
     match mix {
         // Disjoint / pure LWW: one full-row write per generation.
         OverlapMix::Disjoint | OverlapMix::LwwOverwrite => {
             vec![live_row(pk, ck, generation, base_ts, tag)]
         }
         // Live row + a same-generation tombstone: a row tombstone on the lower
-        // clustering half, a cell tombstone on `v1` of the upper half. Both sit
-        // one micro above the live write so they collide with it inside the
-        // generation AND across generations.
+        // clustering half (stamped BELOW the live cells so the flush keeps both —
+        // otherwise the generation collapses to a cell-less row tombstone and the
+        // live-vs-row-tombstone collision never reaches the merge), a cell
+        // tombstone on `v1` of the upper half (stamped ABOVE its column's live
+        // cell so the tombstone is the surviving value).
         OverlapMix::Tombstone => {
             let mut out = vec![live_row(pk, ck, generation, base_ts, tag)];
             if slot < half {
-                out.push(row_tombstone(pk, ck, base_ts + 1));
+                out.push(row_tombstone(pk, ck, base_ts + TS_ROW_TOMBSTONE_OFFSET));
             } else {
-                out.push(cell_tombstone(pk, ck, "v1", base_ts + 1));
+                out.push(cell_tombstone(
+                    pk,
+                    ck,
+                    "v1",
+                    base_ts + TS_CELL_TOMBSTONE_OFFSET,
+                ));
             }
             out
         }
@@ -347,12 +439,20 @@ fn generation_mutations(
             1 => vec![blended_row(pk, ck, generation, base_ts, tag)],
             2 => {
                 let mut out = vec![live_row(pk, ck, generation, base_ts, tag)];
-                // Alternate the tombstone kind by generation so both shapes
-                // appear even at small k; `k` keeps the pattern k-aware.
-                if (generation + k) % 2 == 0 {
-                    out.push(cell_tombstone(pk, ck, "v0", base_ts + 1));
+                // Alternate the tombstone kind by GENERATION PARITY ONLY so both
+                // shapes appear even at small k. Never by `k`: keying the kind off
+                // k made generation g's composition depend on the arm's depth, so
+                // the k=1 anchor was measured on a different tombstone population
+                // than the k>1 arms (roborev, issue #2043).
+                if generation % 2 == 0 {
+                    out.push(cell_tombstone(
+                        pk,
+                        ck,
+                        "v0",
+                        base_ts + TS_CELL_TOMBSTONE_OFFSET,
+                    ));
                 } else {
-                    out.push(row_tombstone(pk, ck, base_ts + 1));
+                    out.push(row_tombstone(pk, ck, base_ts + TS_ROW_TOMBSTONE_OFFSET));
                 }
                 out
             }
