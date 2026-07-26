@@ -140,6 +140,57 @@ push_work_branch() {
   )
 }
 
+# --- ONE SHARED start signal for the concurrency rounds --------------------
+# The racers must be released TOGETHER. The earlier shape used TWO independent
+# FIFOs whose writers were launched sequentially, so each racer was released the
+# moment ITS OWN writer connected: machine A could finish its whole adopt before
+# B even started, and every assertion in the round still held under full
+# serialization — a "race" test that could not detect that it never raced.
+# Now both children announce readiness and then spin on ONE shared flag file the
+# parent creates only after BOTH are ready.
+race_reset() { rm -f "$T/go" "$T/ready-a" "$T/ready-b"; }
+# race_wait_go <ready-file> — announce readiness, then spin on the shared flag.
+race_wait_go() { : >"$1"; while [ ! -e "$T/go" ]; do :; done; }
+# race_release — bounded wait for BOTH readiness marks, then flip the one flag.
+race_release() {
+  local spins=0
+  while [ ! -e "$T/ready-a" ] || [ ! -e "$T/ready-b" ]; do
+    spins=$((spins + 1))
+    if [ "$spins" -gt 1000 ]; then echo "  ! barrier: a racer never signalled ready" >&2; break; fi
+    sleep 0.01
+  done
+  : >"$T/go"
+}
+
+# now_ns — a hi-res clock, so the race rounds carry POSITIVE EVIDENCE that they
+# raced (overlapping windows) instead of only asserting invariants that also hold
+# under serialization. GNU date has %N; BSD/macOS date does not (it emits a
+# literal 'N'), hence the perl/python3 fallbacks. No hi-res clock at all is a
+# LOUD failure below, never a silently skipped witness.
+NS_IMPL=none
+nsprobe=$(date -u +%s%N 2>/dev/null || true)
+if [ -n "$nsprobe" ] && [ -z "${nsprobe//[0-9]/}" ] && [ "${#nsprobe}" -ge 16 ]; then
+  NS_IMPL=date
+elif command -v perl >/dev/null 2>&1 && perl -MTime::HiRes -e 'exit 0' 2>/dev/null; then
+  NS_IMPL=perl
+elif command -v python3 >/dev/null 2>&1; then
+  NS_IMPL=python3
+fi
+now_ns() {
+  case "$NS_IMPL" in
+    date)    date -u +%s%N ;;
+    perl)    perl -MTime::HiRes -e 'printf "%.0f\n", Time::HiRes::time() * 1000000000' ;;
+    python3) python3 -c 'import time; print(time.time_ns())' ;;
+    *)       printf '0\n' ;;
+  esac
+}
+# read_ns <file> — the recorded timestamp, or 0 when unusable.
+read_ns() {
+  local v
+  v=$(cat "$1" 2>/dev/null || true)
+  if [ -n "$v" ] && [ -z "${v//[0-9]/}" ]; then printf '%s\n' "$v"; else printf '0\n'; fi
+}
+
 # ===========================================================================
 echo "TEST 1: FREE claim ref + foreign-tip issue-<N>-* branch — claim refuses WITH the remediation, adopt --expect none SUCCEEDS"
 # ===========================================================================
@@ -148,7 +199,9 @@ push_work_branch "issue-2001-owner-approved-spec" "docs(#2001): OpenSpec change 
 [ -z "$(ref_sha 2001)" ] && ok "precondition: refs/claims/issue-2001 is FREE" \
   || fail "precondition broken: a claim ref already exists for 2001"
 
-outClaim=$(runB claim 2001); rcClaim=$?
+# runB_gh: the gh stub reports NO open PR, i.e. a demonstrably orphaned endgame —
+# the only state in which the escape hatch may be advertised (see TEST 15).
+outClaim=$(runB_gh claim 2001); rcClaim=$?
 if [ "$rcClaim" -eq 2 ] && printf '%s\n' "$outClaim" | grep -q 'reason=legacy-branch-lock'; then
   ok "claim still refuses (exit 2) while the branch stands"
 else
@@ -159,8 +212,9 @@ fi
 # LOST is what sent two workers into hand-crafted claim-commit pushes.
 if printf '%s\n' "$outClaim" | grep -q 'adopt 2001 --expect none --reason' \
    && printf '%s\n' "$outClaim" | grep -q 'issue-2001-owner-approved-spec' \
-   && printf '%s\n' "$outClaim" | grep -q 'claim-ref=free'; then
-  ok "refusal names the exact remediation command, the blocking branch, and claim-ref=free"
+   && printf '%s\n' "$outClaim" | grep -q 'claim-ref=free' \
+   && printf '%s\n' "$outClaim" | grep -q 'open-prs=0'; then
+  ok "refusal names the exact remediation command, the blocking branch, claim-ref=free, and open-prs=0"
 else
   fail "refusal is not actionable (missing remediation/branch/claim-ref=free):
 $outClaim"
@@ -230,7 +284,7 @@ else
   fail "expected RELEASED exit 0 with the ref gone; got rc=$rcRelease ref='$(ref_sha 2001)'
 $outRelease"
 fi
-outAfter=$(runA claim 2001); rcAfter=$?
+outAfter=$(runA_gh claim 2001); rcAfter=$?
 if [ "$rcAfter" -eq 2 ] && printf '%s\n' "$outAfter" | grep -q 'reason=legacy-branch-lock'; then
   ok "after the release the surviving work branch still guards a plain claim (exit 2)"
 else
@@ -276,34 +330,57 @@ runA verify 2002 >/dev/null 2>&1; rcHolderStill=$?
 # ===========================================================================
 echo "TEST 3: two machines RACE the resume path — exactly one SERVER-ACCEPTED create (git arbitrates), 5 rounds"
 # ===========================================================================
-# Real competing pushes: both machines are released from a FIFO barrier and run the
-# empty-lease adopt concurrently against the same origin. Nothing is mocked — the
-# remote's ref update is the arbiter, and the post-receive log is the witness.
+# Real competing pushes: both machines are released by ONE SHARED start signal and
+# run the empty-lease adopt concurrently against the same origin. Nothing is mocked
+# — the remote's ref update is the arbiter, and the post-receive log is the witness.
 # Repeated over distinct issue ids because a single interleaving proves little.
+#
+# AND THE ROUND PROVES IT RACED: each racer records a hi-res timestamp immediately
+# before and after its adopt (the push is the bulk of that call), and the round FAILS
+# unless the two windows OVERLAP. Every other assertion here also holds under full
+# serialization, so without this witness a barrier regression is invisible — which is
+# exactly how a non-racing barrier survived two reviews.
 raceRounds=0; raceOk=0; raceAtomic=0; raceLoser=0; raceWinnerVerified=0; raceDiag=""
+raceOverlapped=0; ovMin=""; ovMax=""
 for id in 2101 2102 2103 2104 2105; do
   raceRounds=$((raceRounds+1))
   push_work_branch "issue-${id}-resumable"
   ( cd "$B" && g fetch -q origin )
-  rm -f "$T/gate-a" "$T/gate-b"
-  mkfifo "$T/gate-a" "$T/gate-b"
-  ( head -1 <"$T/gate-a" >/dev/null 2>&1
+  race_reset
+  ( race_wait_go "$T/ready-a"
+    now_ns >"$T/race-a.t0"
     runA adopt "$id" --expect none --reason "racing machineA" >"$T/race-a.out" 2>&1
-    echo "$?" >"$T/race-a.rc" ) &
+    echo "$?" >"$T/race-a.rc"
+    now_ns >"$T/race-a.t1" ) &
   pidA=$!
-  ( head -1 <"$T/gate-b" >/dev/null 2>&1
+  ( race_wait_go "$T/ready-b"
+    now_ns >"$T/race-b.t0"
     runB adopt "$id" --expect none --reason "racing machineB" >"$T/race-b.out" 2>&1
-    echo "$?" >"$T/race-b.rc" ) &
+    echo "$?" >"$T/race-b.rc"
+    now_ns >"$T/race-b.t1" ) &
   pidB=$!
-  ( echo go >"$T/gate-a" ) &
-  writerA=$!
-  ( echo go >"$T/gate-b" ) &
-  writerB=$!
+  race_release
   wait "$pidA" "$pidB" 2>/dev/null
-  # Never `wait` on the fifo writers: a writer blocks until its reader opens, so a
-  # child that died before opening would hang the suite. The racers are done here,
-  # so any still-blocked writer is simply killed.
-  kill "$writerA" "$writerB" 2>/dev/null || true
+  # Concurrency witness: [t0,t1] per racer must intersect. Reported in the verdict
+  # so the log carries the measured overlap, not just a boolean.
+  t0a=$(read_ns "$T/race-a.t0"); t1a=$(read_ns "$T/race-a.t1")
+  t0b=$(read_ns "$T/race-b.t0"); t1b=$(read_ns "$T/race-b.t1")
+  if [ "$t0a" -gt 0 ] && [ "$t1a" -gt 0 ] && [ "$t0b" -gt 0 ] && [ "$t1b" -gt 0 ]; then
+    ovStart="$t0a"; [ "$t0b" -gt "$ovStart" ] && ovStart="$t0b"
+    ovEnd="$t1a";   [ "$t1b" -lt "$ovEnd" ]   && ovEnd="$t1b"
+    ovNs=$((ovEnd - ovStart))
+    if [ "$ovNs" -gt 0 ]; then
+      raceOverlapped=$((raceOverlapped+1))
+      [ -n "$ovMin" ] && [ "$ovMin" -le "$ovNs" ] || ovMin="$ovNs"
+      [ -n "$ovMax" ] && [ "$ovMax" -ge "$ovNs" ] || ovMax="$ovNs"
+    else
+      raceDiag="$raceDiag
+  round $id: the two adopt windows did NOT overlap (gap $((0 - ovNs))ns) — the racers ran SERIALLY, so this round proves nothing"
+    fi
+  else
+    raceDiag="$raceDiag
+  round $id: no usable hi-res timestamps (NS_IMPL=$NS_IMPL) — cannot witness concurrency"
+  fi
   rcRaceA="$(cat "$T/race-a.rc" 2>/dev/null || echo missing)"
   rcRaceB="$(cat "$T/race-b.rc" 2>/dev/null || echo missing)"
   winners=0
@@ -368,6 +445,16 @@ done
 [ "$raceWinnerVerified" -eq "$raceRounds" ] \
   && ok "the winner verifies as the holder of the single surviving ref, every round" \
   || fail "the race winner did not verify as holder in $((raceRounds - raceWinnerVerified))/$raceRounds rounds$raceDiag"
+# The barrier itself, measured. A suite with no hi-res clock cannot make this claim,
+# so it fails loudly rather than reporting a vacuous race.
+[ "$NS_IMPL" != none ] \
+  && ok "hi-res clock available to witness concurrency (NS_IMPL=$NS_IMPL)" \
+  || fail "no hi-res clock (date %N / perl Time::HiRes / python3) — the race rounds cannot be witnessed"
+if [ "$raceOverlapped" -eq "$raceRounds" ]; then
+  ok "the two racers' adopt windows OVERLAP every round ($raceOverlapped/$raceRounds; overlap min=$((${ovMin:-0} / 1000000))ms max=$((${ovMax:-0} / 1000000))ms, min=${ovMin:-0}ns) — they really ran concurrently"
+else
+  fail "only $raceOverlapped/$raceRounds rounds had overlapping adopt windows — the barrier serialized the racers$raceDiag"
+fi
 
 # ===========================================================================
 echo "TEST 4: --expect fail-closed — empty '' is a usage error; only the literal 'none' opts into the empty lease"
@@ -386,6 +473,21 @@ outJunk=$(runB adopt 2004 --expect "HEAD~1" 2>&1); rcJunk=$?
 [ "$rcJunk" -eq 64 ] && ok "a non-hex, non-'none' --expect is a usage error (exit 64)" \
   || fail "expected exit 64 for --expect HEAD~1; got rc=$rcJunk
 $outJunk"
+# A hex --expect that is not a FULL object name is a CALLER BUG, and both of its
+# shapes used to misreport: a short all-zero value ('0', '00') slipped into the
+# all-zero branch and became a silent CREATE instead of a compare-and-swap, and a
+# TRUNCATED sha built a lease git cannot resolve, so the push failed and the confirm
+# read said ADOPT-LOST — a race-loss verdict for a usage error.
+lenRc=""
+for badExpect in 0 00 abc123 0000000000000000000000000000000000000; do
+  runB adopt 2004 --expect "$badExpect" --reason "truncated sha from a caller bug" >/dev/null 2>&1
+  lenRc="$lenRc $?"
+done
+if [ "$lenRc" = " 64 64 64 64" ] && [ -z "$(ref_sha 2004)" ] && [ "$(accepted_updates 2004)" = "0" ]; then
+  ok "a short/truncated hex --expect (0, 00, abc123, 39 zeros) is a usage error (exit 64) — never a create, never ADOPT-LOST"
+else
+  fail "expected 64 from every short --expect with nothing created; got rcs='$lenRc' ref='$(ref_sha 2004)' updates=$(accepted_updates 2004)"
+fi
 # A non-numeric issue is a usage error on every subcommand (no ref namespace games).
 argRc=""
 for sub in "claim 20x4" "verify 20x4" "release 20x4" "adopt 20x4 --expect none --reason why"; do
@@ -486,10 +588,10 @@ echo "TEST 7: no tip-based re-entrancy survives — even a claim-shaped branch t
 push_work_branch "issue-2007-tip-looks-like-a-claim" \
   "claim issue=2007 machine=machineB pid=1 actor=flow ts=2026-07-26T00:00:00Z nonce=x"
 ( cd "$B" && g fetch -q origin )
-outTip=$(runB claim 2007); rcTip=$?
+outTip=$(runB_gh claim 2007); rcTip=$?
 tipRef=$(ref_sha 2007)
 if [ "$rcTip" -eq 2 ] && printf '%s\n' "$outTip" | grep -q 'reason=legacy-branch-lock' && [ -z "$tipRef" ]; then
-  ok "a claim-shaped branch tip does not grant a claim — the guard blocks and points at the resume command"
+  ok "a claim-shaped branch tip does not grant a claim — the guard blocks (no ref granted)"
 else
   fail "expected legacy-branch-lock refusal exit 2 with no ref; got rc=$rcTip ref='$tipRef'
 $outTip"
@@ -582,6 +684,32 @@ outOtherMachine=$(runA adopt 2010 --expect none --reason "another machine must n
 [ "$rcOtherMachine" -eq 2 ] && ok "another MACHINE still gets ADOPT-LOST (exit 2) — re-entrancy is not a bypass" \
   || fail "expected ADOPT-LOST exit 2 for another machine; got rc=$rcOtherMachine
 $outOtherMachine"
+# The SAME shortcut in CAS mode covers a VIOLATED compare-and-swap: the ref sits at
+# Y != our --expect X, and Y happens to be ours. Exit 2 would abandon a claim we
+# demonstrably hold, but a plain `ADOPTED … from=X` would print a value the ref never
+# had and make a FAILED CAS indistinguishable from a satisfied one — so the CAS path
+# has its own verdict naming BOTH shas.
+STALE=2222222222222222222222222222222222222222
+heldSha10=$(ref_sha 2010)
+outCasReent=$(runB adopt 2010 --expect "$STALE" --reason "cas retry carrying a stale expected sha"); rcCasReent=$?
+if [ "$rcCasReent" -eq 0 ] && printf '%s\n' "$outCasReent" | grep -q 'CLAIM: ADOPTED' \
+   && printf '%s\n' "$outCasReent" | grep -q 'lease-mismatch' \
+   && printf '%s\n' "$outCasReent" | grep -q "expected=$STALE" \
+   && printf '%s\n' "$outCasReent" | grep -q "actual=$heldSha10" \
+   && ! printf '%s\n' "$outCasReent" | grep -q "from=$STALE" \
+   && [ "$(ref_sha 2010)" = "$heldSha10" ] && [ "$(accepted_updates 2010)" = "1" ]; then
+  ok "a VIOLATED CAS on a ref we already hold reports ADOPTED (re-entrant, lease-mismatch) naming BOTH shas, never a bare from=<expected>"
+else
+  fail "expected a lease-mismatch re-entrant ADOPTED naming expected=$STALE and actual=$heldSha10; got rc=$rcCasReent ref='$(ref_sha 2010)' updates=$(accepted_updates 2010)
+$outCasReent"
+fi
+if printf '%s\n' "$outRetry" | grep -q 'from=none' && ! printf '%s\n' "$outRetry" | grep -q 'lease-mismatch'; then
+  ok "the EMPTY-lease re-entrant verdict stays distinct (from=none, no lease-mismatch marker)"
+else
+  fail "the empty-lease re-entrant verdict is no longer distinguishable from the CAS one:
+$outRetry"
+fi
+# (A legitimate CAS from the CURRENT sha — the reaper-adopt contract — is TEST 13.)
 
 # ===========================================================================
 echo "TEST 11: a NON-ASCII --reason works (BSD/macOS tr aborts on it without a byte locale)"
@@ -669,12 +797,26 @@ else
 $outCas
 $casStatus"
 fi
-runB adopt 2023 --expect none --reason '   ' >/dev/null 2>&1; rcBlank=$?
-blankReason=$(line_field "$(runB status 2023)" reason)
-if [ "$rcBlank" -eq 0 ] && [ "$blankReason" = "unspecified" ]; then
-  ok "a reason with nothing representable records reason=unspecified (never an empty field)"
+# A reason with NOTHING RECORDABLE in it is a usage error, not a recorded
+# `reason=unspecified`. The gate used to validate the RAW argument and record the
+# SANITIZED one, so '   ', '---', '…' or an expansion like "$UNSET_VAR " passed and
+# landed as `reason=unspecified` — indistinguishable from supplying no reason, which
+# defeats the "record WHY" requirement. Same fail-closed direction as --expect ''.
+whyRc=""
+for badWhy in '   ' '---' '…' 'x' '  ' '=='; do
+  runB adopt 2023 --expect none --reason "$badWhy" >/dev/null 2>&1
+  whyRc="$whyRc $?"
+done
+if [ "$whyRc" = " 64 64 64 64 64 64" ] && [ -z "$(ref_sha 2023)" ]; then
+  ok "a --reason with nothing recordable ('   ', '---', '…', 'x', '==') is a usage error (exit 64), nothing acquired"
 else
-  fail "expected reason=unspecified; got rc=$rcBlank reason='$blankReason'"
+  fail "expected 64 from every unrecordable --reason with no ref created; got rcs='$whyRc' ref='$(ref_sha 2023)'"
+fi
+runB adopt 2023 --expect none --reason 'wip' >/dev/null 2>&1; rcMinWhy=$?
+if [ "$rcMinWhy" -eq 0 ] && [ "$(line_field "$(runB status 2023)" reason)" = "wip" ]; then
+  ok "a short but RECORDABLE reason ('wip') is accepted and recorded verbatim"
+else
+  fail "expected a recordable 3-char reason to adopt and record; got rc=$rcMinWhy reason='$(line_field "$(runB status 2023)" reason)'"
 fi
 longReason=$(printf 'a%.0s' $(seq 1 200))
 runB adopt 2033 --expect none --reason "$longReason" >/dev/null 2>&1; rcLong=$?
@@ -707,18 +849,17 @@ for id in 2201 2202 2203; do
   reapRounds=$((reapRounds+1))
   runA claim "$id" >/dev/null 2>&1
   staleSha=$(ref_sha "$id")
-  rm -f "$T/gate-r" "$T/gate-s"
-  mkfifo "$T/gate-r" "$T/gate-s"
-  ( head -1 <"$T/gate-r" >/dev/null 2>&1
+  # Same ONE-shared-signal barrier as TEST 3 (two independent FIFOs released each
+  # side as its own writer connected, which permits full serialization).
+  race_reset
+  ( race_wait_go "$T/ready-a"
     runA_gh release "$id" --force >"$T/reap.out" 2>&1; echo "$?" >"$T/reap.rc" ) &
   pidR=$!
-  ( head -1 <"$T/gate-s" >/dev/null 2>&1
+  ( race_wait_go "$T/ready-b"
     runB adopt "$id" --expect none --reason "resumer racing the reaper" >"$T/resume.out" 2>&1; echo "$?" >"$T/resume.rc" ) &
   pidS=$!
-  ( echo go >"$T/gate-r" ) & wr=$!
-  ( echo go >"$T/gate-s" ) & ws=$!
+  race_release
   wait "$pidR" "$pidS" 2>/dev/null
-  kill "$wr" "$ws" 2>/dev/null || true
   rcResume="$(cat "$T/resume.rc" 2>/dev/null || echo missing)"
   resumeOut="$(cat "$T/resume.out" 2>/dev/null)"
   resumeSha=$(line_field "$resumeOut" sha)
@@ -745,6 +886,67 @@ done
 [ "$reapOk" -eq "$reapRounds" ] \
   && ok "forced-release vs empty-lease-adopt: every round ends at no-ref or the resumer's own ref ($reapOk/$reapRounds)" \
   || fail "reaper/resumer barrier race produced a bogus owner in $((reapRounds - reapOk))/$reapRounds rounds$reapDiag"
+
+# ===========================================================================
+echo "TEST 15: the escape hatch is advertised ONLY when the endgame is demonstrably orphaned (open PR / unknown → withheld)"
+# ===========================================================================
+# The refusal's safety argument ("git rejects it if any machine holds the ref") does
+# NOT cover the case the guard exists for: an OLDER-fleet worker locks with the
+# BRANCH and holds no claim ref, so `claim-ref=free` is true for it and the advertised
+# empty-lease adopt WOULD succeed — handing an actively-worked issue to a second
+# machine. The readers are agents that run printed remediations literally, so the
+# command is printed only at open-prs=0, and an unreadable PR list withholds too.
+push_work_branch "issue-2015-live-endgame"
+( cd "$B" && g fetch -q origin )
+PRSHIM="$T/shim-gh-open-pr"
+mkdir -p "$PRSHIM"
+cat >"$PRSHIM/gh" <<'GH'
+#!/usr/bin/env bash
+# Fake gh: one OPEN PR whose head branch is this issue's.
+for a in "$@"; do [ "$a" = "list" ] && { echo "issue-2015-live-endgame"; exit 0; }; done
+exit 1
+GH
+chmod +x "$PRSHIM/gh"
+outLive=$( cd "$B" && PATH="$PRSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" claim 2015 ); rcLive=$?
+if [ "$rcLive" -eq 2 ] && printf '%s\n' "$outLive" | grep -q 'reason=legacy-branch-lock' \
+   && printf '%s\n' "$outLive" | grep -q 'remediation=withheld' \
+   && printf '%s\n' "$outLive" | grep -q 'open-prs=1' \
+   && ! printf '%s\n' "$outLive" | grep -q 'adopt 2015 --expect none' \
+   && [ "$(printf '%s\n' "$outLive" | grep -c 'CLAIM:')" = "1" ]; then
+  ok "with an OPEN PR the refusal withholds the hatch (remediation=withheld open-prs=1, no copy-pasteable adopt) on one line"
+else
+  fail "expected a withheld remediation with open-prs=1; got rc=$rcLive
+$outLive"
+fi
+# gh missing/failing = UNKNOWN, and unknown must fail closed exactly like release's
+# open-PR guard — never advertise a hand-away on an unread signal.
+GHFAIL="$T/shim-gh-broken"
+mkdir -p "$GHFAIL"
+cat >"$GHFAIL/gh" <<'GH'
+#!/usr/bin/env bash
+echo "gh: simulated failure" >&2
+exit 1
+GH
+chmod +x "$GHFAIL/gh"
+outUnknown=$( cd "$B" && PATH="$GHFAIL:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" claim 2015 2>/dev/null ); rcUnknown=$?
+if [ "$rcUnknown" -eq 2 ] && printf '%s\n' "$outUnknown" | grep -q 'remediation=withheld' \
+   && printf '%s\n' "$outUnknown" | grep -q 'open-prs=-1' \
+   && ! printf '%s\n' "$outUnknown" | grep -q 'adopt 2015 --expect none'; then
+  ok "an UNREADABLE PR list also withholds the hatch (open-prs=-1) — fail closed on an unread signal"
+else
+  fail "expected a withheld remediation with open-prs=-1; got rc=$rcUnknown
+$outUnknown"
+fi
+# Withholding is ADVICE, not a lock: an operator who has confirmed ownership can
+# still resume, and git remains the sole arbiter (the claim ref really is free).
+outStillWorks=$(runB adopt 2015 --expect none --reason "ownership confirmed with the PR author"); rcStillWorks=$?
+if [ "$rcStillWorks" -eq 0 ] && printf '%s\n' "$outStillWorks" | grep -q 'CLAIM: ADOPTED' \
+   && [ -n "$(ref_sha 2015)" ]; then
+  ok "the hatch itself still works when invoked deliberately — the guard changes ADVICE, not the arbiter"
+else
+  fail "expected the deliberate resume to still succeed; got rc=$rcStillWorks
+$outStillWorks"
+fi
 
 echo ""
 echo "================  claim-resume (#2945): $PASS passed, $FAIL failed  ================"
