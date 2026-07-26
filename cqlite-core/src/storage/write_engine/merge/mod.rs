@@ -2707,12 +2707,18 @@ impl KWayMerger {
     /// [`from_row_iterators`](Self::from_row_iterators), then move the matching
     /// guard onto the built merger here so it decrements exactly once at merge
     /// end. See [`egress_budget::begin_merge`].
+    ///
+    /// Takes the guard BY VALUE (not `Option`), so it is impossible to call this
+    /// with `None` and silently un-register a live merge; the `debug_assert`
+    /// additionally catches a double-attach that would drop a still-live guard
+    /// early and under-count concurrency.
     #[must_use]
-    pub(crate) fn with_egress_slot(
-        mut self,
-        egress_slot: Option<egress_budget::ActiveMergeGuard>,
-    ) -> Self {
-        self._egress_slot = egress_slot;
+    pub(crate) fn with_egress_slot(mut self, egress_slot: egress_budget::ActiveMergeGuard) -> Self {
+        debug_assert!(
+            self._egress_slot.is_none(),
+            "with_egress_slot must not overwrite a live active-merge slot"
+        );
+        self._egress_slot = Some(egress_slot);
         self
     }
 

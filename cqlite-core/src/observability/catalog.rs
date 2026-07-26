@@ -538,6 +538,21 @@ pub const COMPACTION_BUDGET_CONSUMED: &str = "cqlite.compaction.budget.consumed"
 /// naming collision. No high-cardinality attributes.
 pub const MERGE_PRODUCER_THREADS: &str = "cqlite.merge.producer_threads";
 
+/// `cqlite.merge.active_merges` — gauge `{merge}` (issue #2765).
+///
+/// Live count of concurrent k-way MERGE operations (compaction, full-scan, and
+/// channel-backed point-read fail-safe merges), incremented once per
+/// `KWayMerger` that opens at least one egress channel and decremented once when
+/// it is dropped. This is the divisor of the adaptive egress budget: the
+/// per-channel `sync_channel` capacity every new merge receives is
+/// `clamp(EGRESS_ROW_BUDGET / active_merges, MIN_CAP, 256)`, so this gauge makes
+/// the otherwise-invisible backpressure throttle legible — a level well above
+/// `EGRESS_ROW_BUDGET / 256` means concurrent merges are being squeezed toward
+/// `MIN_CAP`. Deliberately DISTINCT from [`MERGE_PRODUCER_THREADS`], which
+/// counts per-SOURCE producer threads (`O(K × active_merges)`): this counts
+/// MERGES, the unit the budget is keyed on. No high-cardinality attributes.
+pub const MERGE_ACTIVE_MERGES: &str = "cqlite.merge.active_merges";
+
 /// `cqlite.merge.egress_channel_depth` — gauge `{entry}` (issue #2419, WS2).
 ///
 /// Live occupancy of the bounded producer→consumer `sync_channel` (capacity
@@ -908,6 +923,7 @@ pub const ALL_METRICS: &[&str] = &[
     COMPACTION_BUDGET_REQUESTED,
     COMPACTION_BUDGET_CONSUMED,
     MERGE_PRODUCER_THREADS,
+    MERGE_ACTIVE_MERGES,
     // Arrow Flight gRPC service (#1041)
     RPC_REQUESTS,
     RPC_DURATION,

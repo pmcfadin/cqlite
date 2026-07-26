@@ -216,11 +216,14 @@ pub fn build_single_partition_merger_with_registry(
 
     let key_set: std::collections::HashSet<Vec<u8>> = keys.iter().cloned().collect();
 
-    // Issue #2765: register this point-read MERGE ONCE and snapshot the adaptive
-    // per-channel egress capacity shared by every fail-safe (`NeedsScan`) adapter
-    // opened below; the guard is attached to the built merger via
-    // `with_egress_slot` (or dropped here if no run is produced).
-    let (channel_capacity, egress_slot) = egress_budget::begin_merge();
+    // Issue #2765 (LAZY registration): a point read whose candidates ALL seek
+    // (`PathProbe::Seeked` → in-memory `VecRun`s, ZERO egress channels) buffers
+    // NOTHING, so it must NOT occupy an active-merge slot — else high-QPS Flight
+    // point reads would inflate the process-global count and throttle a
+    // concurrent channel-backed compaction/full-scan toward `MIN_CAP`. Defer
+    // `begin_merge` to the FIRST `NeedsScan` egress channel and memoize its
+    // snapshot so every channel in THIS merge still shares ONE capacity.
+    let mut egress: Option<(usize, egress_budget::ActiveMergeGuard)> = None;
 
     let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
     for (run_index, path) in paths.iter().enumerate() {
@@ -266,6 +269,8 @@ pub fn build_single_partition_merger_with_registry(
             PathProbe::NeedsScan => {
                 // Fail-safe: scan this ONE SSTable, forwarding only the target
                 // partitions. The missing index costs speed, never correctness.
+                // Snapshot the shared capacity on the FIRST egress channel only.
+                let channel_capacity = egress.get_or_insert_with(egress_budget::begin_merge).0;
                 let adapter = SSTableRowIteratorAdapter::open(
                     path,
                     run_index,
@@ -283,12 +288,16 @@ pub fn build_single_partition_merger_with_registry(
     }
 
     if runs.is_empty() {
-        // No channel-backed run produced; the slot guard drops here.
+        // No candidate produced a run; any snapshot guard drops here.
         return Ok(None);
     }
-    Ok(Some(
-        KWayMerger::from_row_iterators(runs, schema)?.with_egress_slot(Some(egress_slot)),
-    ))
+    let merger = KWayMerger::from_row_iterators(runs, schema)?;
+    // Attach the slot ONLY if a `NeedsScan` egress channel was actually opened;
+    // an all-`Seeked` (channel-less) point read registers no slot.
+    Ok(Some(match egress {
+        Some((_, guard)) => merger.with_egress_slot(guard),
+        None => merger,
+    }))
 }
 
 /// Reader-based analogue of [`build_single_partition_merger`] (issue #2346):
@@ -321,9 +330,11 @@ pub fn build_single_partition_merger_from_readers(
 
     let key_set: std::collections::HashSet<Vec<u8>> = keys.iter().cloned().collect();
 
-    // Issue #2765: register this point-read MERGE ONCE (see the path-based
-    // builder above) and snapshot the shared adaptive per-channel capacity.
-    let (channel_capacity, egress_slot) = egress_budget::begin_merge();
+    // Issue #2765 (LAZY registration, see the path-based builder above): occupy an
+    // active-merge slot ONLY when a `NeedsScan` egress channel is actually opened;
+    // an all-`Seeked` point read buffers nothing and registers no slot. The
+    // snapshot is memoized so every channel in THIS merge shares ONE capacity.
+    let mut egress: Option<(usize, egress_budget::ActiveMergeGuard)> = None;
 
     let mut runs: Vec<Box<dyn SSTableRowIterator>> = Vec::new();
     for (run_index, reader) in readers.into_iter().enumerate() {
@@ -364,6 +375,8 @@ pub fn build_single_partition_merger_from_readers(
                 // still available here.
                 // Point-read fail-safe: a specific-key filter, not a range scan —
                 // no token bound is pushed (issue #2412; the key set bounds it).
+                // Snapshot the shared capacity on the FIRST egress channel only.
+                let channel_capacity = egress.get_or_insert_with(egress_budget::begin_merge).0;
                 let adapter = SSTableRowIteratorAdapter::open_from_reader(
                     reader,
                     run_index,
@@ -381,12 +394,15 @@ pub fn build_single_partition_merger_from_readers(
     }
 
     if runs.is_empty() {
-        // No channel-backed run produced; the slot guard drops here.
+        // No candidate produced a run; any snapshot guard drops here.
         return Ok(None);
     }
-    Ok(Some(
-        KWayMerger::from_row_iterators(runs, schema)?.with_egress_slot(Some(egress_slot)),
-    ))
+    let merger = KWayMerger::from_row_iterators(runs, schema)?;
+    // Attach the slot ONLY if a `NeedsScan` egress channel was actually opened.
+    Ok(Some(match egress {
+        Some((_, guard)) => merger.with_egress_slot(guard),
+        None => merger,
+    }))
 }
 
 /// Probe an ALREADY-OPEN `reader` for every requested key via the core seek

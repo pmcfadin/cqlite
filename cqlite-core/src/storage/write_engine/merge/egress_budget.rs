@@ -63,6 +63,8 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::observability;
+
 /// Per-active-merge-SLOT egress budget in prefetched `MergeEntry` values (issue
 /// #2765): the per-channel capacity a merge receives is `budget / active_merges`
 /// (clamped). Chosen so that at the pre-change fixed capacity of 256 the budget
@@ -90,6 +92,24 @@ pub(super) const MAX_CAP: usize = super::STREAMING_CHANNEL_CAPACITY;
 /// by [`ActiveMergeGuard`]'s drop when that merge finishes (or is torn down).
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
+/// Record the operator-facing `cqlite.merge.active_merges` gauge (issue #2765),
+/// mirroring the `producer_gauge::record` pattern. Called ONLY for the real
+/// global path (`begin_merge`), never for the per-test private-atomic path, so
+/// the gauge always reflects the true process-wide concurrency.
+fn record_active(active: usize) {
+    observability::record_gauge(
+        observability::catalog::MERGE_ACTIVE_MERGES,
+        active as i64,
+        &[],
+    );
+}
+
+/// Current live process-global active-merge count (test observation hook).
+#[cfg(test)]
+pub(super) fn active_count() -> usize {
+    ACTIVE.load(Ordering::SeqCst)
+}
+
 /// Resolve the per-merge channel capacity for a given live active-merge count.
 ///
 /// `clamp(EGRESS_ROW_BUDGET / active, MIN_CAP, MAX_CAP)`. `active` is floored at
@@ -114,7 +134,7 @@ pub(super) fn capacity_for(active: usize) -> usize {
 /// pairs with this increment on every exit path.
 #[must_use]
 pub(super) fn begin_merge() -> (usize, ActiveMergeGuard) {
-    begin_on(&ACTIVE)
+    begin_on(&ACTIVE, true)
 }
 
 /// Increment `counter`, resolve the capacity from the post-increment count, and
@@ -122,9 +142,16 @@ pub(super) fn begin_merge() -> (usize, ActiveMergeGuard) {
 /// `channel_depth::adjust`) so a test can drive this EXACT increment/guard-drop
 /// pairing against a PRIVATE atomic — deterministic, never racing the other
 /// tests in this binary that drive real merges through the shared [`ACTIVE`].
-fn begin_on(counter: &'static AtomicUsize) -> (usize, ActiveMergeGuard) {
+///
+/// `record` gates the operator gauge: `true` ONLY for the real global path
+/// ([`begin_merge`]), `false` for per-test private atomics, so a test can never
+/// publish a bogus `cqlite.merge.active_merges` level from a private count.
+fn begin_on(counter: &'static AtomicUsize, record: bool) -> (usize, ActiveMergeGuard) {
     let active = counter.fetch_add(1, Ordering::SeqCst) + 1;
-    (capacity_for(active), ActiveMergeGuard { counter })
+    if record {
+        record_active(active);
+    }
+    (capacity_for(active), ActiveMergeGuard { counter, record })
 }
 
 /// RAII guard that decrements the active-merge count when a streaming merge
@@ -134,11 +161,16 @@ fn begin_on(counter: &'static AtomicUsize) -> (usize, ActiveMergeGuard) {
 #[derive(Debug)]
 pub(super) struct ActiveMergeGuard {
     counter: &'static AtomicUsize,
+    /// Whether to re-record the operator gauge on decrement — see [`begin_on`].
+    record: bool,
 }
 
 impl Drop for ActiveMergeGuard {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::SeqCst);
+        let active = self.counter.fetch_sub(1, Ordering::SeqCst) - 1;
+        if self.record {
+            record_active(active);
+        }
     }
 }
 
@@ -205,17 +237,18 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_begin_merge_shrinks_per_channel_capacity() {
+    fn concurrent_begin_shrinks_per_channel_capacity() {
         use std::sync::{Arc, Barrier};
 
-        // Drive N real concurrent MERGE registrations through the REAL
-        // process-global `begin_merge` counter + RAII guards (the production
-        // primitive), and assert the per-channel capacity each merge is HANDED
-        // (the value threaded to every one of its source channels) shrinks below
-        // the fixed 256 as concurrent merges rise — and never below MIN_CAP.
-        // This observes the value `begin_merge` RETURNS (production data), not a
-        // re-derived arithmetic; the KWayMerger-level end-to-end wiring lives in
-        // `egress_wiring_tests`.
+        // Drive N concurrent MERGE registrations through the EXACT production
+        // increment/snapshot primitive (`begin_on`), but against a PRIVATE atomic
+        // (issue #2451 isolation, mirroring the pairing test) so this test can
+        // NEVER inflate the shared global `ACTIVE` and shrink a parallel
+        // merger-building test's caps. Assert the per-channel capacity a merge is
+        // HANDED shrinks below the fixed 256 as concurrent merges rise — and
+        // never below MIN_CAP. (KWayMerger-level end-to-end wiring, on the real
+        // global, lives in `egress_wiring_tests`.)
+        let counter: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
         const N: usize = 16;
         let registered = Arc::new(Barrier::new(N));
         let released = Arc::new(Barrier::new(N));
@@ -225,13 +258,14 @@ mod tests {
                 let registered = registered.clone();
                 let released = released.clone();
                 std::thread::spawn(move || {
-                    // Register FIRST (increments the shared count + snapshots the
-                    // cap), THEN barrier — so by the time any thread proceeds all
-                    // N are counted; the second barrier holds every guard alive
-                    // until all have observed, modelling N concurrent merges.
-                    let (cap, _guard) = begin_merge();
+                    // Register FIRST (increments the PRIVATE count + snapshots the
+                    // cap), THEN barrier — so all N are counted before any reads;
+                    // the second barrier holds every guard alive until all have
+                    // observed, modelling N concurrent merges. `record = false`:
+                    // never touch the process-global operator gauge.
+                    let (cap, _guard) = begin_on(counter, false);
                     registered.wait();
-                    let live = ACTIVE.load(Ordering::SeqCst);
+                    let live = counter.load(Ordering::SeqCst);
                     released.wait();
                     (live, cap)
                 })
@@ -243,17 +277,15 @@ mod tests {
             .map(|h| h.join().expect("merge thread joins"))
             .collect();
 
-        // Background merges from other parallel tests only RAISE `live`, so
-        // `>= N` is race-robust and does not itself perturb their caps beyond the
-        // transient N this test adds (no other test asserts an exact cap/depth).
+        // The private atomic is touched ONLY by this test's N threads, so the
+        // observed concurrency is EXACTLY N (deterministic, not `>=`).
         let max_live = results.iter().map(|(l, _)| *l).max().unwrap_or(0);
-        assert!(
-            max_live >= N,
-            "observed concurrency {max_live} must be >= {N}"
+        assert_eq!(
+            max_live, N,
+            "private-atomic concurrency must be exactly {N}"
         );
-        // At least one merge (the ones that registered when the count was already
-        // high) got a capacity strictly below the pre-change fixed 256 — proof
-        // the returned per-channel cap tracks concurrency, not a constant.
+        // The merges that registered while the count was already high got a
+        // capacity strictly below the pre-change fixed 256 — the shrink property.
         let min_cap_seen = results.iter().map(|(_, c)| *c).min().unwrap_or(MAX_CAP);
         assert!(
             min_cap_seen < MAX_CAP,
@@ -267,6 +299,12 @@ mod tests {
                 "per-channel cap {cap} >= MIN_CAP {MIN_CAP}"
             );
         }
+        // Every guard dropped on join → the private count returns to zero.
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "no leak: all guards dropped"
+        );
     }
 
     #[test]
@@ -275,15 +313,16 @@ mod tests {
         // `channel_depth`'s per-test-atomic pattern): `begin_on` increments and
         // the returned guard's drop decrements, so the count returns to baseline
         // on every scope exit. A private atomic cannot be perturbed by the other
-        // tests in this binary that drive real merges through the shared global.
+        // tests in this binary that drive real merges through the shared global,
+        // and `record = false` keeps it off the process-global operator gauge.
         let counter: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
         assert_eq!(counter.load(Ordering::SeqCst), 0);
         {
-            let (cap0, _g0) = begin_on(counter);
+            let (cap0, _g0) = begin_on(counter, false);
             assert_eq!(counter.load(Ordering::SeqCst), 1);
             assert_eq!(cap0, capacity_for(1), "first merge sees active=1");
             {
-                let (cap1, _g1) = begin_on(counter);
+                let (cap1, _g1) = begin_on(counter, false);
                 assert_eq!(counter.load(Ordering::SeqCst), 2);
                 assert_eq!(cap1, capacity_for(2), "second merge sees active=2");
             }
