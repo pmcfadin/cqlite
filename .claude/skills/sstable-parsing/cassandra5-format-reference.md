@@ -230,11 +230,20 @@ All 18 cells present in schema order
 
 ## Critical Parsing Rules
 
-1. **Clustering Prefix**: MUST check if `clustering_types.is_empty()` before reading
-2. **Column Bitmap**: Only read if HAS_ALL_COLUMNS (0x20) **not** set
-3. **Delta Encoding**: All timestamps/TTLs are deltas, not absolute values
-4. **Cell Empty Flag**: Logic is **inverted** - flag set = empty, flag clear = has value
-5. **Row Sizes**: Always present in SSTable format (not in internal messages)
+1. **Partition boundary FIRST**: a flag byte of `0x01` (`END_OF_PARTITION`) ends the
+   partition — nothing follows it. Check it before interpreting any other bit
+   (`row_decoder/mod.rs:820`).
+2. **Markers are not rows**: `0x02` (`IS_MARKER`) means a RangeTombstoneMarker, not a Row
+   (`row_decoder/mod.rs:821`).
+3. **Clustering Prefix**: MUST check if `clustering_types.is_empty()` before reading; a
+   static row (`EXTENDED_IS_STATIC` = `0x01` of the **extended** byte) has no clustering
+   prefix at all (`row_decoder/mod.rs:825`).
+4. **Column Bitmap**: Only read if HAS_ALL_COLUMNS (0x20) **not** set
+5. **Delta Encoding**: All timestamps/TTLs are deltas, not absolute values
+6. **Cell Empty Flag**: Logic is **inverted** - flag set = empty, flag clear = has value
+7. **Row Sizes**: Always present in SSTable format (not in internal messages)
+8. **Never guess**: take signedness/framing from the field's serializer, never from byte
+   patterns (no-heuristics mandate, #28).
 
 ---
 
