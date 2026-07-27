@@ -86,13 +86,19 @@ struct TableCase {
     /// coverage assertion; not used at query time).
     divergence_classes: &'static [&'static str],
     /// Extra WITHIN-partition clustering predicates to run against EVERY probed
-    /// partition key, as `WHERE <pk> = <k> AND <predicate>` (issue #3002). These
-    /// exercise the clustering-slice read path — for a BTI (`da`) wide partition the
-    /// point run resolves its byte window from the `Rows.db` row-index trie
+    /// partition key, as `(predicate, expected_row_count)` pairs evaluated as
+    /// `WHERE <pk> = <k> AND <predicate>` (issue #3002). These exercise the
+    /// clustering-slice read path — for a BTI (`da`) wide partition the point run
+    /// resolves its byte window from the `Rows.db` row-index trie
     /// (`bti_clustering_row_window`) while the full run decodes the whole partition
-    /// and filters, so a wrong row-index window diverges here. Empty = partition-key
-    /// equality only.
-    clustering_slice_predicates: &'static [&'static str],
+    /// and filters, so a wrong row-index window diverges here.
+    ///
+    /// The expected count is REQUIRED (anti-vacuous-pass): `point == full` alone is
+    /// satisfied by both-empty (`0 == 0`, a window that dropped every row) and by
+    /// both-unfiltered (`300 == 300`, a predicate that never narrowed), so each
+    /// predicate is anchored to the row count its slice must yield. Empty =
+    /// partition-key equality only.
+    clustering_slice_predicates: &'static [(&'static str, usize)],
 }
 
 /// The corpus. Every table has a single INT partition key. Collectively they
@@ -183,12 +189,15 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[1, 2, 3],
         divergence_classes: &["bti_clustering_slice"],
+        // Every partition holds ck=0..=299, so each slice's row count is exact and
+        // identical for pk=1/2/3 — and every one of them is strictly between 0 and the
+        // partition's 300 rows, so neither an empty nor an unnarrowed result can pass.
         clustering_slice_predicates: &[
-            "ck < 8",
-            "ck = 150",
-            "ck >= 100 AND ck < 110",
-            "ck >= 296",
-            "ck > 0 AND ck <= 3",
+            ("ck < 8", 8),
+            ("ck = 150", 1),
+            ("ck >= 100 AND ck < 110", 10),
+            ("ck >= 296", 4),
+            ("ck > 0 AND ck <= 3", 3),
         ],
     },
 ];
@@ -352,12 +361,13 @@ fn value_as_i64(v: &cqlite_core::types::Value) -> Option<i64> {
 }
 
 /// Run `query` under both forced modes and assert byte-identical (rows, values,
-/// order) result sets. Returns the diff description on mismatch.
+/// order) result sets. Returns the agreed row count on success (so a caller can
+/// anchor it to an expected count), or the diff description on mismatch.
 async fn assert_point_full_equal(
     point_db: &Database,
     full_db: &Database,
     query: &str,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let point = point_db
         .execute(query)
         .await
@@ -378,7 +388,7 @@ async fn assert_point_full_equal(
             full_rows
         ));
     }
-    Ok(())
+    Ok(point_rows.len())
 }
 
 /// Run every eligible query for one table under `point` and `full`, asserting
@@ -434,14 +444,45 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
     // Within-partition clustering slices (issue #3002): for a BTI wide partition the
     // point path resolves its decode window from the `Rows.db` row index while the
     // full path decodes the whole partition and filters, so the two paths must still
-    // agree row-for-row, value-for-value, in order.
+    // agree row-for-row, value-for-value, in order. Each slice is ALSO anchored to its
+    // expected row count, so neither a both-empty nor a both-unnarrowed result can
+    // pass vacuously.
     for k in &keys {
-        for predicate in case.clustering_slice_predicates {
+        if case.clustering_slice_predicates.is_empty() {
+            break;
+        }
+        // This partition's full row count, the reference every slice must be strictly
+        // smaller than (re-measured per key rather than assumed uniform).
+        let partition_rows = assert_point_full_equal(
+            &point_db,
+            &full_db,
+            &format!(
+                "SELECT * FROM {}.{} WHERE {} = {}",
+                case.keyspace, case.table, case.pk_column, k
+            ),
+        )
+        .await?;
+        for (predicate, expected_rows) in case.clustering_slice_predicates {
             let query = format!(
                 "SELECT * FROM {}.{} WHERE {} = {} AND {}",
                 case.keyspace, case.table, case.pk_column, k, predicate
             );
-            assert_point_full_equal(&point_db, &full_db, &query).await?;
+            let got = assert_point_full_equal(&point_db, &full_db, &query).await?;
+            if got != *expected_rows {
+                return Err(format!(
+                    "case {}.{}: `{query}` returned {got} rows on BOTH paths but the slice \
+                     must yield exactly {expected_rows} — equal-but-wrong is still wrong",
+                    case.keyspace, case.table
+                ));
+            }
+            if got == 0 || got >= partition_rows {
+                return Err(format!(
+                    "case {}.{}: `{query}` returned {got} rows against a {partition_rows}-row \
+                     partition — a clustering slice must be non-empty AND strictly smaller \
+                     than the whole partition (else the comparison is vacuous)",
+                    case.keyspace, case.table
+                ));
+            }
         }
     }
 

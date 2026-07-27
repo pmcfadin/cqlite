@@ -23,9 +23,11 @@
 //!      `AccessPath::ClusteringSlice`; a partition-only lookup (no clustering
 //!      restriction) still reports `PartitionLookup`.
 //!
-//! Requires `CQLITE_DATASETS_ROOT` and the fetched binary SSTables; skipped (not
-//! failed) when the data isn't present. Excluded under `tombstones` (that build
-//! compiles out the seek and the work counters).
+//! Requires `CQLITE_DATASETS_ROOT`; skipped (not failed) when the datasets root or
+//! the schema is absent. A PRESENT fixture that decodes 0 rows is a hard FAILURE,
+//! never a skip (issue #3002 review: the old "Data.db not fetched?" guards turned a
+//! collapsed clustering window into a silent pass). Excluded under `tombstones`
+//! (that build compiles out the seek and the work counters).
 
 #![cfg(all(
     feature = "state_machine",
@@ -158,14 +160,16 @@ async fn two_bound_range_slice_parity_and_bounded_decode() {
         ))
         .await
         .expect("full partition read must succeed");
-    if full.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    // HARD FAILURE on 0 rows (issue #3002 review): the `test_da/wide_table`
+    // binaries are COMMITTED, so a present-but-undecoded fixture is a read-path
+    // regression, never a skip. The old "Data.db not fetched?" skip turned exactly
+    // the #3002 half-fix failure mode (a clustering window collapsed off the rows)
+    // into a silent pass — this lane must scream instead.
     assert_eq!(
         full.rows.len(),
         PARTITION_ROW_COUNT,
-        "fixture invariant: pk=1 must hold {PARTITION_ROW_COUNT} clustering rows",
+        "fixture invariant: pk=1 must hold {PARTITION_ROW_COUNT} clustering rows (0 rows \
+         means the committed fixture did not decode — a FAILURE, never a skip)",
     );
 
     // `ck >= 100 AND ck < 110` selects exactly ck = 100..=109 (10 rows).
@@ -221,17 +225,19 @@ async fn single_bound_lt_slice_parity_and_bounded_decode() {
     let Some(db) = skip_or_db().await else {
         return;
     };
-    // Skip if no data.
+    // The committed fixture MUST decode: 0 rows is a hard failure, not a skip
+    // (issue #3002 review — this guard used to mask a collapsed clustering window).
     let probe = db
         .execute(&format!(
             "SELECT pk, ck FROM {QUALIFIED_TABLE} WHERE pk = 2 LIMIT 1"
         ))
         .await
         .expect("probe must succeed");
-    if probe.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    assert!(
+        !probe.rows.is_empty(),
+        "fixture invariant: pk=2 must decode at least one row (the committed \
+         test_da/wide_table binaries are present; 0 rows is a read-path FAILURE)"
+    );
 
     // `ck < 20` selects ck = 0..=19 (20 rows).
     let expected: Vec<i32> = (0..20).collect();
@@ -271,10 +277,11 @@ async fn single_bound_gte_slice_parity_and_bounded_decode() {
         ))
         .await
         .expect("probe must succeed");
-    if probe.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    assert!(
+        !probe.rows.is_empty(),
+        "fixture invariant: pk=3 must decode at least one row (the committed \
+         test_da/wide_table binaries are present; 0 rows is a read-path FAILURE)"
+    );
 
     // `ck >= 290` selects ck = 290..=299 (10 rows) — the TAIL of the partition,
     // so the start fast-forward must skip ~290 leading rows.

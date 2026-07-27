@@ -43,10 +43,10 @@ pub use parser::{find_child_offset_for_test, parse_bti_node_for_test};
 // `tombstones`).
 #[cfg(not(feature = "tombstones"))]
 pub(crate) use parser::{rows_floor_block, rows_strict_ceiling_block};
-// Test-only hook for the issue #3002 real-fixture floor oracle.
+// Test-only hooks for the issue #3002 real-fixture clustering-window oracle.
 #[cfg(not(feature = "tombstones"))]
 #[doc(hidden)]
-pub use parser::rows_floor_block_for_test;
+pub use parser::{rows_floor_block_for_test, rows_strict_ceiling_block_for_test};
 
 use crate::parser::header::CassandraVersion;
 use std::collections::HashMap;

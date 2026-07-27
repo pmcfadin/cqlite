@@ -825,11 +825,11 @@ fn write_be_unsigned(buf: &mut Vec<u8>, value: u64, bytes: usize) {
 // `RowIndexEntry.create()` / `IndexWriter::add_partition_with_promoted`) we
 // write, in order:
 //
-//   1. The row-index trie body (children before parents, backward deltas),
-//      whose leaves are `PayloadOnly` nodes carrying a `RowIndexReader.IndexInfo`
-//      payload: `[SizedInts(block_offset)] [optional DeletionTime]`.  The low
-//      nibble (payloadBits) is `offset_bytes | FLAG_OPEN_MARKER`.  This is the
-//      EXACT format `parser::decode_bti_row_payload` consumes.
+//   1. The row-index trie body (children before parents, backward deltas), whose
+//      leaves are `PayloadOnly` nodes carrying a `RowIndexReader.IndexInfo` payload:
+//      `[SizedInts(block_offset)] [optional DeletionTime]`.  The low nibble
+//      (payloadBits) is `offset_bytes | FLAG_OPEN_MARKER` — the EXACT format
+//      `parser::decode_bti_row_payload` consumes.
 //   2. The partition's `TrieIndexEntry` at offset `RowsOffset`:
 //        [u16 key_length][key bytes]
 //        [data position : unsigned vint]
@@ -940,10 +940,10 @@ impl RowsTrieWriter {
     /// `TrieIndexEntry` offset for the i-th partition added (the POSITIVE
     /// position to store in that partition's `Partitions.db` leaf).
     ///
-    /// An empty writer returns `(empty bytes, empty offsets)` — Cassandra emits
-    /// a 0-byte `Rows.db` component when no partition is wide (verified against
-    /// the real `simple_table`/`collection_table`/`ttl_table` `da-2-bti-Rows.db`
-    /// fixtures), and the reader's `iterate_rows_in_bti_file` accepts it.
+    /// An empty writer returns `(empty bytes, empty offsets)` — Cassandra emits a
+    /// 0-byte `Rows.db` when no partition is wide (verified against the real
+    /// `simple_table`/`collection_table`/`ttl_table` `da-2-bti-Rows.db` fixtures),
+    /// and the reader's `iterate_rows_in_bti_file` accepts it.
     pub fn finish(self) -> Result<(Vec<u8>, Vec<u64>)> {
         let mut buf = Vec::new();
         let mut rows_offsets = Vec::with_capacity(self.partitions.len());
@@ -964,13 +964,12 @@ impl RowsTrieWriter {
                 }
             }
 
-            // 1. Serialize the row-index trie body. Its root offset is recorded
-            //    for the SIGNED root delta in the TrieIndexEntry.
-            let root = build_row_trie(&part.blocks);
+            // 1. Serialize the trie body; its root offset feeds the entry's delta.
+            let root = build_row_trie(&part.blocks)?;
             let trie_root = write_row_node(&root, &mut buf)?;
 
-            // 2. Serialize this partition's TrieIndexEntry. `RowsOffset` is the
-            //    offset of the key-length prefix (the entry start).
+            // 2. Serialize this partition's TrieIndexEntry, at `RowsOffset` (the
+            //    offset of the key-length prefix).
             let rows_offset = buf.len();
             write_trie_index_entry(
                 &mut buf,
@@ -1002,14 +1001,14 @@ enum RowTrieBuildNode {
 }
 
 /// Build the radix-1 row-index trie from ascending block separators.
-fn build_row_trie(blocks: &[RowIndexBlock]) -> RowTrieBuildNode {
+fn build_row_trie(blocks: &[RowIndexBlock]) -> Result<RowTrieBuildNode> {
     let mut root = RowTrieBuildNode::Internal {
         children: BTreeMap::new(),
     };
     for b in blocks {
-        insert_row(&mut root, &b.separator_key, b.block_offset, b.open_marker);
+        insert_row(&mut root, &b.separator_key, b.block_offset, b.open_marker)?;
     }
-    root
+    Ok(root)
 }
 
 fn insert_row(
@@ -1017,19 +1016,22 @@ fn insert_row(
     key: &[u8],
     block_offset: u64,
     open_marker: Option<(i32, i64)>,
-) {
+) -> Result<()> {
     match node {
         RowTrieBuildNode::Internal { children } => {
             if key.is_empty() {
-                // A zero-length separator collides with the trie root; the
-                // shortest real separator is at least one byte. Defensive: place
-                // the leaf under byte 0 (unreachable for valid OSS50 keys, which
-                // are weakly prefix-free and non-empty).
-                children.entry(0).or_insert(RowTrieBuildNode::Leaf {
-                    block_offset,
-                    open_marker,
-                });
-                return;
+                // FAIL CLOSED (roborev #3002): an empty separator IS Cassandra's
+                // `ByteComparable.EMPTY` block-0 separator, whose canonical home is the
+                // trie ROOT node's own payload — a position this builder cannot express.
+                // The previous "defensive" branch filed it under transition byte `0x00`,
+                // read back as `[0x00]`: silently wrong bytes where an error belongs.
+                // KNOWN GAP: see `issue_908_bti_canonical_write.rs`.
+                return Err(Error::InvalidInput(
+                    "Rows.db row-index separator is empty (ByteComparable.EMPTY): its \
+                     canonical position is the trie root's own payload, which this writer \
+                     does not emit — refusing to mis-encode it under transition byte 0x00"
+                        .to_string(),
+                ));
             }
             let first = key[0];
             let rest = &key[1..];
@@ -1047,13 +1049,14 @@ fn insert_row(
                     .or_insert_with(|| RowTrieBuildNode::Internal {
                         children: BTreeMap::new(),
                     });
-                insert_row(child, rest, block_offset, open_marker);
+                insert_row(child, rest, block_offset, open_marker)?;
             }
         }
         RowTrieBuildNode::Leaf { .. } => {
             // Unreachable for unique separators (validated in `finish`).
         }
     }
+    Ok(())
 }
 
 /// Write one row-index trie node (and its subtree), returning the absolute
@@ -1084,10 +1087,9 @@ fn write_row_node(node: &RowTrieBuildNode, buf: &mut Vec<u8>) -> Result<usize> {
 /// `RowIndexReader.IndexInfo` payload.
 ///
 /// Layout: `[header=(0<<4)|payloadBits] ++ SizedInts(block_offset) ++ [DeletionTime?]`
-/// where `payloadBits = SizedInts.nonZeroSize(block_offset) | (FLAG_OPEN_MARKER
-/// if open_marker)`.  This is exactly what `decode_bti_row_payload` reads:
-/// `offset_bytes = payloadBits & !FLAG_OPEN_MARKER` (must be 1..=7), and an open
-/// `DeletionTime` follows when `FLAG_OPEN_MARKER` is set.
+/// where `payloadBits = SizedInts.nonZeroSize(block_offset) | (FLAG_OPEN_MARKER if
+/// open_marker)`.  Exactly what `decode_bti_row_payload` reads: `offset_bytes =
+/// payloadBits & !FLAG_OPEN_MARKER` (1..=7), then an open `DeletionTime` if set.
 fn write_row_leaf(
     block_offset: u64,
     open_marker: Option<(i32, i64)>,
@@ -1098,10 +1100,10 @@ fn write_row_leaf(
             "Rows.db block offset {block_offset} too large to encode as SizedInts"
         )));
     }
-    // Block offsets are non-negative; size them as an unsigned magnitude so the
-    // high bit (which SizedInts.read sign-extends) is never set for a value that
-    // fits in (bytes*8 - 1) bits. `sized_ints_non_zero_size` already reserves the
-    // sign bit, so a non-negative value never round-trips to a negative.
+    // Block offsets are non-negative; size them as an unsigned magnitude so the high
+    // bit (which SizedInts.read sign-extends) is never set for a value that fits in
+    // (bytes*8 - 1) bits. `sized_ints_non_zero_size` reserves the sign bit, so a
+    // non-negative value never round-trips to a negative.
     let offset_bytes = sized_ints_non_zero_size(block_offset as i64);
     // The reader rejects offset_bytes == 0 or > 7 (RowIndexWriter asserts < 8).
     if !(1..=7).contains(&offset_bytes) {
@@ -1126,9 +1128,8 @@ fn write_row_leaf(
     Ok(offset)
 }
 
-/// Serialize a per-partition `TrieIndexEntry` (Cassandra `TrieIndexEntry.serialize`).
-///
-/// Layout (consumed by `parser::resolve_rows_db_entry`):
+/// Serialize a per-partition `TrieIndexEntry` (Cassandra
+/// `TrieIndexEntry.serialize`); layout consumed by `parser::resolve_rows_db_entry`:
 /// ```text
 /// [u16 key_length][partition key bytes]
 /// [data position : unsigned vint]
@@ -1161,9 +1162,8 @@ fn write_trie_index_entry(
     write_unsigned_vint(buf, data_position);
 
     // [trieRoot - base : SIGNED vint]. base = the position immediately AFTER the
-    // short-length-prefixed key (entry_start + 2 + key_length): cassandra-5.0.8
-    // `BtiTableWriter.IndexWriter.append` captures `basePosition` as
-    // `rowIndexWriter.position()` AFTER `writeWithShortLength` (issue #3002).
+    // short-length-prefixed key: cassandra-5.0.8 `BtiTableWriter.IndexWriter.append`
+    // captures `basePosition` AFTER `writeWithShortLength` (issue #3002).
     let base = entry_start + 2 + key_length;
     let root_delta = trie_root as i64 - base as i64;
     write_signed_vint(buf, root_delta);

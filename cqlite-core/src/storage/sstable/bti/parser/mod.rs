@@ -115,9 +115,10 @@ pub use slice_walk::{find_child_offset_for_test, parse_bti_node_for_test};
 // public semver surface like the slice walker.
 #[cfg(not(feature = "tombstones"))]
 pub(crate) use rows_floor::{rows_floor_block, rows_strict_ceiling_block};
-// Test-only hook for the issue #3002 real-fixture floor oracle (block 0 is a
-// STORED floor once the root base is correct).
+// Test-only hooks for the issue #3002 real-fixture window oracle (block 0 is a
+// STORED floor once the root base is correct; the END bound is the half the floor
+// walk alone cannot prove).
 #[cfg(not(feature = "tombstones"))]
 #[doc(hidden)]
-pub use rows_floor::rows_floor_block_for_test;
+pub use rows_floor::{rows_floor_block_for_test, rows_strict_ceiling_block_for_test};
 pub use traversal::{iterate_partition_locations_in_bti_file, iterate_partitions_in_bti_file};

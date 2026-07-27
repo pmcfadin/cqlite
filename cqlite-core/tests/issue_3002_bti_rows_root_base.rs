@@ -39,8 +39,8 @@
 use cqlite_core::storage::sstable::bti::encode_clustering_bound_oss50;
 use cqlite_core::storage::sstable::bti::{
     iterate_rows_in_bti_trie, lookup_raw_key_in_bti_partitions_db, parse_bti_node_for_test,
-    resolve_rows_db_entry, rows_floor_block_for_test, BtiNodeData, BtiNodeType,
-    BtiPartitionLocation, BtiRowIndexEntry,
+    resolve_rows_db_entry, rows_floor_block_for_test, rows_strict_ceiling_block_for_test,
+    BtiNodeData, BtiNodeType, BtiPartitionLocation, BtiRowIndexEntry,
 };
 use cqlite_core::types::Value;
 use std::io::Cursor;
@@ -76,8 +76,20 @@ const EXPECTED_TRIE_ENTRIES: usize = BLOCK_COUNT as usize + 1;
 /// the 1-byte LIVE `DeletionTime` sentinel).
 const BLOCK_0_OFFSET: u64 = 7;
 
+/// Fail-closed switch: when set, an absent fixture/schema is a hard FAILURE
+/// instead of a clean skip, so this lane can never green-pass without running.
+/// Mirrors `query_semantics_oracle_parity.rs` / `point_vs_full_differential.rs`
+/// (the agent-gate components set it).
+fn require_fixtures() -> bool {
+    std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Datasets root: `CQLITE_DATASETS_ROOT` when it holds the fixture, else the
-/// in-repo committed corpus (these binaries are committed, not gitignored).
+/// in-repo committed corpus (these binaries are committed, not gitignored). An
+/// absent fixture prints an explicit SKIP — and FAILS under
+/// `CQLITE_REQUIRE_FIXTURES=1`.
 fn datasets_root() -> Option<PathBuf> {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -90,13 +102,27 @@ fn datasets_root() -> Option<PathBuf> {
             .map(PathBuf::from),
         Some(repo),
     ];
-    candidates
+    let found = candidates
         .into_iter()
         .flatten()
-        .find(|root| root.join(WIDE_DIR).join("da-2-bti-Rows.db").exists())
+        .find(|root| root.join(WIDE_DIR).join("da-2-bti-Rows.db").exists());
+    if found.is_none() {
+        let msg = format!(
+            "{WIDE_DIR}/da-2-bti-Rows.db not found under CQLITE_DATASETS_ROOT nor the \
+             in-repo committed corpus"
+        );
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but {msg} — fail-closed (the #3002 fixture is \
+             COMMITTED, so an absent one is a broken checkout, never a pass)"
+        );
+        eprintln!("SKIP: {msg}");
+    }
+    found
 }
 
-/// Read a `Rows.db`/`Partitions.db` component, SKIPping when absent.
+/// Read a `Rows.db`/`Partitions.db` component, SKIPping when absent (hard FAIL
+/// under `CQLITE_REQUIRE_FIXTURES=1`).
 fn read_component(rel: &str) -> Option<Vec<u8>> {
     let root = datasets_root()?;
     let path = root.join(WIDE_DIR).join(rel);
@@ -107,7 +133,12 @@ fn read_component(rel: &str) -> Option<Vec<u8>> {
             path.display()
         ),
         Err(e) => {
-            eprintln!("SKIP: cannot read {}: {e}", path.display());
+            let msg = format!("cannot read {}: {e}", path.display());
+            assert!(
+                !require_fixtures(),
+                "CQLITE_REQUIRE_FIXTURES=1 but {msg} — fail-closed"
+            );
+            eprintln!("SKIP: {msg}");
             None
         }
     }
@@ -242,11 +273,20 @@ fn rows_db_root_base_includes_short_length_prefix() {
             "pk={pk}: the FIRST separator must be the empty key (ByteComparable.EMPTY) \
              indexing block 0 at the partition body start (offset {BLOCK_0_OFFSET})"
         );
+        // LITERAL on-disk bytes, deliberately NOT `enc_ck(8)`: comparing against the
+        // encoder under test would let a coordinated encoder + reconstruction change
+        // stay green. `40` = ClusteringComparator's NEXT_COMPONENT, `80 00 00 08` =
+        // the sign-flipped `int` 8.
         assert_eq!(
             entries[1].0,
+            vec![0x40u8, 0x80, 0x00, 0x00, 0x08],
+            "pk={pk}: the second separator's on-disk bytes must be 40 80 00 00 08, i.e. \
+             the ck=8 image WITH the leading NEXT_COMPONENT byte"
+        );
+        assert_eq!(
             enc_ck(8),
-            "pk={pk}: the second separator must be the OSS50 image of ck=8 \
-             (40 80 00 00 08), i.e. WITH the leading NEXT_COMPONENT byte"
+            vec![0x40u8, 0x80, 0x00, 0x00, 0x08],
+            "the production encoder must independently produce those same literal bytes"
         );
         if pk == 1 {
             assert_eq!(
@@ -270,16 +310,47 @@ fn rows_db_root_base_includes_short_length_prefix() {
     }
 }
 
-/// AC 3 — the compensation was LOAD-BEARING: each fix ALONE regresses.
+/// The `[body_start_rel, body_end_rel)` row-body decode window
+/// `bti_clustering_row_window` derives from `root` for the physical bounds
+/// `[start, end]`, transcribed here for a table with NO static columns
+/// (`test_da.wide_table` has none): `floor(start)` narrows the start — `None` is
+/// the #1968 implicit-first signal, i.e. rel 0 — and `strict_ceiling(end)` is the
+/// EXCLUSIVE end (`None` ⇒ the partition end, modelled as `usize::MAX` exactly as
+/// production does before the caller clamps it).
+fn window(rdb: &[u8], root: usize, start: &[u8], end: &[u8]) -> (usize, usize) {
+    let floor = rows_floor_block_for_test(rdb, root, start).expect("floor walk must succeed");
+    let ceil =
+        rows_strict_ceiling_block_for_test(rdb, root, end).expect("ceiling walk must succeed");
+    (
+        floor.map(|b| b.data_offset as usize).unwrap_or(0),
+        ceil.map(|b| b.data_offset as usize).unwrap_or(usize::MAX),
+    )
+}
+
+/// AC 3 — the compensation was LOAD-BEARING: each fix ALONE regresses, and BOTH
+/// directions are proved EXECUTABLY against the fixture's own bytes by pinning the
+/// resolved `[body_start_rel, body_end_rel)` window for the canonical slice
+/// `ck >= 100 AND ck < 110` (the query `issue_954`/`issue_1647` assert returns
+/// exactly ck=100..=109).
+///
+/// The ground truth for "where those rows live" comes from the CORRECT trie: no row
+/// with `ck >= 100` starts before its own block's start (`floor(ck=100)`), and every
+/// row with `ck <= 109` ends before the start of the block that FOLLOWS ck=109's
+/// (`strict_ceiling(ck=109)`) — clustering order is byte order within a partition.
+/// So `[rows_lo, rows_hi)` brackets the slice, and a window that does not intersect
+/// it CANNOT return the slice.
 ///
 /// Half A alone (correct root, un-prefixed bounds): a bound missing the leading
 /// `0x40` sorts ABOVE the root's only transition, so the floor walk falls into
-/// `goMax` of the whole subtree and returns the LAST block instead of the block
-/// covering the key — a silently wrong window.
+/// `goMax` and returns the LAST block while the ceiling walk finds no greater
+/// branch at all — the window collapses to the partition TAIL, entirely ABOVE the
+/// slice.
 ///
-/// Half B alone (0x40-prefixed bounds, pre-fix root): the pre-fix root is the
-/// `0x40` CHILD, so a prefixed bound's first byte cannot be matched there either,
-/// and the block-0 entry does not exist in that subtree at all.
+/// Half B alone (0x40-prefixed bounds, pre-fix root): the prefixed bound sorts
+/// BELOW every key in the pre-fix subtree, so the floor is the (benign, #1968)
+/// `None` ⇒ rel 0 — but the END bound collapses to the FIRST stored separator, so
+/// the window is block 0 only (ck=0..7), entirely BELOW the slice. That is the
+/// wrong-ANSWER half: the `SELECT` returns 0 rows.
 #[test]
 fn each_fix_alone_regresses_the_read_path() {
     let Some((rdb, _pdb)) = wide_components() else {
@@ -293,43 +364,65 @@ fn each_fix_alone_regresses_the_read_path() {
     // left in production code behind a flag.
     let pre_fix_root = root - 2;
 
-    // ---- Half A alone: correct root + the pre-fix (un-prefixed) encoding ----
+    // The physical bounds production derives for `ck >= 100 AND ck < 110`
+    // (`physical_byte_bounds_for_slice`, ASC column: no swap).
     let correct = iterate_rows_in_bti_trie(&rdb, root).expect("traverse correct root");
     let bound_ck100 = enc_ck(100);
-    let unprefixed: Vec<u8> = bound_ck100[1..].to_vec(); // drop the 0x40
+    let bound_ck110 = enc_ck(110);
+
+    // Ground truth: the byte range the slice's rows occupy, from the CORRECT trie.
+    let rows_lo = rows_floor_block_for_test(&rdb, root, &bound_ck100)
+        .expect("floor walk must succeed")
+        .expect("ck=100 has a stored floor block")
+        .data_offset as usize;
+    let rows_hi = rows_strict_ceiling_block_for_test(&rdb, root, &enc_ck(109))
+        .expect("ceiling walk must succeed")
+        .expect("ck=109 has a stored successor block")
+        .data_offset as usize;
     assert_eq!(
-        unprefixed,
+        rows_lo,
+        floor_oracle(&correct, &bound_ck100).expect("ck=100 has a floor separator") as usize,
+        "the floor walk must agree with the enumerate-and-filter oracle for ck=100"
+    );
+    assert!(
+        (BLOCK_0_OFFSET as usize) < rows_lo && rows_lo < rows_hi,
+        "the ck=100..=109 rows must live in a non-empty byte range ABOVE block 0; \
+         got [{rows_lo}, {rows_hi}) with block 0 at {BLOCK_0_OFFSET}"
+    );
+    println!("#3002 slice ck=100..=109 occupies [{rows_lo}, {rows_hi})");
+
+    // Both fixes together: the window COVERS the slice's rows.
+    let good = window(&rdb, root, &bound_ck100, &bound_ck110);
+    assert!(
+        good.0 <= rows_lo && good.1 >= rows_hi,
+        "with BOTH fixes the window {good:?} must cover the slice's byte range \
+         [{rows_lo}, {rows_hi})"
+    );
+
+    // ---- Half A alone: correct root + the pre-fix (un-prefixed) encoding ----
+    let unprefixed_100 = unprefixed_of(&bound_ck100);
+    assert_eq!(
+        unprefixed_100,
         vec![0x80, 0x00, 0x00, 0x64],
         "the pre-fix encoder produced the bare sign-flipped int"
     );
-
-    let want = floor_oracle(&correct, &bound_ck100).expect("ck=100 has a floor separator");
-    let got_prefixed = rows_floor_block_for_test(&rdb, root, &bound_ck100)
-        .expect("floor walk must succeed")
-        .expect("a prefixed bound must find a stored floor")
-        .data_offset;
-    assert_eq!(
-        got_prefixed, want,
-        "the 0x40-prefixed bound must floor to the block covering ck=100"
-    );
-
-    let got_unprefixed = rows_floor_block_for_test(&rdb, root, &unprefixed)
-        .expect("floor walk must succeed")
-        .expect("un-prefixed bound still returns SOME block (that is the danger)")
-        .data_offset;
+    let half_a = window(&rdb, root, &unprefixed_100, &unprefixed_of(&bound_ck110));
     let last_block = correct
         .last()
-        .map(|(_, e)| e.data_offset)
+        .map(|(_, e)| e.data_offset as usize)
         .expect("non-empty trie");
-    assert_ne!(
-        got_unprefixed, want,
-        "half A alone must regress: an un-prefixed bound cannot locate ck=100's block"
-    );
     assert_eq!(
-        got_unprefixed, last_block,
-        "an un-prefixed bound sorts above the root's 0x40 transition, so the walk \
-         goMax'es the whole subtree and returns the LAST block ({last_block}) — a \
-         wrong-but-parseable window that drops every matching row"
+        half_a,
+        (last_block, usize::MAX),
+        "half A alone: an un-prefixed bound sorts ABOVE the root's only (0x40) \
+         transition, so floor goMax'es to the LAST block ({last_block}) and the ceiling \
+         finds no greater branch — the window collapses to the partition TAIL"
+    );
+    assert!(
+        half_a.0 >= rows_hi,
+        "half A alone must regress: the window {half_a:?} starts at/after {rows_hi}, so it \
+         is DISJOINT from the slice's byte range [{rows_lo}, {rows_hi}) and the \
+         `ck >= 100 AND ck < 110` SELECT can only return rows it never decoded"
     );
 
     // ---- Half B alone: 0x40-prefixed bounds + the pre-fix root ----
@@ -352,14 +445,24 @@ fn each_fix_alone_regresses_the_read_path() {
         unprefixed_of(&enc_ck(8)),
         "keys reconstructed from the pre-fix root lack the leading 0x40"
     );
+
+    let half_b = window(&rdb, pre_fix_root, &bound_ck100, &bound_ck110);
+    let first_stored = pre_fix_entries[0].1.data_offset as usize;
     assert_eq!(
-        rows_floor_block_for_test(&rdb, pre_fix_root, &bound_ck100)
-            .expect("floor walk must succeed")
-            .map(|e| e.data_offset),
-        None,
-        "half B alone must regress: a correctly-0x40-prefixed bound sorts BELOW every \
-         key in the pre-fix root's subtree, so the floor collapses to the #1968 \
-         implicit-first fallback and the narrowing is lost"
+        half_b,
+        (0, first_stored),
+        "half B alone: a correctly-0x40-prefixed bound sorts BELOW every key in the \
+         pre-fix subtree, so the START is the (benign, #1968) implicit-first rel 0 while \
+         the END bound collapses to the FIRST stored separator ({first_stored}) — the \
+         window is block 0 (ck=0..=7) ONLY"
+    );
+    assert!(
+        half_b.1 <= rows_lo,
+        "half B alone must regress: the window {half_b:?} ends at/before {rows_lo}, so it \
+         is DISJOINT from the slice's byte range [{rows_lo}, {rows_hi}) and the \
+         `ck >= 100 AND ck < 110` SELECT returns ZERO rows — a WRONG ANSWER, not merely \
+         a lost narrowing (the floor's `None` alone is the documented-benign #1968 \
+         signal; the END bound is what breaks)"
     );
 }
 
@@ -463,7 +566,7 @@ fn sparse8_trie_over_single_byte_separators(seps: &[u8]) -> (Vec<u8>, usize) {
     not(feature = "tombstones")
 ))]
 mod wiring {
-    use super::datasets_root;
+    use super::{datasets_root, require_fixtures};
     use cqlite_core::ingestion::{ingest, IngestionConfig};
     use cqlite_core::Database;
 
@@ -477,6 +580,12 @@ mod wiring {
             .join("schemas")
             .join("wide-table-bti.cql");
         if !schema.exists() {
+            assert!(
+                !require_fixtures(),
+                "CQLITE_REQUIRE_FIXTURES=1 but the committed schema {} is absent — \
+                 fail-closed",
+                schema.display()
+            );
             eprintln!("SKIP: {} not found", schema.display());
             return None;
         }
@@ -540,6 +649,14 @@ mod wiring {
                     other => panic!("`{predicate}`: ck decoded as {other:?}"),
                 })
                 .collect();
+            // Order is part of the contract: a single-partition clustering read emits
+            // rows in ASCENDING clustering order (the column is ASC), so assert
+            // monotonicity BEFORE sorting — sorting first would hide an out-of-order
+            // window stitch (e.g. a second block decoded ahead of the first).
+            assert!(
+                got.windows(2).all(|w| w[0] < w[1]),
+                "`{predicate}` must return rows in strictly ascending ck order; got {got:?}"
+            );
             got.sort_unstable();
             assert_eq!(got, expected, "`{predicate}` must return exactly its slice");
         }

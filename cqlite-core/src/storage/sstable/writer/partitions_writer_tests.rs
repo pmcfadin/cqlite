@@ -814,6 +814,41 @@ fn rows_db_rejects_non_ascending_separators() {
     assert!(w.finish().is_err());
 }
 
+/// An EMPTY separator (`ByteComparable.EMPTY`, Cassandra's canonical block-0
+/// separator) is REFUSED, not mis-encoded (roborev finding on #3002). Its
+/// canonical home is the trie ROOT node's own payload, which this builder cannot
+/// express; the previous "defensive" fallback filed it under transition byte
+/// `0x00`, which reads back as the separator `[0x00]` — silently wrong bytes where
+/// an error belongs.
+#[test]
+fn rows_db_rejects_empty_separator_instead_of_misencoding_it() {
+    let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
+    let blocks = vec![
+        // Block 0 under ByteComparable.EMPTY (what a canonical Cassandra
+        // `RowIndexWriter.add` stores as the root payload).
+        RowIndexBlock {
+            separator_key: Vec::new(),
+            block_offset: 7,
+            open_marker: None,
+        },
+        RowIndexBlock {
+            separator_key: sep(8),
+            block_offset: 16_512,
+            open_marker: None,
+        },
+    ];
+    let mut w = RowsTrieWriter::new();
+    w.add_partition_row_index(&1i32.to_be_bytes(), 0, blocks, None);
+    let err = w
+        .finish()
+        .expect_err("an empty row-index separator must fail closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("empty") && msg.contains("root"),
+        "the error must name the empty separator and the root-payload gap, got: {msg}"
+    );
+}
+
 /// A partition leaf with a positive RowsOffset payload decodes back to the
 /// SAME RowsOffset via the reader (`BtiPartitionLocation::RowsOffset`).
 #[test]

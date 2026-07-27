@@ -353,6 +353,22 @@ pub(crate) fn rows_strict_ceiling_block(
     }
 }
 
+/// Test-only re-export of the crate-internal [`rows_strict_ceiling_block`] walk,
+/// the END-bound half of the clustering window. Paired with
+/// [`rows_floor_block_for_test`] it lets the fixture-backed issue #3002 parity test
+/// pin the `[body_start_rel, body_end_rel)` window itself — including proving that
+/// each half of the #3002 fix ALONE collapses that window off the rows it must
+/// cover (the floor walk alone cannot show a WRONG END).
+#[doc(hidden)]
+#[cfg(not(feature = "tombstones"))]
+pub fn rows_strict_ceiling_block_for_test(
+    trie_data: &[u8],
+    root_offset: usize,
+    target_key: &[u8],
+) -> BtiResult<Option<BtiRowIndexEntry>> {
+    rows_strict_ceiling_block(trie_data, root_offset, target_key)
+}
+
 #[cfg(not(feature = "tombstones"))]
 #[cfg(test)]
 mod tests {
