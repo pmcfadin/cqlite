@@ -109,29 +109,70 @@ For each present column (simple or complex):
 ### Simple Cell
 ```
 [1 byte: flags]
-[0-1 byte: extended_flags if EXTENDED_FLAG (0x40) set]
 [VInt: timestamp_delta if NOT USE_ROW_TIMESTAMP (0x08)]
-[VInt: local_deletion_time_delta if IS_DELETED or IS_EXPIRING]
+[VInt: local_deletion_time_delta if IS_DELETED, or if IS_EXPIRING and NOT USE_ROW_TTL]
 [VInt: ttl_delta if IS_EXPIRING and NOT USE_ROW_TTL]
-[bytes: value if NOT IS_DELETED and NOT HAS_EMPTY_VALUE]
+[bytes: value if NOT HAS_EMPTY_VALUE (length-prefixed unless the type is fixed-width)]
 ```
 
-**Cell Flags:**
-- `0x01`: IS_DELETED (tombstone)
-- `0x02`: IS_EXPIRING (has TTL)
-- `0x04`: HAS_EMPTY_VALUE (INVERTED: flag=0 means has value, flag=1 means empty)
-- `0x08`: USE_ROW_TIMESTAMP (use row timestamp, don't read separate)
-- `0x10`: USE_ROW_TTL (use row TTL)
-- `0x20`: HAS_NULL_VALUE (value is null)
-- `0x40`: EXTENDED_FLAG (extended flags follow)
+There is **no extended flag byte for a cell** — extended flags are a *row*-header concept
+only.
 
-### Complex Cell (Collections, UDTs)
-Collections have additional wrapping:
+**Cell Flags** — the complete set; there are exactly five:
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| `0x01` | `IS_DELETED` | Cell is a tombstone (no value) |
+| `0x02` | `IS_EXPIRING` | Cell has a TTL (TTL/local-deletion fields follow) |
+| `0x04` | `HAS_EMPTY_VALUE` | Zero-length value — flag SET means empty (not NULL) |
+| `0x08` | `USE_ROW_TIMESTAMP` | Reuse the row timestamp; no cell timestamp is written |
+| `0x10` | `USE_ROW_TTL` | Reuse the row TTL **and** local_deletion_time; neither is written |
+
+> **Citations**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/row_data.rs:860-863`
+> (`CELL_IS_DELETED` `0x01`, `CELL_IS_EXPIRING` `0x02`, `CELL_USE_ROW_TIMESTAMP` `0x08`,
+> `CELL_USE_ROW_TTL` `0x10`) and `:282` (`HAS_EMPTY_VALUE` `0x04`). Guide:
+> `appendix-b-encodings-cheat-sheet.md:231-238`. Cassandra 5.0.8:
+> `db/rows/Cell.java:262-266` — `Cell.Serializer` declares these five `*_MASK` constants
+> and **no others**, so `0x20` and `0x40` are NOT cell flags (an earlier revision of this
+> file invented `HAS_NULL_VALUE`/`EXTENDED_FLAG`; both are fabrications).
+
+**Critical distinction** (`appendix-b-encodings-cheat-sheet.md:247-250`): a tombstone
+(`IS_DELETED`) MUST NOT set `USE_ROW_TIMESTAMP` — tombstones require an explicit timestamp
+and local_deletion_time.
+
+### Complex Cell — NON-FROZEN collections and non-frozen UDTs
+A non-frozen collection column is a *set of cells*, wrapped as:
 ```
-[VInt: element_count]
+[if ROW_HAS_COMPLEX_DELETION (0x40) on the row: complex deletion time — 2 unsigned VInt deltas]
+[unsigned VInt: cell_count]
+[for each cell:]
+    [1 byte: cell flags (table above)]
+    [conditional timestamp / local_deletion_time / ttl deltas]
+    [unsigned VInt: path_len][path bytes]      // the collection key/element path
+    [unsigned VInt: value_len][value bytes]    // omitted when IS_DELETED or HAS_EMPTY_VALUE
+```
+
+> **Citation**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs:279-300`
+> (complex deletion deltas), `:332` (`cell_count` via `parse_vuint`), `:1089` (path length
+> unsigned VInt), `:1136` (value length unsigned VInt). Guide:
+> `appendix-b-encodings-cheat-sheet.md:530-536` — a non-frozen collection cell
+> length-prefixes BOTH path and value with an **unsigned VInt**, fixed-width element types
+> included.
+
+### FROZEN collections / tuples / UDTs — a DIFFERENT encoding
+A frozen value is a single opaque cell whose bytes use **fixed 4-byte big-endian `i32`**
+counts and element lengths — **not** VInts:
+```
+[i32 BE: element_count]
 [for each element:]
-    [cell format as above]
+    [i32 BE: element_len]   // -1 = null
+    [element bytes]
 ```
+
+> **Citation**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/frozen.rs:21`
+> (`i32::from_be_bytes` count), `:98`/`:279`/`:370` (element/key lengths). Guide:
+> `appendix-b-encodings-cheat-sheet.md:537-539`. Cassandra:
+> `CollectionSerializer.java:67-92`, `TupleType.java:341-364`.
 
 ---
 
@@ -199,26 +240,33 @@ All 18 cells present in schema order
 
 ## Compression
 
-Cassandra 5.0 supports three compression algorithms:
+Cassandra 5.0 supports **four compression algorithms plus Noop**: LZ4, Snappy, Deflate,
+Zstd, and Noop (stored raw) — `cqlite-core/src/storage/sstable/compression_info.rs:43-48`.
+See `compression-formats.md` in this skill for the full `CompressionInfo.db` layout.
 
-### Block Structure
+### Chunk Structure
 ```
-[compressed_block_1]
-[compressed_block_2]
+[compressed_chunk_1][crc32: 4 bytes BE]
+[compressed_chunk_2][crc32: 4 bytes BE]
 ...
 ```
 
-Each block:
-- Fixed maximum size (typically 64KB uncompressed)
+Each chunk:
+- Fixed maximum **uncompressed** size = `chunk_length` from `CompressionInfo.db`;
+  Cassandra 5.0 default **16 KiB** (`CompressionParams.DEFAULT_CHUNK_LENGTH`,
+  cassandra-5.0.8 `schema/CompressionParams.java:47`)
 - Compressed independently
-- CRC checksum for validation
+- Followed by an **unconditional** 4-byte big-endian CRC32 over the **compressed** bytes
+  (`chunk_decompressor.rs:275-292`)
 - May contain multiple rows or partial rows
 
 ### Decompression
-1. Read compressed size from block header
-2. Decompress entire block
-3. Parse rows from decompressed buffer
-4. Track offsets within decompressed data
+1. Read the chunk offsets from `CompressionInfo.db` (offsets **only** — there is no stored
+   per-chunk length; the payload length is `next_offset - this_offset - 4`)
+2. Read the chunk record, validate the trailing big-endian CRC32 over the compressed bytes
+3. Decompress the chunk with the algorithm named in `CompressionInfo.db`
+4. Parse rows from the decompressed buffer; offset within the chunk is
+   `logical_offset % chunk_length`
 
 ---
 
