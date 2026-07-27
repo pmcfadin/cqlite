@@ -51,6 +51,11 @@
 - [x] 4.5 Wire the new file into `tooling-tests`; record the component's wall-clock before/after on
       the PR (target: within noise — the guard adds well under a second).
 
+- [x] 4.6 Portability half (review G1): `scripts/tests/test_agent_gate_tree_portability.sh`, also
+      wired into `tooling-tests` — the guard re-run under BSD/macOS `sed`/`stat`/`sort` shims with
+      `AGENT_GATE_TEST_OS=Darwin`, plus a static GNU-only-construct lint over every tree function
+      (13 rules, each proved discriminating by a mutant, with a portable control body).
+
 ## 5. Doctrine (same change)
 - [x] 5.1 `website/src/content/docs/agents-developing/gate-contract.md`: add the three lines to both
       machine-checkable block renderings; add the "a mid-run tree mutation invalidates the run"

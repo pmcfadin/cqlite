@@ -177,6 +177,18 @@ guard and this guard fire, both named lines SHALL appear and the result SHALL be
 - **THEN** the gate SHALL stop there, emit the named `tree-integrity: FAIL` block with `RESULT: FAIL`,
   and exit non-zero without running the remaining components
 
+#### Scenario: the boundary FAIL block carries the same provenance as any other terminal block
+- **GIVEN** a block published at a component boundary is the ONE block a reader reaches after a
+  mid-run mutation, so it is exactly where full provenance is needed
+- **WHEN** a MAIN-lane boundary detection publishes its block
+- **THEN** that block SHALL carry the standard terminal provenance — `commit:`, `datasets:`
+  (when the run has established it), `ci-pins:`, `accelerators:`, `cpu-budget:`, the
+  `summary-integrity:` line when one is set, the tree lines, and the per-component verdict
+  table for the components that recorded a result — in the terminal block's own order and row
+  format, plus `detected-after-component:` and a count of how far the run got
+- **AND** assembling it SHALL take no capture, so the component-named verdict line can never be
+  overwritten by a lazily-triggered terminal capture
+
 #### Scenario: SIDE-lane detection survives the drain and forces a terminal FAIL
 - **WHEN** a backgrounded SIDE-lane component detects the mutation
 - **THEN** it SHALL record a marker instead of emitting, and after the lanes drain the terminal block
@@ -229,6 +241,17 @@ is established and never emit a certification of a real tree).
   to `tree-integrity: SKIP`, which is reserved for a capture attempt finding no git worktree
 - **AND** the retained capture SHALL still detect a real mid-run mutation, and the retention SHALL be
   disclosed on the `tree-start:` line
+
+#### Scenario: an unvalidatable re-capture at the slot grant restores the validated pre-queue capture
+- **GIVEN** a fully validated pre-queue identity exists in the run's state and on disk
+- **WHEN** the re-capture at the slot grant RUNS but cannot be validated (a hash-tool or disk blip)
+- **THEN** the run SHALL restore that pre-queue capture — both the identity and the on-disk manifest,
+  which the failed re-capture may have overwritten — and stay guarded against the strictly wider
+  pre-queue window, rather than failing a run closed for a transient failure
+- **AND** the restored capture SHALL still detect a real mid-run mutation AND name the changed path
+- **AND** when nothing trustworthy can be restored, the run SHALL stay FAIL-CLOSED
+- **AND** an unvalidatable FIRST capture SHALL remain FAIL-CLOSED: there is no validated identity to
+  fall back to, and git demonstrably exists (a genuinely non-git tree yields the no-worktree SKIP)
 
 #### Scenario: a transient git failure at the FIRST capture does not leave the run unguarded
 - **GIVEN** the very first capture reports "no git worktree", which a transient `git rev-parse`
@@ -309,6 +332,14 @@ documented as a stated limitation covered by the existing `datasets:` and `ci-pi
 - **AND** the dominant legitimate case — a TRACKED lockfile that is clean at the start capture and
   re-resolved by the gate's own cargo — SHALL still be stamped `lockfile-settled`
 
+#### Scenario: the blob-id rule accepts both object-id lengths
+- **GIVEN** `git hash-object` yields 40 hex characters in a SHA-1 repository and 64 in a SHA-256 one
+- **WHEN** the carve-out tests whether a lockfile's end record is a real blob id
+- **THEN** it SHALL accept either length through the SAME shared rule the capture digest uses, so the
+  carve-out is reachable on a SHA-256 repository instead of failing every lockfile settle spuriously
+- **AND** the admission SHALL stay closed there: an untracked mid-run `…/Cargo.lock` on a SHA-256
+  repository SHALL still be fatal
+
 #### Scenario: a lockfile change accompanied by any other change is fatal
 - **WHEN** `Cargo.lock` and at least one other in-scope path differ between the start and end manifests
 - **THEN** the run SHALL FAIL with the named `tree-mutated-midrun` line listing all changed paths
@@ -354,6 +385,38 @@ stamped.
   mtime restored — the one edit a size+mtime record cannot see — with the cap set that low
 - **THEN** the cap SHALL have been clamped to the floor, the file SHALL have been content-hashed, the
   mutation SHALL be detected and named, and the emitted block SHALL disclose the clamp
+
+### Requirement: The guard SHALL behave identically on a BSD/macOS host
+
+macOS is a first-class gate host (the gate carries a Darwin wrapper branch, a BSD `stat` branch and a
+macOS `/bin/bash` 3.2 floor), so the tree-integrity code SHALL use no GNU-only construct. Specifically:
+the changed-path parser SHALL handle both `comm -3` columns by field arithmetic inside `awk`, never by
+a GNU-only `sed 's/^\t//'`; a value handed to `awk` SHALL be passed through the environment, never
+`awk -v`, whose escape-sequence processing would un-escape the very tabs the report view escapes; and
+any flag that is not universally available (`sort -z`, `stat -c`) SHALL be PROBED once with a portable
+fallback rather than assumed.
+
+#### Scenario: the changed-path list is correct on a host whose sed does not honour \t
+- **WHEN** a mid-run mutation is detected on a host whose `sed` treats `\t` as a literal `t`
+- **THEN** the named FAIL line SHALL report the changed PATH, never the record's mode field, and the
+  lockfile classification — which keys on those paths — SHALL be unaffected
+
+#### Scenario: a report path is found by its escaped spelling
+- **WHEN** a record's path contains a tab or a newline and is therefore escaped in the `.report` view
+- **THEN** looking that record up by its escaped spelling SHALL find it, and looking up a raw or
+  absent spelling SHALL find nothing
+
+#### Scenario: a sort(1) without -z cannot silently empty the manifest
+- **GIVEN** an unsupported flag makes `sort` emit nothing, which would leave the capture enumerating
+  ZERO paths on a dirty tree — a silent FAIL-OPEN in which both captures agree
+- **WHEN** the guard runs on a host whose `sort` rejects `-z`
+- **THEN** the capture SHALL fall back to git's own deterministic path ordering, SHALL still enumerate
+  the changed paths, and a mutated run SHALL still FAIL while a clean run still certifies
+
+#### Scenario: the size+mtime fallback records a real mtime through the BSD stat interface
+- **WHEN** an oversized untracked file is recorded by size+mtime on a host whose `stat` offers only
+  the BSD `-f` interface
+- **THEN** the record SHALL carry a numeric mtime, not `unknown`
 
 ### Requirement: A discriminating regression test SHALL pin the behaviour inside tooling-tests
 
@@ -417,6 +480,18 @@ sleep.
 - **WHEN** the self-test sequences its mid-run mutation
 - **THEN** it SHALL rendezvous on the gate's per-component result artifacts, and its assertions SHALL
   reference captured identities only — no elapsed-time threshold SHALL appear in the correctness path
+
+#### Scenario: the suite covers a BSD/macOS host, behaviourally and statically
+- **GIVEN** the guard's first Linux-only construct shipped because the suite had no macOS path at all
+- **WHEN** `scripts/tests/test_agent_gate_tree_portability.sh` runs inside `tooling-tests`
+- **THEN** it SHALL re-run the parsing, classification and mtime paths against PATH shims that
+  reproduce the BSD divergences (a `sed` that does not honour `\t`, a `stat` offering only `-f`, a
+  `sort` that rejects `-z`) with `AGENT_GATE_TEST_OS=Darwin` forcing the host-family branches
+- **AND** it SHALL statically lint EVERY tree-integrity function for the GNU-only construct classes,
+  allowlisting only the flags the code PROBES for, so a reintroduction on a path the shims do not
+  execute fails too
+- **AND** each lint rule SHALL be proved discriminating by a mutant that it catches, with a portable
+  control body that it does not flag
 
 ### Requirement: Doctrine SHALL state that a mid-run tree mutation invalidates the run
 

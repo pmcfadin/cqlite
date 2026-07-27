@@ -55,8 +55,8 @@ GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 # `cd "$(dirname "$0")/.."` resolve REPO_ROOT to <root>, so every capture, default
 # summary path and mutation stays inside this run's mktemp namespace.
 # ---------------------------------------------------------------------------
-mkrepo() { # mkrepo <name> -> echoes the repo path
-  local root="$tmp/$1"
+mkrepo() { # mkrepo <name> [extra `git init` args…] -> echoes the repo path
+  local root="$tmp/$1"; shift
   mkdir -p "$root/scripts"
   cp "$GATE" "$root/scripts/agent-gate.sh"
   # The DISPOSABLE-CHECKOUT MARKER (#2926 review B5): the gate's mutating self-test hooks
@@ -69,7 +69,9 @@ mkrepo() { # mkrepo <name> -> echoes the repo path
   printf 'docs body\n'        > "$root/NOTES.md"
   printf 'target/\n*.log\n.agent-gate-summary.txt\n.agent-gate-lite-summary.txt\n.agent-gate-delta-summary.txt\nignored-dir/\n' \
                               > "$root/.gitignore"
-  ( cd "$root" && git init -q . && git add -A && git "${GIT_ID[@]}" commit -qm init ) >/dev/null 2>&1
+  # `${1+"$@"}` (never a bare "$@"): expanding an EMPTY "$@" under `set -u` on bash 3.2 —
+  # the floor this script declares — is an unbound-variable error (#2926 review B8).
+  ( cd "$root" && git init -q ${1+"$@"} . && git add -A && git "${GIT_ID[@]}" commit -qm init ) >/dev/null 2>&1
   printf '%s\n' "$root"
 }
 
@@ -1270,6 +1272,89 @@ QGIT
   fi
   ( cd "$r8" && git checkout -q -- README.md )
 
+  # --- G4: an UNVALIDATABLE (rc 2) re-capture at the slot grant ---------------------
+  # The third arm of the same policy. rc 1 ("no git worktree") restores the pre-queue
+  # capture and rc 1 at the FIRST capture re-attempts — but rc 2 ("the capture RAN and
+  # could not be validated") used to do NEITHER, failing a run closed while a FULLY
+  # VALIDATED pre-queue identity sat in the globals AND on disk. That is a spurious FAIL,
+  # not a safety property: a hash-tool/disk blip at the slot grant killed a 20-minute gate.
+  # Sequenced deterministically: the stub python3 arms a one-shot marker as the slot daemon
+  # starts, and the stub sha256sum answers the NEXT digest — exactly the re-capture's —
+  # with a non-hex string, which _tree_digest_ok rejects (rc 2), then disarms itself.
+  r10=$(mkrepo rc2-repo)
+  mkdir -p "$r10/scripts/lib"
+  cp "$SLOT_DAEMON" "$r10/scripts/lib/gate_slot_daemon.py"
+  ( cd "$r10" && git add -A && git "${GIT_ID[@]}" commit -qm daemon ) >/dev/null 2>&1
+  RSTUB="$tmp/rstub"; mkdir -p "$RSTUB"
+  cp "$STUBBIN/cargo" "$RSTUB/cargo"
+  REAL_SHA=$(command -v sha256sum 2>/dev/null || true)
+  RC2="$tmp/rc2-armed"
+  cat > "$RSTUB/python3" <<QPY
+#!/usr/bin/env bash
+case "\$*" in
+  *gate_slot_daemon.py*) : > "$RC2" ;;
+esac
+exec "$REAL_PY" "\$@"
+QPY
+  chmod +x "$RSTUB/python3"
+  cat > "$RSTUB/sha256sum" <<QSHA
+#!/usr/bin/env bash
+if [ -f "$RC2" ]; then
+  rm -f "$RC2"
+  cat > /dev/null                      # drain stdin, then answer with a NON-HEX digest
+  # RC2_MUTATE (second run only): edit the tree at the moment the re-capture fails, so the
+  # mutation lands INSIDE the window the retained pre-queue capture defines.
+  [ -n "\${RC2_MUTATE:-}" ] && printf 'edited at the unvalidatable re-capture\n' >> "\$RC2_MUTATE"
+  printf 'not-a-digest  -\n'
+  exit 0
+fi
+exec "$REAL_SHA" "\$@"
+QSHA
+  chmod +x "$RSTUB/sha256sum"
+  if [ -z "$REAL_SHA" ]; then
+    ok "G4: SKIP — no sha256sum on this host, the rc-2 re-capture cannot be sequenced through the digest tool"
+  else
+    sum="$tmp/rc2.txt"; out="$tmp/rc2.out"
+    ( cd "$r10" && PATH="$RSTUB:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+        CQLITE_GATE_SLOTS_DIR="$tmp/slots-rc2" CQLITE_GATE_MAX_CONCURRENCY=1 \
+        CQLITE_DATASETS_ROOT="$tmp/empty-datasets" \
+        bash "$r10/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+    if [ ! -f "$RC2" ]; then
+      ok "G4: the one-shot digest blip fired (the re-capture really returned an unvalidatable identity)"
+    else
+      bad "G4: the digest blip never fired — the rc-2 re-capture was not exercised"
+    fi
+    if grep -q '^tree-start: .*pre-queue capture retained' "$sum" 2>/dev/null \
+       && grep -q '^tree-integrity: PASS' "$sum" 2>/dev/null; then
+      ok "G4: an unvalidatable re-capture RESTORES the validated pre-queue capture and certifies (no spurious FAIL)"
+    else
+      bad "G4: the rc-2 re-capture did not restore the pre-queue capture (rc=$rc)"
+      grep -E '^tree-|^RESULT:' "$sum" 2>/dev/null
+    fi
+    if grep -q 'tree-capture-failed' "$sum" 2>/dev/null; then
+      bad "G4: the run still fails closed on a recoverable rc-2 re-capture"
+    else
+      ok "G4: the block carries no tree-capture-failed reason — the recoverable case is not reported as one"
+    fi
+    # …and the DISCRIMINATION STUB: the restored capture must still DETECT. Same blip, with
+    # a real mutation landing at the moment of the failed re-capture.
+    sum="$tmp/rc2-mut.txt"; out="$tmp/rc2-mut.out"
+    ( cd "$r10" && PATH="$RSTUB:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+        CQLITE_GATE_SLOTS_DIR="$tmp/slots-rc2b" CQLITE_GATE_MAX_CONCURRENCY=1 \
+        CQLITE_DATASETS_ROOT="$tmp/empty-datasets" \
+        RC2_MUTATE="$r10/README.md" \
+        bash "$r10/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+    if grep -q 'tree-integrity: FAIL (tree-mutated-midrun;' "$sum" 2>/dev/null \
+       && grep -q 'changed: README.md' "$sum" 2>/dev/null \
+       && ! grep -q '^RESULT: PASS' "$sum" 2>/dev/null && [ "$rc" -ne 0 ]; then
+      ok "G4: the restored pre-queue capture still DETECTS a real mutation, and names the right path (the manifest was restored too)"
+    else
+      bad "G4: the restored capture missed the mutation or misnamed it (rc=$rc)"
+      grep -E '^tree-|^RESULT:' "$sum" 2>/dev/null
+    fi
+    ( cd "$r10" && git checkout -q -- README.md )
+  fi
+
   # --- F1 near-miss: --lite and --delta EXIT BEFORE the slot grant, so they have no
   # re-arm point at all. Their SKIP must at least SAY that a worktree WAS present at the
   # terminal capture, so a transient first-capture failure can never be read as "there was
@@ -1514,8 +1599,11 @@ fi
 # (or gains an unguarded one) is reported rather than silently satisfying the check, and
 # the check is PROVED discriminating below by deleting each call site in turn.
 # fn_body <file> <function-name> — the lines of one top-level function definition.
+# The function name reaches awk through ENVIRON, never `awk -v` (#2926 review G2): `-v`
+# performs escape-sequence processing on the value, so the ONE convention this file uses
+# for handing text to awk is the one that cannot silently rewrite it.
 fn_body() {
-  awk -v f="$2() {" 'index($0, f) == 1 { inf = 1 } inf { print } inf && /^\}/ { inf = 0 }' "$1"
+  TEST_AWK_F="$2() {" awk 'index($0, ENVIRON["TEST_AWK_F"]) == 1 { inf = 1 } inf { print } inf && /^\}/ { inf = 0 }' "$1"
 }
 # body_has <text> <line-prefix> — rc 0 iff some LINE of <text> starts with <line-prefix>.
 # Deliberately pipe-free: this file runs under `set -o pipefail`, and `awk … | grep -q`
@@ -1596,7 +1684,8 @@ fi
 # three REFUSED sites are 4-space and its terminal site is 2-space, and keying on the former
 # is exactly how the terminal site slipped through, #2926 review F2).
 mutant_drop_nth() { # mutant_drop_nth <src> <dst> <fn> <n>
-  awk -v f="$3() {" -v want="$4" '
+  TEST_AWK_F="$3() {" TEST_AWK_N="$4" awk '
+    BEGIN { f = ENVIRON["TEST_AWK_F"]; want = ENVIRON["TEST_AWK_N"] + 0 }
     index($0, f) == 1 { inf = 1 }
     { l = $0; sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]*#.*$/, "", l) }
     inf && l ~ /^_tree_finalize([[:space:]]|$)/ { k++; if (k == want) next }

@@ -185,7 +185,9 @@
 #                      Also runs scripts/tests/test_agent_gate_tree_integrity.sh
 #                      (#2926) — proves a gate whose worktree mutates MID-RUN cannot
 #                      certify, and that an unmutated run still does (hermetic fake
-#                      checkouts + a stub cargo; nothing compiles, ~3s).
+#                      checkouts + a stub cargo; nothing compiles, ~3s) — and
+#                      scripts/tests/test_agent_gate_tree_portability.sh, its BSD/macOS
+#                      half (BSD sed/stat/sort shims + a GNU-only-construct lint).
 #                      Also runs scripts/tests/test_generator_keyspace_scoping.sh
 #                      (#1232) — fails if a generate-*.sh enumerates the whole
 #                      SSTable corpus and grep -z filters by keyspace; needs no
@@ -4521,6 +4523,23 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_integrity.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (tree-integrity self-test #2926); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # …and its PORTABILITY half (#2926 review G1): the same guard re-run against BSD/macOS
+  # shims (sed without GNU escapes, stat -f only, a sort(1) with no -z) plus a static lint
+  # that FAILs on any GNU-only construct in the tree-integrity code. macOS is a first-class
+  # gate host, so a Linux-only token in the guard is a real defect — this is the lane that
+  # catches it. Same hermetic shape (fake checkouts, stub cargo, nothing compiles).
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_tree_portability.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_portability.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (tree-integrity PORTABILITY self-test #2926); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
