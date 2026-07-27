@@ -96,6 +96,13 @@ Where to look in source:
 Sidebar: Version Differences
 BTI is a Cassandra 5.x format family. Older releases rely on `big` plus `Index.db`/`Summary.db`. Readers should expect co-existence during upgrades; mixed-format directories are normal during transitions.
 
+Cassandra 5.0.8 declares exactly one BTI version: `BtiVersion.current_version = "da"` and
+`earliest_supported_version = "da"`
+([`BtiFormat.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java)),
+so **`da` is the only BTI version that exists on disk**. Everything in this chapter describes `da`.
+CQLite matches that floor: `BtiVersionGates::from_version` rejects any non-`da` BTI version with
+`Error::UnsupportedVersion`.
+
 ## Read Amplification and Index Layout
 Conceptual contrast (trimmed):
 
@@ -110,23 +117,61 @@ Illustrative bullets:
 
 For implementation walkthroughs of BTI headers and trie navigation, see Appendix C.
 
-### Prefix/range navigation (byte-wise example)
+### Prefix/range navigation: the `separatorFloor` walk
 
-Consider a composite clustering key `(user_id uuid, path text)` with UTF-8 collation. BTI’s `Rows.db` encodes a trie over the byte sequence of the clustering prefix, enabling prefix seeks:
+Consider a composite clustering key `(user_id uuid, path text)`. BTI's `Rows.db` encodes a trie over
+the byte-comparable (`ByteComparable.Version.OSS50`) encoding of the clustering prefix. Because the
+trie stores **separators** rather than block start keys (see "Row index separator semantics" below),
+locating the block that could hold a key `K` is a **floor** query — the largest separator `<= K` —
+not a "first branch `>=` the requested byte" ceiling query.
 
-Pseudo (simplified):
+Cassandra implements it as `RowIndexReader.separatorFloor(K)`, a single downward walk built on
+`Walker.prefixAndNeighbours` that tracks two things as it descends: the closest **prefix payload**
+(a separator that is a prefix of `K`) and the closest strictly-**lesser branch**
+([`RowIndexReader.java:81–98`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/RowIndexReader.java#L81);
+[`Walker.java:318–350`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/Walker.java#L318)):
+
+Pseudo (simplified; mirrors `prefixAndNeighbours` + `goMax`):
 ```text
-advance(trie, prefix_bytes):
+separator_floor(root, K):                  // visits O(len(K)) nodes
+  prefix_payload = None                    // closest separator that prefixes K
+  lesser_branch  = NONE                    // closest strictly-lesser subtree
   node = root
-  for b in prefix_bytes:
-    if node.has_child(b):
-      node = node.child(b)
-    else:
-      return node.first_ge_branch(b)
-  return node
+  for b in bytes(K) + [END_OF_STREAM]:     // byte-comparable bytes of K, then -1
+    i = node.search(b)                     // >= 0 exact; else -insertion_point - 1
+                                           // Sparse: binary search; Dense: index arithmetic
+    if i == 0 or i == -1:                  // nothing in this node sorts below b
+      if node.has_payload:
+        prefix_payload = node.payload      // a longer prefix wins over a shorter one
+    else:                                  // a strictly-lesser child exists
+      lesser_branch  = node.lesser_child(i)
+      prefix_payload = None                // that child's max is a closer floor
+    if i < 0: break                        // no exact transition: walk ends
+    node = node.child(i)
+
+  if prefix_payload: return prefix_payload
+  return go_max(lesser_branch)             // rightmost payload of the lesser subtree
 ```
 
-Effectively, prefix seek walks byte-by-byte until divergence, then takes the first branch ≥ the requested byte; this contrasts with BIG’s binary search over sampled entries in `Summary.db` followed by scans in `Index.db`.
+The walk visits **O(len(K))** nodes — one per key byte consumed — never O(number of blocks); it
+never enumerates the trie. `go_max` then descends `lastTransition` repeatedly
+([`Walker.java:164–174`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/Walker.java#L164)).
+This contrasts with BIG's binary search over sampled entries in `Summary.db` followed by a scan in
+`Index.db`.
+
+> **Note**: on a well-formed `Rows.db` trie `separatorFloor` never returns `null`, because the first
+> block is stored under the empty separator at the root (see "Row index separator semantics"
+> below). `SSTableIterator.ForwardIndexedReader.setForSlice` relies on this with an explicit
+> `assert indexInfo != null`
+> ([`SSTableIterator.java:100–113`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/SSTableIterator.java#L100)),
+> and Cassandra's own `RowIndexTest` asserts `separatorFloor(ClusteringBound.BOTTOM).offset == 0`.
+
+The complementary walks for the other end of a range are `Walker.followWithGreater` +
+`goMin(greaterBranch)` (the smallest separator greater than a key) and `Walker.min()`
+([`Walker.java:176–190`, `225–242`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/Walker.java#L176)).
+CQLite implements both walks in
+`cqlite-core/src/storage/sstable/bti/parser/rows_floor.rs` (`rows_floor_block`,
+`rows_strict_ceiling_block`).
 
 ### Trie node type families
 
@@ -140,30 +185,67 @@ low nibble (bits 3–0) = 4 payload flag bits (_pb_). Four families
 | `PAYLOAD_ONLY` | 0 | Leaf; no transitions |
 | `SINGLE` | 1–4 | One child; 4-/8-/12-/16-bit distance |
 | `SPARSE` | 5–9 | Binary-searched byte list; 8- to 40-bit distances |
-| `DENSE` | 10–15 | Consecutive byte range; 12- to 64-bit distances (`LONG_DENSE` catch-all) |
+| `DENSE` | 10–14 | Consecutive byte range; 12- to 40-bit distances |
+| `LONG_DENSE` | 15 | Consecutive byte range; 64-bit distances (catch-all) |
 
 All distances are unsigned and subtracted from the current node position (children are earlier
 in the file). See Appendix C for complete per-type byte layouts.
 
+#### Child lookup cost: `SPARSE` searches, `DENSE` indexes
+
+The two multi-child families deliberately trade space for lookup cost, and the difference is a
+property of the on-disk layout, not of any particular reader:
+
+- **`SPARSE`** stores an explicit, ascending list of transition bytes followed by the matching
+  child-distance array. Finding a transition is a **binary search** over that byte list —
+  `O(log n)` in the node's child count — returning `-insertionPoint - 1` on a miss so the caller
+  can identify the neighbouring children
+  ([`TrieNode.java:509–528`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/TrieNode.java#L509)).
+- **`DENSE`/`LONG_DENSE`** store only a start byte and a range length, then one fixed-width
+  distance slot per byte in `[start, start + length]`. Finding a transition is therefore **O(1)
+  index arithmetic**: the slot for a search byte `b` is `b - start`, with an out-of-range `b`
+  rejected by the same comparison. A range with no child at some byte writes a distance of `0`
+  (`NULL_VALUE`) into that slot, so a present-but-empty slot is distinguishable from a real child
+  without any search
+  ([`TrieNode.java:662–702`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/TrieNode.java#L662)).
+  The range is serialised as a single `length − 1` byte, so `transitionRange = 1 + thatByte` and a
+  dense node covers between 1 and 256 consecutive transition bytes — at most the full byte range,
+  never more.
+
+The writer picks the cheaper encoding per node, so a hot upper node with many children is usually
+dense (O(1) descent) while a sparse tail node costs a short binary search. CQLite implements both
+child-lookup paths in `cqlite-core/src/storage/sstable/bti/parser/slice_walk.rs`
+(`sparse_child`, `dense_child`).
+
 ### `Rows.db` per-partition footer
 
-Each partition's row index in `Rows.db` is padded to a 4096-byte page boundary. After the trie
+Trie pages in `Rows.db` are page-aware: the writer pads to the next 4096-byte page boundary only
+when a node or a whole branch would otherwise straddle a page, so that no node is ever split
+across pages ([`IncrementalTrieWriterPageAware.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/IncrementalTrieWriterPageAware.java)).
+It is not an unconditional per-partition padding. After the trie
 pages the footer contains, in order
 ([`BtiFormat.md` lines 977–1010](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.md#L977);
 [`TrieIndexEntry.java:92–116`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/TrieIndexEntry.java#L92)):
 
 1. Partition key (short-length-prefixed bytes)
 2. Data file position of the partition start (unsigned vint)
-3. Root node position: signed vint delta relative to the data file position
-4. Row count in the partition (unsigned vint)
-5. Partition deletion time (12 bytes: local deletion time int + marked-for-delete-at long)
+3. Root node position: signed vint delta relative to the **entry's own base position** — the file
+   offset just past the key bytes, i.e. `entryStart + 2 + keyLength` (see the CQLite reader note
+   below for why the `+ 2` matters)
+4. Row-index **block** count (unsigned vint) — the number of row-index blocks the trie separates,
+   not the number of rows
+   ([`TrieIndexEntry.rowIndexBlockCount`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/TrieIndexEntry.java#L92))
+5. Partition deletion time — in `da` (`hasUIntDeletionTime()`), either a single `0x80` sentinel
+   byte for `DeletionTime.LIVE`, or 12 bytes: 8-byte `markedForDeleteAt` long then a 4-byte
+   **unsigned** local-deletion-time int
+   ([`DeletionTime.Serializer`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/DeletionTime.java#L205))
 
 The partition index (`Partitions.db`) points to the position of the partition key bytes (step 1).
 
 ### CQLite reader: footer root, position sign, and `Rows.db` entry resolution
 
 These BTI facts are verified against CQLite's own reader
-(`cqlite-core/src/storage/sstable/bti/parser.rs`) in addition to the Cassandra spec:
+(`cqlite-core/src/storage/sstable/bti/parser/`) in addition to the Cassandra spec:
 
 - **No header; root offset is the footer.** `Partitions.db` has no header. CQLite
   reads the trie root's absolute byte offset from the **last 8 bytes** of the file
@@ -183,11 +265,17 @@ These BTI facts are verified against CQLite's own reader
   CQLite deserializes (`resolve_rows_db_entry`) to recover the real row-index trie
   root before traversing. The entry layout is
   `[u16 key_length][key bytes][data position: unsigned vint][trieRoot − base: SIGNED
-  vint][block count: unsigned vint][partition DeletionTime]`, with
-  `base = RowsOffset + key_length` and `indexTrieRoot = readVInt() + base` (Cassandra
-  `TrieIndexEntry.deserialize`). Feeding `RowsOffset` straight into a trie walker
-  parses entry metadata as a node and fails. Verified against the `wide_table`
-  fixture in `cqlite-core/tests/issue_832_bti_traversal.rs`; cited to
+  vint][block count: unsigned vint][partition DeletionTime]`.
+  In Cassandra the base is the position the writer was at **after** writing the
+  short-length-prefixed key, i.e. `base = RowsOffset + 2 + key_length`, and
+  `indexTrieRoot = readVInt() + base`
+  ([`BtiTableWriter.java:185–213`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiTableWriter.java#L185)
+  writes `writeWithShortLength(key)` before calling
+  `TrieIndexEntry.serialize(.., rowIndexWriter.position(), ..)`; the same
+  `+ 2 + keyLength` base is recomputed on read in
+  [`BtiTableReader.java:191`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiTableReader.java#L191)).
+  Feeding `RowsOffset` straight into a trie walker
+  parses entry metadata as a node and fails. Cited to
   `TrieIndexEntry.java` (`serialize`/`deserialize`) and `RowIndexWriter.complete`.
 
 - **Trie distances are backward.** All child distances are unsigned and subtracted
@@ -204,8 +292,10 @@ These BTI facts are verified against CQLite's own reader
 > narrow partitions and a positive `RowsOffset` for wide ones; `Rows.db` holds
 > one per-partition `TrieIndexEntry` + row-index trie per wide partition, and is
 > emitted as a 0-byte component when no partition is wide (matching the real
-> `da-2-bti-Rows.db` fixtures). A wide partition is one spanning `>= 2`
-> `column_index_size` (64 KiB) blocks, mirroring `RowIndexEntry.create()`. An
+> `da-2-bti-Rows.db` fixtures). CQLite's writer treats a partition as wide when it
+> spans `>= 2` blocks of its own `COLUMN_INDEX_SIZE_BYTES` (64 KiB — BIG's default,
+> not BTI's 16 KiB granularity), so its block boundaries are its own, not
+> byte-identical to Cassandra's BTI writer. An
 > empty BTI write (zero partitions) is refused, since a `da` SSTable has no
 > readable zero-partition `Partitions.db` form. See
 > `cqlite-core/src/storage/sstable/writer/partitions_writer.rs` (`RowsTrieWriter`)
@@ -213,11 +303,49 @@ These BTI facts are verified against CQLite's own reader
 
 ### Row index granularity
 
-The row index does not index every row—it indexes blocks. The default block size is **at least
-16 KB** of serialised row data, controlled by the `column_index_size` parameter in
-`cassandra.yaml`. Separator keys (the shortest prefix greater than the last key of the prior
-block) are stored, not exact start keys, keeping the index compact
+The row index does not index every row—it indexes blocks. BTI's default granularity is **at least
+16 KiB** of serialised row data
+([`BtiFormatPartitionWriter.DEFAULT_GRANULARITY = 16 * 1024`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormatPartitionWriter.java#L41)),
+overridable with the `column_index_size` parameter in `cassandra.yaml` — whose comment records the
+split explicitly: "64 KiB for BIG, 16KiB for BTI". A partition only gets a row-index trie at all
+when it spans more than one block; with a single block the writer skips the trie and the
+`Partitions.db` leaf carries a direct `Data.db` offset instead
+([`BtiFormatPartitionWriter.java:92–119`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormatPartitionWriter.java#L92)).
+
+#### Row index separator semantics
+
+The trie stores **separators**, not exact block start keys, keeping the index compact
 ([`BtiFormat.md` lines 646–653](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.md#L646)).
+`RowIndexWriter.add` builds them like this
+([`RowIndexWriter.java:66–75`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/RowIndexWriter.java#L66)):
+
+- The **first** block's separator is `ByteComparable.EMPTY` — the empty byte sequence. Adding an
+  empty key to the incremental trie writer sets the payload on the **root node** itself, so block 0
+  is reachable as the root's payload rather than via any transition.
+- Every **subsequent** block's separator is `ByteComparable.separatorGt(prevMax, firstKey)`: the
+  shortest byte sequence that sorts strictly greater than the previous block's last key and no
+  greater than this block's first key.
+- `RowIndexWriter.complete(endPos)` appends one final "nudged" separator so the last block has an
+  upper bound.
+
+Two consequences follow, and they are the format's contract rather than a reader's choice:
+
+1. A separator is generally **not** a key that exists in the partition. Never treat a separator as
+   a row key; it is only a boundary usable for `<`/`>=` comparisons.
+2. Because block 0 is indexed under the empty separator at the root, a lookup for a key that sorts
+   below the first real separator still resolves — `separatorFloor` returns the root's payload
+   (block 0). `separatorFloor` returns `null` only when the trie has no lesser branch and no prefix
+   payload at all, which a well-formed `Rows.db` trie does not produce; see the note under
+   "Prefix/range navigation" above.
+
+> **CQLite note.** CQLite's reader computes the `TrieIndexEntry` base as
+> `rows_offset + key_length`, omitting Cassandra's 2-byte short-length prefix
+> (`cqlite-core/src/storage/sstable/bti/parser/rows.rs`). Walking from that position lands two bytes
+> before the real root, which is why CQLite has historically described the first block as
+> "unindexed": from the wrong root, the empty-key root payload is not reachable. Decoding the real
+> `da-2-bti-Rows.db` fixture from Cassandra's base yields **39** payload entries (the empty-key
+> entry plus 38 separators) where CQLite's base yields 38. This is a CQLite defect, not a property
+> of the BTI format.
 
 ## Performance Considerations and Benchmark Methodology
 
@@ -243,7 +371,12 @@ Note: Provide methodology and harness only; do not claim specific results here.
 - Trie traversal reads less data and requires less CPU per lookup than binary-searching sampled summaries; seek counts on a match are equivalent.
 - Every partition-index leaf node carries a hash byte (`FLAG_HAS_HASH_BYTE = 8`) for fast mismatch rejection—always present in Cassandra 5.0.
 - `SkipListMemtable` remains the compiled-in default in Cassandra 5.0; `TrieMemtable` is opt-in via `cassandra.yaml`.
-- The row index operates on 16 KB blocks (configurable via `column_index_size`), not individual rows.
+- The row index operates on blocks of at least 16 KiB (BTI's `DEFAULT_GRANULARITY`, configurable via
+  `column_index_size`; BIG's default is 64 KiB), not individual rows — and it stores separators
+  between blocks, never the block start keys themselves.
+- Block 0 is indexed under the **empty** separator, which lands its payload on the row-index trie's
+  root node; `separatorFloor` therefore resolves keys below the first real separator instead of
+  returning `null`.
 - Bloom filters and statistics continue to guide/guard the read path.
 - Mixed-format directories occur during upgrades; readers must detect format.
 For implementation details, see Appendix C.
@@ -254,7 +387,11 @@ For implementation details, see Appendix C.
   - Authoritative in-tree spec: `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.md`
   - `BtiFormat.java` (component sets): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java#L83`
   - `PartitionIndex.java` (hash byte, position encoding): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/PartitionIndex.java`
-  - `TrieNode.java` (node types): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/TrieNode.java#L947`
+  - `TrieNode.java` (node types, `Sparse.search`, `Dense.search`): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/TrieNode.java#L947`
+  - `Walker.java` (`prefixAndNeighbours`, `goMax`/`goMin`, `followWithGreater`): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/Walker.java#L318`
+  - `RowIndexReader.java` (`separatorFloor`, payload layout): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/RowIndexReader.java#L81`
+  - `RowIndexWriter.java` (separator construction, `complete`): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/RowIndexWriter.java#L66`
+  - `BtiFormatPartitionWriter.java` (16 KiB `DEFAULT_GRANULARITY`): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormatPartitionWriter.java#L41`
   - `PageAware.java` (4096-byte page constant): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/PageAware.java#L24`
   - `MemtableParams.java` (default factory): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/MemtableParams.java#L99`
   - Big format reader (contrast): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java`
