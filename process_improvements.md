@@ -740,3 +740,55 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       already-shipped signature. Cost here: one wasted claim/worktree cycle and a
       duplicate spec commit that had to be discarded; cost had it gone unnoticed:
       a second PR re-implementing merged work.
+  26. **2026-07-27 — in a lock/consensus protocol the dangerous bug is not a wrong
+      decision, it is a FAILED READ rendered as a confident verdict.** #2945 (PR
+      #2960) took **8 review rounds**, and the single largest cause was one defect
+      class recurring in five different places: a `git`/`gh` read that failed or
+      returned nothing, mapped to an authoritative negative verdict instead of
+      "retry". In `claim.sh` the verdicts `LOST`, `ADOPT-LOST`, `VERIFY-FAIL` and
+      `RELEASE-REFUSED reason=not-holder` all mean **"abandon this issue"** to a
+      worker (exit 2 = "you did not win, take the next item"), so each instance
+      made a machine drop an issue whose ref it still held — and because the ref
+      stayed held, no other machine could take it either: a permanent stall from a
+      transient blip. Found in five separate rounds: (a) `cmd_adopt` had no
+      re-entrancy check, so the documented retry-after-infra path reported
+      `ADOPT-LOST` against ourselves; (b) `cmd_verify` / non-forced `cmd_release`
+      still used a boolean `holder_is_us` that collapsed "holder commit unreadable"
+      into "someone else" — *after* the header had been updated to promise that
+      EVERY remote-reading subcommand maps unreadable to infra; (c) CAS mode
+      reported `ADOPT-LOST expected=X actual=X` — a self-contradictory verdict,
+      since a satisfied lease proves the failure was not a race; (d) an UPPERCASE
+      hex `--expect` satisfied git's push but failed the string compare; (e) the
+      post-push confirm read the ref as absent (reaper window) and said `LOST … 
+      holder=unknown`. **Standing lesson:** when reviewing or writing any
+      lock/claim/lease protocol, sweep it explicitly — *every* negative verdict must
+      be reachable ONLY after a SUCCESSFUL read, and every failed/empty read must
+      map to a retryable infra verdict. Ask the implementer for that sweep as a
+      deliverable ("list any remaining unread-signal→abandon paths") rather than
+      hoping review catches them one at a time; the fifth instance was found by such
+      a sweep in seconds after four rounds had each found one by inspection.
+  27. **2026-07-27 — a test can validate a mechanism under a premise that never
+      holds in production; and a "race" test that has never been shown to race is
+      decoration.** Three compounding instances in #2945/#2960, each caught only by
+      MUTATION testing rather than by reading: (a) the two-machine race test passed
+      unchanged when the atomic empty-lease push was swapped for `git push --force`
+      — every assertion (`winners==1`, `ref_count==1`) was satisfiable by
+      last-writer-wins, and `ref_count<=1` is a tautology for an exact ref; the fix
+      was a `post-receive` hook witnessing exactly ONE accepted update with
+      `old`=all-zeros; (b) after that, the barrier itself turned out to serialize
+      (two independent FIFOs released sequentially), so the test still never raced —
+      fixed with one shared start flag plus ns timestamps asserting the two push
+      windows OVERLAP; (c) the liveness fixture gave every branch its own dated
+      commit, but `flow-activate` pushes work branches with **no commits of their
+      own**, so in production the tip date is `origin/main`'s — the mechanism was
+      validated under a premise that never occurs. **Standing lesson:** for any
+      concurrency or freshness assertion, (1) demand a mutation result, not a green
+      run — "revert the atomicity primitive and show me the test go red"; (2) make
+      the test prove it exercised the condition (measured window overlap, a
+      server-side witness), because "0 rounds actually raced" and "all rounds raced
+      and passed" look identical in output; (3) check each fixture's premise against
+      how production actually creates that state. Corollary from the same PR: a
+      scheduling-derived HARD failure wired into the gate of record is a flake
+      generator — gate on the tolerant form (≥1 of N rounds overlapping, which a
+      serializing barrier still fails structurally at 0/N) and report the rest as
+      diagnostics.
