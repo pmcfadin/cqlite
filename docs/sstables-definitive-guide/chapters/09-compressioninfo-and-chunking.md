@@ -279,7 +279,7 @@ chunk 1: start=0x1e35 comp_len=2666 expected=0x657f7155 computed=0x657f7155 matc
 > **What breaks if you decompress it** depends on the compressor, so a reader must not rely on the
 > decompressor to reject it:
 > - **Deflate** stores a genuinely 0-byte payload — `DeflateCompressor.compressArray()` returns 0
->   when `Deflater.needsInput()` is true for empty input (line 112) — and inflating 0 bytes is a
+>   when `Deflater.needsInput()` is true for empty input (lines 113-114) — and inflating 0 bytes is a
 >   hard error.
 > - **LZ4** stores 5 bytes (`00 00 00 00 00`: the 4-byte little-endian length prefix `0` plus an
 >   empty block) with a valid CRC32 `c622f71d`, verified in the corpus. It decompresses cleanly to

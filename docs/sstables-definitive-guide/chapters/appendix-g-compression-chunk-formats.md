@@ -244,7 +244,7 @@ and rejected against the bomb limit **before** any allocation. See
   deflate fails.
 - Cassandra does not call `setLevel()`, so the stream uses `Deflater`'s default level
   (`Deflater.DEFAULT_COMPRESSION`, equivalent to level 6).
-- `compressArray()` returns **0** when `Deflater.needsInput()` is true (line 112) — i.e. for empty
+- `compressArray()` returns **0** when `Deflater.needsInput()` is true (lines 113-114) — i.e. for empty
   input. That is why a degenerate empty trailing chunk stores a genuinely 0-byte payload under
   Deflate, and why inflating it is a hard error rather than a latent one. See Chunk Offset
   Calculation note 6.
@@ -458,8 +458,14 @@ Each compressed chunk in `Data.db` is immediately followed by a 4-byte CRC32 che
 - Covers the **stored** bytes of the chunk — the compressed payload, or the raw bytes for an
   incompressible chunk — and never the CRC field itself
 - Written for every chunk the writer emits, including a raw chunk and a degenerate empty trailing
-  chunk (an empty Deflate chunk stores CRC `00000000`; the 5-byte LZ4 empty chunk stores
-  `c622f71d` — both verified in the corpus)
+  chunk. An empty Deflate chunk stores a 0-byte payload with CRC `00000000` — verified on
+  `cqlite-core/tests/fixtures/issue_2225/multi_partition_table/nb-1-big-{CompressionInfo,Data}.db`
+  (`DeflateCompressor`, `data_length` 5681, 2 chunk offsets `[0, 3266]` where 1 is expected, final
+  payload 0 bytes, stored CRC `00000000` == computed). The 5-byte LZ4 empty chunk stores
+  `c622f71d`, verified across all 16 degenerate `CompressionInfo.db` files in
+  `test-data/datasets/sstables/` (every one LZ4, payload `0000000000`, stored CRC == computed).
+  No degenerate **Deflate** chunk exists anywhere under `test-data/` — the Deflate case is
+  evidenced only by the `issue_2225` fixture above.
 - Source: `CompressedSequentialWriter.flushData()`, `crcMetadata.appendDirect(toWrite, true)` (line 192)
 - Next chunk offset = current offset + stored length + 4 (`chunkOffset += compressedLength + 4`,
   line 203)
@@ -519,7 +525,7 @@ Reading process:
 - [`schema/CompressionParams.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) — `DEFAULT_CHUNK_LENGTH = 1024 * 16` (line 47), `DEFAULT_MIN_COMPRESS_RATIO = 0.0` (line 48), `calcMaxCompressedLength()` (line 186), `validate()` (lines 441–455)
 - [`LZ4Compressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/LZ4Compressor.java) — 4-byte LE uncompressed-length prefix written at lines 120–123
 - [`SnappyCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/SnappyCompressor.java) — no prefix, raw Snappy block (`rawUncompress`, line 95)
-- [`DeflateCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/DeflateCompressor.java) — no prefix; `new Deflater()`/`new Inflater()` (lines 69, 77) means a zlib-wrapped (RFC 1950) stream; `compressArray()` returns 0 for empty input (line 112)
+- [`DeflateCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/DeflateCompressor.java) — no prefix; `new Deflater()`/`new Inflater()` (lines 69, 77) means a zlib-wrapped (RFC 1950) stream; `compressArray()` returns 0 for empty input (lines 113-114)
 - [`ZstdCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/ZstdCompressor.java) — no prefix, bare Zstd frame with internal checksum; `DEFAULT_COMPRESSION_LEVEL = 3` (line 48)
 - [`NoopCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/NoopCompressor.java) — passthrough compressor
 - [`BigFormat.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java) — `hasMaxCompressedLength` version gate (line 401)
