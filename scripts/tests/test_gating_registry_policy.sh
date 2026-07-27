@@ -1027,6 +1027,74 @@ else
   bad "these gating ruby files bypass the declared floor: $missing_floor"
 fi
 
+# ---- every gating ruby file declares the stdlib IT uses (round 5) -----------
+# THE NEAR-MISS OF THE FLOOR FIX ITSELF. `needs_closure` in gating_policy_rules.rb
+# built a `Set` while only gating_registry.rb required "set" — it worked purely
+# because that file requires "set" BEFORE it `require_relative`s this one. `Set`
+# is not autoloaded until ruby 3.1 and the declared floor is 3.0, so on the FLOOR
+# interpreter a changed load order, or loading the file standalone, raises
+# NameError inside a merge gate. The check is STATIC and load-order-independent:
+# if a file's own (comment-stripped) code names a stdlib constant, that file must
+# require it — inheriting the require from a sibling does not count.
+STDLIB_LINT="$WORK/stdlib-require-lint.rb"
+cat >"$STDLIB_LINT" <<'RUBY'
+# Prints one line per gating file that uses a stdlib without requiring it.
+root = ARGV[0]
+files = %w[gating_registry.rb gating_policy_rules.rb gating_event_rules.rb
+           gating_head_emitability.rb gating_ruby_floor.rb validate-workflows.rb]
+# require name => the constants it provides, matched only where they are USED
+# (followed by `.` or `::`), never inside prose.
+rules = {
+  "set" => /(?<![\w:.])Set[.:\[]|\.to_set\b/,
+  "yaml" => /(?<![\w:.])(?:YAML|Psych)[.:]/,
+  "json" => /(?<![\w:.])JSON[.:]/,
+  "time" => /(?<![\w:.])Time[.:]/,
+  "optparse" => /(?<![\w:.])OptionParser[.:]/
+}
+files.each do |name|
+  path = File.join(root, "scripts", "ci", name)
+  next unless File.file?(path)
+
+  source = File.read(path)
+  # Comments and string literals are PROSE, not use: gating_ruby_floor.rb names
+  # `YAML.load_file` in the diagnostic that explains the floor without ever
+  # calling it. Literals are stripped LINE BY LINE (the char classes exclude
+  # newlines) so a lone quote inside another literal — `text.count('"')` — can
+  # only ever garble its own line, never swallow the rest of the file and turn
+  # this lint into a silent constant pass.
+  code = source.lines.reject { |line| line.strip.start_with?("#") }
+               .map { |line| line.gsub(/"(?:[^"\\\n]|\\.)*"/, '""').gsub(/'(?:[^'\\\n]|\\.)*'/, "''") }
+               .join
+  declared = source.scan(/^\s*require\s+["']([a-z_\/]+)["']/).flatten
+  rules.each do |lib, pattern|
+    next unless code.match?(pattern)
+    next if declared.include?(lib)
+
+    puts "#{name} uses `#{lib}` but never requires it"
+  end
+end
+RUBY
+STDLIB_GAPS=$(ruby "$STDLIB_LINT" "$REPO_ROOT" 2>&1)
+if [ -z "$STDLIB_GAPS" ]; then
+  ok "every gating ruby file requires the stdlib its own code uses"
+else
+  bad "implicit stdlib dependency (breaks on the declared 3.0 floor / a standalone load): $STDLIB_GAPS"
+fi
+
+# THE MUTANT: delete the require that round 5 added and the lint must name it.
+# Without this the check could be a constant "no problems".
+MUTANT_TREE="$WORK/stdlib-mutant"
+mkdir -p "$MUTANT_TREE/scripts/ci"
+cp "$REPO_ROOT"/scripts/ci/gating_*.rb "$REPO_ROOT/scripts/ci/validate-workflows.rb" "$MUTANT_TREE/scripts/ci/"
+grep -v '^require "set"$' "$REPO_ROOT/scripts/ci/gating_policy_rules.rb" \
+  >"$MUTANT_TREE/scripts/ci/gating_policy_rules.rb"
+MUTANT_GAPS=$(ruby "$STDLIB_LINT" "$MUTANT_TREE" 2>&1)
+if contains "$MUTANT_GAPS" "gating_policy_rules.rb uses \`set\`"; then
+  ok "dropping \`require \"set\"\` is caught by the lint (it is not a constant pass)"
+else
+  bad "the stdlib lint did not catch the deleted require: '${MUTANT_GAPS:-<nothing>}'"
+fi
+
 # ------------------------------------------- CODEOWNERS exists (round 4) -----
 # The trust-boundary rationale in design.md closed by naming "CODEOWNERS on
 # .github/ + scripts/ci/" as the complementary control for its one acknowledged

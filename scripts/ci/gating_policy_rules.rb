@@ -18,6 +18,20 @@
 # therefore states the concrete failure it prevents, and rejects only configurations
 # that provably produce it.
 
+# EXPLICIT, NOT INHERITED (issue #2910 round 5). `needs_closure` builds a `Set`.
+# That worked only because gating_registry.rb happens to `require "set"` BEFORE it
+# requires this file — an ordering no rule enforces. `Set` is not autoloaded until
+# ruby 3.1 and the declared floor (gating_ruby_floor.rb) is 3.0, so on the floor
+# interpreter a different load order, or loading this file standalone, raises
+# NameError. Every gating file declares the stdlib it uses itself;
+# `stdlib_require_errors` in scripts/tests/test_gating_registry_policy.sh reds if
+# one stops.
+require "set"
+# `parse_workflow` rescues `Psych::SyntaxError`, which is the SAME implicit
+# dependency one constant over: an unrequired `Psych` resolves to NameError
+# inside a `rescue` clause, turning a malformed workflow into a crash.
+require "yaml"
+
 require_relative "gating_ruby_floor"
 # The trigger / concurrency / trust-boundary half of the same enrolment rule,
 # split out under the campsite rule; `policy_errors` below composes both halves.
