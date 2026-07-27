@@ -128,13 +128,16 @@ fn structure_len_agrees_with_parsed_payload_start_for_every_family() {
             );
         }
 
-        // The extent adds the 1-byte payload exactly when payloadBits != 0.
+        // The extent adds the 1-byte payload exactly when payloadBits != 0, and is
+        // UNAMBIGUOUS: none of these payloads carries an open-marker DeletionTime.
         let payload_bits = node[0] & 0x0F;
         let expected_end = node_offset + structure_len + if payload_bits == 0 { 0 } else { 1 };
+        let extent = rows_node_serialized_extent(&db, node_offset)
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
         assert_eq!(
-            rows_node_serialized_extent_end(&db, node_offset),
-            Ok(expected_end),
-            "{label}: extent = structure + IndexInfo payload"
+            (extent.shortest_end(), extent.is_ambiguous()),
+            (expected_end, false),
+            "{label}: extent = structure + IndexInfo payload, with a single legal end"
         );
     }
 }
@@ -150,7 +153,10 @@ fn extent_includes_the_open_marker_deletion_time() {
         db.push(0x80); // LIVE sentinel (1 byte)
         db
     };
-    assert_eq!(rows_node_serialized_extent_end(&live, 0), Ok(5));
+    let extent = rows_node_serialized_extent(&live, 0).expect("live open marker");
+    // The 12-byte alternative does not fit in this 5-byte buffer, so there is no
+    // ambiguity to report here.
+    assert_eq!((extent.shortest_end(), extent.is_ambiguous()), (5, false));
 
     let non_live = {
         let mut db = single8(0x9, b'a', 1);
@@ -159,9 +165,49 @@ fn extent_includes_the_open_marker_deletion_time() {
         db.extend_from_slice(&9u32.to_be_bytes()); // localDeletionTime
         db
     };
+    let extent = rows_node_serialized_extent(&non_live, 0).expect("non-live open marker");
     assert_eq!(
-        rows_node_serialized_extent_end(&non_live, 0),
-        Ok(3 + 1 + 12)
+        (extent.shortest_end(), extent.is_ambiguous()),
+        (3 + 1 + 12, false),
+        "a body whose leading byte is not 0x80 has exactly one legal length"
+    );
+}
+
+/// FALSE-REJECTION GUARD (roborev #3002): an open-marker `DeletionTime` whose
+/// `markedForDeleteAt` MSB is `0x80` is prefix-indistinguishable from the 1-byte LIVE
+/// sentinel, so measuring the payload by the sentinel-first decode alone would come
+/// up 11 bytes SHORT and reject a VALID file (degrading every clustering slice on it
+/// to a full-partition scan). Both structurally possible ends are reported, and the
+/// root still validates.
+#[test]
+fn open_marker_deletion_time_starting_with_0x80_still_validates() {
+    // `markedForDeleteAt` in the Long.MIN_VALUE octant: BE bytes start with 0x80.
+    let marked_for_delete_at = i64::MIN + 7;
+    assert_eq!(marked_for_delete_at.to_be_bytes()[0], 0x80);
+
+    let mut db = single8(0x9, b'a', 1); // ordinal 2, payloadBits = 1 | FLAG_OPEN_MARKER
+    db.push(0x07); // 1-byte SizedInts block offset
+    db.extend_from_slice(&marked_for_delete_at.to_be_bytes());
+    db.extend_from_slice(&9u32.to_be_bytes());
+    let rows_offset = db.len(); // the entry starts right after the 12-byte body
+    db.extend_from_slice(&[0x00, 0x00]); // a (stub) entry
+
+    let extent = rows_node_serialized_extent(&db, 0).expect("the node measures");
+    assert_eq!(
+        (extent.shortest_end(), extent.is_ambiguous()),
+        (5, true),
+        "0x80 is both the LIVE sentinel and the MSB of this body, so BOTH ends are legal"
+    );
+    assert!(
+        extent.ends_at(rows_offset),
+        "the 12-byte reading ends at the entry"
+    );
+
+    assert_eq!(
+        validate_rows_trie_root(&db, 0, rows_offset).map(|r| r.offset()),
+        Ok(0),
+        "a VALID open-marker root must not be rejected because its DeletionTime body \
+         happens to begin with the LIVE-sentinel byte"
     );
 }
 
@@ -274,14 +320,105 @@ fn validate_rejects_a_truncated_node() {
             .reason,
         RowsTrieRootRejectReason::TruncatedNode
     );
+}
 
-    // A zero-count Sparse node is structurally impossible (`TrieNode.Sparse`).
+/// A zero-transition `Sparse` node is structurally impossible (`TrieNode.Sparse`
+/// always stores >= 1 transition), and it is reported as the SHAPE violation it is —
+/// not as a truncation, which would tell an operator their intact file is cut short.
+#[test]
+fn validate_rejects_a_zero_transition_sparse_node_as_a_shape_violation() {
     let db = vec![0x51u8, 0x00, 0x00, 0x00];
+    let reason = validate_rows_trie_root(&db, 0, db.len())
+        .expect_err("a zero-transition Sparse node must be rejected")
+        .reason;
     assert_eq!(
-        validate_rows_trie_root(&db, 0, db.len())
-            .expect_err("a zero-transition Sparse node must be rejected")
-            .reason,
-        RowsTrieRootRejectReason::TruncatedNode
+        reason,
+        RowsTrieRootRejectReason::SparseNodeWithoutTransitions
+    );
+    let message = reason.to_string();
+    assert!(
+        message.contains("0 transitions") && !message.contains("truncated"),
+        "the message must name the violated Sparse invariant, not truncation: {message}"
+    );
+}
+
+/// A `0x00` byte one byte before the entry is a `PayloadOnly` (childless) node with
+/// `payloadBits == 0`: it encodes neither a transition nor an `IndexInfo`, so
+/// `TrieNode.typeFor` never emits it. Its 1-byte extent would otherwise satisfy the
+/// extent equality by accident and be traversed as a root (roborev #3002).
+#[test]
+fn validate_rejects_a_childless_payload_less_root() {
+    // [PayloadOnly leaf][0x00][entry] — the 0x00 sits at `rows_offset - 1`.
+    let mut db = payload_only_leaf(0x07);
+    let bogus_root = db.len();
+    db.push(0x00);
+    let rows_offset = db.len();
+    db.extend_from_slice(&[0x00, 0x00]); // a (stub) entry
+
+    // The extent equality alone would ACCEPT it: the node "ends" exactly at the entry.
+    let extent = rows_node_serialized_extent(&db, bogus_root).expect("a lone header byte");
+    assert_eq!(extent.shortest_end(), rows_offset);
+
+    let rejection = validate_rows_trie_root(&db, bogus_root as i64, rows_offset)
+        .expect_err("a node that encodes nothing cannot root a row index");
+    assert_eq!(
+        rejection.reason,
+        RowsTrieRootRejectReason::ChildlessRootWithoutPayload { header_byte: 0x00 }
+    );
+}
+
+/// Every rejection reason has a DISTINCT, stable metric label (the bounded attribute
+/// value set carried on `cqlite.read.bti.rows_root_rejected`).
+#[test]
+fn every_reject_reason_has_a_distinct_stable_label() {
+    let reasons = [
+        RowsTrieRootRejectReason::NotBelowEntry,
+        RowsTrieRootRejectReason::PayloadIncapableNodeType { header_byte: 0x12 },
+        RowsTrieRootRejectReason::ChildlessRootWithoutPayload { header_byte: 0x00 },
+        RowsTrieRootRejectReason::TruncatedNode,
+        RowsTrieRootRejectReason::SparseNodeWithoutTransitions,
+        RowsTrieRootRejectReason::InvalidPayloadBits { payload_bits: 0x8 },
+        RowsTrieRootRejectReason::ExtentNotAtEntry { extent_end: 7 },
+    ];
+    let mut labels = std::collections::BTreeSet::new();
+    for reason in reasons {
+        let label = reason.label();
+        assert!(
+            !label.is_empty() && label.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            "{label:?} must be a bounded snake_case attribute value"
+        );
+        assert!(labels.insert(label), "duplicate label {label}");
+    }
+    assert_eq!(
+        labels.len(),
+        7,
+        "a new reason variant must be given its own label (the metric attribute's \
+         value set is closed): {labels:?}"
+    );
+}
+
+/// The rejection is a real `std::error::Error`, so it composes with `?` in a function
+/// returning a boxed/`anyhow` error — it sits in an `Err` position.
+#[test]
+fn rejection_is_a_std_error() {
+    let (db, root, rows_offset) = fixture_shaped_rows_db();
+    fn require_root(
+        db: &[u8],
+        root: i64,
+        rows_offset: usize,
+    ) -> std::result::Result<usize, Box<dyn std::error::Error>> {
+        Ok(validate_rows_trie_root(db, root, rows_offset)?.offset())
+    }
+    assert_eq!(
+        require_root(&db, root as i64, rows_offset).map_err(|e| e.to_string()),
+        Ok(root)
+    );
+    let message = require_root(&db, root as i64 - 2, rows_offset)
+        .expect_err("the child is not a root")
+        .to_string();
+    assert!(
+        message.contains("is unusable") && message.contains("SingleNoPayload"),
+        "the boxed error must carry the full diagnostic: {message}"
     );
 }
 

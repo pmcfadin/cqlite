@@ -363,6 +363,34 @@ Two consequences follow, and they are the format's contract rather than a reader
 > `0x40 NEXT_COMPONENT` byte the on-disk separators carry (the two defects previously cancelled).
 > Pinned by `cqlite-core/tests/issue_3002_bti_rows_root_base.rs`.
 
+#### Root placement invariant (ENFORCED at read time)
+
+The row-index trie is written by an incremental, page-aware writer that serializes **children
+before parents** (`IncrementalTrieWriterPageAware`; `RowIndexWriter.complete` returns the root it
+wrote last), and `BtiTableWriter.IndexWriter.append` writes the partition's `TrieIndexEntry`
+**immediately after** that trie body
+([`BtiTableWriter.java:184–187`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiTableWriter.java#L184)).
+Two properties of the on-disk layout follow, for any writer:
+
+1. the root node precedes its entry (`root < RowsOffset`), and
+2. the root is the **last** node written before the entry, so **the root's serialized extent — its
+   structure plus any attached `IndexInfo` payload — ends EXACTLY at `RowsOffset`**.
+
+CQLite ENFORCES (2) when it resolves a `TrieIndexEntry` (`validate_rows_trie_root`, issue #3002): a
+resolved root whose extent does not end at the entry is refused, and the clustering read degrades to
+a full-partition decode. Consequences for anyone changing the reader or the writer:
+
+- A writer must not emit padding, alignment, or any other trailing byte between the root node and
+  the entry — that byte moves the root's extent end below `RowsOffset` and the row index becomes
+  unusable at read time (correct rows, no narrowing).
+- A node-shape change (new payload field, different `DeletionTime` width) must be reflected in the
+  reader's extent computation in the same change, or every root stops validating.
+- Two node shapes are additionally refused as roots: a `SingleNoPayload` ordinal (1/3), which cannot
+  carry block 0's payload, and `PayloadOnly` (ordinal 0) with `payloadBits == 0`, which is childless
+  AND payload-less and so indexes nothing (`TrieNode.typeFor` never emits it).
+- The check is necessary, not sufficient: a wrongly-based offset can coincidentally end at
+  `RowsOffset` and still validate. It bounds the damage; it does not certify the file.
+
 ## Performance Considerations and Benchmark Methodology
 
 Note: Provide methodology and harness only; do not claim specific results here.

@@ -39,8 +39,9 @@
 use cqlite_core::storage::sstable::bti::encode_clustering_bound_oss50;
 use cqlite_core::storage::sstable::bti::{
     iterate_rows_in_bti_trie, lookup_raw_key_in_bti_partitions_db, parse_bti_node_for_test,
-    resolve_rows_db_entry, rows_floor_block_for_test, rows_strict_ceiling_block_for_test,
-    BtiNodeData, BtiNodeType, BtiPartitionLocation, BtiRowIndexEntry, RowsTrieRootRejectReason,
+    resolve_rows_db_entry, rows_floor_block_for_test, rows_node_serialized_extent_end_for_test,
+    rows_strict_ceiling_block_for_test, BtiNodeData, BtiNodeType, BtiPartitionLocation,
+    BtiRowIndexEntry, RowsTrieRootRejectReason,
 };
 use cqlite_core::types::Value;
 use std::io::Cursor;
@@ -627,6 +628,44 @@ fn rows_db_written_against_the_two_low_base(rdb: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Rewrite the SIGNED root delta at `at` so it resolves to `target`, asserting the
+/// re-encoded ZigZag vint keeps its original 1-byte width — otherwise every
+/// following byte in the file would move.
+fn repoint_root_delta(out: &mut [u8], rdb: &[u8], at: usize, base: usize, target: usize) {
+    let mut probe = at;
+    let _old = read_unsigned_vint_independently(rdb, &mut probe);
+    assert_eq!(probe - at, 1, "this fixture's deltas are 1-byte vints");
+    let delta = target as i64 - base as i64;
+    let zig = ((delta << 1) ^ (delta >> 63)) as u64;
+    assert!(
+        zig < 128,
+        "the re-pointed delta {delta} must still be a 1-byte zigzag vint"
+    );
+    out[at] = zig as u8;
+}
+
+/// Perturb the fixture so every partition's root delta resolves to the byte
+/// IMMEDIATELY BEFORE its entry, and make that byte `0x00`.
+///
+/// `0x00` is `PayloadOnly` (ordinal 0 — childless) with `payloadBits == 0`: a node
+/// that encodes neither a transition nor an `IndexInfo`, which `TrieNode.typeFor`
+/// never emits. Its serialized extent is the single header byte, so it ends EXACTLY
+/// at the entry — the writer-ordering equality alone would ACCEPT it (asserted
+/// below), which is why the childless-shape check exists (roborev #3002).
+///
+/// Synthesized here; no new binary fixture is shipped.
+fn rows_db_with_childless_zero_byte_root(rdb: &[u8]) -> Vec<u8> {
+    let mut out = rdb.to_vec();
+    for (_pk, rows_offset, _root) in PARTITIONS {
+        let key_length = u16::from_be_bytes([rdb[rows_offset], rdb[rows_offset + 1]]) as usize;
+        let base = rows_offset + 2 + key_length;
+        let at = root_delta_position(rdb, rows_offset);
+        repoint_root_delta(&mut out, rdb, at, base, rows_offset - 1);
+        out[rows_offset - 1] = 0x00;
+    }
+    out
+}
+
 /// Append a `TrieIndexEntry` (`[u16 keylen][key][dataPos vint][rootΔ zigzag vint]
 /// [blockCount vint][0x80 LIVE deletion]`) for a trie rooted at `trie_root`,
 /// returning its `RowsOffset`.
@@ -721,6 +760,55 @@ fn two_low_base_entry_is_detected_as_an_unusable_root() {
     }
 }
 
+/// AC (root validation, roborev #3002) — a resolved root that lands on a `0x00` byte
+/// one byte before the entry is rejected on the NODE-SHAPE invariant, even though its
+/// serialized extent ends exactly at the entry (so the writer-ordering equality alone
+/// would have accepted it and traversed a node that indexes nothing).
+#[test]
+fn childless_zero_byte_root_is_rejected_although_its_extent_ends_at_the_entry() {
+    let Some((rdb, _pdb)) = wide_components() else {
+        return;
+    };
+    let patched = rows_db_with_childless_zero_byte_root(&rdb);
+    assert_ne!(patched, rdb, "the perturbation must change the bytes");
+
+    for (pk, rows_offset, _true_root) in PARTITIONS {
+        let bogus_root = rows_offset - 1;
+        assert_eq!(patched[bogus_root], 0x00, "pk={pk}: the crafted root byte");
+
+        // The extent check on its own is satisfied — that is the fail-open being closed.
+        assert_eq!(
+            rows_node_serialized_extent_end_for_test(&patched, bogus_root),
+            Some(rows_offset),
+            "pk={pk}: a lone 0x00 header ends exactly at the entry, so the extent \
+             equality ALONE would accept it as the root"
+        );
+
+        let good = resolve_rows_db_entry(&rdb, rows_offset).expect("baseline entry");
+        let header = resolve_rows_db_entry(&patched, rows_offset)
+            .expect("the ENTRY must still deserialize — only the ROOT is unusable");
+        assert_eq!(
+            (header.data_position, header.block_count),
+            (good.data_position, good.block_count),
+            "pk={pk}: data_position/block_count must be unaffected by an unusable root"
+        );
+        assert_eq!(
+            header.trie_root_offset(),
+            None,
+            "pk={pk}: no root capability"
+        );
+        let rejection = header
+            .trie_root
+            .expect_err("a childless payload-less node cannot root a row index");
+        assert_eq!(rejection.resolved_offset, bogus_root as i64);
+        assert_eq!(
+            rejection.reason,
+            RowsTrieRootRejectReason::ChildlessRootWithoutPayload { header_byte: 0x00 },
+            "pk={pk}: the violated invariant is the node SHAPE, not the extent"
+        );
+    }
+}
+
 /// AC (root validation) — the "root unusable" fallback is a DIFFERENT branch from
 /// the #1968 implicit-first signal, asserted on the branch itself, not on rows:
 ///
@@ -791,7 +879,8 @@ fn root_unusable_fallback_is_distinct_from_implicit_first_block() {
 ))]
 mod wiring {
     use super::{
-        datasets_root, require_fixtures, rows_db_written_against_the_two_low_base, WIDE_DIR,
+        datasets_root, require_fixtures, rows_db_with_childless_zero_byte_root,
+        rows_db_written_against_the_two_low_base, WIDE_DIR,
     };
     use cqlite_core::ingestion::{ingest, IngestionConfig};
     use cqlite_core::Database;
@@ -843,6 +932,21 @@ mod wiring {
     /// one whose entries were written against the pre-#3002 2-LOW base. Returns
     /// `(tempdir, <tmp>/sstables)`; the tempdir must outlive the reader.
     fn fixture_copy_with_two_low_base_rows_db() -> Option<(TempDir, PathBuf)> {
+        fixture_copy_with_patched_rows_db(&rows_db_written_against_the_two_low_base)
+    }
+
+    /// As above, but with a `Rows.db` whose entries resolve to a `0x00` byte one byte
+    /// before the entry — a childless, payload-less node whose extent nevertheless ends
+    /// exactly at the entry (roborev #3002).
+    fn fixture_copy_with_childless_zero_byte_root() -> Option<(TempDir, PathBuf)> {
+        fixture_copy_with_patched_rows_db(&rows_db_with_childless_zero_byte_root)
+    }
+
+    /// Copy the committed fixture SSTable into a temp dir, rewriting `Rows.db` through
+    /// `patch`. Returns `(tempdir, <tmp>/sstables)`; the tempdir must outlive the reader.
+    fn fixture_copy_with_patched_rows_db(
+        patch: &dyn Fn(&[u8]) -> Vec<u8>,
+    ) -> Option<(TempDir, PathBuf)> {
         let src = datasets_root()?.join(WIDE_DIR);
         let tmp = TempDir::new().expect("temp dir");
         let dst = tmp.path().join(WIDE_DIR);
@@ -854,9 +958,9 @@ mod wiring {
             }
         }
         let rows_db = dst.join("da-2-bti-Rows.db");
-        let patched = rows_db_written_against_the_two_low_base(
-            &std::fs::read(&rows_db).expect("read Rows.db"),
-        );
+        let original = std::fs::read(&rows_db).expect("read Rows.db");
+        let patched = patch(&original);
+        assert_ne!(patched, original, "the perturbation must change the bytes");
         std::fs::write(&rows_db, &patched).expect("write patched Rows.db");
         let sstables = tmp.path().join("sstables");
         Some((tmp, sstables))
@@ -938,21 +1042,49 @@ mod wiring {
         let Some(db) = open_db_from(&sstables).await else {
             return;
         };
+        assert_fallback_returns_exact_rows(&db, "2-low base").await;
+    }
 
+    /// AC (root validation, roborev #3002) — the same guarantee for a `Rows.db` whose
+    /// entries resolve to a `0x00` byte one byte before the entry: a childless,
+    /// payload-less node whose extent DOES end at the entry, so only the node-shape
+    /// check rejects it. Before that check, this root was accepted, the floor walk on
+    /// it errored, and `bti_clustering_row_window` turned the error into
+    /// `Error::corruption` — i.e. every one of these slices FAILED, where the honest
+    /// rejection returns the correct rows through the full-partition fallback.
+    #[tokio::test]
+    async fn childless_zero_byte_root_rows_db_still_returns_exact_rows_through_select() {
+        let Some((_tmp, sstables)) = fixture_copy_with_childless_zero_byte_root() else {
+            return;
+        };
+        let Some(db) = open_db_from(&sstables).await else {
+            return;
+        };
+        assert_fallback_returns_exact_rows(&db, "childless 0x00 root").await;
+    }
+
+    /// Shared oracle for both "unusable root ⇒ honest fallback" wiring tests: every
+    /// partition still decodes in full, and every slice class — including the block-0
+    /// range a bogus window drops — returns EXACTLY its rows, in ascending clustering
+    /// order, never an error and never zero rows.
+    async fn assert_fallback_returns_exact_rows(db: &Database, label: &str) {
         for pk in [1, 2, 3] {
             let full = db
                 .execute(&format!("SELECT pk, ck FROM {TABLE} WHERE pk = {pk}"))
                 .await
-                .expect("full partition read must succeed on a mis-rooted row index");
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{label}: full partition read must succeed on a mis-rooted row index: {e}"
+                    )
+                });
             assert_eq!(
                 full.rows.len(),
                 300,
-                "pk={pk}: the full-partition decode fallback must still return all 300 \
-                 rows (0 ⇒ the fixture copy did not decode, which is a FAILURE)"
+                "{label}, pk={pk}: the full-partition decode fallback must still return \
+                 all 300 rows (0 ⇒ the fixture copy did not decode, which is a FAILURE)"
             );
         }
 
-        // Every slice class, including the block-0 range that a bogus window drops.
         let cases: [(&str, Vec<i32>); 5] = [
             ("ck >= 100 AND ck < 110", (100..110).collect()),
             ("ck = 150", vec![150]),
@@ -966,24 +1098,24 @@ mod wiring {
                     "SELECT pk, ck FROM {TABLE} WHERE pk = 1 AND {predicate}"
                 ))
                 .await
-                .unwrap_or_else(|e| panic!("`{predicate}` must succeed, not error: {e}"));
+                .unwrap_or_else(|e| panic!("{label}: `{predicate}` must succeed, not error: {e}"));
             let mut got: Vec<i32> = res
                 .rows
                 .iter()
                 .map(|r| match r.values.get("ck") {
                     Some(cqlite_core::types::Value::Integer(v)) => *v,
-                    other => panic!("`{predicate}`: ck decoded as {other:?}"),
+                    other => panic!("{label}: `{predicate}`: ck decoded as {other:?}"),
                 })
                 .collect();
             assert!(
                 got.windows(2).all(|w| w[0] < w[1]),
-                "`{predicate}` must stay in ascending clustering order; got {got:?}"
+                "{label}: `{predicate}` must stay in ascending clustering order; got {got:?}"
             );
             got.sort_unstable();
             assert_eq!(
                 got, expected,
-                "`{predicate}` must return exactly its slice via the full-partition \
-                 fallback — a bogus window would drop or lose rows here"
+                "{label}: `{predicate}` must return exactly its slice via the \
+                 full-partition fallback — a bogus window would drop or lose rows here"
             );
         }
     }

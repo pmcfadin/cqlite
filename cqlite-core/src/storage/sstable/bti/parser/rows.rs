@@ -187,18 +187,25 @@ fn decode_da_deletion_time(data: &[u8], start: usize) -> BtiResult<(Option<(i32,
     ))
 }
 
-/// Encoded byte length of the modern (DA/BTI) `DeletionTime` at `data[start..]`
-/// (1 for the LIVE sentinel, [`DA_DELETION_TIME_BODY_LEN`] otherwise).
+/// Whether `byte` is the modern (DA/BTI) `DeletionTime` LIVE-sentinel byte.
 ///
-/// Shared with [`super::rows_root`], whose node-extent computation needs the
-/// payload's length without decoding it, so the LIVE-sentinel/body widths live in
-/// exactly one place.
-///
-/// # Errors
-/// Same as [`decode_da_deletion_time`]: out-of-bounds `start` or a truncated
-/// non-live value.
-pub(super) fn da_deletion_time_encoded_len(data: &[u8], start: usize) -> BtiResult<usize> {
-    decode_da_deletion_time(data, start).map(|(_deletion, consumed)| consumed)
+/// NOTE for callers that need a LENGTH rather than a decode: this test is
+/// PREFIX-AMBIGUOUS by construction. `0x80` is both the one-byte LIVE sentinel and
+/// the leading big-endian byte of a full 12-byte body whose `markedForDeleteAt` lies
+/// in the `Long.MIN_VALUE` octant, and nothing later in the encoding distinguishes
+/// them. [`decode_da_deletion_time`] resolves the ambiguity the way Cassandra's own
+/// reader does (sentinel first), which is right for decoding a value; a consumer
+/// that measures a surrounding structure must consider BOTH widths — see
+/// [`super::rows_root::RowsNodeExtent`].
+pub(super) fn da_deletion_time_is_live_sentinel_byte(byte: u8) -> bool {
+    byte == DA_DELETION_TIME_LIVE_SENTINEL
+}
+
+/// Width of a NON-live modern (DA/BTI) `DeletionTime` body
+/// ([`DA_DELETION_TIME_BODY_LEN`]), so the on-disk widths live in exactly one place
+/// and [`super::rows_root`]'s node-extent computation cannot drift from the decoder.
+pub(super) fn da_deletion_time_body_len() -> usize {
+    DA_DELETION_TIME_BODY_LEN
 }
 
 /// Decode a `Rows.db` in-trie payload (`RowIndexReader.IndexInfo`) at
@@ -352,12 +359,19 @@ pub struct BtiRowIndexHeader {
     /// [`super::rows_root`] (issue #3002), else `Err` carrying WHICH invariant it
     /// violated.
     ///
-    /// The validated newtype is the capability: traversal entry points take a
-    /// `usize` root, and the only way to obtain one from an entry is
-    /// [`ValidatedRowsTrieRoot::offset`] (or [`Self::require_trie_root`]), so a
-    /// future caller cannot walk from an unvalidated root by accident. A clustering
-    /// reader that gets `Err` must take its "cannot narrow" fallback (decode the
-    /// full partition) rather than return a bogus window — see
+    /// The validated newtype is a capability, with a deliberately BOUNDED
+    /// guarantee: traversal entry points take a `usize` root, and the only way to
+    /// obtain one from an entry is [`ValidatedRowsTrieRoot::offset`] (or
+    /// [`Self::require_trie_root`]), so a caller cannot walk from a NEVER-validated
+    /// root by accident. It is NOT bound to the buffer it was validated against —
+    /// the newtype is `Copy`, so nothing in the type system stops a caller from
+    /// moving a root validated against `Rows.db` A into a header used with buffer B.
+    /// No in-repo path does that (production validates and walks the same slice), so
+    /// there is no live fail-open; binding the capability to its buffer is tracked as
+    /// a follow-up nit, not claimed here.
+    ///
+    /// A clustering reader that gets `Err` must take its "cannot narrow" fallback
+    /// (decode the full partition) rather than return a bogus window — see
     /// `reader::data_access::bti::bti_clustering_row_window`.
     pub trie_root: Result<ValidatedRowsTrieRoot, RowsTrieRootRejection>,
     /// Number of row-index blocks indexed by this partition's trie.
