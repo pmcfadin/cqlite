@@ -612,7 +612,10 @@ async fn bti_wide_partition_resolves_through_rows_db() {
     //   1. A CQLite-written wide partition has a NON-empty first separator, so a
     //      clustering bound below it floors to `None` — the #1968 implicit-first
     //      branch in `reader/data_access/bti.rs` must therefore live indefinitely,
-    //      even though it is unreachable for Cassandra-written tries.
+    //      even though it is unreachable for Cassandra-written tries. That branch's
+    //      end-to-end coverage is `issue_1968_cqlite_written_bti_implicit_first.rs`,
+    //      which reads a CQLite-written BTI wide partition through `Database::execute`
+    //      (the Cassandra-fixture #1968 lane can no longer reach it).
     //   2. A spec-conformant Cassandra 5.0 `RowIndexReader.separatorFloor` over a
     //      CQLite-written `Rows.db` finds NO block-0 entry, so for a clustering key
     //      below the first stored separator the partition's earliest clustering rows
