@@ -850,7 +850,9 @@ count_rule_rejections() {
              "$WORK"/case-blind-gate "$WORK"/case-deadline-too-long \
              "$WORK"/case-types-too-narrow "$WORK"/case-types-unobserved \
              "$WORK"/case-compound-always "$WORK"/case-echo-only-gate-comment \
-             "$WORK"/case-aggregator-no-label-events; do
+             "$WORK"/case-aggregator-no-label-events \
+             "$WORK"/case-two-scopes "$WORK"/case-mandate-drift \
+             "$WORK"/case-label-churn "$WORK"/case-head-evaluated; do
     run_policy "$dir"
     [ "$RC" -ne 0 ] && n=$((n + 1))
   done
@@ -863,10 +865,10 @@ RULE="$STUB_DIR/gating_registry.rb"
 STUB_REJECTIONS=$(count_rule_rejections)
 RULE="$REGISTRY_RB"
 
-if [ "$REAL_REJECTIONS" -eq 10 ]; then
-  ok "the real rule rejects all 10 discriminating registries"
+if [ "$REAL_REJECTIONS" -eq 14 ]; then
+  ok "the real rule rejects all 14 discriminating registries"
 else
-  bad "the real rule rejected only $REAL_REJECTIONS/10"
+  bad "the real rule rejected only $REAL_REJECTIONS/14"
 fi
 if [ "$STUB_REJECTIONS" -eq 0 ]; then
   ok "the always-pass stub rejects none, so this suite would go RED under it"
