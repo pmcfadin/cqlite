@@ -530,7 +530,11 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   Branch protection enforces the `required` check for admins too (`enforce_admins`), so `--auto` can
   never land against an unchecked head and bypass is impossible; a known-flake red gets
   `gh run rerun --failed`, never a bypass. This enforcement is load-bearing: if branch-protection
-  settings change, this doc governs catching it (#2433). **What a green `required` now covers
+  settings change, this doc governs catching it (#2433). **`gh pr merge --auto` is the ONLY sanctioned
+  merge — REST `PUT repos/OWNER/REPO/pulls/N/merge` is ABSOLUTELY FORBIDDEN (#3055)**: it merges
+  *immediately*, bypassing the required-check wait branch protection exists to enforce, so it is never a
+  GraphQL-throttle fallback. `--auto` is set-once/idempotent — on a throttle, **sleep and retry the same
+  arm**. (The comment-post and PR-create REST fallbacks remain fine; only merge is forbidden.) **What a green `required` now covers
   (#2910)**: `required` is no longer only its own steps — it also polls the PR head's sibling check
   runs and **fails closed** on any tier declared in `.github/ci-gating-tiers.yml` that is failed,
   still pending at the aggregation deadline (60 min default), or **absent** (absence is an error,
