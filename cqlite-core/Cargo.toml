@@ -309,6 +309,18 @@ name = "decode"
 path = "benches/decode_bench.rs"
 harness = false
 
+# Row-conversion (row-build) CPU instrument (issue #3027; unblocks #2901). Two
+# groups over N ∈ {8,16,32,64} columns: `row_build/columns_<N>` drives the REAL
+# public `build_row_from_scan_cached` over 2,000 synthetic partition-grouped rows
+# with one shared PartitionKeyCache, and `row_build/hashonly_<N>` isolates the
+# HashMap-construction + SipHash term. Fully synthetic (no dataset fixture), needs
+# only the default `state_machine` feature. NOT a perf-gate entry — an instrument
+# whose absolute rows/sec is machine-dependent.
+[[bench]]
+name = "row_build"
+path = "benches/row_build_bench.rs"
+harness = false
+
 [[bench]]
 name = "write"
 harness = false
