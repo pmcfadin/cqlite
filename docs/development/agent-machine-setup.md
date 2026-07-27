@@ -129,6 +129,21 @@ server-side (assignee `@me` is identical for one user on two machines, and the
 + `Status=In Progress`. A second machine picking up a reaped/dead claim adopts it via
 compare-and-swap — `bash scripts/flow/claim.sh adopt <N> --expect <current-sha>` — not a
 bare `git fetch`, so a resurrected original holder loses the lease and detects it at once.
+When the claim ref is FREE but an `issue-<N>-*` branch still exists on origin (a resumed,
+parked, or reaped issue, or a merged-but-undeleted branch), `claim` refuses with
+`reason=legacy-branch-lock detail=<branches> claim-ref=free resume=documented-procedure` —
+a diagnosis that names the blocking branch and confirms the claim ref itself is free.
+The one sanctioned resume is
+`bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:branch-outlived-claim`
+(#2945) — git's empty lease, so the create is still server-arbitrated and the claim commit
+records who + why (a placeholder reason like `<why>`, or one still carrying an unsubstituted
+`<…>`, is refused — so the `--reason` above is shown already substituted). It is deliberately **not
+printed** by the refusal: a printed line gets run literally, and an older-fleet worker locks
+with the BRANCH while holding no claim ref, so the empty-lease adopt would succeed against an
+actively-worked lane. Establish abandonment yourself first — `bash scripts/flow/claim-heartbeat.sh
+should-reap <machine>` (the same test `flow-board`'s reaper applies: age > 4h AND no open PR AND
+pid-dead-if-local), plus the board `Status` and the branch/PR author — and never hand-craft a
+claim commit.
 
 ## Full doctrine
 

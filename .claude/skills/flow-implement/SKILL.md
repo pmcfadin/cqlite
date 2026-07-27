@@ -62,6 +62,19 @@ never gate stdout or review churn.
      # re-read; a UNIQUE root commit means a different-slug or identical-base
      # competitor can no longer double-claim. Adopting a reaped claim instead?
      # Use: bash scripts/flow/claim.sh adopt <N> --expect <old-sha>.
+     # RESUMING an issue whose issue-<N>-* branch outlived its claim ref (the
+     # `reason=legacy-branch-lock ... claim-ref=free` refusal)? The sanctioned command:
+     #   bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:branch-outlived-claim
+     # (#2945 — git's empty lease: still server-arbitrated, records who + why. The
+     # --reason above is CONCRETE on purpose: a placeholder reason, or one still
+     # carrying an unsubstituted <…>, is a usage error (exit 64)). The refusal
+     # DIAGNOSES (branch +
+     # claim-ref=free) but deliberately prints NO runnable command: an older-fleet
+     # worker locks with the BRANCH only, so this adopt WOULD succeed against a lane
+     # somebody is actively working. CONFIRM abandonment first — `claim-heartbeat.sh
+     # should-reap <machine>` (age > 4h AND no open PR AND pid-dead if local), the board
+     # Status, the branch/PR author. Never resume blind.
+     # NEVER hand-craft a claim commit to get past the guard.
      if ! bash scripts/flow/claim.sh claim <N>; then
        echo "CLAIM LOST — another machine holds refs/claims/issue-<N>. Take the next item (or fetch to RESUME)."; exit 0
      fi

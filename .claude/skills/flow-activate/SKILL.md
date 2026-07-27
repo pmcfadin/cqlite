@@ -37,6 +37,15 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
    if ! bash scripts/flow/claim.sh claim <N>; then
      echo "CLAIM LOST — another session holds refs/claims/issue-<N>. Take the next item."
      # (Adopting a reaped claim instead? Use: bash scripts/flow/claim.sh adopt <N> --expect <old-sha>)
+     # (Refused with reason=legacy-branch-lock ... claim-ref=free — a FREE claim ref but an
+     #  issue-<N>-* branch still on origin? The sanctioned resume is
+     #  `claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:branch-outlived-claim`
+     #  (#2945 — a placeholder reason, or one still carrying an unsubstituted <…>, is
+     #  rejected with exit 64, so substitute a concrete why). The refusal
+     #  deliberately does NOT print it: CONFIRM the lane is abandoned first —
+     #  `claim-heartbeat.sh should-reap <machine>` (age > 4h AND no open PR AND pid-dead if
+     #  local), board Status, branch/PR author. Never resume blind, never hand-craft a claim
+     #  commit)
    fi
    # CLAIM HELD → set up the worktree + branch. The branch is naming/PR plumbing, NOT the lock:
    wt=".claude/worktrees/issue-<N>-<slug>"

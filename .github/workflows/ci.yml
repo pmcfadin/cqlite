@@ -995,6 +995,16 @@ jobs:
           "flow-finalize guardrail tests"
           -- /bin/bash scripts/flow/tests/finalize-cleanup.test.sh
 
+      # Claim-lock RESUME path (issue #2945): the sanctioned (but unadvertised)
+      # empty-lease adopt, the guard's diagnosis-only refusal, its fail-closed
+      # enumeration, and a REAL two-machine race on the adopt. macOS too —
+      # claim.sh must stay bash-3.2 clean.
+      - name: Run claim.sh resume-path guardrail tests (${{ matrix.os }} /bin/bash)
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "claim resume-path guardrail tests"
+          -- /bin/bash scripts/flow/tests/claim-resume.test.sh
+
       # Release-train version tooling (issue #2652). Runs on macOS too so the
       # system bash 3.2 (the release preflight's real target) is validated, not
       # just asserted.
