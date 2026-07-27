@@ -77,7 +77,23 @@ const CHAPTERS = [
   { file: 'appendix-e-glossary.md',             order: 105, prefix: 'appendix-e' },
   { file: 'appendix-f-known-limitations.md',    order: 106, prefix: 'appendix-f' },
   { file: 'appendix-g-compression-chunk-formats.md', order: 107, prefix: 'appendix-g' },
+  { file: 'appendix-g-algorithm-reference.md',   order: 108, prefix: 'appendix-g-algorithms' },
+  { file: 'appendix-g-quick-reference.md',       order: 109, prefix: 'appendix-g-quickref' },
+  { file: 'appendix-h-commitlog-segment-format.md', order: 110, prefix: 'appendix-h' },
 ];
+
+// Chapter-directory files that are deliberately NOT published to the site.
+// Every entry needs a reason — the publication guard below fails the build on
+// any chapters/*.md that is neither in CHAPTERS nor listed here, so a new
+// chapter can no longer rot out of the site unnoticed (issue #3006).
+const UNPUBLISHED_BY_DESIGN = new Map([
+  [
+    'APPENDIX_G_INDEX.md',
+    'Stale meta "document map" for the Appendix G family: wrong line count and ' +
+      'two references to files that no longer exist. Delete-vs-correct-and-publish ' +
+      'is an open owner decision on issue #3006 — do not publish as-is.',
+  ],
+]);
 
 // Map from source filename → output slug for link rewriting
 const FILE_TO_SLUG = new Map();
@@ -195,6 +211,97 @@ function extractDescription(content) {
 
 console.log('[sync-format-guide] Starting...');
 
+// ── Publication guard (issue #3006) ──────────────────────────────────────────
+// The generated pages are gitignored, so CHAPTERS is the only record of what is
+// published. Forgetting an entry used to produce a green build with the chapter
+// silently unreachable (and inbound links degraded to GitHub blob URLs via the
+// TODO(W8) fallback below). Assert set-equality instead: every chapters/*.md is
+// either published or explicitly excluded with a reason.
+{
+  const onDisk = fs
+    .readdirSync(CHAPTERS_DIR)
+    .filter(f => f.endsWith('.md') && f !== 'README.md')
+    .sort();
+  const unaccounted = onDisk.filter(
+    f => !FILE_TO_SLUG.has(f) && !UNPUBLISHED_BY_DESIGN.has(f)
+  );
+  const staleExclusions = [...UNPUBLISHED_BY_DESIGN.keys()].filter(
+    f => !onDisk.includes(f)
+  );
+  const doublyListed = [...UNPUBLISHED_BY_DESIGN.keys()].filter(f => FILE_TO_SLUG.has(f));
+  // A CHAPTERS entry whose source is gone must FAIL, not warn-and-skip: the
+  // emit loop below would otherwise `continue` past it and produce a green
+  // build with the published page silently missing (the same class of
+  // fail-open bug this guard exists to prevent).
+  const missingSources = CHAPTERS.map(ch => ch.file).filter(f => !onDisk.includes(f));
+  // Output paths derive from `prefix`, and FILE_TO_SLUG is keyed by `file`, so
+  // neither a duplicate prefix (one page silently overwrites another) nor a
+  // duplicate file is caught by the set-equality check alone.
+  const dupes = (values) => {
+    const seen = new Set();
+    const dup = new Set();
+    for (const v of values) {
+      if (seen.has(v)) dup.add(v);
+      seen.add(v);
+    }
+    return [...dup].sort();
+  };
+  const duplicatePrefixes = dupes(CHAPTERS.map(ch => ch.prefix));
+  const duplicateFiles = dupes(CHAPTERS.map(ch => ch.file));
+
+  const problems = [];
+  if (unaccounted.length > 0) {
+    problems.push(
+      'These chapter files are neither published nor explicitly excluded:\n' +
+        unaccounted.map(f => `    - ${f}`).join('\n') +
+        '\n  FIX: add a { file, order, prefix } entry to CHAPTERS to publish it, or add\n' +
+        '       it to UNPUBLISHED_BY_DESIGN with a reason if it must stay off the site.'
+    );
+  }
+  if (staleExclusions.length > 0) {
+    problems.push(
+      'These UNPUBLISHED_BY_DESIGN entries no longer exist on disk (drop them):\n' +
+        staleExclusions.map(f => `    - ${f}`).join('\n')
+    );
+  }
+  if (doublyListed.length > 0) {
+    problems.push(
+      'These files are in BOTH CHAPTERS and UNPUBLISHED_BY_DESIGN (pick one):\n' +
+        doublyListed.map(f => `    - ${f}`).join('\n')
+    );
+  }
+
+  if (missingSources.length > 0) {
+    problems.push(
+      'These CHAPTERS entries have no source file on disk (would silently not publish):\n' +
+        missingSources.map(f => `    - ${f}`).join('\n') +
+        '\n  FIX: restore the chapter file, or remove/rename its CHAPTERS entry.'
+    );
+  }
+  if (duplicatePrefixes.length > 0) {
+    problems.push(
+      'These CHAPTERS prefixes are used more than once (pages would overwrite each other):\n' +
+        duplicatePrefixes.map(p => `    - ${p}`).join('\n')
+    );
+  }
+  if (duplicateFiles.length > 0) {
+    problems.push(
+      'These CHAPTERS files are listed more than once:\n' +
+        duplicateFiles.map(f => `    - ${f}`).join('\n')
+    );
+  }
+
+  if (problems.length > 0) {
+    console.error('[sync-format-guide] ERROR: chapter publication set mismatch (issue #3006)');
+    for (const p of problems) console.error(`  ${p}`);
+    process.exit(1);
+  }
+  console.log(
+    `[sync-format-guide] Publication guard OK: ${FILE_TO_SLUG.size} published, ` +
+      `${UNPUBLISHED_BY_DESIGN.size} excluded by design, ${onDisk.length} on disk.`
+  );
+}
+
 // Ensure output directories exist
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 fs.mkdirSync(DIAGRAMS_DST, { recursive: true });
@@ -217,8 +324,10 @@ let count = 0;
 for (const ch of CHAPTERS) {
   const srcPath = path.join(CHAPTERS_DIR, ch.file);
   if (!fs.existsSync(srcPath)) {
-    console.warn(`[sync-format-guide] WARN: source not found: ${srcPath}`);
-    continue;
+    // Unreachable via the publication guard above; kept as a fail-closed
+    // backstop so a published chapter can never be skipped silently.
+    console.error(`[sync-format-guide] ERROR: source not found: ${srcPath}`);
+    process.exit(1);
   }
 
   const rawContent = fs.readFileSync(srcPath, 'utf-8');
