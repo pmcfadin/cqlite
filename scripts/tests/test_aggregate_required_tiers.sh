@@ -410,6 +410,30 @@ else
 fi
 if contains "$(cat "$SUMMARY")" 'tester'; then ok "the summary records the waiver actor"; else bad "summary omits the waiver actor"; fi
 
+# The actor is EVENT-DERIVED and lands inside a `::warning::` workflow command,
+# so it gets the same allowlist treatment as every other injected value (round 3
+# R5). An off-shape name is withheld rather than echoed; a real app login with a
+# `[bot]` suffix must NOT be (a false withholding would hide who waived).
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --actor 'evil::error::injected'
+if [ "$RC" -eq 0 ] && ! contains "$OUT" "::error::injected"; then
+  ok "an actor carrying a workflow-command payload is withheld, not interpolated"
+else
+  bad "the actor reached the annotation verbatim (rc=$RC): $OUT"
+fi
+if contains "$OUT" "actor withheld"; then
+  ok "the withholding is stated rather than silent"
+else
+  bad "an off-shape actor was dropped with no diagnostic: $OUT"
+fi
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --actor 'dependabot[bot]'
+if [ "$RC" -eq 0 ] && contains "$OUT" 'dependabot[bot]'; then
+  ok "a legitimate app login keeps its [bot] suffix (no false withholding)"
+else
+  bad "a real app actor was withheld (rc=$RC): $OUT"
+fi
+
 invoke "cat $(runs_file one-failed)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta" --actor tester
 if [ "$RC" -ne 0 ]; then ok "a waiver cannot excuse a FAILED tier"; else bad "failed+waived wrongly passed"; fi
 if contains "$OUT" "cannot be waived"; then

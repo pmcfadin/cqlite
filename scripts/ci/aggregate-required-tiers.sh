@@ -161,6 +161,18 @@ case "$EVENT_ACTION_IN" in
   "" ) : ;;
   *[!a-z_]* ) fail_closed "--event-action is not a pull_request activity type: '$EVENT_ACTION_IN'" ;;
 esac
+# The waiver actor is echoed into a `::warning::` WORKFLOW COMMAND, so it is not
+# merely a log string: the repo's injection doctrine says allowlist-validate
+# anything event-derived before it reaches one. A GitHub login is alphanumerics,
+# hyphens, dots/underscores and an app's `[bot]` suffix — nothing else can be a
+# real actor. Withholding an off-shape name (rather than failing closed) keeps a
+# malformed actor from RED-ING a legitimate PR: this value only ever decorates a
+# diagnostic, so a false red here would be pure cost.
+case "$ACTOR" in
+  "" ) ACTOR="unknown" ;;
+  *[!A-Za-z0-9._\[\]-]* ) ACTOR="(actor withheld: not a github login shape)" ;;
+esac
+[ "${#ACTOR}" -gt 64 ] && ACTOR="(actor withheld: over-long)"
 
 # Default data sources. Check runs are keyed to the PULL REQUEST HEAD sha — NOT
 # github.sha, which for a pull_request event is the synthesised merge commit and
