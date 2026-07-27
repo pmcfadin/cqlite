@@ -38,30 +38,47 @@ carry).
 - **A declared registry.** `.github/ci-gating-tiers.yml` names every gating tier by workflow file and by
   the exact check-run context it emits (a check run's name is the emitting job's `name:`), plus an
   `exempt:` block listing every other `pull_request` workflow with a reason and an issue link.
-- **`required` fails closed** on any registered tier that is `failure`/`cancelled`/`timed_out`, still
+- **`required` fails closed** on any registered tier that is `failure`/`timed_out`, still
   non-terminal at the aggregation deadline (60 min default, per-tier override, always strictly below the
   job's `timeout-minutes` so expiry is a reported red rather than a cancellation), or **absent**.
   Absence is NEVER read as inapplicability: a registered tier always emits its context, and an
   inapplicable tier reports that as an explicit **success**. Unregistered check runs (perf, docs recipe
   smoke) stay advisory and cannot block.
+- **…but a false RED is an outage too.** Failing closed applies at the DEADLINE; mid-poll, the states
+  that are transient and self-correcting are re-polled. A `cancelled` tier is routine — marking a draft
+  ready for review or adding a label cancels the tier's in-flight run under `cancel-in-progress` — so it
+  is treated as superseded while a replacement is plausible (supersession is detected positively: the
+  replacement mints a higher check-run id), and fails once the grace lapses or the deadline arrives. A
+  5xx/rate-limit/DNS blip reading the check-runs API is retried under backoff and fails only on
+  persistence. Neither weakens a genuine negative into a pass.
 - **The diff mandates the tier, not the label.** A registered tier's own classifier decides
   applicability from `git diff --name-only base...head`. A mandating diff runs the tier **with or
   without** its `ci:*` label; the label survives only as an opt-in for non-mandating diffs. **No step of
   the delivery flow asks you to work out which tiers are out of band, or to apply a label.**
-- **Enrolment is forced.** `scripts/ci/validate-workflows.rb` already runs as a step *inside* the
-  `required` job; it now fails when a `pull_request`/`pull_request_target` workflow is neither
-  registered nor exempted, when a registered workflow carries a blocking trigger filter, when its
-  emitting job is conditional or does not inspect every `needs.<job>.result`, or when a registry entry
-  is dangling. A new tier that forgets to enrol **reds `required`**.
+- **Enrolment is forced.** `pr-gate.yml` now has two jobs: `pr-gate-core` (the gate's own
+  fmt/clippy/test/policy steps) and `required` (`needs: [pr-gate-core]`, `if: always()`, the unchanged
+  branch-protection context) which does the aggregating. `scripts/ci/validate-workflows.rb` runs as a
+  step in **`pr-gate-core`**, and `required` fails unconditionally when the core job did not conclude
+  `success` — so the rule still reds `required`, one job removed. It fails when a
+  `pull_request`/`pull_request_target` workflow is neither registered nor exempted, when a registered
+  workflow carries a blocking trigger filter (`paths`, `branches`, or a `types:` set that is too narrow
+  to fire on every new head sha or wider than the aggregator observes), when its emitting job's
+  condition is not exactly `always()`, when no step of that job both reads a dependency's `.result` and
+  can exit non-zero, or when a registry entry is dangling. A new tier that forgets to enrol **reds
+  `required`**.
 - **Arming `--auto` stays correct.** GitHub releases the merge on `required` going green, and `required`
   cannot go green until every registered tier has reported success — so keep arming immediately (#2667)
   and never poll a PR's own CI.
 - **Residual — re-run order.** A tier re-run *after* `required` has already gone green cannot be
   retracted by a finished job: **re-run the tier, then re-run `required`**, in that order.
   `scripts/flow/premerge-assert.sh` remains the closer's last look.
-- **Break-glass is per-tier.** `ci:waive:<tier-id>` (an owner action) can excuse a tier that is absent
-  or pending at the deadline; it can **never** excuse a failed one, and there is no blanket waiver. Each
-  honoured waiver emits a warning annotation and a job-summary line naming the tier and the actor.
+- **Break-glass is per-tier, and it actually works.** `ci:waive:<tier-id>` (an owner action) excuses a
+  tier that is **absent** (immediately — there is nothing to wait for) or **pending at the deadline**; it
+  can **never** excuse a failed or cancelled one, and there is no blanket waiver. The label takes effect
+  without a re-run: `required` re-reads the PR's current labels on every poll, and `pr-gate.yml`
+  subscribes to `labeled`/`unlabeled` so applying one to an already-finished gate starts a fresh run that
+  sees it. Each honoured waiver emits a warning annotation and a job-summary line naming the tier and the
+  actor.
 
 Offline proofs live in `scripts/tests/test_aggregate_required_tiers.sh` (every check-run state, both
 re-run directions, self-exclusion by run identity, waiver cases) and

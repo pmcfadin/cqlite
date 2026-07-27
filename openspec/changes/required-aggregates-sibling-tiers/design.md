@@ -51,7 +51,8 @@ workflow-policy rule forces every `pull_request` workflow to be registered or ex
 (c) has no state in which the mechanism's own bug produces a false green. That is worth the enrolment cost.
 
 **Why (c) over (b) alone:** the registry is the forcing function. It is a single in-repo list, and
-`validate-workflows.rb` — which already runs *as a step inside the `required` job* and already carries
+`validate-workflows.rb` — which already runs *as a step in the `pr-gate-core` job that the
+branch-protection context `required` needs and refuses to pass without* and already carries
 structural per-workflow guards (`WORKFLOW_GUARDS`, `observability_classifier_valid?`) and
 reason-annotated exemption tables — is the natural, unbypassable home for the rule.
 

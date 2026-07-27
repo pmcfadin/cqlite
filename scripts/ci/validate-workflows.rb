@@ -530,10 +530,12 @@ workflow_files.each do |file|
   end
 end
 
-# CI gating-tier enrolment (issue #2910). This runs INSIDE the `required` job, so
-# it is the forcing function: a `pull_request`-triggered workflow that is neither
-# registered as a gating tier nor explicitly exempted reds `required`, as does a
-# registered tier whose workflow cannot emit its declared context unconditionally.
+# CI gating-tier enrolment (issue #2910). This runs in the `pr-gate-core` job,
+# which the branch-protection context `required` declares in `needs:` and treats
+# as an unconditional failure unless it concluded `success` — so it is still the
+# forcing function: a `pull_request`-triggered workflow that is neither registered
+# as a gating tier nor explicitly exempted reds `required`, as does a registered
+# tier whose workflow cannot emit its declared context unconditionally.
 errors.concat(
   GatingRegistry.policy_errors(
     workflows_dir: options[:workflows_dir],

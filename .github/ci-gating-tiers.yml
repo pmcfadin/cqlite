@@ -12,10 +12,18 @@
 # trigger semantics, and a mechanism bug reports "absent" (red) rather than
 # "not applicable" (green).
 #
-# Enrolment is mechanically forced: `scripts/ci/validate-workflows.rb` — which runs
-# as a step INSIDE the `required` job — fails when a workflow with a
-# `pull_request`/`pull_request_target` trigger appears in neither `tiers:` nor
-# `exempt:`. Adding a PR-triggered workflow without enrolling it reds `required`.
+# TOPOLOGY. `pr-gate.yml` has two jobs: `pr-gate-core` (fmt/clippy/tests/policy)
+# and `required` (`needs: [pr-gate-core]`, `if: always()`), which is the sole
+# branch-protection context. Enrolment is mechanically forced by
+# `scripts/ci/validate-workflows.rb`, which runs as a step in `pr-gate-core`; it
+# fails when a workflow with a `pull_request`/`pull_request_target` trigger appears
+# in neither `tiers:` nor `exempt:`. `required` fails unconditionally when
+# `pr-gate-core` did not conclude `success`, so adding a PR-triggered workflow
+# without enrolling it still reds `required` — one job removed.
+#
+# Of the 25 workflows that carry a `pull_request`/`pull_request_target` trigger,
+# one is the aggregator (pr-gate.yml), one is a gating tier (flight-ci.yml) and
+# the remaining 23 are exempted below.
 #
 # SCHEMA
 #   version:        must be 1.
@@ -38,13 +46,27 @@
 #     workflow / reason / issue — a PR-triggered workflow that deliberately does NOT
 #     gate the merge. `reason` and `issue` are both mandatory.
 #
-# STRUCTURAL RULES ENFORCED ON EVERY ENTRY UNDER `tiers:` (see gating_registry.rb):
-#   * no blocking trigger `paths:`/`paths-ignore:` (only the always-fire sentinel
-#     `__required_ci_context_never_matches__` is permitted);
-#   * exactly one job emits the declared context, it is unconditional (`always()`),
-#     it inspects `needs.<job>.result` for every job it depends on, it has a failing
-#     path, and its transitive `needs` closure covers every other job in the workflow;
+# STRUCTURAL RULES ENFORCED ON EVERY ENTRY UNDER `tiers:` (gating_policy_rules.rb).
+# Each exists to prevent a concrete failure, in EITHER direction — a tier that can
+# be permanently absent deadlocks every PR just as surely as a silent hole lets one
+# through:
+#   * the workflow has a `pull_request`/`pull_request_target` trigger at all;
+#   * no blocking `paths:`/`paths-ignore:`/`branches:`/`branches-ignore:` filter (only
+#     the always-fire sentinel `__required_ci_context_never_matches__` is permitted);
+#   * `types:` covers every event that mints a new head sha (`opened`, `synchronize`),
+#     or the context is permanently absent for some head; and `types:` stays within
+#     the aggregator's own observed set, or an event the aggregator cannot see could
+#     cancel the tier's in-flight run with no `required` run watching for the replacement;
+#   * exactly one job emits the declared context; its condition is EXACTLY `always()`
+#     (a compound `always() && …` can still evaluate false and skip); for every job it
+#     depends on, some step both READS `needs.<job>.result` and can exit non-zero; and
+#     its transitive `needs` closure covers every other job in the workflow;
 #   * the entry is not the aggregating workflow.
+#
+# AND ON THE AGGREGATOR: it must fire on `labeled`/`unlabeled`, or the `ci:waive:<id>`
+# break-glass below could never be exercised on a PR this mechanism has wedged
+# (applying a label starts no run for an unsubscribed event type, and re-running a
+# workflow replays the original event payload).
 
 version: 1
 

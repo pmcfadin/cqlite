@@ -4,9 +4,11 @@
 #
 # `required` derives what it waits on from `.github/ci-gating-tiers.yml` alone.
 # That registry is only as good as the rule that forces workflows into it, and
-# that rule (scripts/ci/gating_registry.rb, wired into scripts/ci/validate-workflows.rb,
-# which runs as a step INSIDE the `required` job) is what makes a forgotten tier
-# a red instead of a silent hole.
+# that rule (scripts/ci/gating_policy_rules.rb, wired into
+# scripts/ci/validate-workflows.rb, which runs as a step in the `pr-gate-core` job
+# that the branch-protection context `required` needs and treats as an
+# unconditional failure unless it succeeded) is what makes a forgotten tier a red
+# instead of a silent hole.
 #
 # Every case here is DISCRIMINATING: it asserts a non-zero exit AND that the
 # offending workflow/entry is named. The final phase proves non-vacuity by
@@ -581,7 +583,8 @@ if [ "$?" -eq 0 ]; then ok "the real .github tree satisfies the enrolment rule";
 
 # ------------------------------------------------------------- the wiring ---
 # The rule only bites if validate-workflows.rb actually calls it, because THAT is
-# what runs inside the `required` job.
+# what runs in `pr-gate-core` — the job `required` needs and refuses to pass
+# without.
 
 echo "== validate-workflows.rb carries the enrolment rule =="
 DIR=$(new_case wiring)

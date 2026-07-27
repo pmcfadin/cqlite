@@ -8,10 +8,10 @@ The `required` check in `.github/workflows/pr-gate.yml` SHALL, in addition to it
 observe the sibling check runs on the pull request's head commit and SHALL report success ONLY when every
 tier declared in the gating-tier registry has reported a terminal successful conclusion for that commit.
 
-`required` SHALL fail when any registered tier is failed, cancelled, timed out, still non-terminal at the
-aggregation deadline, or absent. Absence SHALL NEVER be interpreted as inapplicability — inapplicability is
-communicated by the tier itself as an emitted success (see the always-emit requirement), so an absent
-registered context is unconditionally an error.
+`required` SHALL fail when any registered tier is failed, timed out, cancelled without a superseding run,
+still non-terminal at the aggregation deadline, or absent. Absence SHALL NEVER be interpreted as
+inapplicability — inapplicability is communicated by the tier itself as an emitted success (see the
+always-emit requirement), so an absent registered context is unconditionally an error.
 
 The aggregation SHALL NOT mask the gate's own result: when the job carrying `pr-gate.yml`'s existing
 validation steps does not conclude `success`, `required` SHALL fail regardless of tier state, and the
@@ -50,6 +50,48 @@ cannot block a PR by failing.
 - **WHEN** `required` aggregates
 - **THEN** `required` concludes success and the unregistered failure is not treated as gating
 
+### Requirement: Failing closed applies at the deadline, and SHALL NOT wedge pull requests on transient states
+
+A false RED is an outage in the same way a false green is: a gate that reds legitimate pull requests is
+disabled by the people it blocks. The aggregation SHALL therefore distinguish a well-formed negative answer
+(which is terminal) from a transient, self-correcting state (which is re-polled), and SHALL reach the same
+fail-closed verdict at the deadline in both cases.
+
+A registered tier whose latest check run concluded `cancelled` or `stale` SHALL be treated as non-terminal
+while a superseding run is plausible, because supersession is routine: `cancel-in-progress` concurrency
+cancels a tier's in-flight run whenever the pull request is re-pushed, labelled, or marked ready for review.
+Supersession SHALL be recognised positively — the replacement run mints a higher check-run id, so the
+cancelled run stops being the latest for that context. A cancellation for which no superseding run appears
+SHALL FAIL, at a bounded grace window or at the deadline, whichever comes first, and SHALL NOT be waivable.
+
+A TRANSPORT failure while reading the check-run set (5xx, secondary rate limit, DNS) SHALL be retried under
+the existing backoff and SHALL NOT by itself end the aggregation. It SHALL fail closed once it persists —
+to the deadline, or past a bounded consecutive-failure ceiling. A transport failure SHALL NEVER be read as
+"no check runs" and SHALL NEVER produce a pass.
+
+#### Scenario: A cancelled tier superseded by a green re-run passes
+- **GIVEN** a registered tier's latest check run concluded `cancelled`
+- **AND** on a later poll a higher-id check run for the same context concluded `success`
+- **WHEN** the aggregation evaluates across those polls
+- **THEN** it concludes success, and its summary records the superseding check run as the deciding one
+
+#### Scenario: A cancellation with no successor still fails
+- **GIVEN** a registered tier's latest check run concluded `cancelled` and no superseding run appears
+- **WHEN** the grace window lapses, or the deadline arrives
+- **THEN** the aggregation FAILS, names the tier, and states that no superseding run appeared
+- **AND** a `ci:waive:<tier-id>` label does not excuse it
+
+#### Scenario: A mid-poll API blip is retried rather than fatal
+- **GIVEN** one check-run fetch fails while poll budget and deadline remain
+- **AND** the next fetch succeeds and every registered tier has concluded `success`
+- **WHEN** the aggregation evaluates
+- **THEN** it concludes success and reports the transient failure as a warning
+
+#### Scenario: A persistent fetch failure fails closed
+- **GIVEN** every check-run fetch fails
+- **WHEN** the consecutive-failure ceiling or the deadline is reached
+- **THEN** the aggregation FAILS with a harness error naming the command, and never reports success
+
 ### Requirement: Registered tiers always emit their context, so absence is unambiguous
 
 Every workflow registered as a gating tier SHALL emit its declared check-run context on EVERY pull request,
@@ -80,11 +122,38 @@ remain gated on that classifier's output so an inapplicable tier costs only the 
 - **WHEN** the workflow-policy validation runs inside `required`
 - **THEN** it FAILS and names the workflow and the filter
 
+#### Scenario: A registered workflow whose activity types cannot cover every head sha is rejected
+- **GIVEN** a workflow listed in the registry whose `pull_request.types` omits `opened` or `synchronize`,
+  or which carries no `pull_request`/`pull_request_target` trigger at all
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS and names the workflow and the missing types, because the context would be permanently
+  absent for some head sha and every such pull request would deadlock for the whole deadline
+
+#### Scenario: A registered workflow firing on an event the aggregator does not observe is rejected
+- **GIVEN** a workflow listed in the registry whose `pull_request.types` includes an activity type absent
+  from the aggregating workflow's own types
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS and names the unobserved types, because such an event can cancel the tier's in-flight
+  run with no `required` run watching for the replacement
+
+#### Scenario: A registered workflow whose types are a subset of the aggregator's is accepted
+- **GIVEN** a workflow listed in the registry whose `pull_request.types` covers `opened` and `synchronize`
+  and is otherwise within the aggregating workflow's types
+- **WHEN** the workflow-policy validation runs
+- **THEN** it PASSES, because a rule that rejects a legitimate configuration wedges pull requests
+
 #### Scenario: A registered workflow with no unconditional emitting job is rejected
 - **GIVEN** a registered workflow in which every job emitting the declared context is conditional on
   something that can skip it
 - **WHEN** the workflow-policy validation runs
 - **THEN** it FAILS and names the workflow and the declared context
+
+#### Scenario: A compound `always() && …` condition is rejected
+- **GIVEN** a registered workflow whose emitting job's condition merely CONTAINS `always()` — for example
+  `always() && github.event.pull_request.draft == false`, which skips the job on every draft pull request
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS, because the rule SHALL require a condition it can prove unconditional rather than one
+  that mentions `always()`
 
 #### Scenario: An emitting job that cannot report the tier's result is rejected
 - **GIVEN** a registered workflow whose emitting job is unconditional but does not inspect the
@@ -94,6 +163,15 @@ remain gated on that classifier's output so an inapplicable tier costs only the 
 - **THEN** it FAILS and names the job and the unreported dependency, because the context would report
   success regardless of that job's outcome
 
+#### Scenario: A gate job whose only failing path is a comment or a quoted string is rejected
+- **GIVEN** a registered workflow whose emitting job binds every `needs.<job>.result` into `env:` and only
+  echoes them, with the token `exit 1` appearing solely in a shell comment or inside a quoted string
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS, because the rule that exists to prevent an always-green tier SHALL NOT be satisfiable
+  without preventing one: for every dependency, some step must both READ that dependency's result and be
+  able to exit non-zero. Where a fully general proof is impractical the rule SHALL be conservative and
+  reject what it cannot prove
+
 ### Requirement: A declared in-repo registry is the single source of truth and enrolment is forced
 
 A registry file (`.github/ci-gating-tiers.yml`) SHALL declare every gating tier, each entry naming at
@@ -101,11 +179,22 @@ minimum a tier id, the owning workflow file, the exact check-run context, and an
 override. `required` SHALL derive its expectation set from this registry alone and SHALL NOT infer
 expectations from GitHub trigger semantics.
 
-Enrolment SHALL be mechanically forced: the workflow-policy validation that already runs as a step inside
-the `required` job SHALL fail when a workflow with a `pull_request` (or `pull_request_target`) trigger is
-neither registered as a gating tier nor listed in the registry's exemption block with a reason and an issue
-reference. The registry SHALL NOT list `pr-gate.yml`, so `required` can never be registered against itself.
-A registry entry whose declared context no workflow emits SHALL be rejected as dangling.
+Enrolment SHALL be mechanically forced: the workflow-policy validation that runs as a step in the
+`pr-gate-core` job — which the branch-protection context `required` declares in `needs:` and treats as an
+unconditional failure unless it concluded `success` — SHALL fail when a workflow with a `pull_request` (or
+`pull_request_target`) trigger is neither registered as a gating tier nor listed in the registry's exemption
+block with a reason and an issue reference. The registry SHALL NOT list `pr-gate.yml`, so `required` can
+never be registered against itself. A registry entry whose declared context no workflow emits SHALL be
+rejected as dangling.
+
+The aggregator SHALL additionally refuse, on its own account and independently of the enrolment rule, to
+report success for an empty or unparseable `tiers:` list: a green aggregate over an empty expectation set is
+the single "green with nothing checked" path the mechanism could otherwise take.
+
+#### Scenario: The aggregator refuses a registry that would aggregate nothing
+- **GIVEN** a registry whose `tiers:` key is absent, empty, or not a list
+- **WHEN** the aggregation runs against it, with every other input healthy
+- **THEN** it exits with a harness error rather than reporting that every registered tier succeeded
 
 #### Scenario: A newly added PR-triggered workflow that is neither registered nor exempt reds `required`
 - **GIVEN** a PR adding a new workflow with a `pull_request` trigger
@@ -243,8 +332,36 @@ A per-tier break-glass label of the form `ci:waive:<tier-id>` MAY excuse a regis
 non-terminal at the deadline. It SHALL NEVER excuse a tier whose latest check run concluded `failure`,
 `cancelled`, or `timed_out`. There SHALL be no blanket waiver that excuses all tiers at once.
 
+The waiver SHALL BE REACHABLE, because the mechanism it excuses can wedge a pull request and that is
+precisely when it is needed. Applying a label starts no run for an activity type the workflow does not
+subscribe to, and re-running a workflow replays the ORIGINAL event payload; therefore the aggregating
+workflow SHALL subscribe to `labeled`/`unlabeled` (enforced by the enrolment rule), and the aggregation
+SHALL re-read the pull request's CURRENT labels on every poll rather than trusting the payload snapshot. A
+failed label read SHALL fall back to the payload — withholding a waiver is safe, granting one is not.
+
+An ABSENT waived tier SHALL be excused immediately rather than at the deadline: there is nothing to wait
+for, so holding a runner for the full deadline only delays a verdict already determined. A PENDING waived
+tier SHALL still be waited out, because it can still turn red, and a red tier is never waivable.
+
 Each honoured waiver SHALL emit a warning annotation and a job-summary line naming the waived tier and the
 actor, so a waived merge is visible after the fact.
+
+#### Scenario: A waiver applied after the run started is honoured
+- **GIVEN** a registered tier is absent and the pull request carried no waiver label when the run began
+- **AND** `ci:waive:<tier-id>` is applied while the aggregation is polling
+- **WHEN** the aggregation next evaluates
+- **THEN** it re-reads the label from the API, excuses the tier, and does not require a re-run
+
+#### Scenario: The aggregating workflow must observe label events
+- **GIVEN** the aggregating workflow's `pull_request` trigger does not include `labeled`/`unlabeled`
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS, because the documented break-glass would then be unexercisable
+
+#### Scenario: A waived absent tier does not hold a runner for the whole deadline
+- **GIVEN** a registered tier is absent and the pull request carries that tier's waiver label
+- **WHEN** the aggregation evaluates with poll budget and deadline remaining
+- **THEN** it excuses the tier immediately without waiting out the deadline
+- **AND** a waived tier that is merely PENDING is still waited out
 
 #### Scenario: A waiver excuses an absent tier
 - **GIVEN** a registered tier is absent at the deadline and the PR carries that tier's `ci:waive:<tier-id>` label
@@ -289,9 +406,16 @@ are out of band.
 
 The aggregation SHALL be implemented as a script whose check-run input, registry path, deadline, and poll
 budget are injectable, so its full decision surface can be exercised offline against synthetic check-run
-fixtures with no network access and no sleeping. A test suite SHALL cover at least: all-pass, one-pending,
-one-failed, one-absent-and-registered, one-absent-and-not-registered, duplicate check runs for one context
-(re-run), self-exclusion, and each waiver case.
+fixtures with no network access and no sleeping. The clock used to age a superseded conclusion and the
+label source SHALL be injectable for the same reason. A test suite SHALL cover at least: all-pass,
+one-pending, one-failed, one-absent-and-registered, one-absent-and-not-registered, duplicate check runs for
+one context (re-run), self-exclusion, each waiver case, cancelled-then-superseded, cancelled-with-no-
+successor, a transient fetch failure that recovers, one that does not, and a registry that would aggregate
+nothing.
+
+Each fix SHALL carry a discriminating mutant, and the mutant set SHALL include the near-miss INVERSES that
+must NOT be rejected — a legitimate `types:` subset, the `${{ always() }}` spelling, a genuine failing path
+on a line containing a quoted `#` — because a rule that reds a legitimate configuration is an outage too.
 
 Every state SHALL have a **discriminating** case that proves the guard FAILs when it should — asserting a
 non-zero exit and the naming of the offending tier, not merely that a passing case passes. Non-vacuity

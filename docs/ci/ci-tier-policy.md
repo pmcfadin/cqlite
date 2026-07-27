@@ -128,18 +128,30 @@ Rules for `pull_request`-triggered workflows:
 
 - Every one must be listed in `.github/ci-gating-tiers.yml`, either under
   `tiers:` (it gates the merge) or under `exempt:` with a `reason` and an `issue`.
-  This is enforced by `scripts/ci/validate-workflows.rb`, which runs as a step
-  inside the `required` job, so forgetting to enrol reds `required`.
+  This is enforced by `scripts/ci/validate-workflows.rb`, which runs as a step in
+  `pr-gate-core`; `required` needs that job and fails unconditionally unless it
+  concluded `success`, so forgetting to enrol reds `required`. (Of the 25
+  PR-triggered workflows today, one is the aggregator, one is a gating tier and
+  23 are exempted.)
 - A workflow under `tiers:` must ALWAYS fire — no blocking trigger `paths:` /
-  `paths-ignore:` (only the `__required_ci_context_never_matches__` sentinel used
-  by `ci.yml`). Applicability moves into a cheap, unconditional classifier job
-  following the `observability-gate.yml` `classify` pattern, and the tier's
-  expensive jobs stay gated on the classifier's output.
-- A workflow under `tiers:` must emit its declared context from exactly one
-  unconditional (`if: always()`) gate job that inspects every
-  `needs.<job>.result` it depends on and whose `needs` closure covers every other
-  job in the workflow. Inapplicability is reported as an explicit SUCCESS from
-  that job — never as an absent check run.
+  `paths-ignore:` / `branches:` (only the
+  `__required_ci_context_never_matches__` sentinel used by `ci.yml`), and its
+  `pull_request.types` must include every event that mints a new head sha
+  (`opened`, `synchronize`) while staying within the aggregator's own observed
+  set. Applicability moves into a cheap, unconditional classifier job following
+  the `observability-gate.yml` `classify` pattern, and the tier's expensive jobs
+  stay gated on the classifier's output.
+- A workflow under `tiers:` must emit its declared context from exactly one gate
+  job whose condition is exactly `if: always()`, for each of whose dependencies
+  some step both reads `needs.<job>.result` and can exit non-zero, and whose
+  `needs` closure covers every other job in the workflow. Inapplicability is
+  reported as an explicit SUCCESS from that job — never as an absent check run.
+- `required` must itself fire on `labeled`/`unlabeled`, or the `ci:waive:<tier-id>`
+  break-glass could never be exercised on a PR the mechanism has wedged.
+- Failing closed applies at the DEADLINE, not to every transient. A `cancelled`
+  tier (routine under `cancel-in-progress`) is re-polled while a replacement run
+  is plausible and fails once the grace lapses; a transport failure reading the
+  check-runs API is retried and fails only on persistence.
 - For a registered tier, a **diff-based mandate overrides the `ci:*` label**: a
   mandating diff runs the tier with or without the label; the label stays an
   opt-in only for non-mandating diffs.

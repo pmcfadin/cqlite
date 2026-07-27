@@ -4,17 +4,24 @@
 - [x] 1.1 Define the schema: `tiers[]` with `id`, `workflow`, `context`, optional `wait_minutes`,
       optional `mandate_paths` (documentation of the tier's own predicate); `exempt[]` with `workflow`,
       `reason`, `issue`.
-- [x] 1.2 Populate `exempt[]` for all 25 current `pull_request` workflows with a one-line reason each, so
+- [x] 1.2 Populate `exempt[]` for the 23 current `pull_request` workflows that are neither the
+      aggregator nor a gating tier (25 carry the trigger), with a one-line reason each, so
       the enrolment rule lands green; promote to `tiers[]` only where the tier is correctness evidence.
 - [x] 1.3 Register the motivating tier first — `flight-ci.yml`'s full test tier (#2910 / PR #2906) — and
       name the exact context string it emits.
 
-## 2. Enrolment enforcement (surface: `scripts/ci/validate-workflows.rb`, run inside the `required` job)
+## 2. Enrolment enforcement (surface: `scripts/ci/validate-workflows.rb`, run in `pr-gate-core`,
+##    the job `required` needs and treats as an unconditional failure unless it succeeded)
 - [x] 2.1 New rule: every `pull_request`/`pull_request_target` workflow is in `tiers[]` or `exempt[]`;
       an exemption without `reason` + `issue` fails.
-- [x] 2.2 Structural rules for a registered tier: no blocking trigger `paths:`/`paths-ignore:` (the
-      `__required_ci_context_never_matches__` sentinel is allowed); an unconditional job emits the
-      declared context; dangling entries (no emitting workflow) fail; `pr-gate.yml` may not be registered.
+- [x] 2.2 Structural rules for a registered tier: the workflow has a `pull_request` trigger at all; no
+      blocking `paths:`/`paths-ignore:`/`branches:` (the `__required_ci_context_never_matches__` sentinel
+      is allowed); `types:` covers `opened`+`synchronize` and stays within the aggregator's observed set;
+      exactly one job emits the declared context and its condition is EXACTLY `always()`; for every
+      dependency some step both reads `needs.<job>.result` and can exit non-zero; dangling entries fail;
+      `pr-gate.yml` may not be registered.
+- [x] 2.4 The aggregator must fire on `labeled`/`unlabeled`, or the `ci:waive:<tier-id>` break-glass is
+      unreachable on a wedged PR.
 - [x] 2.3 Assert the aggregation deadline is strictly less than the aggregating job's `timeout-minutes`.
 
 ## 3. The aggregator (surface: `scripts/ci/aggregate-required-tiers.sh`)
@@ -71,6 +78,23 @@
 - [x] 7.5 No wall-clock assertions (#2642) — expiry via an injected already-expired deadline / zero poll
       budget; verify `scripts/tests/check-no-wallclock-asserts.sh` stays clean.
 - [x] 7.6 Wire the suite into `scripts/agent-gate.sh`'s `tooling-tests` component.
+
+## 7b. False-RED hardening (both failure directions are outages)
+- [x] 7b.1 P1 waiver reachability: aggregating workflow subscribes to `labeled`/`unlabeled`; the
+      aggregation re-reads the PR's current labels each poll (payload as fallback); a policy rule rejects
+      an aggregator that does not observe label events.
+- [x] 7b.2 P2 supersession: `cancelled`/`stale` are non-terminal while a replacement is plausible
+      (positively detected via a higher check-run id) and fail at the grace lapse or the deadline;
+      never waivable. Tier `types:` must stay within the aggregator's observed set.
+- [x] 7b.3 P3 transient fetch failures retried under backoff; fail closed only on persistence.
+- [x] 7b.4 P4 `types:` validated in both directions, plus the degenerate no-PR-trigger case.
+- [x] 7b.5 P5 the emitting job's condition must be EXACTLY `always()`.
+- [x] 7b.6 P6 structural failing-path check (reads the result AND can exit non-zero, comments and quoted
+      strings stripped) replacing the `/exit 1/` substring match.
+- [x] 7b.7 P7 the aggregator refuses an empty/unparseable `tiers:` itself.
+- [x] 7b.8 P8 a waived ABSENT tier resolves immediately; a waived PENDING one still waits.
+- [x] 7b.9 P10 lone check-run object parses; eval'd command inputs shape-validated.
+- [x] 7b.10 Mutants for each, including the near-miss inverses that must NOT red.
 
 ## 8. Doctrine
 - [x] 8.1 `CLAUDE.md` autonomy section: `required` aggregates the registered sibling tiers and fails closed
