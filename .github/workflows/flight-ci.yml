@@ -295,15 +295,25 @@ jobs:
 
   # ALWAYS-EMIT gate job (issue #2910). Its `name:` IS the check-run context
   # registered in .github/ci-gating-tiers.yml, and `required` polls for it on the
-  # PR head. `if: always()` means the context is emitted in EVERY case, including
+  # PR head. The condition means the context is emitted in EVERY case, including
   # the inapplicable one, so an ABSENT context is unambiguously an error rather
   # than "the tier did not apply". It must depend on every other job in this
   # workflow and inspect each `.result`, so no Flight job's failure can go
   # unreported — validate-workflows.rb enforces both structurally.
+  #
+  # `!cancelled()`, NOT `always()` (issue #2910 round 3). `always()` runs this job
+  # even while the RUN IS BEING CANCELLED, and a cancelled run hands it
+  # `needs.*.result == 'cancelled'`, which the `case` below maps to `exit 1`. The
+  # check run would then conclude `failure` — so a ROUTINE supersession (this
+  # workflow cancels in-progress PR runs, including on every label mutation) would
+  # red `required`, and the aggregator's supersession grace, which keys on
+  # `cancelled`/`stale`/`skipped`, could never fire. `!cancelled()` still runs when
+  # a dependency FAILED or was SKIPPED, so nothing about the reporting below
+  # changes; it only stops a cancellation being laundered into a failure.
   tier-gate:
     name: Flight tier gate
     needs: [classify, test, full, image]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

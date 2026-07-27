@@ -57,8 +57,11 @@
 #     or the context is permanently absent for some head; and `types:` stays within
 #     the aggregator's own observed set, or an event the aggregator cannot see could
 #     cancel the tier's in-flight run with no `required` run watching for the replacement;
-#   * exactly one job emits the declared context; its condition is EXACTLY `always()`
-#     (a compound `always() && …` can still evaluate false and skip); for every job it
+#   * exactly one job emits the declared context; its condition is EXACTLY `${{ !cancelled() }}`
+#     (a compound `!cancelled() && …` can still evaluate false and skip — and a bare `always()`
+#     is REJECTED: it runs the gate job DURING a run cancellation, turning
+#     `needs.*.result == cancelled` into a `failure` conclusion and making the aggregator's
+#     supersession grace unreachable); for every job it
 #     depends on, some step both READS `needs.<job>.result` and can exit non-zero; and
 #     its transitive `needs` closure covers every other job in the workflow;
 #   * the entry is not the aggregating workflow.

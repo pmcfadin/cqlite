@@ -218,15 +218,19 @@
 #                      (full cores when sole gate, fair share max(1, ncpu/N) when
 #                      N>1, caller CARGO_BUILD_JOBS respected) and that the gate
 #                      wraps itself in taskpolicy -c utility (macOS) / nice (Linux).
-#                      Also runs (no python3 needed, ruby-SKIP-aware)
-#                      scripts/tests/test_aggregate_required_tiers.sh and
-#                      scripts/tests/test_gating_registry_policy.sh (#2910) — the two
-#                      halves of "CI green means the relevant CI ran": the sibling-tier
-#                      aggregator fails closed on a failed/pending/ABSENT registered
-#                      tier (hermetic check-run fixtures, injected deadlines, stub
-#                      sleep), and the enrolment rule forces every pull_request
-#                      workflow into .github/ci-gating-tiers.yml. Both prove
-#                      non-vacuity with always-pass stubs.
+#                      Also runs (ruby only — no python3 on any path — and
+#                      SKIP-aware when ruby is absent) the three #2910 self-tests
+#                      behind "CI green means the relevant CI ran":
+#                      test_aggregate_required_tiers.sh (the sibling-tier aggregator
+#                      fails closed on a failed/pending/ABSENT registered tier;
+#                      hermetic check-run fixtures, injected deadlines, stub sleep),
+#                      test_gating_registry_policy.sh (the enrolment rule forces every
+#                      pull_request workflow into .github/ci-gating-tiers.yml), and
+#                      test_gating_workflow_semantics.sh (the chain between them: what
+#                      conclusion a tier's gate job reports under cancellation, and
+#                      whether the supersession grace can actually fire — plus a
+#                      GNU-only-construct lint over this mechanism's shell). All three
+#                      prove non-vacuity with always-pass stubs or mutants.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -4771,6 +4775,27 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_gating_registry_policy.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (gating-tier enrolment self-test #2910); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # gating workflow-semantics self-test (#2910 round 3): the CHAIN between the two
+  # halves above. It models what conclusion a registered tier's gate job actually
+  # reports when its run is CANCELLED (an `always()` gate job runs during a
+  # cancellation and turns `needs.*.result == cancelled` into a `failure`, which
+  # makes the aggregator's supersession grace unreachable), feeds that conclusion
+  # into the real registry evaluation, and proves the grace path fires — with an
+  # `always()` mutant proving the model discriminates. It also carries the
+  # GNU-only-construct lint for this change's shell (macOS is a first-class gate
+  # host; #2926's lint is scoped to the gate's own _tree_* functions).
+  echo ">>> [$name] bash scripts/tests/test_gating_workflow_semantics.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gating_workflow_semantics.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (gating workflow-semantics self-test #2910); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

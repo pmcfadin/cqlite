@@ -109,7 +109,7 @@ jobs:
   gate:
     name: Alpha gate
     needs: [classify, work]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -407,37 +407,59 @@ expect_fail_named "an aggregator that ignores label events is rejected" "ci:waiv
 
 echo "== the emitting job must be unconditional =="
 DIR=$(new_case conditional-gate)
-sed "s|    if: always()|    if: github.event_name == 'push'|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  '    if: ${{ !cancelled() }}' "    if: github.event_name == 'push'"
 run_policy "$DIR"
-expect_fail_named "a conditional emitting job is rejected" "always()"
+expect_fail_named "a conditional emitting job is rejected" "must be unconditional"
 
-# The near-miss that the include?("always()") form accepted (issue #2910 P5):
-# a COMPOUND condition passes a substring test yet still skips the gate job — on
-# every draft PR here — leaving the context permanently absent.
-DIR=$(new_case compound-always)
-sed "s|    if: always()|    if: always() \&\& github.event.pull_request.draft == false|" \
-  "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+# THE CANCELLATION-LAUNDERING NEAR-MISS (issue #2910 round 3). `always()` looks
+# like the safest possible condition and is the one this rule used to MANDATE —
+# but it runs the gate job while the run is BEING CANCELLED, when every
+# `needs.<job>.result` is `cancelled`, and the gate's own `case` maps that to
+# `exit 1`. The tier then concludes `failure`, not `cancelled`, so the
+# aggregator's supersession grace can never fire and a routine supersession reds
+# `required`. The rule must reject it BY NAME, or the fix is one careless edit
+# from being undone.
+DIR=$(new_case always-launders-cancellation)
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  '    if: ${{ !cancelled() }}' '    if: always()'
 run_policy "$DIR"
-expect_fail_named "a compound 'always() && ...' condition is rejected" "compound condition"
+expect_fail_named "a bare 'always()' emitting job is rejected" "LAUNDERS"
+if contains "$OUT" '!cancelled()'; then
+  ok "the rejection names the condition to use instead"
+else
+  bad "the always() rejection does not say what to write instead: $OUT"
+fi
 
-DIR=$(new_case wrapped-always)
-sed "s|    if: always()|    if: \${{ always() }}|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+# The near-miss that an `include?` form would accept (issue #2910 P5): a COMPOUND
+# condition passes a substring test yet still skips the gate job — on every draft
+# PR here — leaving the context permanently absent.
+DIR=$(new_case compound-condition)
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  '    if: ${{ !cancelled() }}' '    if: ${{ !cancelled() && github.event.pull_request.draft == false }}'
+run_policy "$DIR"
+expect_fail_named "a compound '!cancelled() && ...' condition is rejected" "must be unconditional"
+
+DIR=$(new_case unwrapped-cancelled)
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  '    if: ${{ !cancelled() }}' '    if: "!cancelled()"'
 run_policy "$DIR"
 if [ "$RC" -eq 0 ]; then
-  ok "the equivalent '\${{ always() }}' form is accepted (no false red)"
+  ok "the equivalent quoted-scalar '!cancelled()' form is accepted (no false red)"
 else
-  bad "'\${{ always() }}' was rejected — that wedges a legitimate workflow: $OUT"
+  bad "'!cancelled()' without the \${{ }} wrapper was rejected — that wedges a legitimate workflow: $OUT"
 fi
 
 # GitHub expression function names are case-insensitive, so this is the SAME
 # condition, not a near-miss to reject.
-DIR=$(new_case cased-always)
-sed "s|    if: always()|    if: Always()|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+DIR=$(new_case cased-cancelled)
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  '    if: ${{ !cancelled() }}' '    if: ${{ !Cancelled() }}'
 run_policy "$DIR"
 if [ "$RC" -eq 0 ]; then
-  ok "'Always()' is accepted (expression functions are case-insensitive)"
+  ok "'!Cancelled()' is accepted (expression functions are case-insensitive)"
 else
-  bad "'Always()' was rejected — a needless false red: $OUT"
+  bad "'!Cancelled()' was rejected — a needless false red: $OUT"
 fi
 
 echo "== the emitting job must reflect the tier's result (no always-green gate) =="
@@ -469,7 +491,7 @@ jobs:
   gate:
     name: Alpha gate
     needs: [classify, work]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -513,7 +535,7 @@ jobs:
   gate:
     name: Alpha gate
     needs: [classify, work]
-    if: always()
+    if: \${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -690,7 +712,7 @@ jobs:
   gate:
     name: Alpha gate
     needs: [classify, work, heavy]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -878,7 +900,8 @@ count_rule_rejections() {
   for dir in "$WORK"/case-unenrolled "$WORK"/case-dangling "$WORK"/case-self-register \
              "$WORK"/case-blind-gate "$WORK"/case-deadline-too-long \
              "$WORK"/case-types-too-narrow "$WORK"/case-types-unobserved \
-             "$WORK"/case-compound-always "$WORK"/case-echo-only-gate-comment \
+             "$WORK"/case-compound-condition "$WORK"/case-always-launders-cancellation \
+             "$WORK"/case-echo-only-gate-comment \
              "$WORK"/case-aggregator-no-label-events \
              "$WORK"/case-two-scopes "$WORK"/case-mandate-drift \
              "$WORK"/case-label-churn "$WORK"/case-head-evaluated; do
@@ -894,10 +917,10 @@ RULE="$STUB_DIR/gating_registry.rb"
 STUB_REJECTIONS=$(count_rule_rejections)
 RULE="$REGISTRY_RB"
 
-if [ "$REAL_REJECTIONS" -eq 14 ]; then
-  ok "the real rule rejects all 14 discriminating registries"
+if [ "$REAL_REJECTIONS" -eq 15 ]; then
+  ok "the real rule rejects all 15 discriminating registries"
 else
-  bad "the real rule rejected only $REAL_REJECTIONS/14"
+  bad "the real rule rejected only $REAL_REJECTIONS/15"
 fi
 if [ "$STUB_REJECTIONS" -eq 0 ]; then
   ok "the always-pass stub rejects none, so this suite would go RED under it"

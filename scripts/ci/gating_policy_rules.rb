@@ -37,12 +37,23 @@ module GatingRegistry
   # PR that is already wedged, which is precisely when it is needed.
   MANDATORY_AGGREGATOR_PR_TYPES = %w[opened synchronize labeled unlabeled].freeze
 
-  # The ONLY job-level condition accepted on an emitting job. Deliberately an
-  # exact match rather than "mentions always()": `always() && <anything>` can
-  # evaluate false (the observed near-miss: `always() && draft == false`, which
-  # skips the gate job on every draft PR and leaves the context permanently
-  # absent). Anything this cannot PROVE unconditional is rejected.
-  UNCONDITIONAL_CONDITION = "always()"
+  # The ONLY job-level condition accepted on an emitting job (issue #2910 round
+  # 3). Deliberately an exact match, not "mentions the function": a compound
+  # condition can evaluate false (the observed near-miss: `always() && draft ==
+  # false`, which skips the gate job on every draft PR and leaves the context
+  # permanently absent). Anything this cannot PROVE is rejected.
+  #
+  # It is `!cancelled()`, NOT `always()`. `always()` runs the gate job even while
+  # the RUN IS BEING CANCELLED — and a cancelled run hands the gate job
+  # `needs.<job>.result == 'cancelled'`, which its `case` maps to a non-zero exit.
+  # The tier's check run then concludes `failure`, so the aggregator's supersession
+  # grace (which only treats `cancelled`/`stale`/`skipped` as non-terminal) can
+  # never fire and a ROUTINE supersession reds `required`. `!cancelled()` is the
+  # same condition in every other respect — it still runs when a dependency failed
+  # or was skipped, so the context is still emitted on every pull request — but it
+  # refuses to launder a cancellation into a failure.
+  EMITTING_JOB_CONDITION = "!cancelled()"
+  LAUNDERING_CONDITION = "always()"
 
   # A shell statement that can end the job non-zero. `exit 0` is deliberately
   # excluded; `exit $rc` / `exit "$rc"` count.
@@ -591,24 +602,35 @@ module GatingRegistry
       errors << "#{label} emitting job `#{job_id}` uses a matrix; matrix jobs mangle the check-run name"
     end
     return errors unless job.key?("needs") || job.key?("if")
-    return errors if unconditional_condition?(condition)
+    return errors if emitting_condition?(condition, EMITTING_JOB_CONDITION)
+
+    if emitting_condition?(condition, LAUNDERING_CONDITION)
+      errors << "#{label} emitting job `#{job_id}` uses `always()`; that runs the gate job even while the " \
+                "RUN IS BEING CANCELLED, when every `needs.<job>.result` is `cancelled` and the job's own " \
+                "check LAUNDERS that into a `failure` conclusion. The aggregator's supersession grace only " \
+                "treats `cancelled`/`stale`/`skipped` as non-terminal, so a routine supersession would red " \
+                "`required` and the grace path would be unreachable. Use `#{EMITTING_JOB_CONDITION}`, which " \
+                "still runs when a dependency failed or was skipped"
+      return errors
+    end
 
     errors << "#{label} emitting job `#{job_id}` must be unconditional: with `needs:` or `if:` its " \
-              "condition must be exactly `always()` (got #{condition.empty? ? '(none)' : "`#{condition}`"}). " \
-              "A compound condition such as `always() && <expr>` can still evaluate false, skipping the " \
-              "job and leaving the context absent"
+              "condition must be exactly `#{EMITTING_JOB_CONDITION}` " \
+              "(got #{condition.empty? ? '(none)' : "`#{condition}`"}). A compound condition such as " \
+              "`#{EMITTING_JOB_CONDITION} && <expr>` can still evaluate false, skipping the job and " \
+              "leaving the context absent"
     errors
   end
 
   # Deliberately exact, not a substring test (issue #2910 P5).
-  def unconditional_condition?(condition)
-    # GitHub expression FUNCTION NAMES are case-insensitive, so `Always()` is the
-    # same condition; rejecting it would be a false red.
+  def emitting_condition?(condition, expected)
+    # GitHub expression FUNCTION NAMES are case-insensitive, so `Cancelled()` is
+    # the same condition; rejecting it would be a false red.
     normalized = condition.to_s.gsub(/\s+/, "").downcase
-    # `${{ always() }}` and `always()` are the same condition; every `${{ }}`
-    # wrapper strictly shortens the string, so this terminates.
+    # `${{ !cancelled() }}` and `!cancelled()` are the same condition; every
+    # `${{ }}` wrapper strictly shortens the string, so this terminates.
     normalized = Regexp.last_match(1) while normalized.match(EXPRESSION_WRAPPER)
-    normalized == UNCONDITIONAL_CONDITION
+    normalized == expected
   end
 
   # STRUCTURAL anti-always-green rule (issue #2910 P6). The previous form asked

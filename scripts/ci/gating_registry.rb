@@ -70,7 +70,17 @@ module GatingRegistry
   # them on every re-push, label change and ready-for-review. Treating them as an
   # immediate hard failure would red `required` on ordinary PR activity (issue
   # #2910 P2). They are NON-TERMINAL for a bounded grace window, then fail.
-  SUPERSEDABLE_CONCLUSIONS = %w[cancelled stale].freeze
+  #
+  # `skipped` joins them in round 3. A registered tier's gate job is required to
+  # carry `if: ${{ !cancelled() }}` (gating_policy_rules.rb) precisely so a
+  # cancellation is not laundered into a `failure`; the flip side is that the ONE
+  # state in which such a job does not run is a cancelled run. GitHub's own
+  # conclusion for a job skipped that way is not something this repo can verify
+  # offline — it may be `cancelled`, or `skipped`, or the check run may not appear
+  # at all — so all three are handled NON-TERMINALLY and all three still FAIL once
+  # the grace lapses or the deadline arrives. No state is silently opened; the
+  # uncertainty only buys a bounded wait.
+  SUPERSEDABLE_CONCLUSIONS = %w[cancelled stale skipped].freeze
 
   ID_PATTERN = /\A[a-z0-9][a-z0-9-]*\z/
   ISSUE_PATTERN = %r{\A(#\d+|https://github\.com/[^\s]+/issues/\d+)\z}
