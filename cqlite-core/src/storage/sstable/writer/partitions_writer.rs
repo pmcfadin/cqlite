@@ -833,7 +833,7 @@ fn write_be_unsigned(buf: &mut Vec<u8>, value: u64, bytes: usize) {
 //   2. The partition's `TrieIndexEntry` at offset `RowsOffset`:
 //        [u16 key_length][key bytes]
 //        [data position : unsigned vint]
-//        [trieRoot - base : SIGNED vint]   (base = RowsOffset + key_length)
+//        [trieRoot - base : SIGNED vint]   (base = RowsOffset + 2 + key_length, #3002)
 //        [block count : unsigned vint]
 //        [partition DeletionTime]          (0x80 LIVE sentinel, else 12 bytes)
 //      consumed by `parser::resolve_rows_db_entry`.
@@ -1132,7 +1132,7 @@ fn write_row_leaf(
 /// ```text
 /// [u16 key_length][partition key bytes]
 /// [data position : unsigned vint]
-/// [trieRoot - base : SIGNED vint]      (base = entry_start + key_length)
+/// [trieRoot - base : SIGNED vint]      (base = entry_start + 2 + key_length)
 /// [block count : unsigned vint]
 /// [partition DeletionTime]
 /// ```
@@ -1160,11 +1160,11 @@ fn write_trie_index_entry(
     // [data position : unsigned vint]
     write_unsigned_vint(buf, data_position);
 
-    // [trieRoot - base : SIGNED vint]. base = RowsOffset + key_length = the
-    // position immediately after the length-prefixed key (entry_start + 2 +
-    // key_length) MINUS 2; `resolve_rows_db_entry` computes
-    // base = rows_offset + key_length, so root_delta = trie_root - base.
-    let base = entry_start + key_length;
+    // [trieRoot - base : SIGNED vint]. base = the position immediately AFTER the
+    // short-length-prefixed key (entry_start + 2 + key_length): cassandra-5.0.8
+    // `BtiTableWriter.IndexWriter.append` captures `basePosition` as
+    // `rowIndexWriter.position()` AFTER `writeWithShortLength` (issue #3002).
+    let base = entry_start + 2 + key_length;
     let root_delta = trie_root as i64 - base as i64;
     write_signed_vint(buf, root_delta);
 

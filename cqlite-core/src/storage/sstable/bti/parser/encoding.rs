@@ -112,21 +112,26 @@ fn encode_clustering_component_oss50(value: &Value, out: &mut Vec<u8>) -> BtiRes
 /// Encode a multi-component clustering bound (`&[Value]`) in Cassandra OSS50
 /// byte-comparable form — the SAME encoding the `Rows.db` trie stores.
 ///
-/// A single-component clustering encodes to the bare component bytes (matching
-/// the `wide_table` fixture separators, e.g. ck=8 → `80 00 00 08`, NO framing).
-/// Multi-component clusterings concatenate per-component byte-comparable
-/// encodings separated by [`OSS50_NEXT_COMPONENT`] (`ByteSource.NEXT_COMPONENT`,
-/// per `ClusteringComparator.asByteComparable`), with no leading/trailing frame
-/// so a prefix bound sorts before any longer key sharing it.
+/// A [`OSS50_NEXT_COMPONENT`] (`0x40`) byte precedes **EVERY** component,
+/// including the FIRST: `ClusteringComparator.ByteComparableClustering`
+/// (cassandra-5.0.8 `ClusteringComparator.java:260-275`) "adds a NEXT_COMPONENT
+/// byte before each component", e.g. `("A", 0005)` → `40 4100 40 0005 40`. So a
+/// single `int` clustering ck=8 encodes to `40 80 00 00 08`, which is exactly the
+/// separator byte string a real `wide_table` `Rows.db` trie stores (issue #3002 —
+/// the previous "bare component bytes, NO framing" claim was calibrated against a
+/// mis-rooted traversal that never saw the root's `0x40` transition).
+///
+/// No TERMINATOR (`0x38`) is appended: row-index separators are `separatorGt` /
+/// `nudge` PREFIXES of a clustering (`RowIndexWriter.add`/`complete`), not
+/// complete clusterings, so no `ByteSource.TERMINATOR` is present on disk. A
+/// prefix bound therefore still sorts before any longer key sharing it.
 pub fn encode_clustering_bound_oss50(values: &[Value]) -> BtiResult<Vec<u8>> {
     // All-ascending convenience: every component uses its base byte-comparable
     // form. Equivalent to `encode_clustering_bound_oss50_with_order` with all
     // `is_reversed = false`.
     let mut out = Vec::new();
-    for (i, v) in values.iter().enumerate() {
-        if i > 0 {
-            out.push(OSS50_NEXT_COMPONENT);
-        }
+    for v in values {
+        out.push(OSS50_NEXT_COMPONENT);
         encode_clustering_component_oss50(v, &mut out)?;
     }
     Ok(out)
@@ -150,13 +155,14 @@ pub fn encode_clustering_bound_oss50(values: &[Value]) -> BtiResult<Vec<u8>> {
 /// (cassandra-5.0.0 `org.apache.cassandra.db.marshal.ReversedType.asComparableBytes`
 /// + `org.apache.cassandra.utils.bytecomparable.ByteSource.invert`.)
 ///
-/// The inter-component framing byte ([`OSS50_NEXT_COMPONENT`], `0x40`) is emitted
-/// by the *comparator* (`ClusteringComparator.asByteComparable`), NOT by a
-/// component's type, so it is **not** inverted even when neighbouring components
-/// are DESC — only the per-component byte-comparable bytes are complemented. This
-/// matches Cassandra, where each `subtype(i)` (possibly a `ReversedType`) emits
-/// its own (already inverted) byte source and the comparator separates them with
-/// the un-inverted `NEXT_COMPONENT` byte.
+/// The framing byte ([`OSS50_NEXT_COMPONENT`], `0x40`) — emitted before EVERY
+/// component including the first, per
+/// `ClusteringComparator.ByteComparableClustering` — comes from the *comparator*,
+/// NOT from a component's type, so it is **not** inverted even when the component
+/// it precedes is DESC; only the per-component byte-comparable bytes are
+/// complemented. This matches Cassandra, where each `subtype(i)` (possibly a
+/// `ReversedType`) emits its own (already inverted) byte source and the comparator
+/// prefixes each with the un-inverted `NEXT_COMPONENT` byte.
 ///
 /// `is_reversed[i]` MUST correspond positionally to `values[i]` (i.e. the schema
 /// clustering-key order). A short `is_reversed` slice treats missing entries as
@@ -167,9 +173,7 @@ pub fn encode_clustering_bound_oss50_with_order(
 ) -> BtiResult<Vec<u8>> {
     let mut out = Vec::new();
     for (i, v) in values.iter().enumerate() {
-        if i > 0 {
-            out.push(OSS50_NEXT_COMPONENT);
-        }
+        out.push(OSS50_NEXT_COMPONENT);
         if is_reversed.get(i).copied().unwrap_or(false) {
             // Encode the base component into a scratch buffer, then complement
             // every byte (ReversedType / ByteSource.invert).
@@ -190,17 +194,19 @@ mod tests {
     use super::*;
 
     /// The OSS50 byte-comparable clustering encoder (issue #832 Finding 1)
-    /// reproduces the on-disk trie separator bytes.
+    /// reproduces the on-disk trie separator bytes — including the leading
+    /// `0x40 NEXT_COMPONENT` byte every component carries (issue #3002; the real
+    /// `wide_table` `Rows.db` separator for ck=8 is `40 80 00 00 08`).
     #[test]
     fn oss50_clustering_encoder() {
-        // Single int component — bare, sign-flip big-endian (matches fixture).
+        // Single int component — 0x40 NEXT_COMPONENT + sign-flip big-endian.
         assert_eq!(
             encode_clustering_bound_oss50(&[Value::Integer(8)]).unwrap(),
-            vec![0x80, 0x00, 0x00, 0x08]
+            vec![0x40, 0x80, 0x00, 0x00, 0x08]
         );
         assert_eq!(
             encode_clustering_bound_oss50(&[Value::Integer(-1)]).unwrap(),
-            vec![0x7F, 0xFF, 0xFF, 0xFF]
+            vec![0x40, 0x7F, 0xFF, 0xFF, 0xFF]
         );
         // Ordering is preserved: -1 < 0 < 100 byte-comparably.
         let neg = encode_clustering_bound_oss50(&[Value::Integer(-1)]).unwrap();
@@ -208,29 +214,31 @@ mod tests {
         let pos = encode_clustering_bound_oss50(&[Value::Integer(100)]).unwrap();
         assert!(neg < zero && zero < pos);
 
-        // bigint — 8-byte sign-flip BE.
+        // bigint — 8-byte sign-flip BE behind the 0x40 framing byte.
         assert_eq!(
             encode_clustering_bound_oss50(&[Value::BigInt(1)]).unwrap(),
-            vec![0x80, 0, 0, 0, 0, 0, 0, 0x01]
+            vec![0x40, 0x80, 0, 0, 0, 0, 0, 0, 0x01]
         );
 
-        // Multi-component: int(1) + text("ab") joined with 0x40 NEXT_COMPONENT,
-        // text terminated by the OSS50 end marker 0x00 0xFF.
+        // Multi-component: 0x40 before EACH of int(1) and text("ab") (the
+        // `("A", 0005) -> 40 4100 40 0005` worked example in
+        // `ClusteringComparator.ByteComparableClustering`), text terminated by
+        // the OSS50 end marker 0x00 0xFF.
         assert_eq!(
             encode_clustering_bound_oss50(&[Value::Integer(1), Value::text("ab".to_string())])
                 .unwrap(),
-            vec![0x80, 0x00, 0x00, 0x01, 0x40, b'a', b'b', 0x00, 0xFF]
+            vec![0x40, 0x80, 0x00, 0x00, 0x01, 0x40, b'a', b'b', 0x00, 0xFF]
         );
 
         // Variable-length OSS50: text terminates with 0x00 0xFF; a literal 0x00
         // byte is escaped as 0x00 0xFE so it never collides with the terminator.
         assert_eq!(
             encode_clustering_bound_oss50(&[Value::text("a".to_string())]).unwrap(),
-            vec![b'a', 0x00, 0xFF]
+            vec![0x40, b'a', 0x00, 0xFF]
         );
         assert_eq!(
             encode_clustering_bound_oss50(&[Value::blob(vec![0x01, 0x00, 0x02])]).unwrap(),
-            vec![0x01, 0x00, 0xFE, 0x02, 0x00, 0xFF]
+            vec![0x40, 0x01, 0x00, 0xFE, 0x02, 0x00, 0xFF]
         );
         // Prefix-free ordering: "a" sorts before "ab".
         let a = encode_clustering_bound_oss50(&[Value::text("a".to_string())]).unwrap();
@@ -246,10 +254,11 @@ mod tests {
     /// complements every byte of the base byte-comparable form.
     #[test]
     fn oss50_clustering_encoder_reversed_order() {
-        // DESC int(8): base 80 00 00 08, complemented -> 7F FF FF F7.
+        // DESC int(8): base 80 00 00 08, complemented -> 7F FF FF F7, behind the
+        // UN-inverted 0x40 framing byte (emitted by the comparator, #3002).
         assert_eq!(
             encode_clustering_bound_oss50_with_order(&[Value::Integer(8)], &[true]).unwrap(),
-            vec![0x7F, 0xFF, 0xFF, 0xF7]
+            vec![0x40, 0x7F, 0xFF, 0xFF, 0xF7]
         );
         // ASC path is identical to the plain encoder.
         assert_eq!(
@@ -281,8 +290,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             mixed,
-            vec![0x80, 0x00, 0x00, 0x01, 0x40, 0x7F, 0xFF, 0xFF, 0xF7],
-            "ASC component bare, 0x40 framing un-inverted, DESC component complemented"
+            vec![0x40, 0x80, 0x00, 0x00, 0x01, 0x40, 0x7F, 0xFF, 0xFF, 0xF7],
+            "0x40 framing before EACH component (un-inverted), DESC component complemented"
         );
 
         // Mixed-order monotonicity.

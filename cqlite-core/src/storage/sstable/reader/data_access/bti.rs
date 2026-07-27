@@ -410,11 +410,16 @@ impl SSTableReader {
             .map(|s| s.columns.iter().any(|c| c.is_static))
             .unwrap_or(false);
 
-        // IMPLICIT FIRST BLOCK (issue #1968): a `start` below the first separator
-        // selects the implicit block at the partition body start, which no walk can
-        // return. `rows_floor_block` returns `None` in exactly that case, so it IS
-        // the implicit-first signal; the decode must then begin at rel 0 or the
-        // earliest clustering rows are dropped.
+        // IMPLICIT FIRST BLOCK (issue #1968): a `start` below the FIRST stored
+        // separator selects a block no walk can return, so `rows_floor_block`'s
+        // `None` IS the implicit-first signal and the decode must begin at rel 0 or
+        // the earliest clustering rows are dropped. In a Cassandra-written trie read
+        // from the CORRECT root (issue #3002) this is now unreachable: the first
+        // block's separator is `ByteComparable.EMPTY` (`RowIndexWriter.add`), stored
+        // as the ROOT node's own payload, and nothing sorts below the empty key — the
+        // floor walk returns that block 0 entry as a genuine STORED floor. The `None`
+        // branch is retained for a trie whose first separator is NOT empty (a
+        // CQLite-written row index, or any bound below a non-empty first separator).
         let includes_implicit_first_block = floor_block.is_none();
 
         // The start narrows to the floor block only when NEITHER a static row NOR the

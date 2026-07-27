@@ -281,6 +281,21 @@ pub(crate) fn rows_floor_block(
     }
 }
 
+/// Test-only re-export of the crate-internal [`rows_floor_block`]
+/// (`RowIndexReader.separatorFloor`) walk, so the fixture-backed issue #3002
+/// parity test can prove — against the REAL `wide_table` `Rows.db` bytes and the
+/// corrected trie root — that the empty-separator block 0 is now returned as a
+/// genuine STORED floor instead of relying on the #1968 implicit-first `None`.
+#[doc(hidden)]
+#[cfg(not(feature = "tombstones"))]
+pub fn rows_floor_block_for_test(
+    trie_data: &[u8],
+    root_offset: usize,
+    target_key: &[u8],
+) -> BtiResult<Option<BtiRowIndexEntry>> {
+    rows_floor_block(trie_data, root_offset, target_key)
+}
+
 #[cfg(not(feature = "tombstones"))]
 /// Compute the block with the smallest separator **strictly greater** than
 /// `target_key` (`target_key`'s successor block).
