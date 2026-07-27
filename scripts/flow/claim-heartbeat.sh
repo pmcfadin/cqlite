@@ -75,6 +75,9 @@
 #                                            # foreign-pid unknowable); exit 2 = no ref.
 #   claim-heartbeat.sh reap <machine>        # delete a machine's claim ref, but
 #                                            # REFUSE if its issue has an open PR.
+#   claim-heartbeat.sh reap-threshold        # print the staleness threshold in
+#                                            # seconds (the single definition of 4h,
+#                                            # reused by claim.sh's liveness check)
 #
 # Run from inside the repo (any cwd under the working tree/worktree is fine —
 # this never touches the working tree or the current branch).
@@ -455,13 +458,20 @@ case "$SUBCOMMAND" in
     shift
     cmd_reap "${1:-}"
     ;;
+  reap-threshold)
+    # The staleness threshold as a machine-readable number of seconds. Exists so a
+    # SIBLING tool (claim.sh's legacy-branch liveness check, #2945) can reuse THIS
+    # file's single definition of "stale enough to hand away" instead of hardcoding a
+    # second copy of 4h that could drift from the documented one.
+    printf '%s\n' "$DEFAULT_REAP_THRESHOLD_SECS"
+    ;;
   -h | --help)
     print_help
     ;;
   "")
-    die_usage "a subcommand is required: beat <issue> | list | clear <machine> | stamp <issue> [pid] | list-claims | should-reap <machine> [secs] | reap <machine>"
+    die_usage "a subcommand is required: beat <issue> | list | clear <machine> | stamp <issue> [pid] | list-claims | should-reap <machine> [secs] | reap <machine> | reap-threshold"
     ;;
   *)
-    die_usage "unknown subcommand: $SUBCOMMAND (expected beat|list|clear|stamp|list-claims|should-reap|reap)"
+    die_usage "unknown subcommand: $SUBCOMMAND (expected beat|list|clear|stamp|list-claims|should-reap|reap|reap-threshold)"
     ;;
 esac
