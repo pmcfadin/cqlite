@@ -469,7 +469,11 @@ pub(crate) fn resolve_rows_db_entry_uncounted(
     // rejection invalidates ONLY the root capability — `data_position` and
     // `block_count` below are decoded regardless, so the point-lookup and
     // successor-walk consumers of those fields are untouched.
-    let trie_root_signed = root_delta + base as i64;
+    // `saturating_add`: `root_delta` is an arbitrary 64-bit ZigZag value on a hostile
+    // or corrupt file, so a plain `+` would overflow (panicking in debug builds). A
+    // saturated bound is rejected by the validator below exactly like any other
+    // out-of-region offset.
+    let trie_root_signed = root_delta.saturating_add(base as i64);
     let trie_root = validate_rows_trie_root(rows_db, trie_root_signed, rows_offset);
 
     let (block_count_u64, n) = read_unsigned_vint_from_slice(&rows_db[cur..])?;

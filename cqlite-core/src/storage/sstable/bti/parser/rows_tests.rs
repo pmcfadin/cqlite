@@ -398,6 +398,32 @@ fn resolve_rows_db_entry_rejects_a_root_from_the_pre_fix_two_low_base() {
     );
 }
 
+/// A hostile/corrupt entry whose SIGNED root delta is a maximal 64-bit value must
+/// neither panic (debug-build integer overflow when adding the base) nor be trusted:
+/// the saturated offset is rejected as out-of-region.
+#[test]
+fn resolve_rows_db_entry_saturates_an_absurd_root_delta() {
+    let mut buf = vec![0x01u8, 0x07]; // a valid root at 0..2
+    let rows_offset = buf.len();
+    buf.extend_from_slice(&0u16.to_be_bytes()); // key length 0
+    buf.push(0); // dataPos
+                 // rootΔ = i64::MAX as a 9-byte unsigned vint of ZigZag(i64::MAX) = 0xFFFF..FE.
+    buf.push(0xFF);
+    buf.extend_from_slice(&((i64::MAX as u64) << 1).to_be_bytes());
+    buf.push(1); // blockCount
+    buf.push(0x80); // LIVE deletion
+
+    let header = resolve_rows_db_entry(&buf, rows_offset).expect("the entry still deserializes");
+    assert_eq!(header.block_count, 1);
+    assert_eq!(
+        header
+            .trie_root
+            .expect_err("an absurd delta cannot yield a root")
+            .reason,
+        RowsTrieRootRejectReason::NotBelowEntry
+    );
+}
+
 /// Finding 2 (issue #832): a `TrieIndexEntry` whose partition DeletionTime is
 /// the MODERN `0x80` LIVE sentinel decodes to `partition_deletion == None`.
 #[test]
