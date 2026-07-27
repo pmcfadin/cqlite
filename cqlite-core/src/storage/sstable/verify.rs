@@ -946,7 +946,7 @@ fn check_bti_structure(
 ) -> Result<Option<Vec<BtiResolvedLeaf>>> {
     use crate::storage::sstable::bti::parser::{
         iterate_partitions_in_bti_file, iterate_rows_for_partition, resolve_rows_db_entry,
-        BtiPartitionLocation,
+        BtiPartitionLocation, RowsTrieRootRejectReason,
     };
     use std::io::Cursor;
 
@@ -1061,13 +1061,41 @@ fn check_bti_structure(
                     continue;
                 }
                 if let Err(e) = iterate_rows_for_partition(&rows_bytes, off) {
-                    findings.push(VerifyFinding::new(
-                        VerifyErrorClass::BtiTrieCorrupt,
-                        "Rows.db",
-                        format!(
+                    // Issue #3002: an INTACT file whose row-index ROOT merely violates
+                    // the writer-ordering invariant (e.g. a `Rows.db` written by CQLite
+                    // <= 0.16, whose root delta was measured from a 2-byte-low base) is
+                    // NOT damaged — the remedy is a rewrite, not data recovery. Naming
+                    // it "truncated/corrupt" would send an operator hunting for damage
+                    // that is not there, so the reason decides the wording.
+                    let reject_reason = resolve_rows_db_entry(&rows_bytes, off)
+                        .ok()
+                        .and_then(|h| h.trie_root.err())
+                        .map(|rejection| rejection.reason);
+                    let detail = match reject_reason {
+                        Some(
+                            reason @ (RowsTrieRootRejectReason::ExtentNotAtEntry { .. }
+                            | RowsTrieRootRejectReason::PayloadIncapableNodeType { .. }),
+                        ) => format!(
+                            "row-index root for the partition at Rows.db offset {} does not satisfy the BTI writer-ordering invariant ({}) — the file's bytes are intact, but the root is unusable, so clustering reads decode whole partitions; rewrite (re-flush/re-compact) this SSTable (issue #3002): {}",
+                            off,
+                            reason.label(),
+                            e
+                        ),
+                        Some(reason) => format!(
+                            "row-index trie for partition at Rows.db offset {} has an unusable root ({}) — truncated/corrupt: {}",
+                            off,
+                            reason.label(),
+                            e
+                        ),
+                        None => format!(
                             "row-index trie for partition at Rows.db offset {} failed to parse (truncated/corrupt): {}",
                             off, e
                         ),
+                    };
+                    findings.push(VerifyFinding::new(
+                        VerifyErrorClass::BtiTrieCorrupt,
+                        "Rows.db",
+                        detail,
                     ));
                     continue;
                 }

@@ -1063,6 +1063,60 @@ mod wiring {
         assert_fallback_returns_exact_rows(&db, "childless 0x00 root").await;
     }
 
+    /// Issue #3002 (roborev): `verify` must NOT tell an operator that an intact file
+    /// is damaged. A `Rows.db` written against the pre-#3002 2-low base is
+    /// byte-for-byte intact — only its root DELTA BASE is wrong — so the finding must
+    /// name the violated writer-ordering invariant and prescribe a REWRITE
+    /// (re-flush/re-compact), never "truncated/corrupt".
+    #[tokio::test]
+    async fn verify_reports_a_rewritable_root_not_a_damaged_file() {
+        use cqlite_core::storage::sstable::verify::{verify_sstable, VerifyErrorClass, VerifyMode};
+
+        let Some((_tmp, sstables)) = fixture_copy_with_two_low_base_rows_db() else {
+            return;
+        };
+        let table_dir = sstables.join(
+            WIDE_DIR
+                .strip_prefix("sstables/")
+                .expect("WIDE_DIR lives under sstables/"),
+        );
+        let config = cqlite_core::Config::default();
+        let platform = std::sync::Arc::new(
+            cqlite_core::platform::Platform::new(&config)
+                .await
+                .expect("Platform::new must succeed"),
+        );
+        let report = verify_sstable(&table_dir, VerifyMode::Quick, &config, platform)
+            .await
+            .expect("verify_sstable must run on an intact-but-mis-rooted SSTable");
+
+        let root_findings: Vec<&str> = report
+            .findings
+            .iter()
+            .filter(|f| f.class == VerifyErrorClass::BtiTrieCorrupt && f.component == "Rows.db")
+            .map(|f| f.detail.as_str())
+            .collect();
+        assert!(
+            !root_findings.is_empty(),
+            "the mis-based root must still be REPORTED (findings: {:?})",
+            report.findings
+        );
+        for detail in root_findings {
+            assert!(
+                detail.contains("extent_not_at_entry"),
+                "the finding must name the violated invariant's stable label: {detail}"
+            );
+            assert!(
+                detail.contains("rewrite") && detail.contains("3002"),
+                "the finding must prescribe a rewrite and reference issue #3002: {detail}"
+            );
+            assert!(
+                !detail.contains("truncated/corrupt"),
+                "an INTACT file must not be described as truncated/corrupt: {detail}"
+            );
+        }
+    }
+
     /// Shared oracle for both "unusable root ⇒ honest fallback" wiring tests: every
     /// partition still decodes in full, and every slice class — including the block-0
     /// range a bogus window drops — returns EXACTLY its rows, in ascending clustering

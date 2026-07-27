@@ -26,9 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     such a file stay CORRECT but are affected in two different ways: a clustering
     `SELECT` silently loses the row-index narrowing (below), while the paths that
     REQUIRE a root — `iterate_rows_for_partition` and `sstable verify` — fail on it.
-    `verify` records a `BtiTrieCorrupt` finding per affected partition and drops that
-    leaf from its cross-check set, so it also reports follow-on index-vs-Data.db
-    findings for the same file; they all clear once the SSTable is rewritten.
+    `verify` records a `BtiTrieCorrupt` finding per affected partition — worded to say
+    the file's bytes are INTACT and the remedy is a rewrite, not damage recovery — and
+    drops that leaf from its cross-check set, so it also reports follow-on
+    index-vs-Data.db findings for the same file; they all clear once the SSTable is
+    rewritten.
   - A mis-rooted entry is now CHECKED structurally rather than trusted: a row-index
     root must precede its entry, be a payload-capable node type (and not the empty
     childless `PayloadOnly`-with-no-payload shape), and end exactly at the entry (the
