@@ -244,14 +244,6 @@ pub fn record_nanos(phase: StreamSubPhase, nanos: u64) {
     });
 }
 
-/// [`record_nanos`] the wall time elapsed since `start` into `phase` — the
-/// manual-timing counterpart of [`timed`] for an ASYNC call site that cannot wrap
-/// a sync closure (e.g. the full-ring fallback's async `read_next_block`
-/// page-in). No-op with no sink installed.
-pub fn record_elapsed(phase: StreamSubPhase, start: Instant) {
-    record_nanos(phase, elapsed_nanos(start));
-}
-
 /// RAII timer that records the elapsed wall time into `phase` when dropped. The
 /// tight-scope counterpart of [`timed`] for an ASYNC region that a sync closure
 /// cannot wrap (e.g. an `.await`ed page-in): bind it in a `{ let _t = …; expr }`

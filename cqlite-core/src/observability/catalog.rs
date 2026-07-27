@@ -102,13 +102,21 @@ pub mod attr {
     pub const RPC_STATUS: &str = "cqlite.rpc.status";
     /// `do_get` execution phase (issue #2162; `"admission"` added #2420
     /// roborev-1700; `"validate"` added #2420 roborev-1702). Bounded to the
-    /// closed set `"validate"`, `"admission"`, `"resolve"`, `"merge_setup"`,
-    /// `"stream"` — a `&'static str` from a fixed slot table, never a
-    /// per-query, per-ticket, key, or query-text value. Used as the bounded
-    /// dimension on [`super::RPC_PHASE_DURATION`] so a stalled `do_get`
-    /// localizes to a phase (time piling up in `merge_setup`, queued behind the
-    /// admission semaphore in `admission`, or stuck parsing/validating a
-    /// malformed ticket in `validate`) from metrics alone.
+    /// closed set of five TOP-LEVEL values `"validate"`, `"admission"`,
+    /// `"resolve"`, `"merge_setup"`, `"stream"` — a `&'static str` from a fixed
+    /// slot table, never a per-query, per-ticket, key, or query-text value. Used
+    /// as the bounded dimension on [`super::RPC_PHASE_DURATION`] so a stalled
+    /// `do_get` localizes to a phase (time piling up in `merge_setup`, queued
+    /// behind the admission semaphore in `admission`, or stuck parsing/validating
+    /// a malformed ticket in `validate`) from metrics alone.
+    ///
+    /// Cardinality (issue #2819): on [`super::RPC_PHASE_DURATION`] the `do_get`
+    /// method ALSO carries FIVE in-`stream` sub-phase values (`"stream_cold_fault"`,
+    /// `"stream_decompress"`, `"stream_merge"`, `"stream_encode"`,
+    /// `"stream_grpc_write"`), so `do_get`'s phase.duration value set is TEN, not
+    /// five. The sub-phase values are gated to `do_get` + `phase.duration` only —
+    /// they are NOT added to [`super::RPC_PHASE_ACTIVE`], which stays the five
+    /// top-level values per method. Still a closed, static, low-cardinality set.
     pub const RPC_PHASE: &str = "cqlite.rpc.phase";
     /// Reason a `SELECT` fell back to a degraded (full-scan) read path
     /// (issue #2163). Values come from
