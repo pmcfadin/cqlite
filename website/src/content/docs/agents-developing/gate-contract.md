@@ -79,6 +79,24 @@ carry).
   subscribes to `labeled`/`unlabeled` so applying one to an already-finished gate starts a fresh run that
   sees it. Each honoured waiver emits a warning annotation and a job-summary line naming the tier and the
   actor.
+- **Labelling is cheap.** Subscribing to label events must not make every `ci:perf` / board-mirror /
+  `needs-decision` label — or the waiver itself — restart a 30-minute gate. So a label mutation never
+  cancels the in-flight run (cancellation is conditional on the event action; the shared concurrency group
+  still guarantees only one run per PR can report `required`), and the label-triggered run **skips
+  `pr-gate-core`** and reuses the core result already recorded for the same head sha. That reuse is
+  fail-closed: absent, pending, failed, or skipped-on-a-non-label-event all red `required`, and the run's
+  own skipped check run cannot stand in for the real one.
+- **The check is not defined by the thing it checks.** `required` evaluates the aggregator, its ruby
+  modules, and `.github/ci-gating-tiers.yml` from the pull request's **base ref**, so a PR cannot gut the
+  aggregator or move its own tier into `exempt:` and go green on instructions it wrote. Practical
+  consequences: a registry change takes effect **after it merges**, and renaming a registered tier's
+  context in the same PR needs a second PR or a `ci:waive:<id>` (the base registry still expects the old
+  name). The enrolment policy still validates the HEAD tree — it is judging your change.
+- **A tier's mandate covers what reaches it at runtime.** For the Flight tier that is `cqlite-flight/**`,
+  `cqlite-core/**`, `test-data/**`, `Cargo.toml`/`Cargo.lock`, `rust-toolchain.toml`, the shared
+  `setup-rust-ci` action and the workflow itself — one verdict for the whole tier, so a core-only diff runs
+  the end-to-end tests rather than the `--lib` subset. A registered tier may have only ONE applicability
+  output; two predicates behind one context is how a mandating diff silently reaches the cheap half.
 
 Offline proofs live in `scripts/tests/test_aggregate_required_tiers.sh` (every check-run state, both
 re-run directions, self-exclusion by run identity, waiver cases) and

@@ -81,14 +81,113 @@ plain `git diff --name-only base...head` — the same set `required`'s existing 
 not a reimplementation of GitHub trigger semantics: it is a first-class, single-owner predicate whose
 failure mode (too broad) costs CI minutes, not correctness.
 
+**One predicate, not two (review round 2).** The first cut of the Flight tier published *two* classifier
+outputs — `run_tier` (fmt/clippy/`--lib`) and `run_full` (the ~30 e2e tests in `cqlite-flight/tests/`) —
+behind one context, governed by two overlapping path regexes. A `cqlite-core/**`-only diff matched only the
+narrower one, so the e2e tests never ran and `Flight tier gate` reported success: **#2906 reappearing
+inside its own fix**, in the exact direction Flight actually breaks from (#2825 shipped a wrong
+`worst_case_batch_capacity_bytes` because nothing exercised it; #2821 was its first caller). Two predicates
+behind one context means the weaker one can silently win, so:
+
+- a registered tier has **exactly one applicability verdict**, enforced by `gating_policy_rules.rb`
+  (`applicability_scope_errors`); genuinely distinct scopes must be two registered tiers with two contexts;
+- the mandate set is everything that reaches the tier at runtime or decides what its tests assert —
+  for Flight: `cqlite-flight/**`, `cqlite-core/**`, `test-data/**`, `Cargo.toml`, `Cargo.lock`,
+  `rust-toolchain.toml`, `.github/actions/setup-rust-ci/**`, and the workflow itself;
+- the registry's `mandate_paths` is prose, so `mandate_path_errors` fails the gate when a documented path
+  is not even mentioned by the tier's classifier (documented-but-unimplemented coverage is worse than none).
+
+## Label events must not tax the gate (review round 2)
+
+Subscribing the aggregator to `labeled`/`unlabeled` is what makes the `ci:waive:<tier-id>` break-glass
+reachable — but combined with the pre-existing `cancel-in-progress: true` it meant **every** label mutation
+(`ci:perf`, a board-mirror label, `needs-decision`, or the waiver itself) cancelled the in-flight run and
+restarted the 30-minute core. Applying the escape hatch would have cost a full gate re-run.
+
+Three options were weighed: (i) conditional `cancel-in-progress`; (ii) a separate concurrency group for
+label runs; (iii) split so a label event re-evaluates only the aggregator. **(i) + (iii) chosen; (ii)
+rejected** — a separate group permits two concurrent runs of the same workflow on the same head, and both
+would report a `required` conclusion, with last-writer-wins deciding a merge. Concretely:
+
+- the concurrency **group is unchanged**, and that is the serialization guarantee: at most one run per PR
+  executes, so two runs can never both report `required` (a queued run reports nothing until it starts);
+- `cancel-in-progress` becomes `github.event.action != 'labeled' && != 'unlabeled'` — a new head sha still
+  cancels the obsolete run; a label mutation queues behind it;
+- `pr-gate-core` is **skipped** on label events, so the heavy work never re-runs. Skipping the WORK never
+  skips the CHECK: `required` requires the `pr-gate-core` result **already recorded for the same head sha**
+  (`check_name=pr-gate-core&filter=all`, minus this run's own job ids — `filter=latest` would return only
+  the label run's own `skipped` check run and hide the real one). Absent, pending, failed, or skipped-on-a-
+  non-label-event all fail closed, so a label can never manufacture a green core;
+- the waiver needs no new run at all in the common case: the aggregator re-reads the PR's live labels every
+  poll, so a waiver applied mid-wait takes effect in the already-running job. The label-triggered run is the
+  path for a waiver applied *after* `required` concluded.
+
+`aggregator_concurrency_errors` rejects an unconditional `cancel-in-progress: true` while the aggregator
+observes label events, so this cannot regress silently.
+
+## The trust boundary: base ref decides (review round 2)
+
+`required` is the sole branch-protection context, and it was reading `aggregate-required-tiers.sh`,
+`gating_registry.rb` and `.github/ci-gating-tiers.yml` **from the PR's own checkout** — the check was
+defined by the thing it checks. A PR could gut the aggregator, or move its own tier from `tiers:` to
+`exempt:` (the enrolment rule accepts any reason ≥ 10 chars plus an issue ref), and go green on
+instructions it wrote. Human review is a weak backstop for the one mechanism whose purpose is not relying
+on a human noticing.
+
+The `required` job now checks out `github.event.pull_request.base.sha` into `base-gating/` and runs the
+aggregator from there; the script derives its registry and ruby modules from its own location, so the whole
+decision surface is the base ref's. A registry change takes effect **after it merges**, which is the
+correct semantics. Details:
+
+- **Not `pull_request_target`.** It runs the base workflow file (closing more) but hands a base-context
+  token to a run that must also see head content — the classic pwn-request shape, and a much larger blast
+  radius than the hole being closed. Checking out the base copy of the specific trusted files is the
+  smaller instrument. The `required` job checks out **no head content at all**.
+- **Bootstrap.** When the base ref carries no registry (the PR that introduces the mechanism; a PR onto a
+  branch cut before it), the job falls back to the head copy with a `::warning::`. This cannot be used to
+  escape a base registry that exists — the base's state is not PR-controllable, so a PR that *deletes* the
+  registry still faces the base copy.
+- **Policy vs aggregation.** `validate-workflows.rb` deliberately still validates the **head** tree: it is
+  judging the proposed change (a PR adding a workflow *and* enrolling it must pass). Aggregation uses the
+  base. Consequence to know: renaming a base-registered tier's **context** in the same PR makes that
+  context absent under the base registry, so such a rename is a two-PR operation or uses `ci:waive:<id>`.
+- **Residual, stated rather than hidden.** A PR still controls the code its own tiers execute — a tier's
+  classifier can be edited to report "not applicable". Base-ref evaluation guarantees the *set* of tiers,
+  their contexts and the aggregation logic, not the work a tier chooses to do. That residual is a visible
+  diff to a registered tier's workflow; CODEOWNERS on `.github/` + `scripts/ci/` is the complementary
+  control, and `aggregator_trust_boundary_errors` keeps the base-ref checkout from being quietly dropped.
+
 ## Mechanics
 
 **Where the aggregation runs.** `pr-gate.yml` splits into `pr-gate-core` (today's steps, unchanged) and
 `required` (`name: required` preserved, `needs: [pr-gate-core]`, `if: always()`), whose only work is
 aggregation. Rationale: the required *context name* is unchanged, so branch protection is untouched; the
-aggregator gets its own generous `timeout-minutes` without inflating the compute job's; the heavy runner is
-released before the wait begins; and `if: always()` guarantees the context still reports when core fails.
-`required` fails whenever `needs.pr-gate-core.result != 'success'` — the aggregate can never mask the core.
+aggregator gets its own generous `timeout-minutes` without inflating the compute job's; and `if: always()`
+guarantees the context still reports when core fails. `required` fails whenever `pr-gate-core` did not
+conclude `success` — the aggregate can never mask the core.
+
+### Cost, stated honestly (review round 2)
+
+An earlier draft of this section claimed the split "releases the heavy runner before the wait begins".
+That was **wrong**, and an inaccurate cost note is how the next person mis-plans capacity. The split
+separates *timeouts*, not runners. The true cost:
+
+- `required` occupies a **second `ubuntu-latest` runner** from the moment `pr-gate-core` concludes until the
+  slowest registered tier reaches a terminal state — worst case the 60-minute deadline, then a reported red
+  (the job's own 75-minute timeout is the backstop).
+- What the split *does* keep cheap is that job's shape: a bare checkout of the base ref, no toolchain, no
+  cargo cache, no build. It is the cheapest runner-minute available, and on a public repo `ubuntu-latest`
+  minutes are free — the real cost is queue contention when many PRs are open.
+- Polling backs off 15s → 60s, so a 60-minute wait is ~60 API calls, not a tight loop.
+- The common case is much cheaper than the worst: tiers start at the same time as `pr-gate-core` (~10–25
+  min), so when they finish first the aggregation's **first poll decides** and the job exits in under a
+  minute. Widening the Flight mandate to `cqlite-core/**` (round 2, Q1) makes the Flight `full` tier —
+  release build plus ~30 e2e tests — the likely long pole on core-touching PRs, so expect `required` to
+  genuinely wait on those.
+- Rejected for now: making the wait free by moving aggregation to a `workflow_run`-triggered job that
+  *writes* the `required` check run. It removes the idle runner but needs a check-run writer with
+  `checks: write`, a `pull_request` association lookup, and a story for the run that never fires — i.e. it
+  re-opens the never-fires trap this design exists to close. Tracked as a follow-up, not a prerequisite.
 
 **What it polls.** `GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs?filter=latest`, paginated, with
 `head_sha = github.event.pull_request.head.sha` — the PR head, **not** `github.sha` (the synthesised merge

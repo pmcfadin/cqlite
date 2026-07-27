@@ -39,10 +39,15 @@ cannot block a PR by failing.
 - **AND** the failure message states that absence is treated as an error, not as inapplicability
 
 #### Scenario: The gate's own validation failed
-- **GIVEN** the job carrying `pr-gate.yml`'s validation steps concluded `failure`, `cancelled`, or `skipped`
+- **GIVEN** the job carrying `pr-gate.yml`'s validation steps concluded `failure` or `cancelled`
 - **AND** every registered tier succeeded
 - **WHEN** the aggregating job runs
 - **THEN** it still runs (it is not skipped) and `required` FAILS
+
+#### Scenario: The gate's own validation was skipped on an event that may not skip it
+- **GIVEN** the compute job concluded `skipped` on any event other than a label mutation
+- **WHEN** the aggregating job runs
+- **THEN** `required` FAILS, naming the event that skipped it
 
 #### Scenario: An unregistered check run failed
 - **GIVEN** every registered context succeeded
@@ -235,6 +240,18 @@ the tier is mandatory for that diff. When the diff mandates the tier, the tier's
 its context SHALL reflect their result, **whether or not** the tier's `ci:*` opt-in label is present. The
 label SHALL remain a manual opt-in only for diffs that do not mandate the tier.
 
+A registered tier SHALL have **exactly one applicability verdict** governing every job behind its context.
+A tier whose jobs are gated on more than one classifier output SHALL be rejected by the workflow-policy
+rule: two predicates behind one context allow a diff to satisfy the narrower one, skip the work the tier
+exists to run, and still see the context report success. Genuinely distinct scopes SHALL be registered as
+separate tiers, each emitting its own context.
+
+The tier's mandate SHALL cover every path that reaches the tier's subject at runtime or determines what its
+tests assert — for the Flight tier: the Flight crate, the core engine it wraps, the test fixtures and
+oracles its parity tests read, the workspace dependency manifests, the pinned toolchain, the shared CI
+setup action, and the workflow itself. The registry's documented `mandate_paths` SHALL be checked against
+the tier's classifier, and a documented path the classifier never mentions SHALL be rejected.
+
 A worker SHALL NOT need per-pull-request knowledge of which tiers are out of band: no step of the delivery
 flow SHALL require a human or agent to apply a label in order for a mandated tier to gate the merge.
 
@@ -243,6 +260,24 @@ flow SHALL require a human or agent to apply a label in order for a mandated tie
 - **WHEN** its workflows run
 - **THEN** the registered Flight tier's mandating jobs execute (including the end-to-end tests)
 - **AND** `required` cannot conclude success until that tier reports success
+
+#### Scenario: A core-only diff mandates the tier that owns the end-to-end tests
+- **GIVEN** a PR whose diff touches only `cqlite-core/**` (or only the Cargo manifests, the pinned
+  toolchain, `test-data/**`, or the shared CI setup action) and carries no `ci:flight-full` label
+- **WHEN** the Flight tier's classifier evaluates the changed-file set
+- **THEN** the verdict mandates the job that runs `cargo test --package cqlite-flight` — the integration
+  and end-to-end tests — not merely the `--lib` job
+- **AND** a diff touching only docs, the CLI, or the bindings does not mandate the tier
+
+#### Scenario: A tier gated on two classifier outputs is rejected
+- **GIVEN** a registered tier whose jobs are gated on two different `needs.<classifier>.outputs.*` values
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS, naming the competing outputs and the jobs they gate
+
+#### Scenario: A documented mandate path the classifier never mentions is rejected
+- **GIVEN** a registry entry whose `mandate_paths` lists a path absent from the tier's workflow
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS, naming the drifted path
 
 #### Scenario: A non-mandating diff leaves the tier opt-in
 - **GIVEN** a PR whose diff mandates no registered heavy tier and carries no `ci:*` label
@@ -377,6 +412,71 @@ actor, so a waived merge is visible after the fact.
 - **GIVEN** a PR carrying `ci:waive:<tier-a>` while `<tier-b>` is also absent
 - **WHEN** the aggregation evaluates
 - **THEN** it FAILS, naming `<tier-b>`
+
+### Requirement: A label mutation SHALL NOT cancel, restart, or duplicate the gate
+
+The aggregating workflow SHALL observe label events (so the waiver is reachable) **without** making routine
+labelling expensive. A `labeled`/`unlabeled` event SHALL NOT cancel an in-flight run of the gate, and SHALL
+NOT re-execute the gate's compute job. Two runs of the aggregating workflow for the same pull request SHALL
+NOT both report a `required` conclusion; serialization SHALL be structural (a shared concurrency group),
+not timing-dependent.
+
+Reusing an already-recorded compute result SHALL NOT weaken it: the reuse SHALL read the result recorded
+for the **same head sha**, excluding the reusing run's own check runs by run identity, and SHALL FAIL when
+that result is absent, non-terminal, or anything other than success. The waiver SHALL take effect without a
+manual re-run.
+
+The workflow-policy validation SHALL reject an aggregating workflow that observes label events while
+declaring an unconditional `cancel-in-progress: true`.
+
+#### Scenario: A waiver applied mid-run takes effect without restarting the compute job
+- **GIVEN** the gate's compute job is skipped for a `labeled` event and its result for this head sha is
+  recorded as success
+- **AND** a `ci:waive:<tier-id>` label is present for an absent tier
+- **WHEN** the aggregation runs
+- **THEN** it reuses the recorded compute result, reports the waiver, and concludes success
+- **AND** no re-execution of the compute job is required
+
+#### Scenario: A label event cannot manufacture a green compute result
+- **GIVEN** the compute job is skipped for a label event
+- **WHEN** the recorded result for this head sha is a failure, is absent, or is only the label run's own
+  skipped check run
+- **THEN** `required` FAILS
+
+#### Scenario: Cancellation on label events is rejected by policy
+- **GIVEN** the aggregating workflow subscribes to `labeled`/`unlabeled` and sets
+  `concurrency.cancel-in-progress: true`
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS, stating that every label mutation would cancel and restart the gate
+
+### Requirement: The mechanism that decides `required` SHALL be read from the base ref
+
+The aggregator, its supporting modules, and the gating-tier registry SHALL be evaluated from the pull
+request's **base ref**, never from the pull request's own checkout, so that the pull request being gated
+cannot rewrite the check that gates it. A registry change SHALL take effect only after it merges. The
+pull request's diff SHALL still be classified normally (each tier's applicability is decided from the
+head diff), and the enrolment policy SHALL still validate the head tree, since it is judging the proposed
+change.
+
+The aggregating job SHALL NOT adopt `pull_request_target`, and SHALL NOT execute pull-request-controlled
+content in the privileged aggregation step. When the base ref carries no registry (bootstrap), the fallback
+to the head copy SHALL be announced; it SHALL NOT be reachable when the base ref does carry one.
+
+The workflow-policy validation SHALL reject an aggregating job that does not check out the base ref into
+its own path, or that invokes the workspace-root copy of the aggregator.
+
+#### Scenario: A PR that moves its own tier to `exempt:` is still gated
+- **GIVEN** the pull request's registry moves a registered tier into `exempt:` and that tier's context is
+  absent from the head
+- **WHEN** the aggregation is evaluated against the base ref's registry
+- **THEN** it FAILS and names the absent tier
+- **AND** the same evidence evaluated against the pull request's own registry would have passed
+
+#### Scenario: An aggregator reading its own PR's copy is rejected
+- **GIVEN** the aggregating job runs the workspace-root copy of the aggregator, or performs no base-ref
+  checkout
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS, stating that the check would be defined by the thing it checks
 
 ### Requirement: A green `required` is what releases `--auto`, and it implies every expected tier already passed
 

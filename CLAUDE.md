@@ -483,7 +483,14 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   annotated exemption) reds `required`. Residual: a tier re-run **after** `required` is already green
   cannot be retracted by a finished job — **re-run the tier, then re-run `required`**, in that order.
   Break-glass is per-tier only (`ci:waive:<tier-id>`, owner action) and can excuse an absent or
-  pending tier, **never** a failed one. Finalize runs in-session when the required
+  pending tier, **never** a failed one — applying it takes effect **without a re-run** (the
+  aggregator re-reads live labels each poll) and **without restarting `pr-gate-core`** (label events
+  queue rather than cancel, and skip the core, reusing the result already recorded for that head
+  sha). Two further properties worth knowing: `required` evaluates the aggregator **and the registry
+  from the PR's BASE ref**, so a registry/aggregator change lands only after it merges (rename a
+  tier's context in a separate PR, or waive it); and a tier's mandate covers everything that reaches
+  it at runtime — for Flight that includes `cqlite-core/**`, `test-data/**` and the Cargo manifests,
+  so core-touching PRs run the Flight e2e tier. Finalize runs in-session when the required
   check is already green at arm time, else on a later wake confirming `state=MERGED`. Do NOT
   wait for the owner. Seam 1
   (spec approval) is the only standing human gate. Escalate and **hold the merge** ONLY for: a

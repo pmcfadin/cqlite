@@ -96,6 +96,28 @@
 - [x] 7b.9 P10 lone check-run object parses; eval'd command inputs shape-validated.
 - [x] 7b.10 Mutants for each, including the near-miss inverses that must NOT red.
 
+## 7c. Roborev round 2 (Q1–Q5)
+- [x] 7c.1 Q1 the Flight mandate covers everything that reaches Flight at runtime (`cqlite-core/**`,
+      `test-data/**`, Cargo manifests, `rust-toolchain.toml`, `setup-rust-ci`), and ONE applicability
+      output governs the whole tier — a core-only diff mandates the end-to-end job, not just `--lib`.
+      New rules: `applicability_scope_errors`, `mandate_path_errors`.
+- [x] 7c.2 Q2 label events queue instead of cancelling (conditional `cancel-in-progress`, unchanged
+      concurrency group so two runs can never both report `required`) and skip `pr-gate-core`, whose
+      recorded result for the same head sha is required instead (`filter=all` + run-identity exclusion;
+      absent/pending/failed/skipped-on-a-non-label-event all fail closed). New rule:
+      `aggregator_concurrency_errors`.
+- [x] 7c.3 Q3 the aggregator, its modules and the registry are evaluated from the BASE ref (no
+      `pull_request_target`; no head content in the job outside the announced bootstrap fallback).
+      New rule: `aggregator_trust_boundary_errors`. Residual (a PR still controls the work its own tiers
+      do) stated in design.md.
+- [x] 7c.4 Q4 the inaccurate "releases the heavy runner" comment corrected; the second-runner cost stated
+      in design.md ("Cost"), including the rejected `workflow_run` alternative.
+- [x] 7c.5 Q5 the three shebang'd scripts are `100755`; the no-op `sed` expression now deletes the
+      paths-ignore sentinel it read as deleting.
+- [x] 7c.6 Discrimination mutants for each (policy non-vacuity 10 → 14; aggregator non-vacuity 6 → 8),
+      plus real-tree assertions that the shipped configuration — not merely a synthetic one — has the
+      properties.
+
 ## 8. Doctrine
 - [x] 8.1 `CLAUDE.md` autonomy section: `required` aggregates the registered sibling tiers and fails closed
       on failed/pending/absent; arming `--auto` stays correct; tier-then-`required` re-run order.
