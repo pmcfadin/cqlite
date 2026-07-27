@@ -145,17 +145,15 @@ pub(crate) struct StreamProbe {
     /// compiled in.
     errors_recorded: Arc<AtomicUsize>,
     /// Blocking-task guards THIS stream's own `spawn_blocking` merge closure
-    /// entered (issue #2896): exactly one per streaming merge. Paired with
-    /// [`Self::blocking_entry_level`] it makes the
-    /// `cqlite.flight.blocking_tasks_in_use` wiring observable per-stream,
-    /// instead of by differencing the process-global gauge against a baseline
-    /// snapshot that a concurrently-running peer test can inflate.
+    /// entered (issue #2896): exactly one per streaming merge. Makes the
+    /// `cqlite.flight.blocking_tasks_in_use` wiring observable PER-STREAM rather
+    /// than through the process-global gauge.
     blocking_entries: Arc<AtomicUsize>,
-    /// The shared in-use level the merge closure's own
-    /// [`crate::saturation::BlockingTaskGuard`] observed at ITS entry — the real
-    /// post-increment value of the production atomic, so it always includes this
-    /// guard's `+1` and is `>= 1` no matter what peer guards do afterwards
-    /// (issue #2896).
+    /// The shared in-use level that closure's own
+    /// [`crate::saturation::BlockingTaskGuard`] observed at ITS entry (issue
+    /// #2896) — see [`crate::saturation::BlockingTaskGuard::entry_level`], and
+    /// [`crate::saturation::blocking_tasks_in_use_level`] for the normative rule
+    /// on bounding it soundly.
     blocking_entry_level: Arc<AtomicI64>,
     /// Egress credit accounting (issue #2821): charged permit bytes, REALIZED
     /// resident capacity bytes and their high-water marks, plus the
@@ -432,10 +430,8 @@ pub(crate) fn spawn_streaming(
         // is the FIRST act here and its Drop decrements on every exit path
         // (normal, error, cancel, panic).
         let blocking_guard = crate::saturation::BlockingTaskGuard::enter();
-        // Issue #2896: publish THIS guard's own entry through the probe — the
-        // number of guards this closure entered, plus the post-increment level the
-        // guard read off the shared production atomic (`>= 1`, since it includes
-        // our own `+1`). These are plain statements on captured `Arc`s, not
+        // Issue #2896: publish THIS guard's own entry through the probe (see the
+        // `StreamProbe` fields). These are plain statements on captured `Arc`s, not
         // ordering-relevant locals: the invariant they preserve is that the guard
         // is entered BEFORE any other statement in this closure, and that no local
         // declared after it can outlive it (so the accounting still spans the whole
