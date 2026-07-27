@@ -870,6 +870,33 @@ if grep -q 'PARTIAL' "$sum"; then
 else
   ok "--only: a mutated run reports FAIL, never PARTIAL"
 fi
+# G3: the MAIN-lane boundary FAIL block is a FULL block, not a stub. It used to carry only
+# the four tree lines + detected-after-component, making the one block a reader reaches
+# after a mid-run mutation the information-POOREST in the gate — no commit, no datasets,
+# no ci-pins, no accelerator/cpu disclosure, no component verdicts. Every other terminal
+# block carries them; so must this one.
+prov_missing=""
+for need in '^commit: [0-9a-f]+ branch: .* dirty: ' '^datasets: ' '^ci-pins: ' \
+            '^accelerators: sccache=' '^cpu-budget: wrapper=' \
+            '^tree-start: ' '^tree-end: ' '^tree-integrity: FAIL' \
+            '^detected-after-component: fmt$' '^fmt: +(PASS|FAIL)' \
+            '^components-completed: [0-9]+ of [0-9]+ selected'; do
+  grep -qE "$need" "$sum" 2>/dev/null || prov_missing="${prov_missing:+$prov_missing }[$need]"
+done
+if [ -z "$prov_missing" ]; then
+  ok "G3: the boundary-FAIL block carries the full provenance (commit/datasets/ci-pins/accelerators/cpu-budget/tree lines/component table)"
+else
+  bad "G3: the boundary-FAIL block is missing standard provenance: $prov_missing"
+  grep -vE '^(logs|summary-file):' "$sum" 2>/dev/null
+fi
+# …and the component table is the REAL one: the boundary that detected the mutation is the
+# fmt component, whose verdict must be in the table exactly once, in the terminal format.
+if [ "$(grep -cE '^fmt: +(PASS|FAIL) \([0-9]+s\)' "$sum" 2>/dev/null | tr -d ' ')" = 1 ]; then
+  ok "G3: the partial component table uses the terminal block's own row format, once per component"
+else
+  bad "G3: the component table row for fmt is missing or malformed"
+  grep -E '^fmt:|^components-completed:' "$sum" 2>/dev/null
+fi
 ( cd "$r4" && git checkout -q -- README.md )
 
 # --- C (real gate, porcelain-identical) -----------------------------------------
@@ -1597,9 +1624,12 @@ for site in "lite:run_lite:1" "delta-refused-1:run_delta:1" "delta-refused-2:run
 done
 # C1: the `commit:` stamp must never be a fresh emit-time git read — the original defect.
 # Comments are stripped (prose ABOUT the defect must not trip the check) and the ONE
-# legitimate site is skipped: _tree_commit_meta's UNGUARDED branch, reached only when
+# legitimate site is skipped: the UNGUARDED branch of the stamp renderer, reached only when
 # there is no git worktree to capture, where the block already stamps tree-integrity: SKIP.
-emit_time_stamps=$(awk '/^_tree_commit_meta\(\) \{/ { skip = 1 } skip { if (/^\}/) skip = 0; next } { print }' "$GATE" \
+# BOTH halves of the split are skipped (#2926 review G3 moved the body into
+# _tree_commit_meta_render so the boundary-FAIL block can stamp WITHOUT a lazy finalize);
+# naming only the wrapper would have made this check pass by looking at the wrong function.
+emit_time_stamps=$(awk '/^_tree_commit_meta(_render)?\(\) \{/ { skip = 1 } skip { if (/^\}/) skip = 0; next } { print }' "$GATE" \
                      | sed 's/[[:space:]]*#.*$//' | grep -n 'commit: \$(git' || true)
 if [ -n "$emit_time_stamps" ]; then
   bad "C1: an emit-time 'commit: \$(git …)' stamp is back — the block can name an unverified sha"
@@ -1624,10 +1654,31 @@ else
 fi
 # The provenance renderer is shared: no emit path may hand-assemble a subset of the lines
 # and drop `tree-hash-cap:` (#2926 review).
-if body_has "$(fn_body "$GATE" _tree_boundary_fail)" '  while IFS= read -r _l; do _meta+=("$_l"); done < <(_tree_meta_render_lines)'; then
-  ok "WIRING: the boundary-FAIL block renders its provenance through the shared renderer (tree-hash-cap included)"
+if body_has "$(fn_body "$GATE" _tree_boundary_fail)" '  while IFS= read -r _l; do _meta+=("$_l"); done < <(_tree_boundary_meta_lines)'; then
+  ok "WIRING: the boundary-FAIL block renders its provenance through the shared assembly (tree-hash-cap included)"
 else
   bad "WIRING: _tree_boundary_fail hand-assembles its provenance lines — tree-hash-cap: can be dropped"
+fi
+# …and that assembly is PURE: it must render through the shared printers and must NEVER
+# call a lazily-finalizing helper, which would take a terminal capture and overwrite the
+# component-named verdict the block exists to publish (#2926 review G3).
+bml=$(fn_body "$GATE" _tree_boundary_meta_lines)
+bml_missing=""
+for need in '  _tree_commit_meta_render' '  _tree_meta_render_lines' \
+            '  printf '"'"'%s\n'"'"' "$(accelerators_line)"' '  printf '"'"'%s\n'"'"' "$(cpu_budget_line)"'; do
+  body_has "$bml" "$need" || bml_missing="${bml_missing:+$bml_missing }${need# *}"
+done
+if [ -z "$bml_missing" ]; then
+  ok "WIRING: the boundary-FAIL assembly renders commit/accelerators/cpu-budget/tree lines through the shared printers"
+else
+  bad "WIRING: the boundary-FAIL assembly is missing: $bml_missing"
+fi
+lazy_hits=$(printf '%s\n' "$bml" | sed 's/[[:space:]]*#.*$//' \
+              | grep -nE '(^|[[:space:]])(_tree_finalize|_tree_meta_lines|_tree_meta_array|_tree_commit_meta)([[:space:]]|$)' || true)
+if [ -z "$lazy_hits" ]; then
+  ok "WIRING: the boundary-FAIL assembly takes NO capture (no lazy finalize can overwrite the component-named verdict)"
+else
+  bad "WIRING: the boundary-FAIL assembly calls a lazily-finalizing helper: $lazy_hits"
 fi
 # The manifest trailer is validated, not merely written (#2926 review C2).
 if body_has "$(fn_body "$GATE" _tree_identity)" '  _tree_manifest_ok "$out" nul'; then

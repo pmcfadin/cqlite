@@ -1754,9 +1754,9 @@ esac
 # (never the checkout default) and every mutation target is an existing, repo-relative path.
 # NOTE this is a TEST SEAM, never a bypass: no mode here can turn a mutated run green.
 case "${AGENT_GATE_TREE_SELFTEST:-0}" in
-  0|capture|clean|boundary|side|terminal|postfinalize|validate-manifest) : ;;
+  0|capture|clean|boundary|side|terminal|postfinalize|validate-manifest|report-lookup) : ;;
   *)
-    echo "agent-gate: invalid AGENT_GATE_TREE_SELFTEST='${AGENT_GATE_TREE_SELFTEST}' (expected one of: 0 capture clean boundary side terminal postfinalize validate-manifest) (#2926)" >&2
+    echo "agent-gate: invalid AGENT_GATE_TREE_SELFTEST='${AGENT_GATE_TREE_SELFTEST}' (expected one of: 0 capture clean boundary side terminal postfinalize validate-manifest report-lookup) (#2926)" >&2
     exit 2 ;;
 esac
 TREE_SELFTEST_FIXTURE_MARKER=".agent-gate-tree-selftest-fixture"
@@ -1934,6 +1934,7 @@ _tree_excluded() {
 # subshell — so the `command -v`/`stat` probes re-ran per capture and per file.
 TREE_SHA_TOOL=""
 TREE_STAT_FLAVOR=""
+TREE_SORT0_OK=0
 _tree_probe_tools() {
   if command -v sha256sum >/dev/null 2>&1; then TREE_SHA_TOOL=sha256sum
   elif command -v shasum >/dev/null 2>&1; then TREE_SHA_TOOL=shasum
@@ -1941,8 +1942,23 @@ _tree_probe_tools() {
   if stat -c %Y . >/dev/null 2>&1; then TREE_STAT_FLAVOR=gnu
   elif stat -f %m . >/dev/null 2>&1; then TREE_STAT_FLAVOR=bsd
   else TREE_STAT_FLAVOR=none; fi
+  # `sort -z` is NOT universal (#2926 review G1 sweep). An unsupported flag makes sort
+  # print usage and emit NOTHING, and the capture's `… | LC_ALL=C sort -z` feeds a
+  # `while read -r -d ''` loop — so the manifest would come back EMPTY on a dirty tree
+  # and BOTH captures would agree: a silent FAIL-OPEN, the worst possible direction.
+  # Probe once; fall back to git's own ordering when the flag is unavailable.
+  if printf 'b\0a\0' | LC_ALL=C sort -z >/dev/null 2>&1; then TREE_SORT0_OK=1; else TREE_SORT0_OK=0; fi
 }
 _tree_probe_tools
+
+# _tree_sort0: NUL-framed sort of stdin, with a portable fallback. The fallback is not a
+# weakening: `git ls-files -z` and `git diff --name-only -z` already emit paths in a
+# deterministic, path-sorted order, and BOTH captures of a run take the same route — the
+# explicit sort only removes the dependency on that git property. What must never happen
+# is a sort that silently drops every path (see the probe above).
+_tree_sort0() {
+  if [ "$TREE_SORT0_OK" = 1 ]; then LC_ALL=C sort -z; else cat; fi
+}
 
 _tree_digest_file() {
   case "$TREE_SHA_TOOL" in
@@ -1950,6 +1966,16 @@ _tree_digest_file() {
     shasum)    shasum -a 256 < "$1" | awk '{print $1}' ;;
     *)         git --no-optional-locks hash-object --no-filters --stdin < "$1" ;;
   esac
+}
+
+# _tree_hex_id_ok <id>: rc 0 iff <id> is a FULL-LENGTH lowercase hex object id — 40 chars
+# in a SHA-1 repository, 64 in a SHA-256 one. ONE rule, used by both callers (#2926 review
+# G5): _tree_digest_ok below, and the lockfile carve-out's "the END value is a real blob
+# id" test, which used to hard-code 40 and therefore never admitted on a SHA-256 repo.
+_tree_hex_id_ok() {
+  case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
+  case "${#1}" in 40|64) return 0 ;; esac
+  return 1
 }
 
 # _tree_digest_ok <digest>: a capture digest is USABLE only when it is a full-length
@@ -1962,12 +1988,11 @@ _tree_digest_file() {
 # sha256sum/shasum produce 64 hex chars; the `git hash-object` last resort produces 40
 # (sha1 repo) or 64 (sha256 repo).
 _tree_digest_ok() {
-  case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
-  case "${#1}" in
-    64) return 0 ;;
-    40) [ "$TREE_SHA_TOOL" = git ] || return 1; return 0 ;;
-  esac
-  return 1
+  _tree_hex_id_ok "$1" || return 1
+  # 40 chars can ONLY be the `git hash-object` last resort against a SHA-1 repo:
+  # sha256sum/shasum always produce 64, so a 40-char digest from those is a short read.
+  if [ "${#1}" -eq 40 ] && [ "$TREE_SHA_TOOL" != git ]; then return 1; fi
+  return 0
 }
 
 # _tree_split_identity <line>: split "<head>\t<dirty>\t<digest>\t<fallbacks>" into
@@ -2082,12 +2107,12 @@ _tree_identity() {
       git --no-optional-locks ls-files -z
     else
       git --no-optional-locks diff --name-only -z --no-renames HEAD --
-    fi | LC_ALL=C sort -z
+    fi | _tree_sort0
   )
   # Untracked side: --exclude-standard is what makes .gitignore the exclusion set.
   while IFS= read -r -d '' p; do
     _tree_excluded "$p" || upaths+=("$p")
-  done < <(git --no-optional-locks ls-files --others --exclude-standard -z | LC_ALL=C sort -z)
+  done < <(git --no-optional-locks ls-files --others --exclude-standard -z | _tree_sort0)
 
   # Oversized UNTRACKED files (one batched find, never a fork per file).
   local -a bigpaths=()
@@ -2289,8 +2314,20 @@ _tree_capture_start() {
 #     A genuinely non-git tree simply fails the re-attempt and stays SKIP, so the spec'd
 #     no-worktree SKIP contract is unchanged; only a transient failure is recovered.
 #
-# rc 2 is NOT restored/re-attempted in either direction — an unvalidatable capture already
-# fails closed, which is the safe direction.
+# rc 2 at the RE-capture (a live guard) is treated EXACTLY like the rc-1 blip above
+# (#2926 review G4): "the capture ran but could not be validated" is a transient tool/disk
+# failure, and a FULLY VALIDATED pre-queue identity is sitting in the globals and on disk,
+# so failing the run there is a spurious FAIL, not a safety property — the guard restores
+# the pre-queue capture and certifies against the strictly WIDER window, as C3 does.
+# Restoring the GLOBALS alone is not enough: unlike rc 1 (which returns before writing
+# anything), an rc-2 re-capture has already OVERWRITTEN $LOG_DIR/tree-identity.start[.report]
+# with a possibly-truncated manifest that every later comparison reads. So the pre-queue
+# manifest is snapshotted BEFORE the re-capture and restored WITH the globals; if that
+# snapshot/restore itself fails there is nothing trustworthy to fall back to and the run
+# stays FAIL-CLOSED.
+# rc 2 at the FIRST capture is different and still fails closed: there is no validated
+# identity to fall back to, and `git rev-parse --git-dir` succeeded, so a git worktree
+# demonstrably exists (a genuinely non-git tree yields rc 1 and stays SKIP).
 _tree_recapture_after_slot() {
   [ "$TREE_CAPTURE_FAILED" -eq 1 ] && return 0
   if [ "$TREE_GUARDED" -ne 1 ]; then
@@ -2308,16 +2345,39 @@ _tree_recapture_after_slot() {
   local s_branch="$TREE_START_BRANCH" s_fb="$TREE_CAP_FALLBACKS"
   local s_start="$TREE_START_LINE" s_end="$TREE_END_LINE" s_int="$TREE_INTEGRITY_LINE"
   local s_cap="$TREE_HASH_CAP_LINE"
+  local snap="$LOG_DIR/tree-identity.prequeue" snap_ok=0
+  if cp "$LOG_DIR/tree-identity.start" "$snap" 2>/dev/null \
+     && cp "$LOG_DIR/tree-identity.start.report" "$snap.report" 2>/dev/null; then
+    snap_ok=1
+  fi
   _tree_capture_start
-  if [ "$TREE_GUARDED" -ne 1 ]; then
+  local why=""
+  if [ "$TREE_CAPTURE_FAILED" -eq 1 ]; then
+    # rc 2: the manifest on disk is now untrustworthy — restore it or stay failed closed.
+    if [ "$snap_ok" -eq 1 ] \
+       && cp "$snap" "$LOG_DIR/tree-identity.start" 2>/dev/null \
+       && cp "$snap.report" "$LOG_DIR/tree-identity.start.report" 2>/dev/null; then
+      why="could not be validated"
+    else
+      echo "⚠️ agent-gate: tree-integrity re-capture at the slot grant could not be validated AND the pre-queue capture could not be restored — failing closed (#2926)" >&2
+    fi
+  elif [ "$TREE_GUARDED" -ne 1 ]; then
+    # rc 1: _tree_identity returned before writing, so the on-disk manifest is still the
+    # pre-queue one. (Copy it back anyway when a snapshot exists — cheap and explicit.)
+    [ "$snap_ok" -eq 1 ] && cp "$snap" "$LOG_DIR/tree-identity.start" 2>/dev/null \
+      && cp "$snap.report" "$LOG_DIR/tree-identity.start.report" 2>/dev/null
+    why="found no git worktree"
+  fi
+  if [ -n "$why" ]; then
     TREE_GUARDED=1
     TREE_CAPTURE_FAILED=0
     TREE_START_HEAD="$s_head"; TREE_START_DIRTY="$s_dirty"; TREE_START_DIGEST="$s_digest"
     TREE_START_BRANCH="$s_branch"; TREE_CAP_FALLBACKS="$s_fb"
     TREE_START_LINE="$s_start (pre-queue capture retained — re-capture unavailable)"
     TREE_END_LINE="$s_end"; TREE_INTEGRITY_LINE="$s_int"; TREE_HASH_CAP_LINE="$s_cap"
-    echo "⚠️ agent-gate: tree-integrity re-capture at the slot grant found no git worktree — retaining the pre-queue capture, guard stays ARMED (#2926)" >&2
+    echo "⚠️ agent-gate: tree-integrity re-capture at the slot grant $why — retaining the pre-queue capture, guard stays ARMED (#2926)" >&2
   fi
+  rm -f "$snap" "$snap.report" 2>/dev/null || true
   return 0
 }
 
@@ -2713,13 +2773,27 @@ _emit_terminal_summary() {
 # between the two captures (content, mode, presence), one per line. Sort temporaries
 # are derived from <b> (which is per-lane unique) so concurrent SIDE-lane callers
 # sharing the start report can never race each other.
+#
+# `comm -3` prefixes COLUMN-2 records (present only in <b>) with ONE TAB. That tab is
+# stripped INSIDE awk, by field arithmetic — never with `sed 's/^\t//'` (#2926 review G1):
+# BSD/macOS sed does not interpret `\t` in a BRE, so there it strips a literal `t`, the
+# tab survives, `awk -F'\t'` shifts by one field and `$4` yields the MODE instead of the
+# PATH. macOS is a first-class gate host (the Darwin `taskpolicy` wrapper, the BSD `stat`
+# branch below, the bash 3.2 floor), so a Linux-only token here is a real defect: the
+# failure line would name `100644`, and `_tree_lockfile_admissible` — which classifies on
+# these very paths — would misclassify with it.
+#
+# A column-2 line therefore presents an EMPTY $1 (the text before its leading tab) with
+# every real field shifted one right; a column-1 line has the record's tag (T|U|H|N) in
+# $1, which is never empty. That distinction is the whole parse.
 _tree_changed_paths() {
   local a="$1" b="$2"
   LC_ALL=C sort "$a" > "$b.cmp-a" 2>/dev/null || return 0
   LC_ALL=C sort "$b" > "$b.cmp-b" 2>/dev/null || return 0
   LC_ALL=C comm -3 "$b.cmp-a" "$b.cmp-b" 2>/dev/null \
-    | sed 's/^\t//' \
-    | awk -F'\t' 'NF >= 4 && $4 != "" { print $4 }' \
+    | awk -F'\t' '
+        $1 == "" { if (NF >= 5 && $5 != "") print $5; next }
+        NF >= 4 && $4 != "" { print $4 }' \
     | LC_ALL=C sort -u
   rm -f "$b.cmp-a" "$b.cmp-b" 2>/dev/null || true
 }
@@ -2734,13 +2808,20 @@ _tree_changed_paths() {
 # other change is a full mutation FAIL. Follow-up #2962 adds --locked to the gate's
 # cargo invocations, after which this carve-out SHOULD BE DELETED.
 
+# The lookup path is passed through the ENVIRONMENT, never `awk -v` (#2926 review G2):
+# `awk -v p=…` performs ESCAPE-SEQUENCE PROCESSING on the assigned value, so the `\t`/`\n`
+# the `.report` view deliberately escapes (review B6) would be turned back into a real TAB
+# or newline inside awk and `$4 == p` could never match — the two fixes would cancel, and
+# a path containing a tab would silently fall out of the classification it was escaped to
+# protect. ENVIRON does no such processing: the value arrives byte-for-byte.
+#
 # _tree_report_tag <report> <path> -> the record's TAG (T|U) for <path>, empty if absent.
 _tree_report_tag() {
-  awk -F'\t' -v p="$2" '$4 == p { print $1; exit }' "$1" 2>/dev/null
+  TREE_AWK_P="$2" awk -F'\t' '$4 == ENVIRON["TREE_AWK_P"] { print $1; exit }' "$1" 2>/dev/null
 }
 # _tree_report_value <report> <path> -> the record's VALUE field, empty if absent.
 _tree_report_value() {
-  awk -F'\t' -v p="$2" '$4 == p { print $2; exit }' "$1" 2>/dev/null
+  TREE_AWK_P="$2" awk -F'\t' '$4 == ENVIRON["TREE_AWK_P"] { print $2; exit }' "$1" 2>/dev/null
 }
 
 # _tree_lockfile_admissible <a.report> <b.report> <head-a> <path>
@@ -2751,7 +2832,9 @@ _tree_report_value() {
 # class, so a real mid-run mutation certified. Admission now requires ALL of:
 #   1. the END record is TAG `T` — a path git tracks, never an untracked impostor;
 #   2. the START record, if the path was already dirty at the start capture, is also `T`;
-#   3. the END value is a real 40-hex blob hash — a DELETED/NONFILE/LINK/size+mtime
+#   3. the END value is a real BLOB OBJECT ID (40 hex in a SHA-1 repository, 64 in a
+#      SHA-256 one — #2926 review G5; the old hard-coded 40 made the carve-out
+#      unreachable on a SHA-256 repo, a spurious FAIL) — a DELETED/NONFILE/LINK/size+mtime
 #      record is a lifecycle change, NOT "cargo re-resolved the lockfile" (the near-miss
 #      variant of the same defect: a mid-run `rm Cargo.lock` is a mutation, not a settle);
 #   4. the path is a BLOB IN THE START COMMIT — the authoritative "this lockfile was part
@@ -2759,6 +2842,11 @@ _tree_report_value() {
 #      required: a lockfile that is clean at start and re-resolved mid-run — the dominant
 #      legitimate case, and the entire reason the carve-out exists — is absent there.)
 # Anything else falls through to the fatal `other` class.
+#
+# <path> is the ESCAPED spelling the `.report` view carries, so conditions 1-3 (report
+# lookups) see it verbatim, while condition 4 hands it to git, which knows the RAW path.
+# For the only paths that can differ — one containing a tab or a newline — git resolves
+# nothing and the carve-out is refused: the FATAL direction, which is the correct one.
 _tree_lockfile_admissible() {
   local a="$1" b="$2" head_a="$3" p="$4" ta tb vb
   case "$p" in Cargo.lock|*/Cargo.lock) : ;; *) return 1 ;; esac
@@ -2766,8 +2854,7 @@ _tree_lockfile_admissible() {
   tb=$(_tree_report_tag "$b" "$p"); [ "$tb" = T ] || return 1
   ta=$(_tree_report_tag "$a" "$p"); [ -z "$ta" ] || [ "$ta" = T ] || return 1
   vb=$(_tree_report_value "$b" "$p")
-  case "$vb" in *[!0-9a-f]*|"") return 1 ;; esac
-  [ "${#vb}" -eq 40 ] || return 1
+  _tree_hex_id_ok "$vb" || return 1
   [ "$(git --no-optional-locks cat-file -t "$head_a:$p" 2>/dev/null)" = blob ] || return 1
   return 0
 }
@@ -2876,6 +2963,65 @@ _assert_tree_integrity() {
   return $?
 }
 
+# _tree_boundary_meta_lines: the FULL provenance a MAIN-lane boundary FAIL block carries
+# (#2926 review G3). The block used to print only the tree lines plus
+# `detected-after-component:`, making the ONE terminal block a reader reaches after a
+# mid-run mutation the information-POOREST one in the gate — no `commit:`, no `datasets:`,
+# no `ci-pins:`, no accelerator/cpu disclosure, no component verdicts. It now emits the
+# same lines, in the same order, as the normal terminal assembly.
+#
+# Everything is read defensively: this runs at ANY component boundary, in ANY mode, and
+# `DATA_COUNT`/`PINS` are established only on the full gate's path (a --lite boundary
+# reaches here before they exist, and the script runs under `set -u`). A line whose source
+# does not exist yet is simply omitted rather than invented.
+#
+# NO capture is taken here — every value comes from state already recorded. Calling the
+# lazy finalize would overwrite the component-named verdict this block exists to publish.
+_tree_boundary_meta_lines() {
+  local _c _rf _st _secs _done=0 _sel=0
+  _tree_commit_meta_render
+  printf '%s\n' "$TREE_COMMIT_LINE"
+  if [ -n "${DATA_COUNT:-}" ]; then
+    if selected_needs_datasets 2>/dev/null; then
+      printf 'datasets: %s Data.db files under %s\n' "$DATA_COUNT" "${CQLITE_DATASETS_ROOT:-<unset>}"
+    else
+      printf 'datasets: %s\n' "$DATA_COUNT"
+    fi
+  fi
+  [ -n "${MISSING_FIXTURES_MARKER:-}" ] && printf '%s\n' "$MISSING_FIXTURES_MARKER"
+  [ -n "${PINS:-}" ] && printf 'ci-pins: %s\n' "$PINS"
+  # Both printers deliberately emit NO trailing newline (their normal callers capture them
+  # into a SUMMARY_META element), so each needs its own '%s\n' here or the whole block
+  # collapses onto one line.
+  printf '%s\n' "$(accelerators_line)"
+  printf '%s\n' "$(cpu_budget_line)"
+  [ -n "${SUMMARY_INTEGRITY_LINE:-}" ] && printf '%s\n' "$SUMMARY_INTEGRITY_LINE"
+  _tree_meta_render_lines
+  # The per-component verdict table, as far as the run got. Canonical COMPONENTS order,
+  # from the `.result` files record_result has written — the same source, order and
+  # `printf` shape the terminal assembly uses, so this table is a genuine PREFIX of the
+  # one a completed run would emit, never a second dialect of it.
+  for _c in "${COMPONENTS[@]}"; do
+    _rf="$LOG_DIR/$_c.result"
+    [ -f "$_rf" ] || continue
+    _st=""; _secs=""
+    read -r _st _secs < "$_rf" || true
+    printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
+    _done=$(( _done + 1 ))
+  done
+  # Selected-count via the bash-3.2 empty-array-safe idiom used throughout this script
+  # (a bare "${ARR[@]}" on an empty array aborts under `set -u` on bash < 4.4).
+  for _c in ${SELECTED_MAIN[@]+"${SELECTED_MAIN[@]}"} ${SELECTED_SIDE[@]+"${SELECTED_SIDE[@]}"}; do
+    _sel=$(( _sel + 1 ))
+  done
+  if [ "$_sel" -gt 0 ]; then
+    printf 'components-completed: %s of %s selected (run STOPPED at the tree-integrity boundary — the rest never ran)\n' "$_done" "$_sel"
+  else
+    printf 'components-completed: %s recorded (run STOPPED at the tree-integrity boundary — the rest never ran)\n' "$_done"
+  fi
+  return 0
+}
+
 # _tree_boundary_fail <component> <reason> — the LANE-AWARE fail-closed action shared by
 # every boundary detection (mutation, or a capture that cannot be validated). MAIN lane:
 # emit the named block and exit 1. SIDE lane: record a marker, return 1, never emit.
@@ -2901,14 +3047,16 @@ _tree_boundary_fail() {
   TREE_MUTATED=1
   OVERALL=FAIL
   TREE_INTEGRITY_LINE="tree-integrity: FAIL ($reason; detected-after-component: $comp)"
-  # Route the provenance through the SHARED renderer (#2926 review): hand-assembling the
-  # three lines here omitted `tree-hash-cap:`, so a run that engaged the size+mtime
+  # Route the provenance through the SHARED renderers (#2926 review): hand-assembling the
+  # three tree lines here omitted `tree-hash-cap:`, so a run that engaged the size+mtime
   # fallback and then failed at a boundary published a block with no disclosure of the
-  # weakened capture — precisely the degraded case where it matters most.
-  # _tree_meta_render_lines is the PURE printer (no lazy finalize): the terminal capture
-  # must not run here, or it would overwrite this block's component-named verdict line.
+  # weakened capture — precisely the degraded case where it matters most. Review G3 then
+  # widened this to the FULL provenance (commit/datasets/ci-pins/accelerators/cpu-budget
+  # and the per-component verdicts): the failure block is exactly where a reader needs it.
+  # _tree_boundary_meta_lines is PURE (no lazy finalize): a terminal capture must not run
+  # here, or it would overwrite this block's component-named verdict line.
   local -a _meta=()
-  while IFS= read -r _l; do _meta+=("$_l"); done < <(_tree_meta_render_lines)
+  while IFS= read -r _l; do _meta+=("$_l"); done < <(_tree_boundary_meta_lines)
   _meta+=("detected-after-component: $comp")
   _emit_terminal_summary FAIL "${_meta[@]}" || true
   exit 1
@@ -3033,6 +3181,15 @@ _tree_commit_meta() {
   if [ "$TREE_GUARDED" -eq 1 ] && [ -z "$TREE_END_DIGEST" ]; then
     _tree_finalize || true
   fi
+  _tree_commit_meta_render
+}
+
+# _tree_commit_meta_render: the PURE stamp renderer — derives TREE_COMMIT_LINE from
+# whatever capture state exists and takes NO capture (#2926 review G3). The boundary-FAIL
+# block needs the `commit:` line but must NOT trigger the lazy terminal finalize, which
+# would overwrite its component-named `tree-integrity:` verdict with a `<terminal>` one —
+# the same reason that block renders its tree lines through _tree_meta_render_lines.
+_tree_commit_meta_render() {
   local branch="${TREE_START_BRANCH:-}"
   if [ "$TREE_GUARDED" -eq 1 ]; then
     [ -n "$branch" ] || branch=unknown
@@ -3295,6 +3452,9 @@ record_result() { # <name> <status> <seconds>
 #              file and print the verdict. AGENT_GATE_TREE_SELFTEST_VALIDATE is
 #              "<file>|<nul|nl>|<head>|<body-count>". Lets the truncation case assert on
 #              the production validator against a REAL, really-truncated manifest.
+#   report-lookup — READ-ONLY: run the real _tree_report_tag/_tree_report_value over a
+#              caller-supplied `.report` file. AGENT_GATE_TREE_SELFTEST_LOOKUP is
+#              "<file>|<escaped-path>". Pins the escaped-path lookup (#2926 review G2).
 # AGENT_GATE_TREE_SELFTEST_MUTATE is a space-separated list of repo-relative files to
 # append to; AGENT_GATE_TREE_SELFTEST_COMMIT=1 additionally commits (moving HEAD).
 if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
@@ -3348,6 +3508,17 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       else
         printf 'tree-selftest: manifest-ok=no\n'
       fi
+      exit 0 ;;
+    report-lookup)
+      # READ-ONLY (no fixture marker needed): the production `.report` field lookups, run
+      # against a caller-supplied report file (#2926 review G2). AGENT_GATE_TREE_SELFTEST_LOOKUP
+      # is "<file>|<path>", where <path> is the ESCAPED spelling the report carries — which
+      # is exactly what `awk -v` used to un-escape back into a real tab, so that a path the
+      # report deliberately escaped could never be found again.
+      _tsl=${AGENT_GATE_TREE_SELFTEST_LOOKUP:-}
+      _tsl_file=${_tsl%%|*}; _tsl_path=${_tsl#*|}
+      printf 'tree-selftest: report-tag=%s\n' "$(_tree_report_tag "$_tsl_file" "$_tsl_path")"
+      printf 'tree-selftest: report-value=%s\n' "$(_tree_report_value "$_tsl_file" "$_tsl_path")"
       exit 0 ;;
     clean|boundary|terminal)
       [ "$AGENT_GATE_TREE_SELFTEST" = clean ] || _tree_selftest_mutate
