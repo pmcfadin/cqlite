@@ -73,6 +73,40 @@ fn schemas_dir() -> Option<PathBuf> {
     dir.exists().then_some(dir)
 }
 
+/// Probe that the BTI wide-partition fixture really is on disk.
+///
+/// This lane's hard asserts (a PRESENT fixture decoding 0 rows is a FAILURE, issue
+/// #3002 review) are only meaningful once the fixture exists: an ABSENT
+/// `test_da/wide_table-*/da-2-bti-Data.db` (partial fetch, or a datasets root other
+/// than the in-repo corpus) SKIPs rather than panicking on a missing file — while a
+/// PRESENT fixture that returns 0 rows still hard-FAILS.
+///
+/// `CQLITE_REQUIRE_FIXTURES=1` makes even the absent case fail closed, so the lane
+/// can never green-pass vacuously where the corpus is guaranteed.
+fn wide_table_fixture(sstables: &Path) -> Option<PathBuf> {
+    let found = std::fs::read_dir(sstables.join("test_da"))
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|dir| {
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("wide_table-"))
+                && dir.join("da-2-bti-Data.db").exists()
+        });
+    if found.is_none() {
+        assert!(
+            !std::env::var("CQLITE_REQUIRE_FIXTURES")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            "CQLITE_REQUIRE_FIXTURES=1 but test_da/wide_table-*/da-2-bti-Data.db is absent \
+             under {} — fail-closed",
+            sstables.display()
+        );
+    }
+    found
+}
+
 async fn setup() -> Result<Database, String> {
     let root = datasets_root().ok_or("CQLITE_DATASETS_ROOT not set or missing")?;
     let schema_path = schemas_dir()
@@ -84,6 +118,11 @@ async fn setup() -> Result<Database, String> {
     let data_dir = root.join("sstables");
     if !data_dir.exists() {
         return Err(format!("sstables dir not found at {data_dir:?}"));
+    }
+    if wide_table_fixture(&data_dir).is_none() {
+        return Err(format!(
+            "BTI fixture test_da/wide_table-*/da-2-bti-Data.db not present under {data_dir:?}"
+        ));
     }
 
     let config = IngestionConfig {

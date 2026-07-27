@@ -196,11 +196,12 @@ pub enum RowsTrieRootRejectReason {
          (a childless node is emitted as PayloadOnly) — the node shape is invalid"
     )]
     SparseNodeWithoutTransitions,
-    /// The node's `payloadBits` do not describe a `RowIndexReader.IndexInfo`
-    /// (`SizedInts` width must be 1..=7 once `FLAG_OPEN_MARKER` is masked off).
+    /// The node's `payloadBits` do not describe a `RowIndexReader.IndexInfo`: the
+    /// nibble is non-zero (so a payload was promised) yet its `SizedInts` block-offset
+    /// width is 0 once `FLAG_OPEN_MARKER` is masked off.
     #[error(
-        "payloadBits 0x{payload_bits:x} is not a valid IndexInfo width (expected a SizedInts \
-         width of 1..=7 after masking FLAG_OPEN_MARKER)"
+        "payloadBits 0x{payload_bits:x} is not a valid IndexInfo width (a non-zero nibble \
+         promised a payload, but the SizedInts width after masking FLAG_OPEN_MARKER is 0)"
     )]
     InvalidPayloadBits {
         /// The payload-bits nibble that could not be a valid `IndexInfo`.
@@ -384,8 +385,10 @@ impl RowsNodeExtent {
 /// `(shortest, alternate_when_ambiguous)`.
 ///
 /// Layout (`RowIndexReader.readPayload`): a `SizedInts` block offset of
-/// `payload_bits & !FLAG_OPEN_MARKER` bytes, followed by a modern DA
-/// `DeletionTime` when `FLAG_OPEN_MARKER` is set. The trailing `DeletionTime` is
+/// `payload_bits & !FLAG_OPEN_MARKER` bytes — a width of `0` is the one invalid
+/// reading (a non-zero `payload_bits` promised a payload, so it cannot describe a
+/// zero-width block offset) — followed by a modern DA `DeletionTime` when
+/// `FLAG_OPEN_MARKER` is set. The trailing `DeletionTime` is
 /// measured from its DECLARED shape — the two widths the DA encoding defines (1
 /// LIVE-sentinel byte, or a 12-byte body) — and where the leading byte cannot
 /// distinguish them BOTH are returned, rather than re-using the sentinel-first
@@ -396,8 +399,15 @@ fn rows_payload_lens(
     payload_start: usize,
     payload_bits: u8,
 ) -> Result<(usize, Option<usize>), RowsTrieRootRejectReason> {
+    // `payload_bits` is the header byte's LOW NIBBLE (masked by every caller), so
+    // clearing `FLAG_OPEN_MARKER` (0x8) always leaves 0..=7 — width 0 is the only
+    // invalid reading.
     let offset_bytes = (payload_bits & !FLAG_OPEN_MARKER) as usize;
-    if offset_bytes == 0 || offset_bytes > 7 {
+    debug_assert!(
+        offset_bytes <= 7,
+        "payload_bits must be a low nibble; got 0x{payload_bits:x}"
+    );
+    if offset_bytes == 0 {
         return Err(RowsTrieRootRejectReason::InvalidPayloadBits { payload_bits });
     }
     let after_offset = payload_start

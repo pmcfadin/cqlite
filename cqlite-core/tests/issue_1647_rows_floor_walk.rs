@@ -92,6 +92,39 @@ fn schemas_dir() -> Option<PathBuf> {
     dir.exists().then_some(dir)
 }
 
+/// Probe that the BTI wide-partition fixture really is on disk.
+///
+/// The hard asserts below (a PRESENT fixture decoding 0 rows is a FAILURE, issue
+/// #3002 review) are only meaningful once the fixture exists: an ABSENT
+/// `test_da/wide_table-*/da-2-bti-Data.db` (partial fetch, or a datasets root other
+/// than the in-repo corpus) SKIPs rather than panicking on a missing file — while a
+/// PRESENT fixture that returns 0 rows still hard-FAILS.
+///
+/// `CQLITE_REQUIRE_FIXTURES=1` makes even the absent case fail closed.
+fn wide_table_fixture(sstables: &Path) -> Option<PathBuf> {
+    let found = std::fs::read_dir(sstables.join("test_da"))
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|dir| {
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("wide_table-"))
+                && dir.join("da-2-bti-Data.db").exists()
+        });
+    if found.is_none() {
+        assert!(
+            !std::env::var("CQLITE_REQUIRE_FIXTURES")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            "CQLITE_REQUIRE_FIXTURES=1 but test_da/wide_table-*/da-2-bti-Data.db is absent \
+             under {} — fail-closed",
+            sstables.display()
+        );
+    }
+    found
+}
+
 async fn skip_or_db() -> Option<Database> {
     let root = datasets_root()?;
     let schema_path = schemas_dir()?.join("wide-table-bti.cql");
@@ -102,6 +135,13 @@ async fn skip_or_db() -> Option<Database> {
     let data_dir = root.join("sstables");
     if !data_dir.exists() {
         eprintln!("Skipping (L1): sstables dir not found");
+        return None;
+    }
+    if wide_table_fixture(&data_dir).is_none() {
+        eprintln!(
+            "Skipping (L1): BTI fixture test_da/wide_table-*/da-2-bti-Data.db not present under {}",
+            data_dir.display()
+        );
         return None;
     }
     let config = IngestionConfig {
@@ -325,5 +365,70 @@ async fn block_zero_slice_window_is_bounded() {
          running to the partition end — it must decode (0, {WINDOW_ROWS_BOUND}] rows; got \
          {rows_decoded} of the partition's {full_rows_decoded}. Block 0's floor is now the \
          root's STORED empty separator, so the start narrows too",
+    );
+}
+
+/// Issue #3002 (roborev round 4): `verify` must NOT perturb the L1
+/// `ROWS_DB_ENTRY_RESOLVES` invariant the tests above assert is EXACTLY 1 per
+/// clustering read.
+///
+/// Verification also resolves every partition's `Rows.db` `TrieIndexEntry` — but as
+/// STRUCTURAL work, not clustering-window work — so it goes through the UNCOUNTED
+/// resolver and must leave the counter at 0. A regression to the counted resolver
+/// makes this the fixture's partition count (3) and silently inflates the invariant
+/// wherever verification and a measured read share a process.
+///
+/// The `rows_scanned`/`is_ok()` assertions keep the `0` from being vacuous: they
+/// prove the run really walked this BTI SSTable's `RowsOffset` leaves.
+#[tokio::test]
+#[serial]
+async fn verify_does_not_bump_rows_db_entry_resolves() {
+    use cqlite_core::storage::sstable::verify::{verify_sstable, VerifyMode};
+
+    let Some(root) = datasets_root() else {
+        eprintln!("Skipping (L1 verify): CQLITE_DATASETS_ROOT not set or missing");
+        return;
+    };
+    let Some(table_dir) = wide_table_fixture(&root.join("sstables")) else {
+        eprintln!("Skipping (L1 verify): BTI wide_table fixture not present");
+        return;
+    };
+
+    let config = cqlite_core::Config::default();
+    let platform = std::sync::Arc::new(
+        cqlite_core::platform::Platform::new(&config)
+            .await
+            .expect("Platform::new must succeed"),
+    );
+
+    rwc::reset();
+    let report = verify_sstable(&table_dir, VerifyMode::Full, &config, platform)
+        .await
+        .expect("verify must run on the committed BTI wide_table fixture");
+    let resolves = rwc::rows_db_entry_resolves();
+    println!(
+        "L1 verify: rows_db_entry_resolves={resolves} rows_scanned={:?} findings={}",
+        report.rows_scanned,
+        report.findings.len()
+    );
+
+    assert!(
+        report.is_ok(),
+        "the committed fixture must verify clean, else this counter probe is measuring a \
+         short-circuited run: {:?}",
+        report.findings
+    );
+    assert_eq!(
+        report.rows_scanned,
+        Some(3 * PARTITION_ROW_COUNT),
+        "FULL-mode verification must scan all {} rows of the fixture (0/None ⇒ it never \
+         reached the BTI leaves, making the counter assertion vacuous)",
+        3 * PARTITION_ROW_COUNT
+    );
+    assert_eq!(
+        resolves, 0,
+        "#3002: `verify` resolves Rows.db entries as STRUCTURAL work and must use the \
+         UNCOUNTED resolver, leaving ROWS_DB_ENTRY_RESOLVES at 0; got {resolves} — a \
+         counted resolve here inflates the L1 clustering-read invariant",
     );
 }

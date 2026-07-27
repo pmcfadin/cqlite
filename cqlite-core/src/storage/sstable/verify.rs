@@ -933,10 +933,14 @@ struct BtiResolvedLeaf {
 ///   recover the wrong key set; the FULL-mode identity cross-check catches the
 ///   latter.
 /// * For every partition whose payload is a `RowsOffset`, the per-partition
-///   row-index entry is resolved from `Rows.db` via [`iterate_rows_for_partition`]
-///   (structural) and [`resolve_rows_db_entry`] (to recover the inline raw key
-///   and the partition's Data.db position). A truncated `Rows.db` makes the
-///   referenced offset point past EOF or the row-trie read hit EOF.
+///   row-index entry is resolved from `Rows.db` EXACTLY ONCE, via
+///   [`resolve_rows_db_entry_uncounted`] — recovering the inline raw key, the
+///   partition's Data.db position and the trie root that
+///   [`iterate_rows_in_bti_trie`] is then walked from (structural check). The
+///   UNCOUNTED resolver deliberately: verification is not the CLUSTERING read
+///   path, so it must not perturb the L1 `ROWS_DB_ENTRY_RESOLVES` invariant
+///   (issue #1647). A truncated `Rows.db` makes the referenced offset point past
+///   EOF or the row-trie read hit EOF.
 /// * A `DataOffset` payload carries the partition's decompressed-Data.db
 ///   position directly; its raw key is resolved later through the Data.db scan.
 fn check_bti_structure(
@@ -945,7 +949,7 @@ fn check_bti_structure(
     findings: &mut Vec<VerifyFinding>,
 ) -> Result<Option<Vec<BtiResolvedLeaf>>> {
     use crate::storage::sstable::bti::parser::{
-        iterate_partitions_in_bti_file, iterate_rows_for_partition, resolve_rows_db_entry,
+        iterate_partitions_in_bti_file, iterate_rows_in_bti_trie, resolve_rows_db_entry_uncounted,
         BtiPartitionLocation, RowsTrieRootRejectReason,
     };
     use std::io::Cursor;
@@ -1060,17 +1064,36 @@ fn check_bti_structure(
                     ));
                     continue;
                 }
-                if let Err(e) = iterate_rows_for_partition(&rows_bytes, off) {
+                // Resolve this partition's `TrieIndexEntry` ONCE: the one header serves
+                // the structural walk below, the rejection reason and the Data.db
+                // position. UNCOUNTED because verification is not the CLUSTERING read
+                // path, so it must not inflate the L1 `ROWS_DB_ENTRY_RESOLVES`
+                // invariant (issue #1647) that lane asserts is exactly 1 per read.
+                let header = match resolve_rows_db_entry_uncounted(&rows_bytes, off) {
+                    Ok(header) => header,
+                    Err(e) => {
+                        findings.push(VerifyFinding::new(
+                            VerifyErrorClass::BtiTrieCorrupt,
+                            "Rows.db",
+                            format!(
+                                "Rows.db entry at offset {} failed to deserialize (truncated/corrupt): {}",
+                                off, e
+                            ),
+                        ));
+                        continue;
+                    }
+                };
+                let walk = header
+                    .require_trie_root()
+                    .and_then(|root| iterate_rows_in_bti_trie(&rows_bytes, root));
+                if let Err(e) = walk {
                     // Issue #3002: an INTACT file whose row-index ROOT merely violates
                     // the writer-ordering invariant (e.g. a `Rows.db` written by CQLite
                     // <= 0.16, whose root delta was measured from a 2-byte-low base) is
                     // NOT damaged — the remedy is a rewrite, not data recovery. Naming
                     // it "truncated/corrupt" would send an operator hunting for damage
                     // that is not there, so the reason decides the wording.
-                    let reject_reason = resolve_rows_db_entry(&rows_bytes, off)
-                        .ok()
-                        .and_then(|h| h.trie_root.err())
-                        .map(|rejection| rejection.reason);
+                    let reject_reason = header.trie_root.err().map(|rejection| rejection.reason);
                     let detail = match reject_reason {
                         Some(
                             reason @ (RowsTrieRootRejectReason::ExtentNotAtEntry { .. }
@@ -1118,28 +1141,14 @@ fn check_bti_structure(
                 }
                 let inline_raw_key = rows_bytes[key_start..key_end].to_vec();
 
-                // Recover the partition's Data.db position too, so a leaf whose
-                // INLINE key and Data.db position disagree (a payload tamper) is
-                // still cross-checkable through the position map.
-                let data_position = match resolve_rows_db_entry(&rows_bytes, off) {
-                    Ok(hdr) => hdr.data_position,
-                    Err(e) => {
-                        findings.push(VerifyFinding::new(
-                            VerifyErrorClass::BtiTrieCorrupt,
-                            "Rows.db",
-                            format!(
-                                "Rows.db entry at offset {} failed to deserialize (truncated/corrupt): {}",
-                                off, e
-                            ),
-                        ));
-                        continue;
-                    }
-                };
-
+                // The partition's Data.db position comes from the SAME (single) entry
+                // resolve above, so a leaf whose INLINE key and Data.db position
+                // disagree (a payload tamper) is still cross-checkable through the
+                // position map.
                 leaves.push(BtiResolvedLeaf {
                     prefix,
                     inline_raw_key: Some(inline_raw_key),
-                    data_position,
+                    data_position: header.data_position,
                 });
             }
             BtiPartitionLocation::DataOffset(off) => {
