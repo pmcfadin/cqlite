@@ -292,17 +292,37 @@ pub(crate) struct BlockingTaskGuard {
     /// against a private atomic never publishes a synthetic reading over
     /// `cqlite.flight.blocking_tasks_in_use`.
     emit: bool,
+    /// The level [`Self::atomic`] held immediately AFTER this guard's own
+    /// increment — i.e. a value that provably includes this guard's `+1`
+    /// (issue #2896). Retained (it is already computed by [`adjust`]) so the
+    /// end-to-end streaming wiring test can assert on an observation
+    /// attributable to ITS OWN guard, instead of differencing the shared global
+    /// against a baseline snapshot that concurrently-running peer tests can
+    /// inflate and then deflate.
+    entry_level: i64,
 }
 
 impl BlockingTaskGuard {
     /// Enter a flight blocking task: increment the in-use gauge and return the
     /// guard whose drop decrements it.
     pub(crate) fn enter() -> Self {
-        record_blocking(adjust(&BLOCKING_TASKS, 1));
+        let entry_level = adjust(&BLOCKING_TASKS, 1);
+        record_blocking(entry_level);
         Self {
             atomic: &BLOCKING_TASKS,
             emit: true,
+            entry_level,
         }
+    }
+
+    /// The shared in-use level observed at this guard's OWN entry — the exact
+    /// post-increment value [`Self::enter`] published to the gauge, so it is
+    /// `>= 1` by construction and can never be invalidated by another guard
+    /// dropping afterwards (issue #2896). Published through
+    /// `crate::streaming::StreamProbe` so the streaming wiring test observes the
+    /// production arithmetic on the REAL shared atomic.
+    pub(crate) fn entry_level(&self) -> i64 {
+        self.entry_level
     }
 
     /// Test-only: enter a guard tracking `atomic` instead of the shared
@@ -314,10 +334,11 @@ impl BlockingTaskGuard {
     /// blocking-pool reading).
     #[cfg(test)]
     fn enter_on(atomic: &'static AtomicI64) -> Self {
-        adjust(atomic, 1);
+        let entry_level = adjust(atomic, 1);
         Self {
             atomic,
             emit: false,
+            entry_level,
         }
     }
 }
