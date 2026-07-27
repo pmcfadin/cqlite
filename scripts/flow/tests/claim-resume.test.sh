@@ -133,9 +133,14 @@ accepted_olds()    { awk -v r="refs/claims/issue-$1" '$1==r {print $2}' "$HOOKLO
 # test the RECORD, not a verbatim rendering of the whole line.
 line_field() { printf '%s' "$1" | tr ' ' '\n' | grep -m1 "^$2=" | sed "s/^$2=//"; }
 
-# push_work_branch <branch> [msg] [tip-date] — an ORDINARY work branch on origin: cut
-# from main, an ordinary commit on top. Its tip carries NO claim trailers, which is
-# exactly why the old tip-based re-entrancy could never fire.
+# --- THE TWO WORK-BRANCH PREMISES ------------------------------------------
+# The name of each fixture states which premise a test encodes, because the liveness
+# gate treats them DIFFERENTLY and the difference is the whole point of TEST 17: a tip
+# with own commits is AGE-JUDGEABLE, a tip without any is INDETERMINATE.
+#
+# push_branch_with_own_commit <branch> [msg] [tip-date] — an ORDINARY work branch on
+# origin: cut from main, WITH an ordinary commit of its own on top. Its tip carries NO
+# claim trailers, which is exactly why the old tip-based re-entrancy could never fire.
 #
 # <tip-date> is the tip's committer date and DEFAULTS TO A LONG-STALE FIXED DATE,
 # because the refusal now only advertises the resume hatch for a branch whose tip is
@@ -143,7 +148,7 @@ line_field() { printf '%s' "$1" | tr ' ' '\n' | grep -m1 "^$2=" | sed "s/^$2=//"
 # mid-implementation, which has no open PR yet either). A fixed literal date keeps the
 # fixture deterministic — no wall-clock arithmetic in an assertion.
 STALE_TIP_DATE='2020-03-01T12:00:00Z'
-push_work_branch() {
+push_branch_with_own_commit() {
   local branch="$1" msg="${2:-ordinary work commit}" when="${3:-$STALE_TIP_DATE}"
   (
     cd "$A" || exit 1
@@ -155,10 +160,51 @@ push_work_branch() {
   )
 }
 
-# push_machine_claim <ref> <issue> <ts> — a supervisor-authored liveness ref
+# push_branch_without_own_commits <branch> — THE PRODUCTION SHAPE AT ACTIVATION TIME:
+# `flow-activate` runs `git worktree add -b issue-<N>-<slug> origin/main` and pushes the
+# branch immediately, so the tip IS origin/main's tip and the branch has no commits of
+# its own until PR time. Its committer date is therefore main's, not the worker's — the
+# premise under which the tip-age liveness signal is VACUOUS (#2945 round 5).
+push_branch_without_own_commits() {
+  local branch="$1"
+  (
+    cd "$A" || exit 1
+    g fetch -q origin
+    g push -q origin "refs/remotes/origin/main:refs/heads/$branch"
+  )
+}
+
+# advance_main_with_stale_tip — move origin's DEFAULT branch to a long-stale-dated tip,
+# i.e. "main has been quiet longer than the reap threshold" (overnight is routine). This
+# is what made the vacuous tip-age signal dangerous: a commit-less branch inherits that
+# date and reads as reapable. Called once, by TEST 17.
+advance_main_with_stale_tip() {
+  (
+    cd "$A" || exit 1
+    g fetch -q origin
+    g checkout -q main
+    g reset -q --hard origin/main
+    GIT_AUTHOR_DATE="$STALE_TIP_DATE" GIT_COMMITTER_DATE="$STALE_TIP_DATE" \
+      g commit -q --allow-empty -m "main has been quiet since $STALE_TIP_DATE"
+    g push -q origin main
+  )
+}
+
+# push_machine_claim <ref> <issue> <ts> — a supervisor-authored liveness ref;
+# push_raw_liveness_ref <ref> <msg> — the same NAMESPACE with an arbitrary (legacy) message.
 # (`refs/machine-claims/<machine>` / `refs/heartbeats/<machine>`, #2655) naming
 # <issue>, with <ts> as its recorded timestamp. Same root-commit shape
 # claim-heartbeat.sh writes, so claim.sh's liveness scan reads a REAL ref, not a mock.
+push_raw_liveness_ref() {
+  local ref="$1" msg="$2"
+  (
+    cd "$A" || exit 1
+    local tree commit
+    tree=$(g hash-object -t tree --stdin </dev/null)
+    commit=$(g commit-tree "$tree" -m "$msg")
+    g push -q --force origin "${commit}:${ref}"
+  )
+}
 push_machine_claim() {
   local ref="$1" issue="$2" ts="$3"
   (
@@ -231,7 +277,7 @@ read_ns() {
 # ===========================================================================
 echo "TEST 1: FREE claim ref + foreign-tip issue-<N>-* branch — claim refuses WITH the remediation, adopt --expect none SUCCEEDS"
 # ===========================================================================
-push_work_branch "issue-2001-owner-approved-spec" "docs(#2001): OpenSpec change approved by owner"
+push_branch_with_own_commit "issue-2001-owner-approved-spec" "docs(#2001): OpenSpec change approved by owner"
 ( cd "$B" && g fetch -q origin )
 [ -z "$(ref_sha 2001)" ] && ok "precondition: refs/claims/issue-2001 is FREE" \
   || fail "precondition broken: a claim ref already exists for 2001"
@@ -332,7 +378,7 @@ fi
 # ===========================================================================
 echo "TEST 2: HELD claim ref + branch present — the resume path is still REFUSED (exit 2, holder keeps it)"
 # ===========================================================================
-push_work_branch "issue-2002-active-effort"
+push_branch_with_own_commit "issue-2002-active-effort"
 ( cd "$B" && g fetch -q origin )
 runA claim 2002 >/dev/null 2>&1   # blocked by the branch guard, so take it via the resume path
 runA adopt 2002 --expect none --reason "machineA is actively working this" >/dev/null 2>&1; rcHold=$?
@@ -378,19 +424,20 @@ echo "TEST 3: two machines RACE the resume path — exactly one SERVER-ACCEPTED 
 # under full serialization, so without this witness a barrier regression is invisible —
 # which is exactly how a non-racing barrier survived two reviews.
 #
-# WHY A MAJORITY AND NOT ALL 5: overlap is derived from PROCESS SCHEDULING, and this
-# suite is a gate-of-record component that runs alongside a parallel component pool. One
-# racer can be descheduled long enough for its window to miss the other's, which is a
-# scheduling fact, not a defect — an all-5 requirement makes the gate red for no bug
-# (#2945 review). A majority still kills the regression it exists for: a barrier that
-# serializes the racers yields ZERO overlapping rounds (measured — see the mutation note
-# in this file's header), nowhere near 3/5. Non-overlapping rounds are printed as
-# diagnostics so a drift toward 3/5 is visible before it becomes a failure.
+# WHY >=1 ROUND AND NOT ALL 5 (NOR A MAJORITY): overlap is derived from PROCESS
+# SCHEDULING, and this suite is a gate-of-record component that runs alongside a parallel
+# component pool (and on macOS CI). A racer can be descheduled long enough for its window
+# to miss the other's, which is a scheduling fact, not a defect — a fatal all-5 or
+# majority threshold makes the gate red for no bug (#2945 review). >=1 still kills the
+# regression the witness exists for, because a serializing barrier fails STRUCTURALLY:
+# it yields ZERO overlapping rounds, never one (measured — see the mutation note in this
+# file's header). EVERY non-overlapping round is still printed as a diagnostic, so a
+# drift from 5/5 toward 1/5 stays visible long before it becomes a failure.
 raceRounds=0; raceOk=0; raceAtomic=0; raceLoser=0; raceWinnerVerified=0; raceDiag=""
 raceOverlapped=0; ovMin=""; ovMax=""; ovDiag=""
 for id in 2101 2102 2103 2104 2105; do
   raceRounds=$((raceRounds+1))
-  push_work_branch "issue-${id}-resumable"
+  push_branch_with_own_commit "issue-${id}-resumable"
   ( cd "$B" && g fetch -q origin )
   race_reset
   ( race_wait_go "$T/ready-a"
@@ -495,15 +542,16 @@ done
 # this host — a loud SKIP of the WITNESS ONLY (the invariants above already asserted),
 # never a failure and never a silent omission.
 [ -n "$ovDiag" ] && diag "concurrency witness, non-overlapping rounds:$ovDiag"
-ovNeeded=$((raceRounds / 2 + 1))
+ovNeeded=1
+diag "concurrency witness: $raceOverlapped/$raceRounds rounds overlapped (fatal below >=$ovNeeded)"
 if [ "$NS_IMPL" = none ]; then
   skip "no hi-res clock (date %N / perl Time::HiRes / python3) — the racers' overlap could not be MEASURED on this host; the race invariants above still ran"
 else
   ok "hi-res clock available to witness concurrency (NS_IMPL=$NS_IMPL)"
   if [ "$raceOverlapped" -ge "$ovNeeded" ]; then
-    ok "the two racers' adopt windows OVERLAP in a majority of rounds ($raceOverlapped/$raceRounds, need >=$ovNeeded; overlap min=$((${ovMin:-0} / 1000000))ms max=$((${ovMax:-0} / 1000000))ms, min=${ovMin:-0}ns) — they really ran concurrently"
+    ok "the two racers' adopt windows OVERLAP in at least one round ($raceOverlapped/$raceRounds, need >=$ovNeeded; overlap min=$((${ovMin:-0} / 1000000))ms max=$((${ovMax:-0} / 1000000))ms, min=${ovMin:-0}ns) — they really ran concurrently"
   else
-    fail "only $raceOverlapped/$raceRounds rounds had overlapping adopt windows (need >=$ovNeeded) — the barrier serialized the racers$ovDiag"
+    fail "NO round ($raceOverlapped/$raceRounds) had overlapping adopt windows (need >=$ovNeeded) — a serializing barrier is the only thing that produces zero$ovDiag"
   fi
 fi
 
@@ -604,7 +652,7 @@ echo "TEST 6: #2677 item 2 — a legacy-branch enumeration OUTAGE fails CLOSED (
 # A git shim fails ONLY `ls-remote --heads` (the guard's enumeration) and passes
 # everything else through, so the claim push WOULD succeed. The old code mapped that
 # failure to "no legacy branches" and granted the claim; it must now be UNKNOWN.
-push_work_branch "issue-2006-invisible-to-the-guard"
+push_branch_with_own_commit "issue-2006-invisible-to-the-guard"
 SHIMH="$T/shim-heads-fail"
 mkdir -p "$SHIMH"
 cat >"$SHIMH/git" <<SHIM
@@ -636,7 +684,7 @@ echo "TEST 7: no tip-based re-entrancy survives — even a claim-shaped branch t
 # The old guard tried to exempt a branch whose TIP looked like our own claim commit.
 # That exemption is deliberately gone: branch tips are not the lock, so a tip that
 # happens to carry claim trailers must NOT grant a claim. The resume is explicit.
-push_work_branch "issue-2007-tip-looks-like-a-claim" \
+push_branch_with_own_commit "issue-2007-tip-looks-like-a-claim" \
   "claim issue=2007 machine=machineB pid=1 actor=flow ts=2026-07-26T00:00:00Z nonce=x"
 ( cd "$B" && g fetch -q origin )
 outTip=$(runB_gh claim 2007); rcTip=$?
@@ -753,6 +801,23 @@ if [ "$rcCasReent" -eq 0 ] && printf '%s\n' "$outCasReent" | grep -q 'CLAIM: ADO
 else
   fail "expected a lease-mismatch re-entrant ADOPTED naming expected=$STALE and actual=$heldSha10; got rc=$rcCasReent ref='$(ref_sha 2010)' updates=$(accepted_updates 2010)
 $outCasReent"
+fi
+# …but the mismatch wording is reserved for a GENUINE divergence (#2945 review). A CAS
+# from the ref's CURRENT sha whose push does not land (the push-fail shim from TEST 9)
+# leaves expected == actual: the precondition DID hold, so `lease-mismatch expected=X
+# actual=X` named a divergence that never happened. It must be the plain re-entrant
+# verdict instead.
+outCasSame=$( cd "$B" && PATH="$SHIMP:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" adopt 2010 --expect "$heldSha10" --reason "cas retry from the ref's current sha" 2>&1 ); rcCasSame=$?
+if [ "$rcCasSame" -eq 0 ] && printf '%s\n' "$outCasSame" | grep -q 'CLAIM: ADOPTED' \
+   && printf '%s\n' "$outCasSame" | grep -q 're-entrant' \
+   && ! printf '%s\n' "$outCasSame" | grep -q 'lease-mismatch' \
+   && printf '%s\n' "$outCasSame" | grep -q "from=$heldSha10" \
+   && [ "$(ref_sha 2010)" = "$heldSha10" ] && [ "$(accepted_updates 2010)" = "1" ]; then
+  ok "a CAS whose expected == actual reports the PLAIN re-entrant verdict — no 'lease-mismatch expected=X actual=X'"
+else
+  fail "expected a plain re-entrant ADOPTED (no lease-mismatch) when expected == actual; got rc=$rcCasSame ref='$(ref_sha 2010)' updates=$(accepted_updates 2010)
+$outCasSame"
 fi
 if printf '%s\n' "$outRetry" | grep -q 'from=none' && ! printf '%s\n' "$outRetry" | grep -q 'lease-mismatch'; then
   ok "the EMPTY-lease re-entrant verdict stays distinct (from=none, no lease-mismatch marker)"
@@ -977,7 +1042,7 @@ echo "TEST 15: the escape hatch is advertised ONLY when the endgame is demonstra
 # command is printed only at open-prs=0, and an unreadable PR list withholds too.
 # The fixture tip is LONG STALE (the default), so the PR signal is the ONLY thing that
 # can withhold here — the tip-age/liveness signals are pinned separately in TEST 16.
-push_work_branch "issue-2015-live-endgame"
+push_branch_with_own_commit "issue-2015-live-endgame"
 ( cd "$B" && g fetch -q origin )
 PRSHIM="$T/shim-gh-open-pr"
 mkdir -p "$PRSHIM"
@@ -1039,7 +1104,7 @@ echo "TEST 16: the PRE-PR window — a FRESH branch tip or a fresh liveness ref 
 # refs — and every unreadable signal withholds.
 
 # (a) FRESH tip, no open PR: a worker mid-implementation. The hatch must be WITHHELD.
-push_work_branch "issue-2016-being-worked-right-now" "wip commit" "$(now_ts)"
+push_branch_with_own_commit "issue-2016-being-worked-right-now" "wip commit" "$(now_ts)"
 ( cd "$B" && g fetch -q origin )
 outFresh=$(runB_gh claim 2016); rcFresh=$?
 if [ "$rcFresh" -eq 2 ] && printf '%s\n' "$outFresh" | grep -q 'remediation=withheld' \
@@ -1056,7 +1121,7 @@ fi
 # (b) STALE tip, no open PR, no liveness ref: demonstrably orphaned → advertised. And
 # the printed command, run VERBATIM (which is what the readers do), must record an
 # INFORMATIVE reason — not the `why` a `--reason <why>` placeholder would have recorded.
-push_work_branch "issue-2017-abandoned-lane"
+push_branch_with_own_commit "issue-2017-abandoned-lane"
 ( cd "$B" && g fetch -q origin )
 outAdv=$(runB_gh claim 2017); rcAdv=$?
 if [ "$rcAdv" -eq 2 ] && printf '%s\n' "$outAdv" | grep -q "adopt 2017 --expect none --reason resume-legacy-branch-lock:issue-2017-abandoned-lane" \
@@ -1084,7 +1149,7 @@ fi
 
 # (c) STALE tip but a FRESH machine-claim ref naming the issue: a supervisor says a
 # worker is on it (#2655), so the hatch is WITHHELD even though the tip aged out.
-push_work_branch "issue-2018-stale-branch-live-worker"
+push_branch_with_own_commit "issue-2018-stale-branch-live-worker"
 push_machine_claim "refs/machine-claims/machineFresh" 2018 "$(now_ts)"
 ( cd "$B" && g fetch -q origin )
 outLiveRef=$(runB_gh claim 2018); rcLiveRef=$?
@@ -1099,7 +1164,7 @@ fi
 
 # (d) …and a liveness ref older than the threshold does NOT withhold forever: it is
 # itself reapable, so an abandoned heartbeat must not lock the lane out permanently.
-push_work_branch "issue-2019-stale-branch-stale-heartbeat"
+push_branch_with_own_commit "issue-2019-stale-branch-stale-heartbeat"
 push_machine_claim "refs/heartbeats/machineStale" 2019 "$STALE_TIP_DATE"
 ( cd "$B" && g fetch -q origin )
 outStaleRef=$(runB_gh claim 2019); rcStaleRef=$?
@@ -1114,7 +1179,7 @@ fi
 # (e) UNREADABLE threshold (claim.sh without its claim-heartbeat.sh sibling): the lane
 # cannot be shown orphaned, so the hatch is withheld rather than defaulting to some
 # second copy of "4h".
-push_work_branch "issue-2020-threshold-unreadable"
+push_branch_with_own_commit "issue-2020-threshold-unreadable"
 ( cd "$B" && g fetch -q origin )
 LONE="$T/lone-claim"
 mkdir -p "$LONE"
@@ -1132,7 +1197,7 @@ fi
 
 # (f) UNREADABLE liveness refs (a git shim fails ONLY the machine-claims enumeration,
 # everything else passes through): "we could not prove nobody is on it" withholds.
-push_work_branch "issue-2021-liveness-enumeration-outage"
+push_branch_with_own_commit "issue-2021-liveness-enumeration-outage"
 ( cd "$B" && g fetch -q origin )
 SHIML="$T/shim-liveness-fail"
 mkdir -p "$SHIML"
@@ -1167,6 +1232,96 @@ if [ "$rcDeliberate" -eq 0 ] && printf '%s\n' "$outDeliberate" | grep -q 'CLAIM:
 else
   fail "expected the deliberate resume of a withheld lane to still succeed; got rc=$rcDeliberate
 $outDeliberate"
+fi
+
+# ===========================================================================
+echo "TEST 17: a branch with NO COMMITS OF ITS OWN is INDETERMINATE, never 'stale' — the vacuous tip-age case"
+# ===========================================================================
+# THE PRODUCTION PREMISE THE OTHER FIXTURES MISS (#2945 round 5). Every fixture above
+# uses push_branch_with_own_commit, so its tip has a date of its own. `flow-activate`
+# does NOT: it creates the branch at origin/main and pushes it with no commits, and
+# `flow-implement` pushes again only at PR time. So for a freshly-activated lane the
+# tip's committer date IS main's — zero information about the worker. Whenever main had
+# been quiet longer than the threshold (overnight is routine), that lane presented as
+# open-prs=0 + a stale tip + no liveness refs, and the guard printed the copy-pasteable
+# hand-away FOR AN ACTIVELY-WORKED ISSUE — the two-writer outcome it exists to prevent.
+# So: no own commits => no age signal => remediation WITHHELD, with its own marker.
+advance_main_with_stale_tip
+
+# (a) The vacuous case: commit-less branch, main quiet since 2020, no liveness refs.
+push_branch_without_own_commits "issue-2060-just-activated-no-commits"
+( cd "$B" && g fetch -q origin )
+outVacuous=$(runB_gh claim 2060); rcVacuous=$?
+if [ "$rcVacuous" -eq 2 ] && printf '%s\n' "$outVacuous" | grep -q 'remediation=withheld' \
+   && printf '%s\n' "$outVacuous" | grep -q 'newest-branch-tip=no-own-commits' \
+   && ! printf '%s\n' "$outVacuous" | grep -q 'stale-after=' \
+   && ! printf '%s\n' "$outVacuous" | grep -q 'adopt 2060 --expect none' \
+   && [ "$(printf '%s\n' "$outVacuous" | grep -c 'CLAIM:')" = "1" ]; then
+  ok "a commit-less branch on a LONG-QUIET main withholds the hatch (newest-branch-tip=no-own-commits, no age verdict)"
+else
+  fail "expected the hatch withheld as no-own-commits; got rc=$rcVacuous
+$outVacuous"
+fi
+
+# (b) THE MOTIVATING CASES STILL WORK. #2043 and #1883 each carried their own
+# OpenSpec spec commit, so their tips ARE informative and genuinely old — on the very
+# same long-quiet main, such a branch must still be advertised.
+push_branch_with_own_commit "issue-2061-abandoned-with-its-own-commit"
+( cd "$B" && g fetch -q origin )
+outOwn=$(runB_gh claim 2061); rcOwn=$?
+if [ "$rcOwn" -eq 2 ] && printf '%s\n' "$outOwn" | grep -q 'adopt 2061 --expect none --reason resume-legacy-branch-lock:' \
+   && printf '%s\n' "$outOwn" | grep -q 'newest-branch-tip=' \
+   && printf '%s\n' "$outOwn" | grep -q 'stale-after=' \
+   && ! printf '%s\n' "$outOwn" | grep -q 'no-own-commits'; then
+  ok "a branch carrying its OWN stale commit is still age-judged and still advertises (the #2043/#1883 shape)"
+else
+  fail "expected the hatch advertised for a stale branch with its own commit; got rc=$rcOwn
+$outOwn"
+fi
+
+# (c) …and the new signal opens NO unreadable-signal hole: when the base (origin's
+# default branch) cannot be read, the ancestry test cannot be run, so the tip cannot be
+# judged either way — withhold, never "it must carry own commits".
+push_branch_with_own_commit "issue-2062-base-unreadable"
+( cd "$B" && g fetch -q origin )
+SHIMB="$T/shim-base-fetch-fail"
+mkdir -p "$SHIMB"
+cat >"$SHIMB/git" <<SHIM
+#!/usr/bin/env bash
+saw_fetch=0; saw_base=0
+for a in "\$@"; do
+  [ "\$a" = "fetch" ] && saw_fetch=1
+  case "\$a" in +HEAD:*) saw_base=1 ;; esac
+done
+if [ "\$saw_fetch" = 1 ] && [ "\$saw_base" = 1 ]; then exit 128; fi
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMB/git"
+outNoBase=$( cd "$B" && PATH="$SHIMB:$GHSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" claim 2062 2>/dev/null ); rcNoBase=$?
+if [ "$rcNoBase" -eq 2 ] && printf '%s\n' "$outNoBase" | grep -q 'remediation=withheld' \
+   && printf '%s\n' "$outNoBase" | grep -q 'default-branch-tip=unreadable' \
+   && ! printf '%s\n' "$outNoBase" | grep -q 'adopt 2062 --expect none'; then
+  ok "an UNREADABLE default-branch tip withholds the hatch (the ancestry test is a signal, so it fails closed too)"
+else
+  fail "expected the hatch withheld on an unreadable base; got rc=$rcNoBase
+$outNoBase"
+fi
+
+# (d) The liveness-ref scan is SCOPED TO THIS ISSUE: a readable LEGACY ref in the
+# namespace that names NO issue used to withhold the hatch fleet-wide, for EVERY issue —
+# the permanent dead end this change removes. It must be skipped, not withheld.
+push_raw_liveness_ref "refs/heartbeats/machineLegacyFormat" "heartbeat machine=machineLegacy pid=7 at=whenever"
+push_branch_with_own_commit "issue-2063-legacy-liveness-ref-present"
+( cd "$B" && g fetch -q origin )
+outLegacyRef=$(runB_gh claim 2063); rcLegacyRef=$?
+if [ "$rcLegacyRef" -eq 2 ] && printf '%s\n' "$outLegacyRef" | grep -q 'adopt 2063 --expect none --reason resume-legacy-branch-lock:' \
+   && printf '%s\n' "$outLegacyRef" | grep -q 'liveness-refs=none-naming-2063' \
+   && ! printf '%s\n' "$outLegacyRef" | grep -q 'liveness-refs=unreadable'; then
+  ok "a LEGACY liveness ref naming no issue does not withhold another issue's hatch (the scan is issue-scoped)"
+else
+  fail "expected an issue-scoped liveness scan to still advertise; got rc=$rcLegacyRef
+$outLegacyRef"
 fi
 
 echo ""
