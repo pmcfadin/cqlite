@@ -103,7 +103,9 @@ if [ -f "$WORKFLOW" ]; then
     ruby - "$WORKFLOW" <<'RUBY'
       require "yaml"
       wf = YAML.load_file(ARGV[0])
-      steps = wf.dig("jobs", "required", "steps") || []
+      # The docs-only classifier lives in `pr-gate-core`; `required` (issue #2910)
+      # is the sibling-tier aggregator and is asserted separately below.
+      steps = wf.dig("jobs", "pr-gate-core", "steps") || []
       classify = steps.find { |s| s.is_a?(Hash) && s["id"] == "classify" }
       abort("no classify step") unless classify
       # Always runs (no if:), and heavy steps are gated on its output.
@@ -122,9 +124,21 @@ if [ -f "$WORKFLOW" ]; then
       # And a docs-only branch step must exist so the required status still
       # reports (green summary) when the heavy path is skipped.
       abort("no docs-only branch step (required status would not report)") unless gated.any? { |s| s["if"].to_s.include?("== 'true'") }
+      # Issue #2910: `required` is the branch-protection context and must ALWAYS
+      # report — never skipped when pr-gate-core fails — and must fail closed on
+      # a non-success core result.
+      required = wf.dig("jobs", "required")
+      abort("no `required` job") unless required.is_a?(Hash)
+      abort("`required` job must be named 'required'") unless required["name"].to_s == "required"
+      abort("`required` must run with if: always() so the context always reports") unless required["if"].to_s.include?("always()")
+      abort("`required` must depend on pr-gate-core") unless Array(required["needs"]).map(&:to_s).include?("pr-gate-core")
+      body = Array(required["steps"]).map { |s| s.is_a?(Hash) ? [s["run"].to_s, (s["env"] || {}).values.join("\n")].join("\n") : "" }.join("\n")
+      abort("`required` must fail when pr-gate-core did not succeed") unless body.include?("needs.pr-gate-core.result")
+      abort("`required` must run the sibling-tier aggregator") unless body.include?("aggregate-required-tiers.sh")
 RUBY
     if [ "$?" -eq 0 ]; then
       ok "classify step always runs; heavy steps (incl. #2644 oracle) gated fail-closed on its output"
+      ok "required always reports, needs pr-gate-core, and aggregates sibling tiers (#2910)"
     else
       bad "pr-gate.yml classify/gating contract not satisfied"
     fi

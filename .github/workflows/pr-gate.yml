@@ -5,14 +5,24 @@ on:
 
 permissions:
   contents: read
+  # Issue #2910: the `required` job POLLS this PR head's sibling check runs.
+  # `checks: read` reads the check-runs endpoint; `actions: read` reads this run's
+  # own job ids for name-independent self-exclusion. Both are read-only and are
+  # available to the default GITHUB_TOKEN, including on fork PRs — no PAT.
+  checks: read
+  actions: read
 
 concurrency:
   group: pr-gate-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  required:
-    name: required
+  # Everything the required gate itself computes. Split out from `required`
+  # (issue #2910) so the aggregation wait gets its own generous timeout without
+  # inflating this compute job's, and so the heavy runner is released before the
+  # wait begins. The branch-protection context name (`required`) is UNCHANGED.
+  pr-gate-core:
+    name: pr-gate-core
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -166,3 +176,54 @@ jobs:
       - name: Required PR Gate timing summary
         if: steps.classify.outputs.docs_only != 'true'
         run: bash scripts/ci/ci-timing-summary.sh summary "Required PR Gate timing"
+
+  # THE branch-protection context. `name: required` is load-bearing — it is the
+  # single entry in .github/branch-protection.json's required_status_checks
+  # contexts, which this change deliberately does NOT touch.
+  #
+  # Issue #2910: a GitHub Actions job cannot `needs:` a job in another workflow,
+  # so every tier in a sibling workflow used to be invisible to
+  # `gh pr merge --auto`. This job closes that by polling the PR head's sibling
+  # check runs and failing closed on any tier registered in
+  # .github/ci-gating-tiers.yml that is failed, non-terminal at the deadline, or
+  # absent. It NEVER masks the core: `pr-gate-core` not concluding `success` is
+  # an unconditional failure here.
+  #
+  # `if: always()` so the required context still reports (red) when the core job
+  # fails, is cancelled, or is skipped — a never-reported required context would
+  # block every affected PR forever.
+  required:
+    name: required
+    needs: [pr-gate-core]
+    if: always()
+    runs-on: ubuntu-latest
+    # Strictly GREATER than the registry's aggregation deadline (60m default), so
+    # expiry surfaces as a reported red with a diagnostic instead of an Actions
+    # job cancellation. validate-workflows.rb asserts this relationship.
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Fail if the PR gate's own validation did not pass
+        env:
+          CORE_RESULT: ${{ needs.pr-gate-core.result }}
+        run: |
+          set -euo pipefail
+          if [ "$CORE_RESULT" != "success" ]; then
+            echo "::error::pr-gate-core concluded '${CORE_RESULT}'; required fails regardless of tier state."
+            echo "**required: FAILED — pr-gate-core concluded \`${CORE_RESULT}\`.**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "pr-gate-core: success"
+
+      - name: Aggregate registered gating tiers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Waiver labels only; the aggregator ignores anything that is not
+          # `ci:waive:<tier-id>`.
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: bash scripts/ci/aggregate-required-tiers.sh

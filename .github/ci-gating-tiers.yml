@@ -1,0 +1,149 @@
+# CI gating-tier registry — the single source of truth for what `required` waits on.
+#
+# Issue #2910. Branch protection requires exactly ONE context, `required`
+# (`.github/workflows/pr-gate.yml`), and a GitHub Actions job cannot `needs:` a job
+# in another workflow. So `required` instead POLLS the pull request head's sibling
+# check runs and FAILS CLOSED on any tier listed under `tiers:` below that is
+# failed, still non-terminal at the deadline, or absent.
+#
+# Absence is ALWAYS an error. A registered tier ALWAYS emits its context — a tier
+# that does not apply to the diff reports that as an explicit SUCCESS from an
+# unconditional gate job. `required` therefore needs no knowledge of GitHub's
+# trigger semantics, and a mechanism bug reports "absent" (red) rather than
+# "not applicable" (green).
+#
+# Enrolment is mechanically forced: `scripts/ci/validate-workflows.rb` — which runs
+# as a step INSIDE the `required` job — fails when a workflow with a
+# `pull_request`/`pull_request_target` trigger appears in neither `tiers:` nor
+# `exempt:`. Adding a PR-triggered workflow without enrolling it reds `required`.
+#
+# SCHEMA
+#   version:        must be 1.
+#   aggregator:     the workflow + job that performs the aggregation. Never registrable
+#                   as a tier (it would wait on itself).
+#   defaults:
+#     wait_minutes: default aggregation deadline for a tier (minutes).
+#   tiers[]:
+#     id:            lowercase kebab-case; also the waiver-label suffix `ci:waive:<id>`.
+#     workflow:      file name under .github/workflows/.
+#     context:       the EXACT check-run name, i.e. the emitting job's `name:`.
+#     wait_minutes:  optional per-tier override; the effective deadline is the MAX
+#                    over tiers and must stay strictly below the aggregator job's
+#                    timeout-minutes.
+#     mandate_paths: documentation of the tier's own diff-based mandate predicate.
+#                    The predicate itself lives in the tier's classifier job (single
+#                    owner); this list exists so a reader can see the intent here.
+#     notes:         free text.
+#   exempt[]:
+#     workflow / reason / issue — a PR-triggered workflow that deliberately does NOT
+#     gate the merge. `reason` and `issue` are both mandatory.
+#
+# STRUCTURAL RULES ENFORCED ON EVERY ENTRY UNDER `tiers:` (see gating_registry.rb):
+#   * no blocking trigger `paths:`/`paths-ignore:` (only the always-fire sentinel
+#     `__required_ci_context_never_matches__` is permitted);
+#   * exactly one job emits the declared context, it is unconditional (`always()`),
+#     it inspects `needs.<job>.result` for every job it depends on, it has a failing
+#     path, and its transitive `needs` closure covers every other job in the workflow;
+#   * the entry is not the aggregating workflow.
+
+version: 1
+
+aggregator:
+  workflow: pr-gate.yml
+  job: required
+
+defaults:
+  wait_minutes: 60
+
+tiers:
+  # The motivating tier (#2910 / PR #2906): the Flight end-to-end tests that
+  # constituted a change's WIRING EVIDENCE ran in neither the local gate nor
+  # flight-ci.yml's PR tier, because the workflow was path-filtered AND the heavy
+  # job was gated on a `ci:flight-full` label the PR did not carry. Both halves are
+  # now closed: the trigger always fires, and a diff touching cqlite-flight/**
+  # MANDATES the full tier with or without the label.
+  - id: flight
+    workflow: flight-ci.yml
+    context: Flight tier gate
+    wait_minutes: 60
+    mandate_paths:
+      - cqlite-flight/**
+      - .github/workflows/flight-ci.yml
+    notes: >-
+      The gate job reports the aggregate of the classifier, the fmt/clippy/lib-test
+      job, the full-package job (which owns the end-to-end tests) and the image job.
+      A diff touching cqlite-flight/** or this workflow mandates the FULL tier. The
+      cheaper fmt/clippy/lib-test job additionally runs for cqlite-core/**,
+      Cargo.toml and Cargo.lock. `ci:flight-full` remains a manual opt-in for diffs
+      that mandate neither.
+
+exempt:
+  - workflow: cassandra-parity.yml
+    reason: Scheduled/label-driven parity lane; its merge-gating half is the committed parity report checked by the local gate.
+    issue: "#2910"
+  - workflow: cassandra-validation.yml
+    reason: Docker-backed validation lane run on demand; not merge-gating today.
+    issue: "#2910"
+  - workflow: ci-minimal-features.yml
+    reason: Feature-matrix build lane; the merge-gating minimal-features build runs in the local gate.
+    issue: "#2910"
+  - workflow: ci.yml
+    reason: Broad opt-in lane (ci:broad); its merge-gating content is covered by the local agent gate.
+    issue: "#2910"
+  - workflow: compaction-parity.yml
+    reason: Byte-parity lane whose merge-gating half is the local gate's compaction-byte-parity component.
+    issue: "#2910"
+  - workflow: coverage-baseline.yml
+    reason: Advisory coverage trend lane; a coverage dip must not block a merge.
+    issue: "#2910"
+  - workflow: delta-roundtrip.yml
+    reason: Feature-flagged delta-export lane, covered by the local gate's delta tests.
+    issue: "#2910"
+  - workflow: docs-site.yml
+    reason: Docs site build/deploy; a site build failure is fixed forward, not merge-gating.
+    issue: "#2910"
+  - workflow: e2e-readback.yml
+    reason: Label-gated Cassandra readback tier (ci:ingest-full); promotion to a gating tier is tracked separately.
+    issue: "#2910"
+  - workflow: flight-trino-e2e.yml
+    reason: Docker-compose Trino end-to-end tier; promotion to a gating tier is tracked separately.
+    issue: "#2910"
+  - workflow: fuzz.yml
+    reason: Fuzz smoke plus nightly long-run; a fuzz finding is filed as a bug, not a merge block.
+    issue: "#1614"
+  - workflow: live-cell-compaction-parity.yml
+    reason: Docker-backed live-cell parity lane; not merge-gating today.
+    issue: "#2910"
+  - workflow: node-ci.yml
+    reason: Node binding lane; the merge-gating half is the local gate's node-bindings component.
+    issue: "#2910"
+  - workflow: observability-gate.yml
+    reason: Observability correctness plus label-gated overhead bench; overhead is advisory.
+    issue: "#2910"
+  - workflow: parity-failure-issue-tests.yml
+    reason: Unit tests for the parity-failure issue filer tooling; tooling-only, not product correctness.
+    issue: "#2910"
+  - workflow: parity-regen-matrix.yml
+    reason: Regeneration matrix lane driven by the weekly exhaustive tier, not by pull requests.
+    issue: "#1026"
+  - workflow: perf-regression.yml
+    reason: Label-gated performance lane (ci:perf); a bench delta is advisory and must not block a merge.
+    issue: "#2910"
+  - workflow: project-board-sync.yml
+    reason: Delivery-board automation on pull_request_target; it reports no product signal.
+    issue: "#2910"
+  - workflow: python-ci.yml
+    reason: Python binding lane; the merge-gating half is the local gate's python-bindings component.
+    issue: "#2910"
+  - workflow: smoke-tests.yml
+    reason: Dataset smoke lane; the merge-gating half is the local gate's smoke component.
+    issue: "#2910"
+  - workflow: sstabledump-parity-gate.yml
+    reason: Legacy parity context retained while branch protection points at pr-gate; superseded by this registry.
+    issue: "#2910"
+  - workflow: trino-connector-ci.yml
+    reason: Java connector build lane; the connector releases on its own cadence.
+    issue: "#2910"
+  - workflow: workflow-config.yml
+    reason: Workflow configuration lint; its merge-gating half is validate-workflows.rb inside required.
+    issue: "#2910"

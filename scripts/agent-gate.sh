@@ -218,6 +218,15 @@
 #                      (full cores when sole gate, fair share max(1, ncpu/N) when
 #                      N>1, caller CARGO_BUILD_JOBS respected) and that the gate
 #                      wraps itself in taskpolicy -c utility (macOS) / nice (Linux).
+#                      Also runs (no python3 needed, ruby-SKIP-aware)
+#                      scripts/tests/test_aggregate_required_tiers.sh and
+#                      scripts/tests/test_gating_registry_policy.sh (#2910) — the two
+#                      halves of "CI green means the relevant CI ran": the sibling-tier
+#                      aggregator fails closed on a failed/pending/ABSENT registered
+#                      tier (hermetic check-run fixtures, injected deadlines, stub
+#                      sleep), and the enrolment rule forces every pull_request
+#                      workflow into .github/ci-gating-tiers.yml. Both prove
+#                      non-vacuity with always-pass stubs.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -4725,6 +4734,43 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_classify_docs_only.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (docs-only classifier self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # required-tier aggregation self-test (#2910): no python3/network needed, always
+  # runs (hermetic — synthetic check-run fixtures, injected deadlines/poll budgets,
+  # a stub sleep; never calls gh). Proves `required` fails closed on a failed,
+  # pending, or ABSENT registered gating tier, that re-runs and self-exclusion are
+  # decided by run identity rather than name, that a waiver can never excuse a
+  # failed tier, and — via an always-exit-0 stub aggregator — that the suite is
+  # non-vacuous. SKIP-aware inside the script (no ruby -> SKIP, never silent PASS).
+  echo ">>> [$name] bash scripts/tests/test_aggregate_required_tiers.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_aggregate_required_tiers.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (required-tier aggregation self-test #2910); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # gating-tier enrolment self-test (#2910): the other half — the rule that forces
+  # every pull_request workflow into .github/ci-gating-tiers.yml (as a tier or an
+  # annotated exemption) and rejects a registered tier that cannot emit its context
+  # unconditionally. Hermetic synthetic workflow trees; includes an always-pass stub
+  # enrolment rule wired through a copy of validate-workflows.rb, so the WIRING is
+  # proven non-vacuous, not just the rule. SKIP-aware (no ruby -> SKIP).
+  echo ">>> [$name] bash scripts/tests/test_gating_registry_policy.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gating_registry_policy.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (gating-tier enrolment self-test #2910); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

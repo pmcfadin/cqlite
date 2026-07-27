@@ -1,0 +1,485 @@
+#!/usr/bin/env bash
+# test_gating_registry_policy.sh — the ENROLMENT rule must be unbypassable
+# (issue #2910).
+#
+# `required` derives what it waits on from `.github/ci-gating-tiers.yml` alone.
+# That registry is only as good as the rule that forces workflows into it, and
+# that rule (scripts/ci/gating_registry.rb, wired into scripts/ci/validate-workflows.rb,
+# which runs as a step INSIDE the `required` job) is what makes a forgotten tier
+# a red instead of a silent hole.
+#
+# Every case here is DISCRIMINATING: it asserts a non-zero exit AND that the
+# offending workflow/entry is named. The final phase proves non-vacuity by
+# substituting an always-pass stub enrolment rule and asserting the negative
+# cases stop failing — including through `validate-workflows.rb`'s own
+# `require_relative`, so the WIRING is proven, not just the rule in isolation.
+#
+# Hermetic: synthetic workflow trees under a per-run mktemp namespace. No network.
+#
+# Run standalone:   bash scripts/tests/test_gating_registry_policy.sh
+# Or via the gate:  scripts/agent-gate.sh runs it inside the `tooling-tests` component.
+set -uo pipefail
+
+REPO_ROOT=$(cd "$(dirname "$0")/.." && cd .. && pwd)
+REGISTRY_RB="$REPO_ROOT/scripts/ci/gating_registry.rb"
+VALIDATOR_RB="$REPO_ROOT/scripts/ci/validate-workflows.rb"
+
+PASS=0
+FAIL=0
+ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
+bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+
+if ! command -v ruby >/dev/null 2>&1; then
+  echo "SKIP: ruby unavailable (the enrolment rule is ruby)"
+  exit 0
+fi
+for f in "$REGISTRY_RB" "$VALIDATOR_RB"; do
+  [ -f "$f" ] || { echo "FAIL - $f not found"; exit 1; }
+done
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/gating-policy-selftest.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+# ------------------------------------------------------------- base tree ----
+
+BASE="$WORK/base"
+mkdir -p "$BASE/workflows"
+
+cat >"$BASE/workflows/pr-gate.yml" <<'YAML'
+name: Required PR Gate
+on:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: pr-gate
+jobs:
+  pr-gate-core:
+    name: pr-gate-core
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - run: 'true'
+  required:
+    name: required
+    needs: [pr-gate-core]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - run: 'true'
+YAML
+
+cat >"$BASE/workflows/alpha.yml" <<'YAML'
+name: Alpha tier
+on:
+  pull_request:
+    paths-ignore:
+      - '__required_ci_context_never_matches__'
+permissions:
+  contents: read
+concurrency:
+  group: alpha
+jobs:
+  classify:
+    name: Classify alpha
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo classify
+  work:
+    name: alpha work
+    needs: classify
+    if: needs.classify.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: echo work
+  gate:
+    name: Alpha gate
+    needs: [classify, work]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          WORK_RESULT: ${{ needs.work.result }}
+        run: |
+          [ "$CLASSIFY_RESULT" = success ] || exit 1
+          case "$WORK_RESULT" in success|skipped) ;; *) exit 1 ;; esac
+YAML
+
+cat >"$BASE/workflows/advisory.yml" <<'YAML'
+name: Advisory lane
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+permissions:
+  contents: read
+concurrency:
+  group: advisory
+jobs:
+  advise:
+    name: advise
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo advisory
+YAML
+
+cat >"$BASE/registry.yml" <<'YAML'
+version: 1
+aggregator:
+  workflow: pr-gate.yml
+  job: required
+defaults:
+  wait_minutes: 60
+tiers:
+  - id: alpha
+    workflow: alpha.yml
+    context: Alpha gate
+exempt:
+  - workflow: advisory.yml
+    reason: Advisory docs lane that must never block a merge.
+    issue: "#2910"
+YAML
+
+new_case() {
+  # NOTE: `local a=1 b=$a` cannot be collapsed — `local`'s arguments are all
+  # expanded before any assignment happens (and `set -u` then trips).
+  local name="$1"
+  local dir="$WORK/case-$name"
+  rm -rf "$dir"
+  cp -R "$BASE" "$dir"
+  printf '%s' "$dir"
+}
+
+OUT=""
+RC=0
+RULE="$REGISTRY_RB"
+
+run_policy() {
+  local dir="$1"
+  OUT=$(ruby "$RULE" policy --workflows-dir "$dir/workflows" --registry "$dir/registry.yml" 2>&1)
+  RC=$?
+}
+
+contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+
+expect_fail_named() {
+  local label="$1" needle="$2"
+  if [ "$RC" -eq 0 ]; then
+    bad "$label: expected a non-zero exit, got 0 — $OUT"
+    return
+  fi
+  if contains "$OUT" "$needle"; then
+    ok "$label (names '$needle')"
+  else
+    bad "$label: failed but did not name '$needle' — $OUT"
+  fi
+}
+
+# ------------------------------------------------------------- the rules ----
+
+echo "== the clean base tree is enrolled =="
+DIR=$(new_case clean)
+run_policy "$DIR"
+if [ "$RC" -eq 0 ]; then ok "a fully enrolled tree passes"; else bad "clean tree rejected: $OUT"; fi
+
+echo "== a new PR-triggered workflow that is neither registered nor exempt =="
+DIR=$(new_case unenrolled)
+cat >"$DIR/workflows/brand-new-tier.yml" <<'YAML'
+name: Brand new tier
+on:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: brand-new
+jobs:
+  run:
+    name: brand new
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo new
+YAML
+run_policy "$DIR"
+expect_fail_named "an unenrolled PR workflow reds the gate" "brand-new-tier.yml"
+
+echo "== a pull_request_target workflow must enrol too =="
+DIR=$(new_case unenrolled-target)
+cat >"$DIR/workflows/target-lane.yml" <<'YAML'
+name: Target lane
+on:
+  pull_request_target:
+    types: [closed]
+permissions:
+  contents: read
+concurrency:
+  group: target
+jobs:
+  run:
+    name: target
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo target
+YAML
+run_policy "$DIR"
+expect_fail_named "an unenrolled pull_request_target workflow reds the gate" "target-lane.yml"
+
+echo "== exemptions need a reason and an issue =="
+DIR=$(new_case exempt-no-reason)
+cat >"$DIR/registry.yml" <<'YAML'
+version: 1
+aggregator: { workflow: pr-gate.yml, job: required }
+defaults: { wait_minutes: 60 }
+tiers:
+  - { id: alpha, workflow: alpha.yml, context: Alpha gate }
+exempt:
+  - { workflow: advisory.yml, issue: "#2910" }
+YAML
+run_policy "$DIR"
+expect_fail_named "an exemption without a reason is rejected" "advisory.yml"
+
+DIR=$(new_case exempt-no-issue)
+cat >"$DIR/registry.yml" <<'YAML'
+version: 1
+aggregator: { workflow: pr-gate.yml, job: required }
+defaults: { wait_minutes: 60 }
+tiers:
+  - { id: alpha, workflow: alpha.yml, context: Alpha gate }
+exempt:
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge. }
+YAML
+run_policy "$DIR"
+expect_fail_named "an exemption without an issue reference is rejected" "issue"
+
+echo "== a dangling registry entry =="
+DIR=$(new_case dangling)
+sed 's/context: Alpha gate/context: No such context/' "$BASE/registry.yml" >"$DIR/registry.yml"
+run_policy "$DIR"
+expect_fail_named "a context no job emits is rejected as dangling" "DANGLING"
+
+echo "== the registry cannot register the required gate itself =="
+DIR=$(new_case self-register)
+cat >"$DIR/registry.yml" <<'YAML'
+version: 1
+aggregator: { workflow: pr-gate.yml, job: required }
+defaults: { wait_minutes: 60 }
+tiers:
+  - { id: alpha, workflow: alpha.yml, context: Alpha gate }
+  - { id: selfgate, workflow: pr-gate.yml, context: required }
+exempt:
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+YAML
+run_policy "$DIR"
+expect_fail_named "registering pr-gate.yml is rejected" "never wait on itself"
+
+echo "== a registered workflow with a blocking trigger filter =="
+DIR=$(new_case blocking-paths)
+sed "s|    paths-ignore:|    paths:|; s|__required_ci_context_never_matches__|cqlite-flight/**|" \
+  "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+expect_fail_named "a blocking paths: filter on a registered tier is rejected" "blocking"
+
+DIR=$(new_case blocking-paths-ignore)
+sed "s|__required_ci_context_never_matches__|docs/**|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+expect_fail_named "a non-sentinel paths-ignore on a registered tier is rejected" "paths-ignore"
+
+echo "== the emitting job must be unconditional =="
+DIR=$(new_case conditional-gate)
+sed "s|    if: always()|    if: github.event_name == 'push'|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+expect_fail_named "a conditional emitting job is rejected" "always()"
+
+echo "== the emitting job must reflect the tier's result (no always-green gate) =="
+DIR=$(new_case blind-gate)
+cat >"$DIR/workflows/alpha.yml" <<'YAML'
+name: Alpha tier
+on:
+  pull_request:
+    paths-ignore:
+      - '__required_ci_context_never_matches__'
+permissions:
+  contents: read
+concurrency:
+  group: alpha
+jobs:
+  classify:
+    name: Classify alpha
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo classify
+  work:
+    name: alpha work
+    needs: classify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: echo work
+  gate:
+    name: Alpha gate
+    needs: [classify, work]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "always green, inspects nothing"
+YAML
+run_policy "$DIR"
+expect_fail_named "a gate job that inspects no needs.<job>.result is rejected" "does not inspect"
+
+echo "== every job in a registered workflow must feed the gate =="
+DIR=$(new_case uncovered-job)
+cat "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+cat >>"$DIR/workflows/alpha.yml" <<'YAML'
+  orphan:
+    name: orphan job
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo orphan
+YAML
+run_policy "$DIR"
+expect_fail_named "a job outside the gate's needs closure is rejected" "orphan"
+
+echo "== the deadline must be strictly less than the aggregating job's timeout =="
+DIR=$(new_case deadline-too-long)
+sed 's/wait_minutes: 60/wait_minutes: 75/' "$BASE/registry.yml" >"$DIR/registry.yml"
+run_policy "$DIR"
+expect_fail_named "deadline == timeout is rejected" "strictly less"
+
+DIR=$(new_case deadline-per-tier-override)
+cat >"$DIR/registry.yml" <<'YAML'
+version: 1
+aggregator: { workflow: pr-gate.yml, job: required }
+defaults: { wait_minutes: 10 }
+tiers:
+  - { id: alpha, workflow: alpha.yml, context: Alpha gate, wait_minutes: 90 }
+exempt:
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+YAML
+run_policy "$DIR"
+expect_fail_named "the effective deadline is the MAX over tiers, not the default" "90m"
+
+echo "== a workflow cannot be both a tier and an exemption =="
+DIR=$(new_case both)
+cat >"$DIR/registry.yml" <<'YAML'
+version: 1
+aggregator: { workflow: pr-gate.yml, job: required }
+defaults: { wait_minutes: 60 }
+tiers:
+  - { id: alpha, workflow: alpha.yml, context: Alpha gate }
+exempt:
+  - { workflow: alpha.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+YAML
+run_policy "$DIR"
+expect_fail_named "a workflow listed twice is rejected" "both a gating tier and an exemption"
+
+echo "== the real repository tree is enrolled =="
+OUT=$(ruby "$REGISTRY_RB" policy --workflows-dir "$REPO_ROOT/.github/workflows" \
+  --registry "$REPO_ROOT/.github/ci-gating-tiers.yml" 2>&1)
+if [ "$?" -eq 0 ]; then ok "the real .github tree satisfies the enrolment rule"; else bad "real tree unenrolled: $OUT"; fi
+
+# ------------------------------------------------------------- the wiring ---
+# The rule only bites if validate-workflows.rb actually calls it, because THAT is
+# what runs inside the `required` job.
+
+echo "== validate-workflows.rb carries the enrolment rule =="
+DIR=$(new_case wiring)
+# Deliberately clean under EVERY other validate-workflows.rb rule (scoped trigger,
+# permissions, concurrency, timeouts), so the only thing that can red it is the
+# enrolment rule — which is what makes the stub substitution below discriminating.
+cat >"$DIR/workflows/brand-new-tier.yml" <<'YAML'
+name: Brand new tier
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+permissions:
+  contents: read
+concurrency:
+  group: brand-new
+jobs:
+  run:
+    name: brand new
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo new
+YAML
+run_validator() {
+  local dir="$1" validator="$2"
+  OUT=$(ruby "$validator" --workflows-dir "$dir/workflows" --gating-registry "$dir/registry.yml" 2>&1)
+  RC=$?
+}
+run_validator "$DIR" "$VALIDATOR_RB"
+expect_fail_named "validate-workflows.rb reds on an unenrolled workflow" "brand-new-tier.yml"
+
+# ------------------------------------------------- non-vacuity (#2910 7.4) --
+
+echo "== non-vacuity: an always-pass stub enrolment rule must break this suite =="
+STUB_DIR="$WORK/stub-ci"
+mkdir -p "$STUB_DIR"
+cat >"$STUB_DIR/gating_registry.rb" <<'RUBY'
+# frozen_string_literal: true
+# Deliberately vacuous stand-in for the enrolment rule: it approves everything.
+module GatingRegistry
+  DEFAULT_REGISTRY = ".github/ci-gating-tiers.yml"
+  module_function
+
+  def policy_errors(workflows_dir: nil, registry_path: nil)
+    []
+  end
+end
+
+if __FILE__ == $PROGRAM_NAME
+  exit 0
+end
+RUBY
+cp "$VALIDATOR_RB" "$STUB_DIR/validate-workflows.rb"
+
+count_rule_rejections() {
+  local n=0 dir
+  for dir in "$WORK"/case-unenrolled "$WORK"/case-dangling "$WORK"/case-self-register \
+             "$WORK"/case-blind-gate "$WORK"/case-deadline-too-long; do
+    run_policy "$dir"
+    [ "$RC" -ne 0 ] && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
+RULE="$REGISTRY_RB"
+REAL_REJECTIONS=$(count_rule_rejections)
+RULE="$STUB_DIR/gating_registry.rb"
+STUB_REJECTIONS=$(count_rule_rejections)
+RULE="$REGISTRY_RB"
+
+if [ "$REAL_REJECTIONS" -eq 5 ]; then
+  ok "the real rule rejects all 5 discriminating registries"
+else
+  bad "the real rule rejected only $REAL_REJECTIONS/5"
+fi
+if [ "$STUB_REJECTIONS" -eq 0 ]; then
+  ok "the always-pass stub rejects none, so this suite would go RED under it"
+else
+  bad "the stub still rejected $STUB_REJECTIONS; the assertions are not driven by the rule"
+fi
+
+run_validator "$WORK/case-wiring" "$STUB_DIR/validate-workflows.rb"
+if [ "$RC" -eq 0 ]; then
+  ok "validate-workflows.rb with the stub rule stops rejecting; the wiring assertion is real"
+else
+  bad "the stub-wired validator still failed, so the wiring assertion is not discriminating: $OUT"
+fi
+
+echo
+echo "==== gating-registry policy self-test: PASS=$PASS FAIL=$FAIL ===="
+[ "$FAIL" -eq 0 ] || exit 1
