@@ -97,11 +97,20 @@ cat >"$(runs_file all-pass)" <<'JSON'
 ]}
 JSON
 
-cat >"$(runs_file one-pending)" <<'JSON'
+# THIS HEAD SHA'S FIRST CI ACTIVITY (issue #2910 round 5). A waiver is bound to
+# the head it was applied for, and the anchor for that is the earliest
+# `started_at` GitHub recorded on the head — so the fixtures carry the timestamps
+# real check runs carry. `HEAD_CI_AT` is an hour BEFORE `WAIVER_AT` below: the
+# ordinary case, a waiver applied to a head that is already running CI.
+HEAD_CI_AT="2025-12-31T23:00:00Z"
+
+cat >"$(runs_file one-pending)" <<JSON
 {"check_runs":[
  {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "started_at":"$HEAD_CI_AT",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
  {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"in_progress","conclusion":null,
+  "started_at":"$HEAD_CI_AT",
   "details_url":"https://github.com/o/r/actions/runs/502/job/1002"}
 ]}
 JSON
@@ -117,9 +126,10 @@ JSON
 
 # Beta's context is absent entirely; an UNREGISTERED context is absent too, which
 # must not gate anything.
-cat >"$(runs_file one-absent)" <<'JSON'
+cat >"$(runs_file one-absent)" <<JSON
 {"check_runs":[
  {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "started_at":"$HEAD_CI_AT",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"}
 ]}
 JSON
@@ -271,6 +281,7 @@ WAIVER_EVENTS="cat $WORK/waiver-events.tsv"
 cat >"$(runs_file beta-pending-after-waiver)" <<JSON
 {"check_runs":[
  {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "started_at":"$HEAD_CI_AT",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
  {"id":1600,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"queued","conclusion":null,
   "started_at":"2026-01-01T00:00:30Z",
@@ -282,12 +293,86 @@ JSON
 cat >"$(runs_file beta-pending-before-waiver)" <<JSON
 {"check_runs":[
  {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "started_at":"$HEAD_CI_AT",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
  {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"in_progress","conclusion":null,
-  "started_at":"2025-12-31T23:00:00Z",
+  "started_at":"$HEAD_CI_AT",
   "details_url":"https://github.com/o/r/actions/runs/502/job/1002"}
 ]}
 JSON
+# Same head, same live waiver, but the pending run started FORTY MINUTES after the
+# label event: it is not the run the waiver triggered, it is a later run carrying
+# information the waiver's author did not have. The window discriminates.
+cat >"$(runs_file beta-pending-late-run)" <<JSON
+{"check_runs":[
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "started_at":"$HEAD_CI_AT",
+  "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
+ {"id":1700,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"queued","conclusion":null,
+  "started_at":"2026-01-01T00:40:00Z",
+  "details_url":"https://github.com/o/r/actions/runs/701/job/1700"}
+]}
+JSON
+
+# ---- THE ABUSE: waive, then push (issue #2910 round 5) ---------------------
+# `ci:waive:<tier-id>` is a LABEL and a label SURVIVES A PUSH. On this NEW head
+# sha every check run postdates the waiver — the label was applied for the
+# PREVIOUS head. Beta has not minted its check run yet, which before round 5 was
+# waived on the first poll ("nothing to wait for"), so the waiver won the race
+# against the tier on every subsequent push: a permanent bypass.
+NEW_HEAD_CI_AT="2026-01-01T01:00:00Z"
+cat >"$(runs_file new-head-beta-absent)" <<JSON
+{"check_runs":[
+ {"id":2001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "started_at":"$NEW_HEAD_CI_AT",
+  "details_url":"https://github.com/o/r/actions/runs/801/job/2001"}
+]}
+JSON
+# The same new head once the tier has reported: it FAILED. A failed tier can
+# never be waived — that is the invariant the permanent bypass defeated, because
+# the tier never got to report before the waiver resolved it.
+cat >"$(runs_file new-head-beta-failed)" <<JSON
+{"check_runs":[
+ {"id":2001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "started_at":"$NEW_HEAD_CI_AT",
+  "details_url":"https://github.com/o/r/actions/runs/801/job/2001"},
+ {"id":2002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"failure",
+  "started_at":"$NEW_HEAD_CI_AT",
+  "details_url":"https://github.com/o/r/actions/runs/802/job/2002"}
+]}
+JSON
+# The real timeline on the new head: the tier is absent for the first two polls
+# (its gate job is the LAST job in its workflow) and then reports its failure.
+cat >"$WORK/new-head-timeline.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$WORK/new-head.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$WORK/new-head.count"
+if [ "\$n" -ge 3 ]; then cat "$(runs_file new-head-beta-failed)"; else cat "$(runs_file new-head-beta-absent)"; fi
+EOF
+chmod +x "$WORK/new-head-timeline.sh"
+# SPOOFING THE ANCHOR. The head anchor is the earliest `started_at` on the head,
+# so anything that can plant an ANCIENT timestamp there makes a stale waiver look
+# bound again. `started_at` on an Actions check run is set by GitHub, but ANY app
+# holding `checks:write` can mint a check run with any timestamp it likes — so
+# only PROVENANCED runs contribute to the anchor. This fixture is the new head
+# plus an unregistered forgery dated 2020.
+cat >"$(runs_file new-head-forged-anchor)" <<JSON
+{"check_runs":[
+ {"id":2001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "started_at":"$NEW_HEAD_CI_AT",
+  "details_url":"https://github.com/o/r/actions/runs/801/job/2001"},
+ {"id":2500,"app":{"slug":"helpful-bot","id":424242},"name":"perf advisory","status":"completed","conclusion":"success",
+  "started_at":"2020-01-01T00:00:00Z",
+  "details_url":"https://example.invalid/not-an-actions-run"}
+]}
+JSON
+# The label removed and RE-APPLIED after the push: the last `labeled` event wins,
+# so the waiver is bound to the new head and the break-glass works again. This is
+# the documented remedy, and it is what keeps the binding rule from being a
+# one-way door.
+printf 'ci:waive:beta\tfirst-labeller\t%s\nci:waive:beta\tsecond-labeller\t2026-01-01T01:30:00Z\n' \
+  "$WAIVER_AT" >"$WORK/waiver-events-reapplied.tsv"
 
 # ---- provenance fixtures (issue #2910 round 4) -----------------------------
 # A check run is identified to branch protection by NAME ALONE, and anything
@@ -720,7 +805,7 @@ if [ "$RC" -eq 0 ] && [ ! -s "$WORK/sleep.log" ]; then
 else
   bad "the waiver was held hostage by the run it started (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log"))"
 fi
-if contains "$OUT" "minted at/after the waiver was applied"; then
+if contains "$OUT" "the one this waiver's own label event started"; then
   ok "the short-circuit states WHY it applied"
 else
   bad "the horizon short-circuit is silent about its reason: $OUT"
@@ -740,6 +825,80 @@ if [ "$RC" -eq 0 ] && [ -s "$WORK/sleep.log" ]; then
   ok "without a resolved label-event time there is no horizon (it can only withhold)"
 else
   bad "an unresolved waiver time still short-circuited (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log"))"
+fi
+: >"$WORK/sleep.log"
+invoke "cat $(runs_file beta-pending-late-run)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+if [ "$RC" -eq 0 ] && [ -s "$WORK/sleep.log" ]; then
+  ok "a run that started 40m after the waiver is NOT the run the waiver triggered (window bounds it)"
+else
+  bad "the horizon swallowed a run the waiver did not start (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log"))"
+fi
+
+# ------------- a waiver is bound to the head it was applied for (round 5) ---
+# THE SHIP-BLOCKING ABUSE. `ci:waive:<tier-id>` is a label; a label survives a
+# push. Read live on every poll AND honoured immediately for an absent tier, it
+# waived every LATER head sha's tier in the seconds before that tier could mint
+# its check run — so `required` went green in seconds and "a failed tier cannot
+# be waived" became unenforceable, because the tier never got to report.
+echo "== a waiver does not carry over to the next head sha =="
+rm -f "$WORK/new-head.count"
+: >"$WORK/sleep.log"
+invoke "cat $(runs_file new-head-beta-absent)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+if [ ! -s "$WORK/sleep.log" ]; then
+  bad "a waiver applied BEFORE this head sha still resolved its absent tier on the first poll"
+else
+  ok "an absent tier on a head sha pushed after the waiver is polled, not waived on sight"
+fi
+if contains "$OUT" "bound to the head sha it was applied for"; then
+  ok "the diagnostic says WHY the visible label did not resolve the tier"
+else
+  bad "a stale waiver is silently ineffective — worse than one that refuses out loud: $OUT"
+fi
+
+# THE DISCRIMINATOR, and the whole point: with the tier polled instead of waived,
+# the tier gets to REPORT, and its failure reds the gate. Under the round-4 rule
+# this run exited 0 before the failure ever appeared.
+rm -f "$WORK/new-head.count"
+invoke "$WORK/new-head-timeline.sh" "$WORK/self-ids.txt" "$FUTURE" 6 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+if [ "$RC" -eq 1 ] && contains "$OUT" "a failed tier cannot be waived"; then
+  ok "the tier reports its FAILURE on the new head and the stale waiver cannot excuse it"
+else
+  bad "a stale waiver bypassed a real tier failure on a new head sha (rc=$RC): $OUT"
+fi
+
+: >"$WORK/sleep.log"
+invoke "cat $(runs_file new-head-forged-anchor)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+if [ -s "$WORK/sleep.log" ]; then
+  ok "an unprovenanced check run cannot back-date the head anchor and revive a stale waiver"
+else
+  bad "a forged 2020 timestamp dragged the head anchor back and re-enabled the bypass: $OUT"
+fi
+
+# NOT A ONE-WAY DOOR. Removing and re-applying the label produces a newer
+# `labeled` event, which binds the waiver to this head — the documented remedy
+# the diagnostic names, exercised.
+: >"$WORK/sleep.log"
+invoke "cat $(runs_file new-head-beta-absent)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels "ci:waive:beta" --waiver-events-cmd "cat $WORK/waiver-events-reapplied.tsv"
+if [ "$RC" -eq 0 ] && [ ! -s "$WORK/sleep.log" ]; then
+  ok "re-applying the label on the new head restores the immediate break-glass"
+else
+  bad "the documented remedy does not work (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log")): $OUT"
+fi
+
+# The deadline rule is UNCHANGED for a stale waiver: it delays a verdict, it
+# never pre-empts one. (Absent at the deadline is still waived; a FAILURE at the
+# deadline is not — asserted above.)
+invoke "cat $(runs_file new-head-beta-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+if [ "$RC" -eq 0 ] && contains "$OUT" "WAIVED"; then
+  ok "a stale waiver still applies at the aggregation deadline (it delays, it does not pre-empt)"
+else
+  bad "the deadline rule was lost for a stale waiver (rc=$RC): $OUT"
 fi
 
 # ------------------------------------------- PROVENANCE (round 4, S4) ------
@@ -1155,6 +1314,12 @@ count_failing_verdicts() {
   [ "$RC" -ne 0 ] && n=$((n + 1))
   invoke "cat $(runs_file beta-forged-over-real-failure)" "$WORK/self-ids.txt" "$EXPIRED" 1
   [ "$RC" -ne 0 ] && n=$((n + 1))
+  # round 5: a waiver left over from an earlier head sha must not pre-empt this
+  # head's tier — the tier reports its failure and the label cannot excuse it.
+  rm -f "$WORK/new-head.count"
+  invoke "$WORK/new-head-timeline.sh" "$WORK/self-ids.txt" "$FUTURE" 6 \
+    --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+  [ "$RC" -ne 0 ] && n=$((n + 1))
   printf '%s' "$n"
 }
 
@@ -1164,10 +1329,10 @@ REAL_FAILURES=$(count_failing_verdicts)
 AGG="$WORK/stub-aggregator.sh"
 STUB_FAILURES=$(count_failing_verdicts)
 AGG="$AGG_REAL"
-if [ "$REAL_FAILURES" -eq 12 ]; then
-  ok "the real aggregator fails all 12 discriminating states"
+if [ "$REAL_FAILURES" -eq 13 ]; then
+  ok "the real aggregator fails all 13 discriminating states"
 else
-  bad "the real aggregator failed only $REAL_FAILURES/12 discriminating states"
+  bad "the real aggregator failed only $REAL_FAILURES/13 discriminating states"
 fi
 if [ "$STUB_FAILURES" -eq 0 ]; then
   ok "the always-exit-0 stub fails none of them, so this suite would go RED under it"

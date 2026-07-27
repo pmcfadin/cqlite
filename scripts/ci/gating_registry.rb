@@ -249,6 +249,14 @@ module GatingRegistry
   # failing keeps a malformed login from RED-ing a legitimate PR.
   WAIVER_ACTOR_PATTERN = /\A[A-Za-z0-9._\[\]-]{1,64}\z/
 
+  # NAMING (issue #2910 round 5). This is `waiver_events`, NOT "waiver
+  # provenance". `provenance_error`/`provenanced?`/`ACTIONS_APP_SLUG` below mean
+  # one specific thing — WHICH APPLICATION MINTED A CHECK RUN — and reusing the
+  # word for "who applied the waiver label and when" made two unrelated concepts
+  # share a name inside one module. The waiver side is now named after the API
+  # record it parses (the pull request's `labeled` events) and matches the
+  # `--waiver-events` flag and the `WAIVER_EVENTS_CMD` shell variable end to end.
+  #
   # WHO ACTUALLY APPLIED THE WAIVER (issue #2910 round 4). The diagnostic used to
   # attribute a waiver to `$GITHUB_ACTOR` — the actor of the event that started
   # THIS run (a pusher, or whoever hit re-run), not the person who applied
@@ -263,7 +271,7 @@ module GatingRegistry
   # Returns { tier_id => { actor:, at: epoch-or-nil, iso: } }. An unreadable or
   # absent feed yields {}, which downgrades the diagnostic to "unresolved" and
   # withholds the pending-waiver horizon below — it can never GRANT anything.
-  def waiver_provenance(text)
+  def parse_waiver_events(text)
     text.to_s.each_line.each_with_object({}) do |line, acc|
       label, actor, created = line.chomp.split("\t", 3)
       match = WAIVER_LABEL_PATTERN.match(label.to_s.strip)
@@ -276,7 +284,7 @@ module GatingRegistry
   end
 
   def waiver_attribution(tier_id, context)
-    info = context[:provenance][tier_id]
+    info = context[:waiver_events][tier_id]
     if info.nil?
       return " (applier UNRESOLVED: no `labeled` event for ci:waive:#{tier_id} could be read; " \
              "this run's actor is NOT the labeller, so no name is claimed)"
@@ -285,6 +293,72 @@ module GatingRegistry
     at = info[:iso].to_s.empty? ? "an unrecorded time" : info[:iso]
     " (label applied by #{info[:actor]} at #{at})"
   end
+
+  # ------------------------------------------- A WAIVER IS BOUND TO ITS HEAD --
+  # THE HOLE THIS CLOSES (issue #2910 round 5). `ci:waive:<tier-id>` is a LABEL,
+  # and a label PERSISTS ACROSS PUSHES. Round 4 read labels live on every poll and
+  # waived an ABSENT tier on the first poll ("nothing to wait for"). Together
+  # those two facts made the waiver permanent: once applied, EVERY later head sha
+  # had that tier waived in the seconds before the tier could mint its check run,
+  # so `required` went green before the tier had a chance to report. The
+  # mechanism's central invariant — a FAILED tier cannot be waived — became
+  # unenforceable, because the waiver always won the race against the tier.
+  #
+  # THE FIX IS EVIDENCE, NOT PRESENCE. A waiver resolves a tier EARLY only when
+  # the `labeled` event that applied it is newer than this head sha's own first
+  # recorded CI activity — i.e. it was applied FOR this head. Otherwise the
+  # ordinary deadline rule applies unchanged: the tier is polled for the full
+  # budget, and if it concludes a failure in that time the waiver is ignored, so
+  # a genuine failure still reds the gate. A stale waiver can therefore delay a
+  # verdict, never pre-empt one.
+  #
+  # THE ANCHOR IS CHECK-RUN EVIDENCE, NOT A COMMIT DATE. The earliest
+  # `started_at` over the head's PROVENANCED check runs is set by GitHub when it
+  # starts a job; a committer date is chosen by whoever wrote the commit and
+  # BACKDATING one would make a stale waiver look bound, so it is not usable here.
+  # Only genuine (Actions) runs contribute: a forged check run with an ancient
+  # timestamp must not be able to drag the anchor backwards. Self-excluded runs
+  # DO contribute — this run's own check run is also evidence of when the head
+  # started running CI, and it is the one run guaranteed to exist.
+  #
+  # FAIL-SAFE DIRECTION: no anchor (no parseable timestamps) or no readable
+  # `labeled` event means NOT bound, which only ever WITHHOLDS the early waiver.
+  def head_activity_anchor(runs)
+    Array(runs).filter_map do |run|
+      next unless run.is_a?(Hash) && provenanced?(run)
+
+      parse_epoch(run["started_at"]) || parse_epoch(run["created_at"])
+    end.min
+  end
+
+  def waiver_bound_to_head?(tier_id, context)
+    info = context[:waiver_events][tier_id]
+    anchor = context[:head_anchor]
+    return false if info.nil? || info[:at].nil? || anchor.nil?
+
+    info[:at] >= anchor
+  end
+
+  # Says WHY an active waiver did not resolve a tier early. A break-glass that
+  # silently does nothing is worse than one that refuses out loud, and the remedy
+  # ("remove and re-apply") is not guessable from the label being present.
+  def unbound_waiver_note(tier_id, context)
+    info = context[:waiver_events][tier_id]
+    if info.nil? || info[:at].nil?
+      return "`ci:waive:#{tier_id}` is applied but its `labeled` event could not be read, so it cannot " \
+             "be bound to this head sha; it will still apply at the aggregation deadline"
+    end
+
+    "`ci:waive:#{tier_id}` was applied at #{info[:iso]}, BEFORE this head sha started running CI — a " \
+      "waiver is bound to the head sha it was applied for, so a label left over from an earlier push " \
+      "cannot pre-empt this head's tiers. Remove and re-apply the label to waive THIS head"
+  end
+
+  # How long after the waiver's own `labeled` event a tier's check run may appear
+  # and still count as "the run this waiver started". GitHub mints a workflow
+  # run's check runs within seconds of the triggering event; anything later is a
+  # different run, carrying information the waiver's author did not have.
+  WAIVER_RUN_WINDOW_SECONDS = 300
 
   # ------------------------------------------------------------ provenance --
   # A check run is identified to branch protection by NAME ALONE, and ANYTHING
@@ -345,7 +419,7 @@ module GatingRegistry
   # is absent such a tier simply stays non-terminal until `final`.
   def evaluate(registry:, check_runs:, exclude_ids: [], run_id: nil, labels: [], final: false,
                now: nil, supersession_grace: DEFAULT_SUPERSESSION_GRACE_SECONDS, unemittable: {},
-               provenance: {})
+               waiver_events: {})
     # SELF-CHECK (issue #2910 P7). An empty or unparseable `tiers:` would make
     # every observation vacuous and the aggregate green with nothing checked —
     # the one silent-open path in the mechanism. The enrolment rule rejects it
@@ -360,7 +434,11 @@ module GatingRegistry
     context = { waived: waived, final: final, now: now, grace: supersession_grace,
                 unemittable: unemittable.is_a?(Hash) ? unemittable : {},
                 impostors: latest_by_context(impostors),
-                provenance: provenance.is_a?(Hash) ? provenance : {} }
+                waiver_events: waiver_events.is_a?(Hash) ? waiver_events : {},
+                # Over the UNFILTERED set: this run's own check runs are excluded
+                # from tier evaluation (self-reference) but are still evidence of
+                # when this head sha started running CI.
+                head_anchor: head_activity_anchor(check_runs) }
 
     tiers(registry).map { |tier| observe_tier(tier, latest, context) }
   end
@@ -405,11 +483,21 @@ module GatingRegistry
     Observation.new("fail", tier_id, declared, check_id, status, conclusion, url, note)
   end
 
-  # An ABSENT tier is waived IMMEDIATELY, not only at the deadline (issue #2910
-  # P8): there is nothing to wait for, so burning the full deadline on it holds a
-  # runner idle for an hour to reach a verdict already determined. A PENDING tier
-  # is different — it can still turn red — so its waiver is honoured only once
-  # the deadline is spent.
+  # An ABSENT tier whose waiver is BOUND TO THIS HEAD is waived immediately
+  # (issue #2910 P8): there is nothing to wait for, so burning the full deadline
+  # on it holds a runner idle for an hour to reach a verdict already determined.
+  #
+  # An absent tier whose waiver is a leftover from an EARLIER head sha is not
+  # (round 5): that shortcut plus a persistent label is exactly how a waiver
+  # became a permanent bypass. It falls through to the ordinary polling path and
+  # is honoured only at the deadline, by which time the tier has had its full
+  # budget to report — and if it reported a failure, no waiver excuses it.
+  #
+  # PRECEDENCE, deliberately: impostor > bound waiver > migration state >
+  # deadline waiver > absent. A bound waiver outranks the migration state because
+  # waiving a deliberately renamed tier is that state's documented remedy; an
+  # UNBOUND one does not, and the migration diagnostic then says why the label it
+  # can see did not help.
   def absent_observation(tier_id, declared, context)
     # An IMPOSTOR is not an absence: a check run with the tier's exact name
     # exists, but its producer is not GitHub Actions (issue #2910 round 4). Say
@@ -424,7 +512,8 @@ module GatingRegistry
                              "`#{tier_id}`: #{provenance_error(impostor)}. Provenance could not be " \
                              "established, so it neither satisfies nor shadows the registered tier")
     end
-    if context[:waived].include?(tier_id)
+    waived = context[:waived].include?(tier_id)
+    if waived && waiver_bound_to_head?(tier_id, context)
       return Observation.new("waived", tier_id, declared, nil, "absent", nil, nil,
                              "absent tier waived by ci:waive:#{tier_id} (nothing to wait for)" +
                              waiver_attribution(tier_id, context))
@@ -437,14 +526,21 @@ module GatingRegistry
     # tier workflow.
     migration = context[:unemittable][tier_id]
     if migration
-      return Observation.new("fail", tier_id, declared, nil, "unemittable", nil, nil,
-                             "MIGRATION STATE: the base ref registers tier `#{tier_id}` but #{migration}. " \
-                             "`required` will not wait out the deadline for a context that cannot arrive. " \
-                             "Remedy: rebase this pull request onto the base branch, or apply " \
-                             "`ci:waive:#{tier_id}` if the tier is deliberately being renamed or retired " \
-                             "(a registry change only takes effect once it is merged)")
+      note = "MIGRATION STATE: the base ref registers tier `#{tier_id}` but #{migration}. " \
+             "`required` will not wait out the deadline for a context that cannot arrive. " \
+             "Remedy: rebase this pull request onto the base branch, or apply " \
+             "`ci:waive:#{tier_id}` if the tier is deliberately being renamed or retired " \
+             "(a registry change only takes effect once it is merged)"
+      note += ". NOTE: #{unbound_waiver_note(tier_id, context)}" if waived
+      return Observation.new("fail", tier_id, declared, nil, "unemittable", nil, nil, note)
     end
     final = context[:final]
+    if waived && final
+      return Observation.new("waived", tier_id, declared, nil, "absent", nil, nil,
+                             "absent tier waived by ci:waive:#{tier_id} at the aggregation deadline — " \
+                             "#{unbound_waiver_note(tier_id, context)}" +
+                             waiver_attribution(tier_id, context))
+    end
     note = "no check run named `#{declared}` on the PR head; absence is an ERROR, not inapplicability " \
            "(a registered tier always emits its context, reporting inapplicability as a success)"
     Observation.new(final ? "fail" : "absent", tier_id, declared, nil, "absent", nil, nil, final ? note : "")
@@ -458,26 +554,42 @@ module GatingRegistry
   # events so its own opt-in label works, so applying `ci:waive:<tier-id>` to a
   # wedged pull request can itself START the run whose `queued` check run then
   # holds the waiver hostage for the full hour. The break-glass would be fighting
-  # itself. When the tier's ONLY check run was minted at or after the moment the
-  # waiver label was applied, that run cannot be information the waiver's author
-  # lacked — so the waiver resolves immediately. Requires a resolved label-event
-  # timestamp; without one this returns false and the ordinary deadline rule
-  # applies, so an unreadable events feed can only ever withhold a waiver.
+  # itself. When the tier's ONLY check run is THE ONE THE WAIVER'S OWN LABEL EVENT
+  # STARTED, that run cannot be information the waiver's author lacked — so the
+  # waiver resolves immediately.
+  #
+  # NARROWED IN ROUND 5, twice over, because "started at or after the waiver" is
+  # true of ANY run started after the label was applied — including every run on
+  # every later head sha, which is how a persistent label became a permanent
+  # bypass:
+  #   1. the waiver must be BOUND TO THIS HEAD SHA (see waiver_bound_to_head?), so
+  #      a label left over from an earlier push resolves nothing early; and
+  #   2. the run must have started INSIDE `WAIVER_RUN_WINDOW_SECONDS` of the
+  #      `labeled` event, so only the run that event itself triggered qualifies —
+  #      not a re-run, and not a tier that happened to start 40 minutes later.
+  # Both still require a resolved label-event timestamp; without one this returns
+  # false and the ordinary deadline rule applies, so an unreadable events feed can
+  # only ever withhold a waiver.
   def waiver_supersedes_pending?(tier_id, run, context)
-    info = context[:provenance][tier_id]
+    info = context[:waiver_events][tier_id]
     return false if run.nil? || info.nil? || info[:at].nil?
+    return false unless waiver_bound_to_head?(tier_id, context)
 
     started = parse_epoch(run["started_at"]) || parse_epoch(run["created_at"])
     return false if started.nil?
 
-    started >= info[:at]
+    started >= info[:at] && (started - info[:at]) <= WAIVER_RUN_WINDOW_SECONDS
   end
 
   def pending_observation(tier_id, declared, check_id, status, conclusion, url, context, run = nil)
     if context[:waived].include?(tier_id)
       caused_by_waiver = waiver_supersedes_pending?(tier_id, run, context)
       if context[:final] || caused_by_waiver
-        reason = caused_by_waiver ? "its only check run was minted at/after the waiver was applied" : nil
+        reason = if caused_by_waiver
+                   "its only check run is the one this waiver's own label event started"
+                 elsif !waiver_bound_to_head?(tier_id, context)
+                   "at the aggregation deadline — #{unbound_waiver_note(tier_id, context)}"
+                 end
         note = "non-terminal tier waived by ci:waive:#{tier_id}#{reason ? " (#{reason})" : ''}" +
                waiver_attribution(tier_id, context)
         return Observation.new("waived", tier_id, declared, check_id, status, conclusion, url, note)
@@ -681,7 +793,7 @@ if __FILE__ == $PROGRAM_NAME
         final: options[:final],
         now: options[:now],
         supersession_grace: options[:grace],
-        provenance: GatingRegistry.waiver_provenance(
+        waiver_events: GatingRegistry.parse_waiver_events(
           options[:waiver_events] && File.file?(options[:waiver_events]) ? File.read(options[:waiver_events]) : ""
         ),
         unemittable: GatingRegistry::HeadEmitability.unemittable(
