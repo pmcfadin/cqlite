@@ -358,6 +358,30 @@ it can never be skimmed as "the mutation did not happen". On every non-mutation 
 a fresh `git rev-parse` at emit time), reading `commit: unverified branch: <b> dirty: unverified`
 when no validated terminal capture exists.
 
+### 8.2 …and it is a property of the DETECTION, not of the path (review J1)
+
+The rule above was implemented at the boundary detection site — the only one review H2 looked at —
+while the guard has **three** detection paths. The TERMINAL path (`_tree_finalize`) and the SIDE-lane
+MARKER path (`_apply_tree_integrity_marker`) both kept stamping the post-mutation sha with no label
+at all: the H2 defect, on the paths that cover `--lite`, `--delta` and every full gate's
+post-last-boundary window. Two lines of rule at one of three sites is a factoring problem, so the
+factoring is the fix:
+
+- `_tree_fail_closed <component> <reason>` — the ONLY site that assigns `TREE_MUTATED`, `OVERALL` and
+  the component-attributed `tree-integrity: FAIL (…)` verdict line.
+- `_tree_label_post_mutation` — the ONLY site that sets `TREE_COMMIT_SOURCE=start` and appends
+  `$TREE_POST_MUTATION_SUFFIX`. Pure and idempotent, and conditional on there BEING a validated end
+  observation that differs from the start, so a mutation reverted before the observation is not
+  described as one.
+- `_tree_mark_mutation` = the two together; `_tree_detection_mark <kind> …` dispatches on the
+  detection KIND (`mutation` vs `capture-failed`), and the kind now travels in the SIDE-lane marker
+  file so the post-drain consumer applies exactly what the MAIN lane would.
+
+A capture that could not be validated is deliberately NOT labelled: it is fail-closed, but nothing
+observed a mutation, so it must not claim a verified-start/post-mutation split. The single-site
+property is pinned structurally by `test_agent_gate_tree_provenance.sh` phase D (with a mutant that
+adds a second assignment site), which is what stops a fourth detection path from diverging again.
+
 **Every capture validates itself before anyone compares it.** `_tree_identity` returns rc 2 — a
 fail-closed condition distinct from rc 1 "no git worktree, SKIP" — when the manifest is not
 well-formed or the digest is not a full-length hex hash. Well-formed means all three of: the FIRST
@@ -375,8 +399,10 @@ that merely exits non-zero produced an empty digest that compared EQUAL and stam
 
 ## 9. Test design (discriminating by construction)
 
-**Two files**, both run by `tooling-tests`: `scripts/tests/test_agent_gate_tree_integrity.sh`
-(behaviour) and `scripts/tests/test_agent_gate_tree_portability.sh` (the BSD/macOS half, review G1).
+**Three files**, all run by `tooling-tests`: `scripts/tests/test_agent_gate_tree_integrity.sh`
+(behaviour), `scripts/tests/test_agent_gate_tree_portability.sh` (the BSD/macOS half, review G1) and
+`scripts/tests/test_agent_gate_tree_provenance.sh` (the labelling/table/carve-out half, review
+J1-J3). The split is the campsite rule (#1135): the behaviour file is already ~1.9k lines.
 Both build throwaway git repos with per-run `mktemp -d …XXXXXX` (hermeticity rules from #2874) and
 drive the gate through a fast path (`--only fmt` on the temp repo, plus direct invocation of the
 capture functions via the existing self-test seam style) so they cost seconds, not an hour.

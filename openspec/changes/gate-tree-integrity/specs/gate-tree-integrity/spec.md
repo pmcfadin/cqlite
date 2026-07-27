@@ -130,9 +130,13 @@ The block's existing `commit:` line — its short sha and its `dirty:` flag — 
 the VERIFIED terminal capture, never from a fresh `git rev-parse`/`git status` executed at emit
 time. When no validated terminal capture exists, the line SHALL say so explicitly rather than name a
 sha, and the run SHALL already be failing closed. When the block is published because a mid-run
-mutation was DETECTED at a component boundary, `commit:` SHALL instead name the VERIFIED START
+mutation was DETECTED — by ANY detection path: a component boundary, a SIDE-lane marker consumed
+after the lanes drain, or the terminal capture — `commit:` SHALL instead name the VERIFIED START
 identity — the identity the run actually executed against — explicitly labelled as such, with the
 post-mutation observation carried separately on an equally explicitly labelled `tree-end:` line.
+This rule is a property of the DETECTION, never of the path that made it: every path SHALL apply the
+identical labelling, and the labelling SHALL be implemented once so a newly added detection path
+cannot publish an unlabelled post-mutation identity.
 
 The two labels are CONTRACT TEXT, not paraphrasable intent: a triager who reads only this block must
 be unable to mistake either tree for the other, so the wording is pinned here verbatim. On a
@@ -164,14 +168,25 @@ without the tree lines, and no block SHALL carry a duplicated set of them.
 - **AND** when no validated terminal capture exists, `commit:` SHALL read `unverified`
 
 #### Scenario: a mutation-detected block names the identity the run executed against
-- **GIVEN** a MAIN-lane boundary detection publishes the ONE block a triager reads after a mid-run
-  mutation, and the post-mutation identity is not one this run certified anything against
-- **WHEN** that block is emitted
+- **GIVEN** a mutation detection publishes the ONE block a triager reads after a mid-run mutation,
+  and the post-mutation identity is not one this run certified anything against
+- **WHEN** that block is emitted, whichever detection path produced it
 - **THEN** its `commit:` line SHALL name the VERIFIED START sha and dirty flag and SHALL carry the
   `(VERIFIED START — …)` suffix pinned verbatim above
 - **AND** the post-mutation identity SHALL appear only on the `tree-end:` line, carrying verbatim
   the suffix `(POST-MUTATION observation — NOT the identity this run executed against)`, so the two
   can never be read as the same thing
+
+#### Scenario: a mutation detected by the TERMINAL capture is labelled identically
+- **GIVEN** the tree mutates AFTER the last component boundary — the window that covers all of
+  `--lite` and `--delta` and the tail of every full gate — so the TERMINAL capture is what detects it
+- **WHEN** the terminal block is emitted
+- **THEN** `commit:` SHALL name the VERIFIED START identity with the `(VERIFIED START — …)` suffix
+  and SHALL NOT name the post-mutation sha, and `tree-end:` SHALL carry the post-mutation identity
+  with the `(POST-MUTATION observation — …)` suffix — byte-for-byte the same two labels a boundary
+  detection publishes
+- **AND** the same SHALL hold for a mutation detected on a SIDE lane and applied from its marker
+  after the lanes drain
 
 #### Scenario: every emission path carries the tree lines exactly once
 - **WHEN** any terminal block is emitted, including one published by an internal self-test hook or
@@ -226,6 +241,9 @@ guard and this guard fire, both named lines SHALL appear and the result SHALL be
   `summary-integrity:` line when one is set, the tree lines, and the per-component verdict
   table for the components that recorded a result — in the terminal block's own order and row
   format, plus `detected-after-component:` and a count of how far the run got
+- **AND** that table SHALL cover the component set the RUNNING MODE dispatches (`--lite` and
+  `--delta` run components the full gate's set does not contain), and no recorded verdict SHALL be
+  omitted from the table or from the count
 - **AND** assembling it SHALL take no capture, so the component-named verdict line can never be
   overwritten by a lazily-triggered terminal capture
 
@@ -317,8 +335,12 @@ is established and never emit a certification of a real tree).
 ### Requirement: The digest SHALL exclude only paths the gate itself writes
 
 Exclusion SHALL be driven by the repository's own ignore rules (`--exclude-standard`) plus exactly
-two explicit carve-outs: (1) the run's own summary file and its `integrity-fail` siblings when they
-resolve under the repository root, and (2) `Cargo.lock`, which is a **named non-fatal class** rather
+three explicit carve-outs, each of which is an artifact THIS RUN writes: (1) the run's own summary
+file and its `integrity-fail` siblings when they resolve under the repository root, (1a) the run's
+own stdout/stderr redirect target, when the platform can name the file descriptor's target and it
+resolves to a regular file under the repository root — and where it cannot be named, the guard SHALL
+stay armed and the failure text SHALL name that possibility rather than exclude anything on a
+guess — and (2) `Cargo.lock`, which is a **named non-fatal class** rather
 than an exclusion — when the start→end manifest difference consists solely of a lockfile, the run
 SHALL stamp `tree-integrity: PASS (lockfile-settled: …)` naming the before/after hashes and proceed;
 when a lockfile changed alongside any other path, the run SHALL FAIL as a mutation. No broader
@@ -334,6 +356,14 @@ documented as a stated limitation covered by the existing `datasets:` and `ci-pi
 - **WHEN** `AGENT_GATE_SUMMARY_FILE` resolves to a non-ignored path under the repository root
 - **THEN** that path and its `integrity-fail` siblings SHALL be excluded from the digest, and no other
   untracked path SHALL be excluded on their account
+
+#### Scenario: a run does not trip the guard on its own stdout redirect target
+- **GIVEN** the documented invocation redirects the run's output into the checkout, and a caller may
+  redirect to a path the repository's ignore rules do not cover
+- **WHEN** the run's stdout and/or stderr resolves to a regular file under the repository root
+- **THEN** exactly that file SHALL be excluded from the digest and the run SHALL be free to certify
+- **AND** no other untracked path SHALL be excluded on its account — a file the run's own components
+  create mid-run SHALL still FAIL as a mutation and SHALL still be named
 
 #### Scenario: the carve-out matches however the in-repo path is spelled
 - **GIVEN** git reports only normalized repo-root-relative paths
@@ -567,6 +597,9 @@ sleep.
   execute fails too
 - **AND** each lint rule SHALL be proved discriminating by a mutant that it catches, with a portable
   control body that it does not flag
+- **AND** the set of functions it lints SHALL be DERIVED from the gate rather than maintained by
+  hand, so a tree-integrity helper added by a later change is covered by that change; this SHALL be
+  proved by a mutant that adds a helper carrying a banned construct and asserts the lint catches it
 
 ### Requirement: Doctrine SHALL state that a mid-run tree mutation invalidates the run
 

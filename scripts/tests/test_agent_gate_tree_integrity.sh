@@ -569,6 +569,19 @@ if [ "$head_before" != "$head_after" ]; then
   else
     bad "commit: the named line does not report the HEAD move ${head_before:0:12}→${head_after:0:12}"
   fi
+  # …and the block must not STAMP the sha it just refused to certify. This case used to
+  # stop at assert_named_fail, and that gap is exactly why the H2 labelling shipped on the
+  # boundary path only while the TERMINAL path kept naming the post-mutation sha unlabelled
+  # (#2926 review J1). The full cross-path contract lives in
+  # scripts/tests/test_agent_gate_tree_provenance.sh; this is its guard on THIS case.
+  if grep -q "^commit: ${head_before:0:7} " "$sum" \
+     && grep -q '^commit: .*(VERIFIED START — ' "$sum" \
+     && ! grep -q "^commit: ${head_after:0:7} " "$sum"; then
+    ok "commit: the TERMINAL detection stamps the VERIFIED START ${head_before:0:7}, labelled — never the post-mutation ${head_after:0:7}"
+  else
+    bad "commit: the terminal block stamps an unlabelled/post-mutation sha (expected the labelled ${head_before:0:7})"
+    grep -E '^commit:|^tree-end:' "$sum" 2>/dev/null
+  fi
 else
   bad "commit: the fixture did not actually commit — the case was not exercised"
 fi

@@ -65,6 +65,17 @@
       `AGENT_GATE_TEST_OS=Darwin`, plus a static GNU-only-construct lint over every tree function
       (13 rules, each proved discriminating by a mutant, with a portable control body).
 
+- [x] 4.7 Provenance half (review J1/J2/J3): `scripts/tests/test_agent_gate_tree_provenance.sh`, the
+      third suite wired into `tooling-tests` — every mutation-detection path (boundary, SIDE-lane
+      marker, terminal) publishes the SAME labelled `commit:`/`tree-end:` split; the boundary block's
+      component table covers the RUNNING mode and drops no recorded verdict; the run's own
+      stdout/stderr redirect target is carved out and nothing wider. Each fix carries a
+      discrimination mutant, plus a structural phase pinning the labelling to ONE assignment site so
+      a fourth detection path cannot diverge the way the third one did.
+- [x] 4.8 The portability lint's function inventory is DERIVED from the gate (review J4) rather than
+      hand-maintained — it silently exempted every helper a later change added; proved by mutants
+      that add a helper carrying a banned construct in four definition shapes.
+
 ## 5. Doctrine (same change)
 - [x] 5.1 `website/src/content/docs/agents-developing/gate-contract.md`: add the three lines to both
       machine-checkable block renderings; add the "a mid-run tree mutation invalidates the run"

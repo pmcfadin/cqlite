@@ -187,7 +187,12 @@
 #                      certify, and that an unmutated run still does (hermetic fake
 #                      checkouts + a stub cargo; nothing compiles, ~3s) — and
 #                      scripts/tests/test_agent_gate_tree_portability.sh, its BSD/macOS
-#                      half (BSD sed/stat/sort shims + a GNU-only-construct lint).
+#                      half (BSD sed/stat/sort shims + a GNU-only-construct lint over an
+#                      inventory DERIVED from the gate), and
+#                      scripts/tests/test_agent_gate_tree_provenance.sh, its labelling half
+#                      (every detection path publishes the same VERIFIED-START/POST-MUTATION
+#                      split; the boundary table covers the running mode; the run's own
+#                      stdout redirect target is not a mutation).
 #                      Also runs scripts/tests/test_generator_keyspace_scoping.sh
 #                      (#1232) — fails if a generate-*.sh enumerates the whole
 #                      SSTable corpus and grep -z filters by keyspace; needs no
@@ -1756,9 +1761,9 @@ esac
 # (never the checkout default) and every mutation target is an existing, repo-relative path.
 # NOTE this is a TEST SEAM, never a bypass: no mode here can turn a mutated run green.
 case "${AGENT_GATE_TREE_SELFTEST:-0}" in
-  0|capture|clean|boundary|side|terminal|postfinalize|validate-manifest|report-lookup) : ;;
+  0|capture|clean|boundary|side|terminal|postfinalize|validate-manifest|report-lookup|mode-components) : ;;
   *)
-    echo "agent-gate: invalid AGENT_GATE_TREE_SELFTEST='${AGENT_GATE_TREE_SELFTEST}' (expected one of: 0 capture clean boundary side terminal postfinalize validate-manifest report-lookup) (#2926)" >&2
+    echo "agent-gate: invalid AGENT_GATE_TREE_SELFTEST='${AGENT_GATE_TREE_SELFTEST}' (expected one of: 0 capture clean boundary side terminal postfinalize validate-manifest report-lookup mode-components) (#2926)" >&2
     exit 2 ;;
 esac
 TREE_SELFTEST_FIXTURE_MARKER=".agent-gate-tree-selftest-fixture"
@@ -1866,7 +1871,15 @@ TREE_START_BRANCH=""      # the branch name read ONCE, at the start of the guard
 #           triager reads — stamp a sha the run never ran against, the exact pattern this
 #           change forbids. So a mutation-detected block names the verified start and says
 #           so, and the post-mutation identity stays on the labelled `tree-end:` line.
+#
+# `start` is set from exactly ONE place — _tree_label_post_mutation, the shared labelling
+# every mutation-detection path calls (#2926 review J1). It used to be set on the boundary
+# path only, which left the TERMINAL path stamping an unlabelled post-mutation sha.
 TREE_COMMIT_SOURCE=end
+# The `tree-end:` suffix that marks a post-mutation observation. CONTRACT TEXT pinned in
+# openspec/changes/gate-tree-integrity/specs/gate-tree-integrity/spec.md — one definition,
+# so every detection path publishes the identical wording.
+TREE_POST_MUTATION_SUFFIX="(POST-MUTATION observation — NOT the identity this run executed against)"
 # The count of untracked files recorded by size+mtime instead of by content hash. It is
 # the MAX over the run's captures, never their SUM (#2926 review): the start and the
 # terminal capture both count the SAME oversized file, so summing reported "2 untracked
@@ -1926,12 +1939,50 @@ _tree_canon_rel() {
 }
 TREE_REPO_ROOT_PHYS=$(cd "$REPO_ROOT" 2>/dev/null && pwd -P) || TREE_REPO_ROOT_PHYS="$REPO_ROOT"
 TREE_EXCLUDE_REL="$(_tree_canon_rel "$SUMMARY_FILE" || true)"
+
+# …plus the run's OWN stdout/stderr redirect target (#2926 review J3). The DOCUMENTED
+# invocation is `bash scripts/agent-gate.sh > gate.log 2>&1`, and `.gitignore` covers
+# `*.log`, so the default is already outside the digest — but a caller redirecting to a
+# NON-ignored in-repo path makes the gate trip on the log it is itself writing and report a
+# mid-run mutation whose named path is its own output. That is the run's own artifact,
+# exactly like the summary file, so it is carved out the same way — and NOTHING wider: only
+# the two fds this process holds, only when each resolves to a REGULAR FILE under the repo
+# root. An untracked file anything else creates mid-run stays fatal.
+#
+# `$$` is used deliberately, never `/proc/self`: this runs inside a `$( … )`, where `self`
+# is the SUBSHELL whose fd 1 is the substitution pipe. Where /proc is absent (macOS/BSD — a
+# first-class gate host) the fd cannot be named at all; the guard then stays fully armed and
+# _tree_fail_reason appends TREE_FD_HINT so a reader is told the real cause instead of the
+# gate excluding something on a guess.
+TREE_STDOUT_REL=""
+TREE_STDERR_REL=""
+TREE_FD_HINT=""
+_tree_fd_target_rel() {   # <fd> -> repo-relative path of that fd's REGULAR-FILE target
+  local link
+  link=$(readlink "/proc/$$/fd/$1" 2>/dev/null) || return 1
+  [ -n "$link" ] || return 1
+  [ -f "$link" ] || return 1
+  _tree_canon_rel "$link"
+}
+if [ -e "/proc/$$/fd/1" ] || [ -L "/proc/$$/fd/1" ]; then
+  TREE_STDOUT_REL="$(_tree_fd_target_rel 1 || true)"
+  TREE_STDERR_REL="$(_tree_fd_target_rel 2 || true)"
+else
+  TREE_FD_HINT=" (note: this host cannot name the run's own stdout/stderr redirect target, so if you redirected this run's output to a non-ignored path INSIDE the checkout, that file is the change)"
+fi
+
 _tree_excluded() {
-  [ -n "$TREE_EXCLUDE_REL" ] || return 1
   case "$1" in
-    "$TREE_EXCLUDE_REL") return 0 ;;
-    "$TREE_EXCLUDE_REL".integrity-fail.*) return 0 ;;
+    "") return 1 ;;
   esac
+  if [ -n "$TREE_EXCLUDE_REL" ]; then
+    case "$1" in
+      "$TREE_EXCLUDE_REL") return 0 ;;
+      "$TREE_EXCLUDE_REL".integrity-fail.*) return 0 ;;
+    esac
+  fi
+  if [ -n "$TREE_STDOUT_REL" ] && [ "$1" = "$TREE_STDOUT_REL" ]; then return 0; fi
+  if [ -n "$TREE_STDERR_REL" ] && [ "$1" = "$TREE_STDERR_REL" ]; then return 0; fi
   return 1
 }
 
@@ -2960,9 +3011,79 @@ _tree_set_end() {
 # _tree_fail_reason <head-b> <rendered-paths> — the NAMED failure text. It deliberately
 # contains no `RESULT:` token, so #2908's poll predicates (`grep -q 'RESULT:'` and the
 # corrected `grep -qE 'RESULT: (PASS|FAIL)'`) behave exactly as they do today.
+#
+# On a host where the run's OWN stdout/stderr redirect target cannot be named (no /proc —
+# macOS/BSD), the text says so (#2926 review J3). There the fd carve-out below cannot arm,
+# so a caller who redirected this run's output to a NON-ignored in-repo path gets a REAL
+# detection whose cause is the log the gate is writing; naming that possibility is the
+# honest alternative to widening the exclusion on a guess.
 _tree_fail_reason() {
-  printf 'tree-mutated-midrun; head %s→%s; changed: %s' \
-    "$(_tree_short "$TREE_START_HEAD")" "$(_tree_short "$1")" "$2"
+  printf 'tree-mutated-midrun; head %s→%s; changed: %s%s' \
+    "$(_tree_short "$TREE_START_HEAD")" "$(_tree_short "$1")" "$2" "$TREE_FD_HINT"
+}
+
+# ---------------------------------------------------------------------------
+# The SHARED fail-closed + post-mutation labelling (#2926 review J1)
+#
+# THREE paths detect a mid-run mutation — a component boundary (_assert_tree_integrity),
+# a SIDE-lane marker (_apply_tree_integrity_marker) and the terminal capture
+# (_tree_finalize) — and review H2's fix was applied to the FIRST one only. The terminal
+# path therefore kept stamping `commit: <post-mutation sha>` with no label: the exact
+# defect H2 exists to prevent, on the path that dominates --lite, --delta and the full
+# gate's post-last-boundary window. The behaviour now lives in ONE place per concern so a
+# fourth path cannot diverge again, and the structural lint in
+# scripts/tests/test_agent_gate_tree_provenance.sh pins each concern to its single
+# assignment site.
+# ---------------------------------------------------------------------------
+
+# _tree_fail_closed <component> <reason>: the fail-closed state EVERY detection shares —
+# the run is FAILED and the verdict line names the reason and the detecting component.
+# The single assignment site for TREE_MUTATED / OVERALL inside the tree guard.
+_tree_fail_closed() {
+  TREE_MUTATED=1
+  OVERALL=FAIL
+  TREE_INTEGRITY_LINE="tree-integrity: FAIL ($2; detected-after-component: $1)"
+}
+
+# _tree_label_post_mutation: the SHARED post-mutation labelling — the ONE place that
+# decides how a block distinguishes "the identity this run executed against" (`commit:`,
+# the VERIFIED START) from "what the tree looked like afterwards" (`tree-end:`). PURE and
+# IDEMPOTENT, so any detection path may call it, in any order, more than once.
+#
+# It labels only when there IS a validated end observation that DIFFERS from the start: a
+# mutation reverted before the observation leaves `commit:` naming the start identity
+# anyway, and claiming a post-mutation reading there would be an invention.
+_tree_label_post_mutation() {
+  [ -n "$TREE_END_HEAD" ] || return 0
+  _tree_digest_ok "$TREE_END_DIGEST" || return 0
+  if [ "$TREE_END_HEAD" = "$TREE_START_HEAD" ] && [ "$TREE_END_DIRTY" = "$TREE_START_DIRTY" ] \
+     && [ "$TREE_END_DIGEST" = "$TREE_START_DIGEST" ]; then
+    return 0
+  fi
+  TREE_COMMIT_SOURCE=start
+  case "$TREE_END_LINE" in
+    *"$TREE_POST_MUTATION_SUFFIX") ;;
+    *) TREE_END_LINE="$TREE_END_LINE $TREE_POST_MUTATION_SUFFIX" ;;
+  esac
+}
+
+# _tree_mark_mutation <component> <reason>: a CONFIRMED mid-run mutation — fail closed AND
+# label the provenance. Every mutation-detection path calls exactly this.
+_tree_mark_mutation() {
+  _tree_fail_closed "$1" "$2"
+  _tree_label_post_mutation
+}
+
+# _tree_detection_mark <kind> <component> <reason>: dispatch by DETECTION KIND. A capture
+# that could not be validated is fail-closed but is NOT a proven mutation, so it must not
+# claim a verified-start/post-mutation split it never observed. An unknown or missing kind
+# is treated as a mutation: over-labelling a capture failure is a cosmetic error, while
+# under-labelling a mutation is the J1 defect itself.
+_tree_detection_mark() {
+  case "$1" in
+    capture-failed) _tree_fail_closed "$2" "$3" ;;
+    *)              _tree_mark_mutation "$2" "$3" ;;
+  esac
 }
 
 # _assert_tree_integrity <component> — the component-boundary check, called from the
@@ -2980,7 +3101,7 @@ _assert_tree_integrity() {
   # A start capture that could not be validated already doomed the run; say so at the
   # first boundary rather than spending the rest of the gate (#2926 review B1).
   if [ "$TREE_CAPTURE_FAILED" -eq 1 ]; then
-    _tree_boundary_fail "$comp" "$TREE_CAPTURE_FAIL_REASON"
+    _tree_boundary_fail "$comp" "$TREE_CAPTURE_FAIL_REASON" capture-failed
     return $?
   fi
   local probe="$LOG_DIR/tree-identity.probe.${BASHPID:-$$}"
@@ -2991,7 +3112,7 @@ _assert_tree_integrity() {
     # rc 1 = git momentarily unavailable: the authoritative terminal capture decides.
     # rc 2 / an unvalidatable identity = fail closed here.
     [ "$rc" -eq 1 ] && return 0
-    _tree_boundary_fail "$comp" "$TREE_CAPTURE_FAIL_REASON"
+    _tree_boundary_fail "$comp" "$TREE_CAPTURE_FAIL_REASON" capture-failed
     return $?
   fi
   head="$TREE_F_HEAD"; dirty="$TREE_F_DIRTY"; digest="$TREE_F_DIGEST"
@@ -3011,12 +3132,11 @@ _assert_tree_integrity() {
   [ "$cls" = lockfile ] && return 0
   # The block about to be published describes a run that executed against the START
   # identity and was STOPPED on observing this one. Record BOTH, unambiguously (#2926
-  # review H2): `commit:` names the verified start (below), `tree-end:` the post-mutation
-  # observation, each labelled for what it is.
+  # review H2): `commit:` names the verified start, `tree-end:` the post-mutation
+  # observation, each labelled for what it is — through the SHARED labelling every
+  # detection path uses (review J1), never a second copy of the rule here.
   _tree_set_end "$head" "$dirty" "$digest"
-  TREE_END_LINE="$TREE_END_LINE (POST-MUTATION observation — NOT the identity this run executed against)"
-  TREE_COMMIT_SOURCE=start
-  _tree_boundary_fail "$comp" "$(_tree_fail_reason "$head" "$rendered")"
+  _tree_boundary_fail "$comp" "$(_tree_fail_reason "$head" "$rendered")" mutation
   return $?
 }
 
@@ -3034,8 +3154,22 @@ _assert_tree_integrity() {
 #
 # NO capture is taken here — every value comes from state already recorded. Calling the
 # lazy finalize would overwrite the component-named verdict this block exists to publish.
+# _tree_mode_components: the component set the RUNNING MODE actually dispatches, one name
+# per line (#2926 review J2). `--lite` and `--delta` run `scoped-tests`, which the full
+# gate's COMPONENTS array does not contain, so iterating COMPONENTS unconditionally could
+# drop that row from a lite/delta boundary block and undercount `components-completed:`.
+_tree_mode_components() {
+  if [ "${LITE:-0}" = 1 ]; then
+    printf '%s\n' "${LITE_COMPONENTS[@]}"
+  elif [ "${DELTA:-0}" = 1 ]; then
+    printf '%s\n' "${DELTA_COMPONENTS[@]}"
+  else
+    printf '%s\n' "${COMPONENTS[@]}"
+  fi
+}
+
 _tree_boundary_meta_lines() {
-  local _c _s _rf _st _secs _done=0 _sel=0
+  local _c _s _rf _st _secs _done=0 _sel=0 _seen=" "
   _tree_commit_meta_render
   printf '%s\n' "$TREE_COMMIT_LINE"
   if [ -n "${DATA_COUNT:-}" ]; then
@@ -3056,13 +3190,31 @@ _tree_boundary_meta_lines() {
   printf '%s\n' "$(cpu_budget_line)"
   [ -n "${SUMMARY_INTEGRITY_LINE:-}" ] && printf '%s\n' "$SUMMARY_INTEGRITY_LINE"
   _tree_meta_render_lines
-  # The per-component verdict table, as far as the run got. Canonical COMPONENTS order,
-  # from the `.result` files record_result has written — the same source, order and
-  # `printf` shape the terminal assembly uses, so this table is a genuine PREFIX of the
-  # one a completed run would emit, never a second dialect of it.
-  for _c in "${COMPONENTS[@]}"; do
+  # The per-component verdict table, as far as the run got. Canonical order for the mode
+  # ACTUALLY RUNNING (#2926 review J2 — this iterated the full gate's COMPONENTS, which does
+  # not contain `scoped-tests`, the component --lite and --delta spend their time in), from
+  # the `.result` files record_result has written — the same source, order and `printf`
+  # shape the terminal assembly uses, so this table is a genuine PREFIX of the one a
+  # completed run would emit, never a second dialect of it.
+  #
+  # Then a SWEEP for any remaining `.result`: a recorded verdict must never be silently
+  # dropped from the table (nor from `components-completed:`) merely because no static list
+  # names it — that is the same "the set is hand-maintained" failure mode as J2 itself, one
+  # step out. LOG_DIR is this run's own mktemp directory, so the sweep can only see verdicts
+  # record_result wrote, and the glob is deterministically ordered.
+  for _c in $(_tree_mode_components); do
     _rf="$LOG_DIR/$_c.result"
     [ -f "$_rf" ] || continue
+    _st=""; _secs=""
+    read -r _st _secs < "$_rf" || true
+    printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
+    _seen="$_seen $_c "
+    _done=$(( _done + 1 ))
+  done
+  for _rf in "$LOG_DIR"/*.result; do
+    [ -f "$_rf" ] || continue
+    _c="${_rf##*/}"; _c="${_c%.result}"
+    case "$_seen" in *" $_c "*) continue ;; esac
     _st=""; _secs=""
     read -r _st _secs < "$_rf" || true
     printf '%-18s %s (%ss)\n' "$_c:" "$_st" "$_secs"
@@ -3081,15 +3233,18 @@ _tree_boundary_meta_lines() {
   return 0
 }
 
-# _tree_boundary_fail <component> <reason> — the LANE-AWARE fail-closed action shared by
-# every boundary detection (mutation, or a capture that cannot be validated). MAIN lane:
-# emit the named block and exit 1. SIDE lane: record a marker, return 1, never emit.
+# _tree_boundary_fail <component> <reason> <kind> — the LANE-AWARE fail-closed action
+# shared by every boundary detection. <kind> is `mutation` (a confirmed mid-run change) or
+# `capture-failed` (a capture that could not be validated), and it travels WITH the marker
+# so the post-drain consumer applies the same labelling the MAIN lane would (#2926 review
+# J1). MAIN lane: emit the named block and exit 1. SIDE lane: record a marker, return 1,
+# never emit.
 _tree_boundary_fail() {
-  local comp="$1" reason="$2" _l
+  local comp="$1" reason="$2" kind="${3:-mutation}" _l
   if [ "${BASHPID:-$$}" != "$$" ]; then
     # APPEND (never truncate): two concurrent SIDE-lane detections must not corrupt
     # each other, and the reader consumes only the FIRST complete line.
-    printf '%s\t%s\n' "$comp" "$reason" >> "$LOG_DIR/tree-integrity.fail" 2>/dev/null || true
+    printf '%s\t%s\t%s\n' "$kind" "$comp" "$reason" >> "$LOG_DIR/tree-integrity.fail" 2>/dev/null || true
     echo "⚠️ agent-gate: tree-integrity FAIL after [$comp] ($reason) — recorded for post-drain fail-close (#2926)" >&2
     return 1
   fi
@@ -3103,9 +3258,7 @@ _tree_boundary_fail() {
     kill "$SIDE_LANE_PID" 2>/dev/null || true
     wait "$SIDE_LANE_PID" 2>/dev/null || true
   fi
-  TREE_MUTATED=1
-  OVERALL=FAIL
-  TREE_INTEGRITY_LINE="tree-integrity: FAIL ($reason; detected-after-component: $comp)"
+  _tree_detection_mark "$kind" "$comp" "$reason"
   # Route the provenance through the SHARED renderers (#2926 review): hand-assembling the
   # three tree lines here omitted `tree-hash-cap:`, so a run that engaged the size+mtime
   # fallback and then failed at a boundary published a block with no disclosure of the
@@ -3124,16 +3277,20 @@ _tree_boundary_fail() {
 # _apply_tree_integrity_marker: consume a SIDE-lane marker after the lanes drain (before
 # the terminal emit) → OVERALL=FAIL + the named terminal line, so a SIDE-lane detection
 # is NEVER lost to a false-green. No-op when no marker exists; idempotent.
+#
+# The marker carries the DETECTION KIND as its first field (#2926 review J1) so this path
+# applies exactly the labelling the MAIN lane applies: a SIDE-lane mutation is a mutation
+# wherever it was seen. The end identity is not captured yet when this runs (it is the
+# first thing _tree_finalize does), so the labelling is re-applied there once it is.
 _apply_tree_integrity_marker() {
   [ -f "$LOG_DIR/tree-integrity.fail" ] || return 0
   [ "$TREE_MARKER_SEEN" -eq 1 ] && return 0
-  local m comp reason
+  local m kind comp reason rest
   m=$(head -n1 "$LOG_DIR/tree-integrity.fail" 2>/dev/null)
-  comp=${m%%$'\t'*}; reason=${m#*$'\t'}
+  kind=${m%%$'\t'*};   rest=${m#*$'\t'}
+  comp=${rest%%$'\t'*}; reason=${rest#*$'\t'}
   TREE_MARKER_SEEN=1
-  TREE_MUTATED=1
-  OVERALL=FAIL
-  TREE_INTEGRITY_LINE="tree-integrity: FAIL ($reason; detected-after-component: $comp)"
+  _tree_detection_mark "$kind" "$comp" "$reason"
   echo "agent-gate: tree-integrity FAIL recorded by a SIDE-lane component '$comp' ($reason) (#2926)" >&2
   return 0
 }
@@ -3172,22 +3329,18 @@ _tree_finalize() {
   local endbase="$LOG_DIR/tree-identity.end.${BASHPID:-$$}"
   local id rc head dirty digest cls rendered
   if [ "$TREE_CAPTURE_FAILED" -eq 1 ]; then
-    TREE_MUTATED=1
-    OVERALL=FAIL
     TREE_END_LINE="tree-end: (start capture failed)"
     TREE_END_DIGEST="unavailable"
-    TREE_INTEGRITY_LINE="tree-integrity: FAIL ($TREE_CAPTURE_FAIL_REASON; detected-after-component: <start>)"
+    _tree_fail_closed "<start>" "$TREE_CAPTURE_FAIL_REASON"
     return 1
   fi
   id=$(_tree_identity "$endbase"); rc=$?
   # rc 1 (no git) AND rc 2 (capture ran but could not be validated) BOTH land here: the
   # tree cannot be proven unchanged, so the run fails closed either way.
   if [ "$rc" -ne 0 ] || ! _tree_split_identity "$id"; then
-    TREE_MUTATED=1
-    OVERALL=FAIL
     TREE_END_LINE="tree-end: (terminal capture failed)"
     TREE_END_DIGEST="unavailable"
-    TREE_INTEGRITY_LINE="tree-integrity: FAIL (terminal capture failed — the tree cannot be proven unchanged)"
+    _tree_fail_closed "<terminal>" "terminal capture failed — the tree cannot be proven unchanged"
     return 1
   fi
   head="$TREE_F_HEAD"; dirty="$TREE_F_DIRTY"; digest="$TREE_F_DIGEST"
@@ -3195,8 +3348,13 @@ _tree_finalize() {
   _tree_cap_note "$TREE_F_FB"
   _tree_cap_stamp
   # A SIDE-lane marker already named the component; keep its more specific line even if
-  # the tree was reverted before the terminal capture.
-  [ "$TREE_MARKER_SEEN" -eq 1 ] && return 1
+  # the tree was reverted before the terminal capture. The end identity only becomes
+  # available HERE, so this is where the marker path's provenance gets labelled (#2926
+  # review J1) — by the same shared rule, so it cannot drift from the other two paths.
+  if [ "$TREE_MARKER_SEEN" -eq 1 ]; then
+    _tree_label_post_mutation
+    return 1
+  fi
   # head + dirty + digest, never the digest alone (#2926 review B1).
   if [ "$head" = "$TREE_START_HEAD" ] && [ "$dirty" = "$TREE_START_DIRTY" ] \
      && [ "$digest" = "$TREE_START_DIGEST" ]; then
@@ -3210,9 +3368,12 @@ _tree_finalize() {
     TREE_INTEGRITY_LINE="tree-integrity: PASS (lockfile-settled: $rendered)"
     return 0
   fi
-  TREE_MUTATED=1
-  OVERALL=FAIL
-  TREE_INTEGRITY_LINE="tree-integrity: FAIL ($(_tree_fail_reason "$head" "$rendered"); detected-after-component: <terminal>)"
+  # A TERMINAL detection is a mutation detection: it takes the same shared labelling as the
+  # boundary path, so `commit:` names the VERIFIED START and `tree-end:` the post-mutation
+  # observation (#2926 review J1 — this path used to stamp the post-mutation sha unlabelled,
+  # which is the H2 defect on the path --lite/--delta and the post-last-boundary window of
+  # the full gate all take).
+  _tree_mark_mutation "<terminal>" "$(_tree_fail_reason "$head" "$rendered")"
   return 1
 }
 
@@ -3570,6 +3731,10 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       printf 'tree-selftest: cap-line=%s\n' "${TREE_HASH_CAP_LINE:-<none>}"
       printf 'tree-selftest: commit-branch=%s\n' "$TREE_START_BRANCH"
       printf 'tree-selftest: exclude-rel=%s\n' "$TREE_EXCLUDE_REL"
+      # The run's own stdout/stderr carve-out (#2926 review J3) — reported so a test can
+      # assert BOTH that it names this run's redirect target and that it names nothing else.
+      printf 'tree-selftest: stdout-rel=%s\n' "${TREE_STDOUT_REL:-<none>}"
+      printf 'tree-selftest: stderr-rel=%s\n' "${TREE_STDERR_REL:-<none>}"
       exit 0 ;;
     validate-manifest)
       # READ-ONLY (no fixture marker needed): the production manifest validator, run
@@ -3594,6 +3759,13 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       _tsl_file=${_tsl%%|*}; _tsl_path=${_tsl#*|}
       printf 'tree-selftest: report-tag=%s\n' "$(_tree_report_tag "$_tsl_file" "$_tsl_path")"
       printf 'tree-selftest: report-value=%s\n' "$(_tree_report_value "$_tsl_file" "$_tsl_path")"
+      exit 0 ;;
+    mode-components)
+      # READ-ONLY (no fixture marker needed): the component set the RUNNING MODE dispatches,
+      # as _tree_boundary_meta_lines sees it (#2926 review J2). Printed on one line so a test
+      # can assert the WHOLE set per mode — the boundary block's table is only as complete as
+      # this set is, and --lite/--delta run a component the full gate's list does not carry.
+      printf 'tree-selftest: mode-components=%s\n' "$(_tree_mode_components | tr '\n' ' ' | sed 's/ *$//')"
       exit 0 ;;
     clean|boundary|terminal)
       [ "$AGENT_GATE_TREE_SELFTEST" = clean ] || _tree_selftest_mutate
@@ -4613,6 +4785,23 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_portability.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (tree-integrity PORTABILITY self-test #2926); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # …and its PROVENANCE half (#2926 review J1/J2/J3): every mutation-detection path
+  # (boundary, SIDE-lane marker, terminal) must publish the SAME labelled `commit:`/
+  # `tree-end:` split, the boundary block's component table must cover the mode actually
+  # running, and the run's own stdout/stderr redirect target must not be mistaken for a
+  # mid-run mutation. Same hermetic shape; each fix carries a discrimination mutant.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_tree_provenance.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_provenance.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (tree-integrity PROVENANCE self-test #2926); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
