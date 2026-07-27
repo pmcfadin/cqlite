@@ -17,6 +17,48 @@ Diagram: read-path decision tree
 
 For an implementation walkthrough of the read flow, see Appendix C.
 
+### Point Lookup Cost (BIG, Cassandra 5.0)
+
+The BIG read path is bounded at every step; nothing in a point read is proportional to the
+SSTable's partition count, *provided* a usable `Summary.db` exists.
+
+| Step | Work | Notes |
+|---|---|---|
+| First/last key range check | comparison only | skips the SSTable entirely when out of range |
+| Key cache | hash lookup | checked before `Summary.db` |
+| Bloom (`Filter.db`) | O(k) hashes | negative → stop |
+| `Summary.db` binary search | O(log s), `s` = samples | decorated-key comparator |
+| `Index.db` interval walk | one interval's entries | bound = exact per-interval width |
+| `Data.db` read | positioned read | promoted index narrows within-partition seeks |
+
+Source order and short-circuits:
+[`BigTableReader.getRowIndexEntry`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java#L215-L360).
+
+**Open reads the summary, not the index.** A BIG reader loads `Summary.db` (plus first/last
+keys) at open; it walks `Index.db` only to **rebuild** a summary or Bloom filter that is
+absent, corrupt, or written with a different `min_index_interval`
+([`BigSSTableReaderLoadingBuilder.java#L96-L130`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigSSTableReaderLoadingBuilder.java#L96-L130)).
+Treat "cheap open" as conditional on a usable `Summary.db`, never unconditional.
+
+**Interval width is not a constant.** `min_index_interval` (default 128) is the spacing only at
+full sampling. A downsampled summary has uneven, wider intervals, and the widest can exceed the
+average `min_index_interval * 128 / sampling_level`; Cassandra bounds its walk with the exact
+per-interval value
+([`IndexSummary.java#L273-L276`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java#L273-L276)).
+
+**Degraded inputs cost more.** With `Summary.db`/`Index.db` missing, a reader has no bounded
+entry point and must scan. CQLite logs a warning naming the absent components and falls back to
+a full sequential scan of `Data.db` in that case (issue #2295) — correct, but O(data size) per
+read.
+
+> **CQLite implementation note.** With a usable `Summary.db`, CQLite reads exactly the covering
+> interval's `[start, end)` bytes for a point read and classifies a miss by whether that
+> interval is **end-bounded** (a real next sample delimits it above): end-bounded miss =
+> authoritative absence; a miss in the last, read-to-EOF interval falls back to a whole-file key
+> scan, since a truncated tail can only drop entries there. Sources:
+> `cqlite-core/src/storage/sstable/reader/summary_point.rs:53-76`,
+> `cqlite-core/src/storage/sstable/reader/data_access/big_point.rs:140-177`.
+
 ## Slices and Range Reads
 
 - Slices can skip to approximate positions via `Summary.db`, then advance in `Index.db`.
@@ -26,7 +68,12 @@ For an implementation walkthrough of the read flow, see Appendix C.
 - When partitions are wide, a promoted index enables O(log n) within-partition seeks for clustering slices instead of scanning all rows. Ensure readers check for promoted index presence and fall back correctly when absent.
 
 ### Iterators for Range Scans
-- Expose an iterator interface that yields `(key, value)` pairs over token ranges: initialize from `Summary.db` token, then advance through `Index.db` entries. Provide `next()`/`peek()` and bounded `limit` support.
+- Expose an iterator interface that yields `(key, value)` pairs over token ranges: initialize at
+  the **floor sample** for the range's lower bound (the summary search entered by a token key
+  bound, not by a stored token — `Summary.db` stores none), then advance through `Index.db`
+  entries, skipping those below the bound. Provide `next()`/`peek()` and bounded `limit` support.
+  Cassandra's equivalent is
+  [`BigTableScanner.seekToCurrentRangeStart()`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableScanner.java#L67-L97).
 
 ### BTI Read Path Notes
 - BTI preserves the decision flow but the index entry payload may differ. Gate parsing using the `Descriptor` format; the iterator and seek abstractions remain the same.
@@ -36,8 +83,13 @@ Promoted index (BIG):
 - Readers detect presence and use it for O(log m) within-partition seeks; otherwise, fall back to sequential scan within the partition.
 
 ### Complexity Notes
-- Point read: Bloom O(1), Summary binary search O(log s), Index probe O(log n) or O(1) if direct-offset; fallback scan O(n).
-- Slice read: Initialization O(log s) + sequential advancement; with promoted index, within-partition seek O(log m) over clustering entries.
+- Point read (usable `Summary.db`): Bloom O(k) hashes, summary binary search O(log s) over `s`
+  samples, then a **forward walk of one `Index.db` interval** — not a binary search over
+  `Index.db`, which is not randomly addressable by key. Fallback scan is O(data size) when the
+  index components are absent or a truncated tail cannot be ruled out. See "Point Lookup Cost"
+  above for the per-step table.
+- Slice read: initialization O(log s) + sequential advancement; with a promoted index,
+  within-partition seek is O(log m) over the partition's `IndexInfo` blocks.
 
 ## Minimal Example (trimmed)
 
@@ -49,12 +101,19 @@ From `test_basic/simple_table`:
 - Bloom optimizes negative lookups; positives proceed to index/summary.
 - Summary sampling accelerates binary search; promoted index helps wide rows.
 - Range scans mix summary jumps with sequential index advances.
+- Cheap open and a bounded `Index.db` walk both depend on a **usable `Summary.db`**; without one
+  the summary is rebuilt from `Index.db`, and without an index at all the read degrades to a
+  full `Data.db` scan.
+- Bound the interval walk by the exact per-interval width (or the next sample's byte position),
+  never by the average width of a downsampled summary.
 
 ### References
 - Cassandra 5.0.8 (pinned):
-  - `IndexSummary` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/IndexSummary.java
+  - `IndexSummary` (note the 5.0 package path `io.sstable.indexsummary`) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java
   - `SinglePartitionReadCommand` (read decision tree L701–L807) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SinglePartitionReadCommand.java#L701-L807
-  - `BigTableReader` (per-SSTable read order L220–L278) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java#L220-L278
+  - `BigTableReader.getRowIndexEntry` (per-SSTable read order L215–L360) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java#L215-L360
+  - Exact per-interval walk bound — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java#L273-L276
+  - Summary load vs rebuild at open — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigSSTableReaderLoadingBuilder.java#L96-L130
   
 For implementation details, see Appendix C.
 
