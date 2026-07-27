@@ -64,9 +64,11 @@ never gate stdout or review churn.
      # Use: bash scripts/flow/claim.sh adopt <N> --expect <old-sha>.
      # RESUMING an issue whose issue-<N>-* branch outlived its claim ref (the
      # `reason=legacy-branch-lock ... claim-ref=free` refusal)? The sanctioned command:
-     #   bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:<branch>
-     # (#2945 — git's empty lease: still server-arbitrated, records who + why; a
-     # placeholder reason like <why> is refused). The refusal DIAGNOSES (branch +
+     #   bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:branch-outlived-claim
+     # (#2945 — git's empty lease: still server-arbitrated, records who + why. The
+     # --reason above is CONCRETE on purpose: a placeholder reason, or one still
+     # carrying an unsubstituted <…>, is a usage error (exit 64)). The refusal
+     # DIAGNOSES (branch +
      # claim-ref=free) but deliberately prints NO runnable command: an older-fleet
      # worker locks with the BRANCH only, so this adopt WOULD succeed against a lane
      # somebody is actively working. CONFIRM abandonment first — `claim-heartbeat.sh

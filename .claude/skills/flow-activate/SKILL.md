@@ -39,7 +39,9 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
      # (Adopting a reaped claim instead? Use: bash scripts/flow/claim.sh adopt <N> --expect <old-sha>)
      # (Refused with reason=legacy-branch-lock ... claim-ref=free — a FREE claim ref but an
      #  issue-<N>-* branch still on origin? The sanctioned resume is
-     #  `claim.sh adopt <N> --expect none --reason <concrete why>` (#2945). The refusal
+     #  `claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:branch-outlived-claim`
+     #  (#2945 — a placeholder reason, or one still carrying an unsubstituted <…>, is
+     #  rejected with exit 64, so substitute a concrete why). The refusal
      #  deliberately does NOT print it: CONFIRM the lane is abandoned first —
      #  `claim-heartbeat.sh should-reap <machine>` (age > 4h AND no open PR AND pid-dead if
      #  local), board Status, branch/PR author. Never resume blind, never hand-craft a claim

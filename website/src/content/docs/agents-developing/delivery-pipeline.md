@@ -239,7 +239,7 @@ free, then points here. The ONE sanctioned resume is documented *only* here and 
 `claim.sh -h` — it is deliberately **never printed as a runnable line** (see below):
 
 ```bash
-bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:issue-<N>-<slug>
+bash scripts/flow/claim.sh adopt 1234 --expect none --reason resume-legacy-branch-lock:branch-outlived-claim
 ```
 
 `--expect none` is git's **empty lease** ("this ref must not exist"), so the create is still arbitrated
@@ -248,7 +248,12 @@ server-side: a machine that actually holds the claim ref keeps it and the resume
 it is recorded in the claim commit next to who took it (machine/actor/ts) and rendered by
 `claim.sh status`, so a resume is auditable; a reason with nothing recordable in it (`'   '`, `'---'`, an
 unset variable) is a **usage error** (exit 64), never a silent `reason=unspecified` — and so is a bare
-**placeholder** (`<why>`, `why`, `todo`, `tbd`, `xxx`, …): the record must say why. A hex
+**placeholder** (`why`, `todo`, `tbd`, `xxx`, …) or a reason still carrying an **unsubstituted `<…>`**
+(a copied `--reason resume-legacy-branch-lock:<branch>` sanitizes to a non-sentinel token, so it is
+rejected on the raw text): the record must say why. That is also why the example above substitutes a
+concrete issue number and reason — the documented invocation is one that works when run verbatim.
+`--actor` is fail-closed the same way (an actor with nothing recordable in it would alias two distinct
+identities onto one holder, and the actor gates re-entrancy/`verify`/`release`). A hex
 `--expect` must be a **full** object name (40/64 hex) — a truncated sha is a usage error, not a lost race.
 
 **Why the command is never printed for you (owner decision, #2945).** `claim.sh` used to decide, from an
