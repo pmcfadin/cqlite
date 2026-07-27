@@ -388,6 +388,17 @@ VERDICT=""
 LABELS_NOW="$PR_LABELS_IN"
 WAIVER_EVENTS_FILE="$WORK_DIR/waiver-events.tsv"
 : >"$WAIVER_EVENTS_FILE"
+# WHY THE FEED WAS EMPTY (issue #3033). An empty label-event feed used to mean two
+# unrelated things — "this pull request has nothing to waive" and "the API call for
+# the `labeled` events FAILED" — and nothing downstream could tell them apart. The
+# second silently disables the EVIDENCE half of `ci:waive:<tier-id>`
+# (gating_registry.rb's waiver_bound_to_head? and waiver_supersedes_pending? can
+# never be true without it), so the break-glass regresses to deadline-only with no
+# trace. These carry the state forward to the reporting section, which names it.
+WAIVER_EVIDENCE_STATE=none      # none | unconfigured | unreadable | read
+WAIVER_EVIDENCE_DETAIL=""       # condensed API error (HTTP status when available)
+WAIVER_EVIDENCE_COUNT=0         # `labeled` events read on the last successful read
+WAIVER_EVIDENCE_FAILURES=0      # polls whose read failed, however it ended up
 
 # The PR's CURRENT labels, re-read every poll so a waiver applied while this job
 # waits takes effect without a re-run. A failed read falls back to the event
@@ -404,26 +415,89 @@ read_labels() {
   LABELS_NOW="$PR_LABELS_IN"
 }
 
+# WHAT ACTUALLY WENT WRONG, condensed for a workflow command. The old code threw
+# this away: EVERY failure mode — an authorization refusal, a secondary rate limit,
+# a 5xx, an absent `gh`, a `--jq` syntax error — collapsed into one identical
+# warning plus an empty file, which is also what an ordinary PR with nothing to
+# waive produces. The HTTP status (when the client reported one) and the command's
+# EXIT STATUS (when it did not) are the two facts that separate those cases, so
+# both are surfaced. `gh` prints the status as "(HTTP 403)".
+#
+# The result lands inside a `::warning::` and in the job summary, so it is
+# sanitised first: control characters go (it must stay one line), workflow-command
+# syntax is defanged, and the text is truncated.
+# waiver_error_detail <exit-status>
+waiver_error_detail() {
+  local rc="${1:-?}" err="$WORK_DIR/waiver-events.err" status="" text=""
+  if [ ! -s "$err" ]; then
+    printf 'exit status %s, no error output' "$rc"
+    return 0
+  fi
+  status="$(grep -o 'HTTP [0-9][0-9][0-9]' "$err" | head -n 1 || true)"
+  text="$(tr -d '[:cntrl:]' <"$err" | sed 's/::/__/g' | cut -c1-200)"
+  if [ -n "$status" ]; then
+    printf '%s — %s' "$status" "$text"
+  else
+    printf 'exit status %s, no HTTP status reported — %s' "$rc" "$text"
+  fi
+}
+
 # The `labeled` events behind any ACTIVE waiver label: who applied it and when.
 # Two uses, both fail-safe — the attribution in the diagnostic, and the horizon
 # that lets a waiver resolve a tier whose only check run the waiver's own label
 # event minted. An empty file means "unresolved": the waiver still applies at the
 # deadline exactly as before, and no name is claimed. This can never GRANT a
 # waiver the labels did not already carry.
+#
+# THREE STATES, NEVER CONFLATED (issue #3033). "No waiver label present",
+# "unreadable feed" and "read N events" all used to leave the same empty file and
+# the same silence, so a genuinely BROKEN read was indistinguishable from an
+# ordinary pull request with nothing to waive — and the failure it hides is total:
+# without the events feed, waiver_bound_to_head? and waiver_supersedes_pending? in
+# gating_registry.rb can never be true, so the break-glass silently degrades to
+# deadline-only and nobody is named on its audit trail. Each state is now recorded
+# and reported. NONE of them fails the job: an unreadable feed must still fall
+# through to the ordinary polling path and be honoured at the deadline, because
+# reding a break-glass PR for an API blip is the worse outage.
 read_waiver_events() {
   : >"$WAIVER_EVENTS_FILE"
+  WAIVER_EVIDENCE_DETAIL=""
   case "$LABELS_NOW" in
     *ci:waive:*) ;;
-    *) return 0 ;;
+    *) WAIVER_EVIDENCE_STATE=none; return 0 ;;
   esac
-  [ -n "$WAIVER_EVENTS_CMD" ] || return 0
+  if [ -z "$WAIVER_EVENTS_CMD" ]; then
+    WAIVER_EVIDENCE_STATE=unconfigured
+    echo "::warning::waiver evidence UNAVAILABLE: a ci:waive: label is present, but this run has no label-event" \
+         "source (no --waiver-events-cmd, and --repo/--pr-number were not both supplied), so the waiver cannot be" \
+         "bound to this head sha or attributed to whoever applied it; it will still apply at the aggregation" \
+         "deadline" >&2
+    return 0
+  fi
 
-  if eval "$WAIVER_EVENTS_CMD" >"$WAIVER_EVENTS_FILE" 2>"$WORK_DIR/waiver-events.err"; then
+  local rc=0
+  eval "$WAIVER_EVENTS_CMD" >"$WAIVER_EVENTS_FILE" 2>"$WORK_DIR/waiver-events.err" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    WAIVER_EVIDENCE_STATE=read
+    WAIVER_EVIDENCE_COUNT="$(grep -c '' "$WAIVER_EVENTS_FILE" || true)"
     return 0
   fi
   sed 's/^/  /' "$WORK_DIR/waiver-events.err" >&2 || true
-  echo "::warning::could not read this pull request's label events; a waiver will still apply at the" \
-       "aggregation deadline, but it will not be attributed to whoever applied it" >&2
+  WAIVER_EVIDENCE_STATE=unreadable
+  WAIVER_EVIDENCE_FAILURES=$((WAIVER_EVIDENCE_FAILURES + 1))
+  WAIVER_EVIDENCE_DETAIL="$(waiver_error_detail "$rc")"
+  # Say WHY the feed was empty, and how to tell the causes apart. The classes have
+  # different remedies: 401/403/404 = the token running this workflow may not read
+  # this pull request's events (the `permissions:` block); a 403 naming a rate limit
+  # or any 5xx = transient, re-run; no HTTP status at all = the client itself failed
+  # (`gh` absent, a bad --jq), which no re-run fixes.
+  echo "::warning::waiver evidence UNREADABLE: the read of this pull request's label events FAILED" \
+       "(${WAIVER_EVIDENCE_DETAIL}) — this is a BROKEN READ, NOT an absence of waiver labels, because a" \
+       "ci:waive: label IS present. 401/403/404 means the token running this workflow may not read this pull" \
+       "request's events (check the workflow's permissions block); a 403 naming a rate limit, or a 5xx, is" \
+       "transient; no HTTP status at all means the client failed (gh unavailable, or a bad --jq). Issue #3033." \
+       "The waiver still applies at the aggregation deadline, but it cannot resolve a tier early and it will" \
+       "not be attributed to whoever applied it" >&2
   : >"$WAIVER_EVENTS_FILE"
 }
 
@@ -560,6 +634,42 @@ while IFS=$'\x1f' read -r state tier context check_id status conclusion url note
       ;;
   esac
 done <"$OBSERVATIONS"
+
+# ----------------------------------------- waiver evidence, always on record --
+# The state is stated for EVERY run, including the ordinary "nothing to waive"
+# one, so that the abnormal states read as abnormal instead of having to be
+# inferred from a silence that also covers a missing `issues: read` grant
+# (issue #3033). This block never changes the verdict.
+emit ""
+case "$WAIVER_EVIDENCE_STATE" in
+  none)
+    emit "Waiver evidence: n/a — no \`ci:waive:<tier-id>\` label is present on this pull request."
+    ;;
+  read)
+    emit "Waiver evidence: READ OK — ${WAIVER_EVIDENCE_COUNT} \`labeled\` event(s) read, so a waiver can be bound to this head sha and attributed."
+    if [ "$WAIVER_EVIDENCE_FAILURES" -gt 0 ]; then
+      emit ""
+      emit "> :warning: ${WAIVER_EVIDENCE_FAILURES} earlier poll(s) could not read the label events; the last read succeeded."
+    fi
+    ;;
+  unreadable)
+    emit "Waiver evidence: **UNREADABLE (broken read — authorization, API or client failure)** — the \`labeled\` events for this pull request could not be read (${WAIVER_EVIDENCE_DETAIL}); ${WAIVER_EVIDENCE_FAILURES} failed read(s)."
+    emit ""
+    emit "> :warning: This is NOT \"no waiver labels present\" — a \`ci:waive:<tier-id>\` label IS present."
+    emit "> \`401\`/\`403\`/\`404\`: the token running this workflow may not read this pull request's events —"
+    emit "> check the workflow's \`permissions:\` block. A \`403\` naming a rate limit, or any \`5xx\`: transient,"
+    emit "> re-run. No HTTP status at all: the client itself failed (\`gh\` unavailable, a bad \`--jq\`), which a"
+    emit "> re-run will not fix. Issue #3033."
+    emit "> Degraded, not fatal: the waiver is still honoured at the aggregation deadline, but it cannot"
+    emit "> resolve a tier early and is reported as \`applier UNRESOLVED\`."
+    ;;
+  unconfigured)
+    emit "Waiver evidence: **UNAVAILABLE (no label-event source configured)** — a \`ci:waive:<tier-id>\` label is present but this run was given no way to read the \`labeled\` events."
+    emit ""
+    emit "> :warning: The waiver is still honoured at the aggregation deadline, but it cannot resolve a tier"
+    emit "> early and is reported as \`applier UNRESOLVED\`."
+    ;;
+esac
 
 emit ""
 if [ "$VERDICT" = "pass" ]; then

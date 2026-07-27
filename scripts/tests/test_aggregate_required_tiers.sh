@@ -655,6 +655,141 @@ else
   bad "a real app applier was withheld (rc=$RC): $OUT"
 fi
 
+# ------------------- waiver evidence: three states, never conflated (#3033) --
+# THE BUG THIS PINS. An empty label-event feed used to mean two unrelated things —
+# "this pull request has nothing to waive" and "the read of the `labeled` events
+# FAILED" — and both left the same empty file and the same silence. The second kills
+# the entire EVIDENCE half of `ci:waive:<tier-id>` (head-binding and the
+# pending-waiver horizon in gating_registry.rb), whose only symptom is a waiver that
+# quietly takes until the deadline with nobody named. EVERY failure mode collapsed
+# into that one silence: an authorization refusal, a rate limit, a 5xx, an absent
+# `gh`, a bad `--jq`. The states are now named, and this asserts they are
+# DISTINGUISHABLE — the discriminator is the pairwise difference of the reported
+# line, not the presence of any single string.
+#
+# It also pins the direction of the degradation: unreadable evidence must never red
+# the job. The waiver still has to be honoured at the deadline, because reding a
+# break-glass PR for an API blip is the worse outage.
+echo "== the label-event feed's three states are reported distinguishably =="
+
+# An AUTHORIZATION refusal, in the shape `gh` reports one.
+cat >"$WORK/waiver-events-403.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "gh: Resource not accessible by integration (HTTP 403)" >&2
+exit 1
+EOF
+chmod +x "$WORK/waiver-events-403.sh"
+# A CLIENT failure: no HTTP status exists at all, and no re-run fixes it.
+cat >"$WORK/waiver-events-client-fail.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "bash: gh: command not found" >&2
+exit 127
+EOF
+chmod +x "$WORK/waiver-events-client-fail.sh"
+
+evidence_line() { grep 'Waiver evidence' "$1" | head -n 1 || true; }
+
+# STATE 1: no waiver label at all — the ordinary PR.
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3
+cp "$SUMMARY" "$WORK/evidence-none.md"
+STATE_NONE=$(evidence_line "$WORK/evidence-none.md")
+if [ "$RC" -eq 0 ] && contains "$STATE_NONE" "n/a" && ! contains "$STATE_NONE" "UNREADABLE"; then
+  ok "a PR with no waiver label reports the 'nothing to waive' state explicitly"
+else
+  bad "the no-waiver state is not stated (rc=$RC): $STATE_NONE"
+fi
+
+# STATE 2: the feed read fine. The fixture carries two `labeled` events.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+cp "$SUMMARY" "$WORK/evidence-read.md"
+STATE_READ=$(evidence_line "$WORK/evidence-read.md")
+if [ "$RC" -eq 0 ] && contains "$STATE_READ" "READ OK" && contains "$STATE_READ" '2 `labeled`'; then
+  ok "a readable feed reports READ OK and how many labeled events it read"
+else
+  bad "the readable state is not stated with its event count (rc=$RC): $STATE_READ"
+fi
+
+# STATE 3: a broken read — an authorization refusal, not an absence of labels.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WORK/waiver-events-403.sh"
+cp "$SUMMARY" "$WORK/evidence-unreadable.md"
+STATE_BAD=$(evidence_line "$WORK/evidence-unreadable.md")
+if contains "$STATE_BAD" "UNREADABLE" && contains "$STATE_BAD" "broken read"; then
+  ok "an unreadable feed is reported as its own state in the job summary"
+else
+  bad "an unreadable feed is indistinguishable from having nothing to waive: $STATE_BAD"
+fi
+# THE MOST VALUABLE FACT IN THE DIAGNOSTIC: the HTTP status, which is what separates
+# "the token may not read this" from "GitHub was briefly unwell".
+if contains "$STATE_BAD" "HTTP 403" &&
+   contains "$(cat "$WORK/evidence-unreadable.md")" 'permissions:'; then
+  ok "the HTTP status is surfaced and an authorization status names the permissions block"
+else
+  bad "the summary does not identify a 403 as an authorization problem: $(cat "$WORK/evidence-unreadable.md")"
+fi
+if contains "$(cat "$WORK/evidence-unreadable.md")" 'rate limit' &&
+   contains "$(cat "$WORK/evidence-unreadable.md")" '5xx'; then
+  ok "the summary states which statuses are transient, so a re-run is not the reflex for all of them"
+else
+  bad "the summary does not separate transient statuses from authorization ones"
+fi
+if contains "$OUT" "::warning::" && contains "$OUT" "UNREADABLE" && contains "$OUT" "NOT an absence of waiver labels"; then
+  ok "the warning annotation says WHY the feed was empty, not merely that it was"
+else
+  bad "the warning annotation is still ambiguous about the cause: $OUT"
+fi
+# THE GRACEFUL PATH, which must survive all of the above.
+if [ "$RC" -eq 0 ] && contains "$OUT" "WAIVED" && contains "$OUT" "UNRESOLVED" && ! contains "$OUT" "FAIL (harness)"; then
+  ok "an unreadable-evidence run still honours the waiver at the deadline and claims no name"
+else
+  bad "unreadable evidence changed the verdict instead of only the diagnostic (rc=$RC): $OUT"
+fi
+
+# The three lines must actually differ from one another; a shared prefix with a
+# different tail is what made the states inferrable-only in the first place.
+if [ -n "$STATE_NONE" ] && [ -n "$STATE_READ" ] && [ -n "$STATE_BAD" ] &&
+   [ "$STATE_NONE" != "$STATE_READ" ] && [ "$STATE_NONE" != "$STATE_BAD" ] &&
+   [ "$STATE_READ" != "$STATE_BAD" ]; then
+  ok "the three states produce three different summary lines (pairwise distinct)"
+else
+  bad "two evidence states report identically: none='$STATE_NONE' read='$STATE_READ' bad='$STATE_BAD'"
+fi
+
+# A CLIENT failure reports no HTTP status at all: it is neither an authorization
+# problem nor transient, and the diagnostic must not imply either. The command's
+# exit status is the only fact available, so it is the one reported.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WORK/waiver-events-client-fail.sh"
+if [ "$RC" -eq 0 ] && contains "$OUT" "UNREADABLE" &&
+   contains "$OUT" "no HTTP status reported" && contains "$OUT" "exit status 127" &&
+   contains "$OUT" "command not found"; then
+  ok "a client failure is reported with its exit status and message, claiming no HTTP status"
+else
+  bad "a client failure was mis-reported as an API status (rc=$RC): $OUT"
+fi
+
+# A silent non-zero exit (no stderr at all) still has to be distinguishable from
+# success: the exit status is reported even when there is nothing else to report.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "false"
+if [ "$RC" -eq 0 ] && contains "$OUT" "UNREADABLE" && contains "$OUT" "exit status 1"; then
+  ok "a silent non-zero read is still reported as unreadable, with its exit status"
+else
+  bad "a silent non-zero read was indistinguishable from a successful one (rc=$RC): $OUT"
+fi
+
+# STATE 4: a waiver label with no label-event source configured at all — the
+# aggregator invoked without --repo/--pr-number. Same degradation, different cause,
+# so it says so rather than borrowing the API-failure wording.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta"
+STATE_UNCONF=$(evidence_line "$SUMMARY")
+if [ "$RC" -eq 0 ] && contains "$STATE_UNCONF" "UNAVAILABLE" && ! contains "$STATE_UNCONF" "UNREADABLE"; then
+  ok "a waiver with no configured event source is its own state, not an API failure"
+else
+  bad "the unconfigured-source state is missing or mislabelled (rc=$RC): $STATE_UNCONF"
+fi
+
 invoke "cat $(runs_file one-failed)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -ne 0 ]; then ok "a waiver cannot excuse a FAILED tier"; else bad "failed+waived wrongly passed"; fi
 if contains "$OUT" "cannot be waived"; then
@@ -1332,6 +1467,47 @@ if [ "$RC" -eq 2 ] && contains "$OUT" "not a branch ref"; then
   ok "an off-shape --base-ref fails closed as a harness error"
 else
   bad "an off-shape --base-ref was accepted (rc=$RC): $OUT"
+fi
+
+# ------------------- the wiring these fixtures CANNOT prove (issue #3033) ---
+# HONEST SCOPE. Every case above injects `--waiver-events-cmd`, so this suite proves
+# the STATE MACHINE and nothing about production: a fixture can never show that the
+# real `gh api repos/{slug}/issues/{n}/events` call succeeds with the token
+# pr-gate.yml hands the aggregator. Only a live pull request carrying a
+# `ci:waive:<tier-id>` label can show that, and as of #3033 no PR ever has — the
+# read is skipped entirely unless such a label is present, so the call has never
+# executed in production. The states above are what will make that first execution
+# legible; they are not a substitute for it.
+#
+# What IS mechanisable is the AGREEMENT between the two files. The aggregator's
+# default label-event command reads the ISSUES-EVENTS endpoint with a PULL REQUEST
+# number, and GitHub's per-permission reference lists
+# `GET /repos/{owner}/{repo}/issues/{issue_number}/events` under `Pull requests`
+# read as well as `Issues` read ("at least one of"), so `pull-requests: read` — which
+# pr-gate.yml already needs for the live label re-read — is what authorizes it. This
+# asserts that grant is still there, because removing it would break BOTH reads at
+# once. It is deliberately NOT a general "permissions cover every endpoint" checker
+# (out of scope for #3033), and it deliberately does NOT demand `issues: read`:
+# granting that would widen a fork-reachable token over every issue in the repo to
+# authorize nothing new.
+echo "== the aggregator's events endpoint and pr-gate.yml's permissions agree =="
+PR_GATE_WF="$REPO_ROOT/.github/workflows/pr-gate.yml"
+if grep -q 'issues/\${PR_NUMBER_IN}/events' "$AGG_REAL"; then
+  ok "the default label-event command reads the issues-events endpoint with the PR number"
+  if [ ! -f "$PR_GATE_WF" ]; then
+    bad "$PR_GATE_WF not found, so the permission grant behind that endpoint cannot be checked"
+  elif ruby -ryaml -e '
+        wf = YAML.safe_load(File.read(ARGV[0]))
+        perms = wf["permissions"]
+        exit 1 unless perms.is_a?(Hash)
+        exit perms["pull-requests"].to_s == "read" ? 0 : 1
+      ' "$PR_GATE_WF"; then
+    ok "pr-gate.yml grants pull-requests: read, which authorizes that read for a PR number"
+  else
+    bad "pr-gate.yml no longer grants 'pull-requests: read'; the ci:waive: evidence binding dies with it (#3033)"
+  fi
+else
+  bad "the aggregator no longer builds the issues-events command this assertion is about"
 fi
 
 # ------------------------------------------------- non-vacuity (#2910 7.4) --

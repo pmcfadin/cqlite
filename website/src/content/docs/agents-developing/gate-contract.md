@@ -100,6 +100,16 @@ carry).
   the full deadline, and if it reports a failure in that time it reds the gate. The waiver still applies at
   the deadline, so it delays a verdict rather than pre-empting one. To get the instant hatch back on the
   new head, **remove and re-apply the label** — the diagnostic says so.
+- **The waiver's EVIDENCE state is always on the record (issue #3033).** Both behaviours above depend on
+  reading this PR's `labeled` events, and a broken read used to look exactly like an ordinary PR: an empty
+  feed, one vague warning, a waiver that quietly waited for the deadline with nobody named. The job summary
+  now always states which of three things happened — `Waiver evidence: n/a` (no `ci:waive:` label present),
+  `READ OK — N labeled event(s)`, or **`UNREADABLE (broken read …)`** carrying the HTTP status (or the
+  command's exit status when there is none). `401`/`403`/`404` means the token may not read this PR's
+  events — check the workflow's `permissions:`; a `403` naming a rate limit or any `5xx` is transient; no
+  HTTP status means the client failed (`gh` absent, bad `--jq`) and a re-run will not help. An unreadable
+  read is **never** a failure of `required`: it withholds the early waiver and the attribution, and the
+  waiver is still honoured at the deadline.
 - **Labelling is cheap.** Subscribing to label events must not make every `ci:perf` / board-mirror /
   `needs-decision` label — or the waiver itself — restart a 30-minute gate. So a label mutation never
   cancels the in-flight run (cancellation is conditional on the event action; the shared concurrency group
