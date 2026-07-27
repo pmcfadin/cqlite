@@ -135,7 +135,7 @@ CREATE TABLE t (
 );
 ```
 
-### Nested Collection Wire Format
+### Nested Collection Wire Format (FROZEN inner lists)
 ```
 CQL: list<frozen<list<int>>>
 Value: [[1, 2], [3, 4, 5]]
@@ -144,7 +144,7 @@ Wire format:
 [0x00, 0x00, 0x00, 0x02]  // outer count = 2
 
 // First nested list [1, 2]
-[0x00, 0x00, 0x00, 0x18]  // size of entire frozen list
+[0x00, 0x00, 0x00, 0x14]  // size of entire frozen list = 20 (see derivation below)
 [0x00, 0x00, 0x00, 0x02]  // inner count = 2
 [0x00, 0x00, 0x00, 0x04]  // size = 4
 [0x00, 0x00, 0x00, 0x01]  // value = 1
@@ -152,7 +152,7 @@ Wire format:
 [0x00, 0x00, 0x00, 0x02]  // value = 2
 
 // Second nested list [3, 4, 5]
-[0x00, 0x00, 0x00, 0x24]  // size of entire frozen list
+[0x00, 0x00, 0x00, 0x1C]  // size of entire frozen list = 28 (see derivation below)
 [0x00, 0x00, 0x00, 0x03]  // inner count = 3
 [0x00, 0x00, 0x00, 0x04]  // size = 4
 [0x00, 0x00, 0x00, 0x03]  // value = 3
@@ -161,6 +161,18 @@ Wire format:
 [0x00, 0x00, 0x00, 0x04]  // size = 4
 [0x00, 0x00, 0x00, 0x05]  // value = 5
 ```
+
+**Derivation of the frozen inner-list sizes.** A frozen `list<int>` body is
+`4 (i32 count) + n * (4 (i32 element_size) + 4 (int value))` = `4 + 8n`:
+
+| Inner list | n | Bytes | Hex |
+|---|---|---|---|
+| `[1, 2]` | 2 | `4 + 2*8 = 20` | `0x14` |
+| `[3, 4, 5]` | 3 | `4 + 3*8 = 28` | `0x1C` |
+
+Count the bytes listed above each inner list to confirm: `[1,2]` shows 5 four-byte words
+after its size word (count, size, value, size, value) = 20; `[3,4,5]` shows 7 = 28. The
+size word itself is NOT included in the size it declares.
 
 ## Deserialization Code
 
