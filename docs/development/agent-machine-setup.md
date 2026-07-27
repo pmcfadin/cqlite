@@ -132,10 +132,12 @@ bare `git fetch`, so a resurrected original holder loses the lease and detects i
 When the claim ref is FREE but an `issue-<N>-*` branch still exists on origin (a resumed,
 parked, or reaped issue, or a merged-but-undeleted branch), `claim` refuses with
 `reason=legacy-branch-lock` and prints the one sanctioned resume:
-`bash scripts/flow/claim.sh adopt <N> --expect none --reason <why>` (#2945) — git's empty
-lease, so the create is still server-arbitrated and the claim commit records who + why.
-That command is printed only at `open-prs=0`; with an open PR (or an unreadable PR list)
-the refusal says `remediation=withheld open-prs=<n>` — confirm ownership before resuming.
+`bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:<branch>`
+(#2945) — git's empty lease, so the create is still server-arbitrated and the claim commit
+records who + why (a placeholder reason like `<why>` is refused). That command is printed
+only when the lane is demonstrably orphaned: `open-prs=0` AND every `issue-<N>-*` branch tip
+older than the 4h reap threshold AND no fresh machine-claim/heartbeat ref naming the issue.
+Anything live or unreadable → `remediation=withheld <signals>`; confirm ownership first.
 
 ## Full doctrine
 

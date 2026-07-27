@@ -236,7 +236,8 @@ lives on that branch, or just a merged-but-undeleted PR branch), `claim` refuses
 `reason=legacy-branch-lock … claim-ref=free` and prints the ONE sanctioned resume:
 
 ```bash
-bash scripts/flow/claim.sh adopt <N> --expect none --reason "<why you are resuming>"
+# the refusal prints this line with a CONCRETE reason already filled in, e.g.
+bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:issue-<N>-<slug>
 ```
 
 `--expect none` is git's **empty lease** ("this ref must not exist"), so the create is still arbitrated
@@ -244,13 +245,20 @@ server-side: a machine that actually holds the claim ref keeps it and the resume
 (exit 2), and two machines racing the resume still yield exactly one winner. `--reason` is **required** —
 it is recorded in the claim commit next to who took it (machine/actor/ts) and rendered by
 `claim.sh status`, so a resume is auditable; a reason with nothing recordable in it (`'   '`, `'---'`, an
-unset variable) is a **usage error** (exit 64), never a silent `reason=unspecified`. A hex `--expect` must
-be a **full** object name (40/64 hex) — a truncated sha is a usage error, not a lost race.
+unset variable) is a **usage error** (exit 64), never a silent `reason=unspecified` — and so is a bare
+**placeholder** (`<why>`, `why`, `todo`, `tbd`, `xxx`, …), because a printed `--reason <why>` run verbatim
+would record the uninformative `reason=why`. That is why the refusal fills the reason in for you. A hex
+`--expect` must be a **full** object name (40/64 hex) — a truncated sha is a usage error, not a lost race.
 
-The refusal **prints that command only when the endgame is demonstrably orphaned** — `open-prs=0`. An
-older-fleet worker locks with the *branch* and holds no claim ref, so `claim-ref=free` is true while it is
-actively working; with an open PR (or an unreadable PR list, `open-prs=-1`) the refusal instead reports
-`remediation=withheld open-prs=<n>` and you confirm ownership via the board and the PR author first. The
+The refusal **prints that command only when the lane is demonstrably orphaned**, judged on THREE signals:
+`open-prs=0` **and** every matching `issue-<N>-*` branch tip older than `claim-heartbeat.sh`'s reap
+threshold (4h) **and** no fresh `refs/machine-claims/*` / `refs/heartbeats/*` ref naming the issue. The
+last two cover the **pre-PR window**: an older-fleet worker locks with the *branch*, holds no claim ref
+(`claim-ref=free`) — and because a PR is opened LATE in this pipeline it also has **no open PR** for most
+of its life, so `open-prs=0` alone would advertise a hand-away on an actively-worked issue. Anything live —
+or any signal that could not be **read** (`open-prs=-1`, an unreachable remote, a missing threshold) —
+prints `remediation=withheld <signals>` instead, and you confirm ownership via the board and the
+branch/PR author first. The
 hatch still works when invoked deliberately — withholding changes the *advice*, not the arbiter. Retrying after a transient `ERROR reason=infra` is safe: an
 adopt whose ref is already held by *this* machine+actor reports `ADOPTED … (re-entrant)` exit 0 rather
 than abandoning an issue you own. This is the only sanctioned way past that refusal — **never hand-craft
