@@ -134,6 +134,23 @@ mutation was DETECTED at a component boundary, `commit:` SHALL instead name the 
 identity — the identity the run actually executed against — explicitly labelled as such, with the
 post-mutation observation carried separately on an equally explicitly labelled `tree-end:` line.
 
+The two labels are CONTRACT TEXT, not paraphrasable intent: a triager who reads only this block must
+be unable to mistake either tree for the other, so the wording is pinned here verbatim. On a
+mutation-detected block, `commit:` SHALL end with exactly:
+
+```
+ (VERIFIED START — the identity this run executed against; the tree MUTATED mid-run, see tree-end: for the post-mutation observation)
+```
+
+and `tree-end:` SHALL end with exactly:
+
+```
+ (POST-MUTATION observation — NOT the identity this run executed against)
+```
+
+(The em dashes are literal U+2014.) When no validated terminal capture exists the line SHALL read
+exactly `commit: unverified branch: <branch> dirty: unverified`.
+
 Every path that emits a terminal block SHALL render its tree provenance through the shared tree
 renderers, including the internal self-test hooks: no emission path SHALL hand-assemble a block
 without the tree lines, and no block SHALL carry a duplicated set of them.
@@ -150,10 +167,11 @@ without the tree lines, and no block SHALL carry a duplicated set of them.
 - **GIVEN** a MAIN-lane boundary detection publishes the ONE block a triager reads after a mid-run
   mutation, and the post-mutation identity is not one this run certified anything against
 - **WHEN** that block is emitted
-- **THEN** its `commit:` line SHALL name the VERIFIED START sha and dirty flag and SHALL say that
-  this is the start identity the run executed against
-- **AND** the post-mutation identity SHALL appear only on the `tree-end:` line, labelled as a
-  post-mutation observation, so the two can never be read as the same thing
+- **THEN** its `commit:` line SHALL name the VERIFIED START sha and dirty flag and SHALL carry the
+  `(VERIFIED START — …)` suffix pinned verbatim above
+- **AND** the post-mutation identity SHALL appear only on the `tree-end:` line, carrying verbatim
+  the suffix `(POST-MUTATION observation — NOT the identity this run executed against)`, so the two
+  can never be read as the same thing
 
 #### Scenario: every emission path carries the tree lines exactly once
 - **WHEN** any terminal block is emitted, including one published by an internal self-test hook or
@@ -382,6 +400,20 @@ one oversized blob — would fall back to size+mtime) SHALL be clamped to the fl
 non-numeric or out-of-range value SHALL fall back to the default; every such normalization SHALL be
 stamped.
 
+The mtime-resolution disclosure is CONTRACT TEXT, not paraphrasable intent — an artifact that hides
+a weaker platform guarantee is worse than one that never claimed it — so the wording is pinned here
+verbatim. Whenever the size+mtime fallback is in force AND the host's probed mtime resolution is
+coarser than nanoseconds, the `tree-hash-cap:` line SHALL append exactly one of:
+
+```
+; mtime resolution: WHOLE SECONDS on this host — a same-size rewrite within one second is NOT detected
+; mtime resolution: UNAVAILABLE on this host — those records are size-only
+```
+
+— the first when the host's `stat` records whole seconds only, the second when no `stat` flavour
+works. (The em dashes are literal U+2014.) When the resolution is sub-second, or when the fallback
+is not in force, no such suffix SHALL be appended.
+
 #### Scenario: no environment variable turns a mutated run green
 - **WHEN** a mutated run is executed with any combination of the gate's documented environment
   variables set
@@ -457,9 +489,9 @@ its own words rather than as a GNU-only construct.
   so a same-size rewrite landing inside one second would be invisible to the fallback on that host
 - **WHEN** the host's `stat` offers the fractional-seconds datum
 - **THEN** the guard SHALL use it and the record SHALL carry a sub-second mtime, closing the gap
-- **AND WHEN** it does not, the `tree-hash-cap:` line SHALL state that the resolution is whole
-  seconds on this host (or unavailable, when no `stat` flavour works), so the artifact never implies
-  a guarantee the platform did not give
+- **AND WHEN** it does not, the `tree-hash-cap:` line SHALL append the `WHOLE SECONDS` suffix
+  pinned verbatim above (or the `UNAVAILABLE … size-only` one, when no `stat` flavour works), so
+  the artifact never implies a guarantee the platform did not give
 
 ### Requirement: A discriminating regression test SHALL pin the behaviour inside tooling-tests
 

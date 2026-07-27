@@ -7,10 +7,19 @@
       Watch C fail against a deliberate porcelain-only prototype before writing the real digest.
 - [x] 1.2 Implement `_tree_identity <out-manifest>`: NUL-framed per-path manifest
       (`H` head, `T` tracked-vs-HEAD with working-tree blob sha / `DELETED` / mode, `U` untracked
-      non-ignored with blob sha), `LC_ALL=C sort -z` ordering, `sha256` digest. All git calls
+      non-ignored with blob sha), deterministic ordering via `_tree_sort0` — `LC_ALL=C sort -z`
+      only when a startup probe proves `-z` is supported, else git's own ordering, because an
+      unsupported flag emits NOTHING and both captures would agree on an empty manifest (a silent
+      fail-OPEN) — and a `sha256` digest. Blob ids are validated by the ONE shared
+      `_tree_hex_id_ok` rule (40 hex SHA-1 / 64 hex SHA-256), never a hard-coded 40. All git calls
       `--no-optional-locks`; `git hash-object --stdin-paths` **without** `-w`.
-- [x] 1.3 Untracked hash cap `AGENT_GATE_TREE_HASH_CAP_BYTES` (default 8 MiB) with
-      `SIZE:<n>:MTIME:<ns>` fallback + a `tree-hash-cap:` stamp when non-default or used.
+- [x] 1.3 Untracked hash cap `AGENT_GATE_TREE_HASH_CAP_BYTES` (default 8 MiB) with a
+      `SIZE:<n>:MTIME:<t>` fallback + a `tree-hash-cap:` stamp when non-default or used. `<t>`'s
+      resolution is a PROBED platform property, not universally nanoseconds: GNU `stat -c '%.9Y'`,
+      else BSD `stat -f '%Fm'` when that datum is offered (validated on its output), else BSD
+      `stat -f '%m'` whole seconds, else `unknown`. Whenever the fallback is in force and the
+      resolution is coarser than nanoseconds, the cap line DISCLOSES it (whole-seconds, or
+      size-only when no `stat` flavour works).
 - [x] 1.4 Exclusions: `--exclude-standard` plus the run's own `$SUMMARY_FILE` /
       `$SUMMARY_FILE.integrity-fail.*` when under `$REPO_ROOT`. No other path excluded.
 

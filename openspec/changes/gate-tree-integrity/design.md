@@ -57,11 +57,21 @@ Capture is one function, `_tree_identity <out-manifest>`, producing a NUL-framed
 `sha256`:
 
 ```
-H <full-head-sha-or-"unborn">             # the HEADER, written first
-T <blob-sha | DELETED> <mode> <path>      # one record per uncommitted tracked change
-U <blob-sha | SIZE:<n>:MTIME:<ns>> <path> # one record per untracked, non-ignored file
-N <body-record-count>                     # the TRAILER, written last
+H <full-head-sha-or-"unborn">                  # the HEADER, written first
+T <value> <mode> <path>                        # one record per uncommitted tracked change
+U <value> <mode> <path>                        # one record per untracked, non-ignored file
+N <body-record-count>                          # the TRAILER, written last
+
+<value> = <blob-sha> | DELETED | NONFILE | LINK:<target> | SIZE:<n>:MTIME:<t>
 ```
+
+`<blob-sha>` is a full-length lowercase hex object id — **40 hex in a SHA-1 repository, 64 in a
+SHA-256 one**. One shared predicate, `_tree_hex_id_ok`, accepts both lengths and is used by every
+caller that asks "is this a real object id" (the capture's own digest validation and the lockfile
+carve-out); no site hard-codes 40.
+
+`SIZE:<n>:MTIME:<t>` is the oversized-untracked-file fallback (§6), and `<t>`'s **resolution is a
+platform property, probed once, never assumed** (see the `MTIME` note under §6).
 
 Every record is NUL-terminated and its **path comes last**, so a path containing a tab or a
 newline cannot forge a field or a record. The `N` trailer is what makes a **truncated** manifest
@@ -74,8 +84,16 @@ detectable (§8).
   recorded `DELETED`.
 - **Untracked side**: `git --no-optional-locks ls-files --others --exclude-standard -z`, hashed the
   same way. `--exclude-standard` is what makes `.gitignore` the exclusion set (§5).
-- Both lists are ordered with `LC_ALL=C sort -z`; the manifest is fully NUL-framed so a path
-  containing a newline cannot forge a line.
+- **Ordering — `sort -z` is PROBED, with a git-order fallback.** Both lists are piped through
+  `_tree_sort0`, which uses `LC_ALL=C sort -z` **only when a one-shot startup probe
+  (`printf 'b\0a\0' | LC_ALL=C sort -z`) proves the flag is supported**, and otherwise falls back
+  to `cat`, keeping git's own ordering. Assuming `-z` unconditionally was a silent **fail-OPEN**:
+  a `sort(1)` that rejects the flag prints usage and emits **nothing**, the `while read -r -d ''`
+  loop consuming it enumerates ZERO paths on a dirty tree, both captures agree on the same empty
+  manifest, and a mutated tree certifies. The fallback is not a weakening — `git diff --name-only
+  -z` and `git ls-files -z` already emit deterministically path-ordered output and both captures of
+  a run take the same route, so the explicit sort only removes the dependency on that git property.
+  The manifest is fully NUL-framed either way, so a path containing a newline cannot forge a line.
 - `digest = sha256(manifest)`; the manifest itself is retained at `$LOG_DIR/tree-identity.{start,end}`
   so a mismatch can **name the paths that changed** (`comm`/`diff` of the two manifests) instead of
   reporting an opaque hash difference.
@@ -184,8 +202,13 @@ Explicit additions (deliberately tiny — an over-broad exclusion re-opens the h
    `Cargo.lock` changed **alongside** anything else, the whole run FAILs as a mutation. Both digests
    are stamped either way, so the residual hole ("someone hand-edits only `Cargo.lock` mid-run") is
    visible in the artifact rather than silent. **Admission is on the RECORD, not the path spelling**
-   (review F3): the path must carry a tracked (`T`) record whose value is a real 40-hex blob hash and
-   must be a blob in the commit the run started on. Path-matching alone gave the non-fatal class to
+   (review F3): the path must carry a tracked (`T`) record whose value is a **real full-length hex
+   blob id** and must be a blob in the commit the run started on. "Real blob id" is decided by the
+   SAME shared `_tree_hex_id_ok` rule the capture digest uses, which accepts **40 hex (SHA-1
+   repository) OR 64 hex (SHA-256 repository)** — the earlier hard-coded 40 made the carve-out
+   unreachable on a SHA-256 repository, spuriously failing every legitimate lockfile settle there
+   (review G5). Widening the length rule does not widen admission: an untracked mid-run
+   `…/Cargo.lock` is still fatal on either hash flavour. Path-matching alone gave the non-fatal class to
    an UNTRACKED `…/Cargo.lock` appearing mid-run, and to a tracked lockfile that was DELETED mid-run
    — both real mutations. Presence in the start *manifest* is deliberately **not** required: the
    manifest lists only paths already differing from HEAD, so requiring it would exclude the dominant
@@ -223,10 +246,28 @@ Argued **against**, and the codebase supplies the argument:
 
 One knob **is** specified, and it is a performance knob rather than a bypass:
 `AGENT_GATE_TREE_HASH_CAP_BYTES` (default 8 MiB) caps per-file content hashing of *untracked* files;
-above the cap the manifest records `SIZE:<n>:MTIME:<ns>` instead of a blob sha. It can never turn a
+above the cap the manifest records `SIZE:<n>:MTIME:<t>` instead of a blob sha. It can never turn a
 detected mutation green — only weaken detection for a single oversized untracked blob — and any
 non-default value, plus any use of the fallback, is stamped in the SUMMARY
-(`tree-hash-cap: <bytes> (<k> file(s) recorded by size+mtime)`).
+(`tree-hash-cap: <bytes> (<k> untracked file(s) recorded by size+mtime…)`).
+
+**`MTIME:<t>` is NOT universally nanoseconds — the resolution is a probed platform property, and a
+coarser one is DISCLOSED (review H5).** `_tree_probe_tools` runs once at startup and sets
+`TREE_STAT_FLAVOR`/`TREE_MTIME_RES`:
+
+| Probe outcome | `_tree_mtime` uses | Resolution | Disclosure appended to the `tree-hash-cap:` line |
+|---|---|---|---|
+| `stat -c %Y` works (GNU) | `stat -c '%.9Y'` | nanoseconds | none — this is the parity case |
+| only `stat -f %m` works (BSD/macOS) **and** `stat -f '%Fm'` returns `<digits>.<digits>` | `stat -f '%Fm'` | sub-second | none — the gap simply closes on that host |
+| only `stat -f %m` works, `%Fm` unrecognized | `stat -f '%m'` | **whole seconds** | `; mtime resolution: WHOLE SECONDS on this host — a same-size rewrite within one second is NOT detected` |
+| no `stat` flavour works | `unknown` | **none** | `; mtime resolution: UNAVAILABLE on this host — those records are size-only` |
+
+The `%Fm` datum is validated on its OUTPUT, not on `stat`'s exit status: an older BSD `stat` that
+does not know the datum either errors or echoes it back, and neither looks like `<digits>.<digits>`.
+The disclosure is emitted only when the fallback is actually in force (`TREE_CAP_FALLBACKS > 0`), so
+a nanosecond-capable host and an unused fallback stay quiet. The point of the asymmetry being
+*stated* rather than *hidden* is that the artifact must never imply a guarantee the platform did not
+give.
 
 The knob is **floored at 4096 bytes** (review F4). Rejecting only non-numeric input accepted `0` and
 `1`, at which *every* untracked file — not one oversized blob — takes the size+mtime record, so a
@@ -295,6 +336,28 @@ Ordering with the existing guard: `summary-integrity` (who owns the artifact) is
 then `tree-integrity` (what the artifact describes); if both fire, both lines appear and `RESULT`
 is `FAIL` once.
 
+### 8.1 `commit:` semantics on a mutation-detected block (review H2)
+
+A MAIN-lane boundary detection publishes **the one block a triager will read** after a mid-run
+mutation, so the identity it names has to be the identity the run actually executed against. Two
+different trees exist at that moment and conflating them is exactly the #2916 failure:
+
+- `commit:` names the **VERIFIED START** — the identity every component that recorded a result ran
+  against. `TREE_COMMIT_SOURCE` is flipped from its default `end` to `start` at the detection site,
+  and the renderer emits
+  `commit: <7-char start sha> branch: <b> dirty: <start dirty> (VERIFIED START — the identity this
+  run executed against; the tree MUTATED mid-run, see tree-end: for the post-mutation observation)`.
+- `tree-end:` carries the **post-mutation observation** — a tree nothing was certified against —
+  with `(POST-MUTATION observation — NOT the identity this run executed against)` appended to the
+  ordinary `tree-end: <sha> dirty: <d> digest: <d12>` rendering.
+
+Both labels are literal, asserted verbatim by the self-test, and are what makes the two readings
+mutually exclusive: the block can never be skimmed as "the gate ran on the post-mutation tree", and
+it can never be skimmed as "the mutation did not happen". On every non-mutation path
+`TREE_COMMIT_SOURCE` stays `end` and `commit:` is derived from the VERIFIED TERMINAL capture (never
+a fresh `git rev-parse` at emit time), reading `commit: unverified branch: <b> dirty: unverified`
+when no validated terminal capture exists.
+
 **Every capture validates itself before anyone compares it.** `_tree_identity` returns rc 2 — a
 fail-closed condition distinct from rc 1 "no git worktree, SKIP" — when the manifest is not
 well-formed or the digest is not a full-length hex hash. Well-formed means all three of: the FIRST
@@ -312,10 +375,11 @@ that merely exits non-zero produced an empty digest that compared EQUAL and stam
 
 ## 9. Test design (discriminating by construction)
 
-New `scripts/tests/test_agent_gate_tree_integrity.sh`, run by `tooling-tests`. It builds throwaway
-git repos with per-run `mktemp -d …XXXXXX` (hermeticity rules from #2874) and drives the gate through
-a fast path (`--only fmt` on the temp repo, and direct invocation of the capture function via the
-existing self-test seam style) so it costs seconds, not an hour.
+**Two files**, both run by `tooling-tests`: `scripts/tests/test_agent_gate_tree_integrity.sh`
+(behaviour) and `scripts/tests/test_agent_gate_tree_portability.sh` (the BSD/macOS half, review G1).
+Both build throwaway git repos with per-run `mktemp -d …XXXXXX` (hermeticity rules from #2874) and
+drive the gate through a fast path (`--only fmt` on the temp repo, plus direct invocation of the
+capture functions via the existing self-test seam style) so they cost seconds, not an hour.
 
 Cases, and what each discriminates:
 
@@ -324,14 +388,47 @@ Cases, and what each discriminates:
 | **A** mutate the tree mid-run (commit landing between two component boundaries) → no `RESULT: PASS`, named `tree-integrity: FAIL (tree-mutated-midrun …)`, non-zero exit | the bug itself |
 | **B** control: identical harness, no mutation → `RESULT: PASS`, `tree-integrity: PASS` | a hardwired-FAIL "guard" |
 | **C** append to an **already-modified** tracked file (porcelain listing byte-identical before/after) → detected | the naive porcelain implementation (§3.1) |
-| **D** untracked file added, then its content changed, then removed → each state a distinct digest | a tracked-only digest |
-| **E** churn-only run: writes under `target/`, a `*.log`, and the default summary path → digest unchanged, `RESULT: PASS` | an over-tight exclusion set that self-trips |
+| **D** untracked file added, then its content changed, then removed → each state a distinct digest, and the removal returns to the baseline | a tracked-only digest; a counter masquerading as a content identity |
+| **E** churn-only run: writes under `target/`, a `*.log`, and the default summary path → digest unchanged, `RESULT: PASS`; plus the docs/`test-data` counter-case, which MUST trip | an over-tight exclusion set that self-trips; an over-broad one that hides a real mutation |
 | **F** capture idempotence: two captures of an unchanged tree → identical digest; `$GIT_DIR/index` mtime+content and `git status` output unchanged across captures | index/worktree perturbation (§3.5) |
 | **G** `--lite` and `--delta` mutated-mid-run → neither certifies | mode gaps (§4) |
 
 A and B together are the discrimination proof: **remove the guard and A fails; hardwire the guard to
 FAIL and B fails.** No test-only bypass seam is introduced to "prove" the guard can fail — such a
-seam would itself be the escape hatch §6 rejects.
+seam would itself be the escape hatch §6 rejects. The mutating self-test hooks refuse any checkout
+lacking the disposable-fixture marker, so they can never run against a live tree.
+
+Cases added by the review rounds, each pinning a defect that shipped and was fixed:
+
+| Case | Pins |
+|---|---|
+| **B1** a hash tool that exits non-zero → FAIL-CLOSED, never an empty digest comparing EQUAL | the headline can't-fail regression |
+| **C1** HEAD moves between the terminal capture and the emit → `commit:` names the VERIFIED capture, `unverified` when there is none | a block certifying a sha the guard never verified |
+| **C2** a manifest truncated after the `H` record → REJECTED by the `N` trailer, never compared | a short write read as a shorter tree |
+| **H2** a MAIN-lane boundary FAIL block → `commit:` = labelled VERIFIED START, `tree-end:` = labelled POST-MUTATION observation (§8.1), asserted verbatim | the two trees being conflated in the one block a triager reads |
+| **F3** lockfile carve-out admitted on the RECORD (tag + tracking + start-commit blob), incl. an untracked mid-run `Cargo.lock` and `notCargo.lock` | path-spelling admission |
+| **F4** a sub-floor cap (`0`/`1`) → clamped, the same-length untracked rewrite still detected, the clamp stamped | a knob that silently disables content hashing |
+| **B3/B6** non-canonical in-repo summary paths excluded; a TAB inside a changed path cannot corrupt the lockfile classification | a disarmed carve-out; a field-forging path |
+| **B4** an edit while QUEUED for a gate slot → outside the certification window | the queue being inside the guarded window (§8 hook 1) |
+| cap disclosure counts FILES not CAPTURES; every settled lockfile named; the changed-path list truncated at 5 with `(+N more)` and a ≤5 control | double-reported disclosures; a lossy report |
+| an early preflight FAIL, and a `summary-integrity` + `tree-integrity` double-fire | provenance dropped on the non-happy paths |
+
+**Portability half** (`test_agent_gate_tree_portability.sh`, review G1) — the guard's first
+Linux-only construct shipped because the suite had no macOS path at all. It runs the parsing,
+classification and mtime paths under `AGENT_GATE_TEST_OS=Darwin` against PATH shims reproducing the
+BSD divergences, and then lints what the shims do not execute:
+
+| Portability case | Pins |
+|---|---|
+| a `sed` that does not honour `\t` | the changed-path parser reporting the MODE field instead of the PATH (and corrupting the lockfile classification, which keys on those paths) |
+| a `stat` offering only `-f` — with and without the `%Fm` fractional datum (**H5**) | `unknown` instead of a real mtime; and a whole-seconds host silently implying nanosecond parity instead of appending the `mtime resolution: WHOLE SECONDS…` disclosure (§6) |
+| a `sort` that rejects `-z` | the silent **fail-OPEN**: zero enumerated paths, both captures agreeing, a mutated tree certifying (§3.2) |
+| **G2** a `.report` lookup by a path's ESCAPED spelling | a raw/absent spelling matching, or `awk -v` un-escaping the escaped tabs |
+| **G5** 64-hex blob ids in a SHA-256 repository | the hard-coded 40 that made the lockfile carve-out unreachable there |
+| **the static lint** — 13 rules (12 GNU-only construct classes + `awk-v-escape-processing`) over all 34 `_tree_*`/`_assert_tree_*` functions, allowlisting `stat -c`/`sort -z` ONLY inside the two functions that PROBE for them | a reintroduction on a code path the shims never execute |
+
+Each lint rule is itself proved discriminating: a mutant body it must catch, and a portable control
+body it must not flag — the rule set cannot silently become a no-op.
 
 **No wall-clock assertions (#2642).** All assertions are on captured identities (digests, SHAs,
 manifest contents, the presence of named lines) — never on elapsed time. The mid-run mutation is
