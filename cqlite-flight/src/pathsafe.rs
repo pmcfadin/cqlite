@@ -8,6 +8,10 @@
 //! `*-Data.db` files. These helpers are the shared, dependency-free guards that
 //! reject such inputs at parse time and, as defense in depth, verify a resolved
 //! path stays within the (canonicalized) data directory.
+//!
+//! NOTE (throwaway — production exercise of the `ci:waive:<tier-id>` break-glass,
+//! issue #3033): this comment exists only to MANDATE the `flight` gating tier on a
+//! non-docs diff. It is reverted and the pull request is closed unmerged.
 use std::path::{Path, PathBuf};
 
 /// A rejected attacker-controlled path component.
