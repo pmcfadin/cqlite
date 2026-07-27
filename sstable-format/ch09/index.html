@@ -79,23 +79,78 @@
 		})();
 	</script> </sl-sidebar-state-persist>  <div class="md:sl-hidden"> <div class="mobile-preferences sl-flex astro-wu23bvmt"> <div class="social-icons astro-wu23bvmt"> <a href="https://github.com/pmcfadin/cqlite" rel="me" class="sl-flex astro-wy4te6ga"><span class="sr-only astro-wy4te6ga">GitHub</span><svg aria-hidden="true" class="astro-wy4te6ga astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-4yphtoen"> <span class="sr-only astro-4yphtoen">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-4yphtoen astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg> <select value="auto" autocomplete="off" class="astro-4yphtoen"> <option value="dark" class="astro-4yphtoen">Dark</option><option value="light" class="astro-4yphtoen">Light</option><option value="auto" selected class="astro-4yphtoen">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-4yphtoen astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg> </label>  </starlight-theme-select>  <script>
 	StarlightThemeProvider.updatePickers();
-</script>   </div>  </div> </div> </div> </nav> <div class="main-frame astro-vrdttmbt">  <script type="module">const a=document.getElementById("starlight__sidebar"),n=a?.querySelector("sl-sidebar-state-persist"),o="sl-sidebar-state",i=()=>{let t=[];const e=n?.dataset.hash||"";try{const s=sessionStorage.getItem(o),r=JSON.parse(s||"{}");Array.isArray(r.open)&&r.hash===e&&(t=r.open)}catch{}return{hash:e,open:t,scroll:a?.scrollTop||0}},c=t=>{try{sessionStorage.setItem(o,JSON.stringify(t))}catch{}},d=()=>c(i()),l=(t,e)=>{const s=i();s.open[e]=t,c(s)};n?.addEventListener("click",t=>{if(!(t.target instanceof Element))return;const e=t.target.closest("summary")?.closest("details");if(!e)return;const s=e.querySelector("sl-sidebar-restore"),r=parseInt(s?.dataset.index||"");isNaN(r)||l(!e.open,r)});addEventListener("visibilitychange",()=>{document.visibilityState==="hidden"&&d()});addEventListener("pageHide",d);</script> <div class="lg:sl-flex astro-67yu43on"> <aside class="right-sidebar-container print:hidden astro-67yu43on"> <div class="right-sidebar astro-67yu43on"> <script type="module" src="/cqlite/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C181hMzK.js"></script><script type="module" src="/cqlite/_astro/TableOfContents.astro_astro_type_script_index_0_lang.CKWWgpjV.js"></script><div class="lg:sl-hidden astro-pb3aqygn"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-doynk5tl"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-doynk5tl"><details id="starlight__mobile-toc" class="astro-doynk5tl"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-doynk5tl"><div class="toggle sl-flex astro-doynk5tl">On this page<svg aria-hidden="true" class="caret astro-doynk5tl astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></div><span class="display-current astro-doynk5tl"></span></summary><div class="dropdown astro-doynk5tl"><ul class="isMobile astro-g2bywc46" style="--depth: 0;"> <li class="astro-g2bywc46" style="--depth: 0;"> <a href="#_top" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#compressioninfodb-and-chunking" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">CompressionInfo.db and Chunking</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#in-this-chapter-you-will-learn" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">In this chapter you will learn</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#compression-metadata" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Compression Metadata</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#chunk-size-trade-offs" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Chunk Size Trade-offs</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#checksums" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Checksums</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#nb-format-chunking-without-headers-cassandra-4x5x" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">NB Format: Chunking Without Headers (Cassandra 4.x/5.x)</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#datadb-structure" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Data.db Structure</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#compressioninfodb-format-serialization-exactness" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CompressionInfo.db Format (serialization exactness)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#reading-nb-format-files" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Reading NB Format Files</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc32-algorithm" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC32 Algorithm</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#common-pitfalls" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Common Pitfalls</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#key-takeaways" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Key Takeaways</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#references" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">References</span> </a>  </li> </ul>  </li> </ul> </div></details></nav></mobile-starlight-toc></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-pb3aqygn"><div class="sl-container astro-pb3aqygn"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-g2bywc46" style="--depth: 0;"> <li class="astro-g2bywc46" style="--depth: 0;"> <a href="#_top" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#compressioninfodb-and-chunking" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">CompressionInfo.db and Chunking</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#in-this-chapter-you-will-learn" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">In this chapter you will learn</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#compression-metadata" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Compression Metadata</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#chunk-size-trade-offs" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Chunk Size Trade-offs</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#checksums" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Checksums</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#nb-format-chunking-without-headers-cassandra-4x5x" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">NB Format: Chunking Without Headers (Cassandra 4.x/5.x)</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#datadb-structure" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Data.db Structure</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#compressioninfodb-format-serialization-exactness" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CompressionInfo.db Format (serialization exactness)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#reading-nb-format-files" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Reading NB Format Files</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc32-algorithm" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC32 Algorithm</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#common-pitfalls" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Common Pitfalls</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#key-takeaways" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Key Takeaways</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#references" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">References</span> </a>  </li> </ul>  </li> </ul> </nav></starlight-toc></div></div> </div> </aside> <div class="main-pane astro-67yu43on">  <main data-pagefind-body class="astro-bguv2lll" lang="en" dir="ltr">    <div class="content-panel astro-7nkwcw3z"> <div class="sl-container astro-7nkwcw3z"> <h1 id="_top" class="astro-j6tvhyss">CompressionInfo.db and Chunking</h1>  </div> </div>  <div class="content-panel astro-7nkwcw3z"> <div class="sl-container astro-7nkwcw3z"> <div class="sl-markdown-content"> <div class="sl-heading-wrapper level-h2"><h2 id="compressioninfodb-and-chunking">CompressionInfo.db and Chunking</h2><a class="sl-anchor-link" href="#compressioninfodb-and-chunking"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “CompressionInfo.db and Chunking”</span></a></div>
+</script>   </div>  </div> </div> </div> </nav> <div class="main-frame astro-vrdttmbt">  <script type="module">const a=document.getElementById("starlight__sidebar"),n=a?.querySelector("sl-sidebar-state-persist"),o="sl-sidebar-state",i=()=>{let t=[];const e=n?.dataset.hash||"";try{const s=sessionStorage.getItem(o),r=JSON.parse(s||"{}");Array.isArray(r.open)&&r.hash===e&&(t=r.open)}catch{}return{hash:e,open:t,scroll:a?.scrollTop||0}},c=t=>{try{sessionStorage.setItem(o,JSON.stringify(t))}catch{}},d=()=>c(i()),l=(t,e)=>{const s=i();s.open[e]=t,c(s)};n?.addEventListener("click",t=>{if(!(t.target instanceof Element))return;const e=t.target.closest("summary")?.closest("details");if(!e)return;const s=e.querySelector("sl-sidebar-restore"),r=parseInt(s?.dataset.index||"");isNaN(r)||l(!e.open,r)});addEventListener("visibilitychange",()=>{document.visibilityState==="hidden"&&d()});addEventListener("pageHide",d);</script> <div class="lg:sl-flex astro-67yu43on"> <aside class="right-sidebar-container print:hidden astro-67yu43on"> <div class="right-sidebar astro-67yu43on"> <script type="module" src="/cqlite/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C181hMzK.js"></script><script type="module" src="/cqlite/_astro/TableOfContents.astro_astro_type_script_index_0_lang.CKWWgpjV.js"></script><div class="lg:sl-hidden astro-pb3aqygn"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-doynk5tl"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-doynk5tl"><details id="starlight__mobile-toc" class="astro-doynk5tl"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-doynk5tl"><div class="toggle sl-flex astro-doynk5tl">On this page<svg aria-hidden="true" class="caret astro-doynk5tl astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></div><span class="display-current astro-doynk5tl"></span></summary><div class="dropdown astro-doynk5tl"><ul class="isMobile astro-g2bywc46" style="--depth: 0;"> <li class="astro-g2bywc46" style="--depth: 0;"> <a href="#_top" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#compressioninfodb-and-chunking" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">CompressionInfo.db and Chunking</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#in-this-chapter-you-will-learn" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">In this chapter you will learn</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#compression-metadata" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Compression Metadata</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#chunk-size-trade-offs" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Chunk Size Trade-offs</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#scan-readahead-vs-per-chunk-reads" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Scan readahead vs. per-chunk reads</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#checksums" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Checksums</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#nb-format-chunking-without-headers-cassandra-4x5x" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">NB Format: Chunking Without Headers (Cassandra 4.x/5.x)</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#datadb-structure" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Data.db Structure</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#compressioninfodb-format-serialization-exactness" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CompressionInfo.db Format (serialization exactness)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#max_compressed_length-and-the-incompressible-chunk-fallback" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">max_compressed_length and the incompressible-chunk fallback</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#reading-nb-format-files" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Reading NB Format Files</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc32-algorithm" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC32 Algorithm</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#common-pitfalls" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Common Pitfalls</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#key-takeaways" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Key Takeaways</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#references" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">References</span> </a>  </li> </ul>  </li> </ul> </div></details></nav></mobile-starlight-toc></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-pb3aqygn"><div class="sl-container astro-pb3aqygn"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-g2bywc46" style="--depth: 0;"> <li class="astro-g2bywc46" style="--depth: 0;"> <a href="#_top" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#compressioninfodb-and-chunking" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">CompressionInfo.db and Chunking</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#in-this-chapter-you-will-learn" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">In this chapter you will learn</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#compression-metadata" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Compression Metadata</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#chunk-size-trade-offs" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Chunk Size Trade-offs</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#scan-readahead-vs-per-chunk-reads" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Scan readahead vs. per-chunk reads</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#checksums" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Checksums</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#nb-format-chunking-without-headers-cassandra-4x5x" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">NB Format: Chunking Without Headers (Cassandra 4.x/5.x)</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#datadb-structure" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Data.db Structure</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#compressioninfodb-format-serialization-exactness" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CompressionInfo.db Format (serialization exactness)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#max_compressed_length-and-the-incompressible-chunk-fallback" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">max_compressed_length and the incompressible-chunk fallback</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#reading-nb-format-files" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Reading NB Format Files</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc32-algorithm" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC32 Algorithm</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#common-pitfalls" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Common Pitfalls</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#key-takeaways" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Key Takeaways</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#references" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">References</span> </a>  </li> </ul>  </li> </ul> </nav></starlight-toc></div></div> </div> </aside> <div class="main-pane astro-67yu43on">  <main data-pagefind-body class="astro-bguv2lll" lang="en" dir="ltr">    <div class="content-panel astro-7nkwcw3z"> <div class="sl-container astro-7nkwcw3z"> <h1 id="_top" class="astro-j6tvhyss">CompressionInfo.db and Chunking</h1>  </div> </div>  <div class="content-panel astro-7nkwcw3z"> <div class="sl-container astro-7nkwcw3z"> <div class="sl-markdown-content"> <div class="sl-heading-wrapper level-h2"><h2 id="compressioninfodb-and-chunking">CompressionInfo.db and Chunking</h2><a class="sl-anchor-link" href="#compressioninfodb-and-chunking"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “CompressionInfo.db and Chunking”</span></a></div>
 <p>Explore compression algorithms, chunk sizes, offset maps, and checksums in <code dir="auto">CompressionInfo.db</code>, and how chunking impacts random vs sequential IO.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="in-this-chapter-you-will-learn">In this chapter you will learn</h3><a class="sl-anchor-link" href="#in-this-chapter-you-will-learn"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “In this chapter you will learn”</span></a></div>
 <ul>
 <li>What <code dir="auto">CompressionInfo.db</code> contains and how it’s used</li>
 <li>How chunk size choices influence performance trade-offs</li>
 <li>How checksums are validated per chunk</li>
+<li>How <code dir="auto">max_compressed_length</code> selects between compressed and raw chunk storage</li>
+<li>Why a compressed SSTable can carry a trailing chunk that holds no data</li>
+<li>How Cassandra 5.0 coalesces chunk reads for scans, and when that optimization silently disappears</li>
 <li>How tooling exposes chunk maps</li>
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="compression-metadata">Compression Metadata</h2><a class="sl-anchor-link" href="#compression-metadata"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Compression Metadata”</span></a></div>
-<p><code dir="auto">CompressionInfo.db</code> contains algorithm class name, option count, option key-value pairs, chunk length, max compressed length (SSTable format version “na” / Cassandra 3.0+ only), total uncompressed data length, chunk count, and chunk offsets. Per-chunk CRC32 checksums live inline in <code dir="auto">Data.db</code>, written immediately after each compressed chunk — <code dir="auto">CompressionInfo.db</code> holds no per-chunk CRCs.</p>
+<p><code dir="auto">CompressionInfo.db</code> contains algorithm class name, option count, option key-value pairs, chunk
+length, max compressed length, total uncompressed data length, chunk count, and chunk offsets.
+The <code dir="auto">max_compressed_length</code> field is gated on SSTable format version ≥ <code dir="auto">na</code>, so it is present in
+every format this guide covers (<code dir="auto">na</code>/<code dir="auto">nb</code> BIG, <code dir="auto">oa</code>/<code dir="auto">da</code> BTI). Per-chunk CRC32 checksums live
+inline in <code dir="auto">Data.db</code>, written immediately after each compressed chunk — <code dir="auto">CompressionInfo.db</code> holds
+no per-chunk CRCs and no trailing metadata checksum.</p>
 <p>For a concise parser walkthrough, see Appendix C.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="chunk-size-trade-offs">Chunk Size Trade-offs</h2><a class="sl-anchor-link" href="#chunk-size-trade-offs"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Chunk Size Trade-offs”</span></a></div>
 <ul>
 <li>Smaller chunks improve random-read locality but add metadata overhead and decompression CPU.</li>
 <li>Larger chunks reduce overhead and improve scans, but increase random-read amplification.</li>
 </ul>
+<p>The server default is <strong>16 KiB</strong> (<code dir="auto">CompressionParams.java:47</code>:
+<code dir="auto">DEFAULT_CHUNK_LENGTH = 1024 * 16</code>). 64 KiB is a common tuning choice, not a default, and it is a
+frequent source of wrong assumptions in reader implementations. Chunk length must always be read
+from <code dir="auto">chunk_length</code> in <code dir="auto">CompressionInfo.db</code> for the SSTable at hand — never hardcoded and never
+inferred (issues #2877, #28). Cassandra also requires <code dir="auto">chunk_length</code> to be a power of two, because
+the chunk index is computed as <code dir="auto">position / chunkLength</code> (<code dir="auto">CompressionParams.validate()</code>, lines
+443–448). Ch. 3 covers the sizing trade-off in operational terms.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="scan-readahead-vs-per-chunk-reads">Scan readahead vs. per-chunk reads</h2><a class="sl-anchor-link" href="#scan-readahead-vs-per-chunk-reads"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Scan readahead vs. per-chunk reads”</span></a></div>
+<p>A compressed reader that issues one positional read per chunk performs one syscall (or one page
+fault) per <code dir="auto">chunk_length</code> of logical data — at the 16 KiB default that is a poor request size for a
+sequential scan. Cassandra 5.0 addresses this with a <strong>scan-specific reader</strong>, not with <code dir="auto">madvise</code>:</p>
+<ul>
+<li><code dir="auto">ChunkReader.instantiateRebufferer(boolean isScan)</code> carries the read intent down from the caller.
+<code dir="auto">CompressedChunkReader.instantiateRebufferer()</code> (line 93) resolves it as
+<code dir="auto">new BufferManagingRebufferer.Aligned(isScan ? forScan() : this)</code>.</li>
+<li><code dir="auto">CompressedChunkReader.Standard</code> (buffered path) builds a <code dir="auto">ScanCompressedReader</code> backed by a
+<code dir="auto">ThreadLocalReadAheadBuffer</code>, and <code dir="auto">forScan()</code> (line 241) activates it. Chunk reads are then
+served from that userspace buffer, so consecutive chunks share one large read instead of one read
+each (<code dir="auto">ScanCompressedReader.read()</code>, lines 169–186).</li>
+<li>Buffer size comes from <code dir="auto">compressed_read_ahead_buffer_size</code>, default <strong>256 KiB</strong>
+(<code dir="auto">Config.java:341</code>). The scan reader is only constructed when that value is <strong>greater than</strong>
+<code dir="auto">chunk_length</code> (<code dir="auto">CompressedChunkReader.java:236–238</code>) — with a 256 KiB buffer and 16 KiB chunks it
+coalesces ~16 chunks per read; set the buffer at or below <code dir="auto">chunk_length</code> and the optimization is
+silently absent.</li>
+<li>Shipped in <strong>Cassandra 5.0.4</strong> as CASSANDRA-15452 (“Improve disk access patterns during
+compaction and range reads”, <code dir="auto">CHANGES.txt:122</code>).</li>
+</ul>
+<blockquote>
+<p><strong>Warning: two ways the scan reader silently does not engage</strong></p>
+<ol>
+<li><strong>ChunkCache wrapping.</strong> <code dir="auto">FileHandle.Builder.maybeCached()</code> (lines 444–448) wraps the chunk
+reader in <code dir="auto">ChunkCache</code> when the cache exists with non-zero capacity, and
+<code dir="auto">ChunkCache.CachingRebufferer.instantiateRebufferer(boolean isScan)</code>
+(<code dir="auto">ChunkCache.java:262–265</code>) <strong>ignores <code dir="auto">isScan</code> and returns <code dir="auto">this</code></strong> — <code dir="auto">forScan()</code> is never
+called, so scans fall back to one read per chunk. Note the precondition: <code dir="auto">ChunkCache.instance</code>
+is null unless <code dir="auto">file_cache_enabled</code> is true, and that setting <strong>defaults to <code dir="auto">false</code></strong>
+(<code dir="auto">Config.java:499</code>, <code dir="auto">cassandra.yaml:742</code>). So on a default 5.0 install the trap is not armed;
+it arms the moment an operator enables the file cache.</li>
+<li><strong>mmap.</strong> <code dir="auto">CompressedChunkReader.Mmap</code> (line 321) does not override <code dir="auto">forScan()</code>, so the base
+implementation returns <code dir="auto">this</code> (line 52). An mmap-backed compressed read gets no userspace scan
+readahead at all and depends entirely on kernel readahead over the mapping. With Cassandra
+5.0’s <code dir="auto">mmap_index_only</code> default, <code dir="auto">Data.db</code> is buffered, so the <code dir="auto">Standard</code> path (which does
+support scan readahead) is the one normally in play — see Ch. 3.</li>
+</ol>
+<p>Implementers taking either lesson across: a decompressed-chunk cache and a read-coalescing layer
+must be co-designed. If a cache layer swallows the scan intent, coalescing never runs.</p>
+</blockquote>
 <div class="sl-heading-wrapper level-h2"><h2 id="checksums">Checksums</h2><a class="sl-anchor-link" href="#checksums"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Checksums”</span></a></div>
 <p>Per-chunk CRC32 checksums are appended inline in <code dir="auto">Data.db</code> after each compressed chunk; readers enforce them for Cassandra 5.0 formats. <code dir="auto">Digest.crc32</code> covers component-level integrity at a coarse level; per-chunk CRCs catch localized corruption within a chunk. <code dir="auto">CompressionInfo.db</code> does not store per-chunk CRCs.</p>
 <p>Readers enforce size and CRC expectations for modern formats. For decompressor details, see Appendix C.</p>
@@ -112,7 +167,8 @@
 <li><strong>Option count</strong> — 4-byte int: number of key-value option pairs</li>
 <li><strong>Options</strong> — repeated UTF-8 key + UTF-8 value pairs (each with 2-byte length prefix)</li>
 <li><strong>Chunk length</strong> — 4-byte int: uncompressed chunk size (default 16 KiB = 16 384 bytes)</li>
-<li><strong>Max compressed length</strong> — 4-byte int: present only for SSTable format version ≥ “na” (Cassandra 3.0+)</li>
+<li><strong>Max compressed length</strong> — 4-byte int: gated on SSTable format version ≥ <code dir="auto">na</code>, so present for
+every format in scope; <code dir="auto">Integer.MAX_VALUE</code> (<code dir="auto">0x7fffffff</code>) with the default <code dir="auto">min_compress_ratio = 0</code></li>
 <li><strong>Data length</strong> — 8-byte long: total uncompressed file size</li>
 <li><strong>Chunk count</strong> — 4-byte int: number of chunks</li>
 <li><strong>Chunk offsets</strong> — array of 8-byte longs: byte offset of each chunk in <code dir="auto">Data.db</code></li>
@@ -124,14 +180,73 @@
 </ul>
 <p>Authoritative example (first 64 bytes from a real file):</p>
 <div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">00000000: 000d 4c5a 3443 6f6d 7072 6573 736f 7200  ..LZ4Compressor.</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">00000010: 0000 0000 0040 007f ffff ff00 0000 0000  .....@..........</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">00000020: 001e fe00 0000 0100 0000 0000 0000 00    ...............</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="00000000: 000d 4c5a 3443 6f6d 7072 6573 736f 7200  ..LZ4Compressor.00000010: 0000 0000 0040 007f ffff ff00 0000 0000  .....@..........00000020: 001e fe00 0000 0100 0000 0000 0000 00    ..............."><div></div></button></div></figure></div>
-<p>Interpretation (trimmed):</p>
-<ul>
-<li><code dir="auto">000d</code> → length 13, followed by <code dir="auto">LZ4Compressor</code> (UTF-8)</li>
-<li><code dir="auto">0040</code> → chunk length field; raw value 0x00004000 = 16 384 bytes = 16 KiB (the default)</li>
-<li><code dir="auto">007f ffff ff00 0000 0000</code> → total uncompressed length (u64 example)</li>
-<li>subsequent bytes begin the chunk map</li>
-</ul>
-<p>Note: Older materials often describe the chunk map as “varint pairs”; Cassandra 5.0 uses fixed-width fields for several header values and format-dependent encodings for the map. Always consult the pinned source for exact widths.</p>
+<p>Interpretation (byte-exact, from <code dir="auto">system/compaction_history</code> <code dir="auto">nb-1-big-CompressionInfo.db</code>):</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Byte range</th><th>Bytes</th><th>Field</th><th>Value</th></tr></thead><tbody><tr><td>0x00–0x01</td><td><code dir="auto">000d</code></td><td><code dir="auto">writeUTF</code> length</td><td>13</td></tr><tr><td>0x02–0x0e</td><td><code dir="auto">4c5a…736f72</code></td><td>compressor name</td><td><code dir="auto">LZ4Compressor</code></td></tr><tr><td>0x0f–0x12</td><td><code dir="auto">00000000</code></td><td>option count</td><td>0</td></tr><tr><td>0x13–0x16</td><td><code dir="auto">00004000</code></td><td>chunk length</td><td>16 384 bytes = 16 KiB (the default)</td></tr><tr><td>0x17–0x1a</td><td><code dir="auto">7fffffff</code></td><td>max compressed length</td><td><code dir="auto">Integer.MAX_VALUE</code> (<code dir="auto">min_compress_ratio = 0</code>)</td></tr><tr><td>0x1b–0x22</td><td><code dir="auto">0000000000001efe</code></td><td>total uncompressed length</td><td>7 934 bytes</td></tr><tr><td>0x23–0x26</td><td><code dir="auto">00000001</code></td><td>chunk count</td><td>1</td></tr><tr><td>0x27–0x2e</td><td><code dir="auto">0000000000000000</code></td><td>chunk offset[0]</td><td>0</td></tr></tbody></table>
+<p>The file ends after the last chunk offset: 47 bytes total for this single-chunk example. There is
+no trailing metadata checksum in <code dir="auto">CompressionInfo.db</code> (<code dir="auto">CompressionMetadata.Writer.writeHeader()</code>
+writes the header and offsets only).</p>
+<p>Note: Older materials often describe the chunk map as “varint pairs”. It is not: every field in
+<code dir="auto">CompressionInfo.db</code> is fixed-width big-endian, and the map is a flat <code dir="auto">u64</code> offset array. Always
+consult the pinned source for exact widths.</p>
 <p>Exact widths (NB, Cassandra 5.0):</p>
 
 
@@ -204,12 +319,52 @@
 
 
 
-<table><thead><tr><th>Field</th><th>Type/width</th><th>Endianness</th><th>Notes</th></tr></thead><tbody><tr><td>compressor_name_length</td><td>u16</td><td>big</td><td>length prefix of class name (Java <code dir="auto">writeUTF</code>)</td></tr><tr><td>compressor_name</td><td>UTF-8 bytes</td><td>—</td><td>e.g., <code dir="auto">LZ4Compressor</code>, <code dir="auto">SnappyCompressor</code></td></tr><tr><td>option_count</td><td>u32</td><td>big</td><td>number of key-value option pairs</td></tr><tr><td>option_key[i]</td><td>UTF-8 string</td><td>—</td><td>repeated <code dir="auto">option_count</code> times</td></tr><tr><td>option_value[i]</td><td>UTF-8 string</td><td>—</td><td>repeated <code dir="auto">option_count</code> times</td></tr><tr><td>chunk_length</td><td>u32</td><td>big</td><td>uncompressed bytes per chunk; default 16 384 (16 KiB)</td></tr><tr><td>max_compressed_length</td><td>u32</td><td>big</td><td>present only for format version ≥ “na” (3.0+)</td></tr><tr><td>total_uncompressed_length</td><td>u64</td><td>big</td><td>table payload size before compression</td></tr><tr><td>chunk_count</td><td>u32</td><td>big</td><td>number of chunks</td></tr><tr><td>chunk_offsets[chunk_count]</td><td>u64 each</td><td>big</td><td>byte offset of each compressed chunk in <code dir="auto">Data.db</code></td></tr></tbody></table>
-<p>Map encoding by format:</p>
+<table><thead><tr><th>Field</th><th>Type/width</th><th>Endianness</th><th>Notes</th></tr></thead><tbody><tr><td>compressor_name_length</td><td>u16</td><td>big</td><td>length prefix of class name (Java <code dir="auto">writeUTF</code>)</td></tr><tr><td>compressor_name</td><td>UTF-8 bytes</td><td>—</td><td>e.g., <code dir="auto">LZ4Compressor</code>, <code dir="auto">SnappyCompressor</code></td></tr><tr><td>option_count</td><td>u32</td><td>big</td><td>number of key-value option pairs</td></tr><tr><td>option_key[i]</td><td>UTF-8 string</td><td>—</td><td>repeated <code dir="auto">option_count</code> times</td></tr><tr><td>option_value[i]</td><td>UTF-8 string</td><td>—</td><td>repeated <code dir="auto">option_count</code> times</td></tr><tr><td>chunk_length</td><td>u32</td><td>big</td><td>uncompressed bytes per chunk; default 16 384 (16 KiB)</td></tr><tr><td>max_compressed_length</td><td>u32</td><td>big</td><td>version-gated at ≥ <code dir="auto">na</code>, so always present in scope; <code dir="auto">0x7fffffff</code> by default; a stored chunk of this length or longer is raw, not compressed</td></tr><tr><td>total_uncompressed_length</td><td>u64</td><td>big</td><td>table payload size before compression</td></tr><tr><td>chunk_count</td><td>u32</td><td>big</td><td>number of chunks</td></tr><tr><td>chunk_offsets[chunk_count]</td><td>u64 each</td><td>big</td><td>byte offset of each compressed chunk in <code dir="auto">Data.db</code></td></tr></tbody></table>
+<p>Map encoding:</p>
 <ul>
-<li>NB (5.0): offsets only; per-chunk compressed length = next_offset − offset − 4 (subtract trailing CRC word in <code dir="auto">Data.db</code>)</li>
-<li>Legacy variants: may differ; this guide focuses on NB; consult sources when targeting older formats</li>
+<li>NB/NA (Cassandra 5.0 BIG): offsets only; per-chunk compressed length = next_offset − offset − 4
+(subtract the trailing CRC word stored inline in <code dir="auto">Data.db</code>). For the last chunk, substitute the
+<code dir="auto">Data.db</code> file length for <code dir="auto">next_offset</code>: <code dir="auto">compressedFileLength − offset − 4</code>
+(<code dir="auto">CompressionMetadata.chunkFor()</code>, line 252: <code dir="auto">new Chunk(chunkOffset, (int)(nextChunkOffset - chunkOffset - 4))</code>).</li>
+<li><code dir="auto">oa</code>/<code dir="auto">da</code> BTI SSTables use the same <code dir="auto">CompressionInfo.db</code> serialization — the chunk map is a
+property of the compression layer, not of the index format.</li>
 </ul>
+<div class="sl-heading-wrapper level-h3"><h3 id="max_compressed_length-and-the-incompressible-chunk-fallback"><code dir="auto">max_compressed_length</code> and the incompressible-chunk fallback</h3><a class="sl-anchor-link" href="#max_compressed_length-and-the-incompressible-chunk-fallback"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “max_compressed_length and the incompressible-chunk fallback”</span></a></div>
+<p><code dir="auto">max_compressed_length</code> is not a cosmetic field: it is the switch that decides whether a stored
+chunk is compressed at all.</p>
+<ul>
+<li><strong>Writer</strong> (<code dir="auto">CompressedSequentialWriter.flushData()</code>, lines 159–178): if
+<code dir="auto">compressedLength >= maxCompressedLength</code>, the writer discards the compressed output and stores
+the <strong>raw</strong> bytes instead. When the raw length is itself below <code dir="auto">maxCompressedLength</code> (only
+possible for the final short chunk) it zero-pads up to <code dir="auto">maxCompressedLength</code>; readers avoid
+reading the padding because they bound the chunk by <code dir="auto">data_length</code>.</li>
+<li><strong>Reader</strong>: a chunk whose stored length is <code dir="auto">>= max_compressed_length</code> is returned as-is with no
+decompression. There is no flag byte — the length comparison <em>is</em> the encoding.</li>
+<li><strong>Default value</strong>: <code dir="auto">Integer.MAX_VALUE</code> (<code dir="auto">0x7fffffff</code>). Cassandra derives it from
+<code dir="auto">min_compress_ratio</code>, whose default is <code dir="auto">0.0</code>
+(<code dir="auto">CompressionParams.java:47–48</code>, <code dir="auto">calcMaxCompressedLength()</code> at line 186), and
+<code dir="auto">calcMinCompressRatio()</code> maps <code dir="auto">Integer.MAX_VALUE</code> back to ratio 0 (line 198). With the default,
+no chunk can ever reach <code dir="auto">max_compressed_length</code>, so the raw path is effectively disabled.</li>
+</ul>
+<blockquote>
+<p><strong>Warning: <code dir="auto">max_compressed_length == 0</code> is corrupt metadata and fails OPEN</strong></p>
+<p>A zero <code dir="auto">max_compressed_length</code> makes the reader’s <code dir="auto">stored_length >= max_compressed_length</code>
+test true for <em>every</em> chunk, so a reader silently hands back still-compressed bytes as if they
+were plaintext instead of raising an error. The per-chunk CRC32 cannot catch this: the CRC is
+computed over the genuinely-on-disk compressed bytes and matches.</p>
+<p>Cassandra never emits this value — but note that <code dir="auto">CompressionParams.validate()</code>
+(lines 441–455) does <strong>not</strong> reject it either: it rejects <code dir="auto">maxCompressedLength &#x3C; 0</code> and
+<code dir="auto">chunkLength &#x3C; maxCompressedLength &#x3C; Integer.MAX_VALUE</code>, and <code dir="auto">0</code> passes both tests. Zero is
+excluded by construction (the default is <code dir="auto">Integer.MAX_VALUE</code>), not by a validation rule, so a
+reader must treat it as a corruption case rather than assuming it cannot occur.</p>
+<p><strong>Reader requirement</strong>: reject <code dir="auto">max_compressed_length == 0</code> when parsing <code dir="auto">CompressionInfo.db</code>,
+before any chunk read, so no downstream consumer can observe an unguarded zero. CQLite fails
+<strong>closed</strong> at parse time with a typed error
+(<code dir="auto">cqlite-core/src/storage/sstable/compression_info.rs:226–230</code>,
+<code dir="auto">Error::InvalidFormat("max_compressed_length cannot be zero")</code>); the same guard is repeated in
+the point-read seek paths (<code dir="auto">reader/data_access/compressed_offset.rs:107</code>,
+<code dir="auto">reader/data_access/big_promoted.rs:681</code>). Issues #2524, #2529.</p>
+</blockquote>
 <p>Chunk map (first two entries, decoded — units: bytes, endianness: big):</p>
 <p>From <code dir="auto">test_timeseries/event_store</code>:</p>
 
@@ -235,7 +390,14 @@
 <table><thead><tr><th>Entry</th><th>Offset</th><th>Length</th></tr></thead><tbody><tr><td>0</td><td>0x0000</td><td>7,729</td></tr><tr><td>1</td><td>0x1e35</td><td>2,666</td></tr></tbody></table>
 <p>Invariants:</p>
 <ul>
-<li>Offsets are strictly increasing; lengths are positive; last chunk may be ≤ <code dir="auto">chunk length</code>.</li>
+<li>Offsets are strictly increasing.</li>
+<li>Every data-bearing chunk decompresses to <code dir="auto">min(chunk_length, data_length − i * chunk_length)</code>
+bytes, so the last data-bearing chunk may be shorter than <code dir="auto">chunk_length</code>.</li>
+<li>A stored compressed length of 0 is possible <strong>only</strong> for a degenerate trailing chunk whose
+logical start is already at/beyond <code dir="auto">data_length</code> (see the warning below); no data-bearing chunk
+has length 0.</li>
+<li><code dir="auto">chunk_count</code> may exceed <code dir="auto">ceil(data_length / chunk_length)</code> by one for the same reason — treat
+<code dir="auto">data_length</code>, not <code dir="auto">chunk_count</code>, as the authority on how much data exists.</li>
 </ul>
 <p>NB CRC micro-proof (same file):</p>
 <div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">chunk 0: start=0x0000 comp_len=7729 expected=0x001daf10 computed=0x001daf10 match=true</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">chunk 1: start=0x1e35 comp_len=2666 expected=0x657f7155 computed=0x657f7155 match=true</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="chunk 0: start=0x0000 comp_len=7729 expected=0x001daf10 computed=0x001daf10 match=truechunk 1: start=0x1e35 comp_len=2666 expected=0x657f7155 computed=0x657f7155 match=true"><div></div></button></div></figure></div>
@@ -243,17 +405,62 @@
 <p><strong>Required sequence:</strong></p>
 <ol>
 <li>Parse <code dir="auto">CompressionInfo.db</code> to get chunk map</li>
-<li>For each chunk:
+<li>For each chunk index <code dir="auto">i</code>:
 <ul>
+<li>Stop if <code dir="auto">i * chunk_length >= data_length</code> — the chunk holds no uncompressed bytes
+(see the degenerate-trailing-chunk warning below)</li>
 <li>Seek to <code dir="auto">offset</code> in Data.db</li>
 <li>Read <code dir="auto">length</code> bytes (compressed data)</li>
 <li>Read next 4 bytes as CRC32 (big-endian u32)</li>
 <li>Validate: compute CRC32 over compressed bytes</li>
-<li>Decompress chunk</li>
-<li>Parse row data from decompressed bytes</li>
+<li>Decompress chunk, unless <code dir="auto">length >= max_compressed_length</code> (raw chunk — use the bytes as-is)</li>
+<li>Truncate the chunk’s uncompressed bytes to <code dir="auto">min(chunk_length, data_length - i * chunk_length)</code></li>
+<li>Parse row data from those bytes</li>
 </ul>
 </li>
 </ol>
+<blockquote>
+<p><strong>Warning: degenerate empty trailing chunks</strong></p>
+<p>Some compressed SSTables carry a trailing entry in the chunk map that maps to <strong>no uncompressed
+bytes at all</strong>: <code dir="auto">chunk_count</code> is one greater than <code dir="auto">ceil(data_length / chunk_length)</code>, so the last
+entry’s logical start (<code dir="auto">(chunk_count − 1) * chunk_length</code>) is already at or beyond <code dir="auto">data_length</code>.</p>
+<p>This is a legitimate on-disk state, not corruption. <code dir="auto">CompressedSequentialWriter.flushData()</code>
+unconditionally appends an offset and increments <code dir="auto">chunkCount</code> for whatever is in the buffer —
+including an empty buffer — and <code dir="auto">SequentialWriter.syncInternal()</code> (lines 213–217) calls
+<code dir="auto">doFlush(0)</code> with no empty-buffer guard. Any <code dir="auto">sync()</code> on a chunk boundary therefore emits an
+empty chunk. The common trigger is the preemptive-open path used while writing/compacting
+(<code dir="auto">BigTableWriter.openFinalEarly()</code> → <code dir="auto">dataWriter.sync()</code>, called from
+<code dir="auto">SSTableRewriter.java:272</code>), which is why the artifact appears on <em>some</em> SSTables rather than
+all of them.</p>
+<p><strong>How common</strong>: 16 of the 126 compressed SSTables in the CQLite v3.5 validation corpus have one
+(including several compacted <code dir="auto">system_schema</code> tables); the other 110 — also including compacted
+generations — do not. Do <strong>not</strong> assume every compacted SSTable has one, and do not assume none
+does.</p>
+<p><strong>The bound is on the LOGICAL start, not on the chunk offset.</strong> <code dir="auto">chunk_offsets</code> are offsets into
+the <em>compressed</em> <code dir="auto">Data.db</code>, while <code dir="auto">data_length</code> is the <em>uncompressed</em> total — comparing the two
+is a category error. Concretely, in <code dir="auto">test_big/wide_partition</code> <code dir="auto">nb-2</code> the trailing chunk 113 sits
+at compressed offset 27 814 in a 27 823-byte <code dir="auto">Data.db</code>, while <code dir="auto">data_length</code> is 1 837 037; only
+<code dir="auto">113 * 16384 = 1 851 392 >= 1 837 037</code> identifies it. Cassandra’s own reader never touches such a
+chunk because every logical position <code dir="auto">&#x3C; data_length</code> maps to an earlier index
+(<code dir="auto">CompressionMetadata.chunkFor()</code> indexes by <code dir="auto">position / chunkLength</code>).</p>
+<p><strong>What breaks if you decompress it</strong> depends on the compressor, so a reader must not rely on the
+decompressor to reject it:</p>
+<ul>
+<li><strong>Deflate</strong> stores a genuinely 0-byte payload — <code dir="auto">DeflateCompressor.compressArray()</code> returns 0
+when <code dir="auto">Deflater.needsInput()</code> is true for empty input (lines 113-114) — and inflating 0 bytes is a
+hard error.</li>
+<li><strong>LZ4</strong> stores 5 bytes (<code dir="auto">00 00 00 00 00</code>: the 4-byte little-endian length prefix <code dir="auto">0</code> plus an
+empty block) with a valid CRC32 <code dir="auto">c622f71d</code>, verified in the corpus. It decompresses cleanly to
+zero bytes, so the defect stays latent until a consumer treats a zero-length chunk as a parse
+boundary.</li>
+</ul>
+<p><strong>Reader requirement</strong>: bound chunk iteration by <code dir="auto">data_length</code> at the single chunk-yield source,
+so every downstream consumer inherits the bound. CQLite does this in
+<code dir="auto">cqlite-core/src/storage/sstable/reader/block_io.rs:382–394</code> (<code dir="auto">logical_start >= data_length</code>
+→ EOF), and the per-chunk decompressor derives each chunk’s expected uncompressed length from
+<code dir="auto">data_length</code> the same way (<code dir="auto">chunk_decompressor.rs:197</code>). This is metadata-driven — no byte
+sniffing (no-heuristics mandate, issue #28). Issue #2225, PR #2242.</p>
+</blockquote>
 <div class="sl-heading-wrapper level-h3"><h3 id="crc32-algorithm">CRC32 Algorithm</h3><a class="sl-anchor-link" href="#crc32-algorithm"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “CRC32 Algorithm”</span></a></div>
 <ul>
 <li><strong>Implementation:</strong> Java <code dir="auto">java.util.zip.CRC32</code></li>
@@ -268,18 +475,34 @@
 <li><strong>Don’t treat first 4 bytes as magic number</strong> - they’re chunk data</li>
 <li><strong>Don’t treat first 4 bytes as CRC prefix</strong> - CRCs are trailing</li>
 <li><strong>Don’t try to read blocks without CompressionInfo.db</strong> - you’ll read garbage sizes</li>
+<li><strong>Don’t forget the <code dir="auto">− 4</code></strong> when deriving a chunk’s compressed length from consecutive offsets;
+the delta includes the inline CRC word</li>
+<li><strong>Don’t decompress all <code dir="auto">chunk_count</code> entries</strong> — stop at the <code dir="auto">data_length</code> logical bound</li>
+<li><strong>Don’t compare a chunk offset against <code dir="auto">data_length</code></strong> — offsets are compressed positions,
+<code dir="auto">data_length</code> is an uncompressed total</li>
+<li><strong>Don’t assume <code dir="auto">max_compressed_length</code> is decorative</strong> — it selects raw vs compressed storage,
+and zero must be rejected</li>
 </ul>
 <div class="sl-heading-wrapper level-h3"><h3 id="key-takeaways">Key Takeaways</h3><a class="sl-anchor-link" href="#key-takeaways"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Key Takeaways”</span></a></div>
 <ul>
 <li><code dir="auto">CompressionInfo.db</code> maps chunks and validates integrity for modern formats.</li>
-<li>Chunk length is central to random vs scan performance; choose based on workload.</li>
+<li>Chunk length is central to random vs scan performance; choose based on workload, and always read
+it from the file (default 16 KiB, not 64 KiB).</li>
 <li>Readers must pair <code dir="auto">CompressionInfo.db</code> with <code dir="auto">Data.db</code> to read the right byte ranges.</li>
+<li><code dir="auto">data_length</code> — not <code dir="auto">chunk_count</code> — is the authority on how much uncompressed data exists.</li>
+<li><code dir="auto">max_compressed_length</code> is a functional switch; a zero value fails open and must be rejected at
+parse time.</li>
 </ul>
 <div class="sl-heading-wrapper level-h3"><h3 id="references">References</h3><a class="sl-anchor-link" href="#references"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “References”</span></a></div>
 <ul>
-<li><code dir="auto">CompressionMetadata</code> (reader / writer): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java">io/compress/CompressionMetadata.java</a> — <code dir="auto">open()</code> lines 76–112, <code dir="auto">writeHeader()</code> lines 375–398</li>
-<li><code dir="auto">CompressionParams</code> (defaults): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java">schema/CompressionParams.java</a> — <code dir="auto">DEFAULT_CHUNK_LENGTH</code> line 47 (note: <code dir="auto">schema/</code>, not <code dir="auto">io/compress/</code>)</li>
-<li><code dir="auto">CompressedSequentialWriter</code> (chunk write + CRC): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java">io/compress/CompressedSequentialWriter.java</a> — <code dir="auto">flushData()</code> lines 140–206</li>
+<li><code dir="auto">CompressionMetadata</code> (reader / writer): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java">io/compress/CompressionMetadata.java</a> — <code dir="auto">open()</code> lines 76–112, <code dir="auto">chunkFor()</code> lines 235–253 (the <code dir="auto">− 4</code> CRC adjustment at line 252), <code dir="auto">writeHeader()</code> lines 375–398</li>
+<li><code dir="auto">CompressionParams</code> (defaults + validation): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java">schema/CompressionParams.java</a> — <code dir="auto">DEFAULT_CHUNK_LENGTH</code> line 47, <code dir="auto">DEFAULT_MIN_COMPRESS_RATIO</code> line 48, <code dir="auto">calcMaxCompressedLength()</code> line 186, <code dir="auto">validate()</code> lines 441–455 (note: <code dir="auto">schema/</code>, not <code dir="auto">io/compress/</code>)</li>
+<li><code dir="auto">CompressedSequentialWriter</code> (chunk write + CRC + raw fallback): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java">io/compress/CompressedSequentialWriter.java</a> — <code dir="auto">flushData()</code> lines 140–206</li>
+<li><code dir="auto">SequentialWriter</code> (unguarded flush on sync): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/SequentialWriter.java">io/util/SequentialWriter.java</a> — <code dir="auto">syncInternal()</code> lines 213–217</li>
+<li><code dir="auto">CompressedChunkReader</code> (scan readahead, raw-chunk read): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java">io/util/CompressedChunkReader.java</a> — <code dir="auto">instantiateRebufferer()</code> line 93, <code dir="auto">ScanCompressedReader</code> lines 156–199, <code dir="auto">Standard.forScan()</code> line 241, <code dir="auto">Mmap</code> line 321 (no <code dir="auto">forScan()</code> override)</li>
+<li><code dir="auto">ChunkCache</code> (drops the scan intent): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/cache/ChunkCache.java">cache/ChunkCache.java</a> — <code dir="auto">instance</code> gating line 53, <code dir="auto">CachingRebufferer.instantiateRebufferer()</code> lines 262–265</li>
+<li><code dir="auto">Config</code> (defaults): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/config/Config.java">config/Config.java</a> — <code dir="auto">compressed_read_ahead_buffer_size</code> line 341, <code dir="auto">file_cache_enabled</code> line 499</li>
 <li><code dir="auto">BigFormat</code> (version gate): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java">io/sstable/format/big/BigFormat.java</a> — <code dir="auto">hasMaxCompressedLength</code> line 401</li>
+<li>CASSANDRA-15452 (scan readahead, shipped 5.0.4): <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/CHANGES.txt">CHANGES.txt</a> line 122</li>
 </ul>
 <p>For implementation details, see Appendix C.</p> </div> <footer class="sl-flex astro-3yyafb3n"> <div class="meta sl-flex astro-3yyafb3n"> <a href="https://github.com/pmcfadin/cqlite/edit/main/website/src/content/docs/sstable-format/ch09.md" class="sl-flex print:hidden astro-eez2twj6"><svg aria-hidden="true" class="astro-eez2twj6 astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg>Edit page</a>  </div> <div class="pagination-links print:hidden astro-u2l5gyhi" dir="ltr"> <a href="/cqlite/sstable-format/ch08/" rel="prev" class="astro-u2l5gyhi"> <svg aria-hidden="true" class="astro-u2l5gyhi astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg> <span class="astro-u2l5gyhi"> Previous <br class="astro-u2l5gyhi"> <span class="link-title astro-u2l5gyhi">Statistics.db</span> </span> </a> <a href="/cqlite/sstable-format/ch10/" rel="next" class="astro-u2l5gyhi"> <svg aria-hidden="true" class="astro-u2l5gyhi astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg> <span class="astro-u2l5gyhi"> Next <br class="astro-u2l5gyhi"> <span class="link-title astro-u2l5gyhi">Point Reads and Slices</span> </span> </a> </div>   </footer>  </div> </div>   </main> </div> </div>  </div> </div>  </body></html>

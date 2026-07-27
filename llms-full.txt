@@ -7959,7 +7959,7 @@ Cassandra 5.0 uses a chunked compression approach for Data.db files. Data is spl
    * Algorithm class name (e.g., `LZ4Compressor`, `SnappyCompressor`)
    * Option count and option key-value pairs
    * Chunk length (uncompressed chunk size; default 16 384 bytes / 16 KiB)
-   * Max compressed length (present for SSTable format version ≥ “na” / Cassandra 3.0+)
+   * Max compressed length (version-gated at ≥ `na`, so present in every format in scope: `na`/`nb` BIG and `oa`/`da` BTI); the raw-vs-compressed switch, not a hint
    * Total uncompressed data length
    * Chunk count
    * Array of chunk offsets pointing into `Data.db`
@@ -7968,8 +7968,9 @@ Cassandra 5.0 uses a chunked compression approach for Data.db files. Data is spl
 
    * Concatenated compressed chunks (no length prefixes, no delimiters)
    * Chunk boundaries defined by offsets in `CompressionInfo.db`
-   * Each chunk followed by a 4-byte CRC32 checksum (computed over the compressed bytes)
+   * Each chunk followed by a 4-byte CRC32 checksum (computed over the stored bytes)
    * Only LZ4 chunks carry an algorithm-specific 4-byte little-endian size prefix; Snappy, Deflate, and Zstd do not
+   * A chunk stored at `>= max_compressed_length` bytes holds raw, uncompressed data
 
 **Key Design Principle**: CompressionInfo.db acts as an index into Data.db, allowing random access to compressed chunks without scanning the entire file.
 
@@ -7989,7 +7990,7 @@ CompressionInfo.db contains metadata about the compressed Data.db file. The form
 [Option Key[i]: UTF-8 string via writeUTF()] (repeated option_count times)
 [Option Value[i]: UTF-8 string via writeUTF()] (repeated option_count times)
 [Chunk Length: 4 bytes BE — uncompressed chunk size, default 16384]
-[Max Compressed Length: 4 bytes BE — only present for format version >= "na" (Cassandra 3.0+)]
+[Max Compressed Length: 4 bytes BE — version-gated at >= "na"; present in all formats in scope]
 [Data Length: 8 bytes BE — total uncompressed file size]
 [Chunk Count: 4 bytes BE]
 [Chunk Offsets: 8 bytes BE * count — byte offsets into Data.db]
@@ -8003,17 +8004,17 @@ Per-chunk CRC32 checksums are stored in `Data.db` immediately after each compres
 
 [Section titled “Field Descriptions”](#field-descriptions)
 
-| Field                 | Type                   | Size     | Byte Order               | Description                                                                                            |
-| --------------------- | ---------------------- | -------- | ------------------------ | ------------------------------------------------------------------------------------------------------ |
-| Algorithm Name        | UTF-8 via `writeUTF()` | 2+N      | Big-Endian length prefix | Class simple name, e.g., `"LZ4Compressor"`, `"NoopCompressor"`                                         |
-| Option Count          | u32                    | 4        | Big-Endian               | Number of key-value option pairs (0 for most compressors)                                              |
-| Option Key\[i]        | UTF-8 via `writeUTF()` | 2+N each | Big-Endian length prefix | Repeated `option_count` times                                                                          |
-| Option Value\[i]      | UTF-8 via `writeUTF()` | 2+N each | Big-Endian length prefix | Repeated `option_count` times                                                                          |
-| Chunk Length          | u32                    | 4        | Big-Endian               | Uncompressed chunk size; default 16 384 bytes (16 KiB)                                                 |
-| Max Compressed Length | u32                    | 4        | Big-Endian               | Present only for SSTable format ≥ “na” (Cassandra 3.0+); `Integer.MAX_VALUE` when `minCompressRatio=0` |
-| Data Length           | u64                    | 8        | Big-Endian               | Total uncompressed file size in bytes                                                                  |
-| Chunk Count           | u32                    | 4        | Big-Endian               | Number of compressed chunks                                                                            |
-| Chunk Offsets         | u64\[]                 | 8 each   | Big-Endian               | Byte offset of each chunk in `Data.db` (`count` entries)                                               |
+| Field                 | Type                   | Size     | Byte Order               | Description                                                                                                                                                                                                                  |
+| --------------------- | ---------------------- | -------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Algorithm Name        | UTF-8 via `writeUTF()` | 2+N      | Big-Endian length prefix | Class simple name, e.g., `"LZ4Compressor"`, `"NoopCompressor"`                                                                                                                                                               |
+| Option Count          | u32                    | 4        | Big-Endian               | Number of key-value option pairs (0 for most compressors)                                                                                                                                                                    |
+| Option Key\[i]        | UTF-8 via `writeUTF()` | 2+N each | Big-Endian length prefix | Repeated `option_count` times                                                                                                                                                                                                |
+| Option Value\[i]      | UTF-8 via `writeUTF()` | 2+N each | Big-Endian length prefix | Repeated `option_count` times                                                                                                                                                                                                |
+| Chunk Length          | u32                    | 4        | Big-Endian               | Uncompressed chunk size; default 16 384 bytes (16 KiB)                                                                                                                                                                       |
+| Max Compressed Length | u32                    | 4        | Big-Endian               | Version-gated at ≥ `na`, so present in all formats in scope; `Integer.MAX_VALUE` (`0x7fffffff`) with the default `minCompressRatio=0`; a chunk stored at this length or longer is raw. Zero is corrupt — see the guard below |
+| Data Length           | u64                    | 8        | Big-Endian               | Total uncompressed file size in bytes                                                                                                                                                                                        |
+| Chunk Count           | u32                    | 4        | Big-Endian               | Number of compressed chunks                                                                                                                                                                                                  |
+| Chunk Offsets         | u64\[]                 | 8 each   | Big-Endian               | Byte offset of each chunk in `Data.db` (`count` entries)                                                                                                                                                                     |
 
 ### Important Notes
 
@@ -8021,7 +8022,7 @@ Per-chunk CRC32 checksums are stored in `Data.db` immediately after each compres
 
 1. **No padding field**: There is no fixed padding after the algorithm name. The bytes following the name are the 4-byte option count (u32 BE).
 2. **Option count is required**: Even when there are no options, the option count (0) is written.
-3. **Max compressed length is version-gated**: Present only for SSTable format version ≥ “na” (Cassandra 3.0+); absent in older formats. Source: `BigFormat.java` line 401.
+3. **Max compressed length is version-gated**: Its presence is gated on SSTable format version ≥ `na` (`BigFormat.java` line 401), so every format this guide covers has it. Do not write a reader that omits it.
 4. **Data length is uncompressed size**: The data length field stores the total UNCOMPRESSED size, not the compressed `Data.db` size.
 5. **Per-chunk CRCs are in Data.db**: CRC32 values follow each compressed chunk inline in `Data.db`. `CompressionInfo.db` stores no per-chunk CRCs.
 
@@ -8029,7 +8030,7 @@ Per-chunk CRC32 checksums are stored in `Data.db` immediately after each compres
 
 [Section titled “Example: CompressionInfo.db with LZ4”](#example-compressioninfodb-with-lz4)
 
-Based on the implementation test case from `compression_info_writer.rs`:
+Real bytes from `test_collections/nested_collections_table` `nb-1-big-CompressionInfo.db` (all 55 bytes of the file):
 
 ```plaintext
 Offset  Hex Bytes                       Decoded Field
@@ -8038,22 +8039,28 @@ Offset  Hex Bytes                       Decoded Field
 0x02    4c 5a 34 43 6f 6d 70            "LZ4Compressor"
         72 65 73 73 6f 72
 0x0f    00 00 00 00                     Option count: 0 (no key-value options)
-0x13    00 01 00 00                     Chunk length: 65536 (0x10000) — non-default; default is 16384 (16 KiB)
-0x17    7f ff ff ff                     Max compressed length: 0x7FFFFFFF (Integer.MAX_VALUE, minCompressRatio=0)
-0x1b    00 00 00 00 00 00 3e 80         Uncompressed data length: 16000
+0x13    00 00 40 00                     Chunk length: 16384 (0x4000) — the 5.0 default
+0x17    7f ff ff ff                     Max compressed length: 0x7FFFFFFF (Integer.MAX_VALUE, min_compress_ratio=0)
+0x1b    00 00 00 00 00 00 51 a3         Uncompressed data length: 20899
 0x23    00 00 00 02                     Chunk count: 2
 0x27    00 00 00 00 00 00 00 00         Chunk 0 offset: 0
-0x2f    00 00 00 00 00 00 20 00         Chunk 1 offset: 8192 (0x2000)
-0x37    [4-byte CRC32]                  Metadata CRC32
+0x2f    00 00 00 00 00 00 21 de         Chunk 1 offset: 8670 (0x21de)
 ```
 
-Total size: 59 bytes (55 bytes content + 4 bytes CRC)
+Total size: **55 bytes** — the file ends after the last chunk offset, with no trailing metadata checksum (Important Note 5 above). Everything else is derived, and the corresponding `Data.db` (11 287 bytes) confirms each derivation:
+
+| Derived value              | Formula                     | Value  | Confirmed in `Data.db`                                               |
+| -------------------------- | --------------------------- | ------ | -------------------------------------------------------------------- |
+| chunk 0 compressed payload | `8670 − 0 − 4`              | 8 666  | CRC32 at offset 8666 is `2a2020b9`, matching a CRC over bytes 0–8665 |
+| chunk 1 compressed payload | `11287 − 8670 − 4`          | 2 613  | —                                                                    |
+| chunk 0 uncompressed       | `min(16384, 20899 − 0)`     | 16 384 | LZ4 LE prefix at offset 0 is `00 40 00 00` = 16384                   |
+| chunk 1 uncompressed       | `min(16384, 20899 − 16384)` | 4 515  | LZ4 LE prefix at offset 8670 = 4515                                  |
 
 ### Example: CompressionInfo.db with Snappy
 
 [Section titled “Example: CompressionInfo.db with Snappy”](#example-compressioninfodb-with-snappy)
 
-Based on the implementation test case:
+Real bytes from `test_timeseries/event_store` `nb-1-big-CompressionInfo.db` (all 58 bytes):
 
 ```plaintext
 Offset  Hex Bytes                       Decoded Field
@@ -8063,17 +8070,16 @@ Offset  Hex Bytes                       Decoded Field
         6d 70 72 65 73 73 6f 72
 0x12    00 00 00 00                     Option count: 0 (no key-value options)
 0x16    00 00 40 00                     Chunk length: 16384 (0x4000)
-0x1a    7f ff ff ff                     Max compressed length: 0x7FFFFFFF (Integer.MAX_VALUE, minCompressRatio=0)
-0x1e    00 00 00 00 00 00 1f 40         Uncompressed data length: 8000
+0x1a    7f ff ff ff                     Max compressed length: 0x7FFFFFFF (Integer.MAX_VALUE, min_compress_ratio=0)
+0x1e    00 00 00 00 00 00 55 7c         Uncompressed data length: 21884
 0x26    00 00 00 02                     Chunk count: 2
 0x2a    00 00 00 00 00 00 00 00         Chunk 0 offset: 0
-0x32    00 00 00 00 00 00 10 00         Chunk 1 offset: 4096 (0x1000)
-0x3a    [4-byte CRC32]                  Metadata CRC32
+0x32    00 00 00 00 00 00 1e 35         Chunk 1 offset: 7733 (0x1e35)
 ```
 
-Total size: 62 bytes (58 bytes content + 4 bytes CRC)
+Total size: **58 bytes** — again ending after the last chunk offset, with no trailing checksum. Chunk 0’s compressed payload is `7733 − 0 − 4 = 7729` bytes; its inline CRC32 at `Data.db` offset 7729 is `0x001daf10`, which matches a CRC32 over those 7729 bytes (verified — see Ch. 9 for the micro-proof).
 
-> **Note**: Per-chunk CRCs are NOT stored in `CompressionInfo.db`. They follow each chunk in `Data.db`.
+> **Note**: `CompressionInfo.db` carries no checksums at all — neither per-chunk nor whole-file. Per-chunk CRC32s follow each chunk inline in `Data.db`; whole-component integrity for the SSTable is covered by `Digest.crc32`.
 
 ## Compressed Chunk Format in Data.db
 
@@ -8095,8 +8101,9 @@ The compressed data format varies by algorithm. The compressed length is derived
 1. **No explicit length prefixes in Data.db**: Chunk boundaries are defined by offsets in CompressionInfo.db
 2. **CRC checksums**: Per-chunk CRC32 values are appended inline in `Data.db` immediately after each compressed chunk — they are NOT stored in `CompressionInfo.db`
 3. **Chunk alignment**: Chunks start at the byte offsets specified in the chunk offset array
-4. **Last chunk**: The last chunk may be smaller than the standard chunk size if the total data length is not evenly divisible
+4. **Last chunk**: The last data-bearing chunk decompresses to fewer than `chunk_length` bytes when `data_length` is not a multiple of `chunk_length`. A trailing map entry beyond the `data_length` bound may exist and holds no data at all — see Chunk Offset Calculation note 6.
 5. **No metadata CRC in CompressionInfo.db**: The file ends after the last chunk offset. Cassandra does not write a trailing metadata CRC to `CompressionInfo.db`; integrity comes from per-chunk CRCs in `Data.db`.
+6. **Not every chunk is compressed**: a chunk stored at `>= max_compressed_length` bytes holds raw, uncompressed data. There is no flag — the length comparison is the encoding.
 
 ## Compression Algorithm Formats
 
@@ -8167,51 +8174,22 @@ decompress_size_prepended(data)
 
 **Key Details:**
 
-* Cassandra 5.0 NB format uses **raw Snappy** without a size prefix
-* The uncompressed size is determined by decompression (not from metadata)
-* Decompressed size is validated against chunk\_length from CompressionInfo.db
+* Cassandra 5.0 uses **raw Snappy** (a bare Snappy block) with no size prefix and no framing
+* The uncompressed length is carried by the Snappy block itself as a leading varint, not by Cassandra
+* The decompressed size must be cross-checked against the length the chunk map implies (`min(chunk_length, data_length - chunk_index * chunk_length)`)
 * 4-byte CRC32 immediately follows the compressed chunk bytes in `Data.db`
-
-**Legacy Format (pre-5.0):**
-
-```plaintext
-[Uncompressed Size: 4 bytes BE]
-[Compressed Data: variable length]
-```
 
 **Decompression Process:**
 
 ```java
-// Cassandra source: SnappyCompressor.uncompress()
+// Cassandra source: SnappyCompressor.uncompress() line 95
 return Snappy.rawUncompress(input, inputOffset, inputLength, output, outputOffset);
 
 
 // Returns the number of bytes decompressed
 ```
 
-**CQLite Implementation:**
-
-```rust
-// Try two formats:
-// 1. With 4-byte size prefix (legacy)
-if data.len() >= 4 {
-    let uncompressed_size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-
-
-    if uncompressed_size > 0 && uncompressed_size <= MAX_DECOMPRESSED_SIZE {
-        let compressed_data = &data[4..];
-        if let Ok(decompressed) = decoder.decompress_vec(compressed_data) {
-            if decompressed.len() == uncompressed_size {
-                return Ok(decompressed);
-            }
-        }
-    }
-}
-
-
-// 2. Fall back to raw Snappy (no prefix) - Cassandra 5.0 NB format
-let decompressed = decoder.decompress_vec(data)?;
-```
+**CQLite Implementation:** exactly one decode attempt, raw Snappy, selected by the authoritative `CompressionInfo.db` compressor name. It never tries framed-then-raw and keeps whichever “succeeds” — a format guess can silently mis-decode an adversarial chunk into wrong bytes, so the strict single-format decode surfaces a typed error instead (no-heuristics mandate, issue #28; the fallback was removed by issue #1588). The advertised length is read from the block’s leading varint and rejected against the bomb limit **before** any allocation. See `cqlite-core/src/storage/sstable/compression.rs` (`snappy_decompress_raw`).
 
 ### Deflate Compression
 
@@ -8226,9 +8204,10 @@ let decompressed = decoder.decompress_vec(data)?;
 
 **Key Details:**
 
-* **No 4-byte size prefix** — `DeflateCompressor.compress()` writes raw Deflate bytes with no length header
-* Uses standard zlib Deflate format (RFC 1951 deflate stream format)
-* Deflate level 6 is used by Cassandra
+* **No 4-byte size prefix** — `DeflateCompressor.compress()` writes the deflater output directly with no length header
+* The stream is **zlib-wrapped (RFC 1950)**, not raw deflate (RFC 1951). `DeflateCompressor` uses `new Deflater()` / `new Inflater()` (lines 69, 77) with no `nowrap` argument, so Java emits a 2-byte zlib header + deflate body + 4-byte Adler-32 trailer. Real chunks begin `78 9c` — verified against a Deflate-compressed corpus fixture. Decoding them as raw deflate fails.
+* Cassandra does not call `setLevel()`, so the stream uses `Deflater`’s default level (`Deflater.DEFAULT_COMPRESSION`, equivalent to level 6).
+* `compressArray()` returns **0** when `Deflater.needsInput()` is true (lines 113-114) — i.e. for empty input. That is why a degenerate empty trailing chunk stores a genuinely 0-byte payload under Deflate, and why inflating it is a hard error rather than a latent one. See Chunk Offset Calculation note 6.
 * 4-byte CRC32 immediately follows the compressed chunk bytes in `Data.db`
 
 **Decompression Process:**
@@ -8241,15 +8220,7 @@ inf.setInput(input, inputOffset, inputLength);
 return inf.inflate(output, outputOffset, maxOutputLength);
 ```
 
-**CQLite Implementation:**
-
-```rust
-// No size prefix — decompress entire chunk (bounds from CompressionInfo.db offsets)
-let mut decoder = DeflateDecoder::new(data);
-let mut decompressed = Vec::new();
-decoder.read_to_end(&mut decompressed)?;
-validate_decompression_size(decompressed.len())?;
-```
+**CQLite Implementation:** decodes with a zlib-aware decoder (`flate2::read::ZlibDecoder`), rejects an empty chunk with a typed error rather than passing it to the decoder, and bounds the output with `Read::take(MAX_DECOMPRESSED_SIZE + 1)` since a zlib stream declares no length. See `cqlite-core/src/storage/sstable/compression.rs` (issue #1082).
 
 ### Zstd Compression
 
@@ -8264,9 +8235,9 @@ validate_decompression_size(decompressed.len())?;
 
 **Key Details:**
 
-* **No 4-byte size prefix** — `ZstdCompressor.compress()` writes a raw Zstd frame with no extra length header
+* **No 4-byte size prefix** — `ZstdCompressor.compress()` writes a bare Zstd frame with no extra length header
 * Uses Zstd frame format with internal content checksum enabled (`ENABLE_CHECKSUM_FLAG = true`)
-* Compression level 3 is default
+* Compression level 3 is the default (`ZstdCompressor.java:48`: `DEFAULT_COMPRESSION_LEVEL = 3`); it is settable per table via the `compression_level` option
 * 4-byte CRC32 immediately follows the compressed chunk bytes in `Data.db`
 
 **Decompression Process:**
@@ -8297,7 +8268,7 @@ validate_decompression_size(decompressed.len())?;
 To find a specific chunk in Data.db:
 
 ```plaintext
-chunk_index = position_in_file / chunk_length
+chunk_index = position_in_file / chunk_length          // position is UNCOMPRESSED
 
 
 chunk_offset = chunk_offsets[chunk_index]
@@ -8305,15 +8276,28 @@ next_chunk_offset = chunk_offsets[chunk_index + 1]
     OR compressed_data_length (if last chunk)
 
 
-compressed_length = next_chunk_offset - chunk_offset
+compressed_length = next_chunk_offset - chunk_offset - 4   // -4 for the inline CRC word
+```
+
+Cassandra computes exactly this in `CompressionMetadata.chunkFor()`:
+
+```java
+// CompressionMetadata.java:249-252
+long nextChunkOffset = idx + 8 == chunkOffsetsSize
+                       ? compressedFileLength
+                       : chunkOffsets.getLong(idx + 8);
+return new Chunk(chunkOffset, (int) (nextChunkOffset - chunkOffset - 4)); // "4" bytes reserved for checksum
 ```
 
 **Important Notes:**
 
 1. **Chunk offsets** are stored as a simple array of u64 values (8 bytes each)
-2. **Compressed length** is calculated by subtracting consecutive offsets
+2. **Compressed length** is the difference of consecutive offsets **minus 4** — the delta includes the 4-byte CRC32 that follows each chunk inline in `Data.db`. Omitting the `− 4` feeds the CRC bytes to the decompressor and mis-verifies every checksum.
 3. **No explicit length fields** per chunk in CompressionInfo.db - lengths are derived from offset differences
-4. **Last chunk** length is `compressed_data_length - chunk_offsets[last]`
+4. **Last chunk** length is `compressed_data_length - chunk_offsets[last] - 4`, where `compressed_data_length` is the on-disk `Data.db` size (Cassandra’s `compressedFileLength`) — not the `data_length` field, which is the uncompressed total.
+5. **Uncompressed length per chunk** is not stored either. It is `min(chunk_length, data_length - chunk_index * chunk_length)`; only the final data-bearing chunk is short.
+6. **Degenerate trailing chunks**: `chunk_count` may be one greater than `ceil(data_length / chunk_length)`, leaving a final entry that maps to no uncompressed bytes. Stop iterating when `chunk_index * chunk_length >= data_length`. Compare the **logical** start against `data_length` — never a chunk offset, which is a compressed-file position. Cassandra itself never reads such a chunk because every logical position `< data_length` indexes to an earlier chunk. Chapter 9 covers the write-side mechanism, how often it occurs, and the per-compressor consequences of decompressing it anyway. Issue #2225, PR #2242.
+7. **Raw (incompressible) chunks**: a chunk whose stored length is `>= max_compressed_length` was stored uncompressed and must **not** be handed to the decompressor (`CompressedSequentialWriter.flushData()` lines 159–178 on the write side; `CompressedChunkReader.Standard.readChunk()` lines 269–290 on the read side, which tests `chunk.length < maxCompressedLength` before decompressing).
 
 ## Memory Safety Considerations
 
@@ -8337,15 +8321,36 @@ fn validate_decompression_size(uncompressed_size: usize) -> Result<()> {
 }
 ```
 
+The guard must run **before** allocation, not after decompression. CQLite inspects the advertised length first for every algorithm that carries one (the LZ4 4-byte prefix, the Snappy leading varint) and caps the reader for the wrapped streams (Deflate/Zstd) with `Read::take(limit + 1)`, so an adversarial chunk cannot force a large allocation before any check runs (`cqlite-core/src/storage/sstable/compression.rs`).
+
 ### Size Prefix Validation
 
 [Section titled “Size Prefix Validation”](#size-prefix-validation)
 
-For algorithms with size prefixes:
+1. For algorithms carrying a declared length (LZ4’s 4-byte little-endian prefix, Snappy’s leading varint), extract and validate it **before** calling the decompressor — the common library entry points pre-allocate from that value.
+2. For wrapped streams with no declared length (Deflate, Zstd), bound the output side instead of trusting the stream.
+3. Independently, cross-check the decompressed length against the value the chunk map implies: `min(chunk_length, data_length - chunk_index * chunk_length)`. A mismatch means corruption or a mis-derived chunk boundary, and is a typed error — never a fallback to another decode attempt.
 
-1. Extract the prefix value
-2. Validate it against the maximum before attempting decompression
-3. For Snappy NB format (no prefix), validate decompressed size after decompression
+### Corrupt `max_compressed_length` Guard
+
+[Section titled “Corrupt max\_compressed\_length Guard”](#corrupt-max_compressed_length-guard)
+
+`max_compressed_length` selects between compressed and raw chunk storage: the reader treats a chunk as raw when its stored length is `>= max_compressed_length`. A **zero** value therefore makes that test true for every chunk, so a reader silently returns still-compressed bytes as if they were plaintext instead of raising an error — it fails **open**. The per-chunk CRC32 cannot catch this, because the CRC is computed over the genuinely-on-disk compressed bytes and matches.
+
+Cassandra never writes zero here — the default is `Integer.MAX_VALUE` — but note that `CompressionParams.validate()` (lines 441–455) does not reject it either: it rejects `maxCompressedLength < 0` and `chunkLength < maxCompressedLength < Integer.MAX_VALUE`, and `0` passes both. Zero is excluded by construction, not by validation, so a reader must treat it as a corruption case.
+
+Reject it once, at `CompressionInfo.db` parse time, before any chunk read, so no downstream consumer can observe an unguarded zero:
+
+```rust
+// cqlite-core/src/storage/sstable/compression_info.rs:226-230
+if max_compressed_length == 0 {
+    return Err(Error::InvalidFormat(
+        "max_compressed_length cannot be zero".to_string(),
+    ));
+}
+```
+
+CQLite fails **closed** with that typed error and repeats the guard in the point-read seek paths (`reader/data_access/compressed_offset.rs:107`, `reader/data_access/big_promoted.rs:681`). Issues #2524, #2529.
 
 ## Algorithm Selection in Cassandra
 
@@ -8374,12 +8379,14 @@ CQLite normalizes these to standard names:
 
 [Section titled “Byte Order Summary”](#byte-order-summary)
 
-| Algorithm | Size Prefix in Data.db | Byte Order    | Notes                                          |
-| --------- | ---------------------- | ------------- | ---------------------------------------------- |
-| LZ4       | Yes — 4 bytes          | Little-Endian | Uncompressed length prepended by compressor    |
-| Snappy    | No                     | N/A           | Raw Snappy frame                               |
-| Deflate   | No                     | N/A           | Raw Deflate stream                             |
-| Zstd      | No                     | N/A           | Zstd frame (internal content checksum enabled) |
+| Algorithm | Size Prefix in Data.db | Byte Order    | Notes                                                                                           |
+| --------- | ---------------------- | ------------- | ----------------------------------------------------------------------------------------------- |
+| LZ4       | Yes — 4 bytes          | Little-Endian | Uncompressed length prepended by Cassandra’s `LZ4Compressor`, then an LZ4 **block** (not frame) |
+| Snappy    | No                     | N/A           | Bare Snappy block; its own leading varint carries the length                                    |
+| Deflate   | No                     | N/A           | **zlib-wrapped (RFC 1950)** stream — begins `78 9c`; not raw RFC 1951 deflate                   |
+| Zstd      | No                     | N/A           | Bare Zstd frame (internal content checksum enabled)                                             |
+
+All `CompressionInfo.db` header fields and chunk offsets are big-endian. The only little-endian value anywhere in the compression layer is LZ4’s 4-byte uncompressed-length prefix inside the chunk payload (`LZ4Compressor.compress()` lines 120–123 write it byte-by-byte, low byte first).
 
 ## CRC Checksum Format
 
@@ -8397,14 +8404,14 @@ Each compressed chunk in `Data.db` is immediately followed by a 4-byte CRC32 che
 ```
 
 * Computed using Java `java.util.zip.CRC32` (IEEE polynomial, same as `crc32()` in zlib)
-* Covers the compressed bytes of the chunk — not the CRC field itself
-* Applied to every chunk without exception
-* Source: `CompressedSequentialWriter.flushData()`, `crcMetadata.appendDirect(toWrite, true)` (line \~192)
-* Next chunk offset = current offset + compressed length + 4 (the CRC word)
+* Covers the **stored** bytes of the chunk — the compressed payload, or the raw bytes for an incompressible chunk — and never the CRC field itself
+* Written for every chunk the writer emits, including a raw chunk and a degenerate empty trailing chunk. An empty Deflate chunk stores a 0-byte payload with CRC `00000000` — verified on `cqlite-core/tests/fixtures/issue_2225/multi_partition_table/nb-1-big-{CompressionInfo,Data}.db` (`DeflateCompressor`, `data_length` 5681, 2 chunk offsets `[0, 3266]` where 1 is expected, final payload 0 bytes, stored CRC `00000000` == computed). The 5-byte LZ4 empty chunk stores `c622f71d`, verified across all 16 degenerate `CompressionInfo.db` files in `test-data/datasets/sstables/` (every one LZ4, payload `0000000000`, stored CRC == computed). No degenerate **Deflate** chunk exists anywhere under `test-data/` — the Deflate case is evidenced only by the `issue_2225` fixture above.
+* Source: `CompressedSequentialWriter.flushData()`, `crcMetadata.appendDirect(toWrite, true)` (line 192)
+* Next chunk offset = current offset + stored length + 4 (`chunkOffset += compressedLength + 4`, line 203)
 
 `CompressionInfo.db` stores **no** per-chunk CRCs — it stores only chunk byte offsets.
 
-**Implementation Note**: CQLite validates per-chunk CRCs during chunk reads.
+**Reader note on verification cost**: Cassandra verifies a chunk CRC probabilistically, governed by the table’s `crc_check_chance` (`CompressedChunkReader.shouldCheckCrc()`, lines 63–67) — a value of 1.0 checks every chunk. CQLite validates the CRC on every chunk read.
 
 ## Practical Example: Reading an LZ4 Chunk
 
@@ -8412,23 +8419,26 @@ Each compressed chunk in `Data.db` is immediately followed by a 4-byte CRC32 che
 
 Given a file with:
 
-* CompressionInfo.db showing: chunk\_offsets = \[0, 1024], chunk\_length=65536 (non-default; default is 16384)
+* CompressionInfo.db showing: chunk\_offsets = \[0, 1024], chunk\_length = 65536 (non-default; default is 16384), max\_compressed\_length = 0x7fffffff, data\_length ≥ 65536
 * Data.db with compressed data at offset 0
 
 ```plaintext
-Bytes 0-3:      [0x00, 0x01, 0x00, 0x00]  = 0x00010000 LE = 65536 (uncompressed size)
-Bytes 4-1023:   Compressed data (1020 bytes)
+Bytes 0-3:      [0x00, 0x00, 0x01, 0x00]  = 0x00010000 LE = 65536 (uncompressed size)
+Bytes 4-1019:   Compressed data (1016 bytes)
+Bytes 1020-1023: CRC32 over bytes 0-1019 (big-endian u32)
 ```
 
 Reading process:
 
 1. Determine chunk 0 offset = 0, chunk 1 offset = 1024
-2. Calculate compressed length = 1024 - 0 = 1024 bytes
+2. Calculate compressed length = `1024 - 0 - 4` = **1020** bytes (the delta includes the CRC word)
 3. Seek to position 0 in Data.db
-4. Read 1024 bytes of compressed data
-5. Extract 4-byte LE prefix = 65536 (uncompressed size)
-6. Decompress remaining 1020 bytes using LZ4
-7. Verify decompressed size = 65536 matches chunk\_length
+4. Read 1020 bytes of compressed data, then 4 more bytes as the big-endian CRC32
+5. Verify CRC32 over the 1020 compressed bytes
+6. Confirm `1020 < max_compressed_length`, so the chunk is compressed rather than raw
+7. Extract the 4-byte little-endian prefix = 65536 (uncompressed size); validate it against the decompression-bomb limit before decompressing
+8. Decompress the remaining 1016 bytes using LZ4 block decompression
+9. Verify decompressed size = `min(chunk_length, data_length - 0)` = 65536
 
 ## Related Documentation
 
@@ -8439,20 +8449,21 @@ Reading process:
 * **Chapter 9**: Compression and chunking details
 * **Appendix B**: Encoding cheat sheet (VInt, flags, byte order)
 * **Appendix F**: Known limitations (what’s not supported yet)
-* **Implementation**: `cqlite-core/src/storage/sstable/writer/compression_info_writer.rs`
-* **Parser**: `cqlite-core/src/storage/sstable/compression_info.rs`
+* **Parser**: `cqlite-core/src/storage/sstable/compression_info.rs` (header + guards), `cqlite-core/src/storage/sstable/chunk_decompressor.rs` (per-chunk read, raw fallback, size cross-check), `cqlite-core/src/storage/sstable/reader/block_io.rs` (`data_length` chunk bound)
+* **Writer**: `cqlite-core/src/storage/sstable/writer/compression_info_writer.rs` — note that CQLite’s production write surface emits **uncompressed** SSTables and never writes a `CompressionInfo.db`; the compressed-write building blocks exist for fixture synthesis only and configuring compressed production writing returns `Error::UnsupportedFormat` (issue #1406). Compressed **read** support (LZ4, Snappy, Deflate, Zstd) is complete.
 
 ### Cassandra 5.0.8 Source References
 
 [Section titled “Cassandra 5.0.8 Source References”](#cassandra-508-source-references)
 
-* [`CompressionMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java) — `open()` lines 76–112, `writeHeader()` lines 375–398
-* [`CompressedSequentialWriter.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java) — per-chunk CRC write path, `flushData()` lines 140–206
-* [`schema/CompressionParams.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) — `DEFAULT_CHUNK_LENGTH = 1024 * 16` (line 47)
-* [`LZ4Compressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/LZ4Compressor.java) — 4-byte LE uncompressed-length prefix
-* [`SnappyCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/SnappyCompressor.java) — no prefix, raw Snappy
-* [`DeflateCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/DeflateCompressor.java) — no prefix, raw Deflate
-* [`ZstdCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/ZstdCompressor.java) — no prefix, Zstd frame with internal checksum
+* [`CompressionMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java) — `open()` lines 76–112, `chunkFor()` lines 235–253 (`− 4` CRC adjustment at line 252), `writeHeader()` lines 375–398
+* [`CompressedSequentialWriter.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java) — `flushData()` lines 140–206: raw-chunk fallback lines 159–178, CRC write line 192, offset advance line 203
+* [`CompressedChunkReader.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java) — `shouldCheckCrc()` lines 63–67, raw-vs-compressed branch line 269 (`Standard`) and line 364 (`Mmap`). Note the package: `io/util/`, not `io/compress/`
+* [`schema/CompressionParams.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) — `DEFAULT_CHUNK_LENGTH = 1024 * 16` (line 47), `DEFAULT_MIN_COMPRESS_RATIO = 0.0` (line 48), `calcMaxCompressedLength()` (line 186), `validate()` (lines 441–455)
+* [`LZ4Compressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/LZ4Compressor.java) — 4-byte LE uncompressed-length prefix written at lines 120–123
+* [`SnappyCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/SnappyCompressor.java) — no prefix, raw Snappy block (`rawUncompress`, line 95)
+* [`DeflateCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/DeflateCompressor.java) — no prefix; `new Deflater()`/`new Inflater()` (lines 69, 77) means a zlib-wrapped (RFC 1950) stream; `compressArray()` returns 0 for empty input (lines 113-114)
+* [`ZstdCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/ZstdCompressor.java) — no prefix, bare Zstd frame with internal checksum; `DEFAULT_COMPRESSION_LEVEL = 3` (line 48)
 * [`NoopCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/NoopCompressor.java) — passthrough compressor
 * [`BigFormat.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java) — `hasMaxCompressedLength` version gate (line 401)
 
@@ -8814,6 +8825,7 @@ This chapter explains how Cassandra lays out compressed data in fixed-size chunk
 
 * How compression chunks and checksums are organized
 * Differences between memory-mapped and buffered IO in practice
+* Why scan and point reads need separate IO plans, and how a shared mmap advice breaks one of them
 * Where Bloom filters fit and how they avoid unnecessary disk reads
 * The performance implications for random vs sequential reads
 
@@ -8821,17 +8833,17 @@ This chapter explains how Cassandra lays out compressed data in fixed-size chunk
 
 [Section titled “Compression Chunks and Checksums”](#compression-chunks-and-checksums)
 
-`CompressionInfo.db` records the compression algorithm, chunk length, total uncompressed length, and a map of compressed chunk offsets for the corresponding `Data.db`. Modern formats may include per-chunk CRCs; `Digest.crc32` provides a coarse integrity check for the SSTable.
+`CompressionInfo.db` records the compression algorithm, chunk length, max compressed length, total uncompressed length, and a map of compressed chunk offsets for the corresponding `Data.db`. Every format in scope here (`na`/`nb` BIG, `oa`/`da` BTI) stores a 4-byte CRC32 inline in `Data.db` after each compressed chunk — so the delta between consecutive chunk offsets is the compressed payload plus 4. `Digest.crc32` provides a coarse whole-component integrity check. Ch. 9 covers the exact serialization and the reader invariants.
 
 From a real `Statistics.db` (trimmed text output produced by tooling), we can see the compressor in use:
 
-```plaintext
+```9:14:test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
 Compressor: org.apache.cassandra.io.compress.SnappyCompressor
-Compression ratio: 0.9762523409965641
+Compression ratio: 0.9745986747265626
 TTL min: 0
 TTL max: 0
-First token: -9216841881891618357 (4d4321e2-662b-4ba1-b75f-48e080727a52)
-Last token: 9206157491929561407 (6bdb6b71-d459-402f-be40-3b4fa1067661)
+First token: -9214503836773200690 (15291a77-d739-4e73-8397-b787442f3a1f)
+Last token: 9222955098912132944 (079599a9-cefb-4894-9eca-e2e2b21f9582)
 ```
 
 For implementation details and reader/decompressor examples, see Appendix C.
@@ -8856,6 +8868,25 @@ Two common strategies exist for SSTable IO:
 
 In practice, chunked compression dominates the read cost model: aligning reads to chunk boundaries reduces amplification for random lookups; sequential scans amortize decompression overhead. Cassandra’s `CompressionMetadata` and related classes define the chunk map used by the readers.
 
+### Scan and point reads are different IO planes
+
+[Section titled “Scan and point reads are different IO planes”](#scan-and-point-reads-are-different-io-planes)
+
+The two access patterns want opposite things from the storage layer, and Cassandra treats them as distinct plans rather than tuning one compromise:
+
+* A **point read** touches one partition body — often a few KiB inside a single compression chunk. Readahead beyond that chunk is wasted bandwidth and wasted page cache.
+* A **scan** walks `Data.db` in offset order. It wants the largest requests the layer will give it, because every chunk it reads it will also decompress and emit.
+
+Cassandra carries this intent explicitly: `RebuffererFactory.instantiateRebufferer(boolean isScan)` takes the read intent as a parameter, and the compressed reader resolves it into a different underlying reader — `isScan ? forScan() : this` (`CompressedChunkReader.java:93`). On the buffered path, `forScan()` activates a `ScanCompressedReader` with a userspace readahead buffer (default 256 KiB) that coalesces many 16 KiB chunk reads into one large read (CASSANDRA-15452, shipped in 5.0.4). Ch. 9 documents the mechanism and the two conditions under which it silently does not engage.
+
+> **Warning: mmap advice is per-mapping, so a shared mapping cannot serve both planes**
+>
+> `madvise` advice attaches to a mapping, not to a read. `MADV_RANDOM` is the right advice for scattered point lookups — it suppresses kernel readahead, so a small partition body costs the pages it actually touches instead of a full readahead window. It is the wrong advice for a sequential walk, which depends on that readahead. A reader that applies `MADV_RANDOM` to one mapping and then serves scans from the same mapping degrades the scan to roughly page-at-a-time faulting.
+>
+> This is a real, field-measured failure mode rather than a theoretical one. In CQLite, a `MADV_RANDOM` point-read optimization (issue #2210) and a later change that routed the summary-guided scan walk onto that same source (#1940) combined into a cross-path regression: the compressed scan walk issued \~4–4.5 KiB block requests at \~7 000 reads/s where \~128 KiB readahead was expected (issue #2876). The fix (PR #2882) split the scan-side positional source from the point mapping — the scan side is an unadvised handle (an `Arc` clone of the same mmap, not a second `mmap`/fd), while genuine point lookups keep the advised source: `cqlite-core/src/storage/sstable/reader/mod.rs:608` builds `scan_positional_source`, and `POINT_MMAP_MADV_RANDOM_MIN_BYTES` (line 343) gates the advice to mappings ≥ 8 MiB. A regression test asserts the scan walk makes zero reads against the point source (`reader/read_at_point_tests.rs`, `summary_guided_compressed_scan_walk_avoids_point_source`).
+>
+> **Takeaway for implementers**: if your reader has separate point and scan paths, give them distinct mapping handles (or distinct advice), and add a test that asserts the scan path never reads through the point source. Nothing in the format makes this failure visible — the bytes are identical either way, only the request sizes differ.
+
 ### Cassandra 5.0 Default: `mmap_index_only`
 
 [Section titled “Cassandra 5.0 Default: mmap\_index\_only”](#cassandra-50-default-mmap_index_only)
@@ -8867,21 +8898,29 @@ Cassandra 5.0 changed the default `disk_access_mode` from `auto` to `mmap_index_
 
 This hybrid retains mmap’s lookup speed for index navigation while keeping `Data.db` reads buffered, reducing address-space pressure and JVM GC interaction. Source: `IOOptions.java` and `SortedTableReaderLoadingBuilder.java:65`. To revert to pre-5.0 behavior, set `disk_access_mode: auto` in `cassandra.yaml`.
 
-### ChunkCache and `file_cache_size`
+### ChunkCache, `file_cache_enabled`, and `file_cache_size`
 
-[Section titled “ChunkCache and file\_cache\_size”](#chunkcache-and-file_cache_size)
+[Section titled “ChunkCache, file\_cache\_enabled, and file\_cache\_size”](#chunkcache-file_cache_enabled-and-file_cache_size)
 
-Cassandra optionally wraps buffered readers in a `ChunkCache` (configured via `file_cache_size` in `cassandra.yaml`). The cache stores decompressed chunks so repeated random reads into the same compressed region avoid re-decompression. Integration point: `FileHandle.java:444–448` (`maybeCached()` wraps `SimpleChunkReader` with `CachingRebufferer`). The `BufferPool` backing individual read allocations has a hard maximum of **64 KiB** (`DiskOptimizationStrategy.java:32`: `MAX_BUFFER_SIZE = 1 << 16`).
+Cassandra can wrap a chunk reader in a `ChunkCache` so repeated reads into the same region avoid a re-read and re-decompression. Two conditions must both hold:
+
+* `file_cache_enabled` must be true **and** the computed cache size must be non-zero: `ChunkCache.instance` is null otherwise (`ChunkCache.java:53–54`). `file_cache_enabled` **defaults to `false`** in Cassandra 5.0 (`Config.java:499`; commented out in `cassandra.yaml:742`), so the chunk cache is off on a default install.
+* The reader must go through `FileHandle.Builder.maybeCached()` (`FileHandle.java:444–448`), which wraps only when `chunkCache != null && chunkCache.capacity() > 0`. It wraps all three reader flavors — `CompressedChunkReader.Mmap` (line 411), `CompressedChunkReader.Standard` (line 424), and `SimpleChunkReader` (line 429).
+
+Enabling it has a non-obvious side effect on scans: `CachingRebufferer.instantiateRebufferer()` drops the `isScan` intent, which disables the scan readahead path described in Ch. 9. The `BufferPool` backing individual read allocations has a hard maximum of **64 KiB** (`DiskOptimizationStrategy.java:32`: `MAX_BUFFER_SIZE = 1 << 16`), so buffered reads never exceed that size on their own.
 
 ## Practical guidance on chunk sizes
 
 [Section titled “Practical guidance on chunk sizes”](#practical-guidance-on-chunk-sizes)
 
-* Server default for `chunk_length_in_kb` in 5.0: **16 KiB** with LZ4 compressor (`CompressionParams.java:47`: `DEFAULT_CHUNK_LENGTH = 1024 * 16`). 64 KiB is a common tuning choice, not the default.
+* Server default for `chunk_length_in_kb` in Cassandra 5.0: **16 KiB** with the LZ4 compressor (`CompressionParams.java:47`: `DEFAULT_CHUNK_LENGTH = 1024 * 16`). This is the authoritative default. 64 KiB is a common tuning choice and a common wrong assumption in reader implementations — it is not the default.
+* `chunk_length` must be a power of two: Cassandra derives the chunk index as `position / chunkLength` and `CompressionParams.validate()` (lines 443–448) rejects non-powers.
 * 32–64 KiB can reduce metadata overhead and improve scan throughput at the cost of higher random-read amplification
 * ≤16 KiB may help highly random access patterns when storage latency is high, but increases metadata and CPU overhead
 
 Align application reads to chunk boundaries whenever possible to avoid double-decompression.
+
+> **Note for reader implementers**: never hardcode or infer a chunk length. Read `chunk_length` from the SSTable’s own `CompressionInfo.db` — it is authoritative per-SSTable metadata, and a table’s `chunk_length_in_kb` can be altered after data is written, so different SSTables of the same table may legitimately disagree (issues #2877, #28).
 
 ## Bloom Filters and Negative Lookups
 
@@ -8904,6 +8943,8 @@ False positive rate (FPR) refresher:
 [Section titled “Key Takeaways”](#key-takeaways)
 
 * Chunked compression bounds random-read amplification to chunk size; align reads to chunks
+* Read `chunk_length` from `CompressionInfo.db`; the 5.0 default is 16 KiB, not 64 KiB
+* Scan and point reads are separate IO plans; a single `MADV_RANDOM` mapping cannot serve both
 * Bloom filters cut disk IO by ruling out non-existent partitions early
 * Mmapped IO favors scans and hot ranges; buffered IO favors targeted random reads
 * Checksums and digests provide integrity at chunk and file levels
@@ -8915,10 +8956,16 @@ False positive rate (FPR) refresher:
 * Cassandra 5.0.8 (pinned):
 
   * `CompressionMetadata` — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java>
-  * `CompressionParams` (DEFAULT\_CHUNK\_LENGTH=16384, L47) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java#L47>
+  * `CompressionParams` (DEFAULT\_CHUNK\_LENGTH=16384, L47; `validate()` L441–455) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java#L47>
+  * `CompressedChunkReader` (scan-vs-point rebufferer, L93; `Standard.forScan()` L241) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java#L93>
+  * `ChunkCache` (instance gating L53–54; `CachingRebufferer.instantiateRebufferer()` L262–265) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/cache/ChunkCache.java#L53>
+  * `Config` (`file_cache_enabled` L499, `compressed_read_ahead_buffer_size` L341) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/config/Config.java#L499>
+  * `FileHandle` (`maybeCached()` L444–448) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/FileHandle.java#L444>
   * `BloomFilter` — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/bloom/BloomFilter.java>
   * `IOOptions` (mmap\_index\_only wiring) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/IOOptions.java>
   * `DiskOptimizationStrategy` (MAX\_BUFFER\_SIZE L32) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/DiskOptimizationStrategy.java#L32>
+
+* CQLite scan/point plane split (issue #2876, PR #2882): `cqlite-core/src/storage/sstable/reader/mod.rs:343` (`POINT_MMAP_MADV_RANDOM_MIN_BYTES`), `:608` (`scan_positional_source`)
 
 For implementation walkthroughs, see Appendix C.
 
@@ -11647,13 +11694,16 @@ Explore compression algorithms, chunk sizes, offset maps, and checksums in `Comp
 * What `CompressionInfo.db` contains and how it’s used
 * How chunk size choices influence performance trade-offs
 * How checksums are validated per chunk
+* How `max_compressed_length` selects between compressed and raw chunk storage
+* Why a compressed SSTable can carry a trailing chunk that holds no data
+* How Cassandra 5.0 coalesces chunk reads for scans, and when that optimization silently disappears
 * How tooling exposes chunk maps
 
 ## Compression Metadata
 
 [Section titled “Compression Metadata”](#compression-metadata)
 
-`CompressionInfo.db` contains algorithm class name, option count, option key-value pairs, chunk length, max compressed length (SSTable format version “na” / Cassandra 3.0+ only), total uncompressed data length, chunk count, and chunk offsets. Per-chunk CRC32 checksums live inline in `Data.db`, written immediately after each compressed chunk — `CompressionInfo.db` holds no per-chunk CRCs.
+`CompressionInfo.db` contains algorithm class name, option count, option key-value pairs, chunk length, max compressed length, total uncompressed data length, chunk count, and chunk offsets. The `max_compressed_length` field is gated on SSTable format version ≥ `na`, so it is present in every format this guide covers (`na`/`nb` BIG, `oa`/`da` BTI). Per-chunk CRC32 checksums live inline in `Data.db`, written immediately after each compressed chunk — `CompressionInfo.db` holds no per-chunk CRCs and no trailing metadata checksum.
 
 For a concise parser walkthrough, see Appendix C.
 
@@ -11663,6 +11713,26 @@ For a concise parser walkthrough, see Appendix C.
 
 * Smaller chunks improve random-read locality but add metadata overhead and decompression CPU.
 * Larger chunks reduce overhead and improve scans, but increase random-read amplification.
+
+The server default is **16 KiB** (`CompressionParams.java:47`: `DEFAULT_CHUNK_LENGTH = 1024 * 16`). 64 KiB is a common tuning choice, not a default, and it is a frequent source of wrong assumptions in reader implementations. Chunk length must always be read from `chunk_length` in `CompressionInfo.db` for the SSTable at hand — never hardcoded and never inferred (issues #2877, #28). Cassandra also requires `chunk_length` to be a power of two, because the chunk index is computed as `position / chunkLength` (`CompressionParams.validate()`, lines 443–448). Ch. 3 covers the sizing trade-off in operational terms.
+
+## Scan readahead vs. per-chunk reads
+
+[Section titled “Scan readahead vs. per-chunk reads”](#scan-readahead-vs-per-chunk-reads)
+
+A compressed reader that issues one positional read per chunk performs one syscall (or one page fault) per `chunk_length` of logical data — at the 16 KiB default that is a poor request size for a sequential scan. Cassandra 5.0 addresses this with a **scan-specific reader**, not with `madvise`:
+
+* `ChunkReader.instantiateRebufferer(boolean isScan)` carries the read intent down from the caller. `CompressedChunkReader.instantiateRebufferer()` (line 93) resolves it as `new BufferManagingRebufferer.Aligned(isScan ? forScan() : this)`.
+* `CompressedChunkReader.Standard` (buffered path) builds a `ScanCompressedReader` backed by a `ThreadLocalReadAheadBuffer`, and `forScan()` (line 241) activates it. Chunk reads are then served from that userspace buffer, so consecutive chunks share one large read instead of one read each (`ScanCompressedReader.read()`, lines 169–186).
+* Buffer size comes from `compressed_read_ahead_buffer_size`, default **256 KiB** (`Config.java:341`). The scan reader is only constructed when that value is **greater than** `chunk_length` (`CompressedChunkReader.java:236–238`) — with a 256 KiB buffer and 16 KiB chunks it coalesces \~16 chunks per read; set the buffer at or below `chunk_length` and the optimization is silently absent.
+* Shipped in **Cassandra 5.0.4** as CASSANDRA-15452 (“Improve disk access patterns during compaction and range reads”, `CHANGES.txt:122`).
+
+> **Warning: two ways the scan reader silently does not engage**
+>
+> 1. **ChunkCache wrapping.** `FileHandle.Builder.maybeCached()` (lines 444–448) wraps the chunk reader in `ChunkCache` when the cache exists with non-zero capacity, and `ChunkCache.CachingRebufferer.instantiateRebufferer(boolean isScan)` (`ChunkCache.java:262–265`) **ignores `isScan` and returns `this`** — `forScan()` is never called, so scans fall back to one read per chunk. Note the precondition: `ChunkCache.instance` is null unless `file_cache_enabled` is true, and that setting **defaults to `false`** (`Config.java:499`, `cassandra.yaml:742`). So on a default 5.0 install the trap is not armed; it arms the moment an operator enables the file cache.
+> 2. **mmap.** `CompressedChunkReader.Mmap` (line 321) does not override `forScan()`, so the base implementation returns `this` (line 52). An mmap-backed compressed read gets no userspace scan readahead at all and depends entirely on kernel readahead over the mapping. With Cassandra 5.0’s `mmap_index_only` default, `Data.db` is buffered, so the `Standard` path (which does support scan readahead) is the one normally in play — see Ch. 3.
+>
+> Implementers taking either lesson across: a decompressed-chunk cache and a read-coalescing layer must be co-designed. If a cache layer swallows the scan intent, coalescing never runs.
 
 ## Checksums
 
@@ -11704,7 +11774,7 @@ The compression metadata file encodes, in serialization order (`CompressionMetad
 2. **Option count** — 4-byte int: number of key-value option pairs
 3. **Options** — repeated UTF-8 key + UTF-8 value pairs (each with 2-byte length prefix)
 4. **Chunk length** — 4-byte int: uncompressed chunk size (default 16 KiB = 16 384 bytes)
-5. **Max compressed length** — 4-byte int: present only for SSTable format version ≥ “na” (Cassandra 3.0+)
+5. **Max compressed length** — 4-byte int: gated on SSTable format version ≥ `na`, so present for every format in scope; `Integer.MAX_VALUE` (`0x7fffffff`) with the default `min_compress_ratio = 0`
 6. **Data length** — 8-byte long: total uncompressed file size
 7. **Chunk count** — 4-byte int: number of chunks
 8. **Chunk offsets** — array of 8-byte longs: byte offset of each chunk in `Data.db`
@@ -11722,34 +11792,60 @@ Authoritative example (first 64 bytes from a real file):
 00000020: 001e fe00 0000 0100 0000 0000 0000 00    ...............
 ```
 
-Interpretation (trimmed):
+Interpretation (byte-exact, from `system/compaction_history` `nb-1-big-CompressionInfo.db`):
 
-* `000d` → length 13, followed by `LZ4Compressor` (UTF-8)
-* `0040` → chunk length field; raw value 0x00004000 = 16 384 bytes = 16 KiB (the default)
-* `007f ffff ff00 0000 0000` → total uncompressed length (u64 example)
-* subsequent bytes begin the chunk map
+| Byte range | Bytes              | Field                     | Value                                          |
+| ---------- | ------------------ | ------------------------- | ---------------------------------------------- |
+| 0x00–0x01  | `000d`             | `writeUTF` length         | 13                                             |
+| 0x02–0x0e  | `4c5a…736f72`      | compressor name           | `LZ4Compressor`                                |
+| 0x0f–0x12  | `00000000`         | option count              | 0                                              |
+| 0x13–0x16  | `00004000`         | chunk length              | 16 384 bytes = 16 KiB (the default)            |
+| 0x17–0x1a  | `7fffffff`         | max compressed length     | `Integer.MAX_VALUE` (`min_compress_ratio = 0`) |
+| 0x1b–0x22  | `0000000000001efe` | total uncompressed length | 7 934 bytes                                    |
+| 0x23–0x26  | `00000001`         | chunk count               | 1                                              |
+| 0x27–0x2e  | `0000000000000000` | chunk offset\[0]          | 0                                              |
 
-Note: Older materials often describe the chunk map as “varint pairs”; Cassandra 5.0 uses fixed-width fields for several header values and format-dependent encodings for the map. Always consult the pinned source for exact widths.
+The file ends after the last chunk offset: 47 bytes total for this single-chunk example. There is no trailing metadata checksum in `CompressionInfo.db` (`CompressionMetadata.Writer.writeHeader()` writes the header and offsets only).
+
+Note: Older materials often describe the chunk map as “varint pairs”. It is not: every field in `CompressionInfo.db` is fixed-width big-endian, and the map is a flat `u64` offset array. Always consult the pinned source for exact widths.
 
 Exact widths (NB, Cassandra 5.0):
 
-| Field                         | Type/width   | Endianness | Notes                                                 |
-| ----------------------------- | ------------ | ---------- | ----------------------------------------------------- |
-| compressor\_name\_length      | u16          | big        | length prefix of class name (Java `writeUTF`)         |
-| compressor\_name              | UTF-8 bytes  | —          | e.g., `LZ4Compressor`, `SnappyCompressor`             |
-| option\_count                 | u32          | big        | number of key-value option pairs                      |
-| option\_key\[i]               | UTF-8 string | —          | repeated `option_count` times                         |
-| option\_value\[i]             | UTF-8 string | —          | repeated `option_count` times                         |
-| chunk\_length                 | u32          | big        | uncompressed bytes per chunk; default 16 384 (16 KiB) |
-| max\_compressed\_length       | u32          | big        | present only for format version ≥ “na” (3.0+)         |
-| total\_uncompressed\_length   | u64          | big        | table payload size before compression                 |
-| chunk\_count                  | u32          | big        | number of chunks                                      |
-| chunk\_offsets\[chunk\_count] | u64 each     | big        | byte offset of each compressed chunk in `Data.db`     |
+| Field                         | Type/width   | Endianness | Notes                                                                                                                                        |
+| ----------------------------- | ------------ | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| compressor\_name\_length      | u16          | big        | length prefix of class name (Java `writeUTF`)                                                                                                |
+| compressor\_name              | UTF-8 bytes  | —          | e.g., `LZ4Compressor`, `SnappyCompressor`                                                                                                    |
+| option\_count                 | u32          | big        | number of key-value option pairs                                                                                                             |
+| option\_key\[i]               | UTF-8 string | —          | repeated `option_count` times                                                                                                                |
+| option\_value\[i]             | UTF-8 string | —          | repeated `option_count` times                                                                                                                |
+| chunk\_length                 | u32          | big        | uncompressed bytes per chunk; default 16 384 (16 KiB)                                                                                        |
+| max\_compressed\_length       | u32          | big        | version-gated at ≥ `na`, so always present in scope; `0x7fffffff` by default; a stored chunk of this length or longer is raw, not compressed |
+| total\_uncompressed\_length   | u64          | big        | table payload size before compression                                                                                                        |
+| chunk\_count                  | u32          | big        | number of chunks                                                                                                                             |
+| chunk\_offsets\[chunk\_count] | u64 each     | big        | byte offset of each compressed chunk in `Data.db`                                                                                            |
 
-Map encoding by format:
+Map encoding:
 
-* NB (5.0): offsets only; per-chunk compressed length = next\_offset − offset − 4 (subtract trailing CRC word in `Data.db`)
-* Legacy variants: may differ; this guide focuses on NB; consult sources when targeting older formats
+* NB/NA (Cassandra 5.0 BIG): offsets only; per-chunk compressed length = next\_offset − offset − 4 (subtract the trailing CRC word stored inline in `Data.db`). For the last chunk, substitute the `Data.db` file length for `next_offset`: `compressedFileLength − offset − 4` (`CompressionMetadata.chunkFor()`, line 252: `new Chunk(chunkOffset, (int)(nextChunkOffset - chunkOffset - 4))`).
+* `oa`/`da` BTI SSTables use the same `CompressionInfo.db` serialization — the chunk map is a property of the compression layer, not of the index format.
+
+### `max_compressed_length` and the incompressible-chunk fallback
+
+[Section titled “max\_compressed\_length and the incompressible-chunk fallback”](#max_compressed_length-and-the-incompressible-chunk-fallback)
+
+`max_compressed_length` is not a cosmetic field: it is the switch that decides whether a stored chunk is compressed at all.
+
+* **Writer** (`CompressedSequentialWriter.flushData()`, lines 159–178): if `compressedLength >= maxCompressedLength`, the writer discards the compressed output and stores the **raw** bytes instead. When the raw length is itself below `maxCompressedLength` (only possible for the final short chunk) it zero-pads up to `maxCompressedLength`; readers avoid reading the padding because they bound the chunk by `data_length`.
+* **Reader**: a chunk whose stored length is `>= max_compressed_length` is returned as-is with no decompression. There is no flag byte — the length comparison *is* the encoding.
+* **Default value**: `Integer.MAX_VALUE` (`0x7fffffff`). Cassandra derives it from `min_compress_ratio`, whose default is `0.0` (`CompressionParams.java:47–48`, `calcMaxCompressedLength()` at line 186), and `calcMinCompressRatio()` maps `Integer.MAX_VALUE` back to ratio 0 (line 198). With the default, no chunk can ever reach `max_compressed_length`, so the raw path is effectively disabled.
+
+> **Warning: `max_compressed_length == 0` is corrupt metadata and fails OPEN**
+>
+> A zero `max_compressed_length` makes the reader’s `stored_length >= max_compressed_length` test true for *every* chunk, so a reader silently hands back still-compressed bytes as if they were plaintext instead of raising an error. The per-chunk CRC32 cannot catch this: the CRC is computed over the genuinely-on-disk compressed bytes and matches.
+>
+> Cassandra never emits this value — but note that `CompressionParams.validate()` (lines 441–455) does **not** reject it either: it rejects `maxCompressedLength < 0` and `chunkLength < maxCompressedLength < Integer.MAX_VALUE`, and `0` passes both tests. Zero is excluded by construction (the default is `Integer.MAX_VALUE`), not by a validation rule, so a reader must treat it as a corruption case rather than assuming it cannot occur.
+>
+> **Reader requirement**: reject `max_compressed_length == 0` when parsing `CompressionInfo.db`, before any chunk read, so no downstream consumer can observe an unguarded zero. CQLite fails **closed** at parse time with a typed error (`cqlite-core/src/storage/sstable/compression_info.rs:226–230`, `Error::InvalidFormat("max_compressed_length cannot be zero")`); the same guard is repeated in the point-read seek paths (`reader/data_access/compressed_offset.rs:107`, `reader/data_access/big_promoted.rs:681`). Issues #2524, #2529.
 
 Chunk map (first two entries, decoded — units: bytes, endianness: big):
 
@@ -11762,7 +11858,10 @@ From `test_timeseries/event_store`:
 
 Invariants:
 
-* Offsets are strictly increasing; lengths are positive; last chunk may be ≤ `chunk length`.
+* Offsets are strictly increasing.
+* Every data-bearing chunk decompresses to `min(chunk_length, data_length − i * chunk_length)` bytes, so the last data-bearing chunk may be shorter than `chunk_length`.
+* A stored compressed length of 0 is possible **only** for a degenerate trailing chunk whose logical start is already at/beyond `data_length` (see the warning below); no data-bearing chunk has length 0.
+* `chunk_count` may exceed `ceil(data_length / chunk_length)` by one for the same reason — treat `data_length`, not `chunk_count`, as the authority on how much data exists.
 
 NB CRC micro-proof (same file):
 
@@ -11779,14 +11878,33 @@ chunk 1: start=0x1e35 comp_len=2666 expected=0x657f7155 computed=0x657f7155 matc
 
 1. Parse `CompressionInfo.db` to get chunk map
 
-2. For each chunk:
+2. For each chunk index `i`:
 
+   * Stop if `i * chunk_length >= data_length` — the chunk holds no uncompressed bytes (see the degenerate-trailing-chunk warning below)
    * Seek to `offset` in Data.db
    * Read `length` bytes (compressed data)
    * Read next 4 bytes as CRC32 (big-endian u32)
    * Validate: compute CRC32 over compressed bytes
-   * Decompress chunk
-   * Parse row data from decompressed bytes
+   * Decompress chunk, unless `length >= max_compressed_length` (raw chunk — use the bytes as-is)
+   * Truncate the chunk’s uncompressed bytes to `min(chunk_length, data_length - i * chunk_length)`
+   * Parse row data from those bytes
+
+> **Warning: degenerate empty trailing chunks**
+>
+> Some compressed SSTables carry a trailing entry in the chunk map that maps to **no uncompressed bytes at all**: `chunk_count` is one greater than `ceil(data_length / chunk_length)`, so the last entry’s logical start (`(chunk_count − 1) * chunk_length`) is already at or beyond `data_length`.
+>
+> This is a legitimate on-disk state, not corruption. `CompressedSequentialWriter.flushData()` unconditionally appends an offset and increments `chunkCount` for whatever is in the buffer — including an empty buffer — and `SequentialWriter.syncInternal()` (lines 213–217) calls `doFlush(0)` with no empty-buffer guard. Any `sync()` on a chunk boundary therefore emits an empty chunk. The common trigger is the preemptive-open path used while writing/compacting (`BigTableWriter.openFinalEarly()` → `dataWriter.sync()`, called from `SSTableRewriter.java:272`), which is why the artifact appears on *some* SSTables rather than all of them.
+>
+> **How common**: 16 of the 126 compressed SSTables in the CQLite v3.5 validation corpus have one (including several compacted `system_schema` tables); the other 110 — also including compacted generations — do not. Do **not** assume every compacted SSTable has one, and do not assume none does.
+>
+> **The bound is on the LOGICAL start, not on the chunk offset.** `chunk_offsets` are offsets into the *compressed* `Data.db`, while `data_length` is the *uncompressed* total — comparing the two is a category error. Concretely, in `test_big/wide_partition` `nb-2` the trailing chunk 113 sits at compressed offset 27 814 in a 27 823-byte `Data.db`, while `data_length` is 1 837 037; only `113 * 16384 = 1 851 392 >= 1 837 037` identifies it. Cassandra’s own reader never touches such a chunk because every logical position `< data_length` maps to an earlier index (`CompressionMetadata.chunkFor()` indexes by `position / chunkLength`).
+>
+> **What breaks if you decompress it** depends on the compressor, so a reader must not rely on the decompressor to reject it:
+>
+> * **Deflate** stores a genuinely 0-byte payload — `DeflateCompressor.compressArray()` returns 0 when `Deflater.needsInput()` is true for empty input (lines 113-114) — and inflating 0 bytes is a hard error.
+> * **LZ4** stores 5 bytes (`00 00 00 00 00`: the 4-byte little-endian length prefix `0` plus an empty block) with a valid CRC32 `c622f71d`, verified in the corpus. It decompresses cleanly to zero bytes, so the defect stays latent until a consumer treats a zero-length chunk as a parse boundary.
+>
+> **Reader requirement**: bound chunk iteration by `data_length` at the single chunk-yield source, so every downstream consumer inherits the bound. CQLite does this in `cqlite-core/src/storage/sstable/reader/block_io.rs:382–394` (`logical_start >= data_length` → EOF), and the per-chunk decompressor derives each chunk’s expected uncompressed length from `data_length` the same way (`chunk_decompressor.rs:197`). This is metadata-driven — no byte sniffing (no-heuristics mandate, issue #28). Issue #2225, PR #2242.
 
 ### CRC32 Algorithm
 
@@ -11806,23 +11924,34 @@ chunk 1: start=0x1e35 comp_len=2666 expected=0x657f7155 computed=0x657f7155 matc
 * **Don’t treat first 4 bytes as magic number** - they’re chunk data
 * **Don’t treat first 4 bytes as CRC prefix** - CRCs are trailing
 * **Don’t try to read blocks without CompressionInfo.db** - you’ll read garbage sizes
+* **Don’t forget the `− 4`** when deriving a chunk’s compressed length from consecutive offsets; the delta includes the inline CRC word
+* **Don’t decompress all `chunk_count` entries** — stop at the `data_length` logical bound
+* **Don’t compare a chunk offset against `data_length`** — offsets are compressed positions, `data_length` is an uncompressed total
+* **Don’t assume `max_compressed_length` is decorative** — it selects raw vs compressed storage, and zero must be rejected
 
 ### Key Takeaways
 
 [Section titled “Key Takeaways”](#key-takeaways)
 
 * `CompressionInfo.db` maps chunks and validates integrity for modern formats.
-* Chunk length is central to random vs scan performance; choose based on workload.
+* Chunk length is central to random vs scan performance; choose based on workload, and always read it from the file (default 16 KiB, not 64 KiB).
 * Readers must pair `CompressionInfo.db` with `Data.db` to read the right byte ranges.
+* `data_length` — not `chunk_count` — is the authority on how much uncompressed data exists.
+* `max_compressed_length` is a functional switch; a zero value fails open and must be rejected at parse time.
 
 ### References
 
 [Section titled “References”](#references)
 
-* `CompressionMetadata` (reader / writer): [io/compress/CompressionMetadata.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java) — `open()` lines 76–112, `writeHeader()` lines 375–398
-* `CompressionParams` (defaults): [schema/CompressionParams.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) — `DEFAULT_CHUNK_LENGTH` line 47 (note: `schema/`, not `io/compress/`)
-* `CompressedSequentialWriter` (chunk write + CRC): [io/compress/CompressedSequentialWriter.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java) — `flushData()` lines 140–206
+* `CompressionMetadata` (reader / writer): [io/compress/CompressionMetadata.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java) — `open()` lines 76–112, `chunkFor()` lines 235–253 (the `− 4` CRC adjustment at line 252), `writeHeader()` lines 375–398
+* `CompressionParams` (defaults + validation): [schema/CompressionParams.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) — `DEFAULT_CHUNK_LENGTH` line 47, `DEFAULT_MIN_COMPRESS_RATIO` line 48, `calcMaxCompressedLength()` line 186, `validate()` lines 441–455 (note: `schema/`, not `io/compress/`)
+* `CompressedSequentialWriter` (chunk write + CRC + raw fallback): [io/compress/CompressedSequentialWriter.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java) — `flushData()` lines 140–206
+* `SequentialWriter` (unguarded flush on sync): [io/util/SequentialWriter.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/SequentialWriter.java) — `syncInternal()` lines 213–217
+* `CompressedChunkReader` (scan readahead, raw-chunk read): [io/util/CompressedChunkReader.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java) — `instantiateRebufferer()` line 93, `ScanCompressedReader` lines 156–199, `Standard.forScan()` line 241, `Mmap` line 321 (no `forScan()` override)
+* `ChunkCache` (drops the scan intent): [cache/ChunkCache.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/cache/ChunkCache.java) — `instance` gating line 53, `CachingRebufferer.instantiateRebufferer()` lines 262–265
+* `Config` (defaults): [config/Config.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/config/Config.java) — `compressed_read_ahead_buffer_size` line 341, `file_cache_enabled` line 499
 * `BigFormat` (version gate): [io/sstable/format/big/BigFormat.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java) — `hasMaxCompressedLength` line 401
+* CASSANDRA-15452 (scan readahead, shipped 5.0.4): [CHANGES.txt](https://github.com/apache/cassandra/blob/cassandra-5.0.8/CHANGES.txt) line 122
 
 For implementation details, see Appendix C.
 
@@ -12110,6 +12239,7 @@ We compare mmapped vs buffered vs async IO and how page cache, read-ahead, and p
 
 * Differences among mmapped, buffered, and async IO
 * Page cache behavior and read-ahead implications
+* Why madvise advice forces a scan-vs-point read-plane split
 * Practical defaults for most workloads
 
 ## IO Modes
@@ -12122,6 +12252,19 @@ We compare mmapped vs buffered vs async IO and how page cache, read-ahead, and p
 
 For a concrete cache/IO implementation walkthrough, see Appendix C.
 
+### madvise is per-mapping, not per-read
+
+[Section titled “madvise is per-mapping, not per-read”](#madvise-is-per-mapping-not-per-read)
+
+`madvise` advice is a property of the mapping, so it cannot be varied per request. That makes the choice of advice a *read-plane* decision rather than a per-call tuning knob:
+
+* `MADV_RANDOM` suppresses kernel readahead. Correct for scattered point lookups, where a partition body is often a few KiB and readahead is pure waste.
+* `MADV_SEQUENTIAL`/no advice leaves readahead in play. Required for an offset-ordered walk of `Data.db`.
+
+A reader with both access patterns therefore needs **two mapping handles** (or two backends) — one advised for point lookups, one unadvised for scans. Cloning a handle to the same mapping is enough; a second `mmap` or file descriptor is not required. If a scan is served from the `MADV_RANDOM` mapping it collapses toward page-at-a-time faulting: CQLite measured \~4–4.5 KiB block requests at \~7 000 reads/s on a compressed scan walk in exactly that configuration (issue #2876, fixed by PR #2882 splitting the scan positional source out of the advised point mapping). Ch. 3 has the details and the code references; the practical rule here is to assert in tests that the scan path never reads through the point source, because the returned bytes are identical either way and only the request sizes differ.
+
+Cassandra reaches the same split differently: it passes the read intent down as `instantiateRebufferer(boolean isScan)` and selects a scan-specific chunk reader with a userspace readahead buffer instead of relying on kernel readahead at all (`CompressedChunkReader.java:93`, CASSANDRA-15452 in 5.0.4). See Ch. 9 for how a chunk cache can silently swallow that intent.
+
 ## Practical Defaults
 
 [Section titled “Practical Defaults”](#practical-defaults)
@@ -12129,8 +12272,9 @@ For a concrete cache/IO implementation walkthrough, see Appendix C.
 * Cassandra 5.0 defaults to `mmap_index_only`: index files are mmap’d; `Data.db` uses buffered I/O. This is the recommended baseline — see Ch. 3 for `IOOptions.java` wiring details.
 * For workloads saturating `Data.db` sequentially, `disk_access_mode: mmap` re-enables full mmap; be aware of JVM address-space pressure on large datasets.
 * Buffered async I/O suits mixed/random workloads and bounded-memory `Data.db` reads.
+* Cassandra’s own chunk cache is **off by default** (`file_cache_enabled = false`, `Config.java:499`), and enabling it disables the scan-readahead path (Ch. 9). Treat “add a cache” and “coalesce scan reads” as one co-design decision, not two independent wins.
 * Keep Bloom enabled; summary sampling reduces seeks
-* Tune prefetch window to match chunk sizes (see Ch. 9)
+* Size the scan read window as a multiple of `chunk_length` read from `CompressionInfo.db` — the 5.0 default is 16 KiB, and Cassandra’s own scan buffer defaults to 256 KiB (`compressed_read_ahead_buffer_size`, `Config.java:341`), i.e. \~16 chunks per read (see Ch. 9)
 
 ### Memory Pressure Handling
 
@@ -12161,7 +12305,8 @@ For a concrete cache/IO implementation walkthrough, see Appendix C.
 
 * Page cache dominates; pick strategies that align with workload
 * Mmap is simple and fast for scans; buffered/async helps control memory and concurrency
-* Prefetch and block caches mitigate random-read penalties
+* madvise advice is per-mapping: give scan and point reads separate handles or separate backends
+* Prefetch and block caches mitigate random-read penalties, but a cache layer that drops the scan intent silently cancels read coalescing
 
 ### References
 
@@ -12171,7 +12316,11 @@ For a concrete cache/IO implementation walkthrough, see Appendix C.
 
   * `IOOptions` (mmap\_index\_only wiring) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/IOOptions.java>
   * `DiskOptimizationStrategy` (MAX\_BUFFER\_SIZE L32) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/DiskOptimizationStrategy.java#L32>
+  * `CompressedChunkReader` (`instantiateRebufferer(isScan)` L93) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java#L93>
+  * `Config` (`file_cache_enabled` L499, `compressed_read_ahead_buffer_size` L341) — <https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/config/Config.java#L499>
   * Reader abstractions and IO options in `org.apache.cassandra.io.*`
+
+* CQLite scan/point plane split: issue #2876, PR #2882 — `cqlite-core/src/storage/sstable/reader/mod.rs:608`
 
 For implementation details, see Appendix C.
 
