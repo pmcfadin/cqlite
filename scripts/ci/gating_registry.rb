@@ -33,6 +33,11 @@ require "json"
 require "optparse"
 require "set"
 require "time"
+# THE VERSION FLOOR, declared and checked in ONE place (issue #2910 round 4).
+# Ruby is the single implementation path here — the python3 fallbacks are gone —
+# so its floor is load-bearing and an unmet one aborts with a named remedy
+# instead of mis-running (macOS system ruby is 2.6). See gating_ruby_floor.rb.
+require_relative "gating_ruby_floor"
 require_relative "gating_policy_rules"
 require_relative "gating_head_emitability"
 
@@ -109,11 +114,12 @@ module GatingRegistry
     triggers.key?("pull_request") || triggers.key?("pull_request_target")
   end
 
+  # `aliases: true` needs Psych >= 3.3, which ships with ruby 3.0 — the floor
+  # gating_ruby_floor.rb declares and enforces. There is deliberately NO
+  # ArgumentError fallback: a silent downgrade to alias-rejecting parsing on an
+  # old interpreter is exactly the mis-run the floor exists to prevent.
   def load_yaml(path)
     YAML.load_file(path, aliases: true)
-  rescue ArgumentError
-    # Older Psych has no `aliases:` keyword.
-    YAML.load_file(path)
   end
 
   def load_registry(path)
@@ -236,6 +242,101 @@ module GatingRegistry
     end.to_set
   end
 
+  # A GitHub login: alphanumerics, hyphens, dots/underscores, and an app's
+  # `[bot]` suffix. Nothing else can be a real actor, and this value is echoed
+  # into a `::warning::` WORKFLOW COMMAND, so it is allowlisted before it gets
+  # there (repo injection doctrine). Withholding an off-shape name rather than
+  # failing keeps a malformed login from RED-ing a legitimate PR.
+  WAIVER_ACTOR_PATTERN = /\A[A-Za-z0-9._\[\]-]{1,64}\z/
+
+  # WHO ACTUALLY APPLIED THE WAIVER (issue #2910 round 4). The diagnostic used to
+  # attribute a waiver to `$GITHUB_ACTOR` — the actor of the event that started
+  # THIS run (a pusher, or whoever hit re-run), not the person who applied
+  # `ci:waive:<tier-id>`. Labels are re-read live on every poll, so that
+  # attribution could name an entirely uninvolved person on the audit trail of a
+  # break-glass. This resolves the real labeller from the PR's `labeled` events.
+  #
+  # Input: one `<label>\t<actor>\t<iso8601>` line per `labeled` event, OLDEST
+  # FIRST (the order the issues-events API returns). The LAST matching event wins
+  # — a label removed and re-applied is attributed to the re-application.
+  #
+  # Returns { tier_id => { actor:, at: epoch-or-nil, iso: } }. An unreadable or
+  # absent feed yields {}, which downgrades the diagnostic to "unresolved" and
+  # withholds the pending-waiver horizon below — it can never GRANT anything.
+  def waiver_provenance(text)
+    text.to_s.each_line.each_with_object({}) do |line, acc|
+      label, actor, created = line.chomp.split("\t", 3)
+      match = WAIVER_LABEL_PATTERN.match(label.to_s.strip)
+      next unless match
+
+      login = actor.to_s.strip
+      login = "(applier withheld: not a github login shape)" unless login.match?(WAIVER_ACTOR_PATTERN)
+      acc[match[1]] = { actor: login, at: parse_epoch(created), iso: created.to_s.strip }
+    end
+  end
+
+  def waiver_attribution(tier_id, context)
+    info = context[:provenance][tier_id]
+    if info.nil?
+      return " (applier UNRESOLVED: no `labeled` event for ci:waive:#{tier_id} could be read; " \
+             "this run's actor is NOT the labeller, so no name is claimed)"
+    end
+
+    at = info[:iso].to_s.empty? ? "an unrecorded time" : info[:iso]
+    " (label applied by #{info[:actor]} at #{at})"
+  end
+
+  # ------------------------------------------------------------ provenance --
+  # A check run is identified to branch protection by NAME ALONE, and ANYTHING
+  # holding `checks:write` on this repository — a GitHub App, an integration, a
+  # `workflow_dispatch`-driven script — can create one. `context_uniqueness_errors`
+  # only rules out same-named JOBS in other workflow files in this repo; it cannot
+  # see a check run minted through the Checks API. Without this, minting
+  # "Flight tier gate" with `conclusion: success` satisfies the tier (issue #2910
+  # round 4).
+  #
+  # So a check run counts for a registered tier only when its PRODUCER is GitHub
+  # Actions. `app.slug`/`app.id` are set by GitHub from the authenticated
+  # creator and are not settable by the creator, which is what makes them
+  # provenance rather than decoration; `details_url` is a cheap second factor
+  # (Actions always points it at the producing run) and is checked for shape, not
+  # trusted on its own.
+  #
+  # FAIL CLOSED: a check run whose producer cannot be established does not
+  # satisfy a tier and does not SHADOW the genuine one either — it is dropped
+  # from the candidate set, and if nothing genuine remains the tier reds with the
+  # impostor named. The strict-direction cost is stated: if GitHub ever stopped
+  # returning `app` on the check-runs endpoint, every tier would red. That is the
+  # correct direction for a merge gate, and `ci:waive:<tier-id>` is the hatch.
+  ACTIONS_APP_SLUG = "github-actions"
+  ACTIONS_APP_ID = 15_368
+  ACTIONS_RUN_URL = %r{\Ahttps?://[^/\s]+/[^/\s]+/[^/\s]+/actions/runs/\d+(?:/|\z)}
+
+  # nil when the producer is provably GitHub Actions; otherwise the reason it is
+  # not, phrased for the failure diagnostic.
+  def provenance_error(run)
+    app = run["app"]
+    unless app.is_a?(Hash)
+      return "the check run carries no `app` object, so its producing application cannot be established"
+    end
+
+    slug = app["slug"].to_s.downcase
+    unless slug == ACTIONS_APP_SLUG || app["id"].to_i == ACTIONS_APP_ID
+      producer = app["slug"] || app["name"] || "(unnamed)"
+      return "it was created by app `#{producer}` (id #{app['id'].inspect}), not GitHub Actions — " \
+             "anything holding `checks:write` can mint a check run with a tier's name"
+    end
+
+    url = run["details_url"].to_s
+    return nil if url.match?(ACTIONS_RUN_URL)
+
+    "its `details_url` #{url.inspect} does not point at an Actions workflow run"
+  end
+
+  def provenanced?(run)
+    provenance_error(run).nil?
+  end
+
   Observation = Struct.new(:state, :tier_id, :context, :check_id, :status, :conclusion, :url, :note)
 
   # Pure decision surface. `final` = the deadline/poll budget is spent, so
@@ -243,7 +344,8 @@ module GatingRegistry
   # `now` (unix seconds, optional) only ages out a superseded conclusion; when it
   # is absent such a tier simply stays non-terminal until `final`.
   def evaluate(registry:, check_runs:, exclude_ids: [], run_id: nil, labels: [], final: false,
-               now: nil, supersession_grace: DEFAULT_SUPERSESSION_GRACE_SECONDS, unemittable: {})
+               now: nil, supersession_grace: DEFAULT_SUPERSESSION_GRACE_SECONDS, unemittable: {},
+               provenance: {})
     # SELF-CHECK (issue #2910 P7). An empty or unparseable `tiers:` would make
     # every observation vacuous and the aggregate green with nothing checked —
     # the one silent-open path in the mechanism. The enrolment rule rejects it
@@ -252,10 +354,13 @@ module GatingRegistry
 
     exclude = exclude_ids.map(&:to_i).to_set
     visible = check_runs.reject { |run| self_excluded?(run, exclude, run_id) }
-    latest = latest_by_context(visible)
+    genuine, impostors = visible.partition { |run| provenanced?(run) }
+    latest = latest_by_context(genuine)
     waived = waived_tier_ids(labels)
     context = { waived: waived, final: final, now: now, grace: supersession_grace,
-                unemittable: unemittable.is_a?(Hash) ? unemittable : {} }
+                unemittable: unemittable.is_a?(Hash) ? unemittable : {},
+                impostors: latest_by_context(impostors),
+                provenance: provenance.is_a?(Hash) ? provenance : {} }
 
     tiers(registry).map { |tier| observe_tier(tier, latest, context) }
   end
@@ -283,7 +388,7 @@ module GatingRegistry
     check_id = run["id"]
 
     if status != "completed"
-      return pending_observation(tier_id, declared, check_id, status, conclusion, url, context)
+      return pending_observation(tier_id, declared, check_id, status, conclusion, url, context, run)
     end
     if conclusion == PASSING_CONCLUSION
       return Observation.new("pass", tier_id, declared, check_id, status, conclusion, url, "")
@@ -306,9 +411,23 @@ module GatingRegistry
   # is different — it can still turn red — so its waiver is honoured only once
   # the deadline is spent.
   def absent_observation(tier_id, declared, context)
+    # An IMPOSTOR is not an absence: a check run with the tier's exact name
+    # exists, but its producer is not GitHub Actions (issue #2910 round 4). Say
+    # so immediately and loudly — it is either an attempt to satisfy the tier
+    # from outside Actions, or an integration accidentally colliding with a
+    # gating context. Both need a human, and neither is waited out.
+    impostor = context[:impostors][declared]
+    if impostor
+      return Observation.new("fail", tier_id, declared, impostor["id"], impostor["status"].to_s,
+                             impostor["conclusion"].to_s, impostor["details_url"].to_s,
+                             "a check run named `#{declared}` exists but does NOT satisfy tier " \
+                             "`#{tier_id}`: #{provenance_error(impostor)}. Provenance could not be " \
+                             "established, so it neither satisfies nor shadows the registered tier")
+    end
     if context[:waived].include?(tier_id)
       return Observation.new("waived", tier_id, declared, nil, "absent", nil, nil,
-                             "absent tier waived by ci:waive:#{tier_id} (nothing to wait for)")
+                             "absent tier waived by ci:waive:#{tier_id} (nothing to wait for)" +
+                             waiver_attribution(tier_id, context))
     end
     # MIGRATION STATE (issue #2910 round 3). The BASE ref registers this tier, but
     # the tree this event ran provably cannot emit its context — so polling it to
@@ -331,10 +450,38 @@ module GatingRegistry
     Observation.new(final ? "fail" : "absent", tier_id, declared, nil, "absent", nil, nil, final ? note : "")
   end
 
-  def pending_observation(tier_id, declared, check_id, status, conclusion, url, context)
-    if context[:final] && context[:waived].include?(tier_id)
-      return Observation.new("waived", tier_id, declared, check_id, status, conclusion, url,
-                             "non-terminal tier waived by ci:waive:#{tier_id}")
+  # A PENDING tier's waiver is normally honoured only at the deadline: the tier
+  # can still turn red, and a failed tier cannot be waived, so the wait buys real
+  # information.
+  #
+  # THE EXCEPTION (issue #2910 round 4). A registered tier subscribes to label
+  # events so its own opt-in label works, so applying `ci:waive:<tier-id>` to a
+  # wedged pull request can itself START the run whose `queued` check run then
+  # holds the waiver hostage for the full hour. The break-glass would be fighting
+  # itself. When the tier's ONLY check run was minted at or after the moment the
+  # waiver label was applied, that run cannot be information the waiver's author
+  # lacked — so the waiver resolves immediately. Requires a resolved label-event
+  # timestamp; without one this returns false and the ordinary deadline rule
+  # applies, so an unreadable events feed can only ever withhold a waiver.
+  def waiver_supersedes_pending?(tier_id, run, context)
+    info = context[:provenance][tier_id]
+    return false if run.nil? || info.nil? || info[:at].nil?
+
+    started = parse_epoch(run["started_at"]) || parse_epoch(run["created_at"])
+    return false if started.nil?
+
+    started >= info[:at]
+  end
+
+  def pending_observation(tier_id, declared, check_id, status, conclusion, url, context, run = nil)
+    if context[:waived].include?(tier_id)
+      caused_by_waiver = waiver_supersedes_pending?(tier_id, run, context)
+      if context[:final] || caused_by_waiver
+        reason = caused_by_waiver ? "its only check run was minted at/after the waiver was applied" : nil
+        note = "non-terminal tier waived by ci:waive:#{tier_id}#{reason ? " (#{reason})" : ''}" +
+               waiver_attribution(tier_id, context)
+        return Observation.new("waived", tier_id, declared, check_id, status, conclusion, url, note)
+      end
     end
     state = context[:final] ? "fail" : "pending"
     note = context[:final] ? "still `#{status}` at the aggregation deadline" : ""
@@ -397,7 +544,10 @@ module GatingRegistry
   # Returns [state, run] where state is :success, :failed, :pending or :absent.
   def recorded_context_result(context:, check_runs:, exclude_ids: [], run_id: nil)
     exclude = exclude_ids.map(&:to_i).to_set
-    visible = check_runs.reject { |run| self_excluded?(run, exclude, run_id) }
+    # The SAME provenance rule as a registered tier (issue #2910 round 4): a
+    # minted `pr-gate-core` success would otherwise let a label event manufacture
+    # a green core, which is precisely what this lookup exists to prevent.
+    visible = check_runs.reject { |run| self_excluded?(run, exclude, run_id) || !provenanced?(run) }
     run = latest_by_context(visible)[context.to_s]
     return [:absent, nil] if run.nil?
     return [:pending, run] if run["status"].to_s != "completed"
@@ -445,6 +595,7 @@ if __FILE__ == $PROGRAM_NAME
   }
 
   options[:context] = nil
+  options[:waiver_events] = nil
   options[:event_workflows_dir] = nil
   options[:event_action] = nil
   options[:base_ref] = nil
@@ -464,6 +615,10 @@ if __FILE__ == $PROGRAM_NAME
     end
     opts.on("--run-id ID") { |v| options[:run_id] = v }
     opts.on("--labels LIST") { |v| options[:labels] = v.split(",").map(&:strip).reject(&:empty?) }
+    opts.on("--waiver-events PATH",
+            "`<label>\\t<actor>\\t<iso8601>` per `labeled` event, oldest first (waiver attribution)") do |v|
+      options[:waiver_events] = v
+    end
     opts.on("--now EPOCH", "unix seconds used to age out a superseded conclusion") do |v|
       options[:now] = v.strip.empty? ? nil : Integer(v, exception: false)
     end
@@ -526,6 +681,9 @@ if __FILE__ == $PROGRAM_NAME
         final: options[:final],
         now: options[:now],
         supersession_grace: options[:grace],
+        provenance: GatingRegistry.waiver_provenance(
+          options[:waiver_events] && File.file?(options[:waiver_events]) ? File.read(options[:waiver_events]) : ""
+        ),
         unemittable: GatingRegistry::HeadEmitability.unemittable(
           registry: registry,
           workflows_dir: options[:event_workflows_dir],

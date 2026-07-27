@@ -1,0 +1,34 @@
+# CODEOWNERS — ownership of the CI trust boundary (issue #2910 round 4).
+#
+# WHY THIS FILE EXISTS. The `required` aggregate reads its registry, its
+# aggregator and its ruby modules from the pull request's BASE ref, so a PR
+# cannot rewrite the check that gates it. The acknowledged RESIDUAL is narrower:
+# a merged PR can still change the classifier of a tier it was itself gated by,
+# and the design named "CODEOWNERS on .github/ and scripts/ci/" as the
+# complementary control for that. No CODEOWNERS file existed anywhere in the
+# repo, so `require_code_owner_reviews` had nothing to resolve and the named
+# control did not exist. This file makes the ownership real.
+#
+# WHAT IT ACTUALLY ENFORCES TODAY, stated honestly rather than assumed:
+#   * GitHub auto-requests review from the owners below on any PR touching these
+#     paths — real, immediate visibility on a trust-boundary edit.
+#   * It does NOT block a merge. The LIVE branch protection on `main` has
+#     `require_code_owner_reviews: false` and `required_approving_review_count: 0`
+#     (the repo merges on the `required` check, per the autonomy doctrine in
+#     CLAUDE.md). The checked-in `.github/branch-protection.json` says `true`;
+#     that file has DRIFTED from the live setting and is not what GitHub applies.
+#   * Turning the residual into a merge-blocking control is an owner decision
+#     (it would require a human review on every agent PR touching `.github/**`),
+#     not something this change makes unilaterally. See
+#     openspec/changes/required-aggregates-sibling-tiers/design.md.
+#
+# The last matching pattern wins, so keep the trust-boundary entries last.
+# scripts/tests/test_gating_registry_policy.sh asserts this file exists and
+# covers both trust-boundary trees; deleting it reds the gate.
+
+# The CI mechanism itself: workflows, actions, the gating-tier registry, and the
+# branch-protection description.
+/.github/ @pmcfadin
+
+# Everything the `required` aggregate executes to decide the merge gate.
+/scripts/ci/ @pmcfadin

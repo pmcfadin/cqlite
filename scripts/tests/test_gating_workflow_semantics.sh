@@ -46,6 +46,22 @@ if ! command -v ruby >/dev/null 2>&1; then
   echo "SKIP: ruby unavailable (the workflow model and the registry reader are ruby)"
   exit 0
 fi
+
+# THE DECLARED RUBY FLOOR (issue #2910 round 4). Ruby is the SINGLE
+# implementation path — the python3 fallbacks were removed — so its version floor
+# became load-bearing at the moment nothing was checking it (macOS system ruby is
+# 2.6 and macOS is a first-class gate host). SKIP WITH THE REASON rather than
+# mis-run: a `filter_map` NoMethodError swallowed by a parser's rescue, or an
+# `aliases:` ArgumentError, would make this suite assert against garbage.
+RUBY_FLOOR_RB="$REPO_ROOT/scripts/ci/gating_ruby_floor.rb"
+if [ ! -f "$RUBY_FLOOR_RB" ]; then
+  echo "FAIL - $RUBY_FLOOR_RB not found (the declared ruby floor cannot be checked)"
+  exit 1
+fi
+if ! ruby "$RUBY_FLOOR_RB" >/dev/null 2>&1; then
+  echo "SKIP: $(ruby "$RUBY_FLOOR_RB" 2>&1 >/dev/null)"
+  exit 0
+fi
 for f in "$FLIGHT_WF" "$REGISTRY_RB" "$REGISTRY_YML"; do
   [ -f "$f" ] || { echo "FAIL - $f not found"; exit 1; }
 done
@@ -75,7 +91,7 @@ contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 cat >"$WORK/simulate.rb" <<'RUBY'
 require "yaml"
 
-workflow_path, context, scenario = ARGV
+workflow_path, context, scenario, run_tier_override = ARGV
 wf = YAML.load_file(workflow_path, aliases: true)
 jobs = wf["jobs"] or abort("simulate: #{workflow_path} has no jobs")
 _job_id, job = jobs.find { |id, j| j.is_a?(Hash) && (j["name"] || id).to_s == context }
@@ -86,11 +102,16 @@ results =
   case scenario
   when "cancelled"    then needs.each_with_object({}) { |n, h| h[n] = "cancelled" }
   when "all-success"  then needs.each_with_object({}) { |n, h| h[n] = "success" }
-  when "inapplicable" then needs.each_with_object({}) { |n, h| h[n] = n == "classify" ? "success" : "skipped" }
+  when "inapplicable", "claimed-but-skipped"
+    needs.each_with_object({}) { |n, h| h[n] = n == "classify" ? "success" : "skipped" }
   when "one-failed"   then needs.each_with_object({}) { |n, h| h[n] = n == "classify" ? "success" : "failure" }
   else abort("simulate: unknown scenario #{scenario.inspect}")
   end
-outputs = { "run_tier" => (scenario == "inapplicable" ? "false" : "true"),
+# The classifier's applicability verdict. `claimed-but-skipped` is the shape
+# where the verdict says the tier applies but none of the work ran; an explicit
+# override models a verdict that was never written or is not a boolean.
+default_verdict = scenario == "inapplicable" ? "false" : "true"
+outputs = { "run_tier" => (run_tier_override || default_verdict),
             "reason" => "simulated #{scenario}" }
 
 condition = job["if"].to_s.gsub(/\s+/, "").downcase
@@ -139,7 +160,7 @@ puts "success"
 RUBY
 
 simulate() {
-  SIM_WORK="$WORK" ruby "$WORK/simulate.rb" "$1" "$2" "$3" 2>"$WORK/simulate.err"
+  SIM_WORK="$WORK" ruby "$WORK/simulate.rb" "$1" "$2" "$3" ${4+"$4"} 2>"$WORK/simulate.err"
 }
 
 FLIGHT_CONTEXT="Flight tier gate"
@@ -185,6 +206,68 @@ else
   bad "MUTANT: the always() variant concluded '$MUTANT_CONCLUSION'; this suite would not have caught the bug"
 fi
 
+# ------------------------------ UNKNOWN MUST NOT READ AS PASS (round 4, S2) --
+# The gate treats `skipped` as a pass because that is how an INAPPLICABLE tier
+# reports itself — a claim about `run_tier`. If the classifier concludes success
+# but `run_tier` is empty or not a boolean (a renamed step id, an output never
+# written, a future refactor), every downstream job is `skipped`, the loop reads
+# them all as passes, and the tier reports SUCCESS with "not applicable to this
+# diff": the exact silent-green defect this whole issue exists to close,
+# reproduced inside the tier's own gate job.
+echo "== an unreadable applicability verdict reds the tier =="
+for verdict in "" "maybe" "TRUE" "1"; do
+  got=$(simulate "$FLIGHT_WF" "$FLIGHT_CONTEXT" inapplicable "$verdict")
+  if [ "$got" = "failure" ]; then
+    ok "run_tier='${verdict}' concludes 'failure' (unknown is not inapplicability)"
+  else
+    bad "run_tier='${verdict}' concluded '$got'; an unreadable verdict passed as 'not applicable'"
+  fi
+done
+for verdict in "true" "false"; do
+  got=$(simulate "$FLIGHT_WF" "$FLIGHT_CONTEXT" inapplicable "$verdict")
+  expected=success
+  [ "$verdict" = "true" ] && expected=failure   # run_tier=true with skipped work
+  if [ "$got" = "$expected" ]; then
+    ok "run_tier='${verdict}' with skipped work concludes '$got'"
+  else
+    bad "run_tier='${verdict}' with skipped work concluded '$got', expected '$expected'"
+  fi
+done
+
+# THE MUTANT: delete the verdict validation and the very first case must go
+# green again — otherwise the assertions above could be satisfied by a gate that
+# reds for some other reason.
+cp "$FLIGHT_WF" "$WORK/flight-unvalidated.yml"
+cat >"$WORK/unvalidate-scope.rb" <<'RUBY'
+# Restore the round-3 tail of the gate script: report the scope, trust it, pass.
+path = ARGV[0]
+text = File.read(path)
+start = text.index("          # UNKNOWN MUST NOT READ AS PASS")
+abort("mutant: the run_tier validation block is gone from #{path}") if start.nil?
+tail = "          echo \"Flight tier gate: PASS\""
+stop = text.index(tail, start)
+abort("mutant: could not find the gate's final PASS line") if stop.nil?
+text[start...stop] = <<~ROUND3
+  #{'          '}if [ "${RUN_TIER:-}" != "true" ]; then
+  #{'            '}echo "Flight tier not applicable to this diff (${SCOPE_REASON:-}); reporting success."
+  #{'          '}fi
+ROUND3
+File.write(path, text)
+RUBY
+ruby "$WORK/unvalidate-scope.rb" "$WORK/flight-unvalidated.yml" || bad "could not build the unvalidated mutant"
+MUTANT_SCOPE=$(simulate "$WORK/flight-unvalidated.yml" "$FLIGHT_CONTEXT" inapplicable "")
+if [ "$MUTANT_SCOPE" = "success" ]; then
+  ok "MUTANT: without the validation an empty run_tier reports SUCCESS (the bug is real and caught)"
+else
+  bad "MUTANT: the unvalidated gate concluded '$MUTANT_SCOPE'; this suite would not have caught S2"
+fi
+MUTANT_CLAIMED=$(simulate "$WORK/flight-unvalidated.yml" "$FLIGHT_CONTEXT" inapplicable "true")
+if [ "$MUTANT_CLAIMED" = "success" ]; then
+  ok "MUTANT: without the consistency check run_tier=true with skipped work also passes"
+else
+  bad "MUTANT: the unvalidated gate concluded '$MUTANT_CLAIMED' for the claimed-but-skipped shape"
+fi
+
 # ------------------------------------- the other half of the chain: required --
 # Whatever GitHub spells the not-run conclusion, the aggregator must treat it as
 # NON-TERMINAL inside the grace and as a FAILURE once the grace — or the deadline
@@ -216,7 +299,7 @@ runs_with_conclusion() {
   fi
   cat >"$WORK/runs.json" <<JSON
 {"check_runs":[
- {"id":4242,"name":"Flight tier gate","status":"completed","conclusion":"$1",
+ {"id":4242,"app":{"slug":"github-actions","id":15368},"name":"Flight tier gate","status":"completed","conclusion":"$1",
   "completed_at":"$CANCELLED_AT",
   "details_url":"https://github.com/o/r/actions/runs/900/job/4242"}
 ]}

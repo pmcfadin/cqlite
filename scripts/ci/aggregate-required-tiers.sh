@@ -36,7 +36,9 @@
 #   --pr-number N              PR number (live labels)  [$PR_NUMBER]
 #   --run-id ID                this workflow run id     [$GITHUB_RUN_ID]
 #   --labels CSV               fallback PR labels       [$PR_LABELS]
-#   --actor NAME               waiver actor for the log [$GITHUB_ACTOR]
+#   --waiver-events-cmd CMD    command printing `<label>\t<actor>\t<iso8601>` per
+#                              `labeled` event, oldest first (waiver attribution
+#                              and the pending-waiver horizon)      [gh api]
 #   --deadline-minutes N       aggregation deadline     [registry effective max]
 #   --deadline-epoch N         absolute deadline (unix seconds); wins over the above
 #   --poll-attempts N          hard cap on fetches      [unbounded until deadline]
@@ -70,7 +72,6 @@ HEAD_SHA="${PR_HEAD_SHA:-}"
 PR_NUMBER_IN="${PR_NUMBER:-}"
 RUN_ID="${GITHUB_RUN_ID:-}"
 PR_LABELS_IN="${PR_LABELS:-}"
-ACTOR="${GITHUB_ACTOR:-unknown}"
 DEADLINE_MINUTES=""
 DEADLINE_EPOCH=""
 POLL_ATTEMPTS=""
@@ -80,6 +81,7 @@ MAX_FETCH_FAILURES="${MAX_FETCH_FAILURES:-6}"
 CHECK_RUNS_CMD="${CHECK_RUNS_CMD:-}"
 SELF_JOBS_CMD="${SELF_JOBS_CMD:-}"
 LABELS_CMD="${LABELS_CMD:-}"
+WAIVER_EVENTS_CMD="${WAIVER_EVENTS_CMD:-}"
 CORE_CONTEXT="${CORE_CONTEXT:-pr-gate-core}"
 CORE_RESULT_IN="${CORE_RESULT:-}"
 EVENT_ACTION_IN="${EVENT_ACTION:-}"
@@ -98,7 +100,6 @@ while [ "$#" -gt 0 ]; do
     --pr-number) PR_NUMBER_IN="$2"; shift 2 ;;
     --run-id) RUN_ID="$2"; shift 2 ;;
     --labels) PR_LABELS_IN="$2"; shift 2 ;;
-    --actor) ACTOR="$2"; shift 2 ;;
     --deadline-minutes) DEADLINE_MINUTES="$2"; shift 2 ;;
     --deadline-epoch) DEADLINE_EPOCH="$2"; shift 2 ;;
     --poll-attempts) POLL_ATTEMPTS="$2"; shift 2 ;;
@@ -114,6 +115,7 @@ while [ "$#" -gt 0 ]; do
     --check-runs-cmd) CHECK_RUNS_CMD="$2"; shift 2 ;;
     --self-jobs-cmd) SELF_JOBS_CMD="$2"; shift 2 ;;
     --labels-cmd) LABELS_CMD="$2"; shift 2 ;;
+    --waiver-events-cmd) WAIVER_EVENTS_CMD="$2"; shift 2 ;;
     --now) NOW_OVERRIDE="$2"; shift 2 ;;
     --summary-file) SUMMARY_FILE="$2"; shift 2 ;;
     --sleep-cmd) SLEEP_CMD="$2"; shift 2 ;;
@@ -131,6 +133,16 @@ fail_closed() {
 }
 
 command -v ruby >/dev/null 2>&1 || fail_closed "ruby is unavailable (needed to read the gating-tier registry)"
+# THE RUBY FLOOR (issue #2910 round 4). Ruby is the single implementation path
+# — the python3 fallbacks were removed — so its version floor became
+# load-bearing. Probe it as a SCRIPT (exit 0/1) rather than letting a library
+# require abort mid-flight, so the diagnostic names the floor and the remedy.
+RUBY_FLOOR_RB="$REPO_ROOT/scripts/ci/gating_ruby_floor.rb"
+[ -f "$RUBY_FLOOR_RB" ] ||
+  fail_closed "scripts/ci/gating_ruby_floor.rb not found (the declared ruby floor cannot be checked)"
+# stderr only; the script writes nothing to a file, so no checkout is dirtied.
+FLOOR_MSG="$(ruby "$RUBY_FLOOR_RB" 2>&1 >/dev/null)" ||
+  fail_closed "${FLOOR_MSG:-ruby is older than the declared gating floor}"
 [ -f "$REGISTRY" ] || fail_closed "registry not found at $REGISTRY"
 
 REGISTRY_RB="$REPO_ROOT/scripts/ci/gating_registry.rb"
@@ -168,18 +180,15 @@ case "$EVENT_ACTION_IN" in
   "" ) : ;;
   *[!a-z_]* ) fail_closed "--event-action is not a pull_request activity type: '$EVENT_ACTION_IN'" ;;
 esac
-# The waiver actor is echoed into a `::warning::` WORKFLOW COMMAND, so it is not
-# merely a log string: the repo's injection doctrine says allowlist-validate
-# anything event-derived before it reaches one. A GitHub login is alphanumerics,
-# hyphens, dots/underscores and an app's `[bot]` suffix — nothing else can be a
-# real actor. Withholding an off-shape name (rather than failing closed) keeps a
-# malformed actor from RED-ING a legitimate PR: this value only ever decorates a
-# diagnostic, so a false red here would be pure cost.
-case "$ACTOR" in
-  "" ) ACTOR="unknown" ;;
-  *[!A-Za-z0-9._\[\]-]* ) ACTOR="(actor withheld: not a github login shape)" ;;
-esac
-[ "${#ACTOR}" -gt 64 ] && ACTOR="(actor withheld: over-long)"
+# WAIVER ATTRIBUTION (issue #2910 round 4). This used to name `$GITHUB_ACTOR` —
+# the actor of the event that started THIS run (a pusher, or whoever hit re-run),
+# NOT whoever applied `ci:waive:<tier-id>`. Labels are re-read live on every
+# poll, so a waiver applied by one person could be attributed to another on the
+# audit trail of a break-glass. The real labeller is resolved from the pull
+# request's `labeled` events instead; the resolved login is allowlisted in
+# gating_registry.rb before it reaches a `::warning::` workflow command, and an
+# unreadable feed downgrades the diagnostic to "UNRESOLVED" rather than
+# guessing. The same timestamps give a pending tier's waiver its horizon.
 
 # --------------------------------------------------- migration detection ----
 # Round 2 moved the registry to the BASE ref; that split WHERE THE REGISTRY LIVES
@@ -234,6 +243,14 @@ fi
 # ever withhold a waiver, never grant one.
 if [ -z "$LABELS_CMD" ] && [ -n "$REPO_SLUG" ] && [ -n "$PR_NUMBER_IN" ]; then
   LABELS_CMD="gh api \"repos/${REPO_SLUG}/pulls/${PR_NUMBER_IN}\" --jq '.labels[].name'"
+fi
+# WHO applied a waiver, and WHEN (issue #2910 round 4). The issues-events API is
+# the authoritative record of the `labeled` events on this pull request, returned
+# OLDEST FIRST — the order gating_registry.rb expects (last matching event wins).
+# Read only when a waiver label is actually present, so the ordinary path costs
+# no extra API call.
+if [ -z "$WAIVER_EVENTS_CMD" ] && [ -n "$REPO_SLUG" ] && [ -n "$PR_NUMBER_IN" ]; then
+  WAIVER_EVENTS_CMD="gh api --paginate \"repos/${REPO_SLUG}/issues/${PR_NUMBER_IN}/events?per_page=100\" --jq '.[] | select(.event == \"labeled\") | [.label.name, (.actor.login // \"unknown\"), .created_at] | @tsv'"
 fi
 # The core context's ALREADY RECORDED result for this head sha. `filter=all` (not
 # `latest`) is load-bearing: on a label-triggered run our own skipped core job
@@ -369,6 +386,8 @@ FETCH_FAILURES=0
 INTERVAL="$POLL_INITIAL_SECONDS"
 VERDICT=""
 LABELS_NOW="$PR_LABELS_IN"
+WAIVER_EVENTS_FILE="$WORK_DIR/waiver-events.tsv"
+: >"$WAIVER_EVENTS_FILE"
 
 # The PR's CURRENT labels, re-read every poll so a waiver applied while this job
 # waits takes effect without a re-run. A failed read falls back to the event
@@ -385,6 +404,29 @@ read_labels() {
   LABELS_NOW="$PR_LABELS_IN"
 }
 
+# The `labeled` events behind any ACTIVE waiver label: who applied it and when.
+# Two uses, both fail-safe — the attribution in the diagnostic, and the horizon
+# that lets a waiver resolve a tier whose only check run the waiver's own label
+# event minted. An empty file means "unresolved": the waiver still applies at the
+# deadline exactly as before, and no name is claimed. This can never GRANT a
+# waiver the labels did not already carry.
+read_waiver_events() {
+  : >"$WAIVER_EVENTS_FILE"
+  case "$LABELS_NOW" in
+    *ci:waive:*) ;;
+    *) return 0 ;;
+  esac
+  [ -n "$WAIVER_EVENTS_CMD" ] || return 0
+
+  if eval "$WAIVER_EVENTS_CMD" >"$WAIVER_EVENTS_FILE" 2>"$WORK_DIR/waiver-events.err"; then
+    return 0
+  fi
+  sed 's/^/  /' "$WORK_DIR/waiver-events.err" >&2 || true
+  echo "::warning::could not read this pull request's label events; a waiver will still apply at the" \
+       "aggregation deadline, but it will not be attributed to whoever applied it" >&2
+  : >"$WAIVER_EVENTS_FILE"
+}
+
 evaluate_once() {
   # $1 = "final" to spend the deadline (unresolved tiers become failures).
   local final_flag=""
@@ -395,6 +437,7 @@ evaluate_once() {
     return 4
   fi
   read_labels
+  read_waiver_events
 
   # `|| rc=$?` keeps this an OR-list, so `set -e` never kills the shell on a
   # deliberate non-zero verdict code (0 pass / 1 fail / 3 keep waiting).
@@ -406,6 +449,7 @@ evaluate_once() {
     --exclude-ids-file "$SELF_IDS_FILE" \
     --run-id "${RUN_ID:-}" \
     --labels "$LABELS_NOW" \
+    --waiver-events "$WAIVER_EVENTS_FILE" \
     --now "${NOW_OVERRIDE:-$(date +%s)}" \
     ${EVENT_ARGS[@]+"${EVENT_ARGS[@]}"} \
     $final_flag >"$OBSERVATIONS" 2>"$WORK_DIR/evaluate.err" || rc=$?
@@ -508,9 +552,11 @@ while IFS=$'\x1f' read -r state tier context check_id status conclusion url note
       ;;
     waived)
       WAIVED_TIERS="${WAIVED_TIERS}${tier} "
-      echo "::warning::required gating tier '${tier}' WAIVED by ci:waive:${tier} (actor: ${ACTOR}): ${note}" >&2
+      # The note carries the RESOLVED labeller (or an explicit "UNRESOLVED"); this
+      # line claims no actor of its own — see the attribution note above.
+      echo "::warning::required gating tier '${tier}' WAIVED by ci:waive:${tier}: ${note}" >&2
       emit ""
-      emit "> :warning: tier \`${tier}\` was waived by label \`ci:waive:${tier}\` (actor: ${ACTOR}) — ${note}"
+      emit "> :warning: tier \`${tier}\` was waived by label \`ci:waive:${tier}\` — ${note}"
       ;;
   esac
 done <"$OBSERVATIONS"

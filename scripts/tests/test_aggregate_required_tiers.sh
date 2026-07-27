@@ -34,6 +34,22 @@ if ! command -v ruby >/dev/null 2>&1; then
   echo "SKIP: ruby unavailable (the gating-tier registry reader needs it)"
   exit 0
 fi
+
+# THE DECLARED RUBY FLOOR (issue #2910 round 4). Ruby is the SINGLE
+# implementation path — the python3 fallbacks were removed — so its version floor
+# became load-bearing at the moment nothing was checking it (macOS system ruby is
+# 2.6 and macOS is a first-class gate host). SKIP WITH THE REASON rather than
+# mis-run: a `filter_map` NoMethodError swallowed by a parser's rescue, or an
+# `aliases:` ArgumentError, would make this suite assert against garbage.
+RUBY_FLOOR_RB="$REPO_ROOT/scripts/ci/gating_ruby_floor.rb"
+if [ ! -f "$RUBY_FLOOR_RB" ]; then
+  echo "FAIL - $RUBY_FLOOR_RB not found (the declared ruby floor cannot be checked)"
+  exit 1
+fi
+if ! ruby "$RUBY_FLOOR_RB" >/dev/null 2>&1; then
+  echo "SKIP: $(ruby "$RUBY_FLOOR_RB" 2>&1 >/dev/null)"
+  exit 0
+fi
 if [ ! -f "$AGG_REAL" ]; then
   echo "FAIL - $AGG_REAL not found"
   exit 1
@@ -68,33 +84,33 @@ runs_file() { printf '%s/runs-%s.json' "$WORK" "$1"; }
 
 cat >"$(runs_file all-pass)" <<'JSON'
 {"check_runs":[
- {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
- {"id":1002,"name":"Beta gate","status":"completed","conclusion":"success",
+ {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/502/job/1002"},
- {"id":1500,"name":"perf advisory","status":"completed","conclusion":"failure",
+ {"id":1500,"app":{"slug":"github-actions","id":15368},"name":"perf advisory","status":"completed","conclusion":"failure",
   "details_url":"https://github.com/o/r/actions/runs/503/job/1500"},
- {"id":9001,"name":"pr-gate-core","status":"completed","conclusion":"success",
+ {"id":9001,"app":{"slug":"github-actions","id":15368},"name":"pr-gate-core","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/777/job/9001"},
- {"id":9002,"name":"required","status":"in_progress","conclusion":null,
+ {"id":9002,"app":{"slug":"github-actions","id":15368},"name":"required","status":"in_progress","conclusion":null,
   "details_url":"https://github.com/o/r/actions/runs/777/job/9002"}
 ]}
 JSON
 
 cat >"$(runs_file one-pending)" <<'JSON'
 {"check_runs":[
- {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
- {"id":1002,"name":"Beta gate","status":"in_progress","conclusion":null,
+ {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"in_progress","conclusion":null,
   "details_url":"https://github.com/o/r/actions/runs/502/job/1002"}
 ]}
 JSON
 
 cat >"$(runs_file one-failed)" <<'JSON'
 {"check_runs":[
- {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
- {"id":1002,"name":"Beta gate","status":"completed","conclusion":"failure",
+ {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"failure",
   "details_url":"https://github.com/o/r/actions/runs/502/job/1002"}
 ]}
 JSON
@@ -103,7 +119,7 @@ JSON
 # must not gate anything.
 cat >"$(runs_file one-absent)" <<'JSON'
 {"check_runs":[
- {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"}
 ]}
 JSON
@@ -111,11 +127,11 @@ JSON
 # Re-run, newest green: the older failure must NOT be latched.
 cat >"$(runs_file rerun-green)" <<'JSON'
 {"check_runs":[
- {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
- {"id":1002,"name":"Beta gate","status":"completed","conclusion":"failure",
+ {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"failure",
   "details_url":"https://github.com/o/r/actions/runs/502/job/1002"},
- {"id":1099,"name":"Beta gate","status":"completed","conclusion":"success",
+ {"id":1099,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/599/job/1099"}
 ]}
 JSON
@@ -123,11 +139,11 @@ JSON
 # Re-run, newest non-terminal: the older SUCCESS must NOT be latched either.
 cat >"$(runs_file rerun-pending)" <<'JSON'
 {"check_runs":[
- {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
- {"id":1002,"name":"Beta gate","status":"completed","conclusion":"success",
+ {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/502/job/1002"},
- {"id":1099,"name":"Beta gate","status":"in_progress","conclusion":null,
+ {"id":1099,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"in_progress","conclusion":null,
   "details_url":"https://github.com/o/r/actions/runs/599/job/1099"}
 ]}
 JSON
@@ -140,13 +156,13 @@ JSON
 # drop ours and leave the sibling failure decisive.
 cat >"$(runs_file self-shadow)" <<'JSON'
 {"check_runs":[
- {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"failure",
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"failure",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
- {"id":9003,"name":"Alpha gate","status":"completed","conclusion":"success",
+ {"id":9003,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/777/job/9003"},
- {"id":1002,"name":"Beta gate","status":"completed","conclusion":"success",
+ {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/502/job/1002"},
- {"id":9004,"name":"Beta gate","status":"completed","conclusion":"success",
+ {"id":9004,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/777/job/9004"}
 ]}
 JSON
@@ -171,9 +187,9 @@ PAST_GRACE=$((CANCELLED_EPOCH + 4000))
 
 cat >"$(runs_file beta-cancelled)" <<JSON
 {"check_runs":[
- {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
- {"id":1002,"name":"Beta gate","status":"completed","conclusion":"cancelled",
+ {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"cancelled",
   "completed_at":"$CANCELLED_AT",
   "details_url":"https://github.com/o/r/actions/runs/502/job/1002"}
 ]}
@@ -183,12 +199,12 @@ JSON
 # latest, so supersession is detected POSITIVELY rather than guessed.
 cat >"$(runs_file beta-superseded)" <<JSON
 {"check_runs":[
- {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
- {"id":1002,"name":"Beta gate","status":"completed","conclusion":"cancelled",
+ {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"cancelled",
   "completed_at":"$CANCELLED_AT",
   "details_url":"https://github.com/o/r/actions/runs/502/job/1002"},
- {"id":1099,"name":"Beta gate","status":"completed","conclusion":"success",
+ {"id":1099,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/599/job/1099"}
 ]}
 JSON
@@ -230,10 +246,93 @@ exit 0
 EOF
 chmod +x "$WORK/labels-late.sh"
 
+# ---- waiver-provenance fixtures (issue #2910 round 4) ---------------------
+# WHO applied `ci:waive:<tier>`, and WHEN, from the PR's `labeled` events
+# (oldest first, the order the issues-events API returns). The old diagnostic
+# named $GITHUB_ACTOR — the actor of the event that started the RUN, which for a
+# live-re-read waiver can be an entirely uninvolved person.
+WAIVER_AT="2026-01-01T00:00:00Z"
+WAIVER_EPOCH=1767225600
+printf 'needs-decision\tpm-bot\t2025-12-30T00:00:00Z\nci:waive:beta\treal-labeller\t%s\n' \
+  "$WAIVER_AT" >"$WORK/waiver-events.tsv"
+# A label removed and re-applied: the LAST `labeled` event is the attribution.
+printf 'ci:waive:beta\tfirst-labeller\t2025-12-31T00:00:00Z\nci:waive:beta\tsecond-labeller\t%s\n' \
+  "$WAIVER_AT" >"$WORK/waiver-events-relabelled.tsv"
+# The resolved login lands in a `::warning::` workflow command, so it keeps the
+# allowlist treatment — now applied where the value is resolved (ruby), not to a
+# value the shell merely passed through.
+printf 'ci:waive:beta\tevil::error::injected\t%s\n' "$WAIVER_AT" >"$WORK/waiver-events-injection.tsv"
+printf 'ci:waive:beta\tdependabot[bot]\t%s\n' "$WAIVER_AT" >"$WORK/waiver-events-bot.tsv"
+WAIVER_EVENTS="cat $WORK/waiver-events.tsv"
+
+# A PENDING beta whose check run was minted AFTER the waiver was applied — i.e.
+# the run the waiver's own label event started. Waiting it out to the deadline
+# would be the break-glass fighting itself.
+cat >"$(runs_file beta-pending-after-waiver)" <<JSON
+{"check_runs":[
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
+ {"id":1600,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"queued","conclusion":null,
+  "started_at":"2026-01-01T00:00:30Z",
+  "details_url":"https://github.com/o/r/actions/runs/601/job/1600"}
+]}
+JSON
+# The same tier pending from a run that predates the waiver: ordinary semantics,
+# the waiver waits for the deadline because the tier can still turn red.
+cat >"$(runs_file beta-pending-before-waiver)" <<JSON
+{"check_runs":[
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
+ {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"in_progress","conclusion":null,
+  "started_at":"2025-12-31T23:00:00Z",
+  "details_url":"https://github.com/o/r/actions/runs/502/job/1002"}
+]}
+JSON
+
+# ---- provenance fixtures (issue #2910 round 4) -----------------------------
+# A check run is identified to branch protection by NAME ALONE, and anything
+# holding `checks:write` can mint one. These are the impostors.
+cat >"$(runs_file beta-foreign-app)" <<'JSON'
+{"check_runs":[
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
+ {"id":9999,"app":{"slug":"helpful-bot","id":424242},"name":"Beta gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/502/job/9999"}
+]}
+JSON
+cat >"$(runs_file beta-no-app)" <<'JSON'
+{"check_runs":[
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
+ {"id":9999,"name":"Beta gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/502/job/9999"}
+]}
+JSON
+cat >"$(runs_file beta-foreign-url)" <<'JSON'
+{"check_runs":[
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
+ {"id":9999,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"success",
+  "details_url":"https://example.invalid/not-an-actions-run"}
+]}
+JSON
+# An impostor must not SHADOW the genuine run either: here the real tier failed
+# and a higher-id forgery reports success.
+cat >"$(runs_file beta-forged-over-real-failure)" <<'JSON'
+{"check_runs":[
+ {"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
+ {"id":1002,"app":{"slug":"github-actions","id":15368},"name":"Beta gate","status":"completed","conclusion":"failure",
+  "details_url":"https://github.com/o/r/actions/runs/502/job/1002"},
+ {"id":9999,"app":{"slug":"helpful-bot","id":424242},"name":"Beta gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/502/job/9999"}
+]}
+JSON
+
 # A LONE check-run object (exactly one check run on the head, un-enveloped) is a
 # shape variation, not a reason to red the gate.
 cat >"$(runs_file lone-object)" <<'JSON'
-{"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+{"id":1001,"app":{"slug":"github-actions","id":15368},"name":"Alpha gate","status":"completed","conclusion":"success",
  "details_url":"https://github.com/o/r/actions/runs/501/job/1001"}
 JSON
 
@@ -401,40 +500,77 @@ else
 fi
 
 echo "== waivers =="
-invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta" --actor tester
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -eq 0 ]; then ok "a waiver excuses an absent tier"; else bad "absent+waived expected exit 0: $OUT"; fi
 if contains "$OUT" "::warning::" && contains "$OUT" "beta"; then
   ok "the honoured waiver emits a warning annotation naming the tier"
 else
   bad "no warning annotation for the honoured waiver: $OUT"
 fi
-if contains "$(cat "$SUMMARY")" 'tester'; then ok "the summary records the waiver actor"; else bad "summary omits the waiver actor"; fi
-
-# The actor is EVENT-DERIVED and lands inside a `::warning::` workflow command,
-# so it gets the same allowlist treatment as every other injected value (round 3
-# R5). An off-shape name is withheld rather than echoed; a real app login with a
-# `[bot]` suffix must NOT be (a false withholding would hide who waived).
-invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
-  --labels "ci:waive:beta" --actor 'evil::error::injected'
-if [ "$RC" -eq 0 ] && ! contains "$OUT" "::error::injected"; then
-  ok "an actor carrying a workflow-command payload is withheld, not interpolated"
+if contains "$(cat "$SUMMARY")" 'real-labeller'; then
+  ok "the summary records who applied the waiver"
 else
-  bad "the actor reached the annotation verbatim (rc=$RC): $OUT"
+  bad "summary omits the waiver applier: $(cat "$SUMMARY")"
 fi
-if contains "$OUT" "actor withheld"; then
+
+# ------------------------------------ waiver ATTRIBUTION (round 4, R6) -----
+# The diagnostic used to name $GITHUB_ACTOR: the actor of the event that started
+# THIS run — a pusher, or whoever hit re-run — not whoever applied the label.
+# Since labels are re-read live on every poll, that could put the wrong name on
+# the audit trail of a break-glass. THE MUTANT is the run actor itself: it is set
+# to a name that must NOT appear anywhere in the output.
+echo "== the waiver is attributed to the LABELLER, not to this run's actor =="
+GITHUB_ACTOR=wrong-person \
+  invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+if [ "$RC" -eq 0 ] && contains "$OUT" "real-labeller" && ! contains "$OUT" "wrong-person"; then
+  ok "the resolved labeller is named and the run's actor is not (the old attribution was wrong)"
+else
+  bad "attribution named the run actor or lost the labeller (rc=$RC): $OUT"
+fi
+
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "cat $WORK/waiver-events-relabelled.tsv"
+if [ "$RC" -eq 0 ] && contains "$OUT" "second-labeller" && ! contains "$OUT" "first-labeller"; then
+  ok "a label removed and re-applied is attributed to the most recent labelling"
+else
+  bad "re-application was attributed to the wrong event (rc=$RC): $OUT"
+fi
+
+# An unreadable events feed must WITHHOLD the claim, not invent one — and must
+# not withhold the waiver itself (that would red a PR for an API blip).
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "false"
+if [ "$RC" -eq 0 ] && contains "$OUT" "UNRESOLVED"; then
+  ok "an unreadable label-event feed still honours the waiver but claims no name"
+else
+  bad "the unresolved-attribution path misbehaved (rc=$RC): $OUT"
+fi
+
+# The RESOLVED login lands inside a `::warning::` workflow command, so it keeps
+# the allowlist treatment; a real app login with a `[bot]` suffix must NOT be
+# withheld (a false withholding would hide who waived).
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "cat $WORK/waiver-events-injection.tsv"
+if [ "$RC" -eq 0 ] && ! contains "$OUT" "::error::injected"; then
+  ok "an applier carrying a workflow-command payload is withheld, not interpolated"
+else
+  bad "the applier reached the annotation verbatim (rc=$RC): $OUT"
+fi
+if contains "$OUT" "applier withheld"; then
   ok "the withholding is stated rather than silent"
 else
-  bad "an off-shape actor was dropped with no diagnostic: $OUT"
+  bad "an off-shape applier was dropped with no diagnostic: $OUT"
 fi
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
-  --labels "ci:waive:beta" --actor 'dependabot[bot]'
+  --labels "ci:waive:beta" --waiver-events-cmd "cat $WORK/waiver-events-bot.tsv"
 if [ "$RC" -eq 0 ] && contains "$OUT" 'dependabot[bot]'; then
   ok "a legitimate app login keeps its [bot] suffix (no false withholding)"
 else
-  bad "a real app actor was withheld (rc=$RC): $OUT"
+  bad "a real app applier was withheld (rc=$RC): $OUT"
 fi
 
-invoke "cat $(runs_file one-failed)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta" --actor tester
+invoke "cat $(runs_file one-failed)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -ne 0 ]; then ok "a waiver cannot excuse a FAILED tier"; else bad "failed+waived wrongly passed"; fi
 if contains "$OUT" "cannot be waived"; then
   ok "the failed+waived case states that a failed tier cannot be waived"
@@ -442,14 +578,14 @@ else
   bad "no 'cannot be waived' diagnostic: $OUT"
 fi
 
-invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:alpha" --actor tester
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:alpha" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -ne 0 ] && contains "$OUT" "beta"; then
   ok "a waiver is scoped to one tier (beta still gates)"
 else
   bad "waiver leaked across tiers (rc=$RC): $OUT"
 fi
 
-invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:*,ci:waive-all,waive" --actor tester
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:*,ci:waive-all,waive" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -ne 0 ]; then ok "there is no blanket waiver"; else bad "a blanket-looking label waived everything"; fi
 
 # ------------------------------------------------- supersession (#2910 P2) --
@@ -529,7 +665,7 @@ fi
 echo "== waiver labels are re-read while the aggregation waits =="
 rm -f "$WORK/labels.count"
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 5 \
-  --labels-cmd "$WORK/labels-late.sh" --actor tester
+  --labels-cmd "$WORK/labels-late.sh" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -eq 0 ]; then
   ok "a waiver applied AFTER the run started is honoured without a re-run"
 else
@@ -537,7 +673,7 @@ else
 fi
 
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
-  --labels-cmd "false" --labels "ci:waive:beta" --actor tester
+  --labels-cmd "false" --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -eq 0 ] && contains "$OUT" "falling back to the event payload labels"; then
   ok "an unreadable label source falls back to the payload labels and says so"
 else
@@ -554,19 +690,82 @@ fi
 # ------------------------------------- waived ABSENT does not idle (P8) -----
 echo "== a waived ABSENT tier resolves immediately; a waived PENDING one still waits =="
 : >"$WORK/sleep.log"
-invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 5 --labels "ci:waive:beta" --actor tester
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 5 --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -eq 0 ] && [ ! -s "$WORK/sleep.log" ]; then
   ok "a waived absent tier does not hold a runner for the whole deadline (no polls)"
 else
   bad "a waived absent tier burned the poll budget (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log"))"
 fi
 : >"$WORK/sleep.log"
-invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 3 --labels "ci:waive:beta" --actor tester
+invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 3 --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -eq 0 ] && [ -s "$WORK/sleep.log" ]; then
   ok "a waived PENDING tier is still waited out (it could still turn red)"
 else
   bad "a waived pending tier short-circuited (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log"))"
 fi
+
+# ------------------------- the break-glass must not fight itself (round 4) --
+# A registered tier subscribes to label events so its own opt-in label works, so
+# applying `ci:waive:<tier>` can START the very run whose `queued` check run then
+# holds the waiver hostage for the full hour. When the tier's only check run was
+# minted at/after the waiver was applied, it cannot be information the waiver's
+# author lacked, so the waiver resolves at once. The DISCRIMINATOR is the pair:
+# the same fixture dated BEFORE the waiver must still be waited out.
+echo "== a waiver resolves a tier whose only run its own label event minted =="
+: >"$WORK/sleep.log"
+invoke "cat $(runs_file beta-pending-after-waiver)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+if [ "$RC" -eq 0 ] && [ ! -s "$WORK/sleep.log" ]; then
+  ok "a pending run minted after the waiver resolves immediately (no polls burned)"
+else
+  bad "the waiver was held hostage by the run it started (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log"))"
+fi
+if contains "$OUT" "minted at/after the waiver was applied"; then
+  ok "the short-circuit states WHY it applied"
+else
+  bad "the horizon short-circuit is silent about its reason: $OUT"
+fi
+: >"$WORK/sleep.log"
+invoke "cat $(runs_file beta-pending-before-waiver)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+if [ "$RC" -eq 0 ] && [ -s "$WORK/sleep.log" ]; then
+  ok "a run that PREDATES the waiver is still waited out (the horizon discriminates)"
+else
+  bad "the horizon swallowed a pre-existing in-flight tier (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log"))"
+fi
+: >"$WORK/sleep.log"
+invoke "cat $(runs_file beta-pending-after-waiver)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels "ci:waive:beta" --waiver-events-cmd "false"
+if [ "$RC" -eq 0 ] && [ -s "$WORK/sleep.log" ]; then
+  ok "without a resolved label-event time there is no horizon (it can only withhold)"
+else
+  bad "an unresolved waiver time still short-circuited (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log"))"
+fi
+
+# ------------------------------------------- PROVENANCE (round 4, S4) ------
+# A registered tier is satisfied by a check run with the declared NAME. Nothing
+# stopped that check run coming from somewhere other than GitHub Actions:
+# `context_uniqueness_errors` only rules out same-named jobs in other workflow
+# FILES, and cannot see a check run minted through the Checks API by any app
+# holding `checks:write`.
+echo "== only GitHub Actions can satisfy a registered tier =="
+provenance_case() {
+  local fixture="$1" label="$2" needle="$3"
+  invoke "cat $(runs_file "$fixture")" "$WORK/self-ids.txt" "$EXPIRED" 1
+  if [ "$RC" -eq 1 ] && contains "$OUT" "beta" && contains "$OUT" "$needle"; then
+    ok "$label"
+  else
+    bad "$label — expected a named red (rc=$RC): $OUT"
+  fi
+}
+provenance_case beta-foreign-app \
+  "a same-named check run from another app does NOT satisfy the tier" "not GitHub Actions"
+provenance_case beta-no-app \
+  "a check run with no identifiable producer fails closed" "cannot be established"
+provenance_case beta-foreign-url \
+  "an Actions-labelled run whose details_url is not an Actions run fails closed" "details_url"
+provenance_case beta-forged-over-real-failure \
+  "a higher-id forgery cannot SHADOW the genuine failed run" "Beta gate"
 
 # ---------------------------------- registry self-check + shapes (P7/P10) ---
 echo "== the aggregator refuses a registry that would aggregate nothing =="
@@ -613,18 +812,18 @@ if [ "$?" -ne 0 ]; then ok "a missing registry fails closed"; else bad "missing 
 
 cat >"$(runs_file core-recorded-success)" <<'JSON'
 {"check_runs":[
- {"id":8000,"name":"pr-gate-core","status":"completed","conclusion":"success",
+ {"id":8000,"app":{"slug":"github-actions","id":15368},"name":"pr-gate-core","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/700/job/8000"},
- {"id":9001,"name":"pr-gate-core","status":"completed","conclusion":"skipped",
+ {"id":9001,"app":{"slug":"github-actions","id":15368},"name":"pr-gate-core","status":"completed","conclusion":"skipped",
   "details_url":"https://github.com/o/r/actions/runs/777/job/9001"}
 ]}
 JSON
 
 cat >"$(runs_file core-recorded-failure)" <<'JSON'
 {"check_runs":[
- {"id":8000,"name":"pr-gate-core","status":"completed","conclusion":"failure",
+ {"id":8000,"app":{"slug":"github-actions","id":15368},"name":"pr-gate-core","status":"completed","conclusion":"failure",
   "details_url":"https://github.com/o/r/actions/runs/700/job/8000"},
- {"id":9001,"name":"pr-gate-core","status":"completed","conclusion":"skipped",
+ {"id":9001,"app":{"slug":"github-actions","id":15368},"name":"pr-gate-core","status":"completed","conclusion":"skipped",
   "details_url":"https://github.com/o/r/actions/runs/777/job/9001"}
 ]}
 JSON
@@ -635,14 +834,14 @@ JSON
 # refactor that treated "found a check run" as sufficient would go green here.
 cat >"$(runs_file core-only-self)" <<'JSON'
 {"check_runs":[
- {"id":9001,"name":"pr-gate-core","status":"completed","conclusion":"skipped",
+ {"id":9001,"app":{"slug":"github-actions","id":15368},"name":"pr-gate-core","status":"completed","conclusion":"skipped",
   "details_url":"https://github.com/o/r/actions/runs/777/job/9001"}
 ]}
 JSON
 
 cat >"$(runs_file core-absent)" <<'JSON'
 {"check_runs":[
- {"id":7000,"name":"some other check","status":"completed","conclusion":"success",
+ {"id":7000,"app":{"slug":"github-actions","id":15368},"name":"some other check","status":"completed","conclusion":"success",
   "details_url":"https://github.com/o/r/actions/runs/700/job/7000"}
 ]}
 JSON
@@ -713,7 +912,7 @@ if [ "$RC" -ne 0 ]; then ok "an unreadable core lookup fails closed"; else bad "
 # tier that never reported, during a run whose core was NOT re-executed.
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 3 \
   --core-result skipped --event-action labeled \
-  --core-runs-cmd "cat $(runs_file core-recorded-success)" --labels "ci:waive:beta" --actor tester
+  --core-runs-cmd "cat $(runs_file core-recorded-success)" --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -eq 0 ] && contains "$OUT" "WAIVED"; then
   ok "a waiver applied by label takes effect in a run that did not re-execute the core"
 else
@@ -885,7 +1084,7 @@ fi
 echo "== a deliberate rename can still be shipped, via the documented waiver =="
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 5 \
   --event-workflows-dir "$(event_tree renamed)" --event-action synchronize --base-ref main \
-  --labels "ci:waive:beta" --actor tester
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -eq 0 ] && contains "$OUT" "WAIVED"; then
   ok "ci:waive:<tier-id> clears a migration state (a registry change takes effect once merged)"
 else
@@ -951,6 +1150,11 @@ count_failing_verdicts() {
   [ "$RC" -ne 0 ] && n=$((n + 1))
   invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 1 --base-ref 'main;rm -rf /'
   [ "$RC" -ne 0 ] && n=$((n + 1))
+  # round 4: a check run that carries the tier's name but not its provenance.
+  invoke "cat $(runs_file beta-foreign-app)" "$WORK/self-ids.txt" "$EXPIRED" 1
+  [ "$RC" -ne 0 ] && n=$((n + 1))
+  invoke "cat $(runs_file beta-forged-over-real-failure)" "$WORK/self-ids.txt" "$EXPIRED" 1
+  [ "$RC" -ne 0 ] && n=$((n + 1))
   printf '%s' "$n"
 }
 
@@ -960,10 +1164,10 @@ REAL_FAILURES=$(count_failing_verdicts)
 AGG="$WORK/stub-aggregator.sh"
 STUB_FAILURES=$(count_failing_verdicts)
 AGG="$AGG_REAL"
-if [ "$REAL_FAILURES" -eq 10 ]; then
-  ok "the real aggregator fails all 10 discriminating states"
+if [ "$REAL_FAILURES" -eq 12 ]; then
+  ok "the real aggregator fails all 12 discriminating states"
 else
-  bad "the real aggregator failed only $REAL_FAILURES/10 discriminating states"
+  bad "the real aggregator failed only $REAL_FAILURES/12 discriminating states"
 fi
 if [ "$STUB_FAILURES" -eq 0 ]; then
   ok "the always-exit-0 stub fails none of them, so this suite would go RED under it"

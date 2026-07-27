@@ -160,9 +160,35 @@ correct semantics. Details:
 
   What base-ref evaluation *does* guarantee is that the SET of tiers, their contexts, and the aggregation
   logic cannot be swapped out by an ordinary registry/script edit — the cheap, reviewable-looking change.
-  The remaining path is a conspicuous diff to `.github/workflows/pr-gate.yml`; CODEOWNERS on `.github/` +
-  `scripts/ci/` is the complementary control, and `aggregator_trust_boundary_errors` keeps the base-ref
-  checkout from being dropped by accident rather than by intent.
+  The remaining path is a conspicuous diff to `.github/workflows/pr-gate.yml`, and
+  `aggregator_trust_boundary_errors` keeps the base-ref checkout from being dropped by accident rather
+  than by intent.
+
+- **The "CODEOWNERS" control, corrected (round 4).** Earlier drafts of this section closed by naming
+  "CODEOWNERS on `.github/` + `scripts/ci/`" as the complementary control for that residual. **There was
+  no CODEOWNERS file anywhere in the repo** — not `.github/CODEOWNERS`, not `/CODEOWNERS`, not
+  `docs/CODEOWNERS` — so `require_code_owner_reviews` had nothing to resolve and the named control did
+  not exist. A design must not delegate its one acknowledged residual to a control that does not exist,
+  so this round makes the ownership real *and* states its true strength:
+  - `.github/CODEOWNERS` now assigns `/.github/` and `/scripts/ci/` to `@pmcfadin`. GitHub honours a
+    CODEOWNERS file at `.github/CODEOWNERS` (also `/CODEOWNERS`, `docs/CODEOWNERS`); the syntax is
+    `<pattern> <owner>…`, last match wins. Validated against GitHub's own
+    `GET /repos/{owner}/{repo}/codeowners/errors` endpoint, which reports zero errors for it.
+  - Effect **today**: an automatic review REQUEST on every PR touching those trees — visibility, not
+    enforcement.
+  - Not enforced: the LIVE branch protection on `main` has `require_code_owner_reviews: false` and
+    `required_approving_review_count: 0`. `require_code_owner_reviews` was therefore inert
+    *independently of this change*, and the checked-in `.github/branch-protection.json` (which says
+    `true`, with `require_last_push_approval: true` and one required approval) has **drifted from the
+    live settings**. That drift predates this change and is recorded here rather than silently fixed:
+    flipping it on would require a human approval on every agent PR touching `.github/**`, which
+    contradicts the merge-on-green autonomy doctrine in `CLAUDE.md` and is an owner decision.
+  - Honest statement of the residual: **visible, but uncontrolled at merge time.** The mechanised
+    controls are base-ref evaluation, `aggregator_trust_boundary_errors`, and the enrolment rule; the
+    review request is a notification on top of them.
+  - `scripts/tests/test_gating_registry_policy.sh` asserts the file exists and covers both trees, so
+    the control cannot silently disappear again (the mutant deletes the `/.github/` rule and the suite
+    reds).
 
 ## Mechanics
 

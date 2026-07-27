@@ -39,7 +39,21 @@ permissions:
 
 concurrency:
   group: flight-ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A new head sha obsoletes the in-flight run, so cancel it. A LABEL mutation
+  # does not (issue #2910 round 4): this workflow subscribes to `labeled` so its
+  # own `ci:flight-full` opt-in is reachable, and `github.event_name ==
+  # 'pull_request'` is TRUE for `labeled`/`unlabeled` — so the previous
+  # expression behaved exactly like `true` on a label event. The consequence was
+  # not merely wasteful: applying the `ci:waive:flight` break-glass to a wedged
+  # PR CANCELLED this tier's in-flight run and minted a fresh `queued` check run,
+  # and a PENDING tier's waiver is only honoured at the aggregation deadline. The
+  # escape hatch made the situation worse before it made it better.
+  # gating_event_rules.rb `concurrency_errors` rejects any cancellation policy on
+  # a registered tier that is not provably false for label events.
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request'
+    && github.event.action != 'labeled'
+    && github.event.action != 'unlabeled' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -362,7 +376,51 @@ jobs:
             exit 1
           fi
 
-          if [ "${RUN_TIER:-}" != "true" ]; then
+          # UNKNOWN MUST NOT READ AS PASS (issue #2910 round 4). Everything above
+          # is `success` or `skipped`, and `skipped` is a pass ONLY because an
+          # inapplicable tier reports itself that way — which is a claim about
+          # `run_tier`. If the classifier concluded success but `run_tier` is
+          # empty or not a boolean (a renamed step id, an output that never got
+          # written, a future refactor), then test/full/image are all `skipped`,
+          # the loop reads that as a pass, and the tier reports SUCCESS with
+          # "not applicable to this diff" — reproducing, inside this tier's own
+          # gate, the exact silent-green defect this issue exists to close. So
+          # the verdict is validated, not assumed.
+          case "${RUN_TIER:-}" in
+            true|false) ;;
+            *)
+              echo "::error::Flight tier gate: the classifier's applicability verdict is" \
+                   "run_tier='${RUN_TIER:-}' (neither 'true' nor 'false'). An unreadable verdict is" \
+                   "NOT inapplicability — the tier reds rather than reporting a vacuous success." \
+                   "Check the classify job's 'scope' step output."
+              {
+                echo ""
+                echo "**Flight tier FAILED: unreadable applicability verdict"
+                echo "\`run_tier='${RUN_TIER:-}'\` (expected \`true\` or \`false\`).**"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+
+          # The other half of the same claim: when the tier IS applicable, the
+          # work must actually have run. `skipped` is a legitimate pass only
+          # under run_tier=false. (`image` is excluded: it never runs on a pull
+          # request by design.)
+          if [ "$RUN_TIER" = "true" ]; then
+            inconsistent=""
+            [ "$TEST_RESULT" = "success" ] || inconsistent="${inconsistent}test(${TEST_RESULT}) "
+            [ "$FULL_RESULT" = "success" ] || inconsistent="${inconsistent}full(${FULL_RESULT}) "
+            if [ -n "$inconsistent" ]; then
+              echo "::error::Flight tier gate: run_tier=true (${SCOPE_REASON:-no reason recorded}) but" \
+                   "${inconsistent}did not run to success. A mandating diff whose work was skipped must" \
+                   "never report a green tier."
+              {
+                echo ""
+                echo "**Flight tier FAILED: run_tier=true but ${inconsistent}was not a success.**"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          else
             echo "Flight tier not applicable to this diff (${SCOPE_REASON:-}); reporting success."
           fi
           echo "Flight tier gate: PASS"

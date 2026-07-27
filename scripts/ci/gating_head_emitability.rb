@@ -55,6 +55,7 @@
 # comes from a PROVABLE property, evaluated on the first poll, not from a clock.
 
 require "yaml"
+require_relative "gating_ruby_floor"
 
 module GatingRegistry
   module HeadEmitability
@@ -137,6 +138,10 @@ module GatingRegistry
         emitter_reason(workflow, name, context)
     end
 
+    # `aliases: true` is guaranteed by the declared ruby floor (>= 3.0), not
+    # hoped for: on an older Psych this keyword raises ArgumentError, the rescue
+    # below would swallow it, and EVERY tier would silently read "inconclusive"
+    # — a check that looks alive and decides nothing. gating_ruby_floor.rb.
     def parse(path)
       data = YAML.load_file(path, aliases: true)
       data.is_a?(Hash) ? data : nil

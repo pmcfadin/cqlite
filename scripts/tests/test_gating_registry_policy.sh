@@ -35,6 +35,22 @@ if ! command -v ruby >/dev/null 2>&1; then
   echo "SKIP: ruby unavailable (the enrolment rule is ruby)"
   exit 0
 fi
+
+# THE DECLARED RUBY FLOOR (issue #2910 round 4). Ruby is the SINGLE
+# implementation path — the python3 fallbacks were removed — so its version floor
+# became load-bearing at the moment nothing was checking it (macOS system ruby is
+# 2.6 and macOS is a first-class gate host). SKIP WITH THE REASON rather than
+# mis-run: a `filter_map` NoMethodError swallowed by a parser's rescue, or an
+# `aliases:` ArgumentError, would make this suite assert against garbage.
+RUBY_FLOOR_RB="$REPO_ROOT/scripts/ci/gating_ruby_floor.rb"
+if [ ! -f "$RUBY_FLOOR_RB" ]; then
+  echo "FAIL - $RUBY_FLOOR_RB not found (the declared ruby floor cannot be checked)"
+  exit 1
+fi
+if ! ruby "$RUBY_FLOOR_RB" >/dev/null 2>&1; then
+  echo "SKIP: $(ruby "$RUBY_FLOOR_RB" 2>&1 >/dev/null)"
+  exit 0
+fi
 for f in "$REGISTRY_RB" "$VALIDATOR_RB"; do
   [ -f "$f" ] || { echo "FAIL - $f not found"; exit 1; }
 done
@@ -757,6 +773,62 @@ subst "$BASE/workflows/pr-gate.yml" "$DIR/workflows/pr-gate.yml" \
 run_policy "$DIR"
 expect_fail_named "label events plus cancel-in-progress: true is rejected" "cancel-in-progress"
 
+# ROUND 4: the same rule on a REGISTERED TIER, where the consequence is worse
+# than a wasted re-run — applying `ci:waive:<tier>` to a wedged PR CANCELS the
+# tier's in-flight run and mints a fresh `queued` check run, and a pending tier's
+# waiver is only honoured at the deadline. The break-glass fights the tier it is
+# waiving. And the round-2 form could not see it: it rejected only the literal
+# `true`, while `github.event_name == 'pull_request'` is TRUE for `labeled`.
+echo "== a registered tier must not cancel its own in-flight run on a label event =="
+tier_cancellation_case() {
+  local name="$1" expr="$2" outcome="$3"
+  local dir
+  dir=$(new_case "$name")
+  subst "$BASE/workflows/alpha.yml" "$dir/workflows/alpha.yml" \
+    "on:
+  pull_request:
+    paths-ignore:" \
+    "on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths-ignore:" \
+    "concurrency:
+  group: alpha" \
+    "concurrency:
+  group: alpha
+  cancel-in-progress: $expr"
+  run_policy "$dir"
+  if [ "$outcome" = reject ]; then
+    expect_fail_named "a tier cancelling on label events ($expr) is rejected" "break-glass"
+  elif [ "$RC" -eq 0 ]; then
+    ok "a tier whose cancellation is action-aware ($expr) is accepted"
+  else
+    bad "a label-safe tier cancellation ($expr) was rejected: $OUT"
+  fi
+}
+tier_cancellation_case tier-cancel-literal 'true' reject
+# The EXACT expression the real flight-ci.yml carried, and the reason the
+# round-2 rule was not enough.
+tier_cancellation_case tier-cancel-event-name \
+  "\${{ github.event_name == 'pull_request' }}" reject
+tier_cancellation_case tier-cancel-action-aware \
+  "\${{ github.event.action != 'labeled' && github.event.action != 'unlabeled' }}" accept
+tier_cancellation_case tier-cancel-false 'false' accept
+
+# And the REAL tier, not just a synthetic one: the rule is only worth having if
+# the shipped workflow obeys it.
+# Asked of the RULE itself, not of a string match: the shipped tier must be
+# label-safe by the same predicate the gate enforces.
+if ruby -e '
+  require ARGV[0]
+  wf = YAML.load_file(ARGV[1], aliases: true)
+  exit(GatingRegistry.label_safe_cancellation?(wf.dig("concurrency", "cancel-in-progress")) ? 0 : 1)
+' "$REPO_ROOT/scripts/ci/gating_registry.rb" "$REPO_ROOT/.github/workflows/flight-ci.yml" 2>/dev/null; then
+  ok "the real flight-ci.yml does not cancel its in-flight run on a label event"
+else
+  bad "the real flight-ci.yml would cancel the very tier a ci:waive label is waiving"
+fi
+
 echo "== the aggregator must evaluate the mechanism from the BASE ref =="
 DIR=$(new_case head-evaluated)
 subst "$BASE/workflows/pr-gate.yml" "$DIR/workflows/pr-gate.yml" \
@@ -900,6 +972,125 @@ run_validator() {
 run_validator "$DIR" "$VALIDATOR_RB"
 expect_fail_named "validate-workflows.rb reds on an unenrolled workflow" "brand-new-tier.yml"
 
+# ---------------------------------------- the declared ruby floor (round 4) --
+# Round 4 deleted the python3 fallbacks, making ruby the SINGLE implementation
+# path — and thereby promoting its version floor to load-bearing at the moment
+# nothing verified it. macOS system ruby is 2.6; `filter_map` is 2.7 and
+# `YAML.load_file(aliases:)` is psych 3.3 / ruby 3.0.
+
+echo "== the ruby floor is declared in one place and discriminates =="
+FLOOR_RB="$REPO_ROOT/scripts/ci/gating_ruby_floor.rb"
+FLOOR=$(ruby -e 'require ARGV[0]; print GatingRubyFloor::FLOOR' "$FLOOR_RB" 2>/dev/null)
+if [ "$FLOOR" = "3.0.0" ]; then
+  ok "the declared floor is ruby $FLOOR"
+else
+  bad "could not read the declared floor (got '${FLOOR:-}')"
+fi
+
+# THE MUTANT: the predicate must reject every interpreter below the floor and
+# accept the ones at or above it. Without both directions "satisfied?" could be a
+# constant.
+floor_verdicts=""
+for probe in 2.6.10:no 2.7.8:no 3.0.0:yes 3.2.3:yes 4.0.0:yes garbage:no; do
+  version="${probe%%:*}"
+  want="${probe#*:}"
+  got=$(ruby -e 'require ARGV[0]; print(GatingRubyFloor.satisfied?(ARGV[1]) ? "yes" : "no")' \
+    "$FLOOR_RB" "$version" 2>/dev/null)
+  [ "$got" = "$want" ] || floor_verdicts="${floor_verdicts}${version}(got ${got:-?}, want $want) "
+done
+if [ -z "$floor_verdicts" ]; then
+  ok "the floor predicate accepts >= 3.0 and rejects 2.6/2.7 and an unparseable version"
+else
+  bad "the floor predicate mis-judged: $floor_verdicts"
+fi
+
+# The message must NAME the remedy: a version gate that only says "no" trains
+# people to delete it.
+FLOOR_MSG=$(ruby -e 'require ARGV[0]; print GatingRubyFloor.message("2.6.10")' "$FLOOR_RB" 2>/dev/null)
+if contains "$FLOOR_MSG" "3.0.0" && contains "$FLOOR_MSG" "2.6" && contains "$FLOOR_MSG" "filter_map"; then
+  ok "the floor diagnostic names the floor, the macOS trap and the constructs that set it"
+else
+  bad "the floor diagnostic is not actionable: $FLOOR_MSG"
+fi
+
+# ANTI-DRIFT: every gating ruby entry point must go through that one declaration,
+# or a new file using a 3.0 construct would reintroduce the silent mis-run.
+missing_floor=""
+for f in gating_registry.rb gating_policy_rules.rb gating_event_rules.rb \
+         gating_head_emitability.rb validate-workflows.rb; do
+  contains "$(cat "$REPO_ROOT/scripts/ci/$f")" 'require_relative "gating_ruby_floor"' ||
+    missing_floor="${missing_floor}$f "
+done
+if [ -z "$missing_floor" ]; then
+  ok "every gating ruby file requires the single floor declaration"
+else
+  bad "these gating ruby files bypass the declared floor: $missing_floor"
+fi
+
+# ------------------------------------------- CODEOWNERS exists (round 4) -----
+# The trust-boundary rationale in design.md closed by naming "CODEOWNERS on
+# .github/ + scripts/ci/" as the complementary control for its one acknowledged
+# residual. No CODEOWNERS file existed ANYWHERE in the repo, so
+# `require_code_owner_reviews` had nothing to resolve and the named control did
+# not exist. It exists now, and this keeps it from silently disappearing again.
+echo "== the trust boundary has code owners =="
+CODEOWNERS=""
+for candidate in "$REPO_ROOT/.github/CODEOWNERS" "$REPO_ROOT/CODEOWNERS" "$REPO_ROOT/docs/CODEOWNERS"; do
+  [ -f "$candidate" ] && CODEOWNERS="$candidate" && break
+done
+if [ -n "$CODEOWNERS" ]; then
+  ok "a CODEOWNERS file exists at a location GitHub honours (${CODEOWNERS#"$REPO_ROOT"/})"
+else
+  bad "no CODEOWNERS at .github/CODEOWNERS, /CODEOWNERS or docs/CODEOWNERS"
+fi
+
+# `covers <file> <path>` — is there a rule whose pattern governs <path>, with at
+# least one owner? Deliberately literal: only the directory-prefix forms GitHub
+# honours are recognised, so a typo does not read as coverage.
+codeowners_covers() {
+  ruby -e '
+    path, target = ARGV
+    rules = File.readlines(path).filter_map do |line|
+      body = line.sub(/#.*/, "").strip
+      next if body.empty?
+
+      pattern, *owners = body.split(/\s+/)
+      next if owners.empty? || owners.none? { |o| o.start_with?("@") }
+
+      pattern
+    end
+    prefixes = [target, "/#{target}", "#{target}**", "/#{target}**", "*"]
+    exit(rules.any? { |r| prefixes.include?(r) } ? 0 : 1)
+  ' "$1" "$2"
+}
+if [ -n "$CODEOWNERS" ]; then
+  uncovered=""
+  for tree in .github/ scripts/ci/; do
+    codeowners_covers "$CODEOWNERS" "$tree" || uncovered="${uncovered}${tree} "
+  done
+  if [ -z "$uncovered" ]; then
+    ok "CODEOWNERS covers both trust-boundary trees with a real owner"
+  else
+    bad "CODEOWNERS does not cover: $uncovered"
+  fi
+
+  # THE MUTANT: drop the `.github/` rule and the assertion above must red — a
+  # coverage check that passes on a file without the rule proves nothing.
+  subst "$CODEOWNERS" "$WORK/codeowners-mutant" "/.github/ @pmcfadin" "# (rule removed)"
+  if codeowners_covers "$WORK/codeowners-mutant" ".github/"; then
+    bad "MUTANT: the coverage check still passed with the .github/ rule removed"
+  else
+    ok "MUTANT: removing the .github/ rule reds the coverage check (it discriminates)"
+  fi
+  # An owner-less pattern is not coverage either.
+  printf '/.github/\n' >"$WORK/codeowners-ownerless"
+  if codeowners_covers "$WORK/codeowners-ownerless" ".github/"; then
+    bad "MUTANT: a pattern with no owner counted as coverage"
+  else
+    ok "MUTANT: a pattern with no owner does not count as coverage"
+  fi
+fi
+
 # ------------------------------------------------- non-vacuity (#2910 7.4) --
 
 echo "== non-vacuity: an always-pass stub enrolment rule must break this suite =="
@@ -921,6 +1112,9 @@ if __FILE__ == $PROGRAM_NAME
   exit 0
 end
 RUBY
+# The ruby FLOOR is not the thing being stubbed — validate-workflows.rb requires
+# it in its own right (issue #2910 round 4) — so the real one comes along.
+cp "$REPO_ROOT/scripts/ci/gating_ruby_floor.rb" "$STUB_DIR/gating_ruby_floor.rb"
 cp "$VALIDATOR_RB" "$STUB_DIR/validate-workflows.rb"
 
 count_rule_rejections() {
@@ -933,7 +1127,8 @@ count_rule_rejections() {
              "$WORK"/case-aggregator-no-label-events \
              "$WORK"/case-two-scopes "$WORK"/case-mandate-drift \
              "$WORK"/case-label-churn "$WORK"/case-head-evaluated \
-             "$WORK"/case-no-event-tree-checkout "$WORK"/case-no-event-dir-input; do
+             "$WORK"/case-no-event-tree-checkout "$WORK"/case-no-event-dir-input \
+             "$WORK"/case-tier-cancel-literal "$WORK"/case-tier-cancel-event-name; do
     run_policy "$dir"
     [ "$RC" -ne 0 ] && n=$((n + 1))
   done
@@ -946,10 +1141,10 @@ RULE="$STUB_DIR/gating_registry.rb"
 STUB_REJECTIONS=$(count_rule_rejections)
 RULE="$REGISTRY_RB"
 
-if [ "$REAL_REJECTIONS" -eq 17 ]; then
-  ok "the real rule rejects all 17 discriminating registries"
+if [ "$REAL_REJECTIONS" -eq 19 ]; then
+  ok "the real rule rejects all 19 discriminating registries"
 else
-  bad "the real rule rejected only $REAL_REJECTIONS/17"
+  bad "the real rule rejected only $REAL_REJECTIONS/19"
 fi
 if [ "$STUB_REJECTIONS" -eq 0 ]; then
   ok "the always-pass stub rejects none, so this suite would go RED under it"

@@ -268,8 +268,15 @@ jobs:
       # tiers execute, so a tier's classifier can be edited to report "not
       # applicable". Base-ref evaluation guarantees the SET of tiers, their
       # contexts and the aggregation logic — not the work a tier chooses to do.
-      # That residual is a visible diff to a registered tier's workflow;
-      # CODEOWNERS on `.github/` + `scripts/ci/` is the complementary control.
+      # That residual is a visible diff to a registered tier's workflow.
+      # `.github/CODEOWNERS` (added in round 4 — no CODEOWNERS file existed
+      # anywhere, so `require_code_owner_reviews` had nothing to resolve) makes
+      # ownership of `.github/` and `scripts/ci/` real enough to AUTO-REQUEST a
+      # review on such a diff. It does NOT block the merge: live branch
+      # protection has `require_code_owner_reviews: false` and zero required
+      # approvals. The residual is therefore VISIBLE but uncontrolled at merge
+      # time; making it blocking is an owner decision (design.md, "Trust
+      # boundary").
       - name: Checkout the base ref's gating mechanism (trusted copy)
         uses: actions/checkout@v5
         with:

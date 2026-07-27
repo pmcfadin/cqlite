@@ -3,6 +3,9 @@
 
 require "optparse"
 require "yaml"
+# Issue #2910 round 4: ruby is the single implementation path for the gating
+# mechanism, so its version floor is load-bearing and checked in one place.
+require_relative "gating_ruby_floor"
 require_relative "gating_registry"
 
 DEFAULT_WORKFLOWS_DIR = ".github/workflows"
