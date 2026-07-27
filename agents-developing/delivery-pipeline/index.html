@@ -306,6 +306,21 @@ visibility. <code dir="auto">flow-activate</code> claims immediately — before 
 (<code dir="auto">claim.sh verify &#x3C;N></code> re-checks holder identity later); on <code dir="auto">CLAIM LOST</code>, back off and take the next
 eligible item.</li>
 </ol>
+<p><strong>Machine prerequisite: git itself must be authenticated (issue #2942).</strong> The lock is a plain <code dir="auto">git push</code>,
+and <code dir="auto">gh</code> auth is a <em>separate</em> credential path — a box with an authenticated <code dir="auto">gh</code> CLI but no git credential
+helper fails every claim with <code dir="auto">fatal: could not read Username for 'https://github.com'</code>, so the claim
+protocol does not work at all while <code dir="auto">gh auth status</code> reports a healthy machine. <code dir="auto">claim.sh</code> classifies that
+signature as <strong><code dir="auto">CLAIM: ERROR reason=auth … (NOT retryable)</code></strong> naming the fix, <em>not</em> the old
+<code dir="auto">reason=infra … (transient — retry)</code> that sent workers into a retry loop on a fault which can never
+self-clear; <code dir="auto">reason=infra (transient — retry)</code> continues to mean a genuine, retryable blip. That
+classification covers <code dir="auto">claim.sh</code> (<code dir="auto">claim</code>/<code dir="auto">adopt</code>/<code dir="auto">release</code>/<code dir="auto">smoke</code>) only — <code dir="auto">claim-heartbeat.sh</code> surfaces
+git’s raw error on its own pushes. Fix a box with <code dir="auto">gh auth setup-git</code> or
+<code dir="auto">bash scripts/bootstrap-agent-machine.sh --yes</code>, whose preflight checks git push credentials (configuring
+a helper <strong>scoped to the origin host</strong> that dereferences <code dir="auto">$GH_TOKEN</code> at call time — never writing the
+token to disk; because it reads the environment it works only where <code dir="auto">GH_TOKEN</code> is exported, so prefer
+<code dir="auto">gh auth setup-git</code> for systemd/cron workers) and probes <strong>board access functionally</strong> instead of trusting
+the <code dir="auto">project</code> scope string. Full delta list with the identifying messages:
+<code dir="auto">docs/development/fleet-runbook.md</code>.</p>
 <p>Another machine that finds an existing claim can <code dir="auto">git fetch</code> the branch to <strong>resume</strong> that work instead of
 colliding; a <strong>reaped</strong> claim is adopted via compare-and-swap — <code dir="auto">claim.sh adopt &#x3C;N> --expect &#x3C;old-sha></code>,
 which replaces the ref with force-with-lease so a resurrected original holder loses the lease and detects
