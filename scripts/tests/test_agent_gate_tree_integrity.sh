@@ -1410,6 +1410,19 @@ if grep -q 'AGENT-GATE LITE SUMMARY' "$sum"; then
 else
   bad "G(--lite): the block is not the LITE-marked one"
 fi
+# G3 in --lite: the boundary block's provenance is assembled at ANY boundary in ANY mode,
+# and `DATA_COUNT`/`PINS` only exist on the full gate's path. Under `set -u` a naive
+# assembly would ABORT here; the correct behaviour is to omit the lines it cannot source
+# and still carry everything else.
+if grep -qE '^commit: [0-9a-f]+ branch: ' "$sum" && grep -q '^accelerators: ' "$sum" \
+   && grep -q '^cpu-budget: ' "$sum" && grep -q '^detected-after-component: fmt$' "$sum" \
+   && grep -qE '^fmt: +(PASS|FAIL)' "$sum" && grep -q '^components-completed: ' "$sum" \
+   && ! grep -q '^ci-pins: ' "$sum" && ! grep -q '^datasets: ' "$sum"; then
+  ok "G(--lite): the boundary block carries its available provenance and OMITS the lines --lite never establishes (no set -u abort, nothing invented)"
+else
+  bad "G(--lite): the boundary block's provenance is wrong for a mode without datasets/ci-pins"
+  grep -vE '^(logs|summary-file):' "$sum" 2>/dev/null
+fi
 ( cd "$r4" && git checkout -q -- README.md )
 sum="$tmp/lite-ctl.txt"; out="$tmp/lite-ctl.out"
 run_gate "$r4" "$sum" "$out" --lite; rc=$?
