@@ -229,6 +229,25 @@ console.log('[sync-format-guide] Starting...');
     f => !onDisk.includes(f)
   );
   const doublyListed = [...UNPUBLISHED_BY_DESIGN.keys()].filter(f => FILE_TO_SLUG.has(f));
+  // A CHAPTERS entry whose source is gone must FAIL, not warn-and-skip: the
+  // emit loop below would otherwise `continue` past it and produce a green
+  // build with the published page silently missing (the same class of
+  // fail-open bug this guard exists to prevent).
+  const missingSources = CHAPTERS.map(ch => ch.file).filter(f => !onDisk.includes(f));
+  // Output paths derive from `prefix`, and FILE_TO_SLUG is keyed by `file`, so
+  // neither a duplicate prefix (one page silently overwrites another) nor a
+  // duplicate file is caught by the set-equality check alone.
+  const dupes = (values) => {
+    const seen = new Set();
+    const dup = new Set();
+    for (const v of values) {
+      if (seen.has(v)) dup.add(v);
+      seen.add(v);
+    }
+    return [...dup].sort();
+  };
+  const duplicatePrefixes = dupes(CHAPTERS.map(ch => ch.prefix));
+  const duplicateFiles = dupes(CHAPTERS.map(ch => ch.file));
 
   const problems = [];
   if (unaccounted.length > 0) {
@@ -249,6 +268,26 @@ console.log('[sync-format-guide] Starting...');
     problems.push(
       'These files are in BOTH CHAPTERS and UNPUBLISHED_BY_DESIGN (pick one):\n' +
         doublyListed.map(f => `    - ${f}`).join('\n')
+    );
+  }
+
+  if (missingSources.length > 0) {
+    problems.push(
+      'These CHAPTERS entries have no source file on disk (would silently not publish):\n' +
+        missingSources.map(f => `    - ${f}`).join('\n') +
+        '\n  FIX: restore the chapter file, or remove/rename its CHAPTERS entry.'
+    );
+  }
+  if (duplicatePrefixes.length > 0) {
+    problems.push(
+      'These CHAPTERS prefixes are used more than once (pages would overwrite each other):\n' +
+        duplicatePrefixes.map(p => `    - ${p}`).join('\n')
+    );
+  }
+  if (duplicateFiles.length > 0) {
+    problems.push(
+      'These CHAPTERS files are listed more than once:\n' +
+        duplicateFiles.map(f => `    - ${f}`).join('\n')
     );
   }
 
@@ -285,8 +324,10 @@ let count = 0;
 for (const ch of CHAPTERS) {
   const srcPath = path.join(CHAPTERS_DIR, ch.file);
   if (!fs.existsSync(srcPath)) {
-    console.warn(`[sync-format-guide] WARN: source not found: ${srcPath}`);
-    continue;
+    // Unreachable via the publication guard above; kept as a fail-closed
+    // backstop so a published chapter can never be skipped silently.
+    console.error(`[sync-format-guide] ERROR: source not found: ${srcPath}`);
+    process.exit(1);
   }
 
   const rawContent = fs.readFileSync(srcPath, 'utf-8');
