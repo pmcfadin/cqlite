@@ -3,6 +3,10 @@
 
 require "optparse"
 require "yaml"
+# Issue #2910 round 4: ruby is the single implementation path for the gating
+# mechanism, so its version floor is load-bearing and checked in one place.
+require_relative "gating_ruby_floor"
+require_relative "gating_registry"
 
 DEFAULT_WORKFLOWS_DIR = ".github/workflows"
 
@@ -117,6 +121,7 @@ REUSABLE_JOB_ALLOWED_KEYS = %w[name uses with secrets needs if permissions strat
 
 options = {
   workflows_dir: DEFAULT_WORKFLOWS_DIR,
+  gating_registry: GatingRegistry::DEFAULT_REGISTRY,
   strict_dataset_downloads: ENV["CI_WORKFLOW_POLICY_STRICT_DATASETS"] == "1"
 }
 
@@ -124,6 +129,9 @@ OptionParser.new do |parser|
   parser.banner = "Usage: ruby scripts/ci/validate-workflows.rb [options]"
   parser.on("--workflows-dir DIR", "Directory containing workflow YAML files") do |dir|
     options[:workflows_dir] = dir
+  end
+  parser.on("--gating-registry PATH", "CI gating-tier registry (issue #2910)") do |path|
+    options[:gating_registry] = path
   end
   parser.on("--strict-dataset-downloads", "Treat direct dataset download snippets as errors") do
     options[:strict_dataset_downloads] = true
@@ -524,6 +532,19 @@ workflow_files.each do |file|
     end
   end
 end
+
+# CI gating-tier enrolment (issue #2910). This runs in the `pr-gate-core` job,
+# which the branch-protection context `required` declares in `needs:` and treats
+# as an unconditional failure unless it concluded `success` — so it is still the
+# forcing function: a `pull_request`-triggered workflow that is neither registered
+# as a gating tier nor explicitly exempted reds `required`, as does a registered
+# tier whose workflow cannot emit its declared context unconditionally.
+errors.concat(
+  GatingRegistry.policy_errors(
+    workflows_dir: options[:workflows_dir],
+    registry_path: options[:gating_registry]
+  )
+)
 
 warnings.each { |message| warn "WARNING: #{message}" }
 

@@ -114,6 +114,99 @@ Not allowed:
 The target globally required status check for this tier is
 `Required PR Gate / required`.
 
+#### The sole required context AGGREGATES sibling tiers (issue #2910)
+
+`required` is no longer only its own steps. `pr-gate.yml` is split into
+`pr-gate-core` (the light contents above) and `required` (`needs: [pr-gate-core]`,
+`if: always()`, the unchanged branch-protection context name), whose additional
+job is to poll the pull request head's sibling check runs and **fail closed** on
+any tier declared in `.github/ci-gating-tiers.yml` that is failed, still
+non-terminal at the aggregation deadline, or **absent**. It never masks the core:
+`pr-gate-core` not concluding `success` fails `required` regardless of tier state.
+
+Rules for `pull_request`-triggered workflows:
+
+- Every one must be listed in `.github/ci-gating-tiers.yml`, either under
+  `tiers:` (it gates the merge) or under `exempt:` with a `reason` and an `issue`.
+  This is enforced by `scripts/ci/validate-workflows.rb`, which runs as a step in
+  `pr-gate-core`; `required` needs that job and fails unconditionally unless it
+  concluded `success`, so forgetting to enrol reds `required`. (Of the 25
+  PR-triggered workflows today, one is the aggregator, one is a gating tier and
+  23 are exempted.)
+- A workflow under `tiers:` must ALWAYS fire — no blocking trigger `paths:` /
+  `paths-ignore:` / `branches:` (only the
+  `__required_ci_context_never_matches__` sentinel used by `ci.yml`), and its
+  `pull_request.types` must include every event that mints a new head sha
+  (`opened`, `synchronize`) while staying within the aggregator's own observed
+  set. Applicability moves into a cheap, unconditional classifier job following
+  the `observability-gate.yml` `classify` pattern, and the tier's expensive jobs
+  stay gated on the classifier's output.
+- A workflow under `tiers:` must emit its declared context from exactly one gate
+  job whose condition is exactly `if: ${{ !cancelled() }}`, for each of whose
+  dependencies some step both reads `needs.<job>.result` and can exit non-zero,
+  and whose `needs` closure covers every other job in the workflow.
+  Inapplicability is reported as an explicit SUCCESS from that job — never as an
+  absent check run. A bare `always()` is **rejected**: it runs the gate job while
+  the run is *being cancelled*, when every `needs.*.result` is `cancelled`, and
+  the gate turns that into a `failure` conclusion — which makes the aggregator's
+  supersession grace unreachable, so every routine supersession would red
+  `required`.
+- **Migration states red fast, not after an hour.** The registry is read from the
+  base ref while the emitter comes from the tree the event ran (for a
+  `pull_request` event, the merge commit). If the base registers a tier whose
+  context that tree provably cannot emit — workflow absent, no PR trigger,
+  `types:`/`branches:` excluding this event, or no job with that name — `required`
+  fails on the first poll and names the remedy: rebase, or `ci:waive:<tier-id>` if
+  the tier is deliberately being renamed or retired (a registry change only takes
+  effect once merged). Inconclusive evidence never produces that verdict, and the
+  verdict is never a pass.
+- `required` must itself fire on `labeled`/`unlabeled`, or the `ci:waive:<tier-id>`
+  break-glass could never be exercised on a PR the mechanism has wedged.
+- Failing closed applies at the DEADLINE, not to every transient. A `cancelled`
+  tier (routine under `cancel-in-progress`) is re-polled while a replacement run
+  is plausible and fails once the grace lapses; a transport failure reading the
+  check-runs API is retried and fails only on persistence.
+- For a registered tier, a **diff-based mandate overrides the `ci:*` label**: a
+  mandating diff runs the tier with or without the label; the label stays an
+  opt-in only for non-mandating diffs.
+- The aggregation deadline (registry `wait_minutes`, max over tiers) must be
+  strictly less than the `required` job's `timeout-minutes`, so expiry is a
+  reported red with a diagnostic rather than an Actions cancellation.
+- Break-glass is per-tier only: `ci:waive:<tier-id>` excuses an absent or pending
+  tier, never a failed one. There is no blanket waiver. It must not fight the
+  tier it waives: a registered tier may NOT cancel its in-flight run on a label
+  event (the enrolment rule rejects any `cancel-in-progress` that is not provably
+  false for `labeled`/`unlabeled` — the literal `true` AND the near-miss
+  `${{ github.event_name == 'pull_request' }}`, which is true for label events),
+  and a pending tier whose only check run was minted at/after the waiver was
+  applied resolves at once instead of waiting out the deadline.
+- The honoured-waiver annotation names WHO APPLIED THE LABEL, resolved from the
+  PR's `labeled` events — not the actor of the run, who is usually someone else.
+  An unresolvable attribution says so rather than naming anyone.
+- A registered tier's context is satisfied ONLY by a check run GitHub Actions
+  produced. A check-run name is global to the commit and anything with
+  `checks:write` can mint one, so provenance (`app` + an Actions run URL) is
+  verified fail-closed; an unverifiable run neither satisfies nor shadows the
+  genuine one.
+- A tier's gate job must VALIDATE its classifier's applicability verdict.
+  `skipped` counts as a pass only because an inapplicable tier reports itself
+  that way; an empty or non-boolean verdict reds the tier rather than reading as
+  "not applicable", and a verdict of "applies" with skipped work reds it too.
+- The gating scripts are ruby-only and declare their interpreter floor
+  (`scripts/ci/gating_ruby_floor.rb`, ruby >= 3.0) in one place; below it the
+  aggregation fails closed with the remedy and the self-tests SKIP with the
+  reason instead of mis-running (macOS system ruby is 2.6).
+
+`.github/branch-protection.json` keeps `contexts: ["required"]` — issue #2910 adds
+no context. It does reconcile the file's review block to the live, intended
+policy (`required_approving_review_count: 0`, `require_code_owner_reviews: false`,
+`require_last_push_approval: false`): the file is applied verbatim, so an
+aspirational value there would switch `main` to a policy the autonomous
+merge-on-green pipeline cannot satisfy. Enforcement is the single `required`
+context plus `enforce_admins: true`; `.github/CODEOWNERS` is an advisory review
+request on `/.github/` and `/scripts/ci/` diffs, not a merge control. See
+`.github/QUALITY_GATES_ENFORCEMENT.md`.
+
 ### Targeted And Nightly
 
 Purpose: run expensive or surface-specific validation without blocking unrelated

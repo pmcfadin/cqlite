@@ -18,14 +18,19 @@ on:
       - 'Cargo.lock'
       - '.github/workflows/flight-ci.yml'
   pull_request:
-    branches: [ main ]
+    # REGISTERED GATING TIER (issue #2910, .github/ci-gating-tiers.yml). The
+    # trigger MUST always fire so the `Flight tier gate` context is emitted on
+    # every PR — an absent registered context is an error, never "not
+    # applicable". `ci.yml`'s established always-fire sentinel: a paths-ignore
+    # that can never match. Applicability is decided by the `classify` job below.
+    #
+    # No `branches:` filter either: a PR based on anything other than main would
+    # otherwise never start this workflow, leaving `required` to wait out the full
+    # deadline on a context that can never appear. validate-workflows.rb enforces
+    # both absences.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-    paths:
-      - 'cqlite-flight/**'
-      - 'cqlite-core/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/flight-ci.yml'
+    paths-ignore:
+      - '__required_ci_context_never_matches__'
   workflow_dispatch:
 
 permissions:
@@ -34,14 +39,138 @@ permissions:
 
 concurrency:
   group: flight-ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A new head sha obsoletes the in-flight run, so cancel it. A LABEL mutation
+  # does not (issue #2910 round 4): this workflow subscribes to `labeled` so its
+  # own `ci:flight-full` opt-in is reachable, and `github.event_name ==
+  # 'pull_request'` is TRUE for `labeled`/`unlabeled` — so the previous
+  # expression behaved exactly like `true` on a label event. The consequence was
+  # not merely wasteful: applying the `ci:waive:flight` break-glass to a wedged
+  # PR CANCELLED this tier's in-flight run and minted a fresh `queued` check run,
+  # and a PENDING tier's waiver is only honoured at the aggregation deadline. The
+  # escape hatch made the situation worse before it made it better.
+  # gating_event_rules.rb `concurrency_errors` rejects any cancellation policy on
+  # a registered tier that is not provably false for label events.
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request'
+    && github.event.action != 'labeled'
+    && github.event.action != 'unlabeled' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ALWAYS-RUN classifier (issue #2910, pattern: observability-gate.yml
+  # `classify`). Decides applicability from the DIFF, so a diff that mandates the
+  # tier runs it WITH OR WITHOUT the `ci:flight-full` label. On PR #2906 the
+  # end-to-end tests that were the change's wiring evidence never ran because the
+  # heavy job was label-gated and the PR carried no label; the diff-based mandate
+  # is what closes that. The label survives only as a manual opt-in for diffs that
+  # mandate nothing.
+  classify:
+    name: Classify Flight tier scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # EXACTLY ONE applicability output (issue #2910 round 2). The first cut had
+    # two — `run_tier` (cheap fmt/clippy/lib test) and `run_full` (the end-to-end
+    # tests) — governed by two overlapping regexes, and a `cqlite-core/**`-only
+    # diff matched only the narrower one: the ~30 integration tests under
+    # cqlite-flight/tests/ never ran and `Flight tier gate` still reported
+    # success. That is #2906 reappearing inside its own fix. One output means one
+    # predicate, and gating_policy_rules.rb now REJECTS a registered tier whose
+    # jobs are governed by more than one (a tier with genuinely distinct scopes
+    # must be registered as two tiers with two contexts, each aggregated on its
+    # own).
+    outputs:
+      run_tier: ${{ steps.scope.outputs.run_tier }}
+      reason: ${{ steps.scope.outputs.reason }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify diff and labels
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HAS_FULL_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:flight-full') }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "reason=non-PR event (${EVENT_NAME}): full tier" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git diff --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
+          echo "Changed files:"
+          sed 's/^/  - /' changed-files.txt
+
+          # FAIL-CLOSED on an empty/ambiguous changed-file set (same rule as
+          # pr-gate.yml's docs-only classifier): if we cannot see the diff we
+          # cannot conclude the tier is inapplicable, so run everything.
+          if [ ! -s changed-files.txt ]; then
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "reason=empty changed-file set; running the full tier fail-closed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # THE MANDATE SET (issue #2910 round 2) — every path that reaches the
+          # Flight server at runtime or decides what its tests assert. Matching
+          # ANY of them runs the WHOLE tier, end-to-end tests included; there is
+          # deliberately no narrower second set that could route a mandating diff
+          # to a cheaper job:
+          #   cqlite-flight/**                  the crate, its Dockerfile and the
+          #                                     ~30 integration/e2e tests
+          #   cqlite-core/**                    the engine Flight wraps — readers,
+          #                                     merge, the Arrow converter. THE
+          #                                     direction from which Flight breaks:
+          #                                     #2825 shipped a wrong
+          #                                     worst_case_batch_capacity_bytes
+          #                                     because nothing exercised it, and
+          #                                     #2821 was its first caller. Both
+          #                                     were core diffs whose Flight e2e
+          #                                     coverage was the entire point.
+          #   Cargo.toml / Cargo.lock           the workspace dependency versions
+          #                                     resolved into the binary
+          #   rust-toolchain.toml               the pinned compiler this tier builds
+          #                                     and runs with
+          #   test-data/**                      the SSTable fixtures and the
+          #                                     query-semantics oracle that
+          #                                     point_read_corpus_parity_test.rs and
+          #                                     query_semantics_flight_parity.rs read
+          #   .github/actions/setup-rust-ci/**  the composite action every job here
+          #                                     depends on to build at all
+          #   .github/workflows/flight-ci.yml   the tier definition itself
+          # NOT mandated, deliberately: cqlite-cli/**, bindings/**, docs/** —
+          # nothing in them is linked into, or read by, the Flight server.
+          # `.github/ci-gating-tiers.yml` documents this list under
+          # `mandate_paths`, and gating_policy_rules.rb fails the gate if the two
+          # drift apart.
+          mandate_regex='^(cqlite-flight/|cqlite-core/|test-data/|\.github/actions/setup-rust-ci/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|\.github/workflows/flight-ci\.yml$)'
+
+          run_tier=false
+          reason='no Flight-relevant path in the diff and no ci:flight-full label'
+          if grep -Eq "$mandate_regex" changed-files.txt; then
+            run_tier=true
+            reason='diff reaches the Flight server at runtime; running the full tier including the end-to-end tests'
+          fi
+          if [ "$HAS_FULL_LABEL" = "true" ]; then
+            run_tier=true
+            reason='ci:flight-full label opt-in'
+          fi
+
+          echo "run_tier=${run_tier}" >> "$GITHUB_OUTPUT"
+          echo "reason=${reason}" >> "$GITHUB_OUTPUT"
+          echo "Flight tier verdict: run_tier=${run_tier} (${reason})"
+
   test:
     name: fmt / clippy / lib test
+    needs: classify
+    if: needs.classify.outputs.run_tier == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -69,19 +198,21 @@ jobs:
           {
             echo "## Flight CI tier"
             echo ""
-            echo "- Ordinary PRs run fmt, clippy, and cqlite-flight library tests."
-            echo "- Full package tests and release binary artifacts run on push to main/tags, nightly schedule, workflow_dispatch, or PRs labeled \`ci:flight-full\`."
+            echo "- This job (fmt, clippy, cqlite-flight library tests) is the prerequisite half of the tier."
+            echo "- The full package tests (cqlite-flight/tests/**, the end-to-end coverage) and the release binary run under the SAME applicability verdict — see the classify job's reason."
+            echo "- A diff touching cqlite-flight/**, cqlite-core/**, test-data/**, the Cargo manifests, rust-toolchain.toml, the shared setup-rust-ci action, or this workflow mandates the whole tier with or without \`ci:flight-full\` (issue #2910)."
             echo "- Container publishing here is limited to main-branch pushes and workflow_dispatch runs (\`latest\` + sha tags); v* tag release images are built multi-arch solely by flight-image.yml (issue #2638)."
           } >> "$GITHUB_STEP_SUMMARY"
 
   full:
     name: full test + release binary
-    needs: test
-    if: >-
-      ${{
-        github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'ci:flight-full')
-      }}
+    needs: [classify, test]
+    # Issue #2910: the DIFF decides, not the label — and it decides for the WHOLE
+    # tier. This job owns `cargo test --package cqlite-flight`, i.e. the ~30
+    # integration/e2e tests under cqlite-flight/tests/ that the `test` job's
+    # `--lib` scope does not touch. It shares `run_tier` with that job precisely
+    # so no mandating diff can reach the cheap half alone.
+    if: needs.classify.outputs.run_tier == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -109,7 +240,7 @@ jobs:
 
   image:
     name: build & push container image
-    needs: full
+    needs: [classify, full]
     # Publish only main-branch and workflow_dispatch images (main/sha tags).
     # NOT on v* tag pushes: on a release tag, flight-image.yml is the SOLE
     # writer of the canonical vX.Y.Z / vX.Y / latest tags as a MULTI-ARCH
@@ -175,3 +306,129 @@ jobs:
           # the release path. Source-only pushes reuse the cargo-chef cook layer.
           cache-from: type=gha,scope=flight-linux-amd64
           cache-to: type=gha,mode=max,scope=flight-linux-amd64
+
+  # ALWAYS-EMIT gate job (issue #2910). Its `name:` IS the check-run context
+  # registered in .github/ci-gating-tiers.yml, and `required` polls for it on the
+  # PR head. The condition means the context is emitted in EVERY case, including
+  # the inapplicable one, so an ABSENT context is unambiguously an error rather
+  # than "the tier did not apply". It must depend on every other job in this
+  # workflow and inspect each `.result`, so no Flight job's failure can go
+  # unreported — validate-workflows.rb enforces both structurally.
+  #
+  # `!cancelled()`, NOT `always()` (issue #2910 round 3). `always()` runs this job
+  # even while the RUN IS BEING CANCELLED, and a cancelled run hands it
+  # `needs.*.result == 'cancelled'`, which the `case` below maps to `exit 1`. The
+  # check run would then conclude `failure` — so a ROUTINE supersession (this
+  # workflow cancels in-progress PR runs, including on every label mutation) would
+  # red `required`, and the aggregator's supersession grace, which keys on
+  # `cancelled`/`stale`/`skipped`, could never fire. `!cancelled()` still runs when
+  # a dependency FAILED or was SKIPPED, so nothing about the reporting below
+  # changes; it only stops a cancellation being laundered into a failure.
+  tier-gate:
+    name: Flight tier gate
+    needs: [classify, test, full, image]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the Flight tier result
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          FULL_RESULT: ${{ needs.full.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+          SCOPE_REASON: ${{ needs.classify.outputs.reason }}
+          RUN_TIER: ${{ needs.classify.outputs.run_tier }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Flight tier gate (issue #2910)"
+            echo ""
+            echo "- scope: run_tier=\`${RUN_TIER:-unknown}\` (${SCOPE_REASON:-no reason recorded})"
+            echo "- classify: \`${CLASSIFY_RESULT}\`"
+            echo "- fmt / clippy / lib test: \`${TEST_RESULT}\`"
+            echo "- full test + release binary: \`${FULL_RESULT}\`"
+            echo "- container image: \`${IMAGE_RESULT}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # `skipped` is a PASS here and only here: it is how an inapplicable
+          # tier reports itself. Everything else that is not `success` reds the
+          # context, which reds `required`.
+          failed=""
+          for pair in \
+            "classify:${CLASSIFY_RESULT}" \
+            "test:${TEST_RESULT}" \
+            "full:${FULL_RESULT}" \
+            "image:${IMAGE_RESULT}"; do
+            job="${pair%%:*}"
+            result="${pair#*:}"
+            case "$result" in
+              success|skipped) ;;
+              *) failed="${failed}${job}(${result}) " ;;
+            esac
+          done
+
+          if [ -n "$failed" ]; then
+            echo "::error::Flight tier failed: ${failed}"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Flight tier FAILED: ${failed}**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # UNKNOWN MUST NOT READ AS PASS (issue #2910 round 4). Everything above
+          # is `success` or `skipped`, and `skipped` is a pass ONLY because an
+          # inapplicable tier reports itself that way — which is a claim about
+          # `run_tier`. If the classifier concluded success but `run_tier` is
+          # empty or not a boolean (a renamed step id, an output that never got
+          # written, a future refactor), then test/full/image are all `skipped`,
+          # the loop reads that as a pass, and the tier reports SUCCESS with
+          # "not applicable to this diff" — reproducing, inside this tier's own
+          # gate, the exact silent-green defect this issue exists to close. So
+          # the verdict is validated, not assumed.
+          case "${RUN_TIER:-}" in
+            true|false) ;;
+            *)
+              echo "::error::Flight tier gate: the classifier's applicability verdict is" \
+                   "run_tier='${RUN_TIER:-}' (neither 'true' nor 'false'). An unreadable verdict is" \
+                   "NOT inapplicability — the tier reds rather than reporting a vacuous success." \
+                   "Check the classify job's 'scope' step output."
+              {
+                echo ""
+                echo "**Flight tier FAILED: unreadable applicability verdict"
+                echo "\`run_tier='${RUN_TIER:-}'\` (expected \`true\` or \`false\`).**"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+
+          # The other half of the same claim: when the tier IS applicable, the
+          # work must actually have run. `skipped` is a legitimate pass only
+          # under run_tier=false. Derived from the SAME pair list as the loop
+          # above rather than naming jobs twice, so a job added to this workflow
+          # is covered without a second edit. (`image` is the one exclusion: it
+          # never runs on a pull request by design.)
+          if [ "$RUN_TIER" = "true" ]; then
+            inconsistent=""
+            for pair in \
+              "classify:${CLASSIFY_RESULT}" \
+              "test:${TEST_RESULT}" \
+              "full:${FULL_RESULT}"; do
+              job="${pair%%:*}"
+              result="${pair#*:}"
+              [ "$result" = "success" ] || inconsistent="${inconsistent}${job}(${result}) "
+            done
+            if [ -n "$inconsistent" ]; then
+              echo "::error::Flight tier gate: run_tier=true (${SCOPE_REASON:-no reason recorded}) but" \
+                   "${inconsistent}did not run to success. A mandating diff whose work was skipped must" \
+                   "never report a green tier."
+              {
+                echo ""
+                echo "**Flight tier FAILED: run_tier=true but ${inconsistent}was not a success.**"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          else
+            echo "Flight tier not applicable to this diff (${SCOPE_REASON:-}); reporting success."
+          fi
+          echo "Flight tier gate: PASS"
