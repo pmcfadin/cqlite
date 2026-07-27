@@ -19,6 +19,36 @@ the CI runtime overhaul. The detailed tier contract lives in
 - Do not change `.github/branch-protection.json` to require a new status until
   the producing workflow exists and has been proven on a PR.
 
+## Zero required approvals is DELIBERATE, not drift (issue #2910)
+
+`.github/branch-protection.json` is applied verbatim (`gh api --method PUT …
+--input`), so it must state the policy the repository actually runs. It records:
+
+```json
+"required_pull_request_reviews": {
+  "required_approving_review_count": 0,
+  "require_code_owner_reviews": false,
+  "require_last_push_approval": false,
+  "dismiss_stale_reviews": true
+}
+```
+
+That is the **live** setting on `main`, and it is intentional. The autonomous
+merge-on-green doctrine in `CLAUDE.md` has workers arm `gh pr merge --auto` on
+their own PRs the moment local certification is met; requiring a human approval
+would stop every agent PR. Enforcement comes from the single `required` status
+check plus `enforce_admins: true` — which applies to admins too, so `--auto` can
+never land against an unchecked head.
+
+Until issue #2910 this file claimed `required_approving_review_count: 1` and
+`require_code_owner_reviews: true`. Nothing enforced those; they had **drifted
+from live**, and applying the file would have silently switched the repository
+to a policy the delivery pipeline cannot satisfy. The file now documents the real
+policy. `.github/CODEOWNERS` remains in place: with
+`require_code_owner_reviews: false` it produces an automatic review REQUEST on
+PRs touching `/.github/` and `/scripts/ci/` — an advisory notification, not a
+merge control. Do not describe it as one.
+
 ## Required PR Gate
 
 The target globally required status check after #1364 is:

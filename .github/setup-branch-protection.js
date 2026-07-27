@@ -149,7 +149,9 @@ function verifyProtection() {
     );
     
     const protection = JSON.parse(output);
-    
+    const expectedApprovals =
+      PROTECTION_CONFIG.required_pull_request_reviews?.required_approving_review_count ?? 0;
+
     // Verify critical settings
     const checks = [
       {
@@ -164,8 +166,16 @@ function verifyProtection() {
         critical: true
       },
       {
-        name: 'PR reviews required', 
-        condition: protection.required_pull_request_reviews?.required_approving_review_count >= 1,
+        // Derived from the checked-in config, NOT hardcoded (issue #2910). This
+        // asserted `>= 1` while live `main` runs 0 required approvals by design
+        // (autonomous merge-on-green; see .github/QUALITY_GATES_ENFORCEMENT.md),
+        // so it reported a CRITICAL failure against a correctly applied config —
+        // a verifier that disagrees with its own source of truth trains people
+        // to ignore it. Enforcement here is the `required` status check plus
+        // enforce_admins, not an approval count.
+        name: `PR review policy matches branch-protection.json (${expectedApprovals} approval(s))`,
+        condition: (protection.required_pull_request_reviews?.required_approving_review_count ?? 0)
+          === expectedApprovals,
         critical: true
       },
       {

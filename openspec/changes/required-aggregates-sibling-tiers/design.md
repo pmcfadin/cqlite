@@ -176,6 +176,25 @@ correct semantics. Details:
   if GitHub stopped returning it every tier would red. That is the correct direction for a merge gate,
   and `ci:waive:<tier-id>` is the hatch.
 
+- **The residual is uncontrolled at merge time, BY DESIGN (round 5, owner decision).** The drift round 4
+  surfaced went to the owner, who ruled: **live is correct; the config file was wrong.** `main` runs
+  `required_approving_review_count: 0`, `require_code_owner_reviews: false`,
+  `require_last_push_approval: false` because the autonomous merge-on-green doctrine in `CLAUDE.md` has
+  workers arm `gh pr merge --auto` on their own PRs; a required approval would stop every agent PR.
+  `.github/branch-protection.json` — which is applied *verbatim* by
+  `.github/setup-branch-protection.js` — has been reconciled to that, so the file now documents the real
+  policy rather than an aspiration, with the rationale recorded in
+  `.github/QUALITY_GATES_ENFORCEMENT.md`. The verifier in that script asserted `>= 1` approvals and would
+  have reported a CRITICAL failure against the corrected config; it now derives the expectation from the
+  config it applies.
+
+  So this design does **not** claim a blocking control over `.github/workflows/pr-gate.yml`. What exists:
+  base-ref evaluation of the registry, the script and `gating_registry.rb`; `aggregator_trust_boundary_errors`;
+  the enrolment rule; the single `required` context with `enforce_admins: true` (admins included, so
+  `--auto` cannot land against an unchecked head); `.github/CODEOWNERS` as an **advisory review request**
+  on `/.github/` and `/scripts/ci/` diffs; and `ci:waive:<tier-id>` as the operational hatch. A conspicuous
+  diff to the aggregating workflow is *visible* — reviewed, notified, and recorded — and it is *not blocked*.
+
 - **The "CODEOWNERS" control, corrected (round 4).** Earlier drafts of this section closed by naming
   "CODEOWNERS on `.github/` + `scripts/ci/`" as the complementary control for that residual. **There was
   no CODEOWNERS file anywhere in the repo** — not `.github/CODEOWNERS`, not `/CODEOWNERS`, not
@@ -188,16 +207,18 @@ correct semantics. Details:
     `GET /repos/{owner}/{repo}/codeowners/errors` endpoint, which reports zero errors for it.
   - Effect **today**: an automatic review REQUEST on every PR touching those trees — visibility, not
     enforcement.
-  - Not enforced: the LIVE branch protection on `main` has `require_code_owner_reviews: false` and
-    `required_approving_review_count: 0`. `require_code_owner_reviews` was therefore inert
-    *independently of this change*, and the checked-in `.github/branch-protection.json` (which says
-    `true`, with `require_last_push_approval: true` and one required approval) has **drifted from the
-    live settings**. That drift predates this change and is recorded here rather than silently fixed:
-    flipping it on would require a human approval on every agent PR touching `.github/**`, which
-    contradicts the merge-on-green autonomy doctrine in `CLAUDE.md` and is an owner decision.
-  - Honest statement of the residual: **visible, but uncontrolled at merge time.** The mechanised
-    controls are base-ref evaluation, `aggregator_trust_boundary_errors`, and the enrolment rule; the
-    review request is a notification on top of them.
+  - Not enforced, and deliberately so: the LIVE branch protection on `main` has
+    `require_code_owner_reviews: false` and `required_approving_review_count: 0`, which the owner
+    confirmed in round 5 is the intended policy (autonomous merge-on-green). `require_code_owner_reviews`
+    is therefore inert *independently of this change*. The checked-in `.github/branch-protection.json`
+    claimed `true` with one required approval; round 5 reconciled it to live rather than leaving the file
+    aspirational, since it is applied verbatim and would otherwise have switched the repository to a
+    policy the delivery pipeline cannot satisfy.
+  - Honest statement of the residual: **visible, and uncontrolled at merge time by design.** The
+    mechanised controls are base-ref evaluation, `aggregator_trust_boundary_errors`, the enrolment rule
+    and `enforce_admins`; the CODEOWNERS review request is an advisory notification on top of them, and
+    `ci:waive:<tier-id>` is the operational hatch. There is no blocking review control here — do not
+    plan as though there were.
   - `scripts/tests/test_gating_registry_policy.sh` asserts the file exists and covers both trees, so
     the control cannot silently disappear again (the mutant deletes the `/.github/` rule and the suite
     reds).

@@ -197,7 +197,15 @@ Rules for `pull_request`-triggered workflows:
   aggregation fails closed with the remedy and the self-tests SKIP with the
   reason instead of mis-running (macOS system ruby is 2.6).
 
-`.github/branch-protection.json` is unchanged: `contexts` remains `["required"]`.
+`.github/branch-protection.json` keeps `contexts: ["required"]` — issue #2910 adds
+no context. It does reconcile the file's review block to the live, intended
+policy (`required_approving_review_count: 0`, `require_code_owner_reviews: false`,
+`require_last_push_approval: false`): the file is applied verbatim, so an
+aspirational value there would switch `main` to a policy the autonomous
+merge-on-green pipeline cannot satisfy. Enforcement is the single `required`
+context plus `enforce_admins: true`; `.github/CODEOWNERS` is an advisory review
+request on `/.github/` and `/scripts/ci/` diffs, not a merge control. See
+`.github/QUALITY_GATES_ENFORCEMENT.md`.
 
 ### Targeted And Nightly
 
