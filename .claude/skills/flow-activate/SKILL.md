@@ -55,11 +55,15 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
    # does `gh auth switch --user "$project_account"` so the project-capable account is active (the EMU
    # account flip otherwise makes the board write fail and degrade to a label SILENTLY).
    gh issue edit <N> --add-assignee @me
-   # have_project=1: gh project item-edit ... --field Status --single-select-option-id <In Progress>
+   # have_project=1 → set the board Status. `--field` is NOT a gh flag (verified gh 2.87.3 offers only
+   # --field-id); all four IDs are required or the write fails:
+   gh project item-edit --id <item-id> --project-id <project-id> \
+     --field-id <status-field-id> --single-select-option-id <In-Progress-option-id>
    # (have_project=0 cannot occur here — Path A eligibility in step 2 already required a reachable board.
    #  Do NOT write a status:in-progress label — the board→label mirror (#2855) derives it from the
    #  board Status you just set; a hand-written board-derived label is reverted on the next mirror pass.)
-   scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes refs/heartbeats/<machine> (#2089)
+   # scripts/flow/*.sh blobs are mode 100644 (no +x) — ALWAYS invoke them via `bash`:
+   bash scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes refs/heartbeats/<machine> (#2089)
    ```
    If `claim.sh claim` reports `CLAIM LOST`, you did NOT win — do not create the worktree; take the next
    eligible item. All spec work happens in that worktree only after `CLAIM HELD`.
