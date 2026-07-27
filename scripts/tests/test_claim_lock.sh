@@ -243,11 +243,17 @@ $outInfra"
 fi
 
 # ===========================================================================
-echo "TEST 10: LOST with an empty remote read prints holder=unknown (never our own commit)"
+echo "TEST 10: a LANDED push whose confirm read comes back EMPTY is infra (exit 1), and names NO holder"
 # ===========================================================================
-# A git shim makes every ls-remote return EMPTY while push passes through. The
-# push creates the ref, but the post-push confirm read comes back empty, so the
-# verdict is LOST — and the holder MUST be reported as unknown, never our own sha.
+# A git shim makes every ls-remote return EMPTY while push passes through, so the
+# push CREATES the ref and the post-push confirm read comes back absent.
+# This assertion used to pin `LOST … holder=unknown` (exit 2) — its point being that
+# the verdict must never fabricate a holder out of OUR OWN sha. The no-holder half of
+# that verdict was itself the bug (#2945): nobody holds the ref in this state, so exit 2
+# ("you did not win, take the next item") walked a worker away from a FREE lane, and the
+# rejected-push sibling already called the identical state infra. The original intent is
+# preserved and strengthened — the verdict now names NO holder at all, unknown or
+# otherwise, and is retryable (exit 1).
 SHIMG="$T/shim-git"
 mkdir -p "$SHIMG"
 cat >"$SHIMG/git" <<SHIM
@@ -260,11 +266,15 @@ SHIM
 chmod +x "$SHIMG/git"
 rc=0; outUnk=$( cd "$A" && PATH="$SHIMG:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 10 ) || rc=$?
 rcUnk=$rc
-if [ "$rcUnk" -eq 2 ] && printf '%s\n' "$outUnk" | grep -q 'CLAIM: LOST' \
-   && printf '%s\n' "$outUnk" | grep -q 'holder=unknown'; then
-  ok "empty-read LOST path prints holder=unknown (exit 2), not our own commit"
+if [ "$rcUnk" -eq 1 ] && printf '%s\n' "$outUnk" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outUnk" | grep -q 'reason=infra' \
+   && printf '%s\n' "$outUnk" | grep -q 'detail=push-accepted-but-ref-absent-on-confirm' \
+   && ! printf '%s\n' "$outUnk" | grep -q 'CLAIM: LOST' \
+   && ! printf '%s\n' "$outUnk" | grep -q 'holder=' \
+   && [ -n "$(ref_sha 10)" ]; then
+  ok "an empty confirm read over a LANDED push → ERROR infra exit 1, naming no holder (never our own commit, never LOST)"
 else
-  bad "expected LOST holder=unknown exit 2; got rc=$rcUnk
+  bad "expected ERROR infra push-accepted-but-ref-absent-on-confirm exit 1 with no holder named; got rc=$rcUnk ref='$(ref_sha 10)'
 $outUnk"
 fi
 
