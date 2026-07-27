@@ -22,7 +22,7 @@
 
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
@@ -144,6 +144,17 @@ pub(crate) struct StreamProbe {
     /// eager-setup errors always did, independent of whether OTel counters are
     /// compiled in.
     errors_recorded: Arc<AtomicUsize>,
+    /// Blocking-task guards THIS stream's own `spawn_blocking` merge closure
+    /// entered (issue #2896): exactly one per streaming merge. Makes the
+    /// `cqlite.flight.blocking_tasks_in_use` wiring observable PER-STREAM rather
+    /// than through the process-global gauge.
+    blocking_entries: Arc<AtomicUsize>,
+    /// The shared in-use level that closure's own
+    /// [`crate::saturation::BlockingTaskGuard`] observed at ITS entry (issue
+    /// #2896) — see [`crate::saturation::BlockingTaskGuard::entry_level`], and
+    /// [`crate::saturation::blocking_tasks_in_use_level`] for the normative rule
+    /// on bounding it soundly.
+    blocking_entry_level: Arc<AtomicI64>,
     /// Egress credit accounting (issue #2821): charged permit bytes, REALIZED
     /// resident capacity bytes and their high-water marks, plus the
     /// reservations-granted / batches-materialized pair that makes
@@ -393,6 +404,11 @@ pub(crate) fn spawn_streaming(
     // The incremental scan-progress seam (issue #2162) is threaded into the merge
     // loop so `cqlite.query.rows_scanned` climbs while the scan is in progress.
     let scan_progress = probe.scan_progress.clone();
+    // The blocking-task-guard observation seam (issue #2896): the closure below
+    // publishes its OWN guard's entry through these, so the wiring assertion is
+    // attributable to THIS stream and immune to peer streams' guard timing.
+    let blocking_entries = probe.blocking_entries.clone();
+    let blocking_entry_level = probe.blocking_entry_level.clone();
 
     // Issue #2819 (roborev L5): capture the `flight.do_get` RPC span HERE — this fn
     // runs synchronously inside the handler's `.instrument(span)` future, so
@@ -413,7 +429,15 @@ pub(crate) fn spawn_streaming(
         // `cqlite.flight.blocking_tasks_in_use` for the whole closure — the guard
         // is the FIRST act here and its Drop decrements on every exit path
         // (normal, error, cancel, panic).
-        let _blocking_guard = crate::saturation::BlockingTaskGuard::enter();
+        let blocking_guard = crate::saturation::BlockingTaskGuard::enter();
+        // Issue #2896: publish THIS guard's own entry through the probe (see the
+        // `StreamProbe` fields). These are plain statements on captured `Arc`s, not
+        // ordering-relevant locals: the invariant they preserve is that the guard
+        // is entered BEFORE any other statement in this closure, and that no local
+        // declared after it can outlive it (so the accounting still spans the whole
+        // closure body, including the merge below).
+        blocking_entries.fetch_add(1, Ordering::Relaxed);
+        blocking_entry_level.store(blocking_guard.entry_level(), Ordering::Relaxed);
         // Issue #2819: per-request in-`stream` sub-phase accumulator, installed on
         // THIS merge consumer thread; emitted ONCE at teardown. Roborev B1 — the
         // emitter MUST flush its samples BEFORE any egress sender is released, or a

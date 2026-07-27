@@ -292,17 +292,32 @@ pub(crate) struct BlockingTaskGuard {
     /// against a private atomic never publishes a synthetic reading over
     /// `cqlite.flight.blocking_tasks_in_use`.
     emit: bool,
+    /// The level [`Self::atomic`] held immediately AFTER this guard's own
+    /// increment (issue #2896). See [`Self::entry_level`].
+    entry_level: i64,
 }
 
 impl BlockingTaskGuard {
     /// Enter a flight blocking task: increment the in-use gauge and return the
     /// guard whose drop decrements it.
     pub(crate) fn enter() -> Self {
-        record_blocking(adjust(&BLOCKING_TASKS, 1));
+        let entry_level = adjust(&BLOCKING_TASKS, 1);
+        record_blocking(entry_level);
         Self {
             atomic: &BLOCKING_TASKS,
             emit: true,
+            entry_level,
         }
+    }
+
+    /// The in-use level observed at this guard's OWN entry — the exact
+    /// post-increment value [`Self::enter`] published to the gauge, and an
+    /// immutable snapshot thereafter (issue #2896), so it is `>= 1` for a
+    /// balanced counter (which this RAII guard guarantees) and no later guard
+    /// drop can invalidate it. Published through `crate::streaming::StreamProbe`;
+    /// see [`blocking_tasks_in_use_level`] for how to bound it soundly.
+    pub(crate) fn entry_level(&self) -> i64 {
+        self.entry_level
     }
 
     /// Test-only: enter a guard tracking `atomic` instead of the shared
@@ -314,10 +329,11 @@ impl BlockingTaskGuard {
     /// blocking-pool reading).
     #[cfg(test)]
     fn enter_on(atomic: &'static AtomicI64) -> Self {
-        adjust(atomic, 1);
+        let entry_level = adjust(atomic, 1);
         Self {
             atomic,
             emit: false,
+            entry_level,
         }
     }
 }
@@ -333,12 +349,25 @@ impl Drop for BlockingTaskGuard {
 
 /// Read the current process-wide flight blocking-task in-use level (issue #2419).
 ///
-/// Exposes the same atomic that drives `cqlite.flight.blocking_tasks_in_use`, so
-/// an end-to-end streaming test can assert the level rises while blocking tasks
-/// are outstanding and returns to its pre-load baseline after every task exits
-/// (asserting on the LEVEL, never on timing). Feature-independent (the atomic is
-/// maintained regardless of the `observability` OTel feature; only the emission
-/// is gated), mirroring [`crate::obs::in_flight_level`].
+/// Exposes the same atomic that drives `cqlite.flight.blocking_tasks_in_use`
+/// (assert on the LEVEL, never on timing).
+///
+/// **NORMATIVE RULE for observing this gauge (issue #2896) — stated ONCE here;
+/// other sites reference it rather than re-derive it.** Every live
+/// [`BlockingTaskGuard`] contributes `0` or `+1` at any instant, so a concurrent
+/// guard can only RAISE the level. Therefore: SOUND — a lower bound counting only
+/// guards the observer itself keeps live ("I hold `k`, so the level is `>= k`"),
+/// and likewise [`BlockingTaskGuard::entry_level`], an immutable post-increment
+/// snapshot. UNSOUND — differencing against a pre-load baseline: a peer holding a
+/// guard when the baseline is read inflates it and then releases, so the level can
+/// sit at or below that baseline while the observer's own guard is legitimately
+/// held (the exact flake #2896 removed). OUT OF SCOPE — exact rise/balance
+/// arithmetic; pin that against a private atomic
+/// ([`BlockingTaskGuard::enter_on`], `tests::blocking_task_guard_rises_and_balances`).
+///
+/// Feature-independent (the atomic is maintained regardless of the
+/// `observability` OTel feature; only the emission is gated), mirroring
+/// [`crate::obs::in_flight_level`].
 pub fn blocking_tasks_in_use_level() -> i64 {
     BLOCKING_TASKS.load(Ordering::SeqCst)
 }

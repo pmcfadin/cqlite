@@ -760,16 +760,30 @@ fn metrics_parity_on_full_consumption() {
 /// [`crate::saturation::BlockingTaskGuard`] is entered by the REAL streaming
 /// `spawn_blocking` merge closure — not merely a standalone unit of the guard.
 ///
-/// While the merge is producing into the bounded channel (the closure has
-/// entered its guard and is parked on backpressure / still emitting), the
-/// process-wide in-use level is at least the pre-load baseline + 1. This is a
-/// robust LOWER bound: concurrent tests can only ADD to the shared count, never
-/// pull it below this merge's own +1, so it does not flake under the parallel
-/// runner (the exact balance-to-baseline property is pinned deterministically by
-/// `saturation::tests::blocking_task_guard_rises_and_balances`).
+/// The test holds a REAL guard of its own (the production
+/// `BlockingTaskGuard::enter`, never the private-atomic `enter_on`) across the
+/// whole observation, then asserts four links — each a lower bound of the SOUND
+/// kind defined normatively on
+/// [`crate::saturation::blocking_tasks_in_use_level`] (issue #2896), so peer
+/// tests can only raise these values and none can flake:
+///
+/// 1. `blocking_tasks_in_use_level() >= 1` while our guard is live — a real
+///    `enter()` reaches the shared atomic the gauge is published from;
+/// 2. `blocking_entries == 1` — the REAL `spawn_blocking` merge closure entered
+///    exactly one guard (not a standalone unit of the guard);
+/// 3. `blocking_entry_level >= 2` — that guard's own post-increment reading
+///    counts our live guard plus its own `+1`, tying it to the SAME atomic;
+/// 4. `blocking_tasks_in_use_level() >= 2` while the merge is still producing —
+///    the closure HOLDS its guard for the merge's duration (the actual production
+///    signal). Without this, an entered-and-immediately-dropped guard — leaving
+///    the gauge reading 0 for the whole merge — would satisfy 1-3.
+///
+/// After the merge is joined, a final `>= 1` bounds the closure's RAII decrement
+/// against underflow past our own still-held contribution (NOT a claim that the
+/// drop was exactly `-1`; the exact rise/balance arithmetic is pinned against a
+/// private atomic by `saturation::tests::blocking_task_guard_rises_and_balances`).
 #[test]
 fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
-    let base = crate::saturation::blocking_tasks_in_use_level();
     let n = 40;
     let (_temp, dir, schema) = many_partition_fixture(n);
     let producer = MergeProducer::with_spec(schema, 1, crate::filter::ScanSpec::default()).unwrap();
@@ -777,6 +791,22 @@ fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
     let schema_ref = Arc::new(producer.arrow_schema().unwrap());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
+    let pr = probe();
+    let pr_check = pr.clone();
+    // A REAL guard on the shared production atomic (never the private-atomic
+    // `enter_on`), held for the rest of the test: it raises the floor the merge
+    // closure's own guard must read, anchoring every assertion below to the SAME
+    // atomic the gauge is published from. It emits one true gauge reading, as any
+    // production entry does; no test asserts on recorded gauge VALUES for
+    // `cqlite.flight.blocking_tasks_in_use` (the OTel capture harness runs in a
+    // separate integration-test process), so nothing else is perturbed.
+    let own_guard = crate::saturation::BlockingTaskGuard::enter();
+    // Link 1: our end of the anchor.
+    assert!(
+        crate::saturation::blocking_tasks_in_use_level() >= 1,
+        "a real BlockingTaskGuard::enter() must increment the shared atomic that \
+         backs cqlite.flight.blocking_tasks_in_use"
+    );
     rt.block_on(async move {
         let (mut stream, handle) = spawn_streaming(
             producer,
@@ -785,32 +815,63 @@ fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
             EgressBudget::default(),
-            probe(),
+            pr,
             CancelFlag::new(),
             timer(),
         );
         // Pull the schema + first batch: to emit a batch the merge closure must
-        // have entered its `BlockingTaskGuard` and started producing. With
-        // n ≫ channel capacity it is still running / backpressured here, so the
-        // guard is held.
+        // have entered its `BlockingTaskGuard` and started producing. That channel
+        // recv is ALSO the release/acquire edge that makes the `Relaxed` probe loads
+        // below sound: the closure's probe writes happen-before its batch send, so
+        // they are visible here. Do NOT hoist these asserts above the batch read —
+        // without that edge they would be racy.
         let _schema_msg = read_one(&mut stream).await.expect("schema message");
         let _first_batch = read_one(&mut stream).await.expect("first batch");
+        assert_eq!(
+            pr_check.blocking_entries.load(Ordering::Relaxed),
+            1,
+            "the real spawn_blocking merge closure must enter exactly one \
+             BlockingTaskGuard (proves the gauge is wired into the production path)"
+        );
         assert!(
-            crate::saturation::blocking_tasks_in_use_level() > base,
-            "the real spawn_blocking merge closure must hold a BlockingTaskGuard \
-             while producing (proves the gauge is wired into the production path). \
-             A robust lower bound: concurrent tests only ADD to the shared count."
+            pr_check.blocking_entry_level.load(Ordering::Relaxed) >= 2,
+            "the closure's guard must increment the SAME shared \
+             cqlite.flight.blocking_tasks_in_use atomic this test holds a guard on: \
+             its own post-increment reading counts our live guard plus its own +1"
+        );
+        // Link 4: the closure still HOLDS its guard here, so the live level counts
+        // both guards. Deterministic, not probabilistic: `batch_size = 1` over
+        // n = 40 single-row partitions means the merge owes 40 sends, while
+        // DO_GET_CHANNEL_CAPACITY is 4 — so having consumed only the first batch,
+        // the producer can be at most ~capacity + in-flight-send + encoder-prefetch
+        // batches ahead (the bound `first_batch_available_before_merge_completes`
+        // and `slow_consumer_bounds_produced_batches` pin at this same point) and
+        // is parked in `send` on the full channel with >30 batches still to emit. It
+        // cannot leave the closure (dropping the guard) until it has sent them all
+        // or is cancelled, and nothing cancels before the `drop(stream)` below. The
+        // egress credit pool cannot end it early either: 12 MiB of default budget
+        // versus 1-row batches, so the count governor binds first. If
+        // DO_GET_CHANNEL_CAPACITY ever rises to >= n, this premise dies — keep the
+        // two numbers apart rather than weakening the assert.
+        assert!(
+            crate::saturation::blocking_tasks_in_use_level() >= 2,
+            "the merge closure's guard must still be HELD while it produces (our \
+             guard + its guard); an entered-and-immediately-dropped guard would \
+             leave cqlite.flight.blocking_tasks_in_use reading 0 for the whole merge"
         );
         // Drop the stream to cancel + join the merge; the guard drops on exit.
         drop(stream);
         let _ = handle.await;
     });
 
-    // The gauge never underflows its baseline (the RAII drop balanced the entry).
+    // The merge's guard has dropped (the closure returned): its decrement did not
+    // take the shared atomic below the contribution of the guard THIS test still
+    // holds. An underflow bound only — see the doc comment.
     assert!(
-        crate::saturation::blocking_tasks_in_use_level() >= base,
-        "the blocking-task gauge must never underflow its pre-load baseline"
+        crate::saturation::blocking_tasks_in_use_level() >= 1,
+        "the blocking-task gauge must not underflow past this test's own live guard"
     );
+    drop(own_guard);
 }
 
 // ---- Issue #2162 Stage 1: rpc.rows/rpc.bytes move per batch ----------------
