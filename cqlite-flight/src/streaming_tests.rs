@@ -760,23 +760,35 @@ fn metrics_parity_on_full_consumption() {
 /// [`crate::saturation::BlockingTaskGuard`] is entered by the REAL streaming
 /// `spawn_blocking` merge closure — not merely a standalone unit of the guard.
 ///
-/// The observation is OWN-GUARD-ATTRIBUTABLE, so it cannot flake under the
-/// parallel runner (issue #2896). Two probe readings, both written by the
-/// production closure itself:
+/// The observation is OWN-GUARD-ATTRIBUTABLE *and* anchored to the shared
+/// process-global atomic that actually backs the gauge, so it cannot flake under
+/// the parallel runner (issue #2896). The test enters a REAL guard of its own
+/// (`BlockingTaskGuard::enter`, the same production constructor — never the
+/// private-atomic `enter_on`) and holds it across the whole observation, then
+/// asserts:
 ///
 /// * `blocking_entries == 1` — this stream's closure entered exactly one real
 ///   `BlockingTaskGuard` (the wiring evidence: the guard lives in the REAL
 ///   `spawn_blocking` merge closure, not in a standalone unit test);
-/// * `blocking_entry_level >= 1` — the level that guard read off the shared
-///   production atomic at its own entry. It is a POST-increment value, so it
-///   includes our own `+1` and stays valid however peer guards come and go.
+/// * `blocking_entry_level >= 2` — the level THAT guard read off the shared
+///   atomic at its own entry. Since this test holds a live guard, the level was
+///   already `>= 1` when the closure entered, so its post-increment read is
+///   `>= 2`. This is what ties the closure's guard to the SAME atomic as ours:
+///   re-pointing `enter()` at a private/different counter (or dropping the
+///   increment and reporting a synthetic level) breaks it.
+/// * after the merge is joined, `blocking_tasks_in_use_level() >= 1` — the
+///   closure's RAII drop did not decrement the shared atomic past our own still
+///   -held contribution (an underflow bound, NOT a proof that the drop was
+///   exactly `-1`).
 ///
-/// The earlier form differenced the process-global gauge against a `base`
-/// snapshot; a peer streaming test holding a guard when `base` was read (and
-/// dropping it before the assert) inflated the baseline and flaked the assert
-/// (#2896). The global gauge only supports its underflow invariant (`>= 0`),
-/// asserted after drain here; the exact rise/balance arithmetic is pinned
-/// deterministically against a private atomic by
+/// Each bound is peer-proof because every other live guard contributes `0` or
+/// `+1` at any instant: peers can only push these values HIGHER, never lower,
+/// and `blocking_entry_level` is an immutable `i64` snapshot once taken. The
+/// earlier form instead differenced the global against a pre-load `base`
+/// snapshot, so a peer holding a guard at `base`-read time (and releasing before
+/// the assert) inflated the baseline and flaked the assert (#2896). Exact
+/// rise/balance arithmetic is not provable here (peers mutate the same atomic
+/// concurrently) and is pinned deterministically against a private atomic by
 /// `saturation::tests::blocking_task_guard_rises_and_balances`.
 #[test]
 fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
@@ -789,6 +801,25 @@ fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let pr = probe();
     let pr_check = pr.clone();
+    // A REAL guard on the shared production atomic (never the private-atomic
+    // `enter_on`), held for the rest of the test: it raises the floor the merge
+    // closure's own guard must read, which is what anchors the assertions below to
+    // the SAME atomic the gauge is published from. It emits one true gauge reading,
+    // as any production entry does; no test asserts on recorded gauge VALUES for
+    // `cqlite.flight.blocking_tasks_in_use` (the OTel capture harness runs in a
+    // separate integration-test process), so nothing else is perturbed.
+    let own_guard = crate::saturation::BlockingTaskGuard::enter();
+    // Our end of the anchor: a real `enter()` must be visible on the SHARED atomic
+    // the public read seam (and the gauge) reads. Peer-proof — our guard is live, so
+    // the level is at least our own `+1` whatever peers do. Together with the
+    // `blocking_entry_level >= 2` assert below (which ties the closure's guard to
+    // the same atomic as ours) this chains the production closure to
+    // `saturation::BLOCKING_TASKS` without any baseline differencing.
+    assert!(
+        crate::saturation::blocking_tasks_in_use_level() >= 1,
+        "a real BlockingTaskGuard::enter() must increment the shared atomic that \
+         backs cqlite.flight.blocking_tasks_in_use"
+    );
     rt.block_on(async move {
         let (mut stream, handle) = spawn_streaming(
             producer,
@@ -802,7 +833,11 @@ fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
             timer(),
         );
         // Pull the schema + first batch: to emit a batch the merge closure must
-        // have entered its `BlockingTaskGuard` and started producing.
+        // have entered its `BlockingTaskGuard` and started producing. That channel
+        // recv is ALSO the release/acquire edge that makes the `Relaxed` probe loads
+        // below sound: the closure's probe writes happen-before its batch send, so
+        // they are visible here. Do NOT hoist these asserts above the batch read —
+        // without that edge they would be racy.
         let _schema_msg = read_one(&mut stream).await.expect("schema message");
         let _first_batch = read_one(&mut stream).await.expect("first batch");
         assert_eq!(
@@ -812,22 +847,27 @@ fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
              BlockingTaskGuard (proves the gauge is wired into the production path)"
         );
         assert!(
-            pr_check.blocking_entry_level.load(Ordering::Relaxed) >= 1,
-            "that guard's own post-increment reading of the shared \
-             cqlite.flight.blocking_tasks_in_use atomic must include its own +1"
+            pr_check.blocking_entry_level.load(Ordering::Relaxed) >= 2,
+            "the closure's guard must increment the SAME shared \
+             cqlite.flight.blocking_tasks_in_use atomic this test holds a guard on: \
+             its own post-increment reading counts our live guard plus its own +1"
         );
         // Drop the stream to cancel + join the merge; the guard drops on exit.
         drop(stream);
         let _ = handle.await;
     });
 
-    // The RAII drop balanced the entry: the process-global gauge is a count of
-    // live guards, so it never goes negative (the only global invariant a
-    // concurrently-running peer test cannot invalidate).
+    // The merge's guard has dropped (the closure returned). Its decrement did not
+    // take the shared atomic below the contribution of the guard THIS test still
+    // holds — an underflow bound, not a claim that the drop was exactly -1 (peers
+    // mutate the same atomic concurrently, so the exact magnitude is unprovable
+    // here; `saturation::tests::blocking_task_guard_rises_and_balances` pins the
+    // rise/balance arithmetic against a private atomic).
     assert!(
-        crate::saturation::blocking_tasks_in_use_level() >= 0,
-        "the blocking-task gauge must never underflow"
+        crate::saturation::blocking_tasks_in_use_level() >= 1,
+        "the blocking-task gauge must not underflow past this test's own live guard"
     );
+    drop(own_guard);
 }
 
 // ---- Issue #2162 Stage 1: rpc.rows/rpc.bytes move per batch ----------------

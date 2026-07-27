@@ -434,9 +434,12 @@ pub(crate) fn spawn_streaming(
         let blocking_guard = crate::saturation::BlockingTaskGuard::enter();
         // Issue #2896: publish THIS guard's own entry through the probe — the
         // number of guards this closure entered, plus the post-increment level the
-        // guard read off the shared production atomic (always `>= 1`, since it
-        // includes our own `+1`). Declared after the guard, so the guard is still
-        // the first act and still drops LAST.
+        // guard read off the shared production atomic (`>= 1`, since it includes
+        // our own `+1`). These are plain statements on captured `Arc`s, not
+        // ordering-relevant locals: the invariant they preserve is that the guard
+        // is entered BEFORE any other statement in this closure, and that no local
+        // declared after it can outlive it (so the accounting still spans the whole
+        // closure body, including the merge below).
         blocking_entries.fetch_add(1, Ordering::Relaxed);
         blocking_entry_level.store(blocking_guard.entry_level(), Ordering::Relaxed);
         // Issue #2819: per-request in-`stream` sub-phase accumulator, installed on

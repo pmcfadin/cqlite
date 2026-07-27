@@ -316,11 +316,15 @@ impl BlockingTaskGuard {
     }
 
     /// The shared in-use level observed at this guard's OWN entry — the exact
-    /// post-increment value [`Self::enter`] published to the gauge, so it is
-    /// `>= 1` by construction and can never be invalidated by another guard
-    /// dropping afterwards (issue #2896). Published through
+    /// post-increment value [`Self::enter`] published to the gauge, and an
+    /// immutable snapshot thereafter, so no later guard drop can invalidate it
+    /// (issue #2896). For a BALANCED counter — which this RAII guard guarantees,
+    /// every `+1` paired with exactly one `-1` on drop — it is `>= 1`: every
+    /// other guard contributes `0` or `+1` at any instant, and this guard's own
+    /// `+1` is already applied. Published through
     /// `crate::streaming::StreamProbe` so the streaming wiring test observes the
-    /// production arithmetic on the REAL shared atomic.
+    /// production arithmetic on the REAL shared atomic, with a LOWER bound the
+    /// test raises by holding a guard of its own.
     pub(crate) fn entry_level(&self) -> i64 {
         self.entry_level
     }
@@ -354,12 +358,18 @@ impl Drop for BlockingTaskGuard {
 
 /// Read the current process-wide flight blocking-task in-use level (issue #2419).
 ///
-/// Exposes the same atomic that drives `cqlite.flight.blocking_tasks_in_use`, so
-/// an end-to-end streaming test can assert the level rises while blocking tasks
-/// are outstanding and returns to its pre-load baseline after every task exits
-/// (asserting on the LEVEL, never on timing). Feature-independent (the atomic is
-/// maintained regardless of the `observability` OTel feature; only the emission
-/// is gated), mirroring [`crate::obs::in_flight_level`].
+/// Exposes the same atomic that drives `cqlite.flight.blocking_tasks_in_use`
+/// (assert on the LEVEL, never on timing). Read it ONLY for bounds concurrent
+/// guards cannot invalidate — e.g. "at least the guards I myself hold". Do NOT
+/// difference it against a pre-load baseline: a peer holding a guard when the
+/// baseline is read inflates it and then releases, which is exactly the flake
+/// issue #2896 removed. Exact rise/balance arithmetic belongs against a private
+/// atomic ([`BlockingTaskGuard::enter_on`], see
+/// `tests::blocking_task_guard_rises_and_balances`); an end-to-end wiring test
+/// observes its own guard's [`BlockingTaskGuard::entry_level`].
+/// Feature-independent (the atomic is maintained regardless of the
+/// `observability` OTel feature; only the emission is gated), mirroring
+/// [`crate::obs::in_flight_level`].
 pub fn blocking_tasks_in_use_level() -> i64 {
     BLOCKING_TASKS.load(Ordering::SeqCst)
 }
