@@ -995,9 +995,10 @@ jobs:
           "flow-finalize guardrail tests"
           -- /bin/bash scripts/flow/tests/finalize-cleanup.test.sh
 
-      # Claim-lock RESUME path (issue #2945): the legacy-branch guard's escape
-      # hatch, its fail-closed enumeration, and a REAL two-machine race on the
-      # empty-lease adopt. macOS too — claim.sh must stay bash-3.2 clean.
+      # Claim-lock RESUME path (issue #2945): the sanctioned (but unadvertised)
+      # empty-lease adopt, the guard's diagnosis-only refusal, its fail-closed
+      # enumeration, and a REAL two-machine race on the adopt. macOS too —
+      # claim.sh must stay bash-3.2 clean.
       - name: Run claim.sh resume-path guardrail tests (${{ matrix.os }} /bin/bash)
         run: >-
           bash scripts/ci/ci-timing-summary.sh measure

@@ -17,6 +17,14 @@
 # hardening of the two user-controlled fields (--reason, --actor) that land in the
 # very commit message the holder-identity parser reads.
 #
+# THE COMMAND IS SANCTIONED BUT NOT ADVERTISED (owner decision, #2945). The refusal
+# DIAGNOSES the lane — the blocking branch plus `claim-ref=free` — and points at the
+# documented procedure; it prints NO runnable resume command, because the readers are
+# agents that execute printed remediations literally and the printed command would
+# succeed against an actively-worked legacy lane. TEST 15 pins that absence (both the
+# `claim.sh adopt` and the bare `adopt … --expect` shapes) and the fact that the claim
+# path reads no GitHub state at all; TEST 16 pins that the MECHANISM is untouched.
+#
 # WRITES ARE WITNESSED, NOT INFERRED: a `post-receive` hook on the bare origin logs
 # every ACCEPTED ref update ("<ref> <old> <new>"), so tests assert how many writes
 # the SERVER applied and from what old value. Counting refs afterwards cannot do
@@ -133,90 +141,27 @@ accepted_olds()    { awk -v r="refs/claims/issue-$1" '$1==r {print $2}' "$HOOKLO
 # test the RECORD, not a verbatim rendering of the whole line.
 line_field() { printf '%s' "$1" | tr ' ' '\n' | grep -m1 "^$2=" | sed "s/^$2=//"; }
 
-# --- THE TWO WORK-BRANCH PREMISES ------------------------------------------
-# The name of each fixture states which premise a test encodes, because the liveness
-# gate treats them DIFFERENTLY and the difference is the whole point of TEST 17: a tip
-# with own commits is AGE-JUDGEABLE, a tip without any is INDETERMINATE.
+# --- THE WORK-BRANCH FIXTURE -----------------------------------------------
+# push_work_branch <branch> [msg] — an ORDINARY work branch on origin: cut from main,
+# with a commit of its own on top. Its tip carries NO claim trailers, which is exactly
+# why the old tip-based re-entrancy could never fire (TEST 7).
 #
-# push_branch_with_own_commit <branch> [msg] [tip-date] — an ORDINARY work branch on
-# origin: cut from main, WITH an ordinary commit of its own on top. Its tip carries NO
-# claim trailers, which is exactly why the old tip-based re-entrancy could never fire.
-#
-# <tip-date> is the tip's committer date and DEFAULTS TO A LONG-STALE FIXED DATE,
-# because the refusal now only advertises the resume hatch for a branch whose tip is
-# older than the reap threshold (#2945 review: a FRESH tip is an older-fleet worker
-# mid-implementation, which has no open PR yet either). A fixed literal date keeps the
-# fixture deterministic — no wall-clock arithmetic in an assertion.
-STALE_TIP_DATE='2020-03-01T12:00:00Z'
-push_branch_with_own_commit() {
-  local branch="$1" msg="${2:-ordinary work commit}" when="${3:-$STALE_TIP_DATE}"
+# The tip's DATE is deliberately irrelevant: the refusal reports the branch and
+# `claim-ref=free` and then points at the documented procedure, so nothing in claim.sh
+# judges a branch tip's age any more (the in-script liveness probe was deleted by owner
+# decision — three revisions of it each shipped a new way to hand away a live lane).
+# That is also why this suite contains NO clock-dependent branch fixture.
+push_work_branch() {
+  local branch="$1" msg="${2:-ordinary work commit}"
   (
     cd "$A" || exit 1
     g checkout -q -b "$branch" main
-    GIT_AUTHOR_DATE="$when" GIT_COMMITTER_DATE="$when" g commit -q --allow-empty -m "$msg"
+    g commit -q --allow-empty -m "$msg"
     g push -q origin "$branch"
     g checkout -q main
     g branch -q -D "$branch"
   )
 }
-
-# push_branch_without_own_commits <branch> — THE PRODUCTION SHAPE AT ACTIVATION TIME:
-# `flow-activate` runs `git worktree add -b issue-<N>-<slug> origin/main` and pushes the
-# branch immediately, so the tip IS origin/main's tip and the branch has no commits of
-# its own until PR time. Its committer date is therefore main's, not the worker's — the
-# premise under which the tip-age liveness signal is VACUOUS (#2945 round 5).
-push_branch_without_own_commits() {
-  local branch="$1"
-  (
-    cd "$A" || exit 1
-    g fetch -q origin
-    g push -q origin "refs/remotes/origin/main:refs/heads/$branch"
-  )
-}
-
-# advance_main_with_stale_tip — move origin's DEFAULT branch to a long-stale-dated tip,
-# i.e. "main has been quiet longer than the reap threshold" (overnight is routine). This
-# is what made the vacuous tip-age signal dangerous: a commit-less branch inherits that
-# date and reads as reapable. Called once, by TEST 17.
-advance_main_with_stale_tip() {
-  (
-    cd "$A" || exit 1
-    g fetch -q origin
-    g checkout -q main
-    g reset -q --hard origin/main
-    GIT_AUTHOR_DATE="$STALE_TIP_DATE" GIT_COMMITTER_DATE="$STALE_TIP_DATE" \
-      g commit -q --allow-empty -m "main has been quiet since $STALE_TIP_DATE"
-    g push -q origin main
-  )
-}
-
-# push_machine_claim <ref> <issue> <ts> — a supervisor-authored liveness ref;
-# push_raw_liveness_ref <ref> <msg> — the same NAMESPACE with an arbitrary (legacy) message.
-# (`refs/machine-claims/<machine>` / `refs/heartbeats/<machine>`, #2655) naming
-# <issue>, with <ts> as its recorded timestamp. Same root-commit shape
-# claim-heartbeat.sh writes, so claim.sh's liveness scan reads a REAL ref, not a mock.
-push_raw_liveness_ref() {
-  local ref="$1" msg="$2"
-  (
-    cd "$A" || exit 1
-    local tree commit
-    tree=$(g hash-object -t tree --stdin </dev/null)
-    commit=$(g commit-tree "$tree" -m "$msg")
-    g push -q --force origin "${commit}:${ref}"
-  )
-}
-push_machine_claim() {
-  local ref="$1" issue="$2" ts="$3"
-  (
-    cd "$A" || exit 1
-    local tree commit
-    tree=$(g hash-object -t tree --stdin </dev/null)
-    commit=$(GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" \
-      g commit-tree "$tree" -m "claim issue=${issue} machine=machineC pid=1 ts=${ts}")
-    g push -q --force origin "${commit}:${ref}"
-  )
-}
-now_ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # --- ONE SHARED start signal for the concurrency rounds --------------------
 # The racers must be released TOGETHER. The earlier shape used TWO independent
@@ -275,31 +220,29 @@ read_ns() {
 }
 
 # ===========================================================================
-echo "TEST 1: FREE claim ref + foreign-tip issue-<N>-* branch — claim refuses WITH the remediation, adopt --expect none SUCCEEDS"
+echo "TEST 1: FREE claim ref + foreign-tip issue-<N>-* branch — claim refuses with a DIAGNOSIS, adopt --expect none SUCCEEDS"
 # ===========================================================================
-push_branch_with_own_commit "issue-2001-owner-approved-spec" "docs(#2001): OpenSpec change approved by owner"
+push_work_branch "issue-2001-owner-approved-spec" "docs(#2001): OpenSpec change approved by owner"
 ( cd "$B" && g fetch -q origin )
 [ -z "$(ref_sha 2001)" ] && ok "precondition: refs/claims/issue-2001 is FREE" \
   || fail "precondition broken: a claim ref already exists for 2001"
 
-# runB_gh: the gh stub reports NO open PR, i.e. a demonstrably orphaned endgame —
-# the only state in which the escape hatch may be advertised (see TEST 15).
-outClaim=$(runB_gh claim 2001); rcClaim=$?
+outClaim=$(runB claim 2001); rcClaim=$?
 if [ "$rcClaim" -eq 2 ] && printf '%s\n' "$outClaim" | grep -q 'reason=legacy-branch-lock'; then
   ok "claim still refuses (exit 2) while the branch stands"
 else
   fail "expected legacy-branch-lock refusal exit 2; got rc=$rcClaim
 $outClaim"
 fi
-# Option 3 of the issue: the refusal must be ACTIONABLE, not a bare LOST — a bare
-# LOST is what sent two workers into hand-crafted claim-commit pushes.
-if printf '%s\n' "$outClaim" | grep -q 'adopt 2001 --expect none --reason' \
-   && printf '%s\n' "$outClaim" | grep -q 'issue-2001-owner-approved-spec' \
+# The refusal must DIAGNOSE (naming the branch and the free claim ref) — a bare LOST is
+# what sent two workers into hand-crafted claim-commit pushes. It must NOT hand over a
+# runnable command; that separation is pinned in TEST 15.
+if printf '%s\n' "$outClaim" | grep -q 'issue-2001-owner-approved-spec' \
    && printf '%s\n' "$outClaim" | grep -q 'claim-ref=free' \
-   && printf '%s\n' "$outClaim" | grep -q 'open-prs=0'; then
-  ok "refusal names the exact remediation command, the blocking branch, claim-ref=free, and open-prs=0"
+   && printf '%s\n' "$outClaim" | grep -q 'resume=documented-procedure'; then
+  ok "refusal names the blocking branch, claim-ref=free, and the documented resume"
 else
-  fail "refusal is not actionable (missing remediation/branch/claim-ref=free):
+  fail "refusal is not a usable diagnosis (missing branch/claim-ref=free/pointer):
 $outClaim"
 fi
 [ "$(printf '%s\n' "$outClaim" | grep -c 'CLAIM:')" = "1" ] \
@@ -367,7 +310,7 @@ else
   fail "expected RELEASED exit 0 with the ref gone; got rc=$rcRelease ref='$(ref_sha 2001)'
 $outRelease"
 fi
-outAfter=$(runA_gh claim 2001); rcAfter=$?
+outAfter=$(runA claim 2001); rcAfter=$?
 if [ "$rcAfter" -eq 2 ] && printf '%s\n' "$outAfter" | grep -q 'reason=legacy-branch-lock'; then
   ok "after the release the surviving work branch still guards a plain claim (exit 2)"
 else
@@ -378,7 +321,7 @@ fi
 # ===========================================================================
 echo "TEST 2: HELD claim ref + branch present — the resume path is still REFUSED (exit 2, holder keeps it)"
 # ===========================================================================
-push_branch_with_own_commit "issue-2002-active-effort"
+push_work_branch "issue-2002-active-effort"
 ( cd "$B" && g fetch -q origin )
 runA claim 2002 >/dev/null 2>&1   # blocked by the branch guard, so take it via the resume path
 runA adopt 2002 --expect none --reason "machineA is actively working this" >/dev/null 2>&1; rcHold=$?
@@ -437,7 +380,7 @@ raceRounds=0; raceOk=0; raceAtomic=0; raceLoser=0; raceWinnerVerified=0; raceDia
 raceOverlapped=0; ovMin=""; ovMax=""; ovDiag=""
 for id in 2101 2102 2103 2104 2105; do
   raceRounds=$((raceRounds+1))
-  push_branch_with_own_commit "issue-${id}-resumable"
+  push_work_branch "issue-${id}-resumable"
   ( cd "$B" && g fetch -q origin )
   race_reset
   ( race_wait_go "$T/ready-a"
@@ -652,7 +595,7 @@ echo "TEST 6: #2677 item 2 — a legacy-branch enumeration OUTAGE fails CLOSED (
 # A git shim fails ONLY `ls-remote --heads` (the guard's enumeration) and passes
 # everything else through, so the claim push WOULD succeed. The old code mapped that
 # failure to "no legacy branches" and granted the claim; it must now be UNKNOWN.
-push_branch_with_own_commit "issue-2006-invisible-to-the-guard"
+push_work_branch "issue-2006-invisible-to-the-guard"
 SHIMH="$T/shim-heads-fail"
 mkdir -p "$SHIMH"
 cat >"$SHIMH/git" <<SHIM
@@ -684,10 +627,10 @@ echo "TEST 7: no tip-based re-entrancy survives — even a claim-shaped branch t
 # The old guard tried to exempt a branch whose TIP looked like our own claim commit.
 # That exemption is deliberately gone: branch tips are not the lock, so a tip that
 # happens to carry claim trailers must NOT grant a claim. The resume is explicit.
-push_branch_with_own_commit "issue-2007-tip-looks-like-a-claim" \
+push_work_branch "issue-2007-tip-looks-like-a-claim" \
   "claim issue=2007 machine=machineB pid=1 actor=flow ts=2026-07-26T00:00:00Z nonce=x"
 ( cd "$B" && g fetch -q origin )
-outTip=$(runB_gh claim 2007); rcTip=$?
+outTip=$(runB claim 2007); rcTip=$?
 tipRef=$(ref_sha 2007)
 if [ "$rcTip" -eq 2 ] && printf '%s\n' "$outTip" | grep -q 'reason=legacy-branch-lock' && [ -z "$tipRef" ]; then
   ok "a claim-shaped branch tip does not grant a claim — the guard blocks (no ref granted)"
@@ -1032,40 +975,52 @@ done
   || fail "reaper/resumer barrier race produced a bogus owner in $((reapRounds - reapOk))/$reapRounds rounds$reapDiag"
 
 # ===========================================================================
-echo "TEST 15: the escape hatch is advertised ONLY when the endgame is demonstrably orphaned (open PR / unknown → withheld)"
+echo "TEST 15: the refusal DIAGNOSES the lane and prints NO runnable resume command (owner decision, #2945)"
 # ===========================================================================
-# The refusal's safety argument ("git rejects it if any machine holds the ref") does
-# NOT cover the case the guard exists for: an OLDER-fleet worker locks with the
-# BRANCH and holds no claim ref, so `claim-ref=free` is true for it and the advertised
-# empty-lease adopt WOULD succeed — handing an actively-worked issue to a second
-# machine. The readers are agents that run printed remediations literally, so the
-# command is printed only at open-prs=0, and an unreadable PR list withholds too.
-# The fixture tip is LONG STALE (the default), so the PR signal is the ONLY thing that
-# can withhold here — the tip-age/liveness signals are pinned separately in TEST 16.
-push_branch_with_own_commit "issue-2015-live-endgame"
+# The refusal used to PRINT a copy-pasteable `adopt --expect none` line whenever an
+# in-script liveness probe judged the lane orphaned. That probe is deleted: the readers
+# are agents that execute printed remediations LITERALLY, an older-fleet worker locks
+# with the BRANCH while holding no claim ref (so the printed command WOULD succeed
+# against a live lane), and three successive revisions of the probe each shipped a new
+# way to hand away an actively-worked issue. What the refusal owes the reader is the
+# DIAGNOSIS (which branch blocks it, and that the claim ref itself is free) plus a
+# pointer to the documented procedure — never an executable line.
+push_work_branch "issue-2015-diagnose-only"
 ( cd "$B" && g fetch -q origin )
-PRSHIM="$T/shim-gh-open-pr"
-mkdir -p "$PRSHIM"
-cat >"$PRSHIM/gh" <<'GH'
-#!/usr/bin/env bash
-# Fake gh: one OPEN PR whose head branch is this issue's.
-for a in "$@"; do [ "$a" = "list" ] && { echo "issue-2015-live-endgame"; exit 0; }; done
-exit 1
-GH
-chmod +x "$PRSHIM/gh"
-outLive=$( cd "$B" && PATH="$PRSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" claim 2015 ); rcLive=$?
-if [ "$rcLive" -eq 2 ] && printf '%s\n' "$outLive" | grep -q 'reason=legacy-branch-lock' \
-   && printf '%s\n' "$outLive" | grep -q 'remediation=withheld' \
-   && printf '%s\n' "$outLive" | grep -q 'open-prs=1' \
-   && ! printf '%s\n' "$outLive" | grep -q 'adopt 2015 --expect none' \
-   && [ "$(printf '%s\n' "$outLive" | grep -c 'CLAIM:')" = "1" ]; then
-  ok "with an OPEN PR the refusal withholds the hatch (remediation=withheld open-prs=1, no copy-pasteable adopt) on one line"
+outDiag=$(runB claim 2015); rcDiag=$?
+if [ "$rcDiag" -eq 2 ] && printf '%s\n' "$outDiag" | grep -q 'reason=legacy-branch-lock' \
+   && printf '%s\n' "$outDiag" | grep -q 'detail=refs/heads/issue-2015-diagnose-only' \
+   && printf '%s\n' "$outDiag" | grep -q 'claim-ref=free' \
+   && [ "$(printf '%s\n' "$outDiag" | grep -c 'CLAIM:')" = "1" ]; then
+  ok "the refusal names the blocking branch and claim-ref=free on ONE line"
 else
-  fail "expected a withheld remediation with open-prs=1; got rc=$rcLive
-$outLive"
+  fail "refusal lost its diagnosis (branch / claim-ref=free); got rc=$rcDiag
+$outDiag"
 fi
-# gh missing/failing = UNKNOWN, and unknown must fail closed exactly like release's
-# open-PR guard — never advertise a hand-away on an unread signal.
+# THE HARD REQUIREMENT: nothing in the output may be run as-is to take the claim.
+# Both shapes are excluded — the fully-qualified invocation and the bare argv — so a
+# future "helpful" reintroduction in either form fails here.
+if ! printf '%s\n' "$outDiag" | grep -q 'claim\.sh adopt' \
+   && ! printf '%s\n' "$outDiag" | grep -qE 'adopt .*--expect' \
+   && ! printf '%s\n' "$outDiag" | grep -q -- '--expect none'; then
+  ok "the refusal contains NO runnable adopt command (no 'claim.sh adopt', no 'adopt … --expect', no '--expect none')"
+else
+  fail "the refusal advertises a runnable resume command again:
+$outDiag"
+fi
+# …and it points at the documented procedure + the abandonment test, so the reader is
+# not left at a dead end (the dead end is what produced hand-crafted claim pushes).
+if printf '%s\n' "$outDiag" | grep -q 'resume=documented-procedure' \
+   && printf '%s\n' "$outDiag" | grep -q 'should-reap' \
+   && printf '%s\n' "$outDiag" | grep -q 'claim\.sh -h'; then
+  ok "the refusal points at the documented resume + the abandonment test (should-reap), not a command"
+else
+  fail "refusal gives no pointer to the documented procedure/abandonment test:
+$outDiag"
+fi
+# The refusal is now INDEPENDENT of gh: the claim path no longer reads GitHub at all,
+# so a broken gh must not change one byte of it. (A gh probe is exactly what the
+# deleted machinery needed, so this pins its absence.)
 GHFAIL="$T/shim-gh-broken"
 mkdir -p "$GHFAIL"
 cat >"$GHFAIL/gh" <<'GH'
@@ -1074,254 +1029,36 @@ echo "gh: simulated failure" >&2
 exit 1
 GH
 chmod +x "$GHFAIL/gh"
-outUnknown=$( cd "$B" && PATH="$GHFAIL:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" claim 2015 2>/dev/null ); rcUnknown=$?
-if [ "$rcUnknown" -eq 2 ] && printf '%s\n' "$outUnknown" | grep -q 'remediation=withheld' \
-   && printf '%s\n' "$outUnknown" | grep -q 'open-prs=-1' \
-   && ! printf '%s\n' "$outUnknown" | grep -q 'adopt 2015 --expect none'; then
-  ok "an UNREADABLE PR list also withholds the hatch (open-prs=-1) — fail closed on an unread signal"
+outNoGh=$( cd "$B" && PATH="$GHFAIL:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" claim 2015 2>/dev/null ); rcNoGh=$?
+if [ "$rcNoGh" -eq 2 ] && [ "$outNoGh" = "$outDiag" ]; then
+  ok "a broken gh produces the byte-identical refusal — the claim path reads no GitHub state"
 else
-  fail "expected a withheld remediation with open-prs=-1; got rc=$rcUnknown
-$outUnknown"
+  fail "the refusal depends on gh (rc=$rcNoGh); with a broken gh it read:
+$outNoGh"
 fi
-# Withholding is ADVICE, not a lock: an operator who has confirmed ownership can
-# still resume, and git remains the sole arbiter (the claim ref really is free).
-outStillWorks=$(runB adopt 2015 --expect none --reason "ownership confirmed with the PR author"); rcStillWorks=$?
-if [ "$rcStillWorks" -eq 0 ] && printf '%s\n' "$outStillWorks" | grep -q 'CLAIM: ADOPTED' \
+
+# ===========================================================================
+echo "TEST 16: the sanctioned resume is fully functional though unadvertised — and STILL loses to a real holder"
+# ===========================================================================
+# Removing the ADVERTISEMENT must not touch the MECHANISM (AC1). An operator who has
+# confirmed abandonment out-of-band runs the documented command and it works; a lane
+# whose claim ref is genuinely HELD still refuses, with the holder's ref untouched.
+outUnadvertised=$(runB adopt 2015 --expect none --reason "abandonment confirmed via should-reap and the branch author"); rcUnadvertised=$?
+if [ "$rcUnadvertised" -eq 0 ] && printf '%s\n' "$outUnadvertised" | grep -q 'CLAIM: ADOPTED' \
    && [ -n "$(ref_sha 2015)" ]; then
-  ok "the hatch itself still works when invoked deliberately — the guard changes ADVICE, not the arbiter"
+  ok "the unadvertised resume still acquires the FREE ref when run deliberately"
 else
-  fail "expected the deliberate resume to still succeed; got rc=$rcStillWorks
-$outStillWorks"
+  fail "expected the deliberate resume to still succeed; got rc=$rcUnadvertised
+$outUnadvertised"
 fi
-
-# ===========================================================================
-echo "TEST 16: the PRE-PR window — a FRESH branch tip or a fresh liveness ref withholds the hatch; the advertised command is informative VERBATIM"
-# ===========================================================================
-# open-prs=0 alone does NOT prove the lane is orphaned (#2945 review): this pipeline
-# opens the PR LATE, so an older-fleet worker that is actively implementing has zero
-# open PRs for most of its life while holding only the BRANCH. The liveness evidence for
-# that window is the branch TIP AGE plus the supervisor-authored machine-claim/heartbeat
-# refs — and every unreadable signal withholds.
-
-# (a) FRESH tip, no open PR: a worker mid-implementation. The hatch must be WITHHELD.
-push_branch_with_own_commit "issue-2016-being-worked-right-now" "wip commit" "$(now_ts)"
-( cd "$B" && g fetch -q origin )
-outFresh=$(runB_gh claim 2016); rcFresh=$?
-if [ "$rcFresh" -eq 2 ] && printf '%s\n' "$outFresh" | grep -q 'remediation=withheld' \
-   && printf '%s\n' "$outFresh" | grep -q 'open-prs=0' \
-   && printf '%s\n' "$outFresh" | grep -q 'newest-branch-tip=' \
-   && ! printf '%s\n' "$outFresh" | grep -q 'adopt 2016 --expect none' \
-   && [ "$(printf '%s\n' "$outFresh" | grep -c 'CLAIM:')" = "1" ]; then
-  ok "a FRESH branch tip at open-prs=0 (legacy worker mid-implementation) WITHHOLDS the hatch"
+heldBefore=$(ref_sha 2015)
+outSecond=$(runA adopt 2015 --expect none --reason "a second machine tries the same unadvertised path"); rcSecond=$?
+if [ "$rcSecond" -eq 2 ] && printf '%s\n' "$outSecond" | grep -q 'CLAIM: ADOPT-LOST' \
+   && [ "$(ref_sha 2015)" = "$heldBefore" ]; then
+  ok "the same command against a HELD ref is refused (exit 2) with the holder's ref unchanged"
 else
-  fail "expected the hatch withheld for a fresh tip at open-prs=0; got rc=$rcFresh
-$outFresh"
-fi
-
-# (b) STALE tip, no open PR, no liveness ref: demonstrably orphaned → advertised. And
-# the printed command, run VERBATIM (which is what the readers do), must record an
-# INFORMATIVE reason — not the `why` a `--reason <why>` placeholder would have recorded.
-push_branch_with_own_commit "issue-2017-abandoned-lane"
-( cd "$B" && g fetch -q origin )
-outAdv=$(runB_gh claim 2017); rcAdv=$?
-if [ "$rcAdv" -eq 2 ] && printf '%s\n' "$outAdv" | grep -q "adopt 2017 --expect none --reason resume-legacy-branch-lock:issue-2017-abandoned-lane" \
-   && printf '%s\n' "$outAdv" | grep -q 'liveness-refs=none-naming-2017' \
-   && printf '%s\n' "$outAdv" | grep -q 'stale-after='; then
-  ok "a STALE tip + open-prs=0 + no liveness ref advertises the hatch with a CONCRETE self-describing --reason"
-else
-  fail "expected an advertised hatch with a concrete reason; got rc=$rcAdv
-$outAdv"
-fi
-verbatimArgs=$(printf '%s\n' "$outAdv" | sed -n "s/.*remediation='bash scripts\/flow\/claim.sh \([^']*\)'.*/\1/p")
-# Deliberate word splitting: the point is to run the PRINTED argv, unedited.
-# shellcheck disable=SC2086
-outVerbatim=$(runB $verbatimArgs); rcVerbatim=$?
-verbatimReason=$(line_field "$(runB status 2017)" reason)
-if [ "$rcVerbatim" -eq 0 ] && printf '%s\n' "$outVerbatim" | grep -q 'CLAIM: ADOPTED' \
-   && [ "$verbatimReason" != "why" ] && [ "$verbatimReason" != "unspecified" ] \
-   && printf '%s' "$verbatimReason" | grep -q 'resume-legacy-branch-lock' \
-   && printf '%s' "$verbatimReason" | grep -q 'issue-2017-abandoned-lane'; then
-  ok "copy-pasted VERBATIM the printed command adopts and records an informative reason ('$verbatimReason')"
-else
-  fail "the printed command did not adopt with an informative reason; rc=$rcVerbatim reason='$verbatimReason'
-$outVerbatim"
-fi
-
-# (c) STALE tip but a FRESH machine-claim ref naming the issue: a supervisor says a
-# worker is on it (#2655), so the hatch is WITHHELD even though the tip aged out.
-push_branch_with_own_commit "issue-2018-stale-branch-live-worker"
-push_machine_claim "refs/machine-claims/machineFresh" 2018 "$(now_ts)"
-( cd "$B" && g fetch -q origin )
-outLiveRef=$(runB_gh claim 2018); rcLiveRef=$?
-if [ "$rcLiveRef" -eq 2 ] && printf '%s\n' "$outLiveRef" | grep -q 'remediation=withheld' \
-   && printf '%s\n' "$outLiveRef" | grep -q 'liveness-ref=refs/machine-claims/machineFresh' \
-   && ! printf '%s\n' "$outLiveRef" | grep -q 'adopt 2018 --expect none'; then
-  ok "a FRESH machine-claim ref naming the issue WITHHOLDS the hatch even with a stale branch tip"
-else
-  fail "expected the hatch withheld for a fresh liveness ref; got rc=$rcLiveRef
-$outLiveRef"
-fi
-
-# (d) …and a liveness ref older than the threshold does NOT withhold forever: it is
-# itself reapable, so an abandoned heartbeat must not lock the lane out permanently.
-push_branch_with_own_commit "issue-2019-stale-branch-stale-heartbeat"
-push_machine_claim "refs/heartbeats/machineStale" 2019 "$STALE_TIP_DATE"
-( cd "$B" && g fetch -q origin )
-outStaleRef=$(runB_gh claim 2019); rcStaleRef=$?
-if [ "$rcStaleRef" -eq 2 ] && printf '%s\n' "$outStaleRef" | grep -q 'adopt 2019 --expect none --reason resume-legacy-branch-lock:' \
-   && printf '%s\n' "$outStaleRef" | grep -q 'liveness-refs=none-naming-2019'; then
-  ok "a liveness ref STALER than the reap threshold ages out and does not withhold the hatch"
-else
-  fail "expected the hatch advertised despite a stale liveness ref; got rc=$rcStaleRef
-$outStaleRef"
-fi
-
-# (e) UNREADABLE threshold (claim.sh without its claim-heartbeat.sh sibling): the lane
-# cannot be shown orphaned, so the hatch is withheld rather than defaulting to some
-# second copy of "4h".
-push_branch_with_own_commit "issue-2020-threshold-unreadable"
-( cd "$B" && g fetch -q origin )
-LONE="$T/lone-claim"
-mkdir -p "$LONE"
-cp "$CLAIM" "$LONE/claim.sh"
-outNoThresh=$( cd "$B" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
-  bash "$LONE/claim.sh" claim 2020 2>/dev/null ); rcNoThresh=$?
-if [ "$rcNoThresh" -eq 2 ] && printf '%s\n' "$outNoThresh" | grep -q 'remediation=withheld' \
-   && printf '%s\n' "$outNoThresh" | grep -q 'liveness=threshold-unreadable' \
-   && ! printf '%s\n' "$outNoThresh" | grep -q 'adopt 2020 --expect none'; then
-  ok "an UNREADABLE staleness threshold withholds the hatch (no hardcoded fallback)"
-else
-  fail "expected the hatch withheld when the threshold cannot be read; got rc=$rcNoThresh
-$outNoThresh"
-fi
-
-# (f) UNREADABLE liveness refs (a git shim fails ONLY the machine-claims enumeration,
-# everything else passes through): "we could not prove nobody is on it" withholds.
-push_branch_with_own_commit "issue-2021-liveness-enumeration-outage"
-( cd "$B" && g fetch -q origin )
-SHIML="$T/shim-liveness-fail"
-mkdir -p "$SHIML"
-cat >"$SHIML/git" <<SHIM
-#!/usr/bin/env bash
-saw_ls=0; saw_liveness=0
-for a in "\$@"; do
-  [ "\$a" = "ls-remote" ] && saw_ls=1
-  case "\$a" in refs/machine-claims/* | refs/heartbeats/*) saw_liveness=1 ;; esac
-done
-if [ "\$saw_ls" = 1 ] && [ "\$saw_liveness" = 1 ]; then exit 128; fi
-exec "$REALGIT" "\$@"
-SHIM
-chmod +x "$SHIML/git"
-outNoLive=$( cd "$B" && PATH="$SHIML:$GHSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
-  bash "$CLAIM" claim 2021 2>/dev/null ); rcNoLive=$?
-if [ "$rcNoLive" -eq 2 ] && printf '%s\n' "$outNoLive" | grep -q 'remediation=withheld' \
-   && printf '%s\n' "$outNoLive" | grep -q 'liveness-refs=unreadable' \
-   && ! printf '%s\n' "$outNoLive" | grep -q 'adopt 2021 --expect none'; then
-  ok "an UNREADABLE liveness-ref enumeration withholds the hatch (fail closed on an unread signal)"
-else
-  fail "expected the hatch withheld on a liveness enumeration outage; got rc=$rcNoLive
-$outNoLive"
-fi
-
-# (g) …and withholding still changes only ADVICE: the deliberate resume of the
-# actively-worked lane from (a) remains possible for an operator who confirmed ownership.
-outDeliberate=$(runB adopt 2016 --expect none --reason "confirmed with the branch author that the lane is free"); rcDeliberate=$?
-if [ "$rcDeliberate" -eq 0 ] && printf '%s\n' "$outDeliberate" | grep -q 'CLAIM: ADOPTED' \
-   && [ -n "$(ref_sha 2016)" ]; then
-  ok "the liveness gate changes the printed ADVICE only — a deliberate resume still works, git still arbitrates"
-else
-  fail "expected the deliberate resume of a withheld lane to still succeed; got rc=$rcDeliberate
-$outDeliberate"
-fi
-
-# ===========================================================================
-echo "TEST 17: a branch with NO COMMITS OF ITS OWN is INDETERMINATE, never 'stale' — the vacuous tip-age case"
-# ===========================================================================
-# THE PRODUCTION PREMISE THE OTHER FIXTURES MISS (#2945 round 5). Every fixture above
-# uses push_branch_with_own_commit, so its tip has a date of its own. `flow-activate`
-# does NOT: it creates the branch at origin/main and pushes it with no commits, and
-# `flow-implement` pushes again only at PR time. So for a freshly-activated lane the
-# tip's committer date IS main's — zero information about the worker. Whenever main had
-# been quiet longer than the threshold (overnight is routine), that lane presented as
-# open-prs=0 + a stale tip + no liveness refs, and the guard printed the copy-pasteable
-# hand-away FOR AN ACTIVELY-WORKED ISSUE — the two-writer outcome it exists to prevent.
-# So: no own commits => no age signal => remediation WITHHELD, with its own marker.
-advance_main_with_stale_tip
-
-# (a) The vacuous case: commit-less branch, main quiet since 2020, no liveness refs.
-push_branch_without_own_commits "issue-2060-just-activated-no-commits"
-( cd "$B" && g fetch -q origin )
-outVacuous=$(runB_gh claim 2060); rcVacuous=$?
-if [ "$rcVacuous" -eq 2 ] && printf '%s\n' "$outVacuous" | grep -q 'remediation=withheld' \
-   && printf '%s\n' "$outVacuous" | grep -q 'newest-branch-tip=no-own-commits' \
-   && ! printf '%s\n' "$outVacuous" | grep -q 'stale-after=' \
-   && ! printf '%s\n' "$outVacuous" | grep -q 'adopt 2060 --expect none' \
-   && [ "$(printf '%s\n' "$outVacuous" | grep -c 'CLAIM:')" = "1" ]; then
-  ok "a commit-less branch on a LONG-QUIET main withholds the hatch (newest-branch-tip=no-own-commits, no age verdict)"
-else
-  fail "expected the hatch withheld as no-own-commits; got rc=$rcVacuous
-$outVacuous"
-fi
-
-# (b) THE MOTIVATING CASES STILL WORK. #2043 and #1883 each carried their own
-# OpenSpec spec commit, so their tips ARE informative and genuinely old — on the very
-# same long-quiet main, such a branch must still be advertised.
-push_branch_with_own_commit "issue-2061-abandoned-with-its-own-commit"
-( cd "$B" && g fetch -q origin )
-outOwn=$(runB_gh claim 2061); rcOwn=$?
-if [ "$rcOwn" -eq 2 ] && printf '%s\n' "$outOwn" | grep -q 'adopt 2061 --expect none --reason resume-legacy-branch-lock:' \
-   && printf '%s\n' "$outOwn" | grep -q 'newest-branch-tip=' \
-   && printf '%s\n' "$outOwn" | grep -q 'stale-after=' \
-   && ! printf '%s\n' "$outOwn" | grep -q 'no-own-commits'; then
-  ok "a branch carrying its OWN stale commit is still age-judged and still advertises (the #2043/#1883 shape)"
-else
-  fail "expected the hatch advertised for a stale branch with its own commit; got rc=$rcOwn
-$outOwn"
-fi
-
-# (c) …and the new signal opens NO unreadable-signal hole: when the base (origin's
-# default branch) cannot be read, the ancestry test cannot be run, so the tip cannot be
-# judged either way — withhold, never "it must carry own commits".
-push_branch_with_own_commit "issue-2062-base-unreadable"
-( cd "$B" && g fetch -q origin )
-SHIMB="$T/shim-base-fetch-fail"
-mkdir -p "$SHIMB"
-cat >"$SHIMB/git" <<SHIM
-#!/usr/bin/env bash
-saw_fetch=0; saw_base=0
-for a in "\$@"; do
-  [ "\$a" = "fetch" ] && saw_fetch=1
-  case "\$a" in +HEAD:*) saw_base=1 ;; esac
-done
-if [ "\$saw_fetch" = 1 ] && [ "\$saw_base" = 1 ]; then exit 128; fi
-exec "$REALGIT" "\$@"
-SHIM
-chmod +x "$SHIMB/git"
-outNoBase=$( cd "$B" && PATH="$SHIMB:$GHSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
-  bash "$CLAIM" claim 2062 2>/dev/null ); rcNoBase=$?
-if [ "$rcNoBase" -eq 2 ] && printf '%s\n' "$outNoBase" | grep -q 'remediation=withheld' \
-   && printf '%s\n' "$outNoBase" | grep -q 'default-branch-tip=unreadable' \
-   && ! printf '%s\n' "$outNoBase" | grep -q 'adopt 2062 --expect none'; then
-  ok "an UNREADABLE default-branch tip withholds the hatch (the ancestry test is a signal, so it fails closed too)"
-else
-  fail "expected the hatch withheld on an unreadable base; got rc=$rcNoBase
-$outNoBase"
-fi
-
-# (d) The liveness-ref scan is SCOPED TO THIS ISSUE: a readable LEGACY ref in the
-# namespace that names NO issue used to withhold the hatch fleet-wide, for EVERY issue —
-# the permanent dead end this change removes. It must be skipped, not withheld.
-push_raw_liveness_ref "refs/heartbeats/machineLegacyFormat" "heartbeat machine=machineLegacy pid=7 at=whenever"
-push_branch_with_own_commit "issue-2063-legacy-liveness-ref-present"
-( cd "$B" && g fetch -q origin )
-outLegacyRef=$(runB_gh claim 2063); rcLegacyRef=$?
-if [ "$rcLegacyRef" -eq 2 ] && printf '%s\n' "$outLegacyRef" | grep -q 'adopt 2063 --expect none --reason resume-legacy-branch-lock:' \
-   && printf '%s\n' "$outLegacyRef" | grep -q 'liveness-refs=none-naming-2063' \
-   && ! printf '%s\n' "$outLegacyRef" | grep -q 'liveness-refs=unreadable'; then
-  ok "a LEGACY liveness ref naming no issue does not withhold another issue's hatch (the scan is issue-scoped)"
-else
-  fail "expected an issue-scoped liveness scan to still advertise; got rc=$rcLegacyRef
-$outLegacyRef"
+  fail "expected ADOPT-LOST exit 2 with the ref intact; got rc=$rcSecond ref='$(ref_sha 2015)' was='$heldBefore'
+$outSecond"
 fi
 
 echo ""
