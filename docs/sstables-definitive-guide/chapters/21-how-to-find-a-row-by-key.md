@@ -6,8 +6,14 @@ seeks and failure paths.
 ### Overview
 - Bloom check (`Filter.db`) → early negative exit when absent
 - BIG: Summary jump (`Summary.db`) → locate `index_offset`; **BTI has no `Summary.db`**
-- Index scan (`Index.db` for BIG, `Partitions.db` trie for BTI) → get `data_offset`
+- Index scan (`Index.db` for BIG, `Partitions.db` trie for BTI) → get `data_offset`, bounded by
+  the summary interval for BIG
 - Data read (`Data.db`) → parse partition + rows via `SerializationHeader`
+
+Cassandra also short-circuits before any of this: the reader compares the target to the
+SSTable's first/last keys and skips the file entirely when out of range, and consults the key
+cache before touching `Summary.db`
+([`BigTableReader.java#L228-L275`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java#L228-L275)).
 
 ### BIG (legacy/newbig) flow
 
@@ -15,12 +21,24 @@ seeks and failure paths.
 - Load `Filter.db` if present; `might_contain(decorated_key)`.
 - Negative → stop. Positive → continue.
 
-**2) Summary**
-- Binary search **partition keys** (decorated-key order, token-first byte comparison) to find
-  the nearest `index_offset` into `Index.db`.
-- Source: `IndexSummary.binarySearch(PartitionPosition key)` —
-  [`IndexSummary.java#L127-L152`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java#L127)
-- Note: the binary search operates on **decorated keys**, not raw token values.
+**2) Summary** — O(log s) over `s` samples
+- Binary search the samples in **decorated-key order**: partitioner token first
+  (`Murmur3Partitioner.LongToken.compareTo` = `Long.compare`), raw key bytes compared
+  *unsigned* only as a tie-break. A raw-byte (`memcmp`) comparator is **wrong** and lands in
+  the wrong interval.
+- The result is the **floor** sample — the greatest sample whose decorated key is `<= target`
+  — whose `position` is where the `Index.db` walk starts. The *next* sample's position is
+  where the covering interval ends. No sample `<= target` yields position `0` (walk from the
+  index start).
+- Sources: [`IndexSummary.binarySearch(PartitionPosition)`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java#L127-L152)
+  and [`getScanPositionFromBinarySearchResult`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java#L367-L373);
+  comparator in [`DecoratedKey.java#L93-L102`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/DecoratedKey.java#L93-L102).
+- Note: the binary search operates on **decorated keys**, not raw token values — and the token
+  is not stored in the entry, so it is recomputed from the sample's raw key.
+- A BIG reader loads `Summary.db` at open and does **not** scan `Index.db` — unless the
+  summary is absent, corrupt, or was written with a different `min_index_interval`, in which
+  case it is rebuilt by walking `Index.db`
+  ([`BigSSTableReaderLoadingBuilder.java#L96-L130`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigSSTableReaderLoadingBuilder.java#L96-L130)).
 
 **3) Index**
 - From `index_offset`, parse entries sequentially until the target is found or passed.
@@ -51,9 +69,37 @@ seeks and failure paths.
   `CompressionInfo.db`.
 - Parse partition header and rows using `SerializationHeader`.
 
+**Bounded interval scan — the walk is not open-ended**
+
+The `Index.db` walk in step 3 is bounded by the summary interval the floor sample opens, so an
+`EQ` lookup touches roughly one interval's worth of entries, not the whole file:
+
+- Cassandra computes the bound as
+  [`getEffectiveIndexIntervalAfterIndex(sampledIndex)`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java#L273-L276)
+  — the **exact** width of *this* interval, from the downsampling pattern. While
+  `i <= effectiveInterval` it compares raw key bytes (fast path); beyond that it compares
+  decorated keys and returns "absent" the moment an index key sorts above the target
+  ([`BigTableReader.java#L277-L320`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java#L277-L320)).
+- Width is `min_index_interval` only at full sampling. A downsampled summary
+  (`sampling_level < 128`) has uneven, wider intervals, and the widest can **exceed** the
+  average-width formula `min_index_interval * 128 / sampling_level` (at `128`/`96`: average
+  ~170.7, widest 256). Never bound a walk by the average.
+
+> **CQLite implementation note.** CQLite's BIG reader, when a usable `Summary.db` is present,
+> reads exactly the covering interval's `[start, end)` bytes and classifies a miss by whether
+> the interval is **end-bounded** (delimited above by a real next sample) — an end-bounded
+> miss is authoritative absence, while a miss in the last (read-to-EOF) interval falls back to
+> a whole-file key scan, because a tail-truncated `Index.db` can only lose entries there.
+> Source: `cqlite-core/src/storage/sstable/reader/summary_point.rs:53-76` and
+> `cqlite-core/src/storage/sstable/reader/data_access/big_point.rs:140-177`.
+
 **Failure/negative path**
 - If raw key != target → call `Serializer.skip()` and advance to the next Index.db entry.
-- If no entry matches within the scan window → partition absent (false-positive bloom hit).
+- If the walk leaves the covering interval without a match, the partition is absent from this
+  SSTable (for an `EQ` search reached through a positive Bloom check, a false-positive Bloom
+  hit). This conclusion is only as authoritative as the interval bound: it assumes the
+  interval's bytes are intact, which is why a reader that cannot rule out a truncated tail
+  must widen the search rather than report absence.
 
 ---
 
@@ -100,7 +146,9 @@ Mismatch → stop. Use `~indexPos` as `dataFilePosition`.
 ### Byte-level seek checklist
 
 - **BIG — Summary → Index:** verify `index_offset` is within file bounds; summary entries are
-  in decorated-key (token-first) order.
+  in decorated-key order (partitioner token first, raw bytes unsigned as tie-break), so search
+  them with a token-order comparator, never `memcmp`. Bound the forward walk by the next
+  sample's position (or by the exact per-interval width), not by the average interval width.
 - **BIG — Index → Data:** the leading `u16` is the key byte length; compare raw key bytes to
   target. No marker, no digest. Call `Serializer.skip()` on mismatch.
 - **BTI — Partitions.db → Data:** sign-bit of `indexPos` routes to `Rows.db` (>= 0) or
@@ -130,6 +178,9 @@ Mismatch → stop. Use `~indexPos` as `dataFilePosition`.
 
 ### References
 - `IndexSummary` (5.0.8): [`org.apache.cassandra.io.sstable.indexsummary.IndexSummary`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java)
+- Decorated-key comparator (token first, then unsigned bytes): [`DecoratedKey.java#L79-L102`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/DecoratedKey.java#L79-L102), [`Murmur3Partitioner.java#L177-L179`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/dht/Murmur3Partitioner.java#L177-L179)
+- Exact per-interval walk bound: [`IndexSummary.java#L273-L276`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java#L273-L276), [`Downsampling.java#L116-L123`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/Downsampling.java#L116-L123)
+- Summary loaded at open (rebuild only when absent/corrupt/interval-mismatched): [`BigSSTableReaderLoadingBuilder.java#L96-L130`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigSSTableReaderLoadingBuilder.java#L96-L130)
 - BIG reader: [`BigTableReader.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java)
 - BIG raw-key comparison (no digest): [`BigTableReader.java#L298-L325`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java#L298)
 - BTI has no Summary.db: [`BtiFormat.java#L100-L108`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java#L83)
