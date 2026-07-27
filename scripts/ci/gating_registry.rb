@@ -11,24 +11,29 @@
 #   * `.github/ci-gating-tiers.yml` names every gating tier (workflow + the exact
 #     check-run context it emits) and exempts every other `pull_request` workflow
 #     with a reason + issue link.
-#   * `policy_errors` is the ENROLMENT rule. It runs inside `validate-workflows.rb`,
-#     which runs as a step inside the `required` job, so a new PR-triggered
-#     workflow that forgets to enrol reds `required`.
+#   * `policy_errors` (scripts/ci/gating_policy_rules.rb) is the ENROLMENT rule.
+#     It runs inside `validate-workflows.rb`, which runs as a step in the
+#     `pr-gate-core` job; `required` declares `needs: [pr-gate-core]` and fails
+#     when the core job did not succeed, so a new PR-triggered workflow that
+#     forgets to enrol still reds `required`.
 #   * `evaluate` is the aggregation decision surface used by
 #     `scripts/ci/aggregate-required-tiers.sh`. It is pure: registry in,
 #     check-run JSON in, verdict out — no network, no clock, no sleeping.
 #
-# FAIL-CLOSED EVERYWHERE. An absent registered context is an ERROR, never
+# FAIL CLOSED, WITHOUT WEDGING. An absent registered context is an ERROR, never
 # "probably not applicable": inapplicability is reported BY THE TIER as an
-# emitted success (see the always-emit rules below). Every rule here is written
-# so that a bug in the mechanism reports "absent"/"invalid" (red) rather than
-# "not applicable" (green) — that asymmetry is the whole reason the registry
-# exists instead of a parser for GitHub's trigger semantics (see design.md).
+# emitted success (see the always-emit rules). But a false RED is an outage too —
+# a gate that wedges legitimate PRs gets disabled by the people it blocks. So the
+# transient, self-correcting states (a run superseded by a re-run, a cancelled
+# run whose replacement has not minted its check run yet) are re-polled rather
+# than hard-failed, and they still fail at the deadline.
 
 require "yaml"
 require "json"
 require "optparse"
 require "set"
+require "time"
+require_relative "gating_policy_rules"
 
 module GatingRegistry
   class Error < StandardError; end
@@ -41,6 +46,13 @@ module GatingRegistry
   DEFAULT_WORKFLOWS_DIR = ".github/workflows"
   DEFAULT_WAIT_MINUTES = 60
 
+  # How long a `cancelled`/`stale` tier is treated as superseded-and-re-polling
+  # before it becomes a failure. GitHub mints the replacement run's check runs
+  # within seconds of the cancellation; this window is generous and still far
+  # below the aggregation deadline, so a GENUINE cancellation does not hold a
+  # runner for the full hour.
+  DEFAULT_SUPERSESSION_GRACE_SECONDS = 600
+
   TOP_LEVEL_KEYS = %w[version aggregator defaults tiers exempt].freeze
   AGGREGATOR_KEYS = %w[workflow job].freeze
   DEFAULTS_KEYS = %w[wait_minutes].freeze
@@ -52,6 +64,13 @@ module GatingRegistry
   # gate job, so `skipped`/`neutral` there means the tier did not report its own
   # result — which is exactly the silent-green state this change exists to kill.
   PASSING_CONCLUSION = "success"
+
+  # Conclusions that routinely mean "a newer run for this same head sha replaced
+  # me", not "this tier decided no". `cancel-in-progress` concurrency produces
+  # them on every re-push, label change and ready-for-review. Treating them as an
+  # immediate hard failure would red `required` on ordinary PR activity (issue
+  # #2910 P2). They are NON-TERMINAL for a bounded grace window, then fail.
+  SUPERSEDABLE_CONCLUSIONS = %w[cancelled stale].freeze
 
   ID_PATTERN = /\A[a-z0-9][a-z0-9-]*\z/
   ISSUE_PATTERN = %r{\A(#\d+|https://github\.com/[^\s]+/issues/\d+)\z}
@@ -126,394 +145,12 @@ module GatingRegistry
     ([fallback] + waits).max
   end
 
-  # ----------------------------------------------------------- schema rules --
-
-  def schema_errors(registry, path)
-    errors = []
-    unknown = registry.keys.map(&:to_s) - TOP_LEVEL_KEYS
-    unknown.each { |key| errors << "#{path}: unknown top-level key `#{key}`" }
-    errors << "#{path}: `version` must be 1" unless registry["version"] == 1
-
-    errors.concat(aggregator_schema_errors(registry, path))
-    errors.concat(defaults_schema_errors(registry, path))
-    errors.concat(tier_schema_errors(registry, path))
-    errors.concat(exempt_schema_errors(registry, path))
-    errors
-  end
-
-  def aggregator_schema_errors(registry, path)
-    aggregator = registry["aggregator"]
-    return ["#{path}: `aggregator` must be a mapping naming the aggregating workflow and job"] unless aggregator.is_a?(Hash)
-
-    errors = []
-    (aggregator.keys.map(&:to_s) - AGGREGATOR_KEYS).each do |key|
-      errors << "#{path}: unknown aggregator key `#{key}`"
-    end
-    AGGREGATOR_KEYS.each do |key|
-      value = aggregator[key]
-      errors << "#{path}: aggregator.#{key} must be a non-empty string" unless value.is_a?(String) && !value.strip.empty?
-    end
-    errors
-  end
-
-  def defaults_schema_errors(registry, path)
-    defaults = registry["defaults"]
-    return [] if defaults.nil?
-    return ["#{path}: `defaults` must be a mapping"] unless defaults.is_a?(Hash)
-
-    errors = []
-    (defaults.keys.map(&:to_s) - DEFAULTS_KEYS).each { |key| errors << "#{path}: unknown defaults key `#{key}`" }
-    wait = defaults["wait_minutes"]
-    unless wait.nil? || (wait.is_a?(Integer) && wait.positive?)
-      errors << "#{path}: defaults.wait_minutes must be a positive integer"
-    end
-    errors
-  end
-
-  def tier_schema_errors(registry, path)
-    raw = registry["tiers"]
-    return ["#{path}: `tiers` must be a list"] unless raw.nil? || raw.is_a?(Array)
-
-    errors = []
-    # An empty `tiers:` list would make `required` trivially green with nothing
-    # aggregated — the exact silent-open state this registry exists to prevent.
-    # Emptying it must be a deliberate, blocked act, not a quiet regression.
-    if Array(raw).empty?
-      errors << "#{path}: `tiers` must declare at least one gating tier; an empty list makes " \
-                "`required` aggregate nothing and go green vacuously"
-    end
-    seen_ids = {}
-    Array(raw).each_with_index do |tier, index|
-      label = "#{path}: tiers[#{index}]"
-      unless tier.is_a?(Hash)
-        errors << "#{label} must be a mapping"
-        next
-      end
-      (tier.keys.map(&:to_s) - TIER_KEYS).each { |key| errors << "#{label} has unknown key `#{key}`" }
-
-      id = tier["id"]
-      if !id.is_a?(String) || !id.match?(ID_PATTERN)
-        errors << "#{label} `id` must be a lowercase kebab-case identifier"
-      elsif seen_ids.key?(id)
-        errors << "#{label} duplicates tier id `#{id}`"
-      else
-        seen_ids[id] = true
-      end
-
-      %w[workflow context].each do |key|
-        value = tier[key]
-        errors << "#{label} `#{key}` must be a non-empty string" unless value.is_a?(String) && !value.strip.empty?
-      end
-
-      wait = tier["wait_minutes"]
-      unless wait.nil? || (wait.is_a?(Integer) && wait.positive?)
-        errors << "#{label} `wait_minutes` must be a positive integer"
-      end
-      paths = tier["mandate_paths"]
-      unless paths.nil? || (paths.is_a?(Array) && paths.all? { |p| p.is_a?(String) })
-        errors << "#{label} `mandate_paths` must be a list of strings"
-      end
-    end
-    errors
-  end
-
-  def exempt_schema_errors(registry, path)
-    raw = registry["exempt"]
-    return ["#{path}: `exempt` must be a list"] unless raw.nil? || raw.is_a?(Array)
-
-    errors = []
-    Array(raw).each_with_index do |entry, index|
-      label = "#{path}: exempt[#{index}]"
-      unless entry.is_a?(Hash)
-        errors << "#{label} must be a mapping"
-        next
-      end
-      (entry.keys.map(&:to_s) - EXEMPT_KEYS).each { |key| errors << "#{label} has unknown key `#{key}`" }
-
-      workflow = entry["workflow"]
-      name = workflow.is_a?(String) ? workflow : "(missing workflow)"
-      errors << "#{label} `workflow` must be a non-empty string" unless workflow.is_a?(String) && !workflow.strip.empty?
-
-      reason = entry["reason"]
-      if !reason.is_a?(String) || reason.strip.length < 10
-        errors << "#{label} (#{name}) needs a `reason` explaining why it does not gate the merge"
-      end
-      issue = entry["issue"]
-      unless issue.is_a?(String) && issue.strip.match?(ISSUE_PATTERN)
-        errors << "#{label} (#{name}) needs an `issue` reference like `#2910`"
-      end
-    end
-    errors
-  end
-
-  # ------------------------------------------------------- enrolment policy --
-
-  # The forcing function. Returns [] when the repo's workflow set and the
-  # registry agree; otherwise a list of named, actionable errors. Any non-empty
-  # result reds `required`.
-  def policy_errors(workflows_dir: DEFAULT_WORKFLOWS_DIR, registry_path: DEFAULT_REGISTRY)
-    registry = begin
-      load_registry(registry_path)
-    rescue Error => e
-      return [e.message]
-    end
-
-    errors = schema_errors(registry, registry_path)
-    return errors unless errors.empty?
-
-    workflows = load_workflows(workflows_dir)
-    errors.concat(enrolment_errors(registry, registry_path, workflows, workflows_dir))
-    errors.concat(registered_workflow_errors(registry, registry_path, workflows, workflows_dir))
-    errors.concat(deadline_errors(registry, registry_path, workflows, workflows_dir))
-    errors
-  end
-
-  def load_workflows(workflows_dir)
-    Dir[File.join(workflows_dir, "*.{yml,yaml}")].sort.each_with_object({}) do |file, acc|
-      parsed = begin
-        load_yaml(file)
-      rescue Psych::SyntaxError
-        nil
-      end
-      acc[File.basename(file)] = parsed.is_a?(Hash) ? parsed : {}
-    end
-  end
-
-  def enrolment_errors(registry, path, workflows, workflows_dir)
-    errors = []
-    aggregator_workflow = registry.dig("aggregator", "workflow").to_s
-    registered = tiers(registry).each_with_object({}) { |t, acc| acc[t["workflow"].to_s] = t }
-    exempted = exemptions(registry).each_with_object({}) { |e, acc| acc[e["workflow"].to_s] = e }
-
-    (registered.keys & exempted.keys).sort.each do |workflow|
-      errors << "#{path}: #{workflow} is both a gating tier and an exemption; pick one"
-    end
-
-    # `required` can never be registered against itself: it would deadlock on its
-    # own check run. Structural, on top of the run-identity self-exclusion.
-    tiers(registry).each do |tier|
-      next unless tier["workflow"].to_s == aggregator_workflow
-
-      errors << "#{path}: tier `#{tier['id']}` registers the aggregating workflow #{aggregator_workflow}; " \
-                "`required` must never wait on itself"
-    end
-
-    (registered.keys + exempted.keys).sort.uniq.each do |workflow|
-      next if workflows.key?(workflow)
-
-      errors << "#{path}: names #{workflow}, which does not exist under #{workflows_dir}/"
-    end
-
-    workflows.each do |name, workflow|
-      next unless pull_request_workflow?(workflow)
-      next if name == aggregator_workflow
-      next if registered.key?(name) || exempted.key?(name)
-
-      errors << "#{path}: #{name} has a pull_request trigger but is neither a gating tier nor an " \
-                "exemption; add it to `tiers` (with the context it emits) or to `exempt` " \
-                "(with a reason and an issue) — issue #2910"
-    end
-    errors
-  end
-
-  # Structural rules that make "absent" unambiguous for a REGISTERED tier.
-  def registered_workflow_errors(registry, path, workflows, workflows_dir)
-    errors = []
-    tiers(registry).each do |tier|
-      name = tier["workflow"].to_s
-      workflow = workflows[name]
-      next if workflow.nil? # already reported as a missing file
-
-      label = "#{path}: tier `#{tier['id']}` (#{name})"
-      errors.concat(trigger_filter_errors(workflow, label, workflows_dir, name))
-      errors.concat(emitting_job_errors(workflow, tier, label))
-      errors.concat(context_uniqueness_errors(workflows, tier, label, name))
-    end
-    errors
-  end
-
-  # A check run is identified by NAME ALONE, across the whole commit — GitHub does
-  # not qualify it by workflow. So if any OTHER workflow has a job with the same
-  # `name:`, its (possibly green) check run could satisfy or shadow this tier
-  # depending on which id is higher. Global uniqueness closes that.
-  def context_uniqueness_errors(workflows, tier, label, own_workflow)
-    context = tier["context"].to_s
-    clashes = workflows.reject { |name, _| name == own_workflow }.filter_map do |name, workflow|
-      jobs = workflow["jobs"]
-      next unless jobs.is_a?(Hash)
-
-      matching = jobs.select { |job_id, job| job.is_a?(Hash) && job_name(job_id, job) == context }
-      "#{name} (#{matching.keys.sort.join(', ')})" unless matching.empty?
-    end
-    return [] if clashes.empty?
-
-    ["#{label} declares context `#{context}`, which is ALSO emitted by #{clashes.sort.join('; ')}; " \
-     "a check-run name is global to the commit, so a same-named sibling job could satisfy or shadow " \
-     "this tier"]
-  end
-
-  def trigger_filter_errors(workflow, label, _workflows_dir, _name)
-    errors = []
-    triggers = workflow_triggers(workflow)
-    %w[pull_request pull_request_target].each do |event|
-      config = triggers[event]
-      next unless config.is_a?(Hash)
-
-      # A `branches:` filter is as blocking as a `paths:` one: a PR whose base is
-      # not listed would never start the tier, its context would be permanently
-      # absent, and `required` would deadlock that PR for the whole deadline.
-      %w[branches branches-ignore].each do |key|
-        next unless config.key?(key)
-
-        errors << "#{label} carries a blocking `#{event}.#{key}` filter; a registered tier must fire " \
-                  "for EVERY pull request, or a PR with another base would deadlock on a permanently " \
-                  "absent context"
-      end
-
-      if config.key?("paths")
-        errors << "#{label} carries a blocking `#{event}.paths` filter; a registered tier must always " \
-                  "fire (use the #{SENTINEL} paths-ignore sentinel and decide applicability in a classifier job)"
-      end
-      next unless config.key?("paths-ignore")
-
-      ignored = Array(config["paths-ignore"]).map(&:to_s)
-      next if ignored == [SENTINEL]
-
-      errors << "#{label} carries a blocking `#{event}.paths-ignore` filter #{ignored.inspect}; only the " \
-                "#{SENTINEL} sentinel is permitted"
-    end
-    errors
-  end
-
-  # The emitting job must (1) exist, (2) be unconditional so the context is
-  # emitted on EVERY pull request, (3) actually reflect the tier's result, and
-  # (4) cover every other job in the workflow. (3)+(4) are what stop an
-  # always-green gate job from re-opening the hole from the inside.
-  def emitting_job_errors(workflow, tier, label)
-    context = tier["context"].to_s
-    jobs = workflow["jobs"]
-    return ["#{label} declares context `#{context}` but the workflow has no jobs mapping"] unless jobs.is_a?(Hash)
-
-    matches = jobs.select { |job_id, job| job.is_a?(Hash) && job_name(job_id, job) == context }
-    if matches.empty?
-      return ["#{label} is DANGLING: no job in the workflow emits the declared context `#{context}` " \
-              "(a check run's name is the job's `name:`)"]
-    end
-    if matches.size > 1
-      return ["#{label} declares context `#{context}`, emitted by more than one job " \
-              "(#{matches.keys.sort.join(', ')}); the context must identify exactly one job"]
-    end
-
-    job_id, job = matches.first
-    errors = []
-    condition = job["if"].to_s.gsub(/\s+/, " ").strip
-    if job.key?("strategy") && job["strategy"].is_a?(Hash) && job["strategy"].key?("matrix")
-      errors << "#{label} emitting job `#{job_id}` uses a matrix; matrix jobs mangle the check-run name"
-    end
-    if (job.key?("needs") || job.key?("if")) && !condition.include?("always()")
-      errors << "#{label} emitting job `#{job_id}` must be unconditional: with `needs:` or `if:` it must " \
-                "include `always()` so the context is emitted even when the tier's jobs fail or skip"
-    end
-
-    needs = Array(job["needs"]).map(&:to_s)
-    if needs.empty?
-      errors << "#{label} emitting job `#{job_id}` declares no `needs:`, so its conclusion cannot reflect " \
-                "the tier's result"
-      return errors
-    end
-
-    body = job_expression_text(job)
-    needs.sort.each do |dependency|
-      next if body.include?("needs.#{dependency}.result")
-
-      errors << "#{label} emitting job `#{job_id}` does not inspect `needs.#{dependency}.result`; the " \
-                "context would report success regardless of that job's outcome"
-    end
-    unless body.match?(/exit\s+1/)
-      errors << "#{label} emitting job `#{job_id}` has no failing path (`exit 1`); it could never red the tier"
-    end
-
-    uncovered = (jobs.keys.map(&:to_s) - [job_id.to_s] - needs_closure(jobs, job_id.to_s).to_a).sort
-    unless uncovered.empty?
-      errors << "#{label} emitting job `#{job_id}` does not transitively depend on #{uncovered.join(', ')}; " \
-                "every job in a registered workflow must feed the gate job or its failure would go unreported"
-    end
-    errors
-  end
-
-  def job_name(job_id, job)
-    name = job["name"]
-    name.is_a?(String) && !name.strip.empty? ? name : job_id.to_s
-  end
-
-  # All text in a job that could reference `needs.<id>.result`: the job `if:`,
-  # every step's `if:`/`run:`, and every env value.
-  def job_expression_text(job)
-    parts = [job["if"].to_s]
-    parts.concat(flatten_env(job["env"]))
-    Array(job["steps"]).each do |step|
-      next unless step.is_a?(Hash)
-
-      parts << step["if"].to_s
-      parts << step["run"].to_s
-      parts.concat(flatten_env(step["env"]))
-      with = step["with"]
-      parts.concat(flatten_env(with)) if with.is_a?(Hash)
-    end
-    parts.join("\n")
-  end
-
-  def flatten_env(env)
-    return [] unless env.is_a?(Hash)
-
-    env.values.map(&:to_s)
-  end
-
-  def needs_closure(jobs, job_id)
-    seen = Set.new
-    queue = Array(jobs[job_id].is_a?(Hash) ? jobs[job_id]["needs"] : nil).map(&:to_s)
-    until queue.empty?
-      current = queue.shift
-      next if seen.include?(current)
-
-      seen << current
-      job = jobs[current]
-      queue.concat(Array(job["needs"]).map(&:to_s)) if job.is_a?(Hash)
-    end
-    seen
-  end
-
-  # The aggregation deadline must be STRICTLY LESS than the aggregating job's
-  # timeout-minutes, so expiry surfaces as a reported red with a diagnostic
-  # rather than an Actions job cancellation (which reports nothing actionable).
-  def deadline_errors(registry, path, workflows, workflows_dir)
-    aggregator = registry["aggregator"]
-    return [] unless aggregator.is_a?(Hash)
-
-    name = aggregator["workflow"].to_s
-    job_id = aggregator["job"].to_s
-    workflow = workflows[name]
-    return ["#{path}: aggregator workflow #{name} not found under #{workflows_dir}/"] if workflow.nil?
-
-    job = workflow.dig("jobs", job_id)
-    return ["#{path}: aggregator job `#{job_id}` not found in #{name}"] unless job.is_a?(Hash)
-
-    timeout = job["timeout-minutes"]
-    unless timeout.is_a?(Integer) && timeout.positive?
-      return ["#{path}: aggregator job `#{job_id}` in #{name} must set a positive `timeout-minutes`"]
-    end
-
-    deadline = effective_wait_minutes(registry)
-    return [] if deadline < timeout
-
-    ["#{path}: aggregation deadline #{deadline}m must be strictly less than #{name} job `#{job_id}` " \
-     "timeout-minutes #{timeout}; otherwise expiry cancels the job instead of reporting a red"]
-  end
-
   # ------------------------------------------------------------- evaluation --
 
-  # Accepts `{"check_runs": [...]}`, a bare array, or NDJSON (one check-run
-  # object per line — what `gh api --paginate --jq '.check_runs[]'` emits).
+  # Accepts `{"check_runs": [...]}`, a bare array, a single check-run object (the
+  # shape GitHub returns when exactly one check run exists and the caller did not
+  # unwrap it), or NDJSON (one check-run object per line — what
+  # `gh api --paginate --jq '.check_runs[]'` emits).
   def parse_check_runs(text)
     stripped = text.to_s.strip
     return [] if stripped.empty?
@@ -540,14 +177,22 @@ module GatingRegistry
     case parsed
     when Hash
       runs = parsed["check_runs"]
-      raise Error, "check-run JSON object has no `check_runs` array" unless runs.is_a?(Array)
+      return runs.select { |entry| entry.is_a?(Hash) } if runs.is_a?(Array)
+      # A lone check-run object is a legitimate shape variation, not a hard
+      # error: red-ing `required` over it would be a false RED (issue #2910 P10).
+      return [parsed] if check_run_object?(parsed)
 
-      runs.select { |entry| entry.is_a?(Hash) }
+      raise Error, "check-run JSON object is neither a `check_runs` envelope nor a check run " \
+                   "(keys: #{parsed.keys.first(8).inspect})"
     when Array
       parsed.select { |entry| entry.is_a?(Hash) }
     else
       raise Error, "check-run JSON must be an object or an array"
     end
+  end
+
+  def check_run_object?(entry)
+    entry.key?("name") && (entry.key?("status") || entry.key?("conclusion") || entry.key?("id"))
   end
 
   # Drop this run's OWN check runs by RUN IDENTITY, never by name: an Actions job
@@ -584,25 +229,41 @@ module GatingRegistry
 
   # Pure decision surface. `final` = the deadline/poll budget is spent, so
   # unresolved tiers become failures (or waived, if a per-tier waiver applies).
-  def evaluate(registry:, check_runs:, exclude_ids: [], run_id: nil, labels: [], final: false)
+  # `now` (unix seconds, optional) only ages out a superseded conclusion; when it
+  # is absent such a tier simply stays non-terminal until `final`.
+  def evaluate(registry:, check_runs:, exclude_ids: [], run_id: nil, labels: [], final: false,
+               now: nil, supersession_grace: DEFAULT_SUPERSESSION_GRACE_SECONDS)
+    # SELF-CHECK (issue #2910 P7). An empty or unparseable `tiers:` would make
+    # every observation vacuous and the aggregate green with nothing checked —
+    # the one silent-open path in the mechanism. The enrolment rule rejects it
+    # too; this is the aggregator refusing on its own account.
+    assert_aggregatable!(registry)
+
     exclude = exclude_ids.map(&:to_i).to_set
     visible = check_runs.reject { |run| self_excluded?(run, exclude, run_id) }
     latest = latest_by_context(visible)
     waived = waived_tier_ids(labels)
+    context = { waived: waived, final: final, now: now, grace: supersession_grace }
 
-    tiers(registry).map do |tier|
-      observe_tier(tier, latest, waived, final)
-    end
+    tiers(registry).map { |tier| observe_tier(tier, latest, context) }
   end
 
-  def observe_tier(tier, latest, waived, final)
-    tier_id = tier["id"].to_s
-    context = tier["context"].to_s
-    run = latest[context]
-
-    if run.nil?
-      return absent_observation(tier_id, context, waived, final)
+  def assert_aggregatable!(registry)
+    raw = registry["tiers"]
+    unless raw.is_a?(Array)
+      raise Error, "registry `tiers` must be a list (got #{raw.class}); refusing to aggregate nothing"
     end
+    return unless tiers(registry).empty?
+
+    raise Error, "registry declares no gating tiers; refusing to report success for an empty " \
+                 "expectation set (a vacuously green `required` is the state this registry prevents)"
+  end
+
+  def observe_tier(tier, latest, context)
+    tier_id = tier["id"].to_s
+    declared = tier["context"].to_s
+    run = latest[declared]
+    return absent_observation(tier_id, declared, context) if run.nil?
 
     status = run["status"].to_s
     conclusion = run["conclusion"].to_s
@@ -610,52 +271,104 @@ module GatingRegistry
     check_id = run["id"]
 
     if status != "completed"
-      return pending_observation(tier_id, context, check_id, status, conclusion, url, waived, final)
+      return pending_observation(tier_id, declared, check_id, status, conclusion, url, context)
     end
-
     if conclusion == PASSING_CONCLUSION
-      return Observation.new("pass", tier_id, context, check_id, status, conclusion, url, "")
+      return Observation.new("pass", tier_id, declared, check_id, status, conclusion, url, "")
+    end
+    if SUPERSEDABLE_CONCLUSIONS.include?(conclusion)
+      return superseded_observation(tier_id, declared, run, context)
     end
 
-    note = if waived.include?(tier_id)
+    note = if context[:waived].include?(tier_id)
              "a failed tier cannot be waived (conclusion `#{conclusion}`); ci:waive:#{tier_id} ignored"
            else
              "registered tier concluded `#{conclusion}`"
            end
-    Observation.new("fail", tier_id, context, check_id, status, conclusion, url, note)
+    Observation.new("fail", tier_id, declared, check_id, status, conclusion, url, note)
   end
 
-  def absent_observation(tier_id, context, waived, final)
-    if final && waived.include?(tier_id)
-      return Observation.new("waived", tier_id, context, nil, "absent", nil, nil,
-                             "absent tier waived by ci:waive:#{tier_id}")
+  # An ABSENT tier is waived IMMEDIATELY, not only at the deadline (issue #2910
+  # P8): there is nothing to wait for, so burning the full deadline on it holds a
+  # runner idle for an hour to reach a verdict already determined. A PENDING tier
+  # is different — it can still turn red — so its waiver is honoured only once
+  # the deadline is spent.
+  def absent_observation(tier_id, declared, context)
+    if context[:waived].include?(tier_id)
+      return Observation.new("waived", tier_id, declared, nil, "absent", nil, nil,
+                             "absent tier waived by ci:waive:#{tier_id} (nothing to wait for)")
     end
-    state = final ? "fail" : "absent"
-    note = "no check run named `#{context}` on the PR head; absence is an ERROR, not inapplicability " \
+    final = context[:final]
+    note = "no check run named `#{declared}` on the PR head; absence is an ERROR, not inapplicability " \
            "(a registered tier always emits its context, reporting inapplicability as a success)"
-    Observation.new(state, tier_id, context, nil, "absent", nil, nil, final ? note : "")
+    Observation.new(final ? "fail" : "absent", tier_id, declared, nil, "absent", nil, nil, final ? note : "")
   end
 
-  def pending_observation(tier_id, context, check_id, status, conclusion, url, waived, final)
-    if final && waived.include?(tier_id)
-      return Observation.new("waived", tier_id, context, check_id, status, conclusion, url,
+  def pending_observation(tier_id, declared, check_id, status, conclusion, url, context)
+    if context[:final] && context[:waived].include?(tier_id)
+      return Observation.new("waived", tier_id, declared, check_id, status, conclusion, url,
                              "non-terminal tier waived by ci:waive:#{tier_id}")
     end
-    state = final ? "fail" : "pending"
-    note = final ? "still `#{status}` at the aggregation deadline" : ""
-    Observation.new(state, tier_id, context, check_id, status, conclusion, url, note)
+    state = context[:final] ? "fail" : "pending"
+    note = context[:final] ? "still `#{status}` at the aggregation deadline" : ""
+    Observation.new(state, tier_id, declared, check_id, status, conclusion, url, note)
+  end
+
+  # `cancelled`/`stale`: supersession is ROUTINE (`cancel-in-progress` fires on
+  # every re-push and label change), so this is non-terminal while a replacement
+  # is plausible. Supersession is detected POSITIVELY as soon as the replacement
+  # exists — a newer run mints a higher check-run id, so `latest_by_context` stops
+  # returning the cancelled one. The grace window only covers the gap before that
+  # check run appears; once it lapses (or at the deadline) the tier FAILS, and no
+  # waiver can excuse it.
+  def superseded_observation(tier_id, declared, run, context)
+    conclusion = run["conclusion"].to_s
+    check_id = run["id"]
+    url = run["details_url"].to_s
+    age = supersession_age(run, context[:now])
+    lapsed = context[:final] || (!age.nil? && age >= context[:grace])
+    unless lapsed
+      return Observation.new("pending", tier_id, declared, check_id, "completed", conclusion, url, "")
+    end
+
+    reason = context[:final] ? "at the aggregation deadline" : "after #{context[:grace]}s"
+    note = "registered tier concluded `#{conclusion}` and no superseding run appeared #{reason}"
+    if context[:waived].include?(tier_id)
+      note += "; a failed tier cannot be waived, so ci:waive:#{tier_id} was ignored"
+    end
+    Observation.new("fail", tier_id, declared, check_id, "completed", conclusion, url, note)
+  end
+
+  # Seconds since the check run completed, or nil when either end of the
+  # subtraction is unknown — in which case the tier stays non-terminal until the
+  # deadline (fail-closed, just later).
+  def supersession_age(run, now)
+    return nil if now.nil?
+
+    completed = parse_epoch(run["completed_at"]) || parse_epoch(run["started_at"])
+    return nil if completed.nil?
+
+    now.to_i - completed
+  end
+
+  def parse_epoch(value)
+    return nil if value.nil? || value.to_s.strip.empty?
+
+    Time.parse(value.to_s).to_i
+  rescue StandardError
+    nil
   end
 
   # UNIT SEPARATOR (0x1F), deliberately NOT a tab: bash `read` treats tab as IFS
   # whitespace and would COLLAPSE the empty fields an absent tier legitimately
   # produces (no check id, no conclusion, no url), silently shifting every later
   # field left.
-  OBSERVATION_SEPARATOR = ""
+  OBSERVATION_SEPARATOR = "\x1f"
 
   def format_observation(observation)
     [observation.state, observation.tier_id, observation.context, observation.check_id,
      observation.status, observation.conclusion, observation.url, observation.note]
-      .map { |field| field.to_s.gsub(/[\t\r\n]/, " ") }
+      .map { |field| field.to_s.gsub(/[\t\r\n]/, " ") }
       .join(OBSERVATION_SEPARATOR)
   end
 
@@ -679,7 +392,9 @@ if __FILE__ == $PROGRAM_NAME
     exclude_ids: [],
     run_id: nil,
     labels: [],
-    final: false
+    final: false,
+    now: nil,
+    grace: GatingRegistry::DEFAULT_SUPERSESSION_GRACE_SECONDS
   }
 
   command = ARGV.shift.to_s
@@ -696,6 +411,13 @@ if __FILE__ == $PROGRAM_NAME
     end
     opts.on("--run-id ID") { |v| options[:run_id] = v }
     opts.on("--labels LIST") { |v| options[:labels] = v.split(",").map(&:strip).reject(&:empty?) }
+    opts.on("--now EPOCH", "unix seconds used to age out a superseded conclusion") do |v|
+      options[:now] = v.strip.empty? ? nil : Integer(v, exception: false)
+    end
+    opts.on("--supersession-grace SECONDS") do |v|
+      parsed = Integer(v, exception: false)
+      options[:grace] = parsed if parsed && parsed >= 0
+    end
     opts.on("--final", "deadline spent: unresolved tiers become failures") { options[:final] = true }
   end
   parser.parse!(ARGV)
@@ -725,7 +447,9 @@ if __FILE__ == $PROGRAM_NAME
         exclude_ids: options[:exclude_ids],
         run_id: options[:run_id],
         labels: options[:labels],
-        final: options[:final]
+        final: options[:final],
+        now: options[:now],
+        supersession_grace: options[:grace]
       )
       observations.each { |o| puts GatingRegistry.format_observation(o) }
       exit GatingRegistry.verdict_code(observations)

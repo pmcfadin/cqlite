@@ -2,15 +2,28 @@ name: Required PR Gate
 
 on:
   pull_request:
+    # Issue #2910. `labeled`/`unlabeled` are LOAD-BEARING, not housekeeping:
+    # applying a label starts no run for an event type this workflow does not
+    # subscribe to, and re-running a workflow REPLAYS the original event payload —
+    # so without them the documented `ci:waive:<tier-id>` break-glass could never
+    # be exercised on a PR this gate has wedged, which is exactly when it is
+    # needed. `ready_for_review` keeps this workflow's observed event set a
+    # SUPERSET of every registered tier's (flight-ci.yml), so no event can cancel
+    # a tier's in-flight run with no `required` run watching for the replacement.
+    # gating_registry.rb enforces both relationships.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
 
 permissions:
   contents: read
   # Issue #2910: the `required` job POLLS this PR head's sibling check runs.
   # `checks: read` reads the check-runs endpoint; `actions: read` reads this run's
-  # own job ids for name-independent self-exclusion. Both are read-only and are
-  # available to the default GITHUB_TOKEN, including on fork PRs — no PAT.
+  # own job ids for name-independent self-exclusion; `pull-requests: read` re-reads
+  # the PR's CURRENT labels (the event payload is a snapshot from run start, and a
+  # re-run replays it, so a waiver added later would otherwise be invisible). All
+  # read-only and available to the default GITHUB_TOKEN, including on fork PRs.
   checks: read
   actions: read
+  pull-requests: read
 
 concurrency:
   group: pr-gate-${{ github.event.pull_request.number }}
@@ -223,7 +236,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          # Waiver labels only; the aggregator ignores anything that is not
-          # `ci:waive:<tier-id>`.
+          # The aggregator re-reads the PR's labels from the API on every poll
+          # (see PR_NUMBER); this payload snapshot is only the fallback for when
+          # that read fails. Waiver labels only — anything that is not
+          # `ci:waive:<tier-id>` is ignored.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: bash scripts/ci/aggregate-required-tiers.sh

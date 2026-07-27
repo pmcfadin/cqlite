@@ -152,10 +152,90 @@ cat >"$(runs_file self-shadow)" <<'JSON'
 JSON
 printf '9003\n' >"$WORK/self-ids-shadow.txt"
 
-# Same set with every self check run RENAMED: exclusion is by run identity, so
-# the verdict must be identical.
+# Same set with our own SUCCEEDING self check run (id 9003, "Alpha gate")
+# renamed: exclusion is by run identity, so the verdict must be identical. (The
+# other self check run, 9004, keeps its name — it is excluded by details URL, and
+# the two mechanisms are asserted separately below.)
 sed 's/"Alpha gate","status":"completed","conclusion":"success"/"totally renamed gate","status":"completed","conclusion":"success"/' \
   "$(runs_file self-shadow)" >"$(runs_file self-shadow-renamed)"
+
+# ---- supersession fixtures (issue #2910 P2) --------------------------------
+# `cancel-in-progress` concurrency cancels a tier's in-flight run on every
+# re-push, label change and ready-for-review, so `cancelled` is ROUTINE. A fixed
+# completion timestamp + an injected `--now` make the grace window deterministic
+# with no wall-clock dependence.
+CANCELLED_AT="2026-01-01T00:00:00Z"
+CANCELLED_EPOCH=1767225600
+WITHIN_GRACE=$((CANCELLED_EPOCH + 60))
+PAST_GRACE=$((CANCELLED_EPOCH + 4000))
+
+cat >"$(runs_file beta-cancelled)" <<JSON
+{"check_runs":[
+ {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
+ {"id":1002,"name":"Beta gate","status":"completed","conclusion":"cancelled",
+  "completed_at":"$CANCELLED_AT",
+  "details_url":"https://github.com/o/r/actions/runs/502/job/1002"}
+]}
+JSON
+
+# The replacement run has minted its check run: the cancelled one is no longer
+# latest, so supersession is detected POSITIVELY rather than guessed.
+cat >"$(runs_file beta-superseded)" <<JSON
+{"check_runs":[
+ {"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/501/job/1001"},
+ {"id":1002,"name":"Beta gate","status":"completed","conclusion":"cancelled",
+  "completed_at":"$CANCELLED_AT",
+  "details_url":"https://github.com/o/r/actions/runs/502/job/1002"},
+ {"id":1099,"name":"Beta gate","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/599/job/1099"}
+]}
+JSON
+
+# Cancelled first, replacement green on the third fetch: the real timeline of a
+# supersession, observed across polls.
+cat >"$WORK/superseding.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$WORK/superseding.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$WORK/superseding.count"
+if [ "\$n" -ge 3 ]; then cat "$(runs_file beta-superseded)"; else cat "$(runs_file beta-cancelled)"; fi
+EOF
+chmod +x "$WORK/superseding.sh"
+
+# ---- transient-fetch fixtures (issue #2910 P3) -----------------------------
+# One 5xx / secondary-rate-limit / DNS blip must not red a PR with an hour of
+# budget left; a persistent outage still fails closed.
+cat >"$WORK/blip-then-pass.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$WORK/blip.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$WORK/blip.count"
+if [ "\$n" -le 1 ]; then echo "503 Service Unavailable" >&2; exit 1; fi
+cat "$(runs_file all-pass)"
+EOF
+chmod +x "$WORK/blip-then-pass.sh"
+
+# ---- live-label fixtures (issue #2910 P1) ----------------------------------
+# A waiver applied WHILE the aggregation waits: the event payload is a snapshot
+# and a re-run replays it, so the labels must be re-read from the API each poll.
+cat >"$WORK/labels-late.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$WORK/labels.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$WORK/labels.count"
+[ "\$n" -ge 2 ] && echo "ci:waive:beta"
+exit 0
+EOF
+chmod +x "$WORK/labels-late.sh"
+
+# A LONE check-run object (exactly one check run on the head, un-enveloped) is a
+# shape variation, not a reason to red the gate.
+cat >"$(runs_file lone-object)" <<'JSON'
+{"id":1001,"name":"Alpha gate","status":"completed","conclusion":"success",
+ "details_url":"https://github.com/o/r/actions/runs/501/job/1001"}
+JSON
 
 # Progressive source: non-terminal on the first two fetches, green on the third.
 cat >"$WORK/progressive.sh" <<EOF
@@ -348,6 +428,150 @@ fi
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:*,ci:waive-all,waive" --actor tester
 if [ "$RC" -ne 0 ]; then ok "there is no blanket waiver"; else bad "a blanket-looking label waived everything"; fi
 
+# ------------------------------------------------- supersession (#2910 P2) --
+# BOTH directions are outages. `cancelled` used to be an instant hard fail, but
+# supersession is routine: marking a draft ready for review, or adding any label,
+# cancels the tier's in-flight run under `cancel-in-progress`. Reding `required`
+# for that wedges ordinary PRs. It must re-poll — and must still fail when the
+# cancellation was genuine.
+
+echo "== a cancelled tier superseded by a green re-run passes =="
+rm -f "$WORK/superseding.count" "$WORK/sleep.log"
+invoke "$WORK/superseding.sh" "$WORK/self-ids.txt" "$FUTURE" 5 --now "$WITHIN_GRACE"
+if [ "$RC" -eq 0 ]; then ok "superseded-then-green passes"; else bad "a superseded cancellation red the gate: $OUT"; fi
+if contains "$(cat "$SUMMARY")" '1099'; then
+  ok "the superseding check run is what decided the tier"
+else
+  bad "the summary did not record the superseding check run: $(cat "$SUMMARY")"
+fi
+SLEEPS=$(wc -l <"$WORK/sleep.log" 2>/dev/null | tr -d ' ')
+if [ "${SLEEPS:-0}" -ge 2 ]; then
+  ok "the cancelled tier was re-polled rather than hard-failed (${SLEEPS} intervals)"
+else
+  bad "the loop did not re-poll a cancelled tier (${SLEEPS:-0} intervals)"
+fi
+
+echo "== a cancelled tier with no successor still fails =="
+invoke "cat $(runs_file beta-cancelled)" "$WORK/self-ids.txt" "$FUTURE" 5 --now "$PAST_GRACE"
+if [ "$RC" -ne 0 ]; then ok "cancelled-with-no-successor fails once the grace lapses"; else bad "a genuine cancellation passed: $OUT"; fi
+if contains "$OUT" "beta" && contains "$OUT" "no superseding run appeared"; then
+  ok "it names the tier and says no superseding run appeared"
+else
+  bad "the cancellation diagnostic is missing: $OUT"
+fi
+
+invoke "cat $(runs_file beta-cancelled)" "$WORK/self-ids.txt" "$EXPIRED" 1 --now "$WITHIN_GRACE"
+if [ "$RC" -ne 0 ]; then ok "a cancelled tier inside the grace still fails AT THE DEADLINE"; else bad "expiry passed a cancelled tier: $OUT"; fi
+
+invoke "cat $(runs_file beta-cancelled)" "$WORK/self-ids.txt" "$EXPIRED" 1 --now "$PAST_GRACE" --labels "ci:waive:beta"
+if [ "$RC" -ne 0 ] && contains "$OUT" "cannot be waived"; then
+  ok "a waiver cannot excuse a cancelled tier either"
+else
+  bad "a cancelled tier was waived (rc=$RC): $OUT"
+fi
+
+# Near-miss: no `completed_at` to age against. Unknown age must NOT mean
+# "instantly stale" (false red) NOR "wait forever" — it stays non-terminal and
+# fails at the deadline.
+CANCELLED_NO_TS=$(sed "s/\"completed_at\":\"$CANCELLED_AT\",//" "$(runs_file beta-cancelled)")
+printf '%s\n' "$CANCELLED_NO_TS" >"$(runs_file beta-cancelled-no-ts)"
+invoke "cat $(runs_file beta-cancelled-no-ts)" "$WORK/self-ids.txt" "$EXPIRED" 1 --now "$PAST_GRACE"
+if [ "$RC" -ne 0 ] && contains "$OUT" "beta"; then
+  ok "a cancellation with no timestamp fails closed at the deadline"
+else
+  bad "an untimestamped cancellation did not fail closed (rc=$RC): $OUT"
+fi
+
+# -------------------------------------------- transient fetch blips (P3) ----
+echo "== a mid-poll API blip is retried, not fatal =="
+rm -f "$WORK/blip.count" "$WORK/sleep.log"
+invoke "$WORK/blip-then-pass.sh" "$WORK/self-ids.txt" "$FUTURE" 6
+if [ "$RC" -eq 0 ]; then ok "one failed fetch mid-poll recovers and passes"; else bad "a single API blip red the gate: $OUT"; fi
+if contains "$OUT" "transient check-run fetch failure"; then
+  ok "the blip is reported as transient rather than silently swallowed"
+else
+  bad "no transient-failure warning: $OUT"
+fi
+
+echo "== a persistent fetch failure still fails CLOSED =="
+invoke "false" "$WORK/self-ids.txt" "$FUTURE" 20 --max-fetch-failures 3
+if [ "$RC" -eq 2 ] && contains "$OUT" "3 times in a row"; then
+  ok "a fetch failure that never recovers fails closed at the ceiling"
+else
+  bad "a persistent fetch failure did not fail closed at the ceiling (rc=$RC): $OUT"
+fi
+
+# --------------------------------------------------- live labels (P1) ------
+echo "== waiver labels are re-read while the aggregation waits =="
+rm -f "$WORK/labels.count"
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 5 \
+  --labels-cmd "$WORK/labels-late.sh" --actor tester
+if [ "$RC" -eq 0 ]; then
+  ok "a waiver applied AFTER the run started is honoured without a re-run"
+else
+  bad "a late waiver was invisible — the documented break-glass would be unreachable: $OUT"
+fi
+
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "false" --labels "ci:waive:beta" --actor tester
+if [ "$RC" -eq 0 ] && contains "$OUT" "falling back to the event payload labels"; then
+  ok "an unreadable label source falls back to the payload labels and says so"
+else
+  bad "the label-read fallback did not hold (rc=$RC): $OUT"
+fi
+
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels-cmd "printf 'needs-decision\n'"
+if [ "$RC" -ne 0 ] && contains "$OUT" "beta"; then
+  ok "live labels that contain no waiver do not excuse anything"
+else
+  bad "a non-waiver label leaked a waiver (rc=$RC): $OUT"
+fi
+
+# ------------------------------------- waived ABSENT does not idle (P8) -----
+echo "== a waived ABSENT tier resolves immediately; a waived PENDING one still waits =="
+: >"$WORK/sleep.log"
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 5 --labels "ci:waive:beta" --actor tester
+if [ "$RC" -eq 0 ] && [ ! -s "$WORK/sleep.log" ]; then
+  ok "a waived absent tier does not hold a runner for the whole deadline (no polls)"
+else
+  bad "a waived absent tier burned the poll budget (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log"))"
+fi
+: >"$WORK/sleep.log"
+invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 3 --labels "ci:waive:beta" --actor tester
+if [ "$RC" -eq 0 ] && [ -s "$WORK/sleep.log" ]; then
+  ok "a waived PENDING tier is still waited out (it could still turn red)"
+else
+  bad "a waived pending tier short-circuited (rc=$RC, sleeps=$(wc -l <"$WORK/sleep.log"))"
+fi
+
+# ---------------------------------- registry self-check + shapes (P7/P10) ---
+echo "== the aggregator refuses a registry that would aggregate nothing =="
+for empty in 'tiers: []' 'tiers: oops' '# no tiers key at all'; do
+  cat >"$WORK/registry-empty.yml" <<YAML
+version: 1
+aggregator: { workflow: pr-gate.yml, job: required }
+defaults: { wait_minutes: 60 }
+$empty
+YAML
+  OUT=$(bash "$AGG_REAL" --registry "$WORK/registry-empty.yml" \
+    --check-runs-cmd "cat $(runs_file all-pass)" --self-jobs-cmd "cat $WORK/self-ids.txt" \
+    --deadline-epoch "$FUTURE" --poll-attempts 1 --sleep-cmd "$WORK/fake-sleep.sh" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 2 ]; then
+    ok "a registry with '$empty' exits 2 rather than reporting a vacuous success"
+  else
+    bad "a registry with '$empty' produced rc=$RC: $OUT"
+  fi
+done
+
+echo "== a lone check-run object is a shape variation, not a harness failure =="
+invoke "cat $(runs_file lone-object)" "$WORK/self-ids.txt" "$EXPIRED" 1
+if [ "$RC" -eq 1 ] && contains "$OUT" "beta" && ! contains "$OUT" "FAIL (harness)"; then
+  ok "a single un-enveloped check run parses; only the genuinely absent tier gates"
+else
+  bad "a lone check-run object was mis-handled (rc=$RC): $OUT"
+fi
+
 echo "== harness failures fail CLOSED =="
 invoke "cat $(runs_file all-pass)" "$WORK/definitely-missing-ids.txt" "$FUTURE" 1
 if [ "$RC" -ne 0 ]; then ok "an unreadable self-job list fails closed"; else bad "missing self-job list passed"; fi
@@ -372,6 +596,10 @@ count_failing_verdicts() {
   [ "$RC" -ne 0 ] && n=$((n + 1))
   invoke "cat $(runs_file one-failed)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta"
   [ "$RC" -ne 0 ] && n=$((n + 1))
+  invoke "cat $(runs_file beta-cancelled)" "$WORK/self-ids.txt" "$FUTURE" 5 --now "$PAST_GRACE"
+  [ "$RC" -ne 0 ] && n=$((n + 1))
+  invoke "false" "$WORK/self-ids.txt" "$FUTURE" 20 --max-fetch-failures 2
+  [ "$RC" -ne 0 ] && n=$((n + 1))
   printf '%s' "$n"
 }
 
@@ -381,10 +609,10 @@ REAL_FAILURES=$(count_failing_verdicts)
 AGG="$WORK/stub-aggregator.sh"
 STUB_FAILURES=$(count_failing_verdicts)
 AGG="$AGG_REAL"
-if [ "$REAL_FAILURES" -eq 4 ]; then
-  ok "the real aggregator fails all 4 discriminating states"
+if [ "$REAL_FAILURES" -eq 6 ]; then
+  ok "the real aggregator fails all 6 discriminating states"
 else
-  bad "the real aggregator failed only $REAL_FAILURES/4 discriminating states"
+  bad "the real aggregator failed only $REAL_FAILURES/6 discriminating states"
 fi
 if [ "$STUB_FAILURES" -eq 0 ]; then
   ok "the always-exit-0 stub fails none of them, so this suite would go RED under it"

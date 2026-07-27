@@ -49,6 +49,7 @@ cat >"$BASE/workflows/pr-gate.yml" <<'YAML'
 name: Required PR Gate
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
 permissions:
   contents: read
 concurrency:
@@ -299,11 +300,76 @@ sed "s|  pull_request:|  pull_request:\\n    branches: [main]|" "$BASE/workflows
 run_policy "$DIR"
 expect_fail_named "a branches: filter on a registered tier is rejected" "branches"
 
+# --------------------------------------------------------------------------
+# `types:` is the near-miss SIBLING of the `branches:`/`paths:` fields above
+# (issue #2910 P4). The branches fix was not generalised to it, which is exactly
+# the shape that produced this class twice — so both directions are covered here,
+# and so is the degenerate case of no pull_request trigger at all.
+echo "== a registered tier must fire on every event that mints a head sha =="
+DIR=$(new_case types-too-narrow)
+sed "s|  pull_request:|  pull_request:\\n    types: [ready_for_review]|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+expect_fail_named "a tier that fires only on ready_for_review is rejected" "types"
+
+# Near-miss of the near-miss: ONE of the two mandatory types present.
+DIR=$(new_case types-missing-synchronize)
+sed "s|  pull_request:|  pull_request:\\n    types: [opened]|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+expect_fail_named "a tier missing 'synchronize' is rejected" "synchronize"
+
+DIR=$(new_case no-pr-trigger)
+sed "s|  pull_request:|  push:|; s|    paths-ignore:|    paths-ignore:|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+expect_fail_named "a registered tier with no pull_request trigger at all is rejected" "no \`pull_request\`"
+
+echo "== a registered tier must not fire where the aggregator is not watching =="
+DIR=$(new_case types-unobserved)
+sed "s|  pull_request:|  pull_request:\\n    types: [opened, synchronize, milestoned]|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+expect_fail_named "a tier firing on an event the aggregator ignores is rejected" "milestoned"
+
+DIR=$(new_case types-observed-subset)
+sed "s|  pull_request:|  pull_request:\\n    types: [opened, synchronize, labeled]|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+if [ "$RC" -eq 0 ]; then
+  ok "a tier whose types are a subset of the aggregator's is accepted (no false red)"
+else
+  bad "a legitimate types: subset was rejected — that wedges PRs: $OUT"
+fi
+
+echo "== the waiver break-glass must be reachable (#2910 P1) =="
+# Labels are applied AFTER a run starts, and a re-run replays the original event
+# payload — so an aggregator that does not subscribe to `labeled`/`unlabeled` has
+# a documented escape hatch that cannot be exercised on the PRs it has wedged.
+DIR=$(new_case aggregator-no-label-events)
+sed "s|    types: \[opened, synchronize, reopened, ready_for_review, labeled, unlabeled\]||" \
+  "$BASE/workflows/pr-gate.yml" >"$DIR/workflows/pr-gate.yml"
+run_policy "$DIR"
+expect_fail_named "an aggregator that ignores label events is rejected" "ci:waive"
+
 echo "== the emitting job must be unconditional =="
 DIR=$(new_case conditional-gate)
 sed "s|    if: always()|    if: github.event_name == 'push'|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
 run_policy "$DIR"
 expect_fail_named "a conditional emitting job is rejected" "always()"
+
+# The near-miss that the include?("always()") form accepted (issue #2910 P5):
+# a COMPOUND condition passes a substring test yet still skips the gate job — on
+# every draft PR here — leaving the context permanently absent.
+DIR=$(new_case compound-always)
+sed "s|    if: always()|    if: always() \&\& github.event.pull_request.draft == false|" \
+  "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+expect_fail_named "a compound 'always() && ...' condition is rejected" "compound condition"
+
+DIR=$(new_case wrapped-always)
+sed "s|    if: always()|    if: \${{ always() }}|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+if [ "$RC" -eq 0 ]; then
+  ok "the equivalent '\${{ always() }}' form is accepted (no false red)"
+else
+  bad "'\${{ always() }}' was rejected — that wedges a legitimate workflow: $OUT"
+fi
 
 echo "== the emitting job must reflect the tier's result (no always-green gate) =="
 DIR=$(new_case blind-gate)
@@ -341,7 +407,77 @@ jobs:
       - run: echo "always green, inspects nothing"
 YAML
 run_policy "$DIR"
-expect_fail_named "a gate job that inspects no needs.<job>.result is rejected" "does not inspect"
+expect_fail_named "a gate job that inspects no needs.<job>.result is rejected" "has no step that reads"
+
+# --------------------------------------------------------------------------
+# THE MUTANT the previous /exit\s+1/ substring rule accepted (issue #2910 P6):
+# a gate job that binds every needs.<job>.result in env: and only ECHOES them,
+# with the token `exit 1` present in a COMMENT. It reads every result, so the
+# inspection rule is satisfied; it can never fail, so the tier is always green —
+# a can't-fail guard inside the mechanism built to stop can't-fail tiers.
+write_echo_only_gate() {
+  # $1 = target workflow path, $2 = the line that must not count as a failing path
+  cat >"$1" <<YAML
+name: Alpha tier
+on:
+  pull_request:
+    paths-ignore:
+      - '__required_ci_context_never_matches__'
+permissions:
+  contents: read
+concurrency:
+  group: alpha
+jobs:
+  classify:
+    name: Classify alpha
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo classify
+  work:
+    name: alpha work
+    needs: classify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: echo work
+  gate:
+    name: Alpha gate
+    needs: [classify, work]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          CLASSIFY_RESULT: \${{ needs.classify.result }}
+          WORK_RESULT: \${{ needs.work.result }}
+        run: |
+          $2
+          echo "classify=\$CLASSIFY_RESULT work=\$WORK_RESULT"
+YAML
+}
+
+echo "== an always-green gate job cannot satisfy the failing-path rule =="
+DIR=$(new_case echo-only-gate-comment)
+write_echo_only_gate "$DIR/workflows/alpha.yml" '# on failure this would exit 1'
+run_policy "$DIR"
+expect_fail_named "a gate whose only 'exit 1' is in a COMMENT is rejected" "can exit non-zero"
+
+DIR=$(new_case echo-only-gate-string)
+write_echo_only_gate "$DIR/workflows/alpha.yml" 'echo "would exit 1 here"'
+run_policy "$DIR"
+expect_fail_named "a gate whose only 'exit 1' is inside a quoted string is rejected" "can exit non-zero"
+
+# ...and the inverse must NOT be a false red: a real failing path on a line that
+# merely CONTAINS a '#' inside quotes still counts.
+DIR=$(new_case gate-hash-in-string)
+write_echo_only_gate "$DIR/workflows/alpha.yml" '[ "$CLASSIFY_RESULT" = success ] || { echo "job #1 failed"; exit 1; }'
+run_policy "$DIR"
+if [ "$RC" -eq 0 ]; then
+  ok "a real 'exit 1' on a line containing a quoted '#' still counts (no false red)"
+else
+  bad "a legitimate failing path was mis-read as a comment — that wedges a workflow: $OUT"
+fi
 
 echo "== every job in a registered workflow must feed the gate =="
 DIR=$(new_case uncovered-job)
@@ -504,7 +640,10 @@ cp "$VALIDATOR_RB" "$STUB_DIR/validate-workflows.rb"
 count_rule_rejections() {
   local n=0 dir
   for dir in "$WORK"/case-unenrolled "$WORK"/case-dangling "$WORK"/case-self-register \
-             "$WORK"/case-blind-gate "$WORK"/case-deadline-too-long; do
+             "$WORK"/case-blind-gate "$WORK"/case-deadline-too-long \
+             "$WORK"/case-types-too-narrow "$WORK"/case-types-unobserved \
+             "$WORK"/case-compound-always "$WORK"/case-echo-only-gate-comment \
+             "$WORK"/case-aggregator-no-label-events; do
     run_policy "$dir"
     [ "$RC" -ne 0 ] && n=$((n + 1))
   done
@@ -517,10 +656,10 @@ RULE="$STUB_DIR/gating_registry.rb"
 STUB_REJECTIONS=$(count_rule_rejections)
 RULE="$REGISTRY_RB"
 
-if [ "$REAL_REJECTIONS" -eq 5 ]; then
-  ok "the real rule rejects all 5 discriminating registries"
+if [ "$REAL_REJECTIONS" -eq 10 ]; then
+  ok "the real rule rejects all 10 discriminating registries"
 else
-  bad "the real rule rejected only $REAL_REJECTIONS/5"
+  bad "the real rule rejected only $REAL_REJECTIONS/10"
 fi
 if [ "$STUB_REJECTIONS" -eq 0 ]; then
   ok "the always-pass stub rejects none, so this suite would go RED under it"
