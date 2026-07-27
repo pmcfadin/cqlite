@@ -72,3 +72,39 @@ there is no external oracle for "which tiers gate a merge".
   different axis and is not merged into this registry.
 - **No change to the local gate's component set**, the no-heuristics mandate, binding surfaces, or the
   <128MB memory budget — this change touches CI topology, one shell script, and doctrine only.
+
+## MIGRATION NOTE — read before merging (#2910 round 3, R1)
+
+This change makes `main` register the `flight` gating tier, and `required` reads the registry from a pull
+request's **base ref** while the tier's emitting job comes from the tree the event ran. Those are two
+different trees, so at the instant this merges they can disagree.
+
+**What actually happens on merge.** For a `pull_request` event GitHub takes workflow definitions from the
+**merge commit**, so an open PR that does not touch `flight-ci.yml` picks up the new trigger, classifier
+and `Flight tier gate` job on its next event with no rebase. An unrebased head that somehow does not
+reds `pr-gate-core` first (`validate-workflows.rb` cannot find `.github/ci-gating-tiers.yml`), which reds
+`required` on the core result — wrong-but-fast, never an hour of silence.
+
+**What is nonetheless handled by construction.** The aggregating job now checks out `github.sha` (the merge
+commit) sparse and read-only, and if the base registers a tier that tree provably cannot emit — workflow
+absent, no PR trigger, `types:`/`branches:` excluding this event, or no job with that name — `required`
+fails on the **first poll** with a diagnostic naming both remedies:
+
+- **rebase** the pull request onto the base branch; or
+- apply **`ci:waive:flight`** if the tier is deliberately being renamed/retired (a registry change only
+  takes effect once merged).
+
+Inconclusive evidence (unparseable workflow, computed job name, unavailable checkout) never produces that
+verdict, and the verdict is never a pass — a PR controls that tree, so "cannot emit, therefore green" would
+be a bypass.
+
+**No short absent-deadline** was added, deliberately: a tier's gate job `needs:` every other job in its
+workflow, so its check run legitimately does not exist for as long as the tier takes to run. A timer on
+"absent" would red exactly the pull requests that genuinely mandate the tier. Speed comes from the provable
+property, evaluated immediately.
+
+The most likely real migration state is a **follow-up PR that renames this tier's context** — that shape is
+covered by a test and by the waiver.
+
+Full reasoning: `openspec/changes/required-aggregates-sibling-tiers/design.md`, section
+"What behaves differently at the MOMENT OF MERGE".
