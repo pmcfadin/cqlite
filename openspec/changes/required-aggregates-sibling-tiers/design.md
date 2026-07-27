@@ -164,6 +164,18 @@ correct semantics. Details:
   `aggregator_trust_boundary_errors` keeps the base-ref checkout from being dropped by accident rather
   than by intent.
 
+- **Provenance, and the precedent already in branch protection (round 4).** A registered tier used to be
+  satisfied by ANY check run with the declared name. Branch protection itself does not work that way: the
+  live `required_status_checks.checks` entry is `{context: required, app_id: 15368}` — GitHub pins the
+  producing app for the one context it enforces. Nothing extended that pinning to the tiers `required`
+  aggregates, so anything holding `checks:write` could mint `Flight tier gate` with `conclusion: success`
+  and satisfy a tier. The aggregation now verifies the producer itself (`app.slug`/`app.id` = GitHub
+  Actions, plus an Actions run `details_url`), fail-closed, for tier contexts and for the recorded
+  `pr-gate-core` result alike; an unverifiable run neither satisfies a tier nor SHADOWS the genuine one,
+  whatever its check-run id. Cost stated: this makes the `app` field of the check-runs API load-bearing —
+  if GitHub stopped returning it every tier would red. That is the correct direction for a merge gate,
+  and `ci:waive:<tier-id>` is the hatch.
+
 - **The "CODEOWNERS" control, corrected (round 4).** Earlier drafts of this section closed by naming
   "CODEOWNERS on `.github/` + `scripts/ci/`" as the complementary control for that residual. **There was
   no CODEOWNERS file anywhere in the repo** — not `.github/CODEOWNERS`, not `/CODEOWNERS`, not

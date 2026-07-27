@@ -404,12 +404,20 @@ jobs:
 
           # The other half of the same claim: when the tier IS applicable, the
           # work must actually have run. `skipped` is a legitimate pass only
-          # under run_tier=false. (`image` is excluded: it never runs on a pull
-          # request by design.)
+          # under run_tier=false. Derived from the SAME pair list as the loop
+          # above rather than naming jobs twice, so a job added to this workflow
+          # is covered without a second edit. (`image` is the one exclusion: it
+          # never runs on a pull request by design.)
           if [ "$RUN_TIER" = "true" ]; then
             inconsistent=""
-            [ "$TEST_RESULT" = "success" ] || inconsistent="${inconsistent}test(${TEST_RESULT}) "
-            [ "$FULL_RESULT" = "success" ] || inconsistent="${inconsistent}full(${FULL_RESULT}) "
+            for pair in \
+              "classify:${CLASSIFY_RESULT}" \
+              "test:${TEST_RESULT}" \
+              "full:${FULL_RESULT}"; do
+              job="${pair%%:*}"
+              result="${pair#*:}"
+              [ "$result" = "success" ] || inconsistent="${inconsistent}${job}(${result}) "
+            done
             if [ -n "$inconsistent" ]; then
               echo "::error::Flight tier gate: run_tier=true (${SCOPE_REASON:-no reason recorded}) but" \
                    "${inconsistent}did not run to success. A mandating diff whose work was skipped must" \
