@@ -167,6 +167,34 @@ new_case() {
   printf '%s' "$dir"
 }
 
+# subst <src> <dst> <find> <replace> [<find> <replace> …] — LITERAL text
+# substitution, portable and fail-loud (issue #2910 round 3).
+#
+# Every synthetic near-miss below is made by editing a fixture, and the two
+# obvious tools both have a trap:
+#   * BSD/macOS `sed` (macOS is a FIRST-CLASS gate host) emits a literal `n` for a
+#     `\n` in the REPLACEMENT and rejects the GNU `addr,+N` range form, so a
+#     multi-line edit silently produces the wrong fixture and the case then proves
+#     nothing. That is #2926's G1 class.
+#   * a `python3 … || ruby …` pair means the fallback is never exercised, so it
+#     rots into a path that cannot work while a doc claims it does.
+# So: ONE path, ruby, which this suite already hard-requires (it SKIPs without it),
+# with no python3 anywhere. And every substitution ASSERTS its needle exists — a
+# fixture edit that quietly matched nothing is the same silent-no-op class.
+subst() {
+  local src="$1" dst="$2"
+  shift 2
+  ruby -e '
+    src, dst = ARGV.shift(2)
+    text = File.read(src)
+    ARGV.each_slice(2) do |find, replace|
+      abort("subst: #{src}: no occurrence of #{find.inspect}") unless text.include?(find)
+      text = text.sub(find, replace)
+    end
+    File.write(dst, text)
+  ' "$src" "$dst" "$@" || bad "subst produced no fixture for $dst (a case built on it proves nothing)"
+}
+
 OUT=""
 RC=0
 RULE="$REGISTRY_RB"
@@ -271,7 +299,7 @@ expect_fail_named "an exemption without an issue reference is rejected" "issue"
 
 echo "== a dangling registry entry =="
 DIR=$(new_case dangling)
-sed 's/context: Alpha gate/context: No such context/' "$BASE/registry.yml" >"$DIR/registry.yml"
+subst "$BASE/registry.yml" "$DIR/registry.yml" "context: Alpha gate" "context: No such context"
 run_policy "$DIR"
 expect_fail_named "a context no job emits is rejected as dangling" "DANGLING"
 
@@ -292,13 +320,15 @@ expect_fail_named "registering pr-gate.yml is rejected" "never wait on itself"
 
 echo "== a registered workflow with a blocking trigger filter =="
 DIR=$(new_case blocking-paths)
-sed "s|    paths-ignore:|    paths:|; s|__required_ci_context_never_matches__|cqlite-flight/**|" \
-  "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  "    paths-ignore:" "    paths:" \
+  "__required_ci_context_never_matches__" "cqlite-flight/**"
 run_policy "$DIR"
 expect_fail_named "a blocking paths: filter on a registered tier is rejected" "blocking"
 
 DIR=$(new_case blocking-paths-ignore)
-sed "s|__required_ci_context_never_matches__|docs/**|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  "__required_ci_context_never_matches__" "docs/**"
 run_policy "$DIR"
 expect_fail_named "a non-sentinel paths-ignore on a registered tier is rejected" "paths-ignore"
 
@@ -306,7 +336,9 @@ expect_fail_named "a non-sentinel paths-ignore on a registered tier is rejected"
 # looks unfiltered but never fires for a PR with another base, so the context is
 # permanently absent and `required` deadlocks that PR for the whole deadline.
 DIR=$(new_case blocking-branches)
-sed "s|  pull_request:|  pull_request:\\n    branches: [main]|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  "  pull_request:" "  pull_request:
+    branches: [main]"
 run_policy "$DIR"
 expect_fail_named "a branches: filter on a registered tier is rejected" "branches"
 
@@ -317,13 +349,17 @@ expect_fail_named "a branches: filter on a registered tier is rejected" "branche
 # and so is the degenerate case of no pull_request trigger at all.
 echo "== a registered tier must fire on every event that mints a head sha =="
 DIR=$(new_case types-too-narrow)
-sed "s|  pull_request:|  pull_request:\\n    types: [ready_for_review]|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  "  pull_request:" "  pull_request:
+    types: [ready_for_review]"
 run_policy "$DIR"
 expect_fail_named "a tier that fires only on ready_for_review is rejected" "types"
 
 # Near-miss of the near-miss: ONE of the two mandatory types present.
 DIR=$(new_case types-missing-synchronize)
-sed "s|  pull_request:|  pull_request:\\n    types: [opened]|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  "  pull_request:" "  pull_request:
+    types: [opened]"
 run_policy "$DIR"
 expect_fail_named "a tier missing 'synchronize' is rejected" "synchronize"
 
@@ -331,18 +367,26 @@ DIR=$(new_case no-pr-trigger)
 # `push:` keeps the workflow triggerable (so the rejection is about the MISSING
 # pull_request trigger, not about a workflow with no `on:` at all) and drops the
 # paths-ignore sentinel, which is meaningless off a PR trigger.
-sed "s|  pull_request:|  push:|; /^    paths-ignore:\$/,+1d" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  "  pull_request:" "  push:" \
+  "    paths-ignore:
+      - '__required_ci_context_never_matches__'
+" ""
 run_policy "$DIR"
 expect_fail_named "a registered tier with no pull_request trigger at all is rejected" "no \`pull_request\`"
 
 echo "== a registered tier must not fire where the aggregator is not watching =="
 DIR=$(new_case types-unobserved)
-sed "s|  pull_request:|  pull_request:\\n    types: [opened, synchronize, milestoned]|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  "  pull_request:" "  pull_request:
+    types: [opened, synchronize, milestoned]"
 run_policy "$DIR"
 expect_fail_named "a tier firing on an event the aggregator ignores is rejected" "milestoned"
 
 DIR=$(new_case types-observed-subset)
-sed "s|  pull_request:|  pull_request:\\n    types: [opened, synchronize, labeled]|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+subst "$BASE/workflows/alpha.yml" "$DIR/workflows/alpha.yml" \
+  "  pull_request:" "  pull_request:
+    types: [opened, synchronize, labeled]"
 run_policy "$DIR"
 if [ "$RC" -eq 0 ]; then
   ok "a tier whose types are a subset of the aggregator's is accepted (no false red)"
@@ -355,8 +399,9 @@ echo "== the waiver break-glass must be reachable (#2910 P1) =="
 # payload — so an aggregator that does not subscribe to `labeled`/`unlabeled` has
 # a documented escape hatch that cannot be exercised on the PRs it has wedged.
 DIR=$(new_case aggregator-no-label-events)
-sed "s|    types: \[opened, synchronize, reopened, ready_for_review, labeled, unlabeled\]||" \
-  "$BASE/workflows/pr-gate.yml" >"$DIR/workflows/pr-gate.yml"
+subst "$BASE/workflows/pr-gate.yml" "$DIR/workflows/pr-gate.yml" \
+  "    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+" ""
 run_policy "$DIR"
 expect_fail_named "an aggregator that ignores label events is rejected" "ci:waive"
 
@@ -663,58 +708,39 @@ expect_fail_named "two applicability outputs behind one context are rejected" "M
 
 echo "== a documented mandate path the classifier never mentions is rejected =="
 DIR=$(new_case mandate-drift)
-cat >>"$DIR/registry.yml" <<'YAML'
-YAML
-python3 - "$DIR/registry.yml" <<'PY' 2>/dev/null || ruby -e '
-  path = ARGV[0]
-  text = File.read(path)
-  text = text.sub("    context: Alpha gate\n", "    context: Alpha gate\n    mandate_paths:\n      - cqlite-core/**\n")
-  File.write(path, text)
-' "$DIR/registry.yml"
-import sys
-path = sys.argv[1]
-text = open(path).read()
-text = text.replace("    context: Alpha gate\n",
-                    "    context: Alpha gate\n    mandate_paths:\n      - cqlite-core/**\n")
-open(path, "w").write(text)
-PY
+subst "$BASE/registry.yml" "$DIR/registry.yml" \
+  "    context: Alpha gate
+" "    context: Alpha gate
+    mandate_paths:
+      - cqlite-core/**
+"
 run_policy "$DIR"
 expect_fail_named "a mandate_paths entry absent from the workflow is rejected" "drifted"
 
 echo "== the aggregator must not cancel and restart on every label mutation =="
 DIR=$(new_case label-churn)
-python3 - "$DIR/workflows/pr-gate.yml" <<'PY' 2>/dev/null || ruby -e '
-  path = ARGV[0]
-  text = File.read(path)
-  File.write(path, text.sub("  group: pr-gate\n", "  group: pr-gate\n  cancel-in-progress: true\n"))
-' "$DIR/workflows/pr-gate.yml"
-import sys
-path = sys.argv[1]
-text = open(path).read()
-open(path, "w").write(text.replace("  group: pr-gate\n", "  group: pr-gate\n  cancel-in-progress: true\n"))
-PY
+subst "$BASE/workflows/pr-gate.yml" "$DIR/workflows/pr-gate.yml" \
+  "  group: pr-gate
+" "  group: pr-gate
+  cancel-in-progress: true
+"
 run_policy "$DIR"
 expect_fail_named "label events plus cancel-in-progress: true is rejected" "cancel-in-progress"
 
 echo "== the aggregator must evaluate the mechanism from the BASE ref =="
 DIR=$(new_case head-evaluated)
-python3 - "$DIR/workflows/pr-gate.yml" <<'PY' 2>/dev/null || ruby -e '
-  path = ARGV[0]
-  text = File.read(path)
-  text = text.sub(/      # The trust boundary.*\n(?:.*\n)*?      - env:\n          GATING_DIR: base-gating\n      run/, "      - run")
-  File.write(path, text)
-' "$DIR/workflows/pr-gate.yml"
-import sys
-path = sys.argv[1]
-lines = open(path).read().splitlines(True)
-kept = [line for line in lines
-        if "base-gating" not in line
-        and "actions/checkout" not in line
-        and not line.strip().startswith(("# The trust boundary", "# context is read", "with:", "ref:", "path:", "env:"))]
-text = "".join(kept).replace('run: bash "$GATING_DIR/scripts/ci/aggregate-required-tiers.sh"',
-                             "run: bash scripts/ci/aggregate-required-tiers.sh")
-open(path, "w").write(text)
-PY
+subst "$BASE/workflows/pr-gate.yml" "$DIR/workflows/pr-gate.yml" \
+  "      # The trust boundary (issue #2910 round 2): everything that decides this
+      # context is read from the BASE ref, never from the PR being gated.
+      - uses: actions/checkout@v5
+        with:
+          ref: \${{ github.event.pull_request.base.sha }}
+          path: base-gating
+      - env:
+          GATING_DIR: base-gating
+        run: bash \"\$GATING_DIR/scripts/ci/aggregate-required-tiers.sh\"
+" "      - run: bash scripts/ci/aggregate-required-tiers.sh
+"
 run_policy "$DIR"
 expect_fail_named "an aggregator reading its own PR's copy is rejected" "BASE ref"
 
