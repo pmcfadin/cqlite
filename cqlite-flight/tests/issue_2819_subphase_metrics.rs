@@ -454,7 +454,8 @@ fn emitter_drop_emits_samples_on_any_exit_path() {
         let timings = std::sync::Arc::new(StreamSubPhaseTimings::default());
         timings.add_nanos(StreamSubPhase::Merge, 7_000);
         timings.add_nanos(StreamSubPhase::ColdFault, 3_000);
-        let _emitter = cqlite_flight::obs::StreamSubPhaseEmitter::new(timings);
+        let _emitter =
+            cqlite_flight::obs::StreamSubPhaseEmitter::new(tracing::Span::none(), timings);
         // `_emitter` drops HERE at end of scope — the only emission point; no
         // explicit emit, mirroring the cancel/error/panic teardown.
     }

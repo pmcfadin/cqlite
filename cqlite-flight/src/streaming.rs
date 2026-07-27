@@ -394,6 +394,16 @@ pub(crate) fn spawn_streaming(
     // loop so `cqlite.query.rows_scanned` climbs while the scan is in progress.
     let scan_progress = probe.scan_progress.clone();
 
+    // Issue #2819 (roborev L5): capture the `flight.do_get` RPC span HERE — this fn
+    // runs synchronously inside the handler's `.instrument(span)` future, so
+    // `Span::current()` is the live RPC span (same context `PhaseTimer::start`
+    // captures it). It MUST be captured before the `spawn_blocking` below: tokio
+    // does NOT propagate the caller's span across `spawn_blocking`, so
+    // `Span::current()` on the blocking thread is the EMPTY span. Threaded into the
+    // emitter so the sub-phase samples carry the same span/exemplar association as
+    // the top-level phase samples.
+    let rpc_span = tracing::Span::current();
+
     // Run the CPU-bound merge off the async runtime; it sends batches as it goes.
     // `error_tx` is a clone kept OUTSIDE the (potentially unwound) merge closure so
     // a panic can still report through it — `sink` (holding the other clone) lives
@@ -420,7 +430,7 @@ pub(crate) fn spawn_streaming(
             cqlite_core::observability::metrics_active().then(|| subphase.clone()),
         );
         let error_tx = tx.clone();
-        let _subphase_emit = crate::obs::StreamSubPhaseEmitter::new(subphase);
+        let _subphase_emit = crate::obs::StreamSubPhaseEmitter::new(rpc_span, subphase);
         let mut sink = ChannelSink {
             tx,
             produced,

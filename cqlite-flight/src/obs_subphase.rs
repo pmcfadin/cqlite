@@ -85,24 +85,30 @@ fn emit_stream_subphase_samples(timings: &StreamSubPhaseTimings) {
 /// `PhaseTimer`'s own drop-driven emission — so a stalled or errored `do_get` still
 /// records whatever sub-phase time it accrued.
 ///
-/// It captures the `flight.do_get` span at construction and re-`enter()`s it
-/// around the emission loop (issue #2819 L5) — mirroring `PhaseTimer::record_current`
-/// — so the five `stream_*` samples carry the SAME span/exemplar association as the
-/// top-level phase samples on that instrument, and an operator correlating a slow
-/// trace sees the sub-phase breakdown, not just the top-level phases.
+/// It re-`enter()`s the `flight.do_get` RPC span around the emission loop (issue
+/// #2819 L5) — mirroring `PhaseTimer::record_current` — so the five `stream_*`
+/// samples carry the SAME span/exemplar association as the top-level phase samples
+/// on that instrument, and an operator correlating a slow trace sees the sub-phase
+/// breakdown, not just the top-level phases.
+///
+/// The span is passed IN by the caller (`spawn_streaming`), captured on the async
+/// task BEFORE the `spawn_blocking`. It must NOT be captured here via
+/// `Span::current()`: this emitter is constructed ON the `spawn_blocking` thread,
+/// which tokio does NOT reach the caller's span into, so `Span::current()` here is
+/// the EMPTY span (the roborev L5 non-functional-fix cause).
 pub struct StreamSubPhaseEmitter {
     timings: Arc<StreamSubPhaseTimings>,
     span: tracing::Span,
 }
 
 impl StreamSubPhaseEmitter {
-    /// Wrap the per-request accumulator so its samples are emitted at drop. Call
-    /// inside the merge closure (where `PhaseTimer` lives) so `Span::current()`
-    /// resolves to the `flight.do_get` RPC span.
-    pub fn new(timings: Arc<StreamSubPhaseTimings>) -> Self {
+    /// Wrap the per-request accumulator so its samples are emitted at drop, under
+    /// `rpc_span` — the `flight.do_get` span the caller captured on the async task
+    /// (NOT `Span::current()` on this blocking thread, which is empty).
+    pub fn new(rpc_span: tracing::Span, timings: Arc<StreamSubPhaseTimings>) -> Self {
         Self {
             timings,
-            span: tracing::Span::current(),
+            span: rpc_span,
         }
     }
 }
@@ -139,7 +145,42 @@ mod tests {
         // (a no-op when the core observability feature is off).
         let t = Arc::new(StreamSubPhaseTimings::default());
         t.add_nanos(StreamSubPhase::Merge, 1_000);
-        let e = StreamSubPhaseEmitter::new(t);
+        let e = StreamSubPhaseEmitter::new(tracing::Span::none(), t);
         drop(e);
+    }
+
+    /// Issue #2819 (roborev L5): the emitter must carry the LIVE `flight.do_get`
+    /// span the caller captured on the async task — NOT an empty span. With a real
+    /// subscriber installed (so spans are enabled), constructing the emitter with
+    /// the ambient span must store a NON-disabled span equal to it. This FAILS if a
+    /// regression reverts to `Span::current()` inside the `spawn_blocking` closure
+    /// (which is the empty/disabled span there).
+    #[test]
+    fn emitter_carries_the_live_rpc_span() {
+        use tracing_subscriber::prelude::*;
+        let subscriber = tracing_subscriber::registry().with(tracing_subscriber::fmt::layer());
+        tracing::subscriber::with_default(subscriber, || {
+            let rpc = tracing::info_span!("flight.do_get");
+            let _g = rpc.enter();
+            // Capture the ambient span exactly as `spawn_streaming` does, then hand
+            // it to the emitter (as the blocking closure would).
+            let captured = tracing::Span::current();
+            assert!(
+                !captured.is_disabled(),
+                "the ambient flight.do_get span must be enabled under a subscriber"
+            );
+            let e =
+                StreamSubPhaseEmitter::new(captured, Arc::new(StreamSubPhaseTimings::default()));
+            assert!(
+                !e.span.is_disabled(),
+                "emitter must hold a NON-disabled (live) span, not the empty span a \
+                 spawn_blocking `Span::current()` would yield"
+            );
+            assert_eq!(
+                e.span.id(),
+                rpc.id(),
+                "emitter must carry the SAME flight.do_get span the samples correlate to"
+            );
+        });
     }
 }
