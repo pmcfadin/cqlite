@@ -326,21 +326,18 @@ fn compressed_do_get_records_at_least_four_positive_subphases() {
     let metrics = mc.flush_and_collect();
 
     let subs = subphase_points(&metrics);
-    assert!(
-        subs.len() >= 4,
-        "a completed compressed do_get must record >= 4 distinct sub-phase samples \
-         (got {}: {:?}) — cold-fault/decompress on the per-SSTable producer thread \
-         plus merge/encode/grpc-write on the merge-consumer thread",
-        subs.len(),
-        subs.keys().collect::<Vec<_>>()
-    );
-    // The compressed path must exercise BOTH the cold-IO and decompress sub-phases
-    // — the whole point of the P1.3↔P1.5 split.
-    assert!(
-        subs.contains_key("stream_cold_fault") && subs.contains_key("stream_decompress"),
-        "a compressed fixture must record both stream_cold_fault and stream_decompress, got {:?}",
-        subs.keys().collect::<Vec<_>>()
-    );
+    // A completed compressed do_get must record ALL FIVE sub-phases (Low 3): both
+    // cold-IO and decompress on the per-SSTable producer thread (the P1.3↔P1.5
+    // split) PLUS merge/encode/grpc-write on the merge-consumer thread — asserting
+    // only `>= 4` would let a regression that dropped one of merge/encode/grpc_write
+    // pass silently.
+    for phase in SUBPHASES {
+        assert!(
+            subs.contains_key(phase),
+            "a completed compressed do_get must record {phase}, got {:?}",
+            subs.keys().collect::<Vec<_>>()
+        );
+    }
 
     let rpc_wall = metrics.counter_sum(catalog::RPC_DURATION);
     assert!(rpc_wall > 0.0, "cqlite.rpc.duration must be recorded");
@@ -543,14 +540,15 @@ fn slow_client_inflates_grpc_write_but_not_cold_fault() {
 }
 
 /// Requirement 2, scenario: the cold−warm delta on `stream_cold_fault` is
-/// obtainable from the STANDING metric alone (no profiler). We assert the delta is
-/// COMPUTABLE — both a cold (first-touch) and a warm (pages resident) run emit a
-/// readable `stream_cold_fault` sample off `cqlite.rpc.phase.duration` — rather
-/// than a wall-clock inequality (which would be a host-dependent flake, forbidden
-/// in the correctness path).
+/// obtainable from the STANDING metric alone (no profiler) — both a cold
+/// (first-touch) and a warm (pages resident) run emit a readable
+/// `stream_cold_fault` sample off `cqlite.rpc.phase.duration`. We assert only that
+/// both samples are PRESENT (so the delta is a plain subtraction of two
+/// standing-metric values); we do NOT assert the delta's sign, which would be a
+/// host-dependent wall-clock flake forbidden in the correctness path.
 #[test]
 #[serial]
-fn cold_warm_delta_on_cold_fault_is_readable_from_the_standing_metric() {
+fn cold_and_warm_runs_both_emit_a_cold_fault_sample() {
     let Some(found) = lz4_fixture_or_skip() else {
         return;
     };
@@ -577,10 +575,6 @@ fn cold_warm_delta_on_cold_fault_is_readable_from_the_standing_metric() {
          cold-warm delta is computable from the standing metric alone (cold={cold_cf:?}, \
          warm={warm_cf:?})"
     );
-    // The delta itself is a plain subtraction of two standing-metric values — the
-    // point of the instrument (no profiler needed). We do not assert its sign to
-    // avoid a host-dependent wall-clock flake.
-    let _delta = cold_cf.unwrap() - warm_cf.unwrap();
 }
 
 /// Requirement 3: no new metric name or attribute key. The sub-phase samples ride
