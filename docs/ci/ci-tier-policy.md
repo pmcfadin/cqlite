@@ -173,7 +173,29 @@ Rules for `pull_request`-triggered workflows:
   strictly less than the `required` job's `timeout-minutes`, so expiry is a
   reported red with a diagnostic rather than an Actions cancellation.
 - Break-glass is per-tier only: `ci:waive:<tier-id>` excuses an absent or pending
-  tier, never a failed one. There is no blanket waiver.
+  tier, never a failed one. There is no blanket waiver. It must not fight the
+  tier it waives: a registered tier may NOT cancel its in-flight run on a label
+  event (the enrolment rule rejects any `cancel-in-progress` that is not provably
+  false for `labeled`/`unlabeled` — the literal `true` AND the near-miss
+  `${{ github.event_name == 'pull_request' }}`, which is true for label events),
+  and a pending tier whose only check run was minted at/after the waiver was
+  applied resolves at once instead of waiting out the deadline.
+- The honoured-waiver annotation names WHO APPLIED THE LABEL, resolved from the
+  PR's `labeled` events — not the actor of the run, who is usually someone else.
+  An unresolvable attribution says so rather than naming anyone.
+- A registered tier's context is satisfied ONLY by a check run GitHub Actions
+  produced. A check-run name is global to the commit and anything with
+  `checks:write` can mint one, so provenance (`app` + an Actions run URL) is
+  verified fail-closed; an unverifiable run neither satisfies nor shadows the
+  genuine one.
+- A tier's gate job must VALIDATE its classifier's applicability verdict.
+  `skipped` counts as a pass only because an inapplicable tier reports itself
+  that way; an empty or non-boolean verdict reds the tier rather than reading as
+  "not applicable", and a verdict of "applies" with skipped work reds it too.
+- The gating scripts are ruby-only and declare their interpreter floor
+  (`scripts/ci/gating_ruby_floor.rb`, ruby >= 3.0) in one place; below it the
+  aggregation fails closed with the remedy and the self-tests SKIP with the
+  reason instead of mis-running (macOS system ruby is 2.6).
 
 `.github/branch-protection.json` is unchanged: `contexts` remains `["required"]`.
 

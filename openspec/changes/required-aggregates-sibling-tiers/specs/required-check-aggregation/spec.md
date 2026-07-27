@@ -389,10 +389,18 @@ failed label read SHALL fall back to the payload — withholding a waiver is saf
 
 An ABSENT waived tier SHALL be excused immediately rather than at the deadline: there is nothing to wait
 for, so holding a runner for the full deadline only delays a verdict already determined. A PENDING waived
-tier SHALL still be waited out, because it can still turn red, and a red tier is never waivable.
+tier SHALL still be waited out, because it can still turn red, and a red tier is never waivable — EXCEPT
+where the pending state was created by the waiver's own label event: when the tier's only check run was
+minted at or after the moment the waiver label was applied, it cannot be information the waiver's author
+lacked, and the waiver SHALL resolve at once. Without a resolved label-event time there SHALL be no such
+horizon, so an unreadable event feed can only ever withhold a waiver, never grant one.
 
 Each honoured waiver SHALL emit a warning annotation and a job-summary line naming the waived tier and the
-actor, so a waived merge is visible after the fact.
+person who applied the label, so a waived merge is visible after the fact. The attribution SHALL be
+resolved from the pull request's `labeled` events (the most recent application of that label wins); it
+SHALL NOT name the actor of the event that started the aggregating run, who is generally not the labeller.
+Where the attribution cannot be resolved, the diagnostic SHALL state that it is unresolved rather than
+name anyone, and the resolved login SHALL be allowlisted before it reaches a workflow command.
 
 #### Scenario: A waiver applied after the run started is honoured
 - **GIVEN** a registered tier is absent and the pull request carried no waiver label when the run began
@@ -426,6 +434,25 @@ actor, so a waived merge is visible after the fact.
 - **WHEN** the aggregation evaluates
 - **THEN** it FAILS, naming `<tier-b>`
 
+#### Scenario: The waiver is attributed to the labeller, not to this run's actor
+- **GIVEN** a waived tier, a `labeled` event recording who applied `ci:waive:<tier-id>`, and a different
+  actor for the event that started the aggregating run
+- **WHEN** the aggregation reports the honoured waiver
+- **THEN** the annotation and summary name the labeller
+- **AND** the run's actor appears nowhere in the output
+
+#### Scenario: An unresolvable attribution claims no name
+- **GIVEN** a waived tier whose label-event feed cannot be read
+- **WHEN** the aggregation reports the honoured waiver
+- **THEN** the tier is still waived
+- **AND** the diagnostic states that the applier is unresolved instead of naming anyone
+
+#### Scenario: A waiver resolves the pending tier its own label event started
+- **GIVEN** a waived tier whose only check run was minted at or after the waiver label was applied
+- **WHEN** the aggregation evaluates with deadline and poll budget remaining
+- **THEN** it excuses the tier immediately, stating why
+- **AND** the same tier pending from a run that PREDATES the waiver is still waited out
+
 ### Requirement: A label mutation SHALL NOT cancel, restart, or duplicate the gate
 
 The aggregating workflow SHALL observe label events (so the waiver is reachable) **without** making routine
@@ -439,8 +466,16 @@ for the **same head sha**, excluding the reusing run's own check runs by run ide
 that result is absent, non-terminal, or anything other than success. The waiver SHALL take effect without a
 manual re-run.
 
-The workflow-policy validation SHALL reject an aggregating workflow that observes label events while
-declaring an unconditional `cancel-in-progress: true`.
+The same protection SHALL extend to every REGISTERED TIER that observes label events. On a tier the
+consequence is worse than a wasted re-run: applying `ci:waive:<tier-id>` to a wedged pull request would
+cancel that tier's in-flight run and mint a fresh `queued` check run, so the break-glass would fight the
+very tier it waives.
+
+The workflow-policy validation SHALL reject an aggregating workflow OR a registered tier that observes
+label events while its `cancel-in-progress` is not provably false for them. Rejecting only the literal
+`true` is insufficient: an expression such as `${{ github.event_name == 'pull_request' }}` is TRUE for
+`labeled`/`unlabeled` and behaves identically. The accepted forms are `false`, absence, or an expression
+that is ACTION-AWARE — one that references the event action and names both label activity types.
 
 #### Scenario: A waiver applied mid-run takes effect without restarting the compute job
 - **GIVEN** the gate's compute job is skipped for a `labeled` event and its result for this head sha is
@@ -461,6 +496,17 @@ declaring an unconditional `cancel-in-progress: true`.
   `concurrency.cancel-in-progress: true`
 - **WHEN** the workflow-policy validation runs
 - **THEN** it FAILS, stating that every label mutation would cancel and restart the gate
+
+#### Scenario: A registered tier that cancels on a label event is rejected by policy
+- **GIVEN** a registered tier subscribes to `labeled`/`unlabeled` and its `cancel-in-progress` is `true`,
+  or an expression such as `${{ github.event_name == 'pull_request' }}` that is true for a label event
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS, stating that applying the waiver would cancel the tier being waived
+
+#### Scenario: An action-aware cancellation on a registered tier is accepted
+- **GIVEN** a registered tier whose `cancel-in-progress` excludes `labeled` and `unlabeled` by action
+- **WHEN** the workflow-policy validation runs
+- **THEN** it passes, so a new head sha still cancels an obsolete run
 
 ### Requirement: The mechanism that decides `required` SHALL be read from the base ref
 
@@ -613,3 +659,90 @@ The suite SHALL run in the local gate's `tooling-tests` component.
 - **GIVEN** a full `scripts/agent-gate.sh` run
 - **WHEN** the `tooling-tests` component executes
 - **THEN** it invokes the new test suite and a failure there fails the component
+
+### Requirement: A registered tier SHALL be satisfied only by a check run GitHub Actions produced
+
+A check run is identified to branch protection by NAME ALONE, and any application holding `checks:write`
+on the repository can create one. Global name-uniqueness across workflow FILES does not close that: it
+cannot see a check run minted through the Checks API. The aggregation SHALL therefore verify the PRODUCER
+of every check run it acts on — for a registered tier's context and for the gate's own recorded compute
+result alike — and SHALL accept only GitHub Actions, identified by the check run's `app` (slug or id) with
+its details URL pointing at an Actions workflow run.
+
+Verification SHALL FAIL CLOSED: a check run whose producer cannot be established SHALL NOT satisfy the
+tier, and SHALL NOT SHADOW a genuine check run of the same name either, whatever its check-run id. When no
+genuine check run remains, the aggregation SHALL FAIL naming the unverifiable one and the reason.
+
+#### Scenario: A same-named check run from another app does not satisfy the tier
+- **GIVEN** a registered tier's context exists on the head as a `success` check run created by an app other
+  than GitHub Actions
+- **WHEN** the aggregation evaluates
+- **THEN** it FAILS, names the tier, and states that the run was not produced by GitHub Actions
+
+#### Scenario: A check run with no identifiable producer fails closed
+- **GIVEN** a check run carrying a registered tier's context but no `app` information, or a details URL that
+  does not resolve to an Actions workflow run
+- **WHEN** the aggregation evaluates
+- **THEN** it FAILS rather than accepting the run
+
+#### Scenario: An unverifiable check run cannot shadow the genuine one
+- **GIVEN** a genuine Actions check run for a registered tier concluded `failure`, and a higher-id check run
+  of the same name from another app concluded `success`
+- **WHEN** the aggregation evaluates
+- **THEN** it FAILS; the higher id does not make the forgery the observed result
+
+### Requirement: A tier's applicability verdict SHALL be validated, not assumed
+
+A registered tier reports inapplicability as an emitted success, and its gate job treats a skipped
+dependency as a pass ONLY on the strength of the classifier's applicability verdict. The gate job SHALL
+therefore validate that verdict: a value that is neither of the two booleans — empty, unwritten, or any
+other string — SHALL FAIL the tier rather than being read as "not applicable". When the verdict says the
+tier DOES apply, the gate SHALL additionally require that the tier's work actually ran to success; a
+mandating diff whose jobs were skipped SHALL NOT report a green tier.
+
+#### Scenario: An unreadable applicability verdict reds the tier
+- **GIVEN** a registered tier whose classifier concluded success but whose applicability output is empty or
+  not a boolean
+- **WHEN** the gate job evaluates
+- **THEN** the tier's context concludes `failure`, naming the unreadable verdict
+- **AND** it does not report "not applicable to this diff"
+
+#### Scenario: A verdict that claims applicability with skipped work reds the tier
+- **GIVEN** a registered tier whose applicability verdict is `true` while its work jobs are `skipped`
+- **WHEN** the gate job evaluates
+- **THEN** the tier's context concludes `failure`
+
+### Requirement: The gating mechanism SHALL declare and check its interpreter floor in one place
+
+The gating mechanism has a single implementation language, so its interpreter version is load-bearing: a
+host below the floor would not fail loudly, it would MIS-RUN (a missing `Enumerable#filter_map`, or a YAML
+loader silently rejecting the alias keyword, each swallowed by a rescue that then reports "inconclusive").
+The floor SHALL be declared in exactly one file, and every gating entry point SHALL go through that
+declaration. A library caller below the floor SHALL abort with a message naming the floor, the constructs
+that set it, and the remedy. The self-tests SHALL SKIP with that reason rather than run against an
+interpreter that cannot execute them faithfully.
+
+#### Scenario: A host below the declared floor fails loudly
+- **GIVEN** an interpreter older than the declared floor
+- **WHEN** the aggregation is invoked
+- **THEN** it fails closed with a diagnostic naming the floor and the remedy, and never reports a verdict
+
+#### Scenario: Every gating entry point goes through the single declaration
+- **GIVEN** the set of gating source files
+- **WHEN** they are inspected
+- **THEN** each one requires the single floor declaration
+
+### Requirement: The trust boundary's complementary ownership control SHALL exist and SHALL NOT be overstated
+
+Base-ref evaluation guarantees the SET of tiers, their contexts and the aggregation logic; it does not
+govern the code a tier executes. That residual SHALL be documented with the control that actually applies
+to it. A `CODEOWNERS` file SHALL exist at a location GitHub honours and SHALL assign owners for the CI
+mechanism trees (`.github/` and `scripts/ci/`), so a trust-boundary diff raises an automatic review
+request. The documentation SHALL state the control's real strength — including whether code-owner review
+is enforced by live branch protection — rather than implying enforcement that is not configured.
+
+#### Scenario: Code owners cover the trust-boundary trees
+- **GIVEN** the repository's CODEOWNERS file
+- **WHEN** the gating self-tests inspect it
+- **THEN** both `.github/` and `scripts/ci/` are covered by a rule naming at least one owner
+- **AND** removing either rule reds the check

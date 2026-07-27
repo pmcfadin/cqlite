@@ -87,7 +87,11 @@ carry).
   without a re-run: `required` re-reads the PR's current labels on every poll, and `pr-gate.yml`
   subscribes to `labeled`/`unlabeled` so applying one to an already-finished gate starts a fresh run that
   sees it. Each honoured waiver emits a warning annotation and a job-summary line naming the tier and the
-  actor.
+  person who **applied the label** — resolved from the PR's `labeled` events, not the actor of the run
+  (who is usually whoever pushed or hit re-run); an unresolvable attribution says so rather than guessing.
+  Two round-4 corrections keep the hatch from fighting the tier: a registered tier may not cancel its
+  in-flight run on a label event, and a pending tier whose only check run was minted at/after the waiver
+  was applied resolves immediately instead of being held to the deadline by the run the waiver started.
 - **Labelling is cheap.** Subscribing to label events must not make every `ci:perf` / board-mirror /
   `needs-decision` label — or the waiver itself — restart a 30-minute gate. So a label mutation never
   cancels the in-flight run (cancellation is conditional on the event action; the shared concurrency group
@@ -95,6 +99,13 @@ carry).
   `pr-gate-core`** and reuses the core result already recorded for the same head sha. That reuse is
   fail-closed: absent, pending, failed, or skipped-on-a-non-label-event all red `required`, and the run's
   own skipped check run cannot stand in for the real one.
+- **Only GitHub Actions can satisfy a tier.** A check-run name is global to the commit and anything
+  holding `checks:write` can mint one, so `required` verifies each check run's producer (`app` + an
+  Actions run URL) fail-closed. An unverifiable run neither satisfies a tier nor shadows the genuine one,
+  and it is named in the red.
+- **Unknown never reads as pass, inside a tier either.** A tier's gate job validates its classifier's
+  applicability verdict: an empty or non-boolean verdict reds the tier instead of reporting "not
+  applicable", and a verdict that claims the tier applies while its work was skipped reds it too.
 - **The check is not defined by the thing it checks.** `required` evaluates the aggregator, its ruby
   modules, and `.github/ci-gating-tiers.yml` from the pull request's **base ref**, so a PR cannot gut the
   aggregator or move its own tier into `exempt:` and go green on instructions it wrote. Practical

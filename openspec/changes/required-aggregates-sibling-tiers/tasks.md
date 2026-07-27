@@ -146,6 +146,40 @@
 - [x] 7d.6 Discrimination mutants for each (policy non-vacuity 14 to 17; aggregator 8 to 10; the
       workflow-semantics chain carries its own `always()` mutant and 14 lint mutants).
 
+## 7e. Round 4 review (3 Medium + 3 Low; five blockers)
+- [x] 7e.1 S1 the named security control did not exist: no CODEOWNERS file anywhere, so
+      `require_code_owner_reviews` had nothing to resolve. Adds `.github/CODEOWNERS` for `.github/` and
+      `scripts/ci/`, and design.md now states the true strength — an automatic review REQUEST, not a
+      merge block: live branch protection has `require_code_owner_reviews: false` and zero required
+      approvals, and `.github/branch-protection.json` has drifted from it. The residual is recorded as
+      VISIBLE-but-uncontrolled; enforcing it is an owner decision. Validated against GitHub's
+      `codeowners/errors` endpoint; a self-test asserts coverage, with a rule-removal mutant.
+- [x] 7e.2 S2 the tier gate failed OPEN on an unrecognised verdict (`skipped` reads as a pass, which is a
+      claim about `run_tier`). The gate now validates the verdict (`true`/`false` only) and additionally
+      requires the work to have run when it says the tier applies. Mutants: empty / `maybe` / `TRUE` /
+      `1` all red, plus an unvalidated-gate mutant that goes green.
+- [x] 7e.3 S3 the break-glass cancelled the tier it waived. The label-churn rule now covers registered
+      tiers and demands an ACTION-AWARE `cancel-in-progress` (the round-2 form accepted
+      `${{ github.event_name == 'pull_request' }}`, true for label events); flight-ci.yml fixed. Plus the
+      aggregator half: a waived tier whose only check run was minted at/after the waiver was applied
+      resolves at once, with the before/after pair as the discriminator.
+- [x] 7e.4 S4 any check run with the right name satisfied a tier. Provenance (`app` slug/id = GitHub
+      Actions + an Actions run `details_url`) is verified fail-closed for tier contexts and for the
+      recorded `pr-gate-core` result; an impostor neither satisfies nor SHADOWS the genuine run. Mutants:
+      foreign app, no app, foreign URL, and a higher-id forgery over a real failure.
+- [x] 7e.5 S5 the ruby floor was load-bearing and unchecked. `scripts/ci/gating_ruby_floor.rb` declares
+      ruby >= 3.0 in one place, library callers abort with the remedy, the three self-tests
+      SKIP-with-reason, and the dead `ArgumentError` YAML fallback is gone. Mutants: the predicate is
+      probed at 2.6/2.7/3.0/3.2/4.0/garbage, and an anti-drift check asserts every gating file requires
+      the declaration.
+- [x] 7e.6 S6 waiver attribution named `$GITHUB_ACTOR` — the run's actor, not the labeller. Resolved from
+      the PR's `labeled` events (last wins), allowlisted at the point of resolution, UNRESOLVED when the
+      feed cannot be read. Mutant: the run actor is set to a name that must appear nowhere.
+- [x] 7e.7 Campsite: the trigger/concurrency/trust-boundary rules move to
+      `scripts/ci/gating_event_rules.rb` (`gating_policy_rules.rb` 769 to 562 lines).
+- [x] 7e.8 Discrimination counts after round 4: policy non-vacuity 17 to 19, aggregator 10 to 12; suites
+      aggregate 94/0, policy 71/0, semantics 26/0.
+
 ## 8. Doctrine
 - [x] 8.1 `CLAUDE.md` autonomy section: `required` aggregates the registered sibling tiers and fails closed
       on failed/pending/absent; arming `--auto` stays correct; tier-then-`required` re-run order.
