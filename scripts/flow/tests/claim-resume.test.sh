@@ -14,8 +14,15 @@
 # still refuses), its RE-ENTRANCY (a retry after a confirm blip must not abandon an
 # issue we hold), a REAL two-machine race on that path, the guard's fail-CLOSED
 # behaviour on an enumeration outage (#2677 item 2), and the IDENTITY-FORGERY
-# hardening of the two user-controlled fields (--reason, --actor) that land in the
-# very commit message the holder-identity parser reads.
+# hardening of the three user-controlled fields (--reason, --actor, CLAIM_MACHINE) that
+# land in the very commit message the holder-identity parser reads.
+#
+# ONE RULE RUNS THROUGH TESTS 9/10/17/21: an UNREAD or NON-RACE signal is retryable infra,
+# NEVER a LOST / ADOPT-LOST / VERIFY-FAIL / not-holder verdict. Four review rounds each
+# found the same shape in a different caller (adopt re-entrancy, an unreadable holder in
+# claim/adopt, then in verify/release, and a CAS rejected while the ref still sat at
+# --expect), so every caller of holder_identity and every push-failure branch is pinned
+# here — including the ANTI-VACUITY twin that proves the genuine exit-2 verdict survives.
 #
 # THE COMMAND IS SANCTIONED BUT NOT ADVERTISED (owner decision, #2945). The refusal
 # DIAGNOSES the lane — the blocking branch plus `claim-ref=free` — and points at the
@@ -871,6 +878,34 @@ if [ "$whyRc" = " 64 64 64 64 64 64" ] && [ -z "$(ref_sha 2023)" ]; then
 else
   fail "expected 64 from every unrecordable --reason with no ref created; got rcs='$whyRc' ref='$(ref_sha 2023)'"
 fi
+# THE SAME GATE ON THE CAS PATH, INCLUDING A SUPPLIED-BUT-EMPTY --reason (#2945 review J4).
+# The validation was guarded on the RAW text being non-empty, so `--reason ""` — the classic
+# `--reason "$WHY"` with WHY unset — was silently IGNORED there and the adoption recorded no
+# `reason=` at all, while '   ' / '---' / 'x' were exit 64: the last asymmetry in an otherwise
+# fail-closed argument surface, and the shape most likely to happen by accident. (TEST 5 pins
+# '' only in --expect none mode, where the separate required-reason gate catches it.)
+runB claim 2063 >/dev/null 2>&1
+casGuard=$(ref_sha 2063)
+casWhyRc=""
+for badWhy in '' '   ' '---' '…' 'x' '==' '<why>' 'tbd'; do
+  runA adopt 2063 --expect "$casGuard" --reason "$badWhy" >/dev/null 2>&1
+  casWhyRc="$casWhyRc $?"
+done
+if [ -n "$casGuard" ] && [ "$casWhyRc" = " 64 64 64 64 64 64 64 64" ] \
+   && [ "$(ref_sha 2063)" = "$casGuard" ] && [ "$(accepted_updates 2063)" = "1" ]; then
+  ok "on the CAS path an EMPTY '' or unrecordable/template/placeholder --reason is a usage error (exit 64) — the held ref is never touched"
+else
+  fail "expected 64 from every bad --reason on the CAS path with the ref untouched; got rcs='$casWhyRc' ref='$(ref_sha 2063)' was='$casGuard' updates=$(accepted_updates 2063)"
+fi
+outCasWhyOk=$(runA adopt 2063 --expect "$casGuard" --reason "adopting after should-reap cleared the lane"); rcCasWhyOk=$?
+if [ "$rcCasWhyOk" -eq 0 ] && printf '%s\n' "$outCasWhyOk" | grep -q 'CLAIM: ADOPTED' \
+   && [ "$(ref_sha 2063)" != "$casGuard" ] \
+   && printf '%s' "$(line_field "$(runA status 2063)" reason)" | grep -q 'should-reap'; then
+  ok "a RECORDABLE --reason still adopts on the CAS path and records (the gate is fail-closed, not a blanket refusal)"
+else
+  fail "expected a recordable CAS --reason to adopt and record; got rc=$rcCasWhyOk reason='$(line_field "$(runA status 2063)" reason)'
+$outCasWhyOk"
+fi
 # A PLACEHOLDER reason is refused too (#2945 review). `--reason <why>` copy-pasted from
 # a help line sanitizes to `why`: 3 recordable chars, so the length gate passes and the
 # record reads `reason=why` — as uninformative as the no-reason case this gate exists to
@@ -1120,6 +1155,37 @@ else
   fail "expected adopt ERROR infra holder-commit-unreadable exit 1 with no ADOPT-LOST; got rc=$rcUnreadAdopt ref='$(ref_sha 2017)' updates=$(accepted_updates 2017)
 $outUnreadAdopt"
 fi
+# …and `verify` + non-forced `release` obey the SAME rule (#2945 review J1). Both used to
+# route through a BOOLEAN holder check that collapsed "unreadable" into "someone else", so
+# the very failure mode this change exists to fix still produced `VERIFY-FAIL …
+# holder-machine= actor=` (exit 2 — "you don't hold it") and `RELEASE-REFUSED
+# reason=not-holder`, against the TRUE holder, whose only remedy would be `--force` on its
+# own claim. The boolean wrapper is gone so no caller can re-collapse the states.
+outUnreadVerify=$( cd "$A" && PATH="$SHIMFETCH:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin \
+  bash "$CLAIM" verify 2017 2>&1 ); rcUnreadVerify=$?
+if [ "$rcUnreadVerify" -eq 1 ] && printf '%s\n' "$outUnreadVerify" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outUnreadVerify" | grep -q 'reason=infra' \
+   && printf '%s\n' "$outUnreadVerify" | grep -q 'detail=holder-commit-unreadable' \
+   && ! printf '%s\n' "$outUnreadVerify" | grep -q 'VERIFY-FAIL' \
+   && ! printf '%s\n' "$outUnreadVerify" | grep -qE 'machine= |machine=$|actor= |actor=$'; then
+  ok "verify with an unreadable holder commit → ERROR infra exit 1 (never VERIFY-FAIL, no empty holder field)"
+else
+  fail "expected verify ERROR infra holder-commit-unreadable exit 1 with no VERIFY-FAIL; got rc=$rcUnreadVerify
+$outUnreadVerify"
+fi
+outUnreadRelease=$( cd "$A" && PATH="$SHIMFETCH:$GHSHIM:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin \
+  bash "$CLAIM" release 2017 2>&1 ); rcUnreadRelease=$?
+if [ "$rcUnreadRelease" -eq 1 ] && printf '%s\n' "$outUnreadRelease" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outUnreadRelease" | grep -q 'reason=infra' \
+   && printf '%s\n' "$outUnreadRelease" | grep -q 'detail=holder-commit-unreadable' \
+   && ! printf '%s\n' "$outUnreadRelease" | grep -q 'RELEASE-REFUSED' \
+   && ! printf '%s\n' "$outUnreadRelease" | grep -q 'RELEASED' \
+   && [ "$(ref_sha 2017)" = "$heldSha17" ]; then
+  ok "non-forced release with an unreadable holder commit → ERROR infra exit 1 (never not-holder, never a delete), ref intact"
+else
+  fail "expected release ERROR infra holder-commit-unreadable exit 1 with the ref intact; got rc=$rcUnreadRelease ref='$(ref_sha 2017)'
+$outUnreadRelease"
+fi
 # ANTI-VACUITY: with the fetch WORKING, the very same commands still give the genuine
 # race verdicts — so the infra verdict above comes from the unread signal, nothing else.
 outReadClaim=$(runA claim 2017); rcReadClaim=$?
@@ -1131,6 +1197,17 @@ else
   fail "expected LOST + ADOPT-LOST exit 2 once the holder commit is readable; got rcClaim=$rcReadClaim rcAdopt=$rcReadAdopt
 $outReadClaim
 $outReadAdopt"
+fi
+outReadVerify=$(runA verify 2017 2>&1); rcReadVerify=$?
+outReadRelease=$(runA_gh release 2017 2>&1); rcReadRelease=$?
+if [ "$rcReadVerify" -eq 2 ] && printf '%s\n' "$outReadVerify" | grep -q 'VERIFY-FAIL' \
+   && [ "$rcReadRelease" -eq 2 ] && printf '%s\n' "$outReadRelease" | grep -q 'reason=not-holder' \
+   && [ "$(ref_sha 2017)" = "$heldSha17" ]; then
+  ok "with a healthy fetch verify/release still report the genuine VERIFY-FAIL / not-holder (exit 2) — the infra verdict is scoped to the unread signal"
+else
+  fail "expected VERIFY-FAIL + not-holder exit 2 once the holder commit is readable; got rcVerify=$rcReadVerify rcRelease=$rcReadRelease
+$outReadVerify
+$outReadRelease"
 fi
 
 # ===========================================================================
@@ -1169,10 +1246,19 @@ $outConcrete"
 fi
 # …and no doc/skill may hand the reader a template again: every line that shows a
 # runnable `claim.sh adopt … --reason` must carry a SUBSTITUTED value.
+#
+# SCOPED REPO-WIDE, AND "NOTHING TO CHECK" IS NOT A FAILURE (#2945 review J5). The lint used
+# to hard-code three paths and FAIL when the grep came up empty, so a doc reorganisation or a
+# rewording that drops the literal string turned the GATE OF RECORD red for a non-defect — and
+# it silently stopped covering any new skill/doc directory. Now every tracked *.md is scanned
+# (so no single path is load-bearing and new docs are covered automatically) and only a line
+# that actually carries an unsubstituted `<…>` in its --reason value fails; an empty scan is a
+# loud SKIP. (It caught a real one on this very branch: agent-machine-setup.md shipped
+# `--reason resume-legacy-branch-lock:<branch>`, a command claim.sh now rejects with exit 64.)
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-docHits="$(grep -rn -- 'claim\.sh adopt .*--reason' \
-  "$REPO_ROOT/CLAUDE.md" "$REPO_ROOT/.claude/skills" \
-  "$REPO_ROOT/website/src/content/docs/agents-developing/delivery-pipeline.md" 2>/dev/null || true)"
+docHits="$(cd "$REPO_ROOT" && grep -rn --include='*.md' \
+  --exclude-dir=target --exclude-dir=node_modules --exclude-dir=.git \
+  -- 'claim\.sh adopt .*--reason' . 2>/dev/null || true)"
 badDocs=""
 while IFS= read -r docLine; do
   [ -n "$docLine" ] || continue
@@ -1180,10 +1266,13 @@ while IFS= read -r docLine; do
   case "$docVal" in *'<'*) badDocs="$badDocs
   $docLine" ;; esac
 done <<< "$docHits"
-if [ -n "$docHits" ] && [ -z "$badDocs" ]; then
-  ok "every documented runnable 'claim.sh adopt … --reason' carries a substituted value ($(printf '%s\n' "$docHits" | grep -c . ) line(s) checked)"
+docHitCount="$(printf '%s\n' "$docHits" | grep -c . )"
+if [ -n "$badDocs" ]; then
+  fail "a documented --reason still ships an unsubstituted template (claim.sh rejects it with exit 64):$badDocs"
+elif [ "$docHitCount" = "0" ]; then
+  skip "no runnable 'claim.sh adopt … --reason' line exists in any *.md — nothing for the doc lint to check (a doc reorg/rewording, not a defect)"
 else
-  fail "a documented --reason still ships an unsubstituted template (or the lint found no lines to check):$badDocs"
+  ok "every documented runnable 'claim.sh adopt … --reason' carries a substituted value ($docHitCount line(s) checked, repo-wide)"
 fi
 
 # ===========================================================================
@@ -1301,6 +1390,119 @@ $globStatus
 $outGlobRel"
 fi
 rm -f "$GLOBTRAP"
+
+# ===========================================================================
+echo "TEST 21: a CAS push that did not land while the ref is STILL at --expect is infra (exit 1), never ADOPT-LOST (#2945 review J2)"
+# ===========================================================================
+# A SATISFIED lease precondition means the push failed for a NON-RACE reason (transient
+# network, an unrecognized auth signature, a server-side hook). `ADOPT-LOST … expected=X
+# actual=X` is self-contradictory on its face AND it makes the worker move on from a claim
+# that is still adoptable and untaken. The empty-lease sibling (TEST 9) and the re-entrant
+# `now == expect` case (TEST 10) already had this treatment; the FOREIGN-holder variant did
+# not. Staged with TEST 9's push-fail shim against a ref held by the OTHER machine, so the
+# holder is readable — this is not the unreadable-holder path.
+runA claim 2021 >/dev/null 2>&1
+casHeld=$(ref_sha 2021)
+( cd "$B" && g fetch -q origin "refs/claims/issue-2021" >/dev/null 2>&1 )
+[ -n "$casHeld" ] && ok "setup: machineA holds issue-2021 — a FOREIGN, readable holder for machineB's CAS" \
+  || fail "setup failed: no claim ref for issue-2021"
+casUnchangedOk=0; casUnchangedDiag=""
+# Both cases of the hex lease value: git resolves an object name case-insensitively, so an
+# UPPERCASE --expect satisfies the lease too and must not read as a divergence either.
+for casExp in "$casHeld" "$(printf '%s' "$casHeld" | LC_ALL=C tr 'a-f' 'A-F')"; do
+  outCasUnchanged=$( cd "$B" && PATH="$SHIMP:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+    bash "$CLAIM" adopt 2021 --expect "$casExp" --reason "cas retry while the lease still holds" 2>&1 ); rcCasUnchanged=$?
+  if [ "$rcCasUnchanged" -eq 1 ] && printf '%s\n' "$outCasUnchanged" | grep -q 'CLAIM: ERROR' \
+     && printf '%s\n' "$outCasUnchanged" | grep -q 'reason=infra' \
+     && printf '%s\n' "$outCasUnchanged" | grep -q 'detail=adopt-cas-rejected-but-ref-unchanged' \
+     && ! printf '%s\n' "$outCasUnchanged" | grep -q 'ADOPT-LOST'; then
+    casUnchangedOk=$((casUnchangedOk+1))
+  else
+    casUnchangedDiag="$casUnchangedDiag
+  --expect $casExp: rc=$rcCasUnchanged $outCasUnchanged"
+  fi
+done
+if [ "$casUnchangedOk" -eq 2 ] && [ "$(ref_sha 2021)" = "$casHeld" ] && [ "$(accepted_updates 2021)" = "1" ]; then
+  ok "a failed CAS push over a ref still at --expect (lower- AND upper-case sha) → ERROR infra exit 1, never ADOPT-LOST; the holder's ref is untouched"
+else
+  fail "expected ERROR infra adopt-cas-rejected-but-ref-unchanged for both sha cases; got $casUnchangedOk/2 ref='$(ref_sha 2021)' updates=$(accepted_updates 2021)$casUnchangedDiag"
+fi
+# ANTI-VACUITY 1: a GENUINE divergence (expected != actual) is still a lost race, with the
+# same shim — so the softening is scoped to the satisfied precondition, not to push failures.
+outCasDiverged=$( cd "$B" && PATH="$SHIMP:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" adopt 2021 --expect "$STALE" --reason "cas with a genuinely stale expected sha" 2>&1 ); rcCasDiverged=$?
+if [ "$rcCasDiverged" -eq 2 ] && printf '%s\n' "$outCasDiverged" | grep -q 'CLAIM: ADOPT-LOST' \
+   && printf '%s\n' "$outCasDiverged" | grep -q "expected=$STALE" \
+   && printf '%s\n' "$outCasDiverged" | grep -q "actual=$casHeld" \
+   && printf '%s\n' "$outCasDiverged" | grep -q 'holder-machine=machineA' \
+   && [ "$(ref_sha 2021)" = "$casHeld" ]; then
+  ok "a CAS whose expected != actual still reports ADOPT-LOST (exit 2) naming the true holder — the infra verdict is not a blanket softening"
+else
+  fail "expected ADOPT-LOST exit 2 for a genuinely stale --expect; got rc=$rcCasDiverged ref='$(ref_sha 2021)'
+$outCasDiverged"
+fi
+# ANTI-VACUITY 2: with a WORKING push the same CAS from the current sha SUCCEEDS (the
+# reaper-adopt contract) — so the infra verdict above came from the push failure alone.
+outCasReal=$(runB adopt 2021 --expect "$casHeld" --reason "the same CAS with a working push evicts the stale holder"); rcCasReal=$?
+runB verify 2021 >/dev/null 2>&1; rcCasRealVerify=$?
+if [ "$rcCasReal" -eq 0 ] && printf '%s\n' "$outCasReal" | grep -q 'CLAIM: ADOPTED' \
+   && [ -n "$(ref_sha 2021)" ] && [ "$(ref_sha 2021)" != "$casHeld" ] \
+   && [ "$rcCasRealVerify" -eq 0 ] && [ "$(accepted_updates 2021)" = "2" ]; then
+  ok "the identical CAS with a working push ADOPTS (exit 0, second server-accepted update, new holder verifies)"
+else
+  fail "expected the working-push CAS to adopt; got rc=$rcCasReal verify=$rcCasRealVerify ref='$(ref_sha 2021)' was='$casHeld' updates=$(accepted_updates 2021)
+$outCasReal"
+fi
+
+# ===========================================================================
+echo "TEST 22: CLAIM_MACHINE is SANITIZED — a spaced or 'actor='-carrying machine identity cannot strand or shift its own claim (#2945 review J3)"
+# ===========================================================================
+# `machine=` is the FIRST identity token in the claim message and the value verify/release
+# compare against, and it was interpolated RAW — the one user-controlled field the
+# sanitize_field contract missed. CLAIM_MACHINE="build box" wrote `machine=build box pid=…`,
+# so the parser returned `build` while the comparison used `build box`: the HOLDER could
+# never verify or non-force-release its OWN claim — a permanently stuck ref needing --force.
+# And a value carrying `actor=` shifted the RECORDED actor (first-match parsing) — the same
+# forgery class closed for --reason/--actor, reachable through an env var.
+runM() { ( cd "$A" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE="$1" CLAIM_REMOTE=origin bash "$CLAIM" "${@:2}" ); }
+runM 'build box' claim 2060 >/dev/null 2>&1; rcSpaced=$?
+spacedSha=$(ref_sha 2060)
+spacedMachine=$(line_field "$(runM 'build box' status 2060)" machine)
+if [ "$rcSpaced" -eq 0 ] && [ -n "$spacedSha" ] && [ "$spacedMachine" = "build-box" ]; then
+  ok "a SPACED CLAIM_MACHINE claims and records as ONE token (machine=build-box)"
+else
+  fail "expected a claim recorded as machine=build-box; got rc=$rcSpaced ref='$spacedSha' machine='$spacedMachine'"
+fi
+runM 'build box' verify 2060 >/dev/null 2>&1; rcSpacedVerify=$?
+runM 'build' verify 2060 >/dev/null 2>&1; rcTruncVerify=$?
+if [ "$rcSpacedVerify" -eq 0 ] && [ "$rcTruncVerify" -eq 2 ]; then
+  ok "the spaced holder VERIFIES its own claim (exit 0) and the truncated identity 'build' does NOT (exit 2) — written and compared tokens agree, with no aliasing"
+else
+  fail "expected verify 0 for 'build box' and 2 for 'build'; got $rcSpacedVerify / $rcTruncVerify"
+fi
+runM 'build box' release 2060 >/dev/null 2>&1; rcSpacedRelease=$?
+if [ "$rcSpacedRelease" -eq 0 ] && [ -z "$(ref_sha 2060)" ]; then
+  ok "the spaced holder RELEASES its own claim without --force (exit 0, ref gone) — no permanently stuck ref"
+else
+  fail "expected a non-forced release by the spaced holder; got rc=$rcSpacedRelease ref='$(ref_sha 2060)'"
+fi
+# An `actor=`-carrying CLAIM_MACHINE must not shift the recorded actor: `machine=machineZ
+# actor=lead pid=… actor=flow` parses (first exact match) as actor=lead.
+runM 'machineZ actor=lead' claim 2070 >/dev/null 2>&1; rcActorEnv=$?
+actorEnvStatus=$(runM 'machineZ actor=lead' status 2070)
+actorEnvMachine=$(line_field "$actorEnvStatus" machine)
+actorEnvActor=$(line_field "$actorEnvStatus" actor)
+runM 'machineZ actor=lead' verify 2070 >/dev/null 2>&1; rcActorEnvVerify=$?
+runM 'machineZ actor=lead' release 2070 >/dev/null 2>&1; rcActorEnvRelease=$?
+if [ "$rcActorEnv" -eq 0 ] && [ "$actorEnvActor" = "flow" ] \
+   && [ "$actorEnvMachine" = "${actorEnvMachine%%[[:space:]]*}" ] \
+   && [ "${actorEnvMachine#*=}" = "$actorEnvMachine" ] \
+   && [ "$rcActorEnvVerify" -eq 0 ] && [ "$rcActorEnvRelease" -eq 0 ] && [ -z "$(ref_sha 2070)" ]; then
+  ok "an 'actor='-carrying CLAIM_MACHINE records the REAL actor (flow) in a single '='-free machine token, and still verifies/releases"
+else
+  fail "expected actor=flow with a sanitized machine token and a clean round trip; got rc=$rcActorEnv machine='$actorEnvMachine' actor='$actorEnvActor' verify=$rcActorEnvVerify release=$rcActorEnvRelease ref='$(ref_sha 2070)'
+$actorEnvStatus"
+fi
 
 echo ""
 echo "================  claim-resume (#2945): $PASS passed, $FAIL failed, $SKIP skipped  ================"
