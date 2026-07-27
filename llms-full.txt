@@ -5409,6 +5409,9 @@ A 22-chapter reference for the Apache Cassandra 5.0 SSTable binary format, audit
 * [Appendix E — Glossary](/cqlite/sstable-format/appendix-e/)
 * [Appendix F — Known Limitations](/cqlite/sstable-format/appendix-f/)
 * [Appendix G: Cassandra 5.0 Compression Chunk Formats](/cqlite/sstable-format/appendix-g/)
+* [Appendix G: Algorithm Reference Sheet](/cqlite/sstable-format/appendix-g-algorithms/)
+* [Appendix G Quick Reference - Compression Formats at a Glance](/cqlite/sstable-format/appendix-g-quickref/)
+* [Appendix H — Cassandra 5.0 CommitLog Segment Format](/cqlite/sstable-format/appendix-h/)
 
 # Appendix A -- CQL->SSTable Type Mapping
 
@@ -8466,6 +8469,890 @@ Reading process:
 * [`ZstdCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/ZstdCompressor.java) — no prefix, bare Zstd frame with internal checksum; `DEFAULT_COMPRESSION_LEVEL = 3` (line 48)
 * [`NoopCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/NoopCompressor.java) — passthrough compressor
 * [`BigFormat.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java) — `hasMaxCompressedLength` version gate (line 401)
+
+# Appendix G: Algorithm Reference Sheet
+
+> Quick lookup for implementing Cassandra 5.0 compression...
+
+Quick lookup for implementing Cassandra 5.0 compression decompression.
+
+## LZ4 Format
+
+[Section titled “LZ4 Format”](#lz4-format)
+
+### In Data.db
+
+[Section titled “In Data.db”](#in-datadb)
+
+```plaintext
+Byte 0-3:   Uncompressed size (Little-Endian u32)
+Byte 4+:    Compressed data
+Byte N:     CRC checksum (4 bytes Big-Endian)
+```
+
+### Size Extraction (CRITICAL - LITTLE-ENDIAN)
+
+[Section titled “Size Extraction (CRITICAL - LITTLE-ENDIAN)”](#size-extraction-critical---little-endian)
+
+```rust
+let size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+```
+
+### Decompression
+
+[Section titled “Decompression”](#decompression)
+
+```rust
+use lz4_flex::decompress;
+
+
+let size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+if size > 128 * 1024 * 1024 { return Err("Decompression bomb"); }
+
+
+let decompressed = decompress(&data[4..], size)?;
+assert_eq!(decompressed.len(), size);
+Ok(decompressed)
+```
+
+### Cassandra Source
+
+[Section titled “Cassandra Source”](#cassandra-source)
+
+* **File**: [`LZ4Compressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/LZ4Compressor.java)
+* **Method**: `uncompress()` (lines 136–165); `compress()` writes 4-byte LE prefix (lines 118–134)
+* **Library**: `net.jpountz.lz4:lz4-java`
+
+***
+
+## Snappy Format
+
+[Section titled “Snappy Format”](#snappy-format)
+
+### Cassandra 5.0 NB (NewBinary) - NO SIZE PREFIX
+
+[Section titled “Cassandra 5.0 NB (NewBinary) - NO SIZE PREFIX”](#cassandra-50-nb-newbinary---no-size-prefix)
+
+```plaintext
+Byte 0+:    Raw compressed data (no prefix)
+Byte N:     CRC checksum (4 bytes Big-Endian)
+```
+
+### Legacy Format (pre-5.0)
+
+[Section titled “Legacy Format (pre-5.0)”](#legacy-format-pre-50)
+
+Cassandra versions before 5.0 also used raw Snappy without a size prefix. The legacy-format fallback path is defensive only.
+
+```plaintext
+Byte 0+:    Raw compressed data (no prefix)
+Byte N:     CRC checksum (4 bytes)
+```
+
+### Decompression (Dual Format)
+
+[Section titled “Decompression (Dual Format)”](#decompression-dual-format)
+
+```rust
+use snap::raw::Decoder;
+
+
+let mut decoder = Decoder::new();
+
+
+// Try legacy format first (Big-Endian prefix)
+if data.len() >= 4 {
+    let size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+
+
+    if size > 0 && size <= 128*1024*1024 {
+        let compressed = &data[4..];
+        if let Ok(result) = decoder.decompress_vec(compressed) {
+            if result.len() == size {
+                return Ok(result);
+            }
+        }
+    }
+}
+
+
+// Fall back to raw Snappy (NB format)
+let result = decoder.decompress_vec(data)?;
+if result.len() > 128*1024*1024 {
+    return Err("Decompression bomb");
+}
+Ok(result)
+```
+
+### Cassandra Source
+
+[Section titled “Cassandra Source”](#cassandra-source-1)
+
+* **File**: [`SnappyCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/SnappyCompressor.java)
+* **Method**: `uncompress()` (lines 93–108) — no prefix, raw Snappy
+* **Library**: `org.xerial.snappy:snappy-java`
+
+***
+
+## Deflate Format
+
+[Section titled “Deflate Format”](#deflate-format)
+
+### In Data.db
+
+[Section titled “In Data.db”](#in-datadb-1)
+
+```plaintext
+Byte 0+:    Raw Deflate compressed data (no length prefix)
+Byte N:     CRC checksum (4 bytes)
+```
+
+**No size prefix.** `DeflateCompressor.compress()` passes raw deflated bytes directly with no length header. Chunk bounds are determined entirely by offset differences in `CompressionInfo.db`.
+
+### Decompression
+
+[Section titled “Decompression”](#decompression-1)
+
+```rust
+use flate2::read::DeflateDecoder;
+use std::io::Read;
+
+
+// No size prefix — decompress entire chunk buffer
+let mut decoder = DeflateDecoder::new(data);
+let mut decompressed = Vec::new();
+decoder.read_to_end(&mut decompressed)?;
+
+
+if decompressed.len() > 128 * 1024 * 1024 {
+    return Err("Decompression bomb");
+}
+Ok(decompressed)
+```
+
+### Cassandra Source
+
+[Section titled “Cassandra Source”](#cassandra-source-2)
+
+* **File**: [`DeflateCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/DeflateCompressor.java)
+* **Method**: `compress()` / `uncompress()` — no length prefix
+* **Library**: `java.util.zip.Inflater`
+
+***
+
+## Zstd Format
+
+[Section titled “Zstd Format”](#zstd-format)
+
+### In Data.db
+
+[Section titled “In Data.db”](#in-datadb-2)
+
+```plaintext
+Byte 0+:    Zstd frame (includes internal content checksum; no extra length prefix)
+Byte N:     CRC checksum (4 bytes)
+```
+
+**No size prefix.** `ZstdCompressor.compress()` writes a raw Zstd frame with `ENABLE_CHECKSUM_FLAG = true`. Chunk bounds are determined entirely by offset differences in `CompressionInfo.db`.
+
+### Decompression
+
+[Section titled “Decompression”](#decompression-2)
+
+```rust
+use zstd::stream::decode_all;
+
+
+// No size prefix — decompress entire chunk buffer
+let decompressed = decode_all(data)?;
+
+
+if decompressed.len() > 128 * 1024 * 1024 {
+    return Err("Decompression bomb");
+}
+Ok(decompressed)
+```
+
+### Cassandra Source
+
+[Section titled “Cassandra Source”](#cassandra-source-3)
+
+* **File**: [`ZstdCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/ZstdCompressor.java)
+* **Method**: `compress()` / `uncompress()` — no length prefix; Zstd frame with internal checksum
+* **Library**: `com.github.luben:zstd-jni`
+
+***
+
+## Byte Order Comparison
+
+[Section titled “Byte Order Comparison”](#byte-order-comparison)
+
+```plaintext
+     LZ4        Snappy     Deflate    Zstd
+     ---        ------     -------   ----
+LE:  [0][1]..   (none)     (none)    (none)
+     prefix     no prefix  no prefix no prefix
+```
+
+LZ4 is the only algorithm with a size prefix in Data.db.
+
+Memory layout for first 4 bytes:
+
+### LZ4 Little-Endian Example
+
+[Section titled “LZ4 Little-Endian Example”](#lz4-little-endian-example)
+
+```plaintext
+Data:           [0x78, 0x56, 0x34, 0x12]
+Value:          0x12345678
+u32 decode:     from_le_bytes() = 0x12345678
+```
+
+### Deflate Big-Endian Example
+
+[Section titled “Deflate Big-Endian Example”](#deflate-big-endian-example)
+
+```plaintext
+Data:           [0x12, 0x34, 0x56, 0x78]
+Value:          0x12345678
+u32 decode:     from_be_bytes() = 0x12345678
+```
+
+***
+
+## CRC Checksum
+
+[Section titled “CRC Checksum”](#crc-checksum)
+
+### Location
+
+[Section titled “Location”](#location)
+
+```plaintext
+Chunk layout in Data.db:
+
+
+offset 0:        [Compressed data starts]
+offset N-4:      [Last byte of compressed data]
+offset N:        [CRC byte 0]
+offset N+1:      [CRC byte 1]
+offset N+2:      [CRC byte 2]
+offset N+3:      [CRC byte 3]
+
+
+Where N = CompressionInfo.compressed_length
+```
+
+### Important
+
+[Section titled “Important”](#important)
+
+* `CompressionInfo.db` stores **only byte offsets** — no per-chunk CRCs and no per-chunk compressed lengths
+* Compressed length is derived: `next_offset - current_offset - 4` (the 4 is the CRC word in `Data.db`)
+* CRC is **NOT** passed to the decompressor
+* CRC follows the compressed bytes in `Data.db` (IEEE CRC32, Java `java.util.zip.CRC32`)
+
+### Calculation
+
+[Section titled “Calculation”](#calculation)
+
+```plaintext
+// CompressionInfo.db gives only offsets, e.g.: offsets = [0, 1028, ...]
+// Derive compressed_length from offsets:
+compressed_length = offsets[1] - offsets[0] - 4  = 1028 - 0 - 4 = 1024
+crc_offset = offsets[0] + compressed_length = 1024
+
+
+// Data.db layout:
+// offset 0:    1024 bytes compressed data
+// offset 1024: 4-byte CRC32
+// offset 1028: next chunk starts
+```
+
+***
+
+## CompressionInfo.db Parsing
+
+[Section titled “CompressionInfo.db Parsing”](#compressioninfodb-parsing)
+
+### Header
+
+[Section titled “Header”](#header)
+
+```rust
+// Java writeUTF() = u16 BE length + UTF-8 bytes (no null terminator)
+let mut pos = 0;
+
+
+// Algorithm class name (Java writeUTF format)
+let algo_len = u16::from_be_bytes([data[pos], data[pos+1]]) as usize;
+pos += 2;
+let algo = String::from_utf8(data[pos..pos+algo_len].to_vec())?;
+pos += algo_len;
+
+
+// Option count (4 bytes BE)
+let option_count = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+pos += 4;
+
+
+// Options (repeated option_count times — each is a Java writeUTF string)
+for _ in 0..option_count {
+    let key_len = u16::from_be_bytes([data[pos], data[pos+1]]) as usize; pos += 2;
+    pos += key_len;
+    let val_len = u16::from_be_bytes([data[pos], data[pos+1]]) as usize; pos += 2;
+    pos += val_len;
+}
+
+
+// Chunk length (4 bytes BE) — default 16384
+let chunk_length = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+pos += 4;
+
+
+// Max compressed length (4 bytes BE) — only present for format >= "na" (Cassandra 3.0+)
+// if has_max_compressed_length:
+let max_compressed_len = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+pos += 4;
+
+
+// Data length (8 bytes BE) — total uncompressed file size
+let data_length = u64::from_be_bytes([
+    data[pos], data[pos+1], data[pos+2], data[pos+3],
+    data[pos+4], data[pos+5], data[pos+6], data[pos+7]
+]);
+pos += 8;
+
+
+// Chunk count (4 bytes BE)
+let chunk_count = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+pos += 4;
+```
+
+### Chunks Array
+
+[Section titled “Chunks Array”](#chunks-array)
+
+```rust
+// CompressionInfo.db stores ONLY offsets — one u64 per chunk
+let mut offsets = Vec::with_capacity(chunk_count as usize);
+for _ in 0..chunk_count {
+    let offset = u64::from_be_bytes([
+        data[pos], data[pos+1], data[pos+2], data[pos+3],
+        data[pos+4], data[pos+5], data[pos+6], data[pos+7]
+    ]);
+    pos += 8;
+    offsets.push(offset);
+}
+
+
+// Derive compressed length from consecutive offsets:
+// compressed_len[i] = offsets[i+1] - offsets[i] - 4  (subtract 4-byte CRC in Data.db)
+// For the last chunk: compressed_len = compressed_file_size - offsets[last] - 4
+```
+
+***
+
+## Common Bugs and Fixes
+
+[Section titled “Common Bugs and Fixes”](#common-bugs-and-fixes)
+
+### Bug 1: Using BE for LZ4
+
+[Section titled “Bug 1: Using BE for LZ4”](#bug-1-using-be-for-lz4)
+
+```rust
+// WRONG - uses Big-Endian for LZ4 (which is Little-Endian)
+let size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+
+
+// CORRECT - uses Little-Endian for LZ4
+let size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+```
+
+### Bug 2: Assuming All Algorithms Have a Size Prefix
+
+[Section titled “Bug 2: Assuming All Algorithms Have a Size Prefix”](#bug-2-assuming-all-algorithms-have-a-size-prefix)
+
+```rust
+// WRONG - Deflate and Zstd have NO prefix; this reads garbage
+let size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+let result = deflate_decode(&data[4..])?;  // skips 4 real data bytes!
+
+
+// CORRECT - no prefix for Deflate, Zstd, or Snappy (Cassandra 5.0)
+let result = deflate_decode(data)?;
+let result = zstd_decode(data)?;
+let result = raw_snappy_decompress(data)?;
+```
+
+### Bug 3: Including CRC in Decompression
+
+[Section titled “Bug 3: Including CRC in Decompression”](#bug-3-including-crc-in-decompression)
+
+```rust
+// WRONG - passes trailing CRC bytes to decompressor
+let result = decompress(data)?  // data still includes 4-byte trailing CRC
+
+
+// CORRECT - use derived compressed_len (excludes CRC)
+// compressed_len = (next_offset - current_offset) - 4
+let result = decompress(&data[..compressed_len])?;
+let crc = u32::from_be_bytes(data[compressed_len..compressed_len+4].try_into()?);
+```
+
+### Bug 4: Not Validating Decompressed Size
+
+[Section titled “Bug 4: Not Validating Decompressed Size”](#bug-4-not-validating-decompressed-size)
+
+```rust
+// WRONG - no bomb protection
+let result = decompress(data)?;
+
+
+// CORRECT for prefix-less algorithms (Snappy, Deflate, Zstd):
+let result = decompress(data)?;
+if result.len() > 128 * 1024 * 1024 { return Err("Bomb"); }
+
+
+// For LZ4 (has LE prefix): also validate before decompression
+let size = u32::from_le_bytes(data[0..4].try_into()?);
+if size > 128 * 1024 * 1024 { return Err("Bomb (pre-check)"); }
+let result = lz4_decompress(&data[4..], size)?;
+```
+
+***
+
+## Testing Template
+
+[Section titled “Testing Template”](#testing-template)
+
+```rust
+#[test]
+fn test_compression_format(algorithm: &str, data_file: &str) {
+    // 1. Read compressed data from Data.db at chunk offset
+    let compressed_data = std::fs::read(data_file).unwrap();
+
+
+    // 2. Parse CompressionInfo.db to get metadata
+    let metadata = parse_compression_info(&format!("{}-CompressionInfo.db", data_file)).unwrap();
+
+
+    // 3. Decompress using algorithm-specific method
+    let decompressed = match algorithm {
+        "LZ4" => decompress_lz4(&compressed_data[..metadata.chunks[0].compressed_length as usize]),
+        "SNAPPY" => decompress_snappy(&compressed_data[..metadata.chunks[0].compressed_length as usize]),
+        "DEFLATE" => decompress_deflate(&compressed_data[..metadata.chunks[0].compressed_length as usize]),
+        "ZSTD" => decompress_zstd(&compressed_data[..metadata.chunks[0].compressed_length as usize]),
+        _ => panic!("Unknown algorithm"),
+    }.unwrap();
+
+
+    // 4. Validate size
+    assert_eq!(decompressed.len() as u32, metadata.chunks[0].uncompressed_length);
+
+
+    // 5. Compare against reference (sstabledump)
+    let reference = std::fs::read("sstabledump-output.txt").unwrap();
+    // (comparison logic)
+}
+```
+
+***
+
+## See Also
+
+[Section titled “See Also”](#see-also)
+
+* Full specification: [Appendix G: Compression Chunk Formats](/cqlite/sstable-format/appendix-g/)
+* Quick reference: [Appendix G Quick Reference](/cqlite/sstable-format/appendix-g-quickref/)
+* CQLite source: `cqlite-core/src/storage/sstable/compression.rs`
+* [`CompressionMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java)
+* [`schema/CompressionParams.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) — `DEFAULT_CHUNK_LENGTH = 1024 * 16` (line 47)
+* [`BigFormat.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java) — `hasMaxCompressedLength` gate (line 401)
+
+# Appendix G Quick Reference - Compression Formats at a Glance
+
+> Cassandra 5.0 chunks data and compresses independently. Each algorithm wraps compressed data...
+
+## One-Minute Summary
+
+[Section titled “One-Minute Summary”](#one-minute-summary)
+
+Cassandra 5.0 chunks data and compresses independently. Each algorithm wraps compressed data differently:
+
+| Algorithm   | Size Prefix in Data.db | Order  | Notes                                     |
+| ----------- | ---------------------- | ------ | ----------------------------------------- |
+| **LZ4**     | 4 bytes                | **LE** | Most common; LE prefix is critical!       |
+| **Snappy**  | None                   | —      | Raw Snappy frame                          |
+| **Deflate** | None                   | —      | Raw Deflate stream (no prefix)            |
+| **Zstd**    | None                   | —      | Zstd frame with internal content checksum |
+
+All chunks end with: `[4-byte BE CRC]`
+
+## Byte Swaps (Critical!)
+
+[Section titled “Byte Swaps (Critical!)”](#byte-swaps-critical)
+
+```rust
+// LZ4 ONLY — 4-byte Little-Endian uncompressed-length prefix
+let size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+let compressed = &data[4..];
+
+
+// Snappy, Deflate, Zstd — NO PREFIX; decompress the whole chunk buffer
+// (Deflate and Zstd have no length header at all)
+```
+
+## CompressionInfo.db Reading
+
+[Section titled “CompressionInfo.db Reading”](#compressioninfodb-reading)
+
+```rust
+// Binary layout (Java writeUTF = u16-BE-length-prefix + UTF-8 bytes):
+[writeUTF] algorithm_name        // e.g., "LZ4Compressor"
+[u32 BE]   option_count          // number of key-value pairs (0 for most)
+// repeat option_count times:
+[writeUTF] option_key
+[writeUTF] option_value
+[u32 BE]   chunk_length          // uncompressed chunk size; default 16384 (16 KiB)
+[u32 BE]   max_compressed_length // ONLY for format version >= "na" (Cassandra 3.0+)
+[u64 BE]   data_length           // total uncompressed size
+[u32 BE]   chunk_count
+
+
+// Then for each chunk (offsets only — no per-chunk lengths or CRCs):
+[u64 BE]   offset                // byte offset in Data.db
+// compressed_len = next_offset - offset - 4 (subtract trailing CRC)
+```
+
+## Finding a Chunk in Data.db
+
+[Section titled “Finding a Chunk in Data.db”](#finding-a-chunk-in-datadb)
+
+```rust
+// Given position in uncompressed file:
+chunk_index = position / chunk_length
+
+
+// Offsets array from CompressionInfo.db (no per-chunk lengths stored):
+offset = chunk_offsets[chunk_index]
+next_offset = chunk_offsets[chunk_index + 1]  // or compressed_file_size for last
+compressed_len = (next_offset - offset) - 4   // subtract 4-byte trailing CRC
+
+
+// Read from Data.db:
+chunk_data = read_from(offset, compressed_len)
+crc = read_u32_be_from(offset + compressed_len)  // validate or skip
+```
+
+## Decompression Template
+
+[Section titled “Decompression Template”](#decompression-template)
+
+```rust
+pub fn decompress(algorithm: &str, data: &[u8]) -> Result<Vec<u8>> {
+    match algorithm {
+        "LZ4" => {
+            // Extract LE prefix
+            let size = u32::from_le_bytes(data[0..4].try_into()?);
+            assert!(size <= 128 * 1024 * 1024); // Bomb check
+            lz4::decompress(&data[4..], size as usize) // Skip prefix
+        }
+        "SNAPPY" => {
+            // Try legacy format first (BE prefix)
+            if data.len() >= 4 {
+                let size = u32::from_be_bytes(data[0..4].try_into()?);
+                if size <= 128*1024*1024 {
+                    if let Ok(result) = snappy_decode(&data[4..]) {
+                        if result.len() == size as usize {
+                            return Ok(result);
+                        }
+                    }
+                }
+            }
+            // Fall back to raw Snappy (NB format)
+            let result = snappy_decode(data)?;
+            assert!(result.len() <= 128*1024*1024); // Bomb check
+            Ok(result)
+        }
+        "DEFLATE" => {
+            // No prefix — decompress entire chunk buffer
+            let result = deflate_decode(data)?;
+            assert!(result.len() <= 128 * 1024 * 1024); // Bomb check post-decompress
+            Ok(result)
+        }
+        "ZSTD" => {
+            // No prefix — decompress entire chunk buffer
+            let result = zstd_decode(data)?;
+            assert!(result.len() <= 128 * 1024 * 1024); // Bomb check post-decompress
+            Ok(result)
+        }
+        _ => Err("Unknown algorithm")
+    }
+}
+```
+
+## Common Mistakes
+
+[Section titled “Common Mistakes”](#common-mistakes)
+
+1. **Using BE for LZ4**: LZ4 uses **little-endian**, not big-endian
+
+   * `u32::from_le_bytes()` not `from_be_bytes()`
+
+2. **Assuming Deflate/Zstd have a size prefix**: Neither algorithm has a length prefix in Data.db
+
+   * Decompress the entire chunk buffer directly; chunk bounds come from CompressionInfo.db offsets
+
+3. **Including CRC in decompression**: The 4-byte CRC comes AFTER compressed data
+
+   * Don’t read it, don’t pass it to decompressor
+   * It’s located at: `chunk_offset + compressed_length`
+
+4. **Wrong CRC position**: CompressionInfo.db `compressed_length` doesn’t include CRC
+
+   * CRC is OUTSIDE the chunk metadata
+
+5. **Ignoring bomb protection**: Always validate decompressed size <= 128MB
+
+   * Use prefix size (if available) for early validation
+   * Validate actual size post-decompression
+
+## Algorithm Class Names (from CompressionInfo.db)
+
+[Section titled “Algorithm Class Names (from CompressionInfo.db)”](#algorithm-class-names-from-compressioninfodb)
+
+```plaintext
+"LZ4Compressor"        -> normalize to "LZ4"
+"SnappyCompressor"     -> normalize to "SNAPPY"
+"DeflateCompressor"    -> normalize to "DEFLATE"
+"ZstdCompressor"       -> normalize to "ZSTD"
+"NoopCompressor"       -> normalize to "NOOP"
+```
+
+## Files to Reference
+
+[Section titled “Files to Reference”](#files-to-reference)
+
+* **Full spec**: [Appendix G: Compression Chunk Formats](/cqlite/sstable-format/appendix-g/)
+
+* **Algorithm reference**: [Appendix G: Algorithm Reference Sheet](/cqlite/sstable-format/appendix-g-algorithms/)
+
+* **CQLite code**: `cqlite-core/src/storage/sstable/compression.rs`
+
+* **Cassandra source**: `apache/cassandra:5.0.8` in `/src/java/org/apache/cassandra/io/compress/`
+
+  * [`CompressionMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java)
+  * [`CompressedSequentialWriter.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java)
+  * [`schema/CompressionParams.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) (note: `schema/`, not `io/compress/`)
+
+## Testing Your Implementation
+
+[Section titled “Testing Your Implementation”](#testing-your-implementation)
+
+```bash
+# Extract SSTable from test data
+cd test-data/datasets/sstables
+
+
+# Dump with sstabledump (reference)
+sstabledump test_basic/simple_table/*.db > reference.txt
+
+
+# Decompress with your implementation
+your_tool decompress test_basic/simple_table/*.db > output.txt
+
+
+# Compare
+diff reference.txt output.txt
+```
+
+## Size Examples
+
+[Section titled “Size Examples”](#size-examples)
+
+Typical CompressionInfo.db:
+
+* \~50 bytes header
+* \~20 bytes per chunk metadata
+* 1 million chunks = \~20 MB overhead
+
+Typical Data.db compression:
+
+* LZ4: 50-70% of original
+* Snappy: 50-60% of original
+* Deflate: 30-50% of original
+* Zstd: 25-45% of original
+
+## When Something Breaks
+
+[Section titled “When Something Breaks”](#when-something-breaks)
+
+1. **Decompression produces garbage**: Check byte order (especially LZ4)
+2. **Size mismatch**: Validate decompressed.len() == expected
+3. **Hangs on decompression**: Probably a bomb (validate size first)
+4. **CRC validation fails**: Make sure you’re reading CRC from correct position
+5. **Snappy fails**: Try both legacy (BE prefix) and NB (raw) formats
+
+## In 30 Seconds
+
+[Section titled “In 30 Seconds”](#in-30-seconds)
+
+1. For LZ4: read 4-byte LE prefix; for Snappy/Deflate/Zstd: no prefix — use all chunk bytes
+2. For LZ4: validate prefix size <= 128MB before decompressing
+3. Decompress using appropriate algorithm (LZ4: skip 4-byte prefix)
+4. Validate decompressed size <= 128MB (all algorithms)
+5. The 4-byte CRC follows the compressed bytes in Data.db; validate or skip it
+
+Done.
+
+# Appendix H — Cassandra 5.0 CommitLog Segment Format
+
+> Verified byte-for-byte against a real Cassandra 5.0.2 segment (issue #2389)....
+
+Verified byte-for-byte against a real Cassandra 5.0.2 segment (issue #2389). The reader lives in `cqlite-core/src/storage/commitlog/`; fixtures + ground truth are generated by `test-data/scripts/generate-commitlog-fixtures.sh`.
+
+> Scope: **uncompressed** segments, descriptor version **7** (`VERSION_40`, Cassandra 4.0/5.0). Note Cassandra 5.0 writes version 7 only under the default `storage_compatibility_mode: CASSANDRA_4`; with the mode set to `NONE` or `UPGRADING` it writes version **8** (`VERSION_50`), which the reader’s exact-match-7 version gate rejects with a typed `Error::UnsupportedCommitLogVersion` (a contained, honest failure — not a bug). Compressed/encrypted segments are detected from the descriptor and **fail closed** (design decision D3). All integers are big-endian; all CRC32s are `java.util.zip.CRC32` (IEEE, = `crc32fast`).
+
+## 1. Segment layout
+
+[Section titled “1. Segment layout”](#1-segment-layout)
+
+```text
+[ descriptor header ]
+[ sync marker 0 ][ record ][ record ]…            section 0
+[ sync marker 1 ][ record ][ record ]…            section 1
+…
+[ zero-filled pre-allocation to segment size ]
+```
+
+A segment is pre-allocated to `commitlog_segment_size_in_mb` (32 MB default) and zero-filled; only the used prefix is meaningful.
+
+## 2. Descriptor header (`CommitLogDescriptor.writeHeader`)
+
+[Section titled “2. Descriptor header (CommitLogDescriptor.writeHeader)”](#2-descriptor-header-commitlogdescriptorwriteheader)
+
+| Field       | Type  | Notes                                                                                                   |
+| ----------- | ----- | ------------------------------------------------------------------------------------------------------- |
+| `version`   | int32 | 7 (`VERSION_40`) for 5.0 under `CASSANDRA_4` mode; 8 (`VERSION_50`) under `NONE`/`UPGRADING` (rejected) |
+| `id`        | int64 | segment id (also in the filename)                                                                       |
+| `paramsLen` | int16 | length of the params JSON                                                                               |
+| `params`    | bytes | UTF-8 JSON; `{}` when uncompressed/unencrypted                                                          |
+| `crc`       | int32 | CRC32 over the header (see below)                                                                       |
+
+Header CRC input order (each int fed big-endian, per `FBUtilities.updateChecksumInt`): `version`, `id` low 32 bits, `id` high 32 bits, `paramsLen` as int32, then the raw params bytes. `header_len = 14 + paramsLen + 4`.
+
+Compression/encryption are read authoritatively from `params` using the real Cassandra keys — a non-null `compressionClass` (a plain STRING, e.g. `"LZ4Compressor"`, not a nested `{"class":…}` object) ⇒ compressed; any non-null `encCipher` / `encKeyAlias` / `encIV` ⇒ encrypted (Cassandra never writes an `"encryption"`/`"encryptionContext"` key). A present-but-`null` value (e.g. `{"compressionClass":null}`) is neither. Never sniffed from payload bytes (no-heuristics, issue #28).
+
+## 3. Sync marker (8 bytes, `CommitLogSegment.writeSyncMarker`)
+
+[Section titled “3. Sync marker (8 bytes, CommitLogSegment.writeSyncMarker)”](#3-sync-marker-8-bytes-commitlogsegmentwritesyncmarker)
+
+| Field        | Type  | Notes                                        |
+| ------------ | ----- | -------------------------------------------- |
+| `nextMarker` | int32 | file offset of the next marker = section end |
+| `crc`        | int32 | CRC32 over id-low, id-high, `markerPos`      |
+
+The marker CRC covers the segment id (low then high int32) and the marker’s own byte offset — **not** `nextMarker`. `nextMarker == 0` or an invalid CRC over a zero region marks the clean end of the written data.
+
+## 4. Record framing (`CommitLog.add`, `ENTRY_OVERHEAD_SIZE = 12`)
+
+[Section titled “4. Record framing (CommitLog.add, ENTRY\_OVERHEAD\_SIZE = 12)”](#4-record-framing-commitlogadd-entry_overhead_size--12)
+
+| Field     | Type         | Notes                                   |
+| --------- | ------------ | --------------------------------------- |
+| `size`    | int32        | serialized mutation length              |
+| `sizeCrc` | int32        | CRC32 over the 4 `size` bytes           |
+| `body`    | `size` bytes | serialized mutation (messaging form)    |
+| `bodyCrc` | int32        | CRC32 over `size` bytes **then** `body` |
+
+A `size <= 0` within a section is zero padding ⇒ end of written data.
+
+### Truncation vs corruption
+
+[Section titled “Truncation vs corruption”](#truncation-vs-corruption)
+
+* **Torn tail** (record/marker bytes extend past EOF): tolerated — prior records are returned and the walk stops, surfacing `truncated`. Mirrors Cassandra’s `tolerateTruncation`.
+* **Corruption** (a fully-present record whose CRC does not match): a typed `Error::CorruptCommitLogFrame`.
+
+## 5. Mutation body (messaging form, `isForSSTable() == false`)
+
+[Section titled “5. Mutation body (messaging form, isForSSTable() == false)”](#5-mutation-body-messaging-form-isforsstable--false)
+
+```text
+uvint numUpdates
+per update:
+  tableId (16 bytes: MSB int64, LSB int64)
+  UnfilteredRowIterator:
+    writeWithVIntLength(partitionKey)   # uvint len + key bytes
+    iterFlags (1 byte)
+    EncodingStats: 3 uvints (minTimestamp, minLocalDeletionTime, minTTL deltas)
+    [static columns]  if HAS_STATIC_ROW
+    regular columns:  uvint count, then count × (uvint len + name bytes)
+    [partition deletion]  if HAS_PARTITION_DELETION
+    [static row]          if HAS_STATIC_ROW
+    [rowEstimate uvint]   if HAS_ROW_ESTIMATE
+    unfiltereds… terminated by END_OF_PARTITION (row flag 0x01)
+```
+
+`iterFlags`: `IS_EMPTY 0x01`, `IS_REVERSED 0x02`, `HAS_PARTITION_DELETION 0x04`, `HAS_STATIC_ROW 0x08`, `HAS_ROW_ESTIMATE 0x10` (`UnfilteredRowIteratorSerializer.java:110-150`).
+
+The **static-columns block is gated on `HAS_STATIC_ROW`**, per-iterator — not on the table having static columns. `UnfilteredRowIteratorSerializer.serialize` computes `hasStatic = staticRow != Rows.EMPTY_STATIC_ROW`, uses it to set the flag, and passes that same boolean to `SerializationHeader.serializer.serializeForMessaging(header, selection, out, hasStatic)` (`UnfilteredRowIteratorSerializer.java:129-139`), which writes the statics `Columns` block only `if (hasStatic)` (`SerializationHeader.java:391-406`). An `IS_EMPTY` partition returns immediately after the flag byte — no EncodingStats, no columns (`UnfilteredRowIteratorSerializer.java:120-124`).
+
+**Note — the messaging form omits `rowBodySize`/`previousUnfilteredSize`** (those are SSTable-only). This is the key difference from the Data.db row layout.
+
+### Row (`UnfilteredSerializer`)
+
+[Section titled “Row (UnfilteredSerializer)”](#row-unfilteredserializer)
+
+`flags` (1 byte): `END_OF_PARTITION 0x01`, `IS_MARKER 0x02`, `HAS_TIMESTAMP 0x04`, `HAS_TTL 0x08`, `HAS_DELETION 0x10`, `HAS_ALL_COLUMNS 0x20`, `HAS_COMPLEX_DELETION 0x40`, `EXTENSION_FLAG 0x80`. Then: `[ext flags]`, clustering values, `[ts delta]`, `[ttl+ldt]`, `[row deletion]`, `[column subset]`, then one cell per present column.
+
+### Cell (`Cell.serializer`)
+
+[Section titled “Cell (Cell.serializer)”](#cell-cellserializer)
+
+`flags` (1 byte): `IS_DELETED 0x01`, `IS_EXPIRING 0x02`, `HAS_EMPTY_VALUE 0x04`, `USE_ROW_TIMESTAMP 0x08`, `USE_ROW_TTL 0x10`. Then `[ts delta]`, `[ldt]`, `[ttl]`, `[complex path]`, then the value — which is present only when `HAS_EMPTY_VALUE` is clear (`Cell.java:303-304`, reader `:310`); when set there is no length and no bytes.
+
+### Values need the schema
+
+[Section titled “Values need the schema”](#values-need-the-schema)
+
+Clustering and cell values are written by `AbstractType.writeValue`: **fixed-length types carry no length prefix** (`int`=4, `bigint`/`timestamp`=8, `uuid`=16, …), variable types are uvint-length-prefixed. Decoding values therefore requires the column types — `CommitLogReader::open_with_schemas` supplies them (schema-aware, no guessing). Without a schema the reader still decodes table id, partition key, and column names structurally.
+
+## 6. Reader coverage (v1) — fail closed on unmodeled constructs
+
+[Section titled “6. Reader coverage (v1) — fail closed on unmodeled constructs”](#6-reader-coverage-v1--fail-closed-on-unmodeled-constructs)
+
+Fully decoded: the common insert path — a table with **no clustering columns**, simple scalar column types, all columns present, no static row, no partition deletion, no range-tombstone marker, no complex deletion. Everything else **fails closed**: the reader returns the structural facts it read authoritatively and marks the row decode as not done, rather than guessing at bytes it cannot align. Guessing here would be a no-heuristics violation (issue #28) *and* a silent-corruption source, since misreading one field’s width misaligns every field after it.
+
+The two honesty signals, both on the public API (`cqlite-core/src/storage/commitlog/mutation.rs:60-95`):
+
+| Signal                          | Meaning when `false`                                                                                                                                                                                                  |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PartitionUpdate::rows_decoded` | rows/cells were not decoded for this update; `rows` is empty (never partially filled)                                                                                                                                 |
+| `Mutation::updates_complete`    | a batch declared more partition updates than `updates` holds — the walk stopped at the first update whose body could not be fully consumed, because the next update’s offset is unknowable without finishing this one |
+
+What still *is* authoritative when `rows_decoded == false`: `table_id`, `partition_key`, `has_partition_deletion` (read straight from the `iterFlags` bit before any early return), and `column_names` when the reader got far enough to read the columns block.
+
+Bail sites, each with its reason (all in `cqlite-core/src/storage/commitlog/mutation.rs`):
+
+| Construct                                                  | Site       | Why it cannot be guessed                                                                                                                                                                                  |
+| ---------------------------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Static row (`HAS_STATIC_ROW`)                              | `:216-232` | bails **before** reading any columns block, so `column_names` is never populated with misparsed bytes                                                                                                     |
+| Partition deletion (`HAS_PARTITION_DELETION`)              | `:237-239` | the partition-level `DeletionTime` body is not decoded; the flag itself is still reported                                                                                                                 |
+| No schema for the table id                                 | `:245-248` | values are type-width-dependent (see *Values need the schema*) — structural-only decode                                                                                                                   |
+| **Clustering columns present**                             | `:288-290` | `ClusteringPrefix.Serializer` writes an unsigned-VInt **presence header** (2 bits per column, batched per 32) before the values; a naive per-column loop would read the header as the first value         |
+| Complex column (collection/tuple/UDT/vector) in the schema | `:301-306` | a complex column is an optional complex-deletion time plus a count-prefixed set of (cell-path, cell) pairs — an entirely different wire shape from a simple cell. Checked once as a schema-level property |
+| Range-tombstone marker (`IS_MARKER`)                       | `:313-316` | marker bodies are not modeled                                                                                                                                                                             |
+| Row-level complex deletion (`HAS_COMPLEX_DELETION`)        | `:345-347` | ditto                                                                                                                                                                                                     |
+| Column subset (`HAS_ALL_COLUMNS` clear)                    | `:350-352` | the subset encoding is not modeled, so column↔cell correspondence is unknown                                                                                                                              |
+
+Note that **row deletions ARE decoded** (`HAS_DELETION` yields `DecodedRow::is_row_deletion == true`, `:339-344`) — it is *partition* deletions that bail.
+
+Because each record is independently CRC-framed (§4), a partial body decode never disturbs the neighboring records: the walk resumes at the next framed record. And because `decode_mutation` rejects a declared update count larger than the body length outright (`:147-152`), an untrusted count cannot spin the update loop.
+
+Extending full value decode to these constructs is a follow-up, not a correctness gap in the sense of producing wrong data — the reader reports what it does not know.
 
 # What Are SSTables?
 

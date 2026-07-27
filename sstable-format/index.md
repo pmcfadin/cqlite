@@ -46,3 +46,6 @@ A 22-chapter reference for the Apache Cassandra 5.0 SSTable binary format, audit
 - [Appendix E — Glossary](/cqlite/sstable-format/appendix-e/)
 - [Appendix F — Known Limitations](/cqlite/sstable-format/appendix-f/)
 - [Appendix G: Cassandra 5.0 Compression Chunk Formats](/cqlite/sstable-format/appendix-g/)
+- [Appendix G: Algorithm Reference Sheet](/cqlite/sstable-format/appendix-g-algorithms/)
+- [Appendix G Quick Reference - Compression Formats at a Glance](/cqlite/sstable-format/appendix-g-quickref/)
+- [Appendix H — Cassandra 5.0 CommitLog Segment Format](/cqlite/sstable-format/appendix-h/)
