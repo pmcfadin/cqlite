@@ -13,6 +13,9 @@ use cqlite_flight::admission::{
     ENV_MAX_CONCURRENT_SCANS, ENV_WAIT_TIMEOUT_MS,
 };
 use cqlite_flight::batch_bytes::{DEFAULT_MAX_BATCH_BYTES, ENV_MAX_BATCH_BYTES};
+use cqlite_flight::egress_credit::{
+    EgressBudget, DEFAULT_MAX_INFLIGHT_EGRESS_BYTES, ENV_MAX_INFLIGHT_EGRESS_BYTES,
+};
 use cqlite_flight::service::CqliteFlightService;
 use cqlite_flight::shutdown::shutdown_signal;
 use std::time::Duration;
@@ -63,6 +66,32 @@ struct Args {
     /// delivered, as a one-row batch; `0` and `1` degrade to one row per batch.
     #[arg(long, env = ENV_MAX_BATCH_BYTES, default_value_t = DEFAULT_MAX_BATCH_BYTES)]
     max_batch_bytes: usize,
+
+    /// Maximum Arrow CAPACITY bytes in flight on ONE streaming `do_get` (issue
+    /// #2821). Credit for a batch is reserved BEFORE the batch is materialized
+    /// and released when it has left the stream, so per-stream egress residency
+    /// is bounded in BYTES rather than by a batch count multiplied by an
+    /// unbounded row width. Denominated in `RecordBatch::get_array_memory_size()`
+    /// (buffer CAPACITY) — a DIFFERENT currency from `--max-batch-bytes`, which
+    /// is Arrow PAYLOAD bytes; convert between them only with
+    /// `cqlite_flight::batch_bytes::worst_case_batch_capacity_bytes`. A single
+    /// batch may exceed the whole ceiling and is still delivered (it takes the
+    /// whole pool), so the guaranteed bound is `max(ceiling, one maximum batch)`
+    /// = max(12 MiB, ~8.4 MiB) = 12 MiB PER STREAM at the shipped defaults —
+    /// size a deployment against that, not against the 8 MiB one-batch figure.
+    /// The bound is over SERVER-SIDE residency: bytes this process holds on the
+    /// egress path. It covers GOVERNED EGRESS CAPACITY only, so it is a floor
+    /// for sizing rather than a per-stream total: the row buffer and the
+    /// encoder's queued `FlightData` (~4 MiB at defaults) are additional
+    /// server-side memory on the same stream and are not counted here. Batches a client retains after receiving them are the
+    /// client's memory and are deliberately not charged here. `0` degrades to
+    /// strict one-batch-at-a-time egress, never a hang.
+    #[arg(
+        long,
+        env = ENV_MAX_INFLIGHT_EGRESS_BYTES,
+        default_value_t = DEFAULT_MAX_INFLIGHT_EGRESS_BYTES
+    )]
+    max_inflight_egress_bytes: usize,
 }
 
 #[tokio::main]
@@ -111,7 +140,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sampler_data_dir = args.data_dir.clone();
     let service = CqliteFlightService::with_admission(args.data_dir, args.batch_size, admission)
         // Issue #2825: the byte-cap half of the dual batch boundary.
-        .with_max_batch_bytes(args.max_batch_bytes);
+        .with_max_batch_bytes(args.max_batch_bytes)
+        // Issue #2821: the per-stream in-flight egress capacity-byte ceiling.
+        .with_egress_budget(EgressBudget::bytes(args.max_inflight_egress_bytes));
 
     // A coarse tonic transport backstop, generously ABOVE the admission ceiling:
     // it guards the HTTP/2 accept loop / stream table from a client opening far
@@ -127,6 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         %listen,
         batch_size = args.batch_size,
         max_batch_bytes = args.max_batch_bytes,
+        max_inflight_egress_bytes = args.max_inflight_egress_bytes,
         max_concurrent_scans = admission_limit,
         admission_wait_timeout_ms = args.admission_wait_timeout_ms,
         max_concurrent_streams,

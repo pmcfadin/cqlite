@@ -2,7 +2,7 @@
 
 | CQL type | On-disk representation | Notes |
 |---|---|---|
-| `udt<name>` | For each field (in definition order): [4-byte BE i32 length][value bytes] | -1=null, 0=empty, >0=data length. Source: `TupleType.java:345-359` (UserType delegates to `TupleType.buildValue`). |
+| `udt<name>` | For each field (in definition order): [4-byte BE i32 length][value bytes] | -1=null, 0=empty, >0=data length. Identical framing to `tuple` — `UserType extends TupleType` (`UserType.java:52`) and reuses `TupleType.buildValue`. Source: `TupleType.java:341-364`. |
 | `frozen<udt<...>>` | Same as UDT, serialized as single blob | Treated atomically, single-cell storage |
 | `list<frozen<udt>>` | Multi-cell: each element is separate cell with frozen UDT blob | Outer list not frozen = multi-cell |
 | `frozen<list<udt>>` | Single-cell: entire list serialized as one blob | Outer frozen = single-cell |
@@ -10,7 +10,7 @@
 
 ### UDT Binary Format Details
 
-**Frozen UDT field encoding** (confirmed via `TupleType.java:345-359`):
+**Frozen UDT field encoding** (confirmed via `TupleType.java:341-364`):
 ```
 [field_1_length: 4-byte BE i32][field_1_data: variable bytes]
 [field_2_length: 4-byte BE i32][field_2_data: variable bytes]
@@ -35,7 +35,7 @@ org.apache.cassandra.db.marshal.UserType(keyspace,hex_name,field1:type1,field2:t
 
 | Column Type | Storage | Cell Structure |
 |-------------|---------|----------------|
-| `frozen<list<udt>>` | Single-cell | VInt count + inline UDT fields |
+| `frozen<list<udt>>` | Single-cell | **4-byte BE i32** count + per-element 4-byte BE i32 length + inline UDT fields (all fixed-width, **not** VInt) |
 | `list<frozen<udt>>` | Multi-cell | Each element = separate cell with frozen UDT value |
 | `map<K, frozen<udt>>` | Multi-cell | Cell path = key, cell value = frozen UDT |
 

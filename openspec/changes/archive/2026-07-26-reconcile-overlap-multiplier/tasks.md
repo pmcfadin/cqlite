@@ -122,5 +122,20 @@
       confirmed no stale pre-re-measure figure survives as live. The owner-approved (2026-07-26)
       saturated-anchor amendment was verified consistent across spec, design, README and this file,
       with the general void rule intact for the saturated control.
-- [ ] 5.6 Final roborev pass → merge-on-green → `flow-finalize` (archive, telemetry stamp via
-      telemetry PR, worktree + branch removal, issue close).
+- [x] 5.6 Final roborev pass → merge-on-green → `flow-finalize`. **Final roborev: 4 findings (1
+      Medium, 3 Low), all in the advisory-only bench instrument, none altering a published figure.**
+      The Medium's *documentation* half was fixed pre-merge (record §1 now declares the instrument's
+      **≥7-core host floor** — a published 250 ms `Flat` sample advances `25 × cores` ticks, so the
+      160-tick resolution floor needs `cores ≥ 6.4` — and records that the two small-host ceiling
+      floors are consequently unreachable dead config). All four **src** fixes were batched into
+      **#2930** (up-front core-count assert + dead-floor cleanup; fail-closed `/proc/stat` parse in
+      `cpu_ticks`, which today `filter_map`s and could index-shift fail-OPEN; `perf-gate.json` arm-id
+      drift check; executing coverage for `foreign_cores`/`end_arm`). Deferring them was a deliberate,
+      owner-backed **provenance** decision, not a scheduling one: editing the guard AFTER the
+      measurement would falsify this record's byte-identity guarantee between the merged instrument
+      and the preserved measurement commit `refs/measurements/issue-2043-run-562f14aa` — the exact
+      claim C blocked on (F1) — in exchange for changes that cannot move a number (the parse defect is
+      unreachable on Linux; the host floor never binds at 16 cores). #2930 lands with #2898, which
+      re-runs the census anyway. **PR #2892 squash-merged 2026-07-26T19:10:50Z** via armed `--auto` on
+      the `required` lane going green; `premerge-assert.sh` returned `PREMERGE: OK 85fecae5`.
+      Telemetry stamped and this change archived in the same follow-up PR.

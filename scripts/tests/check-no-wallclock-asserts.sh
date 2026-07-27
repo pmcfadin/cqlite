@@ -64,6 +64,27 @@ else
     "$REPO_ROOT/cqlite-cli/tests"; do
     [ -e "$p" ] && ROOTS+=("$p")
   done
+  # Root-level tests/*.rs (issue #2902, the #2720 gap): the workspace-root `cqlite`
+  # package's integration tests compile+run in the default `cargo test` gate but sat
+  # OUTSIDE this scan surface — a hardcoded-µs wall-clock assert in
+  # golden_path_partition_lookup_tests.rs flaked a full gate of record. Scan the
+  # TOP-LEVEL files here NON-RECURSIVELY (each `tests/*.rs` passed as an explicit file
+  # arg, so os.walk does not descend). The deeper subtrees (tests/src,
+  # tests/sstable_reading, tests/bulletproof, tests/integration, tests/benchmarks) carry
+  # a broad pre-existing set of latency asserts PLUS genuine false positives — a
+  # `config.timeout.as_secs() > 0` config check and a `timer.elapsed() >= 20ms`
+  # deliberate-delay LOWER bound — so a full recursive sweep is deferred (cf. the #2705
+  # src/ deferral; #2720 tracks the remainder). Scan a subtree explicitly by passing its
+  # path as an arg.
+  # nullglob so a checkout with no top-level tests/*.rs yields ZERO iterations
+  # rather than the literal unexpanded glob string "$REPO_ROOT/tests/*.rs" (which
+  # rs_files would then try to open as a path and skip) — self-documenting and
+  # hazard-free.
+  shopt -s nullglob
+  for f in "$REPO_ROOT"/tests/*.rs; do
+    ROOTS+=("$f")
+  done
+  shopt -u nullglob
 fi
 
 if [ "${#ROOTS[@]}" -eq 0 ]; then

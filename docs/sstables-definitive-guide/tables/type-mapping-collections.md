@@ -2,13 +2,49 @@
 
 | CQL type | On-disk representation | Notes |
 |---|---|---|
-| `list<T>` | Unsigned VInt element count; for each element: [unsigned VInt length + value bytes or fixed-size value] | Elements serialized using `T`'s encoding. Count and element lengths use `writeUnsignedVInt32`. Source: `CollectionSerializer.java:43,51`. |
-| `set<T>` | Same as `list<T>` with set semantics | Elements sorted by comparator on read paths |
-| `map<K,V>` | Unsigned VInt entry count; for each entry: key then value serialized as per types | Keys must be unique; order by key comparator. Source: `CollectionSerializer.java:58`. |
-| `tuple<T1,...,Tn>` | For each field: [**4-byte BE signed int** length + value bytes]; null fields encoded as 0xFFFFFFFF (-1) | Field lengths are 4-byte BE int, **not** VInt. Source: `TupleType.java:345-359`. |
+| `frozen<list<T>>` | **4-byte BE i32** element count; for each element: [**4-byte BE i32** length + value bytes] | One cell holding the packed blob. `pack` → `writeCollectionSize` (`putInt`) + `writeValue` (`putInt` + bytes). `-1` length = NULL element. Source: `CollectionSerializer.java:52-92,123-126`. |
+| `frozen<set<T>>` | Same as `frozen<list<T>>` | Elements are written in the element-type comparator's order |
+| `frozen<map<K,V>>` | **4-byte BE i32** entry count; for each entry: key value then value value, each with its own **4-byte BE i32** length | `MapSerializer.serializeValues` flattens sorted (key, value) pairs, then `pack` frames each with `putInt`. Keys unique, ordered by key comparator. Source: `MapSerializer.java:66-79`, `CollectionSerializer.java:52-92`. |
+| `list<T>` / `set<T>` / `map<K,V>` (non-frozen) | One cell per element/entry: cell **path** always behind an **unsigned VInt** length; cell **value** behind an unsigned-VInt length *iff* `HAS_EMPTY_VALUE` (`0x04`) is clear — and then length-prefixed even for a fixed-width element/value type (see below) | Multi-cell complex column, preceded by an unsigned-VInt cell count. Source: `UnfilteredSerializer.java:277`, `CollectionType.java:361-366`, `Cell.java:271,303-304`, `AbstractType.java:535-552`. |
+| `tuple<T1,...,Tn>` | For each field: [**4-byte BE signed int** length + value bytes]; null fields encoded as 0xFFFFFFFF (-1) | Field lengths are 4-byte BE int, **not** VInt; no field count on disk (arity from schema). Source: `TupleType.java:341-364`. |
 | `frozen<...>` | Payload serialized as a single value using inner type encoding | Prevents updates by sub-component |
 
-**Collection element lengths** (list, set, map) use unsigned VInt encoding (`CollectionSerializer.java`).
+**Frozen collection counts and element lengths** are fixed 4-byte BE `i32`, **not** VInt
+(`CollectionSerializer.java:67-92`).
+
+**Non-frozen collection cell framing** — the path is always unsigned-VInt length-prefixed; the value is
+unsigned-VInt length-prefixed **iff `HAS_EMPTY_VALUE` (`0x04`) is clear**:
+
+- **Cell path: always** an unsigned-VInt length + bytes, never flag-gated.
+  `CollectionType.CollectionPathSerializer.serialize` → `ByteBufferUtil.writeWithVIntLength`
+  (`CollectionType.java:361-366`), and `writeWithVIntLength` is
+  `out.writeUnsignedVInt32(bytes.remaining())` + bytes (`ByteBufferUtil.java:356-360`).
+- **Cell value: present iff `HAS_EMPTY_VALUE` is clear**, and that flag is **size-driven, not
+  type-driven** — `Cell.Serializer.serialize` computes `hasValue = cell.valueSize() > 0`
+  (`Cell.java:271`), sets `HAS_EMPTY_VALUE_MASK` when `!hasValue` (`:277-278`), and writes the value
+  only `if (hasValue)` (`:303-304`); the reader mirrors it (`:310`, `:329-339`). A zero-length value
+  therefore carries **no length VInt and no bytes** — not a `0x00`. Three instances of that single
+  rule:
+  1. a non-frozen `set<T>` element — the datum *is* the cell path and `SetType.valueComparator()`
+     returns `EmptyType.instance` (`SetType.java:106-109`), so every set cell's value is zero-length;
+  2. **any** zero-length value — a `map<text,text>` entry whose value is `''`, an empty blob element
+     in a `list<blob>`;
+  3. an element **tombstone** (`IS_DELETED`, `0x01`; see the mask comment at `Cell.java:264`).
+- **When a value IS present it is length-prefixed even for a fixed-width element type** — `list<int>`
+  exactly like `list<text>`. `Cell.Serializer.serialize` writes
+  `header.getType(column).writeValue(...)` (`Cell.java:303-304`) and `header.getType(column)` returns
+  the **column's** type — the collection type, never the element type
+  (`SerializationHeader.java:160-163`, built from `column.type` at `:250-257`).
+  `CollectionType`/`ListType`/`MapType`/`SetType` never override `valueLengthIfFixed()`, so they inherit
+  `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`) and `writeValue` takes the `else`
+  branch → `accessor.writeWithVIntLength(value, out)` (`AbstractType.java:550-552` →
+  `ValueAccessor.java:171-175`).
+- The `valueLengthIfFixed() >= 0` raw-bytes branch (`AbstractType.java:538-543`) applies to **simple
+  (non-collection)** cells only, where the scalar type overrides it (e.g. `Int32Type` → `4`,
+  `Int32Type.java:156-159`). Cassandra's layout comment names both gates together: the value size "is
+  present unless either the cell has the `HAS_EMPTY_VALUE_MASK`, or the value for columns of this type
+  have a fixed length" (`Cell.java:254-255`) — for a collection cell only the flag can fire.
+
 **Tuple field lengths** use 4-byte BE signed int: -1 (0xFFFFFFFF) = null, 0 = empty, >0 = byte count. See Appendix B for VInt details.
 
 - Cassandra 5.0.8: `org.apache.cassandra.db.SerializationHeader` (`https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java`)

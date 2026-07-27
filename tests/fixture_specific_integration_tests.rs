@@ -63,12 +63,8 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
                 println!("  📋 Found value: {value:?}");
             }
 
-            // Performance check
-            assert!(
-                lookup_duration.as_micros() < 10000,
-                "Minimal fixture lookup should be very fast: {:?}μs",
-                lookup_duration.as_micros()
-            );
+            // Record timing (do not assert on wall-clock latency — #2642/#2902).
+            println!("[perf-record] minimal fixture lookup: {lookup_duration:?}");
         }
         None => {
             println!("  ℹ️  Fixture key not found (may be normal for minimal fixture)");
@@ -82,11 +78,6 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
     let lookup_duration = start_time.elapsed();
 
     assert!(result.is_none(), "Non-existent key should return None");
-    assert!(
-        lookup_duration.as_micros() < 5000,
-        "Non-existent key lookup should be very fast: {:?}μs",
-        lookup_duration.as_micros()
-    );
 
     println!("  ✅ Non-existent key properly handled in {lookup_duration:?}");
 
@@ -190,13 +181,6 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
             limited_results.len(),
             limited_duration
         );
-
-        // Performance check for limited scans
-        assert!(
-            limited_duration.as_millis() < 100,
-            "Limited scan should be fast: {:?}ms",
-            limited_duration.as_millis()
-        );
     }
 
     // Test 3: Range scan with integer keys (for fixture compatibility)
@@ -237,13 +221,6 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
         "  ✅ Empty range scan: {} entries in {:?}",
         empty_results.len(),
         empty_duration
-    );
-
-    // Empty scans should be very fast
-    assert!(
-        empty_duration.as_millis() < 50,
-        "Empty range scan should be very fast: {:?}ms",
-        empty_duration.as_millis()
     );
 
     Ok(())
@@ -317,13 +294,8 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
 
     println!("  📊 Total decompressed data: {total_decompressed_bytes} bytes");
 
-    // Performance check: decompression should not be prohibitively slow
-    // Note: health_metrics not available, performing generic performance check
-    assert!(
-        decompression_duration.as_millis() < 1000,
-        "Decompression should be reasonably fast: {:?}ms",
-        decompression_duration.as_millis()
-    );
+    // Record timing (do not assert on wall-clock latency — #2642/#2902).
+    println!("[perf-record] decompression scan: {decompression_duration:?}");
 
     // Test 2: Individual partition lookup through decompression
     if !results.is_empty() {
@@ -352,12 +324,8 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
             }
         }
 
-        // Performance check for individual lookup
-        assert!(
-            lookup_duration.as_millis() < 100,
-            "Decompressed lookup should be fast: {:?}ms",
-            lookup_duration.as_millis()
-        );
+        // Record timing (do not assert on wall-clock latency — #2642/#2902).
+        println!("[perf-record] decompressed lookup: {lookup_duration:?}");
     }
 
     // Test 3: Multiple operations to stress decompression pipeline
@@ -378,13 +346,6 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
     let avg_stress_time =
         stress_times.iter().sum::<std::time::Duration>() / stress_times.len() as u32;
     println!("  ✅ Stress test complete: average {avg_stress_time:?} per operation");
-
-    // Performance assertion for sustained operations
-    assert!(
-        avg_stress_time.as_millis() < 200,
-        "Sustained decompression operations should be efficient: {:?}ms avg",
-        avg_stress_time.as_millis()
-    );
 
     Ok(())
 }
@@ -505,13 +466,6 @@ async fn test_cross_operation_validation() -> Result<()> {
         let duration = start_time.elapsed();
 
         println!("  📊 {test_name}: {duration:?}");
-
-        assert!(
-            duration.as_millis() < 50,
-            "Operation {} should be fast: {:?}ms",
-            test_name,
-            duration.as_millis()
-        );
     }
 
     println!("  🎉 Cross-operation validation completed successfully");

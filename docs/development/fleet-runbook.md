@@ -31,9 +31,43 @@ issues itself). Other machines run pure **workers**. A lead is a worker with a h
 git clone https://github.com/pmcfadin/cqlite && cd cqlite
 bash scripts/bootstrap-agent-machine.sh        # or manually: sccache, cargo-nextest, bash>=4.3, mold (Linux)
 bash test-data/scripts/fetch-datasets.sh       # real SSTable binaries — REQUIRED (see below)
+gh auth setup-git                              # git push credentials — SEPARATE from gh auth (#2942)
 gh auth status                                  # must include the 'project' scope (board access)
 bash scripts/flow/claim.sh smoke               # preflight: prove origin accepts refs/claims/* (see below)
 ```
+
+**Three deltas that fail with a message pointing away from their cause (#2942).** Each cost a
+worker a diagnosis round-trip on a Linux box; the bootstrap now checks the first two and fails
+loudly rather than reporting a healthy machine. Search for the message you actually saw:
+
+- **`fatal: could not read Username for 'https://github.com'`** — `gh` is authenticated but **git
+  is not**. They are separate credential paths, and `scripts/flow/claim.sh` +
+  `scripts/flow/claim-heartbeat.sh` push with plain `git` on 10+ call sites, so the claim protocol
+  — the cross-machine lock — simply does not work while `gh auth status` reports a happy machine.
+  Fix: `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes`, which configures a
+  helper **scoped to the origin host** that dereferences `$GH_TOKEN` **at call time** (the token
+  itself is never written to disk, so rotating it needs no reconfiguration). Because that helper
+  reads the environment, it only works in shells where `GH_TOKEN` is exported — for an unattended
+  systemd/cron worker prefer `gh auth setup-git`. Related: an unauthenticated push now reports
+  `CLAIM: ERROR reason=auth … (NOT retryable …)` — it used to say `reason=infra … (transient —
+  retry)` and send workers into a retry loop on a fault that can never self-clear. That
+  classification covers `claim.sh` (`claim`/`adopt`/`release`/`smoke`) only; `claim-heartbeat.sh`
+  surfaces git's raw error on its own pushes and does not classify them.
+- **A `gh project` failure citing a missing `read:org` scope on a token whose scopes DO include
+  `project`** — a scope match is evidence about a token, not about the operation. `gh project
+  item-edit` needs `read:org`; the `updateProjectV2ItemFieldValue` GraphQL mutation does **not**
+  and succeeds with the same token. Fix: `gh auth refresh -s read:org`, or route board WRITES
+  through that mutation (which is what `project-board-sync.yml` already does). The bootstrap's
+  board check is now a read-only functional probe for exactly this reason — it can no longer print
+  "board dispatch works" on the strength of the scope string. It also reads scopes from the
+  **active account's** stanza only and probes as `CQLITE_PROJECT_ACCOUNT` (the account `flow-board`
+  forces active), restoring your previous account afterwards: `gh auth status` prints one stanza per
+  logged-in account, so a whole-output grep can describe an account your commands never use — the
+  EMU-account flip documented in `.claude/skills/flow-board/SKILL.md`.
+- **`stale info` from a bare `git push --force-with-lease`**, even when local and remote refs
+  demonstrably match — the bare form leases against a remote-tracking ref this checkout may never
+  have fetched. Always use the explicit CAS form `git push --force-with-lease=<ref>:<sha>`, which
+  is what the flow scripts already do; the bare form only bites a human or agent typing it ad hoc.
 
 **Linux workers — mold linker (#2859):** on Linux hosts bootstrap also provisions the **mold**
 linker (linking is the one build cost sccache cannot cache — every `--lite` round and full gate
@@ -290,7 +324,8 @@ machine + heartbeat age (issue #2089). Interpretation:
 |---|---|
 | Laptop lid closed mid-issue | Nothing. Commits are on the origin branch. Reopen and say `implement <N>` — it resumes from the worktree. |
 | Session feels degraded / bloated | Kill it, start fresh. Board + disk are the state; the new session rehydrates in one board read. |
-| Board unreachable (auth/scope error) | The session STOPS by design (labels are decorative, never a dispatch source). Fix `gh auth refresh -s project` and restart. |
+| Board unreachable (auth/scope error) | The session STOPS by design (labels are decorative, never a dispatch source). Fix `gh auth refresh -s project` and restart. If the scope is already present and `gh project` still fails for `read:org`, that is the #2942 delta — use the `updateProjectV2ItemFieldValue` GraphQL mutation for board writes, or widen the token with `-s read:org`. |
+| `fatal: could not read Username` on any push | git has no credentials even though `gh` does (#2942). The claim protocol pushes with plain git, so it is fully broken until fixed: `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes`. A claim attempt on such a box reports `reason=auth`, not a retryable transient. |
 | Gate seems hung | It's probably queued: look for `waiting for gate slot (N in use)…`. Queued ≠ hung. |
 | Green SUMMARY but parity lines say SKIP | Datasets missing on that machine — `fetch-datasets.sh`, re-run. The FULL gate FAILs CLOSED here (`missing-fixtures: FAIL-CLOSED (#2078)`) so it can't slip through; `--lite`/`--only` stay lenient. |
 | Two machines want the same issue | Impossible past the claim: the second claim-ref push is rejected server-side (non-fast-forward on the fixed-name ref, #2665); the loser sees `CLAIM LOST` and picks the next Ready item. |

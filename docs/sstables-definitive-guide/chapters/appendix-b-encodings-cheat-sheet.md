@@ -2,6 +2,7 @@
 
 In this appendix you will learn:
 - How VInt and ZigZag encodings appear on disk in Cassandra
+- Which `Data.db` fields are unsigned VInt, which are signed, and which are fixed-width
 - Common row/cell header bits and where to find them upstream
 - Quick rules for reading variable-length values
 - Write-side encoding patterns for SSTable generation
@@ -16,7 +17,10 @@ Examples (unsigned lengths shown as hex bytes → value):
 - `00` → 0
 - `0A` → 10
 - `81 00` → 256 (two-byte: 10xxxxxx xxxxxxxx)
-- `C1 00 00` → 0x10000 - 1 example boundary (three-byte: 110xxxxx ...)
+- `C1 00 00` → 0x10000 (three-byte: 110xxxxx xxxxxxxx xxxxxxxx — five data bits in the first byte)
+
+The count of leading 1-bits in the first byte is the number of *extra* bytes that follow; the
+remaining bits of the first byte are the high-order data bits (`VIntCoding.java`).
 
 ZigZag (signed) quick reference:
 - Maps signed to unsigned: 0→0, -1→1, 1→2, -2→3, 2→4, ...
@@ -27,12 +31,45 @@ Upstream anchors (Cassandra 5.0.8):
 - `org.apache.cassandra.db.SerializationHeader` (presence/length handling)
 
 Rules of thumb:
-- Length prefixes for `text`, `blob`, collection elements, and UDT fields are VInt.
-- Signed values may use ZigZag in compatibility layers; lengths are non-negative.
+- Length prefixes that *are* present are **unsigned** VInt (`ValueAccessor.writeWithVIntLength` →
+  `writeUnsignedVInt32`, `ValueAccessor.java:171-175`; paths via `ByteBufferUtil.writeWithVIntLength`,
+  `CollectionType.java:361-366`). That covers `text`/`blob` simple cell values, the path of **every**
+  non-frozen collection cell, and the value of every non-frozen collection cell that *has* one.
+- **A non-frozen collection cell PATH is always length-prefixed; its VALUE is length-prefixed *iff*
+  `HAS_EMPTY_VALUE` (`0x04`) is clear.** That flag is **size-driven, not type-driven**:
+  `Cell.Serializer.serialize` sets it from `cell.valueSize() > 0` (`Cell.java:271`, `:277-278`) and
+  writes the value only `if (hasValue)` (`:303-304`); the reader mirrors it at `:310`, `:329-339`
+  (`skip` at `:381`, `:399-400`). So **no length VInt and no bytes** are written for a zero-length
+  value — the flag replaces the `0x00` a reader might expect. Three instances of the one rule:
+  a non-frozen `set<T>` element (datum lives in the path; `SetType.valueComparator()` is
+  `EmptyType.instance`, `SetType.java:106-109` → always zero-length); **any** zero-length value
+  (a `map<text,text>` entry with value `''`, an empty blob in `list<blob>`); an element **tombstone**
+  (`IS_DELETED`, `0x01` — see the mask's own comment at `Cell.java:264`).
+- **When a value IS present it is unsigned-VInt-length-prefixed even for a fixed-width element type**
+  (`list<int>`, `map<text,bigint>`). `Cell.Serializer.serialize` writes it as
+  `header.getType(column).writeValue(...)` (`Cell.java:303-304`), and `header.getType(column)` is the
+  **column's** type — the collection type, not the element type (`SerializationHeader.java:160-163`,
+  `:250-257`). `CollectionType`/`ListType`/`MapType`/`SetType` never override `valueLengthIfFixed()`, so
+  they are `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`) and `writeValue` takes the
+  `writeWithVIntLength` branch (`:550-552`).
+- **Where the fixed-width no-prefix rule DOES apply: SIMPLE (non-collection) cells.** Only scalar types
+  override `valueLengthIfFixed()` (e.g. `Int32Type` → `4`, `Int32Type.java:156-159`), so only a simple
+  cell can take the raw-bytes branch (`AbstractType.java:538-543`). Cassandra's layout comment states
+  both gates at once — the value size "is present unless either the cell has the
+  `HAS_EMPTY_VALUE_MASK`, or the value for columns of this type have a fixed length"
+  (`Cell.java:254-255`); for a collection cell only the first can ever fire.
+- **Exception — fixed 4-byte BE i32, not VInt**: tuple/UDT field lengths and *frozen* collection
+  counts/element lengths (`TupleType.buildValue`, `CollectionSerializer.writeCollectionSize`).
+- Every VInt in `Data.db` is unsigned **except** the three components of a serialized `DurationType`
+  payload — wherever that payload occurs, including nested in a collection/tuple/UDT. Scoped to
+  `Data.db`: `Index.db`'s promoted-index width delta is a signed VInt (`IndexInfo.java:96,111-112`).
 
-## ZigZag Encoding for Writers
+## ZigZag (Signed VInt) — Where It Actually Applies
 
-When writing SSTable data, timestamps, TTL, and deletion times often use ZigZag encoding to efficiently represent signed values with small absolute magnitudes.
+ZigZag maps a signed integer onto an unsigned one so small negative magnitudes stay short, then
+encodes the result as an unsigned VInt. In Cassandra it is reached through
+`DataOutputPlus.writeVInt` → `VIntCoding.writeVInt` → `writeUnsignedVInt(encodeZigZag64(v))`
+(`VIntCoding.java:449`, `:522`).
 
 **ZigZag formula**: `(n << 1) ^ (n >> 63)` for 64-bit signed integers
 
@@ -52,31 +89,70 @@ When writing SSTable data, timestamps, TTL, and deletion times often use ZigZag 
 | 1000 | 2000 | `0x87 0xD0` |
 | -1000 | 1999 | `0x87 0xCF` |
 
-**Common use cases**:
-- Legacy wire-protocol (pre-5.0 messaging serialization) for signed integer fields
+**Where ZigZag actually appears in `Data.db`** — inside a serialized `DurationType` payload, and
+nowhere else:
+- A `duration` payload is three consecutive **signed** VInts (months, days, nanos).
+  `DurationSerializer.serialize` calls `output.writeVInt(...)` three times
+  (`DurationSerializer.java:34,49-51`). ZigZag is genuinely required here — a negative CQL duration
+  makes every non-zero component negative (`Duration.java:101-110`). See Appendix A.
+- **This is not limited to a top-level `duration` cell.** Wherever a `duration` is *nested*, the same
+  three signed VInts sit inside the enclosing value's bytes while the cell's own type is something
+  else: `frozen<list<duration>>`, `map<text, frozen<tuple<duration,int>>>`, a UDT field declared
+  `duration`. Cassandra models exactly this recursion — `DurationType.referencesDuration()` returns
+  `true` (`DurationType.java:96-99`) and `TupleType.referencesDuration()` recurses over `allTypes()`
+  (`TupleType.java:125-128`), and `UserType extends TupleType` inherits it (`UserType.java:52`).
+  A decoder must therefore reach the signed-VInt path by *type descent*, not by checking whether the
+  column type is `duration`.
 
-> **SSTable Data.db does NOT use ZigZag for row-level temporal fields.**
-> Timestamp deltas, TTL deltas, and local deletion time deltas all call `writeUnsignedVInt` or
-> `writeUnsignedVInt32` (see `SerializationHeader.java:167,172,177`). Because the baselines
-> (`min_timestamp`, `min_ttl`, `min_local_deletion_time`) are the minimums across the SSTable,
-> all deltas are guaranteed non-negative, making unsigned encoding both correct and efficient.
+**Where ZigZag does NOT appear in `Data.db`**: every **structural** field. Length prefixes, counts, and
+the row/cell temporal deltas are all unsigned (next section), no matter how deeply a `duration` is
+nested inside the value they frame.
 
-**Implementation reference**: `cqlite-core/src/storage/serialization/vint.rs::zigzag_encode()`
+**Signed VInt is not unique to `duration` across the whole component set.** The promoted index inside
+`Index.db` also uses a signed VInt, and mixes both variants in one struct: `IndexInfo.Serializer`
+writes the block offset unsigned but the **width delta signed** —
+`out.writeUnsignedVInt(info.offset)` then `out.writeVInt(info.width - WIDTH_BASE)` with
+`WIDTH_BASE = 64 * 1024` (`IndexInfo.java:96,111-112`), read back as `in.readVInt() + WIDTH_BASE`
+(`:134`). The delta is signed because a block narrower than `WIDTH_BASE` yields a negative value.
+ZigZag also appears in the internode messaging serialization path, which is not an SSTable concern.
 
-### SSTable Row Fields Always Use Unsigned VInt, Not ZigZag
+**Implementation references** (`cqlite-core/src/storage/serialization/vint.rs::encode_signed()` =
+ZigZag + unsigned VInt):
+- `Data.db` `duration` payload — three `encode_signed` calls in
+  `cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs:232-234`. Nesting is handled by
+  recursion, not by a top-level type check: `serialize_value_into` recurses into map keys/values, frozen
+  collection elements, and `Value::Frozen` inners (`encoding.rs:303-315`), so a nested `duration` reaches
+  the same three signed VInts.
+- `Index.db` promoted-index width delta — `encode_signed(width_delta, buf)` in
+  `cqlite-core/src/storage/sstable/writer/index_writer.rs:667`; the read side zigzag-decodes to invert
+  it (`cqlite-core/src/storage/sstable/promoted_index_reader.rs`).
+
+## SSTable Row Fields Always Use Unsigned VInt, Not ZigZag
 
 All temporal delta fields written by `SerializationHeader` call the unsigned variant:
 
 | Field | Method | Source |
 |-------|--------|--------|
-| timestamp delta | `writeUnsignedVInt(ts - min_ts)` | `SerializationHeader.java:167` |
-| TTL delta | `writeUnsignedVInt32(ttl - min_ttl)` | `SerializationHeader.java:177` |
-| local_deletion_time delta | `writeUnsignedVInt32(ldt - min_ldt)` | `SerializationHeader.java:172` |
+| timestamp delta | `writeUnsignedVInt(ts - min_ts)` | `SerializationHeader.java:165-168` |
+| TTL delta | `writeUnsignedVInt32(ttl - min_ttl)` | `SerializationHeader.java:175-178` |
+| local_deletion_time delta | `writeUnsignedVInt32(ldt - min_ldt)` | `SerializationHeader.java:170-173` |
 
-ZigZag encoding (`writeVInt`) appears only in the on-wire messaging serialization path
-(pre-5.0 compatibility) and is absent from SSTable Data.db serialization. Because the
-baselines are chosen to be ≤ the smallest actual value in the SSTable, all deltas are
-non-negative, making unsigned encoding correct and efficient.
+`writeDeletionTime` is just those two in order — `writeTimestamp` then `writeLocalDeletionTime`
+(`SerializationHeader.java:180-184`) — so a row/cell/complex deletion is also two unsigned VInts.
+
+Because the baselines (`min_timestamp`, `min_ttl`, `min_local_deletion_time`) are the minimums
+across the SSTable, every delta is non-negative, making unsigned encoding both correct and
+optimal. Decoding one of these as signed ZigZag silently halves and sign-flips the value.
+
+> **Do not infer signedness from the bytes.** A single byte `0x05` is `5` unsigned and `-3` under
+> ZigZag; nothing in the byte distinguishes them. The writer's method (`writeUnsignedVInt` vs
+> `writeVInt`) is the only authority — read it off the field's serializer, never off the data.
+
+CQLite matches this on both sides: the reader parses these fields with `parse_vuint`
+(`reader/parsing/row_decoder/cell_value.rs:95-99` for the cell timestamp delta,
+`row_decoder/row_framing.rs:230-232` for deletion times) and the writer emits them with
+`encode_unsigned` (`writer/data_writer/cells.rs:51-55`, `:170-183`). Issue #1623 (PR #1757,
+`d31c897c`) reclassified 256 real corpus sites that a signed decode had been silently corrupting.
 
 ## Delta Encoding Pattern
 
@@ -103,10 +179,11 @@ SSTable components use delta encoding to reduce storage size by storing offsets 
 - Statistics: `min_ttl = 3600` (1 hour)
 - Actual TTL: `7200` (2 hours)
 - Stored delta: `3600` (encoded as **unsigned** VInt32 — `SerializationHeader.writeUnsignedVInt32`)
-- Bytes: `0x9C 0x20` (unsigned VInt(7200): `7200 = 0x1C20`, 2-byte form `0x9C 0x20`)
+- Bytes: `0x8E 0x10` (unsigned VInt(3600): `3600 = 0x0E10`, 2-byte form `(0x0E | 0x80) = 0x8E`, `0x10`)
+  — the encoded value is the **delta**, not the absolute TTL.
 
 *Local deletion time encoding*:
-- Statistics: `min_local_deletion_time = 1700000000` (Jan 2023)
+- Statistics: `min_local_deletion_time = 1700000000` (Nov 2023)
 - Actual deletion time: `1700000010`
 - Stored delta: `10` (encoded as unsigned VInt)
 - Bytes: `0x0A`
@@ -176,7 +253,9 @@ Cell flags appear at the start of each cell and control cell-level metadata.
   tombstone never also sets `IS_EXPIRING` (so no wasted TTL byte), and an expiring cell never
   sets `IS_DELETED`. Authority: `Cell.Serializer.flags()`. Verified in CQLite's emitter
   (`data_writer.rs` cell-flag construction: TTL fields only on the `Some(ttl)` path).
-- **Empty strings**: Use `HAS_EMPTY_VALUE` flag with zero-length value bytes (distinct from NULL)
+- **Empty strings**: `HAS_EMPTY_VALUE` (`0x04`) flag set and **no** value length and no value bytes —
+  the flag replaces the length VInt, it does not precede a `0x00` (`Cell.java:277-278`, `:303-304`;
+  reader `:310`). Distinct from NULL.
 - **NULL values**: NOT written as cells - represented by absence in column bitmap
 
 **Example**:
@@ -194,8 +273,7 @@ Tombstone cell:
 
 Empty string cell:
 [0x0C]  ← flags (USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE)
-[0x00]  ← value_length = 0
-(no value bytes)
+(no value length VInt, no value bytes)
 ```
 
 **Upstream references**:
@@ -203,9 +281,10 @@ Empty string cell:
 - `org.apache.cassandra.db.rows.*`
 - `org.apache.cassandra.db.rows.UnfilteredSerializer` (V5CompressedLegacy encoding)
 
-## UDT Field Encoding (Issue #220)
+## Tuple and UDT Field Encoding (Issue #220)
 
-UDT fields use **4-byte big-endian i32** length prefixes (NOT VInt):
+Tuple and UDT fields share one on-disk framing: **4-byte big-endian i32** length prefixes
+(NOT VInt), fields concatenated in schema/positional order with **no field count** on disk:
 ```
 [field_length: 4-byte BE i32][field_data: variable]
 ```
@@ -216,6 +295,11 @@ UDT fields use **4-byte big-endian i32** length prefixes (NOT VInt):
 | `-1` (0xFFFFFFFF) | NULL field |
 | `0` (0x00000000) | Empty field (zero-length, present) |
 | `>0` | Byte count of field data |
+
+Trailing omitted fields are implicitly NULL. `UserType extends TupleType` (`UserType.java:52`) and
+`UserType.buildValue` delegates to `TupleType.buildValue` (`UserType.java:194`), so the two forms are
+byte-identical — only their CQL semantics differ. Authority:
+`org.apache.cassandra.db.marshal.TupleType.buildValue` / `.split` (`TupleType.java:301-364`).
 
 **UDT type string format** (in Statistics.db):
 ```
@@ -406,8 +490,25 @@ DecoratedKey {
 
 ## Key Takeaways
 - Expect VInt before variable-sized payloads; decode, then slice the value.
-- **Exception**: UDT fields use fixed 4-byte BE i32 lengths, not VInt.
-- Signed fields that use ZigZag appear primarily in legacy contexts; length fields are non-negative.
+- **Every STRUCTURAL VInt in `Data.db` is UNSIGNED**: lengths/counts *and* the
+  timestamp/TTL/localDeletionTime deltas all use `writeUnsignedVInt`/`writeUnsignedVInt32`
+  (`SerializationHeader.java:165-184`).
+- **ZigZag (signed VInt) in `Data.db` appears only inside a serialized `DurationType` payload** — its
+  three components (`DurationSerializer.java:49-51`) — **wherever that payload occurs**, including
+  nested inside a collection, tuple, or UDT (`DurationType.referencesDuration()`,
+  `DurationType.java:96-99`; `TupleType.referencesDuration()` recurses over `allTypes()`,
+  `TupleType.java:125-128`). No other `Data.db` field uses it. Scoped to `Data.db`: the `Index.db`
+  promoted index also writes a **signed** VInt for its per-block width delta,
+  `writeVInt(info.width - WIDTH_BASE)` (`IndexInfo.java:96,111-112`).
+- **A non-frozen collection cell length-prefixes BOTH path and value with an unsigned VInt**, fixed-width
+  element types included (`Cell.java:303-304` → the *column's* collection type, which is
+  `VARIABLE_LENGTH`). The `valueLengthIfFixed()` raw-bytes shortcut is a **simple-cell** rule
+  (`AbstractType.java:538-543`); a non-frozen `set<T>`'s missing value is `HAS_EMPTY_VALUE_MASK`, a flag,
+  not a width.
+- Signedness is invisible in the bytes (`0x05` = `5` unsigned, `-3` ZigZag) — take it from the
+  field's serializer, never guess from the data.
+- **Exception — not VInt at all**: tuple/UDT field lengths and frozen-collection counts/element
+  lengths are fixed 4-byte BE `i32` (`TupleType.java:341-364`, `CollectionSerializer.java:67-92`).
 - **Row size measurement**: VInt values like `row_size` are measured from AFTER the VInt is consumed (Issue #237).
 - **Safety limit**: Length VInts are capped at 1GB to prevent overflow and allocation attacks (Issue #264).
 - **Write guidance**: Use delta encoding for timestamps/TTL/deletion times; compute Statistics.db baselines first.
@@ -417,4 +518,9 @@ DecoratedKey {
 ## References
 - Cassandra 5.0.8: `SerializationHeader` — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java`
 - Cassandra 5.0.8: `rows` — `https://github.com/apache/cassandra/tree/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows`
+- Cassandra 5.0.8: `VIntCoding` (ZigZag ⇄ unsigned VInt) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/vint/VIntCoding.java`
+- Cassandra 5.0.8: `DurationSerializer` (the only signed-VInt payload in `Data.db`, nesting included) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/serializers/DurationSerializer.java`
+- Cassandra 5.0.8: `IndexInfo` (signed-VInt promoted-index width delta in `Index.db`) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/IndexInfo.java`
+- Cassandra 5.0.8: `CollectionSerializer` (frozen collection fixed-width framing) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/serializers/CollectionSerializer.java`
+- Cassandra 5.0.8: `TupleType` (tuple/UDT `i32`-BE field framing) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/TupleType.java`
 

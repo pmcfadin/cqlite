@@ -79,6 +79,7 @@ fn first_batch_available_before_merge_completes() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             pr.clone(),
             CancelFlag::new(),
             timer(),
@@ -128,6 +129,7 @@ fn slow_consumer_bounds_produced_batches() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             pr.clone(),
             CancelFlag::new(),
             timer(),
@@ -173,6 +175,7 @@ fn dropping_stream_cancels_merge() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             pr.clone(),
             CancelFlag::new(),
             timer(),
@@ -206,7 +209,7 @@ fn dropping_stream_cancels_merge() {
 // (no runtime at all) is the correct way to exercise it directly.
 #[test]
 fn panicking_merge_forwards_a_terminal_error_not_silent_close() {
-    let (tx, mut rx) = mpsc::channel::<Result<RecordBatch, ProducerError>>(1);
+    let (tx, mut rx) = mpsc::channel::<Result<CreditedBatch, ProducerError>>(1);
     run_merge_catching_panics(&tx, || -> Result<(), ProducerError> {
         panic!("synthetic mid-merge panic (test)");
     });
@@ -220,7 +223,15 @@ fn panicking_merge_forwards_a_terminal_error_not_silent_close() {
             );
         }
         other => {
-            panic!("a panic must forward ProducerError::Panicked, not a silent close: {other:?}")
+            panic!(
+                "a panic must forward ProducerError::Panicked, not a silent close \
+                 (got {})",
+                match other {
+                    Some(Ok(_)) => "a batch",
+                    Some(Err(_)) => "a different error",
+                    None => "a silent close",
+                }
+            )
         }
     }
     // No spurious extra item after the terminal error.
@@ -239,7 +250,8 @@ fn do_get_stream_surfaces_panic_as_internal_status_not_eof() {
     let schema = simple_schema();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async move {
-        let (tx, rx) = mpsc::channel::<Result<RecordBatch, ProducerError>>(DO_GET_CHANNEL_CAPACITY);
+        let (tx, rx) =
+            mpsc::channel::<Result<CreditedBatch, ProducerError>>(DO_GET_CHANNEL_CAPACITY);
         // Simulate the merge panicking on the blocking pool.
         let handle = tokio::task::spawn_blocking(move || {
             run_merge_catching_panics(&tx, || -> Result<(), ProducerError> {
@@ -396,7 +408,7 @@ fn stream_batches_raw(producer: MergeProducer, paths: Vec<PathBuf>) -> Vec<Recor
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async move {
         let (tx, mut rx) =
-            mpsc::channel::<Result<RecordBatch, ProducerError>>(DO_GET_CHANNEL_CAPACITY);
+            mpsc::channel::<Result<CreditedBatch, ProducerError>>(DO_GET_CHANNEL_CAPACITY);
         let cancel = CancelFlag::new();
         let sink_cancel = cancel.clone();
         let handle = tokio::task::spawn_blocking(move || {
@@ -404,6 +416,7 @@ fn stream_batches_raw(producer: MergeProducer, paths: Vec<PathBuf>) -> Vec<Recor
                 tx,
                 produced: Arc::new(AtomicUsize::new(0)),
                 cancel: sink_cancel,
+                credit: EgressCredit::new(EgressBudget::default(), EgressObservation::default()),
             };
             if let Err(e) = producer.produce_streaming(
                 paths,
@@ -417,7 +430,7 @@ fn stream_batches_raw(producer: MergeProducer, paths: Vec<PathBuf>) -> Vec<Recor
         });
         let mut out = Vec::new();
         while let Some(item) = rx.recv().await {
-            out.push(item.expect("streamed batch is ok"));
+            out.push(item.expect("streamed batch is ok").into_batch());
         }
         let _ = handle.await;
         out
@@ -712,6 +725,7 @@ fn metrics_parity_on_full_consumption() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             pr,
             CancelFlag::new(),
             timer(),
@@ -770,6 +784,7 @@ fn blocking_tasks_gauge_tracks_real_streaming_do_get() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             probe(),
             CancelFlag::new(),
             timer(),
@@ -828,6 +843,7 @@ fn rpc_progress_moves_before_stream_completes() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             pr,
             CancelFlag::new(),
             timer(),
@@ -886,6 +902,7 @@ fn per_batch_deltas_sum_to_unchanged_total() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             pr,
             CancelFlag::new(),
             timer(),
@@ -956,6 +973,7 @@ fn rows_scanned_flushes_incrementally_over_threshold() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             pr,
             CancelFlag::new(),
             timer(),
@@ -1003,6 +1021,7 @@ fn rows_scanned_sub_threshold_flushes_once() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             pr,
             CancelFlag::new(),
             timer(),
@@ -1052,6 +1071,7 @@ fn rows_scanned_flushes_remainder_on_limit_break() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             pr,
             CancelFlag::new(),
             timer(),
@@ -1175,7 +1195,7 @@ fn channel_sink_emit_unparks_on_cancel_when_receiver_alive() {
     rt.block_on(async move {
         // Cap 1 so a single pre-filled batch fills the channel; keep `_rx` bound so
         // the channel never closes (the send can only be released by cancellation).
-        let (tx, _rx) = mpsc::channel::<Result<RecordBatch, ProducerError>>(1);
+        let (tx, _rx) = mpsc::channel::<Result<CreditedBatch, ProducerError>>(1);
         let cancel = CancelFlag::new();
 
         // A minimal 1-row batch matching `simple_schema`'s Arrow schema.
@@ -1193,7 +1213,9 @@ fn channel_sink_emit_unparks_on_cancel_when_receiver_alive() {
         };
 
         // Fill the single slot so the sink's next emit must park in `reserve()`.
-        tx.send(Ok(batch.clone())).await.unwrap();
+        tx.send(Ok(CreditedBatch::uncredited(batch.clone())))
+            .await
+            .unwrap();
 
         let sink_cancel = cancel.clone();
         let emit_task = tokio::task::spawn_blocking(move || {
@@ -1201,8 +1223,11 @@ fn channel_sink_emit_unparks_on_cancel_when_receiver_alive() {
                 tx,
                 produced: Arc::new(AtomicUsize::new(0)),
                 cancel: sink_cancel,
+                // Ample credit: this test pins the CHANNEL-slot park, not the
+                // credit park (which `egress_budget_tests` covers separately).
+                credit: EgressCredit::new(EgressBudget::default(), EgressObservation::default()),
             };
-            sink.emit(batch)
+            sink.emit(CreditedBatch::uncredited(batch))
         });
 
         // Let the emit park waiting for a permit, then cancel (client disconnect).
@@ -1213,7 +1238,8 @@ fn channel_sink_emit_unparks_on_cancel_when_receiver_alive() {
         let joined = outcome.expect("emit must return within 3s once cancelled, not park forever");
         match joined.expect("emit task joins") {
             Err(ProducerError::Cancelled) => {}
-            other => {
+            Ok(()) => panic!("cancelled emit under backpressure must return Cancelled, got Ok"),
+            Err(other) => {
                 panic!("cancelled emit under backpressure must return Cancelled, got {other:?}")
             }
         }
@@ -1243,6 +1269,7 @@ fn metrics_attribute_emitted_prefix_on_cancel() {
             schema_ref,
             RpcMetrics::start("do_get"),
             DO_GET_CHANNEL_CAPACITY,
+            EgressBudget::default(),
             pr,
             CancelFlag::new(),
             timer(),
@@ -1296,7 +1323,7 @@ fn metered_stream_ends_when_cancel_flag_trips_while_inner_parked() {
         // A channel whose sender is HELD (never sends, never drops): the inner
         // ReceiverStream polls Pending forever — the "merge parked, receiver alive"
         // shape that a bare Pending passthrough could never break out of.
-        let (_tx, rx) = mpsc::channel::<Result<RecordBatch, ProducerError>>(1);
+        let (_tx, rx) = mpsc::channel::<Result<CreditedBatch, ProducerError>>(1);
         let inner = Box::pin(ReceiverStream { rx });
 
         let cancel = CancelFlag::new();

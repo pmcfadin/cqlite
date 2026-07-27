@@ -143,14 +143,8 @@ async fn test_golden_path_single_partition_lookup() -> Result<()> {
     let result = reader.get(&table_id, &partition_key).await?;
     let lookup_duration = start_time.elapsed();
 
-    println!("✅ Single partition lookup completed in {lookup_duration:?}");
-
-    // Performance assertion: Partition lookups should be very fast
-    assert!(
-        lookup_duration.as_millis() < 50,
-        "Single partition lookup took too long: {:?}ms",
-        lookup_duration.as_millis()
-    );
+    // Record timing (do not assert on wall-clock latency — #2642/#2902).
+    println!("[perf-record] single partition lookup: {lookup_duration:?}");
 
     // Log result for analysis
     match result {
@@ -188,13 +182,6 @@ async fn test_golden_path_multi_partition_scanning() -> Result<()> {
         if result.is_some() {
             found_partitions += 1;
         }
-
-        // Each partition lookup should be fast
-        assert!(
-            lookup_duration.as_millis() < 100,
-            "Partition lookup took too long: {:?}ms",
-            lookup_duration.as_millis()
-        );
     }
 
     let avg_lookup_time = total_lookup_time / partition_keys.len() as u32;
@@ -204,13 +191,15 @@ async fn test_golden_path_multi_partition_scanning() -> Result<()> {
         found_partitions,
         partition_keys.len()
     );
-    println!("✅ Average partition lookup time: {avg_lookup_time:?}");
+    // Record timing (do not assert on wall-clock latency — #2642/#2902).
+    println!("[perf-record] average partition lookup: {avg_lookup_time:?}");
 
-    // Performance assertion for batch lookups
+    // Load-immune STRUCTURAL invariant: the hit count cannot exceed the number
+    // of partitions probed.
     assert!(
-        avg_lookup_time.as_micros() < 5000,
-        "Average partition lookup should be efficient: {:?}μs",
-        avg_lookup_time.as_micros()
+        found_partitions <= partition_keys.len(),
+        "found partitions {found_partitions} cannot exceed probed {}",
+        partition_keys.len()
     );
 
     Ok(())
@@ -245,13 +234,6 @@ async fn test_golden_path_partition_boundary_scanning() -> Result<()> {
         results.len()
     );
 
-    // Performance assertion
-    assert!(
-        scan_duration.as_millis() < 500,
-        "Partition boundary scan took too long: {:?}ms",
-        scan_duration.as_millis()
-    );
-
     // Validate scan results span multiple partitions (if data exists)
     if results.len() > 1 {
         let mut unique_partition_prefixes = HashSet::new();
@@ -268,6 +250,13 @@ async fn test_golden_path_partition_boundary_scanning() -> Result<()> {
             unique_partition_prefixes.len()
         );
     }
+
+    // Load-immune STRUCTURAL invariant: the bounded boundary scan honors its limit.
+    assert!(
+        results.len() <= 100,
+        "partition boundary scan must honor its limit of 100: got {} rows",
+        results.len()
+    );
 
     Ok(())
 }
@@ -297,13 +286,6 @@ async fn test_golden_path_clustering_key_operations() -> Result<()> {
         let lookup_duration = start_time.elapsed();
 
         clustering_results.push((clustering_key.clone(), result, lookup_duration));
-
-        // Clustering key lookups should be very fast
-        assert!(
-            lookup_duration.as_micros() < 10000,
-            "Clustering key lookup took too long: {:?}μs",
-            lookup_duration.as_micros()
-        );
     }
 
     // Test: Range scan within partition using clustering key boundaries
@@ -328,11 +310,17 @@ async fn test_golden_path_clustering_key_operations() -> Result<()> {
         range_duration
     );
 
-    // Performance assertion for clustering range scan
+    // Load-immune STRUCTURAL invariants: every clustering key was probed exactly
+    // once, and the bounded range scan honors its limit.
+    assert_eq!(
+        clustering_results.len(),
+        clustering_keys.len(),
+        "each clustering key should be probed exactly once"
+    );
     assert!(
-        range_duration.as_millis() < 200,
-        "Clustering key range scan took too long: {:?}ms",
-        range_duration.as_millis()
+        range_results.len() <= 50,
+        "clustering range scan must honor its limit of 50: got {} rows",
+        range_results.len()
     );
 
     Ok(())
@@ -353,38 +341,65 @@ async fn test_golden_path_partition_bloom_filter_efficiency() -> Result<()> {
         "missing_partition_boundary_test",
     ];
 
-    let mut bloom_test_times = Vec::new();
+    // Assert the bloom fast path DIRECTLY, not via a wall-clock threshold (the
+    // #2642/#2902 flake). Two load-immune signals, mirroring
+    // test_golden_path_bloom_summary_index_coordination:
+    //  1. STRUCTURAL: the reader actually loaded a bloom filter, so the bloom
+    //     pre-check branch in `get()` is reachable (else the check is vacuous).
+    //  2. BEHAVIORAL: an absent-key `get()` must NOT advance the process-global
+    //     `SSTableReader::scan_for_key_call_count()` (issue #831) — the bloom
+    //     short-circuits before the sequential scan fallback. The counter is
+    //     process-global and this binary runs tests concurrently, so we retry:
+    //     a genuine regression scans on EVERY attempt (delta >= 1 always), while
+    //     a concurrent test's scan is sporadic, so a healthy fast path shows a
+    //     zero delta on at least one attempt.
+    let health = reader.get_health_metrics().await?;
+    assert!(
+        health.bloom_filter_enabled,
+        "fixture SSTable must have a bloom filter loaded for the fast-path check to be meaningful"
+    );
 
     for partition_name in &non_existent_partitions {
         let partition_key = RowKey::from(partition_name.as_bytes());
 
-        let start_time = Instant::now();
-        let result = reader.get(&table_id, &partition_key).await?;
-        let lookup_duration = start_time.elapsed();
+        let mut observed_zero_delta = false;
+        let mut last_delta = u64::MAX;
+        let mut last_duration = std::time::Duration::ZERO;
+        for _ in 0..5 {
+            let scans_before = SSTableReader::scan_for_key_call_count();
+            let start_time = Instant::now();
+            let result = reader.get(&table_id, &partition_key).await?;
+            last_duration = start_time.elapsed();
+            let scans_after = SSTableReader::scan_for_key_call_count();
 
-        bloom_test_times.push(lookup_duration);
+            // Should be None for non-existent partitions — checked on EVERY attempt.
+            assert!(
+                result.is_none(),
+                "Non-existent partition should return None: {partition_name}"
+            );
 
-        // Should be None for non-existent partitions
+            last_delta = scans_after.saturating_sub(scans_before);
+            if last_delta == 0 {
+                observed_zero_delta = true;
+                break;
+            }
+        }
+
         assert!(
-            result.is_none(),
-            "Non-existent partition should return None: {partition_name}"
+            observed_zero_delta,
+            "Bloom filter should short-circuit absent-key lookup before scan_for_key \
+             for {partition_name}; every attempt advanced scan_for_key (last delta \
+             {last_delta}), the bloom fast path regressed"
         );
 
-        // Bloom filter should make this very fast
-        assert!(
-            lookup_duration.as_micros() < 1000,
-            "Bloom filter lookup should be very fast: {:?}μs for {}",
-            lookup_duration.as_micros(),
-            partition_name
+        // Non-asserting diagnostic (no wall-clock threshold — #2642/#2902).
+        println!(
+            "  absent-partition '{partition_name}' short-circuited in {last_duration:?} (no scan_for_key)"
         );
     }
 
-    let avg_bloom_time =
-        bloom_test_times.iter().sum::<std::time::Duration>() / bloom_test_times.len() as u32;
-
-    println!("✅ Bloom filter efficiency test: average lookup time {avg_bloom_time:?}");
     println!(
-        "✅ All {} non-existent partition lookups were efficient",
+        "✅ Bloom filter efficiency verified: all {} non-existent partition lookups short-circuited the bloom fast path",
         non_existent_partitions.len()
     );
 
@@ -421,13 +436,8 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
         let result = reader.get(&table_id, &partition_key).await?;
         let lookup_duration = start_time.elapsed();
 
-        // Summary-assisted lookups should be very efficient
-        assert!(
-            lookup_duration.as_millis() < 10,
-            "Summary-assisted partition lookup should be very fast: {:?}ms for {}",
-            lookup_duration.as_millis(),
-            partition_name
-        );
+        // Record timing (do not assert on wall-clock latency — #2642/#2902).
+        println!("[perf-record] summary-assisted lookup {partition_name}: {lookup_duration:?}");
 
         match result {
             Some(value) => {
@@ -465,11 +475,12 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
         range_duration
     );
 
-    // Summary should make range scans efficient
+    // Load-immune STRUCTURAL invariant: the bounded summary-assisted range scan
+    // honors its limit.
     assert!(
-        range_duration.as_millis() < 100,
-        "Summary-assisted range scan should be efficient: {:?}ms",
-        range_duration.as_millis()
+        range_results.len() <= 25,
+        "summary-assisted range scan must honor its limit of 25: got {} rows",
+        range_results.len()
     );
 
     Ok(())
@@ -499,19 +510,6 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
     let total_duration = start_time.elapsed();
     let avg_duration = total_duration / partition_keys.len() as u32;
 
-    // Performance benchmarks
-    assert!(
-        avg_duration.as_micros() < 2000,
-        "Average partition lookup should be very fast: {:?}μs",
-        avg_duration.as_micros()
-    );
-
-    assert!(
-        total_duration.as_millis() < 500,
-        "Batch partition lookups should complete quickly: {:?}ms",
-        total_duration.as_millis()
-    );
-
     println!(
         "✅ Partition benchmark: {} lookups in {:?} (avg: {:?}, found: {})",
         partition_keys.len(),
@@ -540,21 +538,31 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
     let concurrent_total = concurrent_start.elapsed();
 
     // Verify concurrent operations
+    let mut concurrent_processed = 0usize;
     for handle_result in concurrent_results {
         let (id, lookup_result, duration) =
             handle_result.map_err(|e| Error::internal(format!("Task failed: {e}")))?;
 
         lookup_result?; // Verify no errors
+        concurrent_processed += 1;
 
-        assert!(
-            duration.as_millis() < 100,
-            "Concurrent partition lookup {} should be fast: {:?}ms",
-            id,
-            duration.as_millis()
-        );
+        // Record timing (do not assert on wall-clock latency — #2642/#2902).
+        println!("[perf-record] concurrent partition lookup {id}: {duration:?}");
     }
 
     println!("✅ Concurrent partition benchmark: 10 lookups in {concurrent_total:?}");
+
+    // Load-immune STRUCTURAL invariants: the batch hit count cannot exceed the
+    // keys probed, and every spawned concurrent lookup completed successfully.
+    assert!(
+        found_count <= partition_keys.len(),
+        "batch found_count {found_count} cannot exceed probed {}",
+        partition_keys.len()
+    );
+    assert_eq!(
+        concurrent_processed, 10,
+        "all 10 concurrent partition lookups should complete"
+    );
 
     Ok(())
 }
@@ -580,11 +588,8 @@ async fn test_golden_path_partition_edge_cases() -> Result<()> {
     let _result = reader.get(&table_id, &max_partition).await?;
     let duration = start_time.elapsed();
 
-    assert!(
-        duration.as_millis() < 100,
-        "Large partition key lookup should still be efficient: {:?}ms",
-        duration.as_millis()
-    );
+    // Record timing (do not assert on wall-clock latency — #2642/#2902).
+    println!("[perf-record] large partition key lookup: {duration:?}");
 
     // Edge case 3: Binary partition keys
     let binary_partitions = vec![
@@ -662,18 +667,10 @@ async fn test_golden_path_partition_integration_validation() -> Result<()> {
     );
     // NOTE: cache_hits field is not available, use cache_hit_rate instead
 
-    // 5. Integration performance assertions
-    assert!(
-        partition_duration.as_millis() < 50,
-        "Integrated partition lookup should be very fast: {:?}ms",
-        partition_duration.as_millis()
-    );
-
-    assert!(
-        scan_duration.as_millis() < 200,
-        "Integrated partition scan should be efficient: {:?}ms",
-        scan_duration.as_millis()
-    );
+    // 5. Record integration timings (do not assert on wall-clock latency —
+    //    #2642/#2902).
+    println!("[perf-record] integrated partition lookup: {partition_duration:?}");
+    println!("[perf-record] integrated partition scan: {scan_duration:?}");
 
     // 6. Cross-validation: ensure get and scan consistency
     if !scan_results.is_empty() {

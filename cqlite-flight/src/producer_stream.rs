@@ -29,8 +29,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use arrow::record_batch::RecordBatch;
-use cqlite_core::export::{estimate_arrow_row_bytes, rows_to_record_batch};
+use cqlite_core::export::estimate_arrow_row_bytes;
 use cqlite_core::observability::stream_subphase;
 use cqlite_core::observability::{StreamSubPhase, StreamSubPhaseTimings};
 use cqlite_core::query::{PartitionKeyCache, QueryRow};
@@ -46,18 +45,20 @@ use crate::scan_progress::{ScanProgress, ScanProgressMeter};
 /// #2819 B2/B3).
 ///
 /// Resolves the flight per-request sub-phase sink ONCE before the loop (a single
-/// thread-local read + `Arc` clone, NOT per row — B3) and folds merge + encode
-/// CPU nanos into plain `u64` locals as the loop runs. The locals are written
-/// into the shared `AtomicU64` counters EXACTLY ONCE, on [`Drop`] — so an early
-/// return (a cooperative cancel, a `LIMIT` break, or a `?`-propagated error)
-/// still records the work already done, and a full scan makes ONE `fetch_add`
-/// per sub-phase regardless of row/batch count.
+/// thread-local read + `Arc` clone, NOT per row — B3) and folds `stream_merge`
+/// CPU nanos into a plain `u64` local as the loop runs. It is written into the
+/// shared `AtomicU64` counter EXACTLY ONCE, on [`Drop`] — so an early return (a
+/// cooperative cancel, a `LIMIT` break, or a `?`-propagated error) still records
+/// the work already done, and a full scan makes ONE `fetch_add` regardless of
+/// row count.
 ///
 /// `stream_merge` is merge CPU only: each `step_row`'s BLOCKING merge-input recv
 /// wait (producer starvation / cold-IO, timed by the recv site into the
 /// thread-local `pull_wait_nanos` accumulator) is subtracted from that step's
 /// wall time before it is added here (B2) — so a slow producer inflates neither
-/// `stream_merge` nor cold-fault falsely.
+/// `stream_merge` nor cold-fault falsely. (`stream_encode` is timed separately
+/// in `MergeProducer::flush_credited`, around the Arrow build only — see
+/// `egress_flush.rs` — so it excludes the egress-credit reserve park.)
 ///
 /// When no sink is installed (every non-flight caller) the accumulator is inert:
 /// [`Self::active`] is `false`, so the hot loop skips `Instant::now()` entirely
@@ -65,7 +66,6 @@ use crate::scan_progress::{ScanProgress, ScanProgressMeter};
 struct RowSubPhaseAccum {
     sink: Option<Arc<StreamSubPhaseTimings>>,
     merge_nanos: u64,
-    encode_nanos: u64,
 }
 
 impl RowSubPhaseAccum {
@@ -73,7 +73,6 @@ impl RowSubPhaseAccum {
         Self {
             sink: stream_subphase::current(),
             merge_nanos: 0,
-            encode_nanos: 0,
         }
     }
 
@@ -85,11 +84,6 @@ impl RowSubPhaseAccum {
     #[inline]
     fn add_merge(&mut self, nanos: u64) {
         self.merge_nanos = self.merge_nanos.saturating_add(nanos);
-    }
-
-    #[inline]
-    fn add_encode(&mut self, nanos: u64) {
-        self.encode_nanos = self.encode_nanos.saturating_add(nanos);
     }
 
     /// Time `f` and fold its elapsed into the `stream_merge` bucket (merge CPU),
@@ -113,7 +107,6 @@ impl Drop for RowSubPhaseAccum {
     fn drop(&mut self) {
         if let Some(sink) = &self.sink {
             sink.add_nanos(StreamSubPhase::Merge, self.merge_nanos);
-            sink.add_nanos(StreamSubPhase::Encode, self.encode_nanos);
         }
     }
 }
@@ -162,38 +155,6 @@ impl MergeProducer {
         self.drive_merge_streaming(&mut stream, cancel, sink, progress, access_path)
     }
 
-    /// Convert `buffer`'s rows into an Arrow batch and clear it — the streaming
-    /// equivalent of `MergeProducer::flush_buffer` (kept here so that private
-    /// helper need not widen its visibility and force a signature rewrap in the
-    /// over-threshold `producer.rs`).
-    fn flush(&self, buffer: &mut Vec<QueryRow>) -> Result<RecordBatch, ProducerError> {
-        let batch = rows_to_record_batch(&self.columns, buffer)?;
-        buffer.clear();
-        Ok(batch)
-    }
-
-    /// [`Self::flush`] with its Arrow-encode wall time accumulated into the
-    /// `stream_encode` in-`stream` sub-phase LOCAL (issue #2819 B3). Encode runs
-    /// on the merge consumer thread (once per emitted batch, not per row); the
-    /// nanos are folded into `accum`'s plain `u64` and flushed into the shared
-    /// atomic exactly once when the drive loop ends. When no flight sink is
-    /// installed (`accum` inert), there is no `Instant::now()` — a no-op wrapper
-    /// for every non-flight caller.
-    fn flush_accum(
-        &self,
-        buffer: &mut Vec<QueryRow>,
-        accum: &mut RowSubPhaseAccum,
-    ) -> Result<RecordBatch, ProducerError> {
-        if accum.active() {
-            let start = Instant::now();
-            let out = self.flush(buffer);
-            accum.add_encode(stream_subphase::elapsed_nanos(start));
-            out
-        } else {
-            self.flush(buffer)
-        }
-    }
-
     /// Drive the row-merge loop over `stepper` one reconciled row at a time,
     /// appending full-row batches (issue #2230).
     ///
@@ -222,13 +183,17 @@ impl MergeProducer {
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
         let mut emitted: u64 = 0;
         // Issue #2819 (B2/B3): resolve the flight sub-phase sink ONCE here and
-        // accumulate merge/encode CPU into locals, flushed to the shared atomics
+        // accumulate `stream_merge` CPU into a local, flushed to the shared atomic
         // on this accumulator's Drop (covers every early return below). Inert
-        // (no `Instant::now`) when no flight sink is installed.
+        // (no `Instant::now`) when no flight sink is installed. (`stream_encode` is
+        // timed in `flush_credited`.)
         let mut accum = RowSubPhaseAccum::new();
         // Issue #2825: the SAME dual-boundary accumulator `drive_merge` uses — a
         // cap wired into only one egress path would leave the other unbounded.
         let mut byte_cap = BatchByteCap::new(self.max_batch_bytes);
+        // Issue #2821: the SAME per-merge array-node count `drive_merge` uses —
+        // a governor wired into only one loop would leave the other unbounded.
+        let n_array_nodes = self.egress_array_nodes()?;
         // Issue #1817: one partition-key decode cache for the whole merge; each
         // partition's rows arrive consecutively, so its key decodes once.
         let mut pk_cache = PartitionKeyCache::default();
@@ -344,15 +309,13 @@ impl MergeProducer {
             // an empty buffer.
             let width = estimate_arrow_row_bytes(&self.columns, &row);
             if byte_cap.cut_before(width).is_yes() {
-                sink.emit(self.flush_accum(&mut buffer, &mut accum)?)?;
-                byte_cap.reset();
+                self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
             }
             buffer.push(row);
             emitted += 1;
             byte_cap.accumulate(width);
             if buffer.len() >= self.batch_size {
-                sink.emit(self.flush_accum(&mut buffer, &mut accum)?)?;
-                byte_cap.reset();
+                self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
             }
             // LIMIT reached (counted post-filter): stop the merge early.
             if let Some(cap) = limit {
@@ -363,7 +326,7 @@ impl MergeProducer {
         }
 
         if !buffer.is_empty() {
-            sink.emit(self.flush_accum(&mut buffer, &mut accum)?)?;
+            self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
         }
         Ok(())
     }

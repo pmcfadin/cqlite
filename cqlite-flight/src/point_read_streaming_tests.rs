@@ -72,8 +72,18 @@ struct CancelAfterFirstBatchSink<'a> {
 }
 
 impl BatchSink for CancelAfterFirstBatchSink<'_> {
-    fn emit(&mut self, batch: RecordBatch) -> Result<(), ProducerError> {
-        self.rows += batch.num_rows();
+    /// No-op reservation (issue #2821): this double models the merge-drive
+    /// contract, not the bounded egress channel, so it needs no credit pool —
+    /// and, like `CollectSink`, no Tokio runtime.
+    fn reserve(
+        &mut self,
+        _capacity_bytes: usize,
+    ) -> Result<crate::egress_credit::EgressReservation, ProducerError> {
+        Ok(crate::egress_credit::EgressReservation::inert())
+    }
+
+    fn emit(&mut self, batch: crate::egress_credit::CreditedBatch) -> Result<(), ProducerError> {
+        self.rows += batch.into_batch().num_rows();
         self.cancel.cancel();
         Ok(())
     }
