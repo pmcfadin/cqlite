@@ -358,4 +358,13 @@ jobs:
           CORE_RESULT: ${{ needs.pr-gate-core.result }}
           EVENT_ACTION: ${{ github.event.action }}
           GATING_DIR: ${{ steps.source.outputs.dir }}
-        run: bash "$GATING_DIR/scripts/ci/aggregate-required-tiers.sh"
+          # TEMPORARY (#3033 verification, revert before close). Points the waiver
+          # `labeled`-events read at an endpoint that genuinely 404s, to prove on
+          # real infrastructure that an UNREADABLE evidence read only WITHHOLDS
+          # early resolution and never reds `required`. A literal env value, never
+          # a `${{ }}` interpolation into `run:` (scripts/ci/check-workflow-injection.sh).
+          WAIVER_EVENTS_CMD: gh api --paginate "repos/pmcfadin/cqlite/issues/999999999/events?per_page=100" --jq '.[] | select(.event == "labeled") | [.label.name, (.actor.login // "unknown"), .created_at] | @tsv'
+        # TEMPORARY (#3033 verification, revert before close): a short aggregation
+        # deadline so the deadline-honoured waiver path is reached in minutes rather
+        # than the registry's 60. Purely a time-saver; the code path is identical.
+        run: bash "$GATING_DIR/scripts/ci/aggregate-required-tiers.sh" --deadline-minutes 4
