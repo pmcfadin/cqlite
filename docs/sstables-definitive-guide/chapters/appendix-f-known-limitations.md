@@ -95,9 +95,22 @@ CQLite implements that rule correctly on:
 zero-length — a `map<text,text>` entry with value `''`, an empty blob in a `list<blob>` — is emitted as
 `flags=0` + `0x00` where Cassandra emits `flags=0x04` + nothing.
 
-**Impact**: CQLite's own reader round-trips such an SSTable (it accepts the explicit `0x00` length), but
-a strict Cassandra reader desynchronizes the cell stream at that element. Non-empty values, sets, and
-the per-element path are unaffected.
+**Impact — a byte-parity divergence, not a framing one.** Cassandra **reads these bytes without error**:
+its deserializer is symmetric with its serializer, so on `flags=0` it computes `hasValue = true`
+(`Cell.java:310`), takes the variable-length branch `int l = in.readUnsignedVInt32()`
+(`AbstractType.java:590`) which consumes our `0x00` as `l=0`, and `accessor.read(in, 0)` short-circuits
+to `EMPTY_BYTE_BUFFER` before allocating or reading any bytes (`ByteBufferUtil.java:444-448`). The
+stream stays byte-aligned and the decoded value is identical (empty). **This is not corruption.**
+
+What it does break is byte-level equality with Cassandra's output. For the same logical row CQLite emits
+two divergences: one spurious `0x00` length byte, and a `flags` byte differing by `0x04`. Consequences:
+
+- **byte-for-byte compaction parity** — the v0.12 guarantee does not hold for such a row;
+- **digests** — `Digest.crc32` over the cell bytes diverges, so a CQLite-written SSTable will not
+  digest-match Cassandra's for identical data;
+- **`row_size` / `prev_size` accounting** — the row is one byte longer than Cassandra would write it.
+
+Non-empty values, sets, and the per-element path are unaffected.
 
 ### Static Row Support
 

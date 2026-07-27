@@ -350,8 +350,13 @@ NULL top-level column is represented by absence from the column subset, never by
   - **Known gap (issue #2970)**: the *whole-column* writers `write_map_complex_cells()` (`:646`) and
     `write_list_complex_cells()` (`:705`) hardcode `flags = 0` (`:683`, `:737`) and emit
     `encode_unsigned(len)` unconditionally (`:694`, `:747`). A zero-length element value therefore
-    goes out as `flags=0` + `0x00` where Cassandra writes `flags=0x04` + nothing — a strict Cassandra
-    reader desynchronizes. See Appendix F.
+    goes out as `flags=0` + `0x00` where Cassandra writes `flags=0x04` + nothing. Cassandra **reads
+    this without error** — on `flags=0` it expects a length VInt (`Cell.java:310`), consumes our `0x00`
+    as `l=0` (`AbstractType.java:590`), and `read(in, 0)` returns `EMPTY_BYTE_BUFFER` without touching
+    the stream (`ByteBufferUtil.java:444-448`), so framing stays aligned and the value decodes
+    identically. The defect is **byte parity**: one extra byte and a `flags` byte off by `0x04`, which
+    breaks byte-for-byte compaction parity, `Digest.crc32` digest matching, and `row_size`/`prev_size`
+    accounting. See Appendix F.
 - The fixed-width no-prefix rule lives on the **simple**-cell path:
   `.../writer/data_writer/encoding.rs::cell_value_uses_length_prefix()` (`:461`, issue #1672), used by
   `write_cell_value_into()` (`:353`) which `cells.rs` calls for simple cells (`:63`, `:108`, `:200`,
@@ -792,7 +797,7 @@ Tombstone cells have special flag requirements:
 |---------------|-----------|-----------|---------------|-------|
 | Regular write | 0x08 (USE_ROW_TIMESTAMP) | Skip | Skip | Present |
 | Regular write (own TS) | 0x00 | Include delta | Skip | Present |
-| Empty string write | 0x08 \| 0x04 (0x0c) | Skip | Skip | Zero-length |
+| Empty string write | 0x08 \| 0x04 (0x0c) | Skip | Skip | Absent (no length VInt, no bytes) |
 | Tombstone | 0x01 | Include delta | Include delta | None |
 
 **Example**:
@@ -825,7 +830,8 @@ The format distinguishes between NULL and empty values:
 
 **Empty Values** (e.g., empty string ''):
 - Written as cells with CELL_HAS_EMPTY_VALUE flag (0x04)
-- Zero-length value (value_length VInt = 0)
+- **No value length VInt and no value bytes** — the flag replaces them; it is *not* followed by a
+  `0x00` length (`Cell.java:277-278`, `:303-304`; reader `:310`)
 - Counted as "present" in column bitmap (bit = 1)
 
 **Example Column Bitmap**:
@@ -978,8 +984,10 @@ present-bitmap); for `≥ 64` columns it is the large-subset form (missing count
 ```
 [flags: u8]                                        ← Cell flags
 [timestamp_delta: VInt if NOT USE_ROW_TIMESTAMP]  ← Delta from min_timestamp
-[value_length: VInt]                              ← Byte length of value
-[value_bytes]                                     ← Type-specific serialization
+[value_length: VInt]                              ← Byte length; omitted if HAS_EMPTY_VALUE (0x04)
+                                                     is set, or (simple cells) the type is fixed-width
+[value_bytes]                                     ← Type-specific serialization; omitted if
+                                                     HAS_EMPTY_VALUE is set
 ```
 
 **Tombstone Cell** (deleted):
@@ -1016,7 +1024,8 @@ Type-specific serialization rules for cell values:
 | duration | 3x **signed (ZigZag) VInt** | months, days, nanos — NOT fixed-width i32. The same three signed VInts appear wherever a `duration` is nested (e.g. `frozen<list<duration>>`, a `duration` UDT field) |
 
 **Special Cases**:
-- **Empty string**: Zero-length value with CELL_HAS_EMPTY_VALUE flag
+- **Empty string**: CELL_HAS_EMPTY_VALUE (`0x04`) set — **no length VInt and no value bytes**
+  (`Cell.java:277-278`, `:303-304`)
 - **NULL**: Not written as a cell (represented by bitmap absence)
 - **Date encoding**: Add Integer.MIN_VALUE to days value for storage
 - **Decimal**: Scale is 4-byte BE i32, followed by varint unscaled value

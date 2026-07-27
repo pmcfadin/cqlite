@@ -253,7 +253,9 @@ Cell flags appear at the start of each cell and control cell-level metadata.
   tombstone never also sets `IS_EXPIRING` (so no wasted TTL byte), and an expiring cell never
   sets `IS_DELETED`. Authority: `Cell.Serializer.flags()`. Verified in CQLite's emitter
   (`data_writer.rs` cell-flag construction: TTL fields only on the `Some(ttl)` path).
-- **Empty strings**: Use `HAS_EMPTY_VALUE` flag with zero-length value bytes (distinct from NULL)
+- **Empty strings**: `HAS_EMPTY_VALUE` (`0x04`) flag set and **no** value length and no value bytes —
+  the flag replaces the length VInt, it does not precede a `0x00` (`Cell.java:277-278`, `:303-304`;
+  reader `:310`). Distinct from NULL.
 - **NULL values**: NOT written as cells - represented by absence in column bitmap
 
 **Example**:
@@ -271,8 +273,7 @@ Tombstone cell:
 
 Empty string cell:
 [0x0C]  ← flags (USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE)
-[0x00]  ← value_length = 0
-(no value bytes)
+(no value length VInt, no value bytes)
 ```
 
 **Upstream references**:
