@@ -50,8 +50,16 @@ REALGIT="$(command -v git)"   # absolute git, for the shims in TESTS 6/9/10
 
 PASS=0
 FAIL=0
+SKIP=0
 fail() { echo "  ✗ $*"; FAIL=$((FAIL+1)); }
 ok()   { echo "  ✓ $*"; PASS=$((PASS+1)); }
+# skip — a WITNESS whose host dependency is missing. Loud, counted, and reported in
+# the footer, but NOT a failure: this suite runs in the gate of record, where a
+# missing hi-res clock is an environment fact, not a defect (the repo's SKIP-aware
+# convention). Never use it for an assertion the host CAN make.
+skip() { echo "  ⊘ SKIP: $*"; SKIP=$((SKIP+1)); }
+# diag — a measurement worth printing that is NOT a verdict.
+diag() { echo "  · $*"; }
 
 # git in a throwaway identity so commits/pushes work in any sandbox.
 g() { git -c user.email=t@t -c user.name=t -c init.defaultBranch=main -c commit.gpgsign=false "$@"; }
@@ -125,20 +133,44 @@ accepted_olds()    { awk -v r="refs/claims/issue-$1" '$1==r {print $2}' "$HOOKLO
 # test the RECORD, not a verbatim rendering of the whole line.
 line_field() { printf '%s' "$1" | tr ' ' '\n' | grep -m1 "^$2=" | sed "s/^$2=//"; }
 
-# push_work_branch <branch> [msg] — an ORDINARY work branch on origin: cut from
-# main, an ordinary commit on top. Its tip carries NO claim trailers, which is
+# push_work_branch <branch> [msg] [tip-date] — an ORDINARY work branch on origin: cut
+# from main, an ordinary commit on top. Its tip carries NO claim trailers, which is
 # exactly why the old tip-based re-entrancy could never fire.
+#
+# <tip-date> is the tip's committer date and DEFAULTS TO A LONG-STALE FIXED DATE,
+# because the refusal now only advertises the resume hatch for a branch whose tip is
+# older than the reap threshold (#2945 review: a FRESH tip is an older-fleet worker
+# mid-implementation, which has no open PR yet either). A fixed literal date keeps the
+# fixture deterministic — no wall-clock arithmetic in an assertion.
+STALE_TIP_DATE='2020-03-01T12:00:00Z'
 push_work_branch() {
-  local branch="$1" msg="${2:-ordinary work commit}"
+  local branch="$1" msg="${2:-ordinary work commit}" when="${3:-$STALE_TIP_DATE}"
   (
     cd "$A" || exit 1
     g checkout -q -b "$branch" main
-    g commit -q --allow-empty -m "$msg"
+    GIT_AUTHOR_DATE="$when" GIT_COMMITTER_DATE="$when" g commit -q --allow-empty -m "$msg"
     g push -q origin "$branch"
     g checkout -q main
     g branch -q -D "$branch"
   )
 }
+
+# push_machine_claim <ref> <issue> <ts> — a supervisor-authored liveness ref
+# (`refs/machine-claims/<machine>` / `refs/heartbeats/<machine>`, #2655) naming
+# <issue>, with <ts> as its recorded timestamp. Same root-commit shape
+# claim-heartbeat.sh writes, so claim.sh's liveness scan reads a REAL ref, not a mock.
+push_machine_claim() {
+  local ref="$1" issue="$2" ts="$3"
+  (
+    cd "$A" || exit 1
+    local tree commit
+    tree=$(g hash-object -t tree --stdin </dev/null)
+    commit=$(GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" \
+      g commit-tree "$tree" -m "claim issue=${issue} machine=machineC pid=1 ts=${ts}")
+    g push -q --force origin "${commit}:${ref}"
+  )
+}
+now_ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # --- ONE SHARED start signal for the concurrency rounds --------------------
 # The racers must be released TOGETHER. The earlier shape used TWO independent
@@ -149,8 +181,12 @@ push_work_branch() {
 # Now both children announce readiness and then spin on ONE shared flag file the
 # parent creates only after BOTH are ready.
 race_reset() { rm -f "$T/go" "$T/ready-a" "$T/ready-b"; }
-# race_wait_go <ready-file> — announce readiness, then spin on the shared flag.
-race_wait_go() { : >"$1"; while [ ! -e "$T/go" ]; do :; done; }
+# race_wait_go <ready-file> — announce readiness, then poll the shared flag. The
+# poll SLEEPS: a bare `while ...; do :; done` busy-spin burns a core per racer while
+# competing with the very git work the round is timing, and this suite runs inside the
+# gate (whose components share the box) — the racers must wait cheaply, not fight the
+# thing they are measuring. 2ms is far below the git push it gates (tens of ms).
+race_wait_go() { : >"$1"; while [ ! -e "$T/go" ]; do sleep 0.002; done; }
 # race_release — bounded wait for BOTH readiness marks, then flip the one flag.
 race_release() {
   local spins=0
@@ -165,8 +201,9 @@ race_release() {
 # now_ns — a hi-res clock, so the race rounds carry POSITIVE EVIDENCE that they
 # raced (overlapping windows) instead of only asserting invariants that also hold
 # under serialization. GNU date has %N; BSD/macOS date does not (it emits a
-# literal 'N'), hence the perl/python3 fallbacks. No hi-res clock at all is a
-# LOUD failure below, never a silently skipped witness.
+# literal 'N'), hence the perl/python3 fallbacks. No hi-res clock at all is a loud
+# SKIP of the witness below (a missing host dependency, not a defect) — the race
+# INVARIANTS still run and still assert.
 NS_IMPL=none
 nsprobe=$(date -u +%s%N 2>/dev/null || true)
 if [ -n "$nsprobe" ] && [ -z "${nsprobe//[0-9]/}" ] && [ "${#nsprobe}" -ge 16 ]; then
@@ -335,13 +372,22 @@ echo "TEST 3: two machines RACE the resume path — exactly one SERVER-ACCEPTED 
 # — the remote's ref update is the arbiter, and the post-receive log is the witness.
 # Repeated over distinct issue ids because a single interleaving proves little.
 #
-# AND THE ROUND PROVES IT RACED: each racer records a hi-res timestamp immediately
-# before and after its adopt (the push is the bulk of that call), and the round FAILS
-# unless the two windows OVERLAP. Every other assertion here also holds under full
-# serialization, so without this witness a barrier regression is invisible — which is
-# exactly how a non-racing barrier survived two reviews.
+# AND THE ROUNDS PROVE THEY RACED: each racer records a hi-res timestamp immediately
+# before and after its adopt (the push is the bulk of that call), and a MAJORITY of the
+# rounds must show the two windows OVERLAPPING. Every other assertion here also holds
+# under full serialization, so without this witness a barrier regression is invisible —
+# which is exactly how a non-racing barrier survived two reviews.
+#
+# WHY A MAJORITY AND NOT ALL 5: overlap is derived from PROCESS SCHEDULING, and this
+# suite is a gate-of-record component that runs alongside a parallel component pool. One
+# racer can be descheduled long enough for its window to miss the other's, which is a
+# scheduling fact, not a defect — an all-5 requirement makes the gate red for no bug
+# (#2945 review). A majority still kills the regression it exists for: a barrier that
+# serializes the racers yields ZERO overlapping rounds (measured — see the mutation note
+# in this file's header), nowhere near 3/5. Non-overlapping rounds are printed as
+# diagnostics so a drift toward 3/5 is visible before it becomes a failure.
 raceRounds=0; raceOk=0; raceAtomic=0; raceLoser=0; raceWinnerVerified=0; raceDiag=""
-raceOverlapped=0; ovMin=""; ovMax=""
+raceOverlapped=0; ovMin=""; ovMax=""; ovDiag=""
 for id in 2101 2102 2103 2104 2105; do
   raceRounds=$((raceRounds+1))
   push_work_branch "issue-${id}-resumable"
@@ -374,11 +420,11 @@ for id in 2101 2102 2103 2104 2105; do
       [ -n "$ovMin" ] && [ "$ovMin" -le "$ovNs" ] || ovMin="$ovNs"
       [ -n "$ovMax" ] && [ "$ovMax" -ge "$ovNs" ] || ovMax="$ovNs"
     else
-      raceDiag="$raceDiag
-  round $id: the two adopt windows did NOT overlap (gap $((0 - ovNs))ns) — the racers ran SERIALLY, so this round proves nothing"
+      ovDiag="$ovDiag
+  round $id: the two adopt windows did NOT overlap (gap $((0 - ovNs))ns) — that round proves nothing about concurrency"
     fi
   else
-    raceDiag="$raceDiag
+    ovDiag="$ovDiag
   round $id: no usable hi-res timestamps (NS_IMPL=$NS_IMPL) — cannot witness concurrency"
   fi
   rcRaceA="$(cat "$T/race-a.rc" 2>/dev/null || echo missing)"
@@ -445,15 +491,20 @@ done
 [ "$raceWinnerVerified" -eq "$raceRounds" ] \
   && ok "the winner verifies as the holder of the single surviving ref, every round" \
   || fail "the race winner did not verify as holder in $((raceRounds - raceWinnerVerified))/$raceRounds rounds$raceDiag"
-# The barrier itself, measured. A suite with no hi-res clock cannot make this claim,
-# so it fails loudly rather than reporting a vacuous race.
-[ "$NS_IMPL" != none ] \
-  && ok "hi-res clock available to witness concurrency (NS_IMPL=$NS_IMPL)" \
-  || fail "no hi-res clock (date %N / perl Time::HiRes / python3) — the race rounds cannot be witnessed"
-if [ "$raceOverlapped" -eq "$raceRounds" ]; then
-  ok "the two racers' adopt windows OVERLAP every round ($raceOverlapped/$raceRounds; overlap min=$((${ovMin:-0} / 1000000))ms max=$((${ovMax:-0} / 1000000))ms, min=${ovMin:-0}ns) — they really ran concurrently"
+# The barrier itself, measured. Without a hi-res clock the witness is unmeasurable on
+# this host — a loud SKIP of the WITNESS ONLY (the invariants above already asserted),
+# never a failure and never a silent omission.
+[ -n "$ovDiag" ] && diag "concurrency witness, non-overlapping rounds:$ovDiag"
+ovNeeded=$((raceRounds / 2 + 1))
+if [ "$NS_IMPL" = none ]; then
+  skip "no hi-res clock (date %N / perl Time::HiRes / python3) — the racers' overlap could not be MEASURED on this host; the race invariants above still ran"
 else
-  fail "only $raceOverlapped/$raceRounds rounds had overlapping adopt windows — the barrier serialized the racers$raceDiag"
+  ok "hi-res clock available to witness concurrency (NS_IMPL=$NS_IMPL)"
+  if [ "$raceOverlapped" -ge "$ovNeeded" ]; then
+    ok "the two racers' adopt windows OVERLAP in a majority of rounds ($raceOverlapped/$raceRounds, need >=$ovNeeded; overlap min=$((${ovMin:-0} / 1000000))ms max=$((${ovMax:-0} / 1000000))ms, min=${ovMin:-0}ns) — they really ran concurrently"
+  else
+    fail "only $raceOverlapped/$raceRounds rounds had overlapping adopt windows (need >=$ovNeeded) — the barrier serialized the racers$ovDiag"
+  fi
 fi
 
 # ===========================================================================
@@ -812,6 +863,20 @@ if [ "$whyRc" = " 64 64 64 64 64 64" ] && [ -z "$(ref_sha 2023)" ]; then
 else
   fail "expected 64 from every unrecordable --reason with no ref created; got rcs='$whyRc' ref='$(ref_sha 2023)'"
 fi
+# A PLACEHOLDER reason is refused too (#2945 review). `--reason <why>` copy-pasted from
+# a help line sanitizes to `why`: 3 recordable chars, so the length gate passes and the
+# record reads `reason=why` — as uninformative as the no-reason case this gate exists to
+# reject. The sentinel vocabulary is refused by name, case-insensitively.
+placeholderRc=""
+for ph in '<why>' 'why' 'TODO' 'tbd' 'xxx' 'placeholder' 'FIXME' 'n/a'; do
+  runB adopt 2023 --expect none --reason "$ph" >/dev/null 2>&1
+  placeholderRc="$placeholderRc $?"
+done
+if [ "$placeholderRc" = " 64 64 64 64 64 64 64 64" ] && [ -z "$(ref_sha 2023)" ]; then
+  ok "a PLACEHOLDER reason ('<why>', 'why', 'TODO', 'tbd', 'xxx', 'placeholder', 'FIXME', 'n/a') is a usage error (exit 64), nothing acquired"
+else
+  fail "expected 64 from every placeholder --reason with no ref created; got rcs='$placeholderRc' ref='$(ref_sha 2023)'"
+fi
 runB adopt 2023 --expect none --reason 'wip' >/dev/null 2>&1; rcMinWhy=$?
 if [ "$rcMinWhy" -eq 0 ] && [ "$(line_field "$(runB status 2023)" reason)" = "wip" ]; then
   ok "a short but RECORDABLE reason ('wip') is accepted and recorded verbatim"
@@ -825,6 +890,20 @@ if [ "$rcLong" -eq 0 ] && [ "${#longToken}" -eq 120 ]; then
   ok "an over-long reason is truncated to the documented 120 chars"
 else
   fail "expected a 120-char reason token; got rc=$rcLong len=${#longToken}"
+fi
+# TRUNCATION MUST NOT RE-INTRODUCE A TRAILING SEPARATOR (#2945 review). The single-word
+# fixture above cannot see this: the sanitizer trimmed leading/trailing '-' BEFORE the
+# 120-char cut, so a MULTI-WORD reason whose 120th byte is a word separator recorded as
+# '…foo-' — contradicting the documented trim. 31 'abc' words sanitize to 123 chars whose
+# 120th is exactly a '-', so the cut lands on the separator.
+multiReason="$(printf 'abc %.0s' $(seq 1 31))"
+runB adopt 2053 --expect none --reason "$multiReason" >/dev/null 2>&1; rcMulti=$?
+multiToken=$(line_field "$(runB status 2053)" reason)
+if [ "$rcMulti" -eq 0 ] && [ "${#multiToken}" -le 120 ] \
+   && [ "${multiToken%-}" = "$multiToken" ] && [ "${multiToken#abc-abc}" != "$multiToken" ]; then
+  ok "a truncated MULTI-WORD reason keeps the documented trim (len=${#multiToken}, no trailing separator)"
+else
+  fail "expected a <=120-char token with no trailing '-'; got rc=$rcMulti len=${#multiToken} token='$multiToken'"
 fi
 runB adopt 2043 --expect none --reason "$(printf 'first line\nsecond line')" >/dev/null 2>&1; rcNl=$?
 nlStatus=$(runB status 2043)
@@ -896,6 +975,8 @@ echo "TEST 15: the escape hatch is advertised ONLY when the endgame is demonstra
 # empty-lease adopt WOULD succeed — handing an actively-worked issue to a second
 # machine. The readers are agents that run printed remediations literally, so the
 # command is printed only at open-prs=0, and an unreadable PR list withholds too.
+# The fixture tip is LONG STALE (the default), so the PR signal is the ONLY thing that
+# can withhold here — the tip-age/liveness signals are pinned separately in TEST 16.
 push_work_branch "issue-2015-live-endgame"
 ( cd "$B" && g fetch -q origin )
 PRSHIM="$T/shim-gh-open-pr"
@@ -948,6 +1029,146 @@ else
 $outStillWorks"
 fi
 
+# ===========================================================================
+echo "TEST 16: the PRE-PR window — a FRESH branch tip or a fresh liveness ref withholds the hatch; the advertised command is informative VERBATIM"
+# ===========================================================================
+# open-prs=0 alone does NOT prove the lane is orphaned (#2945 review): this pipeline
+# opens the PR LATE, so an older-fleet worker that is actively implementing has zero
+# open PRs for most of its life while holding only the BRANCH. The liveness evidence for
+# that window is the branch TIP AGE plus the supervisor-authored machine-claim/heartbeat
+# refs — and every unreadable signal withholds.
+
+# (a) FRESH tip, no open PR: a worker mid-implementation. The hatch must be WITHHELD.
+push_work_branch "issue-2016-being-worked-right-now" "wip commit" "$(now_ts)"
+( cd "$B" && g fetch -q origin )
+outFresh=$(runB_gh claim 2016); rcFresh=$?
+if [ "$rcFresh" -eq 2 ] && printf '%s\n' "$outFresh" | grep -q 'remediation=withheld' \
+   && printf '%s\n' "$outFresh" | grep -q 'open-prs=0' \
+   && printf '%s\n' "$outFresh" | grep -q 'newest-branch-tip=' \
+   && ! printf '%s\n' "$outFresh" | grep -q 'adopt 2016 --expect none' \
+   && [ "$(printf '%s\n' "$outFresh" | grep -c 'CLAIM:')" = "1" ]; then
+  ok "a FRESH branch tip at open-prs=0 (legacy worker mid-implementation) WITHHOLDS the hatch"
+else
+  fail "expected the hatch withheld for a fresh tip at open-prs=0; got rc=$rcFresh
+$outFresh"
+fi
+
+# (b) STALE tip, no open PR, no liveness ref: demonstrably orphaned → advertised. And
+# the printed command, run VERBATIM (which is what the readers do), must record an
+# INFORMATIVE reason — not the `why` a `--reason <why>` placeholder would have recorded.
+push_work_branch "issue-2017-abandoned-lane"
+( cd "$B" && g fetch -q origin )
+outAdv=$(runB_gh claim 2017); rcAdv=$?
+if [ "$rcAdv" -eq 2 ] && printf '%s\n' "$outAdv" | grep -q "adopt 2017 --expect none --reason resume-legacy-branch-lock:issue-2017-abandoned-lane" \
+   && printf '%s\n' "$outAdv" | grep -q 'liveness-refs=none-naming-2017' \
+   && printf '%s\n' "$outAdv" | grep -q 'stale-after='; then
+  ok "a STALE tip + open-prs=0 + no liveness ref advertises the hatch with a CONCRETE self-describing --reason"
+else
+  fail "expected an advertised hatch with a concrete reason; got rc=$rcAdv
+$outAdv"
+fi
+verbatimArgs=$(printf '%s\n' "$outAdv" | sed -n "s/.*remediation='bash scripts\/flow\/claim.sh \([^']*\)'.*/\1/p")
+# Deliberate word splitting: the point is to run the PRINTED argv, unedited.
+# shellcheck disable=SC2086
+outVerbatim=$(runB $verbatimArgs); rcVerbatim=$?
+verbatimReason=$(line_field "$(runB status 2017)" reason)
+if [ "$rcVerbatim" -eq 0 ] && printf '%s\n' "$outVerbatim" | grep -q 'CLAIM: ADOPTED' \
+   && [ "$verbatimReason" != "why" ] && [ "$verbatimReason" != "unspecified" ] \
+   && printf '%s' "$verbatimReason" | grep -q 'resume-legacy-branch-lock' \
+   && printf '%s' "$verbatimReason" | grep -q 'issue-2017-abandoned-lane'; then
+  ok "copy-pasted VERBATIM the printed command adopts and records an informative reason ('$verbatimReason')"
+else
+  fail "the printed command did not adopt with an informative reason; rc=$rcVerbatim reason='$verbatimReason'
+$outVerbatim"
+fi
+
+# (c) STALE tip but a FRESH machine-claim ref naming the issue: a supervisor says a
+# worker is on it (#2655), so the hatch is WITHHELD even though the tip aged out.
+push_work_branch "issue-2018-stale-branch-live-worker"
+push_machine_claim "refs/machine-claims/machineFresh" 2018 "$(now_ts)"
+( cd "$B" && g fetch -q origin )
+outLiveRef=$(runB_gh claim 2018); rcLiveRef=$?
+if [ "$rcLiveRef" -eq 2 ] && printf '%s\n' "$outLiveRef" | grep -q 'remediation=withheld' \
+   && printf '%s\n' "$outLiveRef" | grep -q 'liveness-ref=refs/machine-claims/machineFresh' \
+   && ! printf '%s\n' "$outLiveRef" | grep -q 'adopt 2018 --expect none'; then
+  ok "a FRESH machine-claim ref naming the issue WITHHOLDS the hatch even with a stale branch tip"
+else
+  fail "expected the hatch withheld for a fresh liveness ref; got rc=$rcLiveRef
+$outLiveRef"
+fi
+
+# (d) …and a liveness ref older than the threshold does NOT withhold forever: it is
+# itself reapable, so an abandoned heartbeat must not lock the lane out permanently.
+push_work_branch "issue-2019-stale-branch-stale-heartbeat"
+push_machine_claim "refs/heartbeats/machineStale" 2019 "$STALE_TIP_DATE"
+( cd "$B" && g fetch -q origin )
+outStaleRef=$(runB_gh claim 2019); rcStaleRef=$?
+if [ "$rcStaleRef" -eq 2 ] && printf '%s\n' "$outStaleRef" | grep -q 'adopt 2019 --expect none --reason resume-legacy-branch-lock:' \
+   && printf '%s\n' "$outStaleRef" | grep -q 'liveness-refs=none-naming-2019'; then
+  ok "a liveness ref STALER than the reap threshold ages out and does not withhold the hatch"
+else
+  fail "expected the hatch advertised despite a stale liveness ref; got rc=$rcStaleRef
+$outStaleRef"
+fi
+
+# (e) UNREADABLE threshold (claim.sh without its claim-heartbeat.sh sibling): the lane
+# cannot be shown orphaned, so the hatch is withheld rather than defaulting to some
+# second copy of "4h".
+push_work_branch "issue-2020-threshold-unreadable"
+( cd "$B" && g fetch -q origin )
+LONE="$T/lone-claim"
+mkdir -p "$LONE"
+cp "$CLAIM" "$LONE/claim.sh"
+outNoThresh=$( cd "$B" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$LONE/claim.sh" claim 2020 2>/dev/null ); rcNoThresh=$?
+if [ "$rcNoThresh" -eq 2 ] && printf '%s\n' "$outNoThresh" | grep -q 'remediation=withheld' \
+   && printf '%s\n' "$outNoThresh" | grep -q 'liveness=threshold-unreadable' \
+   && ! printf '%s\n' "$outNoThresh" | grep -q 'adopt 2020 --expect none'; then
+  ok "an UNREADABLE staleness threshold withholds the hatch (no hardcoded fallback)"
+else
+  fail "expected the hatch withheld when the threshold cannot be read; got rc=$rcNoThresh
+$outNoThresh"
+fi
+
+# (f) UNREADABLE liveness refs (a git shim fails ONLY the machine-claims enumeration,
+# everything else passes through): "we could not prove nobody is on it" withholds.
+push_work_branch "issue-2021-liveness-enumeration-outage"
+( cd "$B" && g fetch -q origin )
+SHIML="$T/shim-liveness-fail"
+mkdir -p "$SHIML"
+cat >"$SHIML/git" <<SHIM
+#!/usr/bin/env bash
+saw_ls=0; saw_liveness=0
+for a in "\$@"; do
+  [ "\$a" = "ls-remote" ] && saw_ls=1
+  case "\$a" in refs/machine-claims/* | refs/heartbeats/*) saw_liveness=1 ;; esac
+done
+if [ "\$saw_ls" = 1 ] && [ "\$saw_liveness" = 1 ]; then exit 128; fi
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIML/git"
+outNoLive=$( cd "$B" && PATH="$SHIML:$GHSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" claim 2021 2>/dev/null ); rcNoLive=$?
+if [ "$rcNoLive" -eq 2 ] && printf '%s\n' "$outNoLive" | grep -q 'remediation=withheld' \
+   && printf '%s\n' "$outNoLive" | grep -q 'liveness-refs=unreadable' \
+   && ! printf '%s\n' "$outNoLive" | grep -q 'adopt 2021 --expect none'; then
+  ok "an UNREADABLE liveness-ref enumeration withholds the hatch (fail closed on an unread signal)"
+else
+  fail "expected the hatch withheld on a liveness enumeration outage; got rc=$rcNoLive
+$outNoLive"
+fi
+
+# (g) …and withholding still changes only ADVICE: the deliberate resume of the
+# actively-worked lane from (a) remains possible for an operator who confirmed ownership.
+outDeliberate=$(runB adopt 2016 --expect none --reason "confirmed with the branch author that the lane is free"); rcDeliberate=$?
+if [ "$rcDeliberate" -eq 0 ] && printf '%s\n' "$outDeliberate" | grep -q 'CLAIM: ADOPTED' \
+   && [ -n "$(ref_sha 2016)" ]; then
+  ok "the liveness gate changes the printed ADVICE only — a deliberate resume still works, git still arbitrates"
+else
+  fail "expected the deliberate resume of a withheld lane to still succeed; got rc=$rcDeliberate
+$outDeliberate"
+fi
+
 echo ""
-echo "================  claim-resume (#2945): $PASS passed, $FAIL failed  ================"
+echo "================  claim-resume (#2945): $PASS passed, $FAIL failed, $SKIP skipped  ================"
 [ "$FAIL" -eq 0 ]
