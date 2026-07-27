@@ -3,7 +3,7 @@
 This appendix documents current capabilities, parsing limitations, validation status, and workarounds in CQLite's SSTable implementation. It serves as a reference to prevent repeated investigation of known issues and provides clear guidance for contributors.
 
 **In this appendix you will learn:**
-- M5.1 write support capabilities (NEW)
+- Write support capabilities and the one hard claim boundary (uncompressed SSTables only, #1406)
 - Which SSTable formats and table types have parsing issues
 - Current validation pass rates across test datasets
 - Feature gaps and remaining limitations
@@ -12,9 +12,11 @@ This appendix documents current capabilities, parsing limitations, validation st
 
 ---
 
-## M5.1 Write Support Capabilities
+## Write Support Capabilities
 
-CQLite M5.1 introduces comprehensive SSTable write support with the following capabilities:
+CQLite ships SSTable write support (`write-support`, a **default** feature of `cqlite-core`) with the
+following capabilities. See "Write support posture (current)" below for the full picture — flush,
+STCS compaction, export — and the one hard claim boundary (uncompressed only, #1406).
 
 ### Data.db Writing (V5CompressedLegacy Format)
 
@@ -171,9 +173,9 @@ All timestamps, TTL values, and local deletion times are delta-encoded:
 
 ---
 
-## Resolved M5.0 Limitations
+## Resolved Early-Write-Support Limitations
 
-The following limitations from M5.0 have been resolved in M5.1:
+These were limitations of the first write-support drop (M5.0), resolved in M5.1:
 
 ### CompressionInfo.db Writing
 
@@ -181,13 +183,13 @@ The following limitations from M5.0 have been resolved in M5.1:
 
 CQLite's production SSTable writer emits uncompressed Data.db only and never writes a CompressionInfo.db. The `CompressedDataWriter` / `CompressionInfoWriter` types exist solely to synthesize compressed fixtures for exercising the decompressing reader; they are UNWIRED (no flush/compaction path reaches them) and any attempt to configure compressed production writing returns `Error::UnsupportedFormat`.
 
-The READ/decompression path fully supports all four compression algorithms (LZ4, Snappy, Deflate, Zstd) — CQLite reads compressed Cassandra SSTables end-to-end. See the "CompressionInfo.db Writing" entry under "M5.1 Write Support Capabilities" above for the exact fail-closed boundary and the parseable on-read format.
+The READ/decompression path fully supports all four compression algorithms (LZ4, Snappy, Deflate, Zstd) — CQLite reads compressed Cassandra SSTables end-to-end. See the "CompressionInfo.db Writing" entry under "Write Support Capabilities" above for the exact fail-closed boundary and the parseable on-read format.
 
 ### Collection Serialization
 
 **Status**: RESOLVED (Issues #377, #378)
 
-M5.0 had limited collection support. M5.1 implements:
+The first drop had limited collection support; now implemented:
 - Frozen collection serialization (single-cell format)
 - Non-frozen collection serialization (multi-cell complex columns)
 - Proper flag handling (`ROW_HAS_COMPLEX_DELETION`)
@@ -196,114 +198,98 @@ M5.0 had limited collection support. M5.1 implements:
 
 **Status**: RESOLVED (Issue #379)
 
-M5.0 did not support static columns. M5.1 implements:
+The first drop did not support static columns; now implemented:
 - Static row writing with extended flags
 - Proper ordering (static rows before regular rows)
 - Correct column bitmap handling for static columns
 
 ---
 
-## M5.2 Compaction and Export Capabilities
+## Compaction and Export Capabilities
 
-CQLite M5.2 introduces compaction APIs and SSTable export support. Note that compaction execution is pending M5.3 reader integration.
+Compaction executes end-to-end. v0.12 delivered **byte-for-byte STCS compaction parity** against
+Apache Cassandra; the old "execution pending M5.3 reader integration" caveat no longer applies.
 
 ### K-Way Merge (Issue #382)
 
-**Status**: PARTIALLY IMPLEMENTED
+**Status**: ✅ **IMPLEMENTED** — this is the production compaction merger
 
-API surface defined; merge execution pending M5.3 SSTable reader integration.
-
-K-way merge infrastructure for combining multiple L0 SSTables:
+K-way merge infrastructure for combining multiple SSTables:
 - Binary heap-based merge with O(log k) per entry
-- Last-write-wins semantics by timestamp
 - Schema-aware clustering key comparison
-- Memory budget: k × 8KB peek buffers
+- Per-cell / per-cell-path reconciliation (epic #921)
 
-**Current Limitation**: `KWayMerger::new()` returns "pending" error. Merge execution requires M5.3 reader integration to convert SSTable entries back to Mutation format.
-
-**Code Review Fixes Applied**:
-- `merge.rs:551`: Replaced `unwrap()` with `ok_or_else()` for proper error handling
-- `merge.rs:643`: Added `log::warn` for schema comparison fallback instead of silent error
+`KWayMerger::new` (`cqlite-core/src/storage/write_engine/merge/mod.rs:2530`) delegates to
+`new_with_gc` (`:2570`) and returns a working merger; `new_cancellable` (`:2539`) additionally
+wires a cooperative `ScanCancel` into every input reader's compaction scan (#2264).
 
 ### STCS Merge Policy (Issue #383)
 
-**Status**: IMPLEMENTED (not yet usable)
+**Status**: ✅ **IMPLEMENTED** and usable
 
-Pluggable compaction strategy via `MergePolicy` trait:
-- `STCSPolicy`: Size-Tiered Compaction Strategy (Cassandra default)
-  - Bucket grouping by size ratio (0.5x - 1.5x)
-  - Configurable min/max thresholds (default: 4-32)
+Pluggable compaction strategy via the `MergePolicy` trait
+(`cqlite-core/src/storage/write_engine/merge_policy.rs`):
+- `STCSPolicy` (`:80`): Size-Tiered Compaction Strategy (Cassandra default)
+  - Bucket grouping by size ratio with inclusive `>=`/`<=` bounds (`:191-192`)
+  - Configurable min/max thresholds, validated in `STCSPolicy::new` (`:100`)
 - Custom policies via `Box<dyn MergePolicy>`
 
-**Current Limitation**: While the `STCSPolicy` logic is fully implemented and tested, it cannot be used yet because `WriteEngine::set_merge_policy()` returns an error pending M5.3 reader integration.
-
-**Code Review Fixes Applied**:
-- `merge_policy.rs:175-177`: Fixed bucket boundary to use inclusive comparisons (`>=`/`<=`)
-- `merge_policy.rs:192-193`: Changed to saturating arithmetic for overflow safety
+`WriteEngine::set_merge_policy` (`cqlite-core/src/storage/write_engine/maintenance.rs:321`) stores
+the policy and returns `Ok(())`.
 
 ### Maintenance Step API (Issue #384)
 
-**Status**: PARTIALLY IMPLEMENTED
+**Status**: ✅ **IMPLEMENTED** — flush **and** compaction
 
-Incremental maintenance via `maintenance_step()`:
-- Non-blocking, budget-limited execution
+`WriteEngine::maintenance_step` (`cqlite-core/src/storage/write_engine/maintenance.rs:462`,
+inner at `:491`) performs background compaction work within a time budget, driving the merge state
+machine and the gc_grace / overlap-aware purge logic (#921 / #935 / #1388 / #2299):
+- Non-blocking, budget-limited execution (a ~10% budget tolerance is recorded to observability)
 - Returns `MaintenanceReport` with maintenance stats
 - Suitable for background thread scheduling
 
-**Current Limitation**: `maintenance_step()` currently performs only flush operations. Compaction steps pending M5.3 reader integration.
-
 ### TTL and Expiring Cells (Issue #386)
 
-**Status**: IMPLEMENTED
+**Status**: ✅ **IMPLEMENTED**
 
 TTL support for expiring data:
-- TTL delta encoding against Statistics.db baseline
-- Expiration timestamp tracking
-- Tombstone generation for expired cells
-
-**Code Review Fixes Applied**:
-- `data_writer.rs:328`: Added negative TTL delta validation with descriptive error
+- TTL delta encoding against the Statistics.db baseline
+  (`cqlite-core/src/storage/sstable/writer/data_writer/cells.rs:186`), which rejects a negative
+  delta with a descriptive error (`:187-193`)
+- Expiration-time derivation via `expiring_local_deletion_time` (`cells.rs:261`)
 
 ### SSTable Export API (Issue #388)
 
-**Status**: IMPLEMENTED
+**Status**: ✅ **IMPLEMENTED**
 
-`export_sstable()` API for distribution:
+`WriteEngine::export_sstable` (`cqlite-core/src/storage/write_engine/export.rs:280`) for
+distribution:
 - Cassandra-compatible naming: `{keyspace}-{table}-nb-{gen}-big-{Component}.db`
 - Optional compaction before export
 - Component validation (Data.db, Index.db, Statistics.db, etc.)
-
-**Code Review Fixes Applied**:
-- `export.rs:220`: Changed `std::fs::create_dir_all` to `tokio::fs::create_dir_all().await`
-- `export.rs:343-378`: Made `find_most_recent_sstable()` async with `tokio::fs::read_dir`
+- Fully async I/O — `tokio::fs::create_dir_all` (`:307`) and an async
+  `find_most_recent_sstable` (`:437`)
 
 ---
 
-## Remaining M5.1 Limitations
+## Remaining Write-Path Limitations
 
-### Promoted Index (Deferred)
+### Promoted Index
 
-**Status**: DEFERRED (M5.2+ scope)
+**Status**: ✅ **IMPLEMENTED** (Issue #993)
 
-Index.db entries always write `promoted_index_length = 0`. Wide partitions (10K+ rows) cannot use fast within-partition seeks.
+Wide partitions get a real promoted index. `SSTableWriter` collects promoted-index blocks during the
+Data.db pass for partitions with **≥ 64 KiB** of row data
+(`cqlite-core/src/storage/sstable/writer/mod.rs:687-693`) and passes them to
+`IndexWriter::add_partition_with_promoted`
+(`cqlite-core/src/storage/sstable/writer/index_writer.rs:380`, called from `writer/mod.rs:725` and
+`writer/incremental.rs:168`). The writer gates emission on **≥ 2** blocks, mirroring Cassandra's
+`RowIndexEntry.create()` which only builds an indexed entry when `columnIndexCount > 1`
+(cassandra-5.0.8 `io/sstable/format/big/RowIndexEntry.java:234`).
 
-**Impact**:
-- Simple/narrow partitions: No impact
-- Wide partitions (10K+ rows): Linear scan required for within-partition queries
-
-**Rationale**: M5.1 prioritizes correctness over performance. Promoted index requires complex sampling logic.
-
-### Compaction
-
-**Status**: PARTIALLY IMPLEMENTED (M5.2)
-
-CQLite has defined k-way merge compaction API with STCS (Size-Tiered Compaction Strategy):
-- `maintenance_step()` API for incremental maintenance (currently flush-only)
-- `set_merge_policy()` for custom compaction strategies (currently returns error)
-- API surface complete; execution pending M5.3 reader integration
-- See "M5.2 Compaction and Export Capabilities" section above for details
-
-**Current Limitation**: `set_merge_policy()` currently returns an error. Compaction execution requires M5.3 SSTable reader integration to convert entries back to mutations for k-way merge.
+The read side consumes it: `PromotedIndexData` (`index_reader/mod.rs:80`) carries the raw payload
+and `decode_partition_promoted_index` (`reader/data_access/big_promoted.rs:268`) decodes it for a
+within-partition seek.
 
 ### BTI Format Writing
 
@@ -315,47 +301,52 @@ CQLite emits canonical BTI (`da`) format SSTables, including trie-based `Partiti
 
 ### Index.db/Summary.db Full Format
 
-**Status**: PARTIAL
+**Status**: ✅ **IMPLEMENTED**
 
-Current implementation:
-- Index.db: MD5 digest format with VInt offsets (no promoted index)
-- Summary.db: Sampled entries with correct offset tracking
-
-Not implemented:
-- Full promoted index data in Index.db entries (BIG `nb` format)
+- Index.db: key + VInt data offset + VInt promoted-index length, with a real promoted-index payload
+  for wide partitions (see "Promoted Index" above). Entry framing:
+  `cqlite-core/src/storage/sstable/index_reader/parse.rs:161-162`.
+- Summary.db: sampled entries with correct offset tracking
+  (`cqlite-core/src/storage/sstable/summary_reader/`).
 
 BTI (`da`) trie format write/read IS supported (see "BTI Format Writing" above).
 
 ### Statistics.db Full TOC Format
 
-**Status**: IMPLEMENTED
+**Status**: ✅ **IMPLEMENTED**
 
-The `StatisticsWriter` produces a full Cassandra 5.0 compatible Statistics.db with complete TOC structure:
+The `StatisticsWriter` (`cqlite-core/src/storage/sstable/writer/stats_writer/`) produces a full
+Cassandra 5.0 compatible Statistics.db with complete TOC structure:
 
 **Implemented**:
 - Full TOC header with component count and CRC32 checksums
 - VALIDATION component (partitioner class name, bloom filter FP chance)
-- COMPACTION component (minimal HyperLogLogPlus cardinality estimator)
-- STATS component (EncodingStats with min/max timestamps, TTL, deletion times, histograms)
+- STATS component (EncodingStats with min/max timestamps, TTL, deletion times, histograms).
+  The `EstimatedHistogram`s are Cassandra-canonical, not stubs: `estimatedPartitionSize` uses 156
+  buckets and `estimatedCellPerPartitionCount` 119 buckets (issue #1327,
+  `stats_writer/components.rs:493-496`; accumulator in `stats_writer/estimated_histogram.rs`), and
+  `estimatedTombstoneDropTime` is populated for every tombstone local-deletion-time observed during
+  the write (`stats_writer/metadata.rs:257-264`, which correctly excludes the
+  `DeletionTime.LIVE` sentinel per #851).
 - SERIALIZATION_HEADER component (schema-derived or minimal stub)
 
-**Known Limitations**:
-- STATS component uses minimal histograms (2 buckets, empty tombstone histogram)
-- COMPACTION component uses empty HyperLogLogPlus sketch (no cardinality data)
+**Known Limitation**:
+- COMPACTION component writes a hardcoded **empty** HyperLogLogPlus sketch — no cardinality data
+  (`stats_writer/components.rs:63-92`, a minimal valid `HyperLogLogPlus(p=11, sp=25)` SPARSE
+  sketch).
 
 **Wide tables (>64 columns) — supported (Issue #763)**:
-The SERIALIZATION_HEADER column sets are now written exactly as Cassandra's
-`SerializationHeader.Serializer.writeColumnsWithTypes`
-(cassandra-5.0.0 `SerializationHeader.java` lines 489-497): an unsigned-VInt column
-count followed by `count` `(VInt-length name, VInt-length marshal type)` pairs. This
-path has **no** 64-column limit. A previous note here claimed a "64-column bitmap"
-cap; that was inaccurate — the 64-bit bitmap encoding belongs to
-`Columns.serializer.serializeSubset` (`Columns.java` lines 503-531), which serialises
-a per-row column *subset* against a pre-shared superset (Data.db rows / inter-node
-messaging) and is never used for the SSTable header. Tables with 65+ columns therefore
-round-trip losslessly; regression coverage lives in
-`stats_writer.rs::tests::test_serialization_header_70_columns_roundtrip` and
-`test_serialization_header_200_columns_count_is_vint`.
+The SERIALIZATION_HEADER column sets are written exactly as Cassandra's
+`SerializationHeader.Serializer.writeColumnsWithTypes` (cassandra-5.0.8
+`src/java/org/apache/cassandra/db/SerializationHeader.java:489-497`): an unsigned-VInt column count
+followed by `count` `(VInt-length name, VInt-length marshal type)` pairs. This path has **no**
+64-column limit. A previous note here claimed a "64-column bitmap" cap; that was inaccurate — the
+64-bit bitmap encoding belongs to `Columns.Serializer.serializeSubset` (cassandra-5.0.8
+`src/java/org/apache/cassandra/db/Columns.java:503-531`), which serialises a per-row column
+*subset* against a pre-shared superset (Data.db rows / inter-node messaging) and is never used for
+the SSTable header. Tables with 65+ columns therefore round-trip losslessly; regression coverage
+lives in `writer/stats_writer/serialization_header.rs::test_serialization_header_70_columns_roundtrip`
+(`:445`) and `::test_serialization_header_200_columns_count_is_vint` (`:501`).
 
 **Impact**: Statistics.db files are fully compatible with Cassandra 5.0. Schema can be provided explicitly for richer SerializationHeader, or omitted for minimal stub format.
 
@@ -363,9 +354,10 @@ round-trip losslessly; regression coverage lives in
 
 ## Parsing Limitations
 
-### Snapshot header-identity extraction — ID-less snapshot dirs (Issue #2384)
+### Snapshot header-identity extraction — ID-less snapshot dirs
 
-**Status**: ⚠️ **Partial** — ID-ful (Cassandra-shaped) snapshots fully resolved; ID-less snapshots pending follow-up (#2415)
+**Status**: 🐛 **OPEN** (limitation) — ID-ful (Cassandra-shaped) snapshots fully resolved (#2384);
+ID-less snapshot dirs still misparse
 **Impact**: Logging + sync schema-fallback identity only (does NOT affect the ticket-derived warm-cache key)
 
 Snapshot-aware path parsing (`cqlite-core/src/storage/sstable/snapshot_path.rs`) resolves the
@@ -379,9 +371,10 @@ Cassandra-shaped, ID-ful snapshot directories
   named `snapshots` (`.../data/snapshots/{table}-{id}/...-Data.db`).
 
 **Residual limitation**: CQLite's own write engine emits **ID-less** table
-directories `{keyspace}/{table}/` (no `-{uuid}` suffix — `writer/mod.rs`). When
+directories `{keyspace}/{table}/` (no `-{uuid}` suffix —
+`cqlite-core/src/storage/sstable/writer/mod.rs:470`). When
 those are snapshotted (e.g. the flight producer's
-`reads_from_snapshot_directory` path), the read path is
+`reads_from_snapshot_directory` path, `cqlite-flight/src/producer.rs:2391`), the read path is
 `{ks}/{table}/snapshots/{tag}/...-Data.db`. Because `is_table_id_dir` requires a
 `-{32-hex}` suffix, an ID-less snapshot dir does NOT match the guard, the walk-up
 is skipped, and the header-identity misparse persists: keyspace resolves to
@@ -390,15 +383,20 @@ is skipped, and the header-identity misparse persists: keyspace resolves to
 This is **inherently unresolvable from the path alone** — an ID-less snapshot
 `{ks}/{table}/snapshots/{tag}/` and an ordinary table in a keyspace literally
 named `snapshots` (`{data}/snapshots/{table}/`) are structurally identical. Only
-external authoritative keyspace/table context can disambiguate them, and threading
-that context is the scope of the follow-up.
+external authoritative keyspace/table context can disambiguate them.
 
 **Blast radius**: header keyspace/table are used for logging and the sync
 schema-fallback path; the ID-less misparse does NOT corrupt the ticket-derived
-warm-cache key. The robust fix (authoritative keyspace/table threaded into the
-reader) is tracked as **#2415**.
+warm-cache key.
 
-**Tracking**: Issue #2384 (structural fix, shipped) → follow-up #2415 (robust fix)
+The current (limited) behavior is **deliberately pinned** by
+`snapshot_path.rs::idless_snapshot_currently_unresolved_pending_followup` (`:230`), whose doc
+comment states the assertion should FLIP when the robust fix (authoritative keyspace/table threaded
+into `SSTableReader::open`) lands. That pin, not this appendix, is the authority on whether the
+limitation is still live: as of this writing it still asserts the misparse.
+
+**Tracking**: Issue #2384 (structural fix, shipped). The robust-fix follow-up issue is CLOSED, but
+the code pin above is unchanged — treat this as an open limitation until that assertion flips.
 
 ---
 
@@ -410,14 +408,17 @@ reader) is tracked as **#2415**.
 
 **Root Cause Found**: The SerializationHeader format includes a static column section between clustering keys and regular columns. The parser was treating the `static_count` byte as a separator (expecting `0x00`), which only worked when there were no static columns.
 
-**Correct Format** (confirmed via `SerializationHeader.java`):
+**Correct Format** (confirmed via cassandra-5.0.8
+`src/java/org/apache/cassandra/db/SerializationHeader.java:458-459`):
 ```
 [pk_type] [ck_count] [ck_types...] [static_count] [static_columns...] [reg_count] [regular_columns...]
 ```
 
 When `static_count = 0`, it encodes as `0x00`, making simple tables work. But when `static_count > 0`, parsing would fail.
 
-**Fix**: Modified `parse_serialization_header_at_offset()` in `enhanced_statistics_parser.rs` to:
+**Fix**: Modified the SerializationHeader parse path in
+`cqlite-core/src/parser/enhanced_statistics_parser/` (now split into `header.rs`,
+`encoding_stats.rs`, `marshal_type.rs`, and `serialization_header/`) to:
 1. Parse static column count after clustering keys
 2. Parse static column definitions when count > 0
 3. Mark static columns with `is_static: true` flag
@@ -467,7 +468,8 @@ When `static_count = 0`, it encodes as `0x00`, making simple tables work. But wh
 
 **Status**: ✅ **FIXED** (Issue #218)
 **Impact**: Was 5 tables - now 0 (Summary.db parses correctly for all tables)
-**Resolution**: Complete rewrite of `summary_reader.rs` with correct Cassandra 5.0 format
+**Resolution**: Complete rewrite of the Summary.db reader
+(`cqlite-core/src/storage/sstable/summary_reader/`) with the correct Cassandra 5.0 format
 
 **Root Cause Found**: The original parser used a completely incorrect format specification. It expected a "version" field as the first 4 bytes, but Cassandra 5.0 Summary.db starts with `min_index_interval` (e.g., 128).
 
@@ -539,7 +541,8 @@ With Issue #218 fixed, Summary.db now parses correctly. The remaining collection
 **Fix Details**:
 - Split `parse_row_header()` into `parse_row_flags()` + `parse_row_metadata()`
 - Parse clustering prefix immediately after flags, before row_size
-- File: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
+- File: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/` — the row framing now lives in
+  `row_framing.rs` (`parse_row_metadata` at `:394`)
 
 **Results**:
 - Smoke test pass rate improved from 27% (9/33) to 79% (26/33)
@@ -556,27 +559,22 @@ With Issue #218 fixed, Summary.db now parses correctly. The remaining collection
 
 **Status**: ✅ **FIXED** (Issue #212)
 **Impact**: Was 1 table - now 0 (BTI index parsing works correctly)
-**Resolution**: Fixed V5_0NewBigFormat version variant handling in block_io.rs
+**Resolution**: Corrected format-version dispatch on the block-read path plus BTI inter-entry padding handling
 
 **Root Cause Found**: Two issues combined to cause silent data loss:
 
-1. **Missing Version Variant**: `CassandraVersion::V5_0NewBigFormat` was not included in the match statement for NB format chunk reading in `block_io.rs`. This caused the reader to use legacy block header parsing (which returns EOF immediately) instead of the correct NB chunk-based reading.
-
+1. **Format-version dispatch**: the block reader classified the table's version into the legacy
+   block-header path (which returns EOF immediately) instead of the chunk-based read path, so the
+   index yielded zero entries with no error.
 2. **BTI Inter-Entry Padding**: BTI Index.db entries have variable padding bytes between them (null or non-null). The parser needed enhanced padding skip logic to find valid entry boundaries.
 
-**Correct Flow** (after fix):
-```
-V5_0NewBigFormat → read_nb_format_chunk_data() → decompress chunk → parse partition data
-```
-
-**Previous (Wrong) Flow**:
-```
-V5_0NewBigFormat → read_legacy_format_block_header() → EOF → 0 entries
-```
-
-**Fix Details**:
-- File: `cqlite-core/src/storage/sstable/reader/block_io.rs` - Added `V5_0NewBigFormat` to NB chunk reader match
-- File: `cqlite-core/src/storage/sstable/index_reader.rs` - Enhanced BTI padding skip logic
+> **Implementation note (CQLite-specific).** Both fixes long predate the epic #1116 module splits,
+> and the code named in the original writeup has since been rewritten and relocated
+> (version classification now lives in `cqlite-core/src/parser/header.rs`; block reads in
+> `cqlite-core/src/storage/sstable/reader/block_io.rs`; the index reader in
+> `cqlite-core/src/storage/sstable/index_reader/`). The specific match arms and helper functions
+> quoted in the original 2025 writeup no longer exist under those names, so they are not reproduced
+> here — the durable record is the outcome below.
 
 **Results**:
 - `stock_prices` now returns 231 entries (2 partitions with rows)
@@ -593,7 +591,7 @@ V5_0NewBigFormat → read_legacy_format_block_header() → EOF → 0 entries
 **Impact**: Was 1 table - now 0 (time_bucketed_counters returns 41 rows correctly)
 **Resolution**: Added empty index entries check to trigger sequential scan fallback
 
-**Root Cause Found**: When BTI Index.db parsing is incomplete (returns 0 partition entries), the scan path in `data_access.rs` would:
+**Root Cause Found**: When BTI Index.db parsing is incomplete (returns 0 partition entries), the scan path in `reader/data_access/` would:
 1. Take the index-based path (since `self.index.is_some()`)
 2. Get 0 entries from `get_range()`
 3. Check `has_zero_size` which is `false` (no entries to check)
@@ -602,18 +600,16 @@ V5_0NewBigFormat → read_legacy_format_block_header() → EOF → 0 entries
 **Symptom**: `SELECT * FROM test_timeseries.time_bucketed_counters` returned 0 rows despite containing 41 rows.
 
 **Fix Details**:
-- File: `cqlite-core/src/storage/sstable/reader/data_access.rs`
-- Added check for empty entries BEFORE the `has_zero_size` check
-- When `entries.is_empty()`, triggers sequential scan fallback
+- Added a check for empty index entries BEFORE the `has_zero_size` check
+- When the index yields no entries, the scan falls back to a sequential Data.db scan
 - Sequential scan correctly parses Data.db directly, bypassing index issues
 
-**Code Change**:
-```rust
-// Issue #256 FIX: Fall back to sequential scan when index returns no entries
-if entries.is_empty() {
-    return self.sequential_scan(table_id, start_key, end_key, limit, schema).await;
-}
-```
+**Current shape of that guard** (`cqlite-core/src/storage/sstable/reader/data_access/full_index_scan.rs:102`):
+a zero-entry index is now treated as *structurally unusable*, never as a legitimately empty
+SSTable — the full-index path returns `Ok(None)` and the caller falls back with a loud WARN
+(`IndexReader::open` already rejects a zero-byte Index.db as corruption, and neither Cassandra
+nor `SSTableWriter` emits a zero-partition SSTable). The sequential fallback itself lives in
+`data_access/sequential.rs`.
 
 **Results**:
 - `time_bucketed_counters` now returns 41 rows via sequential scan fallback
@@ -660,7 +656,7 @@ if entries.is_empty() {
 **Impact**: Was causing zero-row results when table names had qualified vs unqualified mismatch
 **Resolution**: Updated `scan_for_key()` to use `table_ids_match()` function
 
-**Root Cause Found**: The `scan_for_key()` function in `data_access.rs` used direct equality (`==`) to compare table IDs, which failed when:
+**Root Cause Found**: The `scan_for_key()` function used direct equality (`==`) to compare table IDs, which failed when:
 - Query used qualified name (e.g., `test_basic.simple_table`)
 - SSTable stored unqualified name (e.g., `simple_table`)
 - Or vice versa
@@ -668,117 +664,98 @@ if entries.is_empty() {
 **Symptom**: CLI queries returned zero rows with debug log showing `table_id mismatch ('test_basic.simple_table' != 'simple_table')`.
 
 **Fix Details**:
-- File: `cqlite-core/src/storage/sstable/reader/data_access.rs:504`
 - Changed: `entry_table_id == *table_id` → `table_ids_match(&entry_table_id, table_id)`
-- The `table_ids_match()` function (lines 26-50) handles qualified/unqualified name comparison correctly
+- `table_ids_match()` handles qualified/unqualified name comparison correctly
 
-**Note**: The `sequential_scan()` function (line 648) already used `table_ids_match()` correctly. This fix aligns `scan_for_key()` with the same matching logic.
+**Current locations** (post epic #1116 split): `scan_for_key` at
+`cqlite-core/src/storage/sstable/reader/data_access/sequential.rs:680` and `sequential_scan` at
+`sequential.rs:815`; the comparator `table_ids_match` at `data_access/model.rs:213`. A stricter
+sibling, `table_ids_match_strict` (`model.rs:251`), additionally requires the keyspace to match
+when both sides carry one (#1284) and is used on the BTI point-lookup path.
+
+**Note**: `sequential_scan()` already used `table_ids_match()` correctly. This fix aligned `scan_for_key()` with the same matching logic.
 
 **Tracking**: Issue #36 (comment thread, Jan 2026)
 
 ---
 
-### BTI Metadata Offset Extraction (Performance Optimization - M3+ Scope)
+### ~~BTI Metadata Offset Extraction~~ — IMPLEMENTED
 
-**Status**: 🔄 **DEFERRED** (Issue #226)
-**Impact**: Performance - sequential scan fallback instead of direct partition lookup
-**Current Behavior**: Fully functional with sequential read mode
+**Status**: ✅ **IMPLEMENTED** (Issues #226 and #208 both CLOSED)
+**Was**: deferred as an M3+ performance optimization; BTI point lookups fell back to a sequential scan.
 
-**Background**: BTI format Index.db entries contain variable-length metadata after the partition key. This metadata encodes the Data.db offset for direct partition seeks, but the exact format was not previously documented.
+**Format** (Cassandra 5.0 BTI, `da`): a `Partitions.db` trie leaf's payload is
+`[hash_byte: 1 byte][position: N bytes]` in **SizedInts** encoding (not VInt), where `N` derives
+from the `payloadBits` low nibble of the node header. A **negative** encoded position means the
+payload is a direct `Data.db` offset (`data_offset = ~position`, a NARROW partition); a
+**non-negative** position is an offset into `Rows.db` for that partition's row-level trie index (a
+WIDE partition).
 
-**Research Findings** (Issue #226):
-- BTI payload uses **SizedInts encoding** (not VInt)
-- Format: `[hash_byte: 1 byte][position: size bytes]`
-- Size determined by `payloadBits` field in trie node header
-- Formula: `size = payloadBits - 7`
-
-**Example from stock_prices Index.db**:
+**Example from a `stock_prices` `Partitions.db` leaf**:
 ```text
 00 00 04 80 00 4f 88 00
 ^  ^-----------^
-│  └─ Position bytes (Data.db offset)
+│  └─ Position bytes (SizedInts)
 └─── Hash byte (filter hash lower 8 bits)
 ```
 
-**Current Workaround**: Sequential scan with raw_key matching (Issue #212 fix) - functionally correct but O(n) performance.
+**Implementation** — both formerly-pending pieces now exist:
+- ✅ SizedInts decoder (`cqlite-core/src/storage/sstable/bti/sized_ints.rs`)
+- ✅ Trie node header parsing — `payload_flags = header_byte & 0x0F`
+  (`bti/parser/node_decode.rs:313`) feeds the payload decoders
+- ✅ Direct offset extraction — `decode_bti_partition_payload(trie_data, payload_start, payload_bits)`
+  (`bti/parser/partitions.rs:78`) returns
+  `BtiPartitionLocation::DataOffset(u64)` / `RowsOffset(u64)` (`partitions.rs:47-58`), with
+  `payload_bits` range-validated fail-closed (`:81-91`) and
+  `position_bytes = payload_bits - FLAG_HAS_HASH_BYTE + 1` (`:97`). The row-level analogue is
+  `bti/parser/rows.rs:207`.
+- ✅ Consumed on the read path: `reader/data_access/bti.rs:333` uses a `RowsOffset` to seek the wide
+  partition's `Rows.db` entry directly; the writer's inverse is
+  `writer/partitions_writer.rs:632`.
 
-**Future Optimization** (M3+ scope):
-1. Extract `payloadBits` from BTI trie node headers
-2. Decode SizedInts to get Data.db offset
-3. Enable O(log n) direct partition seeks
-
-**Implementation Status**:
-- ✅ SizedInts decoder implemented (`cqlite-core/src/storage/sstable/bti/sized_ints.rs`)
-- ✅ Research documented (`docs/research/BTI_PAYLOAD_*.md`)
-- ⏳ Trie node header parsing (pending)
-- ⏳ Direct offset extraction (pending)
-
-**Tracking**: Issue #226 (log noise fix - CLOSED), Issue #208 C3 (offset extraction - deferred)
+**Tracking**: Issue #226 (CLOSED), Issue #208 (CLOSED)
 
 ---
 
-### Index.db VInt Offset Parsing (DigestFormat - NB Tables)
+### ~~Index.db VInt Offset Parsing (NB Tables)~~ - FIXED
 
-**Status**: 🐛 **OPEN** (Issue #237)
-**Impact**: 83% of partitions skipped in 7 test_timeseries tables (~827 partitions)
-**Current Behavior**: Falls back to sequential Data.db scan with "malformed partition" warnings
+**Status**: ✅ **FIXED** (Issue #237, CLOSED 2026-01-06)
+**Was**: 83% of partitions skipped in 7 `test_timeseries` tables (~827 partitions), falling back to a
+sequential Data.db scan with "malformed partition" warnings.
 
-**Root Cause**: The Index.db parser incorrectly reads VInt offsets as length-prefixed bytes. The current implementation treats the first byte after the digest as an `offset_len` field, then reads that many bytes. This matches older MC/MD SSTable formats, but NB format (Cassandra 5.0) uses VInt encoding directly.
+**Root Cause**: the Index.db parser read the entry's offset as a length-prefixed byte run — treating
+the first byte of the offset as an `offset_len` and then taking that many bytes. Cassandra 5.0 NB
+encodes the offset as an unsigned VInt directly, so a `0x00` first byte was read as `offset_len=0`,
+the cursor advanced one byte short, and every following entry failed to parse.
 
-**Affected Format** (DigestFormat with VInt Offsets):
-```
-Entry: marker(2) + digest(16) + vint_offset(1-9 bytes)
-
-Where:
-- marker: 0x0010 (fixed)
-- digest: 16-byte MD5 hash of partition key
-- vint_offset: Cassandra VInt encoding (NOT length-prefixed)
-```
-
-**Bug Location**: `cqlite-core/src/storage/sstable/index_reader.rs`
-- Function: `parse_simple_partition_key_with_offset()` (lines ~375-430)
-
-**Current (Wrong)**:
-```rust
-let (input, offset_len) = nom_u8(input)?;      // Treats VInt byte as length!
-let (input, offset_bytes) = take(offset_len)(input)?;
-let data_offset = decode_be_offset(offset_bytes);
+**Authoritative entry layout** (BIG Index.db; see also Issue #552 and guide Ch.6, and the
+`parse_all_partition_entries` doc comment at
+`cqlite-core/src/storage/sstable/index_reader/parse.rs:150-175`):
+```text
+[key_len: u16 BE]                    ← length of the raw partition key
+[raw partition key bytes: key_len]   ← the partition key exactly as in Data.db
+[data_offset: unsigned vint]         ← byte offset into the Data.db data section
+[promoted_index_len: unsigned vint]  ← byte length of the promoted index (0 = none)
+[promoted_index_data: promoted_index_len bytes]
 ```
 
-**Evidence from sensor_data Index.db**:
-```
-0x0000  00 10 02 84 a7 18 be 7b 49 e6 b6 b9 8e 82 f5 ff  .......{I.......
-0x0010  16 60 [00] 00 00 10 7d 39 42 8c aa a8 45 1d 84 7f  .`....}9B...E...
-        ^^^^^^ Entry 0 VInt (0x00 = 0)
-                   ^^^^^ Entry 1 marker
-```
+> **Correction to the original 2026-01 writeup.** That writeup described the entry as
+> `marker(0x0010) + 16-byte MD5 digest + vint_offset`. There is no `0x0010` marker and no on-disk
+> digest: the leading `u16` is the partition-key LENGTH (single-UUID keys happen to start `0x0010`
+> = 16, which is where the "marker" reading came from; the composite-key `multi_partition_table`
+> starts `0x0026` = 38). There is likewise no separate "BTI Index.db format" — a BTI-indexed
+> SSTable emits `Partitions.db`/`Rows.db` tries and no Index.db at all.
 
-Parser reads `0x00` as `offset_len=0`, takes 0 bytes, advances by 19 bytes instead of 20. Next entry parse fails.
+**Fix**: offsets are decoded with the unsigned-VInt reader (`cqlite-core/src/parser/vint.rs`;
+`parse_vuint` is used for both the data offset and the promoted-index length at
+`index_reader/parse.rs:349-350`, and the framing-only fast path is
+`parse_big_index_entry_framing` at `:345`). Index.db offsets are relative to the Data.db data
+section, so the reader adds the header size. The inverse encoder (`parser::vint::encode_vuint`) is
+used to build fixtures in `index_reader/lazy.rs:385-386`.
 
-**Affected Tables**:
-| Table | Partitions | Currently Parsed | Success Rate |
-|-------|-----------|------------------|--------------|
-| sensor_data | 9 | 1 | 11% |
-| app_metrics | 199 | 1 | <1% |
-| user_activity | 199 | 1 | <1% |
-| log_entries | 199 | 1 | <1% |
-| event_store | 199 | 1 | <1% |
-| user_sessions | 199 | 1 | <1% |
-| tick_data | 23 | 1 | 4% |
+**Regression pin**: `cqlite-core/tests/issue_237_row_size_offset_regression_test.rs`.
 
-**Proposed Fix**:
-```rust
-// Replace offset parsing with VInt decoding:
-let (input, vint_offset) = parse_vint(input)?;
-let data_offset = vint_offset;  // SSTableReader adds header_size later
-```
-
-**Additional Notes**:
-- Index.db offsets are relative to Data.db data section (exclude 30-byte header)
-- VInt decoding already exists in `cqlite-core/src/parser/vint.rs`
-- Format detection needed to distinguish NB VInt from legacy length-prefixed
-
-**Tracking**: Issue #237
+**Tracking**: Issue #237 (CLOSED)
 
 ---
 
@@ -788,32 +765,42 @@ These limitations were surfaced and byte-verified during Epic #817 (compaction
 fidelity). Each is grounded in CQLite's own reader/writer or a cited Cassandra
 class; where CQLite diverges from Cassandra it is called out explicitly.
 
-### Reader lacks the `≥ 64`-column large-subset decode branch (#12)
+> **Note on the numbering.** The parenthesised numbers in the headings below (`cursor-finding 4`,
+> `12`, `14`, … `25`) are the ordinals of the findings in Epic #817's own audit list. They are
+> **not** GitHub issue numbers — GitHub issues are always written `#<n>` in prose (e.g. #824, #921).
+
+### Reader lacks the `≥ 64`-column large-subset decode branch (cursor-finding 12)
 
 **Status**: 🐛 **OPEN**
 
 When `HAS_ALL_COLUMNS` (0x20) is clear, Cassandra's `Columns.Serializer.serializeSubset`
-(`Columns.java:503-531`) selects the columns-subset encoding by superset size: a single
-unsigned-VInt bitmap for `< 64` regular columns, and a **large-subset** form (VInt count +
-smaller-of present/missing **absolute** column indices, each an unsigned VInt — not deltas) for
-`≥ 64`. CQLite's reader
-(`reader/parsing/row_decoder.rs::parse_row_metadata`) always reads a single
+(cassandra-5.0.8 `src/java/org/apache/cassandra/db/Columns.java:503-531`) selects the
+columns-subset encoding by superset size: a single
+unsigned-VInt bitmap of *missing* columns for `< 64` regular columns, and a **large-subset** form
+for `≥ 64` — `serializeLargeSubset` (`Columns.java:609-639`) writes
+`supersetCount - columnCount` as an unsigned VInt, then the smaller of the present/missing sets as
+**absolute** column indices (`iter.indexOfCurrent()`), each an unsigned VInt. (Note: the method's
+own doc comment says "deltas"; the code writes absolute indices — the code is authoritative.)
+CQLite's reader
+(`reader/parsing/row_decoder/row_framing.rs::parse_row_metadata`, `:394`) always reads a single
 `parse_vuint` into a `u64` `missing_columns_bitmap` and has no `≥ 64` branch, so for a
 `≥ 64`-column table it consumes only the missing-count VInt and then mis-reads the trailing
 index VInts as cell data, corrupting the row stream. The reader also treats any column at
-`idx >= 64` as present regardless of the field. The **writer** implements both modes correctly
-(`data_writer.rs::write_column_subset`), pinned at the 63/64/65 boundary by
+`idx >= 64` as present regardless of the field (`row_decoder/row_data.rs:340`). The **writer**
+implements both modes correctly
+(`writer/data_writer/rows.rs::write_column_subset`, `:1136`), pinned at the 63/64/65 boundary by
 `cqlite-core/tests/issue_824_column_subset_and_filter.rs`. **Workaround**: tables with fewer
 than 64 regular columns are unaffected (the common case).
 
-### Complex-column merge is whole-column, not per-cell-path (#14/#17/#18) — RESOLVED in epic #921
+### Complex-column merge is whole-column, not per-cell-path (cursor-findings 14/17/18) — RESOLVED in epic #921
 
 **Status**: ✅ **RESOLVED** (#844 / #888 / #927 / #887, epic #921)
 
 **Was** (Epic #817): Cassandra merges complex (multi-cell collection/UDT) columns **per
 cell-path** using the column's path comparator — signed `ShortType` for a UDT field index,
 `TimeUUIDType` for a list element, the map key type for a map — applying shadow-before-purge per
-path. CQLite's merge (`storage/write_engine/merge.rs::reconcile_cluster`) reconciled by **whole
+path. CQLite's merge (`storage/write_engine/merge/mod.rs::reconcile_cluster`, `:4207`, with the
+per-cell helpers in `merge/reconcile.rs`) reconciled by **whole
 column**: its `CellData` carried no cell-path, so per-path merge of multi-cell collections/UDTs
 was not representable.
 
@@ -830,7 +817,7 @@ Chapter 11 — "Compaction merge semantics". Authority:
 `org.apache.cassandra.db.rows.Cells` (per-column complex merge) and the column's `CellPath`
 comparator.
 
-### Equal-timestamp live-cell value tie-break diverges from Cassandra (#4/#21)
+### Equal-timestamp live-cell value tie-break diverges from Cassandra (cursor-findings 4/21)
 
 **Status**: 🐛 **OPEN** (divergence; FIX ruled in #818, follow-up)
 
@@ -846,7 +833,7 @@ does NOT implement expiring-beats-pure-live or the `localDeletionTime`/TTL tie-b
 3–4) — those are additional divergences (see Chapter 11). Authority:
 `org.apache.cassandra.db.rows.Cells.resolveRegular`.
 
-### Latent: RT / complex-deletion size VInt width (#25)
+### Latent: RT / complex-deletion size VInt width (cursor-finding 25)
 
 **Status**: 🐛 **OPEN** (latent)
 
@@ -857,14 +844,14 @@ large partition can mis-encode the size field. This is currently latent (small f
 exceed the narrow width) but is a real width hazard to watch when writing large partitions.
 Authority: `org.apache.cassandra.db.rows.UnfilteredSerializer` (marker/row-body size fields).
 
-### AlwaysPresentFilter / absent `Filter.db` — handled (#23)
+### AlwaysPresentFilter / absent `Filter.db` — handled (cursor-finding 23)
 
 **Status**: ✅ **HANDLED** (documented for completeness)
 
 A table created with `bloom_filter_fp_chance = 1.0` is backed by Cassandra's
 `AlwaysPresentFilter`, which serializes nothing — the SSTable has **no `Filter.db` component**.
 CQLite reads such tables correctly via **both** `scan` and `get`: the per-reader bloom gate
-(`reader/data_access.rs`) only consults `might_contain` when a filter is present, so an absent
+(`reader/data_access/big_point.rs:77`) only consults `might_contain` when a filter is present, so an absent
 filter ("always maybe") never short-circuits a point lookup to `None`; `get` then falls back to
 the same stitched-chunk scan that `scan` uses. Verified by
 `cqlite-core/tests/issue_824_column_subset_and_filter.rs` (absent-`Filter.db` scan + get tests,
@@ -892,34 +879,48 @@ headers merge the same logical column (#888 / #927; parity Cassandra `d14c96b8` 
 `5e636f9`). Any stale "non-frozen UDT unsupported" claim elsewhere is superseded by
 this entry.
 
-### Row-deletion + live-cells coexistence — NOT represented (#932)
+### Row-deletion + live-cells coexistence — SUPPORTED (#932)
 
-**Status**: 🐛 **OPEN** (limitation)
+**Status**: ✅ **RESOLVED** (#932, CLOSED 2026-06-22)
 
-A Cassandra row can carry a **row deletion** (`HAS_DELETION`) **and** surviving cells
-written strictly after the deletion timestamp at the same time. CQLite does not
-represent this: the V5CompressedLegacy reader collapses a `HAS_DELETION` row to a
-**pure tombstone** (it emits the row tombstone with an empty cell map and detects it
-via `RowHeader::is_row_tombstone`), and the merge `RowData` is an enum — `Tombstone`
-**xor** `Live`, never both. So a row tombstone that should coexist with newer
-surviving cells **loses the row deletion** (the surviving cells win and the deletion
-is dropped). Authority: `org.apache.cassandra.db.rows.Row` (a `Row` carries both a
-`Row.Deletion` and live cells). Tracked in **#932**.
+**Was**: a Cassandra row can carry a **row deletion** (`HAS_DELETION`) **and** surviving cells
+written strictly after the deletion timestamp at the same time. CQLite could not represent this —
+the reader collapsed a `HAS_DELETION` row to a **pure tombstone**, and the merge `RowData` was an
+enum, `Tombstone` **xor** `Live`, never both, so a row tombstone that should coexist with newer
+surviving cells lost the row deletion.
 
-### Range tombstones during compaction — NOT applied/emitted (#933)
+**Now**: the merge model carries the deletion alongside the surviving cells —
+`MergeRow::row_deletion: Option<(i64, i32)>` (`write_engine/merge/model.rs:73`, set via
+`with_row_deletion`, `:177`) is `(markedForDeleteAt, localDeletionTime)`, so a live row can also be
+row-deleted. The reader's single row-write-timestamp decision for the coexistence case is
+`row_write_timestamp` (`reader/parsing/row_decoder/partition_driver.rs:40`), which prefers the row
+liveness timestamp when cells survive and falls back to `markedForDeleteAt` for a pure tombstone.
+Pinned by `reconcile_cluster_attaches_row_deletion_when_cells_survive`
+(`write_engine/merge/mod.rs:11050`) plus the `row_write_timestamp_*` cases at
+`partition_driver.rs:301-332`. Authority: `org.apache.cassandra.db.rows.Row` (a `Row` carries both
+a `Row.Deletion` and live cells).
 
-**Status**: 🐛 **OPEN** (limitation)
+### Range tombstones during compaction — SUPPORTED (#933)
 
-Range tombstones are not applied or emitted end-to-end in the compaction merge path.
-The V5CompressedLegacy reader **skips** range tombstone markers
-(`skip_range_tombstone_marker`) on the normal scan/compaction path — it does not
-surface a surviving marker to the merger (only the dedicated `delta-scan` path decodes
-them via `parse_range_tombstone_marker_full`), and `merge_entry_to_mutation` does not
-persist a surviving range marker into the rewritten output. Consequently a range
-tombstone is neither used to shadow covered rows during compaction nor re-emitted into
-the compacted SSTable. Authority:
-`org.apache.cassandra.db.rows.RangeTombstoneMarker` / `UnfilteredSerializer`. Tracked
-in **#933**.
+**Status**: ✅ **RESOLVED** (#933, CLOSED 2026-06-23)
+
+**Was**: range tombstones were neither applied nor emitted in the compaction merge path — the
+reader skipped range-tombstone markers on the normal scan/compaction path (only the dedicated
+`delta-scan` path decoded them), and the merge did not persist a surviving marker into the
+rewritten output.
+
+**Now**, all three legs are wired:
+- **Reader surfacing** — the compaction read path decodes markers via
+  `parse_range_tombstone_marker_with_ldt`
+  (`reader/parsing/row_decoder/compaction.rs:519`; the decoder itself is
+  `row_decoder/row_framing.rs:1108`, also used by the `delta-scan`
+  `parse_range_tombstone_marker_full` at `:1000`).
+- **Merge shadowing** — `coalesce_range_tombstones` (`write_engine/merge/mod.rs:3465`) folds
+  overlapping markers and `apply_range_shadowing` (`:3936`) drops the rows they cover.
+- **Writer emission** — surviving markers are re-emitted into the compacted SSTable.
+
+Pinned end-to-end by `cqlite-core/tests/issue_933_range_tombstone_compaction.rs`. Authority:
+`org.apache.cassandra.db.rows.RangeTombstoneMarker` / `UnfilteredSerializer`.
 
 ### gc_grace purging: overlap-aware in partial compactions (#935)
 
@@ -1033,30 +1034,53 @@ All core SSTable component parsers are working correctly with complete support f
 
 ---
 
-## M2+ Deferred Features
+## Write support posture (current)
 
-The following features are planned but not implemented in the current M2 milestone:
+### CQLite writes SSTables — uncompressed only
 
-### SSTable Writing (Removed in Issue #175, #176)
+**Status**: ✅ **SUPPORTED** — M5 complete; byte-for-byte STCS compaction parity since v0.12
 
-**Status**: Removed from codebase
-**Rationale**: CQLite is a **read-only library** focused on local SSTable access
+CQLite is **not** a read-only library. `write-support` is a **default** feature of `cqlite-core`,
+and the write engine produces Cassandra 5.0-readable SSTables:
 
-**Removed Components**:
-- `storage/wal.rs` (Write-Ahead Log)
-- `storage/memtable.rs` (In-memory write buffer)
-- `storage/compaction.rs` (Background merging)
-- `storage/manifest.rs` (Metadata tracking)
-- `storage/sstable/writer.rs` (SSTable serialization)
-- `storage/sstable/validation.rs` (Write validation)
+- **Flush**: `WriteEngine::write` (`cqlite-core/src/storage/write_engine/mod.rs`) accepts
+  `Mutation`s through a WAL + memtable (`write_engine/wal.rs`, `write_engine/memtable.rs`) and
+  flushes them as SSTables via `SSTableWriter` (`storage/sstable/writer/`).
+- **Compaction**: STCS runs end-to-end. `WriteEngine::set_merge_policy` and
+  `WriteEngine::maintenance_step` (`write_engine/maintenance.rs`) drive real background compaction,
+  and `KWayMerger` (`write_engine/merge/mod.rs`) is the production merger.
+- **Formats**: BIG (`nb`) is the DEFAULT write target; canonical BTI (`da`) write is a supported
+  alternative (#872).
+- **Export**: `WriteEngine::export_sstable` (`write_engine/export.rs`) emits a
+  Cassandra-named component set.
 
-**Impact**: All `put()`, `delete()`, `flush()`, `compact()` methods return errors with message "removed in Issue #175/176".
+> **Claim boundary — UNCOMPRESSED SSTable writes only (issue #1406).**
+> The production write surface (flush + compaction) emits **uncompressed** SSTables and **never**
+> writes a `CompressionInfo.db`. The compressed-write building blocks (`CompressedDataWriter`,
+> `CompressionInfoWriter`) exist but are **UNWIRED** — fixture synthesis for the decompressing
+> reader only, with zero Cassandra-side byte-parity coverage. Configuring compressed production
+> writing returns `Error::UnsupportedFormat`
+> (`CompressionInfoWriter::guard_unsupported_production_write`). Do **not** claim CQLite emits
+> compressed SSTables. The READ path decompresses all four algorithms (LZ4, Snappy, Deflate, Zstd)
+> end-to-end.
 
-**Workaround**: Use Apache Cassandra for writes. CQLite is read-only.
+**Historically removed components** (Issues #175 / #176): the original `storage/wal.rs`,
+`storage/memtable.rs`, `storage/compaction.rs`, `storage/manifest.rs`,
+`storage/sstable/writer.rs`, and `storage/sstable/validation.rs` were deleted when CQLite was
+briefly read-only. The write path was later rebuilt in a different place — under
+`cqlite-core/src/storage/write_engine/` and `cqlite-core/src/storage/sstable/writer/` — so those
+paths are gone but the capability is not.
 
-**Future**: Write support may return in M4+ if community demand justifies the complexity.
+**Residual read-only stubs**: the *legacy* `Storage` trait methods `put()` / `delete()` /
+`flush_memtable()` / `flush()` in `cqlite-core/src/storage/mod.rs` still return
+"removed in Issue #175" errors — that trait was never rewired to the write engine. Use
+`WriteEngine` (or the CLI's write/compact commands) rather than those stubs.
+`Database::flush()` / `Database::compact()` (`cqlite-core/src/lib.rs`) are gated behind the
+`experimental` feature and delegate to those same legacy stubs.
 
 ---
+
+## Feature-Gated and Deferred Features
 
 ### Experimental Features (Opt-In)
 
@@ -1081,42 +1105,52 @@ cargo test --package cqlite-core --features experimental bloom
 
 **Feature Flag**: `legacy-heuristics`
 **Default**: **Disabled** (not in CI)
-**Purpose**: Backward compatibility for Cassandra 3.x/4.x SSTables
+**Purpose**: Opt-in heuristic *fallbacks* (schema-less blob decode) — **not** support for a
+pre-Cassandra-5.0 format.
 
-CQLite defaults to Cassandra 5.0+ formats using authoritative metadata (no-heuristics mandate, Issue #28). Legacy heuristics enable schema-less blob fallback for older formats.
+CQLite decodes using authoritative metadata only (no-heuristics mandate, Issue #28); this flag
+re-enables the old guessing fallbacks for callers who accept the risk.
+
+> **Version floor (do not misread this flag).** CQLite targets **Cassandra 5.0**: `na`/`nb` BIG and
+> `oa`/`da` BTI. Pre-`na` (`ma`–`me`, Cassandra 3.x) is **out of scope** and is rejected in code —
+> `BigVersionGates::from_version` rejects `< na` and `BtiVersionGates::from_version` rejects
+> non-`da`, both surfacing `Error::UnsupportedVersion` through `SSTableReader::open`. Enabling
+> `legacy-heuristics` does **not** make a 3.x SSTable readable.
 
 **To Enable**:
 ```bash
 cargo build --features legacy-heuristics
 ```
 
-**Note**: Legacy support is **not tested in CI** and may have gaps. Modern Cassandra 5.0 is the supported target.
+**Note**: These fallbacks are **not tested in CI** and may have gaps.
 
 ---
 
-#### ANTLR Parser (Alternative CQL Parser)
+#### ~~ANTLR Parser (Alternative CQL Parser)~~ — REMOVED
 
-**Feature Flag**: `antlr`
-**Default**: Disabled
-**Purpose**: ANTLR4-based CQL parser as alternative to nom-based parser
+**Status**: ✅ **REMOVED** (Issue #1639)
 
-M2+ uses nom parser by default. ANTLR integration is experimental and incomplete.
+There is no `antlr` feature flag. The ANTLR stub backend was removed in #1639 (every parse through
+it failed); nom is the only built-in CQL parser backend. Pinned by
+`cqlite-core/tests/parser_factory_tests.rs`.
 
 ---
 
 #### Tombstone and GC Logic
 
 **Feature Flag**: `tombstones`
-**Default**: Disabled
-**Purpose**: Tombstone detection and garbage collection semantics
+**Default**: Disabled (`cqlite-core/Cargo.toml`)
 
-**Status**: Deferred to M3+
-
-Current implementation skips tombstoned rows (Issue #191 fix in select_executor.rs) but does not expose tombstone metadata or perform GC simulation.
+The default build skips tombstoned rows on the read path. The `tombstones` feature changes
+execution behavior in `cqlite-core/src/query/select_executor/execute.rs` (epic #951 "honest
+paths": a non-targeted execution fails loudly rather than silently full-scanning). Tombstone
+semantics on the **write/compaction** path — gc_grace purging, range-tombstone shadowing and
+re-emission — are NOT behind this flag and are supported by default; see
+"Epic #921 — Compaction merge semantics" above.
 
 ---
 
-### Query Engine Limitations (M2+ Scope)
+### Query Engine Surface
 
 **Current State**: Query engine enabled by default (`state_machine` feature)
 
@@ -1126,16 +1160,24 @@ Current implementation skips tombstoned rows (Issue #191 fix in select_executor.
 - Query planning and optimization
 - Multi-partition query execution
 - Schema-aware result formatting
+- `WHERE` filtering: partition-key point lookup plus a residual filter step
+  (`select_executor/mod.rs::execute_filter`, `select_executor/predicate.rs`)
+- `LIMIT` / `OFFSET`, including scan-level limit pushdown
+  (`select_executor/mod.rs::execute_limit`, `select_executor/limit_pushdown/`)
+- `PER PARTITION LIMIT` (`execute_per_partition_limit`)
+- `ORDER BY` (`select_executor/lookup.rs`)
+- `DISTINCT` (`select_optimizer.rs`)
+- Aggregate functions and `GROUP BY`
+  (`select_executor/aggregation/`, `select_executor/stream_agg.rs`, plus the #1578
+  GROUP-BY-free global-aggregate fast path in `select_executor/execute.rs`)
 
-**Not Implemented** (M3+ Scope):
-- INSERT/UPDATE/DELETE statement execution (write operations)
-- WHERE clause filtering (partial - partition key filtering works)
-- ORDER BY clause support
-- LIMIT clause support
-- Aggregate functions (COUNT, SUM, AVG, etc.)
-- GROUP BY clause support
+**Not Implemented**:
+- `UPDATE` / `DELETE` statement execution (no executor exists; the statement types parse only)
+- `INSERT` execution requires the non-default `experimental` feature
+  (`cqlite-core/src/query/executor.rs` returns `Error::UnsupportedFormat` otherwise)
 
-**Workaround**: For unsupported query features, use `read-sstable` command for raw data access or Apache Cassandra tools.
+**Workaround**: For unsupported query features, use the `read-sstable` command for raw data access,
+or write through `WriteEngine` / Apache Cassandra tools.
 
 ---
 
@@ -1208,32 +1250,34 @@ cargo build --no-default-features --features all-compression
 
 - **Issue #258**: V5CompressedLegacy Parser Errors for 15/33 Tables - **FIXED**
   - Status: ✅ FIXED - Two root causes identified and resolved
-  - Root cause 1: Timestamp units mismatch in `parser/types.rs` - `parse_timestamp()` multiplied milliseconds by 1000 (converting to microseconds) but `Value::Timestamp(i64)` stores milliseconds. This caused overflow → negative values → `<invalid-timestamp:...>` markers.
-  - Root cause 2: Partition header flags heuristic in `row_decoder` - `flags > 0x20` check rejected valid partition headers with higher flag values, causing single-byte offset skip and cascading misalignment errors. Violated Issue #28 no-heuristics mandate.
-  - Fix 1: Removed `* 1000` multiplication in `parser/types.rs:289` - now stores milliseconds directly
-  - Fix 2: Removed `flags > 0x20` heuristic check in `row_decoder:292` - validation now format-based only
+  - Root cause 1: Timestamp units mismatch in the type parser - `parse_timestamp()` multiplied milliseconds by 1000 (converting to microseconds) but `Value::Timestamp(i64)` stores milliseconds. This caused overflow → negative values → `<invalid-timestamp:...>` markers.
+  - Root cause 2: Partition header flags heuristic in the row decoder - a `flags > 0x20` check rejected valid partition headers with higher flag values, causing single-byte offset skip and cascading misalignment errors. Violated Issue #28 no-heuristics mandate.
+  - Fix 1: Removed the `* 1000` multiplication — `parse_timestamp` now stores milliseconds directly (`cqlite-core/src/parser/types/primitives.rs:89`)
+  - Fix 2: Removed the `flags > 0x20` heuristic check in the row decoder - validation is now format-based only
   - Result: All 33 test tables pass comprehensive SELECT tests with no ERROR messages or invalid data markers
-  - Files: `cqlite-core/src/parser/types.rs`, `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
+  - Files: `cqlite-core/src/parser/types/` (split by epic #1116: `primitives.rs`, `collections.rs`, `udt.rs`, `tombstones.rs`), `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/`
 
 - **Issue #240**: DATE Type Values Display as `<invalid-date:...>` - **FIXED**
   - Status: ✅ FIXED - DATE type now parses correctly in all contexts including map keys
-  - Root cause: `CqlType::Date` was mapped to `ComparatorType::Custom("date")` in `comparator.rs`, causing DATE values to fall through to blob parsing. Also, multiple parsing paths (parser/types.rs, row_decoder) read DATE as raw i32 without Cassandra's Integer.MIN_VALUE offset decoding.
+  - Root cause: `CqlType::Date` was mapped to `ComparatorType::Custom("date")`, causing DATE values to fall through to blob parsing. Also, multiple parsing paths read DATE as raw i32 without Cassandra's Integer.MIN_VALUE offset decoding.
   - Fix:
-    1. Added `ComparatorType::Date` variant to comparator.rs with proper comparison support
-    2. Updated `from_cql_type()` and `from_cql_type_with_registry()` to map `CqlType::Date` → `ComparatorType::Date`
-    3. Added DATE parsing arm to `parse_value_with_schema_type()` and `parse_value_with_comparator()` in value_parsing.rs
-    4. Fixed `parse_date()` in parser/types.rs to apply Cassandra DATE encoding: `stored.wrapping_add(i32::MIN as u32) as i32`
-    5. Fixed map key DATE parsing in row_decoder line 5327
+    1. Added a `ComparatorType::Date` variant with proper comparison support (`cqlite-core/src/types/comparator.rs:48`)
+    2. Updated `from_cql_type()` / `from_cql_type_with_registry()` to map `CqlType::Date` → `ComparatorType::Date` (`comparator.rs:140`)
+    3. Added DATE parsing arms to `parse_value_with_schema_type()` and `parse_value_with_comparator()` (`reader/parsing/value_parsing.rs`, `reader/parsing/comparator_value_parsing.rs`)
+    4. Fixed `parse_date()` to apply Cassandra DATE encoding: `stored.wrapping_add(i32::MIN as u32) as i32` (`parser/types/primitives.rs:97-100`)
+    5. Fixed DATE map-key parsing in the row decoder (now `row_decoder/complex_column.rs:1582`, with the same decode in `cell_value_scalar.rs:332`, `raw_type_value.rs:275`, `raw_value.rs:262`)
+    6. Digest-key DATE decoding at `storage/sstable/key_digest.rs:233-240`
   - Cassandra DATE encoding: 4-byte big-endian unsigned int shifted by Integer.MIN_VALUE (2^31) for byte-order comparability. Decoding adds i32::MIN back.
   - Result: DATE columns and DATE keys in maps now display as `YYYY-MM-DD` format (e.g., `2025-10-05`) instead of `<invalid-date:...>`
-  - Files: `comparator.rs`, `value_parsing.rs`, `comparator_value_parsing.rs`, `key_digest.rs`, `parser/types.rs`, `row_decoder`
 
 - **Issue #238**: UDTs Inside Collections Not Parsed - **FIXED**
   - Status: ✅ FIXED - Extended `parse_value_with_comparator` for recursive type parsing
   - Root cause: `parse_value_with_comparator` had minimal implementation (only Boolean, Text, Blob) - all other types fell back to Blob, including UDTs nested in List/Set/Map
   - Fix: Added complete type handlers for TinyInt, SmallInt, Int, BigInt, Uuid, List, Set, Map, Tuple, UDT, and Frozen types
   - Result: UDTs inside collections now show actual field values instead of `0x` blobs
-  - File: `cqlite-core/src/storage/sstable/reader/parsing/value_parsing.rs` (lines 172-324)
+  - File: `cqlite-core/src/storage/sstable/reader/parsing/comparator_value_parsing.rs`
+    (`parse_value_with_comparator` at `:44`, recursion via `parse_value_with_comparator_at_depth`
+    in `value_parsing.rs:481`)
 
 - **Issue #239**: Nested UDTs Inside Collections Display as Hex Blobs - **FIXED**
   - Status: ✅ FIXED - Nested UDTs in collections now parse correctly
@@ -1245,7 +1289,7 @@ cargo build --no-default-features --features all-compression
     2. Added `parse_inline_udt_value()` function to parse UDTs using inline field definitions when registry lookup fails
     3. Modified all `CqlType::Udt(udt_name, inline_fields)` pattern matches to use `inline_fields` as fallback
   - Result: Nested UDTs like `contact_info.address` now show parsed field values (`{street, city, state, zip_code, country}`) instead of `0x...` blobs
-  - File: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder.rs`
+  - File: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/` (split by epic #1116)
 
 ### Completed Issues (Fixed - Dec 2025)
 
@@ -1259,7 +1303,9 @@ cargo build --no-default-features --features all-compression
   - Root cause: Parser tried to read complex deletion time VInt as cell flags
   - Fix: Added `is_complex_column()` detection, `parse_complex_column()` with proper HAS_COMPLEX_DELETION handling, `skip_complex_cell()` with correct field order (flags→timestamp→deletion→ttl→path→value)
   - Key insight: Cell flags are ONLY 0x00-0x1F (5 bits). The 0xC0+ bytes were VInt data, not flags.
-  - Also fixed: Added V5_0TypedCollections to block_io.rs NB format list
+  - Also fixed: format-version dispatch on the block-read path (the version variant named in the
+    original writeup no longer exists; version classification now lives in
+    `cqlite-core/src/parser/header.rs`)
   - Result: `typed_collections_table` and `frozen_collections_table` now pass
 
 - **Issue #218**: Summary.db parser format mismatch - **FIXED**
@@ -1282,7 +1328,7 @@ cargo build --no-default-features --features all-compression
   - Result: 19 tables unblocked
 
 - **Issue #212**: BTI index zero entries - FIXED
-  - Status: Fixed (V5_0NewBigFormat variant handling)
+  - Status: Fixed (format-version dispatch on the block-read path + BTI inter-entry padding)
   - Result: `stock_prices` now passing
 
 - **Issue #213**: Clustering key parsing order - FIXED
@@ -1297,172 +1343,128 @@ cargo build --no-default-features --features all-compression
 
 - **Issue #207**: Byte-Comparable Key Encoding (CEP-25)
   - Status: Completed
-  - Result: V5_0NewBigFormat (0xD4645400) now recognized
+  - Result: the `0xD4645400` header magic is recognized (`cqlite-core/src/parser/header.rs:171`)
 
 - **Issue #208**: BTI Index.db Format Support
   - Status: Completed
-  - Result: Dual-parser architecture for MD5 digest + BTI formats
-  - Impact: +366 LOC, Index.db parsing improved
+  - Note: the "dual-parser architecture for MD5 digest + BTI Index.db formats" described here was
+    subsequently **removed** as a spurious heuristic (Issue #28 mandate) — there is no MD5 digest in
+    a BIG Index.db entry, and a BTI-indexed SSTable has no Index.db at all (it uses
+    `Partitions.db`/`Rows.db`). See the corrected entry layout under "Index.db VInt Offset Parsing"
+    above.
 
 - **Issue #209**: Component Flattening Pre-allocation
   - Status: Completed
   - Result: 55-75% performance improvement for 2-6 component keys
 
-### Deferred Issues (M3+ Scope)
+### Formerly Deferred (M3+ Scope) — now closed
 
-- **Issue #154**: UDT support (collections_with_udts)
-  - Status: Partial implementation, blocked by Issue #210
-  - Scope: M3+ feature completeness
+- **Issue #154**: UDT support (`collections_with_udts`)
+  - Status: ✅ CLOSED (2025-10-11). Its blocker, Issue #210 (static columns in SerializationHeader),
+    is also CLOSED; UDT support landed via #220 and `collections_with_udts` passes.
 
 - **Issue #162**: Statistics.db EncodingStats parsing
-  - Status: Minimal parser implemented
-  - Scope: M3+ metadata enhancements
+  - Status: Parser implemented; the EncodingStats decode now lives in
+    `cqlite-core/src/parser/enhanced_statistics_parser/encoding_stats.rs`.
 
 - **Issue #191**: Tombstone row filtering
-  - Status: Fixed (skip tombstoned rows in select_executor.rs)
-  - Remaining: Expose tombstone metadata (M3+ scope)
+  - Status: ✅ CLOSED (2025-10-24). Tombstoned rows are skipped on the SELECT path
+    (`cqlite-core/src/query/select_executor/execute.rs`). Tombstone metadata *is* exposed — behind
+    the non-default `tombstones` feature, with epic #951's honest-paths behavior (a non-targeted
+    execution fails rather than silently full-scanning); see "Tombstone and GC Logic" above.
 
-### Infrastructure Removed
+### Infrastructure Removed (and later rebuilt elsewhere)
 
 - **Issue #175**: MemTable and WAL removal
-  - Rationale: Read-only library focus
-  - Impact: All write operations return errors
+  - Rationale at the time: read-only library focus
+  - Then: all write operations returned errors
+  - **Now**: rebuilt under `cqlite-core/src/storage/write_engine/` (`wal.rs`, `memtable.rs`). Only
+    the *legacy* `Storage` trait stubs still return the "removed in Issue #175" error — see
+    "Write support posture (current)".
 
 - **Issue #176**: Compaction and manifest removal
-  - Rationale: Read-only library focus
-  - Impact: Compaction methods return errors
+  - Rationale at the time: read-only library focus
+  - Then: compaction methods returned errors
+  - **Now**: STCS compaction runs end-to-end via `WriteEngine::maintenance_step` +
+    `KWayMerger`, with byte-for-byte parity vs Cassandra since v0.12 — see "Compaction and Export
+    Capabilities".
 
 ---
 
-## M5 Write Support Limitations
+## Historical M5 Write-Support Limitations (mostly closed)
 
-CQLite M5 introduces SSTable write support, but with several intentional limitations for the initial release. The write engine produces valid Cassandra 5.0 BIG format SSTables that can be read by both CQLite and Cassandra, but takes simplified approaches in areas where full Cassandra compatibility is not critical.
+These were the intentional simplifications taken when write support first landed in M5. **Nearly all
+have since been fixed** — each entry below records what the limitation was and what closed it, so
+that an old reference to "the M5 write limitation" resolves to the current truth rather than the
+2026-01 snapshot. The write engine produces valid Cassandra 5.0 BIG format SSTables readable by both
+CQLite and Cassandra; the one genuinely open claim boundary is the uncompressed-only write surface
+(#1406, last entry in this section).
 
-### Tombstone Local Deletion Time Workaround
+### ~~Tombstone Local Deletion Time Workaround~~ - FIXED
 
-**Status**: ⚠️ **WORKAROUND IN PLACE** (Issue #401)
-**Impact**: Tombstone cells use derived local_deletion_time instead of explicit value
-**Affected Component**: `cqlite-core/src/storage/sstable/writer/data_writer.rs`
+**Status**: ✅ **FIXED** (Issue #401, CLOSED 2026-01-29; explicit field shipped in #764)
 
 **Background**: Cassandra tombstones require two timestamp fields:
 1. **Deletion timestamp** (microseconds): When the delete was issued
 2. **Local deletion time** (seconds): Local server time for GC eligibility tracking
 
-**Current Implementation**: The `Mutation` struct does not include an explicit `local_deletion_time` field. The writer derives it from the deletion timestamp:
+**Was**: `Mutation` had no explicit `local_deletion_time`, so the writer derived it as
+`timestamp_micros / 1_000_000` — correct for an immediate delete, wrong for a replayed or
+back-dated one.
 
-```rust
-// data_writer.rs:416
-let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
-```
+**Now**: `Mutation` carries the field explicitly —
+`pub local_deletion_time: Option<i32>` (`cqlite-core/src/storage/write_engine/mutation.rs:97`),
+settable via `Mutation::with_local_deletion_time` (`:191`), and a row deletion carries its own
+`(deletion_time_micros, local_deletion_time_secs)` pair (`:101`). It still defaults to the derived
+value when unset, so existing callers are unaffected. The writer lives under
+`cqlite-core/src/storage/sstable/writer/data_writer/` (split by epic #1116); TTL / expiring-cell
+handling is in `data_writer/cells.rs`.
 
-**Rationale**:
-- For immediate deletes, local_deletion_time = deletion_time / 1000 is correct
-- GC semantics are deferred (M6+ scope)
-- SSTable compaction (which uses local_deletion_time) is out of scope for M5
-
-**Future Fix** (M6+):
-- Add `local_deletion_time: Option<i32>` to `Mutation` struct
-- Allow explicit setting via API: `mutation.with_deletion_time(timestamp, local_deletion_time)`
-- Default to derived value if not specified
-
-**Tracking**: Issue #401 (RESOLVED with workaround)
+**Tracking**: Issue #401 (CLOSED)
 
 ---
 
-### IndexWriter Memory Buffering
+### ~~IndexWriter Memory Buffering~~ - FIXED (streaming mode)
 
-**Status**: ⚠️ **ACCEPTABLE TRADE-OFF** (Issue #408)
-**Impact**: Index.db entries are buffered in memory (not streamed to disk)
-**Affected Component**: `cqlite-core/src/storage/sstable/writer/index_writer.rs`
+**Status**: ✅ **FIXED** (Issue #408, CLOSED 2026-01-29; streaming from #753, counting mode from #908)
 
-**Current Implementation**: The `IndexWriter` uses a `Vec<u8>` buffer that holds all index entries in memory until `finish()` is called:
+**Was**: `IndexWriter` held every serialized index entry in a `Vec<u8>` until `finish()`, so peak
+heap grew linearly with partition count (~20 MB per 1M partitions, ~200 MB per 10M) and a
+billion-partition write was out of reach.
 
-```rust
-// index_writer.rs:90-91
-buffer: Vec<u8>,  // Serialized index data (written incrementally)
-```
+**Now**: `IndexWriter` has **three** modes that produce byte-identical Index.db output
+(`cqlite-core/src/storage/sstable/writer/index_writer.rs:130-165`):
 
-**Memory Usage**:
-- Each entry: 20-22 bytes (marker + digest + VInt offset + promoted_length)
-- 1M partitions: ~20 MB
-- 10M partitions: ~200 MB
-- Memory grows linearly with partition count
+| Mode | Constructor | Peak heap | Used by |
+|------|-------------|-----------|---------|
+| In-memory | `IndexWriter::new` (`:215`) | O(file) | unit tests that inspect produced bytes |
+| Streaming | `IndexWriter::with_sink(index_path)` (`:270`) | O(one entry) | the production BIG write path (#753) |
+| Counting | `IndexWriter::counting` (`:251`) | O(one entry) | the BTI path, which has no Index.db but still needs per-entry offset/size bookkeeping (#908) |
 
-**Why Not True Streaming?**:
-1. **Summary.db sampling requires accurate offsets**: Summary.db samples every Nth index entry and needs the exact byte offset in Index.db where each entry was written. This requires knowing Index.db positions before the file is complete.
-2. **Offset tracking complexity**: True disk streaming would require:
-   - Flushing partial buffers during writes
-   - Complex offset calculation across buffer boundaries
-   - Synchronous I/O in async context
+In streaming mode each entry is serialized into a small scratch `Vec`, written through a
+`BufWriter<File>`, and the scratch is cleared — keeping a multi-GB compaction inside the 128 MB
+memory target. The file is opened lazily on the first `add_partition`, so the parent directory need
+not exist at construction. Summary.db sampling still gets exact offsets: in streaming/counting
+modes `index_offset` equals `position` (the scratch is empty at that point), and in in-memory mode
+it equals `buffer.len()`.
 
-**Trade-Off Analysis**:
-- ✅ **Acceptable**: 200 MB for 10M partitions is reasonable for modern systems
-- ✅ **Simplicity**: Vec buffer provides O(1) append and accurate offset tracking
-- ❌ **Not suitable for**: Billion-partition SSTables (20 GB+ memory)
-
-**Workaround**: For extremely large SSTables, split writes into multiple generations.
-
-**Future Optimization** (M6+):
-- Implement true streaming with buffered I/O
-- Add configurable buffer size with periodic flushes
-- Track cumulative offsets across buffer boundaries
-
-**Tracking**: Issue #408 (documented limitation)
+**Tracking**: Issue #408 (CLOSED)
 
 ---
 
-### Promoted Index Deferred
+### ~~Promoted Index Deferred~~ - IMPLEMENTED
 
-**Status**: ⏳ **DEFERRED** (M5 Stage 0 scope)
-**Impact**: Wide partitions (many clustering keys) cannot use fast within-partition seeks
-**Affected Component**: `cqlite-core/src/storage/sstable/writer/index_writer.rs`
+**Status**: ✅ **IMPLEMENTED** (Issue #993) — the M5 Stage 0 deferral is over.
 
-**Current Implementation**: Index.db entries always write `promoted_index_length = 0`:
+Promoted index is Cassandra's optimization for wide partitions: it stores sampled clustering-key
+ranges *within* a partition, enabling a bounded seek to a specific row range instead of a full
+within-partition scan. The old claim here — that Index.db entries always write
+`promoted_index_length = 0` — is no longer true.
 
-```rust
-// index_writer.rs:168-169
-// Write promoted index length (0 = no promoted index)
-encode_unsigned(0, &mut self.buffer);
-```
-
-**What Is Promoted Index?**:
-Promoted index is Cassandra's optimization for wide partitions (partitions with many clustering keys). It stores sampled clustering key ranges within a partition, enabling O(log n) seeks to specific rows instead of O(n) sequential scans.
-
-**Example Use Case**:
-```sql
--- Wide partition: 10,000 rows per user_id
-CREATE TABLE user_activity (
-    user_id int,
-    timestamp timestamp,
-    activity text,
-    PRIMARY KEY (user_id, timestamp)
-);
-
--- Without promoted index: Must scan all 10K rows
-SELECT * FROM user_activity WHERE user_id = 1 AND timestamp > '2025-01-01';
-
--- With promoted index: Jump directly to 2025-01-01 range
-```
-
-**Impact**:
-- ✅ **No impact**: Simple tables, narrow partitions (< 100 rows per partition)
-- ⚠️ **Minor impact**: Medium partitions (100-1000 rows) - sequential scan still fast
-- ❌ **Significant impact**: Wide partitions (10K+ rows) - linear scan required
-
-**Rationale for Deferral**:
-- M5 Stage 0 focuses on correctness, not performance optimizations
-- Promoted index format is complex (requires sampling logic and offset tracking)
-- 95% of use cases have narrow partitions
-- Sequential scan is functionally correct, just slower
-
-**Future Implementation** (M5.1+):
-1. Detect wide partitions (> 1000 rows) during write
-2. Sample clustering keys every N rows (e.g., every 256 rows)
-3. Encode promoted index block: `[num_entries][entry_1]...[entry_n]`
-4. Each entry: `[clustering_key][row_offset]`
-5. Write promoted_index_length and data to Index.db
-
-**Tracking**: M5.0 Stage 0 scope decision (no issue filed)
+See **"Remaining Write-Path Limitations → Promoted Index"** earlier in this appendix for the
+current write-side and read-side implementation, including the **≥ 64 KiB** collection threshold and
+the **≥ 2**-block emission gate that mirrors Cassandra's `RowIndexEntry.create()`
+(`columnIndexCount > 1`).
 
 ---
 
@@ -1480,15 +1482,26 @@ The `StatisticsWriter` now produces complete Cassandra 5.0 compatible Statistics
 - STATS component (min/max timestamps, TTL, deletion times, row/column counts, histograms)
 - SERIALIZATION_HEADER component (schema-derived partition keys, clustering keys, column names/types)
 
-**Current Limitations**:
-- Column bitmap encoding limited to 64 columns (VUInt format)
-- STATS histograms use minimal valid values (2 buckets, empty tombstone histogram)
-- COMPACTION cardinality estimator uses empty HyperLogLogPlus sketch
+**Current Limitations** (one, not three):
+- COMPACTION cardinality estimator writes a **minimal valid empty** HyperLogLogPlus sketch
+  (`HyperLogLogPlus(p=11, sp=25)`, SPARSE, 15 bytes, both set sizes 0 —
+  `writer/stats_writer/components.rs:63-92`). The file parses in Cassandra, but the estimate is 0.
+
+**Corrections to earlier drafts of this section**:
+- *"STATS histograms use minimal valid values (2 buckets, empty tombstone histogram)"* was **wrong**.
+  The writer emits Cassandra-canonical `EstimatedHistogram` bucket layouts (156 partition-size / 119
+  column-count buckets, #1327 — `stats_writer/components.rs:493-496`,
+  `stats_writer/estimated_histogram.rs`), and the tombstone-drop histogram is populated at
+  `stats_writer/metadata.rs:257-264` (excluding the `DeletionTime.LIVE` sentinel, per #851).
+- *"Column bitmap encoding limited to 64 columns"* is a **reader** limitation, not a Statistics.db
+  one — see "Reader lacks the `≥ 64`-column large-subset decode branch" above. The writer implements
+  both the `< 64` bitmap and the `≥ 64` large-subset forms.
 
 **Impact**: Statistics.db files are fully compatible with Cassandra 5.0. When schema is provided via `write()`, SerializationHeader contains full column metadata. When schema is None, uses minimal stub format.
 
 **Files**:
-- `cqlite-core/src/storage/sstable/writer/stats_writer.rs` (complete implementation)
+- `cqlite-core/src/storage/sstable/writer/stats_writer/` (split by epic #1116: `mod.rs`,
+  `components.rs`, `metadata.rs`, `estimated_histogram.rs`, `serialization_header.rs`, `marshal.rs`)
 
 **Related Issues**: Issue #425 (Statistics.db checksums and format - FIXED)
 
@@ -1502,7 +1515,7 @@ CQLite's production SSTable writer emits uncompressed Data.db only and never wri
 
 The READ path fully supports all four algorithms (LZ4, Snappy, Deflate, Zstd) — CQLite reads compressed Cassandra SSTables end-to-end.
 
-See "M5.1 Write Support Capabilities" section at the top of this document for the exact fail-closed boundary.
+See the "Write Support Capabilities" section at the top of this document for the exact fail-closed boundary.
 
 **Files**:
 - `cqlite-core/src/storage/sstable/writer/compressed_data_writer.rs` (test-only building block)
@@ -1515,21 +1528,31 @@ See "M5.1 Write Support Capabilities" section at the top of this document for th
 - **Pass rate: 100% (33/33 tables)** - COMPLETE! All test tables now passing
 - All SSTable component parsers (Data.db, Index.db, Summary.db, Statistics.db) now use correct formats
 - All data types fully supported: basic types, collections, UDTs, frozen types, complex cells
-- **M5.1 Write Support**: Feature-complete with documented trade-offs
-  - ⚠️ CompressionInfo.db: production writer emits uncompressed Data.db only; compressed-write infra is test-only/fail-closed (#1406). READ/decompression fully supports LZ4, Snappy, Deflate, Zstd
+- **CQLite is NOT read-only.** Write support (`write-support`, a **default** feature) and STCS
+  compaction ship, with byte-for-byte compaction parity vs Apache Cassandra since v0.12. See
+  "Write support posture (current)".
+- **Write support**: feature-complete for its claimed surface
+  - ⚠️ **The one hard claim boundary**: the production write surface emits **uncompressed** SSTables
+    only and **never** a `CompressionInfo.db`; compressed-write building blocks are UNWIRED
+    (fixture synthesis only) and configuring compressed production writing returns
+    `Error::UnsupportedFormat` (#1406). READ/decompression fully supports LZ4, Snappy, Deflate, Zstd
   - ✅ Collection serialization: Frozen and non-frozen collections
   - ✅ Static columns: Extended flags format with EXTENDED_IS_STATIC
   - ✅ Composite partition keys: Multi-component encoding
   - ✅ Delta encoding: Statistics.db baseline for timestamps/TTL
-  - ⚠️ Issue #401: Tombstone local_deletion_time derived from timestamp
-  - ⚠️ Issue #408: IndexWriter uses Vec buffer (not true disk streaming)
-  - ⏳ Promoted Index deferred (length=0 in all entries)
-  - ⚠️ Statistics.db minimal format (hybrid header, not full TOC)
+  - ✅ Explicit tombstone `local_deletion_time` on `Mutation` (#401 fixed, shipped in #764)
+  - ✅ Streaming `IndexWriter` — O(one entry) peak heap via `with_sink` (#408 fixed via #753/#908)
+  - ✅ Promoted index for ≥ 64 KiB partitions, gated on ≥ 2 blocks like Cassandra (#993)
+  - ✅ Statistics.db full Cassandra 5.0 TOC format with canonical histograms (#1327); only the
+    HyperLogLogPlus cardinality sketch is an empty stub
+  - ✅ Canonical BTI (`da`) write in addition to the default BIG (`nb`) target (#872)
 - **All read-side feature gaps closed**:
   - ✅ Issue #219: Frozen type support
   - ✅ Issue #220: UDT (User-Defined Type) support
   - ✅ Issue #221: Complex cell flag handling for non-frozen collections
-- **Milestone achieved**: M5.1 completion (uncompressed SSTable write support, collections, static columns). Compression is read-only — the production writer emits uncompressed Data.db; compressed-write infra is test-only/fail-closed (#1406)
+- **Remaining read-side divergences to know about**: the `≥ 64`-column large-subset decode branch is
+  missing, and the equal-timestamp live-cell value tie-break differs from Cassandra's
+  `Cells.resolveRegular` — both detailed under "Epic #817".
 
 ---
 
