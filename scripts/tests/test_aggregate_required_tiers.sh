@@ -477,6 +477,32 @@ invoke() {
 
 contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 
+# NO TWO LINES OF ONE RUN MAY CONTRADICT EACH OTHER (issue #3033 round 8). The
+# recurring defect in this block has been a claim that outran the run's observations;
+# its worst form is a summary that both ADMITS a read failed and DENIES that anything
+# failed, which is what an off-shape label plus a 403 on the label read used to
+# produce (`permissions:` advice next to "NOT an authorization or API problem"). This
+# is the property, not a spelling: any run that admits a failed read must carry none
+# of the denials.
+admits_read_failure() {
+  case "$1" in
+    *"could not read"*|*"labels FAILED"*|*"read FAILED"*|*"read(s) FAILED"*|*"events FAILED"*|*UNREADABLE*)
+      return 0 ;;
+  esac
+  return 1
+}
+DENIAL_PHRASES="NOT an authorization or API problem|and nothing failed|neither a permission nor an API problem|no read failed on this run|there was never"
+contradictions() {
+  local out="$1" found="" d="" rest="$DENIAL_PHRASES"
+  admits_read_failure "$out" || return 0
+  while [ -n "$rest" ]; do
+    d="${rest%%|*}"
+    if [ "$d" = "$rest" ]; then rest=""; else rest="${rest#*|}"; fi
+    case "$out" in *"$d"*) found="${found}[${d}] " ;; esac
+  done
+  printf '%s' "$found"
+}
+
 FUTURE=$(( $(date +%s) + 86400 ))
 EXPIRED=1
 
@@ -655,6 +681,891 @@ else
   bad "a real app applier was withheld (rc=$RC): $OUT"
 fi
 
+# --------------- waiver evidence: every state reported distinctly (#3033) ---
+# THE BUG THIS PINS. An empty label-event feed used to mean two unrelated things —
+# "this pull request has nothing to waive" and "the read of the `labeled` events
+# FAILED" — and both left the same empty file and the same silence. The second kills
+# the entire EVIDENCE half of `ci:waive:<tier-id>` (head-binding and the
+# pending-waiver horizon in gating_registry.rb), whose only symptom is a waiver that
+# quietly takes until the deadline with nobody named. EVERY failure mode collapsed
+# into that one silence: an authorization refusal, a rate limit, a 5xx, an absent
+# `gh`, a bad `--jq`. The states are now named, and this asserts they are
+# DISTINGUISHABLE — the discriminator is the pairwise difference of the reported
+# line, not the presence of any single string.
+#
+# It also pins the direction of the degradation: unreadable evidence must never red
+# the job. The waiver still has to be honoured at the deadline, because reding a
+# break-glass PR for an API blip is the worse outage.
+echo "== every state of the label-event feed is reported distinguishably =="
+
+# An AUTHORIZATION refusal, in the shape `gh` reports one.
+cat >"$WORK/waiver-events-403.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "gh: Resource not accessible by integration (HTTP 403)" >&2
+exit 1
+EOF
+chmod +x "$WORK/waiver-events-403.sh"
+# A CLIENT failure: no HTTP status exists at all, and no re-run fixes it.
+cat >"$WORK/waiver-events-client-fail.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "bash: gh: command not found" >&2
+exit 127
+EOF
+chmod +x "$WORK/waiver-events-client-fail.sh"
+# A failure whose stderr survives sanitisation as NOTHING: control characters only.
+# `[ -s ]` sees a non-empty file, so the detail builder takes the sanitising path and
+# is left with an empty string -- the state that used to trail the diagnostic off into
+# a dangling em dash. Also the portable stand-in for the abort hazard the round-3
+# finding named: the sanitising pipeline must never be allowed to end the run.
+printf '#!/usr/bin/env bash\nprintf "\\001\\002\\r" >&2\nexit 4\n' \
+  >"$WORK/waiver-events-unprintable.sh"
+chmod +x "$WORK/waiver-events-unprintable.sh"
+# A HEALTHY read that carries NO waiver event. The default `--jq` selects
+# `event == "labeled"` for every label, so this is the shape that made a feed of
+# `needs-decision` events read as "waiver evidence read": the read works, and
+# nothing in it can attribute or bind anything.
+printf 'needs-decision\tpm-bot\t2025-12-30T00:00:00Z\n' >"$WORK/waiver-events-no-waiver.tsv"
+# A label applied, its events UNREADABLE, then the label REMOVED mid-run. The final
+# state is legitimately "nothing to waive", and the broken read must not vanish
+# with the label.
+cat >"$WORK/labels-then-none.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$WORK/labels-drop.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$WORK/labels-drop.count"
+[ "\$n" -le 1 ] && echo "ci:waive:beta"
+exit 0
+EOF
+chmod +x "$WORK/labels-then-none.sh"
+# ---- round 4 fixtures: the LABEL read's own trustworthiness -----------------
+# A live label read that FAILS, in the shape `gh` reports an authorization refusal.
+# The run-start payload is then all the run has, and that snapshot predates the
+# whole polling window — which is precisely where a waiver applied mid-run lives.
+cat >"$WORK/labels-403.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "gh: Resource not accessible by integration (HTTP 403)" >&2
+exit 1
+EOF
+chmod +x "$WORK/labels-403.sh"
+# A live label read that SUCCEEDS and returns nothing: the ONLY state in which "no
+# waiver label is present" is an observation rather than a guess.
+printf '#!/usr/bin/env bash\nexit 0\n' >"$WORK/labels-none-live.sh"
+chmod +x "$WORK/labels-none-live.sh"
+# A live label read that succeeds and returns the waiver label in force NOW.
+printf '#!/usr/bin/env bash\necho ci:waive:beta\nexit 0\n' >"$WORK/labels-beta-live.sh"
+chmod +x "$WORK/labels-beta-live.sh"
+# IMMUTABLE HISTORY: a `ci:waive:alpha` labelling from months ago whose label was
+# removed the same day. `labeled` events are never deleted, so it is in this feed
+# forever — and it can attribute or bind exactly nothing.
+printf 'ci:waive:alpha\tancient-labeller\t2025-06-01T00:00:00Z\n' >"$WORK/waiver-events-stale.tsv"
+# A feed carrying a BLANK line (a trailing newline from the API, a `--jq` that
+# emitted an empty record). An empty label must never match the empty slot a
+# label list's trailing separator leaves, or a blank line would count as evidence
+# for a waiver label in force — a false "the evidence was observed" from nothing.
+printf 'needs-decision\tpm-bot\t2025-12-30T00:00:00Z\n\n' >"$WORK/waiver-events-blankline.tsv"
+
+evidence_line() { grep 'Waiver evidence' "$1" | head -n 1 || true; }
+
+# STATE 1: no waiver label at all — the ordinary PR.
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3
+cp "$SUMMARY" "$WORK/evidence-none.md"
+STATE_NONE=$(evidence_line "$WORK/evidence-none.md")
+if [ "$RC" -eq 0 ] && contains "$STATE_NONE" "n/a" && ! contains "$STATE_NONE" "UNREADABLE"; then
+  ok "a PR with no waiver label reports the 'nothing to waive' state explicitly"
+else
+  bad "the no-waiver state is not stated (rc=$RC): $STATE_NONE"
+fi
+
+# STATE 2: the feed read fine. The fixture carries two `labeled` events, of which
+# exactly ONE is a `ci:waive:` labelling — the discriminator for round 2's finding:
+# the feed total is NOT the number of events the evidence path can use.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+cp "$SUMMARY" "$WORK/evidence-read.md"
+STATE_READ=$(evidence_line "$WORK/evidence-read.md")
+if [ "$RC" -eq 0 ] && contains "$STATE_READ" "READ OK" &&
+   contains "$STATE_READ" '2 `labeled`' && contains "$STATE_READ" '1 of them'; then
+  ok "a readable feed reports BOTH the feed total and the ci:waive: subset"
+else
+  bad "the readable state does not separate the feed total from the waiver events (rc=$RC): $STATE_READ"
+fi
+# And it must not claim the binding SUCCEEDED — a matching event only binds if its
+# timestamp is at or after this head sha's first CI activity, which is a per-tier
+# verdict, not a property of the read.
+#
+# This guard is deliberately anchored on the hedge the implementation MUST emit, not
+# only on an over-claiming phrase it must not: a purely negative assertion against a
+# string no code path produces passes unconditionally (the round-3 finding — the
+# earlier `! contains "can be bound"` form was vacuous the moment round 2 reworded
+# the line, so it would have accepted "the waiver IS bound to this head sha"). The
+# positive half fails the moment the deferral to the per-tier verdict is dropped.
+if contains "$STATE_READ" "decided per tier above" &&
+   ! contains "$STATE_READ" "is bound" && ! contains "$STATE_READ" "can be bound"; then
+  ok "the readable state defers the binding verdict per tier instead of asserting it"
+else
+  bad "the summary asserts a head-binding it did not observe: $STATE_READ"
+fi
+
+# STATE 3: a broken read — an authorization refusal, not an absence of labels.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WORK/waiver-events-403.sh"
+cp "$SUMMARY" "$WORK/evidence-unreadable.md"
+STATE_BAD=$(evidence_line "$WORK/evidence-unreadable.md")
+if contains "$STATE_BAD" "UNREADABLE" && contains "$STATE_BAD" "broken read"; then
+  ok "an unreadable feed is reported as its own state in the job summary"
+else
+  bad "an unreadable feed is indistinguishable from having nothing to waive: $STATE_BAD"
+fi
+# THE MOST VALUABLE FACT IN THE DIAGNOSTIC: the HTTP status, which is what separates
+# "the token may not read this" from "GitHub was briefly unwell".
+# Anchored on the CLASSIFIED shape `(HTTP 403 — …)`, not merely on the string "HTTP
+# 403" appearing somewhere: the client's raw stderr contains that string too, so an
+# assertion on it alone survives a broken status extraction and lets a 403 be
+# described as "no HTTP status reported" — the client-failure diagnosis, whose remedy
+# ("no re-run fixes it") is the wrong advice for an authorization refusal.
+if contains "$STATE_BAD" "(HTTP 403 —" && ! contains "$STATE_BAD" "no HTTP status reported" &&
+   contains "$(cat "$WORK/evidence-unreadable.md")" 'permissions:'; then
+  ok "the HTTP status is surfaced and an authorization status names the permissions block"
+else
+  bad "the summary does not identify a 403 as an authorization problem: $(cat "$WORK/evidence-unreadable.md")"
+fi
+if contains "$(cat "$WORK/evidence-unreadable.md")" 'rate limit' &&
+   contains "$(cat "$WORK/evidence-unreadable.md")" '5xx'; then
+  ok "the summary states which statuses are transient, so a re-run is not the reflex for all of them"
+else
+  bad "the summary does not separate transient statuses from authorization ones"
+fi
+if contains "$OUT" "::warning::" && contains "$OUT" "UNREADABLE" && contains "$OUT" "NOT an absence of waiver labels"; then
+  ok "the warning annotation says WHY the feed was empty, not merely that it was"
+else
+  bad "the warning annotation is still ambiguous about the cause: $OUT"
+fi
+# THE GRACEFUL PATH, which must survive all of the above.
+if [ "$RC" -eq 0 ] && contains "$OUT" "WAIVED" && contains "$OUT" "UNRESOLVED" && ! contains "$OUT" "FAIL (harness)"; then
+  ok "an unreadable-evidence run still honours the waiver at the deadline and claims no name"
+else
+  bad "unreadable evidence changed the verdict instead of only the diagnostic (rc=$RC): $OUT"
+fi
+
+# The three lines must actually differ from one another; a shared prefix with a
+# different tail is what made the states inferrable-only in the first place.
+if [ -n "$STATE_NONE" ] && [ -n "$STATE_READ" ] && [ -n "$STATE_BAD" ] &&
+   [ "$STATE_NONE" != "$STATE_READ" ] && [ "$STATE_NONE" != "$STATE_BAD" ] &&
+   [ "$STATE_READ" != "$STATE_BAD" ]; then
+  ok "the three states produce three different summary lines (pairwise distinct)"
+else
+  bad "two evidence states report identically: none='$STATE_NONE' read='$STATE_READ' bad='$STATE_BAD'"
+fi
+
+# A CLIENT failure reports no HTTP status at all: it is neither an authorization
+# problem nor transient, and the diagnostic must not imply either. The command's
+# exit status is the only fact available, so it is the one reported.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WORK/waiver-events-client-fail.sh"
+if [ "$RC" -eq 0 ] && contains "$OUT" "UNREADABLE" &&
+   contains "$OUT" "no HTTP status reported" && contains "$OUT" "exit status 127" &&
+   contains "$OUT" "command not found"; then
+  ok "a client failure is reported with its exit status and message, claiming no HTTP status"
+else
+  bad "a client failure was mis-reported as an API status (rc=$RC): $OUT"
+fi
+
+# Stderr that sanitises down to nothing must still yield a legible diagnostic AND,
+# above all, must not end the run: the verdict has to survive it exactly like every
+# other unreadable shape (rc 0, WAIVED, tier UNRESOLVED).
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WORK/waiver-events-unprintable.sh"
+if [ "$RC" -eq 0 ] && contains "$OUT" "UNREADABLE" &&
+   contains "$OUT" "exit status 4" && contains "$OUT" "unprintable error output"; then
+  ok "stderr that sanitises to nothing is named as such, and the run still completes"
+else
+  bad "unprintable stderr broke or blanked the diagnostic (rc=$RC): $OUT"
+fi
+
+# A silent non-zero exit (no stderr at all) still has to be distinguishable from
+# success: the exit status is reported even when there is nothing else to report.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "false"
+if [ "$RC" -eq 0 ] && contains "$OUT" "UNREADABLE" && contains "$OUT" "exit status 1"; then
+  ok "a silent non-zero read is still reported as unreadable, with its exit status"
+else
+  bad "a silent non-zero read was indistinguishable from a successful one (rc=$RC): $OUT"
+fi
+
+# STATE 4: a waiver label with no label-event source configured at all — the
+# aggregator invoked without --repo/--pr-number. Same degradation, different cause,
+# so it says so rather than borrowing the API-failure wording.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta"
+STATE_UNCONF=$(evidence_line "$SUMMARY")
+if [ "$RC" -eq 0 ] && contains "$STATE_UNCONF" "UNAVAILABLE" && ! contains "$STATE_UNCONF" "UNREADABLE"; then
+  ok "a waiver with no configured event source is its own state, not an API failure"
+else
+  bad "the unconfigured-source state is missing or mislabelled (rc=$RC): $STATE_UNCONF"
+fi
+# ...and it says it ONCE. The condition cannot change during the run (the command is
+# fixed at argument-parse time), so a per-poll annotation would be a dozen identical
+# lines. THE DISCRIMINATOR is a multi-poll run: 3 polls, still one annotation.
+invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 3 --labels "ci:waive:beta"
+UNCONF_WARNINGS=$(printf '%s\n' "$OUT" | grep -c 'waiver evidence UNAVAILABLE' || true)
+if [ "${UNCONF_WARNINGS:-0}" -eq 1 ] && contains "$(evidence_line "$SUMMARY")" "UNAVAILABLE"; then
+  ok "the unconfigured warning is emitted once per run, not once per poll"
+else
+  bad "the unconfigured warning fired ${UNCONF_WARNINGS:-0} times across the poll loop"
+fi
+
+# STATE 5, and the reason round 2 exists: the read SUCCEEDED and carried no
+# `ci:waive:` event at all. The feed total alone would have reported this as
+# "evidence read" — an unproven claim in exactly the shape this issue exists to
+# remove — while attribution and head-binding are as dead as under a 403.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "cat $WORK/waiver-events-no-waiver.tsv"
+STATE_NOWAIVE=$(evidence_line "$SUMMARY")
+if contains "$STATE_NOWAIVE" "READ OK" && contains "$STATE_NOWAIVE" "0 for a waiver label in force now" &&
+   contains "$STATE_NOWAIVE" "UNRESOLVED"; then
+  ok "a healthy feed with no waiver events is reported as unresolved, not as evidence read"
+else
+  bad "a feed of non-waiver events was reported as usable waiver evidence: $STATE_NOWAIVE"
+fi
+if contains "$(cat "$SUMMARY")" "neither a permission nor an API problem"; then
+  ok "the no-waiver-events case rules out the causes it is not, instead of being mistaken for them"
+else
+  bad "the no-waiver-events case borrows the API-failure diagnosis: $(cat "$SUMMARY")"
+fi
+if [ "$RC" -eq 0 ] && contains "$OUT" "WAIVED" && contains "$OUT" "UNRESOLVED"; then
+  ok "it too still honours the waiver at the deadline and claims no name"
+else
+  bad "the no-waiver-events case changed the verdict (rc=$RC): $OUT"
+fi
+if [ "$STATE_NOWAIVE" != "$STATE_READ" ] && [ "$STATE_NOWAIVE" != "$STATE_BAD" ]; then
+  ok "the no-waiver-events line differs from both the usable-evidence and unreadable lines"
+else
+  bad "state 5 reports identically to another state: '$STATE_NOWAIVE'"
+fi
+
+# A BROKEN READ IS NOT ERASED BY THE LABEL GOING AWAY. Label present on poll 1 with
+# an unreadable feed, removed by poll 2: the final state is legitimately "nothing to
+# waive", and the earlier failures are still on the record. The tier is NOT waived
+# (the label is gone), which is the correct verdict and the discriminator.
+rm -f "$WORK/labels-drop.count"
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 2 \
+  --labels-cmd "$WORK/labels-then-none.sh" --waiver-events-cmd "$WORK/waiver-events-403.sh"
+DROP_SUMMARY="$(cat "$SUMMARY")"
+if [ "$RC" -ne 0 ] && contains "$DROP_SUMMARY" "no valid waiver label is in the label set this run is using now, but" &&
+   contains "$DROP_SUMMARY" "HTTP 403"; then
+  ok "a waiver label removed mid-run keeps the record that its events were unreadable"
+else
+  bad "the broken-read history was discarded with the label (rc=$RC): $DROP_SUMMARY"
+fi
+
+# ---- round 4: a claim may not outrun the LABEL read either (issue #3033) ----
+# THE SAME DEFECT CLASS, ONE LAYER FURTHER OUT. Both of these were the summary
+# asserting something derived from state it had not observed:
+#   M1 — the `none` line stated "no ci:waive:<tier-id> label is present" even when
+#        the LIVE label read had FAILED and the labels in hand were the run-start
+#        payload snapshot. The polling window exists so a waiver applied mid-run
+#        takes effect, so that was a confident FALSE NEGATIVE about exactly the
+#        thing this issue is about, in a line this change added.
+#   M2 — the waiver-event count was the whole `ci:waive:` HISTORY. `labeled` events
+#        are immutable, so a label applied and removed months ago kept the "the
+#        evidence is present" claim alive while the label actually IN FORCE had no
+#        event of its own.
+# The fix for both is to report the observation and name the gap: an UNKNOWN, never
+# a confident absence and never a zero that was not counted. And neither state may
+# touch the verdict — the aggregator's exit status comes from tier evaluation alone.
+echo "== the label read's trustworthiness is reported, never assumed =="
+
+# M1's false negative, reproduced: the live read fails, the payload has no waiver
+# label, and a waiver applied since the run started would be invisible.
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels-cmd "$WORK/labels-403.sh"
+STATE_UNTRUSTED_NONE=$(evidence_line "$SUMMARY")
+if contains "$STATE_UNTRUSTED_NONE" "UNKNOWN" && contains "$STATE_UNTRUSTED_NONE" "UNTRUSTED" &&
+   contains "$STATE_UNTRUSTED_NONE" "run-start event payload" &&
+   ! contains "$STATE_UNTRUSTED_NONE" "label is present on this pull request"; then
+  ok "a failed live label read reports UNKNOWN instead of claiming no waiver label is present"
+else
+  bad "the summary claimed an absence it never observed: $STATE_UNTRUSTED_NONE"
+fi
+# The per-poll `::warning::` was never enough on its own — the finding is that the
+# fallback has to reach the SUMMARY. The durable counter is what proves it did.
+if contains "$STATE_UNTRUSTED_NONE" "1 failed read(s)" && contains "$STATE_UNTRUSTED_NONE" "HTTP 403"; then
+  ok "the failed-label-read count and its HTTP status reach the summary, not just a per-poll warning"
+else
+  bad "the label-read failure left no durable record in the summary: $STATE_UNTRUSTED_NONE"
+fi
+if contains "$OUT" "HTTP 403" && contains "$OUT" "INVISIBLE to it"; then
+  ok "the annotation says what the fallback makes invisible, not merely that it happened"
+else
+  bad "the label-read failure is not diagnosable from the annotation: $OUT"
+fi
+if [ "$RC" -eq 0 ] && ! contains "$OUT" "FAIL (harness)"; then
+  ok "an untrusted label read changes the diagnostic only, never the verdict"
+else
+  bad "an untrusted label read altered the verdict (rc=$RC): $OUT"
+fi
+
+# THE CONTRAST that keeps the guard above non-vacuous: when the live read SUCCEEDS,
+# absence IS an observation and stays stated plainly.
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels-cmd "$WORK/labels-none-live.sh"
+STATE_LIVE_NONE=$(evidence_line "$SUMMARY")
+if [ "$RC" -eq 0 ] && contains "$STATE_LIVE_NONE" "label is present on this pull request" &&
+   ! contains "$STATE_LIVE_NONE" "UNTRUSTED"; then
+  ok "a successful live read still states the absence plainly — an observation, not a hedge"
+else
+  bad "the genuinely-observed absence lost its plain statement (rc=$RC): $STATE_LIVE_NONE"
+fi
+if [ "$STATE_LIVE_NONE" != "$STATE_UNTRUSTED_NONE" ]; then
+  ok "an observed absence and an unobserved one are different lines"
+else
+  bad "a failed label read reads identically to a successful one: $STATE_LIVE_NONE"
+fi
+
+# M2, reproduced: `ci:waive:beta` is in force, and the only `ci:waive:` event in the
+# feed is the ancient `ci:waive:alpha` whose label is long gone. The old count of 1
+# claimed "the evidence needed for head-binding and attribution is present"; the
+# intersection with the labels in force is 0, and beta's evidence is missing.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-beta-live.sh" --waiver-events-cmd "cat $WORK/waiver-events-stale.tsv"
+STATE_STALE=$(evidence_line "$SUMMARY")
+if contains "$STATE_STALE" "0 for a waiver label in force now" &&
+   contains "$STATE_STALE" '1 of them for a `ci:waive:` label' &&
+   ! contains "$STATE_STALE" "OBSERVED for that label"; then
+  ok "a waiver event whose label was removed counts as history, never as usable evidence"
+else
+  bad "a stale waiver event was reported as evidence for the label in force: $STATE_STALE"
+fi
+if contains "$(cat "$SUMMARY")" "IMMUTABLE HISTORY"; then
+  ok "the summary explains how a waiver event can be present yet bind nothing"
+else
+  bad "the removed-label case offers no explanation: $(cat "$SUMMARY")"
+fi
+if [ "$RC" -eq 0 ] && contains "$OUT" "WAIVED" && contains "$OUT" "UNRESOLVED"; then
+  ok "a zero intersection still honours the waiver at the deadline and names nobody"
+else
+  bad "a zero intersection changed the verdict (rc=$RC): $OUT"
+fi
+
+# NOTHING COUNTS AS EVIDENCE. A blank line in the feed must not match the in-force
+# label list's empty trailing slot; if it did, an empty record would be reported as
+# an observed `ci:waive:` event for the label in force.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-beta-live.sh" --waiver-events-cmd "cat $WORK/waiver-events-blankline.tsv"
+if [ "$RC" -eq 0 ] && contains "$(evidence_line "$SUMMARY")" "0 for a waiver label in force now" &&
+   ! contains "$(evidence_line "$SUMMARY")" "OBSERVED for that label"; then
+  ok "a blank feed line counts as nothing, not as evidence for the label in force"
+else
+  bad "an empty record was counted as waiver evidence (rc=$RC): $(evidence_line "$SUMMARY")"
+fi
+
+# THE REPORT MAY NOT BE LAXER THAN THE VERDICT. `ci:waive:BETA` is not a waiver
+# label (gating_registry.rb requires a lower-case tier id), so an event for it
+# waives nothing — and must not be counted as usable evidence either, or the summary
+# would claim in-force evidence for a label the evaluator ignores. Round 6 sharpened
+# what this reports: the off-shape label is now its OWN state (see the round-6 block
+# below) rather than a zero-intersection reading of a feed nobody needed to fetch.
+printf 'ci:waive:BETA\tshouty-labeller\t2026-01-01T00:00:00Z\n' >"$WORK/waiver-events-offshape.tsv"
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:BETA" --waiver-events-cmd "cat $WORK/waiver-events-offshape.tsv"
+if [ "$RC" -ne 0 ] && contains "$(evidence_line "$SUMMARY")" "INVALID WAIVER LABEL" &&
+   ! contains "$(evidence_line "$SUMMARY")" "OBSERVED for that label"; then
+  ok "an off-shape waiver label counts as no in-force evidence, matching what the evaluator accepts"
+else
+  bad "the report was laxer than the verdict about what a waiver label is (rc=$RC): $(evidence_line "$SUMMARY")"
+fi
+
+# THE ORDERING DEPENDENCY between the two fixes: an intersection is only sound
+# against a label set that was OBSERVED. Live read fails, the payload carries
+# `ci:waive:beta`, the feed is healthy and DOES carry a beta event — the honest
+# report is UNKNOWN, because which labels are in force was never seen.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --labels-cmd "$WORK/labels-403.sh" --waiver-events-cmd "$WAIVER_EVENTS"
+STATE_UNKNOWN_MATCH=$(evidence_line "$SUMMARY")
+if contains "$STATE_UNKNOWN_MATCH" "in-force match **UNKNOWN**" &&
+   contains "$STATE_UNKNOWN_MATCH" "did not observe which waiver labels are in force" &&
+   ! contains "$STATE_UNKNOWN_MATCH" "OBSERVED for that label" &&
+   ! contains "$STATE_UNKNOWN_MATCH" "0 for a waiver label in force now"; then
+  ok "an untrusted label read makes the in-force match UNKNOWN — neither present nor zero"
+else
+  bad "the intersection was reported against a label set this run never observed: $STATE_UNKNOWN_MATCH"
+fi
+if [ "$RC" -eq 0 ] && contains "$OUT" "WAIVED" && ! contains "$OUT" "FAIL (harness)"; then
+  ok "the unknown-intersection state is non-fatal and the waiver is still honoured"
+else
+  bad "an unknown intersection changed the verdict (rc=$RC): $OUT"
+fi
+
+# FAIL-SAFE DIRECTION, unchanged by all of the above: a failed label read can only
+# ever WITHHOLD a waiver. No waiver in the payload, so the absent tier still reds.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-403.sh"
+if [ "$RC" -ne 0 ] && contains "$OUT" "beta" && contains "$(evidence_line "$SUMMARY")" "UNKNOWN"; then
+  ok "an untrusted label read withholds a waiver rather than inventing one"
+else
+  bad "a failed label read granted a waiver or hid the red (rc=$RC): $OUT"
+fi
+
+# Pairwise distinctness again, now across the round-4 states: an UNKNOWN that reads
+# like a zero, or like an absence, would be the same defect wearing a new word.
+if [ -n "$STATE_UNTRUSTED_NONE" ] && [ -n "$STATE_STALE" ] && [ -n "$STATE_UNKNOWN_MATCH" ] &&
+   [ "$STATE_UNTRUSTED_NONE" != "$STATE_UNKNOWN_MATCH" ] && [ "$STATE_STALE" != "$STATE_READ" ] &&
+   [ "$STATE_STALE" != "$STATE_NOWAIVE" ] && [ "$STATE_UNKNOWN_MATCH" != "$STATE_BAD" ] &&
+   [ "$STATE_UNKNOWN_MATCH" != "$STATE_READ" ]; then
+  ok "the round-4 states are distinct from one another and from every earlier state"
+else
+  bad "a round-4 state reports identically to another: untrusted='$STATE_UNTRUSTED_NONE' stale='$STATE_STALE' unknown='$STATE_UNKNOWN_MATCH'"
+fi
+
+# ---- round 6: a `ci:waive:` SUBSTRING is not a waiver label (issue #3033) ----
+# THE LAST INSTANCE OF THE SAME DEFECT. The evidence read was gated on the raw
+# substring `*ci:waive:*` while the verdict uses gating_registry.rb's
+# /\Aci:waive:[a-z0-9][a-z0-9-]*\z/. So `ci:waive:Flight` — a capitalisation typo on
+# a real tier id, and the shape a first-ever break-glass exercise produces — sent the
+# run into the evidence path, where the UNREADABLE/UNAVAILABLE lines asserted that
+# "the label set this run is using carries a ci:waive:<tier-id> label". That is a
+# claim about a break-glass THAT DOES NOT EXIST and that the evaluator ignores, and
+# it points the reader at the workflow's `permissions:` block for what is a typo.
+# The gate now uses the validated set, and the off-shape label gets its own line
+# naming it. Hermetic fixtures only: `ci:waive:BETA`/`ci:waive:Flight`, never the
+# repo's real `ci:waive:flight`.
+echo "== an off-shape ci:waive: label is named as a typo, not diagnosed as an API problem =="
+
+# A live label read that succeeds and returns ONLY an off-shape waiver label.
+printf '#!/usr/bin/env bash\necho ci:waive:BETA\nexit 0\n' >"$WORK/labels-offshape-live.sh"
+chmod +x "$WORK/labels-offshape-live.sh"
+# An events command that RECORDS being called. An off-shape label must not cost the
+# paginated label-events read at all, so the absence of this file is the evidence
+# that the gate is the validated set and not the substring.
+cat >"$WORK/waiver-events-probe.sh" <<EOF
+#!/usr/bin/env bash
+echo probed >>"$WORK/events-probe.count"
+cat "$WORK/waiver-events-offshape.tsv"
+EOF
+chmod +x "$WORK/waiver-events-probe.sh"
+# A valid waiver label WITH an off-shape one beside it: the valid label owns the
+# headline, and the typo must still be named somewhere or the operator never learns
+# that half of what they applied did nothing.
+printf '#!/usr/bin/env bash\nprintf "ci:waive:beta\\nci:waive:Flight\\n"\nexit 0\n' \
+  >"$WORK/labels-mixed-live.sh"
+chmod +x "$WORK/labels-mixed-live.sh"
+
+rm -f "$WORK/events-probe.count"
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-offshape-live.sh" --waiver-events-cmd "$WORK/waiver-events-probe.sh"
+STATE_OFFSHAPE=$(evidence_line "$SUMMARY")
+if contains "$STATE_OFFSHAPE" "INVALID WAIVER LABEL" && contains "$STATE_OFFSHAPE" 'ci:waive:BETA' &&
+   contains "$STATE_OFFSHAPE" "waives NOTHING"; then
+  ok "an off-shape ci:waive: label is reported as its own state, naming the offending label"
+else
+  bad "the off-shape label was not named as waiving nothing: $STATE_OFFSHAPE"
+fi
+# THE WHOLE POINT: it must not read as an authorization/API failure, and the remedy
+# it offers must be the typo, not the `permissions:` block.
+if ! contains "$STATE_OFFSHAPE" "UNREADABLE" && ! contains "$STATE_OFFSHAPE" "UNAVAILABLE" &&
+   ! contains "$(cat "$SUMMARY")" 'permissions:' &&
+   contains "$(cat "$SUMMARY")" "capitalised tier id"; then
+  ok "the off-shape state diagnoses the typo instead of sending the reader to the permissions block"
+else
+  bad "an off-shape label still reads as an API/authorization problem: $(cat "$SUMMARY")"
+fi
+if [ ! -f "$WORK/events-probe.count" ]; then
+  ok "an off-shape label costs no label-events read (the gate is the validated shape, not a substring)"
+else
+  bad "the events feed was fetched for a label that waives nothing: $(cat "$WORK/events-probe.count")"
+fi
+# FAIL-SAFE DIRECTION: an off-shape label grants nothing, so the absent tier reds.
+if [ "$RC" -ne 0 ] && contains "$OUT" "beta" && ! contains "$OUT" "WAIVED"; then
+  ok "an off-shape label waives nothing — the absent tier still fails"
+else
+  bad "an off-shape label excused a tier or hid the red (rc=$RC): $OUT"
+fi
+# ...and it is a DIFFERENT line from every neighbouring state, including the plain
+# absence it used to be reported as and the two abnormal states it used to borrow.
+if [ -n "$STATE_OFFSHAPE" ] && [ "$STATE_OFFSHAPE" != "$STATE_NONE" ] &&
+   [ "$STATE_OFFSHAPE" != "$STATE_BAD" ] && [ "$STATE_OFFSHAPE" != "$STATE_UNCONF" ] &&
+   [ "$STATE_OFFSHAPE" != "$STATE_LIVE_NONE" ] && [ "$STATE_OFFSHAPE" != "$STATE_NOWAIVE" ]; then
+  ok "the off-shape state is distinct from the absence, unreadable, unavailable and zero-match lines"
+else
+  bad "the off-shape state reports identically to another: '$STATE_OFFSHAPE'"
+fi
+
+# A LABEL NAME IS USER-CONTROLLED TEXT, and this line is the only place the report
+# prints one. It goes to stdout, where `::` is workflow-command syntax, and it has to
+# stay a single summary line — so the name is defanged and stripped of control
+# characters at collection, in pure shell (a sanitiser that could fail would take the
+# diagnostic with it).
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "$(printf 'ci:waive:A\nB::error::pwned')"
+OFFSHAPE_LINE=$(grep 'INVALID WAIVER LABEL' "$SUMMARY" || true)
+# ONE line carries the whole name: the embedded newline is gone (a name that wrapped
+# would leave `__error__pwned` on a line of its own), and `::` is defanged.
+OFFSHAPE_SPILL=$(grep -c '__error__pwned' "$SUMMARY" || true)
+if contains "$OFFSHAPE_LINE" 'ci:waive:AB__error__pwned' &&
+   ! contains "$(cat "$SUMMARY")" '::error::pwned' && [ "${OFFSHAPE_SPILL:-0}" -eq 1 ]; then
+  ok "an off-shape label's name is defanged and stays one line (it is attacker-controlled text)"
+else
+  bad "an off-shape label name reached the summary unsanitised (spill=${OFFSHAPE_SPILL:-0}): $(cat "$SUMMARY")"
+fi
+
+# An off-shape label ALONGSIDE a valid one: the valid label's evidence state owns the
+# headline, and the typo is still named once.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-mixed-live.sh" --waiver-events-cmd "$WAIVER_EVENTS"
+MIXED_SUMMARY="$(cat "$SUMMARY")"
+if [ "$RC" -eq 0 ] && contains "$(evidence_line "$SUMMARY")" "READ OK" &&
+   contains "$MIXED_SUMMARY" "Also in the label set this run is using, and NOT a waiver label" &&
+   contains "$MIXED_SUMMARY" 'ci:waive:Flight'; then
+  ok "an off-shape label beside a valid one is still named, and the valid one still waives its tier"
+else
+  bad "the off-shape label vanished behind a valid one (rc=$RC): $MIXED_SUMMARY"
+fi
+
+# THE PRODUCTION HAPPY PATH, ASSERTED AT THE SUMMARY LINE. Every other in-force
+# assertion in this suite runs off the event PAYLOAD labels; the live-read path — what
+# CI actually does — was only ever asserted through the exit status, which ruby
+# decides. So a regression that emptied the in-force set under a live read would flip
+# this line to "0 for a waiver label in force now" with the whole suite still green.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-beta-live.sh" --waiver-events-cmd "$WAIVER_EVENTS"
+STATE_LIVE_MATCH=$(evidence_line "$SUMMARY")
+if [ "$RC" -eq 0 ] && contains "$STATE_LIVE_MATCH" "READ OK" &&
+   contains "$STATE_LIVE_MATCH" '1 of them for a `ci:waive:` label in force' &&
+   contains "$STATE_LIVE_MATCH" "OBSERVED for that label" &&
+   ! contains "$STATE_LIVE_MATCH" "UNKNOWN" &&
+   ! contains "$STATE_LIVE_MATCH" "0 for a waiver label in force now"; then
+  ok "a live label read with a matching event reports the observed evidence, not a zero or an UNKNOWN"
+else
+  bad "the live-read happy path's summary line is wrong (rc=$RC): $STATE_LIVE_MATCH"
+fi
+# And the evidence is USED, not merely reported: the applier is named from the feed.
+if contains "$OUT" "WAIVED" && contains "$OUT" "real-labeller" && ! contains "$OUT" "UNRESOLVED"; then
+  ok "the live-read in-force match attributes the waiver to whoever applied it"
+else
+  bad "a live-read waiver with usable evidence was not attributed: $OUT"
+fi
+
+# ---- round 7: the shape check must not depend on the shell's collation ------
+# A DEFECT INVISIBLE ON THE MACHINE THAT TESTS IT. Glob RANGES (`[a-z]`) are matched
+# by COLLATION ORDER, not ASCII, unless `globasciiranges` is set — and that is only on
+# by default from bash 5.0. Under glibc with a UTF-8 locale the order is `aAbBcC…`, so
+# on bash 3.2/4.x `[!a-z0-9]*` does NOT reject `BETA`: the shape check would classify
+# `ci:waive:BETA` as IN FORCE, making the report laxer than the ruby evaluator on the
+# one path whose purpose is that they cannot disagree. macOS ships /bin/bash 3.2 and
+# runs these scripts (scripts/agent-gate.sh uses `taskpolicy`), so this was live —
+# and it is invisible to a plain run on this box, which is bash 5.x.
+echo "== the tier-id shape check is locale- and bash-version-independent =="
+
+# The class as the aggregator actually spells it, read out of the source so the check
+# cannot drift from the code.
+# `[|]`, not `\|`: a backslash-escaped `|` inside an ERE is a GNU extension the
+# repo's portability lint (rightly) rejects — a bracket expression is POSIX.
+SHAPE_PAT=$(grep -E "^ *''[|]\[!" "$AGG_REAL" | head -n 1)
+SHAPE_PAT=${SHAPE_PAT%)*}
+SHAPE_PAT=${SHAPE_PAT#"${SHAPE_PAT%%[![:space:]]*}"}
+# The pre-fix form, kept as the harness's own control: if THIS does not misclassify in
+# the reproduction below, the reproduction has no discriminating power and says so
+# instead of reporting a pass it did not earn.
+SHAPE_PAT_OLD="''|[!a-z0-9]*|*[!a-z0-9-]*"
+# bash 3.2 semantics, reproduced on bash 5.x: turn `globasciiranges` off and collate
+# under a locale whose order interleaves the cases.
+shape_verdict() {
+  (
+    LC_ALL=en_US.UTF-8
+    export LC_ALL
+    shopt -u globasciiranges 2>/dev/null || true
+    tier="$1"
+    eval "case \"\$tier\" in
+      $2) printf off-shape ;;
+      *) printf in-force ;;
+    esac"
+  )
+}
+
+# STRUCTURAL PIN, true whatever this box's bash does: the class is spelled out. This
+# is the assertion that cannot be environment-dependent, and it fails the moment the
+# range comes back.
+if contains "$SHAPE_PAT" 'abcdefghijklmnopqrstuvwxyz0123456789' &&
+   ! contains "$SHAPE_PAT" 'a-z' && ! contains "$SHAPE_PAT" 'A-Z'; then
+  ok "the tier-id class is spelled out, so it cannot depend on the shell's collation order"
+else
+  bad "the tier-id shape check uses a collation-dependent range: $SHAPE_PAT"
+fi
+# ...and no OTHER executable line in the aggregator carries a single-case range either
+# (its input validators are case-SYMMETRIC — `A-Za-z0-9` — and therefore immune; the
+# tier-id class and the `--event-action` guard were the two that were not).
+#
+# COMMENTS AND STRING LITERALS ARE STRIPPED, NOT WHOLE LINES. An earlier form dropped
+# every line containing `emit `/`echo `, so a real range on a line that also carried an
+# annotation escaped the check — a guard weaker than the invariant it pins. Stripping
+# `#...`, "..." and '...' leaves exactly the executable glob patterns, which are
+# unquoted by construction.
+COLLATION_RANGES=$(sed -e 's/#.*$//' -e 's/"[^"]*"//g' -e "s/'[^']*'//g" "$AGG_REAL" \
+  | grep -nE '\[!?[^]]*(a-z|A-Z)' | grep -vE 'A-Za-z|a-zA-Z' || true)
+if [ -z "$COLLATION_RANGES" ]; then
+  ok "no executable line in the aggregator matches a single-case glob range"
+else
+  bad "a collation-dependent glob range remains: $COLLATION_RANGES"
+fi
+
+# BEHAVIOURAL, with the harness's discriminating power checked first.
+if [ "$(shape_verdict BETA "$SHAPE_PAT_OLD")" = "in-force" ]; then
+  if [ "$(shape_verdict BETA "$SHAPE_PAT")" = "off-shape" ] &&
+     [ "$(shape_verdict Flight "$SHAPE_PAT")" = "off-shape" ] &&
+     [ "$(shape_verdict flight "$SHAPE_PAT")" = "in-force" ] &&
+     [ "$(shape_verdict beta-2 "$SHAPE_PAT")" = "in-force" ]; then
+    ok "under bash 3.2 range semantics the class still rejects BETA/Flight and accepts flight/beta-2"
+  else
+    bad "the shape check misclassifies under collation ranges: BETA=$(shape_verdict BETA "$SHAPE_PAT") Flight=$(shape_verdict Flight "$SHAPE_PAT") flight=$(shape_verdict flight "$SHAPE_PAT")"
+  fi
+else
+  # Honest about it rather than banking a pass: the structural pin above is then the
+  # only coverage, and it is environment-independent.
+  echo "note: this environment cannot reproduce collation ranges (no en_US.UTF-8, or codepoint-ordered);"
+  echo "note: the bash-3.2 defect is covered structurally here, not behaviourally"
+fi
+
+# LOW 1: the feed total counts RECORDS, not lines. The blank-line fixture is one real
+# event plus a trailing blank, which used to be reported as "2 `labeled` event(s)".
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-beta-live.sh" --waiver-events-cmd "cat $WORK/waiver-events-blankline.tsv"
+if contains "$(evidence_line "$SUMMARY")" '1 `labeled` event(s)' &&
+   ! contains "$(evidence_line "$SUMMARY")" '2 `labeled` event(s)'; then
+  ok "a blank feed line is not counted as an event read (records, not lines)"
+else
+  bad "the feed total counted a blank line as an event: $(evidence_line "$SUMMARY")"
+fi
+
+# LOW 2a: presence is a claim too. Under a FAILED live read the off-shape label comes
+# from the run-start payload, so it may have been removed since — the line may not say
+# it "is applied".
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:BETA" --labels-cmd "$WORK/labels-403.sh"
+STATE_OFFSHAPE_UNTRUSTED=$(evidence_line "$SUMMARY")
+OFFSHAPE_UNTRUSTED_OUT="$OUT"
+if contains "$STATE_OFFSHAPE_UNTRUSTED" "INVALID WAIVER LABEL" &&
+   contains "$STATE_OFFSHAPE_UNTRUSTED" "whether they are still applied was NOT observed" &&
+   ! contains "$STATE_OFFSHAPE_UNTRUSTED" '`ci:waive:BETA` are applied'; then
+  ok "an off-shape label read from the payload is not asserted to be applied NOW"
+else
+  bad "the off-shape line claimed a presence it never observed: $STATE_OFFSHAPE_UNTRUSTED"
+fi
+# THE ROUND-7 FINDING, in the same state this case already exercised: the trailing
+# note and the blockquote denied that anything failed while the label read's own 403
+# was reported a few lines further down. Both halves of the denial are pinned, and so
+# is the positive statement that replaces them.
+if ! contains "$OFFSHAPE_UNTRUSTED_OUT" "and nothing failed" &&
+   ! contains "$OFFSHAPE_UNTRUSTED_OUT" "NOT an authorization or API problem" &&
+   ! contains "$OFFSHAPE_UNTRUSTED_OUT" "there was never" &&
+   contains "$OFFSHAPE_UNTRUSTED_OUT" "A read DID fail on this run" &&
+   contains "$OFFSHAPE_UNTRUSTED_OUT" 'permissions:'; then
+  ok "an off-shape label plus a failed label read admits the failure instead of denying it"
+else
+  bad "the off-shape diagnostic contradicted the label-read failure in the same run: $OFFSHAPE_UNTRUSTED_OUT"
+fi
+if [ "$STATE_OFFSHAPE_UNTRUSTED" != "$STATE_OFFSHAPE" ]; then
+  ok "an observed off-shape label and an unobserved one are different lines"
+else
+  bad "the untrusted off-shape line reads identically to the observed one"
+fi
+
+# LOW 2b: "nothing was read" is a claim about the RUN. A valid waiver label on poll 1
+# whose feed read SUCCEEDED, then mistyped: the feed WAS read, and saying otherwise is
+# the same false absence one variable over.
+cat >"$WORK/labels-beta-then-offshape.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$WORK/labels-typo.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$WORK/labels-typo.count"
+if [ "\$n" -le 1 ]; then echo "ci:waive:beta"; else echo "ci:waive:BETA"; fi
+exit 0
+EOF
+chmod +x "$WORK/labels-beta-then-offshape.sh"
+rm -f "$WORK/labels-typo.count"
+invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 2 \
+  --labels-cmd "$WORK/labels-beta-then-offshape.sh" --waiver-events-cmd "$WAIVER_EVENTS"
+if contains "$(evidence_line "$SUMMARY")" "the feed WAS read on 1 earlier poll(s)" &&
+   ! contains "$(evidence_line "$SUMMARY")" "there was never" &&
+   ! contains "$(evidence_line "$SUMMARY")" "read on this run"; then
+  ok "an earlier successful feed read is not erased by a later off-shape label"
+else
+  bad "the off-shape line claimed nothing was ever read, after a read succeeded: $(evidence_line "$SUMMARY")"
+fi
+
+# LOW 3: the in-force list is deduplicated and bounded exactly like the off-shape one —
+# it is interpolated into two annotations and two summary lines, and GitHub allows up
+# to 100 labels on a pull request.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta,ci:waive:beta"
+DUP_COUNT=$(printf '%s\n' "$(evidence_line "$SUMMARY")" | grep -o 'ci:waive:beta' | grep -c . || true)
+if [ "${DUP_COUNT:-0}" -eq 1 ]; then
+  ok "a repeated waiver label is named once, not once per occurrence"
+else
+  bad "the in-force list named a duplicated label ${DUP_COUNT:-0} times: $(evidence_line "$SUMMARY")"
+fi
+MANY_VALID=""
+MANY_OFFSHAPE=""
+i=0
+while [ "$i" -lt 40 ]; do
+  i=$((i + 1))
+  MANY_VALID="${MANY_VALID}ci:waive:tier-${i},"
+  MANY_OFFSHAPE="${MANY_OFFSHAPE}ci:waive:Tier-${i},"
+done
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "${MANY_VALID%,}"
+if contains "$(evidence_line "$SUMMARY")" "(truncated)" && contains "$OUT" "(truncated)"; then
+  ok "a heavily-labelled PR gets a BOUNDED in-force list in the summary and the annotation"
+else
+  bad "the in-force list was unbounded: $(evidence_line "$SUMMARY")"
+fi
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "${MANY_OFFSHAPE%,}"
+if contains "$(evidence_line "$SUMMARY")" "(truncated)"; then
+  ok "the off-shape list is bounded the same way"
+else
+  bad "the off-shape list was unbounded: $(evidence_line "$SUMMARY")"
+fi
+
+# ---- round 8: the sweep — no site claims more than the run observed -----------
+# EACH ROUND HARDENED THE SITE THE REVIEWER NAMED and left its siblings alone, which
+# is why there was a round 5, 6 and 7. So this pins the PROPERTY across combined
+# states rather than three more strings: a run that admits a read failed may carry no
+# denial that one did, in any of its lines.
+echo "== no run contradicts itself across two lines of one summary =="
+
+# An events read that FAILS on the first poll and succeeds (with no waiver event) on
+# the second: the zero-in-force blockquote used to say "The read succeeded, so this is
+# neither a permission nor an API problem" while the failure was reported below it.
+cat >"$WORK/waiver-events-403-then-ok.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$WORK/events-403.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$WORK/events-403.count"
+if [ "\$n" -le 1 ]; then echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; fi
+cat "$WORK/waiver-events-no-waiver.tsv"
+EOF
+chmod +x "$WORK/waiver-events-403-then-ok.sh"
+rm -f "$WORK/events-403.count"
+invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 2 \
+  --labels-cmd "$WORK/labels-beta-live.sh" --waiver-events-cmd "$WORK/waiver-events-403-then-ok.sh"
+RECOVERED_OUT="$OUT"
+if contains "$RECOVERED_OUT" "The read succeeded on THIS poll" &&
+   ! contains "$RECOVERED_OUT" "neither a permission nor an API problem"; then
+  ok "a feed read that failed earlier is not denied by the poll that succeeded"
+else
+  bad "the recovered-read case denied the earlier failure: $RECOVERED_OUT"
+fi
+
+# An off-shape label NOW, with a valid one earlier whose feed read FAILED.
+cat >"$WORK/labels-beta-then-offshape-2.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$WORK/labels-typo2.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$WORK/labels-typo2.count"
+if [ "\$n" -le 1 ]; then echo "ci:waive:beta"; else echo "ci:waive:BETA"; fi
+exit 0
+EOF
+chmod +x "$WORK/labels-beta-then-offshape-2.sh"
+rm -f "$WORK/labels-typo2.count"
+invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 2 \
+  --labels-cmd "$WORK/labels-beta-then-offshape-2.sh" --waiver-events-cmd "$WORK/waiver-events-403.sh"
+OFFSHAPE_AFTER_FAIL="$OUT"
+if contains "$OFFSHAPE_AFTER_FAIL" "earlier read(s) of the feed FAILED" &&
+   contains "$OFFSHAPE_AFTER_FAIL" "A read DID fail on this run" &&
+   ! contains "$OFFSHAPE_AFTER_FAIL" "read on this run: no valid"; then
+  ok "an off-shape label after a FAILED feed read reports the failure, not 'nothing was read'"
+else
+  bad "the off-shape line erased an earlier failed read: $OFFSHAPE_AFTER_FAIL"
+fi
+
+# THE PROPERTY ITSELF, over every combined state this suite can build. A future
+# unhedged sibling fails here instead of waiting for a reviewer.
+CONTRA=""
+for combo in "offshape+failed-label-read:$OFFSHAPE_UNTRUSTED_OUT" \
+             "offshape+failed-feed-read:$OFFSHAPE_AFTER_FAIL" \
+             "recovered-feed-read:$RECOVERED_OUT"; do
+  found=$(contradictions "${combo#*:}")
+  [ -n "$found" ] && CONTRA="${CONTRA}${combo%%:*} => ${found}; "
+done
+# ...and the four remaining states, re-run here so the check covers all of them.
+rm -f "$WORK/labels-typo.count"
+for spec in "untrusted-labels+inforce-unknown:--labels|ci:waive:beta|--labels-cmd|$WORK/labels-403.sh|--waiver-events-cmd|$WAIVER_EVENTS" \
+            "unreadable-feed:--labels|ci:waive:beta|--waiver-events-cmd|$WORK/waiver-events-403.sh" \
+            "unconfigured:--labels|ci:waive:beta" \
+            "offshape-live:--labels-cmd|$WORK/labels-offshape-live.sh" \
+            "zero-inforce:--labels-cmd|$WORK/labels-beta-live.sh|--waiver-events-cmd|cat $WORK/waiver-events-stale.tsv" \
+            "plain-none:--labels-cmd|$WORK/labels-none-live.sh"; do
+  name="${spec%%:*}"
+  args="${spec#*:}"
+  OLD_IFS="$IFS"; IFS='|'
+  # shellcheck disable=SC2086 # deliberate word split on the | separator
+  set -- $args
+  IFS="$OLD_IFS"
+  invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 "$@"
+  found=$(contradictions "$OUT")
+  [ -n "$found" ] && CONTRA="${CONTRA}${name} => ${found}; "
+done
+if [ -z "$CONTRA" ]; then
+  ok "no state's output admits a failed read and denies one at the same time (9 combinations)"
+else
+  bad "a summary contradicted itself: $CONTRA"
+fi
+# THE DETECTOR MUST DETECT, or the sweep above passes on nine states it never
+# examined. Exercised on the exact shape the round-7 finding quoted, and on a text that
+# denies without admitting (where the denial is legitimate).
+if [ -n "$(contradictions 'the live read of this pull request labels FAILED ... and nothing failed')" ] &&
+   [ -z "$(contradictions 'the read succeeded; no read failed on this run')" ]; then
+  ok "the self-contradiction detector fires on an admission+denial pair and stays quiet otherwise"
+else
+  bad "the contradiction detector is vacuous: it did not fire on a known contradiction"
+fi
+
+# Low (round 7): the in-force line must carry the same provenance the `none` branch
+# carries for the identical label source. Payload labels: the count is real, but "in
+# force" means in force in a run-start snapshot nobody re-read.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+if contains "$(evidence_line "$SUMMARY")" "OBSERVED for that label" &&
+   contains "$(evidence_line "$SUMMARY")" "that label set is the run-start event payload"; then
+  ok "an in-force claim from payload labels says the labels are the payload, as the absence line does"
+else
+  bad "the in-force line asserted 'in force' without its label provenance: $(evidence_line "$SUMMARY")"
+fi
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-beta-live.sh" --waiver-events-cmd "$WAIVER_EVENTS"
+if ! contains "$(evidence_line "$SUMMARY")" "that label set is the run-start event payload"; then
+  ok "a live label read carries no payload caveat — the hedge appears only where it is true"
+else
+  bad "a live read was hedged as a payload snapshot: $(evidence_line "$SUMMARY")"
+fi
+
+# Low (round 7): a PERSISTENT label-read failure is annotated once, not per poll — the
+# durable record is the summary's count. A DIFFERENT failure still annotates.
+invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels-cmd "$WORK/labels-403.sh"
+LABEL_WARNINGS=$(printf '%s\n' "$OUT" | grep -c "could not read the PR's current labels" || true)
+if [ "${LABEL_WARNINGS:-0}" -eq 1 ] && contains "$(cat "$SUMMARY")" "failed read(s)"; then
+  ok "a persistent label-read failure is annotated once per run, with the count in the summary"
+else
+  bad "the label-read warning fired ${LABEL_WARNINGS:-0} times across the poll loop"
+fi
+cat >"$WORK/labels-403-then-client-fail.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$WORK/labels-mixed-fail.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$WORK/labels-mixed-fail.count"
+if [ "\$n" -le 1 ]; then echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; fi
+echo "bash: gh: command not found" >&2
+exit 127
+EOF
+chmod +x "$WORK/labels-403-then-client-fail.sh"
+rm -f "$WORK/labels-mixed-fail.count"
+invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --labels-cmd "$WORK/labels-403-then-client-fail.sh"
+MIXED_WARNINGS=$(printf '%s\n' "$OUT" | grep -c "could not read the PR's current labels" || true)
+if [ "${MIXED_WARNINGS:-0}" -ge 2 ] && contains "$OUT" "HTTP 403" && contains "$OUT" "exit status 127"; then
+  ok "a DIFFERENT label-read failure is still annotated — the dedup keys on the detail, not a boolean"
+else
+  bad "a changed failure detail was swallowed by the dedup (${MIXED_WARNINGS:-0} annotation(s)): $OUT"
+fi
+
 invoke "cat $(runs_file one-failed)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -ne 0 ]; then ok "a waiver cannot excuse a FAILED tier"; else bad "failed+waived wrongly passed"; fi
 if contains "$OUT" "cannot be waived"; then
@@ -759,10 +1670,18 @@ fi
 
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
   --labels-cmd "false" --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
-if [ "$RC" -eq 0 ] && contains "$OUT" "falling back to the event payload labels"; then
+if [ "$RC" -eq 0 ] && contains "$OUT" "falling back to the run-start event payload labels"; then
   ok "an unreadable label source falls back to the payload labels and says so"
 else
   bad "the label-read fallback did not hold (rc=$RC): $OUT"
+fi
+# ...and the fallback is DURABLE, not just a per-poll annotation: the summary has to
+# carry it, because the summary is what a human reads after the fact (issue #3033).
+if contains "$(cat "$SUMMARY")" "Label read UNTRUSTED" &&
+   contains "$(cat "$SUMMARY")" "RUN-START EVENT PAYLOAD"; then
+  ok "the label-read fallback is recorded in the job summary, not only warned about"
+else
+  bad "the fallback left no trace in the summary: $(cat "$SUMMARY")"
 fi
 
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels-cmd "printf 'needs-decision\n'"
@@ -1333,6 +2252,23 @@ if [ "$RC" -eq 2 ] && contains "$OUT" "not a branch ref"; then
 else
   bad "an off-shape --base-ref was accepted (rc=$RC): $OUT"
 fi
+
+# ------------------- the wiring these fixtures CANNOT prove (issue #3033) ---
+# HONEST SCOPE, stated where it is easy to forget. Every case above injects
+# `--waiver-events-cmd`, so this suite proves the STATE MACHINE and nothing about
+# production: no fixture can show that the real
+# `gh api repos/{slug}/issues/{n}/events` call succeeds with the token pr-gate.yml
+# hands the aggregator. Only a live pull request carrying a `ci:waive:<tier-id>`
+# label can show that, and as of #3033 none ever had — the read is skipped unless
+# such a label is present, so the call had never executed in production. The states
+# above are what make that first execution legible; they are not a substitute for it.
+#
+# The one mechanisable half — that pr-gate.yml still grants the `pull-requests: read`
+# which authorizes that endpoint for a PR number — is asserted ONCE, in
+# scripts/tests/test_classify_docs_only.sh (the suite that owns pr-gate.yml's
+# structural contract). It is deliberately not duplicated here: one invariant, one
+# home, and a copy here would have had to re-derive the workflow's shape to say
+# anything true about WHY it failed.
 
 # ------------------------------------------------- non-vacuity (#2910 7.4) --
 # Every guard above must be PROVABLY able to fail. Substituting an always-exit-0

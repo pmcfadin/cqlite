@@ -183,6 +183,24 @@ Rules for `pull_request`-triggered workflows:
 - The honoured-waiver annotation names WHO APPLIED THE LABEL, resolved from the
   PR's `labeled` events — not the actor of the run, who is usually someone else.
   An unresolvable attribution says so rather than naming anyone.
+- The waiver-evidence report states OBSERVATIONS, never a derived capability. It
+  claims that no waiver label is present only when the LIVE label read succeeded on
+  that poll; a read that fell back to the run-start event payload reports UNKNOWN
+  instead, because a label applied mid-run is invisible to that snapshot. `labeled`
+  events are immutable history, so evidence is counted only for a waiver label
+  actually IN FORCE, and an untrusted label read makes that count UNKNOWN rather
+  than zero. Whether such an event BINDS stays a per-tier verdict. Every one of
+  those states is reported and none of them changes the verdict.
+- No two lines of one report may contradict each other. Every claim about labels is
+  phrased against "the label set this run is using" plus that set's provenance (live
+  read, or the run-start payload), because that is the only thing the report observes;
+  and a run that ADMITS a read failed emits no denial that one did — the operator never
+  gets `permissions:` advice beside an "authorization is not the problem" line.
+- A waiver label is `ci:waive:<tier-id>` with a LOWER-CASE tier id
+  (`[a-z0-9][a-z0-9-]*`) — the shape the evaluator matches. A `ci:waive:`-prefixed
+  label that misses it (`ci:waive:Flight`) waives nothing, and the report says so,
+  naming the label: it is neither a waiver in force (nothing is read for it, and no
+  evidence state is reported about it) nor an absence of waiver labels.
 - A registered tier's context is satisfied ONLY by a check run GitHub Actions
   produced. A check-run name is global to the commit and anything with
   `checks:write` can mint one, so provenance (`app` + an Actions run URL) is

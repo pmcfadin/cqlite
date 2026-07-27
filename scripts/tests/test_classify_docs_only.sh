@@ -139,6 +139,16 @@ if [ -f "$WORKFLOW" ]; then
       # `ci:waive:<tier-id>` applied to a wedged PR takes effect. That read needs
       # both the PR number and `pull-requests: read`; without them the break-glass
       # silently degrades to the event payload snapshot.
+      #
+      # ISSUE #3033: the same `pull-requests: read` also authorizes the SECOND half
+      # of the break-glass — `gh api repos/{slug}/issues/{n}/events`, the `labeled`
+      # events behind waiver attribution and head-binding. GitHub's per-permission
+      # reference lists that endpoint under `Pull requests` read as well as `Issues`
+      # read, so `issues: read` must NOT be added to pr-gate.yml: it would widen a
+      # fork-reachable token over every issue in the repo to authorize nothing new.
+      # This single assertion is therefore the only home for that invariant — the
+      # sibling suite (test_aggregate_required_tiers.sh) deliberately does not
+      # duplicate it. A missing grant kills BOTH reads at once.
       abort("`required` must pass the PR number for the live label read") unless body.include?("pull_request.number")
       perms = wf["permissions"]
       abort("pr-gate.yml must grant `pull-requests: read` for the live label read") unless perms.is_a?(Hash) && perms["pull-requests"].to_s == "read"
