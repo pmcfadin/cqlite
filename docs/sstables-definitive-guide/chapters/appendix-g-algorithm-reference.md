@@ -390,10 +390,9 @@ fn test_compression_format(algorithm: &str, data_file: &str) {
 
 ## See Also
 
-- Full specification: appendix-g-compression-chunk-formats.md
-- Quick reference: appendix-g-quick-reference.md
-- Research notes: /docs/archive/issues/COMPRESSION_CHUNK_FORMAT_RESEARCH.md
-- CQLite source: `/cqlite-core/src/storage/sstable/compression.rs`
+- Full specification: [Appendix G: Compression Chunk Formats](./appendix-g-compression-chunk-formats.md)
+- Quick reference: [Appendix G Quick Reference](./appendix-g-quick-reference.md)
+- CQLite source: `cqlite-core/src/storage/sstable/compression.rs`
 - [`CompressionMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java)
 - [`schema/CompressionParams.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) — `DEFAULT_CHUNK_LENGTH = 1024 * 16` (line 47)
 - [`BigFormat.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java) — `hasMaxCompressedLength` gate (line 401)

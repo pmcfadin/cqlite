@@ -77,7 +77,23 @@ const CHAPTERS = [
   { file: 'appendix-e-glossary.md',             order: 105, prefix: 'appendix-e' },
   { file: 'appendix-f-known-limitations.md',    order: 106, prefix: 'appendix-f' },
   { file: 'appendix-g-compression-chunk-formats.md', order: 107, prefix: 'appendix-g' },
+  { file: 'appendix-g-algorithm-reference.md',   order: 108, prefix: 'appendix-g-algorithms' },
+  { file: 'appendix-g-quick-reference.md',       order: 109, prefix: 'appendix-g-quickref' },
+  { file: 'appendix-h-commitlog-segment-format.md', order: 110, prefix: 'appendix-h' },
 ];
+
+// Chapter-directory files that are deliberately NOT published to the site.
+// Every entry needs a reason — the publication guard below fails the build on
+// any chapters/*.md that is neither in CHAPTERS nor listed here, so a new
+// chapter can no longer rot out of the site unnoticed (issue #3006).
+const UNPUBLISHED_BY_DESIGN = new Map([
+  [
+    'APPENDIX_G_INDEX.md',
+    'Stale meta "document map" for the Appendix G family: wrong line count and ' +
+      'two references to files that no longer exist. Delete-vs-correct-and-publish ' +
+      'is an open owner decision on issue #3006 — do not publish as-is.',
+  ],
+]);
 
 // Map from source filename → output slug for link rewriting
 const FILE_TO_SLUG = new Map();
@@ -194,6 +210,58 @@ function extractDescription(content) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 console.log('[sync-format-guide] Starting...');
+
+// ── Publication guard (issue #3006) ──────────────────────────────────────────
+// The generated pages are gitignored, so CHAPTERS is the only record of what is
+// published. Forgetting an entry used to produce a green build with the chapter
+// silently unreachable (and inbound links degraded to GitHub blob URLs via the
+// TODO(W8) fallback below). Assert set-equality instead: every chapters/*.md is
+// either published or explicitly excluded with a reason.
+{
+  const onDisk = fs
+    .readdirSync(CHAPTERS_DIR)
+    .filter(f => f.endsWith('.md') && f !== 'README.md')
+    .sort();
+  const unaccounted = onDisk.filter(
+    f => !FILE_TO_SLUG.has(f) && !UNPUBLISHED_BY_DESIGN.has(f)
+  );
+  const staleExclusions = [...UNPUBLISHED_BY_DESIGN.keys()].filter(
+    f => !onDisk.includes(f)
+  );
+  const doublyListed = [...UNPUBLISHED_BY_DESIGN.keys()].filter(f => FILE_TO_SLUG.has(f));
+
+  const problems = [];
+  if (unaccounted.length > 0) {
+    problems.push(
+      'These chapter files are neither published nor explicitly excluded:\n' +
+        unaccounted.map(f => `    - ${f}`).join('\n') +
+        '\n  FIX: add a { file, order, prefix } entry to CHAPTERS to publish it, or add\n' +
+        '       it to UNPUBLISHED_BY_DESIGN with a reason if it must stay off the site.'
+    );
+  }
+  if (staleExclusions.length > 0) {
+    problems.push(
+      'These UNPUBLISHED_BY_DESIGN entries no longer exist on disk (drop them):\n' +
+        staleExclusions.map(f => `    - ${f}`).join('\n')
+    );
+  }
+  if (doublyListed.length > 0) {
+    problems.push(
+      'These files are in BOTH CHAPTERS and UNPUBLISHED_BY_DESIGN (pick one):\n' +
+        doublyListed.map(f => `    - ${f}`).join('\n')
+    );
+  }
+
+  if (problems.length > 0) {
+    console.error('[sync-format-guide] ERROR: chapter publication set mismatch (issue #3006)');
+    for (const p of problems) console.error(`  ${p}`);
+    process.exit(1);
+  }
+  console.log(
+    `[sync-format-guide] Publication guard OK: ${FILE_TO_SLUG.size} published, ` +
+      `${UNPUBLISHED_BY_DESIGN.size} excluded by design, ${onDisk.length} on disk.`
+  );
+}
 
 // Ensure output directories exist
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });

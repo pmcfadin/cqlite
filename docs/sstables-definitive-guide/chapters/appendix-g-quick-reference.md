@@ -135,9 +135,9 @@ pub fn decompress(algorithm: &str, data: &[u8]) -> Result<Vec<u8>> {
 
 ## Files to Reference
 
-- **Full spec**: `/docs/sstables-definitive-guide/chapters/appendix-g-compression-chunk-formats.md`
-- **Research notes**: `/docs/archive/issues/COMPRESSION_CHUNK_FORMAT_RESEARCH.md`
-- **CQLite code**: `/cqlite-core/src/storage/sstable/compression.rs`
+- **Full spec**: [Appendix G: Compression Chunk Formats](./appendix-g-compression-chunk-formats.md)
+- **Algorithm reference**: [Appendix G: Algorithm Reference Sheet](./appendix-g-algorithm-reference.md)
+- **CQLite code**: `cqlite-core/src/storage/sstable/compression.rs`
 - **Cassandra source**: `apache/cassandra:5.0.8` in `/src/java/org/apache/cassandra/io/compress/`
   - [`CompressionMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java)
   - [`CompressedSequentialWriter.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java)
