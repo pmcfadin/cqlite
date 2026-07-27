@@ -46,9 +46,11 @@
 # `refs/heads/issue-<N>-*` branch. `claim` refuses if any such branch exists on
 # origin (treat the issue as already-claimed) and names the resume command above
 # in its refusal — but ONLY when the lane is DEMONSTRABLY ORPHANED per
-# `hatch_liveness`: zero open PRs AND every matching branch tip older than
-# claim-heartbeat.sh's reap threshold AND no fresh machine-claim/heartbeat ref naming
-# the issue. An older-fleet worker holds only the BRANCH, so `claim-ref=free` is true
+# `hatch_liveness`: zero open PRs AND every matching branch tip carrying at least one
+# commit of its OWN and older than claim-heartbeat.sh's reap threshold AND no fresh
+# machine-claim/heartbeat ref naming the issue. A branch with no commits beyond
+# origin/main (what `flow-activate` pushes at activation) has NO age signal at all, so
+# it is INDETERMINATE and withholds. An older-fleet worker holds only the BRANCH, so `claim-ref=free` is true
 # while it works — and because a PR is opened LATE in this pipeline, "no open PR" is
 # also true for most of its life, which is why the branch-tip age and the liveness
 # refs (the PRE-PR window) are part of the test. Otherwise — a live signal OR any
@@ -99,11 +101,14 @@
 #                                             RE-ENTRANT: if the ref is already held by THIS
 #                                             machine+actor, adopt reports ADOPTED (re-entrant)
 #                                             exit 0 — a retry after a confirm-read blip must
-#                                             never abandon an issue we still hold. In CAS mode
-#                                             that verdict names BOTH shas
-#                                             (re-entrant, lease-mismatch expected=/actual=), so a
-#                                             VIOLATED compare-and-swap is never reported as a
-#                                             satisfied one.
+#                                             never abandon an issue we still hold. In CAS mode,
+#                                             when the ref sits at some OTHER sha of ours, that
+#                                             verdict names BOTH shas (re-entrant, lease-mismatch
+#                                             expected=/actual=), so a VIOLATED compare-and-swap is
+#                                             never reported as a satisfied one; when the ref is
+#                                             still at --expect (the precondition HELD, only our
+#                                             new commit did not land) it is the plain re-entrant
+#                                             verdict — no mismatch that did not happen.
 #   release <N> [--force] [--actor <id>]      delete the ref; without --force requires holder identity
 #                                             (machine+actor) + no open PR, and deletes via CAS lease.
 #                                             --force = reaper/adopt: unconditional delete.
@@ -453,6 +458,44 @@ reap_threshold_secs() {
   printf '%s\n' "$out"
 }
 
+# hatch_fetch_ref <remote-ref> <slot> — fetch <remote-ref> from origin into the
+# PRIVATE local ref refs/hatch-scan/<slot> and print its commit sha; returns 1 when
+# ANY step is unreadable (callers withhold).
+#
+# EXPLICIT REFSPEC, NEVER FETCH_HEAD: the liveness scan fetches several refs in a
+# row and every `git fetch` REWRITES FETCH_HEAD, so reading FETCH_HEAD is a
+# clobbering hazard — one stale read ages the WRONG commit. Fetching (not just
+# ls-remote'ing) is also what makes the objects local, which the ancestry test below
+# needs. The slots are force-updated (`+`) and deleted by hatch_liveness afterwards.
+hatch_fetch_ref() {
+  local refname="$1" slot="refs/hatch-scan/$2" sha
+  git fetch --quiet --no-tags "$REMOTE" "+${refname}:${slot}" >/dev/null 2>&1 || return 1
+  sha="$(git rev-parse --verify --quiet "${slot}^{commit}")" || return 1
+  [ -n "$sha" ] || return 1
+  printf '%s\n' "$sha"
+}
+
+# hatch_tip_has_own_commits <tip-sha> <base-sha> — does this branch tip carry at
+# least ONE commit beyond origin's default branch?
+#   0  yes — the tip is the worker's OWN work, so its committer date means something
+#   1  no  — the tip IS the base (or an ancestor of it). `flow-activate` creates the
+#            work branch with `git worktree add -b issue-<N>-<slug> origin/main` and
+#            pushes it with NO commits of its own, so such a tip's date is
+#            origin/main's and carries ZERO information about the worker (#2945
+#            review). Age-judging it made an actively-worked lane look "stale"
+#            whenever main had been quiet longer than the threshold (overnight is
+#            routine) and advertised a hand-away for it — two writers on one issue.
+#   2  the ancestry test itself could not be run — an unread signal.
+hatch_tip_has_own_commits() {
+  local rc=0
+  git merge-base --is-ancestor "$1" "$2" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    1) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
 # hatch_liveness <N> <threshold-secs> — may the copy-pasteable empty-lease resume be
 # ADVERTISED for this issue, i.e. is its lane demonstrably ORPHANED?
 #
@@ -464,31 +507,76 @@ reap_threshold_secs() {
 # remediations literally. So the PRE-PR window needs its own liveness evidence:
 #
 #   1. open PRs == 0                       (the ENDGAME signal; -1 = unreadable)
-#   2. EVERY matching issue-<N>-* branch tip is OLDER than <threshold> (the same
+#   2. EVERY matching issue-<N>-* branch tip CARRIES AT LEAST ONE COMMIT OF ITS OWN
+#      (beyond origin's default branch) and is OLDER than <threshold> (the same
 #      staleness threshold `claim-heartbeat.sh should-reap` uses) — a worker mid-
-#      implementation pushes commits, so a FRESH tip means somebody is on it
-#   3. NO refs/machine-claims/* or refs/heartbeats/* ref FRESHLY names this issue
-#      (the supervisor-authored liveness proof of #2655; a ref older than the
-#      threshold is itself reapable and does not withhold)
+#      implementation pushes commits, so a FRESH tip means somebody is on it. A tip
+#      with NO own commits is what `flow-activate` pushes at activation time, so its
+#      date is origin/main's: NO INFORMATION, hence INDETERMINATE, hence withheld —
+#      never "stale" (#2945 review). The motivating cases (#2043, #1883) each carried
+#      their own OpenSpec commit, so they stay age-judgeable and still advertise.
+#   3. NO refs/machine-claims/* or refs/heartbeats/* ref that NAMES THIS ISSUE is
+#      fresher than <threshold> (the supervisor-authored liveness proof of #2655; a
+#      ref older than the threshold is itself reapable and does not withhold, and a
+#      ref naming another issue — or naming none at all — is not evidence about THIS
+#      lane, so it does not withhold either)
 #
-# ANY signal that cannot be READ withholds — an unreachable remote, an unparseable
-# commit date and a missing threshold are all "we could not prove nobody is working
-# this", never an all-clear. Sets HATCH_SIGNALS (a single-line key=value run for the
-# refusal) and returns 0 = orphaned (advertise), 1 = withhold.
+# ANY signal that cannot be READ withholds — an unreachable remote, an unreadable
+# default-branch/ancestry test, an unparseable commit date and a missing threshold are
+# all "we could not prove nobody is working this", never an all-clear. Sets
+# HATCH_SIGNALS (a single-line key=value run for the refusal) and returns 0 = orphaned
+# (advertise), 1 = withhold.
 HATCH_SIGNALS=""
 hatch_liveness() {
+  local rc=0
+  hatch_liveness_scan "$@" || rc=$?
+  # The private scan slots are scratch, not state: drop them so the scan never leaves
+  # fetched objects pinned in the caller's checkout.
+  git update-ref -d refs/hatch-scan/base   >/dev/null 2>&1 || true
+  git update-ref -d refs/hatch-scan/branch >/dev/null 2>&1 || true
+  git update-ref -d refs/hatch-scan/live   >/dev/null 2>&1 || true
+  return "$rc"
+}
+
+hatch_liveness_scan() {
   local issue="$1" threshold="$2"
-  local prs now raw line refname msg tip_ct age min_age="" ref_issue ref_ts ref_epoch
+  local prs now raw line refname msg base tip tip_ct age min_age="" own_rc ref_issue ref_ts ref_epoch
 
   prs="$(open_pr_count "$issue")"
   HATCH_SIGNALS="open-prs=$prs"
   [ "$prs" = "0" ] || return 1
 
+  # The BASE a work branch is cut from: origin's default branch, read as the remote's
+  # HEAD so no branch name is hardcoded. FETCHED, because the ancestry test needs its
+  # objects locally — and an unreadable base is an UNREAD signal, so it withholds
+  # rather than silently letting every tip count as "own work" (which would restore
+  # the vacuous age verdict this signal exists to remove).
+  if ! base="$(hatch_fetch_ref HEAD base)"; then
+    HATCH_SIGNALS="$HATCH_SIGNALS default-branch-tip=unreadable"
+    return 1
+  fi
+
   now="$(date -u +%s)"
   while IFS= read -r refname; do
     [ -n "$refname" ] || continue
-    if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1 \
-       || ! tip_ct="$(git log -1 --format=%ct FETCH_HEAD 2>/dev/null)" \
+    if ! tip="$(hatch_fetch_ref "$refname" branch)"; then
+      HATCH_SIGNALS="$HATCH_SIGNALS branch-tip=unreadable:${refname}"
+      return 1
+    fi
+    own_rc=0
+    hatch_tip_has_own_commits "$tip" "$base" || own_rc=$?
+    if [ "$own_rc" = "1" ]; then
+      # INDETERMINATE, not stale: a freshly-activated branch carries no commits of
+      # its own, so there is nothing here to age. Withhold, with a self-describing
+      # marker so the reader sees WHY no age was reported.
+      HATCH_SIGNALS="$HATCH_SIGNALS newest-branch-tip=no-own-commits:${refname}"
+      return 1
+    fi
+    if [ "$own_rc" != "0" ]; then
+      HATCH_SIGNALS="$HATCH_SIGNALS branch-tip=ancestry-unreadable:${refname}"
+      return 1
+    fi
+    if ! tip_ct="$(git log -1 --format=%ct "$tip" 2>/dev/null)" \
        || [ -z "$tip_ct" ] || [ -n "${tip_ct//[0-9]/}" ]; then
       HATCH_SIGNALS="$HATCH_SIGNALS branch-tip=unreadable:${refname}"
       return 1
@@ -512,16 +600,19 @@ hatch_liveness() {
     [ -n "$line" ] || continue
     refname="$(printf '%s' "$line" | awk '{print $2}')"
     [ -n "$refname" ] || continue
-    if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1 \
-       || ! msg="$(git log -1 --format=%B FETCH_HEAD 2>/dev/null)" || [ -z "$msg" ]; then
+    if ! tip="$(hatch_fetch_ref "$refname" live)" \
+       || ! msg="$(git log -1 --format=%B "$tip" 2>/dev/null)"; then
+      # We could not READ this ref at all, so we cannot rule out that it names our
+      # issue → withhold (fail closed).
       HATCH_SIGNALS="$HATCH_SIGNALS liveness-refs=unreadable:${refname}"
       return 1
     fi
+    # SCOPED TO THIS ISSUE (#2945 review). A ref we CAN read that does not name this
+    # issue — another issue's claim, or a legacy/foreign ref with no `issue=` trailer
+    # at all — is not evidence about THIS lane. Withholding on it blocked the hatch
+    # FLEET-WIDE for EVERY issue, re-creating the permanent dead end this change
+    # exists to remove. Skipped, not withheld.
     ref_issue="$(msg_field "$msg" issue)"
-    if [ -z "$ref_issue" ]; then
-      HATCH_SIGNALS="$HATCH_SIGNALS liveness-refs=unreadable:${refname}"
-      return 1
-    fi
     [ "$ref_issue" = "$issue" ] || continue
     # This ref names OUR issue. Fresh -> a worker is on it. Unparseable ts -> we
     # cannot age it out, so it withholds (fail closed) exactly like should-reap
@@ -601,9 +692,9 @@ cmd_claim() {
     elif hatch_liveness "$issue" "$threshold"; then
       hatch_branch="${LEGACY_BRANCHES%%,*}"
       hatch_branch="${hatch_branch#refs/heads/}"
-      remedy="remediation='bash scripts/flow/claim.sh adopt $issue --expect none --reason resume-legacy-branch-lock:${hatch_branch}' $HATCH_SIGNALS (orphaned lane: no open PR, every branch tip staler than the reap threshold, no fresh liveness ref for this issue — an older-fleet branch lock left behind, a parked/reaped resume, or a merged-but-undeleted branch; the quoted empty-lease adopt takes the FREE claim ref atomically — git rejects it if any machine holds the claim ref)"
+      remedy="remediation='bash scripts/flow/claim.sh adopt $issue --expect none --reason resume-legacy-branch-lock:${hatch_branch}' $HATCH_SIGNALS (orphaned lane: no open PR, every branch tip carrying its OWN commits and staler than the reap threshold, no fresh liveness ref for this issue — an older-fleet branch lock left behind, a parked/reaped resume, or a merged-but-undeleted branch; the quoted empty-lease adopt takes the FREE claim ref atomically — git rejects it if any machine holds the claim ref)"
     else
-      remedy="remediation=withheld $HATCH_SIGNALS (this lane may be LIVE or is unproven: an open PR (or an unreadable -1 PR list), a branch tip fresher than the reap threshold — an older-fleet worker mid-implementation holds only the BRANCH and has NO PR yet — or a fresh machine-claim/heartbeat ref naming this issue. An empty-lease adopt WOULD succeed there and create a SECOND writer; confirm ownership via the board and the branch/PR author first, then see 'bash scripts/flow/claim.sh -h')"
+      remedy="remediation=withheld $HATCH_SIGNALS (this lane may be LIVE or is unproven: an open PR (or an unreadable -1 PR list), a branch tip fresher than the reap threshold — an older-fleet worker mid-implementation holds only the BRANCH and has NO PR yet — a branch with NO commits of its own, whose tip date is just origin/main's and says nothing about the worker (newest-branch-tip=no-own-commits), or a fresh machine-claim/heartbeat ref naming this issue. An empty-lease adopt WOULD succeed there and create a SECOND writer; confirm ownership via the board and the branch/PR author first, then see 'bash scripts/flow/claim.sh -h')"
     fi
     emit "LOST issue=$issue reason=legacy-branch-lock detail=$LEGACY_BRANCHES exists on $REMOTE claim-ref=free $remedy"
     return 2
@@ -849,8 +940,13 @@ cmd_adopt() {
   # exit 2 would abandon it), but reporting a plain `ADOPTED … from=X` would print a
   # value the ref never had and make a FAILED CAS indistinguishable from a satisfied
   # one. So the CAS path gets its OWN verdict naming BOTH shas (#2945 review).
+  # …but ONLY a GENUINE divergence gets the mismatch wording (#2945 review): when the
+  # ref still sits at exactly our --expect value the compare-and-swap precondition DID
+  # hold (only our own new commit failed to land), so `lease-mismatch expected=X
+  # actual=X` named a divergence that never happened. That case takes the plain
+  # re-entrant verdict, whose `from=` is the value the ref really has.
   if [ -n "$now" ] && holder_is_us "$now" "$actor"; then
-    if [ "$mode" = "empty" ]; then
+    if [ "$mode" = "empty" ] || [ "$now" = "$expect" ]; then
       emit "ADOPTED issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_desc "$now") from=$expect (re-entrant)"
     else
       emit "ADOPTED issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_desc "$now") (re-entrant, lease-mismatch expected=$expect actual=$now — we DO hold the ref, but the compare-and-swap precondition did NOT hold)"
