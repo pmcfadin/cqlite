@@ -294,7 +294,8 @@ impl SSTableReader {
     ///
     /// Returns `Ok(None)` (decode the whole partition, report `PartitionLookup`)
     /// for every other case — a NARROW partition, an empty `Rows.db`, an
-    /// un-encodable bound, or a slice that selects no block. This is the honest
+    /// un-encodable bound, a slice that selects no block, or (issue #3002) an entry
+    /// whose row-index ROOT failed structural validation. This is the honest
     /// fallback: correctness is preserved by decoding the full partition and
     /// letting the post-scan backstop filter.
     #[cfg(not(feature = "tombstones"))]
@@ -345,7 +346,26 @@ impl SSTableReader {
                 "BTI clustering seek: Rows.db entry at RowsOffset({rows_offset}) unreadable: {e}"
             ))
         })?;
-        let root = header.trie_root;
+        // ROOT UNUSABLE (issue #3002): the entry's resolved root failed structural
+        // validation — it is not the last-written node before the entry, so walking
+        // from it would return a structurally valid but BOGUS window that silently
+        // drops rows (exactly the pre-#3002 fail-open). Take the honest "cannot
+        // narrow" fallback: `Ok(None)` ⇒ decode the whole partition and let the
+        // post-scan backstop filter. This is DISTINCT from the #1968 implicit-first
+        // signal below, which keeps a real (narrowed-END) window rooted at rel 0.
+        // `header.data_position`/`block_count` are unaffected and stay usable by the
+        // point-lookup / successor-walk paths.
+        let root = match &header.trie_root {
+            Ok(root) => root.offset(),
+            Err(rejection) => {
+                debug!(
+                    "BTI clustering seek: {rejection}; decoding the full partition (no \
+                     narrowing) — a Rows.db row index written by CQLite <= 0.15 must be \
+                     rewritten (re-flush/re-compact), see issue #3002"
+                );
+                return Ok(None);
+            }
+        };
 
         // Per-column reverse order for the FIRST clustering column (single-column
         // scope per #954). A missing/absent schema treats it as ascending.

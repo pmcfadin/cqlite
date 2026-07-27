@@ -22,6 +22,11 @@ pub use parser::{
     select_row_index_blocks_for_range, BtiPartitionLocation, BtiRowIndexEntry,
     BtiRowIndexEntryWithKey, BtiRowIndexHeader, FLAG_HAS_HASH_BYTE, FLAG_OPEN_MARKER,
 };
+// Structural `Rows.db` row-index-root validation (issue #3002).
+pub use parser::{
+    rows_node_serialized_extent_end_for_test, RowsTrieRootRejectReason, RowsTrieRootRejection,
+    ValidatedRowsTrieRoot,
+};
 // Crate-internal zero-copy slice walker (rust-reviewer #1574): consumed only by
 // the SSTable reader, so kept off cqlite-core's public semver surface. It takes a
 // PRE-ENCODED byte-comparable key so callers hoist the key hash+encoding out of the

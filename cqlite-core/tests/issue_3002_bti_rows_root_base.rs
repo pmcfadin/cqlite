@@ -40,7 +40,7 @@ use cqlite_core::storage::sstable::bti::encode_clustering_bound_oss50;
 use cqlite_core::storage::sstable::bti::{
     iterate_rows_in_bti_trie, lookup_raw_key_in_bti_partitions_db, parse_bti_node_for_test,
     resolve_rows_db_entry, rows_floor_block_for_test, rows_strict_ceiling_block_for_test,
-    BtiNodeData, BtiNodeType, BtiPartitionLocation, BtiRowIndexEntry,
+    BtiNodeData, BtiNodeType, BtiPartitionLocation, BtiRowIndexEntry, RowsTrieRootRejectReason,
 };
 use cqlite_core::types::Value;
 use std::io::Cursor;
@@ -193,8 +193,14 @@ fn rows_db_root_base_includes_short_length_prefix() {
         );
 
         let header = resolve_rows_db_entry(&rdb, rows_offset).expect("entry must deserialize");
+        // AC (root validation, issue #3002): a REAL Cassandra-written entry must PASS
+        // the structural root validation — rejecting a valid file would be worse than
+        // the bug being fixed.
+        let trie_root = header.require_trie_root().unwrap_or_else(|e| {
+            panic!("pk={pk}: the Cassandra-written root must validate structurally: {e}")
+        });
         assert_eq!(
-            header.trie_root,
+            trie_root,
             expected_root,
             "pk={pk}: trie root must be RowsOffset + 2 + key_length + delta = \
              {expected_root} (the pre-#3002 base was 2 bytes low → {})",
@@ -251,7 +257,7 @@ fn rows_db_root_base_includes_short_length_prefix() {
         }
 
         // A faithful traversal from the correct root.
-        let entries = iterate_rows_in_bti_trie(&rdb, header.trie_root)
+        let entries = iterate_rows_in_bti_trie(&rdb, trie_root)
             .expect("traversal from the resolved root must succeed");
         assert_eq!(
             entries.len(),
@@ -357,7 +363,8 @@ fn each_fix_alone_regresses_the_read_path() {
     };
     let root = resolve_rows_db_entry(&rdb, PARTITIONS[0].1)
         .expect("resolve pk=1")
-        .trie_root;
+        .require_trie_root()
+        .expect("the fixture root must validate");
     // The pre-#3002 base was exactly 2 bytes low (it omitted the u16 short-length
     // prefix), so the pre-fix root is `root - 2`. Reconstructed here rather than
     // left in production code behind a flag.
@@ -485,7 +492,8 @@ fn block_zero_is_a_stored_floor_and_implicit_first_is_preserved() {
     };
     let root = resolve_rows_db_entry(&rdb, PARTITIONS[0].1)
         .expect("resolve pk=1")
-        .trie_root;
+        .require_trie_root()
+        .expect("the fixture root must validate");
 
     // An OPEN lower bound (the empty physical-low sentinel) floors to the stored
     // block-0 entry — previously `None` (implicit-first).
@@ -555,6 +563,223 @@ fn sparse8_trie_over_single_byte_separators(seps: &[u8]) -> (Vec<u8>, usize) {
     (trie, root as usize)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Root VALIDATION (issue #3002, owner-approved scope extension): a `Rows.db`
+// whose entry delta was encoded against the OLD 2-low base is DETECTED, and the
+// clustering read takes the honest full-partition fallback instead of returning a
+// structurally-valid-but-bogus window.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Read a Cassandra unsigned VInt independently of production code (the oracle for
+/// locating the entry's delta byte must not share the decoder under test).
+fn read_unsigned_vint_independently(bytes: &[u8], pos: &mut usize) -> u64 {
+    let first = bytes[*pos];
+    *pos += 1;
+    let extra = first.leading_ones() as usize;
+    let mask: u64 = if extra >= 7 {
+        0
+    } else {
+        (1u64 << (7 - extra)) - 1
+    };
+    let mut value = (first as u64) & mask;
+    for _ in 0..extra {
+        value = (value << 8) | bytes[*pos] as u64;
+        *pos += 1;
+    }
+    value
+}
+
+/// Byte position of the SIGNED root-delta VInt inside the `TrieIndexEntry` at
+/// `rows_offset`, located by hand: `[u16 key_length][key][dataPos unsigned vint]`.
+fn root_delta_position(rdb: &[u8], rows_offset: usize) -> usize {
+    let key_length = u16::from_be_bytes([rdb[rows_offset], rdb[rows_offset + 1]]) as usize;
+    let mut pos = rows_offset + 2 + key_length;
+    let _data_position = read_unsigned_vint_independently(rdb, &mut pos);
+    pos
+}
+
+/// Rewrite every partition's root delta the way a PRE-#3002 CQLite writer would
+/// have: measured from `RowsOffset + key_length` (2 bytes LOW), so a correct reader
+/// resolves the root 2 bytes HIGH — two bytes into the root node's own body.
+///
+/// The trie bytes are untouched, and each rewritten ZigZag VInt is asserted to keep
+/// its original width, so every offset in the file stays valid: the ONLY difference
+/// is the base the delta was measured against. (Synthesized here — no new binary
+/// fixture is shipped.)
+fn rows_db_written_against_the_two_low_base(rdb: &[u8]) -> Vec<u8> {
+    let mut out = rdb.to_vec();
+    for (pk, rows_offset, _root) in PARTITIONS {
+        let at = root_delta_position(rdb, rows_offset);
+        let mut probe = at;
+        let zig = read_unsigned_vint_independently(rdb, &mut probe);
+        let width = probe - at;
+        let delta = ((zig >> 1) as i64) ^ -((zig & 1) as i64);
+        // Same target root, base 2 bytes lower ⇒ delta 2 higher.
+        let pre_fix = delta + 2;
+        let re_zig = ((pre_fix << 1) ^ (pre_fix >> 63)) as u64;
+        assert!(
+            re_zig < 128 && width == 1,
+            "pk={pk}: this fixture's deltas are 1-byte vints ({delta} → {pre_fix}); a \
+             width change would move every following byte"
+        );
+        out[at] = re_zig as u8;
+    }
+    out
+}
+
+/// Append a `TrieIndexEntry` (`[u16 keylen][key][dataPos vint][rootΔ zigzag vint]
+/// [blockCount vint][0x80 LIVE deletion]`) for a trie rooted at `trie_root`,
+/// returning its `RowsOffset`.
+fn append_trie_index_entry(
+    buf: &mut Vec<u8>,
+    key: &[u8],
+    data_position: u64,
+    trie_root: usize,
+    block_count: u64,
+) -> usize {
+    let rows_offset = buf.len();
+    buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
+    buf.extend_from_slice(key);
+    let base = rows_offset + 2 + key.len();
+    assert!(
+        data_position < 128 && block_count < 128,
+        "1-byte vints only"
+    );
+    buf.push(data_position as u8);
+    let delta = trie_root as i64 - base as i64;
+    let zig = ((delta << 1) ^ (delta >> 63)) as u64;
+    assert!(zig < 128, "1-byte zigzag vint only (delta {delta})");
+    buf.push(zig as u8);
+    buf.push(block_count as u8);
+    buf.push(0x80); // LIVE partition deletion
+    rows_offset
+}
+
+/// AC (root validation) — an entry written against the OLD 2-low base is DETECTED
+/// as unusable, while the fields the root bug never affected (`data_position`,
+/// `block_count`) still decode; and walking from the bogus root — what production
+/// did before this check — would have silently DROPPED the earliest rows.
+#[test]
+fn two_low_base_entry_is_detected_as_an_unusable_root() {
+    let Some((rdb, _pdb)) = wide_components() else {
+        return;
+    };
+    let patched = rows_db_written_against_the_two_low_base(&rdb);
+    assert_ne!(patched, rdb, "the perturbation must change the bytes");
+
+    for (pk, rows_offset, true_root) in PARTITIONS {
+        let good = resolve_rows_db_entry(&rdb, rows_offset).expect("baseline entry");
+        let header = resolve_rows_db_entry(&patched, rows_offset)
+            .expect("the ENTRY must still deserialize — only the ROOT is unusable");
+
+        // The unaffected consumers' fields are byte-identical to the baseline.
+        assert_eq!(
+            (header.data_position, header.block_count),
+            (good.data_position, good.block_count),
+            "pk={pk}: data_position/block_count must be unaffected by an unusable root"
+        );
+        assert_eq!(header.block_count, BLOCK_COUNT);
+
+        // The root capability is withheld, with the structural reason.
+        assert_eq!(
+            header.trie_root_offset(),
+            None,
+            "pk={pk}: the 2-high resolved root must NOT be exposed as usable"
+        );
+        let rejection = match header.trie_root {
+            Ok(root) => panic!("pk={pk}: root {root:?} must have been rejected"),
+            Err(rejection) => rejection,
+        };
+        assert_eq!(rejection.resolved_offset, true_root as i64 + 2);
+        assert_eq!(
+            rejection.reason,
+            RowsTrieRootRejectReason::ExtentNotAtEntry {
+                extent_end: rows_offset + 1
+            },
+            "pk={pk}: 2 bytes into the root's body the delta byte 0x02 fakes a \
+             PayloadOnly node whose extent overshoots the entry at {rows_offset}"
+        );
+        assert!(
+            (rejection.resolved_offset as usize) < patched.len(),
+            "pk={pk}: the old `root < rows_db.len()` check would have ACCEPTED this \
+             offset — that fail-open is what this validation closes"
+        );
+
+        // What the pre-check code would have done with that bogus root: the fake
+        // PayloadOnly node parses, so the floor walk returns a block whose start is
+        // ABOVE the partition body — every row before it would be dropped.
+        let bogus_root = rejection.resolved_offset as usize;
+        let bogus_floor = rows_floor_block_for_test(&patched, bogus_root, b"")
+            .expect("the bogus root parses — that is precisely the fail-open")
+            .expect("it even yields a floor block");
+        assert!(
+            bogus_floor.data_offset > BLOCK_0_OFFSET,
+            "pk={pk}: the bogus window would start at {} (> block 0 at \
+             {BLOCK_0_OFFSET}), silently dropping the earliest clustering rows",
+            bogus_floor.data_offset
+        );
+    }
+}
+
+/// AC (root validation) — the "root unusable" fallback is a DIFFERENT branch from
+/// the #1968 implicit-first signal, asserted on the branch itself, not on rows:
+///
+/// - implicit-first: the root VALIDATES (`trie_root` is `Ok`) and the floor walk
+///   returns `None` because the bound sorts below a non-empty first separator, so
+///   production keeps a window that starts at rel 0 with a narrowed END;
+/// - root unusable: `trie_root` is `Err`, so production has no root to walk at all
+///   and returns "cannot narrow" (full-partition decode).
+#[test]
+fn root_unusable_fallback_is_distinct_from_implicit_first_block() {
+    let Some((rdb, _pdb)) = wide_components() else {
+        return;
+    };
+
+    // (a) IMPLICIT FIRST (#1968): a synthetic trie whose first separator is NOT empty
+    // (the shape CQLite's own writer emits), with a real entry in front of it.
+    let (trie, syn_root) = sparse8_trie_over_single_byte_separators(&[0x10, 0x20]);
+    let mut synthetic = trie;
+    let syn_rows_offset = append_trie_index_entry(&mut synthetic, &[0x00, 0x07], 5, syn_root, 2);
+    let syn_header =
+        resolve_rows_db_entry(&synthetic, syn_rows_offset).expect("synthetic entry resolves");
+    let syn_validated = syn_header
+        .require_trie_root()
+        .expect("a payload-LESS internal root that ends at the entry is VALID");
+    assert_eq!(syn_validated, syn_root);
+    assert_eq!(
+        rows_floor_block_for_test(&synthetic, syn_validated, &[0x05])
+            .expect("floor walk must succeed"),
+        None,
+        "#1968: a bound below a NON-empty first separator yields the implicit-first \
+         `None` — with a VALID root, which is what distinguishes it"
+    );
+
+    // (b) ROOT UNUSABLE: the same fixture entry rewritten against the 2-low base has
+    // no root at all — a different branch, with a named reason.
+    let patched = rows_db_written_against_the_two_low_base(&rdb);
+    let bad = resolve_rows_db_entry(&patched, PARTITIONS[0].1).expect("entry resolves");
+    assert!(
+        bad.trie_root.is_err() && bad.trie_root_offset().is_none(),
+        "the root-unusable branch withholds the root entirely"
+    );
+    assert!(
+        matches!(
+            bad.trie_root.expect_err("rejected"),
+            cqlite_core::storage::sstable::bti::RowsTrieRootRejection {
+                reason: RowsTrieRootRejectReason::ExtentNotAtEntry { .. },
+                ..
+            }
+        ),
+        "and reports WHICH structural invariant failed, never a bare `None`"
+    );
+
+    // The two cases are not conflatable: one has a usable root, the other does not.
+    assert!(
+        syn_header.trie_root.is_ok() && bad.trie_root.is_err(),
+        "implicit-first keeps a usable root; root-unusable does not"
+    );
+}
+
 /// WIRING EVIDENCE — the fix is exercised through the public `SELECT` path
 /// (`Database::execute` → `scan_single_partition_clustering` →
 /// `resolve_clustering_seek_window` → `bti_clustering_row_window` → the corrected
@@ -565,13 +790,24 @@ fn sparse8_trie_over_single_byte_separators(seps: &[u8]) -> (Vec<u8>, usize) {
     not(feature = "tombstones")
 ))]
 mod wiring {
-    use super::{datasets_root, require_fixtures};
+    use super::{
+        datasets_root, require_fixtures, rows_db_written_against_the_two_low_base, WIDE_DIR,
+    };
     use cqlite_core::ingestion::{ingest, IngestionConfig};
     use cqlite_core::Database;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
 
     const TABLE: &str = "test_da.wide_table";
 
     async fn open_db() -> Option<Database> {
+        let sstables = datasets_root()?.join("sstables");
+        open_db_from(&sstables).await
+    }
+
+    /// Ingest `test_da` from an arbitrary `sstables` directory (the committed corpus,
+    /// or a patched copy of it).
+    async fn open_db_from(data_dir: &Path) -> Option<Database> {
         let root = datasets_root()?;
         let schema = root
             .parent()
@@ -590,7 +826,7 @@ mod wiring {
         }
         let cfg = IngestionConfig {
             schema_paths: vec![schema],
-            data_dir: root.join("sstables"),
+            data_dir: data_dir.to_path_buf(),
             version_hint: None,
             core_config: cqlite_core::Config::default(),
             table_directory_filter: Some("/test_da/".to_string()),
@@ -601,6 +837,29 @@ mod wiring {
             "the wide_table schema must load"
         );
         Some(result.database)
+    }
+
+    /// Copy the committed fixture SSTable into a temp dir, replacing `Rows.db` with
+    /// one whose entries were written against the pre-#3002 2-LOW base. Returns
+    /// `(tempdir, <tmp>/sstables)`; the tempdir must outlive the reader.
+    fn fixture_copy_with_two_low_base_rows_db() -> Option<(TempDir, PathBuf)> {
+        let src = datasets_root()?.join(WIDE_DIR);
+        let tmp = TempDir::new().expect("temp dir");
+        let dst = tmp.path().join(WIDE_DIR);
+        std::fs::create_dir_all(&dst).expect("create fixture copy dir");
+        for entry in std::fs::read_dir(&src).expect("read fixture dir") {
+            let entry = entry.expect("dir entry");
+            if entry.file_type().expect("file type").is_file() {
+                std::fs::copy(entry.path(), dst.join(entry.file_name())).expect("copy component");
+            }
+        }
+        let rows_db = dst.join("da-2-bti-Rows.db");
+        let patched = rows_db_written_against_the_two_low_base(
+            &std::fs::read(&rows_db).expect("read Rows.db"),
+        );
+        std::fs::write(&rows_db, &patched).expect("write patched Rows.db");
+        let sstables = tmp.path().join("sstables");
+        Some((tmp, sstables))
     }
 
     /// Every clustering-slice class over the BTI wide partition returns EXACTLY the
@@ -658,6 +917,74 @@ mod wiring {
             );
             got.sort_unstable();
             assert_eq!(got, expected, "`{predicate}` must return exactly its slice");
+        }
+    }
+
+    /// AC (root validation) — a `Rows.db` whose entries were written against the OLD
+    /// 2-low base still returns EXACTLY the right rows through the public `SELECT`
+    /// path: the unusable root is detected and the read falls back to a
+    /// full-partition decode (correct-but-slower), never zero rows and never an
+    /// error. Without the validation the bogus root yields a window that starts
+    /// ABOVE the partition body, so `ck < 8` returns nothing.
+    ///
+    /// It also proves the `data_position` consumers survive: the point lookup
+    /// (`partition_lookup`) and the successor walk (`partition_successor`) that bound
+    /// every one of these reads take their offsets from the SAME entries.
+    #[tokio::test]
+    async fn two_low_base_rows_db_still_returns_exact_rows_through_select() {
+        let Some((_tmp, sstables)) = fixture_copy_with_two_low_base_rows_db() else {
+            return;
+        };
+        let Some(db) = open_db_from(&sstables).await else {
+            return;
+        };
+
+        for pk in [1, 2, 3] {
+            let full = db
+                .execute(&format!("SELECT pk, ck FROM {TABLE} WHERE pk = {pk}"))
+                .await
+                .expect("full partition read must succeed on a mis-rooted row index");
+            assert_eq!(
+                full.rows.len(),
+                300,
+                "pk={pk}: the full-partition decode fallback must still return all 300 \
+                 rows (0 ⇒ the fixture copy did not decode, which is a FAILURE)"
+            );
+        }
+
+        // Every slice class, including the block-0 range that a bogus window drops.
+        let cases: [(&str, Vec<i32>); 5] = [
+            ("ck >= 100 AND ck < 110", (100..110).collect()),
+            ("ck = 150", vec![150]),
+            ("ck < 8", (0..8).collect()),
+            ("ck >= 296", (296..300).collect()),
+            ("ck > 0 AND ck <= 3", (1..=3).collect()),
+        ];
+        for (predicate, expected) in cases {
+            let res = db
+                .execute(&format!(
+                    "SELECT pk, ck FROM {TABLE} WHERE pk = 1 AND {predicate}"
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("`{predicate}` must succeed, not error: {e}"));
+            let mut got: Vec<i32> = res
+                .rows
+                .iter()
+                .map(|r| match r.values.get("ck") {
+                    Some(cqlite_core::types::Value::Integer(v)) => *v,
+                    other => panic!("`{predicate}`: ck decoded as {other:?}"),
+                })
+                .collect();
+            assert!(
+                got.windows(2).all(|w| w[0] < w[1]),
+                "`{predicate}` must stay in ascending clustering order; got {got:?}"
+            );
+            got.sort_unstable();
+            assert_eq!(
+                got, expected,
+                "`{predicate}` must return exactly its slice via the full-partition \
+                 fallback — a bogus window would drop or lose rows here"
+            );
         }
     }
 }

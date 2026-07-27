@@ -674,7 +674,15 @@ fn rows_db_single_wide_partition_roundtrips() {
     assert_eq!(header.partition_deletion, None, "LIVE sentinel → None");
 
     // Traversal from the recovered root yields our separators + offsets.
-    let entries = iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse from root");
+    let entries = iterate_rows_in_bti_trie(
+        &rows_db,
+        // Issue #3002: the writer's own root must PASS structural validation.
+        header
+            .trie_root
+            .expect("the written root must validate structurally")
+            .offset(),
+    )
+    .expect("traverse from root");
     assert_eq!(entries.len(), blocks.len());
     for (got, expected) in entries.iter().zip(blocks.iter()) {
         assert_eq!(got.0, expected.separator_key, "separator key");
@@ -720,7 +728,15 @@ fn rows_db_multiple_wide_partitions_roundtrip() {
             "partition {i} data position"
         );
         assert_eq!(header.block_count, 2);
-        let entries = iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse");
+        let entries = iterate_rows_in_bti_trie(
+            &rows_db,
+            // Issue #3002: the writer's own root must PASS structural validation.
+            header
+                .trie_root
+                .expect("the written root must validate structurally")
+                .offset(),
+        )
+        .expect("traverse");
         assert_eq!(entries.len(), 2, "partition {i} block count");
         assert_eq!(entries[0].0, sep(8));
         assert_eq!(entries[1].0, sep(16));
@@ -760,7 +776,15 @@ fn rows_db_open_marker_roundtrips() {
     w.add_partition_row_index(&7i32.to_be_bytes(), 0, blocks.clone(), None);
     let (rows_db, offsets) = w.finish().expect("finish");
     let header = resolve_rows_db_entry(&rows_db, offsets[0] as usize).expect("resolve");
-    let entries = iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse");
+    let entries = iterate_rows_in_bti_trie(
+        &rows_db,
+        // Issue #3002: the writer's own root must PASS structural validation.
+        header
+            .trie_root
+            .expect("the written root must validate structurally")
+            .offset(),
+    )
+    .expect("traverse");
     assert_eq!(
         entries[0].1.open_marker,
         Some((1_700_000_000, 1_700_000_000_000_000))

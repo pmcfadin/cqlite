@@ -3,6 +3,7 @@
 //! (epic #1135); included via `#[path]` so `use super::*` still reaches the
 //! parent module's private items.
 
+use super::super::rows_root::RowsTrieRootRejectReason;
 use super::*;
 
 /// Dense16 (ordinal 11): [0xB0|pf] [start] [len-1] [range * 2-byte deltas]
@@ -286,9 +287,13 @@ fn select_blocks_separator_semantics() {
 /// per-partition `TrieIndexEntry` and recovers the trie root.
 #[test]
 fn resolve_rows_db_entry_recovers_root_and_metadata() {
-    // Place a 1-byte pad so the trie "root" lives at a non-zero offset.
-    let mut buf = vec![0xEEu8; 4]; // bytes 0..4: pretend trie nodes
-    let rows_offset = buf.len(); // entry starts here, e.g. 4
+    // Bytes 0..2 pad, then a REAL root node at 2..4 whose serialized extent ends
+    // exactly at the entry — the structural invariant `resolve_rows_db_entry`
+    // validates (issue #3002). A `PayloadOnly` (ordinal 0) node with payloadBits = 1
+    // is `[0x01][1-byte SizedInts block offset]`.
+    let mut buf = vec![0xEEu8; 2];
+    buf.extend_from_slice(&[0x01, 0x07]); // root at 2..4
+    let rows_offset = buf.len(); // entry starts here, i.e. 4
 
     // key: length 4, value 0x00000007
     buf.extend_from_slice(&4u16.to_be_bytes());
@@ -313,9 +318,11 @@ fn resolve_rows_db_entry_recovers_root_and_metadata() {
     let header = resolve_rows_db_entry(&buf, rows_offset).unwrap();
     assert_eq!(header.data_position, 123);
     assert_eq!(
-        header.trie_root, 2,
+        header.trie_root_offset(),
+        Some(2),
         "trie root = rootΔ + (RowsOffset + 2 + keylen)"
     );
+    assert_eq!(header.require_trie_root().unwrap(), 2);
     assert_eq!(header.block_count, 38);
     // (local_deletion_time, marked_for_delete_at) = (9, 17).
     assert_eq!(header.partition_deletion, Some((9, 17)));
@@ -324,11 +331,81 @@ fn resolve_rows_db_entry_recovers_root_and_metadata() {
     assert!(resolve_rows_db_entry(&buf, buf.len() + 10).is_err());
 }
 
+/// Issue #3002: an entry whose SIGNED root delta was encoded against the pre-fix
+/// 2-LOW base resolves 2 bytes into the root node's own body. That is NOT the
+/// last-written node before the entry, so the resolved root is REJECTED — while
+/// `data_position` and `block_count` still decode, because the paths that consume
+/// only those (point lookup, successor walk) were never affected by the root bug.
+#[test]
+fn resolve_rows_db_entry_rejects_a_root_from_the_pre_fix_two_low_base() {
+    // Trie: a payload-less `SingleNoPayload4` child at 0..2, then the `Single8` root
+    // carrying block 0's payload at 2..6 — the real `test_da/wide_table` shape.
+    let mut buf = vec![0x12u8, 0x80]; // child (ordinal 1: payload-INCAPABLE)
+    let root = buf.len();
+    buf.extend_from_slice(&[0x21, 0x40, 0x02, 0x07]); // root: header, transition, delta, payload
+    let rows_offset = buf.len(); // the entry begins where the root's extent ends
+
+    buf.extend_from_slice(&4u16.to_be_bytes());
+    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x07]);
+    let correct_base = rows_offset + 2 + 4;
+    buf.push(123); // dataPos
+                   // The delta a PRE-FIX writer emits: measured from `rows_offset + key_length`,
+                   // i.e. 2 bytes low, so a correct reader resolves it 2 bytes HIGH.
+    let pre_fix_delta: i64 = root as i64 - (correct_base as i64 - 2);
+    let zig = ((pre_fix_delta << 1) ^ (pre_fix_delta >> 63)) as u64;
+    assert!(zig < 128, "test setup expects a 1-byte vint");
+    buf.push(zig as u8);
+    buf.push(38); // blockCount
+    buf.push(0x80); // LIVE partition deletion
+
+    let header = resolve_rows_db_entry(&buf, rows_offset).expect("the ENTRY still deserializes");
+    assert_eq!(
+        header.data_position, 123,
+        "data_position must be unaffected by an unusable root"
+    );
+    assert_eq!(
+        header.block_count, 38,
+        "block_count must be unaffected by an unusable root"
+    );
+    assert_eq!(
+        header.trie_root_offset(),
+        None,
+        "the 2-high resolved root must NOT be exposed as a usable root"
+    );
+    let rejection = header
+        .trie_root
+        .expect_err("the resolved root must be rejected");
+    assert_eq!(rejection.resolved_offset, root as i64 + 2);
+    assert_eq!(
+        rejection.reason,
+        RowsTrieRootRejectReason::ExtentNotAtEntry {
+            extent_end: rows_offset + 1
+        },
+        "2 bytes into the root's body, the delta byte 0x02 fakes a PayloadOnly node \
+         whose extent overshoots the entry — so it is not the last-written node"
+    );
+    // A caller with no fallback gets a loud error naming the invariant.
+    let err = header.require_trie_root().expect_err("no usable root");
+    assert!(
+        format!("{err}").contains("LAST node written"),
+        "the error must name the violated structural invariant: {err}"
+    );
+    // The CORRECT base resolves the very same entry to a validated root.
+    assert_eq!(
+        super::super::rows_root::validate_rows_trie_root(&buf, root as i64, rows_offset)
+            .map(|r| r.offset()),
+        Ok(root)
+    );
+}
+
 /// Finding 2 (issue #832): a `TrieIndexEntry` whose partition DeletionTime is
 /// the MODERN `0x80` LIVE sentinel decodes to `partition_deletion == None`.
 #[test]
 fn resolve_rows_db_entry_live_partition_deletion() {
-    let mut buf = vec![0xEEu8; 4];
+    // Bytes 0..2 pad + a real `PayloadOnly` root at 2..4 ending exactly at the entry
+    // (the structural invariant of issue #3002).
+    let mut buf = vec![0xEEu8; 2];
+    buf.extend_from_slice(&[0x01, 0x07]);
     let rows_offset = buf.len();
     buf.extend_from_slice(&4u16.to_be_bytes());
     buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x07]);

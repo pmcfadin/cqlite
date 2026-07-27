@@ -295,9 +295,14 @@ fn rows_offset_resolves_real_trie_root() {
     // `in.getFilePointer()` after `readWithShortLength`
     // (`BtiTableReader.retrieveEntryIfAcceptable`). This test previously pinned the
     // 2-bytes-low 236, which locked in the defect.
-    assert_eq!(header.trie_root, 238, "pk=1 trie root must resolve to 238");
+    // The root is exposed only as a STRUCTURALLY VALIDATED capability (issue #3002):
+    // a real Cassandra root must pass that validation.
+    let trie_root = header
+        .require_trie_root()
+        .expect("the Cassandra-written root must pass structural validation");
+    assert_eq!(trie_root, 238, "pk=1 trie root must resolve to 238");
     assert_ne!(
-        header.trie_root, ro1,
+        trie_root, ro1,
         "trie root must differ from RowsOffset (entry vs node)"
     );
     assert_eq!(header.data_position, 0, "pk=1 Data.db position must be 0");
@@ -322,7 +327,7 @@ fn rows_offset_resolves_real_trie_root() {
     // Traversal from the recovered root yields blockCount + 1 valid separators:
     // one per block (the first being `ByteComparable.EMPTY`) plus the trailing
     // separator `RowIndexWriter.complete()` appends after the last block.
-    let entries = iterate_rows_in_bti_trie(&rdb, header.trie_root)
+    let entries = iterate_rows_in_bti_trie(&rdb, trie_root)
         .expect("traversal from the recovered root must succeed");
     assert_eq!(
         entries.len() as u32,

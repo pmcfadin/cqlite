@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes. The next version's entries will collect here._
+### Fixed
+
+- **BTI `Rows.db` row-index base + leading `NEXT_COMPONENT` byte (#3002, #3040).** Two
+  defects that cancelled each other on the BTI clustering read path are corrected:
+  (a) the per-partition `TrieIndexEntry`'s SIGNED root delta is now measured from
+  `RowsOffset + 2 + key_length` — the position AFTER the short-length-prefixed key,
+  where Cassandra 5.0.8 captures `basePosition` — instead of a base 2 bytes low that
+  dropped the root's own `ByteComparable.EMPTY` block-0 payload; and (b) the OSS50
+  clustering-bound encoders now emit the `0x40 NEXT_COMPONENT` byte before EACH
+  component INCLUDING the first, matching `ClusteringComparator`.
+  - **Cassandra-written SSTables are unaffected by the change and now read
+    correctly** — their row indexes were always canonical; only CQLite's
+    reader/encoder were wrong.
+  - **`Rows.db` row indexes WRITTEN by CQLite <= 0.15 are mis-rooted and must be
+    rewritten** (re-flush or re-compact the affected tables, or regenerate the
+    SSTables). Their entry deltas were encoded against the old 2-low base.
+  - Such a mis-rooted entry is now DETECTED structurally rather than trusted: a
+    row-index root must precede its entry, be a payload-capable node type, and end
+    exactly at the entry (the trie writer emits children before parents, so the root
+    is the last node written). An unusable root makes the clustering read fall back to
+    a **full-partition decode** — correct but unnarrowed — instead of returning a
+    structurally valid but wrong window. `data_position`/`block_count` still decode, so
+    point lookups and successor walks are unaffected.
+
+### Changed
+
+- `BtiRowIndexHeader::trie_root` is now
+  `Result<ValidatedRowsTrieRoot, RowsTrieRootRejection>` instead of a bare `usize`, so
+  an unvalidated row-index root cannot be traversed by accident; use
+  `trie_root_offset()` / `require_trie_root()` (#3002).
 
 ## [v0.16.1] - 2026-07-23
 

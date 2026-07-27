@@ -273,7 +273,7 @@ async fn big_default_format_unchanged() {
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder};
 use cqlite_core::storage::sstable::bti::{
     iterate_rows_in_bti_trie, lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry,
-    BtiPartitionLocation,
+    rows_node_serialized_extent_end_for_test, BtiPartitionLocation,
 };
 use std::io::Cursor;
 
@@ -449,6 +449,19 @@ fn assert_trie_index_entry_base_is_canonical(
         "the root's only transition must be the NEXT_COMPONENT byte 0x40"
     );
 
+    // Cross-check the INDEPENDENT formula above against the PRODUCTION extent helper
+    // (issue #3002): production now enforces this same invariant at read time
+    // (`validate_rows_trie_root`), and the two must agree on the resolved root rather
+    // than drift apart. The oracle stays hand-rolled on purpose — its value is that it
+    // shares no code with what it checks — so this equality is what keeps the pair
+    // provably in sync.
+    assert_eq!(
+        rows_node_serialized_extent_end_for_test(rows_db, root),
+        Some(root_extent_end(root)),
+        "the production node-extent helper must agree with this test's independent \
+         formula at the resolved root {root}"
+    );
+
     // Self-check, in the WRITER's direction: a pre-#3002 writer encodes the delta
     // against a base 2 bytes LOW (`rows_offset + key_length`), so this test — which
     // resolves against the CORRECT base — would compute a root 2 bytes HIGH. That
@@ -462,6 +475,13 @@ fn assert_trie_index_entry_base_is_canonical(
         "a pre-#3002 2-low writer base would make this test resolve the root to \
          {regressed_root}, which must NOT satisfy the node-boundary invariant (else this \
          assertion could not detect a writer regression)"
+    );
+    // ...and PRODUCTION must reject that same offset, so a mis-based writer is caught
+    // at read time too, not only by this test.
+    assert_ne!(
+        rows_node_serialized_extent_end_for_test(rows_db, regressed_root),
+        Some(rows_offset),
+        "production must also refuse to treat {regressed_root} as the root"
     );
 }
 
@@ -565,8 +585,15 @@ async fn bti_wide_partition_resolves_through_rows_db() {
         "wide partition must span >= 2 blocks; got {}",
         header.block_count
     );
-    let entries =
-        iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse pk=1 row index");
+    // Issue #3002: the emitted root must PASS structural validation before anything
+    // traverses from it.
+    let entries = iterate_rows_in_bti_trie(
+        &rows_db,
+        header
+            .require_trie_root()
+            .expect("the written root must pass structural validation"),
+    )
+    .expect("traverse pk=1 row index");
     // KNOWN GAP (write parity, tracked as follow-up work off issue #3002) — pinned
     // deliberately, NOT fixed here (fixing it would change emitted bytes):
     //
@@ -789,8 +816,15 @@ async fn bti_wide_desc_partition_resolves_through_rows_db() {
         "wide partition must span >= 2 blocks; got {}",
         header.block_count
     );
-    let entries =
-        iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse DESC row index");
+    // Issue #3002: the emitted root must PASS structural validation before anything
+    // traverses from it.
+    let entries = iterate_rows_in_bti_trie(
+        &rows_db,
+        header
+            .require_trie_root()
+            .expect("the written root must pass structural validation"),
+    )
+    .expect("traverse DESC row index");
     // Same KNOWN GAP as the ASC case above (follow-up off issue #3002): CQLite emits
     // `block_count` separators led by the first row's clustering key, where Cassandra
     // emits `blockCount + 1` led by the root-payload `ByteComparable.EMPTY` block-0
@@ -890,8 +924,15 @@ async fn bti_wide_mixed_order_partition_resolves_through_rows_db() {
     };
     let header = resolve_rows_db_entry(&rows_db, rows_offset).expect("resolve mixed entry");
     assert!(header.block_count >= 2);
-    let entries =
-        iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse mixed row index");
+    // Issue #3002: the emitted root must PASS structural validation before anything
+    // traverses from it.
+    let entries = iterate_rows_in_bti_trie(
+        &rows_db,
+        header
+            .require_trie_root()
+            .expect("the written root must pass structural validation"),
+    )
+    .expect("traverse mixed row index");
     for w in entries.windows(2) {
         assert!(
             w[0].0 < w[1].0,

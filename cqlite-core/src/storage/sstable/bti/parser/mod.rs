@@ -63,6 +63,7 @@ mod partitions;
 mod partition_successor_walk;
 mod rows;
 mod rows_floor;
+mod rows_root;
 mod slice_walk;
 mod traversal;
 
@@ -84,6 +85,13 @@ pub use rows::{
     read_unsigned_vint_from_slice_for_test, resolve_rows_db_entry,
     select_row_index_blocks_for_range, BtiRowIndexEntry, BtiRowIndexEntryWithKey,
     BtiRowIndexHeader, FLAG_OPEN_MARKER,
+};
+// Structural row-index-root validation (issue #3002): the validated-root
+// capability type plus the rejection reason a clustering reader reports when it
+// takes the honest full-partition fallback.
+pub use rows_root::{
+    rows_node_serialized_extent_end_for_test, RowsTrieRootRejectReason, RowsTrieRootRejection,
+    ValidatedRowsTrieRoot,
 };
 // Crate-internal uncounted `TrieIndexEntry.deserialize` (issue #2058): the successor
 // walk resolves a WIDE successor's `data_position` for the seek END bound, which must

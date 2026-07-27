@@ -31,6 +31,7 @@ use crate::{error::Error, storage::sstable::bti::node::BtiResult};
 use std::io::{Read, Seek, SeekFrom};
 
 use super::partitions::sized_ints_read_from_slice;
+use super::rows_root::{validate_rows_trie_root, RowsTrieRootRejection, ValidatedRowsTrieRoot};
 use super::traversal::{dfs_collect_in_order, load_bti_trie_via_footer};
 
 #[allow(unused_imports)] // referenced in doc-links
@@ -186,6 +187,20 @@ fn decode_da_deletion_time(data: &[u8], start: usize) -> BtiResult<(Option<(i32,
     ))
 }
 
+/// Encoded byte length of the modern (DA/BTI) `DeletionTime` at `data[start..]`
+/// (1 for the LIVE sentinel, [`DA_DELETION_TIME_BODY_LEN`] otherwise).
+///
+/// Shared with [`super::rows_root`], whose node-extent computation needs the
+/// payload's length without decoding it, so the LIVE-sentinel/body widths live in
+/// exactly one place.
+///
+/// # Errors
+/// Same as [`decode_da_deletion_time`]: out-of-bounds `start` or a truncated
+/// non-live value.
+pub(super) fn da_deletion_time_encoded_len(data: &[u8], start: usize) -> BtiResult<usize> {
+    decode_da_deletion_time(data, start).map(|(_deletion, consumed)| consumed)
+}
+
 /// Decode a `Rows.db` in-trie payload (`RowIndexReader.IndexInfo`) at
 /// `payload_start` inside `trie_data`, given the node's `payload_bits` (low
 /// nibble of the header byte).
@@ -327,13 +342,24 @@ pub type BtiRowIndexEntryWithKey = (Vec<u8>, BtiRowIndexEntry);
 pub struct BtiRowIndexHeader {
     /// Absolute byte position of the partition's start in `Data.db`.  Block
     /// offsets in [`BtiRowIndexEntry::data_offset`] are relative to this.
+    ///
+    /// Always decoded, INDEPENDENT of the row-index root's validity: the
+    /// point-lookup and successor-walk paths consume only this field (plus
+    /// [`Self::block_count`]) and are unaffected by an unusable root (issue #3002).
     pub data_position: u64,
-    /// Byte offset, within the `Rows.db` file, of this partition's row-index
-    /// trie root node.  Feed this to [`iterate_rows_in_bti_trie`] for a full
-    /// in-order traversal. For range selection, call [`resolve_rows_db_entry`]
-    /// first (with the `RowsOffset`) to get this header, then pass
-    /// `iterate_rows_in_bti_trie` output to [`select_row_index_blocks_for_range`].
-    pub trie_root: usize,
+    /// This partition's row-index trie ROOT — `Ok` only when the offset the entry's
+    /// SIGNED delta resolved to passed the structural validation in
+    /// [`super::rows_root`] (issue #3002), else `Err` carrying WHICH invariant it
+    /// violated.
+    ///
+    /// The validated newtype is the capability: traversal entry points take a
+    /// `usize` root, and the only way to obtain one from an entry is
+    /// [`ValidatedRowsTrieRoot::offset`] (or [`Self::require_trie_root`]), so a
+    /// future caller cannot walk from an unvalidated root by accident. A clustering
+    /// reader that gets `Err` must take its "cannot narrow" fallback (decode the
+    /// full partition) rather than return a bogus window — see
+    /// `reader::data_access::bti::bti_clustering_row_window`.
+    pub trie_root: Result<ValidatedRowsTrieRoot, RowsTrieRootRejection>,
     /// Number of row-index blocks indexed by this partition's trie.
     pub block_count: u32,
     /// Partition-level deletion `(local_deletion_time, marked_for_delete_at)`,
@@ -341,6 +367,31 @@ pub struct BtiRowIndexHeader {
     /// ([`decode_da_deletion_time`], issue #832 Finding 2); `None` for the `0x80`
     /// LIVE sentinel or when too few trailing bytes remain.
     pub partition_deletion: Option<(i32, i64)>,
+}
+
+impl BtiRowIndexHeader {
+    /// The validated row-index trie root offset, or `None` when the resolved root
+    /// failed structural validation (issue #3002).
+    pub fn trie_root_offset(&self) -> Option<usize> {
+        self.trie_root.as_ref().ok().map(|root| root.offset())
+    }
+
+    /// The validated row-index trie root offset, or a parse error naming the
+    /// violated structural invariant.
+    ///
+    /// Use this where an unusable root genuinely IS an error (full-partition
+    /// row-index enumeration, `verify`); a reader that can fall back to a
+    /// full-partition decode should match on [`Self::trie_root`] instead and take
+    /// the honest fallback.
+    ///
+    /// # Errors
+    /// [`Error::Parse`] describing the rejected root.
+    pub fn require_trie_root(&self) -> BtiResult<usize> {
+        match &self.trie_root {
+            Ok(root) => Ok(root.offset()),
+            Err(rejection) => Err(Error::Parse(format!("Rows.db entry: {rejection}"))),
+        }
+    }
 }
 
 /// Resolve a partition's row-index entry in `Rows.db`, given the `RowsOffset`
@@ -355,10 +406,16 @@ pub struct BtiRowIndexHeader {
 /// `rows_db` is the full `Rows.db` file contents; `rows_offset` is the
 /// `RowsOffset` value.  All reads are bounds-checked.
 ///
+/// The recovered trie root is STRUCTURALLY VALIDATED before it is exposed
+/// ([`super::rows_root::validate_rows_trie_root`], issue #3002): an unusable root
+/// yields `Ok` with [`BtiRowIndexHeader::trie_root`] set to `Err(reason)`, NOT a
+/// failed resolution — `data_position`/`block_count` are decoded independently and
+/// the paths that consume only those (point lookup, successor walk) must keep
+/// working.
+///
 /// # Errors
 /// Returns a parse error if `rows_offset` is out of bounds, the key length is
-/// implausible, the vint fields are truncated, or the recovered trie root falls
-/// outside `rows_db`.
+/// implausible, or the vint fields are truncated.
 pub fn resolve_rows_db_entry(rows_db: &[u8], rows_offset: usize) -> BtiResult<BtiRowIndexHeader> {
     // Issue #1647 (L1): count every `TrieIndexEntry.deserialize` on the CLUSTERING
     // read path so it can prove it resolves the per-partition entry EXACTLY once.
@@ -405,15 +462,15 @@ pub(crate) fn resolve_rows_db_entry_uncounted(
     cur += n;
 
     // indexTrieRoot = readVInt() + base   (TrieIndexEntry.deserialize)
+    //
+    // STRUCTURAL VALIDATION (issue #3002): the resolved offset is only a candidate.
+    // The single shared validator below is reached by BOTH public entry points (the
+    // counted `resolve_rows_db_entry` delegates here), so the two cannot drift. A
+    // rejection invalidates ONLY the root capability — `data_position` and
+    // `block_count` below are decoded regardless, so the point-lookup and
+    // successor-walk consumers of those fields are untouched.
     let trie_root_signed = root_delta + base as i64;
-    if trie_root_signed < 0 || (trie_root_signed as usize) >= rows_db.len() {
-        return Err(Error::Parse(format!(
-            "Rows.db entry: recovered trie root {trie_root_signed} out of bounds \
-             (base={base}, delta={root_delta}, file size={})",
-            rows_db.len()
-        )));
-    }
-    let trie_root = trie_root_signed as usize;
+    let trie_root = validate_rows_trie_root(rows_db, trie_root_signed, rows_offset);
 
     let (block_count_u64, n) = read_unsigned_vint_from_slice(&rows_db[cur..])?;
     cur += n;
@@ -512,12 +569,18 @@ pub fn select_row_index_blocks_for_range(
 /// start**; add `header.data_position` for an absolute `Data.db` position.
 ///
 /// Returns `(header, entries)`.
+///
+/// # Errors
+/// Propagates the entry-resolution error and, per issue #3002, FAILS when the
+/// entry's root did not pass structural validation — a full enumeration has no
+/// narrower fallback to take, and a malformed row index is exactly what
+/// `verify`'s `BtiTrieCorrupt` finding should report.
 pub fn iterate_rows_for_partition(
     rows_db: &[u8],
     rows_offset: usize,
 ) -> BtiResult<(BtiRowIndexHeader, Vec<BtiRowIndexEntryWithKey>)> {
     let header = resolve_rows_db_entry(rows_db, rows_offset)?;
-    let entries = iterate_rows_in_bti_trie(rows_db, header.trie_root)?;
+    let entries = iterate_rows_in_bti_trie(rows_db, header.require_trie_root()?)?;
     Ok((header, entries))
 }
 
