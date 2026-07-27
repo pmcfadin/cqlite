@@ -45,11 +45,17 @@
 # LEGACY GUARD (mixed-fleet safety): older workers still branch-lock with a
 # `refs/heads/issue-<N>-*` branch. `claim` refuses if any such branch exists on
 # origin (treat the issue as already-claimed) and names the resume command above
-# in its refusal — but ONLY when the issue has ZERO open PRs. An older-fleet worker
-# holds only the BRANCH, so `claim-ref=free` is true while it works, and advertising
-# the empty-lease adopt would hand an ACTIVE issue to a second machine. With an open
-# PR (or an unreadable PR list) the refusal prints `remediation=withheld open-prs=<n>`
+# in its refusal — but ONLY when the lane is DEMONSTRABLY ORPHANED per
+# `hatch_liveness`: zero open PRs AND every matching branch tip older than
+# claim-heartbeat.sh's reap threshold AND no fresh machine-claim/heartbeat ref naming
+# the issue. An older-fleet worker holds only the BRANCH, so `claim-ref=free` is true
+# while it works — and because a PR is opened LATE in this pipeline, "no open PR" is
+# also true for most of its life, which is why the branch-tip age and the liveness
+# refs (the PRE-PR window) are part of the test. Otherwise — a live signal OR any
+# signal that could not be READ — the refusal prints `remediation=withheld <signals>`
 # instead: fail closed, because the readers run printed remediations literally (#2945).
+# The advertised command carries a CONCRETE `--reason resume-legacy-branch-lock:<branch>`
+# rather than a `<why>` placeholder, since it will be run verbatim.
 # There is NO tip-based re-entrancy exemption: a work branch is
 # cut from origin/main and carries ordinary commits, so its tip NEVER carries the
 # machine=/actor= claim trailers — the old "all-ours -> no block" escape hatch was
@@ -86,7 +92,10 @@
 #                                             is REQUIRED and is recorded in the claim commit.
 #                                             An EMPTY --expect '' is a usage error on purpose,
 #                                             as is a --reason with nothing recordable in it
-#                                             ('   ', '---', '…'): the record must say WHY.
+#                                             ('   ', '---', '…') or one that records as a bare
+#                                             PLACEHOLDER ('why', 'todo', 'tbd', 'xxx', …, the
+#                                             shape a verbatim-run `--reason <why>` produces):
+#                                             the record must say WHY.
 #                                             RE-ENTRANT: if the ref is already held by THIS
 #                                             machine+actor, adopt reports ADOPTED (re-entrant)
 #                                             exit 0 — a retry after a confirm-read blip must
@@ -126,9 +135,17 @@
 #
 # CONSTRAINTS
 #   macOS bash 3.2 compatible (no associative arrays, no readarray/mapfile).
-#   `set -euo pipefail`, shellcheck-clean. gh is used ONLY by `release` (open-PR
-#   guard) and degrades LOUDLY if gh is absent. All informative output is a
-#   single line prefixed `CLAIM:`.
+#   `set -euo pipefail`, shellcheck-clean. All informative output is a single line
+#   prefixed `CLAIM:` (notes/degradations go to stderr).
+#   gh is consulted by exactly TWO paths, both via `open_pr_count`, both degrading
+#   LOUDLY (stderr note + a `-1` count) when gh is absent/errors: `release` without
+#   --force (the open-PR guard) and `claim`'s LEGACY-BRANCH refusal (one
+#   `gh pr list --limit 1000` per refusal, as hatch_liveness's endgame signal, where
+#   `-1` WITHHOLDS the advertised remediation). Nothing else touches gh, and claim/
+#   adopt/release ARBITRATION never depends on it — gh only bounds how loud a refusal
+#   may be. That refusal also shells out to the sibling `claim-heartbeat.sh
+#   reap-threshold` (single source of the 4h staleness threshold); an unreadable
+#   answer withholds rather than defaulting.
 #
 # EXIT CODES
 #   0  success (CLAIM HELD, VERIFY-OK, ADOPTED, RELEASED, SMOKE-OK, status render)
@@ -304,6 +321,11 @@ remote_claim_lookup() {
 # shell metacharacters) to a single '-', trims leading/trailing '-', caps at 120
 # chars, and never prints an empty token.
 #
+# TRIM ORDER IS PART OF THE CONTRACT: the 120-char cut happens BEFORE the final
+# trim, because trimming first and truncating after can re-introduce the very
+# trailing separator the trim promised to remove (a reason whose 120th byte is a
+# '-' recorded as `…foo-`, #2945 review). Collapse -> trim -> cut -> re-trim.
+#
 # LC_ALL=C on BOTH tr and sed is load-bearing: BSD/macOS `tr` aborts with
 # "Illegal byte sequence" on non-ASCII input under a UTF-8 locale, and a `--reason`
 # with an em dash is a likely invocation in this repo. Under `set -euo pipefail`
@@ -313,6 +335,7 @@ sanitize_field() {
   local s
   s="$(printf '%s' "${1:-}" | LC_ALL=C tr -c 'A-Za-z0-9._:/#-' '-' | LC_ALL=C sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//')"
   s="$(LC_ALL=C printf '%.120s' "$s")"
+  s="${s%-}"   # re-trim: the cut may have landed exactly on a separator
   [ -n "$s" ] || s="unspecified"
   printf '%s\n' "$s"
 }
@@ -413,6 +436,113 @@ legacy_branch_scan() {
   return 0
 }
 
+# reap_threshold_secs — "how old is stale enough to hand away", in seconds, read
+# from claim-heartbeat.sh (`reap-threshold`) so the fleet keeps exactly ONE
+# definition of the 4h staleness threshold instead of a second copy here that could
+# drift from the documented one (#2945 review). Prints the seconds (exit 0), or
+# returns 1 when the sibling script is missing/answers non-numerically — an
+# UNREADABLE signal, which callers must treat as "withhold", never as a default.
+reap_threshold_secs() {
+  local hb out
+  hb="$(dirname -- "${BASH_SOURCE[0]}")/claim-heartbeat.sh"
+  [ -f "$hb" ] || return 1
+  out="$(bash "$hb" reap-threshold 2>/dev/null)" || return 1
+  case "$out" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$out"
+}
+
+# hatch_liveness <N> <threshold-secs> — may the copy-pasteable empty-lease resume be
+# ADVERTISED for this issue, i.e. is its lane demonstrably ORPHANED?
+#
+# The open-PR signal ALONE does not answer this (#2945 review). In this pipeline the
+# PR is opened LATE (implement + review happen first), so an older-fleet worker that
+# is actively implementing has ZERO open PRs for most of its life while holding only
+# the BRANCH — and `claim-ref=free` is true for it. Advertising the hatch there is the
+# two-writer outcome the guard exists to prevent, and the readers run printed
+# remediations literally. So the PRE-PR window needs its own liveness evidence:
+#
+#   1. open PRs == 0                       (the ENDGAME signal; -1 = unreadable)
+#   2. EVERY matching issue-<N>-* branch tip is OLDER than <threshold> (the same
+#      staleness threshold `claim-heartbeat.sh should-reap` uses) — a worker mid-
+#      implementation pushes commits, so a FRESH tip means somebody is on it
+#   3. NO refs/machine-claims/* or refs/heartbeats/* ref FRESHLY names this issue
+#      (the supervisor-authored liveness proof of #2655; a ref older than the
+#      threshold is itself reapable and does not withhold)
+#
+# ANY signal that cannot be READ withholds — an unreachable remote, an unparseable
+# commit date and a missing threshold are all "we could not prove nobody is working
+# this", never an all-clear. Sets HATCH_SIGNALS (a single-line key=value run for the
+# refusal) and returns 0 = orphaned (advertise), 1 = withhold.
+HATCH_SIGNALS=""
+hatch_liveness() {
+  local issue="$1" threshold="$2"
+  local prs now raw line refname msg tip_ct age min_age="" ref_issue ref_ts ref_epoch
+
+  prs="$(open_pr_count "$issue")"
+  HATCH_SIGNALS="open-prs=$prs"
+  [ "$prs" = "0" ] || return 1
+
+  now="$(date -u +%s)"
+  while IFS= read -r refname; do
+    [ -n "$refname" ] || continue
+    if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1 \
+       || ! tip_ct="$(git log -1 --format=%ct FETCH_HEAD 2>/dev/null)" \
+       || [ -z "$tip_ct" ] || [ -n "${tip_ct//[0-9]/}" ]; then
+      HATCH_SIGNALS="$HATCH_SIGNALS branch-tip=unreadable:${refname}"
+      return 1
+    fi
+    age=$((now - tip_ct))
+    [ "$age" -ge 0 ] || age=0
+    if [ -z "$min_age" ] || [ "$age" -lt "$min_age" ]; then min_age="$age"; fi
+  done <<< "$(printf '%s' "$LEGACY_BRANCHES" | tr ',' '\n')"
+  if [ -z "$min_age" ]; then
+    HATCH_SIGNALS="$HATCH_SIGNALS branch-tip=unreadable"
+    return 1
+  fi
+  HATCH_SIGNALS="$HATCH_SIGNALS newest-branch-tip=$(humanize_age "$min_age") stale-after=$(humanize_age "$threshold")"
+  [ "$min_age" -gt "$threshold" ] || return 1
+
+  if ! raw="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 'refs/heartbeats/*' 2>/dev/null)"; then
+    HATCH_SIGNALS="$HATCH_SIGNALS liveness-refs=unreadable"
+    return 1
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    refname="$(printf '%s' "$line" | awk '{print $2}')"
+    [ -n "$refname" ] || continue
+    if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1 \
+       || ! msg="$(git log -1 --format=%B FETCH_HEAD 2>/dev/null)" || [ -z "$msg" ]; then
+      HATCH_SIGNALS="$HATCH_SIGNALS liveness-refs=unreadable:${refname}"
+      return 1
+    fi
+    ref_issue="$(msg_field "$msg" issue)"
+    if [ -z "$ref_issue" ]; then
+      HATCH_SIGNALS="$HATCH_SIGNALS liveness-refs=unreadable:${refname}"
+      return 1
+    fi
+    [ "$ref_issue" = "$issue" ] || continue
+    # This ref names OUR issue. Fresh -> a worker is on it. Unparseable ts -> we
+    # cannot age it out, so it withholds (fail closed) exactly like should-reap
+    # refuses to reap on an unknown age.
+    ref_ts="$(msg_field "$msg" ts)"
+    if [ -z "$ref_ts" ] || ! ref_epoch="$(ts_to_epoch "$ref_ts")"; then
+      HATCH_SIGNALS="$HATCH_SIGNALS liveness-ref=${refname}:unparseable-ts"
+      return 1
+    fi
+    age=$((now - ref_epoch))
+    [ "$age" -ge 0 ] || age=0
+    if [ "$age" -le "$threshold" ]; then
+      HATCH_SIGNALS="$HATCH_SIGNALS liveness-ref=${refname}:age=$(humanize_age "$age")"
+      return 1
+    fi
+  done <<< "$raw"
+
+  HATCH_SIGNALS="$HATCH_SIGNALS liveness-refs=none-naming-$issue"
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 cmd_claim() {
   local issue="" actor="${CLAIM_ACTOR:-flow}"
@@ -456,17 +586,24 @@ cmd_claim() {
     # so `claim-ref=free` is true for it and the advertised empty-lease adopt WOULD
     # succeed — a second machine on an actively-worked issue. Prose hedging ("if it
     # is YOURS") is not a control: the readers are agents that run printed
-    # remediations literally. So the copy-pasteable command is printed ONLY when the
-    # endgame is demonstrably orphaned — zero open PRs on this issue's branch — using
-    # the same gh signal `release` already trusts for "somebody's endgame is live".
-    # Unknown (gh missing/failed, -1) withholds too: fail closed, never advertise a
-    # hand-away on an unread signal.
-    local prs remedy
-    prs="$(open_pr_count "$issue")"
-    if [ "$prs" = "0" ]; then
-      remedy="remediation='bash scripts/flow/claim.sh adopt $issue --expect none --reason <why>' open-prs=0 (no open PR: that branch is an older-fleet branch lock, a parked/reaped resume, or a merged-but-undeleted branch; the quoted empty-lease adopt takes the FREE claim ref atomically — git rejects it if any machine holds the claim ref)"
+    # remediations literally. So the copy-pasteable command is printed ONLY when
+    # hatch_liveness proves the lane ORPHANED across ALL its signals — no open PR
+    # (endgame), every branch tip staler than the reap threshold (the PRE-PR window,
+    # where an actively-implementing legacy worker has no PR at all), and no fresh
+    # machine-claim/heartbeat ref naming this issue. Any unreadable signal withholds:
+    # fail closed, never advertise a hand-away on evidence we could not read.
+    # The printed --reason is a CONCRETE, self-describing default, not a `<why>`
+    # placeholder: run verbatim, `<why>` recorded as `reason=why` — as uninformative
+    # as the no-reason case the audit gate rejects (cmd_adopt now refuses that token).
+    local remedy threshold hatch_branch
+    if ! threshold="$(reap_threshold_secs)"; then
+      remedy="remediation=withheld liveness=threshold-unreadable (could not read the staleness threshold from claim-heartbeat.sh reap-threshold, so the lane cannot be shown orphaned; fix the checkout, then see 'bash scripts/flow/claim.sh -h')"
+    elif hatch_liveness "$issue" "$threshold"; then
+      hatch_branch="${LEGACY_BRANCHES%%,*}"
+      hatch_branch="${hatch_branch#refs/heads/}"
+      remedy="remediation='bash scripts/flow/claim.sh adopt $issue --expect none --reason resume-legacy-branch-lock:${hatch_branch}' $HATCH_SIGNALS (orphaned lane: no open PR, every branch tip staler than the reap threshold, no fresh liveness ref for this issue — an older-fleet branch lock left behind, a parked/reaped resume, or a merged-but-undeleted branch; the quoted empty-lease adopt takes the FREE claim ref atomically — git rejects it if any machine holds the claim ref)"
     else
-      remedy="remediation=withheld open-prs=$prs (an open PR — or, at -1, an unreadable PR list — means someone's endgame may be LIVE, and an older-fleet worker holds only the BRANCH, so an empty-lease adopt WOULD succeed and create a SECOND writer; confirm ownership via the board and the PR author first, then see 'bash scripts/flow/claim.sh -h')"
+      remedy="remediation=withheld $HATCH_SIGNALS (this lane may be LIVE or is unproven: an open PR (or an unreadable -1 PR list), a branch tip fresher than the reap threshold — an older-fleet worker mid-implementation holds only the BRANCH and has NO PR yet — or a fresh machine-claim/heartbeat ref naming this issue. An empty-lease adopt WOULD succeed there and create a SECOND writer; confirm ownership via the board and the branch/PR author first, then see 'bash scripts/flow/claim.sh -h')"
     fi
     emit "LOST issue=$issue reason=legacy-branch-lock detail=$LEGACY_BRANCHES exists on $REMOTE claim-ref=free $remedy"
     return 2
@@ -623,6 +760,19 @@ cmd_adopt() {
     if [ "$reason_token" = "unspecified" ] || [ "${#reason_token}" -lt 3 ]; then
       die_usage "adopt: --reason must carry at least 3 recordable characters ([A-Za-z0-9._:/#-]); '$reason' records as '$reason_token', which is indistinguishable from no reason at all"
     fi
+    # PLACEHOLDER TOKENS ARE REFUSED (#2945 review). A doc/help line that shows
+    # `--reason <why>` is run VERBATIM by the readers of these commands, and `<why>`
+    # sanitizes to `why` — 3 recordable chars, so the length gate passes and the
+    # record says `reason=why`: exactly as uninformative as the no-reason case this
+    # gate exists to reject. So the sentinel set is refused BY NAME too (the printed
+    # remediation now carries a concrete self-describing default instead, see
+    # cmd_claim). Case-insensitive; the list is the placeholder vocabulary that shows
+    # up in help text and templates, not an attempt at judging prose quality.
+    case "$(printf '%s' "$reason_token" | LC_ALL=C tr 'A-Z' 'a-z')" in
+      why | reason | todo | tbd | tba | xxx | xxxx | placeholder | fixme | none | foo | bar | baz | n/a)
+        die_usage "adopt: --reason '$reason' records as the PLACEHOLDER '$reason_token' — as uninformative as no reason at all. Say what the resume IS, e.g. --reason resume-legacy-branch-lock:issue-$issue-<slug> or --reason 'reaped claim, board says Ready'"
+        ;;
+    esac
   fi
   if [ "$mode" = "empty" ]; then
     # The resume is a judgement call, so it MUST be self-documenting: the claim
