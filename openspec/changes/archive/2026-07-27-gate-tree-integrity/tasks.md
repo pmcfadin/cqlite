@@ -86,10 +86,17 @@
       the existing `datasets:`/`ci-pins:` stamps).
 
 ## 6. Quality stages
-- [ ] 6.1 `--lite` each fix round (summary-file redirect, unique path).
-- [ ] 6.2 Review-first: `rust-reviewer` (shell/script scope) + roborev on the lite-green diff.
-- [ ] 6.3 Open PR; `flow-closer`: ONE full gate of record → C intent audit (`spec-auditor` against
-      this change's `specs/**`) → final roborev → merge-on-green → finalize.
-- [ ] 6.4 Field verification: the full gate of record for THIS PR must itself emit
+- [x] 6.1 `--lite` each fix round (summary-file redirect, unique path).
+- [x] 6.2 Review-first: `rust-reviewer` (shell/script scope) + roborev on the lite-green diff.
+      Converged over 7 roborev passes plus 2 independent shell reviews (~35 findings, including
+      three distinct false-PASS routes); rounds 6 and 7 were consecutive clean-of-blockers passes.
+- [x] 6.3 Open PR; `flow-closer`: ONE full gate of record → C intent audit (`spec-auditor` against
+      this change's `specs/**`) → final roborev → merge-on-green → finalize. C: 11/11 satisfied,
+      plus a narrow re-check after the H2 scope change. Merged as PR #2976.
+- [x] 6.4 Field verification: the full gate of record for THIS PR must itself emit
       `tree-integrity: PASS` with matching `tree-start:`/`tree-end:` digests — the change certifies
-      itself. Record the block on issue #2926.
+      itself. Record the block on issue #2926. OBSERVED at `56165bb`:
+      `tree-start: 56165bbc378c dirty: no digest: 8b0b3041a62c`,
+      `tree-end: 56165bbc378c dirty: no digest: 8b0b3041a62c`, `tree-integrity: PASS`, `RESULT: PASS`
+      — and the guard's verdict was cross-checked against an external HEAD/porcelain record taken
+      before and after the run, which agreed.
