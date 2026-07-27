@@ -392,9 +392,11 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `reason=unspecified`/`reason=why`). That is the ONLY sanctioned
   way past `reason=legacy-branch-lock`; never hand-craft a claim commit. The refusal PRINTS that
   command (reason pre-filled) only when the lane is demonstrably ORPHANED on all three signals:
-  `open-prs=0` AND every `issue-<N>-*` branch tip older than the 4h reap threshold AND no fresh
-  machine-claim/heartbeat ref naming the issue — the tip/liveness signals cover the PRE-PR window,
-  where an older-fleet worker holds only the BRANCH and has no PR yet. Anything live or unreadable
+  `open-prs=0` AND every `issue-<N>-*` branch tip carrying its OWN commits and older than the 4h reap
+  threshold AND no fresh machine-claim/heartbeat ref naming the issue — the tip/liveness signals cover
+  the PRE-PR window, where an older-fleet worker holds only the BRANCH and has no PR yet. A branch
+  pushed at `origin/main` with NO commits of its own (what `flow-activate` creates) has no age signal
+  at all: it reports `newest-branch-tip=no-own-commits` and is WITHHELD. Anything live or unreadable
   prints `remediation=withheld <signals>`; confirm ownership via the board + branch/PR author before
   resuming. `claim.sh release <N>`
   deletes the ref (refuses under an open PR without `--force`). Maintain the liveness heartbeat

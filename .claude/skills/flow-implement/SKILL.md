@@ -68,9 +68,11 @@ never gate stdout or review churn.
      #   bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:<branch>
      # (#2945 — git's empty lease: still server-arbitrated, records who + why; a
      # placeholder reason like <why> is refused). It is printed ONLY when the lane
-     # is demonstrably orphaned: open-prs=0 AND every issue-<N>-* branch tip staler
-     # than the 4h reap threshold AND no fresh machine-claim/heartbeat ref naming
-     # the issue. `remediation=withheld <signals>` = LIVE or unproven — confirm
+     # is demonstrably orphaned: open-prs=0 AND every issue-<N>-* branch tip carrying
+     # its OWN commits and staler than the 4h reap threshold AND no fresh machine-
+     # claim/heartbeat ref naming the issue (a commit-less branch, i.e. one still at
+     # origin/main, has NO age signal: newest-branch-tip=no-own-commits, withheld).
+     # `remediation=withheld <signals>` = LIVE or unproven — confirm
      # ownership (board + branch/PR author) before resuming, do not resume blind.
      # NEVER hand-craft a claim commit to get past the guard.
      if ! bash scripts/flow/claim.sh claim <N>; then

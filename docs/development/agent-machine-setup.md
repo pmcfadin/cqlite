@@ -136,7 +136,9 @@ parked, or reaped issue, or a merged-but-undeleted branch), `claim` refuses with
 (#2945) — git's empty lease, so the create is still server-arbitrated and the claim commit
 records who + why (a placeholder reason like `<why>` is refused). That command is printed
 only when the lane is demonstrably orphaned: `open-prs=0` AND every `issue-<N>-*` branch tip
-older than the 4h reap threshold AND no fresh machine-claim/heartbeat ref naming the issue.
+carrying its OWN commits and older than the 4h reap threshold AND no fresh machine-claim/heartbeat
+ref naming the issue. A commit-less branch (what `flow-activate` pushes) has no age signal, so it is
+withheld as `newest-branch-tip=no-own-commits`.
 Anything live or unreadable → `remediation=withheld <signals>`; confirm ownership first.
 
 ## Full doctrine

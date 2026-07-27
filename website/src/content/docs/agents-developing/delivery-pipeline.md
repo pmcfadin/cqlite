@@ -251,12 +251,18 @@ would record the uninformative `reason=why`. That is why the refusal fills the r
 `--expect` must be a **full** object name (40/64 hex) — a truncated sha is a usage error, not a lost race.
 
 The refusal **prints that command only when the lane is demonstrably orphaned**, judged on THREE signals:
-`open-prs=0` **and** every matching `issue-<N>-*` branch tip older than `claim-heartbeat.sh`'s reap
-threshold (4h) **and** no fresh `refs/machine-claims/*` / `refs/heartbeats/*` ref naming the issue. The
+`open-prs=0` **and** every matching `issue-<N>-*` branch tip **carrying at least one commit of its own**
+and older than `claim-heartbeat.sh`'s reap threshold (4h) **and** no fresh `refs/machine-claims/*` /
+`refs/heartbeats/*` ref naming the issue. The
 last two cover the **pre-PR window**: an older-fleet worker locks with the *branch*, holds no claim ref
 (`claim-ref=free`) — and because a PR is opened LATE in this pipeline it also has **no open PR** for most
-of its life, so `open-prs=0` alone would advertise a hand-away on an actively-worked issue. Anything live —
-or any signal that could not be **read** (`open-prs=-1`, an unreachable remote, a missing threshold) —
+of its life, so `open-prs=0` alone would advertise a hand-away on an actively-worked issue. The
+"own commits" qualifier matters just as much: `flow-activate` pushes the branch at `origin/main` with no
+commits of its own, so a freshly-activated lane's tip date **is main's** — no information about the
+worker. Such a tip is reported `newest-branch-tip=no-own-commits` and **withheld** (indeterminate), never
+judged "stale" because main happened to be quiet overnight. Anything live —
+or any signal that could not be **read** (`open-prs=-1`, an unreachable remote, an unreadable default
+branch, a missing threshold) —
 prints `remediation=withheld <signals>` instead, and you confirm ownership via the board and the
 branch/PR author first. The
 hatch still works when invoked deliberately — withholding changes the *advice*, not the arbiter. Retrying after a transient `ERROR reason=infra` is safe: an

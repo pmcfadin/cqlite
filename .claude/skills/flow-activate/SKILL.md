@@ -40,8 +40,10 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
      # (Refused with reason=legacy-branch-lock — a FREE claim ref but an issue-<N>-* branch
      #  still on origin? Resume it: claim.sh adopt <N> --expect none --reason <concrete why>,
      #  #2945 — but ONLY by running the command the refusal itself PRINTS (reason pre-filled;
-     #  it is printed only at open-prs=0 + all branch tips staler than 4h + no fresh
-     #  machine-claim/heartbeat ref). A `remediation=withheld <signals>` line means the lane
+     #  it is printed only at open-prs=0 + all branch tips carrying their OWN commits and
+     #  staler than 4h + no fresh machine-claim/heartbeat ref; the branch this skill pushes
+     #  below has NO commits of its own, so its lane is never advertised as stale).
+     #  A `remediation=withheld <signals>` line means the lane
      #  may be LIVE or is unproven: confirm ownership first, never resume blind)
    fi
    # CLAIM HELD → set up the worktree + branch. The branch is naming/PR plumbing, NOT the lock:
