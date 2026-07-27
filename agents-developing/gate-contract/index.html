@@ -169,6 +169,39 @@ event itself started). <strong>Push a commit and your waiver stops short-circuit
 the full deadline, and if it reports a failure in that time it reds the gate. The waiver still applies at
 the deadline, so it delays a verdict rather than pre-empting one. To get the instant hatch back on the
 new head, <strong>remove and re-apply the label</strong> — the diagnostic says so.</li>
+<li><strong>The waiver’s EVIDENCE state is always on the record (issue #3033).</strong> Both behaviours above depend on
+reading this PR’s <code dir="auto">labeled</code> events, and a broken read used to look exactly like an ordinary PR: an empty
+feed, one vague warning, a waiver that quietly waited for the deadline with nobody named. The job summary
+now always states what happened — <code dir="auto">Waiver evidence: n/a</code> (no <code dir="auto">ci:waive:</code> label present); <code dir="auto">READ OK — feed read (N labeled event(s)), M of them for a ci:waive: label in force</code>; the same <code dir="auto">READ OK</code> with <strong><code dir="auto">0 for a waiver label in force now</code></strong> (the read worked and carried nothing usable, so attribution stays
+<code dir="auto">UNRESOLVED</code>); or <strong><code dir="auto">UNREADABLE (broken read …)</code></strong> carrying the HTTP status, or the command’s exit status
+when there is none. <code dir="auto">401</code>/<code dir="auto">403</code>/<code dir="auto">404</code> means the token may not read this PR’s events — check the workflow’s
+<code dir="auto">permissions:</code>; a <code dir="auto">403</code> naming a rate limit or any <code dir="auto">5xx</code> is transient; no HTTP status means the client
+failed (<code dir="auto">gh</code> absent, bad <code dir="auto">--jq</code>) and a re-run will not help. The counts are <strong>feed total</strong>, the
+<strong><code dir="auto">ci:waive:</code> history</strong> and the subset <strong>in force</strong> precisely because the feed carries every label’s
+events and <code dir="auto">labeled</code> events are immutable: an event for a label since removed is history that can bind
+nothing. A healthy read is evidence that the read works, never that a waiver bound — binding is a
+per-tier verdict against that head sha’s first CI activity. An unreadable read is <strong>never</strong> a failure of
+<code dir="auto">required</code>: it withholds the early waiver and the attribution, and the waiver is still honoured at the
+deadline.</li>
+<li><strong>The report never claims more than it observed (issue #3033 round 4).</strong> The same defect recurred one
+layer out: the summary asserted absence (<code dir="auto">no ci:waive: label is present</code>) even when the LIVE label read
+had failed and the labels in hand were the run-start payload — a confident false negative about a waiver
+applied mid-run, which is what the polling window exists for. So the label read’s trustworthiness is now
+tracked and reported: a fallback to the payload reports <strong><code dir="auto">UNKNOWN (label read UNTRUSTED)</code></strong> with the
+failed-read count and status, and it makes the in-force count <strong>UNKNOWN</strong> rather than zero. A failed or
+ambiguous read can only ever <em>withhold</em> a waiver, never grant one, and none of these states can change
+<code dir="auto">required</code>’s verdict — that comes from tier evaluation alone. The same discipline was then applied to
+<strong>every</strong> line of the block, not only the ones a reviewer named: claims about labels are phrased against
+“the label set this run is using” plus that set’s provenance, and a run that admits a read failed carries
+no denial that one did — so you never get <code dir="auto">permissions:</code> advice beside an “authorization is not the
+problem” line, and the suite pins that property across the combined states rather than the wording.</li>
+<li><strong>A mistyped waiver label is named as a typo (issue #3033 round 6).</strong> A waiver label is
+<code dir="auto">ci:waive:&#x3C;tier-id></code> with a LOWER-CASE tier id (<code dir="auto">[a-z0-9][a-z0-9-]*</code>), which is what the evaluator
+matches. Anything else — <code dir="auto">ci:waive:Flight</code> for tier <code dir="auto">flight</code> — waives nothing, so the evidence read is
+never even attempted for it and the summary reports <strong><code dir="auto">INVALID WAIVER LABEL — it waives NOTHING</code></strong>, naming
+the offending label and the fix. Previously such a label was reported through the <code dir="auto">UNREADABLE</code>/<code dir="auto">UNAVAILABLE</code>
+diagnostics, which sent the reader to the workflow’s <code dir="auto">permissions:</code> block for what is a capitalisation
+typo. An off-shape label applied beside a valid one is still named once, under the valid label’s state.</li>
 <li><strong>Labelling is cheap.</strong> Subscribing to label events must not make every <code dir="auto">ci:perf</code> / board-mirror /
 <code dir="auto">needs-decision</code> label — or the waiver itself — restart a 30-minute gate. So a label mutation never
 cancels the in-flight run (cancellation is conditional on the event action; the shared concurrency group

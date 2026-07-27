@@ -100,6 +100,41 @@ carry).
   the full deadline, and if it reports a failure in that time it reds the gate. The waiver still applies at
   the deadline, so it delays a verdict rather than pre-empting one. To get the instant hatch back on the
   new head, **remove and re-apply the label** — the diagnostic says so.
+- **The waiver's EVIDENCE state is always on the record (issue #3033).** Both behaviours above depend on
+  reading this PR's `labeled` events, and a broken read used to look exactly like an ordinary PR: an empty
+  feed, one vague warning, a waiver that quietly waited for the deadline with nobody named. The job summary
+  now always states what happened — `Waiver evidence: n/a` (no `ci:waive:` label present); `READ OK — feed
+  read (N labeled event(s)), M of them for a ci:waive: label in force`; the same `READ OK` with **`0 for a
+  waiver label in force now`** (the read worked and carried nothing usable, so attribution stays
+  `UNRESOLVED`); or **`UNREADABLE (broken read …)`** carrying the HTTP status, or the command's exit status
+  when there is none. `401`/`403`/`404` means the token may not read this PR's events — check the workflow's
+  `permissions:`; a `403` naming a rate limit or any `5xx` is transient; no HTTP status means the client
+  failed (`gh` absent, bad `--jq`) and a re-run will not help. The counts are **feed total**, the
+  **`ci:waive:` history** and the subset **in force** precisely because the feed carries every label's
+  events and `labeled` events are immutable: an event for a label since removed is history that can bind
+  nothing. A healthy read is evidence that the read works, never that a waiver bound — binding is a
+  per-tier verdict against that head sha's first CI activity. An unreadable read is **never** a failure of
+  `required`: it withholds the early waiver and the attribution, and the waiver is still honoured at the
+  deadline.
+- **The report never claims more than it observed (issue #3033 round 4).** The same defect recurred one
+  layer out: the summary asserted absence (`no ci:waive: label is present`) even when the LIVE label read
+  had failed and the labels in hand were the run-start payload — a confident false negative about a waiver
+  applied mid-run, which is what the polling window exists for. So the label read's trustworthiness is now
+  tracked and reported: a fallback to the payload reports **`UNKNOWN (label read UNTRUSTED)`** with the
+  failed-read count and status, and it makes the in-force count **UNKNOWN** rather than zero. A failed or
+  ambiguous read can only ever *withhold* a waiver, never grant one, and none of these states can change
+  `required`'s verdict — that comes from tier evaluation alone. The same discipline was then applied to
+  **every** line of the block, not only the ones a reviewer named: claims about labels are phrased against
+  "the label set this run is using" plus that set's provenance, and a run that admits a read failed carries
+  no denial that one did — so you never get `permissions:` advice beside an "authorization is not the
+  problem" line, and the suite pins that property across the combined states rather than the wording.
+- **A mistyped waiver label is named as a typo (issue #3033 round 6).** A waiver label is
+  `ci:waive:<tier-id>` with a LOWER-CASE tier id (`[a-z0-9][a-z0-9-]*`), which is what the evaluator
+  matches. Anything else — `ci:waive:Flight` for tier `flight` — waives nothing, so the evidence read is
+  never even attempted for it and the summary reports **`INVALID WAIVER LABEL — it waives NOTHING`**, naming
+  the offending label and the fix. Previously such a label was reported through the `UNREADABLE`/`UNAVAILABLE`
+  diagnostics, which sent the reader to the workflow's `permissions:` block for what is a capitalisation
+  typo. An off-shape label applied beside a valid one is still named once, under the valid label's state.
 - **Labelling is cheap.** Subscribing to label events must not make every `ci:perf` / board-mirror /
   `needs-decision` label — or the waiver itself — restart a 30-minute gate. So a label mutation never
   cancels the in-flight run (cancellation is conditional on the event action; the shared concurrency group
