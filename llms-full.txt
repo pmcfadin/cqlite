@@ -11196,14 +11196,17 @@ See [`BloomFilter`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src
 
 `Statistics.db` captures table-level metadata such as histograms, min/max timestamps, repair/level flags, compression ratios, and counts that inform compaction and read heuristics.
 
+Because it is the fallback source of truth for types and encoding baselines when no schema is supplied (no-heuristics mandate, issue #28), `Statistics.db` is **authoritative metadata, not a hint** — which is why a present-but-unparseable file is a hard error rather than a degraded read (see *Corruption handling*).
+
 ### In this chapter you will learn
 
 [Section titled “In this chapter you will learn”](#in-this-chapter-you-will-learn)
 
 * What `StatsMetadata` contains and how it is used
-* How statistics are collected during flush
+* How min/max aggregates encode “absent” and the live-cell deletion-time sentinel
+* The real serialized layout (TOC + four checksummed components) and why `0x26291b05` is not a magic number
+* How statistics are collected during flush, and the fail-closed corruption posture
 * How stats influence compaction and read behavior
-* How to inspect a tiny subset via tools
 
 ## Stats Overview
 
@@ -11229,8 +11232,8 @@ totalRows: 1000
 
 * Timestamps and Deletions:
 
-  * **min\_timestamp / max\_timestamp**: microsecond epoch range of writes
-  * **min/max local deletion time**: lower/upper bounds for tombstone local deletion time
+  * **min\_timestamp / max\_timestamp**: microsecond epoch range of writes. Both are `long` fields ([`StatsMetadata.java:65-66`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java)) written **adjacently as two big-endian int64s** in the STATS component, after `estimatedCellPerPartitionCount` and the partition-size histogram ([`StatsMetadata.java:407-408`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java) — `out.writeLong(minTimestamp); out.writeLong(maxTimestamp);`). There is no “absent” flag: see *Absent min/max values* below for how Cassandra encodes “nothing was recorded”.
+  * **min/max local deletion time**: lower/upper bounds for tombstone local deletion time, also `long` fields ([`StatsMetadata.java:67-68`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java)), but with a **version-dependent wire width** — see *Local deletion time and the live-cell sentinel* below.
 
 * Bloom and Compression:
 
@@ -11251,6 +11254,49 @@ totalRows: 1000
 
 These fields drive compaction policies (e.g., tombstone purging thresholds), read heuristics (e.g., read-ahead sizing), and operational insights (e.g., skew from partition histograms).
 
+### Absent min/max values (no “unset” flag on the wire)
+
+[Section titled “Absent min/max values (no “unset” flag on the wire)”](#absent-minmax-values-no-unset-flag-on-the-wire)
+
+`min_timestamp` / `max_timestamp` occupy a fixed 8 bytes each, so an SSTable in which *nothing* was tracked still writes two int64s. Cassandra’s `MetadataCollector` resolves this with per-tracker defaults rather than a presence flag:
+
+* `timestampTracker = new MinMaxLongTracker()` ([`MetadataCollector.java:111`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataCollector.java)), whose no-arg constructor is `this(Long.MIN_VALUE, Long.MAX_VALUE)` ([`MetadataCollector.java:411-413`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataCollector.java)).
+* While `isSet == false`, `min()` returns the *defaultMin* and `max()` returns the *defaultMax* ([`MetadataCollector.java:438-446`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataCollector.java)).
+
+So for an SSTable with no recorded timestamps the serialized pair is **`minTimestamp = Long.MIN_VALUE`, `maxTimestamp = Long.MAX_VALUE`** — the *widest possible* interval, which is the safe (never-exclude) answer for a min/max pruning filter. The same values are what `MetadataCollector.defaultStatsMetadata()` hands out ([`MetadataCollector.java:80-84`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataCollector.java)). Note the asymmetry: `Long.MIN_VALUE` is the unset **min** default and `Long.MAX_VALUE` is the unset **max** default; neither is a general-purpose “absent” marker, and a real recorded value can legitimately be negative (Cassandra permits negative write timestamps).
+
+CQLite models “absent” explicitly rather than propagating a sentinel into query predicates: the parsed `max_timestamp` is an `Option<i64>` and is left `None` when it cannot be read (`cqlite-core/src/parser/enhanced_statistics_parser/mod.rs:249-276`, issues #1729/#1653), and `decode_max_timestamp` maps the reserved value it treats as “unset” to `None` (`cqlite-core/src/parser/repair_metadata.rs:1239-1261`). Consumers must therefore handle `None` as “unknown — do not prune”, not as “zero”.
+
+On the write side CQLite’s collector seeds `min_timestamp = i64::MAX` / `max_timestamp = i64::MIN` (`cqlite-core/src/storage/sstable/writer/stats_writer/metadata.rs:199-204`) and normalizes any still-unset sentinel to `0` in `finalize()` (`.../metadata.rs:397-418`). That is a **CQLite implementation choice and a deliberate divergence from Cassandra**, which emits the widening defaults above; it is only reachable for an SSTable in which no cell timestamp was ever folded.
+
+### Local deletion time and the live-cell sentinel
+
+[Section titled “Local deletion time and the live-cell sentinel”](#local-deletion-time-and-the-live-cell-sentinel)
+
+`min/max_local_deletion_time` are `long` in memory but their **serialized width and sentinel differ by SSTable version**:
+
+| Version                                       | Wire form                                        | ”no deletion / live” sentinel on disk                   |
+| --------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------- |
+| `oa`/`da` and later (`hasUIntDeletionTime()`) | int32 holding an **unsigned** seconds value      | `0xFFFFFFFF` (`Cell.NO_DELETION_TIME_UNSIGNED_INTEGER`) |
+| `na`/`nb` (legacy path)                       | signed int32, clamped to `Integer.MAX_VALUE - 1` | `Integer.MAX_VALUE`                                     |
+
+Authority: `hasUIntDeletionTime()` is `version >= "oa"` ([`BigFormat.java:409`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java)); the two branches are [`StatsMetadata.java:409-420`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java) (`Cell.deletionTimeLongToUnsignedInteger` for `oa`+, else the `== Long.MAX_VALUE ? Integer.MAX_VALUE : min(v, Integer.MAX_VALUE - 1)` clamp); the read side reverses it and remaps a legacy `Integer.MAX_VALUE` back to `Cell.NO_DELETION_TIME` ([`StatsMetadata.java:551-568`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java)).
+
+**The in-memory sentinel is not `Integer.MAX_VALUE`.** `Cell.NO_DELETION_TIME` is `Long.MAX_VALUE`; the related-but-distinct constants are all defined together at [`Cell.java:48-57`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/Cell.java):
+
+* `NO_TTL = 0`
+* `NO_DELETION_TIME = Long.MAX_VALUE` — “this cell is not deleted”
+* `NO_DELETION_TIME_UNSIGNED_INTEGER = CassandraUInt.MAX_VALUE_UINT` (`0xFFFFFFFF`) — the `oa`+ on-disk spelling of the same fact
+* `MAX_DELETION_TIME = CassandraUInt.MAX_VALUE_LONG - 2` — largest *real* deletion time
+* `INVALID_DELETION_TIME = CassandraUInt.MAX_VALUE_LONG - 1`
+* `MAX_DELETION_TIME_2038_LEGACY_CAP = Integer.MAX_VALUE - 1` — the pre-`oa` clamp ceiling
+
+Conflating these is a real hazard: `Long.MAX_VALUE` (memory), `0xFFFFFFFF` (`oa`+ disk) and `Integer.MAX_VALUE` (`nb` disk) are three spellings of “live”, while `Integer.MAX_VALUE - 1` is a *legitimate* deletion time under the legacy clamp. Independently, `DeletionTime.LIVE` is `(Long.MIN_VALUE, Long.MAX_VALUE)` ([`DeletionTime.java:46`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/DeletionTime.java)) — a live *range/partition* deletion, not a cell.
+
+**Why `max_local_deletion_time` reads as “live” in mixed SSTables.** The tracker is seeded with the sentinel on *both* ends — `localDeletionTimeTracker = new MinMaxLongTracker(Cell.NO_DELETION_TIME, Cell.NO_DELETION_TIME)` ([`MetadataCollector.java:112`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataCollector.java)) — and **every cell** is folded in, live ones included, because `update(Cell)` passes `cell.localDeletionTime()` unconditionally ([`MetadataCollector.java:229-236`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataCollector.java)). A live, non-expiring cell contributes `NO_DELETION_TIME`, i.e. `Long.MAX_VALUE`, so an SSTable containing *any* live non-TTL cell finalizes with `max_local_deletion_time` at the sentinel regardless of how many tombstones it also holds. The tombstone-drop histogram is kept clean by the explicit exclusion at [`MetadataCollector.java:267-271`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataCollector.java) (`if (newLocalDeletionTime != Cell.NO_DELETION_TIME) estimatedTombstoneDropTime.update(...)`). Consequence for readers: `max_local_deletion_time` is **not** a usable “latest tombstone” bound — treat the sentinel as “contains live data”, and use `estimatedTombstoneDropTime` for tombstone scheduling.
+
+CQLite matches this behavior (issue #1728): a live write folds `note_live_local_deletion_time()`, which raises `max_local_deletion_time` to the sentinel (`cqlite-core/src/storage/sstable/writer/stats_writer/metadata.rs:286-292`, called from `cqlite-core/src/storage/sstable/writer/stats_fold.rs:95-157` for live simple cells and live complex elements). TTL’d rows deliberately do **not** fold the live sentinel, since an expiring cell has a real local deletion time. Both behaviors are pinned by `test_live_write_plus_tombstone_max_ldt_is_live_sentinel` and `test_ttl_row_write_does_not_fold_live_sentinel` (`cqlite-core/src/storage/sstable/writer/mod.rs:2115-2219`).
+
 ## Collection and Serialization
 
 [Section titled “Collection and Serialization”](#collection-and-serialization)
@@ -11264,6 +11310,65 @@ Pinpoints in Cassandra 5.0.8:
 * `StatsMetadata` exposes typed accessors for the above
 
 For an implementation walkthrough of parsing and reporting helpers, see Appendix C.
+
+### Serialized layout of the file (real TOC, all four components)
+
+[Section titled “Serialized layout of the file (real TOC, all four components)”](#serialized-layout-of-the-file-real-toc-all-four-components)
+
+Every Cassandra 5.0 `Statistics.db` is written by `MetadataSerializer.serialize` ([`MetadataSerializer.java:67-112`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataSerializer.java)):
+
+```text
+[i32 BE] component count                       -- 4 in 5.0
+[i32 BE] CRC32(count bytes)                    -- only when version.hasMetadataChecksum()
+4 × ( [i32 BE] MetadataType ordinal, [i32 BE] absolute offset of that component )
+[i32 BE] CRC32(all TOC entry bytes)            -- cumulative, same gate
+per component, in ordinal order:
+  [ component body ]
+  [i32 BE] CRC32(body)                         -- same gate
+```
+
+`MetadataType` ordinals are `VALIDATION 0, COMPACTION 1, STATS 2, HEADER 3` ([`MetadataType.java:28-34`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataType.java)). `hasMetadataChecksum()` is `version >= "na"` ([`BigFormat.java:404`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java)), so **every version in this guide’s scope (`na`, `nb`, `oa`, `da`) carries the checksums**. `CHECKSUM_LENGTH` is 4 ([`MetadataSerializer.java:65`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataSerializer.java)); each CRC is fed big-endian via `FBUtilities.updateChecksumInt` ([`FBUtilities.java:1117-1123`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/FBUtilities.java)).
+
+Because the count is always 4 and the checksum immediately follows it, the second word of a 5.0 `Statistics.db` is *always* the constant `CRC32(0x00000004) = 0x26291b05`. It is a derived checksum, **not** a magic number — see *The `0x26291b05` “magic number”* below.
+
+Cassandra validates each of those CRCs on read and throws `CorruptSSTableException("Checksums do not match for " + file)` on mismatch ([`MetadataSerializer.java:214-226`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataSerializer.java)).
+
+### Corruption handling: fail-closed, with one stated gap (issue #1626)
+
+[Section titled “Corruption handling: fail-closed, with one stated gap (issue #1626)”](#corruption-handling-fail-closed-with-one-stated-gap-issue-1626)
+
+`Statistics.db` is **authoritative metadata**, not a hint: under the no-heuristics mandate (issue #28) it is the fallback source of truth for types and encoding baselines when no schema is supplied. A silently-degraded parse would therefore corrupt decoding downstream, so CQLite’s posture is:
+
+| Situation                                   | Behavior                                             |
+| ------------------------------------------- | ---------------------------------------------------- |
+| `Statistics.db` **absent**                  | `Ok(None)` — the reader continues without it         |
+| `Statistics.db` **present but unparseable** | **hard error out of `SSTableReader::open()`**        |
+| Filename version below the 5.0 floor        | `Error::UnsupportedVersion` **before any file read** |
+
+`load_statistics_reader` returns `Result<Option<StatisticsReader>>` and maps *only* `Error::NotFound` to `Ok(None)`; a corruption error is re-wrapped with the offending component path and every other error is propagated unchanged (`cqlite-core/src/storage/sstable/reader/component_loading.rs:249-300`). The call site uses `?`, so the failure surfaces from `open()` rather than yielding a reader with zero-valued stats (`cqlite-core/src/storage/sstable/reader/mod.rs:792-794`). Version gating runs from the filename before any filesystem access (issue #1249), so a below-floor SSTable is rejected without being read (`cqlite-core/src/storage/sstable/statistics_reader.rs:46-127`).
+
+**Stated precondition — what “unparseable” covers.** This guarantee is about *structural* parse failure: truncated or nonsensical bytes that the parser cannot decode. CQLite does **not yet verify the per-component CRC32s described above; that validation is explicitly deferred** (`cqlite-core/src/storage/sstable/statistics_reader.rs:105-120`), so a `Statistics.db` whose bytes are corrupt *but still structurally decodable* can be accepted where Cassandra would raise `CorruptSSTableException`. Do not read the table above as “any corrupt `Statistics.db` is detected”.
+
+Where a specific field is unreadable, CQLite fails closed on that field rather than inventing a value: the parsed `max_timestamp` stays `None` and `max_deletion_time` defaults to `i64::MAX` (the widest, never-prune answer) in `cqlite-core/src/parser/enhanced_statistics_parser/mod.rs:249-276`.
+
+### The `0x26291b05` “magic number” and the single TOC walk (issue #2148)
+
+[Section titled “The 0x26291b05 “magic number” and the single TOC walk (issue #2148)”](#the-0x26291b05-magic-number-and-the-single-toc-walk-issue-2148)
+
+`0x26291b05` is frequently described as a `Statistics.db` magic number or a `statistics_kind` tag. It is neither: it is exactly `CRC32` over the four big-endian bytes of the component count `4`, emitted by the `maybeWriteChecksum` call that follows `out.writeInt(components.size())` ([`MetadataSerializer.java:76-78`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataSerializer.java)). It is stable only because 5.0 always writes exactly four components; a file with a different component count would carry a different word there, so **it must not be used as a format-identification magic value**.
+
+Confirmed on a real fixture — the first 40 bytes of `test_basic/composite_key_table.../nb-1-big-Statistics.db`:
+
+```text
+00000000  00 00 00 04   26 29 1b 05        count = 4, CRC32(count) = 0x26291b05
+00000008  00 00 00 00  00 00 00 2c        VALIDATION  (ordinal 0) @ 0x2c
+00000010  00 00 00 01  00 00 00 65        COMPACTION  (ordinal 1) @ 0x65
+00000018  00 00 00 02  00 00 01 a1        STATS       (ordinal 2) @ 0x1a1
+00000020  00 00 00 03  00 00 13 99        HEADER      (ordinal 3) @ 0x1399
+00000028  1d a8 06 ed                     CRC32 over the TOC entries
+```
+
+CQLite parses this TOC **once per file** and threads the result to every consumer. The walk is `repair_metadata::parse_statistics_toc` /`walk_statistics_toc` (`cqlite-core/src/parser/repair_metadata.rs:203-400`); the single call site is `cqlite-core/src/parser/enhanced_statistics_parser/mod.rs:335`, whose `toc` is passed to both the header/STATS consumers and the STATS-extras post-pass (`.../mod.rs:324-427`). Before issue #2148 the same TOC was re-walked once per consumer (three walks per file); the header reader now documents that the walk has moved out (`cqlite-core/src/parser/enhanced_statistics_parser/header.rs:64-69`). Bounds rules the walk enforces: offsets must lie inside the file, the last STATS entry wins, the first HEADER entry wins, and a component’s end is the next offset minus the 4-byte trailing CRC (`cqlite-core/src/parser/repair_metadata.rs:290-400`).
 
 ## Operational Implications
 
@@ -11375,45 +11480,26 @@ For implementation details, see Appendix C.
 
 [Section titled “Writing Statistics.db”](#writing-statisticsdb)
 
-CQLite’s M5 implementation produces Statistics.db files compatible with Cassandra 5.0’s nb-format. The writer generates a **hybrid format** that satisfies both the TOC-based parser and the simplified nb-format header parser.
+CQLite’s writer emits the **real Cassandra TOC layout described above** — four components (VALIDATION, COMPACTION, STATS, SERIALIZATION\_HEADER) with the count checksum, the cumulative TOC checksum, and a trailing CRC32 per component (`cqlite-core/src/storage/sstable/writer/stats_writer/mod.rs:142-249`; `NUM_COMPONENTS = 4` and the `METADATA_TYPE_*` ordinals 0..3 are at `.../mod.rs:78-84`). The CRC feed mirrors `FBUtilities.updateChecksumInt` (big-endian words, `.../mod.rs:252-274`).
 
-### Hybrid Format Structure
+> **Correction notice:** earlier revisions of this chapter described a CQLite “hybrid format” — a 32-byte header doubling as a *fake* TOC, with `0x26291b05` as a “Statistics magic number” and only an EncodingStats block after byte 32. That description no longer matches the writer (and never matched Cassandra): the TOC is real, the four components are all present, and `0x26291b05` is `CRC32` of the component count (see above). The related “Full Cassandra TOC Structure (Not Implemented)” claim has been removed for the same reason.
 
-[Section titled “Hybrid Format Structure”](#hybrid-format-structure)
+The STATS body has two builders in the writer: `build_stats_component` (the legacy / `hasUIntDeletionTime() == false` layout) and `build_stats_component_da` (the BtiFormat layout, which adds the covered-clustering `Slice`, **unsigned** deletion times, key range and token-space coverage) — `cqlite-core/src/storage/sstable/writer/stats_writer/components.rs:99-320`.
 
-The Statistics.db file written by CQLite uses a 32-byte header followed by EncodingStats data:
+**Which builder runs, precisely.** The dispatch is on the writer’s `bti: bool` flag, not on a version string: `if self.bti { build_stats_component_da } else { build_stats_component }` (`.../stats_writer/mod.rs:150-157`). That flag is `false` for `StatisticsWriter::new` and `true` for `new_bti` (`.../mod.rs:107-122`). The two sentinels each builder emits are:
 
-```text
-Bytes 0-31: Header (doubles as fake TOC)
-  [u32 BE] 4                    - Interpreted as num_components or version
-  [u32 BE] 0x26291b05           - Statistics magic number
-  [u32 BE] 0                    - Reserved
-  [u32 BE] data_length          - Length of EncodingStats data
-  [u32 BE] 1, 0x65, 2, 0        - Metadata fields (observed in real files)
+| Builder                           | Unset local-deletion-time written | Site                        |
+| --------------------------------- | --------------------------------- | --------------------------- |
+| `build_stats_component` (non-BTI) | `Integer.MAX_VALUE` (`i32::MAX`)  | `.../components.rs:120-134` |
+| `build_stats_component_da` (BTI)  | `0xFFFFFFFF`                      | `.../components.rs:251-262` |
 
+**Reconciliation with the version rule (no `oa` case exists on CQLite’s write path).** Per *Local deletion time and the live-cell sentinel*, `Integer.MAX_VALUE` is the **`na`/`nb`** disk sentinel and `0xFFFFFFFF` is the **`oa`/`da`** one. CQLite’s writer emits exactly two descriptors — `SSTableFormat::Big → "nb"` and `SSTableFormat::Bti → "da"` (`cqlite-core/src/storage/sstable/writer/finish.rs:381-384`) — so the mapping above is correct *for everything CQLite actually writes*: `nb` gets `Integer.MAX_VALUE`, `da` gets `0xFFFFFFFF`. **`oa` is never produced by the writer at all**, so there is no “`oa` through the legacy builder” behavior to describe.
 
-Bytes 32+: EncodingStats data
-  [u32 BE] 3                    - Metadata type (EncodingStats marker)
-  [VUInt]  0                    - Data length placeholder
-  [VUInt]  43                   - Partitioner string length
-  [bytes]  Murmur3Partitioner   - Partitioner class name
-  [VUInt]  0, 0                 - Metadata placeholders
-  [UnsignedVInt]   min_timestamp_delta     - Unsigned VInt 64-bit (delta from TIMESTAMP_EPOCH)
-  [UnsignedVInt32] min_deletion_time_delta - Unsigned VInt32 (delta from DELETION_TIME_EPOCH)
-  [UnsignedVInt32] min_ttl_delta            - Unsigned VInt32 (delta from TTL_EPOCH=0)
-```
+> **Correction notice:** an earlier revision of this section described the legacy builder as covering “BIG (`nb`/`oa`)” while simultaneously claiming it “follows the version rule”. Those two statements contradict each other — `oa` has `hasUIntDeletionTime() == true` ([`BigFormat.java:409`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java)), so an `oa` STATS body routed through the legacy `Integer.MAX_VALUE` builder would be **wrong**, not version-following. The resolution is that CQLite’s writer has no `oa` output at all; the `nb`/`oa` grouping was simply inaccurate.
 
-**Magic Number**: The constant `0x26291b05` appears at bytes 4-7 and serves dual purposes:
+> **CQLite implementation note (a latent hazard, not current behavior).** Because the builder is selected by a format *boolean* rather than by a version gate (`BigVersionGates::has_uint_deletion_time`), the correct sentinel is only a side effect of `SSTableFormat::Big` hard-coding `"nb"`. If a BIG `oa` write path were ever added without re-gating this dispatch, `oa` would silently receive the `na`/`nb` sentinel. Two stale comments still assert exactly that incorrect outcome — `.../stats_writer/mod.rs:151-153` (“BIG (`nb`/`oa`) emits the legacy layout”) and the `StatisticsWriter::new` doc at `.../stats_writer/mod.rs:111` (“the legacy `nb`/`oa` BIG layout”).
 
-* `statistics_kind` when read by `parse_nb_format_header()`
-* `checksum` when read by the single-pass `parse_statistics_toc()` TOC walk (issue #2148)
-
-**Version/Components**: The value `4` at bytes 0-3 indicates:
-
-* `version_type = 4` (Cassandra 5.0 format) for nb-format parsers
-* `num_components = 4` for TOC-based parsers
-
-This hybrid approach allows a minimal Statistics.db to be readable by multiple parser implementations without requiring the full TOC structure with VALIDATION, COMPACTION, STATS, and HEADER components.
+**Read side:** `oa` here is a **BIG** version; it is not a BTI version. The only BTI version CQLite reads is `da` — `BtiVersionGates::from_version` returns `Error::UnsupportedVersion` for anything else (`cqlite-core/src/storage/sstable/version_gate/bti.rs:55-61`), so nothing in this section should be read as implying an `oa` BTI SSTable is readable. On the BIG side the supported allowlist is exactly `{na, nb, oa}` (`cqlite-core/src/storage/sstable/version_gate/big.rs:99-138`), and `oa` reads use the unsigned-deletion-time branch via `has_uint_deletion_time`.
 
 ### Delta Encoding Baselines
 
@@ -11455,24 +11541,15 @@ The primary purpose of Statistics.db is to provide **baseline values for delta e
 
 [Section titled “EncodingStats Serialization”](#encodingstats-serialization)
 
-The EncodingStats section (starting at byte 32) uses a specific VInt encoding sequence:
+The three baselines live at the **very start of the HEADER component** (`MetadataType` ordinal 3), not at a fixed file offset: `SerializationHeader.Serializer.serialize` writes `EncodingStats` first, then the key type, the clustering-type list, the static columns and the regular columns ([`SerializationHeader.java:451-460`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java)). Locate it through the TOC, never by counting bytes from the file start.
 
-1. **Metadata type marker** (`u32 BE` = 3): Identifies the start of EncodingStats data
+The EncodingStats block itself is exactly three unsigned VInts, in this order:
 
-2. **Data length placeholder** (`VUInt` = 0): Reserved field read and discarded by parser
+1. `min_timestamp` delta: `writeUnsignedVInt` (64-bit, up to 8 bytes)
+2. `min_local_deletion_time` delta: `writeUnsignedVInt32` (32-bit, up to 5 bytes)
+3. `min_ttl` delta: `writeUnsignedVInt32` (32-bit, up to 5 bytes)
 
-3. **Partitioner string**:
-
-   * Length as `VUInt` (43 bytes for Murmur3Partitioner)
-   * Full class name: `org.apache.cassandra.dht.Murmur3Partitioner`
-
-4. **Metadata placeholders** (2x `VUInt` = 0): Purpose unclear, observed in real files
-
-5. **Delta encoding baselines** (3× unsigned VInt):
-
-   * `min_timestamp` (i64 delta): `writeUnsignedVInt` (64-bit, up to 8 bytes)
-   * `min_local_deletion_time` (i32 delta): `writeUnsignedVInt32` (32-bit, up to 5 bytes)
-   * `min_ttl` (i32 delta): `writeUnsignedVInt32` (32-bit, up to 5 bytes)
+> **Correction notice:** an earlier revision of this section described the EncodingStats block as beginning at byte 32 with a `u32 BE = 3` “metadata type marker”, a length placeholder, a `VUInt`-prefixed partitioner string and two `VUInt` placeholders “observed in real files”. Those bytes belong to other structures: the `3` is the HEADER **TOC entry’s** type ordinal (in the TOC, not in the component body), and the 43-byte `org.apache.cassandra.dht.Murmur3Partitioner` string is the **VALIDATION** component, written with Java `writeUTF` (2-byte big-endian length `0x002b`, then the bytes) and followed by an f64 `bloomFilterFPChance` ([`ValidationMetadata.java:79-83`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/ValidationMetadata.java)). The COMPACTION component in between is a length-prefixed HyperLogLogPlus cardinality estimator ([`CompactionMetadata.java:83-86`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/CompactionMetadata.java)). No field in this file is a “placeholder of unclear purpose”.
 
 **VInt encoding**: All baseline values use **unsigned** VInt encoding. Deltas are always non-negative (subtracted from their respective epochs). ZigZag (signed) encoding is NOT used. Using a 32-bit VInt for `minTimestamp` will corrupt timestamps after 2037. See [`EncodingStats.java:272–276`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/EncodingStats.java#L272) and Appendix B for VInt encoding details.
 
@@ -11498,15 +11575,22 @@ pub struct StatisticsMetadata {
 }
 ```
 
-**Update methods**:
+(Note the CQLite-side width divergence: Cassandra’s `minLocalDeletionTime` / `maxLocalDeletionTime` are `long` in memory, while CQLite tracks them as `i32` and widens at serialization time.)
 
-* `update_timestamp(i64)`: Tracks min/max timestamp range
-* `update_local_deletion_time(i32)`: Tracks the deletion time range for tombstones **and** accumulates the value into the `estimatedTombstoneDropTime` histogram (see below)
-* `update_ttl(i32)`: Tracks TTL range (ignores 0 values)
-* `increment_partition_count()`: Counts partitions written
-* `increment_row_count()`: Counts rows (live + tombstones)
+**Update methods** (`cqlite-core/src/storage/sstable/writer/stats_writer/metadata.rs`):
 
-**Finalization**: Before writing, sentinel values (i64::MAX, i32::MAX) are normalized to 0 if no actual values were recorded. This ensures valid baselines even for empty SSTables.
+* `update_timestamp(i64)` (`:240-246`): tracks the min/max timestamp range, skipping the live/`NO_DELETION` markers `i64::MIN` and `i64::MAX` so they cannot poison the range
+* `update_local_deletion_time(i32)` (`:257-264`): tracks the **tombstone** deletion-time range **and** accumulates into the `estimatedTombstoneDropTime` histogram (see below); a live marker (`i32::MAX`) is rejected here (issue #851)
+* `note_live_local_deletion_time()` (`:286-292`): raises **`max_local_deletion_time` alone** to the live sentinel for a live non-TTL cell — the mixed-SSTable behavior Cassandra gets from folding every cell’s `localDeletionTime` (issue #1728). It deliberately does not touch the min or the histogram.
+* `update_ttl(i32)` (`:310-315`): tracks the TTL range, ignoring 0 (`NO_TTL`)
+* `increment_partition_count()` / `increment_row_count()`: counts (rows = live + tombstones)
+
+**Finalization** (`.../metadata.rs:397-418`): the *unset* sentinels are normalized to `0` — `min_timestamp == i64::MAX`, `max_timestamp == i64::MIN`, `min_local_deletion_time == i32::MAX`, `max_local_deletion_time == i32::MIN`, and `min_ttl == i32::MAX` each become `0`. This affects only aggregates that were never updated, so a real recorded value is never rewritten. Two consequences worth stating:
+
+* A `0` local-deletion-time aggregate reaching the STATS builder is re-encoded as the *no-deletions* sentinel for the target version — `i32::MAX` for `nb` (`cqlite-core/src/storage/sstable/writer/stats_writer/components.rs:120-134`) and `0xFFFFFFFF` for `da` (`.../components.rs:197-320`) — so the round-trip stays Cassandra-compatible.
+* `max_local_deletion_time == i32::MAX` from `note_live_local_deletion_time()` is **not** the `i32::MIN` unset case, so it survives `finalize()` and serializes as the live sentinel — which is the point of issue #1728.
+
+Timestamps are the divergence noted earlier: Cassandra would emit the widening `Long.MIN_VALUE` / `Long.MAX_VALUE` defaults for a fully-unrecorded SSTable, CQLite emits `0`/`0`.
 
 ### Implementation Reference
 
@@ -11514,14 +11598,15 @@ pub struct StatisticsMetadata {
 
 For the complete write-side implementation, see:
 
-* `cqlite-core/src/storage/sstable/writer/stats_writer.rs`: Statistics.db writer
-* `cqlite-core/src/storage/sstable/writer/data_writer.rs`: Data.db writer that uses these baselines
+* `cqlite-core/src/storage/sstable/writer/stats_writer/` (module; `mod.rs` writes the TOC + components, `metadata.rs` holds the collector, `components.rs` builds the per-component bodies): Statistics.db writer
+* `cqlite-core/src/storage/sstable/writer/data_writer/`: Data.db writer that uses these baselines
+* `cqlite-core/src/storage/sstable/writer/stats_fold.rs`: the per-cell/per-mutation folds that drive the collector
 
 ### estimatedTombstoneDropTime histogram (STATS component)
 
 [Section titled “estimatedTombstoneDropTime histogram (STATS component)”](#estimatedtombstonedroptime-histogram-stats-component)
 
-The STATS component carries `estimatedTombstoneDropTime`, the histogram of tombstone local-deletion-times that Cassandra uses to compute `estimatedDroppableTombstoneRatio` and schedule tombstone compaction. CQLite emits this histogram from its own writer (verified in `cqlite-core/src/storage/sstable/writer/stats_writer.rs`).
+The STATS component carries `estimatedTombstoneDropTime`, the histogram of tombstone local-deletion-times that Cassandra uses to compute `estimatedDroppableTombstoneRatio` and schedule tombstone compaction. CQLite emits this histogram from its own writer (`cqlite-core/src/storage/sstable/writer/stats_writer/components.rs:145-149`, with the builder in `.../stats_writer/metadata.rs`).
 
 Structure and algorithm:
 
@@ -11539,23 +11624,11 @@ Structure and algorithm:
 
   An empty histogram serializes as 8 bytes (`maxBinSize = 0, size = 0`).
 
-* **Determinism / byte-stability (scope-limited).** Bins are stored in a `BTreeMap<i64, i64>` and serialized in ascending key order, so for a **given final bin set** the serialized bytes are order-stable. This is NOT a full insertion-order-independence guarantee: the histogram is built by **streaming insertion** (`update`), and once the input exceeds the 100-bin cap the builder merges the two **nearest** bins on the fly (`merge_closest_bins`). Because the merged key is the count-weighted average of whichever two bins happen to be adjacent at that moment, the resulting merged bins — and thus the final byte output — can differ depending on the **order** in which the same multiset of deletion times was inserted. So byte-identity across different insertion orders of the same deletion-time multiset is **not guaranteed**, and `stats_writer.rs` does **not** assert it. What the tests in `stats_writer.rs` DO assert (issue #730) is the framing: a non-empty histogram reports `maxBinSize = 100`, an empty one reports `maxBinSize = 0, size = 0`, and below the cap there is one bin per distinct deletion time (no byte-stability / insertion-order-independence assertion above the cap).
+* **Determinism / byte-stability (scope-limited).** Bins are stored in a `BTreeMap<i64, i64>` and serialized in ascending key order, so for a **given final bin set** the serialized bytes are order-stable. This is NOT a full insertion-order-independence guarantee: the histogram is built by **streaming insertion** (`update`), and once the input exceeds the 100-bin cap the builder merges the two **nearest** bins on the fly (`merge_closest_bins`). Because the merged key is the count-weighted average of whichever two bins happen to be adjacent at that moment, the resulting merged bins — and thus the final byte output — can differ depending on the **order** in which the same multiset of deletion times was inserted. So byte-identity across different insertion orders of the same deletion-time multiset is **not guaranteed**, and the `stats_writer` module does **not** assert it. What the tests in `stats_writer/` DO assert (issue #730) is the framing: a non-empty histogram reports `maxBinSize = 100`, an empty one reports `maxBinSize = 0, size = 0`, and below the cap there is one bin per distinct deletion time (no byte-stability / insertion-order-independence assertion above the cap).
 
 Authority: `org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder` and `org.apache.cassandra.io.sstable.metadata.StatsMetadata` (`estimatedTombstoneDropTime`).
 
-### Full Cassandra TOC Structure (Not Implemented)
-
-[Section titled “Full Cassandra TOC Structure (Not Implemented)”](#full-cassandra-toc-structure-not-implemented)
-
-For reference, full Cassandra Statistics.db files contain a complete TOC with four components:
-
-1. **TOC**: `num_components` (4) + checksum + 4 component entries (32 bytes total)
-2. **VALIDATION component** (offset \~44): Validator class name
-3. **COMPACTION component**: Compaction metadata
-4. **STATS component**: Contains EncodingStats plus histograms, cardinality estimates
-5. **HEADER component**: SerializationHeader with full table schema
-
-CQLite’s minimal implementation writes only the EncodingStats baseline values needed for Data.db decoding. Future versions may add support for the complete metadata structure.
+(The TOC structure that used to be described here as “Full Cassandra TOC Structure (Not Implemented)” is documented — and is what CQLite actually writes — under *Serialized layout of the file* and *Writing Statistics.db* above. The 44-byte TOC prelude is `4 + 4 + 4×8 + 4`, not 32 bytes.)
 
 # CompressionInfo.db and Chunking
 
@@ -13342,13 +13415,13 @@ For implementation details, see Appendix C.
 
 # Checksums and Integrity
 
-> SSTables carry integrity metadata at two levels: per-chunk checksums for compressed...
+> SSTables carry integrity metadata at two levels: per-chunk checksums over Data.db...
 
 ## Checksums and Integrity
 
 [Section titled “Checksums and Integrity”](#checksums-and-integrity)
 
-SSTables carry integrity metadata at two levels: per-chunk checksums for compressed `Data.db` blocks, and the `Digest.crc32` file for component-level verification. Readers validate checksums at each level to ensure data integrity throughout the read path.
+SSTables carry integrity metadata at two levels: per-chunk checksums over `Data.db` blocks (inline when compressed, in `CRC.db` when not), and the single per-SSTable `Digest.crc32` covering the whole `Data.db`. Readers validate the chunk CRC on the read path; the digest is a whole-file check used by tools, streaming and verification.
 
 > **Correction notice:** An earlier version of this chapter contained a section titled “Header CRC32 Prefixes” describing a CRC32 prefix that was believed to appear before certain NB-format SSTable headers. That section has been removed. Per `HEADER_CRC32_DOCUMENTATION.md` and verification against Cassandra 5.0.8 source, **NB format `Data.db` has NO magic number or global header** — the file starts directly with compressed chunk data. The bytes previously mistaken for a header CRC32 (e.g., `0x71160000`, `0xf1185c00`) are the first bytes of compressed chunk data. NB format is identified by filename pattern, not file content. See `CompressedSequentialWriter` constructor and `flushData()` for confirmation.
 
@@ -13356,8 +13429,9 @@ SSTables carry integrity metadata at two levels: per-chunk checksums for compres
 
 [Section titled “In this chapter you will learn”](#in-this-chapter-you-will-learn)
 
-* How per-chunk checksums are stored and validated for NB compressed `Data.db`
-* What `Digest.crc32` covers and how it differs from other checksums
+* How per-chunk checksums are stored and validated for compressed `Data.db`
+* What `Digest.crc32` covers (and what it does not)
+* How a writer accumulates both checksums incrementally, without re-reading `Data.db`
 * How readers/writers interact with integrity metadata
 * How to demonstrate a minimal verification example
 
@@ -13365,26 +13439,29 @@ SSTables carry integrity metadata at two levels: per-chunk checksums for compres
 
 [Section titled “Checksum coverage at a glance (authoritative)”](#checksum-coverage-at-a-glance-authoritative)
 
-| Component / Format      | Header CRC32 prefix | Trailing per-chunk CRCs | Byte order (stored) | CRC scope                   | Verified by                       |
-| ----------------------- | ------------------- | ----------------------- | ------------------- | --------------------------- | --------------------------------- |
-| Data.db (BIG)           | no                  | no                      | n/a                 | n/a                         | `Digest.crc32`                    |
-| Data.db (NB)            | no                  | yes                     | big-endian u32      | compressed chunk bytes only | reader per chunk + `Digest.crc32` |
-| Index.db (BIG/NB)       | no                  | n/a                     | n/a                 | n/a                         | `Digest.crc32`                    |
-| Summary.db (BIG/NB)     | no                  | n/a                     | n/a                 | n/a                         | `Digest.crc32`                    |
-| Filter.db (BIG/NB)      | no                  | n/a                     | n/a                 | n/a                         | `Digest.crc32`                    |
-| Statistics.db (BIG/NB)  | no                  | n/a                     | n/a                 | n/a                         | `Digest.crc32`                    |
-| CompressionInfo.db (NB) | no                  | n/a                     | n/a                 | n/a                         | `Digest.crc32`                    |
-| Notes:                  |                     |                         |                     |                             |                                   |
+| Component             | Per-chunk CRCs                       | Where the chunk CRCs live             | Byte order (stored) | CRC scope                    | Covered by `Digest.crc32`                         |
+| --------------------- | ------------------------------------ | ------------------------------------- | ------------------- | ---------------------------- | ------------------------------------------------- |
+| Data.db, uncompressed | yes                                  | separate `CRC.db`                     | big-endian u32      | one 64 KiB block of raw data | yes (digest = CRC32 over raw data)                |
+| Data.db, compressed   | yes                                  | inline, after each chunk in `Data.db` | big-endian u32      | compressed chunk bytes only  | yes (digest spans data **and** the inline CRCs)   |
+| Index.db              | no                                   | n/a                                   | n/a                 | n/a                          | **no**                                            |
+| Summary.db            | no                                   | n/a                                   | n/a                 | n/a                          | **no**                                            |
+| Filter.db             | no                                   | n/a                                   | n/a                 | n/a                          | **no**                                            |
+| Statistics.db         | no                                   | n/a                                   | n/a                 | n/a                          | **no** — but its own TOC/component CRC32s (Ch. 8) |
+| CompressionInfo.db    | no (holds chunk *offsets*, not CRCs) | n/a                                   | n/a                 | n/a                          | **no**                                            |
 
-* NB format `Data.db` has no magic number or header; the file starts directly with compressed data.
-* `Digest.crc32` is an independent per-component file; each component written by `ChecksummedSequentialWriter` or `CompressedSequentialWriter` generates its own `Digest.crc32`. There is no single digest enumerating all TOC components.
+Notes:
+
+* `Data.db` has no magic number or global header in either form; a compressed file starts directly with the first compressed chunk.
+* **`Digest.crc32` covers `Data.db` and nothing else.** There is exactly one `Digest.crc32` per SSTable, and only the data writer produces it: `DataComponent.buildWriter` passes `Components.DIGEST` to whichever data writer it builds ([`DataComponent.java:43-60`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/DataComponent.java)), the two `writeFullChecksum` call sites are that data writer’s close path ([`ChecksummedSequentialWriter.java:70`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksummedSequentialWriter.java), [`CompressedSequentialWriter.java:393`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java)), and `SSTableReader.getDigestValidator` validates `Components.DATA` against `Components.DIGEST` ([`SSTableReader.java:535-536`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableReader.java)). `Index.db` is written by a plain `SequentialWriter` with no checksum writer at all ([`BigTableWriter.java:253`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableWriter.java)), so `Index.db`, `Summary.db` and `Filter.db` carry **no** checksum of any kind. Verified on the real fixture `test_basic/uncompressed_table.../nb-1-big-*`: `Digest.crc32` reads `4192247423`, which is `zlib.crc32(Data.db)` exactly, and matches none of the other components’ CRC32s.
 * Full matrix with details appears later in this chapter.
 
-## NB Format: Trailing Chunk CRCs
+> **Correction notice:** earlier revisions of this chapter said each component “generates its own independent `Digest.crc32`” and listed every component as “Verified by `Digest.crc32`”. That is wrong in both directions: there is a single `Digest.crc32` file per SSTable, and it covers `Data.db` only. The corrected statement — one digest, data-only — is what the citations and the fixture above support. The original claim that no digest *enumerates all TOC components* remains true.
 
-[Section titled “NB Format: Trailing Chunk CRCs”](#nb-format-trailing-chunk-crcs)
+## Compressed Data.db: Trailing Chunk CRCs
 
-NB format uses a different CRC strategy than legacy formats - CRCs are placed **after** (trailing) each chunk, not before.
+[Section titled “Compressed Data.db: Trailing Chunk CRCs”](#compressed-datadb-trailing-chunk-crcs)
+
+For a compressed `Data.db`, each chunk’s CRC is placed **after** (trailing) the chunk it covers — never before it, and never in `CompressionInfo.db`.
 
 ### CRC Placement
 
@@ -13404,12 +13481,12 @@ Source: [`CompressedSequentialWriter.java:187-192`](https://github.com/apache/ca
 
 [Section titled “Validation Process”](#validation-process)
 
-1. Read chunk bytes from Data.db (length from CompressionInfo.db)
-2. Read next 4 bytes as big-endian u32 (expected CRC)
-3. Compute CRC32 over chunk bytes using Java algorithm
-4. Compare computed vs expected
+1. Decide whether to check at all: `shouldCheckCrc()` is true when `crc_check_chance >= 1.0`, else probabilistically ([`CompressedChunkReader.java:63-67`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java))
+2. Read chunk bytes from Data.db (length from `CompressionInfo.db`; when checking, read `chunk.length + 4` so the trailing CRC comes along)
+3. Read those 4 trailing bytes as a big-endian u32 (expected CRC)
+4. Compute CRC32 over the chunk bytes only, using the Java algorithm
 5. On match: decompress and continue
-6. On mismatch: corruption detected (fail or warn based on `crc_check_chance` config)
+6. On mismatch: `CorruptBlockException` ([`CompressedChunkReader.java:134-149`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java))
 
 Explicit note: CRC32 is computed over the compressed chunk only and excludes the trailing 4-byte CRC itself ([`ChecksumWriter.java:68-69`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksumWriter.java)).
 
@@ -13436,9 +13513,10 @@ When aligned to a chunk boundary, the 4 bytes immediately following the compress
 
 [Section titled “Cassandra Configuration”](#cassandra-configuration)
 
-* `crc_check_chance`: Probability of validating CRC (0.0 to 1.0)
-* Default: 1.0 (always validate)
-* Purpose: Trade integrity checking for performance
+* `crc_check_chance`: probability of validating a compressed chunk’s CRC on read (0.0 to 1.0)
+* Default: 1.0 — at `>= 1.0` every chunk read is checked; below that the check is sampled per read ([`CompressedChunkReader.java:63-67`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java))
+* Purpose: trade integrity checking for performance
+* Scope: this setting governs the **compressed** chunk-CRC read path only; it does not affect `Digest.crc32` verification or `Statistics.db`’s component CRC32s
 
 ### Implementation Note
 
@@ -13472,15 +13550,21 @@ crc_file_pos  = (chunk_index * 4) + 4
 
 where `chunkSize` is the 4-byte int at the start of `CRC.db` ([`DataIntegrityMetadata.java:52-53`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/DataIntegrityMetadata.java): `reader.seek(((start / chunkSize) * 4L) + 4)` where `start = chunkStart(offset)`).
 
-Note: per-chunk CRC values written to `CRC.db` are **not** included in the full checksum for `ChecksummedSequentialWriter` (`checksumIncrementalResult=false`, [`ChecksummedSequentialWriter.java:49`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksummedSequentialWriter.java)). For `CompressedSequentialWriter`, per-chunk CRC bytes **are** included in the full checksum (`checksumIncrementalResult=true`, [`CompressedSequentialWriter.java:192`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java)).
+The header value is the data `SequentialWriter`’s `buffer.capacity()` ([`ChecksummedSequentialWriter.java:38`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksummedSequentialWriter.java)), 64 KiB by default, and each CRC32 covers one block of **raw (uncompressed)** data.
 
-## Per-Chunk Checksums (Legacy Formats)
+Note: per-chunk CRC values written to `CRC.db` are **not** included in the full checksum for `ChecksummedSequentialWriter` (`checksumIncrementalResult=false`, [`ChecksummedSequentialWriter.java:49`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksummedSequentialWriter.java)). For `CompressedSequentialWriter`, per-chunk CRC bytes **are** included in the full checksum (`checksumIncrementalResult=true`, [`CompressedSequentialWriter.java:192`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java)). A direct consequence: for a single-chunk uncompressed `Data.db` the one `CRC.db` entry equals the `Digest.crc32` value. Verified on `test_basic/uncompressed_table.../nb-1-big-*`, whose 8-byte `CRC.db` is `00010000 f9e09e7f` — chunk size 65536 and one CRC `0xf9e09e7f` = `4192247423`, exactly the `Digest.crc32` contents for a 19803-byte `Data.db`.
 
-[Section titled “Per-Chunk Checksums (Legacy Formats)”](#per-chunk-checksums-legacy-formats)
+A writer does not need to re-read the finished file to produce either value — see *Computing Checksums Incrementally While Writing*, which also covers the flush-vs-compaction `CRC.db` tail difference (issue #1222).
 
-When compression is enabled, `CompressionInfo.db` may include a CRC for each compressed chunk. Readers should compute CRC over the compressed bytes and compare with metadata prior to decompression. This catches corruption early and avoids propagating errors downstream.
+## Where per-chunk CRCs live (compressed vs uncompressed)
 
-Readers should validate chunk CRCs where present before decompression; modern formats expect strict CRC adherence. For validation walkthroughs, see Appendix C.
+[Section titled “Where per-chunk CRCs live (compressed vs uncompressed)”](#where-per-chunk-crcs-live-compressed-vs-uncompressed)
+
+`CompressionInfo.db` does **not** contain per-chunk CRC values. Its body is a `writeUTF` compressor name, the `otherOptions` map, `chunkLength`, `maxCompressedLength`, the uncompressed `dataLength`, the chunk count, and then the chunk **offsets** ([`CompressionMetadata.java:375-392`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java)). The CRCs for a compressed table are stored **inline in `Data.db`**, immediately after each compressed chunk (see [*Compressed Data.db: Trailing Chunk CRCs*](#compressed-datadb-trailing-chunk-crcs) above). For an uncompressed table they live in the separate `CRC.db` component. The two are mutually exclusive, which follows directly from `DataComponent.buildWriter` choosing `CompressedSequentialWriter` (inline) or `ChecksummedSequentialWriter` (`CRC.db`) ([`DataComponent.java:36-61`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/DataComponent.java)). That choice is made on `metadata.params.compression.isEnabled()` alone, so the exclusivity holds for **BIG and BTI alike** — see the `CRC.db` precondition under *Computing Checksums Incrementally While Writing*.
+
+Readers should validate the chunk CRC before decompressing. Note the precondition on “always”: whether a given read validates is governed by `crc_check_chance` — the check runs unconditionally only at `1.0`, and otherwise probabilistically ([`CompressedChunkReader.java:63-67`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java): `checkChance >= 1d || (checkChance > 0d && checkChance > ThreadLocalRandom...nextDouble())`). When the check does run and fails, Cassandra throws `CorruptBlockException` ([`CompressedChunkReader.java:144-149`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java)). For validation walkthroughs, see Appendix C.
+
+> **Correction notice:** this section previously stated that “`CompressionInfo.db` may include a CRC for each compressed chunk”. It does not — see the layout citation above.
 
 ## Digest Files
 
@@ -13488,15 +13572,59 @@ Readers should validate chunk CRCs where present before decompression; modern fo
 
 `Digest.crc32` is written by `ChecksumWriter.writeFullChecksum()` on SSTable finalization ([`ChecksumWriter.java:91-103`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksumWriter.java)). It contains a **single line**: the CRC32 checksum value as a UTF-8 decimal string, flushed and synced to disk.
 
-Each component written by `ChecksummedSequentialWriter` or `CompressedSequentialWriter` generates its own independent `Digest.crc32`. Each digest covers exactly one component file ([`DataIntegrityMetadata.FileDigestValidator`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/DataIntegrityMetadata.java): reads `Long.parseLong(digestReader.readLine())` — decimal string — and validates a single `dataFile` against a single `digestFile`). There is no single `Digest.crc32` that enumerates all components listed in `TOC.txt`.
+There is **one** `Digest.crc32` per SSTable and it covers **`Data.db` only** — see the citations under *Checksum coverage at a glance*. `FileDigestValidator` reads `Long.parseLong(digestReader.readLine())` and validates a single `dataFile` against a single `digestFile` ([`DataIntegrityMetadata`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/DataIntegrityMetadata.java)), and the `dataFile` it is given is always `Components.DATA` ([`SSTableReader.java:535-536`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableReader.java)). No digest enumerates all components listed in `TOC.txt`, and no digest exists for `Index.db`, `Summary.db`, `Filter.db`, `Statistics.db` or `CompressionInfo.db`.
 
-`Digest.crc32` is complementary to per-chunk CRCs: the digest validates whole-file contents, while per-chunk CRCs validate compressed block integrity during reads.
+`Digest.crc32` is complementary to per-chunk CRCs: the digest validates whole-file `Data.db` contents (a whole-file read), while per-chunk CRCs validate one block during a normal read.
 
 Minimal verification example:
 
-1. For each component file, locate the corresponding `Digest.crc32`.
-2. Compute CRC32 over the entire component file contents.
-3. Compare against the decimal value in `Digest.crc32`; on mismatch, quarantine and rehydrate via repair/streaming.
+1. Locate the SSTable’s single `Digest.crc32`.
+2. Compute CRC32 over the entire `Data.db` contents.
+3. Compare against the decimal value in `Digest.crc32`; on mismatch, quarantine and rehydrate via repair/streaming. (Other components have no digest — validate `Statistics.db` through its own per-component CRC32s instead, Ch. 8.)
+
+## Computing Checksums Incrementally While Writing (issue #1663)
+
+[Section titled “Computing Checksums Incrementally While Writing (issue #1663)”](#computing-checksums-incrementally-while-writing-issue-1663)
+
+A writer can produce both `Digest.crc32` and `CRC.db` **without ever re-reading the finished `Data.db`**, because both are CRC32s over the same byte stream in write order. Cassandra does exactly this: `ChecksumWriter` keeps two `CRC32` instances — `incrementalChecksum` for the current chunk and `fullChecksum` for the whole file — and `appendDirect` folds each buffer into both, emits the chunk value, then resets only the incremental one ([`ChecksumWriter.java:34-36, 62-89`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksumWriter.java)). `writeFullChecksum` then serializes the accumulated `fullChecksum` at close ([`ChecksumWriter.java:91-103`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksumWriter.java)). The `checksumIncrementalResult` boolean is the *only* difference between the two paths: it decides whether the 4-byte chunk CRC is itself folded into the full checksum (see *Digest.crc32 Coverage*).
+
+CQLite mirrors this with a single accumulator, `StreamingCrc` (`cqlite-core/src/storage/sstable/writer/crc_writer.rs:121-185`):
+
+| Field          | Role                                                        |
+| -------------- | ----------------------------------------------------------- |
+| `whole`        | whole-file hasher — becomes the `Digest.crc32` value        |
+| `chunk`        | hasher for the chunk currently being filled                 |
+| `chunk_filled` | bytes accumulated toward the current `CRC_CHUNK_SIZE` block |
+| `chunk_crcs`   | finalized per-chunk CRC32s, in order                        |
+
+`CRC_CHUNK_SIZE` is `64 * 1024`, matching Cassandra’s default `SequentialWriter` `bufferSize` (`.../crc_writer.rs:62-67`).
+
+**Where bytes are fed.** Exactly once, in write order, immediately after the sink write and before the scratch buffer is cleared: `self.crc.update(&self.buffer)` in `DataWriter::flush_partition` (`cqlite-core/src/storage/sstable/writer/data_writer/mod.rs:424-442`). Because `update` carries `chunk_filled` across calls (`crc_writer.rs:157-171`), chunk boundaries are a fixed grid over the raw `Data.db` bytes and **straddle partition boundaries** — they are not per-partition. `finish_streaming` closes any trailing short chunk and returns both results in a `StreamFinish { data_size, digest_crc32, chunk_crcs }` (`.../data_writer/mod.rs:324-338, 507-537`).
+
+**Where they are consumed.** `SSTableWriter::finish` writes `Digest.crc32` from `stream.digest_crc32` (`cqlite-core/src/storage/sstable/writer/finish.rs:177-190`) and assembles `CRC.db` from `stream.chunk_crcs` via `assemble_crc_bytes` (`.../finish.rs:192-224`). No pass over the finished file is involved.
+
+Preconditions and exceptions worth stating explicitly:
+
+* **Format truth: `CRC.db` exists ⟺ the data writer is uncompressed — for *any* format, BTI included.** It is a **compression gate, not a BIG-vs-BTI gate.** Two independent citations at `cassandra-5.0.8`:
+
+  * `SSTableWriter.Builder.addDefaultComponents` branches on `params.compression.isEnabled()` alone: the compressed arm adds `Components.COMPRESSION_INFO`, the `else` arm adds `Components.CRC`. There is no format test anywhere in the branch, and the method is inherited by the BTI writer builder ([`SSTableWriter.java:483-497`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableWriter.java)).
+  * `DataComponent.buildWriter` is likewise **format-agnostic** — it takes a `Descriptor` plus `TableMetadata` and picks `CompressedSequentialWriter` (inline chunk CRCs, `CompressionInfo.db`) or `ChecksummedSequentialWriter` (`CRC.db`) purely on `metadata.params.compression.isEnabled()` ([`DataComponent.java:36-61`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/DataComponent.java)).
+
+  Confirming this from the component registry: `BtiFormat.Components.ALL_COMPONENTS` explicitly lists `CRC` alongside `COMPRESSION_INFO` ([`BtiFormat.java:100-108`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java)). So a Cassandra-written **uncompressed BTI (`da`) SSTable does carry a `CRC.db`**, and a **compressed BIG (`nb`) SSTable does not**. The correct statement of the exclusivity is compressed-inline-CRCs XOR `CRC.db`, orthogonal to BIG/BTI.
+
+* **CQLITE IMPLEMENTATION DETAIL (not format authority): CQLite’s writer gates `CRC.db` on `is_bti`.** `finish.rs:205-207` skips `CRC.db` for any BTI output (`let crc_path = if is_bti { None } else { … }`), and the module doc asserts the same (`cqlite-core/src/storage/sstable/writer/crc_writer.rs:1-8`). Because CQLite’s production write surface is uncompressed-only (issue #1406), that gate is **narrower than Cassandra’s rule**: an uncompressed `da` written by CQLite omits a `CRC.db` that Cassandra would have emitted. This is a documented CQLite behavior, not a format property.
+
+  **The supporting observation is confounded evidence.** The note that “BTI (`da`) fixtures written by Cassandra carry no `CRC.db`” is true of the fixtures but proves nothing about the gate: **every** `test-data/datasets/sstables/test_da/*` fixture ships a `CompressionInfo.db`, i.e. all four are *compressed*. A compressed SSTable has no `CRC.db` under either hypothesis, so those fixtures **cannot distinguish a BTI gate from a compression gate**. Distinguishing them requires an *uncompressed* Cassandra-written `da` fixture (`WITH compression = {'enabled': false}`), which the corpus does not currently contain. Per the citations above, Cassandra’s rule is the compression gate.
+
+* **Empty `Data.db` is the one recomputation.** When no partition was streamed, there are no accumulated bytes, so `finish` computes the digest over the just-written empty file (`finish.rs:185-189`); `CRC32` of zero bytes is `0`.
+
+* **The re-read implementation still exists, as a test oracle only.** `build_crc_bytes` streams the finished file in `CRC_CHUNK_SIZE` blocks and routes through the same `assemble_crc_bytes`, so the incremental and re-read paths are provably byte-identical. It is `#[cfg(test)]` (`crc_writer.rs:54-60, 187-235`) and each call bumps the `data_db_checksum_full_reads` work counter, so a regression that reintroduces a production full-file re-read is caught by a test rather than by a benchmark.
+
+* **Flush and compaction tails differ by design (issue #1222).** Cassandra’s compaction path flushes the data writer once more at close over a zero-length buffer, so a compacted `CRC.db` ends with one extra `00000000` group; the flush path does not. `assemble_crc_bytes` takes an explicit `CrcTrailer` (`None` for flush, `EmptyFinalChunk` for compaction, `crc_writer.rs:69-119`) selected from `is_compaction_output` (`finish.rs:209-213`), and the trailer is suppressed for an empty `Data.db` (no Cassandra golden exists for that case).
+
+* Issue #1197 (writer omitted `CRC.db` for uncompressed BIG) is **fixed**: `CRC.db` is emitted and listed in `TOC.txt` for the uncompressed BIG write path.
+
+Because `CRC.db` chunk CRCs are *not* folded into the full checksum on the uncompressed path, a single-chunk uncompressed `Data.db` has exactly one `CRC.db` entry that equals its `Digest.crc32` value.
 
 ## Recovery Strategies (Beyond Detection)
 
@@ -13531,9 +13659,10 @@ Scope note: focus on SSTable-level recovery patterns; node-level operations are 
 * **NB format `Data.db` has NO magic number or header** — the file starts directly with compressed chunk data. There are no “Header CRC32 Prefixes” in NB format.
 * **NB format uses trailing chunk CRCs** — placed after each compressed chunk, big-endian u32, covering compressed chunk bytes only.
 * **CRC.db** (uncompressed path) holds a 4-byte int header (chunk size) + 4-byte CRC32 per chunk. Seek to chunk N’s CRC with: `crc_file_pos = (chunk_index * 4) + 4`.
-* **`Digest.crc32`** is an independent per-component file containing a single UTF-8 decimal CRC32 value; each component has its own digest. It does not enumerate all TOC components.
-* Readers should validate all checksums on-the-fly; tools may verify digests offline.
-* Fail-fast on any CRC mismatch — do not attempt heuristic recovery in modern formats.
+* **`Digest.crc32`** is a single per-SSTable file containing one UTF-8 decimal CRC32 value, and it covers **`Data.db` only**. `Index.db`, `Summary.db` and `Filter.db` carry no checksum at all; `Statistics.db` is self-checksummed via its TOC/component CRC32s (Ch. 8).
+* **Both `Digest.crc32` and `CRC.db` can be produced incrementally during the write** — one whole-file hasher plus one per-chunk hasher over the same byte stream — so no writer needs to re-read the finished `Data.db` (issue #1663).
+* Readers should validate checksums on-the-fly; tools may verify digests offline.
+* Fail-fast on a detected CRC mismatch — do not attempt heuristic recovery in modern formats. Note the precondition: on the compressed read path a chunk CRC is only *checked* unconditionally when `crc_check_chance = 1.0`, so “fail-fast” describes what happens when a check runs, not a guarantee that every corrupt byte is checked on every read.
 
 ### References
 
@@ -13550,43 +13679,29 @@ Scope note: focus on SSTable-level recovery patterns; node-level operations are 
 
 * CQLite implementation:
 
-  * CRC32 computation: `crc32fast` crate (Rust standard library compatible)
+  * CRC32 computation: `crc32fast` crate (byte-compatible with `java.util.zip.CRC32`)
+  * Incremental accumulator (`Digest.crc32` + `CRC.db` during the write, issue #1663): `cqlite-core/src/storage/sstable/writer/crc_writer.rs`
+  * Byte feed point: `cqlite-core/src/storage/sstable/writer/data_writer/mod.rs:424-442`
+  * Component emission: `cqlite-core/src/storage/sstable/writer/finish.rs:177-224`
 
 For implementation details and walkthroughs, see Appendix C.
-
-## Format/Component Checksum Matrix (Cassandra 5.0)
-
-[Section titled “Format/Component Checksum Matrix (Cassandra 5.0)”](#formatcomponent-checksum-matrix-cassandra-50)
-
-| Component (format)  | Header CRC32 prefix | Trailing chunk CRCs | Byte order (stored) | CRC scope                   | `Digest.crc32` present |
-| ------------------- | ------------------- | ------------------- | ------------------- | --------------------------- | ---------------------- |
-| Data.db (BIG)       | no                  | no                  | n/a                 | n/a                         | yes                    |
-| Index.db (BIG)      | no                  | n/a                 | n/a                 | n/a                         | yes                    |
-| Summary.db (BIG)    | no                  | n/a                 | n/a                 | n/a                         | yes                    |
-| Filter.db (BIG)     | no                  | n/a                 | n/a                 | n/a                         | yes                    |
-| Statistics.db (BIG) | no                  | n/a                 | n/a                 | n/a                         | yes                    |
-| CompressionInfo.db  | no                  | n/a                 | n/a                 | n/a                         | yes                    |
-| Data.db (NB)        | no                  | yes (per chunk)     | big-endian u32      | compressed chunk bytes only | yes                    |
-
-Notes:
-
-* NB `Data.db` starts directly with compressed data; no magic number, no header.
-* Trailing CRCs apply only to NB `Data.db` and are big-endian u32 immediately following each compressed chunk.
-* Each `Digest.crc32` covers exactly one component file (independent per-component, not a set digest).
 
 ## `Digest.crc32` Coverage
 
 [Section titled “Digest.crc32 Coverage”](#digestcrc32-coverage)
 
-`Digest.crc32` is a per-component file written by `ChecksumWriter.writeFullChecksum()`. It holds a single UTF-8 decimal line: the CRC32 over the full byte range of the associated component file. Each component written by `ChecksummedSequentialWriter` or `CompressedSequentialWriter` produces its own independent `Digest.crc32`.
+`Digest.crc32` is written once per SSTable by `ChecksumWriter.writeFullChecksum()` from the **data** writer’s close path, and it holds a single UTF-8 decimal line: the CRC32 over the full byte range of `Data.db`. Both of the `writeFullChecksum` call sites in 5.0.8 are that data writer ([`ChecksummedSequentialWriter.java:70`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksummedSequentialWriter.java), [`CompressedSequentialWriter.java:393`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java)); no other SSTable component is given a digest file.
 
-For compressed components (`CompressedSequentialWriter`), the full checksum includes all compressed data bytes **plus** all per-chunk CRC values ([`ChecksumWriter.java:74-81`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksumWriter.java)). For uncompressed components (`ChecksummedSequentialWriter`), only data bytes are included (per-chunk CRCs are not fed into the full checksum).
+What “full byte range of `Data.db`” includes differs by path, and this is the *only* effect of `checksumIncrementalResult`:
+
+* **Compressed** (`CompressedSequentialWriter`, `checksumIncrementalResult = true`): all compressed data bytes **plus** each 4-byte inline per-chunk CRC value ([`ChecksumWriter.java:74-81`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksumWriter.java)). Since those CRCs are physically part of `Data.db`, this is simply “CRC32 over the whole file” — confirmed on `test_basic/compression_test_table.../nb-1-big-*`, where `Digest.crc32 = 2910221354 = zlib.crc32(entire 213472-byte Data.db)`.
+* **Uncompressed** (`ChecksummedSequentialWriter`, `checksumIncrementalResult = false`): only the raw data bytes; the `CRC.db` chunk values are not fed in. Again “CRC32 over the whole file”, because `CRC.db` is a separate file.
 
 Minimal verification example:
 
-1. Read `TOC.txt` to enumerate components.
-2. For each listed component, compute CRC32 over the entire file contents.
-3. Compare against entries in `Digest.crc32`; on mismatch, quarantine and rehydrate via repair/streaming.
+1. Compute CRC32 over the entire `Data.db`.
+2. Compare against the single decimal value in `Digest.crc32`; on mismatch, quarantine and rehydrate via repair/streaming.
+3. Do **not** expect a digest for any other component — validate `Statistics.db` via its own component CRC32s (Ch. 8) and the rest by rebuilding them from `Data.db`.
 
 # How to find a row by key (flow card)
 

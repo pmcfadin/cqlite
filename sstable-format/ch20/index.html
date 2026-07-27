@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-bguv2lll"> <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Checksums and Integrity | CQLite</title><link rel="canonical" href="https://pmcfadin.github.io/cqlite/sstable-format/ch20/"/><link rel="sitemap" href="/cqlite/sitemap-index.xml"/><link rel="shortcut icon" href="/cqlite/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v5.18.2"/><meta name="generator" content="Starlight v0.34.3"/><meta property="og:title" content="Checksums and Integrity"/><meta property="og:type" content="article"/><meta property="og:url" content="https://pmcfadin.github.io/cqlite/sstable-format/ch20/"/><meta property="og:locale" content="en"/><meta property="og:description" content="SSTables carry integrity metadata at two levels: per-chunk checksums for compressed..."/><meta property="og:site_name" content="CQLite"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="SSTables carry integrity metadata at two levels: per-chunk checksums for compressed..."/><script>
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-bguv2lll"> <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Checksums and Integrity | CQLite</title><link rel="canonical" href="https://pmcfadin.github.io/cqlite/sstable-format/ch20/"/><link rel="sitemap" href="/cqlite/sitemap-index.xml"/><link rel="shortcut icon" href="/cqlite/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v5.18.2"/><meta name="generator" content="Starlight v0.34.3"/><meta property="og:title" content="Checksums and Integrity"/><meta property="og:type" content="article"/><meta property="og:url" content="https://pmcfadin.github.io/cqlite/sstable-format/ch20/"/><meta property="og:locale" content="en"/><meta property="og:description" content="SSTables carry integrity metadata at two levels: per-chunk checksums over Data.db..."/><meta property="og:site_name" content="CQLite"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="SSTables carry integrity metadata at two levels: per-chunk checksums over Data.db..."/><script>
 	window.StarlightThemeProvider = (() => {
 		const storedTheme =
 			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
@@ -79,10 +79,11 @@
 		})();
 	</script> </sl-sidebar-state-persist>  <div class="md:sl-hidden"> <div class="mobile-preferences sl-flex astro-wu23bvmt"> <div class="social-icons astro-wu23bvmt"> <a href="https://github.com/pmcfadin/cqlite" rel="me" class="sl-flex astro-wy4te6ga"><span class="sr-only astro-wy4te6ga">GitHub</span><svg aria-hidden="true" class="astro-wy4te6ga astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-4yphtoen"> <span class="sr-only astro-4yphtoen">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-4yphtoen astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg> <select value="auto" autocomplete="off" class="astro-4yphtoen"> <option value="dark" class="astro-4yphtoen">Dark</option><option value="light" class="astro-4yphtoen">Light</option><option value="auto" selected class="astro-4yphtoen">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-4yphtoen astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg> </label>  </starlight-theme-select>  <script>
 	StarlightThemeProvider.updatePickers();
-</script>   </div>  </div> </div> </div> </nav> <div class="main-frame astro-vrdttmbt">  <script type="module">const a=document.getElementById("starlight__sidebar"),n=a?.querySelector("sl-sidebar-state-persist"),o="sl-sidebar-state",i=()=>{let t=[];const e=n?.dataset.hash||"";try{const s=sessionStorage.getItem(o),r=JSON.parse(s||"{}");Array.isArray(r.open)&&r.hash===e&&(t=r.open)}catch{}return{hash:e,open:t,scroll:a?.scrollTop||0}},c=t=>{try{sessionStorage.setItem(o,JSON.stringify(t))}catch{}},d=()=>c(i()),l=(t,e)=>{const s=i();s.open[e]=t,c(s)};n?.addEventListener("click",t=>{if(!(t.target instanceof Element))return;const e=t.target.closest("summary")?.closest("details");if(!e)return;const s=e.querySelector("sl-sidebar-restore"),r=parseInt(s?.dataset.index||"");isNaN(r)||l(!e.open,r)});addEventListener("visibilitychange",()=>{document.visibilityState==="hidden"&&d()});addEventListener("pageHide",d);</script> <div class="lg:sl-flex astro-67yu43on"> <aside class="right-sidebar-container print:hidden astro-67yu43on"> <div class="right-sidebar astro-67yu43on"> <script type="module" src="/cqlite/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C181hMzK.js"></script><script type="module" src="/cqlite/_astro/TableOfContents.astro_astro_type_script_index_0_lang.CKWWgpjV.js"></script><div class="lg:sl-hidden astro-pb3aqygn"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-doynk5tl"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-doynk5tl"><details id="starlight__mobile-toc" class="astro-doynk5tl"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-doynk5tl"><div class="toggle sl-flex astro-doynk5tl">On this page<svg aria-hidden="true" class="caret astro-doynk5tl astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></div><span class="display-current astro-doynk5tl"></span></summary><div class="dropdown astro-doynk5tl"><ul class="isMobile astro-g2bywc46" style="--depth: 0;"> <li class="astro-g2bywc46" style="--depth: 0;"> <a href="#_top" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#checksums-and-integrity" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Checksums and Integrity</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#in-this-chapter-you-will-learn" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">In this chapter you will learn</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#checksum-coverage-at-a-glance-authoritative" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Checksum coverage at a glance (authoritative)</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#nb-format-trailing-chunk-crcs" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">NB Format: Trailing Chunk CRCs</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc-placement" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC Placement</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#validation-process" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Validation Process</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc-algorithm-details" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC Algorithm Details</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#cassandra-configuration" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Cassandra Configuration</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#implementation-note" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Implementation Note</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#crcdb-component-separate-per-chunk-crcs-for-uncompressed-data" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">CRC.db Component (Separate Per-Chunk CRCs for Uncompressed Data)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#per-chunk-checksums-legacy-formats" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Per-Chunk Checksums (Legacy Formats)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#digest-files" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Digest Files</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#recovery-strategies-beyond-detection" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Recovery Strategies (Beyond Detection)</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#key-takeaways" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Key Takeaways</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#references" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">References</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#formatcomponent-checksum-matrix-cassandra-50" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Format/Component Checksum Matrix (Cassandra 5.0)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#digestcrc32-coverage" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Digest.crc32 Coverage</span> </a>  </li> </ul> </div></details></nav></mobile-starlight-toc></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-pb3aqygn"><div class="sl-container astro-pb3aqygn"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-g2bywc46" style="--depth: 0;"> <li class="astro-g2bywc46" style="--depth: 0;"> <a href="#_top" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#checksums-and-integrity" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Checksums and Integrity</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#in-this-chapter-you-will-learn" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">In this chapter you will learn</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#checksum-coverage-at-a-glance-authoritative" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Checksum coverage at a glance (authoritative)</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#nb-format-trailing-chunk-crcs" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">NB Format: Trailing Chunk CRCs</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc-placement" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC Placement</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#validation-process" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Validation Process</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc-algorithm-details" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC Algorithm Details</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#cassandra-configuration" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Cassandra Configuration</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#implementation-note" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Implementation Note</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#crcdb-component-separate-per-chunk-crcs-for-uncompressed-data" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">CRC.db Component (Separate Per-Chunk CRCs for Uncompressed Data)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#per-chunk-checksums-legacy-formats" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Per-Chunk Checksums (Legacy Formats)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#digest-files" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Digest Files</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#recovery-strategies-beyond-detection" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Recovery Strategies (Beyond Detection)</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#key-takeaways" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Key Takeaways</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#references" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">References</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#formatcomponent-checksum-matrix-cassandra-50" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Format/Component Checksum Matrix (Cassandra 5.0)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#digestcrc32-coverage" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Digest.crc32 Coverage</span> </a>  </li> </ul> </nav></starlight-toc></div></div> </div> </aside> <div class="main-pane astro-67yu43on">  <main data-pagefind-body class="astro-bguv2lll" lang="en" dir="ltr">    <div class="content-panel astro-7nkwcw3z"> <div class="sl-container astro-7nkwcw3z"> <h1 id="_top" class="astro-j6tvhyss">Checksums and Integrity</h1>  </div> </div>  <div class="content-panel astro-7nkwcw3z"> <div class="sl-container astro-7nkwcw3z"> <div class="sl-markdown-content"> <div class="sl-heading-wrapper level-h2"><h2 id="checksums-and-integrity">Checksums and Integrity</h2><a class="sl-anchor-link" href="#checksums-and-integrity"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Checksums and Integrity”</span></a></div>
-<p>SSTables carry integrity metadata at two levels: per-chunk checksums for compressed <code dir="auto">Data.db</code>
-blocks, and the <code dir="auto">Digest.crc32</code> file for component-level verification. Readers validate checksums
-at each level to ensure data integrity throughout the read path.</p>
+</script>   </div>  </div> </div> </div> </nav> <div class="main-frame astro-vrdttmbt">  <script type="module">const a=document.getElementById("starlight__sidebar"),n=a?.querySelector("sl-sidebar-state-persist"),o="sl-sidebar-state",i=()=>{let t=[];const e=n?.dataset.hash||"";try{const s=sessionStorage.getItem(o),r=JSON.parse(s||"{}");Array.isArray(r.open)&&r.hash===e&&(t=r.open)}catch{}return{hash:e,open:t,scroll:a?.scrollTop||0}},c=t=>{try{sessionStorage.setItem(o,JSON.stringify(t))}catch{}},d=()=>c(i()),l=(t,e)=>{const s=i();s.open[e]=t,c(s)};n?.addEventListener("click",t=>{if(!(t.target instanceof Element))return;const e=t.target.closest("summary")?.closest("details");if(!e)return;const s=e.querySelector("sl-sidebar-restore"),r=parseInt(s?.dataset.index||"");isNaN(r)||l(!e.open,r)});addEventListener("visibilitychange",()=>{document.visibilityState==="hidden"&&d()});addEventListener("pageHide",d);</script> <div class="lg:sl-flex astro-67yu43on"> <aside class="right-sidebar-container print:hidden astro-67yu43on"> <div class="right-sidebar astro-67yu43on"> <script type="module" src="/cqlite/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C181hMzK.js"></script><script type="module" src="/cqlite/_astro/TableOfContents.astro_astro_type_script_index_0_lang.CKWWgpjV.js"></script><div class="lg:sl-hidden astro-pb3aqygn"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-doynk5tl"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-doynk5tl"><details id="starlight__mobile-toc" class="astro-doynk5tl"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-doynk5tl"><div class="toggle sl-flex astro-doynk5tl">On this page<svg aria-hidden="true" class="caret astro-doynk5tl astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></div><span class="display-current astro-doynk5tl"></span></summary><div class="dropdown astro-doynk5tl"><ul class="isMobile astro-g2bywc46" style="--depth: 0;"> <li class="astro-g2bywc46" style="--depth: 0;"> <a href="#_top" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#checksums-and-integrity" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Checksums and Integrity</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#in-this-chapter-you-will-learn" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">In this chapter you will learn</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#checksum-coverage-at-a-glance-authoritative" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Checksum coverage at a glance (authoritative)</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#compressed-datadb-trailing-chunk-crcs" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Compressed Data.db: Trailing Chunk CRCs</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc-placement" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC Placement</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#validation-process" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Validation Process</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc-algorithm-details" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC Algorithm Details</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#cassandra-configuration" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Cassandra Configuration</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#implementation-note" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Implementation Note</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#crcdb-component-separate-per-chunk-crcs-for-uncompressed-data" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">CRC.db Component (Separate Per-Chunk CRCs for Uncompressed Data)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#where-per-chunk-crcs-live-compressed-vs-uncompressed" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Where per-chunk CRCs live (compressed vs uncompressed)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#digest-files" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Digest Files</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#computing-checksums-incrementally-while-writing-issue-1663" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Computing Checksums Incrementally While Writing (issue #1663)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#recovery-strategies-beyond-detection" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Recovery Strategies (Beyond Detection)</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#key-takeaways" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Key Takeaways</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#references" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">References</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#digestcrc32-coverage" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Digest.crc32 Coverage</span> </a>  </li> </ul> </div></details></nav></mobile-starlight-toc></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-pb3aqygn"><div class="sl-container astro-pb3aqygn"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-g2bywc46" style="--depth: 0;"> <li class="astro-g2bywc46" style="--depth: 0;"> <a href="#_top" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#checksums-and-integrity" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Checksums and Integrity</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#in-this-chapter-you-will-learn" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">In this chapter you will learn</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#checksum-coverage-at-a-glance-authoritative" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Checksum coverage at a glance (authoritative)</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#compressed-datadb-trailing-chunk-crcs" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Compressed Data.db: Trailing Chunk CRCs</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc-placement" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC Placement</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#validation-process" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Validation Process</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#crc-algorithm-details" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">CRC Algorithm Details</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#cassandra-configuration" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Cassandra Configuration</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#implementation-note" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Implementation Note</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#crcdb-component-separate-per-chunk-crcs-for-uncompressed-data" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">CRC.db Component (Separate Per-Chunk CRCs for Uncompressed Data)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#where-per-chunk-crcs-live-compressed-vs-uncompressed" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Where per-chunk CRCs live (compressed vs uncompressed)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#digest-files" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Digest Files</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#computing-checksums-incrementally-while-writing-issue-1663" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Computing Checksums Incrementally While Writing (issue #1663)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#recovery-strategies-beyond-detection" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Recovery Strategies (Beyond Detection)</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#key-takeaways" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Key Takeaways</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#references" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">References</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#digestcrc32-coverage" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Digest.crc32 Coverage</span> </a>  </li> </ul> </nav></starlight-toc></div></div> </div> </aside> <div class="main-pane astro-67yu43on">  <main data-pagefind-body class="astro-bguv2lll" lang="en" dir="ltr">    <div class="content-panel astro-7nkwcw3z"> <div class="sl-container astro-7nkwcw3z"> <h1 id="_top" class="astro-j6tvhyss">Checksums and Integrity</h1>  </div> </div>  <div class="content-panel astro-7nkwcw3z"> <div class="sl-container astro-7nkwcw3z"> <div class="sl-markdown-content"> <div class="sl-heading-wrapper level-h2"><h2 id="checksums-and-integrity">Checksums and Integrity</h2><a class="sl-anchor-link" href="#checksums-and-integrity"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Checksums and Integrity”</span></a></div>
+<p>SSTables carry integrity metadata at two levels: per-chunk checksums over <code dir="auto">Data.db</code> blocks
+(inline when compressed, in <code dir="auto">CRC.db</code> when not), and the single per-SSTable <code dir="auto">Digest.crc32</code>
+covering the whole <code dir="auto">Data.db</code>. Readers validate the chunk CRC on the read path; the digest is a
+whole-file check used by tools, streaming and verification.</p>
 <blockquote>
 <p><strong>Correction notice:</strong> An earlier version of this chapter contained a section titled
 “Header CRC32 Prefixes” describing a CRC32 prefix that was believed to appear before certain
@@ -96,8 +97,9 @@ filename pattern, not file content. See <code dir="auto">CompressedSequentialWri
 </blockquote>
 <div class="sl-heading-wrapper level-h3"><h3 id="in-this-chapter-you-will-learn">In this chapter you will learn</h3><a class="sl-anchor-link" href="#in-this-chapter-you-will-learn"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “In this chapter you will learn”</span></a></div>
 <ul>
-<li>How per-chunk checksums are stored and validated for NB compressed <code dir="auto">Data.db</code></li>
-<li>What <code dir="auto">Digest.crc32</code> covers and how it differs from other checksums</li>
+<li>How per-chunk checksums are stored and validated for compressed <code dir="auto">Data.db</code></li>
+<li>What <code dir="auto">Digest.crc32</code> covers (and what it does not)</li>
+<li>How a writer accumulates both checksums incrementally, without re-reading <code dir="auto">Data.db</code></li>
 <li>How readers/writers interact with integrity metadata</li>
 <li>How to demonstrate a minimal verification example</li>
 </ul>
@@ -171,24 +173,40 @@ filename pattern, not file content. See <code dir="auto">CompressedSequentialWri
 
 
 
-
-
-
-
-
-
-
-
-<table><thead><tr><th>Component / Format</th><th>Header CRC32 prefix</th><th>Trailing per-chunk CRCs</th><th>Byte order (stored)</th><th>CRC scope</th><th>Verified by</th></tr></thead><tbody><tr><td>Data.db (BIG)</td><td>no</td><td>no</td><td>n/a</td><td>n/a</td><td><code dir="auto">Digest.crc32</code></td></tr><tr><td>Data.db (NB)</td><td>no</td><td>yes</td><td>big-endian u32</td><td>compressed chunk bytes only</td><td>reader per chunk + <code dir="auto">Digest.crc32</code></td></tr><tr><td>Index.db (BIG/NB)</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td><code dir="auto">Digest.crc32</code></td></tr><tr><td>Summary.db (BIG/NB)</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td><code dir="auto">Digest.crc32</code></td></tr><tr><td>Filter.db (BIG/NB)</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td><code dir="auto">Digest.crc32</code></td></tr><tr><td>Statistics.db (BIG/NB)</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td><code dir="auto">Digest.crc32</code></td></tr><tr><td>CompressionInfo.db (NB)</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td><code dir="auto">Digest.crc32</code></td></tr><tr><td>Notes:</td><td></td><td></td><td></td><td></td><td></td></tr></tbody></table>
+<table><thead><tr><th>Component</th><th>Per-chunk CRCs</th><th>Where the chunk CRCs live</th><th>Byte order (stored)</th><th>CRC scope</th><th>Covered by <code dir="auto">Digest.crc32</code></th></tr></thead><tbody><tr><td>Data.db, uncompressed</td><td>yes</td><td>separate <code dir="auto">CRC.db</code></td><td>big-endian u32</td><td>one 64 KiB block of raw data</td><td>yes (digest = CRC32 over raw data)</td></tr><tr><td>Data.db, compressed</td><td>yes</td><td>inline, after each chunk in <code dir="auto">Data.db</code></td><td>big-endian u32</td><td>compressed chunk bytes only</td><td>yes (digest spans data <strong>and</strong> the inline CRCs)</td></tr><tr><td>Index.db</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td><strong>no</strong></td></tr><tr><td>Summary.db</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td><strong>no</strong></td></tr><tr><td>Filter.db</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td><strong>no</strong></td></tr><tr><td>Statistics.db</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td><strong>no</strong> — but its own TOC/component CRC32s (Ch. 8)</td></tr><tr><td>CompressionInfo.db</td><td>no (holds chunk <em>offsets</em>, not CRCs)</td><td>n/a</td><td>n/a</td><td>n/a</td><td><strong>no</strong></td></tr></tbody></table>
+<p>Notes:</p>
 <ul>
-<li>NB format <code dir="auto">Data.db</code> has no magic number or header; the file starts directly with compressed data.</li>
-<li><code dir="auto">Digest.crc32</code> is an independent per-component file; each component written by
-<code dir="auto">ChecksummedSequentialWriter</code> or <code dir="auto">CompressedSequentialWriter</code> generates its own
-<code dir="auto">Digest.crc32</code>. There is no single digest enumerating all TOC components.</li>
+<li><code dir="auto">Data.db</code> has no magic number or global header in either form; a compressed file starts
+directly with the first compressed chunk.</li>
+<li><strong><code dir="auto">Digest.crc32</code> covers <code dir="auto">Data.db</code> and nothing else.</strong> There is exactly one
+<code dir="auto">Digest.crc32</code> per SSTable, and only the data writer produces it: <code dir="auto">DataComponent.buildWriter</code>
+passes <code dir="auto">Components.DIGEST</code> to whichever data writer it builds
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/DataComponent.java"><code dir="auto">DataComponent.java:43-60</code></a>),
+the two <code dir="auto">writeFullChecksum</code> call sites are that data writer’s close path
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksummedSequentialWriter.java"><code dir="auto">ChecksummedSequentialWriter.java:70</code></a>,
+<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java"><code dir="auto">CompressedSequentialWriter.java:393</code></a>),
+and <code dir="auto">SSTableReader.getDigestValidator</code> validates <code dir="auto">Components.DATA</code> against
+<code dir="auto">Components.DIGEST</code>
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableReader.java"><code dir="auto">SSTableReader.java:535-536</code></a>).
+<code dir="auto">Index.db</code> is written by a plain <code dir="auto">SequentialWriter</code> with no checksum writer at all
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableWriter.java"><code dir="auto">BigTableWriter.java:253</code></a>),
+so <code dir="auto">Index.db</code>, <code dir="auto">Summary.db</code> and <code dir="auto">Filter.db</code> carry <strong>no</strong> checksum of any kind.
+Verified on the real fixture
+<code dir="auto">test_basic/uncompressed_table.../nb-1-big-*</code>: <code dir="auto">Digest.crc32</code> reads <code dir="auto">4192247423</code>, which is
+<code dir="auto">zlib.crc32(Data.db)</code> exactly, and matches none of the other components’ CRC32s.</li>
 <li>Full matrix with details appears later in this chapter.</li>
 </ul>
-<div class="sl-heading-wrapper level-h2"><h2 id="nb-format-trailing-chunk-crcs">NB Format: Trailing Chunk CRCs</h2><a class="sl-anchor-link" href="#nb-format-trailing-chunk-crcs"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “NB Format: Trailing Chunk CRCs”</span></a></div>
-<p>NB format uses a different CRC strategy than legacy formats - CRCs are placed <strong>after</strong> (trailing) each chunk, not before.</p>
+<blockquote>
+<p><strong>Correction notice:</strong> earlier revisions of this chapter said each component “generates its
+own independent <code dir="auto">Digest.crc32</code>” and listed every component as “Verified by <code dir="auto">Digest.crc32</code>”.
+That is wrong in both directions: there is a single <code dir="auto">Digest.crc32</code> file per SSTable, and it
+covers <code dir="auto">Data.db</code> only. The corrected statement — one digest, data-only — is what the
+citations and the fixture above support. The original claim that no digest <em>enumerates all
+TOC components</em> remains true.</p>
+</blockquote>
+<div class="sl-heading-wrapper level-h2"><h2 id="compressed-datadb-trailing-chunk-crcs">Compressed Data.db: Trailing Chunk CRCs</h2><a class="sl-anchor-link" href="#compressed-datadb-trailing-chunk-crcs"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Compressed Data.db: Trailing Chunk CRCs”</span></a></div>
+<p>For a compressed <code dir="auto">Data.db</code>, each chunk’s CRC is placed <strong>after</strong> (trailing) the chunk it
+covers — never before it, and never in <code dir="auto">CompressionInfo.db</code>.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="crc-placement">CRC Placement</h3><a class="sl-anchor-link" href="#crc-placement"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “CRC Placement”</span></a></div>
 <div class="expressive-code"><link rel="stylesheet" href="/cqlite/_astro/ec.v4551.css"><script type="module" src="/cqlite/_astro/ec.0vx5m.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[chunk_bytes: variable length] &#x3C;- Compressed data</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[crc32: 4 bytes, big-endian]   &#x3C;- CRC32(chunk_bytes)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[next_chunk_bytes: variable]</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[crc32: 4 bytes, big-endian]</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">...</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="[chunk_bytes: variable length] <- Compressed data[crc32: 4 bytes, big-endian]   <- CRC32(chunk_bytes)[next_chunk_bytes: variable][crc32: 4 bytes, big-endian]..."><div></div></button></div></figure></div>
 <p>Source:
@@ -198,12 +216,16 @@ Each chunk offset advances by <code dir="auto">compressedLength + 4</code> (for 
 (<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java"><code dir="auto">CompressedSequentialWriter.java:203</code></a>).</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="validation-process">Validation Process</h3><a class="sl-anchor-link" href="#validation-process"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Validation Process”</span></a></div>
 <ol>
-<li>Read chunk bytes from Data.db (length from CompressionInfo.db)</li>
-<li>Read next 4 bytes as big-endian u32 (expected CRC)</li>
-<li>Compute CRC32 over chunk bytes using Java algorithm</li>
-<li>Compare computed vs expected</li>
+<li>Decide whether to check at all: <code dir="auto">shouldCheckCrc()</code> is true when <code dir="auto">crc_check_chance >= 1.0</code>,
+else probabilistically
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java"><code dir="auto">CompressedChunkReader.java:63-67</code></a>)</li>
+<li>Read chunk bytes from Data.db (length from <code dir="auto">CompressionInfo.db</code>; when checking, read
+<code dir="auto">chunk.length + 4</code> so the trailing CRC comes along)</li>
+<li>Read those 4 trailing bytes as a big-endian u32 (expected CRC)</li>
+<li>Compute CRC32 over the chunk bytes only, using the Java algorithm</li>
 <li>On match: decompress and continue</li>
-<li>On mismatch: corruption detected (fail or warn based on <code dir="auto">crc_check_chance</code> config)</li>
+<li>On mismatch: <code dir="auto">CorruptBlockException</code>
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java"><code dir="auto">CompressedChunkReader.java:134-149</code></a>)</li>
 </ol>
 <p>Explicit note: CRC32 is computed over the compressed chunk only and excludes the trailing
 4-byte CRC itself
@@ -222,9 +244,12 @@ Each chunk offset advances by <code dir="auto">compressedLength + 4</code> (for 
 </ul>
 <div class="sl-heading-wrapper level-h3"><h3 id="cassandra-configuration">Cassandra Configuration</h3><a class="sl-anchor-link" href="#cassandra-configuration"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Cassandra Configuration”</span></a></div>
 <ul>
-<li><code dir="auto">crc_check_chance</code>: Probability of validating CRC (0.0 to 1.0)</li>
-<li>Default: 1.0 (always validate)</li>
-<li>Purpose: Trade integrity checking for performance</li>
+<li><code dir="auto">crc_check_chance</code>: probability of validating a compressed chunk’s CRC on read (0.0 to 1.0)</li>
+<li>Default: 1.0 — at <code dir="auto">>= 1.0</code> every chunk read is checked; below that the check is sampled per
+read (<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java"><code dir="auto">CompressedChunkReader.java:63-67</code></a>)</li>
+<li>Purpose: trade integrity checking for performance</li>
+<li>Scope: this setting governs the <strong>compressed</strong> chunk-CRC read path only; it does not affect
+<code dir="auto">Digest.crc32</code> verification or <code dir="auto">Statistics.db</code>’s component CRC32s</li>
 </ul>
 <div class="sl-heading-wrapper level-h3"><h3 id="implementation-note">Implementation Note</h3><a class="sl-anchor-link" href="#implementation-note"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Implementation Note”</span></a></div>
 <p>The <code dir="auto">crc32fast</code> Rust crate implements the same algorithm. Ensure big-endian byte order when comparing.</p>
@@ -241,35 +266,199 @@ values.</p>
 <p>where <code dir="auto">chunkSize</code> is the 4-byte int at the start of <code dir="auto">CRC.db</code>
 (<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/DataIntegrityMetadata.java"><code dir="auto">DataIntegrityMetadata.java:52-53</code></a>:
 <code dir="auto">reader.seek(((start / chunkSize) * 4L) + 4)</code> where <code dir="auto">start = chunkStart(offset)</code>).</p>
+<p>The header value is the data <code dir="auto">SequentialWriter</code>’s <code dir="auto">buffer.capacity()</code>
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksummedSequentialWriter.java"><code dir="auto">ChecksummedSequentialWriter.java:38</code></a>),
+64 KiB by default, and each CRC32 covers one block of <strong>raw (uncompressed)</strong> data.</p>
 <p>Note: per-chunk CRC values written to <code dir="auto">CRC.db</code> are <strong>not</strong> included in the full checksum
 for <code dir="auto">ChecksummedSequentialWriter</code> (<code dir="auto">checksumIncrementalResult=false</code>,
 <a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksummedSequentialWriter.java"><code dir="auto">ChecksummedSequentialWriter.java:49</code></a>).
 For <code dir="auto">CompressedSequentialWriter</code>, per-chunk CRC bytes <strong>are</strong> included in the full checksum
 (<code dir="auto">checksumIncrementalResult=true</code>,
-<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java"><code dir="auto">CompressedSequentialWriter.java:192</code></a>).</p>
-<div class="sl-heading-wrapper level-h2"><h2 id="per-chunk-checksums-legacy-formats">Per-Chunk Checksums (Legacy Formats)</h2><a class="sl-anchor-link" href="#per-chunk-checksums-legacy-formats"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Per-Chunk Checksums (Legacy Formats)”</span></a></div>
-<p>When compression is enabled, <code dir="auto">CompressionInfo.db</code> may include a CRC for each compressed chunk. Readers should compute CRC over the compressed bytes and compare with metadata prior to decompression. This catches corruption early and avoids propagating errors downstream.</p>
-<p>Readers should validate chunk CRCs where present before decompression; modern formats expect strict CRC adherence. For validation walkthroughs, see Appendix C.</p>
+<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java"><code dir="auto">CompressedSequentialWriter.java:192</code></a>).
+A direct consequence: for a single-chunk uncompressed <code dir="auto">Data.db</code> the one <code dir="auto">CRC.db</code> entry equals
+the <code dir="auto">Digest.crc32</code> value. Verified on <code dir="auto">test_basic/uncompressed_table.../nb-1-big-*</code>, whose
+8-byte <code dir="auto">CRC.db</code> is <code dir="auto">00010000 f9e09e7f</code> — chunk size 65536 and one CRC <code dir="auto">0xf9e09e7f</code> =
+<code dir="auto">4192247423</code>, exactly the <code dir="auto">Digest.crc32</code> contents for a 19803-byte <code dir="auto">Data.db</code>.</p>
+<p>A writer does not need to re-read the finished file to produce either value — see <em>Computing
+Checksums Incrementally While Writing</em>, which also covers the flush-vs-compaction <code dir="auto">CRC.db</code>
+tail difference (issue #1222).</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="where-per-chunk-crcs-live-compressed-vs-uncompressed">Where per-chunk CRCs live (compressed vs uncompressed)</h2><a class="sl-anchor-link" href="#where-per-chunk-crcs-live-compressed-vs-uncompressed"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Where per-chunk CRCs live (compressed vs uncompressed)”</span></a></div>
+<p><code dir="auto">CompressionInfo.db</code> does <strong>not</strong> contain per-chunk CRC values. Its body is a <code dir="auto">writeUTF</code>
+compressor name, the <code dir="auto">otherOptions</code> map, <code dir="auto">chunkLength</code>, <code dir="auto">maxCompressedLength</code>, the
+uncompressed <code dir="auto">dataLength</code>, the chunk count, and then the chunk <strong>offsets</strong>
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java"><code dir="auto">CompressionMetadata.java:375-392</code></a>).
+The CRCs for a compressed table are stored <strong>inline in <code dir="auto">Data.db</code></strong>, immediately after each
+compressed chunk (see <a href="#compressed-datadb-trailing-chunk-crcs"><em>Compressed Data.db: Trailing Chunk
+CRCs</em></a> above). For an uncompressed table they live
+in the separate <code dir="auto">CRC.db</code> component. The two are mutually exclusive, which follows directly
+from <code dir="auto">DataComponent.buildWriter</code> choosing <code dir="auto">CompressedSequentialWriter</code> (inline) or
+<code dir="auto">ChecksummedSequentialWriter</code> (<code dir="auto">CRC.db</code>)
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/DataComponent.java"><code dir="auto">DataComponent.java:36-61</code></a>).
+That choice is made on <code dir="auto">metadata.params.compression.isEnabled()</code> alone, so the exclusivity
+holds for <strong>BIG and BTI alike</strong> — see the <code dir="auto">CRC.db</code> precondition under <em>Computing Checksums
+Incrementally While Writing</em>.</p>
+<p>Readers should validate the chunk CRC before decompressing. Note the precondition on
+“always”: whether a given read validates is governed by <code dir="auto">crc_check_chance</code> — the check runs
+unconditionally only at <code dir="auto">1.0</code>, and otherwise probabilistically
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java"><code dir="auto">CompressedChunkReader.java:63-67</code></a>:
+<code dir="auto">checkChance >= 1d || (checkChance > 0d &#x26;&#x26; checkChance > ThreadLocalRandom...nextDouble())</code>).
+When the check does run and fails, Cassandra throws <code dir="auto">CorruptBlockException</code>
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/CompressedChunkReader.java"><code dir="auto">CompressedChunkReader.java:144-149</code></a>).
+For validation walkthroughs, see Appendix C.</p>
+<blockquote>
+<p><strong>Correction notice:</strong> this section previously stated that “<code dir="auto">CompressionInfo.db</code> may
+include a CRC for each compressed chunk”. It does not — see the layout citation above.</p>
+</blockquote>
 <div class="sl-heading-wrapper level-h2"><h2 id="digest-files">Digest Files</h2><a class="sl-anchor-link" href="#digest-files"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Digest Files”</span></a></div>
 <p><code dir="auto">Digest.crc32</code> is written by <code dir="auto">ChecksumWriter.writeFullChecksum()</code> on SSTable finalization
 (<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksumWriter.java"><code dir="auto">ChecksumWriter.java:91-103</code></a>).
 It contains a <strong>single line</strong>: the CRC32 checksum value as a UTF-8 decimal string, flushed
 and synced to disk.</p>
-<p>Each component written by <code dir="auto">ChecksummedSequentialWriter</code> or <code dir="auto">CompressedSequentialWriter</code>
-generates its own independent <code dir="auto">Digest.crc32</code>. Each digest covers exactly one component file
-(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/DataIntegrityMetadata.java"><code dir="auto">DataIntegrityMetadata.FileDigestValidator</code></a>:
-reads <code dir="auto">Long.parseLong(digestReader.readLine())</code> — decimal string — and validates a single
-<code dir="auto">dataFile</code> against a single <code dir="auto">digestFile</code>). There is no single <code dir="auto">Digest.crc32</code> that enumerates
-all components listed in <code dir="auto">TOC.txt</code>.</p>
-<p><code dir="auto">Digest.crc32</code> is complementary to per-chunk CRCs: the digest validates whole-file contents,
-while per-chunk CRCs validate compressed block integrity during reads.</p>
+<p>There is <strong>one</strong> <code dir="auto">Digest.crc32</code> per SSTable and it covers <strong><code dir="auto">Data.db</code> only</strong> — see the
+citations under <em>Checksum coverage at a glance</em>. <code dir="auto">FileDigestValidator</code> reads
+<code dir="auto">Long.parseLong(digestReader.readLine())</code> and validates a single <code dir="auto">dataFile</code> against a single
+<code dir="auto">digestFile</code>
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/DataIntegrityMetadata.java"><code dir="auto">DataIntegrityMetadata</code></a>),
+and the <code dir="auto">dataFile</code> it is given is always <code dir="auto">Components.DATA</code>
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableReader.java"><code dir="auto">SSTableReader.java:535-536</code></a>).
+No digest enumerates all components listed in <code dir="auto">TOC.txt</code>, and no digest exists for
+<code dir="auto">Index.db</code>, <code dir="auto">Summary.db</code>, <code dir="auto">Filter.db</code>, <code dir="auto">Statistics.db</code> or <code dir="auto">CompressionInfo.db</code>.</p>
+<p><code dir="auto">Digest.crc32</code> is complementary to per-chunk CRCs: the digest validates whole-file <code dir="auto">Data.db</code>
+contents (a whole-file read), while per-chunk CRCs validate one block during a normal read.</p>
 <p>Minimal verification example:</p>
 <ol>
-<li>For each component file, locate the corresponding <code dir="auto">Digest.crc32</code>.</li>
-<li>Compute CRC32 over the entire component file contents.</li>
+<li>Locate the SSTable’s single <code dir="auto">Digest.crc32</code>.</li>
+<li>Compute CRC32 over the entire <code dir="auto">Data.db</code> contents.</li>
 <li>Compare against the decimal value in <code dir="auto">Digest.crc32</code>; on mismatch, quarantine and
-rehydrate via repair/streaming.</li>
+rehydrate via repair/streaming. (Other components have no digest — validate <code dir="auto">Statistics.db</code>
+through its own per-component CRC32s instead, Ch. 8.)</li>
 </ol>
+<div class="sl-heading-wrapper level-h2"><h2 id="computing-checksums-incrementally-while-writing-issue-1663">Computing Checksums Incrementally While Writing (issue #1663)</h2><a class="sl-anchor-link" href="#computing-checksums-incrementally-while-writing-issue-1663"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Computing Checksums Incrementally While Writing (issue #1663)”</span></a></div>
+<p>A writer can produce both <code dir="auto">Digest.crc32</code> and <code dir="auto">CRC.db</code> <strong>without ever re-reading the finished
+<code dir="auto">Data.db</code></strong>, because both are CRC32s over the same byte stream in write order. Cassandra
+does exactly this: <code dir="auto">ChecksumWriter</code> keeps two <code dir="auto">CRC32</code> instances — <code dir="auto">incrementalChecksum</code> for
+the current chunk and <code dir="auto">fullChecksum</code> for the whole file — and <code dir="auto">appendDirect</code> folds each
+buffer into both, emits the chunk value, then resets only the incremental one
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksumWriter.java"><code dir="auto">ChecksumWriter.java:34-36, 62-89</code></a>).
+<code dir="auto">writeFullChecksum</code> then serializes the accumulated <code dir="auto">fullChecksum</code> at close
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksumWriter.java"><code dir="auto">ChecksumWriter.java:91-103</code></a>).
+The <code dir="auto">checksumIncrementalResult</code> boolean is the <em>only</em> difference between the two paths: it
+decides whether the 4-byte chunk CRC is itself folded into the full checksum (see
+<em>Digest.crc32 Coverage</em>).</p>
+<p>CQLite mirrors this with a single accumulator, <code dir="auto">StreamingCrc</code>
+(<code dir="auto">cqlite-core/src/storage/sstable/writer/crc_writer.rs:121-185</code>):</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Role</th></tr></thead><tbody><tr><td><code dir="auto">whole</code></td><td>whole-file hasher — becomes the <code dir="auto">Digest.crc32</code> value</td></tr><tr><td><code dir="auto">chunk</code></td><td>hasher for the chunk currently being filled</td></tr><tr><td><code dir="auto">chunk_filled</code></td><td>bytes accumulated toward the current <code dir="auto">CRC_CHUNK_SIZE</code> block</td></tr><tr><td><code dir="auto">chunk_crcs</code></td><td>finalized per-chunk CRC32s, in order</td></tr></tbody></table>
+<p><code dir="auto">CRC_CHUNK_SIZE</code> is <code dir="auto">64 * 1024</code>, matching Cassandra’s default <code dir="auto">SequentialWriter</code>
+<code dir="auto">bufferSize</code> (<code dir="auto">.../crc_writer.rs:62-67</code>).</p>
+<p><strong>Where bytes are fed.</strong> Exactly once, in write order, immediately after the sink write and
+before the scratch buffer is cleared:
+<code dir="auto">self.crc.update(&#x26;self.buffer)</code> in <code dir="auto">DataWriter::flush_partition</code>
+(<code dir="auto">cqlite-core/src/storage/sstable/writer/data_writer/mod.rs:424-442</code>). Because <code dir="auto">update</code>
+carries <code dir="auto">chunk_filled</code> across calls (<code dir="auto">crc_writer.rs:157-171</code>), chunk boundaries are a fixed
+grid over the raw <code dir="auto">Data.db</code> bytes and <strong>straddle partition boundaries</strong> — they are not
+per-partition. <code dir="auto">finish_streaming</code> closes any trailing short chunk and returns both results
+in a <code dir="auto">StreamFinish { data_size, digest_crc32, chunk_crcs }</code>
+(<code dir="auto">.../data_writer/mod.rs:324-338, 507-537</code>).</p>
+<p><strong>Where they are consumed.</strong> <code dir="auto">SSTableWriter::finish</code> writes <code dir="auto">Digest.crc32</code> from
+<code dir="auto">stream.digest_crc32</code> (<code dir="auto">cqlite-core/src/storage/sstable/writer/finish.rs:177-190</code>) and
+assembles <code dir="auto">CRC.db</code> from <code dir="auto">stream.chunk_crcs</code> via <code dir="auto">assemble_crc_bytes</code>
+(<code dir="auto">.../finish.rs:192-224</code>). No pass over the finished file is involved.</p>
+<p>Preconditions and exceptions worth stating explicitly:</p>
+<ul>
+<li>
+<p><strong>Format truth: <code dir="auto">CRC.db</code> exists ⟺ the data writer is uncompressed — for <em>any</em> format,
+BTI included.</strong> It is a <strong>compression gate, not a BIG-vs-BTI gate.</strong> Two independent
+citations at <code dir="auto">cassandra-5.0.8</code>:</p>
+<ul>
+<li><code dir="auto">SSTableWriter.Builder.addDefaultComponents</code> branches on
+<code dir="auto">params.compression.isEnabled()</code> alone: the compressed arm adds
+<code dir="auto">Components.COMPRESSION_INFO</code>, the <code dir="auto">else</code> arm adds <code dir="auto">Components.CRC</code>. There is no format
+test anywhere in the branch, and the method is inherited by the BTI writer builder
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableWriter.java"><code dir="auto">SSTableWriter.java:483-497</code></a>).</li>
+<li><code dir="auto">DataComponent.buildWriter</code> is likewise <strong>format-agnostic</strong> — it takes a <code dir="auto">Descriptor</code>
+plus <code dir="auto">TableMetadata</code> and picks <code dir="auto">CompressedSequentialWriter</code> (inline chunk CRCs,
+<code dir="auto">CompressionInfo.db</code>) or <code dir="auto">ChecksummedSequentialWriter</code> (<code dir="auto">CRC.db</code>) purely on
+<code dir="auto">metadata.params.compression.isEnabled()</code>
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/DataComponent.java"><code dir="auto">DataComponent.java:36-61</code></a>).</li>
+</ul>
+<p>Confirming this from the component registry: <code dir="auto">BtiFormat.Components.ALL_COMPONENTS</code>
+explicitly lists <code dir="auto">CRC</code> alongside <code dir="auto">COMPRESSION_INFO</code>
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java"><code dir="auto">BtiFormat.java:100-108</code></a>).
+So a Cassandra-written <strong>uncompressed BTI (<code dir="auto">da</code>) SSTable does carry a <code dir="auto">CRC.db</code></strong>, and a
+<strong>compressed BIG (<code dir="auto">nb</code>) SSTable does not</strong>. The correct statement of the exclusivity is
+compressed-inline-CRCs XOR <code dir="auto">CRC.db</code>, orthogonal to BIG/BTI.</p>
+</li>
+<li>
+<p><strong>CQLITE IMPLEMENTATION DETAIL (not format authority): CQLite’s writer gates <code dir="auto">CRC.db</code> on
+<code dir="auto">is_bti</code>.</strong> <code dir="auto">finish.rs:205-207</code> skips <code dir="auto">CRC.db</code> for any BTI output
+(<code dir="auto">let crc_path = if is_bti { None } else { … }</code>), and the module doc asserts the same
+(<code dir="auto">cqlite-core/src/storage/sstable/writer/crc_writer.rs:1-8</code>). Because CQLite’s production
+write surface is uncompressed-only (issue #1406), that gate is <strong>narrower than
+Cassandra’s rule</strong>: an uncompressed <code dir="auto">da</code> written by CQLite omits a <code dir="auto">CRC.db</code> that Cassandra
+would have emitted. This is a documented CQLite behavior, not a format property.</p>
+<p><strong>The supporting observation is confounded evidence.</strong> The note that “BTI (<code dir="auto">da</code>) fixtures
+written by Cassandra carry no <code dir="auto">CRC.db</code>” is true of the fixtures but proves nothing about
+the gate: <strong>every</strong> <code dir="auto">test-data/datasets/sstables/test_da/*</code> fixture ships a
+<code dir="auto">CompressionInfo.db</code>, i.e. all four are <em>compressed</em>. A compressed SSTable has no <code dir="auto">CRC.db</code>
+under either hypothesis, so those fixtures <strong>cannot distinguish a BTI gate from a
+compression gate</strong>. Distinguishing them requires an <em>uncompressed</em> Cassandra-written <code dir="auto">da</code>
+fixture (<code dir="auto">WITH compression = {'enabled': false}</code>), which the corpus does not currently
+contain. Per the citations above, Cassandra’s rule is the compression gate.</p>
+</li>
+<li>
+<p><strong>Empty <code dir="auto">Data.db</code> is the one recomputation.</strong> When no partition was streamed, there are no
+accumulated bytes, so <code dir="auto">finish</code> computes the digest over the just-written empty file
+(<code dir="auto">finish.rs:185-189</code>); <code dir="auto">CRC32</code> of zero bytes is <code dir="auto">0</code>.</p>
+</li>
+<li>
+<p><strong>The re-read implementation still exists, as a test oracle only.</strong> <code dir="auto">build_crc_bytes</code>
+streams the finished file in <code dir="auto">CRC_CHUNK_SIZE</code> blocks and routes through the same
+<code dir="auto">assemble_crc_bytes</code>, so the incremental and re-read paths are provably byte-identical.
+It is <code dir="auto">#[cfg(test)]</code> (<code dir="auto">crc_writer.rs:54-60, 187-235</code>) and each call bumps the
+<code dir="auto">data_db_checksum_full_reads</code> work counter, so a regression that reintroduces a
+production full-file re-read is caught by a test rather than by a benchmark.</p>
+</li>
+<li>
+<p><strong>Flush and compaction tails differ by design (issue #1222).</strong> Cassandra’s compaction
+path flushes the data writer once more at close over a zero-length buffer, so a compacted
+<code dir="auto">CRC.db</code> ends with one extra <code dir="auto">00000000</code> group; the flush path does not. <code dir="auto">assemble_crc_bytes</code>
+takes an explicit <code dir="auto">CrcTrailer</code> (<code dir="auto">None</code> for flush, <code dir="auto">EmptyFinalChunk</code> for compaction,
+<code dir="auto">crc_writer.rs:69-119</code>) selected from <code dir="auto">is_compaction_output</code> (<code dir="auto">finish.rs:209-213</code>), and
+the trailer is suppressed for an empty <code dir="auto">Data.db</code> (no Cassandra golden exists for that case).</p>
+</li>
+<li>
+<p>Issue #1197 (writer omitted <code dir="auto">CRC.db</code> for uncompressed BIG) is <strong>fixed</strong>: <code dir="auto">CRC.db</code> is
+emitted and listed in <code dir="auto">TOC.txt</code> for the uncompressed BIG write path.</p>
+</li>
+</ul>
+<p>Because <code dir="auto">CRC.db</code> chunk CRCs are <em>not</em> folded into the full checksum on the uncompressed path,
+a single-chunk uncompressed <code dir="auto">Data.db</code> has exactly one <code dir="auto">CRC.db</code> entry that equals its
+<code dir="auto">Digest.crc32</code> value.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="recovery-strategies-beyond-detection">Recovery Strategies (Beyond Detection)</h2><a class="sl-anchor-link" href="#recovery-strategies-beyond-detection"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Recovery Strategies (Beyond Detection)”</span></a></div>
 <p>Scope note: focus on SSTable-level recovery patterns; node-level operations are out of scope.</p>
 <ul>
@@ -310,10 +499,17 @@ compressed chunk data. There are no “Header CRC32 Prefixes” in NB format.</l
 covering compressed chunk bytes only.</li>
 <li><strong>CRC.db</strong> (uncompressed path) holds a 4-byte int header (chunk size) + 4-byte CRC32 per chunk.
 Seek to chunk N’s CRC with: <code dir="auto">crc_file_pos = (chunk_index * 4) + 4</code>.</li>
-<li><strong><code dir="auto">Digest.crc32</code></strong> is an independent per-component file containing a single UTF-8 decimal
-CRC32 value; each component has its own digest. It does not enumerate all TOC components.</li>
-<li>Readers should validate all checksums on-the-fly; tools may verify digests offline.</li>
-<li>Fail-fast on any CRC mismatch — do not attempt heuristic recovery in modern formats.</li>
+<li><strong><code dir="auto">Digest.crc32</code></strong> is a single per-SSTable file containing one UTF-8 decimal CRC32 value,
+and it covers <strong><code dir="auto">Data.db</code> only</strong>. <code dir="auto">Index.db</code>, <code dir="auto">Summary.db</code> and <code dir="auto">Filter.db</code> carry no
+checksum at all; <code dir="auto">Statistics.db</code> is self-checksummed via its TOC/component CRC32s (Ch. 8).</li>
+<li><strong>Both <code dir="auto">Digest.crc32</code> and <code dir="auto">CRC.db</code> can be produced incrementally during the write</strong> — one
+whole-file hasher plus one per-chunk hasher over the same byte stream — so no writer needs
+to re-read the finished <code dir="auto">Data.db</code> (issue #1663).</li>
+<li>Readers should validate checksums on-the-fly; tools may verify digests offline.</li>
+<li>Fail-fast on a detected CRC mismatch — do not attempt heuristic recovery in modern
+formats. Note the precondition: on the compressed read path a chunk CRC is only <em>checked</em>
+unconditionally when <code dir="auto">crc_check_chance = 1.0</code>, so “fail-fast” describes what happens when a
+check runs, not a guarantee that every corrupt byte is checked on every read.</li>
 </ul>
 <div class="sl-heading-wrapper level-h3"><h3 id="references">References</h3><a class="sl-anchor-link" href="#references"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “References”</span></a></div>
 <ul>
@@ -340,101 +536,41 @@ CRC32 value; each component has its own digest. It does not enumerate all TOC co
 <li>
 <p>CQLite implementation:</p>
 <ul>
-<li>CRC32 computation: <code dir="auto">crc32fast</code> crate (Rust standard library compatible)</li>
+<li>CRC32 computation: <code dir="auto">crc32fast</code> crate (byte-compatible with <code dir="auto">java.util.zip.CRC32</code>)</li>
+<li>Incremental accumulator (<code dir="auto">Digest.crc32</code> + <code dir="auto">CRC.db</code> during the write, issue #1663):
+<code dir="auto">cqlite-core/src/storage/sstable/writer/crc_writer.rs</code></li>
+<li>Byte feed point: <code dir="auto">cqlite-core/src/storage/sstable/writer/data_writer/mod.rs:424-442</code></li>
+<li>Component emission: <code dir="auto">cqlite-core/src/storage/sstable/writer/finish.rs:177-224</code></li>
 </ul>
 </li>
 </ul>
 <p>For implementation details and walkthroughs, see Appendix C.</p>
-<div class="sl-heading-wrapper level-h2"><h2 id="formatcomponent-checksum-matrix-cassandra-50">Format/Component Checksum Matrix (Cassandra 5.0)</h2><a class="sl-anchor-link" href="#formatcomponent-checksum-matrix-cassandra-50"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Format/Component Checksum Matrix (Cassandra 5.0)”</span></a></div>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-<table><thead><tr><th>Component (format)</th><th>Header CRC32 prefix</th><th>Trailing chunk CRCs</th><th>Byte order (stored)</th><th>CRC scope</th><th><code dir="auto">Digest.crc32</code> present</th></tr></thead><tbody><tr><td>Data.db (BIG)</td><td>no</td><td>no</td><td>n/a</td><td>n/a</td><td>yes</td></tr><tr><td>Index.db (BIG)</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td>yes</td></tr><tr><td>Summary.db (BIG)</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td>yes</td></tr><tr><td>Filter.db (BIG)</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td>yes</td></tr><tr><td>Statistics.db (BIG)</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td>yes</td></tr><tr><td>CompressionInfo.db</td><td>no</td><td>n/a</td><td>n/a</td><td>n/a</td><td>yes</td></tr><tr><td>Data.db (NB)</td><td>no</td><td>yes (per chunk)</td><td>big-endian u32</td><td>compressed chunk bytes only</td><td>yes</td></tr></tbody></table>
-<p>Notes:</p>
-<ul>
-<li>NB <code dir="auto">Data.db</code> starts directly with compressed data; no magic number, no header.</li>
-<li>Trailing CRCs apply only to NB <code dir="auto">Data.db</code> and are big-endian u32 immediately following each compressed chunk.</li>
-<li>Each <code dir="auto">Digest.crc32</code> covers exactly one component file (independent per-component, not a set digest).</li>
-</ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="digestcrc32-coverage"><code dir="auto">Digest.crc32</code> Coverage</h2><a class="sl-anchor-link" href="#digestcrc32-coverage"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Digest.crc32 Coverage”</span></a></div>
-<p><code dir="auto">Digest.crc32</code> is a per-component file written by <code dir="auto">ChecksumWriter.writeFullChecksum()</code>. It holds
-a single UTF-8 decimal line: the CRC32 over the full byte range of the associated component file.
-Each component written by <code dir="auto">ChecksummedSequentialWriter</code> or <code dir="auto">CompressedSequentialWriter</code> produces
-its own independent <code dir="auto">Digest.crc32</code>.</p>
-<p>For compressed components (<code dir="auto">CompressedSequentialWriter</code>), the full checksum includes all
-compressed data bytes <strong>plus</strong> all per-chunk CRC values
+<p><code dir="auto">Digest.crc32</code> is written once per SSTable by <code dir="auto">ChecksumWriter.writeFullChecksum()</code> from the
+<strong>data</strong> writer’s close path, and it holds a single UTF-8 decimal line: the CRC32 over the
+full byte range of <code dir="auto">Data.db</code>. Both of the <code dir="auto">writeFullChecksum</code> call sites in 5.0.8 are that
+data writer
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksummedSequentialWriter.java"><code dir="auto">ChecksummedSequentialWriter.java:70</code></a>,
+<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java"><code dir="auto">CompressedSequentialWriter.java:393</code></a>);
+no other SSTable component is given a digest file.</p>
+<p>What “full byte range of <code dir="auto">Data.db</code>” includes differs by path, and this is the <em>only</em> effect
+of <code dir="auto">checksumIncrementalResult</code>:</p>
+<ul>
+<li><strong>Compressed</strong> (<code dir="auto">CompressedSequentialWriter</code>, <code dir="auto">checksumIncrementalResult = true</code>): all
+compressed data bytes <strong>plus</strong> each 4-byte inline per-chunk CRC value
 (<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/ChecksumWriter.java"><code dir="auto">ChecksumWriter.java:74-81</code></a>).
-For uncompressed components (<code dir="auto">ChecksummedSequentialWriter</code>), only data bytes are included
-(per-chunk CRCs are not fed into the full checksum).</p>
+Since those CRCs are physically part of <code dir="auto">Data.db</code>, this is simply “CRC32 over the whole
+file” — confirmed on <code dir="auto">test_basic/compression_test_table.../nb-1-big-*</code>, where
+<code dir="auto">Digest.crc32 = 2910221354 = zlib.crc32(entire 213472-byte Data.db)</code>.</li>
+<li><strong>Uncompressed</strong> (<code dir="auto">ChecksummedSequentialWriter</code>, <code dir="auto">checksumIncrementalResult = false</code>): only
+the raw data bytes; the <code dir="auto">CRC.db</code> chunk values are not fed in. Again “CRC32 over the whole
+file”, because <code dir="auto">CRC.db</code> is a separate file.</li>
+</ul>
 <p>Minimal verification example:</p>
 <ol>
-<li>Read <code dir="auto">TOC.txt</code> to enumerate components.</li>
-<li>For each listed component, compute CRC32 over the entire file contents.</li>
-<li>Compare against entries in <code dir="auto">Digest.crc32</code>; on mismatch, quarantine and rehydrate via repair/streaming.</li>
+<li>Compute CRC32 over the entire <code dir="auto">Data.db</code>.</li>
+<li>Compare against the single decimal value in <code dir="auto">Digest.crc32</code>; on mismatch, quarantine and
+rehydrate via repair/streaming.</li>
+<li>Do <strong>not</strong> expect a digest for any other component — validate <code dir="auto">Statistics.db</code> via its own
+component CRC32s (Ch. 8) and the rest by rebuilding them from <code dir="auto">Data.db</code>.</li>
 </ol> </div> <footer class="sl-flex astro-3yyafb3n"> <div class="meta sl-flex astro-3yyafb3n"> <a href="https://github.com/pmcfadin/cqlite/edit/main/website/src/content/docs/sstable-format/ch20.md" class="sl-flex print:hidden astro-eez2twj6"><svg aria-hidden="true" class="astro-eez2twj6 astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg>Edit page</a>  </div> <div class="pagination-links print:hidden astro-u2l5gyhi" dir="ltr"> <a href="/cqlite/sstable-format/ch19/" rel="prev" class="astro-u2l5gyhi"> <svg aria-hidden="true" class="astro-u2l5gyhi astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg> <span class="astro-u2l5gyhi"> Previous <br class="astro-u2l5gyhi"> <span class="link-title astro-u2l5gyhi">Example reference listing sourced from canonical datasets...</span> </span> </a> <a href="/cqlite/sstable-format/ch21/" rel="next" class="astro-u2l5gyhi"> <svg aria-hidden="true" class="astro-u2l5gyhi astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg> <span class="astro-u2l5gyhi"> Next <br class="astro-u2l5gyhi"> <span class="link-title astro-u2l5gyhi">How to find a row by key (flow card)</span> </span> </a> </div>   </footer>  </div> </div>   </main> </div> </div>  </div> </div>  </body></html>
