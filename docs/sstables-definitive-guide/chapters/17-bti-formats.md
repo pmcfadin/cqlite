@@ -167,11 +167,14 @@ This contrasts with BIG's binary search over sampled entries in `Summary.db` fol
 > and Cassandra's own `RowIndexTest` asserts `separatorFloor(ClusteringBound.BOTTOM).offset == 0`.
 
 The complementary walks for the other end of a range are `Walker.followWithGreater` +
-`goMin(greaterBranch)` (the smallest separator greater than a key) and `Walker.min()`
-([`Walker.java:176–190`, `225–242`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/Walker.java#L176)).
-CQLite implements both walks in
-`cqlite-core/src/storage/sstable/bti/parser/rows_floor.rs` (`rows_floor_block`,
-`rows_strict_ceiling_block`).
+`goMin(greaterBranch)` (the smallest separator greater than a key)
+([`Walker.java:176–190`, `225–242`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/Walker.java#L176)),
+and `RowIndexReader.min()`, which returns the first block by calling `goMin(root)`
+([`RowIndexReader.java:100`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/RowIndexReader.java#L100)).
+
+> **CQLite implementation note (not format authority).** CQLite implements both walks in
+> `cqlite-core/src/storage/sstable/bti/parser/rows_floor.rs` (`rows_floor_block`,
+> `rows_strict_ceiling_block`). See Appendix C for CQLite reader details.
 
 ### Trie node type families
 
@@ -200,7 +203,7 @@ property of the on-disk layout, not of any particular reader:
   child-distance array. Finding a transition is a **binary search** over that byte list —
   `O(log n)` in the node's child count — returning `-insertionPoint - 1` on a miss so the caller
   can identify the neighbouring children
-  ([`TrieNode.java:509–528`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/TrieNode.java#L509)).
+  ([`TrieNode.java:513–533`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/tries/TrieNode.java#L513)).
 - **`DENSE`/`LONG_DENSE`** store only a start byte and a range length, then one fixed-width
   distance slot per byte in `[start, start + length]`. Finding a transition is therefore **O(1)
   index arithmetic**: the slot for a search byte `b` is `b - start`, with an out-of-range `b`
@@ -213,9 +216,11 @@ property of the on-disk layout, not of any particular reader:
   never more.
 
 The writer picks the cheaper encoding per node, so a hot upper node with many children is usually
-dense (O(1) descent) while a sparse tail node costs a short binary search. CQLite implements both
-child-lookup paths in `cqlite-core/src/storage/sstable/bti/parser/slice_walk.rs`
-(`sparse_child`, `dense_child`).
+dense (O(1) descent) while a sparse tail node costs a short binary search.
+
+> **CQLite implementation note (not format authority).** CQLite implements both child-lookup paths
+> in `cqlite-core/src/storage/sstable/bti/parser/slice_walk.rs` (`sparse_child`, `dense_child`).
+> See Appendix C for CQLite reader details.
 
 ### `Rows.db` per-partition footer
 
