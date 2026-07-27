@@ -28,8 +28,15 @@
 //! - **`row_build/hashonly_<N>`** — the SAME prepared names/values, but the timed
 //!   routine does ONLY `HashMap::with_capacity(n)` + `n` inserts. No partition-key
 //!   reconstruct, no `into_owned()`, no projection closure. This isolates the
-//!   *map construction + SipHash* term, which is the precise number #2901 needs:
-//!   `columns_<N> − hashonly_<N>` is everything else in the conversion.
+//!   *map construction + SipHash* term; `columns_<N> − hashonly_<N>` is everything
+//!   else in the conversion.
+//!
+//!   **Do NOT read `hashonly_<N>` as the upside of a hasher swap (#2901).** It bounds
+//!   map construction AND hashing together — `HashMap::with_capacity`, the hashbrown
+//!   probe/insert, and the map dealloc are all inside it, and a hasher swap removes
+//!   NONE of them. Only the SipHash sub-term is addressable that way. For that,
+//!   use in-situ profile attribution (`sip::Hasher::write` + `RandomState::hash_one`),
+//!   which issue #3027 measured at 4.94% of on-CPU on `read/full_scan`.
 //!
 //! The bench is **NOT** a `benches/perf-gate.json` entry: it is an instrument, and
 //! its absolute rows/sec is machine-dependent. Its value is the ratio between the
@@ -47,9 +54,10 @@
 //!   `Arc<str>` handles — name LENGTH is what SipHash consumes, so `a`/`b`/`c`
 //!   would understate the map term.
 //! - **Values** cycle through a realistic mix — `text` (24 B), `int`, `bigint`,
-//!   `uuid`, `timestamp`, `double`, `boolean` (~9.9 B of payload per column, i.e.
-//!   ~79 B/row at N=8 up to ~631 B/row at N=64; the exact per-row average is
-//!   printed at setup).
+//!   `uuid`, `timestamp`, `double`, `boolean`. Because `kind_at(i) = KINDS[i % 7]`
+//!   restarts on the 24 B `text` arm, per-row payload is NOT a flat multiple of N:
+//!   it is **93 B at N=8, 166 B at N=16, 328 B at N=32, 645 B at N=64** (so the
+//!   ~690 B/row target shape lands at N=64). The exact figure is printed at setup.
 //! - **Text payloads are slices of ONE shared backing `Bytes`**, mimicking a
 //!   decompressed chunk. That matters: `Value::into_owned()` (the #1644 D2
 //!   retention boundary inside the conversion) copies a shared payload, so a
@@ -75,8 +83,8 @@
 //! Measured on the same machine, retaining the batch cost 2 790 ns/row for
 //! `hashonly_64` vs 1 869 ns/row when dropping per row (+49%), and broke the
 //! linear scaling — it read out as "map construction = 98% of the conversion at
-//! N=64", an artifact, where the per-row-drop design reads a stable ~72–80% across
-//! all four column counts. The trade is that map DEALLOCATION is now inside the
+//! N=64", an artifact, where the per-row-drop design reads 57–80% across all four
+//! column counts. The trade is that map DEALLOCATION is now inside the
 //! measurement; that is real per-row work the conversion's caller pays either way,
 //! and both groups pay it identically, so the `columns_<N> − hashonly_<N>` delta
 //! stays clean.
@@ -88,10 +96,33 @@
 //! # Determinism
 //!
 //! Every name, value, and key is a pure function of `(row_index, column_index)` —
-//! no wall-clock input, no RNG (seeded or otherwise), so the workload is
-//! byte-identical on every run and machine. There are no wall-clock threshold
-//! asserts anywhere; the only `Instant` use is the best-effort ledger pass, which
-//! RECORDS a number and never asserts on one.
+//! no wall-clock input, no RNG (seeded or otherwise), so the INPUT is byte-identical
+//! on every run and machine. There are no wall-clock threshold asserts anywhere; the
+//! only `Instant` use is the best-effort ledger pass, which RECORDS a number and
+//! never asserts on one.
+//!
+//! The *hashing* is not equally reproducible: `RandomState` seeds per process, so
+//! collision patterns differ run to run. Both groups share the seed within a run, so
+//! the `columns` ∷ `hashonly` ratio is unaffected — but this plausibly contributes to
+//! the spread below.
+//!
+//! # KNOWN LIMITATION — read before quoting a number (issue #3048)
+//!
+//! Run-to-run spread on an idle box is ~2–3% at N=8/16 but **7–26% at N=32/64**
+//! (measured: two runs of the IDENTICAL binary gave `columns_32` 771k vs 722k and
+//! `columns_64` 300k vs 379k; the `hashonly_*` control, which no `QueryRow` hasher
+//! change can affect, moved 8–25%). The noise tracks memory footprint. **Trust
+//! N=8/16; treat N=32/64 as indicative** until #3048 stabilises it. This instrument
+//! cannot currently resolve a <10% effect at realistic column counts.
+//!
+//! # Fidelity caveat
+//!
+//! The synthetic rows carry no clustering columns and no primary-key pseudo-cells.
+//! The real V5 decoder surfaces PK columns into the cell map as pseudo-cells
+//! (`row_decoder/mod.rs:719-723`), so in production the partition-key insert is
+//! often an OVERWRITE into an N-entry map rather than an (N+1)-th insert. That does
+//! not move the ratio, but it means the absolute per-row cost here is not a
+//! production figure.
 //!
 //! # Gating
 //!

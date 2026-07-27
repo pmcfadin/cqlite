@@ -209,7 +209,7 @@ performs an **unconditional** `Bytes::copy_from_slice` — a heap allocation + m
 payload is already tight. The rationale (documented in-place) is that `capacity()` cannot see backing
 *behind* the payload offset. For a ~690 B row **every** byte-carrying cell is Tier 1, so every one is
 copied. The repo's own ratchet encodes this as `PER_CELL_ALLOCS = 1`
-(`row_build_alloc_budget_test.rs:52-54`).
+(`row_build_alloc_budget_test.rs:73`, rationale at `:52-54`).
 
 Ledger for one medium row (30 cols, ~690 B), decompressed chunk -> finished `QueryRow`: **~16-17 heap
 allocations and ~12 memcpys**, of which ~10-11 are `into_owned` alone. This is T2 territory (borrow from
@@ -266,7 +266,10 @@ projection:
   on-CPU (557 cycles/row)**; with the `hashbrown` insert it is 7.68%.
 - Streaming profile: SipHash symbols total **8.12%** of on-CPU.
 - Isolated instrument (`row_build/hashonly_*` vs `columns_*`, clean run): map construction + SipHash is
-  **57-80% of the entire row-conversion cost**.
+  **57-80% of the entire row-conversion cost**. **This is NOT the upside of a hasher swap** — it bounds
+  map construction *and* hashing together (`with_capacity`, the hashbrown probe/insert and the map dealloc
+  are all inside it, and a hasher swap removes none of them). Only the SipHash sub-term is addressable
+  that way, and the in-situ 4.94% above is the honest bound on it.
 
 **(b) Non-breaking surface — REFUTED BY CONSTRUCTION.** The issue said *"scope the swap so the map type
 does not appear in any `pub` signature... If it cannot be made non-breaking, say so and stop."* It cannot:
@@ -306,8 +309,8 @@ change and is T2-aligned; it belongs with the "avoid materializing `Value`" work
   `row_build/hashonly_{N}` isolates map construction + SipHash. Carries a compile-time pin
   (`ValuesMap` + `hashonly_map_type_is_pinned_to_query_row`) so that changing `QueryRow.values`' hasher
   **breaks the bench build** rather than silently making the two groups measure different hashers.
-  Known limitation: run-to-run spread at N=32/64 is 7-26% (§6.2); trust N=8/16 and treat the large arms
-  as indicative until stabilised.
+  Known limitation, now recorded in the bench's own module doc: run-to-run spread at N=32/64 is 7-26%
+  (§6.2); trust N=8/16 and treat the large arms as indicative until #3048 stabilises it.
 - This report.
 - No production-code change: both candidate fixes were null results and were reverted.
 
