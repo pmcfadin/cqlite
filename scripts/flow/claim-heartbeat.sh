@@ -109,6 +109,13 @@ note()      { echo "[claim-heartbeat] $*" >&2; }
 
 REMOTE="${HEARTBEAT_REMOTE:-origin}"
 
+# Never block on an interactive credential prompt (issue #2942). On a tty-attached
+# worker with no git credential helper, the ref pushes below would sit waiting for a
+# username forever instead of failing. Prompts off = they fail fast and visibly.
+# NOTE: unlike claim.sh, this script does NOT classify auth-vs-transient on its
+# pushes — it surfaces git's raw error.
+export GIT_TERMINAL_PROMPT=0
+
 # Default reap threshold: 4h (matches the heartbeat threshold documented above).
 DEFAULT_REAP_THRESHOLD_SECS="${DEFAULT_REAP_THRESHOLD_SECS:-14400}"
 

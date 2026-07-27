@@ -517,6 +517,136 @@ $statusOut"
 fi
 
 # ===========================================================================
+echo "TEST 20: an AUTH failure is reason=auth (never 'transient — retry'); a real transient still is"
+# ===========================================================================
+# Issue #2942. A box whose `gh` is authenticated but whose GIT has no credential
+# helper fails every claim push with `fatal: could not read Username`. That is a
+# machine-configuration fault that CANNOT self-clear, yet it was reported as
+#   CLAIM: ERROR reason=infra detail=push-rejected-but-ref-absent (transient — retry)
+# telling the worker to retry the one thing guaranteed never to work. The auth
+# signature must produce a DISTINCT non-retryable verdict — and, per the #2665
+# contract, a genuine transient must still report as the retryable infra error.
+#
+# Both shims fail only `push` (ls-remote passes through, as it does for a public
+# repo readable anonymously) and differ ONLY in the stderr git emits.
+mk_push_fail_shim() {
+  # mk_push_fail_shim <dir> <stderr-line>
+  mkdir -p "$1"
+  cat >"$1/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "push" ]; then
+    echo "$2" >&2
+    exit 128
+  fi
+done
+exec "$REALGIT" "\$@"
+SHIM
+  chmod +x "$1/git"
+}
+
+# (a) credential failure -> reason=auth, no "transient", no retry advice.
+AUTHSHIM="$T/shim-git-noauth"
+mk_push_fail_shim "$AUTHSHIM" "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+rc=0; outAuth=$( cd "$A" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 20 ) || rc=$?
+rcAuth=$rc
+if [ "$rcAuth" -eq 1 ] && printf '%s\n' "$outAuth" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outAuth" | grep -q 'reason=auth' \
+   && printf '%s\n' "$outAuth" | grep -q 'NOT retryable' \
+   && ! printf '%s\n' "$outAuth" | grep -q 'transient' \
+   && ! printf '%s\n' "$outAuth" | grep -q -- '— retry' \
+   && ! printf '%s\n' "$outAuth" | grep -q 'CLAIM: LOST'; then
+  ok "(a) unauthenticated push → CLAIM ERROR reason=auth, no transient/retry advice"
+else
+  bad "(a) expected reason=auth exit 1 with no transient/retry wording; got rc=$rcAuth
+$outAuth"
+fi
+# The verdict must name the remediation, not just the fault.
+if printf '%s\n' "$outAuth" | grep -q 'gh auth setup-git' \
+   || printf '%s\n' "$outAuth" | grep -q 'bootstrap-agent-machine'; then
+  ok "(a) auth verdict names the remediation"
+else
+  bad "(a) auth verdict named no remediation:
+$outAuth"
+fi
+# It must NOT echo git's raw stderr (a remote URL can carry an embedded secret).
+if ! printf '%s\n' "$outAuth" | grep -q 'terminal prompts disabled'; then
+  ok "(a) auth verdict does not echo raw git stderr"
+else
+  bad "(a) auth verdict echoed raw git stderr (secret-leak surface):
+$outAuth"
+fi
+
+# (b) genuine transient (unreachable host) -> unchanged retryable infra verdict.
+NETSHIM="$T/shim-git-netfail"
+mk_push_fail_shim "$NETSHIM" "fatal: unable to access 'https://github.com/x.git/': Could not resolve host: github.com"
+rc=0; outNet=$( cd "$A" && PATH="$NETSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 21 ) || rc=$?
+rcNet=$rc
+if [ "$rcNet" -eq 1 ] && printf '%s\n' "$outNet" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outNet" | grep -q 'reason=infra' \
+   && printf '%s\n' "$outNet" | grep -q 'transient' \
+   && ! printf '%s\n' "$outNet" | grep -q 'reason=auth'; then
+  ok "(b) genuine transient still reports the retryable infra verdict (#2665 contract intact)"
+else
+  bad "(b) expected reason=infra transient exit 1; got rc=$rcNet
+$outNet"
+fi
+
+# (c) `403 Forbidden` must NOT be treated as auth. A proxy or edge outage returns it,
+# and turning a transient into a permanent stop is the one direction the #2665
+# contract says never to move. (GitHub's rate-limit text is `HTTP 403`.)
+F403="$T/shim-git-403"
+mk_push_fail_shim "$F403" "fatal: unable to access 'https://github.com/x.git/': The requested URL returned error: 403 Forbidden"
+rc=0; out403=$( cd "$A" && PATH="$F403:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" claim 24 ) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out403" | grep -q 'reason=infra' \
+   && ! printf '%s\n' "$out403" | grep -q 'reason=auth'; then
+  ok "(c) a 403 stays a RETRYABLE transient (an edge/proxy outage is not a credential fault)"
+else
+  bad "(c) expected reason=infra for a 403; got rc=$rc
+$out403"
+fi
+
+# (d) adopt: the CAS push is unauthenticated. The confirm read succeeds on a public
+# repo, so without the auth check this reports ADOPT-LOST — blaming the lease for a
+# broken machine.
+runA claim 25 >/dev/null
+oldsha25=$(ref_sha 25)
+rc=0; outAdoptAuth=$( cd "$B" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineB bash "$CLAIM" adopt 25 --expect "$oldsha25" ) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$outAdoptAuth" | grep -q 'reason=auth' \
+   && ! printf '%s\n' "$outAdoptAuth" | grep -q 'ADOPT-LOST'; then
+  ok "(d) adopt under an auth failure → reason=auth, never ADOPT-LOST"
+else
+  bad "(d) expected adopt reason=auth exit 1 with no ADOPT-LOST; got rc=$rc
+$outAdoptAuth"
+fi
+
+# (e) release --force (the reaper path): an unauthenticated delete is not transient.
+runA claim 26 >/dev/null
+rc=0; outRelAuth=$( cd "$A" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" release 26 --force ) || rc=$?
+ref26=$(ref_sha 26)
+if [ "$rc" -eq 1 ] && printf '%s\n' "$outRelAuth" | grep -q 'reason=auth' \
+   && ! printf '%s\n' "$outRelAuth" | grep -q 'transient' \
+   && [ -n "$ref26" ]; then
+  ok "(e) release --force under an auth failure → reason=auth (ref intact, no false RELEASED)"
+else
+  bad "(e) expected release reason=auth exit 1 with the ref intact; got rc=$rc ref=$ref26
+$outRelAuth"
+fi
+
+# (f) smoke: the preflight's whole job is diagnosing the remote, so blaming the
+# refs/claims/* namespace for a credential fault sends the operator hunting the
+# wrong thing on a brand-new box.
+rc=0; outSmokeAuth=$( cd "$A" && PATH="$AUTHSHIM:$PATH" CLAIM_MACHINE=machineA bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$outSmokeAuth" | grep -q 'SMOKE-FAIL' \
+   && printf '%s\n' "$outSmokeAuth" | grep -q 'reason=auth' \
+   && ! printf '%s\n' "$outSmokeAuth" | grep -q 'push-rejected'; then
+  ok "(f) smoke under an auth failure → reason=auth, not 'does origin permit refs/claims/*?'"
+else
+  bad "(f) expected SMOKE-FAIL reason=auth; got rc=$rc
+$outSmokeAuth"
+fi
+
+# ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
 if [ "$FAIL" -eq 0 ]; then echo "RESULT: PASS"; exit 0; else echo "RESULT: FAIL"; exit 1; fi

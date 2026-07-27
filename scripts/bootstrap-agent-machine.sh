@@ -16,7 +16,21 @@
 #      / "ACCEL_LANES" / "mold link-accelerator") so the two can never disagree
 #      about whether an accelerator is present. The final health check below
 #      re-reads the state straight from the gate to reconcile.
-#   3. gh auth + the `project` scope (Path A board dispatch, #1886).
+#   3. gh auth + BOARD ACCESS (Path A board dispatch, #1886). The verdict comes
+#      from a READ-ONLY functional probe of the board, never from the `project`
+#      scope string (issue #2942): a token can carry `project` and still fail
+#      `gh project item-edit` for a missing `read:org` while the equivalent
+#      `updateProjectV2ItemFieldValue` GraphQL mutation works. Scopes are read from
+#      the ACTIVE account's stanza only, and the probe runs as the account flow-board
+#      forces active, restoring the operator's account afterwards. Overridable with
+#      CQLITE_PROJECT_OWNER / CQLITE_PROJECT_NUMBER / CQLITE_PROJECT_ACCOUNT.
+#   3b. git push CREDENTIALS (issue #2942) — separate from `gh` auth. The claim
+#      protocol (scripts/flow/claim.sh, claim-heartbeat.sh) pushes with plain git
+#      on 10+ call sites, so an authenticated gh with an unauthenticated git means
+#      the cross-machine lock does not work. Under --yes this configures a
+#      credential path scoped to the origin host, preferring `gh auth setup-git`,
+#      else a helper that dereferences $GH_TOKEN at call time. The token is never
+#      written to disk.
 #   4. roborev installed and its LOCAL config resolves — roborev follows THIS
 #      machine's configured agent (commonly codex via .roborev.toml); we warn
 #      only if the local config is broken, never prescribe an agent.
@@ -26,7 +40,7 @@
 #
 # Usage:
 #   bash scripts/bootstrap-agent-machine.sh            # check + print install cmds
-#   bash scripts/bootstrap-agent-machine.sh --yes      # also auto-run brew/cargo installs
+#   bash scripts/bootstrap-agent-machine.sh --yes      # also auto-run installs + git credentials
 #   bash scripts/bootstrap-agent-machine.sh --skip-smoke   # skip the final gate run
 #   bash scripts/bootstrap-agent-machine.sh --help
 set -uo pipefail
@@ -41,7 +55,7 @@ for arg in "$@"; do
     --yes|-y) AUTO_YES=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     -h|--help)
-      sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) echo "bootstrap: unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -57,6 +71,20 @@ esac
 
 WARNINGS=0
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---- bounded execution (issue #2942) ----
+# GNU coreutils installs its timeout as `gtimeout` on stock macOS, so resolving only
+# `timeout` leaves every bound below INERT on macOS — which is the fleet's platform and
+# the one where two of the three hang scenarios live (a locked osxkeychain, a Git
+# Credential Manager browser flow). Resolve both, and degrade visibly (unbounded) only
+# when neither exists.
+TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+# bounded <secs> <cmd...> — run <cmd...> under the resolved timeout binary if there is
+# one, else run it directly. Use `env VAR=... cmd` when the call needs env prefixes.
+bounded() {
+  local secs="$1"; shift
+  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$secs" "$@"; else "$@"; fi
+}
 ok()   { printf '  \033[32m[ok]\033[0m   %s\n' "$1"; }
 warn() { printf '  \033[33m[warn]\033[0m %s\n' "$1"; WARNINGS=$((WARNINGS + 1)); }
 info() { printf '         %s\n' "$1"; }
@@ -335,25 +363,413 @@ if [ "$PLATFORM" = linux ]; then
   fi
 fi
 
-# ---- 3. gh auth + project scope (Path A, #1886) ----
-hdr "GitHub CLI auth + project scope (Path A, #1886)"
+# ---- 3. GitHub board access + project scope (Path A, #1886; #2942) ----
+# The board is the SOLE dispatch authority, so "can this machine use the board?"
+# must be answered by TRYING it. Until #2942 this section matched the `project`
+# scope STRING and declared "board dispatch works" — and a box was observed where
+# that scope IS present, `gh project item-edit` fails for a missing `read:org`, and
+# the equivalent `updateProjectV2ItemFieldValue` GraphQL mutation succeeds with the
+# SAME token. A scope match is evidence about a token, not about the operation.
+# The scope check survives as a cheap PRE-FILTER; the verdict comes from a probe.
+# The probe is strictly READ-ONLY — a bootstrap must never mutate a real board item.
+#
+# Both facts the verdict rests on must also be attributed to the RIGHT IDENTITY.
+# `gh auth status` prints one stanza PER logged-in account on a host and the active
+# one is not guaranteed first, so a plain grep can read a different account's scopes
+# than the one every gh call will use — this repo has a documented instance
+# (.claude/skills/flow-board/SKILL.md: the active account silently flips to an EMU
+# account lacking `project`, and board writes then degrade SILENTLY). And `flow-board`
+# FORCES CQLITE_PROJECT_ACCOUNT active before any board op, so probing as whatever
+# account happens to be active measures a different identity than board dispatch uses.
+# Both are the same defect this section exists to remove, one level up: a verdict
+# derived from something other than the operation actually performed.
+BOARD_OWNER="${CQLITE_PROJECT_OWNER:-pmcfadin}"
+BOARD_ACCOUNT="${CQLITE_PROJECT_ACCOUNT:-pmcfadin}"   # same var flow-board honors
+BOARD_TITLE="${PROJECT_TITLE:-CQLite Delivery}"       # same title setup-project-board.sh uses
+BOARD_GRAPHQL_WRITE="updateProjectV2ItemFieldValue"
+# CQLITE_PROJECT_NUMBER must NOT be defaulted to a guess. flow-board reads
+# `project_number="${CQLITE_PROJECT_NUMBER:-}"` and sets have_project=0 → "board
+# unreachable, STOP" when it is unset, so defaulting to 1 here would print a green
+# "board reachable" on a box where every flow-* skill refuses to dispatch — the same
+# false green this section exists to kill, one layer out. Unset is a REPORTABLE STATE.
+BOARD_NUMBER="${CQLITE_PROJECT_NUMBER:-}"
+BOARD_NUMBER_SRC=env
+[ -z "$BOARD_NUMBER" ] && BOARD_NUMBER_SRC=unset
+
+# board_discover_number <owner> <title> — resolve the board number by TITLE, the way
+# test-data/scripts/setup-project-board.sh does, so an unset env var can still be
+# diagnosed precisely ("it is #N, you just haven't exported it") instead of vaguely.
+# Needs jq (as that script does); prints nothing when unavailable or not found.
+board_discover_number() {
+  have jq || return 0
+  bounded 20 gh project list --owner "$1" --format json --limit 200 2>/dev/null \
+    | jq -r --arg t "$2" '(.projects // [])[] | select(.title == $t) | .number' 2>/dev/null \
+    | head -n1
+}
+
+# gh_active_block <auth-status-output> — ONLY the active account's stanza. Stanzas
+# start at a "Logged in to <host> account <name>" line; the active one carries
+# "Active account: true". Falls back to the whole output when no such marker exists
+# (older gh / single account), so this never returns empty.
+gh_active_block() {
+  printf '%s\n' "$1" | awk '
+    /Logged in to/ { n++ }
+    { blk[n] = blk[n] $0 "\n"; if ($0 ~ /Active account: true/) active = n }
+    END {
+      if (active) { printf "%s", blk[active]; exit }
+      for (i = 0; i <= n; i++) printf "%s", blk[i]
+    }'
+}
+
+# gh_block_account <stanza> — the account name a stanza belongs to ("" if unknown).
+gh_block_account() {
+  printf '%s\n' "$1" | sed -n 's/.*Logged in to [^ ]* account \([^ ][^ ]*\).*/\1/p' | head -1
+}
+
+# board_graphql_read <owner> <number> — READ-ONLY projectV2 lookup, the read
+# counterpart of the write fallback, so its result says whether that fallback is
+# actually available on this token. Success requires a NON-EMPTY project id:
+# `gh api graphql` exits 0 on a well-formed query that resolves to null (e.g. an
+# org-owned board queried as a user), which would otherwise read as a false OK.
+# Tries user-owned first (what project-board-sync.yml uses), then org-owned.
+board_graphql_read() {
+  local owner="$1" number="$2" id
+  [ -n "$number" ] || return 1
+  id=$(bounded 20 gh api graphql -f owner="$owner" -F number="$number" \
+        -f query='query($owner:String!,$number:Int!){user(login:$owner){projectV2(number:$number){id}}}' \
+        --jq '.data.user.projectV2.id' 2>/dev/null)
+  if [ -z "$id" ] || [ "$id" = null ]; then
+    id=$(bounded 20 gh api graphql -f owner="$owner" -F number="$number" \
+          -f query='query($owner:String!,$number:Int!){organization(login:$owner){projectV2(number:$number){id}}}' \
+          --jq '.data.organization.projectV2.id' 2>/dev/null)
+  fi
+  [ -n "$id" ] && [ "$id" != null ]
+}
+
+# restore_board_account — put the operator's active gh account back. Idempotent, and
+# installed as a TRAP: between the switch and the restore sit network calls, so a hang
+# plus Ctrl-C, or a supervisor SIGTERM, would otherwise kill the script mid-bracket and
+# SILENTLY leave the active account changed. A check must never mutate host state.
+restore_board_account() {
+  [ "${BOARD_SWITCHED:-0}" = 1 ] || return 0
+  BOARD_SWITCHED=0
+  if gh auth switch --user "$PRE_PROBE_ACCOUNT" >/dev/null 2>&1; then
+    info "restored gh's active account to '$PRE_PROBE_ACCOUNT'"
+  else
+    warn "could NOT restore gh's active account — it is left as '$BOARD_ACCOUNT'. Fix: gh auth switch --user $PRE_PROBE_ACCOUNT"
+  fi
+}
+
+hdr "GitHub board access + project scope (Path A, #1886)"
 if have gh; then
-  if gh auth status >/dev/null 2>&1; then
+  # ONE invocation: capture output and status together (gh auth status hits the API).
+  auth_out=$(gh auth status 2>&1); auth_rc=$?
+  if [ "$auth_rc" -eq 0 ]; then
     ok "gh authenticated"
-    # Token-boundary match on the scopes line so a scope like 'project:read-only'
-    # (or any 'xprojecty' substring) can never false-positive as 'project'.
-    scopes_line=$(gh auth status 2>&1 | grep "Token scopes:" | head -1)
+    # ---- attribute every fact below to the ACTIVE account, and say which one ----
+    ACTIVE_BLOCK=$(gh_active_block "$auth_out")
+    ACTIVE_ACCOUNT=$(gh_block_account "$ACTIVE_BLOCK")
+    # An env token outranks the keyring, so there is exactly ONE identity and
+    # `gh auth switch` cannot change it — detect that up front rather than
+    # attempting (and reporting) a switch that could never take effect.
+    GH_ENV_TOKEN=0
+    [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ] && GH_ENV_TOKEN=1
+    info "measuring gh account '${ACTIVE_ACCOUNT:-<unknown>}'$([ "$GH_ENV_TOKEN" = 1 ] && printf ' (from GH_TOKEN in the environment)')"
+
+    # Mirror flow-board: it forces CQLITE_PROJECT_ACCOUNT active before EVERY board
+    # op, so probing as a different account would answer a question nobody asks —
+    # loudly failing a box where dispatch works, or greenlighting an account dispatch
+    # never uses. Switching mutates real gh state, so we only switch when we must and
+    # we always switch BACK; a failed restore is a loud warn, never a silent leftover.
+    BOARD_SWITCHED=0
+    PRE_PROBE_ACCOUNT="$ACTIVE_ACCOUNT"   # what the operator had active; restored below
+    if [ "$GH_ENV_TOKEN" = 0 ] && [ -n "$ACTIVE_ACCOUNT" ] && [ "$ACTIVE_ACCOUNT" != "$BOARD_ACCOUNT" ]; then
+      if gh auth switch --user "$BOARD_ACCOUNT" >/dev/null 2>&1; then
+        BOARD_SWITCHED=1
+        # Arm the restore BEFORE anything that can hang or be interrupted.
+        trap 'restore_board_account' EXIT
+        trap 'restore_board_account; exit 130' INT
+        trap 'restore_board_account; exit 143' TERM
+        info "temporarily switched gh's active account '$ACTIVE_ACCOUNT' -> '$BOARD_ACCOUNT' for the probe (what flow-board does); will switch back"
+        auth_out=$(gh auth status 2>&1)
+        ACTIVE_BLOCK=$(gh_active_block "$auth_out")
+        ACTIVE_ACCOUNT=$(gh_block_account "$ACTIVE_BLOCK")
+      else
+        info "could not switch to '$BOARD_ACCOUNT' (CQLITE_PROJECT_ACCOUNT) — probing as '$ACTIVE_ACCOUNT'; flow-board would attempt the same switch"
+      fi
+    fi
+
+    # Token-boundary match on the ACTIVE account's scopes line so a scope like
+    # 'project:read-only' (or any 'xprojecty' substring) can never false-positive.
+    scopes_line=$(printf '%s\n' "$ACTIVE_BLOCK" | grep "Token scopes:" | head -1)
+    scope_prefilter=0
     if printf '%s\n' "$scopes_line" | grep -qE "(^|[ ,'])project([ ,']|$)"; then
-      ok "'project' scope present — board dispatch works"
+      scope_prefilter=1
+      info "pre-filter: 'project' scope present on '${ACTIVE_ACCOUNT:-<unknown>}' (NOT the verdict — the probe below decides)"
     else
-      warn "'project' scope MISSING — the board is the SOLE dispatch authority (Path A). Fix:"
+      warn "'project' scope MISSING on gh account '${ACTIVE_ACCOUNT:-<unknown>}' — the board is the SOLE dispatch authority (Path A). Fix:"
       info "gh auth refresh -s project"
+    fi
+    # gh's OWN declaration that the ACTIVE token lacks scopes gh requires. This is
+    # the discriminator behind the observed false OK: scopes include 'project',
+    # `read:org` is missing, and `gh project item-edit` fails on that alone.
+    missing_scopes=$(printf '%s\n' "$ACTIVE_BLOCK" | grep -i "Missing required token scopes" | head -1)
+    missing_list="${missing_scopes##*scopes:}"; missing_list="${missing_list# }"
+    # Resolve the board number when it is not exported, so the gap can be reported
+    # precisely rather than papered over with a guess.
+    if [ "$BOARD_NUMBER_SRC" = unset ]; then
+      BOARD_NUMBER="$(board_discover_number "$BOARD_OWNER" "$BOARD_TITLE")"
+      [ -n "$BOARD_NUMBER" ] && BOARD_NUMBER_SRC=discovered
+    fi
+
+    # READ-ONLY probes, both BOUNDED: they sit between the account switch and its
+    # restore, so an unbounded hang here is what strands the operator's account.
+    board_read=0
+    graphql_read=0
+    if [ -n "$BOARD_NUMBER" ]; then
+      bounded 20 gh project view "$BOARD_NUMBER" --owner "$BOARD_OWNER" >/dev/null 2>&1 && board_read=1
+      board_graphql_read "$BOARD_OWNER" "$BOARD_NUMBER" && graphql_read=1
+    fi
+
+    # Restore the operator's account BEFORE reporting (the trap is the backstop for an
+    # interrupt; this is the normal path, and it is idempotent with the trap).
+    restore_board_account
+
+    # An unqualified ok requires ALL THREE: the read probe passed, gh reports no
+    # missing required scopes, AND the 'project' WRITE scope is present. Without the
+    # last one a read-only token (e.g. read:project) would print the earlier
+    # "'project' scope MISSING" warn and then a reassuring ok as the section's LAST
+    # word, while every dispatch write still fails.
+    # An unexported CQLITE_PROJECT_NUMBER is a DISPATCH BLOCKER even when every probe
+    # passes, because flow-board defaults it to empty and stops. Report it first: it is
+    # the one gap the operator can fix with a single export.
+    if [ "$BOARD_NUMBER_SRC" != env ]; then
+      if [ "$BOARD_NUMBER_SRC" = discovered ]; then
+        warn "CQLITE_PROJECT_NUMBER is NOT exported — flow-* skills default it to EMPTY and STOP ('board unreachable'), whatever this probe says"
+        info "the board titled '$BOARD_TITLE' is #$BOARD_NUMBER — export it:  export CQLITE_PROJECT_NUMBER=$BOARD_NUMBER"
+      else
+        warn "CQLITE_PROJECT_NUMBER is NOT exported and no board titled '$BOARD_TITLE' could be resolved for owner '$BOARD_OWNER' — flow-* skills will STOP (Path A: no board, no dispatch)"
+        info "run:  bash test-data/scripts/setup-project-board.sh    (it discovers/creates the board and prints the export line)"
+      fi
+    fi
+
+    if [ "$board_read" = 1 ] && [ -z "$missing_scopes" ] && [ "$scope_prefilter" = 1 ] \
+       && [ "$BOARD_NUMBER_SRC" = env ]; then
+      ok "board #$BOARD_NUMBER ($BOARD_OWNER) reachable as '${ACTIVE_ACCOUNT:-<unknown>}' — 'gh project' read probe OK, 'project' scope present, no missing token scopes"
+    elif [ "$board_read" = 1 ]; then
+      board_dq=""
+      [ "$scope_prefilter" = 0 ] && board_dq="the 'project' WRITE scope is MISSING"
+      if [ -n "$missing_scopes" ]; then
+        [ -n "$board_dq" ] && board_dq="$board_dq; "
+        board_dq="${board_dq}gh reports missing required scopes ($missing_list)"
+      fi
+      if [ "$BOARD_NUMBER_SRC" != env ]; then
+        [ -n "$board_dq" ] && board_dq="$board_dq; "
+        board_dq="${board_dq}CQLITE_PROJECT_NUMBER is not exported"
+      fi
+      warn "board READ works as '${ACTIVE_ACCOUNT:-<unknown>}' but $board_dq — board dispatch can still FAIL"
+      info "board WRITES: fall back to the GraphQL \`$BOARD_GRAPHQL_WRITE\` mutation (it succeeds with the SAME token; graphql projectV2 read probe: $([ "$graphql_read" = 1 ] && echo OK || echo FAILED))"
+      info "or widen the token:  gh auth refresh -s project -s read:org"
+    elif [ "$graphql_read" = 1 ]; then
+      warn "'gh project' CANNOT use board #$BOARD_NUMBER ($BOARD_OWNER) as '${ACTIVE_ACCOUNT:-<unknown>}'$([ "$scope_prefilter" = 1 ] && printf ' even though the scope pre-filter passed')${missing_list:+ — gh reports missing required scopes ($missing_list)}"
+      info "the GraphQL projectV2 read probe SUCCEEDED with the same token — board WRITES must go through the \`$BOARD_GRAPHQL_WRITE\` mutation, not \`gh project item-edit\`"
+      info "or widen the token:  gh auth refresh -s read:org"
+    else
+      warn "board #${BOARD_NUMBER:-<unresolved>} ($BOARD_OWNER) UNREACHABLE as '${ACTIVE_ACCOUNT:-<unknown>}' — BOTH probes failed ('gh project view' and the GraphQL projectV2 read). Path A: a session with no board access must STOP, never label-dispatch"
+      info "check the account (CQLITE_PROJECT_ACCOUNT=$BOARD_ACCOUNT) and owner/number (CQLITE_PROJECT_OWNER / CQLITE_PROJECT_NUMBER), then: gh auth refresh -s project -s read:org"
+      info "neither 'gh project item-edit' nor the \`$BOARD_GRAPHQL_WRITE\` GraphQL fallback can work until a probe passes"
     fi
   else
     warn "gh not authenticated — run: gh auth login (then gh auth refresh -s project)"
   fi
 else
   warn "gh CLI NOT installed — $(brew_or_cargo gh gh 2>/dev/null || echo 'install GitHub CLI: https://cli.github.com')"
+fi
+
+# ---- 3b. git push credentials (issue #2942) ----
+# `gh` auth and `git` auth are SEPARATE credential paths. An authenticated gh CLI is
+# NOT evidence that a raw `git push` can authenticate — and the flow tooling
+# (scripts/flow/claim.sh, scripts/flow/claim-heartbeat.sh) pushes with plain git on
+# 10+ call sites (the claim ref, the adoption CAS, release, heartbeats). On a box
+# where only gh is wired, every one of those fails with
+#     fatal: could not read Username for 'https://github.com'
+# so the claim protocol — the cross-machine lock the whole fleet depends on — simply
+# does not work, while `gh auth status` reports a happy machine.
+#
+# The probe is `git credential fill`: it runs the CONFIGURED helper chain and answers
+# exactly the question that matters ("would git find a credential for this host?")
+# without contacting the network and without pushing anything. The filled credential
+# is held only in a local shell variable — never printed, logged, or stored.
+#
+# The helper DECLINES (exit 1) when no token is in the environment rather than
+# emitting an empty password. That matters because git treats a `password=` line as
+# satisfied even when the value is EMPTY, so an empty-emitting helper produces a
+# green probe on a machine where every push fails. This is highly reachable: --yes
+# writes the helper globally and PERSISTENTLY while $GH_TOKEN is a per-shell env var,
+# so bootstrapping in an interactive shell and then running the supervisor from
+# systemd/cron would otherwise yield a green bootstrap and a dead claim protocol —
+# the very "validated the configuration, not the operation" defect this change exists
+# to kill. The probe correspondingly requires a NON-EMPTY password, not exit 0.
+GIT_CRED_HELPER='!f(){ test "$1" = get || exit 0; t="${GH_TOKEN:-${GITHUB_TOKEN:-}}"; [ -n "$t" ] || exit 1; echo username=x-access-token; echo "password=$t"; };f'
+
+# git_cred_probe <host> — 0 iff the configured helper chain yields a non-empty
+# secret for <host>. Three hang guards, because this runs inside the gate's
+# tooling-tests against a developer's REAL helper chain:
+#   - GIT_TERMINAL_PROMPT=0 + a deliberately nonexistent askpass stop GIT's own prompt;
+#   - `timeout` bounds a HELPER SUBPROCESS, which neither variable governs — a Git
+#     Credential Manager device-code/browser flow, a credential-cache waiting on a
+#     dead daemon socket, or a locked osxkeychain would otherwise block indefinitely.
+# The output is captured into a variable rather than piped into grep so that grep -q
+# closing the pipe early can never turn a SIGPIPE into a false "no credential".
+git_cred_probe() {
+  local host="$1" out
+  out=$(printf 'protocol=https\nhost=%s\n\n' "$host" \
+    | bounded 10 env GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=cqlite-bootstrap-no-askpass \
+      SSH_ASKPASS=cqlite-bootstrap-no-askpass \
+      git -C "$REPO_ROOT" credential fill 2>/dev/null) || true
+  printf '%s\n' "$out" | grep -q '^password=.'
+}
+
+# Both helper-inspection predicates below use a --get-regexp over the whole
+# `credential.*.helper` key space rather than the bare `credential.helper` key. The
+# helper THIS script writes is host-scoped (credential.https://<host>.helper), as is
+# anything `gh auth setup-git` writes — so a bare-key lookup would miss exactly the
+# configurations the script itself creates, and the two advisories that matter most to
+# an unattended worker would go silent on the very machines they were written for.
+
+# git_global_helper_configured — 0 iff ANY global credential helper exists, scoped or not.
+git_global_helper_configured() {
+  git config --global --get-regexp '^credential\..*helper$' >/dev/null 2>&1
+}
+
+# git_local_helper_configured — 0 iff ANY repo-local credential helper exists.
+git_local_helper_configured() {
+  git -C "$REPO_ROOT" config --local --get-regexp '^credential\..*helper$' >/dev/null 2>&1
+}
+
+# git_env_token_helper_active — 0 iff a configured helper (any scope, any host key) is
+# an ENV-DEREFERENCING one. Used to attach the "$GH_TOKEN must be exported" caveat to
+# an otherwise-green verdict. Both markers must appear in the SAME line (--get-regexp
+# prints one key+value per line): a helper with a token BAKED IN also says
+# x-access-token but has no environment dependency, and claiming otherwise would be
+# its own small misattribution.
+git_env_token_helper_active() {
+  { git config --global --get-regexp '^credential\..*helper$' 2>/dev/null
+    git -C "$REPO_ROOT" config --get-regexp '^credential\..*helper$' 2>/dev/null
+  } | grep -F 'x-access-token' | grep -qF 'GH_TOKEN'
+}
+
+# git_origin_host <url> — host of an http(s) origin ("" for any other form). The
+# path is stripped FIRST so an '@' inside the path can never be mistaken for the
+# user[:password]@ prefix.
+git_origin_host() {
+  local url="$1" rest hostport
+  case "$url" in
+    https://*) rest="${url#https://}" ;;
+    http://*)  rest="${url#http://}" ;;
+    *) return 0 ;;
+  esac
+  hostport="${rest%%/*}"
+  printf '%s' "${hostport#*@}"
+}
+
+hdr "git push credentials (issue #2942)"
+# Classify origin BEFORE probing: only an http(s) remote uses a credential helper.
+# An SSH remote authenticates with a key (a helper is irrelevant), and a local/file
+# remote needs no credential at all — mislabeling either would send an operator
+# after the wrong fix, which is the exact failure mode this whole change exists to end.
+GIT_ORIGIN_URL=""; GIT_ORIGIN_HOST=""; GIT_ORIGIN_KIND=none
+if have git; then
+  GIT_ORIGIN_URL=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
+  case "$GIT_ORIGIN_URL" in
+    "")                    GIT_ORIGIN_KIND=none ;;
+    https://*|http://*)    GIT_ORIGIN_KIND=https; GIT_ORIGIN_HOST=$(git_origin_host "$GIT_ORIGIN_URL") ;;
+    ssh://*|git+ssh://*)   GIT_ORIGIN_KIND=ssh ;;
+    *@*:*)                 GIT_ORIGIN_KIND=ssh ;;   # scp-like git@host:owner/repo.git
+    *)                     GIT_ORIGIN_KIND=other ;; # file:// or a local path
+  esac
+  [ "$GIT_ORIGIN_KIND" = https ] && [ -z "$GIT_ORIGIN_HOST" ] && GIT_ORIGIN_KIND=other
+fi
+
+if ! have git; then
+  warn "git NOT installed — the claim protocol pushes with plain git"
+elif [ "$GIT_ORIGIN_KIND" = none ]; then
+  warn "no 'origin' remote in $REPO_ROOT — cannot check push credentials"
+elif [ "$GIT_ORIGIN_KIND" = ssh ]; then
+  # SSH (git@host:… / ssh://…): git authenticates with your SSH key, and an https
+  # credential helper is irrelevant. Report it and configure nothing.
+  ok "origin is an SSH remote — git push authenticates via SSH keys, not a credential helper (no helper needed)"
+  info "verify separately if pushes fail:  ssh -T git@github.com"
+elif [ "$GIT_ORIGIN_KIND" = other ]; then
+  info "origin is a '$GIT_ORIGIN_KIND' remote (neither http(s) nor SSH) — no credential helper applies"
+elif git_cred_probe "$GIT_ORIGIN_HOST"; then
+  ok "git push credentials resolve for $GIT_ORIGIN_HOST (a helper answers with a non-empty secret)"
+  if git_local_helper_configured && ! git_global_helper_configured; then
+    info "note: the helper is configured at REPO-LOCAL scope only — a fresh clone or a"
+    info "      new checkout on this box will NOT inherit it. Re-run with --yes to add a global one."
+  fi
+  if git_env_token_helper_active; then
+    info "note: that helper reads \$GH_TOKEN from the ENVIRONMENT, so it works only in shells"
+    info "      where GH_TOKEN is exported — a systemd/cron worker started without it will"
+    info "      fail every push. For unattended workers prefer:  gh auth setup-git"
+  fi
+else
+  warn "git push has NO credentials for $GIT_ORIGIN_HOST — an authenticated 'gh' does NOT authenticate git"
+  info "symptom: every push fails with  fatal: could not read Username for 'https://$GIT_ORIGIN_HOST'"
+  info "impact: scripts/flow/claim.sh + claim-heartbeat.sh push on 10+ call sites — the claim protocol does not work"
+  info "fix:    gh auth setup-git    (preferred; wires gh as git's credential helper)"
+  info "        or re-run with --yes to configure a helper that reads \$GH_TOKEN at call time"
+  if [ "$AUTO_YES" = 1 ]; then
+    cred_fixed=0
+    # Preferred form: let gh wire itself in. Verified by RE-PROBING — on the box
+    # that motivated #2942 the gh credential path was precisely what was not wired,
+    # so "the command exited 0" is not evidence.
+    if have gh && gh auth status >/dev/null 2>&1; then
+      info "configuring: gh auth setup-git"
+      if gh auth setup-git >/dev/null 2>&1 && git_cred_probe "$GIT_ORIGIN_HOST"; then
+        ok "git credentials configured via 'gh auth setup-git' (no secret written to disk)"
+        cred_fixed=1
+      else
+        info "'gh auth setup-git' did not yield a usable credential — falling back to the \$GH_TOKEN helper"
+      fi
+    fi
+    if [ "$cred_fixed" = 0 ]; then
+      if [ -z "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+        warn "cannot auto-configure: neither GH_TOKEN nor GITHUB_TOKEN is set in this environment"
+        info "export GH_TOKEN=<token>, then re-run:  bash scripts/bootstrap-agent-machine.sh --yes"
+      else
+        # The value written is a shell snippet that DEREFERENCES $GH_TOKEN when git
+        # asks — the token itself never lands on disk, so rotating it needs no
+        # reconfiguration and a leaked ~/.gitconfig leaks no credential. (Decision 2
+        # of the worker-env-preflight change: explicitly NOT ~/.git-credentials.)
+        #
+        # HOST-SCOPED, never a bare [credential] helper. An unscoped helper offers the
+        # GitHub token to EVERY https host git talks to — a submodule, a cargo/pip git
+        # dependency, a mistyped clone, or any host that answers 401 would receive it.
+        # `gh auth setup-git` (the preferred path this falls back FROM) scopes per host,
+        # so an unscoped fallback would make --yes strictly less safe than its own
+        # preferred branch. "A leaked ~/.gitconfig leaks no credential" is true of the
+        # env-var indirection but says nothing about who git hands the token TO.
+        cred_key="credential.https://$GIT_ORIGIN_HOST.helper"
+        info "configuring $cred_key to dereference \$GH_TOKEN at call time (scoped to $GIT_ORIGIN_HOST; the token is NOT written to disk)"
+        # Idempotence: never stack a second copy on a re-run. The check is the EXACT
+        # key we write — a copy scoped to some other host is unrelated and must not
+        # suppress this one.
+        if git config --global --get-all "$cred_key" 2>/dev/null | grep -qF 'x-access-token'; then
+          warn "a \$GH_TOKEN-style helper is ALREADY configured for $GIT_ORIGIN_HOST yet the probe still fails — check that GH_TOKEN is set, valid and unexpired (not re-adding it)"
+        elif git config --global --add "$cred_key" "$GIT_CRED_HELPER" 2>/dev/null \
+           && git_cred_probe "$GIT_ORIGIN_HOST"; then
+          ok "git credentials configured for $GIT_ORIGIN_HOST via a \$GH_TOKEN-dereferencing helper (no secret written to disk)"
+          info "this helper reads \$GH_TOKEN from the ENVIRONMENT — an unattended worker (systemd/cron)"
+          info "started without GH_TOKEN exported will still fail every push; prefer 'gh auth setup-git' there"
+        else
+          warn "could not configure a working git credential helper — fix manually: gh auth setup-git"
+        fi
+      fi
+    fi
+  else
+    info "(re-run with --yes to auto-configure)"
+  fi
 fi
 
 # ---- 4. roborev (follows LOCAL machine config — never pin an agent, #1921 owner correction) ----
