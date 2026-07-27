@@ -1060,9 +1060,11 @@ fi
 STDLIB_LINT="$WORK/stdlib-require-lint.rb"
 cat >"$STDLIB_LINT" <<'RUBY'
 # Prints one line per gating file that uses a stdlib without requiring it.
+# GLOBBED, not listed: a hardcoded list is the same drift one level up — the
+# next `gating_*.rb` would be added without anyone noticing it is unlinted.
 root = ARGV[0]
-files = %w[gating_registry.rb gating_policy_rules.rb gating_event_rules.rb
-           gating_head_emitability.rb gating_ruby_floor.rb validate-workflows.rb]
+files = (Dir.glob(File.join(root, "scripts", "ci", "gating_*.rb")) +
+         [File.join(root, "scripts", "ci", "validate-workflows.rb")]).map { |p| File.basename(p) }.uniq
 # require name => the constants it provides, matched only where they are USED
 # (followed by `.` or `::`), never inside prose.
 rules = {

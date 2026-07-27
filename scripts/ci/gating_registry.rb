@@ -323,6 +323,10 @@ module GatingRegistry
   #
   # FAIL-SAFE DIRECTION: no anchor (no parseable timestamps) or no readable
   # `labeled` event means NOT bound, which only ever WITHHOLDS the early waiver.
+  # Same for the one known imprecision: the check-runs fetch uses `filter=latest`,
+  # so re-running every tier on a head moves the anchor forward and can unbind a
+  # waiver that really was applied for it. The cost is a wait, not a wrong
+  # verdict — the tier is then polled and waived at the deadline as before.
   def head_activity_anchor(runs)
     Array(runs).filter_map do |run|
       next unless run.is_a?(Hash) && provenanced?(run)

@@ -1250,6 +1250,20 @@ else
   bad "the break-glass could not clear a migration state (rc=$RC): $OUT"
 fi
 
+# THE INTERACTION of round 5's binding with round 3's migration state: a waiver
+# left over from an earlier head does NOT clear a migration state, and the
+# diagnostic has to say so — a label that is plainly applied and plainly not
+# working is the most confusing failure this mechanism can produce.
+invoke "cat $(runs_file new-head-beta-absent)" "$WORK/self-ids.txt" "$FUTURE" 5 \
+  --event-workflows-dir "$(event_tree renamed)" --event-action synchronize --base-ref main \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
+if [ "$RC" -ne 0 ] && contains "$OUT" "MIGRATION STATE" &&
+   contains "$OUT" "bound to the head sha it was applied for"; then
+  ok "a waiver from an earlier head does not clear a migration state, and the red explains why"
+else
+  bad "a stale waiver silently cleared (or silently failed to clear) a migration state (rc=$RC): $OUT"
+fi
+
 echo "== inconclusive evidence must NOT fast-fail (a false red is an outage too) =="
 for tree in matching unparseable computed-name; do
   : >"$WORK/sleep.log"
