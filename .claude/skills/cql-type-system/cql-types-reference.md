@@ -293,10 +293,18 @@ fn deserialize_counter(data: &[u8]) -> Result<i64> {
 
 ## Null Handling
 
-All CQL types can be null:
-- **In collections:** 4-byte size prefix of `-1` (0xFFFFFFFF)
-- **In UDT fields:** 4-byte size prefix of `-1`
-- **In cells:** Cell with IS_DELETED flag or no value bytes
+All CQL types can be null, but the *framing* that expresses null depends on whether you
+are inside a **frozen** value or looking at a **non-frozen** collection's cells:
+- **In a FROZEN collection / tuple / UDT:** a 4-byte big-endian `i32` length of `-1`
+  (`0xFFFFFFFF`) (`row_decoder/frozen.rs:98,279,370`; `TupleType.java:341-364`).
+- **In a NON-FROZEN collection cell:** there is no `-1` sentinel — an absent value is the
+  cell flag `HAS_EMPTY_VALUE` (`0x04`), and lengths are **unsigned VInts** which cannot be
+  negative (`row_decoder/complex_column.rs:1136`;
+  `appendix-b-encodings-cheat-sheet.md:530-536`).
+- **In cells generally:** a cell with `IS_DELETED` (`0x01`), or a column omitted from the
+  row's column bitmap.
+
+See `collections-and-udts.md` for the two collection encodings side by side.
 
 ```rust
 fn deserialize_nullable<T>(
@@ -324,10 +332,15 @@ fn deserialize_nullable<T>(
 - **Null:** Field doesn't have a value (SQL NULL)
 - **Empty:** Field has zero-length value (empty string, empty blob)
 
-**Wire format:**
-- Null: size = -1, no bytes follow
-- Empty: size = 0, no bytes follow
-- Present: size = N, N bytes follow
+**Wire format** — inside a **frozen** value (4-byte BE `i32` lengths):
+- Null: size = `-1`, no bytes follow
+- Empty: size = `0`, no bytes follow
+- Present: size = `N`, `N` bytes follow
+
+**Wire format** — a **non-frozen** collection cell (unsigned-VInt lengths, so no `-1`):
+- Empty/absent value: cell flag `HAS_EMPTY_VALUE` (`0x04`) set; no length, no bytes
+- Deleted: cell flag `IS_DELETED` (`0x01`) set; no value bytes
+- Present: unsigned VInt `value_len` = `N`, then `N` bytes
 
 ## Type Aliases
 
@@ -354,5 +367,17 @@ CQL has exactly one such alias pair:
 
 ## Reference Implementation
 
-See `cqlite-core/src/types/` for complete Rust type system implementation.
+- `cqlite-core/src/types/` — the CQL type model / `Value` enum.
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/cell_value_scalar.rs` —
+  scalar on-disk decode (the authority for what CQLite does with `date`, `duration`, etc.).
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/frozen.rs` — frozen
+  collections/tuples (4-byte BE `i32` framing).
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs` —
+  non-frozen collections (unsigned-VInt framing).
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/udt.rs` — UDTs.
+
+**Format authority** for a genuinely disputed on-disk question is Apache Cassandra 5.0.8
+(`git show cassandra-5.0.8:src/java/org/apache/cassandra/...`) plus
+`docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md`. A CQLite
+`file:line` is authoritative for *what CQLite currently does*, not for what the format is.
 
