@@ -45,8 +45,12 @@ Never try to infer type from data alone - always use schema.
 - `bigint` - 8 bytes signed, big-endian
 - `float` - 4 bytes IEEE 754
 - `double` - 8 bytes IEEE 754
-- `date` - 4 bytes (days since epoch)
-- `time` - 8 bytes (nanoseconds since midnight)
+- `date` - 4 bytes BE unsigned, days since epoch **biased by `Integer.MIN_VALUE`**
+  (epoch day 0 is stored as `0x80000000`) — un-bias with
+  `stored.wrapping_add(i32::MIN as u32) as i32`; a plain `u32` read is wrong by 2^31 days.
+  Citations: `row_decoder/cell_value_scalar.rs:329-333`; cassandra-5.0.8
+  `serializers/SimpleDateSerializer.java:36-37,110,113-115`.
+- `time` - 8 bytes signed BE (nanoseconds since midnight; no bias)
 
 #### Variable-Size Primitives
 - `text`/`varchar` - UTF-8 encoded string
@@ -58,20 +62,52 @@ Never try to infer type from data alone - always use schema.
 - `inet` - 4 bytes (IPv4) or 16 bytes (IPv6)
 - `varint` - variable-length big integer
 - `decimal` - scale (4 bytes) + unscaled varint
-- `duration` - months, days, nanoseconds (3 VInts)
+- `duration` - months, days, nanoseconds as 3 **ZigZag-SIGNED** VInts — the ONLY signed
+  VInts in `Data.db`, wherever a duration payload occurs (including nested in a
+  collection/tuple/UDT). Decoding them unsigned makes every negative duration wrong.
+  Citations: `appendix-b-encodings-cheat-sheet.md:63-65,92-97`;
+  `DurationSerializer.java:49-51`.
 - `timestamp` - 8 bytes (milliseconds since Unix epoch)
 
 ### 2. Collection Types
 
 See [collections-and-udts.md](collections-and-udts.md) for detailed format.
 
-**Collection Format:**
+> ### ⚠️ There are TWO collection encodings — pick by frozen-ness, never by byte pattern
+> Frozen and non-frozen collections do NOT share a wire format. Assuming the frozen layout
+> for a non-frozen column (or vice versa) mis-frames every element.
+
+**FROZEN collection** (`frozen<list<int>>`, and any collection nested inside another
+collection/tuple/UDT) — one opaque cell, **fixed 4-byte big-endian `i32`** count and
+element lengths (NOT VInts):
 ```
-[4 bytes: element_count (big-endian)]
+[i32 BE: element_count]
 [for each element:]
-    [4 bytes: element_size (big-endian)]
+    [i32 BE: element_len]   // -1 = null
     [bytes: element_data]
 ```
+> **Citation**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/frozen.rs:21`
+> (count), `:98,279,370` (element/key lengths). Guide:
+> `appendix-b-encodings-cheat-sheet.md:537-539`. Cassandra:
+> `CollectionSerializer.java:67-92`, `TupleType.java:341-364`.
+
+**NON-FROZEN collection** (the default `list<int>`, `set<T>`, `map<K,V>`) — a *set of
+cells*, framed with **unsigned VInts**:
+```
+[if the row sets ROW_HAS_COMPLEX_DELETION (0x40): complex deletion, 2 unsigned VInt deltas]
+[unsigned VInt: cell_count]
+[for each cell:]
+    [1 byte: cell flags]
+    [conditional timestamp / local_deletion_time / ttl unsigned-VInt deltas]
+    [unsigned VInt: path_len][path bytes]     // element key / path
+    [unsigned VInt: value_len][value bytes]   // omitted when IS_DELETED or HAS_EMPTY_VALUE
+```
+> **Citation**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs:332`
+> (`cell_count` via `parse_vuint`), `:1089` (path length), `:1136` (value length),
+> `:279-300` (complex deletion). Guide: `appendix-b-encodings-cheat-sheet.md:530-536` — a
+> non-frozen collection cell length-prefixes BOTH path and value with an unsigned VInt,
+> **fixed-width element types included** (the `valueLengthIfFixed()` raw-bytes shortcut is
+> a simple-cell rule only, `AbstractType.java:538-543`).
 
 **Types:**
 - `list<T>` - Ordered, allows duplicates
