@@ -288,6 +288,111 @@ else
 fi
 rm -f "$r1/big-untracked.bin"
 
+# --- C2: a manifest TRUNCATED after the H record must never compare EQUAL ---------
+# ENOSPC on $TMPDIR during a 40-60 minute gate truncates the manifest write. Validating
+# only the FIRST record accepted the short file, and two truncations sharing the same
+# byte-identical `H<TAB><head>` prefix then compared EQUAL — a mutation to a
+# later-sorted path passed as `tree-integrity: PASS`. The manifest now carries an
+# `N<TAB><count>` TRAILER that a truncation necessarily loses.
+r_t=$(mkrepo trunc-repo)
+t_head=$( cd "$r_t" && git rev-parse HEAD )
+mT1="$tmp/trunc-1"; mT2="$tmp/trunc-2"
+printf 'zz\n' > "$r_t/zz-untracked.txt"          # sorts AFTER the H record
+dT1=$(capture_identity "$r_t" digest AGENT_GATE_TREE_SELFTEST_MANIFEST_OUT="$mT1")
+printf 'zz mutated\n' >> "$r_t/zz-untracked.txt"
+dT2=$(capture_identity "$r_t" digest AGENT_GATE_TREE_SELFTEST_MANIFEST_OUT="$mT2")
+
+# the production manifest carries the trailer, and its count is the body count
+last_rec=$(tr '\0' '\n' < "$mT1" | tail -1)
+body_n=$(tr '\0' '\n' < "$mT1" | sed '$d' | grep -c '^[TU]	')
+if [ "$last_rec" = "$(printf 'N\t%s' "$body_n")" ]; then
+  ok "C2: the production manifest ends with the N trailer and its count matches the body ($body_n)"
+else
+  bad "C2: manifest trailer missing/mismatched (last='$last_rec' body=$body_n)"
+fi
+
+# truncate BOTH manifests immediately after the H record — the ENOSPC shape
+h_bytes=$(( 2 + ${#t_head} + 1 ))
+head -c "$h_bytes" "$mT1" > "$mT1.trunc"
+head -c "$h_bytes" "$mT2" > "$mT2.trunc"
+if [ "$dT1" != "$dT2" ] && cmp -s "$mT1.trunc" "$mT2.trunc"; then
+  ok "C2: the two truncations are BYTE-IDENTICAL although the trees differ — the false-PASS shape is reproduced"
+else
+  bad "C2: the truncated-prefix case was not reproduced (d1=$dT1 d2=$dT2)"
+fi
+
+validate_manifest() { # validate_manifest <repo> <file> <nul|nl> <head> <count> -> yes|no
+  ( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/validate-sentinel.txt" \
+      AGENT_GATE_TREE_SELFTEST=validate-manifest \
+      AGENT_GATE_TREE_SELFTEST_VALIDATE="$2|$3|$4|$5" \
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null ) | sed -n 's/^tree-selftest: manifest-ok=//p' | head -1
+}
+v_intact=$(validate_manifest "$r_t" "$mT1" nul "$t_head" "$body_n")
+v_trunc=$(validate_manifest "$r_t" "$mT1.trunc" nul "$t_head" "$body_n")
+if [ "$v_intact" = yes ]; then
+  ok "C2: the validator ACCEPTS a complete production manifest (not hardwired to reject)"
+else
+  bad "C2: the validator rejected an intact manifest (got '$v_intact')"
+fi
+if [ "$v_trunc" = no ]; then
+  ok "C2: the validator REJECTS the same manifest truncated after the H record"
+else
+  bad "C2: a truncated manifest validated (got '$v_trunc') — the false PASS is still reachable"
+fi
+# a trailer that disagrees with the body count is rejected too (a partial re-write)
+printf 'H\t%s\0T\tabc\t100644\tp\0N\t5\0' "$t_head" > "$tmp/trunc-badcount"
+v_bad=$(validate_manifest "$r_t" "$tmp/trunc-badcount" nul "$t_head" 5)
+printf 'H\t%s\0T\tabc\t100644\tp\0N\t1\0' "$t_head" > "$tmp/trunc-goodcount"
+v_good=$(validate_manifest "$r_t" "$tmp/trunc-goodcount" nul "$t_head" 1)
+if [ "$v_bad" = no ] && [ "$v_good" = yes ]; then
+  ok "C2: the trailer count must equal the records actually read (5-claimed/1-present rejected, 1/1 accepted)"
+else
+  bad "C2: the trailer count is not enforced (bad='$v_bad' good='$v_good')"
+fi
+# and the same for the .report view, which the failure-naming path parses
+if [ -f "$mT1.report" ]; then
+  v_rep=$(validate_manifest "$r_t" "$mT1.report" nl "$t_head" "$body_n")
+  sed '$d' "$mT1.report" > "$mT1.report.trunc"          # drop the trailer line
+  v_rep_t=$(validate_manifest "$r_t" "$mT1.report.trunc" nl "$t_head" "$body_n")
+  if [ "$v_rep" = yes ] && [ "$v_rep_t" = no ]; then
+    ok "C2: the newline-framed .report view is held to the same trailer rule (intact yes / truncated no)"
+  else
+    bad "C2: the .report view is not trailer-validated (intact='$v_rep' truncated='$v_rep_t')"
+  fi
+else
+  bad "C2: the capture hook did not emit a .report view — the case was not exercised"
+fi
+rm -f "$r_t/zz-untracked.txt"
+
+# --- the summary carve-out canonicalizes a NOT-YET-CREATED parent directory --------
+# _tree_canon_rel returned 1 when the summary path's parent did not exist, silently
+# DISARMING the carve-out (#2926 review). Benign only while the sentinel write also
+# fails — the day anything mkdir -p's the parent it is a guaranteed false FAIL.
+capture_exclude_rel() { # capture_exclude_rel <repo> <pinned-summary-path>
+  ( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$2" AGENT_GATE_TREE_SELFTEST=capture \
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null ) \
+    | sed -n 's/^tree-selftest: exclude-rel=//p' | head -1
+}
+mkdir -p "$r_t/existing"
+xr_have=$(capture_exclude_rel "$r_t" "$r_t/existing/sum.txt")
+xr_missing=$(capture_exclude_rel "$r_t" "$r_t/not-yet/deeper/sum.txt")
+xr_outside=$(capture_exclude_rel "$r_t" "$tmp/outside-sum.txt")
+if [ "$xr_have" = "existing/sum.txt" ]; then
+  ok "canon: an in-repo summary path with an EXISTING parent canonicalizes to $xr_have"
+else
+  bad "canon: existing-parent canonicalization wrong (got '$xr_have')"
+fi
+if [ "$xr_missing" = "not-yet/deeper/sum.txt" ]; then
+  ok "canon: a summary path whose parent does NOT exist still canonicalizes ($xr_missing) — the carve-out stays armed"
+else
+  bad "canon: a missing parent disarmed the carve-out (got '$xr_missing')"
+fi
+if [ -z "$xr_outside" ]; then
+  ok "canon: a summary path OUTSIDE the repo root is still not excluded (exclusion stays narrow)"
+else
+  bad "canon: an out-of-repo summary path was excluded as '$xr_outside'"
+fi
+
 echo "=== phase 2: the verdict paths (MAIN lane / SIDE lane / terminal) ==========="
 
 # --- B (hook control): no mutation -> a genuine RESULT: PASS --------------------
@@ -384,6 +489,95 @@ else
   bad "commit: the fixture did not actually commit — the case was not exercised"
 fi
 
+# --- C1: a HEAD move BETWEEN the terminal capture and the emit -------------------
+# THE ORIGINAL #2926 DEFECT, in its last surviving hiding place. The guard's terminal
+# capture is authoritative — but the block's `commit:`/`dirty:` stamp used to be a FRESH
+# `git rev-parse --short HEAD` / `git status --porcelain` run AFTER it, so a HEAD move
+# landing in that window produced a CERTIFIED block naming a sha the guard never
+# verified. The stamp must come from the verified capture.
+sum="$tmp/hook-postfinalize.txt"; out="$tmp/hook-postfinalize.out"
+pf_before=$( cd "$r2" && git rev-parse HEAD )
+( cd "$r2" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=postfinalize \
+    AGENT_GATE_TREE_SELFTEST_MUTATE=README.md AGENT_GATE_TREE_SELFTEST_COMMIT=1 \
+    GIT_AUTHOR_NAME=gate GIT_AUTHOR_EMAIL=gate@example.invalid \
+    GIT_COMMITTER_NAME=gate GIT_COMMITTER_EMAIL=gate@example.invalid \
+    bash "$r2/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+pf_after=$( cd "$r2" && git rev-parse HEAD )
+pf_stamp=$(sed -n 's/^commit: \([^ ]*\).*/\1/p' "$sum" | head -1)
+pf_dirty=$(sed -n 's/^commit: .*dirty: \([^ ]*\).*/\1/p' "$sum" | head -1)
+pf_endd=$(sed -n 's/^tree-end: .*dirty: \([^ ]*\).*/\1/p' "$sum" | head -1)
+if [ "$pf_before" != "$pf_after" ]; then
+  ok "C1: the fixture really moved HEAD between the terminal capture and the emit (${pf_before:0:7}→${pf_after:0:7})"
+else
+  bad "C1: HEAD did not move — the post-finalize window was not exercised"
+fi
+if [ -n "$pf_stamp" ] && [ "$pf_stamp" = "${pf_before:0:7}" ]; then
+  ok "C1: the emitted commit: names the sha the TERMINAL CAPTURE VERIFIED ($pf_stamp), not the moved HEAD"
+else
+  bad "C1: commit: is '$pf_stamp', expected the verified ${pf_before:0:7} (stamped at emit time?)"
+fi
+if [ -n "$pf_stamp" ] && [ "$pf_stamp" != "${pf_after:0:7}" ]; then
+  ok "C1: the block does NOT certify the post-move sha ${pf_after:0:7} — no unverified commit is ever named"
+else
+  bad "C1: the block certified ${pf_after:0:7}, a sha the guard never verified (rc=$rc)"
+  grep -E '^commit:|^tree-|^RESULT:' "$sum" 2>/dev/null
+fi
+if [ -n "$pf_dirty" ] && [ "$pf_dirty" = "$pf_endd" ]; then
+  ok "C1: the commit line's dirty flag is the verified capture's ($pf_dirty), not a fresh porcelain read"
+else
+  bad "C1: dirty: '$pf_dirty' disagrees with the verified tree-end dirty '$pf_endd'"
+fi
+# …and the CONTROL: on an unmutated run the same stamp is the real, current sha — the
+# capture-derived stamp is not a constant, and not a placeholder.
+ctl_head=$( cd "$r2" && git rev-parse HEAD )
+ctl_stamp=$(sed -n 's/^commit: \([^ ]*\).*/\1/p' "$tmp/hook-clean.txt" | head -1)
+ctl_branch=$(sed -n 's/^commit: .* branch: \([^ ]*\).*/\1/p' "$tmp/hook-clean.txt" | head -1)
+if [ -n "$ctl_stamp" ] && [ "$ctl_stamp" != selftest ] && [ "$ctl_stamp" != unverified ]; then
+  ok "C1 control: an unmutated run stamps a REAL capture-derived sha ($ctl_stamp), not a constant"
+else
+  bad "C1 control: the unmutated run's commit: is '$ctl_stamp' — the stamp is not capture-derived"
+fi
+if [ "$ctl_branch" = master ] || [ "$ctl_branch" = main ]; then
+  ok "C1 control: the branch label is captured inside the window ($ctl_branch)"
+else
+  bad "C1 control: unexpected branch label '$ctl_branch'"
+fi
+[ -n "$ctl_head" ] || bad "C1 control: fixture HEAD unreadable"
+
+# --- the hash-cap disclosure counts FILES, not CAPTURES ---------------------------
+# A run takes at least two captures (start + terminal). Summing their fallback counts
+# reported ONE oversized untracked file present all run as "2 untracked file(s)" (#2926
+# review). The figure must be the file count, whatever the number of captures.
+r_cap=$(mkrepo capcount-repo)
+printf 'oversized untracked payload\n' > "$r_cap/one-big.bin"
+sum="$tmp/hook-capcount.txt"
+( cd "$r_cap" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=clean \
+    AGENT_GATE_TREE_HASH_CAP_BYTES=1 \
+    bash "$r_cap/scripts/agent-gate.sh" >"$tmp/hook-capcount.out" 2>&1 ); rc=$?
+cap_line=$(grep '^tree-hash-cap: ' "$sum" 2>/dev/null | head -1)
+if [ "$rc" -eq 0 ] && [ "$cap_line" = "tree-hash-cap: 1 bytes (1 untracked file(s) recorded by size+mtime)" ]; then
+  ok "cap: ONE oversized untracked file is reported ONCE across the start AND terminal captures"
+else
+  bad "cap: the fallback count is per-capture, not per-file (rc=$rc, got '$cap_line')"
+fi
+# …and the boundary-FAIL block — which assembles its own meta — must disclose it too.
+# It used to hand-assemble tree-start/tree-end/tree-integrity and DROP tree-hash-cap,
+# hiding the weakened capture in exactly the degraded case where it matters (#2926 review).
+printf 'oversized untracked payload\n' > "$r_cap/one-big.bin"
+sum="$tmp/hook-capfail.txt"
+( cd "$r_cap" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=boundary \
+    AGENT_GATE_TREE_SELFTEST_MUTATE=README.md AGENT_GATE_TREE_HASH_CAP_BYTES=1 \
+    bash "$r_cap/scripts/agent-gate.sh" >"$tmp/hook-capfail.out" 2>&1 ); rc=$?
+assert_named_fail "cap + boundary FAIL" "$sum" "$rc"
+if grep -q '^tree-hash-cap: 1 bytes' "$sum" 2>/dev/null; then
+  ok "cap: the component-boundary FAIL block discloses the weakened capture (tree-hash-cap present)"
+else
+  bad "cap: the boundary FAIL block dropped tree-hash-cap: — the degraded capture is invisible"
+  grep -E '^tree-' "$sum" 2>/dev/null
+fi
+( cd "$r_cap" && git checkout -q -- README.md )
+rm -f "$r_cap/one-big.bin"
+
 # --- lockfile-settled: non-fatal alone, fatal with company ----------------------
 r3=$(mkrepo lockfile-repo)
 sum="$tmp/hook-lock.txt"
@@ -409,6 +603,33 @@ else
   bad "lockfile: the fatal case did not list both changed paths"
 fi
 ( cd "$r3" && git checkout -q -- Cargo.lock README.md )
+
+# --- EVERY settled lockfile is named (a workspace can re-resolve several) ---------
+# The spec scenario "every settled lockfile is named in the stamp" was previously
+# untested because the fixture had only ONE lockfile, leaving the naming LOOP uncovered
+# (#2926 review). A second, nested lockfile exercises it.
+mkdir -p "$r3/member"
+printf 'member lock v1\n' > "$r3/member/Cargo.lock"
+( cd "$r3" && git add -A && git "${GIT_ID[@]}" commit -qm 'second lockfile' ) >/dev/null 2>&1
+sum="$tmp/hook-lock-multi.txt"
+( cd "$r3" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=terminal \
+    AGENT_GATE_TREE_SELFTEST_MUTATE="Cargo.lock member/Cargo.lock" \
+    bash "$r3/scripts/agent-gate.sh" >"$tmp/hook-lock-multi.out" 2>&1 ); rc=$?
+lock_line=$(sed -n 's/^tree-integrity: PASS (lockfile-settled: \(.*\))$/\1/p' "$sum" | head -1)
+if [ "$rc" -eq 0 ] && grep -q '^RESULT: PASS' "$sum" \
+   && printf '%s' "$lock_line" | grep -q 'Cargo.lock ' \
+   && printf '%s' "$lock_line" | grep -q 'member/Cargo.lock '; then
+  ok "lockfile: BOTH settled lockfiles are named in the stamp ($lock_line)"
+else
+  bad "lockfile: the multi-lockfile stamp under-reports (rc=$rc, stamp='$lock_line')"
+  grep -E 'tree-integrity|RESULT' "$sum" 2>/dev/null
+fi
+if [ "$(printf '%s\n' "$lock_line" | grep -o '→' | wc -l | tr -d ' ')" = 2 ]; then
+  ok "lockfile: each named lockfile carries its own before→after hash pair"
+else
+  bad "lockfile: the multi-lockfile stamp does not carry one before→after pair per lockfile"
+fi
+( cd "$r3" && git checkout -q -- Cargo.lock member/Cargo.lock )
 
 # --- B1: A FAILING HASH TOOL MUST NOT CERTIFY (the headline regression) -----------
 # _tree_identity used to print whatever the hash tool produced and return 0. With an
@@ -656,8 +877,88 @@ QPY
     bad "B4: the start identity was not re-captured after the slot (pre=$pre_digest post=$post_digest start=$q_start)"
   fi
   ( cd "$r6" && git checkout -q -- README.md )
+
+  # --- C3: a TRANSIENT git blip at the slot grant must not DISARM the guard --------
+  # _tree_recapture_after_slot re-runs the start capture; its rc-1 branch ("no git
+  # worktree") sets TREE_GUARDED=0, which is correct only at the very FIRST capture. A
+  # `git rev-parse --git-dir` blip at the slot grant (a concurrent prune/gc, a stuttering
+  # network mount) therefore downgraded a 20-minute full gate to `tree-integrity: SKIP` —
+  # a live guard silently disarmed by a hiccup. Sequenced deterministically: the stub
+  # python3 arms a one-shot marker as the slot daemon starts, and the stub git fails the
+  # NEXT rev-parse pair (exactly the re-capture) and then disarms itself.
+  r7=$(mkrepo blip-repo)
+  mkdir -p "$r7/scripts/lib"
+  cp "$SCRIPT_DIR/../lib/gate_slot_daemon.py" "$r7/scripts/lib/gate_slot_daemon.py" 2>/dev/null || true
+  ( cd "$r7" && git add -A && git "${GIT_ID[@]}" commit -qm daemon ) >/dev/null 2>&1
+  REAL_GIT=$(command -v git)
+  BSTUB="$tmp/bstub"; mkdir -p "$BSTUB"
+  cp "$STUBBIN/cargo" "$BSTUB/cargo"
+  BLIP="$tmp/blip-armed"
+  cat > "$BSTUB/python3" <<QPY
+#!/usr/bin/env bash
+case "\$*" in
+  *gate_slot_daemon.py*) : > "$BLIP" ;;
+esac
+exec "$REAL_PY" "\$@"
+QPY
+  chmod +x "$BSTUB/python3"
+  cat > "$BSTUB/git" <<QGIT
+#!/usr/bin/env bash
+if [ -f "$BLIP" ]; then
+  case "\$*" in
+    *"rev-parse HEAD"*)      exit 128 ;;
+    *"rev-parse --git-dir"*)
+      rm -f "$BLIP"
+      # BLIP_MUTATE (second run only): edit the tree at the very moment the re-capture
+      # fails, so the mutation lands INSIDE the window the retained capture defines.
+      [ -n "\${BLIP_MUTATE:-}" ] && printf 'edited at the blip\n' >> "\$BLIP_MUTATE"
+      exit 128 ;;
+  esac
+fi
+exec "$REAL_GIT" "\$@"
+QGIT
+  chmod +x "$BSTUB/git"
+  sum="$tmp/blip.txt"; out="$tmp/blip.out"
+  ( cd "$r7" && PATH="$BSTUB:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+      CQLITE_GATE_SLOTS_DIR="$tmp/slots-blip" CQLITE_GATE_MAX_CONCURRENCY=1 \
+      CQLITE_DATASETS_ROOT="$tmp/empty-datasets" \
+      bash "$r7/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+  if [ ! -f "$BLIP" ]; then
+    ok "C3: the one-shot git blip fired during the run (the re-capture really saw 'no git worktree')"
+  else
+    bad "C3: the blip never fired — the case was not exercised"
+  fi
+  if grep -q '^tree-integrity: SKIP' "$sum" 2>/dev/null; then
+    bad "C3: a transient git blip DISARMED the guard — the run certified with tree-integrity: SKIP (rc=$rc)"
+    grep -E '^tree-' "$sum" 2>/dev/null
+  else
+    ok "C3: the guard stays ARMED across the blip — no tree-integrity: SKIP"
+  fi
+  if grep -q '^tree-start: .*pre-queue capture retained' "$sum" 2>/dev/null \
+     && grep -q '^tree-integrity: PASS' "$sum" 2>/dev/null; then
+    ok "C3: the pre-queue capture is retained and still verified at the terminal capture (tree-integrity: PASS)"
+  else
+    bad "C3: the retained-capture path did not certify (rc=$rc)"
+    grep -E '^tree-' "$sum" 2>/dev/null
+  fi
+  # …and the retained capture still DETECTS: the same blip with a real mutation FAILs.
+  sum="$tmp/blip-mut.txt"; out="$tmp/blip-mut.out"
+  ( cd "$r7" && PATH="$BSTUB:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+      CQLITE_GATE_SLOTS_DIR="$tmp/slots-blip2" CQLITE_GATE_MAX_CONCURRENCY=1 \
+      CQLITE_DATASETS_ROOT="$tmp/empty-datasets" \
+      BLIP_MUTATE="$r7/README.md" \
+      bash "$r7/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+  if grep -q 'tree-integrity: FAIL (tree-mutated-midrun;' "$sum" 2>/dev/null \
+     && ! grep -q '^RESULT: PASS' "$sum" 2>/dev/null; then
+    ok "C3: a guard retained across the blip still DETECTS a real mid-run mutation"
+  else
+    bad "C3: the retained guard missed a real mutation (rc=$rc)"
+    grep -E '^tree-|^RESULT:' "$sum" 2>/dev/null
+  fi
+  ( cd "$r7" && git checkout -q -- README.md )
 else
   ok "B4: SKIP — python3 unavailable, the slot daemon (and therefore the queue) cannot run here"
+  ok "C3: SKIP — python3 unavailable, the slot-grant re-capture cannot be sequenced here"
 fi
 
 # --- G: --lite ------------------------------------------------------------------
@@ -844,11 +1145,102 @@ if awk '/^_tree_capture_start\(\) \{/,/^\}/' "$GATE" | grep -q "IFS=\$'\\\\t' re
 else
   ok "WIRING: the identity is split by _tree_split_identity, which preserves empty fields and validates each"
 fi
-n_final=$(grep -c '_tree_finalize' "$GATE")
-if [ "$n_final" -ge 5 ]; then
-  ok "WIRING: _tree_finalize is called on every terminal path (full, lite, delta, delta-refusals): $n_final references"
+# C4: PER-CALL-SITE, never a textual occurrence count. `grep -c '_tree_finalize'` counted
+# the definition, its doc comment, the _tree_meta_lines/_tree_meta_array internals and the
+# self-test hooks — ALL of which survive deleting every terminal call site, so the
+# assertion could not fail for the reason it existed (#2926 review C4). Each terminal path
+# is now asserted inside its own awk range, and the check is PROVED discriminating below
+# by deleting each call site in a scratch copy.
+# fn_body <file> <function-name> — the lines of one top-level function definition.
+fn_body() {
+  awk -v f="$2() {" 'index($0, f) == 1 { inf = 1 } inf { print } inf && /^\}/ { inf = 0 }' "$1"
+}
+# body_has <text> <line-prefix> — rc 0 iff some LINE of <text> starts with <line-prefix>.
+# Deliberately pipe-free: this file runs under `set -o pipefail`, and `awk … | grep -q`
+# makes the PIPELINE fail on awk's SIGPIPE once grep short-circuits — a structural check
+# that reports "missing" for a call site that is plainly present.
+body_has() {
+  case $'\n'"$1" in *$'\n'"$2"*) return 0 ;; esac
+  return 1
+}
+tree_finalize_sites() { # <gate-file> -> prints the MISSING sites; rc 1 when any is missing
+  local g="$1" missing="" fin emit
+  body_has "$(fn_body "$g" run_lite)"  '  _tree_finalize'   || missing="run_lite"
+  body_has "$(fn_body "$g" run_delta)" '    _tree_finalize' || missing="${missing:+$missing }run_delta"
+  # top level: the column-0 call site must precede the final terminal emit. Matched on the
+  # exact CALL form — `^_tree_finalize` alone also matches the DEFINITION line, which
+  # survives deleting every call site (the #2926 review C4 vacuity, in miniature).
+  fin=$(grep -n '^_tree_finalize || true$' "$g" | tail -1 | cut -d: -f1)
+  emit=$(grep -n '^_emit_terminal_summary "\$OVERALL" "\${SUMMARY_META\[@\]}"' "$g" | tail -1 | cut -d: -f1)
+  if [ -z "$fin" ] || [ -z "$emit" ] || [ "$fin" -ge "$emit" ]; then
+    missing="${missing:+$missing }top-level"
+  fi
+  [ -z "$missing" ] || { printf '%s\n' "$missing"; return 1; }
+  return 0
+}
+if miss_sites=$(tree_finalize_sites "$GATE"); then
+  ok "WIRING: _tree_finalize is called from EVERY terminal path (run_lite, run_delta, top-level pre-emit)"
 else
-  bad "WIRING: only $n_final _tree_finalize references — a terminal emit path is unguarded"
+  bad "WIRING: terminal path(s) with no _tree_finalize call: $miss_sites"
+fi
+# …and the PROOF that the check can fail: delete one call site at a time in a scratch copy.
+mutant_drop() { # mutant_drop <src> <dst> <lite|delta|top>
+  case "$3" in
+    lite)  awk '/^run_lite\(\) \{/{inf=1} inf && /^  _tree_finalize/{next} /^\}/{if(inf) inf=0} {print}'  "$1" > "$2" ;;
+    delta) awk '/^run_delta\(\) \{/{inf=1} inf && /^    _tree_finalize/{next} /^\}/{if(inf) inf=0} {print}' "$1" > "$2" ;;
+    top)   grep -v '^_tree_finalize || true$' "$1" > "$2" ;;
+  esac
+}
+for site in lite delta top; do
+  mut="$tmp/mutant-$site.sh"
+  mutant_drop "$GATE" "$mut" "$site"
+  if cmp -s "$GATE" "$mut"; then
+    bad "C4: the '$site' mutation removed nothing — the proof is vacuous"
+  elif tree_finalize_sites "$mut" >/dev/null 2>&1; then
+    bad "C4: the structural check STILL PASSES after deleting the '$site' terminal call site (can't-fail guard)"
+  else
+    ok "C4: the structural check FAILS when the '$site' terminal call site is deleted (proved discriminating)"
+  fi
+done
+# C1: the `commit:` stamp must never be a fresh emit-time git read — the original defect.
+# Comments are stripped (prose ABOUT the defect must not trip the check) and the ONE
+# legitimate site is skipped: _tree_commit_meta's UNGUARDED branch, reached only when
+# there is no git worktree to capture, where the block already stamps tree-integrity: SKIP.
+emit_time_stamps=$(awk '/^_tree_commit_meta\(\) \{/ { skip = 1 } skip { if (/^\}/) skip = 0; next } { print }' "$GATE" \
+                     | sed 's/[[:space:]]*#.*$//' | grep -n 'commit: \$(git' || true)
+if [ -n "$emit_time_stamps" ]; then
+  bad "C1: an emit-time 'commit: \$(git …)' stamp is back — the block can name an unverified sha"
+  printf '%s\n' "$emit_time_stamps"
+else
+  ok "C1: no emit path stamps 'commit:' from a fresh git call (every stamp is capture-derived)"
+fi
+for fn in run_lite run_delta; do
+  if body_has "$(fn_body "$GATE" "$fn")" '  _tree_commit_meta'; then
+    ok "C1: $fn() stamps commit: via _tree_commit_meta (verified-capture derived)"
+  else
+    bad "C1: $fn() does not derive its commit: stamp from the verified capture"
+  fi
+done
+cm_ln=$(grep -n '^_tree_commit_meta$' "$GATE" | tail -1 | cut -d: -f1)
+tf_ln=$(grep -n '^_tree_finalize || true$' "$GATE" | tail -1 | cut -d: -f1)
+te_ln=$(grep -n '^_emit_terminal_summary "\$OVERALL" "\${SUMMARY_META\[@\]}"' "$GATE" | tail -1 | cut -d: -f1)
+if [ -n "$cm_ln" ] && [ -n "$tf_ln" ] && [ -n "$te_ln" ] && [ "$tf_ln" -lt "$cm_ln" ] && [ "$cm_ln" -lt "$te_ln" ]; then
+  ok "C1: the top-level stamp is taken AFTER the terminal capture and BEFORE the emit (finalize=$tf_ln stamp=$cm_ln emit=$te_ln)"
+else
+  bad "C1: the top-level commit stamp is not sequenced between the capture and the emit (finalize=$tf_ln stamp=$cm_ln emit=$te_ln)"
+fi
+# The provenance renderer is shared: no emit path may hand-assemble a subset of the lines
+# and drop `tree-hash-cap:` (#2926 review).
+if body_has "$(fn_body "$GATE" _tree_boundary_fail)" '  while IFS= read -r _l; do _meta+=("$_l"); done < <(_tree_meta_render_lines)'; then
+  ok "WIRING: the boundary-FAIL block renders its provenance through the shared renderer (tree-hash-cap included)"
+else
+  bad "WIRING: _tree_boundary_fail hand-assembles its provenance lines — tree-hash-cap: can be dropped"
+fi
+# The manifest trailer is validated, not merely written (#2926 review C2).
+if body_has "$(fn_body "$GATE" _tree_identity)" '  _tree_manifest_ok "$out" nul'; then
+  ok "WIRING: _tree_identity validates its own manifest through _tree_manifest_ok (header+trailer+count)"
+else
+  bad "WIRING: the manifest is not trailer-validated — a truncated capture can compare equal"
 fi
 # Side-effect freedom is a CODE property: no -w on hash-object, --no-optional-locks on
 # every git call inside the capture helpers. Comment lines are stripped first so prose
