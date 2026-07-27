@@ -1816,12 +1816,38 @@ fi
 # untracked file is recorded by size+mtime instead of by content hash, which can only
 # WEAKEN detection for one oversized untracked blob; it can never suppress a detected
 # mutation, and any use (or any non-default value) is stamped as `tree-hash-cap:`.
+#
+# The knob is FLOORED at TREE_HASH_CAP_MIN (#2926 review F4). Rejecting only non-numeric
+# input accepted `0` and `1`, at which EVERY untracked file — not one oversized blob — is
+# recorded by size+mtime, so a same-size content edit that preserves mtime became invisible:
+# the header's "can only weaken for one oversized blob" claim was false at a low cap. A
+# sub-floor (or unusably large, or non-numeric) value is normalized and the normalization is
+# STAMPED, so the weakening is never silent either way.
 TREE_HASH_CAP_DEFAULT=8388608
+TREE_HASH_CAP_MIN=4096
+TREE_HASH_CAP_NOTE=""
 TREE_HASH_CAP_BYTES="${AGENT_GATE_TREE_HASH_CAP_BYTES:-$TREE_HASH_CAP_DEFAULT}"
 case "$TREE_HASH_CAP_BYTES" in
-  ''|*[!0-9]*) TREE_HASH_CAP_BYTES="$TREE_HASH_CAP_DEFAULT" ;;
+  ''|*[!0-9]*)
+    TREE_HASH_CAP_NOTE="invalid '$TREE_HASH_CAP_BYTES' → default"
+    TREE_HASH_CAP_BYTES="$TREE_HASH_CAP_DEFAULT" ;;
 esac
+# A value too long for shell arithmetic would make the `-lt` below (and `find -size`) error
+# out, so it is normalized before any numeric use.
+if [ "${#TREE_HASH_CAP_BYTES}" -gt 18 ]; then
+  TREE_HASH_CAP_NOTE="out-of-range '$TREE_HASH_CAP_BYTES' → default"
+  TREE_HASH_CAP_BYTES="$TREE_HASH_CAP_DEFAULT"
+fi
+if [ "$TREE_HASH_CAP_BYTES" -lt "$TREE_HASH_CAP_MIN" ]; then
+  TREE_HASH_CAP_NOTE="clamped from $TREE_HASH_CAP_BYTES to the ${TREE_HASH_CAP_MIN}-byte floor"
+  TREE_HASH_CAP_BYTES="$TREE_HASH_CAP_MIN"
+fi
 TREE_GUARDED=0            # 1 once a start identity was captured (the guard is live)
+# Why the guard is not armed, when it is not (#2926 review F1). Only `no-worktree` — set
+# by _tree_capture_start's rc-1 branch — marks a REAL capture attempt that found no git
+# worktree; the synthetic emission modes leave it empty so their `selftest` identity is
+# never touched by the unguarded-terminal probe.
+TREE_UNGUARDED_REASON=""
 TREE_MUTATED=0            # 1 once a non-lockfile mid-run mutation was detected
 TREE_CAPTURE_FAILED=0     # 1 when a capture ran but could not be validated (fail closed)
 TREE_CAPTURE_FAIL_REASON="tree-capture-failed; the tree cannot be proven unchanged"
@@ -2181,11 +2207,13 @@ _tree_cap_note() {
   return 0
 }
 
-# _tree_cap_stamp: stamp `tree-hash-cap:` when the knob is non-default OR the
-# size+mtime fallback was actually used (so a weakened capture is never invisible).
+# _tree_cap_stamp: stamp `tree-hash-cap:` when the knob is non-default, when it was
+# NORMALIZED (clamped/rejected — #2926 review F4), or when the size+mtime fallback was
+# actually used, so neither a weakened capture nor a rejected knob value is ever invisible.
 _tree_cap_stamp() {
-  if [ "$TREE_HASH_CAP_BYTES" != "$TREE_HASH_CAP_DEFAULT" ] || [ "${TREE_CAP_FALLBACKS:-0}" -gt 0 ]; then
-    TREE_HASH_CAP_LINE="tree-hash-cap: $TREE_HASH_CAP_BYTES bytes (${TREE_CAP_FALLBACKS:-0} untracked file(s) recorded by size+mtime)"
+  if [ "$TREE_HASH_CAP_BYTES" != "$TREE_HASH_CAP_DEFAULT" ] || [ -n "$TREE_HASH_CAP_NOTE" ] \
+     || [ "${TREE_CAP_FALLBACKS:-0}" -gt 0 ]; then
+    TREE_HASH_CAP_LINE="tree-hash-cap: $TREE_HASH_CAP_BYTES bytes${TREE_HASH_CAP_NOTE:+ ($TREE_HASH_CAP_NOTE)} (${TREE_CAP_FALLBACKS:-0} untracked file(s) recorded by size+mtime)"
   fi
 }
 
@@ -2197,6 +2225,7 @@ _tree_capture_start() {
   id=$(_tree_identity "$LOG_DIR/tree-identity.start"); rc=$?
   if [ "$rc" -eq 1 ]; then
     TREE_GUARDED=0
+    TREE_UNGUARDED_REASON=no-worktree
     TREE_CAPTURE_FAILED=0
     TREE_START_LINE="tree-start: (capture unavailable — no git worktree)"
     TREE_END_LINE="tree-end: (capture unavailable — no git worktree)"
@@ -2217,6 +2246,7 @@ _tree_capture_start() {
     return 0
   fi
   TREE_CAPTURE_FAILED=0
+  TREE_UNGUARDED_REASON=""
   TREE_START_HEAD="$TREE_F_HEAD"; TREE_START_DIRTY="$TREE_F_DIRTY"
   TREE_START_DIGEST="$TREE_F_DIGEST"
   TREE_CAP_FALLBACKS=0; _tree_cap_note "$TREE_F_FB"
@@ -2243,18 +2273,37 @@ _tree_capture_start() {
 # The startup sentinel deliberately keeps the EARLY tree-start it was written with — it
 # records the tree the process began on; the emitted block records the guarded window.
 #
-# A TRANSIENT git failure at the slot grant SHALL NOT disarm a live guard (#2926 review
-# C3). `_tree_capture_start`'s rc-1 branch ("no git worktree") sets TREE_GUARDED=0, which
-# is correct only at the VERY FIRST capture — reaching here means a real capture already
-# succeeded, so a `git rev-parse --git-dir` blip (a concurrent prune/gc, a stuttering
-# network mount) would silently downgrade the whole full gate to `tree-integrity: SKIP`.
-# So the pre-queue capture is snapshotted first and RESTORED if the re-capture reports
-# "no worktree"; the run stays guarded, certifying against the older (strictly wider)
-# window. rc 2 is NOT restored — an unvalidatable capture already fails closed, which is
-# the safe direction.
+# A TRANSIENT git failure SHALL NOT disarm the guard — in EITHER direction (#2926 review
+# C3 + F1). `_tree_capture_start`'s rc-1 branch ("no git worktree") sets TREE_GUARDED=0,
+# and a `git rev-parse --git-dir` blip (a concurrent prune/gc, a stuttering network mount)
+# is indistinguishable from a genuinely non-git tree at the moment it happens. Both blip
+# positions are handled here, conservatively:
+#
+#   * blip at the RE-CAPTURE (a live guard, C3): the pre-queue capture is snapshotted
+#     first and RESTORED, so the run stays guarded and certifies against the older
+#     (strictly wider) window.
+#   * blip at the FIRST capture (an unarmed guard, F1): the mirror image, and the more
+#     dangerous one — second 0 of the process is exactly when a `git gc`/prune is likeliest
+#     and a single failure there used to yield `tree-integrity: SKIP` + `RESULT: PASS` for
+#     the WHOLE run. So the capture is RE-ATTEMPTED here and the guard is ARMED on success.
+#     A genuinely non-git tree simply fails the re-attempt and stays SKIP, so the spec'd
+#     no-worktree SKIP contract is unchanged; only a transient failure is recovered.
+#
+# rc 2 is NOT restored/re-attempted in either direction — an unvalidatable capture already
+# fails closed, which is the safe direction.
 _tree_recapture_after_slot() {
-  [ "$TREE_GUARDED" -eq 1 ] || return 0
   [ "$TREE_CAPTURE_FAILED" -eq 1 ] && return 0
+  if [ "$TREE_GUARDED" -ne 1 ]; then
+    # F1: the first capture found no worktree. Re-attempt; a blip recovers, a real
+    # non-git tree does not (it fails the same way twice and stays SKIP).
+    [ "$TREE_UNGUARDED_REASON" = no-worktree ] || return 0
+    _tree_capture_start
+    if [ "$TREE_GUARDED" -eq 1 ] && [ "$TREE_CAPTURE_FAILED" -ne 1 ]; then
+      TREE_START_LINE="$TREE_START_LINE (captured at the slot grant — the first capture found no git worktree)"
+      echo "⚠️ agent-gate: tree-integrity start capture was unavailable at process start but SUCCEEDED at the slot grant — the first failure was transient, guard ARMED (#2926)" >&2
+    fi
+    return 0
+  fi
   local s_head="$TREE_START_HEAD" s_dirty="$TREE_START_DIRTY" s_digest="$TREE_START_DIGEST"
   local s_branch="$TREE_START_BRANCH" s_fb="$TREE_CAP_FALLBACKS"
   local s_start="$TREE_START_LINE" s_end="$TREE_END_LINE" s_int="$TREE_INTEGRITY_LINE"
@@ -2684,6 +2733,45 @@ _tree_changed_paths() {
 # difference is stamped `lockfile-settled` and proceeds; a lockfile accompanied by ANY
 # other change is a full mutation FAIL. Follow-up #2962 adds --locked to the gate's
 # cargo invocations, after which this carve-out SHOULD BE DELETED.
+
+# _tree_report_tag <report> <path> -> the record's TAG (T|U) for <path>, empty if absent.
+_tree_report_tag() {
+  awk -F'\t' -v p="$2" '$4 == p { print $1; exit }' "$1" 2>/dev/null
+}
+# _tree_report_value <report> <path> -> the record's VALUE field, empty if absent.
+_tree_report_value() {
+  awk -F'\t' -v p="$2" '$4 == p { print $2; exit }' "$1" 2>/dev/null
+}
+
+# _tree_lockfile_admissible <a.report> <b.report> <head-a> <path>
+#   rc 0 iff <path> may take the NON-FATAL `lockfile-settled` class.
+#
+# Matching on the path alone was a fail-closed hole (#2926 review F3): an UNTRACKED file
+# that merely happens to be named `…/Cargo.lock` and appears mid-run got the non-fatal
+# class, so a real mid-run mutation certified. Admission now requires ALL of:
+#   1. the END record is TAG `T` — a path git tracks, never an untracked impostor;
+#   2. the START record, if the path was already dirty at the start capture, is also `T`;
+#   3. the END value is a real 40-hex blob hash — a DELETED/NONFILE/LINK/size+mtime
+#      record is a lifecycle change, NOT "cargo re-resolved the lockfile" (the near-miss
+#      variant of the same defect: a mid-run `rm Cargo.lock` is a mutation, not a settle);
+#   4. the path is a BLOB IN THE START COMMIT — the authoritative "this lockfile was part
+#      of the tree this run began on" test. (Presence in the START MANIFEST cannot be
+#      required: a lockfile that is clean at start and re-resolved mid-run — the dominant
+#      legitimate case, and the entire reason the carve-out exists — is absent there.)
+# Anything else falls through to the fatal `other` class.
+_tree_lockfile_admissible() {
+  local a="$1" b="$2" head_a="$3" p="$4" ta tb vb
+  case "$p" in Cargo.lock|*/Cargo.lock) : ;; *) return 1 ;; esac
+  [ -n "$head_a" ] && [ "$head_a" != unborn ] || return 1
+  tb=$(_tree_report_tag "$b" "$p"); [ "$tb" = T ] || return 1
+  ta=$(_tree_report_tag "$a" "$p"); [ -z "$ta" ] || [ "$ta" = T ] || return 1
+  vb=$(_tree_report_value "$b" "$p")
+  case "$vb" in *[!0-9a-f]*|"") return 1 ;; esac
+  [ "${#vb}" -eq 40 ] || return 1
+  [ "$(git --no-optional-locks cat-file -t "$head_a:$p" 2>/dev/null)" = blob ] || return 1
+  return 0
+}
+
 _tree_change_class() {
   local a="$1" b="$2" head_a="$3" head_b="$4"
   local list n cls=other rendered p locks=0 nonlock=0 before after detail=""
@@ -2692,18 +2780,19 @@ _tree_change_class() {
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     n=$(( n + 1 ))
-    case "$p" in
-      Cargo.lock|*/Cargo.lock) locks=$(( locks + 1 )) ;;
-      *) nonlock=1 ;;
-    esac
+    if _tree_lockfile_admissible "$a" "$b" "$head_a" "$p"; then
+      locks=$(( locks + 1 ))
+    else
+      nonlock=1
+    fi
   done <<<"$list"
   if [ "$head_a" = "$head_b" ] && [ "$n" -gt 0 ] && [ "$nonlock" -eq 0 ] && [ "$locks" -gt 0 ]; then
     # Name EVERY settled lockfile, not just the first (#2926 review): a workspace can
     # re-resolve several, and a stamp that hides the rest under-reports what moved.
     while IFS= read -r p; do
       [ -n "$p" ] || continue
-      before=$(awk -F'\t' -v p="$p" '$4 == p { print $2; exit }' "$a" 2>/dev/null)
-      after=$(awk -F'\t' -v p="$p" '$4 == p { print $2; exit }' "$b" 2>/dev/null)
+      before=$(_tree_report_value "$a" "$p")
+      after=$(_tree_report_value "$b" "$p")
       detail="${detail:+$detail }$p $(_tree_short "${before:-unmodified}")→$(_tree_short "${after:-unmodified}")"
     done <<<"$list"
     printf 'lockfile\t%s\n' "$detail"
@@ -2847,9 +2936,29 @@ _apply_tree_integrity_marker() {
 # the LAST component boundary is still caught here; this is the one check that can
 # never be skipped. Forces OVERALL=FAIL on detection (so `--only` reports FAIL rather
 # than PARTIAL, and every mode's exit status follows). rc 1 iff mutated.
+# _tree_unguarded_terminal_probe: the F1 near-miss cover for the modes that have NO slot
+# grant to re-arm at (--lite, --delta, --only). If the FIRST capture reported "no git
+# worktree" but a worktree IS present at the terminal capture, the SKIP was produced by a
+# TRANSIENT failure, not by a non-git tree — and this run proved nothing about the tree.
+# The verdict stays SKIP (the no-worktree SKIP contract is spec'd and is not changed here),
+# but the line SAYS SO, so a reader can never read that SKIP as "there was nothing to check".
+_tree_unguarded_terminal_probe() {
+  [ "$TREE_UNGUARDED_REASON" = no-worktree ] || return 0
+  local probe="$LOG_DIR/tree-identity.skipprobe.${BASHPID:-$$}"
+  _tree_identity "$probe" >/dev/null 2>&1; local rc=$?
+  rm -f "$probe" "$probe.report" 2>/dev/null || true
+  [ "$rc" -eq 1 ] && return 0        # still no worktree — the genuine SKIP
+  TREE_INTEGRITY_LINE="tree-integrity: SKIP (start capture found no git worktree, but a worktree WAS present at the terminal capture — the start capture failed transiently; this run proves NOTHING about the tree)"
+  echo "⚠️ agent-gate: tree-integrity was never armed because the start capture found no git worktree, yet a worktree is present now — the start capture failed transiently (#2926)" >&2
+  return 0
+}
+
 _tree_finalize() {
   _apply_tree_integrity_marker
-  [ "$TREE_GUARDED" -eq 1 ] || return 0
+  if [ "$TREE_GUARDED" -ne 1 ]; then
+    _tree_unguarded_terminal_probe
+    return 0
+  fi
   # The terminal manifest path is PER-LANE (#2926 review B7): _tree_finalize is reachable
   # from a backgrounded SIDE-lane subshell (via _tree_meta_lines/_tree_meta_array on the
   # integrity-fail publish path), and a fixed filename let two lanes write one file.

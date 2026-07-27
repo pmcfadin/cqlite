@@ -79,10 +79,35 @@ mkrepo() { # mkrepo <name> -> echoes the repo path
 # component executes, with no sleep and no race.
 STUBBIN="$tmp/stubbin"
 mkdir -p "$STUBBIN"
+#
+# The mid-run edit shapes it can perform, all inside the `fmt` component:
+#   FAKE_CARGO_MUTATE  — append to a file (the dominant shape)
+#   FAKE_CARGO_CREATE  — create a NEW untracked file (the #2926 F3 shape: an untracked
+#                        `…/Cargo.lock` appearing mid-run must never take the carve-out)
+#   FAKE_CARGO_RM      — delete a file (the F3 near-miss: a mid-run `rm Cargo.lock`)
+#   FAKE_CARGO_INPLACE — overwrite a file's bytes keeping its SIZE, then restore its MTIME
+#                        from FAKE_CARGO_INPLACE_REF (the F4 shape: the only edit a
+#                        size+mtime record cannot see, so it needs the content hash)
 cat > "$STUBBIN/cargo" <<'STUB'
 #!/usr/bin/env bash
 if [ "${1:-}" = fmt ]; then
   [ -n "${FAKE_CARGO_MUTATE:-}" ] && printf 'mid-run edit\n' >> "$FAKE_CARGO_MUTATE"
+  if [ -n "${FAKE_CARGO_CREATE:-}" ]; then
+    for _p in $FAKE_CARGO_CREATE; do
+      mkdir -p "$(dirname "$_p")"
+      printf 'created mid-run\n' > "$_p"
+    done
+  fi
+  [ -n "${FAKE_CARGO_RM:-}" ] && rm -f "$FAKE_CARGO_RM"
+  if [ -n "${FAKE_CARGO_INPLACE:-}" ]; then
+    cp -p "$FAKE_CARGO_INPLACE" "$FAKE_CARGO_INPLACE_REF"
+    _n=$(wc -c < "$FAKE_CARGO_INPLACE" | tr -d ' ')
+    # same byte count, different bytes
+    _i=0; : > "$FAKE_CARGO_INPLACE"
+    while [ "$_i" -lt "$_n" ]; do printf 'Z' >> "$FAKE_CARGO_INPLACE"; _i=$(( _i + 1 )); done
+    touch -r "$FAKE_CARGO_INPLACE_REF" "$FAKE_CARGO_INPLACE"
+    rm -f "$FAKE_CARGO_INPLACE_REF"
+  fi
   if [ -n "${FAKE_CARGO_CHURN:-}" ]; then
     # Exactly the churn a real gate produces inside the checkout: build output under
     # target/ and a *.log — both covered by the repo's own ignore rules.
@@ -276,17 +301,74 @@ fi
 ( cd "$r1" && git checkout -q -- docs test-data )
 
 # --- the hash cap is stamped, and cannot suppress a detection -------------------
-printf 'oversized untracked payload\n' > "$r1/big-untracked.bin"
+# A file LARGER than the cap in force (the floor is 4096 bytes — see F4 below), so the
+# size+mtime fallback genuinely engages and must be disclosed.
+mkbig() { # mkbig <path> <bytes>
+  local i=0
+  : > "$1"
+  while [ "$i" -lt "$2" ]; do printf '0123456789abcdef' >> "$1"; i=$(( i + 16 )); done
+}
+mkbig "$r1/big-untracked.bin" 8192
 cap_out=$( cd "$r1" && env AGENT_GATE_SUMMARY_FILE="$tmp/cap-sentinel.txt" \
-             AGENT_GATE_TREE_SELFTEST=capture AGENT_GATE_TREE_HASH_CAP_BYTES=1 \
+             AGENT_GATE_TREE_SELFTEST=capture AGENT_GATE_TREE_HASH_CAP_BYTES=4096 \
              bash "$r1/scripts/agent-gate.sh" 2>/dev/null )
-if printf '%s' "$cap_out" | grep -q 'cap-line=tree-hash-cap: 1 bytes (1 untracked file(s) recorded by size+mtime)'; then
+if printf '%s' "$cap_out" | grep -q 'cap-line=tree-hash-cap: 4096 bytes (1 untracked file(s) recorded by size+mtime)'; then
   ok "cap: a non-default AGENT_GATE_TREE_HASH_CAP_BYTES and the fallback use are STAMPED"
 else
   bad "cap: tree-hash-cap: stamp missing/incorrect"
   printf '%s\n' "$cap_out" | sed -n 's/^tree-selftest: cap-line=/  got: /p'
 fi
+
+# --- F4: the cap is FLOORED, and the normalization is stamped ---------------------
+# Rejecting only non-numeric input accepted 0 and 1, at which EVERY untracked file — not
+# one oversized blob — falls back to size+mtime, so the "can only weaken for one oversized
+# blob" claim was false. Values below the floor are clamped, and the clamp is disclosed.
+cap_field() { # cap_field <repo> <cap-value> <field>  (field: cap-line | fallbacks)
+  ( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/cap-sentinel.txt" \
+      AGENT_GATE_TREE_SELFTEST=capture AGENT_GATE_TREE_HASH_CAP_BYTES="$2" \
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null ) \
+    | sed -n "s/^tree-selftest: $3=//p;s/.*[ ]$3=\([^ ]*\).*/\1/p" | head -1
+}
+for lowcap in 0 1 4095; do
+  got=$(cap_field "$r1" "$lowcap" cap-line)
+  case "$got" in
+    "tree-hash-cap: 4096 bytes (clamped from $lowcap to the 4096-byte floor)"*)
+      ok "F4: cap=$lowcap is clamped to the 4096-byte floor and the clamp is STAMPED" ;;
+    *)
+      bad "F4: cap=$lowcap was not clamped/stamped (got '$got')" ;;
+  esac
+done
+got=$(cap_field "$r1" "not-a-number" cap-line)
+case "$got" in
+  "tree-hash-cap: 8388608 bytes (invalid 'not-a-number' → default)"*)
+    ok "F4: a non-numeric cap falls back to the default and the rejection is STAMPED" ;;
+  *) bad "F4: a non-numeric cap is not stamped (got '$got')" ;;
+esac
+got=$(cap_field "$r1" 99999999999999999999999 cap-line)
+case "$got" in
+  "tree-hash-cap: 8388608 bytes (out-of-range "*)
+    ok "F4: an out-of-range cap falls back to the default and is STAMPED (no arithmetic error)" ;;
+  *) bad "F4: an out-of-range cap is not normalized (got '$got')" ;;
+esac
+# …and the CONTROL: the default cap stamps NOTHING when no fallback is used, so the line
+# means "this capture was weakened", not "the gate ran".
 rm -f "$r1/big-untracked.bin"
+got=$(cap_field "$r1" 8388608 cap-line)
+if [ "$got" = "<none>" ]; then
+  ok "F4 control: the default cap with no fallback stamps no tree-hash-cap: line"
+else
+  bad "F4 control: the default cap stamped '$got'"
+fi
+# …and at the floor, an ORDINARY small untracked file is CONTENT-HASHED, not size+mtime:
+# the weakening the clamp exists to prevent, measured at the capture.
+printf 'a small ordinary untracked file\n' > "$r1/small-untracked.txt"
+fb=$(cap_field "$r1" 1 fallbacks)
+if [ "$fb" = 0 ]; then
+  ok "F4: at cap=1 (clamped) an ordinary small untracked file is content-hashed (0 size+mtime fallbacks)"
+else
+  bad "F4: a low cap pushed ordinary untracked files onto the size+mtime fallback ($fb file(s))"
+fi
+rm -f "$r1/small-untracked.txt"
 
 # --- C2: a manifest TRUNCATED after the H record must never compare EQUAL ---------
 # ENOSPC on $TMPDIR during a 40-60 minute gate truncates the manifest write. Validating
@@ -549,13 +631,13 @@ fi
 # reported ONE oversized untracked file present all run as "2 untracked file(s)" (#2926
 # review). The figure must be the file count, whatever the number of captures.
 r_cap=$(mkrepo capcount-repo)
-printf 'oversized untracked payload\n' > "$r_cap/one-big.bin"
+mkbig "$r_cap/one-big.bin" 8192
 sum="$tmp/hook-capcount.txt"
 ( cd "$r_cap" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=clean \
-    AGENT_GATE_TREE_HASH_CAP_BYTES=1 \
+    AGENT_GATE_TREE_HASH_CAP_BYTES=4096 \
     bash "$r_cap/scripts/agent-gate.sh" >"$tmp/hook-capcount.out" 2>&1 ); rc=$?
 cap_line=$(grep '^tree-hash-cap: ' "$sum" 2>/dev/null | head -1)
-if [ "$rc" -eq 0 ] && [ "$cap_line" = "tree-hash-cap: 1 bytes (1 untracked file(s) recorded by size+mtime)" ]; then
+if [ "$rc" -eq 0 ] && [ "$cap_line" = "tree-hash-cap: 4096 bytes (1 untracked file(s) recorded by size+mtime)" ]; then
   ok "cap: ONE oversized untracked file is reported ONCE across the start AND terminal captures"
 else
   bad "cap: the fallback count is per-capture, not per-file (rc=$rc, got '$cap_line')"
@@ -563,13 +645,13 @@ fi
 # …and the boundary-FAIL block — which assembles its own meta — must disclose it too.
 # It used to hand-assemble tree-start/tree-end/tree-integrity and DROP tree-hash-cap,
 # hiding the weakened capture in exactly the degraded case where it matters (#2926 review).
-printf 'oversized untracked payload\n' > "$r_cap/one-big.bin"
+mkbig "$r_cap/one-big.bin" 8192
 sum="$tmp/hook-capfail.txt"
 ( cd "$r_cap" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=boundary \
-    AGENT_GATE_TREE_SELFTEST_MUTATE=README.md AGENT_GATE_TREE_HASH_CAP_BYTES=1 \
+    AGENT_GATE_TREE_SELFTEST_MUTATE=README.md AGENT_GATE_TREE_HASH_CAP_BYTES=4096 \
     bash "$r_cap/scripts/agent-gate.sh" >"$tmp/hook-capfail.out" 2>&1 ); rc=$?
 assert_named_fail "cap + boundary FAIL" "$sum" "$rc"
-if grep -q '^tree-hash-cap: 1 bytes' "$sum" 2>/dev/null; then
+if grep -q '^tree-hash-cap: 4096 bytes' "$sum" 2>/dev/null; then
   ok "cap: the component-boundary FAIL block discloses the weakened capture (tree-hash-cap present)"
 else
   bad "cap: the boundary FAIL block dropped tree-hash-cap: — the degraded capture is invisible"
@@ -630,6 +712,42 @@ else
   bad "lockfile: the multi-lockfile stamp does not carry one before→after pair per lockfile"
 fi
 ( cd "$r3" && git checkout -q -- Cargo.lock member/Cargo.lock )
+
+# --- the changed-path list is TRUNCATED at 5 with an explicit remainder count -------
+# The spec requires the named line to list the changed paths "truncated with an explicit
+# count when numerous"; the >5 branch had no test at all (#2926 review), so a renderer
+# that dropped the remainder — or listed everything — would have gone unnoticed.
+r_many=$(mkrepo manypaths-repo)
+many=""
+for i in 1 2 3 4 5 6 7; do printf 'body %s\n' "$i" > "$r_many/f$i.txt"; many="${many:+$many }f$i.txt"; done
+( cd "$r_many" && git add -A && git "${GIT_ID[@]}" commit -qm 'seven files' ) >/dev/null 2>&1
+sum="$tmp/hook-many.txt"
+( cd "$r_many" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=terminal \
+    AGENT_GATE_TREE_SELFTEST_MUTATE="$many" \
+    bash "$r_many/scripts/agent-gate.sh" >"$tmp/hook-many.out" 2>&1 ); rc=$?
+assert_named_fail "truncation (7 changed paths)" "$sum" "$rc"
+changed_list=$(sed -n 's/^tree-integrity: FAIL (tree-mutated-midrun; [^;]*; changed: \(.*\); detected-after-component: .*)$/\1/p' "$sum" | head -1)
+n_named=$(printf '%s\n' "$changed_list" | grep -o 'f[0-9]\.txt' | wc -l | tr -d ' ')
+if [ "$n_named" = 5 ] && printf '%s' "$changed_list" | grep -q '(+2 more)'; then
+  ok "truncation: 7 changed paths render as 5 named + '(+2 more)' ($changed_list)"
+else
+  bad "truncation: the >5-path branch renders wrongly ($n_named named, list='$changed_list')"
+fi
+# …and the CONTROL: at or below the limit NOTHING is truncated (the count is a remainder,
+# not a constant).
+( cd "$r_many" && git checkout -q -- . )
+sum="$tmp/hook-many5.txt"
+( cd "$r_many" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=terminal \
+    AGENT_GATE_TREE_SELFTEST_MUTATE="f1.txt f2.txt f3.txt f4.txt f5.txt" \
+    bash "$r_many/scripts/agent-gate.sh" >"$tmp/hook-many5.out" 2>&1 ); rc=$?
+assert_named_fail "truncation control (exactly 5 changed paths)" "$sum" "$rc"
+changed5=$(sed -n 's/^tree-integrity: FAIL (tree-mutated-midrun; [^;]*; changed: \(.*\); detected-after-component: .*)$/\1/p' "$sum" | head -1)
+if [ "$(printf '%s\n' "$changed5" | grep -o 'f[0-9]\.txt' | wc -l | tr -d ' ')" = 5 ] \
+   && ! printf '%s' "$changed5" | grep -q 'more)'; then
+  ok "truncation control: exactly 5 changed paths are ALL named with no remainder marker"
+else
+  bad "truncation control: a 5-path list was truncated or under-reported ('$changed5')"
+fi
 
 # --- B1: A FAILING HASH TOOL MUST NOT CERTIFY (the headline regression) -----------
 # _tree_identity used to print whatever the hash tool produced and return 0. With an
@@ -829,17 +947,108 @@ else
 fi
 rm -f "$tabpath"
 
+# --- F3: the lockfile carve-out is TAG- and TRACKING-checked, not path-matched -----
+# `case "$p" in Cargo.lock|*/Cargo.lock)` keyed on the PATH ALONE, so any file whose name
+# ends `/Cargo.lock` took the NON-FATAL class — including an UNTRACKED one that appeared
+# mid-run, i.e. a real mutation certifying as `lockfile-settled`. Admission now requires a
+# tracked (`T`) record whose value is a real blob hash and whose path is a blob in the
+# START COMMIT.
+sum="$tmp/only-lock-untracked.txt"; out="$tmp/only-lock-untracked.out"
+FAKE_CARGO_CREATE="$r4/vendor/Cargo.lock" run_gate "$r4" "$sum" "$out" --only fmt; rc=$?
+assert_named_fail "F3 (an UNTRACKED Cargo.lock appearing mid-run)" "$sum" "$rc"
+if grep -q 'lockfile-settled' "$sum" 2>/dev/null; then
+  bad "F3: an untracked mid-run Cargo.lock took the non-fatal carve-out — a real mutation certified"
+else
+  ok "F3: an untracked mid-run vendor/Cargo.lock is FATAL (tag U never takes the carve-out)"
+fi
+rm -rf "$r4/vendor"
+
+# …the same for a path that merely ENDS in `Cargo.lock` (the suffix impostor): tracked,
+# committed, and edited mid-run — it is not a lockfile and must be a normal mutation.
+printf 'not a lockfile\n' > "$r4/notCargo.lock"
+mkdir -p "$r4/deps"; printf 'also not a lockfile\n' > "$r4/deps/vendored-Cargo.lock"
+( cd "$r4" && git add -A && git "${GIT_ID[@]}" commit -qm 'lockfile impostors' ) >/dev/null 2>&1
+for impostor in notCargo.lock deps/vendored-Cargo.lock; do
+  sum="$tmp/only-lock-impostor.txt"; out="$tmp/only-lock-impostor.out"
+  FAKE_CARGO_MUTATE="$r4/$impostor" run_gate "$r4" "$sum" "$out" --only fmt; rc=$?
+  assert_named_fail "F3 ('$impostor', a suffix impostor)" "$sum" "$rc"
+  if grep -q 'lockfile-settled' "$sum" 2>/dev/null; then
+    bad "F3: '$impostor' was misclassified as a settled lockfile"
+  else
+    ok "F3: '$impostor' is NOT a lockfile — it is a normal fatal mutation"
+  fi
+  ( cd "$r4" && git checkout -q -- "$impostor" )
+done
+
+# …and the near-miss variant of the same defect: the lockfile is TRACKED (tag T) but the
+# mid-run change is a DELETION, not a re-resolution. A deleted lockfile is a tree mutation.
+sum="$tmp/only-lock-deleted.txt"; out="$tmp/only-lock-deleted.out"
+FAKE_CARGO_RM="$r4/Cargo.lock" run_gate "$r4" "$sum" "$out" --only fmt; rc=$?
+assert_named_fail "F3 (a tracked Cargo.lock DELETED mid-run)" "$sum" "$rc"
+if grep -q 'lockfile-settled' "$sum" 2>/dev/null; then
+  bad "F3: deleting the lockfile mid-run was stamped 'settled' — a lifecycle change is not a re-resolution"
+else
+  ok "F3: deleting a tracked Cargo.lock mid-run is FATAL (only a real blob hash can settle)"
+fi
+( cd "$r4" && git checkout -q -- Cargo.lock )
+
+# …and the CONTROL that keeps the carve-out alive: the dominant legitimate shape is a
+# lockfile that is CLEAN at the start capture and re-resolved by the gate's own cargo.
+# (This is why admission cannot require presence in the START MANIFEST, which lists only
+# paths already differing from HEAD — that requirement would kill the carve-out outright.)
+sum="$tmp/only-lock-ctl.txt"; out="$tmp/only-lock-ctl.out"
+FAKE_CARGO_MUTATE="$r4/Cargo.lock" run_gate "$r4" "$sum" "$out" --only fmt; rc=$?
+if grep -qE '^tree-integrity: PASS \(lockfile-settled: Cargo.lock unmodified→[0-9a-f]{12}\)' "$sum" \
+   && [ "$rc" -eq 3 ]; then
+  ok "F3 control: a CLEAN-at-start tracked Cargo.lock re-resolved mid-run still stamps lockfile-settled"
+else
+  bad "F3 control: the legitimate lockfile settle no longer certifies (rc=$rc)"
+  grep -E '^tree-integrity|^RESULT:' "$sum" 2>/dev/null
+fi
+( cd "$r4" && git checkout -q -- Cargo.lock )
+
+# --- F4 (real gate): a LOW cap must not weaken detection for ORDINARY untracked files
+# The existing no-bypass case mutates a TRACKED file, which is content-hashed whatever the
+# cap, so it never exercised the weakening path. Here an UNTRACKED file is rewritten with
+# DIFFERENT BYTES OF THE SAME LENGTH and its MTIME IS RESTORED — the one edit a size+mtime
+# record cannot see. At an unfloored cap of 1 every untracked file takes that record and
+# this mutation is INVISIBLE; with the 4096-byte floor it is content-hashed and detected.
+printf 'untracked payload present at the start capture\n' > "$r4/untracked-payload.txt"
+sum="$tmp/only-lowcap-untracked.txt"; out="$tmp/only-lowcap-untracked.out"
+( cd "$r4" && PATH="$STUBBIN:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+    AGENT_GATE_TREE_HASH_CAP_BYTES=1 \
+    FAKE_CARGO_INPLACE="$r4/untracked-payload.txt" \
+    FAKE_CARGO_INPLACE_REF="$tmp/inplace-mtime-ref" \
+    bash "$r4/scripts/agent-gate.sh" --only fmt >"$out" 2>&1 ); rc=$?
+assert_named_fail "F4 (untracked same-size same-mtime edit at cap=1)" "$sum" "$rc"
+if grep -q 'changed: untracked-payload.txt' "$sum" 2>/dev/null \
+   && grep -q '^tree-hash-cap: 4096 bytes (clamped from 1 ' "$sum" 2>/dev/null; then
+  ok "F4: the mutation is named AND the clamp is disclosed in the same block"
+else
+  bad "F4: the untracked same-size/same-mtime edit was not named, or the clamp not disclosed"
+  grep -E '^tree-|^RESULT:' "$sum" 2>/dev/null
+fi
+rm -f "$r4/untracked-payload.txt" "$tmp/inplace-mtime-ref"
+
 # --- B4: an edit while QUEUED for a gate slot is outside the certification window --
 # With CQLITE_GATE_MAX_CONCURRENCY=1 a full gate can sit in `waiting for gate slot` for
 # a whole other run; it has executed nothing and certifies nothing, so the window must
 # begin when the slot is granted. Sequenced DETERMINISTICALLY (no sleep): a stub python3
 # performs the edit and only THEN execs the real slot daemon, which is what writes the
 # ready file the gate blocks on.
+# The slot-grant cases (B4, C3, F1) have TWO prerequisites: python3, and the slot daemon
+# the gate blocks on. Both are named EXPLICITLY here, and a missing daemon is reported as
+# its own failure rather than surfacing as three confusing fail-closed cases — a scratch
+# copy of this file that brings only scripts/agent-gate.sh says exactly what it is missing.
+SLOT_DAEMON="$SCRIPT_DIR/../lib/gate_slot_daemon.py"
 REAL_PY=$(command -v python3 2>/dev/null || true)
-if [ -n "$REAL_PY" ]; then
+if [ -n "$REAL_PY" ] && [ ! -f "$SLOT_DAEMON" ]; then
+  bad "B4/C3/F1 prerequisite: $SLOT_DAEMON is MISSING — the slot-grant cases cannot be sequenced (copy scripts/lib/gate_slot_daemon.py alongside scripts/agent-gate.sh)"
+fi
+if [ -n "$REAL_PY" ] && [ -f "$SLOT_DAEMON" ]; then
   r6=$(mkrepo queue-repo)
   mkdir -p "$r6/scripts/lib"
-  cp "$SCRIPT_DIR/../lib/gate_slot_daemon.py" "$r6/scripts/lib/gate_slot_daemon.py" 2>/dev/null || true
+  cp "$SLOT_DAEMON" "$r6/scripts/lib/gate_slot_daemon.py"
   ( cd "$r6" && git add -A && git "${GIT_ID[@]}" commit -qm daemon ) >/dev/null 2>&1
   QSTUB="$tmp/qstub"; mkdir -p "$QSTUB"
   cp "$STUBBIN/cargo" "$QSTUB/cargo"
@@ -888,7 +1097,7 @@ QPY
   # NEXT rev-parse pair (exactly the re-capture) and then disarms itself.
   r7=$(mkrepo blip-repo)
   mkdir -p "$r7/scripts/lib"
-  cp "$SCRIPT_DIR/../lib/gate_slot_daemon.py" "$r7/scripts/lib/gate_slot_daemon.py" 2>/dev/null || true
+  cp "$SLOT_DAEMON" "$r7/scripts/lib/gate_slot_daemon.py"
   ( cd "$r7" && git add -A && git "${GIT_ID[@]}" commit -qm daemon ) >/dev/null 2>&1
   REAL_GIT=$(command -v git)
   BSTUB="$tmp/bstub"; mkdir -p "$BSTUB"
@@ -956,9 +1165,128 @@ QGIT
     grep -E '^tree-|^RESULT:' "$sum" 2>/dev/null
   fi
   ( cd "$r7" && git checkout -q -- README.md )
+
+  # --- F1: a git blip at the FIRST capture must not disarm the guard for the WHOLE run
+  # The mirror image of C3, and the more dangerous half: `_tree_capture_start`'s rc-1
+  # branch ("no git worktree") is indistinguishable from a transient `git rev-parse`
+  # failure at second 0 — exactly when a concurrent `git gc`/prune is likeliest — and a
+  # single such failure produced `tree-integrity: SKIP` + `RESULT: PASS` for the entire
+  # run. The conservative arm: the slot-grant re-capture RE-ATTEMPTS and ARMS on success.
+  # (A genuinely non-git tree fails the re-attempt the same way and stays SKIP, so the
+  # spec'd no-worktree SKIP contract is untouched.)
+  r8=$(mkrepo firstblip-repo)
+  mkdir -p "$r8/scripts/lib"
+  cp "$SLOT_DAEMON" "$r8/scripts/lib/gate_slot_daemon.py"
+  ( cd "$r8" && git add -A && git "${GIT_ID[@]}" commit -qm daemon ) >/dev/null 2>&1
+  FSTUB="$tmp/fstub"; mkdir -p "$FSTUB"
+  cp "$STUBBIN/cargo" "$FSTUB/cargo"
+  FBLIP="$tmp/first-blip-armed"; FCOUNT="$tmp/first-blip-count"
+  # `git rev-parse HEAD` is issued by _tree_identity and by NOTHING else in the gate, so
+  # counting it counts CAPTURES: #1 = the blipped first capture (armed → fails, and the
+  # following --git-dir probe disarms the stub), #2 = the slot-grant re-attempt (the
+  # window start), #3 = the next capture inside the window. FBLIP_MUTATE edits the tree at
+  # the START of capture #3, so the edit lands INSIDE the re-armed window by construction.
+  cat > "$FSTUB/git" <<QGIT
+#!/usr/bin/env bash
+case "\$*" in
+  *"rev-parse HEAD"*)
+    [ -f "$FBLIP" ] && exit 128
+    _n=\$(cat "$FCOUNT" 2>/dev/null || echo 0); _n=\$(( _n + 1 )); printf '%s' "\$_n" > "$FCOUNT"
+    if [ -n "\${FBLIP_MUTATE:-}" ] && [ "\$_n" = 2 ]; then
+      printf 'edited after the guard re-armed\n' >> "\$FBLIP_MUTATE"
+    fi ;;
+  *"rev-parse --git-dir"*)
+    if [ -f "$FBLIP" ]; then rm -f "$FBLIP"; exit 128; fi ;;
+esac
+exec "$REAL_GIT" "\$@"
+QGIT
+  chmod +x "$FSTUB/git"
+  : > "$FBLIP"; rm -f "$FCOUNT"
+  sum="$tmp/firstblip.txt"; out="$tmp/firstblip.out"
+  ( cd "$r8" && PATH="$FSTUB:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+      CQLITE_GATE_SLOTS_DIR="$tmp/slots-fb" CQLITE_GATE_MAX_CONCURRENCY=1 \
+      CQLITE_DATASETS_ROOT="$tmp/empty-datasets" \
+      bash "$r8/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+  if [ ! -f "$FBLIP" ]; then
+    ok "F1: the one-shot blip fired at the FIRST capture (the case was exercised)"
+  else
+    bad "F1: the first-capture blip never fired — the case was not exercised"
+  fi
+  if grep -q '^tree-integrity: SKIP' "$sum" 2>/dev/null; then
+    bad "F1: a blip at the first capture DISARMED the guard for the whole run (tree-integrity: SKIP, rc=$rc)"
+    grep -E '^tree-' "$sum" 2>/dev/null
+  else
+    ok "F1: a blip at the first capture does NOT leave the run unguarded (no tree-integrity: SKIP)"
+  fi
+  if grep -q '^tree-start: .*captured at the slot grant' "$sum" 2>/dev/null \
+     && grep -q '^tree-integrity: PASS' "$sum" 2>/dev/null; then
+    ok "F1: the capture is RE-ATTEMPTED at the slot grant, the guard ARMS, and the run certifies"
+  else
+    bad "F1: the re-attempt did not arm the guard (rc=$rc)"
+    grep -E '^tree-' "$sum" 2>/dev/null
+  fi
+  # …and the armed-by-re-attempt guard still DETECTS: same blip, plus a real mutation
+  # landing after the re-arm.
+  : > "$FBLIP"; rm -f "$FCOUNT"
+  sum="$tmp/firstblip-mut.txt"; out="$tmp/firstblip-mut.out"
+  ( cd "$r8" && PATH="$FSTUB:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+      CQLITE_GATE_SLOTS_DIR="$tmp/slots-fb2" CQLITE_GATE_MAX_CONCURRENCY=1 \
+      CQLITE_DATASETS_ROOT="$tmp/empty-datasets" \
+      FBLIP_MUTATE="$r8/README.md" \
+      bash "$r8/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+  if grep -q 'tree-integrity: FAIL (tree-mutated-midrun;' "$sum" 2>/dev/null \
+     && ! grep -q '^RESULT: PASS' "$sum" 2>/dev/null && [ "$rc" -ne 0 ]; then
+    ok "F1: a guard armed by the re-attempt still DETECTS a real mid-run mutation"
+  else
+    bad "F1: the re-armed guard missed a real mutation (rc=$rc)"
+    grep -E '^tree-|^RESULT:' "$sum" 2>/dev/null
+  fi
+  ( cd "$r8" && git checkout -q -- README.md )
+
+  # --- F1 near-miss: --lite and --delta EXIT BEFORE the slot grant, so they have no
+  # re-arm point at all. Their SKIP must at least SAY that a worktree WAS present at the
+  # terminal capture, so a transient first-capture failure can never be read as "there was
+  # nothing to check". (`--only` self-exempts from the cap but still passes THROUGH
+  # acquire_gate_slot, so it re-arms exactly like the full gate — asserted first.)
+  : > "$FBLIP"; rm -f "$FCOUNT"
+  sum="$tmp/firstblip-only.txt"; out="$tmp/firstblip-only.out"
+  ( cd "$r8" && PATH="$FSTUB:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+      bash "$r8/scripts/agent-gate.sh" --only fmt >"$out" 2>&1 ); rc=$?
+  if grep -q '^tree-start: .*captured at the slot grant' "$sum" 2>/dev/null \
+     && grep -q '^tree-integrity: PASS' "$sum" 2>/dev/null; then
+    ok "F1: an --only run blipped at the first capture also re-arms (it passes through acquire_gate_slot)"
+  else
+    bad "F1: the --only mode did not re-arm after a first-capture blip (rc=$rc)"
+    grep -E '^tree-' "$sum" 2>/dev/null
+  fi
+  : > "$FBLIP"; rm -f "$FCOUNT"
+  sum="$tmp/firstblip-lite.txt"; out="$tmp/firstblip-lite.out"
+  ( cd "$r8" && PATH="$FSTUB:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+      bash "$r8/scripts/agent-gate.sh" --lite >"$out" 2>&1 ); rc=$?
+  if grep -q '^tree-integrity: SKIP (start capture found no git worktree, but a worktree WAS present at the terminal capture' "$sum" 2>/dev/null; then
+    ok "F1: a --lite run blipped at its only capture point discloses the transient failure in its SKIP line"
+  else
+    bad "F1: a blipped --lite run published a bare SKIP — indistinguishable from a non-git tree (rc=$rc)"
+    grep -E '^tree-' "$sum" 2>/dev/null
+  fi
+  # …and the CONTROL: a genuinely non-git tree still reports the plain SKIP (the spec'd
+  # no-worktree contract is unchanged — the disclosure is not hardwired on).
+  r9="$tmp/nogit-repo"
+  mkdir -p "$r9/scripts"; cp "$GATE" "$r9/scripts/agent-gate.sh"
+  printf 'hello\n' > "$r9/README.md"
+  sum="$tmp/nogit.txt"; out="$tmp/nogit.out"
+  ( cd "$r9" && PATH="$STUBBIN:$PATH" AGENT_GATE_SUMMARY_FILE="$sum" \
+      bash "$r9/scripts/agent-gate.sh" --only fmt >"$out" 2>&1 ); rc=$?
+  if grep -q '^tree-integrity: SKIP (capture unavailable — no git worktree)' "$sum" 2>/dev/null; then
+    ok "F1 control: a genuinely non-git tree still reports the plain no-worktree SKIP (contract unchanged)"
+  else
+    bad "F1 control: the no-worktree SKIP contract changed (rc=$rc)"
+    grep -E '^tree-' "$sum" 2>/dev/null
+  fi
 else
   ok "B4: SKIP — python3 unavailable, the slot daemon (and therefore the queue) cannot run here"
   ok "C3: SKIP — python3 unavailable, the slot-grant re-capture cannot be sequenced here"
+  ok "F1: SKIP — python3 unavailable, the first-capture blip re-attempt cannot be sequenced here"
 fi
 
 # --- G: --lite ------------------------------------------------------------------
@@ -1145,12 +1473,19 @@ if awk '/^_tree_capture_start\(\) \{/,/^\}/' "$GATE" | grep -q "IFS=\$'\\\\t' re
 else
   ok "WIRING: the identity is split by _tree_split_identity, which preserves empty fields and validates each"
 fi
-# C4: PER-CALL-SITE, never a textual occurrence count. `grep -c '_tree_finalize'` counted
-# the definition, its doc comment, the _tree_meta_lines/_tree_meta_array internals and the
-# self-test hooks — ALL of which survive deleting every terminal call site, so the
-# assertion could not fail for the reason it existed (#2926 review C4). Each terminal path
-# is now asserted inside its own awk range, and the check is PROVED discriminating below
-# by deleting each call site in a scratch copy.
+# C4/F2: PER-EMIT-PATH, keyed on the CALL FORM — never on a textual occurrence count and
+# never on INDENTATION. Two vacuity classes have been eliminated here in turn:
+#   * `grep -c '_tree_finalize'` counted the definition, its doc comment and the
+#     _tree_meta_lines/_tree_meta_array internals, all of which survive deleting every
+#     call site (#2926 review C4);
+#   * keying on `'    _tree_finalize'` (4-space) matched run_delta's three REFUSED sites
+#     but NOT its 2-space TERMINAL site, so deleting that one left the check green
+#     (#2926 review F2).
+# The property asserted is the one that actually matters and has no indentation in it:
+# EVERY emit call site in a certifying function is preceded by a terminal capture since
+# the previous emit. The site inventory is asserted too, so a body that loses its emits
+# (or gains an unguarded one) is reported rather than silently satisfying the check, and
+# the check is PROVED discriminating below by deleting each call site in turn.
 # fn_body <file> <function-name> — the lines of one top-level function definition.
 fn_body() {
   awk -v f="$2() {" 'index($0, f) == 1 { inf = 1 } inf { print } inf && /^\}/ { inf = 0 }' "$1"
@@ -1163,10 +1498,54 @@ body_has() {
   case $'\n'"$1" in *$'\n'"$2"*) return 0 ;; esac
   return 1
 }
-tree_finalize_sites() { # <gate-file> -> prints the MISSING sites; rc 1 when any is missing
-  local g="$1" missing="" fin emit
-  body_has "$(fn_body "$g" run_lite)"  '  _tree_finalize'   || missing="run_lite"
-  body_has "$(fn_body "$g" run_delta)" '    _tree_finalize' || missing="${missing:+$missing }run_delta"
+# unfinalized_emits <gate> <fn> -> prints the ORDINAL of every emit call site in <fn>'s
+# body that is not preceded by a `_tree_finalize` call since the previous emit; rc 1 when
+# any is. Leading whitespace and trailing comments are stripped BEFORE matching, so the
+# check sees the call form only: neither re-indenting a call site nor writing prose about
+# one can change the verdict.
+# A capture may be taken EXPLICITLY (`_tree_finalize`) or LAZILY (`_tree_meta_array` /
+# `_tree_meta_lines`, which finalize in the current shell when no terminal capture has
+# been taken). run_delta's four ERROR emits use the lazy form legitimately, so coverage
+# accepts all three — and the count of EXPLICIT sites is asserted separately below, so
+# the lazy backstop can never be what silently keeps a certifying terminal green.
+unfinalized_emits() {
+  local out
+  out=$(fn_body "$1" "$2" | awk '
+    { l = $0; sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]*#.*$/, "", l) }
+    l ~ /^(_tree_finalize|_tree_meta_array|_tree_meta_lines)([[:space:]]|$)/ { fin = 1; next }
+    l ~ /^(emit_summary|_emit_terminal_summary)([[:space:]]|$)/ { n++; if (!fin) printf "%s ", n; fin = 0 }
+  ')
+  [ -z "$out" ] || { printf '%s\n' "$out"; return 1; }
+  return 0
+}
+# emit_sites <gate> <fn> -> how many emit call sites the body has. A body with ZERO would
+# make the coverage check vacuously true, so the inventory is asserted explicitly.
+emit_sites() {
+  fn_body "$1" "$2" | awk '
+    { l = $0; sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]*#.*$/, "", l) }
+    l ~ /^(emit_summary|_emit_terminal_summary)([[:space:]]|$)/ { n++ }
+    END { print n + 0 }'
+}
+# explicit_finalize_sites <gate> <fn> -> how many EXPLICIT `_tree_finalize` CALL LINES the
+# body has. Comment-stripped and indentation-stripped, so it counts call sites only — not
+# the definition, not its doc comment, not prose (the #2926 C4 vacuity) — and it is blind
+# to how a site is indented (the #2926 F2 vacuity).
+explicit_finalize_sites() {
+  fn_body "$1" "$2" | awk '
+    { l = $0; sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]*#.*$/, "", l) }
+    l ~ /^_tree_finalize([[:space:]]|$)/ { n++ }
+    END { print n + 0 }'
+}
+tree_finalize_sites() { # <gate-file> -> prints the FAILING sites; rc 1 when any fails
+  local g="$1" missing="" m fin emit
+  m=$(unfinalized_emits "$g" run_lite)  || missing="run_lite(emit#$m)"
+  m=$(unfinalized_emits "$g" run_delta) || missing="${missing:+$missing }run_delta(emit#$m)"
+  # The site inventories. Exact, so ADDING an emit path (or removing a capture) makes the
+  # author revisit this proof instead of inheriting a check that no longer covers the code.
+  [ "$(emit_sites "$g" run_lite)"  -eq 1 ] || missing="${missing:+$missing }run_lite(emit-inventory)"
+  [ "$(emit_sites "$g" run_delta)" -eq 8 ] || missing="${missing:+$missing }run_delta(emit-inventory)"
+  [ "$(explicit_finalize_sites "$g" run_lite)"  -eq 1 ] || missing="${missing:+$missing }run_lite(explicit-finalize)"
+  [ "$(explicit_finalize_sites "$g" run_delta)" -eq 4 ] || missing="${missing:+$missing }run_delta(explicit-finalize)"
   # top level: the column-0 call site must precede the final terminal emit. Matched on the
   # exact CALL form — `^_tree_finalize` alone also matches the DEFINITION line, which
   # survives deleting every call site (the #2926 review C4 vacuity, in miniature).
@@ -1178,28 +1557,42 @@ tree_finalize_sites() { # <gate-file> -> prints the MISSING sites; rc 1 when any
   [ -z "$missing" ] || { printf '%s\n' "$missing"; return 1; }
   return 0
 }
+n_lite_emits=$(emit_sites "$GATE" run_lite); n_delta_emits=$(emit_sites "$GATE" run_delta)
+n_delta_fin=$(explicit_finalize_sites "$GATE" run_delta)
 if miss_sites=$(tree_finalize_sites "$GATE"); then
-  ok "WIRING: _tree_finalize is called from EVERY terminal path (run_lite, run_delta, top-level pre-emit)"
+  ok "WIRING: every emit path is preceded by a terminal capture (run_lite: $n_lite_emits emit(s), run_delta: $n_delta_emits emit(s)/$n_delta_fin explicit finalize(s), top-level pre-emit)"
 else
-  bad "WIRING: terminal path(s) with no _tree_finalize call: $miss_sites"
+  bad "WIRING: emit path(s) reached with no _tree_finalize: $miss_sites"
 fi
-# …and the PROOF that the check can fail: delete one call site at a time in a scratch copy.
-mutant_drop() { # mutant_drop <src> <dst> <lite|delta|top>
-  case "$3" in
-    lite)  awk '/^run_lite\(\) \{/{inf=1} inf && /^  _tree_finalize/{next} /^\}/{if(inf) inf=0} {print}'  "$1" > "$2" ;;
-    delta) awk '/^run_delta\(\) \{/{inf=1} inf && /^    _tree_finalize/{next} /^\}/{if(inf) inf=0} {print}' "$1" > "$2" ;;
-    top)   grep -v '^_tree_finalize || true$' "$1" > "$2" ;;
-  esac
+# …and the PROOF that the check can fail: delete ONE call site at a time in a scratch copy,
+# addressing each by its ORDINAL inside the function (never by its indentation — run_delta's
+# three REFUSED sites are 4-space and its terminal site is 2-space, and keying on the former
+# is exactly how the terminal site slipped through, #2926 review F2).
+mutant_drop_nth() { # mutant_drop_nth <src> <dst> <fn> <n>
+  awk -v f="$3() {" -v want="$4" '
+    index($0, f) == 1 { inf = 1 }
+    { l = $0; sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]*#.*$/, "", l) }
+    inf && l ~ /^_tree_finalize([[:space:]]|$)/ { k++; if (k == want) next }
+    { print }
+    inf && /^\}/ { inf = 0 }
+  ' "$1" > "$2"
 }
-for site in lite delta top; do
-  mut="$tmp/mutant-$site.sh"
-  mutant_drop "$GATE" "$mut" "$site"
+mutant_drop_top() { grep -v '^_tree_finalize || true$' "$1" > "$2"; }
+# run_delta's FOUR sites by ordinal: 1-3 are the REFUSED paths, 4 is the TERMINAL one whose
+# deletion the previous indentation-keyed check could not see.
+for site in "lite:run_lite:1" "delta-refused-1:run_delta:1" "delta-refused-2:run_delta:2" \
+            "delta-refused-3:run_delta:3" "delta-terminal:run_delta:4" "top::"; do
+  name=${site%%:*}; rest=${site#*:}; mfn=${rest%%:*}; mn=${rest#*:}
+  mut="$tmp/mutant-$name.sh"
+  if [ "$name" = top ]; then mutant_drop_top "$GATE" "$mut"; else mutant_drop_nth "$GATE" "$mut" "$mfn" "$mn"; fi
   if cmp -s "$GATE" "$mut"; then
-    bad "C4: the '$site' mutation removed nothing — the proof is vacuous"
+    bad "C4: the '$name' mutation removed nothing — the proof is vacuous"
+  elif [ "$(( $(wc -l < "$GATE") - $(wc -l < "$mut") ))" -ne 1 ] && [ "$name" != top ]; then
+    bad "C4: the '$name' mutation removed $(( $(wc -l < "$GATE") - $(wc -l < "$mut") )) lines, expected exactly 1"
   elif tree_finalize_sites "$mut" >/dev/null 2>&1; then
-    bad "C4: the structural check STILL PASSES after deleting the '$site' terminal call site (can't-fail guard)"
+    bad "C4: the structural check STILL PASSES after deleting the '$name' call site (can't-fail guard)"
   else
-    ok "C4: the structural check FAILS when the '$site' terminal call site is deleted (proved discriminating)"
+    ok "C4: the structural check FAILS when the '$name' call site is deleted (proved discriminating)"
   fi
 done
 # C1: the `commit:` stamp must never be a fresh emit-time git read — the original defect.

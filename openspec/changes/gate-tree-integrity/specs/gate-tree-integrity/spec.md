@@ -226,9 +226,26 @@ is established and never emit a certification of a real tree).
 - **WHEN** the re-capture at the slot grant cannot consult git at all (a concurrent prune/gc, a
   stuttering network mount)
 - **THEN** the run SHALL RETAIN the pre-queue capture and stay guarded — it SHALL NOT be downgraded
-  to `tree-integrity: SKIP`, which is reserved for the FIRST capture finding no git worktree
+  to `tree-integrity: SKIP`, which is reserved for a capture attempt finding no git worktree
 - **AND** the retained capture SHALL still detect a real mid-run mutation, and the retention SHALL be
   disclosed on the `tree-start:` line
+
+#### Scenario: a transient git failure at the FIRST capture does not leave the run unguarded
+- **GIVEN** the very first capture reports "no git worktree", which a transient `git rev-parse`
+  failure at process start is indistinguishable from
+- **WHEN** the run reaches the slot grant
+- **THEN** the capture SHALL be RE-ATTEMPTED there and the guard SHALL be ARMED if it succeeds, so a
+  single blip at second 0 cannot yield `tree-integrity: SKIP` with `RESULT: PASS` for the whole run
+- **AND** the `tree-start:` line SHALL disclose that the identity was captured at the slot grant
+- **AND** a guard armed by that re-attempt SHALL still detect a real mid-run mutation
+- **AND** a genuinely non-git tree SHALL fail the re-attempt and keep the plain no-worktree `SKIP`
+
+#### Scenario: an unguarded mode discloses a worktree that reappears by the terminal capture
+- **GIVEN** `--lite` and `--delta` exit before the slot grant and therefore have no re-arm point
+- **WHEN** a run's first capture found no git worktree but the terminal capture finds one
+- **THEN** the `tree-integrity: SKIP` line SHALL state that the start capture failed transiently and
+  that the run proves nothing about the tree, so that SKIP can never be read as "there was nothing
+  to check"
 
 #### Scenario: helper modes remain exempt and unchanged
 - **WHEN** `--list`, `--python-build-verify` or the concurrency-stub mode is invoked
@@ -280,6 +297,18 @@ documented as a stated limitation covered by the existing `datasets:` and `ci-pi
 - **THEN** the SUMMARY SHALL carry `tree-integrity: PASS (lockfile-settled: …)` naming the before and
   after hashes, and the run SHALL be free to certify
 
+#### Scenario: the lockfile class is admitted on the record, never on the path spelling
+- **GIVEN** matching on the path alone would give the non-fatal class to any file whose name ends
+  `/Cargo.lock`
+- **WHEN** the changed path is UNTRACKED (an untracked `Cargo.lock` appearing mid-run), or its end
+  record is not a real blob hash (the lockfile was deleted or replaced by a non-file), or the path is
+  not a blob in the commit the run started on
+- **THEN** the change SHALL fall through to the fatal class and the run SHALL FAIL
+- **AND** a path that merely ends in `Cargo.lock` without being one (for example `notCargo.lock` or
+  `deps/vendored-Cargo.lock`) SHALL likewise be a normal fatal mutation
+- **AND** the dominant legitimate case — a TRACKED lockfile that is clean at the start capture and
+  re-resolved by the gate's own cargo — SHALL still be stamped `lockfile-settled`
+
 #### Scenario: a lockfile change accompanied by any other change is fatal
 - **WHEN** `Cargo.lock` and at least one other in-scope path differ between the start and end manifests
 - **THEN** the run SHALL FAIL with the named `tree-mutated-midrun` line listing all changed paths
@@ -294,7 +323,11 @@ No environment variable, flag, or configuration SHALL convert a detected mid-run
 `RESULT: PASS`. The only supported knob SHALL be a per-file content-hash cap for untracked files
 (`AGENT_GATE_TREE_HASH_CAP_BYTES`, default 8 MiB) which weakens detection for a single oversized
 untracked blob only, never suppresses a detected mutation, and SHALL be stamped in the SUMMARY
-whenever it is set to a non-default value or whenever the size+mtime fallback is used.
+whenever it is set to a non-default value or whenever the size+mtime fallback is used. The knob
+SHALL be FLOORED: a value below the floor (notably `0` and `1`, at which EVERY untracked file — not
+one oversized blob — would fall back to size+mtime) SHALL be clamped to the floor, and a
+non-numeric or out-of-range value SHALL fall back to the default; every such normalization SHALL be
+stamped.
 
 #### Scenario: no environment variable turns a mutated run green
 - **WHEN** a mutated run is executed with any combination of the gate's documented environment
@@ -314,6 +347,13 @@ whenever it is set to a non-default value or whenever the size+mtime fallback is
 - **WHEN** the cap is set arbitrarily low and a tracked file is edited mid-run
 - **THEN** the mutation SHALL still be detected and the run SHALL FAIL (the cap applies only to
   untracked-file content hashing)
+
+#### Scenario: a sub-floor cap cannot weaken detection for ordinary untracked files
+- **GIVEN** a cap of `0` or `1` would push every untracked file onto the size+mtime record
+- **WHEN** an untracked file is rewritten mid-run with different bytes of the SAME length and its
+  mtime restored — the one edit a size+mtime record cannot see — with the cap set that low
+- **THEN** the cap SHALL have been clamped to the floor, the file SHALL have been content-hashed, the
+  mutation SHALL be detected and named, and the emitted block SHALL disclose the clamp
 
 ### Requirement: A discriminating regression test SHALL pin the behaviour inside tooling-tests
 
@@ -348,6 +388,26 @@ sleep.
 - **THEN** the gate SHALL refuse with a non-zero exit before writing anything, leaving the working
   tree and HEAD untouched
 - **AND** with the marker present the same invocation SHALL run and still fail closed on the mutation
+
+#### Scenario: the wiring proof is per-call-site and blind to indentation
+- **GIVEN** a structural check that keys on a call site's INDENTATION is vacuous for any site written
+  at a different indentation (a check that cannot fail is the defect it replaced)
+- **WHEN** the self-test asserts that the terminal capture is wired into every certifying emit path
+- **THEN** the assertion SHALL match on the CALL FORM with leading whitespace and trailing comments
+  stripped, SHALL assert the emit-site and explicit-capture inventories of each certifying function,
+  and SHALL be PROVED discriminating by deleting each call site in turn — addressed by its ORDINAL
+  within the function — in a scratch copy, including the terminal site of `run_delta`
+
+#### Scenario: the truncated changed-path list is covered by a test and a control
+- **WHEN** more than five paths differ between the start and end manifests
+- **THEN** the named line SHALL list five paths followed by an explicit `(+N more)` remainder, and at
+  or below five paths SHALL list them all with no remainder marker
+
+#### Scenario: the self-test names its own prerequisites
+- **GIVEN** the slot-grant cases need `scripts/lib/gate_slot_daemon.py` beside `scripts/agent-gate.sh`
+- **WHEN** the self-test runs from a copy that lacks it
+- **THEN** it SHALL report that missing prerequisite by name rather than failing the slot-grant cases
+  for an unexplained reason
 
 #### Scenario: the self-test is hermetic and leaves no shared fixtures
 - **WHEN** two instances of the self-test run concurrently in one checkout

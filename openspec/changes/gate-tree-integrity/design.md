@@ -183,7 +183,14 @@ Explicit additions (deliberately tiny — an over-broad exclusion re-opens the h
    `tree-integrity: PASS (lockfile-settled: Cargo.lock <sha-before>→<sha-after>)` and proceeds; if
    `Cargo.lock` changed **alongside** anything else, the whole run FAILs as a mutation. Both digests
    are stamped either way, so the residual hole ("someone hand-edits only `Cargo.lock` mid-run") is
-   visible in the artifact rather than silent. **Follow-up (separate issue): add `--locked` to the
+   visible in the artifact rather than silent. **Admission is on the RECORD, not the path spelling**
+   (review F3): the path must carry a tracked (`T`) record whose value is a real 40-hex blob hash and
+   must be a blob in the commit the run started on. Path-matching alone gave the non-fatal class to
+   an UNTRACKED `…/Cargo.lock` appearing mid-run, and to a tracked lockfile that was DELETED mid-run
+   — both real mutations. Presence in the start *manifest* is deliberately **not** required: the
+   manifest lists only paths already differing from HEAD, so requiring it would exclude the dominant
+   legitimate case (a clean lockfile re-resolved by the gate's own cargo) and make the carve-out dead
+   code. **Follow-up (separate issue): add `--locked` to the
    gate's cargo invocations and delete this carve-out** — that change alters failure modes across
    every component and does not belong here.
 
@@ -220,6 +227,13 @@ above the cap the manifest records `SIZE:<n>:MTIME:<ns>` instead of a blob sha. 
 detected mutation green — only weaken detection for a single oversized untracked blob — and any
 non-default value, plus any use of the fallback, is stamped in the SUMMARY
 (`tree-hash-cap: <bytes> (<k> file(s) recorded by size+mtime)`).
+
+The knob is **floored at 4096 bytes** (review F4). Rejecting only non-numeric input accepted `0` and
+`1`, at which *every* untracked file — not one oversized blob — takes the size+mtime record, so a
+same-length content edit with a restored mtime became invisible and the "single oversized blob"
+claim was false. Sub-floor values are clamped; non-numeric or arithmetic-out-of-range values fall
+back to the default; every normalization is stamped in the same `tree-hash-cap:` line, so a rejected
+knob value is never silent.
 
 ## 7. Interaction with the `INCOMPLETE` placeholder (#2908)
 
@@ -259,7 +273,13 @@ Three hooks, mirroring #2874 exactly:
    which it has executed nothing and certifies nothing — the certification window must begin when
    work begins. `--lite`/`--delta` exit before that call site and keep the early capture; the
    startup sentinel deliberately keeps the pre-queue `tree-start:` (it records the tree the process
-   began on).
+   began on). That re-capture is **transient-failure-safe in both directions**: a blip while the
+   guard is ARMED retains the pre-queue capture (review C3), and a blip at the FIRST capture — which
+   is indistinguishable from "no git worktree" and used to yield `SKIP` + `PASS` for the whole run —
+   is RE-ATTEMPTED here and ARMS the guard on success (review F1). A genuinely non-git tree fails the
+   re-attempt identically and keeps the spec'd `SKIP`, so the contract is unchanged. For the modes
+   with no slot grant (`--lite`, `--delta`), the terminal capture probes once when unguarded and, if
+   a worktree IS present, says so in the `SKIP` line rather than letting it read as "nothing to check".
 2. **Component boundary** — inside `record_result` (:2251), alongside `_assert_summary_integrity`.
    On the MAIN foreground lane a mismatch stops the run immediately with the named FAIL block (the
    ~1 h saving). Off the foreground lane (`[ "${BASHPID:-$$}" != "$$" ]`, the SIDE-lane subshells) it
