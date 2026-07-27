@@ -124,6 +124,13 @@ carry).
   failed-read count and status, and it makes the in-force count **UNKNOWN** rather than zero. A failed or
   ambiguous read can only ever *withhold* a waiver, never grant one, and none of these states can change
   `required`'s verdict — that comes from tier evaluation alone.
+- **A mistyped waiver label is named as a typo (issue #3033 round 6).** A waiver label is
+  `ci:waive:<tier-id>` with a LOWER-CASE tier id (`[a-z0-9][a-z0-9-]*`), which is what the evaluator
+  matches. Anything else — `ci:waive:Flight` for tier `flight` — waives nothing, so the evidence read is
+  never even attempted for it and the summary reports **`INVALID WAIVER LABEL — it waives NOTHING`**, naming
+  the offending label and the fix. Previously such a label was reported through the `UNREADABLE`/`UNAVAILABLE`
+  diagnostics, which sent the reader to the workflow's `permissions:` block for what is a capitalisation
+  typo. An off-shape label applied beside a valid one is still named once, under the valid label's state.
 - **Labelling is cheap.** Subscribing to label events must not make every `ci:perf` / board-mirror /
   `needs-decision` label — or the waiver itself — restart a 30-minute gate. So a label mutation never
   cancels the in-flight run (cancellation is conditional on the event action; the shared concurrency group

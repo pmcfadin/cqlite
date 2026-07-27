@@ -191,6 +191,11 @@ Rules for `pull_request`-triggered workflows:
   actually IN FORCE, and an untrusted label read makes that count UNKNOWN rather
   than zero. Whether such an event BINDS stays a per-tier verdict. Every one of
   those states is reported and none of them changes the verdict.
+- A waiver label is `ci:waive:<tier-id>` with a LOWER-CASE tier id
+  (`[a-z0-9][a-z0-9-]*`) — the shape the evaluator matches. A `ci:waive:`-prefixed
+  label that misses it (`ci:waive:Flight`) waives nothing, and the report says so,
+  naming the label: it is neither a waiver in force (nothing is read for it, and no
+  evidence state is reported about it) nor an absence of waiver labels.
 - A registered tier's context is satisfied ONLY by a check run GitHub Actions
   produced. A check-run name is global to the commit and anything with
   `checks:write` can mint one, so provenance (`app` + an Actions run URL) is

@@ -792,7 +792,12 @@ else
 fi
 # THE MOST VALUABLE FACT IN THE DIAGNOSTIC: the HTTP status, which is what separates
 # "the token may not read this" from "GitHub was briefly unwell".
-if contains "$STATE_BAD" "HTTP 403" &&
+# Anchored on the CLASSIFIED shape `(HTTP 403 — …)`, not merely on the string "HTTP
+# 403" appearing somewhere: the client's raw stderr contains that string too, so an
+# assertion on it alone survives a broken status extraction and lets a 403 be
+# described as "no HTTP status reported" — the client-failure diagnosis, whose remedy
+# ("no re-run fixes it") is the wrong advice for an authorization refusal.
+if contains "$STATE_BAD" "(HTTP 403 —" && ! contains "$STATE_BAD" "no HTTP status reported" &&
    contains "$(cat "$WORK/evidence-unreadable.md")" 'permissions:'; then
   ok "the HTTP status is surfaced and an authorization status names the permissions block"
 else
