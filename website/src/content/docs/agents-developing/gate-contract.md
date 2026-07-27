@@ -63,9 +63,18 @@ carry).
   `pull_request`/`pull_request_target` workflow is neither registered nor exempted, when a registered
   workflow carries a blocking trigger filter (`paths`, `branches`, or a `types:` set that is too narrow
   to fire on every new head sha or wider than the aggregator observes), when its emitting job's
-  condition is not exactly `always()`, when no step of that job both reads a dependency's `.result` and
-  can exit non-zero, or when a registry entry is dangling. A new tier that forgets to enrol **reds
-  `required`**.
+  condition is not exactly `${{ !cancelled() }}`, when no step of that job both reads a dependency's
+  `.result` and can exit non-zero, or when a registry entry is dangling. A new tier that forgets to enrol
+  **reds `required`**. (`always()` is rejected on a tier gate job: it runs the job *while the run is being
+  cancelled*, turning `needs.*.result == cancelled` into a `failure` conclusion, which makes the
+  supersession grace unreachable and reds `required` on every routine supersession.)
+- **A migration state reds in seconds, not after an hour.** The registry is read from the base ref while
+  the emitter comes from the tree the event ran (the merge commit, for a `pull_request` event). If the base
+  registers a tier that tree provably cannot emit — its workflow absent, no PR trigger, `types:`/`branches:`
+  excluding this event, or no job with that name — `required` fails on the first poll and names the remedy:
+  **rebase**, or `ci:waive:<tier-id>` if the tier is deliberately being renamed or retired (a registry
+  change only takes effect once merged). Inconclusive evidence never produces that verdict, and the verdict
+  is never a pass.
 - **Arming `--auto` stays correct.** GitHub releases the merge on `required` going green, and `required`
   cannot go green until every registered tier has reported success — so keep arming immediately (#2667)
   and never poll a PR's own CI.
