@@ -1359,6 +1359,38 @@ else
   echo "------- on disk -------"; cat "$child_default" 2>/dev/null; echo "-----------------------"
 fi
 
+# --- 15. #2926: tree provenance lines are part of the block, and they do NOT ---------
+#         disturb the RESULT poll predicates.
+# The block grew three lines (`tree-start:`, `tree-end:`, `tree-integrity:`; a fourth,
+# `tree-hash-cap:`, only when the untracked-hash cap is engaged). Two properties are
+# pinned HERE, next to the rest of the block contract — the guard's own behaviour lives
+# in scripts/tests/test_agent_gate_tree_integrity.sh:
+#   a. the three lines are present in the canonical emission path;
+#   b. NO added line contains the token `RESULT:` — so BOTH the buggy poll predicate
+#      (`grep -q 'RESULT:'`) and the corrected one (`grep -qE 'RESULT: (PASS|FAIL)'`)
+#      behave EXACTLY as they did before this change (#2908 is neither fixed nor
+#      regressed here). Asserting "exactly one RESULT: token" is what makes (b) a real
+#      guard rather than a restatement of (a).
+tree_sum="$tmp/2926-tree-lines.txt"
+env AGENT_GATE_SUMMARY_FILE="$tree_sum" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+tree_missing=()
+grep -q '^tree-start: '     "$tree_sum" 2>/dev/null || tree_missing+=("tree-start")
+grep -q '^tree-end: '       "$tree_sum" 2>/dev/null || tree_missing+=("tree-end")
+grep -q '^tree-integrity: ' "$tree_sum" 2>/dev/null || tree_missing+=("tree-integrity")
+if [ "${#tree_missing[@]}" -eq 0 ]; then
+  ok "2926-tree-lines: the SUMMARY block carries tree-start / tree-end / tree-integrity"
+else
+  bad "2926-tree-lines: missing ${tree_missing[*]}"
+  echo "------- block -------"; cat "$tree_sum" 2>/dev/null; echo "---------------------"
+fi
+n_result=$(grep -c 'RESULT:' "$tree_sum" 2>/dev/null)
+if [ "$n_result" = 1 ] && grep -qE '^RESULT: (PASS|FAIL)' "$tree_sum" 2>/dev/null; then
+  ok "2926-poll-predicates: exactly ONE 'RESULT:' token — both poll predicates behave as before (#2908 untouched)"
+else
+  bad "2926-poll-predicates: found $n_result 'RESULT:' tokens — an added line embeds the token"
+  grep -n 'RESULT:' "$tree_sum" 2>/dev/null
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

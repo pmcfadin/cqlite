@@ -125,6 +125,14 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `missing-fixtures: FAIL-CLOSED (#2078)`; `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` opts out visibly
   (`missing-fixtures: OPT-OUT (...)`). Remedy: `bash test-data/scripts/fetch-datasets.sh`.
   `--lite`/`--only` stay lenient.
+- **A run whose worktree mutates MID-RUN cannot certify (#2926).** Every mode captures a tree
+  identity at start, re-verifies it at each component boundary + the terminal emit, and FAILs closed
+  with `tree-integrity: FAIL (tree-mutated-midrun; head <a>→<b>; changed: …)`. Every SUMMARY carries
+  `tree-start:`/`tree-end:`/`tree-integrity:`, so **closers verify `tree-integrity:` alongside
+  `RESULT:`** — a mutated-mid-run block is not a certification and cannot be pasted as one. The
+  block's `commit:`/`dirty:` are derived from that verified capture, never a fresh emit-time git
+  read. No env var bypasses it; remedy is to re-run on a stable tree (don't edit a worktree while
+  its gate runs).
 - Every SUMMARY carries an `accelerators:` line (sccache/nextest/lane state) — degradation there is
   actionable, not noise. Self-test: `bash scripts/tests/test_agent_gate_summary.sh`.
 

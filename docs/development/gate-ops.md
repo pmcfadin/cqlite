@@ -337,6 +337,40 @@ The gate of record is **structurally immune** to nested and concurrent gate acti
 
 Self-tests: `scripts/tests/test_agent_gate_nested_isolation.sh` (nested-clobber immunity, explicit-wins, mid-run integrity FAIL, same-checkout concurrency) and `scripts/tests/test_gate_selftest_hermetic.sh` (the fixture lint), both wired into `tooling-tests`. Peer **full** gates in the *same* checkout still need distinct summary paths / separate worktrees (out of scope here) — the guarantee above is about *nested* and *self-test* activity, not two top-level full gates sharing one `.agent-gate-summary.txt`.
 
+## Mid-run tree mutation: `tree-mutated-midrun` (issue #2926)
+
+Sibling guard to the one above: `summary-integrity` protects **who owns the summary artifact**; `tree-integrity` protects **what that artifact describes**. The gate captures a *tree identity* at start (HEAD + dirty flag + a sha256 of a per-path content manifest covering every uncommitted tracked change and every untracked, non-ignored file), re-captures it at every `record_result` boundary and once immediately before the terminal emit, and stamps `tree-start:` / `tree-end:` / `tree-integrity:` into **every** SUMMARY block (full, `--lite`, `--delta`, `--only`) plus `tree-start:` into the startup `INCOMPLETE` sentinel.
+
+**The shape that causes it** (#1582 / #1930): a lead legitimately runs a `flow-closer` (gating) and a fixer (editing) that overlap on ONE worktree — this does *not* violate the one-worker rule, and it happened for real on 2026-07-26 while gating PR #2916 (a review-fix commit landed 
+into the worktree of a live full gate; the run was killed and left `RESULT: INCOMPLETE`, so the fail-safe held **by timing luck**). Before #2926 a completed run would have emitted `commit: <the fixer's sha> … RESULT: PASS` for a tree most components never compiled.
+
+**What you see:**
+
+```
+tree-start: 4686c37a1b2c dirty: no  digest: 2ca89bd8f01e
+tree-end:   116d0b9e77aa dirty: yes digest: 47f1c40355ab
+tree-integrity: FAIL (tree-mutated-midrun; head 4686c37a1b2c→116d0b9e77aa; changed: cqlite-core/src/foo.rs docs/bar.md (+3 more); detected-after-component: clippy)
+RESULT: FAIL
+```
+
+**Recovery: re-run on a stable tree.** There is nothing to "fix" in the gate — the FAIL is accurate and the run is unsalvageable, because component→file attribution does not exist (there is no way to know the already-run components were unaffected). The named line lists the changed paths; the retained manifests live at `<logs>/tree-identity.{start,end}` if you need the full set. Prevention: do not edit a worktree while its gate runs — park the fix until the gate reports, or run the fix round in a second worktree.
+
+Notes:
+
+- **No bypass** — no environment variable turns a mutated run green. `AGENT_GATE_TREE_HASH_CAP_BYTES` (default 8 MiB) is a *performance* knob capping content hashing of oversized *untracked* files only; any non-default value or fallback use is stamped as `tree-hash-cap:`.
+- A detected mutation is a **verdict** (`RESULT: FAIL`), never the `INCOMPLETE` liveness placeholder, and it is `FAIL` even for an `--only` run that would otherwise be `PARTIAL`.
+- Exclusions are the repo's own `.gitignore` rules (so all `target/**`, `*.log`, `.agent-gate-*summary.txt` churn is invisible) plus the run's own summary file when a caller pins a relative in-repo path. `docs/**`, `*.md`, `test-data/**` and `openspec/**` are deliberately NOT excluded. **Limitation**: gitignored *inputs* (the fetched `test-data/datasets/**` binaries) are outside the digest — the `datasets:` and `ci-pins:` stamps cover those.
+- **Reading the `changed:` list.** It is space-joined, so paths are printed with the manifest's own backslash escapes: `\s` = a space, `\t` = a tab, `\n` = a newline, `\\` = a literal backslash. `changed: two\swords.txt` is ONE path, not two.
+- One named non-fatal class: a `Cargo.lock`-**only** difference stamps `tree-integrity: PASS (lockfile-settled: …)` naming every settled lockfile, because the gate runs cargo without `--locked` (#2962 removes the need for this carve-out); a lockfile change alongside any other path is fatal.
+- **The window starts when work starts.** The FULL gate (re-)captures its start identity immediately *after* `acquire_gate_slot` returns, so an edit made while it sat in `waiting for gate slot (N in use)…` — where it executed nothing and certified nothing — does not invalidate it. `--lite`/`--delta` never queue and certify from the capture taken before their first component. Once a slot is granted, every later edit is inside the window.
+- **A capture that cannot be validated is a FAIL, not a SKIP.** Every capture validates its OWN manifest before anyone can compare it: the first record must be the `H<TAB><head>` header, the LAST must be an `N<TAB><count>` trailer, and the trailer's count must equal the records actually read back. So a failing hash tool, a short write, or a manifest truncated mid-file (e.g. `$TMPDIR` full during a long run) is rejected — a truncation cannot leave two captures sharing a byte-identical prefix that compares equal. The run reports `tree-integrity: FAIL (tree-capture-failed; …)`. Only "there is no git worktree at all" produces a `SKIP`, and only at the FIRST capture: a transient git failure at the slot-grant re-capture retains the pre-queue capture and keeps the guard armed rather than downgrading a live guard to `SKIP`.
+- **`commit:`/`dirty:` come from the verified terminal capture**, not from a fresh `git rev-parse --short HEAD` / `git status --porcelain` at emit time — that emit-time read was the original #2926 defect (a HEAD move landing between the capture and the stamp certified a sha the guard never verified). A block can only ever name a sha a validated capture observed; with no validated capture it reads `commit: unverified … dirty: unverified` and the run is FAIL-closed.
+- **A boundary FAIL block is a FULL block.** When the mutation is caught at a component boundary the run stops there, and the block it publishes carries the same provenance as any other terminal block — `commit:`, `datasets:`, `ci-pins:`, `accelerators:`, `cpu-budget:`, the tree lines, the verdicts of the components that had already recorded one, and `components-completed: N of M selected` — plus `detected-after-component:`. You never have to re-run to find out what the run was.
+- Cost: ~30 ms per capture, i.e. ~1 s added to a 40–60 minute gate.
+- **A mutation-detected block never stamps the post-mutation sha.** Whichever path catches it — a component boundary, a SIDE-lane marker, or the terminal capture — `commit:` names the VERIFIED START (the identity the run executed against) with an explicit `(VERIFIED START — …)` label, and the post-mutation reading sits on `tree-end:` with an explicit `(POST-MUTATION observation — …)` label. The labelling lives in one place, so the three paths cannot drift (#2926 review J1).
+- **The run's own output is not a mutation.** Besides the summary file, the run's stdout/stderr redirect target is carved out when the platform can name it and it is a regular file inside the checkout — so `> gate-out.txt` inside the repo does not make the gate trip on its own log. Where the fd cannot be named (no `/proc`), nothing is excluded and the FAIL text says so.
+- Self-tests, all three wired into `tooling-tests`: `scripts/tests/test_agent_gate_tree_integrity.sh` (the behavioural guard), `scripts/tests/test_agent_gate_tree_portability.sh` (the same guard under BSD/macOS `sed`/`stat`/`sort` shims, plus a lint — over a function inventory DERIVED from the gate — that FAILs on any GNU-only construct in the tree-integrity code; macOS is a first-class gate host) and `scripts/tests/test_agent_gate_tree_provenance.sh` (the labelling contract on every detection path, the boundary block's component table, and the stdout carve-out).
+
 ## `--delta` mechanics: test/docs-only re-certification (issue #1892 / #2081)
 
 `CLAUDE.md` keeps only the invocation and the tier rule (NOT the gate of

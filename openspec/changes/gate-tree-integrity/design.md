@@ -1,0 +1,477 @@
+# Design — gate-tree-integrity (issue #2926)
+
+## 1. What is actually broken (code-verified)
+
+| Claim | Evidence in `scripts/agent-gate.sh` @ `c76f4ef` |
+|---|---|
+| `commit:` is stamped at summary-write time | :4888 (full), :3703 (`--lite`), :3923 (`--delta`) |
+| Nothing captures tree state at start | the ONLY other `git rev-parse` uses are :3818 (`--delta` anchor), :4926–4927 (push signal), :3256/:3356 (base-ref probes) |
+| The `dirty:` flag is `git status --porcelain` at the same late moment | same three lines |
+| Components derive scope from git **mid-run** | `file-size` :3266–3268, `--lite` blast radius :3365–3366, `--delta` classification :3881–3882 |
+| There is already a component-boundary chokepoint to hook | `record_result` :2251–2256 calls `_assert_summary_integrity` |
+| There is already a lane-aware (MAIN vs SIDE) fail-closed pattern to mirror | `_assert_summary_integrity` :1985, `_apply_integrity_marker` :2051, `_emit_terminal_summary` :2077 |
+
+The #2874 `summary-integrity` machinery is the exact structural precedent: a per-run identity
+(`run-id`), a boundary check, a lane-aware marker for backgrounded components, and a terminal
+re-check. This change adds a second identity — of the **tree** rather than of the **summary file** —
+through the same three hook points. That is the cheapest correct shape and it keeps one mental model.
+
+## 2. Remedy choice: fail-closed identity stamp (not snapshot, not lock)
+
+The issue offered three remedies.
+
+- **Snapshot / gate a detached copy.** Strongest isolation, but: the gate compiles into a shared
+  `target/` whose paths are baked into artifacts, the datasets root and `REPO_ROOT`-relative
+  component paths (`docs/reports/…`, `test-data/…`) assume the real checkout, and a copy of a
+  built repo is tens of GB. It also *hides* the collision instead of reporting it — the fixer's
+  commit still lands in a worktree whose gate result no longer describes it. Rejected as this
+  change's remedy.
+- **Advisory worktree lock.** Prevents the second writer, but only if the second writer takes the
+  lock. The realistic second writer is a human or an agent running `git commit`, which will never
+  consult a gate lock. It also converts a rare hazard into a routine hard block on a normal pipeline
+  shape (closer + fixer). Rejected.
+- **Fail-closed identity stamp (chosen).** Makes the corruption *self-evident in the artifact* —
+  precisely the property whose absence caused the incident. It costs ~35 ms per run, cannot be
+  defeated by an uncooperative writer, and composes with the existing #2874 mechanism. It does not
+  prevent the collision; the doctrine update (§7) and #1930 cover prevention.
+
+## 3. The digest — chosen mechanism, and why the naive one fails
+
+### 3.1 The trap the guard must not fall into
+
+`git status --porcelain` alone is **provably blind** to the dominant case. Measured in this checkout:
+
+```
+append "A\n" to README.md      porcelain sha256 = c8094453…   diff-based digest = 2ca89bd8…
+append "B\n" to README.md      porcelain sha256 = c8094453…   diff-based digest = 47f1c403…
+                                                ^^ IDENTICAL              ^^ CHANGED
+```
+
+The porcelain listing is ` M README.md` in both states. Editing a file that is *already* modified —
+the single most likely shape of a mid-run review fix — leaves the porcelain byte-identical. A guard
+built on it would be another can't-fail guard.
+
+### 3.2 Chosen mechanism: a per-path content manifest, digested
+
+Capture is one function, `_tree_identity <out-manifest>`, producing a NUL-framed manifest and its
+`sha256`:
+
+```
+H <full-head-sha-or-"unborn">                  # the HEADER, written first
+T <value> <mode> <path>                        # one record per uncommitted tracked change
+U <value> <mode> <path>                        # one record per untracked, non-ignored file
+N <body-record-count>                          # the TRAILER, written last
+
+<value> = <blob-sha> | DELETED | NONFILE | LINK:<target> | SIZE:<n>:MTIME:<t>
+```
+
+`<blob-sha>` is a full-length lowercase hex object id — **40 hex in a SHA-1 repository, 64 in a
+SHA-256 one**. One shared predicate, `_tree_hex_id_ok`, accepts both lengths and is used by every
+caller that asks "is this a real object id" (the capture's own digest validation and the lockfile
+carve-out); no site hard-codes 40.
+
+`SIZE:<n>:MTIME:<t>` is the oversized-untracked-file fallback (§6), and `<t>`'s **resolution is a
+platform property, probed once, never assumed** (see the `MTIME` note under §6).
+
+Every record is NUL-terminated and its **path comes last**, so a path containing a tab or a
+newline cannot forge a field or a record. The `N` trailer is what makes a **truncated** manifest
+detectable (§8).
+
+- **Tracked side**: `git --no-optional-locks diff --name-only -z HEAD --` enumerates every path that
+  differs from HEAD in the index *or* the working tree (content, mode, add, delete). Each surviving
+  path's **working-tree bytes** are hashed with `git hash-object --stdin-paths` (a single batched
+  process, **no `-w`** so nothing is written to the object database); paths that no longer exist are
+  recorded `DELETED`.
+- **Untracked side**: `git --no-optional-locks ls-files --others --exclude-standard -z`, hashed the
+  same way. `--exclude-standard` is what makes `.gitignore` the exclusion set (§5).
+- **Ordering — `sort -z` is PROBED, with a git-order fallback.** Both lists are piped through
+  `_tree_sort0`, which uses `LC_ALL=C sort -z` **only when a one-shot startup probe
+  (`printf 'b\0a\0' | LC_ALL=C sort -z`) proves the flag is supported**, and otherwise falls back
+  to `cat`, keeping git's own ordering. Assuming `-z` unconditionally was a silent **fail-OPEN**:
+  a `sort(1)` that rejects the flag prints usage and emits **nothing**, the `while read -r -d ''`
+  loop consuming it enumerates ZERO paths on a dirty tree, both captures agree on the same empty
+  manifest, and a mutated tree certifies. The fallback is not a weakening — `git diff --name-only
+  -z` and `git ls-files -z` already emit deterministically path-ordered output and both captures of
+  a run take the same route, so the explicit sort only removes the dependency on that git property.
+  The manifest is fully NUL-framed either way, so a path containing a newline cannot forge a line.
+- `digest = sha256(manifest)`; the manifest itself is retained at `$LOG_DIR/tree-identity.{start,end}`
+  so a mismatch can **name the paths that changed** (`comm`/`diff` of the two manifests) instead of
+  reporting an opaque hash difference.
+
+**Why this catches the identical-porcelain case**: the manifest carries the *content hash of the
+file's current bytes*, not its status letter. Appending to an already-modified file changes the
+`T <path> <blob-sha>` line while `git status` output is unchanged. Verified empirically above and,
+for the untracked side, by adding then appending to a new untracked file (three distinct digests:
+absent → added → content changed).
+
+**Why the digest only has to be stable *within one run*.** Both captures happen in one process
+invocation on one machine with one git binary and one config. No cross-run, cross-machine or
+cross-git-version stability is required, which removes every portability objection to using git's
+own plumbing output as the input to the hash.
+
+### 3.3 Alternatives considered and rejected
+
+| Candidate | Verdict |
+|---|---|
+| `git status --porcelain` (± `--untracked-files=all`) | **Rejected** — provably blind to §3.1 (measured). |
+| Hash of `git diff --binary HEAD` patch text | Close second; equally content-sensitive and marginally cheaper (~4 ms), but an opaque patch blob cannot name the changed paths on failure, and it says nothing about untracked files. Its per-path successor (§3.2) is strictly more useful for the same order of cost. |
+| `git ls-files -s` (+ index blob shas) | **Rejected** — reflects the **index**, so an unstaged working-tree edit is invisible. Making it correct requires hashing all 4,346 tracked files. |
+| Temporary index + `git add -A` + `git write-tree` | **Rejected** — correct, but **228 ms** measured per capture (~13× §3.2) *and* it writes blob/tree objects into the object database, which git worktrees **share with the root checkout**. A guard that mutates the user's repo to check that the user's repo did not mutate is the wrong trade, even though index/worktree are untouched. |
+| `find -newer` / mtime sweep | **Rejected** — build tools touch mtimes constantly; false positives, and it is a wall-clock-shaped signal (#2642 territory). |
+
+### 3.4 Cost (measured, this checkout: 4,346 tracked files, warm page cache)
+
+| Operation | Time |
+|---|---|
+| `git diff --binary HEAD \| sha256sum` (clean tree) | 4 ms |
+| Full `_tree_identity` shape (HEAD + tracked names + hash-object batch + untracked enumeration) | **17 ms** |
+| Temp-index `git add -A` + `git write-tree` (rejected alternative) | 228 ms |
+
+Two captures (start + terminal) ≈ **35 ms**. With a capture at every `record_result` boundary
+(~30 components) ≈ **0.5 s** on a 40–60 minute full gate — under 0.03 %. On a 1–5 minute `--lite`
+run, ≈ 0.1 s. Cost is dominated by lstat-ing tracked files; it grows with the size of the
+*uncommitted* diff (usually small), not with repository or `target/` size.
+
+### 3.5 Side-effect freedom
+
+Every git invocation is prefixed `git --no-optional-locks`. Without it, `git diff`/`git status` may
+refresh and **rewrite `$GIT_DIR/index`** — which would (a) perturb the user's index, violating the
+stated constraint, and (b) race the ~8 concurrent SIDE-lane subshells that will each call the
+capture at their own component boundary. `git hash-object` is invoked **without `-w`**: hashes are
+computed, nothing is written. No temporary index, no `git add`, no object-database write, no
+working-tree write. The only files the guard creates are the two manifests under `$LOG_DIR`
+(already a per-run `mktemp -d`, outside the repo).
+
+## 4. Mode coverage: full, `--lite`, `--delta`, `--only` — all guarded
+
+**Recommendation: guard all four.** Reasoning per mode:
+
+- **Full gate** — the gate of record; the incident's mode. Non-negotiable.
+- **`--lite`** — *more* scope-sensitive than the full gate, not less: `run_scoped_tests` derives its
+  blast radius from `git diff --name-only "$base"...HEAD` **and** `git diff --name-only HEAD` at
+  :3365–3366, i.e. mid-run. A commit landing between summary-path resolution and that call changes
+  which packages and which `--test` targets run. And `--lite` is the mode that runs *during* the
+  fix rounds, i.e. in the exact window where a second agent is editing. A ~0.1 s cost on a 1–5 min
+  run is not a reason to leave the hole open.
+- **`--delta`** — its entire premise is "`anchor..HEAD` is executable-tests/docs only", classified
+  from `git diff --name-only --no-renames "$anchor_sha" HEAD` at :3881. If HEAD moves mid-run, the
+  set that was classified is not the set that was executed, and the fail-closed classification is
+  void. `--delta` is also the mode most likely to be running while someone keeps polishing.
+- **`--only` (PARTIAL)** — shares the full-gate code path; guarding it is free and a PARTIAL block
+  is still pasted into PRs.
+
+**Exempt** (they never emit a certification of a real tree, and several exit before `LOG_DIR` is
+created at :1620): `--list` (:1474), `--python-build-verify` (:1569), `--emit-summary-selftest`
+(:2130 already stamps the synthetic `commit: selftest branch: selftest dirty: no`), the `--lite`
+aggregation self-test (:4225, same synthetic stamp) and the concurrency-stub mode (:4200). These
+stamp `tree-start: selftest` / `tree-end: selftest` so the block shape stays uniform and
+`test_agent_gate_summary.sh` can assert on the lines' presence without a git dependency.
+
+## 5. Exclusions — `.gitignore` does almost all of it
+
+The exclusion set is `--exclude-standard` (the repo's own ignore rules) plus a two-item explicit
+list. Audited coverage of everything the gate itself writes into the checkout:
+
+| Gate-written path | Already excluded by |
+|---|---|
+| `target/**` (all cargo/nextest/criterion/profiling output, incl. `target/profiling/history.jsonl`) | `.gitignore: target/` |
+| `gate.log` and any caller redirect log | `.gitignore: *.log` |
+| `.agent-gate-summary.txt`, `-lite-`, `-delta-`, and `*.integrity-fail.*` siblings | `.gitignore` root-scoped rules |
+| `test-data/.tmp-parity-manifest-mutated*` (parity-report self-test fixture) | `.gitignore` explicit rule |
+| `test-data/scripts/smoke-test-all-tables-results/`, `test-data/output/` | `.gitignore` |
+| `bindings/python/{target,build,dist,*.egg-info,__pycache__,.venv}`, `pytest_output.txt`, `*.so` | root + `bindings/python/.gitignore` |
+| `bindings/node/{target,node_modules,*.node,index.js,index.d.ts}` | root + `bindings/node/.gitignore` |
+| `trino-connector/{build,.gradle}`, `compaction-parity/{build,.gradle}` | their `.gitignore`s |
+| fetched dataset binaries (`*.db`, `test-data/datasets/.dataset-pin`) | `.gitignore` |
+| `$LOG_DIR` (`/tmp/agent-gate.XXXXXX`), sccache dir, `CARGO_HOME` | outside `$REPO_ROOT` |
+
+Explicit additions (deliberately tiny — an over-broad exclusion re-opens the hole):
+
+1. **`$SUMMARY_FILE` and `$SUMMARY_FILE.integrity-fail.*`, only when they resolve under
+   `$REPO_ROOT`.** The three default paths are already gitignored, but a caller may pin a *relative*
+   `AGENT_GATE_SUMMARY_FILE` (resolved against `$INVOCATION_CWD` at :1678–1681), landing an
+   untracked, non-ignored file in the repo that the gate writes twice by contract. Scope: exactly
+   the paths this run declares it will write — not a glob.
+2. **`Cargo.lock` is a named non-fatal class, not an exclusion.** The gate runs cargo **without
+   `--locked`/`--frozen` (verified: neither flag appears anywhere in the script)**, so the first
+   cargo component may legitimately re-resolve a stale lockfile — a tracked-file mutation caused by
+   the gate itself. Making that a hard FAIL would break real runs. Making it invisible would hide a
+   dependency-version change from the certification. Chosen middle: if the start→end manifest diff
+   contains **only** `Cargo.lock` (or a nested `*/Cargo.lock`), the run stamps
+   `tree-integrity: PASS (lockfile-settled: Cargo.lock <sha-before>→<sha-after>)` and proceeds; if
+   `Cargo.lock` changed **alongside** anything else, the whole run FAILs as a mutation. Both digests
+   are stamped either way, so the residual hole ("someone hand-edits only `Cargo.lock` mid-run") is
+   visible in the artifact rather than silent. **Admission is on the RECORD, not the path spelling**
+   (review F3): the path must carry a tracked (`T`) record whose value is a **real full-length hex
+   blob id** and must be a blob in the commit the run started on. "Real blob id" is decided by the
+   SAME shared `_tree_hex_id_ok` rule the capture digest uses, which accepts **40 hex (SHA-1
+   repository) OR 64 hex (SHA-256 repository)** — the earlier hard-coded 40 made the carve-out
+   unreachable on a SHA-256 repository, spuriously failing every legitimate lockfile settle there
+   (review G5). Widening the length rule does not widen admission: an untracked mid-run
+   `…/Cargo.lock` is still fatal on either hash flavour. Path-matching alone gave the non-fatal class to
+   an UNTRACKED `…/Cargo.lock` appearing mid-run, and to a tracked lockfile that was DELETED mid-run
+   — both real mutations. Presence in the start *manifest* is deliberately **not** required: the
+   manifest lists only paths already differing from HEAD, so requiring it would exclude the dominant
+   legitimate case (a clean lockfile re-resolved by the gate's own cargo) and make the carve-out dead
+   code. **Follow-up (separate issue): add `--locked` to the
+   gate's cargo invocations and delete this carve-out** — that change alters failure modes across
+   every component and does not belong here.
+
+Explicitly **NOT** excluded, and why: `docs/**` and `*.md` (a docs edit mid-run is a real mutation,
+and `--delta` re-certifies exactly those files), `test-data/**` beyond the ignore rules (a fixture
+swap mid-run is the nastiest possible mutation), `openspec/**`, `scripts/**`, `.github/**`.
+
+**Residual limitation to state in the doctrine**: gitignored *inputs* — chiefly the fetched
+`test-data/datasets/**` SSTable binaries — are outside the digest. Their stability is covered by the
+existing `datasets: N Data.db files` stamp and the `ci-pins:` line, not by this guard.
+
+## 6. Escape hatch — recommendation: **none**
+
+Argued **against**, and the codebase supplies the argument:
+
+- The guard's whole value is that a certification artifact cannot lie. An env var that converts a
+  known-lying artifact back into `RESULT: PASS` reinstates the exact failure mode #2926 exists to
+  close. A certification guard with a bypass is worth approximately what the bypass costs to type.
+- The precedent named in the issue is a **warning, not a model**: `CQLITE_ALLOW_FILE_GROWTH` is an
+  opt-out that is **never stamped into the SUMMARY** — it prints only into the `file-size`
+  component's stdout (:3301–3303) and `SUMMARY_META` never learns about it. (Contrast
+  `AGENT_GATE_ALLOW_MISSING_FIXTURES`, which *is* stamped via `MISSING_FIXTURES_MARKER` at
+  :1187/:4896 — that is the shape any future opt-out must copy.)
+- The legitimate need behind an escape hatch is "my mid-run edit was irrelevant to the components
+  that already ran". That is not knowable — component→file attribution does not exist — and the
+  remedy is already the cheapest sound one: re-run on a stable tree. A mixed-tree run has to be
+  re-run to mean anything regardless of what an env var says.
+- Failing closed here cannot deadlock delivery: the mutation is under the operator's control, and
+  the FAIL names the offending paths.
+
+One knob **is** specified, and it is a performance knob rather than a bypass:
+`AGENT_GATE_TREE_HASH_CAP_BYTES` (default 8 MiB) caps per-file content hashing of *untracked* files;
+above the cap the manifest records `SIZE:<n>:MTIME:<t>` instead of a blob sha. It can never turn a
+detected mutation green — only weaken detection for a single oversized untracked blob — and any
+non-default value, plus any use of the fallback, is stamped in the SUMMARY
+(`tree-hash-cap: <bytes> (<k> untracked file(s) recorded by size+mtime…)`).
+
+**`MTIME:<t>` is NOT universally nanoseconds — the resolution is a probed platform property, and a
+coarser one is DISCLOSED (review H5).** `_tree_probe_tools` runs once at startup and sets
+`TREE_STAT_FLAVOR`/`TREE_MTIME_RES`:
+
+| Probe outcome | `_tree_mtime` uses | Resolution | Disclosure appended to the `tree-hash-cap:` line |
+|---|---|---|---|
+| `stat -c %Y` works (GNU) | `stat -c '%.9Y'` | nanoseconds | none — this is the parity case |
+| only `stat -f %m` works (BSD/macOS) **and** `stat -f '%Fm'` returns `<digits>.<digits>` | `stat -f '%Fm'` | sub-second | none — the gap simply closes on that host |
+| only `stat -f %m` works, `%Fm` unrecognized | `stat -f '%m'` | **whole seconds** | `; mtime resolution: WHOLE SECONDS on this host — a same-size rewrite within one second is NOT detected` |
+| no `stat` flavour works | `unknown` | **none** | `; mtime resolution: UNAVAILABLE on this host — those records are size-only` |
+
+The `%Fm` datum is validated on its OUTPUT, not on `stat`'s exit status: an older BSD `stat` that
+does not know the datum either errors or echoes it back, and neither looks like `<digits>.<digits>`.
+The disclosure is emitted only when the fallback is actually in force (`TREE_CAP_FALLBACKS > 0`), so
+a nanosecond-capable host and an unused fallback stay quiet. The point of the asymmetry being
+*stated* rather than *hidden* is that the artifact must never imply a guarantee the platform did not
+give.
+
+The knob is **floored at 4096 bytes** (review F4). Rejecting only non-numeric input accepted `0` and
+`1`, at which *every* untracked file — not one oversized blob — takes the size+mtime record, so a
+same-length content edit with a restored mtime became invisible and the "single oversized blob"
+claim was false. Sub-floor values are clamped; non-numeric or arithmetic-out-of-range values fall
+back to the default; every normalization is stamped in the same `tree-hash-cap:` line, so a rejected
+knob value is never silent.
+
+## 7. Interaction with the `INCOMPLETE` placeholder (#2908)
+
+The startup sentinel at :1760–1769 writes `RESULT: INCOMPLETE (gate did not finish)` as a liveness
+marker. Composition rules:
+
+1. `tree-mutated-midrun` is a **verdict**, never a liveness state: it emits `RESULT: FAIL` plus
+   `tree-integrity: FAIL (…)`. A live gate that detects the mutation knows the outcome
+   determinately, so INCOMPLETE would be strictly less informative.
+2. The sentinel **gains** `tree-start: <sha> dirty: <y/n> digest: <d12>` (it does not gain a
+   `tree-end:` line — there is no end yet). A gate killed mid-run therefore leaves an artifact that
+   still records the tree it began on, which is precisely the forensic evidence the #2916 incident
+   lacked.
+3. **Do not regress #2908.** #2908's concern is that `grep -q 'RESULT:'` false-positives on the
+   placeholder; the corrected predicate is `grep -qE 'RESULT: (PASS|FAIL)'`. Constraint on this
+   change: **no new line may contain the token `RESULT:`** — in particular the `tree-integrity:`
+   reason text must never embed it, and the mutation reason must not be phrased as
+   `RESULT: mutated`. Both predicates (buggy and corrected) therefore behave exactly as they do
+   today.
+4. **A `.running` sentinel is the cleaner joint fix** for #2908's poll hazard — a
+   `$SUMMARY_FILE.running` file created next to the summary at startup and removed at terminal emit
+   makes "is the gate finished?" a file-existence question with no parsing at all, and it would
+   naturally carry the `tree-start:` identity for pollers. **That belongs to #2908, not here.** This
+   change is designed to compose with it: the tree lines live inside the SUMMARY block, and the
+   start identity is written in exactly one place (`$LOG_DIR/tree-identity.start` + the sentinel),
+   so a later `.running` file can reuse it without a second capture.
+
+## 8. Detection points and lane-awareness
+
+Three hooks, mirroring #2874 exactly:
+
+1. **Start** — immediately after summary-path resolution / sentinel write, before `run_lite`,
+   `run_delta` and `acquire_gate_slot`, so all guarded modes are covered by one capture. Stored as
+   `$LOG_DIR/tree-identity.start` + `TREE_START_DIGEST`. The FULL gate then **re-captures** right
+   after `acquire_gate_slot` returns (`_tree_recapture_after_slot`): with the machine cap pinned to
+   1, a gate can sit in `waiting for gate slot` for the length of another 20–25 min run, during
+   which it has executed nothing and certifies nothing — the certification window must begin when
+   work begins. `--lite`/`--delta` exit before that call site and keep the early capture; the
+   startup sentinel deliberately keeps the pre-queue `tree-start:` (it records the tree the process
+   began on). That re-capture is **transient-failure-safe in both directions**: a blip while the
+   guard is ARMED retains the pre-queue capture (review C3), and a blip at the FIRST capture — which
+   is indistinguishable from "no git worktree" and used to yield `SKIP` + `PASS` for the whole run —
+   is RE-ATTEMPTED here and ARMS the guard on success (review F1). A genuinely non-git tree fails the
+   re-attempt identically and keeps the spec'd `SKIP`, so the contract is unchanged. For the modes
+   with no slot grant (`--lite`, `--delta`), the terminal capture probes once when unguarded and, if
+   a worktree IS present, says so in the `SKIP` line rather than letting it read as "nothing to check".
+2. **Component boundary** — inside `record_result` (:2251), alongside `_assert_summary_integrity`.
+   On the MAIN foreground lane a mismatch stops the run immediately with the named FAIL block (the
+   ~1 h saving). Off the foreground lane (`[ "${BASHPID:-$$}" != "$$" ]`, the SIDE-lane subshells) it
+   **must not** `emit_summary`/`exit`; it appends to a marker file
+   (`$LOG_DIR/tree-integrity.fail`) that a post-drain `_apply_tree_integrity_marker` converts into
+   `OVERALL=FAIL` + the named terminal line — the same append-safe pattern as
+   `$LOG_DIR/summary-integrity.fail` (:1998–2003, :2051–2064).
+3. **Terminal** — a final capture immediately before `_emit_terminal_summary` (:4912 / :3718 /
+   `run_delta`'s emit), which is the authoritative check: a mutation landing after the last
+   `record_result` is still caught. This is the one that can never be skipped.
+
+Ordering with the existing guard: `summary-integrity` (who owns the artifact) is evaluated first,
+then `tree-integrity` (what the artifact describes); if both fire, both lines appear and `RESULT`
+is `FAIL` once.
+
+### 8.1 `commit:` semantics on a mutation-detected block (review H2)
+
+A MAIN-lane boundary detection publishes **the one block a triager will read** after a mid-run
+mutation, so the identity it names has to be the identity the run actually executed against. Two
+different trees exist at that moment and conflating them is exactly the #2916 failure:
+
+- `commit:` names the **VERIFIED START** — the identity every component that recorded a result ran
+  against. `TREE_COMMIT_SOURCE` is flipped from its default `end` to `start` at the detection site,
+  and the renderer emits
+  `commit: <7-char start sha> branch: <b> dirty: <start dirty> (VERIFIED START — the identity this
+  run executed against; the tree MUTATED mid-run, see tree-end: for the post-mutation observation)`.
+- `tree-end:` carries the **post-mutation observation** — a tree nothing was certified against —
+  with `(POST-MUTATION observation — NOT the identity this run executed against)` appended to the
+  ordinary `tree-end: <sha> dirty: <d> digest: <d12>` rendering.
+
+Both labels are literal, asserted verbatim by the self-test, and are what makes the two readings
+mutually exclusive: the block can never be skimmed as "the gate ran on the post-mutation tree", and
+it can never be skimmed as "the mutation did not happen". On every non-mutation path
+`TREE_COMMIT_SOURCE` stays `end` and `commit:` is derived from the VERIFIED TERMINAL capture (never
+a fresh `git rev-parse` at emit time), reading `commit: unverified branch: <b> dirty: unverified`
+when no validated terminal capture exists.
+
+### 8.2 …and it is a property of the DETECTION, not of the path (review J1)
+
+The rule above was implemented at the boundary detection site — the only one review H2 looked at —
+while the guard has **three** detection paths. The TERMINAL path (`_tree_finalize`) and the SIDE-lane
+MARKER path (`_apply_tree_integrity_marker`) both kept stamping the post-mutation sha with no label
+at all: the H2 defect, on the paths that cover `--lite`, `--delta` and every full gate's
+post-last-boundary window. Two lines of rule at one of three sites is a factoring problem, so the
+factoring is the fix:
+
+- `_tree_fail_closed <component> <reason>` — the ONLY site that assigns `TREE_MUTATED`, `OVERALL` and
+  the component-attributed `tree-integrity: FAIL (…)` verdict line.
+- `_tree_label_post_mutation` — the ONLY site that sets `TREE_COMMIT_SOURCE=start` and appends
+  `$TREE_POST_MUTATION_SUFFIX`. Pure and idempotent, and conditional on there BEING a validated end
+  observation that differs from the start, so a mutation reverted before the observation is not
+  described as one.
+- `_tree_mark_mutation` = the two together; `_tree_detection_mark <kind> …` dispatches on the
+  detection KIND (`mutation` vs `capture-failed`), and the kind now travels in the SIDE-lane marker
+  file so the post-drain consumer applies exactly what the MAIN lane would.
+
+A capture that could not be validated is deliberately NOT labelled: it is fail-closed, but nothing
+observed a mutation, so it must not claim a verified-start/post-mutation split. The single-site
+property is pinned structurally by `test_agent_gate_tree_provenance.sh` phase D (with a mutant that
+adds a second assignment site), which is what stops a fourth detection path from diverging again.
+
+**Every capture validates itself before anyone compares it.** `_tree_identity` returns rc 2 — a
+fail-closed condition distinct from rc 1 "no git worktree, SKIP" — when the manifest is not
+well-formed or the digest is not a full-length hex hash. Well-formed means all three of: the FIRST
+record is the header `H<TAB><head>`, the LAST record is the trailer `N<TAB><body-count>`, and that
+trailer's count equals the body records actually read back. Validating only the first record was not
+enough (review C2): an ENOSPC truncation *after* the `H` record left a manifest whose surviving
+prefix was byte-identical to another capture's prefix, so the two compared EQUAL and a mutation to a
+later-sorted path passed as `tree-integrity: PASS`. With the trailer, a short write can no longer be
+mistaken for a shorter tree. The printed identity is then
+split by `_tree_split_identity`, never by `IFS=$'\t' read` (tab is IFS *whitespace*, so `read`
+collapses an empty field and shifts later fields left), and each field is re-validated. The
+comparison is over **head + dirty + digest**, never the digest alone. Without all three, a hash tool
+that merely exits non-zero produced an empty digest that compared EQUAL and stamped
+`tree-integrity: PASS` on a mutated tree.
+
+## 9. Test design (discriminating by construction)
+
+**Three files**, all run by `tooling-tests`: `scripts/tests/test_agent_gate_tree_integrity.sh`
+(behaviour), `scripts/tests/test_agent_gate_tree_portability.sh` (the BSD/macOS half, review G1) and
+`scripts/tests/test_agent_gate_tree_provenance.sh` (the labelling/table/carve-out half, review
+J1-J3). The split is the campsite rule (#1135): the behaviour file is already ~1.9k lines.
+Both build throwaway git repos with per-run `mktemp -d …XXXXXX` (hermeticity rules from #2874) and
+drive the gate through a fast path (`--only fmt` on the temp repo, plus direct invocation of the
+capture functions via the existing self-test seam style) so they cost seconds, not an hour.
+
+Cases, and what each discriminates:
+
+| Case | Discriminates against |
+|---|---|
+| **A** mutate the tree mid-run (commit landing between two component boundaries) → no `RESULT: PASS`, named `tree-integrity: FAIL (tree-mutated-midrun …)`, non-zero exit | the bug itself |
+| **B** control: identical harness, no mutation → `RESULT: PASS`, `tree-integrity: PASS` | a hardwired-FAIL "guard" |
+| **C** append to an **already-modified** tracked file (porcelain listing byte-identical before/after) → detected | the naive porcelain implementation (§3.1) |
+| **D** untracked file added, then its content changed, then removed → each state a distinct digest, and the removal returns to the baseline | a tracked-only digest; a counter masquerading as a content identity |
+| **E** churn-only run: writes under `target/`, a `*.log`, and the default summary path → digest unchanged, `RESULT: PASS`; plus the docs/`test-data` counter-case, which MUST trip | an over-tight exclusion set that self-trips; an over-broad one that hides a real mutation |
+| **F** capture idempotence: two captures of an unchanged tree → identical digest; `$GIT_DIR/index` mtime+content and `git status` output unchanged across captures | index/worktree perturbation (§3.5) |
+| **G** `--lite` and `--delta` mutated-mid-run → neither certifies | mode gaps (§4) |
+
+A and B together are the discrimination proof: **remove the guard and A fails; hardwire the guard to
+FAIL and B fails.** No test-only bypass seam is introduced to "prove" the guard can fail — such a
+seam would itself be the escape hatch §6 rejects. The mutating self-test hooks refuse any checkout
+lacking the disposable-fixture marker, so they can never run against a live tree.
+
+Cases added by the review rounds, each pinning a defect that shipped and was fixed:
+
+| Case | Pins |
+|---|---|
+| **B1** a hash tool that exits non-zero → FAIL-CLOSED, never an empty digest comparing EQUAL | the headline can't-fail regression |
+| **C1** HEAD moves between the terminal capture and the emit → `commit:` names the VERIFIED capture, `unverified` when there is none | a block certifying a sha the guard never verified |
+| **C2** a manifest truncated after the `H` record → REJECTED by the `N` trailer, never compared | a short write read as a shorter tree |
+| **H2** a MAIN-lane boundary FAIL block → `commit:` = labelled VERIFIED START, `tree-end:` = labelled POST-MUTATION observation (§8.1), asserted verbatim | the two trees being conflated in the one block a triager reads |
+| **F3** lockfile carve-out admitted on the RECORD (tag + tracking + start-commit blob), incl. an untracked mid-run `Cargo.lock` and `notCargo.lock` | path-spelling admission |
+| **F4** a sub-floor cap (`0`/`1`) → clamped, the same-length untracked rewrite still detected, the clamp stamped | a knob that silently disables content hashing |
+| **B3/B6** non-canonical in-repo summary paths excluded; a TAB inside a changed path cannot corrupt the lockfile classification | a disarmed carve-out; a field-forging path |
+| **B4** an edit while QUEUED for a gate slot → outside the certification window | the queue being inside the guarded window (§8 hook 1) |
+| cap disclosure counts FILES not CAPTURES; every settled lockfile named; the changed-path list truncated at 5 with `(+N more)` and a ≤5 control | double-reported disclosures; a lossy report |
+| an early preflight FAIL, and a `summary-integrity` + `tree-integrity` double-fire | provenance dropped on the non-happy paths |
+
+**Portability half** (`test_agent_gate_tree_portability.sh`, review G1) — the guard's first
+Linux-only construct shipped because the suite had no macOS path at all. It runs the parsing,
+classification and mtime paths under `AGENT_GATE_TEST_OS=Darwin` against PATH shims reproducing the
+BSD divergences, and then lints what the shims do not execute:
+
+| Portability case | Pins |
+|---|---|
+| a `sed` that does not honour `\t` | the changed-path parser reporting the MODE field instead of the PATH (and corrupting the lockfile classification, which keys on those paths) |
+| a `stat` offering only `-f` — with and without the `%Fm` fractional datum (**H5**) | `unknown` instead of a real mtime; and a whole-seconds host silently implying nanosecond parity instead of appending the `mtime resolution: WHOLE SECONDS…` disclosure (§6) |
+| a `sort` that rejects `-z` | the silent **fail-OPEN**: zero enumerated paths, both captures agreeing, a mutated tree certifying (§3.2) |
+| **G2** a `.report` lookup by a path's ESCAPED spelling | a raw/absent spelling matching, or `awk -v` un-escaping the escaped tabs |
+| **G5** 64-hex blob ids in a SHA-256 repository | the hard-coded 40 that made the lockfile carve-out unreachable there |
+| **the static lint** — 13 rules (12 GNU-only construct classes + `awk-v-escape-processing`) over all 34 `_tree_*`/`_assert_tree_*` functions, allowlisting `stat -c`/`sort -z` ONLY inside the two functions that PROBE for them | a reintroduction on a code path the shims never execute |
+
+Each lint rule is itself proved discriminating: a mutant body it must catch, and a portable control
+body it must not flag — the rule set cannot silently become a no-op.
+
+**No wall-clock assertions (#2642).** All assertions are on captured identities (digests, SHAs,
+manifest contents, the presence of named lines) — never on elapsed time. The mid-run mutation is
+sequenced by a **rendezvous on the gate's own artifacts** (wait for the first
+`$LOG_DIR/<component>.result` to appear, then mutate), not by `sleep N`; the harness's outer
+bounded-wait deadline is a test-harness timeout, not a correctness threshold, and is documented as
+such so `scripts/tests/check-no-wallclock-asserts.sh` / the `roborev-lints` component's intent is
+respected.
+
+## 10. Doctrine updates (same change)
+
+- `website/src/content/docs/agents-developing/gate-contract.md`: add `tree-start:`/`tree-end:`/
+  `tree-integrity:` to the machine-checkable block (both the full and PARTIAL renderings at
+  :357/:378), and a short "a mid-run tree mutation invalidates the run" section stating that
+  `tree-integrity: PASS` is part of what a closer must read before trusting a summary.
+- `CLAUDE.md` gate section: one line in the gate table's notes — a full/lite/delta run whose tree
+  changes mid-run FAILs with `tree-mutated-midrun` and cannot be pasted as a certification; closers
+  verify `tree-integrity:` alongside `RESULT:`.
+- `docs/development/gate-ops.md`: operational note on the closer+fixer overlap shape (#1582/#1930)
+  and how to recover (re-run on a stable tree; the FAIL names the changed paths).
