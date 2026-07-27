@@ -126,6 +126,17 @@ pub mod attr {
     /// `tombstones_build_no_prune`). Bounded by the enum itself; NEVER carries a
     /// partition key, predicate value, or query string.
     pub const FALLBACK_REASON: &str = "cqlite.query.fallback_reason";
+    /// Structural invariant a BTI `Rows.db` row-index ROOT violated, making the
+    /// clustering read fall back to a full-partition decode (issue #3002). Values
+    /// come from
+    /// [`crate::storage::sstable::bti::RowsTrieRootRejectReason::label`] — a closed,
+    /// static set of SEVEN `&'static str`s (`not_below_entry`,
+    /// `payload_incapable_node_type`, `childless_root_without_payload`,
+    /// `truncated_node`, `sparse_node_without_transitions`, `invalid_payload_bits`,
+    /// `extent_not_at_entry`), STAMPED per enum variant and never derived from file
+    /// bytes or a message string. Bounded by the enum itself; NEVER carries an
+    /// offset, key, or path.
+    pub const ROWS_ROOT_REJECT_REASON: &str = "cqlite.read.rows_root_reject_reason";
     /// Flight warm-handle refresh outcome (issue #2310). Bounded to the closed set
     /// `"unchanged"`, `"rebuilt_delta"`, `"fail_closed_retained"` — a `&'static str`
     /// from a fixed slot table, never a ticket, key, or path value.
@@ -312,6 +323,21 @@ pub const READ_SSTABLES_PRUNED: &str = "cqlite.read.sstables_pruned";
 /// definitely absent. Under a correct oracle this stays 0; a non-zero value is a
 /// corruption/soundness alarm. Bounded attributes: [`attr::SSTABLE_FORMAT`].
 pub const READ_BLOOM_FALSE_NEGATIVES: &str = "cqlite.read.bloom.false_negatives";
+
+/// `cqlite.read.bti.rows_root_rejected` — counter `{partition}` (issue #3002).
+///
+/// Incremented once per clustering-slice read that could NOT use a BTI partition's
+/// `Rows.db` row index because the row-index ROOT the `TrieIndexEntry` resolved to
+/// failed structural validation, so the read decoded the WHOLE partition instead
+/// (correct rows, no narrowing). Bounded attribute:
+/// [`attr::ROWS_ROOT_REJECT_REASON`] (the closed
+/// `RowsTrieRootRejectReason::label()` set).
+///
+/// Zero on a healthy table. A non-zero value names the cause of otherwise
+/// unexplained clustering-read latency: every slice over the affected partitions is
+/// doing a full-partition decode. The known producer is a `Rows.db` written by
+/// CQLite <= 0.16 (mis-based root delta) — re-flush/re-compact those tables.
+pub const READ_BTI_ROWS_ROOT_REJECTED: &str = "cqlite.read.bti.rows_root_rejected";
 
 /// `cqlite.merge.rows_in` — counter `{row}` (issue #2163).
 ///
@@ -888,6 +914,8 @@ pub const ALL_METRICS: &[&str] = &[
     READ_SCAN_WINDOW_REFILL,
     READ_SSTABLES_PRUNED,
     READ_BLOOM_FALSE_NEGATIVES,
+    // BTI row-index root rejection → full-partition fallback (#3002)
+    READ_BTI_ROWS_ROOT_REJECTED,
     MERGE_ROWS_IN,
     MERGE_ROWS_OUT,
     QUERY_DEGRADED_PATH,

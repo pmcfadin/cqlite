@@ -358,9 +358,23 @@ impl SSTableReader {
         let root = match &header.trie_root {
             Ok(root) => root.offset(),
             Err(rejection) => {
+                // OPERATOR SIGNAL (#3002): this fallback is otherwise invisible — it
+                // shows up only as unexplained clustering-read latency, because every
+                // slice over the affected partitions decodes in full. Count it with
+                // the violated invariant as the bounded attribute so a dashboard can
+                // name the cause; the `debug!` keeps the offsets, which never go on a
+                // metric label.
+                crate::observability::add_counter(
+                    crate::observability::catalog::READ_BTI_ROWS_ROOT_REJECTED,
+                    1,
+                    &[(
+                        crate::observability::catalog::attr::ROWS_ROOT_REJECT_REASON,
+                        rejection.reason.label().into(),
+                    )],
+                );
                 debug!(
                     "BTI clustering seek: {rejection}; decoding the full partition (no \
-                     narrowing) — a Rows.db row index written by CQLite <= 0.15 must be \
+                     narrowing) — a Rows.db row index written by CQLite <= 0.16 must be \
                      rewritten (re-flush/re-compact), see issue #3002"
                 );
                 return Ok(None);

@@ -290,6 +290,7 @@ struct Instruments {
     read_scan_window_refill: Counter<u64>,
     read_sstables_pruned: Counter<u64>,
     read_bloom_false_negatives: Counter<u64>,
+    read_bti_rows_root_rejected: Counter<u64>,
     merge_rows_in: Counter<u64>,
     merge_rows_out: Counter<u64>,
     query_degraded_path: Counter<u64>,
@@ -404,6 +405,14 @@ fn instruments() -> &'static Instruments {
                 .with_unit(catalog::unit::DIMENSIONLESS)
                 .with_description(
                     "Opt-in presence-oracle false negatives (soundness alarm), keyed by {format}.",
+                )
+                .build(),
+            read_bti_rows_root_rejected: m
+                .u64_counter(catalog::READ_BTI_ROWS_ROOT_REJECTED)
+                .with_unit(catalog::unit::PARTITIONS)
+                .with_description(
+                    "Clustering reads that decoded a whole BTI partition because its Rows.db \
+                     row-index root failed validation, keyed by {reason} (#3002).",
                 )
                 .build(),
             merge_rows_in: m
@@ -744,6 +753,7 @@ pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue
         catalog::READ_SCAN_WINDOW_REFILL => &i.read_scan_window_refill,
         catalog::READ_SSTABLES_PRUNED => &i.read_sstables_pruned,
         catalog::READ_BLOOM_FALSE_NEGATIVES => &i.read_bloom_false_negatives,
+        catalog::READ_BTI_ROWS_ROOT_REJECTED => &i.read_bti_rows_root_rejected,
         catalog::MERGE_ROWS_IN => &i.merge_rows_in,
         catalog::MERGE_ROWS_OUT => &i.merge_rows_out,
         catalog::QUERY_DEGRADED_PATH => &i.query_degraded_path,

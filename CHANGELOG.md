@@ -20,16 +20,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Cassandra-written SSTables are unaffected by the change and now read
     correctly** — their row indexes were always canonical; only CQLite's
     reader/encoder were wrong.
-  - **`Rows.db` row indexes WRITTEN by CQLite <= 0.15 are mis-rooted and must be
+  - **`Rows.db` row indexes WRITTEN by CQLite <= 0.16 are mis-rooted and must be
     rewritten** (re-flush or re-compact the affected tables, or regenerate the
-    SSTables). Their entry deltas were encoded against the old 2-low base.
-  - Such a mis-rooted entry is now DETECTED structurally rather than trusted: a
-    row-index root must precede its entry, be a payload-capable node type, and end
-    exactly at the entry (the trie writer emits children before parents, so the root
-    is the last node written). An unusable root makes the clustering read fall back to
-    a **full-partition decode** — correct but unnarrowed — instead of returning a
-    structurally valid but wrong window. `data_position`/`block_count` still decode, so
-    point lookups and successor walks are unaffected.
+    SSTables). Their entry deltas were encoded against the old 2-low base. Reads of
+    such a file stay CORRECT but are affected in two different ways: a clustering
+    `SELECT` silently loses the row-index narrowing (below), while the paths that
+    REQUIRE a root — `iterate_rows_for_partition` and `sstable verify` — fail on it.
+    `verify` records a `BtiTrieCorrupt` finding per affected partition and drops that
+    leaf from its cross-check set, so it also reports follow-on index-vs-Data.db
+    findings for the same file; they all clear once the SSTable is rewritten.
+  - A mis-rooted entry is now CHECKED structurally rather than trusted: a row-index
+    root must precede its entry, be a payload-capable node type (and not the empty
+    childless `PayloadOnly`-with-no-payload shape), and end exactly at the entry (the
+    trie writer emits children before parents, so the root is the last node written).
+    A rejected root makes the clustering read fall back to a **full-partition
+    decode** — correct but unnarrowed — instead of returning a structurally valid but
+    wrong window. `data_position`/`block_count` still decode, so point lookups and
+    successor walks are unaffected. These conditions are **necessary, not
+    sufficient**: a mis-based offset whose bytes happen to decode to a node ending
+    exactly at the entry still validates and still narrows to a bogus window, so this
+    is a safety net for the affected files, not a general detector — the remedy
+    remains rewriting them.
+  - New counter `cqlite.read.bti.rows_root_rejected` (`{partition}`, attribute
+    `cqlite.read.rows_root_reject_reason`) makes that fallback visible instead of
+    silent: it is 0 on a healthy table, and non-zero names the violated invariant
+    behind otherwise unexplained clustering-read latency.
 
 ### Changed
 
