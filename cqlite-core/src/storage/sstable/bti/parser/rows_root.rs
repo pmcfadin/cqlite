@@ -1,23 +1,50 @@
 //! Structural validation of a per-partition `Rows.db` row-index trie ROOT
 //! (issue #3002).
 //!
-//! ## The invariant (a spec property, not a provenance guess)
+//! ## Which checks are format invariants, and which depend on the WRITER
 //!
 //! Cassandra's row-index trie is emitted by an INCREMENTAL writer that serializes
 //! **children before parents** (`IncrementalTrieWriterPageAware` /
 //! `RowIndexWriter.complete`, mirrored by CQLite's own `write_row_node`), and each
 //! partition's `TrieIndexEntry` is appended immediately AFTER that partition's trie
-//! body (`BtiTableWriter.IndexWriter.append`). Two consequences are therefore
-//! properties of the FORMAT, independent of what wrote the file:
+//! body (`BtiTableWriter.IndexWriter.append`). Two consequences are properties of
+//! the FORMAT, independent of what wrote the file:
 //!
 //!   1. the trie ROOT is the LAST node written before the entry, so the root's
 //!      serialized extent ends EXACTLY at the entry's offset (`RowsOffset`), and
 //!   2. the root precedes the entry (`root < RowsOffset`).
 //!
 //! A resolved root that violates either is not a root — the file is malformed by
-//! spec. Nothing here infers *who* wrote the file from byte patterns
-//! (no-heuristics, issue #28): every check is a structural equality derived from
-//! the serialization order above.
+//! spec.
+//!
+//! The node-SHAPE checks are weaker claims, and are stated here as such rather than
+//! folded into the sentence above:
+//!
+//!   * [`RowsTrieRootRejectReason::ChildlessRootWithoutPayload`] is still a
+//!     node-shape invariant: `TrieNode.typeFor` never emits an ordinal-0 node with
+//!     `payloadBits == 0` (it encodes neither a transition nor a payload), and a row
+//!     index with `blockCount >= 1` must reach an `IndexInfo` from its root.
+//!   * [`RowsTrieRootRejectReason::PayloadIncapableNodeType`] is **NOT** a format
+//!     invariant. A payload-less root with exactly ONE child whose backward delta
+//!     fits in 4/12 bits is a perfectly legal trie node, and `TrieNode.typeFor`
+//!     would pick `SINGLE_NOPAYLOAD_4`/`_12` for it. Rejecting those ordinals is
+//!     sound only because of two WRITER properties: Cassandra's `RowIndexWriter`
+//!     always parks block 0's `ByteComparable.EMPTY` payload on the root (so a
+//!     Cassandra-written root is payload-BEARING), and CQLite's own `write_row_node`
+//!     routes every internal node through `write_sparse` (so a CQLite-written root
+//!     is always `Sparse*`, never a single-child size optimisation). If either
+//!     writer gained that optimisation, this check would have to be relaxed IN
+//!     LOCKSTEP or every root it emitted would become unreadable by its own reader.
+//!     CQLite's half of that coupling is pinned by the writer-side test
+//!     `rows_db_root_ordinal_stays_in_readers_accepted_set`
+//!     (`writer/partitions_writer_tests.rs`), which asserts the emitted root ordinal
+//!     against [`rows_root_rejected_root_ordinals_for_test`] — the very set this
+//!     module rejects — so a writer drift FAILS a test instead of silently
+//!     degrading every clustering read to a full-partition decode.
+//!
+//! Nothing here infers *who* wrote the file from byte patterns (no-heuristics,
+//! issue #28): every check reads a structural property of the bytes at the resolved
+//! offset. Only (1) and (2) are guaranteed by the format itself.
 //!
 //! ## Why it matters, and exactly how far it goes
 //!
@@ -72,6 +99,29 @@ const ORDINAL_SINGLE_NOPAYLOAD_4: u8 = 1;
 /// `TrieNode` ordinal of `SINGLE_NOPAYLOAD_12` — 12-bit delta across the first two
 /// bytes; likewise payload-incapable.
 const ORDINAL_SINGLE_NOPAYLOAD_12: u8 = 3;
+
+/// The `TrieNode` ordinals [`validate_rows_trie_root`] refuses outright as a
+/// row-index ROOT, because they structurally cannot carry block 0's payload.
+///
+/// This is THE set the reader rejects (the validator matches against it), which is
+/// what makes [`rows_root_rejected_root_ordinals_for_test`] a real coupling for the
+/// writer-side test rather than a second, drift-prone copy. See the module docs:
+/// this is a writer-dependent condition, not a format invariant.
+const ROOT_REJECTED_ORDINALS: [u8; 2] = [ORDINAL_SINGLE_NOPAYLOAD_4, ORDINAL_SINGLE_NOPAYLOAD_12];
+
+/// The ordinal set [`validate_rows_trie_root`] rejects as a row-index root, exposed
+/// so CQLite's WRITER can assert (in `writer/partitions_writer_tests.rs`) that every
+/// root it emits stays out of it.
+///
+/// Without that assertion nothing couples the writer's node-type choice to the
+/// reader's accepted set: a future single-child size optimisation in `write_row_node`
+/// would make every root CQLite writes unreadable by CQLite's own reader (a
+/// full-partition fallback on every clustering slice, plus a `BtiTrieCorrupt` finding
+/// per partition from `verify`) with no test failing.
+#[doc(hidden)]
+pub fn rows_root_rejected_root_ordinals_for_test() -> [u8; 2] {
+    ROOT_REJECTED_ORDINALS
+}
 
 /// A `Rows.db` row-index trie root offset that has PASSED
 /// [`validate_rows_trie_root`].
@@ -448,7 +498,10 @@ pub(crate) fn rows_node_serialized_extent(
 /// a perfectly readable trie. Requiring a payload outright would reject
 /// CQLite-written row indexes; requiring payload-CAPABILITY still rejects the
 /// pre-#3002 mis-based root, which lands on a `SINGLE_NOPAYLOAD_4` node in the real
-/// fixture. The one payload-less shape that IS rejected is `PayloadOnly` (ordinal 0)
+/// fixture. That payload-capability condition is a property of the two WRITERS, not
+/// of the format — a single-child payload-less root IS legal — so it is coupled to
+/// CQLite's writer by test, not by hope; see this module's docs.
+/// The one payload-less shape that IS rejected is `PayloadOnly` (ordinal 0)
 /// with `payloadBits == 0`: that node is childless AND payload-less, so it indexes
 /// nothing and `TrieNode.typeFor` never emits it — the check is a node-shape
 /// invariant, not a "is this byte plausible" judgement. It matters because a `0x00`
@@ -477,7 +530,7 @@ pub(crate) fn validate_rows_trie_root(
         .get(root)
         .ok_or_else(|| reject(RowsTrieRootRejectReason::TruncatedNode))?;
     let ordinal = (header_byte >> 4) & 0x0F;
-    if ordinal == ORDINAL_SINGLE_NOPAYLOAD_4 || ordinal == ORDINAL_SINGLE_NOPAYLOAD_12 {
+    if ROOT_REJECTED_ORDINALS.contains(&ordinal) {
         return Err(reject(RowsTrieRootRejectReason::PayloadIncapableNodeType {
             header_byte,
         }));

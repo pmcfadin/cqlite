@@ -90,8 +90,8 @@ pub use rows::{
 // capability type plus the rejection reason a clustering reader reports when it
 // takes the honest full-partition fallback.
 pub use rows_root::{
-    rows_node_serialized_extent_end_for_test, RowsTrieRootRejectReason, RowsTrieRootRejection,
-    ValidatedRowsTrieRoot,
+    rows_node_serialized_extent_end_for_test, rows_root_rejected_root_ordinals_for_test,
+    RowsTrieRootRejectReason, RowsTrieRootRejection, ValidatedRowsTrieRoot,
 };
 // Crate-internal uncounted `TrieIndexEntry.deserialize` (issue #2058): the successor
 // walk resolves a WIDE successor's `data_position` for the seek END bound, which must

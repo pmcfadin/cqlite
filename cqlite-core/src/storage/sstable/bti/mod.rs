@@ -24,8 +24,8 @@ pub use parser::{
 };
 // Structural `Rows.db` row-index-root validation (issue #3002).
 pub use parser::{
-    rows_node_serialized_extent_end_for_test, RowsTrieRootRejectReason, RowsTrieRootRejection,
-    ValidatedRowsTrieRoot,
+    rows_node_serialized_extent_end_for_test, rows_root_rejected_root_ordinals_for_test,
+    RowsTrieRootRejectReason, RowsTrieRootRejection, ValidatedRowsTrieRoot,
 };
 // Crate-internal zero-copy slice walker (rust-reviewer #1574): consumed only by
 // the SSTable reader, so kept off cqlite-core's public semver surface. It takes a
