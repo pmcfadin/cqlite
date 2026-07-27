@@ -259,6 +259,49 @@ an SSTable concern. See Appendix B for byte-level examples.</p>
 <li><strong>Frozen</strong> (<code dir="auto">frozen&#x3C;list&#x3C;...>></code>): Single-cell storage, entire collection serialized as one blob</li>
 <li><strong>Non-frozen</strong> (<code dir="auto">list&#x3C;...></code>): Multi-cell storage, each element stored as separate cell</li>
 </ul>
+<div class="sl-heading-wrapper level-h4"><h4 id="column-ordering-serializationheader-is-the-positional-key">Column Ordering: <code dir="auto">SerializationHeader</code> Is the Positional Key</h4><a class="sl-anchor-link" href="#column-ordering-serializationheader-is-the-positional-key"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Column Ordering: SerializationHeader Is the Positional Key”</span></a></div>
+<p>A row body carries <strong>no column names</strong>. Cells are written positionally, and both the cell
+sequence and the missing-columns bitmap index into the column lists recorded in the
+<code dir="auto">SerializationHeader</code> (<code dir="auto">Statistics.db</code>, see Chapter 7). The header order is therefore the
+<em>only</em> authority for which cell is which — there is nothing in <code dir="auto">Data.db</code> to fall back on, and
+nothing may be inferred from the bytes (no-heuristics mandate, issue #28).</p>
+<p><strong>The order.</strong> Static columns and regular columns are two independent lists. Within each list,
+Cassandra sorts by <code dir="auto">ColumnMetadata.comparisonOrder</code> — a packed <code dir="auto">long</code>
+(<code dir="auto">ColumnMetadata.java:107-116</code>):</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">(kind.ordinal() &#x3C;&#x3C; 61) | (isComplex ? 1L &#x3C;&#x3C; 60 : 0) | (position &#x3C;&#x3C; 48) | (name.prefixComparison >>> 16)</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="(kind.ordinal() << 61) | (isComplex ? 1L << 60 : 0) | (position << 48) | (name.prefixComparison >>> 16)"><div></div></button></div></figure></div>
+<p>The <code dir="auto">isComplex</code> bit sits <strong>above</strong> every name bit, so within one list <strong>all complex (multi-cell)
+columns sort after all simple ones</strong>, and only then does the column name break ties (by
+<code dir="auto">ColumnIdentifier.compareTo</code> → <code dir="auto">prefixComparison</code>, then unsigned byte comparison of the name
+bytes, <code dir="auto">ColumnIdentifier.java:90-106</code>, <code dir="auto">:217-225</code>). Note this partitions the whole list by
+complexity — it is not a per-name adjacency rule: a complex <code dir="auto">a_map</code> still sorts after a simple
+<code dir="auto">z_text</code>. “Complex” means non-frozen collection or non-frozen UDT: <code dir="auto">ColumnMetadata.isComplex()</code> is
+<code dir="auto">cellPathComparator != null</code> (<code dir="auto">:418-420</code>), and that comparator is built only for a non-primary-key
+column whose <code dir="auto">type.isMultiCell()</code> (<code dir="auto">makeCellPathComparator</code>, <code dir="auto">:200-207</code>). A <code dir="auto">frozen&#x3C;…></code> column is
+simple.</p>
+<p><strong>Why the two must agree.</strong> The chain is:
+<code dir="auto">RegularAndStaticColumns.Builder</code> builds each list as a BTree in <code dir="auto">naturalOrder()</code>
+(<code dir="auto">RegularAndStaticColumns.java:156-172</code>) → <code dir="auto">SerializationHeader.toComponent()</code> copies that order
+into insertion-ordered <code dir="auto">LinkedHashMap</code>s for the static/regular columns
+(<code dir="auto">SerializationHeader.java:250-259</code>) → the header serializer writes the names in that map order →
+<code dir="auto">UnfilteredSerializer.serializeRowBody</code> walks the row’s columns in the same order
+(<code dir="auto">UnfilteredSerializer.java:240-259</code>) and <code dir="auto">Columns.Serializer.serializeSubset</code> numbers bitmap bits
+by that same index (<code dir="auto">Columns.java:503-531</code>). A reader replays it in reverse (<code dir="auto">deserializeRowBody</code>,
+<code dir="auto">UnfilteredSerializer.java:564+</code>, subset at <code dir="auto">:606</code>).</p>
+<p>A writer whose header order and cell order disagree produces an SSTable that misdecodes without
+any error: bitmap bit <em>i</em> is attributed to the wrong column, a complex column can be dropped, and
+the cells after it are read with the wrong type and framing (complex cells carry a cell path,
+simple cells do not) — desynchronizing the rest of the row.</p>
+<p>Authority: <code dir="auto">org.apache.cassandra.schema.ColumnMetadata</code> (<code dir="auto">comparisonOrder</code>, <code dir="auto">compareTo</code>),
+<code dir="auto">org.apache.cassandra.db.RegularAndStaticColumns</code>, <code dir="auto">org.apache.cassandra.db.SerializationHeader</code>,
+<code dir="auto">org.apache.cassandra.db.Columns.Serializer</code>, <code dir="auto">org.apache.cassandra.db.rows.UnfilteredSerializer</code>.</p>
+<p>CQLite implements the same key as <code dir="auto">column_order_key(column) -> (is_complex, name)</code> in
+<code dir="auto">cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs:9-11</code>, and applies it to <strong>both</strong>
+sides: the header lists at
+<code dir="auto">cqlite-core/src/storage/sstable/writer/stats_writer/serialization_header.rs:159</code> (static) and
+<code dir="auto">:186</code> (regular), and the cell stream from the same key. Regression guard:
+<code dir="auto">cqlite-core/tests/issue_2035_collection_roundtrip.rs</code> (issue #2035 — <code dir="auto">map&#x3C;text,int></code> + <code dir="auto">set&#x3C;int></code>
+plus a trailing simple column round-trip; the pre-fix writer sorted the header by name only, so the
+complex columns landed in the wrong positions).</p>
 <div class="sl-heading-wrapper level-h4"><h4 id="frozen-collection-serialization">Frozen Collection Serialization</h4><a class="sl-anchor-link" href="#frozen-collection-serialization"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Frozen Collection Serialization”</span></a></div>
 <p>Frozen collections are stored as a single cell with the entire collection serialized as a binary blob.</p>
 <blockquote>
@@ -290,6 +333,32 @@ entry into a key buffer followed by a value buffer before packing.</p>
 layout comment at <code dir="auto">:242-259</code>) — note local deletion time comes <strong>before</strong> TTL. The complex column is
 preceded by an unsigned-VInt cell count (<code dir="auto">UnfilteredSerializer.java:277</code>) and, when
 <code dir="auto">HAS_COMPLEX_DELETION</code> is set, a deletion time.</p>
+<p><strong><code dir="auto">USE_ROW_TTL</code> (<code dir="auto">0x10</code>): element expiry inherited from row liveness.</strong> Collection element cells
+use the <em>same</em> <code dir="auto">Cell.Serializer</code> as simple cells, so they get the same TTL-elision optimization —
+and readers of complex columns must implement it. The writer sets the flag only when <strong>all four</strong>
+conditions hold (<code dir="auto">Cell.java:275</code>):</p>
+<ol>
+<li>the cell is expiring (<code dir="auto">cell.isExpiring()</code>, which also sets <code dir="auto">IS_EXPIRING</code>, <code dir="auto">0x02</code>),</li>
+<li>the row’s primary-key liveness is itself expiring (<code dir="auto">rowLiveness.isExpiring()</code>),</li>
+<li><code dir="auto">cell.ttl() == rowLiveness.ttl()</code>, and</li>
+<li><code dir="auto">cell.localDeletionTime() == rowLiveness.localExpirationTime()</code>.</li>
+</ol>
+<p>When set, <strong>both</strong> the <code dir="auto">local_deletion_time</code> and the <code dir="auto">ttl</code> VInts are omitted from the cell
+(<code dir="auto">Cell.java:295-298</code>) and the reader takes both values from the row’s TTL fields
+(<code dir="auto">Cell.java:318-322</code>). So it is not a “may” — given identical row and cell expiry the flag is
+mandatory, and <code dir="auto">IS_EXPIRING</code> is set alongside it (combined byte <code dir="auto">0x12</code>, or <code dir="auto">0x1a</code> with
+<code dir="auto">USE_ROW_TIMESTAMP</code>).</p>
+<p>In practice a single <code dir="auto">INSERT … USING TTL n</code> writing a whole non-frozen collection gives every
+element the row’s TTL and expiry, so every element cell carries <code dir="auto">USE_ROW_TTL</code>. A later per-element
+update with a different TTL (or into a row with no row-level TTL) fails condition 2 or 3 and writes
+explicit <code dir="auto">local_deletion_time</code> + <code dir="auto">ttl</code> VInts with <code dir="auto">USE_ROW_TTL</code> clear. A reader must therefore be
+prepared for a <strong>mix</strong> of inherited and explicit expiry within one complex column.</p>
+<p>Authority: <code dir="auto">org.apache.cassandra.db.rows.Cell.Serializer</code> (<code dir="auto">serialize</code>, <code dir="auto">deserialize</code>).
+CQLite implements the element-level side in
+<code dir="auto">cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs:22-132</code>
+(<code dir="auto">ElementExpiryShape</code> / <code dir="auto">ExpiryHomogeneity</code> — a tri-state tracker that folds per-element
+inherited-vs-explicit expiry back into a column-level answer), with the round-trip pinned by
+<code dir="auto">cqlite-core/tests/issue_2038_collection_ttl_expiring_cell.rs</code> (issue #2038).</p>
 <p><strong>The path is always unsigned-VInt-length-prefixed. The value is unsigned-VInt-length-prefixed <em>iff</em>
 <code dir="auto">HAS_EMPTY_VALUE</code> (<code dir="auto">0x04</code>) is clear — and when present it is length-prefixed even for a fixed-width
 element type:</strong></p>
@@ -413,7 +482,10 @@ set element — path present, value gone entirely. Schematically, for <code dir=
 <div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">0C  01 6B</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">^   ^  ^</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">|   |  "k"</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">|   VInt path len = 1</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">cell flags (0x08 USE_ROW_TIMESTAMP | 0x04 HAS_EMPTY_VALUE) — no value length, no value bytes</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="0C  01 6B^   ^  ^|   |  &#x22;k&#x22;|   VInt path len = 1cell flags (0x08 USE_ROW_TIMESTAMP | 0x04 HAS_EMPTY_VALUE) — no value length, no value bytes"><div></div></button></div></figure></div>
 <p>A reader that unconditionally reads a value-length VInt here consumes the next cell’s flag byte and
 desynchronizes. Note this is distinct from a NULL: a NULL map <em>value</em> is not expressible in CQL, and a
-NULL top-level column is represented by absence from the column subset, never by a cell.</p>
+NULL top-level column is never represented by a <em>cell</em> — for a simple column it is absence from the
+column subset. (A non-frozen collection is the one case where “reads as NULL” does not imply “absent
+from the subset”: an emptied collection is present in the subset with a complex deletion and zero
+cells — see <a href="#empty-collections">Empty Collections</a> below.)</p>
 <p><strong>Implementation References</strong> (CQLite):</p>
 <ul>
 <li>Frozen collections: <code dir="auto">cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs::serialize_value_into()</code>
@@ -475,6 +547,47 @@ treats <code dir="auto">size &#x3C; 0</code> as null, and returns short when the
 <li><code dir="auto">list&#x3C;frozen&#x3C;udt>></code> = multi-cell (each UDT element is separate cell)</li>
 <li><code dir="auto">frozen&#x3C;list&#x3C;udt>></code> = single-cell (entire list is one blob)</li>
 </ul>
+<div class="sl-heading-wrapper level-h4"><h4 id="empty-collections">Empty Collections</h4><a class="sl-anchor-link" href="#empty-collections"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Empty Collections”</span></a></div>
+<p><strong>Frozen stores a zero-count blob; non-frozen stores no cells but is <em>not</em> absent.</strong> The two modes
+diverge, and the non-frozen side is easy to get wrong:</p>
+<ul>
+<li>
+<p><strong>Frozen</strong> (<code dir="auto">frozen&#x3C;set&#x3C;text>></code> written as <code dir="auto">{}</code>): a normal single cell whose value is a
+zero-element blob — the 4-byte BE count <code dir="auto">00 00 00 00</code> and nothing else
+(<code dir="auto">CollectionSerializer.pack</code> always writes the count, <code dir="auto">CollectionSerializer.java:52-64</code>). This is
+a present, non-null value and is distinguishable from a column that was never written.</p>
+</li>
+<li>
+<p><strong>Non-frozen</strong> (<code dir="auto">set&#x3C;text></code> written as <code dir="auto">{}</code>): <strong>zero element cells</strong>, but the column is still
+present in the row — because writing a non-frozen collection is a <em>replace</em>, and a replace emits a
+<strong>complex (collection) deletion</strong> covering the prior contents before adding cells
+(<code dir="auto">Lists.Setter</code>/<code dir="auto">Sets.Setter</code>/<code dir="auto">Maps.Setter</code> call
+<code dir="auto">UpdateParameters.setComplexDeletionTimeForOverwrite</code>, <code dir="auto">UpdateParameters.java:202-205</code>, then add
+zero cells because the literal is empty: <code dir="auto">Sets.Adder.doAdd</code> returns early on
+<code dir="auto">elements.size() == 0</code>). So the row carries <code dir="auto">HAS_COMPLEX_DELETION</code> and, for that column, a
+deletion time plus a cell count of <code dir="auto">0</code>.</p>
+<p>On the read side the collection reconciles to zero elements, which CQL surfaces as <code dir="auto">NULL</code> — an
+empty non-frozen collection and a null one are indistinguishable <em>to a query</em>. But they are
+distinguishable <strong>on disk</strong>, and a reader must not conflate the two: <code dir="auto">ComplexColumnData</code>’s
+invariant is <code dir="auto">cells.length > 0 || !complexDeletion.isLive()</code> (<code dir="auto">ComplexColumnData.java:64-70</code>) —
+i.e. zero cells is legal precisely when a complex deletion is present, and a column with neither is
+dropped entirely (<code dir="auto">update</code>, <code dir="auto">:229-235</code>).</p>
+</li>
+</ul>
+<p>Abridged <code dir="auto">sstabledump</code> output from the <code dir="auto">nb_empty_collections</code> parity fixture (<code dir="auto">test_types</code>, one row
+with all six columns written empty in a single <code dir="auto">INSERT</code>) — elided (<code dir="auto">…</code>) and annotated, not byte-exact:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">"cells": [</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">{ "name": "fl", "value": [] },                 // frozen&#x3C;list&#x3C;int>>  — present, zero-count blob</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">{ "name": "fm", "value": {} },                 // frozen&#x3C;map&#x3C;text,int>></span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">{ "name": "fs", "value": [] },                 // frozen&#x3C;set&#x3C;text>></span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">{ "name": "ml", "deletion_info": { … } },      // list&#x3C;int>  — complex deletion, ZERO cells</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">{ "name": "mm", "deletion_info": { … } },      // map&#x3C;text,int></span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">  </span></span><span style="--0:#d6deeb;--1:#403f53">{ "name": "ms", "deletion_info": { … } }       // set&#x3C;text></span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">]</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="&#x22;cells&#x22;: [  { &#x22;name&#x22;: &#x22;fl&#x22;, &#x22;value&#x22;: [] },                 // frozen<list<int>>  — present, zero-count blob  { &#x22;name&#x22;: &#x22;fm&#x22;, &#x22;value&#x22;: {} },                 // frozen<map<text,int>>  { &#x22;name&#x22;: &#x22;fs&#x22;, &#x22;value&#x22;: [] },                 // frozen<set<text>>  { &#x22;name&#x22;: &#x22;ml&#x22;, &#x22;deletion_info&#x22;: { … } },      // list<int>  — complex deletion, ZERO cells  { &#x22;name&#x22;: &#x22;mm&#x22;, &#x22;deletion_info&#x22;: { … } },      // map<text,int>  { &#x22;name&#x22;: &#x22;ms&#x22;, &#x22;deletion_info&#x22;: { … } }       // set<text>]"><div></div></button></div></figure></div>
+<p>Note what the non-frozen entries are <em>not</em>: they are neither missing from the row nor a row/cell
+tombstone. <code dir="auto">sstabledump</code> prints a bare <code dir="auto">deletion_info</code> object for a complex column when
+<code dir="auto">complexDeletion()</code> is live-less and there are no cells to follow
+(<code dir="auto">JsonTransformer.serializeColumnData</code>, <code dir="auto">:400-429</code>) — that is exactly the on-disk shape above.
+Reference: <code dir="auto">test-data/datasets/sstables/test_types/nb_empty_collections-*/nb-1-big-Data.db.jsonl</code>;
+generator <code dir="auto">test-data/scripts/generate-cql-type-parity.sh</code> (<code dir="auto">[B9]</code>), schema
+<code dir="auto">test-data/schemas/cql-type-parity.cql</code>.</p>
+<p>A genuinely <strong>absent</strong> non-frozen collection — one never written for that row — is signalled the
+same way as any absent column: its bit is set in the missing-columns bitmap (or the column is simply
+outside the subset), with no deletion time and no cells. Distinguishing “written empty” from “never
+written” therefore requires the complex deletion, not the cell count.</p>
 <p>See <code dir="auto">tables/type-mapping-complex.md</code> for detailed format specifications.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="counter-cells-issue-241">Counter Cells (Issue #241)</h3><a class="sl-anchor-link" href="#counter-cells-issue-241"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Counter Cells (Issue #241)”</span></a></div>
 <p>Counter columns store a <code dir="auto">CounterContext</code> structure, not a raw i64 value. The CounterContext tracks counter updates across multiple replicas (shards).</p>
@@ -939,7 +1052,7 @@ invalid even when every individual component is itself under 65,535 bytes.</p>
 
 
 
-<table><thead><tr><th>Condition</th><th>Flag</th><th>Hex</th><th>Result</th></tr></thead><tbody><tr><td>Cell is tombstone</td><td>CELL_IS_DELETED</td><td>0x01</td><td>Include deletion fields</td></tr><tr><td>Cell has TTL</td><td>CELL_IS_EXPIRING</td><td>0x02</td><td>Include TTL fields</td></tr><tr><td>Value is empty string</td><td>CELL_HAS_EMPTY_VALUE</td><td>0x04</td><td>Zero-length value</td></tr><tr><td>Use row timestamp</td><td>CELL_USE_ROW_TIMESTAMP</td><td>0x08</td><td>Skip cell timestamp</td></tr><tr><td>Use row TTL</td><td>CELL_USE_ROW_TTL</td><td>0x10</td><td>Skip cell TTL</td></tr></tbody></table>
+<table><thead><tr><th>Condition</th><th>Flag</th><th>Hex</th><th>Result</th></tr></thead><tbody><tr><td>Cell is tombstone</td><td>CELL_IS_DELETED</td><td>0x01</td><td>Include deletion fields</td></tr><tr><td>Cell has TTL</td><td>CELL_IS_EXPIRING</td><td>0x02</td><td>Include TTL fields</td></tr><tr><td>Value is empty string</td><td>CELL_HAS_EMPTY_VALUE</td><td>0x04</td><td>Zero-length value</td></tr><tr><td>Use row timestamp</td><td>CELL_USE_ROW_TIMESTAMP</td><td>0x08</td><td>Skip cell timestamp</td></tr><tr><td>Use row TTL</td><td>CELL_USE_ROW_TTL</td><td>0x10</td><td>Skip <strong>both</strong> cell TTL and cell local_deletion_time</td></tr></tbody></table>
 <p><strong>CELL_USE_ROW_TIMESTAMP Truth Table</strong>:</p>
 <p>Most cells use the row-level timestamp for efficiency. Cells need their own timestamp when the cell timestamp differs from the row timestamp (e.g., different write operations).</p>
 

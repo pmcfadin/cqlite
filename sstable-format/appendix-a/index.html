@@ -199,6 +199,39 @@ disk. Null fields are encoded as 0xFFFFFFFF (-1). Source: <code dir="auto">Tuple
 <code dir="auto">UserType extends TupleType</code> (<code dir="auto">UserType.java:52,194</code>), so the two are byte-identical.</p>
 </li>
 <li>
+<p><strong>UDT type names in DDL: accept BOTH bare and keyspace-qualified.</strong> A CQL type string naming a UDT
+may arrive either as <code dir="auto">frozen&#x3C;addr></code> or as <code dir="auto">frozen&#x3C;my_ks.addr></code>, and <em>which</em> form you get depends on
+who produced the DDL — not on the SSTable. A schema parser must accept both and resolve the UDT by
+splitting on the first <code dir="auto">.</code>.</p>
+<ul>
+<li><strong>Cassandra server-side emits the BARE name.</strong> <code dir="auto">CQL3Type.UserDefined.toString()</code> returns
+<code dir="auto">ColumnIdentifier.maybeQuote(name)</code> (or <code dir="auto">"frozen&#x3C;" + maybeQuote(name) + '>'</code>) with no keyspace
+prefix (<code dir="auto">CQL3Type.java:413-420</code>), and every server path funnels through it:
+<code dir="auto">CqlBuilder.append(AbstractType)</code> uses <code dir="auto">type.asCQL3Type().toString()</code> (<code dir="auto">CqlBuilder.java:134-137</code>),
+which drives <code dir="auto">DESCRIBE TABLE</code> / <code dir="auto">SchemaCQLHelper</code> snapshot <code dir="auto">schema.cql</code>, and
+<code dir="auto">SchemaKeyspace.addColumnToSchemaMutation</code> stores the same bare string in
+<code dir="auto">system_schema.columns.type</code> (<code dir="auto">SchemaKeyspace.java:746</code>). The <code dir="auto">DESCRIBE</code> goldens in
+<code dir="auto">test/unit/org/apache/cassandra/cql3/statements/DescribeStatementTest.java</code> show exactly
+<code dir="auto">b frozen&#x3C;&#x3C;bare type name>></code>. <code dir="auto">UserType.getCqlTypeName()</code> <em>is</em> keyspace-qualified
+(<code dir="auto">String.format("%s.%s", …)</code>, <code dir="auto">UserType.java:450-452</code>) but is used only in <code dir="auto">ALTER TYPE</code> error
+messages, not in emitted DDL.</li>
+<li><strong>The qualified form comes from the DataStax Java driver.</strong>
+<code dir="auto">com.datastax.oss.driver.api.core.type.UserDefinedType.asCql(boolean includeFrozen, boolean pretty)</code>
+/ <code dir="auto">describe(...)</code> format with <code dir="auto">frozen&#x3C;%s.%s></code> / <code dir="auto">%s.%s</code> (verified in the constant pool of
+<code dir="auto">java-driver-core-4.19.2.jar</code>). Any tool that renders schema through the driver therefore emits
+<code dir="auto">frozen&#x3C;keyspace.typename></code> — including Cassandra Sidecar’s
+<code dir="auto">GET /api/v1/keyspaces/&#x3C;ks>/schema</code>, which is how CQLite’s Trino connector obtains DDL.</li>
+<li>CQLite accepts both: <code dir="auto">cqlite-core/src/schema/cql_parser.rs</code> (<code dir="auto">qualified_type_name</code> parses
+<code dir="auto">identifier ('.' identifier)?</code>) and <code dir="auto">split_qualified_udt</code> in
+<code dir="auto">cqlite-core/src/schema/udt_registry.rs</code> (re-exported from <code dir="auto">cqlite-core/src/schema/mod.rs:24</code>),
+used at every registry lookup site (issue #2807).</li>
+<li>This is a <strong>DDL/schema-text</strong> concern only. Nothing on disk carries a CQL type string of this
+form: the <code dir="auto">Statistics.db</code> <code dir="auto">SerializationHeader</code> records the <em>internal marshal</em> form,
+<code dir="auto">org.apache.cassandra.db.marshal.UserType(keyspace,hex_encoded_name,field:type,…)</code>, which is
+always keyspace-bearing (see Appendix B, “Tuple and UDT Field Encoding”).</li>
+</ul>
+</li>
+<li>
 <p><strong>Vector types</strong>: fixed-element vectors (<code dir="auto">vector&#x3C;float,n></code>) write no length prefix — layout is exactly <code dir="auto">n x elementSize</code> bytes concatenated. Source: <code dir="auto">VectorType.java:477-493</code>, <code dir="auto">FixedLengthSerializer</code>.</p>
 </li>
 </ul>

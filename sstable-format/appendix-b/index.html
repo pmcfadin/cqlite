@@ -461,7 +461,7 @@ ZigZag; nothing in the byte distinguishes them. The writer’s method (<code dir
 
 
 
-<table><thead><tr><th>Bit</th><th>Name</th><th>Value</th><th>Description</th></tr></thead><tbody><tr><td>0</td><td><code dir="auto">IS_DELETED</code></td><td><code dir="auto">0x01</code></td><td>Cell is a tombstone (no value)</td></tr><tr><td>1</td><td><code dir="auto">IS_EXPIRING</code></td><td><code dir="auto">0x02</code></td><td>TTL fields follow (expiring cell)</td></tr><tr><td>2</td><td><code dir="auto">HAS_EMPTY_VALUE</code></td><td><code dir="auto">0x04</code></td><td>Zero-length value (not NULL)</td></tr><tr><td>3</td><td><code dir="auto">USE_ROW_TIMESTAMP</code></td><td><code dir="auto">0x08</code></td><td>Use row-level timestamp (no cell timestamp)</td></tr><tr><td>4</td><td><code dir="auto">USE_ROW_TTL</code></td><td><code dir="auto">0x10</code></td><td>Use row-level TTL (no cell TTL)</td></tr></tbody></table>
+<table><thead><tr><th>Bit</th><th>Name</th><th>Value</th><th>Description</th></tr></thead><tbody><tr><td>0</td><td><code dir="auto">IS_DELETED</code></td><td><code dir="auto">0x01</code></td><td>Cell is a tombstone (no value)</td></tr><tr><td>1</td><td><code dir="auto">IS_EXPIRING</code></td><td><code dir="auto">0x02</code></td><td>TTL fields follow (expiring cell)</td></tr><tr><td>2</td><td><code dir="auto">HAS_EMPTY_VALUE</code></td><td><code dir="auto">0x04</code></td><td>Zero-length value (not NULL)</td></tr><tr><td>3</td><td><code dir="auto">USE_ROW_TIMESTAMP</code></td><td><code dir="auto">0x08</code></td><td>Use row-level timestamp (no cell timestamp)</td></tr><tr><td>4</td><td><code dir="auto">USE_ROW_TTL</code></td><td><code dir="auto">0x10</code></td><td>Inherit row-level TTL <strong>and</strong> local_deletion_time (neither field is written)</td></tr></tbody></table>
 <p><strong>Common flag combinations</strong>:</p>
 <ul>
 <li><code dir="auto">0x08</code>: Normal write (use row timestamp)</li>
@@ -481,8 +481,32 @@ sets <code dir="auto">IS_DELETED</code>. Authority: <code dir="auto">Cell.Serial
 <li><strong>Empty strings</strong>: <code dir="auto">HAS_EMPTY_VALUE</code> (<code dir="auto">0x04</code>) flag set and <strong>no</strong> value length and no value bytes —
 the flag replaces the length VInt, it does not precede a <code dir="auto">0x00</code> (<code dir="auto">Cell.java:277-278</code>, <code dir="auto">:303-304</code>;
 reader <code dir="auto">:310</code>). Distinct from NULL.</li>
-<li><strong>NULL values</strong>: NOT written as cells - represented by absence in column bitmap</li>
+<li><strong>NULL values</strong>: NOT written as cells - represented by absence in column bitmap. Caveat for
+<strong>non-frozen collections</strong>: a collection emptied or overwritten-with-<code dir="auto">{}</code> reads back as NULL but is
+<strong>present</strong> in the subset, carrying a complex deletion and zero element cells — absence in the
+bitmap is not the only on-disk shape that surfaces as NULL. See Chapter 5, “Empty Collections”.</li>
 </ul>
+<p><strong>TTL field range — Cassandra’s bound, and the reader-side cast hazard</strong>:</p>
+<p>On disk, the cell TTL is an <strong>unsigned VInt32 delta</strong> over <code dir="auto">stats.minTTL</code>:
+<code dir="auto">SerializationHeader.writeTTL</code> emits <code dir="auto">writeUnsignedVInt32(ttl - stats.minTTL)</code> and <code dir="auto">readTTL</code> adds
+<code dir="auto">stats.minTTL</code> back (<code dir="auto">SerializationHeader.java:175-178</code>, <code dir="auto">:196-199</code>). Cassandra itself holds TTL in a
+signed <code dir="auto">int</code>, and enforces the range at request validation, not at parse time:
+<code dir="auto">Attributes.MAX_TTL = 20 * 365 * 24 * 60 * 60</code> — 20 years (20 × 365 days), <code dir="auto">630,720,000</code> s
+(<code dir="auto">Attributes.java:47</code>) — with <code dir="auto">ttl &#x3C; 0</code> and <code dir="auto">ttl > MAX_TTL</code> both rejected as
+<code dir="auto">InvalidRequestException</code> (<code dir="auto">:135-139</code>). At <em>read</em> time the only check is
+<code dir="auto">if (ttl &#x3C; 0) throw new IOException("Invalid TTL: " + ttl)</code> (<code dir="auto">Cell.java:345-346</code>). So a
+well-formed Cassandra 5.0 SSTable can never carry a TTL above <code dir="auto">MAX_TTL</code>, which is comfortably
+below <code dir="auto">i32::MAX</code> (<code dir="auto">2,147,483,647</code> s ≈ 68 years).</p>
+<p><em>Reader-implementation note (CQLite, not a format rule)</em>: a reader that decodes the delta into a
+<code dir="auto">u32</code>/<code dir="auto">u64</code> and then does a bare <code dir="auto">as i32</code> would wrap an out-of-range value to a <strong>negative</strong> TTL —
+the one thing Cassandra’s own reader rejects outright. CQLite therefore saturates instead of
+wrapping, on both cell paths:
+<code dir="auto">cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs:46-53</code>
+(<code dir="auto">ttl.min(i32::MAX as u32) as i32</code>, collection-element path, issue #2498) and
+<code dir="auto">cqlite-core/src/storage/sstable/reader/parsing/row_decoder/cell_value.rs:165</code>
+(<code dir="auto">abs_ttl.min(i32::MAX as i64) as i32</code>, scalar path, issue #2173). No real Cassandra data reaches
+this clamp; it exists so a corrupt or adversarial file yields a saturated positive TTL rather than a
+sign-flipped one.</p>
 <p><strong>Example</strong>:</p>
 <div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Normal cell (use row timestamp):</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[0x08]  ← flags (USE_ROW_TIMESTAMP)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← value_length VInt</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← value bytes</span></div></div><div class="ec-line"><div class="code">
 </div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Tombstone cell:</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[0x01]  ← flags (IS_DELETED only)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← timestamp delta VInt (required)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← local_deletion_time delta VUInt (required)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">(no value bytes)</span></div></div><div class="ec-line"><div class="code">

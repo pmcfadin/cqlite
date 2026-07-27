@@ -96,6 +96,35 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
 - **Tuple and UDT field lengths** use **4-byte BE signed int** (not VInt), with no field count on
   disk. Null fields are encoded as 0xFFFFFFFF (-1). Source: `TupleType.java:341-364`;
   `UserType extends TupleType` (`UserType.java:52,194`), so the two are byte-identical.
+- **UDT type names in DDL: accept BOTH bare and keyspace-qualified.** A CQL type string naming a UDT
+  may arrive either as `frozen<addr>` or as `frozen<my_ks.addr>`, and *which* form you get depends on
+  who produced the DDL — not on the SSTable. A schema parser must accept both and resolve the UDT by
+  splitting on the first `.`.
+  - **Cassandra server-side emits the BARE name.** `CQL3Type.UserDefined.toString()` returns
+    `ColumnIdentifier.maybeQuote(name)` (or `"frozen<" + maybeQuote(name) + '>'`) with no keyspace
+    prefix (`CQL3Type.java:413-420`), and every server path funnels through it:
+    `CqlBuilder.append(AbstractType)` uses `type.asCQL3Type().toString()` (`CqlBuilder.java:134-137`),
+    which drives `DESCRIBE TABLE` / `SchemaCQLHelper` snapshot `schema.cql`, and
+    `SchemaKeyspace.addColumnToSchemaMutation` stores the same bare string in
+    `system_schema.columns.type` (`SchemaKeyspace.java:746`). The `DESCRIBE` goldens in
+    `test/unit/org/apache/cassandra/cql3/statements/DescribeStatementTest.java` show exactly
+    `b frozen<<bare type name>>`. `UserType.getCqlTypeName()` *is* keyspace-qualified
+    (`String.format("%s.%s", …)`, `UserType.java:450-452`) but is used only in `ALTER TYPE` error
+    messages, not in emitted DDL.
+  - **The qualified form comes from the DataStax Java driver.**
+    `com.datastax.oss.driver.api.core.type.UserDefinedType.asCql(boolean includeFrozen, boolean pretty)`
+    / `describe(...)` format with `frozen<%s.%s>` / `%s.%s` (verified in the constant pool of
+    `java-driver-core-4.19.2.jar`). Any tool that renders schema through the driver therefore emits
+    `frozen<keyspace.typename>` — including Cassandra Sidecar's
+    `GET /api/v1/keyspaces/<ks>/schema`, which is how CQLite's Trino connector obtains DDL.
+  - CQLite accepts both: `cqlite-core/src/schema/cql_parser.rs` (`qualified_type_name` parses
+    `identifier ('.' identifier)?`) and `split_qualified_udt` in
+    `cqlite-core/src/schema/udt_registry.rs` (re-exported from `cqlite-core/src/schema/mod.rs:24`),
+    used at every registry lookup site (issue #2807).
+  - This is a **DDL/schema-text** concern only. Nothing on disk carries a CQL type string of this
+    form: the `Statistics.db` `SerializationHeader` records the *internal marshal* form,
+    `org.apache.cassandra.db.marshal.UserType(keyspace,hex_encoded_name,field:type,…)`, which is
+    always keyspace-bearing (see Appendix B, "Tuple and UDT Field Encoding").
 - **Vector types**: fixed-element vectors (`vector<float,n>`) write no length prefix -- layout is exactly `n x elementSize` bytes concatenated. Source: `VectorType.java:477-493`, `FixedLengthSerializer`.
 
 ## Key Takeaways
