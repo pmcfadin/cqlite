@@ -269,8 +269,22 @@ recipes: `docs/development/dev-cookbook.md`.
 - **Definitive Guide**: `docs/sstables-definitive-guide/`
 - **Agent developer docs**: https://pmcfadin.github.io/cqlite/agents-developing/
 - **Issues**: https://github.com/pmcfadin/cqlite/issues
-- **Cassandra source**: `~/local_projects/cassandra` (local) /
-  https://github.com/apache/cassandra/tree/cassandra-5.0.0
+- **Cassandra source — read it at the PINNED TAG, never a working tree (#3041)**: CQLite targets the
+  Cassandra **5.0** on-disk format, so the authority is a `cassandra-5.0.8` tag read:
+  ```bash
+  git show cassandra-5.0.8:src/java/org/apache/cassandra/db/rows/UnfilteredSerializer.java
+  ```
+  Browse the same pin at https://github.com/apache/cassandra/tree/cassandra-5.0.8. A **local clone is
+  OPTIONAL and BRANCH-SENSITIVE**: a checkout may sit on `trunk`/`6.0-alpha`/any non-5.0 line, whose code
+  is NOT the 5.0 format and yields confidently-wrong answers, so read through the tag ref
+  (`git -C <clone> show cassandra-5.0.8:<path>`) — never the checked-out files. There is no guaranteed
+  clone path on any machine; `$CQLITE_CASSANDRA_REPO` names one when a tool needs it.
+
+### Format authority — a CQLite `file:line` is NEVER format authority (#3041)
+Citing CQLite's own code to justify CQLite's behavior is **circular reasoning**. Format authority is, in
+order: (1) the pinned `cassandra-5.0.8` Cassandra source, (2) `sstabledump` output, (3)
+`docs/sstables-definitive-guide/`. A CQLite source line is evidence of *what CQLite does*, never of
+*what is correct*.
 
 ## Agent-Team Conventions
 
