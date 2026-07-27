@@ -427,12 +427,11 @@ async fn bti_wide_partition_resolves_through_rows_db() {
             "block offsets must be strictly increasing"
         );
     }
-    // First block separator is ck=0 (OSS50 sign-flipped int = 0x8000_0000).
-    assert_eq!(
-        entries[0].0,
-        0x8000_0000u32.to_be_bytes().to_vec(),
-        "first separator must be ck=0"
-    );
+    // First block separator is ck=0: the `0x40 NEXT_COMPONENT` byte every OSS50
+    // component carries (issue #3002) + the sign-flipped int (0x8000_0000).
+    let mut expected_first = vec![0x40u8];
+    expected_first.extend_from_slice(&0x8000_0000u32.to_be_bytes());
+    assert_eq!(entries[0].0, expected_first, "first separator must be ck=0");
 
     // pk=2 (narrow) → DataOffset, NOT a RowsOffset.
     let raw_pk2 = 2i32.to_be_bytes().to_vec();
@@ -628,13 +627,17 @@ async fn bti_wide_desc_partition_resolves_through_rows_db() {
     }
 
     // First block's first row is the LARGEST ck (DESC writes descending). For
-    // ck in 0..200, that is ck=199 => reversed byte-comparable of (sign-flip
-    // int 199) = complement(80 00 00 C7) = 7F FF FF 38.
-    let expected_first = (0x8000_0000u32 ^ 199)
-        .to_be_bytes()
-        .iter()
-        .map(|b| 0xFF ^ *b)
-        .collect::<Vec<u8>>();
+    // ck in 0..200, that is ck=199 => the UN-inverted `0x40 NEXT_COMPONENT` framing
+    // byte (emitted by the comparator, not the type — issue #3002) followed by the
+    // reversed byte-comparable of (sign-flip int 199) = complement(80 00 00 C7) =
+    // 7F FF FF 38.
+    let mut expected_first = vec![0x40u8];
+    expected_first.extend(
+        (0x8000_0000u32 ^ 199)
+            .to_be_bytes()
+            .iter()
+            .map(|b| 0xFF ^ *b),
+    );
     assert_eq!(
         entries[0].0, expected_first,
         "first DESC separator must be reversed byte-comparable of the largest ck (199)"

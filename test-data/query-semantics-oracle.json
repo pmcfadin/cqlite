@@ -98,6 +98,50 @@
         { "id": 1, "ck": 5, "v": "a-1-5" },
         { "id": 1, "ck": 30, "v": "b-1-30" }
       ]
+    },
+    {
+      "id": "wide_table_bti__clustering_slice",
+      "keyspace": "test_da",
+      "table": "wide_table",
+      "fixture_dir_prefix": "wide_table-",
+      "sstable_prefix": "da-2-bti",
+      "schema": "wide-table-bti.cql",
+      "query": "SELECT pk, ck FROM test_da.wide_table WHERE pk = 1 AND ck >= 100 AND ck < 110",
+      "reconciliation": ["none_all_live"],
+      "pinned_now_secs": 1800000000,
+      "pinned_now_note": "2027-01-15T08:00:00Z. This fixture carries no TTL, tombstone or deletion of any kind (every row is unconditionally live at any now), so the pin only removes wall-clock nondeterminism from the lane; it never selects between rows.",
+      "physical_row_count": 900,
+      "note": [
+        "Issue #3002 (BTI Rows.db row-index root base + leading OSS50 NEXT_COMPONENT).",
+        "A BEHAVIOUR-PRESERVATION oracle for the BTI clustering-slice read path",
+        "(`scan_single_partition_clustering` -> `resolve_clustering_seek_window` ->",
+        "`bti_clustering_row_window`): the two compensating defects cancelled on this",
+        "fixture, so the semantic result set must be IDENTICAL before and after removing",
+        "the compensation. A change here is a regression, not a semantic update.",
+        "",
+        "Oracle derivation: test_da/wide_table is a real Apache Cassandra 5.0 `da` (BTI)",
+        "SSTable whose committed sstabledump golden (da-2-bti-Data.db.jsonl) holds 900",
+        "physical rows (3 partitions x ck=0..299) with NO tombstone/TTL/deletion marker,",
+        "so physical == semantic here: the expected result set is exactly the golden's",
+        "pk=1 rows with 100 <= ck < 110, read off the golden rather than hand-authored.",
+        "",
+        "flight_lane=false: the Flight `do_get` ticket surface is a whole-table projection",
+        "scan with no WHERE clause, so a partition + clustering-slice query is not",
+        "expressible on that lane (see cqlite-flight/tests/query_semantics_flight_parity.rs)."
+      ],
+      "flight_lane": false,
+      "expected_rows": [
+        { "pk": 1, "ck": 100 },
+        { "pk": 1, "ck": 101 },
+        { "pk": 1, "ck": 102 },
+        { "pk": 1, "ck": 103 },
+        { "pk": 1, "ck": 104 },
+        { "pk": 1, "ck": 105 },
+        { "pk": 1, "ck": 106 },
+        { "pk": 1, "ck": 107 },
+        { "pk": 1, "ck": 108 },
+        { "pk": 1, "ck": 109 }
+      ]
     }
   ]
 }

@@ -94,6 +94,20 @@ struct Case {
     /// empty-pass contract. Defaults to `false`.
     #[serde(default)]
     expect_empty: bool,
+    /// Whether this case is expressible on the FLIGHT lane. A Flight ticket is a
+    /// whole-table projection scan with NO `WHERE` clause, so an oracle case whose
+    /// `query` carries a partition/clustering predicate (e.g. the BTI
+    /// clustering-slice case, issue #3002) cannot be run here at all and is
+    /// declared `"flight_lane": false` in the oracle. Defaults to `true`, so a case
+    /// that omits the field is still asserted on this lane (never a silent skip).
+    #[serde(default = "default_true")]
+    flight_lane: bool,
+}
+
+/// `serde` default for [`Case::flight_lane`] — a case is on the Flight lane unless
+/// it explicitly opts out.
+fn default_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +314,20 @@ fn normalize(rows: Vec<serde_json::Map<String, serde_json::Value>>) -> Vec<Strin
 
 /// One case: returns Ok(true) if it ran a comparison, Ok(false) if it SKIPped.
 async fn run_case(case: &Case) -> Result<bool, String> {
+    // Not expressible on this lane (a whole-table projection `do_get` cannot carry
+    // the case's WHERE clause). This is a DECLARED per-case property in the oracle,
+    // not a fixture-presence skip, so it is honoured even under
+    // CQLITE_REQUIRE_FIXTURES — the in-core lane
+    // (cqlite-core/tests/query_semantics_oracle_parity.rs) asserts these cases.
+    if !case.flight_lane {
+        eprintln!(
+            "SKIP case {} — declared flight_lane: false (query carries a WHERE clause \
+             the Flight ticket surface cannot express)",
+            case.id
+        );
+        return Ok(false);
+    }
+
     // Anti-empty-pass config validation (independent of fixture presence): an
     // empty `expected_rows` must be an explicit, provable opt-in — never an
     // accident that silently collapses the compared column set to `[]`.
@@ -437,6 +465,7 @@ fn synthetic_case(
             vec![serde_json::Map::new()]
         },
         expect_empty,
+        flight_lane: true,
     }
 }
 

@@ -85,6 +85,14 @@ struct TableCase {
     /// Documented reconciliation classes this fixture covers (for the corpus
     /// coverage assertion; not used at query time).
     divergence_classes: &'static [&'static str],
+    /// Extra WITHIN-partition clustering predicates to run against EVERY probed
+    /// partition key, as `WHERE <pk> = <k> AND <predicate>` (issue #3002). These
+    /// exercise the clustering-slice read path — for a BTI (`da`) wide partition the
+    /// point run resolves its byte window from the `Rows.db` row-index trie
+    /// (`bti_clustering_row_window`) while the full run decodes the whole partition
+    /// and filters, so a wrong row-index window diverges here. Empty = partition-key
+    /// equality only.
+    clustering_slice_predicates: &'static [&'static str],
 }
 
 /// The corpus. Every table has a single INT partition key. Collectively they
@@ -100,6 +108,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["multi_generation", "tombstone"],
+        clustering_slice_predicates: &[],
     },
     TableCase {
         keyspace: "test_tomb",
@@ -108,6 +117,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["multi_generation", "tombstone"],
+        clustering_slice_predicates: &[],
     },
     // Cross-generation partition tombstone + a tombstone-only partition.
     TableCase {
@@ -117,6 +127,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[1, 2],
         divergence_classes: &["multi_generation", "tombstone"],
+        clustering_slice_predicates: &[],
     },
     // TTL localDeletionTime boundary (expired vs live cells).
     TableCase {
@@ -126,6 +137,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["ttl"],
+        clustering_slice_predicates: &[],
     },
     // Live static cell surviving adjacent row/cell/range tombstones.
     TableCase {
@@ -135,6 +147,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "pk",
         probe_keys: &[],
         divergence_classes: &["tombstone"],
+        clustering_slice_predicates: &[],
     },
     // Post-major-compaction tombstone/TTL fixtures (single output SSTable).
     TableCase {
@@ -144,6 +157,7 @@ const CORPUS: &[TableCase] = &[
         pk_column: "id",
         probe_keys: &[],
         divergence_classes: &["tombstone"],
+        clustering_slice_predicates: &[],
     },
     TableCase {
         keyspace: "test_compaction_tombstone_ttl",
@@ -152,6 +166,30 @@ const CORPUS: &[TableCase] = &[
         pk_column: "id",
         probe_keys: &[],
         divergence_classes: &["ttl"],
+        clustering_slice_predicates: &[],
+    },
+    // BTI (`da`) WIDE partition with a per-partition `Rows.db` row index (issue
+    // #3002): the ONLY corpus table whose point path narrows its decode to a
+    // clustering-slice byte window resolved from the row-index trie. All rows are
+    // live (no tombstone/TTL class), so the divergence this case guards is a wrong
+    // row-index window — a point run that drops or over-collects rows the full-scan
+    // run returns. The slices deliberately span block 0 (`ck < 8`, whose floor is the
+    // empty separator the #3002 root fix restored), a mid-partition point read, an
+    // interior range, and the last block.
+    TableCase {
+        keyspace: "test_da",
+        table: "wide_table",
+        schema: "wide-table-bti.cql",
+        pk_column: "pk",
+        probe_keys: &[1, 2, 3],
+        divergence_classes: &["bti_clustering_slice"],
+        clustering_slice_predicates: &[
+            "ck < 8",
+            "ck = 150",
+            "ck >= 100 AND ck < 110",
+            "ck >= 296",
+            "ck > 0 AND ck <= 3",
+        ],
     },
 ];
 
@@ -393,6 +431,20 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
         assert_point_full_equal(&point_db, &full_db, &query).await?;
     }
 
+    // Within-partition clustering slices (issue #3002): for a BTI wide partition the
+    // point path resolves its decode window from the `Rows.db` row index while the
+    // full path decodes the whole partition and filters, so the two paths must still
+    // agree row-for-row, value-for-value, in order.
+    for k in &keys {
+        for predicate in case.clustering_slice_predicates {
+            let query = format!(
+                "SELECT * FROM {}.{} WHERE {} = {} AND {}",
+                case.keyspace, case.table, case.pk_column, k, predicate
+            );
+            assert_point_full_equal(&point_db, &full_db, &query).await?;
+        }
+    }
+
     // `IN (...)` over the complete partition key (when ≥2 keys exist): the union
     // of targeted lookups (point) must equal the full-scan + in-memory IN filter.
     if keys.len() >= 2 {
@@ -409,10 +461,12 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
     }
 
     eprintln!(
-        "PASS {}.{} — {} point queries + IN, point == full (classes: {:?})",
+        "PASS {}.{} — {} point queries + {} clustering slices/key + IN, point == full \
+         (classes: {:?})",
         case.keyspace,
         case.table,
         keys.len(),
+        case.clustering_slice_predicates.len(),
         case.divergence_classes
     );
     Ok(true)

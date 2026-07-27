@@ -332,6 +332,15 @@ The trie stores **separators**, not exact block start keys, keeping the index co
   greater than this block's first key.
 - `RowIndexWriter.complete(endPos)` appends one final "nudged" separator so the last block has an
   upper bound.
+- Separator BYTES are produced by `ClusteringComparator.asByteComparable`, whose
+  `ByteComparableClustering` emits a `NEXT_COMPONENT` byte (`0x40`,
+  [`ByteSource.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/bytecomparable/ByteSource.java#L69))
+  **before every component, including the first**
+  ([`ClusteringComparator.java:260–275`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/ClusteringComparator.java#L260):
+  worked example `("A", 0005) → 40 4100 40 0005 40`). So a single `int` clustering `ck = 8`
+  separator is `40 80 00 00 08`, not the bare `80 00 00 08`. Row-index separators carry **no**
+  `TERMINATOR` (`0x38`): `separatorGt`/`nudge` produce clustering PREFIXES, not complete
+  clusterings, so the trailing terminator of a full `ByteComparableClustering` is absent on disk.
 
 Two consequences follow, and they are the format's contract rather than a reader's choice:
 
@@ -343,14 +352,16 @@ Two consequences follow, and they are the format's contract rather than a reader
    payload at all, which a well-formed `Rows.db` trie does not produce; see the note under
    "Prefix/range navigation" above.
 
-> **CQLite note.** CQLite's reader computes the `TrieIndexEntry` base as
-> `rows_offset + key_length`, omitting Cassandra's 2-byte short-length prefix
-> (`cqlite-core/src/storage/sstable/bti/parser/rows.rs`). Walking from that position lands two bytes
-> before the real root, which is why CQLite has historically described the first block as
-> "unindexed": from the wrong root, the empty-key root payload is not reachable. Decoding the real
-> `da-2-bti-Rows.db` fixture from Cassandra's base yields **39** payload entries (the empty-key
-> entry plus 38 separators) where CQLite's base yields 38. This is a CQLite defect, not a property
-> of the BTI format.
+> **CQLite note (fixed in issue #3002).** CQLite's reader used to compute the `TrieIndexEntry` base
+> as `rows_offset + key_length`, omitting Cassandra's 2-byte short-length prefix. Walking from that
+> position landed two bytes before the real root, which is why CQLite historically described the
+> first block as "unindexed": from the wrong root the empty-key root payload is not reachable.
+> Decoding the real `da-2-bti-Rows.db` fixture from Cassandra's base yields **39** payload entries
+> (the empty-key entry plus 38 separators) where the old base yielded 38. Both the reader
+> (`resolve_rows_db_entry`) and the BTI writer (`write_trie_index_entry`) now use
+> `rows_offset + 2 + key_length`, and CQLite's OSS50 clustering-bound encoder emits the leading
+> `0x40 NEXT_COMPONENT` byte the on-disk separators carry (the two defects previously cancelled).
+> Pinned by `cqlite-core/tests/issue_3002_bti_rows_root_base.rs`.
 
 ## Performance Considerations and Benchmark Methodology
 
