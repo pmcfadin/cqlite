@@ -7,19 +7,70 @@ Cassandra supports three collection types:
 - **Set** - Unordered, no duplicates (stored sorted)
 - **Map** - Key-value pairs (stored sorted by key)
 
-## Collection Wire Format
+## Collection Wire Format — TWO distinct encodings
 
-### General Structure
-All collections use the same basic format:
+> ### ⚠️ Frozen and non-frozen collections do NOT share a wire format
+> Choose the encoding from the **schema's frozen-ness of the column**, never from the byte
+> pattern (no-heuristics mandate, #28). Assuming the frozen layout for a non-frozen column
+> (or vice versa) mis-frames every element.
+
+| | **FROZEN** | **NON-FROZEN** (the default) |
+|---|---|---|
+| Declared as | `frozen<list<int>>`; also any collection nested inside another collection/tuple/UDT | `list<int>`, `set<T>`, `map<K,V>` |
+| On disk | ONE opaque cell value | a SET of cells (one per element) |
+| Count | fixed **4-byte BE `i32`** | **unsigned VInt** |
+| Element/value length | fixed **4-byte BE `i32`** (`-1` = null) | **unsigned VInt** (no `-1`; absent = `HAS_EMPTY_VALUE` flag) |
+| Per-element metadata | none | cell flags + optional timestamp/TTL/LDT deltas + a cell **path** |
+| Element deletion | not representable | per-cell `IS_DELETED`; whole-collection via `ROW_HAS_COMPLEX_DELETION` (`0x40`) |
+
+### FROZEN collection structure (fixed 4-byte BE `i32` framing)
 
 ```
-[4 bytes: element_count (big-endian i32)]
+[i32 BE: element_count]
 [for each element:]
-    [4 bytes: element_size (big-endian i32)]
+    [i32 BE: element_size]   // -1 = null
     [bytes: element_data]
 ```
 
-### List Example
+> **Citation**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/frozen.rs:21`
+> (`i32::from_be_bytes` count), `:98`, `:279`, `:370` (element/key sizes). Guide:
+> `docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md:537-539`
+> ("tuple/UDT field lengths and frozen-collection counts/element lengths are fixed 4-byte
+> BE `i32`"). Cassandra: `CollectionSerializer.java:67-92`.
+
+### NON-FROZEN collection structure (unsigned-VInt framing)
+
+```
+[if the row sets ROW_HAS_COMPLEX_DELETION (0x40):]
+    [unsigned VInt: markedForDeleteAt delta]
+    [unsigned VInt: local_deletion_time delta]
+[unsigned VInt: cell_count]
+[for each cell:]
+    [1 byte: cell flags]                       // IS_DELETED 0x01, IS_EXPIRING 0x02,
+                                               // HAS_EMPTY_VALUE 0x04, USE_ROW_TIMESTAMP 0x08,
+                                               // USE_ROW_TTL 0x10
+    [conditional unsigned-VInt timestamp / local_deletion_time / ttl deltas]
+    [unsigned VInt: path_len][path bytes]      // element key / path (the list UUID, set
+                                               // element, or map key)
+    [unsigned VInt: value_len][value bytes]    // omitted when IS_DELETED or HAS_EMPTY_VALUE
+```
+
+> **Citation**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs:279-300`
+> (complex deletion deltas), `:332` (`cell_count` via `parse_vuint`), `:1089` (path length),
+> `:1136` (value length). Guide: `appendix-b-encodings-cheat-sheet.md:530-536` — a
+> non-frozen collection cell length-prefixes BOTH path and value with an unsigned VInt,
+> **fixed-width element types included**; the `valueLengthIfFixed()` raw-bytes shortcut is a
+> **simple-cell** rule only (`AbstractType.java:538-543`), and a non-frozen `set<T>`'s
+> missing value is the `HAS_EMPTY_VALUE_MASK` flag, not a width.
+
+### Examples below are FROZEN
+
+Every hex example in this section (`List`, `Set`, `Map`, `Nested`) shows the **frozen**
+layout — the fixed 4-byte BE `i32` framing above. For a non-frozen column, replace each
+4-byte count/length with an unsigned VInt and add the per-cell flags/path shown in the
+non-frozen structure.
+
+### List Example (FROZEN)
 ```
 CQL: list<int>
 Value: [10, 20, 30]
@@ -34,7 +85,7 @@ Wire format:
 [0x00, 0x00, 0x00, 0x1E]  // value = 30
 ```
 
-### Set Example
+### Set Example (FROZEN)
 ```
 CQL: set<text>
 Value: {'apple', 'banana', 'cherry'}
@@ -49,7 +100,7 @@ Wire format (stored sorted):
 [0x63, 0x68, 0x65, 0x72, 0x72, 0x79]  // "cherry"
 ```
 
-### Map Example
+### Map Example (FROZEN)
 ```
 CQL: map<text, int>
 Value: {'a': 1, 'b': 2}
