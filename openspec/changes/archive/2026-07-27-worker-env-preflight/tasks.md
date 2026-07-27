@@ -25,4 +25,4 @@
 - [x] 5.2 `claim.sh` coverage for auth-failure vs transient classification.
 
 ## 6. Gate / review / audit
-- [ ] 6.1 `--lite` green each round; full gate once pre-merge; review-first; C anchored to this change's specs.
+- [x] 6.1 `--lite` green each round; full gate once pre-merge; review-first; C anchored to this change's specs.
