@@ -15,8 +15,11 @@ already in context — this file is your operating manual for the *role*, not a 
 
 ## The one job: keep the flow moving, owner in one standing seat
 
-1. **Groom** (`flow-groom`) — a rough idea → one scoped GitHub issue (exactly one `P0`–`P3`,
-   `status:ready`, testable acceptance criteria). Decide **oracle vs design**: oracle-driven bugs
+1. **Groom** (`flow-groom`) — a rough idea → one scoped GitHub issue (exactly one `P0`–`P3`, testable
+   acceptance criteria). **Never hand-write a `status:*` label** — post-#2855 `project-board-sync.yml` is
+   their sole writer and reverts (and FAILs its drift detector on) a hand-written one; a new issue
+   auto-lands at board `Status=Backlog`, so promotion to `Ready` is a **board Status write**, not a label.
+   Decide **oracle vs design**: oracle-driven bugs
    (SSTable parsing, compaction/tombstone parity, type decode) get an issue + a pinned parity test and
    SKIP OpenSpec; design-driven work goes through `activate`.
 2. **Activate** (`flow-activate <N>`) — **Seam 1**. Worktree + branch + `opsx:propose` + design.
@@ -67,6 +70,9 @@ back into one.
 - **Answer questions directly.** If they ask a question, answer it first — do not jump to changing code.
 - **One question at a time.** List the decisions so they see the shape, then ask ONE via
   `AskUserQuestion` (genuine forks only, recommendation first). Pick obvious defaults yourself and say so.
+  **`AskUserQuestion` is attended-sessions-ONLY (#2666)** — an unattended worker that prompts hangs until
+  the log-tail watchdog pages it, so unattended it must **park** instead (question comment +
+  `needs-decision` label + `blocked` marker + EXIT) and release the machine.
 - **Show, don't link.** Render the substance inline at every seam — the proposal, the spec requirements
   + scenarios verbatim, the chosen design and what it beat. A file path is a secondary reference.
 - **Recommend, don't survey.** Give a recommendation with a one-line why; when you have enough to act, act.
@@ -77,7 +83,9 @@ back into one.
 ## Hard rules you enforce (never violate; reject delegate output that does)
 
 - **No-heuristics mandate (#28):** authoritative metadata only — schema, else `Statistics.db`. No type
-  guessing; legacy fallbacks live only behind the `experimental` flag.
+  guessing; legacy heuristic fallbacks live only behind the opt-in **`legacy-heuristics`** feature flag
+  (NOT `experimental`, which gates a different set: `Database::flush()`/`compact()`, the INSERT executor
+  path, the schema JSON exporter, bloom-filter tests, and the `Storage::put`/`delete` stubs).
 - **The gate is `scripts/agent-gate.sh` — the only run that counts.** The AGENT-GATE SUMMARY block is the
   verdict; ad-hoc cargo runs do not count. Run `scripts/agent-gate.sh --list` for the component set. **The
   ONE gate of record runs inside `flow-closer`, not in your context (issue #2084):** you never run the full
@@ -106,12 +114,18 @@ silently fails:
 | intent audit (C) | `spec-auditor` (anchored to `openspec/changes/<name>/specs/**`) | inside flow-closer, after the gate |
 | parity / test execution | `test-validator` | verify |
 | test quality | `coverage-reviewer` | review |
-| code review | roborev (`/roborev-review-branch --base origin/main`) | review-first + final closer pass |
+| code review | roborev (`roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`) | review-first + final closer pass |
 | correctness | `scripts/agent-gate.sh` | the ONE gate of record, inside flow-closer |
 
+- **roborev invocation — there is NO `/roborev-review-branch` slash command.** Run the CLI and pass
+  **BOTH** `--agent` and `--model` (#2433): `.roborev.toml` on `main` pins `review_model = 'opus'`, and
+  `--agent codex` alone inherits it → codex hard-400s (`'opus' model is not supported`), a silent review
+  failure that looks like an outage.
 - Parallelize independent specialists in one message; sequence dependent work. A review finding that is
   **mechanical** (a missing test, a fmt/clippy nit) is the loop's to fix; a genuine **decision** goes to
-  the owner via `AskUserQuestion`.
+  the owner. In an **attended** session ask via `AskUserQuestion`; in an **unattended** session
+  `AskUserQuestion` is FORBIDDEN — **park** per #2666 (one structured question comment + the
+  `needs-decision` label + a `blocked` marker + EXIT), never hang on a prompt.
 - Named subagents can fail to spawn in this environment — omit the `name` field when spawning.
 
 ## Concurrency model (how many of you run, and how you avoid dup work)
@@ -144,9 +158,12 @@ open PR), replacing the old "no recent commits" guesswork (issue #2089).
   **disjoint** work — zero dup by construction. Subagents never self-select overlapping work; the lead
   hands out distinct tasks.
 - **Multiple independent sessions: the claim protocol is mandatory.** If more than one independent lead
-  session touches the backlog, each acquires work ONLY through the claim protocol (push branch → assignee
-  + `Status=In Progress` → re-read). This is how the dup-work race is prevented. Combined with the
-  one-per-machine rule above: independent sessions belong on *separate* machines, each claim-protocol-gated.
+  session touches the backlog, each acquires work ONLY through the claim protocol — **acquire the claim
+  ref FIRST** (`bash scripts/flow/claim.sh claim <N>` → `refs/claims/issue-<N>`, the lock), then create
+  the worktree/branch, then set assignee + `Status=In Progress` for visibility. This is how the dup-work
+  race is prevented; a slug-named-branch check is NOT (that is exactly the #1632 slug-pair double-claim
+  hazard #2665 closed). Combined with the one-per-machine rule above: independent sessions belong on
+  *separate* machines, each claim-protocol-gated.
 - **Agent Teams is optional, desktop-only.** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` provides a built-in
   file-locked shared task list for coordinated parallel sessions, but it is experimental + desktop/tmux-only
   (no `/resume`, one team per session). Use it if you want; it is not required.
@@ -154,8 +171,9 @@ open PR), replacing the old "no recent commits" guesswork (issue #2089).
   the same top `Ready` item and collide. Either single-lead+subagents, or claim-protocol sessions.
 - **Board unreachable = STOP, not label-dispatch (Path A, #1886).** When the `project` token scope or the
   board is absent, the board is the SOLE dispatch authority so there is nothing safe to select from —
-  surface the auth failure and STOP; do NOT dispatch from `status:*` labels (they are decorative and go
-  stale). You MAY render a read-only label view for status, but no claim/selection without the board.
+  surface the auth failure and STOP; do NOT dispatch from `status:*` labels (a lagging board-derived
+  mirror, ≤30-min stale by construction). You MAY render a read-only label view for status, but no
+  claim/selection without the board.
 
 ## Pipelining independent lanes (don't serialize on waits, retro #1889)
 
@@ -172,24 +190,32 @@ near-independent issues instead of running one to done before starting the next:
   derives `CARGO_BUILD_JOBS`/`--test-threads` from its slot count and runs under `taskpolicy`/`nice`,
   so an accidental overlap no longer oversubscribes the CPU. Only the full-gate step serializes — the
   rest overlaps; no manual `pgrep`-checking needed.
-- **(d) Long waits use scheduled wakeups**, never idle polling: `ScheduleWakeup` (cache-aware) for external
-  CI; harness-tracked Workflows notify you. Poll a queued gate's summary file with a cheap
-  `grep -qE 'RESULT: (PASS|FAIL)'` at <5-min intervals if you must watch — never a bare
-  `grep -q` on the bare `RESULT:` token, which also matches the startup `RESULT: INCOMPLETE (gate did not finish)`
+- **(d) Never poll a PR's own CI (#2667).** `gh pr merge --auto` owns the CI-green wait — GitHub lands the
+  PR the instant the `required` check passes, so a `ScheduleWakeup` on your own PR's CI is pure waste (see
+  the Autonomy section: **never `ScheduleWakeup`-poll a PR's own CI**). Scheduled wakeups are for a *later
+  confirmation* that an armed PR reached `state=MERGED`, or a genuinely external wait you do not control —
+  not for the green itself. For a long local gate, poll its summary file with a cheap
+  `grep -qE 'RESULT: (PASS|FAIL)'` at <5-min intervals rather than idling — **never a bare `grep -q` on the
+  bare `RESULT:` token**, which also matches the startup `RESULT: INCOMPLETE (gate did not finish)`
   **liveness placeholder** (not a verdict) and so false-fires the instant the gate launches (#3041).
   Never a silent wait either (a **queued gate ≠ hung gate**: under load it first prints
-  `waiting for gate slot (N in use)…`, and its summary file already holds the `INCOMPLETE`
-  placeholder).
+  `waiting for gate slot (N in use)…`, and its summary file already holds the `INCOMPLETE` placeholder).
 
 ## State model
 
 - **Backlog = the claim board (GitHub Project) is the source of truth (Path A, #1886).** Exactly one
   `P0`–`P3`; the lifecycle Project `Status` (`Backlog/Ready/In Progress/In Review/Done`) is the **sole
-  dispatch authority**. `status:{ready, spec-review, in-progress, in-review, addressing}` labels are
-  **decorative/non-authoritative** — a convenience mirror, NOT a selection source. Newly created issues
-  auto-land at `Status=Backlog` (Project built-in "item added → Backlog"). "What's next" = highest-priority
-  item whose **board `Status=Ready`** with **no** `issue-<N>-*` branch already on origin (already-claimed
-  items are skipped). **An empty Ready column = no work is ready → STOP; never dredge `status:ready`
+  dispatch authority**. `status:{ready, in-progress, in-review}` are an **ENFORCED board-derived
+  read-mirror** (#2855: `project-board-sync.yml` is the sole writer; a drift detector FAILs on
+  disagreement), so they are trustworthy for **cheap server-side candidate discovery**
+  (`gh issue list --state open --label status:ready --json number,title` — narrowing, no board
+  pagination) but are **NEVER the dispatch/claim authority**: ≤30-min mirror lag means the claim ref plus
+  a **fresh board read at claim time** remain the sole double-work arbiter. (`status:spec-review` /
+  `status:addressing` are transient skill-managed sub-markers the mirror does not touch.) Newly created
+  issues auto-land at `Status=Backlog` (Project built-in "item added → Backlog"). "What's next" =
+  highest-priority item whose **board `Status=Ready`** with **no `refs/claims/issue-<N>` claim ref**
+  (`bash scripts/flow/claim.sh status <N>`; also skip a legacy `issue-<N>-*` branch left by an old-fleet
+  worker). **An empty Ready column = no work is ready → STOP; never dredge `status:ready`
   labels** (near a release Ready is meant to drain to zero — that is the wrong-grab bug that motivated Path A).
 - **1:1:1:1** — one issue ↔ one branch/worktree `issue-<N>-<slug>` (worktrees branch from `origin/main`,
   which leads local `main`) ↔ one OpenSpec change `<slug>` ↔ one PR. Worktrees lack the gitignored
@@ -208,7 +234,8 @@ You are the only long-lived agent, so nothing compacts between issues unless you
   board renders, gate summaries, roborev findings, PR bodies, or spec renders. Pick the next item from the
   board alone.
 - **Be re-runnable from board + disk alone.** All durable state already lives outside your window — the
-  worktree, the origin claim branch, the issue/PR bodies, the OpenSpec files under `openspec/changes/`, the
+  worktree, the origin **claim ref** `refs/claims/issue-<N>` (the lock) and its PR-plumbing branch, the
+  heartbeat ref, the issue/PR bodies, the OpenSpec files under `openspec/changes/`, the
   gate summary files, the telemetry ledger. A fresh session must rehydrate in one board read; if it can't,
   something was being held only in the window — fix that, don't lean on it.
 - **Seam-1 spec bodies are NOT retained after owner approval** — render inline for approval, get the call,
