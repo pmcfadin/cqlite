@@ -166,7 +166,9 @@
 #      SMOKE-FAIL). EVERY remote-reading subcommand (claim/verify/adopt/release/status)
 #      maps an ls-remote/push/delete failure to ERROR (exit 1), so a network blip never
 #      makes a worker conclude it LOST/does-not-hold/RELEASED. `claim` also never reports
-#      LOST when nobody holds the ref (a failed push whose re-read finds it absent), and
+#      LOST when nobody holds the ref — whether the push was REJECTED or ACCEPTED, a
+#      re-read that finds the ref absent is infra (a reaper delete can land in that
+#      window; either way the lane is FREE, so exit 2 would be a lie), and
 #      and NO subcommand reports LOST/ADOPT-LOST/VERIFY-FAIL/not-holder when the holder
 #      commit's message is UNREADABLE (`detail=holder-commit-unreadable`): the best-effort
 #      fetch may simply not have landed the object, so the holder is unknown — possibly US.
@@ -628,8 +630,18 @@ cmd_claim() {
     emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$sha machine=$(this_machine) actor=$actor"
     return 0
   fi
+  if [ -z "$confirmed" ]; then
+    # The push was ACCEPTED yet the confirm read finds the ref ABSENT — realistically a
+    # reaper's force-delete landing in this window. NOBODY HOLDS IT, so this is not a
+    # lost race: the SAME rule, and the same shape, as the rejected-push sibling above
+    # (`push-rejected-but-ref-absent`) — ERROR (exit 1, retryable), never a LOST verdict
+    # rendering `sha=<gone> holder=unknown`, which a worker reads as "you did not win,
+    # take the next item" and so walks away from a FREE lane (#2945 review).
+    emit_infra "issue=$issue detail=push-accepted-but-ref-absent-on-confirm-on-$REMOTE (nobody holds it — not a lost race)"
+    return 1
+  fi
   fetch_claim "$issue"
-  emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=${confirmed:-<gone>} $(holder_token "$confirmed")"
+  emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=$confirmed $(holder_token "$confirmed")"
   return 2
 }
 

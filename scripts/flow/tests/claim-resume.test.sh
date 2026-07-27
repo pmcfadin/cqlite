@@ -1504,6 +1504,100 @@ else
 $actorEnvStatus"
 fi
 
+# ===========================================================================
+echo "TEST 23: a claim whose push LANDED but whose confirm reads the ref ABSENT is infra (exit 1), never LOST (#2945 review K1)"
+# ===========================================================================
+# The fifth caller of the ONE RULE. The push is ACCEPTED, the confirm `ls-remote`
+# SUCCEEDS, and it reports the ref ABSENT — what a reaper's force-delete landing in that
+# window looks like. NOBODY holds the ref, so `LOST … sha=<gone> holder=unknown` (exit 2)
+# told a worker "you did not win, take the next item" about a lane that is FREE, and
+# contradicted this file's own header rule ("`claim` never reports LOST when nobody holds
+# the ref"). The rejected-push sibling already treated the identical state as infra.
+# The shim answers every `ls-remote refs/claims/*` with an EMPTY SUCCESS (exit 0, no
+# output — exactly a present-then-deleted ref), and lets the push through for real, so
+# the pre-check sees a free lane, the push lands, and the confirm reads it gone.
+SHIMABS="$T/shim-confirm-absent"
+mkdir -p "$SHIMABS"
+cat >"$SHIMABS/git" <<SHIM
+#!/usr/bin/env bash
+saw_ls=0; saw_claims=0
+for a in "\$@"; do
+  [ "\$a" = "ls-remote" ] && saw_ls=1
+  case "\$a" in refs/claims/*) saw_claims=1 ;; esac
+done
+if [ "\$saw_ls" = 1 ] && [ "\$saw_claims" = 1 ]; then exit 0; fi
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMABS/git"
+outAbsConfirm=$( cd "$B" && PATH="$SHIMABS:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" claim 2301 2>&1 ); rcAbsConfirm=$?
+if [ "$rcAbsConfirm" -eq 1 ] && printf '%s\n' "$outAbsConfirm" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outAbsConfirm" | grep -q 'reason=infra' \
+   && printf '%s\n' "$outAbsConfirm" | grep -q 'detail=push-accepted-but-ref-absent-on-confirm' \
+   && [ -n "$(ref_sha 2301)" ] && [ "$(accepted_updates 2301)" = "1" ]; then
+  ok "a LANDED claim push whose confirm reads the ref ABSENT → ERROR infra exit 1 (retryable), the server write still witnessed"
+else
+  fail "expected ERROR infra push-accepted-but-ref-absent-on-confirm exit 1; got rc=$rcAbsConfirm ref='$(ref_sha 2301)' updates=$(accepted_updates 2301)
+$outAbsConfirm"
+fi
+# …and NONE of the abandon-class vocabulary appears — no LOST, and never the tell-tale
+# `sha=<gone> holder=unknown` render that named a holder nobody is.
+if ! printf '%s\n' "$outAbsConfirm" | grep -q 'CLAIM: LOST' \
+   && ! printf '%s\n' "$outAbsConfirm" | grep -q '<gone>' \
+   && ! printf '%s\n' "$outAbsConfirm" | grep -q 'holder=unknown'; then
+  ok "the absent-on-confirm verdict is free of LOST / sha=<gone> / holder=unknown"
+else
+  fail "the absent-on-confirm verdict still renders an abandon-class token:
+$outAbsConfirm"
+fi
+# ANTI-VACUITY: the SAME site must still report a GENUINE LOST when the confirm read
+# succeeds and names a READABLE FOREIGN winner — the infra verdict above is scoped to
+# "nobody holds it", not a blanket softening of the post-push confirm.
+runA claim 2302 >/dev/null 2>&1; rcForeignSetup=$?
+FOREIGN=$(ref_sha 2302)
+g -C "$B" fetch -q origin "refs/claims/issue-2302" 2>/dev/null || true
+if [ "$rcForeignSetup" -eq 0 ] && [ -n "$FOREIGN" ] \
+   && g -C "$B" cat-file -e "${FOREIGN}^{commit}" 2>/dev/null; then
+  ok "setup: machineA's claim commit for issue-2302 is READABLE from clone B (the foreign winner is nameable)"
+else
+  fail "setup failed for the foreign-winner case (rc=$rcForeignSetup foreign='$FOREIGN')"
+fi
+# Same shim shape, but the SECOND claims read (the post-push confirm) advertises the
+# foreign sha; the FIRST (the pre-check) still says free, so the push lands and the
+# verdict comes from the confirm — not from the pre-existing-holder pre-check.
+CTRFOR="$T/confirm-read-count"
+: >"$CTRFOR"
+SHIMFOR="$T/shim-confirm-foreign"
+mkdir -p "$SHIMFOR"
+cat >"$SHIMFOR/git" <<SHIM
+#!/usr/bin/env bash
+saw_ls=0; saw_claims=0
+for a in "\$@"; do
+  [ "\$a" = "ls-remote" ] && saw_ls=1
+  case "\$a" in refs/claims/*) saw_claims=1 ;; esac
+done
+if [ "\$saw_ls" = 1 ] && [ "\$saw_claims" = 1 ]; then
+  n=\$(cat "$CTRFOR" 2>/dev/null || echo 0)
+  n=\$((n + 1)); printf '%s' "\$n" >"$CTRFOR"
+  if [ "\$n" = 1 ]; then exit 0; fi
+  printf '%s\trefs/claims/issue-2303\n' "$FOREIGN"
+  exit 0
+fi
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMFOR/git"
+outForeignConfirm=$( cd "$B" && PATH="$SHIMFOR:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" claim 2303 2>&1 ); rcForeignConfirm=$?
+if [ "$rcForeignConfirm" -eq 2 ] && printf '%s\n' "$outForeignConfirm" | grep -q 'CLAIM: LOST' \
+   && printf '%s\n' "$outForeignConfirm" | grep -q "sha=$FOREIGN" \
+   && printf '%s\n' "$outForeignConfirm" | grep -q 'holder-machine=machineA' \
+   && ! printf '%s\n' "$outForeignConfirm" | grep -q 'holder=unknown'; then
+  ok "a post-push confirm naming a READABLE FOREIGN sha still reports the genuine LOST (exit 2) with that holder named"
+else
+  fail "expected a genuine LOST exit 2 naming holder-machine=machineA at sha=$FOREIGN; got rc=$rcForeignConfirm
+$outForeignConfirm"
+fi
+
 echo ""
 echo "================  claim-resume (#2945): $PASS passed, $FAIL failed, $SKIP skipped  ================"
 [ "$FAIL" -eq 0 ]
