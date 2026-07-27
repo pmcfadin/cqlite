@@ -76,8 +76,16 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base-gating
+      # Migration detection (issue #2910 round 3): the tree THIS EVENT ran, so a
+      # base-registered tier whose emitter the PR renamed or removed reds fast
+      # instead of polling a context that can never arrive.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: event-tree
       - env:
           GATING_DIR: base-gating
+          EVENT_WORKFLOWS_DIR: event-tree/.github/workflows
         run: bash "$GATING_DIR/scripts/ci/aggregate-required-tiers.sh"
 YAML
 
@@ -752,19 +760,39 @@ expect_fail_named "label events plus cancel-in-progress: true is rejected" "canc
 echo "== the aggregator must evaluate the mechanism from the BASE ref =="
 DIR=$(new_case head-evaluated)
 subst "$BASE/workflows/pr-gate.yml" "$DIR/workflows/pr-gate.yml" \
-  "      # The trust boundary (issue #2910 round 2): everything that decides this
-      # context is read from the BASE ref, never from the PR being gated.
-      - uses: actions/checkout@v5
+  "      - uses: actions/checkout@v5
         with:
           ref: \${{ github.event.pull_request.base.sha }}
           path: base-gating
-      - env:
-          GATING_DIR: base-gating
-        run: bash \"\$GATING_DIR/scripts/ci/aggregate-required-tiers.sh\"
-" "      - run: bash scripts/ci/aggregate-required-tiers.sh
-"
+" "" \
+  "          GATING_DIR: base-gating
+" "" \
+  'bash "$GATING_DIR/scripts/ci/aggregate-required-tiers.sh"' "bash scripts/ci/aggregate-required-tiers.sh"
 run_policy "$DIR"
 expect_fail_named "an aggregator reading its own PR's copy is rejected" "BASE ref"
+
+# ---------------------------------------------- the MIGRATION STATE (round 3)
+# The base-ref fix split WHERE THE REGISTRY LIVES from WHERE THE EMITTER LIVES.
+# Detecting the disagreement needs two things wired into the aggregating job, and
+# either can be dropped by a future edit without any other test noticing — so
+# each is its own discriminating case.
+echo "== the aggregator must read the tree THIS EVENT ran, and hand it over =="
+DIR=$(new_case no-event-tree-checkout)
+subst "$BASE/workflows/pr-gate.yml" "$DIR/workflows/pr-gate.yml" \
+  "      - uses: actions/checkout@v5
+        with:
+          ref: \${{ github.sha }}
+          path: event-tree
+" ""
+run_policy "$DIR"
+expect_fail_named "an aggregator that never reads the event tree is rejected" "THIS EVENT RAN"
+
+DIR=$(new_case no-event-dir-input)
+subst "$BASE/workflows/pr-gate.yml" "$DIR/workflows/pr-gate.yml" \
+  "          EVENT_WORKFLOWS_DIR: event-tree/.github/workflows
+" ""
+run_policy "$DIR"
+expect_fail_named "checking out the event tree but never passing it is rejected" "silently do nothing"
 
 # ---------------------------------------- the real tree, round-2 properties --
 # The rules above are structural; these assert the actual shipped configuration,
@@ -904,7 +932,8 @@ count_rule_rejections() {
              "$WORK"/case-echo-only-gate-comment \
              "$WORK"/case-aggregator-no-label-events \
              "$WORK"/case-two-scopes "$WORK"/case-mandate-drift \
-             "$WORK"/case-label-churn "$WORK"/case-head-evaluated; do
+             "$WORK"/case-label-churn "$WORK"/case-head-evaluated \
+             "$WORK"/case-no-event-tree-checkout "$WORK"/case-no-event-dir-input; do
     run_policy "$dir"
     [ "$RC" -ne 0 ] && n=$((n + 1))
   done
@@ -917,10 +946,10 @@ RULE="$STUB_DIR/gating_registry.rb"
 STUB_REJECTIONS=$(count_rule_rejections)
 RULE="$REGISTRY_RB"
 
-if [ "$REAL_REJECTIONS" -eq 15 ]; then
-  ok "the real rule rejects all 15 discriminating registries"
+if [ "$REAL_REJECTIONS" -eq 17 ]; then
+  ok "the real rule rejects all 17 discriminating registries"
 else
-  bad "the real rule rejected only $REAL_REJECTIONS/15"
+  bad "the real rule rejected only $REAL_REJECTIONS/17"
 fi
 if [ "$STUB_REJECTIONS" -eq 0 ]; then
   ok "the always-pass stub rejects none, so this suite would go RED under it"

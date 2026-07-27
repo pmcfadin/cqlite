@@ -758,6 +758,167 @@ else
   bad "the base registry did not gate the absent tier (rc=$RC): $OUT"
 fi
 
+# ------------------------------------- THE MIGRATION STATE (round 3, R1) ----
+# The trust-boundary fix reads the registry from the BASE ref while the emitting
+# job comes from the tree THIS EVENT ran. When those disagree — a PR that renames
+# a registered tier's context, deletes its workflow, or predates the tier — the
+# context can NEVER arrive, and polling it to the deadline holds a runner for an
+# hour to reach a verdict already known. Every case below asserts the FAST red
+# AND the remedy, plus the two directions that must NOT fast-fail.
+
+# event_tree <case> -> the workflows directory of a synthetic "tree this event
+# ran". The caller writes the workflow files into it.
+event_tree() { printf '%s/event-%s/.github/workflows' "$WORK" "$1"; }
+
+mkdir -p "$(event_tree matching)" "$(event_tree renamed)" "$(event_tree deleted)" \
+         "$(event_tree unparseable)" "$(event_tree computed-name)"
+
+# The tree agrees with the base registry: both tiers' emitters are present.
+for tree in matching unparseable computed-name; do
+  cat >"$(event_tree "$tree")/alpha.yml" <<'YAML'
+name: Alpha tier
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  gate:
+    name: Alpha gate
+    steps:
+      - run: 'true'
+YAML
+done
+cat >"$(event_tree matching)/beta.yml" <<'YAML'
+name: Beta tier
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  gate:
+    name: Beta gate
+    steps:
+      - run: 'true'
+YAML
+# THE RENAME: beta.yml exists but now emits a different context. The head is
+# self-consistent (its own registry would name `Beta gate v2`), so `pr-gate-core`
+# passes — this is the residual the base-ref fix created, and the only way to see
+# it is to compare the two trees.
+cat >"$(event_tree renamed)/alpha.yml" <<'YAML'
+name: Alpha tier
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  gate:
+    name: Alpha gate
+    steps:
+      - run: 'true'
+YAML
+cat >"$(event_tree renamed)/beta.yml" <<'YAML'
+name: Beta tier
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  gate:
+    name: Beta gate v2
+    steps:
+      - run: 'true'
+YAML
+# THE DELETION: beta.yml is not in the tree at all (an unrebased branch cut before
+# the tier existed, or a PR that removed the workflow).
+cp "$(event_tree renamed)/alpha.yml" "$(event_tree deleted)/alpha.yml"
+# Unparseable beta.yml: INCONCLUSIVE, never a fast red.
+printf 'name: Beta\non: [pull_request\n  jobs: ][\n' >"$(event_tree unparseable)/beta.yml"
+# A computed job name cannot be resolved offline: also inconclusive.
+cat >"$(event_tree computed-name)/beta.yml" <<'YAML'
+name: Beta tier
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  gate:
+    name: ${{ format('Beta {0}', 'gate') }}
+    steps:
+      - run: 'true'
+YAML
+
+echo "== a base-registered tier the event tree cannot emit reds FAST =="
+: >"$WORK/sleep.log"
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 5 \
+  --event-workflows-dir "$(event_tree renamed)" --event-action synchronize --base-ref main
+if [ "$RC" -ne 0 ] && contains "$OUT" "MIGRATION STATE"; then
+  ok "a renamed context is reported as a migration state, not polled to the deadline"
+else
+  bad "the renamed context did not produce a migration verdict (rc=$RC): $OUT"
+fi
+if [ ! -s "$WORK/sleep.log" ]; then
+  ok "it reds on the FIRST poll — no runner held for an hour on a context that cannot arrive"
+else
+  bad "the migration state still burned the poll budget ($(wc -l <"$WORK/sleep.log") intervals)"
+fi
+if contains "$OUT" "rebase" && contains "$OUT" "ci:waive:beta"; then
+  ok "the diagnostic names BOTH remedies (rebase, or waive a deliberate rename)"
+else
+  bad "the migration diagnostic does not name the remedy: $OUT"
+fi
+
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 5 \
+  --event-workflows-dir "$(event_tree deleted)" --event-action synchronize --base-ref main
+if [ "$RC" -ne 0 ] && contains "$OUT" "carries no"; then
+  ok "a tier whose workflow the event tree lacks entirely is a migration state too"
+else
+  bad "a missing tier workflow was not detected (rc=$RC): $OUT"
+fi
+
+echo "== detection can only ever FAIL, never pass =="
+# A pull request controls this tree. If "the event tree cannot emit it" meant
+# PASS, breaking your own tier workflow would be a one-line bypass. The evidence
+# here is a tier that FAILED; the migration state must not launder it green.
+invoke "cat $(runs_file one-failed)" "$WORK/self-ids.txt" "$FUTURE" 5 \
+  --event-workflows-dir "$(event_tree renamed)" --event-action synchronize --base-ref main
+if [ "$RC" -ne 0 ]; then
+  ok "a failed tier stays failed even when the event tree could not emit it"
+else
+  bad "the migration check turned a failed tier green — that is a bypass"
+fi
+
+echo "== a deliberate rename can still be shipped, via the documented waiver =="
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 5 \
+  --event-workflows-dir "$(event_tree renamed)" --event-action synchronize --base-ref main \
+  --labels "ci:waive:beta" --actor tester
+if [ "$RC" -eq 0 ] && contains "$OUT" "WAIVED"; then
+  ok "ci:waive:<tier-id> clears a migration state (a registry change takes effect once merged)"
+else
+  bad "the break-glass could not clear a migration state (rc=$RC): $OUT"
+fi
+
+echo "== inconclusive evidence must NOT fast-fail (a false red is an outage too) =="
+for tree in matching unparseable computed-name; do
+  : >"$WORK/sleep.log"
+  invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 2 \
+    --event-workflows-dir "$(event_tree "$tree")" --event-action synchronize --base-ref main
+  if contains "$OUT" "MIGRATION STATE"; then
+    bad "the '$tree' event tree produced a migration verdict; that reds a legitimate PR"
+  else
+    ok "the '$tree' event tree yields no migration verdict (the tier is polled normally)"
+  fi
+done
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 2 \
+  --event-workflows-dir "$WORK/no-such-event-tree" --event-action synchronize --base-ref main
+if ! contains "$OUT" "MIGRATION STATE" && contains "$OUT" "::warning::"; then
+  ok "an unavailable event tree warns and falls back to polling rather than reding"
+else
+  bad "a missing event tree was mishandled: $OUT"
+fi
+
+# The base-ref shape is validated before it reaches the registry reader.
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 1 --base-ref 'main;rm -rf /'
+if [ "$RC" -eq 2 ] && contains "$OUT" "not a branch ref"; then
+  ok "an off-shape --base-ref fails closed as a harness error"
+else
+  bad "an off-shape --base-ref was accepted (rc=$RC): $OUT"
+fi
+
 # ------------------------------------------------- non-vacuity (#2910 7.4) --
 # Every guard above must be PROVABLY able to fail. Substituting an always-exit-0
 # aggregator has to make the failing cases stop failing; if it does not, the
@@ -784,6 +945,12 @@ count_failing_verdicts() {
   invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 1 \
     --core-result skipped --event-action labeled --core-runs-cmd "cat $(runs_file core-only-self)"
   [ "$RC" -ne 0 ] && n=$((n + 1))
+  # round 3: the migration state, and the shape guard in front of it.
+  invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 1 \
+    --event-workflows-dir "$(event_tree renamed)" --event-action synchronize --base-ref main
+  [ "$RC" -ne 0 ] && n=$((n + 1))
+  invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 1 --base-ref 'main;rm -rf /'
+  [ "$RC" -ne 0 ] && n=$((n + 1))
   printf '%s' "$n"
 }
 
@@ -793,10 +960,10 @@ REAL_FAILURES=$(count_failing_verdicts)
 AGG="$WORK/stub-aggregator.sh"
 STUB_FAILURES=$(count_failing_verdicts)
 AGG="$AGG_REAL"
-if [ "$REAL_FAILURES" -eq 8 ]; then
-  ok "the real aggregator fails all 8 discriminating states"
+if [ "$REAL_FAILURES" -eq 10 ]; then
+  ok "the real aggregator fails all 10 discriminating states"
 else
-  bad "the real aggregator failed only $REAL_FAILURES/8 discriminating states"
+  bad "the real aggregator failed only $REAL_FAILURES/10 discriminating states"
 fi
 if [ "$STUB_FAILURES" -eq 0 ]; then
   ok "the always-exit-0 stub fails none of them, so this suite would go RED under it"

@@ -18,6 +18,8 @@
 # therefore states the concrete failure it prevents, and rejects only configurations
 # that provably produce it.
 
+require_relative "gating_head_emitability"
+
 module GatingRegistry
   # GitHub's default `pull_request` activity types when `types:` is omitted.
   DEFAULT_PR_TYPES = %w[opened synchronize reopened].freeze
@@ -206,6 +208,7 @@ module GatingRegistry
     errors.concat(aggregator_trigger_errors(registry, registry_path, workflows))
     errors.concat(aggregator_concurrency_errors(registry, registry_path, workflows))
     errors.concat(aggregator_trust_boundary_errors(registry, registry_path, workflows))
+    errors.concat(HeadEmitability.wiring_errors(registry, registry_path, workflows))
     errors.concat(registered_workflow_errors(registry, registry_path, workflows, workflows_dir))
     errors.concat(deadline_errors(registry, registry_path, workflows, workflows_dir))
     errors

@@ -34,6 +34,7 @@ require "optparse"
 require "set"
 require "time"
 require_relative "gating_policy_rules"
+require_relative "gating_head_emitability"
 
 module GatingRegistry
   class Error < StandardError; end
@@ -242,7 +243,7 @@ module GatingRegistry
   # `now` (unix seconds, optional) only ages out a superseded conclusion; when it
   # is absent such a tier simply stays non-terminal until `final`.
   def evaluate(registry:, check_runs:, exclude_ids: [], run_id: nil, labels: [], final: false,
-               now: nil, supersession_grace: DEFAULT_SUPERSESSION_GRACE_SECONDS)
+               now: nil, supersession_grace: DEFAULT_SUPERSESSION_GRACE_SECONDS, unemittable: {})
     # SELF-CHECK (issue #2910 P7). An empty or unparseable `tiers:` would make
     # every observation vacuous and the aggregate green with nothing checked —
     # the one silent-open path in the mechanism. The enrolment rule rejects it
@@ -253,7 +254,8 @@ module GatingRegistry
     visible = check_runs.reject { |run| self_excluded?(run, exclude, run_id) }
     latest = latest_by_context(visible)
     waived = waived_tier_ids(labels)
-    context = { waived: waived, final: final, now: now, grace: supersession_grace }
+    context = { waived: waived, final: final, now: now, grace: supersession_grace,
+                unemittable: unemittable.is_a?(Hash) ? unemittable : {} }
 
     tiers(registry).map { |tier| observe_tier(tier, latest, context) }
   end
@@ -307,6 +309,21 @@ module GatingRegistry
     if context[:waived].include?(tier_id)
       return Observation.new("waived", tier_id, declared, nil, "absent", nil, nil,
                              "absent tier waived by ci:waive:#{tier_id} (nothing to wait for)")
+    end
+    # MIGRATION STATE (issue #2910 round 3). The BASE ref registers this tier, but
+    # the tree this event ran provably cannot emit its context — so polling it to
+    # the deadline would hold a runner for an hour to reach a verdict already
+    # known. Fail NOW, naming the remedy. Never the reverse: "the head cannot
+    # emit, therefore pass" would let a pull request go green by breaking its own
+    # tier workflow.
+    migration = context[:unemittable][tier_id]
+    if migration
+      return Observation.new("fail", tier_id, declared, nil, "unemittable", nil, nil,
+                             "MIGRATION STATE: the base ref registers tier `#{tier_id}` but #{migration}. " \
+                             "`required` will not wait out the deadline for a context that cannot arrive. " \
+                             "Remedy: rebase this pull request onto the base branch, or apply " \
+                             "`ci:waive:#{tier_id}` if the tier is deliberately being renamed or retired " \
+                             "(a registry change only takes effect once it is merged)")
     end
     final = context[:final]
     note = "no check run named `#{declared}` on the PR head; absence is an ERROR, not inapplicability " \
@@ -428,6 +445,9 @@ if __FILE__ == $PROGRAM_NAME
   }
 
   options[:context] = nil
+  options[:event_workflows_dir] = nil
+  options[:event_action] = nil
+  options[:base_ref] = nil
 
   command = ARGV.shift.to_s
   parser = OptionParser.new do |opts|
@@ -452,6 +472,12 @@ if __FILE__ == $PROGRAM_NAME
       options[:grace] = parsed if parsed && parsed >= 0
     end
     opts.on("--final", "deadline spent: unresolved tiers become failures") { options[:final] = true }
+    opts.on("--event-workflows-dir DIR",
+            "workflow definitions of the tree THIS EVENT ran (migration detection)") do |v|
+      options[:event_workflows_dir] = v
+    end
+    opts.on("--event-action ACTION", "this pull_request event's activity type") { |v| options[:event_action] = v }
+    opts.on("--base-ref REF", "this pull request's base branch") { |v| options[:base_ref] = v }
   end
   parser.parse!(ARGV)
 
@@ -499,7 +525,13 @@ if __FILE__ == $PROGRAM_NAME
         labels: options[:labels],
         final: options[:final],
         now: options[:now],
-        supersession_grace: options[:grace]
+        supersession_grace: options[:grace],
+        unemittable: GatingRegistry::HeadEmitability.unemittable(
+          registry: registry,
+          workflows_dir: options[:event_workflows_dir],
+          event_action: options[:event_action],
+          base_ref: options[:base_ref]
+        )
       )
       observations.each { |o| puts GatingRegistry.format_observation(o) }
       exit GatingRegistry.verdict_code(observations)

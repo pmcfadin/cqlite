@@ -47,6 +47,9 @@
 #   --core-result RESULT       `needs.<core>.result` in THIS run    [$CORE_RESULT]
 #   --event-action ACTION      the pull_request activity type       [$EVENT_ACTION]
 #   --core-runs-cmd CMD        command printing that context's check runs [gh api]
+#   --event-workflows-dir DIR  workflow definitions of the tree THIS EVENT ran,
+#                              for migration detection      [$EVENT_WORKFLOWS_DIR]
+#   --base-ref REF             this pull request's base branch        [$BASE_REF]
 #   --check-runs-cmd CMD       command printing check-run JSON/NDJSON [gh api]
 #   --self-jobs-cmd CMD        command printing this run's job ids    [gh api]
 #   --labels-cmd CMD           command printing the PR's CURRENT label names [gh api]
@@ -81,6 +84,8 @@ CORE_CONTEXT="${CORE_CONTEXT:-pr-gate-core}"
 CORE_RESULT_IN="${CORE_RESULT:-}"
 EVENT_ACTION_IN="${EVENT_ACTION:-}"
 CORE_RUNS_CMD="${CORE_RUNS_CMD:-}"
+EVENT_WORKFLOWS_DIR="${EVENT_WORKFLOWS_DIR:-}"
+BASE_REF_IN="${BASE_REF:-}"
 NOW_OVERRIDE=""
 SUMMARY_FILE="${GITHUB_STEP_SUMMARY:-}"
 SLEEP_CMD="${SLEEP_CMD:-sleep}"
@@ -104,6 +109,8 @@ while [ "$#" -gt 0 ]; do
     --core-result) CORE_RESULT_IN="$2"; shift 2 ;;
     --event-action) EVENT_ACTION_IN="$2"; shift 2 ;;
     --core-runs-cmd) CORE_RUNS_CMD="$2"; shift 2 ;;
+    --event-workflows-dir) EVENT_WORKFLOWS_DIR="$2"; shift 2 ;;
+    --base-ref) BASE_REF_IN="$2"; shift 2 ;;
     --check-runs-cmd) CHECK_RUNS_CMD="$2"; shift 2 ;;
     --self-jobs-cmd) SELF_JOBS_CMD="$2"; shift 2 ;;
     --labels-cmd) LABELS_CMD="$2"; shift 2 ;;
@@ -173,6 +180,32 @@ case "$ACTOR" in
   *[!A-Za-z0-9._\[\]-]* ) ACTOR="(actor withheld: not a github login shape)" ;;
 esac
 [ "${#ACTOR}" -gt 64 ] && ACTOR="(actor withheld: over-long)"
+
+# --------------------------------------------------- migration detection ----
+# Round 2 moved the registry to the BASE ref; that split WHERE THE REGISTRY LIVES
+# from WHERE THE EMITTER LIVES. If the base registers a tier whose context the
+# tree this event ran cannot emit, the context can never arrive and polling it to
+# the deadline would burn a runner for an hour to reach a verdict already known.
+# gating_head_emitability.rb answers that question from provable properties only,
+# and the verdict is ALWAYS a failure — "the head cannot emit, therefore pass"
+# would be a one-line bypass. See that file's header.
+case "$BASE_REF_IN" in
+  "" ) : ;;
+  *[!A-Za-z0-9._/-]* ) fail_closed "--base-ref is not a branch ref: '$BASE_REF_IN'" ;;
+esac
+EVENT_ARGS=()
+if [ -n "$EVENT_WORKFLOWS_DIR" ] && [ ! -d "$EVENT_WORKFLOWS_DIR" ]; then
+  echo "::warning::the event tree's workflow definitions are not at '$EVENT_WORKFLOWS_DIR'; a registered" \
+       "tier whose emitter this pull request renamed or removed cannot be detected early and will instead" \
+       "wait out the aggregation deadline" >&2
+  EVENT_WORKFLOWS_DIR=""
+elif [ -z "$EVENT_WORKFLOWS_DIR" ] && [ -n "$RUN_ID" ]; then
+  echo "::warning::no --event-workflows-dir was supplied, so this run cannot tell a registered tier that is" \
+       "merely SLOW from one whose emitter does not exist in the tree this event ran" >&2
+fi
+[ -n "$EVENT_WORKFLOWS_DIR" ] && EVENT_ARGS+=(--event-workflows-dir "$EVENT_WORKFLOWS_DIR")
+[ -n "$EVENT_ACTION_IN" ] && EVENT_ARGS+=(--event-action "$EVENT_ACTION_IN")
+[ -n "$BASE_REF_IN" ] && EVENT_ARGS+=(--base-ref "$BASE_REF_IN")
 
 # Default data sources. Check runs are keyed to the PULL REQUEST HEAD sha — NOT
 # github.sha, which for a pull_request event is the synthesised merge commit and
@@ -374,6 +407,7 @@ evaluate_once() {
     --run-id "${RUN_ID:-}" \
     --labels "$LABELS_NOW" \
     --now "${NOW_OVERRIDE:-$(date +%s)}" \
+    ${EVENT_ARGS[@]+"${EVENT_ARGS[@]}"} \
     $final_flag >"$OBSERVATIONS" 2>"$WORK_DIR/evaluate.err" || rc=$?
   if [ -s "$WORK_DIR/evaluate.err" ]; then
     sed 's/^/  /' "$WORK_DIR/evaluate.err" >&2

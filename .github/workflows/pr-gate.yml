@@ -302,8 +302,39 @@ jobs:
           path: head-gating
           persist-credentials: false
 
+      # MIGRATION DETECTION (issue #2910 round 3). The trust-boundary fix above
+      # split WHERE THE REGISTRY LIVES (the base ref) from WHERE THE EMITTER
+      # LIVES (the tree this event ran). When they disagree — a PR that renames a
+      # registered tier's context, deletes its workflow, or predates the tier —
+      # the context can NEVER appear, and without this the aggregator would poll
+      # it for the full 60 minutes, hold a runner, and report an unexplained red.
+      #
+      # `github.sha` is deliberate: for a `pull_request` event that is the MERGE
+      # COMMIT, which is exactly the tree GitHub took this run's workflow
+      # definitions from — so this reads the same flight-ci.yml the Flight tier
+      # would have run from, not the raw head. Sparse, read-only, no credentials:
+      # the content is untrusted and is only ever PARSED, never executed, and the
+      # verdict it can produce is a failure, never a pass (see
+      # scripts/ci/gating_head_emitability.rb).
+      #
+      # `continue-on-error` because losing this checkout must not red a
+      # legitimate PR: the aggregator warns and falls back to ordinary polling.
+      - name: Checkout the event tree's workflow definitions (read-only)
+        id: event-tree
+        continue-on-error: true
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: event-tree
+          persist-credentials: false
+          sparse-checkout: .github/workflows
+          sparse-checkout-cone-mode: false
+
       - name: Aggregate registered gating tiers
         env:
+          # Migration detection inputs (see the checkout step above).
+          EVENT_WORKFLOWS_DIR: event-tree/.github/workflows
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
