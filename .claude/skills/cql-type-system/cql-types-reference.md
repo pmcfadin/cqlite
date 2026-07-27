@@ -175,12 +175,33 @@ fn deserialize_timestamp(data: &[u8]) -> Result<i64> {
 ```
 
 #### Date
-**Wire Format:** 4 bytes unsigned (days since epoch: 1970-01-01)
+**Wire Format:** 4 bytes big-endian **unsigned**, days-since-epoch **shifted by
+`Integer.MIN_VALUE`** — the epoch (1970-01-01) sits at the CENTRE of the unsigned range,
+i.e. day 0 is encoded as `0x80000000`. The shift exists so the raw 4 bytes sort in date
+order (byte-comparable).
+
+**You MUST un-bias the stored value.** Reading it as a plain `u32` days-since-epoch is
+wrong by 2^31 days.
+
 ```rust
-fn deserialize_date(data: &[u8]) -> Result<u32> {
-    Ok(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+/// Cassandra DATE: 4-byte unsigned BE with an Integer.MIN_VALUE offset.
+fn deserialize_date(data: &[u8]) -> Result<i32> {
+    let stored = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    // Remove the bias: stored 0x80000000 -> 0 days since 1970-01-01.
+    Ok(stored.wrapping_add(i32::MIN as u32) as i32)
 }
 ```
+
+> **Citations**: CQLite decode path —
+> `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/cell_value_scalar.rs:329-333`
+> (`stored.wrapping_add(i32::MIN as u32) as i32`; the bias is spelled `i32::MIN as u32`,
+> which is why a grep for the literal `0x80000000` finds nothing). Format authority —
+> Apache Cassandra 5.0.8 `src/java/org/apache/cassandra/serializers/SimpleDateSerializer.java`:
+> `:36-37` ("For byte-order comparability, we shift by `Integer.MIN_VALUE` and treat the
+> data as an unsigned integer … w/epoch sitting in the center @ 2^31"), `:110`
+> (`timeInMillisToDay` → `toDays() - Integer.MIN_VALUE`), `:113-115`
+> (`dayToTimeInMillis` → `ofDays(days + Integer.MIN_VALUE)`). The *decoded* value CQLite
+> carries in `Value::Date` is the signed days-since-epoch, matching Cassandra's `int`.
 
 #### Time
 **Wire Format:** 8 bytes big-endian (nanoseconds since midnight)
@@ -193,15 +214,46 @@ fn deserialize_time(data: &[u8]) -> Result<i64> {
 ```
 
 #### Duration
-**Wire Format:** 3 VInts (months, days, nanoseconds)
+**Wire Format:** 3 **ZigZag-signed** VInts (months, days, nanoseconds).
+
+> ### ⚠️ These are the ONLY signed VInts in `Data.db`
+> Every other VInt in `Data.db` — all lengths, counts, and the timestamp/TTL/
+> local-deletion-time deltas — is **unsigned**. A `duration`'s three components are the
+> sole exception, and they apply **wherever a duration payload occurs**, including nested
+> inside a collection, tuple, or UDT (`frozen<list<duration>>`,
+> `map<text, frozen<tuple<duration,int>>>`, a UDT field of type `duration`, …).
+> **Decoding them as unsigned VInts makes every negative duration wrong**, and a negative
+> CQL duration makes every non-zero component negative.
+
+**ZigZag decode**: `(zz >> 1) ^ -(zz & 1)` — i.e. positive `n` encodes as `2n`, negative
+`n` as `2|n| - 1`.
+
 ```rust
+/// ZigZag-decode an unsigned VInt payload into its signed value.
+fn zigzag_decode(zz: u64) -> i64 {
+    ((zz >> 1) as i64) ^ -((zz & 1) as i64)
+}
+
 fn deserialize_duration(data: &[u8]) -> Result<(i32, i32, i64)> {
-    let (months_data, rest) = parse_vint(data)?;
-    let (days_data, rest) = parse_vint(rest)?;
-    let (nanos_data, _) = parse_vint(rest)?;
-    Ok((months_data as i32, days_data as i32, nanos_data))
+    // parse_vuint reads the raw UNSIGNED VInt; the ZigZag step recovers the sign.
+    let (rest, months_zz) = parse_vuint(data)?;
+    let (rest, days_zz) = parse_vuint(rest)?;
+    let (_, nanos_zz) = parse_vuint(rest)?;
+    Ok((
+        zigzag_decode(months_zz) as i32,
+        zigzag_decode(days_zz) as i32,
+        zigzag_decode(nanos_zz),
+    ))
 }
 ```
+
+> **Citations**: `docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md:63-65`
+> ("Every VInt in `Data.db` is unsigned **except** the three components of a serialized
+> `DurationType` payload"), `:92-97` (the duration/ZigZag rule and its nesting scope),
+> `:520-529` (structural VInts are unsigned; ZigZag appears only inside a `DurationType`
+> payload). Cassandra: `DurationSerializer.java:34,49-51` (three `writeVInt` calls),
+> `VIntCoding.java:449,522` (`writeVInt` → `writeUnsignedVInt(encodeZigZag64(v))`),
+> `Duration.java:101-110` (a negative duration negates every component).
 
 ### Network Types
 
@@ -279,9 +331,14 @@ fn deserialize_nullable<T>(
 
 ## Type Aliases
 
-Some types have multiple names:
-- `text` = `varchar`
-- `blob` = `bytea` (PostgreSQL compatibility)
+CQL has exactly one such alias pair:
+- `text` = `varchar` (both are `UTF8Type`)
+
+> **Citation**: cassandra-5.0.8 `src/java/org/apache/cassandra/cql3/CQL3Type.java:88-111`
+> — the `Native` enum is the complete list of CQL native type names. `TEXT` (`:103`) and
+> `VARCHAR` (`:111`) both map to `UTF8Type.instance`, which is the one true alias pair;
+> `BLOB` (`:91`) maps to `BytesType.instance` and appears exactly once. CQL has **no**
+> PostgreSQL-style alias for `blob` — do not invent one.
 
 ## Special Cases
 
