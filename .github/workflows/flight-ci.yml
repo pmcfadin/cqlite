@@ -215,6 +215,19 @@ jobs:
     if: needs.classify.outputs.run_tier == 'true'
     runs-on: ubuntu-latest
     steps:
+      # TEMPORARY (#3033 verification, revert before close). `Flight tier gate`
+      # is created only once every job it `needs:` has completed, and on this
+      # repo the whole tier concludes in ~11 minutes — FASTER than pr-gate-core
+      # (~15-25 min), which is what gates the `required` job's start. So on a
+      # healthy mandating PR `required` never observes the tier as absent or
+      # pending, and neither early-resolution waiver path is reachable. This
+      # delay holds the tier's gate context ABSENT past the moment `required`
+      # starts polling, which is the state the `ci:waive:<tier-id>` break-glass
+      # exists for. 35 minutes is deterministic: pr-gate-core has
+      # timeout-minutes: 30, so `required` always starts before this lapses.
+      - name: TEMPORARY hold the tier's gate context absent (#3033 verification)
+        run: sleep 2100
+
       - uses: actions/checkout@v5
 
       - name: Setup Rust
