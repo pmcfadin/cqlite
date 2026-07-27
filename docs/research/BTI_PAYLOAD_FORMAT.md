@@ -214,7 +214,8 @@ fn read_sized_int<R: Read>(reader: &mut R, bytes: usize) -> Result<i64, Error> {
 
 ## Cassandra Source References
 
-Key files in `~/local_projects/cassandra`:
+Key files, read at the **pinned tag** (`git show cassandra-5.0.8:src/java/org/apache/cassandra/...`) —
+a local clone is optional and branch-sensitive, so never read its working tree (#3041):
 
 1. **`src/java/org/apache/cassandra/io/sstable/format/bti/PartitionIndex.java`**
    - Line 79: `FLAG_HAS_HASH_BYTE = 8`
@@ -287,6 +288,8 @@ For a 1GB SSTable with 10,000 partitions:
 
 ## References
 
-- Cassandra 5.0.0 source: `https://github.com/apache/cassandra/tree/cassandra-5.0.0`
-- Local source: `~/local_projects/cassandra/src/java/org/apache/cassandra/io/sstable/format/bti/`
+- Cassandra 5.0 source (authority, pinned): `git show cassandra-5.0.8:src/java/org/apache/cassandra/io/sstable/format/bti/<file>`
+  — browse at `https://github.com/apache/cassandra/tree/cassandra-5.0.8`
+- A local clone is OPTIONAL and BRANCH-SENSITIVE (#3041): read it only via
+  `git -C "$CQLITE_CASSANDRA_REPO" show cassandra-5.0.8:<path>`, never its checked-out files
 - CQLite docs: `docs/sstables-definitive-guide/chapters/17-bti-formats.md`

@@ -41,7 +41,9 @@ All claims below are derived from the Cassandra 5.0.8 source:
 | `SortedTableWriter.java` | Data.db write-time chain |
 | `BtiTableReader.java` | End-to-end read path |
 
-Local copy: `docs/cassandra-5.0-src/` (or `~/local_projects/cassandra`).
+Read these at the **pinned tag**: `git show cassandra-5.0.8:src/java/org/apache/cassandra/io/sstable/format/bti/<file>`.
+An in-repo snapshot may exist at `docs/cassandra-5.0-src/`; a local Cassandra clone is optional and
+branch-sensitive (a non-5.0 branch is not the 5.0 format), so read it only through the tag ref (#3041).
 
 ---
 

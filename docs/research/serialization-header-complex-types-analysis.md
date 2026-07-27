@@ -800,9 +800,12 @@ private static Pair<String, String> getTypeName(String compareWith) throws Synta
 
 ### Cassandra Source Files
 
-- `/Users/patrick/local_projects/cassandra/src/java/org/apache/cassandra/db/SerializationHeader.java`
-- `/Users/patrick/local_projects/cassandra/src/java/org/apache/cassandra/serializers/AbstractTypeSerializer.java`
-- `/Users/patrick/local_projects/cassandra/src/java/org/apache/cassandra/db/marshal/TypeParser.java`
+- `src/java/org/apache/cassandra/db/SerializationHeader.java`
+- `src/java/org/apache/cassandra/serializers/AbstractTypeSerializer.java`
+- `src/java/org/apache/cassandra/db/marshal/TypeParser.java`
+
+Read each at the **pinned tag** — `git show cassandra-5.0.8:<path>` — never a working tree: a local
+clone is optional and branch-sensitive, and a non-5.0 branch is not the 5.0 format (#3041).
 
 ### Test Data
 
