@@ -314,9 +314,33 @@ in-flight run and mint a fresh `queued` check run — and a pending tier's waive
 deadline, so the break-glass made things worse before it made them better. Two changes: a registered tier
 may no longer cancel on a label event (mechanised — the rule now demands an action-aware
 `cancel-in-progress`, since the previous form accepted `${{ github.event_name == 'pull_request' }}`, which
-is true for `labeled`), and a waived tier whose only check run was minted at/after the waiver was applied
-resolves immediately, because that run cannot be information the waiver's author lacked. A tier pending
-from a run that PREDATES the waiver is still waited out.
+is true for `labeled`), and a pending tier may resolve on its waiver before the deadline.
+
+**Round 5 superseded that early-resolution rule, and the reason is the whole point of the hatch.** Round 4
+phrased it as `started_at >= waiver_at` — a waived tier whose check run was minted at/after the waiver was
+applied resolves immediately. That formulation is the **permanent-bypass defect** (`tasks.md:7f.1`):
+**labels persist across pushes**, so once `ci:waive:<tier-id>` was applied, every LATER head sha minted its
+check runs after the label and was therefore waived before its tier had reported anything. A one-time
+break-glass silently became a standing exemption, and nothing in the run log said so.
+
+The shipped rule binds a waiver to **evidence**, in two independent conditions
+(`gating_registry.rb:338,365,580-585`):
+
+1. **Bound to this head** — `waiver_bound_to_head?` requires the `labeled` event to be **no older than the
+   head's earliest `started_at` over PROVENANCED check runs**. The anchor is deliberately not a commit date
+   (back-datable by the pull request's author) and not any check run (forgeable by anything holding
+   `checks:write`); only a run whose provenance was verified can contribute. A label left over from an
+   earlier push fails this and cannot pre-empt the new head's tiers.
+2. **The run this waiver started** — early resolution of a *pending* tier additionally requires
+   `started - waiver_at <= WAIVER_RUN_WINDOW_SECONDS` (300s). GitHub mints a run's check runs within
+   seconds of the triggering event; anything later is a different run, carrying information the waiver's
+   author did not have.
+
+Failing either condition is **not** a denied waiver — it falls through to the ordinary polling path and is
+honoured at the deadline exactly as before, with `unbound_waiver_note` stating out loud WHY it did not
+resolve early and that the remedy is to remove and re-apply the label. A break-glass that silently does
+nothing is worse than one that refuses out loud. What no waiver can do, at any point on this path, is
+excuse a tier that reported `failure`/`timed_out`: a terminal conclusion never reaches the waiver branch.
 
 ## Testability, and why it must be provably-failing
 
@@ -375,6 +399,18 @@ tree GitHub took this run's workflow definitions from — sparse, read-only, no 
 with a diagnostic naming both remedies (rebase, or `ci:waive:<tier-id>` for a deliberate rename). Losing
 that checkout is `continue-on-error`: it warns and falls back to ordinary polling, because a false red is
 also an outage.
+
+**Round 5 made that judgement event-aware (T2).** "Provably cannot emit" was originally evaluated against a
+fixed set of activity types, which is wrong in both directions once the aggregator itself subscribes to
+`labeled`/`unlabeled`. The shipped test (`gating_head_emitability.rb:204-210`) asks whether the tier's
+`types:` intersects `HEAD_PRODUCING_TYPES + the activity type of THIS event` — the types that can actually
+put the context on this head sha, plus the one that started this run. A tier is declared unemittable only
+when that intersection is empty, and the diagnostic names the observed event action so the verdict is
+reproducible from the log. Note this branch is unreachable for a COMPLIANT tier: the enrolment rule already
+forces every registered tier to subscribe to `opened` + `synchronize` (`MANDATORY_TIER_PR_TYPES`), so it
+fires only for a head tree that narrowed `types:` out of compliance — which is itself a genuine migration
+state. That makes `MANDATORY_TIER_PR_TYPES` load-bearing here, and the two constants are cross-asserted in
+the self-test rather than left to drift apart.
 
 Two directions are deliberately closed:
 
