@@ -21,6 +21,13 @@ the local smoke suite and emits a machine-checkable summary block. A claim that 
 from this script's summary (between the `AGENT-GATE SUMMARY` markers, ending in `RESULT: PASS`) — ad-hoc
 `cargo` runs do not count.
 
+**Only `RESULT: PASS`/`RESULT: FAIL` is a verdict (#3041).** The gate writes
+`RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** and overwrites it on
+completion, so `INCOMPLETE` is a **liveness placeholder, not a verdict**. If you poll a summary file
+instead of waiting for the process to exit, the predicate is
+`grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"` — a bare `grep -q` on the bare `RESULT:` token fires the
+instant the gate starts and would accept a just-launched (or still-queued) gate as certified.
+
 ```bash
 # ITERATE — every fix round (fmt + file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min).
 # Emits a DISTINCT ==== AGENT-GATE LITE SUMMARY ==== block that must NEVER be pasted as the full SUMMARY.

@@ -102,6 +102,14 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
 
 - Prefer `run_in_background` (or a long timeout) so a subagent never idle-waits and gets
   watchdog-killed (#1855). A queued gate ≠ hung gate: under load it prints `waiting for gate slot`.
+- **Completion probe = `grep -qE 'RESULT: (PASS|FAIL)'` — `INCOMPLETE` is a liveness placeholder, NOT
+  a verdict (#3041; mechanism follow-up #2908).** The gate writes
+  `RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** (EXIT-trap sentinel,
+  before the #1825 slot is even granted) and only overwrites it with `PASS`/`FAIL` at the terminal
+  emit. So a bare `grep -q` on the bare `RESULT:` token fires the instant the gate starts and would let an agent accept
+  a **just-launched or still-queued** gate as its gate of record — a verdict that does not exist.
+  Anchor every poll (agents, skills, docs, helper scripts) on `PASS|FAIL`; a sentinel-only summary
+  means "still running, died, or queued", never certified.
 - Defaults if `AGENT_GATE_SUMMARY_FILE` unset (per-checkout; give concurrent gates in ONE checkout
   unique paths): `.agent-gate-summary.txt` / `.agent-gate-lite-summary.txt` / `.agent-gate-delta-summary.txt`.
   **Nested exception (#2874):** a gate started with `AGENT_GATE_PARENT_RUN_ID` in its env (i.e. spawned

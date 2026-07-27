@@ -327,6 +327,29 @@ CQLITE_GATE_DISABLE_CAP=1 bash scripts/agent-gate.sh       # force-disable the c
 
 The cap fails **open** (disabled, loud stderr note) when `python3`/the daemon is unavailable — the gate is never un-runnable because of the cap. Self-test: `scripts/tests/test_gate_concurrency_cap.sh` (wired into `tooling-tests`).
 
+## The startup `INCOMPLETE` sentinel is a liveness placeholder, not a verdict (issue #3041)
+
+`agent-gate.sh` writes a startup sentinel into `$AGENT_GATE_SUMMARY_FILE` **before any component runs** — before `acquire_gate_slot` even grants the #1825 slot — whose terminal line is exactly:
+
+```
+RESULT: INCOMPLETE (gate did not finish)
+```
+
+It is overwritten with `RESULT: PASS` / `RESULT: FAIL` only at the terminal emit. The sentinel is deliberate and load-bearing: it is what makes a killed/orphaned/queued gate detectable (and since #2926 it also carries `tree-start:`, so a killed run still records the tree it began on).
+
+**Consequence for every poller: `INCOMPLETE` is a liveness placeholder, not a verdict.** A bare `grep -q` on the bare `RESULT:` token is satisfied the instant the gate launches, so an agent polling that way can read a **just-launched or still-queued** gate as a finished one, treat the placeholder as its gate of record, and advance toward merge on a verdict that does not exist — silently voiding the only run that counts. The single correct completion predicate, in agents, skills, docs, and any helper that polls a summary file, is:
+
+```bash
+grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+```
+
+Corollaries:
+
+- A summary file holding only the sentinel means **still running, died, or queued** — never "certified".
+- A queued gate (`waiting for gate slot (N in use)…`) *already has* a sentinel-bearing summary file; the file's existence is not progress. See also the closer's queue-aware deadline rule in `.claude/agents/flow-closer.md`.
+- The reader contract still applies on top of this: validate the block's `run-id:` line and read `tree-integrity:` alongside the verdict (#2874/#2926) — a foreign `RESULT: PASS` is a peer's verdict, not yours.
+- The stronger *mechanism* fix (a distinct `.running` sentinel that cannot be misread, plus a pin in `scripts/tests/test_agent_gate_summary.sh`) is tracked in **#2908**; #3041 corrected the documented predicate everywhere.
+
 ## Nested / concurrent-gate isolation (issue #2874)
 
 The gate of record is **structurally immune** to nested and concurrent gate activity — no box-exclusive ops rule and no "serialize every self-test lane" discipline is needed. The historical `#2751` workaround ("run the full gate **without** `AGENT_GATE_SUMMARY_FILE`") is **OBSOLETE**: the summary-file redirect invocation (`AGENT_GATE_SUMMARY_FILE=… bash scripts/agent-gate.sh`) is once again the documented default for callers, and running it concurrently with another lane's gate self-tests on the same box is safe. Three mechanisms guarantee this:

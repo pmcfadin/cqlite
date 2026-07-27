@@ -56,7 +56,7 @@ grep -qE 'RESULT: (PASS|FAIL)' /tmp/gate-<N>.txt && echo done   # a VERDICT ⇒ 
 **Only `PASS`/`FAIL` is a verdict.** `agent-gate.sh` writes
 `RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** (via its EXIT
 trap) and only *overwrites* it on completion, so `INCOMPLETE` is a **liveness placeholder, not
-a verdict** — it means "still running, or died". A bare `grep -q 'RESULT:'` therefore matches
+a verdict** — it means "still running, or died". A bare `grep -q` on the bare `RESULT:` token therefore matches
 within seconds of gate start and would let you read a just-launched gate as a finished one and
 advance toward merge on a verdict that does not exist (#3041; mechanism follow-up #2908). Always
 anchor the probe on `PASS|FAIL`.

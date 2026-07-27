@@ -423,15 +423,32 @@ read it:
 - **Set `AGENT_GATE_SUMMARY_FILE=/path` before running.** The gate writes the
   complete SUMMARY to that exact path with plain redirection, so the file is
   complete no matter what happens to stdout. `cat` it afterward; it always
-  contains the full block (start marker → `RESULT:` → end marker). Prefer
-  `run_in_background` (or a long timeout) so a subagent never idle-waits on the
-  gate and gets watchdog-killed (issue #1855).
+  contains the full block (start marker → `RESULT: PASS`/`RESULT: FAIL` → end
+  marker). Prefer `run_in_background` (or a long timeout) so a subagent never
+  idle-waits on the gate and gets watchdog-killed (issue #1855).
 
   ```bash
   AGENT_GATE_SUMMARY_FILE=/tmp/gate-summary.txt \
     bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
   cat /tmp/gate-summary.txt   # complete SUMMARY, even if gate.log truncated
   ```
+
+> **Completion probe — anchor on `PASS|FAIL`; `INCOMPLETE` is a liveness placeholder,
+> not a verdict (#3041; mechanism follow-up #2908).** The gate writes
+> `RESULT: INCOMPLETE (gate did not finish)` into `$AGENT_GATE_SUMMARY_FILE` **at
+> launch** (its EXIT-trap startup sentinel, written *before* the #1825 slot is even
+> acquired) and only *overwrites* it with `RESULT: PASS`/`RESULT: FAIL` on completion.
+> The placeholder is deliberate — it makes a killed/orphaned gate detectable — but it
+> means a bare `grep -q` on the bare `RESULT:` token is satisfied the instant the gate starts, before a
+> single component has run. An agent polling that way can read a just-launched (or
+> queued) gate as a finished one and advance toward merge on a verdict that does not
+> exist. The only correct predicate is:
+>
+> ```bash
+> grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+> ```
+>
+> A terminal `RESULT: INCOMPLETE` means "still running, or died" — never a certification.
 
 - **If you don't set it,** the gate writes the same complete block to the
   documented default `$PWD/.agent-gate-summary.txt` (gitignored). If your streamed

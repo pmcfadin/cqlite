@@ -1367,7 +1367,7 @@ fi
 # in scripts/tests/test_agent_gate_tree_integrity.sh:
 #   a. the three lines are present in the canonical emission path;
 #   b. NO added line contains the token `RESULT:` — so BOTH the buggy poll predicate
-#      (`grep -q 'RESULT:'`) and the corrected one (`grep -qE 'RESULT: (PASS|FAIL)'`)
+#      (a bare-token match) and the corrected one (`grep -qE 'RESULT: (PASS|FAIL)'`)
 #      behave EXACTLY as they did before this change (#2908 is neither fixed nor
 #      regressed here). Asserting "exactly one RESULT: token" is what makes (b) a real
 #      guard rather than a restatement of (a).
