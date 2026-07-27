@@ -17,7 +17,8 @@
 - [x] 2.2 Structural rules for a registered tier: the workflow has a `pull_request` trigger at all; no
       blocking `paths:`/`paths-ignore:`/`branches:` (the `__required_ci_context_never_matches__` sentinel
       is allowed); `types:` covers `opened`+`synchronize` and stays within the aggregator's observed set;
-      exactly one job emits the declared context and its condition is EXACTLY `always()`; for every
+      exactly one job emits the declared context and its condition is EXACTLY `${{ !cancelled() }}` (a bare
+      `always()` is rejected: it launders a run cancellation into a `failure` conclusion); for every
       dependency some step both reads `needs.<job>.result` and can exit non-zero; dangling entries fail;
       `pr-gate.yml` may not be registered.
 - [x] 2.4 The aggregator must fire on `labeled`/`unlabeled`, or the `ci:waive:<tier-id>` break-glass is
@@ -88,7 +89,9 @@
       never waivable. Tier `types:` must stay within the aggregator's observed set.
 - [x] 7b.3 P3 transient fetch failures retried under backoff; fail closed only on persistence.
 - [x] 7b.4 P4 `types:` validated in both directions, plus the degenerate no-PR-trigger case.
-- [x] 7b.5 P5 the emitting job's condition must be EXACTLY `always()`.
+- [x] 7b.5 P5 the emitting job's condition must be EXACTLY `${{ !cancelled() }}` (round 3: a bare
+      `always()` runs the job DURING a cancellation and turns `needs.*.result == cancelled` into a
+      `failure`, which makes the supersession grace unreachable).
 - [x] 7b.6 P6 structural failing-path check (reads the result AND can exit non-zero, comments and quoted
       strings stripped) replacing the `/exit 1/` substring match.
 - [x] 7b.7 P7 the aggregator refuses an empty/unparseable `tiers:` itself.
@@ -117,6 +120,31 @@
 - [x] 7c.6 Discrimination mutants for each (policy non-vacuity 10 → 14; aggregator non-vacuity 6 → 8),
       plus real-tree assertions that the shipped configuration — not merely a synthetic one — has the
       properties.
+
+## 7d. Round-3 review (R1-R5): deployment axis, cancellation, portability
+- [x] 7d.1 R1 MIGRATION STATE. `scripts/ci/gating_head_emitability.rb` answers "can the tree THIS EVENT
+      ran emit this base-registered context at all?" from provable properties only (workflow absent, no
+      PR trigger, `types:`/`branches:` excluding this event, no job with that name). A positive answer
+      reds on the FIRST poll naming rebase + `ci:waive:<id>`; inconclusive evidence yields nothing; the
+      verdict is never a pass. `pr-gate.yml` checks out `github.sha` (the merge commit for a
+      pull-request event) sparse/read-only/`continue-on-error`, and the enrolment rule requires BOTH
+      halves of that wiring. NO short absent-deadline: a tier gate job `needs:` every other job, so an
+      absent context is the normal state of a running tier and a timer would red the PRs that mandate it.
+- [x] 7d.2 R2 the tier gate stops laundering a cancellation into a failure: `if: ${{ !cancelled() }}`
+      mandated (a bare `always()` rejected by name), `skipped` joins `cancelled`/`stale` as
+      non-terminal-then-fail, and `scripts/tests/test_gating_workflow_semantics.sh` asserts the whole
+      chain workflow-YAML to conclusion to aggregation verdict, with an `always()` mutant.
+- [x] 7d.3 R3 portability: one ruby `subst` fixture editor replaces five newline-in-replacement `sed`
+      sites and one GNU relative-range address; a 14-rule GNU-only lint (12 from #2926 plus the two sed
+      classes it lacks) covers this change's shell, each rule with a mutant. A repo-wide extension to
+      `scripts/ci/**` and `scripts/tests/**` is a refactor (about 85 pre-existing hits) and belongs to
+      issue #2981.
+- [x] 7d.4 R4 the never-exercised `python3 || ruby` fallbacks are gone; the suites are ruby-only and were
+      run with python3 masked off PATH.
+- [x] 7d.5 R5 the waiver actor is allowlisted before reaching a `::warning::`; the no-op registry append
+      is removed.
+- [x] 7d.6 Discrimination mutants for each (policy non-vacuity 14 to 17; aggregator 8 to 10; the
+      workflow-semantics chain carries its own `always()` mutant and 14 lint mutants).
 
 ## 8. Doctrine
 - [x] 8.1 `CLAUDE.md` autonomy section: `required` aggregates the registered sibling tiers and fails closed

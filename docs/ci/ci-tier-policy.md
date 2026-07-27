@@ -142,10 +142,24 @@ Rules for `pull_request`-triggered workflows:
   the `observability-gate.yml` `classify` pattern, and the tier's expensive jobs
   stay gated on the classifier's output.
 - A workflow under `tiers:` must emit its declared context from exactly one gate
-  job whose condition is exactly `if: always()`, for each of whose dependencies
-  some step both reads `needs.<job>.result` and can exit non-zero, and whose
-  `needs` closure covers every other job in the workflow. Inapplicability is
-  reported as an explicit SUCCESS from that job — never as an absent check run.
+  job whose condition is exactly `if: ${{ !cancelled() }}`, for each of whose
+  dependencies some step both reads `needs.<job>.result` and can exit non-zero,
+  and whose `needs` closure covers every other job in the workflow.
+  Inapplicability is reported as an explicit SUCCESS from that job — never as an
+  absent check run. A bare `always()` is **rejected**: it runs the gate job while
+  the run is *being cancelled*, when every `needs.*.result` is `cancelled`, and
+  the gate turns that into a `failure` conclusion — which makes the aggregator's
+  supersession grace unreachable, so every routine supersession would red
+  `required`.
+- **Migration states red fast, not after an hour.** The registry is read from the
+  base ref while the emitter comes from the tree the event ran (for a
+  `pull_request` event, the merge commit). If the base registers a tier whose
+  context that tree provably cannot emit — workflow absent, no PR trigger,
+  `types:`/`branches:` excluding this event, or no job with that name — `required`
+  fails on the first poll and names the remedy: rebase, or `ci:waive:<tier-id>` if
+  the tier is deliberately being renamed or retired (a registry change only takes
+  effect once merged). Inconclusive evidence never produces that verdict, and the
+  verdict is never a pass.
 - `required` must itself fire on `labeled`/`unlabeled`, or the `ci:waive:<tier-id>`
   break-glass could never be exercised on a PR the mechanism has wedged.
 - Failing closed applies at the DEADLINE, not to every transient. A `cancelled`

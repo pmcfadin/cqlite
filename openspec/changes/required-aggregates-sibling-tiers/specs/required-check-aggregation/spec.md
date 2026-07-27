@@ -153,12 +153,25 @@ remain gated on that classifier's output so an inapplicable tier costs only the 
 - **WHEN** the workflow-policy validation runs
 - **THEN** it FAILS and names the workflow and the declared context
 
-#### Scenario: A compound `always() && …` condition is rejected
-- **GIVEN** a registered workflow whose emitting job's condition merely CONTAINS `always()` — for example
-  `always() && github.event.pull_request.draft == false`, which skips the job on every draft pull request
+#### Scenario: A compound condition is rejected
+- **GIVEN** a registered workflow whose emitting job's condition merely CONTAINS the mandated function —
+  for example `!cancelled() && github.event.pull_request.draft == false`, which skips the job on every
+  draft pull request
 - **WHEN** the workflow-policy validation runs
 - **THEN** it FAILS, because the rule SHALL require a condition it can prove unconditional rather than one
-  that mentions `always()`
+  that merely mentions the function
+
+#### Scenario: An emitting job SHALL NOT launder a cancellation into a failure
+- **GIVEN** a registered workflow whose emitting job is conditioned on `always()`
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS and states that `always()` runs the gate job while the run is BEING CANCELLED, at which
+  point every `needs.<job>.result` is `cancelled` and the gate's own check turns that into a `failure`
+  conclusion — so the supersession grace could never fire and a routine supersession would red `required`
+- **AND** the mandated condition SHALL be one that does not run during a cancellation while still running
+  when a dependency failed or was skipped, so the context is still emitted on every pull request
+- **AND** the aggregation SHALL treat every conclusion GitHub may record for a job that did not run in a
+  cancelled run — including `skipped` — as non-terminal for the bounded grace and as a FAILURE afterwards,
+  since which spelling GitHub uses is not verifiable offline and no spelling may pass
 
 #### Scenario: An emitting job that cannot report the tier's result is rejected
 - **GIVEN** a registered workflow whose emitting job is unconditional but does not inspect the
@@ -477,6 +490,54 @@ its own path, or that invokes the workspace-root copy of the aggregator.
   checkout
 - **WHEN** the workflow-policy validation runs
 - **THEN** it FAILS, stating that the check would be defined by the thing it checks
+
+### Requirement: A tier the running tree cannot emit SHALL red immediately, naming the remedy
+
+Reading the registry from the base ref separates WHERE THE REGISTRY LIVES from WHERE THE EMITTER LIVES.
+When a tier registered on the base ref cannot be emitted by the tree the event actually ran — its workflow
+is absent, it has no pull-request trigger, its `types:` exclude this event, its `branches:` exclude this
+base, or no job carries the declared context as its name — the context can never arrive. The aggregation
+SHALL detect that state and FAIL immediately with a diagnostic naming both remedies (rebase onto the base
+branch, or the documented per-tier waiver for a deliberate rename or retirement). It SHALL NOT poll such a
+context to the aggregation deadline.
+
+Detection SHALL rest on provable properties only. Any inconclusive evidence — an unparseable workflow, a
+computed job name, a filter whose outcome depends on the diff, or an unavailable copy of the tree — SHALL
+yield no verdict and fall back to ordinary polling, because a false "cannot emit" is a false red.
+
+The verdict SHALL only ever be a failure. "The running tree cannot emit this tier, therefore pass" SHALL
+NOT exist, since the pull request controls that tree.
+
+The aggregation SHALL NOT bound the absence of a registered context by a short timer: a tier's emitting job
+depends on every other job in its workflow, so its check run legitimately does not exist for as long as the
+tier takes to run, and any such timer would red exactly the pull requests that genuinely mandate the tier.
+
+The workflow-policy validation SHALL reject an aggregating job that does not read the tree the event ran,
+or that reads it and does not pass it to the aggregation.
+
+#### Scenario: A pull request that renames a registered tier's context reds at once
+- **GIVEN** the base ref registers a tier by context name, and the tree the event ran emits a different
+  name for it
+- **WHEN** the aggregation runs
+- **THEN** it FAILS on the first poll, states that this is a migration state, and names both the rebase and
+  the per-tier waiver as remedies
+- **AND** no polling interval is consumed
+
+#### Scenario: A deliberate rename ships via the waiver
+- **GIVEN** the migration state above and the tier's waiver label applied
+- **WHEN** the aggregation runs
+- **THEN** it PASSES and records the waiver, because a registry change takes effect only once merged
+
+#### Scenario: Inconclusive evidence does not red a pull request
+- **GIVEN** the tree the event ran is unavailable, unparseable, or names the emitting job with an
+  expression that cannot be resolved
+- **WHEN** the aggregation runs
+- **THEN** no migration verdict is produced, the situation is announced, and the tier is polled normally
+
+#### Scenario: The detection cannot turn a failure green
+- **GIVEN** a registered tier that reported a failing conclusion, in a tree that also cannot emit it
+- **WHEN** the aggregation runs
+- **THEN** it FAILS
 
 ### Requirement: A green `required` is what releases `--auto`, and it implies every expected tier already passed
 

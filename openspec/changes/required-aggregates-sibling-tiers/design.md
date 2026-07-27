@@ -270,3 +270,55 @@ state gets a discriminating case that proves `required` FAILs when it should.
   already nearly failed.
 - **A `workflow_run`-triggered roll-up that reports a second context** — needs a second required context
   (branch-protection change) and inherits the never-fires trap for filtered producers.
+
+## What behaves differently at the MOMENT OF MERGE (review round 3)
+
+Everything above reasons about steady state. The deployment axis is separate, and it is the axis on which
+a CI change lands on everyone at once.
+
+**The split this change created.** Round 2 moved the registry and the aggregator to the pull request's
+**base ref** — necessary, or the check is defined by the thing it checks. But the *emitter* (the tier's
+gate job) comes from the tree the event ran. Those are two different trees, and at the instant this merges
+they can disagree: `main` starts registering `Flight tier gate` while some other tree does not emit it.
+
+Three things bound the blast radius, and they should be stated rather than assumed:
+
+1. **For a `pull_request` event GitHub takes workflow definitions from the MERGE COMMIT, not the head.**
+   An open pull request that does not touch `flight-ci.yml` therefore picks up the new tier — trigger,
+   classifier, gate job — on its next event, with no rebase. The "every open PR wedges" reading assumes
+   head-ref semantics and overstates the risk.
+2. **An unrebased head reds `pr-gate-core` first anyway.** `validate-workflows.rb` runs there against the
+   head tree and cannot find `.github/ci-gating-tiers.yml`, so `required` fails on the core result long
+   before any tier polling. Wrong-but-fast, and never an hour of silence.
+3. **The residual is real and is not the unrebased branch.** It is a pull request that RENAMES a registered
+   tier's context (or deletes its workflow) *and* updates the registry in the same commit. That head is
+   self-consistent, so `pr-gate-core` passes; `required` is evaluating the BASE registry, which still names
+   the old context; the context never appears; the aggregator polls for the full hour. Any follow-up change
+   to this mechanism has exactly that shape.
+
+**So detection is by construction, not by procedure** (`scripts/ci/gating_head_emitability.rb`): the
+aggregating job checks out `github.sha` — for a pull-request event the merge commit, i.e. precisely the
+tree GitHub took this run's workflow definitions from — sparse, read-only, no credentials, and only ever
+*parsed*. If the base registers a tier that tree provably cannot emit, `required` fails on the FIRST poll
+with a diagnostic naming both remedies (rebase, or `ci:waive:<tier-id>` for a deliberate rename). Losing
+that checkout is `continue-on-error`: it warns and falls back to ordinary polling, because a false red is
+also an outage.
+
+Two directions are deliberately closed:
+
+- **It can only ever fail.** A pull request controls that tree, so "cannot emit, therefore pass" would be a
+  one-line bypass: break your own tier workflow, go green.
+- **No short absent-deadline.** The obvious "red it in 15 minutes instead of 60" is wrong here: a tier's
+  gate job `needs:` every other job in its workflow, so GitHub does not create its check run until they
+  finish. Absence for tens of minutes is the NORMAL state of a tier that is genuinely running, and a timer
+  on it would red exactly the pull requests that mandate the tier. Speed comes from a provable property
+  evaluated immediately, not from a clock.
+
+**Other merge-time deltas, for the record.** (a) The `ci-gating-tiers.yml` registry only starts governing a
+pull request once it is on that PR's base — so this change governs nothing until it merges, and everything
+one event later. (b) The bootstrap fallback ("the base carries no registry") is reachable only until this
+merges; afterwards it is dead code retained for branches cut from an older base, and it cannot be used to
+escape a base registry that exists. (c) Re-running an OLD run replays the old event payload and the old
+workflow files, so it neither gains nor is broken by this change. (d) From the merge onward, a
+`cqlite-core/**` diff mandates the whole Flight tier — a real, intended increase in per-PR CI time that the
+registry's `mandate_paths` documents.
