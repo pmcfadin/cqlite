@@ -1231,7 +1231,9 @@ echo "== the tier-id shape check is locale- and bash-version-independent =="
 
 # The class as the aggregator actually spells it, read out of the source so the check
 # cannot drift from the code.
-SHAPE_PAT=$(grep -E "^ *''\|\[!" "$AGG_REAL" | head -n 1)
+# `[|]`, not `\|`: a backslash-escaped `|` inside an ERE is a GNU extension the
+# repo's portability lint (rightly) rejects — a bracket expression is POSIX.
+SHAPE_PAT=$(grep -E "^ *''[|]\[!" "$AGG_REAL" | head -n 1)
 SHAPE_PAT=${SHAPE_PAT%)*}
 SHAPE_PAT=${SHAPE_PAT#"${SHAPE_PAT%%[![:space:]]*}"}
 # The pre-fix form, kept as the harness's own control: if THIS does not misclassify in
