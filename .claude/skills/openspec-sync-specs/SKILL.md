@@ -15,11 +15,19 @@ This is an **agent-driven** operation - you will read delta specs and directly e
 
 **Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
 
+> **`AskUserQuestion` is ATTENDED-SESSIONS-ONLY (#2666).** Every prompt below assumes a human is watching.
+> In an **unattended** session (a worker/supervisor run) `AskUserQuestion` is FORBIDDEN — the session hangs
+> until the log-tail watchdog pages it. Unattended, **park** instead: post ONE structured question comment
+> on the issue (options + recommendation + default), add the `needs-decision` label, write a `blocked`
+> marker with `reason: needs-decision` (or `reason: seam1-approval` at Seam 1), and **EXIT**, releasing the
+> machine. Resume only on a strictly-newer owner reply (a durable `resume-dont-ask` label is a standing
+> Seam-1 seal that stands in for the answer).
+
 **Steps**
 
 1. **If no change name provided, prompt for selection**
 
-   Run `openspec list --json` to get available changes. Use the **AskUserQuestion tool** to let the user select.
+   Run `openspec list --json` to get available changes. Use the **AskUserQuestion tool** (attended only — unattended, PARK per the note above) to let the user select.
 
    Show changes that have delta specs (under `specs/` directory).
 
