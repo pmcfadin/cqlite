@@ -459,7 +459,9 @@ module GatingRegistry
 
   # Deliberately exact, not a substring test (issue #2910 P5).
   def unconditional_condition?(condition)
-    normalized = condition.to_s.gsub(/\s+/, "")
+    # GitHub expression FUNCTION NAMES are case-insensitive, so `Always()` is the
+    # same condition; rejecting it would be a false red.
+    normalized = condition.to_s.gsub(/\s+/, "").downcase
     # `${{ always() }}` and `always()` are the same condition; every `${{ }}`
     # wrapper strictly shortens the string, so this terminates.
     normalized = Regexp.last_match(1) while normalized.match(EXPRESSION_WRAPPER)

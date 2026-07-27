@@ -373,6 +373,17 @@ else
   bad "'\${{ always() }}' was rejected — that wedges a legitimate workflow: $OUT"
 fi
 
+# GitHub expression function names are case-insensitive, so this is the SAME
+# condition, not a near-miss to reject.
+DIR=$(new_case cased-always)
+sed "s|    if: always()|    if: Always()|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+if [ "$RC" -eq 0 ]; then
+  ok "'Always()' is accepted (expression functions are case-insensitive)"
+else
+  bad "'Always()' was rejected — a needless false red: $OUT"
+fi
+
 echo "== the emitting job must reflect the tier's result (no always-green gate) =="
 DIR=$(new_case blind-gate)
 cat >"$DIR/workflows/alpha.yml" <<'YAML'

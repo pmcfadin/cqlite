@@ -135,10 +135,17 @@ if [ -f "$WORKFLOW" ]; then
       body = Array(required["steps"]).map { |s| s.is_a?(Hash) ? [s["run"].to_s, (s["env"] || {}).values.join("\n")].join("\n") : "" }.join("\n")
       abort("`required` must fail when pr-gate-core did not succeed") unless body.include?("needs.pr-gate-core.result")
       abort("`required` must run the sibling-tier aggregator") unless body.include?("aggregate-required-tiers.sh")
+      # Issue #2910 P1: the aggregator re-reads the PR's CURRENT labels so a
+      # `ci:waive:<tier-id>` applied to a wedged PR takes effect. That read needs
+      # both the PR number and `pull-requests: read`; without them the break-glass
+      # silently degrades to the event payload snapshot.
+      abort("`required` must pass the PR number for the live label read") unless body.include?("pull_request.number")
+      perms = wf["permissions"]
+      abort("pr-gate.yml must grant `pull-requests: read` for the live label read") unless perms.is_a?(Hash) && perms["pull-requests"].to_s == "read"
 RUBY
     if [ "$?" -eq 0 ]; then
       ok "classify step always runs; heavy steps (incl. #2644 oracle) gated fail-closed on its output"
-      ok "required always reports, needs pr-gate-core, and aggregates sibling tiers (#2910)"
+      ok "required always reports, needs pr-gate-core, aggregates sibling tiers, and can re-read labels (#2910)"
     else
       bad "pr-gate.yml classify/gating contract not satisfied"
     fi
