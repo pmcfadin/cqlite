@@ -183,6 +183,14 @@ Rules for `pull_request`-triggered workflows:
 - The honoured-waiver annotation names WHO APPLIED THE LABEL, resolved from the
   PR's `labeled` events — not the actor of the run, who is usually someone else.
   An unresolvable attribution says so rather than naming anyone.
+- The waiver-evidence report states OBSERVATIONS, never a derived capability. It
+  claims that no waiver label is present only when the LIVE label read succeeded on
+  that poll; a read that fell back to the run-start event payload reports UNKNOWN
+  instead, because a label applied mid-run is invisible to that snapshot. `labeled`
+  events are immutable history, so evidence is counted only for a waiver label
+  actually IN FORCE, and an untrusted label read makes that count UNKNOWN rather
+  than zero. Whether such an event BINDS stays a per-tier verdict. Every one of
+  those states is reported and none of them changes the verdict.
 - A registered tier's context is satisfied ONLY by a check run GitHub Actions
   produced. A check-run name is global to the commit and anything with
   `checks:write` can mint one, so provenance (`app` + an Actions run URL) is
