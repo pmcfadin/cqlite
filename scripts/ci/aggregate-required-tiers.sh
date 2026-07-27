@@ -637,9 +637,10 @@ done <"$OBSERVATIONS"
 
 # ----------------------------------------- waiver evidence, always on record --
 # The state is stated for EVERY run, including the ordinary "nothing to waive"
-# one, so that the abnormal states read as abnormal instead of having to be
-# inferred from a silence that also covers a missing `issues: read` grant
-# (issue #3033). This block never changes the verdict.
+# one, so an abnormal state READS as abnormal instead of having to be inferred from
+# a silence the healthy case produces too (issue #3033). One line in the ordinary
+# case; the diagnosis only when there is something to diagnose. This block never
+# changes the verdict.
 emit ""
 case "$WAIVER_EVIDENCE_STATE" in
   none)
