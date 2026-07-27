@@ -70,7 +70,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      - run: 'true'
+      # The trust boundary (issue #2910 round 2): everything that decides this
+      # context is read from the BASE ref, never from the PR being gated.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base-gating
+      - env:
+          GATING_DIR: base-gating
+        run: bash "$GATING_DIR/scripts/ci/aggregate-required-tiers.sh"
 YAML
 
 cat >"$BASE/workflows/alpha.yml" <<'YAML'
@@ -591,6 +599,191 @@ echo "== the real repository tree is enrolled =="
 OUT=$(ruby "$REGISTRY_RB" policy --workflows-dir "$REPO_ROOT/.github/workflows" \
   --registry "$REPO_ROOT/.github/ci-gating-tiers.yml" 2>&1)
 if [ "$?" -eq 0 ]; then ok "the real .github tree satisfies the enrolment rule"; else bad "real tree unenrolled: $OUT"; fi
+
+# --------------------------------------------- round-2 structural rules -----
+# Each of these is the mechanised form of a hole found by review: the near-miss
+# is expressed as a synthetic tree, and the rule must NAME it.
+
+echo "== a tier gated on more than one classifier output is rejected =="
+DIR=$(new_case two-scopes)
+cat >"$DIR/workflows/alpha.yml" <<'YAML'
+name: Alpha tier
+on:
+  pull_request:
+    paths-ignore:
+      - '__required_ci_context_never_matches__'
+permissions:
+  contents: read
+concurrency:
+  group: alpha
+jobs:
+  classify:
+    name: Classify alpha
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo classify
+  work:
+    name: alpha work
+    needs: classify
+    if: needs.classify.outputs.run_cheap == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: echo cheap
+  heavy:
+    name: alpha heavy
+    needs: [classify, work]
+    if: needs.classify.outputs.run_full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: echo heavy
+  gate:
+    name: Alpha gate
+    needs: [classify, work, heavy]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          WORK_RESULT: ${{ needs.work.result }}
+          HEAVY_RESULT: ${{ needs.heavy.result }}
+        run: |
+          [ "$CLASSIFY_RESULT" = success ] || exit 1
+          case "$WORK_RESULT" in success|skipped) ;; *) exit 1 ;; esac
+          case "$HEAVY_RESULT" in success|skipped) ;; *) exit 1 ;; esac
+YAML
+run_policy "$DIR"
+expect_fail_named "two applicability outputs behind one context are rejected" "MORE THAN ONE classifier output"
+
+echo "== a documented mandate path the classifier never mentions is rejected =="
+DIR=$(new_case mandate-drift)
+cat >>"$DIR/registry.yml" <<'YAML'
+YAML
+python3 - "$DIR/registry.yml" <<'PY' 2>/dev/null || ruby -e '
+  path = ARGV[0]
+  text = File.read(path)
+  text = text.sub("    context: Alpha gate\n", "    context: Alpha gate\n    mandate_paths:\n      - cqlite-core/**\n")
+  File.write(path, text)
+' "$DIR/registry.yml"
+import sys
+path = sys.argv[1]
+text = open(path).read()
+text = text.replace("    context: Alpha gate\n",
+                    "    context: Alpha gate\n    mandate_paths:\n      - cqlite-core/**\n")
+open(path, "w").write(text)
+PY
+run_policy "$DIR"
+expect_fail_named "a mandate_paths entry absent from the workflow is rejected" "drifted"
+
+echo "== the aggregator must not cancel and restart on every label mutation =="
+DIR=$(new_case label-churn)
+python3 - "$DIR/workflows/pr-gate.yml" <<'PY' 2>/dev/null || ruby -e '
+  path = ARGV[0]
+  text = File.read(path)
+  File.write(path, text.sub("  group: pr-gate\n", "  group: pr-gate\n  cancel-in-progress: true\n"))
+' "$DIR/workflows/pr-gate.yml"
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text.replace("  group: pr-gate\n", "  group: pr-gate\n  cancel-in-progress: true\n"))
+PY
+run_policy "$DIR"
+expect_fail_named "label events plus cancel-in-progress: true is rejected" "cancel-in-progress"
+
+echo "== the aggregator must evaluate the mechanism from the BASE ref =="
+DIR=$(new_case head-evaluated)
+python3 - "$DIR/workflows/pr-gate.yml" <<'PY' 2>/dev/null || ruby -e '
+  path = ARGV[0]
+  text = File.read(path)
+  text = text.sub(/      # The trust boundary.*\n(?:.*\n)*?      - env:\n          GATING_DIR: base-gating\n      run/, "      - run")
+  File.write(path, text)
+' "$DIR/workflows/pr-gate.yml"
+import sys
+path = sys.argv[1]
+lines = open(path).read().splitlines(True)
+kept = [line for line in lines
+        if "base-gating" not in line
+        and "actions/checkout" not in line
+        and not line.strip().startswith(("# The trust boundary", "# context is read", "with:", "ref:", "path:", "env:"))]
+text = "".join(kept).replace('run: bash "$GATING_DIR/scripts/ci/aggregate-required-tiers.sh"',
+                             "run: bash scripts/ci/aggregate-required-tiers.sh")
+open(path, "w").write(text)
+PY
+run_policy "$DIR"
+expect_fail_named "an aggregator reading its own PR's copy is rejected" "BASE ref"
+
+# ---------------------------------------- the real tree, round-2 properties --
+# The rules above are structural; these assert the actual shipped configuration,
+# because a rule that is satisfied by a DIFFERENT shape than the one we ship
+# proves nothing about this repository.
+
+echo "== the real pr-gate.yml does not restart the core on a label mutation =="
+PR_GATE="$REPO_ROOT/.github/workflows/pr-gate.yml"
+CORE_IF=$(ruby -ryaml -e '
+  wf = YAML.load_file(ARGV[0], aliases: true)
+  print wf.dig("jobs", "pr-gate-core", "if").to_s
+' "$PR_GATE")
+if contains "$CORE_IF" "labeled" && contains "$CORE_IF" "unlabeled"; then
+  ok "pr-gate-core is skipped for label events (no 30-minute restart)"
+else
+  bad "pr-gate-core still runs on label events: if='$CORE_IF'"
+fi
+CANCEL=$(ruby -ryaml -e '
+  wf = YAML.load_file(ARGV[0], aliases: true)
+  print wf.dig("concurrency", "cancel-in-progress").to_s
+' "$PR_GATE")
+if [ "$CANCEL" != "true" ] && contains "$CANCEL" "labeled"; then
+  ok "cancellation is conditional on the event action, so label runs queue instead of cancelling"
+else
+  bad "pr-gate.yml cancel-in-progress is '$CANCEL'; a label mutation would cancel the in-flight gate"
+fi
+
+echo "== the real Flight tier mandates the direction Flight breaks from =="
+FLIGHT_WF="$REPO_ROOT/.github/workflows/flight-ci.yml"
+MANDATE_RE=$(sed -n "s/^ *mandate_regex='\(.*\)'$/\1/p" "$FLIGHT_WF")
+if [ -n "$MANDATE_RE" ]; then
+  ok "the Flight classifier exposes a single extractable mandate regex"
+else
+  bad "could not extract mandate_regex from $FLIGHT_WF"
+fi
+for mandated in cqlite-core/src/storage/sstable/reader.rs cqlite-flight/tests/point_read_corpus_parity_test.rs \
+                Cargo.toml Cargo.lock rust-toolchain.toml test-data/datasets/x.jsonl \
+                .github/actions/setup-rust-ci/action.yml .github/workflows/flight-ci.yml; do
+  if printf '%s\n' "$mandated" | grep -Eq "$MANDATE_RE"; then
+    ok "a diff touching $mandated mandates the Flight tier"
+  else
+    bad "$mandated does NOT mandate the Flight tier — the #2906 class is open for it"
+  fi
+done
+for unmandated in docs/README.md cqlite-cli/src/main.rs bindings/python/src/lib.rs; do
+  if printf '%s\n' "$unmandated" | grep -Eq "$MANDATE_RE"; then
+    bad "$unmandated mandates the Flight tier; the mandate is indiscriminate, so the cases above prove nothing"
+  else
+    ok "a diff touching $unmandated does not mandate the Flight tier"
+  fi
+done
+# The mandate must reach the job that owns the END-TO-END tests, not just the
+# cheap one — that gap is exactly what round 2 found.
+FULL_IF=$(ruby -ryaml -e '
+  wf = YAML.load_file(ARGV[0], aliases: true)
+  jobs = wf["jobs"]
+  full = jobs.find { |_, job| Array(job["steps"]).any? { |s| s["run"].to_s.match?(/cargo test --package cqlite-flight\s*$/) } }
+  print full ? full[1]["if"].to_s : "(no full-package test job)"
+' "$FLIGHT_WF")
+TEST_IF=$(ruby -ryaml -e '
+  wf = YAML.load_file(ARGV[0], aliases: true)
+  jobs = wf["jobs"]
+  cheap = jobs.find { |_, job| Array(job["steps"]).any? { |s| s["run"].to_s.include?("cargo test --package cqlite-flight --lib") } }
+  print cheap ? cheap[1]["if"].to_s : "(no lib test job)"
+' "$FLIGHT_WF")
+if [ -n "$FULL_IF" ] && [ "$FULL_IF" = "$TEST_IF" ]; then
+  ok "the full-package (end-to-end) job and the --lib job share one applicability verdict: $FULL_IF"
+else
+  bad "the end-to-end job's condition ('$FULL_IF') differs from the --lib job's ('$TEST_IF'); a diff can reach one and not the other"
+fi
 
 # ------------------------------------------------------------- the wiring ---
 # The rule only bites if validate-workflows.rb actually calls it, because THAT is

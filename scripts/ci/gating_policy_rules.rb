@@ -193,7 +193,9 @@ module GatingRegistry
     workflows = load_workflows(workflows_dir)
     errors.concat(enrolment_errors(registry, registry_path, workflows, workflows_dir))
     errors.concat(aggregator_trigger_errors(registry, registry_path, workflows))
-    errors.concat(registered_workflow_errors(registry, registry_path, workflows))
+    errors.concat(aggregator_concurrency_errors(registry, registry_path, workflows))
+    errors.concat(aggregator_trust_boundary_errors(registry, registry_path, workflows))
+    errors.concat(registered_workflow_errors(registry, registry_path, workflows, workflows_dir))
     errors.concat(deadline_errors(registry, registry_path, workflows, workflows_dir))
     errors
   end
@@ -291,8 +293,85 @@ module GatingRegistry
      "replays the original event payload), making the documented break-glass unreachable"]
   end
 
+  # THE LABEL-CHURN RULE (issue #2910 round 2). Subscribing the aggregator to
+  # `labeled`/`unlabeled` (above) is what makes the break-glass reachable — but
+  # combined with a blanket `cancel-in-progress: true` it also means EVERY label
+  # mutation (`ci:perf`, a board-mirror label, `needs-decision`, or the waiver
+  # itself) cancels the in-flight run and restarts the whole gate. That turns
+  # applying the break-glass into a full re-run of the heaviest job in the repo,
+  # which is a worse tax than the problem the subscription solved. So when the
+  # aggregator observes label events, `cancel-in-progress` must NOT be the
+  # unconditional literal `true`.
+  def aggregator_concurrency_errors(registry, path, workflows)
+    name = registry.dig("aggregator", "workflow").to_s
+    workflow = workflows[name]
+    return [] unless workflow.is_a?(Hash)
+
+    types = Array(pr_types(workflow, "pull_request")) + Array(pr_types(workflow, "pull_request_target"))
+    return [] if (types & %w[labeled unlabeled]).empty?
+
+    concurrency = workflow["concurrency"]
+    cancel = concurrency.is_a?(Hash) ? concurrency["cancel-in-progress"] : nil
+    return [] unless cancel == true
+
+    ["#{path}: aggregator workflow #{name} subscribes to label events AND sets " \
+     "`concurrency.cancel-in-progress: true`; every label mutation would then cancel and RESTART the " \
+     "in-flight gate, so applying `ci:waive:<tier-id>` (or any routine label) costs a full re-run. Make " \
+     "cancellation conditional on the event action so label runs queue instead of cancelling"]
+  end
+
+  AGGREGATOR_SCRIPT = "scripts/ci/aggregate-required-tiers.sh"
+  # The script invoked from the WORKSPACE ROOT, i.e. the pull request's own
+  # checkout: a bare `bash scripts/ci/…`, not `"$DIR/scripts/ci/…"`.
+  ROOT_INVOCATION = %r{(?:\A|[\s"'(=])scripts/ci/aggregate-required-tiers\.sh}
+
+  # THE TRUST BOUNDARY (issue #2910 round 2). `required` is the only
+  # branch-protection context, and it was reading the aggregator AND the registry
+  # from the pull request's own checkout — so the check was defined by the thing
+  # it checks. A PR could gut the aggregator, or move its own tier from `tiers:`
+  # to `exempt:` (the enrolment rule accepts any reason ≥ 10 chars plus an issue
+  # ref), and go green on instructions it wrote. Human review is a weak backstop
+  # for the one mechanism whose purpose is not relying on a human noticing.
+  #
+  # So: the aggregating job MUST check out the base ref into its own path, and
+  # MUST NOT invoke the workspace-root (head) copy of the aggregator.
+  def aggregator_trust_boundary_errors(registry, path, workflows)
+    name = registry.dig("aggregator", "workflow").to_s
+    workflow = workflows[name]
+    return [] unless workflow.is_a?(Hash)
+
+    job = workflow.dig("jobs", registry.dig("aggregator", "job").to_s)
+    return [] unless job.is_a?(Hash)
+
+    steps = Array(job["steps"]).select { |step| step.is_a?(Hash) }
+    errors = []
+    unless steps.any? { |step| base_ref_checkout?(step) }
+      errors << "#{path}: aggregator job in #{name} never checks out the pull request's BASE ref into a " \
+                "separate `path:`; it would then evaluate the registry and the aggregator FROM THE PR " \
+                "being gated, which can neuter its own required check"
+    end
+    steps.each_with_index do |step, index|
+      run = step["run"].to_s
+      next unless run.include?(AGGREGATOR_SCRIPT) && run.match?(ROOT_INVOCATION)
+
+      errors << "#{path}: aggregator job in #{name} step #{index + 1} runs the WORKSPACE-ROOT copy of " \
+                "#{AGGREGATOR_SCRIPT} (the pull request's own); invoke it from the base-ref checkout path " \
+                "so a PR cannot rewrite the check that gates it"
+    end
+    errors
+  end
+
+  def base_ref_checkout?(step)
+    return false unless step["uses"].to_s.start_with?("actions/checkout")
+
+    with = step["with"]
+    return false unless with.is_a?(Hash)
+
+    with["ref"].to_s.include?("base") && !with["path"].to_s.strip.empty?
+  end
+
   # Structural rules that make "absent" unambiguous for a REGISTERED tier.
-  def registered_workflow_errors(registry, path, workflows)
+  def registered_workflow_errors(registry, path, workflows, workflows_dir)
     observed = aggregator_observed_types(registry, workflows)
     errors = []
     tiers(registry).each do |tier|
@@ -304,8 +383,72 @@ module GatingRegistry
       errors.concat(trigger_filter_errors(workflow, label, observed))
       errors.concat(emitting_job_errors(workflow, tier, label))
       errors.concat(context_uniqueness_errors(workflows, tier, label, name))
+      errors.concat(applicability_scope_errors(workflow, label))
+      errors.concat(mandate_path_errors(tier, label, workflow_source(workflows_dir, name)))
     end
     errors
+  end
+
+  def workflow_source(workflows_dir, name)
+    file = File.join(workflows_dir.to_s, name.to_s)
+    File.file?(file) ? File.read(file) : nil
+  end
+
+  # A `needs.<job>.outputs.<name>` reference inside a job-level `if:` — i.e. one
+  # job's applicability being decided by another job's verdict.
+  APPLICABILITY_OUTPUT = /needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)/
+
+  # ONE APPLICABILITY VERDICT PER TIER (issue #2910 round 2). This is the rule
+  # that would have caught the near-miss: flight-ci.yml published TWO classifier
+  # outputs, `run_tier` (fmt/clippy/`--lib`) and `run_full` (the ~30 end-to-end
+  # tests), governed by two overlapping path regexes. A `cqlite-core/**`-only
+  # diff — the exact direction #2821/#2825 broke Flight from — matched only the
+  # narrower one, so the end-to-end tests never ran and `Flight tier gate` still
+  # reported success. Two predicates behind one context means the weaker one can
+  # silently win. A tier with genuinely distinct scopes must be registered as two
+  # tiers with two contexts, each aggregated on its own account.
+  def applicability_scope_errors(workflow, label)
+    jobs = workflow["jobs"]
+    return [] unless jobs.is_a?(Hash)
+
+    refs = Hash.new { |hash, key| hash[key] = [] }
+    jobs.each do |job_id, job|
+      next unless job.is_a?(Hash)
+
+      job["if"].to_s.scan(APPLICABILITY_OUTPUT) do |producer, output|
+        refs["needs.#{producer}.outputs.#{output}"] << job_id.to_s
+      end
+    end
+    return [] if refs.size <= 1
+
+    listed = refs.keys.sort.map { |ref| "#{ref} (#{refs[ref].sort.join(', ')})" }.join("; ")
+    ["#{label} gates its jobs on MORE THAN ONE classifier output — #{listed}. A registered tier must have " \
+     "exactly one applicability verdict behind its context, or a diff can satisfy the narrower predicate " \
+     "and skip the work the tier exists to run while the context still reports success. Split genuinely " \
+     "distinct scopes into separate registered tiers, each emitting its own context"]
+  end
+
+  # ANTI-DRIFT for the registry's documented mandate (issue #2910 round 2).
+  # `mandate_paths` is prose, and prose that has drifted from the mechanism is
+  # worse than none — a reader (or reviewer) checks the registry and concludes the
+  # tier covers a path it does not. This proves the checkable half: every
+  # documented path is at least MENTIONED by the tier's own workflow, so widening
+  # the doc without widening the classifier fails the gate. Backslashes are
+  # stripped from the haystack first so a regex-escaped `Cargo\.toml` matches the
+  # documented `Cargo.toml`. It deliberately does NOT try to prove which job a
+  # mandated path routes to — that is applicability_scope_errors' job.
+  def mandate_path_errors(tier, label, source)
+    return [] if source.nil?
+
+    haystack = source.delete("\\")
+    Array(tier["mandate_paths"]).filter_map do |declared|
+      needle = declared.to_s.sub(/\*+\z/, "")
+      next if needle.strip.empty? || haystack.include?(needle)
+
+      "#{label} documents `mandate_paths` entry `#{declared}`, but its workflow never mentions " \
+        "`#{needle}`; the registry's documented mandate and the tier's classifier predicate have drifted " \
+        "(a documented path the classifier cannot match is coverage that does not exist)"
+    end
   end
 
   # A check run is identified by NAME ALONE, across the whole commit — GitHub does

@@ -581,6 +581,146 @@ OUT=$(bash "$AGG_REAL" --registry "$WORK/nonexistent-registry.yml" \
   --check-runs-cmd "cat $(runs_file all-pass)" --self-jobs-cmd "cat $WORK/self-ids.txt" 2>&1)
 if [ "$?" -ne 0 ]; then ok "a missing registry fails closed"; else bad "missing registry passed"; fi
 
+# --------------------------------- the gate's own compute job (round 2) -----
+# A label mutation must not restart the 30-minute core, so a label-triggered run
+# skips it and `required` reuses the result already RECORDED for the same head
+# sha. Skipping the WORK must never skip the CHECK: every way that reuse could
+# manufacture a green core is a case here.
+
+cat >"$(runs_file core-recorded-success)" <<'JSON'
+{"check_runs":[
+ {"id":8000,"name":"pr-gate-core","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/700/job/8000"},
+ {"id":9001,"name":"pr-gate-core","status":"completed","conclusion":"skipped",
+  "details_url":"https://github.com/o/r/actions/runs/777/job/9001"}
+]}
+JSON
+
+cat >"$(runs_file core-recorded-failure)" <<'JSON'
+{"check_runs":[
+ {"id":8000,"name":"pr-gate-core","status":"completed","conclusion":"failure",
+  "details_url":"https://github.com/o/r/actions/runs/700/job/8000"},
+ {"id":9001,"name":"pr-gate-core","status":"completed","conclusion":"skipped",
+  "details_url":"https://github.com/o/r/actions/runs/777/job/9001"}
+]}
+JSON
+
+# THE NEAR-MISS: the ONLY `pr-gate-core` check run on the head is the one THIS
+# label run skipped. It has the highest id, so without run-identity exclusion it
+# would be read as the answer — and `skipped` is not `success`, but a future
+# refactor that treated "found a check run" as sufficient would go green here.
+cat >"$(runs_file core-only-self)" <<'JSON'
+{"check_runs":[
+ {"id":9001,"name":"pr-gate-core","status":"completed","conclusion":"skipped",
+  "details_url":"https://github.com/o/r/actions/runs/777/job/9001"}
+]}
+JSON
+
+cat >"$(runs_file core-absent)" <<'JSON'
+{"check_runs":[
+ {"id":7000,"name":"some other check","status":"completed","conclusion":"success",
+  "details_url":"https://github.com/o/r/actions/runs/700/job/7000"}
+]}
+JSON
+
+echo "== the gate's own compute job is never masked (#2910 round 2) =="
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --core-result success --event-action synchronize
+if [ "$RC" -eq 0 ]; then ok "a successful core passes through"; else bad "successful core rejected (rc=$RC): $OUT"; fi
+
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --core-result failure --event-action synchronize
+if [ "$RC" -ne 0 ] && contains "$OUT" "pr-gate-core"; then
+  ok "a failed core fails required regardless of tier state"
+else
+  bad "a failed core did not fail required (rc=$RC): $OUT"
+fi
+
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --core-result skipped --event-action synchronize
+if [ "$RC" -ne 0 ] && contains "$OUT" "synchronize"; then
+  ok "a core skipped on a NON-label event fails closed (only a label mutation may reuse)"
+else
+  bad "a core skipped on a synchronize event was tolerated (rc=$RC): $OUT"
+fi
+
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --core-result skipped --event-action labeled --core-runs-cmd "cat $(runs_file core-recorded-success)"
+if [ "$RC" -eq 0 ] && contains "$OUT" "recorded for this head sha"; then
+  ok "a label event reuses the core result recorded for the same head sha"
+else
+  bad "a label event could not reuse the recorded core (rc=$RC): $OUT"
+fi
+
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --core-result skipped --event-action labeled --core-runs-cmd "cat $(runs_file core-recorded-failure)"
+if [ "$RC" -ne 0 ]; then ok "a label event cannot reuse a FAILED core"; else bad "a label event reused a failed core"; fi
+
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --core-result skipped --event-action labeled --core-runs-cmd "cat $(runs_file core-absent)"
+if [ "$RC" -ne 0 ]; then ok "a label event with NO recorded core fails closed"; else bad "an absent recorded core passed"; fi
+
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --core-result skipped --event-action labeled --core-runs-cmd "cat $(runs_file core-only-self)"
+if [ "$RC" -ne 0 ]; then
+  ok "the label run's OWN skipped core check run cannot stand in for the real one"
+else
+  bad "the run's own skipped core was accepted as the recorded result"
+fi
+
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --core-result skipped --event-action labeled --core-runs-cmd "false"
+if [ "$RC" -ne 0 ]; then ok "an unreadable core lookup fails closed"; else bad "an unreadable core lookup passed"; fi
+
+# The break-glass, end to end, on the event that applies it: a waiver label on a
+# tier that never reported, during a run whose core was NOT re-executed.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --core-result skipped --event-action labeled \
+  --core-runs-cmd "cat $(runs_file core-recorded-success)" --labels "ci:waive:beta" --actor tester
+if [ "$RC" -eq 0 ] && contains "$OUT" "WAIVED"; then
+  ok "a waiver applied by label takes effect in a run that did not re-execute the core"
+else
+  bad "the label-event waiver path did not clear (rc=$RC): $OUT"
+fi
+
+# ------------------------- the BASE ref's registry governs (round 2) --------
+# A PR can edit `.github/ci-gating-tiers.yml`, so `required` reads the registry
+# (and this script, and gating_registry.rb) from the pull request's BASE ref. The
+# pair below is the discrimination: the SAME check-run evidence passes under the
+# PR's edited registry and fails under the base one.
+echo "== a PR moving its own tier to exempt: is still gated by the base registry =="
+cat >"$WORK/registry-head-exempts-beta.yml" <<'YAML'
+version: 1
+aggregator:
+  workflow: pr-gate.yml
+  job: required
+defaults:
+  wait_minutes: 60
+tiers:
+  - id: alpha
+    workflow: alpha.yml
+    context: Alpha gate
+exempt:
+  - workflow: beta.yml
+    reason: Not merge-gating for this pull request, honest.
+    issue: "#2910"
+YAML
+OUT=$(bash "$AGG_REAL" --registry "$WORK/registry-head-exempts-beta.yml" \
+  --check-runs-cmd "cat $(runs_file one-absent)" --self-jobs-cmd "cat $WORK/self-ids.txt" \
+  --deadline-epoch "$EXPIRED" --poll-attempts 1 --sleep-cmd "$WORK/fake-sleep.sh" 2>&1)
+RC=$?
+if [ "$RC" -eq 0 ]; then
+  ok "the PR's edited registry would have let the absent tier through (the attack works, unmitigated)"
+else
+  bad "the head-registry control case did not pass, so the base-registry case proves nothing: $OUT"
+fi
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1
+if [ "$RC" -ne 0 ] && contains "$OUT" "beta"; then
+  ok "evaluated against the BASE registry the same evidence still fails on the absent tier"
+else
+  bad "the base registry did not gate the absent tier (rc=$RC): $OUT"
+fi
+
 # ------------------------------------------------- non-vacuity (#2910 7.4) --
 # Every guard above must be PROVABLY able to fail. Substituting an always-exit-0
 # aggregator has to make the failing cases stop failing; if it does not, the
@@ -600,6 +740,13 @@ count_failing_verdicts() {
   [ "$RC" -ne 0 ] && n=$((n + 1))
   invoke "false" "$WORK/self-ids.txt" "$FUTURE" 20 --max-fetch-failures 2
   [ "$RC" -ne 0 ] && n=$((n + 1))
+  # round 2: the gate's own compute job, in both of its refusal shapes.
+  invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 1 \
+    --core-result skipped --event-action synchronize
+  [ "$RC" -ne 0 ] && n=$((n + 1))
+  invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 1 \
+    --core-result skipped --event-action labeled --core-runs-cmd "cat $(runs_file core-only-self)"
+  [ "$RC" -ne 0 ] && n=$((n + 1))
   printf '%s' "$n"
 }
 
@@ -609,10 +756,10 @@ REAL_FAILURES=$(count_failing_verdicts)
 AGG="$WORK/stub-aggregator.sh"
 STUB_FAILURES=$(count_failing_verdicts)
 AGG="$AGG_REAL"
-if [ "$REAL_FAILURES" -eq 6 ]; then
-  ok "the real aggregator fails all 6 discriminating states"
+if [ "$REAL_FAILURES" -eq 8 ]; then
+  ok "the real aggregator fails all 8 discriminating states"
 else
-  bad "the real aggregator failed only $REAL_FAILURES/6 discriminating states"
+  bad "the real aggregator failed only $REAL_FAILURES/8 discriminating states"
 fi
 if [ "$STUB_FAILURES" -eq 0 ]; then
   ok "the always-exit-0 stub fails none of them, so this suite would go RED under it"
