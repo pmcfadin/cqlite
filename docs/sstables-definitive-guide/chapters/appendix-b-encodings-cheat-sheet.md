@@ -237,7 +237,7 @@ Cell flags appear at the start of each cell and control cell-level metadata.
 | 1 | `IS_EXPIRING` | `0x02` | TTL fields follow (expiring cell) |
 | 2 | `HAS_EMPTY_VALUE` | `0x04` | Zero-length value (not NULL) |
 | 3 | `USE_ROW_TIMESTAMP` | `0x08` | Use row-level timestamp (no cell timestamp) |
-| 4 | `USE_ROW_TTL` | `0x10` | Use row-level TTL (no cell TTL) |
+| 4 | `USE_ROW_TTL` | `0x10` | Inherit row-level TTL **and** local_deletion_time (neither field is written) |
 
 **Common flag combinations**:
 - `0x08`: Normal write (use row timestamp)
@@ -256,7 +256,34 @@ Cell flags appear at the start of each cell and control cell-level metadata.
 - **Empty strings**: `HAS_EMPTY_VALUE` (`0x04`) flag set and **no** value length and no value bytes —
   the flag replaces the length VInt, it does not precede a `0x00` (`Cell.java:277-278`, `:303-304`;
   reader `:310`). Distinct from NULL.
-- **NULL values**: NOT written as cells - represented by absence in column bitmap
+- **NULL values**: NOT written as cells - represented by absence in column bitmap. Caveat for
+  **non-frozen collections**: a collection emptied or overwritten-with-`{}` reads back as NULL but is
+  **present** in the subset, carrying a complex deletion and zero element cells — absence in the
+  bitmap is not the only on-disk shape that surfaces as NULL. See Chapter 5, "Empty Collections".
+
+**TTL field range — Cassandra's bound, and the reader-side cast hazard**:
+
+On disk, the cell TTL is an **unsigned VInt32 delta** over `stats.minTTL`:
+`SerializationHeader.writeTTL` emits `writeUnsignedVInt32(ttl - stats.minTTL)` and `readTTL` adds
+`stats.minTTL` back (`SerializationHeader.java:175-178`, `:196-199`). Cassandra itself holds TTL in a
+signed `int`, and enforces the range at request validation, not at parse time:
+`Attributes.MAX_TTL = 20 * 365 * 24 * 60 * 60` — 20 years (20 × 365 days), `630,720,000` s
+(`Attributes.java:47`) — with `ttl < 0` and `ttl > MAX_TTL` both rejected as
+`InvalidRequestException` (`:135-139`). At *read* time the only check is
+`if (ttl < 0) throw new IOException("Invalid TTL: " + ttl)` (`Cell.java:345-346`). So a
+well-formed Cassandra 5.0 SSTable can never carry a TTL above `MAX_TTL`, which is comfortably
+below `i32::MAX` (`2,147,483,647` s ≈ 68 years).
+
+*Reader-implementation note (CQLite, not a format rule)*: a reader that decodes the delta into a
+`u32`/`u64` and then does a bare `as i32` would wrap an out-of-range value to a **negative** TTL —
+the one thing Cassandra's own reader rejects outright. CQLite therefore saturates instead of
+wrapping, on both cell paths:
+`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs:46-53`
+(`ttl.min(i32::MAX as u32) as i32`, collection-element path, issue #2498) and
+`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/cell_value.rs:165`
+(`abs_ttl.min(i32::MAX as i64) as i32`, scalar path, issue #2173). No real Cassandra data reaches
+this clamp; it exists so a corrupt or adversarial file yields a saturated positive TTL rather than a
+sign-flipped one.
 
 **Example**:
 ```

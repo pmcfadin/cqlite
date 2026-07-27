@@ -119,6 +119,60 @@ Endianness:
 - **Frozen** (`frozen<list<...>>`): Single-cell storage, entire collection serialized as one blob
 - **Non-frozen** (`list<...>`): Multi-cell storage, each element stored as separate cell
 
+#### Column Ordering: `SerializationHeader` Is the Positional Key
+
+A row body carries **no column names**. Cells are written positionally, and both the cell
+sequence and the missing-columns bitmap index into the column lists recorded in the
+`SerializationHeader` (`Statistics.db`, see Chapter 7). The header order is therefore the
+*only* authority for which cell is which — there is nothing in `Data.db` to fall back on, and
+nothing may be inferred from the bytes (no-heuristics mandate, issue #28).
+
+**The order.** Static columns and regular columns are two independent lists. Within each list,
+Cassandra sorts by `ColumnMetadata.comparisonOrder` — a packed `long`
+(`ColumnMetadata.java:107-116`):
+
+```
+(kind.ordinal() << 61) | (isComplex ? 1L << 60 : 0) | (position << 48) | (name.prefixComparison >>> 16)
+```
+
+The `isComplex` bit sits **above** every name bit, so within one list **all complex (multi-cell)
+columns sort after all simple ones**, and only then does the column name break ties (by
+`ColumnIdentifier.compareTo` → `prefixComparison`, then unsigned byte comparison of the name
+bytes, `ColumnIdentifier.java:90-106`, `:217-225`). Note this partitions the whole list by
+complexity — it is not a per-name adjacency rule: a complex `a_map` still sorts after a simple
+`z_text`. "Complex" means non-frozen collection or non-frozen UDT: `ColumnMetadata.isComplex()` is
+`cellPathComparator != null` (`:418-420`), and that comparator is built only for a non-primary-key
+column whose `type.isMultiCell()` (`makeCellPathComparator`, `:200-207`). A `frozen<…>` column is
+simple.
+
+**Why the two must agree.** The chain is:
+`RegularAndStaticColumns.Builder` builds each list as a BTree in `naturalOrder()`
+(`RegularAndStaticColumns.java:156-172`) → `SerializationHeader.toComponent()` copies that order
+into insertion-ordered `LinkedHashMap`s for the static/regular columns
+(`SerializationHeader.java:250-259`) → the header serializer writes the names in that map order →
+`UnfilteredSerializer.serializeRowBody` walks the row's columns in the same order
+(`UnfilteredSerializer.java:240-259`) and `Columns.Serializer.serializeSubset` numbers bitmap bits
+by that same index (`Columns.java:503-531`). A reader replays it in reverse (`deserializeRowBody`,
+`UnfilteredSerializer.java:564+`, subset at `:606`).
+
+A writer whose header order and cell order disagree produces an SSTable that misdecodes without
+any error: bitmap bit *i* is attributed to the wrong column, a complex column can be dropped, and
+the cells after it are read with the wrong type and framing (complex cells carry a cell path,
+simple cells do not) — desynchronizing the rest of the row.
+
+Authority: `org.apache.cassandra.schema.ColumnMetadata` (`comparisonOrder`, `compareTo`),
+`org.apache.cassandra.db.RegularAndStaticColumns`, `org.apache.cassandra.db.SerializationHeader`,
+`org.apache.cassandra.db.Columns.Serializer`, `org.apache.cassandra.db.rows.UnfilteredSerializer`.
+
+CQLite implements the same key as `column_order_key(column) -> (is_complex, name)` in
+`cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs:9-11`, and applies it to **both**
+sides: the header lists at
+`cqlite-core/src/storage/sstable/writer/stats_writer/serialization_header.rs:159` (static) and
+`:186` (regular), and the cell stream from the same key. Regression guard:
+`cqlite-core/tests/issue_2035_collection_roundtrip.rs` (issue #2035 — `map<text,int>` + `set<int>`
+plus a trailing simple column round-trip; the pre-fix writer sorted the header by name only, so the
+complex columns landed in the wrong positions).
+
 #### Frozen Collection Serialization
 
 Frozen collections are stored as a single cell with the entire collection serialized as a binary blob.
@@ -189,6 +243,35 @@ Field order and presence are authoritative in `Cell.Serializer.serialize` (`Cell
 layout comment at `:242-259`) — note local deletion time comes **before** TTL. The complex column is
 preceded by an unsigned-VInt cell count (`UnfilteredSerializer.java:277`) and, when
 `HAS_COMPLEX_DELETION` is set, a deletion time.
+
+**`USE_ROW_TTL` (`0x10`): element expiry inherited from row liveness.** Collection element cells
+use the *same* `Cell.Serializer` as simple cells, so they get the same TTL-elision optimization —
+and readers of complex columns must implement it. The writer sets the flag only when **all four**
+conditions hold (`Cell.java:275`):
+
+1. the cell is expiring (`cell.isExpiring()`, which also sets `IS_EXPIRING`, `0x02`),
+2. the row's primary-key liveness is itself expiring (`rowLiveness.isExpiring()`),
+3. `cell.ttl() == rowLiveness.ttl()`, and
+4. `cell.localDeletionTime() == rowLiveness.localExpirationTime()`.
+
+When set, **both** the `local_deletion_time` and the `ttl` VInts are omitted from the cell
+(`Cell.java:295-298`) and the reader takes both values from the row's TTL fields
+(`Cell.java:318-322`). So it is not a "may" — given identical row and cell expiry the flag is
+mandatory, and `IS_EXPIRING` is set alongside it (combined byte `0x12`, or `0x1a` with
+`USE_ROW_TIMESTAMP`).
+
+In practice a single `INSERT … USING TTL n` writing a whole non-frozen collection gives every
+element the row's TTL and expiry, so every element cell carries `USE_ROW_TTL`. A later per-element
+update with a different TTL (or into a row with no row-level TTL) fails condition 2 or 3 and writes
+explicit `local_deletion_time` + `ttl` VInts with `USE_ROW_TTL` clear. A reader must therefore be
+prepared for a **mix** of inherited and explicit expiry within one complex column.
+
+Authority: `org.apache.cassandra.db.rows.Cell.Serializer` (`serialize`, `deserialize`).
+CQLite implements the element-level side in
+`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs:22-132`
+(`ElementExpiryShape` / `ExpiryHomogeneity` — a tri-state tracker that folds per-element
+inherited-vs-explicit expiry back into a column-level answer), with the round-trip pinned by
+`cqlite-core/tests/issue_2038_collection_ttl_expiring_cell.rs` (issue #2038).
 
 **The path is always unsigned-VInt-length-prefixed. The value is unsigned-VInt-length-prefixed *iff*
 `HAS_EMPTY_VALUE` (`0x04`) is clear — and when present it is length-prefixed even for a fixed-width
@@ -331,7 +414,10 @@ cell flags (0x08 USE_ROW_TIMESTAMP | 0x04 HAS_EMPTY_VALUE) — no value length, 
 ```
 A reader that unconditionally reads a value-length VInt here consumes the next cell's flag byte and
 desynchronizes. Note this is distinct from a NULL: a NULL map *value* is not expressible in CQL, and a
-NULL top-level column is represented by absence from the column subset, never by a cell.
+NULL top-level column is never represented by a *cell* — for a simple column it is absence from the
+column subset. (A non-frozen collection is the one case where "reads as NULL" does not imply "absent
+from the subset": an emptied collection is present in the subset with a complex deletion and zero
+cells — see [Empty Collections](#empty-collections) below.)
 
 **Implementation References** (CQLite):
 - Frozen collections: `cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs::serialize_value_into()`
@@ -394,6 +480,58 @@ treats `size < 0` as null, and returns short when the buffer ends early. CQLite 
 **Critical distinction**: The **outer** type determines storage:
 - `list<frozen<udt>>` = multi-cell (each UDT element is separate cell)
 - `frozen<list<udt>>` = single-cell (entire list is one blob)
+
+#### Empty Collections
+
+**Frozen stores a zero-count blob; non-frozen stores no cells but is *not* absent.** The two modes
+diverge, and the non-frozen side is easy to get wrong:
+
+- **Frozen** (`frozen<set<text>>` written as `{}`): a normal single cell whose value is a
+  zero-element blob — the 4-byte BE count `00 00 00 00` and nothing else
+  (`CollectionSerializer.pack` always writes the count, `CollectionSerializer.java:52-64`). This is
+  a present, non-null value and is distinguishable from a column that was never written.
+- **Non-frozen** (`set<text>` written as `{}`): **zero element cells**, but the column is still
+  present in the row — because writing a non-frozen collection is a *replace*, and a replace emits a
+  **complex (collection) deletion** covering the prior contents before adding cells
+  (`Lists.Setter`/`Sets.Setter`/`Maps.Setter` call
+  `UpdateParameters.setComplexDeletionTimeForOverwrite`, `UpdateParameters.java:202-205`, then add
+  zero cells because the literal is empty: `Sets.Adder.doAdd` returns early on
+  `elements.size() == 0`). So the row carries `HAS_COMPLEX_DELETION` and, for that column, a
+  deletion time plus a cell count of `0`.
+
+  On the read side the collection reconciles to zero elements, which CQL surfaces as `NULL` — an
+  empty non-frozen collection and a null one are indistinguishable *to a query*. But they are
+  distinguishable **on disk**, and a reader must not conflate the two: `ComplexColumnData`'s
+  invariant is `cells.length > 0 || !complexDeletion.isLive()` (`ComplexColumnData.java:64-70`) —
+  i.e. zero cells is legal precisely when a complex deletion is present, and a column with neither is
+  dropped entirely (`update`, `:229-235`).
+
+Abridged `sstabledump` output from the `nb_empty_collections` parity fixture (`test_types`, one row
+with all six columns written empty in a single `INSERT`) — elided (`…`) and annotated, not byte-exact:
+
+```
+"cells": [
+  { "name": "fl", "value": [] },                 // frozen<list<int>>  — present, zero-count blob
+  { "name": "fm", "value": {} },                 // frozen<map<text,int>>
+  { "name": "fs", "value": [] },                 // frozen<set<text>>
+  { "name": "ml", "deletion_info": { … } },      // list<int>  — complex deletion, ZERO cells
+  { "name": "mm", "deletion_info": { … } },      // map<text,int>
+  { "name": "ms", "deletion_info": { … } }       // set<text>
+]
+```
+
+Note what the non-frozen entries are *not*: they are neither missing from the row nor a row/cell
+tombstone. `sstabledump` prints a bare `deletion_info` object for a complex column when
+`complexDeletion()` is live-less and there are no cells to follow
+(`JsonTransformer.serializeColumnData`, `:400-429`) — that is exactly the on-disk shape above.
+Reference: `test-data/datasets/sstables/test_types/nb_empty_collections-*/nb-1-big-Data.db.jsonl`;
+generator `test-data/scripts/generate-cql-type-parity.sh` (`[B9]`), schema
+`test-data/schemas/cql-type-parity.cql`.
+
+A genuinely **absent** non-frozen collection — one never written for that row — is signalled the
+same way as any absent column: its bit is set in the missing-columns bitmap (or the column is simply
+outside the subset), with no deletion time and no cells. Distinguishing "written empty" from "never
+written" therefore requires the complex deletion, not the cell count.
 
 See `tables/type-mapping-complex.md` for detailed format specifications.
 
@@ -777,7 +915,7 @@ Cell flags are constructed based on cell properties:
 | Cell has TTL | CELL_IS_EXPIRING | 0x02 | Include TTL fields |
 | Value is empty string | CELL_HAS_EMPTY_VALUE | 0x04 | Zero-length value |
 | Use row timestamp | CELL_USE_ROW_TIMESTAMP | 0x08 | Skip cell timestamp |
-| Use row TTL | CELL_USE_ROW_TTL | 0x10 | Skip cell TTL |
+| Use row TTL | CELL_USE_ROW_TTL | 0x10 | Skip **both** cell TTL and cell local_deletion_time |
 
 **CELL_USE_ROW_TIMESTAMP Truth Table**:
 
