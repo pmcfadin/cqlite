@@ -191,6 +191,11 @@ Rules for `pull_request`-triggered workflows:
   actually IN FORCE, and an untrusted label read makes that count UNKNOWN rather
   than zero. Whether such an event BINDS stays a per-tier verdict. Every one of
   those states is reported and none of them changes the verdict.
+- No two lines of one report may contradict each other. Every claim about labels is
+  phrased against "the label set this run is using" plus that set's provenance (live
+  read, or the run-start payload), because that is the only thing the report observes;
+  and a run that ADMITS a read failed emits no denial that one did — the operator never
+  gets `permissions:` advice beside an "authorization is not the problem" line.
 - A waiver label is `ci:waive:<tier-id>` with a LOWER-CASE tier id
   (`[a-z0-9][a-z0-9-]*`) — the shape the evaluator matches. A `ci:waive:`-prefixed
   label that misses it (`ci:waive:Flight`) waives nothing, and the report says so,

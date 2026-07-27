@@ -123,7 +123,11 @@ carry).
   tracked and reported: a fallback to the payload reports **`UNKNOWN (label read UNTRUSTED)`** with the
   failed-read count and status, and it makes the in-force count **UNKNOWN** rather than zero. A failed or
   ambiguous read can only ever *withhold* a waiver, never grant one, and none of these states can change
-  `required`'s verdict — that comes from tier evaluation alone.
+  `required`'s verdict — that comes from tier evaluation alone. The same discipline was then applied to
+  **every** line of the block, not only the ones a reviewer named: claims about labels are phrased against
+  "the label set this run is using" plus that set's provenance, and a run that admits a read failed carries
+  no denial that one did — so you never get `permissions:` advice beside an "authorization is not the
+  problem" line, and the suite pins that property across the combined states rather than the wording.
 - **A mistyped waiver label is named as a typo (issue #3033 round 6).** A waiver label is
   `ci:waive:<tier-id>` with a LOWER-CASE tier id (`[a-z0-9][a-z0-9-]*`), which is what the evaluator
   matches. Anything else — `ci:waive:Flight` for tier `flight` — waives nothing, so the evidence read is
