@@ -57,10 +57,15 @@ Capture is one function, `_tree_identity <out-manifest>`, producing a NUL-framed
 `sha256`:
 
 ```
-H <full-head-sha-or-"unborn">
-T <path> <blob-sha | DELETED> <mode>      # one line per uncommitted tracked change
-U <path> <blob-sha | SIZE:<n>:MTIME:<ns>> # one line per untracked, non-ignored file
+H <full-head-sha-or-"unborn">             # the HEADER, written first
+T <blob-sha | DELETED> <mode> <path>      # one record per uncommitted tracked change
+U <blob-sha | SIZE:<n>:MTIME:<ns>> <path> # one record per untracked, non-ignored file
+N <body-record-count>                     # the TRAILER, written last
 ```
+
+Every record is NUL-terminated and its **path comes last**, so a path containing a tab or a
+newline cannot forge a field or a record. The `N` trailer is what makes a **truncated** manifest
+detectable (§8).
 
 - **Tracked side**: `git --no-optional-locks diff --name-only -z HEAD --` enumerates every path that
   differs from HEAD in the index *or* the working tree (content, mode, add, delete). Each surviving
@@ -271,8 +276,14 @@ then `tree-integrity` (what the artifact describes); if both fire, both lines ap
 is `FAIL` once.
 
 **Every capture validates itself before anyone compares it.** `_tree_identity` returns rc 2 — a
-fail-closed condition distinct from rc 1 "no git worktree, SKIP" — when the manifest's first record
-is not `H<TAB><head>` or the digest is not a full-length hex hash. The printed identity is then
+fail-closed condition distinct from rc 1 "no git worktree, SKIP" — when the manifest is not
+well-formed or the digest is not a full-length hex hash. Well-formed means all three of: the FIRST
+record is the header `H<TAB><head>`, the LAST record is the trailer `N<TAB><body-count>`, and that
+trailer's count equals the body records actually read back. Validating only the first record was not
+enough (review C2): an ENOSPC truncation *after* the `H` record left a manifest whose surviving
+prefix was byte-identical to another capture's prefix, so the two compared EQUAL and a mutation to a
+later-sorted path passed as `tree-integrity: PASS`. With the trailer, a short write can no longer be
+mistaken for a shorter tree. The printed identity is then
 split by `_tree_split_identity`, never by `IFS=$'\t' read` (tab is IFS *whitespace*, so `read`
 collapses an empty field and shifts later fields left), and each field is re-validated. The
 comparison is over **head + dirty + digest**, never the digest alone. Without all three, a hash tool
