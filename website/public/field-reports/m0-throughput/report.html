@@ -1,0 +1,129 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>cqlite M0 — disk / SSTable read-path profile (v0.16.0 → 0.17-dev)</title><style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --fg:#e6edf3; --muted:#8b949e;
+          --green:#3fb950; --amber:#d29922; --red:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:28px; margin:0 0 4px; }
+  h2 { font-size:20px; margin:40px 0 12px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  h3 { font-size:16px; margin:28px 0 8px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .pass { background:rgba(63,185,80,.15); color:var(--green); }
+  .watch { background:rgba(210,153,34,.15); color:var(--amber); }
+  .fail { background:rgba(248,81,73,.15); color:var(--red); }
+  table { width:100%; border-collapse:collapse; margin:12px 0; background:var(--card); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  th,td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; vertical-align:top; }
+  th { background:#1c2128; color:var(--muted); font-weight:600; font-size:13px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:none; }
+  .good { color:var(--green); font-weight:600; }
+  .warnc { color:var(--amber); font-weight:600; }
+  .badc { color:var(--red); font-weight:600; }
+  code { background:#1c2128; padding:1px 6px; border-radius:4px; font-size:13px; }
+  .callout { background:var(--card); border-left:3px solid var(--accent); padding:12px 16px; border-radius:0 8px 8px 0; margin:16px 0; }
+  .callout.green { border-left-color:var(--green); }
+  .callout.amber { border-left-color:var(--amber); }
+  .callout.red { border-left-color:var(--red); }
+  pre { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px; white-space:pre-wrap; font-size:12.5px; overflow-x:auto; line-height:1.45; }
+  .bar { display:inline-block; height:11px; background:var(--accent); border-radius:2px; vertical-align:middle; }
+  .barwrap { display:flex; align-items:center; gap:8px; }
+  .barcell { min-width:260px; }
+  footer { margin-top:48px; color:var(--muted); font-size:13px; border-top:1px solid var(--border); padding-top:16px; }
+  .kpi { display:flex; gap:16px; flex-wrap:wrap; margin:16px 0; }
+  .kpibox { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px 18px; min-width:180px; flex:1; }
+  .kpibox .n { font-size:24px; font-weight:700; }
+  .kpibox .l { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+</style></head><body><div class="wrap">
+<h1>cqlite M0 — disk &amp; SSTable read-path profile</h1>
+<p class="sub">Server-direct full-scan IO characterization, <b>v0.16.0 (Arm 1) → 0.17-dev (Arm 2)</b>. Focus: what the SSTable read path actually asks the block device for, and why it is (still) the standing throughput lever. Test bed: i4i.xlarge (4&nbsp;vCPU / 2 physical cores, XFS on the i4i NVMe <code>nvme1n1</code>), LZ4-compressed <code>keyvalue</code> corpus (<code>chunk_length_in_kb=16</code>, ~3.4M partitions, ~650 MB Data.db), <code>flight-loadgen --shape full</code>, no Trino. Tracked on cqlite&nbsp;#2818. Measured 2026-07-26/27.</p>
+
+<div class="callout amber"><b>The one-line disk finding.</b> Across <i>both</i> arms the scan reads the SSTables in <b>~4.3&nbsp;KB block requests — one LZ4 chunk faulted a page at a time — and that did not change.</b> 0.17-dev nearly doubled throughput by fixing the CPU/pipeline path, so the device now does <i>fewer</i> tiny reads per second (util 74%&nbsp;→&nbsp;53%), but the <b>request size is unmoved</b>. The read path is still not doing large sequential IO. That is the standing lever, and nothing in 0.17 addresses it.</p>
+
+<div class="kpi">
+  <div class="kpibox"><div class="n">~4.3 KB</div><div class="l">mean block read (both arms)</div></div>
+  <div class="kpibox"><div class="n">99.3–99.7%</div><div class="l">reads in [4K, 8K)</div></div>
+  <div class="kpibox"><div class="n">0.10 ms</div><div class="l">device r_await (disk is fast)</div></div>
+  <div class="kpibox"><div class="n">15% → 28%</div><div class="l">of fio seq ceiling (711.8 MB/s)</div></div>
+</div>
+
+<h2>1. Block-read size distribution — the headline, and it did not move</h2>
+<p><code>bpftrace</code> on <code>tracepoint:block:block_rq_complete</code> (reads only), full cold scan. bcc's <code>xfsslower</code> will not compile on the lab's HWE 7.0.0-aws kernel, so bpftrace is the substitute (per CASSANDRA-15452 method).</p>
+
+<h3>Arm 1 — v0.16.0 (498,759 reads, 2.12 GB)</h3>
+<pre>[512, 1K)         2
+[4K,  8K)   497,417  &#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;  99.7%
+[8K, 16K)        64
+[16K,32K)        76
+[32K,64K)        47
+[64K,128K)    1,045
+[128K,256K)     108              mean read = 4,260 B (4.2 KB)</pre>
+
+<h3>Arm 2 — 0.17-dev (192,514 reads, 0.87 GB)</h3>
+<pre>[4K,  8K)   191,180  &#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;  99.3%
+[8K, 16K)        67
+[16K,32K)        72
+[32K,64K)        47
+[64K,128K)    1,114
+[128K,256K)      34              mean read = 4,494 B (4.4 KB)</pre>
+
+<div class="callout"><b>Interpretation.</b> The corpus is LZ4-compressed at a <b>16&nbsp;KiB chunk length</b>. A chunk is decompressed as a unit, but the read of the compressed chunk off disk lands as <b>~4&nbsp;KB page-sized requests</b> — i.e. the read path faults roughly a page at a time and never coalesces adjacent chunks into a large sequential request. #2877 (per-chunk read coalescing) shipped in 0.17-dev; it does not change the device-level request size on this narrow-row corpus, which is the expected null result — the reads were already chunk-granular. The absent bars ≥64&nbsp;KB are what a sequential SSTable scan <i>would</i> produce with readahead.</p></div>
+
+<h2>2. iostat — the device is starved by tiny requests, not saturated</h2>
+<table><thead><tr><th>metric (<code>nvme1n1</code>, cold scan)</th><th>Arm 1 — v0.16.0</th><th>Arm 2 — 0.17-dev</th><th>read</th></tr></thead><tbody>
+<tr><td><code>rareq-sz</code> (avg request)</td><td>4.2 KB</td><td>4.4 KB</td><td class="warnc">unchanged — tiny</td></tr>
+<tr><td><code>r/s</code> (read IOPS)</td><td>~9,600</td><td>~5,400</td><td class="good">fewer (CPU path faster)</td></tr>
+<tr><td><code>r_await</code> (latency)</td><td>0.11 ms</td><td>0.10 ms</td><td class="good">device is fast</td></tr>
+<tr><td><code>%util</code></td><td>~74%</td><td>~53%</td><td class="good">more headroom</td></tr>
+<tr><td>device MB/s served</td><td>~39 MB/s</td><td>~23 MB/s</td><td>limited by IOPS × 4KB</td></tr>
+</tbody></table>
+<p>The device answers each request in <b>~0.1 ms</b> and never exceeds ~74% busy — it is not the bottleneck by bandwidth. It is <b>starved</b>: every read is ~4&nbsp;KB, so throughput is bounded by request <i>count</i>, not device capability. Arm 2 issues <i>fewer</i> such requests per second (the CPU pipeline feeds them less often now that decode/merge got faster), which is why <code>%util</code> dropped even as end-to-end MB/s rose.</p>
+
+<h2>3. Headroom vs the raw device (fio)</h2>
+<p><code>fio</code> sequential read (<code>bs=1M iodepth=32 direct=1</code>, cache dropped) on the same i4i NVMe: <b>711.8 MB/s / 712 IOPS</b> per node (identical on all 3). Against that ceiling:</p>
+<table><thead><tr><th>single-stream scan (warm, Arrow wire)</th><th>MB/s</th><th>% of 711.8 MB/s device ceiling</th></tr></thead><tbody>
+<tr><td>fio bs=1M sequential (the ceiling)</td><td>711.8</td><td><div class="barwrap"><span class="barcell"><span class="bar" style="width:260px"></span></span>100%</div></td></tr>
+<tr><td>Arm 2 — 0.17-dev</td><td>199.3</td><td><div class="barwrap"><span class="barcell"><span class="bar" style="width:73px"></span></span><span class="good">28%</span></div></td></tr>
+<tr><td>Arm 1 — v0.16.0</td><td>106.8</td><td><div class="barwrap"><span class="barcell"><span class="bar" style="width:39px"></span></span>15%</div></td></tr>
+</tbody></table>
+<p>0.17-dev nearly doubled the fraction of the disk the read path can actually use (15% → 28%), <b>but the remaining 72% gap is not disk bandwidth</b> — the device will do 711 MB/s at <code>bs=1M</code> and only ~40 MB/s worth of work is being asked of it at 4&nbsp;KB. Closing the gap means larger reads, not faster storage.</p>
+
+<h2>4. Read path, resolved (cqlite #2818 ask)</h2>
+<p>At SSTable <b>open</b> the reader builds a dedicated <code>MADV_RANDOM</code> point-read mmap per Data.db (issue #2210) — this is the <code>Dedicated MADV_RANDOM point-read mapping</code> log line, and it is for <i>point</i> reads, not scans.</p>
+<table><thead><tr><th>scan-path Data.db mapping</th><th>Arm 1 — v0.16.0</th><th>Arm 2 — 0.17-dev</th></tr></thead><tbody>
+<tr><td><code>/proc/&lt;pid&gt;/maps</code> Data.db regions during scan</td><td class="warnc">0 (scan read via positioned/buffered path)</td><td class="good">5 <code>r--s</code> shared regions</td></tr>
+<tr><td>mechanism</td><td>single read plane</td><td>#2876 read-plane split → distinct scan-side mapping</td></tr>
+</tbody></table>
+<p>So the two Arm-1 statements that looked contradictory resolve to: <i>the MADV_RANDOM point mapping is created at open; in 0.16 the scan never mapped Data.db, in 0.17-dev it does — a separate scan read plane.</i> Either way, the device-level read stays ~4&nbsp;KB.</p>
+
+<h2>5. Where the cold-IO cost actually lands — #2819 sub-phase timers (0.17-dev)</h2>
+<p>0.17-dev adds five in-<code>stream</code> sub-phase timers on <code>cqlite.rpc.phase.duration</code> (<code>do_get</code> only). They run on concurrent pipeline threads and <b>overlap — they do not sum to <code>stream</code></b>. Mean ms/RPC:</p>
+<table><thead><tr><th>sub-phase</th><th>cold</th><th>warm</th><th>cold − warm</th><th>what it is</th></tr></thead><tbody>
+<tr><td class="good"><b>stream_cold_fault</b></td><td>4437.9</td><td>105.8</td><td class="good"><b>−4332 ms (42×)</b></td><td>cold body-chunk page-in (the cold-IO term)</td></tr>
+<tr><td>stream_merge</td><td>7351.7</td><td>7224.4</td><td>~0</td><td>k-way merge + reconcile + materialize (CPU)</td></tr>
+<tr><td>stream_encode</td><td>1868.3</td><td>1842.9</td><td>~0</td><td>Arrow RecordBatch encode (CPU)</td></tr>
+<tr><td>stream_decompress</td><td>149.2</td><td>149.6</td><td>~0</td><td>LZ4 chunk decompress (producer thread)</td></tr>
+<tr><td>stream_grpc_write</td><td>5.8</td><td>5.9</td><td>~0</td><td>egress send (client-paced)</td></tr>
+</tbody></table>
+<div class="callout green"><b>The disk cost is real and isolable.</b> <code>stream_cold_fault</code> is <b>4.4&nbsp;s/scan cold and collapses 42× to 106&nbsp;ms warm</b> — that is the tiny-read disk penalty, in production-observable form, and it is purely a cold-cache effect. The persistent (warm) bound is CPU: <code>stream_merge</code> + <code>stream_encode</code> are identical cold vs warm. So on a cold or partly-cold node — the real field condition at 3.4M partitions — the 4&nbsp;KB read pattern costs seconds per scan that a large-sequential-read path would largely erase.</p></div>
+
+<h2>6. Disk-access knobs don't help — the 4 KB size is intrinsic</h2>
+<p>Zero-cost prelude A/B (single-stream, cold each), Arm 2 — mirrors Arm 1 exactly:</p>
+<table><thead><tr><th>config</th><th>MB/s</th></tr></thead><tbody>
+<tr><td><code>baseline</code> (Auto)</td><td class="good">204.6</td></tr>
+<tr><td><code>CQLITE_PREFETCH=willneed</code></td><td>209.8</td></tr>
+<tr><td><code>CQLITE_PREFETCH=sequential</code></td><td>205.8</td></tr>
+<tr><td><code>CQLITE_DISK_ACCESS_MODE=buffered</code></td><td>204.9</td></tr>
+<tr><td><code>CQLITE_DISK_ACCESS_MODE=mmap</code></td><td class="badc">121.4</td></tr>
+</tbody></table>
+<p>No existing knob moves the needle; forcing <code>mmap</code> is worse. The 4&nbsp;KB granularity is not a tunable — it needs a code change.</p>
+
+<h2>The disk verdict &amp; the lever</h2>
+<div class="callout amber">
+<p><b>0.17-dev did not change the disk read pattern.</b> Reads are ~4.3&nbsp;KB in both arms (99.3–99.7% in [4K,8K)), device util actually fell (74%→53%) because the faster CPU path needs fewer IOPS, and the scan still uses only 28% of a 711&nbsp;MB/s device. The throughput doubling came entirely from the CPU/pipeline fixes (#2876 read-plane split, #2825 batching), not from the disk path.</p>
+<p><b>The standing lever is scan-side readahead across adjacent compressed chunks</b> — a ≥256&nbsp;KiB scan-only read buffer (gated on <code>&gt; chunk_length</code>), exactly the CASSANDRA-15452 fix. It is <b>not in the 0.17 manifest.</b> Predicted payoff: the histogram mass moves to ≥64&nbsp;KB, <code>stream_cold_fault</code> shrinks, and cold/partly-cold single-stream MB/s rises toward the 711&nbsp;MB/s device instead of plateauing at ~28% of it.</p>
+</div>
+
+<footer>
+Server-direct, unstripped self-built <code>cqlite-flight</code> + <code>flight-loadgen</code>: Arm 1 = <code>v0.16.0</code> tag; Arm 2 = origin/main <code>ed3ac7e</code> (0.17-dev, <code>--features observability</code>). Same LZ4 corpus (<code>chunk_length_in_kb=16</code>), same method. Disk stats: <code>bpftrace block_rq_complete</code>, <code>iostat -x 1</code>, <code>/proc/&lt;pid&gt;/io</code> (read_bytes / rchar / syscr reported separately), <code>fio bs=1M</code> ceiling. samply recorded 0 samples on this HWE kernel; CPU decomposition via <code>perf record</code>. Full method + non-disk results on cqlite&nbsp;#2818. Raw artifacts in the easy-db-lab rig at <code>clusters/cqlite-m0-arm{1,2}-artifacts/</code>.
+</footer>
+</div></body></html>

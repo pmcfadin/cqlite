@@ -24,6 +24,7 @@ report for that round.
 
 | Round | Date | Stack | Verdict | Report |
 |-------|------|-------|---------|--------|
+| **M0 — disk / read-path profile** | 2026-07-27 | flight v0.16.0 → 0.17-dev (server-direct) | **0.17-dev ~2× single-stream throughput (CPU-path fixes), but the block-device read pattern did NOT move** — reads stay ~4.3 KB (99%+ in `[4K,8K)`), scan uses 28% of the 711 MB/s device; standing lever is scan-side cross-chunk readahead (CASSANDRA-15452), not in the 0.17 manifest | [Full report →](/cqlite/field-validation/m0-throughput/) |
 | **0.16.0 GA verification** | 2026-07-23 | flight 0.16.0 · connector 0.16.0 | **GA sound — all 3 tracked fixes hold** — #2806 split pruning fixed (−18% p50 / −4× CPU on keyed reads), #2807 UDT parse fixed, #2815 collection-column drop fixed (raw bytes; structured decode is a 0.17 follow-up) | [Full report →](/cqlite/field-validation/0-16-0-ga/) |
 | **0.16.0-rc1 fix validation** | 2026-07-21 | flight 0.16.0-rc1 · connector 0.16.0-rc1 | **Soak ship-grade (0 errors, integrity holds); 2 of 3 testable fixes fail in the field** — #2679 split pruning inert (#2806), #2349 UDT blocked by a parser bug (#2807), #2681 abort taxonomy verified | [Full report →](/cqlite/field-validation/0-16-0-rc1/) |
 | **v0.15.0 milestone soak** | 2026-07-17 | flight 0.15.0 · connector 0.15.0 | **7 / 8 VERIFIED** — the one open flag (background snapshot grace-sweep, #2452) confirmed fixed in the field | [Full report →](/cqlite/field-validation/soak-0-15/) |
