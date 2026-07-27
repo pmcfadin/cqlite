@@ -95,8 +95,9 @@ pub use rows_root::{
 };
 // Crate-internal uncounted `TrieIndexEntry.deserialize` (issue #2058): the successor
 // walk resolves a WIDE successor's `data_position` for the seek END bound, which must
-// not bump the L1 clustering-window `ROWS_DB_ENTRY_RESOLVES` invariant.
-#[cfg(not(feature = "tombstones"))]
+// not bump the L1 clustering-window `ROWS_DB_ENTRY_RESOLVES` invariant. Also used by
+// `verify` (issue #3002), which is NOT compiled out under `tombstones` — hence no cfg
+// gate here.
 pub(crate) use rows::resolve_rows_db_entry_uncounted;
 // Crate-internal only: the zero-copy slice walker's sole consumers are the
 // SSTable reader (partition_lookup / data_access::bti). Kept off the public
