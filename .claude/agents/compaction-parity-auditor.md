@@ -26,11 +26,19 @@ relevant branch lives on the `rustyrazorblade/cassandra` fork, not in the apache
 
 - Branch: `cursor-compaction-completion` (companion: `cursor-compaction-test-harness`)
 - Repo path: resolve in this order —
-  1. `$CQLITE_CASSANDRA_REPO` if set,
-  2. else `~/local_projects/cassandra` (the project's documented local Cassandra checkout, per CLAUDE.md).
+  1. `$CQLITE_CASSANDRA_REPO` if set (the only supported way to name a clone);
+  2. else `$HOME/local_projects/cassandra` — a **legacy convenience fallback only**, NOT a documented
+     path: it is absent on the agent machines, and a clone found there may be checked out on a non-5.0
+     branch (#3041). Treat a hit as unverified until you read it through a pinned ref.
+- **Read through refs, never a working tree (#3041).** For 5.0 *format* questions the authority is
+  `git -C "$REPO" show cassandra-5.0.8:<path>`; for this catalog it is the
+  `rustyrazorblade/cursor-compaction-completion` ref below. A checked-out working tree may be `trunk`
+  or `6.0-alpha` and is not the 5.0 format. And a **CQLite `file:line` is NEVER format authority** —
+  citing CQLite's own code to justify CQLite's behavior is circular; authority is (1) pinned
+  `cassandra-5.0.8` source, (2) `sstabledump`, (3) `docs/sstables-definitive-guide/`.
 - If that checkout exists but lacks the branch, fetch it on demand:
   ```bash
-  REPO="${CQLITE_CASSANDRA_REPO:-$HOME/local_projects/cassandra}"
+  REPO="${CQLITE_CASSANDRA_REPO:-$HOME/local_projects/cassandra}"   # fallback is legacy, may not exist
   git -C "$REPO" remote get-url rustyrazorblade 2>/dev/null \
     || git -C "$REPO" remote add rustyrazorblade https://github.com/rustyrazorblade/cassandra.git
   git -C "$REPO" fetch rustyrazorblade cursor-compaction-completion cursor-compaction-test-harness
