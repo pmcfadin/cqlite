@@ -2980,11 +2980,13 @@ _assert_tree_integrity() {
 # NO capture is taken here — every value comes from state already recorded. Calling the
 # lazy finalize would overwrite the component-named verdict this block exists to publish.
 _tree_boundary_meta_lines() {
-  local _c _rf _st _secs _done=0 _sel=0
+  local _c _s _rf _st _secs _done=0 _sel=0
   _tree_commit_meta_render
   printf '%s\n' "$TREE_COMMIT_LINE"
   if [ -n "${DATA_COUNT:-}" ]; then
-    if selected_needs_datasets 2>/dev/null; then
+    # `command -v` first: the helper is DEFINED alongside DATA_COUNT on the full gate's
+    # path, so calling it blind would be a "command not found" on any earlier boundary.
+    if command -v selected_needs_datasets >/dev/null 2>&1 && selected_needs_datasets; then
       printf 'datasets: %s Data.db files under %s\n' "$DATA_COUNT" "${CQLITE_DATASETS_ROOT:-<unset>}"
     else
       printf 'datasets: %s\n' "$DATA_COUNT"
@@ -3013,7 +3015,7 @@ _tree_boundary_meta_lines() {
   done
   # Selected-count via the bash-3.2 empty-array-safe idiom used throughout this script
   # (a bare "${ARR[@]}" on an empty array aborts under `set -u` on bash < 4.4).
-  for _c in ${SELECTED_MAIN[@]+"${SELECTED_MAIN[@]}"} ${SELECTED_SIDE[@]+"${SELECTED_SIDE[@]}"}; do
+  for _s in ${SELECTED_MAIN[@]+"${SELECTED_MAIN[@]}"} ${SELECTED_SIDE[@]+"${SELECTED_SIDE[@]}"}; do
     _sel=$(( _sel + 1 ))
   done
   if [ "$_sel" -gt 0 ]; then

@@ -420,6 +420,7 @@ if [ -z "$missing_fns" ] && [ "$n_tree_fns" -ge 30 ]; then
 else
   bad "PORTABILITY: the lint's function inventory is stale — not found in the gate: ${missing_fns:-<none>} (n=$n_tree_fns)"
 fi
+# shellcheck disable=SC2086  # intentional word-split over the space-separated name list
 if gnu_hits=$(gnu_only_hits "$GATE" $TREE_FNS); then
   ok "PORTABILITY: no GNU-only construct in any tree-integrity function ($(printf '%s\n' $GNU_RULES | grep -c . | tr -d ' ') rules)"
 else
