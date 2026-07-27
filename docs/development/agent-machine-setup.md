@@ -131,15 +131,18 @@ compare-and-swap — `bash scripts/flow/claim.sh adopt <N> --expect <current-sha
 bare `git fetch`, so a resurrected original holder loses the lease and detects it at once.
 When the claim ref is FREE but an `issue-<N>-*` branch still exists on origin (a resumed,
 parked, or reaped issue, or a merged-but-undeleted branch), `claim` refuses with
-`reason=legacy-branch-lock` and prints the one sanctioned resume:
+`reason=legacy-branch-lock detail=<branches> claim-ref=free resume=documented-procedure` —
+a diagnosis that names the blocking branch and confirms the claim ref itself is free.
+The one sanctioned resume is
 `bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:<branch>`
 (#2945) — git's empty lease, so the create is still server-arbitrated and the claim commit
-records who + why (a placeholder reason like `<why>` is refused). That command is printed
-only when the lane is demonstrably orphaned: `open-prs=0` AND every `issue-<N>-*` branch tip
-carrying its OWN commits and older than the 4h reap threshold AND no fresh machine-claim/heartbeat
-ref naming the issue. A commit-less branch (what `flow-activate` pushes) has no age signal, so it is
-withheld as `newest-branch-tip=no-own-commits`.
-Anything live or unreadable → `remediation=withheld <signals>`; confirm ownership first.
+records who + why (a placeholder reason like `<why>` is refused). It is deliberately **not
+printed** by the refusal: a printed line gets run literally, and an older-fleet worker locks
+with the BRANCH while holding no claim ref, so the empty-lease adopt would succeed against an
+actively-worked lane. Establish abandonment yourself first — `bash scripts/flow/claim-heartbeat.sh
+should-reap <machine>` (the same test `flow-board`'s reaper applies: age > 4h AND no open PR AND
+pid-dead-if-local), plus the board `Status` and the branch/PR author — and never hand-craft a
+claim commit.
 
 ## Full doctrine
 

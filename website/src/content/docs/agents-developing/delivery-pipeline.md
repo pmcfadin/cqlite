@@ -233,10 +233,12 @@ the loss immediately (fixes the #2467/#2499 two-writer race).
 **Resuming past the legacy-branch guard (issue #2945)** — when the claim ref is **free** but an
 `issue-<N>-*` branch still stands on origin (a parked/reaped/released claim, an owner-approved spec that
 lives on that branch, or just a merged-but-undeleted PR branch), `claim` refuses with
-`reason=legacy-branch-lock … claim-ref=free` and prints the ONE sanctioned resume:
+`reason=legacy-branch-lock … claim-ref=free resume=documented-procedure`. That refusal is a
+**diagnosis, not a hand-off**: it names the blocking branch(es) and tells you the claim ref itself is
+free, then points here. The ONE sanctioned resume is documented *only* here and in
+`claim.sh -h` — it is deliberately **never printed as a runnable line** (see below):
 
 ```bash
-# the refusal prints this line with a CONCRETE reason already filled in, e.g.
 bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:issue-<N>-<slug>
 ```
 
@@ -246,26 +248,26 @@ server-side: a machine that actually holds the claim ref keeps it and the resume
 it is recorded in the claim commit next to who took it (machine/actor/ts) and rendered by
 `claim.sh status`, so a resume is auditable; a reason with nothing recordable in it (`'   '`, `'---'`, an
 unset variable) is a **usage error** (exit 64), never a silent `reason=unspecified` — and so is a bare
-**placeholder** (`<why>`, `why`, `todo`, `tbd`, `xxx`, …), because a printed `--reason <why>` run verbatim
-would record the uninformative `reason=why`. That is why the refusal fills the reason in for you. A hex
+**placeholder** (`<why>`, `why`, `todo`, `tbd`, `xxx`, …): the record must say why. A hex
 `--expect` must be a **full** object name (40/64 hex) — a truncated sha is a usage error, not a lost race.
 
-The refusal **prints that command only when the lane is demonstrably orphaned**, judged on THREE signals:
-`open-prs=0` **and** every matching `issue-<N>-*` branch tip **carrying at least one commit of its own**
-and older than `claim-heartbeat.sh`'s reap threshold (4h) **and** no fresh `refs/machine-claims/*` /
-`refs/heartbeats/*` ref naming the issue. The
-last two cover the **pre-PR window**: an older-fleet worker locks with the *branch*, holds no claim ref
-(`claim-ref=free`) — and because a PR is opened LATE in this pipeline it also has **no open PR** for most
-of its life, so `open-prs=0` alone would advertise a hand-away on an actively-worked issue. The
-"own commits" qualifier matters just as much: `flow-activate` pushes the branch at `origin/main` with no
-commits of its own, so a freshly-activated lane's tip date **is main's** — no information about the
-worker. Such a tip is reported `newest-branch-tip=no-own-commits` and **withheld** (indeterminate), never
-judged "stale" because main happened to be quiet overnight. Anything live —
-or any signal that could not be **read** (`open-prs=-1`, an unreachable remote, an unreadable default
-branch, a missing threshold) —
-prints `remediation=withheld <signals>` instead, and you confirm ownership via the board and the
-branch/PR author first. The
-hatch still works when invoked deliberately — withholding changes the *advice*, not the arbiter. Retrying after a transient `ERROR reason=infra` is safe: an
+**Why the command is never printed for you (owner decision, #2945).** `claim.sh` used to decide, from an
+in-script liveness probe, whether to print a copy-pasteable version of that command. That probe is gone.
+The readers of a refusal are agents that run printed remediations **literally**, and an older-fleet worker
+locks with the *branch* while holding **no claim ref** (`claim-ref=free` is true for it) — so a printed
+empty-lease adopt would take an **actively-worked** lane and create a second writer. Judging abandonment
+needs signals `claim.sh` cannot read soundly, and three successive revisions of the probe each shipped a
+fresh version of that hazard (a vacuous branch-tip date, a cross-process ref race, a fleet-wide permanent
+withhold). So the refusal diagnoses and points here, and **you** establish abandonment first with the same
+test `flow-board`'s reaper uses:
+
+```bash
+bash scripts/flow/claim-heartbeat.sh should-reap <machine>   # exit 0 = reapable, 1 = keep, 2 = no ref
+```
+
+i.e. claim age > 4h **and** no open PR **and** (pid-dead, when the claim is local) — plus the board
+`Status` and the branch/PR author. Only then run the documented resume. Retrying after a transient
+`ERROR reason=infra` is safe: an
 adopt whose ref is already held by *this* machine+actor reports `ADOPTED … (re-entrant)` exit 0 rather
 than abandoning an issue you own. This is the only sanctioned way past that refusal — **never hand-craft
 a claim commit or push the ref directly** (the field failure that motivated #2945). The claiming session also maintains a

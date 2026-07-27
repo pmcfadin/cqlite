@@ -63,17 +63,15 @@ never gate stdout or review churn.
      # competitor can no longer double-claim. Adopting a reaped claim instead?
      # Use: bash scripts/flow/claim.sh adopt <N> --expect <old-sha>.
      # RESUMING an issue whose issue-<N>-* branch outlived its claim ref (the
-     # `reason=legacy-branch-lock` refusal, which prints this command verbatim)?
-     # Use the command the refusal PRINTS (reason pre-filled):
+     # `reason=legacy-branch-lock ... claim-ref=free` refusal)? The sanctioned command:
      #   bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:<branch>
      # (#2945 — git's empty lease: still server-arbitrated, records who + why; a
-     # placeholder reason like <why> is refused). It is printed ONLY when the lane
-     # is demonstrably orphaned: open-prs=0 AND every issue-<N>-* branch tip carrying
-     # its OWN commits and staler than the 4h reap threshold AND no fresh machine-
-     # claim/heartbeat ref naming the issue (a commit-less branch, i.e. one still at
-     # origin/main, has NO age signal: newest-branch-tip=no-own-commits, withheld).
-     # `remediation=withheld <signals>` = LIVE or unproven — confirm
-     # ownership (board + branch/PR author) before resuming, do not resume blind.
+     # placeholder reason like <why> is refused). The refusal DIAGNOSES (branch +
+     # claim-ref=free) but deliberately prints NO runnable command: an older-fleet
+     # worker locks with the BRANCH only, so this adopt WOULD succeed against a lane
+     # somebody is actively working. CONFIRM abandonment first — `claim-heartbeat.sh
+     # should-reap <machine>` (age > 4h AND no open PR AND pid-dead if local), the board
+     # Status, the branch/PR author. Never resume blind.
      # NEVER hand-craft a claim commit to get past the guard.
      if ! bash scripts/flow/claim.sh claim <N>; then
        echo "CLAIM LOST — another machine holds refs/claims/issue-<N>. Take the next item (or fetch to RESUME)."; exit 0

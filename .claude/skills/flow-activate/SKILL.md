@@ -37,14 +37,13 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
    if ! bash scripts/flow/claim.sh claim <N>; then
      echo "CLAIM LOST — another session holds refs/claims/issue-<N>. Take the next item."
      # (Adopting a reaped claim instead? Use: bash scripts/flow/claim.sh adopt <N> --expect <old-sha>)
-     # (Refused with reason=legacy-branch-lock — a FREE claim ref but an issue-<N>-* branch
-     #  still on origin? Resume it: claim.sh adopt <N> --expect none --reason <concrete why>,
-     #  #2945 — but ONLY by running the command the refusal itself PRINTS (reason pre-filled;
-     #  it is printed only at open-prs=0 + all branch tips carrying their OWN commits and
-     #  staler than 4h + no fresh machine-claim/heartbeat ref; the branch this skill pushes
-     #  below has NO commits of its own, so its lane is never advertised as stale).
-     #  A `remediation=withheld <signals>` line means the lane
-     #  may be LIVE or is unproven: confirm ownership first, never resume blind)
+     # (Refused with reason=legacy-branch-lock ... claim-ref=free — a FREE claim ref but an
+     #  issue-<N>-* branch still on origin? The sanctioned resume is
+     #  `claim.sh adopt <N> --expect none --reason <concrete why>` (#2945). The refusal
+     #  deliberately does NOT print it: CONFIRM the lane is abandoned first —
+     #  `claim-heartbeat.sh should-reap <machine>` (age > 4h AND no open PR AND pid-dead if
+     #  local), board Status, branch/PR author. Never resume blind, never hand-craft a claim
+     #  commit)
    fi
    # CLAIM HELD → set up the worktree + branch. The branch is naming/PR plumbing, NOT the lock:
    wt=".claude/worktrees/issue-<N>-<slug>"

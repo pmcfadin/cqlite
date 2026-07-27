@@ -390,15 +390,14 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   it, `ADOPT-LOST`) and the claim commit records who took it AND why (a `--reason` with nothing
   recordable in it, or a bare placeholder like `<why>`/`todo`/`tbd`, is a usage error — not a silent
   `reason=unspecified`/`reason=why`). That is the ONLY sanctioned
-  way past `reason=legacy-branch-lock`; never hand-craft a claim commit. The refusal PRINTS that
-  command (reason pre-filled) only when the lane is demonstrably ORPHANED on all three signals:
-  `open-prs=0` AND every `issue-<N>-*` branch tip carrying its OWN commits and older than the 4h reap
-  threshold AND no fresh machine-claim/heartbeat ref naming the issue — the tip/liveness signals cover
-  the PRE-PR window, where an older-fleet worker holds only the BRANCH and has no PR yet. A branch
-  pushed at `origin/main` with NO commits of its own (what `flow-activate` creates) has no age signal
-  at all: it reports `newest-branch-tip=no-own-commits` and is WITHHELD. Anything live or unreadable
-  prints `remediation=withheld <signals>`; confirm ownership via the board + branch/PR author before
-  resuming. `claim.sh release <N>`
+  way past `reason=legacy-branch-lock`; never hand-craft a claim commit. It is deliberately **NOT
+  auto-advertised**: the refusal DIAGNOSES the lane (`reason=legacy-branch-lock detail=<branches>
+  claim-ref=free resume=documented-procedure`) and points here, but prints **no runnable command** —
+  a printed line gets executed literally, and an older-fleet worker holds only the BRANCH (so the
+  empty-lease adopt WOULD succeed against a live lane). Before resuming, CONFIRM the lane is
+  abandoned with the same test `flow-board`'s reaper uses — `claim-heartbeat.sh should-reap
+  <machine>` (age > 4h AND no open PR AND pid-dead-if-local) plus board `Status` and the branch/PR
+  author. `claim.sh release <N>`
   deletes the ref (refuses under an open PR without `--force`). Maintain the liveness heartbeat
   (`scripts/flow/claim-heartbeat.sh beat <N>`, refreshed at claim + every stage transition);
   `flow-board` reaps deterministically (age > 4h AND no open PR) (#2089).
