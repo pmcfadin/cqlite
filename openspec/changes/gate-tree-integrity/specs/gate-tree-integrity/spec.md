@@ -375,6 +375,16 @@ documented as a stated limitation covered by the existing `datasets:` and `ci-pi
 - **AND** canonicalization SHALL succeed when the pinned path's parent directory does not exist yet,
   so the carve-out cannot be silently disarmed by a directory the gate has not created
 
+#### Scenario: a space inside a changed path cannot be read as two paths
+- **GIVEN** the `changed:` list and the `lockfile-settled:` detail are SPACE-JOINED, and they are the
+  one artifact a triager reads after a mid-run mutation
+- **WHEN** a changed path contains a SPACE (for example `two words.txt`)
+- **THEN** the rendered list SHALL escape it (`two\swords.txt`) so a single path can never be read as
+  two separate paths
+- **AND** the escape SHALL be the same backslash family the manifest's `.report` view uses — `\\` for a
+  literal backslash, `\n` for a newline, `\t` for a tab, `\s` for a space — never a second convention,
+  and the backslash SHALL be escaped so the family is injective
+
 #### Scenario: a tab inside a changed path cannot corrupt the lockfile classification
 - **WHEN** a changed path contains a TAB character (for example an untracked file whose name begins
   `Cargo.lock<TAB>`)

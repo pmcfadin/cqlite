@@ -86,6 +86,11 @@ if [ "${1:-}" = fmt ] && [ -n "${FAKE_CARGO_CREATE:-}" ]; then
   mkdir -p "$(dirname "$FAKE_CARGO_CREATE")"
   printf 'created mid-run\n' > "$FAKE_CARGO_CREATE"
 fi
+# …and the TRACKED-file variant: appending to an existing tracked file is how the
+# `lockfile-settled` carve-out is reached (cargo re-resolving a stale lockfile).
+if [ "${1:-}" = fmt ] && [ -n "${FAKE_CARGO_MUTATE:-}" ]; then
+  printf 'lock v2\n' >> "$FAKE_CARGO_MUTATE"
+fi
 case "${1:-}" in metadata) printf '{"packages":[],"workspace_members":[],"target_directory":"/tmp"}\n' ;; esac
 exit 0
 STUB
@@ -272,6 +277,53 @@ if [ "$rc" -ne 0 ] && grep -q '^RESULT: FAIL' "$sum" \
 else
   bad "J1 near-miss: the capture-failure block claims a split it never observed (rc=$rc)"
   grep -E '^commit:|^tree-' "$sum" 2>/dev/null
+fi
+# …and the POSITIVE half of the same contract (#2926 review K4). Asserting only the ABSENCE
+# of the two labels leaves the spec's third pinned string — the rendering a capture-failure
+# block actually publishes — unverified by construction, the same gap the H2/H5 wording fix
+# closed. The spec pins it verbatim: "When no validated terminal capture exists the line
+# SHALL read exactly `commit: unverified branch: <branch> dirty: unverified`", so it is
+# checked as a WHOLE-LINE equality, exactly the way START_LABEL/END_LABEL are checked above.
+#
+# Here `<branch>` is `unknown`, and that is the contract too, not a shortcut: the branch NAME
+# is read ONCE inside the guarded window (TREE_START_BRANCH, review C1), and a START capture
+# that never validated never opened one — naming a branch from a fresh emit-time git call is
+# precisely what C1 forbids. The variant below covers `<branch>` carrying a real name.
+nm_expect="commit: unverified branch: unknown dirty: unverified"
+nm_commit=$(summary_line "$sum" 'commit: ')
+if [ "$nm_commit" = "$nm_expect" ]; then
+  ok "J1/K4 near-miss: the capture-failure block renders the pinned contract line exactly ('$nm_expect')"
+else
+  bad "J1/K4 near-miss: the unverified rendering is not the pinned contract line — got '$nm_commit', want '$nm_expect'"
+fi
+
+# The variant that exercises the `<branch>` substitution itself: a digest tool that succeeds
+# for the START capture and fails for every later one. The start identity is validated (so
+# the branch IS read), no mutation is ever observed (so the VERIFIED-START branch of the
+# renderer is not taken), and the terminal capture cannot be validated — the exact state the
+# pinned line describes, now with a real branch name in it.
+ONESHOT="$tmp/oneshot"; mkdir -p "$ONESHOT"
+for _tool in sha256sum shasum; do
+  { printf '#!/bin/sh\n'
+    printf 'n=$(cat "%s/count" 2>/dev/null || echo 0); n=$((n + 1)); printf %%s "$n" > "%s/count"\n' \
+      "$ONESHOT" "$ONESHOT"
+    printf '[ "$n" -gt 1 ] && exit 3\n'
+    printf 'exec %s "$@"\n' "$(command -v "$_tool" 2>/dev/null || echo /bin/false)"
+  } > "$ONESHOT/$_tool"
+  chmod +x "$ONESHOT/$_tool"
+done
+printf '0' > "$ONESHOT/count"
+sum="$tmp/label-oneshot.txt"; out="$tmp/label-oneshot.out"
+os_branch=$( cd "$r_lbl" && git rev-parse --abbrev-ref HEAD 2>/dev/null )
+( cd "$r_lbl" && PATH="$ONESHOT:$STUBBIN:$PATH" env AGENT_GATE_SUMMARY_FILE="$sum" \
+    AGENT_GATE_TREE_SELFTEST=clean bash "$r_lbl/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+os_expect="commit: unverified branch: $os_branch dirty: unverified"
+os_commit=$(summary_line "$sum" 'commit: ')
+if [ -n "$os_branch" ] && [ "$os_commit" = "$os_expect" ] && [ "$rc" -ne 0 ] \
+   && grep -q '^RESULT: FAIL' "$sum" 2>/dev/null; then
+  ok "K4: with a VALIDATED start and an unvalidatable later capture the pinned line carries the real branch ('$os_expect')"
+else
+  bad "K4: the pinned unverified line did not carry the window's branch — got '$os_commit', want '$os_expect' (rc=$rc)"
 fi
 ( cd "$r_lbl" && git checkout -q -- README.md )
 
@@ -513,6 +565,170 @@ if [ "$(code_sites "$mut" 'TREE_MUTATED=1')" = 2 ] \
   ok "D mutant: a 4th path assigning the state itself produces a SECOND site, which the pin rejects (proved discriminating)"
 else
   bad "D mutant: adding a second assignment site did not change the counts — the pin is vacuous"
+fi
+
+echo "=== phase E (K1): the mutation diagnostic is unambiguous about WHAT moved ====="
+
+# The `changed:` list and the `lockfile-settled:` detail are SPACE-JOINED, so a path
+# containing a space rendered exactly like TWO separate paths (#2926 review K1) — in the one
+# artifact a triager reads after a mid-run mutation. Both renderings now escape the space as
+# `\s`, the fourth member of the `.report` view's own backslash family (`\\`, `\n`, `\t`).
+#
+# These cases live in this suite rather than the (already oversized) integrity suite for the
+# campsite reason its header states; the capture-side escaping cases are the B6 tab case
+# there, and this is the RENDER side of the same property.
+r_sp=$(mkrepo space-repo)
+sum="$tmp/space-changed.txt"
+( cd "$r_sp" && PATH="$STUBBIN:$PATH" FAKE_CARGO_CREATE="$r_sp/two words.txt" \
+    AGENT_GATE_SUMMARY_FILE="$sum" bash "$r_sp/scripts/agent-gate.sh" --only fmt \
+    >"$tmp/space-changed.out" 2>&1 ); rc=$?
+sp_line=$(summary_line "$sum" 'tree-integrity: FAIL')
+sp_bad=""
+[ "$rc" -ne 0 ] || sp_bad="${sp_bad:+$sp_bad }run-certified"
+case "$sp_line" in
+  *"changed: two\\swords.txt;"*) ;;
+  *) sp_bad="${sp_bad:+$sp_bad }space-not-escaped" ;;
+esac
+case "$sp_line" in
+  *"two words.txt"*) sp_bad="${sp_bad:+$sp_bad }raw-space-still-rendered" ;;
+esac
+if [ -z "$sp_bad" ]; then
+  ok "K1: a changed path containing a SPACE renders as 'two\\swords.txt' — one path, not two"
+else
+  bad "K1: the changed-path rendering is ambiguous ($sp_bad): '$sp_line'"
+fi
+rm -f "$r_sp/two words.txt"
+
+# The same property on the OTHER rendering: the `lockfile-settled:` detail, which joins
+# `<path> <before>→<after>` triples with the same space.
+mkdir -p "$r_sp/vendor dir"
+printf 'lock v1\n' > "$r_sp/vendor dir/Cargo.lock"
+( cd "$r_sp" && git add -A && git "${GIT_ID[@]}" commit -qm "vendored lockfile" ) >/dev/null 2>&1
+sum="$tmp/space-lockfile.txt"
+( cd "$r_sp" && PATH="$STUBBIN:$PATH" FAKE_CARGO_MUTATE="$r_sp/vendor dir/Cargo.lock" \
+    AGENT_GATE_SUMMARY_FILE="$sum" bash "$r_sp/scripts/agent-gate.sh" --only fmt \
+    >"$tmp/space-lockfile.out" 2>&1 )
+sp_lock=$(summary_line "$sum" 'tree-integrity: PASS (lockfile-settled')
+case "$sp_lock" in
+  *"lockfile-settled: vendor\\sdir/Cargo.lock "*)
+    ok "K1: the lockfile-settled detail escapes the space too ('vendor\\sdir/Cargo.lock …') — the same helper, not a second convention" ;;
+  *)
+    bad "K1: the lockfile-settled detail renders an ambiguous path: '$sp_lock'" ;;
+esac
+( cd "$r_sp" && git checkout -q -- "vendor dir/Cargo.lock" )
+
+# The mutant: restore the pre-fix rendering (the raw path, space and all) and prove the
+# assertion above goes red — a one-path list becomes indistinguishable from a two-path one.
+mut="$tmp/gate-mutant-render.sh"
+if gate_replace_line "$GATE" "$mut" \
+     'rendered="${rendered:+$rendered }$(_tree_render_path "$p")"' \
+     'rendered="${rendered:+$rendered }$p"'; then
+  r_spm=$(mkrepo_from render-mutant-repo "$mut")
+  ( cd "$r_spm" && PATH="$STUBBIN:$PATH" FAKE_CARGO_CREATE="$r_spm/two words.txt" \
+      AGENT_GATE_SUMMARY_FILE="$tmp/space-mutant.txt" \
+      bash "$r_spm/scripts/agent-gate.sh" --only fmt >"$tmp/space-mutant.out" 2>&1 )
+  spm_line=$(summary_line "$tmp/space-mutant.txt" 'tree-integrity: FAIL')
+  case "$spm_line" in
+    *"changed: two words.txt;"*)
+      ok "K1 mutant: the pre-fix rendering emits 'changed: two words.txt' — indistinguishable from two paths (proved discriminating)" ;;
+    *)
+      bad "K1 mutant: the pre-fix rendering did not reproduce the ambiguity — the case is vacuous: '$spm_line'" ;;
+  esac
+else
+  bad "K1 mutant: the changed-path render site was not found — the mutant is vacuous"
+fi
+
+echo "=== phase F (K2): oversized-untracked membership is cursor-based AND correct ==="
+
+# Membership in the oversized-untracked set was a linear scan INSIDE the per-path loop, so
+# each capture cost O(#untracked × #oversized) — at every component boundary, in every
+# SIDE-lane subshell and at the terminal (#2926 review K2). It is now a single forward
+# CURSOR, which is only correct because `bigpaths` is an order-preserving SUBSEQUENCE of
+# `upaths`. This phase asserts the OUTCOME (the right files, and only those, take the
+# size+mtime record) and then breaks each half of that reasoning in turn.
+mkbig() { # mkbig <path> <bytes>
+  local i=0
+  : > "$1"
+  while [ "$i" -lt "$2" ]; do printf '0123456789abcdef' >> "$1"; i=$(( i + 16 )); done
+}
+# k2_fixture <name> <gate> -> a checkout whose UNTRACKED set interleaves oversized and
+# under-cap files AROUND an embedded git repo. `git ls-files --others` reports an embedded
+# repo as the single DIRECTORY entry `m-embedded/`; handing that to find would make it
+# RECURSE and report paths that are not in the untracked list at all, which is exactly the
+# desync the probe filter exists to prevent.
+k2_fixture() {
+  local root; root=$(mkrepo_from "$1" "$2")
+  mkbig "$root/a-big.bin" 8192
+  printf 'small\n' > "$root/b-small.txt"
+  mkdir -p "$root/m-embedded"
+  ( cd "$root/m-embedded" && git init -q . ) >/dev/null 2>&1
+  mkbig "$root/m-embedded/inner-big.bin" 8192
+  mkbig "$root/z-big.bin" 8192
+  printf '%s\n' "$root"
+}
+# k2_capture <repo> <manifest-out> -> the capture's `fallbacks=` count (empty on failure)
+k2_capture() {
+  ( cd "$1" && env AGENT_GATE_SUMMARY_FILE="$tmp/k2-sentinel.txt" \
+      AGENT_GATE_TREE_SELFTEST=capture AGENT_GATE_TREE_HASH_CAP_BYTES=4096 \
+      AGENT_GATE_TREE_SELFTEST_MANIFEST_OUT="$2" \
+      bash "$1/scripts/agent-gate.sh" 2>/dev/null ) \
+    | sed -n 's/^tree-selftest: .*fallbacks=//p' | head -1
+}
+# k2_value <report> <path> -> the VALUE field of that path's record. The path travels
+# through the ENVIRONMENT, never `awk -v`, for the escape-transparency reason the gate's own
+# lookups do (#2926 review G2/H4).
+k2_value() { TEST_AWK_P="$2" awk -F'\t' '$4 == ENVIRON["TEST_AWK_P"] { print $2; exit }' "$1" 2>/dev/null; }
+
+r_k2=$(k2_fixture k2-repo "$GATE")
+m_k2="$tmp/k2-manifest"
+k2_fb=$(k2_capture "$r_k2" "$m_k2")
+k2_bad=""
+case "$(k2_value "$m_k2.report" a-big.bin)" in SIZE:8192:MTIME:*) ;; *) k2_bad="${k2_bad:+$k2_bad }a-big-not-capped" ;; esac
+case "$(k2_value "$m_k2.report" z-big.bin)" in SIZE:8192:MTIME:*) ;; *) k2_bad="${k2_bad:+$k2_bad }z-big-not-capped" ;; esac
+case "$(k2_value "$m_k2.report" b-small.txt)" in
+  SIZE:*|'') k2_bad="${k2_bad:+$k2_bad }small-file-capped-or-missing" ;;
+esac
+case "$(k2_value "$m_k2.report" m-embedded/)" in NONFILE) ;; *) k2_bad="${k2_bad:+$k2_bad }embedded-repo-record" ;; esac
+[ "$k2_fb" = 2 ] || k2_bad="${k2_bad:+$k2_bad }fallbacks=$k2_fb(want 2)"
+if [ -z "$k2_bad" ]; then
+  ok "K2: the cursor selects EXACTLY the oversized untracked files (a-big, z-big) across an embedded-repo entry, and no other ($k2_fb fallbacks)"
+else
+  bad "K2: the oversized-untracked membership is wrong ($k2_bad)"
+  grep -c . "$m_k2.report" 2>/dev/null
+fi
+
+# Mutant 1 — the cursor never reports a hit: nothing takes the size+mtime record, so the
+# assertion above cannot pass vacuously on a capture that simply hashes everything.
+mut="$tmp/gate-mutant-cursor.sh"
+if gate_replace_line "$GATE" "$mut" 'isbig=1; bi=$(( bi + 1 ))' 'isbig=0; bi=$(( bi + 1 ))'; then
+  r_k2m=$(k2_fixture k2-cursor-mutant-repo "$mut")
+  k2m_fb=$(k2_capture "$r_k2m" "$tmp/k2-cursor-manifest")
+  if [ "$k2m_fb" = 0 ]; then
+    ok "K2 mutant: with the cursor hit disabled NO file takes the size+mtime record (proved discriminating)"
+  else
+    bad "K2 mutant: the cursor mutant still reported $k2m_fb fallback(s) — the assertion is vacuous"
+  fi
+else
+  bad "K2 mutant: the cursor hit site was not found — the mutant is vacuous"
+fi
+
+# Mutant 2 — the load-bearing half: drop the probe FILTER, so the embedded-repo directory
+# reaches find, find recurses into it, and its inner file lands in `bigpaths` between
+# a-big.bin and z-big.bin. The cursor then desyncs and z-big.bin — a genuinely oversized
+# file — silently stops taking the fallback. This is the case that proves the subsequence
+# property the cursor rests on is real and not an assumption.
+mut="$tmp/gate-mutant-probe.sh"
+if gate_replace_line "$GATE" "$mut" \
+     'if [ ! -L "$p" ] && [ -f "$p" ]; then probe+=("$p"); fi' 'probe+=("$p")'; then
+  r_k2p=$(k2_fixture k2-probe-mutant-repo "$mut")
+  k2p_fb=$(k2_capture "$r_k2p" "$tmp/k2-probe-manifest")
+  k2p_z=$(k2_value "$tmp/k2-probe-manifest.report" z-big.bin)
+  case "$k2p_z" in
+    SIZE:*) bad "K2 mutant: dropping the probe filter changed nothing — the subsequence property is untested (fallbacks=$k2p_fb)" ;;
+    *)      ok "K2 mutant: without the probe filter find recurses into the embedded repo and z-big.bin loses its record (fallbacks=$k2p_fb) — the subsequence property is load-bearing" ;;
+  esac
+else
+  bad "K2 mutant: the probe filter site was not found — the mutant is vacuous"
 fi
 
 echo "----"

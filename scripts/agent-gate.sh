@@ -2101,14 +2101,6 @@ _tree_split_identity() {
 
 _tree_short() { printf '%.12s' "${1:-?}"; }
 
-# _tree_in_list <needle> <haystack...>
-_tree_in_list() {
-  local n="$1"; shift
-  local x
-  for x in ${@+"$@"}; do [ "$x" = "$n" ] && return 0; done
-  return 1
-}
-
 # _tree_manifest_ok <file> <nul|nl> <head> <body-count>: rc 0 iff <file> is a COMPLETE
 # manifest — first record `H<TAB><head>`, last record `N<TAB><body-count>`, and exactly
 # <body-count> records between them. #2926 review C2: checking only the first record
@@ -2196,30 +2188,56 @@ _tree_identity() {
   done < <(git --no-optional-locks ls-files --others --exclude-standard -z | _tree_sort0)
 
   # Oversized UNTRACKED files (one batched find, never a fork per file).
-  local -a bigpaths=()
-  if [ "${#upaths[@]}" -gt 0 ]; then
+  #
+  # Only PLAIN, non-symlink untracked paths are handed to find, and that filter is what
+  # makes `bigpaths` an ORDER-PRESERVING SUBSEQUENCE of `upaths`: POSIX find processes its
+  # operands in order and a non-directory operand yields at most itself, so the output is
+  # the given order with the under-cap paths removed. `git ls-files --others` CAN emit a
+  # directory entry (an embedded git repo is listed as `dir/`), which find would recurse
+  # into and report paths that are not in `upaths` at all — breaking the subsequence
+  # property. Those entries could never match the membership test anyway (the per-path
+  # loop below reaches it only under `-f`), so dropping them here changes no record.
+  #
+  # The subsequence property is what lets the loop test membership with a single forward
+  # CURSOR instead of a linear scan (#2926 review K2): membership was O(#untracked ×
+  # #oversized-untracked) inside a capture that runs at every component boundary, in every
+  # backgrounded SIDE-lane subshell and at the terminal, so the scan cost multiplied.
+  local -a bigpaths=() probe=()
+  for p in ${upaths[@]+"${upaths[@]}"}; do
+    if [ ! -L "$p" ] && [ -f "$p" ]; then probe+=("$p"); fi
+  done
+  if [ "${#probe[@]}" -gt 0 ]; then
     # `xargs -0 find …` would append the paths AFTER the expression (find requires them
     # BEFORE it), so the paths are placed explicitly via `sh -c … "$@"`.
     while IFS= read -r -d '' p; do bigpaths+=("$p"); done < <(
-      printf '%s\0' "${upaths[@]}" \
+      printf '%s\0' "${probe[@]}" \
         | TREE_CAP="$TREE_HASH_CAP_BYTES" xargs -0 \
             sh -c 'find -H "$@" -size "+${TREE_CAP}c" -type f -print0 2>/dev/null' sh
     )
   fi
 
   local -a tags=() vals=() modes=() paths=() batch=()
-  local fallbacks=0 tag mode value h
+  local fallbacks=0 tag mode value h isbig
+  local bi=0 nbig="${#bigpaths[@]}"
   local -a src=()
   for tag in T U; do
     if [ "$tag" = T ]; then src=(${tpaths[@]+"${tpaths[@]}"}); else src=(${upaths[@]+"${upaths[@]}"}); fi
     for p in ${src[@]+"${src[@]}"}; do
+      # The cursor advances at EVERY untracked path, before any branch: a path that was
+      # oversized at the find but has since been deleted (or turned into a symlink) still
+      # consumes its entry, so the two walks stay in step and a later oversized file is
+      # not missed. One string comparison per path, O(1) amortised.
+      isbig=0
+      if [ "$tag" = U ] && [ "$bi" -lt "$nbig" ] && [ "${bigpaths[$bi]}" = "$p" ]; then
+        isbig=1; bi=$(( bi + 1 ))
+      fi
       if [ -L "$p" ]; then
         # A symlink's git blob IS its target; never follow it (a dangling link would
         # abort the whole hash-object batch).
         mode=120000; value="LINK:$(readlink "$p" 2>/dev/null || echo '?')"
       elif [ -f "$p" ]; then
         if [ -x "$p" ]; then mode=100755; else mode=100644; fi
-        if [ "${#bigpaths[@]}" -gt 0 ] && [ "$tag" = U ] && _tree_in_list "$p" "${bigpaths[@]}"; then
+        if [ "$isbig" -eq 1 ]; then
           value="SIZE:$(wc -c < "$p" 2>/dev/null | tr -d ' '):MTIME:$(_tree_mtime "$p")"
           fallbacks=$(( fallbacks + 1 ))
         else
@@ -2265,6 +2283,14 @@ _tree_identity() {
   # (#2926 review B6): an unescaped tab truncated $4, which both named the wrong path in
   # the failure line AND fed the Cargo.lock classifier a fragment, so the non-fatal
   # lockfile carve-out could misfire on a path that merely LOOKS like a lockfile.
+  #
+  # The BACKSLASH is escaped FIRST, and it is what makes the family INJECTIVE (#2926
+  # review K1): without it a path literally containing the two characters `\` `n` and a
+  # path containing a real newline produced the SAME record, so the escaping that exists
+  # to disambiguate could itself be forged. One family, decoded left to right:
+  #   `\\` = a literal backslash, `\n` = newline, `\t` = tab
+  # and _tree_render_path adds the fourth member (`\s` = space) at RENDER time, where the
+  # space is the character that would forge a list boundary.
   local i k=0 esc escv tab=$'\t'
   {
     printf 'H\t%s\0' "$head"
@@ -2273,8 +2299,8 @@ _tree_identity() {
       value="${vals[$i]}"
       if [ "$value" = "@H@" ]; then value="${hashes[$k]}"; k=$(( k + 1 )); fi
       printf '%s\t%s\t%s\t%s\0' "${tags[$i]}" "$value" "${modes[$i]}" "${paths[$i]}"
-      esc=${paths[$i]//$nl/\\n};  esc=${esc//$tab/\\t}
-      escv=${value//$nl/\\n};     escv=${escv//$tab/\\t}
+      esc=${paths[$i]//\\/\\\\};  esc=${esc//$nl/\\n};   esc=${esc//$tab/\\t}
+      escv=${value//\\/\\\\};     escv=${escv//$nl/\\n}; escv=${escv//$tab/\\t}
       printf '%s\t%s\t%s\t%s\n' "${tags[$i]}" "$escv" "${modes[$i]}" "$esc" >&3
     done
     printf 'N\t%s\0' "${#paths[@]}"
@@ -2947,7 +2973,8 @@ _tree_report_value() {
 #
 # <path> is the ESCAPED spelling the `.report` view carries, so conditions 1-3 (report
 # lookups) see it verbatim, while condition 4 hands it to git, which knows the RAW path.
-# For the only paths that can differ — one containing a tab or a newline — git resolves
+# For the only paths that can differ — one containing a tab, a newline or a backslash —
+# git resolves
 # nothing and the carve-out is refused: the FATAL direction, which is the correct one.
 _tree_lockfile_admissible() {
   local a="$1" b="$2" head_a="$3" p="$4" ta tb vb
@@ -2959,6 +2986,24 @@ _tree_lockfile_admissible() {
   _tree_hex_id_ok "$vb" || return 1
   [ "$(git --no-optional-locks cat-file -t "$head_a:$p" 2>/dev/null)" = blob ] || return 1
   return 0
+}
+
+# _tree_render_path <report-path> -> the LIST-SAFE spelling of one path.
+#
+# The `changed:` list and the `lockfile-settled:` detail are SPACE-JOINED, so the space is
+# the character that forges a LIST BOUNDARY exactly as a tab forges a field and a newline
+# forges a record (#2926 review K1): rendered raw, the single path `src/a b.rs` reads
+# identically to the two paths `src/a` and `b.rs`. This is the one diagnostic a triager
+# reads after a mid-run mutation, so it must be unambiguous.
+#
+# It is the FOURTH member of the `.report` view's own backslash family (`\\`, `\n`, `\t`
+# — see _tree_identity), never a second convention: `\s` = a space. The input is already
+# the report spelling, in which every literal backslash is doubled, so an `\s` in the
+# output can only have come from a real space, and `\\s` is a path that really contains
+# `\` `s`. Decoding is single-layer, left to right.
+_tree_render_path() {
+  local s="$1"
+  printf '%s' "${s// /\\s}"
 }
 
 _tree_change_class() {
@@ -2982,7 +3027,7 @@ _tree_change_class() {
       [ -n "$p" ] || continue
       before=$(_tree_report_value "$a" "$p")
       after=$(_tree_report_value "$b" "$p")
-      detail="${detail:+$detail }$p $(_tree_short "${before:-unmodified}")→$(_tree_short "${after:-unmodified}")"
+      detail="${detail:+$detail }$(_tree_render_path "$p") $(_tree_short "${before:-unmodified}")→$(_tree_short "${after:-unmodified}")"
     done <<<"$list"
     printf 'lockfile\t%s\n' "$detail"
     return 0
@@ -2993,7 +3038,7 @@ _tree_change_class() {
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     if [ "$shown" -lt 5 ]; then
-      rendered="${rendered:+$rendered }$p"
+      rendered="${rendered:+$rendered }$(_tree_render_path "$p")"
       shown=$(( shown + 1 ))
     fi
   done <<<"$list"
