@@ -1061,6 +1061,247 @@ else
 $outSecond"
 fi
 
+# ===========================================================================
+echo "TEST 17: an UNREADABLE holder commit is infra (exit 1), never LOST/ADOPT-LOST (#2945 review H1)"
+# ===========================================================================
+# `fetch_claim` is best-effort (`|| true`), so a transient fetch failure — disk full,
+# partial outage, ref-advertisement hiccup — leaves the claim OBJECT absent and its
+# message unreadable. The identity check then answered "not us", and both `claim` and
+# `adopt` fell through to LOST / ADOPT-LOST (exit 2), which workers read as "you did not
+# win, take the next item". In the reported shape `now` is OUR OWN claim commit, so a
+# machine abandoned an issue it still held the ref for — and nobody else could take it
+# either (the ref is held): a permanent stall whose tell is the empty
+# `holder-machine= actor=` render. An unread signal must be infra, like every other one.
+runB claim 2017 >/dev/null 2>&1; rcSetup17=$?
+heldSha17=$(ref_sha 2017)
+# The object must NOT be present in clone A — that is what makes the read unreadable.
+if [ "$rcSetup17" -eq 0 ] && [ -n "$heldSha17" ] \
+   && ! g -C "$A" cat-file -e "${heldSha17}^{commit}" 2>/dev/null; then
+  ok "setup: machineB holds issue-2017 and clone A does not have the claim object locally"
+else
+  fail "setup failed for the unreadable-holder case (rc=$rcSetup17 ref='$heldSha17'; object already local?)"
+fi
+SHIMFETCH="$T/shim-fetch-fail"
+mkdir -p "$SHIMFETCH"
+cat >"$SHIMFETCH/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = "fetch" ] && exit 128; done
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMFETCH/git"
+outUnreadClaim=$( cd "$A" && PATH="$SHIMFETCH:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin \
+  bash "$CLAIM" claim 2017 2>&1 ); rcUnreadClaim=$?
+if [ "$rcUnreadClaim" -eq 1 ] && printf '%s\n' "$outUnreadClaim" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outUnreadClaim" | grep -q 'reason=infra' \
+   && printf '%s\n' "$outUnreadClaim" | grep -q 'detail=holder-commit-unreadable' \
+   && ! printf '%s\n' "$outUnreadClaim" | grep -q 'CLAIM: LOST' \
+   && [ "$(ref_sha 2017)" = "$heldSha17" ]; then
+  ok "claim with an unreadable holder commit → ERROR infra exit 1 (never LOST), ref untouched"
+else
+  fail "expected ERROR infra holder-commit-unreadable exit 1 with no LOST; got rc=$rcUnreadClaim ref='$(ref_sha 2017)'
+$outUnreadClaim"
+fi
+# …and the verdict never renders an EMPTY holder (the tell of the old bug).
+if ! printf '%s\n' "$outUnreadClaim" | grep -qE 'machine= |machine=$|actor= |actor=$'; then
+  ok "the unreadable-holder verdict prints no empty machine=/actor= field"
+else
+  fail "the unreadable-holder verdict rendered an empty holder field:
+$outUnreadClaim"
+fi
+outUnreadAdopt=$( cd "$A" && PATH="$SHIMFETCH:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin \
+  bash "$CLAIM" adopt 2017 --expect none --reason "resume attempt over a flaky fetch" 2>&1 ); rcUnreadAdopt=$?
+if [ "$rcUnreadAdopt" -eq 1 ] && printf '%s\n' "$outUnreadAdopt" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outUnreadAdopt" | grep -q 'reason=infra' \
+   && printf '%s\n' "$outUnreadAdopt" | grep -q 'detail=holder-commit-unreadable' \
+   && ! printf '%s\n' "$outUnreadAdopt" | grep -q 'ADOPT-LOST' \
+   && [ "$(ref_sha 2017)" = "$heldSha17" ] && [ "$(accepted_updates 2017)" = "1" ]; then
+  ok "adopt with an unreadable holder commit → ERROR infra exit 1 (never ADOPT-LOST), no server write"
+else
+  fail "expected adopt ERROR infra holder-commit-unreadable exit 1 with no ADOPT-LOST; got rc=$rcUnreadAdopt ref='$(ref_sha 2017)' updates=$(accepted_updates 2017)
+$outUnreadAdopt"
+fi
+# ANTI-VACUITY: with the fetch WORKING, the very same commands still give the genuine
+# race verdicts — so the infra verdict above comes from the unread signal, nothing else.
+outReadClaim=$(runA claim 2017); rcReadClaim=$?
+outReadAdopt=$(runA adopt 2017 --expect none --reason "resume attempt with a healthy fetch"); rcReadAdopt=$?
+if [ "$rcReadClaim" -eq 2 ] && printf '%s\n' "$outReadClaim" | grep -q 'holder-machine=machineB' \
+   && [ "$rcReadAdopt" -eq 2 ] && printf '%s\n' "$outReadAdopt" | grep -q 'CLAIM: ADOPT-LOST'; then
+  ok "with a healthy fetch the same calls still report the genuine LOST/ADOPT-LOST (exit 2) — the infra verdict is not a blanket softening"
+else
+  fail "expected LOST + ADOPT-LOST exit 2 once the holder commit is readable; got rcClaim=$rcReadClaim rcAdopt=$rcReadAdopt
+$outReadClaim
+$outReadAdopt"
+fi
+
+# ===========================================================================
+echo "TEST 18: an UNSUBSTITUTED <…> in --reason is refused on the RAW text (#2945 review H2)"
+# ===========================================================================
+# The placeholder gate only saw the SANITIZED token, so it caught a bare `<why>` but not
+# a template inside a longer value: the documented
+# `--reason resume-legacy-branch-lock:<branch>`, run VERBATIM (the exact mode this change
+# is built around), sanitizes to `resume-legacy-branch-lock:-branch` — 33 chars, no
+# sentinel — and was ACCEPTED, recording an unresolved placeholder as the audit reason.
+tmplRc=""
+for tmpl in 'resume-legacy-branch-lock:<branch>' 'resume-legacy-branch-lock:issue-2018-<slug>' 'resume of <N> after a reap' '<concrete why>'; do
+  runB adopt 2018 --expect none --reason "$tmpl" >/dev/null 2>&1
+  tmplRc="$tmplRc $?"
+done
+if [ "$tmplRc" = " 64 64 64 64" ] && [ -z "$(ref_sha 2018)" ] && [ "$(accepted_updates 2018)" = "0" ]; then
+  ok "every --reason still carrying <…> is a usage error (exit 64), nothing acquired"
+else
+  fail "expected 64 from every unsubstituted --reason template; got rcs='$tmplRc' ref='$(ref_sha 2018)' updates=$(accepted_updates 2018)"
+fi
+outTmpl=$(runB adopt 2018 --expect none --reason 'resume-legacy-branch-lock:<branch>' 2>&1) || true
+if printf '%s\n' "$outTmpl" | grep -qi 'placeholder' && printf '%s\n' "$outTmpl" | grep -qi 'substitute'; then
+  ok "the refusal names the unsubstituted placeholder and tells the caller to substitute it"
+else
+  fail "the template refusal does not explain itself:
+$outTmpl"
+fi
+# The SUBSTITUTED form must work — the point is a documented invocation that runs.
+outConcrete=$(runB adopt 2018 --expect none --reason 'resume-legacy-branch-lock:branch-outlived-claim'); rcConcrete=$?
+if [ "$rcConcrete" -eq 0 ] && printf '%s\n' "$outConcrete" | grep -q 'CLAIM: ADOPTED' \
+   && [ "$(line_field "$(runB status 2018)" reason)" = "resume-legacy-branch-lock:branch-outlived-claim" ]; then
+  ok "the substituted, self-describing reason adopts and records verbatim"
+else
+  fail "expected the concrete reason to adopt and record; got rc=$rcConcrete reason='$(line_field "$(runB status 2018)" reason)'
+$outConcrete"
+fi
+# …and no doc/skill may hand the reader a template again: every line that shows a
+# runnable `claim.sh adopt … --reason` must carry a SUBSTITUTED value.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+docHits="$(grep -rn -- 'claim\.sh adopt .*--reason' \
+  "$REPO_ROOT/CLAUDE.md" "$REPO_ROOT/.claude/skills" \
+  "$REPO_ROOT/website/src/content/docs/agents-developing/delivery-pipeline.md" 2>/dev/null || true)"
+badDocs=""
+while IFS= read -r docLine; do
+  [ -n "$docLine" ] || continue
+  docVal="${docLine#*--reason }"; docVal="${docVal%% *}"
+  case "$docVal" in *'<'*) badDocs="$badDocs
+  $docLine" ;; esac
+done <<< "$docHits"
+if [ -n "$docHits" ] && [ -z "$badDocs" ]; then
+  ok "every documented runnable 'claim.sh adopt … --reason' carries a substituted value ($(printf '%s\n' "$docHits" | grep -c . ) line(s) checked)"
+else
+  fail "a documented --reason still ships an unsubstituted template (or the lint found no lines to check):$badDocs"
+fi
+
+# ===========================================================================
+echo "TEST 19: --actor must RECORD something — two unrecordable actors can no longer alias (#2945 review H3)"
+# ===========================================================================
+# --reason was made fail-closed, but --actor — part of the HOLDER IDENTITY that gates
+# re-entrancy, verify and non-forced release — still coerced to the `unspecified`
+# sentinel. So `claim N --actor '***'` recorded `actor=unspecified` and a later
+# `release N --actor '???'` resolved to `unspecified` too, satisfying the holder gate for
+# a claim it does not own: two distinct-but-unrecordable actors aliased onto ONE identity.
+actorRc=""
+for badActor in '***' '???' '   ' '---' '…' 'unspecified' '=='; do
+  runA claim 2019 --actor "$badActor" >/dev/null 2>&1
+  actorRc="$actorRc $?"
+done
+if [ "$actorRc" = " 64 64 64 64 64 64 64" ] && [ -z "$(ref_sha 2019)" ]; then
+  ok "an unrecordable --actor ('***', '???', '   ', '---', '…', 'unspecified', '==') is a usage error (exit 64), nothing claimed"
+else
+  fail "expected 64 from every unrecordable --actor with no ref created; got rcs='$actorRc' ref='$(ref_sha 2019)'"
+fi
+# THE ALIASING ITSELF: a claim by a recordable actor cannot be released by an
+# unrecordable one, on ANY subcommand — the sentinel identity is unreachable now.
+runA claim 2019 --actor alpha >/dev/null 2>&1; rcAlpha=$?
+alphaSha=$(ref_sha 2019)
+aliasRc=""
+for sub in "verify 2019" "release 2019" "adopt 2019 --expect none --reason retaking-with-an-unrecordable-actor"; do
+  # shellcheck disable=SC2086  # deliberate word-split of the fixed arg list
+  ( cd "$A" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" $sub --actor '???' >/dev/null 2>&1 )
+  aliasRc="$aliasRc $?"
+done
+if [ "$rcAlpha" -eq 0 ] && [ "$aliasRc" = " 64 64 64" ] && [ "$(ref_sha 2019)" = "$alphaSha" ]; then
+  ok "an unrecordable --actor is refused (64) on verify/release/adopt too — it can no longer alias onto the 'alpha' holder's claim"
+else
+  fail "expected 64 from verify/release/adopt with an unrecordable actor and the ref intact; got rcAlpha=$rcAlpha rcs='$aliasRc' ref='$(ref_sha 2019)' was='$alphaSha'"
+fi
+# Non-regression: a RECORDABLE actor still round-trips end to end.
+runA verify 2019 --actor alpha >/dev/null 2>&1; rcVAlpha=$?
+runA verify 2019 >/dev/null 2>&1; rcVDefault=$?
+rcRelAlpha=0; ( cd "$A" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" release 2019 --actor alpha >/dev/null 2>&1 ) || rcRelAlpha=$?
+if [ "$rcVAlpha" -eq 0 ] && [ "$rcVDefault" -eq 2 ] && [ "$rcRelAlpha" -eq 0 ] && [ -z "$(ref_sha 2019)" ]; then
+  ok "a recordable --actor still claims/verifies/releases, and the default actor is correctly a non-holder"
+else
+  fail "recordable-actor round trip broke: verify(alpha)=$rcVAlpha verify(default)=$rcVDefault release(alpha)=$rcRelAlpha ref='$(ref_sha 2019)'"
+fi
+
+# ===========================================================================
+echo "TEST 20: HAND-CRAFTED claim commits reach msg_field UNSANITIZED — first exact key wins, globs stay inert (#2945 review H4)"
+# ===========================================================================
+# The forgery tests above drive --reason/--actor through the CLI, where sanitize_field
+# already strips '=', spaces and '*' — so they exercise the SANITIZER, not the
+# `msg_field` parser the header calls "the root fix" and "a second, independent layer".
+# The one input class that reaches the parser unsanitized is a HAND-CRAFTED claim commit,
+# which this file documents workers pushing twice in one day. Without these cases a
+# refactor reverting msg_field to the greedy `sed` form — or dropping its `set -f` guard
+# — passes every other test in the suite.
+# push_crafted_claim <issue> <full commit message> — a claim ref whose commit message is
+# EXACTLY the given text (a root commit on the empty tree, like claim.sh's own).
+push_crafted_claim() {
+  local issue="$1" msg="$2" tree sha
+  tree="$(g -C "$A" hash-object -t tree --stdin </dev/null)"
+  sha="$(g -C "$A" commit-tree "$tree" -m "$msg")"
+  g -C "$A" push -q origin "$sha:refs/claims/issue-$issue"
+  printf '%s\n' "$sha"
+}
+# (a) GREEDY-vs-FIRST and EXACT-KEY, in one message: a `holder-machine=` token BEFORE the
+# real one (a substring matcher answers machineC) and a trailing `machine=machineA
+# actor=flow` pair (the greedy `.*machine=` matcher answers machineA/flow — clone A's own
+# identity, i.e. a forged holder).
+craftedSha=$(push_crafted_claim 2020 "claim issue=2020 holder-machine=machineC machine=machineB pid=1 actor=lead ts=2026-07-26T00:00:00Z nonce=hand-crafted reason=sneaky machine=machineA actor=flow")
+craftedStatus=$(runA status 2020)
+if [ "$(line_field "$craftedStatus" machine)" = "machineB" ] \
+   && [ "$(line_field "$craftedStatus" actor)" = "lead" ]; then
+  ok "(a) status resolves the FIRST exact machine=/actor= tokens (machineB/lead), not the trailing forged pair nor holder-machine="
+else
+  fail "(a) crafted message resolved to the wrong holder:
+$craftedStatus"
+fi
+runA verify 2020 >/dev/null 2>&1; rcCraftV=$?
+outCraftRel=$( cd "$A" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" release 2020 2>&1 ); rcCraftRel=$?
+if [ "$rcCraftV" -eq 2 ] && [ "$rcCraftRel" -eq 2 ] \
+   && printf '%s\n' "$outCraftRel" | grep -q 'reason=not-holder' \
+   && printf '%s\n' "$outCraftRel" | grep -q 'holder-machine=machineB' \
+   && [ "$(ref_sha 2020)" = "$craftedSha" ]; then
+  ok "(a) the impersonated machineA neither verifies (exit 2) nor releases (not-holder, ref intact) the crafted claim"
+else
+  fail "(a) a trailing forged machine=/actor= pair granted machineA the holder identity; verify=$rcCraftV release=$rcCraftRel ref='$(ref_sha 2020)'
+$outCraftRel"
+fi
+rcCraftTrue=0; ( cd "$B" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin bash "$CLAIM" release 2020 --actor lead >/dev/null 2>&1 ) || rcCraftTrue=$?
+if [ "$rcCraftTrue" -eq 0 ] && [ -z "$(ref_sha 2020)" ]; then
+  ok "(a) the TRUE crafted holder (machineB/lead) does resolve and can release it (exit 0, ref gone)"
+else
+  fail "(a) the true holder of the crafted claim could not release it (rc=$rcCraftTrue ref='$(ref_sha 2020)')"
+fi
+# (b) THE GLOB: a crafted `machine=machine*` token plus a file literally named
+# `machine=machineA` in the caller's cwd. Word-splitting the message WITHOUT `set -f`
+# pathname-expands that token into `machine=machineA` — clone A's identity — so the
+# parser hands machineA a holder identity it never had. With the guard it stays the
+# literal `machine*`.
+GLOBTRAP="$A/machine=machineA"
+: >"$GLOBTRAP"
+globSha=$(push_crafted_claim 2030 "claim issue=2030 machine=machine* pid=1 actor=flow ts=2026-07-26T00:00:00Z nonce=hand-crafted-glob")
+[ -e "$GLOBTRAP" ] && ok "(b) glob trap present: a file named 'machine=machineA' sits in the caller's cwd" \
+  || fail "(b) could not create the glob trap file — the case would be vacuous"
+globStatus=$(runA status 2030)
+runA verify 2030 >/dev/null 2>&1; rcGlobV=$?
+outGlobRel=$( cd "$A" && PATH="$GHSHIM:$PATH" CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" release 2030 2>&1 ); rcGlobRel=$?
+if [ "$(line_field "$globStatus" machine)" = 'machine*' ] && [ "$rcGlobV" -eq 2 ] \
+   && [ "$rcGlobRel" -eq 2 ] && printf '%s\n' "$outGlobRel" | grep -q 'reason=not-holder' \
+   && [ "$(ref_sha 2030)" = "$globSha" ]; then
+  ok "(b) a '*'-carrying token stays inert: status renders 'machine*', machineA neither verifies nor releases (ref intact)"
+else
+  fail "(b) the crafted glob expanded against the cwd and forged a holder: machine='$(line_field "$globStatus" machine)' verify=$rcGlobV release=$rcGlobRel ref='$(ref_sha 2030)'
+$globStatus
+$outGlobRel"
+fi
+rm -f "$GLOBTRAP"
+
 echo ""
 echo "================  claim-resume (#2945): $PASS passed, $FAIL failed, $SKIP skipped  ================"
 [ "$FAIL" -eq 0 ]
