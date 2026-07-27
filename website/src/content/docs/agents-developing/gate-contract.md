@@ -23,6 +23,51 @@ execute rather than skip, and uploads the SUMMARY block as an artifact. So a cha
 component (e.g. `node-bindings`) that the light PR check cannot see is still caught within 24h and
 surfaces on the Actions dashboard.
 
+## What a green `required` covers (issue #2910)
+
+Branch protection requires exactly ONE context, `required` (`.github/workflows/pr-gate.yml`), and a
+GitHub Actions job cannot `needs:` a job in another workflow. Until #2910 that meant every tier in a
+sibling workflow — the Flight e2e tier, the parity lanes, every label-gated suite — was **invisible to
+`gh pr merge --auto`**: a PR could land green with its most important integration test pending, failed,
+or never triggered (the real instance: PR #2906's wiring-evidence e2e test ran nowhere, because
+`flight-ci.yml` was `paths:`-filtered *and* its heavy job needed a `ci:flight-full` label the PR did not
+carry).
+
+`required` now aggregates. Concretely:
+
+- **A declared registry.** `.github/ci-gating-tiers.yml` names every gating tier by workflow file and by
+  the exact check-run context it emits (a check run's name is the emitting job's `name:`), plus an
+  `exempt:` block listing every other `pull_request` workflow with a reason and an issue link.
+- **`required` fails closed** on any registered tier that is `failure`/`cancelled`/`timed_out`, still
+  non-terminal at the aggregation deadline (60 min default, per-tier override, always strictly below the
+  job's `timeout-minutes` so expiry is a reported red rather than a cancellation), or **absent**.
+  Absence is NEVER read as inapplicability: a registered tier always emits its context, and an
+  inapplicable tier reports that as an explicit **success**. Unregistered check runs (perf, docs recipe
+  smoke) stay advisory and cannot block.
+- **The diff mandates the tier, not the label.** A registered tier's own classifier decides
+  applicability from `git diff --name-only base...head`. A mandating diff runs the tier **with or
+  without** its `ci:*` label; the label survives only as an opt-in for non-mandating diffs. **No step of
+  the delivery flow asks you to work out which tiers are out of band, or to apply a label.**
+- **Enrolment is forced.** `scripts/ci/validate-workflows.rb` already runs as a step *inside* the
+  `required` job; it now fails when a `pull_request`/`pull_request_target` workflow is neither
+  registered nor exempted, when a registered workflow carries a blocking trigger filter, when its
+  emitting job is conditional or does not inspect every `needs.<job>.result`, or when a registry entry
+  is dangling. A new tier that forgets to enrol **reds `required`**.
+- **Arming `--auto` stays correct.** GitHub releases the merge on `required` going green, and `required`
+  cannot go green until every registered tier has reported success — so keep arming immediately (#2667)
+  and never poll a PR's own CI.
+- **Residual — re-run order.** A tier re-run *after* `required` has already gone green cannot be
+  retracted by a finished job: **re-run the tier, then re-run `required`**, in that order.
+  `scripts/flow/premerge-assert.sh` remains the closer's last look.
+- **Break-glass is per-tier.** `ci:waive:<tier-id>` (an owner action) can excuse a tier that is absent
+  or pending at the deadline; it can **never** excuse a failed one, and there is no blanket waiver. Each
+  honoured waiver emits a warning annotation and a job-summary line naming the tier and the actor.
+
+Offline proofs live in `scripts/tests/test_aggregate_required_tiers.sh` (every check-run state, both
+re-run directions, self-exclusion by run identity, waiver cases) and
+`scripts/tests/test_gating_registry_policy.sh` (the enrolment rule and its wiring). Both run in the
+gate's `tooling-tests` component and both prove non-vacuity with an always-pass stub.
+
 ## Components
 
 The gate mirrors the enforced CI gates (`.github/workflows/ci.yml`,

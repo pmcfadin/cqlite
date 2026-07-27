@@ -175,6 +175,13 @@ module GatingRegistry
     return ["#{path}: `tiers` must be a list"] unless raw.nil? || raw.is_a?(Array)
 
     errors = []
+    # An empty `tiers:` list would make `required` trivially green with nothing
+    # aggregated — the exact silent-open state this registry exists to prevent.
+    # Emptying it must be a deliberate, blocked act, not a quiet regression.
+    if Array(raw).empty?
+      errors << "#{path}: `tiers` must declare at least one gating tier; an empty list makes " \
+                "`required` aggregate nothing and go green vacuously"
+    end
     seen_ids = {}
     Array(raw).each_with_index do |tier, index|
       label = "#{path}: tiers[#{index}]"
@@ -320,8 +327,29 @@ module GatingRegistry
       label = "#{path}: tier `#{tier['id']}` (#{name})"
       errors.concat(trigger_filter_errors(workflow, label, workflows_dir, name))
       errors.concat(emitting_job_errors(workflow, tier, label))
+      errors.concat(context_uniqueness_errors(workflows, tier, label, name))
     end
     errors
+  end
+
+  # A check run is identified by NAME ALONE, across the whole commit — GitHub does
+  # not qualify it by workflow. So if any OTHER workflow has a job with the same
+  # `name:`, its (possibly green) check run could satisfy or shadow this tier
+  # depending on which id is higher. Global uniqueness closes that.
+  def context_uniqueness_errors(workflows, tier, label, own_workflow)
+    context = tier["context"].to_s
+    clashes = workflows.reject { |name, _| name == own_workflow }.filter_map do |name, workflow|
+      jobs = workflow["jobs"]
+      next unless jobs.is_a?(Hash)
+
+      matching = jobs.select { |job_id, job| job.is_a?(Hash) && job_name(job_id, job) == context }
+      "#{name} (#{matching.keys.sort.join(', ')})" unless matching.empty?
+    end
+    return [] if clashes.empty?
+
+    ["#{label} declares context `#{context}`, which is ALSO emitted by #{clashes.sort.join('; ')}; " \
+     "a check-run name is global to the commit, so a same-named sibling job could satisfy or shadow " \
+     "this tier"]
   end
 
   def trigger_filter_errors(workflow, label, _workflows_dir, _name)
@@ -330,6 +358,17 @@ module GatingRegistry
     %w[pull_request pull_request_target].each do |event|
       config = triggers[event]
       next unless config.is_a?(Hash)
+
+      # A `branches:` filter is as blocking as a `paths:` one: a PR whose base is
+      # not listed would never start the tier, its context would be permanently
+      # absent, and `required` would deadlock that PR for the whole deadline.
+      %w[branches branches-ignore].each do |key|
+        next unless config.key?(key)
+
+        errors << "#{label} carries a blocking `#{event}.#{key}` filter; a registered tier must fire " \
+                  "for EVERY pull request, or a PR with another base would deadlock on a permanently " \
+                  "absent context"
+      end
 
       if config.key?("paths")
         errors << "#{label} carries a blocking `#{event}.paths` filter; a registered tier must always " \

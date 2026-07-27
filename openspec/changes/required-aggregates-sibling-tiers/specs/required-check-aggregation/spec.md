@@ -74,11 +74,25 @@ remain gated on that classifier's output so an inapplicable tier costs only the 
 - **WHEN** the workflow-policy validation runs inside `required`
 - **THEN** it FAILS and names the workflow and the filter
 
+#### Scenario: A registered workflow with a blocking branch filter is rejected
+- **GIVEN** a workflow listed in the registry whose `pull_request` trigger carries a `branches:` (or
+  `branches-ignore:`) filter, so a pull request with another base would never start it
+- **WHEN** the workflow-policy validation runs inside `required`
+- **THEN** it FAILS and names the workflow and the filter
+
 #### Scenario: A registered workflow with no unconditional emitting job is rejected
 - **GIVEN** a registered workflow in which every job emitting the declared context is conditional on
   something that can skip it
 - **WHEN** the workflow-policy validation runs
 - **THEN** it FAILS and names the workflow and the declared context
+
+#### Scenario: An emitting job that cannot report the tier's result is rejected
+- **GIVEN** a registered workflow whose emitting job is unconditional but does not inspect the
+  `result` of every job it depends on, or does not transitively depend on every other job in the
+  workflow
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS and names the job and the unreported dependency, because the context would report
+  success regardless of that job's outcome
 
 ### Requirement: A declared in-repo registry is the single source of truth and enrolment is forced
 
@@ -113,6 +127,17 @@ A registry entry whose declared context no workflow emits SHALL be rejected as d
 - **GIVEN** a registry entry whose workflow is `pr-gate.yml`
 - **WHEN** the workflow-policy validation runs
 - **THEN** it FAILS
+
+#### Scenario: An empty tier list is rejected
+- **GIVEN** a registry whose `tiers` list is empty, so `required` would aggregate nothing
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS, because a vacuously green aggregate is the state this registry exists to prevent
+
+#### Scenario: A context emitted by more than one workflow is rejected
+- **GIVEN** a registry entry whose declared context is also the `name:` of a job in another workflow
+- **WHEN** the workflow-policy validation runs
+- **THEN** it FAILS and names the other workflow, because a check-run name is global to the commit and
+  a same-named sibling job could satisfy or shadow the registered tier
 
 ### Requirement: A diff that mandates a tier runs it regardless of labels
 

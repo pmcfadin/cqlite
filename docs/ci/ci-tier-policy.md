@@ -114,6 +114,43 @@ Not allowed:
 The target globally required status check for this tier is
 `Required PR Gate / required`.
 
+#### The sole required context AGGREGATES sibling tiers (issue #2910)
+
+`required` is no longer only its own steps. `pr-gate.yml` is split into
+`pr-gate-core` (the light contents above) and `required` (`needs: [pr-gate-core]`,
+`if: always()`, the unchanged branch-protection context name), whose additional
+job is to poll the pull request head's sibling check runs and **fail closed** on
+any tier declared in `.github/ci-gating-tiers.yml` that is failed, still
+non-terminal at the aggregation deadline, or **absent**. It never masks the core:
+`pr-gate-core` not concluding `success` fails `required` regardless of tier state.
+
+Rules for `pull_request`-triggered workflows:
+
+- Every one must be listed in `.github/ci-gating-tiers.yml`, either under
+  `tiers:` (it gates the merge) or under `exempt:` with a `reason` and an `issue`.
+  This is enforced by `scripts/ci/validate-workflows.rb`, which runs as a step
+  inside the `required` job, so forgetting to enrol reds `required`.
+- A workflow under `tiers:` must ALWAYS fire — no blocking trigger `paths:` /
+  `paths-ignore:` (only the `__required_ci_context_never_matches__` sentinel used
+  by `ci.yml`). Applicability moves into a cheap, unconditional classifier job
+  following the `observability-gate.yml` `classify` pattern, and the tier's
+  expensive jobs stay gated on the classifier's output.
+- A workflow under `tiers:` must emit its declared context from exactly one
+  unconditional (`if: always()`) gate job that inspects every
+  `needs.<job>.result` it depends on and whose `needs` closure covers every other
+  job in the workflow. Inapplicability is reported as an explicit SUCCESS from
+  that job — never as an absent check run.
+- For a registered tier, a **diff-based mandate overrides the `ci:*` label**: a
+  mandating diff runs the tier with or without the label; the label stays an
+  opt-in only for non-mandating diffs.
+- The aggregation deadline (registry `wait_minutes`, max over tiers) must be
+  strictly less than the `required` job's `timeout-minutes`, so expiry is a
+  reported red with a diagnostic rather than an Actions cancellation.
+- Break-glass is per-tier only: `ci:waive:<tier-id>` excuses an absent or pending
+  tier, never a failed one. There is no blanket waiver.
+
+`.github/branch-protection.json` is unchanged: `contexts` remains `["required"]`.
+
 ### Targeted And Nightly
 
 Purpose: run expensive or surface-specific validation without blocking unrelated

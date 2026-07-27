@@ -18,13 +18,17 @@ on:
       - 'Cargo.lock'
       - '.github/workflows/flight-ci.yml'
   pull_request:
-    branches: [ main ]
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     # REGISTERED GATING TIER (issue #2910, .github/ci-gating-tiers.yml). The
     # trigger MUST always fire so the `Flight tier gate` context is emitted on
     # every PR — an absent registered context is an error, never "not
     # applicable". `ci.yml`'s established always-fire sentinel: a paths-ignore
     # that can never match. Applicability is decided by the `classify` job below.
+    #
+    # No `branches:` filter either: a PR based on anything other than main would
+    # otherwise never start this workflow, leaving `required` to wait out the full
+    # deadline on a context that can never appear. validate-workflows.rb enforces
+    # both absences.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     paths-ignore:
       - '__required_ci_context_never_matches__'
   workflow_dispatch:
@@ -82,6 +86,16 @@ jobs:
           git diff --name-only "${BASE_SHA}...${HEAD_SHA}" > changed-files.txt
           echo "Changed files:"
           sed 's/^/  - /' changed-files.txt
+
+          # FAIL-CLOSED on an empty/ambiguous changed-file set (same rule as
+          # pr-gate.yml's docs-only classifier): if we cannot see the diff we
+          # cannot conclude the tier is inapplicable, so run everything.
+          if [ ! -s changed-files.txt ]; then
+            echo "run_tier=true" >> "$GITHUB_OUTPUT"
+            echo "run_full=true" >> "$GITHUB_OUTPUT"
+            echo "reason=empty changed-file set; running the full tier fail-closed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # FULL mandate: anything owned by the Flight server itself, including
           # its end-to-end tests, plus this workflow.

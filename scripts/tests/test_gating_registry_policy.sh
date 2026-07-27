@@ -291,6 +291,14 @@ sed "s|__required_ci_context_never_matches__|docs/**|" "$BASE/workflows/alpha.ym
 run_policy "$DIR"
 expect_fail_named "a non-sentinel paths-ignore on a registered tier is rejected" "paths-ignore"
 
+# A `branches:` filter is the near-miss variant of the same hole: the workflow
+# looks unfiltered but never fires for a PR with another base, so the context is
+# permanently absent and `required` deadlocks that PR for the whole deadline.
+DIR=$(new_case blocking-branches)
+sed "s|  pull_request:|  pull_request:\\n    branches: [main]|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+run_policy "$DIR"
+expect_fail_named "a branches: filter on a registered tier is rejected" "branches"
+
 echo "== the emitting job must be unconditional =="
 DIR=$(new_case conditional-gate)
 sed "s|    if: always()|    if: github.event_name == 'push'|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
@@ -367,6 +375,53 @@ exempt:
 YAML
 run_policy "$DIR"
 expect_fail_named "the effective deadline is the MAX over tiers, not the default" "90m"
+
+echo "== an empty tiers list would make required green vacuously =="
+DIR=$(new_case no-tiers)
+cat >"$DIR/registry.yml" <<'YAML'
+version: 1
+aggregator: { workflow: pr-gate.yml, job: required }
+defaults: { wait_minutes: 60 }
+tiers: []
+exempt:
+  - { workflow: alpha.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+YAML
+run_policy "$DIR"
+expect_fail_named "an empty tiers list is rejected" "at least one gating tier"
+
+echo "== a context name is global to the commit, so it must be unique =="
+DIR=$(new_case context-clash)
+cat >"$DIR/workflows/impostor.yml" <<'YAML'
+name: Impostor lane
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+permissions:
+  contents: read
+concurrency:
+  group: impostor
+jobs:
+  sneaky:
+    name: Alpha gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "same check-run name as the registered tier"
+YAML
+cat >"$DIR/registry.yml" <<'YAML'
+version: 1
+aggregator: { workflow: pr-gate.yml, job: required }
+defaults: { wait_minutes: 60 }
+tiers:
+  - { id: alpha, workflow: alpha.yml, context: Alpha gate }
+exempt:
+  - { workflow: advisory.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+  - { workflow: impostor.yml, reason: Advisory docs lane that must never block a merge., issue: "#2910" }
+YAML
+run_policy "$DIR"
+expect_fail_named "a context emitted by a job in another workflow is rejected" "impostor.yml"
 
 echo "== a workflow cannot be both a tier and an exemption =="
 DIR=$(new_case both)

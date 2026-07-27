@@ -470,7 +470,20 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   Branch protection enforces the `required` check for admins too (`enforce_admins`), so `--auto` can
   never land against an unchecked head and bypass is impossible; a known-flake red gets
   `gh run rerun --failed`, never a bypass. This enforcement is load-bearing: if branch-protection
-  settings change, this doc governs catching it (#2433). Finalize runs in-session when the required
+  settings change, this doc governs catching it (#2433). **What a green `required` now covers
+  (#2910)**: `required` is no longer only its own steps — it also polls the PR head's sibling check
+  runs and **fails closed** on any tier declared in `.github/ci-gating-tiers.yml` that is failed,
+  still pending at the aggregation deadline (60 min default), or **absent** (absence is an error,
+  never "not applicable" — a registered tier always emits its context, reporting inapplicability as
+  an explicit success). So arming `--auto` before the tiers finish stays correct: GitHub releases the
+  merge on `required` going green, and `required` cannot go green until every registered tier has
+  reported success. A **diff that mandates a tier runs it with or without the tier's `ci:*` label**,
+  so **no step of the flow asks a worker to decide which tiers are out of band or to apply a label**.
+  Adding a `pull_request` workflow without enrolling it in the registry (as a tier or an
+  annotated exemption) reds `required`. Residual: a tier re-run **after** `required` is already green
+  cannot be retracted by a finished job — **re-run the tier, then re-run `required`**, in that order.
+  Break-glass is per-tier only (`ci:waive:<tier-id>`, owner action) and can excuse an absent or
+  pending tier, **never** a failed one. Finalize runs in-session when the required
   check is already green at arm time, else on a later wake confirming `state=MERGED`. Do NOT
   wait for the owner. Seam 1
   (spec approval) is the only standing human gate. Escalate and **hold the merge** ONLY for: a
