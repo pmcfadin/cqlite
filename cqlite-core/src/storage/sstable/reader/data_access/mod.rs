@@ -961,10 +961,16 @@ impl SSTableReader {
         // path's "time only the positional read". `verify_uncompressed_range` reads
         // CRC.db via the positional `source` (NO shared mutex) — genuine cold IO —
         // so it is timed; the body read is timed under the already-held lock. No
-        // `stream_decompress` (correctly absent). `scoped` is None (zero cost) with
-        // no flight sink installed.
+        // `stream_decompress` (correctly absent).
+        //
+        // Issue #2819 (L1): capture the sink ONCE here, BEFORE any `.await`, and
+        // build both timers from that captured `Option` — so no thread-local read
+        // happens post-await (correct even if the future resumes on another
+        // executor thread). `None` (zero cost) with no flight sink installed.
+        let cold_sink = crate::observability::stream_subphase::current();
         {
-            let _cold = crate::observability::stream_subphase::scoped(
+            let _cold = crate::observability::stream_subphase::scoped_captured(
+                &cold_sink,
                 crate::observability::StreamSubPhase::ColdFault,
             );
             // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
@@ -976,7 +982,8 @@ impl SSTableReader {
             // Lock-wait is acquired OUTSIDE the cold-fault timer (peer-scan mutex
             // contention is not cold-IO — the BLOCKER).
             let mut guard = file.lock().await;
-            let _cold = crate::observability::stream_subphase::scoped(
+            let _cold = crate::observability::stream_subphase::scoped_captured(
+                &cold_sink,
                 crate::observability::StreamSubPhase::ColdFault,
             );
             guard.seek(SeekFrom::Start(offset)).await?;

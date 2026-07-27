@@ -277,7 +277,19 @@ impl Drop for SubPhaseTimer {
 /// is installed — so a non-flight caller pays nothing. The sink `Arc` is captured
 /// here (correct-by-construction across an `.await`), never re-resolved at drop.
 pub fn scoped(phase: StreamSubPhase) -> Option<SubPhaseTimer> {
-    current().map(|sink| SubPhaseTimer {
+    scoped_captured(&current(), phase)
+}
+
+/// A [`SubPhaseTimer`] for `phase` built from an ALREADY-CAPTURED sink (from a
+/// prior [`current`] call), so NO thread-local read happens here (issue #2819
+/// L1). Use when the timer must be constructed AFTER an `.await` that may resume
+/// on a different executor thread — capture the sink ONCE before the await, then
+/// build each timer from that captured `Option`.
+pub fn scoped_captured(
+    sink: &Option<Arc<StreamSubPhaseTimings>>,
+    phase: StreamSubPhase,
+) -> Option<SubPhaseTimer> {
+    sink.clone().map(|sink| SubPhaseTimer {
         phase,
         start: Instant::now(),
         sink,

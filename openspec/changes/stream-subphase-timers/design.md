@@ -151,3 +151,20 @@ wall-clock and their sum can exceed `stream`. `stream` keeps its meaning as the 
 wall-clock total; the load-bearing cold-IO signal is the **cold−warm delta on `stream_cold_fault`**,
 not a sum. This is why the recording mechanism is a per-request Arc-atomic accumulator propagated to
 the three scan-thread spawn sites, not a single-thread `Duration`-bucket loop cursor.
+
+## On-path instrumentation overhead (issue #2819 Medium, roborev job 18)
+
+With a meter installed, the row-granular streaming loop
+(`producer_stream.rs::drive_merge_streaming`) pays per row: ~2 `Instant::now()`
+(one iteration-start snapshot + one record at the merge-region end) plus a couple
+of thread-local reads (the pull-wait accumulator + the `sink_active` fast-path
+`Cell`). The reconcile (`step_row`) and materialize (`entry_to_row`) are folded
+into ONE timed region (their sum lands in `stream_merge`), so no per-scope
+boundary clock is taken — down from ~4 clock reads/row in the first draft. When
+the meter is OFF the sink is not installed (`metrics_active()` gate in
+`spawn_streaming`), so the loop takes ZERO `Instant::now()`. `stream_encode` is
+timed once per batch (not per row) in `flush_credited`; `stream_grpc_write` once
+per batch in `ChannelSink::emit`; `stream_cold_fault`/`stream_decompress` once per
+chunk on the producer thread. A real throughput microbenchmark quantifying the
+meter-on overhead on epic #2403's hot loop is tracked separately in **#2980**
+(deliberately NOT built in this change).

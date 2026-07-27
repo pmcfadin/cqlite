@@ -52,13 +52,19 @@ use crate::scan_progress::{ScanProgress, ScanProgressMeter};
 /// the work already done, and a full scan makes ONE `fetch_add` regardless of
 /// row count.
 ///
-/// `stream_merge` is merge CPU only: each `step_row`'s BLOCKING merge-input recv
+/// `stream_merge` is merge CPU only: each iteration's BLOCKING merge-input recv
 /// wait (producer starvation / cold-IO, timed by the recv site into the
-/// thread-local `pull_wait_nanos` accumulator) is subtracted from that step's
+/// thread-local `pull_wait_nanos` accumulator) is subtracted from the iteration's
 /// wall time before it is added here (B2) — so a slow producer inflates neither
 /// `stream_merge` nor cold-fault falsely. (`stream_encode` is timed separately
 /// in `MergeProducer::flush_credited`, around the Arrow build only — see
 /// `egress_flush.rs` — so it excludes the egress-credit reserve park.)
+///
+/// On-path overhead (issue #2819 Medium): with a meter installed the loop pays
+/// ~2 `Instant::now()` + a couple of thread-local reads PER ROW (one iteration
+/// snapshot + one record). The reconcile and materialize are folded into ONE
+/// timed region so no per-scope boundary clock is taken. On-path instrumentation
+/// overhead; throughput microbenchmark tracked in #2980.
 ///
 /// When no sink is installed (every non-flight caller) the accumulator is inert:
 /// [`Self::active`] is `false`, so the hot loop skips `Instant::now()` entirely
@@ -86,19 +92,32 @@ impl RowSubPhaseAccum {
         self.merge_nanos = self.merge_nanos.saturating_add(nanos);
     }
 
-    /// Time `f` and fold its elapsed into the `stream_merge` bucket (merge CPU),
-    /// or run it bare when inert. For pure-CPU merge work with NO blocking recv
-    /// inside — the per-row `entry_to_row` materialize. (`step_row` is timed
-    /// inline instead, because it must SUBTRACT the recv-wait delta.)
+    /// Snapshot the start of one merge iteration: `Some(Instant)` + the current
+    /// recv-wait total when a sink is installed, else `(None, 0)` — NO clock read
+    /// on the non-flight path. Paired with exactly one [`Self::record_merge_iter`]
+    /// per iteration.
     #[inline]
-    fn time_merge<T>(&mut self, f: impl FnOnce() -> T) -> T {
+    fn iter_start(&self) -> (Option<Instant>, u64) {
         if self.active() {
-            let start = Instant::now();
-            let out = f();
-            self.add_merge(stream_subphase::elapsed_nanos(start));
-            out
+            (Some(Instant::now()), stream_subphase::pull_wait_nanos())
         } else {
-            f()
+            (None, 0)
+        }
+    }
+
+    /// Fold the whole merge region `[t0, now]` MINUS the recv-wait accrued since
+    /// `wait_before` into the `stream_merge` bucket — the reconcile (`step_row`)
+    /// AND the materialize (`entry_to_row`) both land here, so no per-scope
+    /// boundary clock is needed (issue #2819 Medium: ~2 `Instant::now()`/row —
+    /// `t0` in [`Self::iter_start`] + `now` here — not ~4). Called EXACTLY ONCE
+    /// per iteration, at the point the merge region ends (before the flush/emit
+    /// block, whose encode/grpc-write are separate buckets). The recv-wait is all
+    /// inside `step_row` ⊂ `[t0, now]`, so subtracting the delta leaves merge CPU.
+    #[inline]
+    fn record_merge_iter(&mut self, t0: Option<Instant>, wait_before: u64) {
+        if let Some(t0) = t0 {
+            let wait = stream_subphase::pull_wait_nanos().saturating_sub(wait_before);
+            self.add_merge(stream_subphase::elapsed_nanos(t0).saturating_sub(wait));
         }
     }
 }
@@ -221,24 +240,15 @@ impl MergeProducer {
             // NEVER masked as a clean `Cancelled` abort — only an actual
             // cancellation maps to `ProducerError::Cancelled`.
             //
-            // Issue #2819 (B2): the reconcile step is the `stream_merge` sub-phase
-            // (k-way merge + LWW/tombstone/TTL reconcile), on the merge consumer
-            // thread — but `step_row` also does the BLOCKING merge-input recv while
-            // it pulls the next entry, so time the step and SUBTRACT the recv-wait
-            // delta the recv site logged (`pull_wait_nanos`) to leave merge CPU
-            // only. Materialize (`entry_to_row`) is added to the same bucket below.
-            let step = if accum.active() {
-                let wait_before = stream_subphase::pull_wait_nanos();
-                let start = Instant::now();
-                let out = stepper.step_row();
-                let elapsed = stream_subphase::elapsed_nanos(start);
-                let wait = stream_subphase::pull_wait_nanos().saturating_sub(wait_before);
-                accum.add_merge(elapsed.saturating_sub(wait));
-                out
-            } else {
-                stepper.step_row()
-            }
-            .map_err(|e| match e {
+            // Issue #2819 (B2/Medium): snapshot ONE iteration start here; the whole
+            // merge region — `step_row` reconcile (k-way merge + LWW/tombstone/TTL,
+            // which also does the BLOCKING merge-input recv) PLUS the `entry_to_row`
+            // materialize — is folded into `stream_merge` at the region's end via a
+            // SINGLE `record_merge_iter`, with the recv-wait delta subtracted (the
+            // recv-wait is producer starvation / cold-IO, not merge CPU). ~2
+            // `Instant::now()`/row (this snapshot + the record), not ~4.
+            let (iter_t0, wait_before) = accum.iter_start();
+            let step = stepper.step_row().map_err(|e| match e {
                 cqlite_core::Error::Cancelled => ProducerError::Cancelled,
                 other => ProducerError::Merge(other),
             })?;
@@ -257,9 +267,13 @@ impl MergeProducer {
                         &mut partition_recorded,
                         &mut meter,
                     );
+                    accum.record_merge_iter(iter_t0, wait_before);
                     continue;
                 }
-                StreamingStep::Complete => break,
+                StreamingStep::Complete => {
+                    accum.record_merge_iter(iter_t0, wait_before);
+                    break;
+                }
             };
 
             self.begin_partition(
@@ -271,26 +285,23 @@ impl MergeProducer {
             );
             // Token-range filter: drop whole partitions outside the split's range.
             if !partition_active {
+                accum.record_merge_iter(iter_t0, wait_before);
                 continue;
             }
 
             // Build the row so predicates can reference any projected-out column
             // too (`assemble_cols` includes filter-referenced columns); carriers
-            // (`entry_to_row` → None) are skipped without counting a row.
-            //
-            // Issue #2819 (B2): per-row materialize is merge CPU — fold its time
-            // into the same `stream_merge` bucket via `time_merge` (no recv-wait
-            // here — pure decode/assembly on the merge consumer thread).
-            let materialized = accum.time_merge(|| {
-                self.entry_to_row(
-                    &key.key,
-                    *entry,
-                    &mut pk_cache,
-                    assemble_cols.as_ref(),
-                    self.now_secs,
-                )
-            });
-            let Some(row) = materialized? else {
+            // (`entry_to_row` → None) are skipped without counting a row. Its
+            // materialize CPU is part of the `stream_merge` region timed above.
+            let Some(row) = self.entry_to_row(
+                &key.key,
+                *entry,
+                &mut pk_cache,
+                assemble_cols.as_ref(),
+                self.now_secs,
+            )?
+            else {
+                accum.record_merge_iter(iter_t0, wait_before);
                 continue;
             };
             // Count a row materialised/examined by the scan (BEFORE the predicate
@@ -299,9 +310,14 @@ impl MergeProducer {
             // Predicate pushdown: keep the row only when it is definitely True.
             if let Some(filter) = &self.spec.filter {
                 if !filter.keeps(&row) {
+                    accum.record_merge_iter(iter_t0, wait_before);
                     continue;
                 }
             }
+            // Merge region (reconcile + materialize + predicate) ends here — record
+            // it ONCE, BEFORE the flush/emit block below (encode + grpc-write are
+            // separate buckets).
+            accum.record_merge_iter(iter_t0, wait_before);
             // Dual row-cap / byte-cap boundary (issue #2825): estimate the row's
             // Arrow payload width BEFORE it moves into the buffer and cut on the
             // row that WOULD cross the cap. Test-then-push, so a row wider than
