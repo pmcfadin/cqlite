@@ -112,7 +112,8 @@ then one cell per present column.
 ### Cell (`Cell.serializer`)
 `flags` (1 byte): `IS_DELETED 0x01`, `IS_EXPIRING 0x02`, `HAS_EMPTY_VALUE 0x04`,
 `USE_ROW_TIMESTAMP 0x08`, `USE_ROW_TTL 0x10`. Then `[ts delta]`, `[ldt]`, `[ttl]`,
-`[complex path]`, then the value.
+`[complex path]`, then the value — which is present only when `HAS_EMPTY_VALUE` is
+clear (`Cell.java:303-304`, reader `:310`); when set there is no length and no bytes.
 
 ### Values need the schema
 Clustering and cell values are written by `AbstractType.writeValue`: **fixed-length
