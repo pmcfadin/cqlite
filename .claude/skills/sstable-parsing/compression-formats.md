@@ -85,8 +85,9 @@ is written. CQLite always validates.
 uncompressed-length prefix** to a **raw LZ4 block** (this is NOT the `lz4_flex`
 size-prepended/varint format).
 
-**Rust Implementation** — this repo uses the **`lz4_flex`** crate. The `lz4` crate is NOT
-a dependency; a sample calling `lz4::block::decompress` cannot compile here.
+**Rust Implementation** — this repo uses the **`lz4_flex`** crate. The bare `lz4` crate is
+NOT a workspace dependency, so any sample calling its `block::decompress` API cannot
+compile here.
 
 ```rust
 // Cassandra LZ4Compressor.decompress() lines 169-172: 4-byte LE length prefix + raw block.
@@ -138,8 +139,8 @@ fn decompress_snappy(compressed: &[u8]) -> Result<Vec<u8>> {
 > ### ⚠️ TRAP — this is shipped P0 #1082 (deflate-as-zlib / zstd bare-frame)
 > Cassandra's `DeflateCompressor` uses `java.util.zip.Deflater`/`Inflater`, which emit a
 > **zlib-wrapped** stream: a 2-byte header (`0x78 0x9c`) + DEFLATE body + 4-byte Adler-32
-> trailer. Decoding it with `flate2::read::DeflateDecoder` (raw DEFLATE) is **exactly the
-> P0 bug #1082**. Use **`flate2::read::ZlibDecoder`**. There is also **no** 4-byte
+> trailer. Decoding it with flate2's **raw-DEFLATE** reader is **exactly the P0 bug
+> #1082** — you must use flate2's **zlib** reader, `ZlibDecoder`. There is also **no** 4-byte
 > uncompressed-size prefix here — that is an LZ4/Zstd convention.
 
 **Rust Implementation:**
