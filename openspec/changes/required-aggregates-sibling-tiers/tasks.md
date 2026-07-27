@@ -180,6 +180,46 @@
 - [x] 7e.8 Discrimination counts after round 4: policy non-vacuity 17 to 19, aggregator 10 to 12; suites
       aggregate 94/0, policy 71/0, semantics 26/0.
 
+## 7f. Round 5 review (1 High + 1 Medium + 2 Low)
+- [x] 7f.1 T1 (High) a waiver, once applied, permanently bypassed its tier. `ci:waive:<tier-id>` is a LABEL
+      and a label survives a push; read live on every poll AND honoured immediately for an ABSENT tier, it
+      excused every later head sha's tier before that tier could mint a check run — so the waiver always
+      won the race and "a failed tier cannot be waived" was unenforceable. Round 4's pending shortcut
+      inherited it (`started >= waiver_at` is true of ANY later run). The early waiver is now bound to
+      EVIDENCE: the `labeled` event must be no older than this head sha's first recorded CI activity (the
+      earliest `started_at` over PROVENANCED check runs — a commit timestamp is author-chosen and
+      back-datable, so it is not usable), and a pending run must additionally start inside
+      `WAIVER_RUN_WINDOW_SECONDS` of that event. Unbound waivers fall back to the deadline rule unchanged,
+      so a stale waiver delays a verdict but never pre-empts one. Precedence: impostor > bound waiver >
+      migration state > deadline waiver > absent. Mutants: binding-always-true 4 failures, no-window 1,
+      anchor-counts-impostors 1.
+- [x] 7f.2 T2 migration detection false-redded label-triggered runs — a three-fix interaction (P1 added
+      label events to the aggregator, R1 keyed emitability to "this event's activity type", so any label
+      change minutes after a push declared a healthy `types: [opened, synchronize]` tier unemittable).
+      Emitability is now judged against the activity types that can put the context on THIS HEAD SHA
+      (head-producing types plus the current event). That makes `MANDATORY_TIER_PR_TYPES` load-bearing —
+      a compliant tier can no longer reach the branch — so the containment of the two constants is
+      cross-asserted with a mutant. Mutant (single-event rule restored): 4 failures.
+- [x] 7f.3 T3 `Set.new` in `gating_policy_rules.rb` with no `require "set"` — it worked only on
+      `gating_registry.rb`'s load order, and `Set` is not autoloaded until ruby 3.1 while the declared
+      floor is 3.0. Adds the require plus a static, load-order-independent lint over every gating ruby
+      file; the lint immediately found a second instance (`rescue Psych::SyntaxError` with no
+      `require "yaml"`). Mutant: deleting the require must be named.
+- [x] 7f.4 T4 `provenance` named two unrelated concepts. The waiver side is renamed to
+      `parse_waiver_events` / `context[:waiver_events]`, matching the `--waiver-events` flag and
+      `WAIVER_EVENTS_CMD` end to end; `provenance_error`/`provenanced?`/`ACTIONS_APP_SLUG` keep the word
+      for its one meaning, WHICH APP MINTED A CHECK RUN.
+- [x] 7f.5 Owner decision on the 7e.1 drift: **live is correct, the config file was wrong.**
+      `.github/branch-protection.json` is reconciled to live (0 approvals, no code-owner reviews, no
+      last-push approval) — it is applied verbatim, so an aspirational value would switch `main` to a
+      policy merge-on-green cannot satisfy. The rationale is recorded in
+      `.github/QUALITY_GATES_ENFORCEMENT.md` and `docs/ci/ci-tier-policy.md`; the verifier in
+      `setup-branch-protection.js` (which hardcoded `>= 1` as CRITICAL) derives the expectation from the
+      config it applies. design.md now states the residual as **uncontrolled at merge time by design**,
+      with CODEOWNERS advisory and `ci:waive:` as the hatch — no blocking control is claimed.
+- [x] 7f.6 Discrimination counts after round 5: aggregator non-vacuity 12 to 13; suites aggregate 106/0,
+      policy 74/0, semantics 26/0.
+
 ## 8. Doctrine
 - [x] 8.1 `CLAUDE.md` autonomy section: `required` aggregates the registered sibling tiers and fails closed
       on failed/pending/absent; arming `--auto` stays correct; tier-then-`required` re-run order.

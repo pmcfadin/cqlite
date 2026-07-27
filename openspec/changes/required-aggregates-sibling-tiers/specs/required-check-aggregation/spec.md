@@ -387,13 +387,31 @@ workflow SHALL subscribe to `labeled`/`unlabeled` (enforced by the enrolment rul
 SHALL re-read the pull request's CURRENT labels on every poll rather than trusting the payload snapshot. A
 failed label read SHALL fall back to the payload — withholding a waiver is safe, granting one is not.
 
-An ABSENT waived tier SHALL be excused immediately rather than at the deadline: there is nothing to wait
-for, so holding a runner for the full deadline only delays a verdict already determined. A PENDING waived
-tier SHALL still be waited out, because it can still turn red, and a red tier is never waivable — EXCEPT
-where the pending state was created by the waiver's own label event: when the tier's only check run was
-minted at or after the moment the waiver label was applied, it cannot be information the waiver's author
-lacked, and the waiver SHALL resolve at once. Without a resolved label-event time there SHALL be no such
-horizon, so an unreadable event feed can only ever withhold a waiver, never grant one.
+A WAIVER SHALL BE BOUND TO THE HEAD SHA IT WAS APPLIED FOR. A waiver label persists across pushes, so a
+rule that resolves a tier on label presence alone makes the waiver permanent: on every later head sha the
+tier would be excused in the seconds before it could report, and "a failed tier is never waivable" would
+become unenforceable because the waiver always wins the race. Therefore an EARLY resolution (before the
+aggregation deadline) SHALL require evidence that the waiver belongs to this head: the `labeled` event that
+applied it SHALL be no older than the head sha's first recorded CI activity. That anchor SHALL be derived
+from check-run evidence whose producer is verified (the earliest start time over the head's provenanced
+check runs), and SHALL NOT be derived from a commit timestamp, which the author of the commit chooses.
+An unverifiable check run SHALL NOT contribute to the anchor.
+
+An ABSENT waived tier whose waiver is bound to this head SHALL be excused immediately rather than at the
+deadline: there is nothing to wait for, so holding a runner for the full deadline only delays a verdict
+already determined. A PENDING waived tier SHALL still be waited out, because it can still turn red, and a
+red tier is never waivable — EXCEPT where the pending state was created by the waiver's own label event:
+when the tier's only check run was minted within a bounded window after the waiver label was applied, it
+cannot be information the waiver's author lacked, and the waiver SHALL resolve at once. That window SHALL
+be short enough to admit only the run the label event itself triggered, not any later run.
+
+Where the waiver is NOT bound to this head sha, the ordinary deadline rule SHALL apply unchanged: the tier
+is polled for the full budget and excused only at the deadline, so a stale waiver can DELAY a verdict but
+never PRE-EMPT one — in particular, a tier that reports a failure within the budget still reds the gate.
+The diagnostic SHALL state why the visible label did not resolve the tier and SHALL name the remedy
+(re-applying the label produces a newer `labeled` event, which binds it to this head). Without a resolved
+label-event time there SHALL be no early resolution at all, so an unreadable event feed can only ever
+withhold a waiver, never grant one.
 
 Each honoured waiver SHALL emit a warning annotation and a job-summary line naming the waived tier and the
 person who applied the label, so a waived merge is visible after the fact. The attribution SHALL be
@@ -414,10 +432,29 @@ name anyone, and the resolved login SHALL be allowlisted before it reaches a wor
 - **THEN** it FAILS, because the documented break-glass would then be unexercisable
 
 #### Scenario: A waived absent tier does not hold a runner for the whole deadline
-- **GIVEN** a registered tier is absent and the pull request carries that tier's waiver label
+- **GIVEN** a registered tier is absent and the pull request carries that tier's waiver label, applied
+  after this head sha started running CI
 - **WHEN** the aggregation evaluates with poll budget and deadline remaining
 - **THEN** it excuses the tier immediately without waiting out the deadline
 - **AND** a waived tier that is merely PENDING is still waited out
+
+#### Scenario: A waiver does not carry over to the next head sha
+- **GIVEN** `ci:waive:<tier-id>` was applied to a pull request and a new commit was then pushed
+- **AND** on the new head sha that tier has not yet minted its check run
+- **WHEN** the aggregation evaluates with poll budget and deadline remaining
+- **THEN** the tier is NOT excused; it is polled, and the diagnostic states that the waiver is bound to
+  the head sha it was applied for and names the remedy
+- **AND** when the tier subsequently reports `failure`, `required` FAILS and states that a failed tier
+  cannot be waived
+- **AND** removing and re-applying the label produces a newer `labeled` event that restores the immediate
+  break-glass on the new head
+
+#### Scenario: An unverifiable check run cannot back-date the head anchor
+- **GIVEN** a head sha carrying a check run whose producer is not GitHub Actions and whose recorded start
+  time predates a waiver applied for an earlier head sha
+- **WHEN** the aggregation evaluates
+- **THEN** the forged timestamp does not contribute to the anchor and the stale waiver is still not
+  resolved early
 
 #### Scenario: A waiver excuses an absent tier
 - **GIVEN** a registered tier is absent at the deadline and the PR carries that tier's `ci:waive:<tier-id>` label
@@ -448,10 +485,13 @@ name anyone, and the resolved login SHALL be allowlisted before it reaches a wor
 - **AND** the diagnostic states that the applier is unresolved instead of naming anyone
 
 #### Scenario: A waiver resolves the pending tier its own label event started
-- **GIVEN** a waived tier whose only check run was minted at or after the waiver label was applied
+- **GIVEN** a waived tier whose only check run was minted within the bounded window after the waiver
+  label was applied
 - **WHEN** the aggregation evaluates with deadline and poll budget remaining
 - **THEN** it excuses the tier immediately, stating why
 - **AND** the same tier pending from a run that PREDATES the waiver is still waited out
+- **AND** the same tier pending from a run that started LONG after the waiver, outside that window, is
+  also still waited out
 
 ### Requirement: A label mutation SHALL NOT cancel, restart, or duplicate the gate
 
@@ -541,15 +581,24 @@ its own path, or that invokes the workspace-root copy of the aggregator.
 
 Reading the registry from the base ref separates WHERE THE REGISTRY LIVES from WHERE THE EMITTER LIVES.
 When a tier registered on the base ref cannot be emitted by the tree the event actually ran — its workflow
-is absent, it has no pull-request trigger, its `types:` exclude this event, its `branches:` exclude this
-base, or no job carries the declared context as its name — the context can never arrive. The aggregation
-SHALL detect that state and FAIL immediately with a diagnostic naming both remedies (rebase onto the base
-branch, or the documented per-tier waiver for a deliberate rename or retirement). It SHALL NOT poll such a
-context to the aggregation deadline.
+is absent, it has no pull-request trigger, its `types:` exclude every activity type that could put the
+context on this head sha, its `branches:` exclude this base, or no job carries the declared context as its
+name — the context can never arrive. The aggregation SHALL detect that state and FAIL immediately with a
+diagnostic naming both remedies (rebase onto the base branch, or the documented per-tier waiver for a
+deliberate rename or retirement). It SHALL NOT poll such a context to the aggregation deadline.
 
 Detection SHALL rest on provable properties only. Any inconclusive evidence — an unparseable workflow, a
 computed job name, a filter whose outcome depends on the diff, or an unavailable copy of the tree — SHALL
 yield no verdict and fall back to ordinary polling, because a false "cannot emit" is a false red.
+
+EMITABILITY IS A PROPERTY OF THE HEAD SHA, NOT OF THE EVENT THAT STARTED THIS RUN. Check runs accumulate on
+a head sha from whichever event minted them, and the aggregating workflow subscribes to label events so the
+break-glass is reachable — so a tier that emitted, or is about to emit, from the push that created this head
+SHALL NOT be judged unemittable merely because a `labeled` event started the current aggregating run. The
+activity-type test SHALL therefore be evaluated against the set of activity types that can produce the
+context on this head sha (the head-producing types together with the current event), and SHALL yield a
+verdict only when the tier subscribes to none of them. That set SHALL cover every activity type the
+enrolment rule mandates for a registered tier, so a compliant tier can never be fast-redded by this test.
 
 The verdict SHALL only ever be a failure. "The running tree cannot emit this tier, therefore pass" SHALL
 NOT exist, since the pull request controls that tree.
@@ -584,6 +633,13 @@ or that reads it and does not pass it to the aggregation.
 - **GIVEN** a registered tier that reported a failing conclusion, in a tree that also cannot emit it
 - **WHEN** the aggregation runs
 - **THEN** it FAILS
+
+#### Scenario: A label-triggered run does not mis-read a tier that emits from the push
+- **GIVEN** a registered tier whose copy in the running tree subscribes to `opened` and `synchronize`
+- **WHEN** the aggregation runs from a `labeled`, `unlabeled`, `ready_for_review` or `reopened` event
+- **THEN** no migration verdict is produced and the tier is polled normally
+- **AND** a tree whose copy of that tier subscribes only to label events is still reported as a migration
+  state
 
 ### Requirement: A green `required` is what releases `--auto`, and it implies every expected tier already passed
 

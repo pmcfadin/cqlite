@@ -70,8 +70,10 @@ carry).
   supersession grace unreachable and reds `required` on every routine supersession.)
 - **A migration state reds in seconds, not after an hour.** The registry is read from the base ref while
   the emitter comes from the tree the event ran (the merge commit, for a `pull_request` event). If the base
-  registers a tier that tree provably cannot emit — its workflow absent, no PR trigger, `types:`/`branches:`
-  excluding this event, or no job with that name — `required` fails on the first poll and names the remedy:
+  registers a tier that tree provably cannot emit — its workflow absent, no PR trigger, `types:` excluding
+  every activity type that could put the context on this head sha (not merely the event that started this
+  run: check runs accumulate on the head from whichever event minted them), `branches:` excluding this
+  base, or no job with that name — `required` fails on the first poll and names the remedy:
   **rebase**, or `ci:waive:<tier-id>` if the tier is deliberately being renamed or retired (a registry
   change only takes effect once merged). Inconclusive evidence never produces that verdict, and the verdict
   is never a pass.
@@ -82,16 +84,22 @@ carry).
   retracted by a finished job: **re-run the tier, then re-run `required`**, in that order.
   `scripts/flow/premerge-assert.sh` remains the closer's last look.
 - **Break-glass is per-tier, and it actually works.** `ci:waive:<tier-id>` (an owner action) excuses a
-  tier that is **absent** (immediately — there is nothing to wait for) or **pending at the deadline**; it
-  can **never** excuse a failed or cancelled one, and there is no blanket waiver. The label takes effect
-  without a re-run: `required` re-reads the PR's current labels on every poll, and `pr-gate.yml`
-  subscribes to `labeled`/`unlabeled` so applying one to an already-finished gate starts a fresh run that
-  sees it. Each honoured waiver emits a warning annotation and a job-summary line naming the tier and the
-  person who **applied the label** — resolved from the PR's `labeled` events, not the actor of the run
-  (who is usually whoever pushed or hit re-run); an unresolvable attribution says so rather than guessing.
-  Two round-4 corrections keep the hatch from fighting the tier: a registered tier may not cancel its
-  in-flight run on a label event, and a pending tier whose only check run was minted at/after the waiver
-  was applied resolves immediately instead of being held to the deadline by the run the waiver started.
+  tier that is **absent** or **pending at the deadline**; it can **never** excuse a failed or cancelled
+  one, and there is no blanket waiver. The label takes effect without a re-run: `required` re-reads the
+  PR's current labels on every poll, and `pr-gate.yml` subscribes to `labeled`/`unlabeled` so applying one
+  to an already-finished gate starts a fresh run that sees it. Each honoured waiver emits a warning
+  annotation and a job-summary line naming the tier and the person who **applied the label** — resolved
+  from the PR's `labeled` events, not the actor of the run (who is usually whoever pushed or hit re-run);
+  an unresolvable attribution says so rather than guessing. A registered tier may not cancel its in-flight
+  run on a label event, so the hatch does not fight the tier it waives.
+- **A waiver is bound to the head sha you applied it for.** A label persists across pushes, so "waive an
+  absent tier on sight" plus a leftover label would waive every later head's tier in the seconds before it
+  could report — a permanent bypass. The **immediate** waiver therefore requires the `labeled` event to be
+  newer than that head sha's first CI activity (and, for a pending tier, the run must be the one the label
+  event itself started). **Push a commit and your waiver stops short-circuiting**: the tier is polled for
+  the full deadline, and if it reports a failure in that time it reds the gate. The waiver still applies at
+  the deadline, so it delays a verdict rather than pre-empting one. To get the instant hatch back on the
+  new head, **remove and re-apply the label** — the diagnostic says so.
 - **Labelling is cheap.** Subscribing to label events must not make every `ci:perf` / board-mirror /
   `needs-decision` label — or the waiver itself — restart a 30-minute gate. So a label mutation never
   cancels the in-flight run (cancellation is conditional on the event action; the shared concurrency group

@@ -486,7 +486,9 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   pending tier, **never** a failed one — applying it takes effect **without a re-run** (the
   aggregator re-reads live labels each poll) and **without restarting `pr-gate-core`** (label events
   queue rather than cancel, and skip the core, reusing the result already recorded for that head
-  sha). Two further properties worth knowing: `required` evaluates the aggregator **and the registry
+  sha). A waiver is **bound to the head sha it was applied for**: a label survives a push, so after
+  you push again it no longer short-circuits — the tier is polled and a failure it reports still reds
+  the gate; **remove and re-apply the label** to waive the new head. Two further properties worth knowing: `required` evaluates the aggregator **and the registry
   from the PR's BASE ref**, so a registry/aggregator change lands only after it merges (rename a
   tier's context in a separate PR, or waive it); and a tier's mandate covers everything that reaches
   it at runtime — for Flight that includes `cqlite-core/**`, `test-data/**` and the Cargo manifests,
