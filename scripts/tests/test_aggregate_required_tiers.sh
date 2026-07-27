@@ -644,6 +644,19 @@ else
   bad "a core skipped on a synchronize event was tolerated (rc=$RC): $OUT"
 fi
 
+# THE ADJACENT VARIANT of the case above: `ready_for_review` and `reopened` also
+# change no bytes, so they are the obvious next candidates for reuse — and they
+# are deliberately NOT granted it. The reuse surface is exactly the event class
+# whose frequency motivated it (labels); everything else must re-run the core.
+invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
+  --core-result skipped --event-action ready_for_review \
+  --core-runs-cmd "cat $(runs_file core-recorded-success)"
+if [ "$RC" -ne 0 ] && contains "$OUT" "ready_for_review"; then
+  ok "reuse is scoped to label events; ready_for_review may not skip the core"
+else
+  bad "ready_for_review reused the recorded core (rc=$RC): $OUT"
+fi
+
 invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 3 \
   --core-result skipped --event-action labeled --core-runs-cmd "cat $(runs_file core-recorded-success)"
 if [ "$RC" -eq 0 ] && contains "$OUT" "recorded for this head sha"; then

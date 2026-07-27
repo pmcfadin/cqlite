@@ -151,11 +151,18 @@ correct semantics. Details:
   judging the proposed change (a PR adding a workflow *and* enrolling it must pass). Aggregation uses the
   base. Consequence to know: renaming a base-registered tier's **context** in the same PR makes that
   context absent under the base registry, so such a rename is a two-PR operation or uses `ci:waive:<id>`.
-- **Residual, stated rather than hidden.** A PR still controls the code its own tiers execute — a tier's
-  classifier can be edited to report "not applicable". Base-ref evaluation guarantees the *set* of tiers,
-  their contexts and the aggregation logic, not the work a tier chooses to do. That residual is a visible
-  diff to a registered tier's workflow; CODEOWNERS on `.github/` + `scripts/ci/` is the complementary
-  control, and `aggregator_trust_boundary_errors` keeps the base-ref checkout from being quietly dropped.
+- **Residual, stated rather than hidden.** Two things stay head-controlled, and neither is closable by a
+  base-ref *checkout*:
+  1. the code a tier executes — a tier's classifier can be edited to report "not applicable";
+  2. **the aggregating workflow file itself**. `pull_request` runs the head's `pr-gate.yml`, so a PR can
+     in principle delete the base checkout, or the `validate-workflows.rb` step that enforces it. Only
+     `pull_request_target` (rejected above) or repository settings close that.
+
+  What base-ref evaluation *does* guarantee is that the SET of tiers, their contexts, and the aggregation
+  logic cannot be swapped out by an ordinary registry/script edit — the cheap, reviewable-looking change.
+  The remaining path is a conspicuous diff to `.github/workflows/pr-gate.yml`; CODEOWNERS on `.github/` +
+  `scripts/ci/` is the complementary control, and `aggregator_trust_boundary_errors` keeps the base-ref
+  checkout from being dropped by accident rather than by intent.
 
 ## Mechanics
 
