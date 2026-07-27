@@ -281,8 +281,21 @@ turn green until every registered tier has already reported success. Workers kee
 **Break-glass.** A GitHub-side incident can leave a registered tier permanently absent. The escape hatch is
 a per-tier label `ci:waive:<tier-id>` — never a blanket bypass — honoured **only** for an absent or
 non-terminal tier and **never** for a `failure`/`cancelled`/`timed_out` conclusion. Each waiver emits a
-`::warning::` annotation and a job-summary line naming the tier and the actor. It is an owner action; a
-worker never needs it, which preserves the "no per-PR knowledge" acceptance criterion.
+`::warning::` annotation and a job-summary line naming the tier and **whoever applied the label** —
+resolved from the pull request's `labeled` events, not `$GITHUB_ACTOR`, which is the actor of the event
+that started the aggregating run and, because labels are re-read live on every poll, is routinely someone
+else entirely (round 4). An unresolvable attribution is reported as UNRESOLVED rather than guessing. It is
+an owner action; a worker never needs it, which preserves the "no per-PR knowledge" acceptance criterion.
+
+Round 4 also stopped the hatch from fighting the tier it opens. A registered tier subscribes to label
+events so its own opt-in label works, so applying `ci:waive:<tier-id>` used to CANCEL that tier's
+in-flight run and mint a fresh `queued` check run — and a pending tier's waiver was honoured only at the
+deadline, so the break-glass made things worse before it made them better. Two changes: a registered tier
+may no longer cancel on a label event (mechanised — the rule now demands an action-aware
+`cancel-in-progress`, since the previous form accepted `${{ github.event_name == 'pull_request' }}`, which
+is true for `labeled`), and a waived tier whose only check run was minted at/after the waiver was applied
+resolves immediately, because that run cannot be information the waiver's author lacked. A tier pending
+from a run that PREDATES the waiver is still waited out.
 
 ## Testability, and why it must be provably-failing
 
