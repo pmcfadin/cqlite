@@ -1269,6 +1269,49 @@ else
   bad "a missing event tree was mishandled: $OUT"
 fi
 
+# ---- emitability is a property of the HEAD SHA, not of this event (round 5) --
+# THE THREE-FIX INTERACTION. P1 subscribed the aggregator to `labeled`/
+# `unlabeled` so the break-glass works on a wedged PR; round 3 added emitability
+# detection keyed to "does the tier's `types:` include THIS event's activity
+# type?"; the two together made every label-triggered aggregator run declare a
+# perfectly healthy `types: [opened, synchronize]` tier "provably unemittable"
+# and red the gate. Check runs accumulate on the HEAD SHA from whichever event
+# minted them — the `matching` tree here is the same one the `synchronize` case
+# above treats as healthy, so the ONLY difference is the event that started the
+# aggregator.
+for action in labeled unlabeled ready_for_review reopened; do
+  invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 2 \
+    --event-workflows-dir "$(event_tree matching)" --event-action "$action" --base-ref main
+  if contains "$OUT" "MIGRATION STATE"; then
+    bad "a '$action' run called a synchronize-emitting tier unemittable — every label change reds the PR"
+  else
+    ok "a '$action' aggregator run does not mis-read a tier that emits from synchronize"
+  fi
+done
+# Still a PROVABLE negative when it really is one: a head tree that narrowed
+# `types:` to label events only can never emit the context for a head sha, and
+# the enrolment rule would reject that tier outright.
+mkdir -p "$(event_tree label-only)"
+cp "$(event_tree matching)/alpha.yml" "$(event_tree label-only)/alpha.yml"
+cat >"$(event_tree label-only)/beta.yml" <<'YAML'
+name: Beta tier
+on:
+  pull_request:
+    types: [labeled]
+jobs:
+  gate:
+    name: Beta gate
+    steps:
+      - run: 'true'
+YAML
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$FUTURE" 2 \
+  --event-workflows-dir "$(event_tree label-only)" --event-action synchronize --base-ref main
+if contains "$OUT" "MIGRATION STATE" && contains "$OUT" "excludes every activity type"; then
+  ok "a head tree whose tier fires ONLY on label events is still a provable migration state"
+else
+  bad "the types rule stopped detecting a genuinely unreachable context: $OUT"
+fi
+
 # The base-ref shape is validated before it reaches the registry reader.
 invoke "cat $(runs_file all-pass)" "$WORK/self-ids.txt" "$FUTURE" 1 --base-ref 'main;rm -rf /'
 if [ "$RC" -eq 2 ] && contains "$OUT" "not a branch ref"; then

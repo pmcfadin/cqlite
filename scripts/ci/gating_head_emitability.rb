@@ -33,7 +33,11 @@
 # tree this event ran emit that context AT ALL? Only provable negatives count:
 #   (a) the tier's workflow file is not in the tree;
 #   (b) it has no `pull_request`/`pull_request_target` trigger;
-#   (c) its `types:` excludes this event's activity type;
+#   (c) its `types:` excludes EVERY activity type that can put the context on
+#       this head sha — the head-producing ones plus the current event. NOT
+#       merely the current event: check runs accumulate on the head sha from
+#       whichever event minted them, so a tier that emitted from `synchronize` is
+#       not unemittable just because a `labeled` event started this run (round 5);
 #   (d) its `branches:`/`branches-ignore:` filter excludes this pull request's
 #       base ref;
 #   (e) no job in it carries the declared context as its check-run name.
@@ -170,14 +174,45 @@ module GatingRegistry
     def event_reason(config, event, name, context, event_action, base_ref)
       return nil unless config.is_a?(Hash)
 
-      if config.key?("types") && !event_action.to_s.strip.empty?
-        types = Array(config["types"]).map(&:to_s)
-        unless types.include?(event_action.to_s)
-          return "its copy of #{name} subscribes to `#{event}.types` #{types.sort.inspect}, which excludes " \
-                 "this `#{event_action}` event, so `#{context}` cannot be emitted for it"
-        end
-      end
+      reason = types_reason(config, event, name, context, event_action)
+      return reason if reason
+
       branch_reason(config, event, name, context, base_ref)
+    end
+
+    # CHECK RUNS ACCUMULATE ON THE HEAD SHA, NOT ON THIS EVENT (issue #2910
+    # round 5). Round 3 asked "does this tier's `types:` include THIS event's
+    # activity type?" — but a check run belongs to the head sha and is minted by
+    # whichever event created it. P1 then subscribed the AGGREGATOR to `labeled`
+    # /`unlabeled` (so the break-glass works on a wedged PR), and the three fixes
+    # chained: a label-triggered aggregator run started reading a perfectly
+    # healthy tier — one that emitted, or is about to emit, from the `synchronize`
+    # run — as "provably unemittable", and red the gate. Applying ANY label
+    # (`ci:perf`, `needs-decision`, the waiver itself) two minutes after a push
+    # would have done it.
+    #
+    # So emitability is judged against the SET of activity types that can put
+    # `context` on this head sha: the ones that can create a head and start its
+    # CI, plus the current event. Only when the tier subscribes to NONE of them is
+    # the context provably unreachable. The enrolment rule already requires every
+    # registered tier to subscribe to `opened` + `synchronize`
+    # (MANDATORY_TIER_PR_TYPES), so for a COMPLIANT tier this branch can never
+    # fire — it is left in to catch the head tree that narrowed `types:` out of
+    # compliance, which is a genuine migration state. That makes
+    # MANDATORY_TIER_PR_TYPES load-bearing for this check, which is why the two
+    # constants are cross-asserted in the self-test.
+    HEAD_PRODUCING_TYPES = %w[opened reopened synchronize ready_for_review].freeze
+
+    def types_reason(config, event, name, context, event_action)
+      return nil unless config.key?("types")
+
+      types = Array(config["types"]).map(&:to_s)
+      producing = (HEAD_PRODUCING_TYPES + [event_action.to_s.strip]).reject(&:empty?).uniq
+      return nil unless (types & producing).empty?
+
+      "its copy of #{name} subscribes to `#{event}.types` #{types.sort.inspect}, which excludes every " \
+        "activity type that can put `#{context}` on this pull request head #{producing.sort.inspect} " \
+        "(this run was started by `#{event_action}`), so it cannot be emitted for this head sha"
     end
 
     def branch_reason(config, event, name, context, base_ref)

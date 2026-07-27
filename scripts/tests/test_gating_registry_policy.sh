@@ -1027,6 +1027,27 @@ else
   bad "these gating ruby files bypass the declared floor: $missing_floor"
 fi
 
+# ---- the two type sets that must not drift apart (round 5) ------------------
+# The migration check's `types:` branch is only SAFE because the enrolment rule
+# forces every registered tier to subscribe to `opened` + `synchronize`
+# (MANDATORY_TIER_PR_TYPES): that is what guarantees a compliant tier can never
+# be called "unemittable" by a label-triggered aggregator run. If someone ever
+# shrinks HEAD_PRODUCING_TYPES below the mandated set, the branch starts firing
+# on compliant tiers again — the exact false red round 5 removed. Assert the
+# containment rather than leaving it as a comment.
+TYPE_DRIFT=$(ruby -e '
+require ARGV[0]
+require ARGV[1]
+missing = GatingRegistry::MANDATORY_TIER_PR_TYPES -
+          GatingRegistry::HeadEmitability::HEAD_PRODUCING_TYPES
+print missing.sort.inspect unless missing.empty?
+' "$REPO_ROOT/scripts/ci/gating_event_rules.rb" "$REPO_ROOT/scripts/ci/gating_head_emitability.rb" 2>&1)
+if [ -z "$TYPE_DRIFT" ]; then
+  ok "HEAD_PRODUCING_TYPES covers every activity type a registered tier must subscribe to"
+else
+  bad "the migration check can fast-red a COMPLIANT tier: mandated types missing from the head-producing set: $TYPE_DRIFT"
+fi
+
 # ---- every gating ruby file declares the stdlib IT uses (round 5) -----------
 # THE NEAR-MISS OF THE FLOOR FIX ITSELF. `needs_closure` in gating_policy_rules.rb
 # built a `Set` while only gating_registry.rb required "set" — it worked purely
