@@ -666,10 +666,17 @@ impl SSTableRowIteratorAdapter {
         producer_gauge::spawned();
 
         // Issue #2819: propagate the sub-phase sink onto this path-based producer
-        // thread too (thread-locals are not inherited across a spawn), so a
-        // paths-built merge records cold_fault/decompress like `open_from_reader`.
-        // `None` (no-op) for non-flight callers. (This file is far over the #1116
-        // campsite target; the +2 lines are the minimal correct propagation.)
+        // thread too (thread-locals are not inherited across a spawn); `None`
+        // (no-op) for non-flight callers. NOTE (roborev L2): this is a DEFENSIVE /
+        // latent propagation, NOT a parity-covered do_get path — production
+        // `do_get` is warm-only (`spawn_streaming_from_readers` → `open_from_reader`,
+        // which has the tested propagation). The path-based `open`
+        // (`MergeInput::Paths`) is the test-only byte-identity oracle, so its
+        // cold_fault/decompress attribution has no e2e assertion (and would fire
+        // only for a stitching/BTI fixture via the `read_next_block` loop). Kept so
+        // a future path-based flight caller is correct by construction, not to
+        // imply current parity coverage. (This file is far over the #1116 campsite
+        // target; the +2 lines are the minimal propagation.)
         let subphase_sink = crate::observability::stream_subphase::current();
 
         // Spawn the producer thread via `Builder::spawn` (rather than the

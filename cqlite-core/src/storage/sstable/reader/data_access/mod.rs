@@ -944,27 +944,41 @@ impl SSTableReader {
     ) -> Result<Vec<u8>> {
         use tokio::io::AsyncReadExt;
 
-        // Issue #2819: attribute the UNCOMPRESSED body page-in (CRC verify + disk
-        // read) to `stream_cold_fault` — this is the Summary-guided / full-index
-        // scan read for an uncompressed table (CQLite's own write-surface output
-        // plus uncompressed Cassandra tables), so cold-fault must record here too,
-        // not only on the compressed window. No `stream_decompress` (correctly
-        // absent). `scoped` is None (zero cost) with no flight sink installed.
-        let _cold = crate::observability::stream_subphase::scoped(
-            crate::observability::StreamSubPhase::ColdFault,
-        );
         let size = u32::try_from(len).map_err(|_| {
             Error::corruption(format!(
                 "uncompressed read length {len} exceeds u32 range for CRC verification \
                  at Data.db offset 0x{offset:x}"
             ))
         })?;
-        // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
-        self.verify_uncompressed_range(source, offset, size).await?;
+
+        // Issue #2819 (BLOCKER): attribute the UNCOMPRESSED body page-in to
+        // `stream_cold_fault`, but time ONLY the actual IO — NOT the
+        // `file.lock().await` below on the reader-wide mutex. The warm registry
+        // (#2356) shares one `Arc<SSTableReader>` across concurrent `do_get`s that
+        // admission (#2420) runs at once, so a PEER scan's lock-wait must never be
+        // attributed to cold-IO (it would inflate `stream_cold_fault` on a WARM run
+        // and break the cold−warm delta = cold-IO meaning). Mirrors the compressed
+        // path's "time only the positional read". `verify_uncompressed_range` reads
+        // CRC.db via the positional `source` (NO shared mutex) — genuine cold IO —
+        // so it is timed; the body read is timed under the already-held lock. No
+        // `stream_decompress` (correctly absent). `scoped` is None (zero cost) with
+        // no flight sink installed.
+        {
+            let _cold = crate::observability::stream_subphase::scoped(
+                crate::observability::StreamSubPhase::ColdFault,
+            );
+            // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
+            self.verify_uncompressed_range(source, offset, size).await?;
+        }
 
         let mut buf = vec![0u8; len];
         {
+            // Lock-wait is acquired OUTSIDE the cold-fault timer (peer-scan mutex
+            // contention is not cold-IO — the BLOCKER).
             let mut guard = file.lock().await;
+            let _cold = crate::observability::stream_subphase::scoped(
+                crate::observability::StreamSubPhase::ColdFault,
+            );
             guard.seek(SeekFrom::Start(offset)).await?;
             guard.read_exact(&mut buf).await?;
         }

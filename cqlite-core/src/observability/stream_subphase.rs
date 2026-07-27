@@ -255,25 +255,32 @@ pub fn record_elapsed(phase: StreamSubPhase, start: Instant) {
 /// RAII timer that records the elapsed wall time into `phase` when dropped. The
 /// tight-scope counterpart of [`timed`] for an ASYNC region that a sync closure
 /// cannot wrap (e.g. an `.await`ed page-in): bind it in a `{ let _t = …; expr }`
-/// block so it drops the instant the region ends. Recorded only if a sink is
-/// installed on this thread.
+/// block so it drops the instant the region ends.
+///
+/// It CAPTURES the sink `Arc` at construction (like [`timed`]), NOT via the
+/// thread-local at drop time — so it stays correct even if the guard is held
+/// across an `.await` that resumes the future on a DIFFERENT executor thread
+/// (issue #2819 L1). A `None` sink means "not installed" — a no-op on drop.
 pub struct SubPhaseTimer {
     phase: StreamSubPhase,
     start: Instant,
+    sink: Arc<StreamSubPhaseTimings>,
 }
 
 impl Drop for SubPhaseTimer {
     fn drop(&mut self) {
-        record_elapsed(self.phase, self.start);
+        self.sink.add_nanos(self.phase, elapsed_nanos(self.start));
     }
 }
 
 /// A [`SubPhaseTimer`] for `phase`, or `None` (zero `Instant::now`) when no sink
-/// is installed — so a non-flight caller pays nothing.
+/// is installed — so a non-flight caller pays nothing. The sink `Arc` is captured
+/// here (correct-by-construction across an `.await`), never re-resolved at drop.
 pub fn scoped(phase: StreamSubPhase) -> Option<SubPhaseTimer> {
-    sink_active().then(|| SubPhaseTimer {
+    current().map(|sink| SubPhaseTimer {
         phase,
         start: Instant::now(),
+        sink,
     })
 }
 
