@@ -111,12 +111,48 @@ mkbig() { # mkbig <path> <bytes> — a file larger than the hash cap in force
   while [ "$i" -lt "$2" ]; do printf '0123456789abcdef' >> "$1"; i=$(( i + 16 )); done
 }
 
-# fn_body <file> <function-name> — the lines of one top-level function definition.
+# fn_body <file> <function-name> — the lines of one function definition, at ANY indentation
+# (#2926 review J4). It used to require column 0, so a helper defined inside a conditional
+# block — the gate has two, inside its self-test hook — extracted as EMPTY and was silently
+# skipped by every lint rule below. The body ends at the `}` matching the definition's own
+# indentation, so a nested block whose closing brace happens to sit alone on a line cannot
+# truncate the extraction.
 # The name reaches awk through ENVIRON, never `awk -v` (#2926 review G2): `-v` performs
 # escape-sequence processing on the value, so the one convention this suite uses for
 # handing text to awk is the one that cannot silently rewrite it.
+# A ONE-LINE definition (`f() { …; }`) is complete on its own line and must NOT open a
+# multi-line scan: doing so would swallow the whole rest of the file into that function's
+# "body" and lint every later line under its name.
 fn_body() {
-  TEST_AWK_F="$2() {" awk 'index($0, ENVIRON["TEST_AWK_F"]) == 1 { inf = 1 } inf { print } inf && /^\}/ { inf = 0 }' "$1"
+  TEST_AWK_F="$2() {" awk '
+    { l = $0; sub(/^[[:space:]]+/, "", l) }
+    !inf && index(l, ENVIRON["TEST_AWK_F"]) == 1 {
+      print
+      if (l ~ /\}[[:space:]]*$/) next
+      inf = 1
+      pad = substr($0, 1, match($0, /[^[:space:]]/) - 1)
+      next
+    }
+    inf { print; if ($0 == pad "}") inf = 0 }
+  ' "$1"
+}
+# tree_fn_names <file> — DERIVE the tree-integrity function inventory FROM THE FILE (#2926
+# review J4). This list was hand-maintained, and the inventory assertion only checked that
+# every LISTED name still existed — never the converse — so any `_tree_*` helper a future
+# change added was silently exempt from all 13 rules below. It works today and stops working
+# the moment someone extends the module: the same deferred can't-fail shape as the vacuous
+# checks this suite has already had to remove twice. Enumerating definitions makes the
+# inventory a PROPERTY OF THE CODE, so a new helper is covered on the commit that adds it.
+# Deliberately NOT anchored at `{$`: a definition line may carry a trailing comment, and a
+# one-liner puts its whole body there. Anchoring on end-of-line is how the first draft of
+# this enumerator quietly skipped two helpers that were right there in the file.
+tree_fn_names() {
+  awk '
+    { l = $0; sub(/^[[:space:]]+/, "", l) }
+    l ~ /^(_tree_[A-Za-z0-9_]+|_assert_tree_integrity|_apply_tree_integrity_marker)\(\)[[:space:]]*\{/ {
+      sub(/\(\).*$/, "", l); print l
+    }
+  ' "$1"
 }
 # body_has <text> <line-prefix> — rc 0 iff some LINE of <text> starts with <line-prefix>.
 # Deliberately pipe-free: this file runs under `set -o pipefail`, and `awk … | grep -q`
@@ -420,15 +456,7 @@ fi
 # the classes that have actually cost this repo a round, plus the standard portability list.
 # `stat -c` and `sort -z` are allowlisted in the two functions that PROBE for them (the
 # probe is the portable pattern — using them unconditionally is the bug).
-TREE_FNS="_tree_canon_rel _tree_excluded _tree_probe_tools _tree_sort0 _tree_digest_file \
-_tree_hex_id_ok _tree_digest_ok _tree_split_identity _tree_in_list _tree_manifest_ok \
-_tree_identity _tree_mtime _tree_cap_note _tree_cap_stamp _tree_capture_start \
-_tree_recapture_after_slot _tree_changed_paths _tree_report_tag _tree_report_value \
-_tree_lockfile_admissible _tree_change_class _tree_set_end _tree_fail_reason \
-_assert_tree_integrity _tree_boundary_meta_lines _tree_boundary_fail \
-_apply_tree_integrity_marker _tree_unguarded_terminal_probe _tree_finalize \
-_tree_commit_meta _tree_commit_meta_render _tree_meta_render_lines _tree_meta_lines \
-_tree_meta_array _tree_result"
+TREE_FNS=$(tree_fn_names "$GATE" | tr '\n' ' ')
 GNU_RULES="bre-escape sed-in-place grep-perl date-d readlink-f sort-version sort-nul \
 stat-gnu xargs-r find-printf mktemp-p echo-e"
 # `awk -v` is POSIX and universally available, so it is NOT a portability rule (#2926
@@ -476,17 +504,26 @@ rule_hits() {
   [ -z "$found" ] || { printf '%s' "$found"; return 1; }
   return 0
 }
-# The inventory is asserted first: a typo'd or deleted function name would make the lint
-# scan nothing and pass vacuously.
+# The DERIVED inventory is asserted first — not for staleness (it cannot be stale any more)
+# but for EXTRACTABILITY: every name the enumerator found must also yield a body, or the
+# rules would scan nothing for it and pass vacuously. A floor and three anchor names guard
+# the enumerator itself: a regex that quietly stopped matching would otherwise report a
+# tiny, all-green inventory.
 missing_fns=""
 for fn in $TREE_FNS; do
   [ -n "$(fn_body "$GATE" "$fn")" ] || missing_fns="${missing_fns:+$missing_fns }$fn"
 done
 n_tree_fns=$(printf '%s\n' $TREE_FNS | grep -c . | tr -d ' ')
-if [ -z "$missing_fns" ] && [ "$n_tree_fns" -ge 30 ]; then
-  ok "PORTABILITY: the lint covers all $n_tree_fns tree-integrity functions (inventory intact)"
+n_uniq_fns=$(printf '%s\n' $TREE_FNS | LC_ALL=C sort -u | grep -c . | tr -d ' ')
+anchor_missing=""
+for fn in _tree_identity _tree_finalize _assert_tree_integrity _tree_label_post_mutation; do
+  case " $TREE_FNS " in *" $fn "*) ;; *) anchor_missing="${anchor_missing:+$anchor_missing }$fn" ;; esac
+done
+if [ -z "$missing_fns" ] && [ -z "$anchor_missing" ] && [ "$n_tree_fns" -ge 35 ] \
+   && [ "$n_tree_fns" -eq "$n_uniq_fns" ]; then
+  ok "PORTABILITY: the lint covers all $n_tree_fns tree-integrity functions, DERIVED from the gate (no hand-maintained list)"
 else
-  bad "PORTABILITY: the lint's function inventory is stale — not found in the gate: ${missing_fns:-<none>} (n=$n_tree_fns)"
+  bad "PORTABILITY: the derived inventory is broken — unextractable: ${missing_fns:-<none>}; missing anchors: ${anchor_missing:-<none>}; n=$n_tree_fns uniq=$n_uniq_fns"
 fi
 # shellcheck disable=SC2086  # intentional word-split over the space-separated name list
 if gnu_hits=$(rule_hits "$GATE" "$GNU_RULES" $TREE_FNS); then
@@ -538,6 +575,79 @@ if [ "$lint_caught" -eq "$lint_total" ] && [ "$lint_total" -eq 13 ] \
   ok "PORTABILITY+ESCAPING: every one of the $lint_total lint rules is proved discriminating (one mutant each, checked against its OWN rule)"
 else
   bad "PORTABILITY+ESCAPING: only $lint_caught of $lint_total lint rules caught their mutant (rule inventory: $n_lint_rules)"
+fi
+# …and the J4 mutants: a helper ADDED to the gate must be linted on the commit that adds it.
+# Both shapes are proved — a top-level definition and one nested inside a conditional block,
+# the shape the old column-0-only extractor returned EMPTY for (and therefore skipped). Each
+# mutant carries a banned construct, and the assertion is BOTH that the derived inventory
+# names it AND that the rules flag it: enumerating a function nobody scans would be the same
+# vacuity one level up.
+newfn_caught=0; newfn_total=0
+for shape in top nested commented oneliner; do
+  newfn_total=$(( newfn_total + 1 ))
+  newfn="_tree_future_$shape"
+  mut="$tmp/gate-newfn-$shape.sh"
+  cp "$GATE" "$mut"
+  case "$shape" in
+    top)
+      { printf '%s() {\n' "$newfn"
+        printf "  comm -3 \"\$1\" \"\$2\" | sed 's/^\\\\t//'\n"
+        printf '}\n'; } >> "$mut" ;;
+    nested)   # defined inside a conditional block — indented, the shape a column-0-only
+              # extractor returned EMPTY for and therefore skipped entirely
+      { printf 'if [ "${SOME_FLAG:-0}" = 1 ]; then\n'
+        printf '  %s() {\n' "$newfn"
+        printf "    comm -3 \"\$1\" \"\$2\" | sed 's/^\\\\t//'\n"
+        printf '  }\n'
+        printf 'fi\n'; } >> "$mut" ;;
+    commented)   # a trailing comment on the definition line
+      { printf '%s() {   # <fd> -> something\n' "$newfn"
+        printf "  comm -3 \"\$1\" \"\$2\" | sed 's/^\\\\t//'\n"
+        printf '}\n'; } >> "$mut" ;;
+    oneliner)    # whole definition on one line
+      printf "%s() { sed -i 's/a/b/' \"\$1\"; }\n" "$newfn" >> "$mut" ;;
+  esac
+  mut_fns=$(tree_fn_names "$mut" | tr '\n' ' ')
+  case " $mut_fns " in
+    *" $newfn "*)
+      # shellcheck disable=SC2086  # intentional word-split over the space-separated name list
+      if rule_hits "$mut" "$GNU_RULES" $mut_fns >/dev/null 2>&1; then
+        bad "J4: the newly added $shape helper $newfn() carries a GNU-only construct but the lint passed"
+      else
+        newfn_caught=$(( newfn_caught + 1 ))
+      fi ;;
+    *) bad "J4: the derived inventory did NOT pick up the newly added $shape helper $newfn()" ;;
+  esac
+done
+if [ "$newfn_caught" -eq "$newfn_total" ] && [ "$newfn_total" -eq 4 ]; then
+  ok "J4: a NEWLY ADDED tree helper is enumerated and linted automatically in all $newfn_total definition shapes (top/nested/commented/one-line)"
+else
+  bad "J4: only $newfn_caught of $newfn_total new-helper mutants were caught — a future helper can still be unlinted"
+fi
+# The remaining escape hatch is NAMING: the enumerator keys on the `_tree_*` prefix (plus the
+# two `_assert_`/`_apply_` names), so a helper called something else would still slip through.
+# Close it from the other side — EVERY function whose name mentions "tree" must be in the
+# inventory — which catches `_gate_tree_x`, `tree_helper` and friends on the commit that adds
+# them.
+all_tree_named=$(awk '
+  { l = $0; sub(/^[[:space:]]+/, "", l) }
+  l ~ /^[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*\{/ { sub(/\(\).*$/, "", l); print l }
+' "$GATE" | grep -i tree | LC_ALL=C sort -u)
+unlinted=""
+for fn in $all_tree_named; do
+  case " $TREE_FNS " in *" $fn "*) ;; *) unlinted="${unlinted:+$unlinted }$fn" ;; esac
+done
+if [ -z "$unlinted" ] && [ -n "$all_tree_named" ]; then
+  ok "J4: every tree-named function in the gate is in the linted inventory (no differently-named helper escapes)"
+else
+  bad "J4: tree-named function(s) outside the linted inventory: ${unlinted:-<enumerator found none>}"
+fi
+# A one-line definition must extract as ONE line: opening a multi-line scan on it would make
+# every later line of the gate part of that function's "body".
+if [ "$(fn_body "$GATE" _tree_short | grep -c .)" = 1 ]; then
+  ok "J4: a one-line definition (_tree_short) extracts as exactly one line — the scan cannot run away into the rest of the file"
+else
+  bad "J4: _tree_short's extracted body is $(fn_body "$GATE" _tree_short | grep -c .) lines — the extractor swallowed the file"
 fi
 # …and a NON-vacuity control: a portable body must produce NO hit, so the lint is not
 # simply flagging everything.
