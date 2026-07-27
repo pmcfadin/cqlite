@@ -26,16 +26,37 @@ permissions:
   pull-requests: read
 
 concurrency:
+  # The GROUP is the serialization guarantee: at most one run of this workflow
+  # per PR ever executes, so two runs can never both report a `required`
+  # conclusion — a queued run reports nothing until it starts.
+  #
+  # `cancel-in-progress` only chooses cancel-vs-QUEUE (issue #2910 round 2):
+  #   * a new head sha (opened/synchronize/reopened/ready_for_review) obsoletes
+  #     the in-flight run, so cancel it;
+  #   * a LABEL mutation changes no byte of the diff. Cancelling there would
+  #     restart the 30-minute core (clippy, all-feature build, core tests, the
+  #     #2644 oracle) on every `ci:perf`, board-mirror or `needs-decision` label
+  #     — and on the `ci:waive:<tier-id>` break-glass itself, making the escape
+  #     hatch cost a full gate re-run. Label runs therefore queue behind the
+  #     in-flight run and skip the core entirely (see `pr-gate-core`'s `if:`).
+  # gating_policy_rules.rb rejects an unconditional `true` here while this
+  # workflow subscribes to label events.
   group: pr-gate-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event.action != 'labeled' && github.event.action != 'unlabeled' }}
 
 jobs:
   # Everything the required gate itself computes. Split out from `required`
   # (issue #2910) so the aggregation wait gets its own generous timeout without
-  # inflating this compute job's, and so the heavy runner is released before the
-  # wait begins. The branch-protection context name (`required`) is UNCHANGED.
+  # inflating this compute job's. The branch-protection context name
+  # (`required`) is UNCHANGED.
   pr-gate-core:
     name: pr-gate-core
+    # A label mutation changes no file, so re-running the heaviest job in the
+    # repo for it is pure tax (issue #2910 round 2). The label run instead reuses
+    # the result this job ALREADY recorded for the same head sha — `required`
+    # verifies that via the aggregator's --core-* options and fails closed if no
+    # successful core is recorded. Skipping the WORK never skips the CHECK.
+    if: ${{ github.event.action != 'labeled' && github.event.action != 'unlabeled' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -205,6 +226,16 @@ jobs:
   # `if: always()` so the required context still reports (red) when the core job
   # fails, is cancelled, or is skipped — a never-reported required context would
   # block every affected PR forever.
+  #
+  # COST, stated honestly (issue #2910 round 2): this is a SECOND `ubuntu-latest`
+  # runner that lives until the slowest registered tier reaches a terminal state
+  # (worst case the 60-minute deadline, then a reported red). The earlier claim
+  # that the job split "releases the heavy runner before the wait begins" was
+  # wrong — the split separates TIMEOUTS, not runners. What it does keep cheap is
+  # this job's shape: a bare checkout of the base ref, no toolchain, no cache, no
+  # build; and when the tiers already finished while `pr-gate-core` was running,
+  # the first poll decides and the job exits in well under a minute. See
+  # openspec/changes/required-aggregates-sibling-tiers/design.md ("Cost").
   required:
     name: required
     needs: [pr-gate-core]
@@ -216,20 +247,60 @@ jobs:
     timeout-minutes: 75
 
     steps:
-      - name: Checkout
+      # TRUST BOUNDARY (issue #2910 round 2). Everything that DECIDES this
+      # context — the aggregator, its ruby modules and the tier registry — is
+      # read from the pull request's BASE REF, never from the PR's own checkout.
+      # Otherwise the check is defined by the thing it checks: a PR could gut
+      # scripts/ci/aggregate-required-tiers.sh, or move its own tier from
+      # `tiers:` to `exempt:` (the enrolment rule accepts any reason + issue
+      # ref), and `required` would go green on instructions the PR wrote. A
+      # registry change now takes effect AFTER it merges, which is the correct
+      # semantics. `base.sha` is a commit on the (protected) base branch, so it
+      # is not reachable from the PR head.
+      #
+      # We deliberately do NOT switch this workflow to `pull_request_target`:
+      # that hands a base-context token to a run that must also see head content
+      # — the classic pwn-request shape. Checking out the base copy of the
+      # specific trusted files is the smaller instrument, and this job never
+      # checks out head content at all (except in the bootstrap branch below).
+      #
+      # RESIDUAL, stated rather than hidden: a PR still controls the code its own
+      # tiers execute, so a tier's classifier can be edited to report "not
+      # applicable". Base-ref evaluation guarantees the SET of tiers, their
+      # contexts and the aggregation logic — not the work a tier chooses to do.
+      # That residual is a visible diff to a registered tier's workflow;
+      # CODEOWNERS on `.github/` + `scripts/ci/` is the complementary control.
+      - name: Checkout the base ref's gating mechanism (trusted copy)
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base-gating
+          persist-credentials: false
 
-      - name: Fail if the PR gate's own validation did not pass
-        env:
-          CORE_RESULT: ${{ needs.pr-gate-core.result }}
+      - name: Select the gating mechanism source
+        id: source
         run: |
           set -euo pipefail
-          if [ "$CORE_RESULT" != "success" ]; then
-            echo "::error::pr-gate-core concluded '${CORE_RESULT}'; required fails regardless of tier state."
-            echo "**required: FAILED — pr-gate-core concluded \`${CORE_RESULT}\`.**" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
+          if [ -f base-gating/.github/ci-gating-tiers.yml ] &&
+             [ -f base-gating/scripts/ci/aggregate-required-tiers.sh ]; then
+            echo "dir=base-gating" >> "$GITHUB_OUTPUT"
+            echo "Gating mechanism source: the BASE ref (trusted)."
+            exit 0
           fi
-          echo "pr-gate-core: success"
+          # BOOTSTRAP ONLY: the base ref predates this mechanism (the PR that
+          # introduces it, or a PR onto a branch cut before it). There is nothing
+          # on the base to subvert, and the base's state is not PR-controllable,
+          # so this fallback can never be used to escape a base registry that
+          # exists — a PR that DELETES the registry still faces the base copy.
+          echo "::warning::the base ref carries no gating registry; falling back to this PR's copy (bootstrap)"
+          echo "dir=head-gating" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout this PR (bootstrap only — the base has no mechanism)
+        if: steps.source.outputs.dir == 'head-gating'
+        uses: actions/checkout@v5
+        with:
+          path: head-gating
+          persist-credentials: false
 
       - name: Aggregate registered gating tiers
         env:
@@ -242,4 +313,11 @@ jobs:
           # `ci:waive:<tier-id>` is ignored.
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-        run: bash scripts/ci/aggregate-required-tiers.sh
+          # The gate's own compute job. On a label event it is skipped and the
+          # aggregator requires the result already RECORDED for this head sha;
+          # on any other event `skipped` is an unconditional failure.
+          CORE_CONTEXT: pr-gate-core
+          CORE_RESULT: ${{ needs.pr-gate-core.result }}
+          EVENT_ACTION: ${{ github.event.action }}
+          GATING_DIR: ${{ steps.source.outputs.dir }}
+        run: bash "$GATING_DIR/scripts/ci/aggregate-required-tiers.sh"

@@ -359,6 +359,26 @@ module GatingRegistry
     nil
   end
 
+  # The result ALREADY RECORDED for a context on this head sha, ignoring this
+  # run's own check runs (issue #2910 round 2). A label mutation changes no file,
+  # so the label-triggered run skips `pr-gate-core` rather than restarting a
+  # 30-minute job — but skipping the WORK must never skip the CHECK: `required`
+  # instead reads what the core concluded for this exact head. Its own skipped
+  # check run has the highest id and would otherwise mask that, hence the same
+  # run-identity exclusion the tier evaluation uses.
+  #
+  # Returns [state, run] where state is :success, :failed, :pending or :absent.
+  def recorded_context_result(context:, check_runs:, exclude_ids: [], run_id: nil)
+    exclude = exclude_ids.map(&:to_i).to_set
+    visible = check_runs.reject { |run| self_excluded?(run, exclude, run_id) }
+    run = latest_by_context(visible)[context.to_s]
+    return [:absent, nil] if run.nil?
+    return [:pending, run] if run["status"].to_s != "completed"
+    return [:success, run] if run["conclusion"].to_s == PASSING_CONCLUSION
+
+    [:failed, run]
+  end
+
   # UNIT SEPARATOR (0x1F), deliberately NOT a tab: bash `read` treats tab as IFS
   # whitespace and would COLLAPSE the empty fields an absent tier legitimately
   # produces (no check id, no conclusion, no url), silently shifting every later
@@ -397,9 +417,12 @@ if __FILE__ == $PROGRAM_NAME
     grace: GatingRegistry::DEFAULT_SUPERSESSION_GRACE_SECONDS
   }
 
+  options[:context] = nil
+
   command = ARGV.shift.to_s
   parser = OptionParser.new do |opts|
-    opts.banner = "Usage: ruby scripts/ci/gating_registry.rb {policy|evaluate|deadline} [options]"
+    opts.banner = "Usage: ruby scripts/ci/gating_registry.rb {policy|evaluate|deadline|recorded-result} [options]"
+    opts.on("--context NAME", "check-run name for `recorded-result`") { |v| options[:context] = v }
     opts.on("--registry PATH") { |v| options[:registry] = v }
     opts.on("--workflows-dir DIR") { |v| options[:workflows_dir] = v }
     opts.on("--check-runs PATH", "check-run JSON/NDJSON file, or - for stdin") { |v| options[:check_runs] = v }
@@ -437,6 +460,23 @@ if __FILE__ == $PROGRAM_NAME
       registry = GatingRegistry.load_registry(options[:registry])
       puts GatingRegistry.effective_wait_minutes(registry)
       exit 0
+    when "recorded-result"
+      # No registry needed: this asks only "what did <context> already conclude
+      # for this head sha, excluding my own run?". 0 success / 1 failed /
+      # 3 pending / 4 absent — every non-zero code is a refusal, so a caller that
+      # merely checks `if ok` still fails closed.
+      raise GatingRegistry::Error, "--context is required" if options[:context].to_s.strip.empty?
+
+      text = options[:check_runs] == "-" ? $stdin.read : File.read(options[:check_runs])
+      state, run = GatingRegistry.recorded_context_result(
+        context: options[:context],
+        check_runs: GatingRegistry.parse_check_runs(text),
+        exclude_ids: options[:exclude_ids],
+        run_id: options[:run_id]
+      )
+      puts [state, run&.dig("id"), run&.dig("status"), run&.dig("conclusion"), run&.dig("details_url")]
+        .map { |field| field.to_s.gsub(/[\t\r\n]/, " ") }.join(GatingRegistry::OBSERVATION_SEPARATOR)
+      exit({ success: 0, failed: 1, pending: 3, absent: 4 }.fetch(state))
     when "evaluate"
       registry = GatingRegistry.load_registry(options[:registry])
       text = options[:check_runs] == "-" ? $stdin.read : File.read(options[:check_runs])

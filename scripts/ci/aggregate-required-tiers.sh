@@ -43,6 +43,10 @@
 #   --poll-initial-seconds N   first backoff interval   [15]
 #   --poll-max-seconds N       backoff ceiling          [60]
 #   --max-fetch-failures N     consecutive transient fetch failures tolerated [6]
+#   --core-context NAME        the gate's own compute job's context [pr-gate-core]
+#   --core-result RESULT       `needs.<core>.result` in THIS run    [$CORE_RESULT]
+#   --event-action ACTION      the pull_request activity type       [$EVENT_ACTION]
+#   --core-runs-cmd CMD        command printing that context's check runs [gh api]
 #   --check-runs-cmd CMD       command printing check-run JSON/NDJSON [gh api]
 #   --self-jobs-cmd CMD        command printing this run's job ids    [gh api]
 #   --labels-cmd CMD           command printing the PR's CURRENT label names [gh api]
@@ -73,6 +77,10 @@ MAX_FETCH_FAILURES="${MAX_FETCH_FAILURES:-6}"
 CHECK_RUNS_CMD="${CHECK_RUNS_CMD:-}"
 SELF_JOBS_CMD="${SELF_JOBS_CMD:-}"
 LABELS_CMD="${LABELS_CMD:-}"
+CORE_CONTEXT="${CORE_CONTEXT:-pr-gate-core}"
+CORE_RESULT_IN="${CORE_RESULT:-}"
+EVENT_ACTION_IN="${EVENT_ACTION:-}"
+CORE_RUNS_CMD="${CORE_RUNS_CMD:-}"
 NOW_OVERRIDE=""
 SUMMARY_FILE="${GITHUB_STEP_SUMMARY:-}"
 SLEEP_CMD="${SLEEP_CMD:-sleep}"
@@ -92,13 +100,19 @@ while [ "$#" -gt 0 ]; do
     --poll-initial-seconds) POLL_INITIAL_SECONDS="$2"; shift 2 ;;
     --poll-max-seconds) POLL_MAX_SECONDS="$2"; shift 2 ;;
     --max-fetch-failures) MAX_FETCH_FAILURES="$2"; shift 2 ;;
+    --core-context) CORE_CONTEXT="$2"; shift 2 ;;
+    --core-result) CORE_RESULT_IN="$2"; shift 2 ;;
+    --event-action) EVENT_ACTION_IN="$2"; shift 2 ;;
+    --core-runs-cmd) CORE_RUNS_CMD="$2"; shift 2 ;;
     --check-runs-cmd) CHECK_RUNS_CMD="$2"; shift 2 ;;
     --self-jobs-cmd) SELF_JOBS_CMD="$2"; shift 2 ;;
     --labels-cmd) LABELS_CMD="$2"; shift 2 ;;
     --now) NOW_OVERRIDE="$2"; shift 2 ;;
     --summary-file) SUMMARY_FILE="$2"; shift 2 ;;
     --sleep-cmd) SLEEP_CMD="$2"; shift 2 ;;
-    -h|--help) sed -n '2,70p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    # Print the header block, however long it grows — a hard line range silently
+    # starts printing code once someone documents a new option.
+    -h|--help) awk 'NR > 1 { if (!/^#/) exit; print }' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "aggregate-required-tiers: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -137,6 +151,16 @@ case "$RUN_ID" in
   "" ) : ;;
   *[!0-9]* ) fail_closed "--run-id/GITHUB_RUN_ID is not a positive integer: '$RUN_ID'" ;;
 esac
+# A check-run name is free text but is interpolated into a URL query, so keep it
+# to the shape a job `name:` can legitimately have.
+case "$CORE_CONTEXT" in
+  "" ) fail_closed "--core-context must name the gate's own compute job's context" ;;
+  *[!A-Za-z0-9\ ._-]* ) fail_closed "--core-context is not a plain check-run name: '$CORE_CONTEXT'" ;;
+esac
+case "$EVENT_ACTION_IN" in
+  "" ) : ;;
+  *[!a-z_]* ) fail_closed "--event-action is not a pull_request activity type: '$EVENT_ACTION_IN'" ;;
+esac
 
 # Default data sources. Check runs are keyed to the PULL REQUEST HEAD sha — NOT
 # github.sha, which for a pull_request event is the synthesised merge commit and
@@ -165,6 +189,13 @@ fi
 # ever withhold a waiver, never grant one.
 if [ -z "$LABELS_CMD" ] && [ -n "$REPO_SLUG" ] && [ -n "$PR_NUMBER_IN" ]; then
   LABELS_CMD="gh api \"repos/${REPO_SLUG}/pulls/${PR_NUMBER_IN}\" --jq '.labels[].name'"
+fi
+# The core context's ALREADY RECORDED result for this head sha. `filter=all` (not
+# `latest`) is load-bearing: on a label-triggered run our own skipped core job
+# mints the newest check run of that name, and `filter=latest` would return only
+# that one, hiding the real result we need to honour.
+if [ -z "$CORE_RUNS_CMD" ] && [ -n "$REPO_SLUG" ] && [ -n "$HEAD_SHA" ]; then
+  CORE_RUNS_CMD="gh api --paginate \"repos/${REPO_SLUG}/commits/${HEAD_SHA}/check-runs?check_name=${CORE_CONTEXT// /%20}&filter=all&per_page=100\" --jq '.check_runs[]'"
 fi
 
 if [ -z "$DEADLINE_EPOCH" ]; then
@@ -210,6 +241,82 @@ until eval "$SELF_JOBS_CMD" >"$SELF_IDS_FILE" 2>"$WORK_DIR/self-job-ids.err"; do
 done
 
 echo "aggregate-required-tiers: registry=$REGISTRY deadline_epoch=$DEADLINE_EPOCH run_id=${RUN_ID:-none}"
+
+# --------------------------------------------------- the gate's own compute --
+# `required` NEVER masks its own workflow's compute job. Normally that is decided
+# by this run's `needs.<core>.result`. The one exception is a LABEL-triggered run
+# (issue #2910 round 2): a label mutation changes no file, so restarting the
+# 30-minute core would make every `ci:perf` / board-mirror / `needs-decision`
+# label — and the `ci:waive:<tier-id>` break-glass itself — cost a full gate
+# re-run. The core job is skipped there, and this reads what it ALREADY concluded
+# for this exact head sha instead. Skipping the WORK never skips the CHECK: an
+# absent, pending, or non-success recorded result fails closed, so a label can
+# never manufacture a green core.
+LABEL_EVENT=false
+case "$EVENT_ACTION_IN" in
+  labeled|unlabeled) LABEL_EVENT=true ;;
+esac
+
+core_summary() {
+  [ -n "$SUMMARY_FILE" ] && printf '%s\n' "$1" >>"$SUMMARY_FILE"
+  return 0
+}
+
+verify_recorded_core() {
+  [ -n "$CORE_RUNS_CMD" ] || return 1
+  local attempt=0 rc=0 line=""
+  while :; do
+    attempt=$((attempt + 1))
+    if eval "$CORE_RUNS_CMD" >"$WORK_DIR/core-runs.json" 2>"$WORK_DIR/core-runs.err"; then
+      rc=0
+      line="$(ruby "$REGISTRY_RB" recorded-result \
+        --context "$CORE_CONTEXT" \
+        --check-runs "$WORK_DIR/core-runs.json" \
+        --exclude-ids-file "$SELF_IDS_FILE" \
+        --run-id "${RUN_ID:-}")" || rc=$?
+      CORE_OBSERVED="$line"
+      return "$rc"
+    fi
+    sed 's/^/  /' "$WORK_DIR/core-runs.err" >&2 || true
+    [ "$attempt" -ge 3 ] && return 1
+    echo "::warning::transient failure reading the recorded ${CORE_CONTEXT} result (attempt ${attempt}); retrying" >&2
+    "$SLEEP_CMD" "$POLL_INITIAL_SECONDS" || true
+  done
+}
+
+CORE_OBSERVED=""
+case "$CORE_RESULT_IN" in
+  "" )
+    # No core result injected at all (e.g. a standalone invocation): nothing to
+    # assert, the tier aggregation below is the whole job.
+    : ;;
+  success )
+    echo "${CORE_CONTEXT}: success (this run)" ;;
+  skipped )
+    if [ "$LABEL_EVENT" != "true" ]; then
+      echo "::error::${CORE_CONTEXT} was skipped on a '${EVENT_ACTION_IN:-unknown}' event; only a label" \
+           "mutation may skip it, so required fails closed." >&2
+      core_summary "**required: FAILED — \`${CORE_CONTEXT}\` was skipped on a non-label event (\`${EVENT_ACTION_IN:-unknown}\`).**"
+      exit 1
+    fi
+    CORE_RC=0
+    verify_recorded_core || CORE_RC=$?
+    case "$CORE_RC" in
+      0) echo "${CORE_CONTEXT}: success (recorded for this head sha; ${CORE_OBSERVED})" ;;
+      *)
+        echo "::error::no successful ${CORE_CONTEXT} is recorded for this head sha (${CORE_OBSERVED:-lookup failed});" \
+             "a '${EVENT_ACTION_IN}' event may reuse that result but never substitute for it." >&2
+        core_summary "**required: FAILED — no successful \`${CORE_CONTEXT}\` recorded for this head sha; a label event cannot stand in for it.**"
+        exit 1
+        ;;
+    esac
+    ;;
+  * )
+    echo "::error::${CORE_CONTEXT} concluded '${CORE_RESULT_IN}'; required fails regardless of tier state." >&2
+    core_summary "**required: FAILED — \`${CORE_CONTEXT}\` concluded \`${CORE_RESULT_IN}\`.**"
+    exit 1
+    ;;
+esac
 
 OBSERVATIONS="$WORK_DIR/observations.tsv"
 ATTEMPT=0
