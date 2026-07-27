@@ -206,13 +206,27 @@ async fn test_file_creation_performance() -> Result<()> {
     let test_data = TestSSTableData::default();
 
     let start_time = std::time::Instant::now();
-    let _sstable_path = harness.create_test_sstable("perf_test", test_data).await?;
+    let sstable_path = harness.create_test_sstable("perf_test", test_data).await?;
     let duration = start_time.elapsed();
 
-    // File creation should be fast (under 1 second)
+    // Record timing (do not assert on wall-clock latency — #2642/#2902).
+    println!("[perf-record] test sstable creation: {duration:?}");
+
+    // Load-immune STRUCTURAL invariant (replaces the retired wall-clock assert):
+    // creation actually produced the file on disk and it is non-empty.
+    let meta = tokio::fs::metadata(&sstable_path).await.map_err(|e| {
+        Error::Io(std::io::Error::other(format!(
+            "created SSTable path {sstable_path:?} is not accessible: {e}"
+        )))
+    })?;
     assert!(
-        duration.as_secs() < 1,
-        "File creation took too long: {duration:?}"
+        meta.is_file(),
+        "created SSTable path should be a regular file: {sstable_path:?}"
+    );
+    assert!(
+        meta.len() > 0,
+        "created SSTable file should be non-empty: {sstable_path:?} ({} bytes)",
+        meta.len()
     );
 
     Ok(())

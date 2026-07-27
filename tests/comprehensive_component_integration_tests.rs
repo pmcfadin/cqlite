@@ -261,13 +261,6 @@ async fn test_partition_lookup_component_integration() -> Result<()> {
                 );
             }
         }
-
-        // Performance assertion: Component-integrated lookups should be fast
-        assert!(
-            lookup_duration.as_millis() < 100,
-            "Component-integrated lookup should be fast: {:?}ms",
-            lookup_duration.as_millis()
-        );
     }
 
     // Test 2: Verify component stats after lookups
@@ -302,13 +295,6 @@ async fn test_range_scan_component_integration() -> Result<()> {
         full_scan_duration
     );
 
-    // Performance assertion for full scan
-    assert!(
-        full_scan_duration.as_millis() < 1000,
-        "Full scan should complete quickly: {:?}ms",
-        full_scan_duration.as_millis()
-    );
-
     // Test 2: Limited range scan
     let start_time = Instant::now();
     let limited_results = reader.scan(&table_id, None, None, Some(10), None).await?;
@@ -325,13 +311,6 @@ async fn test_range_scan_component_integration() -> Result<()> {
         limited_results.len() <= 10,
         "Limited scan should respect limit: {} <= 10",
         limited_results.len()
-    );
-
-    // Performance assertion for limited scan
-    assert!(
-        limited_scan_duration.as_millis() < 100,
-        "Limited scan should be very fast: {:?}ms",
-        limited_scan_duration.as_millis()
     );
 
     // Test 3: Range scan with boundaries
@@ -408,13 +387,6 @@ async fn test_decompression_component_integration() -> Result<()> {
         decompression_duration
     );
 
-    // Performance assertion: Decompression should not significantly slow down reads
-    assert!(
-        decompression_duration.as_millis() < 500,
-        "Decompression should be efficient: {:?}ms",
-        decompression_duration.as_millis()
-    );
-
     // Test 3: Verify decompressed data integrity
     let mut total_value_size = 0;
     for (key, value) in &results {
@@ -451,13 +423,6 @@ async fn test_decompression_component_integration() -> Result<()> {
             println!("  ℹ️  Key not found through decompression (expected for test data)");
         }
     }
-
-    // Performance assertion for single lookup through decompression
-    assert!(
-        lookup_duration.as_millis() < 50,
-        "Decompressed lookup should be fast: {:?}ms",
-        lookup_duration.as_millis()
-    );
 
     Ok(())
 }
