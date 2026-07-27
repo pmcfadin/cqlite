@@ -42,22 +42,22 @@
 # push. It is NOT a bypass — git still arbitrates, so a machine actively holding
 # the claim ref keeps it (ADOPT-LOST, exit 2).
 #
+# IT IS DELIBERATELY NOT AUTO-ADVERTISED (owner decision, #2945). The refusal below
+# DIAGNOSES the lane (which branch blocks it, and that the claim ref itself is free)
+# and POINTS AT THE DOCUMENTED PROCEDURE — it never prints a copy-pasteable resume
+# command. The readers are agents that run printed remediations LITERALLY, so a
+# printed command is a hand-away, and deciding whether a lane is truly abandoned
+# needs signals this script cannot read soundly (three successive attempts at such a
+# liveness probe each shipped a new way to hand an ACTIVELY-WORKED lane to a second
+# writer). The abandonment test lives where it already has the inputs:
+# `flow-board`'s reaper criteria / `claim-heartbeat.sh should-reap`, plus the board
+# Status and the branch/PR author.
+#
 # LEGACY GUARD (mixed-fleet safety): older workers still branch-lock with a
 # `refs/heads/issue-<N>-*` branch. `claim` refuses if any such branch exists on
-# origin (treat the issue as already-claimed) and names the resume command above
-# in its refusal — but ONLY when the lane is DEMONSTRABLY ORPHANED per
-# `hatch_liveness`: zero open PRs AND every matching branch tip carrying at least one
-# commit of its OWN and older than claim-heartbeat.sh's reap threshold AND no fresh
-# machine-claim/heartbeat ref naming the issue. A branch with no commits beyond
-# origin/main (what `flow-activate` pushes at activation) has NO age signal at all, so
-# it is INDETERMINATE and withholds. An older-fleet worker holds only the BRANCH, so `claim-ref=free` is true
-# while it works — and because a PR is opened LATE in this pipeline, "no open PR" is
-# also true for most of its life, which is why the branch-tip age and the liveness
-# refs (the PRE-PR window) are part of the test. Otherwise — a live signal OR any
-# signal that could not be READ — the refusal prints `remediation=withheld <signals>`
-# instead: fail closed, because the readers run printed remediations literally (#2945).
-# The advertised command carries a CONCRETE `--reason resume-legacy-branch-lock:<branch>`
-# rather than a `<why>` placeholder, since it will be run verbatim.
+# origin (treat the issue as already-claimed), naming the blocking branch(es) and
+# `claim-ref=free` — a diagnosis that used to be missing, and without which a worker
+# cannot tell this refusal from a genuinely held claim.
 # There is NO tip-based re-entrancy exemption: a work branch is
 # cut from origin/main and carries ordinary commits, so its tip NEVER carries the
 # machine=/actor= claim trailers — the old "all-ours -> no block" escape hatch was
@@ -142,15 +142,11 @@
 #   macOS bash 3.2 compatible (no associative arrays, no readarray/mapfile).
 #   `set -euo pipefail`, shellcheck-clean. All informative output is a single line
 #   prefixed `CLAIM:` (notes/degradations go to stderr).
-#   gh is consulted by exactly TWO paths, both via `open_pr_count`, both degrading
-#   LOUDLY (stderr note + a `-1` count) when gh is absent/errors: `release` without
-#   --force (the open-PR guard) and `claim`'s LEGACY-BRANCH refusal (one
-#   `gh pr list --limit 1000` per refusal, as hatch_liveness's endgame signal, where
-#   `-1` WITHHOLDS the advertised remediation). Nothing else touches gh, and claim/
-#   adopt/release ARBITRATION never depends on it — gh only bounds how loud a refusal
-#   may be. That refusal also shells out to the sibling `claim-heartbeat.sh
-#   reap-threshold` (single source of the 4h staleness threshold); an unreadable
-#   answer withholds rather than defaulting.
+#   gh is consulted by exactly ONE path, via `open_pr_count`, degrading LOUDLY
+#   (stderr note + a `-1` count) when gh is absent/errors: `release` without --force
+#   (the open-PR guard). Nothing else touches gh — `claim` (including its
+#   LEGACY-BRANCH refusal), `adopt` and `release --force` never run it, so no
+#   arbitration or refusal text depends on a GitHub read.
 #
 # EXIT CODES
 #   0  success (CLAIM HELD, VERIFY-OK, ADOPTED, RELEASED, SMOKE-OK, status render)
@@ -441,198 +437,6 @@ legacy_branch_scan() {
   return 0
 }
 
-# reap_threshold_secs — "how old is stale enough to hand away", in seconds, read
-# from claim-heartbeat.sh (`reap-threshold`) so the fleet keeps exactly ONE
-# definition of the 4h staleness threshold instead of a second copy here that could
-# drift from the documented one (#2945 review). Prints the seconds (exit 0), or
-# returns 1 when the sibling script is missing/answers non-numerically — an
-# UNREADABLE signal, which callers must treat as "withhold", never as a default.
-reap_threshold_secs() {
-  local hb out
-  hb="$(dirname -- "${BASH_SOURCE[0]}")/claim-heartbeat.sh"
-  [ -f "$hb" ] || return 1
-  out="$(bash "$hb" reap-threshold 2>/dev/null)" || return 1
-  case "$out" in
-    '' | *[!0-9]*) return 1 ;;
-  esac
-  printf '%s\n' "$out"
-}
-
-# hatch_fetch_ref <remote-ref> <slot> — fetch <remote-ref> from origin into the
-# PRIVATE local ref refs/hatch-scan/<slot> and print its commit sha; returns 1 when
-# ANY step is unreadable (callers withhold).
-#
-# EXPLICIT REFSPEC, NEVER FETCH_HEAD: the liveness scan fetches several refs in a
-# row and every `git fetch` REWRITES FETCH_HEAD, so reading FETCH_HEAD is a
-# clobbering hazard — one stale read ages the WRONG commit. Fetching (not just
-# ls-remote'ing) is also what makes the objects local, which the ancestry test below
-# needs. The slots are force-updated (`+`) and deleted by hatch_liveness afterwards.
-hatch_fetch_ref() {
-  local refname="$1" slot="refs/hatch-scan/$2" sha
-  git fetch --quiet --no-tags "$REMOTE" "+${refname}:${slot}" >/dev/null 2>&1 || return 1
-  sha="$(git rev-parse --verify --quiet "${slot}^{commit}")" || return 1
-  [ -n "$sha" ] || return 1
-  printf '%s\n' "$sha"
-}
-
-# hatch_tip_has_own_commits <tip-sha> <base-sha> — does this branch tip carry at
-# least ONE commit beyond origin's default branch?
-#   0  yes — the tip is the worker's OWN work, so its committer date means something
-#   1  no  — the tip IS the base (or an ancestor of it). `flow-activate` creates the
-#            work branch with `git worktree add -b issue-<N>-<slug> origin/main` and
-#            pushes it with NO commits of its own, so such a tip's date is
-#            origin/main's and carries ZERO information about the worker (#2945
-#            review). Age-judging it made an actively-worked lane look "stale"
-#            whenever main had been quiet longer than the threshold (overnight is
-#            routine) and advertised a hand-away for it — two writers on one issue.
-#   2  the ancestry test itself could not be run — an unread signal.
-hatch_tip_has_own_commits() {
-  local rc=0
-  git merge-base --is-ancestor "$1" "$2" >/dev/null 2>&1 || rc=$?
-  case "$rc" in
-    0) return 1 ;;
-    1) return 0 ;;
-    *) return 2 ;;
-  esac
-}
-
-# hatch_liveness <N> <threshold-secs> — may the copy-pasteable empty-lease resume be
-# ADVERTISED for this issue, i.e. is its lane demonstrably ORPHANED?
-#
-# The open-PR signal ALONE does not answer this (#2945 review). In this pipeline the
-# PR is opened LATE (implement + review happen first), so an older-fleet worker that
-# is actively implementing has ZERO open PRs for most of its life while holding only
-# the BRANCH — and `claim-ref=free` is true for it. Advertising the hatch there is the
-# two-writer outcome the guard exists to prevent, and the readers run printed
-# remediations literally. So the PRE-PR window needs its own liveness evidence:
-#
-#   1. open PRs == 0                       (the ENDGAME signal; -1 = unreadable)
-#   2. EVERY matching issue-<N>-* branch tip CARRIES AT LEAST ONE COMMIT OF ITS OWN
-#      (beyond origin's default branch) and is OLDER than <threshold> (the same
-#      staleness threshold `claim-heartbeat.sh should-reap` uses) — a worker mid-
-#      implementation pushes commits, so a FRESH tip means somebody is on it. A tip
-#      with NO own commits is what `flow-activate` pushes at activation time, so its
-#      date is origin/main's: NO INFORMATION, hence INDETERMINATE, hence withheld —
-#      never "stale" (#2945 review). The motivating cases (#2043, #1883) each carried
-#      their own OpenSpec commit, so they stay age-judgeable and still advertise.
-#   3. NO refs/machine-claims/* or refs/heartbeats/* ref that NAMES THIS ISSUE is
-#      fresher than <threshold> (the supervisor-authored liveness proof of #2655; a
-#      ref older than the threshold is itself reapable and does not withhold, and a
-#      ref naming another issue — or naming none at all — is not evidence about THIS
-#      lane, so it does not withhold either)
-#
-# ANY signal that cannot be READ withholds — an unreachable remote, an unreadable
-# default-branch/ancestry test, an unparseable commit date and a missing threshold are
-# all "we could not prove nobody is working this", never an all-clear. Sets
-# HATCH_SIGNALS (a single-line key=value run for the refusal) and returns 0 = orphaned
-# (advertise), 1 = withhold.
-HATCH_SIGNALS=""
-hatch_liveness() {
-  local rc=0
-  hatch_liveness_scan "$@" || rc=$?
-  # The private scan slots are scratch, not state: drop them so the scan never leaves
-  # fetched objects pinned in the caller's checkout.
-  git update-ref -d refs/hatch-scan/base   >/dev/null 2>&1 || true
-  git update-ref -d refs/hatch-scan/branch >/dev/null 2>&1 || true
-  git update-ref -d refs/hatch-scan/live   >/dev/null 2>&1 || true
-  return "$rc"
-}
-
-hatch_liveness_scan() {
-  local issue="$1" threshold="$2"
-  local prs now raw line refname msg base tip tip_ct age min_age="" own_rc ref_issue ref_ts ref_epoch
-
-  prs="$(open_pr_count "$issue")"
-  HATCH_SIGNALS="open-prs=$prs"
-  [ "$prs" = "0" ] || return 1
-
-  # The BASE a work branch is cut from: origin's default branch, read as the remote's
-  # HEAD so no branch name is hardcoded. FETCHED, because the ancestry test needs its
-  # objects locally — and an unreadable base is an UNREAD signal, so it withholds
-  # rather than silently letting every tip count as "own work" (which would restore
-  # the vacuous age verdict this signal exists to remove).
-  if ! base="$(hatch_fetch_ref HEAD base)"; then
-    HATCH_SIGNALS="$HATCH_SIGNALS default-branch-tip=unreadable"
-    return 1
-  fi
-
-  now="$(date -u +%s)"
-  while IFS= read -r refname; do
-    [ -n "$refname" ] || continue
-    if ! tip="$(hatch_fetch_ref "$refname" branch)"; then
-      HATCH_SIGNALS="$HATCH_SIGNALS branch-tip=unreadable:${refname}"
-      return 1
-    fi
-    own_rc=0
-    hatch_tip_has_own_commits "$tip" "$base" || own_rc=$?
-    if [ "$own_rc" = "1" ]; then
-      # INDETERMINATE, not stale: a freshly-activated branch carries no commits of
-      # its own, so there is nothing here to age. Withhold, with a self-describing
-      # marker so the reader sees WHY no age was reported.
-      HATCH_SIGNALS="$HATCH_SIGNALS newest-branch-tip=no-own-commits:${refname}"
-      return 1
-    fi
-    if [ "$own_rc" != "0" ]; then
-      HATCH_SIGNALS="$HATCH_SIGNALS branch-tip=ancestry-unreadable:${refname}"
-      return 1
-    fi
-    if ! tip_ct="$(git log -1 --format=%ct "$tip" 2>/dev/null)" \
-       || [ -z "$tip_ct" ] || [ -n "${tip_ct//[0-9]/}" ]; then
-      HATCH_SIGNALS="$HATCH_SIGNALS branch-tip=unreadable:${refname}"
-      return 1
-    fi
-    age=$((now - tip_ct))
-    [ "$age" -ge 0 ] || age=0
-    if [ -z "$min_age" ] || [ "$age" -lt "$min_age" ]; then min_age="$age"; fi
-  done <<< "$(printf '%s' "$LEGACY_BRANCHES" | tr ',' '\n')"
-  if [ -z "$min_age" ]; then
-    HATCH_SIGNALS="$HATCH_SIGNALS branch-tip=unreadable"
-    return 1
-  fi
-  HATCH_SIGNALS="$HATCH_SIGNALS newest-branch-tip=$(humanize_age "$min_age") stale-after=$(humanize_age "$threshold")"
-  [ "$min_age" -gt "$threshold" ] || return 1
-
-  if ! raw="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 'refs/heartbeats/*' 2>/dev/null)"; then
-    HATCH_SIGNALS="$HATCH_SIGNALS liveness-refs=unreadable"
-    return 1
-  fi
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    refname="$(printf '%s' "$line" | awk '{print $2}')"
-    [ -n "$refname" ] || continue
-    if ! tip="$(hatch_fetch_ref "$refname" live)" \
-       || ! msg="$(git log -1 --format=%B "$tip" 2>/dev/null)"; then
-      # We could not READ this ref at all, so we cannot rule out that it names our
-      # issue → withhold (fail closed).
-      HATCH_SIGNALS="$HATCH_SIGNALS liveness-refs=unreadable:${refname}"
-      return 1
-    fi
-    # SCOPED TO THIS ISSUE (#2945 review). A ref we CAN read that does not name this
-    # issue — another issue's claim, or a legacy/foreign ref with no `issue=` trailer
-    # at all — is not evidence about THIS lane. Withholding on it blocked the hatch
-    # FLEET-WIDE for EVERY issue, re-creating the permanent dead end this change
-    # exists to remove. Skipped, not withheld.
-    ref_issue="$(msg_field "$msg" issue)"
-    [ "$ref_issue" = "$issue" ] || continue
-    # This ref names OUR issue. Fresh -> a worker is on it. Unparseable ts -> we
-    # cannot age it out, so it withholds (fail closed) exactly like should-reap
-    # refuses to reap on an unknown age.
-    ref_ts="$(msg_field "$msg" ts)"
-    if [ -z "$ref_ts" ] || ! ref_epoch="$(ts_to_epoch "$ref_ts")"; then
-      HATCH_SIGNALS="$HATCH_SIGNALS liveness-ref=${refname}:unparseable-ts"
-      return 1
-    fi
-    age=$((now - ref_epoch))
-    [ "$age" -ge 0 ] || age=0
-    if [ "$age" -le "$threshold" ]; then
-      HATCH_SIGNALS="$HATCH_SIGNALS liveness-ref=${refname}:age=$(humanize_age "$age")"
-      return 1
-    fi
-  done <<< "$raw"
-
-  HATCH_SIGNALS="$HATCH_SIGNALS liveness-refs=none-naming-$issue"
-  return 0
-}
 
 # ---------------------------------------------------------------------------
 cmd_claim() {
@@ -661,42 +465,25 @@ cmd_claim() {
   fi
 
   # Legacy branch-lock guard (mixed fleet). An `issue-<N>-*` branch on origin is
-  # treated as an older worker's branch lock. The refusal NAMES the sanctioned
-  # resume command (#2945): a bare LOST is what previously sent workers into
-  # hand-crafted claim-commit pushes. An enumeration OUTAGE is UNKNOWN, not an
-  # all-clear (#2677 item 2) — it maps to ERROR infra (retryable), never a claim
+  # treated as an older worker's branch lock. An enumeration OUTAGE is UNKNOWN, not
+  # an all-clear (#2677 item 2) — it maps to ERROR infra (retryable), never a claim
   # granted on an unread guard.
   if ! legacy_branch_scan "$issue"; then
     emit_infra "issue=$issue detail=legacy-branch-ls-remote-unreachable-on-$REMOTE (cannot tell 'no legacy branch' from an outage)"
     return 1
   fi
   if [ -n "$LEGACY_BRANCHES" ]; then
-    # The refusal must be ACTIONABLE without being DANGEROUS (#2945 review). "git
-    # rejects it if any machine holds the ref" does NOT cover the case this guard
-    # exists for: an OLDER-fleet worker locks with the BRANCH and holds no claim ref,
-    # so `claim-ref=free` is true for it and the advertised empty-lease adopt WOULD
-    # succeed — a second machine on an actively-worked issue. Prose hedging ("if it
-    # is YOURS") is not a control: the readers are agents that run printed
-    # remediations literally. So the copy-pasteable command is printed ONLY when
-    # hatch_liveness proves the lane ORPHANED across ALL its signals — no open PR
-    # (endgame), every branch tip staler than the reap threshold (the PRE-PR window,
-    # where an actively-implementing legacy worker has no PR at all), and no fresh
-    # machine-claim/heartbeat ref naming this issue. Any unreadable signal withholds:
-    # fail closed, never advertise a hand-away on evidence we could not read.
-    # The printed --reason is a CONCRETE, self-describing default, not a `<why>`
-    # placeholder: run verbatim, `<why>` recorded as `reason=why` — as uninformative
-    # as the no-reason case the audit gate rejects (cmd_adopt now refuses that token).
-    local remedy threshold hatch_branch
-    if ! threshold="$(reap_threshold_secs)"; then
-      remedy="remediation=withheld liveness=threshold-unreadable (could not read the staleness threshold from claim-heartbeat.sh reap-threshold, so the lane cannot be shown orphaned; fix the checkout, then see 'bash scripts/flow/claim.sh -h')"
-    elif hatch_liveness "$issue" "$threshold"; then
-      hatch_branch="${LEGACY_BRANCHES%%,*}"
-      hatch_branch="${hatch_branch#refs/heads/}"
-      remedy="remediation='bash scripts/flow/claim.sh adopt $issue --expect none --reason resume-legacy-branch-lock:${hatch_branch}' $HATCH_SIGNALS (orphaned lane: no open PR, every branch tip carrying its OWN commits and staler than the reap threshold, no fresh liveness ref for this issue — an older-fleet branch lock left behind, a parked/reaped resume, or a merged-but-undeleted branch; the quoted empty-lease adopt takes the FREE claim ref atomically — git rejects it if any machine holds the claim ref)"
-    else
-      remedy="remediation=withheld $HATCH_SIGNALS (this lane may be LIVE or is unproven: an open PR (or an unreadable -1 PR list), a branch tip fresher than the reap threshold — an older-fleet worker mid-implementation holds only the BRANCH and has NO PR yet — a branch with NO commits of its own, whose tip date is just origin/main's and says nothing about the worker (newest-branch-tip=no-own-commits), or a fresh machine-claim/heartbeat ref naming this issue. An empty-lease adopt WOULD succeed there and create a SECOND writer; confirm ownership via the board and the branch/PR author first, then see 'bash scripts/flow/claim.sh -h')"
-    fi
-    emit "LOST issue=$issue reason=legacy-branch-lock detail=$LEGACY_BRANCHES exists on $REMOTE claim-ref=free $remedy"
+    # DIAGNOSE, DO NOT HAND OVER (owner decision, #2945). The refusal names the
+    # blocking branch(es) and says the claim REF is free — the diagnosis a bare LOST
+    # was missing, and the reason workers previously concluded the issue was a dead
+    # end and hand-crafted claim commits. It deliberately prints NO runnable resume
+    # command: the readers are agents that execute printed remediations literally, and
+    # an older-fleet worker locks with the BRANCH while holding no claim ref, so a
+    # printed empty-lease adopt WOULD succeed against an actively-worked lane. Deciding
+    # abandonment needs liveness inputs this script cannot read soundly (three
+    # successive in-script probes each shipped a fresh way to hand away a live lane),
+    # so the pointer goes to the tools that own that judgement.
+    emit "LOST issue=$issue reason=legacy-branch-lock detail=$LEGACY_BRANCHES exists on $REMOTE claim-ref=free resume=documented-procedure (the claim REF is FREE — this is an older worker's BRANCH lock, not a held claim. A sanctioned resume exists and is documented in the claim protocol (CLAUDE.md) and in 'bash scripts/flow/claim.sh -h'; it is intentionally NOT printed here as a runnable line. CONFIRM the lane is abandoned FIRST — flow-board's reaper criteria via claim-heartbeat.sh should-reap, the board Status, and the branch/PR author — then follow that documented procedure. Never resume a lane a live worker owns, and never hand-craft a claim commit)"
     return 2
   fi
 
