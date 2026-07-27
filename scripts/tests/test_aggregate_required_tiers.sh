@@ -686,6 +686,14 @@ echo "bash: gh: command not found" >&2
 exit 127
 EOF
 chmod +x "$WORK/waiver-events-client-fail.sh"
+# A failure whose stderr survives sanitisation as NOTHING: control characters only.
+# `[ -s ]` sees a non-empty file, so the detail builder takes the sanitising path and
+# is left with an empty string -- the state that used to trail the diagnostic off into
+# a dangling em dash. Also the portable stand-in for the abort hazard the round-3
+# finding named: the sanitising pipeline must never be allowed to end the run.
+printf '#!/usr/bin/env bash\nprintf "\\001\\002\\r" >&2\nexit 4\n' \
+  >"$WORK/waiver-events-unprintable.sh"
+chmod +x "$WORK/waiver-events-unprintable.sh"
 # A HEALTHY read that carries NO waiver event. The default `--jq` selects
 # `event == "labeled"` for every label, so this is the shape that made a feed of
 # `needs-decision` events read as "waiver evidence read": the read works, and
@@ -732,8 +740,16 @@ fi
 # And it must not claim the binding SUCCEEDED — a matching event only binds if its
 # timestamp is at or after this head sha's first CI activity, which is a per-tier
 # verdict, not a property of the read.
-if ! contains "$STATE_READ" "can be bound"; then
-  ok "the readable state claims evidence presence, not that a waiver bound"
+#
+# This guard is deliberately anchored on the hedge the implementation MUST emit, not
+# only on an over-claiming phrase it must not: a purely negative assertion against a
+# string no code path produces passes unconditionally (the round-3 finding — the
+# earlier `! contains "can be bound"` form was vacuous the moment round 2 reworded
+# the line, so it would have accepted "the waiver IS bound to this head sha"). The
+# positive half fails the moment the deferral to the per-tier verdict is dropped.
+if contains "$STATE_READ" "decided per tier above" &&
+   ! contains "$STATE_READ" "is bound" && ! contains "$STATE_READ" "can be bound"; then
+  ok "the readable state defers the binding verdict per tier instead of asserting it"
 else
   bad "the summary asserts a head-binding it did not observe: $STATE_READ"
 fi
@@ -795,6 +811,18 @@ if [ "$RC" -eq 0 ] && contains "$OUT" "UNREADABLE" &&
   ok "a client failure is reported with its exit status and message, claiming no HTTP status"
 else
   bad "a client failure was mis-reported as an API status (rc=$RC): $OUT"
+fi
+
+# Stderr that sanitises down to nothing must still yield a legible diagnostic AND,
+# above all, must not end the run: the verdict has to survive it exactly like every
+# other unreadable shape (rc 0, WAIVED, tier UNRESOLVED).
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta" --waiver-events-cmd "$WORK/waiver-events-unprintable.sh"
+if [ "$RC" -eq 0 ] && contains "$OUT" "UNREADABLE" &&
+   contains "$OUT" "exit status 4" && contains "$OUT" "unprintable error output"; then
+  ok "stderr that sanitises to nothing is named as such, and the run still completes"
+else
+  bad "unprintable stderr broke or blanked the diagnostic (rc=$RC): $OUT"
 fi
 
 # A silent non-zero exit (no stderr at all) still has to be distinguishable from

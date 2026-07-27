@@ -446,7 +446,15 @@ waiver_error_detail() {
     return 0
   fi
   status="$(grep -o 'HTTP [0-9][0-9][0-9]' "$err" | head -n 1 || true)"
-  text="$(tr -d '[:cntrl:]' <"$err" | sed 's/::/__/g' | cut -c1-200)"
+  # `|| true` is load-bearing on BOTH substitutions, not decoration: this runs under
+  # `set -euo pipefail`, so a non-zero pipeline here would abort the whole aggregator
+  # with no summary and a non-zero exit -- turning UNREADABLE evidence (which must
+  # never change the verdict) into a RED `required`. That is reachable: BSD `tr`/`sed`
+  # exit 1 with "Illegal byte sequence" on non-UTF-8 stderr under a UTF-8 locale, and
+  # macOS is a first-class host for these scripts. A partial/empty detail string is
+  # always preferable to killing the run.
+  text="$(tr -d '[:cntrl:]' <"$err" | sed 's/::/__/g' | cut -c1-200 || true)"
+  [ -n "$text" ] || text='(unprintable error output)'
   if [ -n "$status" ]; then
     printf '%s — %s' "$status" "$text"
   else
