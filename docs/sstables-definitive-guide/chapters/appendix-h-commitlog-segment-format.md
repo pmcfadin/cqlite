@@ -97,7 +97,17 @@ per update:
 ```
 
 `iterFlags`: `IS_EMPTY 0x01`, `IS_REVERSED 0x02`, `HAS_PARTITION_DELETION 0x04`,
-`HAS_STATIC_ROW 0x08`, `HAS_ROW_ESTIMATE 0x10`.
+`HAS_STATIC_ROW 0x08`, `HAS_ROW_ESTIMATE 0x10`
+(`UnfilteredRowIteratorSerializer.java:110-150`).
+
+The **static-columns block is gated on `HAS_STATIC_ROW`**, per-iterator — not on the table
+having static columns. `UnfilteredRowIteratorSerializer.serialize` computes
+`hasStatic = staticRow != Rows.EMPTY_STATIC_ROW`, uses it to set the flag, and passes that
+same boolean to `SerializationHeader.serializer.serializeForMessaging(header, selection, out,
+hasStatic)` (`UnfilteredRowIteratorSerializer.java:129-139`), which writes the statics
+`Columns` block only `if (hasStatic)` (`SerializationHeader.java:391-406`). An
+`IS_EMPTY` partition returns immediately after the flag byte — no EncodingStats, no columns
+(`UnfilteredRowIteratorSerializer.java:120-124`).
 
 **Note — the messaging form omits `rowBodySize`/`previousUnfilteredSize`** (those
 are SSTable-only). This is the key difference from the Data.db row layout.
@@ -123,12 +133,49 @@ column types — `CommitLogReader::open_with_schemas` supplies them (schema-awar
 no guessing). Without a schema the reader still decodes table id, partition key,
 and column names structurally.
 
-## 6. Reader coverage (v1)
+## 6. Reader coverage (v1) — fail closed on unmodeled constructs
 
-Fully decoded: the common insert path (simple columns, all columns present, no
-static/complex/subset/deletion). Constructs not yet modeled (static rows,
-collection/complex columns, column subsets, range-tombstone markers,
-row/partition deletions) are surfaced honestly via
-`PartitionUpdate::rows_decoded == false` rather than guessed — each record is
-independently CRC-framed, so a partial body decode never disturbs the others.
-Extending full value decode to these is a follow-up.
+Fully decoded: the common insert path — a table with **no clustering columns**, simple
+scalar column types, all columns present, no static row, no partition deletion, no
+range-tombstone marker, no complex deletion. Everything else **fails closed**: the reader
+returns the structural facts it read authoritatively and marks the row decode as not done,
+rather than guessing at bytes it cannot align. Guessing here would be a no-heuristics
+violation (issue #28) *and* a silent-corruption source, since misreading one field's width
+misaligns every field after it.
+
+The two honesty signals, both on the public API
+(`cqlite-core/src/storage/commitlog/mutation.rs:60-95`):
+
+| Signal | Meaning when `false` |
+|---|---|
+| `PartitionUpdate::rows_decoded` | rows/cells were not decoded for this update; `rows` is empty (never partially filled) |
+| `Mutation::updates_complete` | a batch declared more partition updates than `updates` holds — the walk stopped at the first update whose body could not be fully consumed, because the next update's offset is unknowable without finishing this one |
+
+What still *is* authoritative when `rows_decoded == false`: `table_id`, `partition_key`,
+`has_partition_deletion` (read straight from the `iterFlags` bit before any early return), and
+`column_names` when the reader got far enough to read the columns block.
+
+Bail sites, each with its reason (all in
+`cqlite-core/src/storage/commitlog/mutation.rs`):
+
+| Construct | Site | Why it cannot be guessed |
+|---|---|---|
+| Static row (`HAS_STATIC_ROW`) | `:216-232` | bails **before** reading any columns block, so `column_names` is never populated with misparsed bytes |
+| Partition deletion (`HAS_PARTITION_DELETION`) | `:237-239` | the partition-level `DeletionTime` body is not decoded; the flag itself is still reported |
+| No schema for the table id | `:245-248` | values are type-width-dependent (see *Values need the schema*) — structural-only decode |
+| **Clustering columns present** | `:288-290` | `ClusteringPrefix.Serializer` writes an unsigned-VInt **presence header** (2 bits per column, batched per 32) before the values; a naive per-column loop would read the header as the first value |
+| Complex column (collection/tuple/UDT/vector) in the schema | `:301-306` | a complex column is an optional complex-deletion time plus a count-prefixed set of (cell-path, cell) pairs — an entirely different wire shape from a simple cell. Checked once as a schema-level property |
+| Range-tombstone marker (`IS_MARKER`) | `:313-316` | marker bodies are not modeled |
+| Row-level complex deletion (`HAS_COMPLEX_DELETION`) | `:345-347` | ditto |
+| Column subset (`HAS_ALL_COLUMNS` clear) | `:350-352` | the subset encoding is not modeled, so column↔cell correspondence is unknown |
+
+Note that **row deletions ARE decoded** (`HAS_DELETION` yields
+`DecodedRow::is_row_deletion == true`, `:339-344`) — it is *partition* deletions that bail.
+
+Because each record is independently CRC-framed (§4), a partial body decode never disturbs
+the neighboring records: the walk resumes at the next framed record. And because
+`decode_mutation` rejects a declared update count larger than the body length outright
+(`:147-152`), an untrusted count cannot spin the update loop.
+
+Extending full value decode to these constructs is a follow-up, not a correctness gap in the
+sense of producing wrong data — the reader reports what it does not know.
