@@ -1163,6 +1163,24 @@ else
   bad "the off-shape state reports identically to another: '$STATE_OFFSHAPE'"
 fi
 
+# A LABEL NAME IS USER-CONTROLLED TEXT, and this line is the only place the report
+# prints one. It goes to stdout, where `::` is workflow-command syntax, and it has to
+# stay a single summary line — so the name is defanged and stripped of control
+# characters at collection, in pure shell (a sanitiser that could fail would take the
+# diagnostic with it).
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "$(printf 'ci:waive:A\nB::error::pwned')"
+OFFSHAPE_LINE=$(grep 'INVALID WAIVER LABEL' "$SUMMARY" || true)
+# ONE line carries the whole name: the embedded newline is gone (a name that wrapped
+# would leave `__error__pwned` on a line of its own), and `::` is defanged.
+OFFSHAPE_SPILL=$(grep -c '__error__pwned' "$SUMMARY" || true)
+if contains "$OFFSHAPE_LINE" 'ci:waive:AB__error__pwned' &&
+   ! contains "$(cat "$SUMMARY")" '::error::pwned' && [ "${OFFSHAPE_SPILL:-0}" -eq 1 ]; then
+  ok "an off-shape label's name is defanged and stays one line (it is attacker-controlled text)"
+else
+  bad "an off-shape label name reached the summary unsanitised (spill=${OFFSHAPE_SPILL:-0}): $(cat "$SUMMARY")"
+fi
+
 # An off-shape label ALONGSIDE a valid one: the valid label's evidence state owns the
 # headline, and the typo is still named once.
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
