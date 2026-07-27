@@ -359,10 +359,17 @@ UPDATE t SET data = [1, 2, 3] WHERE id = 1;
 -- Cannot: UPDATE t SET data[0] = 99 WHERE id = 1;
 ```
 
-**Wire format:** Same as non-frozen, but:
-- Serialized as single blob in parent structure
-- No tombstones for individual elements
-- Entire collection replaced on update
+**Wire format: NOT the same as non-frozen** — see the two-encoding table at the top of this
+file. A frozen collection is:
+- serialized as a **single opaque cell value**, with fixed 4-byte BE `i32` count and element
+  lengths (`row_decoder/frozen.rs:21,98`) — not a set of cells with unsigned-VInt framing;
+- unable to represent per-element tombstones (there is no per-element cell to flag);
+- replaced wholesale on update.
+
+A **non-frozen** collection is a set of cells with `cell_count` and value lengths as
+**unsigned VInts**, per-element cell flags/paths, and per-element tombstones
+(`row_decoder/complex_column.rs:332,1089,1136`;
+`appendix-b-encodings-cheat-sheet.md:530-536`).
 
 ### Frozen UDTs
 ```cql
@@ -382,16 +389,24 @@ UPDATE t SET addr = {street: '...', city: '...', zip: ...} WHERE id = 1;
 
 ## Empty Collections
 
+**FROZEN** (4-byte BE `i32` count):
 ```
-Empty list: [0x00, 0x00, 0x00, 0x00]  // count = 0
-Empty set:  [0x00, 0x00, 0x00, 0x00]  // count = 0
-Empty map:  [0x00, 0x00, 0x00, 0x00]  // count = 0
+Empty frozen list: [0x00, 0x00, 0x00, 0x00]  // count = 0
+Empty frozen set:  [0x00, 0x00, 0x00, 0x00]  // count = 0
+Empty frozen map:  [0x00, 0x00, 0x00, 0x00]  // count = 0
 ```
+
+**NON-FROZEN** (unsigned VInt `cell_count`): a single `0x00` byte — `cell_count = 0`
+(`row_decoder/complex_column.rs:332`). In practice Cassandra usually writes no complex
+column at all rather than a zero-cell one.
 
 ## Null vs Empty
 
-- **Null collection:** Field not present, or size = -1 in length-prefixed context
-- **Empty collection:** Field present with count = 0
+- **Null collection:** column absent from the row's column bitmap; or, inside a **frozen**
+  container, a 4-byte BE `i32` length of `-1` (`0xFFFFFFFF`). A **non-frozen** collection's
+  lengths are unsigned VInts and cannot be `-1` — an absent value is the cell flag
+  `HAS_EMPTY_VALUE` (`0x04`).
+- **Empty collection:** present with count/`cell_count` = 0.
 
 ## Performance Considerations
 
@@ -442,11 +457,24 @@ CREATE TABLE collection_table (
 
 Validate parsing:
 ```bash
-./scripts/generate.sh
-sstabledump test-data/datasets/sstables/test_collections/collection_table/*.db
+bash test-data/scripts/fetch-datasets.sh   # real Cassandra 5.0 binaries (gitignored)
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+sstabledump test-data/datasets/sstables/test_collections/collection_table/*-Data.db
 ```
 
 ## Reference
 
-See `cqlite-core/src/types/collections.rs` for implementation.
+Implementation (verify against `origin/main`):
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/frozen.rs` — **frozen**
+  collections/tuples (4-byte BE `i32` framing).
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs` —
+  **non-frozen** collections (unsigned-VInt framing, per-cell flags/paths).
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/udt.rs` — UDTs.
+- `cqlite-core/src/types/` — the CQL type model / `Value` enum.
+
+**Format authority** for a genuinely disputed on-disk question is Apache Cassandra 5.0.8
+(`git show cassandra-5.0.8:src/java/org/apache/cassandra/...` —
+`CollectionSerializer.java`, `TupleType.java`, `UserType.java`, `db/rows/Cell.java`) plus
+`docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md`. A CQLite
+`file:line` is authoritative for *what CQLite currently does*, not for what the format is.
 
