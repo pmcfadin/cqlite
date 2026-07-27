@@ -93,7 +93,8 @@
 #                                             `issue-<N>-*` branch outlived its claim; --reason
 #                                             is REQUIRED and is recorded in the claim commit.
 #                                             An EMPTY --expect '' is a usage error on purpose,
-#                                             as is a --reason with nothing recordable in it
+#                                             as is a SUPPLIED --reason '' (on BOTH the empty-lease
+#                                             and the CAS path) or one with nothing recordable in it
 #                                             ('   ', '---', '…'), one that records as a bare
 #                                             PLACEHOLDER ('why', 'todo', 'tbd', 'xxx', …, the
 #                                             shape a verbatim-run `--reason <why>` produces),
@@ -166,9 +167,12 @@
 #      maps an ls-remote/push/delete failure to ERROR (exit 1), so a network blip never
 #      makes a worker conclude it LOST/does-not-hold/RELEASED. `claim` also never reports
 #      LOST when nobody holds the ref (a failed push whose re-read finds it absent), and
-#      neither `claim` nor `adopt` reports LOST/ADOPT-LOST when the holder commit's
-#      message is UNREADABLE (`detail=holder-commit-unreadable`): the best-effort fetch
-#      may simply not have landed the object, so the holder is unknown — possibly US.
+#      and NO subcommand reports LOST/ADOPT-LOST/VERIFY-FAIL/not-holder when the holder
+#      commit's message is UNREADABLE (`detail=holder-commit-unreadable`): the best-effort
+#      fetch may simply not have landed the object, so the holder is unknown — possibly US.
+#      `adopt` in CAS mode also never reports ADOPT-LOST while the ref still sits at
+#      exactly `--expect` (`detail=adopt-cas-rejected-but-ref-unchanged`): the lease
+#      precondition HELD, so the push failed for some other reason — no race happened.
 #      ALSO exit 1: `CLAIM ERROR reason=auth` — a push git could not AUTHENTICATE
 #      (issue #2942). Same exit code (callers keep treating 1 as "not a race"), but the
 #      verdict is explicitly NOT retryable: retrying cannot fix a missing credential.
@@ -188,6 +192,16 @@ emit()      { echo "CLAIM: $*"; }
 # with `return 1` per the header exit-code contract, so a network blip never makes
 # a worker conclude it lost ownership.
 emit_infra() { emit "ERROR reason=infra $* (transient — retry)"; }
+
+# emit_unreadable_holder <issue> <sha> — the claim commit's message could NOT be read
+# (holder_identity state 2). The holder is UNKNOWN — possibly US — so EVERY caller maps
+# it to this ONE retryable infra verdict, never to LOST / ADOPT-LOST / VERIFY-FAIL /
+# not-holder. Shared on purpose: four separate review rounds found this same
+# "an unread signal was reported as abandon/does-not-hold" shape in a different caller,
+# so the wording and the verdict live in exactly one place (#2945 review).
+emit_unreadable_holder() {
+  emit_infra "issue=$1 ref=refs/claims/issue-$1 sha=$2 detail=holder-commit-unreadable (the claim object did not fetch — the holder is UNKNOWN, possibly us; NOT a lost race and NOT a 'you do not hold it' verdict)"
+}
 
 # emit_auth <line> — a push git could not AUTHENTICATE (issue #2942). This is a
 # MACHINE-CONFIGURATION fault, not a blip: it cannot self-clear, so it must never
@@ -266,8 +280,6 @@ humanize_age() {
   else                          printf '%sd\n' "$((s / 86400))"
   fi
 }
-
-this_machine() { printf '%s\n' "${CLAIM_MACHINE:-$(hostname -s)}"; }
 
 # msg_field <message> <key> — extract "<key>=<value>" (value is a non-space run).
 #
@@ -354,6 +366,20 @@ sanitize_field() {
   printf '%s\n' "$s"
 }
 
+# this_machine — the machine identity, SANITIZED to one token (#2945 review). `machine=`
+# is the FIRST identity token in the claim message AND the value `verify`/non-forced
+# `release` compare against, and it was interpolated RAW — the one user-controlled field
+# sanitize_field's contract missed. Two consequences, both reachable through an env var:
+#   - CLAIM_MACHINE="build box" wrote `machine=build box pid=…`, so the parser returned
+#     `build` while the comparison used `build box` — the HOLDER could never verify or
+#     non-force-release its OWN claim: a permanently stuck ref needing --force.
+#   - a value carrying `actor=` shifted the recorded actor — the same forgery class closed
+#     for --reason/--actor.
+# Sanitizing HERE (one definition) rather than at each use guarantees the WRITTEN and the
+# COMPARED token are always the same value. A machine identity must still be UNIQUE per
+# box (see IDENTITY): sanitization makes it parseable, not distinct.
+this_machine() { sanitize_field "${CLAIM_MACHINE:-$(hostname -s)}"; }
+
 # resolve_actor <raw> — the actor identity, sanitized to one token. Sanitizing at
 # the ARG BOUNDARY (every subcommand, before any comparison) keeps the written
 # record and the identity match on exactly the same value.
@@ -405,11 +431,14 @@ build_claim_commit() {
 #      swallows its errors, so a transient fetch failure over an object we do not have
 #      locally lands here), so the holder is UNKNOWN — possibly US.
 # Collapsing 2 into 1 is the "an unread signal must never mean abandon" bug: callers
-# fall through to LOST/ADOPT-LOST (exit 2), which workers read as "you did not win,
-# take the next item". A machine would then drop an issue whose claim ref it still
-# holds, and nobody else could take it either (the ref is held) — a permanent stall,
-# whose tell is the empty `holder-machine= actor=` render. Every caller maps 2 to
-# `emit_infra` + exit 1 (retryable), like every other unread remote signal here.
+# fall through to LOST/ADOPT-LOST/VERIFY-FAIL/not-holder (exit 2), which workers read as
+# "you do not own this, move on". A machine would then drop an issue whose claim ref it
+# still holds, and nobody else could take it either (the ref is held) — a permanent
+# stall, whose tell is the empty `holder-machine= actor=` render. EVERY caller maps 2 to
+# `emit_unreadable_holder` + return 1 (retryable), like every other unread remote signal
+# here — and there is deliberately NO boolean wrapper around this function: the earlier
+# `holder_is_us` helper re-collapsed 2 into "someone else" for `verify` and `release`,
+# which is exactly how that contract was shipped false once already (#2945 review).
 holder_identity() {
   local sha="$1" actor="$2" msg h_machine h_actor
   msg="$(git log -1 --format=%B "$sha" 2>/dev/null || true)"
@@ -419,11 +448,6 @@ holder_identity() {
   [ "$h_machine" = "$(this_machine)" ] && [ "$h_actor" = "$actor" ] && return 0
   return 1
 }
-
-# holder_is_us <sha> <actor> — 0 iff the claim commit was authored by this
-# machine+actor (identity match). A boolean wrapper for the paths whose verdict does
-# not distinguish "someone else" from "unreadable"; use holder_identity where it must.
-holder_is_us() { holder_identity "$1" "$2"; }
 
 # fetch_claim <N> — ensure the claim object is present locally; no-op on absence.
 fetch_claim() {
@@ -460,8 +484,8 @@ holder_token() {
 #      map this to ERROR reason=infra (exit 1), matching every other remote read.
 # There is deliberately NO "is this branch ours" test: a work branch is cut from
 # origin/main and carries ordinary commits, so its tip NEVER carries the claim
-# machine=/actor= trailers, which made the old `holder_is_us`-based "all-ours -> no
-# block" re-entrancy unreachable (#2945). Re-entrancy for a branch you own is now
+# machine=/actor= trailers, which made the old identity-based "all-ours -> no block"
+# re-entrancy unreachable (#2945). Re-entrancy for a branch you own is now
 # expressed explicitly by `adopt <N> --expect none --reason <why>`, arbitrated by
 # the claim ref itself rather than guessed from a commit message.
 LEGACY_BRANCHES=""
@@ -513,7 +537,7 @@ cmd_claim() {
     # fetch is best-effort, so a transient failure leaves the claim object absent and
     # the message unreadable — including when the holder is US.
     if [ "$hrc" -eq 2 ]; then
-      emit_infra "issue=$issue ref=refs/claims/issue-$issue sha=$existing detail=holder-commit-unreadable (the claim object did not fetch — the holder is UNKNOWN, possibly us; NOT a lost race)"
+      emit_unreadable_holder "$issue" "$existing"
       return 1
     fi
     emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=$existing $(holder_token "$existing")"
@@ -584,7 +608,7 @@ cmd_claim() {
     # Same rule as the pre-check: unreadable holder metadata is retryable infra, not a
     # LOST verdict on a ref that may well be ours.
     if [ "$hrc2" -eq 2 ]; then
-      emit_infra "issue=$issue ref=refs/claims/issue-$issue sha=$now detail=holder-commit-unreadable (the claim object did not fetch — the holder is UNKNOWN, possibly us; NOT a lost race)"
+      emit_unreadable_holder "$issue" "$now"
       return 1
     fi
     emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_token "$now")"
@@ -634,9 +658,20 @@ cmd_verify() {
     return 2
   fi
   fetch_claim "$issue"
-  if holder_is_us "$sha" "$actor"; then
+  # THREE outcomes, never two (#2945 review): an UNREADABLE holder commit must not be
+  # reported as "you do not hold it". `fetch_claim` is best effort, so a transient failure
+  # leaves the object absent and the message empty EVEN WHEN THE HOLDER IS US — and a
+  # `VERIFY-FAIL … holder-machine= actor=` exit 2 is precisely the verdict that makes a
+  # worker abandon an issue it still holds.
+  local vrc=0
+  holder_identity "$sha" "$actor" || vrc=$?
+  if [ "$vrc" -eq 0 ]; then
     emit "VERIFY-OK issue=$issue ref=refs/claims/issue-$issue sha=$sha $(holder_desc "$sha")"
     return 0
+  fi
+  if [ "$vrc" -eq 2 ]; then
+    emit_unreadable_holder "$issue" "$sha"
+    return 1
   fi
   emit "VERIFY-FAIL issue=$issue ref=refs/claims/issue-$issue sha=$sha holder-$(holder_desc "$sha") wanted-machine=$(this_machine) wanted-actor=$actor"
   return 2
@@ -644,12 +679,14 @@ cmd_verify() {
 
 # ---------------------------------------------------------------------------
 cmd_adopt() {
-  local issue="" actor="${CLAIM_ACTOR:-flow}" expect="" reason="" mode="cas"
+  local issue="" actor="${CLAIM_ACTOR:-flow}" expect="" reason="" reason_given=0 mode="cas"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --actor)  [ "$#" -ge 2 ] || die_usage "--actor requires a value";  actor="$2";  shift 2 ;;
       --expect) [ "$#" -ge 2 ] || die_usage "--expect requires a value"; expect="$2"; shift 2 ;;
-      --reason) [ "$#" -ge 2 ] || die_usage "--reason requires a value"; reason="$2"; shift 2 ;;
+      # reason_given records the FLAG's presence, so a supplied-but-empty value cannot
+      # skip validation (see the gate below).
+      --reason) [ "$#" -ge 2 ] || die_usage "--reason requires a value"; reason="$2"; reason_given=1; shift 2 ;;
       -*) die_usage "adopt: unknown flag $1" ;;
       *) [ -z "$issue" ] || die_usage "adopt: unexpected argument $1"; issue="$1"; shift ;;
     esac
@@ -687,6 +724,14 @@ cmd_adopt() {
     *[!0]*) : ;;
     *) mode="empty" ;;
   esac
+  # NORMALIZE THE CASE of a hex lease value. git resolves an object name
+  # case-insensitively, so `--expect <UPPERCASE sha>` satisfies the lease and the push
+  # lands — but every comparison below (`now = expect`) is a STRING compare against
+  # ls-remote's lowercase output, so an uppercase value made a satisfied precondition
+  # read as a violated one. Normalizing here keeps the arbiter and the verdict agreed.
+  if [ "$mode" = "cas" ]; then
+    expect="$(printf '%s' "$expect" | LC_ALL=C tr 'A-F' 'a-f')"
+  fi
 
   # VALIDATE THE RECORDED TOKEN, NOT THE RAW TEXT (#2945 review). The audit value
   # is what lands in the claim commit, so gating on `[ -n "$reason" ]` let '   ',
@@ -696,8 +741,16 @@ cmd_adopt() {
   # actually says something: not the `unspecified` sentinel sanitize_field falls back
   # to (so a literal `--reason unspecified` is refused too — it records nothing), and
   # at least 3 recordable characters. Same fail-closed direction as `--expect ''`.
+  #
+  # AND THE GATE KEYS ON "WAS THE FLAG SUPPLIED", NOT "IS THE RAW TEXT NON-EMPTY"
+  # (#2945 review). Guarding it on `[ -n "$reason" ]` silently EXEMPTED `--reason ""` —
+  # the classic `--reason "$WHY"` with WHY unset — on the CAS path: the adoption recorded
+  # no `reason=` at all, while '   ', '---' and 'x' were exit 64. That was the last
+  # asymmetry in an otherwise fail-closed argument surface, and it is the shape most
+  # likely to happen by accident. A SUPPLIED-but-empty reason is now exit 64 on BOTH
+  # paths (on --expect none the required-reason gate below caught it already).
   local extra="" reason_token=""
-  if [ -n "$reason" ]; then
+  if [ "$reason_given" -eq 1 ]; then
     # AN UNSUBSTITUTED TEMPLATE IS REFUSED BEFORE SANITIZATION (#2945 review). The
     # placeholder gate below only sees the SANITIZED token, so it caught a bare `<why>`
     # but not a template inside a longer value: the documented
@@ -820,7 +873,7 @@ cmd_adopt() {
   if [ -n "$now" ]; then
     holder_identity "$now" "$actor" || arc=$?
     if [ "$arc" -eq 2 ]; then
-      emit_infra "issue=$issue ref=refs/claims/issue-$issue sha=$now detail=holder-commit-unreadable (the claim object did not fetch — the holder is UNKNOWN, possibly us; NOT a lost race)"
+      emit_unreadable_holder "$issue" "$now"
       return 1
     fi
   fi
@@ -831,6 +884,18 @@ cmd_adopt() {
       emit "ADOPTED issue=$issue ref=refs/claims/issue-$issue sha=$now $(holder_desc "$now") (re-entrant, lease-mismatch expected=$expect actual=$now — we DO hold the ref, but the compare-and-swap precondition did NOT hold)"
     fi
     return 0
+  fi
+  # A CAS whose push did not land WHILE THE REF IS STILL EXACTLY AT `--expect` did not
+  # lose a race: the lease precondition HELD, so the push failed for some other reason
+  # (transient network, an unrecognized auth signature, a server-side hook). `ADOPT-LOST
+  # … expected=X actual=X` is self-contradictory on its face, and it makes a worker move
+  # on from a claim that is still adoptable and UNTAKEN. So it is retryable infra —
+  # regardless of who the (readable) holder is. The empty-lease sibling above
+  # (`rejected-but-ref-absent`) and the re-entrant `now == expect` case already had this
+  # treatment; the FOREIGN-holder variant was the one missed (#2945 review).
+  if [ "$mode" = "cas" ] && [ -n "$now" ] && [ "$now" = "$expect" ]; then
+    emit_infra "issue=$issue ref=refs/claims/issue-$issue sha=$now expected=$expect detail=adopt-cas-rejected-but-ref-unchanged (the lease precondition still HOLDS — the push failed for another reason; NOT a lost race) $(holder_token "$now")"
+    return 1
   fi
   emit "ADOPT-LOST issue=$issue ref=refs/claims/issue-$issue expected=$expect actual=${now:-<gone>} $(holder_token "$now")"
   return 2
@@ -897,7 +962,17 @@ cmd_release() {
     # not release a ref you do not hold — that is the reaper's job, and the reaper
     # uses --force (which skips BOTH this identity gate and the open-PR guard).
     fetch_claim "$issue"
-    if ! holder_is_us "$sha" "$actor"; then
+    # Same three-outcome rule as `verify` (#2945 review): an UNREADABLE holder commit is
+    # UNKNOWN, so `reason=not-holder` (exit 2) would refuse the TRUE holder its own
+    # release over a best-effort fetch blip — and the refusal's remedy (`--force`) is the
+    # one thing a holder must not need for its own claim.
+    local hrc3=0
+    holder_identity "$sha" "$actor" || hrc3=$?
+    if [ "$hrc3" -eq 2 ]; then
+      emit_unreadable_holder "$issue" "$sha"
+      return 1
+    fi
+    if [ "$hrc3" -ne 0 ]; then
       emit "RELEASE-REFUSED issue=$issue reason=not-holder sha=$sha holder-$(holder_desc "$sha") wanted-machine=$(this_machine) wanted-actor=$actor (only the holder may release without --force)"
       return 2
     fi

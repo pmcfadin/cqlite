@@ -134,9 +134,10 @@ parked, or reaped issue, or a merged-but-undeleted branch), `claim` refuses with
 `reason=legacy-branch-lock detail=<branches> claim-ref=free resume=documented-procedure` —
 a diagnosis that names the blocking branch and confirms the claim ref itself is free.
 The one sanctioned resume is
-`bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:<branch>`
+`bash scripts/flow/claim.sh adopt <N> --expect none --reason resume-legacy-branch-lock:branch-outlived-claim`
 (#2945) — git's empty lease, so the create is still server-arbitrated and the claim commit
-records who + why (a placeholder reason like `<why>` is refused). It is deliberately **not
+records who + why (a placeholder reason like `<why>`, or one still carrying an unsubstituted
+`<…>`, is refused — so the `--reason` above is shown already substituted). It is deliberately **not
 printed** by the refusal: a printed line gets run literally, and an older-fleet worker locks
 with the BRANCH while holding no claim ref, so the empty-lease adopt would succeed against an
 actively-worked lane. Establish abandonment yourself first — `bash scripts/flow/claim-heartbeat.sh
