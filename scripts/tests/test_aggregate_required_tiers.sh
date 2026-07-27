@@ -1218,6 +1218,162 @@ else
   bad "a live-read waiver with usable evidence was not attributed: $OUT"
 fi
 
+# ---- round 7: the shape check must not depend on the shell's collation ------
+# A DEFECT INVISIBLE ON THE MACHINE THAT TESTS IT. Glob RANGES (`[a-z]`) are matched
+# by COLLATION ORDER, not ASCII, unless `globasciiranges` is set — and that is only on
+# by default from bash 5.0. Under glibc with a UTF-8 locale the order is `aAbBcC…`, so
+# on bash 3.2/4.x `[!a-z0-9]*` does NOT reject `BETA`: the shape check would classify
+# `ci:waive:BETA` as IN FORCE, making the report laxer than the ruby evaluator on the
+# one path whose purpose is that they cannot disagree. macOS ships /bin/bash 3.2 and
+# runs these scripts (scripts/agent-gate.sh uses `taskpolicy`), so this was live —
+# and it is invisible to a plain run on this box, which is bash 5.x.
+echo "== the tier-id shape check is locale- and bash-version-independent =="
+
+# The class as the aggregator actually spells it, read out of the source so the check
+# cannot drift from the code.
+SHAPE_PAT=$(grep -E "^ *''\|\[!" "$AGG_REAL" | head -n 1)
+SHAPE_PAT=${SHAPE_PAT%)*}
+SHAPE_PAT=${SHAPE_PAT#"${SHAPE_PAT%%[![:space:]]*}"}
+# The pre-fix form, kept as the harness's own control: if THIS does not misclassify in
+# the reproduction below, the reproduction has no discriminating power and says so
+# instead of reporting a pass it did not earn.
+SHAPE_PAT_OLD="''|[!a-z0-9]*|*[!a-z0-9-]*"
+# bash 3.2 semantics, reproduced on bash 5.x: turn `globasciiranges` off and collate
+# under a locale whose order interleaves the cases.
+shape_verdict() {
+  (
+    LC_ALL=en_US.UTF-8
+    export LC_ALL
+    shopt -u globasciiranges 2>/dev/null || true
+    tier="$1"
+    eval "case \"\$tier\" in
+      $2) printf off-shape ;;
+      *) printf in-force ;;
+    esac"
+  )
+}
+
+# STRUCTURAL PIN, true whatever this box's bash does: the class is spelled out. This
+# is the assertion that cannot be environment-dependent, and it fails the moment the
+# range comes back.
+if contains "$SHAPE_PAT" 'abcdefghijklmnopqrstuvwxyz0123456789' &&
+   ! contains "$SHAPE_PAT" 'a-z' && ! contains "$SHAPE_PAT" 'A-Z'; then
+  ok "the tier-id class is spelled out, so it cannot depend on the shell's collation order"
+else
+  bad "the tier-id shape check uses a collation-dependent range: $SHAPE_PAT"
+fi
+# ...and no OTHER executable line in the aggregator carries a single-case range either
+# (its input validators are case-SYMMETRIC — `A-Za-z0-9` — and therefore immune; the
+# tier-id class and the `--event-action` guard were the two that were not).
+COLLATION_RANGES=$(grep -nE '\[!?[^]]*(a-z|A-Z)' "$AGG_REAL" \
+  | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE 'emit |echo |A-Za-z|a-zA-Z' || true)
+if [ -z "$COLLATION_RANGES" ]; then
+  ok "no executable line in the aggregator matches a single-case glob range"
+else
+  bad "a collation-dependent glob range remains: $COLLATION_RANGES"
+fi
+
+# BEHAVIOURAL, with the harness's discriminating power checked first.
+if [ "$(shape_verdict BETA "$SHAPE_PAT_OLD")" = "in-force" ]; then
+  if [ "$(shape_verdict BETA "$SHAPE_PAT")" = "off-shape" ] &&
+     [ "$(shape_verdict Flight "$SHAPE_PAT")" = "off-shape" ] &&
+     [ "$(shape_verdict flight "$SHAPE_PAT")" = "in-force" ] &&
+     [ "$(shape_verdict beta-2 "$SHAPE_PAT")" = "in-force" ]; then
+    ok "under bash 3.2 range semantics the class still rejects BETA/Flight and accepts flight/beta-2"
+  else
+    bad "the shape check misclassifies under collation ranges: BETA=$(shape_verdict BETA "$SHAPE_PAT") Flight=$(shape_verdict Flight "$SHAPE_PAT") flight=$(shape_verdict flight "$SHAPE_PAT")"
+  fi
+else
+  # Honest about it rather than banking a pass: the structural pin above is then the
+  # only coverage, and it is environment-independent.
+  echo "note: this environment cannot reproduce collation ranges (no en_US.UTF-8, or codepoint-ordered);"
+  echo "note: the bash-3.2 defect is covered structurally here, not behaviourally"
+fi
+
+# LOW 1: the feed total counts RECORDS, not lines. The blank-line fixture is one real
+# event plus a trailing blank, which used to be reported as "2 `labeled` event(s)".
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-beta-live.sh" --waiver-events-cmd "cat $WORK/waiver-events-blankline.tsv"
+if contains "$(evidence_line "$SUMMARY")" '1 `labeled` event(s)' &&
+   ! contains "$(evidence_line "$SUMMARY")" '2 `labeled` event(s)'; then
+  ok "a blank feed line is not counted as an event read (records, not lines)"
+else
+  bad "the feed total counted a blank line as an event: $(evidence_line "$SUMMARY")"
+fi
+
+# LOW 2a: presence is a claim too. Under a FAILED live read the off-shape label comes
+# from the run-start payload, so it may have been removed since — the line may not say
+# it "is applied".
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:BETA" --labels-cmd "$WORK/labels-403.sh"
+STATE_OFFSHAPE_UNTRUSTED=$(evidence_line "$SUMMARY")
+if contains "$STATE_OFFSHAPE_UNTRUSTED" "INVALID WAIVER LABEL" &&
+   contains "$STATE_OFFSHAPE_UNTRUSTED" "whether they are still applied was NOT observed" &&
+   ! contains "$STATE_OFFSHAPE_UNTRUSTED" '`ci:waive:BETA` are applied'; then
+  ok "an off-shape label read from the payload is not asserted to be applied NOW"
+else
+  bad "the off-shape line claimed a presence it never observed: $STATE_OFFSHAPE_UNTRUSTED"
+fi
+if [ "$STATE_OFFSHAPE_UNTRUSTED" != "$STATE_OFFSHAPE" ]; then
+  ok "an observed off-shape label and an unobserved one are different lines"
+else
+  bad "the untrusted off-shape line reads identically to the observed one"
+fi
+
+# LOW 2b: "nothing was read" is a claim about the RUN. A valid waiver label on poll 1
+# whose feed read SUCCEEDED, then mistyped: the feed WAS read, and saying otherwise is
+# the same false absence one variable over.
+cat >"$WORK/labels-beta-then-offshape.sh" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$WORK/labels-typo.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" >"$WORK/labels-typo.count"
+if [ "\$n" -le 1 ]; then echo "ci:waive:beta"; else echo "ci:waive:BETA"; fi
+exit 0
+EOF
+chmod +x "$WORK/labels-beta-then-offshape.sh"
+rm -f "$WORK/labels-typo.count"
+invoke "cat $(runs_file one-pending)" "$WORK/self-ids.txt" "$FUTURE" 2 \
+  --labels-cmd "$WORK/labels-beta-then-offshape.sh" --waiver-events-cmd "$WAIVER_EVENTS"
+if contains "$(evidence_line "$SUMMARY")" "earlier poll(s) DID read the feed" &&
+   ! contains "$(evidence_line "$SUMMARY")" "were read at any point"; then
+  ok "an earlier successful feed read is not erased by a later off-shape label"
+else
+  bad "the off-shape line claimed nothing was ever read, after a read succeeded: $(evidence_line "$SUMMARY")"
+fi
+
+# LOW 3: the in-force list is deduplicated and bounded exactly like the off-shape one —
+# it is interpolated into two annotations and two summary lines, and GitHub allows up
+# to 100 labels on a pull request.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels "ci:waive:beta,ci:waive:beta"
+DUP_COUNT=$(printf '%s\n' "$(evidence_line "$SUMMARY")" | grep -o 'ci:waive:beta' | grep -c . || true)
+if [ "${DUP_COUNT:-0}" -eq 1 ]; then
+  ok "a repeated waiver label is named once, not once per occurrence"
+else
+  bad "the in-force list named a duplicated label ${DUP_COUNT:-0} times: $(evidence_line "$SUMMARY")"
+fi
+MANY_VALID=""
+MANY_OFFSHAPE=""
+i=0
+while [ "$i" -lt 40 ]; do
+  i=$((i + 1))
+  MANY_VALID="${MANY_VALID}ci:waive:tier-${i},"
+  MANY_OFFSHAPE="${MANY_OFFSHAPE}ci:waive:Tier-${i},"
+done
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "${MANY_VALID%,}"
+if contains "$(evidence_line "$SUMMARY")" "(truncated)" && contains "$OUT" "(truncated)"; then
+  ok "a heavily-labelled PR gets a BOUNDED in-force list in the summary and the annotation"
+else
+  bad "the in-force list was unbounded: $(evidence_line "$SUMMARY")"
+fi
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "${MANY_OFFSHAPE%,}"
+if contains "$(evidence_line "$SUMMARY")" "(truncated)"; then
+  ok "the off-shape list is bounded the same way"
+else
+  bad "the off-shape list was unbounded: $(evidence_line "$SUMMARY")"
+fi
+
 invoke "cat $(runs_file one-failed)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
 if [ "$RC" -ne 0 ]; then ok "a waiver cannot excuse a FAILED tier"; else bad "failed+waived wrongly passed"; fi
 if contains "$OUT" "cannot be waived"; then
