@@ -328,7 +328,10 @@ run_policy "$DIR"
 expect_fail_named "a tier missing 'synchronize' is rejected" "synchronize"
 
 DIR=$(new_case no-pr-trigger)
-sed "s|  pull_request:|  push:|; s|    paths-ignore:|    paths-ignore:|" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
+# `push:` keeps the workflow triggerable (so the rejection is about the MISSING
+# pull_request trigger, not about a workflow with no `on:` at all) and drops the
+# paths-ignore sentinel, which is meaningless off a PR trigger.
+sed "s|  pull_request:|  push:|; /^    paths-ignore:\$/,+1d" "$BASE/workflows/alpha.yml" >"$DIR/workflows/alpha.yml"
 run_policy "$DIR"
 expect_fail_named "a registered tier with no pull_request trigger at all is rejected" "no \`pull_request\`"
 
