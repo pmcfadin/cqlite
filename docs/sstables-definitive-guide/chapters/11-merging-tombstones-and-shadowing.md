@@ -8,6 +8,75 @@ Tombstones mark deletions at partition/row/cell levels (and ranges). This chapte
 - TTL expiry and gc_grace interactions
 - Practical reconciliation rules
 
+## Read-Time vs Compaction-Time Reconciliation
+
+Deletion and expiry are applied at **two independent points**, and confusing them is a
+common source of correctness bugs. Cassandra applies deletion/expiry visibility on
+**every read**, regardless of how many SSTables are involved; it applies *garbage
+collection* (physically dropping the tombstone) only during **compaction**.
+
+### Read-time visibility (applies even to a single SSTable)
+
+Reading one generation with no merge at all still requires three filters before a row
+reaches the client:
+
+1. **TTL expiry.** An expiring cell is live iff `nowInSec < localDeletionTime`
+   (`Cell.isLive(long nowInSec)`,
+   [`Cell.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/Cell.java#L173));
+   at or past that second it is invisible.
+2. **Partition deletion.** The partition header's `DeletionTime` shadows every row and
+   cell whose `timestamp <= markedForDeleteAt` — `DeletionTime.deletes(long timestamp)`
+   is exactly `timestamp <= markedForDeleteAt()`
+   ([`DeletionTime.java:173–176`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/DeletionTime.java#L173-L176)),
+   so the shadow is **inclusive** at equal timestamp. See Chapter 5 for the on-disk
+   layout of this field.
+3. **Range tombstones.** Range-tombstone markers shadow rows inside their clustering
+   interval, by the same `deletes(timestamp)` rule.
+
+In Cassandra this read-time filtering is a transformation applied over the (possibly
+single-source) row iterator — `Filter.applyToRow` calls `row.purge(..., nowInSec, ...)`
+and drops every range-tombstone marker before the client sees it
+([`Filter.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/transform/Filter.java)).
+It is **not** part of the merge; a one-SSTable read gets it too.
+
+CQLite implements read-time visibility at:
+
+- **Single generation** — `PartitionShadow`
+  (`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/partition_shadow.rs:73`
+  `open`, `:90` `feed_range_marker`, `:230` `cell_shadowed_or_expired`), opened per
+  partition by the row decoder
+  (`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/block_emit.rs:105`).
+  It is deliberately **not** behind the `write-support` feature — read correctness must
+  not depend on a write feature (issue #1741).
+- **Multiple generations on the SELECT path** — `ReadShadow`, captured once per scan
+  (`cqlite-core/src/storage/sstable/generation_merge.rs:94`, used at `:265`/`:350`),
+  sharing the same `cell_shadowed_or_expired` predicate as the single-generation path
+  (issue #1849).
+- **Arrow Flight `do_get`** — the reconciliation clock is captured once per request and
+  threaded into the merger (`cqlite-flight/src/producer.rs:381` `now_secs`, set at
+  `:472`, passed at `:569`); without it, TTL expiry is a strict no-op (issue #2789).
+
+### Compaction-time reconciliation and purging
+
+A compaction additionally performs cross-generation reconciliation (per-cell timestamp
+compare and the equal-timestamp tie-breaks below) and then **purges** tombstones that
+are past `gcBefore` and provably shadow nothing outside the compaction set — see
+"gc_grace / gcBefore purging during compaction" below and Chapter 15.
+
+TTL expiry inside CQLite's merge is `expire_ttl_cells`
+(`cqlite-core/src/storage/write_engine/merge/reconcile.rs:468`), which is a **strict
+no-op when the clock is absent** (`now_secs == None`): a caller that does not supply a
+reconciliation clock gets no expiry at all. Read paths must therefore always thread
+their captured `now`.
+
+> **Why this split matters for testing.** A parity corpus built only from already-
+> compacted SSTables has its tombstones purged on disk, so a read path that never
+> applies read-time shadowing can still match a physical dump byte-for-byte. That is
+> why CQLite keeps a *query-semantics* oracle (post-reconciliation `SELECT` results at a
+> pinned `now`) alongside the physical `sstabledump` goldens — issue #1742. A
+> physical-dump oracle enumerates every cell on disk *including* shadowed ones and
+> cannot catch a read-time-reconciliation bug.
+
 ## Tombstone Types
 
 - Partition, Row, Cell tombstones
@@ -33,7 +102,7 @@ When two cells share **equal timestamps**, `Cells.resolveRegular()` applies this
 
 ### CQLite reconciliation behavior and divergences
 
-CQLite's merge path (`cqlite-core/src/storage/write_engine/merge.rs`,
+CQLite's merge path (`cqlite-core/src/storage/write_engine/merge/mod.rs:4188`
 `reconcile_cluster`) implements only PART of the equal-timestamp hierarchy above.
 What it actually compares, per column, is narrow — and the divergences below are
 **not** an exhaustive enumeration of every place it differs from Cassandra. These
@@ -42,9 +111,11 @@ are documented honestly here and tracked in Appendix F.
 - **What `reconcile_cluster` actually compares.** Per **`(column, cell_path)`**
   (epic #921; multi-cell collection/UDT elements reconcile independently — see
   "Compaction merge semantics" below), the winner is chosen by
-  `cell_reconcile_replace`: (1) **strictly higher `timestamp`** wins; (2) at
+  `reconcile_rules::cell_wins`
+  (`cqlite-core/src/storage/write_engine/reconcile_rules.rs:70`): (1) **strictly
+  higher `timestamp`** wins; (2) at
   **equal** `timestamp`, a **cell tombstone beats a live OR expiring cell**
-  (`is_cell_tombstone(candidate) && !is_cell_tombstone(existing)`), decided
+  (`candidate.is_tombstone() && !existing.is_tombstone()`), decided
   **before** any `localDeletionTime` compare (issue #848, parity Cassandra
   `a62c749`); (3) otherwise the **first-seen** cell is kept — and because inputs
   arrive in heap-routing order (`run_index` ascending = newest file first),
@@ -52,7 +123,7 @@ are documented honestly here and tracked in Appendix F.
   cell whose `timestamp <= row_del` (the `<=` lets the row tombstone win at equal
   timestamp). That is the whole of the equal-timestamp logic.
 
-- **What matches Cassandra at equal timestamp.** Because `is_cell_tombstone`
+- **What matches Cassandra at equal timestamp.** Because `is_tombstone()`
   distinguishes a cell tombstone from *any* non-tombstone (whether live or
   TTL-expiring), CQLite's check (2) makes a **cell tombstone beat both a live cell
   and an expiring cell** at equal timestamp — i.e. Cassandra's rule 1 (tombstone
@@ -79,10 +150,42 @@ are documented honestly here and tracked in Appendix F.
   `Cells.resolveRegular` keeps the cell with the **strictly-greater RAW value bytes**
   (unsigned lexicographic comparison on the raw value, skipping the VInt length
   prefix). **CQLite currently keeps the first-seen cell (newer file)** instead of
-  comparing value bytes (`reconcile_cluster`: the `replace` predicate only fires for
-  a higher timestamp or an equal-timestamp cell tombstone). This is a known
+  comparing value bytes (`reconcile_rules::cell_wins` returns `true` only for a
+  higher timestamp or an equal-timestamp cell tombstone). This is a known
   divergence (ruled a FIX in issue #818; the fix is a follow-up). Authority:
-  `org.apache.cassandra.db.rows.Cells.resolveRegular`.
+  `org.apache.cassandra.db.rows.Cells.resolveRegular` — its final statement is
+  `return compareValues(left, right) >= 0 ? left : right;`, a raw-value compare
+  through the type's `ValueAccessor`.
+
+  This tie-break is a **byte-level** compare on the serialized value and is
+  distinct from the **typed ordering** used for `ORDER BY`, `MIN`/`MAX`, `GROUP BY`
+  keys, and clustering comparison. For `float`/`double` columns that typed ordering
+  is Java's `Float.compare`/`Double.compare` contract: `FloatType`/`DoubleType`
+  delegate to `NumberType.compareComposed`, which compares the *composed*
+  `Float`/`Double` objects
+  ([`DoubleType.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/DoubleType.java),
+  [`FloatType.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/FloatType.java)).
+  That contract is a **total order** and differs from IEEE `==`/`<` in two ways:
+  **`NaN` sorts last** (greater than `+Infinity`, and all `NaN` bit-patterns compare
+  equal), and **`-0.0 < +0.0`** (the signed zeros are distinct and ordered). It is
+  also **not** Rust's `f64::total_cmp`, which places negative `NaN` first. CQLite
+  therefore implements the Java contract explicitly in `cqlite-core/src/float_cmp.rs`
+  (`cassandra_double_cmp` / `cassandra_float_cmp`) rather than reusing `total_cmp` or
+  `partial_cmp`, and routes typed ordering through it — including `GROUP BY` key
+  equality at every nesting depth
+  (`cqlite-core/src/query/select_executor/aggregation/group_key_cmp.rs:87`, issue
+  #2074) and clustering/collection ordering
+  (`cqlite-core/src/storage/write_engine/mutation.rs:832`).
+
+  One deliberate exception: **`WHERE`-clause (predicate) evaluation** does not use the
+  NaN-last total order. A `NaN` operand yields SQL **UNKNOWN** and the row is dropped,
+  because treating `NaN` as the greatest value would make `d > 1.5` true for
+  `d = NaN` and leak rows that an engine pushing the predicate down would discard;
+  the same function compares two integral operands as exact `i128` first, since two
+  distinct `i64` above 2^53 collapse to one `f64` mantissa
+  (`cqlite-core/src/query/select_executor/value_ops.rs:136`
+  `try_compare_values_predicate`, issue #2231). Ordering and filtering therefore use
+  intentionally different float rules; do not unify them.
 
 - **Complex (collection/UDT) column merge — per-cell-path (RESOLVED in epic #921).**
   Cassandra merges complex columns **per cell-path** using the column's path
@@ -99,7 +202,7 @@ are documented honestly here and tracked in Appendix F.
 ## Compaction merge semantics
 
 Epic #921 brought CQLite's compaction merge path
-(`cqlite-core/src/storage/write_engine/merge.rs`, `reconcile_cluster`, and the
+(`cqlite-core/src/storage/write_engine/merge/mod.rs`, `reconcile_cluster`, and the
 `merge_entry_to_mutation` rewrite) substantially closer to Cassandra's
 `CompactionIterator` / `Cells#reconcile`. This section documents what the merge
 **actually** does, verified against the code on this branch; each rule names the
@@ -112,7 +215,7 @@ column. A simple cell has `cell_path == None` and behaves as before; each elemen
 of a multi-cell collection or UDT carries its authoritative `cell_path` and
 reconciles independently. **Disjoint elements** of the same column written in
 different SSTables both survive; the **same `(column, cell_path)` key** resolves to
-the cell with the **higher per-cell timestamp** (`cell_reconcile_replace`). On the
+the cell with the **higher per-cell timestamp** (`reconcile_rules::cell_wins`). On the
 write-out side, `cells_to_cell_operations` emits one
 `CellOperation::WriteComplexElement` per surviving element (preserving its
 `cell_path`, `timestamp`, `ttl`, `local_deletion_time`, and authoritative
@@ -160,9 +263,9 @@ dropped.
 ### Tombstone-vs-expiring (TTL) tie-break (#848)
 
 At **equal timestamp** a cell **tombstone beats an expiring (TTL) cell**, and this is
-decided **before** the `localDeletionTime` compare. `cell_reconcile_replace` compares
-timestamps first, then returns `is_cell_tombstone(candidate) &&
-!is_cell_tombstone(existing)`; because `is_cell_tombstone` treats an expiring cell as
+decided **before** the `localDeletionTime` compare. `reconcile_rules::cell_wins`
+compares timestamps first, then returns `candidate.is_tombstone() &&
+!existing.is_tombstone()`; because `is_tombstone()` treats an expiring cell as
 non-tombstone (it carries a real value plus a TTL, not a `CellTombstone`), the single
 rule subsumes both tombstone-beats-live and tombstone-beats-expiring (parity Cassandra
 `a62c749`). The further equal-timestamp ranking among non-tombstone cells
@@ -193,6 +296,51 @@ Key invariants, verified in `compute_gc_before` and `reconcile_cluster`:
   (`KWayMerger::with_purge_safe` / the `purge_safe` flag), so partial compactions
   **retain** tombstones and cannot resurrect data shadowed in a non-included
   overlapping SSTable. In the CLI this is opt-in via `--major` / `--purge-tombstones`.
+
+### Partition-granular vs row-granular merge
+
+**Cassandra merges lazily, one `Unfiltered` at a time.** Partition-level merging is a
+lazy iterator-of-iterators (`UnfilteredPartitionIterators.merge`), and *within* a
+partition `UnfilteredRowIterators.UnfilteredRowMergeIterator.computeNext()` pulls a
+single row or range-tombstone marker off the underlying `MergeIterator` and returns it
+([`UnfilteredRowIterators.java:523`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/UnfilteredRowIterators.java#L523)).
+`CompactionIterator` delegates `hasNext()` straight to that iterator, so it does **not**
+collect a partition's reconciled rows before emitting the first one. Working memory is
+bounded by the merge fan-out *k* (one buffered `Unfiltered` per source), not by the
+partition's width. This is what lets Cassandra compact a partition far larger than heap.
+
+CQLite has **two** merge drivers over the same k-way heap, and which one a path uses
+determines its memory profile:
+
+| Driver | Granularity | Where it runs |
+|--------|-------------|---------------|
+| `KWayMerger::step()` (`merge/mod.rs:2981`) | Whole partition — returns `MergeStep::Partition { key, rows }` with every reconciled row of one partition | multi-generation `SELECT` read path (`storage/sstable/generation_merge.rs:268`, `:358`, `:464`); Flight's collect/aggregate paths |
+| `StreamingMerger::step_streaming()` (`merge/streaming.rs:610`) | One clustering-key group at a time, pulled directly off the heap | production compaction (`merge::merge`, `merge/mod.rs:2728`, driving `StreamingMerger` at `:2773`); resumable maintenance compaction (`write_engine/maintenance.rs:738`); Flight full-scan / point-read / cache-warm |
+
+With the buffered driver, peak memory scales with the **widest partition**, independent
+of *k*, of `LIMIT`, and of the output batch size — a `LIMIT 1` against a multi-million-row
+partition still materializes the whole partition first, and a cancellation flag is only
+observed *between* partitions (issues #1668, #2230, #2423).
+
+The streaming driver removes that whole-partition buffer: rows leave the merge as they
+are reconciled, cancellation and byte budgets are honored mid-partition, and only a
+bounded prefix is held. That prefix is not zero and the reason is a format property
+worth knowing: a partition's `clustering_key: None` carriers (the static row and the
+partition/range-tombstone markers) always sort before any clustered row, and the writer
+needs the partition's **complete** range-tombstone set upfront to interleave markers with
+rows in clustering order. A range tombstone's coalesced marker is only surfaced once its
+CLOSE bound is parsed, which — for a range whose covered rows live in a different
+generation — can be after those rows have streamed past. The streaming compaction path
+therefore buffers that bounded, partition-width-independent prefix and nothing else.
+
+Flight's row-granular entry point is `drive_merge_over` →
+`drive_merge_streaming` (`cqlite-flight/src/producer_stream.rs:71`, `:94`), used by the
+full scan (`producer.rs:809`), point reads (`producer_point.rs:210`), and cache warming
+(`producer_warm.rs:101`, `:120`). The buffered `drive_merge` (`producer.rs:941`) remains
+on the non-streaming collect path (`merge_paths`, `producer.rs:916`) — which returns a
+fully materialized `Vec<RecordBatch>` anyway and serves as the parity oracle for the
+streaming path — and on aggregation, whose output is bounded by the group count rather
+than the row count.
 
 ### Writer invariants surfaced by the merge path
 
@@ -241,12 +389,21 @@ comparison.
 
 Range tombstones delete clustering intervals; readers must compare timestamps against range bounds during reconciliation.
 
-> **Warning: range tombstones during compaction.** As of epic #921, range
-> tombstones are **not** applied or emitted end-to-end in the compaction merge path.
-> The V5CompressedLegacy reader only **skips** range markers (it does not surface
-> them to the merger, except on the dedicated delta-scan path), and the writer does
-> not persist a surviving range marker through `merge_entry_to_mutation`. Tracked in
-> #933 — see Appendix F.
+Range tombstones are applied and emitted **end-to-end** through CQLite's compaction
+merge path (issue #933): the row decoder surfaces range markers to the merger
+(`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/compaction.rs:504`
+`on_range_marker`), the merger coalesces open/close bounds into whole tombstones and
+shadows the rows they cover (`merge/mod.rs:3446` `coalesce_range_tombstones`, `:3917`
+`apply_range_shadowing`), and a surviving range tombstone is re-serialized as
+open/close bound markers in the output (`writer/data_writer/cells.rs:333`
+`write_range_bound`). The end-to-end behavior is pinned by
+`cqlite-core/tests/issue_933_range_tombstone_compaction.rs`.
+
+A range tombstone's coalesced marker is only known once its **CLOSE** bound is parsed,
+which can be strictly after the rows it covers have already streamed past (they may live
+in a different generation). That ordering property is why the streaming compaction path
+buffers a bounded, partition-width-independent carrier prefix — see "Partition-granular
+vs row-granular merge" above.
 
 ## Tombstone Timeline Diagram
 
@@ -258,8 +415,14 @@ Range tombstones delete clustering intervals; readers must compare timestamps ag
 - Newest wins by timestamp; at **equal timestamp**, tombstones (and expiring cells) always beat
   live cells (`Cells.java:94`, CASSANDRA-14592). Within equal-timestamp tombstones: pure
   tombstone beats expiring cell; then higher `localDeletionTime`; then lower TTL.
+- Deletion/expiry **visibility** applies on every read, even from a single SSTable;
+  tombstone **collection** happens only during compaction.
 - Range tombstones apply only within their intervals and while active.
 - TTL expiry can surface as synthetic tombstones.
+- Cassandra merges rows lazily (bounded by fan-out *k*); a whole-partition-buffered
+  merge driver bounds memory by the widest partition instead.
+- Typed `float`/`double` ordering follows Java `Double.compare` (NaN last, `-0.0 < +0.0`),
+  which is neither IEEE `<` nor Rust's `total_cmp`.
 
 ### Complexity Notes
 - Merge per row: sorting values is O(k log k) where k is the number of versions; single-pass reconciliation after sort is O(k).
@@ -270,6 +433,11 @@ Range tombstones delete clustering intervals; readers must compare timestamps ag
   - `Cells.java` (tombstone reconciliation L79–L128) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/Cells.java#L79-L128
   - `DeletionTime.supersedes()` (partition/row tombstone precedence L158–L161) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/DeletionTime.java#L158-L161
   - Rows/tombstones package — https://github.com/apache/cassandra/tree/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows
+  - `DeletionTime.deletes(long)` (inclusive shadow at equal timestamp, L173–L176) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/DeletionTime.java#L173-L176
+  - `Cell.isLive(long nowInSec)` (TTL expiry predicate) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/Cell.java#L173
+  - `Filter` (read-time purge/expiry transformation) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/transform/Filter.java
+  - `UnfilteredRowIterators.UnfilteredRowMergeIterator.computeNext()` (lazy row merge, L523) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/UnfilteredRowIterators.java#L523
+  - `DoubleType` / `FloatType` (`Double.compare` ordering via `NumberType.compareComposed`) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/DoubleType.java
   
 For implementation details, see Appendix C.
 
