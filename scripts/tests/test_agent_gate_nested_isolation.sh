@@ -243,6 +243,30 @@ else
   bad "marker mode: sibling missing the terminal FAIL verdict"
   echo "------- marker sibling ($msib) -------"; cat "$msib" 2>/dev/null; echo "-----------------------------"
 fi
+# #2926 H3: these self-test hooks reach the REAL terminal emit with a hand-built meta. Every
+# other emit path in #2926 is THREADED through the tree renderers, and an emit path that is
+# not is precisely how "nine emit sites, six of them undiscovered" happened — an emitted
+# block with no tree lines is untraceable, whatever the block's other content. Assert the
+# lines are present on both hook-driven blocks (their VALUES depend on whether the fixture
+# is a git worktree; their PRESENCE does not).
+assert_tree_lines() { # assert_tree_lines <label> <file>
+  local label="$1" f="$2" miss=()
+  [ -f "$f" ] || { bad "$label: block file missing ($f)"; return; }
+  grep -q '^tree-start: '     "$f" || miss+=("tree-start")
+  grep -q '^tree-end: '       "$f" || miss+=("tree-end")
+  grep -q '^tree-integrity: ' "$f" || miss+=("tree-integrity")
+  # …exactly ONCE. This publish path re-emits the tree lines from the live globals and
+  # drops any the caller also supplied, so threading a caller's meta must not double them.
+  [ "$(grep -c '^tree-start: ' "$f")" = 1 ] || miss+=("tree-start-not-exactly-once")
+  [ "$(grep -c '^tree-end: ' "$f")" = 1 ]   || miss+=("tree-end-not-exactly-once")
+  if [ "${#miss[@]}" -eq 0 ]; then
+    ok "$label: the emitted block carries tree-start/tree-end/tree-integrity (#2926 H3: no untraceable emit path)"
+  else
+    bad "$label: emitted block is missing ${miss[*]} — this emit path is not threaded through the tree renderers"
+    echo "------- block ($f) -------"; cat "$f" 2>/dev/null; echo "--------------------------"
+  fi
+}
+assert_tree_lines "marker mode" "$msib"
 # --- Property 3d (job-2107 MED#1): marker-LESS terminal detection ---------------
 # A peer that writes the contended path AFTER the last component boundary leaves no marker; the
 # terminal emit must STILL detect it on the observable condition alone, not clobber, and force FAIL.
@@ -264,6 +288,20 @@ else
   bad "live-peer FAIL block dropped SUMMARY_META"
   echo "------- tnm sibling ($tnm_sib) -------"; cat "$tnm_sib" 2>/dev/null; echo "----------------------"
 fi
+assert_tree_lines "terminal-nomarker mode" "$tnm_sib"
+# …and the WIRING that keeps it that way: both hooks must render through _tree_meta_array,
+# never a second hand-built dialect of the tree lines.
+for hook_fn in 'marker' 'terminal-nomarker'; do
+  # The hook name reaches awk through ENVIRON, never `awk -v` (whose escape processing can
+  # rewrite a value) — the convention the tree suites use throughout.
+  if TEST_AWK_H="  $hook_fn)" \
+       awk 'index($0, ENVIRON["TEST_AWK_H"]) == 1 { f = 1 } f { print } f && /exit 0 ;;/ { exit }' "$GATE" \
+       | grep -q '^    _tree_meta_array$'; then
+    ok "WIRING: the '$hook_fn' self-test hook threads its block through _tree_meta_array (#2926 H3)"
+  else
+    bad "WIRING: the '$hook_fn' self-test hook emits without the tree renderers — an untraceable emit path"
+  fi
+done
 
 # --- Property 3c (WIRING): the guard is actually called from record_result ----------
 # All the hook-driven properties above call _assert_summary_integrity /

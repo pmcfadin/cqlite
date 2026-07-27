@@ -129,7 +129,14 @@ this capability SHALL contain the token `RESULT:`.
 The block's existing `commit:` line — its short sha and its `dirty:` flag — SHALL be derived from
 the VERIFIED terminal capture, never from a fresh `git rev-parse`/`git status` executed at emit
 time. When no validated terminal capture exists, the line SHALL say so explicitly rather than name a
-sha, and the run SHALL already be failing closed.
+sha, and the run SHALL already be failing closed. When the block is published because a mid-run
+mutation was DETECTED at a component boundary, `commit:` SHALL instead name the VERIFIED START
+identity — the identity the run actually executed against — explicitly labelled as such, with the
+post-mutation observation carried separately on an equally explicitly labelled `tree-end:` line.
+
+Every path that emits a terminal block SHALL render its tree provenance through the shared tree
+renderers, including the internal self-test hooks: no emission path SHALL hand-assemble a block
+without the tree lines, and no block SHALL carry a duplicated set of them.
 
 #### Scenario: a HEAD move between the terminal capture and the emit is never certified
 - **GIVEN** the terminal capture has been taken and verified
@@ -138,6 +145,21 @@ sha, and the run SHALL already be failing closed.
   HEAD, and the `dirty:` flag SHALL be the capture's — no block SHALL ever certify a sha the guard
   did not verify
 - **AND** when no validated terminal capture exists, `commit:` SHALL read `unverified`
+
+#### Scenario: a mutation-detected block names the identity the run executed against
+- **GIVEN** a MAIN-lane boundary detection publishes the ONE block a triager reads after a mid-run
+  mutation, and the post-mutation identity is not one this run certified anything against
+- **WHEN** that block is emitted
+- **THEN** its `commit:` line SHALL name the VERIFIED START sha and dirty flag and SHALL say that
+  this is the start identity the run executed against
+- **AND** the post-mutation identity SHALL appear only on the `tree-end:` line, labelled as a
+  post-mutation observation, so the two can never be read as the same thing
+
+#### Scenario: every emission path carries the tree lines exactly once
+- **WHEN** any terminal block is emitted, including one published by an internal self-test hook or
+  by the no-clobber summary-integrity publish path
+- **THEN** that block SHALL carry `tree-start:`, `tree-end:` and `tree-integrity:` lines, exactly one
+  of each
 
 #### Scenario: a full-gate summary carries tree-start, tree-end and tree-integrity
 - **WHEN** a full gate emits its terminal SUMMARY
@@ -373,6 +395,16 @@ stamped.
   once, however many captures the run took
 - **AND** every emitted block SHALL carry that line when it applies, including the block published
   by a component-boundary FAIL, where the capture is weakest and the disclosure matters most
+- **AND** when the fallback is in force the line SHALL also state the mtime RESOLUTION the host
+  actually offers whenever it is coarser than nanoseconds, so a weaker platform guarantee is
+  disclosed rather than implied to be at parity
+
+#### Scenario: a superseded capture's cap disclosure is cleared, never left standing
+- **GIVEN** the full gate re-captures the start identity when its slot is granted, and the fallback
+  count is re-derived from that authoritative capture
+- **WHEN** the pre-queue capture engaged the size+mtime fallback and the re-capture does not
+- **THEN** the `tree-hash-cap:` line SHALL NOT be published, so no block advertises a weakened
+  capture that is not in effect
 
 #### Scenario: the hash cap cannot suppress a detected mutation
 - **WHEN** the cap is set arbitrarily low and a tracked file is edited mid-run
@@ -391,10 +423,12 @@ stamped.
 macOS is a first-class gate host (the gate carries a Darwin wrapper branch, a BSD `stat` branch and a
 macOS `/bin/bash` 3.2 floor), so the tree-integrity code SHALL use no GNU-only construct. Specifically:
 the changed-path parser SHALL handle both `comm -3` columns by field arithmetic inside `awk`, never by
-a GNU-only `sed 's/^\t//'`; a value handed to `awk` SHALL be passed through the environment, never
-`awk -v`, whose escape-sequence processing would un-escape the very tabs the report view escapes; and
-any flag that is not universally available (`sort -z`, `stat -c`) SHALL be PROBED once with a portable
-fallback rather than assumed.
+a GNU-only `sed 's/^\t//'`; and any flag that is not universally available (`sort -z`, `stat -c`,
+BSD `stat`'s fractional-seconds datum) SHALL be PROBED once with a portable fallback rather than
+assumed. Separately — and NOT as a portability rule, since `awk -v` is POSIX — a value handed to
+`awk` SHALL be passed through the environment rather than `awk -v`, whose escape-sequence processing
+would un-escape the very tabs the report view escapes; the enforcing lint SHALL report that hazard in
+its own words rather than as a GNU-only construct.
 
 #### Scenario: the changed-path list is correct on a host whose sed does not honour \t
 - **WHEN** a mid-run mutation is detected on a host whose `sed` treats `\t` as a literal `t`
@@ -417,6 +451,15 @@ fallback rather than assumed.
 - **WHEN** an oversized untracked file is recorded by size+mtime on a host whose `stat` offers only
   the BSD `-f` interface
 - **THEN** the record SHALL carry a numeric mtime, not `unknown`
+
+#### Scenario: sub-second mtime resolution is used where the BSD host offers it, and disclosed where it does not
+- **GIVEN** GNU `stat` records nanoseconds while a BSD `stat` limited to `%m` records whole seconds,
+  so a same-size rewrite landing inside one second would be invisible to the fallback on that host
+- **WHEN** the host's `stat` offers the fractional-seconds datum
+- **THEN** the guard SHALL use it and the record SHALL carry a sub-second mtime, closing the gap
+- **AND WHEN** it does not, the `tree-hash-cap:` line SHALL state that the resolution is whole
+  seconds on this host (or unavailable, when no `stat` flavour works), so the artifact never implies
+  a guarantee the platform did not give
 
 ### Requirement: A discriminating regression test SHALL pin the behaviour inside tooling-tests
 

@@ -231,6 +231,65 @@ else
     bad "G1: the BSD stat branch produced no usable mtime — the fallback record is degraded"
     grep 'one-big' "$mdw.report" 2>/dev/null
   fi
+  # --- H5: a WEAKER mtime resolution is DISCLOSED, never silently shipped -----------
+  # GNU records nanoseconds (`stat -c %.9Y`); a BSD stat with only `%m` records WHOLE
+  # SECONDS, so on that host a same-size rewrite landing inside one second is invisible to
+  # the size+mtime fallback while Linux catches it. That is a real, platform-specific
+  # weakening of a correctness guard, so the cap line — the fallback's own disclosure —
+  # states the resolution the host actually gave (#2926 review H5).
+  dw_cap=$(sed -n 's/^tree-selftest: cap-line=//p' "$tmp/darwin-cap.out" | head -1)
+  case "$dw_cap" in
+    *"untracked file(s) recorded by size+mtime; mtime resolution: WHOLE SECONDS on this host"*)
+      ok "H5: a whole-seconds-only stat host DISCLOSES the reduced mtime resolution in tree-hash-cap:" ;;
+    *)
+      bad "H5: the cap line hides the weaker BSD mtime resolution — got '$dw_cap'" ;;
+  esac
+  # …and the gap CLOSES where the platform offers sub-second mtimes: BSD's `%Fm` datum.
+  # A second shim, identical but for knowing `%Fm`, must produce a FRACTIONAL record and
+  # NO disclosure — which is also what proves the disclosure above is not unconditional.
+  FRACBIN="$tmp/fracbin"; mkdir -p "$FRACBIN"
+  cp "$STUBBIN/cargo" "$FRACBIN/cargo"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'REAL_STAT=%s\n' "$REAL_STAT"
+    cat <<'FRACSHIM'
+case "${1:-}" in
+  -c*) printf 'stat: illegal option -- c\n' >&2; exit 1 ;;
+  -f)  fmt="${2:-}"; shift 2
+       [ "${1:-}" = "--" ] && shift
+       case "$fmt" in
+         %m)  exec "$REAL_STAT" -c %Y -- "$@" ;;
+         %Fm) exec "$REAL_STAT" -c %.9Y -- "$@" ;;
+         *)   printf 'stat: unsupported format %s\n' "$fmt" >&2; exit 1 ;;
+       esac ;;
+esac
+printf 'stat: usage: stat [-f format] [file ...]\n' >&2
+exit 1
+FRACSHIM
+  } > "$FRACBIN/stat"
+  chmod +x "$FRACBIN/stat"
+  cp "$DARWINBIN/sed" "$FRACBIN/sed"
+  mfr="$tmp/frac-manifest"
+  ( cd "$r_dw" && PATH="$FRACBIN:$PATH" env "${darwin_env[@]}" \
+      AGENT_GATE_SUMMARY_FILE="$tmp/frac-cap-sentinel.txt" \
+      AGENT_GATE_TREE_SELFTEST=capture AGENT_GATE_TREE_HASH_CAP_BYTES=4096 \
+      AGENT_GATE_TREE_SELFTEST_MANIFEST_OUT="$mfr" \
+      bash "$r_dw/scripts/agent-gate.sh" >"$tmp/frac-cap.out" 2>&1 )
+  if grep -qE '^U	SIZE:8192:MTIME:[0-9]+\.[0-9]+	' "$mfr.report" 2>/dev/null; then
+    ok "H5: a BSD stat that offers %Fm records a SUB-SECOND mtime (the resolution gap is closed, not merely disclosed)"
+  else
+    bad "H5: the %Fm datum was not used — the BSD record stayed whole-seconds"
+    grep 'one-big' "$mfr.report" 2>/dev/null
+  fi
+  fr_cap=$(sed -n 's/^tree-selftest: cap-line=//p' "$tmp/frac-cap.out" | head -1)
+  case "$fr_cap" in
+    *"mtime resolution:"*)
+      bad "H5 control: a sub-second host still claims reduced resolution — the disclosure is unconditional: '$fr_cap'" ;;
+    "tree-hash-cap: 4096 bytes (1 untracked file(s) recorded by size+mtime)")
+      ok "H5 control: a sub-second host carries the cap line with NO resolution caveat (the disclosure is host-derived)" ;;
+    *)
+      bad "H5 control: unexpected cap line on the sub-second host: '$fr_cap'" ;;
+  esac
   rm -f "$r_dw/one-big.bin"
 fi
 
@@ -371,9 +430,16 @@ _apply_tree_integrity_marker _tree_unguarded_terminal_probe _tree_finalize \
 _tree_commit_meta _tree_commit_meta_render _tree_meta_render_lines _tree_meta_lines \
 _tree_meta_array _tree_result"
 GNU_RULES="bre-escape sed-in-place grep-perl date-d readlink-f sort-version sort-nul \
-stat-gnu xargs-r find-printf mktemp-p echo-e awk-v"
-GNU_ALLOW="_tree_probe_tools:stat-gnu _tree_mtime:stat-gnu _tree_probe_tools:sort-nul _tree_sort0:sort-nul"
-gnu_rule_pat() {
+stat-gnu xargs-r find-printf mktemp-p echo-e"
+# `awk -v` is POSIX and universally available, so it is NOT a portability rule (#2926
+# review H4): filing it under "GNU-only" told a future author the wrong thing and banned a
+# portable construct. The real hazard is ESCAPING — `-v` performs escape-sequence
+# processing on the assigned value, un-escaping the very `\t`/`\n` the `.report` view
+# escapes on purpose (review B6), so a lookup by escaped spelling can never match (G2
+# above proves that behaviourally). Its own rule, its own message.
+ESCAPE_RULES="awk-v-escape-processing"
+LINT_ALLOW="_tree_probe_tools:stat-gnu _tree_mtime:stat-gnu _tree_probe_tools:sort-nul _tree_sort0:sort-nul"
+lint_rule_pat() {
   case "$1" in
     bre-escape)   printf '%s' '(sed|grep)[[:space:]].*\\[tsSwWdb+|]' ;;
     sed-in-place) printf '%s' 'sed[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-i([[:space:]]|$)' ;;
@@ -387,21 +453,23 @@ gnu_rule_pat() {
     find-printf)  printf '%s' 'find[[:space:]].*-printf' ;;
     mktemp-p)     printf '%s' 'mktemp[[:space:]]+(-p([[:space:]]|$)|--tmpdir)' ;;
     echo-e)       printf '%s' 'echo[[:space:]]+-e([[:space:]]|$)' ;;
-    awk-v)        printf '%s' 'awk[[:space:]].*[[:space:]]-v[[:space:]]' ;;
+    awk-v-escape-processing)
+                  printf '%s' 'awk[[:space:]].*[[:space:]]-v[[:space:]]' ;;
   esac
 }
-gnu_allowed() { case " $GNU_ALLOW " in *" $1:$2 "*) return 0 ;; esac; return 1; }
-# gnu_only_hits <file> <fn…> -> one "<fn>/<rule>: <line>" per violation; rc 1 when any.
-gnu_only_hits() {
-  local f="$1"; shift
+lint_allowed() { case " $LINT_ALLOW " in *" $1:$2 "*) return 0 ;; esac; return 1; }
+# rule_hits <file> <rule-set> <fn…> -> one "<fn>/<rule>: <line>" per violation; rc 1 when
+# any. The rule SET is a parameter so each class carries its own, correctly-worded verdict.
+rule_hits() {
+  local f="$1" rules="$2"; shift 2
   local fn body rule hit found=""
   # shellcheck disable=SC2086  # intentional word-split over the space-separated name lists
   for fn in $*; do
     body=$(fn_body "$f" "$fn" | sed 's/[[:space:]]*#.*$//')
     [ -n "$body" ] || continue
-    for rule in $GNU_RULES; do
-      gnu_allowed "$fn" "$rule" && continue
-      hit=$(printf '%s\n' "$body" | grep -nE "$(gnu_rule_pat "$rule")" | head -1)
+    for rule in $rules; do
+      lint_allowed "$fn" "$rule" && continue
+      hit=$(printf '%s\n' "$body" | grep -nE "$(lint_rule_pat "$rule")" | head -1)
       [ -n "$hit" ] && found="${found}${fn}/${rule}: ${hit}"$'\n'
     done
   done
@@ -421,20 +489,30 @@ else
   bad "PORTABILITY: the lint's function inventory is stale — not found in the gate: ${missing_fns:-<none>} (n=$n_tree_fns)"
 fi
 # shellcheck disable=SC2086  # intentional word-split over the space-separated name list
-if gnu_hits=$(gnu_only_hits "$GATE" $TREE_FNS); then
+if gnu_hits=$(rule_hits "$GATE" "$GNU_RULES" $TREE_FNS); then
   ok "PORTABILITY: no GNU-only construct in any tree-integrity function ($(printf '%s\n' $GNU_RULES | grep -c . | tr -d ' ') rules)"
 else
   bad "PORTABILITY: GNU-only construct(s) in the tree-integrity code:"
   printf '%s' "$gnu_hits"
 fi
+# The ESCAPING class, reported in its own words (#2926 review H4) — `awk -v` is portable;
+# what it is not is escape-transparent.
+# shellcheck disable=SC2086  # intentional word-split over the space-separated name list
+if esc_hits=$(rule_hits "$GATE" "$ESCAPE_RULES" $TREE_FNS); then
+  ok "ESCAPING: no awk -v assignment in any tree-integrity function (values reach awk escape-transparently)"
+else
+  bad "ESCAPING: awk -v assignment(s) in the tree-integrity code — awk performs escape-sequence processing on a -v value, un-escaping the \\t/\\n the .report view escapes on purpose (see G2 above); hand the value through the environment (ENVIRON[…]) instead:"
+  printf '%s' "$esc_hits"
+fi
 # …and the PROOF that each rule can fail: one mutant per rule, in a NON-allowlisted
-# function, asserted to be caught. A lint nobody has seen fail is not a lint.
+# function, asserted to be caught. A lint nobody has seen fail is not a lint. Each mutant
+# is checked against ITS OWN rule only, so a rule cannot inherit another's discrimination.
 lint_caught=0; lint_total=0
 while IFS='|' read -r rule line; do
   [ -n "$rule" ] || continue
   lint_total=$(( lint_total + 1 ))
   printf '_tree_changed_paths() {\n  %s\n}\n' "$line" > "$tmp/lint-mutant.sh"
-  if gnu_only_hits "$tmp/lint-mutant.sh" _tree_changed_paths >/dev/null 2>&1; then
+  if rule_hits "$tmp/lint-mutant.sh" "$rule" _tree_changed_paths >/dev/null 2>&1; then
     bad "PORTABILITY: the lint does NOT catch the '$rule' mutant ($line)"
   else
     lint_caught=$(( lint_caught + 1 ))
@@ -452,12 +530,14 @@ xargs-r|xargs -r echo
 find-printf|find . -printf '%p'
 mktemp-p|mktemp -p /tmp
 echo-e|echo -e "a"
-awk-v|awk -F'\t' -v p="$2" '$4 == p { print }' "$1"
+awk-v-escape-processing|awk -F'\t' -v p="$2" '$4 == p { print }' "$1"
 MUTANTS
-if [ "$lint_caught" -eq "$lint_total" ] && [ "$lint_total" -eq 13 ]; then
-  ok "PORTABILITY: every one of the $lint_total lint rules is proved discriminating (one mutant each)"
+n_lint_rules=$(printf '%s\n' $GNU_RULES $ESCAPE_RULES | grep -c . | tr -d ' ')
+if [ "$lint_caught" -eq "$lint_total" ] && [ "$lint_total" -eq 13 ] \
+   && [ "$n_lint_rules" -eq 13 ]; then
+  ok "PORTABILITY+ESCAPING: every one of the $lint_total lint rules is proved discriminating (one mutant each, checked against its OWN rule)"
 else
-  bad "PORTABILITY: only $lint_caught of $lint_total lint rules caught their mutant"
+  bad "PORTABILITY+ESCAPING: only $lint_caught of $lint_total lint rules caught their mutant (rule inventory: $n_lint_rules)"
 fi
 # …and a NON-vacuity control: a portable body must produce NO hit, so the lint is not
 # simply flagging everything.
@@ -466,11 +546,11 @@ _tree_changed_paths() {
   LC_ALL=C comm -3 "$1" "$2" | awk -F'\t' '$1 == "" { print $5; next } { print $4 }'
 }
 CLEANFN
-if gnu_only_hits "$tmp/lint-clean.sh" _tree_changed_paths >/dev/null 2>&1; then
+if rule_hits "$tmp/lint-clean.sh" "$GNU_RULES $ESCAPE_RULES" _tree_changed_paths >/dev/null 2>&1; then
   ok "PORTABILITY control: a portable comm|awk body produces no lint hit (the lint is not flagging everything)"
 else
   bad "PORTABILITY control: the lint flags a portable body — it would block correct code"
-  gnu_only_hits "$tmp/lint-clean.sh" _tree_changed_paths
+  rule_hits "$tmp/lint-clean.sh" "$GNU_RULES $ESCAPE_RULES" _tree_changed_paths
 fi
 # The structural half of G5: the blob-id rule is SHARED, never a second hard-coded length.
 if body_has "$(fn_body "$GATE" _tree_lockfile_admissible)" '  _tree_hex_id_ok "$vb" || return 1' \

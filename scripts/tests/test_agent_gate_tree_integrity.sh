@@ -573,6 +573,48 @@ else
   bad "commit: the fixture did not actually commit — the case was not exercised"
 fi
 
+# --- H2: the boundary FAIL block names the identity the run EXECUTED against -----
+# The whole thesis of #2926 is "never stamp a sha you did not verify". A MAIN-lane boundary
+# detection sets tree-end from the POST-mutation probe before publishing, so the ONE block a
+# triager reads after a mid-run mutation used to carry a `commit:` line naming the sha the
+# run did NOT execute against. The block must name the VERIFIED START, label it, and keep
+# the post-mutation observation on its own labelled line (#2926 review H2).
+sum="$tmp/hook-bcommit.txt"; out="$tmp/hook-bcommit.out"
+b_before=$( cd "$r2" && git rev-parse HEAD )
+( cd "$r2" && env AGENT_GATE_SUMMARY_FILE="$sum" AGENT_GATE_TREE_SELFTEST=boundary \
+    AGENT_GATE_TREE_SELFTEST_MUTATE=README.md AGENT_GATE_TREE_SELFTEST_COMMIT=1 \
+    GIT_AUTHOR_NAME=gate GIT_AUTHOR_EMAIL=gate@example.invalid \
+    GIT_COMMITTER_NAME=gate GIT_COMMITTER_EMAIL=gate@example.invalid \
+    bash "$r2/scripts/agent-gate.sh" >"$out" 2>&1 ); rc=$?
+b_after=$( cd "$r2" && git rev-parse HEAD )
+b_stamp=$(sed -n 's/^commit: \([^ ]*\).*/\1/p' "$sum" | head -1)
+b_end=$(sed -n 's/^tree-end: \([^ ]*\) .*/\1/p' "$sum" | head -1)
+if [ "$b_before" != "$b_after" ]; then
+  ok "H2: the fixture really moved HEAD at the boundary (${b_before:0:7}→${b_after:0:7}) — start and post-mutation identities differ"
+else
+  bad "H2: HEAD did not move — the start-vs-post-mutation distinction was not exercised"
+fi
+assert_named_fail "H2 (boundary FAIL block)" "$sum" "$rc"
+if [ -n "$b_stamp" ] && [ "$b_stamp" = "${b_before:0:7}" ] && [ "$b_stamp" != "${b_after:0:7}" ]; then
+  ok "H2: the boundary block's commit: names the VERIFIED START ($b_stamp), not the post-mutation ${b_after:0:7}"
+else
+  bad "H2: commit: is '$b_stamp', expected the verified start ${b_before:0:7} (the block names a sha the run never executed against)"
+  grep -E '^commit:|^tree-' "$sum" 2>/dev/null
+fi
+if grep -q '^commit: .*(VERIFIED START — the identity this run executed against; the tree MUTATED mid-run, see tree-end: for the post-mutation observation)$' "$sum"; then
+  ok "H2: the commit: line LABELS itself as the verified start and points at tree-end: for the post-mutation identity"
+else
+  bad "H2: the commit: line does not disambiguate start from post-mutation"
+  grep '^commit: ' "$sum" 2>/dev/null
+fi
+if [ -n "$b_end" ] && [ "$b_end" = "${b_after:0:12}" ] \
+   && grep -q '^tree-end: .*(POST-MUTATION observation — NOT the identity this run executed against)$' "$sum"; then
+  ok "H2: tree-end: carries the post-mutation identity (${b_after:0:12}), explicitly labelled as such"
+else
+  bad "H2: tree-end: is '$b_end' / unlabelled — the post-mutation identity is not separately named"
+  grep '^tree-end: ' "$sum" 2>/dev/null
+fi
+
 # --- C1: a HEAD move BETWEEN the terminal capture and the emit -------------------
 # THE ORIGINAL #2926 DEFECT, in its last surviving hiding place. The guard's terminal
 # capture is authoritative — but the block's `commit:`/`dirty:` stamp used to be a FRESH
@@ -1781,6 +1823,24 @@ if [ -z "$lazy_hits" ]; then
   ok "WIRING: the boundary-FAIL assembly takes NO capture (no lazy finalize can overwrite the component-named verdict)"
 else
   bad "WIRING: the boundary-FAIL assembly calls a lazily-finalizing helper: $lazy_hits"
+fi
+# H1: the cap stamp must CLEAR a line that no longer applies. The full gate re-captures at
+# the slot grant and _tree_capture_start resets the fallback count first, so a set-only
+# stamp left a pre-queue `tree-hash-cap:` standing on a block whose authoritative capture
+# engaged no fallback — advertising a weakened capture that is not in force. Asserted on
+# the code because the window is the slot grant, which no self-test hook can enter.
+cs_body=$(fn_body "$GATE" _tree_cap_stamp)
+if body_has "$cs_body" '    TREE_HASH_CAP_LINE=""'; then
+  ok "H1: _tree_cap_stamp CLEARS tree-hash-cap: when no cap condition is in effect (no stale disclosure survives a re-capture)"
+else
+  bad "H1: _tree_cap_stamp only ever SETS the line — a superseded capture's disclosure survives"
+  printf '%s\n' "$cs_body"
+fi
+if body_has "$(fn_body "$GATE" _tree_capture_start)" '  TREE_CAP_FALLBACKS=0; _tree_cap_note "$TREE_F_FB"' \
+   && body_has "$(fn_body "$GATE" _tree_capture_start)" '  _tree_cap_stamp'; then
+  ok "H1: every start capture re-notes from zero and re-stamps (the clear path is actually reachable)"
+else
+  bad "H1: _tree_capture_start no longer resets+restamps the cap disclosure — the H1 window moved"
 fi
 # The manifest trailer is validated, not merely written (#2926 review C2).
 if body_has "$(fn_body "$GATE" _tree_identity)" '  _tree_manifest_ok "$out" nul'; then

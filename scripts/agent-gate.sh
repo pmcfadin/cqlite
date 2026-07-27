@@ -1857,6 +1857,16 @@ TREE_MARKER_SEEN=0        # 1 once a SIDE-lane marker has been consumed
 TREE_START_HEAD=""; TREE_START_DIRTY=""; TREE_START_DIGEST=""
 TREE_END_HEAD=""; TREE_END_DIRTY=""; TREE_END_DIGEST=""
 TREE_START_BRANCH=""      # the branch name read ONCE, at the start of the guarded window
+# Which capture the block's `commit:` line names (#2926 review H2):
+#   end   — the VERIFIED TERMINAL capture (the default, and the C1 property this change
+#           exists to establish: a block may only name a sha some capture validated).
+#   start — a MAIN-lane boundary detection. The run EXECUTED against the START identity;
+#           the post-mutation identity is merely what the guard OBSERVED when it stopped,
+#           and naming it on `commit:` would make the failure artifact — the first thing a
+#           triager reads — stamp a sha the run never ran against, the exact pattern this
+#           change forbids. So a mutation-detected block names the verified start and says
+#           so, and the post-mutation identity stays on the labelled `tree-end:` line.
+TREE_COMMIT_SOURCE=end
 # The count of untracked files recorded by size+mtime instead of by content hash. It is
 # the MAX over the run's captures, never their SUM (#2926 review): the start and the
 # terminal capture both count the SAME oversized file, so summing reported "2 untracked
@@ -1936,14 +1946,32 @@ _tree_excluded() {
 # subshell — so the `command -v`/`stat` probes re-ran per capture and per file.
 TREE_SHA_TOOL=""
 TREE_STAT_FLAVOR=""
+# The mtime RESOLUTION _tree_mtime can actually record on this host: ns | s | none
+# (#2926 review H5). It is a DISCLOSED property, not an internal detail: the size+mtime
+# fallback is only as strong as its clock, so a host that can offer whole seconds only
+# cannot see a same-size rewrite that lands inside one second — a real, platform-specific
+# weakening of a correctness guard. _tree_cap_stamp publishes it whenever the fallback is
+# actually in use, so the artifact states the guarantee that host gave rather than
+# implying parity with the nanosecond hosts.
+TREE_MTIME_RES=none
 TREE_SORT0_OK=0
 _tree_probe_tools() {
   if command -v sha256sum >/dev/null 2>&1; then TREE_SHA_TOOL=sha256sum
   elif command -v shasum >/dev/null 2>&1; then TREE_SHA_TOOL=shasum
   else TREE_SHA_TOOL=git; fi
-  if stat -c %Y . >/dev/null 2>&1; then TREE_STAT_FLAVOR=gnu
-  elif stat -f %m . >/dev/null 2>&1; then TREE_STAT_FLAVOR=bsd
-  else TREE_STAT_FLAVOR=none; fi
+  local frac
+  if stat -c %Y . >/dev/null 2>&1; then TREE_STAT_FLAVOR=gnu; TREE_MTIME_RES=ns
+  elif stat -f %m . >/dev/null 2>&1; then
+    # BSD/macOS. `%m` is whole seconds; the newer `%Fm` datum prints FRACTIONAL seconds,
+    # so where this stat offers it the resolution gap against GNU's `%.9Y` simply closes.
+    # Probed (never assumed) and validated on the OUTPUT: an older stat that does not know
+    # the datum either errors or echoes it back, and neither looks like `<digits>.<digits>`.
+    TREE_STAT_FLAVOR=bsd; TREE_MTIME_RES=s
+    frac=$(stat -f '%Fm' . 2>/dev/null) || frac=""
+    case "$frac" in
+      *[0-9].[0-9]*) TREE_STAT_FLAVOR=bsd-frac; TREE_MTIME_RES=ns ;;
+    esac
+  else TREE_STAT_FLAVOR=none; TREE_MTIME_RES=none; fi
   # `sort -z` is NOT universal (#2926 review G1 sweep). An unsupported flag makes sort
   # print usage and emit NOTHING, and the capture's `… | LC_ALL=C sort -z` feeds a
   # `while read -r -d ''` loop — so the manifest would come back EMPTY on a dirty tree
@@ -2214,13 +2242,15 @@ _tree_identity() {
   printf '%s\t%s\t%s\t%s\n' "$head" "$dirty" "$digest" "$fallbacks"
 }
 
-# _tree_mtime <path> -> mtime (ns where the platform's stat offers it, else seconds).
-# TREE_STAT_FLAVOR is probed once by _tree_probe_tools (see above).
+# _tree_mtime <path> -> mtime (sub-second where the platform's stat offers it, else whole
+# seconds). TREE_STAT_FLAVOR/TREE_MTIME_RES are probed once by _tree_probe_tools (above);
+# whenever the resolution is coarser than nanoseconds the cap line SAYS SO (#2926 H5).
 _tree_mtime() {
   case "$TREE_STAT_FLAVOR" in
-    gnu) stat -c '%.9Y' -- "$1" 2>/dev/null || echo unknown ;;
-    bsd) stat -f '%m' -- "$1" 2>/dev/null || echo unknown ;;
-    *)   echo unknown ;;
+    gnu)      stat -c '%.9Y' -- "$1" 2>/dev/null || echo unknown ;;
+    bsd-frac) stat -f '%Fm'  -- "$1" 2>/dev/null || echo unknown ;;
+    bsd)      stat -f '%m'   -- "$1" 2>/dev/null || echo unknown ;;
+    *)        echo unknown ;;
   esac
 }
 
@@ -2237,10 +2267,29 @@ _tree_cap_note() {
 # _tree_cap_stamp: stamp `tree-hash-cap:` when the knob is non-default, when it was
 # NORMALIZED (clamped/rejected — #2926 review F4), or when the size+mtime fallback was
 # actually used, so neither a weakened capture nor a rejected knob value is ever invisible.
+#
+# It must also CLEAR a line that no longer applies (#2926 review H1). The full gate
+# RE-captures at the slot grant, and _tree_capture_start resets TREE_CAP_FALLBACKS to 0
+# before re-noting: if the pre-queue capture engaged the fallback and the authoritative
+# re-capture does not, a set-only stamp left the OLD line standing and the block advertised
+# a weakened capture that is not in force. A stale disclosure is a false statement about
+# the run, so the else-branch is part of the contract, not tidiness.
+#
+# When the fallback IS in use, the record is only as good as the host's mtime resolution,
+# so a coarser-than-nanosecond clock is disclosed in the same line (#2926 review H5).
 _tree_cap_stamp() {
+  local mres=""
+  if [ "${TREE_CAP_FALLBACKS:-0}" -gt 0 ]; then
+    case "$TREE_MTIME_RES" in
+      s)    mres="; mtime resolution: WHOLE SECONDS on this host — a same-size rewrite within one second is NOT detected" ;;
+      none) mres="; mtime resolution: UNAVAILABLE on this host — those records are size-only" ;;
+    esac
+  fi
   if [ "$TREE_HASH_CAP_BYTES" != "$TREE_HASH_CAP_DEFAULT" ] || [ -n "$TREE_HASH_CAP_NOTE" ] \
      || [ "${TREE_CAP_FALLBACKS:-0}" -gt 0 ]; then
-    TREE_HASH_CAP_LINE="tree-hash-cap: $TREE_HASH_CAP_BYTES bytes${TREE_HASH_CAP_NOTE:+ ($TREE_HASH_CAP_NOTE)} (${TREE_CAP_FALLBACKS:-0} untracked file(s) recorded by size+mtime)"
+    TREE_HASH_CAP_LINE="tree-hash-cap: $TREE_HASH_CAP_BYTES bytes${TREE_HASH_CAP_NOTE:+ ($TREE_HASH_CAP_NOTE)} (${TREE_CAP_FALLBACKS:-0} untracked file(s) recorded by size+mtime$mres)"
+  else
+    TREE_HASH_CAP_LINE=""
   fi
 }
 
@@ -2960,7 +3009,13 @@ _assert_tree_integrity() {
   rm -f "$probe" "$probe.report" 2>/dev/null || true
   # lockfile-settled: non-fatal here; the terminal capture stamps it.
   [ "$cls" = lockfile ] && return 0
+  # The block about to be published describes a run that executed against the START
+  # identity and was STOPPED on observing this one. Record BOTH, unambiguously (#2926
+  # review H2): `commit:` names the verified start (below), `tree-end:` the post-mutation
+  # observation, each labelled for what it is.
   _tree_set_end "$head" "$dirty" "$digest"
+  TREE_END_LINE="$TREE_END_LINE (POST-MUTATION observation — NOT the identity this run executed against)"
+  TREE_COMMIT_SOURCE=start
   _tree_boundary_fail "$comp" "$(_tree_fail_reason "$head" "$rendered")"
   return $?
 }
@@ -3197,7 +3252,14 @@ _tree_commit_meta_render() {
   local branch="${TREE_START_BRANCH:-}"
   if [ "$TREE_GUARDED" -eq 1 ]; then
     [ -n "$branch" ] || branch=unknown
-    if [ -n "$TREE_END_HEAD" ] && _tree_digest_ok "$TREE_END_DIGEST"; then
+    # A mutation-detected boundary block names the VERIFIED START identity — what the run
+    # actually executed against (#2926 review H2). Guarded on the start identity being
+    # validated: when it is not (a start capture that failed), the run is fail-closed and
+    # falls through to the `unverified` rendering rather than naming anything.
+    if [ "$TREE_COMMIT_SOURCE" = start ] && [ -n "$TREE_START_HEAD" ] \
+       && _tree_digest_ok "$TREE_START_DIGEST"; then
+      TREE_COMMIT_LINE="commit: $(printf '%.7s' "$TREE_START_HEAD") branch: $branch dirty: $TREE_START_DIRTY (VERIFIED START — the identity this run executed against; the tree MUTATED mid-run, see tree-end: for the post-mutation observation)"
+    elif [ -n "$TREE_END_HEAD" ] && _tree_digest_ok "$TREE_END_DIGEST"; then
       TREE_COMMIT_LINE="commit: $(printf '%.7s' "$TREE_END_HEAD") branch: $branch dirty: $TREE_END_DIRTY"
     else
       # No validated terminal capture exists (capture failed / no worktree at terminal).
@@ -3387,8 +3449,14 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     printf '%s\t%s\n' "smoke" "foreign run-id detected mid-run; expected $RUN_ID" \
       >> "$LOG_DIR/summary-integrity.fail"
     _apply_integrity_marker
+    # THREADED, like every other emit path in #2926: these hooks reach the REAL terminal
+    # emit, so a hand-built meta with no tree lines would publish an untraceable block —
+    # the very "emit sites nobody enumerated" shape this change set out to close (review
+    # H3). _tree_meta_array finalizes in the CURRENT shell (never a subshell, B2).
+    _tree_meta_array
     _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
-      ${SUMMARY_INTEGRITY_LINE:+"$SUMMARY_INTEGRITY_LINE"} || true
+      ${SUMMARY_INTEGRITY_LINE:+"$SUMMARY_INTEGRITY_LINE"} \
+      "${TREE_META_LINES[@]}" || true
     printf 'marker-integrity-selftest: contended-untouched=%s sibling=%s\n' \
       "$(grep -qF 'run-id: /tmp/agent-gate.FOREIGN-' "$SUMMARY_FILE" 2>/dev/null && echo yes || echo no)" \
       "$([ -f "$SUMMARY_FILE.integrity-fail.$(basename "$RUN_ID")" ] && echo yes || echo no)"
@@ -3406,7 +3474,10 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     } > "$SUMMARY_FILE"
     OVERALL=PASS
     _term_rc=0
-    _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" || _term_rc=$?
+    # Threaded for the same reason as the `marker` hook above (#2926 review H3).
+    _tree_meta_array
+    _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
+      "${TREE_META_LINES[@]}" || _term_rc=$?
     printf 'terminal-nomarker-selftest: contended-untouched=%s sibling=%s overall=%s rc=%s\n' \
       "$(grep -qF 'run-id: /tmp/agent-gate.FOREIGN-' "$SUMMARY_FILE" 2>/dev/null && echo yes || echo no)" \
       "$([ -f "$SUMMARY_FILE.integrity-fail.$(basename "$RUN_ID")" ] && echo yes || echo no)" \
