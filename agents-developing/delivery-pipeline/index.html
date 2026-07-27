@@ -297,7 +297,8 @@ lock</strong>.</p>
 <ol>
 <li><strong>Eligibility</strong> — the item is <code dir="auto">Ready</code> AND has <strong>no</strong> <code dir="auto">refs/claims/issue-&#x3C;N></code> claim ref
 (<code dir="auto">bash scripts/flow/claim.sh status &#x3C;N></code>) and <strong>no</strong> legacy <code dir="auto">issue-&#x3C;N>-*</code> branch on origin (mixed-fleet
-safety; older workers still branch-lock).</li>
+safety; older workers still branch-lock). A surviving branch over a <strong>free</strong> claim ref is not a dead
+end — see <em>Resuming past the legacy-branch guard</em> below.</li>
 <li><strong>Claim</strong> — <code dir="auto">bash scripts/flow/claim.sh claim &#x3C;N></code> acquires the lock (<code dir="auto">CLAIM HELD</code> exit 0 / <code dir="auto">CLAIM LOST</code>
 exit 2); only then create the worktree + branch and set assignee <code dir="auto">@me</code> + <code dir="auto">Status=In Progress</code> for board
 visibility. <code dir="auto">flow-activate</code> claims immediately — before any spec work; oracle-driven issues claim in
@@ -324,7 +325,44 @@ the <code dir="auto">project</code> scope string. Full delta list with the ident
 <p>Another machine that finds an existing claim can <code dir="auto">git fetch</code> the branch to <strong>resume</strong> that work instead of
 colliding; a <strong>reaped</strong> claim is adopted via compare-and-swap — <code dir="auto">claim.sh adopt &#x3C;N> --expect &#x3C;old-sha></code>,
 which replaces the ref with force-with-lease so a resurrected original holder loses the lease and detects
-the loss immediately (fixes the #2467/#2499 two-writer race). The claiming session also maintains a
+the loss immediately (fixes the #2467/#2499 two-writer race).</p>
+<p><strong>Resuming past the legacy-branch guard (issue #2945)</strong> — when the claim ref is <strong>free</strong> but an
+<code dir="auto">issue-&#x3C;N>-*</code> branch still stands on origin (a parked/reaped/released claim, an owner-approved spec that
+lives on that branch, or just a merged-but-undeleted PR branch), <code dir="auto">claim</code> refuses with
+<code dir="auto">reason=legacy-branch-lock … claim-ref=free resume=documented-procedure</code>. That refusal is a
+<strong>diagnosis, not a hand-off</strong>: it names the blocking branch(es) and tells you the claim ref itself is
+free, then points here. The ONE sanctioned resume is documented <em>only</em> here and in
+<code dir="auto">claim.sh -h</code> — it is deliberately <strong>never printed as a runnable line</strong> (see below):</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">bash</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/flow/claim.sh</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">adopt</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">1234</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--expect</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">none</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--reason</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">resume-legacy-branch-lock:branch-outlived-claim</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="bash scripts/flow/claim.sh adopt 1234 --expect none --reason resume-legacy-branch-lock:branch-outlived-claim"><div></div></button></div></figure></div>
+<p><code dir="auto">--expect none</code> is git’s <strong>empty lease</strong> (“this ref must not exist”), so the create is still arbitrated
+server-side: a machine that actually holds the claim ref keeps it and the resumer gets <code dir="auto">ADOPT-LOST</code>
+(exit 2), and two machines racing the resume still yield exactly one winner. <code dir="auto">--reason</code> is <strong>required</strong> —
+it is recorded in the claim commit next to who took it (machine/actor/ts) and rendered by
+<code dir="auto">claim.sh status</code>, so a resume is auditable; a reason with nothing recordable in it (<code dir="auto">'   '</code>, <code dir="auto">'---'</code>, an
+unset variable) is a <strong>usage error</strong> (exit 64), never a silent <code dir="auto">reason=unspecified</code> — and so is a bare
+<strong>placeholder</strong> (<code dir="auto">why</code>, <code dir="auto">todo</code>, <code dir="auto">tbd</code>, <code dir="auto">xxx</code>, …) or a reason still carrying an <strong>unsubstituted <code dir="auto">&#x3C;…></code></strong>
+(a copied <code dir="auto">--reason resume-legacy-branch-lock:&#x3C;branch></code> sanitizes to a non-sentinel token, so it is
+rejected on the raw text): the record must say why. That is also why the example above substitutes a
+concrete issue number and reason — the documented invocation is one that works when run verbatim.
+<code dir="auto">--actor</code> is fail-closed the same way (an actor with nothing recordable in it would alias two distinct
+identities onto one holder, and the actor gates re-entrancy/<code dir="auto">verify</code>/<code dir="auto">release</code>). A hex
+<code dir="auto">--expect</code> must be a <strong>full</strong> object name (40/64 hex) — a truncated sha is a usage error, not a lost race.</p>
+<p><strong>Why the command is never printed for you (owner decision, #2945).</strong> <code dir="auto">claim.sh</code> used to decide, from an
+in-script liveness probe, whether to print a copy-pasteable version of that command. That probe is gone.
+The readers of a refusal are agents that run printed remediations <strong>literally</strong>, and an older-fleet worker
+locks with the <em>branch</em> while holding <strong>no claim ref</strong> (<code dir="auto">claim-ref=free</code> is true for it) — so a printed
+empty-lease adopt would take an <strong>actively-worked</strong> lane and create a second writer. Judging abandonment
+needs signals <code dir="auto">claim.sh</code> cannot read soundly, and three successive revisions of the probe each shipped a
+fresh version of that hazard (a vacuous branch-tip date, a cross-process ref race, a fleet-wide permanent
+withhold). So the refusal diagnoses and points here, and <strong>you</strong> establish abandonment first with the same
+test <code dir="auto">flow-board</code>’s reaper uses:</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">bash</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/flow/claim-heartbeat.sh</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">should-reap</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">&#x3C;machine></span><span style="--0:#D6DEEB;--1:#403F53">   </span><span style="--0:#919F9F;--1:#5F636F"># exit 0 = reapable, 1 = keep, 2 = no ref</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="bash scripts/flow/claim-heartbeat.sh should-reap <machine>   # exit 0 = reapable, 1 = keep, 2 = no ref"><div></div></button></div></figure></div>
+<p>i.e. claim age > 4h <strong>and</strong> no open PR <strong>and</strong> (pid-dead, when the claim is local) — plus the board
+<code dir="auto">Status</code> and the branch/PR author. Only then run the documented resume. Retrying after a transient
+<code dir="auto">ERROR reason=infra</code> is safe: an
+adopt whose ref is already held by <em>this</em> machine+actor reports <code dir="auto">ADOPTED … (re-entrant)</code> exit 0 rather
+than abandoning an issue you own. This is the only sanctioned way past that refusal — <strong>never hand-craft
+a claim commit or push the ref directly</strong> (the field failure that motivated #2945). The claiming session also maintains a
 liveness <strong>heartbeat</strong> (<code dir="auto">scripts/flow/claim-heartbeat.sh beat &#x3C;N></code> — a cheap origin git ref under
 <code dir="auto">refs/heartbeats/&#x3C;machine></code>, never a GitHub API call — refreshed at claim time and on every stage
 transition: activate/implement/gate/PR). <code dir="auto">flow-board</code> reaps <strong>abandoned claims deterministically</strong> (issue
