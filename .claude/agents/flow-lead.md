@@ -52,7 +52,7 @@ back into one.
 ## Autonomy: arm `--auto`, GitHub merges on green (default, #2667)
 
 - **Default:** the moment **local certification** is met — `agent-gate.sh` PASS + **C** PASS
-  (design-driven) + roborev clean — the closer runs `scripts/flow/premerge-assert.sh <pr>
+  (design-driven) + roborev clean — the closer runs `bash scripts/flow/premerge-assert.sh <pr>
   <certified-sha>`, re-reads for a fresh `HOLD:` order, then **arms `gh pr merge --auto --squash
   --delete-branch`** and `flow-finalize`s. GitHub owns the CI-green wait — the `required` check
   (#2433, enforced for admins too via `enforce_admins`) lands the PR the instant it passes; **never
@@ -139,7 +139,7 @@ plumbing, NOT the lock); a session claims the ref FIRST (git arbitrates the atom
 then creates the worktree/branch, sets assignee + `Status=In Progress` for visibility, and proceeds only
 on `CLAIM HELD`. See `flow-activate` / `flow-implement` for the steps and `flow-board`
 for the render + reaper. The claiming session also maintains a liveness **heartbeat**
-(`scripts/flow/claim-heartbeat.sh beat <N>` — a cheap origin git ref, never a GitHub API call — refreshed at
+(`bash scripts/flow/claim-heartbeat.sh beat <N>` — a cheap origin git ref, never a GitHub API call — refreshed at
 claim time and every stage transition) that `flow-board` uses for deterministic reaping (age > 4h AND no
 open PR), replacing the old "no recent commits" guesswork (issue #2089).
 

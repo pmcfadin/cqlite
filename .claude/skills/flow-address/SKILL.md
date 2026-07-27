@@ -54,5 +54,5 @@ Resolve them in the worktree and reply per thread.
 7. **Re-certify and re-arm merge-on-green (#2667).** The owner's comments are input, NOT a merge
    gate — unless a comment is an explicit `HOLD:` or raises a product/scope question. After addressing
    them, re-certify (lite + any diff-relevant targets; a full/delta gate per the gate contract if the
-   certified SHA changed), re-run `scripts/flow/premerge-assert.sh <pr> <certified-sha>`, then re-arm
+   certified SHA changed), re-run `bash scripts/flow/premerge-assert.sh <pr> <certified-sha>`, then re-arm
    `gh pr merge --auto --squash --delete-branch`.
