@@ -30,6 +30,11 @@
 //! 300 rows, LZ4) — the only non-empty `Rows.db` in the corpus. Its binaries are
 //! COMMITTED (28 KiB Data.db), so these tests really run; an absent fixture SKIPs
 //! loudly and a present-but-empty result is a hard failure, never a pass.
+//!
+//! Excluded under `tombstones`: that build serves reads by a full-scan filter, so
+//! the whole clustering-window path (and the `rows_floor_block` walk this pins) is
+//! compiled out there — mirroring `issue_1647_rows_floor_walk.rs`.
+#![cfg(not(feature = "tombstones"))]
 
 use cqlite_core::storage::sstable::bti::encode_clustering_bound_oss50;
 use cqlite_core::storage::sstable::bti::{
