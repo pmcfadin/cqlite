@@ -84,14 +84,26 @@ fn emit_stream_subphase_samples(timings: &StreamSubPhaseTimings) {
 /// samples on EVERY exit path (normal completion, error, cancel, panic), mirroring
 /// `PhaseTimer`'s own drop-driven emission — so a stalled or errored `do_get` still
 /// records whatever sub-phase time it accrued.
+///
+/// It captures the `flight.do_get` span at construction and re-`enter()`s it
+/// around the emission loop (issue #2819 L5) — mirroring `PhaseTimer::record_current`
+/// — so the five `stream_*` samples carry the SAME span/exemplar association as the
+/// top-level phase samples on that instrument, and an operator correlating a slow
+/// trace sees the sub-phase breakdown, not just the top-level phases.
 pub struct StreamSubPhaseEmitter {
     timings: Arc<StreamSubPhaseTimings>,
+    span: tracing::Span,
 }
 
 impl StreamSubPhaseEmitter {
-    /// Wrap the per-request accumulator so its samples are emitted at drop.
+    /// Wrap the per-request accumulator so its samples are emitted at drop. Call
+    /// inside the merge closure (where `PhaseTimer` lives) so `Span::current()`
+    /// resolves to the `flight.do_get` RPC span.
     pub fn new(timings: Arc<StreamSubPhaseTimings>) -> Self {
-        Self { timings }
+        Self {
+            timings,
+            span: tracing::Span::current(),
+        }
     }
 }
 
@@ -100,6 +112,8 @@ impl Drop for StreamSubPhaseEmitter {
         // `Drop` runs exactly once, so the emission is unconditional (no
         // "already-emitted" guard is reachable). A sub-phase that accumulated no
         // time emits no sample (`emit_stream_subphase_samples` skips zero buckets).
+        // Re-enter the captured RPC span so the samples attach to it (L5).
+        let _entered = self.span.enter();
         emit_stream_subphase_samples(&self.timings);
     }
 }

@@ -40,8 +40,8 @@ use cqlite_core::storage::write_engine::{
 };
 use cqlite_core::types::Value;
 use cqlite_flight::obs::{
-    PHASE_STREAM_COLD_FAULT, PHASE_STREAM_DECOMPRESS, PHASE_STREAM_ENCODE, PHASE_STREAM_GRPC_WRITE,
-    PHASE_STREAM_MERGE,
+    PHASE_STREAM, PHASE_STREAM_COLD_FAULT, PHASE_STREAM_DECOMPRESS, PHASE_STREAM_ENCODE,
+    PHASE_STREAM_GRPC_WRITE, PHASE_STREAM_MERGE,
 };
 use cqlite_flight::service::CqliteFlightService;
 
@@ -204,7 +204,7 @@ fn stream_phase_seconds(m: &testing::CapturedMetrics) -> f64 {
                 .filter(|p| {
                     p.attributes
                         .iter()
-                        .any(|(k, v)| k == catalog::attr::RPC_PHASE && v == "stream")
+                        .any(|(k, v)| k == catalog::attr::RPC_PHASE && v == PHASE_STREAM)
                 })
                 .map(|p| p.value)
                 .sum()
@@ -307,13 +307,14 @@ fn uncompressed_ticket() -> Vec<u8> {
 
 // ============================ scenarios ============================
 
-/// Requirement 1: a completed `do_get` over a real COMPRESSED fixture records at
-/// least four distinct sub-phase samples, AND (positivity check) each recorded
-/// sub-phase is > 0 and no greater than the RPC wall time — the sub-phases
-/// attribute the in-`stream` cost across concurrent stages WITHOUT summing to it.
+/// Requirement 1: a completed `do_get` over a real COMPRESSED fixture records ALL
+/// FIVE distinct sub-phase samples, AND (positivity check) each recorded sub-phase
+/// is > 0 (single-threaded ones no greater than the RPC wall time) — the
+/// sub-phases attribute the in-`stream` cost across concurrent stages WITHOUT
+/// summing to it.
 #[test]
 #[serial]
-fn compressed_do_get_records_at_least_four_positive_subphases() {
+fn compressed_do_get_records_all_five_positive_subphases() {
     let Some(found) = lz4_fixture_or_skip() else {
         return;
     };
@@ -430,6 +431,49 @@ fn bti_compressed_do_get_records_cold_fault_and_decompress() {
     }
 }
 
+/// Requirement 4 (Drop-on-all-paths): the emitter flushes the sub-phase samples at
+/// teardown on EVERY exit — a cooperative cancel (client disconnect), a merge
+/// error, and a panic ALL reduce to the emitter's `Drop` running with whatever
+/// nanos accumulated (unlike `PhaseTimer`, which every other e2e test drives via a
+/// fully drained stream). This exercises that `Drop` path DIRECTLY — accumulate
+/// sub-phase time, then drop the emitter WITHOUT any explicit emit — and asserts
+/// the samples still land through the real observability surface. It is
+/// deterministic (no merge-task cancel-timing race): the emitter's `Drop` is the
+/// single emission point the cancel/error/panic paths all funnel through.
+#[test]
+#[serial]
+fn emitter_drop_emits_samples_on_any_exit_path() {
+    use cqlite_core::observability::{StreamSubPhase, StreamSubPhaseTimings};
+
+    let mc = testing::metrics_capture();
+    mc.reset();
+    {
+        // Simulate a merge that accrued some cold-fault + merge time and then
+        // exited via cancel/error/panic — i.e. the emitter is dropped WITHOUT the
+        // stream being drained.
+        let timings = std::sync::Arc::new(StreamSubPhaseTimings::default());
+        timings.add_nanos(StreamSubPhase::Merge, 7_000);
+        timings.add_nanos(StreamSubPhase::ColdFault, 3_000);
+        let _emitter = cqlite_flight::obs::StreamSubPhaseEmitter::new(timings);
+        // `_emitter` drops HERE at end of scope — the only emission point; no
+        // explicit emit, mirroring the cancel/error/panic teardown.
+    }
+    let subs = subphase_points(&mc.flush_and_collect());
+    assert!(
+        subs.contains_key(PHASE_STREAM_MERGE) && subs.contains_key(PHASE_STREAM_COLD_FAULT),
+        "the emitter's Drop must flush accumulated sub-phase samples on ANY exit path \
+         (cancel/error/panic), not only a drained do_get — got {:?}",
+        subs.keys().collect::<Vec<_>>()
+    );
+    // A sub-phase that accrued nothing still emits no sample (never a fabricated
+    // zero) — the emission is per-bucket, not all-or-nothing.
+    assert!(
+        !subs.contains_key(PHASE_STREAM_DECOMPRESS),
+        "an un-entered sub-phase must record no sample even on the Drop path, got {:?}",
+        subs.keys().collect::<Vec<_>>()
+    );
+}
+
 /// Requirement 1, scenario 3: an uncompressed-fixture run never invokes
 /// decompression, so it records NO `stream_decompress` sample — while the other
 /// sub-phases still record theirs.
@@ -447,7 +491,7 @@ fn uncompressed_do_get_records_no_decompress_subphase() {
 
     let subs = subphase_points(&metrics);
     assert!(
-        !subs.contains_key("stream_decompress"),
+        !subs.contains_key(PHASE_STREAM_DECOMPRESS),
         "an uncompressed fixture (no CompressionInfo.db) must record NO stream_decompress \
          sample, got {:?}",
         subs.keys().collect::<Vec<_>>()
@@ -457,14 +501,18 @@ fn uncompressed_do_get_records_no_decompress_subphase() {
     // case (CQLite's own write-surface output). This is the assertion that keeps
     // M1's coverage hole from being invisible.
     assert!(
-        subs.contains_key("stream_cold_fault"),
+        subs.contains_key(PHASE_STREAM_COLD_FAULT),
         "an uncompressed do_get must STILL record stream_cold_fault (the body page-in \
          is timed on the uncompressed read path too), got {:?}",
         subs.keys().collect::<Vec<_>>()
     );
     // The other data-plane sub-phases still record on the merge-consumer thread:
     // merge (reconcile/materialize), encode (Arrow), and grpc-write (egress send).
-    for phase in ["stream_merge", "stream_encode", "stream_grpc_write"] {
+    for phase in [
+        PHASE_STREAM_MERGE,
+        PHASE_STREAM_ENCODE,
+        PHASE_STREAM_GRPC_WRITE,
+    ] {
         assert!(
             subs.contains_key(phase),
             "uncompressed do_get must still record {phase}, got {:?}",
@@ -505,10 +553,22 @@ fn slow_client_inflates_grpc_write_but_not_cold_fault() {
     ));
     let stalled = subphase_points(&mc.flush_and_collect());
 
-    let prompt_grpc = prompt.get("stream_grpc_write").map(|p| p.0).unwrap_or(0.0);
-    let stalled_grpc = stalled.get("stream_grpc_write").map(|p| p.0).unwrap_or(0.0);
-    let prompt_cold = prompt.get("stream_cold_fault").map(|p| p.0).unwrap_or(0.0);
-    let stalled_cold = stalled.get("stream_cold_fault").map(|p| p.0).unwrap_or(0.0);
+    let prompt_grpc = prompt
+        .get(PHASE_STREAM_GRPC_WRITE)
+        .map(|p| p.0)
+        .unwrap_or(0.0);
+    let stalled_grpc = stalled
+        .get(PHASE_STREAM_GRPC_WRITE)
+        .map(|p| p.0)
+        .unwrap_or(0.0);
+    let prompt_cold = prompt
+        .get(PHASE_STREAM_COLD_FAULT)
+        .map(|p| p.0)
+        .unwrap_or(0.0);
+    let stalled_cold = stalled
+        .get(PHASE_STREAM_COLD_FAULT)
+        .map(|p| p.0)
+        .unwrap_or(0.0);
 
     // The stalled run's egress-write time is materially larger (the deliberate
     // 40ms-per-batch park dominates any scheduling noise). Comparing two METRIC
@@ -567,8 +627,8 @@ fn cold_and_warm_runs_both_emit_a_cold_fault_sample() {
     rt.block_on(do_get_drain_all(&svc_warm, lz4_ticket(None)));
     let warm = subphase_points(&mc.flush_and_collect());
 
-    let cold_cf = cold.get("stream_cold_fault").map(|p| p.0);
-    let warm_cf = warm.get("stream_cold_fault").map(|p| p.0);
+    let cold_cf = cold.get(PHASE_STREAM_COLD_FAULT).map(|p| p.0);
+    let warm_cf = warm.get(PHASE_STREAM_COLD_FAULT).map(|p| p.0);
     assert!(
         cold_cf.is_some() && warm_cf.is_some(),
         "both the cold and warm runs must emit a stream_cold_fault sample so the \
