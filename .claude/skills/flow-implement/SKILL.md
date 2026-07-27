@@ -42,9 +42,13 @@ never gate stdout or review churn.
    Set the Project `Status=In Progress` too. **Run the `flow-board` detection snippet FIRST** — it does
    `gh auth switch --user "$project_account"` so the project-capable account is active (the EMU flip
    otherwise makes `gh project item-edit` fail and the board write degrade to labels SILENTLY). If
-   `have_project=1`, `gh project item-edit ... Status=In Progress`; if `have_project=0`, the label above
-   is the fallback AND you MUST print the loud `⚠️ board unavailable …` warning so the owner knows the
-   board will not reflect this claim.
+   `have_project=1`, set the board Status (`--field` is NOT a gh flag — only `--field-id`):
+   ```bash
+   gh project item-edit --id <item-id> --project-id <project-id> \
+     --field-id <status-field-id> --single-select-option-id <In-Progress-option-id>
+   ```
+   If `have_project=0`, the `--remove-label` cleanup above is all you can do AND you MUST print the loud
+   `⚠️ board unavailable …` warning so the owner knows the board will not reflect this claim.
 2. **Ensure the worktree exists — and that you hold the claim.** Design-driven issues already hold the
    claim ref + pushed branch (acquired in `flow-activate`); reuse them. Oracle-driven issues skip
    `flow-activate`, so they run the claim protocol (D2) HERE: `claim.sh` is the lock (the slugless
@@ -56,7 +60,7 @@ never gate stdout or review churn.
    if git -C <repo-root> worktree list | grep -q "$wt"; then
      # design-driven: claim ref + worktree already exist (from flow-activate).
      # Implementation starting IS a stage transition — refresh the heartbeat (#2089).
-     scripts/flow/claim-heartbeat.sh beat <N>
+     bash scripts/flow/claim-heartbeat.sh beat <N>
    else
      # oracle-driven: acquire the claim ref now. claim.sh does the atomic push +
      # re-read; a UNIQUE root commit means a different-slug or identical-base
@@ -82,7 +86,7 @@ never gate stdout or review churn.
      git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
      git -C "$wt" push -u origin "issue-<N>-<slug>"   # PR head — NOT the lock
      gh issue edit <N> --add-assignee @me
-     scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes the claim heartbeat (#2089)
+     bash scripts/flow/claim-heartbeat.sh beat <N>   # FIRST beat — establishes the claim heartbeat (#2089)
    fi
    ```
 3. **Test data.** Worktrees lack the gitignored `Data.db` binaries — run the gate and tests with
@@ -101,7 +105,7 @@ never gate stdout or review churn.
       gate stdout into a persistent context):
       ```bash
       AGENT_GATE_SUMMARY_FILE=/tmp/lite-<N>.txt \
-        scripts/agent-gate.sh --lite > lite-<N>.log 2>&1 < /dev/null
+        bash scripts/agent-gate.sh --lite > lite-<N>.log 2>&1 < /dev/null
       cat /tmp/lite-<N>.txt   # the complete LITE block (default recovery: .agent-gate-lite-summary.txt)
       ```
       **Reader contract (#2874):** the exit code is primary, and before trusting the block's
@@ -112,15 +116,20 @@ never gate stdout or review churn.
       `RESULT: INCOMPLETE (gate did not finish)` at launch, so if you poll rather than wait for exit,
       use `grep -qE 'RESULT: (PASS|FAIL)'` — a bare `grep -q` on the bare `RESULT:` token matches that **liveness
       placeholder** and would read a just-launched run as a finished one.
-      Lite runs fmt + file-size + FULL-workspace clippy + blast-radius-scoped tests (~1-5 min). It is the
+      Lite's components are exactly `file-size fmt clippy roborev-lints scoped-tests` (the
+      `scripts/agent-gate.sh` `LITE_COMPONENTS` array), where clippy is **per-package scoped** (#1844) and
+      `scoped-tests` is blast-radius (touched package `--lib` + the diff's new `--test` targets). It is the
       FAST ITERATION gate, NOT the gate of record; its distinct `MODE: lite` block must NEVER be pasted as
       the full SUMMARY.
    3. If lite FAILs, fix and go to step 2. Repeat until lite is PASS and the change is complete.
    Do NOT run the full `scripts/agent-gate.sh` during the fix-round loop — that is the `flow-closer`'s single
    gate of record (step 7).
 5. **Review-first — DEFAULT, BEFORE the first full gate (issues #2086/#2087/#2088).** On the **lite-green**
-   diff, run `rust-reviewer` (explicit `model: opus`) **and** roborev
-   (`/roborev-review-branch --base origin/main`, machine-configured agent) NOW — before any full gate — so
+   diff, run `rust-reviewer` (explicit `model: opus`) **and** roborev NOW — there is **no
+   `/roborev-review-branch` slash command**; run the CLI and pass **BOTH** `--agent` and `--model` (#2433,
+   or codex hard-400s on the config-pinned `opus`):
+   `roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`
+   — before any full gate — so
    the ONE full gate certifies already-reviewed code. **Skip review-first ONLY for a genuinely mechanical
    diff:** no `pub`-item change AND a single call site AND no new surface (the narrow inverse of the old
    conditional). When in doubt, review.
@@ -143,18 +152,23 @@ never gate stdout or review churn.
    ```bash
    git -C <worktree> push -u origin issue-<N>-<slug>
    gh pr create --base main --head issue-<N>-<slug> --fill   # ensure body has "Closes #<N>"
-   scripts/flow/claim-heartbeat.sh beat <N>                  # PR-open stage transition
+   bash scripts/flow/claim-heartbeat.sh beat <N>             # PR-open stage transition
    # Board → In Review fires via GitHub's "Pull request linked to issue" built-in. Belt-and-suspenders:
-   # run the flow-board detection snippet first (switches to the project-capable account), then
-   # gh project item-edit ... Status=In Review when have_project=1. Do NOT write a status:in-review
+   # run the flow-board detection snippet first (switches to the project-capable account), then set the
+   # board Status when have_project=1 (`--field` is NOT a gh flag — only --field-id):
+   #   gh project item-edit --id <item-id> --project-id <project-id> \
+   #     --field-id <status-field-id> --single-select-option-id <In-Review-option-id>
+   # Do NOT write a status:in-review
    # label — the board→label mirror (#2855) derives it from the board Status; if have_project=0 print
    # the loud ⚠️ board-unavailable warning so the owner knows the board (and thus the mirror) is stale.
    ```
    **GitHub API resilience:** `gh pr create` / `gh issue comment` ride the **GraphQL** bucket, which
    throttles **separately** from REST (each 5k pts/hr, independent per-bucket windows). If GraphQL is
    exhausted, fall back to `gh api` REST: PR create → `repos/OWNER/REPO/pulls`, comment →
-   `repos/OWNER/REPO/issues/N/comments`, merge → `repos/OWNER/REPO/pulls/N/merge`. Never stall a pipeline
-   step on a single exhausted bucket.
+   `repos/OWNER/REPO/issues/N/comments`. Never stall a pipeline step on a single exhausted bucket.
+   **MERGE HAS NO REST FALLBACK — `PUT repos/OWNER/REPO/pulls/N/merge` is FORBIDDEN**: it merges
+   immediately, bypassing the required-check wait branch protection exists to enforce (#2433,
+   `enforce_admins=true`). `gh pr merge --auto` is set-once/idempotent — on a throttle, sleep and retry it.
 7. **Hand the endgame to `flow-closer` — the disposable per-issue closer (issue #2084).** Spawn
    `flow-closer` (explicit `model: opus`) once, passing `#N`, the worktree/branch, routing, the OpenSpec
    `<slug>` (design only), the open PR number, and `CQLITE_DATASETS_ROOT`. It owns the terminal stages in
