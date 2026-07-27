@@ -373,13 +373,56 @@ The CRC feed mirrors `FBUtilities.updateChecksumInt` (big-endian words, `.../mod
 > (see above). The related "Full Cassandra TOC Structure (Not Implemented)" claim has been
 > removed for the same reason.
 
-The STATS body is version-gated in the writer:
-`build_stats_component` for BIG (`nb`/`oa`) and `build_stats_component_da` for BTI (`da`),
-which adds the covered-clustering `Slice`, unsigned deletion times, key range and
-token-space coverage (`cqlite-core/src/storage/sstable/writer/stats_writer/components.rs:100-320`).
-The unset local-deletion-time sentinel written there follows the version rule from
-*Local deletion time and the live-cell sentinel*: `Integer.MAX_VALUE` for `nb`,
-`0xFFFFFFFF` for `da`.
+The STATS body has two builders in the writer:
+`build_stats_component` (the legacy / `hasUIntDeletionTime() == false` layout) and
+`build_stats_component_da` (the BtiFormat layout, which adds the covered-clustering `Slice`,
+**unsigned** deletion times, key range and token-space coverage) —
+`cqlite-core/src/storage/sstable/writer/stats_writer/components.rs:99-320`.
+
+**Which builder runs, precisely.** The dispatch is on the writer's `bti: bool` flag, not on a
+version string: `if self.bti { build_stats_component_da } else { build_stats_component }`
+(`.../stats_writer/mod.rs:150-157`). That flag is `false` for `StatisticsWriter::new` and
+`true` for `new_bti` (`.../mod.rs:107-122`). The two sentinels each builder emits are:
+
+| Builder | Unset local-deletion-time written | Site |
+|---|---|---|
+| `build_stats_component` (non-BTI) | `Integer.MAX_VALUE` (`i32::MAX`) | `.../components.rs:120-134` |
+| `build_stats_component_da` (BTI) | `0xFFFFFFFF` | `.../components.rs:251-262` |
+
+**Reconciliation with the version rule (no `oa` case exists on CQLite's write path).** Per
+*Local deletion time and the live-cell sentinel*, `Integer.MAX_VALUE` is the **`na`/`nb`**
+disk sentinel and `0xFFFFFFFF` is the **`oa`/`da`** one. CQLite's writer emits exactly two
+descriptors — `SSTableFormat::Big → "nb"` and `SSTableFormat::Bti → "da"`
+(`cqlite-core/src/storage/sstable/writer/finish.rs:381-384`) — so the mapping above is
+correct *for everything CQLite actually writes*: `nb` gets `Integer.MAX_VALUE`, `da` gets
+`0xFFFFFFFF`. **`oa` is never produced by the writer at all**, so there is no "`oa` through
+the legacy builder" behavior to describe.
+
+> **Correction notice:** an earlier revision of this section described the legacy builder as
+> covering "BIG (`nb`/`oa`)" while simultaneously claiming it "follows the version rule".
+> Those two statements contradict each other — `oa` has `hasUIntDeletionTime() == true`
+> ([`BigFormat.java:409`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java)),
+> so an `oa` STATS body routed through the legacy `Integer.MAX_VALUE` builder would be
+> **wrong**, not version-following. The resolution is that CQLite's writer has no `oa` output
+> at all; the `nb`/`oa` grouping was simply inaccurate.
+
+> **CQLite implementation note (a latent hazard, not current behavior).** Because the
+> builder is selected by a format *boolean* rather than by a version gate
+> (`BigVersionGates::has_uint_deletion_time`), the correct sentinel is only a side effect of
+> `SSTableFormat::Big` hard-coding `"nb"`. If a BIG `oa` write path were ever added without
+> re-gating this dispatch, `oa` would silently receive the `na`/`nb` sentinel. Two stale
+> comments still assert exactly that incorrect outcome — `.../stats_writer/mod.rs:151-153`
+> ("BIG (`nb`/`oa`) emits the legacy layout") and the `StatisticsWriter::new` doc at
+> `.../stats_writer/mod.rs:111` ("the legacy `nb`/`oa` BIG layout").
+
+**Read side:** `oa` here is a **BIG** version; it is not a BTI version. The only BTI version
+CQLite reads is `da` — `BtiVersionGates::from_version` returns
+`Error::UnsupportedVersion` for anything else
+(`cqlite-core/src/storage/sstable/version_gate/bti.rs:55-61`), so nothing in this section
+should be read as implying an `oa` BTI SSTable is readable. On the BIG side the supported
+allowlist is exactly `{na, nb, oa}`
+(`cqlite-core/src/storage/sstable/version_gate/big.rs:99-138`), and `oa` reads use the
+unsigned-deletion-time branch via `has_uint_deletion_time`.
 
 ### Delta Encoding Baselines
 

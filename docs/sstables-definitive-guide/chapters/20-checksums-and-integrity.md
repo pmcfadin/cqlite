@@ -181,11 +181,15 @@ compressor name, the `otherOptions` map, `chunkLength`, `maxCompressedLength`, t
 uncompressed `dataLength`, the chunk count, and then the chunk **offsets**
 ([`CompressionMetadata.java:375-392`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java)).
 The CRCs for a compressed table are stored **inline in `Data.db`**, immediately after each
-compressed chunk (see *NB Format: Trailing Chunk CRCs*). For an uncompressed table they live
+compressed chunk (see [*Compressed Data.db: Trailing Chunk
+CRCs*](#compressed-datadb-trailing-chunk-crcs) above). For an uncompressed table they live
 in the separate `CRC.db` component. The two are mutually exclusive, which follows directly
 from `DataComponent.buildWriter` choosing `CompressedSequentialWriter` (inline) or
 `ChecksummedSequentialWriter` (`CRC.db`)
-([`DataComponent.java:43-60`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/DataComponent.java)).
+([`DataComponent.java:36-61`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/DataComponent.java)).
+That choice is made on `metadata.params.compression.isEnabled()` alone, so the exclusivity
+holds for **BIG and BTI alike** — see the `CRC.db` precondition under *Computing Checksums
+Incrementally While Writing*.
 
 Readers should validate the chunk CRC before decompressing. Note the precondition on
 "always": whether a given read validates is governed by `crc_check_chance` — the check runs
@@ -269,15 +273,43 @@ assembles `CRC.db` from `stream.chunk_crcs` via `assemble_crc_bytes`
 
 Preconditions and exceptions worth stating explicitly:
 
-- **Uncompressed BIG only.** `CRC.db` is written only when the output is not BTI, matching
-  Cassandra: `DataComponent.buildWriter` hands `Components.CRC` to
-  `ChecksummedSequentialWriter` on the uncompressed branch and nothing equivalent on the
-  compressed branch
-  ([`DataComponent.java:43-60`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/DataComponent.java)).
-  BTI (`da`) fixtures written by Cassandra carry no `CRC.db`
-  (`cqlite-core/src/storage/sstable/writer/crc_writer.rs:1-8`;
-  gate in `finish.rs:205-207`). CQLite's production write surface is uncompressed-only
-  (issue #1406), so the compressed inline-CRC path is not exercised by its writer.
+- **Format truth: `CRC.db` exists ⟺ the data writer is uncompressed — for *any* format,
+  BTI included.** It is a **compression gate, not a BIG-vs-BTI gate.** Two independent
+  citations at `cassandra-5.0.8`:
+  - `SSTableWriter.Builder.addDefaultComponents` branches on
+    `params.compression.isEnabled()` alone: the compressed arm adds
+    `Components.COMPRESSION_INFO`, the `else` arm adds `Components.CRC`. There is no format
+    test anywhere in the branch, and the method is inherited by the BTI writer builder
+    ([`SSTableWriter.java:483-497`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableWriter.java)).
+  - `DataComponent.buildWriter` is likewise **format-agnostic** — it takes a `Descriptor`
+    plus `TableMetadata` and picks `CompressedSequentialWriter` (inline chunk CRCs,
+    `CompressionInfo.db`) or `ChecksummedSequentialWriter` (`CRC.db`) purely on
+    `metadata.params.compression.isEnabled()`
+    ([`DataComponent.java:36-61`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/DataComponent.java)).
+
+  Confirming this from the component registry: `BtiFormat.Components.ALL_COMPONENTS`
+  explicitly lists `CRC` alongside `COMPRESSION_INFO`
+  ([`BtiFormat.java:100-108`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java)).
+  So a Cassandra-written **uncompressed BTI (`da`) SSTable does carry a `CRC.db`**, and a
+  **compressed BIG (`nb`) SSTable does not**. The correct statement of the exclusivity is
+  compressed-inline-CRCs XOR `CRC.db`, orthogonal to BIG/BTI.
+
+- **CQLITE IMPLEMENTATION DETAIL (not format authority): CQLite's writer gates `CRC.db` on
+  `is_bti`.** `finish.rs:205-207` skips `CRC.db` for any BTI output
+  (`let crc_path = if is_bti { None } else { … }`), and the module doc asserts the same
+  (`cqlite-core/src/storage/sstable/writer/crc_writer.rs:1-8`). Because CQLite's production
+  write surface is uncompressed-only (issue #1406), that gate is **narrower than
+  Cassandra's rule**: an uncompressed `da` written by CQLite omits a `CRC.db` that Cassandra
+  would have emitted. This is a documented CQLite behavior, not a format property.
+
+  **The supporting observation is confounded evidence.** The note that "BTI (`da`) fixtures
+  written by Cassandra carry no `CRC.db`" is true of the fixtures but proves nothing about
+  the gate: **every** `test-data/datasets/sstables/test_da/*` fixture ships a
+  `CompressionInfo.db`, i.e. all four are *compressed*. A compressed SSTable has no `CRC.db`
+  under either hypothesis, so those fixtures **cannot distinguish a BTI gate from a
+  compression gate**. Distinguishing them requires an *uncompressed* Cassandra-written `da`
+  fixture (`WITH compression = {'enabled': false}`), which the corpus does not currently
+  contain. Per the citations above, Cassandra's rule is the compression gate.
 - **Empty `Data.db` is the one recomputation.** When no partition was streamed, there are no
   accumulated bytes, so `finish` computes the digest over the just-written empty file
   (`finish.rs:185-189`); `CRC32` of zero bytes is `0`.
