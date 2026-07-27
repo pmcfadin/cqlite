@@ -66,6 +66,16 @@ be NUL-framed so that a path containing a newline cannot forge a manifest line.
 - **AND** removing an untracked file that was PRESENT at the baseline capture SHALL change the
   digest, which is the property that makes an untracked-file deletion mid-run detectable
 
+#### Scenario: a manifest truncated after the header is rejected, not compared
+- **GIVEN** a manifest write is truncated part-way (for example `$TMPDIR` fills during a long run),
+  leaving a file whose surviving prefix is byte-identical to another capture's prefix
+- **WHEN** the capture validates its own output
+- **THEN** the manifest SHALL carry a trailing record stating the number of body records, and a
+  manifest whose first record is not the header, whose last record is not that trailer, or whose
+  trailer count disagrees with the records actually read SHALL be REJECTED
+- **AND** the two truncated captures SHALL therefore never compare equal, so a mutation to a path
+  recorded after the truncation point cannot pass as `tree-integrity: PASS`
+
 #### Scenario: a capture that cannot be validated fails closed instead of comparing equal
 - **GIVEN** the hashing tool exits non-zero, or the manifest write fails or is truncated, so the
   capture produces no usable digest
@@ -115,6 +125,19 @@ The SUMMARY block SHALL carry a `tree-start:` line (HEAD short-sha, dirty flag, 
 The synthetic emission modes (`--emit-summary-selftest`, the `--lite` aggregation self-test) SHALL
 stamp a `selftest` identity so the block shape is uniform without a git dependency. No line added by
 this capability SHALL contain the token `RESULT:`.
+
+The block's existing `commit:` line — its short sha and its `dirty:` flag — SHALL be derived from
+the VERIFIED terminal capture, never from a fresh `git rev-parse`/`git status` executed at emit
+time. When no validated terminal capture exists, the line SHALL say so explicitly rather than name a
+sha, and the run SHALL already be failing closed.
+
+#### Scenario: a HEAD move between the terminal capture and the emit is never certified
+- **GIVEN** the terminal capture has been taken and verified
+- **WHEN** HEAD moves before the block is written
+- **THEN** the emitted `commit:` SHALL name the sha the capture verified, SHALL NOT name the moved
+  HEAD, and the `dirty:` flag SHALL be the capture's — no block SHALL ever certify a sha the guard
+  did not verify
+- **AND** when no validated terminal capture exists, `commit:` SHALL read `unverified`
 
 #### Scenario: a full-gate summary carries tree-start, tree-end and tree-integrity
 - **WHEN** a full gate emits its terminal SUMMARY
@@ -198,6 +221,15 @@ is established and never emit a certification of a real tree).
 - **AND** `--lite` and `--delta`, which never queue and exit before that point, SHALL keep the
   capture taken before their own first component
 
+#### Scenario: a transient git failure at the slot grant does not disarm a live guard
+- **GIVEN** a start capture has already succeeded, so the guard is armed
+- **WHEN** the re-capture at the slot grant cannot consult git at all (a concurrent prune/gc, a
+  stuttering network mount)
+- **THEN** the run SHALL RETAIN the pre-queue capture and stay guarded — it SHALL NOT be downgraded
+  to `tree-integrity: SKIP`, which is reserved for the FIRST capture finding no git worktree
+- **AND** the retained capture SHALL still detect a real mid-run mutation, and the retention SHALL be
+  disclosed on the `tree-start:` line
+
 #### Scenario: helper modes remain exempt and unchanged
 - **WHEN** `--list`, `--python-build-verify` or the concurrency-stub mode is invoked
 - **THEN** no tree-identity capture SHALL be required and their behaviour and output SHALL be unchanged
@@ -230,6 +262,8 @@ documented as a stated limitation covered by the existing `datasets:` and `ci-pi
 - **THEN** the path SHALL be canonicalized before comparison so the carve-out matches, because the
   gate creates that file only AFTER the start capture and a missed carve-out is a guaranteed false FAIL
 - **AND** a path resolving outside the repository root SHALL simply not be excluded
+- **AND** canonicalization SHALL succeed when the pinned path's parent directory does not exist yet,
+  so the carve-out cannot be silently disarmed by a directory the gate has not created
 
 #### Scenario: a tab inside a changed path cannot corrupt the lockfile classification
 - **WHEN** a changed path contains a TAB character (for example an untracked file whose name begins
@@ -270,8 +304,11 @@ whenever it is set to a non-default value or whenever the size+mtime fallback is
 #### Scenario: the hash cap is stamped when non-default or when the fallback is used
 - **WHEN** `AGENT_GATE_TREE_HASH_CAP_BYTES` is set to a non-default value, or any untracked file
   exceeds the cap and is recorded by size and mtime
-- **THEN** the SUMMARY SHALL carry a `tree-hash-cap:` line naming the cap and the number of files
-  recorded by the fallback
+- **THEN** the SUMMARY SHALL carry a `tree-hash-cap:` line naming the cap and the number of FILES
+  recorded by the fallback — a single oversized file present for the whole run SHALL be reported
+  once, however many captures the run took
+- **AND** every emitted block SHALL carry that line when it applies, including the block published
+  by a component-boundary FAIL, where the capture is weakest and the disclosure matters most
 
 #### Scenario: the hash cap cannot suppress a detected mutation
 - **WHEN** the cap is set arbitrarily low and a tracked file is edited mid-run

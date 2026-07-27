@@ -405,17 +405,22 @@ tree-integrity: FAIL (tree-mutated-midrun; head <a>→<b>; changed: <paths…> (
 RESULT: FAIL
 ```
 
-Why it exists: `commit:`/`dirty:` are stamped at *emit* time, so a worktree edited while
-the gate ran used to emit a block attributing **mixed-tree results to the final sha** —
-indistinguishable from a real certification. This is reachable without breaking the
-one-worker rule (#1930): a lead legitimately runs a closer (gating) and a fixer
-(editing) that overlap on one worktree.
+Why it exists: `commit:`/`dirty:` used to be stamped by a fresh `git rev-parse` /
+`git status` at *emit* time, so a worktree edited while the gate ran emitted a block
+attributing **mixed-tree results to the final sha** — indistinguishable from a real
+certification. This is reachable without breaking the one-worker rule (#1930): a lead
+legitimately runs a closer (gating) and a fixer (editing) that overlap on one worktree.
 
 Contract:
 
 - **A closer MUST read `tree-integrity:` alongside `RESULT:`** before trusting a
   summary. `RESULT: PASS` with anything other than `tree-integrity: PASS` cannot occur;
   a block whose `tree-start:`/`tree-end:` digests differ is not a certification.
+- **The `commit:` line is derived from the verified terminal capture**, never from a
+  fresh git read at emit time. The only sha a block can name is one a validated capture
+  observed — so a HEAD move landing between the capture and the emit can no longer be
+  certified. When no validated capture exists, the line reads
+  `commit: unverified … dirty: unverified` and the run is already FAIL-closed.
 - The guard covers the full gate, `--lite`, `--delta` and `--only`. Only `--list`,
   `--python-build-verify`, the concurrency stub and the self-test emission modes are
   exempt (they stamp a synthetic `selftest` identity).
