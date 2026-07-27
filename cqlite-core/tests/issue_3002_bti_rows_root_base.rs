@@ -49,11 +49,13 @@ use std::path::{Path, PathBuf};
 /// Relative path of the wide-partition BTI fixture directory.
 const WIDE_DIR: &str = "sstables/test_da/wide_table-9099a7c06c1811f19864870fb8444786";
 
-/// The fixture's three `TrieIndexEntry` offsets (`RowsOffset` from Partitions.db)
-/// and the Cassandra-true trie root each one resolves to: `RowsOffset + 2 +
-/// key_length + root_delta`, with `key_length = 4` and `root_delta = -10` for all
-/// three. The pre-fix formula produced 236/488/742 (each exactly 2 lower).
-const ROWS_OFFSET_AND_ROOT: [(usize, usize); 3] = [(242, 238), (494, 490), (748, 744)];
+/// The fixture's three partitions as `(pk, RowsOffset, trie_root)`: the
+/// `RowsOffset` each `pk` resolves to in Partitions.db (re-verified below, not
+/// trusted), and the Cassandra-true trie root that entry resolves to —
+/// `RowsOffset + 2 + key_length + root_delta`, with `key_length = 4` and
+/// `root_delta = -10` for all three. The pre-fix formula produced 236/488/742
+/// (each exactly 2 lower).
+const PARTITIONS: [(i32, usize, usize); 3] = [(1, 242, 238), (2, 494, 490), (3, 748, 744)];
 
 /// `TrieNode` ordinal for `SINGLE_8` (cassandra-5.0.8 `TrieNode.java`): a 1-byte
 /// transition + 1-byte backward delta, and — unlike `SINGLE_NOPAYLOAD_4`
@@ -148,9 +150,8 @@ fn rows_db_root_base_includes_short_length_prefix() {
         return;
     };
 
-    for (rows_offset, expected_root) in ROWS_OFFSET_AND_ROOT {
+    for (pk, rows_offset, expected_root) in PARTITIONS {
         // The RowsOffset is authoritative from Partitions.db, not hardcoded trust.
-        let pk = ((rows_offset - 242) / 252 + 1) as i32; // 242→1, 494→2, 748→3
         let mut cur = Cursor::new(pdb.clone());
         let loc = lookup_raw_key_in_bti_partitions_db(&mut cur, &pk.to_be_bytes())
             .expect("Partitions.db lookup must succeed")
@@ -247,7 +248,7 @@ fn rows_db_root_base_includes_short_length_prefix() {
             "pk={pk}: the second separator must be the OSS50 image of ck=8 \
              (40 80 00 00 08), i.e. WITH the leading NEXT_COMPONENT byte"
         );
-        if rows_offset == 242 {
+        if pk == 1 {
             assert_eq!(
                 entries[1].1.data_offset, 16_512,
                 "pk=1: block 1 starts at within-partition offset 16512"
@@ -284,7 +285,7 @@ fn each_fix_alone_regresses_the_read_path() {
     let Some((rdb, _pdb)) = wide_components() else {
         return;
     };
-    let root = resolve_rows_db_entry(&rdb, 242)
+    let root = resolve_rows_db_entry(&rdb, PARTITIONS[0].1)
         .expect("resolve pk=1")
         .trie_root;
     // The pre-#3002 base was exactly 2 bytes low (it omitted the u16 short-length
@@ -380,7 +381,7 @@ fn block_zero_is_a_stored_floor_and_implicit_first_is_preserved() {
     let Some((rdb, _pdb)) = wide_components() else {
         return;
     };
-    let root = resolve_rows_db_entry(&rdb, 242)
+    let root = resolve_rows_db_entry(&rdb, PARTITIONS[0].1)
         .expect("resolve pk=1")
         .trie_root;
 
