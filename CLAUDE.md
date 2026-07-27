@@ -365,6 +365,23 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   (`Backlog/Ready/In Progress/In Review/Done`); exactly one `P0`–`P3` per issue. New issues auto-land
   at `Backlog`. Empty Ready column = no work ready → STOP. Board unreachable (auth/scope) → STOP and
   fix auth; never label-dispatch.
+- **How to READ the board — always `--query`, never an unfiltered page (#3055)**: the fresh board read
+  the claim protocol requires is a **server-side filtered** `item-list`. This board is 900+ items, and
+  an UNFILTERED `gh project item-list` **silently truncates** at the page limit — it returns a partial
+  column with no error, which has produced wrong "nothing is Ready" / "issue not on board" reads.
+  Filtered, it is exact, ~1.6 s, and cheaper than the GraphQL `projectItems` path:
+
+  ```bash
+  gh project item-list 1 --owner pmcfadin --query "status:Ready"         --format json -L 100 \
+    --jq '.items[]|"\(.content.number)\t\(.content.title)"'
+  gh project item-list 1 --owner pmcfadin --query 'status:"In Progress"' --format json -L 100
+  gh project item-list 1 --owner pmcfadin --query 'status:"In Review"'   --format json -L 100
+  ```
+
+  `--query` takes GitHub Projects filter syntax (`-status:Done`, `assignee:<login>`, combinations);
+  quote multi-word option names. Do NOT reach for GraphQL to work around truncation — filter instead.
+  Corollary: a board read and the `status:*` labels **will disagree** by design (below) — when they do,
+  the filtered board read wins, always.
 - **`status:*` labels = an ENFORCED read-mirror of board Status, for DISCOVERY only (#2855)**: the
   `project-board-sync.yml` workflow is the *single writer*, deriving each OPEN issue's label from its
   board Status (Ready→`status:ready`, In Progress→`status:in-progress`, In Review→`status:in-review`,
@@ -373,8 +390,12 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   (`gh issue list --state open --label status:ready --json number,title` — no issue bodies, no board
   pagination). It is NEVER the dispatch/claim authority: it is eventually-consistent (≤30-min lag), so
   it only NARROWS candidates — the claim ref + a fresh board read at claim time remain the sole
-  double-work arbiter. flow-* skills no longer write the board-derived labels (they set board Status
-  only; the mirror follows); `status:spec-review`/`status:addressing` stay transient skill-managed
+  double-work arbiter. **The lag is real and routinely bites**: measured 2026-07-27, the label said
+  `status:ready` for three issues the board had at In Progress / In Review / In Review, while two
+  freshly-promoted P0s had no label yet — so a label-only read simultaneously offered work already
+  three stages in AND hid the two highest-priority items. Reporting board state from labels is a
+  correctness bug, not a shortcut. flow-* skills no longer write the board-derived labels (they set
+  board Status only; the mirror follows); `status:spec-review`/`status:addressing` stay transient skill-managed
   sub-markers the mirror does not touch.
 - **Claim protocol (cross-machine, #2665)**: THE lock is the slugless fixed-name ref
   `refs/claims/issue-<N>`, acquired via `bash scripts/flow/claim.sh claim <N>` — an atomic unique
