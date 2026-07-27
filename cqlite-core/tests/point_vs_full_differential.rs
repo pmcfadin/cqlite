@@ -432,13 +432,18 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
         ));
     }
 
-    // Single-key `=` equality for every discovered partition.
+    // Single-key `=` equality for every discovered partition. The agreed row count is
+    // RETAINED per key: it is exactly the reference the clustering-slice block below
+    // needs, and re-running the same full-partition query there would decode every
+    // wide partition twice more per run (2 paths × ~600 KiB for `test_da.wide_table`).
+    let mut partition_rows_by_key: BTreeMap<i64, usize> = BTreeMap::new();
     for k in &keys {
         let query = format!(
             "SELECT * FROM {}.{} WHERE {} = {}",
             case.keyspace, case.table, case.pk_column, k
         );
-        assert_point_full_equal(&point_db, &full_db, &query).await?;
+        let rows = assert_point_full_equal(&point_db, &full_db, &query).await?;
+        partition_rows_by_key.insert(*k, rows);
     }
 
     // Within-partition clustering slices (issue #3002): for a BTI wide partition the
@@ -446,42 +451,41 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
     // full path decodes the whole partition and filters, so the two paths must still
     // agree row-for-row, value-for-value, in order. Each slice is ALSO anchored to its
     // expected row count, so neither a both-empty nor a both-unnarrowed result can
-    // pass vacuously.
-    for k in &keys {
-        if case.clustering_slice_predicates.is_empty() {
-            break;
-        }
-        // This partition's full row count, the reference every slice must be strictly
-        // smaller than (re-measured per key rather than assumed uniform).
-        let partition_rows = assert_point_full_equal(
-            &point_db,
-            &full_db,
-            &format!(
-                "SELECT * FROM {}.{} WHERE {} = {}",
-                case.keyspace, case.table, case.pk_column, k
-            ),
-        )
-        .await?;
-        for (predicate, expected_rows) in case.clustering_slice_predicates {
-            let query = format!(
-                "SELECT * FROM {}.{} WHERE {} = {} AND {}",
-                case.keyspace, case.table, case.pk_column, k, predicate
-            );
-            let got = assert_point_full_equal(&point_db, &full_db, &query).await?;
-            if got != *expected_rows {
-                return Err(format!(
-                    "case {}.{}: `{query}` returned {got} rows on BOTH paths but the slice \
-                     must yield exactly {expected_rows} — equal-but-wrong is still wrong",
+    // pass vacuously. The predicate set is a per-CASE property, so it is checked ONCE
+    // outside the per-key loop (it is not a per-key condition).
+    if !case.clustering_slice_predicates.is_empty() {
+        for k in &keys {
+            // This partition's full row count, the reference every slice must be
+            // strictly smaller than — the count the `=` equality loop above already
+            // agreed on for this key (per-key, never assumed uniform).
+            let partition_rows = *partition_rows_by_key.get(k).ok_or_else(|| {
+                format!(
+                    "case {}.{}: no agreed full-partition row count for key {k} \
+                     (the equality loop must record one per probed key)",
                     case.keyspace, case.table
-                ));
-            }
-            if got == 0 || got >= partition_rows {
-                return Err(format!(
-                    "case {}.{}: `{query}` returned {got} rows against a {partition_rows}-row \
-                     partition — a clustering slice must be non-empty AND strictly smaller \
-                     than the whole partition (else the comparison is vacuous)",
-                    case.keyspace, case.table
-                ));
+                )
+            })?;
+            for (predicate, expected_rows) in case.clustering_slice_predicates {
+                let query = format!(
+                    "SELECT * FROM {}.{} WHERE {} = {} AND {}",
+                    case.keyspace, case.table, case.pk_column, k, predicate
+                );
+                let got = assert_point_full_equal(&point_db, &full_db, &query).await?;
+                if got != *expected_rows {
+                    return Err(format!(
+                        "case {}.{}: `{query}` returned {got} rows on BOTH paths but the slice \
+                         must yield exactly {expected_rows} — equal-but-wrong is still wrong",
+                        case.keyspace, case.table
+                    ));
+                }
+                if got == 0 || got >= partition_rows {
+                    return Err(format!(
+                        "case {}.{}: `{query}` returned {got} rows against a {partition_rows}-row \
+                         partition — a clustering slice must be non-empty AND strictly smaller \
+                         than the whole partition (else the comparison is vacuous)",
+                        case.keyspace, case.table
+                    ));
+                }
             }
         }
     }

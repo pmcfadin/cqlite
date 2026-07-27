@@ -1058,6 +1058,7 @@ mod tests {
             attr::FALLBACK_REASON,
             attr::WARM_REFRESH_OUTCOME,
             attr::FLIGHT_ABORT_REASON,
+            attr::ROWS_ROOT_REJECT_REASON,
         ] {
             assert!(key.starts_with("cqlite."), "attr {key} must be namespaced");
         }
