@@ -90,14 +90,23 @@ tiers:
     wait_minutes: 60
     mandate_paths:
       - cqlite-flight/**
+      - cqlite-core/**
+      - test-data/**
+      - .github/actions/setup-rust-ci/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
       - .github/workflows/flight-ci.yml
     notes: >-
       The gate job reports the aggregate of the classifier, the fmt/clippy/lib-test
-      job, the full-package job (which owns the end-to-end tests) and the image job.
-      A diff touching cqlite-flight/** or this workflow mandates the FULL tier. The
-      cheaper fmt/clippy/lib-test job additionally runs for cqlite-core/**,
-      Cargo.toml and Cargo.lock. `ci:flight-full` remains a manual opt-in for diffs
-      that mandate neither.
+      job, the full-package job (which owns cqlite-flight/tests/** — the ~30
+      integration/end-to-end tests) and the image job. ONE applicability verdict
+      covers all of them: matching any `mandate_paths` entry runs the whole tier.
+      cqlite-core/** is in the set because core is the direction Flight breaks from
+      (#2825's wrong constant, #2821 its first caller — both core diffs whose Flight
+      e2e coverage was the point); an earlier cut routed a core-only diff to the
+      `--lib` job alone and still reported success. `ci:flight-full` remains a manual
+      opt-in for diffs that mandate nothing.
 
 exempt:
   - workflow: cassandra-parity.yml

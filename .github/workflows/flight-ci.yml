@@ -56,9 +56,18 @@ jobs:
     name: Classify Flight tier scope
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # EXACTLY ONE applicability output (issue #2910 round 2). The first cut had
+    # two — `run_tier` (cheap fmt/clippy/lib test) and `run_full` (the end-to-end
+    # tests) — governed by two overlapping regexes, and a `cqlite-core/**`-only
+    # diff matched only the narrower one: the ~30 integration tests under
+    # cqlite-flight/tests/ never ran and `Flight tier gate` still reported
+    # success. That is #2906 reappearing inside its own fix. One output means one
+    # predicate, and gating_policy_rules.rb now REJECTS a registered tier whose
+    # jobs are governed by more than one (a tier with genuinely distinct scopes
+    # must be registered as two tiers with two contexts, each aggregated on its
+    # own).
     outputs:
       run_tier: ${{ steps.scope.outputs.run_tier }}
-      run_full: ${{ steps.scope.outputs.run_full }}
       reason: ${{ steps.scope.outputs.reason }}
     steps:
       - name: Checkout
@@ -78,7 +87,6 @@ jobs:
 
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "run_tier=true" >> "$GITHUB_OUTPUT"
-            echo "run_full=true" >> "$GITHUB_OUTPUT"
             echo "reason=non-PR event (${EVENT_NAME}): full tier" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -92,39 +100,58 @@ jobs:
           # cannot conclude the tier is inapplicable, so run everything.
           if [ ! -s changed-files.txt ]; then
             echo "run_tier=true" >> "$GITHUB_OUTPUT"
-            echo "run_full=true" >> "$GITHUB_OUTPUT"
             echo "reason=empty changed-file set; running the full tier fail-closed" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # FULL mandate: anything owned by the Flight server itself, including
-          # its end-to-end tests, plus this workflow.
-          full_regex='^(cqlite-flight/|\.github/workflows/flight-ci\.yml$)'
-          # Cheap-tier mandate: additionally the crates and manifests Flight
-          # compiles against.
-          tier_regex='^(cqlite-flight/|cqlite-core/|Cargo\.toml$|Cargo\.lock$|\.github/workflows/flight-ci\.yml$)'
+          # THE MANDATE SET (issue #2910 round 2) — every path that reaches the
+          # Flight server at runtime or decides what its tests assert. Matching
+          # ANY of them runs the WHOLE tier, end-to-end tests included; there is
+          # deliberately no narrower second set that could route a mandating diff
+          # to a cheaper job:
+          #   cqlite-flight/**                  the crate, its Dockerfile and the
+          #                                     ~30 integration/e2e tests
+          #   cqlite-core/**                    the engine Flight wraps — readers,
+          #                                     merge, the Arrow converter. THE
+          #                                     direction from which Flight breaks:
+          #                                     #2825 shipped a wrong
+          #                                     worst_case_batch_capacity_bytes
+          #                                     because nothing exercised it, and
+          #                                     #2821 was its first caller. Both
+          #                                     were core diffs whose Flight e2e
+          #                                     coverage was the entire point.
+          #   Cargo.toml / Cargo.lock           the workspace dependency versions
+          #                                     resolved into the binary
+          #   rust-toolchain.toml               the pinned compiler this tier builds
+          #                                     and runs with
+          #   test-data/**                      the SSTable fixtures and the
+          #                                     query-semantics oracle that
+          #                                     point_read_corpus_parity_test.rs and
+          #                                     query_semantics_flight_parity.rs read
+          #   .github/actions/setup-rust-ci/**  the composite action every job here
+          #                                     depends on to build at all
+          #   .github/workflows/flight-ci.yml   the tier definition itself
+          # NOT mandated, deliberately: cqlite-cli/**, bindings/**, docs/** —
+          # nothing in them is linked into, or read by, the Flight server.
+          # `.github/ci-gating-tiers.yml` documents this list under
+          # `mandate_paths`, and gating_policy_rules.rb fails the gate if the two
+          # drift apart.
+          mandate_regex='^(cqlite-flight/|cqlite-core/|test-data/|\.github/actions/setup-rust-ci/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|\.github/workflows/flight-ci\.yml$)'
 
-          run_full=false
           run_tier=false
           reason='no Flight-relevant path in the diff and no ci:flight-full label'
-          if grep -Eq "$full_regex" changed-files.txt; then
-            run_full=true
+          if grep -Eq "$mandate_regex" changed-files.txt; then
             run_tier=true
-            reason='diff mandates the full Flight tier (cqlite-flight/** or this workflow)'
-          elif grep -Eq "$tier_regex" changed-files.txt; then
-            run_tier=true
-            reason='diff mandates the cheap Flight tier (cqlite-core/Cargo manifests)'
+            reason='diff reaches the Flight server at runtime; running the full tier including the end-to-end tests'
           fi
           if [ "$HAS_FULL_LABEL" = "true" ]; then
-            run_full=true
             run_tier=true
             reason='ci:flight-full label opt-in'
           fi
 
           echo "run_tier=${run_tier}" >> "$GITHUB_OUTPUT"
-          echo "run_full=${run_full}" >> "$GITHUB_OUTPUT"
           echo "reason=${reason}" >> "$GITHUB_OUTPUT"
-          echo "Flight tier verdict: run_tier=${run_tier} run_full=${run_full} (${reason})"
+          echo "Flight tier verdict: run_tier=${run_tier} (${reason})"
 
   test:
     name: fmt / clippy / lib test
@@ -157,19 +184,21 @@ jobs:
           {
             echo "## Flight CI tier"
             echo ""
-            echo "- Ordinary PRs run fmt, clippy, and cqlite-flight library tests."
-            echo "- Full package tests and release binary artifacts run on push to main/tags, nightly schedule, workflow_dispatch, or PRs labeled \`ci:flight-full\`."
+            echo "- This job (fmt, clippy, cqlite-flight library tests) is the prerequisite half of the tier."
+            echo "- The full package tests (cqlite-flight/tests/**, the end-to-end coverage) and the release binary run under the SAME applicability verdict — see the classify job's reason."
+            echo "- A diff touching cqlite-flight/**, cqlite-core/**, test-data/**, the Cargo manifests, rust-toolchain.toml, the shared setup-rust-ci action, or this workflow mandates the whole tier with or without \`ci:flight-full\` (issue #2910)."
             echo "- Container publishing here is limited to main-branch pushes and workflow_dispatch runs (\`latest\` + sha tags); v* tag release images are built multi-arch solely by flight-image.yml (issue #2638)."
           } >> "$GITHUB_STEP_SUMMARY"
 
   full:
     name: full test + release binary
     needs: [classify, test]
-    # Issue #2910: the DIFF decides, not the label. `run_full` is true whenever
-    # the diff touches cqlite-flight/** (which is where the end-to-end tests
-    # live) or this workflow, on any non-PR event, or when the ci:flight-full
-    # label opts a non-mandating diff in.
-    if: needs.classify.outputs.run_full == 'true'
+    # Issue #2910: the DIFF decides, not the label — and it decides for the WHOLE
+    # tier. This job owns `cargo test --package cqlite-flight`, i.e. the ~30
+    # integration/e2e tests under cqlite-flight/tests/ that the `test` job's
+    # `--lib` scope does not touch. It shares `run_tier` with that job precisely
+    # so no mandating diff can reach the cheap half alone.
+    if: needs.classify.outputs.run_tier == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -286,14 +315,13 @@ jobs:
           IMAGE_RESULT: ${{ needs.image.result }}
           SCOPE_REASON: ${{ needs.classify.outputs.reason }}
           RUN_TIER: ${{ needs.classify.outputs.run_tier }}
-          RUN_FULL: ${{ needs.classify.outputs.run_full }}
         run: |
           set -euo pipefail
 
           {
             echo "## Flight tier gate (issue #2910)"
             echo ""
-            echo "- scope: run_tier=\`${RUN_TIER:-unknown}\` run_full=\`${RUN_FULL:-unknown}\` (${SCOPE_REASON:-no reason recorded})"
+            echo "- scope: run_tier=\`${RUN_TIER:-unknown}\` (${SCOPE_REASON:-no reason recorded})"
             echo "- classify: \`${CLASSIFY_RESULT}\`"
             echo "- fmt / clippy / lib test: \`${TEST_RESULT}\`"
             echo "- full test + release binary: \`${FULL_RESULT}\`"
