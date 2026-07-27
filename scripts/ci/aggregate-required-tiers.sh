@@ -428,6 +428,16 @@ LABELS_READ_DETAIL=""           # the LAST such failure, condensed; never cleare
 # normalised EXACTLY as gating_registry.rb normalises them (comma split, strip,
 # then the tier-id shape) so the evidence report cannot disagree with the verdict.
 INFORCE_WAIVER_LABELS=""
+# The `ci:waive:`-PREFIXED labels that are NOT waiver labels — an off-shape tier id
+# (issue #3033 round 6). Its own state, because it is neither "no waiver label
+# present" nor an API/authorization problem: a label IS applied, in a shape
+# gating_registry.rb's WAIVER_LABEL_PATTERN does not match, so it waives nothing.
+# `ci:waive:Flight` (a capitalised tier id) is the realistic way to get here, and
+# reporting it as an absence — or worse, as the "the label set carries a ci:waive:
+# label" evidence diagnostic — sends the operator to the workflow's `permissions:`
+# block for a typo. Sanitised at collection: label names are user-controlled text
+# that lands in a job summary on stdout, where `::` is workflow-command syntax.
+INVALID_WAIVER_LABELS=""
 
 # WHAT ACTUALLY WENT WRONG, condensed for a workflow command. The old code threw
 # this away: EVERY failure mode — an authorization refusal, a secondary rate limit,
@@ -472,8 +482,9 @@ condense_error() {
 # a reported zero — a claim of absence nobody observed. Shell parameter expansion
 # has no such failure mode.
 compute_inforce_waiver_labels() {
-  local rest="$LABELS_NOW" item="" tier=""
+  local rest="$LABELS_NOW" item="" tier="" safe=""
   INFORCE_WAIVER_LABELS=""
+  INVALID_WAIVER_LABELS=""
   while [ -n "$rest" ]; do
     item="${rest%%,*}"
     if [ "$item" = "$rest" ]; then rest=""; else rest="${rest#*,}"; fi
@@ -484,9 +495,29 @@ compute_inforce_waiver_labels() {
       *) continue ;;
     esac
     # /[a-z0-9][a-z0-9-]*\z/ — the tier-id shape, so anything that reaches the
-    # comparison below is already allowlisted.
+    # comparison below is already allowlisted. Anything that does NOT match is
+    # recorded as an off-shape label rather than dropped in silence: the operator
+    # who typed it believes they waived a tier, and only this list can say
+    # otherwise. Still pure shell (see the header): a sanitiser that could fail
+    # would silently empty the list and take the diagnostic with it.
     case "$tier" in
-      ''|[!a-z0-9]*|*[!a-z0-9-]*) continue ;;
+      ''|[!a-z0-9]*|*[!a-z0-9-]*)
+        # The WHOLE label is recorded, not the tier id, so a bare `ci:waive:` with
+        # nothing after it still names itself in the report.
+        safe="${item//[[:cntrl:]]/}"   # the summary line must stay ONE line
+        safe="${safe//::/__}"          # defang workflow-command syntax
+        safe="${safe:0:80}"            # bound one label's contribution
+        # Bounded overall, so a pull request wearing many off-shape labels cannot
+        # produce an unbounded annotation, and deduplicated so a repeated
+        # `--labels` entry is named once.
+        if [ "${#INVALID_WAIVER_LABELS}" -lt 240 ]; then
+          case ",${INVALID_WAIVER_LABELS}," in
+            *",${safe},"*) ;;
+            *) INVALID_WAIVER_LABELS="${INVALID_WAIVER_LABELS}${safe}," ;;
+          esac
+        fi
+        continue
+        ;;
     esac
     INFORCE_WAIVER_LABELS="${INFORCE_WAIVER_LABELS}${item},"
   done
@@ -590,13 +621,30 @@ read_labels() {
 # reding a break-glass PR for an API blip is the worse outage.
 read_waiver_events() {
   : >"$WAIVER_EVENTS_FILE"
-  case "$LABELS_NOW" in
-    *ci:waive:*) ;;
-    # No waiver label on THIS poll. `WAIVER_EVIDENCE_FAILURES` is deliberately NOT
-    # reset: a label applied, read broken, then removed mid-run must not erase the
-    # record that the reads were broken (the reporting section says so).
-    *) WAIVER_EVIDENCE_STATE=none; return 0 ;;
-  esac
+  # THE VALIDATED SHAPE, NOT A `ci:waive:` SUBSTRING (issue #3033 round 6). This
+  # gate used to be `case "$LABELS_NOW" in *ci:waive:*`, while the verdict —
+  # gating_registry.rb's /\Aci:waive:[a-z0-9][a-z0-9-]*\z/ — is far stricter. So an
+  # off-shape label (`ci:waive:Flight`, the capitalisation typo) sent this function
+  # down the evidence path and made the run report "the label set this run is using
+  # carries a ci:waive:<tier-id> label" in an UNREADABLE/UNAVAILABLE diagnostic:
+  # a claim about a break-glass that does not exist and that the evaluator ignores,
+  # pointing the reader at a `permissions:` block while the real fault (a label
+  # that waives nothing) went unnamed. The validated set is what the gate uses now,
+  # so every state below is about a waiver label the evaluator would honour, and an
+  # off-shape label costs no paginated API call.
+  #
+  # PRECONDITION: `INFORCE_WAIVER_LABELS` is current. It is computed at startup and
+  # on ALL THREE exits of read_labels (live, fallback, payload), which is the only
+  # thing that runs before this — and were that ever untrue, an uncomputed set is
+  # EMPTY, which withholds evidence rather than granting a waiver.
+  if [ -z "$INFORCE_WAIVER_LABELS" ]; then
+    # No waiver label in force on THIS poll. `WAIVER_EVIDENCE_FAILURES` is
+    # deliberately NOT reset: a label applied, read broken, then removed mid-run
+    # must not erase the record that the reads were broken (the reporting section
+    # says so).
+    WAIVER_EVIDENCE_STATE=none
+    return 0
+  fi
   if [ -z "$WAIVER_EVENTS_CMD" ]; then
     WAIVER_EVIDENCE_STATE=unconfigured
     # ONCE PER RUN. Unlike an unreadable read, this condition cannot change while
@@ -605,7 +653,8 @@ read_waiver_events() {
     # The summary block carries the persistent record.
     if [ "$WAIVER_UNCONFIGURED_WARNED" != "true" ]; then
       WAIVER_UNCONFIGURED_WARNED=true
-      echo "::warning::waiver evidence UNAVAILABLE: a ci:waive: label is present, but this run has no label-event" \
+      echo "::warning::waiver evidence UNAVAILABLE: the waiver label(s) ${INFORCE_WAIVER_LABELS%,} are in force" \
+           "(shape-checked against what the evaluator accepts), but this run has no label-event" \
            "source (no --waiver-events-cmd, and --repo/--pr-number were not both supplied), so the waiver cannot be" \
            "bound to this head sha or attributed to whoever applied it; it will still apply at the aggregation" \
            "deadline" >&2
@@ -645,7 +694,8 @@ read_waiver_events() {
   # (`gh` absent, a bad --jq), which no re-run fixes.
   echo "::warning::waiver evidence UNREADABLE: the read of this pull request's label events FAILED" \
        "(${WAIVER_EVIDENCE_DETAIL}) — this is a BROKEN READ, NOT an absence of waiver labels, because the label" \
-       "set this poll is using carries a ci:waive: label. 401/403/404 means the token running this workflow may not read this pull" \
+       "set this poll is using carries the waiver label(s) ${INFORCE_WAIVER_LABELS%,}, shape-checked against what" \
+       "the evaluator accepts. 401/403/404 means the token running this workflow may not read this pull" \
        "request's events (check the workflow's permissions block); a 403 naming a rate limit, or a 5xx, is" \
        "transient; no HTTP status at all means the client failed (gh unavailable, or a bad --jq). Issue #3033." \
        "The waiver still applies at the aggregation deadline, but it cannot resolve a tier early and it will" \
@@ -684,6 +734,13 @@ evaluate_once() {
   fi
   return "$rc"
 }
+
+# read_waiver_events gates on `INFORCE_WAIVER_LABELS`, so it is computed from the
+# run-start labels here, before the first poll. read_labels recomputes it on every
+# poll (all three exits), so this only makes the precondition hold independently of
+# call order — it cannot make the set stale, and an uncomputed set is empty, which
+# withholds evidence rather than granting a waiver.
+compute_inforce_waiver_labels
 
 while :; do
   ATTEMPT=$((ATTEMPT + 1))
@@ -838,27 +895,60 @@ if [ "$LABELS_READ_STATE" = "fallback" ]; then
   INFORCE_UNKNOWN_REASON="the live label read FAILED (${LABELS_READ_FAILURES} failed read(s); ${LABELS_READ_DETAIL}) and the labels fell back to the run-start event payload"
 fi
 
+# An off-shape `ci:waive:` label was READ from whichever label set this run had, so
+# the trust of that read qualifies what may be said about the absence of a VALID
+# one alongside it — under a failed live read, absence is not claimable at all.
+OFFSHAPE_LABEL_SET_NOTE=""
+case "$LABELS_READ_STATE" in
+  fallback)
+    OFFSHAPE_LABEL_SET_NOTE=" No valid \`ci:waive:<tier-id>\` label is in the run-start event payload either, but the live label read FAILED (${LABELS_READ_FAILURES} failed read(s); ${LABELS_READ_DETAIL}), so absence of a valid one is NOT claimed."
+    ;;
+  payload)
+    OFFSHAPE_LABEL_SET_NOTE=" No valid \`ci:waive:<tier-id>\` label is in the run-start event payload, which is the only label set this run had (no live label source configured)."
+    ;;
+  *)
+    OFFSHAPE_LABEL_SET_NOTE=" No valid \`ci:waive:<tier-id>\` label is present on this pull request."
+    ;;
+esac
+
 emit ""
 case "$WAIVER_EVIDENCE_STATE" in
   none)
-    case "$LABELS_READ_STATE" in
-      live)
-        # Genuinely observed: the live read succeeded on this poll, so absence is
-        # an observation and is stated as one.
-        emit "Waiver evidence: n/a — no \`ci:waive:<tier-id>\` label is present on this pull request."
-        ;;
-      fallback)
-        # THE FALSE NEGATIVE THIS REPLACES (issue #3033 round 4). This line used to
-        # state absence flatly here — while the live read had failed and the labels
-        # were a run-start snapshot, i.e. precisely when a waiver applied mid-run
-        # (the reason the polling window exists) is invisible. Report the
-        # observation and the gap in it instead.
-        emit "Waiver evidence: **UNKNOWN (label read UNTRUSTED)** — no \`ci:waive:<tier-id>\` label was OBSERVED, but the live label read FAILED (${LABELS_READ_FAILURES} failed read(s); ${LABELS_READ_DETAIL}) and this run fell back to the run-start event payload, so a waiver label applied since the run started would be invisible here. Absence is NOT claimed."
-        ;;
-      *)
-        emit "Waiver evidence: n/a — no \`ci:waive:<tier-id>\` label is in the run-start event payload, which is the only label set this run had (no live label source configured), so a label applied since the run started was never looked for."
-        ;;
-    esac
+    # AN OFF-SHAPE `ci:waive:` LABEL IS ITS OWN STATE (issue #3033 round 6). It is
+    # not an absence — a label IS applied — and it is not an authorization or API
+    # problem, which is what the reader was previously told: the old substring gate
+    # sent `ci:waive:Flight` into the evidence path, where the UNREADABLE and
+    # UNAVAILABLE lines then asserted that "the label set this run is using carries
+    # a ci:waive:<tier-id> label". The operator went looking at the workflow's
+    # `permissions:` block for what is a capitalisation typo. This names the typo.
+    if [ -n "$INVALID_WAIVER_LABELS" ]; then
+      emit "Waiver evidence: **INVALID WAIVER LABEL — it waives NOTHING** — the label(s) \`${INVALID_WAIVER_LABELS%,}\` are applied but are not waiver labels: a waiver label is \`ci:waive:<tier-id>\` with a LOWER-CASE tier id (\`[a-z0-9][a-z0-9-]*\`), which is the shape the registry evaluator matches, so it IGNORES these and no tier is waived by them.${OFFSHAPE_LABEL_SET_NOTE} No \`labeled\` events were read: there is no waiver label to gather evidence for."
+      emit ""
+      emit "> :warning: This is NOT \"no waiver labels present\", and NOT an authorization or API problem — no"
+      emit "> read was attempted and nothing failed. A \`ci:waive:\`-prefixed label IS applied, in a shape the"
+      emit "> evaluator ignores; a capitalised tier id (\`ci:waive:Flight\` for tier \`flight\`) is the usual"
+      emit "> cause. To waive a tier, apply \`ci:waive:<tier-id>\` with the tier id spelled exactly as"
+      emit "> \`.github/ci-gating-tiers.yml\` spells it. Issue #3033."
+    else
+      case "$LABELS_READ_STATE" in
+        live)
+          # Genuinely observed: the live read succeeded on this poll, so absence is
+          # an observation and is stated as one.
+          emit "Waiver evidence: n/a — no \`ci:waive:<tier-id>\` label is present on this pull request."
+          ;;
+        fallback)
+          # THE FALSE NEGATIVE THIS REPLACES (issue #3033 round 4). This line used to
+          # state absence flatly here — while the live read had failed and the labels
+          # were a run-start snapshot, i.e. precisely when a waiver applied mid-run
+          # (the reason the polling window exists) is invisible. Report the
+          # observation and the gap in it instead.
+          emit "Waiver evidence: **UNKNOWN (label read UNTRUSTED)** — no \`ci:waive:<tier-id>\` label was OBSERVED, but the live label read FAILED (${LABELS_READ_FAILURES} failed read(s); ${LABELS_READ_DETAIL}) and this run fell back to the run-start event payload, so a waiver label applied since the run started would be invisible here. Absence is NOT claimed."
+          ;;
+        *)
+          emit "Waiver evidence: n/a — no \`ci:waive:<tier-id>\` label is in the run-start event payload, which is the only label set this run had (no live label source configured), so a label applied since the run started was never looked for."
+          ;;
+      esac
+    fi
     # A label applied, its events unreadable, then the label removed mid-run: the
     # state is legitimately "nothing to waive" now, but the broken read is history
     # worth keeping, not history to discard.
@@ -899,7 +989,9 @@ case "$WAIVER_EVIDENCE_STATE" in
   unreadable)
     emit "Waiver evidence: **UNREADABLE (broken read — authorization, API or client failure)** — the \`labeled\` events for this pull request could not be read (${WAIVER_EVIDENCE_DETAIL}); ${WAIVER_EVIDENCE_FAILURES} failed read(s)."
     emit ""
-    emit "> :warning: This is NOT \"no waiver labels present\" — the label set this run is using carries a \`ci:waive:<tier-id>\` label."
+    emit "> :warning: This is NOT \"no waiver labels present\" — the label set this run is using carries the waiver"
+    emit "> label(s) \`${INFORCE_WAIVER_LABELS%,}\`, shape-checked against what the evaluator accepts (an off-shape"
+    emit "> \`ci:waive:\` label never reaches this state and is reported separately)."
     emit "> \`401\`/\`403\`/\`404\`: the token running this workflow may not read this pull request's events —"
     emit "> check the workflow's \`permissions:\` block. A \`403\` naming a rate limit, or any \`5xx\`: transient,"
     emit "> re-run. No HTTP status at all: the client itself failed (\`gh\` unavailable, a bad \`--jq\`), which a"
@@ -908,12 +1000,21 @@ case "$WAIVER_EVIDENCE_STATE" in
     emit "> resolve a tier early and is reported as \`applier UNRESOLVED\`."
     ;;
   unconfigured)
-    emit "Waiver evidence: **UNAVAILABLE (no label-event source configured)** — the label set this run is using carries a \`ci:waive:<tier-id>\` label but this run was given no way to read the \`labeled\` events."
+    emit "Waiver evidence: **UNAVAILABLE (no label-event source configured)** — the label set this run is using carries the waiver label(s) \`${INFORCE_WAIVER_LABELS%,}\` (shape-checked against what the evaluator accepts) but this run was given no way to read the \`labeled\` events."
     emit ""
     emit "> :warning: The waiver is still honoured at the aggregation deadline, but it cannot resolve a tier"
     emit "> early and is reported as \`applier UNRESOLVED\`."
     ;;
 esac
+# AN OFF-SHAPE LABEL ALONGSIDE A VALID ONE still waives nothing (issue #3033 round
+# 6). The headline above then belongs to the valid label's evidence state, so the
+# off-shape one would otherwise go unmentioned — and the operator who typed
+# `ci:waive:Flight` next to a working `ci:waive:beta` would never learn that the
+# first one did nothing. Said once, and only where it is not already the headline.
+if [ -n "$INVALID_WAIVER_LABELS" ] && [ "$WAIVER_EVIDENCE_STATE" != "none" ]; then
+  emit ""
+  emit "> :warning: Also applied, and NOT a waiver label: \`${INVALID_WAIVER_LABELS%,}\`. A waiver label is \`ci:waive:<tier-id>\` with a LOWER-CASE tier id (\`[a-z0-9][a-z0-9-]*\`), so the evaluator IGNORES this one and it waives nothing; nothing above is about it."
+fi
 emit_label_read_note
 
 emit ""

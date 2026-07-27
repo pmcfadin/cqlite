@@ -1030,11 +1030,13 @@ fi
 # THE REPORT MAY NOT BE LAXER THAN THE VERDICT. `ci:waive:BETA` is not a waiver
 # label (gating_registry.rb requires a lower-case tier id), so an event for it
 # waives nothing — and must not be counted as usable evidence either, or the summary
-# would claim in-force evidence for a label the evaluator ignores.
+# would claim in-force evidence for a label the evaluator ignores. Round 6 sharpened
+# what this reports: the off-shape label is now its OWN state (see the round-6 block
+# below) rather than a zero-intersection reading of a feed nobody needed to fetch.
 printf 'ci:waive:BETA\tshouty-labeller\t2026-01-01T00:00:00Z\n' >"$WORK/waiver-events-offshape.tsv"
 invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
   --labels "ci:waive:BETA" --waiver-events-cmd "cat $WORK/waiver-events-offshape.tsv"
-if [ "$RC" -ne 0 ] && contains "$(evidence_line "$SUMMARY")" "0 for a waiver label in force now" &&
+if [ "$RC" -ne 0 ] && contains "$(evidence_line "$SUMMARY")" "INVALID WAIVER LABEL" &&
    ! contains "$(evidence_line "$SUMMARY")" "OBSERVED for that label"; then
   ok "an off-shape waiver label counts as no in-force evidence, matching what the evaluator accepts"
 else
@@ -1081,6 +1083,116 @@ if [ -n "$STATE_UNTRUSTED_NONE" ] && [ -n "$STATE_STALE" ] && [ -n "$STATE_UNKNO
   ok "the round-4 states are distinct from one another and from every earlier state"
 else
   bad "a round-4 state reports identically to another: untrusted='$STATE_UNTRUSTED_NONE' stale='$STATE_STALE' unknown='$STATE_UNKNOWN_MATCH'"
+fi
+
+# ---- round 6: a `ci:waive:` SUBSTRING is not a waiver label (issue #3033) ----
+# THE LAST INSTANCE OF THE SAME DEFECT. The evidence read was gated on the raw
+# substring `*ci:waive:*` while the verdict uses gating_registry.rb's
+# /\Aci:waive:[a-z0-9][a-z0-9-]*\z/. So `ci:waive:Flight` — a capitalisation typo on
+# a real tier id, and the shape a first-ever break-glass exercise produces — sent the
+# run into the evidence path, where the UNREADABLE/UNAVAILABLE lines asserted that
+# "the label set this run is using carries a ci:waive:<tier-id> label". That is a
+# claim about a break-glass THAT DOES NOT EXIST and that the evaluator ignores, and
+# it points the reader at the workflow's `permissions:` block for what is a typo.
+# The gate now uses the validated set, and the off-shape label gets its own line
+# naming it. Hermetic fixtures only: `ci:waive:BETA`/`ci:waive:Flight`, never the
+# repo's real `ci:waive:flight`.
+echo "== an off-shape ci:waive: label is named as a typo, not diagnosed as an API problem =="
+
+# A live label read that succeeds and returns ONLY an off-shape waiver label.
+printf '#!/usr/bin/env bash\necho ci:waive:BETA\nexit 0\n' >"$WORK/labels-offshape-live.sh"
+chmod +x "$WORK/labels-offshape-live.sh"
+# An events command that RECORDS being called. An off-shape label must not cost the
+# paginated label-events read at all, so the absence of this file is the evidence
+# that the gate is the validated set and not the substring.
+cat >"$WORK/waiver-events-probe.sh" <<EOF
+#!/usr/bin/env bash
+echo probed >>"$WORK/events-probe.count"
+cat "$WORK/waiver-events-offshape.tsv"
+EOF
+chmod +x "$WORK/waiver-events-probe.sh"
+# A valid waiver label WITH an off-shape one beside it: the valid label owns the
+# headline, and the typo must still be named somewhere or the operator never learns
+# that half of what they applied did nothing.
+printf '#!/usr/bin/env bash\nprintf "ci:waive:beta\\nci:waive:Flight\\n"\nexit 0\n' \
+  >"$WORK/labels-mixed-live.sh"
+chmod +x "$WORK/labels-mixed-live.sh"
+
+rm -f "$WORK/events-probe.count"
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-offshape-live.sh" --waiver-events-cmd "$WORK/waiver-events-probe.sh"
+STATE_OFFSHAPE=$(evidence_line "$SUMMARY")
+if contains "$STATE_OFFSHAPE" "INVALID WAIVER LABEL" && contains "$STATE_OFFSHAPE" 'ci:waive:BETA' &&
+   contains "$STATE_OFFSHAPE" "waives NOTHING"; then
+  ok "an off-shape ci:waive: label is reported as its own state, naming the offending label"
+else
+  bad "the off-shape label was not named as waiving nothing: $STATE_OFFSHAPE"
+fi
+# THE WHOLE POINT: it must not read as an authorization/API failure, and the remedy
+# it offers must be the typo, not the `permissions:` block.
+if ! contains "$STATE_OFFSHAPE" "UNREADABLE" && ! contains "$STATE_OFFSHAPE" "UNAVAILABLE" &&
+   ! contains "$(cat "$SUMMARY")" 'permissions:' &&
+   contains "$(cat "$SUMMARY")" "capitalised tier id"; then
+  ok "the off-shape state diagnoses the typo instead of sending the reader to the permissions block"
+else
+  bad "an off-shape label still reads as an API/authorization problem: $(cat "$SUMMARY")"
+fi
+if [ ! -f "$WORK/events-probe.count" ]; then
+  ok "an off-shape label costs no label-events read (the gate is the validated shape, not a substring)"
+else
+  bad "the events feed was fetched for a label that waives nothing: $(cat "$WORK/events-probe.count")"
+fi
+# FAIL-SAFE DIRECTION: an off-shape label grants nothing, so the absent tier reds.
+if [ "$RC" -ne 0 ] && contains "$OUT" "beta" && ! contains "$OUT" "WAIVED"; then
+  ok "an off-shape label waives nothing — the absent tier still fails"
+else
+  bad "an off-shape label excused a tier or hid the red (rc=$RC): $OUT"
+fi
+# ...and it is a DIFFERENT line from every neighbouring state, including the plain
+# absence it used to be reported as and the two abnormal states it used to borrow.
+if [ -n "$STATE_OFFSHAPE" ] && [ "$STATE_OFFSHAPE" != "$STATE_NONE" ] &&
+   [ "$STATE_OFFSHAPE" != "$STATE_BAD" ] && [ "$STATE_OFFSHAPE" != "$STATE_UNCONF" ] &&
+   [ "$STATE_OFFSHAPE" != "$STATE_LIVE_NONE" ] && [ "$STATE_OFFSHAPE" != "$STATE_NOWAIVE" ]; then
+  ok "the off-shape state is distinct from the absence, unreadable, unavailable and zero-match lines"
+else
+  bad "the off-shape state reports identically to another: '$STATE_OFFSHAPE'"
+fi
+
+# An off-shape label ALONGSIDE a valid one: the valid label's evidence state owns the
+# headline, and the typo is still named once.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-mixed-live.sh" --waiver-events-cmd "$WAIVER_EVENTS"
+MIXED_SUMMARY="$(cat "$SUMMARY")"
+if [ "$RC" -eq 0 ] && contains "$(evidence_line "$SUMMARY")" "READ OK" &&
+   contains "$MIXED_SUMMARY" "Also applied, and NOT a waiver label" &&
+   contains "$MIXED_SUMMARY" 'ci:waive:Flight'; then
+  ok "an off-shape label beside a valid one is still named, and the valid one still waives its tier"
+else
+  bad "the off-shape label vanished behind a valid one (rc=$RC): $MIXED_SUMMARY"
+fi
+
+# THE PRODUCTION HAPPY PATH, ASSERTED AT THE SUMMARY LINE. Every other in-force
+# assertion in this suite runs off the event PAYLOAD labels; the live-read path — what
+# CI actually does — was only ever asserted through the exit status, which ruby
+# decides. So a regression that emptied the in-force set under a live read would flip
+# this line to "0 for a waiver label in force now" with the whole suite still green.
+invoke "cat $(runs_file one-absent)" "$WORK/self-ids.txt" "$EXPIRED" 1 \
+  --labels-cmd "$WORK/labels-beta-live.sh" --waiver-events-cmd "$WAIVER_EVENTS"
+STATE_LIVE_MATCH=$(evidence_line "$SUMMARY")
+if [ "$RC" -eq 0 ] && contains "$STATE_LIVE_MATCH" "READ OK" &&
+   contains "$STATE_LIVE_MATCH" '1 of them for a `ci:waive:` label in force' &&
+   contains "$STATE_LIVE_MATCH" "OBSERVED for that label" &&
+   ! contains "$STATE_LIVE_MATCH" "UNKNOWN" &&
+   ! contains "$STATE_LIVE_MATCH" "0 for a waiver label in force now"; then
+  ok "a live label read with a matching event reports the observed evidence, not a zero or an UNKNOWN"
+else
+  bad "the live-read happy path's summary line is wrong (rc=$RC): $STATE_LIVE_MATCH"
+fi
+# And the evidence is USED, not merely reported: the applier is named from the feed.
+if contains "$OUT" "WAIVED" && contains "$OUT" "real-labeller" && ! contains "$OUT" "UNRESOLVED"; then
+  ok "the live-read in-force match attributes the waiver to whoever applied it"
+else
+  bad "a live-read waiver with usable evidence was not attributed: $OUT"
 fi
 
 invoke "cat $(runs_file one-failed)" "$WORK/self-ids.txt" "$EXPIRED" 1 --labels "ci:waive:beta" --waiver-events-cmd "$WAIVER_EVENTS"
