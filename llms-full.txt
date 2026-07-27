@@ -3870,12 +3870,13 @@ This page tracks the **progression over time**. Each row links to the full, stan
 
 [Section titled “Reports”](#reports)
 
-| Round                         | Date       | Stack                                    | Verdict                                                                                                                                                                                                               | Report                                                |
-| ----------------------------- | ---------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| **0.16.0 GA verification**    | 2026-07-23 | flight 0.16.0 · connector 0.16.0         | **GA sound — all 3 tracked fixes hold** — #2806 split pruning fixed (−18% p50 / −4× CPU on keyed reads), #2807 UDT parse fixed, #2815 collection-column drop fixed (raw bytes; structured decode is a 0.17 follow-up) | [Full report →](/cqlite/field-validation/0-16-0-ga/)  |
-| **0.16.0-rc1 fix validation** | 2026-07-21 | flight 0.16.0-rc1 · connector 0.16.0-rc1 | **Soak ship-grade (0 errors, integrity holds); 2 of 3 testable fixes fail in the field** — #2679 split pruning inert (#2806), #2349 UDT blocked by a parser bug (#2807), #2681 abort taxonomy verified                | [Full report →](/cqlite/field-validation/0-16-0-rc1/) |
-| **v0.15.0 milestone soak**    | 2026-07-17 | flight 0.15.0 · connector 0.15.0         | **7 / 8 VERIFIED** — the one open flag (background snapshot grace-sweep, #2452) confirmed fixed in the field                                                                                                          | [Full report →](/cqlite/field-validation/soak-0-15/)  |
-| **Round 12**                  | 2026-07-15 | flight round12 · connector 0.14.3        | **ALL GREEN** — every R11b baseline held or improved; #2419 saturation gauges now visible under overload; #2436 large-cell fix confirmed                                                                              | [Full report →](/cqlite/field-validation/round-12/)   |
+| Round                             | Date       | Stack                                     | Verdict                                                                                                                                                                                                                                                                                    | Report                                                   |
+| --------------------------------- | ---------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| **M0 — disk / read-path profile** | 2026-07-27 | flight v0.16.0 → 0.17-dev (server-direct) | **0.17-dev \~2× single-stream throughput (CPU-path fixes), but the block-device read pattern did NOT move** — reads stay \~4.3 KB (99%+ in `[4K,8K)`), scan uses 28% of the 711 MB/s device; standing lever is scan-side cross-chunk readahead (CASSANDRA-15452), not in the 0.17 manifest | [Full report →](/cqlite/field-validation/m0-throughput/) |
+| **0.16.0 GA verification**        | 2026-07-23 | flight 0.16.0 · connector 0.16.0          | **GA sound — all 3 tracked fixes hold** — #2806 split pruning fixed (−18% p50 / −4× CPU on keyed reads), #2807 UDT parse fixed, #2815 collection-column drop fixed (raw bytes; structured decode is a 0.17 follow-up)                                                                      | [Full report →](/cqlite/field-validation/0-16-0-ga/)     |
+| **0.16.0-rc1 fix validation**     | 2026-07-21 | flight 0.16.0-rc1 · connector 0.16.0-rc1  | **Soak ship-grade (0 errors, integrity holds); 2 of 3 testable fixes fail in the field** — #2679 split pruning inert (#2806), #2349 UDT blocked by a parser bug (#2807), #2681 abort taxonomy verified                                                                                     | [Full report →](/cqlite/field-validation/0-16-0-rc1/)    |
+| **v0.15.0 milestone soak**        | 2026-07-17 | flight 0.15.0 · connector 0.15.0          | **7 / 8 VERIFIED** — the one open flag (background snapshot grace-sweep, #2452) confirmed fixed in the field                                                                                                                                                                               | [Full report →](/cqlite/field-validation/soak-0-15/)     |
+| **Round 12**                      | 2026-07-15 | flight round12 · connector 0.14.3         | **ALL GREEN** — every R11b baseline held or improved; #2419 saturation gauges now visible under overload; #2436 large-cell fix confirmed                                                                                                                                                   | [Full report →](/cqlite/field-validation/round-12/)      |
 
 ## Headline metrics, round over round
 
@@ -3993,6 +3994,39 @@ The full report is a self-contained dashboard with four linked views:
 * **The rig metrics-pipeline fix is now durable** — the soak-0.15 `resourcedetection` fix was being reverted by kit start/stop (the OTel config regenerates from the built binary); rebuilding the dist makes it hold through kit churn. `rate()` is per-`host_name`, no inflation.
 
 > Run metadata: flight `0.16.0-rc1@sha256:79c7907d` (multi-arch INDEX, src f4f13a7cb) · connector 0.16.0-rc1 · Trino 481 · Cassandra 5.0.8 RF=3 · 3× i4i.xlarge · \~1.70M partitions/node (new integrity anchor — #2789 read-time TTL expiry landed in this build) · 2026-07-21.
+
+# M0 — Disk / SSTable Read-Path Profile
+
+> The M0 throughput-program run (cqlite#2818) — a server-direct full-scan IO characterization across v0.16.0 → 0.17-dev. 0.17-dev nearly doubled single-stream throughput via CPU-path fixes, but the block-device read pattern (~4.3 KB requests, one LZ4 chunk a page at a time) did not move. The standing lever is scan-side cross-chunk readahead.
+
+# M0 — disk / SSTable read-path profile
+
+[Section titled “M0 — disk / SSTable read-path profile”](#m0--disk--sstable-read-path-profile)
+
+The first run of the **0.17 scan-path throughput program** ([epic #2817](https://github.com/pmcfadin/cqlite/issues/2817), [M0 / #2818](https://github.com/pmcfadin/cqlite/issues/2818)). Unlike the release-validation rounds, this is a **server-direct** profile — `flight-loadgen → cqlite-flight` with **no Trino** — built to answer one question: *what does the SSTable read path actually ask the block device for, and is it the standing throughput lever?* Run as a two-arm A/B, **v0.16.0 (pre-fix) → 0.17-dev (post-fix)**, same corpus and method.
+
+**Disk verdict: 0.17-dev did not change the disk read pattern.** Across both arms the scan reads the SSTables in **\~4.3 KB block requests — one LZ4-compressed 16 KiB chunk, faulted a page at a time — and 99.3–99.7% of all reads land in the `[4K, 8K)` bucket.** 0.17-dev nearly doubled single-stream throughput (107 → 199 MB/s warm) by fixing the **CPU/pipeline** path (#2876 read-plane split, #2825 byte-bounded Arrow batches), so the device now does *fewer* tiny reads per second — util actually fell from \~74% to \~53% — but the **request size is unmoved**, and the scan still uses only **28% of a 711.8 MB/s device**. The remaining gap is not disk bandwidth.
+
+**The standing lever is scan-side readahead across adjacent compressed chunks** — a ≥256 KiB scan-only read buffer (gated on `> chunk_length`), the [CASSANDRA-15452](https://issues.apache.org/jira/browse/CASSANDRA-15452) fix. It is **not in the 0.17 manifest.** With it, the read-size histogram should move to ≥64 KB, the `stream_cold_fault` sub-phase (4.4 s/scan cold, 42× the warm value) should shrink, and cold / partly-cold single-stream throughput should rise toward the device ceiling instead of plateauing at \~28% of it.
+
+[**Open the full disk report →**](/cqlite/field-reports/m0-throughput/report.html)
+
+The report covers, disk-first:
+
+* **Block-read size distribution** — side-by-side `bpftrace` histograms for both arms (the reads did not move).
+* **iostat** — `rareq-sz` unchanged at \~4.3 KB; IOPS and `%util` fell as the CPU path sped up; `r_await` 0.10 ms proves the device is not the bottleneck.
+* **Headroom vs the raw device** — `fio bs=1M` ceiling 711.8 MB/s; the scan uses 15% → 28% across the arms.
+* **Read path resolved** — the `MADV_RANDOM` point mapping vs the new 0.17 scan-side Data.db mapping (#2876).
+* **#2819 sub-phase timers** — `stream_cold_fault` isolates the cold-IO cost (4.4 s cold → 106 ms warm, a 42× collapse).
+* **Disk-access knobs** — `CQLITE_DISK_ACCESS_MODE` / `CQLITE_PREFETCH` A/B: nothing helps; the 4 KB size is intrinsic.
+
+## Method note
+
+[Section titled “Method note”](#method-note)
+
+Server-direct, unstripped self-built `cqlite-flight` + `flight-loadgen`: Arm 1 = the `v0.16.0` tag; Arm 2 = origin/main `ed3ac7e` (0.17-dev, `--features observability`). Same LZ4-compressed `cassandra_easy_stress.keyvalue` corpus (`chunk_length_in_kb=16`, \~3.4M partitions, \~650 MB Data.db) on i4i.xlarge (4 vCPU / 2 physical cores, XFS on the i4i NVMe). Disk stats via `bpftrace block_rq_complete`, `iostat -x 1`, `/proc/<pid>/io` (read\_bytes / rchar / syscr reported separately, never divided), and an `fio bs=1M` ceiling. bcc’s `xfsslower` will not compile on the lab’s HWE 7.0.0-aws kernel, so `bpftrace` is the substitute; `samply` recorded zero samples on that kernel, so the CPU decomposition (on the full #2818 write-up) uses `perf record`.
+
+This is a **release delta with four confounded changes** (#2876, #2877, #2765, #2825) — the throughput numbers are their combined effect, not attributable to any single issue. Full method, the CPU decomposition, and the C(N) core-scaling result (the plateau tracks *physical* cores, so pod sizing is a real lever) are on [#2818](https://github.com/pmcfadin/cqlite/issues/2818).
 
 # Round 12 Field Validation
 
