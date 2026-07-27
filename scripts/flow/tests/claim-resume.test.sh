@@ -1597,6 +1597,93 @@ else
   fail "expected a genuine LOST exit 2 naming holder-machine=machineA at sha=$FOREIGN; got rc=$rcForeignConfirm
 $outForeignConfirm"
 fi
+# …and the SIXTH instance of the one rule, at the same site: the confirm names a
+# DIFFERENT sha whose commit is UNREADABLE. `fetch_claim` only ever fetches THIS issue's
+# ref (which the landed push left at OUR OWN sha), so a TOCTOU winner advertised by the
+# confirm is simply not a local object — the identity read cannot say who holds it, and
+# it may be us. Falling straight through to LOST rendered the tell-tale empty
+# `holder-machine= actor=` and contradicted this file's own header rule ("NO subcommand
+# reports LOST/ADOPT-LOST/VERIFY-FAIL/not-holder when the holder commit's message is
+# UNREADABLE"). Same three-outcome triage as the rejected-push sibling now.
+runA claim 2304 >/dev/null 2>&1; rcUnreadSetup=$?
+FOREIGN_UNREAD=$(ref_sha 2304)
+if [ "$rcUnreadSetup" -eq 0 ] && [ -n "$FOREIGN_UNREAD" ] \
+   && ! g -C "$B" cat-file -e "${FOREIGN_UNREAD}^{commit}" 2>/dev/null; then
+  ok "setup: machineA's claim commit for issue-2304 exists on origin and is NOT a local object in clone B (so its identity is unreadable there)"
+else
+  fail "setup failed for the unreadable-confirm case (rc=$rcUnreadSetup foreign='$FOREIGN_UNREAD'; object already local?)"
+fi
+CTRUNR="$T/confirm-read-count-unreadable"
+: >"$CTRUNR"
+SHIMUNR="$T/shim-confirm-unreadable"
+mkdir -p "$SHIMUNR"
+cat >"$SHIMUNR/git" <<SHIM
+#!/usr/bin/env bash
+saw_ls=0; saw_claims=0
+for a in "\$@"; do
+  [ "\$a" = "ls-remote" ] && saw_ls=1
+  case "\$a" in refs/claims/*) saw_claims=1 ;; esac
+done
+if [ "\$saw_ls" = 1 ] && [ "\$saw_claims" = 1 ]; then
+  n=\$(cat "$CTRUNR" 2>/dev/null || echo 0)
+  n=\$((n + 1)); printf '%s' "\$n" >"$CTRUNR"
+  if [ "\$n" = 1 ]; then exit 0; fi
+  printf '%s\trefs/claims/issue-2305\n' "$FOREIGN_UNREAD"
+  exit 0
+fi
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMUNR/git"
+outUnreadConfirm=$( cd "$B" && PATH="$SHIMUNR:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" claim 2305 2>&1 ); rcUnreadConfirm=$?
+if [ "$rcUnreadConfirm" -eq 1 ] && printf '%s\n' "$outUnreadConfirm" | grep -q 'CLAIM: ERROR' \
+   && printf '%s\n' "$outUnreadConfirm" | grep -q 'reason=infra' \
+   && printf '%s\n' "$outUnreadConfirm" | grep -q 'detail=holder-commit-unreadable' \
+   && ! printf '%s\n' "$outUnreadConfirm" | grep -q 'CLAIM: LOST' \
+   && ! printf '%s\n' "$outUnreadConfirm" | grep -qE 'machine= |machine=$|actor= |actor=$'; then
+  ok "a post-push confirm naming an UNREADABLE sha → ERROR infra exit 1 (never LOST, no empty machine=/actor= render)"
+else
+  fail "expected ERROR infra holder-commit-unreadable exit 1 with no LOST; got rc=$rcUnreadConfirm
+$outUnreadConfirm"
+fi
+# The third outcome of that same triage: the confirm names a sha that is OURS and
+# READABLE — we DO hold a claim, so exit 2 would abandon it. Re-entrant HELD, exactly as
+# the rejected-push sibling and the pre-check already do (TEST 10 pins adopt's twin).
+runB claim 2306 >/dev/null 2>&1; rcOursSetup=$?
+OURS=$(ref_sha 2306)
+CTROUR="$T/confirm-read-count-ours"
+: >"$CTROUR"
+SHIMOUR="$T/shim-confirm-ours"
+mkdir -p "$SHIMOUR"
+cat >"$SHIMOUR/git" <<SHIM
+#!/usr/bin/env bash
+saw_ls=0; saw_claims=0
+for a in "\$@"; do
+  [ "\$a" = "ls-remote" ] && saw_ls=1
+  case "\$a" in refs/claims/*) saw_claims=1 ;; esac
+done
+if [ "\$saw_ls" = 1 ] && [ "\$saw_claims" = 1 ]; then
+  n=\$(cat "$CTROUR" 2>/dev/null || echo 0)
+  n=\$((n + 1)); printf '%s' "\$n" >"$CTROUR"
+  if [ "\$n" = 1 ]; then exit 0; fi
+  printf '%s\trefs/claims/issue-2307\n' "$OURS"
+  exit 0
+fi
+exec "$REALGIT" "\$@"
+SHIM
+chmod +x "$SHIMOUR/git"
+outOursConfirm=$( cd "$B" && PATH="$SHIMOUR:$PATH" CLAIM_MACHINE=machineB CLAIM_REMOTE=origin \
+  bash "$CLAIM" claim 2307 2>&1 ); rcOursConfirm=$?
+if [ "$rcOursSetup" -eq 0 ] && [ -n "$OURS" ] && [ "$rcOursConfirm" -eq 0 ] \
+   && printf '%s\n' "$outOursConfirm" | grep -q 'CLAIM: HELD' \
+   && printf '%s\n' "$outOursConfirm" | grep -q 're-entrant' \
+   && printf '%s\n' "$outOursConfirm" | grep -q 'machine=machineB' \
+   && ! printf '%s\n' "$outOursConfirm" | grep -q 'CLAIM: LOST'; then
+  ok "a post-push confirm naming a sha that is OURS reports a re-entrant HELD (exit 0), never LOST — the claim we hold is not abandoned"
+else
+  fail "expected a re-entrant HELD exit 0 for our own sha $OURS; got setup=$rcOursSetup rc=$rcOursConfirm
+$outOursConfirm"
+fi
 
 echo ""
 echo "================  claim-resume (#2945): $PASS passed, $FAIL failed, $SKIP skipped  ================"

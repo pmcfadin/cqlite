@@ -641,6 +641,25 @@ cmd_claim() {
     return 1
   fi
   fetch_claim "$issue"
+  # A TOCTOU winner's sha. Route it through the SAME three-outcome identity read as the
+  # rejected-push sibling above and as the pre-check, so all of this file's exit-2 sites
+  # read as ONE rule: a commit of OURS is a re-entrant HELD (we do hold the ref), an
+  # UNREADABLE commit is retryable infra (the holder is UNKNOWN — possibly us — and
+  # `fetch_claim` is best effort AND only ever fetches THIS issue's ref, which the landed
+  # push left at our own sha, so a TOCTOU winner's object may simply not be here;
+  # falling straight through rendered the tell-tale empty `holder-machine= actor=` on a
+  # LOST, which the header rule at the top of this file forbids), and ONLY a
+  # successfully-read FOREIGN holder is a genuine LOST.
+  local crc=0
+  holder_identity "$confirmed" "$actor" || crc=$?
+  if [ "$crc" -eq 0 ]; then
+    emit "HELD issue=$issue ref=refs/claims/issue-$issue sha=$confirmed $(holder_desc "$confirmed") (re-entrant)"
+    return 0
+  fi
+  if [ "$crc" -eq 2 ]; then
+    emit_unreadable_holder "$issue" "$confirmed"
+    return 1
+  fi
   emit "LOST issue=$issue ref=refs/claims/issue-$issue sha=$confirmed $(holder_token "$confirmed")"
   return 2
 }
