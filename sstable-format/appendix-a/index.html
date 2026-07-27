@@ -95,10 +95,13 @@
 <div class="sl-heading-wrapper level-h2"><h2 id="worked-examples">Worked Examples</h2><a class="sl-anchor-link" href="#worked-examples"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Worked Examples”</span></a></div>
 <ul>
 <li>
-<p>Nested collection (map&#x3C;text, list<int>>), 2 entries:</int></p>
+<p>Nested frozen collection (<code dir="auto">frozen&#x3C;map&#x3C;text, frozen&#x3C;list&#x3C;int>>>></code>), 2 entries:</p>
 <ul>
-<li>Encoding: count (VInt) -> for each entry: key (VInt len + UTF-8), value list (VInt elem count -> each int as 4 bytes)</li>
-<li>Size rule of thumb: total_size ~= size(VInt(count)) + sum[ size(VInt(|key|)) + |key| + size(VInt(list_len)) + 4*list_len ]</li>
+<li>Encoding: entry count (<strong>4-byte BE i32</strong>) -> for each entry: key (4-byte BE i32 len + UTF-8),
+then value (4-byte BE i32 len + the inner list’s own blob: 4-byte BE i32 elem count ->
+each element 4-byte BE i32 len + 4 int bytes). Every prefix inside a frozen blob is
+fixed-width, <strong>not</strong> VInt.</li>
+<li>Size rule of thumb: total_size ~= 4 + sum[ (4 + |key|) + (4 + |inner_list_blob|) ]</li>
 </ul>
 </li>
 <li>
@@ -154,15 +157,67 @@
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="notes">Notes</h2><a class="sl-anchor-link" href="#notes"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Notes”</span></a></div>
 <ul>
-<li><strong>Collection element lengths</strong> (list, set, map) use unsigned VInt encoding (<code dir="auto">CollectionSerializer.java:43,51</code>). See Appendix B for VInt details.</li>
-<li><strong>Tuple and UDT field lengths</strong> use <strong>4-byte BE signed int</strong> (not VInt). Null fields are encoded as 0xFFFFFFFF (-1). Source: <code dir="auto">TupleType.java:345-359</code>.</li>
-<li><strong>Vector types</strong>: fixed-element vectors (<code dir="auto">vector&#x3C;float,n></code>) write no length prefix — layout is exactly <code dir="auto">n x elementSize</code> bytes concatenated. Source: <code dir="auto">VectorType.java:477-493</code>, <code dir="auto">FixedLengthSerializer</code>.</li>
+<li>
+<p><strong>Frozen collection counts and element lengths</strong> (<code dir="auto">frozen&#x3C;list/set/map></code>) use <strong>fixed 4-byte BE
+i32</strong>, not VInt: <code dir="auto">CollectionSerializer.pack</code> writes the count via <code dir="auto">writeCollectionSize</code>
+(<code dir="auto">putInt</code>, <code dir="auto">CollectionSerializer.java:67-70</code>) and each element via <code dir="auto">writeValue</code>
+(<code dir="auto">putInt</code> + bytes, <code dir="auto">:82-92</code>); <code dir="auto">-1</code> = NULL element. See Chapter 5, “Frozen Collection Serialization”.</p>
+</li>
+<li>
+<p><strong>Non-frozen collection cells</strong> always length-prefix the cell <strong>path</strong> with an unsigned VInt, and
+length-prefix the cell <strong>value</strong> <em>iff</em> <code dir="auto">HAS_EMPTY_VALUE</code> (<code dir="auto">0x04</code>) is clear — each element is its own
+cell, so the framing differs from the frozen form:</p>
+<ul>
+<li>The cell <strong>path</strong> (never flag-gated): <code dir="auto">CollectionType.CollectionPathSerializer.serialize</code> →
+<code dir="auto">ByteBufferUtil.writeWithVIntLength</code> (<code dir="auto">CollectionType.java:361-366</code>), which is
+<code dir="auto">writeUnsignedVInt32(remaining)</code> + bytes (<code dir="auto">ByteBufferUtil.java:356-360</code>).</li>
+<li>The cell <strong>value</strong> is present only when <code dir="auto">HAS_EMPTY_VALUE</code> is clear, and that flag is
+<strong>size-driven, not type-driven</strong>: <code dir="auto">Cell.Serializer.serialize</code> sets it from <code dir="auto">cell.valueSize() > 0</code>
+(<code dir="auto">Cell.java:271</code>, <code dir="auto">:277-278</code>) and writes the value only <code dir="auto">if (hasValue)</code> (<code dir="auto">:303-304</code>); the reader
+mirrors it (<code dir="auto">:310</code>, <code dir="auto">:329-339</code>). So a <strong>zero-length value carries no length VInt and no bytes</strong> —
+not a <code dir="auto">0x00</code>. Instances of that one rule: a non-frozen <code dir="auto">set&#x3C;T></code> element (datum in the path,
+<code dir="auto">SetType.valueComparator()</code> is <code dir="auto">EmptyType.instance</code>, <code dir="auto">SetType.java:106-109</code>), any zero-length value
+(<code dir="auto">map&#x3C;text,text></code> entry <code dir="auto">-> ''</code>, empty blob in a <code dir="auto">list&#x3C;blob></code>), and an element tombstone
+(<code dir="auto">IS_DELETED</code>, <code dir="auto">Cell.java:264</code>).</li>
+<li><strong>When the value IS present it is length-prefixed even for a fixed-width element/value type</strong>
+(<code dir="auto">list&#x3C;int></code>, <code dir="auto">map&#x3C;text,bigint></code>): <code dir="auto">Cell.Serializer.serialize</code> calls
+<code dir="auto">header.getType(column).writeValue(...)</code> (<code dir="auto">Cell.java:303-304</code>), and <code dir="auto">header.getType(column)</code> is the
+<strong>column’s</strong> type — the collection type, never the element type
+(<code dir="auto">SerializationHeader.java:160-163</code>, map built from <code dir="auto">column.type</code> at <code dir="auto">:250-257</code>).
+<code dir="auto">CollectionType</code>/<code dir="auto">ListType</code>/<code dir="auto">MapType</code>/<code dir="auto">SetType</code> do not override <code dir="auto">valueLengthIfFixed()</code>, so they
+inherit <code dir="auto">VARIABLE_LENGTH = -1</code> (<code dir="auto">AbstractType.java:62</code>, <code dir="auto">:490-493</code>) and <code dir="auto">writeValue</code> takes
+the <code dir="auto">else</code> branch → <code dir="auto">accessor.writeWithVIntLength(...)</code> (<code dir="auto">:550-552</code>).</li>
+<li>The <code dir="auto">valueLengthIfFixed() >= 0</code> raw-bytes branch (<code dir="auto">AbstractType.java:538-543</code>) fires only for
+<strong>simple (non-collection)</strong> cells, whose scalar type overrides it (e.g. <code dir="auto">Int32Type</code> → <code dir="auto">4</code>,
+<code dir="auto">Int32Type.java:156-159</code>).</li>
+</ul>
+<p>See Chapter 5, “Non-Frozen Collection Serialization”.</p>
+</li>
+<li>
+<p><strong>Tuple and UDT field lengths</strong> use <strong>4-byte BE signed int</strong> (not VInt), with no field count on
+disk. Null fields are encoded as 0xFFFFFFFF (-1). Source: <code dir="auto">TupleType.java:341-364</code>;
+<code dir="auto">UserType extends TupleType</code> (<code dir="auto">UserType.java:52,194</code>), so the two are byte-identical.</p>
+</li>
+<li>
+<p><strong>Vector types</strong>: fixed-element vectors (<code dir="auto">vector&#x3C;float,n></code>) write no length prefix — layout is exactly <code dir="auto">n x elementSize</code> bytes concatenated. Source: <code dir="auto">VectorType.java:477-493</code>, <code dir="auto">FixedLengthSerializer</code>.</p>
+</li>
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="key-takeaways">Key Takeaways</h2><a class="sl-anchor-link" href="#key-takeaways"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Key Takeaways”</span></a></div>
 <ul>
 <li>Primitive numeric and time types are fixed-width big-endian values.</li>
-<li>Strings and blobs are length-prefixed with VInt; collection counts and element lengths also use unsigned VInt.</li>
-<li>Tuple and UDT field lengths use 4-byte BE signed int; -1 (0xFFFFFFFF) = null.</li>
+<li>Cell values for strings and blobs are length-prefixed with <strong>unsigned</strong> VInt (never ZigZag). So is
+every non-frozen collection cell value <strong>that is present at all</strong> (i.e. <code dir="auto">HAS_EMPTY_VALUE</code> clear),
+fixed-width element types included — the fixed-width no-prefix rule is a <strong>simple-cell</strong> rule, and a
+zero-length collection value is omitted entirely rather than written as a <code dir="auto">0x00</code> length.</li>
+<li>Frozen collection counts and element lengths, and tuple/UDT field lengths, are fixed 4-byte BE
+signed int (-1 = null), <strong>not</strong> VInt.</li>
+<li>Signed (ZigZag) VInts in <code dir="auto">Data.db</code> occur only inside a serialized <code dir="auto">DurationType</code> payload — its
+months/days/nanos — <strong>wherever that payload appears</strong>, including nested inside a collection, tuple, or
+UDT (<code dir="auto">frozen&#x3C;list&#x3C;duration>></code>, a <code dir="auto">duration</code> UDT field). Cassandra tracks this recursion via
+<code dir="auto">referencesDuration()</code> (<code dir="auto">DurationType.java:96-99</code>; <code dir="auto">TupleType.java:125-128</code> recurses over
+<code dir="auto">allTypes()</code>). Every structural VInt in <code dir="auto">Data.db</code> — length prefix, count, timestamp/TTL/deletion delta
+— is unsigned. Signed VInt is not unique to <code dir="auto">duration</code> across the whole component set either:
+<code dir="auto">Index.db</code>’s promoted index writes a signed width delta (<code dir="auto">IndexInfo.java:96,111-112</code>). See Appendix B.</li>
 <li>Fixed-element vectors (e.g., <code dir="auto">vector&#x3C;float,n></code>) are raw concatenated elements with no length prefix.</li>
 <li>Serialization is schema-driven; <code dir="auto">SerializationHeader</code> and the <code dir="auto">db.marshal</code> types define exact encodings.</li>
 </ul>

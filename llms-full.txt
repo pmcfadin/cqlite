@@ -5404,10 +5404,10 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
 
 [Section titled “Worked Examples”](#worked-examples)
 
-* Nested collection (map\<text, list>), 2 entries:
+* Nested frozen collection (`frozen<map<text, frozen<list<int>>>>`), 2 entries:
 
-  * Encoding: count (VInt) -> for each entry: key (VInt len + UTF-8), value list (VInt elem count -> each int as 4 bytes)
-  * Size rule of thumb: total\_size \~= size(VInt(count)) + sum\[ size(VInt(|key|)) + |key| + size(VInt(list\_len)) + 4\*list\_len ]
+  * Encoding: entry count (**4-byte BE i32**) -> for each entry: key (4-byte BE i32 len + UTF-8), then value (4-byte BE i32 len + the inner list’s own blob: 4-byte BE i32 elem count -> each element 4-byte BE i32 len + 4 int bytes). Every prefix inside a frozen blob is fixed-width, **not** VInt.
+  * Size rule of thumb: total\_size \~= 4 + sum\[ (4 + |key|) + (4 + |inner\_list\_blob|) ]
 
 * UDT with optional fields (frozen):
 
@@ -5454,8 +5454,19 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
 
 [Section titled “Notes”](#notes)
 
-* **Collection element lengths** (list, set, map) use unsigned VInt encoding (`CollectionSerializer.java:43,51`). See Appendix B for VInt details.
-* **Tuple and UDT field lengths** use **4-byte BE signed int** (not VInt). Null fields are encoded as 0xFFFFFFFF (-1). Source: `TupleType.java:345-359`.
+* **Frozen collection counts and element lengths** (`frozen<list/set/map>`) use **fixed 4-byte BE i32**, not VInt: `CollectionSerializer.pack` writes the count via `writeCollectionSize` (`putInt`, `CollectionSerializer.java:67-70`) and each element via `writeValue` (`putInt` + bytes, `:82-92`); `-1` = NULL element. See Chapter 5, “Frozen Collection Serialization”.
+
+* **Non-frozen collection cells** always length-prefix the cell **path** with an unsigned VInt, and length-prefix the cell **value** *iff* `HAS_EMPTY_VALUE` (`0x04`) is clear — each element is its own cell, so the framing differs from the frozen form:
+
+  * The cell **path** (never flag-gated): `CollectionType.CollectionPathSerializer.serialize` → `ByteBufferUtil.writeWithVIntLength` (`CollectionType.java:361-366`), which is `writeUnsignedVInt32(remaining)` + bytes (`ByteBufferUtil.java:356-360`).
+  * The cell **value** is present only when `HAS_EMPTY_VALUE` is clear, and that flag is **size-driven, not type-driven**: `Cell.Serializer.serialize` sets it from `cell.valueSize() > 0` (`Cell.java:271`, `:277-278`) and writes the value only `if (hasValue)` (`:303-304`); the reader mirrors it (`:310`, `:329-339`). So a **zero-length value carries no length VInt and no bytes** — not a `0x00`. Instances of that one rule: a non-frozen `set<T>` element (datum in the path, `SetType.valueComparator()` is `EmptyType.instance`, `SetType.java:106-109`), any zero-length value (`map<text,text>` entry `-> ''`, empty blob in a `list<blob>`), and an element tombstone (`IS_DELETED`, `Cell.java:264`).
+  * **When the value IS present it is length-prefixed even for a fixed-width element/value type** (`list<int>`, `map<text,bigint>`): `Cell.Serializer.serialize` calls `header.getType(column).writeValue(...)` (`Cell.java:303-304`), and `header.getType(column)` is the **column’s** type — the collection type, never the element type (`SerializationHeader.java:160-163`, map built from `column.type` at `:250-257`). `CollectionType`/`ListType`/`MapType`/`SetType` do not override `valueLengthIfFixed()`, so they inherit `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`) and `writeValue` takes the `else` branch → `accessor.writeWithVIntLength(...)` (`:550-552`).
+  * The `valueLengthIfFixed() >= 0` raw-bytes branch (`AbstractType.java:538-543`) fires only for **simple (non-collection)** cells, whose scalar type overrides it (e.g. `Int32Type` → `4`, `Int32Type.java:156-159`).
+
+  See Chapter 5, “Non-Frozen Collection Serialization”.
+
+* **Tuple and UDT field lengths** use **4-byte BE signed int** (not VInt), with no field count on disk. Null fields are encoded as 0xFFFFFFFF (-1). Source: `TupleType.java:341-364`; `UserType extends TupleType` (`UserType.java:52,194`), so the two are byte-identical.
+
 * **Vector types**: fixed-element vectors (`vector<float,n>`) write no length prefix — layout is exactly `n x elementSize` bytes concatenated. Source: `VectorType.java:477-493`, `FixedLengthSerializer`.
 
 ## Key Takeaways
@@ -5463,8 +5474,9 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
 [Section titled “Key Takeaways”](#key-takeaways)
 
 * Primitive numeric and time types are fixed-width big-endian values.
-* Strings and blobs are length-prefixed with VInt; collection counts and element lengths also use unsigned VInt.
-* Tuple and UDT field lengths use 4-byte BE signed int; -1 (0xFFFFFFFF) = null.
+* Cell values for strings and blobs are length-prefixed with **unsigned** VInt (never ZigZag). So is every non-frozen collection cell value **that is present at all** (i.e. `HAS_EMPTY_VALUE` clear), fixed-width element types included — the fixed-width no-prefix rule is a **simple-cell** rule, and a zero-length collection value is omitted entirely rather than written as a `0x00` length.
+* Frozen collection counts and element lengths, and tuple/UDT field lengths, are fixed 4-byte BE signed int (-1 = null), **not** VInt.
+* Signed (ZigZag) VInts in `Data.db` occur only inside a serialized `DurationType` payload — its months/days/nanos — **wherever that payload appears**, including nested inside a collection, tuple, or UDT (`frozen<list<duration>>`, a `duration` UDT field). Cassandra tracks this recursion via `referencesDuration()` (`DurationType.java:96-99`; `TupleType.java:125-128` recurses over `allTypes()`). Every structural VInt in `Data.db` — length prefix, count, timestamp/TTL/deletion delta — is unsigned. Signed VInt is not unique to `duration` across the whole component set either: `Index.db`’s promoted index writes a signed width delta (`IndexInfo.java:96,111-112`). See Appendix B.
 * Fixed-element vectors (e.g., `vector<float,n>`) are raw concatenated elements with no length prefix.
 * Serialization is schema-driven; `SerializationHeader` and the `db.marshal` types define exact encodings.
 
@@ -5481,6 +5493,7 @@ This appendix consolidates the type mapping tables for Cassandra 5.0 SSTables an
 In this appendix you will learn:
 
 * How VInt and ZigZag encodings appear on disk in Cassandra
+* Which `Data.db` fields are unsigned VInt, which are signed, and which are fixed-width
 * Common row/cell header bits and where to find them upstream
 * Quick rules for reading variable-length values
 * Write-side encoding patterns for SSTable generation
@@ -5498,7 +5511,9 @@ Examples (unsigned lengths shown as hex bytes → value):
 * `00` → 0
 * `0A` → 10
 * `81 00` → 256 (two-byte: 10xxxxxx xxxxxxxx)
-* `C1 00 00` → 0x10000 - 1 example boundary (three-byte: 110xxxxx …)
+* `C1 00 00` → 0x10000 (three-byte: 110xxxxx xxxxxxxx xxxxxxxx — five data bits in the first byte)
+
+The count of leading 1-bits in the first byte is the number of *extra* bytes that follow; the remaining bits of the first byte are the high-order data bits (`VIntCoding.java`).
 
 ZigZag (signed) quick reference:
 
@@ -5512,14 +5527,18 @@ Upstream anchors (Cassandra 5.0.8):
 
 Rules of thumb:
 
-* Length prefixes for `text`, `blob`, collection elements, and UDT fields are VInt.
-* Signed values may use ZigZag in compatibility layers; lengths are non-negative.
+* Length prefixes that *are* present are **unsigned** VInt (`ValueAccessor.writeWithVIntLength` → `writeUnsignedVInt32`, `ValueAccessor.java:171-175`; paths via `ByteBufferUtil.writeWithVIntLength`, `CollectionType.java:361-366`). That covers `text`/`blob` simple cell values, the path of **every** non-frozen collection cell, and the value of every non-frozen collection cell that *has* one.
+* **A non-frozen collection cell PATH is always length-prefixed; its VALUE is length-prefixed *iff* `HAS_EMPTY_VALUE` (`0x04`) is clear.** That flag is **size-driven, not type-driven**: `Cell.Serializer.serialize` sets it from `cell.valueSize() > 0` (`Cell.java:271`, `:277-278`) and writes the value only `if (hasValue)` (`:303-304`); the reader mirrors it at `:310`, `:329-339` (`skip` at `:381`, `:399-400`). So **no length VInt and no bytes** are written for a zero-length value — the flag replaces the `0x00` a reader might expect. Three instances of the one rule: a non-frozen `set<T>` element (datum lives in the path; `SetType.valueComparator()` is `EmptyType.instance`, `SetType.java:106-109` → always zero-length); **any** zero-length value (a `map<text,text>` entry with value `''`, an empty blob in `list<blob>`); an element **tombstone** (`IS_DELETED`, `0x01` — see the mask’s own comment at `Cell.java:264`).
+* **When a value IS present it is unsigned-VInt-length-prefixed even for a fixed-width element type** (`list<int>`, `map<text,bigint>`). `Cell.Serializer.serialize` writes it as `header.getType(column).writeValue(...)` (`Cell.java:303-304`), and `header.getType(column)` is the **column’s** type — the collection type, not the element type (`SerializationHeader.java:160-163`, `:250-257`). `CollectionType`/`ListType`/`MapType`/`SetType` never override `valueLengthIfFixed()`, so they are `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`) and `writeValue` takes the `writeWithVIntLength` branch (`:550-552`).
+* **Where the fixed-width no-prefix rule DOES apply: SIMPLE (non-collection) cells.** Only scalar types override `valueLengthIfFixed()` (e.g. `Int32Type` → `4`, `Int32Type.java:156-159`), so only a simple cell can take the raw-bytes branch (`AbstractType.java:538-543`). Cassandra’s layout comment states both gates at once — the value size “is present unless either the cell has the `HAS_EMPTY_VALUE_MASK`, or the value for columns of this type have a fixed length” (`Cell.java:254-255`); for a collection cell only the first can ever fire.
+* **Exception — fixed 4-byte BE i32, not VInt**: tuple/UDT field lengths and *frozen* collection counts/element lengths (`TupleType.buildValue`, `CollectionSerializer.writeCollectionSize`).
+* Every VInt in `Data.db` is unsigned **except** the three components of a serialized `DurationType` payload — wherever that payload occurs, including nested in a collection/tuple/UDT. Scoped to `Data.db`: `Index.db`’s promoted-index width delta is a signed VInt (`IndexInfo.java:96,111-112`).
 
-## ZigZag Encoding for Writers
+## ZigZag (Signed VInt) — Where It Actually Applies
 
-[Section titled “ZigZag Encoding for Writers”](#zigzag-encoding-for-writers)
+[Section titled “ZigZag (Signed VInt) — Where It Actually Applies”](#zigzag-signed-vint--where-it-actually-applies)
 
-When writing SSTable data, timestamps, TTL, and deletion times often use ZigZag encoding to efficiently represent signed values with small absolute magnitudes.
+ZigZag maps a signed integer onto an unsigned one so small negative magnitudes stay short, then encodes the result as an unsigned VInt. In Cassandra it is reached through `DataOutputPlus.writeVInt` → `VIntCoding.writeVInt` → `writeUnsignedVInt(encodeZigZag64(v))` (`VIntCoding.java:449`, `:522`).
 
 **ZigZag formula**: `(n << 1) ^ (n >> 63)` for 64-bit signed integers
 
@@ -5541,27 +5560,39 @@ When writing SSTable data, timestamps, TTL, and deletion times often use ZigZag 
 | 1000           | 2000         | `0x87 0xD0` |
 | -1000          | 1999         | `0x87 0xCF` |
 
-**Common use cases**:
+**Where ZigZag actually appears in `Data.db`** — inside a serialized `DurationType` payload, and nowhere else:
 
-* Legacy wire-protocol (pre-5.0 messaging serialization) for signed integer fields
+* A `duration` payload is three consecutive **signed** VInts (months, days, nanos). `DurationSerializer.serialize` calls `output.writeVInt(...)` three times (`DurationSerializer.java:34,49-51`). ZigZag is genuinely required here — a negative CQL duration makes every non-zero component negative (`Duration.java:101-110`). See Appendix A.
+* **This is not limited to a top-level `duration` cell.** Wherever a `duration` is *nested*, the same three signed VInts sit inside the enclosing value’s bytes while the cell’s own type is something else: `frozen<list<duration>>`, `map<text, frozen<tuple<duration,int>>>`, a UDT field declared `duration`. Cassandra models exactly this recursion — `DurationType.referencesDuration()` returns `true` (`DurationType.java:96-99`) and `TupleType.referencesDuration()` recurses over `allTypes()` (`TupleType.java:125-128`), and `UserType extends TupleType` inherits it (`UserType.java:52`). A decoder must therefore reach the signed-VInt path by *type descent*, not by checking whether the column type is `duration`.
 
-> **SSTable Data.db does NOT use ZigZag for row-level temporal fields.** Timestamp deltas, TTL deltas, and local deletion time deltas all call `writeUnsignedVInt` or `writeUnsignedVInt32` (see `SerializationHeader.java:167,172,177`). Because the baselines (`min_timestamp`, `min_ttl`, `min_local_deletion_time`) are the minimums across the SSTable, all deltas are guaranteed non-negative, making unsigned encoding both correct and efficient.
+**Where ZigZag does NOT appear in `Data.db`**: every **structural** field. Length prefixes, counts, and the row/cell temporal deltas are all unsigned (next section), no matter how deeply a `duration` is nested inside the value they frame.
 
-**Implementation reference**: `cqlite-core/src/storage/serialization/vint.rs::zigzag_encode()`
+**Signed VInt is not unique to `duration` across the whole component set.** The promoted index inside `Index.db` also uses a signed VInt, and mixes both variants in one struct: `IndexInfo.Serializer` writes the block offset unsigned but the **width delta signed** — `out.writeUnsignedVInt(info.offset)` then `out.writeVInt(info.width - WIDTH_BASE)` with `WIDTH_BASE = 64 * 1024` (`IndexInfo.java:96,111-112`), read back as `in.readVInt() + WIDTH_BASE` (`:134`). The delta is signed because a block narrower than `WIDTH_BASE` yields a negative value. ZigZag also appears in the internode messaging serialization path, which is not an SSTable concern.
 
-### SSTable Row Fields Always Use Unsigned VInt, Not ZigZag
+**Implementation references** (`cqlite-core/src/storage/serialization/vint.rs::encode_signed()` = ZigZag + unsigned VInt):
+
+* `Data.db` `duration` payload — three `encode_signed` calls in `cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs:232-234`. Nesting is handled by recursion, not by a top-level type check: `serialize_value_into` recurses into map keys/values, frozen collection elements, and `Value::Frozen` inners (`encoding.rs:303-315`), so a nested `duration` reaches the same three signed VInts.
+* `Index.db` promoted-index width delta — `encode_signed(width_delta, buf)` in `cqlite-core/src/storage/sstable/writer/index_writer.rs:667`; the read side zigzag-decodes to invert it (`cqlite-core/src/storage/sstable/promoted_index_reader.rs`).
+
+## SSTable Row Fields Always Use Unsigned VInt, Not ZigZag
 
 [Section titled “SSTable Row Fields Always Use Unsigned VInt, Not ZigZag”](#sstable-row-fields-always-use-unsigned-vint-not-zigzag)
 
 All temporal delta fields written by `SerializationHeader` call the unsigned variant:
 
-| Field                       | Method                               | Source                         |
-| --------------------------- | ------------------------------------ | ------------------------------ |
-| timestamp delta             | `writeUnsignedVInt(ts - min_ts)`     | `SerializationHeader.java:167` |
-| TTL delta                   | `writeUnsignedVInt32(ttl - min_ttl)` | `SerializationHeader.java:177` |
-| local\_deletion\_time delta | `writeUnsignedVInt32(ldt - min_ldt)` | `SerializationHeader.java:172` |
+| Field                       | Method                               | Source                             |
+| --------------------------- | ------------------------------------ | ---------------------------------- |
+| timestamp delta             | `writeUnsignedVInt(ts - min_ts)`     | `SerializationHeader.java:165-168` |
+| TTL delta                   | `writeUnsignedVInt32(ttl - min_ttl)` | `SerializationHeader.java:175-178` |
+| local\_deletion\_time delta | `writeUnsignedVInt32(ldt - min_ldt)` | `SerializationHeader.java:170-173` |
 
-ZigZag encoding (`writeVInt`) appears only in the on-wire messaging serialization path (pre-5.0 compatibility) and is absent from SSTable Data.db serialization. Because the baselines are chosen to be ≤ the smallest actual value in the SSTable, all deltas are non-negative, making unsigned encoding correct and efficient.
+`writeDeletionTime` is just those two in order — `writeTimestamp` then `writeLocalDeletionTime` (`SerializationHeader.java:180-184`) — so a row/cell/complex deletion is also two unsigned VInts.
+
+Because the baselines (`min_timestamp`, `min_ttl`, `min_local_deletion_time`) are the minimums across the SSTable, every delta is non-negative, making unsigned encoding both correct and optimal. Decoding one of these as signed ZigZag silently halves and sign-flips the value.
+
+> **Do not infer signedness from the bytes.** A single byte `0x05` is `5` unsigned and `-3` under ZigZag; nothing in the byte distinguishes them. The writer’s method (`writeUnsignedVInt` vs `writeVInt`) is the only authority — read it off the field’s serializer, never off the data.
+
+CQLite matches this on both sides: the reader parses these fields with `parse_vuint` (`reader/parsing/row_decoder/cell_value.rs:95-99` for the cell timestamp delta, `row_decoder/row_framing.rs:230-232` for deletion times) and the writer emits them with `encode_unsigned` (`writer/data_writer/cells.rs:51-55`, `:170-183`). Issue #1623 (PR #1757, `d31c897c`) reclassified 256 real corpus sites that a signed decode had been silently corrupting.
 
 ## Delta Encoding Pattern
 
@@ -5593,11 +5624,11 @@ SSTable components use delta encoding to reduce storage size by storing offsets 
 * Statistics: `min_ttl = 3600` (1 hour)
 * Actual TTL: `7200` (2 hours)
 * Stored delta: `3600` (encoded as **unsigned** VInt32 — `SerializationHeader.writeUnsignedVInt32`)
-* Bytes: `0x9C 0x20` (unsigned VInt(7200): `7200 = 0x1C20`, 2-byte form `0x9C 0x20`)
+* Bytes: `0x8E 0x10` (unsigned VInt(3600): `3600 = 0x0E10`, 2-byte form `(0x0E | 0x80) = 0x8E`, `0x10`) — the encoded value is the **delta**, not the absolute TTL.
 
 *Local deletion time encoding*:
 
-* Statistics: `min_local_deletion_time = 1700000000` (Jan 2023)
+* Statistics: `min_local_deletion_time = 1700000000` (Nov 2023)
 * Actual deletion time: `1700000010`
 * Stored delta: `10` (encoded as unsigned VInt)
 * Bytes: `0x0A`
@@ -5673,7 +5704,7 @@ Cell flags appear at the start of each cell and control cell-level metadata.
 
 * **Tombstones** (`IS_DELETED`): MUST NOT set `USE_ROW_TIMESTAMP` - tombstones require explicit timestamps and local\_deletion\_time
 * **`IS_EXPIRING` (0x02) is strict and mutually exclusive with `IS_DELETED` (0x01)**: `IS_EXPIRING` means `ttl != NO_TTL` and is set only for a live cell that carries a TTL. A tombstone never also sets `IS_EXPIRING` (so no wasted TTL byte), and an expiring cell never sets `IS_DELETED`. Authority: `Cell.Serializer.flags()`. Verified in CQLite’s emitter (`data_writer.rs` cell-flag construction: TTL fields only on the `Some(ttl)` path).
-* **Empty strings**: Use `HAS_EMPTY_VALUE` flag with zero-length value bytes (distinct from NULL)
+* **Empty strings**: `HAS_EMPTY_VALUE` (`0x04`) flag set and **no** value length and no value bytes — the flag replaces the length VInt, it does not precede a `0x00` (`Cell.java:277-278`, `:303-304`; reader `:310`). Distinct from NULL.
 * **NULL values**: NOT written as cells - represented by absence in column bitmap
 
 **Example**:
@@ -5694,8 +5725,7 @@ Tombstone cell:
 
 Empty string cell:
 [0x0C]  ← flags (USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE)
-[0x00]  ← value_length = 0
-(no value bytes)
+(no value length VInt, no value bytes)
 ```
 
 **Upstream references**:
@@ -5704,11 +5734,11 @@ Empty string cell:
 * `org.apache.cassandra.db.rows.*`
 * `org.apache.cassandra.db.rows.UnfilteredSerializer` (V5CompressedLegacy encoding)
 
-## UDT Field Encoding (Issue #220)
+## Tuple and UDT Field Encoding (Issue #220)
 
-[Section titled “UDT Field Encoding (Issue #220)”](#udt-field-encoding-issue-220)
+[Section titled “Tuple and UDT Field Encoding (Issue #220)”](#tuple-and-udt-field-encoding-issue-220)
 
-UDT fields use **4-byte big-endian i32** length prefixes (NOT VInt):
+Tuple and UDT fields share one on-disk framing: **4-byte big-endian i32** length prefixes (NOT VInt), fields concatenated in schema/positional order with **no field count** on disk:
 
 ```plaintext
 [field_length: 4-byte BE i32][field_data: variable]
@@ -5721,6 +5751,8 @@ UDT fields use **4-byte big-endian i32** length prefixes (NOT VInt):
 | `-1` (0xFFFFFFFF) | NULL field                         |
 | `0` (0x00000000)  | Empty field (zero-length, present) |
 | `>0`              | Byte count of field data           |
+
+Trailing omitted fields are implicitly NULL. `UserType extends TupleType` (`UserType.java:52`) and `UserType.buildValue` delegates to `TupleType.buildValue` (`UserType.java:194`), so the two forms are byte-identical — only their CQL semantics differ. Authority: `org.apache.cassandra.db.marshal.TupleType.buildValue` / `.split` (`TupleType.java:301-364`).
 
 **UDT type string format** (in Statistics.db):
 
@@ -5926,8 +5958,11 @@ DecoratedKey {
 [Section titled “Key Takeaways”](#key-takeaways)
 
 * Expect VInt before variable-sized payloads; decode, then slice the value.
-* **Exception**: UDT fields use fixed 4-byte BE i32 lengths, not VInt.
-* Signed fields that use ZigZag appear primarily in legacy contexts; length fields are non-negative.
+* **Every STRUCTURAL VInt in `Data.db` is UNSIGNED**: lengths/counts *and* the timestamp/TTL/localDeletionTime deltas all use `writeUnsignedVInt`/`writeUnsignedVInt32` (`SerializationHeader.java:165-184`).
+* **ZigZag (signed VInt) in `Data.db` appears only inside a serialized `DurationType` payload** — its three components (`DurationSerializer.java:49-51`) — **wherever that payload occurs**, including nested inside a collection, tuple, or UDT (`DurationType.referencesDuration()`, `DurationType.java:96-99`; `TupleType.referencesDuration()` recurses over `allTypes()`, `TupleType.java:125-128`). No other `Data.db` field uses it. Scoped to `Data.db`: the `Index.db` promoted index also writes a **signed** VInt for its per-block width delta, `writeVInt(info.width - WIDTH_BASE)` (`IndexInfo.java:96,111-112`).
+* **A non-frozen collection cell length-prefixes BOTH path and value with an unsigned VInt**, fixed-width element types included (`Cell.java:303-304` → the *column’s* collection type, which is `VARIABLE_LENGTH`). The `valueLengthIfFixed()` raw-bytes shortcut is a **simple-cell** rule (`AbstractType.java:538-543`); a non-frozen `set<T>`’s missing value is `HAS_EMPTY_VALUE_MASK`, a flag, not a width.
+* Signedness is invisible in the bytes (`0x05` = `5` unsigned, `-3` ZigZag) — take it from the field’s serializer, never guess from the data.
+* **Exception — not VInt at all**: tuple/UDT field lengths and frozen-collection counts/element lengths are fixed 4-byte BE `i32` (`TupleType.java:341-364`, `CollectionSerializer.java:67-92`).
 * **Row size measurement**: VInt values like `row_size` are measured from AFTER the VInt is consumed (Issue #237).
 * **Safety limit**: Length VInts are capped at 1GB to prevent overflow and allocation attacks (Issue #264).
 * **Write guidance**: Use delta encoding for timestamps/TTL/deletion times; compute Statistics.db baselines first.
@@ -5940,6 +5975,11 @@ DecoratedKey {
 
 * Cassandra 5.0.8: `SerializationHeader` — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java`
 * Cassandra 5.0.8: `rows` — `https://github.com/apache/cassandra/tree/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows`
+* Cassandra 5.0.8: `VIntCoding` (ZigZag ⇄ unsigned VInt) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/vint/VIntCoding.java`
+* Cassandra 5.0.8: `DurationSerializer` (the only signed-VInt payload in `Data.db`, nesting included) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/serializers/DurationSerializer.java`
+* Cassandra 5.0.8: `IndexInfo` (signed-VInt promoted-index width delta in `Index.db`) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/IndexInfo.java`
+* Cassandra 5.0.8: `CollectionSerializer` (frozen collection fixed-width framing) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/serializers/CollectionSerializer.java`
+* Cassandra 5.0.8: `TupleType` (tuple/UDT `i32`-BE field framing) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/TupleType.java`
 
 # Appendix C — Reference Walkthroughs with Code
 
@@ -6272,6 +6312,32 @@ Non-frozen collections are serialized as multiple cells (complex columns):
 * **map\<K,V>**: Entries stored with serialized key as path
 
 Complex columns set the `ROW_HAS_COMPLEX_DELETION` flag (0x40).
+
+### Zero-length collection element value: `HAS_EMPTY_VALUE` on the whole-column writers
+
+[Section titled “Zero-length collection element value: HAS\_EMPTY\_VALUE on the whole-column writers”](#zero-length-collection-element-value-has_empty_value-on-the-whole-column-writers)
+
+**Status**: KNOWN GAP (Issue #2970)
+
+Cassandra decides the presence of a cell’s value length + bytes from the `HAS_EMPTY_VALUE` flag (`0x04`), which it sets from `cell.valueSize() > 0` — a **size** test, not a type test (`Cell.java:271`, `:277-278`, `:303-304`; read side `:310`, `:329-339`). A zero-length value is therefore written as `flags |= 0x04` with **no** length VInt and **no** bytes.
+
+CQLite implements that rule correctly on:
+
+* the reader — `.../reader/parsing/row_decoder/complex_column.rs::parse_complex_cell_value()` (`:1012`, `:1128`) reads a value length only when neither `IS_DELETED` nor `HAS_EMPTY_VALUE` is set;
+* the per-element writer — `.../writer/data_writer/complex.rs::write_complex_element_cell()` (`:884-891`, `:960-969`) derives the flag and emits the length only when it is clear;
+* `write_set_complex_cells()` (`:594`), which always sets `CELL_HAS_EMPTY_VALUE` and writes no value.
+
+**The gap**: the *whole-column* writers `write_map_complex_cells()` (`:646`) and `write_list_complex_cells()` (`:705`) hardcode `flags = 0` (`:683`, `:737`) and call `encode_unsigned(len)` unconditionally (`:694`, `:747`). An element whose serialized value is zero-length — a `map<text,text>` entry with value `''`, an empty blob in a `list<blob>` — is emitted as `flags=0` + `0x00` where Cassandra emits `flags=0x04` + nothing.
+
+**Impact — a byte-parity divergence, not a framing one.** Cassandra **reads these bytes without error**: its deserializer is symmetric with its serializer, so on `flags=0` it computes `hasValue = true` (`Cell.java:310`), takes the variable-length branch `int l = in.readUnsignedVInt32()` (`AbstractType.java:590`) which consumes our `0x00` as `l=0`, and `accessor.read(in, 0)` short-circuits to `EMPTY_BYTE_BUFFER` before allocating or reading any bytes (`ByteBufferUtil.java:444-448`). The stream stays byte-aligned and the decoded value is identical (empty). **This is not corruption.**
+
+What it does break is byte-level equality with Cassandra’s output. For the same logical row CQLite emits two divergences: one spurious `0x00` length byte, and a `flags` byte differing by `0x04`. Consequences:
+
+* **byte-for-byte compaction parity** — the v0.12 guarantee does not hold for such a row;
+* **digests** — `Digest.crc32` over the cell bytes diverges, so a CQLite-written SSTable will not digest-match Cassandra’s for identical data;
+* **`row_size` / `prev_size` accounting** — the row is one byte longer than Cassandra would write it.
+
+Non-empty values, sets, and the per-element path are unaffected.
 
 ### Static Row Support
 
@@ -9083,6 +9149,37 @@ Underlying file shows a partition stream with a serialization header followed by
 
 VInt parsing (Cassandra-compatible), used across headers and lengths. For a concise implementation walkthrough, see Appendix C.
 
+### VInt Sign Convention
+
+[Section titled “VInt Sign Convention”](#vint-sign-convention)
+
+A VInt on disk carries no marker for its own signedness, so the reader must know which variant the writer used. In `Data.db` the answer is nearly uniform: **unsigned VInt (no ZigZag)**.
+
+Unsigned VInt (`writeUnsignedVInt` / `writeUnsignedVInt32`):
+
+| Field                                                                                                                                       | Writer call                                              | Source                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Variable-width **simple** cell value length (`text`, `blob`, `varint`, `decimal`, `duration`)                                               | `writeWithVIntLength` → `writeUnsignedVInt32`            | `ValueAccessor.java:171-175`                                                       |
+| Non-frozen collection cell path length (**always** present)                                                                                 | `ByteBufferUtil.writeWithVIntLength`                     | `CollectionType.java:361-366`, `ByteBufferUtil.java:356-360`                       |
+| Non-frozen collection cell **value** length (present iff `HAS_EMPTY_VALUE` is clear — and then present even for a fixed-width element type) | `writeWithVIntLength` → `writeUnsignedVInt32`            | `Cell.java:271,303-304`, `AbstractType.java:550-552`, `ValueAccessor.java:171-175` |
+| Clustering-prefix header (2 bits per clustering column, one VInt per batch of ≤32 columns)                                                  | `writeUnsignedVInt(makeHeader(...))`                     | `ClusteringPrefix.java:455-475`                                                    |
+| `row_size` and `prev_size` (`previousUnfilteredSize`)                                                                                       | `writeUnsignedVInt`                                      | `UnfilteredSerializer.java:199-202`                                                |
+| Complex-column cell count                                                                                                                   | `writeUnsignedVInt32(data.cellsCount())`                 | `UnfilteredSerializer.java:277`                                                    |
+| Columns-subset field (missing-column bitmap, large-subset count and indices)                                                                | `writeUnsignedVInt` / `writeUnsignedVInt32`              | `Columns.java:521-525`, `:614-639`                                                 |
+| Row/cell timestamp, TTL, and local-deletion-time deltas                                                                                     | `writeTimestamp` / `writeTTL` / `writeLocalDeletionTime` | `SerializationHeader.java:165-184`                                                 |
+
+Signed (ZigZag) VInt in `Data.db` — only inside a serialized `DurationType` payload: its months, days, and nanos are three `writeVInt` calls (`DurationSerializer.java:34,49-51`). That payload is not limited to a top-level `duration` cell: wherever a `duration` is *nested* — `frozen<list<duration>>`, `map<text, frozen<tuple<duration,int>>>`, a UDT field of type `duration` — those same three signed VInts appear inside the enclosing value’s bytes. Cassandra models exactly this recursion: `DurationType.referencesDuration()` returns `true` (`DurationType.java:96-99`) and `TupleType.referencesDuration()` recurses over `allTypes()` (`TupleType.java:125-128`). Every *structural* VInt in `Data.db` — lengths, counts, temporal deltas — stays unsigned. This is a `Data.db` statement only; other components do use signed VInt (notably the `Index.db` promoted-index width delta, `IndexInfo.java:96,111-112`).
+
+**Where the “fixed-width types carry no length prefix” rule applies: SIMPLE (non-collection) cells only.** `AbstractType.writeValue` (`AbstractType.java:535-552`) branches on `valueLengthIfFixed()`: `>= 0` writes the raw bytes with no prefix (`:538-543`), otherwise it writes an unsigned-VInt length
+
+* bytes (`:550-552`). The type consulted is the *column’s* type, so for a non-frozen collection column the branch is decided by `ListType`/`SetType`/`MapType` — none of which override `valueLengthIfFixed()` — so **whenever a value is written at all it is length-prefixed**. Whether a value is written at all is a separate, earlier decision made by the `HAS_EMPTY_VALUE` flag (`Cell.java:271`, `:303-304`). See “Non-Frozen Collection Serialization” below.
+
+Not VInt at all — fixed-width 4-byte big-endian `i32`: frozen-collection counts and element lengths, and tuple/UDT field lengths. See “Frozen Collection Serialization” and “UDTs” below.
+
+> **Warning: signedness is not discoverable from the bytes.** The byte `0x05` decodes to `5` unsigned and to `-3` under ZigZag. Never infer the variant from a byte pattern — take it from the field’s serializer, as tabulated above. A structural length decoded with the wrong variant does not fail loudly; it silently desynchronizes the rest of the row stream.
+
+The temporal deltas are unsigned because their baselines (`min_timestamp`, `min_ttl`, `min_local_deletion_time` in `Statistics.db`) are the minimums across the SSTable, so every delta is non-negative. ZigZag also exists in Cassandra’s internode messaging serialization, which is not an SSTable concern. See Appendix B for byte-level examples.
+
 Readers interpret row/cell flags to distinguish live cells, TTLs, and tombstones; see Chapter 11 for tombstone semantics. Cross-link to Appendix B for a compact encoding summary.
 
 Common cell flags (high level):
@@ -9135,14 +9232,16 @@ Endianness:
 
 [Section titled “Frozen Collection Serialization”](#frozen-collection-serialization)
 
-Frozen collections are stored as a single cell with the entire collection serialized as a binary blob. The format uses 4-byte big-endian i32 length prefixes (matching Java’s serialization format).
+Frozen collections are stored as a single cell with the entire collection serialized as a binary blob.
+
+> **The count and every element length are FIXED 4-byte big-endian `i32` — NOT VInt.** VInt is the dominant length-prefix pattern elsewhere in `Data.db`, so this is a common misread. `CollectionSerializer.pack` writes the count with `ByteBuffer.putInt` (`writeCollectionSize`, `CollectionSerializer.java:67-70`) and each element with `writeValue` — another `putInt` plus raw bytes (`:82-92`); `sizeOfValue` is hard-coded to `4 + size` (`:123-126`), and `-1` means NULL (`readValue`, `:94-101`). The *outer* cell value wrapping the blob still carries the usual unsigned-VInt length — the fixed-width framing starts inside the blob.
 
 **Frozen List/Set Format** (identical for both types):
 
 ```plaintext
-[i32 BE: element_count]
+[element_count: 4-byte BE i32]        ← Fixed-width, NOT VInt
 [for each element:
-  [i32 BE: element_length]
+  [element_length: 4-byte BE i32]     ← Fixed-width per element, NOT VInt (-1 = NULL)
   [element_bytes]
 ]
 ```
@@ -9155,17 +9254,19 @@ Hex: 00 00 00 02  00 00 00 04 00 00 00 2A  00 00 00 04 00 00 00 64
      count=2        elem1: len=4, val=42   elem2: len=4, val=100
 ```
 
-**Frozen Map Format**:
+**Frozen Map Format** (a map packs each entry as two consecutive values, key then value, so the framing is identical — every prefix is a fixed 4-byte BE `i32`):
 
 ```plaintext
-[i32 BE: entry_count]
+[entry_count: 4-byte BE i32]          ← Fixed-width, NOT VInt
 [for each entry:
-  [i32 BE: key_length]
+  [key_length: 4-byte BE i32]         ← Fixed-width, NOT VInt
   [key_bytes]
-  [i32 BE: value_length]
+  [value_length: 4-byte BE i32]       ← Fixed-width, NOT VInt
   [value_bytes]
 ]
 ```
+
+Authority: `org.apache.cassandra.serializers.CollectionSerializer` (`pack`, `writeCollectionSize`, `writeValue`) plus `MapSerializer.serializeValues` (`MapSerializer.java:66-79`), which flattens each entry into a key buffer followed by a value buffer before packing.
 
 **Example** (frozen map with 1 entry: “a” -> 42):
 
@@ -9181,81 +9282,134 @@ Hex: 00 00 00 01  00 00 00 01 61  00 00 00 04 00 00 00 2A
 
 Non-frozen collections are stored as multiple cells, one per element or entry. Each cell has a `cell_path` that identifies the element and a `cell_value` that contains the data.
 
-**Non-frozen collection cell format** (complex columns):
+**Non-frozen collection cell format** (complex columns) — every VInt below is **unsigned**:
 
 ```plaintext
 [flags: u8]
-[timestamp: VInt if not USE_ROW_TIMESTAMP_MASK]
-[local_deletion_time: VInt if deleted/expiring]
-[ttl: VInt if expiring]
-[cell_path: VInt length + bytes]  ← See table below
-[value: VInt length + bytes]      ← See table below
+[timestamp: unsigned VInt if not USE_ROW_TIMESTAMP_MASK]
+[local_deletion_time: unsigned VInt32 if deleted/expiring (and not USE_ROW_TTL_MASK)]
+[ttl: unsigned VInt32 if expiring (and not USE_ROW_TTL_MASK)]
+[cell_path: unsigned VInt length + bytes]  ← ALWAYS length-prefixed
+[value: unsigned VInt length + bytes]      ← present iff HAS_EMPTY_VALUE_MASK is CLEAR;
+                                              when present, ALWAYS length-prefixed
 ```
+
+Field order and presence are authoritative in `Cell.Serializer.serialize` (`Cell.java:268-305`, layout comment at `:242-259`) — note local deletion time comes **before** TTL. The complex column is preceded by an unsigned-VInt cell count (`UnfilteredSerializer.java:277`) and, when `HAS_COMPLEX_DELETION` is set, a deletion time.
+
+**The path is always unsigned-VInt-length-prefixed. The value is unsigned-VInt-length-prefixed *iff* `HAS_EMPTY_VALUE` (`0x04`) is clear — and when present it is length-prefixed even for a fixed-width element type:**
+
+* **`cell_path` — always** an unsigned-VInt length + bytes. `CollectionType.CollectionPathSerializer.serialize` calls `ByteBufferUtil.writeWithVIntLength(path.get(0), out)` (`CollectionType.java:361-366`), and `writeWithVIntLength` is `out.writeUnsignedVInt32(bytes.remaining())` followed by the bytes (`ByteBufferUtil.java:356-360`). The path is not gated by any flag.
+
+* **`value` — present iff `HAS_EMPTY_VALUE` (`0x04`) is CLEAR, and that flag is SIZE-driven, not type-driven.** `Cell.Serializer.serialize` computes `boolean hasValue = cell.valueSize() > 0;` (`Cell.java:271`), sets `flags |= HAS_EMPTY_VALUE_MASK` when `!hasValue` (`:277-278`), and writes the value only `if (hasValue)` (`:303-304`). The reader mirrors it exactly: `boolean hasValue = (flags & HAS_EMPTY_VALUE_MASK) == 0;` (`:310`) and only then does it consume a length + bytes (`:329-339`; `skip` at `:381`, `:399-400`). So a **zero-length value carries no length VInt and no bytes** — the flag *replaces* the `0x00` length a reader might expect. Three common situations hit this, and the unifying rule is the **flag**, not any one of them:
+
+  1. a non-frozen `set<T>` element — the datum lives in the cell **path** and `SetType.valueComparator()` is `EmptyType.instance` (`SetType.java:106-109`), so the value is always zero-length;
+  2. **any** genuinely zero-length value — e.g. a `map<text,text>` entry whose value is `''`, or an empty blob element in a `list<blob>`. `set<T>` is just the case where this holds for *every* element;
+  3. an **element tombstone** (`IS_DELETED`, `0x01`) — a deleted element has no value bytes (`HAS_EMPTY_VALUE_MASK`’s own comment at `Cell.java:264` calls out the tombstone case).
+
+* **When a value IS present, it is unsigned-VInt-length-prefixed even for a fixed-width element type** — `list<int>` exactly as `list<text>`. `Cell.Serializer.serialize` writes it as `header.getType(column).writeValue(cell.value(), cell.accessor(), out)` (`Cell.java:303-304`), and `header.getType(column)` yields the **column’s** type — the *collection* type, never the element type (`SerializationHeader.java:160-163`; the header’s per-column map is built from `column.type`, `:250-257`). `ListType`, `SetType`, `MapType`, and their `CollectionType` base do **not** override `valueLengthIfFixed()`, so they inherit `AbstractType`’s `VARIABLE_LENGTH = -1` (`AbstractType.java:62`, `:490-493`). `AbstractType.writeValue` therefore takes the `else` branch → `accessor.writeWithVIntLength(value, out)` (`:550-552`) → `out.writeUnsignedVInt32(size(value))` + bytes (`ValueAccessor.java:171-175`).
+
+Cassandra’s own layout comment states both conditions together: the value size “is present unless either the cell has the `HAS_EMPTY_VALUE_MASK`, or the value for columns of this type have a fixed length” (`Cell.java:254-255`). For a collection cell the second condition can never fire, so the flag is the only gate.
+
+> **Common misreading.** “Fixed-width types skip the length prefix” is a genuine Cassandra rule, but it lives one level down — at the **simple (non-collection) cell**, where `header.getType(column)` is a scalar type that *does* override `valueLengthIfFixed()` (e.g. `Int32Type` returns `4`, `Int32Type.java:156-159`). For a complex/collection cell the same call returns the collection type, which never overrides it, so the raw-bytes branch at `AbstractType.java:538-543` can never fire for a collection cell. Reading `list<int>` as raw 4-byte values silently desynchronizes the cell stream. The mirror-image misreading is just as costly: reading a length VInt for a cell whose flags carry `HAS_EMPTY_VALUE` — a `map<text,text>` entry with an `''` value, for instance — consumes the *next* cell’s flag byte as a length. **Always branch on the flag first.**
 
 **Cell Path and Value by Collection Type**:
 
-| Collection Type | cell\_path          | cell\_value        |
-| --------------- | ------------------- | ------------------ |
-| `list<T>`       | TimeUUID (16 bytes) | Serialized element |
-| `set<T>`        | Serialized element  | Empty (0 bytes)    |
-| `map<K,V>`      | Serialized key      | Serialized value   |
+| Collection Type | cell\_path (always unsigned-VInt length + bytes) | cell\_value        | Value framing                                                                                                                                                |
+| --------------- | ------------------------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `list<T>`       | TimeUUID (16 bytes)                              | Serialized element | Unsigned-VInt length + bytes whether `T` is fixed- or variable-width — **unless** `HAS_EMPTY_VALUE` is set (zero-length element, or tombstone), then nothing |
+| `set<T>`        | Serialized element                               | Empty (0 bytes)    | None — `HAS_EMPTY_VALUE_MASK` always set, no length and no value bytes                                                                                       |
+| `map<K,V>`      | Serialized key                                   | Serialized value   | Unsigned-VInt length + bytes whether `V` is fixed- or variable-width — **unless** `HAS_EMPTY_VALUE` is set (e.g. value `''`, or tombstone), then nothing     |
 
 **List Element Ordering**:
 
 Lists use TimeUUID (UUID version 1) for the `cell_path` to maintain insertion order. TimeUUIDs are time-sortable, ensuring elements remain in the order they were written. Each element gets a unique TimeUUID generated at write time.
 
-**Example** (list with 2 integers):
+**Example** (`list<int>`, 2 elements) — both the path and the value are length-prefixed (`10` = unsigned VInt 16, `04` = unsigned VInt 4). Verbatim bytes from the `nb` SSTable `test_collections/collection_table` (column `scores list<int>`, values 23 and 99), Snappy-decompressed:
 
 ```plaintext
-Cell 1:
-  path: f35cf98a-220c-11ef-8b04-f4ff7ffcf681 (16 bytes, TimeUUID)
-  value: 00 00 00 2A (4 bytes, int 42)
+Cell 1:  08  10 79f2a080a25111f0a3fef1a551383fb9  04  00 00 00 17
+         ^   ^  ^                                 ^   ^
+         |   |  16-byte TimeUUID path             |   int 23
+         |   VInt path len = 16                   VInt value len = 4
+         cell flags (0x08 = USE_ROW_TIMESTAMP)
 
 
-Cell 2:
-  path: f35cf98b-220c-11ef-8b04-f4ff7ffcf681 (16 bytes, TimeUUID)
-  value: 00 00 00 64 (4 bytes, int 100)
+Cell 2:  08  10 79f2a08aa25111f0a3fef1a551383fb9  04  00 00 00 63   (int 99)
 ```
+
+The `04` before each 4-byte int is the point: a fixed-width element type does **not** remove the value length prefix on a non-frozen collection cell.
 
 **Set Element Storage**:
 
-Sets use the element value itself as the `cell_path` for efficient membership testing. The `cell_value` is always empty (0 bytes). This allows Cassandra to check set membership by looking for a cell with a matching path.
+Sets use the element value itself as the `cell_path` for efficient membership testing. The `cell_value` is always empty — `SetType.valueComparator()` is `EmptyType.instance` (`SetType.java:106-109`) — so `cell.valueSize()` is 0, the cell sets `HAS_EMPTY_VALUE_MASK` (`0x04`) and writes zero value bytes (`Cell.java:264`, `:271`, `:277-278`, `:303-304`). This lets Cassandra check set membership by looking for a cell with a matching path.
 
-**Example** (set with 2 text values):
+A `set<T>` is **not** a special case in the serializer — it is simply the collection whose values are *always* zero-length, so it hits the general `HAS_EMPTY_VALUE` path on every cell. Nothing about `set` is type-cased: the same code path omits the value for a `map<text,text>` entry whose value is `''`. And the omission is driven by the **flag**, not by the element type’s width: a `set<int>` and a `set<text>` both carry no value bytes.
+
+**Example** (`set<text>`, 2 elements) — path length-prefixed, value absent entirely:
 
 ```plaintext
 Cell 1:
-  path: 61 6C 70 68 61 (5 bytes, "alpha")
-  value: (empty, 0 bytes)
+  path:  05 | 61 6C 70 68 61   (VInt len 5, then "alpha")
+  value: (none — HAS_EMPTY_VALUE_MASK set in flags)
 
 
 Cell 2:
-  path: 62 65 74 61 (4 bytes, "beta")
-  value: (empty, 0 bytes)
+  path:  04 | 62 65 74 61      (VInt len 4, then "beta")
+  value: (none — HAS_EMPTY_VALUE_MASK set in flags)
 ```
 
 **Map Entry Storage**:
 
 Maps use the serialized key as the `cell_path` and the serialized value as the `cell_value`. This allows efficient key lookups.
 
-**Example** (map with 2 entries: 1->“one”, 2->“two”):
+**Example** (`map<int,text>`, 2 entries: 1->“one”, 2->“two”) — path and value each length-prefixed:
 
 ```plaintext
 Cell 1:
-  path: 00 00 00 01 (4 bytes, int key 1)
-  value: 6F 6E 65 (3 bytes, "one")
+  path:  04 | 00 00 00 01   (VInt len 4, then int key 1)
+  value: 03 | 6F 6E 65      (VInt len 3, then "one")
 
 
 Cell 2:
-  path: 00 00 00 02 (4 bytes, int key 2)
-  value: 74 77 6F (3 bytes, "two")
+  path:  04 | 00 00 00 02   (VInt len 4, then int key 2)
+  value: 03 | 74 77 6F      (VInt len 3, then "two")
 ```
 
-**Implementation References**:
+A fixed-width *value* type changes nothing. Verbatim bytes for `metadata_map map<text,bigint>` in `test_collections/collection_table` (entry `"want" -> 104237`):
 
-* Frozen collections: `cqlite-core/src/storage/sstable/writer/data_writer.rs::serialize_frozen_list()`, `serialize_frozen_set()`, `serialize_frozen_map()`
-* Non-frozen collections: `serialize_nonfrozen_list()`, `serialize_nonfrozen_set()`, `serialize_nonfrozen_map()`
-* Tests: `cqlite-core/tests/collection_roundtrip_test.rs`
+```plaintext
+08  04 77 61 6E 74  08  00 00 00 00 00 01 97 2D
+^   ^  ^            ^   ^
+|   |  "want"       |   bigint 104237 (0x1972D)
+|   VInt path len=4 VInt value len = 8
+cell flags
+```
+
+**An empty map value takes the flag path, not a `0x00` length.** Because `HAS_EMPTY_VALUE` is decided by `cell.valueSize() > 0` (`Cell.java:271`), an entry whose value is the empty string is framed like a set element — path present, value gone entirely. Schematically, for `map<text,text>` entry `"k" -> ''`:
+
+```plaintext
+0C  01 6B
+^   ^  ^
+|   |  "k"
+|   VInt path len = 1
+cell flags (0x08 USE_ROW_TIMESTAMP | 0x04 HAS_EMPTY_VALUE) — no value length, no value bytes
+```
+
+A reader that unconditionally reads a value-length VInt here consumes the next cell’s flag byte and desynchronizes. Note this is distinct from a NULL: a NULL map *value* is not expressible in CQL, and a NULL top-level column is represented by absence from the column subset, never by a cell.
+
+**Implementation References** (CQLite):
+
+* Frozen collections: `cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs::serialize_value_into()` (its `write_len_prefixed_i32` helper emits the fixed 4-byte BE prefixes); reader `.../reader/parsing/row_decoder/frozen.rs::parse_frozen_{list,set,map}_value()`
+
+* Non-frozen collections — **the length prefix is never element-width-driven on either side**, but the two writer paths differ on the `HAS_EMPTY_VALUE` gate:
+
+  * Reader `.../reader/parsing/row_decoder/complex_column.rs::parse_complex_cell_value()` (`:973`) is correct: it decodes the flag byte (`has_empty_value = (flags & 0x04) != 0`, `:1012`) and only `parse_vuint`s a value length when neither `IS_DELETED` nor `HAS_EMPTY_VALUE` is set (`:1128`, `:1136`).
+  * Per-element writer `.../writer/data_writer/complex.rs::write_complex_element_cell()` (`:863`) is correct: it derives the flag (`:884-891`) and emits the length + bytes only when `HAS_EMPTY_VALUE` is clear (`:960-969`). `write_set_complex_cells()` (`:594`) likewise always sets `CELL_HAS_EMPTY_VALUE` and writes no value.
+  * **Known gap (issue #2970)**: the *whole-column* writers `write_map_complex_cells()` (`:646`) and `write_list_complex_cells()` (`:705`) hardcode `flags = 0` (`:683`, `:737`) and emit `encode_unsigned(len)` unconditionally (`:694`, `:747`). A zero-length element value therefore goes out as `flags=0` + `0x00` where Cassandra writes `flags=0x04` + nothing. Cassandra **reads this without error** — on `flags=0` it expects a length VInt (`Cell.java:310`), consumes our `0x00` as `l=0` (`AbstractType.java:590`), and `read(in, 0)` returns `EMPTY_BYTE_BUFFER` without touching the stream (`ByteBufferUtil.java:444-448`), so framing stays aligned and the value decodes identically. The defect is **byte parity**: one extra byte and a `flags` byte off by `0x04`, which breaks byte-for-byte compaction parity, `Digest.crc32` digest matching, and `row_size`/`prev_size` accounting. See Appendix F.
+
+* The fixed-width no-prefix rule lives on the **simple**-cell path: `.../writer/data_writer/encoding.rs::cell_value_uses_length_prefix()` (`:461`, issue #1672), used by `write_cell_value_into()` (`:353`) which `cells.rs` calls for simple cells (`:63`, `:108`, `:200`, `:230`).
+
+* Tests: `cqlite-core/tests/issue_2035_collection_roundtrip.rs`, `cqlite-core/tests/collection_sstable_integration_test.rs`
 
 **UDTs** (User-Defined Types) serialize fields in schema order with 4-byte BE length prefixes:
 
@@ -9271,6 +9425,10 @@ Cell 2:
 * `0` (0x00000000): Field is empty (zero-length but present)
 * `>0`: Number of bytes of field data following
 * Trailing omitted fields are implicitly NULL
+
+**Tuple field framing is identical to UDT field framing.** A `tuple<T1, T2, ...>` value is just its fields concatenated, each behind a fixed 4-byte BE signed `i32` length: `-1` (0xFFFFFFFF) = NULL, `0` = empty (zero-length but present), `>0` = byte count. Neither form writes a field **count** — arity comes from the schema, and trailing omitted fields are implicitly NULL. Tuples and UDTs differ only in semantics (tuples are positional and unnamed; UDTs are named-field records); on disk they share one serializer, because `UserType extends TupleType` (`UserType.java:52`) and `UserType.buildValue` delegates straight to `TupleType.buildValue` (`UserType.java:194`).
+
+Authority: `TupleType.buildValue` (`TupleType.java:341-364`) writes `putInt(-1)` for a null component and `putInt(size)` otherwise; `TupleType.split` (`:301-339`) reads a 4-byte length per component, treats `size < 0` as null, and returns short when the buffer ends early. CQLite mirrors both sides in `writer/data_writer/encoding.rs:307-313` and `reader/parsing/row_decoder/frozen.rs::parse_tuple_elements_raw()` (`:515-583`).
 
 **Critical distinction**: The **outer** type determines storage:
 
@@ -9329,6 +9487,9 @@ Reference: `org.apache.cassandra.db.context.CounterContext` in Cassandra 5.0 sou
 
 * `Data.db` is schema-driven and encodes partitions as unfiltered row streams.
 * VInts and bit flags compactly encode sizes, timestamps, and cell metadata.
+* Every *structural* `Data.db` VInt is **unsigned** — lengths, counts, and the timestamp/TTL/localDeletionTime deltas alike. Signed (ZigZag) VInts appear only inside a serialized `DurationType` payload (its three components), wherever that payload occurs — including nested inside a collection, tuple, or UDT.
+* A **non-frozen collection** cell length-prefixes **both** the path and the value with an unsigned VInt, *even for a fixed-width element type* (`list<int>`, `map<text,bigint>`): `writeValue` sees the collection type, which is `VARIABLE_LENGTH`. The `valueLengthIfFixed()` raw-bytes shortcut applies to **simple (non-collection)** cells only. A non-frozen `set<T>` carries no value bytes at all, via `HAS_EMPTY_VALUE_MASK` — a flag, not a width.
+* Frozen-collection counts/element lengths and tuple/UDT field lengths are **fixed 4-byte BE `i32`**, not VInt; tuples and UDTs share one serializer.
 * Tombstones and TTLs are first-class and affect reconciliation.
 
 ### Troubleshooting
@@ -9346,6 +9507,11 @@ Reference: `org.apache.cassandra.db.context.CounterContext` in Cassandra 5.0 sou
 
   * Rows and tombstones: `org.apache.cassandra.db.rows.*` (`Unfiltered`, `RangeTombstoneMarker`)
   * Serialization header: [org.apache.cassandra.db.SerializationHeader](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java)
+  * Cell framing: [org.apache.cassandra.db.rows.Cell](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/Cell.java) (`Serializer`)
+  * Cell value length prefix: [org.apache.cassandra.db.marshal.AbstractType](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/AbstractType.java) (`writeValue`) + [ValueAccessor](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/ValueAccessor.java) (`writeWithVIntLength`)
+  * Frozen collection framing: [org.apache.cassandra.serializers.CollectionSerializer](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/serializers/CollectionSerializer.java)
+  * Tuple/UDT framing: [org.apache.cassandra.db.marshal.TupleType](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/TupleType.java), [UserType](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/UserType.java)
+  * VInt/ZigZag primitives: [org.apache.cassandra.utils.vint.VIntCoding](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/vint/VIntCoding.java)
 
 For implementation details, see Appendix C.
 
@@ -9396,7 +9562,7 @@ The complete row format, confirmed via Cassandra’s `UnfilteredSerializer.java`
 For tables with clustering keys, values are encoded between flags and row\_size:
 
 ```plaintext
-[header: VInt]                         ← 2 bits per clustering column
+[header: unsigned VInt]                ← 2 bits per clustering column
 [value_1: type-specific]               ← Only if state indicates PRESENT
 [value_2: type-specific]
 ...
@@ -9409,10 +9575,12 @@ The header VInt uses 2 bits per column to indicate state:
 * `10` (2): Value NULL - no bytes follow
 * `11` (3): Reserved
 
+> **Headers are batched at 32 columns.** Because a 64-bit header holds only 32 two-bit states, `serializeValuesWithoutSize` emits one unsigned-VInt header per batch of up to 32 clustering columns, then that batch’s values, then the next header. Tables with ≤32 clustering columns — effectively all real tables — see exactly one header, but a reader must not assume that. Source: `ClusteringPrefix.java:455-475` (`makeHeader` at `:548-562`).
+
 Type-specific encoding:
 
-* **Fixed-width types** (timestamp, int, bigint, UUID): Raw bytes, no length prefix
-* **Variable-width types** (text, varchar, blob): VInt length prefix + bytes
+* **Fixed-width types** (timestamp, int, bigint, UUID): Raw bytes, no length prefix (`AbstractType.writeValue` skips the prefix when `valueLengthIfFixed() >= 0`, `:538-543`) — this holds for clustering values and **simple** cells, never for a non-frozen collection cell
+* **Variable-width types** (text, varchar, blob): **unsigned** VInt length prefix + bytes
 
 ### Unfiltered Markers (Issue #229 Fix)
 
@@ -9649,12 +9817,12 @@ Most cells use the row-level timestamp for efficiency. Cells need their own time
 
 Tombstone cells have special flag requirements:
 
-| Cell Operation         | Flag Bits                  | Timestamp     | Deletion Time | Value       |
-| ---------------------- | -------------------------- | ------------- | ------------- | ----------- |
-| Regular write          | 0x08 (USE\_ROW\_TIMESTAMP) | Skip          | Skip          | Present     |
-| Regular write (own TS) | 0x00                       | Include delta | Skip          | Present     |
-| Empty string write     | 0x08 \| 0x04 (0x0c)        | Skip          | Skip          | Zero-length |
-| Tombstone              | 0x01                       | Include delta | Include delta | None        |
+| Cell Operation         | Flag Bits                  | Timestamp     | Deletion Time | Value                             |
+| ---------------------- | -------------------------- | ------------- | ------------- | --------------------------------- |
+| Regular write          | 0x08 (USE\_ROW\_TIMESTAMP) | Skip          | Skip          | Present                           |
+| Regular write (own TS) | 0x00                       | Include delta | Skip          | Present                           |
+| Empty string write     | 0x08 \| 0x04 (0x0c)        | Skip          | Skip          | Absent (no length VInt, no bytes) |
+| Tombstone              | 0x01                       | Include delta | Include delta | None                              |
 
 **Example**:
 
@@ -9683,7 +9851,7 @@ The format distinguishes between NULL and empty values:
 **Empty Values** (e.g., empty string ”):
 
 * Written as cells with CELL\_HAS\_EMPTY\_VALUE flag (0x04)
-* Zero-length value (value\_length VInt = 0)
+* **No value length VInt and no value bytes** — the flag replaces them; it is *not* followed by a `0x00` length (`Cell.java:277-278`, `:303-304`; reader `:310`)
 * Counted as “present” in column bitmap (bit = 1)
 
 **Example Column Bitmap**:
@@ -9713,7 +9881,7 @@ timestamp_delta = mutation_timestamp - min_timestamp
 ttl_delta = mutation_ttl - min_ttl
 ```
 
-**Local Deletion Time Delta** (unsigned VInt):
+**Local Deletion Time Delta** (unsigned VInt32 — `SerializationHeader.writeLocalDeletionTime` calls `writeUnsignedVInt32`):
 
 ```plaintext
 deletion_time_delta = local_deletion_time - min_local_deletion_time
@@ -9856,8 +10024,10 @@ When `ROW_HAS_ALL_COLUMNS` (0x20) is NOT set, a columns-subset field follows —
 ```plaintext
 [flags: u8]                                        ← Cell flags
 [timestamp_delta: VInt if NOT USE_ROW_TIMESTAMP]  ← Delta from min_timestamp
-[value_length: VInt]                              ← Byte length of value
-[value_bytes]                                     ← Type-specific serialization
+[value_length: VInt]                              ← Byte length; omitted if HAS_EMPTY_VALUE (0x04)
+                                                     is set, or (simple cells) the type is fixed-width
+[value_bytes]                                     ← Type-specific serialization; omitted if
+                                                     HAS_EMPTY_VALUE is set
 ```
 
 **Tombstone Cell** (deleted):
@@ -9876,32 +10046,33 @@ When `ROW_HAS_ALL_COLUMNS` (0x20) is NOT set, a columns-subset field follows —
 
 Type-specific serialization rules for cell values:
 
-| Type          | Format                     | Example                                        |
-| ------------- | -------------------------- | ---------------------------------------------- |
-| boolean       | 1 byte                     | true = 0x01, false = 0x00                      |
-| tinyint       | 1 byte (signed)            | -5 = 0xFB                                      |
-| smallint      | 2 bytes BE                 | 300 = 0x01 0x2C                                |
-| int           | 4 bytes BE                 | 42 = 0x00 0x00 0x00 0x2A                       |
-| bigint        | 8 bytes BE                 | 1000 = 0x00 0x00 0x00 0x00 0x00 0x00 0x03 0xE8 |
-| float         | 4 bytes BE (IEEE 754)      | 3.14f = 0x40 0x48 0xF5 0xC3                    |
-| double        | 8 bytes BE (IEEE 754)      | 3.14 = 0x40 0x09 0x1E 0xB8 0x51 0xEB 0x85 0x1F |
-| text/varchar  | UTF-8 bytes (no prefix)    | “test” = 0x74 0x65 0x73 0x74                   |
-| blob          | Raw bytes (no prefix)      | Binary data as-is                              |
-| timestamp     | 8 bytes BE (milliseconds)  | Epoch milliseconds                             |
-| date          | 4 bytes BE (days + offset) | days - Integer.MIN\_VALUE                      |
-| time          | 8 bytes BE (nanoseconds)   | Nanoseconds since midnight                     |
-| uuid/timeuuid | 16 bytes (raw)             | UUID bytes                                     |
-| inet          | 4 or 16 bytes              | IPv4 (4) or IPv6 (16)                          |
-| varint        | Variable-length BE signed  | Big integer, no length prefix                  |
-| decimal       | 4 bytes scale + varint     | Scale (BE i32) + unscaled value                |
-| duration      | 3x i32 BE                  | months, days, nanos                            |
+| Type          | Format                      | Example                                                                                                                                                               |
+| ------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| boolean       | 1 byte                      | true = 0x01, false = 0x00                                                                                                                                             |
+| tinyint       | 1 byte (signed)             | -5 = 0xFB                                                                                                                                                             |
+| smallint      | 2 bytes BE                  | 300 = 0x01 0x2C                                                                                                                                                       |
+| int           | 4 bytes BE                  | 42 = 0x00 0x00 0x00 0x2A                                                                                                                                              |
+| bigint        | 8 bytes BE                  | 1000 = 0x00 0x00 0x00 0x00 0x00 0x00 0x03 0xE8                                                                                                                        |
+| float         | 4 bytes BE (IEEE 754)       | 3.14f = 0x40 0x48 0xF5 0xC3                                                                                                                                           |
+| double        | 8 bytes BE (IEEE 754)       | 3.14 = 0x40 0x09 0x1E 0xB8 0x51 0xEB 0x85 0x1F                                                                                                                        |
+| text/varchar  | UTF-8 bytes (no prefix)     | “test” = 0x74 0x65 0x73 0x74                                                                                                                                          |
+| blob          | Raw bytes (no prefix)       | Binary data as-is                                                                                                                                                     |
+| timestamp     | 8 bytes BE (milliseconds)   | Epoch milliseconds                                                                                                                                                    |
+| date          | 4 bytes BE (days + offset)  | days - Integer.MIN\_VALUE                                                                                                                                             |
+| time          | 8 bytes BE (nanoseconds)    | Nanoseconds since midnight                                                                                                                                            |
+| uuid/timeuuid | 16 bytes (raw)              | UUID bytes                                                                                                                                                            |
+| inet          | 4 or 16 bytes               | IPv4 (4) or IPv6 (16)                                                                                                                                                 |
+| varint        | Variable-length BE signed   | Big integer, no length prefix                                                                                                                                         |
+| decimal       | 4 bytes scale + varint      | Scale (BE i32) + unscaled value                                                                                                                                       |
+| duration      | 3x **signed (ZigZag) VInt** | months, days, nanos — NOT fixed-width i32. The same three signed VInts appear wherever a `duration` is nested (e.g. `frozen<list<duration>>`, a `duration` UDT field) |
 
 **Special Cases**:
 
-* **Empty string**: Zero-length value with CELL\_HAS\_EMPTY\_VALUE flag
+* **Empty string**: CELL\_HAS\_EMPTY\_VALUE (`0x04`) set — **no length VInt and no value bytes** (`Cell.java:277-278`, `:303-304`)
 * **NULL**: Not written as a cell (represented by bitmap absence)
 * **Date encoding**: Add Integer.MIN\_VALUE to days value for storage
-* **Decimal**: Scale is 4-byte BE i32, followed by varint unscaled value
+* **Decimal**: Scale is 4-byte BE i32, followed by varint unscaled value (`DecimalSerializer.java:42-54`: `putInt(scale)` then `BigInteger.toByteArray()`)
+* **Duration**: the one `Data.db` payload built from **signed** VInts — `DurationSerializer.serialize` calls `writeVInt` three times (`DurationSerializer.java:34,49-51`) — and it counts wherever that payload occurs, nested inside a collection/tuple/UDT included. Every *structural* field in `Data.db` uses unsigned VInt; see [VInt Sign Convention](#vint-sign-convention).
 
 ### Write Operation Flow
 
