@@ -123,15 +123,17 @@ fresh `git worktree add --detach HEAD`, never the dirty tree.
 
 ## Running the codex reviewer — override BOTH agent and model
 
-`.roborev.toml` on `main` pins `agent = 'claude-code'` and `review_model = 'opus'`. To run the codex
-backend you must override **both** on the command line:
+`.roborev.toml` on `main` pins `agent = 'claude-code'` and `review_model = 'claude-opus-5'`. That
+repo-local pin **overrides** whatever your global `~/.roborev/config.toml` sets, so it is the value that
+actually runs. To run the codex backend you must override **both** on the command line:
 
 ```bash
 roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait
 ```
 
-`--agent codex` **alone** still inherits `review_model = 'opus'` from config, and codex on a ChatGPT
-account rejects `opus` with a hard `400 'opus' model is not supported` — a silent review failure that
-looks like a backend outage rather than a config mismatch. Worktrees inherit `main`'s pinned config, so
-`--model gpt-5.6-sol` (codex's own configured model, from `~/.codex/config.toml`) is the reliable
-override on every checkout.
+`--agent codex` **alone** still inherits the pinned `review_model` from config — an Anthropic model name
+codex cannot serve — and codex on a ChatGPT account rejects it with a hard
+`400 '<model>' model is not supported` (historically `400 'opus' model is not supported`) — a silent
+review failure that looks like a backend outage rather than a config mismatch. Worktrees inherit `main`'s
+pinned config, so `--model gpt-5.6-sol` (codex's own configured model, from `~/.codex/config.toml`) is the
+reliable override on every checkout.

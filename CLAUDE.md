@@ -285,11 +285,14 @@ implement (TDD) → --lite each fix round (summary-file redirect)
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.
-- **roborev invocation — pass BOTH agent and model (#2433).** `.roborev.toml` on `main` pins
-  `agent = 'claude-code'` + `review_model = 'opus'`. To run the codex reviewer you must override BOTH:
+- **roborev invocation — pass BOTH agent and model (#2433/#3037).** `.roborev.toml` on `main` pins
+  `agent = 'claude-code'` + `review_model = 'claude-opus-5'` (the repo pin overrides your global
+  `~/.roborev/config.toml`, so it is the value that actually runs). To run the codex reviewer you must
+  override BOTH:
   `roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`. `--agent codex`
-  alone still inherits `review_model = 'opus'` from config, and codex-on-a-ChatGPT-account rejects
-  `opus` with a hard `400 'opus' model is not supported` — a silent review failure that looks like an
+  alone still inherits the pinned `review_model` from config — an Anthropic model name codex cannot
+  serve — and codex-on-a-ChatGPT-account rejects it with a hard `400 '<model>' model is not supported`
+  (historically `400 'opus' model is not supported`) — a silent review failure that looks like an
   outage. Run from a checkout whose `.roborev.toml` you know (worktrees inherit `main`'s pinned config);
   `--model` is the reliable override. codex's own configured model is `gpt-5.6-sol` (`~/.codex/config.toml`).
 - **flow-closer (#2084/#2668)**: the full gate, the final roborev pass, and the merge run inside the
