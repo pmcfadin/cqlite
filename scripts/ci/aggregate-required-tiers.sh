@@ -395,10 +395,22 @@ WAIVER_EVENTS_FILE="$WORK_DIR/waiver-events.tsv"
 # (gating_registry.rb's waiver_bound_to_head? and waiver_supersedes_pending? can
 # never be true without it), so the break-glass regresses to deadline-only with no
 # trace. These carry the state forward to the reporting section, which names it.
+#
+# TWO COUNTS, NOT ONE (issue #3033 round 2). The default `--jq` selects
+# `event == "labeled"` for EVERY label, while gating_registry.rb keys only on
+# `ci:waive:<tier-id>` (WAIVER_LABEL_PATTERN). Reporting the feed total alone would
+# claim "evidence read" off a feed of `needs-decision` events — the same
+# unproven-claim defect this issue exists to remove, one layer up. So the
+# waiver-relevant subset is counted separately and the report distinguishes "feed
+# fine, no waiver events" from "feed fine, waiver events present".
 WAIVER_EVIDENCE_STATE=none      # none | unconfigured | unreadable | read
-WAIVER_EVIDENCE_DETAIL=""       # condensed API error (HTTP status when available)
-WAIVER_EVIDENCE_COUNT=0         # `labeled` events read on the last successful read
+WAIVER_EVIDENCE_DETAIL=""       # the LAST failure's condensed error; never cleared,
+                                # so a `read`/`none` poll after a failed one can
+                                # still say what went wrong earlier
+WAIVER_EVIDENCE_COUNT=0         # `labeled` events in the feed, last successful read
+WAIVER_EVIDENCE_WAIVER_COUNT=0  # of those, ones for a `ci:waive:` label
 WAIVER_EVIDENCE_FAILURES=0      # polls whose read failed, however it ended up
+WAIVER_UNCONFIGURED_WARNED=false # the unconfigured warning is emitted once per run
 
 # The PR's CURRENT labels, re-read every poll so a waiver applied while this job
 # waits takes effect without a re-run. A failed read falls back to the event
@@ -461,17 +473,26 @@ waiver_error_detail() {
 # reding a break-glass PR for an API blip is the worse outage.
 read_waiver_events() {
   : >"$WAIVER_EVENTS_FILE"
-  WAIVER_EVIDENCE_DETAIL=""
   case "$LABELS_NOW" in
     *ci:waive:*) ;;
+    # No waiver label on THIS poll. `WAIVER_EVIDENCE_FAILURES` is deliberately NOT
+    # reset: a label applied, read broken, then removed mid-run must not erase the
+    # record that the reads were broken (the reporting section says so).
     *) WAIVER_EVIDENCE_STATE=none; return 0 ;;
   esac
   if [ -z "$WAIVER_EVENTS_CMD" ]; then
     WAIVER_EVIDENCE_STATE=unconfigured
-    echo "::warning::waiver evidence UNAVAILABLE: a ci:waive: label is present, but this run has no label-event" \
-         "source (no --waiver-events-cmd, and --repo/--pr-number were not both supplied), so the waiver cannot be" \
-         "bound to this head sha or attributed to whoever applied it; it will still apply at the aggregation" \
-         "deadline" >&2
+    # ONCE PER RUN. Unlike an unreadable read, this condition cannot change while
+    # the job runs — WAIVER_EVENTS_CMD is fixed at argument-parse time — so a
+    # per-poll annotation would be a dozen identical lines saying the same thing.
+    # The summary block carries the persistent record.
+    if [ "$WAIVER_UNCONFIGURED_WARNED" != "true" ]; then
+      WAIVER_UNCONFIGURED_WARNED=true
+      echo "::warning::waiver evidence UNAVAILABLE: a ci:waive: label is present, but this run has no label-event" \
+           "source (no --waiver-events-cmd, and --repo/--pr-number were not both supplied), so the waiver cannot be" \
+           "bound to this head sha or attributed to whoever applied it; it will still apply at the aggregation" \
+           "deadline" >&2
+    fi
     return 0
   fi
 
@@ -480,6 +501,12 @@ read_waiver_events() {
   if [ "$rc" -eq 0 ]; then
     WAIVER_EVIDENCE_STATE=read
     WAIVER_EVIDENCE_COUNT="$(grep -c '' "$WAIVER_EVENTS_FILE" || true)"
+    # The label is field 1 of `<label>\t<actor>\t<iso8601>`, so anchoring at the
+    # line start counts LABEL matches and cannot be fooled by an actor's login.
+    # This is an upper bound on what gating_registry.rb will accept (it also
+    # requires the tier-id shape), which is why nothing below claims more than
+    # "the evidence is present".
+    WAIVER_EVIDENCE_WAIVER_COUNT="$(grep -c '^ci:waive:' "$WAIVER_EVENTS_FILE" || true)"
     return 0
   fi
   sed 's/^/  /' "$WORK_DIR/waiver-events.err" >&2 || true
@@ -645,12 +672,32 @@ emit ""
 case "$WAIVER_EVIDENCE_STATE" in
   none)
     emit "Waiver evidence: n/a — no \`ci:waive:<tier-id>\` label is present on this pull request."
-    ;;
-  read)
-    emit "Waiver evidence: READ OK — ${WAIVER_EVIDENCE_COUNT} \`labeled\` event(s) read, so a waiver can be bound to this head sha and attributed."
+    # A label applied, its events unreadable, then the label removed mid-run: the
+    # state is legitimately "nothing to waive" now, but the broken read is history
+    # worth keeping, not history to discard.
     if [ "$WAIVER_EVIDENCE_FAILURES" -gt 0 ]; then
       emit ""
-      emit "> :warning: ${WAIVER_EVIDENCE_FAILURES} earlier poll(s) could not read the label events; the last read succeeded."
+      emit "> :warning: no waiver label now, but ${WAIVER_EVIDENCE_FAILURES} earlier read(s) of this pull request's \`labeled\` events FAILED (${WAIVER_EVIDENCE_DETAIL}) while one was present."
+    fi
+    ;;
+  read)
+    # WHAT WAS OBSERVED, NOT WHAT IT IMPLIES (issue #3033 round 2). A feed of
+    # `labeled` events for other labels proves the read works and nothing else, and
+    # even a matching `ci:waive:` event only BINDS if its timestamp is at or after
+    # this head sha's first CI activity — which is decided per tier in the rows
+    # above. So this reports presence of the evidence and stops there.
+    if [ "${WAIVER_EVIDENCE_WAIVER_COUNT:-0}" -gt 0 ]; then
+      emit "Waiver evidence: READ OK — feed read (${WAIVER_EVIDENCE_COUNT} \`labeled\` event(s)), ${WAIVER_EVIDENCE_WAIVER_COUNT} of them for a \`ci:waive:\` label, so the evidence needed for head-binding and attribution is present (whether a waiver actually binds is decided per tier above)."
+    else
+      emit "Waiver evidence: READ OK — feed read (${WAIVER_EVIDENCE_COUNT} \`labeled\` event(s)), but **0 \`ci:waive:\` labeled events** found, so attribution and head-binding remain UNRESOLVED."
+      emit ""
+      emit "> :warning: The read succeeded, so this is neither a permission nor an API problem: a \`ci:waive:<tier-id>\`"
+      emit "> label is on the pull request, yet the events feed carried no \`labeled\` event for it. A waiver still"
+      emit "> applies at the aggregation deadline, but it cannot resolve a tier early and no applier is named."
+    fi
+    if [ "$WAIVER_EVIDENCE_FAILURES" -gt 0 ]; then
+      emit ""
+      emit "> :warning: ${WAIVER_EVIDENCE_FAILURES} earlier poll(s) could not read the label events (${WAIVER_EVIDENCE_DETAIL}); the last read succeeded."
     fi
     ;;
   unreadable)

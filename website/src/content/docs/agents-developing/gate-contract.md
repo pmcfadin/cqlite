@@ -103,13 +103,17 @@ carry).
 - **The waiver's EVIDENCE state is always on the record (issue #3033).** Both behaviours above depend on
   reading this PR's `labeled` events, and a broken read used to look exactly like an ordinary PR: an empty
   feed, one vague warning, a waiver that quietly waited for the deadline with nobody named. The job summary
-  now always states which of three things happened — `Waiver evidence: n/a` (no `ci:waive:` label present),
-  `READ OK — N labeled event(s)`, or **`UNREADABLE (broken read …)`** carrying the HTTP status (or the
-  command's exit status when there is none). `401`/`403`/`404` means the token may not read this PR's
-  events — check the workflow's `permissions:`; a `403` naming a rate limit or any `5xx` is transient; no
-  HTTP status means the client failed (`gh` absent, bad `--jq`) and a re-run will not help. An unreadable
-  read is **never** a failure of `required`: it withholds the early waiver and the attribution, and the
-  waiver is still honoured at the deadline.
+  now always states what happened — `Waiver evidence: n/a` (no `ci:waive:` label present); `READ OK — feed
+  read (N labeled event(s)), M of them for a ci:waive: label`; the same `READ OK` with **`0 ci:waive:
+  labeled events`** (the read worked and carried nothing usable, so attribution stays `UNRESOLVED`); or
+  **`UNREADABLE (broken read …)`** carrying the HTTP status, or the command's exit status when there is
+  none. `401`/`403`/`404` means the token may not read this PR's events — check the workflow's
+  `permissions:`; a `403` naming a rate limit or any `5xx` is transient; no HTTP status means the client
+  failed (`gh` absent, bad `--jq`) and a re-run will not help. The counts are **feed total** and
+  **`ci:waive:` subset** precisely because the feed carries every label's events: a healthy read is
+  evidence that the read works, never that a waiver bound — binding is a per-tier verdict against that
+  head sha's first CI activity. An unreadable read is **never** a failure of `required`: it withholds the
+  early waiver and the attribution, and the waiver is still honoured at the deadline.
 - **Labelling is cheap.** Subscribing to label events must not make every `ci:perf` / board-mirror /
   `needs-decision` label — or the waiver itself — restart a 30-minute gate. So a label mutation never
   cancels the in-flight run (cancellation is conditional on the event action; the shared concurrency group
