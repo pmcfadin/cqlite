@@ -28,22 +28,39 @@ instead of waiting for the process to exit, the predicate is
 `grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"` — a bare `grep -q` on the bare `RESULT:` token fires the
 instant the gate starts and would accept a just-launched (or still-queued) gate as certified.
 
-```bash
-# ITERATE — every fix round (fmt + file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min).
-# Emits a DISTINCT ==== AGENT-GATE LITE SUMMARY ==== block that must NEVER be pasted as the full SUMMARY.
-scripts/agent-gate.sh --lite
+**Every invocation — full, lite, and `--only` — MUST use the summary-file redirect** (#1175/#2079). The
+summary block is the only gate text an agent retains; never stream raw gate stdout into a persistent
+context, and never read `gate.log`.
 
-# BEFORE MERGE — the FULL gate, run EXACTLY ONCE by the lead. Its ==== AGENT-GATE SUMMARY ====
-# (ending RESULT: PASS) is the only run that counts. --lite never replaces it.
-scripts/agent-gate.sh
+```bash
+# ITERATE — every fix round. --lite components (exactly, per scripts/agent-gate.sh LITE_COMPONENTS):
+#   file-size · fmt · clippy (PER-PACKAGE scoped, #1844 — not whole-workspace) · roborev-lints ·
+#   scoped-tests (blast-radius: touched package --lib + the diff's new --test targets). ~1-5 min.
+# Emits a DISTINCT ==== AGENT-GATE LITE SUMMARY ==== block that must NEVER be pasted as the full SUMMARY.
+AGENT_GATE_SUMMARY_FILE=/tmp/lite-<N>.txt \
+  bash scripts/agent-gate.sh --lite > /tmp/lite-<N>.log 2>&1 < /dev/null
+cat /tmp/lite-<N>.txt
+
+# BEFORE MERGE — the FULL gate, run EXACTLY ONCE, inside the flow-closer subagent (#2084).
+# Its ==== AGENT-GATE SUMMARY ==== (ending RESULT: PASS) is the only run that counts; --lite never
+# replaces it.
+AGENT_GATE_SUMMARY_FILE=/tmp/gate-<N>.txt \
+  bash scripts/agent-gate.sh > /tmp/gate-<N>.log 2>&1 < /dev/null
+cat /tmp/gate-<N>.txt
 
 # Debugging only (output marked PARTIAL, never counts as the gate):
-scripts/agent-gate.sh --only fmt,clippy
+AGENT_GATE_SUMMARY_FILE=/tmp/partial-<N>.txt \
+  bash scripts/agent-gate.sh --only fmt,clippy > /tmp/partial-<N>.log 2>&1 < /dev/null
 ```
 
-- **Division of labor (issue #1855):** subagents iterate on `--lite` / targeted tests and end at
-  commit + push + report. The **lead** runs the full gate + roborev — a subagent idle-waiting on a 12-20 min
-  full gate gets killed by the 600s stall watchdog and takes its child gate process down with it.
+- **Division of labor (#1855/#2084/#2079):** the implementing subagent iterates on `--lite` / targeted
+  tests and ends at commit + push + report. **The ONE full gate of record and the final roborev pass run
+  inside the disposable `flow-closer` subagent, NOT in the lead** — the lead never runs the full gate and
+  never reads its stdout; it retains only the closer's terminal packet (verdict, PR URL, summary-file
+  path). The closer launches the gate via `Bash run_in_background` and reads the SUMMARY **from the file**:
+  a subagent that idle-waits on a 12-25 min full gate is killed by the 600s stall watchdog and orphans its
+  child gate process. The closer has no `Agent` tool, so it requests **C** (`spec-auditor`) from the lead
+  via a `NEEDS-SPAWN` packet (#2668).
 - **Queued gate ≠ hung gate:** under load the full gate may **queue for a #1825 slot** (prints
   `waiting for gate slot (N in use)…` once) then run 15-20 min — total wall time can exceed 20 min. Use a
   long Bash `timeout` or `run_in_background` and check for that line before assuming a hang (the default
