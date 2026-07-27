@@ -232,5 +232,9 @@
 ## 9. Gate / review / audit
 - [x] 9.1 `--lite` green each fix round (summary-file redirect); review-first (rust-reviewer + roborev on the
       lite-green diff) before the one full gate.
-- [ ] 9.2 Full `scripts/agent-gate.sh` once pre-merge inside `flow-closer`; C (`spec-auditor`) anchored to
+- [x] 9.2 Full `scripts/agent-gate.sh` once pre-merge inside `flow-closer`; C (`spec-auditor`) anchored to
       `openspec/changes/required-aggregates-sibling-tiers/specs/**`; final roborev clean.
+      Gate of record PASS at `9dc735e` (all components, `tree-integrity: PASS`); C PASS (every
+      requirement `satisfied` bar one justified `partial`), which caught `design.md` still documenting
+      the round-4 waiver rule round 5 had superseded — fixed at `cd4e473` and re-certified `--delta`
+      against the `9dc735e` anchor; final roborev clean of blockers (5 findings → #3033, #3034).
