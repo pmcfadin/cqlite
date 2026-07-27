@@ -417,7 +417,7 @@ desynchronizes. Note this is distinct from a NULL: a NULL map *value* is not exp
 NULL top-level column is never represented by a *cell* — for a simple column it is absence from the
 column subset. (A non-frozen collection is the one case where "reads as NULL" does not imply "absent
 from the subset": an emptied collection is present in the subset with a complex deletion and zero
-cells — see "Empty collections" below.)
+cells — see [Empty Collections](#empty-collections) below.)
 
 **Implementation References** (CQLite):
 - Frozen collections: `cqlite-core/src/storage/sstable/writer/data_writer/encoding.rs::serialize_value_into()`
@@ -481,8 +481,10 @@ treats `size < 0` as null, and returns short when the buffer ends early. CQLite 
 - `list<frozen<udt>>` = multi-cell (each UDT element is separate cell)
 - `frozen<list<udt>>` = single-cell (entire list is one blob)
 
-**Empty collections: frozen stores a zero-count blob; non-frozen stores no cells but is *not*
-absent.** The two modes diverge, and the non-frozen side is easy to get wrong:
+#### Empty Collections
+
+**Frozen stores a zero-count blob; non-frozen stores no cells but is *not* absent.** The two modes
+diverge, and the non-frozen side is easy to get wrong:
 
 - **Frozen** (`frozen<set<text>>` written as `{}`): a normal single cell whose value is a
   zero-element blob — the 4-byte BE count `00 00 00 00` and nothing else
@@ -504,8 +506,8 @@ absent.** The two modes diverge, and the non-frozen side is easy to get wrong:
   i.e. zero cells is legal precisely when a complex deletion is present, and a column with neither is
   dropped entirely (`update`, `:229-235`).
 
-Verbatim from the `nb_empty_collections` parity fixture (`test_types`, one row with all six columns
-written empty in a single `INSERT`), via `sstabledump`:
+Abridged `sstabledump` output from the `nb_empty_collections` parity fixture (`test_types`, one row
+with all six columns written empty in a single `INSERT`) — elided (`…`) and annotated, not byte-exact:
 
 ```
 "cells": [

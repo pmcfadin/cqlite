@@ -259,7 +259,7 @@ Cell flags appear at the start of each cell and control cell-level metadata.
 - **NULL values**: NOT written as cells - represented by absence in column bitmap. Caveat for
   **non-frozen collections**: a collection emptied or overwritten-with-`{}` reads back as NULL but is
   **present** in the subset, carrying a complex deletion and zero element cells — absence in the
-  bitmap is not the only on-disk shape that surfaces as NULL. See Chapter 5, "Empty collections".
+  bitmap is not the only on-disk shape that surfaces as NULL. See Chapter 5, "Empty Collections".
 
 **TTL field range — Cassandra's bound, and the reader-side cast hazard**:
 
@@ -267,7 +267,7 @@ On disk, the cell TTL is an **unsigned VInt32 delta** over `stats.minTTL`:
 `SerializationHeader.writeTTL` emits `writeUnsignedVInt32(ttl - stats.minTTL)` and `readTTL` adds
 `stats.minTTL` back (`SerializationHeader.java:175-178`, `:196-199`). Cassandra itself holds TTL in a
 signed `int`, and enforces the range at request validation, not at parse time:
-`Attributes.MAX_TTL = 20 * 365 * 24 * 60 * 60` — 20 years, `631,152,000` s
+`Attributes.MAX_TTL = 20 * 365 * 24 * 60 * 60` — 20 years (20 × 365 days), `630,720,000` s
 (`Attributes.java:47`) — with `ttl < 0` and `ttl > MAX_TTL` both rejected as
 `InvalidRequestException` (`:135-139`). At *read* time the only check is
 `if (ttl < 0) throw new IOException("Invalid TTL: " + ttl)` (`Cell.java:345-346`). So a
