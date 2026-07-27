@@ -102,15 +102,23 @@ fn schemas_dir() -> Option<PathBuf> {
 ///
 /// `CQLITE_REQUIRE_FIXTURES=1` makes even the absent case fail closed.
 fn wide_table_fixture(sstables: &Path) -> Option<PathBuf> {
+    // A `read_dir` failure (an ABSENT or unreadable `test_da`) is the absent case, and
+    // must FALL THROUGH to the `CQLITE_REQUIRE_FIXTURES` assert below — an early
+    // `?` return here would let the lane green-pass vacuously under
+    // `CQLITE_REQUIRE_FIXTURES=1` wherever the corpus is guaranteed (pr-gate.yml /
+    // gate.yml both set it), which is exactly the knob this probe advertises.
     let found = std::fs::read_dir(sstables.join("test_da"))
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .find(|dir| {
-            dir.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("wide_table-"))
-                && dir.join("da-2-bti-Data.db").exists()
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .find(|dir| {
+                    dir.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("wide_table-"))
+                        && dir.join("da-2-bti-Data.db").exists()
+                })
         });
     if found.is_none() {
         assert!(
