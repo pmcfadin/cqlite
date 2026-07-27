@@ -10,18 +10,46 @@ Extracted from Apache Cassandra 5.0 source code (UnfilteredSerializer.java, Cell
 ### 1. Row Header (Flags)
 ```
 [1 byte: flags]
-[0-1 bytes: extended flags if EXTENSION_FLAG (0x80) set]
+[0-1 bytes: extended flags — present iff ROW_HAS_EXTENDED_FLAGS (0x80) is set]
 ```
 
-**Flags Breakdown:**
-- `0x01`: IS_MARKER (range tombstone marker)
-- `0x02`: (reserved)
-- `0x04`: HAS_TIMESTAMP (row has liveness timestamp)
-- `0x08`: HAS_TTL (row has time-to-live)
-- `0x10`: HAS_DELETION (row has deletion tombstone)
-- `0x20`: HAS_ALL_COLUMNS (all schema columns present, no bitmap needed)
-- `0x40`: IS_STATIC (static row)
-- `0x80`: EXTENSION_FLAG (extended flags byte follows)
+**Main flag byte:**
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| `0x01` | `END_OF_PARTITION` | End-of-partition marker — **nothing follows this flag byte** |
+| `0x02` | `IS_MARKER` | Unfiltered is a RangeTombstoneMarker, not a Row |
+| `0x04` | `ROW_HAS_TIMESTAMP` | Row has a liveness timestamp (delta-encoded) |
+| `0x08` | `ROW_HAS_TTL` | Row has a TTL (delta-encoded) |
+| `0x10` | `ROW_HAS_DELETION` | Row has a deletion tombstone |
+| `0x20` | `ROW_HAS_ALL_COLUMNS` | All schema columns present — no bitmap needed |
+| `0x40` | `ROW_HAS_COMPLEX_DELETION` | Row carries a non-frozen collection column with deletion info |
+| `0x80` | `ROW_HAS_EXTENDED_FLAGS` | Extended flags byte follows |
+
+**EXTENDED flag byte** (present only when `ROW_HAS_EXTENDED_FLAGS = 0x80` is set):
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| `0x01` | `EXTENDED_IS_STATIC` | Static row — carries **NO** clustering prefix |
+
+> **Citations**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/mod.rs:709-715`
+> (`ROW_HAS_TIMESTAMP` `0x04`, `ROW_HAS_TTL` `0x08`, `ROW_HAS_DELETION` `0x10`,
+> `ROW_HAS_ALL_COLUMNS` `0x20`, `ROW_HAS_COMPLEX_DELETION` `0x40`,
+> `ROW_HAS_EXTENDED_FLAGS` `0x80`), `:820` (`END_OF_PARTITION = 0x01`), `:821`
+> (`IS_MARKER = 0x02`), `:825` (`EXTENDED_IS_STATIC = 0x01`). Guide:
+> `docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md:206-212`.
+> Cassandra: `UnfilteredSerializer.java:102-109` and `:114-122`.
+
+**⚠️ `0x01` is the partition boundary, not a static/marker bit.** Treating `0x01` as
+`IS_STATIC` (or as the marker flag) means **mis-detecting partition boundaries** — the
+highest-consequence single bit in the row format. `IS_STATIC` lives at `0x01` of the
+**EXTENDED** byte. `HAS_ALL_COLUMNS` has exactly one value, `0x20`.
+
+**Common flag combinations** (`appendix-b-encodings-cheat-sheet.md:215-219`):
+- `0x24`: simple write (`HAS_TIMESTAMP | HAS_ALL_COLUMNS`)
+- `0x2C`: TTL write (`HAS_TIMESTAMP | HAS_TTL | HAS_ALL_COLUMNS`)
+- `0x04`: partial update (timestamp, no `HAS_ALL_COLUMNS` → bitmap follows)
+- `0x14`: row deletion (`HAS_TIMESTAMP | HAS_DELETION`)
 
 ### 2. Clustering Prefix
 For tables with clustering columns:
@@ -196,5 +224,20 @@ Each block:
 
 ## Reference Implementation
 
-See `cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs` for full Rust implementation following this specification.
+The V5 row/partition decoder lives in the
+`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/` **directory** (~30 files).
+Entry points:
+
+- `row_decoder/mod.rs` — flag constants (`END_OF_PARTITION`, `IS_MARKER`,
+  `ROW_HAS_*`, `EXTENDED_IS_STATIC`) and the parser struct.
+- `row_decoder/row_framing.rs` — row/partition framing and boundary detection.
+- `row_decoder/row_data.rs`, `cell_value_scalar.rs`, `cell_value_complex.rs` — cell decode.
+- `row_decoder/complex_column.rs` — non-frozen collections; `frozen.rs` — frozen
+  collections; `udt.rs` — UDTs; `partition_driver.rs` — partition iteration.
+
+The former single-file V5-compressed-legacy parser module was deleted by epic #1116
+(source splits), commit `cb049f7a8`; any pointer to a single `.rs` file for this parser is
+stale. Format authority for a genuinely disputed on-disk question is Apache Cassandra 5.0.8
+(`UnfilteredSerializer.java`, `Cell.java`, `ClusteringPrefix.java`) plus
+`docs/sstables-definitive-guide/`.
 
