@@ -323,10 +323,11 @@ async fn equality_slice_parity_and_bounded_decode() {
         ))
         .await
         .expect("probe must succeed");
-    if probe.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    assert!(
+        !probe.rows.is_empty(),
+        "fixture invariant: pk=1 must decode at least one row (the committed \
+         test_da/wide_table binaries are present; 0 rows is a read-path FAILURE)"
+    );
 
     let (returned, rows_decoded, path) = run_slice(&db, "pk = 1 AND ck = 150").await;
     assert_eq!(
@@ -366,10 +367,11 @@ async fn partition_only_lookup_reports_partition_lookup_not_clustering_slice() {
         ))
         .await
         .expect("partition read must succeed");
-    if result.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    assert!(
+        !result.rows.is_empty(),
+        "fixture invariant: pk=1 must decode at least one row (the committed \
+         test_da/wide_table binaries are present; 0 rows is a read-path FAILURE)"
+    );
     assert_eq!(
         result.metadata.access_path,
         Some(AccessPath::PartitionLookup),
@@ -399,10 +401,13 @@ async fn slice_results_equal_full_scan_filtered_baseline() {
         ))
         .await
         .expect("full partition read must succeed");
-    if full.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    assert_eq!(
+        full.rows.len(),
+        PARTITION_ROW_COUNT,
+        "fixture invariant: pk=1 must hold {PARTITION_ROW_COUNT} clustering rows (the committed \
+         test_da/wide_table binaries are present; a 0-row or short baseline would make every \
+         parity case below vacuously true — a FAILURE, never a skip)",
+    );
     let all_cks = cks(&full.rows);
 
     // For each shape, the in-memory baseline filter over the full partition's cks

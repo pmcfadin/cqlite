@@ -392,21 +392,34 @@ fn assert_trie_index_entry_base_is_canonical(
         "the trie root {root} must lie in the trie region BELOW the entry at {rows_offset}"
     );
 
-    // The root node's serialized extent must end exactly at the entry start.
-    let extent_ends_at_entry = |node_offset: usize| -> bool {
-        let header = rows_db[node_offset];
-        let ordinal = header >> 4;
-        // Sparse ordinals 5/7/8/9 carry 1/2/3/5-byte backward pointers;
-        // layout = [header][count][count transition bytes][count pointers].
-        let ptr_bytes = match ordinal {
+    // End offset of the node serialized at `node_offset`, or `None` when the node type
+    // is one this helper does not model (or the offset is out of range).
+    // Sparse ordinals 5/7/8/9 (SPARSE_8/16/24/40) carry 1/2/3/5-byte backward pointers;
+    // layout = [header][count][count transition bytes][count pointers].
+    let extent_end = |node_offset: usize| -> Option<usize> {
+        let header = *rows_db.get(node_offset)?;
+        let count = *rows_db.get(node_offset + 1)? as usize;
+        let ptr_bytes = match header >> 4 {
             5 => 1usize,
             7 => 2,
             8 => 3,
             9 => 5,
-            _ => return false,
+            _ => return None,
         };
-        let count = rows_db[node_offset + 1] as usize;
-        node_offset + 2 + count + count * ptr_bytes == rows_offset
+        Some(node_offset + 2 + count + count * ptr_bytes)
+    };
+    // At the RESOLVED ROOT, an unmodelled node type must be a loud, precise failure —
+    // never a silent "boundary not satisfied" that would read as a writer regression.
+    let root_extent_end = |node_offset: usize| -> usize {
+        extent_end(node_offset).unwrap_or_else(|| {
+            let header = rows_db[node_offset];
+            panic!(
+                "unhandled node type at the resolved root {node_offset}: header byte \
+                 0x{header:02x} (ordinal {}) is not one of SPARSE_8/16/24/40 (ordinals 5/7/8/9) \
+                 — a writer change altered the root node type; update this helper",
+                header >> 4
+            )
+        })
     };
 
     let header = rows_db[root];
@@ -416,8 +429,9 @@ fn assert_trie_index_entry_base_is_canonical(
         "the resolved root byte 0x{header:02x} must be a payload-CAPABLE node type \
          (ordinals 1/3 are SingleNoPayload and structurally cannot carry a payload)"
     );
-    assert!(
-        extent_ends_at_entry(root),
+    assert_eq!(
+        root_extent_end(root),
+        rows_offset,
         "the resolved root at {root} (base {base} + delta {root_delta}) must be the LAST \
          trie node written before the entry at {rows_offset}, i.e. its serialized bytes \
          must end exactly there; header byte 0x{header:02x}"
@@ -435,14 +449,19 @@ fn assert_trie_index_entry_base_is_canonical(
         "the root's only transition must be the NEXT_COMPONENT byte 0x40"
     );
 
-    // The PRE-#3002 base (`rows_offset + key_length`, 2 bytes low) does NOT describe
-    // a node ending at the entry start — so this check really discriminates the two.
-    let pre_fix_root = root - 2;
-    assert!(
-        !extent_ends_at_entry(pre_fix_root),
-        "the pre-#3002 2-low base would resolve to {pre_fix_root}, which must NOT satisfy \
-         the node-boundary invariant (else this assertion could not detect a writer \
-         regression)"
+    // Self-check, in the WRITER's direction: a pre-#3002 writer encodes the delta
+    // against a base 2 bytes LOW (`rows_offset + key_length`), so this test — which
+    // resolves against the CORRECT base — would compute a root 2 bytes HIGH. That
+    // offset must NOT satisfy the node-boundary invariant, else the assertion above
+    // could not detect such a writer regression. (`None` there = unmodelled node type,
+    // which likewise does not satisfy it.)
+    let regressed_root = root + 2;
+    assert_ne!(
+        extent_end(regressed_root),
+        Some(rows_offset),
+        "a pre-#3002 2-low writer base would make this test resolve the root to \
+         {regressed_root}, which must NOT satisfy the node-boundary invariant (else this \
+         assertion could not detect a writer regression)"
     );
 }
 

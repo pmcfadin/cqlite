@@ -511,8 +511,7 @@ mod tests {
         // Oracle: the block for the largest separator <= key, else None.
         let oracle = |key: &[u8]| -> Option<u64> {
             all.iter()
-                .filter(|(sep, _)| sep.as_slice() <= key)
-                .next_back()
+                .rfind(|(sep, _)| sep.as_slice() <= key)
                 .map(|(_, e)| e.data_offset)
         };
 
@@ -726,8 +725,7 @@ mod tests {
 
         let floor_oracle = |key: &[u8]| -> Option<u64> {
             all.iter()
-                .filter(|(sep, _)| sep.as_slice() <= key)
-                .next_back()
+                .rfind(|(sep, _)| sep.as_slice() <= key)
                 .map(|(_, e)| e.data_offset)
         };
         let ceil_oracle = |key: &[u8]| -> Option<u64> {

@@ -227,9 +227,10 @@ async fn range_clustering_read_walks_floor_not_all_blocks() {
     let Some(db) = skip_or_db().await else {
         return;
     };
-    let _full_decompress = warm_up(&db).await;
+    let full_rows_decoded = warm_up(&db).await;
 
     rwc::reset();
+    wc::reset();
     let res = db
         .execute(&format!(
             "SELECT pk, ck, payload FROM {QUALIFIED_TABLE} WHERE pk = 1 AND ck >= 100 AND ck < 110"
@@ -245,7 +246,11 @@ async fn range_clustering_read_walks_floor_not_all_blocks() {
 
     let nodes = rwc::bti_nodes_visited();
     let resolves = rwc::rows_db_entry_resolves();
-    println!("L1 range read: bti_nodes_visited={nodes} rows_db_entry_resolves={resolves}");
+    let rows_decoded = wc::rows_decoded();
+    println!(
+        "L1 range read: bti_nodes_visited={nodes} rows_db_entry_resolves={resolves} \
+         rows_decoded={rows_decoded} (full partition: {full_rows_decoded})"
+    );
 
     assert!(
         nodes > 0 && nodes < NODES_BOUND,
@@ -257,11 +262,21 @@ async fn range_clustering_read_walks_floor_not_all_blocks() {
         "L1: the clustering-window path must resolve the per-partition Rows.db entry \
          EXACTLY once; got {resolves} (pre-L1 resolved it twice)",
     );
+    // Issue #3002: bound the resolved WINDOW here too, not only the walk — an
+    // over-inclusive window returns the correct 10 rows while making the decoder parse
+    // the whole partition, which no row-level assertion can see.
+    assert!(
+        rows_decoded > 0 && rows_decoded <= WINDOW_ROWS_BOUND,
+        "#3002: a `ck >= 100 AND ck < 110` range read must decode (0, {WINDOW_ROWS_BOUND}] rows \
+         from its row-index window; got {rows_decoded} of the partition's {full_rows_decoded}",
+    );
 }
 
 /// Issue #3002 — the BLOCK-0 slice (`ck < 8`), whose floor is the
 /// `ByteComparable.EMPTY` separator stored on the corrected root node. Pins the
-/// resolved WINDOW (via `decompress_calls`) as well as the walk, because an
+/// resolved WINDOW (via `rows_decoded` — the count of rows the window makes the
+/// decoder parse; `decompress_calls` would be useless here, since `warm_up` has
+/// already cached the blocks and it stays 0) as well as the walk, because an
 /// over-inclusive window returns the CORRECT rows: before #3002 the compensating
 /// defects made this slice decode from rel 0 through the whole partition, which no
 /// row-level assertion can see.

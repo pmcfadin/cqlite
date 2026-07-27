@@ -162,8 +162,7 @@ fn enc_ck(ck: i32) -> Vec<u8> {
 fn floor_oracle(entries: &[(Vec<u8>, BtiRowIndexEntry)], key: &[u8]) -> Option<u64> {
     entries
         .iter()
-        .filter(|(sep, _)| sep.as_slice() <= key)
-        .next_back()
+        .rfind(|(sep, _)| sep.as_slice() <= key)
         .map(|(_, e)| e.data_offset)
 }
 

@@ -144,9 +144,12 @@ async fn run_slice(db: &Database, where_clause: &str) -> (Vec<i32>, u64, Option<
     (cks(&result.rows), rows_decoded, path)
 }
 
-/// Skip helper: confirm pk=2 is populated (Data.db fetched) via a pk-INCLUDING
-/// projection (a bare `SELECT ck` probe would need issue #1952). Returns the db and
-/// full pk=2 partition when present.
+/// Fixture-invariant helper: read the full pk=2 partition via a pk-INCLUDING
+/// projection (a bare `SELECT ck` probe would need issue #1952) and return its cks.
+///
+/// The `test_da/wide_table` binaries are COMMITTED, so a 0-row read here is a
+/// read-path FAILURE, never a "not fetched" skip — a silent skip would make every
+/// open-lower-bound assertion below vacuous.
 async fn db_and_pk2(db: &Database) -> Option<Vec<i32>> {
     let full = db
         .execute(&format!(
@@ -154,10 +157,11 @@ async fn db_and_pk2(db: &Database) -> Option<Vec<i32>> {
         ))
         .await
         .expect("pk=2 partition read must succeed");
-    if full.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return None;
-    }
+    assert!(
+        !full.rows.is_empty(),
+        "fixture invariant: pk=2 must decode at least one row (the committed \
+         test_da/wide_table binaries are present; 0 rows is a read-path FAILURE)"
+    );
     assert_eq!(
         full.rows.len(),
         PARTITION_ROW_COUNT,
