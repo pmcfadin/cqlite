@@ -13,18 +13,27 @@ owner unless a set is pre-authorized for merge-on-green.
 > **GitHub API resilience:** `gh issue`/`gh pr`/`gh project` writes ride the **GraphQL** bucket, which
 > throttles **separately** from REST (each 5k pts/hr, independent per-bucket windows). If GraphQL is
 > exhausted, issue the **same write** via its `gh api` REST endpoint (e.g. comment →
-> `repos/OWNER/REPO/issues/N/comments`, merge → `repos/OWNER/REPO/pulls/N/merge`). Never stall the board
+> `repos/OWNER/REPO/issues/N/comments`, PR create → `repos/OWNER/REPO/pulls`). Never stall the board
 > sweep on one exhausted bucket. This is an **API-endpoint swap for the identical operation only** — it is
 > NOT a dispatch fallback: Path A (#1886) still holds, and selecting/claiming work from `status:*` labels
 > remains forbidden regardless of which API bucket is throttled.
+>
+> **MERGE HAS NO REST FALLBACK — `PUT repos/OWNER/REPO/pulls/N/merge` is FORBIDDEN.** That endpoint merges
+> **immediately**, bypassing the required-check wait that branch protection exists to enforce (#2433 —
+> GitHub-enforced merge gate, `enforce_admins=true`). The only sanctioned merge is
+> `gh pr merge --auto --squash --delete-branch`, which is **set-once/idempotent**: on a GraphQL throttle,
+> **sleep and retry the same `--auto` arm** (a re-arm on an already-armed PR is a safe no-op). Never
+> substitute REST for a merge, and never merge to "unblock" a throttled bucket.
 
 ## Project-or-labels detection (shared by all flow-* skills)
 
 The board is a **GitHub Project (v2)** with a `Status` single-select
 (`Backlog/Ready/In Progress/In Review/Done`). **The board `Status` field is the SOLE dispatch authority
-(Path A, issue #1886).** `status:*` labels are decorative/non-authoritative — they are NOT a dispatch
-fallback and MUST NOT be used to select or claim work. Reading/writing the board needs the `project`
-token scope. Detect it once:
+(Path A, issue #1886).** `status:*` labels are an **ENFORCED board-derived read-mirror** (#2855 —
+`project-board-sync.yml` is their sole writer, and a drift detector FAILs the run on disagreement): they
+are trustworthy for **cheap server-side candidate discovery** (narrowing), but they are **eventually
+consistent (≤30-min lag) and are NEVER the dispatch/claim authority** — MUST NOT be used to select or
+claim work. Reading/writing the board needs the `project` token scope. Detect it once:
 
 ```bash
 # project_owner / project_number identify the CQLite Delivery board (see setup-project-board.sh output).
@@ -47,10 +56,11 @@ fi
 ```
 
 **Path A: the board is the only authority — there is NO label dispatch fallback.** When `have_project=0`
-the board is unreachable, and because `status:*` labels are decorative they are NOT a safe substitute for
-selecting or claiming work (stale labels are exactly what caused the wrong-grabs). So on `have_project=0`:
+the board is unreachable, and because `status:*` labels are only a lagging board-derived mirror (#2855)
+they are NOT a safe substitute for selecting or claiming work (a stale mirror read is exactly what caused
+the wrong-grabs). So on `have_project=0`:
 **do not dispatch.** Print
-`🛑 board unreachable (active gh account lacks 'project' scope) — CANNOT dispatch; status:* labels are decorative, not the queue. Fix auth first.`
+`🛑 board unreachable (active gh account lacks 'project' scope) — CANNOT dispatch; status:* labels are a lagging read-mirror, not the queue. Fix auth first.`
 and STOP. You MAY still render a read-only status view from labels for the owner, but no claim, no
 selection, no "next thing" happens without the board. The one-time fix is the owner's:
 `gh auth refresh -s project` on the `$project_account` + run `test-data/scripts/setup-project-board.sh`.
@@ -77,7 +87,8 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    ```bash
    gh issue list --state open --json number,title,labels,assignees,url --limit 100
    ```
-   Bucket by `status:*`; read the `P?` label as priority; show assignee from `assignees`. This view is
+   Bucket by `status:*` (the #2855 board-derived mirror — accurate to within its ≤30-min sweep lag, never
+   an authority); read the `P?` label as priority; show assignee from `assignees`. This view is
    informational only — no claim/selection happens without the board.
 3. **PRs + CI:**
    ```bash
@@ -93,11 +104,12 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    ```
    Each `CLAIM: STATUS issue=<N>` line is an active claim (holder machine/actor + age); a matching
    legacy `issue-<N>-<slug>` branch, if any, is that claim's PR head (or an old-fleet branch-lock).
-3a. **Fleet view (issue #2089).** For each `In Progress` item, join the claim against the shared
+4a. **Fleet view (issue #2089).** For each `In Progress` item, join the claim against the shared
    heartbeat refs — a cheap origin git ref, never a GitHub API call — to show which machine holds it and
-   whether it is alive:
+   whether it is alive. (`scripts/flow/*.sh` blobs are mode `100644` — **always `bash`-prefixed**, never
+   executed directly.)
    ```bash
-   scripts/flow/claim-heartbeat.sh list
+   bash scripts/flow/claim-heartbeat.sh list
    ```
    This renders one line per machine: `machine  issue  ts  age` (e.g. `mbp-2  #2083  2026-07-06T18:03:11Z
    12m`). Join on `issue` against the board's `In Progress` rows and render alongside worktrees/claims:
@@ -109,14 +121,21 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
 5. **Reconcile + reap.** Cross-check the board against GitHub-side state:
    - **Drift:** a PR that is **merged** (or its issue closed) while the item is still `In Progress`
      (or `In Review`) → flag for transition to `Done` (the server-side automation should do this; if it
-     hasn't, set it: `gh project item-edit ... --field Status --single-select-option-id <Done>` or flip
-     the `status:*` label). Also flag an approved spec still `Ready`/`status:spec-review`.
+     hasn't, set the **board `Status` only** — never hand-flip a `status:*` label, which the #2855 mirror
+     owns and will revert):
+     ```bash
+     # `--field` is NOT a gh flag (verified gh 2.87.3 offers only --field-id). All four IDs are required:
+     gh project item-edit --id <item-id> --project-id <project-id> \
+       --field-id <status-field-id> --single-select-option-id <Done-option-id>
+     ```
+     The mirror follows on its next pass (Done → no board-derived label). Also flag an approved spec still
+     `Ready`/`status:spec-review`.
    - **Abandoned claim (reaper) — deterministic rule (issue #2089).** This REPLACES the old "no recent
      commits" guesswork, which false-positived on long no-commit implementation phases and
      false-negatived on a push-then-idle machine. The rule now has two conditions, both required:
      ```bash
-     # 1. heartbeat age for the claiming machine, from the fleet view (step 4a):
-     scripts/flow/claim-heartbeat.sh list   # age column for the issue's machine
+     # 1. heartbeat age for the claiming machine, from the fleet view (step 4a above):
+     bash scripts/flow/claim-heartbeat.sh list   # age column for the issue's machine
      # 2. no open PR for the issue:
      gh pr list --state open --search "issue-<N>" --json number --jq 'length'
      ```
@@ -130,7 +149,7 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
           heartbeat age, and that no PR was open.
        2. Clear the assignee.
        3. Set board `Status` → `Ready`.
-       4. Clear the dead machine's heartbeat ref: `scripts/flow/claim-heartbeat.sh clear <machine>`.
+       4. Clear the dead machine's heartbeat ref: `bash scripts/flow/claim-heartbeat.sh clear <machine>`.
        5. **NEVER delete the `issue-<N>-*` branch if it carries commits.** The branch (PR plumbing) is
           preserved on origin exactly as-is; picking the issue back up means resuming that branch
           (`git fetch` + continue), not starting a fresh `flow-activate`. Only a branch with zero commits
@@ -179,7 +198,10 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    spec inline / show the PR), or — if nothing waits — offer a short **claim-aware** pick-list: only items
    whose **board `Status=Ready`** AND
    have **no** `refs/claims/issue-<N>` claim ref and **no** legacy `issue-<N>-*` branch on origin
-   (already-claimed items are not offered) to `flow-activate`, highest priority first. Selection is by **board `Status` only** — never by `status:ready` label.
+   (already-claimed items are not offered) to `flow-activate`, highest priority first. Step 1's
+   `status:ready` mirror read may have **narrowed** the candidate set, but the final selection is by
+   **board `Status` only** — the label is never the authority.
    **An empty board Ready column means no work is ready → say so and STOP.** Do NOT fall back to the
-   `status:*` label set to find more (near a release, Ready is *supposed* to drain to zero; dredging
-   labels is the exact wrong-grab bug). Don't dump the whole backlog; show the one, mention the rest.
+   `status:*` label set to find more — a mirror row the board does not confirm as `Ready` is stale by
+   definition (near a release, Ready is *supposed* to drain to zero; dredging labels is the exact
+   wrong-grab bug). Don't dump the whole backlog; show the one, mention the rest.
