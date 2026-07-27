@@ -32,6 +32,7 @@ pub mod filter;
 mod metered_stream;
 pub mod obs;
 pub mod obs_abort;
+pub mod obs_subphase;
 pub mod pathsafe;
 pub mod point_read;
 pub mod producer;

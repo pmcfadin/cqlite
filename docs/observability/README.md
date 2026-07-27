@@ -59,6 +59,19 @@ See the [Quickstart](quickstart.md) for the full walkthrough.
   `validate → admission → resolve → merge_setup → stream` (`admission` and
   `validate` added by #2420), so a stalled request localizes to a phase (queued in
   `admission`, building in `merge_setup`, etc.) from metrics alone.
+- **`cqlite.rpc.phase` in-`stream` sub-phase values (issue #2819)** — within the
+  `stream` phase and ONLY on `do_get`, `cqlite.rpc.phase_duration` also carries five
+  bounded sub-phase values that decompose the data-plane wall time:
+  `stream_cold_fault` (cold body-chunk page-in / cold-IO latency),
+  `stream_decompress` (LZ4 chunk decompress), `stream_merge` (k-way merge +
+  reconcile + row materialize — merge CPU only, the blocking merge-input recv wait
+  is excluded), `stream_encode` (Arrow `RecordBatch` encode), and
+  `stream_grpc_write` (egress channel `reserve()`/send incl. backpressure park —
+  CLIENT-PACED, not server cost). They run on concurrent pipeline threads and
+  OVERLAP (they do NOT sum to `stream`); the load-bearing signal is the cold−warm
+  delta on `stream_cold_fault`. These values are emitted once per RPC at stream
+  teardown, ride the EXISTING histogram + attribute key (no new metric/attr key),
+  and never appear on `cqlite.rpc.phase.active`.
 - **`cqlite.sstable.index_interval_parses_total`** — NEW counter (issue #2412):
   one increment per summary-guided interval parse on a point lookup.
   **`cqlite.sstable.index_parses_total` now counts FULL Index.db parses only** —

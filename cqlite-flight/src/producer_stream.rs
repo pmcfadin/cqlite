@@ -26,7 +26,12 @@
 //! Lives in its own module (not `producer.rs`) because that file is over the
 //! campsite file-size threshold (epic #1116).
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use cqlite_core::export::estimate_arrow_row_bytes;
+use cqlite_core::observability::stream_subphase;
+use cqlite_core::observability::{StreamSubPhase, StreamSubPhaseTimings};
 use cqlite_core::query::{PartitionKeyCache, QueryRow};
 use cqlite_core::storage::write_engine::merge::{StreamingMerger, StreamingStep};
 use cqlite_core::storage::write_engine::{DecoratedKey, KWayMerger};
@@ -35,6 +40,95 @@ use crate::batch_bytes::BatchByteCap;
 use crate::cancel::CancelFlag;
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
+
+/// Per-request in-`stream` sub-phase accumulator for the row-drive loop (issue
+/// #2819 B2/B3).
+///
+/// Resolves the flight per-request sub-phase sink ONCE before the loop (a single
+/// thread-local read + `Arc` clone, NOT per row — B3) and folds `stream_merge`
+/// CPU nanos into a plain `u64` local as the loop runs. It is written into the
+/// shared `AtomicU64` counter EXACTLY ONCE, on [`Drop`] — so an early return (a
+/// cooperative cancel, a `LIMIT` break, or a `?`-propagated error) still records
+/// the work already done, and a full scan makes ONE `fetch_add` regardless of
+/// row count.
+///
+/// `stream_merge` is merge CPU only: each iteration's BLOCKING merge-input recv
+/// wait (producer starvation / cold-IO, timed by the recv site into the
+/// thread-local `pull_wait_nanos` accumulator) is subtracted from the iteration's
+/// wall time before it is added here (B2) — so a slow producer inflates neither
+/// `stream_merge` nor cold-fault falsely. (`stream_encode` is timed separately
+/// in `MergeProducer::flush_credited`, around the Arrow build only — see
+/// `egress_flush.rs` — so it excludes the egress-credit reserve park.)
+///
+/// On-path overhead (issue #2819 Medium): with a meter installed the loop pays
+/// ~2 `Instant::now()` + a couple of thread-local reads PER ROW (one iteration
+/// snapshot + one record). The reconcile and materialize are folded into ONE
+/// timed region so no per-scope boundary clock is taken. On-path instrumentation
+/// overhead; throughput microbenchmark tracked in #2980.
+///
+/// When no sink is installed (every non-flight caller) the accumulator is inert:
+/// [`Self::active`] is `false`, so the hot loop skips `Instant::now()` entirely
+/// and `Drop` records nothing.
+struct RowSubPhaseAccum {
+    sink: Option<Arc<StreamSubPhaseTimings>>,
+    merge_nanos: u64,
+}
+
+impl RowSubPhaseAccum {
+    fn new() -> Self {
+        Self {
+            sink: stream_subphase::current(),
+            merge_nanos: 0,
+        }
+    }
+
+    #[inline]
+    fn active(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    #[inline]
+    fn add_merge(&mut self, nanos: u64) {
+        self.merge_nanos = self.merge_nanos.saturating_add(nanos);
+    }
+
+    /// Snapshot the start of one merge iteration: `Some(Instant)` + the current
+    /// recv-wait total when a sink is installed, else `(None, 0)` — NO clock read
+    /// on the non-flight path. Paired with exactly one [`Self::record_merge_iter`]
+    /// per iteration.
+    #[inline]
+    fn iter_start(&self) -> (Option<Instant>, u64) {
+        if self.active() {
+            (Some(Instant::now()), stream_subphase::pull_wait_nanos())
+        } else {
+            (None, 0)
+        }
+    }
+
+    /// Fold the whole merge region `[t0, now]` MINUS the recv-wait accrued since
+    /// `wait_before` into the `stream_merge` bucket — the reconcile (`step_row`)
+    /// AND the materialize (`entry_to_row`) both land here, so no per-scope
+    /// boundary clock is needed (issue #2819 Medium: ~2 `Instant::now()`/row —
+    /// `t0` in [`Self::iter_start`] + `now` here — not ~4). Called EXACTLY ONCE
+    /// per iteration, at the point the merge region ends (before the flush/emit
+    /// block, whose encode/grpc-write are separate buckets). The recv-wait is all
+    /// inside `step_row` ⊂ `[t0, now]`, so subtracting the delta leaves merge CPU.
+    #[inline]
+    fn record_merge_iter(&mut self, t0: Option<Instant>, wait_before: u64) {
+        if let Some(t0) = t0 {
+            let wait = stream_subphase::pull_wait_nanos().saturating_sub(wait_before);
+            self.add_merge(stream_subphase::elapsed_nanos(t0).saturating_sub(wait));
+        }
+    }
+}
+
+impl Drop for RowSubPhaseAccum {
+    fn drop(&mut self) {
+        if let Some(sink) = &self.sink {
+            sink.add_nanos(StreamSubPhase::Merge, self.merge_nanos);
+        }
+    }
+}
 
 /// Abstraction over the ROW-granular streaming stepper — the streaming analogue
 /// of `producer::PartitionStepper` (issue #2230).
@@ -107,6 +201,12 @@ impl MergeProducer {
         let mut meter = ScanProgressMeter::new(progress, access_path);
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
         let mut emitted: u64 = 0;
+        // Issue #2819 (B2/B3): resolve the flight sub-phase sink ONCE here and
+        // accumulate `stream_merge` CPU into a local, flushed to the shared atomic
+        // on this accumulator's Drop (covers every early return below). Inert
+        // (no `Instant::now`) when no flight sink is installed. (`stream_encode` is
+        // timed in `flush_credited`.)
+        let mut accum = RowSubPhaseAccum::new();
         // Issue #2825: the SAME dual-boundary accumulator `drive_merge` uses — a
         // cap wired into only one egress path would leave the other unbounded.
         let mut byte_cap = BatchByteCap::new(self.max_batch_bytes);
@@ -139,6 +239,15 @@ impl MergeProducer {
             // I/O/corruption error that happens to race a client disconnect is
             // NEVER masked as a clean `Cancelled` abort — only an actual
             // cancellation maps to `ProducerError::Cancelled`.
+            //
+            // Issue #2819 (B2/Medium): snapshot ONE iteration start here; the whole
+            // merge region — `step_row` reconcile (k-way merge + LWW/tombstone/TTL,
+            // which also does the BLOCKING merge-input recv) PLUS the `entry_to_row`
+            // materialize — is folded into `stream_merge` at the region's end via a
+            // SINGLE `record_merge_iter`, with the recv-wait delta subtracted (the
+            // recv-wait is producer starvation / cold-IO, not merge CPU). ~2
+            // `Instant::now()`/row (this snapshot + the record), not ~4.
+            let (iter_t0, wait_before) = accum.iter_start();
             let step = stepper.step_row().map_err(|e| match e {
                 cqlite_core::Error::Cancelled => ProducerError::Cancelled,
                 other => ProducerError::Merge(other),
@@ -158,9 +267,13 @@ impl MergeProducer {
                         &mut partition_recorded,
                         &mut meter,
                     );
+                    accum.record_merge_iter(iter_t0, wait_before);
                     continue;
                 }
-                StreamingStep::Complete => break,
+                StreamingStep::Complete => {
+                    accum.record_merge_iter(iter_t0, wait_before);
+                    break;
+                }
             };
 
             self.begin_partition(
@@ -172,12 +285,14 @@ impl MergeProducer {
             );
             // Token-range filter: drop whole partitions outside the split's range.
             if !partition_active {
+                accum.record_merge_iter(iter_t0, wait_before);
                 continue;
             }
 
             // Build the row so predicates can reference any projected-out column
             // too (`assemble_cols` includes filter-referenced columns); carriers
-            // (`entry_to_row` → None) are skipped without counting a row.
+            // (`entry_to_row` → None) are skipped without counting a row. Its
+            // materialize CPU is part of the `stream_merge` region timed above.
             let Some(row) = self.entry_to_row(
                 &key.key,
                 *entry,
@@ -186,6 +301,7 @@ impl MergeProducer {
                 self.now_secs,
             )?
             else {
+                accum.record_merge_iter(iter_t0, wait_before);
                 continue;
             };
             // Count a row materialised/examined by the scan (BEFORE the predicate
@@ -194,9 +310,14 @@ impl MergeProducer {
             // Predicate pushdown: keep the row only when it is definitely True.
             if let Some(filter) = &self.spec.filter {
                 if !filter.keeps(&row) {
+                    accum.record_merge_iter(iter_t0, wait_before);
                     continue;
                 }
             }
+            // Merge region (reconcile + materialize + predicate) ends here — record
+            // it ONCE, BEFORE the flush/emit block below (encode + grpc-write are
+            // separate buckets).
+            accum.record_merge_iter(iter_t0, wait_before);
             // Dual row-cap / byte-cap boundary (issue #2825): estimate the row's
             // Arrow payload width BEFORE it moves into the buffer and cut on the
             // row that WOULD cross the cap. Test-then-push, so a row wider than
@@ -302,6 +423,36 @@ mod tests {
                 self.cancel.cancel();
             }
             Ok(step)
+        }
+    }
+
+    /// A [`RowStepper`] that sleeps in `step_row` and attributes 3/4 of the
+    /// MEASURED sleep to the pull-wait accumulator (simulating a BLOCKING
+    /// merge-input recv) before completing — so a test can prove the drive loop
+    /// SUBTRACTS recv-wait from the `stream_merge` bucket (issue #2819 B2). The
+    /// injected wait is a fraction of the ACTUAL elapsed sleep (recorded in
+    /// `actual_nanos`), not a hardcoded constant, so the assertion is
+    /// host-independent (no #2642 wall-clock race).
+    struct RecvWaitStepper {
+        sleep: std::time::Duration,
+        actual_nanos: u64,
+        done: bool,
+    }
+
+    impl RowStepper for RecvWaitStepper {
+        fn step_row(&mut self) -> Result<StreamingStep, cqlite_core::Error> {
+            if self.done {
+                return Ok(StreamingStep::Complete);
+            }
+            let t = std::time::Instant::now();
+            std::thread::sleep(self.sleep);
+            let actual = cqlite_core::observability::stream_subphase::elapsed_nanos(t);
+            self.actual_nanos = actual;
+            // Attribute 3/4 of the MEASURED sleep to recv-wait, as the real recv
+            // site would — a fraction of what actually elapsed, never a constant.
+            cqlite_core::observability::stream_subphase::add_pull_wait_nanos(actual * 3 / 4);
+            self.done = true;
+            Ok(StreamingStep::Complete)
         }
     }
 
@@ -522,5 +673,61 @@ mod tests {
         for (b, s) in buffered.iter().zip(streamed.iter()) {
             assert_eq!(b, s, "streaming batch must be byte-identical to buffered");
         }
+    }
+
+    /// B2 (recv-wait exclusion): the drive loop must SUBTRACT the blocking
+    /// merge-input recv-wait from the `stream_merge` bucket, so `stream_merge` is
+    /// merge CPU only. A stub `step_row` sleeps, attributes 3/4 of the MEASURED
+    /// sleep to the pull-wait accumulator (as the real recv site would), then
+    /// completes. `stream_merge` must land BELOW that injected 3/4 (leaving ≈1/4)
+    /// — a CORRECTNESS metric-vs-metric check (recorded merge bucket vs the
+    /// recorded recv-wait, both derived from the SAME measured sleep), NOT a
+    /// host-latency threshold (no #2642 wall-clock race — neither side is a
+    /// constant). Without the subtraction `stream_merge` ≈ the full measured sleep,
+    /// i.e. ABOVE the injected 3/4, so it fails closed at any host speed.
+    #[test]
+    fn stream_merge_excludes_recv_wait() {
+        use cqlite_core::observability::{stream_subphase, StreamSubPhase, StreamSubPhaseTimings};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let schema = clustering_schema();
+        let producer = MergeProducer::new(schema, 8192).unwrap();
+
+        // Install a sink on THIS (drive) thread so the accumulator records into it.
+        let timings = Arc::new(StreamSubPhaseTimings::default());
+        let _install = stream_subphase::install(Some(timings.clone()));
+
+        let mut stepper = RecvWaitStepper {
+            sleep: Duration::from_millis(40),
+            actual_nanos: 0,
+            done: false,
+        };
+
+        let mut batches = Vec::new();
+        {
+            let mut sink = CollectSink(&mut batches);
+            producer
+                .drive_merge_streaming(
+                    &mut stepper,
+                    &CancelFlag::new(),
+                    &mut sink,
+                    &ScanProgress::default(),
+                    AccessPath::FullScan.label(),
+                )
+                .expect("drive succeeds");
+        }
+
+        // Injected recv-wait = 3/4 of the MEASURED sleep; merge must be the
+        // remaining ≈1/4, strictly below the injected wait regardless of host speed.
+        let injected_wait = stepper.actual_nanos * 3 / 4;
+        let merge = timings.nanos(StreamSubPhase::Merge);
+        assert!(
+            merge < injected_wait,
+            "stream_merge ({merge} ns) must EXCLUDE the injected recv-wait \
+             ({injected_wait} ns, 3/4 of the {} ns measured sleep) — the B2 \
+             subtraction regressed",
+            stepper.actual_nanos
+        );
     }
 }

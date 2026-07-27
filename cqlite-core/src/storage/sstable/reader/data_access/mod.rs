@@ -950,12 +950,42 @@ impl SSTableReader {
                  at Data.db offset 0x{offset:x}"
             ))
         })?;
-        // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
-        self.verify_uncompressed_range(source, offset, size).await?;
+
+        // Issue #2819 (BLOCKER): attribute the UNCOMPRESSED body page-in to
+        // `stream_cold_fault`, but time ONLY the actual IO — NOT the
+        // `file.lock().await` below on the reader-wide mutex. The warm registry
+        // (#2356) shares one `Arc<SSTableReader>` across concurrent `do_get`s that
+        // admission (#2420) runs at once, so a PEER scan's lock-wait must never be
+        // attributed to cold-IO (it would inflate `stream_cold_fault` on a WARM run
+        // and break the cold−warm delta = cold-IO meaning). Mirrors the compressed
+        // path's "time only the positional read". `verify_uncompressed_range` reads
+        // CRC.db via the positional `source` (NO shared mutex) — genuine cold IO —
+        // so it is timed; the body read is timed under the already-held lock. No
+        // `stream_decompress` (correctly absent).
+        //
+        // Issue #2819 (L1): capture the sink ONCE here, BEFORE any `.await`, and
+        // build both timers from that captured `Option` — so no thread-local read
+        // happens post-await (correct even if the future resumes on another
+        // executor thread). `None` (zero cost) with no flight sink installed.
+        let cold_sink = crate::observability::stream_subphase::current();
+        {
+            let _cold = crate::observability::stream_subphase::scoped_captured(
+                &cold_sink,
+                crate::observability::StreamSubPhase::ColdFault,
+            );
+            // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
+            self.verify_uncompressed_range(source, offset, size).await?;
+        }
 
         let mut buf = vec![0u8; len];
         {
+            // Lock-wait is acquired OUTSIDE the cold-fault timer (peer-scan mutex
+            // contention is not cold-IO — the BLOCKER).
             let mut guard = file.lock().await;
+            let _cold = crate::observability::stream_subphase::scoped_captured(
+                &cold_sink,
+                crate::observability::StreamSubPhase::ColdFault,
+            );
             guard.seek(SeekFrom::Start(offset)).await?;
             guard.read_exact(&mut buf).await?;
         }

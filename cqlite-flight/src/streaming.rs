@@ -222,26 +222,40 @@ impl BatchSink for ChannelSink {
         // an async worker) and drives the `select!` to completion.
         let handle = tokio::runtime::Handle::current();
         let cancelled = self.cancel.cancelled();
-        handle.block_on(async {
-            tokio::select! {
-                // Bias the send arm so a ready permit is taken deterministically
-                // even if cancellation fires in the same poll — a batch that CAN be
-                // delivered without blocking is, keeping normal-path behaviour and
-                // the stream/collect byte-parity identical.
-                biased;
-                permit = self.tx.reserve() => match permit {
-                    // Receiver still present: deliver this batch.
-                    Ok(permit) => {
-                        permit.send(Ok(batch));
-                        Ok(())
+        // Issue #2819: the `stream_grpc_write` sub-phase wraps ONLY the egress
+        // channel `reserve()`/send here — INCLUDING the backpressure park while a
+        // slow client is not draining. This runs on the merge/egress thread and
+        // shares no code interval with the producer-thread `stream_cold_fault`
+        // scope (`data_access/compressed_offset.rs` on the Summary-guided read,
+        // `data_access/compaction.rs` on the full-ring fallback), so a client
+        // stall inflates `stream_grpc_write` but can never inflate
+        // `stream_cold_fault`.
+        cqlite_core::observability::stream_subphase::timed(
+            cqlite_core::observability::StreamSubPhase::GrpcWrite,
+            || {
+                handle.block_on(async {
+                    tokio::select! {
+                        // Bias the send arm so a ready permit is taken
+                        // deterministically even if cancellation fires in the same
+                        // poll — a batch that CAN be delivered without blocking is,
+                        // keeping normal-path behaviour and the stream/collect
+                        // byte-parity identical.
+                        biased;
+                        permit = self.tx.reserve() => match permit {
+                            // Receiver still present: deliver this batch.
+                            Ok(permit) => {
+                                permit.send(Ok(batch));
+                                Ok(())
+                            }
+                            // Receiver dropped (client gone): stop the merge.
+                            Err(_) => Err(ProducerError::Cancelled),
+                        },
+                        // Client disconnected while parked waiting for a slot.
+                        _ = cancelled => Err(ProducerError::Cancelled),
                     }
-                    // Receiver dropped (client gone): stop the merge.
-                    Err(_) => Err(ProducerError::Cancelled),
-                },
-                // Client disconnected while we were parked waiting for a slot.
-                _ = cancelled => Err(ProducerError::Cancelled),
-            }
-        })
+                })
+            },
+        )
     }
 }
 
@@ -380,6 +394,16 @@ pub(crate) fn spawn_streaming(
     // loop so `cqlite.query.rows_scanned` climbs while the scan is in progress.
     let scan_progress = probe.scan_progress.clone();
 
+    // Issue #2819 (roborev L5): capture the `flight.do_get` RPC span HERE — this fn
+    // runs synchronously inside the handler's `.instrument(span)` future, so
+    // `Span::current()` is the live RPC span (same context `PhaseTimer::start`
+    // captures it). It MUST be captured before the `spawn_blocking` below: tokio
+    // does NOT propagate the caller's span across `spawn_blocking`, so
+    // `Span::current()` on the blocking thread is the EMPTY span. Threaded into the
+    // emitter so the sub-phase samples carry the same span/exemplar association as
+    // the top-level phase samples.
+    let rpc_span = tracing::Span::current();
+
     // Run the CPU-bound merge off the async runtime; it sends batches as it goes.
     // `error_tx` is a clone kept OUTSIDE the (potentially unwound) merge closure so
     // a panic can still report through it — `sink` (holding the other clone) lives
@@ -390,7 +414,23 @@ pub(crate) fn spawn_streaming(
         // is the FIRST act here and its Drop decrements on every exit path
         // (normal, error, cancel, panic).
         let _blocking_guard = crate::saturation::BlockingTaskGuard::enter();
+        // Issue #2819: per-request in-`stream` sub-phase accumulator, installed on
+        // THIS merge consumer thread; emitted ONCE at teardown. Roborev B1 — the
+        // emitter MUST flush its samples BEFORE any egress sender is released, or a
+        // client scraping metrics at end-of-stream races the recording. Locals drop
+        // in REVERSE declaration order, so `_subphase_emit` is declared AFTER
+        // `error_tx` to drop FIRST: emit → then `error_tx` drops (closing the
+        // channel / ending the client stream) → then `_subphase_install`
+        // uninstalls the thread-local (no leak onto a reused blocking-pool thread).
+        // Roborev M1 — install the sink ONLY when metrics are actually collected;
+        // with the meter off, `install(None)` makes every timing site inert (ZERO
+        // `Instant::now()` on the hot loop for a meter-off build).
+        let subphase = Arc::new(cqlite_core::observability::StreamSubPhaseTimings::default());
+        let _subphase_install = cqlite_core::observability::stream_subphase::install(
+            cqlite_core::observability::metrics_active().then(|| subphase.clone()),
+        );
         let error_tx = tx.clone();
+        let _subphase_emit = crate::obs::StreamSubPhaseEmitter::new(rpc_span, subphase);
         let mut sink = ChannelSink {
             tx,
             produced,

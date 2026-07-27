@@ -240,10 +240,11 @@ fn do_get_emits_bounded_phase_and_incremental_metrics() {
          invisible in the phase breakdown"
     );
 
-    // Every phase value is one of the CLOSED 5-value set (issue #2420
-    // roborev-1701/1702: this closed-set list is intentionally exhaustive — a
-    // future 6th phase must update this assertion as a deliberate decision,
-    // not drift silently past it); no ticket/key/query attribute.
+    // Every phase value is one of the CLOSED set: the five top-level phases PLUS
+    // the five in-`stream` sub-phase values (issue #2819). This closed-set list is
+    // intentionally exhaustive — a future phase/sub-phase must update this
+    // assertion as a deliberate decision, not drift silently past it; no
+    // ticket/key/query attribute ever appears.
     for p in &phase.points {
         let phase_val = p
             .attributes
@@ -253,7 +254,18 @@ fn do_get_emits_bounded_phase_and_incremental_metrics() {
         assert!(
             matches!(
                 phase_val,
-                Some("validate" | "admission" | "resolve" | "merge_setup" | "stream")
+                Some(
+                    "validate"
+                        | "admission"
+                        | "resolve"
+                        | "merge_setup"
+                        | "stream"
+                        | "stream_cold_fault"
+                        | "stream_decompress"
+                        | "stream_merge"
+                        | "stream_encode"
+                        | "stream_grpc_write"
+                )
             ),
             "phase value must be in the closed set, got {phase_val:?}"
         );

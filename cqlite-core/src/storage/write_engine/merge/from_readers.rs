@@ -198,7 +198,18 @@ impl SSTableRowIteratorAdapter {
         // spawning (see `SSTableRowIteratorAdapter::open`'s identical rationale).
         producer_gauge::spawned();
 
+        // Issue #2819: thread-locals are NOT inherited across a spawn, so the
+        // flight per-request sub-phase sink is propagated EXPLICITLY — capture it
+        // on the CALLING (merge consumer) thread here and re-install it at the top
+        // of the producer thread below, so this scan's page-in/decompress (which
+        // run synchronously ON the producer thread — `stream_all_partitions_for_query`
+        // → `compressed_offset.rs` / `compaction.rs`) reach the request's
+        // accumulator. A deeper `spawn_blocking` feed thread (the windowed-scan
+        // page-in) is NOT reached by this single-hop propagation and is not
+        // covered. `None` (no-op) for every non-flight caller.
+        let subphase_sink = crate::observability::stream_subphase::current();
         let producer = match std::thread::Builder::new().spawn(move || {
+            let _subphase_guard = crate::observability::stream_subphase::install(subphase_sink);
             Self::producer_thread_from_reader(
                 reader,
                 run_index,

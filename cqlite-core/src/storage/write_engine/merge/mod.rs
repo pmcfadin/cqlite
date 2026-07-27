@@ -305,7 +305,11 @@ impl RunReader {
         let mut bytes_buffered = 0;
 
         while bytes_buffered < self.buffer_size {
-            match self.reader.next() {
+            // Issue #2819 (B2): time the BLOCKING recv into the pull-wait
+            // accumulator so the row-drive loop excludes it from `stream_merge`
+            // (zero cost when no flight sink is installed).
+            let next = crate::observability::stream_subphase::time_recv(|| self.reader.next());
+            match next {
                 Some(Ok(entry)) => {
                     // Estimate entry size for buffer management
                     bytes_buffered += Self::estimate_entry_size(&entry);
@@ -661,6 +665,20 @@ impl SSTableRowIteratorAdapter {
         // correct-by-construction — no ordering race is possible.
         producer_gauge::spawned();
 
+        // Issue #2819: propagate the sub-phase sink onto this path-based producer
+        // thread too (thread-locals are not inherited across a spawn); `None`
+        // (no-op) for non-flight callers. NOTE (roborev L2): this is a DEFENSIVE /
+        // latent propagation, NOT a parity-covered do_get path — production
+        // `do_get` is warm-only (`spawn_streaming_from_readers` → `open_from_reader`,
+        // which has the tested propagation). The path-based `open`
+        // (`MergeInput::Paths`) is the test-only byte-identity oracle, so its
+        // cold_fault/decompress attribution has no e2e assertion (and would fire
+        // only for a stitching/BTI fixture via the `read_next_block` loop). Kept so
+        // a future path-based flight caller is correct by construction, not to
+        // imply current parity coverage. (This file is far over the #1116 campsite
+        // target; the +2 lines are the minimal propagation.)
+        let subphase_sink = crate::observability::stream_subphase::current();
+
         // Spawn the producer thread via `Builder::spawn` (rather than the
         // panic-on-failure `std::thread::spawn`) so an OS thread-creation failure
         // is a recoverable `Err`, not a process abort: the gauge increment above
@@ -670,6 +688,7 @@ impl SSTableRowIteratorAdapter {
         // collides with any runtime on the calling thread (Issue #587) and adds no
         // worker threads beyond itself (Issue #2316).
         let producer = match std::thread::Builder::new().spawn(move || {
+            let _subphase_guard = crate::observability::stream_subphase::install(subphase_sink);
             Self::producer_thread(
                 path_buf,
                 run_index,

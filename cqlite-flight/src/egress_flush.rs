@@ -109,7 +109,14 @@ impl MergeProducer {
         // Parks here on an exhausted pool, with ONLY the row buffer resident —
         // nothing is materialized while a reservation is pending.
         let reservation = sink.reserve(reserve_capacity_bytes)?;
-        let batch = self.flush_buffer(buffer)?;
+        // Issue #2819: time ONLY the Arrow build as `stream_encode` — NOT the
+        // reserve park above (egress-credit backpressure, client-paced) nor the
+        // emit below (`stream_grpc_write`). Runs on the merge-consumer thread once
+        // per batch; a no-op with no flight sink installed (non-flight callers).
+        let batch = cqlite_core::observability::stream_subphase::timed(
+            cqlite_core::observability::StreamSubPhase::Encode,
+            || self.flush_buffer(buffer),
+        )?;
         let actual_capacity_bytes = batch.get_array_memory_size();
         // Trues up DOWNWARD; an `actual > reserved` fails closed (never upward).
         let permit = reservation.materialize(actual_capacity_bytes)?;

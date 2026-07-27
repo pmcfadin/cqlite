@@ -58,9 +58,11 @@ pub mod config;
 mod error_schema;
 pub mod operator_docs;
 mod operator_docs_annotations;
+pub mod stream_subphase;
 
 pub use config::{ObservabilityConfig, ObservabilityConfigBuilder, OtelProtocol};
 pub use error_schema::ErrorCategory;
+pub use stream_subphase::{StreamSubPhase, StreamSubPhaseGuard, StreamSubPhaseTimings};
 
 use crate::error::{Error, Result};
 
@@ -171,6 +173,23 @@ pub fn add_counter(name: &'static str, value: u64, attrs: &[Attr]) {
     #[cfg(not(feature = "observability"))]
     {
         let _ = (name, value, attrs);
+    }
+}
+
+/// Whether metrics are actually being collected — the `observability` feature is
+/// compiled in AND a meter provider is installed (`otel::metrics_active`). Every
+/// `record_*` here already gates on this, so it is a no-op when false; exposing it
+/// lets a caller SKIP building per-request timing state whose samples would only
+/// be discarded (issue #2819 M1 — the "zero-cost when the meter is off" promise).
+#[inline]
+pub fn metrics_active() -> bool {
+    #[cfg(feature = "observability")]
+    {
+        otel::metrics_active()
+    }
+    #[cfg(not(feature = "observability"))]
+    {
+        false
     }
 }
 

@@ -36,6 +36,14 @@ pub const SUBSYSTEM: &str = "flight";
 // stable `crate::obs::{AbortReason, AbortContext, record_do_get_abort}` path.
 pub use crate::obs_abort::{record_do_get_abort, AbortContext, AbortReason};
 
+// The in-`stream` sub-phase value table + per-request emitter (issue #2819) live
+// in a sibling module (campsite rule, epic #1116), re-exported here so call sites
+// keep the stable `crate::obs::{...}` path.
+pub use crate::obs_subphase::{
+    StreamSubPhaseEmitter, PHASE_STREAM_COLD_FAULT, PHASE_STREAM_DECOMPRESS, PHASE_STREAM_ENCODE,
+    PHASE_STREAM_GRPC_WRITE, PHASE_STREAM_MERGE,
+};
+
 /// Bounded `cqlite.rpc.status` value for a successful RPC.
 const STATUS_OK: &str = "ok";
 /// Bounded `cqlite.rpc.status` value for a failed RPC.

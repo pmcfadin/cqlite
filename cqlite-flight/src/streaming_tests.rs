@@ -1361,3 +1361,28 @@ fn metered_stream_ends_when_cancel_flag_trips_while_inner_parked() {
         );
     });
 }
+
+/// Issue #2819 (M1 / L4b): the in-`stream` sub-phase sink is installed ONLY when
+/// metrics are actually collected. `spawn_streaming` gates the install on
+/// `cqlite_core::observability::metrics_active()`; with the meter OFF — the state
+/// in a plain unit test, and in any deploy that never initialised OTel — the
+/// gating installs `None`, so the merge thread's `RowSubPhaseAccum` is inert and
+/// the hot row loop takes ZERO `Instant::now()`. This pins that decision:
+/// meter-off ⇒ no sink installed (else the loop would pay per-row clock reads for
+/// samples `record_histogram` discards anyway).
+#[test]
+fn meter_off_installs_no_subphase_sink() {
+    use cqlite_core::observability::{metrics_active, stream_subphase, StreamSubPhaseTimings};
+
+    assert!(
+        !metrics_active(),
+        "a plain unit test installs no meter, so metrics must be inactive"
+    );
+    // The EXACT expression `spawn_streaming` uses to build the install argument.
+    let subphase = Arc::new(StreamSubPhaseTimings::default());
+    let _guard = stream_subphase::install(metrics_active().then(|| subphase.clone()));
+    assert!(
+        stream_subphase::current().is_none(),
+        "meter-off do_get must install NO sub-phase sink (spawn_streaming M1 gating)"
+    );
+}

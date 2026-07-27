@@ -660,7 +660,23 @@ impl SSTableReader {
             .unwrap_or(usize::MAX);
 
         let mut chunk_count = 0;
-        while let Some(compressed_chunk) = self.read_next_block(&cursor).await? {
+        loop {
+            // Issue #2819 (B4): a BTI/`da` table (and any Summary-guided FellBack)
+            // routes HERE, not the instrumented `compressed_offset.rs` path, so time
+            // the page-in (cold_fault) + decompress (below) on this fallback too, or
+            // a BTI scan would emit only 3 of 5 sub-phases. `scoped` is None (zero
+            // cost) with no flight sink; the block scopes it to just the `.await`.
+            // (#1116: this reader is over the campsite target; these are the minimal
+            // instrumentation lines — full gate run with CQLITE_ALLOW_FILE_GROWTH=1.)
+            let next_block = {
+                let _t = crate::observability::stream_subphase::scoped(
+                    crate::observability::StreamSubPhase::ColdFault,
+                );
+                self.read_next_block(&cursor).await?
+            };
+            let Some(compressed_chunk) = next_block else {
+                break;
+            };
             // Cooperative cancellation (issue #2264, roborev round 3): a poll
             // every 256 chunks catches the edge case `drain_compaction_window`'s
             // per-PARTITION poll cannot — a single partition so wide it spans
@@ -680,7 +696,13 @@ impl SSTableReader {
                 compressed_chunk
             } else if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
-                compression.decompress(&compressed_chunk).map_err(|e| {
+                // Issue #2819 (B4): LZ4 decompress — the `stream_decompress` scope
+                // (reached only for a genuinely compressed chunk).
+                crate::observability::stream_subphase::timed(
+                    crate::observability::StreamSubPhase::Decompress,
+                    || compression.decompress(&compressed_chunk),
+                )
+                .map_err(|e| {
                     Error::corruption(format!(
                         "stream_all_partitions_for_compaction: Failed to decompress chunk {}: {}",
                         chunk_count, e
