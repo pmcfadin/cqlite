@@ -462,6 +462,61 @@ mod tests {
         );
     }
 
+    /// Roborev BLOCKER (issue #3058): opening the fast-path source and then
+    /// dropping it — exactly what the `Unsupported` fallback does before handing
+    /// the request to the k-way merger — must leave the CALLER's cancellation
+    /// flag UN-cancelled. `ScanCancel` clones share one `Arc<AtomicBool>`, so a
+    /// stream that cancelled the caller's clone on drop would poison the very
+    /// fallback it exists to enable (the merger would be built pre-cancelled and
+    /// return `Cancelled`/zero rows) and would make the request's `CancelFlag`
+    /// single-use even on the success path.
+    #[test]
+    fn dropping_the_scan_source_does_not_poison_the_callers_cancel() {
+        use crate::producer::MergeProducer;
+        use crate::testutil::{simple_schema, total_rows, write_row};
+        let (_temp, readers) = open_readers(vec![vec![
+            write_row(1, "a", 10, 100),
+            write_row(2, "b", 20, 100),
+        ]]);
+        let schema = simple_schema();
+        let cancel = crate::cancel::CancelFlag::new();
+
+        let source = ScanRowSource::open(
+            Arc::clone(&readers[0]),
+            schema.clone(),
+            None,
+            1_700_000_000,
+            cancel.scan_cancel(),
+        )
+        .expect("the source opens");
+        assert!(
+            source.is_some(),
+            "this fixture IS servable by the fast path"
+        );
+        drop(source);
+
+        assert!(
+            !cancel.is_cancelled(),
+            "dropping the fast-path source must not cancel the request"
+        );
+        assert!(
+            !cancel.scan_cancel().is_cancelled(),
+            "…including the shared synchronous ScanCancel the merger polls"
+        );
+
+        // The fallback the blocker is about: with that SAME flag, the merge arm
+        // must still return the FULL row set (pre-fix it returned zero rows).
+        let producer = MergeProducer::new(schema, 1024).expect("producer");
+        let batches = producer
+            .produce_streaming_from_readers_to_vec(readers, &cancel)
+            .expect("the merge arm runs with a non-poisoned flag");
+        assert_eq!(
+            total_rows(&batches),
+            2,
+            "the merge arm returns every row after a fast-path source was dropped"
+        );
+    }
+
     /// `merge` wins over everything, including an aggregating request — it is the
     /// field kill switch and must be absolute.
     #[test]

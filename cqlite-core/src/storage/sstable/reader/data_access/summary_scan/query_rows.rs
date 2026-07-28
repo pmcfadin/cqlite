@@ -94,7 +94,18 @@ pub enum QueryRowBatch {
 /// then observes the cancel (or a failed send into the dropped channel) and exits.
 pub struct QueryRowStream {
     rx: Receiver<Result<QueryRowBatch>>,
-    cancel: ScanCancel,
+    /// This stream's OWN cancellation flag — a CHILD of the caller's, never the
+    /// caller's own clone (roborev, issue #3058).
+    ///
+    /// `ScanCancel` clones share one `Arc<AtomicBool>`, so cancelling the
+    /// caller's flag on drop would POISON the whole request: the designed clean
+    /// fallback (`QueryRowBatch::Unsupported` → drop the stream → build the
+    /// k-way merger instead) would hand the merger an already-cancelled flag and
+    /// yield `Cancelled`/zero rows instead of the full result set, and even a
+    /// successful stream would leave the request's `CancelFlag` single-use. The
+    /// caller's flag is bridged INTO this child (caller-cancel stops the walk)
+    /// but never the other way round.
+    child_cancel: ScanCancel,
 }
 
 impl QueryRowStream {
@@ -109,10 +120,12 @@ impl Drop for QueryRowStream {
     fn drop(&mut self) {
         // Stop the walk promptly rather than letting it run to completion into a
         // channel nobody reads (the producer would otherwise only notice at its
-        // next send). The thread is deliberately NOT joined: it holds only an
-        // `Arc<SSTableReader>` + its own runtime and exits on the next cancel
+        // next send). Cancels only THIS stream's child flag — the caller's flag
+        // is untouched, so a caller that falls back to another read path gets an
+        // un-cancelled one. The thread is deliberately NOT joined: it holds only
+        // an `Arc<SSTableReader>` + its own runtime and exits on the next cancel
         // poll, so a dropped stream never blocks the consumer.
-        self.cancel.cancel();
+        self.child_cancel.cancel();
     }
 }
 
@@ -134,7 +147,14 @@ impl SSTableReader {
         scan_cancel: ScanCancel,
     ) -> Result<QueryRowStream> {
         let (tx, rx) = sync_channel::<Result<QueryRowBatch>>(QUERY_ROWS_CHANNEL_BATCHES);
-        let thread_cancel = scan_cancel.clone();
+        // This stream's own flag (see `QueryRowStream::child_cancel`): the walk
+        // polls the CHILD, the caller's flag is bridged into it, and nothing ever
+        // cancels the caller's.
+        let child_cancel = ScanCancel::new();
+        let bridge = CancelBridge {
+            caller: scan_cancel,
+            child: child_cancel.clone(),
+        };
         std::thread::Builder::new()
             .name("cqlite-query-rows".to_string())
             .spawn(move || {
@@ -153,7 +173,7 @@ impl SSTableReader {
                         schema,
                         token_bound,
                         now_secs,
-                        &thread_cancel,
+                        &bridge,
                         &tx,
                     ))
                 })();
@@ -165,10 +185,7 @@ impl SSTableReader {
             .map_err(|e| {
                 Error::Storage(format!("query row stream: failed to spawn thread: {e}"))
             })?;
-        Ok(QueryRowStream {
-            rx,
-            cancel: scan_cancel,
-        })
+        Ok(QueryRowStream { rx, child_cancel })
     }
 
     /// Whether this reader has the components the single-generation streaming
@@ -215,23 +232,26 @@ async fn drive_query_rows(
     schema: crate::schema::TableSchema,
     token_bound: Option<ScanTokenBound>,
     now_secs: i64,
-    scan_cancel: &ScanCancel,
+    cancel: &CancelBridge,
     tx: &SyncSender<Result<QueryRowBatch>>,
 ) -> Result<()> {
     if token_bound.is_none() {
-        return drive_full_scan_rows(reader, schema, now_secs, scan_cancel, tx).await;
+        return drive_full_scan_rows(reader, schema, now_secs, cancel, tx).await;
     }
 
+    let scan_cancel = cancel.child();
     let mut sink = BatchSink::new(tx);
-    let mut emit = |row: (RowKey, ScanRow)| sink.push(row);
 
+    // Each walk gets its OWN short-lived emit closure so the `&mut sink` borrow
+    // ends with the call — that is what lets the pre-emit guard below actually
+    // READ `sink.emitted` between the two walks (roborev, issue #3058).
     let outcome = reader
         .stream_partitions_summary_guided(
             scan_cancel,
             token_bound,
             Some(now_secs),
             Some(&schema),
-            &mut emit,
+            &mut |row: (RowKey, ScanRow)| sink.push(row),
         )
         .await?;
     if matches!(outcome, FullIndexStreamOutcome::Streamed) {
@@ -239,32 +259,100 @@ async fn drive_query_rows(
     }
 
     // No usable Summary.db: fall back to the full-`Index.db` streaming walk. Both
-    // walks report `FellBack` only BEFORE their first emit, so nothing has been
-    // handed to the consumer at this point.
+    // walks CONTRACT to report `FellBack` only BEFORE their first emit — ENFORCED
+    // here, not assumed (roborev, issue #3058): re-driving a second walk into a
+    // sink that already holds rows (an under-full, still-buffered batch counts)
+    // would flush both walks' output and silently DUPLICATE rows. Fail closed.
+    assert_nothing_emitted(sink.emitted, "before the full-index fallback walk")?;
     let outcome = reader
-        .stream_all_partitions_via_full_index(scan_cancel, Some(now_secs), Some(&schema), &mut emit)
+        .stream_all_partitions_via_full_index(
+            scan_cancel,
+            Some(now_secs),
+            Some(&schema),
+            &mut |row: (RowKey, ScanRow)| sink.push(row),
+        )
         .await?;
     if matches!(outcome, FullIndexStreamOutcome::Streamed) {
         return sink.finish();
     }
 
     // Neither walk can serve this reader. Report it as the FIRST and ONLY
-    // message, having emitted nothing.
+    // message, having emitted nothing — enforced, for the same reason.
+    assert_nothing_emitted(sink.emitted, "before reporting Unsupported")?;
     let _ = tx.send(Ok(QueryRowBatch::Unsupported));
     Ok(())
+}
+
+/// Fail closed when a walk reported `FellBack` AFTER handing rows to the sink.
+///
+/// The fallback design rests on "`FellBack` is pre-emit only"; if that ever
+/// stopped holding, continuing would emit some rows twice (once from the walk
+/// that fell back, once from the fallback walk) with no error anywhere. A
+/// corruption error is the only safe outcome — a partially-served stream must
+/// never be silently topped up.
+fn assert_nothing_emitted(emitted: u64, stage: &str) -> Result<()> {
+    if emitted > 0 {
+        return Err(Error::corruption(format!(
+            "query row stream: a walk reported FellBack AFTER emitting {emitted} row(s) \
+             ({stage}) — continuing would duplicate rows (issue #3058)"
+        )));
+    }
+    Ok(())
+}
+
+/// The stream's cancellation pair: the caller's flag (observed, NEVER cancelled)
+/// and this stream's own child flag (what the walks poll and what `Drop`
+/// cancels). See [`QueryRowStream::child_cancel`].
+struct CancelBridge {
+    caller: ScanCancel,
+    child: ScanCancel,
+}
+
+impl CancelBridge {
+    /// The flag to hand the walks.
+    fn child(&self) -> &ScanCancel {
+        &self.child
+    }
+
+    /// Propagate a CALLER cancellation into the child (one-way), returning
+    /// whether the scan should stop. Polled at batch boundaries, so a cancelled
+    /// request stops the walk without waiting for the consumer to drop us.
+    fn poll_caller(&self) -> bool {
+        if self.caller.is_cancelled() {
+            self.child.cancel();
+            return true;
+        }
+        false
+    }
 }
 
 /// Full-ring arm: forward the windowed batched scan's `(RowKey, ScanRow)` batches
 /// straight through, re-using the batching the scan already did.
 ///
-/// One admission permit is taken for this whole scan operation
-/// ([`ScanAdmission::Acquire`]) exactly as any other top-level single-generation
-/// scan does — never per sub-scan (issue #1594).
+/// # Admission (issue #1594 / #2420, roborev #3058)
+///
+/// Opened [`ScanAdmission::Exempt`] — this scan does NOT take a core admission
+/// permit. Three reasons, all load-bearing:
+/// * The CALLER is already admitted. The Flight `do_get` this serves holds a
+///   `--max-concurrent-scans` permit for its whole life (#2420), and the core
+///   semaphore's default cap is `available_parallelism()` (≈ncpu), which is
+///   SMALLER than that governor's default of 64 — acquiring here would silently
+///   throttle single-source `do_get`s below the operator's configured
+///   concurrency.
+/// * The arm it replaces takes none. The k-way merge arm drives its inputs on
+///   plain `std::thread`s and never admits, so admitting here would make the
+///   fast path *less* concurrent than the slow path it replaces.
+/// * The resource the core semaphore protects is not contended here. This scan's
+///   `spawn_blocking` parse/feed tasks run on the query-row thread's OWN
+///   `current_thread` runtime (and therefore its own blocking pool), not the
+///   shared runtime pool whose starvation #1594 exists to prevent.
+///
+/// `Exempt` never blocks, so it cannot introduce the #1594 hold-and-wait cycle.
 async fn drive_full_scan_rows(
     reader: Arc<SSTableReader>,
     schema: crate::schema::TableSchema,
     now_secs: i64,
-    scan_cancel: &ScanCancel,
+    cancel: &CancelBridge,
     tx: &SyncSender<Result<QueryRowBatch>>,
 ) -> Result<()> {
     let table_id = reader.scan_table_id();
@@ -274,14 +362,18 @@ async fn drive_full_scan_rows(
         None,
         Some(schema),
         QUERY_ROWS_PER_BATCH * QUERY_ROWS_CHANNEL_BATCHES,
-        ScanAdmission::Acquire,
+        ScanAdmission::Exempt,
         Some(now_secs),
     );
     while let Some(msg) = rx.recv().await {
         // Cooperative cancellation: the caller dropping the stream also drops our
         // receiver (so the send below fails), but polling here stops a cancelled
-        // scan without waiting for the next batch to be produced.
-        scan_cancel.check()?;
+        // scan without waiting for the next batch to be produced. A CALLER cancel
+        // is bridged into the child flag; the caller's own flag is never touched.
+        if cancel.poll_caller() {
+            return Err(Error::Cancelled);
+        }
+        cancel.child().check()?;
         let rows = msg?;
         if tx.send(Ok(QueryRowBatch::Rows(rows))).is_err() {
             // Consumer dropped: stop pulling (not an error).
@@ -336,5 +428,67 @@ impl<'a> BatchSink<'a> {
         // pending — a clean end of stream, not an error.
         let _ = self.flush()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Roborev (issue #3058): the "`FellBack` is pre-emit only" contract is
+    /// ENFORCED, not assumed. Rows already handed to the sink (including an
+    /// under-full, still-buffered batch) must turn a second walk into a hard
+    /// corruption error rather than a silently duplicated result set.
+    #[test]
+    fn a_post_emit_fallback_fails_closed_instead_of_duplicating_rows() {
+        assert!(
+            assert_nothing_emitted(0, "before the full-index fallback walk").is_ok(),
+            "the pre-emit case is the normal fallback and must proceed"
+        );
+        let err = assert_nothing_emitted(1, "before the full-index fallback walk")
+            .expect_err("a post-emit fallback must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FellBack AFTER emitting"),
+            "the error must name the violated contract, got: {msg}"
+        );
+        assert!(
+            assert_nothing_emitted(127, "before reporting Unsupported").is_err(),
+            "a partially-filled batch (< QUERY_ROWS_PER_BATCH) still counts as emitted"
+        );
+    }
+
+    /// The bridge is ONE-WAY: a caller cancellation stops the walk (via the
+    /// child), but nothing this stream does may cancel the caller's flag — the
+    /// fallback to the k-way merge arm depends on getting it back un-cancelled.
+    #[test]
+    fn the_cancel_bridge_is_one_way() {
+        let caller = ScanCancel::new();
+        let bridge = CancelBridge {
+            caller: caller.clone(),
+            child: ScanCancel::new(),
+        };
+        assert!(!bridge.poll_caller(), "no cancellation yet");
+        bridge.child().cancel();
+        assert!(
+            !caller.is_cancelled(),
+            "cancelling the CHILD must never reach the caller's flag"
+        );
+        assert!(!bridge.poll_caller(), "still no caller cancellation");
+
+        let caller2 = ScanCancel::new();
+        let bridge2 = CancelBridge {
+            caller: caller2.clone(),
+            child: ScanCancel::new(),
+        };
+        caller2.cancel();
+        assert!(
+            bridge2.poll_caller(),
+            "a caller cancellation stops the scan"
+        );
+        assert!(
+            bridge2.child().is_cancelled(),
+            "and is propagated into the child so the walk aborts promptly"
+        );
     }
 }

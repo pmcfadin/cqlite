@@ -401,6 +401,55 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
     );
 }
 
+/// Roborev BLOCKER (issue #3058), e2e half: when the single reader cannot be
+/// served by the single-generation streaming query walk, the request FALLS BACK
+/// to the k-way merge arm and returns the FULL row set — it must never come back
+/// short, empty, or `Cancelled` because the fast path touched the request's
+/// cancellation flag on its way out.
+///
+/// The unservable reader is produced authoritatively, by removing the `Index.db`
+/// (and `Summary.db`) components the walk requires — not by stubbing a predicate.
+#[tokio::test]
+async fn an_unservable_reader_falls_back_to_the_merge_arm_with_every_row() {
+    let _guard = PROBE_LOCK.lock().await;
+    std::env::remove_var(MERGE_PATH_ENV);
+    let (_temp, data_dir) = build_generations(vec![vec![
+        write(1, 1, "a", 100),
+        write(1, 2, "b", 100),
+        write(2, 1, "c", 100),
+    ]])
+    .await;
+    let table_dir = data_dir.join(KS).join(TBL);
+    for entry in std::fs::read_dir(&table_dir).expect("table dir").flatten() {
+        let name = entry.file_name();
+        let name = name.to_str().unwrap_or_default().to_string();
+        if name.ends_with("-Index.db") || name.ends_with("-Summary.db") {
+            std::fs::remove_file(entry.path()).expect("component removed");
+        }
+    }
+
+    let svc = CqliteFlightService::new(data_dir, 8192);
+    let before = ReadPathProbe::snapshot();
+    let rows = do_get_rows(&svc, ticket_bytes()).await;
+    let delta = ReadPathProbe::snapshot().delta_since(&before);
+
+    assert_eq!(
+        rows,
+        BTreeMap::from([
+            ((1, 1), "a".to_string()),
+            ((1, 2), "b".to_string()),
+            ((2, 1), "c".to_string()),
+        ]),
+        "the fallback must return EVERY row — a poisoned cancellation flag would \
+         make this empty (or a Cancelled abort)"
+    );
+    assert!(
+        delta.mergers_built >= 1,
+        "an unservable reader must be served by the merge arm (mergers={})",
+        delta.mergers_built
+    );
+}
+
 /// The forced-path seam is a real kill switch: `CQLITE_FLIGHT_MERGE_PATH=merge`
 /// puts a SINGLE-source request back on the k-way merge arm (observed), and the
 /// rows it returns are the same ones the fast arm returns.

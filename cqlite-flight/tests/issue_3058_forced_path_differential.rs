@@ -77,6 +77,7 @@ use cqlite_core::storage::write_engine::{
     CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::Value;
+use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_flight::bypass::MERGE_PATH_ENV;
 use cqlite_flight::service::CqliteFlightService;
 
@@ -672,31 +673,25 @@ async fn forced_path_differential_agrees_on_every_shape() {
     )
     .await;
 
+    // A token range derived from the fixture's REAL tokens: `(t1 - 1, t1]` holds
+    // exactly partition pk=1, whose three surviving clustering rows give the case
+    // a non-zero floor. Deriving the range (rather than guessing a half-ring)
+    // is what stops this from passing vacuously when the range holds nothing —
+    // and `assert_arms_agree` additionally requires the merge run to have really
+    // merged and the bypass run to have really bypassed.
+    let t1 = cassandra_murmur3_token(&1_i32.to_be_bytes());
     let mut token_scoped = ticket_json(KS, TBL, DDL);
-    token_scoped["token_start"] = serde_json::json!(i64::MIN);
-    token_scoped["token_end"] = serde_json::json!(0_i64);
-    // A half-ring split: whichever partitions fall in it must match on both arms
-    // (the count itself is data-dependent, so this case asserts EQUALITY only).
-    let (merge_rows, _, _) = {
-        std::env::set_var(TTL_NOW_ENV, NOW_BEFORE_EXPIRY.to_string());
-        let r = run_forced(&svc, &token_scoped, "merge").await;
-        std::env::remove_var(TTL_NOW_ENV);
-        r
-    };
-    let (bypass_rows, _, bypass_delta) = {
-        std::env::set_var(TTL_NOW_ENV, NOW_BEFORE_EXPIRY.to_string());
-        let r = run_forced(&svc, &token_scoped, "bypass").await;
-        std::env::remove_var(TTL_NOW_ENV);
-        r
-    };
-    if merge_rows != bypass_rows {
-        failures.push(format!(
-            "token-range differential MISMATCH\n  merge: {merge_rows:#?}\n  bypass: {bypass_rows:#?}"
-        ));
-    }
-    if bypass_delta.mergers_built != 0 {
-        failures.push("a token-scoped single-source scan must still take the fast arm".to_string());
-    }
+    token_scoped["token_start"] = serde_json::json!(t1.saturating_sub(1));
+    token_scoped["token_end"] = serde_json::json!(t1);
+    let _ = assert_arms_agree(
+        "shapes/token-range(single partition)",
+        &svc,
+        &token_scoped,
+        NOW_BEFORE_EXPIRY,
+        3,
+        &mut failures,
+    )
+    .await;
 
     // (4) A byte-capped stream: the cap must hold on the fast arm and the rows
     //     must still match the merge arm's.
