@@ -1,0 +1,132 @@
+{
+  "issue": 3068,
+  "purpose": "Field-shaped LZ4-compressed multi-GB single-SSTable Cassandra 5.0 corpus for read-plane (scan window / large I/O) measurement.",
+  "generated_utc": "2026-07-28T21:51:59.943032+00:00",
+  "generator": "test-data/scripts/gen-perf-corpus-3068.sh",
+  "method": "cassandra-stress user profile (ships in the cassandra image), UNLOGGED single-partition batches, 10 rows/partition; durable_writes=false and autocompaction disabled during load (generation-time only \u2014 neither changes SSTable bytes), then nodetool flush + nodetool compact (major) to a single SSTable.",
+  "cassandra_image": "cassandra:5.0.2",
+  "keyspace": "perf_3068",
+  "keyspace_ddl": "CREATE KEYSPACE perf_3068 WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}  AND durable_writes = false;",
+  "rows_per_partition": 10,
+  "corpus_root": "/home/ubuntu/corpus-3068",
+  "datasets_root_usage": "CQLITE_DATASETS_ROOT=/home/ubuntu/corpus-3068",
+  "corpus_committed": false,
+  "corpus_note": "The corpus itself is multi-GB and is NOT committed. Regenerate it with the generator above, then re-run this script to reproduce this manifest; the Data.db sha256 recorded per table is the reproducibility check.",
+  "provenance": {
+    "sizes": "os.stat of each component file",
+    "data_db_sha256": "sha256 of the Data.db bytes",
+    "compression": "CompressionInfo.db header (authoritative, not the DDL)",
+    "rows": "Cassandra sstablemetadata totalRows (Statistics.db); fail-closed, never a fabricated 0",
+    "ddl": "recorded per table with its own source field"
+  },
+  "tables": [
+    {
+      "table": "medium_700b",
+      "keyspace_table": "perf_3068.medium_700b",
+      "sstable_dir": "sstables/perf_3068/medium_700b-8cc9d0708a2711f1a82281d620fbe729",
+      "sstable_basename": "nb-34-big",
+      "format": "nb",
+      "format_detail": "nb = BIG, Cassandra 5.0 default storage_compatibility_mode=CASSANDRA_4",
+      "sstable_count": 1,
+      "single_sstable": true,
+      "data_db_count": 1,
+      "rows": 11994840,
+      "statistics": {
+        "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+        "total_rows": 11994840,
+        "total_columns_set": 119948400,
+        "partition_count": 1199484,
+        "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+        "cassandra_compression_ratio": "0.9718243898391086",
+        "sstable_level": 0,
+        "estimated_droppable_tombstones": "0.0"
+      },
+      "components": {
+        "nb-34-big-CompressionInfo.db": 4330207,
+        "nb-34-big-Data.db": 8620456540,
+        "nb-34-big-Digest.crc32": 10,
+        "nb-34-big-Filter.db": 1517624,
+        "nb-34-big-Index.db": 33548956,
+        "nb-34-big-Statistics.db": 10766,
+        "nb-34-big-Summary.db": 299944,
+        "nb-34-big-TOC.txt": 92
+      },
+      "missing_components": [],
+      "non_component_files": {
+        "schema.cql": 2379
+      },
+      "data_db_bytes": 8620456540,
+      "data_db_gib": 8.028,
+      "data_db_sha256": "a6242273c2717e5ec439d4957a3db654dc35dc8044d6c54711ab670e8af3fb0d",
+      "compression": {
+        "source": "read from CompressionInfo.db header (authoritative)",
+        "compressor": "LZ4Compressor",
+        "options": {},
+        "chunk_length_bytes": 16384,
+        "chunk_length_kb": 16.0,
+        "chunk_count": 541271,
+        "uncompressed_data_length_bytes": 8868157196,
+        "compression_ratio_on_disk_over_logical": 0.972069
+      },
+      "ddl": {
+        "source": "schema.cql captured at generation time (alongside the SSTable components)",
+        "text": "CREATE TABLE perf_3068.medium_700b (\n    pk text,\n    ck int,\n    name text,\n    note text,\n    payload blob,\n    status text,\n    tags text,\n    ts timestamp,\n    v_bool boolean,\n    v_dbl double,\n    v_int int,\n    v_long bigint,\n    PRIMARY KEY (pk, ck)\n) WITH CLUSTERING ORDER BY (ck ASC)\n    AND additional_write_policy = '99p'\n    AND allow_auto_snapshot = true\n    AND bloom_filter_fp_chance = 0.01\n    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}\n    AND cdc = false\n    AND comment = ''\n    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}\n    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}\n    AND memtable = 'default'\n    AND crc_check_chance = 1.0\n    AND default_time_to_live = 0\n    AND extensions = {}\n    AND gc_grace_seconds = 864000\n    AND incremental_backups = true\n    AND max_index_interval = 2048\n    AND memtable_flush_period_in_ms = 0\n    AND min_index_interval = 128\n    AND read_repair = 'BLOCKING'\n    AND speculative_retry = '99p';",
+        "extracted_statement": true
+      }
+    },
+    {
+      "table": "wide_4kb",
+      "keyspace_table": "perf_3068.wide_4kb",
+      "sstable_dir": "sstables/perf_3068/wide_4kb-90c037f08a2711f1a82281d620fbe729",
+      "sstable_basename": "nb-11-big",
+      "format": "nb",
+      "format_detail": "nb = BIG, Cassandra 5.0 default storage_compatibility_mode=CASSANDRA_4",
+      "sstable_count": 1,
+      "single_sstable": true,
+      "data_db_count": 1,
+      "rows": 1199890,
+      "statistics": {
+        "source": "cassandra sstablemetadata (cassandra:5.0.2) reading Statistics.db",
+        "total_rows": 1199890,
+        "total_columns_set": 11998900,
+        "partition_count": 119989,
+        "partitioner": "org.apache.cassandra.dht.Murmur3Partitioner",
+        "cassandra_compression_ratio": "1.00059889463006",
+        "sstable_level": 0,
+        "estimated_droppable_tombstones": "0.0"
+      },
+      "components": {
+        "nb-11-big-CompressionInfo.db": 2453415,
+        "nb-11-big-Data.db": 5028730707,
+        "nb-11-big-Digest.crc32": 10,
+        "nb-11-big-Filter.db": 148624,
+        "nb-11-big-Index.db": 3353228,
+        "nb-11-big-Statistics.db": 10766,
+        "nb-11-big-Summary.db": 30088,
+        "nb-11-big-TOC.txt": 92
+      },
+      "missing_components": [],
+      "non_component_files": {
+        "schema.cql": 2379
+      },
+      "data_db_bytes": 5028730707,
+      "data_db_gib": 4.683,
+      "data_db_sha256": "9dad6e61d7845c9b8711a3a2959fed3ad25cca05d2423f83f861362f6095c98a",
+      "compression": {
+        "source": "read from CompressionInfo.db header (authoritative)",
+        "compressor": "LZ4Compressor",
+        "options": {},
+        "chunk_length_bytes": 16384,
+        "chunk_length_kb": 16.0,
+        "chunk_count": 306672,
+        "uncompressed_data_length_bytes": 5024494876,
+        "compression_ratio_on_disk_over_logical": 1.000843
+      },
+      "ddl": {
+        "source": "schema.cql captured at generation time (alongside the SSTable components)",
+        "text": "CREATE TABLE perf_3068.wide_4kb (\n    pk text,\n    ck int,\n    body text,\n    name text,\n    note text,\n    payload blob,\n    status text,\n    ts timestamp,\n    v_bool boolean,\n    v_dbl double,\n    v_int int,\n    v_long bigint,\n    PRIMARY KEY (pk, ck)\n) WITH CLUSTERING ORDER BY (ck ASC)\n    AND additional_write_policy = '99p'\n    AND allow_auto_snapshot = true\n    AND bloom_filter_fp_chance = 0.01\n    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}\n    AND cdc = false\n    AND comment = ''\n    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}\n    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}\n    AND memtable = 'default'\n    AND crc_check_chance = 1.0\n    AND default_time_to_live = 0\n    AND extensions = {}\n    AND gc_grace_seconds = 864000\n    AND incremental_backups = true\n    AND max_index_interval = 2048\n    AND memtable_flush_period_in_ms = 0\n    AND min_index_interval = 128\n    AND read_repair = 'BLOCKING'\n    AND speculative_retry = '99p';",
+        "extracted_statement": true
+      }
+    }
+  ]
+}
