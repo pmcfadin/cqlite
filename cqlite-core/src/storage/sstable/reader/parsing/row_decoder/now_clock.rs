@@ -84,6 +84,39 @@ pub fn now_epoch_secs() -> i64 {
     now_from(raw_override.as_deref(), wall_clock_now_secs())
 }
 
+impl super::V5CompressedLegacyParser {
+    /// Issue #3058: pin this parser's read-time TTL "now" (epoch seconds) to a
+    /// clock the CALLER already sampled, instead of the ambient one
+    /// [`now_epoch_secs`] samples at construction.
+    ///
+    /// The Flight `do_get` producer captures ONE reconciliation `now` per request
+    /// (`read_time_now_secs`, this module's `now_epoch_secs`) and threads it into
+    /// its k-way merger via `with_now_secs`. Its single-source fast path must use
+    /// the SAME instant for `PartitionShadow`'s TTL expiry, or the two arms could
+    /// decide a cell straddling an expiration second differently and a PINNED
+    /// `now` (the query-semantics oracles) would not be honored on the fast arm.
+    /// So the fast path threads the request's `now` down to here rather than
+    /// letting the parser re-read the wall clock.
+    ///
+    /// A caller that has no request-scoped clock keeps the constructor default.
+    /// Only consulted when `read_shadowing` is `true`.
+    ///
+    /// Lives in `now_clock` (a CHILD of the module defining the parser, so the
+    /// private field is in scope) to keep `row_decoder/mod.rs` from growing past
+    /// the file-size ratchet (epic #1116).
+    pub fn with_now_secs(mut self, now_secs: i64) -> Self {
+        self.now_secs = now_secs;
+        self
+    }
+
+    /// The read-time TTL "now" (epoch seconds) this parser will evaluate expiry
+    /// against. Exposed so a test can PROVE a caller-pinned clock actually
+    /// reached the parser (issue #3058) instead of assuming it.
+    pub fn now_secs(&self) -> i64 {
+        self.now_secs
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

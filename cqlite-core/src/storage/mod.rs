@@ -2,6 +2,9 @@
 
 /// Shared, bytes-bounded, sharded decompressed-chunk cache (issue #1567).
 pub mod cache;
+/// Always-on read-path ARM probes (issue #3058): explicit markers for
+/// "the k-way merge ran" vs "the single-generation query scan ran".
+pub mod read_path_probe;
 /// Cooperative cancellation for long-running synchronous scans (issue #2264).
 pub mod scan_cancel;
 pub mod sstable;

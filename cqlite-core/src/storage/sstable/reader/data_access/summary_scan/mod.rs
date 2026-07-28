@@ -47,6 +47,9 @@ use crate::{Error, Result, RowKey};
 // The walk owns the enumeration; the window owns the one piece of per-scan state a
 // COMPRESSED `Data.db` needs.
 mod compressed_scan_window;
+/// Single-generation, token-scoped, pull-based query ROW stream (issue #3058).
+mod query_rows;
+pub use query_rows::{QueryRowBatch, QueryRowStream};
 
 // COMBINED-INTERACTION regression for the #2876 read-intent split x the #2877
 // coalescing window: every widened read this walk issues must land on the
@@ -387,17 +390,39 @@ impl SSTableReader {
     /// emitted as `(RowKey, ScanRow)` — byte-identical to
     /// [`stream_all_partitions_via_full_index`](Self::iterate_all_partitions_via_full_index)'s
     /// per-partition emit, but streamed (no resident `Vec`) + token-scoped.
+    ///
+    /// `now_secs` (issue #3058): when `Some`, the caller's request-scoped
+    /// read-time TTL clock is pinned onto the read-shadowing parser instead of
+    /// the ambient one it samples at construction, so a caller that already
+    /// captured ONE reconciliation `now` (the Flight producer) expires TTL cells
+    /// against exactly that instant. `None` keeps the ambient sample.
+    ///
+    /// `caller_schema` (issue #3058): the AUTHORITATIVE table schema, when the
+    /// caller has one (the Flight producer's ticket-DDL schema). It must take
+    /// precedence over the reader's own four-tier lookup exactly as the
+    /// compaction sibling's `schema` parameter does — an `nb` SSTable header
+    /// carries no embedded schema, so decoding it with the reader-derived one
+    /// loses the clustering-key columns (they surface as NULL). `None` keeps the
+    /// reader-derived resolution.
     pub(in crate::storage::sstable::reader) async fn stream_partitions_summary_guided<F>(
         &self,
         scan_cancel: &ScanCancel,
         token_bound: Option<ScanTokenBound>,
+        now_secs: Option<i64>,
+        caller_schema: Option<&crate::schema::TableSchema>,
         emit: &mut F,
     ) -> Result<FullIndexStreamOutcome>
     where
         F: FnMut((RowKey, ScanRow)) -> Result<ControlFlow<()>>,
     {
         let parser = self.build_v5_parser(true);
-        let reader_schema = self.get_table_schema(None);
+        let parser = match now_secs {
+            Some(now) => parser.with_now_secs(now),
+            None => parser,
+        };
+        let reader_schema = caller_schema
+            .cloned()
+            .or_else(|| self.get_table_schema(None));
         let schema = reader_schema.as_ref();
         self.walk_in_range_partition_slices(scan_cancel, token_bound, &parser, schema, &mut |raw| {
             let parsed = parser.parse_block(raw, schema, self)?;
@@ -520,7 +545,10 @@ impl SSTableReader {
                 // `V5_0Uncompressed` model: read-shadowing rows adapted to
                 // CompactionRow (row_timestamp 0), matching the non-stitching
                 // compaction stream's emit exactly.
-                self.stream_partitions_summary_guided(scan_cancel, token_bound, &mut |(k, v)| {
+                self.stream_partitions_summary_guided(scan_cancel, token_bound, None, schema, &mut |(
+                    k,
+                    v,
+                )| {
                     let row =
                         super::super::compaction_row::CompactionRow::from_legacy_value(k, v, 0);
                     emit(row)
