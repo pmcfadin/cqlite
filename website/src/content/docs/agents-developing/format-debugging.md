@@ -101,16 +101,39 @@ Row flags reference:
 
 ## Step 4: Compare against Cassandra source
 
-When CQLite behaviour diverges from the spec:
+When CQLite behaviour diverges from the spec, read the Cassandra source **at the pinned
+`cassandra-5.0.8` tag** — CQLite targets the Cassandra 5.0 on-disk format, and any other line
+(`trunk`, `6.0-alpha`, …) is a *different* format:
 
 ```bash
-# Local Cassandra 5.0 source
-grep -n "deserializeRowBody" ~/local_projects/cassandra/src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java | head -20
+# Authority: a PINNED TAG READ (never a working tree)
+git show cassandra-5.0.8:src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java \
+  | grep -n "deserializeRowBody" | head -20
 
-# Remote: https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java
+# Browse the same pin:
+# https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java
 ```
 
-Key Cassandra source files:
+:::caution[A local clone is optional and branch-sensitive (#3041)]
+There is **no guaranteed Cassandra clone path** on an agent machine, and a clone that exists may be
+checked out on a **non-5.0 branch** (a real one here sat on `6.0-alpha`) — reading its working tree
+produces a **confidently-wrong 5.0 answer** that no gate can catch. If you use a clone, read through
+the tag ref, never the checked-out files:
+
+```bash
+git -C "${CQLITE_CASSANDRA_REPO:?set to a Cassandra clone}" fetch --tags -q
+git -C "$CQLITE_CASSANDRA_REPO" show cassandra-5.0.8:<java path>
+```
+:::
+
+:::danger[A CQLite `file:line` is NEVER format authority]
+Citing CQLite's own code to justify CQLite's behavior is **circular reasoning**. Format authority is, in
+order: (1) the pinned `cassandra-5.0.8` Cassandra source, (2) `sstabledump` output, (3)
+`docs/sstables-definitive-guide/`. A CQLite source line is evidence of *what CQLite does*, never of
+*what is correct*.
+:::
+
+Key Cassandra source files (read each as `git show cassandra-5.0.8:src/java/org/apache/cassandra/<file>`):
 
 | File | Relevance |
 |------|-----------|

@@ -51,17 +51,27 @@ NOT poll in a tight `ScheduleWakeup` loop.
 **Polling is MANDATORY, not optional (#2668).** After launching the gate, poll the
 **SUMMARY FILE** (never the log) with a cheap `grep` at **5-minute intervals**:
 ```bash
-grep -q 'RESULT:' /tmp/gate-<N>.txt && echo done   # summary present ⇒ gate finished
+grep -qE 'RESULT: (PASS|FAIL)' /tmp/gate-<N>.txt && echo done   # a VERDICT ⇒ gate finished
 ```
+**Only `PASS`/`FAIL` is a verdict.** `agent-gate.sh` writes
+`RESULT: INCOMPLETE (gate did not finish)` into the summary file **at launch** (via its EXIT
+trap) and only *overwrites* it on completion, so `INCOMPLETE` is a **liveness placeholder, not
+a verdict** — it means "still running, or died". A bare `grep -q` on the bare `RESULT:` token therefore matches
+within seconds of gate start and would let you read a just-launched gate as a finished one and
+advance toward merge on a verdict that does not exist (#3041; mechanism follow-up #2908). Always
+anchor the probe on `PASS|FAIL`.
 - **Hard deadline = 45 minutes** of active-gate wall-clock. On the deadline with no
-  `RESULT:` in the summary file, emit terminal packet `verdict: gate-timeout` (naming the
-  summary-file path + log path) — **never park silently**.
+  `RESULT: PASS`/`RESULT: FAIL` in the summary file (an `INCOMPLETE` placeholder does not
+  count), emit terminal packet `verdict: gate-timeout` (naming the summary-file path + log
+  path) — **never park silently**.
 - **Queued-slot waits extend the deadline by the queue wait.** A **queued gate ≠ a hung
   gate**: under load the gate first prints `waiting for gate slot (N in use)…` (#1825) and
-  can sit 20+ min before it even starts. Detect the queue via the summary file's *absence*
-  plus that slot message; while queued, the 45-min active-gate deadline has not started —
-  extend it by the observed queue wait. Once the gate is actually running, the 45-min
-  clock applies.
+  can sit 20+ min before it even starts. The startup sentinel is written **before** the slot
+  is acquired, so a queued gate already has a summary file holding
+  `RESULT: INCOMPLETE (gate did not finish)` — detect the queue via that slot message (the
+  placeholder-only summary is expected, not evidence of progress). While queued, the 45-min
+  active-gate deadline has not started — extend it by the observed queue wait. Once the gate
+  is actually running, the 45-min clock applies.
 
 ## Heartbeat (issue #2089)
 Refresh the claim liveness heartbeat at the two stage transitions you own — **at start**
@@ -83,16 +93,18 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
      bash scripts/agent-gate.sh > gate-<N>.log 2>&1 < /dev/null   # via Bash run_in_background
    ```
    End your turn; on re-invoke, `cat /tmp/gate-<N>.txt` — the complete `==== AGENT-GATE
-   SUMMARY ====` block (start marker → `RESULT:` → end marker). **Never read `gate-<N>.log`
-   into your context** — the SUMMARY file is the only gate text you retain. `--lite` never
-   substitutes for this run.
+   SUMMARY ====` block (start marker → `RESULT: PASS`/`RESULT: FAIL` → end marker; a terminal
+   `RESULT: INCOMPLETE` means the run never finished, so there is no verdict to read).
+   **Never read `gate-<N>.log` into your context** — the SUMMARY file is the only gate text you
+   retain. `--lite` never substitutes for this run.
    **Reader contract — VERIFY the run-id, don't trust a bare block (#2874).** The pinned
    summary path is not unconditionally your verdict. The gate's no-clobber guard deliberately
    leaves a *foreign* run's block on the pinned path when a live peer owns it (only possible on
    a shared checkout-default path — your unique `mktemp`/`/tmp/gate-<N>.txt` path makes it
    unreachable, but verify anyway as defense-in-depth). So when you read `/tmp/gate-<N>.txt`:
    the process **exit code is primary**, and you MUST confirm the block's `run-id:` line is the
-   run you launched before trusting `RESULT:`. If the `run-id` doesn't match (a peer's block —
+   run you launched before trusting its `RESULT: PASS`/`RESULT: FAIL`. If the `run-id` doesn't
+   match (a peer's block —
    even `RESULT: PASS`), your verdict is at the sibling `/tmp/gate-<N>.txt.integrity-fail.*`
    (glob it) or the run's `logs:` bundle — read that instead, and treat a `summary-integrity:
    FAIL` line as a hard FAIL, never a bare INCOMPLETE.

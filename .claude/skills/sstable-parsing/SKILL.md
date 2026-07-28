@@ -124,11 +124,29 @@ Variable-length integer encoding:
 - Subsequent bytes contain value
 - Used for row sizes, timestamps, offsets
 
+## Format authority (#3041)
+
+**A CQLite `file:line` is NEVER format authority.** Citing CQLite's own code to justify CQLite's
+behavior is circular reasoning. Authority is, in order:
+
+1. The **pinned `cassandra-5.0.8` Cassandra source** — read it as a tag ref, never a working tree:
+   ```bash
+   git show cassandra-5.0.8:src/java/org/apache/cassandra/db/rows/UnfilteredSerializer.java
+   ```
+   (Browse: https://github.com/apache/cassandra/tree/cassandra-5.0.8.) A local clone is **optional and
+   branch-sensitive** — none is guaranteed to exist, and one that does may sit on `trunk`/`6.0-alpha`,
+   which is **not** the 5.0 on-disk format; read it via `git -C "$CQLITE_CASSANDRA_REPO" show
+   cassandra-5.0.8:<path>`.
+2. `sstabledump` output on a real SSTable.
+3. `docs/sstables-definitive-guide/`.
+
+A CQLite source line is evidence of *what CQLite does*, never of *what is correct*.
+
 ## Next Steps
 
 When parser encounters issues:
 1. Log byte offsets at each stage
-2. Compare against Java source (UnfilteredSerializer.java)
+2. Compare against the pinned Java source (`git show cassandra-5.0.8:…/UnfilteredSerializer.java`)
 3. Validate against sstabledump output
 4. Check compression block boundaries
 5. Verify delta encoding calculations

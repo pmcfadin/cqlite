@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-03
 **Audience:** internal engineering scoping — frank, decision-oriented, code-anchored.
-**Targets:** Apache Cassandra **trunk** (`~/local_projects/cassandra`, base.version 7.0,
+**Targets:** Apache Cassandra **trunk** (a local trunk checkout, historically
+`~/local_projects/cassandra` — a machine-local clone that is NOT guaranteed to exist and whose branch is NOT the Cassandra 5.0 on-disk format CQLite targets; 5.0 format authority is `git show cassandra-5.0.8:<path>` (#3041); base.version 7.0,
 cassandra-6.0 merged 2026-07-03); Cassandra 5.0.x deltas flagged inline. CQLite v0.12.0.
 **Companion:** `synthesis-q1-freshness.md` (the freshness question);
 `synthesis-q2-storage-engine.md` (the full working notes behind this report).

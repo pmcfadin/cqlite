@@ -173,9 +173,13 @@ near-independent issues instead of running one to done before starting the next:
   so an accidental overlap no longer oversubscribes the CPU. Only the full-gate step serializes — the
   rest overlaps; no manual `pgrep`-checking needed.
 - **(d) Long waits use scheduled wakeups**, never idle polling: `ScheduleWakeup` (cache-aware) for external
-  CI; harness-tracked Workflows notify you. Poll a queued gate's summary file with a cheap `grep` at
-  <5-min intervals if you must watch — never a silent wait (a **queued gate ≠ hung gate**: under load it
-  first prints `waiting for gate slot (N in use)…`).
+  CI; harness-tracked Workflows notify you. Poll a queued gate's summary file with a cheap
+  `grep -qE 'RESULT: (PASS|FAIL)'` at <5-min intervals if you must watch — never a bare
+  `grep -q` on the bare `RESULT:` token, which also matches the startup `RESULT: INCOMPLETE (gate did not finish)`
+  **liveness placeholder** (not a verdict) and so false-fires the instant the gate launches (#3041).
+  Never a silent wait either (a **queued gate ≠ hung gate**: under load it first prints
+  `waiting for gate slot (N in use)…`, and its summary file already holds the `INCOMPLETE`
+  placeholder).
 
 ## State model
 

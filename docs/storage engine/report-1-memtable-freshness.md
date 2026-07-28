@@ -35,7 +35,10 @@ SLA would ever justify in-JVM work.**
 ## 1. How Cassandra (and CQLite) actually work here — the mechanism map
 
 Every claim in this section was spot-checked against source during synthesis; anchors are
-`file:line` in `~/local_projects/cassandra` (trunk) or the CQLite repo.
+`file:line` in a Cassandra **trunk** checkout or the CQLite repo. (Provenance note, #3041: trunk is NOT the
+Cassandra 5.0 on-disk format CQLite targets — for any 5.0 format claim the authority is
+`git show cassandra-5.0.8:<path>`; and a CQLite `file:line` is NEVER format authority, only evidence of
+what CQLite does.)
 
 ### 1.1 The CQLite read path is stateless, path-driven, and snapshot-pinned
 
@@ -298,7 +301,7 @@ All paths relative to `docs/storage engine/` (note the space — quote in shells
 - **Referenced-but-not-committed indexes** (`read-path.md`, `cqlite-flight-trino.md`, from
   the research scratchpads): their load-bearing claims are either corrected or absorbed in
   `synthesis-q1-freshness.md` §1/§6 — treat the synthesis as authoritative over them.
-- **Source anchors for re-verification (trunk `~/local_projects/cassandra`):**
+- **Source anchors for re-verification (a Cassandra **trunk** checkout — a machine-local clone that is NOT guaranteed to exist and whose branch is NOT the Cassandra 5.0 on-disk format CQLite targets; 5.0 format authority is `git show cassandra-5.0.8:<path>` (#3041)):**
   `db/memtable/Memtable.java` (:60 interface, :449 `performSnapshot`, durability flags
   ~:105–:125), `schema/MemtableParams.java:111`, `db/StorageHook.java:33`,
   `service/snapshot/TakeSnapshotTask.java:128`, `db/ReadCommand.java:1174`,

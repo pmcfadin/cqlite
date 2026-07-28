@@ -39,7 +39,7 @@ Status legend for effort: **S** ≤1wk, **M** ~1 month, **L** ~1 quarter, **XL**
 
 ## 1. Verified seam map (spot-checked against source — with corrections)
 
-### Cassandra trunk (`~/local_projects/cassandra`, branch `trunk`)
+### Cassandra trunk (branch `trunk`; historically read from `~/local_projects/cassandra` — a machine-local clone that is NOT guaranteed to exist and whose branch is NOT the Cassandra 5.0 on-disk format CQLite targets; 5.0 format authority is `git show cassandra-5.0.8:<path>` (#3041))
 
 | Seam | Anchor | What it actually gives you | Verdict |
 |---|---|---|---|

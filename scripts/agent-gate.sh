@@ -3067,7 +3067,7 @@ _tree_set_end() {
 }
 
 # _tree_fail_reason <head-b> <rendered-paths> — the NAMED failure text. It deliberately
-# contains no `RESULT:` token, so #2908's poll predicates (`grep -q 'RESULT:'` and the
+# contains no `RESULT:` token, so #2908's poll predicates (the buggy bare-token one and the
 # corrected `grep -qE 'RESULT: (PASS|FAIL)'`) behave exactly as they do today.
 #
 # On a host where the run's OWN stdout/stderr redirect target cannot be named (no /proc —

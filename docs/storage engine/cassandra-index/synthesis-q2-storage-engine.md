@@ -3,7 +3,8 @@
 **Audience:** internal engineering scoping (frank, code-anchored, effort-tiered).
 **Targets:** Apache Cassandra **trunk** (base.version 7.0, cassandra-6.0 merged 2026-07-03,
 HEAD `50ddce8455`), with 5.0.x deltas flagged. CQLite at v0.12.0.
-**Source of truth:** spot-checked against `~/local_projects/cassandra` (Java) and
+**Source of truth:** spot-checked against a Cassandra **trunk** Java checkout (historically
+`~/local_projects/cassandra` — a machine-local clone that is NOT guaranteed to exist and whose branch is NOT the Cassandra 5.0 on-disk format CQLite targets; 5.0 format authority is `git show cassandra-5.0.8:<path>` (#3041)) and
 `cqlite-core` (Rust); Haiku index files in `docs/storage engine/` +
 `docs/storage\ engine/`. Load-bearing claims re-verified in source — corrections below.
 

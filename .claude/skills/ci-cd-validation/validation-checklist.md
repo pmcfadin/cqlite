@@ -12,5 +12,9 @@ Validation is `scripts/agent-gate.sh`, run in the tiered loop:
   `==== AGENT-GATE SUMMARY ====` (ending `RESULT: PASS`) is the only run that counts. `--lite` never
   replaces it. Under load the full gate may **queue for a #1825 slot** (prints `waiting for gate slot
   (N in use)…` once) then run 15-20 min — use a long timeout; queued ≠ hung.
+- **`INCOMPLETE` is a liveness placeholder, not a verdict (#3041).** The startup sentinel puts
+  `RESULT: INCOMPLETE (gate did not finish)` in the summary file before any component runs (a queued
+  gate already has one), so any completion poll must be
+  `grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"`, never a bare `grep -q` on the bare `RESULT:` token.
 
 See `SKILL.md` (this dir) for the loop and `docs/development/pm-operating-loop.md` for the delivery model.

@@ -108,6 +108,10 @@ never gate stdout or review churn.
       `RESULT:` confirm its `run-id:` line is the run you launched — the no-clobber guard can leave a
       foreign peer's block on a shared pinned path (unreachable with a unique path, but verify). On a
       `run-id` mismatch, read the sibling `/tmp/lite-<N>.txt.integrity-fail.*` / `logs:` bundle instead.
+      **And only `PASS`/`FAIL` is a verdict (#3041):** the gate stamps
+      `RESULT: INCOMPLETE (gate did not finish)` at launch, so if you poll rather than wait for exit,
+      use `grep -qE 'RESULT: (PASS|FAIL)'` — a bare `grep -q` on the bare `RESULT:` token matches that **liveness
+      placeholder** and would read a just-launched run as a finished one.
       Lite runs fmt + file-size + FULL-workspace clippy + blast-radius-scoped tests (~1-5 min). It is the
       FAST ITERATION gate, NOT the gate of record; its distinct `MODE: lite` block must NEVER be pasted as
       the full SUMMARY.

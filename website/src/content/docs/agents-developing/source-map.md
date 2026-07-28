@@ -195,9 +195,25 @@ rg -n "\.unwrap()" cqlite-core/src/ --glob '!*.rs.bk'
 
 ## Cassandra source reference
 
-When the CQLite parser behaviour diverges from Cassandra's:
+When the CQLite parser behaviour diverges from Cassandra's, the authority is the Cassandra source read
+**at the pinned `cassandra-5.0.8` tag** — CQLite targets the Cassandra **5.0** on-disk format:
 
-- Local copy: `~/local_projects/cassandra` (Cassandra 5.0 source)
-- Remote: https://github.com/apache/cassandra/tree/cassandra-5.0.0
+```bash
+git show cassandra-5.0.8:src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java
+```
+
+- Browse the same pin: https://github.com/apache/cassandra/tree/cassandra-5.0.8
 - Key file: `src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java`
 - Key file: `src/java/org/apache/cassandra/db/rows/Cell.java`
+- **A local clone is OPTIONAL and BRANCH-SENSITIVE (#3041).** No clone path is guaranteed to exist on a
+  given machine (`~/local_projects/cassandra` is absent on the agent machines), and one that does exist
+  may be checked out on a non-5.0 line — `trunk`/`6.0-alpha` is **not** the 5.0 format. If you use a
+  clone (`$CQLITE_CASSANDRA_REPO`), read through the tag ref
+  (`git -C "$CQLITE_CASSANDRA_REPO" show cassandra-5.0.8:<path>`), never its working tree.
+
+:::danger[A CQLite `file:line` is NEVER format authority]
+Citing CQLite's own code to justify CQLite's behavior is **circular reasoning**. Format authority is, in
+order: (1) the pinned `cassandra-5.0.8` Cassandra source, (2) `sstabledump` output, (3)
+`docs/sstables-definitive-guide/`. A CQLite source line — everything mapped on this page — is evidence
+of *what CQLite does*, never of *what is correct*.
+:::
