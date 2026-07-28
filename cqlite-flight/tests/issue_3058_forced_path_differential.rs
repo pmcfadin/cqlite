@@ -344,7 +344,7 @@ async fn assert_refused_schema_unchanged(
     svc: &CqliteFlightService,
     ticket: &serde_json::Value,
     pinned_now: i64,
-    expect_error: bool,
+    expect_error: Option<&str>,
     failures: &mut Vec<String>,
 ) {
     std::env::set_var(TTL_NOW_ENV, pinned_now.to_string());
@@ -377,24 +377,31 @@ async fn assert_refused_schema_unchanged(
         return;
     }
     match (&merge_outcome, expect_error) {
-        (Err(msg), true) => eprintln!(
+        (Err(msg), Some(must_name)) if msg.contains(must_name) => eprintln!(
             "PASS {label} — refused schema took the merge arm on both forced values; \
-             behaviour unchanged (still the pre-existing #2339 error: {msg})"
+             behaviour unchanged (still the pre-existing error naming \
+             '{must_name}')"
         ),
-        (Ok(rows), false) if !rows.is_empty() => eprintln!(
+        (Err(msg), Some(must_name)) => failures.push(format!(
+            "case {label}: both arms failed, but NOT with the expected condition — \
+             the error must name '{must_name}', so an unrelated identical failure \
+             cannot pass this case. Got: {msg}"
+        )),
+        (Ok(rows), None) if !rows.is_empty() => eprintln!(
             "PASS {label} — refused schema took the merge arm on both forced values \
              ({} rows, unchanged)",
             rows.len()
         ),
-        (Ok(rows), false) => failures.push(format!(
-            "case {label}: the refused schema returned NO rows ({} ) — a vacuous pass",
+        (Ok(rows), None) => failures.push(format!(
+            "case {label}: the refused schema returned NO rows ({}) — a vacuous pass",
             rows.len()
         )),
-        (Ok(_), true) => failures.push(format!(
-            "case {label}: expected today's pre-existing ERROR on both arms but the \
-             request SUCCEEDED — if #2339 was fixed, update this case"
+        (Ok(_), Some(must_name)) => failures.push(format!(
+            "case {label}: expected today's pre-existing ERROR naming '{must_name}' \
+             on both arms, but the request SUCCEEDED — if #2339 was fixed, update \
+             this case"
         )),
-        (Err(msg), false) => failures.push(format!(
+        (Err(msg), None) => failures.push(format!(
             "case {label}: expected rows on both arms but both failed: {msg}"
         )),
     }
@@ -797,7 +804,7 @@ async fn forced_path_differential_agrees_on_every_shape() {
         &ssvc,
         &sticket,
         NOW_BEFORE_EXPIRY,
-        false,
+        None,
         &mut failures,
     )
     .await;
@@ -834,7 +841,7 @@ async fn forced_path_differential_agrees_on_every_shape() {
                 &svc,
                 &ticket,
                 case.pinned_now,
-                case.refused_outcome_is_error,
+                case.refused_error_substr,
                 &mut failures,
             )
             .await;
@@ -893,9 +900,10 @@ struct DatasetCase {
     /// both forced values take the merge arm and behave identically — instead of
     /// an arm-vs-arm row differential.
     refuses_fast_arm: bool,
-    /// For a refused schema: whether today's (unchanged) behaviour on BOTH arms is
-    /// a hard error (`#2339`) rather than rows.
-    refused_outcome_is_error: bool,
+    /// For a refused schema: `Some(substring)` when today's (unchanged) behaviour
+    /// on BOTH arms is a hard error, naming the CONDITION the error must mention
+    /// (so an unrelated identical failure cannot pass); `None` when it is rows.
+    refused_error_substr: Option<&'static str>,
     /// When `Some(pk)`, the ticket carries a token range derived from that `int`
     /// partition key's REAL Murmur3 token, so the case exercises the TOKEN-BOUND
     /// bypass arm (`stream_partitions_summary_guided`) rather than the full-ring
@@ -921,7 +929,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 2,
             pk_only_projection: vec!["id", "ck"],
             refuses_fast_arm: false,
-            refused_outcome_is_error: false,
+            refused_error_substr: None,
             columns: vec![],
             token_of_int_pk: None,
         },
@@ -935,7 +943,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 1,
             pk_only_projection: vec!["id", "ck"],
             refuses_fast_arm: false,
-            refused_outcome_is_error: false,
+            refused_error_substr: None,
             columns: vec![],
             token_of_int_pk: None,
         },
@@ -958,7 +966,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 2,
             pk_only_projection: vec!["id", "ck"],
             refuses_fast_arm: false,
-            refused_outcome_is_error: false,
+            refused_error_substr: None,
             columns: vec![],
             // Every surviving row of this fixture lives in partition id = 1.
             token_of_int_pk: Some(1),
@@ -973,7 +981,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 1,
             pk_only_projection: vec!["id", "ck"],
             refuses_fast_arm: false,
-            refused_outcome_is_error: false,
+            refused_error_substr: None,
             columns: vec![],
             token_of_int_pk: Some(1),
         },
@@ -987,7 +995,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 3,
             pk_only_projection: vec!["id", "ck"],
             refuses_fast_arm: false,
-            refused_outcome_is_error: false,
+            refused_error_substr: None,
             columns: vec![],
             token_of_int_pk: None,
         },
@@ -1021,8 +1029,42 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 1,
             pk_only_projection: vec![],
             refuses_fast_arm: true,
-            refused_outcome_is_error: true,
+            // The #2339 condition the merge arm fails closed on — asserted so an
+            // unrelated identical error on both arms cannot pass this case.
+            refused_error_substr: Some("composite-keyed collection decode unsupported"),
             columns: vec![],
+            token_of_int_pk: None,
+        },
+        // Spec R7's "a frozen UDT inside a collection still decodes structurally"
+        // scenario, over the SAME real bytes (roborev/C): the composite-keyed
+        // guard is schema-WIDE, so the case above (which declares the sibling
+        // `contacts set<frozen<contact_info>>`) can no longer reach the fast arm
+        // under any projection. This case therefore declares a ticket DDL with
+        // ONLY the non-refused columns — `addresses list<frozen<address_type>>`
+        // and `locations_visited map<date, frozen<address_type>>` (a scalar-keyed
+        // map) — which is legitimate because the CALLER schema IS the ticket DDL
+        // and undeclared on-disk columns are tolerated by the reassembler
+        // (`read_assembly.rs`). The predicate therefore selects the fast arm and
+        // the `frozen<UDT>`-inside-a-`list` Struct decode is compared arm-vs-arm
+        // again. `assert_arms_agree` FAILS the case unless the bypass leg shows
+        // mergers_built == 0 AND reconcile_entries == 0, so "the fast arm was
+        // really taken" is asserted, not assumed.
+        DatasetCase {
+            label: "cassandra/collections_with_udts@udt-in-collection",
+            pk_only_label: "cassandra/collections_with_udts@udt-in-collection+pk-only",
+            keyspace: "test_collections",
+            table: "collections_with_udts",
+            ddl: [
+                "CREATE TABLE collections_with_udts (user_id uuid PRIMARY KEY, addresses list<frozen<address_type>>, locations_visited map<date, frozen<address_type>>);",
+                "CREATE TYPE address_type (street text, city text, state text, zip_code text, country text);",
+            ]
+            .join(" "),
+            pinned_now: ORACLE_PINNED_NOW,
+            min_rows: 1,
+            pk_only_projection: vec!["user_id"],
+            refuses_fast_arm: false,
+            refused_error_substr: None,
+            columns: vec!["user_id", "addresses"],
             token_of_int_pk: None,
         },
         DatasetCase {
@@ -1037,7 +1079,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 1,
             pk_only_projection: vec![],
             refuses_fast_arm: true,
-            refused_outcome_is_error: false,
+            refused_error_substr: None,
             columns: vec![],
             token_of_int_pk: None,
         },
