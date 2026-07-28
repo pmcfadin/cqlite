@@ -119,8 +119,17 @@ code --diff reference/simple_table-sorted.json cqlite/simple_table-sorted.json
 
 ### Validation Test Suite
 
+Real entrypoints (these exist; there is no `sstable_validation` target):
+
+| Entrypoint | Covers |
+|------------|--------|
+| `cqlite-core/tests/query_semantics_oracle_parity.rs` | query-semantics parity — the post-reconciliation `SELECT` result set at a PINNED `now` |
+| `cqlite-core/tests/point_vs_full_differential.rs` | point-vs-full differential lane — same query under `CQLITE_READ_PATH=point` vs `=full` |
+| `bash test-data/scripts/smoke-test-all-tables.sh` | all-tables smoke across the enumerated corpus |
+
+The shape of a per-table parity assertion (illustrative, not a copy of a real file):
+
 ```rust
-// tests/sstable_validation.rs
 #[test]
 fn validate_simple_table() {
     let reference = load_sstabledump_output(
@@ -144,14 +153,19 @@ fn validate_simple_table() {
 ### Run Validation
 
 ```bash
-# All tables
-cargo test --test sstable_validation
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
 
-# Specific table
-cargo test --test sstable_validation -- simple_table
+# All tables (smoke)
+bash test-data/scripts/smoke-test-all-tables.sh
 
-# With output
-cargo test --test sstable_validation -- simple_table --nocapture
+# Query-semantics parity oracle
+cargo test --package cqlite-core --test query_semantics_oracle_parity
+
+# Point-vs-full differential lane
+cargo test --package cqlite-core --test point_vs_full_differential
+
+# Narrow to one case (+ output)
+cargo test --package cqlite-core --test query_semantics_oracle_parity -- simple_table --nocapture
 ```
 
 ## Validation Criteria
@@ -296,9 +310,9 @@ jobs:
           sudo apt-get install -y cassandra-tools
       
       - name: Download test data
-        run: |
-          wget https://github.com/pmcfadin/cqlite/releases/download/test-data-v5.0/cqlite-test-data.tar.gz
-          tar xzf cqlite-test-data.tar.gz
+        # The script carries the pinned release tag + asset + sha256 — never
+        # transcribe them here (env overrides: DATASET_TAG/DATASET_ASSET/DATASET_SHA256).
+        run: bash test-data/scripts/fetch-datasets.sh
       
       - name: Generate reference
         run: |
@@ -307,7 +321,11 @@ jobs:
           done
       
       - name: Run validation
-        run: cargo test --test sstable_validation
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+        run: |
+          cargo test --package cqlite-core --test query_semantics_oracle_parity
+          cargo test --package cqlite-core --test point_vs_full_differential
       
       - name: Upload diffs on failure
         if: failure()
@@ -350,16 +368,17 @@ hexdump -C Data.db -s <offset> -n 256
 
 ### Step 5: Fix Parser
 
-Update parser based on format understanding:
+Update the parser based on format understanding — the row/cell decode path lives under
+`cqlite-core/src/storage/sstable/reader/parsing/row_decoder/`, typed value decode in
+`cqlite-core/src/storage/sstable/reader/parsing/value_parsing.rs`:
 ```rust
-// Fix in v5_compressed_legacy.rs
 let correct_offset = old_offset + missing_bytes;
 ```
 
 ### Step 6: Re-validate
 
 ```bash
-cargo test --test sstable_validation -- failing_test
+cargo test --package cqlite-core --test query_semantics_oracle_parity -- failing_test
 ```
 
 ## Known Validation Challenges
@@ -404,6 +423,12 @@ After validation passes:
 ## References
 
 - sstabledump source: https://github.com/apache/cassandra/tree/trunk/src/java/org/apache/cassandra/tools
-- Cassandra SSTable format: See `CASSANDRA_50_FORMAT_SPECIFICATION.md`
-- cqlite validation tests: `tests/sstable_validation.rs`
+- Cassandra SSTable format (single source of truth): `docs/sstables-definitive-guide/README.md` —
+  `chapters/05-data-db-format.md` (Data.db), `chapters/06-index-and-summary.md` (Index.db/Summary.db),
+  `chapters/17-bti-formats.md` (BTI), `chapters/appendix-b-encodings-cheat-sheet.md` (encodings),
+  `chapters/appendix-f-known-limitations.md` (known limitations)
+- cqlite parity tests: `cqlite-core/tests/query_semantics_oracle_parity.rs`,
+  `cqlite-core/tests/point_vs_full_differential.rs`
+- Corpus scope + enforcement policy: `test-data/validation-matrix.md`,
+  `test-data/corpus-coverage-policy.md`
 
