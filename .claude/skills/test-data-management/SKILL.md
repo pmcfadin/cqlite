@@ -143,30 +143,20 @@ Stops Cassandra and removes Docker volumes.
 
 Schemas in `test-data/schemas/`:
 
-### basic-types.cql
-Simple table with all primitive types:
-- Partition key: uuid
-- No clustering
-- Columns: int, text, timestamp, boolean, etc.
+`schemas/core.list` names the curated set `start-clean.sh` applies by default:
+`basic-types.cql`, `collections.cql`, `time-series.cql`, `wide-rows.cql` (→ keyspaces
+`test_basic`, `test_collections`, `test_timeseries`, `test_wide_rows`).
 
-### collections.cql
-Collection types:
-- list<int>
-- set<text>
-- map<text, int>
-- Nested frozen collections
+Beyond the core set the directory holds the format-specific and parity fixtures — `oa-test.cql`,
+`da-test.cql` (BTI), `cql-type-parity.cql`, `compaction-parity*.cql`, `tombstone-parity.cql`,
+`compression-parity.cql`, `write-load-parity.cql`, `deltas.cql`, `wide-table-bti.cql`, plus
+`udts/` and `legacy/`.
 
-### time-series.cql
-Time-series pattern:
-- Partition key: sensor_id
-- Clustering: timestamp (DESC)
-- Columns: temperature, humidity, pressure
-
-### wide-rows.cql
-Wide partition testing:
-- Single partition key
-- Many clustering rows (1000+)
-- Tests pagination and offset handling
+**Read the `.cql` for the actual DDL** — column sets and clustering shapes change with the fixtures,
+and row counts come from the generator (`--rows N`, default 50), not from the schema. Which tables
+are enforced vs skip-pending lives in `test-data/validation-matrix.md` +
+`test-data/corpus-coverage-policy.md`, and the corpus is enumerated from disk per run (#1229) —
+never hard-code a table count.
 
 ### Custom Schemas
 Add your own:
@@ -187,15 +177,21 @@ See [validation-workflow.md](validation-workflow.md) for complete validation pro
 
 ### Validate Against sstabledump
 
+Table directories carry a UUID suffix (`<table>-<uuid>/`), so glob rather than hard-coding a path;
+`<schema>.cql` is one of the files in `test-data/schemas/` (e.g. `basic-types.cql`).
+
 ```bash
+TABLE_DIR=$(echo test-data/datasets/sstables/<keyspace>/<table>-*)
+
 # 1. Generate sstabledump reference
-sstabledump test-data/datasets/sstables/keyspace/table/*-Data.db \
-    > reference.json
+#    (a committed `*-Data.db.jsonl` golden already sits beside every Data.db —
+#     prefer comparing against that unless you are refreshing the golden)
+sstabledump "$TABLE_DIR"/*-Data.db > reference.json
 
 # 2. Parse with cqlite
 cargo run --bin cqlite -- \
-    --data-dir test-data/datasets/sstables/keyspace/table \
-    --schema test-data/schemas/schema.cql \
+    --data-dir "$TABLE_DIR" \
+    --schema test-data/schemas/<schema>.cql \
     --out json > cqlite.json
 
 # 3. Compare (ignoring formatting)

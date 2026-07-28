@@ -26,11 +26,19 @@ reference.json            cqlite.json
 
 ### Using sstabledump
 
+On-disk table directories carry a UUID suffix (`simple_table-<uuid>/`) and the generation prefix
+is the SSTable format version (`nb-1-big-*` for BIG, `da-1-bti-*` for BTI) — glob, never hard-code:
+
 ```bash
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+TABLE_DIR=$(echo test-data/datasets/sstables/test_basic/simple_table-*)
+
 # Generate JSON reference for a table
-sstabledump test-data/datasets/sstables/test_basic/simple_table/na-1-big-Data.db \
-    > reference/simple_table.json
+sstabledump "$TABLE_DIR"/*-Data.db > reference/simple_table.json
 ```
+
+Each table dir also ships a committed `*-Data.db.jsonl` sstabledump golden — for parity work
+compare against that rather than regenerating, unless you are refreshing the golden itself.
 
 ### sstabledump Options
 
@@ -64,7 +72,7 @@ sstabledump -l 10 Data.db
 
 ```bash
 cargo run --bin cqlite -- \
-    --data-dir test-data/datasets/sstables/test_basic/simple_table \
+    --data-dir "$TABLE_DIR" \
     --schema test-data/schemas/basic-types.cql \
     --out json \
     > cqlite/simple_table.json
@@ -132,12 +140,13 @@ The shape of a per-table parity assertion (illustrative, not a copy of a real fi
 ```rust
 #[test]
 fn validate_simple_table() {
+    // The committed sstabledump golden that ships beside every Data.db
     let reference = load_sstabledump_output(
-        "test-data/reference/simple_table.json"
+        dataset_path("sstables/test_basic/simple_table-*/nb-1-big-Data.db.jsonl")
     ).unwrap();
-    
+
     let cqlite = parse_sstable(
-        "test-data/datasets/sstables/test_basic/simple_table",
+        dataset_path("sstables/test_basic/simple_table-*"),
         "test-data/schemas/basic-types.cql"
     ).unwrap();
     
