@@ -258,22 +258,35 @@ those **identical bytes** on the **same box, same pinned physical cores, same ru
 pre-change and post-change ratio SHALL be measured locally so the delta is self-contained; the WS0
 absolute SHALL NOT be restated as if reproduced.
 
-**Delivered result (measured; owner accepted at delivery).** The bypass SHALL demonstrate a
-**material, externally-measured throughput gain** on the target surface. Measured warm, pinned,
-CPU-wide, median of 3:
+**Delivered result (measured on the shipping commit; owner accepted at delivery).** The bypass SHALL
+demonstrate a **material, externally-measured throughput gain** on the target surface, measured on
+**both** access shapes — the full-ring scan AND the **token-bounded** shape the Trino connector
+actually issues. Measured warm, pinned to one physical core's siblings, CPU-wide counters, median
+of 3:
 
-| surface / arm | rows/s | cycles/row |
-|---|--:|--:|
-| bare scan | 312,155 | 22,012 |
-| `do_get` merge (pre-change path, same binary) | 53,873 | 122,571 |
-| `do_get` **bypass** | **210,192** | **27,600** |
+| shape | arm | rows/s | cycles/row | `cell_metadata_maps` |
+|---|---|--:|--:|--:|
+| — | bare scan | 310,743 | 22,051 | — |
+| full-ring | merge (pre-change path, same binary) | 63,600 | 94,770 | 4,000,000 |
+| full-ring | **bypass** | **211,105** | **27,954** | **0** |
+| token-bound | merge | 62,783 | 94,964 | 2,012,000 |
+| token-bound | **bypass** | **206,068** | **26,688** | **0** |
 
-That is **3.90x** on the target surface (4.44x by cycles/row) and closes the bare-scan gap from
-**5.73x to 1.49x** — ~90% of the excess. The originally-stated **~1.3x** target is **NOT** reached;
-the residual (27,600 vs 22,012 cycles/row, +25%) is Arrow encode + IPC framing, with all
-merge-path probe counters at zero. Arrow encode is explicitly out of scope for this change and is
-owned by **issue #3096**, whose acceptance criterion is closing 1.49x to ~1.3x. The shortfall SHALL
-be recorded plainly in the PR and the issue, and SHALL NOT be rounded toward the target.
+That is **3.32x** on the full-ring shape and **3.28x** on the token-bound shape, closing the
+bare-scan gap from **5.73x** to **1.47x** (full-ring) / **1.51x** (token-bound).
+
+The originally-stated **~1.3x** target is **NOT** reached. The residual (27,954 vs 22,051
+cycles/row, +27%) is Arrow encode + IPC framing + loopback gRPC, with every merge-path probe
+counter at zero — the merge path is provably gone. Arrow encode is explicitly out of scope here and
+is owned by **issue #3096**, whose acceptance criterion is closing this remainder. The shortfall
+SHALL be recorded plainly in the PR and the issue and SHALL NOT be rounded toward the target.
+
+**The merge arm's throughput improved as a side effect, and this SHALL be reported rather than
+hidden.** The `structure_only` coverage-check mode (added for R3 on the token-bounded arm) also
+removes the merge arm's duplicate compaction-parser pass, halving its per-row metadata maps
+(8,000,000 → 4,000,000 for 4M rows) and improving it 53,873 → 63,600 rows/s (+18.1%). Emitted rows
+are byte-identical, so R4 holds; the honest consequence is that the bypass-vs-merge speedup is
+**3.32x, not the 3.90x** measured before that fix landed. Superseded figures SHALL NOT be quoted.
 
 The measurement SHALL use CPU-wide `perf stat -C` (never `perf stat -p`, which costs >2x on this
 workload) and SHALL pin the workload with `taskset` (unpinned measured 18.74 s vs 11.16 s pinned).
@@ -282,10 +295,15 @@ WS0 absolute re-measurement as an explicit **owed follow-up** on a machine holdi
 corpus. If the bypass does not move the local `do_get` rows/s materially, the work SHALL STOP and the
 negative result SHALL be posted rather than further levers stacked.
 
-#### Scenario: The local ratio closes materially on the bare scan
+#### Scenario: The local ratio closes materially on the bare scan, on both access shapes
 - **GIVEN** a locally generated corpus of ~4,000,000 rows and a single SSTable, with the bare scan and Flight `do_get` measured over those identical bytes in the same session, warm, on pinned physical cores, with CPU-wide perf counters, median of at least 3 runs
-- **WHEN** the merge arm and the bypass arm are measured on the SAME binary via the forced-path override
-- **THEN** the bypass arm is at least 3x the merge arm's rows/s, the bare-scan gap closes from ~5.7x to under 1.6x, and every figure is reported as rows/s AND cycles/row
+- **WHEN** the merge arm and the bypass arm are measured on the SAME binary via the forced-path override, for BOTH a full-ring scan and a token-bounded scan
+- **THEN** on each shape the bypass arm is at least 3x the merge arm's rows/s, the bare-scan gap closes from ~5.7x to under 1.6x, and every figure is reported as rows/s AND cycles/row
+
+#### Scenario: The token-bounded shape is measured, not assumed from the full-ring result
+- **GIVEN** that the Trino connector issues token-ranged splits rather than full-ring scans
+- **WHEN** the acceptance measurement is performed
+- **THEN** the token-bounded shape is measured explicitly on its own code path (the Summary-guided walk), its row count is reported alongside its rows/s, and `cell_metadata_maps == 0` is confirmed on that arm — the full-ring figure is never presented as covering it
 
 #### Scenario: The residual shortfall against the original target is reported, not rounded away
 - **WHEN** the results are written up
