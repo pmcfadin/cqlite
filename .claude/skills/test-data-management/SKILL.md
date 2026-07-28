@@ -40,20 +40,21 @@ bash test-data/scripts/regenerate-datasets.sh --rows 200
 ```
 
 **Compose-stack workflow (interactive / partial):**
-```bash
-cd test-data
+All paths below are repo-root-relative; run via `bash` (`regenerate-datasets.sh` is not
+committed executable, so `./` invocation fails on it):
 
-# 1. Start clean Cassandra 5 with schemas
-./scripts/start-clean.sh
+```bash
+# 1. Start clean Cassandra 5 with schemas (container: cqlite-cassandra-5-0)
+bash test-data/scripts/start-clean.sh
 
 # 2. (Optional) run CQL inserts manually via cqlsh
 docker exec -it cqlite-cassandra-5-0 cqlsh
 
 # 3. Export SSTables + generate JSONL goldens
-./scripts/export.sh
+bash test-data/scripts/export.sh
 
 # 4. Shutdown and clean volumes
-./scripts/shutdown-clean.sh
+bash test-data/scripts/shutdown-clean.sh
 ```
 
 ## Generation Scripts
@@ -95,8 +96,8 @@ Starts Cassandra 5.0 container (via compose) and applies schemas.
 
 **Example:**
 ```bash
-./scripts/start-clean.sh
-SCHEMA_SET=all ./scripts/start-clean.sh
+bash test-data/scripts/start-clean.sh
+SCHEMA_SET=all bash test-data/scripts/start-clean.sh
 ```
 
 ### export.sh

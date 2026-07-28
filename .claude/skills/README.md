@@ -96,13 +96,21 @@ plus general-purpose Rust guidance.
 - `validation-checklist.md` - Complete pre-push checklist
 - `merge-process.md` - PR merge workflow
 
-**Validation Commands:**
+**Validation Commands:** `scripts/agent-gate.sh` is the gate of record (issue #719) — ad-hoc
+`cargo` runs never count. Always redirect stdout to a log and read only the summary file
+(issues #1175/#2079):
+
 ```bash
-cargo fmt --all
-cargo clippy --package cqlite-core --lib --all-features -- -D warnings
-cargo test --package cqlite-core --lib --all-features
-./scripts/ci/validate-cleanup.sh
+# Every fix round (fast)
+AGENT_GATE_SUMMARY_FILE=/tmp/gate-lite.txt bash scripts/agent-gate.sh --lite > gate-lite.log 2>&1 < /dev/null
+cat /tmp/gate-lite.txt
+
+# Once per issue, immediately pre-merge (the run that counts)
+AGENT_GATE_SUMMARY_FILE=/tmp/gate-summary.txt bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
+cat /tmp/gate-summary.txt
 ```
+
+`bash scripts/agent-gate.sh --list` prints the current component set.
 
 ---
 
