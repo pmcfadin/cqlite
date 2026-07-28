@@ -1,0 +1,6 @@
+threads=1 cpus=0  -> READ    10.73 GB/s(1e9)      9.99 GiB/s  best 0.200124 s  guard 0
+threads=2 cpus=0,1  -> READ    21.24 GB/s(1e9)     19.78 GiB/s  best 0.101113 s  guard 0
+threads=4 cpus=0,1,2,3  -> READ    41.78 GB/s(1e9)     38.91 GiB/s  best 0.051398 s  guard 0
+threads=8 cpus=0,1,2,3,4,5,6,7  -> READ    81.16 GB/s(1e9)     75.58 GiB/s  best 0.026461 s  guard 0
+--- 16 logical (SMT) ---
+READ    94.20 GB/s(1e9)     87.74 GiB/s  best 0.022796 s  guard 0

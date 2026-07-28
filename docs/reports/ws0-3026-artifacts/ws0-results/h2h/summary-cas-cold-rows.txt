@@ -1,0 +1,28 @@
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-cold-rows",
+ "temp": "cold",
+ "surface": "native-cql/rows",
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 49.3408409270005,
+ "rows_per_sec_wall": 81066.51457193069,
+ "daemon_cpu_secs": 34.35,
+ "rows_per_daemon_cpu_sec": 116445.12372634643,
+ "uncompressed_MB_per_s": 56.15477464397638,
+ "compressed_MB_per_s": 15.885794195515537,
+ "cycles": 70646552163,
+ "instructions": 224230517119,
+ "cycles_per_row": 17662.123749153103,
+ "instructions_per_row": 56059.17090694994,
+ "IPC": 3.173976793681902,
+ "l2_lines_in_all": 1123371200,
+ "mem_traffic_in_bytes_per_row": 17974.433496921167,
+ "l2_evict_bytes_per_row": 16411.87124645928,
+ "daemon_io_delta": {
+  "rchar": 1059589053,
+  "read_bytes": 784068608,
+  "syscr": 4081
+ }
+}

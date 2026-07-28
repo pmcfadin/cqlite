@@ -1,0 +1,6 @@
+# started on Mon Jul 27 20:17:14 2026
+
+85023414,,cycles,5030299705,100.00,,
+59270184,,instructions,5006236583,100.00,0.70,insn per cycle
+921846,,l2_lines_in.all,5006200242,100.00,,
+1586374,,l2_lines_out.non_silent,5006175979,100.00,,

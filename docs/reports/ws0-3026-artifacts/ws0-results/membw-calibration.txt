@@ -1,0 +1,130 @@
+=== WS0 memory-traffic proxy calibration (re-measured, retained) ===
+2026-07-28T00:38:43+00:00
+host: ip-172-31-34-181  kernel: 6.17.0-1019-aws  vCPU: 16
+loadavg at start: 0.35 0.24 0.28  -- box otherwise idle, Cassandra stopped
+perf_event_paranoid: -1
+Model name: Intel(R) Xeon(R) Platinum 8488C
+L2 cache: 16 MiB (8 instances)
+L3 cache: 105 MiB (1 instance)
+
+-- rebuild --
+built OK: /home/ubuntu/ws0/ws0-cqlite/membw_cal  (gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0)
+
+METHOD
+  taskset -c 2 perf stat -e l2_lines_in.all -- membw_cal <buf_mib> <passes>
+  proxy_bytes    = l2_lines_in.all * 64
+  bytes_touched  = buf * passes            (printed by the kernel; the read stride is
+                                            8 x u64 = exactly one 64 B line per iteration)
+  Analytic DRAM ground truth per working set (no IMC counters exist in this VM):
+    512 MiB (4.9x the 105 MiB L3) -> every pass must miss L3, so DRAM bytes == bytes_touched
+    32  MiB (< L3, > L2)          -> buffer stays L3-resident, DRAM bytes ~= one fill (32 MiB)
+    1   MiB (< the 2 MiB/core L2) -> buffer stays L2-resident, so L2 fills ~= 0
+
+  PASS-COUNT SENSITIVITY (why `passes` must be large):
+  membw_cal memsets the buffer before starting its own timer, but perf counts the
+  whole process, so one extra buffer-fill of l2_lines_in is always included and
+  amortizes as ~1/passes. Measured at 512 MiB:
+      passes=8   -> +15.5%      passes=32  -> +4.4%
+      passes=128 -> +1.6%       passes=340 -> +1.1%
+  The calibration point below therefore uses passes=340 at all three sizes.
+
+=== CALIBRATION POINT: passes=340, three working-set sizes, 3 replicates ===
+
+---- buf=512MiB passes=340 rep=1 ----
+ground_truth_bytes_touched=182536110080 (170.00 GiB) sec=17.3142 GB/s=10.54 sink=12297829382461849600
+57997157476,,cycles,17550289583,100.00,,
+12075193786,,instructions,17550289583,100.00,0.21,insn per cycle
+2883012912,,l2_lines_in.all,17550289583,100.00,,
+2854000095,,l2_lines_out.non_silent,17550289583,100.00,,
+
+---- buf=32MiB passes=340 rep=1 ----
+ground_truth_bytes_touched=11408506880 (10.62 GiB) sec=0.3606 GB/s=31.64 sink=12297829382472335360
+1235634309,,cycles,375250551,100.00,,
+749570251,,instructions,375250551,100.00,0.61,insn per cycle
+179584267,,l2_lines_in.all,375250551,100.00,,
+178993656,,l2_lines_out.non_silent,375250551,100.00,,
+
+---- buf=1MiB passes=340 rep=1 ----
+ground_truth_bytes_touched=356515840 (0.33 GiB) sec=0.0023 GB/s=158.34 sink=6148914691236495360
+9100736,,cycles,3375411,100.00,,
+24068628,,instructions,3375411,100.00,2.64,insn per cycle
+36550,,l2_lines_in.all,3375411,100.00,,
+25538,,l2_lines_out.non_silent,3375411,100.00,,
+
+---- buf=512MiB passes=340 rep=2 ----
+ground_truth_bytes_touched=182536110080 (170.00 GiB) sec=17.3476 GB/s=10.52 sink=12297829382461849600
+58070031763,,cycles,17562003551,100.00,,
+12071382333,,instructions,17562003551,100.00,0.21,insn per cycle
+2882928287,,l2_lines_in.all,17562003551,100.00,,
+2855779910,,l2_lines_out.non_silent,17562003551,100.00,,
+
+---- buf=32MiB passes=340 rep=2 ----
+ground_truth_bytes_touched=11408506880 (10.62 GiB) sec=0.3552 GB/s=32.12 sink=12297829382472335360
+1214619774,,cycles,369652697,100.00,,
+749516186,,instructions,369652697,100.00,0.62,insn per cycle
+179565412,,l2_lines_in.all,369652697,100.00,,
+178978484,,l2_lines_out.non_silent,369652697,100.00,,
+
+---- buf=1MiB passes=340 rep=2 ----
+ground_truth_bytes_touched=356515840 (0.33 GiB) sec=0.0021 GB/s=171.72 sink=6148914691236495360
+9091959,,cycles,3233114,100.00,,
+24063545,,instructions,3233114,100.00,2.65,insn per cycle
+35715,,l2_lines_in.all,3233114,100.00,,
+23911,,l2_lines_out.non_silent,3233114,100.00,,
+
+---- buf=512MiB passes=340 rep=3 ----
+ground_truth_bytes_touched=182536110080 (170.00 GiB) sec=17.3681 GB/s=10.51 sink=12297829382461849600
+58013263933,,cycles,17581676970,100.00,,
+12072046816,,instructions,17581676970,100.00,0.21,insn per cycle
+2883079772,,l2_lines_in.all,17581676970,100.00,,
+2856151753,,l2_lines_out.non_silent,17581676970,100.00,,
+
+---- buf=32MiB passes=340 rep=3 ----
+ground_truth_bytes_touched=11408506880 (10.62 GiB) sec=0.3559 GB/s=32.05 sink=12297829382472335360
+1220010731,,cycles,370460702,100.00,,
+750146655,,instructions,370460702,100.00,0.61,insn per cycle
+179577123,,l2_lines_in.all,370460702,100.00,,
+178977115,,l2_lines_out.non_silent,370460702,100.00,,
+
+---- buf=1MiB passes=340 rep=3 ----
+ground_truth_bytes_touched=356515840 (0.33 GiB) sec=0.0023 GB/s=157.65 sink=6148914691236495360
+9247372,,cycles,3393699,100.00,,
+24062150,,instructions,3393699,100.00,2.60,insn per cycle
+36516,,l2_lines_in.all,3393699,100.00,,
+24621,,l2_lines_out.non_silent,3393699,100.00,,
+
+=== PASS-COUNT SWEEP at 512 MiB (memset-amortization evidence) ===
+
+---- buf=512MiB passes=8 ----
+ground_truth_bytes_touched=4294967296 (4.00 GiB) sec=0.3994 GB/s=10.75 sink=289360691352043520
+77553536,,l2_lines_in.all,612961283,100.00,,
+
+---- buf=512MiB passes=32 ----
+ground_truth_bytes_touched=17179869184 (16.00 GiB) sec=1.5917 GB/s=10.79 sink=1157442765408174080
+280275282,,l2_lines_in.all,1802061807,100.00,,
+
+---- buf=512MiB passes=128 ----
+ground_truth_bytes_touched=68719476736 (64.00 GiB) sec=6.3476 GB/s=10.83 sink=4629771061632696320
+1091132729,,l2_lines_in.all,6556787676,100.00,,
+
+---- buf=512MiB passes=340 ----
+ground_truth_bytes_touched=182536110080 (170.00 GiB) sec=16.9336 GB/s=10.78 sink=12297829382461849600
+2881910414,,l2_lines_in.all,17144205482,100.00,,
+
+loadavg at end: 0.86 0.43 0.34
+=== end ===
+
+=== COMPUTED RESULT (medians of the 3 replicates at passes=340) ===
+
+ buf     l2_lines_in.all   proxy = x64 (B)      bytes_touched (B)   proxy/touched   analytic DRAM (B)   proxy/DRAM
+ 512MiB    2,883,012,912    184,512,826,368     182,536,110,080     +1.08%          182,536,110,080     1.0x
+  32MiB      179,577,123     11,492,935,872      11,408,506,880     +0.74%               33,554,432   342.5x
+   1MiB           36,516          2,337,024         356,515,840     -99.34% (~0)          1,048,576     2.2x
+
+CONCLUSION (unchanged from the original, now backed by retained output):
+  `l2_lines_in.all x 64` equals DRAM traffic to within +1.1% ONLY when the working set
+  exceeds L3 (512 MiB case). At 32 MiB it overstates DRAM traffic by ~342x (it measures
+  L3->L2 refill, not DRAM). At 1 MiB it collapses to ~0 (0.7% of bytes touched) because
+  the buffer never leaves L2. Any per-row traffic figure taken with this proxy is
+  therefore valid as DRAM traffic only on a >L3 working set, and is an UPPER BOUND
+  elsewhere.

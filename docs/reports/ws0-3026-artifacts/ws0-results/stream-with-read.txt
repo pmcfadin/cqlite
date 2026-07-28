@@ -1,0 +1,44 @@
+===== 1T pinned physical cores 0 (incl. pure-Read kernel) =====
+# ws0-stream  threads=1  array=512 MiB each (3 arrays, 1.50 GiB total)  n=67108864  ntimes=12
+# L3 on this box = 105 MiB; per-array footprint is 4.9x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            12.66        11.79     0.084842
+Scale           12.57        11.71     0.085387
+Add             13.22        12.32     0.121798
+Triad           13.21        12.31     0.121900
+Read             7.45         6.93     0.072108
+# checksum 1.845858e+16 sink 8.707129e+21
+
+===== 2T pinned physical cores 0,1 (incl. pure-Read kernel) =====
+# ws0-stream  threads=2  array=512 MiB each (3 arrays, 1.50 GiB total)  n=67108864  ntimes=12
+# L3 on this box = 105 MiB; per-array footprint is 4.9x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            24.55        22.87     0.043733
+Scale           24.34        22.67     0.044114
+Add             25.77        24.00     0.062502
+Triad           25.73        23.96     0.062608
+Read            14.73        13.72     0.036443
+# checksum 1.845858e+16 sink 8.707129e+21
+
+===== 4T pinned physical cores 0,1,2,3 (incl. pure-Read kernel) =====
+# ws0-stream  threads=4  array=512 MiB each (3 arrays, 1.50 GiB total)  n=67108864  ntimes=12
+# L3 on this box = 105 MiB; per-array footprint is 4.9x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            45.77        42.63     0.023458
+Scale           45.98        42.83     0.023350
+Add             48.98        45.61     0.032885
+Triad           49.07        45.70     0.032820
+Read            28.81        26.83     0.018638
+# checksum 1.845858e+16 sink 8.707129e+21
+
+===== 8T pinned physical cores 0,1,2,3,4,5,6,7 (incl. pure-Read kernel) =====
+# ws0-stream  threads=8  array=512 MiB each (3 arrays, 1.50 GiB total)  n=67108864  ntimes=12
+# L3 on this box = 105 MiB; per-array footprint is 4.9x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            78.76        73.35     0.013633
+Scale           77.02        71.73     0.013941
+Add             85.92        80.01     0.018747
+Triad           85.22        79.37     0.018899
+Read            56.61        52.72     0.009484
+# checksum 1.845858e+16 sink 8.707129e+21
+

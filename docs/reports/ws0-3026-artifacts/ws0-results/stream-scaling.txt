@@ -1,0 +1,59 @@
+===== 1 THREAD(S)  pinned to distinct PHYSICAL cores: 0 =====
+# ws0-stream  threads=1  array=512 MiB each (3 arrays, 1.50 GiB total)  n=67108864  ntimes=12
+# L3 on this box = 105 MiB; per-array footprint is 4.9x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            12.72        11.84     0.084446
+Scale           12.48        11.63     0.086007
+Add             13.16        12.25     0.122414
+Triad           12.99        12.10     0.123971
+# checksum 1.845858e+16
+
+===== 2 THREAD(S)  pinned to distinct PHYSICAL cores: 0,1 =====
+# ws0-stream  threads=2  array=512 MiB each (3 arrays, 1.50 GiB total)  n=67108864  ntimes=12
+# L3 on this box = 105 MiB; per-array footprint is 4.9x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            24.62        22.93     0.043609
+Scale           24.50        22.82     0.043820
+Add             25.73        23.96     0.062609
+Triad           25.71        23.95     0.062641
+# checksum 1.845858e+16
+
+===== 4 THREAD(S)  pinned to distinct PHYSICAL cores: 0,1,2,3 =====
+# ws0-stream  threads=4  array=512 MiB each (3 arrays, 1.50 GiB total)  n=67108864  ntimes=12
+# L3 on this box = 105 MiB; per-array footprint is 4.9x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            46.94        43.72     0.022875
+Scale           46.63        43.43     0.023026
+Add             49.87        46.44     0.032296
+Triad           49.75        46.33     0.032374
+# checksum 1.845858e+16
+
+===== 6 THREAD(S)  pinned to distinct PHYSICAL cores: 0,1,2,3,4,5 =====
+# ws0-stream  threads=6  array=512 MiB each (3 arrays, 1.50 GiB total)  n=67108864  ntimes=12
+# L3 on this box = 105 MiB; per-array footprint is 4.9x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            65.26        60.78     0.016453
+Scale           65.09        60.62     0.016497
+Add             69.69        64.90     0.023112
+Triad           70.28        65.46     0.022915
+# checksum 1.845858e+16
+
+===== 8 THREAD(S)  pinned to distinct PHYSICAL cores: 0,1,2,3,4,5,6,7 =====
+# ws0-stream  threads=8  array=512 MiB each (3 arrays, 1.50 GiB total)  n=67108864  ntimes=12
+# L3 on this box = 105 MiB; per-array footprint is 4.9x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            79.39        73.94     0.013525
+Scale           78.95        73.53     0.013600
+Add             87.70        81.68     0.018365
+Triad           86.76        80.80     0.018564
+# checksum 1.845858e+16
+
+===== 16 THREADS (all 16 LOGICAL = SMT siblings included, 8 physical) =====
+# ws0-stream  threads=16  array=512 MiB each (3 arrays, 1.50 GiB total)  n=67108864  ntimes=12
+# L3 on this box = 105 MiB; per-array footprint is 4.9x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            83.63        77.88     0.012839
+Scale           81.93        76.30     0.013106
+Add             88.67        82.58     0.018165
+Triad           88.99        82.88     0.018099
+# checksum 1.845858e+16

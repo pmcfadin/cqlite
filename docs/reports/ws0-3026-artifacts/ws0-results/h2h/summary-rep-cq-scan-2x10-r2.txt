@@ -1,0 +1,30 @@
+{
+ "engine": "cqlite",
+ "label": "rep-cq-scan-2x10-r2",
+ "temp": "warm",
+ "surface": "scan",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "rows": 3999890,
+ "digest": "0xd1fba762150c532c",
+ "scan_secs": 10.876366244,
+ "rows_per_sec": 367759.77475074073,
+ "uncompressed_MB_per_s": 254.74719596983812,
+ "compressed_MB_per_s": 72.06620546015516,
+ "arrow_payload_bytes": 0,
+ "cycles": 70438361780,
+ "instructions": 110385648057,
+ "cycles_per_row": 17610.07472205486,
+ "instructions_per_row": 27597.17093645075,
+ "IPC": 1.5671240112279625,
+ "l2_lines_in_all": 120824102,
+ "mem_traffic_in_bytes_per_row": 1933.2387960668918,
+ "l2_evict_bytes_per_row": 1734.7092725049938,
+ "peak_rss_kib": 1041824,
+ "proc_io_delta": {
+  "rchar": 3084245,
+  "read_bytes": 0,
+  "syscr": 115
+ },
+ "cycles_per_row_WARNING": "counted across 2 SMT siblings; wall cycles are double-counted. Use the -c 2 run for cycles/row and IPC."
+}

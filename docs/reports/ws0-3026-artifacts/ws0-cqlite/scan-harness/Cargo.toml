@@ -1,0 +1,27 @@
+# Throwaway scan-throughput harness for issue #3026 WS0.
+# Lives OUTSIDE the cqlite repo on purpose (the wt-3026 worktree stays git-clean).
+# Depends on cqlite-core by path with `cli-helpers` (public `ingestion::ingest`)
+# and `arrow` (public `export::rows_to_record_batch`) so it can time BOTH the
+# bare core scan and the scan+Arrow-encode leg in one process.
+[package]
+name = "ws0-scan-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cqlite-core = { path = "/home/ubuntu/workspace/wt-3026/cqlite-core", features = ["cli-helpers", "arrow"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+clap = { version = "4.4", features = ["derive", "env"] }
+arrow = { version = "53", default-features = false, features = ["ipc"] }
+serde_json = "1"
+
+# Mirror the repo's release profile EXACTLY (lto=fat, codegen-units=1,
+# panic=abort) so the harness measures the same codegen the shipped binaries
+# get — but unstripped with debug info for `perf record --call-graph=dwarf`.
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = "none"
+debug = true
