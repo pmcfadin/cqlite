@@ -141,12 +141,22 @@ bash test-data/scripts/shutdown-clean.sh
 | `oa-test.cql` | test_oa | 6 | oa format: simple types, collections, UDT, TTL, static, tombstones |
 | `da-test.cql` | test_da | 3 | da/BTI format: simple types, collections, TTL |
 
+The table counts above describe what these schemas create; they are **not** the coverage
+contract. Enforced scope (which keyspaces run vs are skip-pending) lives in
+`test-data/corpus-coverage-policy.md` + `test-data/validation-matrix.md`, and both the smoke
+script and the binding parity suites enumerate the corpus **from disk** per run (#1229) — a
+newly-committed keyspace is automatically in scope. Never assert a hard-coded table total.
+`test-data/schemas/` also holds parity fixtures not listed here (compaction, tombstone,
+compression, write-load, deltas, cql-type).
+
 ## CI integration
 
-CI fetches binary SSTables from the `datasets-v3` GitHub release:
+CI fetches the binary SSTables from the pinned GitHub dataset release. The script carries the
+pin (tag + asset + sha256) — read it there, don't transcribe it:
 
 ```bash
 bash test-data/scripts/fetch-datasets.sh
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
 ```
 
 See `.github/workflows/` for the full CI configuration.

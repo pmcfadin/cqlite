@@ -261,7 +261,7 @@ Skills are stored in `.claude/skills/` and committed to git:
 ```bash
 # Add skills to git
 git add .claude/skills/
-git commit -m "feat: add Claude Code skills for M1-M6"
+git commit -m "feat: add Claude Code skills for M1-M7"
 git push origin main
 ```
 
