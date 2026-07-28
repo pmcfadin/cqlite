@@ -4,13 +4,20 @@ Complete guide to generating the CQLite test corpus (datasets-v3: nb + oa + da).
 
 ## Current corpus: datasets-v3
 
-Three SSTable version/format tiers produced by Cassandra 5.0.2:
+Three SSTable version/format tiers produced by Cassandra 5.0.2 by
+`regenerate-datasets.sh`:
 
-| Tier | Version | Format | Keyspaces | Tables |
-|------|---------|--------|-----------|--------|
-| Primary | `nb` | `big` | test_basic, test_collections, test_timeseries, test_wide_rows | 33 |
-| OA extended | `oa` | `big` | test_oa | 6 |
-| BTI extended | `da` | `bti` | test_da | 3 |
+| Tier | Version | Format | Keyspaces |
+|------|---------|--------|-----------|
+| Primary | `nb` | `big` | test_basic, test_collections, test_timeseries, test_wide_rows |
+| OA extended | `oa` | `big` | test_oa |
+| BTI extended | `da` | `bti` | test_da |
+
+> This is what **this script** regenerates, not the full enforced corpus — other keyspaces
+> (e.g. `test_big`, `test_comp`) come from their own `generate-*.sh` fixture scripts and are
+> also enforced. The authoritative, disk-derived scope is
+> `test-data/validation-matrix.md` + `test-data/corpus-coverage-policy.md`; counts are
+> re-derived per run (#1229), never hard-coded.
 
 Golden JSONL files (sstabledump output) are committed alongside each table's
 binary SSTables.
