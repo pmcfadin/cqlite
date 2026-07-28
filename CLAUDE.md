@@ -110,6 +110,18 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   a **just-launched or still-queued** gate as its gate of record — a verdict that does not exist.
   Anchor every poll (agents, skills, docs, helper scripts) on `PASS|FAIL`; a sentinel-only summary
   means "still running, died, or queued", never certified.
+- **A markdown/docs-only diff cannot change the compiled binary — so a test failure in its full gate
+  is BY DEFINITION pre-existing on `main` or a flake, and the correct response is CITE-AND-WAIVE
+  (#3042).** If your diff touches no compiled input (no `src`, no `Cargo.*`, no build script, no
+  workflow, no test-data), it cannot have caused a test to fail. **NEVER patch source to turn such a
+  gate green** — that is a real change smuggled in under a docs diff, certified by nothing, and it
+  masks the actual main-red. Instead: (1) confirm the diff really is non-compiling-input
+  (`git diff --stat origin/main...HEAD`); (2) identify the failure as a known main-red issue or a
+  known flake — reproduce it on a clean `origin/main` checkout if it is not already filed, and FILE it
+  if it is not; (3) record the waiver in the PR body naming the failing component and the issue number
+  it belongs to. A waiver with no cited issue is not a waiver — it is an unexplained red. Conversely,
+  if ANY compiled input is in the diff the waiver is void: the failure is presumed yours until proven
+  otherwise.
 - Defaults if `AGENT_GATE_SUMMARY_FILE` unset (per-checkout; give concurrent gates in ONE checkout
   unique paths): `.agent-gate-summary.txt` / `.agent-gate-lite-summary.txt` / `.agent-gate-delta-summary.txt`.
   **Nested exception (#2874):** a gate started with `AGENT_GATE_PARENT_RUN_ID` in its env (i.e. spawned
@@ -229,6 +241,22 @@ by responsibility (source: epic #1116; tests: #1135). Genuinely out of scope →
   `cqlite-core/tests/point_vs_full_differential.rs`): it runs the same point-eligible query under
   forced `CQLITE_READ_PATH=point` and `=full` and asserts identical rows/values/order at a PINNED
   `now` — catching a divergence between the two read paths that a physical dump cannot see.
+- **Third blind spot: a CQLite-WRITTEN + CQLite-READ round-trip test is INVARIANT to a uniform
+  framing/serialization error (issue #3042).** Both sides make the *identical* mistake, so the
+  round-trip closes and the test stays green while real Cassandra-written data reads wrong — and,
+  symmetrically, CQLite-written data is unreadable by Cassandra. Such a test can **never** substitute
+  for a Cassandra-written fixture; it validates self-consistency, which is not the property anyone
+  cares about. Concrete instance: the only arity-2 BTI test,
+  `cqlite-core/tests/issue_908_bti_canonical_write.rs`, is CQLite-written and CQLite-read and asserts
+  only ordering/structure, so it is invariant to exactly the framing defect of **#3002 (BTI `Rows.db`
+  row-index root base 2 bytes low — missing the `writeWithShortLength` 2-byte prefix, masked by a
+  compensating encoder defect that omitted the leading `0x40 NEXT_COMPONENT`)**. Two defects that
+  cancel are undetectable by a symmetric test *by construction*. The oracle that caught it is
+  `cqlite-core/tests/issue_3002_bti_rows_root_base.rs`, asserting against the real Cassandra 5.0 `da`
+  fixture with every expectation derived from Cassandra's writer/reader source — never from CQLite's
+  prior behavior. Rule: for any on-disk framing/encoding property, the oracle must be
+  **Cassandra-written bytes** (or Cassandra source), never CQLite's own output. Long form:
+  [validation playbook](https://pmcfadin.github.io/cqlite/agents-developing/validation-playbook/).
 
 ### Fuzzing (issue #1614)
 `fuzz/` is a cargo-fuzz/libFuzzer crate in its own workspace, excluded from the main one — the gate
