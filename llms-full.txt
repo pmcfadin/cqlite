@@ -1687,6 +1687,27 @@ env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 
 The `CQLITE_READ_PATH` knob is a **test/debug** control (not a perf recommendation); `point` fails closed rather than silently full-scanning. See the CLI reference for the user-facing knob docs.
 
+### The self-round-trip blind spot (CQLite-written + CQLite-read, issue #3042)
+
+[Section titled “The self-round-trip blind spot (CQLite-written + CQLite-read, issue #3042)”](#the-self-round-trip-blind-spot-cqlite-written--cqlite-read-issue-3042)
+
+Both lanes above compare CQLite against an *external* oracle or against its own two read paths. A third class of test compares CQLite only to itself in a single direction — write with CQLite, read back with CQLite, assert the values survived — and it carries a blind spot severe enough to name explicitly:
+
+> **A CQLite-written + CQLite-read round-trip test is INVARIANT to a uniform framing/serialization error.**
+
+The writer and the reader share the same encoding assumption. If that assumption is wrong, *both sides make the identical mistake*, the round-trip still closes, and the test is green — while real Cassandra-written data reads wrong, and CQLite-written data is unreadable by Cassandra. The test validates **self-consistency**, which is not the property that matters. It therefore can **never** substitute for a Cassandra-written fixture on any on-disk framing or encoding property.
+
+**The concrete instance (issue #3002).** The only arity-2 BTI test, `cqlite-core/tests/issue_908_bti_canonical_write.rs`, is CQLite-written and CQLite-read and asserts only ordering/structure. It stayed green across a defect pair that cancelled:
+
+1. `resolve_rows_db_entry` computed the signed root-delta base as `RowsOffset + key_length` — **2 bytes low**, because Cassandra 5.0 captures `basePosition` *after* `writeWithShortLength`, i.e. `RowsOffset + 2 + key_length`.
+2. The OSS50 clustering-bound encoders emitted the `0x40 NEXT_COMPONENT` byte only *between* components, while `ClusteringComparator.ByteComparableClustering` emits it before **each** component including the first.
+
+The 2-low root pointed at exactly the subtree the un-prefixed bounds were keyed for, so the two errors masked each other perfectly. Fixing *either alone* regresses BTI clustering reads — which is precisely why a symmetric test cannot see the pair. It is also why the fixture matters independently: the wrong root landed on the root’s only child only because that fixture’s child node happened to be 2 bytes wide (see the fixture-must-vary rule in `.claude/skills/test-data-management/SKILL.md`).
+
+**What caught it:** `cqlite-core/tests/issue_3002_bti_rows_root_base.rs`, pinned against the real Cassandra 5.0 `da` fixture (`test_da/wide_table`), with every expectation derived from Cassandra’s own writer/reader source — never from CQLite’s prior behavior. That last clause is the load-bearing one: an expectation reverse-engineered from current CQLite output re-encodes the bug as the specification.
+
+**Rule.** For any on-disk framing/encoding property, the oracle must be **Cassandra-written bytes or Cassandra source**, never CQLite’s own output. A round-trip test is a useful regression net for internal invariants; it is not parity evidence.
+
 ## Golden JSONL files
 
 [Section titled “Golden JSONL files”](#golden-jsonl-files)
