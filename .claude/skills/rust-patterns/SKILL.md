@@ -327,14 +327,17 @@ cargo instruments -t Allocations --bin cqlite -- parse large-file.db
 - Memory target: <128MB for large files
 - Type-safe parsing
 
-**Supports Milestone M6** (Performance Validation):
+**Supports Milestone M7** (Performance Validation + v1.0):
 - Parse 1GB files in <10 seconds
 - Sub-millisecond partition lookups
 
 ## Common Patterns from Codebase
 
-See [zero-copy-patterns.md](zero-copy-patterns.md) for patterns extracted from:
-- `v5_compressed_legacy.rs` (1997 lines)
+See [zero-copy-patterns.md](zero-copy-patterns.md) for patterns extracted from the row-decode
+path. Read the current code rather than trusting a transcribed listing — the module set moves:
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/` — row/cell decode (`row_framing.rs`,
+  `cell_value*.rs`, `partition_driver.rs`, …)
+- `cqlite-core/src/storage/sstable/reader/parsing/value_parsing.rs` — typed value decode
 - Bytes usage
 - Async decompression
 - Buffer management

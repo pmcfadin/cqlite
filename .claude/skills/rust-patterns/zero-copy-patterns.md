@@ -4,7 +4,7 @@ These patterns are extracted from real code in `cqlite-core/src/storage/sstable/
 
 ## Pattern 1: Bytes for Buffer Sharing
 
-### From v5_compressed_legacy.rs
+### From the row-decode path (`parsing/row_decoder/`)
 ```rust
 use bytes::Bytes;
 
@@ -291,8 +291,13 @@ impl<'a> RowParser<'a> {
 
 ## Performance Impact
 
-### Measured Improvements
-From v5_compressed_legacy.rs refactoring:
+### Illustrative Improvements
+
+> These figures are ILLUSTRATIVE of the copying-vs-zero-copy shape, not a measurement of current
+> `main`. Do not quote them as CQLite performance claims. For real numbers run the committed
+> benches (`cqlite-core/benches/read.rs`, `decode_bench.rs`, `m1_performance.rs`,
+> `tail_latency.rs`) and read the gate budgets in `cqlite-core/benches/perf-gate.json` /
+> `tail-latency-gate.json`.
 
 **Before (copying):**
 - Parse 1GB SSTable: ~45 seconds

@@ -145,7 +145,7 @@ These crates support:
 - **M1:** Zero-copy reading (bytes, tokio)
 - **M3:** Output formats (serde + format crates)
 - **M4:** Language bindings (async patterns)
-- **M6:** Performance targets (efficient I/O)
+- **M7:** Performance targets (efficient I/O)
 
 ## Example Workflow
 
