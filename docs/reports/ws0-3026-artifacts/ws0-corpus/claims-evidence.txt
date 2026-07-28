@@ -1,0 +1,223 @@
+daemon RSS (KB)       : 9114192
+daemon pid            : 10168
+kernel                : 6.17.0-1019-aws
+max_hw_sectors_kb     : 256
+max_sectors_kb        : 256
+read_ahead_kb         : 128
+
+================ CLAIM A: file_cache_enabled / ChunkCache ================
+--- evidence A1: system_views.settings on the LIVE node ---
+--- SELECT name, value FROM system_views.settings WHERE name IN  ('file_cache_enabled','file_cache_size','file_cache_round_up','disk_access_mode',   'buffer_pool_us
+name	value
+buffer_pool_use_heap_if_exhausted	false
+disk_access_mode	standard
+file_cache_enabled	false
+file_cache_round_up	false
+file_cache_size	512MiB
+
+--- evidence A2: nodetool info cache lines (Info.java prints a 'Chunk Cache' line
+    ONLY if the Cache/ChunkCache MBean is registered; it swallows
+    InstanceNotFoundException, so absence == chunk cache not instantiated) ---
+Key Cache              : entries 889, size 75.78 KiB, capacity 100 MiB, 459 hits, 1204 requests, 0.381 recent hit rate, 14400 save period in seconds
+Row Cache              : entries 0, size 0 bytes, capacity 0 bytes, 0 hits, 0 requests, NaN recent hit rate, 0 save period in seconds
+Counter Cache          : entries 0, size 0 bytes, capacity 50 MiB, 0 hits, 0 requests, NaN recent hit rate, 7200 save period in seconds
+Network Cache          : size 8 MiB, overflow size: 0 bytes, capacity 128 MiB
+A2 VERDICT: 'Chunk Cache' line ABSENT -> chunk cache MBean not registered -> OFF
+
+--- evidence A3: ChunkCache metric MBeans registered in the live JVM ---
+ChunkCache MBean name occurrences: 0
+(sjk mxdump unavailable)
+
+--- evidence A4: startup Config dump ---
+file_cache_enabled=false
+compressed_read_ahead_buffer_size=256KiB
+INFO  [main] 2026-07-27T18:20:39,298 DatabaseDescriptor.java:551 - DiskAccessMode is standard, indexAccessMode is mmap
+INFO  [SSTableBatchOpen:1] 2026-07-27T18:20:41,859 BufferPools.java:49 - Global buffer pool limit is 512.000MiB for chunk-cache and 128.000MiB for networking
+
+================ CLAIM B: read sizes during a COLD full scan =============
+--- /proc/10168/io BEFORE (raw counters, reported separately; NEVER divided) ---
+rchar: 4354687657
+wchar: 3045905390
+syscr: 389394
+syscw: 1771342
+read_bytes: 1300094976
+write_bytes: 7016378368
+
+--- dropping page cache ---
+Mem:            30Gi       9.7Gi        21Gi       3.0Mi       320Mi        21Gi
+
+--- starting bpftrace (syscall + block level) ---
+--- running cold full scan ---
+SCAN ranges           : 512
+SCAN rows counted     : 3999890
+SCAN wall seconds     : 13.854
+SCAN rows/s           : 288,725
+SCAN uncompressed MB/s: 200.0  (at measured 692.70 B/row)
+SCAN compressed  MB/s : 56.6  (at measured 195.96 B/row)
+
+--- stopping bpftrace ---
+  Attaching 7 probes...
+  TRACING pid=10168 (syscall + block). Ctrl-C to dump.
+  TRACE DONE
+  
+  
+  @dev_bytes_by_rwbs[R]: 4096
+  @dev_bytes_by_rwbs[WSM]: 69632
+  @dev_bytes_by_rwbs[RM]: 679936
+  @dev_bytes_by_rwbs[RA]: 810422272
+  @dev_hist_by_rwbs[R]: 
+  [4K, 8K)               1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+  
+  @dev_hist_by_rwbs[WSM]: 
+  [4K, 8K)               2 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+  [8K, 16K)              0 |                                                    |
+  [16K, 32K)             1 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+  [32K, 64K)             1 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+  
+  @dev_hist_by_rwbs[RM]: 
+  [4K, 8K)             166 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+  
+  @dev_hist_by_rwbs[RA]: 
+  [4K, 8K)             189 |@@@                                                 |
+  [8K, 16K)            153 |@@                                                  |
+  [16K, 32K)           143 |@@                                                  |
+  [32K, 64K)            81 |@                                                   |
+  [64K, 128K)          122 |@@                                                  |
+  [128K, 256K)          55 |                                                    |
+  [256K, 512K)        2989 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+  
+  @dev_n_by_rwbs[R]: 1
+  @dev_n_by_rwbs[WSM]: 4
+  @dev_n_by_rwbs[RM]: 166
+  @dev_n_by_rwbs[RA]: 3732
+  @dev_read_bytes: 811106304
+  @dev_read_hist: 
+  [4K, 8K)             356 |@@@@@@                                              |
+  [8K, 16K)            153 |@@                                                  |
+  [16K, 32K)           143 |@@                                                  |
+  [32K, 64K)            81 |@                                                   |
+  [64K, 128K)          122 |@@                                                  |
+  [128K, 256K)          55 |                                                    |
+  [256K, 512K)        2989 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+  
+  @dev_read_lhist_256k: 
+  [0, 16K)             509 |@@@@@@@@                                            |
+  [16K, 32K)           143 |@@                                                  |
+  [32K, 48K)            48 |                                                    |
+  [48K, 64K)            33 |                                                    |
+  [64K, 80K)            59 |@                                                   |
+  [80K, 96K)            18 |                                                    |
+  [96K, 112K)           18 |                                                    |
+  [112K, 128K)          27 |                                                    |
+  [128K, 144K)          53 |                                                    |
+  [144K, 160K)           1 |                                                    |
+  [160K, 176K)           0 |                                                    |
+  [176K, 192K)           0 |                                                    |
+  [192K, 208K)           0 |                                                    |
+  [208K, 224K)           0 |                                                    |
+  [224K, 240K)           0 |                                                    |
+  [240K, 256K)           1 |                                                    |
+  [256K, 272K)        2989 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+  
+  @dev_read_n: 3899
+  @pread_by_comm[ReadStage-9]: 1
+  @pread_by_comm[ReadStage-11]: 1
+  @pread_by_comm[ReadStage-17]: 3
+  @pread_by_comm[ReadStage-14]: 3
+  @pread_by_comm[ReadStage-16]: 3
+  @pread_by_comm[ReadStage-15]: 3
+  @pread_by_comm[ReadStage-13]: 3
+  @pread_by_comm[ReadStage-1]: 5
+  @pread_by_comm[ReadStage-12]: 1871
+  @pread_by_comm[ReadStage-6]: 2174
+  @pread_hist: 
+  [16, 32)              12 |                                                    |
+  [32, 64)               2 |                                                    |
+  [64, 128)              6 |                                                    |
+  [128, 256)             1 |                                                    |
+  [256, 512)             1 |                                                    |
+  [512, 1K)              1 |                                                    |
+  [1K, 2K)               0 |                                                    |
+  [2K, 4K)               1 |                                                    |
+  [4K, 8K)               0 |                                                    |
+  [8K, 16K)              1 |                                                    |
+  [16K, 32K)             0 |                                                    |
+  [32K, 64K)             0 |                                                    |
+  [64K, 128K)            0 |                                                    |
+  [128K, 256K)           1 |                                                    |
+  [256K, 512K)        4041 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+  
+  @pread_lhist_256k: 
+  [0, 16K)              25 |                                                    |
+  [16K, 32K)             0 |                                                    |
+  [32K, 48K)             0 |                                                    |
+  [48K, 64K)             0 |                                                    |
+  [64K, 80K)             0 |                                                    |
+  [80K, 96K)             0 |                                                    |
+  [96K, 112K)            0 |                                                    |
+  [112K, 128K)           0 |                                                    |
+  [128K, 144K)           0 |                                                    |
+  [144K, 160K)           0 |                                                    |
+  [160K, 176K)           0 |                                                    |
+  [176K, 192K)           0 |                                                    |
+  [192K, 208K)           0 |                                                    |
+  [208K, 224K)           0 |                                                    |
+  [224K, 240K)           0 |                                                    |
+  [240K, 256K)           1 |                                                    |
+  [256K, 272K)        4041 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+  
+  @pread_n: 4067
+  @pread_req_bytes: 1059588899
+  @pread_sz_by_comm[ReadStage-16, 73]: 1
+  @pread_sz_by_comm[ReadStage-15, 196]: 1
+  @pread_sz_by_comm[ReadStage-1, 120]: 1
+  @pread_sz_by_comm[ReadStage-14, 73]: 1
+  @pread_sz_by_comm[ReadStage-17, 73]: 1
+  @pread_sz_by_comm[ReadStage-13, 73]: 1
+  @pread_sz_by_comm[ReadStage-1, 298]: 1
+  @pread_sz_by_comm[ReadStage-12, 73]: 1
+  @pread_sz_by_comm[ReadStage-11, 3857]: 1
+  @pread_sz_by_comm[ReadStage-6, 250787]: 1
+  @pread_sz_by_comm[ReadStage-1, 719]: 1
+  @pread_sz_by_comm[ReadStage-9, 8215]: 1
+  @pread_sz_by_comm[ReadStage-12, 28]: 2
+  @pread_sz_by_comm[ReadStage-1, 51]: 2
+  @pread_sz_by_comm[ReadStage-14, 28]: 2
+  @pread_sz_by_comm[ReadStage-13, 28]: 2
+  @pread_sz_by_comm[ReadStage-16, 28]: 2
+  @pread_sz_by_comm[ReadStage-15, 28]: 2
+  @pread_sz_by_comm[ReadStage-17, 28]: 2
+  @pread_sz_by_comm[ReadStage-12, 262144]: 1868
+  @pread_sz_by_comm[ReadStage-6, 262144]: 2173
+  @read_hist: 
+  [4K, 8K)               8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+  
+  @read_n: 8
+  @read_req_bytes: 32768
+  @readv_n: 0
+
+--- /proc/10168/io AFTER (raw counters) ---
+rchar: 5414276644
+wchar: 3046963993
+syscr: 393469
+syscw: 1777142
+read_bytes: 2084020224
+write_bytes: 7017435136
+
+--- /proc/10168/io DELTA over the scan (each counter separately; NOT divided) ---
+  delta rchar       = 1059588987
+  delta syscr       = 4075
+  delta read_bytes  = 783925248
+  delta wchar       = 1058603
+  delta syscw       = 5800
+  delta write_bytes = 1056768
+  NOTE: rchar counts bytes returned to userspace by read/pread syscalls;
+        read_bytes counts bytes actually fetched from the block device;
+        syscr counts read-family syscalls. They measure DIFFERENT layers and
+        rchar/syscr is NOT a per-syscall request size (a prior effort's bogus
+        '~59 KB/syscall' came from exactly that division).
+
+--- Data.db size for comparison with device read_bytes ---
+-rw-rw-r-- 1 ubuntu ubuntu 783799203 Jul 27 18:26 /home/ubuntu/ws0/cassandra-data/data/ws0/events-871ae22089e811f1b640e39063f2e195/nb-16-big-Data.db
+
+evidence written to /home/ubuntu/ws0/ws0-corpus/claims-evidence.txt

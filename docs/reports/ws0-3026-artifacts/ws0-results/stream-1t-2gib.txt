@@ -1,0 +1,9 @@
+# ws0-stream  threads=1  array=2048 MiB each (3 arrays, 6.00 GiB total)  n=268435456  ntimes=6
+# L3 on this box = 105 MiB; per-array footprint is 19.5x L3
+Kernel      GB/s(1e9)        GiB/s       best_s
+Copy            12.96        12.07     0.331300
+Scale           12.80        11.93     0.335417
+Add             13.49        12.56     0.477678
+Triad           13.46        12.53     0.478761
+Read             7.46         6.94     0.287977
+# checksum 1.620506e+09 sink 3.057648e+15

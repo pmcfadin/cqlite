@@ -1,0 +1,86 @@
+# WS0 (CQLite issue #3026) throughput-grade corpus profile for cassandra-stress.
+#
+# Shape target: ~4,000,000 rows, ~690 B/row UNCOMPRESSED on disk, ~3.5x LZ4 ratio,
+#               single SSTable after `nodetool compact`.
+#
+# NOTE: the table_definition deliberately sets NO `compression` clause, so the
+# table inherits Cassandra 5.0's stock default (LZ4Compressor, chunk_length_in_kb=16,
+# CompressionParams.DEFAULT_CHUNK_LENGTH = 1024*16). That default is then VERIFIED
+# from the on-disk CompressionInfo.db header, not assumed.
+#
+# No collections, no UDTs, no secondary indexes: clean baseline shape.
+
+keyspace: ws0
+
+keyspace_definition: |
+  CREATE KEYSPACE ws0 WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+
+table: events
+
+table_definition: |
+  CREATE TABLE events (
+        part_id text,
+        seq int,
+        event_time timestamp,
+        device_id uuid,
+        metric_a int,
+        metric_b bigint,
+        metric_c double,
+        status text,
+        region text,
+        payload text,
+        blob_a blob,
+        blob_b blob,
+        PRIMARY KEY ((part_id), seq, event_time)
+  )
+
+columnspec:
+  # ---- primary key ----
+  - name: part_id
+    size: fixed(16)
+    population: uniform(1..1000000000)
+  # NOTE on clustering fan-out: cassandra-stress derives each row's regular-column
+  # values from (partition seed, LAST clustering value). So with seq x event_time =
+  # A x B, every regular value is duplicated A times inside the partition. That
+  # duplication is a big, and easily-overlooked, lever on the achieved LZ4 ratio.
+  - name: seq                     # clustering 1: CAL_SEQ_CLUSTER values per partition
+    cluster: fixed(CAL_SEQ_CLUSTER)
+    population: uniform(1..1000000)   # wide => the draws are ~always distinct => real rows
+  - name: event_time              # clustering 2: CAL_ET_CLUSTER values per partition
+    cluster: fixed(CAL_ET_CLUSTER)
+    population: uniform(1..100000000)
+
+  # ---- regular columns; populations chosen to hit the ~3.5x LZ4 target ----
+  - name: device_id
+    population: uniform(1..4000)
+  - name: metric_a
+    population: uniform(1..100000)
+  - name: metric_b
+    population: uniform(1..100000000)
+  - name: metric_c
+    population: uniform(1..100000)
+  - name: status
+    size: fixed(8)
+    population: uniform(1..6)
+  - name: region
+    size: fixed(12)
+    population: uniform(1..8)
+  - name: payload
+    size: fixed(CAL_PAYLOAD)
+    population: uniform(1..CAL_PAYLOAD_POP)
+  - name: blob_a
+    size: fixed(CAL_BLOBA)
+    population: uniform(1..CAL_BLOBA_POP)
+  - name: blob_b
+    size: fixed(CAL_BLOBB)
+    population: uniform(1..CAL_BLOBB_POP)
+
+insert:
+  partitions: fixed(1)            # one partition per operation
+  batchtype: UNLOGGED
+  select: fixed(1)/1              # visit every generated clustering row => 20 rows/partition
+
+queries:
+  read_partition:
+    cql: select * from events where part_id = ? LIMIT 100
+    fields: samerow

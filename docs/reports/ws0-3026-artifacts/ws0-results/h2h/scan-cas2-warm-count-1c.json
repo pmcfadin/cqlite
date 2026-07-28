@@ -1,0 +1,1 @@
+{"label": "cas2-warm-count-1c", "engine": "cassandra-5.0.8", "surface": "native-cql/count", "ranges": 512, "inflight": 8, "fetch_size": 5000, "rows": 3999890, "wall_secs": 14.27620452500014, "rows_per_sec_wall": 280178.81034104625, "uncompressed_MB_per_s": 194.07986192324273, "compressed_MB_per_s": 54.903839674431424}

@@ -1,0 +1,2 @@
+harness: mode=ScanArrow sql=SELECT * FROM ws0.events passes=1 reopen_each_pass=false worker_threads=1
+pass 0 (cold): rows=3999890 cells=0 secs=17.842364 rows_per_sec=224179.4 arrow_payload_bytes=2699937486 digest=0xd1fba762150c532c io_read_bytes=0 io_rchar=252 io_syscr=14

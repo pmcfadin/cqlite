@@ -1,0 +1,12 @@
+arm                      IOPS    MB/s   MiB/s  mean_us  p50_us   p99_us  p99.9_us  min_us  run_s read_GiB
+---------------------------------------------------------------------------------------------------------
+randread-4k-qd1          1377     5.6     5.4    722.2   708.6   1089.5    1548.3   409.0    300      1.6
+seqread-4k-qd1           1385     5.7     5.4    718.9   708.6   1011.7    1417.2   353.7     90      0.5
+randread-1M-qd32          125   131.3   125.2 255835.1252706.8 252706.8  350224.4115887.3    120     14.7
+seqread-1M-qd32           125   131.3   125.2 255860.1252706.8 252706.8  308281.3119795.4    120     14.7
+
+per-second bandwidth stability (MiB/s, from fio bw samples):
+  randread-4k-qd1      min     4.6  mean     5.4  max     5.7  stddev    0.2
+  seqread-4k-qd1       min     4.6  mean     5.4  max     5.6  stddev    0.2
+  randread-1M-qd32     min   124.0  mean   125.2  max   126.1  stddev    0.9
+  seqread-1M-qd32      min   121.1  mean   125.2  max   129.1  stddev    1.0

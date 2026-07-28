@@ -1,0 +1,29 @@
+{
+ "engine": "cqlite",
+ "label": "cq-warm-scan-1t",
+ "temp": "warm",
+ "surface": "scan",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "rows": 3999890,
+ "digest": "0xd1fba762150c532c",
+ "scan_secs": 11.436205467,
+ "rows_per_sec": 349756.74506216,
+ "uncompressed_MB_per_s": 242.27649730455823,
+ "compressed_MB_per_s": 68.53833176238088,
+ "arrow_payload_bytes": 0,
+ "cycles": 38815074300,
+ "instructions": 103528157855,
+ "cycles_per_row": 9704.035435974489,
+ "instructions_per_row": 25882.751239409085,
+ "IPC": 2.6672152436147725,
+ "l2_lines_in_all": 78287452,
+ "mem_traffic_in_bytes_per_row": 1252.6336794261842,
+ "l2_evict_bytes_per_row": 1194.8207295700631,
+ "peak_rss_kib": 1040824,
+ "proc_io_delta": {
+  "rchar": 3084240,
+  "read_bytes": 0,
+  "syscr": 116
+ }
+}

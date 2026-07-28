@@ -1,0 +1,6 @@
+# started on Mon Jul 27 20:16:31 2026
+
+81125256,,cycles,5027062805,100.00,,
+23040664,,instructions,5006410892,100.00,0.28,insn per cycle
+1298710,,l2_lines_in.all,5006376663,100.00,,
+1997981,,l2_lines_out.non_silent,5006354674,100.00,,

@@ -1,0 +1,42 @@
+=== WS0 (#3026) measurement-session timeline ===
+Captured 2026-07-28T02:07:27Z from the measurement box's own kernel log, to make the
+swapfile / OOM / reboot attribution in the report traceable after the instance is terminated.
+Box: c7i.4xlarge  host ip-172-31-34-181  kernel 6.17.0-1019-aws  product c7i.4xlarge
+
+--- journalctl --list-boots (the fio arms ran on boot -1, the head-to-head arms on boot 0) ---
+IDX BOOT ID                          FIRST ENTRY                 LAST ENTRY
+ -2 93eee1a1f51c4fa8b18bb146b2cd8552 Fri 2026-07-24 02:17:09 UTC Fri 2026-07-24 02:31:06 UTC
+ -1 4f40d7bce14f4965a1e808dd7e3fde45 Sun 2026-07-26 01:44:51 UTC Mon 2026-07-27 16:00:05 UTC
+  0 e5c8382916b341098c986111532fc62d Mon 2026-07-27 16:58:36 UTC Tue 2026-07-28 02:05:01 UTC
+
+--- journalctl -k : OOM kill and swapon (verbatim) ---
+Jul 27 17:05:28 ip-172-31-34-181 kernel: rustc invoked oom-killer: gfp_mask=0x140dca(GFP_HIGHUSER_MOVABLE|__GFP_ZERO|__GFP_COMP), order=0, oom_score_adj=0
+Jul 27 17:05:28 ip-172-31-34-181 kernel: Total swap = 0kB
+Jul 27 17:05:28 ip-172-31-34-181 kernel: Out of memory: Killed process 2590 (java) total-vm:19431136kB, anon-rss:17085992kB, file-rss:2760kB, shmem-rss:0kB, UID:1000 pgtables:34108kB oom_score_adj:0
+Jul 27 17:59:08 ip-172-31-34-181 kernel: Adding 16777212k swap on /swapfile.  Priority:-2 extents:395 across:155934720k SS
+
+--- swapon --show / swapfile stat / fstab ---
+NAME      TYPE SIZE   USED PRIO
+/swapfile file  16G 201.6M   -2
+/swapfile created=2026-07-27 17:59:08.342374041 +0000
+/swapfile none swap sw 0 0
+
+--- SMT topology (thread_siblings_list), for the 'physical core N = logical N and N+8' claim ---
+cpu0  siblings=0,8
+cpu1  siblings=1,9
+cpu2  siblings=2,10
+cpu3  siblings=3,11
+cpu4  siblings=4,12
+cpu5  siblings=5,13
+cpu6  siblings=6,14
+cpu7  siblings=7,15
+cpu8  siblings=0,8
+cpu10 siblings=2,10
+cpu12 siblings=4,12
+cpu15 siblings=7,15
+
+--- device readahead / max_hw_sectors (context for the mmap fault path, sec 9.3) ---
+read_ahead_kb = 128
+max_sectors_kb = 256
+max_hw_sectors_kb = 256
+=== end ===

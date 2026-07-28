@@ -1,0 +1,57 @@
+#!/usr/bin/env bpftrace
+/*
+ * WS0 Claim B instrumentation (CQLite issue #3026).
+ *
+ * $1 = Cassandra daemon PID (tgid). Traces, until SIGINT:
+ *   - SYSCALL level : requested byte count of every pread64 / read / readv issued
+ *                     by the daemon  (this is what CompressedChunkReader /
+ *                     ThreadLocalReadAheadBuffer actually ask the kernel for)
+ *   - DEVICE  level : completed block-layer request sizes (nr_sector * 512).
+ *                     NOTE: max_hw_sectors_kb=256 on this box, so the device can
+ *                     never complete a single request larger than 256 KiB --
+ *                     a 256 KiB device request is therefore NOT by itself
+ *                     evidence of a 256 KiB syscall.
+ */
+BEGIN { printf("TRACING pid=%d (syscall + block). Ctrl-C to dump.\n", $1); }
+
+tracepoint:syscalls:sys_enter_pread64 /pid == $1/
+{
+    @pread_hist = hist(args->count);
+    @pread_lhist_256k = lhist(args->count, 0, 524288, 16384);
+    @pread_n = count();
+    @pread_req_bytes = sum(args->count);
+    @pread_by_comm[comm] = count();
+    @pread_sz_by_comm[comm, args->count] = count();
+}
+
+tracepoint:syscalls:sys_enter_read /pid == $1/
+{
+    @read_hist = hist(args->count);
+    @read_n = count();
+    @read_req_bytes = sum(args->count);
+}
+
+tracepoint:syscalls:sys_enter_readv /pid == $1/
+{
+    @readv_n = count();
+}
+
+/* device level. bpftrace 0.20 exposes rwbs as a STRING ("R","RA","W","WS",...),
+ * so use it directly as a map key (no str() needed). Key everything by rwbs so reads vs readahead vs
+ * writes stay separated instead of being lumped or silently dropped. */
+tracepoint:block:block_rq_complete
+{
+    @dev_n_by_rwbs[args->rwbs] = count();
+    @dev_bytes_by_rwbs[args->rwbs] = sum(args->nr_sector * 512);
+    @dev_hist_by_rwbs[args->rwbs] = hist(args->nr_sector * 512);
+}
+
+tracepoint:block:block_rq_complete /strncmp(args->rwbs, "R", 1) == 0/
+{
+    @dev_read_hist = hist(args->nr_sector * 512);
+    @dev_read_lhist_256k = lhist(args->nr_sector * 512, 0, 524288, 16384);
+    @dev_read_n = count();
+    @dev_read_bytes = sum(args->nr_sector * 512);
+}
+
+END { printf("TRACE DONE\n"); }

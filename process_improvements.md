@@ -792,3 +792,43 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       generator — gate on the tolerant form (≥1 of N rounds overlapping, which a
       serializing barrier still fails structurally at 0/N) and report the rest as
       diagnostics.
+  28. **2026-07-27 — one agent session can OOM-kill ITSELF by oversubscribing the
+      box, and the tell is that you warned the subagents about each other.** During
+      #3026 (WS0 Cassandra baseline) I deliberately overlapped a full Rust workspace
+      build (`arrow`/`parquet`/`tonic`/`otel`, default 16 jobs) with a Cassandra
+      daemon plus a 16-thread `cassandra-stress` load, to save wall-clock. On a
+      30 GiB box with **zero swap** the kernel fired the global OOM killer —
+      `rustc invoked oom-killer ... global_oom`, victim `java` at 17 GB anon-rss —
+      and it did not stop at the workload: it killed the **tmux scope and user slice
+      holding the Claude Code process**, twice, losing both subagent sessions
+      mid-flight. CLAUDE.md already says one worker per machine and serialize heavy
+      work (#1930/#2640); I violated it for speed. **The retrospective tell: I had
+      told each subagent "expect CPU contention from the other agent" — that warning
+      WAS the evidence I had oversubscribed the machine, and I wrote it without
+      drawing the conclusion. Treat "I need to warn my agents about each other" as a
+      hard stop, not a courtesy note.** Three durable fixes: (a) **serialize heavy
+      phases** — build to completion, THEN load data; a subagent that must be warned
+      about a peer should not be running yet; (b) **give the box swap** (16 GiB,
+      `vm.swappiness=10` so it is a safety valve, not routine paging) — without it a
+      spike is fatal rather than slow, and the casualty is the session, not just the
+      job; (c) **bound every memory consumer explicitly**: `CARGO_BUILD_JOBS=6` and
+      an explicit JVM `-Xmx`. Corollary on *assumed* defaults: I reasoned "stock
+      Cassandra on 30 GiB self-sizes to ~7.5 GiB heap, so the 17 GB victim must be
+      the stress client." Wrong — `cassandra-env.sh` computes
+      `heap_limit=15872 MB` vs `half_system_memory=15775 MB` and picks **half of
+      RAM = 15.4 GiB**, so the daemon was the victim. **Read the sizing code; do not
+      infer a default from a remembered heuristic.** Second corollary, on recovery:
+      after such a kill, **verify on-disk state before resuming** rather than
+      trusting either agent's last report — one had reported "checkout clean" while
+      having deleted 4 tracked fixtures (a `fetch-datasets.sh` run against a git
+      checkout), and the other had produced only `.rlib`s with zero executables. Both
+      resumed correctly from their transcripts once given the actual disk state.
+      Third corollary, on the WRITE-UP: a numbers-dense report needs its figures
+      fact-checked against the raw artifacts by an **adversarial reader**, because six
+      wrong figures survived authoring — a headline ratio built on the **mean of 2 runs
+      captioned "median of 3"**, a correctness digest that appeared in **no artifact**
+      (it was the other run mode's), a **per-hardware-thread** number presented as
+      per-physical-core, plus a bad multiplier, a foreign denominator and an
+      off-by-one line citation. **Standing rule: every derived figure must be
+      recomputed from the artifact it claims, and any figure whose artifact was not
+      retained must be labelled as such or re-measured — never quietly kept.**
