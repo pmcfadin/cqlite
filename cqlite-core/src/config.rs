@@ -53,14 +53,14 @@ pub struct StorageConfig {
     /// Sync mode for durability
     pub sync_mode: SyncMode,
 
-    /// Memory-map SSTable Data.db files instead of using buffered file I/O.
+    /// Legacy promote-only flag: it upgrades an **explicit**
+    /// [`DiskAccessMode::Buffered`] request to [`DiskAccessMode::Mmap`].
     ///
-    /// **Opt-in.** Defaults to `false` (buffered I/O), which is portable and
-    /// safe on every filesystem. When enabled, the reader maps Data.db files at
-    /// or above [`Self::mmap_min_size_bytes`] into the process address space and
-    /// serves reads from the OS page cache with no per-block `read` syscall,
-    /// mirroring Cassandra's `disk_access_mode: mmap`. This speeds up repeated
-    /// local scans of the same files.
+    /// It does **not** select the backend — [`Self::disk_access_mode`] does, and its
+    /// `Auto` default already memory-maps most Data.db files (see that field). So
+    /// `false` does not mean "buffered I/O", and `true` changes nothing unless
+    /// something explicitly requested `Buffered`. A mapped file is served from the
+    /// page cache with no per-block `read` syscall, as Cassandra's mmap mode does.
     ///
     /// # Safety / platform constraints
     ///
@@ -76,10 +76,10 @@ pub struct StorageConfig {
     ///
     /// # Interaction with the write engine (Issue #591)
     ///
-    /// This setting only affects the read path. Compaction always reads its
-    /// input SSTables through buffered I/O regardless of `use_mmap`, and deletes
-    /// each input by removing its `TOC.txt` first (unpublishing it) before the
-    /// data components, best-effort. So enabling mmap for queries is safe
+    /// This setting only affects the read path. Compaction's input readers force
+    /// `use_mmap = false` + explicit `Buffered` (only `CQLITE_USE_MMAP=1` promotes even
+    /// those); each input is unpublished by removing its `TOC.txt` before the data
+    /// components, best-effort. So enabling mmap for queries is safe
     /// alongside background compaction: a compaction never holds a mapping over a
     /// file it then deletes, and on Windows a data file still pinned by a mapped
     /// reader becomes an invisible orphan (reclaimed on the next startup) rather
@@ -88,15 +88,15 @@ pub struct StorageConfig {
     /// Can also be enabled at runtime by setting `CQLITE_USE_MMAP=1`.
     ///
     /// `#[serde(default)]` keeps configs serialized before this field existed
-    /// (which omit it) deserializing successfully, defaulting to buffered I/O.
+    /// (which omit it) deserializing successfully, defaulting to no promotion.
     #[serde(default = "default_use_mmap")]
     pub use_mmap: bool,
 
-    /// Minimum Data.db file size (bytes) before [`Self::use_mmap`] takes effect.
+    /// Minimum Data.db size (bytes) at which [`DiskAccessMode::Auto`] maps. Default 4096.
     ///
-    /// Files smaller than this use buffered I/O even when `use_mmap` is set,
-    /// since the per-file mapping overhead is not worthwhile for tiny files and
-    /// mapping a zero-length file is invalid. Defaults to one page (4096).
+    /// It gates ONLY `Auto`, which uses buffered I/O below it (a tiny file does not
+    /// repay the mapping setup); an explicit `Mmap` — including a `Buffered` promoted
+    /// by [`Self::use_mmap`] — is not size-gated, only a zero-length file falls back.
     ///
     /// `#[serde(default)]` for backward compatibility with older payloads.
     #[serde(default = "default_mmap_min_size_bytes")]
@@ -116,8 +116,8 @@ pub struct StorageConfig {
     ///
     /// Set an explicit [`DiskAccessMode::Buffered`], [`DiskAccessMode::Mmap`],
     /// or [`DiskAccessMode::Direct`] to override the heuristic. The legacy
-    /// [`Self::use_mmap`] flag still forces mmap when `Auto` would otherwise
-    /// pick buffered, for backward compatibility.
+    /// [`Self::use_mmap`] flag only PROMOTES an explicit `Buffered` request to
+    /// `Mmap`; it never changes what `Auto` resolves to.
     ///
     /// Can also be set at runtime via `CQLITE_DISK_ACCESS_MODE`
     /// (`auto` / `buffered` / `mmap` / `direct`).
@@ -143,10 +143,10 @@ pub struct StorageConfig {
     #[serde(default)]
     pub prefetch: PrefetchMode,
 
-    /// Size in bytes of the read-ahead window used by the direct-I/O backend
-    /// (and the buffered backend's reader capacity hint). Rounded up to the
-    /// I/O alignment. Defaults to 1 MiB. Only takes effect when
-    /// [`Self::prefetch`] is not [`PrefetchMode::Off`].
+    /// Size in bytes of the read-ahead window used by the direct-I/O backend, and by
+    /// nothing else: the buffered backend ignores it (`open_buffered_sources` takes no
+    /// prefetch bytes; its `BufReader::new` capacity is tokio's 8 KiB default). Rounded
+    /// up to the I/O alignment; 1 MiB default; inert while `prefetch` is `Off`.
     #[serde(default = "default_direct_io_prefetch_bytes")]
     pub direct_io_prefetch_bytes: usize,
 }
@@ -199,7 +199,7 @@ pub enum PrefetchMode {
     Auto,
 }
 
-/// Default for [`StorageConfig::use_mmap`]: mmap is opt-in, so buffered I/O.
+/// Default for [`StorageConfig::use_mmap`]: no promotion (see the field doc).
 fn default_use_mmap() -> bool {
     false
 }

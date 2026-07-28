@@ -50,7 +50,7 @@ mod compressed_scan_window;
 
 // COMBINED-INTERACTION regression for the #2876 read-intent split x the #2877
 // coalescing window: every widened read this walk issues must land on the
-// UNADVISED scan plane and none on the `MADV_RANDOM` point plane — a property of
+// never-`MADV_RANDOM` scan plane and none on the point plane — a property of
 // the PAIR that neither fix's own tests can observe. Lives in-crate (not
 // `cqlite-core/tests/`) because the per-plane spies and plane setters are
 // `#[cfg(test)] pub(crate)`; lives HERE rather than beside
@@ -296,14 +296,14 @@ impl SSTableReader {
                 // SCAN intent (issue #2876): this forward Summary-guided walk reads
                 // Data.db in mostly-ascending order, so every read — the partition
                 // body AND (uncompressed) its covering `CRC.db` chunks — goes
-                // through the reader's UNADVISED `scan_positional_source`, never the
-                // `MADV_RANDOM` point mapping whose readahead suppression (#2210)
+                // through the reader's never-`MADV_RANDOM` `scan_positional_source`,
+                // not the `MADV_RANDOM` point mapping whose suppressed readahead (#2210)
                 // would cost this walk ~one 4 KiB fault per partition.
                 //
                 // The #2877 coalescing window is the CONSUMER of that plane, never a
                 // bypass of it: it makes the SAME scan-plane reads fewer and larger
                 // (chunk-aligned, ramped to 4 MiB), which is precisely what the
-                // unadvised mapping's kernel readahead rewards. Issuing them on the
+                // scan mapping's kernel readahead rewards. Issuing them on the
                 // advised point plane instead would reinstate the #2876 field
                 // regression while every per-PR test stayed green — the combined
                 // interaction `cqlite-core/tests/issue_2877_scan_chunk_coalescing.rs`

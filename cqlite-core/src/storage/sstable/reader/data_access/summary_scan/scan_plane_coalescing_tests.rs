@@ -11,7 +11,7 @@
 //!   `MADV_RANDOM` (issue #2210) to suppress kernel readahead for scattered point
 //!   faults. On a forward walk that advice is exactly backwards — ~one 4 KiB fault
 //!   per partition instead of a readahead window. Scan-shaped walks now pass the
-//!   reader's UNADVISED `scan_positional_source`.
+//!   reader's never-`MADV_RANDOM` `scan_positional_source`.
 //! - **#2877** coalesces that walk's reads per CHUNK rather than per PARTITION,
 //!   with a doubling ramp up to a 4 MiB window.
 //!

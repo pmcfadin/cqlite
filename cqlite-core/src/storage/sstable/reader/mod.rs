@@ -337,8 +337,13 @@ fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
 /// amplification (~30x) and the cold-cache per-read latency (~35-43%). Threshold
 /// is measurement-derived on Linux/EBS: the win is unambiguous by 4 MiB; 8 MiB
 /// leaves 2x margin above the sub-MB "wash" zone. See
-/// docs/reports/issue-2210-madv-random-point-mmap-ab.md. The SCAN mapping is
-/// NEVER advised (measured #1143 behaviour preserved).
+/// docs/reports/issue-2210-madv-random-point-mmap-ab.md. The SCAN mapping never
+/// gets `MADV_RANDOM`; the default `PrefetchMode::Auto` leaves it unadvised
+/// entirely (measured #1143 behaviour), an explicit `Sequential`/`WillNeed` does
+/// advise it. It backs BOTH `BlockSource::Mapped` and `scan_positional_source`,
+/// and the windowed / Summary-guided scan feed reads through the latter
+/// (`ReadAt`), NOT through `BlockSource` (#2876) — so a claim scoped to
+/// `BlockSource` describes nothing that a real scan does.
 #[cfg(unix)]
 const POINT_MMAP_MADV_RANDOM_MIN_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -595,16 +600,11 @@ impl SSTableReader {
         };
 
         // Build the SCAN-side positional source (issue #2876): the Summary-guided
-        // compressed partition walk and the windowed streaming scan feed must NOT
-        // share `point_source` — for the mmap backend that source is deliberately
-        // advised `MADV_RANDOM` above (issue #2210) to help scattered point faults,
-        // which is exactly backwards for a mostly-sequential scan (one 4 KiB page
-        // fault per positional read instead of the ~128 KiB read-ahead window).
-        // Always the SAME unadvised mapping `ScanSource::Mapped` already holds — an
-        // `Arc` clone, no new mapping / fd (#1143: the scan mapping is never
-        // advised). The Direct/Buffered backends have no per-mapping advice
-        // concept, so they share `point_source` unchanged (no behavior change for
-        // those backends).
+        // walk and the windowed scan feed must NOT share the deliberately
+        // `MADV_RANDOM` `point_source` (#2210) — backwards for a mostly-sequential
+        // scan (a 4 KiB page fault per read, not the ~128 KiB read-ahead window).
+        // Reuse the SAME never-`MADV_RANDOM` mapping `ScanSource::Mapped` holds (an
+        // `Arc` clone, no new mapping / fd); Direct/Buffered share `point_source`.
         let scan_positional_source: Arc<dyn read_at::ReadAt> = match &scan_source {
             ScanSource::Mapped(mmap) => Arc::new(read_at::MmapReadAt::new(mmap.clone())),
             #[cfg(unix)]
@@ -974,7 +974,7 @@ impl SSTableReader {
     /// Whether this reader's block source is backed by a memory map.
     ///
     /// Test-only hook used to verify that the `use_mmap` config / env wiring
-    /// actually selects the intended backend end-to-end.
+    /// actually promotes an explicit `Buffered` request to mmap end-to-end.
     #[cfg(test)]
     pub(crate) async fn is_mmap_backed(&self) -> bool {
         self.file.lock().await.is_mmap()
@@ -1187,12 +1187,12 @@ impl SSTableReader {
     /// (`file_size >= min_random_bytes`) map a SECOND, dedicated read-only mapping
     /// of the same file and advise it `MADV_RANDOM`, returning that distinct
     /// mapping so scattered point faults read one page instead of the ~128 KiB
-    /// read-ahead window (issue #2210). The returned mapping is a SEPARATE
-    /// allocation from `scan_mmap`, which is left unadvised — advising the point map
-    /// therefore cannot affect the scan map (#1143 preserved). Below the threshold,
-    /// or if the dedicated map / its advice fails, share `scan_mmap` unchanged
-    /// (never keep a redundant unadvised 2nd map). Mapped directly (not via
-    /// `map_file`) so the read-work FILE_OPENS counter is untouched.
+    /// read-ahead window (issue #2210). The returned mapping is a SEPARATE allocation
+    /// from `scan_mmap`, which THIS function never advises (only `build_block_sources`
+    /// does, and only for an explicit `Sequential`/`WillNeed`), so advising the point
+    /// map cannot affect the scan map (#1143 preserved). Below the threshold, or if
+    /// the dedicated map / its advice fails, share `scan_mmap` unchanged (never keep a
+    /// redundant 2nd map). Mapped directly (not via `map_file`): FILE_OPENS untouched.
     #[cfg(unix)]
     fn point_read_mmap(
         path: &Path,
