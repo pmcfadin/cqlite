@@ -214,7 +214,9 @@ without the tree lines, and no block SHALL carry a duplicated set of them.
   the existing synthetic `commit: selftest` stamp, and SHALL require no git state
 
 #### Scenario: the RESULT poll predicates are unaffected by the new lines
-- **WHEN** a caller polls a summary file with `grep -q 'RESULT:'` or `grep -qE 'RESULT: (PASS|FAIL)'`
+- **WHEN** a caller polls a summary file with the **known-buggy** bare-`RESULT:`-token match (it also
+  matches the start-of-run `RESULT: INCOMPLETE` placeholder — the #2908/#3041 defect; do NOT copy it) or
+  the **correct** `grep -qE 'RESULT: (PASS|FAIL)'`
 - **THEN** the added lines SHALL NOT match either predicate, so issue #2908's separate concern is
   neither fixed nor regressed by this change
 
