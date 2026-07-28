@@ -24,7 +24,7 @@ maturin build --release
 
 ```toml
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -33,14 +33,13 @@ version = "0.1.0"
 description = "Fast CQL parser and SSTable reader"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.8"
+requires-python = ">=3.9"   # CQLite's floor (abi3-py39)
 authors = [{ name = "Your Name", email = "you@example.com" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -85,7 +84,7 @@ name = "cqlite"
 crate-type = ["cdylib", "rlib"]  # cdylib for Python, rlib for Rust
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py39"] }  # version pinned at the workspace root
 
 [profile.release]
 lto = true           # Link-time optimization
