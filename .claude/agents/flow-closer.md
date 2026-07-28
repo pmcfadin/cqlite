@@ -200,17 +200,20 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
      branch-cleanup step fails *after* the merge lands. **A nonzero exit from
      `gh pr merge` is NOT evidence the merge failed.** Verify the merge with `mergedAt`
      (below), then clean the branch separately in `flow-finalize`.
-   - **`mergedAt` is the ONLY reliable probe that a PR merged.** `state=OPEN` with a
-     populated `merge_commit_sha` is **NOT merged**: GitHub populates
+   - **The merge timestamp (`mergedAt` in `gh pr view --json` / GraphQL, `merged_at` in the
+     REST API — same field, two spellings) is the ONLY reliable probe that a PR merged.**
+     `state=open` with a populated `merge_commit_sha` is **NOT merged**: GitHub populates
      `merge_commit_sha` *speculatively* for a merely MERGEABLE PR (it is the SHA of the
      test-merge it computed), so reading that field as a merge receipt reports success on a
-     PR that never landed. Likewise a bare `state` read is ambiguous — `CLOSED` covers both
-     merged and abandoned. Probe:
+     PR that never landed. Verified on this repo: four open PRs each carried a populated
+     `merge_commit_sha` with `merged_at=null` and `merged=false`. Likewise a bare `state`
+     read is ambiguous — REST `closed` covers both merged and abandoned. Probe:
      ```bash
-     gh pr view <pr> --json mergedAt -q .mergedAt   # non-null ⇒ merged; null ⇒ NOT merged
+     gh pr view <pr> --json mergedAt -q .mergedAt        # non-null ⇒ merged; null ⇒ NOT merged
+     gh api repos/{owner}/{repo}/pulls/<pr> --jq .merged_at   # REST spelling, same meaning
      ```
-     Use `mergedAt` for every "did it merge?" decision in step 6 — never `merge_commit_sha`,
-     never a bare `state`, never the arm command's exit code.
+     Use the merge timestamp for every "did it merge?" decision in step 6 — never
+     `merge_commit_sha`, never a bare `state`, never the arm command's exit code.
 6. **Finalize — two paths (the merge may land AFTER you exit).** `--auto` means the merge
    can complete after this session ends, so finalize (telemetry, board, claim release) must
    not assume the PR is already merged. Choose:
