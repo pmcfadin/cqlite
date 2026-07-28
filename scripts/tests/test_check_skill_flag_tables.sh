@@ -2,6 +2,11 @@
 # test_check_skill_flag_tables.sh — self-test for the auto-loaded-skill flag-table
 # drift guard (issue #3054).
 #
+# Every negative assertion checks not just THAT the guard failed but WHY (a distinctive
+# substring of the intended diagnostic). A bare non-zero-exit assertion is vacuous: it
+# passes on an unrelated silent abort, which is exactly how the first cut of this suite
+# let a `set -e` bug hide the guard's most actionable message.
+#
 # Proves check-skill-flag-tables.sh:
 #   1. PASSes on the REAL repo (the skill tables match the decoder constants today),
 #   2. FAILs on a SHIFTED value — the exact pre-#3054 bug (`0x01` labeled `IS_MARKER`
@@ -9,9 +14,16 @@
 #   3. FAILs on an INVENTED flag name (the pre-#3054 `HAS_IS_MARKER`),
 #   4. FAILs when a real source constant is documented in NO skill table (dropped row),
 #   5. FAILs CLOSED when the decoder source is missing/moved (never a vacuous PASS),
-#   6. FAILs CLOSED when the flag table is reformatted out of existence.
-# Hermetic: copies the repo's relevant subtrees into a temp dir and mutates the COPY;
-# no cargo, network, or datasets.
+#   6. FAILs CLOSED when the flag table is reformatted out of existence,
+#   7. FAILs on a SHIFTED CELL value in the reference file (the cell table lives ONLY
+#      there, so without this the whole CELL_* path has no mutant),
+#   8. FAILs on a NAMESPACE swap — a real name+value documented under the wrong flag
+#      byte (`0x01 EXTENDED_IS_STATIC` inside the ROW table),
+#   9. FAILs CLOSED on a NEW unclassified source flag (a hand-maintained allow-list
+#      would silently exempt it from "must be documented"),
+#  10. FAILs CLOSED when a flag table drifts out from under a recognizable heading.
+# Hermetic: copies the repo's relevant files into a temp dir and mutates the COPY;
+# no cargo, network, or datasets. bash 3.2 compatible.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -26,6 +38,8 @@ SKILL_DIR_REL=".claude/skills/sstable-parsing"
 DECODER_DIR_REL="cqlite-core/src/storage/sstable/reader/parsing/row_decoder"
 SKILL_MD="$SKILL_DIR_REL/SKILL.md"
 REF_MD="$SKILL_DIR_REL/cassandra5-format-reference.md"
+ROW_RS="$DECODER_DIR_REL/mod.rs"
+CELL_RS="$DECODER_DIR_REL/cell_value.rs"
 
 # 1. The real repo must pass.
 if ! bash "$GUARD" "$REPO_ROOT" >/dev/null 2>&1; then
@@ -36,17 +50,17 @@ fi
 echo "OK: real repo PASSes"
 
 # Per-run temp sandbox with a TERMINAL-XXXXXX template (macOS mktemp substitutes only
-# a trailing run of X's). Cleaned up on exit.
+# a trailing run of X's). Cleaned up on exit, and on Ctrl-C / termination too.
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/skill-flag-tables-test-XXXXXX")"
-trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"' EXIT INT TERM
 
 # Build a minimal sandbox: the guard needs the two skill files + the two decoder sources.
 sandbox="$tmp/repo"
-mkdir -p "$sandbox/$SKILL_DIR_REL" "$sandbox/$DECODER_DIR_REL" "$sandbox/scripts/ci"
+mkdir -p "$sandbox/$SKILL_DIR_REL" "$sandbox/$DECODER_DIR_REL"
 cp "$REPO_ROOT/$SKILL_MD" "$sandbox/$SKILL_MD"
 cp "$REPO_ROOT/$REF_MD" "$sandbox/$REF_MD"
-cp "$REPO_ROOT/$DECODER_DIR_REL/mod.rs" "$sandbox/$DECODER_DIR_REL/mod.rs"
-cp "$REPO_ROOT/$DECODER_DIR_REL/row_data.rs" "$sandbox/$DECODER_DIR_REL/row_data.rs"
+cp "$REPO_ROOT/$ROW_RS" "$sandbox/$ROW_RS"
+cp "$REPO_ROOT/$CELL_RS" "$sandbox/$CELL_RS"
 
 # Sanity: the pristine sandbox passes, so every failure below is caused by the mutation.
 if ! bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
@@ -59,7 +73,8 @@ echo "OK: pristine sandbox PASSes"
 restore() {
   cp "$REPO_ROOT/$SKILL_MD" "$sandbox/$SKILL_MD"
   cp "$REPO_ROOT/$REF_MD" "$sandbox/$REF_MD"
-  cp "$REPO_ROOT/$DECODER_DIR_REL/mod.rs" "$sandbox/$DECODER_DIR_REL/mod.rs"
+  cp "$REPO_ROOT/$ROW_RS" "$sandbox/$ROW_RS"
+  cp "$REPO_ROOT/$CELL_RS" "$sandbox/$CELL_RS"
 }
 
 # Portable in-place sed (GNU sed needs no arg; BSD/macOS sed needs an empty one).
@@ -68,61 +83,95 @@ sed_i() {
   if sed --version >/dev/null 2>&1; then sed -i "$expr" "$file"; else sed -i '' "$expr" "$file"; fi
 }
 
+# Run the guard on the sandbox, expecting FAILURE with a specific diagnostic.
+# Capture first: the guard exits non-zero here, and piping it straight into grep would
+# trip `pipefail` on the guard's own (expected) failure rather than on the grep.
+expect_fail_with() {
+  local label="$1" needle="$2" out
+  out="$(bash "$GUARD" "$sandbox" 2>&1 || true)"
+  if bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
+    echo "FAIL: guard did NOT trip on: $label"
+    exit 1
+  fi
+  if ! grep -q "$needle" <<<"$out"; then
+    echo "FAIL: $label tripped the guard, but NOT via the intended path (expected to see: $needle)"
+    echo "$out"
+    exit 1
+  fi
+  echo "OK: $label"
+  restore
+}
+
 # 2. SHIFTED value: label 0x01 as IS_MARKER (0x01 is really END_OF_PARTITION).
 #    This is precisely the pre-#3054 defect that taught partition-boundary mis-detection.
 sed_i 's/| `0x01` | `END_OF_PARTITION`/| `0x01` | `IS_MARKER`/' "$sandbox/$SKILL_MD"
-if bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
-  echo "FAIL: guard did NOT trip on a shifted flag value (0x01 labeled IS_MARKER)"
-  exit 1
-fi
-# Capture first: the guard exits non-zero here, and piping it straight into grep would
-# trip `pipefail` on the guard's own (expected) failure rather than on the grep.
-shift_out="$(bash "$GUARD" "$sandbox" 2>&1 || true)"
-if ! grep -q 'FLAG VALUE DRIFT' <<<"$shift_out"; then
-  echo "FAIL: shifted value tripped the guard but not via the FLAG VALUE DRIFT path"
-  echo "$shift_out"
-  exit 1
-fi
-echo "OK: shifted flag value is caught (the pre-#3054 partition-boundary bug)"
-restore
+expect_fail_with "shifted row-flag value is caught (the pre-#3054 partition-boundary bug)" \
+  'FLAG VALUE DRIFT'
 
 # 3. INVENTED flag name: the pre-#3054 `HAS_IS_MARKER`.
 sed_i 's/| `0x02` | `IS_MARKER`/| `0x02` | `HAS_IS_MARKER`/' "$sandbox/$SKILL_MD"
-if bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
-  echo "FAIL: guard did NOT trip on an invented flag name (HAS_IS_MARKER)"
-  exit 1
-fi
-echo "OK: invented flag name is caught"
-restore
+expect_fail_with "invented flag name is caught" \
+  "documents flag 'HAS_IS_MARKER'"
 
 # 4. DROPPED row: remove ROW_HAS_COMPLEX_DELETION from BOTH skill tables.
 sed_i '/`ROW_HAS_COMPLEX_DELETION`/d' "$sandbox/$SKILL_MD"
 sed_i '/`ROW_HAS_COMPLEX_DELETION`/d' "$sandbox/$REF_MD"
-if bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
-  echo "FAIL: guard did NOT trip when a real source constant is documented nowhere"
-  exit 1
-fi
-echo "OK: silently-dropped flag row is caught"
-restore
+expect_fail_with "silently-dropped flag row is caught" \
+  'documented in NONE of the skill flag tables'
 
 # 5. FAIL-CLOSED when the decoder source moved (a source split must not yield a
 #    vacuous PASS against a stale table).
-mv "$sandbox/$DECODER_DIR_REL/mod.rs" "$tmp/mod.rs.away"
+mv "$sandbox/$ROW_RS" "$tmp/mod.rs.away"
+out="$(bash "$GUARD" "$sandbox" 2>&1 || true)"
 if bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
   echo "FAIL: guard PASSED vacuously with the decoder source missing"
   exit 1
 fi
+grep -q 'decoder source not found' <<<"$out" || {
+  echo "FAIL: missing decoder source failed, but not via the fail-closed path"; echo "$out"; exit 1; }
 echo "OK: missing decoder source FAILs closed"
-mv "$tmp/mod.rs.away" "$sandbox/$DECODER_DIR_REL/mod.rs"
+mv "$tmp/mod.rs.away" "$sandbox/$ROW_RS"
 restore
 
 # 6. FAIL-CLOSED when the flag table is reformatted away entirely.
 sed_i '/^| `0x/d' "$sandbox/$SKILL_MD"
-if bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
-  echo "FAIL: guard PASSED with no parseable flag-table row (a reformat must fail closed)"
+expect_fail_with "reformatted-away flag table FAILs closed" \
+  'NO parseable flag-table row'
+
+# 7. SHIFTED CELL value, in the REFERENCE file (the only file carrying the cell table —
+#    without this mutant the entire CELL_* path is unproven).
+sed_i 's/| `0x08` | `USE_ROW_TIMESTAMP`/| `0x20` | `USE_ROW_TIMESTAMP`/' "$sandbox/$REF_MD"
+expect_fail_with "shifted CELL-flag value in the reference file is caught" \
+  'FLAG VALUE DRIFT'
+
+# 8. NAMESPACE swap: EXTENDED_IS_STATIC is a real constant with the real value 0x01, but
+#    documented inside the ROW flag-byte table. Name and value both check out — only the
+#    byte is wrong, which is the pre-#3054 confusion in its subtlest form.
+sed_i 's/| `0x01` | `END_OF_PARTITION`/| `0x01` | `EXTENDED_IS_STATIC`/' "$sandbox/$SKILL_MD"
+expect_fail_with "namespace swap (a real extended-byte flag documented in the row table) is caught" \
+  'FLAG NAMESPACE DRIFT'
+
+# 9. A NEW source flag the classifier does not recognize must FAIL CLOSED, not be
+#    silently exempted from "must be documented". Cassandra's extended byte really does
+#    define HAS_SHADOWABLE_DELETION = 0x02, so this is the realistic next addition.
+printf 'const HAS_SHADOWABLE_DELETION: u8 = 0x02;\n' >>"$sandbox/$ROW_RS"
+expect_fail_with "a new unclassified source flag FAILs closed (no silent allow-list exemption)" \
+  "unclassified u8 constant 'HAS_SHADOWABLE_DELETION'"
+
+# 9b. ...and the documented escape hatch works for a genuine non-flag constant.
+printf 'const SOME_TUNABLE: u8 = 0x07; // flag-table-lint-ignore\n' >>"$sandbox/$ROW_RS"
+if ! bash "$GUARD" "$sandbox" >/dev/null 2>&1; then
+  echo "FAIL: the flag-table-lint-ignore escape hatch did not exempt a non-flag constant"
+  bash "$GUARD" "$sandbox" || true
   exit 1
 fi
-echo "OK: reformatted-away flag table FAILs closed"
+echo "OK: flag-table-lint-ignore exempts a genuine non-flag constant"
 restore
 
-echo "PASS: test_check_skill_flag_tables.sh — all 6 assertions hold"
+# 10. A flag table that drifts out from under a recognizable heading must FAIL, not
+#     inherit a stale namespace from whatever heading happened to precede it.
+sed_i 's/^\*\*Cell Flags\*\*.*/**Assorted bits**/' "$sandbox/$REF_MD"
+expect_fail_with "a flag table under an unrecognized heading FAILs closed" \
+  'UNRECOGNIZED section heading'
+
+echo "PASS: test_check_skill_flag_tables.sh — all 10 assertions hold"

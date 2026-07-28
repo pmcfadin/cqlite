@@ -128,9 +128,12 @@ only.
 | `0x08` | `USE_ROW_TIMESTAMP` | Reuse the row timestamp; no cell timestamp is written |
 | `0x10` | `USE_ROW_TTL` | Reuse the row TTL **and** local_deletion_time; neither is written |
 
-> **Citations**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/row_data.rs:860-863`
-> (`CELL_IS_DELETED` `0x01`, `CELL_IS_EXPIRING` `0x02`, `CELL_USE_ROW_TIMESTAMP` `0x08`,
-> `CELL_USE_ROW_TTL` `0x10`) and `:282` (`HAS_EMPTY_VALUE` `0x04`). Guide:
+> **Citations**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/cell_value.rs:49-53`
+> — all five constants, in `parse_cell_value_schema_order`, the **production** cell
+> decoder (`CELL_IS_DELETED` `0x01`, `CELL_IS_EXPIRING` `0x02`, `CELL_HAS_EMPTY_VALUE`
+> `0x04`, `CELL_USE_ROW_TIMESTAMP` `0x08`, `CELL_USE_ROW_TTL` `0x10`). Cite this file, not
+> `row_data.rs:860-863` — that is a `#[cfg(test)]` mirror (`parse_cell_header_end_offset`)
+> carrying only four of the five. Guide:
 > `appendix-b-encodings-cheat-sheet.md:231-238`. Cassandra 5.0.8:
 > `db/rows/Cell.java:262-266` — `Cell.Serializer` declares these five `*_MASK` constants
 > and **no others**, so `0x20` and `0x40` are NOT cell flags (an earlier revision of this
@@ -288,7 +291,9 @@ Entry points:
 - `row_decoder/mod.rs` — flag constants (`END_OF_PARTITION`, `IS_MARKER`,
   `ROW_HAS_*`, `EXTENDED_IS_STATIC`) and the parser struct.
 - `row_decoder/row_framing.rs` — row/partition framing and boundary detection.
-- `row_decoder/row_data.rs`, `cell_value_scalar.rs`, `cell_value_complex.rs` — cell decode.
+- `row_decoder/cell_value.rs` — the production cell decoder + the five `CELL_*` flag
+  constants (`:49-53`). `row_data.rs`, `cell_value_scalar.rs`, `cell_value_complex.rs` —
+  the rest of the cell-decode ladder.
 - `row_decoder/complex_column.rs` — non-frozen collections; `frozen.rs` — frozen
   collections; `udt.rs` — UDTs; `partition_driver.rs` — partition iteration.
 
