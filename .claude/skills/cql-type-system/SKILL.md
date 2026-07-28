@@ -303,12 +303,19 @@ Detailed specifications in:
 
 ## Testing
 
-Generate type-correct test data:
+Generate type-correct test data (see the `test-data-management` skill for the full workflow):
 ```bash
-# Use test-data-management skill for Docker-based generation
-cd test-data
-./scripts/start-clean.sh
-./scripts/generate.sh
+# Full corpus regeneration (single-command, Docker)
+bash test-data/scripts/regenerate-datasets.sh
+
+# Or the CQL-type parity fixture specifically
+bash test-data/scripts/generate-cql-type-parity.sh
+
+# Or interactively via the compose stack
+bash test-data/scripts/start-clean.sh
+docker exec -it cqlite-cassandra-5-0 cqlsh   # run your INSERTs
+bash test-data/scripts/export.sh
+bash test-data/scripts/shutdown-clean.sh
 ```
 
 Validate parsing against sstabledump:
