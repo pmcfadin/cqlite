@@ -77,7 +77,7 @@ anchor the probe on `PASS|FAIL`.
 Refresh the claim liveness heartbeat at the two stage transitions you own — **at start**
 (when you begin the endgame) and **immediately before merge**:
 ```bash
-scripts/flow/claim-heartbeat.sh beat <N>
+bash scripts/flow/claim-heartbeat.sh beat <N>
 ```
 This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'s
 `age > 4h AND no open PR` rule.
@@ -88,7 +88,7 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    the only gate invocation that counts. The REQUIRED form (issue #2079) writes the block
    to a pre-chosen file so raw stdout never has to be read into context:
    ```bash
-   scripts/flow/claim-heartbeat.sh beat <N>
+   bash scripts/flow/claim-heartbeat.sh beat <N>
    AGENT_GATE_SUMMARY_FILE=/tmp/gate-<N>.txt \
      bash scripts/agent-gate.sh > gate-<N>.log 2>&1 < /dev/null   # via Bash run_in_background
    ```
@@ -173,7 +173,7 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    is SAFE because #2433 configured a real `required` check + `enforce_admins` on `main`
    (no empty `contexts=[]`, no bypass) — `--auto` can never merge against an unchecked head.
    ```bash
-   scripts/flow/claim-heartbeat.sh beat <N>
+   bash scripts/flow/claim-heartbeat.sh beat <N>
    gh pr merge <pr> --auto --squash --delete-branch
    ```
 6. **Finalize — two paths (the merge may land AFTER you exit).** `--auto` means the merge

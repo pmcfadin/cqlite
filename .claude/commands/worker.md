@@ -83,7 +83,7 @@ onto its own branch). Rules, non-negotiable:
    resumable claim) → write a `no-work` iteration marker (see step 9) and EXIT** — a cheap no-op iteration;
    the supervisor backs off before the next one (near a release the Ready column is *meant* to drain to
    zero; that is "done," not a cue to dredge labels for more). Refresh this machine's heartbeat on claim/
-   resume: `scripts/flow/claim-heartbeat.sh beat <N>` (#2089).
+   resume: `bash scripts/flow/claim-heartbeat.sh beat <N>` (#2089).
 3. **Claim it — the `claim.sh` ref is THE lock; acquire it FIRST, then create the worktree/branch as PR plumbing:**
    ```
    git -C ~/projects/cqlite fetch origin
@@ -129,7 +129,7 @@ onto its own branch). Rules, non-negotiable:
       fixed now (each re-triggers `fix → --lite re-cert (+ diff-relevant parity/integration target) →
       re-review`, NEVER a full gate — #2087); **nits** batched into ONE linked follow-up issue at merge time,
       never a re-verify round. When in doubt, blocker.
-   3. Open the PR (`Closes #<N>`); refresh the heartbeat (`scripts/flow/claim-heartbeat.sh beat <N>`).
+   3. Open the PR (`Closes #<N>`); refresh the heartbeat (`bash scripts/flow/claim-heartbeat.sh beat <N>`).
    4. **Spawn `flow-closer` (model: opus) for the endgame — you do NOT run the full gate yourself.** It runs
       THE full `scripts/agent-gate.sh` **exactly once** (the ONLY gate of record) via `run_in_background`
       with the summary-file pattern and **never idle-waits** (a subagent idle-waiting on a 12-25 min gate is
