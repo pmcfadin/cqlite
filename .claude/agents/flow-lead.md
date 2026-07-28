@@ -135,7 +135,10 @@ There is a shared **claim board** — a GitHub Project (v2) with a `Status` sing
 same item. The deciding cross-machine lock is the slugless fixed-name ref **`refs/claims/issue-<N>`**
 acquired via `bash scripts/flow/claim.sh claim <N>` (#2665 — assignee `@me` is identical for the same
 GitHub user on two machines, so assignee alone is NOT a lock; the `issue-<N>-<slug>` branch is PR
-plumbing, NOT the lock); a session claims the ref FIRST (git arbitrates the atomic push server-side),
+plumbing, NOT the lock). **`refs/claims/issue-<N>` and `refs/machine-claims/<machine>` are DISTINCT
+namespaces**: the former is the per-issue lock (`claim.sh`), the latter the supervisor-authored
+*machine-busy* stamp (#2655/#2499) that feeds the CI reaper — reading one as the other double-claims.
+A session claims the issue ref FIRST (git arbitrates the atomic push server-side),
 then creates the worktree/branch, sets assignee + `Status=In Progress` for visibility, and proceeds only
 on `CLAIM HELD`. See `flow-activate` / `flow-implement` for the steps and `flow-board`
 for the render + reaper. The claiming session also maintains a liveness **heartbeat**
@@ -210,7 +213,10 @@ near-independent issues instead of running one to done before starting the next:
   disagreement), so they are trustworthy for **cheap server-side candidate discovery**
   (`gh issue list --state open --label status:ready --json number,title` — narrowing, no board
   pagination) but are **NEVER the dispatch/claim authority**: ≤30-min mirror lag means the claim ref plus
-  a **fresh board read at claim time** remain the sole double-work arbiter. (`status:spec-review` /
+  a **fresh board read at claim time** remain the sole double-work arbiter. **Labels NARROW; the filtered
+  board read + the claim ref DECIDE.** Read the board with a **server-side filter**
+  (`gh project item-list <n> --owner <o> --query 'status:Ready' --format json -L 100`) — an unfiltered
+  `item-list` truncates on this 900+ item board and silently under-reports a column. (`status:spec-review` /
   `status:addressing` are transient skill-managed sub-markers the mirror does not touch.) Newly created
   issues auto-land at `Status=Backlog` (Project built-in "item added → Backlog"). "What's next" =
   highest-priority item whose **board `Status=Ready`** with **no `refs/claims/issue-<N>` claim ref**

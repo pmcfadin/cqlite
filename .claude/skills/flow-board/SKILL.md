@@ -11,19 +11,27 @@ and drive the **single** item waiting on them. Read-only render; the unblock ste
 owner unless a set is pre-authorized for merge-on-green.
 
 > **GitHub API resilience:** `gh issue`/`gh pr`/`gh project` writes ride the **GraphQL** bucket, which
-> throttles **separately** from REST (each 5k pts/hr, independent per-bucket windows). If GraphQL is
-> exhausted, issue the **same write** via its `gh api` REST endpoint (e.g. comment →
-> `repos/OWNER/REPO/issues/N/comments`, PR create → `repos/OWNER/REPO/pulls`). Never stall the board
-> sweep on one exhausted bucket. This is an **API-endpoint swap for the identical operation only** — it is
+> throttles **separately** from REST (each 5k pts/hr, independent per-bucket windows). GraphQL exhaustion
+> is **routine, not exotic** — fleet polling burns it (observed machine-wide on 2026-07-27). For a
+> **comment or a PR create, SWAP TO REST immediately; do NOT "retry" a hard-exhausted bucket** — retrying a
+> limit that resets on the hour is a hang, not a backoff:
+> ```bash
+> gh api -X POST repos/OWNER/REPO/issues/N/comments -F body=@/tmp/comment.md   # comment
+> gh api -X POST repos/OWNER/REPO/pulls -f title=… -f head=… -f base=main      # PR create
+> ```
+> Never stall the board sweep on one exhausted bucket. This is an **API-endpoint swap for the identical operation only** — it is
 > NOT a dispatch fallback: Path A (#1886) still holds, and selecting/claiming work from `status:*` labels
 > remains forbidden regardless of which API bucket is throttled.
 >
 > **MERGE HAS NO REST FALLBACK — `PUT repos/OWNER/REPO/pulls/N/merge` is FORBIDDEN.** That endpoint merges
 > **immediately**, bypassing the required-check wait that branch protection exists to enforce (#2433 —
 > GitHub-enforced merge gate, `enforce_admins=true`). The only sanctioned merge is
-> `gh pr merge --auto --squash --delete-branch`, which is **set-once/idempotent**: on a GraphQL throttle,
-> **sleep and retry the same `--auto` arm** (a re-arm on an already-armed PR is a safe no-op). Never
-> substitute REST for a merge, and never merge to "unblock" a throttled bucket.
+> `gh pr merge --auto --squash --delete-branch`. **Merge is the ONE operation with no REST swap** — the
+> REST fallback above is for *comments and PR creates*, never merges. `--auto` is
+> **set-once/idempotent**, so on a GraphQL throttle **sleep past the reset window and re-arm** (a re-arm on
+> an already-armed PR is a safe no-op) — and unlike a comment, a merge is never urgent enough to justify
+> bypassing the check wait. Never substitute REST for a merge, and never merge to "unblock" a throttled
+> bucket.
 
 ## Project-or-labels detection (shared by all flow-* skills)
 
@@ -76,10 +84,28 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    This is discovery only — it narrows candidates. It is **eventually consistent** (≤30-min mirror lag)
    and is **NEVER the dispatch/claim authority**: you MUST still confirm each candidate against the
    live board `Status` in step 6 and acquire the claim ref before working it.
-2. **Render the board.** If `have_project=1`, render from the Project (the authoritative view):
+
+   **The rule, plainly: labels NARROW candidates; the filtered board read + the claim ref DECIDE.** The lag
+   is real and bites both ways — an owner-captured snapshot from 2026-07-27 had #3054 (skill format tables)
+   at board `In Progress` and #3055 (flow doctrine) at `In Review` while **both** still carried
+   `status:ready`, and two freshly-promoted `Ready` P0s (#3058, #3068) carried **no** label yet. So a lead
+   who trusts the label can report an issue as available when an agent is already three stages into it,
+   **and** miss a just-promoted P0 entirely. This is #2855 behaving as designed, not a bug.
+2. **Render the board — FILTER SERVER-SIDE, never page the whole board.** If `have_project=1`, render
+   from the Project (the authoritative view). On this 900+ item board an **unfiltered** `item-list`
+   truncates and silently under-reports a column (it cost the owner a mis-reported Ready column on
+   2026-07-27). The fix is a **server-side Projects filter**, not a different API: `--query` takes
+   Projects filter syntax (`assignee:octocat`, `-status:Done`; **quote multi-word option names**), and the
+   filtered read is exact, faster, and cheaper than the GraphQL `projectItems` path. Owner-verified on the
+   live board: `status:Ready` returned 10 items in ~1.6s.
    ```bash
-   gh project item-list "$project_number" --owner "$project_owner" --format json --limit 200
+   gh project item-list "$project_number" --owner "$project_owner" --query 'status:Ready'         --format json -L 100
+   gh project item-list "$project_number" --owner "$project_owner" --query 'status:"In Progress"' --format json -L 100
+   gh project item-list "$project_number" --owner "$project_owner" --query 'status:"In Review"'   --format json -L 100
    ```
+   Read each lifecycle column with its own filtered call. Do NOT switch to GraphQL `projectItems` to
+   "avoid truncation" — that was a wrong diagnosis; and do NOT raise `-L` on an unfiltered list instead of
+   filtering.
    Show, per item: `#N (slug)  P?  Status  assignee  PR/CI  worktree`. Group by `Status`
    (`Backlog → Ready → In Progress → In Review → Done`); each `In Progress` item MUST show its assignee
    (the claiming session/owner). If `have_project=0`, you may render a **read-only** status view from
@@ -100,8 +126,17 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
    fixed-name **claim refs** are now THE lock (#2665); the `issue-<N>-<slug>` branch is only PR plumbing:
    ```bash
    bash scripts/flow/claim.sh status               # active claim refs: refs/claims/issue-<N> + holder + age
+   git ls-remote origin 'refs/claims/*'            # raw view of the per-issue lock namespace
    git ls-remote --heads origin "issue-*"          # legacy branch-locks (older workers) + PR heads
    ```
+   **Two DISTINCT ref namespaces — never conflate them, or you will double-claim:**
+   - `refs/claims/issue-<N>` — the **per-issue lock** (`claim.sh`, #2665). THE arbiter of who owns an issue.
+   - `refs/machine-claims/<machine>` — the **supervisor-authored machine claim** (#2655/#2499), stamped by
+     `worker-supervisor.sh` via `claim-heartbeat.sh stamp`. It records which *machine* is busy and feeds the
+     CI reaper's `should-reap` predicate. It is **NOT** an issue lock, and its presence/absence says nothing
+     about whether a given issue is claimable.
+   A `refs/machine-claims/` entry read as a per-issue claim (or vice versa) produces exactly the
+   double-claim the ref lock exists to prevent.
    Each `CLAIM: STATUS issue=<N>` line is an active claim (holder machine/actor + age); a matching
    legacy `issue-<N>-<slug>` branch, if any, is that claim's PR head (or an old-fleet branch-lock).
 4a. **Fleet view (issue #2089).** For each `In Progress` item, join the claim against the shared
