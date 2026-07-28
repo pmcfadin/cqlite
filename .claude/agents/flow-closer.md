@@ -176,18 +176,58 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    scripts/flow/claim-heartbeat.sh beat <N>
    gh pr merge <pr> --auto --squash --delete-branch
    ```
+
+   **(d) Reading the arm/merge outcome — three observed `--auto` behaviors, and the ONE
+   reliable merged-probe (#3042).** The arm command's exit code and the PR's `state` field
+   are both weak signals here. Three green-looking signals mean nothing:
+
+   - **`gh pr merge --auto` on an ALREADY-GREEN PR has three observed outcomes**:
+     accepted-and-queued; merged immediately; or **REJECTED** with
+     `Pull request is in clean status`. The rejection is not a failure to merge — it means
+     GitHub declined to *queue* a PR that has nothing left to wait for. The fallback is a
+     direct GraphQL `mergePullRequest` carrying `expectedHeadOid` set to your certified SHA
+     (the mutation refuses if the head moved, so it keeps the #2456 guarantee):
+     ```bash
+     gh api graphql -f query='mutation($pr:ID!,$oid:GitObjectID!){
+       mergePullRequest(input:{pullRequestId:$pr, expectedHeadOid:$oid, mergeMethod:SQUASH}){
+         pullRequest{ number mergedAt } } }' -f pr="$PR_NODE_ID" -f oid="<certified-sha>"
+     ```
+     A GraphQL **throttle** on this path is a retry, not a failure (see
+     `.claude/skills/ci-cd-validation/merge-process.md`). **`PUT /repos/.../pulls/N/merge`
+     (REST merge) is never the fallback** — it takes no head-oid expectation.
+   - **`--delete-branch` frequently EXITS NONZERO while the merge itself SUCCEEDED** —
+     `cannot delete local branch used by worktree` (observed 6 times in one session). The
+     branch-cleanup step fails *after* the merge lands. **A nonzero exit from
+     `gh pr merge` is NOT evidence the merge failed.** Verify the merge with `mergedAt`
+     (below), then clean the branch separately in `flow-finalize`.
+   - **The merge timestamp (`mergedAt` in `gh pr view --json` / GraphQL, `merged_at` in the
+     REST API — same field, two spellings) is the ONLY reliable probe that a PR merged.**
+     `state=open` with a populated `merge_commit_sha` is **NOT merged**: GitHub populates
+     `merge_commit_sha` *speculatively* for a merely MERGEABLE PR (it is the SHA of the
+     test-merge it computed), so reading that field as a merge receipt reports success on a
+     PR that never landed. Verified on this repo: four open PRs each carried a populated
+     `merge_commit_sha` with `merged_at=null` and `merged=false`. Likewise a bare `state`
+     read is ambiguous — REST `closed` covers both merged and abandoned. Probe:
+     ```bash
+     gh pr view <pr> --json mergedAt -q .mergedAt        # non-null ⇒ merged; null ⇒ NOT merged
+     gh api repos/{owner}/{repo}/pulls/<pr> --jq .merged_at   # REST spelling, same meaning
+     ```
+     Use the merge timestamp for every "did it merge?" decision in step 6 — never
+     `merge_commit_sha`, never a bare `state`, never the arm command's exit code.
 6. **Finalize — two paths (the merge may land AFTER you exit).** `--auto` means the merge
    can complete after this session ends, so finalize (telemetry, board, claim release) must
    not assume the PR is already merged. Choose:
    - **(b) Fast path — DEFAULT when the `required` check is already GREEN at arm time**
      (`gh pr checks <pr>` shows the required lane passed): `--auto` lands within seconds —
-     briefly confirm `gh pr view <pr> --json state -q .state` == `MERGED` (poll on the same
+     briefly confirm `gh pr view <pr> --json mergedAt -q .mergedAt` is **non-null** (per
+     step 5(d): `mergedAt`, not `state`, not `merge_commit_sha`; poll on the same
      hard-deadline discipline as the gate wait, NOT a tight loop), then run
      `flow-finalize <N>` in-session.
    - **(a) Deferred path — when the required check is still PENDING at arm time**: do NOT
      idle-wait for CI. Return `verdict: auto-armed` with the PR URL; the merge + finalize
      complete on a **later wake / next session** that first confirms
-     `gh pr view <pr> --json state -q .state` == `MERGED` before running `flow-finalize <N>`.
+     `gh pr view <pr> --json mergedAt -q .mergedAt` is **non-null** (step 5(d)) before
+     running `flow-finalize <N>`.
      The gate completion push-signal (#2667) and GitHub's own auto-merge notification are the
      callbacks — the summary file is a push signal now, not a poll target.
 
