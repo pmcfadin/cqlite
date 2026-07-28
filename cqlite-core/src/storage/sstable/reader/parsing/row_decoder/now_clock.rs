@@ -115,6 +115,13 @@ impl super::V5CompressedLegacyParser {
     pub fn now_secs(&self) -> i64 {
         self.now_secs
     }
+
+    /// Whether SELECT-semantic read shadowing is enabled on this parser (issue
+    /// #1741). Exposed alongside [`Self::now_secs`] so the single-generation
+    /// query path can ASSERT its decode posture rather than assume it (#3058).
+    pub fn read_shadowing(&self) -> bool {
+        self.read_shadowing
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +132,32 @@ mod tests {
     // directly with an explicit override argument — no env::set_var/remove_var,
     // no guard type, no #[serial]. There is no process-global mutation here for
     // any parallel test (in this binary or any other) to race.
+
+    /// Issue #3058: a caller-pinned `now` must REPLACE the ambient sample the
+    /// constructor took, and must not disturb the read-shadowing posture — the
+    /// two properties the single-generation query path depends on.
+    #[test]
+    fn caller_pinned_now_replaces_the_ambient_sample() {
+        let parser = crate::storage::sstable::reader::V5CompressedLegacyParser::new(
+            "ks".to_string(),
+            "tbl".to_string(),
+            0,
+            0,
+            None,
+        )
+        .with_read_shadowing(true);
+        let ambient = parser.now_secs();
+        let pinned = parser.with_now_secs(1_782_950_400);
+        assert_eq!(
+            pinned.now_secs(),
+            1_782_950_400,
+            "the caller's instant, not the ambient sample ({ambient})"
+        );
+        assert!(
+            pinned.read_shadowing(),
+            "pinning the clock must not disturb the read-shadowing posture"
+        );
+    }
 
     #[test]
     fn override_pins_now() {

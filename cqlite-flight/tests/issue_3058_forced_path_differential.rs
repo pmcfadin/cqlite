@@ -732,7 +732,10 @@ async fn forced_path_differential_agrees_on_every_shape() {
         }
         let root = datasets_root().join("sstables");
         let svc = CqliteFlightService::new(root, 8192);
-        let ticket = ticket_json(case.keyspace, case.table, &case.ddl);
+        let mut ticket = ticket_json(case.keyspace, case.table, &case.ddl);
+        if !case.columns.is_empty() {
+            ticket["columns"] = serde_json::json!(case.columns);
+        }
         if case.static_fallback {
             assert_static_falls_back(case.label, &svc, &ticket, case.pinned_now, &mut failures)
                 .await;
@@ -787,6 +790,8 @@ struct DatasetCase {
     /// `true` for a schema the predicate refuses (a STATIC column): the case
     /// asserts the fail-closed FALLBACK instead of an arm differential.
     static_fallback: bool,
+    /// Optional projection for the MAIN case (empty = `SELECT *`).
+    columns: Vec<&'static str>,
 }
 
 /// The pinned `now` the query-semantics oracle records for the
@@ -807,6 +812,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 2,
             pk_only_projection: vec!["id", "ck"],
             static_fallback: false,
+            columns: vec![],
         },
         DatasetCase {
             label: "cassandra/ttl_expired_live",
@@ -818,6 +824,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 1,
             pk_only_projection: vec!["id", "ck"],
             static_fallback: false,
+            columns: vec![],
         },
         DatasetCase {
             label: "cassandra/shadow_row_delete",
@@ -829,6 +836,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 3,
             pk_only_projection: vec!["id", "ck"],
             static_fallback: false,
+            columns: vec![],
         },
         // REAL Cassandra static shape: `sdata` was written by
         // `UPDATE static_clustering_shape SET sdata='static-val' WHERE id=1`
@@ -836,6 +844,36 @@ fn dataset_cases() -> Vec<DatasetCase> {
         // column, so the predicate REFUSES the fast path (the arms disagree on
         // static-row shape) — this case pins that fail-closed fallback on real
         // Cassandra bytes.
+        // Spec R7: a `frozen<UDT>` INSIDE a collection must still decode
+        // structurally on the fast arm — the warm reader's resolved UDT registry
+        // is threaded identically, so the arms must agree cell-for-cell.
+        DatasetCase {
+            label: "cassandra/collections_with_udts(frozen UDT in collection)",
+            pk_only_label: "cassandra/collections_with_udts@pk-only",
+            keyspace: "test_collections",
+            table: "collections_with_udts",
+            // The ticket DDL is parsed as ONE `CREATE TABLE`
+            // (`service::parse_schema` -> `parse_cql_schema`), while the UDT
+            // registry is resolved by scanning the SAME string for `CREATE TYPE`
+            // (`udt_registry_from_cql`) — so the table statement comes FIRST and
+            // the type statements follow it.
+            ddl: [
+                "CREATE TABLE collections_with_udts (user_id uuid PRIMARY KEY, addresses list<frozen<address_type>>, contacts set<frozen<contact_info>>, locations_visited map<date, frozen<address_type>>, emergency_contacts map<text, frozen<contact_info>>);",
+                "CREATE TYPE address_type (street text, city text, state text, zip_code text, country text);",
+                "CREATE TYPE contact_info (email text, phone text, address frozen<address_type>);",
+            ]
+            .join(" "),
+            pinned_now: ORACLE_PINNED_NOW,
+            min_rows: 1,
+            pk_only_projection: vec!["user_id"],
+            static_fallback: false,
+            // `contacts` / `emergency_contacts` are composite-keyed collections
+            // of frozen UDTs, which the MERGED-read assembler fails closed on
+            // (issue #2339) — so they cannot be part of an arm-vs-arm comparison.
+            // `addresses` is `list<frozen<address_type>>`, the frozen-UDT-inside-a
+            // -collection shape this case exists to compare.
+            columns: vec!["user_id", "addresses"],
+        },
         DatasetCase {
             label: "cassandra/static_clustering_shape(fail-closed static fallback)",
             pk_only_label: "cassandra/static_clustering_shape@pk-only",
@@ -848,6 +886,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             min_rows: 1,
             pk_only_projection: vec![],
             static_fallback: true,
+            columns: vec![],
         },
     ]
 }

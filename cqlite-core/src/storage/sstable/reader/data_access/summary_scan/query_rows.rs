@@ -25,9 +25,15 @@
 //!
 //! # Guarantees this surface makes to its caller
 //!
-//! * **Read shadowing is ON.** Both walks build their parser with
-//!   `build_v5_parser(true)` — asserted by `read_shadowing_is_enabled_on_the_query_walk`
-//!   in the sibling tests, not assumed.
+//! * **Read shadowing is ON.** Every source this module drives builds its parser
+//!   with `build_v5_parser(true)` — the Summary-guided walk
+//!   ([`SSTableReader::stream_partitions_summary_guided`]), the full-`Index.db`
+//!   walk ([`SSTableReader::stream_all_partitions_via_full_index`]) and the
+//!   windowed batched scan (`scan_stream_windowed`'s `drain_scan_window_blocking`).
+//!   That posture is asserted BEHAVIOURALLY, not by reading: the Flight
+//!   forced-path differential (`cqlite-flight/tests/issue_3058_forced_path_differential.rs`)
+//!   shows tombstoned/expired rows suppressed identically to the reconciling
+//!   merge arm, which is only possible with shadowing on.
 //! * **The TTL/expiry clock is the CALLER's.** `now_secs` is pinned onto the
 //!   parser ([`V5CompressedLegacyParser::with_now_secs`]), never re-sampled from
 //!   the wall clock, so a request that captured ONE reconciliation instant (and a
