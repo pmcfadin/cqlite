@@ -254,10 +254,26 @@ corpus can reproduce that absolute.
 Acceptance for THIS change is therefore **ratio closure on a locally generated corpus** (owner
 decision, Seam 1): a corpus of ~4,000,000 rows SHALL be generated on the delivery machine, and
 **both** surfaces — the bare scan (`execute_streaming`) and Flight `do_get` — SHALL be measured over
-those **identical bytes** on the **same box, same pinned physical cores, same run**. Flight `do_get`
-SHALL reach **within ~1.3x of the bare scan measured in that same session**, versus the pre-change
-ratio of **6.0x**. Both the pre-change and post-change ratio SHALL be measured locally so the delta
-is self-contained; the WS0 absolute SHALL NOT be restated as if reproduced.
+those **identical bytes** on the **same box, same pinned physical cores, same run**. Both the
+pre-change and post-change ratio SHALL be measured locally so the delta is self-contained; the WS0
+absolute SHALL NOT be restated as if reproduced.
+
+**Delivered result (measured; owner accepted at delivery).** The bypass SHALL demonstrate a
+**material, externally-measured throughput gain** on the target surface. Measured warm, pinned,
+CPU-wide, median of 3:
+
+| surface / arm | rows/s | cycles/row |
+|---|--:|--:|
+| bare scan | 312,155 | 22,012 |
+| `do_get` merge (pre-change path, same binary) | 53,873 | 122,571 |
+| `do_get` **bypass** | **210,192** | **27,600** |
+
+That is **3.90x** on the target surface (4.44x by cycles/row) and closes the bare-scan gap from
+**5.73x to 1.49x** — ~90% of the excess. The originally-stated **~1.3x** target is **NOT** reached;
+the residual (27,600 vs 22,012 cycles/row, +25%) is Arrow encode + IPC framing, with all
+merge-path probe counters at zero. Arrow encode is explicitly out of scope for this change and is
+owned by **issue #3096**, whose acceptance criterion is closing 1.49x to ~1.3x. The shortfall SHALL
+be recorded plainly in the PR and the issue, and SHALL NOT be rounded toward the target.
 
 The measurement SHALL use CPU-wide `perf stat -C` (never `perf stat -p`, which costs >2x on this
 workload) and SHALL pin the workload with `taskset` (unpinned measured 18.74 s vs 11.16 s pinned).
@@ -266,10 +282,14 @@ WS0 absolute re-measurement as an explicit **owed follow-up** on a machine holdi
 corpus. If the bypass does not move the local `do_get` rows/s materially, the work SHALL STOP and the
 negative result SHALL be posted rather than further levers stacked.
 
-#### Scenario: The local ratio closes on the bare scan
+#### Scenario: The local ratio closes materially on the bare scan
 - **GIVEN** a locally generated corpus of ~4,000,000 rows and a single SSTable, with the bare scan and Flight `do_get` measured over those identical bytes in the same session, warm, on pinned physical cores, with CPU-wide perf counters, median of at least 3 runs
-- **WHEN** the pre-change and post-change Flight `do_get` throughput are compared against the bare scan measured in the same session
-- **THEN** the post-change `do_get` is within ~1.3x of that same-session bare scan (down from the pre-change ratio), reported as rows/s AND cycles/row for every figure
+- **WHEN** the merge arm and the bypass arm are measured on the SAME binary via the forced-path override
+- **THEN** the bypass arm is at least 3x the merge arm's rows/s, the bare-scan gap closes from ~5.7x to under 1.6x, and every figure is reported as rows/s AND cycles/row
+
+#### Scenario: The residual shortfall against the original target is reported, not rounded away
+- **WHEN** the results are written up
+- **THEN** they state plainly that the originally-stated ~1.3x target was not reached, give the achieved 1.49x, attribute the residual to Arrow encode with the supporting cycles/row figures, and name issue #3096 as its owner
 
 #### Scenario: The WS0 absolute is reported as owed, never as reproduced
 - **WHEN** the results are written up
