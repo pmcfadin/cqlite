@@ -815,7 +815,7 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       an explicit JVM `-Xmx`. Corollary on *assumed* defaults: I reasoned "stock
       Cassandra on 30 GiB self-sizes to ~7.5 GiB heap, so the 17 GB victim must be
       the stress client." Wrong — `cassandra-env.sh` computes
-      `heap_limit=15872 MB` vs `half_system_memory=15776 MB` and picks **half of
+      `heap_limit=15872 MB` vs `half_system_memory=15775 MB` and picks **half of
       RAM = 15.4 GiB**, so the daemon was the victim. **Read the sizing code; do not
       infer a default from a remembered heuristic.** Second corollary, on recovery:
       after such a kill, **verify on-disk state before resuming** rather than
@@ -823,3 +823,12 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       having deleted 4 tracked fixtures (a `fetch-datasets.sh` run against a git
       checkout), and the other had produced only `.rlib`s with zero executables. Both
       resumed correctly from their transcripts once given the actual disk state.
+      Third corollary, on the WRITE-UP: a numbers-dense report needs its figures
+      fact-checked against the raw artifacts by an **adversarial reader**, because six
+      wrong figures survived authoring — a headline ratio built on the **mean of 2 runs
+      captioned "median of 3"**, a correctness digest that appeared in **no artifact**
+      (it was the other run mode's), a **per-hardware-thread** number presented as
+      per-physical-core, plus a bad multiplier, a foreign denominator and an
+      off-by-one line citation. **Standing rule: every derived figure must be
+      recomputed from the artifact it claims, and any figure whose artifact was not
+      retained must be labelled as such or re-measured — never quietly kept.**

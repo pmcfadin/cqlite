@@ -14,11 +14,13 @@ re-runnable method for it. Prior to this, every "we are slower than stock Cassan
 
 | Comparison | Result |
 |---|---|
-| **Read + materialise** (nothing shipped) | **CQLite is 1.18× stock Cassandra** — 367,760 vs 311,196 rows/s per physical core, warm |
-| **Ship every row to a client** | **CQLite Flight is 0.29× — Cassandra is 3.48× FASTER** — 61,151 vs 212,981 rows/s per physical core, warm |
+| **Read + materialise** (nothing shipped) | **CQLite is 1.18× stock Cassandra** — 367,760 rows/s (1 physical core) vs 311,196 (1 hardware thread), warm — mixed pinnings, see below |
+| **Ship every row to a client** | **CQLite Flight is 0.29× — Cassandra is 3.50× FASTER** — 60,892 vs 212,981 rows/s per physical core, warm |
 
-The 1.18× is deliberately conservative: it grants Cassandra its *better* pinning. At matched pinning it
-is 1.24×.
+The 1.18× grants Cassandra its *better* pinning (its 1-hw-thread figure against CQLite's 1-core figure).
+There are **two** matched pinnings and they straddle it rather than both beating it: 1-core↔1-core is
+**1.24×**, 1-hw-thread↔1-hw-thread is **1.13×** — *below* the headline. So treat 1.18× as mid-range, not
+as a conservative floor.
 
 This is **not** a CQLite win. On the read path the advantage is a margin, not a multiple. On the honest
 end-to-end surface — the only one comparable to Cassandra actually serving rows to a client — CQLite
@@ -35,7 +37,7 @@ writing. Follow-ups filed: **#3058** (the dominant, confirmed cause), #3060, #30
 | | Value |
 |---|---|
 | Instance | **c7i.4xlarge** — 16 vCPU / **8 physical cores**, Xeon Platinum 8488C (Sapphire Rapids) |
-| Memory | 30 GiB + a 16 GiB swapfile (`vm.swappiness=10`), added mid-run — see §8 |
+| Memory | 30 GiB + a 16 GiB swapfile (`vm.swappiness=10`), **added mid-run** as an OOM safety valve, not a tuning change (see the heap note below) |
 | Storage | **EBS only.** Both devices report `Amazon Elastic Block Store` (`nvme0n1`→`/`, `nvme1n1`→`/data`) |
 | Kernel | 6.17.0-1019-aws |
 | Cassandra | **5.0.8** (`1722270...`), OpenJDK 17.0.19 |
@@ -52,9 +54,11 @@ writing. Follow-ups filed: **#3058** (the dominant, confirmed cause), #3060, #30
 `cassandra.yaml` deltas are **paths + listen/rpc addresses only**, with one exception:
 
 **`MAX_HEAP_SIZE=8G` was set explicitly.** Stock auto-sizing on a 30 GiB box does **not** give ~7.5 GiB:
-`cassandra-env.sh` computes `heap_limit=15872 MB` and `half_system_memory=15776 MB`, and because half <
+`cassandra-env.sh` computes `heap_limit=15872 MB` (`:54`, exact) and `half_system_memory=15775 MB`
+(`:21` uses `free -m` = 31551 on this box, and `expr 31551 / 2` = 15775), and because half <
 limit it selects **half of RAM → a 15.4 GiB heap** (confirmed: an unbounded daemon reported
-`Heap Memory (MB): 766.41 / 15776.00`). An unbounded daemon is what OOM-killed this box (§8). Since
+`Heap Memory (MB): 766.41 / 15776.00`). An unbounded daemon is what OOM-killed this box (recorded in
+`head-to-head-method.md` §6 and `ws0-corpus/rerun.sh:40-45`; not an `fio` matter, so not in §8). Since
 `file_cache_enabled=false` (§5), heap size should have little effect on a scan — but it is stated rather
 than assumed. `HEAP_NEWSIZE` deliberately left unset: this build uses G1 and `cassandra-env.sh`
 warns/ignores it under G1.
@@ -135,7 +139,7 @@ Median of 3 replicates, spread <±2%. Physical core = CPUs 2+10.
 | CQLite scan+Arrow | 1 hw thr | 215,207 | 149.1 | 42.2 | 15,564 | 2.03 | 14,147 |
 | CQLite scan+Arrow | 1 core | 227,531 | 157.6 | 44.6 | *20,611* | 1.58 | 14,208 |
 | CQLite Flight | 1 hw thr | 55,593 | 38.5 | 10.9 | 60,825 | 2.39 | 30,914 |
-| CQLite Flight | 1 core | 61,151 | 42.4 | 12.0 | *96,198* | 1.52 | 32,188 |
+| CQLite Flight | 1 core | 60,892 | 42.2 | 11.9 | *96,260* | 1.52 | 32,438 |
 | **COLD** (1 run each) | | | | | | | |
 | Cassandra `count(*)` | 1 core | 295,717 | 204.8 | 57.9 | *22,675* | 1.80 | 10,604 |
 | Cassandra `SELECT *` | 1 core | 209,023 | 144.8 | 41.0 | *30,593* | 1.69 | 18,740 |
@@ -144,10 +148,14 @@ Median of 3 replicates, spread <±2%. Physical core = CPUs 2+10.
 | CQLite Flight | 1 core | 59,542 | 41.2 | 11.7 | *96,767* | 1.52 | 32,910 |
 
 `cyc/row` and IPC are valid only on the **1-hw-thread** rows (SMT sibling idle). Starred figures are the
-2-sibling sum and double-count core cycles. MB/s basis: uncompressed 2,770,741,510 B, compressed
-783,799,203 B — always state which.
+2-sibling sum and double-count core cycles. **The `mem B/row` column carries the same caveat and is
+equally 1-hw-thread-only** — a busy SMT sibling pollutes `l2_lines_in.all` (§10.5), and the effect is
+large, not marginal: CQLite bare scan reads **1,240** B/row at 1 hw thread vs **1,933** at 1 core, a 56%
+gap on a headline metric. All five COLD rows are 1-core and inherit this. MB/s basis: uncompressed
+2,770,741,510 B, compressed 783,799,203 B — always state which.
 
-**Cold ≈ warm within ~5% on every arm, both engines. This workload is not I/O-bound on this box.**
+**Cold ≈ warm within ~6.3% worst case (CQLite scan+Arrow 1-core, 227,531→213,117); all other arms within
+4.6%. This workload is not I/O-bound on this box.**
 
 ### Fairness of the comparators
 
@@ -159,8 +167,13 @@ Median of 3 replicates, spread <±2%. Physical core = CPUs 2+10.
   leg and mildly favours CQLite on the serialization leg.
 - **Cassandra's `count(*)` does not skip cell deserialisation** (verified from the profile), so it is a
   fair read-path comparator rather than a flattering one.
-- **Correctness held**: CQLite returned exactly 3,999,890 rows / 12 cells per row, digest
-  `0x4903ffa446163c4b`, stable across every run and matching Cassandra's two oracles.
+- **Correctness held**: CQLite returned exactly 3,999,890 rows, digest **`0xd1fba762150c532c`** — the
+  `--no-fold` digest used for every reported number, and identical in **all 21** run artefacts that record
+  one (21 of 21 `summary-*` and 21 of 21 `scan-*.json`; the 5 Flight summaries carry no digest field, so
+  the Flight arm is row-count-verified only) — matching Cassandra's two oracles on the row count.
+  (`0x4903ffa446163c4b` is the separate once-per-change `--fold` check; it appears in no run artifact.) **"12 cells per row" is unverified here**: it follows
+  from the 12-column DDL, but the two summaries carrying a cell counter record `"cells": 0`, so this
+  baseline did not measure it.
 
 ---
 
@@ -202,17 +215,25 @@ Source: `cassandra-5.0.8` tag. All verified by hand against the source.
 
 ### Empirically confirmed on the live node
 
-- **Chunk cache OFF**, four ways: `system_views.settings` shows `file_cache_enabled false`; `nodetool info`
-  prints no `Chunk Cache` line (and `Info.java:126-140` swallows `InstanceNotFoundException`, so absence
-  means the MBean was never registered); a 6.07 MB `sjk mxdump` of the live JVM contains **0** occurrences
-  of "ChunkCache" while KeyCache/RowCache/CounterCache are present; startup Config dump agrees.
+- **Chunk cache OFF**, three independent ways: `system_views.settings` shows `file_cache_enabled false`
+  (evidence A1); `nodetool info` prints no `Chunk Cache` line while KeyCache/RowCache/CounterCache **are**
+  present (evidence A2 — and `Info.java:126-146` swallows `InstanceNotFoundException`, so absence means
+  the MBean was never registered); the startup Config dump agrees (A4).
+  *Not load-bearing:* evidence A3 attempted an MBean-name grep of a live-JVM dump and recorded
+  `ChunkCache MBean name occurrences: 0` — but it also records `(sjk mxdump unavailable)`. **No dump was
+  retained and no dump size was recorded, so A3 is not independently verifiable and should not be cited
+  as the strongest line.** (The KeyCache/RowCache/CounterCache positive control belongs to A2, above, not
+  to A3.) The conclusion stands on A1/A2/A4.
   *Red herring:* the log line `Global buffer pool limit is 512.000MiB for chunk-cache` **is** emitted —
   that is the buffer *pool*, not the cache.
 - **256 KiB preads**, on a cold full scan: **4,041 of 4,067 preads (99.4%) were exactly 262,144 B**; the
   `[16K,32K)` bucket is **empty**; not one 16 KiB pread. The remainder were sub-16 KiB metadata reads plus
   one 250,787 B short read at EOF. `max_hw_sectors_kb=256` caps *device* I/O at 256 KiB, so the **syscall**
   histogram is the load-bearing evidence, not the device one.
-- **1.3520× syscall-level read amplification** (1,059,659,423 requested vs a 783,799,203 B file), because
+- **~1.352× syscall-level read amplification** (1,059,659,423 B **returned** to userspace — `rchar` counts
+  bytes returned, not requested — vs a 783,799,203 B file; **1.3520×**). The *requested* counter from
+  bpftrace (`@pread_req_bytes`, a different run) is 1,059,588,899 B → **1.3519×**. The distinction is
+  immaterial to the conclusion, but state which counter you mean. This happens because
   the readahead buffer is per-thread and two ReadStage threads re-fetched each other's blocks. The page
   cache absorbed it — device reads were **1.0002×** the file size — so it costs syscall+memcpy CPU, not
   I/O. Consequence: the same per-thread keying that makes the buffer merge-safe makes it redundant across
@@ -224,17 +245,22 @@ Source: `cassandra-5.0.8` tag. All verified by hand against the source.
 
 ### Measured memory bandwidth — the assumed 8 GB/s/core is CONSERVATIVE
 
-STREAM-style, arrays ≥512 MiB (4.9× the 105 MiB L3), re-verified at 2 GiB with identical results, pinned
-to distinct physical cores.
+STREAM-style, arrays ≥512 MiB (4.9× the 105 MiB L3), re-verified at 2 GiB with identical results.
+**This table mixes two run sets — read the pin column.** The 4/8/16-thread rows come from the pinned
+sweeps (`stream-with-read.txt`, `readbw-scaling.txt`); the two quoted 1-thread figures come from the
+*unpinned* quiet runs (`stream-1t-quiet.txt`, `readbw-1t-quiet.txt`), so the pinned 1-thread pure-read
+value is given alongside them.
 
-| Threads | Triad GB/s | Pure Read GB/s | Read GB/s per core |
-|--:|--:|--:|--:|
-| 1 | 13.49 | **10.84** | **10.84** |
-| 4 | 49.07 | 41.78 | 10.45 |
-| 8 (all physical) | 85.22 | **81.16** | **10.15** |
-| 16 (SMT) | 88.99 | 94.20 | — |
+| Threads | pin | Triad GB/s | Pure Read GB/s | Read GB/s per core |
+|--:|---|--:|--:|--:|
+| 1 | unpinned (quiet) | 13.49 | **10.84** | **10.84** |
+| 1 | pinned (core 0) | 13.21 | **10.73** | **10.73** |
+| 4 | pinned | 49.07 | 41.78 | 10.45 |
+| 8 (all physical) | pinned | 85.22 | **81.16** | **10.15** |
+| 16 (SMT) | pinned | 88.99 | 94.20 | — |
 
-Saturation ≈ 89 GB/s triad / 94 GB/s read. **8 GB/s/core is achievable and conservative by 27–35%**, and
+Saturation ≈ 89 GB/s triad / 94 GB/s read. **8 GB/s/core is achievable and conservative — the measured
+single-core pure read is 34% above it on the pinned 10.73 and 35% above it on the unpinned 10.84** — and
 survives the all-cores case where such assumptions usually die.
 
 *Caveat:* the STREAM Copy/Scale/Add/Triad convention undercounts DRAM traffic (stores incur
@@ -246,11 +272,22 @@ actual DRAM bytes.
 Uncore IMC counters **do not exist in this VM** (hard null): `/sys/bus/event_source/devices/` has only
 `breakpoint cpu kprobe msr software tracepoint uprobe`; `LLC-load-misses` is `<not supported>`;
 `longest_lat_cache.miss`/`cache-misses`/`offcore_requests.*` appear in `perf list` but count **exactly 0**
-(hypervisor-masked); no `/sys/fs/resctrl`, no `/sys/class/powercap`.
+(hypervisor-masked); `/sys/fs/resctrl` absent entirely, and `/sys/class/powercap` present **but empty**
+(no RAPL zones), which is equally useless but is not the same fact.
 
-Validated proxy: **`l2_lines_in.all × 64`**, calibrated against ground truth at three working-set scales —
-**+1.2%** accurate at 512 MiB (≫ L3), ~340× over at 32 MiB (L3-resident), ~0 at 1 MiB (L2-resident). So it
-equals DRAM traffic **only** when the working set exceeds L3.
+Validated proxy: **`l2_lines_in.all × 64`**, calibrated against analytic ground truth at three
+working-set scales with `ws0-cqlite/membw_cal.c` (medians of 3 replicates, `passes=340`, `taskset -c 2`;
+retained output: `ws0-results/membw-calibration.txt`) —
+
+| working set | vs bytes touched | vs analytic DRAM traffic | verdict |
+|---|--:|--:|---|
+| 512 MiB (4.9× L3) | **+1.08%** | **1.0×** | proxy **is** DRAM traffic |
+| 32 MiB (< L3, > L2) | +0.74% | **342.5× over** | proxy measures L3→L2 refill |
+| 1 MiB (< L2) | −99.34% (**~0**) | — | proxy collapses; nothing leaves L2 |
+
+So it equals DRAM traffic **only** when the working set exceeds L3. (`passes` must be large: `membw_cal`
+memsets before starting its own timer while `perf` counts the whole process, so one extra buffer-fill
+amortizes as ~1/passes — the same 512 MiB point reads +15.5% at `passes=8` and +1.1% at `passes=340`.)
 
 ```bash
 taskset -c 2 perf stat -e cycles,instructions,l2_lines_in.all,l2_lines_out.non_silent -- <workload>
@@ -258,10 +295,13 @@ taskset -c 2 perf stat -e cycles,instructions,l2_lines_in.all,l2_lines_out.non_s
 ```
 
 **CQLite bare scan measures 1,240 B/row on this 783 MB (>L3) corpus vs the modeled 4.4 KB — ~3.5× too
-high.** At 291.7k rows/s that is 0.55 GB/s ≈ **5% of one core's bandwidth**, with IPC 2.67–3.73.
+high.** At the 350,580 rows/s measured on the same 1-hw-thread arm that is **0.435 GB/s ≈ 4.0% of one
+core's 10.84 GB/s**, with IPC 2.67–3.73. (The earlier "0.55 GB/s ≈ 5%" mixed in a 291.7k rows/s figure
+that is not a WS0 measurement; the corrected, self-consistent figure is *lower*, so it **strengthens** the
+not-memory-bound conclusion.)
 
 > **T3 (~1.8M rows/s/core, "memory-bandwidth bound") does not survive.** Both inputs were wrong in the
-> same direction: bandwidth is 27–35% *higher* than assumed and traffic per row is ~3.5× *lower*. This
+> same direction: bandwidth is 34–35% *higher* than assumed and traffic per row is ~3.5× *lower*. This
 > scan is **instruction-throughput-bound**, not memory-bound, and the umbrella's "memory bandwidth binds
 > before cycles" framing is refuted.
 
@@ -270,14 +310,17 @@ Suspected origin of the error: the modeled 4.4 KB/row is numerically identical t
 per *row*).
 
 **Limit on the proxy, stated:** it equals DRAM traffic only for the tight Rust scan. Cassandra's 9,650
-B/row (~12× its decompressed stream) and Arrow's 14,147 B/row are JVM allocation/GC and Arrow-builder
-churn refilling from **L3** — for those arms the figure is an upper bound, not DRAM traffic.
+B/row is **13.9× its own decompressed stream** (9,650 / the measured 692.70 B/row), and Arrow's 14,147
+B/row is likewise inflated; both are JVM allocation/GC and Arrow-builder churn refilling from **L3** — for
+those arms the figure is an upper bound, not DRAM traffic. (The earlier "~12×" divided Cassandra's rate by
+*CQLite's* 243 MB/s decompression floor, which is not "its" own stream — Cassandra's is 215.6 MB/s.)
 
 ### Do the tiers survive contact with Cassandra?
 
-**Yes — but the framing does not.** Stock Cassandra sits at 311k rows/s/phys-core on the read path,
-~0.52× T1, so the tiers need not be re-derived from its numbers. But T1 (600k) would **extend a lead
-CQLite already holds**, while the real deficit is the 3.48× shipping-path loss.
+**Yes — but the framing does not.** Stock Cassandra sits at **297,653 rows/s per physical core** on the
+read path (the `1 core` row of §4 — *not* §1's 311,196, which is its 1-hardware-thread figure), ~**0.50×**
+T1, so the tiers need not be re-derived from its numbers. But T1 (600k) would **extend a lead CQLite
+already holds**, while the real deficit is the 3.50× shipping-path loss.
 
 ---
 
@@ -302,9 +345,9 @@ Both bounds confirmed arithmetically:
   network round trip, so locality buys nothing. Do not model a sequential-scan advantage on EBS.
 
 Volume type **inferred** gp3 @ default 125 MiB/s / 3,000 IOPS (no AWS API credentials): the layout write
-plateaued at 125.3 MiB/s, both 1M arms pinned at 125.2 MiB/s (stddev 0.9), and 300 s sustained showed
-**no decay**, ruling out gp2. Also `max_hw_sectors_kb=256`, so the kernel splits each 1 MiB request into
-4× 256 KiB device I/Os.
+plateaued at 125.3 MiB/s, both 1M arms pinned at 125.2 MiB/s (stddev 0.9 randread / 1.0 seqread), and
+300 s sustained showed **no decay**, ruling out gp2. Also `max_hw_sectors_kb=256`, so the kernel splits
+each 1 MiB request into 4× 256 KiB device I/Os.
 
 > **AC#2 remains OPEN.** These are correct **c7i/EBS** numbers, and they **cannot** replace the i4i
 > instance-store denominator this AC exists to correct: prior work's 711.8 MB/s figure is **5.4×** what
@@ -318,28 +361,44 @@ plateaued at 125.3 MiB/s, both 1M arms pinned at 125.2 MiB/s (stddev 0.9), and 3
 1. **The 288,725 rows/s Cassandra reference is CLIENT-bound, not a Cassandra capability.** Reproduced
    exactly at `--inflight 1` (292,849 rows/s / 13.66 s); with concurrency the same warm scan reaches
    **2,086,231 rows/s** full-box — **7.1× higher**. Never quote it as Cassandra throughput.
+   *(The 292,849 / 13.66 s and 2,086,231 figures are recorded in `head-to-head-method.md` F3–F7 only; no
+   raw run artefact was retained. The 288,725 rows/s reference itself is backed, by
+   `ws0-corpus/claims-evidence.txt`.)*
 2. **"No k-way merge on either side" is FALSE for Flight** — CQLite's Flight producer runs
    merge/compaction reconciliation unconditionally, even on one SSTable (#3058). True for the bare scan.
-3. **CQLite mmaps `Data.db` here — it does not issue ~4.4 KB reads.** Two `r--s` mappings of 783,799,203 B;
+3. **CQLite mmaps `Data.db` here — it does not issue ~4.4 KB reads.** Two `r--s` mappings of 783,799,203 B
+   *(the mapping observation is recorded in `head-to-head-method.md` F3–F7; no raw run artefact retained)*;
    the entire scan makes **115 `read()` syscalls / 3.08 MB `rchar`** (metadata only), vs Cassandra's ~4,190
-   preads / 1.0596 GB. **This does not reproduce the "99.3% of reads in [4K,8K), rareq-sz 4.4 KB" ground
-   truth** — the discrepancy (surface? build? resolved disk-access mode?) is unresolved and is a
-   prerequisite for #3031. Syscall counts across engines are descriptive only.
-4. **Arrow encode is 59% of cycles / 37% of throughput on this corpus — not 15–20%.** Wide blob/text rows
-   make the Arrow payload 2.70 GB ≈ the entire uncompressed dataset (675 B/row copied).
+   preads / 1.0596 GB — those four are artefact-backed. **This does not reproduce the "99.3% of reads in
+   [4K,8K), rareq-sz 4.4 KB" ground truth** — the discrepancy (surface? build? resolved disk-access mode?)
+   is unresolved and is a prerequisite for #3031. Syscall counts across engines are descriptive only.
+4. **Arrow encode costs +59% cycles per row and −37% throughput on this corpus — not 15–20%.** Stated
+   unambiguously, because two different quantities collide on "59/37": on the single `cq-warm-*-1t` runs
+   Arrow *raises* cycles/row by **+59.0%** (15,430 vs 9,704) — an increase, not a share — and Arrow's
+   *share* of total cycles is **37%**, coincidentally the same number as the throughput loss. The
+   median-of-3 §4 table values are **+60.6% cycles** (15,564 vs 9,692) and **−38.6% throughput** (215,207
+   vs 350,580); prefer those. Wide blob/text rows make the Arrow payload 2.70 GB ≈ the entire
+   uncompressed dataset (675 B/row copied).
 5. **`perf stat -p` costs >2× on the CQLite scan** (163K vs 360K rows/s; ~540K context switches saving
    per-task counters). **All figures here use CPU-wide `-C`.** This artefact alone would publish a
-   2.1×-wrong ratio.
+   2.1×-wrong ratio. *(The 360K rows/s unmetered and ~540K context-switch figures are recorded in
+   `head-to-head-method.md` F3–F7; no raw run artefact retained.)*
 6. **Unpinned CQLite is SLOWER than pinned** (18.74 s vs 11.16 s; 1.98M vs 310K voluntary context
-   switches) — the `tokio::sync::mpsc` handoff is the scaling limiter.
+   switches) — the `tokio::sync::mpsc` handoff is the scaling limiter. *(Recorded in
+   `head-to-head-method.md` F3–F7; no raw run artefact retained.)*
 7. **rows/s is not portable across row shapes.** On one core across four shipped tables: 81.2k → 629.4k
    rows/s, a **7.8× spread**; `test_comp.lz4_table` hit 290.0k on a bare single-thread scan, numerically
    near the 291.7k Flight reference on a totally different shape. **Fix the row shape or the number is
-   meaningless** — hence both arms here use one table.
-8. **Cassandra emits a trailing zero-length chunk**: `chunkCount == ceil(dataLength/chunkLength) + 1`
-   (measured 169,114 vs `ceil` 169,113; final chunk 9 B; reproduced in all 6 SSTables). CQLite's reader is
-   safe (reads `chunk_count` from the header) but its unwired compressed *writer* omits it — recorded on
-   #1406.
+   meaningless** — hence both arms here use one table. *(The 81.2k/629.4k, 290.0k and 291.7k inputs come
+   from earlier harness validation, not from a WS0 artefact, and are unverifiable here; the 7.8×
+   arithmetic on them is correct.)*
+8. **Cassandra emits a trailing zero-length chunk**: `chunkCount == ceil(dataLength/chunkLength) + 1`.
+   **Independently re-verified by re-parsing this corpus's `nb-16-big-CompressionInfo.db`**: `chunkCount`
+   **169,114** vs `ceil(2,770,741,510 / 16,384)` = **169,113**, and the 9 B chunk (5 B LZ4 payload + 4 B
+   CRC) is **uniquely the last**, index 169113 — it is the single smallest stored chunk in the file. The
+   earlier "reproduced in all 6 SSTables" observation is **not** backed by retained artefacts (only the
+   final compacted SSTable was kept). CQLite's reader is safe (reads `chunk_count` from the header) but its
+   unwired compressed *writer* omits it — recorded on #1406.
 
 ---
 
@@ -387,6 +446,17 @@ Artifacts on the measurement box: corpus `/home/ubuntu/ws0/ws0-corpus/` (`rerun.
   Target PIDs explicitly.
 - **Do not run `fetch-datasets.sh` against a git checkout** — it deleted 4 tracked commitlog fixtures
   during this work.
+- **roborev, three traps, all measured on this box:**
+  - `.roborev.toml` sets `exclude_patterns = ['docs/**', '*.md']`, so a **docs-only diff has zero
+    reviewable content** — roborev returns "No issues found / no code changes to review". That is a
+    vacuous pass, not a code review. Do not report it as review coverage of a report like this one.
+  - **CLAUDE.md's prescribed `--model gpt-5.6-sol` is REJECTED by the installed codex-cli 0.142.5**
+    (`The 'gpt-5.6-sol' model requires a newer version of Codex`). codex **auth is fine** (`Logged in
+    using personal access token`) and `~/.codex/config.toml` carries no model pin, so the doctrine claim
+    that the model is configured there does not hold here. The **working invocation is**
+    `roborev review --branch --base origin/main --agent codex --model gpt-5.5 --wait` (verified).
+  - The `claude-code` roborev agent fails separately with `Failed to authenticate: OAuth session expired
+    and could not be refreshed` — a different failure from the model rejection above; do not conflate them.
 
 ### Surfaces that would flatter CQLite — do not measure with these
 
@@ -415,7 +485,7 @@ Artifacts on the measurement box: corpus `/home/ubuntu/ws0/ws0-corpus/` (`rerun.
 ## 12. Follow-ups filed
 
 - **#3058** (P1, confirmed) — Flight `do_get` runs k-way merge/compaction reconciliation unconditionally
-  on a single SSTable. The dominant cause of the 3.48× shipping-path loss.
+  on a single SSTable. The dominant cause of the 3.50× shipping-path loss.
 - **#3060** (P2, observed once) — `cqlite-flight` may never exit when signalled mid-stream.
 - **#3061** (P3, observed once) — 1,017 MiB peak RSS with `Data.db` mapped twice; also asks whether the
   `<128MB` target is measured correctly at all.
