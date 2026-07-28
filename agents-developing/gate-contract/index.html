@@ -457,17 +457,31 @@ read it:</p>
 <p><strong>Set <code dir="auto">AGENT_GATE_SUMMARY_FILE=/path</code> before running.</strong> The gate writes the
 complete SUMMARY to that exact path with plain redirection, so the file is
 complete no matter what happens to stdout. <code dir="auto">cat</code> it afterward; it always
-contains the full block (start marker → <code dir="auto">RESULT:</code> → end marker). Prefer
-<code dir="auto">run_in_background</code> (or a long timeout) so a subagent never idle-waits on the
-gate and gets watchdog-killed (issue #1855).</p>
+contains the full block (start marker → <code dir="auto">RESULT: PASS</code>/<code dir="auto">RESULT: FAIL</code> → end
+marker). Prefer <code dir="auto">run_in_background</code> (or a long timeout) so a subagent never
+idle-waits on the gate and gets watchdog-killed (issue #1855).</p>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#C5E478;--1:#3B61B0">AGENT_GATE_SUMMARY_FILE</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#ECC48D;--1:#3B61B0">/tmp/gate-summary.txt</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#ECC48D;--1:#3B61B0">bash</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/agent-gate.sh</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#7FDBCA;--1:#096E72">></span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">gate.log</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#7FDBCA;--1:#096E72">2>&#x26;1</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#7FDBCA;--1:#096E72">&#x3C;</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">/dev/null</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">cat</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">/tmp/gate-summary.txt</span><span style="--0:#D6DEEB;--1:#403F53">   </span><span style="--0:#919F9F;--1:#5F636F"># complete SUMMARY, even if gate.log truncated</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="AGENT_GATE_SUMMARY_FILE=/tmp/gate-summary.txt \  bash scripts/agent-gate.sh > gate.log 2>&#x26;1 < /dev/nullcat /tmp/gate-summary.txt   # complete SUMMARY, even if gate.log truncated"><div></div></button></div></figure></div>
 </li>
-<li>
-<p><strong>If you don’t set it,</strong> the gate writes the same complete block to the
+</ul>
+<blockquote>
+<p><strong>Completion probe — anchor on <code dir="auto">PASS|FAIL</code>; <code dir="auto">INCOMPLETE</code> is a liveness placeholder,
+not a verdict (#3041; mechanism follow-up #2908).</strong> The gate writes
+<code dir="auto">RESULT: INCOMPLETE (gate did not finish)</code> into <code dir="auto">$AGENT_GATE_SUMMARY_FILE</code> <strong>at
+launch</strong> (its EXIT-trap startup sentinel, written <em>before</em> the #1825 slot is even
+acquired) and only <em>overwrites</em> it with <code dir="auto">RESULT: PASS</code>/<code dir="auto">RESULT: FAIL</code> on completion.
+The placeholder is deliberate — it makes a killed/orphaned gate detectable — but it
+means a bare <code dir="auto">grep -q</code> on the bare <code dir="auto">RESULT:</code> token is satisfied the instant the gate starts, before a
+single component has run. An agent polling that way can read a just-launched (or
+queued) gate as a finished one and advance toward merge on a verdict that does not
+exist. The only correct predicate is:</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">grep</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-qE</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#ECC48D;--1:#984E4D">RESULT: (PASS|FAIL)</span><span style="--0:#D9F5DD;--1:#111111">'</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C5E478;--1:#3B61B0">$AGENT_GATE_SUMMARY_FILE</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">   </span><span style="--0:#919F9F;--1:#5F636F"># a VERDICT ⇒ gate finished</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="grep -qE &#x27;RESULT: (PASS|FAIL)&#x27; &#x22;$AGENT_GATE_SUMMARY_FILE&#x22;   # a VERDICT ⇒ gate finished"><div></div></button></div></figure></div>
+<p>A terminal <code dir="auto">RESULT: INCOMPLETE</code> means “still running, or died” — never a certification.</p>
+</blockquote>
+<ul>
+<li><strong>If you don’t set it,</strong> the gate writes the same complete block to the
 documented default <code dir="auto">$PWD/.agent-gate-summary.txt</code> (gitignored). If your streamed
 capture looks truncated (missing the <code dir="auto">==== END AGENT-GATE SUMMARY ====</code>
-marker), <code dir="auto">cat</code> that file — it is always complete.</p>
-</li>
+marker), <code dir="auto">cat</code> that file — it is always complete.</li>
 </ul>
 <blockquote>
 <p><strong>Concurrency caveat (#1175):</strong> the default <code dir="auto">$PWD/.agent-gate-summary.txt</code> is

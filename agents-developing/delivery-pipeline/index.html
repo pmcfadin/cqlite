@@ -467,7 +467,10 @@ doubt, blocker.</li>
 <li><strong>The disposable <code dir="auto">flow-closer</code> owns the endgame (issue #2084/#2668).</strong> <code dir="auto">flow-implement</code> opens the PR, then
 spawns a per-issue <code dir="auto">flow-closer</code> that runs the ONE full <code dir="auto">scripts/agent-gate.sh</code> of record (via
 <code dir="auto">run_in_background</code> + the summary-file pattern — it <strong>never idle-waits</strong>, which would trip the #1855 stall
-watchdog and orphan the gate; polling the summary file is mandatory on a hard 45-min deadline), the <strong>C</strong>
+watchdog and orphan the gate; polling the summary file is mandatory on a hard 45-min deadline, with
+<code dir="auto">grep -qE 'RESULT: (PASS|FAIL)'</code> — never a bare <code dir="auto">grep -q</code> on the bare <code dir="auto">RESULT:</code> token, which also matches the startup
+<code dir="auto">RESULT: INCOMPLETE</code> liveness placeholder and would accept a just-launched gate as a verdict, #3041),
+the <strong>C</strong>
 intent audit, the final roborev pass, then merges on green and <code dir="auto">flow-finalize</code>s. The closer has <strong>no
 <code dir="auto">Agent</code> tool</strong>, so it never spawns directly: for <strong>C</strong> (and any src-design fix) it emits a structured
 <code dir="auto">NEEDS-SPAWN</code> packet and ends its turn — the lead spawns <code dir="auto">spec-auditor</code>/<code dir="auto">sstable-developer</code> and re-invokes

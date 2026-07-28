@@ -321,7 +321,7 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
 * **Review-first is the default (issue #2086).** `rust-reviewer` + roborev run on the **lite-green** diff **before** the first full gate, so review discovers fixable problems before we pay for the 12–25 min gate. Skip only for a genuinely mechanical diff (no `pub`-item change AND single call site AND no new surface).
 * **Scoped re-cert, one full gate (issue #2087).** A roborev blocker that touches src re-certifies with `scripts/agent-gate.sh --lite` (blast-radius-scoped) + any diff-relevant parity/integration target — NOT a full gate. The single full gate of record runs **once**, immediately pre-merge; lite re-certs (their `MODE: lite` marker) are never the gate of record.
 * **Severity-triaged findings (issue #2088).** Findings are classified per the [roborev severity rubric](https://github.com/pmcfadin/cqlite/blob/main/docs/development/roborev-severity.md): **blockers** (correctness, data-parity, no-heuristics, safety, wiring-evidence, security, any acceptance criterion) are fixed pre-merge; **nits** (style, naming, comment/doc polish, no-repro test suggestions) are batched into ONE linked follow-up issue at merge time and never trigger a re-verify round. When in doubt, blocker.
-* **The disposable `flow-closer` owns the endgame (issue #2084/#2668).** `flow-implement` opens the PR, then spawns a per-issue `flow-closer` that runs the ONE full `scripts/agent-gate.sh` of record (via `run_in_background` + the summary-file pattern — it **never idle-waits**, which would trip the #1855 stall watchdog and orphan the gate; polling the summary file is mandatory on a hard 45-min deadline), the **C** intent audit, the final roborev pass, then merges on green and `flow-finalize`s. The closer has **no `Agent` tool**, so it never spawns directly: for **C** (and any src-design fix) it emits a structured `NEEDS-SPAWN` packet and ends its turn — the lead spawns `spec-auditor`/`sstable-developer` and re-invokes the closer with the result. It returns only a terminal packet (verdict, PR URL, summary-file path, ≤10 lines residual), so gate stdout and review churn die with its context instead of accreting in the lead session. Any src change after the full gate INVALIDATES it — the gate of record must postdate the final src change and rebase.
+* **The disposable `flow-closer` owns the endgame (issue #2084/#2668).** `flow-implement` opens the PR, then spawns a per-issue `flow-closer` that runs the ONE full `scripts/agent-gate.sh` of record (via `run_in_background` + the summary-file pattern — it **never idle-waits**, which would trip the #1855 stall watchdog and orphan the gate; polling the summary file is mandatory on a hard 45-min deadline, with `grep -qE 'RESULT: (PASS|FAIL)'` — never a bare `grep -q` on the bare `RESULT:` token, which also matches the startup `RESULT: INCOMPLETE` liveness placeholder and would accept a just-launched gate as a verdict, #3041), the **C** intent audit, the final roborev pass, then merges on green and `flow-finalize`s. The closer has **no `Agent` tool**, so it never spawns directly: for **C** (and any src-design fix) it emits a structured `NEEDS-SPAWN` packet and ends its turn — the lead spawns `spec-auditor`/`sstable-developer` and re-invokes the closer with the result. It returns only a terminal packet (verdict, PR URL, summary-file path, ≤10 lines residual), so gate stdout and review churn die with its context instead of accreting in the lead session. Any src change after the full gate INVALIDATES it — the gate of record must postdate the final src change and rebase.
 * **Division of labor.** An implementer subagent (`sstable-developer`) edits/commits/pushes and verifies with `--lite`/targeted tests **only** — it must **never** invoke the full gate.
 
 Every gate invocation — full and `--lite` — uses the **summary-file redirect** by default (`AGENT_GATE_SUMMARY_FILE=<path> … > gate.log 2>&1 < /dev/null`, then `cat <path>`); raw gate stdout is never read into a persistent agent context (issue #2079). See the [gate contract](/cqlite/agents-developing/gate-contract/) for the summary-file default and the `accelerators:` line.
@@ -479,17 +479,32 @@ Row flags reference:
 
 [Section titled “Step 4: Compare against Cassandra source”](#step-4-compare-against-cassandra-source)
 
-When CQLite behaviour diverges from the spec:
+When CQLite behaviour diverges from the spec, read the Cassandra source **at the pinned `cassandra-5.0.8` tag** — CQLite targets the Cassandra 5.0 on-disk format, and any other line (`trunk`, `6.0-alpha`, …) is a *different* format:
 
 ```bash
-# Local Cassandra 5.0 source
-grep -n "deserializeRowBody" ~/local_projects/cassandra/src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java | head -20
+# Authority: a PINNED TAG READ (never a working tree)
+git show cassandra-5.0.8:src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java \
+  | grep -n "deserializeRowBody" | head -20
 
 
-# Remote: https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java
+# Browse the same pin:
+# https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java
 ```
 
-Key Cassandra source files:
+A local clone is optional and branch-sensitive (#3041)
+
+There is **no guaranteed Cassandra clone path** on an agent machine, and a clone that exists may be checked out on a **non-5.0 branch** (a real one here sat on `6.0-alpha`) — reading its working tree produces a **confidently-wrong 5.0 answer** that no gate can catch. If you use a clone, read through the tag ref, never the checked-out files:
+
+```bash
+git -C "${CQLITE_CASSANDRA_REPO:?set to a Cassandra clone}" fetch --tags -q
+git -C "$CQLITE_CASSANDRA_REPO" show cassandra-5.0.8:<java path>
+```
+
+A CQLite `file:line` is NEVER format authority
+
+Citing CQLite’s own code to justify CQLite’s behavior is **circular reasoning**. Format authority is, in order: (1) the pinned `cassandra-5.0.8` Cassandra source, (2) `sstabledump` output, (3) `docs/sstables-definitive-guide/`. A CQLite source line is evidence of *what CQLite does*, never of *what is correct*.
+
+Key Cassandra source files (read each as `git show cassandra-5.0.8:src/java/org/apache/cassandra/<file>`):
 
 | File                                              | Relevance                                 |
 | ------------------------------------------------- | ----------------------------------------- |
@@ -791,13 +806,21 @@ cat /tmp/gate-summary.txt   # complete SUMMARY block; gate.log is never read int
 
 This is the default because it is **also** the robust path. Under **non-foreground** capture (a `script`/pty, a buffering wrapper, a “drain-until-EOF then write” reader, or a backgrounded pipeline) a streamed SUMMARY block can be lost entirely: a gate component sometimes leaks a descendant (a `cargo`/`rustc` build server, a daemonizing test, etc.) that keeps the gate’s stdout pipe open, so an until-EOF reader never sees EOF, gets killed by a timeout, and discards its in-memory buffer — even though the gate exited 0. (Detaching the gate’s *own* stdout cannot fix this: the leaked child still holds its inherited copy of the pipe write-end.) The summary file does not depend on the stream at all — pick the path in advance and read it:
 
-* **Set `AGENT_GATE_SUMMARY_FILE=/path` before running.** The gate writes the complete SUMMARY to that exact path with plain redirection, so the file is complete no matter what happens to stdout. `cat` it afterward; it always contains the full block (start marker → `RESULT:` → end marker). Prefer `run_in_background` (or a long timeout) so a subagent never idle-waits on the gate and gets watchdog-killed (issue #1855).
+* **Set `AGENT_GATE_SUMMARY_FILE=/path` before running.** The gate writes the complete SUMMARY to that exact path with plain redirection, so the file is complete no matter what happens to stdout. `cat` it afterward; it always contains the full block (start marker → `RESULT: PASS`/`RESULT: FAIL` → end marker). Prefer `run_in_background` (or a long timeout) so a subagent never idle-waits on the gate and gets watchdog-killed (issue #1855).
 
   ```bash
   AGENT_GATE_SUMMARY_FILE=/tmp/gate-summary.txt \
     bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
   cat /tmp/gate-summary.txt   # complete SUMMARY, even if gate.log truncated
   ```
+
+> **Completion probe — anchor on `PASS|FAIL`; `INCOMPLETE` is a liveness placeholder, not a verdict (#3041; mechanism follow-up #2908).** The gate writes `RESULT: INCOMPLETE (gate did not finish)` into `$AGENT_GATE_SUMMARY_FILE` **at launch** (its EXIT-trap startup sentinel, written *before* the #1825 slot is even acquired) and only *overwrites* it with `RESULT: PASS`/`RESULT: FAIL` on completion. The placeholder is deliberate — it makes a killed/orphaned gate detectable — but it means a bare `grep -q` on the bare `RESULT:` token is satisfied the instant the gate starts, before a single component has run. An agent polling that way can read a just-launched (or queued) gate as a finished one and advance toward merge on a verdict that does not exist. The only correct predicate is:
+>
+> ```bash
+> grep -qE 'RESULT: (PASS|FAIL)' "$AGENT_GATE_SUMMARY_FILE"   # a VERDICT ⇒ gate finished
+> ```
+>
+> A terminal `RESULT: INCOMPLETE` means “still running, or died” — never a certification.
 
 * **If you don’t set it,** the gate writes the same complete block to the documented default `$PWD/.agent-gate-summary.txt` (gitignored). If your streamed capture looks truncated (missing the `==== END AGENT-GATE SUMMARY ====` marker), `cat` that file — it is always complete.
 
@@ -1350,12 +1373,20 @@ rg -n "\.unwrap()" cqlite-core/src/ --glob '!*.rs.bk'
 
 [Section titled “Cassandra source reference”](#cassandra-source-reference)
 
-When the CQLite parser behaviour diverges from Cassandra’s:
+When the CQLite parser behaviour diverges from Cassandra’s, the authority is the Cassandra source read **at the pinned `cassandra-5.0.8` tag** — CQLite targets the Cassandra **5.0** on-disk format:
 
-* Local copy: `~/local_projects/cassandra` (Cassandra 5.0 source)
-* Remote: <https://github.com/apache/cassandra/tree/cassandra-5.0.0>
+```bash
+git show cassandra-5.0.8:src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java
+```
+
+* Browse the same pin: <https://github.com/apache/cassandra/tree/cassandra-5.0.8>
 * Key file: `src/java/org/apache/cassandra/io/sstable/format/big/UnfilteredSerializer.java`
 * Key file: `src/java/org/apache/cassandra/db/rows/Cell.java`
+* **A local clone is OPTIONAL and BRANCH-SENSITIVE (#3041).** No clone path is guaranteed to exist on a given machine (`~/local_projects/cassandra` is absent on the agent machines), and one that does exist may be checked out on a non-5.0 line — `trunk`/`6.0-alpha` is **not** the 5.0 format. If you use a clone (`$CQLITE_CASSANDRA_REPO`), read through the tag ref (`git -C "$CQLITE_CASSANDRA_REPO" show cassandra-5.0.8:<path>`), never its working tree.
+
+A CQLite `file:line` is NEVER format authority
+
+Citing CQLite’s own code to justify CQLite’s behavior is **circular reasoning**. Format authority is, in order: (1) the pinned `cassandra-5.0.8` Cassandra source, (2) `sstabledump` output, (3) `docs/sstables-definitive-guide/`. A CQLite source line — everything mapped on this page — is evidence of *what CQLite does*, never of *what is correct*.
 
 # Spec-driven audit
 

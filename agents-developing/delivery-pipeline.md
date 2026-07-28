@@ -392,7 +392,10 @@ implement (TDD) → lite (each fix round) → rust-reviewer + roborev on the lit
 - **The disposable `flow-closer` owns the endgame (issue #2084/#2668).** `flow-implement` opens the PR, then
   spawns a per-issue `flow-closer` that runs the ONE full `scripts/agent-gate.sh` of record (via
   `run_in_background` + the summary-file pattern — it **never idle-waits**, which would trip the #1855 stall
-  watchdog and orphan the gate; polling the summary file is mandatory on a hard 45-min deadline), the **C**
+  watchdog and orphan the gate; polling the summary file is mandatory on a hard 45-min deadline, with
+  `grep -qE 'RESULT: (PASS|FAIL)'` — never a bare `grep -q` on the bare `RESULT:` token, which also matches the startup
+  `RESULT: INCOMPLETE` liveness placeholder and would accept a just-launched gate as a verdict, #3041),
+  the **C**
   intent audit, the final roborev pass, then merges on green and `flow-finalize`s. The closer has **no
   `Agent` tool**, so it never spawns directly: for **C** (and any src-design fix) it emits a structured
   `NEEDS-SPAWN` packet and ends its turn — the lead spawns `spec-auditor`/`sstable-developer` and re-invokes
