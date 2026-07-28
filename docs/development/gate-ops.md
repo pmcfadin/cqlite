@@ -350,6 +350,49 @@ Corollaries:
 - The reader contract still applies on top of this: validate the block's `run-id:` line and read `tree-integrity:` alongside the verdict (#2874/#2926) — a foreign `RESULT: PASS` is a peer's verdict, not yours.
 - The stronger *mechanism* fix (a distinct `.running` sentinel that cannot be misread, plus a pin in `scripts/tests/test_agent_gate_summary.sh`) is tracked in **#2908**; #3041 corrected the documented predicate everywhere.
 
+## Liveness diagnosis: is my gate alive, queued, or dead? (issue #3042)
+
+The sentinel above tells you a gate has not *finished*; it says nothing about whether it is still
+running. Diagnosing that wrongly is expensive in both directions — killing and relaunching a healthy
+queued gate wastes 15–25 min, and waiting on a dead one wastes the whole session. Use these probes,
+in this order:
+
+- **The authoritative aliveness probe is the gate LOG FILE's mtime advancing.** A live gate writes
+  continuously; a dead one stops. Sample it twice, a minute or two apart:
+  ```bash
+  stat -f %m gate-<N>.log   # macOS; GNU: stat -c %Y
+  ```
+  An advancing mtime means alive, full stop. (You are only reading the *timestamp* here — never read
+  `gate-<N>.log`'s contents into context; the SUMMARY file remains the only gate text you retain.)
+- **`ps` is unreliable for this** and should not be your primary signal. A gate spends long stretches
+  inside child `cargo`/`nextest`/`rustc` processes under different names, and a **queued** gate is
+  legitimately running no cargo at all — so "I don't see it in `ps`" is not evidence of death.
+- **`waiting for gate slot (N in use)…` means QUEUED and ALIVE, not hung.** Under the #1825 cap a
+  gate can sit in the queue for 20+ minutes before executing anything. It already has a
+  sentinel-bearing summary file (written before the slot is granted), so neither the file's existence
+  nor its `INCOMPLETE` content is progress. A queued gate's wall-clock does not count against an
+  active-gate deadline — extend the deadline by the observed queue wait
+  (`.claude/agents/flow-closer.md` step 1).
+- **A missing slot daemon IS meaningful evidence of death — but only comparatively.** Each live full
+  gate has its own background `scripts/lib/gate_slot_daemon.py` holding its slot for as long as the
+  gate process lives. So the total absence of *your own* gate's daemon **while sibling gates' daemons
+  are present** is real evidence your gate died (the daemon polls the gate PID and exits when it
+  vanishes). No daemons at all for anyone is inconclusive — the cap fails open when `python3` or the
+  daemon script is unavailable, and `--lite`/`--delta`/`--only` runs never take a slot.
+  ```bash
+  pgrep -fl gate_slot_daemon.py   # one line per gate currently holding a slot
+  ```
+- **Gate slot acquisition is NOT FIFO.** The daemon sweeps the N slot lockfiles with non-blocking
+  `flock` and retries the whole sweep after a poll interval, so there is no queue order and no
+  fairness guarantee: a gate that started waiting later can win a freed slot first, and an unlucky
+  gate can be passed over repeatedly. Do not infer "my gate must be next" from having waited longest,
+  and do not read a long wait as a stall.
+
+Putting it together: an `INCOMPLETE` summary + an advancing log mtime = **alive, keep waiting**. An
+`INCOMPLETE` summary + a log mtime frozen for many minutes + your daemon absent while peers' daemons
+are present = **dead, relaunch**. Anything else is inconclusive — prefer waiting to relaunching, and
+report `gate-timeout` on the hard deadline rather than guessing.
+
 ## Nested / concurrent-gate isolation (issue #2874)
 
 The gate of record is **structurally immune** to nested and concurrent gate activity — no box-exclusive ops rule and no "serialize every self-test lane" discipline is needed. The historical `#2751` workaround ("run the full gate **without** `AGENT_GATE_SUMMARY_FILE`") is **OBSOLETE**: the summary-file redirect invocation (`AGENT_GATE_SUMMARY_FILE=… bash scripts/agent-gate.sh`) is once again the documented default for callers, and running it concurrently with another lane's gate self-tests on the same box is safe. Three mechanisms guarantee this:
