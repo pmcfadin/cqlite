@@ -446,6 +446,15 @@ shortest byte sequence that sorts strictly greater than the previous block’s l
 greater than this block’s first key.</li>
 <li><code dir="auto">RowIndexWriter.complete(endPos)</code> appends one final “nudged” separator so the last block has an
 upper bound.</li>
+<li>Separator BYTES are produced by <code dir="auto">ClusteringComparator.asByteComparable</code>, whose
+<code dir="auto">ByteComparableClustering</code> emits a <code dir="auto">NEXT_COMPONENT</code> byte (<code dir="auto">0x40</code>,
+<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/bytecomparable/ByteSource.java#L69"><code dir="auto">ByteSource.java</code></a>)
+<strong>before every component, including the first</strong>
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/ClusteringComparator.java#L260"><code dir="auto">ClusteringComparator.java:260–275</code></a>:
+worked example <code dir="auto">("A", 0005) → 40 4100 40 0005 40</code>). So a single <code dir="auto">int</code> clustering <code dir="auto">ck = 8</code>
+separator is <code dir="auto">40 80 00 00 08</code>, not the bare <code dir="auto">80 00 00 08</code>. Row-index separators carry <strong>no</strong>
+<code dir="auto">TERMINATOR</code> (<code dir="auto">0x38</code>): <code dir="auto">separatorGt</code>/<code dir="auto">nudge</code> produce clustering PREFIXES, not complete
+clusterings, so the trailing terminator of a full <code dir="auto">ByteComparableClustering</code> is absent on disk.</li>
 </ul>
 <p>Two consequences follow, and they are the format’s contract rather than a reader’s choice:</p>
 <ol>
@@ -458,15 +467,44 @@ payload at all, which a well-formed <code dir="auto">Rows.db</code> trie does no
 “Prefix/range navigation” above.</li>
 </ol>
 <blockquote>
-<p><strong>CQLite note.</strong> CQLite’s reader computes the <code dir="auto">TrieIndexEntry</code> base as
-<code dir="auto">rows_offset + key_length</code>, omitting Cassandra’s 2-byte short-length prefix
-(<code dir="auto">cqlite-core/src/storage/sstable/bti/parser/rows.rs</code>). Walking from that position lands two bytes
-before the real root, which is why CQLite has historically described the first block as
-“unindexed”: from the wrong root, the empty-key root payload is not reachable. Decoding the real
-<code dir="auto">da-2-bti-Rows.db</code> fixture from Cassandra’s base yields <strong>39</strong> payload entries (the empty-key
-entry plus 38 separators) where CQLite’s base yields 38. This is a CQLite defect, not a property
-of the BTI format.</p>
+<p><strong>CQLite note (fixed in issue #3002).</strong> CQLite’s reader used to compute the <code dir="auto">TrieIndexEntry</code> base
+as <code dir="auto">rows_offset + key_length</code>, omitting Cassandra’s 2-byte short-length prefix. Walking from that
+position landed two bytes before the real root, which is why CQLite historically described the
+first block as “unindexed”: from the wrong root the empty-key root payload is not reachable.
+Decoding the real <code dir="auto">da-2-bti-Rows.db</code> fixture from Cassandra’s base yields <strong>39</strong> payload entries
+(the empty-key entry plus 38 separators) where the old base yielded 38. Both the reader
+(<code dir="auto">resolve_rows_db_entry</code>) and the BTI writer (<code dir="auto">write_trie_index_entry</code>) now use
+<code dir="auto">rows_offset + 2 + key_length</code>, and CQLite’s OSS50 clustering-bound encoder emits the leading
+<code dir="auto">0x40 NEXT_COMPONENT</code> byte the on-disk separators carry (the two defects previously cancelled).
+Pinned by <code dir="auto">cqlite-core/tests/issue_3002_bti_rows_root_base.rs</code>.</p>
 </blockquote>
+<div class="sl-heading-wrapper level-h4"><h4 id="root-placement-invariant-enforced-at-read-time">Root placement invariant (ENFORCED at read time)</h4><a class="sl-anchor-link" href="#root-placement-invariant-enforced-at-read-time"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Root placement invariant (ENFORCED at read time)”</span></a></div>
+<p>The row-index trie is written by an incremental, page-aware writer that serializes <strong>children
+before parents</strong> (<code dir="auto">IncrementalTrieWriterPageAware</code>; <code dir="auto">RowIndexWriter.complete</code> returns the root it
+wrote last), and <code dir="auto">BtiTableWriter.IndexWriter.append</code> writes the partition’s <code dir="auto">TrieIndexEntry</code>
+<strong>immediately after</strong> that trie body
+(<a href="https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiTableWriter.java#L184"><code dir="auto">BtiTableWriter.java:184–187</code></a>).
+Two properties of the on-disk layout follow, for any writer:</p>
+<ol>
+<li>the root node precedes its entry (<code dir="auto">root &#x3C; RowsOffset</code>), and</li>
+<li>the root is the <strong>last</strong> node written before the entry, so <strong>the root’s serialized extent — its
+structure plus any attached <code dir="auto">IndexInfo</code> payload — ends EXACTLY at <code dir="auto">RowsOffset</code></strong>.</li>
+</ol>
+<p>CQLite ENFORCES (2) when it resolves a <code dir="auto">TrieIndexEntry</code> (<code dir="auto">validate_rows_trie_root</code>, issue #3002): a
+resolved root whose extent does not end at the entry is refused, and the clustering read degrades to
+a full-partition decode. Consequences for anyone changing the reader or the writer:</p>
+<ul>
+<li>A writer must not emit padding, alignment, or any other trailing byte between the root node and
+the entry — that byte moves the root’s extent end below <code dir="auto">RowsOffset</code> and the row index becomes
+unusable at read time (correct rows, no narrowing).</li>
+<li>A node-shape change (new payload field, different <code dir="auto">DeletionTime</code> width) must be reflected in the
+reader’s extent computation in the same change, or every root stops validating.</li>
+<li>Two node shapes are additionally refused as roots: a <code dir="auto">SingleNoPayload</code> ordinal (1/3), which cannot
+carry block 0’s payload, and <code dir="auto">PayloadOnly</code> (ordinal 0) with <code dir="auto">payloadBits == 0</code>, which is childless
+AND payload-less and so indexes nothing (<code dir="auto">TrieNode.typeFor</code> never emits it).</li>
+<li>The check is necessary, not sufficient: a wrongly-based offset can coincidentally end at
+<code dir="auto">RowsOffset</code> and still validate. It bounds the damage; it does not certify the file.</li>
+</ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="performance-considerations-and-benchmark-methodology">Performance Considerations and Benchmark Methodology</h2><a class="sl-anchor-link" href="#performance-considerations-and-benchmark-methodology"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Performance Considerations and Benchmark Methodology”</span></a></div>
 <p>Note: Provide methodology and harness only; do not claim specific results here.</p>
 <ul>
