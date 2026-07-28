@@ -385,6 +385,11 @@ fn finish_blocking_drain(
 /// Inputs the blocking parse half needs that the I/O half resolves once up front
 /// (so the blocking task does not have to touch the async runtime).
 struct WindowParseCtx {
+    /// Issue #3058: caller-pinned read-time TTL clock (`None` = the parser's own
+    /// ambient sample). Set by a caller that already captured ONE reconciliation
+    /// instant for the request (the Flight single-source fast path), so TTL
+    /// expiry is decided at exactly that instant on every partition of the scan.
+    now_secs: Option<i64>,
     // Issue #1578: no `table_id` — the stitch path does not filter by it (see the
     // parse closure in `run_scan_stream_windowed`).
     start_key: Option<RowKey>,
@@ -413,6 +418,8 @@ impl SSTableReader {
         end_key: Option<RowKey>,
         schema: Option<crate::schema::TableSchema>,
         cursor: &ScanCursor,
+        // Issue #3058: caller-pinned read-time TTL clock (`None` = ambient).
+        now_secs: Option<i64>,
         // Which public surface to adapt the internal batched stream to (issue
         // #1592): per-row (flatten) or batched (straight-through). The rest of the
         // driver — I/O feed, blocking parse, join, backpressure — is identical for
@@ -433,6 +440,7 @@ impl SSTableReader {
         // the blocking task never touches the async runtime. Schema resolution
         // matches the previous `parse_stitched_stream` resolution exactly.
         let ctx = WindowParseCtx {
+            now_secs,
             start_key,
             end_key,
             schema: schema.or_else(|| self.get_table_schema(None)),
@@ -749,6 +757,11 @@ impl SSTableReader {
         // read shadowing (partition/range tombstone + TTL), so build the parser
         // with read_shadowing = true.
         let parser = self.build_v5_parser(true);
+        // Issue #3058: honor the caller's pinned reconciliation clock.
+        let parser = match ctx.now_secs {
+            Some(now) => parser.with_now_secs(now),
+            None => parser,
+        };
         // Sliding front-cursor window (issue #1589): compacts once per refill.
         let mut window = WindowCursor::new();
         let mut broke = false;
@@ -987,6 +1000,15 @@ impl SSTableReader {
 
             match step {
                 ParseStep::Emitted(consumed) => {
+                    // Work-probe (issue #2398, extended by #3058): one partition
+                    // body decoded on the WINDOWED scan path — the counterpart to
+                    // the index-driven walks' per-partition increment. Recorded on
+                    // the CONFIRMED emit (never on NeedMore), so a partition
+                    // straddling a chunk boundary counts exactly once. Without it
+                    // the single-source `do_get` fast path (issue #3058), which
+                    // drives this path for a full-ring scan, would decode bodies
+                    // that no scan-work counter ever saw.
+                    crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
                     let take = if consumed == 0 { 1 } else { consumed };
                     // Advance the cursor (no memmove); `consume` clamps to remaining.
                     window.consume(take);

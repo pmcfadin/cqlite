@@ -53,6 +53,7 @@ use std::sync::Arc;
 
 use super::ScanTokenBound;
 use crate::storage::scan_cancel::ScanCancel;
+use crate::storage::sstable::reader::scan_stream_windowed::scan_admission::ScanAdmission;
 use super::super::full_index_stream::FullIndexStreamOutcome;
 use super::super::super::SSTableReader;
 use crate::types::ScanRow;
@@ -142,8 +143,8 @@ impl SSTableReader {
                             ))
                         })?;
                     rt.block_on(drive_query_rows(
-                        &self,
-                        &schema,
+                        self,
+                        schema,
                         token_bound,
                         now_secs,
                         &thread_cancel,
@@ -174,18 +175,42 @@ impl SSTableReader {
 
 /// Drive the single-generation walk, batching rows into `tx`.
 ///
-/// Routing: Summary-guided + token-scoped first (#2412/#2413, no out-of-range
-/// partition body is read); on a pre-emit `FellBack`, the full-`Index.db`
-/// streaming walk (full ring — the caller's downstream token filter still bounds
-/// the result); on a second pre-emit `FellBack`, [`QueryRowBatch::Unsupported`].
+/// # Source selection (issue #3058)
+///
+/// Both sources are single-generation, read-shadowed and clock-pinned; they
+/// differ in which cost they avoid, and the choice is made from the request's
+/// own authoritative shape — the presence of a token bound — never from a guess:
+///
+/// * **No token bound (a full-ring scan).** The WINDOWED batched scan
+///   (`scan_stream_batched_admitted`) — the exact path the bare `SELECT`
+///   full scan uses. It walks the data section directly, so it pays NO
+///   `partition_slice_fully_consumed` structural re-decode per partition and
+///   builds ZERO per-row `CellWriteMetadata` maps.
+/// * **A token bound (a Trino split).** The Summary-guided walk, so the split's
+///   range is pushed INTO the per-SSTable walk (#2412/#2413) and out-of-range
+///   partition bodies are never read. Reading only the in-range slice dominates
+///   any per-partition cost by orders of magnitude on a narrow split. NOTE: that
+///   walk's coverage check (`partition_slice_fully_consumed`, Signal B) decodes
+///   each in-range slice through the compaction parser, which DOES build the
+///   per-row metadata map — a PRE-EXISTING property of the walk that the merge
+///   arm pays identically, not something this fast path introduces.
+///
+/// On a pre-emit `FellBack` from the Summary-guided walk the full-`Index.db`
+/// streaming walk is tried (full ring; the caller's downstream token filter
+/// still bounds the result set); on a second pre-emit `FellBack`,
+/// [`QueryRowBatch::Unsupported`] is reported and NOTHING has been emitted.
 async fn drive_query_rows(
-    reader: &SSTableReader,
-    schema: &crate::schema::TableSchema,
+    reader: Arc<SSTableReader>,
+    schema: crate::schema::TableSchema,
     token_bound: Option<ScanTokenBound>,
     now_secs: i64,
     scan_cancel: &ScanCancel,
     tx: &SyncSender<Result<QueryRowBatch>>,
 ) -> Result<()> {
+    if token_bound.is_none() {
+        return drive_full_scan_rows(reader, schema, now_secs, scan_cancel, tx).await;
+    }
+
     let mut sink = BatchSink::new(tx);
     let mut emit = |row: (RowKey, ScanRow)| sink.push(row);
 
@@ -194,7 +219,7 @@ async fn drive_query_rows(
             scan_cancel,
             token_bound,
             Some(now_secs),
-            Some(schema),
+            Some(&schema),
             &mut emit,
         )
         .await?;
@@ -206,7 +231,12 @@ async fn drive_query_rows(
     // walks report `FellBack` only BEFORE their first emit, so nothing has been
     // handed to the consumer at this point.
     let outcome = reader
-        .stream_all_partitions_via_full_index(scan_cancel, Some(now_secs), Some(schema), &mut emit)
+        .stream_all_partitions_via_full_index(
+            scan_cancel,
+            Some(now_secs),
+            Some(&schema),
+            &mut emit,
+        )
         .await?;
     if matches!(outcome, FullIndexStreamOutcome::Streamed) {
         return sink.finish();
@@ -215,6 +245,43 @@ async fn drive_query_rows(
     // Neither walk can serve this reader. Report it as the FIRST and ONLY
     // message, having emitted nothing.
     let _ = tx.send(Ok(QueryRowBatch::Unsupported));
+    Ok(())
+}
+
+/// Full-ring arm: forward the windowed batched scan's `(RowKey, ScanRow)` batches
+/// straight through, re-using the batching the scan already did.
+///
+/// One admission permit is taken for this whole scan operation
+/// ([`ScanAdmission::Acquire`]) exactly as any other top-level single-generation
+/// scan does — never per sub-scan (issue #1594).
+async fn drive_full_scan_rows(
+    reader: Arc<SSTableReader>,
+    schema: crate::schema::TableSchema,
+    now_secs: i64,
+    scan_cancel: &ScanCancel,
+    tx: &SyncSender<Result<QueryRowBatch>>,
+) -> Result<()> {
+    let table_id = reader.scan_table_id();
+    let mut rx = reader.scan_stream_batched_admitted(
+        table_id,
+        None,
+        None,
+        Some(schema),
+        QUERY_ROWS_PER_BATCH * QUERY_ROWS_CHANNEL_BATCHES,
+        ScanAdmission::Acquire,
+        Some(now_secs),
+    );
+    while let Some(msg) = rx.recv().await {
+        // Cooperative cancellation: the caller dropping the stream also drops our
+        // receiver (so the send below fails), but polling here stops a cancelled
+        // scan without waiting for the next batch to be produced.
+        scan_cancel.check()?;
+        let rows = msg?;
+        if tx.send(Ok(QueryRowBatch::Rows(rows))).is_err() {
+            // Consumer dropped: stop pulling (not an error).
+            return Ok(());
+        }
+    }
     Ok(())
 }
 
