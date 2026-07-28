@@ -154,12 +154,18 @@
   passes `caller_schema = None` at the merge-arm call site) and #3098 (batched nits:
   `read_path_probe` cacheline/compaction reach, `on_merger_built` phase skew between the arms).
 
-- **AC #3 / §5 measurement NOT performed in this change.** No local corpus was generated and no
-  `perf stat -C` / `taskset` run was made; the ratio-closure claim and the kill criterion are still
-  OWED. The wiring, correctness pins and the `CQLITE_FLIGHT_MERGE_PATH` seam needed to run it are in
-  place.
-- **AC #5 WS0 digest (3,999,890 rows, 12 cells/row, `0x4903ffa446163c4b`) NOT reproduced** — the WS0
-  corpus is absent from this machine (recorded as owed, never claimed as verified).
+- **AC #3 / §5 measurement WAS performed** on a locally generated ~4,000,000-row single-SSTable
+  corpus, warm, `taskset`-pinned, CPU-wide `perf stat -C`, both arms on the SAME binary via
+  `CQLITE_FLIGHT_MERGE_PATH`, for BOTH the full-ring and token-bounded shapes. It is the acceptance
+  evidence and is recorded in the spec's R8 section (3.32x full-ring / 3.28x token-bound; bare-scan
+  gap 1.47x / 1.51x; the ~1.3x target NOT reached, residual attributed to Arrow encode and owned by
+  #3096; the merge arm's +18.1% side-effect gain reported, not hidden). Genuinely owed items are
+  listed below — the measurement itself is not one of them.
+- **STILL OWED (measurement side):** the **WS0 absolute** re-measurement (`>= ~280,000` rows/s; beat
+  Cassandra's `212,981`) on a machine holding that corpus; the **AC #5 digest** triple (3,999,890
+  rows, 12 cells/row, `0x4903ffa446163c4b`), which the absent WS0 corpus makes unreproducible here;
+  and the **stock-Cassandra leg** (no Cassandra on this box, so no head-to-head was run). None of
+  these is claimed as verified anywhere in the change.
 - **STATIC columns are excluded from the bypass, fail-closed.** Measured on real Cassandra bytes,
   the two arms disagree in opposite directions (merge emits a `ck = null` static row and injects no
   static value into clustering rows; the single-generation decoder injects statics correctly but

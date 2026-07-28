@@ -355,9 +355,22 @@ async fn token_pruning_to_one_source_still_selects_the_fast_path() {
     );
     assert_eq!(
         delta.mergers_built, 0,
-        "the POST-prune count is 1, so the fast path must be selected even though          the table has two generations"
+        "the POST-prune count is 1, so the fast path must be selected even though \
+         the table has two generations"
     );
     assert_eq!(delta.reconcile_entries, 0);
+    // Spec R3 on the TOKEN-BOUND arm — the Trino split shape, i.e. the route the
+    // connector actually uses and the one that WAS broken mid-delivery. This arm
+    // runs the Summary-guided walk, whose per-partition coverage check used to
+    // decode through the compaction parser and allocate one `CellWriteMetadata`
+    // map PER ROW; it is now a structure-only drive
+    // (`parse_one_partition_structure_only`), so this arm allocates none either.
+    // Without this assertion R3 had no regression pin here at all.
+    assert_eq!(
+        delta.cell_metadata_maps, 0,
+        "AC #2 / spec R3 must hold on the token-bound arm too, not only the \
+         full-ring one — the structure-only coverage check is what makes it true"
+    );
 }
 
 // arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing

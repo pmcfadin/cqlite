@@ -216,12 +216,18 @@ impl SSTableReader {
 ///   builds ZERO per-row `CellWriteMetadata` maps.
 /// * **A token bound (a Trino split).** The Summary-guided walk, so the split's
 ///   range is pushed INTO the per-SSTable walk (#2412/#2413) and out-of-range
-///   partition bodies are never read. Reading only the in-range slice dominates
-///   any per-partition cost by orders of magnitude on a narrow split. NOTE: that
-///   walk's coverage check (`partition_slice_fully_consumed`, Signal B) decodes
-///   each in-range slice through the compaction parser, which DOES build the
-///   per-row metadata map — a PRE-EXISTING property of the walk that the merge
-///   arm pays identically, not something this fast path introduces.
+///   partition bodies are never read. Its per-partition coverage check
+///   (`partition_slice_fully_consumed`, Signal B) drives the framing in
+///   STRUCTURE-ONLY mode (`parse_one_partition_structure_only`), so it builds no
+///   `CompactionRow`, no per-row `CellWriteMetadata` map and no complex-element
+///   map — this arm allocates ZERO metadata maps, exactly like the full-ring one,
+///   and that is pinned by `cell_metadata_maps == 0` in
+///   `cqlite-flight/tests/issue_3058_bypass_path_taken.rs`
+///   (`token_pruning_to_one_source_still_selects_the_fast_path`) plus every
+///   `assert_arms_agree` case's bypass leg. (Before that fix the check decoded
+///   through the compaction parser and DID build one map per row; the merge arm's
+///   own coverage check got the same saving, since those rows were always
+///   discarded.)
 ///
 /// On a pre-emit `FellBack` from the Summary-guided walk the full-`Index.db`
 /// streaming walk is tried (full ring; the caller's downstream token filter

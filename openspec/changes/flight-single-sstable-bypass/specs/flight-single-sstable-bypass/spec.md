@@ -66,12 +66,22 @@ authoritative state takes the merge arm.
 - **THEN** it consults only the post-prune reader count, the schema's `dropped_columns` map, the aggregation flag, the point-read plan, and the forced-path override — and consults no file size, no `Statistics.db` estimate, and no SSTable byte content
 
 ### Requirement: A single-source `do_get` does not enter the k-way merge or compaction reconciliation
-When the fast path is selected, the request SHALL NOT construct a `KWayMerger`, SHALL NOT invoke
-`KWayMerger::reconcile_cluster_with_overlap_counted`, and SHALL NOT invoke
-`CompactionPolicy::on_data_row` (`row_decoder/compaction.rs:585`). This SHALL be verified by a
-**path-taken assertion that fails if the merge path is entered** — an explicit observation of which
-arm ran (e.g. a counter/probe on the merger construction and on the reconcile entry), NOT a
-throughput assertion and NOT a timing inference (issue AC #1).
+When the fast path is selected, the request SHALL NOT construct a `KWayMerger` and SHALL NOT invoke
+`KWayMerger::reconcile_cluster_with_overlap_counted` — no cross-generation reconciliation, LWW
+resolution, or merge egress machinery may run. This SHALL be verified by a **path-taken assertion
+that fails if the merge path is entered** — an explicit observation of which arm ran (a counter/probe
+on the merger construction and on the reconcile entry), NOT a throughput assertion and NOT a timing
+inference (issue AC #1).
+
+`CompactionPolicy::on_data_row` (`row_decoder/compaction.rs`) is a NARROW, EXPLICIT exception on the
+token-bounded arm, and only in its STRUCTURE-ONLY mode: the Summary-guided walk's per-partition
+coverage check (`partition_slice_fully_consumed`, the #2302 data-loss guard) drives the partition
+framing through `parse_one_partition_structure_only`, which decodes each row only far enough to
+advance the offset. In that mode it constructs NO `CompactionRow`, NO per-row `CellWriteMetadata`
+map, NO complex-element map, and performs NO reconciliation — nothing it produces is emitted or
+read. R2's named observables therefore remain exactly zero and remain the test contract: the
+merger-construction count and the compaction-reconcile-entry count are zero, and (R3) the per-row
+metadata-map count is zero on BOTH arms. The full-ring arm does not reach `on_data_row` at all.
 
 #### Scenario: A single-SSTable do_get never constructs the merger
 - **GIVEN** an end-to-end `do_get` over a real single-SSTable fixture with the fast path enabled
@@ -307,7 +317,7 @@ negative result SHALL be posted rather than further levers stacked.
 
 #### Scenario: The residual shortfall against the original target is reported, not rounded away
 - **WHEN** the results are written up
-- **THEN** they state plainly that the originally-stated ~1.3x target was not reached, give the achieved 1.49x, attribute the residual to Arrow encode with the supporting cycles/row figures, and name issue #3096 as its owner
+- **THEN** they state plainly that the originally-stated ~1.3x target was not reached, give the achieved bare-scan gap (**1.47x** full-ring / **1.51x** token-bound), attribute the residual to Arrow encode with the supporting cycles/row figures, and name issue #3096 as its owner
 
 #### Scenario: The WS0 absolute is reported as owed, never as reproduced
 - **WHEN** the results are written up

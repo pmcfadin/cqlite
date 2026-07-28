@@ -40,8 +40,6 @@
 //! guard the sibling `issue_3058_bypass_path_taken.rs` holds), so a `#[test]`
 //! added here later cannot race the env window by accident.
 //!
-//! ## Fixture contract
-//!
 //! ## Residual (stated, not hidden)
 //!
 //! The gap-(b) shape with NO liveness marker AT ALL — a clustering row written by
@@ -52,6 +50,8 @@
 //! row, and CQLite's own writer cannot produce one (`merge_row_group` derives
 //! liveness from any mutation that writes cells), so that exact byte shape needs a
 //! Cassandra-generated fixture — recorded as owed, not silently claimed.
+//!
+//! ## Fixture contract
 //!
 //! Dataset-backed cases SKIP cleanly when the fetched corpus is absent, UNLESS
 //! `CQLITE_REQUIRE_FIXTURES=1` (which the gate sets), where an absent fixture is
@@ -273,6 +273,18 @@ async fn assert_arms_agree(
         ));
         return None;
     }
+    // Spec R3 on EVERY differential case, both shapes: the bypass leg must build
+    // ZERO per-row `CellWriteMetadata` maps. Asserted here rather than only in the
+    // dedicated path-taken tests so each case — full-ring, token-bound, projected,
+    // byte-capped, UDT-bearing — carries its own pin.
+    if bypass_delta.cell_metadata_maps != 0 {
+        failures.push(format!(
+            "case {label}: the forced-bypass run built {} per-row CellWriteMetadata \
+             map(s) — spec R3 requires zero on the fast path",
+            bypass_delta.cell_metadata_maps
+        ));
+        return None;
+    }
     if merge_sizes.iter().sum::<usize>() != bypass_sizes.iter().sum::<usize>() {
         failures.push(format!(
             "case {label}: batch row totals differ: merge {merge_sizes:?} vs bypass \
@@ -456,11 +468,12 @@ async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
         ))
         .unwrap();
     // ck=3: two live columns (the multi-column shape). A CQLite-WRITTEN simple
-    // cell tombstone is deliberately NOT exercised here: both arms surface it as
-    // a raw `Value::Tombstone` that the Arrow encoder then rejects
-    // ("expected Text value, got Tombstone(..)"). That reproduces with
-    // `CQLITE_FLIGHT_MERGE_PATH=merge`, i.e. on the pre-#3058 merge path, so it
-    // is a PRE-EXISTING defect of the CQLite write/read round-trip, identical on
+    // cell tombstone is deliberately NOT exercised here — EXCLUSION TRACKED BY
+    // ISSUE #3094: both arms surface it as a raw `Value::Tombstone` that the Arrow
+    // encoder then rejects ("expected Text value, got Tombstone(..)"). That
+    // reproduces with `CQLITE_FLIGHT_MERGE_PATH=merge`, i.e. on the pre-#3058
+    // merge path, so it is a PRE-EXISTING defect of the CQLite write/read
+    // round-trip (see #3094), identical on
     // both arms and out of this change's scope — recorded for a follow-up rather
     // than papered over here. Cassandra-written tombstones ARE covered, by the
     // dataset cases below and by the query-semantics oracle.
