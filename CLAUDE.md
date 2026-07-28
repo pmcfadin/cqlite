@@ -341,13 +341,22 @@ implement (TDD) → --lite each fix round (summary-file redirect)
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.
-- **roborev invocation — pass BOTH agent and model (#2433).** `.roborev.toml` on `main` pins
-  `agent = 'claude-code'` + `review_model = 'opus'`. To run the codex reviewer you must override BOTH:
-  `roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`. `--agent codex`
-  alone still inherits `review_model = 'opus'` from config, and codex-on-a-ChatGPT-account rejects
-  `opus` with a hard `400 'opus' model is not supported` — a silent review failure that looks like an
-  outage. Run from a checkout whose `.roborev.toml` you know (worktrees inherit `main`'s pinned config);
-  `--model` is the reliable override. codex's own configured model is `gpt-5.6-sol` (`~/.codex/config.toml`).
+- **roborev invocation — the default is codex; overriding it means passing BOTH agent and model
+  (#2433/#3037).** `.roborev.toml` on `main` pins `agent`/`review_agent = 'codex'` +
+  `model`/`review_model = 'gpt-5.6-sol'` (the repo pin overrides your global `~/.roborev/config.toml`,
+  so it is the value that actually runs). So the plain
+  `roborev review --branch --base origin/main --wait` already runs codex — **no flags needed**.
+  The trap is the reverse case: to run the **Claude** reviewer you must override BOTH:
+  `roborev review --branch --base origin/main --agent claude-code --model claude-opus-5 --wait`.
+  `--agent claude-code` alone still inherits `review_model = 'gpt-5.6-sol'` from config — an OpenAI
+  model name Claude cannot serve — which fails as a silent review failure that looks like an outage.
+  (Historically the pin ran the other way and codex-on-a-ChatGPT-account rejected the inherited
+  Anthropic name with a hard `400 'opus' model is not supported`; same trap, mirrored.) Run from a
+  checkout whose `.roborev.toml` you know (worktrees inherit `main`'s pinned config); `--model` is the
+  reliable override. Note `gpt-5.6-sol` is **codex's own built-in default, not a config pin** — there
+  is no `~/.codex/config.toml` on the worker boxes; the bare `codex` default moved `gpt-5.5` →
+  `gpt-5.6-sol` in the 0.142.5 → 0.145.0 upgrade, so a future codex version bump can silently move it
+  again. `codex --version` + a bare `codex exec` header is how you check what it actually resolves to.
 - **flow-closer (#2084/#2668)**: the full gate, the final roborev pass, and the merge run inside the
   disposable `flow-closer` subagent — the lead retains only its terminal packet (verdict, PR URL,
   summary-file path, ≤10 lines residual), never gate stdout or review churn. The closer has **no
