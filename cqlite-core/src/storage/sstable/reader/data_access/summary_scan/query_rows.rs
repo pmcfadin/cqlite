@@ -214,6 +214,53 @@ impl SSTableReader {
     pub fn supports_streaming_query_scan(&self) -> bool {
         self.index_reader.is_some() && self.bti_partitions_db.is_none()
     }
+
+    /// The STATIC columns this SSTable's OWN serialization header declares
+    /// (`Statistics.db`'s `SerializationHeader.staticColumns`) — authoritative
+    /// ON-DISK metadata, independent of any caller-supplied schema.
+    ///
+    /// Exists because a caller schema is not a safe source for the static
+    /// question (roborev, issue #3058): the Flight producer's schema comes from
+    /// the ticket DDL, and an `nb` header carries no embedded schema to
+    /// cross-check it against (#3097), so a DDL that predates an
+    /// `ALTER TABLE ADD … STATIC` (or a hand-built ticket) would declare no
+    /// static column for an SSTable that actually contains one. The
+    /// single-generation read path emits NOTHING for a partition holding only a
+    /// static row, where the merge arm emits one row, so a routing decision made
+    /// on the stale DDL alone would change the row count.
+    ///
+    /// The serialization header enumerates EVERY static column the file can
+    /// contain, so this is at least as strong as inspecting each decoded row's
+    /// `EXTENDED_IS_STATIC` flag, and it is available BEFORE the first row (so a
+    /// caller can fall back cleanly instead of aborting mid-stream).
+    ///
+    /// An empty result means "this file declares no static column" when the
+    /// header was parsed. A file whose `Statistics.db` is absent/unparsed also
+    /// yields an empty list — see [`Self::static_columns_are_known`], which a
+    /// caller MUST consult to distinguish the two.
+    pub fn on_disk_static_columns(&self) -> Vec<String> {
+        let Some(stats) = self.statistics_reader.as_ref() else {
+            return Vec::new();
+        };
+        stats
+            .statistics()
+            .serialization_header_columns
+            .iter()
+            .filter(|c| c.is_static)
+            .map(|c| c.name.clone())
+            .collect()
+    }
+
+    /// Whether [`Self::on_disk_static_columns`] is an ANSWER rather than an
+    /// absence of information: `true` when the serialization header was parsed
+    /// (so "no static columns" is authoritative), `false` when there is nothing
+    /// to read (no `Statistics.db`, or a header with no columns at all), in which
+    /// case a caller that needs the static question settled MUST fail closed.
+    pub fn static_columns_are_known(&self) -> bool {
+        self.statistics_reader
+            .as_ref()
+            .is_some_and(|s| !s.statistics().serialization_header_columns.is_empty())
+    }
 }
 
 /// Drive the single-generation walk, batching rows into `tx`.

@@ -1067,6 +1067,30 @@ fn dataset_cases() -> Vec<DatasetCase> {
             columns: vec!["user_id", "addresses"],
             token_of_int_pk: None,
         },
+        // The NON-FROZEN (multicell) UDT divergence, on real Cassandra bytes
+        // (roborev): `mp person_type` is multicell, so the merge arm's
+        // `assemble_complex` `_` fall-through keeps only the LAST element's scalar
+        // while the single-generation decoder assembles the whole `Value::Udt`
+        // (#927/#1081). The predicate REFUSES such a schema, so this pins that the
+        // fast arm is not taken and behaviour is exactly today's.
+        DatasetCase {
+            label: "cassandra/cx_multicell_udt_collection_paths(fail-closed non-frozen UDT)",
+            pk_only_label: "cassandra/cx_multicell_udt_collection_paths@pk-only",
+            keyspace: "test_types",
+            table: "cx_multicell_udt_collection_paths",
+            ddl: [
+                "CREATE TABLE cx_multicell_udt_collection_paths (pk int, ck int, mp person_type, ml list<text>, PRIMARY KEY (pk, ck));",
+                "CREATE TYPE person_type (first_name text, last_name text, age int, active boolean);",
+            ]
+            .join(" "),
+            pinned_now: ORACLE_PINNED_NOW,
+            min_rows: 1,
+            pk_only_projection: vec![],
+            refuses_fast_arm: true,
+            refused_error_substr: None,
+            columns: vec![],
+            token_of_int_pk: None,
+        },
         DatasetCase {
             label: "cassandra/static_clustering_shape(fail-closed static fallback)",
             pk_only_label: "cassandra/static_clustering_shape@pk-only",

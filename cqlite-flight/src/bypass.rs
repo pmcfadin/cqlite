@@ -21,12 +21,26 @@
 //!
 //! # The predicate is conjunctive and FAIL-CLOSED (issue #28)
 //!
-//! [`bypass_reason`] consults ONLY: the POST-prune source count, the schema's
-//! `dropped_columns` map, the aggregation flag, and the forced-path override —
-//! plus the reader's own component metadata via
-//! `SSTableReader::supports_streaming_query_scan`. It never looks at a file
-//! size, a `Statistics.db` estimate, or SSTable byte content. Anything that
-//! cannot be established takes the slow, known-correct merge arm.
+//! [`bypass_reason`] consults exactly these inputs, and nothing else:
+//! * the POST-prune source count (from the authoritative `*-Data.db` listing);
+//! * the reader's parsed COMPONENT metadata
+//!   (`SSTableReader::supports_streaming_query_scan`);
+//! * the reader's own SERIALIZATION HEADER for on-disk static columns
+//!   (`on_disk_static_columns` / `static_columns_are_known`) — authoritative
+//!   on-disk metadata, consulted because the caller schema alone cannot settle
+//!   the static question (see [`BypassReason::StaticColumns`]);
+//! * the CALLER-SUPPLIED schema (the ticket DDL) for `dropped_columns`, declared
+//!   static columns, and declared column TYPES. This is caller INPUT, not on-disk
+//!   metadata — it is the decode contract the request itself supplies, and it is
+//!   what makes the type-shape guards expressible at all. Where it is not
+//!   sufficient alone (the static question) the on-disk header above is consulted
+//!   too;
+//! * the aggregation flag and the forced-path override.
+//!
+//! It never looks at a file size, a `Statistics.db` row/size ESTIMATE, or SSTable
+//! byte content, and never infers a type or a behaviour from a byte pattern
+//! (issue #28). Anything that cannot be established takes the slow,
+//! known-correct merge arm.
 //!
 //! # The forced-path seam
 //!
@@ -118,9 +132,10 @@ pub enum BypassReason {
     /// The single reader lacks the components the single-generation streaming
     /// query walk needs (no `Index.db`, or a BTI reader).
     ReaderUnsupported,
-    /// The schema declares a NON-FROZEN collection whose element (set) or key
-    /// (map) is a frozen UDT/tuple/nested collection — a "composite-keyed"
-    /// collection.
+    /// The schema declares a MULTI-CELL (non-frozen) column whose two arms do not
+    /// collapse identically: a "composite-keyed" collection (a non-frozen `set`
+    /// whose element, or `map` whose key, is a frozen UDT/tuple/nested
+    /// collection), OR a non-frozen top-level UDT.
     ///
     /// The two arms disagree by CONSTRUCTION on these columns, and in a way that
     /// would make a query's outcome depend on the generation count (roborev,
@@ -137,7 +152,14 @@ pub enum BypassReason {
     /// arm and today's behaviour is preserved EXACTLY. Making both arms serve
     /// these columns is owned by #2339, exactly as the static divergence is owned
     /// by #3095.
-    CompositeKeyedCollection,
+    ///
+    /// A non-frozen top-level UDT diverges the same way but SILENTLY rather than
+    /// by failing closed: `assemble_complex`'s `_` fall-through keeps only the
+    /// LAST element's scalar, while the single-generation decoder assembles the
+    /// full `Value::Udt` (#927/#1081). Same hazard, same treatment.
+    /// [`declares_composite_keyed_collection`] tabulates every
+    /// `assemble_complex` arm and which of them diverge.
+    MulticellArmDivergence,
     /// The schema declares a STATIC column.
     ///
     /// The two arms genuinely disagree on static-row shape today, in OPPOSITE
@@ -192,12 +214,23 @@ pub fn bypass_reason(
     if schema.columns.iter().any(|c| c.is_static) {
         return BypassReason::StaticColumns;
     }
+    // The caller SCHEMA is not a sufficient source for the static question
+    // (roborev, issue #3058): it is the ticket DDL, and an `nb` header carries no
+    // embedded schema to cross-check it against (#3097), so a DDL predating an
+    // `ALTER TABLE ADD … STATIC` (or a hand-built ticket) would sail through the
+    // check above while the SSTable actually holds static rows — and the fast path
+    // emits NOTHING for a static-only partition where the merge arm emits a row.
+    // Consult the file's OWN serialization header, and fail closed when it cannot
+    // answer at all.
+    if !only.static_columns_are_known() || !only.on_disk_static_columns().is_empty() {
+        return BypassReason::StaticColumns;
+    }
     if schema
         .columns
         .iter()
         .any(|c| declares_composite_keyed_collection(&c.data_type))
     {
-        return BypassReason::CompositeKeyedCollection;
+        return BypassReason::MulticellArmDivergence;
     }
     if !only.supports_streaming_query_scan() {
         return BypassReason::ReaderUnsupported;
@@ -205,32 +238,54 @@ pub fn bypass_reason(
     BypassReason::Selected
 }
 
-/// Whether `data_type` declares a collection the MERGE arm's reassembler refuses
-/// (issue #2339) — see [`BypassReason::CompositeKeyedCollection`].
+/// Whether `data_type` declares a MULTI-CELL (non-frozen) column shape the two
+/// arms do NOT collapse identically — see
+/// [`BypassReason::MulticellArmDivergence`].
 ///
-/// MIRRORS the authority that actually fails closed, `read_assembly.rs`'s
-/// `key_is_opaque_composite`: a non-frozen `set<X>` whose element `X`, or a
-/// non-frozen `map<K, _>` whose key `K`, is (after unwrapping `frozen`) a
-/// tuple / UDT / nested collection, or a `Custom` type name other than the two
-/// the scalar codec decodes (`time`, `inet`). A `list<…>` is always fine: its
-/// cell path is a position TimeUUID, never the value.
+/// Mirrors `write_engine/merge/read_assembly.rs::assemble_complex` ARM BY ARM —
+/// that function is the ONLY place the merge arm collapses a multi-cell column,
+/// so its arms are the complete divergence surface. Enumerated exhaustively so a
+/// future member of this class is not discovered one at a time:
 ///
-/// A type string that does not parse counts as composite (fail-closed): an
-/// unrepresentable type must never silently select the fast arm.
+/// | `assemble_complex` arm | vs the single-generation collapse | refused here |
+/// |---|---|---|
+/// | `Set(scalar)` | EQUIVALENT — sorted `Value::Set` | no |
+/// | `Set(opaque composite)` | DIVERGENT — fails closed (#2339) | YES |
+/// | `List(_)`, any element type | EQUIVALENT — sorted `Value::List` | no |
+/// | `Map(scalar, _)` | EQUIVALENT — `Value::Map` | no |
+/// | `Map(opaque composite, _)` | DIVERGENT — fails closed (#2339) | YES |
+/// | `_` fall-through, i.e. a NON-FROZEN top-level UDT (or other non-collection complex column) | DIVERGENT SILENTLY — merge arm returns `last_value(elements)`, only the LAST element's scalar, while the single-generation decoder assembles the full `Value::Udt` (#927/#1081) | YES |
+/// | column not declared in the caller schema | `last_value`, but such columns are never emitted to Arrow | no — unobservable |
+/// | `CqlType::parse` error on the declared type | DIVERGENT — merge arm errors, fast arm decodes | YES — unparseable is refused |
+///
+/// "Opaque composite" is `read_assembly.rs`'s own `key_is_opaque_composite` rule:
+/// after unwrapping `frozen`, a tuple / UDT / nested collection, or a `Custom`
+/// name other than the two the scalar codec decodes (`time`, `inet`).
+///
+/// FROZEN shapes are excluded throughout: a frozen collection or frozen UDT is
+/// ONE cell, so it never reaches `assemble_complex`'s multi-element path and both
+/// arms serve it identically.
 fn declares_composite_keyed_collection(data_type: &str) -> bool {
     let Ok(parsed) = CqlType::parse(data_type) else {
         return true;
     };
-    // A FROZEN collection is one opaque cell — it never takes the per-element
-    // cell-path path the merge arm refuses.
     match parsed {
         CqlType::Set(inner) => is_opaque_composite(&inner),
         CqlType::Map(key, _) => is_opaque_composite(&key),
-        // `CqlType::parse` also returns `Custom` for a type string whose
-        // STRUCTURE it could not parse (e.g. an uppercase `SET<…>`). A bare name
-        // is a UDT reference — one opaque cell both arms serve identically — but
-        // an unparsed structure could be any collection, so fail closed.
-        CqlType::Custom(name) => name.contains('<'),
+        // A LIST is element-for-element equivalent on both arms: its cell path is
+        // a position TimeUUID, so the order is authoritative either way — even for
+        // a `frozen<UDT>` element.
+        CqlType::List(_) => false,
+        // A NON-FROZEN, top-level MULTI-CELL complex column — a bare UDT
+        // reference (`Custom`, e.g. `contact_info`), or an explicit `Udt`/`Tuple` —
+        // lands on `assemble_complex`'s `_` fall-through, which keeps only the
+        // LAST element's value while the single-generation decoder assembles the
+        // whole `Value::Udt` (#927/#1081). `CqlType::parse` also yields `Custom`
+        // for a type string whose structure it could not parse, which is refused
+        // for the same fail-closed reason.
+        CqlType::Custom(_) | CqlType::Udt(_, _) | CqlType::Tuple(_) => true,
+        // `Frozen(_)` and scalars are ONE cell, so they never reach
+        // `assemble_complex`'s multi-element path at all.
         _ => false,
     }
 }
@@ -616,8 +671,15 @@ mod tests {
             "set<frozen<tuple<int, text>>>",
             "map<frozen<tuple<int, text>>, text>",
             "set<frozen<list<int>>>",
-            // Unparsed STRUCTURE (uppercase): could be any collection → fail closed.
+            // Case-insensitive parse: this is refused by the `Set` arm, exactly
+            // like its lowercase spelling.
             "SET<FROZEN<CONTACT_INFO>>",
+            // A BARE (non-frozen) UDT is MULTI-CELL: the merge arm's
+            // `assemble_complex` `_` fall-through keeps only the last element's
+            // scalar while the fast arm builds the whole `Value::Udt`
+            // (#927/#1081) — the divergence class this guard exists for.
+            "contact_info",
+            "tuple<int, text>",
         ] {
             let mut schema = base.clone();
             if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
@@ -625,7 +687,7 @@ mod tests {
             }
             assert_eq!(
                 bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
-                BypassReason::CompositeKeyedCollection,
+                BypassReason::MulticellArmDivergence,
                 "`{refused}` must take the merge arm"
             );
         }
@@ -637,9 +699,10 @@ mod tests {
             "frozen<set<frozen<contact_info>>>",
             "set<inet>",
             "int",
-            // A bare UDT reference is ONE opaque cell, served identically by both
-            // arms — it is not a composite-keyed collection.
-            "contact_info",
+            // A FROZEN UDT is ONE cell — it never reaches the multi-element
+            // collapse, so both arms serve it identically.
+            "frozen<contact_info>",
+            "frozen<tuple<int, text>>",
         ] {
             let mut schema = base.clone();
             if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {

@@ -21,9 +21,11 @@ existing `KWayMerger` path when ANY of them does not:
   `producer_warm.rs:52`);
 - the request did not take the full-PK-equality point-read route (`producer_warm.rs:75`);
 - **the schema declares no STATIC column** (see below);
-- **the schema declares no composite-keyed collection** — a non-frozen `set<X>` whose element, or a
-  non-frozen `map<K, _>` whose key, is (after unwrapping `frozen`) a tuple / UDT / nested collection
-  (see below);
+- **the schema declares no multi-cell column whose two arms disagree** — a non-frozen `set<X>` whose
+  element, or a non-frozen `map<K, _>` whose key, is (after unwrapping `frozen`) a tuple / UDT /
+  nested collection, OR a non-frozen top-level UDT (see below);
+- **the SSTable's own serialization header declares no static column** — authoritative on-disk
+  metadata, checked in ADDITION to the caller schema (see below);
 - the forced-path override does not request the merge arm.
 
 **Static-column exclusion (fail-closed, deferral — issue #3095).** Delivery of this change
@@ -57,6 +59,24 @@ exclusion this is a **deferral, not a design position**: issue #2339 owns servin
 both arms, after which the precondition SHALL be removed. `list<frozen<UDT>>` is explicitly NOT
 affected — a list element's cell path is a position TimeUUID, and the merge arm serves it.
 
+The multi-cell exclusion SHALL be derived by mirroring EVERY arm of the merge arm's own collapse
+function (`write_engine/merge/read_assembly.rs::assemble_complex`) — not only the arms that fail
+closed. Its divergent arms are: a non-frozen `set` with an opaque-composite element and a non-frozen
+`map` with an opaque-composite key (both FAIL CLOSED, #2339), and the `_` fall-through — a NON-FROZEN
+top-level UDT — which returns only the LAST element's scalar while the single-generation decoder
+assembles the whole `Value::Udt` (#927/#1081), i.e. diverges SILENTLY. `list<…>` (any element type),
+`set<scalar>`, `map<scalar, _>`, every frozen shape and every scalar are element-for-element
+equivalent and SHALL NOT be excluded. A declared type that does not parse SHALL be excluded
+(fail-closed).
+
+The static exclusion SHALL NOT rest on the caller schema alone. The Flight schema is the ticket DDL
+and an `nb` header carries no embedded schema to cross-check it against (#3097), so a DDL that
+predates an `ALTER TABLE ADD … STATIC` would pass a schema-only check while the SSTable holds static
+rows — and the fast path emits NOTHING for a static-only partition where the merge arm emits a row.
+The predicate SHALL therefore ALSO consult the SSTable's own `SerializationHeader.staticColumns`
+(authoritative on-disk metadata, available before the first row) and SHALL fail closed when that
+header cannot answer at all.
+
 The predicate SHALL be conjunctive and fail-closed: any condition that cannot be established from
 authoritative state takes the merge arm.
 
@@ -69,6 +89,16 @@ authoritative state takes the merge arm.
 - **GIVEN** a warm `do_get` over a table with two generations where the ticket's token filter prunes one of them away via already-parsed endpoint tokens (`prune_readers`, zero extra I/O)
 - **WHEN** the decision point is reached
 - **THEN** the count used is the POST-prune count (1), not the pre-prune count (2), and the fast path is selected
+
+#### Scenario: An SSTable carrying an undeclared static column falls back to the merger
+- **GIVEN** a single-source `do_get` whose ticket DDL declares NO static column, over an SSTable whose serialization header declares one (a DDL predating an `ALTER TABLE ADD … STATIC`, or a hand-built ticket)
+- **WHEN** the decision point is reached
+- **THEN** the fast path is NOT selected — the on-disk header, not the caller schema, settles the question — so a static-only partition still yields the row the merge arm emits
+
+#### Scenario: A non-frozen UDT column falls back to the merger
+- **GIVEN** a single-source `do_get` over a table declaring a NON-FROZEN (multi-cell) UDT column
+- **WHEN** the decision point is reached
+- **THEN** the fast path is NOT selected, so the column's value cannot change from the merge arm's `last_value` collapse to the fast arm's assembled `Value::Udt` depending on the table's generation count
 
 #### Scenario: A composite-keyed-collection schema falls back to the merger
 - **GIVEN** a single-source `do_get` whose `TableSchema` declares a non-frozen `set`/`map` whose element/key is a frozen UDT, tuple or nested collection

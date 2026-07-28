@@ -666,15 +666,20 @@ impl SSTableReader {
                     }
                 };
                 for (entry_table_id, entry_key, entry_value) in entries {
-                    if !table_ids_match(&entry_table_id, &table_id) {
-                        continue;
-                    }
-                    // Counted BEFORE the range/tombstone filters (as every other
-                    // site does): the body was decoded regardless of whether its
-                    // rows survive.
+                    // Counted BEFORE every filter — including the table-id filter —
+                    // exactly like the sibling sites (`sequential_scan`'s two loops
+                    // and the stitched walk): the partition body was DECODED
+                    // regardless of whether its rows survive, and a `Data.db` whose
+                    // entries carry a non-matching `TableId` (path/header keyspace
+                    // mismatch, or `scan_table_id`'s `"default"` fallback) must not
+                    // report 0 bodies where `sequential_scan` reports N (roborev,
+                    // issue #3058).
                     if prev_partition_key.as_ref() != Some(&entry_key) {
                         crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
                         prev_partition_key = Some(entry_key.clone());
+                    }
+                    if !table_ids_match(&entry_table_id, &table_id) {
+                        continue;
                     }
                     if let Some(ref start) = start_key {
                         if &entry_key < start {
