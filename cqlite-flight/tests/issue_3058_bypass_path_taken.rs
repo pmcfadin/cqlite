@@ -339,7 +339,7 @@ async fn token_pruning_to_one_source_still_selects_the_fast_path() {
     let svc = CqliteFlightService::new(data_dir, 8192);
     let ticket = serde_json::to_vec(&serde_json::json!({
         "keyspace": KS, "table": TBL, "ddl": DDL,
-        "token_start": t1 - 1, "token_end": t1,
+        "token_start": t1.saturating_sub(1), "token_end": t1,
     }))
     .expect("ticket json");
 
@@ -351,7 +351,7 @@ async fn token_pruning_to_one_source_still_selects_the_fast_path() {
         rows,
         BTreeMap::from([((1, 1), "gen1".to_string())]),
         "only the in-range partition is returned (token {t1} in ({}, {t1}]; pk=2 is at {t2})",
-        t1 - 1
+        t1.saturating_sub(1)
     );
     assert_eq!(
         delta.mergers_built, 0,
