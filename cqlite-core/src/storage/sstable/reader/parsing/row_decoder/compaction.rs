@@ -369,6 +369,41 @@ impl V5CompressedLegacyParser {
             emit(row)
         })
     }
+
+    /// STRUCTURE-ONLY sibling of
+    /// [`parse_one_partition_for_compaction`](Self::parse_one_partition_for_compaction)
+    /// (issue #3058): drives the SAME sliding-window partition framing and returns
+    /// the SAME [`ParseStep`], but builds no rows at all.
+    ///
+    /// This is what the coverage check
+    /// (`SSTableReader::partition_slice_fully_consumed`) needs: its verdict is
+    /// `Emitted(consumed) && consumed == slice.len()`, i.e. purely the byte
+    /// framing, and every row it used to build was handed to a no-op closure. On
+    /// the token-scoped single-source read path that row-building was the last
+    /// remaining per-row `CellWriteMetadata` allocation (spec R3), and on the
+    /// merge arm it was pure waste — the structural verdict is byte-identical
+    /// because consumption never depended on the discarded rows.
+    pub fn parse_one_partition_structure_only(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &crate::storage::sstable::reader::types::SSTableReader,
+        at_final_chunk: bool,
+    ) -> Result<ParseStep> {
+        if data.is_empty() {
+            return Ok(ParseStep::Done);
+        }
+        let schema = schema.ok_or_else(|| {
+            Error::schema(format!(
+                "V5CompressedLegacy (structure check) requires schema for {}.{}",
+                self.keyspace, self.table_name
+            ))
+        })?;
+        let mut policy = CompactionPolicy::structure_only(self);
+        self.drive_partition_sliding(data, schema, reader, at_final_chunk, &mut policy, |_row| {
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+    }
 }
 
 /// Issue #1640 (K1): [`SlidingPartitionPolicy`] for the per-element compaction
@@ -378,6 +413,17 @@ impl V5CompressedLegacyParser {
 /// range-tombstone markers are paired into `RangeMarker` rows (issue #933).
 pub(super) struct CompactionPolicy<'a> {
     parser: &'a V5CompressedLegacyParser,
+    /// STRUCTURE-ONLY mode (issue #3058): decode each row far enough to advance
+    /// the offset, but build NO `CompactionRow`, NO per-cell `CellWriteMetadata`
+    /// map and NO per-column complex-element map.
+    ///
+    /// Used by the coverage check `partition_slice_fully_consumed`, whose rows are
+    /// fed to a no-op emit and thrown away — building them was pure waste, and on
+    /// the token-scoped single-source read path (`summary_scan::query_rows`) it was
+    /// the last thing allocating a per-row metadata `HashMap` on a path whose whole
+    /// point is not to (spec R3). Consumption/`ParseStep` are byte-driven and
+    /// therefore identical in both modes, so the structural verdict is unchanged.
+    structure_only: bool,
     partition_key: RowKey,
     /// Issue #933: in-flight range-tombstone start bound
     /// `(bound, markedForDeleteAt µs, localDeletionTime s)`, re-derived from the
@@ -393,8 +439,17 @@ impl<'a> CompactionPolicy<'a> {
     pub(super) fn new(parser: &'a V5CompressedLegacyParser) -> Self {
         Self {
             parser,
+            structure_only: false,
             partition_key: RowKey::new(Vec::new()),
             pending_range_start: None,
+        }
+    }
+
+    /// A policy that verifies STRUCTURE only — see [`Self::structure_only`].
+    pub(super) fn structure_only(parser: &'a V5CompressedLegacyParser) -> Self {
+        Self {
+            structure_only: true,
+            ..Self::new(parser)
         }
     }
 
@@ -592,6 +647,24 @@ impl SlidingPartitionPolicy for CompactionPolicy<'_> {
         pending: &mut Vec<Self::Row>,
     ) -> Option<usize> {
         use crate::storage::sstable::reader::compaction_row::CompactionRow;
+        // Structure-only (issue #3058): advance over the row WITHOUT allocating a
+        // per-cell metadata map, a complex-element map or a `CompactionRow` — the
+        // caller discards rows and only reads the byte consumption.
+        if self.structure_only {
+            return match self.parser.parse_row_data_with_offset_impl(
+                data,
+                offset,
+                Some(schema),
+                reader,
+                false,
+                None,
+                resolution,
+                None,
+            ) {
+                Ok((_cells, _meta, _hdr, next_offset, _is_static, _complex)) => Some(next_offset),
+                Err(_) => None,
+            };
+        }
         // Compaction mode: capture per-column complex elements and request
         // per-cell metadata so simple cells carry per-cell timestamps/TTLs.
         let mut complex_capture: CompactionComplexColumns = HashMap::new();

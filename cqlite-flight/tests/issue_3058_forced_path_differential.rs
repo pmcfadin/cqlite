@@ -36,7 +36,9 @@
 //! counters are all PROCESS-GLOBAL, so this file holds exactly ONE `#[test]`
 //! that runs every case sequentially — the same discipline
 //! `query_semantics_flight_parity.rs` uses. Add a case to the list, not a second
-//! `#[test]`.
+//! `#[test]`. That convention is additionally ENFORCED by `PROBE_LOCK` (the same
+//! guard the sibling `issue_3058_bypass_path_taken.rs` holds), so a `#[test]`
+//! added here later cannot race the env window by accident.
 //!
 //! ## Fixture contract
 //!
@@ -80,6 +82,9 @@ use cqlite_core::types::Value;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_flight::bypass::MERGE_PATH_ENV;
 use cqlite_flight::service::CqliteFlightService;
+
+/// Serializes the process-global env + probe window (see the module doc).
+static PROBE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Debug-only reader seam pinning the read-time TTL clock (see `now_clock.rs`).
 const TTL_NOW_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
@@ -611,6 +616,7 @@ async fn build_statics_fixture() -> (tempfile::TempDir, PathBuf) {
 /// The whole differential (one test — see the module doc's isolation note).
 #[tokio::test]
 async fn forced_path_differential_agrees_on_every_shape() {
+    let _guard = PROBE_LOCK.lock().await;
     let mut failures: Vec<String> = Vec::new();
 
     // ---- CQLite-written tombstone/TTL/range/partition shapes ---------------

@@ -477,9 +477,13 @@ impl SSTableReader {
         schema: Option<&TableSchema>,
     ) -> Result<bool> {
         use crate::storage::sstable::reader::parsing::ParseStep;
-        let mut noop = |_row| Ok(std::ops::ControlFlow::Continue(()));
-        let step =
-            parser.parse_one_partition_for_compaction(raw, schema, self, false, &mut noop)?;
+        // Issue #3058: STRUCTURE-ONLY drive. The verdict below reads only the byte
+        // consumption, and every row this used to build went straight to a no-op
+        // closure — including, per row, a `CellWriteMetadata` map. Dropping that
+        // build is what lets the token-scoped single-source read path allocate ZERO
+        // metadata maps (spec R3); the framing, and therefore the verdict, is
+        // unchanged.
+        let step = parser.parse_one_partition_structure_only(raw, schema, self, false)?;
         Ok(matches!(step, ParseStep::Emitted(consumed) if consumed == raw.len()))
     }
 }
