@@ -211,6 +211,23 @@ Every headline point is the **median of 3 replicate runs** (Flight: 3 at `-c 2,1
 run-to-run spread is under ±2% for every configuration except one noted below.
 `rep-*` labels in `/home/ubuntu/ws0/ws0-results/h2h/` are those replicates.
 
+> **ERRATUM (added in a post-review round; the retained artefacts are the authority, not this paragraph).**
+> Two statements above are wrong as written:
+> 1. **"spread under ±2% for every configuration except one" — two configurations exceed it.** Per-arm
+>    dispersion computed from the `rep-*` triples: Cassandra `SELECT *` at `-c 2` is **2.73%** and CQLite
+>    `scan-arrow` at `-c 2` is **4.90%**. The other seven are 0.33–1.92%. The full table is in report §4.
+> 2. **"Flight: 3 at `-c 2,10`" is right for 1 core and wrong for 1 hardware thread.** The 1-core point is a
+>    genuine median of 3 (`fl-warm-1c` 60,411 / `rep-fl-2x10-r2` 60,892 / `rep-fl-2x10-r3` 61,410). The
+>    **1-hw-thread point is n=1** — the single `fl1t` step (`flight-fl1t.jsonl`, 5 scans in 359.75 s =
+>    55,593.9 rows/s, counters in `perf-fl1t.txt`). The two attempted `-c 2` replicates (`rep-fl-2-r1`,
+>    `fl-warm-1t`) failed with `flight-loadgen: ... could not connect ... transport error`; their `.jsonl`
+>    files are empty and they were discarded, not averaged.
+>
+> Also: **finding F2 below is prose only.** Its source profile (`h2h/prof-count.txt`, 121 MB) was not
+> committed, and the retained substitute `h2h-perf-summaries/prof-count.top400.txt` contains none of the
+> frames or percentages F2 cites (it is the head of a raw thread dump; zero `%` characters in the file).
+> The same applies to the `SELECT *` percentages in report §5. Treat both as assertions pending a re-run.
+
 * **F1 — no correctness bug.** CQLite returns exactly 3,999,890 rows and 12
   cells/row, digest stable across every run, matching Cassandra's two oracles.
 * **F2 — Cassandra `count(*)` does NOT skip cell deserialisation**, so it is a fair
