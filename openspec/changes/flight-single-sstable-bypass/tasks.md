@@ -149,6 +149,11 @@
 
 ## 9. Residuals recorded at implementation time (issue #3058)
 
+- **Follow-ups filed from the roborev round**: #3097 (the merge arm ignores the ticket's
+  authoritative schema, so nb clustering columns decode as NULL there — the reason this change
+  passes `caller_schema = None` at the merge-arm call site) and #3098 (batched nits:
+  `read_path_probe` cacheline/compaction reach, `on_merger_built` phase skew between the arms).
+
 - **AC #3 / §5 measurement NOT performed in this change.** No local corpus was generated and no
   `perf stat -C` / `taskset` run was made; the ratio-closure claim and the kill criterion are still
   OWED. The wiring, correctness pins and the `CQLITE_FLIGHT_MERGE_PATH` seam needed to run it are in
