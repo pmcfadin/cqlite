@@ -24,6 +24,29 @@ CQLite uses real Cassandra 5.0 instances to generate test data, ensuring:
 - Compression validation (actual compressed SSTables)
 - Schema variety (all CQL types)
 
+## A fixture proves nothing about a property it does not VARY (issue #3042)
+
+Before choosing or generating a fixture, name the property under test and ask whether this
+fixture **varies** it. If it does not, the fixture cannot validate it — the property is
+**UNTESTED**, not proven, and the resulting green is meaningless. This is a *selection-time*
+check: once the fixture is in place the test passes and nothing flags the gap.
+
+- **A single-component clustering key cannot validate a multi-component invariant.** Component
+  separators, `NEXT_COMPONENT` framing between components, and mixed ASC/DESC inversion all
+  need arity ≥ 2 to be exercised at all.
+- **Values that happen to share a first byte cannot validate byte-discriminated trie/index
+  logic.** BTI partition/row tries branch on transition bytes; keys with an identical leading
+  byte never force the discriminating branch.
+- **Correctness resting on an incidental property of one fixture is untested.** Real instance:
+  the pre-fix BTI root-delta base was 2 bytes low, and the wrong root pointed *straight at the
+  root's only child* purely because that fixture's child node happened to be 2 bytes wide —
+  the defect was invisible until a fixture varied the node width (issue #3002, pinned in
+  `cqlite-core/tests/issue_3002_bti_rows_root_base.rs`).
+
+So: vary the arity, vary the leading bytes, vary the widths and the orders. A corpus of one
+shape is a corpus of one datapoint. See also the self-round-trip blind spot in `CLAUDE.md`
+§Testing — a fixture you generated with CQLite cannot be the oracle for CQLite.
+
 ## Test Data Workflow
 
 See [dataset-generation.md](dataset-generation.md) for complete workflow details.
