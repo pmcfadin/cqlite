@@ -229,16 +229,23 @@ stack further levers, and re-open the attribution question — Arrow encode is t
    surface and the WS0 corpus are the warm reader route; the cold route has an equivalent
    unconditional `KWayMerger` build. Recommendation: **warm only** in this change (smallest diff on
    the highest-risk surface), cold as an immediate follow-up if the number lands.
-2. **The WS0 measurement assets are NOT on this box.** `/home/ubuntu/ws0/ws0-corpus/rerun.sh`,
-   `/home/ubuntu/ws0/ws0-h2h/`, and `/home/ubuntu/ws0/ws0-results/head-to-head-method.md` all do not
-   exist (`/home/ubuntu/ws0` itself is absent; only `/home/ubuntu/workspace` is present). The box is
+2. **The WS0 measurement assets are NOT on this box — SETTLED at Seam 1: ratio closure on a local
+   corpus.** `/home/ubuntu/ws0/ws0-corpus/rerun.sh`, `/home/ubuntu/ws0/ws0-h2h/`, and
+   `/home/ubuntu/ws0/ws0-results/head-to-head-method.md` all do not exist (`/home/ubuntu/ws0` itself
+   is absent; only `/home/ubuntu/workspace` is present), nothing named `ws0` appears anywhere on
+   disk, the rig was never committed to the repo, and Docker/Cassandra are not installed. The box is
    a 16-vCPU Intel Xeon Platinum 8488C / 30 GB (Sapphire Rapids, c7i-family) with `perf` and
-   `taskset` available, so it *can* run the measurement — but the corpus generator, the drivers, and
-   the method doc must first be recovered or regenerated, and the regenerated corpus must reproduce
-   `Data.db sha256 22d9ae224b439b2176c287a59eee6a7d1f08b4f1fafc4d2198b3da50cdce922c` for the pass
-   condition to be a like-for-like comparison. **Owner: recover the assets, or approve regeneration
-   plus a re-baselined 61,151 rows/s reference measured on this box before the change lands.** The
-   pass condition is not verifiable until this is settled.
+   `taskset` available, so it *can* host a measurement. CQLite's write surface is uncompressed-only
+   (claim boundary #1406) while the WS0 corpus is LZ4 `chunk_length=16384`, so no locally generated
+   corpus can reproduce the WS0 absolute regardless.
+
+   **Owner decision:** generate a ~4M-row corpus locally and measure **both** the bare scan and
+   Flight `do_get` over those identical bytes, same box, same pinned cores, same session, pre- and
+   post-change. Pass = `do_get` closes to within ~1.3x of the same-session bare scan (from 6.0x).
+   The WS0 absolute is recorded as an **owed follow-up** on a machine holding the byte-identical
+   corpus, and is never restated as reproduced. This preserves the anti-#2877 discipline (acceptance
+   turns on an external throughput number, not a CPU-share shift) while being explicit about what
+   evidence was and was not obtained.
 3. **Is the `CQLITE_FLIGHT_MERGE_PATH` escape hatch acceptable as a permanent, documented test seam**
    (as `CQLITE_READ_PATH` is), or must it be test-cfg-only? Recommendation: permanent and documented
    — it is the field's only kill switch if the bypass is ever found wrong in production.

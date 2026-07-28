@@ -147,8 +147,14 @@ oracles at a PINNED `now` — core `query_semantics_oracle_parity.rs` (gate comp
 read-time-reconciliation divergence (issue #1742); (2) the point-vs-full differential lane
 (`cqlite-core/tests/point_vs_full_differential.rs`, issue #1918); and (3) a **forced-path
 differential** over the SAME bytes, enabled by a documented override that pins the fast path or the
-merge path. On the WS0 corpus the output SHALL remain **3,999,890 rows, 12 cells/row, digest
-`0x4903ffa446163c4b`** (issue AC #5).
+merge path.
+
+Issue AC #5 pins the WS0 corpus output at **3,999,890 rows, 12 cells/row, digest
+`0x4903ffa446163c4b`**. That corpus is absent from the delivery machine (see the acceptance
+requirement below), so AC #5 SHALL be discharged **in form** on the locally generated corpus: a
+full-scan `do_get` SHALL produce a byte-identical row count, cells/row, and value digest when run
+forced to the merge arm and forced to the bypass arm over the same bytes. The WS0 digest itself
+SHALL be recorded as an owed check, and SHALL NOT be reported as verified.
 
 #### Scenario: Both query-semantics oracles pass at a pinned now
 - **WHEN** the `query-semantics-oracle` and `flight-query-semantics-oracle` gate components run against `test-data/query-semantics-oracle.json` at its pinned `now`
@@ -163,10 +169,14 @@ merge path. On the WS0 corpus the output SHALL remain **3,999,890 rows, 12 cells
 - **WHEN** `point_vs_full_differential.rs` runs the same point-eligible query under the forced point and full read paths at a PINNED `now`
 - **THEN** the rows, values, and order are identical, unchanged by this change
 
-#### Scenario: The WS0 corpus digest is unchanged
-- **GIVEN** the WS0 corpus (`ws0.events`, single `nb` SSTable, `Data.db sha256 22d9ae224b439b2176c287a59eee6a7d1f08b4f1fafc4d2198b3da50cdce922c`)
-- **WHEN** a full `do_get` scan is run with the fast path active and the streamed values are digested
-- **THEN** the result is 3,999,890 rows at 12 cells/row with digest `0x4903ffa446163c4b`, identical to the pre-change run
+#### Scenario: Row count, cells/row and value digest are arm-invariant on the local corpus
+- **GIVEN** the locally generated ~4,000,000-row single-SSTable corpus
+- **WHEN** a full `do_get` scan is run forced to the merge arm and forced to the bypass arm, and the streamed values are digested in each run
+- **THEN** the two runs agree exactly on row count, cells/row, and value digest
+
+#### Scenario: The WS0 digest is recorded as owed
+- **WHEN** the change is written up
+- **THEN** the WS0 AC #5 triple (3,999,890 rows, 12 cells/row, digest `0x4903ffa446163c4b`) is listed as an unverified owed check against a machine holding that corpus, and is not claimed as reproduced
 
 ### Requirement: Existing Flight data-plane features are preserved on the fast path
 The fast path SHALL preserve every feature the merge path provides on the streaming row route:
@@ -197,20 +207,40 @@ untouched — aggregating tickets return early at `service.rs:1028` and never re
 - **THEN** it takes the aggregate route and never reaches the single-source branch, and its results are unchanged
 
 ### Requirement: The change is accepted on an external throughput number, with a stated kill criterion
-Acceptance SHALL be an **external** measurement on the WS0 corpus, warm, per **physical** core,
-reported as **rows/s AND cycles/row** (never CPU-share): Flight `do_get` SHALL reach **>= ~280,000
-rows/s per physical core** (within ~1.3x of the 367,760 rows/s bare scan) and SHALL beat stock
-Cassandra's 212,981 rows/s, up from the measured 61,151 rows/s. A reduction in the share of CPU
-spent in the merge with unmoved rows/s is a **FAIL**. The measurement SHALL use CPU-wide `perf stat
--C` (never `perf stat -p`, which costs >2x on this workload) and SHALL pin the workload with
-`taskset` (unpinned measured 18.74 s vs 11.16 s pinned). Both warm and cold numbers SHALL be
-reported, kept as separate claims. If the bypass does not move `do_get` rows/s materially, the work
-SHALL STOP and the negative result SHALL be posted rather than further levers stacked.
+Acceptance SHALL be an **external throughput measurement**, warm, per **physical** core, reported as
+**rows/s AND cycles/row** (never CPU-share). A reduction in the share of CPU spent in the merge with
+unmoved rows/s is a **FAIL**.
 
-#### Scenario: The re-measurement clears the external target
-- **GIVEN** the WS0 corpus with the byte-identical `Data.db`, measured warm on pinned physical cores with CPU-wide perf counters, median of at least 3 runs
-- **WHEN** Flight `do_get` throughput is measured after the change
-- **THEN** it is at least ~280,000 rows/s per physical core and greater than 212,981 rows/s, reported together with cycles/row
+The WS0 rig (`ws0.events`; `/home/ubuntu/ws0/ws0-corpus/rerun.sh`, `ws0-h2h/`,
+`ws0-results/head-to-head-method.md`) is **absent from the delivery machine** and is not committed to
+the repository, so the WS0 absolute (`>= ~280,000` rows/s; beat Cassandra's `212,981`; up from
+`61,151`) is **not reproducible here**. CQLite's write surface is additionally uncompressed-only
+(claim boundary #1406) while the WS0 corpus is LZ4 `chunk_length=16384`, so no locally generated
+corpus can reproduce that absolute.
+
+Acceptance for THIS change is therefore **ratio closure on a locally generated corpus** (owner
+decision, Seam 1): a corpus of ~4,000,000 rows SHALL be generated on the delivery machine, and
+**both** surfaces — the bare scan (`execute_streaming`) and Flight `do_get` — SHALL be measured over
+those **identical bytes** on the **same box, same pinned physical cores, same run**. Flight `do_get`
+SHALL reach **within ~1.3x of the bare scan measured in that same session**, versus the pre-change
+ratio of **6.0x**. Both the pre-change and post-change ratio SHALL be measured locally so the delta
+is self-contained; the WS0 absolute SHALL NOT be restated as if reproduced.
+
+The measurement SHALL use CPU-wide `perf stat -C` (never `perf stat -p`, which costs >2x on this
+workload) and SHALL pin the workload with `taskset` (unpinned measured 18.74 s vs 11.16 s pinned).
+Both warm and cold numbers SHALL be reported, kept as separate claims. The change SHALL record the
+WS0 absolute re-measurement as an explicit **owed follow-up** on a machine holding the byte-identical
+corpus. If the bypass does not move the local `do_get` rows/s materially, the work SHALL STOP and the
+negative result SHALL be posted rather than further levers stacked.
+
+#### Scenario: The local ratio closes on the bare scan
+- **GIVEN** a locally generated corpus of ~4,000,000 rows and a single SSTable, with the bare scan and Flight `do_get` measured over those identical bytes in the same session, warm, on pinned physical cores, with CPU-wide perf counters, median of at least 3 runs
+- **WHEN** the pre-change and post-change Flight `do_get` throughput are compared against the bare scan measured in the same session
+- **THEN** the post-change `do_get` is within ~1.3x of that same-session bare scan (down from the pre-change ratio), reported as rows/s AND cycles/row for every figure
+
+#### Scenario: The WS0 absolute is reported as owed, never as reproduced
+- **WHEN** the results are written up
+- **THEN** they state plainly that the WS0 corpus was unavailable on the delivery machine, report the local ratio as the evidence actually obtained, and record the WS0 absolute re-measurement as an open follow-up — no WS0 number is presented as having been re-measured
 
 #### Scenario: The measurement avoids both known traps
 - **WHEN** the measurement procedure is inspected
