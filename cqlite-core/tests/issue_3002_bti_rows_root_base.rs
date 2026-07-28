@@ -889,6 +889,104 @@ mod wiring {
 
     const TABLE: &str = "test_da.wide_table";
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // EMISSION-LEVEL WIRING EVIDENCE for `cqlite.read.bti.rows_root_rejected`
+    // (issue #3002).
+    //
+    // The counter's registration/unit/attribute-namespacing is covered in
+    // `correctness_signals_2163.rs` by calling `obs::add_counter` BY HAND, which
+    // proves nothing about the PRODUCTION call site in
+    // `reader::data_access::bti::bti_clustering_row_window`. The two tests below
+    // are the only ones that actually drive a rejected root end-to-end, so they
+    // are where the emission belongs: deleting the `add_counter` block in
+    // `data_access/bti.rs` must FAIL a test, not merely stop a dashboard.
+    //
+    // `crate::observability::add_counter` compiles to a no-op unless the
+    // `observability` feature is on, so the probe is necessarily feature-gated
+    // and DEGRADES TO A NO-OP in the default build. Run the lane that exercises
+    // it with:
+    //
+    //   cargo test -p cqlite-core \
+    //     --features observability-testing,cli-helpers,state_machine \
+    //     --test issue_3002_bti_rows_root_base
+    //
+    // (Wiring a gate/CI lane that enables the feature for this target is out of
+    // scope here — this file is a tests-only change.)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// A metric-capture window around a flow that MUST reject a `Rows.db` root.
+    ///
+    /// The shared OTel capture is process-global with DELTA temporality, so each
+    /// user must be `#[serial]` (see the `#[cfg_attr]`s on the tests below) —
+    /// otherwise one test's `reset()` drains another's in-flight deltas.
+    #[cfg(feature = "observability-testing")]
+    struct RejectionProbe(cqlite_core::observability::testing::MetricsCapture);
+
+    #[cfg(feature = "observability-testing")]
+    impl RejectionProbe {
+        /// Begin capturing (draining anything already accumulated).
+        fn start() -> Self {
+            let capture = cqlite_core::observability::testing::metrics_capture();
+            capture.reset();
+            Self(capture)
+        }
+
+        /// Assert the PRODUCTION call site emitted
+        /// `cqlite.read.bti.rows_root_rejected` for `expected_reason` — and NOT for
+        /// `other_reason`, which is the reason the SIBLING wiring test drives. The
+        /// pair is what makes this evidence for the attribute value too: a call site
+        /// that stamped a constant label would satisfy one test and fail the other.
+        fn assert_rejected_with_reason(self, expected_reason: &str, other_reason: &str) {
+            use cqlite_core::observability::catalog;
+            let m = self.0.flush_and_collect();
+            let attr = catalog::attr::ROWS_ROOT_REJECT_REASON;
+            let seen = m.sum_where(
+                catalog::READ_BTI_ROWS_ROOT_REJECTED,
+                &[(attr, expected_reason)],
+            );
+            assert!(
+                seen > 0.0,
+                "the PRODUCTION rejection path must emit {} with {attr}={expected_reason:?}; \
+                 saw {seen} (entry: {:?}) — an unusable root that degrades every clustering \
+                 slice to a full-partition decode is invisible to an operator without it",
+                catalog::READ_BTI_ROWS_ROOT_REJECTED,
+                m.find(catalog::READ_BTI_ROWS_ROOT_REJECTED)
+            );
+            assert_eq!(
+                m.sum_where(
+                    catalog::READ_BTI_ROWS_ROOT_REJECTED,
+                    &[(attr, other_reason)]
+                ),
+                0.0,
+                "this flow rejects roots for {expected_reason:?} ONLY, so no point may carry \
+                 {attr}={other_reason:?} — the label must come from the rejection, not a constant"
+            );
+            assert_eq!(
+                m.unit(catalog::READ_BTI_ROWS_ROOT_REJECTED),
+                Some(catalog::unit::PARTITIONS),
+                "the emission must hit the PRE-REGISTERED instrument (its declared unit), \
+                 not the ad-hoc fallback arm"
+            );
+        }
+    }
+
+    /// No-op stand-in for the default build, where `add_counter` itself is a
+    /// compile-time no-op so there is nothing to observe.
+    #[cfg(not(feature = "observability-testing"))]
+    struct RejectionProbe;
+
+    #[cfg(not(feature = "observability-testing"))]
+    impl RejectionProbe {
+        fn start() -> Self {
+            Self
+        }
+        fn assert_rejected_with_reason(self, _expected_reason: &str, _other_reason: &str) {}
+    }
+
+    /// The two `RowsTrieRootRejectReason::label()` values these wiring tests drive.
+    const REASON_EXTENT: &str = "extent_not_at_entry";
+    const REASON_CHILDLESS: &str = "childless_root_without_payload";
+
     async fn open_db() -> Option<Database> {
         let sstables = datasets_root()?.join("sstables");
         open_db_from(&sstables).await
@@ -1034,7 +1132,13 @@ mod wiring {
     /// It also proves the `data_position` consumers survive: the point lookup
     /// (`partition_lookup`) and the successor walk (`partition_successor`) that bound
     /// every one of these reads take their offsets from the SAME entries.
+    ///
+    /// And it is the EMISSION-level wiring evidence for
+    /// `cqlite.read.bti.rows_root_rejected` with
+    /// `rows_root_reject_reason = "extent_not_at_entry"`: without the probe below,
+    /// deleting the production `add_counter` block would leave this suite green.
     #[tokio::test]
+    #[cfg_attr(feature = "observability-testing", serial_test::serial)]
     async fn two_low_base_rows_db_still_returns_exact_rows_through_select() {
         let Some((_tmp, sstables)) = fixture_copy_with_two_low_base_rows_db() else {
             return;
@@ -1042,7 +1146,9 @@ mod wiring {
         let Some(db) = open_db_from(&sstables).await else {
             return;
         };
+        let probe = RejectionProbe::start();
         assert_fallback_returns_exact_rows(&db, "2-low base").await;
+        probe.assert_rejected_with_reason(REASON_EXTENT, REASON_CHILDLESS);
     }
 
     /// AC (root validation, roborev #3002) — the same guarantee for a `Rows.db` whose
@@ -1052,7 +1158,11 @@ mod wiring {
     /// it errored, and `bti_clustering_row_window` turned the error into
     /// `Error::corruption` — i.e. every one of these slices FAILED, where the honest
     /// rejection returns the correct rows through the full-partition fallback.
+    ///
+    /// EMISSION-level wiring evidence for the same counter with the OTHER bounded
+    /// attribute value, `rows_root_reject_reason = "childless_root_without_payload"`.
     #[tokio::test]
+    #[cfg_attr(feature = "observability-testing", serial_test::serial)]
     async fn childless_zero_byte_root_rows_db_still_returns_exact_rows_through_select() {
         let Some((_tmp, sstables)) = fixture_copy_with_childless_zero_byte_root() else {
             return;
@@ -1060,7 +1170,9 @@ mod wiring {
         let Some(db) = open_db_from(&sstables).await else {
             return;
         };
+        let probe = RejectionProbe::start();
         assert_fallback_returns_exact_rows(&db, "childless 0x00 root").await;
+        probe.assert_rejected_with_reason(REASON_CHILDLESS, REASON_EXTENT);
     }
 
     /// Issue #3002 (roborev): `verify` must NOT tell an operator that an intact file
