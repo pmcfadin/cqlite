@@ -28,9 +28,13 @@
 #
 # Output layout (mirrors the repo's CQLITE_DATASETS_ROOT convention, so
 # CQLITE_DATASETS_ROOT=$CORPUS_ROOT works directly):
-#   $CORPUS_ROOT/sstables/perf_3068/medium_700b-<uuid>/nb-*-*.db
-#   $CORPUS_ROOT/sstables/perf_3068/wide_4kb-<uuid>/nb-*-*.db
+#   $CORPUS_ROOT/sstables/perf_3068/medium_700b-<uuid>/nb-*-*.db + schema.cql
+#   $CORPUS_ROOT/sstables/perf_3068/wide_4kb-<uuid>/nb-*-*.db   + schema.cql
 #   $CORPUS_ROOT/manifest-3068.json    (copied to test-data/perf-corpus-3068-manifest.json)
+#
+# schema.cql is `cqlsh DESCRIBE KEYSPACE` captured at generation time and copied
+# next to each published SSTable, so the manifest's keyspace/table DDL can be
+# regenerated OFFLINE from the corpus alone (no live container needed).
 #
 # See docs/development/perf-corpus-and-containment.md — including why every
 # measurement against this corpus must go through perf-run-contained.sh.
@@ -40,14 +44,20 @@
 #   MEDIUM_PARTITIONS=1200000 WIDE_PARTITIONS=120000 \
 #     CORPUS_ROOT=/home/ubuntu/corpus-3068 bash .../gen-perf-corpus-3068.sh
 #   TABLES=medium bash test-data/scripts/gen-perf-corpus-3068.sh   # medium only
+#   bash .../gen-perf-corpus-3068.sh --validate-only   # validate inputs, run nothing
+#   bash .../gen-perf-corpus-3068.sh --prune-dry-run   # + list the stale corpus
+#                                                     #   dirs a run WOULD remove
 set -euo pipefail
 
 IMAGE="${IMAGE:-cassandra:5.0.2}"
 CONTAINER="${CONTAINER:-cqlite-perf3068}"
-CORPUS_ROOT="${CORPUS_ROOT:-/home/ubuntu/corpus-3068}"
+# `${VAR-default}`, not `${VAR:-default}`: an EXPLICITLY EMPTY CORPUS_ROOT/TABLES
+# (typically a caller's unset variable) must fail validation, never silently
+# become the default — this script deletes multi-GB paths under CORPUS_ROOT.
+CORPUS_ROOT="${CORPUS_ROOT-/home/ubuntu/corpus-3068}"
 KS="perf_3068"
 # Which tables to build: "both" | "medium" | "wide".
-TABLES="${TABLES:-both}"
+TABLES="${TABLES-both}"
 # 10 rows per partition (clustering fixed(10)), so rows = partitions * 10.
 # 1.2M partitions * 10 rows * ~718 B/row on disk => ~8.6 GB Data.db.
 MEDIUM_PARTITIONS="${MEDIUM_PARTITIONS:-1200000}"
@@ -58,12 +68,104 @@ STRESS_THREADS="${STRESS_THREADS:-16}"
 DOCKER="${DOCKER:-sudo -n docker}"
 MAX_HEAP="${MAX_HEAP:-8G}"
 HEAP_NEW="${HEAP_NEW:-2G}"
+# Remove a previously-published <table>-<uuid> dir before publishing the new one.
+# PRUNE_STALE=0 keeps them (accepting several multi-GB copies the manifest does
+# not describe).
+PRUNE_STALE="${PRUNE_STALE:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRESS="/opt/cassandra/tools/bin/cassandra-stress"
 
 log() { echo "[gen-perf-3068] $*"; }
 die() { echo "[gen-perf-3068] FATAL: $*" >&2; exit 1; }
+
+VALIDATE_ONLY=0
+PRUNE_DRY_RUN=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    # Self-test hooks (scripts/tests/test_gen_perf_corpus_3068.sh): validate the
+    # inputs / enumerate prune candidates and EXIT — no container, no writes, no
+    # deletions.
+    --validate-only) VALIDATE_ONLY=1; shift ;;
+    --prune-dry-run) VALIDATE_ONLY=1; PRUNE_DRY_RUN=1; shift ;;
+    -h|--help)
+      echo "usage: $0 [--validate-only|--prune-dry-run]  (config via env: TABLES, CORPUS_ROOT, ...)" >&2
+      exit 0 ;;
+    *) die "unknown argument: $1 (config is via environment variables)" ;;
+  esac
+done
+
+# ---------------------------------------------------------- input validation --
+# BEFORE any destructive or expensive work: an unvalidated TABLES typo used to
+# start a container, generate nothing, and then overwrite the COMMITTED manifest
+# with an empty tables array — silent corruption of a provenance artifact.
+declare -a SELECTED_TABLES=()
+validate_inputs() {
+  case "$TABLES" in
+    both)   SELECTED_TABLES=(medium_700b wide_4kb) ;;
+    medium) SELECTED_TABLES=(medium_700b) ;;
+    wide)   SELECTED_TABLES=(wide_4kb) ;;
+    *) die "invalid TABLES='$TABLES' (expected one of: both | medium | wide)" ;;
+  esac
+  [[ -n "${CORPUS_ROOT// }" ]] || die "CORPUS_ROOT is empty"
+  [[ "$CORPUS_ROOT" == /* ]] || die "CORPUS_ROOT must be an absolute path, got '$CORPUS_ROOT'"
+  [[ "$(printf '%s' "$CORPUS_ROOT" | sed 's:/*$::')" != "" ]] \
+    || die "refusing to use '/' as CORPUS_ROOT"
+  [[ -n "${KS// }" ]] || die "keyspace is empty"
+  log "validated: TABLES=$TABLES -> ${SELECTED_TABLES[*]}; CORPUS_ROOT=$CORPUS_ROOT"
+}
+
+# Resolved (symlink-free) corpus keyspace dir; "" when it does not exist yet.
+corpus_keyspace_dir() {
+  local root
+  root="$(cd "$CORPUS_ROOT" 2>/dev/null && pwd -P)" || return 0
+  [[ -n "$root" && "$root" != "/" ]] || die "CORPUS_ROOT resolved to '/' — refusing"
+  printf '%s/sstables/%s' "$root" "$KS"
+}
+
+# Remove PREVIOUS <table>-<uuid> dirs so repeated regenerations cannot leave
+# several multi-GB copies of a table while the manifest describes only the last.
+#
+# Deliberately narrow — this deletes multi-GB paths:
+#   * only DIRECT children of $CORPUS_ROOT/sstables/$KS,
+#   * only names matching exactly "<selected-table>-<32 hex>" (Cassandra's own
+#     "<table>-<UUID-without-dashes>" layout); anything else is left alone,
+#   * never a symlink, and never a path whose resolved form is outside that
+#     keyspace dir (die, not delete),
+#   * never the directory just published ($2), and
+#   * never with an empty/relative/"/" corpus root (validate_inputs + here).
+prune_stale_table_dirs() {  # $1 = table, $2 = basename to KEEP ("" keeps none)
+  local tbl="$1" keep="${2:-}" ks_dir d base real
+  [[ -n "${tbl// }" ]] || die "prune: empty table name"
+  ks_dir="$(corpus_keyspace_dir)"
+  [[ -n "$ks_dir" && -d "$ks_dir" ]] || return 0
+  local had_nullglob=0
+  shopt -q nullglob && had_nullglob=1
+  shopt -s nullglob
+  for d in "$ks_dir/$tbl"-*; do
+    base="$(basename "$d")"
+    [[ -d "$d" ]] || continue
+    if [[ -L "$d" ]]; then
+      log "[prune] skipping symlink (never followed): $d"
+      continue
+    fi
+    if [[ ! "$base" =~ ^${tbl}-[0-9a-f]{32}$ ]]; then
+      log "[prune] skipping '$base' (not a <table>-<uuid> corpus dir)"
+      continue
+    fi
+    [[ -n "$keep" && "$base" == "$keep" ]] && continue
+    real="$(cd "$d" && pwd -P)" || die "prune: cannot resolve $d"
+    [[ "$real" == "$ks_dir/$base" ]] \
+      || die "prune: '$d' resolves OUTSIDE the corpus keyspace dir ($real) — refusing to delete"
+    if [[ "$PRUNE_DRY_RUN" == 1 ]]; then
+      echo "WOULD-PRUNE $real"
+      continue
+    fi
+    log "[prune] removing stale corpus dir $real"
+    sudo -n rm -rf -- "$real"
+  done
+  [[ "$had_nullglob" == 1 ]] || shopt -u nullglob
+}
 
 # ---------------------------------------------------------------- preflight --
 # `nodetool compact` needs transient room for a full second copy of the table.
@@ -262,12 +364,34 @@ finalize_table() {  # $1 = table name
   echo "$dir"
 }
 
+# Capture the live keyspace + table DDL so the manifest's keyspace_ddl / per-table
+# ddl can be rebuilt from the corpus alone. FAIL-CLOSED: without it a fresh run
+# would emit `keyspace_ddl: null` and the committed manifest would not be
+# reproducible by the committed generator.
+capture_schema() {  # $1 = destination file
+  local out="$1" tmp
+  tmp="$(mktemp)"
+  $DOCKER exec "$CONTAINER" cqlsh -e "DESCRIBE KEYSPACE $KS;" > "$tmp" 2>/dev/null \
+    || die "could not DESCRIBE KEYSPACE $KS (schema.cql is required for a reproducible manifest)"
+  grep -q "^CREATE KEYSPACE $KS " "$tmp" \
+    || die "DESCRIBE KEYSPACE $KS produced no CREATE KEYSPACE statement"
+  grep -q "^CREATE TABLE $KS\." "$tmp" \
+    || die "DESCRIBE KEYSPACE $KS produced no CREATE TABLE statement"
+  mv "$tmp" "$out"
+  log "captured schema -> $out ($(wc -c <"$out" | tr -d ' ') bytes)"
+}
+
 publish_table() {  # $1 = table, $2 = container sstable dir
   local tbl="$1" cdir="$2"
   local host_dir="$CORPUS_ROOT/cassandra-data/data/$KS/$(basename "$cdir")"
   local dest="$CORPUS_ROOT/sstables/$KS/$(basename "$cdir")"
   [[ -d "$host_dir" ]] || die "[$tbl] host bind-mount dir missing: $host_dir"
   mkdir -p "$(dirname "$dest")"
+  # Drop any earlier generation of THIS table first (see prune_stale_table_dirs
+  # for the guards) so the corpus never holds several multi-GB copies.
+  if [[ "$PRUNE_STALE" == 1 ]]; then
+    prune_stale_table_dirs "$tbl" "$(basename "$cdir")"
+  fi
   sudo -n rm -rf "$dest"
   mkdir -p "$dest"
   # Hardlink (same filesystem) — instant, and the corpus survives deletion of
@@ -279,6 +403,19 @@ publish_table() {  # $1 = table, $2 = container sstable dir
 }
 
 # ---------------------------------------------------------------------- main --
+# Input validation runs FIRST — before the container, the load, and any deletion.
+validate_inputs
+
+if [[ "$VALIDATE_ONLY" == 1 ]]; then
+  if [[ "$PRUNE_DRY_RUN" == 1 ]]; then
+    for tbl in "${SELECTED_TABLES[@]}"; do
+      prune_stale_table_dirs "$tbl" ""
+    done
+  fi
+  echo "VALIDATE-OK tables=${SELECTED_TABLES[*]} corpus_root=$CORPUS_ROOT keyspace=$KS"
+  exit 0
+fi
+
 preflight_space 40
 write_profiles
 start_container
@@ -297,12 +434,19 @@ if [[ "$TABLES" == "both" || "$TABLES" == "wide" ]]; then
   DIRS+=("wide_4kb:$(finalize_table wide_4kb | tail -1)")
 fi
 
+# Captured once from the live container, copied into every published dir.
+capture_schema "$CORPUS_ROOT/schema.cql"
+
 PUBLISHED=()
 for entry in "${DIRS[@]}"; do
   tbl="${entry%%:*}"; cdir="${entry#*:}"
-  PUBLISHED+=("$tbl:$(publish_table "$tbl" "$cdir" | tail -1)")
-  log "[$tbl] published"
+  dest="$(publish_table "$tbl" "$cdir" | tail -1)"
+  cp "$CORPUS_ROOT/schema.cql" "$dest/schema.cql"
+  PUBLISHED+=("$tbl:$dest")
+  log "[$tbl] published (with schema.cql)"
 done
+
+[[ ${#PUBLISHED[@]} -gt 0 ]] || die "no tables were published — refusing to write a manifest"
 
 # Two manifests, same content: one next to the (uncommitted) corpus, and one at
 # the COMMITTED path so a regenerated corpus can be diffed against the recorded

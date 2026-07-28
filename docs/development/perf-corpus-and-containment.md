@@ -48,6 +48,10 @@ bytes** — never values assumed from the DDL or from the generator's intent:
   a throwaway memory-capped container. This is **fail-closed**: if `totalRows` cannot be read the
   generator errors out rather than recording an unobserved number.
 
+The DDL is reproducible too: the generator captures `cqlsh DESCRIBE KEYSPACE` into `schema.cql` and
+publishes a copy **next to each SSTable**, so `keyspace_ddl` and the per-table DDL can be rebuilt
+from the corpus alone with no live container. The capture is fail-closed — no `schema.cql`, no run.
+
 Regenerate + re-verify:
 
 ```bash
@@ -61,6 +65,21 @@ python3 test-data/scripts/write-perf-corpus-manifest.py \
 
 The recorded `data_db_sha256` is the reproducibility check: a regenerated corpus with a different
 hash is a *different* corpus, and any perf number measured against it is not comparable.
+
+Generator guardrails (pinned by `scripts/tests/test_gen_perf_corpus_3068.sh`, gate component
+`tooling-tests`):
+
+- **`TABLES` (`both`|`medium`|`wide`) and `CORPUS_ROOT` are validated FIRST**, before the container,
+  the load, or any deletion. A typo used to start a container, generate nothing, and then overwrite
+  the committed manifest with an empty `tables` array; the manifest writer now also **refuses an
+  empty `--table` list** outright, so no caller can produce that.
+- **A regeneration prunes the previous `<table>-<uuid>` directory** for each selected table, so the
+  corpus cannot accumulate multiple multi-GB copies that the manifest does not describe. The
+  deletion is deliberately narrow: direct children of `$CORPUS_ROOT/sstables/<keyspace>` whose name
+  is exactly `<selected-table>-<32 hex>`, never a symlink, never a path resolving outside that
+  directory, never with an empty/relative/`/` corpus root. `PRUNE_STALE=0` keeps them;
+  `--prune-dry-run` lists what a run would remove and deletes nothing (`--validate-only` checks
+  inputs only).
 
 ## Why `perf-run-contained.sh` exists — read this before your first cold scan
 
@@ -89,11 +108,23 @@ bash test-data/scripts/perf-run-contained.sh --mem 8G --swap 2G -- \
 ```
 
 `--mem`/`--swap` take systemd memory syntax (byte count with an optional `K`/`M`/`G`/`T`[`i`]
-suffix, a percentage, `max`, or `infinity`) and are **validated before `sudo`**. That validation is
-safety-critical, not cosmetic: a bare `8` is a legal systemd value meaning *8 bytes*, so a typo
-must not quietly turn every run into an instant OOM that looks like a real result. It is pinned by
-`scripts/tests/test_perf_run_contained.sh` (gate component `tooling-tests`); `--check-args`
-validates and prints the resolved caps without executing anything.
+suffix, or a percentage of physical RAM) and are **validated before `sudo`**. That validation is
+safety-critical, not cosmetic, and it is deliberately *stricter than systemd*:
+
+- **`max` and `infinity` are REFUSED** (either flag, any case). systemd accepts them and they
+  *disable* the limit — a "contained" run with no cap is exactly the state that livelocked the host.
+  A cap must be finite.
+- **`--mem` may not be zero** (`0`, `0G`, `0%`): a zero cap kills the workload instead of containing
+  it. **`--swap 0` is allowed** and is the normal "no swap" cap.
+- **A percentage must be `<= 100%`** (and `> 0%` for `--mem`).
+- **A suffixless number is a BYTE count to systemd** — `--mem 8` means *8 bytes*. Anything under
+  1 MiB is refused outright (a typo must never look like an instant OOM), and a larger suffixless
+  value is accepted but echoes the reading it resolved to (`... reads it as BYTES = 1073741824 B
+  (1.00 GiB)`), so it can never be a silent misunderstanding. A *suffixed* small cap (`64K`) is still
+  accepted: it is explicit, not a typo.
+
+Pinned by `scripts/tests/test_perf_run_contained.sh` (gate component `tooling-tests`);
+`--check-args` validates and prints the resolved caps without executing anything.
 
 Practical caps on a 16 GiB box: `--mem 8G --swap 2G` leaves room for the host. If the measurement
 gets OOM-killed under that cap, that is a **finding about the read path's memory behavior** (see the

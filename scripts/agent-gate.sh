@@ -244,8 +244,12 @@
 #                      Also runs (no python3/sudo/systemd needed)
 #                      scripts/tests/test_perf_run_contained.sh (#3068) — pins the
 #                      --mem/--swap validation of the perf-corpus containment wrapper
-#                      test-data/scripts/perf-run-contained.sh, whose misparsed cap
-#                      would mean a hung host rather than a killed process.
+#                      test-data/scripts/perf-run-contained.sh, whose misparsed or
+#                      UNBOUNDED cap would mean a hung host rather than a killed
+#                      process — and scripts/tests/test_gen_perf_corpus_3068.sh,
+#                      which pins the perf-corpus generator's TABLES validation, its
+#                      manifest writer's refusal of an empty table list, and the
+#                      tight scoping of its multi-GB stale-corpus pruning.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -4648,6 +4652,24 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_perf_run_contained.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (perf-run-contained arg-safety guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # perf-corpus generator guard (#3068): hermetic (no docker/sudo/cassandra —
+  # only the generator's --validate-only/--prune-dry-run hooks, which exit before
+  # the container starts). Pins (a) TABLES validation BEFORE any destructive work
+  # plus the manifest writer's refusal to emit an empty `tables` array — together
+  # they stop a typo silently overwriting the committed provenance manifest — and
+  # (b) the tight scoping of stale-corpus pruning, which deletes multi-GB paths.
+  echo ">>> [$name] bash scripts/tests/test_gen_perf_corpus_3068.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_3068.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (perf-corpus generator guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

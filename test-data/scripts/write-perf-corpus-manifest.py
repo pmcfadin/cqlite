@@ -280,10 +280,28 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
+    # Fail closed on an empty table list: an empty `tables` array is a manifest
+    # that describes nothing, and writing one over the COMMITTED manifest would
+    # silently destroy a provenance artifact (e.g. after a TABLES typo generated
+    # no tables at all).
+    if not args.table:
+        raise SystemExit(
+            "no --table given: refusing to write a manifest with an empty "
+            "'tables' array (it would overwrite a real manifest with nothing). "
+            "Pass at least one --table=<name>:<published sstable dir>."
+        )
+
     docker = args.docker.split()
     tables, sstable_dirs = [], []
     for spec in args.table:
-        name, _, path = spec.partition(":")
+        name, sep, path = spec.partition(":")
+        if not sep or not name.strip() or not path.strip():
+            raise SystemExit(
+                f"malformed --table {spec!r}: expected "
+                "'<table-name>:<published sstable dir>'"
+            )
+        if not os.path.isdir(path):
+            raise SystemExit(f"--table {name}: not a directory: {path}")
         sstable_dirs.append(path)
         tables.append(build_table_record(
             args.keyspace, name, path, args.container, args.image, docker,

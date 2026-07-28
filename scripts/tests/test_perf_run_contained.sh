@@ -31,13 +31,25 @@ else
 fi
 
 # ------------------------------------------------------- accepted mem values --
-# Every form systemd MemoryMax accepts, plus the plain byte count.
-for good in 8G 512M 1.5G 2Gi 64K 1T 50% max infinity 1073741824 512MB; do
-  if out=$(bash "$SCRIPT" --check-args --mem "$good" --swap "$good" -- true 2>&1) &&
+# Every FINITE form systemd MemoryMax accepts, plus the plain byte count. Notes
+# go to stderr, so only stdout is compared.
+for good in 8G 512M 1.5G 2Gi 64K 1T 50% 100% 1073741824 512MB; do
+  if out=$(bash "$SCRIPT" --check-args --mem "$good" --swap "$good" -- true 2>/dev/null) &&
      [[ "$out" == "ARGS-OK mem=$good swap=$good cmd=true" ]]; then
     pass "accepts --mem/--swap '$good'"
   else
     fail "rejected valid memory value '$good' (out: $out)"
+  fi
+done
+
+# `--swap 0` is the legitimate "no swap at all" cap and must stay accepted
+# (unlike `--mem 0`, which is a nonsense cap -- see the rejections below).
+for goodswap in 0 0G 0%; do
+  if out=$(bash "$SCRIPT" --check-args --swap "$goodswap" -- true 2>/dev/null) &&
+     [[ "$out" == "ARGS-OK mem=8G swap=$goodswap cmd=true" ]]; then
+    pass "accepts --swap '$goodswap' (no swap)"
+  else
+    fail "rejected valid zero swap cap '$goodswap' (out: $out)"
   fi
 done
 
@@ -65,12 +77,49 @@ reject "non-numeric --swap"       --swap banana
 reject "negative --swap"          --swap -2G
 reject "unknown flag"             --memory 8G
 
-# A bare integer IS a valid systemd byte count, so it is accepted -- but the
-# usage text must warn about the byte-count reading that makes `8` a footgun.
-if bash "$SCRIPT" --help 2>&1 | grep -q "byte count"; then
+# ------------------------------------------------- UNBOUNDED caps are refused --
+# systemd ACCEPTS MemoryMax=max/infinity and it DISABLES the limit, i.e. runs the
+# "contained" workload uncontained -- the exact state that livelocked a swapless
+# host for 75 minutes. Case-insensitively refused for BOTH caps.
+for unbounded in max infinity MAX INFINITY Max Infinity mAx iNfInItY; do
+  reject "--mem $unbounded (unbounded cap)"  --mem "$unbounded"
+  reject "--swap $unbounded (unbounded cap)" --swap "$unbounded"
+done
+
+# Zero / over-100% --mem caps are nonsense, not containment.
+reject "zero --mem"               --mem 0
+reject "zero --mem (suffixed)"    --mem 0G
+reject "zero --mem (percent)"     --mem 0%
+reject "over-100% --mem"          --mem 200%
+reject "over-100% --swap"         --swap 101%
+
+# A SUFFIXLESS number is BYTES to systemd, so a bare `8` is an 8-BYTE cap: every
+# run would look like an instant OOM and hide the real result. Refused outright
+# below 1 MiB rather than silently producing a uselessly tiny cap.
+reject "bare small integer --mem"   --mem 8
+reject "sub-1MiB byte count --mem"  --mem 1024
+reject "bare small integer --swap"  --swap 8
+
+# A large suffixless count IS a legitimate byte cap, but the resolved reading is
+# echoed so it can never be a silent misunderstanding.
+err=$(bash "$SCRIPT" --check-args --mem 1073741824 -- true 2>&1 >/dev/null)
+if grep -q "reads it as BYTES" <<<"$err"; then
+  pass "suffixless byte count reports its resolved reading"
+else
+  fail "no byte-count note for a suffixless --mem (err: $err)"
+fi
+
+# The usage text must explain the byte-count reading AND the unbounded refusal.
+help_out=$(bash "$SCRIPT" --help 2>&1)
+if grep -q "BYTE count" <<<"$help_out" || grep -q "byte count" <<<"$help_out"; then
   pass "usage documents that a bare number is a byte count"
 else
   fail "usage text does not explain the bare-number/byte-count reading"
+fi
+if grep -qi "REFUSED" <<<"$help_out" && grep -qi "infinity" <<<"$help_out"; then
+  pass "usage documents that max/infinity are refused"
+else
+  fail "usage text does not document the unbounded-cap refusal"
 fi
 
 # ------------------------------------------------------- structural failures --
