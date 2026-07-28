@@ -459,7 +459,8 @@ Validate parsing:
 ```bash
 bash test-data/scripts/fetch-datasets.sh   # real Cassandra 5.0 binaries (gitignored)
 export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
-sstabledump test-data/datasets/sstables/test_collections/collection_table/*-Data.db
+# Table dirs carry a UUID suffix — glob, never hard-code
+sstabledump test-data/datasets/sstables/test_collections/collection_table-*/*-Data.db
 ```
 
 ## Reference

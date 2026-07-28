@@ -4,13 +4,20 @@ Complete guide to generating the CQLite test corpus (datasets-v3: nb + oa + da).
 
 ## Current corpus: datasets-v3
 
-Three SSTable version/format tiers produced by Cassandra 5.0.2:
+Three SSTable version/format tiers produced by Cassandra 5.0.2 by
+`regenerate-datasets.sh`:
 
-| Tier | Version | Format | Keyspaces | Tables |
-|------|---------|--------|-----------|--------|
-| Primary | `nb` | `big` | test_basic, test_collections, test_timeseries, test_wide_rows | 33 |
-| OA extended | `oa` | `big` | test_oa | 6 |
-| BTI extended | `da` | `bti` | test_da | 3 |
+| Tier | Version | Format | Keyspaces |
+|------|---------|--------|-----------|
+| Primary | `nb` | `big` | test_basic, test_collections, test_timeseries, test_wide_rows |
+| OA extended | `oa` | `big` | test_oa |
+| BTI extended | `da` | `bti` | test_da |
+
+> This is what **this script** regenerates, not the full enforced corpus — other keyspaces
+> (e.g. `test_big`, `test_comp`) come from their own `generate-*.sh` fixture scripts and are
+> also enforced. The authoritative, disk-derived scope is
+> `test-data/validation-matrix.md` + `test-data/corpus-coverage-policy.md`; counts are
+> re-derived per run (#1229), never hard-coded.
 
 Golden JSONL files (sstabledump output) are committed alongside each table's
 binary SSTables.
@@ -58,7 +65,10 @@ through three phases, restarting the container between phases to change format:
 After regeneration:
 
 ```bash
-# Smoke-test 39 tables (nb=33 + oa=6; da=3 currently SKIP-PENDING BTI)
+# Smoke-test the whole corpus. The table set is ENUMERATED FROM DISK per run
+# (issue #1229 retired the hand-typed allowlist) — never hard-code a count.
+# Enforced scope + skip-pending keyspaces: test-data/validation-matrix.md
+#                                          test-data/corpus-coverage-policy.md
 bash test-data/scripts/smoke-test-all-tables.sh
 
 # Package as release tarball
@@ -94,7 +104,8 @@ bash test-data/scripts/shutdown-clean.sh
 
 ### start-clean.sh
 
-Starts `cassandra-5-0` via compose, waits for health, applies schemas from
+Starts the `cqlite-cassandra-5-0` container via
+`test-data/docker/docker-compose-cassandra5.yml`, waits for health, applies schemas from
 `schemas/core.list`.
 
 ```bash
@@ -137,12 +148,22 @@ bash test-data/scripts/shutdown-clean.sh
 | `oa-test.cql` | test_oa | 6 | oa format: simple types, collections, UDT, TTL, static, tombstones |
 | `da-test.cql` | test_da | 3 | da/BTI format: simple types, collections, TTL |
 
+The table counts above describe what these schemas create; they are **not** the coverage
+contract. Enforced scope (which keyspaces run vs are skip-pending) lives in
+`test-data/corpus-coverage-policy.md` + `test-data/validation-matrix.md`, and both the smoke
+script and the binding parity suites enumerate the corpus **from disk** per run (#1229) — a
+newly-committed keyspace is automatically in scope. Never assert a hard-coded table total.
+`test-data/schemas/` also holds parity fixtures not listed here (compaction, tombstone,
+compression, write-load, deltas, cql-type).
+
 ## CI integration
 
-CI fetches binary SSTables from the `datasets-v3` GitHub release:
+CI fetches the binary SSTables from the pinned GitHub dataset release. The script carries the
+pin (tag + asset + sha256) — read it there, don't transcribe it:
 
 ```bash
 bash test-data/scripts/fetch-datasets.sh
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
 ```
 
 See `.github/workflows/` for the full CI configuration.

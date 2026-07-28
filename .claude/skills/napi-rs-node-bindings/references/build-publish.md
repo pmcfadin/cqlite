@@ -20,6 +20,11 @@ npm test
 
 ### package.json
 
+> CQLite's live config is `bindings/node/package.json` — it is on `@napi-rs/cli` **v3**, so the
+> config key is `napi.targets` (flat array) + `napi.binaryName`, and the test runner is **jest**.
+> The generic v2-style snippet below (`napi.triples`, ava) is illustrative of the older CLI; prefer
+> the real file.
+
 ```json
 {
   "name": "@yourorg/cqlite",
@@ -44,7 +49,7 @@ npm test
   },
   "license": "MIT",
   "engines": {
-    "node": ">= 14"
+    "node": ">= 18"
   },
   "scripts": {
     "artifacts": "napi artifacts",
@@ -55,8 +60,8 @@ npm test
     "version": "napi version"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0",
-    "ava": "^6.0.0"
+    "@napi-rs/cli": "^3.5.1",
+    "jest": "^29.7.0"
   },
   "files": [
     "index.js",

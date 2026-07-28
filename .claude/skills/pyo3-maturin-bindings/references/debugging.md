@@ -7,7 +7,7 @@
 ```toml
 # Cargo.toml - ensure feature is enabled
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py39"] }  # version pinned at the workspace root
 ```
 
 ### Symbol visibility / undefined symbols on macOS

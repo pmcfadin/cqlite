@@ -63,20 +63,21 @@ bash test-data/scripts/regenerate-datasets.sh --rows 200
 ```
 
 **Compose-stack workflow (interactive / partial):**
-```bash
-cd test-data
+All paths below are repo-root-relative; run via `bash` (`regenerate-datasets.sh` is not
+committed executable, so `./` invocation fails on it):
 
-# 1. Start clean Cassandra 5 with schemas
-./scripts/start-clean.sh
+```bash
+# 1. Start clean Cassandra 5 with schemas (container: cqlite-cassandra-5-0)
+bash test-data/scripts/start-clean.sh
 
 # 2. (Optional) run CQL inserts manually via cqlsh
 docker exec -it cqlite-cassandra-5-0 cqlsh
 
 # 3. Export SSTables + generate JSONL goldens
-./scripts/export.sh
+bash test-data/scripts/export.sh
 
 # 4. Shutdown and clean volumes
-./scripts/shutdown-clean.sh
+bash test-data/scripts/shutdown-clean.sh
 ```
 
 ## Generation Scripts
@@ -108,7 +109,7 @@ bash test-data/scripts/regenerate-datasets.sh --dry-run
 Starts Cassandra 5.0 container (via compose) and applies schemas.
 
 **What it does:**
-1. Starts `cassandra-5-0` container via docker-compose
+1. Starts the `cqlite-cassandra-5-0` container via `test-data/docker/docker-compose-cassandra5.yml`
 2. Waits for Cassandra to be healthy
 3. Applies schemas from `schemas/core.list`
 
@@ -118,8 +119,8 @@ Starts Cassandra 5.0 container (via compose) and applies schemas.
 
 **Example:**
 ```bash
-./scripts/start-clean.sh
-SCHEMA_SET=all ./scripts/start-clean.sh
+bash test-data/scripts/start-clean.sh
+SCHEMA_SET=all bash test-data/scripts/start-clean.sh
 ```
 
 ### export.sh
@@ -166,30 +167,20 @@ Stops Cassandra and removes Docker volumes.
 
 Schemas in `test-data/schemas/`:
 
-### basic-types.cql
-Simple table with all primitive types:
-- Partition key: uuid
-- No clustering
-- Columns: int, text, timestamp, boolean, etc.
+`schemas/core.list` names the curated set `start-clean.sh` applies by default:
+`basic-types.cql`, `collections.cql`, `time-series.cql`, `wide-rows.cql` (→ keyspaces
+`test_basic`, `test_collections`, `test_timeseries`, `test_wide_rows`).
 
-### collections.cql
-Collection types:
-- list<int>
-- set<text>
-- map<text, int>
-- Nested frozen collections
+Beyond the core set the directory holds the format-specific and parity fixtures — `oa-test.cql`,
+`da-test.cql` (BTI), `cql-type-parity.cql`, `compaction-parity*.cql`, `tombstone-parity.cql`,
+`compression-parity.cql`, `write-load-parity.cql`, `deltas.cql`, `wide-table-bti.cql`, plus
+`udts/` and `legacy/`.
 
-### time-series.cql
-Time-series pattern:
-- Partition key: sensor_id
-- Clustering: timestamp (DESC)
-- Columns: temperature, humidity, pressure
-
-### wide-rows.cql
-Wide partition testing:
-- Single partition key
-- Many clustering rows (1000+)
-- Tests pagination and offset handling
+**Read the `.cql` for the actual DDL** — column sets and clustering shapes change with the fixtures,
+and row counts come from the generator (`--rows N`, default 50), not from the schema. Which tables
+are enforced vs skip-pending lives in `test-data/validation-matrix.md` +
+`test-data/corpus-coverage-policy.md`, and the corpus is enumerated from disk per run (#1229) —
+never hard-code a table count.
 
 ### Custom Schemas
 Add your own:
@@ -210,15 +201,21 @@ See [validation-workflow.md](validation-workflow.md) for complete validation pro
 
 ### Validate Against sstabledump
 
+Table directories carry a UUID suffix (`<table>-<uuid>/`), so glob rather than hard-coding a path;
+`<schema>.cql` is one of the files in `test-data/schemas/` (e.g. `basic-types.cql`).
+
 ```bash
+TABLE_DIR=$(echo test-data/datasets/sstables/<keyspace>/<table>-*)
+
 # 1. Generate sstabledump reference
-sstabledump test-data/datasets/sstables/keyspace/table/*-Data.db \
-    > reference.json
+#    (a committed `*-Data.db.jsonl` golden already sits beside every Data.db —
+#     prefer comparing against that unless you are refreshing the golden)
+sstabledump "$TABLE_DIR"/*-Data.db > reference.json
 
 # 2. Parse with cqlite
 cargo run --bin cqlite -- \
-    --data-dir test-data/datasets/sstables/keyspace/table \
-    --schema test-data/schemas/schema.cql \
+    --data-dir "$TABLE_DIR" \
+    --schema test-data/schemas/<schema>.cql \
     --out json > cqlite.json
 
 # 3. Compare (ignoring formatting)
@@ -229,14 +226,20 @@ diff ref-sorted.json cql-sorted.json
 
 ### Automated Validation
 
-Run validation script:
 ```bash
-# Validate all test tables
-cargo test --test sstable_validation
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
 
-# Validate specific table
-cargo test --test sstable_validation -- simple_table
+# All enumerated tables (smoke)
+bash test-data/scripts/smoke-test-all-tables.sh
+
+# Query-semantics parity oracle (post-reconciliation SELECT at a pinned `now`)
+cargo test --package cqlite-core --test query_semantics_oracle_parity
+
+# Point-vs-full differential lane
+cargo test --package cqlite-core --test point_vs_full_differential
 ```
+
+There is no `--test sstable_validation` target — the three entrypoints above are the real ones.
 
 ## Property Testing
 
@@ -272,10 +275,8 @@ proptest! {
 Package datasets for CI or distribution:
 
 ```bash
-# Package current dataset
-./scripts/package_datasets.sh
-
-# Output: test-data/cqlite-test-data-v5.0-<date>.tar.gz
+# Package current dataset (the script decides the archive name — read its output)
+bash test-data/scripts/package_datasets.sh
 ```
 
 **Contents:**
@@ -290,11 +291,11 @@ Package datasets for CI or distribution:
 Quick validation in CI:
 
 ```bash
-# Use packaged dataset
-tar xzf cqlite-test-data-v5.0.tar.gz
+# Fetch the pinned dataset release (the script carries tag + asset + sha256)
+bash test-data/scripts/fetch-datasets.sh
 
 # Run core tests
-./scripts/ci-one-shot-smoke.sh
+bash test-data/scripts/ci-one-shot-smoke.sh
 
 # Validates:
 # - Basic parsing
@@ -317,7 +318,9 @@ echo "ALTER TABLE test_basic.simple_table ADD duration_col duration;" \
 bash test-data/scripts/regenerate-datasets.sh
 
 # 3. Validate parsing
-cargo test --test sstable_validation
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+bash test-data/scripts/smoke-test-all-tables.sh
+cargo test --package cqlite-core --test query_semantics_oracle_parity
 ```
 
 ### Scenario 2: Test Large Values
@@ -350,40 +353,53 @@ bash test-data/scripts/export.sh
 
 ## Troubleshooting
 
+The compose stack's container is named **`cqlite-cassandra-5-0`** (see `container_name:` in
+`test-data/docker/docker-compose-cassandra5.yml`). Every `docker exec`/`docker logs` below assumes
+you brought it up first (`bash test-data/scripts/start-clean.sh`) — check `docker ps` before
+concluding a command "failed". Note `regenerate-datasets.sh` uses its own separate container
+(`cqlite-regen`), not this one.
+
 ### Cassandra Won't Start
 ```bash
-# Check logs
-docker logs cassandra-5-0
+docker ps -a | grep cqlite-cassandra-5-0
+docker logs cqlite-cassandra-5-0
 
 # Common issue: Port 9042 in use
 lsof -i :9042
-# Kill process or change port in docker-compose-cassandra5.yml
+# Kill process or change port in test-data/docker/docker-compose-cassandra5.yml
 ```
 
 ### Generation Fails
 ```bash
-# Check generator logs
-cat test-data/logs/data_generation.log
+# Read the script's own stdout/stderr (capture it; there is no committed log directory)
+bash test-data/scripts/regenerate-datasets.sh > /tmp/regen.log 2>&1
 
 # Verify schema applied
-docker exec cassandra-5-0 cqlsh -e "DESCRIBE KEYSPACES;"
+docker exec cqlite-cassandra-5-0 cqlsh -e "DESCRIBE KEYSPACES;"
 ```
 
 ### Export Produces No Files
 ```bash
 # Verify data exists in container
-docker exec cassandra-5-0 ls -la /var/lib/cassandra/data/
+docker exec cqlite-cassandra-5-0 ls -la /var/lib/cassandra/data/
 
 # Check if flush happened
-docker logs cassandra-5-0 | grep flush
+docker logs cqlite-cassandra-5-0 | grep flush
 ```
 
 ## Dataset Repository
 
-Packaged datasets available at:
+Packaged datasets live in GitHub releases on this repo, but **never hard-code the tag or asset
+name** — the pin moves. Fetch via the script, which carries the current pinned
+tag/asset/sha256 and verifies the download:
+
+```bash
+bash test-data/scripts/fetch-datasets.sh
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
 ```
-https://github.com/pmcfadin/cqlite/releases/tag/test-data-v5.0
-```
+
+Overrides exist for one-off pins (`DATASET_TAG`, `DATASET_ASSET`, `DATASET_SHA256`); bumping the
+committed pin is `test-data/scripts/bump-dataset-pin.sh`.
 
 Download for:
 - CI without Docker

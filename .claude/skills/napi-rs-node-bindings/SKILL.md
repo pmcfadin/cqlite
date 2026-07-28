@@ -114,31 +114,42 @@ lto = true
 
 ### package.json Setup
 
+CQLite's real config is `bindings/node/package.json` — read it rather than copying a snippet.
+Note it is on `@napi-rs/cli` v3, whose config key is `napi.targets` (a flat array), **not** the v2
+`napi.triples` object, and its test runner is **jest**, not ava:
+
 ```json
 {
-  "name": "cqlite",
-  "version": "0.1.0",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "name": "@cqlite/node",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
   "napi": {
-    "name": "cqlite",
-    "triples": {
-      "defaults": true,
-      "additional": ["aarch64-apple-darwin", "aarch64-linux-android"]
-    }
+    "binaryName": "cqlite-node",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
   },
   "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
-    "prepublishOnly": "napi prepublish -t npm",
-    "test": "ava"
+    "build": "napi build --platform --profile release-unwind --features write-support",
+    "build:debug": "napi build --platform --features write-support",
+    "test": "node --expose-gc ./node_modules/jest/bin/jest.js"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.0",
-    "ava": "^6.0.0"
-  }
+    "@napi-rs/cli": "^3.5.1",
+    "jest": "^29.7.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": { "node": ">= 18" }
 }
 ```
+
+The examples elsewhere in this skill are written against ava; CQLite's own suite uses jest, so
+translate `import test from 'ava'` / `t.is(...)` to jest's `test`/`expect` when working in
+`bindings/node/`.
 
 ### build.rs
 

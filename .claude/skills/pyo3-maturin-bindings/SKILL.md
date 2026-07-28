@@ -66,9 +66,10 @@ fn my_lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
 ### 3. Build & Test
 
 ```bash
-maturin develop          # Install in current venv for testing
-maturin build --release  # Build wheel
-pytest tests/python/     # Run Python tests
+cd bindings/python
+maturin develop --profile dev   # Install in current venv for testing
+maturin build --release         # Build wheel
+pytest tests/                   # Run Python tests (bindings/python/tests/)
 ```
 
 ## Reference Guides
@@ -95,7 +96,9 @@ name = "my_lib"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
+# CQLite pins pyo3 at the workspace root (`Cargo.toml` `[workspace.dependencies]`) —
+# inherit it, never re-pin a version here. bindings/python uses:
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py39", "multiple-pymethods"] }
 
 [features]
 extension-module = ["pyo3/extension-module"]
@@ -105,12 +108,12 @@ extension-module = ["pyo3/extension-module"]
 
 ```toml
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "my-lib"
-requires-python = ">=3.8"
+requires-python = ">=3.9"   # CQLite's floor (abi3-py39)
 classifiers = ["Programming Language :: Rust"]
 
 [tool.maturin]

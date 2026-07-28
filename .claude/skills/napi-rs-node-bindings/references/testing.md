@@ -1,10 +1,16 @@
 # Testing Strategies
 
+> **CQLite's actual Node suite is jest, not ava.** Tests live in `bindings/node/__test__/*.test.js`
+> (config `bindings/node/jest.config.js`) and run via
+> `npm test` → `node --expose-gc ./node_modules/jest/bin/jest.js`. The ava snippets below are
+> generic napi-rs illustrations — translate `import test from 'ava'` / `t.is(a, b)` to jest's
+> `test(...)` / `expect(a).toBe(b)` when writing real CQLite tests.
+
 ## Testing Layers
 
 ```
 ┌─────────────────────────────────────┐
-│  Node.js Integration Tests (ava)    │  ← Test the API users actually use
+│  Node.js Integration Tests (jest)   │  ← Test the API users actually use
 ├─────────────────────────────────────┤
 │  Rust Unit Tests (cargo test)       │  ← Test core logic
 └─────────────────────────────────────┘

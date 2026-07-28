@@ -169,9 +169,11 @@ export function parseAll(cql: string): Statement[];
 
 ## Parity Test Pattern
 
+CQLite's real parity test is `bindings/node/__test__/parity.test.js` (jest, run with
+`npm run test:parity`). The ava-flavoured sketch below shows the table-driven shape only:
+
 ```javascript
-// __test__/parity.spec.mjs
-import test from 'ava';
+import test from 'ava';   // CQLite's suite uses jest — translate to test()/expect()
 import { parse } from '../index.js';
 
 const PARITY_TESTS = [

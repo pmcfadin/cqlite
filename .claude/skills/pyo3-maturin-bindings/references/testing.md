@@ -256,7 +256,8 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+        # CQLite's floor is 3.9 (`requires-python = ">=3.9"`, abi3-py39)
+        python: ["3.9", "3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
