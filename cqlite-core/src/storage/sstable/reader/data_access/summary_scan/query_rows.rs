@@ -49,9 +49,16 @@
 //!   `sequential_scan` fallback is deliberately NOT taken here: it cannot honor a
 //!   caller-pinned `now`, and silently serving a scan against the wall clock would
 //!   break the pinned-`now` contract above.
-//! * **Cancellation and backpressure.** The walk polls the caller's [`ScanCancel`]
-//!   at its normal cadence, and every batch send observes the bounded channel; a
-//!   consumer that drops the stream breaks the walk at its next send.
+//! * **Cancellation and backpressure.** The walk polls this stream's CHILD
+//!   [`ScanCancel`] at its normal cadence, and the CALLER's flag is bridged into
+//!   that child at every batch boundary — on the full-ring arm in
+//!   [`drive_full_scan_rows`] and on the token-bounded arm in `BatchSink::flush`
+//!   — so a client disconnect stops either walk without waiting for the consumer
+//!   to drop the stream, and a cancelled scan terminates with `Cancelled` rather
+//!   than a silently short stream. Only the child is ever cancelled; the caller's
+//!   flag is left intact so a fallback to the merge arm still works. Every batch
+//!   send also observes the bounded channel, and a dropped consumer breaks the
+//!   walk at its next send.
 
 use std::ops::ControlFlow;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -111,6 +118,14 @@ pub struct QueryRowStream {
 impl QueryRowStream {
     /// Block until the next message is available. `None` = the walk finished
     /// (clean end of stream).
+    ///
+    /// KNOWN GAP — issue #3106: a `recv` error also means "the sender was
+    /// dropped", which a producer-thread PANIC produces without any terminal
+    /// message, so an unwinding walk currently reports a clean (silently
+    /// truncated) end of stream rather than an error. The channel protocol needs
+    /// an explicit `Done` sentinel (or `catch_unwind` → `Err`) for a disconnect
+    /// without a terminator to be treated as corruption; #3106 owns that, for
+    /// this stream AND the k-way merge adapter, whose stance this matches.
     pub fn next_batch(&mut self) -> Option<Result<QueryRowBatch>> {
         self.rx.recv().ok()
     }
@@ -246,7 +261,7 @@ async fn drive_query_rows(
     }
 
     let scan_cancel = cancel.child();
-    let mut sink = BatchSink::new(tx);
+    let mut sink = BatchSink::new(tx, cancel);
 
     // Each walk gets its OWN short-lived emit closure so the `&mut sink` borrow
     // ends with the call — that is what lets the pre-emit guard below actually
@@ -261,7 +276,10 @@ async fn drive_query_rows(
         )
         .await?;
     if matches!(outcome, FullIndexStreamOutcome::Streamed) {
-        return sink.finish();
+        sink.finish()?;
+        // A caller cancellation that broke the walk must surface as `Cancelled`,
+        // never as a clean (silently short) end of stream.
+        return cancel.caller_result();
     }
 
     // No usable Summary.db: fall back to the full-`Index.db` streaming walk. Both
@@ -279,7 +297,8 @@ async fn drive_query_rows(
         )
         .await?;
     if matches!(outcome, FullIndexStreamOutcome::Streamed) {
-        return sink.finish();
+        sink.finish()?;
+        return cancel.caller_result();
     }
 
     // Neither walk can serve this reader. Report it as the FIRST and ONLY
@@ -329,6 +348,16 @@ impl CancelBridge {
             return true;
         }
         false
+    }
+
+    /// `Err(Cancelled)` when the CALLER cancelled, else `Ok(())` — so a walk that
+    /// was broken by a cancellation terminates the stream with a cancellation
+    /// rather than a clean, silently truncated end of stream.
+    fn caller_result(&self) -> Result<()> {
+        if self.caller.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        Ok(())
     }
 }
 
@@ -390,18 +419,26 @@ async fn drive_full_scan_rows(
 }
 
 /// Accumulates emitted rows into `QUERY_ROWS_PER_BATCH`-sized batches and pushes
-/// them through the bounded channel, translating a dropped consumer into
-/// `ControlFlow::Break` so the walk stops instead of running to completion.
+/// them through the bounded channel, translating a dropped consumer — or a
+/// CALLER cancellation — into `ControlFlow::Break` so the walk stops instead of
+/// running to completion.
 struct BatchSink<'a> {
     tx: &'a SyncSender<Result<QueryRowBatch>>,
+    /// The caller/child cancellation pair. The token-bounded walk polls the CHILD
+    /// internally at its own cadence, but nothing there sees the CALLER's flag —
+    /// so a client disconnect would otherwise only stop this walk once the
+    /// consumer noticed and dropped the stream (a whole batch of a wide partition
+    /// later). Bridged here, at the batch boundary (roborev, issue #3058).
+    cancel: &'a CancelBridge,
     batch: Vec<(RowKey, ScanRow)>,
     emitted: u64,
 }
 
 impl<'a> BatchSink<'a> {
-    fn new(tx: &'a SyncSender<Result<QueryRowBatch>>) -> Self {
+    fn new(tx: &'a SyncSender<Result<QueryRowBatch>>, cancel: &'a CancelBridge) -> Self {
         Self {
             tx,
+            cancel,
             batch: Vec::with_capacity(QUERY_ROWS_PER_BATCH),
             emitted: 0,
         }
@@ -417,6 +454,12 @@ impl<'a> BatchSink<'a> {
     }
 
     fn flush(&mut self) -> Result<ControlFlow<()>> {
+        // Bridge a CALLER cancellation into the child (one-way — the caller's own
+        // flag is never cancelled, which is what keeps the merge-arm fallback
+        // usable) and stop the walk here rather than a batch later.
+        if self.cancel.poll_caller() {
+            return Ok(ControlFlow::Break(()));
+        }
         if self.batch.is_empty() {
             return Ok(ControlFlow::Continue(()));
         }
@@ -461,6 +504,60 @@ mod tests {
         assert!(
             assert_nothing_emitted(127, "before reporting Unsupported").is_err(),
             "a partially-filled batch (< QUERY_ROWS_PER_BATCH) still counts as emitted"
+        );
+    }
+
+    /// Roborev (issue #3058): a CALLER cancellation must reach the TOKEN-BOUNDED
+    /// walk too, at a batch boundary — not only once the consumer notices and
+    /// drops the stream (which on a wide partition is a whole batch later). The
+    /// caller's own flag must still be left un-cancelled (only the child is ever
+    /// cancelled), or the merge-arm fallback would be poisoned again.
+    #[test]
+    fn a_caller_cancellation_breaks_the_token_bound_sink_at_a_batch_boundary() {
+        let caller = ScanCancel::new();
+        let child = ScanCancel::new();
+        let bridge = CancelBridge {
+            caller: caller.clone(),
+            child: child.clone(),
+        };
+        let (tx, rx) = sync_channel::<Result<QueryRowBatch>>(QUERY_ROWS_CHANNEL_BATCHES);
+        let mut sink = BatchSink::new(&tx, &bridge);
+        let row = || (RowKey::new(vec![1]), ScanRow::Row(Vec::new()));
+
+        // A full batch with no cancellation flows through.
+        for _ in 0..QUERY_ROWS_PER_BATCH {
+            assert!(matches!(
+                sink.push(row()).expect("push"),
+                ControlFlow::Continue(())
+            ));
+        }
+        assert!(
+            matches!(rx.try_recv(), Ok(Ok(QueryRowBatch::Rows(b))) if b.len() == QUERY_ROWS_PER_BATCH),
+            "the first batch was handed to the consumer"
+        );
+
+        // Now the caller cancels. The next batch boundary must BREAK the walk.
+        caller.cancel();
+        let mut broke = false;
+        for _ in 0..QUERY_ROWS_PER_BATCH {
+            if matches!(sink.push(row()).expect("push"), ControlFlow::Break(())) {
+                broke = true;
+                break;
+            }
+        }
+        assert!(
+            broke,
+            "a caller cancellation must stop the token-bounded walk at the batch \
+             boundary, not only when the consumer drops the stream"
+        );
+        assert!(
+            child.is_cancelled(),
+            "the cancellation is propagated into the child so the walk's own poll \
+             aborts it promptly too"
+        );
+        assert!(
+            matches!(bridge.caller_result(), Err(Error::Cancelled)),
+            "a cancelled scan terminates with Cancelled, never a clean short stream"
         );
     }
 

@@ -48,7 +48,7 @@
 
 use std::sync::Arc;
 
-use cqlite_core::schema::TableSchema;
+use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::sstable::reader::{
     QueryRowBatch, QueryRowStream, SSTableReader, ScanTokenBound,
@@ -118,6 +118,26 @@ pub enum BypassReason {
     /// The single reader lacks the components the single-generation streaming
     /// query walk needs (no `Index.db`, or a BTI reader).
     ReaderUnsupported,
+    /// The schema declares a NON-FROZEN collection whose element (set) or key
+    /// (map) is a frozen UDT/tuple/nested collection — a "composite-keyed"
+    /// collection.
+    ///
+    /// The two arms disagree by CONSTRUCTION on these columns, and in a way that
+    /// would make a query's outcome depend on the generation count (roborev,
+    /// issue #3058):
+    /// * the MERGE arm's reassembler FAILS CLOSED (`read_assembly.rs`'s
+    ///   `key_is_opaque_composite` → `composite_collection_unsupported`, issue
+    ///   #2339) rather than emit opaque bytes into a typed Arrow builder;
+    /// * the single-generation decoder returns the collapsed value happily.
+    ///
+    /// So without this guard `SELECT *` over such a table would ERROR at two
+    /// generations and SUCCEED at one — i.e. start failing after a flush and
+    /// start working after a compaction. That is a query-result change, which
+    /// this change's contract (spec R6) forbids, so the schema takes the merge
+    /// arm and today's behaviour is preserved EXACTLY. Making both arms serve
+    /// these columns is owned by #2339, exactly as the static divergence is owned
+    /// by #3095.
+    CompositeKeyedCollection,
     /// The schema declares a STATIC column.
     ///
     /// The two arms genuinely disagree on static-row shape today, in OPPOSITE
@@ -172,10 +192,67 @@ pub fn bypass_reason(
     if schema.columns.iter().any(|c| c.is_static) {
         return BypassReason::StaticColumns;
     }
+    if schema
+        .columns
+        .iter()
+        .any(|c| declares_composite_keyed_collection(&c.data_type))
+    {
+        return BypassReason::CompositeKeyedCollection;
+    }
     if !only.supports_streaming_query_scan() {
         return BypassReason::ReaderUnsupported;
     }
     BypassReason::Selected
+}
+
+/// Whether `data_type` declares a collection the MERGE arm's reassembler refuses
+/// (issue #2339) — see [`BypassReason::CompositeKeyedCollection`].
+///
+/// MIRRORS the authority that actually fails closed, `read_assembly.rs`'s
+/// `key_is_opaque_composite`: a non-frozen `set<X>` whose element `X`, or a
+/// non-frozen `map<K, _>` whose key `K`, is (after unwrapping `frozen`) a
+/// tuple / UDT / nested collection, or a `Custom` type name other than the two
+/// the scalar codec decodes (`time`, `inet`). A `list<…>` is always fine: its
+/// cell path is a position TimeUUID, never the value.
+///
+/// A type string that does not parse counts as composite (fail-closed): an
+/// unrepresentable type must never silently select the fast arm.
+fn declares_composite_keyed_collection(data_type: &str) -> bool {
+    let Ok(parsed) = CqlType::parse(data_type) else {
+        return true;
+    };
+    // A FROZEN collection is one opaque cell — it never takes the per-element
+    // cell-path path the merge arm refuses.
+    match parsed {
+        CqlType::Set(inner) => is_opaque_composite(&inner),
+        CqlType::Map(key, _) => is_opaque_composite(&key),
+        // `CqlType::parse` also returns `Custom` for a type string whose
+        // STRUCTURE it could not parse (e.g. an uppercase `SET<…>`). A bare name
+        // is a UDT reference — one opaque cell both arms serve identically — but
+        // an unparsed structure could be any collection, so fail closed.
+        CqlType::Custom(name) => name.contains('<'),
+        _ => false,
+    }
+}
+
+/// Whether a collection element/key type is undecodable by the merge arm's
+/// scalar codec (the `key_is_opaque_composite` rule).
+fn is_opaque_composite(ty: &CqlType) -> bool {
+    match ty {
+        CqlType::Frozen(inner) => is_opaque_composite(inner),
+        CqlType::Tuple(_)
+        | CqlType::Udt(_, _)
+        | CqlType::Set(_)
+        | CqlType::List(_)
+        | CqlType::Map(_, _) => true,
+        // Only these two `Custom` names are decoded by the scalar codec; every
+        // other name is a UDT reference (or unparsed structure) and is opaque.
+        CqlType::Custom(name) => {
+            let bare = name.rsplit(':').next().unwrap_or(name);
+            !(bare == "time" || bare == "inet")
+        }
+        _ => false,
+    }
 }
 
 /// The single-generation row source: pulls `(RowKey, ScanRow)` batches from the
@@ -515,6 +592,66 @@ mod tests {
             2,
             "the merge arm returns every row after a fast-path source was dropped"
         );
+    }
+
+    /// Spec R1 (roborev, issue #3058): a non-frozen collection whose element/key
+    /// is a frozen UDT takes the MERGE arm, so `SELECT *` cannot start working
+    /// at one generation and erroring at two (#2339 fails the merge arm closed on
+    /// exactly these columns). A `list<frozen<udt>>` is NOT affected — its cell
+    /// path is a position TimeUUID, and the merge arm serves it.
+    #[test]
+    fn a_composite_keyed_collection_forces_the_merge_arm() {
+        use crate::testutil::{simple_schema, write_row};
+        let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
+        let base = simple_schema();
+        assert_eq!(
+            bypass_reason(&readers, &base, ForcedMergePath::Auto, false),
+            BypassReason::Selected,
+            "control: the plain schema WOULD take the fast path"
+        );
+
+        for refused in [
+            "set<frozen<contact_info>>",
+            "map<frozen<contact_info>, text>",
+            "set<frozen<tuple<int, text>>>",
+            "map<frozen<tuple<int, text>>, text>",
+            "set<frozen<list<int>>>",
+            // Unparsed STRUCTURE (uppercase): could be any collection → fail closed.
+            "SET<FROZEN<CONTACT_INFO>>",
+        ] {
+            let mut schema = base.clone();
+            if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+                c.data_type = refused.to_string();
+            }
+            assert_eq!(
+                bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+                BypassReason::CompositeKeyedCollection,
+                "`{refused}` must take the merge arm"
+            );
+        }
+
+        for allowed in [
+            "list<frozen<address_type>>",
+            "set<text>",
+            "map<text, frozen<contact_info>>",
+            "frozen<set<frozen<contact_info>>>",
+            "set<inet>",
+            "int",
+            // A bare UDT reference is ONE opaque cell, served identically by both
+            // arms — it is not a composite-keyed collection.
+            "contact_info",
+        ] {
+            let mut schema = base.clone();
+            if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+                c.data_type = allowed.to_string();
+            }
+            assert_eq!(
+                bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+                BypassReason::Selected,
+                "`{allowed}` is served identically by both arms and must stay on \
+                 the fast path"
+            );
+        }
     }
 
     /// `merge` wins over everything, including an aggregating request — it is the

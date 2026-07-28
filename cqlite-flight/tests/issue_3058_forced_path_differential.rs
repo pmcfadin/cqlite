@@ -205,6 +205,34 @@ fn push_rows(batch: &RecordBatch, out: &mut Vec<Row>) {
     }
 }
 
+/// Drain `do_get` capturing a terminal error INSTEAD of panicking, so a case
+/// whose (unchanged, pre-existing) behaviour is a hard error on both arms can be
+/// compared arm-vs-arm too — e.g. a composite-keyed collection of frozen UDTs,
+/// which #2339 fails closed on. Returns `Err(status message)`.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
+async fn do_get_outcome(
+    svc: &CqliteFlightService,
+    ticket: &serde_json::Value,
+) -> Result<Vec<Row>, String> {
+    let bytes = serde_json::to_vec(ticket).expect("ticket json");
+    let resp = match svc.do_get(Request::new(Ticket::new(bytes))).await {
+        Ok(r) => r.into_inner(),
+        Err(status) => return Err(format!("do_get rpc: {}", status.message())),
+    };
+    let mapped = resp.map(|r| r.map_err(|e| FlightError::ExternalError(Box::new(e))));
+    let mut stream = FlightRecordBatchStream::new_from_flight_data(mapped);
+    let mut rows = Vec::new();
+    while let Some(batch) = stream.next().await {
+        match batch {
+            Ok(batch) => push_rows(&batch, &mut rows),
+            Err(e) => return Err(format!("stream: {e}")),
+        }
+    }
+    Ok(rows)
+}
+
 /// Run `ticket` under a forced arm, returning its rows, batch sizes and the
 /// probe delta that proves which arm actually ran.
 async fn run_forced(
@@ -299,48 +327,77 @@ async fn assert_arms_agree(
     Some(bypass_rows)
 }
 
-/// A static-bearing schema must fall back to the merge arm under BOTH forced
-/// values, returning identical rows — i.e. the fast path cannot change those
-/// results because it is never taken for them (fail-closed, see
-/// `BypassReason::StaticColumns`). Also asserts the fallback returns a non-empty
-/// result, so an empty read cannot make this pass vacuously.
-async fn assert_static_falls_back(
+/// A schema the predicate REFUSES (a static column, or a composite-keyed
+/// collection of frozen UDTs) must fall back to the merge arm under BOTH forced
+/// values and behave IDENTICALLY — i.e. the fast path cannot change those results
+/// because it is never taken for them (fail-closed; see
+/// `BypassReason::StaticColumns` / `BypassReason::CompositeKeyedCollection`).
+///
+/// "Identically" includes an identical FAILURE: `#2339` makes the merge arm fail
+/// closed on a composite-keyed collection, and preserving that (rather than
+/// silently serving rows at one generation and erroring at two) is exactly the
+/// point of the guard. `expect_error` records which of the two outcomes is
+/// today's behaviour, so if #2339 is later fixed this test says so instead of
+/// quietly changing meaning.
+async fn assert_refused_schema_unchanged(
     label: &str,
     svc: &CqliteFlightService,
     ticket: &serde_json::Value,
     pinned_now: i64,
+    expect_error: bool,
     failures: &mut Vec<String>,
 ) {
     std::env::set_var(TTL_NOW_ENV, pinned_now.to_string());
-    let (merge_rows, _, merge_delta) = run_forced(svc, ticket, "merge").await;
-    let (bypass_rows, _, bypass_delta) = run_forced(svc, ticket, "bypass").await;
+    std::env::set_var(MERGE_PATH_ENV, "merge");
+    let merge_before = ReadPathProbe::snapshot();
+    let merge_outcome = do_get_outcome(svc, ticket).await;
+    let merge_delta = ReadPathProbe::snapshot().delta_since(&merge_before);
+    std::env::set_var(MERGE_PATH_ENV, "bypass");
+    let bypass_before = ReadPathProbe::snapshot();
+    let bypass_outcome = do_get_outcome(svc, ticket).await;
+    let bypass_delta = ReadPathProbe::snapshot().delta_since(&bypass_before);
+    std::env::remove_var(MERGE_PATH_ENV);
     std::env::remove_var(TTL_NOW_ENV);
 
-    if bypass_delta.mergers_built == 0 || bypass_delta.reconcile_entries == 0 {
+    if bypass_delta.mergers_built == 0 {
         failures.push(format!(
-            "case {label}: a STATIC-column schema must fall back to the merge arm \
-             even under CQLITE_FLIGHT_MERGE_PATH=bypass (mergers={}, reconciles={})",
-            bypass_delta.mergers_built, bypass_delta.reconcile_entries
+            "case {label}: a schema the predicate refuses must fall back to the \
+             merge arm even under CQLITE_FLIGHT_MERGE_PATH=bypass (mergers=0) — \
+             the fast arm must NOT be taken"
         ));
     }
     if merge_delta.mergers_built == 0 {
         failures.push(format!("case {label}: the forced-merge run did not merge"));
     }
-    if merge_rows != bypass_rows {
+    if merge_outcome != bypass_outcome {
         failures.push(format!(
-            "case {label}: the static fallback must be behaviour-identical under both \
-             forced values\n  merge: {merge_rows:#?}\n  bypass: {bypass_rows:#?}"
+            "case {label}: the refused schema must behave identically under both \
+             forced values\n  merge: {merge_outcome:#?}\n  bypass: {bypass_outcome:#?}"
         ));
+        return;
     }
-    if merge_rows.is_empty() {
-        failures.push(format!(
-            "case {label}: the static fixture returned NO rows — a vacuous pass"
-        ));
+    match (&merge_outcome, expect_error) {
+        (Err(msg), true) => eprintln!(
+            "PASS {label} — refused schema took the merge arm on both forced values; \
+             behaviour unchanged (still the pre-existing #2339 error: {msg})"
+        ),
+        (Ok(rows), false) if !rows.is_empty() => eprintln!(
+            "PASS {label} — refused schema took the merge arm on both forced values \
+             ({} rows, unchanged)",
+            rows.len()
+        ),
+        (Ok(rows), false) => failures.push(format!(
+            "case {label}: the refused schema returned NO rows ({} ) — a vacuous pass",
+            rows.len()
+        )),
+        (Ok(_), true) => failures.push(format!(
+            "case {label}: expected today's pre-existing ERROR on both arms but the \
+             request SUCCEEDED — if #2339 was fixed, update this case"
+        )),
+        (Err(msg), false) => failures.push(format!(
+            "case {label}: expected rows on both arms but both failed: {msg}"
+        )),
     }
-    eprintln!(
-        "PASS {label} — static schema fell back to the merge arm ({} rows, unchanged)",
-        merge_rows.len()
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -735,11 +792,12 @@ async fn forced_path_differential_agrees_on_every_shape() {
     let (_stemp, statics_dir) = build_statics_fixture().await;
     let ssvc = CqliteFlightService::new(statics_dir, 8192);
     let sticket = ticket_json(KS, STATIC_TBL, STATIC_DDL);
-    assert_static_falls_back(
+    assert_refused_schema_unchanged(
         "statics/select-star",
         &ssvc,
         &sticket,
         NOW_BEFORE_EXPIRY,
+        false,
         &mut failures,
     )
     .await;
@@ -760,9 +818,26 @@ async fn forced_path_differential_agrees_on_every_shape() {
         if !case.columns.is_empty() {
             ticket["columns"] = serde_json::json!(case.columns);
         }
-        if case.static_fallback {
-            assert_static_falls_back(case.label, &svc, &ticket, case.pinned_now, &mut failures)
-                .await;
+        // A token range derived from the fixture's REAL partition token drives the
+        // TOKEN-BOUND bypass arm (the Summary-guided walk the Trino connector
+        // uses, and the only arm that overrides the reader-derived schema with the
+        // ticket DDL) over real Cassandra `nb` bytes. A single `int` partition key
+        // is stored as its 4-byte big-endian value, which is what Cassandra hashes.
+        if let Some(pk) = case.token_of_int_pk {
+            let t = cassandra_murmur3_token(&pk.to_be_bytes());
+            ticket["token_start"] = serde_json::json!(t.saturating_sub(1));
+            ticket["token_end"] = serde_json::json!(t);
+        }
+        if case.refuses_fast_arm {
+            assert_refused_schema_unchanged(
+                case.label,
+                &svc,
+                &ticket,
+                case.pinned_now,
+                case.refused_outcome_is_error,
+                &mut failures,
+            )
+            .await;
             continue;
         }
         let _ = assert_arms_agree(
@@ -811,11 +886,21 @@ struct DatasetCase {
     pinned_now: i64,
     min_rows: usize,
     pk_only_projection: Vec<&'static str>,
-    /// `true` for a schema the predicate refuses (a STATIC column): the case
-    /// asserts the fail-closed FALLBACK instead of an arm differential.
-    static_fallback: bool,
     /// Optional projection for the MAIN case (empty = `SELECT *`).
     columns: Vec<&'static str>,
+    /// `true` when the bypass predicate REFUSES this schema (a static column or a
+    /// composite-keyed collection): the case asserts the fail-closed fallback —
+    /// both forced values take the merge arm and behave identically — instead of
+    /// an arm-vs-arm row differential.
+    refuses_fast_arm: bool,
+    /// For a refused schema: whether today's (unchanged) behaviour on BOTH arms is
+    /// a hard error (`#2339`) rather than rows.
+    refused_outcome_is_error: bool,
+    /// When `Some(pk)`, the ticket carries a token range derived from that `int`
+    /// partition key's REAL Murmur3 token, so the case exercises the TOKEN-BOUND
+    /// bypass arm (`stream_partitions_summary_guided`) rather than the full-ring
+    /// one. Without it a dataset case only ever covers `drive_full_scan_rows`.
+    token_of_int_pk: Option<i32>,
 }
 
 /// The pinned `now` the query-semantics oracle records for the
@@ -835,8 +920,10 @@ fn dataset_cases() -> Vec<DatasetCase> {
             pinned_now: ORACLE_PINNED_NOW,
             min_rows: 2,
             pk_only_projection: vec!["id", "ck"],
-            static_fallback: false,
+            refuses_fast_arm: false,
+            refused_outcome_is_error: false,
             columns: vec![],
+            token_of_int_pk: None,
         },
         DatasetCase {
             label: "cassandra/ttl_expired_live",
@@ -847,8 +934,48 @@ fn dataset_cases() -> Vec<DatasetCase> {
             pinned_now: ORACLE_PINNED_NOW,
             min_rows: 1,
             pk_only_projection: vec!["id", "ck"],
-            static_fallback: false,
+            refuses_fast_arm: false,
+            refused_outcome_is_error: false,
             columns: vec![],
+            token_of_int_pk: None,
+        },
+        // TOKEN-BOUND variants of the two single-partition fixtures (roborev,
+        // issue #3058): without these, EVERY real-Cassandra case built a ticket
+        // with no token range, so all of them exercised only the full-ring arm
+        // (`drive_full_scan_rows`) and the Summary-guided arm the Trino connector
+        // actually drives had NO arm-vs-arm proof over real `nb` bytes. That arm
+        // is also the only one that overrides the reader-derived schema with the
+        // ticket DDL (`caller_schema`, which exists because `nb` headers carry no
+        // embedded schema — #3097), so it is exactly where a schema-resolution
+        // divergence would surface.
+        DatasetCase {
+            label: "cassandra/rt_cross_gen@token-bound",
+            pk_only_label: "cassandra/rt_cross_gen@token-bound+pk-only",
+            keyspace: "test_compaction_tombstone_ttl",
+            table: "rt_cross_gen",
+            ddl: tombstone_ddl.replace("{TBL}", "rt_cross_gen"),
+            pinned_now: ORACLE_PINNED_NOW,
+            min_rows: 2,
+            pk_only_projection: vec!["id", "ck"],
+            refuses_fast_arm: false,
+            refused_outcome_is_error: false,
+            columns: vec![],
+            // Every surviving row of this fixture lives in partition id = 1.
+            token_of_int_pk: Some(1),
+        },
+        DatasetCase {
+            label: "cassandra/ttl_expired_live@token-bound",
+            pk_only_label: "cassandra/ttl_expired_live@token-bound+pk-only",
+            keyspace: "test_compaction_tombstone_ttl",
+            table: "ttl_expired_live",
+            ddl: tombstone_ddl.replace("{TBL}", "ttl_expired_live"),
+            pinned_now: ORACLE_PINNED_NOW,
+            min_rows: 1,
+            pk_only_projection: vec!["id", "ck"],
+            refuses_fast_arm: false,
+            refused_outcome_is_error: false,
+            columns: vec![],
+            token_of_int_pk: Some(1),
         },
         DatasetCase {
             label: "cassandra/shadow_row_delete",
@@ -859,8 +986,10 @@ fn dataset_cases() -> Vec<DatasetCase> {
             pinned_now: ORACLE_PINNED_NOW,
             min_rows: 3,
             pk_only_projection: vec!["id", "ck"],
-            static_fallback: false,
+            refuses_fast_arm: false,
+            refused_outcome_is_error: false,
             columns: vec![],
+            token_of_int_pk: None,
         },
         // REAL Cassandra static shape: `sdata` was written by
         // `UPDATE static_clustering_shape SET sdata='static-val' WHERE id=1`
@@ -868,19 +997,20 @@ fn dataset_cases() -> Vec<DatasetCase> {
         // column, so the predicate REFUSES the fast path (the arms disagree on
         // static-row shape) — this case pins that fail-closed fallback on real
         // Cassandra bytes.
-        // Spec R7: a `frozen<UDT>` INSIDE a collection must still decode
-        // structurally on the fast arm — the warm reader's resolved UDT registry
-        // is threaded identically, so the arms must agree cell-for-cell.
+        // Spec R1/R6 (roborev): this table declares `set<frozen<contact_info>>`
+        // and `map<text, frozen<contact_info>>` — a composite-keyed collection the
+        // MERGE arm's reassembler fails closed on (#2339) while the
+        // single-generation decoder serves it. Left unguarded, `SELECT *` here
+        // would ERROR at two generations and SUCCEED at one. The predicate now
+        // REFUSES the fast path for such a schema, so this case runs UNPROJECTED
+        // (`SELECT *`) and pins the fallback: both forced values take the merge
+        // arm and behave exactly as they do today (i.e. both fail the same way,
+        // which is why it is asserted as a fallback rather than a row differential).
         DatasetCase {
-            label: "cassandra/collections_with_udts(frozen UDT in collection)",
+            label: "cassandra/collections_with_udts(fail-closed composite-keyed collection)",
             pk_only_label: "cassandra/collections_with_udts@pk-only",
             keyspace: "test_collections",
             table: "collections_with_udts",
-            // The ticket DDL is parsed as ONE `CREATE TABLE`
-            // (`service::parse_schema` -> `parse_cql_schema`), while the UDT
-            // registry is resolved by scanning the SAME string for `CREATE TYPE`
-            // (`udt_registry_from_cql`) — so the table statement comes FIRST and
-            // the type statements follow it.
             ddl: [
                 "CREATE TABLE collections_with_udts (user_id uuid PRIMARY KEY, addresses list<frozen<address_type>>, contacts set<frozen<contact_info>>, locations_visited map<date, frozen<address_type>>, emergency_contacts map<text, frozen<contact_info>>);",
                 "CREATE TYPE address_type (street text, city text, state text, zip_code text, country text);",
@@ -889,14 +1019,11 @@ fn dataset_cases() -> Vec<DatasetCase> {
             .join(" "),
             pinned_now: ORACLE_PINNED_NOW,
             min_rows: 1,
-            pk_only_projection: vec!["user_id"],
-            static_fallback: false,
-            // `contacts` / `emergency_contacts` are composite-keyed collections
-            // of frozen UDTs, which the MERGED-read assembler fails closed on
-            // (issue #2339) — so they cannot be part of an arm-vs-arm comparison.
-            // `addresses` is `list<frozen<address_type>>`, the frozen-UDT-inside-a
-            // -collection shape this case exists to compare.
-            columns: vec!["user_id", "addresses"],
+            pk_only_projection: vec![],
+            refuses_fast_arm: true,
+            refused_outcome_is_error: true,
+            columns: vec![],
+            token_of_int_pk: None,
         },
         DatasetCase {
             label: "cassandra/static_clustering_shape(fail-closed static fallback)",
@@ -909,8 +1036,10 @@ fn dataset_cases() -> Vec<DatasetCase> {
             pinned_now: ORACLE_PINNED_NOW,
             min_rows: 1,
             pk_only_projection: vec![],
-            static_fallback: true,
+            refuses_fast_arm: true,
+            refused_outcome_is_error: false,
             columns: vec![],
+            token_of_int_pk: None,
         },
     ]
 }

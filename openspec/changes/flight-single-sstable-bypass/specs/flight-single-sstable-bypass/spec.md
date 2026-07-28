@@ -21,6 +21,9 @@ existing `KWayMerger` path when ANY of them does not:
   `producer_warm.rs:52`);
 - the request did not take the full-PK-equality point-read route (`producer_warm.rs:75`);
 - **the schema declares no STATIC column** (see below);
+- **the schema declares no composite-keyed collection** — a non-frozen `set<X>` whose element, or a
+  non-frozen `map<K, _>` whose key, is (after unwrapping `frozen`) a tuple / UDT / nested collection
+  (see below);
 - the forced-path override does not request the merge arm.
 
 **Static-column exclusion (fail-closed, deferral — issue #3095).** Delivery of this change
@@ -38,6 +41,22 @@ preserving today's (incorrect but unchanged) behavior. This is an explicit **def
 design position**: issue #3095 owns making static semantics Cassandra-correct on both arms, after
 which this precondition SHALL be removed and the bypass SHALL cover static-bearing tables.
 
+**Composite-keyed-collection exclusion (fail-closed, deferral — issue #2339).** The two arms
+disagree by CONSTRUCTION on a non-frozen collection whose element (set) or key (map) is a frozen
+UDT/tuple/nested collection: the merge arm's reassembler FAILS CLOSED
+(`write_engine/merge/read_assembly.rs`'s `key_is_opaque_composite` →
+`composite_collection_unsupported`, issue #2339) rather than push opaque bytes into a typed Arrow
+builder, while the single-generation decoder returns the collapsed value. Left unguarded, `SELECT *`
+over such a table (e.g. `test_collections.collections_with_udts`) would **succeed at one generation
+and error at two** — i.e. begin failing after a flush and begin working after a compaction, making
+the outcome depend on generation count. That is a query-result change, which this change forbids, so
+such a schema SHALL take the merge arm and today's behavior (including today's hard error) SHALL be
+preserved exactly. The detection is schema-only and mirrors the code that actually fails closed; a
+type string whose structure cannot be parsed counts as composite (fail-closed). Like the static
+exclusion this is a **deferral, not a design position**: issue #2339 owns serving these columns on
+both arms, after which the precondition SHALL be removed. `list<frozen<UDT>>` is explicitly NOT
+affected — a list element's cell path is a position TimeUUID, and the merge arm serves it.
+
 The predicate SHALL be conjunctive and fail-closed: any condition that cannot be established from
 authoritative state takes the merge arm.
 
@@ -50,6 +69,11 @@ authoritative state takes the merge arm.
 - **GIVEN** a warm `do_get` over a table with two generations where the ticket's token filter prunes one of them away via already-parsed endpoint tokens (`prune_readers`, zero extra I/O)
 - **WHEN** the decision point is reached
 - **THEN** the count used is the POST-prune count (1), not the pre-prune count (2), and the fast path is selected
+
+#### Scenario: A composite-keyed-collection schema falls back to the merger
+- **GIVEN** a single-source `do_get` whose `TableSchema` declares a non-frozen `set`/`map` whose element/key is a frozen UDT, tuple or nested collection
+- **WHEN** the decision point is reached
+- **THEN** the fast path is NOT selected and the request is served by the existing `KWayMerger` path, so its outcome is exactly today's — including the pre-existing #2339 hard error — and never depends on the table's generation count
 
 #### Scenario: A static-bearing schema falls back to the merger
 - **GIVEN** a single-source `do_get` whose `TableSchema` declares at least one STATIC column
