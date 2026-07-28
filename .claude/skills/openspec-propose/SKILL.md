@@ -22,11 +22,19 @@ When ready to implement, run /opsx:apply
 
 **Input**: The user's request should include a change name (kebab-case) OR a description of what they want to build.
 
+> **`AskUserQuestion` is ATTENDED-SESSIONS-ONLY (#2666).** Every prompt below assumes a human is watching.
+> In an **unattended** session (a worker/supervisor run) `AskUserQuestion` is FORBIDDEN — the session hangs
+> until the log-tail watchdog pages it. Unattended, **park** instead: post ONE structured question comment
+> on the issue (options + recommendation + default), add the `needs-decision` label, write a `blocked`
+> marker with `reason: needs-decision` (or `reason: seam1-approval` at Seam 1), and **EXIT**, releasing the
+> machine. Resume only on a strictly-newer owner reply (a durable `resume-dont-ask` label is a standing
+> Seam-1 seal that stands in for the answer).
+
 **Steps**
 
 1. **If no clear input provided, ask what they want to build**
 
-   Use the **AskUserQuestion tool** (open-ended, no preset options) to ask:
+   Use the **AskUserQuestion tool** (open-ended, no preset options; attended only — unattended, PARK per the note above) to ask:
    > "What change do you want to work on? Describe what you want to build or fix."
 
    From their description, derive a kebab-case name (e.g., "add user authentication" → `add-user-auth`).
@@ -77,7 +85,7 @@ When ready to implement, run /opsx:apply
       - Stop when all `applyRequires` artifacts are done
 
    c. **If an artifact requires user input** (unclear context):
-      - Use **AskUserQuestion tool** to clarify
+      - Use **AskUserQuestion tool** to clarify (attended only — unattended, PARK per the note above)
       - Then continue with creation
 
 5. **Show final status**

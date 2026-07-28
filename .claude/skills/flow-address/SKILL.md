@@ -19,8 +19,12 @@ Resolve them in the worktree and reply per thread.
 2. **Gather the feedback.** `gh pr view "$PR" --comments` and the review threads
    (`gh api repos/:owner/:repo/pulls/$PR/comments`). List the asks.
 3. **Triage** each (receiving-code-review discipline — verify, don't perform agreement): a **mechanical**
-   fix is yours to make; a **genuine design/scope** question goes to the owner via `AskUserQuestion`
-   (one at a time). Push back with a reason where a suggestion is wrong, rather than complying blindly.
+   fix is yours to make; a **genuine design/scope** question goes to the owner. In an **attended** session
+   ask ONE at a time via `AskUserQuestion`. **`AskUserQuestion` is attended-sessions-ONLY (#2666)** — in an
+   **unattended** session it is FORBIDDEN (the worker would hang until the log-tail watchdog pages it):
+   instead **park** — post ONE structured question comment (options + recommendation + default), add the
+   `needs-decision` label, write a `blocked` marker with `reason: needs-decision`, and **EXIT**, releasing
+   the machine. Push back with a reason where a suggestion is wrong, rather than complying blindly.
 4. **Fix in the worktree** (`.claude/worktrees/issue-<N>-<slug>`), spawning `sstable-developer` for
    non-trivial code changes. Set the transient `addressing` sub-marker (a skill-managed marker the
    board→label mirror #2855 does not own); clear the sibling transient `spec-review` marker. Do NOT
@@ -28,9 +32,19 @@ Resolve them in the worktree and reply per thread.
    ```bash
    gh issue edit <N> --remove-label status:spec-review --add-label status:addressing
    ```
-5. **Re-verify** what the change touched: re-run `scripts/agent-gate.sh` (with `CQLITE_DATASETS_ROOT` at
-   the main repo) and re-run C (`spec-auditor`) if requirements/tests changed; roborev again if code
-   changed materially.
+5. **Re-verify what the change touched — `--lite` per address round, NEVER a full gate here.** The tiered
+   loop (#1821/#2087) gives each fix round `--lite`; the ONE full gate of record runs inside `flow-closer`
+   (#2084). Always use the mandatory summary-file redirect (#1175/#2079) — never stream raw gate stdout
+   into a persistent context:
+   ```bash
+   AGENT_GATE_SUMMARY_FILE=/tmp/lite-<N>.txt \
+     bash scripts/agent-gate.sh --lite > /tmp/lite-<N>.log 2>&1 < /dev/null
+   cat /tmp/lite-<N>.txt   # the LITE block (MODE: lite) is the ONLY gate text you retain
+   ```
+   Add any diff-relevant parity/integration `--test` target (run with `CQLITE_DATASETS_ROOT` pointed at
+   the main repo). Re-run C (`spec-auditor`) if requirements/tests changed; roborev again if code changed
+   materially. If the certified SHA moved, re-certification is the closer's full (or `--delta`) gate per
+   the gate contract — not a full gate in this skill.
 6. **Push + reply.** `git -C <worktree> push`, then reply on each `$PR` thread with what changed (commit
    ref), and clear the transient `addressing` sub-marker. The board stays `In Review` (PR still open),
    so the mirror keeps `status:in-review` — do NOT hand-write it:
@@ -40,5 +54,5 @@ Resolve them in the worktree and reply per thread.
 7. **Re-certify and re-arm merge-on-green (#2667).** The owner's comments are input, NOT a merge
    gate — unless a comment is an explicit `HOLD:` or raises a product/scope question. After addressing
    them, re-certify (lite + any diff-relevant targets; a full/delta gate per the gate contract if the
-   certified SHA changed), re-run `scripts/flow/premerge-assert.sh <pr> <certified-sha>`, then re-arm
+   certified SHA changed), re-run `bash scripts/flow/premerge-assert.sh <pr> <certified-sha>`, then re-arm
    `gh pr merge --auto --squash --delete-branch`.

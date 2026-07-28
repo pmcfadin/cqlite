@@ -76,8 +76,10 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    phone/web — no `flow-*` run needed); if it hasn't, set it yourself:
    ```bash
    # Run the flow-board detection snippet first (it switches to the project-capable account — the EMU
-   # flip otherwise makes this write fail silently), then set the board Status only:
-   gh project item-edit <item-id> --field Status --single-select-option-id <Done>   # when have_project=1
+   # flip otherwise makes this write fail silently), then set the board Status only.
+   # `--field` is NOT a gh flag (verified gh 2.87.3 offers only --field-id); all four IDs are required:
+   gh project item-edit --id <item-id> --project-id <project-id> \
+     --field-id <status-field-id> --single-select-option-id <Done-option-id>   # when have_project=1
    ```
    Do NOT write any `status:*` label here. Done → no board-derived label (board→label mirror #2855:
    Backlog/Done carry none), and the mirror only reconciles OPEN issues, so a leftover label on the
@@ -96,7 +98,8 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    ```bash
    # --confirm-unmerged: a squash-merge leaves the branch tip out of `main`; step 1
    # already verified PR state=MERGED, which IS the authority the flag stands for.
-   scripts/flow/finalize-cleanup.sh --issue <N> --merged-branch <merged-branch> --confirm-unmerged
+   # `scripts/flow/*.sh` blobs are mode 100644 (no +x) — ALWAYS invoke them via `bash`.
+   bash scripts/flow/finalize-cleanup.sh --issue <N> --merged-branch <merged-branch> --confirm-unmerged
    # Add --dry-run first to preview. Exit codes: 0 ok · 2 multi-lock · 3 dirty/unpushed · 4 unmerged tip.
    ```
    On a non-zero exit the script changed nothing and surfaced why — resolve the 1:1:1:1 violation or the
@@ -112,7 +115,7 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    Then clear this machine's claim heartbeat so it doesn't linger on origin until `flow-board`'s 4h reap
    window (issue #2089):
    ```bash
-   scripts/flow/claim-heartbeat.sh clear "$(hostname -s)"
+   bash scripts/flow/claim-heartbeat.sh clear "$(hostname -s)"
    ```
 7. **Close the issue** with a traceable comment referencing the merged PR + commit (only if its
    acceptance criteria are fully met — never close an epic):
