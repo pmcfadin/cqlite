@@ -88,7 +88,7 @@ pub struct StorageConfig {
     /// Can also be enabled at runtime by setting `CQLITE_USE_MMAP=1`.
     ///
     /// `#[serde(default)]` keeps configs serialized before this field existed
-    /// (which omit it) deserializing successfully, defaulting to buffered I/O.
+    /// (which omit it) deserializing successfully, defaulting to no promotion.
     #[serde(default = "default_use_mmap")]
     pub use_mmap: bool,
 
@@ -116,8 +116,8 @@ pub struct StorageConfig {
     ///
     /// Set an explicit [`DiskAccessMode::Buffered`], [`DiskAccessMode::Mmap`],
     /// or [`DiskAccessMode::Direct`] to override the heuristic. The legacy
-    /// [`Self::use_mmap`] flag still forces mmap when `Auto` would otherwise
-    /// pick buffered, for backward compatibility.
+    /// [`Self::use_mmap`] flag only PROMOTES an explicit `Buffered` request to
+    /// `Mmap`; it never changes what `Auto` resolves to.
     ///
     /// Can also be set at runtime via `CQLITE_DISK_ACCESS_MODE`
     /// (`auto` / `buffered` / `mmap` / `direct`).
@@ -199,7 +199,7 @@ pub enum PrefetchMode {
     Auto,
 }
 
-/// Default for [`StorageConfig::use_mmap`]: mmap is opt-in, so buffered I/O.
+/// Default for [`StorageConfig::use_mmap`]: no promotion (see the field doc).
 fn default_use_mmap() -> bool {
     false
 }

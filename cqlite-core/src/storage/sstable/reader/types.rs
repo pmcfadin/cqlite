@@ -153,21 +153,35 @@ impl Default for SSTableReaderStats {
 pub struct SSTableReaderConfig {
     /// Size of the read buffer in bytes
     pub read_buffer_size: usize,
-    /// Whether to memory-map SSTable files instead of using buffered file I/O.
+    /// Legacy promote-only flag: it upgrades an **explicit**
+    /// [`Buffered`](crate::config::DiskAccessMode::Buffered) request to
+    /// [`Mmap`](crate::config::DiskAccessMode::Mmap). It does **not** select the
+    /// read backend, and `false` does **not** mean "buffered I/O".
     ///
-    /// **Opt-in; defaults to `false`.** When enabled, files at or above
-    /// [`Self::mmap_min_size_bytes`] are mapped into the address space and
-    /// served from the OS page cache with no per-block read syscall. This
-    /// mirrors Cassandra's `disk_access_mode: mmap` and benefits repeated local
-    /// scans of the same files. Enable only for immutable local SSTables — see
-    /// [`crate::Config`]'s `storage.use_mmap` for the platform/filesystem
-    /// constraints (network FS and external mutation can `SIGBUS`).
+    /// The backend is chosen by `storage.disk_access_mode` ([`crate::Config`]),
+    /// which defaults to [`Auto`](crate::config::DiskAccessMode::Auto). See
+    /// `resolve_disk_access_mode` in the reader module for the exact resolution:
+    /// `Auto` yields buffered I/O only for files below
+    /// [`Self::mmap_min_size_bytes`] (4 KiB), **mmap** for anything larger up to
+    /// `storage.direct_io_memory_fraction` of system RAM (default half), and
+    /// direct I/O above that. So every field reader built from a default
+    /// `Config` memory-maps any Data.db bigger than one page, and no combination
+    /// of this flag's values can produce the buffered path there — only an
+    /// explicit `disk_access_mode: buffered` can (as the write/compaction merge
+    /// readers do).
+    ///
+    /// A mapped file is served from the OS page cache with no per-block read
+    /// syscall, mirroring Cassandra's `disk_access_mode: mmap`. Map only
+    /// immutable local SSTables — see [`crate::Config`]'s `storage.use_mmap` for
+    /// the platform/filesystem constraints (network FS and external mutation can
+    /// `SIGBUS`).
     pub use_mmap: bool,
     /// Minimum file size (bytes) for memory mapping to kick in.
     ///
-    /// Files smaller than this use buffered I/O even when [`Self::use_mmap`] is
-    /// set, since the per-file mapping overhead is not worthwhile for tiny
-    /// files and mapping a zero-length file is invalid.
+    /// Files smaller than this use buffered I/O — both under the default
+    /// `disk_access_mode: Auto` and when [`Self::use_mmap`] promotes an explicit
+    /// `Buffered` request — since the per-file mapping overhead is not
+    /// worthwhile for tiny files and mapping a zero-length file is invalid.
     pub mmap_min_size_bytes: usize,
     /// Maximum number of blocks to cache
     pub block_cache_size: usize,
@@ -183,9 +197,12 @@ impl Default for SSTableReaderConfig {
     fn default() -> Self {
         Self {
             read_buffer_size: 64 * 1024, // 64KB
-            use_mmap: false,             // Opt-in; buffered I/O is the portable, safe default
-            mmap_min_size_bytes: 4096,   // Skip mmap for files smaller than a page
-            block_cache_size: 1000,      // Cache 1000 blocks
+            // Promote-only legacy flag (see the field doc); the backend itself
+            // comes from `storage.disk_access_mode`, whose `Auto` default
+            // resolves to mmap for any file above `mmap_min_size_bytes`.
+            use_mmap: false,
+            mmap_min_size_bytes: 4096, // Skip mmap for files smaller than a page
+            block_cache_size: 1000,    // Cache 1000 blocks
             validate_checksums: true,
             use_bloom_filter: true,
             prefetch_size: 128 * 1024, // 128KB
