@@ -674,7 +674,15 @@ fn rows_db_single_wide_partition_roundtrips() {
     assert_eq!(header.partition_deletion, None, "LIVE sentinel → None");
 
     // Traversal from the recovered root yields our separators + offsets.
-    let entries = iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse from root");
+    let entries = iterate_rows_in_bti_trie(
+        &rows_db,
+        // Issue #3002: the writer's own root must PASS structural validation.
+        header
+            .trie_root
+            .expect("the written root must validate structurally")
+            .offset(),
+    )
+    .expect("traverse from root");
     assert_eq!(entries.len(), blocks.len());
     for (got, expected) in entries.iter().zip(blocks.iter()) {
         assert_eq!(got.0, expected.separator_key, "separator key");
@@ -720,7 +728,15 @@ fn rows_db_multiple_wide_partitions_roundtrip() {
             "partition {i} data position"
         );
         assert_eq!(header.block_count, 2);
-        let entries = iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse");
+        let entries = iterate_rows_in_bti_trie(
+            &rows_db,
+            // Issue #3002: the writer's own root must PASS structural validation.
+            header
+                .trie_root
+                .expect("the written root must validate structurally")
+                .offset(),
+        )
+        .expect("traverse");
         assert_eq!(entries.len(), 2, "partition {i} block count");
         assert_eq!(entries[0].0, sep(8));
         assert_eq!(entries[1].0, sep(16));
@@ -760,7 +776,15 @@ fn rows_db_open_marker_roundtrips() {
     w.add_partition_row_index(&7i32.to_be_bytes(), 0, blocks.clone(), None);
     let (rows_db, offsets) = w.finish().expect("finish");
     let header = resolve_rows_db_entry(&rows_db, offsets[0] as usize).expect("resolve");
-    let entries = iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse");
+    let entries = iterate_rows_in_bti_trie(
+        &rows_db,
+        // Issue #3002: the writer's own root must PASS structural validation.
+        header
+            .trie_root
+            .expect("the written root must validate structurally")
+            .offset(),
+    )
+    .expect("traverse");
     assert_eq!(
         entries[0].1.open_marker,
         Some((1_700_000_000, 1_700_000_000_000_000))
@@ -812,6 +836,103 @@ fn rows_db_rejects_non_ascending_separators() {
     let mut w = RowsTrieWriter::new();
     w.add_partition_row_index(&1i32.to_be_bytes(), 0, blocks, None);
     assert!(w.finish().is_err());
+}
+
+/// An EMPTY separator (`ByteComparable.EMPTY`, Cassandra's canonical block-0
+/// separator) is REFUSED, not mis-encoded (roborev finding on #3002). Its
+/// canonical home is the trie ROOT node's own payload, which this builder cannot
+/// express; the previous "defensive" fallback filed it under transition byte
+/// `0x00`, which reads back as the separator `[0x00]` — silently wrong bytes where
+/// an error belongs.
+#[test]
+fn rows_db_rejects_empty_separator_instead_of_misencoding_it() {
+    let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
+    let blocks = vec![
+        // Block 0 under ByteComparable.EMPTY (what a canonical Cassandra
+        // `RowIndexWriter.add` stores as the root payload).
+        RowIndexBlock {
+            separator_key: Vec::new(),
+            block_offset: 7,
+            open_marker: None,
+        },
+        RowIndexBlock {
+            separator_key: sep(8),
+            block_offset: 16_512,
+            open_marker: None,
+        },
+    ];
+    let mut w = RowsTrieWriter::new();
+    w.add_partition_row_index(&1i32.to_be_bytes(), 0, blocks, None);
+    let err = w
+        .finish()
+        .expect_err("an empty row-index separator must fail closed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("empty") && msg.contains("root"),
+        "the error must name the empty separator and the root-payload gap, got: {msg}"
+    );
+}
+
+/// WRITER ↔ READER COUPLING (roborev #3002): every row-index ROOT this writer emits
+/// must have a node ordinal OUTSIDE the set `validate_rows_trie_root` rejects.
+///
+/// That rejection (`SINGLE_NOPAYLOAD_4`/`_12`) is NOT a format invariant — a
+/// payload-less root with a single close child is a legal trie node, and
+/// `TrieNode.typeFor` would choose exactly that encoding for it. The reader is safe
+/// only because `write_row_node` unconditionally routes internal nodes through
+/// `write_sparse`, and nothing else couples that choice to the reader's accepted set.
+/// So assert it here: if a future single-child size optimisation lands in the writer,
+/// this test FAILS instead of silently making every row index CQLite writes
+/// unreadable by CQLite's own reader (a full-partition fallback on every clustering
+/// slice, plus a `BtiTrieCorrupt` finding per partition from `verify`).
+#[test]
+fn rows_db_root_ordinal_stays_in_readers_accepted_set() {
+    use crate::storage::sstable::bti::{
+        resolve_rows_db_entry, rows_root_rejected_root_ordinals_for_test,
+    };
+
+    let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
+    let rejected = rows_root_rejected_root_ordinals_for_test();
+
+    // Both root fan-outs: a SINGLE-child root (every `int` clustering separator
+    // shares the leading 0x80 byte, so this is the ordinary shape — and the exact one
+    // a size optimisation would compress into SINGLE_NOPAYLOAD_*), and a multi-child
+    // root.
+    let shapes: [(&str, Vec<Vec<u8>>); 2] = [
+        ("single-child root", vec![sep(8), sep(16), sep(24)]),
+        (
+            "multi-child root",
+            vec![vec![0x10, 0x01], vec![0x20, 0x02], vec![0x30, 0x03]],
+        ),
+    ];
+    for (label, separators) in shapes {
+        let blocks: Vec<RowIndexBlock> = separators
+            .iter()
+            .enumerate()
+            .map(|(i, s)| RowIndexBlock {
+                separator_key: s.clone(),
+                block_offset: (i as u64 + 1) * 64,
+                open_marker: None,
+            })
+            .collect();
+        let mut w = RowsTrieWriter::new();
+        w.add_partition_row_index(&1i32.to_be_bytes(), 0, blocks, None);
+        let (rows_db, offsets) = w.finish().expect("finish");
+        let header =
+            resolve_rows_db_entry(&rows_db, offsets[0] as usize).expect("entry must resolve");
+        let root = header
+            .trie_root
+            .unwrap_or_else(|e| panic!("{label}: the written root must validate: {e}"))
+            .offset();
+        let ordinal = rows_db[root] >> 4;
+        assert!(
+            !rejected.contains(&ordinal),
+            "{label}: the emitted root's node ordinal {ordinal} is in the READER's rejected \
+             set {rejected:?} — `validate_rows_trie_root` would refuse every root this \
+             writer emits. Either keep routing internal nodes through `write_sparse` or \
+             relax the reader IN LOCKSTEP (issue #3002)."
+        );
+    }
 }
 
 /// A partition leaf with a positive RowsOffset payload decodes back to the

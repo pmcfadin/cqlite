@@ -100,6 +100,17 @@ fn correctness_signals_end_to_end() {
         1,
         &[(catalog::attr::FALLBACK_REASON, "no_schema".into())],
     );
+    // Issue #3002: the BTI row-index-root rejection counter (its bounded attribute
+    // value comes from `RowsTrieRootRejectReason::label`, asserted closed in the
+    // parser's own unit tests).
+    obs::add_counter(
+        catalog::READ_BTI_ROWS_ROOT_REJECTED,
+        1,
+        &[(
+            catalog::attr::ROWS_ROOT_REJECT_REASON,
+            "extent_not_at_entry".into(),
+        )],
+    );
     let m = mc.flush_and_collect();
     assert_registered_unit(&m, catalog::MERGE_ROWS_IN, catalog::unit::ROWS);
     assert_registered_unit(&m, catalog::MERGE_ROWS_OUT, catalog::unit::ROWS);
@@ -123,6 +134,11 @@ fn correctness_signals_end_to_end() {
         &m,
         catalog::QUERY_DEGRADED_PATH,
         catalog::unit::DIMENSIONLESS,
+    );
+    assert_registered_unit(
+        &m,
+        catalog::READ_BTI_ROWS_ROOT_REJECTED,
+        catalog::unit::PARTITIONS,
     );
 
     // --- Requirement: Merge row-count reconciliation counters ---

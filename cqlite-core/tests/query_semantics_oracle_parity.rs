@@ -439,11 +439,12 @@ async fn query_semantics_oracle_matches_cassandra_select() {
     );
 
     let mut ran = 0usize;
+    let mut skipped: Vec<&str> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     for case in &oracle.cases {
         match run_case(case).await {
             Ok(true) => ran += 1,
-            Ok(false) => {}
+            Ok(false) => skipped.push(case.id.as_str()),
             Err(e) => failures.push(e),
         }
     }
@@ -455,9 +456,24 @@ async fn query_semantics_oracle_matches_cassandra_select() {
     );
 
     if require_fixtures() {
+        // Fail closed per CASE, not merely suite-wide: this lane has NO per-case
+        // opt-out (the oracle's `flight_lane` flag scopes ONLY the Flight lane, which
+        // cannot express a `WHERE` clause — this in-core lane executes every case), so
+        // EVERY case must have run. A suite-wide `ran > 0` would let a newly added
+        // case skip silently while the gate component still passed.
         assert!(
-            ran > 0,
-            "CQLITE_REQUIRE_FIXTURES=1 but no oracle case ran (fixtures absent) — fail-closed"
+            skipped.is_empty(),
+            "CQLITE_REQUIRE_FIXTURES=1 but {} of {} oracle cases SKIPped ({:?}) — every \
+             case must run on this lane; it has no per-case opt-out",
+            skipped.len(),
+            oracle.cases.len(),
+            skipped
+        );
+        assert_eq!(
+            ran,
+            oracle.cases.len(),
+            "CQLITE_REQUIRE_FIXTURES=1: {ran} of {} oracle cases ran — fail-closed",
+            oracle.cases.len()
         );
     } else if ran == 0 {
         eprintln!("SKIP query_semantics_oracle: no fixtures present (set CQLITE_REQUIRE_FIXTURES=1 to fail-close)");

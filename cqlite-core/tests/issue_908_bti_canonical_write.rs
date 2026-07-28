@@ -273,7 +273,7 @@ async fn big_default_format_unchanged() {
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder};
 use cqlite_core::storage::sstable::bti::{
     iterate_rows_in_bti_trie, lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry,
-    BtiPartitionLocation,
+    rows_node_serialized_extent_end_for_test, BtiPartitionLocation,
 };
 use std::io::Cursor;
 
@@ -319,6 +319,170 @@ fn wide_schema() -> TableSchema {
         comments: HashMap::new(),
         dropped_columns: HashMap::new(),
     }
+}
+
+/// Read a Cassandra unsigned VInt (`DataOutputPlus.writeUnsignedVInt`) from
+/// `bytes[*pos..]`, advancing `pos`. Hand-rolled ON PURPOSE: the assertion path of
+/// [`assert_trie_index_entry_base_is_canonical`] must not share code with the
+/// production writer/reader pair it is checking (issue #3002).
+fn read_unsigned_vint_independently(bytes: &[u8], pos: &mut usize) -> u64 {
+    let first = bytes[*pos];
+    *pos += 1;
+    let extra = first.leading_ones() as usize;
+    // Data bits kept in the first byte: 7 - extra (0 once extra >= 7).
+    let mask: u64 = if extra >= 7 {
+        0
+    } else {
+        (1u64 << (7 - extra)) - 1
+    };
+    let mut value = (first as u64) & mask;
+    for _ in 0..extra {
+        value = (value << 8) | bytes[*pos] as u64;
+        *pos += 1;
+    }
+    value
+}
+
+/// Read a Cassandra signed (ZigZag) VInt independently of production code.
+fn read_signed_vint_independently(bytes: &[u8], pos: &mut usize) -> i64 {
+    let u = read_unsigned_vint_independently(bytes, pos);
+    ((u >> 1) as i64) ^ -((u & 1) as i64)
+}
+
+/// Issue #3002, writer side: decode the emitted `TrieIndexEntry` at `rows_offset`
+/// BY HAND (`u16` key length, key bytes, unsigned-vint data position, signed-vint
+/// root delta) and assert the SIGNED root delta is measured from the canonical base
+/// `rows_offset + 2 + key_length` — the position immediately AFTER
+/// `writeWithShortLength`, which is where cassandra-5.0.8
+/// `BtiTableWriter.IndexWriter.append` captures `basePosition`.
+///
+/// The structural invariant used as the oracle needs no production helper: the
+/// writer serializes each partition's row-index trie IMMEDIATELY before that
+/// partition's entry and the trie ROOT is the LAST node written (children first,
+/// parent after — `write_row_node`), so the root node's serialized bytes must END
+/// exactly at `rows_offset`. A 2-low base points 2 bytes short of a node boundary,
+/// which this check rejects. The root is additionally asserted payload-CAPABLE
+/// (ordinals 1/3, the `SingleNoPayload` variants, structurally cannot carry one —
+/// that is how the fixture-side #3002 defect lost the block-0 payload).
+fn assert_trie_index_entry_base_is_canonical(
+    rows_db: &[u8],
+    rows_offset: usize,
+    expected_key: &[u8],
+) {
+    // [u16 key_length][key bytes]
+    let key_length = u16::from_be_bytes([rows_db[rows_offset], rows_db[rows_offset + 1]]) as usize;
+    assert_eq!(
+        key_length,
+        expected_key.len(),
+        "entry's u16 key length must match the partition key length"
+    );
+    let key = &rows_db[rows_offset + 2..rows_offset + 2 + key_length];
+    assert_eq!(key, expected_key, "entry must carry the raw partition key");
+
+    let mut pos = rows_offset + 2 + key_length;
+    // [data position : unsigned vint]
+    let _data_position = read_unsigned_vint_independently(rows_db, &mut pos);
+    // [trieRoot - base : SIGNED vint]
+    let root_delta = read_signed_vint_independently(rows_db, &mut pos);
+
+    let base = rows_offset + 2 + key_length;
+    let root = (base as i64 + root_delta) as usize;
+    assert!(
+        root < rows_offset,
+        "the trie root {root} must lie in the trie region BELOW the entry at {rows_offset}"
+    );
+
+    // End offset of the node serialized at `node_offset`, or `None` when the node type
+    // is one this helper does not model (or the offset is out of range).
+    // Sparse ordinals 5/7/8/9 (SPARSE_8/16/24/40) carry 1/2/3/5-byte backward pointers;
+    // layout = [header][count][count transition bytes][count pointers].
+    let extent_end = |node_offset: usize| -> Option<usize> {
+        let header = *rows_db.get(node_offset)?;
+        let count = *rows_db.get(node_offset + 1)? as usize;
+        let ptr_bytes = match header >> 4 {
+            5 => 1usize,
+            7 => 2,
+            8 => 3,
+            9 => 5,
+            _ => return None,
+        };
+        Some(node_offset + 2 + count + count * ptr_bytes)
+    };
+    // At the RESOLVED ROOT, an unmodelled node type must be a loud, precise failure —
+    // never a silent "boundary not satisfied" that would read as a writer regression.
+    let root_extent_end = |node_offset: usize| -> usize {
+        extent_end(node_offset).unwrap_or_else(|| {
+            let header = rows_db[node_offset];
+            panic!(
+                "unhandled node type at the resolved root {node_offset}: header byte \
+                 0x{header:02x} (ordinal {}) is not one of SPARSE_8/16/24/40 (ordinals 5/7/8/9) \
+                 — a writer change altered the root node type; update this helper",
+                header >> 4
+            )
+        })
+    };
+
+    let header = rows_db[root];
+    let ordinal = header >> 4;
+    assert!(
+        ordinal != 1 && ordinal != 3,
+        "the resolved root byte 0x{header:02x} must be a payload-CAPABLE node type \
+         (ordinals 1/3 are SingleNoPayload and structurally cannot carry a payload)"
+    );
+    assert_eq!(
+        root_extent_end(root),
+        rows_offset,
+        "the resolved root at {root} (base {base} + delta {root_delta}) must be the LAST \
+         trie node written before the entry at {rows_offset}, i.e. its serialized bytes \
+         must end exactly there; header byte 0x{header:02x}"
+    );
+    // The root's single transition is the OSS50 `0x40` NEXT_COMPONENT byte shared by
+    // every separator (issue #3002), so the root has exactly one child.
+    assert_eq!(
+        rows_db[root + 1],
+        1,
+        "the root indexes one shared first separator byte, so its fan-out must be 1"
+    );
+    assert_eq!(
+        rows_db[root + 2],
+        0x40,
+        "the root's only transition must be the NEXT_COMPONENT byte 0x40"
+    );
+
+    // Cross-check the INDEPENDENT formula above against the PRODUCTION extent helper
+    // (issue #3002): production now enforces this same invariant at read time
+    // (`validate_rows_trie_root`), and the two must agree on the resolved root rather
+    // than drift apart. The oracle stays hand-rolled on purpose — its value is that it
+    // shares no code with what it checks — so this equality is what keeps the pair
+    // provably in sync.
+    assert_eq!(
+        rows_node_serialized_extent_end_for_test(rows_db, root),
+        Some(root_extent_end(root)),
+        "the production node-extent helper must agree with this test's independent \
+         formula at the resolved root {root}"
+    );
+
+    // Self-check, in the WRITER's direction: a pre-#3002 writer encodes the delta
+    // against a base 2 bytes LOW (`rows_offset + key_length`), so this test — which
+    // resolves against the CORRECT base — would compute a root 2 bytes HIGH. That
+    // offset must NOT satisfy the node-boundary invariant, else the assertion above
+    // could not detect such a writer regression. (`None` there = unmodelled node type,
+    // which likewise does not satisfy it.)
+    let regressed_root = root + 2;
+    assert_ne!(
+        extent_end(regressed_root),
+        Some(rows_offset),
+        "a pre-#3002 2-low writer base would make this test resolve the root to \
+         {regressed_root}, which must NOT satisfy the node-boundary invariant (else this \
+         assertion could not detect a writer regression)"
+    );
+    // ...and PRODUCTION must reject that same offset, so a mis-based writer is caught
+    // at read time too, not only by this test.
+    assert_ne!(
+        rows_node_serialized_extent_end_for_test(rows_db, regressed_root),
+        Some(rows_offset),
+        "production must also refuse to treat {regressed_root} as the root"
+    );
 }
 
 /// One row of a wide partition: pk/ck ints + a ~2 KiB payload so a few hundred
@@ -406,18 +570,66 @@ async fn bti_wide_partition_resolves_through_rows_db() {
             panic!("pk=1 must be wide (RowsOffset); got DataOffset({o})")
         }
     };
+    // ---------------------------------------------------------------------
+    // WRITER-SIDE base, decoded INDEPENDENTLY of production code (issue #3002).
+    // `resolve_rows_db_entry` + the writer moved in LOCKSTEP, so a round-trip
+    // through the reader would pass just as well with the OLD (2-low) base. This
+    // block therefore decodes the emitted `TrieIndexEntry` by hand and checks the
+    // resulting root against a structural invariant of the emitted bytes.
+    // ---------------------------------------------------------------------
+    assert_trie_index_entry_base_is_canonical(&rows_db, rows_offset, &raw_pk1);
+
     let header = resolve_rows_db_entry(&rows_db, rows_offset).expect("resolve pk=1 entry");
     assert!(
         header.block_count >= 2,
         "wide partition must span >= 2 blocks; got {}",
         header.block_count
     );
-    let entries =
-        iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse pk=1 row index");
+    // Issue #3002: the emitted root must PASS structural validation before anything
+    // traverses from it.
+    let entries = iterate_rows_in_bti_trie(
+        &rows_db,
+        header
+            .require_trie_root()
+            .expect("the written root must pass structural validation"),
+    )
+    .expect("traverse pk=1 row index");
+    // KNOWN GAP (write parity, tracked as follow-up work off issue #3002) — pinned
+    // deliberately, NOT fixed here (fixing it would change emitted bytes):
+    //
+    //   CQLite's row-index writer emits `block_count` separators, the first being the
+    //   FIRST ROW'S clustering key (ck=0 below). Apache Cassandra 5.0's
+    //   `RowIndexWriter.add` instead indexes block 0 under `ByteComparable.EMPTY`
+    //   (stored as the trie ROOT node's own payload) and appends a trailing separator
+    //   in `complete()`, so a Cassandra-written trie holds `blockCount + 1`
+    //   separators — see `cqlite-core/tests/issue_3002_bti_rows_root_base.rs`, which
+    //   pins exactly that shape on the real `da` fixture. So the count identity
+    //   asserted here (`entries.len() == block_count`) is CQLite's shape, not
+    //   Cassandra's.
+    //
+    // Second-order consequences of the gap (all consequences of the missing empty
+    // block-0 separator, none of them fixed here):
+    //   1. A CQLite-written wide partition has a NON-empty first separator, so a
+    //      clustering bound below it floors to `None` — the #1968 implicit-first
+    //      branch in `reader/data_access/bti.rs` must therefore live indefinitely,
+    //      even though it is unreachable for Cassandra-written tries. That branch's
+    //      end-to-end coverage is `issue_1968_cqlite_written_bti_implicit_first.rs`,
+    //      which reads a CQLite-written BTI wide partition through `Database::execute`
+    //      (the Cassandra-fixture #1968 lane can no longer reach it).
+    //   2. A spec-conformant Cassandra 5.0 `RowIndexReader.separatorFloor` over a
+    //      CQLite-written `Rows.db` finds NO block-0 entry, so for a clustering key
+    //      below the first stored separator the partition's earliest clustering rows
+    //      are unreachable through the row index by that reader.
+    //   3. The writer consequently REFUSES an empty separator outright rather than
+    //      mis-encoding it under transition byte `0x00` (`insert_row` returns
+    //      `Error::InvalidInput`; see `partitions_writer_tests.rs`), because the
+    //      canonical position — the root node's payload — is not expressible by
+    //      `build_row_trie`.
     assert_eq!(
         entries.len() as u32,
         header.block_count,
-        "traversal must yield block_count blocks"
+        "traversal must yield block_count blocks (CQLite's shape; Cassandra's canonical \
+         trie holds blockCount + 1 — see the KNOWN GAP note above)"
     );
     // Separators ascending; block offsets strictly increasing.
     for w in entries.windows(2) {
@@ -427,12 +639,11 @@ async fn bti_wide_partition_resolves_through_rows_db() {
             "block offsets must be strictly increasing"
         );
     }
-    // First block separator is ck=0 (OSS50 sign-flipped int = 0x8000_0000).
-    assert_eq!(
-        entries[0].0,
-        0x8000_0000u32.to_be_bytes().to_vec(),
-        "first separator must be ck=0"
-    );
+    // First block separator is ck=0: the `0x40 NEXT_COMPONENT` byte every OSS50
+    // component carries (issue #3002) + the sign-flipped int (0x8000_0000).
+    let mut expected_first = vec![0x40u8];
+    expected_first.extend_from_slice(&0x8000_0000u32.to_be_bytes());
+    assert_eq!(entries[0].0, expected_first, "first separator must be ck=0");
 
     // pk=2 (narrow) → DataOffset, NOT a RowsOffset.
     let raw_pk2 = 2i32.to_be_bytes().to_vec();
@@ -608,8 +819,19 @@ async fn bti_wide_desc_partition_resolves_through_rows_db() {
         "wide partition must span >= 2 blocks; got {}",
         header.block_count
     );
-    let entries =
-        iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse DESC row index");
+    // Issue #3002: the emitted root must PASS structural validation before anything
+    // traverses from it.
+    let entries = iterate_rows_in_bti_trie(
+        &rows_db,
+        header
+            .require_trie_root()
+            .expect("the written root must pass structural validation"),
+    )
+    .expect("traverse DESC row index");
+    // Same KNOWN GAP as the ASC case above (follow-up off issue #3002): CQLite emits
+    // `block_count` separators led by the first row's clustering key, where Cassandra
+    // emits `blockCount + 1` led by the root-payload `ByteComparable.EMPTY` block-0
+    // separator.
     assert_eq!(entries.len() as u32, header.block_count);
 
     // Separators ascending (trie requirement) AND block offsets strictly
@@ -628,13 +850,17 @@ async fn bti_wide_desc_partition_resolves_through_rows_db() {
     }
 
     // First block's first row is the LARGEST ck (DESC writes descending). For
-    // ck in 0..200, that is ck=199 => reversed byte-comparable of (sign-flip
-    // int 199) = complement(80 00 00 C7) = 7F FF FF 38.
-    let expected_first = (0x8000_0000u32 ^ 199)
-        .to_be_bytes()
-        .iter()
-        .map(|b| 0xFF ^ *b)
-        .collect::<Vec<u8>>();
+    // ck in 0..200, that is ck=199 => the UN-inverted `0x40 NEXT_COMPONENT` framing
+    // byte (emitted by the comparator, not the type — issue #3002) followed by the
+    // reversed byte-comparable of (sign-flip int 199) = complement(80 00 00 C7) =
+    // 7F FF FF 38.
+    let mut expected_first = vec![0x40u8];
+    expected_first.extend(
+        (0x8000_0000u32 ^ 199)
+            .to_be_bytes()
+            .iter()
+            .map(|b| 0xFF ^ *b),
+    );
     assert_eq!(
         entries[0].0, expected_first,
         "first DESC separator must be reversed byte-comparable of the largest ck (199)"
@@ -701,8 +927,15 @@ async fn bti_wide_mixed_order_partition_resolves_through_rows_db() {
     };
     let header = resolve_rows_db_entry(&rows_db, rows_offset).expect("resolve mixed entry");
     assert!(header.block_count >= 2);
-    let entries =
-        iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse mixed row index");
+    // Issue #3002: the emitted root must PASS structural validation before anything
+    // traverses from it.
+    let entries = iterate_rows_in_bti_trie(
+        &rows_db,
+        header
+            .require_trie_root()
+            .expect("the written root must pass structural validation"),
+    )
+    .expect("traverse mixed row index");
     for w in entries.windows(2) {
         assert!(
             w[0].0 < w[1].0,

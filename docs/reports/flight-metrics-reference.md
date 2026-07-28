@@ -6,7 +6,7 @@ Operator-facing reference for every `cqlite.*` instrument CQLite emits over Arro
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
-Total instruments: **76**.
+Total instruments: **77**.
 
 ## All instruments
 
@@ -60,6 +60,7 @@ Total instruments: **76**.
 | `cqlite.query.rows_scanned` | counter | `{row}` | `cqlite.query.access_path` | Rows examined by the SELECT scan step before filter/projection/LIMIT. | ≈ query.rows for a point lookup; far larger means a full_scan is doing the work. |
 | `cqlite.read.bloom.checks` | counter | `1` | `cqlite.result`<br>`cqlite.sstable.format` | Bloom-filter / BTI-trie present-or-absent checks; miss = definitely absent. | A high miss-rate is healthy pruning; pairing with partition_lookup reveals the bloom false-positive rate. |
 | `cqlite.read.bloom.false_negatives` | counter | `1` | `cqlite.sstable.format` | Opt-in soundness alarm: keys found on an authoritative scan that the presence oracle said were absent. | MUST stay 0. Any non-zero value is a corruption/soundness alarm (only emitted when verification is enabled). |
+| `cqlite.read.bti.rows_root_rejected` | counter | `{partition}` | `cqlite.read.rows_root_reject_reason` | Clustering-slice reads that decoded a WHOLE BTI partition because its Rows.db row-index root failed structural validation, tagged by the violated invariant. | Should be 0. Non-zero explains clustering-read latency with no narrowing: the rows are correct but the row index is unusable — re-flush/re-compact a Rows.db written by CQLite <= 0.16 (#3002). |
 | `cqlite.read.bytes` | counter | `By` | `cqlite.sstable.format`<br>`cqlite.compression` | Total Data.db bytes read (post-decompression). | Track against read.rows to spot read amplification; a spike with flat rows means wide scans. |
 | `cqlite.read.duration` | histogram | `s` | `cqlite.sstable.format` | Distribution of single read/scan operation durations. | Watch p99; a growing tail is the read-latency alarm. |
 | `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`<br>`cqlite.read.lookup_route`<br>`cqlite.sstable.format` | Partition point lookups attempted, tagged hit/miss so a dashboard computes the hit ratio from one series. | A healthy point-read workload is dominated by hits; a miss-heavy ratio means keys are absent or mis-routed. |

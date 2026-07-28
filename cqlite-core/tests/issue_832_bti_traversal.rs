@@ -26,11 +26,15 @@ use std::path::{Path, PathBuf};
 const WIDE_DIR: &str = "sstables/test_da/wide_table-9099a7c06c1811f19864870fb8444786";
 
 /// Cassandra OSS50 byte-comparable encoding of an `int` clustering value `ck`
-/// (single-component clustering): flip the sign bit, big-endian.  This matches
-/// the separator keys stored in the `wide_table` Rows.db tries (e.g. ck=8 →
-/// `80 00 00 08`).
+/// (single-component clustering): the `0x40 NEXT_COMPONENT` framing byte
+/// `ClusteringComparator.ByteComparableClustering` emits before EACH component
+/// (including the first), then the sign-flipped big-endian `Int32Type` image.
+/// This is the exact separator byte string the `wide_table` Rows.db tries store
+/// (ck=8 → `40 80 00 00 08`); the pre-#3002 helper omitted the leading `0x40`.
 fn encode_ck_int(ck: i32) -> Vec<u8> {
-    ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec()
+    let mut v = vec![0x40u8];
+    v.extend_from_slice(&((ck as u32) ^ 0x8000_0000).to_be_bytes());
+    v
 }
 
 /// Cassandra `Int32Type` raw partition-key bytes for `pk` (4-byte big-endian).
@@ -243,19 +247,24 @@ fn row_iterator_real_empty_rows_db_yields_nothing() {
 // PRIMARY KEY (pk, ck)), LZ4. 3 partitions pk=1/2/3, each 300 rows ck=0..299,
 // each ~600 KiB → each has a Rows.db row-index entry.
 //
-// Concrete, deterministic fixture facts (decoded from the real bytes):
-//   pk=1 → RowsOffset 242 → trieRoot 236, dataPos 0,       blockCount 38
-//   pk=2 → RowsOffset 494 → trieRoot 488, dataPos 619201,  blockCount 38
-//   pk=3 → RowsOffset 748 → trieRoot 742, dataPos 1238408, blockCount 38
-// Each partition's 38 separators are ck = 8,16,24,…,296,300 with within-partition
-// block offsets 16512, 33024, … (~16 KiB granularity), ending at the partition
-// data size (~619200). Separator key for ck=N is (N ^ 0x8000_0000) big-endian.
+// Concrete, deterministic fixture facts (decoded from the real bytes; the roots
+// are `RowsOffset + 2 + key_length + delta` per issue #3002 — the pre-#3002 base
+// omitted the 2-byte short-length prefix and resolved 236/488/742):
+//   pk=1 → RowsOffset 242 → trieRoot 238, dataPos 0,       blockCount 38
+//   pk=2 → RowsOffset 494 → trieRoot 490, dataPos 619201,  blockCount 38
+//   pk=3 → RowsOffset 748 → trieRoot 744, dataPos 1238408, blockCount 38
+// Each partition's trie holds blockCount + 1 = 39 separators: the EMPTY key
+// (`ByteComparable.EMPTY`, `RowIndexWriter.add`'s first `sep`) indexing block 0 at
+// the partition body start (offset 7), then ck = 8,16,24,…,296 at within-partition
+// offsets 16512, 33024, … (~16 KiB granularity), then `complete()`'s trailing
+// separator at ck=300 = the partition data size (~619200). The separator key for
+// ck=N is `40` + (N ^ 0x8000_0000) big-endian.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// (1) Finding A: pk=1's RowsOffset must resolve to a per-partition
 /// `TrieIndexEntry`, NOT a trie root.  Asserts the recovered trie root differs
 /// from RowsOffset, parses as a valid trie node, and that traversal from THAT
-/// root yields blockCount (38) row-index blocks — not an error or garbage.
+/// root yields blockCount + 1 (39) separators — not an error or garbage.
 #[test]
 fn rows_offset_resolves_real_trie_root() {
     let Some(root) = datasets_root() else {
@@ -280,9 +289,20 @@ fn rows_offset_resolves_real_trie_root() {
 
     // Resolving the entry recovers the real trie root + partition metadata.
     let header = resolve_rows_db_entry(&rdb, ro1).expect("entry must deserialize");
-    assert_eq!(header.trie_root, 236, "pk=1 trie root must resolve to 236");
+    // Issue #3002: the root-delta base is `RowsOffset + 2 + key_length` —
+    // cassandra-5.0.8 captures `basePosition` AFTER `writeWithShortLength`
+    // (`BtiTableWriter.IndexWriter.append`) and reads it back as
+    // `in.getFilePointer()` after `readWithShortLength`
+    // (`BtiTableReader.retrieveEntryIfAcceptable`). This test previously pinned the
+    // 2-bytes-low 236, which locked in the defect.
+    // The root is exposed only as a STRUCTURALLY VALIDATED capability (issue #3002):
+    // a real Cassandra root must pass that validation.
+    let trie_root = header
+        .require_trie_root()
+        .expect("the Cassandra-written root must pass structural validation");
+    assert_eq!(trie_root, 238, "pk=1 trie root must resolve to 238");
     assert_ne!(
-        header.trie_root, ro1,
+        trie_root, ro1,
         "trie root must differ from RowsOffset (entry vs node)"
     );
     assert_eq!(header.data_position, 0, "pk=1 Data.db position must be 0");
@@ -304,13 +324,15 @@ fn rows_offset_resolves_real_trie_root() {
         "pk=3 partition deletion must be LIVE (0x80 sentinel → None)"
     );
 
-    // Traversal from the recovered root yields exactly blockCount valid blocks.
-    let entries = iterate_rows_in_bti_trie(&rdb, header.trie_root)
+    // Traversal from the recovered root yields blockCount + 1 valid separators:
+    // one per block (the first being `ByteComparable.EMPTY`) plus the trailing
+    // separator `RowIndexWriter.complete()` appends after the last block.
+    let entries = iterate_rows_in_bti_trie(&rdb, trie_root)
         .expect("traversal from the recovered root must succeed");
     assert_eq!(
         entries.len() as u32,
-        header.block_count,
-        "traversal must yield blockCount (38) row-index blocks, got {}",
+        header.block_count + 1,
+        "traversal must yield blockCount + 1 (39) separators, got {}",
         entries.len()
     );
 }
@@ -347,7 +369,11 @@ fn row_iterator_wide_partition_yields_blocks_in_order() {
         "a ~600 KiB partition must span multiple index blocks; got {}",
         entries.len()
     );
-    assert_eq!(entries.len(), 38, "pk=1 must yield 38 blocks");
+    assert_eq!(
+        entries.len(),
+        39,
+        "pk=1 must yield 39 separators (38 blocks + complete()'s trailing separator)"
+    );
 
     // Separator keys ascending (DFS guarantees byte-comparable order).
     for w in entries.windows(2) {
@@ -379,10 +405,15 @@ fn row_iterator_wide_partition_yields_blocks_in_order() {
     // pk=1 starts at Data.db position 0.
     assert_eq!(header.data_position, 0);
 
-    // First separator is ck=8, last is ck=300 (the complete() trailing sep).
-    assert_eq!(entries.first().unwrap().0, encode_ck_int(8));
+    // First separator is the EMPTY key indexing block 0 at the partition body
+    // start (offset 7); the second is ck=8; the last is ck=300 (the complete()
+    // trailing sep). Pre-#3002 the mis-rooted traversal started at ck=8/16512 and
+    // never saw block 0.
+    assert_eq!(entries.first().unwrap().0, Vec::<u8>::new());
+    assert_eq!(offsets.first().copied(), Some(7));
+    assert_eq!(entries[1].0, encode_ck_int(8));
+    assert_eq!(offsets[1], 16512);
     assert_eq!(entries.last().unwrap().0, encode_ck_int(300));
-    assert_eq!(offsets.first().copied(), Some(16512));
 }
 
 /// (3) Finding B: range_query over ck in [100..=150] returns exactly the blocks
@@ -424,11 +455,21 @@ fn range_query_wide_partition_returns_correct_clustering_subset() {
     // Build the parallel list of (separator_ck, offset) for cross-checking.
     // decode separator ck from the byte-comparable key.  Separators are the
     // shortest prefix > prevMax; for this single int-clustering fixture they are
-    // the full 4-byte form (e.g. ck=8 → 80 00 00 08), but guard for any shorter
+    // the leading `0x40 NEXT_COMPONENT` byte (issue #3002) plus the full 4-byte
+    // Int32Type form (e.g. ck=8 → 40 80 00 00 08), but guard for any shorter
     // path-compressed key by zero-padding on the right (byte-comparable order).
+    // The EMPTY separator (block 0, `ByteComparable.EMPTY`) names no component at
+    // all and sorts below every clustering, so it decodes to -∞.
     let sep_to_ck = |k: &[u8]| -> i64 {
+        if k.is_empty() {
+            return i64::MIN;
+        }
+        assert_eq!(
+            k[0], 0x40,
+            "separator must start with NEXT_COMPONENT: {k:02x?}"
+        );
         let mut buf = [0u8; 4];
-        for (i, b) in k.iter().take(4).enumerate() {
+        for (i, b) in k[1..].iter().take(4).enumerate() {
             buf[i] = *b;
         }
         (u32::from_be_bytes(buf) ^ 0x8000_0000) as i32 as i64
@@ -501,11 +542,21 @@ fn range_query_wide_partition_returns_correct_clustering_subset() {
     }
 
     // ---- below-range: ck in [-50, -10] (no rows; all cks are 0..299) ----
+    // Separator semantics: block 0's interval is [EMPTY, ck=8) = (-∞, 8), which
+    // DOES contain ck in [-50,-10], so the authoritative selection is exactly the
+    // block-0 entry at offset 7 (over-inclusive by block granularity; the post-scan
+    // backstop drops the non-matching rows). Pre-#3002 the mis-rooted traversal had
+    // no block-0 separator, so this selected nothing and the reader depended on the
+    // #1968 implicit-first fallback to avoid dropping the earliest rows.
     let below = select_row_index_blocks_for_range(&all, &encode_ck_int(-50), &encode_ck_int(-10));
+    assert_eq!(
+        below.iter().map(|b| b.data_offset).collect::<Vec<_>>(),
+        vec![7],
+        "a below-range query must select exactly block 0 (the EMPTY separator's block)"
+    );
     assert!(
-        below.is_empty(),
-        "a below-range query (ck < 0) must select no blocks; got {:?}",
-        below.iter().map(|b| b.data_offset).collect::<Vec<_>>()
+        !below.iter().any(|b| in_offsets.contains(&b.data_offset)),
+        "the below-range selection must not overlap the ck in [100,150] data blocks"
     );
 
     // ---- above-range: ck in [400, 500] (beyond ck=299) ----

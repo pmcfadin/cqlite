@@ -22,6 +22,11 @@ pub use parser::{
     select_row_index_blocks_for_range, BtiPartitionLocation, BtiRowIndexEntry,
     BtiRowIndexEntryWithKey, BtiRowIndexHeader, FLAG_HAS_HASH_BYTE, FLAG_OPEN_MARKER,
 };
+// Structural `Rows.db` row-index-root validation (issue #3002).
+pub use parser::{
+    rows_node_serialized_extent_end_for_test, rows_root_rejected_root_ordinals_for_test,
+    RowsTrieRootRejectReason, RowsTrieRootRejection, ValidatedRowsTrieRoot,
+};
 // Crate-internal zero-copy slice walker (rust-reviewer #1574): consumed only by
 // the SSTable reader, so kept off cqlite-core's public semver surface. It takes a
 // PRE-ENCODED byte-comparable key so callers hoist the key hash+encoding out of the
@@ -43,6 +48,10 @@ pub use parser::{find_child_offset_for_test, parse_bti_node_for_test};
 // `tombstones`).
 #[cfg(not(feature = "tombstones"))]
 pub(crate) use parser::{rows_floor_block, rows_strict_ceiling_block};
+// Test-only hooks for the issue #3002 real-fixture clustering-window oracle.
+#[cfg(not(feature = "tombstones"))]
+#[doc(hidden)]
+pub use parser::{rows_floor_block_for_test, rows_strict_ceiling_block_for_test};
 
 use crate::parser::header::CassandraVersion;
 use std::collections::HashMap;

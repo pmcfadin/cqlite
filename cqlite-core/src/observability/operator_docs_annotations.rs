@@ -83,6 +83,15 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         round_item: "—",
     },
     MetricDoc {
+        name: catalog::READ_BTI_ROWS_ROOT_REJECTED,
+        kind: MetricKind::Counter,
+        unit: catalog::unit::PARTITIONS,
+        summary: "Clustering-slice reads that decoded a WHOLE BTI partition because its Rows.db row-index root failed structural validation, tagged by the violated invariant.",
+        attributes: &[attr::ROWS_ROOT_REJECT_REASON],
+        interpretation: "Should be 0. Non-zero explains clustering-read latency with no narrowing: the rows are correct but the row index is unusable — re-flush/re-compact a Rows.db written by CQLite <= 0.16 (#3002).",
+        round_item: "—",
+    },
+    MetricDoc {
         name: catalog::READ_BLOOM_FALSE_NEGATIVES,
         kind: MetricKind::Counter,
         unit: catalog::unit::DIMENSIONLESS,

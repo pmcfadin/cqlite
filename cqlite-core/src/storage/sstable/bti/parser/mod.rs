@@ -63,6 +63,7 @@ mod partitions;
 mod partition_successor_walk;
 mod rows;
 mod rows_floor;
+mod rows_root;
 mod slice_walk;
 mod traversal;
 
@@ -85,10 +86,18 @@ pub use rows::{
     select_row_index_blocks_for_range, BtiRowIndexEntry, BtiRowIndexEntryWithKey,
     BtiRowIndexHeader, FLAG_OPEN_MARKER,
 };
+// Structural row-index-root validation (issue #3002): the validated-root
+// capability type plus the rejection reason a clustering reader reports when it
+// takes the honest full-partition fallback.
+pub use rows_root::{
+    rows_node_serialized_extent_end_for_test, rows_root_rejected_root_ordinals_for_test,
+    RowsTrieRootRejectReason, RowsTrieRootRejection, ValidatedRowsTrieRoot,
+};
 // Crate-internal uncounted `TrieIndexEntry.deserialize` (issue #2058): the successor
 // walk resolves a WIDE successor's `data_position` for the seek END bound, which must
-// not bump the L1 clustering-window `ROWS_DB_ENTRY_RESOLVES` invariant.
-#[cfg(not(feature = "tombstones"))]
+// not bump the L1 clustering-window `ROWS_DB_ENTRY_RESOLVES` invariant. Also used by
+// `verify` (issue #3002), which is NOT compiled out under `tombstones` — hence no cfg
+// gate here.
 pub(crate) use rows::resolve_rows_db_entry_uncounted;
 // Crate-internal only: the zero-copy slice walker's sole consumers are the
 // SSTable reader (partition_lookup / data_access::bti). Kept off the public
@@ -115,4 +124,10 @@ pub use slice_walk::{find_child_offset_for_test, parse_bti_node_for_test};
 // public semver surface like the slice walker.
 #[cfg(not(feature = "tombstones"))]
 pub(crate) use rows_floor::{rows_floor_block, rows_strict_ceiling_block};
+// Test-only hooks for the issue #3002 real-fixture window oracle (block 0 is a
+// STORED floor once the root base is correct; the END bound is the half the floor
+// walk alone cannot prove).
+#[cfg(not(feature = "tombstones"))]
+#[doc(hidden)]
+pub use rows_floor::{rows_floor_block_for_test, rows_strict_ceiling_block_for_test};
 pub use traversal::{iterate_partition_locations_in_bti_file, iterate_partitions_in_bti_file};

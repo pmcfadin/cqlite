@@ -94,6 +94,20 @@ struct Case {
     /// empty-pass contract. Defaults to `false`.
     #[serde(default)]
     expect_empty: bool,
+    /// Whether this case is expressible on the FLIGHT lane. A Flight ticket is a
+    /// whole-table projection scan with NO `WHERE` clause, so an oracle case whose
+    /// `query` carries a partition/clustering predicate (e.g. the BTI
+    /// clustering-slice case, issue #3002) cannot be run here at all and is
+    /// declared `"flight_lane": false` in the oracle. Defaults to `true`, so a case
+    /// that omits the field is still asserted on this lane (never a silent skip).
+    #[serde(default = "default_true")]
+    flight_lane: bool,
+}
+
+/// `serde` default for [`Case::flight_lane`] — a case is on the Flight lane unless
+/// it explicitly opts out.
+fn default_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -300,9 +314,10 @@ fn normalize(rows: Vec<serde_json::Map<String, serde_json::Value>>) -> Vec<Strin
 
 /// One case: returns Ok(true) if it ran a comparison, Ok(false) if it SKIPped.
 async fn run_case(case: &Case) -> Result<bool, String> {
-    // Anti-empty-pass config validation (independent of fixture presence): an
-    // empty `expected_rows` must be an explicit, provable opt-in — never an
-    // accident that silently collapses the compared column set to `[]`.
+    // Anti-empty-pass config validation runs FIRST, for EVERY case — including a
+    // `flight_lane: false` one (whose config is still validated here even though this
+    // lane cannot execute it), so an opt-out can never smuggle a malformed case past
+    // the guards below.
     if case.expected_rows.is_empty() {
         if !case.expect_empty {
             return Err(format!(
@@ -318,6 +333,31 @@ async fn run_case(case: &Case) -> Result<bool, String> {
                 case.id
             ));
         }
+    }
+
+    // Not expressible on this lane (a whole-table projection `do_get` cannot carry
+    // the case's WHERE clause). This is a DECLARED per-case property in the oracle,
+    // not a fixture-presence skip, so it is honoured even under
+    // CQLITE_REQUIRE_FIXTURES — the in-core lane
+    // (cqlite-core/tests/query_semantics_oracle_parity.rs) asserts these cases.
+    if !case.flight_lane {
+        // The opt-out is only legitimate for a query this lane genuinely cannot
+        // express — i.e. one carrying a `WHERE` clause. Without this check the flag
+        // could later be flipped on an expressible case to MUTE a real failure.
+        if !case.query.to_ascii_uppercase().contains(" WHERE ") {
+            return Err(format!(
+                "case {}: declares flight_lane: false but its query carries no WHERE \
+                 clause, so it IS expressible as a whole-table projection scan — the \
+                 opt-out may not be used to mute an expressible case: {}",
+                case.id, case.query
+            ));
+        }
+        eprintln!(
+            "SKIP case {} — declared flight_lane: false (query carries a WHERE clause \
+             the Flight ticket surface cannot express)",
+            case.id
+        );
+        return Ok(false);
     }
 
     let Some(root) = sstables_root(&case.keyspace) else {
@@ -437,6 +477,7 @@ fn synthetic_case(
             vec![serde_json::Map::new()]
         },
         expect_empty,
+        flight_lane: true,
     }
 }
 
@@ -500,6 +541,24 @@ async fn query_semantics_oracle_matches_flight_do_get() {
     );
 
     if require_fixtures() {
+        // Fail closed per CASE, not merely suite-wide: EVERY case that did not
+        // declare the `flight_lane: false` opt-out must actually have run, else a
+        // silently-skipped case would leave this lane green without asserting it.
+        let expected_on_lane: Vec<&str> = oracle
+            .cases
+            .iter()
+            .filter(|c| c.flight_lane)
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(
+            ran,
+            expected_on_lane.len(),
+            "CQLITE_REQUIRE_FIXTURES=1: {} of {} flight-lane oracle cases ran — every case \
+             without a `flight_lane: false` opt-out must run (expected on lane: {:?})",
+            ran,
+            expected_on_lane.len(),
+            expected_on_lane
+        );
         assert!(
             ran > 0,
             "CQLITE_REQUIRE_FIXTURES=1 but no oracle case ran (fixtures absent) — fail-closed"

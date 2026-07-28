@@ -23,9 +23,11 @@
 //!      `AccessPath::ClusteringSlice`; a partition-only lookup (no clustering
 //!      restriction) still reports `PartitionLookup`.
 //!
-//! Requires `CQLITE_DATASETS_ROOT` and the fetched binary SSTables; skipped (not
-//! failed) when the data isn't present. Excluded under `tombstones` (that build
-//! compiles out the seek and the work counters).
+//! Requires `CQLITE_DATASETS_ROOT`; skipped (not failed) when the datasets root or
+//! the schema is absent. A PRESENT fixture that decodes 0 rows is a hard FAILURE,
+//! never a skip (issue #3002 review: the old "Data.db not fetched?" guards turned a
+//! collapsed clustering window into a silent pass). Excluded under `tombstones`
+//! (that build compiles out the seek and the work counters).
 
 #![cfg(all(
     feature = "state_machine",
@@ -71,6 +73,48 @@ fn schemas_dir() -> Option<PathBuf> {
     dir.exists().then_some(dir)
 }
 
+/// Probe that the BTI wide-partition fixture really is on disk.
+///
+/// This lane's hard asserts (a PRESENT fixture decoding 0 rows is a FAILURE, issue
+/// #3002 review) are only meaningful once the fixture exists: an ABSENT
+/// `test_da/wide_table-*/da-2-bti-Data.db` (partial fetch, or a datasets root other
+/// than the in-repo corpus) SKIPs rather than panicking on a missing file — while a
+/// PRESENT fixture that returns 0 rows still hard-FAILS.
+///
+/// `CQLITE_REQUIRE_FIXTURES=1` makes even the absent case fail closed, so the lane
+/// can never green-pass vacuously where the corpus is guaranteed.
+fn wide_table_fixture(sstables: &Path) -> Option<PathBuf> {
+    // A `read_dir` failure (an ABSENT or unreadable `test_da`) is the absent case, and
+    // must FALL THROUGH to the `CQLITE_REQUIRE_FIXTURES` assert below — an early
+    // `?` return here would let the lane green-pass vacuously under
+    // `CQLITE_REQUIRE_FIXTURES=1` wherever the corpus is guaranteed (pr-gate.yml /
+    // gate.yml both set it), which is exactly the knob this probe advertises.
+    let found = std::fs::read_dir(sstables.join("test_da"))
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .find(|dir| {
+                    dir.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("wide_table-"))
+                        && dir.join("da-2-bti-Data.db").exists()
+                })
+        });
+    if found.is_none() {
+        assert!(
+            !std::env::var("CQLITE_REQUIRE_FIXTURES")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            "CQLITE_REQUIRE_FIXTURES=1 but test_da/wide_table-*/da-2-bti-Data.db is absent \
+             under {} — fail-closed",
+            sstables.display()
+        );
+    }
+    found
+}
+
 async fn setup() -> Result<Database, String> {
     let root = datasets_root().ok_or("CQLITE_DATASETS_ROOT not set or missing")?;
     let schema_path = schemas_dir()
@@ -82,6 +126,11 @@ async fn setup() -> Result<Database, String> {
     let data_dir = root.join("sstables");
     if !data_dir.exists() {
         return Err(format!("sstables dir not found at {data_dir:?}"));
+    }
+    if wide_table_fixture(&data_dir).is_none() {
+        return Err(format!(
+            "BTI fixture test_da/wide_table-*/da-2-bti-Data.db not present under {data_dir:?}"
+        ));
     }
 
     let config = IngestionConfig {
@@ -158,14 +207,16 @@ async fn two_bound_range_slice_parity_and_bounded_decode() {
         ))
         .await
         .expect("full partition read must succeed");
-    if full.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    // HARD FAILURE on 0 rows (issue #3002 review): the `test_da/wide_table`
+    // binaries are COMMITTED, so a present-but-undecoded fixture is a read-path
+    // regression, never a skip. The old "Data.db not fetched?" skip turned exactly
+    // the #3002 half-fix failure mode (a clustering window collapsed off the rows)
+    // into a silent pass — this lane must scream instead.
     assert_eq!(
         full.rows.len(),
         PARTITION_ROW_COUNT,
-        "fixture invariant: pk=1 must hold {PARTITION_ROW_COUNT} clustering rows",
+        "fixture invariant: pk=1 must hold {PARTITION_ROW_COUNT} clustering rows (0 rows \
+         means the committed fixture did not decode — a FAILURE, never a skip)",
     );
 
     // `ck >= 100 AND ck < 110` selects exactly ck = 100..=109 (10 rows).
@@ -221,17 +272,19 @@ async fn single_bound_lt_slice_parity_and_bounded_decode() {
     let Some(db) = skip_or_db().await else {
         return;
     };
-    // Skip if no data.
+    // The committed fixture MUST decode: 0 rows is a hard failure, not a skip
+    // (issue #3002 review — this guard used to mask a collapsed clustering window).
     let probe = db
         .execute(&format!(
             "SELECT pk, ck FROM {QUALIFIED_TABLE} WHERE pk = 2 LIMIT 1"
         ))
         .await
         .expect("probe must succeed");
-    if probe.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    assert!(
+        !probe.rows.is_empty(),
+        "fixture invariant: pk=2 must decode at least one row (the committed \
+         test_da/wide_table binaries are present; 0 rows is a read-path FAILURE)"
+    );
 
     // `ck < 20` selects ck = 0..=19 (20 rows).
     let expected: Vec<i32> = (0..20).collect();
@@ -271,10 +324,11 @@ async fn single_bound_gte_slice_parity_and_bounded_decode() {
         ))
         .await
         .expect("probe must succeed");
-    if probe.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    assert!(
+        !probe.rows.is_empty(),
+        "fixture invariant: pk=3 must decode at least one row (the committed \
+         test_da/wide_table binaries are present; 0 rows is a read-path FAILURE)"
+    );
 
     // `ck >= 290` selects ck = 290..=299 (10 rows) — the TAIL of the partition,
     // so the start fast-forward must skip ~290 leading rows.
@@ -316,10 +370,11 @@ async fn equality_slice_parity_and_bounded_decode() {
         ))
         .await
         .expect("probe must succeed");
-    if probe.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    assert!(
+        !probe.rows.is_empty(),
+        "fixture invariant: pk=1 must decode at least one row (the committed \
+         test_da/wide_table binaries are present; 0 rows is a read-path FAILURE)"
+    );
 
     let (returned, rows_decoded, path) = run_slice(&db, "pk = 1 AND ck = 150").await;
     assert_eq!(
@@ -359,10 +414,11 @@ async fn partition_only_lookup_reports_partition_lookup_not_clustering_slice() {
         ))
         .await
         .expect("partition read must succeed");
-    if result.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    assert!(
+        !result.rows.is_empty(),
+        "fixture invariant: pk=1 must decode at least one row (the committed \
+         test_da/wide_table binaries are present; 0 rows is a read-path FAILURE)"
+    );
     assert_eq!(
         result.metadata.access_path,
         Some(AccessPath::PartitionLookup),
@@ -392,10 +448,13 @@ async fn slice_results_equal_full_scan_filtered_baseline() {
         ))
         .await
         .expect("full partition read must succeed");
-    if full.rows.is_empty() {
-        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
-        return;
-    }
+    assert_eq!(
+        full.rows.len(),
+        PARTITION_ROW_COUNT,
+        "fixture invariant: pk=1 must hold {PARTITION_ROW_COUNT} clustering rows (the committed \
+         test_da/wide_table binaries are present; a 0-row or short baseline would make every \
+         parity case below vacuously true — a FAILURE, never a skip)",
+    );
     let all_cks = cks(&full.rows);
 
     // For each shape, the in-memory baseline filter over the full partition's cks

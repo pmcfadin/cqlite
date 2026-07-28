@@ -294,7 +294,8 @@ impl SSTableReader {
     ///
     /// Returns `Ok(None)` (decode the whole partition, report `PartitionLookup`)
     /// for every other case — a NARROW partition, an empty `Rows.db`, an
-    /// un-encodable bound, or a slice that selects no block. This is the honest
+    /// un-encodable bound, a slice that selects no block, or (issue #3002) an entry
+    /// whose row-index ROOT failed structural validation. This is the honest
     /// fallback: correctness is preserved by decoding the full partition and
     /// letting the post-scan backstop filter.
     #[cfg(not(feature = "tombstones"))]
@@ -345,7 +346,40 @@ impl SSTableReader {
                 "BTI clustering seek: Rows.db entry at RowsOffset({rows_offset}) unreadable: {e}"
             ))
         })?;
-        let root = header.trie_root;
+        // ROOT UNUSABLE (issue #3002): the entry's resolved root failed structural
+        // validation — it is not the last-written node before the entry, so walking
+        // from it would return a structurally valid but BOGUS window that silently
+        // drops rows (exactly the pre-#3002 fail-open). Take the honest "cannot
+        // narrow" fallback: `Ok(None)` ⇒ decode the whole partition and let the
+        // post-scan backstop filter. This is DISTINCT from the #1968 implicit-first
+        // signal below, which keeps a real (narrowed-END) window rooted at rel 0.
+        // `header.data_position`/`block_count` are unaffected and stay usable by the
+        // point-lookup / successor-walk paths.
+        let root = match &header.trie_root {
+            Ok(root) => root.offset(),
+            Err(rejection) => {
+                // OPERATOR SIGNAL (#3002): this fallback is otherwise invisible — it
+                // shows up only as unexplained clustering-read latency, because every
+                // slice over the affected partitions decodes in full. Count it with
+                // the violated invariant as the bounded attribute so a dashboard can
+                // name the cause; the `debug!` keeps the offsets, which never go on a
+                // metric label.
+                crate::observability::add_counter(
+                    crate::observability::catalog::READ_BTI_ROWS_ROOT_REJECTED,
+                    1,
+                    &[(
+                        crate::observability::catalog::attr::ROWS_ROOT_REJECT_REASON,
+                        rejection.reason.label().into(),
+                    )],
+                );
+                debug!(
+                    "BTI clustering seek: {rejection}; decoding the full partition (no \
+                     narrowing) — a Rows.db row index written by CQLite <= 0.16 must be \
+                     rewritten (re-flush/re-compact), see issue #3002"
+                );
+                return Ok(None);
+            }
+        };
 
         // Per-column reverse order for the FIRST clustering column (single-column
         // scope per #954). A missing/absent schema treats it as ascending.
@@ -410,11 +444,16 @@ impl SSTableReader {
             .map(|s| s.columns.iter().any(|c| c.is_static))
             .unwrap_or(false);
 
-        // IMPLICIT FIRST BLOCK (issue #1968): a `start` below the first separator
-        // selects the implicit block at the partition body start, which no walk can
-        // return. `rows_floor_block` returns `None` in exactly that case, so it IS
-        // the implicit-first signal; the decode must then begin at rel 0 or the
-        // earliest clustering rows are dropped.
+        // IMPLICIT FIRST BLOCK (issue #1968): a `start` below the FIRST stored
+        // separator selects a block no walk can return, so `rows_floor_block`'s
+        // `None` IS the implicit-first signal and the decode must begin at rel 0 or
+        // the earliest clustering rows are dropped. In a Cassandra-written trie read
+        // from the CORRECT root (issue #3002) this is now unreachable: the first
+        // block's separator is `ByteComparable.EMPTY` (`RowIndexWriter.add`), stored
+        // as the ROOT node's own payload, and nothing sorts below the empty key — the
+        // floor walk returns that block 0 entry as a genuine STORED floor. The `None`
+        // branch is retained for a trie whose first separator is NOT empty (a
+        // CQLite-written row index, or any bound below a non-empty first separator).
         let includes_implicit_first_block = floor_block.is_none();
 
         // The start narrows to the floor block only when NEITHER a static row NOR the
