@@ -72,6 +72,7 @@ use tonic::Request;
 
 use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::read_path_probe::ReadPathProbe;
+use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::storage::write_engine::mutation::{
     ClusteringBound, PartitionTombstone, RangeTombstone,
 };
@@ -80,7 +81,7 @@ use cqlite_core::storage::write_engine::{
 };
 use cqlite_core::types::Value;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
-use cqlite_flight::bypass::MERGE_PATH_ENV;
+use cqlite_flight::bypass::{bypass_reason, BypassReason, ForcedMergePath, MERGE_PATH_ENV};
 use cqlite_flight::service::CqliteFlightService;
 
 /// Serializes the process-global env + probe window (see the module doc).
@@ -327,11 +328,12 @@ async fn assert_arms_agree(
     Some(bypass_rows)
 }
 
-/// A schema the predicate REFUSES (a static column, or a composite-keyed
-/// collection of frozen UDTs) must fall back to the merge arm under BOTH forced
-/// values and behave IDENTICALLY — i.e. the fast path cannot change those results
-/// because it is never taken for them (fail-closed; see
-/// `BypassReason::StaticColumns` / `BypassReason::CompositeKeyedCollection`).
+/// A schema the predicate REFUSES (a static column — declared OR found in the
+/// SSTable's own serialization header — or a multi-cell column whose two arms
+/// disagree) must fall back to the merge arm under BOTH forced values and behave
+/// IDENTICALLY: the fast path cannot change those results because it is never
+/// taken for them (fail-closed; see `BypassReason::StaticColumns` /
+/// `BypassReason::MulticellArmDivergence`).
 ///
 /// "Identically" includes an identical FAILURE: `#2339` makes the merge arm fail
 /// closed on a composite-keyed collection, and preserving that (rather than
@@ -809,6 +811,9 @@ async fn forced_path_differential_agrees_on_every_shape() {
     )
     .await;
 
+    // ---- The on-disk static branch, asserted DIRECTLY on the predicate ------
+    assert_undeclared_static_column_is_refused_on_disk(&mut failures).await;
+
     // ---- Real Cassandra fixtures ------------------------------------------
     for case in dataset_cases() {
         let Some(dir) = fixture_dir(case.keyspace, case.table) else {
@@ -880,6 +885,124 @@ async fn forced_path_differential_agrees_on_every_shape() {
         failures.is_empty(),
         "forced-path differential failures:\n{}",
         failures.join("\n\n")
+    );
+}
+
+/// Prove the ON-DISK static branch of the predicate — not the schema branch —
+/// is what refuses a stale-DDL request (roborev/C).
+///
+/// The chain asserted here, all on real Cassandra bytes
+/// (`test_writeparity.static_clustering_shape`, whose serialization header reads
+/// `StaticColumns: sdata:…UTF8Type`):
+/// 1. the ticket DDL (which OMITS `sdata`) parses to a schema declaring NO static
+///    column — so the schema-side check (`bypass.rs`'s `schema.columns … is_static`)
+///    provably CANNOT fire;
+/// 2. the reader's own header DOES report `["sdata"]`, and reports it as KNOWN;
+/// 3. `bypass_reason` nevertheless returns `StaticColumns`.
+///
+/// (1) + (3) together establish that the refusal came from the on-disk branch,
+/// which is otherwise unexercised: every other static test declares the column in
+/// its DDL and refuses one check earlier.
+async fn assert_undeclared_static_column_is_refused_on_disk(failures: &mut Vec<String>) {
+    const STALE_DDL: &str =
+        "CREATE TABLE static_clustering_shape (id int, ck int, rdata text, PRIMARY KEY (id, ck))";
+    let Some(dir) = fixture_dir("test_writeparity", "static_clustering_shape") else {
+        let msg = "on-disk static check: fixture dir absent".to_string();
+        if require_fixtures() {
+            failures.push(format!("REQUIRE_FIXTURES: {msg}"));
+        } else {
+            eprintln!("SKIP {msg}");
+        }
+        return;
+    };
+    let Some(data_db) = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-Data.db"))
+        })
+    else {
+        let msg = "on-disk static check: Data.db not fetched".to_string();
+        if require_fixtures() {
+            failures.push(format!("REQUIRE_FIXTURES: {msg}"));
+        } else {
+            eprintln!("SKIP {msg}");
+        }
+        return;
+    };
+
+    let schema = match cqlite_core::schema::parse_cql_schema(STALE_DDL) {
+        Ok(s) => s,
+        Err(e) => {
+            failures.push(format!(
+                "on-disk static check: stale DDL did not parse: {e}"
+            ));
+            return;
+        }
+    };
+    if schema.columns.iter().any(|c| c.is_static) {
+        failures.push(
+            "on-disk static check: the stale DDL must declare NO static column, or the \
+             schema-side check would refuse first and this case would prove nothing"
+                .to_string(),
+        );
+        return;
+    }
+
+    let config = cqlite_core::Config::default();
+    let platform = match cqlite_core::Platform::new(&config).await {
+        Ok(p) => std::sync::Arc::new(p),
+        Err(e) => {
+            failures.push(format!("on-disk static check: platform: {e}"));
+            return;
+        }
+    };
+    let reader = match SSTableReader::open(&data_db, &config, platform).await {
+        Ok(r) => std::sync::Arc::new(r),
+        Err(e) => {
+            failures.push(format!("on-disk static check: reader open: {e}"));
+            return;
+        }
+    };
+
+    let on_disk = reader.on_disk_static_columns();
+    if on_disk != vec!["sdata".to_string()] {
+        failures.push(format!(
+            "on-disk static check: the serialization header must report the file's \
+             STATIC column (expected [\"sdata\"], got {on_disk:?}) — if this is empty \
+             the guard is a silent no-op"
+        ));
+        return;
+    }
+    if !reader.static_columns_are_known() {
+        failures.push(
+            "on-disk static check: the header was parsed, so the static question must \
+             report itself as KNOWN"
+                .to_string(),
+        );
+        return;
+    }
+
+    let reason = bypass_reason(
+        std::slice::from_ref(&reader),
+        &schema,
+        ForcedMergePath::Auto,
+        false,
+    );
+    if reason != BypassReason::StaticColumns {
+        failures.push(format!(
+            "on-disk static check: a request whose DDL omits the file's static column \
+             must be refused BY THE ON-DISK BRANCH; got {reason:?}"
+        ));
+        return;
+    }
+    eprintln!(
+        "PASS on-disk static check — DDL declares no static column, header reports \
+         {on_disk:?}, predicate refuses with StaticColumns (the on-disk branch)"
     );
 }
 
@@ -1083,6 +1206,30 @@ fn dataset_cases() -> Vec<DatasetCase> {
                 "CREATE TYPE person_type (first_name text, last_name text, age int, active boolean);",
             ]
             .join(" "),
+            pinned_now: ORACLE_PINNED_NOW,
+            min_rows: 1,
+            pk_only_projection: vec![],
+            refuses_fast_arm: true,
+            refused_error_substr: None,
+            columns: vec![],
+            token_of_int_pk: None,
+        },
+        // The STALE-DDL case (roborev/C): this fixture's serialization header
+        // declares `sdata` STATIC, but this ticket DDL OMITS it — so the
+        // schema-side static check CANNOT fire and only the ON-DISK header check
+        // can refuse the fast path. That is the exact scenario the on-disk check
+        // exists for (a DDL predating an `ALTER TABLE ADD … STATIC`), and without
+        // this case that branch is dead in test terms. `assert_undeclared_static_
+        // column_is_refused_on_disk` below additionally asserts, directly on the
+        // predicate, that the refusal comes from the on-disk branch.
+        DatasetCase {
+            label: "cassandra/static_clustering_shape@stale-ddl(on-disk static)",
+            pk_only_label: "cassandra/static_clustering_shape@stale-ddl+pk-only",
+            keyspace: "test_writeparity",
+            table: "static_clustering_shape",
+            // NOTE: `sdata text static` is deliberately ABSENT.
+            ddl: "CREATE TABLE static_clustering_shape (id int, ck int, rdata text, PRIMARY KEY (id, ck))"
+                .to_string(),
             pinned_now: ORACLE_PINNED_NOW,
             min_rows: 1,
             pk_only_projection: vec![],
