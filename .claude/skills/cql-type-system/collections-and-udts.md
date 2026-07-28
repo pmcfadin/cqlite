@@ -7,19 +7,70 @@ Cassandra supports three collection types:
 - **Set** - Unordered, no duplicates (stored sorted)
 - **Map** - Key-value pairs (stored sorted by key)
 
-## Collection Wire Format
+## Collection Wire Format — TWO distinct encodings
 
-### General Structure
-All collections use the same basic format:
+> ### ⚠️ Frozen and non-frozen collections do NOT share a wire format
+> Choose the encoding from the **schema's frozen-ness of the column**, never from the byte
+> pattern (no-heuristics mandate, #28). Assuming the frozen layout for a non-frozen column
+> (or vice versa) mis-frames every element.
+
+| | **FROZEN** | **NON-FROZEN** (the default) |
+|---|---|---|
+| Declared as | `frozen<list<int>>`; also any collection nested inside another collection/tuple/UDT | `list<int>`, `set<T>`, `map<K,V>` |
+| On disk | ONE opaque cell value | a SET of cells (one per element) |
+| Count | fixed **4-byte BE `i32`** | **unsigned VInt** |
+| Element/value length | fixed **4-byte BE `i32`** (`-1` = null) | **unsigned VInt** (no `-1`; absent = `HAS_EMPTY_VALUE` flag) |
+| Per-element metadata | none | cell flags + optional timestamp/TTL/LDT deltas + a cell **path** |
+| Element deletion | not representable | per-cell `IS_DELETED`; whole-collection via `ROW_HAS_COMPLEX_DELETION` (`0x40`) |
+
+### FROZEN collection structure (fixed 4-byte BE `i32` framing)
 
 ```
-[4 bytes: element_count (big-endian i32)]
+[i32 BE: element_count]
 [for each element:]
-    [4 bytes: element_size (big-endian i32)]
+    [i32 BE: element_size]   // -1 = null
     [bytes: element_data]
 ```
 
-### List Example
+> **Citation**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/frozen.rs:21`
+> (`i32::from_be_bytes` count), `:98`, `:279`, `:370` (element/key sizes). Guide:
+> `docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md:537-539`
+> ("tuple/UDT field lengths and frozen-collection counts/element lengths are fixed 4-byte
+> BE `i32`"). Cassandra: `CollectionSerializer.java:67-92`.
+
+### NON-FROZEN collection structure (unsigned-VInt framing)
+
+```
+[if the row sets ROW_HAS_COMPLEX_DELETION (0x40):]
+    [unsigned VInt: markedForDeleteAt delta]
+    [unsigned VInt: local_deletion_time delta]
+[unsigned VInt: cell_count]
+[for each cell:]
+    [1 byte: cell flags]                       // IS_DELETED 0x01, IS_EXPIRING 0x02,
+                                               // HAS_EMPTY_VALUE 0x04, USE_ROW_TIMESTAMP 0x08,
+                                               // USE_ROW_TTL 0x10
+    [conditional unsigned-VInt timestamp / local_deletion_time / ttl deltas]
+    [unsigned VInt: path_len][path bytes]      // element key / path (the list UUID, set
+                                               // element, or map key)
+    [unsigned VInt: value_len][value bytes]    // omitted when IS_DELETED or HAS_EMPTY_VALUE
+```
+
+> **Citation**: `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs:279-300`
+> (complex deletion deltas), `:332` (`cell_count` via `parse_vuint`), `:1089` (path length),
+> `:1136` (value length). Guide: `appendix-b-encodings-cheat-sheet.md:530-536` — a
+> non-frozen collection cell length-prefixes BOTH path and value with an unsigned VInt,
+> **fixed-width element types included**; the `valueLengthIfFixed()` raw-bytes shortcut is a
+> **simple-cell** rule only (`AbstractType.java:538-543`), and a non-frozen `set<T>`'s
+> missing value is the `HAS_EMPTY_VALUE_MASK` flag, not a width.
+
+### Examples below are FROZEN
+
+Every hex example in this section (`List`, `Set`, `Map`, `Nested`) shows the **frozen**
+layout — the fixed 4-byte BE `i32` framing above. For a non-frozen column, replace each
+4-byte count/length with an unsigned VInt and add the per-cell flags/path shown in the
+non-frozen structure.
+
+### List Example (FROZEN)
 ```
 CQL: list<int>
 Value: [10, 20, 30]
@@ -34,7 +85,7 @@ Wire format:
 [0x00, 0x00, 0x00, 0x1E]  // value = 30
 ```
 
-### Set Example
+### Set Example (FROZEN)
 ```
 CQL: set<text>
 Value: {'apple', 'banana', 'cherry'}
@@ -49,7 +100,7 @@ Wire format (stored sorted):
 [0x63, 0x68, 0x65, 0x72, 0x72, 0x79]  // "cherry"
 ```
 
-### Map Example
+### Map Example (FROZEN)
 ```
 CQL: map<text, int>
 Value: {'a': 1, 'b': 2}
@@ -84,7 +135,7 @@ CREATE TABLE t (
 );
 ```
 
-### Nested Collection Wire Format
+### Nested Collection Wire Format (FROZEN inner lists)
 ```
 CQL: list<frozen<list<int>>>
 Value: [[1, 2], [3, 4, 5]]
@@ -93,7 +144,7 @@ Wire format:
 [0x00, 0x00, 0x00, 0x02]  // outer count = 2
 
 // First nested list [1, 2]
-[0x00, 0x00, 0x00, 0x18]  // size of entire frozen list
+[0x00, 0x00, 0x00, 0x14]  // size of entire frozen list = 20 (see derivation below)
 [0x00, 0x00, 0x00, 0x02]  // inner count = 2
 [0x00, 0x00, 0x00, 0x04]  // size = 4
 [0x00, 0x00, 0x00, 0x01]  // value = 1
@@ -101,7 +152,7 @@ Wire format:
 [0x00, 0x00, 0x00, 0x02]  // value = 2
 
 // Second nested list [3, 4, 5]
-[0x00, 0x00, 0x00, 0x24]  // size of entire frozen list
+[0x00, 0x00, 0x00, 0x1C]  // size of entire frozen list = 28 (see derivation below)
 [0x00, 0x00, 0x00, 0x03]  // inner count = 3
 [0x00, 0x00, 0x00, 0x04]  // size = 4
 [0x00, 0x00, 0x00, 0x03]  // value = 3
@@ -110,6 +161,18 @@ Wire format:
 [0x00, 0x00, 0x00, 0x04]  // size = 4
 [0x00, 0x00, 0x00, 0x05]  // value = 5
 ```
+
+**Derivation of the frozen inner-list sizes.** A frozen `list<int>` body is
+`4 (i32 count) + n * (4 (i32 element_size) + 4 (int value))` = `4 + 8n`:
+
+| Inner list | n | Bytes | Hex |
+|---|---|---|---|
+| `[1, 2]` | 2 | `4 + 2*8 = 20` | `0x14` |
+| `[3, 4, 5]` | 3 | `4 + 3*8 = 28` | `0x1C` |
+
+Count the bytes listed above each inner list to confirm: `[1,2]` shows 5 four-byte words
+after its size word (count, size, value, size, value) = 20; `[3,4,5]` shows 7 = 28. The
+size word itself is NOT included in the size it declares.
 
 ## Deserialization Code
 
@@ -296,10 +359,17 @@ UPDATE t SET data = [1, 2, 3] WHERE id = 1;
 -- Cannot: UPDATE t SET data[0] = 99 WHERE id = 1;
 ```
 
-**Wire format:** Same as non-frozen, but:
-- Serialized as single blob in parent structure
-- No tombstones for individual elements
-- Entire collection replaced on update
+**Wire format: NOT the same as non-frozen** — see the two-encoding table at the top of this
+file. A frozen collection is:
+- serialized as a **single opaque cell value**, with fixed 4-byte BE `i32` count and element
+  lengths (`row_decoder/frozen.rs:21,98`) — not a set of cells with unsigned-VInt framing;
+- unable to represent per-element tombstones (there is no per-element cell to flag);
+- replaced wholesale on update.
+
+A **non-frozen** collection is a set of cells with `cell_count` and value lengths as
+**unsigned VInts**, per-element cell flags/paths, and per-element tombstones
+(`row_decoder/complex_column.rs:332,1089,1136`;
+`appendix-b-encodings-cheat-sheet.md:530-536`).
 
 ### Frozen UDTs
 ```cql
@@ -319,16 +389,24 @@ UPDATE t SET addr = {street: '...', city: '...', zip: ...} WHERE id = 1;
 
 ## Empty Collections
 
+**FROZEN** (4-byte BE `i32` count):
 ```
-Empty list: [0x00, 0x00, 0x00, 0x00]  // count = 0
-Empty set:  [0x00, 0x00, 0x00, 0x00]  // count = 0
-Empty map:  [0x00, 0x00, 0x00, 0x00]  // count = 0
+Empty frozen list: [0x00, 0x00, 0x00, 0x00]  // count = 0
+Empty frozen set:  [0x00, 0x00, 0x00, 0x00]  // count = 0
+Empty frozen map:  [0x00, 0x00, 0x00, 0x00]  // count = 0
 ```
+
+**NON-FROZEN** (unsigned VInt `cell_count`): a single `0x00` byte — `cell_count = 0`
+(`row_decoder/complex_column.rs:332`). In practice Cassandra usually writes no complex
+column at all rather than a zero-cell one.
 
 ## Null vs Empty
 
-- **Null collection:** Field not present, or size = -1 in length-prefixed context
-- **Empty collection:** Field present with count = 0
+- **Null collection:** column absent from the row's column bitmap; or, inside a **frozen**
+  container, a 4-byte BE `i32` length of `-1` (`0xFFFFFFFF`). A **non-frozen** collection's
+  lengths are unsigned VInts and cannot be `-1` — an absent value is the cell flag
+  `HAS_EMPTY_VALUE` (`0x04`).
+- **Empty collection:** present with count/`cell_count` = 0.
 
 ## Performance Considerations
 
@@ -379,11 +457,24 @@ CREATE TABLE collection_table (
 
 Validate parsing:
 ```bash
-./scripts/generate.sh
-sstabledump test-data/datasets/sstables/test_collections/collection_table/*.db
+bash test-data/scripts/fetch-datasets.sh   # real Cassandra 5.0 binaries (gitignored)
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+sstabledump test-data/datasets/sstables/test_collections/collection_table/*-Data.db
 ```
 
 ## Reference
 
-See `cqlite-core/src/types/collections.rs` for implementation.
+Implementation (verify against `origin/main`):
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/frozen.rs` — **frozen**
+  collections/tuples (4-byte BE `i32` framing).
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs` —
+  **non-frozen** collections (unsigned-VInt framing, per-cell flags/paths).
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/udt.rs` — UDTs.
+- `cqlite-core/src/types/` — the CQL type model / `Value` enum.
+
+**Format authority** for a genuinely disputed on-disk question is Apache Cassandra 5.0.8
+(`git show cassandra-5.0.8:src/java/org/apache/cassandra/...` —
+`CollectionSerializer.java`, `TupleType.java`, `UserType.java`, `db/rows/Cell.java`) plus
+`docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md`. A CQLite
+`file:line` is authoritative for *what CQLite currently does*, not for what the format is.
 

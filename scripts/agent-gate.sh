@@ -231,6 +231,16 @@
 #                      whether the supersession grace can actually fire — plus a
 #                      GNU-only-construct lint over this mechanism's shell). All three
 #                      prove non-vacuity with always-pass stubs or mutants.
+#                      Also runs (no python3 needed)
+#                      scripts/tests/test_check_skill_flag_tables.sh (#3054) — pins
+#                      scripts/ci/check-skill-flag-tables.sh, which asserts the
+#                      AUTO-LOADED .claude/skills/sstable-parsing/ row/extended/cell
+#                      flag tables match the real row_decoder constants (an agent
+#                      trusts a skill table over the code, and the pre-#3054 tables
+#                      taught partition-boundary mis-detection). Hermetic temp-sandbox
+#                      copy; proves non-vacuity by mutating the copy (shifted value,
+#                      invented name, dropped row) and fails closed on a moved
+#                      decoder source or a reformatted-away table.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -4532,9 +4542,15 @@ run_kit_dashboard_drift() {
 # scripts/tests/test_gate_failure_mode.sh (#2662), which pins the decision table
 # of scripts/ci/gate-failure-mode.sh — the routing logic behind the nightly
 # gate-failure alert workflow, which is otherwise untestable (it only fires on a
-# real workflow_run event). Pure/offline, no gh/network. SKIP-aware:
-# the summary test's truncation case relies on a python3 reader, so with no
-# python3 we record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
+# real workflow_run event). Pure/offline, no gh/network. Also runs
+# scripts/tests/test_check_skill_flag_tables.sh (#3054), which pins
+# scripts/ci/check-skill-flag-tables.sh: the AUTO-LOADED sstable-parsing skill's
+# row/extended/cell flag tables must match the real row_decoder constants, so an
+# agent can never again be taught a partition-boundary decode bug by a rotted skill
+# table (hermetic temp-sandbox copy; no cargo/datasets/network). Pure/offline, no
+# gh/network. SKIP-aware: the summary test's truncation case relies on a python3
+# reader, so with no python3 we record SKIP (loud, never silent PASS); any test
+# failure -> hard FAIL.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -4588,6 +4604,26 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_check_dockerfile_rust_pin.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (flight Dockerfile rust-pin lockstep); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # auto-loaded-skill flag-table drift guard (#3054): no python3/Docker/cargo
+  # needed, always runs. Pins the row/extended/cell flag tables in
+  # .claude/skills/sstable-parsing/{SKILL.md,cassandra5-format-reference.md} to the
+  # real constants in row_decoder/{mod.rs,row_data.rs} — those skills auto-load into
+  # every binary-format agent context, and the pre-#3054 tables taught
+  # partition-boundary mis-detection (0x01 labeled IS_MARKER/IS_STATIC). Fails closed
+  # when a source split moves the constants or the table is reformatted away. A
+  # failure FAILs the component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_check_skill_flag_tables.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_check_skill_flag_tables.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (skill flag-table drift guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

@@ -175,12 +175,33 @@ fn deserialize_timestamp(data: &[u8]) -> Result<i64> {
 ```
 
 #### Date
-**Wire Format:** 4 bytes unsigned (days since epoch: 1970-01-01)
+**Wire Format:** 4 bytes big-endian **unsigned**, days-since-epoch **shifted by
+`Integer.MIN_VALUE`** — the epoch (1970-01-01) sits at the CENTRE of the unsigned range,
+i.e. day 0 is encoded as `0x80000000`. The shift exists so the raw 4 bytes sort in date
+order (byte-comparable).
+
+**You MUST un-bias the stored value.** Reading it as a plain `u32` days-since-epoch is
+wrong by 2^31 days.
+
 ```rust
-fn deserialize_date(data: &[u8]) -> Result<u32> {
-    Ok(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+/// Cassandra DATE: 4-byte unsigned BE with an Integer.MIN_VALUE offset.
+fn deserialize_date(data: &[u8]) -> Result<i32> {
+    let stored = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    // Remove the bias: stored 0x80000000 -> 0 days since 1970-01-01.
+    Ok(stored.wrapping_add(i32::MIN as u32) as i32)
 }
 ```
+
+> **Citations**: CQLite decode path —
+> `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/cell_value_scalar.rs:329-333`
+> (`stored.wrapping_add(i32::MIN as u32) as i32`; the bias is spelled `i32::MIN as u32`,
+> which is why a grep for the literal `0x80000000` finds nothing). Format authority —
+> Apache Cassandra 5.0.8 `src/java/org/apache/cassandra/serializers/SimpleDateSerializer.java`:
+> `:36-37` ("For byte-order comparability, we shift by `Integer.MIN_VALUE` and treat the
+> data as an unsigned integer … w/epoch sitting in the center @ 2^31"), `:110`
+> (`timeInMillisToDay` → `toDays() - Integer.MIN_VALUE`), `:113-115`
+> (`dayToTimeInMillis` → `ofDays(days + Integer.MIN_VALUE)`). The *decoded* value CQLite
+> carries in `Value::Date` is the signed days-since-epoch, matching Cassandra's `int`.
 
 #### Time
 **Wire Format:** 8 bytes big-endian (nanoseconds since midnight)
@@ -193,15 +214,46 @@ fn deserialize_time(data: &[u8]) -> Result<i64> {
 ```
 
 #### Duration
-**Wire Format:** 3 VInts (months, days, nanoseconds)
+**Wire Format:** 3 **ZigZag-signed** VInts (months, days, nanoseconds).
+
+> ### ⚠️ These are the ONLY signed VInts in `Data.db`
+> Every other VInt in `Data.db` — all lengths, counts, and the timestamp/TTL/
+> local-deletion-time deltas — is **unsigned**. A `duration`'s three components are the
+> sole exception, and they apply **wherever a duration payload occurs**, including nested
+> inside a collection, tuple, or UDT (`frozen<list<duration>>`,
+> `map<text, frozen<tuple<duration,int>>>`, a UDT field of type `duration`, …).
+> **Decoding them as unsigned VInts makes every negative duration wrong**, and a negative
+> CQL duration makes every non-zero component negative.
+
+**ZigZag decode**: `(zz >> 1) ^ -(zz & 1)` — i.e. positive `n` encodes as `2n`, negative
+`n` as `2|n| - 1`.
+
 ```rust
+/// ZigZag-decode an unsigned VInt payload into its signed value.
+fn zigzag_decode(zz: u64) -> i64 {
+    ((zz >> 1) as i64) ^ -((zz & 1) as i64)
+}
+
 fn deserialize_duration(data: &[u8]) -> Result<(i32, i32, i64)> {
-    let (months_data, rest) = parse_vint(data)?;
-    let (days_data, rest) = parse_vint(rest)?;
-    let (nanos_data, _) = parse_vint(rest)?;
-    Ok((months_data as i32, days_data as i32, nanos_data))
+    // parse_vuint reads the raw UNSIGNED VInt; the ZigZag step recovers the sign.
+    let (rest, months_zz) = parse_vuint(data)?;
+    let (rest, days_zz) = parse_vuint(rest)?;
+    let (_, nanos_zz) = parse_vuint(rest)?;
+    Ok((
+        zigzag_decode(months_zz) as i32,
+        zigzag_decode(days_zz) as i32,
+        zigzag_decode(nanos_zz),
+    ))
 }
 ```
+
+> **Citations**: `docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md:63-65`
+> ("Every VInt in `Data.db` is unsigned **except** the three components of a serialized
+> `DurationType` payload"), `:92-97` (the duration/ZigZag rule and its nesting scope),
+> `:520-529` (structural VInts are unsigned; ZigZag appears only inside a `DurationType`
+> payload). Cassandra: `DurationSerializer.java:34,49-51` (three `writeVInt` calls),
+> `VIntCoding.java:449,522` (`writeVInt` → `writeUnsignedVInt(encodeZigZag64(v))`),
+> `Duration.java:101-110` (a negative duration negates every component).
 
 ### Network Types
 
@@ -241,10 +293,18 @@ fn deserialize_counter(data: &[u8]) -> Result<i64> {
 
 ## Null Handling
 
-All CQL types can be null:
-- **In collections:** 4-byte size prefix of `-1` (0xFFFFFFFF)
-- **In UDT fields:** 4-byte size prefix of `-1`
-- **In cells:** Cell with IS_DELETED flag or no value bytes
+All CQL types can be null, but the *framing* that expresses null depends on whether you
+are inside a **frozen** value or looking at a **non-frozen** collection's cells:
+- **In a FROZEN collection / tuple / UDT:** a 4-byte big-endian `i32` length of `-1`
+  (`0xFFFFFFFF`) (`row_decoder/frozen.rs:98,279,370`; `TupleType.java:341-364`).
+- **In a NON-FROZEN collection cell:** there is no `-1` sentinel — an absent value is the
+  cell flag `HAS_EMPTY_VALUE` (`0x04`), and lengths are **unsigned VInts** which cannot be
+  negative (`row_decoder/complex_column.rs:1136`;
+  `appendix-b-encodings-cheat-sheet.md:530-536`).
+- **In cells generally:** a cell with `IS_DELETED` (`0x01`), or a column omitted from the
+  row's column bitmap.
+
+See `collections-and-udts.md` for the two collection encodings side by side.
 
 ```rust
 fn deserialize_nullable<T>(
@@ -272,16 +332,26 @@ fn deserialize_nullable<T>(
 - **Null:** Field doesn't have a value (SQL NULL)
 - **Empty:** Field has zero-length value (empty string, empty blob)
 
-**Wire format:**
-- Null: size = -1, no bytes follow
-- Empty: size = 0, no bytes follow
-- Present: size = N, N bytes follow
+**Wire format** — inside a **frozen** value (4-byte BE `i32` lengths):
+- Null: size = `-1`, no bytes follow
+- Empty: size = `0`, no bytes follow
+- Present: size = `N`, `N` bytes follow
+
+**Wire format** — a **non-frozen** collection cell (unsigned-VInt lengths, so no `-1`):
+- Empty/absent value: cell flag `HAS_EMPTY_VALUE` (`0x04`) set; no length, no bytes
+- Deleted: cell flag `IS_DELETED` (`0x01`) set; no value bytes
+- Present: unsigned VInt `value_len` = `N`, then `N` bytes
 
 ## Type Aliases
 
-Some types have multiple names:
-- `text` = `varchar`
-- `blob` = `bytea` (PostgreSQL compatibility)
+CQL has exactly one such alias pair:
+- `text` = `varchar` (both are `UTF8Type`)
+
+> **Citation**: cassandra-5.0.8 `src/java/org/apache/cassandra/cql3/CQL3Type.java:88-111`
+> — the `Native` enum is the complete list of CQL native type names. `TEXT` (`:103`) and
+> `VARCHAR` (`:111`) both map to `UTF8Type.instance`, which is the one true alias pair;
+> `BLOB` (`:91`) maps to `BytesType.instance` and appears exactly once. CQL has **no**
+> PostgreSQL-style alias for `blob` — do not invent one.
 
 ## Special Cases
 
@@ -297,5 +367,17 @@ Some types have multiple names:
 
 ## Reference Implementation
 
-See `cqlite-core/src/types/` for complete Rust type system implementation.
+- `cqlite-core/src/types/` — the CQL type model / `Value` enum.
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/cell_value_scalar.rs` —
+  scalar on-disk decode (the authority for what CQLite does with `date`, `duration`, etc.).
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/frozen.rs` — frozen
+  collections/tuples (4-byte BE `i32` framing).
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/complex_column.rs` —
+  non-frozen collections (unsigned-VInt framing).
+- `cqlite-core/src/storage/sstable/reader/parsing/row_decoder/udt.rs` — UDTs.
+
+**Format authority** for a genuinely disputed on-disk question is Apache Cassandra 5.0.8
+(`git show cassandra-5.0.8:src/java/org/apache/cassandra/...`) plus
+`docs/sstables-definitive-guide/chapters/appendix-b-encodings-cheat-sheet.md`. A CQLite
+`file:line` is authoritative for *what CQLite currently does*, not for what the format is.
 

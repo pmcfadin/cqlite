@@ -17,7 +17,7 @@ plus general-purpose Rust guidance.
 **Files:**
 - `SKILL.md` - Main skill guidance
 - `cassandra5-format-reference.md` - Complete row format specification
-- `compression-formats.md` - LZ4, Snappy, Deflate formats
+- `compression-formats.md` - the four compression algorithms plus Noop: LZ4, Snappy, Deflate, Zstd, Noop (`cqlite-core/src/storage/sstable/compression_info.rs:43-48`)
 
 ---
 
