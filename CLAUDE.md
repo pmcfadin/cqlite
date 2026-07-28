@@ -285,13 +285,22 @@ implement (TDD) → --lite each fix round (summary-file redirect)
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.
-- **roborev invocation — pass BOTH agent and model (#2433).** `.roborev.toml` on `main` pins
-  `agent = 'claude-code'` + `review_model = 'opus'`. To run the codex reviewer you must override BOTH:
-  `roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`. `--agent codex`
-  alone still inherits `review_model = 'opus'` from config, and codex-on-a-ChatGPT-account rejects
-  `opus` with a hard `400 'opus' model is not supported` — a silent review failure that looks like an
-  outage. Run from a checkout whose `.roborev.toml` you know (worktrees inherit `main`'s pinned config);
-  `--model` is the reliable override. codex's own configured model is `gpt-5.6-sol` (`~/.codex/config.toml`).
+- **roborev invocation — the repo pins codex + `gpt-5.6-sol` + `thorough` (#2433).** `.roborev.toml`
+  on `main` pins `agent`/`review_agent = 'codex'`, `model`/`review_model = 'gpt-5.6-sol'`, and
+  `review_reasoning = 'thorough'`, so the plain invocation already runs the intended reviewer:
+  `roborev review --branch --base origin/main --wait`. **This repo-local pin OVERRIDES your global
+  `~/.roborev/config.toml`** — it is the value that actually runs, on every checkout (worktrees inherit
+  `main`'s pinned config). Overriding to another backend requires BOTH flags (`--agent X --model Y`):
+  `--agent` alone still inherits the pinned `review_model`, which the other backend cannot serve, and
+  the resulting hard `400 '<model>' model is not supported` looks like an outage rather than a config
+  mismatch.
+  - **`gpt-5.6-sol` requires codex CLI ≥ 0.145.0.** On 0.142.5 it fails with
+    `400 ... requires a newer version of Codex`. Verify with `codex --version`; upgrade per
+    `docs/development/fleet-runbook.md`. Models this ChatGPT account can serve: `gpt-5.6-sol`,
+    `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`. Plain
+    `gpt-5.6`, `gpt-5.1-codex*` and `gpt-5-codex` are rejected as *not supported on a ChatGPT account*.
+  - **roborev reasoning ladder** is `fast|standard|medium|thorough|maximum` (there is no `high`); it
+    maps onto codex's `model_reasoning_effort`, so `thorough` → `high` and `maximum` → `xhigh`.
 - **flow-closer (#2084/#2668)**: the full gate, the final roborev pass, and the merge run inside the
   disposable `flow-closer` subagent — the lead retains only its terminal packet (verdict, PR URL,
   summary-file path, ≤10 lines residual), never gate stdout or review churn. The closer has **no

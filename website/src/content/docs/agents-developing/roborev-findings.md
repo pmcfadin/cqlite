@@ -121,17 +121,38 @@ fresh `git worktree add --detach HEAD`, never the dirty tree.
 3. Then run `scripts/agent-gate.sh` and request review as usual — see the
    [gate contract](/cqlite/agents-developing/gate-contract/).
 
-## Running the codex reviewer — override BOTH agent and model
+## The pinned reviewer — codex, `gpt-5.6-sol`, `thorough`
 
-`.roborev.toml` on `main` pins `agent = 'claude-code'` and `review_model = 'opus'`. To run the codex
-backend you must override **both** on the command line:
+`.roborev.toml` on `main` pins `agent`/`review_agent = 'codex'`, `model`/`review_model =
+'gpt-5.6-sol'`, and `review_reasoning = 'thorough'`. The plain invocation therefore already runs the
+intended reviewer — no flags needed:
 
 ```bash
-roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait
+roborev review --branch --base origin/main --wait
 ```
 
-`--agent codex` **alone** still inherits `review_model = 'opus'` from config, and codex on a ChatGPT
-account rejects `opus` with a hard `400 'opus' model is not supported` — a silent review failure that
-looks like a backend outage rather than a config mismatch. Worktrees inherit `main`'s pinned config, so
-`--model gpt-5.6-sol` (codex's own configured model, from `~/.codex/config.toml`) is the reliable
-override on every checkout.
+That repo-local pin **overrides** whatever your global `~/.roborev/config.toml` sets, so it is the
+value that actually runs. Worktrees inherit `main`'s pinned config, so this holds on every checkout.
+
+To run a *different* backend you must override **both** agent and model:
+
+```bash
+roborev review --branch --base origin/main --agent claude-code --model opus --wait
+```
+
+`--agent` **alone** still inherits the pinned `review_model` from config — a model the other backend
+cannot serve — and the resulting hard `400 '<model>' model is not supported` reads like a backend
+outage rather than a config mismatch.
+
+### Version floor and available models
+
+`gpt-5.6-sol` **requires codex CLI ≥ 0.145.0**. On 0.142.5 it fails with `400 ... requires a newer
+version of Codex`; check with `codex --version`. Models this ChatGPT account can serve:
+
+| Usable | Rejected (*not supported when using Codex with a ChatGPT account*) |
+|---|---|
+| `gpt-5.6-sol` (default), `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` | `gpt-5.6`, `gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5.1-codex-max`, `gpt-5-codex`, `gpt-5.1` |
+
+roborev's reasoning ladder is `fast | standard | medium | thorough | maximum` — there is **no
+`high`**. It maps onto codex's `model_reasoning_effort`, so `thorough` → `high` and `maximum` →
+`xhigh`.
