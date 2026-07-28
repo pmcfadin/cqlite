@@ -1,6 +1,6 @@
 # CQLite Claude Code Skills
 
-This directory contains specialized skills to accelerate M1-M6 development of the cqlite project,
+This directory contains specialized skills to accelerate M1-M7 development of the cqlite project,
 plus general-purpose Rust guidance.
 
 ## Skills Overview
@@ -44,7 +44,7 @@ plus general-purpose Rust guidance.
 
 **Trigger keywords:** zero-copy, async, lifetime, borrow checker, performance, memory, unsafe, Bytes, tokio
 
-**Supports:** M1 (Zero-copy), M6 (Performance targets)
+**Supports:** M1 (Zero-copy), M7 (Performance validation + v1.0)
 
 **Files:**
 - `SKILL.md` - Performance patterns guidance
@@ -74,7 +74,9 @@ plus general-purpose Rust guidance.
 
 **Scripts Used:**
 - `test-data/scripts/start-clean.sh`
-- `test-data/scripts/generate.sh`
+- `test-data/scripts/regenerate-datasets.sh` (full corpus)
+- `test-data/scripts/generate-*-parity.sh` (per-fixture)
+- `test-data/scripts/fetch-datasets.sh` (pinned release binaries)
 - `test-data/scripts/export.sh`
 - `test-data/scripts/shutdown-clean.sh`
 
@@ -87,7 +89,7 @@ plus general-purpose Rust guidance.
 
 **Trigger keywords:** CI, validation, clippy, merge, push, coverage, feature flags, pre-commit
 
-**Supports:** All milestones (quality gates), M6 (Release readiness)
+**Supports:** All milestones (quality gates), M7 (Release readiness)
 
 **Files:**
 - `SKILL.md` - CI/CD workflow
@@ -212,7 +214,8 @@ Test each skill with realistic queries:
 | **M3** (Output Writers) | 3, 5 |
 | **M4** (Bindings) | 3, 5 |
 | **M5** (Write Support) | 1, 2, 3, 4, 5 |
-| **M6** (Performance) | 3, 5 |
+| **M6** (WASM Bindings) | 3, 5 |
+| **M7** (Perf validation + v1.0) | 3, 5 |
 
 ---
 
@@ -305,7 +308,7 @@ Skills are designed for minimal overhead:
 - ✅ All CQL types (Skill 2)
 - ✅ Zero-copy patterns (Skill 3)
 
-### M6: Performance & Release
+### M7: Performance Validation & v1.0
 - ✅ <128MB memory target (Skill 3)
 - ✅ Performance profiling guidance (Skill 3)
 - ✅ Release process (Skill 5)
@@ -379,7 +382,7 @@ Consider adding:
 
 - **Claude Code Skills Docs:** https://docs.claude.com/en/docs/claude-code/skills
 - **Project PRD:** `docs/development/PRD.md`
-- **Cleanup Agent:** `.claude/agents/cleanup/cleanup-agent-prompt.md`
+- **Subagents:** `.claude/agents/`
 - **Test Data Scripts:** `test-data/scripts/`
 
 ---
@@ -389,13 +392,13 @@ Consider adding:
 **5 skills created:**
 1. ✅ SSTable Format Parsing (M1 core)
 2. ✅ CQL Type System (M1 types)
-3. ✅ Rust Performance Patterns (M1+M6)
+3. ✅ Rust Performance Patterns (M1+M7)
 4. ✅ Test Data Management (All milestones)
 5. ✅ CI/CD Validation (All milestones)
 
 **Total files:** 15 (5 SKILL.md + 10 supporting docs)
 
-**Coverage:** M1-M6 development workflows
+**Coverage:** M1-M7 development workflows
 
 **Ready to use:** Skills automatically activate based on your questions
 
