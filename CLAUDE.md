@@ -288,7 +288,13 @@ order: (1) the pinned `cassandra-5.0.8` Cassandra source, (2) `sstabledump` outp
 
 ## Agent-Team Conventions
 
-- Implementers commit after each meaningful unit of work so reviews land while context is fresh.
+- **Implementers commit after each meaningful unit of work — this is WORK-LOSS insurance, not just
+  review hygiene (#3042).** Reviews landing while context is fresh is the smaller half. The larger
+  half: a subagent starved of CPU (a co-scheduled gate, a heavy sibling lane) is killed by the **600s
+  stall watchdog** and **loses every uncommitted change** — 3 agents lost all their work this way in a
+  single session. A commit is the only thing that survives the kill; the harness re-invoke starts from
+  the last commit, not the last edit. So commit early and often, before any long-running or
+  CPU-contended step, even mid-refactor and even when the unit feels too small to review.
 - Stay within your assigned issue's scope; flag cross-cutting changes to the lead instead of editing
   another teammate's files.
 - An issue is "done" only when tests pass, coverage meets threshold, roborev is clean, and both the
@@ -518,6 +524,17 @@ end-to-end test. Green helper-only unit tests are not sufficient.
     the telemetry PR — return its number as residual if its CI is still pending.
 - **Keep doctrine current in the same change** — user-facing or workflow changes update CLAUDE.md
   and the website `agents-developing/` page as part of the change.
+  - **Acceptance step: a publish is verified by the NEW CONTENT being served, never by HTTP 200
+    (#3042).** A green deploy plus a `200` proves the site is up, not that your change is live: the CDN
+    can keep serving the **previous** page for roughly **3 minutes** afterward (observed twice — two
+    successive `curl`s returned stale content after a successful deploy). Grep the response for a
+    distinctive string your change introduced, and re-check after a wait if it is absent:
+    ```bash
+    curl -sS https://pmcfadin.github.io/cqlite/agents-developing/<page>/ | grep -c '<new phrase>'
+    ```
+    A `0` means not-yet-published (or not published) — not a failure to report immediately, but never
+    bank it as done. For a NEW SSTable-guide chapter there is a second, separate requirement: it must
+    be registered in `CHAPTERS` (`docs/sstables-definitive-guide/README.md`).
 
 ## Product-Manager Behavior (lead)
 
