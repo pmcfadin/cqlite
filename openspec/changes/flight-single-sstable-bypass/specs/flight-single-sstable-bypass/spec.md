@@ -20,7 +20,23 @@ existing `KWayMerger` path when ANY of them does not:
 - the request is not aggregating (already guaranteed by the `is_aggregating()` early return at
   `producer_warm.rs:52`);
 - the request did not take the full-PK-equality point-read route (`producer_warm.rs:75`);
+- **the schema declares no STATIC column** (see below);
 - the forced-path override does not request the merge arm.
+
+**Static-column exclusion (fail-closed, deferral — issue #3095).** Delivery of this change
+established, against the pinned `cassandra-5.0.8` source
+(`cql3/statements/SelectStatement.java::processPartition`, L1089-1152), that **both** arms are
+already wrong for static-bearing tables and wrong in *different* directions: the merge arm emits a
+phantom `ck = null` row per static-bearing partition AND leaves the static column null on the real
+clustering rows (N+1 rows where Cassandra returns N), while the single-generation arm injects
+statics correctly but returns zero rows for a static-only partition where Cassandra returns one.
+The merge-arm defect is **pre-existing on `main`** and is not introduced here.
+
+Because the two arms disagree, routing static-bearing tables to the fast arm would **change query
+results** — which this change forbids. A static-bearing schema SHALL therefore take the merge arm,
+preserving today's (incorrect but unchanged) behavior. This is an explicit **deferral, not a
+design position**: issue #3095 owns making static semantics Cassandra-correct on both arms, after
+which this precondition SHALL be removed and the bypass SHALL cover static-bearing tables.
 
 The predicate SHALL be conjunctive and fail-closed: any condition that cannot be established from
 authoritative state takes the merge arm.
@@ -34,6 +50,11 @@ authoritative state takes the merge arm.
 - **GIVEN** a warm `do_get` over a table with two generations where the ticket's token filter prunes one of them away via already-parsed endpoint tokens (`prune_readers`, zero extra I/O)
 - **WHEN** the decision point is reached
 - **THEN** the count used is the POST-prune count (1), not the pre-prune count (2), and the fast path is selected
+
+#### Scenario: A static-bearing schema falls back to the merger
+- **GIVEN** a single-source `do_get` whose `TableSchema` declares at least one STATIC column
+- **WHEN** the decision point is reached
+- **THEN** the fast path is NOT selected and the request is served by the existing `KWayMerger` path, so its results are byte-for-byte what they are today (see the static-column exclusion above and issue #3095)
 
 #### Scenario: A non-empty dropped_columns map falls back to the merger
 - **GIVEN** a single-source `do_get` whose `TableSchema.dropped_columns` is non-empty
@@ -108,7 +129,10 @@ regress issue #2988 (multi-generation SELECT continues to drive the buffered `KW
 ### Requirement: Read-time reconciliation semantics are preserved on the fast path
 The fast path SHALL apply SELECT-semantic read reconciliation with results indistinguishable from
 the merge path for a single source: partition deletions, range tombstones, row tombstones, cell
-tombstones, TTL expiry, and static-cell injection into every clustering row. It SHALL run with
+tombstones, and TTL expiry. **Static columns are OUT OF SCOPE of the fast path** — a static-bearing
+schema takes the merge arm (see the static-column exclusion in the predicate requirement and issue
+#3095), so static-cell injection is not a property of this change and is not asserted here. It
+SHALL run with
 `read_shadowing = true` (`scan_stream_windowed.rs:748-751`) so `PartitionShadow`
 (`row_decoder/partition_shadow.rs:44`) is active, and its TTL/expiry clock SHALL be the request's
 `now_secs` — the SAME clock the merge arm threads via `with_now_secs`
@@ -119,8 +143,8 @@ both arms.
 - **WHEN** the fast path's parser construction is inspected
 - **THEN** it is built with `read_shadowing = true` and `PartitionShadow` is opened for each partition, so tombstone/TTL shadowing is applied
 
-#### Scenario: Tombstone, TTL, static-row and range-tombstone cases reconcile identically on both arms
-- **GIVEN** a single-SSTable fixture containing a partition deletion, a range tombstone, a row deletion, a cell tombstone, an expired-TTL cell, a live-TTL cell, and a static column, at a PINNED `now`
+#### Scenario: Tombstone, TTL and range-tombstone cases reconcile identically on both arms
+- **GIVEN** a single-SSTable fixture with no static column, containing a partition deletion, a range tombstone, a row deletion, an expired-TTL cell and a live-TTL cell, at a PINNED `now`
 - **WHEN** the same `do_get` is run twice over the SAME bytes — once forced to the fast path and once forced to the merge path
 - **THEN** the two runs return identical rows, identical column values, and identical row order
 
@@ -140,7 +164,16 @@ both arms.
 - **THEN** the row IS returned under both projections, identically to the merge path's `has_live_data_cell` visibility rule (`producer.rs:1199-1220`, issues #2374/#2789)
 
 ### Requirement: Query-result output is unchanged, proven by the semantic oracles and a forced-path differential
-The change SHALL NOT alter any query result. This SHALL be proven by (1) both query-semantics
+The change SHALL NOT alter any query result. Note this holds **because** the shapes on which the two
+arms are known to disagree are routed to the merge arm fail-closed: static-bearing schemas (issue
+#3095) via the bypass predicate. Two further shapes are excluded from the forced-path differential
+as **documented pre-existing defects, not as convenient omissions** — a CQLite-written simple cell
+tombstone reaching the Arrow encoder as `Value::Tombstone`, which fails the stream on BOTH arms
+(issue #3094), and `set<frozen<UDT>>`, which the merge arm alone fails closed on (issue #2339).
+Each exclusion SHALL be commented in the test with its issue reference, and each SHALL be retired by
+that issue.
+
+This SHALL be proven by (1) both query-semantics
 oracles at a PINNED `now` — core `query_semantics_oracle_parity.rs` (gate component
 `query-semantics-oracle`) and Flight `query_semantics_flight_parity.rs` (gate component
 `flight-query-semantics-oracle`) — since physical-dump parity alone cannot see a
