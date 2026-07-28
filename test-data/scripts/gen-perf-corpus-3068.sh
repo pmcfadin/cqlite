@@ -30,7 +30,10 @@
 # CQLITE_DATASETS_ROOT=$CORPUS_ROOT works directly):
 #   $CORPUS_ROOT/sstables/perf_3068/medium_700b-<uuid>/nb-*-*.db
 #   $CORPUS_ROOT/sstables/perf_3068/wide_4kb-<uuid>/nb-*-*.db
-#   $CORPUS_ROOT/manifest-3068.json
+#   $CORPUS_ROOT/manifest-3068.json    (copied to test-data/perf-corpus-3068-manifest.json)
+#
+# See docs/development/perf-corpus-and-containment.md — including why every
+# measurement against this corpus must go through perf-run-contained.sh.
 #
 # Usage:
 #   bash test-data/scripts/gen-perf-corpus-3068.sh                # both tables
@@ -301,12 +304,23 @@ for entry in "${DIRS[@]}"; do
   log "[$tbl] published"
 done
 
+# Two manifests, same content: one next to the (uncommitted) corpus, and one at
+# the COMMITTED path so a regenerated corpus can be diffed against the recorded
+# sha256/row counts. MANIFEST_OUT= disables the in-repo write.
 log "writing manifest..."
+MANIFEST_OUT="${MANIFEST_OUT-$SCRIPT_DIR/../perf-corpus-3068-manifest.json}"
 python3 "$SCRIPT_DIR/write-perf-corpus-manifest.py" \
   --corpus-root "$CORPUS_ROOT" \
   --keyspace "$KS" \
   --image "$IMAGE" \
+  --container "$CONTAINER" \
   ${PUBLISHED[@]+"${PUBLISHED[@]/#/--table=}"}
+# Copied, not re-generated: a second run would re-hash multiple GB for a
+# byte-identical result (the manifest records corpus-root-RELATIVE paths).
+if [[ -n "$MANIFEST_OUT" ]]; then
+  cp "$CORPUS_ROOT/manifest-3068.json" "$MANIFEST_OUT"
+  log "committed-path manifest: $MANIFEST_OUT"
+fi
 
 log "DONE. Corpus at $CORPUS_ROOT/sstables/$KS/"
 log "Use with: CQLITE_DATASETS_ROOT=$CORPUS_ROOT"

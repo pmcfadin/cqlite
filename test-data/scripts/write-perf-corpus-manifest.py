@@ -2,14 +2,21 @@
 """Emit the issue-#3068 perf-corpus manifest.
 
 Everything recorded here is READ BACK FROM THE WRITTEN BYTES, never assumed:
-the chunk length and compressor come out of the ``CompressionInfo.db``
-component (see ``read-compression-info.py``), the sizes out of ``stat``, the
-sha256 out of the file itself. A DDL string in a manifest is documentation; the
-CompressionInfo header is the fact.
+
+* sizes come from ``stat``, the sha256 from hashing the file itself;
+* the compressor / chunk length / chunk count come out of the
+  ``CompressionInfo.db`` header (see ``read-compression-info.py``) -- NOT out of
+  the table DDL, which a later ALTER or a Cassandra-side clamp could make a lie;
+* the row count comes from Cassandra's OWN ``sstablemetadata`` reading
+  ``Statistics.db`` (``totalRows``), run in a throwaway memory-capped container.
+
+The row count is FAIL-CLOSED: if ``totalRows`` cannot be read back, the script
+errors out rather than recording an unobserved number (a counter not observed is
+an error, never a fabricated 0).
 
 Usage:
     write-perf-corpus-manifest.py --corpus-root DIR --keyspace KS --image IMG \
-        --table=<name>:<published-sstable-dir> [--table=...]
+        --table=<name>:<published-sstable-dir> [--table=...] [--out FILE]
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -64,30 +72,143 @@ def one_component(sstable_dir: str, suffix: str) -> str:
     return hits[0]
 
 
-def describe_table(keyspace: str, table: str, image_container: str | None) -> str | None:
-    """Best-effort live DDL read; the manifest records it verbatim when available."""
-    if not image_container:
-        return None
-    try:
-        out = subprocess.run(
-            ["sudo", "-n", "docker", "exec", image_container, "cqlsh", "-e",
-             f"DESCRIBE TABLE {keyspace}.{table};"],
-            capture_output=True, text=True, timeout=120,
+SSTABLEMETADATA = "/opt/cassandra/tools/bin/sstablemetadata"
+
+
+def sstable_metadata(data_db: str, image: str, docker: list[str], mem: str) -> dict:
+    """Read ``Statistics.db`` back with Cassandra's own offline ``sstablemetadata``.
+
+    Runs in a throwaway container with the SSTable directory bind-mounted
+    read-only, memory-capped, and with a small heap: the tool only reads the tiny
+    Statistics component, so it must never be allowed to grow into the host's
+    memory (see ``perf-run-contained.sh`` for why that matters on this corpus).
+    """
+    sstable_dir = os.path.dirname(os.path.abspath(data_db))
+    cmd = [
+        *docker, "run", "--rm",
+        "--memory", mem, "--memory-swap", mem,
+        "-e", "MAX_HEAP_SIZE=1G", "-e", "HEAP_NEWSIZE=256M",
+        "-v", f"{sstable_dir}:/data:ro",
+        "--entrypoint", SSTABLEMETADATA, image,
+        f"/data/{os.path.basename(data_db)}",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    text = proc.stdout
+    rows = re.search(r"^totalRows:\s*(\d+)\s*$", text, re.M)
+    if not rows:
+        raise SystemExit(
+            f"could not read totalRows from sstablemetadata for {data_db}\n"
+            f"  exit={proc.returncode}\n  stderr={proc.stderr.strip()[:2000]}"
         )
-        return out.stdout.strip() or None
-    except Exception:
-        return None
+
+    def _int(pattern: str) -> int | None:
+        m = re.search(pattern, text, re.M)
+        return int(m.group(1)) if m else None
+
+    def _str(pattern: str) -> str | None:
+        m = re.search(pattern, text, re.M)
+        return m.group(1).strip() if m else None
+
+    # Partition count = the sum of the "Partition Size:" histogram bucket counts.
+    # Rendered as "   <size> (<human>) | <count> (<pct>) OOO..." under that header.
+    partitions = None
+    in_hist = False
+    for line in text.splitlines():
+        if line.startswith("Partition Size:"):
+            in_hist = True
+            continue
+        if in_hist:
+            if line.strip().startswith("Percentiles") or not line.startswith("   "):
+                break
+            bucket = re.match(r"\s*\d+.*?\|\s*(\d+)\s", line)
+            if bucket:
+                partitions = (partitions or 0) + int(bucket.group(1))
+    return {
+        "source": f"cassandra sstablemetadata ({image}) reading Statistics.db",
+        "total_rows": int(rows.group(1)),
+        "total_columns_set": _int(r"^totalColumnsSet:\s*(\d+)\s*$"),
+        "partition_count": partitions,
+        "partitioner": _str(r"^Partitioner:\s*(\S+)\s*$"),
+        "cassandra_compression_ratio": _str(r"^Compression ratio:\s*(\S+)\s*$"),
+        "sstable_level": _int(r"^SSTable Level:\s*(\d+)\s*$"),
+        "estimated_droppable_tombstones": _str(
+            r"^Estimated droppable tombstones:\s*(\S+)\s*$"
+        ),
+    }
+
+
+def table_ddl(keyspace: str, table: str, sstable_dir: str,
+              container: str | None, ddl_file: str | None) -> dict:
+    """DDL for the manifest: prefer a live DESCRIBE, else the captured schema.cql.
+
+    The DDL is documentation -- the CompressionInfo header remains the fact --
+    so the source is recorded alongside it rather than silently interchanged.
+    """
+    if container:
+        try:
+            out = subprocess.run(
+                ["sudo", "-n", "docker", "exec", container, "cqlsh", "-e",
+                 f"DESCRIBE TABLE {keyspace}.{table};"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return {"source": f"live cqlsh DESCRIBE in container {container}",
+                        "text": out.stdout.strip()}
+        except Exception:
+            pass
+
+    path = ddl_file or os.path.join(sstable_dir, "schema.cql")
+    if os.path.exists(path):
+        with open(path) as fh:
+            captured = fh.read()
+        # Pull just this table's CREATE TABLE statement out of the captured file.
+        # It ends at the first line-final ';' (the statement runs "CREATE TABLE
+        # ks.t (...) WITH ... AND ...;", so the ')' is NOT the terminator).
+        stmt = re.search(
+            rf"^CREATE TABLE {re.escape(keyspace)}\.{re.escape(table)} \(.*?;[ \t]*$",
+            captured, re.M | re.S,
+        )
+        return {
+            "source": (
+                f"{os.path.basename(path)} captured at generation time "
+                "(alongside the SSTable components)"
+            ),
+            "text": (stmt.group(0) if stmt else captured).strip(),
+            "extracted_statement": stmt is not None,
+        }
+    return {"source": "unavailable", "text": None, "extracted_statement": False}
+
+
+def keyspace_ddl(keyspace: str, sstable_dirs: list[str]) -> str | None:
+    """The CREATE KEYSPACE statement from the first captured schema.cql we find."""
+    for sstable_dir in sstable_dirs:
+        path = os.path.join(sstable_dir, "schema.cql")
+        if not os.path.exists(path):
+            continue
+        with open(path) as fh:
+            stmt = re.search(
+                rf"^CREATE KEYSPACE {re.escape(keyspace)} .*?;[ \t]*$",
+                fh.read(), re.M | re.S,
+            )
+        if stmt:
+            return stmt.group(0).strip()
+    return None
 
 
 def build_table_record(keyspace: str, table: str, sstable_dir: str,
-                       container: str | None) -> dict:
-    components = {}
+                       container: str | None, image: str, docker: list[str],
+                       mem: str, ddl_file: str | None,
+                       corpus_root: str) -> dict:
+    # SSTable components only ("<version>-<gen>-<size>-<Component>"). Anything
+    # else in the directory (a captured schema.cql, a stray tool artifact) is
+    # listed separately so it can never masquerade as part of the SSTable.
+    components, other_files = {}, {}
     for entry in sorted(os.listdir(sstable_dir)):
-        components[entry] = os.path.getsize(os.path.join(sstable_dir, entry))
+        size = os.path.getsize(os.path.join(sstable_dir, entry))
+        target = components if re.match(r"^[a-z]{2}-\d+-big-", entry) else other_files
+        target[entry] = size
 
-    suffixes = sorted(
-        {e.split("-", 3)[-1] for e in components if e.startswith("nb-")}
-    )
+    suffixes = sorted({e.split("-", 3)[-1] for e in components})
     missing = [c for c in EXPECTED_COMPONENTS if c not in suffixes]
 
     data_db = one_component(sstable_dir, "Data.db")
@@ -96,15 +217,29 @@ def build_table_record(keyspace: str, table: str, sstable_dir: str,
 
     data_size = os.path.getsize(data_db)
     uncompressed = ci["uncompressed_data_length_bytes"]
+    stats = sstable_metadata(data_db, image, docker, mem)
+    sstable_count = len(glob.glob(os.path.join(sstable_dir, "*-Data.db")))
 
     return {
         "table": table,
-        "sstable_dir": sstable_dir,
+        "keyspace_table": f"{keyspace}.{table}",
+        # Recorded relative to corpus_root: the manifest is committed and must not
+        # pin one machine's absolute layout.
+        "sstable_dir": os.path.relpath(os.path.abspath(sstable_dir),
+                                       os.path.abspath(corpus_root)),
         "sstable_basename": os.path.basename(data_db).rsplit("-Data.db", 1)[0],
-        "format": "nb (BIG, Cassandra 5.0 default storage_compatibility_mode=CASSANDRA_4)",
-        "data_db_count": len(glob.glob(os.path.join(sstable_dir, "*-Data.db"))),
+        "format": "nb",
+        "format_detail": (
+            "nb = BIG, Cassandra 5.0 default storage_compatibility_mode=CASSANDRA_4"
+        ),
+        "sstable_count": sstable_count,
+        "single_sstable": sstable_count == 1,
+        "data_db_count": sstable_count,
+        "rows": stats["total_rows"],
+        "statistics": stats,
         "components": components,
         "missing_components": missing,
+        "non_component_files": other_files,
         "data_db_bytes": data_size,
         "data_db_gib": round(data_size / 1024**3, 3),
         "data_db_sha256": sha256_of(data_db),
@@ -120,7 +255,7 @@ def build_table_record(keyspace: str, table: str, sstable_dir: str,
                 round(data_size / uncompressed, 6) if uncompressed else None
             ),
         },
-        "ddl": describe_table(keyspace, table, container),
+        "ddl": table_ddl(keyspace, table, sstable_dir, container, ddl_file),
     }
 
 
@@ -129,17 +264,31 @@ def main() -> int:
     ap.add_argument("--corpus-root", required=True)
     ap.add_argument("--keyspace", required=True)
     ap.add_argument("--image", required=True)
-    ap.add_argument("--container", default="cqlite-perf3068")
+    ap.add_argument("--container", default=None,
+                    help="live container for a DESCRIBE TABLE read (optional; "
+                         "schema.cql is used when absent or unreachable)")
+    ap.add_argument("--docker", default="sudo -n docker",
+                    help="docker invocation (default: 'sudo -n docker')")
+    ap.add_argument("--metadata-mem", default="3g",
+                    help="memory cap for the throwaway sstablemetadata container")
     ap.add_argument("--rows-per-partition", type=int, default=10)
     ap.add_argument("--table", action="append", default=[],
                     help="<table-name>:<published sstable dir>")
+    ap.add_argument("--ddl-file", default=None,
+                    help="schema.cql to source DDL from (default: "
+                         "<sstable-dir>/schema.cql)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    tables = []
+    docker = args.docker.split()
+    tables, sstable_dirs = [], []
     for spec in args.table:
         name, _, path = spec.partition(":")
-        tables.append(build_table_record(args.keyspace, name, path, args.container))
+        sstable_dirs.append(path)
+        tables.append(build_table_record(
+            args.keyspace, name, path, args.container, args.image, docker,
+            args.metadata_mem, args.ddl_file, args.corpus_root,
+        ))
 
     manifest = {
         "issue": 3068,
@@ -158,9 +307,26 @@ def main() -> int:
         ),
         "cassandra_image": args.image,
         "keyspace": args.keyspace,
+        "keyspace_ddl": keyspace_ddl(args.keyspace, sstable_dirs),
         "rows_per_partition": args.rows_per_partition,
         "corpus_root": args.corpus_root,
         "datasets_root_usage": f"CQLITE_DATASETS_ROOT={args.corpus_root}",
+        "corpus_committed": False,
+        "corpus_note": (
+            "The corpus itself is multi-GB and is NOT committed. Regenerate it with "
+            "the generator above, then re-run this script to reproduce this manifest; "
+            "the Data.db sha256 recorded per table is the reproducibility check."
+        ),
+        "provenance": {
+            "sizes": "os.stat of each component file",
+            "data_db_sha256": "sha256 of the Data.db bytes",
+            "compression": "CompressionInfo.db header (authoritative, not the DDL)",
+            "rows": (
+                "Cassandra sstablemetadata totalRows (Statistics.db); fail-closed, "
+                "never a fabricated 0"
+            ),
+            "ddl": "recorded per table with its own source field",
+        },
         "tables": tables,
     }
 
@@ -172,11 +338,12 @@ def main() -> int:
     for t in tables:
         c = t["compression"]
         print(
-            f"[manifest] {t['table']}: Data.db {t['data_db_bytes']} B "
-            f"({t['data_db_gib']} GiB), {c['compressor']} "
-            f"chunk_length={c['chunk_length_bytes']} B, "
+            f"[manifest] {t['table']}: rows={t['rows']}, "
+            f"Data.db {t['data_db_bytes']} B ({t['data_db_gib']} GiB), "
+            f"{c['compressor']} chunk_length={c['chunk_length_bytes']} B, "
             f"ratio={c['compression_ratio_on_disk_over_logical']}, "
-            f"sstables={t['data_db_count']}, missing_components={t['missing_components']}"
+            f"sstables={t['sstable_count']}, "
+            f"missing_components={t['missing_components']}"
         )
     return 0
 

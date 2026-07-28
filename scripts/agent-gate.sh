@@ -241,6 +241,11 @@
 #                      copy; proves non-vacuity by mutating the copy (shifted value,
 #                      invented name, dropped row) and fails closed on a moved
 #                      decoder source or a reformatted-away table.
+#                      Also runs (no python3/sudo/systemd needed)
+#                      scripts/tests/test_perf_run_contained.sh (#3068) — pins the
+#                      --mem/--swap validation of the perf-corpus containment wrapper
+#                      test-data/scripts/perf-run-contained.sh, whose misparsed cap
+#                      would mean a hung host rather than a killed process.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -4624,6 +4629,25 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_check_skill_flag_tables.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (skill flag-table drift guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # perf-run-contained argument-safety guard (#3068): no python3/sudo/systemd
+  # needed, always runs (the wrapper's --check-args hook executes nothing). Pins
+  # the --mem/--swap validation of test-data/scripts/perf-run-contained.sh: that
+  # wrapper is the containment around multi-GB perf-corpus reads after an
+  # uncontained one hard-hung a swapless host for 75 minutes, so a silently
+  # misparsed cap is a host-availability bug, not a usability nit. A failure FAILs
+  # the component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_perf_run_contained.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_perf_run_contained.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (perf-run-contained arg-safety guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

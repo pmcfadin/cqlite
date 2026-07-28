@@ -9,7 +9,10 @@ Cassandra-side clamp, would make the DDL a lie). Per
 (and docs/sstables-definitive-guide/chapters/09-compressioninfo-and-chunking.md,
 "CompressionInfo.db Format (serialization exactness)") the layout is:
 
-    UTF   compressor class name                   (2-byte length + modified-UTF8)
+    UTF   compressor SIMPLE class name            (2-byte length + modified-UTF8;
+                                                   e.g. "LZ4Compressor", NOT the
+                                                   fully-qualified org.apache... name
+                                                   that Statistics.db records)
     int   option count
       UTF key / UTF value  (option count times)
     int   chunk length (uncompressed bytes per chunk)

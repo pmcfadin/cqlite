@@ -22,6 +22,12 @@ See `docs/profiling.md`.
 FD/RSS resource-leak soak (long-running open/scan/drop loop): see
 `docs/development/soak-resource-leak.md`.
 
+Measuring against a **multi-GB** corpus (cold/warm scans, large-I/O work): generate it with
+`test-data/scripts/gen-perf-corpus-3068.sh` and run every measurement through
+`test-data/scripts/perf-run-contained.sh` — an *uncontained* cold read of an 8 GiB mmap'd `Data.db`
+hard-hung a swapless host for 75 minutes with no OOM kill. See
+`docs/development/perf-corpus-and-containment.md`.
+
 ## CLI
 
 ```bash
