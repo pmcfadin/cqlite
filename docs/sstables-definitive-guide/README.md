@@ -11,6 +11,26 @@ This directory contains the evolving manuscript for our SSTables reference in th
 
 Contributions: keep chapters under ~300-600 lines; split when larger.
 
+## Adding a new chapter or appendix — it is NOT published until registered
+
+Creating a file under `chapters/` does **not** publish it to the docs site. The published set is the
+hardcoded `CHAPTERS` array in `website/scripts/sync-format-guide.mjs`; a chapter absent from it is
+simply never synced. Four appendices were silently unpublished this way (issue #3006).
+
+To publish a new chapter or appendix:
+
+1. Add a `{ file, order, prefix }` entry to the `CHAPTERS` array in
+   `website/scripts/sync-format-guide.mjs`.
+2. Add it to the chapter/appendix list below, so the guide's own front door matches the site.
+
+If a file must deliberately stay off the site, register it in that script's
+`UNPUBLISHED_BY_DESIGN` map with a reason instead.
+
+Either way you will be told: the sync script runs as the website `prebuild` and **exits 1** on an
+unregistered chapter (as well as on a stale exclusion, a doubly-listed file, a missing source, or a
+duplicate prefix), so an unregistered chapter now fails the build rather than vanishing quietly. Do
+not work around the guard — register the chapter.
+
 ## Chapters
 
 - 01 — [What Are SSTables?](chapters/01-what-are-sstables.md)
