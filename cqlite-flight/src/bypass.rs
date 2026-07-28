@@ -49,17 +49,17 @@
 use std::sync::Arc;
 
 use cqlite_core::schema::TableSchema;
+use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::sstable::reader::{
     QueryRowBatch, QueryRowStream, SSTableReader, ScanTokenBound,
 };
-use cqlite_core::storage::scan_cancel::ScanCancel;
 use cqlite_core::storage::write_engine::DecoratedKey;
 use cqlite_core::types::ScanRow;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_core::RowKey;
 
 use crate::producer::ProducerError;
-use crate::producer_stream::{PendingRow, RowSource, SourceStep};
+use crate::row_source::{PendingRow, RowSource, SourceStep};
 
 /// The forced-path override environment variable (see the module docs).
 pub const MERGE_PATH_ENV: &str = "CQLITE_FLIGHT_MERGE_PATH";
@@ -296,11 +296,26 @@ mod tests {
     fn forced_path_parse_is_total() {
         assert_eq!(ForcedMergePath::parse(None), ForcedMergePath::Auto);
         assert_eq!(ForcedMergePath::parse(Some("")), ForcedMergePath::Auto);
-        assert_eq!(ForcedMergePath::parse(Some("nonsense")), ForcedMergePath::Auto);
-        assert_eq!(ForcedMergePath::parse(Some("bypass")), ForcedMergePath::Bypass);
-        assert_eq!(ForcedMergePath::parse(Some(" BYPASS ")), ForcedMergePath::Bypass);
-        assert_eq!(ForcedMergePath::parse(Some("merge")), ForcedMergePath::Merge);
-        assert_eq!(ForcedMergePath::parse(Some("Merge")), ForcedMergePath::Merge);
+        assert_eq!(
+            ForcedMergePath::parse(Some("nonsense")),
+            ForcedMergePath::Auto
+        );
+        assert_eq!(
+            ForcedMergePath::parse(Some("bypass")),
+            ForcedMergePath::Bypass
+        );
+        assert_eq!(
+            ForcedMergePath::parse(Some(" BYPASS ")),
+            ForcedMergePath::Bypass
+        );
+        assert_eq!(
+            ForcedMergePath::parse(Some("merge")),
+            ForcedMergePath::Merge
+        );
+        assert_eq!(
+            ForcedMergePath::parse(Some("Merge")),
+            ForcedMergePath::Merge
+        );
     }
 
     /// A zero-source set is not a single source (the caller returns before this,
@@ -351,7 +366,9 @@ mod tests {
 
     /// Open ONE real reader over a single-SSTable fixture, so the predicate is
     /// exercised against genuine reader metadata rather than a stub.
-    fn open_readers(batches: Vec<Vec<cqlite_core::storage::write_engine::Mutation>>) -> (tempfile::TempDir, Vec<Arc<SSTableReader>>) {
+    fn open_readers(
+        batches: Vec<Vec<cqlite_core::storage::write_engine::Mutation>>,
+    ) -> (tempfile::TempDir, Vec<Arc<SSTableReader>>) {
         use crate::testutil::{build_sstables, simple_schema};
         let schema = simple_schema();
         let (temp, _data, table_dir) = build_sstables(&schema, batches);
@@ -394,12 +411,7 @@ mod tests {
         let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
         assert_eq!(readers.len(), 1, "the fixture is exactly one generation");
         assert_eq!(
-            bypass_reason(
-                &readers,
-                &simple_schema(),
-                ForcedMergePath::Auto,
-                false
-            ),
+            bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false),
             BypassReason::Selected
         );
     }

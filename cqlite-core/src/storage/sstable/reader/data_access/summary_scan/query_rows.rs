@@ -57,11 +57,11 @@ use std::ops::ControlFlow;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 
+use super::super::super::SSTableReader;
+use super::super::full_index_stream::FullIndexStreamOutcome;
 use super::ScanTokenBound;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::scan_stream_windowed::scan_admission::ScanAdmission;
-use super::super::full_index_stream::FullIndexStreamOutcome;
-use super::super::super::SSTableReader;
 use crate::types::ScanRow;
 use crate::{Error, Result, RowKey};
 
@@ -162,8 +162,13 @@ impl SSTableReader {
                     let _ = sender.send(Err(e));
                 }
             })
-            .map_err(|e| Error::Storage(format!("query row stream: failed to spawn thread: {e}")))?;
-        Ok(QueryRowStream { rx, cancel: scan_cancel })
+            .map_err(|e| {
+                Error::Storage(format!("query row stream: failed to spawn thread: {e}"))
+            })?;
+        Ok(QueryRowStream {
+            rx,
+            cancel: scan_cancel,
+        })
     }
 
     /// Whether this reader has the components the single-generation streaming
@@ -237,12 +242,7 @@ async fn drive_query_rows(
     // walks report `FellBack` only BEFORE their first emit, so nothing has been
     // handed to the consumer at this point.
     let outcome = reader
-        .stream_all_partitions_via_full_index(
-            scan_cancel,
-            Some(now_secs),
-            Some(&schema),
-            &mut emit,
-        )
+        .stream_all_partitions_via_full_index(scan_cancel, Some(now_secs), Some(&schema), &mut emit)
         .await?;
     if matches!(outcome, FullIndexStreamOutcome::Streamed) {
         return sink.finish();

@@ -651,16 +651,20 @@ impl SSTableReader {
                         return Err(e);
                     }
                 };
-                let entries =
-                    match self.parse_block_entries_at_now(&block, schema.as_ref(), true, now_secs) {
-                        Ok(entries) => entries,
-                        Err(e) => {
-                            if !batch.is_empty() {
-                                let _ = tx.send(Ok(std::mem::take(&mut batch))).await;
-                            }
-                            return Err(e);
+                let entries = match self.parse_block_entries_at_now(
+                    &block,
+                    schema.as_ref(),
+                    true,
+                    now_secs,
+                ) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        if !batch.is_empty() {
+                            let _ = tx.send(Ok(std::mem::take(&mut batch))).await;
                         }
-                    };
+                        return Err(e);
+                    }
+                };
                 for (entry_table_id, entry_key, entry_value) in entries {
                     if !table_ids_match(&entry_table_id, &table_id) {
                         continue;

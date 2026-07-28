@@ -43,6 +43,9 @@ pub mod producer;
 mod producer_point;
 mod producer_stream;
 mod producer_warm;
+// The arm-independent ROW SOURCE seam shared by the k-way merge arm and the
+// single-generation bypass arm (issue #3058).
+mod row_source;
 pub mod saturation;
 pub mod scan_progress;
 pub mod service;

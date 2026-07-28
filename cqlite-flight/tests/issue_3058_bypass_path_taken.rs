@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
 use arrow::array::{Array, Int32Array, StringArray};
 use arrow::record_batch::RecordBatch;
@@ -45,7 +45,7 @@ use cqlite_flight::bypass::MERGE_PATH_ENV;
 use cqlite_flight::service::CqliteFlightService;
 
 /// Serializes the process-global probe/env window (see the module doc).
-static PROBE_LOCK: Mutex<()> = Mutex::new(());
+static PROBE_LOCK: Mutex<()> = Mutex::const_new(());
 
 const KS: &str = "bypass_ks";
 const TBL: &str = "rows";
@@ -155,6 +155,9 @@ fn ticket_bytes() -> Vec<u8> {
 }
 
 /// Drain a `do_get` into `(pk, ck) -> v` rows.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_rows(svc: &CqliteFlightService, ticket: Vec<u8>) -> BTreeMap<(i32, i32), String> {
     let resp = svc
         .do_get(Request::new(Ticket::new(ticket)))
@@ -211,7 +214,7 @@ impl Drop for ForcedPath {
 /// false`) — while still returning every live row.
 #[tokio::test]
 async fn single_source_do_get_neither_merges_nor_reconciles() {
-    let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = PROBE_LOCK.lock().await;
     std::env::remove_var(MERGE_PATH_ENV);
     let (_temp, data_dir) = build_generations(vec![vec![
         write(1, 1, "a", 100),
@@ -262,7 +265,7 @@ async fn single_source_do_get_neither_merges_nor_reconciles() {
 /// the only multi-generation oracle coverage on this surface.
 #[tokio::test]
 async fn two_overlapping_sstables_enter_the_merger_and_reconcile() {
-    let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = PROBE_LOCK.lock().await;
     std::env::remove_var(MERGE_PATH_ENV);
     let (_temp, data_dir) = build_generations(vec![
         // Generation 1 (older).
@@ -314,13 +317,15 @@ async fn two_overlapping_sstables_enter_the_merger_and_reconcile() {
 /// generations.
 #[tokio::test]
 async fn token_pruning_to_one_source_still_selects_the_fast_path() {
-    let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = PROBE_LOCK.lock().await;
     std::env::remove_var(MERGE_PATH_ENV);
     // pk=1 in generation 1, pk=2 in generation 2 — no partition overlap, so each
     // generation's endpoint-token span covers exactly its own partition.
-    let (_temp, data_dir) =
-        build_generations(vec![vec![write(1, 1, "gen1", 100)], vec![write(2, 1, "gen2", 100)]])
-            .await;
+    let (_temp, data_dir) = build_generations(vec![
+        vec![write(1, 1, "gen1", 100)],
+        vec![write(2, 1, "gen2", 100)],
+    ])
+    .await;
     assert_eq!(count_data_dbs(&data_dir), 2, "two generations on disk");
 
     // The authoritative token of each partition key: a single `int` partition key
@@ -355,6 +360,9 @@ async fn token_pruning_to_one_source_still_selects_the_fast_path() {
     assert_eq!(delta.reconcile_entries, 0);
 }
 
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 /// Spec R7: a client that stops reading mid-stream stops the fast path's scan —
 /// the response stream is dropped and the request ends without draining the
 /// table. Pinned on the OBSERVED completion of the drop (no timing threshold in
@@ -362,7 +370,7 @@ async fn token_pruning_to_one_source_still_selects_the_fast_path() {
 /// and no further rows are delivered after the drop.
 #[tokio::test]
 async fn fast_arm_stream_stops_when_the_client_drops_it() {
-    let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = PROBE_LOCK.lock().await;
     std::env::remove_var(MERGE_PATH_ENV);
     // Enough partitions that a full drain would be many batches at batch_size 1.
     let rows: Vec<_> = (0..200).map(|i| write(i, 1, "v", 100)).collect();
@@ -379,7 +387,11 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
     let mapped = resp.map(|r| r.map_err(|e| FlightError::ExternalError(Box::new(e))));
     let mut stream = FlightRecordBatchStream::new_from_flight_data(mapped);
     // Take ONE batch, then drop the stream mid-flight.
-    let first = stream.next().await.expect("a first batch").expect("decodes");
+    let first = stream
+        .next()
+        .await
+        .expect("a first batch")
+        .expect("decodes");
     assert!(first.num_rows() > 0, "the first batch carries rows");
     drop(stream);
     let delta = ReadPathProbe::snapshot().delta_since(&before);
@@ -394,7 +406,7 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
 /// rows it returns are the same ones the fast arm returns.
 #[tokio::test]
 async fn forced_merge_puts_a_single_source_back_on_the_merge_arm() {
-    let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = PROBE_LOCK.lock().await;
     let (_temp, data_dir) = build_generations(vec![vec![
         write(1, 1, "a", 100),
         write(1, 2, "b", 100),

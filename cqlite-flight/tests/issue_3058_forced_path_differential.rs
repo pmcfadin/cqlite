@@ -144,6 +144,9 @@ fn ticket_json(keyspace: &str, table: &str, ddl: &str) -> serde_json::Value {
 /// Drain `do_get` into ordered rows (the emit ORDER is part of the comparison)
 /// plus each emitted batch's row count, so a batching-budget case can compare
 /// the batch BOUNDARIES across arms too.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size; boxing
+// it (clippy's suggestion) would break the flight decoder stream API (#2856).
+#[allow(clippy::result_large_err)]
 async fn do_get_rows_and_batches(
     svc: &CqliteFlightService,
     ticket: &serde_json::Value,
@@ -472,7 +475,9 @@ async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
             T_BASE_MICROS,
         ))
         .unwrap();
-    engine.write(write_v(1, 4, "doomed", T_BASE_MICROS)).unwrap();
+    engine
+        .write(write_v(1, 4, "doomed", T_BASE_MICROS))
+        .unwrap();
     engine
         .write(base(
             1,
@@ -483,9 +488,15 @@ async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
         .unwrap();
 
     // pk=2: rows covered by a RANGE tombstone plus one outside it.
-    engine.write(write_v(2, 10, "rt-covered", T_BASE_MICROS)).unwrap();
-    engine.write(write_v(2, 11, "rt-covered", T_BASE_MICROS)).unwrap();
-    engine.write(write_v(2, 99, "rt-survivor", T_BASE_MICROS)).unwrap();
+    engine
+        .write(write_v(2, 10, "rt-covered", T_BASE_MICROS))
+        .unwrap();
+    engine
+        .write(write_v(2, 11, "rt-covered", T_BASE_MICROS))
+        .unwrap();
+    engine
+        .write(write_v(2, 99, "rt-survivor", T_BASE_MICROS))
+        .unwrap();
     let mut rt = Mutation::new(
         TableId::new(KS, TBL),
         PartitionKey::single("pk", Value::Integer(2)),
@@ -649,7 +660,8 @@ async fn forced_path_differential_agrees_on_every_shape() {
     // (3) Predicate pushdown + projection + a token range on the fast arm.
     let mut projected = ticket_json(KS, TBL, DDL);
     projected["columns"] = serde_json::json!(["pk", "ck"]);
-    projected["predicates"] = serde_json::json!([{ "column": "v", "op": "Equal", "value": "live" }]);
+    projected["predicates"] =
+        serde_json::json!([{ "column": "v", "op": "Equal", "value": "live" }]);
     let _ = assert_arms_agree(
         "shapes/predicate+projection",
         &svc,
@@ -683,9 +695,7 @@ async fn forced_path_differential_agrees_on_every_shape() {
         ));
     }
     if bypass_delta.mergers_built != 0 {
-        failures.push(
-            "a token-scoped single-source scan must still take the fast arm".to_string(),
-        );
+        failures.push("a token-scoped single-source scan must still take the fast arm".to_string());
     }
 
     // (4) A byte-capped stream: the cap must hold on the fast arm and the rows

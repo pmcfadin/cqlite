@@ -545,14 +545,17 @@ impl SSTableReader {
                 // `V5_0Uncompressed` model: read-shadowing rows adapted to
                 // CompactionRow (row_timestamp 0), matching the non-stitching
                 // compaction stream's emit exactly.
-                self.stream_partitions_summary_guided(scan_cancel, token_bound, None, schema, &mut |(
-                    k,
-                    v,
-                )| {
-                    let row =
-                        super::super::compaction_row::CompactionRow::from_legacy_value(k, v, 0);
-                    emit(row)
-                })
+                self.stream_partitions_summary_guided(
+                    scan_cancel,
+                    token_bound,
+                    None,
+                    schema,
+                    &mut |(k, v)| {
+                        let row =
+                            super::super::compaction_row::CompactionRow::from_legacy_value(k, v, 0);
+                        emit(row)
+                    },
+                )
                 .await?
             };
             if matches!(outcome, FullIndexStreamOutcome::Streamed) {
