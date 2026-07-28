@@ -58,7 +58,10 @@ through three phases, restarting the container between phases to change format:
 After regeneration:
 
 ```bash
-# Smoke-test 39 tables (nb=33 + oa=6; da=3 currently SKIP-PENDING BTI)
+# Smoke-test the whole corpus. The table set is ENUMERATED FROM DISK per run
+# (issue #1229 retired the hand-typed allowlist) — never hard-code a count.
+# Enforced scope + skip-pending keyspaces: test-data/validation-matrix.md
+#                                          test-data/corpus-coverage-policy.md
 bash test-data/scripts/smoke-test-all-tables.sh
 
 # Package as release tarball
@@ -94,7 +97,8 @@ bash test-data/scripts/shutdown-clean.sh
 
 ### start-clean.sh
 
-Starts `cassandra-5-0` via compose, waits for health, applies schemas from
+Starts the `cqlite-cassandra-5-0` container via
+`test-data/docker/docker-compose-cassandra5.yml`, waits for health, applies schemas from
 `schemas/core.list`.
 
 ```bash
