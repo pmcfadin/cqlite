@@ -41,6 +41,24 @@ pub(crate) enum SourceStep {
     Row(DecoratedKey, PendingRow),
     /// A partition boundary carrying no row (an empty/all-purged partition that
     /// still counts as scanned on the merge arm).
+    ///
+    /// KNOWN ACCOUNTING DIFFERENCE between the arms (issue #3058, roborev;
+    /// tracked for closure by #3098). Only the MERGE source emits this: the k-way
+    /// merger surfaces `StreamingStep::PartitionEnd` for a partition whose rows
+    /// were all suppressed (a partition deletion, a range tombstone, expired
+    /// TTLs), so `drive_row_source` calls `meter.record_partition()` for it. The
+    /// single-generation scan source CANNOT: the walk emits only SURVIVING rows,
+    /// so a fully-suppressed partition produces no message at all and the source
+    /// never learns it existed — surfacing it would need a new
+    /// partition-boundary signal threaded out of two core walks.
+    ///
+    /// Consequence, stated rather than left silent: `ScanProgress`'s
+    /// `partitions_scanned` can be LOWER on the fast arm than on the merge arm by
+    /// exactly the number of fully-suppressed partitions. `rows_scanned` is
+    /// UNAFFECTED (it counts materialized rows, and a suppressed partition
+    /// materializes none) and no emitted row, value or order differs — this is a
+    /// progress-counter difference only. Pinned by
+    /// `bypass::tests::progress_accounting_difference_between_the_arms_is_the_documented_one`.
     PartitionEnd(DecoratedKey),
     /// The source is exhausted.
     Complete,

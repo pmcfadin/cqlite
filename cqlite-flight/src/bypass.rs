@@ -717,6 +717,97 @@ mod tests {
         }
     }
 
+    /// Roborev (issue #3058): the ONE accounting difference between the arms is
+    /// the documented one — a fully-suppressed partition is counted as scanned by
+    /// the merge arm (it arrives as `StreamingStep::PartitionEnd`) and not by the
+    /// fast arm (the walk emits only surviving rows, so the source never learns
+    /// the partition existed; see `SourceStep::PartitionEnd`'s doc). Everything
+    /// else must match: the emitted rows AND the examined-row progress counter.
+    ///
+    /// Drives both arms DIRECTLY (no env mutation) so this cannot race a sibling
+    /// lib test.
+    #[test]
+    fn progress_accounting_difference_between_the_arms_is_the_documented_one() {
+        use crate::producer::{CollectSink, MergeProducer};
+        use crate::scan_progress::ScanProgress;
+        use crate::testutil::{simple_schema, total_rows, write_row};
+        use cqlite_core::storage::write_engine::KWayMerger;
+
+        // pk=1 survives; pk=2 is written and then row-deleted in the SAME
+        // generation, so it is a partition that exists on disk and yields NO row.
+        let schema = simple_schema();
+        let (_temp, readers) = open_readers(vec![vec![
+            write_row(1, "a", 10, 100),
+            crate::testutil::write_row(2, "gone", 20, 100),
+            crate::testutil::delete_row(2, 200),
+        ]]);
+        let producer = MergeProducer::new(schema.clone(), 1024).expect("producer");
+        let cancel = crate::cancel::CancelFlag::new();
+
+        // FAST arm, driven directly.
+        let fast_progress = ScanProgress::default();
+        let mut fast_batches = Vec::new();
+        {
+            let mut source = ScanRowSource::open(
+                Arc::clone(&readers[0]),
+                schema.clone(),
+                None,
+                1_700_000_000,
+                cancel.scan_cancel(),
+            )
+            .expect("source opens")
+            .expect("this fixture is servable by the fast path");
+            let mut sink = CollectSink(&mut fast_batches);
+            producer
+                .drive_row_source(
+                    &mut source,
+                    &cancel,
+                    &mut sink,
+                    &fast_progress,
+                    cqlite_core::query::AccessPath::FullScan.label(),
+                )
+                .expect("fast arm drives");
+        }
+
+        // MERGE arm, driven directly over the SAME reader.
+        let merge_progress = ScanProgress::default();
+        let mut merge_batches = Vec::new();
+        {
+            let mut merger =
+                KWayMerger::new_from_readers(readers.clone(), &schema, cancel.scan_cancel(), None)
+                    .expect("merger builds")
+                    .with_now_secs(Some(1_700_000_000));
+            let mut sink = CollectSink(&mut merge_batches);
+            producer
+                .drive_merge_over(
+                    &mut merger,
+                    &cancel,
+                    &mut sink,
+                    &merge_progress,
+                    cqlite_core::query::AccessPath::FullScan.label(),
+                )
+                .expect("merge arm drives");
+        }
+
+        assert_eq!(
+            total_rows(&fast_batches),
+            total_rows(&merge_batches),
+            "the suppressed partition must not surface on EITHER arm, and the \
+             surviving row must surface on both"
+        );
+        assert_eq!(
+            total_rows(&fast_batches),
+            1,
+            "exactly the one live partition's row survives"
+        );
+        assert_eq!(
+            fast_progress.flushed_rows(),
+            merge_progress.flushed_rows(),
+            "the EXAMINED-ROW progress counter must be arm-invariant: a suppressed \
+             partition materializes no row on either arm"
+        );
+    }
+
     /// `merge` wins over everything, including an aggregating request — it is the
     /// field kill switch and must be absolute.
     #[test]

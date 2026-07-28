@@ -36,6 +36,7 @@ use tonic::Request;
 
 use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::read_path_probe::ReadPathProbe;
+use cqlite_core::storage::sstable::work_counters;
 use cqlite_core::storage::write_engine::{
     CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
@@ -43,6 +44,15 @@ use cqlite_core::types::Value;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_flight::bypass::MERGE_PATH_ENV;
 use cqlite_flight::service::CqliteFlightService;
+
+/// Partitions in the mid-stream-cancel fixture: comfortably larger than
+/// everything the fast arm can hold in flight (`QUERY_ROWS_PER_BATCH` × the
+/// bounded channel's batches, plus the batched scan's own buffering), so
+/// "stopped early" and "drained the table" are genuinely distinguishable. At 200
+/// the whole table fitted in the in-flight buffer and the walk legitimately
+/// finished before any cancel could bite — which made the stop assertion vacuous
+/// rather than the code wrong.
+const PARTITIONS: usize = 2_000;
 
 /// Serializes the process-global probe/env window (see the module doc).
 static PROBE_LOCK: Mutex<()> = Mutex::const_new(());
@@ -377,16 +387,24 @@ async fn token_pruning_to_one_source_still_selects_the_fast_path() {
 // it (clippy's suggestion) would break the flight decoder stream API (#2856).
 #[allow(clippy::result_large_err)]
 /// Spec R7: a client that stops reading mid-stream stops the fast path's scan —
-/// the response stream is dropped and the request ends without draining the
-/// table. Pinned on the OBSERVED completion of the drop (no timing threshold in
-/// the assertion path): the test simply proves the server-side stream terminates
-/// and no further rows are delivered after the drop.
+/// the response stream is dropped and the walk STOPS instead of running the table
+/// to completion.
+///
+/// Pinned on an OBSERVED work marker, not on elapsed time and not merely on which
+/// arm ran (roborev: asserting only `mergers_built == 0` would pass even if the
+/// fast arm drained all 200 partitions after the client left). The marker is
+/// `work_counters::stream_walk_partitions_parsed()`, which counts partition BODIES
+/// decoded: after the drop it must be far below the fixture's partition count AND
+/// must stop growing.
 #[tokio::test]
 async fn fast_arm_stream_stops_when_the_client_drops_it() {
     let _guard = PROBE_LOCK.lock().await;
     std::env::remove_var(MERGE_PATH_ENV);
     // Enough partitions that a full drain would be many batches at batch_size 1.
-    let rows: Vec<_> = (0..200).map(|i| write(i, 1, "v", 100)).collect();
+    let rows: Vec<_> = (0..PARTITIONS)
+        .map(|i| write(i as i32, 1, "v", 100))
+        .collect();
+    work_counters::reset();
     let (_temp, data_dir) = build_generations(vec![rows]).await;
     assert_eq!(count_data_dbs(&data_dir), 1);
 
@@ -411,6 +429,37 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
     assert_eq!(
         delta.mergers_built, 0,
         "the cancelled request ran on the fast arm"
+    );
+
+    // THE stop assertion, on an observed work marker rather than a timing
+    // threshold: wait for the partition-body count to STABILIZE (two equal
+    // consecutive samples), then require it to be bounded below the fixture.
+    // Stabilization is a convergence check, not a deadline — a walk that keeps
+    // decoding simply never converges and the test says so. `PROBE_LOCK`
+    // serializes this file and one file = one process, so no sibling scan
+    // contributes to the counter.
+    let mut settled = work_counters::stream_walk_partitions_parsed();
+    let mut stable = false;
+    for _ in 0..2_000 {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let sample = work_counters::stream_walk_partitions_parsed();
+        if sample == settled {
+            stable = true;
+            break;
+        }
+        settled = sample;
+    }
+    assert!(
+        stable,
+        "the walk never stopped decoding partition bodies after the client dropped \
+         the stream (last sample {settled} of {PARTITIONS})"
+    );
+    assert!(
+        settled < PARTITIONS as u64,
+        "the abandoned scan must not have drained the whole fixture: decoded \
+         {settled} of {PARTITIONS} partition bodies"
     );
 }
 

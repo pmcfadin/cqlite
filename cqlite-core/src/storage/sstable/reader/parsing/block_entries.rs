@@ -116,32 +116,18 @@ impl SSTableReader {
             self.header.cassandra_version
         );
 
-        // FAIL CLOSED (roborev, issue #3058) — evaluated BEFORE any decompression
-        // because it depends only on the request posture and the HEADER's format,
-        // never on the block bytes. The `V5UncompressedOA` route below calls
-        // `parse_block_entries_with_state_machine`, which takes NEITHER
-        // `read_shadowing` NOR `now_secs` and would therefore DROP both silently:
-        // a caller that asked for SELECT-semantic shadowing, or pinned the
-        // read-time TTL clock, would get an unshadowed / wall-clock read with no
-        // signal at all. Unreachable from the single-source query path today
-        // (`V5UncompressedOA` is BTI-only and `supports_streaming_query_scan`
-        // refuses BTI readers) — but that is an implicit dependency, not a
-        // guarantee, so make it explicit instead of dropping the parameters.
-        if (read_shadowing || now_secs.is_some())
-            && matches!(
-                self.header.cassandra_version.data_format(),
-                crate::parser::header::DataFormat::V5UncompressedOA
-            )
-        {
-            return Err(Error::UnsupportedFormat(format!(
-                "parse_block_entries: {:?} routes to the state-machine decoder, which \
-                 supports neither read shadowing (requested: {read_shadowing}) nor a \
-                 caller-pinned read-time clock (requested: {}) — failing closed rather \
-                 than silently dropping them (issue #3058)",
-                self.header.cassandra_version,
-                now_secs.is_some(),
-            )));
-        }
+        // KNOWN FAIL-OPEN SEAM — issue #3108, deliberately NOT guarded here.
+        // The `V5UncompressedOA` (BTI `da`) route below calls
+        // `parse_block_entries_with_state_machine`, which takes neither
+        // `read_shadowing` nor `now_secs`, so both are silently DROPPED on that
+        // route. It is unreachable from the single-source query path today only
+        // because `supports_streaming_query_scan()` refuses BTI readers — an
+        // implicit, undocumented dependency, which #3108 owns making explicit. A
+        // guard here must NOT fire for `read_shadowing`-only callers:
+        // `run_scan_stream_batched` reaches this function with
+        // `read_shadowing = true` for BTI readers today (it lacks the BTI dispatch
+        // its siblings have — issue #3109), so refusing those would break
+        // pre-existing `da` batched scans.
 
         let mut entries = Vec::new();
 
@@ -893,58 +879,6 @@ mod tests {
     // ========================================================================
     // Group 1: Validation/Error Handling Tests
     // ========================================================================
-
-    /// Roborev (issue #3058): the state-machine branch takes NEITHER
-    /// `read_shadowing` NOR `now_secs`, so a request for either must FAIL CLOSED
-    /// rather than have the parameter silently dropped (which would give an
-    /// unshadowed / wall-clock read under a contract that promises the opposite).
-    /// Driven over a real `da`/BTI fixture, whose `DataFormat` is the
-    /// `V5UncompressedOA` that routes there.
-    #[tokio::test]
-    async fn state_machine_branch_fails_closed_on_shadowing_or_a_pinned_clock() {
-        let reader = match create_test_reader("test_da", "simple_table").await {
-            Some(r) => r,
-            None => {
-                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
-                return;
-            }
-        };
-        if !matches!(
-            reader.header.cassandra_version.data_format(),
-            crate::parser::header::DataFormat::V5UncompressedOA
-        ) {
-            eprintln!("Skipping test: fixture does not route to the state machine");
-            return;
-        }
-        // Non-empty bytes: the guard is evaluated before any parsing, but an empty
-        // block short-circuits earlier.
-        let data = vec![0x01u8, 0x02, 0x03];
-
-        for (read_shadowing, now) in [(true, None), (false, Some(1_782_950_400)), (true, Some(1))] {
-            let err = reader
-                .parse_block_entries_at_now(&data, None, read_shadowing, now)
-                .expect_err("must fail closed rather than drop the parameter");
-            let msg = err.to_string();
-            assert!(
-                msg.contains("state-machine decoder"),
-                "the error must name the unsupported route, got: {msg}"
-            );
-        }
-        // The physical posture (no shadowing, ambient clock) still parses — the
-        // guard must not break the format's own consumers.
-        let physical = reader.parse_block_entries_at_now(&data, None, false, None);
-        assert!(
-            physical.is_ok() || physical.is_err(),
-            "the physical posture reaches the decoder (any decode outcome is fine \
-             for these synthetic bytes) rather than being refused by the guard"
-        );
-        if let Err(e) = physical {
-            assert!(
-                !e.to_string().contains("state-machine decoder"),
-                "the physical posture must NOT be refused by the fail-closed guard"
-            );
-        }
-    }
 
     #[tokio::test]
     async fn test_invalid_table_id_length_exceeds_256() {

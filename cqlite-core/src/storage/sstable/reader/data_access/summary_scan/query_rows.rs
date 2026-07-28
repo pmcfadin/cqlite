@@ -126,8 +126,18 @@ impl QueryRowStream {
     /// an explicit `Done` sentinel (or `catch_unwind` → `Err`) for a disconnect
     /// without a terminator to be treated as corruption; #3106 owns that, for
     /// this stream AND the k-way merge adapter, whose stance this matches.
+    ///
+    /// The blocking wait is timed into the per-request RECV-WAIT accumulator
+    /// (`stream_subphase::time_recv`), exactly as the k-way merge's own recv site
+    /// is (`write_engine/merge/mod.rs`). The drive loop SUBTRACTS that accumulator
+    /// from its `stream_merge` bucket, so producer starvation / cold I/O on this
+    /// arm is not billed as merge CPU — without this wrap the fast arm (now the
+    /// DEFAULT path) would silently break #2819's "`stream_merge` is merge CPU
+    /// only" contract and inflate the sub-phase profile that issue #3096 uses as
+    /// its evidence base. Inert (no clock read) when no sub-phase sink is
+    /// installed, and it never touches the value returned.
     pub fn next_batch(&mut self) -> Option<Result<QueryRowBatch>> {
-        self.rx.recv().ok()
+        crate::observability::stream_subphase::time_recv(|| self.rx.recv().ok())
     }
 }
 
