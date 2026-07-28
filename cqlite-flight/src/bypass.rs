@@ -118,6 +118,25 @@ pub enum BypassReason {
     /// The single reader lacks the components the single-generation streaming
     /// query walk needs (no `Index.db`, or a BTI reader).
     ReaderUnsupported,
+    /// The schema declares a STATIC column.
+    ///
+    /// The two arms genuinely disagree on static-row shape today, in OPPOSITE
+    /// directions, so neither can be adopted silently (measured on
+    /// `test_writeparity.static_clustering_shape` and on a static fixture with a
+    /// static-ONLY partition):
+    /// * the merge arm emits the static row as its OWN `ck = null` row and does
+    ///   NOT inject the static value into the partition's clustering rows —
+    ///   Cassandra does the opposite;
+    /// * the single-generation decoder injects the static cells into every
+    ///   clustering row (correct) but emits NOTHING for a partition that has a
+    ///   static row and NO clustering rows — Cassandra returns one row there, so
+    ///   taking the fast path would DROP that row.
+    ///
+    /// Changing query results is out of this change's remit either way, so a
+    /// static-bearing schema takes the merge arm and keeps today's behaviour
+    /// EXACTLY. Reconciling both arms with Cassandra's static semantics is a
+    /// follow-up (it changes the core read path, not just Flight routing).
+    StaticColumns,
 }
 
 impl BypassReason {
@@ -149,6 +168,9 @@ pub fn bypass_reason(
     };
     if !schema.dropped_columns.is_empty() {
         return BypassReason::DroppedColumns;
+    }
+    if schema.columns.iter().any(|c| c.is_static) {
+        return BypassReason::StaticColumns;
     }
     if !only.supports_streaming_query_scan() {
         return BypassReason::ReaderUnsupported;
@@ -300,6 +322,131 @@ mod tests {
         assert_eq!(
             bypass_reason(&[], &schema, ForcedMergePath::Auto, true),
             BypassReason::Aggregating
+        );
+    }
+
+    /// A schema declaring a STATIC column takes the merge arm, fail-closed: the
+    /// two arms disagree on static-row shape today (see [`BypassReason::StaticColumns`]),
+    /// so the fast path must not silently change those results.
+    #[test]
+    fn a_static_column_forces_the_merge_arm() {
+        use crate::testutil::{simple_schema, write_row};
+        let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
+        let mut schema = simple_schema();
+        // An otherwise-selecting single-source request: only the static column
+        // differs, so this isolates the static precondition.
+        assert_eq!(
+            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+            BypassReason::Selected,
+            "control: without the static column this request WOULD take the fast path"
+        );
+        if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
+            c.is_static = true;
+        }
+        assert_eq!(
+            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+            BypassReason::StaticColumns
+        );
+    }
+
+    /// Open ONE real reader over a single-SSTable fixture, so the predicate is
+    /// exercised against genuine reader metadata rather than a stub.
+    fn open_readers(batches: Vec<Vec<cqlite_core::storage::write_engine::Mutation>>) -> (tempfile::TempDir, Vec<Arc<SSTableReader>>) {
+        use crate::testutil::{build_sstables, simple_schema};
+        let schema = simple_schema();
+        let (temp, _data, table_dir) = build_sstables(&schema, batches);
+        let mut data_dbs: Vec<std::path::PathBuf> = std::fs::read_dir(&table_dir)
+            .expect("table dir")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("-Data.db"))
+            })
+            .collect();
+        data_dbs.sort();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let readers = rt.block_on(async {
+            let config = cqlite_core::Config::default();
+            let platform = Arc::new(cqlite_core::Platform::new(&config).await.expect("platform"));
+            let mut out = Vec::new();
+            for p in data_dbs {
+                out.push(Arc::new(
+                    SSTableReader::open(&p, &config, platform.clone())
+                        .await
+                        .expect("reader opens"),
+                ));
+            }
+            out
+        });
+        (temp, readers)
+    }
+
+    /// Spec R1: exactly ONE post-prune source, an empty `dropped_columns`, no
+    /// aggregation and no forced merge → the fast path is selected.
+    #[test]
+    fn one_source_with_a_clean_schema_selects_the_fast_path() {
+        use crate::testutil::{simple_schema, write_row};
+        let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
+        assert_eq!(readers.len(), 1, "the fixture is exactly one generation");
+        assert_eq!(
+            bypass_reason(
+                &readers,
+                &simple_schema(),
+                ForcedMergePath::Auto,
+                false
+            ),
+            BypassReason::Selected
+        );
+    }
+
+    /// Spec R1: two post-prune sources take the merge arm.
+    #[test]
+    fn two_sources_take_the_merge_arm() {
+        use crate::testutil::{simple_schema, write_row};
+        let (_temp, readers) = open_readers(vec![
+            vec![write_row(1, "a", 10, 100)],
+            vec![write_row(2, "b", 20, 200)],
+        ]);
+        assert_eq!(readers.len(), 2, "the fixture is two generations");
+        assert_eq!(
+            bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false),
+            BypassReason::MultipleSources
+        );
+    }
+
+    /// Spec R1: a non-empty `dropped_columns` map takes the merge arm, so the
+    /// reconciler's timestamp-based dropped-column purge (Step 3b) still runs.
+    #[test]
+    fn a_non_empty_dropped_columns_map_takes_the_merge_arm() {
+        use crate::testutil::{simple_schema, write_row};
+        let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
+        let mut schema = simple_schema();
+        schema
+            .dropped_columns
+            .insert("gone".to_string(), 1_700_000_000_000_000);
+        assert_eq!(
+            bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+            BypassReason::DroppedColumns
+        );
+    }
+
+    /// Spec R1: even under a forced `bypass`, a correctness precondition still
+    /// wins — the override can never make the fast path serve a 2-source table.
+    #[test]
+    fn forced_bypass_never_overrides_a_correctness_precondition() {
+        use crate::testutil::{simple_schema, write_row};
+        let (_temp, readers) = open_readers(vec![
+            vec![write_row(1, "a", 10, 100)],
+            vec![write_row(2, "b", 20, 200)],
+        ]);
+        assert_eq!(
+            bypass_reason(&readers, &simple_schema(), ForcedMergePath::Bypass, false),
+            BypassReason::MultipleSources
         );
     }
 

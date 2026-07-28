@@ -793,6 +793,53 @@ mod tests {
         }
     }
 
+    /// Spec R3 (issue #3058): a row materialized from the SINGLE-GENERATION scan
+    /// arm carries `cell_metadata: None`, exactly as the merge arm's rows do — no
+    /// consumer can observe a difference in the emitted `QueryRow`, and no
+    /// per-cell write-metadata map is attached to it.
+    #[test]
+    fn a_scanned_row_carries_no_cell_metadata() {
+        use crate::producer_stream::PendingRow;
+        use cqlite_core::query::PartitionKeyCache;
+        use cqlite_core::storage::write_engine::DecoratedKey;
+        use cqlite_core::types::{ScanRow, Value};
+        use cqlite_core::RowKey;
+        use std::sync::Arc as StdArc;
+
+        let schema = crate::testutil::simple_schema();
+        let producer = MergeProducer::new(schema, 8192).unwrap();
+        // `id` is the partition key (4-byte big-endian int); the decoded cells
+        // carry only the regular columns, as the single-generation reader emits.
+        let key_bytes = 7_i32.to_be_bytes().to_vec();
+        let scan_row = ScanRow::Row(vec![
+            (StdArc::from("name"), Value::text("n7")),
+            (StdArc::from("score"), Value::Integer(70)),
+        ]);
+        let mut pk_cache = PartitionKeyCache::default();
+        let row = producer
+            .materialize_pending(
+                &DecoratedKey::new(0, key_bytes.clone()),
+                PendingRow::Scanned(RowKey::new(key_bytes), scan_row),
+                &mut pk_cache,
+                None,
+            )
+            .expect("materialize succeeds")
+            .expect("a live scan row is emitted");
+
+        assert!(
+            row.cell_metadata.is_none(),
+            "the fast arm's emitted QueryRow must carry NO cell metadata (identical \
+             to the merge arm's rows — `filter.rs`/`agg.rs` never read it)"
+        );
+        assert_eq!(row.values.get("name"), Some(&Value::text("n7")));
+        assert_eq!(row.values.get("score"), Some(&Value::Integer(70)));
+        assert_eq!(
+            row.values.get("id"),
+            Some(&Value::Integer(7)),
+            "the partition-key column is reconstructed from the row key"
+        );
+    }
+
     /// B2 (recv-wait exclusion): the drive loop must SUBTRACT the blocking
     /// merge-input recv-wait from the `stream_merge` bucket, so `stream_merge` is
     /// merge CPU only. A stub `step_row` sleeps, attributes 3/4 of the MEASURED

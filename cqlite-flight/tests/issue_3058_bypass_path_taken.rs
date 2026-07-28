@@ -40,6 +40,7 @@ use cqlite_core::storage::write_engine::{
     CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::Value;
+use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_flight::bypass::MERGE_PATH_ENV;
 use cqlite_flight::service::CqliteFlightService;
 
@@ -303,6 +304,88 @@ async fn two_overlapping_sstables_enter_the_merger_and_reconcile() {
         delta.reconcile_entries > 0,
         "AC #4: two overlapping sources MUST enter the compaction reconciler (got {})",
         delta.reconcile_entries
+    );
+}
+
+/// Spec R1: the count that decides is the POST-prune one. Two generations whose
+/// partitions live in DISJOINT token regions, plus a ticket whose token range
+/// covers only one of them, leaves exactly ONE source after `prune_readers` —
+/// and that must select the fast path even though the table holds two
+/// generations.
+#[tokio::test]
+async fn token_pruning_to_one_source_still_selects_the_fast_path() {
+    let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var(MERGE_PATH_ENV);
+    // pk=1 in generation 1, pk=2 in generation 2 — no partition overlap, so each
+    // generation's endpoint-token span covers exactly its own partition.
+    let (_temp, data_dir) =
+        build_generations(vec![vec![write(1, 1, "gen1", 100)], vec![write(2, 1, "gen2", 100)]])
+            .await;
+    assert_eq!(count_data_dbs(&data_dir), 2, "two generations on disk");
+
+    // The authoritative token of each partition key: a single `int` partition key
+    // is stored as its 4-byte big-endian value, which is exactly what Cassandra
+    // hashes.
+    let t1 = cassandra_murmur3_token(&1_i32.to_be_bytes());
+    let t2 = cassandra_murmur3_token(&2_i32.to_be_bytes());
+    assert_ne!(t1, t2, "the two partitions must hash to different tokens");
+
+    // A half-open `(start, end]` range holding ONLY pk=1's token.
+    let svc = CqliteFlightService::new(data_dir, 8192);
+    let ticket = serde_json::to_vec(&serde_json::json!({
+        "keyspace": KS, "table": TBL, "ddl": DDL,
+        "token_start": t1 - 1, "token_end": t1,
+    }))
+    .expect("ticket json");
+
+    let before = ReadPathProbe::snapshot();
+    let rows = do_get_rows(&svc, ticket).await;
+    let delta = ReadPathProbe::snapshot().delta_since(&before);
+
+    assert_eq!(
+        rows,
+        BTreeMap::from([((1, 1), "gen1".to_string())]),
+        "only the in-range partition is returned (token {t1} in ({}, {t1}]; pk=2 is at {t2})",
+        t1 - 1
+    );
+    assert_eq!(
+        delta.mergers_built, 0,
+        "the POST-prune count is 1, so the fast path must be selected even though          the table has two generations"
+    );
+    assert_eq!(delta.reconcile_entries, 0);
+}
+
+/// Spec R7: a client that stops reading mid-stream stops the fast path's scan —
+/// the response stream is dropped and the request ends without draining the
+/// table. Pinned on the OBSERVED completion of the drop (no timing threshold in
+/// the assertion path): the test simply proves the server-side stream terminates
+/// and no further rows are delivered after the drop.
+#[tokio::test]
+async fn fast_arm_stream_stops_when_the_client_drops_it() {
+    let _guard = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var(MERGE_PATH_ENV);
+    // Enough partitions that a full drain would be many batches at batch_size 1.
+    let rows: Vec<_> = (0..200).map(|i| write(i, 1, "v", 100)).collect();
+    let (_temp, data_dir) = build_generations(vec![rows]).await;
+    assert_eq!(count_data_dbs(&data_dir), 1);
+
+    let svc = CqliteFlightService::new(data_dir, 1);
+    let before = ReadPathProbe::snapshot();
+    let resp = svc
+        .do_get(Request::new(Ticket::new(ticket_bytes())))
+        .await
+        .expect("do_get")
+        .into_inner();
+    let mapped = resp.map(|r| r.map_err(|e| FlightError::ExternalError(Box::new(e))));
+    let mut stream = FlightRecordBatchStream::new_from_flight_data(mapped);
+    // Take ONE batch, then drop the stream mid-flight.
+    let first = stream.next().await.expect("a first batch").expect("decodes");
+    assert!(first.num_rows() > 0, "the first batch carries rows");
+    drop(stream);
+    let delta = ReadPathProbe::snapshot().delta_since(&before);
+    assert_eq!(
+        delta.mergers_built, 0,
+        "the cancelled request ran on the fast arm"
     );
 }
 
