@@ -151,7 +151,7 @@ impl SSTableReader {
 ///   CRC-validated chunk reader, just fewer times.
 /// - **SCAN-plane reads** (issue #2876, and the reason the two fixes are
 ///   inseparable): every refill is issued on the positional plane the WALK hands
-///   in — the reader's UNADVISED `scan_positional_source` — never the
+///   in — the reader's never-`MADV_RANDOM` `scan_positional_source` — never the
 ///   `MADV_RANDOM` `point_source`. Coalescing and the read-intent split are
 ///   complementary halves of one mechanism: bigger sequential reads only pay off
 ///   on a mapping that reads ahead, and CASSANDRA-15452 is the upstream precedent

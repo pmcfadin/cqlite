@@ -3,24 +3,24 @@
 //! The SSTable reader accesses Data.db through a single seekable byte source;
 //! [`BlockSource`] offers two interchangeable backends (plus Unix direct I/O):
 //!
-//! - [`BlockSource::Buffered`]: buffered async file I/O through the OS page cache
-//!   with kernel read-ahead; used for files below `mmap_min_size_bytes` and
-//!   wherever `disk_access_mode: buffered` is explicit (the compaction/merge path).
-//! - [`BlockSource::Mapped`]: a memory-mapped view served straight from the page
-//!   cache — no per-block `read` syscall, no copy into a buffered reader; suits
-//!   repeated local scans of immutable files and is Cassandra's own read-path
-//!   strategy (`disk_access_mode: mmap`). **The default `Auto` mode resolves to
-//!   this for any Data.db above one page**, so it, not `Buffered`, is the default.
+//! - [`BlockSource::Buffered`]: buffered async file I/O through the OS page cache with
+//!   kernel read-ahead; used under `Auto` below `mmap_min_size_bytes`, for a
+//!   zero-length file, wherever `disk_access_mode: buffered` is explicit and
+//!   `use_mmap` does not promote it (the compaction/merge path), and as the graceful
+//!   fallback when a map or a direct open fails (`build_block_sources`).
+//! - [`BlockSource::Mapped`]: a memory-mapped view served straight from the page cache
+//!   — no per-block `read` syscall, no copy into a buffered reader; Cassandra's own
+//!   read-path strategy (`disk_access_mode: mmap`). Under the default `Auto`, a Data.db
+//!   from one page up to `direct_io_memory_fraction` of RAM lands here, not `Buffered`.
 //!
-//! Both implement [`tokio::io::AsyncRead`] / [`tokio::io::AsyncSeek`], so every
-//! call site (`seek` / `stream_position` / `read` / `read_exact`) works against
-//! either unmodified; the mmap backend is purely in-memory, so its poll methods
-//! always complete synchronously (`Poll::Ready`).
+//! Both implement [`tokio::io::AsyncRead`] / [`tokio::io::AsyncSeek`], so every call site
+//! (`seek` / `stream_position` / `read` / `read_exact`) works against either unmodified;
+//! the mmap backend is in-memory, so its poll methods always return `Poll::Ready`.
 //!
-//! Buffered capacity is tokio's 8 KiB `DEFAULT_BUF_SIZE` (#3068): both constructors
-//! below use `BufReader::new` (`with_capacity` appears nowhere in `cqlite-core/src`),
-//! and `SSTableReaderConfig::read_buffer_size` (64 KiB) is a `block_io.rs` scratch
-//! cap, not a reader capacity — so it reaches only the explicitly-buffered readers.
+//! Buffered capacity is tokio's 8 KiB `DEFAULT_BUF_SIZE` (#3068): both constructors below
+//! use `BufReader::new` (no `BufReader::with_capacity` in `cqlite-core/src`), and
+//! `SSTableReaderConfig::read_buffer_size` (64 KiB) never sizes that reader — it caps
+//! `block_io.rs`'s `read_into_vec_capped` scratch for EVERY backend, `Mapped` included.
 
 use std::io::{self, SeekFrom};
 use std::path::Path;

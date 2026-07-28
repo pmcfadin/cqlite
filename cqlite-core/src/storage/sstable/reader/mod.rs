@@ -974,7 +974,7 @@ impl SSTableReader {
     /// Whether this reader's block source is backed by a memory map.
     ///
     /// Test-only hook used to verify that the `use_mmap` config / env wiring
-    /// actually selects the intended backend end-to-end.
+    /// actually promotes an explicit `Buffered` request to mmap end-to-end.
     #[cfg(test)]
     pub(crate) async fn is_mmap_backed(&self) -> bool {
         self.file.lock().await.is_mmap()
@@ -1187,12 +1187,12 @@ impl SSTableReader {
     /// (`file_size >= min_random_bytes`) map a SECOND, dedicated read-only mapping
     /// of the same file and advise it `MADV_RANDOM`, returning that distinct
     /// mapping so scattered point faults read one page instead of the ~128 KiB
-    /// read-ahead window (issue #2210). The returned mapping is a SEPARATE
-    /// allocation from `scan_mmap`, which is left unadvised — advising the point map
-    /// therefore cannot affect the scan map (#1143 preserved). Below the threshold,
-    /// or if the dedicated map / its advice fails, share `scan_mmap` unchanged
-    /// (never keep a redundant unadvised 2nd map). Mapped directly (not via
-    /// `map_file`) so the read-work FILE_OPENS counter is untouched.
+    /// read-ahead window (issue #2210). The returned mapping is a SEPARATE allocation
+    /// from `scan_mmap`, which THIS function never advises (only `build_block_sources`
+    /// does, and only for an explicit `Sequential`/`WillNeed`), so advising the point
+    /// map cannot affect the scan map (#1143 preserved). Below the threshold, or if
+    /// the dedicated map / its advice fails, share `scan_mmap` unchanged (never keep a
+    /// redundant 2nd map). Mapped directly (not via `map_file`): FILE_OPENS untouched.
     #[cfg(unix)]
     fn point_read_mmap(
         path: &Path,

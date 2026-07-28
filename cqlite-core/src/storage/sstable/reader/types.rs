@@ -151,7 +151,9 @@ impl Default for SSTableReaderStats {
 /// Configuration for SSTable reader
 #[derive(Debug, Clone)]
 pub struct SSTableReaderConfig {
-    /// Size of the read buffer in bytes
+    /// Cap (bytes) on the scratch buffer `block_io.rs` reads a block through
+    /// (`read_into_vec_capped`), applied to EVERY backend, `Mapped` included. It is
+    /// NOT a `BufReader` capacity — that is tokio's 8 KiB default (#3068).
     pub read_buffer_size: usize,
     /// Legacy promote-only flag: it upgrades an **explicit**
     /// [`Buffered`](crate::config::DiskAccessMode::Buffered) request to
@@ -161,14 +163,17 @@ pub struct SSTableReaderConfig {
     /// The backend is chosen by `storage.disk_access_mode` ([`crate::Config`]),
     /// which defaults to [`Auto`](crate::config::DiskAccessMode::Auto). See
     /// `resolve_disk_access_mode` in the reader module for the exact resolution:
-    /// `Auto` yields buffered I/O only for files below
-    /// [`Self::mmap_min_size_bytes`] (4 KiB), **mmap** for anything larger up to
-    /// `storage.direct_io_memory_fraction` of system RAM (default half), and
-    /// direct I/O above that. So every field reader built from a default
-    /// `Config` memory-maps any Data.db bigger than one page, and no combination
-    /// of this flag's values can produce the buffered path there — only an
-    /// explicit `disk_access_mode: buffered` can (as the write/compaction merge
-    /// readers do).
+    /// `Auto` yields buffered I/O for files below [`Self::mmap_min_size_bytes`]
+    /// (4 KiB) and **mmap** for anything larger, up to
+    /// `storage.direct_io_memory_fraction` of system RAM (default half); above that
+    /// it picks direct I/O where that backend is compiled in (Linux/Android/macOS —
+    /// elsewhere, or when system memory cannot be read, `Auto` never escalates and
+    /// stays on mmap). So a reader built from a default `Config` maps a Data.db
+    /// between one page and that fraction, and this flag cannot make it buffered;
+    /// only an explicit `disk_access_mode: buffered` can (as the write/compaction
+    /// merge readers do). Mapping is still best-effort: if the map itself fails
+    /// (network/overlay mount, `ENOMEM`), `build_block_sources` falls back to
+    /// buffered I/O rather than failing the open.
     ///
     /// A mapped file is served from the OS page cache with no per-block read
     /// syscall, mirroring Cassandra's `disk_access_mode: mmap`. Map only
@@ -176,12 +181,13 @@ pub struct SSTableReaderConfig {
     /// the platform/filesystem constraints (network FS and external mutation can
     /// `SIGBUS`).
     pub use_mmap: bool,
-    /// Minimum file size (bytes) for memory mapping to kick in.
+    /// Minimum file size (bytes) at which the `Auto` heuristic memory-maps.
     ///
-    /// Files smaller than this use buffered I/O — both under the default
-    /// `disk_access_mode: Auto` and when [`Self::use_mmap`] promotes an explicit
-    /// `Buffered` request — since the per-file mapping overhead is not
-    /// worthwhile for tiny files and mapping a zero-length file is invalid.
+    /// Under the default `disk_access_mode: Auto`, files below this use buffered I/O,
+    /// since the per-file mapping overhead is not worthwhile for tiny files. It does
+    /// NOT gate an explicit `Mmap` request — including one [`Self::use_mmap`] promoted
+    /// from an explicit `Buffered` — which is size-independent; only a zero-length
+    /// file, which cannot be mapped at all, always falls back to buffered I/O.
     pub mmap_min_size_bytes: usize,
     /// Maximum number of blocks to cache
     pub block_cache_size: usize,
