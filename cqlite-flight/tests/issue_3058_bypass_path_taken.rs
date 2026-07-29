@@ -43,16 +43,27 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_flight::bypass::MERGE_PATH_ENV;
+use cqlite_flight::egress_credit::EgressBudget;
 use cqlite_flight::service::CqliteFlightService;
 
-/// Partitions in the mid-stream-cancel fixture: comfortably larger than
-/// everything the fast arm can hold in flight (`QUERY_ROWS_PER_BATCH` × the
-/// bounded channel's batches, plus the batched scan's own buffering), so
-/// "stopped early" and "drained the table" are genuinely distinguishable. At 200
-/// the whole table fitted in the in-flight buffer and the walk legitimately
-/// finished before any cancel could bite — which made the stop assertion vacuous
-/// rather than the code wrong.
-const PARTITIONS: usize = 2_000;
+/// Partitions in the mid-stream-cancel fixture. Must be far more than the stream
+/// can hold in flight under [`CANCEL_EGRESS_CEILING`], so "stopped early" and
+/// "drained the table" are distinguishable STRUCTURALLY (by the credit pool)
+/// rather than by scheduling luck.
+const PARTITIONS: usize = 800;
+
+/// Per-stream in-flight egress ceiling for the mid-stream-cancel test.
+///
+/// This is what makes the stop assertion DETERMINISTIC. Without a tight ceiling
+/// the producer is free to race ahead of a client that has stopped reading, and
+/// on a fast/loaded machine it can decode the whole (tiny, one-row-per-partition)
+/// fixture before the cancellation is observed — which is scheduling, not
+/// behaviour, and made an earlier revision of this test flaky under the gate's
+/// parallel load. With the ceiling, only a bounded number of batches can be
+/// buffered ahead of the dropped client, so the walk MUST park and then stop:
+/// the bound below holds by construction. Comfortably above one 1-row batch's
+/// capacity (so no batch is refused) and far below the whole fixture's.
+const CANCEL_EGRESS_CEILING: usize = 64 * 1024;
 
 /// Serializes the process-global probe/env window (see the module doc).
 static PROBE_LOCK: Mutex<()> = Mutex::const_new(());
@@ -392,10 +403,13 @@ async fn token_pruning_to_one_source_still_selects_the_fast_path() {
 ///
 /// Pinned on an OBSERVED work marker, not on elapsed time and not merely on which
 /// arm ran (roborev: asserting only `mergers_built == 0` would pass even if the
-/// fast arm drained all 200 partitions after the client left). The marker is
+/// fast arm drained the whole table after the client left). The marker is
 /// `work_counters::stream_walk_partitions_parsed()`, which counts partition BODIES
-/// decoded: after the drop it must be far below the fixture's partition count AND
-/// must stop growing.
+/// decoded: after the drop it must stop growing AND be below the fixture's
+/// partition count.
+///
+/// The bound is made structural by [`CANCEL_EGRESS_CEILING`] — see its doc for why
+/// a bound without it is scheduling luck rather than behaviour.
 #[tokio::test]
 async fn fast_arm_stream_stops_when_the_client_drops_it() {
     let _guard = PROBE_LOCK.lock().await;
@@ -408,7 +422,8 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
     let (_temp, data_dir) = build_generations(vec![rows]).await;
     assert_eq!(count_data_dbs(&data_dir), 1);
 
-    let svc = CqliteFlightService::new(data_dir, 1);
+    let svc = CqliteFlightService::new(data_dir, 1)
+        .with_egress_budget(EgressBudget::bytes(CANCEL_EGRESS_CEILING));
     let before = ReadPathProbe::snapshot();
     let resp = svc
         .do_get(Request::new(Ticket::new(ticket_bytes())))
