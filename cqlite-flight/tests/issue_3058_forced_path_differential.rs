@@ -314,10 +314,15 @@ async fn assert_arms_agree(
         ));
         return None;
     }
-    if merge_sizes.iter().sum::<usize>() != bypass_sizes.iter().sum::<usize>() {
+    // The BATCH BOUNDARIES, not just the totals: comparing sums could never fail
+    // independently of the row-set equality asserted above, which made every
+    // batching claim in this file vacuous (roborev). Both arms run the SAME drive
+    // loop and the same `BatchByteCap`, so for an identical row set the boundaries
+    // must be identical too — a divergence means one arm's batching diverged.
+    if merge_sizes != bypass_sizes {
         failures.push(format!(
-            "case {label}: batch row totals differ: merge {merge_sizes:?} vs bypass \
-             {bypass_sizes:?}"
+            "case {label}: batch BOUNDARIES differ: merge {merge_sizes:?} vs bypass \
+             {bypass_sizes:?} (the row sets are identical, so the batching diverged)"
         ));
         return None;
     }
@@ -778,9 +783,20 @@ async fn forced_path_differential_agrees_on_every_shape() {
     )
     .await;
 
-    // (4) A byte-capped stream: the cap must hold on the fast arm and the rows
-    //     must still match the merge arm's.
-    let capped = CqliteFlightService::new(shapes_dir.clone(), 8192).with_max_batch_bytes(512);
+    // (4) A byte-capped stream. The cap must be genuinely EXERCISED (more than one
+    //     batch, and strictly more batches than the same query uncapped) and the
+    //     boundaries must be identical on both arms — `assert_arms_agree` now
+    //     compares the boundaries, not just the totals.
+    //
+    //     `TINY_BATCH_BYTES` is below one row's estimated Arrow payload, so the
+    //     dual row-cap/byte-cap boundary cuts on EVERY row: with a cap of 512 the
+    //     whole 4-row result fitted in one batch and nothing about batching was
+    //     observable at all. The cap's BYTE semantics (no batch exceeds the
+    //     budget) are pinned by `tests/issue_2825_max_batch_bytes_e2e.rs`, which
+    //     now runs over the fast arm; what this case owns is arm-EQUIVALENCE.
+    const TINY_BATCH_BYTES: usize = 16;
+    let capped =
+        CqliteFlightService::new(shapes_dir.clone(), 8192).with_max_batch_bytes(TINY_BATCH_BYTES);
     let _ = assert_arms_agree(
         "shapes/max-batch-bytes",
         &capped,
@@ -790,6 +806,40 @@ async fn forced_path_differential_agrees_on_every_shape() {
         &mut failures,
     )
     .await;
+    std::env::set_var(TTL_NOW_ENV, NOW_BEFORE_EXPIRY.to_string());
+    let (capped_rows, capped_sizes, capped_delta) = run_forced(&capped, &full, "bypass").await;
+    let uncapped = CqliteFlightService::new(shapes_dir.clone(), 8192);
+    let (uncapped_rows, uncapped_sizes, _) = run_forced(&uncapped, &full, "bypass").await;
+    std::env::remove_var(TTL_NOW_ENV);
+    if capped_delta.mergers_built != 0 {
+        failures.push("the byte-capped run must be on the fast arm".to_string());
+    }
+    if capped_sizes.len() <= 1 {
+        failures.push(format!(
+            "byte-cap: the cap was NOT exercised — the whole result came back in \
+             {} batch(es) ({capped_sizes:?}), so this case would pass even if \
+             max_batch_bytes were ignored entirely",
+            capped_sizes.len()
+        ));
+    }
+    if capped_sizes.len() <= uncapped_sizes.len() {
+        failures.push(format!(
+            "byte-cap: a {TINY_BATCH_BYTES}-byte cap must cut into MORE batches than \
+             the same query uncapped (capped {capped_sizes:?} vs uncapped \
+             {uncapped_sizes:?}) — the cap is not governing the fast arm"
+        ));
+    }
+    if capped_sizes.iter().any(|n| *n != 1) {
+        failures.push(format!(
+            "byte-cap: with a cap below one row's payload every batch must carry \
+             exactly one row, got {capped_sizes:?}"
+        ));
+    }
+    if capped_rows != uncapped_rows {
+        failures.push(
+            "byte-cap: capping changes only the batch boundaries, never the rows".to_string(),
+        );
+    }
 
     // ---- Static columns: the fail-closed fallback --------------------------
     // A static-bearing schema must NOT take the fast path: the arms disagree on
