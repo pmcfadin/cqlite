@@ -14,6 +14,10 @@ pub mod agg;
 // batch boundary shared by BOTH producer drive loops, plus the published
 // payload-to-capacity conversion constants issue #2821 composes on.
 pub mod batch_bytes;
+// Single-source (one post-prune SSTable) merge bypass for the warm `do_get` row
+// route (issue #3058): the fail-closed predicate, the `CQLITE_FLIGHT_MERGE_PATH`
+// forced-path seam, and the single-generation scan row source.
+pub mod bypass;
 pub mod cancel;
 // Per-stream in-flight egress capacity-byte credit governor (issue #2821): the
 // reserve-before-materialize credit pool, its RAII permit, the `CreditedBatch`
@@ -39,6 +43,9 @@ pub mod producer;
 mod producer_point;
 mod producer_stream;
 mod producer_warm;
+// The arm-independent ROW SOURCE seam shared by the k-way merge arm and the
+// single-generation bypass arm (issue #3058).
+mod row_source;
 pub mod saturation;
 pub mod scan_progress;
 pub mod service;

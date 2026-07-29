@@ -145,6 +145,12 @@ impl SSTableReader {
     pub(in crate::storage::sstable::reader) async fn stream_all_partitions_via_full_index<F>(
         &self,
         scan_cancel: &ScanCancel,
+        // Issue #3058: caller-pinned read-time TTL clock (`None` = ambient).
+        now_secs: Option<i64>,
+        // Issue #3058: the caller's AUTHORITATIVE schema, which must win over the
+        // reader's four-tier lookup (an `nb` header carries none, so decoding
+        // with the reader-derived schema drops the clustering columns).
+        caller_schema: Option<&TableSchema>,
         emit: &mut F,
     ) -> Result<FullIndexStreamOutcome>
     where
@@ -199,7 +205,13 @@ impl SSTableReader {
         // All gates passed: stream. Read-shadowing parser (matches sequential_scan
         // + the materialising variant).
         let parser = self.build_v5_parser(true);
-        let reader_schema = self.get_table_schema(None);
+        let parser = match now_secs {
+            Some(now) => parser.with_now_secs(now),
+            None => parser,
+        };
+        let reader_schema = caller_schema
+            .cloned()
+            .or_else(|| self.get_table_schema(None));
         let schema = reader_schema.as_ref();
         // Hardening B (issue #2361): O(1)-per-partition (token, key)-order guard —
         // see `check_token_order`'s doc for why this stands in for the
@@ -402,7 +414,7 @@ impl SSTableReader {
     {
         if self.index_reader.is_some() && self.bti_partitions_db.is_none() {
             match self
-                .stream_all_partitions_via_full_index(scan_cancel, &mut emit)
+                .stream_all_partitions_via_full_index(scan_cancel, None, None, &mut emit)
                 .await?
             {
                 FullIndexStreamOutcome::Streamed => return Ok(()),
@@ -465,9 +477,13 @@ impl SSTableReader {
         schema: Option<&TableSchema>,
     ) -> Result<bool> {
         use crate::storage::sstable::reader::parsing::ParseStep;
-        let mut noop = |_row| Ok(std::ops::ControlFlow::Continue(()));
-        let step =
-            parser.parse_one_partition_for_compaction(raw, schema, self, false, &mut noop)?;
+        // Issue #3058: STRUCTURE-ONLY drive. The verdict below reads only the byte
+        // consumption, and every row this used to build went straight to a no-op
+        // closure — including, per row, a `CellWriteMetadata` map. Dropping that
+        // build is what lets the token-scoped single-source read path allocate ZERO
+        // metadata maps (spec R3); the framing, and therefore the verdict, is
+        // unchanged.
+        let step = parser.parse_one_partition_structure_only(raw, schema, self, false)?;
         Ok(matches!(step, ParseStep::Emitted(consumed) if consumed == raw.len()))
     }
 }

@@ -82,6 +82,7 @@ pub use data_access::ClusteringSlice;
 // Token-range bound pushed into the Summary-guided streaming walk (issue #2413
 // Option A) — used by the flight warm merge to scope a split's scan.
 pub use data_access::ScanTokenBound;
+pub use data_access::{QueryRowBatch, QueryRowStream};
 // Single-partition compaction seek outcome (issue #2207). `not(tombstones)` like
 // the seek path it wraps.
 #[cfg(not(feature = "tombstones"))]

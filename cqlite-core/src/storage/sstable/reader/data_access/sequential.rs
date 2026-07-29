@@ -470,6 +470,7 @@ impl SSTableReader {
                 end_key,
                 schema,
                 &cursor,
+                None,
                 WindowedOut::PerRow(tx.clone()),
             )
             .await
@@ -530,12 +531,18 @@ impl SSTableReader {
             schema,
             buffer_size,
             ScanAdmission::Acquire,
+            None,
         )
     }
 
     /// [`scan_stream_batched`](Self::scan_stream_batched) with an explicit
     /// admission context (issue #1594), mirroring
     /// [`scan_stream_admitted`](Self::scan_stream_admitted).
+    /// `now_secs` (issue #3058): a caller-pinned read-time TTL clock, threaded to
+    /// the read-shadowing decoder so a caller that already captured ONE
+    /// reconciliation instant for the request (the Flight single-source fast
+    /// path) expires TTL cells at exactly that instant instead of an ambient
+    /// wall-clock sample. `None` keeps the ambient sample.
     pub(crate) fn scan_stream_batched_admitted(
         self: std::sync::Arc<Self>,
         table_id: TableId,
@@ -544,6 +551,7 @@ impl SSTableReader {
         schema: Option<crate::schema::TableSchema>,
         buffer_size: usize,
         admission: ScanAdmission,
+        now_secs: Option<i64>,
     ) -> mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>> {
         // The public channel carries BATCHES; sizing it to
         // `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps the resident-row
@@ -560,6 +568,7 @@ impl SSTableReader {
                     schema,
                     tx.clone(),
                     admission,
+                    now_secs,
                 )
                 .await
             {
@@ -577,6 +586,8 @@ impl SSTableReader {
         schema: Option<crate::schema::TableSchema>,
         tx: mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>,
         admission: ScanAdmission,
+        // Issue #3058: caller-pinned read-time TTL clock (`None` = ambient).
+        now_secs: Option<i64>,
     ) -> Result<()> {
         // Admission control (issue #1594, F4): identical discipline to the per-row
         // `run_scan_stream` — one permit per top-level scan operation, held via RAII.
@@ -602,6 +613,7 @@ impl SSTableReader {
                 end_key,
                 schema,
                 &cursor,
+                now_secs,
                 WindowedOut::Batched(tx.clone()),
             )
             .await
@@ -623,6 +635,11 @@ impl SSTableReader {
             // the error via `?` here would silently drop up to BATCH_EMIT_ROWS-1
             // confirmed rows.
             let mut batch: Vec<(RowKey, ScanRow)> = Vec::with_capacity(BATCH_EMIT_ROWS);
+            // Work-probe (issue #2398, extended by #3058): same "changed partition
+            // key = one more partition body decoded" accounting `sequential_scan`
+            // does, so the single-source `do_get` fast path's full-ring scan is
+            // visible to the scan-work counter instead of silently unrecorded.
+            let mut prev_partition_key: Option<RowKey> = None;
             loop {
                 let block = match self.read_next_block(&cursor).await {
                     Ok(Some(block)) => block,
@@ -634,17 +651,33 @@ impl SSTableReader {
                         return Err(e);
                     }
                 };
-                let entries =
-                    match self.parse_block_entries_with_schema(&block, schema.as_ref(), true) {
-                        Ok(entries) => entries,
-                        Err(e) => {
-                            if !batch.is_empty() {
-                                let _ = tx.send(Ok(std::mem::take(&mut batch))).await;
-                            }
-                            return Err(e);
+                let entries = match self.parse_block_entries_at_now(
+                    &block,
+                    schema.as_ref(),
+                    true,
+                    now_secs,
+                ) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        if !batch.is_empty() {
+                            let _ = tx.send(Ok(std::mem::take(&mut batch))).await;
                         }
-                    };
+                        return Err(e);
+                    }
+                };
                 for (entry_table_id, entry_key, entry_value) in entries {
+                    // Counted BEFORE every filter — including the table-id filter —
+                    // exactly like the sibling sites (`sequential_scan`'s two loops
+                    // and the stitched walk): the partition body was DECODED
+                    // regardless of whether its rows survive, and a `Data.db` whose
+                    // entries carry a non-matching `TableId` (path/header keyspace
+                    // mismatch, or `scan_table_id`'s `"default"` fallback) must not
+                    // report 0 bodies where `sequential_scan` reports N (roborev,
+                    // issue #3058).
+                    if prev_partition_key.as_ref() != Some(&entry_key) {
+                        crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
+                        prev_partition_key = Some(entry_key.clone());
+                    }
                     if !table_ids_match(&entry_table_id, &table_id) {
                         continue;
                     }

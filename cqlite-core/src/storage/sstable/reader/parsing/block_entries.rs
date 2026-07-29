@@ -93,11 +93,41 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
         read_shadowing: bool,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
+        self.parse_block_entries_at_now(block_data, schema, read_shadowing, None)
+    }
+
+    /// [`parse_block_entries`](Self::parse_block_entries) with a caller-pinned
+    /// read-time TTL clock (issue #3058).
+    ///
+    /// `now_secs`: `Some` pins the decoder's expiry instant to the one the caller
+    /// already captured for the whole request (the Flight single-source fast
+    /// path), instead of the ambient sample the parser takes at construction;
+    /// `None` keeps that ambient sample. Only consulted when `read_shadowing`.
+    pub(in crate::storage::sstable::reader) fn parse_block_entries_at_now(
+        &self,
+        block_data: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+        read_shadowing: bool,
+        now_secs: Option<i64>,
+    ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         tracing::debug!(
             "parse_block_entries: Starting parse (data size: {} bytes, version: {:?})",
             block_data.len(),
             self.header.cassandra_version
         );
+
+        // KNOWN FAIL-OPEN SEAM — issue #3108, deliberately NOT guarded here.
+        // The `V5UncompressedOA` (BTI `da`) route below calls
+        // `parse_block_entries_with_state_machine`, which takes neither
+        // `read_shadowing` nor `now_secs`, so both are silently DROPPED on that
+        // route. It is unreachable from the single-source query path today only
+        // because `supports_streaming_query_scan()` refuses BTI readers — an
+        // implicit, undocumented dependency, which #3108 owns making explicit. A
+        // guard here must NOT fire for `read_shadowing`-only callers:
+        // `run_scan_stream_batched` reaches this function with
+        // `read_shadowing = true` for BTI readers today (it lacks the BTI dispatch
+        // its siblings have — issue #3109), so refusing those would break
+        // pre-existing `da` batched scans.
 
         let mut entries = Vec::new();
 
@@ -269,6 +299,11 @@ impl SSTableReader {
             .with_version_gates(self.version_gates.clone());
             // Issue #1741: apply SELECT-semantic read shadowing per the caller.
             let parser = parser.with_read_shadowing(read_shadowing);
+            // Issue #3058: honor the caller's pinned reconciliation clock.
+            let parser = match now_secs {
+                Some(now) => parser.with_now_secs(now),
+                None => parser,
+            };
             // Add UDT registry if available for UDT-aware collection parsing (Issue #238)
             let parser = if let Some(ref registry) = self.udt_registry {
                 parser.with_udt_registry(registry.clone())

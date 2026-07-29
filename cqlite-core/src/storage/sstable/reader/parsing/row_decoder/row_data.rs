@@ -72,6 +72,10 @@ impl V5CompressedLegacyParser {
         // (i.e. `want_cell_metadata == true`).  On the normal read path this stays
         // `None` so that zero HashMap allocations or inserts occur per cell.
         let mut cell_meta: Option<HashMap<String, CellWriteMetadata>> = if want_cell_metadata {
+            // Issue #3058: explicit "a per-row cell-write-metadata map was
+            // allocated" marker (see `storage::read_path_probe`), so the Flight
+            // fast path can PROVE it builds none rather than infer it.
+            crate::storage::read_path_probe::record_cell_metadata_map();
             Some(HashMap::new())
         } else {
             None

@@ -102,6 +102,7 @@ pub use point_compaction::SinglePartitionCompaction;
 // Option A). Re-exported to the crate so the flight warm merge can construct one
 // from its `TokenFilter`.
 pub use summary_scan::ScanTokenBound;
+pub use summary_scan::{QueryRowBatch, QueryRowStream};
 
 // Re-export the decompress-work counter so the sibling `scan_stream_windowed`
 // module (outside `data_access`) can increment it on the windowed-scan miss path

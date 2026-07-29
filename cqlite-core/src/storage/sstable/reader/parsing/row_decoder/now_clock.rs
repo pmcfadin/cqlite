@@ -84,6 +84,46 @@ pub fn now_epoch_secs() -> i64 {
     now_from(raw_override.as_deref(), wall_clock_now_secs())
 }
 
+impl super::V5CompressedLegacyParser {
+    /// Issue #3058: pin this parser's read-time TTL "now" (epoch seconds) to a
+    /// clock the CALLER already sampled, instead of the ambient one
+    /// [`now_epoch_secs`] samples at construction.
+    ///
+    /// The Flight `do_get` producer captures ONE reconciliation `now` per request
+    /// (`read_time_now_secs`, this module's `now_epoch_secs`) and threads it into
+    /// its k-way merger via `with_now_secs`. Its single-source fast path must use
+    /// the SAME instant for `PartitionShadow`'s TTL expiry, or the two arms could
+    /// decide a cell straddling an expiration second differently and a PINNED
+    /// `now` (the query-semantics oracles) would not be honored on the fast arm.
+    /// So the fast path threads the request's `now` down to here rather than
+    /// letting the parser re-read the wall clock.
+    ///
+    /// A caller that has no request-scoped clock keeps the constructor default.
+    /// Only consulted when `read_shadowing` is `true`.
+    ///
+    /// Lives in `now_clock` (a CHILD of the module defining the parser, so the
+    /// private field is in scope) to keep `row_decoder/mod.rs` from growing past
+    /// the file-size ratchet (epic #1116).
+    pub fn with_now_secs(mut self, now_secs: i64) -> Self {
+        self.now_secs = now_secs;
+        self
+    }
+
+    /// The read-time TTL "now" (epoch seconds) this parser will evaluate expiry
+    /// against. Exposed so a test can PROVE a caller-pinned clock actually
+    /// reached the parser (issue #3058) instead of assuming it.
+    pub fn now_secs(&self) -> i64 {
+        self.now_secs
+    }
+
+    /// Whether SELECT-semantic read shadowing is enabled on this parser (issue
+    /// #1741). Exposed alongside [`Self::now_secs`] so the single-generation
+    /// query path can ASSERT its decode posture rather than assume it (#3058).
+    pub fn read_shadowing(&self) -> bool {
+        self.read_shadowing
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +132,32 @@ mod tests {
     // directly with an explicit override argument — no env::set_var/remove_var,
     // no guard type, no #[serial]. There is no process-global mutation here for
     // any parallel test (in this binary or any other) to race.
+
+    /// Issue #3058: a caller-pinned `now` must REPLACE the ambient sample the
+    /// constructor took, and must not disturb the read-shadowing posture — the
+    /// two properties the single-generation query path depends on.
+    #[test]
+    fn caller_pinned_now_replaces_the_ambient_sample() {
+        let parser = crate::storage::sstable::reader::V5CompressedLegacyParser::new(
+            "ks".to_string(),
+            "tbl".to_string(),
+            0,
+            0,
+            None,
+        )
+        .with_read_shadowing(true);
+        let ambient = parser.now_secs();
+        let pinned = parser.with_now_secs(1_782_950_400);
+        assert_eq!(
+            pinned.now_secs(),
+            1_782_950_400,
+            "the caller's instant, not the ambient sample ({ambient})"
+        );
+        assert!(
+            pinned.read_shadowing(),
+            "pinning the clock must not disturb the read-shadowing posture"
+        );
+    }
 
     #[test]
     fn override_pins_now() {

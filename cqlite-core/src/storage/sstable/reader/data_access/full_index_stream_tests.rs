@@ -152,7 +152,7 @@ async fn stream_via_full_index_streams_every_partition_in_order() {
 
     let mut streamed_keys: Vec<crate::RowKey> = Vec::new();
     let outcome = reader
-        .stream_all_partitions_via_full_index(&cancel, &mut |(key, _value)| {
+        .stream_all_partitions_via_full_index(&cancel, None, None, &mut |(key, _value)| {
             streamed_keys.push(key);
             Ok(ControlFlow::Continue(()))
         })
@@ -333,7 +333,7 @@ async fn windowed_stream_matches_materialising_over_larger_fixture() {
 
     let mut streamed_keys: Vec<crate::RowKey> = Vec::new();
     let outcome = reader
-        .stream_all_partitions_via_full_index(&cancel, &mut |(key, _value)| {
+        .stream_all_partitions_via_full_index(&cancel, None, None, &mut |(key, _value)| {
             streamed_keys.push(key);
             Ok(ControlFlow::Continue(()))
         })
@@ -446,7 +446,7 @@ async fn windowed_stream_read_pattern_is_sequential() {
     let work = rwc::read_work_scope::ReadWorkScope::new();
     let mut emitted = 0usize;
     let outcome = reader
-        .stream_all_partitions_via_full_index(&cancel, &mut |_row| {
+        .stream_all_partitions_via_full_index(&cancel, None, None, &mut |_row| {
             emitted += 1;
             Ok(ControlFlow::Continue(()))
         })
@@ -670,7 +670,7 @@ async fn windowed_stream_multi_refill_and_large_partition_clamp_parity() {
     let work = rwc::read_work_scope::ReadWorkScope::new();
     let mut streamed: Vec<(crate::RowKey, crate::types::ScanRow)> = Vec::new();
     let outcome = reader
-        .stream_all_partitions_via_full_index(&cancel, &mut |row| {
+        .stream_all_partitions_via_full_index(&cancel, None, None, &mut |row| {
             streamed.push(row);
             Ok(ControlFlow::Continue(()))
         })

@@ -4292,6 +4292,9 @@ impl KWayMerger {
         // (issue #1037). Never read here; only incremented.
         purges: &mut PurgeCounts,
     ) -> Option<MergeEntry> {
+        // Issue #3058: explicit "the compaction reconciler ran" marker (see
+        // `storage::read_path_probe`) — a single relaxed add on the merge arm.
+        crate::storage::read_path_probe::record_reconcile_entry();
         // Decomposed into named, parity-load-bearing steps in `reconcile.rs`
         // (issue #945). The step ORDER is critical: Step 2b before Steps 3/3c so
         // a surviving complex deletion cannot resurrect a covered element on a

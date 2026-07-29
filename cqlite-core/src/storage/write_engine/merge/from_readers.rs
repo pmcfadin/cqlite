@@ -329,6 +329,9 @@ impl KWayMerger {
             ));
         }
         schema.validate_dropped_columns()?;
+        // Issue #3058: explicit "the k-way merge arm was taken" marker (see
+        // `storage::read_path_probe`), recorded once per constructed merger.
+        crate::storage::read_path_probe::record_merger_built();
 
         // Issue #2765: register this k-way merge ONCE and snapshot the adaptive
         // per-channel egress capacity shared by every source channel below.

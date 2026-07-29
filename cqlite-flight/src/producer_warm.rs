@@ -27,6 +27,7 @@ use cqlite_core::query::AccessPath;
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::storage::write_engine::{build_single_partition_merger_from_readers, KWayMerger};
 
+use crate::bypass::{bypass_reason, ForcedMergePath, ScanRowSource};
 use crate::cancel::CancelFlag;
 use crate::producer::{BatchSink, CollectSink, MergeProducer, ProducerError};
 use crate::scan_progress::ScanProgress;
@@ -107,7 +108,57 @@ impl MergeProducer {
         // per-SSTable Summary-guided walk so out-of-range partition bodies are
         // never read (the token filter still runs downstream at `drive_merge` as a
         // backstop). A full scan (no token filter) passes `None` → full-ring walk.
+        // BOTH arms below push the same bound.
         let token_bound = self.spec.token.as_ref().map(|t| t.to_scan_bound());
+
+        // Issue #3058: with exactly ONE post-prune source there is nothing to
+        // reconcile ACROSS generations — read-time SELECT semantics are applied
+        // inside the single-generation decoder (`read_shadowing = true`,
+        // `PartitionShadow`, issue #1741). Take the fast path only when the
+        // conjunctive, fail-closed predicate holds (see `crate::bypass`); the
+        // aggregation precondition is guaranteed by the `is_aggregating()` early
+        // return above and the point-read precondition by the route returned
+        // above, so both are ASSERTED here rather than re-derived.
+        debug_assert!(
+            !self.is_aggregating(),
+            "the aggregate route returns above; the bypass site is unreachable for it"
+        );
+        let reason = bypass_reason(
+            &readers,
+            &self.schema,
+            ForcedMergePath::from_env(),
+            self.is_aggregating(),
+        );
+        if reason.is_selected() {
+            if let Some(reader) = readers.first().cloned() {
+                // `open` PRIMES the walk: a reader the single-generation stream
+                // cannot serve reports that BEFORE emitting anything, so this
+                // falls through to the merge arm with no partial output.
+                if let Some(mut source) = ScanRowSource::open(
+                    reader,
+                    self.schema.clone(),
+                    token_bound,
+                    // Issue #2374/#2789 + #3058: the SAME request-scoped
+                    // reconciliation clock the merge arm threads via
+                    // `with_now_secs` below, so TTL expiry is decided at one
+                    // pinned instant on BOTH arms.
+                    self.now_secs,
+                    cancel.scan_cancel(),
+                )? {
+                    // Same phase boundary the merge arm fires: the inputs are
+                    // open and rows are about to stream.
+                    on_merger_built();
+                    return self.drive_row_source(
+                        &mut source,
+                        cancel,
+                        sink,
+                        progress,
+                        AccessPath::FullScan.label(),
+                    );
+                }
+            }
+        }
+
         let mut merger =
             KWayMerger::new_from_readers(readers, &self.schema, cancel.scan_cancel(), token_bound)
                 .map_err(ProducerError::Merge)?

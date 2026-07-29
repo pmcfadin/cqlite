@@ -39,6 +39,7 @@ use cqlite_core::storage::write_engine::{DecoratedKey, KWayMerger};
 use crate::batch_bytes::BatchByteCap;
 use crate::cancel::CancelFlag;
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
+use crate::row_source::{MergeRowSource, RowSource, SourceStep};
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
 
 /// Per-request in-`stream` sub-phase accumulator for the row-drive loop (issue
@@ -193,6 +194,23 @@ impl MergeProducer {
         progress: &ScanProgress,
         access_path: &'static str,
     ) -> Result<(), ProducerError> {
+        let mut source = MergeRowSource::new(stepper);
+        self.drive_row_source(&mut source, cancel, sink, progress, access_path)
+    }
+
+    /// The arm-independent row drive loop (issue #3058): identical batching,
+    /// byte budget, cancellation, progress accounting, predicate/projection and
+    /// `LIMIT` handling for BOTH the k-way merge source and the single-source
+    /// scan source. See [`Self::drive_merge_streaming`] for the semantics; the
+    /// only difference between the arms is where `next_step` gets its rows.
+    pub(crate) fn drive_row_source(
+        &self,
+        source: &mut dyn RowSource,
+        cancel: &CancelFlag,
+        sink: &mut dyn BatchSink,
+        progress: &ScanProgress,
+        access_path: &'static str,
+    ) -> Result<(), ProducerError> {
         let limit = self.spec.limit;
         // A zero cap produces no rows without touching the merge.
         if limit == Some(0) {
@@ -248,14 +266,14 @@ impl MergeProducer {
             // recv-wait is producer starvation / cold-IO, not merge CPU). ~2
             // `Instant::now()`/row (this snapshot + the record), not ~4.
             let (iter_t0, wait_before) = accum.iter_start();
-            let step = stepper.step_row().map_err(|e| match e {
+            let step = source.next_step().map_err(|e| match e {
                 cqlite_core::Error::Cancelled => ProducerError::Cancelled,
                 other => ProducerError::Merge(other),
             })?;
 
             let (key, entry) = match step {
-                StreamingStep::ClusterGroup { key, row } => (key, row),
-                StreamingStep::PartitionEnd { key } => {
+                SourceStep::Row(key, row) => (key, row),
+                SourceStep::PartitionEnd(key) => {
                     // An empty (all-purged) but token-passing partition still
                     // counts as scanned in `drive_merge` (its empty
                     // `MergeStep::Partition` fires `record_partition` before its
@@ -270,7 +288,7 @@ impl MergeProducer {
                     accum.record_merge_iter(iter_t0, wait_before);
                     continue;
                 }
-                StreamingStep::Complete => {
+                SourceStep::Complete => {
                     accum.record_merge_iter(iter_t0, wait_before);
                     break;
                 }
@@ -293,13 +311,8 @@ impl MergeProducer {
             // too (`assemble_cols` includes filter-referenced columns); carriers
             // (`entry_to_row` → None) are skipped without counting a row. Its
             // materialize CPU is part of the `stream_merge` region timed above.
-            let Some(row) = self.entry_to_row(
-                &key.key,
-                *entry,
-                &mut pk_cache,
-                assemble_cols.as_ref(),
-                self.now_secs,
-            )?
+            let Some(row) =
+                self.materialize_pending(&key, entry, &mut pk_cache, assemble_cols.as_ref())?
             else {
                 accum.record_merge_iter(iter_t0, wait_before);
                 continue;
@@ -673,6 +686,53 @@ mod tests {
         for (b, s) in buffered.iter().zip(streamed.iter()) {
             assert_eq!(b, s, "streaming batch must be byte-identical to buffered");
         }
+    }
+
+    /// Spec R3 (issue #3058): a row materialized from the SINGLE-GENERATION scan
+    /// arm carries `cell_metadata: None`, exactly as the merge arm's rows do — no
+    /// consumer can observe a difference in the emitted `QueryRow`, and no
+    /// per-cell write-metadata map is attached to it.
+    #[test]
+    fn a_scanned_row_carries_no_cell_metadata() {
+        use crate::row_source::PendingRow;
+        use cqlite_core::query::PartitionKeyCache;
+        use cqlite_core::storage::write_engine::DecoratedKey;
+        use cqlite_core::types::{ScanRow, Value};
+        use cqlite_core::RowKey;
+        use std::sync::Arc as StdArc;
+
+        let schema = crate::testutil::simple_schema();
+        let producer = MergeProducer::new(schema, 8192).unwrap();
+        // `id` is the partition key (4-byte big-endian int); the decoded cells
+        // carry only the regular columns, as the single-generation reader emits.
+        let key_bytes = 7_i32.to_be_bytes().to_vec();
+        let scan_row = ScanRow::Row(vec![
+            (StdArc::from("name"), Value::text("n7")),
+            (StdArc::from("score"), Value::Integer(70)),
+        ]);
+        let mut pk_cache = PartitionKeyCache::default();
+        let row = producer
+            .materialize_pending(
+                &DecoratedKey::new(0, key_bytes.clone()),
+                PendingRow::Scanned(RowKey::new(key_bytes), scan_row),
+                &mut pk_cache,
+                None,
+            )
+            .expect("materialize succeeds")
+            .expect("a live scan row is emitted");
+
+        assert!(
+            row.cell_metadata.is_none(),
+            "the fast arm's emitted QueryRow must carry NO cell metadata (identical \
+             to the merge arm's rows — `filter.rs`/`agg.rs` never read it)"
+        );
+        assert_eq!(row.values.get("name"), Some(&Value::text("n7")));
+        assert_eq!(row.values.get("score"), Some(&Value::Integer(70)));
+        assert_eq!(
+            row.values.get("id"),
+            Some(&Value::Integer(7)),
+            "the partition-key column is reconstructed from the row key"
+        );
     }
 
     /// B2 (recv-wait exclusion): the drive loop must SUBTRACT the blocking
