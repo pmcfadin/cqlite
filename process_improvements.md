@@ -832,3 +832,37 @@ issues have landed). Keep entries short so a future reader can re-run the measur
       off-by-one line citation. **Standing rule: every derived figure must be
       recomputed from the artifact it claims, and any figure whose artifact was not
       retained must be labelled as such or re-measured — never quietly kept.**
+  29. **2026-07-29 — five lessons from #3058 (Flight single-SSTable merge bypass),
+      whose delivery burned 6 full gates + 3 deltas and discarded 5 certifications;
+      *5 of its 19 roborev findings were defects introduced by earlier fixes in the
+      same delivery*.** Each is a standing rule, not a war story:
+      - (a) **When a review finds one member of a divergence class, ask for the
+        exhaustive ENUMERATION, not a fix for that shape.** #3058's guard had to
+        mirror `assemble_complex` arm by arm; every round that fixed "the shape
+        roborev named" was followed by a round finding the next shape. The
+        deliverable to demand is the enumeration itself ("list every arm and show
+        the predicate's disposition of each"), which converged in one pass after
+        four rounds of one-at-a-time.
+      - (b) **Late in a delivery, do NOT accept a src-touching fix for a roborev Low
+        that no spec requirement demands.** Round 5 added a fail-closed guard for an
+        unreachable-today seam; it caused a **HIGH regression breaking pre-existing
+        BTI batched scans**, cost two gate cycles, and was reverted. The correct
+        disposition of a Low with no requirement behind it is a follow-up issue
+        (here: #3112, sequenced to land with or after #3109), not a late src edit.
+      - (c) **Verifying a guard's enumeration is COMPLETE is not the same as
+        verifying the mirror is FAITHFUL.** `spec-auditor` independently confirmed
+        #3058's 8-arm `assemble_complex` set was complete — and the predicate still
+        skipped `unwrap_frozen`, so it disagreed with the very function it mirrored
+        (#3112). Completeness is a property of the arm LIST; faithfulness is a
+        property of each arm's DISPOSITION. Audit both, separately.
+      - (d) **A cancellation/stop bound asserted by row or partition count is
+        scheduling luck, not a proof.** Bound it STRUCTURALLY — force the producer to
+        park (an egress ceiling) — rather than numerically. #3058 needed two attempts
+        to learn this; the second was caught by a red `--lite` gate, which is the
+        cheap place to catch it.
+      - (e) **A merged PR with `Closes #N` auto-closes the issue, so issue state is
+        NOT proof that `flow-finalize` ran.** #3058 read CLOSED at 05:16:17Z while
+        its worktree, its 1-day-old claim ref, its unarchived OpenSpec change and a
+        ledger with zero records for it all sat outstanding. Verify the four
+        artifacts directly — worktree removed, claim ref released, change archived,
+        telemetry line present — never the issue's `state` field.
