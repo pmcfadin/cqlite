@@ -72,6 +72,11 @@ pub(crate) enum SourceStep {
 /// materializing, exactly as the pre-#3058 loop did, so a token-excluded
 /// partition costs no row construction (and a decode error inside one cannot
 /// surface for a partition the split does not own).
+///
+/// A source DECORATOR that materializes rows itself must therefore apply the same
+/// token predicate first, so the invariant holds for the decorated arm too —
+/// `statics::StaticMergeSource` does (issue #3095 B5), which is why a
+/// `PendingRow::Materialized` never represents a token-excluded partition's row.
 pub(crate) enum PendingRow {
     /// A reconciled k-way merge entry (multi-source arm).
     Merged(Box<MergeEntry>),
