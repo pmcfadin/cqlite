@@ -588,8 +588,36 @@ impl SSTableReader {
         }
         // Full-ring fallback (no usable summary/index): the downstream token filter
         // still bounds the result set, so correctness holds without pushdown.
-        self.stream_all_partitions_for_compaction(schema, scan_cancel, emit)
-            .await
+        //
+        // QUERY-ARM caller-schema fidelity (issue #3097): the summary-guided walk
+        // above honours the caller's authoritative `schema`, but this fallback
+        // fires when `Summary.db` is absent/unusable (or the walk `FellBack`). For
+        // a non-stitching `V5_0Uncompressed` reader, `stream_all_partitions_for_
+        // compaction` delegates its non-stitch branch to
+        // `stream_all_partitions_cancellable`, whose full-index/sequential routes
+        // resolve the decode schema from the READER only — so a ticket-DDL
+        // clustering key (`ck`) would again surface as NULL exactly as in the
+        // summary-guided branch this issue fixed. So the QUERY arm threads its
+        // caller `schema` through `stream_all_partitions_cancellable` directly for
+        // that branch (adapting `ScanRow` → `CompactionRow` byte-identically to the
+        // compaction non-stitch branch). Compaction never routes through this
+        // method, and its own `stream_all_partitions_cancellable` call passes
+        // `None`, so compaction's effective decode schema is unchanged (#3097).
+        //
+        // Chunk-stitching (`nb`) and BTI (`da`) readers keep routing through
+        // `stream_all_partitions_for_compaction`, whose stitch/BTI decode already
+        // honours the passed `schema` (`schema.cloned().or_else(...)`), so no
+        // divergence is introduced there.
+        if self.requires_chunk_stitching() || self.bti_partitions_db.is_some() {
+            return self
+                .stream_all_partitions_for_compaction(schema, scan_cancel, emit)
+                .await;
+        }
+        self.stream_all_partitions_cancellable(scan_cancel, schema, |(key, value)| {
+            let row = super::super::compaction_row::CompactionRow::from_legacy_value(key, value, 0);
+            emit(row)
+        })
+        .await
     }
 }
 

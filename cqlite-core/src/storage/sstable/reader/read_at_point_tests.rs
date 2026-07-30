@@ -860,3 +860,123 @@ async fn merge_arm_query_stream_honours_caller_schema_clustering() {
          (fallback unchanged); got {cols_none:?}"
     );
 }
+
+/// Issue #3097 (roborev round 2 blocker): the WARM merge arm's FALLBACK —
+/// taken when `Summary.db` is absent/unusable, so the summary-guided walk never
+/// fires and enumeration delegates to `stream_all_partitions_cancellable`'s
+/// full-index/sequential decode — must ALSO honour the caller's authoritative
+/// schema. The prior fix only threaded the schema through the summary-guided
+/// branch, so this path still resolved the decode schema from the reader alone
+/// and surfaced a clustered `V5_0Uncompressed` reader's clustering column as the
+/// placeholder `clustering_key` (NULL `ck` to a projected `SELECT`).
+///
+/// Forces the fallback by DELETING the fixture's `Summary.db` before open, then
+/// pins that `stream_all_partitions_for_query(Some(schema), …)` yields the
+/// clustering column under the caller's real name `ck` — and with `None` still
+/// falls back to the reader-derived placeholder, proving the parameter (not the
+/// bytes) governs. RED before this change (fallback hard-coded reader-derived),
+/// GREEN after.
+#[cfg(all(feature = "write-support", feature = "lz4"))]
+#[tokio::test]
+async fn merge_arm_query_fallback_no_summary_honours_caller_schema_clustering() {
+    use std::collections::BTreeSet;
+    use std::ops::ControlFlow;
+
+    use super::compaction_row::{CompactionRow, CompactionRowData};
+    use crate::storage::scan_cancel::ScanCancel;
+
+    let (_temp, data_path, schema) = build_uncompressed_classified_clustered_fixture().await;
+
+    // Force the FALLBACK path: remove the `Summary.db` sibling so the reader opens
+    // without a usable summary and `stream_all_partitions_for_query` skips the
+    // summary-guided walk entirely, delegating to the full-index/sequential
+    // fallback (`stream_all_partitions_cancellable`) — the path this test covers.
+    let summary_path = data_path.with_file_name(
+        data_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .expect("data file name")
+            .replace("-Data.db", "-Summary.db"),
+    );
+    if summary_path.exists() {
+        std::fs::remove_file(&summary_path).expect("remove Summary.db to force fallback");
+    }
+
+    let reader = open_reader(&data_path).await.expect("open fixture reader");
+
+    // Preconditions: the non-stitching V5_0Uncompressed branch (the only arm the
+    // bug is observable on) AND no usable Summary.db (so the summary-guided walk
+    // does NOT run — this exercises the fallback, not the already-fixed branch).
+    assert!(
+        !reader.requires_chunk_stitching(),
+        "fixture must classify as the non-stitching V5_0Uncompressed branch"
+    );
+    assert!(
+        reader.compression_info.is_none() && reader.bti_partitions_db.is_none(),
+        "fixture must be an uncompressed BIG reader (no CompressionInfo.db, no BTI)"
+    );
+    assert!(
+        reader
+            .summary_reader
+            .as_ref()
+            .map(|s| s.get_entries().is_empty())
+            .unwrap_or(true),
+        "Summary.db must be absent/empty so the summary-guided walk is skipped and \
+         the query arm takes the full-index/sequential FALLBACK under test"
+    );
+
+    async fn columns_seen(
+        reader: &SSTableReader,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> (usize, BTreeSet<String>) {
+        let cancel = ScanCancel::default();
+        let mut rows = 0usize;
+        let mut cols = BTreeSet::new();
+        reader
+            .stream_all_partitions_for_query(schema, &cancel, None, |r: CompactionRow| {
+                rows += 1;
+                if let CompactionRowData::Live { simple, .. } = &r.row_data {
+                    for c in simple {
+                        cols.insert(c.column.clone());
+                    }
+                }
+                Ok(ControlFlow::Continue(()))
+            })
+            .await
+            .expect("fallback merge-arm query stream");
+        (rows, cols)
+    }
+
+    let (rows_with, cols_with) = columns_seen(&reader, Some(&schema)).await;
+    let (rows_none, cols_none) = columns_seen(&reader, None).await;
+
+    assert_eq!(
+        rows_with, 400,
+        "the fallback must emit exactly one row per fixture partition — a \
+         zero/short result is a failure, not a vacuous pass"
+    );
+    assert_eq!(
+        rows_none, 400,
+        "the None-schema fallback must emit every row too"
+    );
+
+    // The FIX: the caller schema wins through the fallback too.
+    assert!(
+        cols_with.contains("ck"),
+        "the fallback must decode the clustering column under the caller's \
+         authoritative name `ck` (issue #3097 round 2); got {cols_with:?}"
+    );
+    assert!(
+        !cols_with.contains("clustering_key"),
+        "the fallback must NOT surface the placeholder `clustering_key` when the \
+         caller supplied a real schema; got {cols_with:?}"
+    );
+
+    // Fallback-of-the-fallback preserved: with NO caller schema the reader-derived
+    // placeholder still governs, proving the PARAMETER changed the outcome.
+    assert!(
+        cols_none.contains("clustering_key") && !cols_none.contains("ck"),
+        "with no caller schema the reader-derived placeholder must still apply; \
+         got {cols_none:?}"
+    );
+}
