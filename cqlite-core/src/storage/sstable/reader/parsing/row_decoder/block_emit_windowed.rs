@@ -306,6 +306,16 @@ impl V5CompressedLegacyParser {
                     // Issue #1642 (K3): positional `RowCells`, matching the decoder emit.
                     let mut static_cells: RowCells = Vec::new();
                     let mut row_count = 0;
+                    // Issue #3095: Cassandra's `partition.hasNext()` — clustering
+                    // rows only (the static row is delivered out of band by
+                    // `partition.staticRow()`), plus proof that this call really
+                    // saw the partition's END. A partition body that is only
+                    // PARTIALLY present in `data` must never be mistaken for an
+                    // empty one, so the static-only row below is emitted solely
+                    // when the walk reached `END_OF_PARTITION` or the next
+                    // partition header.
+                    let mut emitted_clustering_row = false;
+                    let mut partition_complete = false;
                     loop {
                         // Issue #954: stop at the clustering-slice end bound. The
                         // row-index block extent (`body_end`) is the authoritative
@@ -330,6 +340,7 @@ impl V5CompressedLegacyParser {
                                 partition_index, offset, row_count
                             );
                             offset += 1; // Skip the END_OF_PARTITION marker byte
+                            partition_complete = true;
                             break; // Move to next partition
                         }
 
@@ -469,10 +480,6 @@ impl V5CompressedLegacyParser {
                                     // Do NOT push to results — static rows are not result rows
                                     // Continue to next row/marker in partition
                                 } else {
-                                    // Merge static cells into this clustering row (Issue #480;
-                                    // positional, clustering-row-wins, issue #1642).
-                                    merge_static_cells(&mut cells, &static_cells);
-
                                     // Issue #1741: hide rows shadowed by a partition or
                                     // range tombstone, or expired by TTL, matching a
                                     // Cassandra SELECT. Active only for query reads
@@ -491,10 +498,29 @@ impl V5CompressedLegacyParser {
                                         })
                                     });
 
-                                    // Issue #505/#932: row-tombstone display rule now
-                                    // lives in the shared `build_display_row` helper.
-                                    let row_value =
-                                        build_display_row(cells, row_header_opt.as_ref(), schema);
+                                    // Issue #505/#932: row-tombstone display rule lives
+                                    // in the shared `build_display_row` helper. Issue
+                                    // #480/#1642: static cells are merged in
+                                    // (positional, clustering-row-wins).
+                                    //
+                                    // Issue #3095: on a user-facing SELECT read the
+                                    // tombstone decision is taken over the row's OWN
+                                    // cells FIRST, so a static value cannot revive a
+                                    // row-tombstoned row (see
+                                    // `build_display_row_read_path`). Physical consumers
+                                    // keep the historical inject-then-decide order, so
+                                    // their byte-pinned output is unchanged.
+                                    let row_value = if shadow.is_some() {
+                                        build_display_row_read_path(
+                                            cells,
+                                            &static_cells,
+                                            row_header_opt.as_ref(),
+                                            schema,
+                                        )
+                                    } else {
+                                        merge_static_cells(&mut cells, &static_cells);
+                                        build_display_row(cells, row_header_opt.as_ref(), schema)
+                                    };
 
                                     // Issue #954: count each clustering row actually
                                     // decoded out of Data.db so a slice query can be
@@ -507,6 +533,15 @@ impl V5CompressedLegacyParser {
                                     crate::storage::sstable::work_counters::add_rows_decoded(1);
 
                                     if !hidden {
+                                        // Issue #3095 (roborev + rust-reviewer
+                                        // BLOCKER): only a VISIBLE row counts as one
+                                        // of Cassandra's `partition.hasNext()` rows —
+                                        // a `ScanRow::Marker` (pure row tombstone) is
+                                        // suppressed downstream by every user-facing
+                                        // consumer, so counting it would hide the
+                                        // static row of a partition whose clustering
+                                        // rows are all deleted. See `row_is_visible`.
+                                        emitted_clustering_row |= row_is_visible(&row_value);
                                         match emit((
                                             table_id.clone(),
                                             partition_key.clone(),
@@ -545,6 +580,7 @@ impl V5CompressedLegacyParser {
                                         "V5CompressedLegacy: Partition {} complete: {} rows parsed (next partition detected at offset {})",
                                         partition_index, row_count, offset
                                     );
+                                    partition_complete = true;
                                     break; // Next partition starts here
                                 }
 
@@ -569,6 +605,68 @@ impl V5CompressedLegacyParser {
                                 }
                                 break; // End of valid data in partition
                             }
+                        }
+                    }
+
+                    // Issue #3095: Cassandra's static-content-on-an-empty-partition
+                    // rule. `SelectStatement.processPartition()` (cassandra-5.0.8,
+                    // L1099-1120): with NO clustering rows and a non-empty
+                    // out-of-band `partition.staticRow()`, the query returns EXACTLY
+                    // ONE row — clustering + REGULAR columns null
+                    // (`default: result.add((ByteBuffer) null)`), STATIC columns
+                    // populated — and that branch `return`s, making it mutually
+                    // exclusive with the per-row loop.
+                    //
+                    // Gated on `read_shadowing` (user-facing SELECT reads only), so a
+                    // PHYSICAL consumer still sees exactly the on-disk unfiltereds and
+                    // sstabledump/compaction parity is unchanged; on
+                    // `partition_complete`, so a partially-present partition body is
+                    // never mistaken for an empty one; and on a clustering-slice
+                    // window being absent, since a slice read decodes only part of the
+                    // partition (a static-bearing schema never takes the row-index
+                    // fast-forward today, so this is a belt-and-braces invariant).
+                    //
+                    // RESIDUAL, stated rather than left implicit (issue #3095 review):
+                    // `partition_complete` is established PER BLOCK here — it is set
+                    // only by this block's `END_OF_PARTITION` byte or by the next
+                    // partition's header appearing in THIS block. So a static-only
+                    // partition whose `END_OF_PARTITION` byte lands in the NEXT
+                    // decompressed block yields 0 rows where Cassandra returns 1. The
+                    // direction is FAIL-CLOSED (a row withheld, never a phantom row or
+                    // a wrong value), and the shape is narrow: a static-only partition
+                    // is a partition header + one static row, so its body straddling a
+                    // block boundary requires the boundary to fall inside those few
+                    // bytes. Closing it needs an `at_final_block`-style signal threaded
+                    // from every caller (`data_access::big_promoted`,
+                    // `data_access::bti_point`, the Summary-guided walk), i.e. the
+                    // `at_final_chunk` contract `drive_partition_sliding` already has —
+                    // which is why the SLIDING path (the full-scan route, and the one
+                    // the Flight fast arm drives) does NOT have this residual.
+                    //
+                    // `static_cells` is already empty when the static row was shadowed
+                    // by the partition tombstone or expired by its own TTL (#1741
+                    // Finding 1), so a stale static row cannot resurface. The
+                    // clustering/regular-restriction half of
+                    // `returnStaticContentOnPartitionWithNoRows()` is enforced
+                    // downstream: this row's clustering AND regular columns are null,
+                    // so any restriction on one of them (the only way
+                    // `queriesFullPartitions()` becomes false) rejects it under the
+                    // three-valued predicate rule that keeps a row only when the
+                    // predicate is definitely True.
+                    if self.read_shadowing
+                        && partition_complete
+                        && row_body_end.is_none()
+                        && !emitted_clustering_row
+                        && !static_cells.is_empty()
+                    {
+                        // Non-empty cells holding a static (non-key) column, so the
+                        // shared display rule yields `ScanRow::Row`; no header is
+                        // needed (a shadowed/tombstoned static row already emptied
+                        // `static_cells`).
+                        let row_value = build_display_row(static_cells, None, schema);
+                        match emit((table_id.clone(), partition_key.clone(), row_value))? {
+                            std::ops::ControlFlow::Continue(()) => emitted += 1,
+                            std::ops::ControlFlow::Break(()) => return Ok(()),
                         }
                     }
 
@@ -910,166 +1008,5 @@ impl V5CompressedLegacyParser {
         self.drive_partition_sliding(data, schema, reader, at_final_chunk, &mut policy, |row| {
             emit(row)
         })
-    }
-}
-
-/// Issue #1640 (K1): [`SlidingPartitionPolicy`] for the streaming-scan /
-/// compaction-read `(TableId, RowKey, ScanRow, row_timestamp)` path
-/// (`parse_block_with_timestamps` family). Read-side shadowing is active only
-/// when the parser was built for a user-facing query read (`read_shadowing`);
-/// physical consumers leave `shadow` `None` and see every on-disk row.
-struct TimestampPolicy<'a> {
-    parser: &'a V5CompressedLegacyParser,
-    table_id: TableId,
-    partition_key: RowKey,
-    /// Issue #1741 per-partition read-side shadow; `None` for physical reads.
-    shadow: Option<PartitionShadow>,
-    /// Issue #480 static cells accumulated for merge into each clustering row.
-    /// Issue #1642 (K3): positional `RowCells`, matching the decoder emit.
-    static_cells: RowCells,
-}
-
-impl<'a> TimestampPolicy<'a> {
-    fn new(parser: &'a V5CompressedLegacyParser) -> Self {
-        Self {
-            parser,
-            table_id: TableId::new(format!("{}.{}", parser.keyspace, parser.table_name)),
-            partition_key: RowKey::new(Vec::new()),
-            shadow: None,
-            static_cells: Vec::new(),
-        }
-    }
-}
-
-impl SlidingPartitionPolicy for TimestampPolicy<'_> {
-    type Row = (TableId, RowKey, ScanRow, i64);
-
-    fn on_partition_open(
-        &mut self,
-        partition_key: RowKey,
-        partition_deletion: Option<(i64, i32)>,
-        schema: &TableSchema,
-        _pending: &mut Vec<Self::Row>,
-    ) {
-        self.partition_key = partition_key;
-        // Issue #1741 (F2): reuse the parser's once-per-read `now_secs`, not a
-        // per-block wall-clock sample, so all blocks of one scan share one `now`.
-        self.shadow = self.parser.read_shadowing.then(|| {
-            PartitionShadow::open(
-                self.parser.now_secs,
-                partition_deletion,
-                clustering_reversed_flags(schema),
-            )
-        });
-    }
-
-    fn on_range_marker(
-        &mut self,
-        data: &[u8],
-        offset: usize,
-        schema: &TableSchema,
-        _pending: &mut Vec<Self::Row>,
-    ) -> MarkerOutcome {
-        // Issue #1741: on the user-facing scan path decode the marker and feed
-        // the range-tombstone FSM so covered rows are shadowed; the physical path
-        // (shadow == None) only advances past it.
-        if let Some(sh) = self.shadow.as_mut() {
-            match self
-                .parser
-                .parse_range_tombstone_marker_full(data, offset, schema)
-            {
-                Ok((bv, bk, dp, ds, next_offset)) => {
-                    if sh.feed_range_marker(bv, bk, dp, ds).is_err() {
-                        return MarkerOutcome::Stop;
-                    }
-                    MarkerOutcome::Advanced(next_offset)
-                }
-                Err(_) => MarkerOutcome::Stop,
-            }
-        } else {
-            match self
-                .parser
-                .skip_range_tombstone_marker(data, offset, schema)
-            {
-                Ok(next_offset) => MarkerOutcome::Advanced(next_offset),
-                Err(_) => MarkerOutcome::Stop,
-            }
-        }
-    }
-
-    fn on_data_row(
-        &mut self,
-        data: &[u8],
-        offset: usize,
-        schema: &TableSchema,
-        reader: &crate::storage::sstable::reader::types::SSTableReader,
-        resolution: &RowColumnResolution,
-        pending: &mut Vec<Self::Row>,
-    ) -> Option<usize> {
-        match self.parser.parse_row_data_with_offset(
-            data,
-            offset,
-            Some(schema),
-            reader,
-            false,
-            resolution,
-            self.shadow.as_ref(),
-        ) {
-            Ok((
-                mut cells,
-                _row_cell_meta,
-                row_header_opt,
-                next_offset,
-                is_static,
-                _complex_meta,
-            )) => {
-                // Issue #932 (K1): the ONE row-write-timestamp coexistence rule.
-                let row_ts = row_write_timestamp(&row_header_opt);
-
-                if is_static {
-                    // Issue #1741 (Finding 1): drop a shadowed/expired static row's
-                    // cells so a surviving clustering row does not resurface stale
-                    // static data. No-op when shadowing is off.
-                    let static_hidden = self.shadow.as_ref().is_some_and(|sh| {
-                        row_header_opt
-                            .as_ref()
-                            .is_some_and(|h| sh.row_hidden(h, &[]))
-                    });
-                    self.static_cells = if static_hidden { Vec::new() } else { cells };
-                } else {
-                    // Positional, clustering-row-wins merge (issue #1642).
-                    merge_static_cells(&mut cells, &self.static_cells);
-
-                    // Issue #1741: hide rows shadowed by a partition/range tombstone
-                    // or expired by TTL (matching a Cassandra SELECT). No-op on the
-                    // physical path (shadow == None).
-                    let hidden = self.shadow.as_ref().is_some_and(|sh| {
-                        row_header_opt.as_ref().is_some_and(|h| {
-                            let clustering = if sh.needs_clustering() {
-                                extract_clustering_values(&cells, schema)
-                            } else {
-                                Vec::new()
-                            };
-                            sh.row_hidden(h, &clustering)
-                        })
-                    });
-
-                    // Issue #505/#932: row-tombstone display rule lives in the
-                    // shared `build_display_row` helper.
-                    let row_value = build_display_row(cells, row_header_opt.as_ref(), schema);
-
-                    if !hidden {
-                        pending.push((
-                            self.table_id.clone(),
-                            self.partition_key.clone(),
-                            row_value,
-                            row_ts,
-                        ));
-                    }
-                }
-                Some(next_offset)
-            }
-            Err(_) => None,
-        }
     }
 }

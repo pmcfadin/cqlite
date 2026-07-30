@@ -40,6 +40,9 @@ pub mod obs_subphase;
 pub mod pathsafe;
 pub mod point_read;
 pub mod producer;
+// The BUFFERED (whole-partition) drive loops — campsite split of `producer.rs`
+// (epic #1116); sibling of `producer_stream`'s row-granular loop.
+mod producer_drive;
 mod producer_point;
 mod producer_stream;
 mod producer_warm;
@@ -51,6 +54,9 @@ pub mod scan_progress;
 pub mod service;
 pub mod shutdown;
 pub mod stats;
+// Cassandra STATIC-column `SELECT` semantics for the k-way merge arm of the row
+// route (issue #3095).
+mod statics;
 pub mod streaming;
 pub mod warm;
 
