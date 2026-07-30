@@ -498,9 +498,23 @@ same board-only rehydration rule applies to worker sessions (see the supervisor 
 <p>A fresh machine that will run the pipeline should first run
 <code dir="auto">bash scripts/bootstrap-agent-machine.sh</code> (details in <code dir="auto">docs/development/agent-machine-setup.md</code>): it
 verifies the gate accelerators (<code dir="auto">sccache</code>, <code dir="auto">cargo-nextest</code>, modern bash — issue #1848), the datasets +
-<code dir="auto">CQLITE_DATASETS_ROOT</code>, <code dir="auto">gh</code> auth + the <code dir="auto">project</code> scope, and roborev’s local config. <strong>roborev follows the
-machine’s configured agent</strong> (commonly <code dir="auto">codex</code> via <code dir="auto">.roborev.toml</code>; no flags) — explicit <code dir="auto">--agent</code>/<code dir="auto">--model</code>
-is a per-machine troubleshooting override only, never doctrine.</p>
+<code dir="auto">CQLITE_DATASETS_ROOT</code>, <code dir="auto">gh</code> auth + the <code dir="auto">project</code> scope, and roborev’s local config. <strong>roborev is invoked
+ONLY through the fail-closed wrapper <code dir="auto">bash scripts/flow/roborev-review.sh --agent &#x3C;agent> --model &#x3C;model> [--repo &#x3C;abs-path>] [--base &#x3C;ref>]</code></strong> (#2964) — fleet form <code dir="auto">--agent codex --model gpt-5.6-sol</code>; the Claude
+reviewer is <code dir="auto">--agent claude-code --model claude-opus-5</code>. <strong>BOTH <code dir="auto">--agent</code> and <code dir="auto">--model</code> are ALWAYS
+required</strong> (the wrapper rejects a missing one as a usage error; one alone inherits the mismatched
+<code dir="auto">.roborev.toml</code>-pinned model and fails as a silent-looking review outage), and the branch must be <strong>pushed
+first</strong> — the wrapper asserts that and FAILs otherwise. Three direct-CLI forms are <strong>NON-SANCTIONED</strong>:
+<code dir="auto">roborev review --branch</code> <strong>without an explicit <code dir="auto">--repo</code></strong> (from a worktree it resolves against the ROOT
+checkout), the two-positional commit-range form (its range base is git’s empty tree), and a single-SHA
+review (it reviews <strong>one commit, not the branch</strong>). Each can report clean having reviewed NOTHING — or, for
+the single-SHA form, only the last commit — and a vacuous pass is textually identical to a genuine one.
+Measured: <strong><code dir="auto">--repo</code> is what makes <code dir="auto">--branch</code> correct</strong>, so the wrapper reviews the RANGE <code dir="auto">&#x3C;base>..HEAD</code> and
+verifies BOTH endpoints against the job record (<code dir="auto">reviewed-sha:</code> is a range, not a sha; <code dir="auto">job-record:</code> reports
+the record’s completeness). Note too that roborev excludes non-code paths from the diff it builds, so a
+docs-only diff cannot be roborev-certified at all. <strong>Any</strong> non-PASS terminal <code dir="auto">RESULT</code> —
+<code dir="auto">NOTHING-TO-REVIEW</code> included — is a failed review round and a blocked merge, never a clean pass. Verify
+which reviewer a box can actually serve with <code dir="auto">roborev check-agents</code>; why:
+<a href="/cqlite/agents-developing/roborev-findings/">roborev findings</a> + CLAUDE.md.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="pipelining-independent-lanes-retro-1889">Pipelining independent lanes (retro #1889)</h2><a class="sl-anchor-link" href="#pipelining-independent-lanes-retro-1889"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Pipelining independent lanes (retro #1889)”</span></a></div>
 <p>The lead <strong>pipelines</strong> near-independent issues rather than serializing on long waits (a full gate is
 15–25 min, plus CI and roborev round-trips):</p>
