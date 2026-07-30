@@ -14,6 +14,7 @@
 use super::super::scan_stream_windowed::scan_admission::{self, ScanAdmission};
 use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
 use super::super::SSTableReader;
+use super::batched_scan_stream::BatchedScanStream;
 use super::model::{
     sort_by_token_order, sort_by_token_order_with_meta, table_ids_match, SCAN_FOR_KEY_CALLS,
 };
@@ -523,7 +524,7 @@ impl SSTableReader {
         end_key: Option<RowKey>,
         schema: Option<crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>> {
+    ) -> BatchedScanStream {
         self.scan_stream_batched_admitted(
             table_id,
             start_key,
@@ -552,14 +553,14 @@ impl SSTableReader {
         buffer_size: usize,
         admission: ScanAdmission,
         now_secs: Option<i64>,
-    ) -> mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>> {
+    ) -> BatchedScanStream {
         // The public channel carries BATCHES; sizing it to
         // `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps the resident-row
         // budget of this channel comparable to the per-row surface's `buffer_size`
         // rather than `buffer_size * BATCH_EMIT_ROWS`.
         let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS).max(1);
         let (tx, rx) = mpsc::channel(cap);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             if let Err(e) = self
                 .run_scan_stream_batched(
                     table_id,
@@ -575,7 +576,7 @@ impl SSTableReader {
                 let _ = tx.send(Err(e)).await;
             }
         });
-        rx
+        BatchedScanStream::new(rx, task)
     }
 
     async fn run_scan_stream_batched(
@@ -596,7 +597,7 @@ impl SSTableReader {
             ScanAdmission::Exempt => None,
         };
 
-        let cursor = self.new_scan_cursor().await?;
+        let cursor = self.open_batched_scan_cursor().await?;
         let header_size = self.calculate_header_size();
         {
             let mut file_guard = cursor.file.lock().await;
@@ -651,12 +652,7 @@ impl SSTableReader {
                         return Err(e);
                     }
                 };
-                let entries = match self.parse_block_entries_at_now(
-                    &block,
-                    schema.as_ref(),
-                    true,
-                    now_secs,
-                ) {
+                let entries = match self.parse_batched_block(&block, schema.as_ref(), now_secs) {
                     Ok(entries) => entries,
                     Err(e) => {
                         if !batch.is_empty() {

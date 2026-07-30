@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A dead producer no longer completes a query SUCCESSFULLY with a silently
+  truncated result set (#3106).** Both channel boundaries behind the
+  single-generation read path (used by the Flight `do_get` row route) treated
+  "sender dropped" as "the scan finished", so a producer thread/task that UNWOUND —
+  a panic anywhere in the walk or decode, rather than an `Err` return — ended the
+  request with **fewer rows than the table holds, no error and no log**.
+  - The query row stream's producer→consumer protocol now has an EXPLICIT terminator
+    (`Done`) and a distinct `Failed` message; a disconnect WITHOUT a terminator is an
+    `Error::Internal` naming the truncation, never a clean end of stream. The
+    producer thread additionally runs under `catch_unwind`, so a panic reaches the
+    client as an informative error carrying the panic message.
+  - The batched streaming scan's driver task is now JOINED when its channel closes
+    (`BatchedScanStream`), so a task that panicked/was cancelled surfaces as an
+    `Error::Internal` instead of an empty-but-successful end of stream. This closes
+    the same hole for the streaming `SELECT` and aggregate-fold paths, which
+    consume the same surface.
+  - Both errors are `is_recoverable() == false`: the failure is deterministic, so a
+    retry would reproduce it.
+
 - **BTI `Rows.db` row-index base + leading `NEXT_COMPONENT` byte (#3002, #3040).** Two
   defects that cancelled each other on the BTI clustering read path are corrected:
   (a) the per-partition `TrieIndexEntry`'s SIGNED root delta is now measured from
@@ -54,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Result<ValidatedRowsTrieRoot, RowsTrieRootRejection>` instead of a bare `usize`, so
   an unvalidated row-index root cannot be traversed by accident; use
   `trie_root_offset()` / `require_trie_root()` (#3002).
+- **Breaking (API):** the batched streaming scan now returns
+  `sstable::reader::BatchedScanStream` instead of
+  `tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>` — affecting
+  `StorageEngine::scan_stream_batched`, `SSTableManager::scan_stream_batched` (both
+  feature variants) and `SSTableReader::scan_stream_batched`/`_admitted`. The new type
+  owns the scan task's `JoinHandle` so a dead task cannot masquerade as end-of-stream
+  (#3106). Its `recv()` keeps the same `async fn(&mut self) -> Option<Result<..>>`
+  shape, so the usual `while let Some(batch) = stream.recv().await` consumer compiles
+  unchanged; code that named the `Receiver` type, stored it in a struct field, or
+  called `Receiver`-specific methods (`try_recv`, `blocking_recv`, `close`) must be
+  updated.
 
 ## [v0.16.1] - 2026-07-23
 
