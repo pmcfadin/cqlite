@@ -19,11 +19,12 @@
 //!   * real Cassandra `nb` fixtures from the query-semantics oracle
 //!     (`test_compaction_tombstone_ttl`): range tombstone, row deletion,
 //!     expired-TTL cell + expired row-liveness marker, surviving live rows;
-//!   * the STATIC-column fail-closed fallback, on both a CQLite-written fixture
-//!     (including a static-ONLY partition) and the real Cassandra
-//!     `test_writeparity.static_clustering_shape`: a static-bearing schema must
-//!     take the MERGE arm and return exactly what it returns today (the two arms
-//!     genuinely disagree there — see `BypassReason::StaticColumns`);
+//!   * STATIC columns as an ARM DIFFERENTIAL (issue #3095): a CQLite-written
+//!     fixture (including a static-ONLY partition) and the real Cassandra
+//!     `test_writeparity.static_clustering_shape`, both with a DECLARING ticket
+//!     DDL, must agree row-for-row across the arms. Only the UNDECLARED-on-disk
+//!     static column still fails closed to the merge arm (see
+//!     `BypassReason::StaticColumns`), pinned by the `@stale-ddl` case;
 //!   * a CQLite-written fixture carrying a partition deletion, a range tombstone,
 //!     a row deletion, an expired-TTL cell and a live-TTL cell,
 //!     read at TWO pinned `now` values so the pinned clock itself is pinned;
@@ -841,22 +842,29 @@ async fn forced_path_differential_agrees_on_every_shape() {
         );
     }
 
-    // ---- Static columns: the fail-closed fallback --------------------------
-    // A static-bearing schema must NOT take the fast path: the arms disagree on
-    // static-row shape (the merge arm emits a `ck = null` static row and injects
-    // nothing; the single-generation decoder injects statics into the clustering
-    // rows but drops a static-ONLY partition entirely). Both are wrong in
-    // DIFFERENT ways versus Cassandra, so this change keeps today's behaviour
-    // exactly and the divergence is a documented follow-up.
+    // ---- Static columns: an ARM DIFFERENTIAL (issue #3095) -----------------
+    // The static exclusion this case used to pin is RETIRED: both arms now
+    // implement Cassandra's `processPartition()` static semantics (statics merged
+    // into every clustering row; a static-only partition returning exactly one
+    // row), so a schema DECLARING its static columns is servable by the fast arm
+    // and the two must agree row-for-row.
+    //
+    // SCOPE, stated so this case is not mistaken for a Cassandra oracle: the
+    // fixture is CQLITE-WRITTEN, so its ROW CONTENT proves nothing about
+    // Cassandra (it is invariant to a uniform error and is subject to the
+    // write-side #1074 — #3042). What it does prove is ARM-INVARIANCE over bytes
+    // whose static layout differs from Cassandra's. The Cassandra-parity oracle
+    // is `cqlite-flight/tests/issue_3095_flight_static_columns.rs`, on
+    // Cassandra-written fixtures including a static-ONLY partition.
     let (_stemp, statics_dir) = build_statics_fixture().await;
     let ssvc = CqliteFlightService::new(statics_dir, 8192);
     let sticket = ticket_json(KS, STATIC_TBL, STATIC_DDL);
-    assert_refused_schema_unchanged(
+    let _ = assert_arms_agree(
         "statics/select-star",
         &ssvc,
         &sticket,
         NOW_BEFORE_EXPIRY,
-        None,
+        1,
         &mut failures,
     )
     .await;
@@ -1174,10 +1182,12 @@ fn dataset_cases() -> Vec<DatasetCase> {
         },
         // REAL Cassandra static shape: `sdata` was written by
         // `UPDATE static_clustering_shape SET sdata='static-val' WHERE id=1`
-        // alongside an INSERTed clustering row. Its schema declares a STATIC
-        // column, so the predicate REFUSES the fast path (the arms disagree on
-        // static-row shape) — this case pins that fail-closed fallback on real
-        // Cassandra bytes.
+        // alongside an INSERTed clustering row. Issue #3095: with both arms now
+        // implementing Cassandra's `processPartition()` static semantics, a ticket
+        // DDL that DECLARES `sdata static` is servable by the fast arm, so this is
+        // an arm differential rather than a fail-closed fallback. (Its
+        // Cassandra-parity assertion — 1 row, static value present, no `ck = null`
+        // row — lives in `issue_3095_flight_static_columns.rs`.)
         // Spec R1/R6 (roborev): this table declares `set<frozen<contact_info>>`
         // and `map<text, frozen<contact_info>>` — a composite-keyed collection the
         // MERGE arm's reassembler fails closed on (#2339) while the
@@ -1289,7 +1299,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             token_of_int_pk: None,
         },
         DatasetCase {
-            label: "cassandra/static_clustering_shape(fail-closed static fallback)",
+            label: "cassandra/static_clustering_shape(declared static, both arms)",
             pk_only_label: "cassandra/static_clustering_shape@pk-only",
             keyspace: "test_writeparity",
             table: "static_clustering_shape",
@@ -1299,7 +1309,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             pinned_now: ORACLE_PINNED_NOW,
             min_rows: 1,
             pk_only_projection: vec![],
-            refuses_fast_arm: true,
+            refuses_fast_arm: false,
             refused_error_substr: None,
             columns: vec![],
             token_of_int_pk: None,
