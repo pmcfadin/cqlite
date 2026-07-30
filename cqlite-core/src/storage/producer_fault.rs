@@ -178,8 +178,23 @@ pub enum ScanTaskSite {
     /// site is that a death here must NOT be answered by silently substituting the
     /// concat (roborev on #3124).
     ///
-    /// Constructed only on the non-`tombstones` path, like [`Self::FanoutMerge`].
-    #[cfg_attr(feature = "tombstones", allow(dead_code))]
+    /// # Gated to exactly where the site EXISTS
+    ///
+    /// `generation_merge` is a `write-support` module (it drives the write engine's
+    /// `KWayMerger`) and its streaming entry point is additionally
+    /// `cfg(not(tombstones))` — a `tombstones` build routes `scan_stream` through the
+    /// materializing `scan`. So this checkpoint exists in exactly one configuration,
+    /// and the variant is `#[cfg]`'d to match it rather than kept everywhere behind an
+    /// `allow(dead_code)`: in a read-only (`--no-default-features`) build there is no
+    /// cross-generation merge task to arm, and a variant nothing can ever construct
+    /// there would be a lie about the seam's coverage. Its only two references — the
+    /// checkpoint call and the end-to-end pin in
+    /// `scan_stream_fanout_panic_tests.rs` — carry this same triple already.
+    ///
+    /// ([`Self::FanoutMerge`] cannot use a `#[cfg]` here: this module's own always-
+    /// compiled unit tests name it, so under `--all-features` (i.e. `tombstones` on)
+    /// cfg'ing it away would break those tests rather than silence a lint.)
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
     CrossGenerationMerge,
 }
 
