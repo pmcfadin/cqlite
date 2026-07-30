@@ -154,7 +154,9 @@ async fn build_two_generation_fixture(schema: &TableSchema) -> (tempfile::TempDi
     let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema.clone());
     let mut engine = WriteEngine::new(config).expect("engine");
 
-    engine.write(insert_liveness_marker_only()).expect("write 1");
+    engine
+        .write(insert_liveness_marker_only())
+        .expect("write 1");
     engine
         .flush()
         .await
