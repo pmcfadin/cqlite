@@ -84,15 +84,38 @@ chmod +x "$stubbin/roborev"
 # ---------------------------------------------------------------------------
 git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c commit.gpgsign=false "${@:2}"; }
 
-make_fixture() { # make_fixture <name> <mode: pushed|unpushed|empty|docs-only> -> prints work dir
+# Modes:
+#   pushed          wide refspec, feature pushed (mirror ref present -> fast path)
+#   unpushed        wide refspec, feature never pushed
+#   empty           wide refspec, feature == main, pushed
+#   docs-only       wide refspec, markdown-only change, pushed
+#   narrow          NARROW refspec (+refs/heads/main:refs/remotes/origin/main) —
+#                   feature IS pushed but no refs/remotes/origin/feature ever
+#                   exists. This is THE fleet's real configuration, under which a
+#                   mirror-ref push assert false-FAILs unconditionally.
+#   narrow-behind   narrow refspec, pushed, then one extra LOCAL commit
+#   narrow-upstream narrow refspec on a remote named `upstream` with
+#                   branch.feature.remote=upstream (hardcoding `origin` breaks)
+#   unreachable     pushed, mirror ref removed, remote URL repointed at a missing
+#                   path so `git ls-remote` FAILS (infra/auth condition)
+#   no-base         pushed, then refs/remotes/origin/main deleted so the default
+#                   --base origin/main cannot resolve
+make_fixture() { # make_fixture <name> <mode> -> prints work dir
   # NOTE: separate statements on purpose — `local` is a builtin, so ALL of its
   # arguments are expanded before any assignment takes effect; `local a=$1 b=$a`
   # would read an unset `a` and abort under `set -u`.
-  local name mode root work
+  local name mode root work remote narrow
   name="$1"
   mode="$2"
   root="$tmp/$name"
   work="$root/work"
+  remote=origin
+  narrow=0
+  case "$mode" in
+    narrow|narrow-behind) narrow=1 ;;
+    narrow-upstream) narrow=1; remote=upstream ;;
+  esac
+
   mkdir -p "$root"
   git init -q --bare "$root/origin.git"
   git init -q -b main "$work"
@@ -100,33 +123,59 @@ make_fixture() { # make_fixture <name> <mode: pushed|unpushed|empty|docs-only> -
   printf 'fn main() {}\n' >"$work/main.rs"
   git_q "$work" add README.md main.rs
   git_q "$work" commit -q -m base
-  git_q "$work" remote add origin "$root/origin.git"
-  git_q "$work" push -q origin main
+  git_q "$work" remote add "$remote" "$root/origin.git"
+  if [ "$narrow" -eq 1 ]; then
+    git_q "$work" config "remote.$remote.fetch" "+refs/heads/main:refs/remotes/$remote/main"
+  fi
+  git_q "$work" push -q "$remote" main
 
+  git_q "$work" checkout -q -b feature main
   case "$mode" in
-    empty)
-      git_q "$work" checkout -q -b feature main
-      git_q "$work" push -q origin feature
-      ;;
+    empty) : ;;
     docs-only)
-      git_q "$work" checkout -q -b feature main
       printf 'doc line\ndoc line 2\n' >>"$work/README.md"
       printf '# spec\n' >"$work/NOTES.md"
       git_q "$work" add README.md NOTES.md
       git_q "$work" commit -q -m 'docs only'
-      git_q "$work" push -q origin feature
       ;;
     *)
-      git_q "$work" checkout -q -b feature main
       printf 'fn helper() {}\n' >>"$work/main.rs"
       git_q "$work" add main.rs
       git_q "$work" commit -q -m 'code change'
-      if [ "$mode" = pushed ]; then
-        git_q "$work" push -q origin feature
-      fi
+      ;;
+  esac
+  if [ "$mode" != unpushed ]; then
+    git_q "$work" push -q "$remote" feature
+  fi
+
+  case "$mode" in
+    narrow-upstream)
+      git_q "$work" config branch.feature.remote "$remote"
+      ;;
+    narrow-behind)
+      printf 'fn later() {}\n' >>"$work/main.rs"
+      git_q "$work" add main.rs
+      git_q "$work" commit -q -m 'unpushed narrow follow-up'
+      ;;
+    unreachable)
+      git_q "$work" update-ref -d "refs/remotes/origin/feature" 2>/dev/null || true
+      git_q "$work" remote set-url origin "$root/absent-remote.git"
+      ;;
+    no-base)
+      git_q "$work" update-ref -d refs/remotes/origin/main
       ;;
   esac
   printf '%s' "$work"
+}
+
+# Fixture-integrity guard: a narrow-refspec fixture that accidentally grew a
+# feature mirror ref would silently stop testing the condition it exists for.
+assert_no_mirror_ref() { # assert_no_mirror_ref <label> <work> <remote>
+  if git -C "$2" rev-parse --verify --quiet "refs/remotes/$3/feature" >/dev/null; then
+    bad "$1: fixture is not narrow — refs/remotes/$3/feature exists"
+  else
+    ok "$1: no refs/remotes/$3/feature mirror ref (narrow refspec reproduced)"
+  fi
 }
 
 CASE_N=0
@@ -259,7 +308,7 @@ STUB_TOKENS='505625 387328 6332'
 run_wrapper "$work"
 assert_verdict 'case (e)' FAIL 1
 assert_says 'case (e) push-assert FAIL' '^push-assert: FAIL'
-assert_says 'case (e) names the missing remote branch' "remote branch 'origin/feature' does not exist"
+assert_says 'case (e) names the missing remote branch authoritatively' "the remote 'origin' has no branch 'feature' \(authoritative: git ls-remote\)"
 assert_never_enqueued 'case (e)'
 
 printf '== case (e2): remote behind HEAD names the unpushed commits ==\n'
@@ -272,6 +321,64 @@ run_wrapper "$work"
 assert_verdict 'case (e2)' FAIL 1
 assert_says 'case (e2) lists the unpushed commit' 'unpushed follow-up'
 assert_never_enqueued 'case (e2)'
+
+printf '== case (k): NARROW fetch refspec — pushed, but no feature mirror ref ==\n'
+# THE regression case (#2964 follow-up blocker): CQLite clones set
+# remote.origin.fetch = +refs/heads/main:refs/remotes/origin/main, so
+# refs/remotes/origin/<feature> is NEVER created however often the branch is
+# pushed. A mirror-ref push assert false-FAILs here 100% of the time, which would
+# make the only sanctioned roborev invocation unusable fleet-wide and push agents
+# back to the bare --branch form. The remote (git ls-remote) is the authority.
+work=$(make_fixture case_k narrow)
+assert_no_mirror_ref 'case (k)' "$work" origin
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_VERDICT='No issues found'
+STUB_TOKENS='505625 387328 6332'
+run_wrapper "$work"
+assert_verdict 'case (k)' PASS 0
+assert_says 'case (k) push-assert PASS despite the absent mirror ref' '^push-assert: PASS$'
+assert_says 'case (k) the run proceeded to a real review' '^sha-assert: PASS$'
+
+printf '== case (k2): narrow refspec, pushed but behind HEAD ==\n'
+work=$(make_fixture case_k2 narrow-behind)
+assert_no_mirror_ref 'case (k2)' "$work" origin
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (k2)' FAIL 1
+assert_says 'case (k2) push-assert FAIL (unpushed commits)' '^push-assert: FAIL \(unpushed commits\)$'
+assert_says 'case (k2) names the unpushed commit' 'unpushed narrow follow-up'
+assert_says 'case (k2) cites ls-remote as the authority' 'authoritative: git ls-remote'
+assert_never_enqueued 'case (k2)'
+
+printf '== case (k3): the remote is derived from the branch upstream, not hardcoded ==\n'
+work=$(make_fixture case_k3 narrow-upstream)
+assert_no_mirror_ref 'case (k3)' "$work" upstream
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work" --base upstream/main
+assert_verdict 'case (k3)' PASS 0
+assert_says 'case (k3) push-assert PASS against the configured upstream' '^push-assert: PASS$'
+
+printf '== case (k4): ls-remote failure is an infra/auth FAIL, not "never pushed" ==\n'
+work=$(make_fixture case_k4 unreachable)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (k4)' FAIL 1
+assert_says 'case (k4) push-assert FAIL names the ls-remote failure' '^push-assert: FAIL \(ls-remote failed: infra/auth\)$'
+assert_says 'case (k4) attributes it to infra/auth' 'INFRA/AUTH condition, NOT evidence that the branch is unpushed'
+assert_says 'case (k4) points at the separate git credential path' 'gh auth setup-git'
+assert_lacks 'case (k4) does NOT claim the branch was never pushed' 'has never been pushed'
+assert_never_enqueued 'case (k4)'
+
+printf '== case (k5): an unresolvable --base FAILs closed, never NOTHING-TO-REVIEW ==\n'
+work=$(make_fixture case_k5 no-base)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (k5)' FAIL 1
+assert_says 'case (k5) census-check FAIL names the unresolvable base' "^census-check: FAIL \(base 'origin/main' unresolvable\)$"
+assert_says 'case (k5) push-assert still PASS' '^push-assert: PASS$'
+assert_says 'case (k5) says it is not NOTHING-TO-REVIEW' "explicitly NOT a NOTHING-TO-REVIEW"
+assert_lacks 'case (k5) is not NOTHING-TO-REVIEW' '^RESULT: NOTHING-TO-REVIEW$'
+assert_never_enqueued 'case (k5)'
 
 printf '== case (f): genuine review with matching sha + healthy accounting ==\n'
 work=$(make_fixture case_f pushed)

@@ -27,6 +27,15 @@
 # This wrapper judges the reviewer's claims against a LOCALLY COMPUTED `git` diff
 # census — never against the reviewer's own prose — and fails closed.
 #
+# Corollary the wrapper itself had to learn: EVERY oracle here must be the
+# authoritative source, never a local proxy. The push assert asks the REMOTE via
+# `git ls-remote` because CQLite clones carry a narrow fetch refspec under which a
+# feature branch's `refs/remotes/origin/<branch>` mirror ref is never created — so
+# reading the mirror produced a 100%-reproducible false FAIL that would have pushed
+# agents back to the bare `--branch` form this wrapper exists to replace. Likewise
+# `<base>` is a mirror ref: if it does not resolve, the run FAILs closed rather
+# than reporting an empty census.
+#
 # USAGE
 # -----
 #   scripts/flow/roborev-review.sh --agent <agent> --model <model> \
@@ -315,42 +324,89 @@ fi
 
 # --- step 2: push assert (AC3) — before the census, so the operator gets the ---
 # --- actionable cause ("push your commits") rather than a downstream vacuity ---
+#
+# THE ORACLE IS THE REMOTE, NOT THE LOCAL MIRROR (#2964 follow-up). The obvious
+# implementation — read `refs/remotes/<remote>/<branch>` — is WRONG on this fleet
+# and was a 100%-reproducible false FAIL: CQLite clones carry a NARROW fetch
+# refspec
+#     remote.origin.fetch = +refs/heads/main:refs/remotes/origin/main
+# so `refs/remotes/origin/*` only ever holds `origin/main` (+ `origin/HEAD`). A
+# remote-tracking ref for a feature branch is NEVER created there, no matter how
+# many times the branch is pushed — so "mirror ref absent" says NOTHING about
+# whether the branch is pushed. `git ls-remote` asks the REMOTE, which is the
+# authoritative answer, exactly as the census asks `git` locally rather than
+# believing the reviewer's prose. A local proxy is never authority.
 if [ "$BRANCH" = "HEAD" ]; then
   PUSH_ASSERT="FAIL (detached HEAD)"
-  DETAILS+=("ERROR: push-assert: $REPO is on a detached HEAD, so there is no origin/<branch> to assert against. Check out the issue branch. No review was enqueued.")
+  DETAILS+=("ERROR: push-assert: $REPO is on a detached HEAD, so there is no branch to assert against. Check out the issue branch. No review was enqueued.")
   finish FAIL 1
 fi
 
-REMOTE_SHA=""
-if ! REMOTE_SHA=$(git -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$BRANCH"); then
-  PUSH_ASSERT="FAIL (no remote branch origin/$BRANCH)"
-  DETAILS+=("ERROR: push-assert: remote branch 'origin/$BRANCH' does not exist — this branch has never been pushed. The reviewer can only see what the remote has, so an unpushed branch is itself an empty-diff cause. No review was enqueued.")
-  finish FAIL 1
-fi
+# Prefer the branch's CONFIGURED upstream remote; fall back to `origin`.
+REMOTE=$(git -C "$REPO" config --get "branch.$BRANCH.remote" 2>/dev/null || printf '')
+[ -n "$REMOTE" ] || REMOTE=origin
 
-if [ "$REMOTE_SHA" != "$HEAD_SHA" ]; then
-  PUSH_ASSERT="FAIL (unpushed commits)"
-  DETAILS+=("ERROR: push-assert: origin/$BRANCH ($REMOTE_SHA) != local HEAD ($HEAD_SHA).")
-  unpushed=$(git -C "$REPO" log --oneline "refs/remotes/origin/$BRANCH..HEAD" 2>/dev/null || printf '')
-  if [ -n "$unpushed" ]; then
-    DETAILS+=("ERROR: push-assert: unpushed commit(s):")
+# FAST PATH (optional, saves a remote round trip): a mirror ref that EXISTS and
+# already equals HEAD is proof enough. Its ABSENCE proves nothing — fall through.
+MIRROR_SHA=$(git -C "$REPO" rev-parse --verify --quiet "refs/remotes/$REMOTE/$BRANCH" || printf '')
+if [ "$MIRROR_SHA" = "$HEAD_SHA" ]; then
+  PUSH_ASSERT="PASS"
+else
+  set +e
+  LS_OUT=$(git -C "$REPO" ls-remote --heads "$REMOTE" "$BRANCH" 2>&1)
+  LS_RC=$?
+  set -e
+  if [ "$LS_RC" -ne 0 ]; then
+    # NOT "never pushed" — a misattributed cause sends people to fix the wrong
+    # thing. `git` and `gh` are SEPARATE credential paths (#2942): an
+    # authenticated `gh` with an unwired git fails every remote read here.
+    PUSH_ASSERT="FAIL (ls-remote failed: infra/auth)"
+    DETAILS+=("ERROR: push-assert: 'git ls-remote --heads $REMOTE $BRANCH' exited $LS_RC, so the remote state is UNKNOWN. This is an INFRA/AUTH condition, NOT evidence that the branch is unpushed — do not 'fix' it by pushing. git and gh are separate credential paths (#2942): check network reachability and git's own credentials ('gh auth setup-git'). git said:")
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       DETAILS+=("  $line")
-    done <<<"$unpushed"
-  else
-    DETAILS+=("ERROR: push-assert: local HEAD is not ahead of origin/$BRANCH — the branch has diverged from its remote; reconcile before reviewing.")
+    done <<<"$LS_OUT"
+    DETAILS+=("ERROR: push-assert: failing closed on an unknown remote state. No review was enqueued.")
+    finish FAIL 1
   fi
-  DETAILS+=("ERROR: push-assert: push the branch before reviewing. No review was enqueued.")
-  finish FAIL 1
+  REMOTE_SHA=$(printf '%s\n' "$LS_OUT" | awk -v ref="refs/heads/$BRANCH" '$2 == ref { print $1; exit }')
+  if [ -z "$REMOTE_SHA" ]; then
+    PUSH_ASSERT="FAIL (branch absent on remote $REMOTE)"
+    DETAILS+=("ERROR: push-assert: the remote '$REMOTE' has no branch '$BRANCH' (authoritative: git ls-remote) — this branch has never been pushed. The reviewer can only see what the remote has, so an unpushed branch is itself an empty-diff cause. Push it, then re-run. No review was enqueued.")
+    finish FAIL 1
+  fi
+  if [ "$REMOTE_SHA" != "$HEAD_SHA" ]; then
+    PUSH_ASSERT="FAIL (unpushed commits)"
+    DETAILS+=("ERROR: push-assert: $REMOTE/$BRANCH is at $REMOTE_SHA (authoritative: git ls-remote) but local HEAD is $HEAD_SHA.")
+    unpushed=""
+    if git -C "$REPO" cat-file -e "${REMOTE_SHA}^{commit}" 2>/dev/null; then
+      unpushed=$(git -C "$REPO" log --oneline "$REMOTE_SHA..HEAD" 2>/dev/null || printf '')
+    fi
+    if [ -n "$unpushed" ]; then
+      DETAILS+=("ERROR: push-assert: unpushed commit(s):")
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        DETAILS+=("  $line")
+      done <<<"$unpushed"
+    else
+      DETAILS+=("ERROR: push-assert: local HEAD is not a descendant of the remote tip (or the remote tip is not present locally) — the branch has diverged; reconcile before reviewing.")
+    fi
+    DETAILS+=("ERROR: push-assert: push the branch before reviewing. No review was enqueued.")
+    finish FAIL 1
+  fi
+  PUSH_ASSERT="PASS"
 fi
-PUSH_ASSERT="PASS"
 
 # --- step 3: the local diff census — THE ORACLE -------------------------------
+# `<base>` (default `origin/main`) IS a local mirror ref, so it can be stale or —
+# on a narrow-refspec clone that has never fetched — absent. Fail CLOSED: an
+# unresolvable base must never be allowed to produce an empty census, which would
+# surface as NOTHING-TO-REVIEW and read as "nothing to look at" rather than "we
+# could not tell". No implicit `git fetch` is performed on the caller's behalf.
 BASE_SHA=""
 if ! BASE_SHA=$(git -C "$REPO" rev-parse --verify --quiet "${BASE}^{commit}"); then
   CENSUS_CHECK="FAIL (base '$BASE' unresolvable)"
-  DETAILS+=("ERROR: census: base ref '$BASE' does not resolve to a commit in $REPO — the census, and therefore every vacuity judgement, would be unfounded. No review was enqueued.")
+  DETAILS+=("ERROR: census: base ref '$BASE' does not resolve to a commit in $REPO, so the census — and therefore every vacuity judgement — would be unfounded. This is a FAIL, explicitly NOT a NOTHING-TO-REVIEW: an unresolvable base is 'we cannot tell', never 'there is nothing to review'. If '$BASE' is a remote-tracking ref, this clone may have a narrow fetch refspec or have never fetched it; fetch it yourself (the wrapper never fetches behind your back) and re-run. No review was enqueued.")
   finish FAIL 1
 fi
 
