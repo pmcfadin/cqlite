@@ -7,13 +7,41 @@ runs it review-first on the lite-green diff (#2086), and `flow-closer` runs a fi
 before arming `gh pr merge --auto` (#2084/#2667). "roborev clean" is therefore load-bearing — if it can
 be satisfied without a review having happened, the pipeline merges unreviewed code with no red anywhere.
 
-Three confirmed triggers produce exactly that (evidence table in `proposal.md`):
+**FOUR** confirmed triggers produce exactly that (evidence table in `proposal.md`; T4 was found by this
+change's own live probe, in round 5):
 
-| # | Trigger | Enqueued SHA | Detectable by a SHA check? |
-|---|---------|--------------|----------------------------|
-| 1 | worktree + `--branch` resolves against the ROOT checkout (on `main`) | `origin/main` | **yes** |
-| 2 | two-positional commit-range form mis-enqueues | neither endpoint | **yes** |
-| 3 | code-free (docs-only) diff silently discarded | correct SHA | **NO** |
+| # | Trigger | Enqueued `git_ref` | Detectable by a SHA check? |
+|---|---------|--------------------|----------------------------|
+| 1 | worktree + `--branch` **without `--repo`** resolves against the ROOT checkout (on `main`) | `origin/main` | **yes** |
+| 2 | two-positional commit-range form anchors the range at git's EMPTY TREE | `4b825dc6…..<head>` | **yes** |
+| 3 | code-free (docs-only) diff structurally discarded | correct SHA | **NO** |
+| 4 | single-SHA form reviews ONE COMMIT, not the branch | `<head40>` — *correct*, and still partial | **NO** (it EQUALS HEAD) |
+
+T4 is the one the issue's own AC2 prescribed, and the nastiest of the four: the enqueued sha is exactly
+branch HEAD, so every sha-equality check passes while the reviewer saw only the last commit. On a
+17-commit branch it delivered 3 of 5 code files.
+
+### The measured invocation matrix (round 5, real daemon)
+
+One branch (17 commits, census 27 files = 22 markdown + 5 code), four invocation forms, measuring the
+enqueued `git_ref` AND which files appear as `diff --git` headers in the prompt actually sent:
+
+| form | enqueued `git_ref` | code files in prompt |
+|---|---|---|
+| `--branch --base <base> --repo <abs>` | `<base40>..<head40>` | **5/5 — SANCTIONED** |
+| `--since <base> --repo <abs>` | `<base40>..<head40>` | 5/5 (byte-identical prompt) |
+| `<base> <head>` (two positionals) | `4b825dc6…`(git EMPTY-TREE)`..<head40>` | 3/5 BROKEN |
+| `<sha>` (single commit) | `<head40>` | 3/5 PARTIAL — one commit |
+
+Three conclusions this document exists to preserve: **(1)** `--repo` is what makes `--branch` correct from
+a worktree (with it, roborev reported "17 commits since origin/main"), so the defect was never `--branch`
+— it was `--branch` *without* `--repo`; **(2)** the single-SHA form is a partial review reported as a
+complete one, so we implement AC2's INTENT (reviewed content must match the requested range) rather than
+its letter; **(3)** all 22 markdown files were ABSENT from the prompt while all 5 code files were present
+— roborev **excludes non-code paths from the diff it constructs**, which is the mechanism behind T3 (for a
+markdown-only diff the constructed diff is genuinely empty, so "contains no code changes to review" is a
+truthful report of an empty input, not a malfunction) and the reason `prompt-content` checks the CODE
+subset of the census.
 
 Two structural facts constrain every option:
 
@@ -42,7 +70,7 @@ against data the wrapper obtains itself:
 | `push-assert` | the REMOTE, via `git ls-remote` | the reviewer can only see what the remote has |
 | `census-check` | our own `git diff --numstat --no-renames` | what MUST be reviewed |
 | `code-free` | our own classification of that census | T3, before a review is even enqueued |
-| `sha-assert` | the job record's structured `git_ref` | T1/T2 — the wrong commit was reviewed |
+| `sha-assert` | the job record's structured `git_ref` (BOTH range endpoints) | T1/T2/T4 — the wrong or partial scope was reviewed |
 | `review-completed` | job `status` + an allow-list of terminal verdict markers | a review actually FINISHED |
 | `prompt-content` | our census's own paths inside the prompt SENT | the reviewer never GOT the diff |
 
@@ -60,19 +88,28 @@ falling back to `$PWD` is exactly how a caller reviews a repository it did not n
 ordered and fail-closed; the first hard failure stops the run, emits the summary block, and exits
 non-zero.
 
-Implementation is **three files**, split for size hygiene and one responsibility each:
+Implementation is **five files**, split for size hygiene and one responsibility each:
 
-- `scripts/flow/roborev-review.sh` (796 lines) — flags, identity, invocation, the asserts, the block.
-- `scripts/flow/roborev-review-oracles.sh` (221) — **sourced**: `roborev_push_assert` + `roborev_census`
+- `scripts/flow/roborev-review.sh` (752 lines) — flags, identity, invocation, the range/job-record asserts,
+  the block.
+- `scripts/flow/roborev-review-oracles.sh` (227) — **sourced**: `roborev_push_assert` + `roborev_census`
   (including the code-free classification). These two are the change's whole thesis in code, and both
   learned the "never trust a local proxy" lesson the hard way (below).
-- `scripts/flow/roborev-job-facts.py` (178) — JSON decoding of the job record: `git_ref`, `status`,
-  `model`/`requested_model`, the prompt, and the token counts with their three-state extraction.
+- `scripts/flow/roborev-review-checks.sh` (342) — **sourced**: the five per-review checks
+  (`review-completed`, `prompt-content`, `findings`/`roborev-exit`, tier 1, tier 2). Split out when the
+  wrapper hit 998 lines. Division of labour: the ORACLES file answers *what must be reviewed, and is it
+  even reviewable*, from data we obtain ourselves; the CHECKS file answers *did a review of that actually
+  happen*, from the job record and the transcript.
+- `scripts/flow/roborev-job-facts.py` (203) — JSON decoding of the job record: `git_ref`, `status`,
+  `model`/`requested_model`, `verdict`, the prompt, and the token counts with their three-state extraction.
+- `scripts/tests/test_roborev_review_guard.sh` (1628) — the hermetic regression check.
 
-The sourced path is resolved from `BASH_SOURCE` (never `$PWD` — the wrapper runs from arbitrary
-worktrees) and the wrapper **FAILs CLOSED** when that file is missing OR truncated: an absent oracles
-file that silently turned the push assert and the census into no-ops would be a worse failure than any
-this guard was built to catch.
+Both sourced paths are resolved from `BASH_SOURCE` (never `$PWD` — the wrapper runs from arbitrary
+worktrees), and the wrapper **FAILs CLOSED** when either is missing OR truncated (the test is that every
+required function is actually defined). Both are validated **BEFORE the review is invoked**, so a broken
+installation costs no review — even though the checks file's functions are not called until after the job
+facts exist. A silently absent helper would leave every key it owns reading `SKIP`/`PASS` beside a
+`RESULT: PASS`, which is a worse failure than any this guard was built to catch.
 
 **Step 1 — Resolve identity.** Repo root (**absolute** — `roborev --repo` must never receive a relative
 path), branch, full 40-char HEAD. `--repo` is always passed explicitly; the wrapper never relies on
@@ -115,29 +152,55 @@ change's own spec requirement and CLAUDE.md rule (4). Classification is by **fil
 or `.claude/` as prose, which misclassifies `docs/foo.py` and `.github/workflows/*.yml` — and now that
 code-free is a FAIL condition, a false code-free classification is a **false FAIL**.
 
-**Step 4 — Invoke by explicit SHA + explicit repo (AC2).**
+**Step 4 — Invoke over the CENSUS RANGE with an explicit repo (AC2's intent).**
 
 ```
-roborev review <head-sha> --repo <abs-repo> --agent <a> --model <m> --wait
+roborev review --branch --base <base> --repo <abs-repo> --agent <a> --model <m> --wait
 ```
 
-**NEVER bare `--branch`** (trigger 1). **NEVER the two-positional range form** (trigger 2). Both
-`--agent` and `--model` are always passed — the wrapper refuses to run with only one, preserving the
-#2433/#3037 trap (`--agent claude-code` alone inherits `review_model` from `.roborev.toml` and fails as
-a silent-looking outage). Enforcing it in the wrapper converts that outage into a usage error at the
-call site. The transcript goes to `--log`; stdout stays reserved for the block.
+This reviews the RANGE `<base>..HEAD` — exactly the census — per the matrix above. **NEVER `--branch`
+WITHOUT `--repo`** (T1). **NEVER the two-positional range form** (T2, empty-tree base). **NEVER a single
+sha** (T4, one commit). This is a deliberate, recorded departure from AC2's literal text, which prescribed
+the single-sha form; the AC's *intent* — the reviewed content must match the requested range — is what the
+wrapper implements and asserts. Both `--agent` and `--model` are always passed — the wrapper refuses to run
+with only one, preserving the #2433/#3037 trap (`--agent claude-code` alone inherits `review_model` from
+`.roborev.toml` and fails as a silent-looking outage). Enforcing it in the wrapper converts that outage
+into a usage error at the call site. The transcript goes to `--log`; stdout stays reserved for the block.
 
-**Step 5 — Reviewed-SHA assert (AC2): the STRUCTURED field is the oracle.** The job record's `git_ref`
-is a full 40-char sha recorded by roborev itself, so it is compared full-sha to full-sha. The stdout
-`Enqueued job <N> for <sha>` line is **demoted to a cross-check** — parsing a tool's prose is the weaker
-source whenever a structured one exists — but its absence is still a hard FAIL, because it carries the
-job id every structured query needs. Parsing is defensive: lower-cased before matching (so an
-upper-case announcement cannot survive the match and then fall out of field extraction as garbage
-handed to `roborev show`), a **7**-hex-char floor (4 was loose enough that a 4-char prefix satisfied the
-assert), both fields validated, and with several announcements the LAST is the effective enqueue with
-the multiplicity recorded. A mismatch is ATTRIBUTED: equal to the base ⇒ the worktree `--branch`
-signature; neither endpoint ⇒ the range-form signature. A disagreement between stdout and `git_ref` is
-a NOTICE, because it means one of the two surfaces is misreporting.
+**Step 5 — Reviewed-RANGE assert (AC2's intent): the STRUCTURED field is the only oracle.** The job
+record's `git_ref` for the sanctioned form is `<base40>..<head40>`, and **BOTH endpoints** are compared
+full-sha to full-sha against the census range — strictly stronger than the single-sha equality it
+replaces (it proves the scope neither stops short of the tip nor starts elsewhere). `reviewed-sha:`
+therefore carries a RANGE, not a sha. Four failure shapes:
+`FAIL (reviewed range does not match <base>...HEAD)` naming the offending endpoint (an empty-tree base is
+called out as the two-positional signature); `FAIL (single-commit record, not the census range)` — which
+fires **even when the single sha EQUALS HEAD**, because `prompt-content` matches PATHS, so a review of only
+the last of several commits touching one file passes every path check while the earlier changes go
+unreviewed; `FAIL (reviewed-sha does not match head-sha)` for a single sha that is not HEAD (attributed to
+the base ref where it equals it); and `FAIL (job record unavailable — reviewed range unverifiable)`.
+
+The stdout `Enqueued job <N> for <sha>` line is **demoted all the way to the carrier of the job id**: for
+a RANGE review it announces only the range BASE, so it can establish nothing about HEAD, and the wrapper
+therefore FAILS CLOSED when the record is unavailable rather than falling back to a check that verifies
+nothing. Its absence is still a hard FAIL, because every structured query needs that id. Parsing stays
+defensive: lower-cased before matching (so an upper-case announcement cannot survive the match and then
+fall out of field extraction as garbage handed to `roborev show`), a **7**-hex-char floor (4 was loose
+enough that a 4-char prefix satisfied the old assert), both fields validated, and with several
+announcements the LAST is the effective enqueue with the multiplicity recorded as a NOTICE.
+
+**Step 5a — `job-record:`, its own key.** Four asserts plus `model:` depend on the structured record, so
+its completeness is reported rather than inferred: `PASS` / `PASS (no token accounting in the record)` /
+`DEGRADED (incomplete after <n>s: <fields>)` / `SKIP`. `DEGRADED` is deliberately NON-failing — the
+dependent asserts publish their own verdicts (notably `sha-assert: FAIL (job record unavailable …)`), so
+nothing is silently weakened. **TWO SOURCES OF DIFFERENT SHAPE** are consulted and a source counts only
+when it yields the fields the asserts need: `roborev show <job> --json` returns the **REVIEW** row (id,
+agent, prompt — but no `git_ref`/`status`/`token_usage`) and NESTS the JOB row under a `job` key, while
+`roborev list --json` returns the JOB row directly. Both rows answer to the same id, so returning the
+first id match handed back the poorer row; the extractor now prefers an id match that actually carries
+`git_ref`. **There was never an async/durability problem** — an earlier round diagnosed one from exactly
+this wrong-row read, and that diagnosis is retracted here: with the nested row read as a first-class source
+the record is complete in ONE read, so the bounded poll is a **5×1s sanity retry** (down from 45×1s), not a
+wait. Shortening it can only make the record MORE likely to read `DEGRADED` — the fail-closed direction.
 
 **Step 5b — `model:`.** `requested_model` ≠ `model` is surfaced as a **loud NOTICE, not a FAIL**: a
 model-alias resolution is legitimate, so a mismatch is not by itself evidence of a bad review, and an
@@ -155,22 +218,51 @@ and all three used to PASS. When `status` is unavailable, completion may rest on
 a NOTICE naming it as the weaker of the two signals, never a silent upgrade to `done`.
 
 **Step 6b — `prompt-content:` — DETERMINISTIC, threshold-free.** Reads the prompt actually sent to the
-agent (the job record's `prompt`, else `roborev show <job> --prompt`) and looks for OUR census's own
-paths in it. This is the deterministic complement of tier 1: tier 1 catches "the reviewer GOT the diff
-and discarded it"; this catches "the reviewer never GOT the diff". Bounded by
-`PROMPT_CONTENT_MAX_PATHS_CHECKED=40` — all paths for a small census, an evenly sampled subset (all of
-which must be present) for a large one — and the PASS value reports the coverage it checked. A
-whitespace-only prompt file is a RETRIEVAL FAILURE ⇒ `UNAVAILABLE` (degraded, visible), never a FAIL:
-an unsupported roborev build must not false-FAIL every run.
+agent (the job record's `prompt`, else `roborev show <job> --prompt`) and looks for the **CODE subset** of
+our census's paths in it. This is the deterministic complement of tier 1: tier 1 catches "the reviewer GOT
+the diff and discarded it"; this catches "the reviewer never GOT the diff". Three properties, each of which
+replaced a reproduced defect:
+
+- **The CODE subset, not every path** — roborev excludes non-code paths from the diff it builds (measured
+  22 markdown absent / 5 code present), so requiring all 27 would false-FAIL every documentation-touching
+  branch, i.e. most of them.
+- **Every code path, no sampling cap** — the former `PROMPT_CONTENT_MAX_PATHS_CHECKED=40` even-sampling
+  bound was a hole: a partial prompt naming just the sampled files passed. Exact-header matching is cheap
+  even for a 500-file diff, so the cap is gone.
+- **Both header SIDES, compared whole-line** — the census runs `--no-renames` (a rename = two paths) while
+  the reviewer's diff may have rename detection ON (one `diff --git a/old b/new` header). Same-path-only
+  matching FALSELY REJECTED every review containing a detected rename; collecting the path set from both
+  sides reconciles the two behaviours without weakening exact-header strictness to a substring test (a
+  substring is satisfied by any incidental mention — including this wrapper quoting a path in a comment).
+
+**An unretrievable (whitespace-only) prompt now FAILS** — `FAIL (prompt unretrievable — no evidence any
+diff was delivered)`. The former non-failing `UNAVAILABLE` was a round-6 BLOCKER: with a non-empty code
+census it allowed PASS with no authoritative evidence any diff reached the reviewer, which contradicts the
+wrapper's whole purpose. It is not an always-red risk either — the prompt is measurably retrievable from
+the record's `prompt` field AND from `roborev show <job> --prompt`, so an empty one is a real anomaly.
+Note the value shapes: `PASS (n/n code census paths present)` vs
+`FAIL (k/n code census paths absent …)` — same denominator, opposite numerator sense, so a grep-based
+reader must read the word, not the ratio.
 
 **Step 6c — `findings:` and `roborev-exit:`.** roborev **exits non-zero when it REPORTS FINDINGS**. The
 original wording called every non-zero exit a reviewer malfunction, which is dangerous in the OPPOSITE
 direction from the vacuity bug: an agent told the reviewer broke will retry or bypass instead of FIXING
 the findings. So the exit is split — `FINDINGS (exit N)` when the review ran (structured `status` is the
 authority) versus `ERROR (exit N)` when the reviewer itself failed — and the findings state gets its own
-key (`NONE` / `PRESENT` / `PRESENT (n)` / `UNKNOWN` / `SKIP`). Both still force `RESULT: FAIL` (a review
-with open findings is not "roborev clean"), but the FINDINGS message says explicitly: the review is
-genuine, do not retry, do not bypass, triage and fix.
+key (`NONE` / `PRESENT` / `PRESENT (n)` / `UNKNOWN` / `INCONSISTENT (…)` / `SKIP`). Both still force
+`RESULT: FAIL` (a review with open findings is not "roborev clean"), but the FINDINGS message says
+explicitly: the review is genuine, do not retry, do not bypass, triage and fix.
+
+The PRESENT/NONE answer is derived from the **structured `verdict` field**, with the exit code as fallback,
+because tier 1 is GATED on it: a regex over the whole transcript let an incidental or quoted `[Low]` set
+`PRESENT` and thereby EXEMPT a genuinely vacuous verdict from tier 1's hard failure. Prose is consulted
+only inside the FINDINGS BLOCK (a `Findings` heading/label through to a **line-initial** `Summary`
+heading/label — matched mid-sentence, the terminator closed the block early and under-counted). The `(n)`
+COUNT stays best-effort prose parsing reported for a human; the PRESENT/NONE/INCONSISTENT distinction is
+the load-bearing part. A contradiction — a clean structured verdict, or a zero exit, beside in-block
+severity markers — is `INCONSISTENT (verdict clean, n findings marker(s))` /
+`INCONSISTENT (exit 0, n findings marker(s))`: both FAIL the run, and being neither `PRESENT` nor `NONE`
+neither can exempt tier 1.
 
 **Step 6d — `vacuity-tier1:` — AUTHORITATIVE, but ANCHORED and GATED.** The reviewer's own summary
 claiming no code changes, against a census we measured as non-empty, is T3 and must FAIL, not merely
@@ -178,8 +270,13 @@ note. But the naive form false-FAILs: matched anywhere in the transcript, a genu
 QUOTED the phrase was failed as vacuous — and this change's own diff carries the phrase in five-plus
 files. Two properties make the strict version safe:
 
-1. **Anchoring** — only the verdict/summary region (the lines carrying `Summary:`) is matched, never
-   arbitrary finding bodies. No such region ⇒ `UNAVAILABLE`.
+1. **Anchoring to the whole summary BLOCK** — from a `Summary` HEADING or a `Summary:` label anywhere on a
+   line, through to the next heading or EOF; never arbitrary finding bodies. No such region ⇒
+   `UNAVAILABLE`. The earlier region — only the LINES containing `Summary:` — was a round-6 BLOCKER: the
+   real format is `## Summary` / blank / prose, so the region held the heading and none of the prose, and a
+   vacuous clean review whose "no code changes" sentence sat under the heading reported **PASS** — the
+   exact defect the wrapper exists to stop. The block form is a strict superset of the line form, so the
+   older single-line `No issues found. Summary: …` shape stays covered.
 2. **Gating on `findings:`** — `NONE` ⇒ the reviewer is CLAIMING CLEANLINESS, so the phrase is a vacuity
    claim ⇒ **HARD FAIL**. `UNKNOWN` ⇒ **HARD FAIL** too: an unknowable state must never DISARM the
    check. `PRESENT*` ⇒ the reviewer demonstrably analysed the diff, so the phrase is discussion ⇒
@@ -238,7 +335,7 @@ repo: <abs>
 branch: <name>
 base: <ref>
 head-sha: <sha40>|-
-reviewed-sha: <sha>|-
+reviewed-sha: <base40>..<head40>   |  <sha40> (only if the record reports a single commit)  |  -
 job: <N>|-
 model: <m> | <m> (SUBSTITUTED — requested '<r>') | <m> (UNCONFIRMED — no model field in the job record) | -
 census: <F> file(s), +<A>/-<D>   |  -
@@ -247,18 +344,27 @@ push-assert:      PASS | SKIP | FAIL (detached HEAD) | FAIL (ls-remote failed: i
                                     | FAIL (branch absent on remote <r>) | FAIL (unpushed commits)
 census-check:     PASS | SKIP | FAIL (git diff failed) | FAIL (base '<ref>' unresolvable) | FAIL (empty census)
 code-free:        PASS | SKIP | FAIL (code-free census: n/n files are documentation/specification text)
+job-record:       PASS | PASS (no token accounting in the record) | SKIP
+                                    | DEGRADED (incomplete after <n>s: <fields>)      <-- NON-failing
 sha-assert:       PASS | SKIP | FAIL (roborev not on PATH) | FAIL (no parseable enqueue announcement)
                                     | FAIL (unparseable enqueue announcement)
+                                    | FAIL (reviewed range does not match <base>...HEAD)
+                                    | FAIL (single-commit record, not the census range)
                                     | FAIL (reviewed-sha does not match head-sha)
+                                    | FAIL (job record unavailable — reviewed range unverifiable)
 review-completed: PASS | SKIP | FAIL (transcript unreadable) | FAIL (job status '<s>' is not done)
                                     | FAIL (no terminal verdict marker)
-prompt-content:   PASS (k/n census paths present) | FAIL (k/n census paths absent from the prompt)
-                                    | UNAVAILABLE | SKIP
+prompt-content:   PASS (n/n code census paths present)
+                                    | FAIL (k/n code census paths absent from the prompt)
+                                    | FAIL (prompt unretrievable — no evidence any diff was delivered)
+                                    | SKIP                                  <-- NO passing UNAVAILABLE
 vacuity-tier1:    PASS | FAIL (vacuous verdict vs non-empty census)
                                     | NOTICE (phrase present in a findings-bearing review) | UNAVAILABLE | SKIP
 vacuity-tier2:    PASS | FAIL (vacuous token signature)
                                     | FAIL (token accounting present but unparseable — drift) | UNAVAILABLE | SKIP
 findings:         NONE | PRESENT | PRESENT (n) | UNKNOWN | SKIP
+                                    | INCONSISTENT (verdict clean, n findings marker(s))
+                                    | INCONSISTENT (exit 0, n findings marker(s))
 roborev-exit:     PASS | FINDINGS (exit N) | ERROR (exit N) | SKIP
 log: <transcript path>
 RESULT: PASS|FAIL|NOTHING-TO-REVIEW
@@ -266,9 +372,10 @@ RESULT: PASS|FAIL|NOTHING-TO-REVIEW
 
 Note `sha-assert: FAIL (roborev not on PATH)`: an absent binary is a pre-enqueue fail-closed condition
 reported under the assert that would have consumed the announcement. Every per-check key participates in
-ONE scan: a value starting `FAIL` / `FINDINGS` / `ERROR` fails the run; `PASS` / `SKIP` / `UNAVAILABLE` /
-`NOTICE` never do (NOTICE is the advisory tier's value and is deliberately non-failing). A key whose
-step was never reached reads `SKIP` — never a blank, and never mistakable for a pass.
+ONE scan: a value starting `FAIL` / `FINDINGS` / `ERROR` / `INCONSISTENT` fails the run;
+`PASS*` / `SKIP` / `UNAVAILABLE` / `NOTICE*` / `DEGRADED*` never do (NOTICE is the advisory tier's value;
+DEGRADED reports an incomplete job record whose consequences are carried by the dependent asserts). A key
+whose step was never reached reads `SKIP` — never a blank, and never mistakable for a pass.
 
 Exit codes: `0` PASS, `1` FAIL, `3` NOTHING-TO-REVIEW, `2` **usage error**. Exit 2 is deliberately NOT a
 verdict: it emits **no** summary block at all (a loud `ERROR:` naming the missing option, before any repo
@@ -336,17 +443,21 @@ hook path runs roborev at all (#2671) and has no invocation to migrate.
 
 ### Regression check + gate wiring
 
-`scripts/tests/test_roborev_review_guard.sh` (1232 lines) — **hermetic**: a **stub `roborev`** first on
+`scripts/tests/test_roborev_review_guard.sh` (1628 lines) — **hermetic**: a **stub `roborev`** first on
 `PATH` replays the recorded real outputs (enqueue lines, verdict text, and the `show --json` payload
-*including* the doubly-encoded `token_usage` string with `total_output_tokens` — reproducing that shape
-verbatim is what keeps tier 2 honest), driven against throwaway `git init` fixtures each with its own
+*including* the doubly-encoded `token_usage` string with `total_output_tokens`, and the REVIEW row that
+NESTS the job row under a `job` key — reproducing those shapes verbatim is what keeps tier 2 and the
+job-record read honest), driven against throwaway `git init` fixtures each with its own
 local bare `origin`. Fixture modes cover the fleet's real topologies: wide/`narrow` refspec, behind,
 `narrow-upstream` (a remote named `upstream`), `unreachable` (ls-remote fails), `no-base`,
-`deleted-remote` (mirror ref equals HEAD, branch deleted), docs-only, mixed, workflow-yaml. No network,
-no real roborev, no datasets, no cargo; ~0.5s. **258 assertions across ~60 named cases, 27/27 mutation
-kills.** A fixture-integrity guard fails if a narrow-refspec fixture ever grows a feature mirror ref —
-otherwise it would silently stop testing the condition it exists for. python3 absence is a loud SKIP for
-the structured-payload cases, never a silent pass.
+`deleted-remote` (mirror ref equals HEAD, branch deleted), docs-only, mixed, workflow-yaml, and
+`renamed` (a rename the census sees as two paths). No network,
+no real roborev, no datasets, no cargo. **329 assertions; deliberate wrapper mutations killed 27/27 in the
+round-5 batch and 15/15 in the round-6 batch** (the one survivor found there — the nested-job-row read —
+is now pinned by case x10). A fixture-integrity guard fails if a narrow-refspec fixture ever grows a
+feature mirror ref — otherwise it would silently stop testing the condition it exists for. python3 absence
+is a loud SKIP for the structured-payload cases, never a silent pass. The tally line deliberately does NOT
+start with `RESULT:`, a token that belongs to the gate's summary contract and the wrapper's own block.
 
 **Wiring (concrete).** Both registration points in `scripts/agent-gate.sh` are used:
 
@@ -360,19 +471,39 @@ the structured-payload cases, never a silent pass.
   component on non-zero, with a named failure line).
 
 **Live worktree probe (documented, not gate-run).** From a real `issue-<N>-*` worktree with a pushed
-commit and the root checkout on `main`, run the wrapper and confirm `reviewed-sha == head-sha` (and
-`!= origin/main`) in the block. Only this can prove the real external binary honours the explicit
-`--repo`; it needs network + a live reviewer, so it lives in the wrapper's `--help` text (so procedure
-and implementation cannot drift) and the doctrine page, with an instruction to re-run it after any
-roborev version bump.
+commit and the root checkout on `main`, run the wrapper and confirm the reviewed scope COVERS the worktree
+HEAD: with the sanctioned range invocation `reviewed-sha:` is `<base40>..<head40>`, so the assertion is on
+the range's HEAD endpoint (plus `sha-assert: PASS`, which is only reachable when both endpoints match), and
+a `reviewed-sha` that is the base alone means the explicit `--repo` did not defeat the root-checkout
+resolution. Only this probe can prove the real external binary honours the explicit `--repo`; it needs
+network + a live reviewer, so it lives in the wrapper's `--help` text (so procedure and implementation
+cannot drift) and the doctrine page, with an instruction to re-run it after any roborev version bump.
+
+**Known residual (recorded, not hidden).** The `--help` probe text still phrases step 3 as
+`reviewed-sha == head-sha (prefix match)`, wording that predates the range form and which the pinned
+regression case asserts verbatim; the corrected RANGE phrasing has landed on the doctrine page. Both should
+converge on the range form in a follow-up touch of `scripts/flow/roborev-review.sh` + its test — it is a
+documentation-only staleness (no assert depends on it), but it is exactly the kind of drift this section
+exists to name.
 
 ### Doctrine (ships in this change)
 
 CLAUDE.md's roborev-invocation bullet (*Agent-Team Conventions*) and
 `website/src/content/docs/agents-developing/roborev-findings.md` both state: the wrapper is the only
-sanctioned invocation; **verify the reviewed SHA**; `"contains no code changes to review"` on a
-non-empty diff is a **HARD FAIL**; docs-only diffs cannot be roborev-certified — plus the exit-code
-contract and "any non-PASS `RESULT`, `NOTHING-TO-REVIEW` included, is a blocked merge". The page also
+sanctioned invocation; **verify the reviewed SCOPE against the census range**; `"contains no code changes to
+review"` on a non-empty diff is a **HARD FAIL**; docs-only diffs cannot be roborev-certified — plus the
+exit-code contract and "any non-PASS `RESULT`, `NOTHING-TO-REVIEW` included, is a blocked merge".
+
+**The three measured corrections land on every surface that states the rule** (CLAUDE.md,
+`roborev-findings.md`, `delivery-pipeline.md`, `docs/development/pm-operating-loop.md`,
+`docs/development/agent-machine-setup.md`), because the previous wording FORBADE the form now known to be
+correct: (a) the non-sanctioned form is `--branch` **WITHOUT** an explicit `--repo`, not `--branch` as such;
+(b) the single-SHA form reviews ONE COMMIT — a fourth vacuity class, and the form AC2 literally asked for;
+(c) roborev EXCLUDES non-code paths from the diff it builds, which is why a markdown-only diff yields a
+genuinely empty input (a truthful "no code changes" report), why `prompt-content` checks the CODE subset,
+and why the deterministic pre-enqueue `code-free:` FAIL is the right answer. The block's documented keys
+gain `job-record:` and the corrected `prompt-content:` values, and the live-probe section is restated in the
+range form. The page also
 gains a row in its **mechanized-in-`--lite`** table for the new guard (a mechanized class absent from
 that table gets hand-checked forever). Publication acceptance follows CLAUDE.md's rule: **grep the
 served page for a new distinctive phrase**; a `200` is not proof (observed CDN staleness ≈3 minutes).
@@ -404,7 +535,7 @@ Three structural properties keep this clean anyway, and the final architecture s
 
 1. **Register worktrees with `roborev repo` so `--branch` resolves correctly.** *Rejected:* there **is
    no `add` subcommand** — repos self-register on first use, so there is nothing to call. Even if there
-   were, it would fix only trigger 1: triggers 2 and 3 would still return an indistinguishable "No
+   were, it would fix only T1: T2, T3 and T4 would still return an indistinguishable "No
    issues found".
 2. **Patch/fork `roborev` upstream.** *Rejected for this change:* the binary is outside this repo's
    control and the fleet is exposed on **every** issue right now — a guard we own ships today. Noted as
@@ -456,3 +587,46 @@ Three structural properties keep this clean anyway, and the final architecture s
     renamed output field degraded it to a non-failing `UNAVAILABLE` while the real counts were the
     vacuous baseline). A drift FAIL costs one re-run after a one-line alias addition; a silently
     disarmed guard costs an unreviewed merge.
+13. **The SINGLE-SHA invocation** (`roborev review <sha> --repo <abs>`) — *the form issue #2964's own AC2
+    prescribes*. **Tried and REJECTED with measured evidence:** it enqueues `git_ref = <head40>`, i.e. ONE
+    COMMIT, and delivered **3 of 5** census code files on a 17-commit branch. Every sha-equality check
+    passes (the sha IS branch HEAD), so it is a PARTIAL review reported as a complete one — a fourth
+    vacuity class. Worse, `prompt-content` matches PATHS, so when several commits touch the same file a
+    review of only the last one satisfies every path check. Replaced by the range form, and the wrapper now
+    FAILs a single-commit record even when it equals HEAD. AC2's intent is honoured; its letter is not.
+14. **The TWO-POSITIONAL range form** (`roborev review <base> <head>`). **Tried and REJECTED with measured
+    evidence:** the enqueued range base is git's **EMPTY-TREE** hash `4b825dc6…`, not `<base>`, and it
+    delivered 3/5 code files. The empty-tree base is now called out by name in the mismatch message as
+    this form's signature.
+15. **`--branch` WITHOUT an explicit `--repo`** (the original defect, and — importantly — the thing the
+    first draft of this doctrine banned *categorically*). **Rejected as an invocation, but the categorical
+    ban was itself WRONG and is retracted here:** measured, `--branch` **with** `--repo <abs>` reports "17
+    commits since origin/main" and delivers 5/5 code files, and is now the SANCTIONED form. The defect was
+    always the MISSING `--repo` (which lets roborev resolve against the ROOT checkout, normally on the base
+    branch). A doctrine that forbids `--branch` outright forbids the correct invocation — which is why the
+    narrowing is propagated to every surface that states the rule.
+16. **`prompt-content: UNAVAILABLE` as a NON-FAILING value for an unretrievable prompt.** *Tried and
+    REJECTED (round-6 BLOCKER):* with a non-empty code census it let a run reach PASS with **no**
+    authoritative evidence any diff reached the reviewer — a pass resting on nothing, which is the very
+    thing this wrapper exists to prevent. It is also not a plausible always-red risk: the prompt is
+    measurably retrievable from the job record's `prompt` field AND from `roborev show <job> --prompt`. Now
+    `FAIL (prompt unretrievable — no evidence any diff was delivered)`.
+17. **SAME-PATH-ONLY matching of `diff --git` headers in `prompt-content`.** *Tried and REJECTED (round-6
+    BLOCKER):* our census runs `--no-renames` (a rename = two paths) while the reviewer's diff may have
+    rename detection ON (one `a/old b/new` header), so same-path matching **falsely rejected every review
+    containing a detected rename** — a false FAIL on ordinary work, which is how guards get waived. Fixed
+    by collecting the path set from BOTH header sides and comparing whole-line; exact-header strictness is
+    retained (no weakening to a substring test, which any incidental mention would satisfy).
+18. **A tier-1 verdict region of only the LINES CONTAINING `Summary:`.** *Tried and REJECTED (round-6
+    BLOCKER):* the real reviewer format is a `## Summary` HEADING followed by a blank line and the prose, so
+    the region captured the heading and none of the sentence — and a **vacuous clean review whose "no code
+    changes" claim sat under the heading reported PASS**, the exact defect the wrapper exists to stop. The
+    region is now the whole summary BLOCK (heading or label → next heading/EOF), a strict superset of the
+    line form.
+19. **Diagnosing the incomplete job record as an ASYNCHRONOUS write** (and polling 45×1s for it). *Tried
+    and REJECTED as a MISDIAGNOSIS:* the record was never late. `roborev show <job> --json` returns the
+    REVIEW row and nests the JOB row under a `job` key, and the extractor was matching the outer row, which
+    carries no `git_ref`/`status`/`token_usage`. Reading the nested row as a first-class source makes the
+    record complete in ONE read; the poll is now a 5×1s **sanity retry**. Recorded because the wrong
+    diagnosis had already been written into prose, and a "known" cause that is false costs the next reader
+    more than an open question.

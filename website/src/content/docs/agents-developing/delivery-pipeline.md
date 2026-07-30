@@ -433,9 +433,15 @@ ONLY through the fail-closed wrapper `bash scripts/flow/roborev-review.sh --agen
 reviewer is `--agent claude-code --model claude-opus-5`. **BOTH `--agent` and `--model` are ALWAYS
 required** (the wrapper rejects a missing one as a usage error; one alone inherits the mismatched
 `.roborev.toml`-pinned model and fails as a silent-looking review outage), and the branch must be **pushed
-first** — the wrapper asserts that and FAILs otherwise. A bare `roborev review --branch` and the
-two-positional commit-range form are **NON-SANCTIONED**: they can report clean having reviewed NOTHING, and
-a vacuous pass is textually identical to a genuine one. **Any** non-PASS terminal `RESULT` —
+first** — the wrapper asserts that and FAILs otherwise. Three direct-CLI forms are **NON-SANCTIONED**:
+`roborev review --branch` **without an explicit `--repo`** (from a worktree it resolves against the ROOT
+checkout), the two-positional commit-range form (its range base is git's empty tree), and a single-SHA
+review (it reviews **one commit, not the branch**). Each can report clean having reviewed NOTHING — or, for
+the single-SHA form, only the last commit — and a vacuous pass is textually identical to a genuine one.
+Measured: **`--repo` is what makes `--branch` correct**, so the wrapper reviews the RANGE `<base>..HEAD` and
+verifies BOTH endpoints against the job record (`reviewed-sha:` is a range, not a sha; `job-record:` reports
+the record's completeness). Note too that roborev excludes non-code paths from the diff it builds, so a
+docs-only diff cannot be roborev-certified at all. **Any** non-PASS terminal `RESULT` —
 `NOTHING-TO-REVIEW` included — is a failed review round and a blocked merge, never a clean pass. Verify
 which reviewer a box can actually serve with `roborev check-agents`; why:
 [roborev findings](/cqlite/agents-developing/roborev-findings/) + CLAUDE.md.

@@ -139,44 +139,65 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
 
 ### The four rules
 
-1. **The wrapper is the only sanctioned roborev invocation.** A bare
-   `roborev review --branch --base origin/main` is **NON-SANCTIONED**, and so is the two-positional
-   commit-range form (`roborev review <sha-a> <sha-b>`).
-2. **The reviewed scope must be VERIFIED against branch HEAD.** The wrapper asserts it from the **job
-   record's structured fields** (read via `roborev list --json` / `roborev show --json` — e.g. the
-   full-sha `git_ref`), and treats the stdout `Enqueued job <N> for <sha>` announcement as a **demoted
-   cross-check** that still fails closed when it is absent or unparseable. A tool's structured record
+1. **The wrapper is the only sanctioned roborev invocation.** Three direct-CLI forms are
+   **NON-SANCTIONED**: `--branch` **WITHOUT an explicit `--repo`** (from a worktree it resolves against the
+   ROOT checkout), the two-positional commit-range form (`roborev review <sha-a> <sha-b>`, whose range base
+   is git's EMPTY TREE), and a single-SHA review (`roborev review <sha>`, which **reviews ONE COMMIT, not
+   the branch**). Measured on a 17-commit branch with a 27-file census: `--branch --base <base> --repo
+   <abs>` delivered **5/5** census code files to the reviewer, the other two **3/5**. So `--repo` is what
+   makes `--branch` correct — the defect was always the missing `--repo`, never `--branch` itself — and the
+   wrapper invokes that range form.
+2. **The reviewed RANGE must be VERIFIED against `<base>...HEAD`.** The wrapper asserts **both endpoints**
+   from the **job record's structured fields** (read via `roborev list --json` / `roborev show --json`:
+   `git_ref` is `<base40>..<head40>`, reported in `reviewed-sha:` beside a `job-record:` completeness key),
+   and demotes the stdout `Enqueued job <N> for <sha>` announcement to the **carrier of the job id** — for
+   a range review it names only the range BASE, so when the record is unavailable the run FAILS rather than
+   falling back to prose that verifies nothing. A tool's structured record
    is a stronger source than its human-readable prose — the same principle that moved the push assert
-   off the local `origin/<branch>` mirror ref onto `git ls-remote`. A reviewed scope that does not
-   match, or that *equals the base ref*, **aborts the round**; base-equality is the signature of the
+   off the local `origin/<branch>` mirror ref onto `git ls-remote`. A range that does not match, a
+   **single-commit record even when it equals HEAD**, or a scope that *equals the base ref*, **aborts the
+   round**; base-equality is the signature of the
    worktree bug below. Also push first — an unpushed implementation commit is itself an empty-diff
    cause, and the wrapper asserts the push and FAILs otherwise. Which fields are asserted is the
    wrapper's business — see its `--help`.
 3. **`"contains no code changes to review"` on a NON-EMPTY diff is a HARD FAIL**, never a pass. The
    wrapper judges the reviewer's claim against a *locally computed* `git` diff census, so a reviewer
    asserting the opposite of a census we measured ourselves has demonstrably not reviewed the change.
-4. **A docs-only (code-free) diff cannot be roborev-certified at all** — the wrapper's deterministic
+4. **A docs-only (code-free) diff cannot be roborev-certified at all.** The mechanism is measured:
+   roborev **excludes non-code paths from the diff it builds** (of a 27-file census — 22 markdown, 5 code —
+   the prompt carried headers for exactly the 5 code files), so for a prose-only diff the constructed diff
+   is genuinely EMPTY and the verdict is a *truthful report of an empty input*, not a reviewer malfunction.
+   Re-running cannot help; the wrapper's deterministic
    pre-enqueue `code-free:` check fails it before any review is enqueued, rather than matching reviewer
-   prose after the fact. The sanctioned substitute is primary-source verification recorded in the PR (for a docs
+   prose after the fact. The same mechanism is why `prompt-content:` asserts the **CODE subset** of the
+   census — and why an unretrievable prompt is a `FAIL` there, never a passing `UNAVAILABLE`. The sanctioned substitute is primary-source verification recorded in the PR (for a docs
    change describing the on-disk format, `git show cassandra-5.0.8:<path>`). **No docs-only change may
    ever record "roborev clean."**
 
 ### Why: a vacuous roborev pass is textually identical to a genuine clean pass
 
-Three confirmed trigger paths make roborev report clean **without having reviewed anything**, and at the
-top level ("No issues found") a vacuous verdict reads exactly like a real one:
+**Four** confirmed trigger paths make roborev report clean **without having reviewed anything** (or having
+reviewed only part), and at the top level ("No issues found") a vacuous verdict reads exactly like a real
+one:
 
-- **T1 — worktree + `--branch`.** Worktrees are not in `roborev repo list`, and `roborev repo` has no
-  `add` subcommand (repos self-register on first use), so `--branch` resolves against the **ROOT
-  checkout** — which normally sits on `main` — and enqueues the BASE commit. Observed: enqueued
+- **T1 — worktree + `--branch` without `--repo`.** Worktrees are not in `roborev repo list`, and
+  `roborev repo` has no `add` subcommand (repos self-register on first use), so `--branch` resolves against
+  the **ROOT checkout** — which normally sits on `main` — and enqueues the BASE commit. Observed: enqueued
   `39900e4db` (= `origin/main`) while the branch HEAD was `4e7ab591e`; jobs 4649/4651/4653/4655/4657 all
-  enqueued `origin/main`.
-- **T2 — the commit-range form mis-enqueues.** `roborev review 89fdbb895 989d7d2c3` enqueued
-  `90a17d376` — **neither endpoint**.
+  enqueued `origin/main`. Adding an explicit `--repo <abs>` FIXES this form: it then reports "17 commits
+  since origin/main" and delivers every census code file — which is why the sanctioned invocation uses it.
+- **T2 — the two-positional commit-range form** anchors the reviewed range at git's **EMPTY-TREE** hash
+  (`4b825dc6…..<head40>`) rather than at the base you named, delivering 3 of 5 census code files.
 - **T3 — a code-free diff is silently discarded** even on a correctly targeted run: right SHA, right
   `--repo`, and still *"No issues found. Summary: The provided diff contains no code changes to
   review."* Reproducible (jobs 4658/4659). **This one passes the SHA check, so SHA verification alone is
-  insufficient** — hence rules 3 and 4.
+  insufficient** — hence rules 3 and 4. The mechanism is rule 4's: non-code paths never reach the
+  constructed diff, so there is genuinely nothing to review.
+- **T4 — a single-SHA review covers ONE COMMIT.** `roborev review <sha>` enqueues `git_ref = <head40>` —
+  *correct*, and still partial: 3 of 5 census code files reached the prompt on a 17-commit branch. Every
+  sha-equality check passes while the reviewer saw only the last commit, so this is a PARTIAL review
+  reported as a complete one, invisible to any SHA check. It is also the form #2964's own AC2 prescribed;
+  the wrapper implements that AC's *intent* — the reviewed content must match the requested range.
 
 Token accounting is the tell: genuine reviews run 398k–649k input / 314k–554k cached / 5.0k–6.3k output
 over 2m25s–2m45s, while the vacuous baseline is 18.7k input / 0 cached / 53–56 output in 8s (a
@@ -191,9 +212,13 @@ unreviewed code fleet-wide.
 ### Live worktree probe (documented, not gate-run)
 
 The hermetic regression check cannot prove the real external binary honours `--repo`. From a real
-`issue-<N>-*` worktree whose commit is pushed, while the root checkout sits on `main`, run the wrapper
-and confirm the summary block shows `reviewed-sha` equal to the worktree branch's HEAD and **not** equal
-to `origin/main`. It stays out of the gate because it needs network and a live reviewer.
+`issue-<N>-*` worktree whose commit is pushed, while the root checkout sits on `main`, run the wrapper and
+confirm the summary block's `sha-assert: PASS` beside a **`reviewed-sha:` RANGE** of the form
+`<base40>..<head40>` whose **HEAD endpoint is the worktree branch's HEAD** and whose base is `origin/main`.
+Because the sanctioned invocation reviews a range, `reviewed-sha` is **not** a bare sha — do not test it for
+equality with `head-sha`; compare the range's head endpoint. A `reviewed-sha` that is `origin/main` alone
+means the explicit `--repo` did not defeat the root-checkout resolution. It stays out of the gate because
+it needs network and a live reviewer, and it should be re-run after any roborev version bump.
 
 ## Pass BOTH agent and model — the wrapper requires it
 

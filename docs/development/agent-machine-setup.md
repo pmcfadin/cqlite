@@ -122,9 +122,14 @@ bash scripts/flow/roborev-review.sh --agent codex --model gpt-5.6-sol \
 **Both `--agent` and `--model` are ALWAYS required** — the wrapper rejects a missing one
 as a usage error, because one alone inherits the mismatched `.roborev.toml`-pinned model
 and fails as a silent-looking review outage. **Push the branch first**; the wrapper asserts
-that and FAILs otherwise. A bare `roborev review --branch` and the two-positional
-commit-range form are **NON-SANCTIONED** — from a worktree the former resolves against the
-ROOT checkout and reviews the base commit, reporting clean having reviewed NOTHING. Any
+that and FAILs otherwise. Three direct-CLI forms are **NON-SANCTIONED**:
+`roborev review --branch` **without an explicit `--repo`** (from a worktree it resolves
+against the ROOT checkout and reviews the base commit, reporting clean having reviewed
+NOTHING), the two-positional commit-range form (its range base is git's empty tree), and a
+single-SHA review (it reviews ONE COMMIT, not the branch — partial, with a sha that equals
+HEAD, so no sha check catches it). `--repo` is what makes `--branch` correct: the wrapper
+reviews the RANGE `<base>..HEAD` and asserts both endpoints from the job record, so
+`reviewed-sha:` is a range and `job-record:` reports the record's completeness. Any
 non-PASS terminal `RESULT`, `NOTHING-TO-REVIEW` included, is a failed round and a blocked
 merge, never a clean pass. Why: CLAUDE.md + the `agents-developing/roborev-findings` page.
 

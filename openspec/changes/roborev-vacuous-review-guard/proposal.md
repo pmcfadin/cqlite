@@ -13,22 +13,38 @@ new sanctioned invocation surface plus doctrine) · **Issue:** #2964 (`flow-meta
 clean" as a merge condition (`flow-closer` runs a final roborev confirmation pass before arming
 `gh pr merge --auto`), a vacuous pass can merge **unreviewed code**.
 
-Three trigger paths are confirmed:
+**Four** trigger paths are confirmed (the fourth was found by this change's own live probe):
 
-1. **Worktree + `--branch`.** `roborev review --branch --base origin/main` run from inside a git
-   worktree resolves `--branch` against the **ROOT checkout**, not `$PWD` — worktrees are not
-   registered in `roborev repo list`, and `roborev repo` has no `add` subcommand (repos self-register
+1. **Worktree + `--branch` WITHOUT an explicit `--repo`.** `roborev review --branch --base origin/main` run
+   from inside a git worktree resolves `--branch` against the **ROOT checkout**, not `$PWD` — worktrees are
+   not registered in `roborev repo list`, and `roborev repo` has no `add` subcommand (repos self-register
    on first use). The root normally sits on `main`, so the run enqueues the **BASE** commit, the diff
    is empty, and the verdict is "No issues found. Summary: The provided combined diff contains no code
    changes to review." Observed: enqueued `39900e4db` (= `origin/main`) while the branch HEAD was
-   `4e7ab591e`; jobs 4649/4651/4653/4655/4657 all enqueued `origin/main`.
-2. **Commit-range form mis-enqueues.** `roborev review 89fdbb895 989d7d2c3` enqueued `90a17d376` —
-   **neither endpoint**.
+   `4e7ab591e`; jobs 4649/4651/4653/4655/4657 all enqueued `origin/main`. **Measured correction:** adding
+   an explicit `--repo <abs>` FIXES this form (it then reports "17 commits since origin/main" and delivers
+   every code file) — so the defect is the MISSING `--repo`, not `--branch` itself, and `--branch --base
+   <base> --repo <abs>` is the SANCTIONED invocation.
+2. **The two-positional commit-range form** anchors the reviewed range at git's **EMPTY-TREE** hash
+   (`4b825dc6…..<head40>`), delivering only 3 of 5 census code files. (An earlier observation of it
+   enqueueing an unrelated `90a17d376` for `roborev review 89fdbb895 989d7d2c3` is the same class:
+   the range it reviews is not the one requested.)
 3. **Code-free diffs are silently discarded even on a correctly-targeted run.** A 5-file / 167+ / 63−
-   **all-markdown** diff, invoked correctly by explicit SHA + `--repo <worktree-abs>`, enqueued the
+   **all-markdown** diff, invoked correctly with an explicit SHA + `--repo <worktree-abs>`, enqueued the
    right SHA and still returned "No issues found. Summary: The provided diff contains no code changes
    to review." Reproducible (jobs 4658, 4659). **This path passes an enqueued-SHA check**, so SHA
-   verification alone is insufficient.
+   verification alone is insufficient. **Mechanism, now measured:** roborev EXCLUDES non-code paths from
+   the diff it constructs (on a 27-file census — 22 markdown + 5 code — the prompt carried headers for
+   exactly the 5 code files), so for an all-prose diff the constructed diff is genuinely EMPTY and the
+   reviewer's report is TRUTHFUL about an empty input rather than a malfunction. Re-running cannot help;
+   only a deterministic pre-enqueue refusal can.
+4. **The single-SHA form reviews ONE COMMIT, not the branch** — and it is the form this issue's own AC2
+   prescribes. Measured: `git_ref = <head40>` (correct!) while only 3 of 5 census code files reached the
+   prompt. On any multi-commit branch — every branch we ship — it certifies the branch from its last commit
+   alone: a PARTIAL review reported as a complete one, invisible to every sha-equality check. Hence the
+   sanctioned invocation reviews the **RANGE** `<base>..HEAD`, and the wrapper FAILs a single-commit job
+   record even when it equals HEAD. This change implements AC2's **intent** — the reviewed content must
+   match the requested range — rather than its letter, and says so in `design.md` and the spec delta.
 
 **Token accounting is the observable tell** (`roborev log <job>` / `roborev show <job> --json`):
 
@@ -51,7 +67,8 @@ and **output counts collide** between a genuine CLEAN review and a vacuous one (
 output floor cannot discriminate them and is advisory only.
 
 **Blast radius is total.** The 1:1:1:1 rule puts **every** issue in a worktree, so **every** flow-\*
-roborev run is exposed to trigger 1. Measured cost on #2950: two vacuous runs "passed"; re-run
+roborev run is exposed to T1, and every multi-commit branch to T4. Measured cost on #2950: two
+vacuous runs "passed"; re-run
 correctly against the real SHA, the **same diff produced TWO REAL BLOCKERS** that would otherwise
 have shipped.
 
@@ -59,9 +76,11 @@ have shipped.
 
 1. **A single sanctioned invocation surface: `scripts/flow/roborev-review.sh`** — a fail-closed
    CQLite-side wrapper. `roborev` is an **external binary** (`/usr/local/bin/roborev`, not vendored
-   here), so the guard cannot live upstream; it lives on our side of the call. Implemented as three
-   files: the wrapper, a sourced `roborev-review-oracles.sh` (push assert + census/code-free), and
-   `roborev-job-facts.py` (job-record/token JSON decoding).
+   here), so the guard cannot live upstream; it lives on our side of the call. Implemented as **five**
+   files: the wrapper, a sourced `roborev-review-oracles.sh` (push assert + census/code-free), a sourced
+   `roborev-review-checks.sh` (the five per-review checks), `roborev-job-facts.py` (job-record/token JSON
+   decoding), and the hermetic regression check. Both sourced files FAIL CLOSED when missing or truncated,
+   validated **before** the review is invoked so a broken install costs no review.
 2. **DETERMINISTIC checks carry the verdict; prose and tokens only corroborate.** Each load-bearing
    check is judged against data the wrapper obtains ITSELF: the REMOTE (`git ls-remote`), its own
    `git diff --numstat --no-renames <base>...HEAD` census, its own code-free classification of that
@@ -75,10 +94,14 @@ have shipped.
 4. **Ordered, fail-closed asserts**: push assert against the REMOTE (an unpushed branch is itself an
    empty-diff cause; a local mirror ref is NOT authority) → census (an unresolvable base or a failed
    `git diff` FAILs, distinctly from an empty census) → **deterministic code-free FAIL before anything
-   is enqueued** → explicit-SHA + explicit-`--repo` invocation (never bare `--branch`, never the
-   two-positional range form) → reviewed-SHA assert against the job record's full-40-char `git_ref`
-   (the stdout `Enqueued job N for <sha>` line demoted to a fail-closed cross-check) →
-   `review-completed` → `prompt-content` → findings-vs-error attribution → the two corroborating
+   is enqueued** → the RANGE invocation with an explicit absolute `--repo` (never `--branch` without
+   `--repo`, never the two-positional range form, never a single sha) → a `job-record:` read that
+   consults BOTH payload shapes and reports its own completeness → reviewed-**RANGE** assert against the
+   job record's `git_ref`, asserting BOTH endpoints against the census range (the stdout `Enqueued job N
+   for <sha>` line demoted to the carrier of the job id — for a range review it names only the base, so an
+   unavailable record FAILs rather than falling back to it) →
+   `review-completed` → `prompt-content` → findings-vs-error attribution (with a contradiction reported
+   `INCONSISTENT` and failed) → the two corroborating
    vacuity tiers → a machine-greppable `==== ROBOREV REVIEW SUMMARY ====` block with a terminal
    `RESULT: PASS|FAIL|NOTHING-TO-REVIEW` and a non-zero exit on anything but PASS.
 5. **A distinct `NOTHING-TO-REVIEW` status** for a genuinely empty census — explicitly **not** a pass,
@@ -105,12 +128,16 @@ have shipped.
    previously prescribed the **inverse** rule ("no `--agent`/`--model` flags"; one called explicit
    agent/model "never doctrine"). Bare `--branch` becomes non-sanctioned everywhere.
 10. **A hermetic regression check** (`scripts/tests/test_roborev_review_guard.sh`, a stub `roborev` on
-    `PATH` replaying the recorded outputs — including the doubly-encoded token payload — against
-    throwaway git fixtures covering the fleet's narrow-refspec topology) wired into BOTH the `--lite`
+    `PATH` replaying the recorded outputs — including the doubly-encoded token payload and the review row
+    that nests the job row — against throwaway git fixtures covering the fleet's narrow-refspec topology
+    and a detected rename) wired into BOTH the `--lite`
     `roborev-lints` component and the full-gate `tooling-tests`, plus a documented **live worktree
-    probe** proving a worktree-launched review reviews the worktree's HEAD.
+    probe** proving a worktree-launched review reviews the worktree's HEAD. **329 assertions.**
 11. **Doctrine in the same change** (CLAUDE.md's roborev-invocation paragraph + the
-    `agents-developing/roborev-findings` page, including a row in its mechanized-in-`--lite` table).
+    `agents-developing/roborev-findings` page, including a row in its mechanized-in-`--lite` table), plus
+    the three measured corrections propagated to every surface that states the rule: the non-sanctioned
+    form is `--branch` **without** `--repo`; the single-SHA form is a partial review; roborev excludes
+    non-code paths from the diff it builds.
 
 ## Non-goals
 
@@ -134,8 +161,9 @@ have shipped.
 
 - **New scripts:** `scripts/flow/roborev-review.sh` (the sanctioned invocation),
   `scripts/flow/roborev-review-oracles.sh` (sourced: push assert + census/code-free oracles),
+  `scripts/flow/roborev-review-checks.sh` (sourced: the five per-review checks),
   `scripts/flow/roborev-job-facts.py` (job-record + token extraction),
-  `scripts/tests/test_roborev_review_guard.sh` (hermetic regression check — 258 assertions).
+  `scripts/tests/test_roborev_review_guard.sh` (hermetic regression check — 329 assertions).
 - **Gate:** the regression check is registered in `scripts/agent-gate.sh`'s shell-tooling component
   set (`tooling-tests`, and `roborev-lints` so it also runs in `--lite`), so a regression FAILs the
   fast loop rather than costing a review round.

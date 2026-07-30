@@ -350,27 +350,38 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   `AGENT-GATE *SUMMARY` blocks so neither can be pasted as the other), never the transcript — that goes
   to the `log:` path named in the block. Exit `0` PASS / `1` FAIL / `3` NOTHING-TO-REVIEW / `2` usage
   error; **any** non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round and
-  a blocked merge, never "roborev clean". Four rules: **(1)** bare
-  `roborev review --branch --base origin/main` is NON-SANCTIONED, and so is the two-positional
-  commit-range form. **(2)** The **reviewed scope must be VERIFIED against branch HEAD** — the wrapper
-  asserts it from the **job record's structured fields** (`roborev list/show --json`; e.g. the full-sha
-  `git_ref`), with the stdout `Enqueued job <N> for <sha>` line DEMOTED to a cross-check that still
-  fails closed when absent or unparseable (a structured record beats parsing a tool's human-readable
-  prose — the same reasoning that moved the push-assert onto `git ls-remote`). A reviewed scope that
-  does not match, or that equals the base ref, **aborts the round** — base-equality is the signature of
+  a blocked merge, never "roborev clean". Four rules: **(1)** the NON-SANCTIONED direct forms are
+  `--branch` **WITHOUT** an explicit `--repo` (from a worktree it resolves against the ROOT checkout),
+  the two-positional commit-range form (its range base is git's EMPTY TREE), and a SINGLE-SHA review (it
+  covers ONE COMMIT, certifying a multi-commit branch from its last commit alone). `--repo` is what makes
+  `--branch` correct, so the wrapper reviews the RANGE `--branch --base <base> --repo <abs>` — measured
+  5/5 census code files delivered, vs 3/5 for the other two. **(2)** The **reviewed RANGE must be VERIFIED
+  against `<base>...HEAD`** — the wrapper asserts BOTH endpoints from the **job record's structured
+  fields** (`roborev list/show --json`; `git_ref` is `<base40>..<head40>`, echoed in `reviewed-sha:`
+  beside a `job-record:` completeness key), with the stdout `Enqueued job <N> for <sha>` line DEMOTED to
+  the job-id carrier: for a range review it names only the BASE, so an unavailable record FAILs rather
+  than falling back to prose that verifies nothing. A range that does not match, a SINGLE-COMMIT record
+  (even one equal to HEAD), or a base-equal scope **aborts the round** — base-equality is the signature of
   the worktree bug. **(3)** `"contains no code changes to review"` on a
   NON-EMPTY diff is a **HARD FAIL**, never a pass. **(4)** A docs-only (code-free) diff **cannot be
-  roborev-certified at all** — the wrapper's deterministic pre-enqueue `code-free:` check fails it
-  before any review is enqueued; the sanctioned substitute is
+  roborev-certified at all**: roborev **EXCLUDES non-code paths from the diff it builds** (measured — 22
+  markdown absent from the prompt, 5 code present), so for prose-only the constructed diff is genuinely
+  EMPTY and that verdict is a truthful report of an empty input, not a malfunction. The wrapper's
+  deterministic pre-enqueue `code-free:` check fails it before any review is enqueued, and
+  `prompt-content:` therefore asserts the CODE subset of the census (an unretrievable prompt FAILs — there
+  is no passing `UNAVAILABLE` there). The sanctioned substitute is
   primary-source verification recorded in the PR (e.g. `git show cassandra-5.0.8:<path>`), and no
   docs-only change may ever record "roborev clean". Push first: an unpushed implementation commit is
-  itself an empty-diff cause, and the wrapper asserts the push and FAILs otherwise. **Why:** three
-  confirmed paths make roborev report clean having reviewed NOTHING, and a vacuous pass is TEXTUALLY
-  IDENTICAL to a genuine one — (T1) from a worktree, `--branch` resolves against the ROOT checkout
-  (normally on `main`) and enqueues the BASE commit: enqueued `39900e4db` (= origin/main) while branch
-  HEAD was `4e7ab591e`; (T2) the range form `roborev review 89fdbb895 989d7d2c3` enqueued `90a17d376` —
-  NEITHER endpoint; (T3) a code-free diff is SILENTLY DISCARDED even with the right SHA and the right
-  `--repo`, so **SHA verification alone is insufficient**. Token accounting is the tell: genuine reviews
+  itself an empty-diff cause, and the wrapper asserts the push and FAILs otherwise. **Why:** FOUR
+  confirmed paths make roborev report clean having reviewed NOTHING (or only part), and a vacuous pass is
+  TEXTUALLY IDENTICAL to a genuine one — (T1) from a worktree, `--branch` without `--repo` resolves
+  against the ROOT checkout (normally on `main`) and enqueues the BASE commit: enqueued `39900e4db`
+  (= origin/main) while branch HEAD was `4e7ab591e`; (T2) the two-positional range form anchors the range
+  at git's EMPTY TREE (`4b825dc6…`); (T3) a code-free diff is SILENTLY DISCARDED even with the right SHA
+  and the right `--repo`, so **SHA verification alone is insufficient**; (T4) a single-SHA review covers
+  ONE COMMIT — a PARTIAL review whose enqueued sha EQUALS HEAD, so no sha check can see it (this is the
+  form #2964's own AC2 asked for; the wrapper implements the AC's intent instead).
+  Token accounting is the tell: genuine reviews
   398k–649k input / 314k–554k cached / 5.0k–6.3k output over ~2m30s, vs the vacuous baseline 18.7k input
   / 0 cached / 53–56 output in 8s. Real cost: on #2950 two vacuous runs "passed"; re-run correctly
   against the real SHA, the SAME diff produced TWO REAL BLOCKERS. 1:1:1:1 puts EVERY issue in a worktree

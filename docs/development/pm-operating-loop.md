@@ -210,10 +210,14 @@ worktree (the manager never rebases someone else's branch).
 - EMU guard every board op: `gh auth switch --user pmcfadin && gh auth setup-git`.
 - roborev runs ONLY through `bash scripts/flow/roborev-review.sh --agent <agent> --model <model>
   [--repo <abs-path>] [--base <ref>]` (#2964; fleet form `--agent codex --model gpt-5.6-sol`). **Both flags
-  ALWAYS** — the wrapper rejects a missing one as a usage error. Push the branch first; a bare
-  `roborev review --branch` and the two-positional commit-range form are NON-SANCTIONED (they can report
-  clean having reviewed nothing). Any non-PASS terminal `RESULT`, `NOTHING-TO-REVIEW` included, is a failed
-  round and a blocked merge — never "roborev clean". See CLAUDE.md +
+  ALWAYS** — the wrapper rejects a missing one as a usage error. Push the branch first. NON-SANCTIONED
+  direct forms: `roborev review --branch` **without an explicit `--repo`** (from a worktree it resolves
+  against the ROOT checkout), the two-positional commit-range form (range base = git's empty tree), and a
+  single-SHA review (reviews ONE COMMIT, not the branch — a partial review whose sha equals HEAD). `--repo`
+  is what makes `--branch` correct, so the wrapper reviews the RANGE `<base>..HEAD` and asserts both
+  endpoints from the job record; a docs-only diff cannot be roborev-certified at all, because roborev
+  excludes non-code paths from the diff it builds. Any non-PASS terminal `RESULT`, `NOTHING-TO-REVIEW`
+  included, is a failed round and a blocked merge — never "roborev clean". See CLAUDE.md +
   `docs/development/agent-machine-setup.md`.
 - Every GitHub write gets a short traceable comment.
 
