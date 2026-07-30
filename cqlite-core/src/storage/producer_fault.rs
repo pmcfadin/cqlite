@@ -31,8 +31,9 @@
 //!   query-row thread used to read as "the scan finished".
 //! * [`arm_scan_task_panic`] → the generalisation of the second seam to EVERY
 //!   spawned scan task on the ≠1-generation (query-engine full scan) path (issue
-//!   #3124): the fan-out k-way merge task, a per-reader per-row sub-scan, and the
-//!   windowed forwarder — see [`ScanTaskSite`]. Each had a DISCARDED `JoinHandle`
+//!   #3124): the fan-out k-way merge task, a per-reader per-row sub-scan, the
+//!   windowed forwarder, and the cross-generation RECONCILING merge task — see
+//!   [`ScanTaskSite`]. Each had a DISCARDED `JoinHandle`
 //!   and a consumer that read channel-close as end-of-scan, i.e. the #3106 defect
 //!   on the multi-generation path. An arm is keyed by `(site, scope)`, not scope
 //!   alone, because one scan traverses several of these checkpoints.
@@ -166,6 +167,20 @@ pub enum ScanTaskSite {
     /// blocking parse half's batches to the caller's surface. Reached only by
     /// chunk-stitching (compressed) readers.
     WindowedForwarder,
+    /// The CROSS-GENERATION reconciling merge task of
+    /// `generation_merge::stream_generations_for_read` (issue #3124 site 5), at its
+    /// prelude — i.e. inside the `KWayMerger::new` construction window, BEFORE the
+    /// task signals readiness.
+    ///
+    /// Deliberately its own site rather than sharing [`Self::FanoutMerge`]: that is
+    /// the schema-less lazy token-order CONCAT, this is the authoritative RECONCILING
+    /// merge a multi-generation read with a schema takes, and the whole point of the
+    /// site is that a death here must NOT be answered by silently substituting the
+    /// concat (roborev on #3124).
+    ///
+    /// Constructed only on the non-`tombstones` path, like [`Self::FanoutMerge`].
+    #[cfg_attr(feature = "tombstones", allow(dead_code))]
+    CrossGenerationMerge,
 }
 
 /// Consulted at a spawned scan task's checkpoint so an armed fault unwinds THAT

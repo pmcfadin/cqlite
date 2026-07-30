@@ -2105,9 +2105,11 @@ impl SSTableManager {
     /// O(one partition + channel), and time-to-first-row is O(first partition),
     /// not O(full merge). The merger already emits partitions in `(token, key)`
     /// order, byte-identical to `scan`'s `sort_by_token_order`, so the emitted
-    /// order is unchanged (issue #1579 ordering guardrail). On a merger
-    /// CONSTRUCTION error the driver reports back so this path FALLS BACK to the
-    /// lazy per-reader streaming merge, mirroring `scan`'s fall-back-to-concat. The
+    /// order is unchanged (issue #1579 ordering guardrail). On a REPORTED merger
+    /// CONSTRUCTION error this path FALLS BACK to the lazy per-reader streaming
+    /// merge, mirroring `scan`'s fall-back-to-concat; on a merge producer that DIED
+    /// it fails closed instead, because the concat is not reconciling and answering a
+    /// panic with it returns full-length WRONG data (issue #3124). The
     /// single-generation / no-schema / no-`write-support` cases keep the lazy
     /// streaming merge, which already matches `scan`'s concat path exactly and
     /// preserves LIMIT/backpressure.
@@ -2154,34 +2156,33 @@ impl SSTableManager {
                         );
                         return Ok(rx);
                     }
-                    Err(e) => {
-                        // Never fail a read because the merge could not be
-                        // constructed (unsupported format); fall back to the lazy
-                        // streaming merge, matching `scan`'s fall-back-to-concatenation.
-                        //
-                        // Error-path asymmetry, intentional (issue #1579): this `Err`
-                        // is ONLY the merger-CONSTRUCTION failure (`KWayMerger::new`,
-                        // signalled back before any row is streamed), so falling back
-                        // here can never emit a partially-merged, mis-reconciled
-                        // result — the streaming task has not sent anything yet. A
-                        // `step()` error occurring MID-merge (after some partitions
-                        // were already streamed to the caller) is NOT retried here;
-                        // it is delivered downstream as an `Err` item on the output
-                        // channel (see `stream_generations_for_read`), ending the
-                        // stream at that point. That is deliberately SAFER than the
-                        // materializing `scan`'s fallback, which — if it could fail
-                        // partway through populating its `Vec` — would have no way to
-                        // signal "these rows are reconciled, the rest are not"; the
-                        // streaming channel's `Err` item gives the caller an honest,
-                        // unambiguous cutoff instead of silently returning a
-                        // half-reconciled table.
+                    // Never fail a read because the merge could not be CONSTRUCTED
+                    // (unsupported input format); fall back to the lazy streaming
+                    // merge, matching `scan`'s fall-back-to-concatenation.
+                    //
+                    // Gated on the TYPE, not on the message (issue #3124, roborev):
+                    // `fallback_eligible()` is true for the REPORTED construction
+                    // failure ONLY. Nothing has been streamed at that point, so
+                    // falling back cannot mix reconciled and unreconciled rows, and
+                    // the concat's documented Issue #883 limitation is accepted for a
+                    // table the reconciling merge cannot open at all.
+                    //
+                    // The other setup failure — the producer task DIED before
+                    // signalling — is deliberately NOT eligible and propagates. Falling
+                    // back on a dead producer returned a FULL-LENGTH, UNRECONCILED
+                    // result set (duplicated overwritten rows, resurrected deleted
+                    // rows) as `Ok` with only a warning: silently WRONG data, one notch
+                    // worse than the silent truncation #3124 is about.
+                    Err(setup) if setup.fallback_eligible() => {
                         tracing::warn!(
-                            "SSTableManager::scan_stream - cross-generation merge failed for '{}' ({}); \
-                             falling back to lazy per-reader streaming merge",
+                            "SSTableManager::scan_stream - cross-generation merge could not be \
+                             constructed for '{}' ({}); falling back to lazy per-reader \
+                             streaming merge",
                             table_id,
-                            e
+                            setup.into_error()
                         );
                     }
+                    Err(setup) => return Err(setup.into_error()),
                 }
             }
         }
