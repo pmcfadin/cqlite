@@ -73,7 +73,10 @@ use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_core::RowKey;
 
 use crate::producer::ProducerError;
-use crate::row_source::{PendingRow, RowSource, SourceStep};
+// `map_core_error` is the ONE core-error -> producer-taxonomy mapping (issue
+// #2264: map by VARIANT, never by racing the cancel flag), shared with the merge
+// arm rather than duplicated per source.
+use crate::row_source::{map_core_error, PendingRow, RowSource, SourceStep};
 
 /// The forced-path override environment variable (see the module docs).
 pub const MERGE_PATH_ENV: &str = "CQLITE_FLIGHT_MERGE_PATH";
@@ -369,7 +372,7 @@ impl ScanRowSource {
             None => Vec::new(),
             Some(Ok(QueryRowBatch::Unsupported)) => return Ok(None),
             Some(Ok(QueryRowBatch::Rows(rows))) => rows,
-            Some(Err(e)) => return Err(map_scan_error(e)),
+            Some(Err(e)) => return Err(map_core_error(e)),
         };
         let emitted_any = !first.is_empty();
         Ok(Some(Self {
@@ -392,16 +395,6 @@ impl ScanRowSource {
         let decorated = DecoratedKey::new(cassandra_murmur3_token(bytes), bytes.to_vec());
         self.current = Some(decorated.clone());
         decorated
-    }
-}
-
-/// Map a core scan error onto the producer's error taxonomy, preserving a
-/// cooperative cancellation as `Cancelled` rather than a generic merge failure
-/// (issue #2264: map by VARIANT, never by racing the cancel flag).
-fn map_scan_error(e: cqlite_core::Error) -> ProducerError {
-    match e {
-        cqlite_core::Error::Cancelled => ProducerError::Cancelled,
-        other => ProducerError::Merge(other),
     }
 }
 
@@ -429,7 +422,7 @@ impl RowSource for ScanRowSource {
                         ),
                     )));
                 }
-                Some(Err(e)) => return Err(map_scan_error(e)),
+                Some(Err(e)) => return Err(map_core_error(e)),
             }
         }
     }

@@ -78,6 +78,17 @@ pub(crate) struct StaticMergeSource<'a> {
     /// The static values to inject into each of the partition's clustering rows.
     statics: StaticValues,
     /// Whether a VISIBLE clustering row was handed downstream for this partition.
+    ///
+    /// "Handed downstream", NOT "survived the request's predicate" — and that is
+    /// the Cassandra-faithful choice, not a convenience. A predicate can only
+    /// remove clustering rows when it restricts a clustering or REGULAR column,
+    /// and in exactly that case `returnStaticContentOnPartitionWithNoRows()` is
+    /// FALSE (`queriesFullPartitions()` =
+    /// `!hasClusteringColumnsRestrictions() && !hasRegularColumnsRestrictions()`),
+    /// so Cassandra returns ZERO rows for the partition. Treating a filtered-out
+    /// row as "the partition had rows" therefore yields the same result set, and a
+    /// bare `SELECT *` — where the static-only row IS returned — has no predicate
+    /// to remove anything.
     emitted_clustering_row: bool,
     /// A step deferred by one `next_step` call, so a partition's static-only row
     /// can be emitted BEFORE the first step of the next partition.

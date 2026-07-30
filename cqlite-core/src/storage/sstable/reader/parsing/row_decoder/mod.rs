@@ -714,101 +714,15 @@ const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
 const ROW_HAS_COMPLEX_DELETION: u8 = 0x40; // Issue #221: Row contains complex column with deletion info
 const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 
-/// Issue #932: does the decoded cell map hold any NON-primary-key data cell?
-///
-/// Primary-key (partition + clustering) columns are surfaced into the cell map
-/// as pseudo-cells (#229) so the read-back path can recover the clustering
-/// identity; they are NOT row data. A row carrying `HAS_DELETION` is a PURE row
-/// tombstone only when no such data cell survives — otherwise the row deletion
-/// COEXISTS with surviving (strictly-newer) cells and the row displays as live.
-fn row_has_non_key_cell(cells: &[(Arc<str>, Value)], schema: &TableSchema) -> bool {
-    cells.iter().any(|(name, _)| {
-        let name: &str = name;
-        !schema.partition_keys.iter().any(|k| k.name == name)
-            && !schema.clustering_keys.iter().any(|c| c.name == name)
-    })
-}
-
-/// Issue #1642 (K3): append accumulated static-column cells onto a clustering
-/// row's positional cell vector. This is an unconditional `extend` (O(n_static))
-/// — NOT a per-cell membership scan — because a static column name can NEVER
-/// collide with a name already in the clustering row's cells, so there is no
-/// clustering-row-wins conflict to resolve.
-///
-/// Disjointness proof (this codebase). `static_cells` is the cell vector of an
-/// IS_STATIC row; its names are exactly `RowColumnResolution::columns_for(true)`
-/// — header columns with `is_static == true` AND `!is_primary_key` AND
-/// `!is_clustering`. A static row has no clustering prefix, so it receives zero
-/// clustering-key pseudo-cells (row_data.rs: `clustering_values` is empty when
-/// static). A clustering row's `cells` names are the clustering-key pseudo-cells
-/// (issue #229) PLUS `columns_for(false)` — header columns with `is_static ==
-/// false` AND `!is_primary_key` AND `!is_clustering`. Every column has exactly
-/// one `is_static` value, so the `is_static == want_static` filter makes
-/// `columns_for(true)` and `columns_for(false)` name-disjoint; and
-/// `columns_for(true)` excludes clustering-key columns, so no static cell shares
-/// a clustering-key pseudo-cell name. Hence the two name sets are disjoint and
-/// the former membership guard could never fire.
-///
-/// Appending AFTER the clustering row's own cells keeps the merged order
-/// deterministic-by-construction (never user-visible: the query result is a
-/// name-keyed map, issue #1334).
-fn merge_static_cells(cells: &mut RowCells, static_cells: &RowCells) {
-    cells.extend(
-        static_cells
-            .iter()
-            .map(|(name, value)| (Arc::clone(name), value.clone())),
-    );
-}
-
-/// Issue #932/#1741: build the user-facing `ScanRow` display value for a parsed
-/// clustering row from its decoded `cells` and row header. Shared by every
-/// user-facing emit path so the row-tombstone display rule lives in ONE place:
-/// a `HAS_DELETION` row that carries NO surviving non-key cell displays as a pure
-/// `Tombstone` marker (suppressed downstream by `filter_tombstone`); a row that
-/// still carries surviving cells displays as a live `Row` (the deletion shadows
-/// only already-absent older cells). An empty cell set becomes a null marker.
-fn build_display_row(
-    cells: RowCells,
-    row_header_opt: Option<&RowHeader>,
-    schema: &TableSchema,
-) -> ScanRow {
-    let row_tombstone = row_header_opt.filter(|h| h.is_row_tombstone());
-    let has_data_cell = row_has_non_key_cell(&cells, schema);
-    if row_tombstone.is_some() && !has_data_cell {
-        ScanRow::Marker(
-            row_tombstone
-                .map(|h| h.row_tombstone())
-                .unwrap_or(Value::Null),
-        )
-    } else if cells.is_empty() {
-        ScanRow::Marker(Value::Null)
-    } else {
-        // Issue #1642 (K3): the decoder already emits cells positionally, in
-        // serialization-header (schema) column order — determinism comes from
-        // CONSTRUCTION, not a per-row sort. The former per-row `HashMap`
-        // allocation and alphabetical `sort_by` are gone; the interned
-        // `Arc<str>` name handles (#1334) move straight into the carrier.
-        ScanRow::Row(cells)
-    }
-}
-
-/// Issue #1741: extract a clustering row's clustering-key values (in schema
-/// clustering order) from its decoded cell map. Only called when a range
-/// tombstone is currently OPEN in the partition, so the per-row clone is off the
-/// tombstone-free hot path. Returns fewer values than the clustering arity only
-/// for a malformed/partial row (missing clustering pseudo-cells).
-fn extract_clustering_values(cells: &[(Arc<str>, Value)], schema: &TableSchema) -> Vec<Value> {
-    schema
-        .clustering_keys
-        .iter()
-        .filter_map(|ck| {
-            cells
-                .iter()
-                .find(|(name, _)| name.as_ref() == ck.name.as_str())
-                .map(|(_, v)| v.clone())
-        })
-        .collect()
-}
+// Issue #3095 / epic #1116: the row DISPLAY + static-merge helpers
+// (`row_has_non_key_cell`, `merge_static_cells`, `build_display_row`,
+// `extract_clustering_values`) live in `display_row`.
+mod display_row;
+use display_row::{build_display_row, extract_clustering_values, merge_static_cells};
+// campsite split of `block_emit_windowed` (epic #1116): the streaming-scan
+// `SlidingPartitionPolicy`.
+mod timestamp_policy;
+use timestamp_policy::TimestampPolicy;
 
 // Issue #1741 / #1853: `now_epoch_secs()` (the read-time TTL "now" clock, with
 // its `CQLITE_TTL_NOW_OVERRIDE_SECS` test seam) lives in `now_clock` — split
@@ -890,10 +804,6 @@ mod raw_type_value;
 mod raw_value;
 mod row_data;
 mod row_framing;
-// campsite split of `block_emit_windowed` (epic #1116): the streaming-scan
-// `SlidingPartitionPolicy`.
-mod timestamp_policy;
-use timestamp_policy::TimestampPolicy;
 mod udt;
 
 use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
