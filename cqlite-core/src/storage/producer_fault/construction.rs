@@ -69,9 +69,9 @@ impl MergeConstructionFault {
             Self::Io => Error::Io(std::io::Error::other(format!(
                 "{INJECTED_CONSTRUCTION_MESSAGE} (io)"
             ))),
-            Self::Corruption => Error::corruption(format!(
-                "{INJECTED_CONSTRUCTION_MESSAGE} (corrupt input)"
-            )),
+            Self::Corruption => {
+                Error::corruption(format!("{INJECTED_CONSTRUCTION_MESSAGE} (corrupt input)"))
+            }
             Self::UnsupportedFormat => Error::unsupported_format(format!(
                 "{INJECTED_CONSTRUCTION_MESSAGE} (merger-ineligible input)"
             )),

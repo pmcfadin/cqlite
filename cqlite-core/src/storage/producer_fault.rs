@@ -100,22 +100,20 @@
 //!
 //! # One seam injects an `Err`, not a panic (issue #3154)
 //!
-//! [`arm_merge_construction_error`] (child module [`construction`]) makes
+//! [`arm_merge_construction_error`] (child module `construction`) makes
 //! `KWayMerger::new` REPORT a chosen error variant on the cross-generation merge
-//! path, which is what proves the narrowed fallback classification: an I/O or
-//! corruption failure must propagate, while a merger-ineligible unsupported-format
-//! failure must still degrade to the documented concat. See that module's doc.
+//! path, proving the narrowed fallback classification: an I/O or corruption failure
+//! must propagate, while a merger-ineligible unsupported-format failure must still
+//! degrade to the documented concat. See that module's doc.
 
 /// The `Err`-reporting construction seam (issue #3154), in a child module so this
 /// file stays under the ~800-line campsite target (epic #1116).
 ///
 /// Gated to exactly where the seam it injures EXISTS —
 /// `generation_merge::stream_generations_for_read` is `write-support` AND
-/// `not(tombstones)` (a `tombstones` build routes `scan_stream` through the
-/// materializing `scan`, which has no `MergeStreamSetupError` at all) — for the same
-/// reason [`ScanTaskSite::CrossGenerationMerge`] is: a symbol that nothing in a
-/// configuration can ever reach would be a lie about that configuration's coverage,
-/// and `#[allow(dead_code)]` would hide it instead of stating it.
+/// `not(tombstones)` — for the same reason [`ScanTaskSite::CrossGenerationMerge`] is:
+/// a symbol nothing in a configuration can reach would be a lie about that
+/// configuration's coverage, and `#[allow(dead_code)]` would hide it, not state it.
 #[cfg(all(
     any(test, feature = "producer-fault-injection"),
     feature = "write-support",
@@ -387,35 +385,20 @@ impl FaultScope {
     }
 }
 
-/// The `Err`-reporting construction seam's take side (issue #3154).
-///
-/// Gated to the one configuration whose call site exists — the cross-generation
-/// reconciling merge's construction window in
-/// `generation_merge::stream_generations_for_read` — so no build carries a method
-/// nothing can reach (see [`construction`]'s `mod` declaration above).
+/// The `Err`-reporting construction seam's take side (issue #3154), gated to the one
+/// configuration whose call site exists — the cross-generation reconciling merge's
+/// construction window in `generation_merge::stream_generations_for_read` — so no
+/// build carries a method nothing can reach (see the `mod construction` doc above).
 #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 impl FaultScope {
     /// The construction error a test armed for this scope, if any — i.e. the error
-    /// `KWayMerger::new` is made to report instead of building the merger.
-    ///
-    /// ALWAYS `None` in a production build, where [`Self::armed_construction_error`]
-    /// is a function that returns `None` without touching (or even compiling) any
-    /// registry.
+    /// `KWayMerger::new` is made to report instead of building the merger. ALWAYS
+    /// `None` in a production build, which compiles no registry to consult.
     #[inline]
     pub(crate) fn injected_construction_error(&self) -> Option<crate::Error> {
-        self.armed_construction_error()
-    }
-
-    #[cfg(any(test, feature = "producer-fault-injection"))]
-    #[inline]
-    fn armed_construction_error(&self) -> Option<crate::Error> {
-        construction::take(&self.path.to_string_lossy())
-    }
-
-    /// Production build: nothing can be armed, so there is nothing to take.
-    #[cfg(not(any(test, feature = "producer-fault-injection")))]
-    #[inline]
-    fn armed_construction_error(&self) -> Option<crate::Error> {
+        #[cfg(any(test, feature = "producer-fault-injection"))]
+        return construction::take(&self.path.to_string_lossy());
+        #[cfg(not(any(test, feature = "producer-fault-injection")))]
         None
     }
 }
@@ -751,77 +734,13 @@ impl Drop for ArmedMergeProducerPanic {
     }
 }
 
-/// A boxed panic hook, as [`std::panic::set_hook`] takes it.
+/// Panic-hook silencing, in a child module so this file stays under the ~800-line
+/// campsite target (epic #1116). Re-exported here so every caller keeps the
+/// `producer_fault::silence_injected_panics` path it already uses.
 #[cfg(any(test, feature = "producer-fault-injection"))]
-type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
-
-/// Suppress the console noise of the INJECTED panic — and only that one — for the
-/// returned guard's lifetime.
-///
-/// Deliberately NOT a blanket `set_hook(|_| {})`: the panic hook is
-/// process-global, so silencing everything would swallow a genuine assertion
-/// failure message from this test or any test running in parallel, exactly the
-/// "masked assertion" failure mode. Panics whose payload does not carry
-/// [`INJECTED_PANIC_MESSAGE`] are delegated to the hook that was installed
-/// before (libtest's capture hook, normally), and that hook is reinstated when
-/// this guard drops — EXCEPT on an unwinding drop, where restoring is skipped
-/// (see [`SilencedInjectedPanics::drop`]).
+mod silence;
 #[cfg(any(test, feature = "producer-fault-injection"))]
-#[must_use = "the injected panic is only silenced while the guard is alive"]
-pub fn silence_injected_panics() -> SilencedInjectedPanics {
-    let previous: std::sync::Arc<PanicHook> = std::sync::Arc::new(std::panic::take_hook());
-    let installed = previous.clone();
-    std::panic::set_hook(Box::new(move |info| {
-        if is_injected(info) {
-            return;
-        }
-        installed(info);
-    }));
-    SilencedInjectedPanics { previous }
-}
-
-/// Whether `info` describes an injected fault panic. Matched on the payload
-/// STRING, so no real panic is ever swallowed.
-#[cfg(any(test, feature = "producer-fault-injection"))]
-fn is_injected(info: &std::panic::PanicHookInfo<'_>) -> bool {
-    let payload = info.payload();
-    let message = payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&'static str>().copied());
-    message.is_some_and(|m| m.contains(INJECTED_PANIC_MESSAGE))
-}
-
-/// Guard returned by [`silence_injected_panics`]; restores the previous hook on a
-/// normal drop (see [`Self::drop`] for the unwinding case).
-#[cfg(any(test, feature = "producer-fault-injection"))]
-pub struct SilencedInjectedPanics {
-    previous: std::sync::Arc<PanicHook>,
-}
-
-#[cfg(any(test, feature = "producer-fault-injection"))]
-impl Drop for SilencedInjectedPanics {
-    fn drop(&mut self) {
-        // NEVER touch the hook while unwinding (roborev, issue #3106):
-        // `std::panic::set_hook` PANICS if called from a panicking thread, so a
-        // guard still alive when an assertion (or any fallible call inside the
-        // silenced block) fails would double-panic and ABORT the process — under
-        // libtest's capture that loses the original message entirely and, in an
-        // integration-test binary, takes every sibling test's result with it.
-        // Skipping the restore leaves the filtering hook installed for the rest of
-        // the process, which is harmless: it only ever suppresses
-        // `INJECTED_PANIC_MESSAGE` and delegates everything else.
-        if std::thread::panicking() {
-            return;
-        }
-        // `set_hook` needs an owned `Box`, and the previous hook is behind an
-        // `Arc` (it is borrowed by the filtering hook installed above), so it is
-        // reinstated through one thin delegating wrapper. Behaviourally identical;
-        // the only cost is a pointer hop per nested guard.
-        let previous = self.previous.clone();
-        std::panic::set_hook(Box::new(move |info| previous(info)));
-    }
-}
+pub use silence::{silence_injected_panics, SilencedInjectedPanics};
 
 // Unit tests in a `*_tests.rs` sibling so this file stays under the ~800-line
 // campsite target (epic #1116 / #1135) — see that file's header.
