@@ -15,6 +15,7 @@ use super::super::scan_stream_windowed::scan_admission::{self, ScanAdmission};
 use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
 use super::super::SSTableReader;
 use super::batched_scan_stream::BatchedScanStream;
+use super::joined_scan_stream::RowScanStream;
 use super::model::{
     sort_by_token_order, sort_by_token_order_with_meta, table_ids_match, SCAN_FOR_KEY_CALLS,
 };
@@ -335,7 +336,7 @@ impl SSTableReader {
         end_key: Option<RowKey>,
         schema: Option<crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> mpsc::Receiver<Result<(RowKey, ScanRow)>> {
+    ) -> RowScanStream {
         // A directly-invoked reader scan is a top-level scan OPERATION: acquire one
         // admission permit (issue #1594). Callers that fan out to multiple readers
         // (`SSTableManager::scan_stream`) instead hold ONE permit for the whole
@@ -365,9 +366,16 @@ impl SSTableReader {
         schema: Option<crate::schema::TableSchema>,
         buffer_size: usize,
         admission: ScanAdmission,
-    ) -> mpsc::Receiver<Result<(RowKey, ScanRow)>> {
+    ) -> RowScanStream {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
-        tokio::spawn(async move {
+        // Issue #3124 (site 2): the task's `JoinHandle` is RETAINED, not discarded.
+        // This task is the per-generation producer a fan-out k-way merge primes a
+        // head from; before this, a task that UNWOUND (a decode panic, an abort)
+        // dropped `tx` with no error and no terminal item, the merge read that close
+        // as "this generation is exhausted", and the query returned FEWER ROWS WITH
+        // NO ERROR. `RowScanStream` joins the handle on channel close, so a dead
+        // producer is an `Err`, never a clean end of stream.
+        let task = tokio::spawn(async move {
             if let Err(e) = self
                 .run_scan_stream(table_id, start_key, end_key, schema, tx.clone(), admission)
                 .await
@@ -376,7 +384,7 @@ impl SSTableReader {
                 let _ = tx.send(Err(e)).await;
             }
         });
-        rx
+        RowScanStream::new(rx, task)
     }
 
     async fn run_scan_stream(
@@ -400,6 +408,18 @@ impl SSTableReader {
             ScanAdmission::Acquire => Some(scan_admission::admit().await),
             ScanAdmission::Exempt => None,
         };
+
+        // Issue #3124 (site 2): the ONE test-only fault checkpoint for this task,
+        // placed ABOVE every format branch (BTI trie walk, windowed stitch,
+        // block-by-block) so killing it reproduces the "sender dropped with no error
+        // and no terminator" condition for ANY reader — a checkpoint inside one
+        // branch would silently not fire for the other formats. The join that
+        // catches it wraps the whole task, so the property proven is
+        // branch-agnostic. Compiles to nothing in a production build.
+        crate::storage::producer_fault::scan_task_checkpoint(
+            crate::storage::producer_fault::ScanTaskSite::PerRowScan,
+            || self.file_path(),
+        );
 
         // Issue #1577 (owner-chosen fix, 2026-07-06): BTI (`da`) readers MUST use
         // the SAME per-reader decode path `SSTableReader::scan` uses — the trie-walk

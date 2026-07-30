@@ -596,7 +596,7 @@ pub(super) async fn stream_generations_for_read(
     start_key: Option<&RowKey>,
     end_key: Option<&RowKey>,
     buffer_size: usize,
-) -> Result<mpsc::Receiver<Result<(RowKey, ScanRow)>>> {
+) -> Result<reader::RowScanStream> {
     let start_key = start_key.cloned();
     let end_key = end_key.cloned();
     let paths = ordered_generation_paths(reader_list);
@@ -605,7 +605,14 @@ pub(super) async fn stream_generations_for_read(
     let (ready_tx, ready_rx) = oneshot::channel::<Result<()>>();
     let (out_tx, out_rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(buffer_size.max(1));
 
-    tokio::task::spawn_blocking(move || {
+    // Issue #3124: the merge task's `JoinHandle` is RETAINED and handed to the
+    // returned `RowScanStream`. A `spawn_blocking` closure that PANICS (a decode
+    // bug inside `KWayMerger::step`, say) drops `out_tx` with no error and no
+    // terminator, and every consumer of this channel — the query engine's
+    // multi-generation full scan — used to read that as "the merge finished" and
+    // return FEWER ROWS WITH NO ERROR. Joining on channel close makes a dead
+    // merge an `Error::Internal` instead.
+    let task = tokio::task::spawn_blocking(move || {
         // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
         let mut merger = match KWayMerger::new(paths, &schema) {
@@ -662,7 +669,7 @@ pub(super) async fn stream_generations_for_read(
     });
 
     match ready_rx.await {
-        Ok(Ok(())) => Ok(out_rx),
+        Ok(Ok(())) => Ok(reader::RowScanStream::new(out_rx, task)),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(crate::Error::Storage(
             "cross-generation streaming merge task ended before signalling readiness".to_string(),

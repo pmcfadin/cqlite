@@ -49,6 +49,9 @@ mod prefetch_window;
 // sync-fallback registry-schema pre-resolution (issue #1692)
 #[cfg(feature = "state_machine")]
 mod registry_schema;
+// The windowed scan's forwarder task + its join verdict (issue #3124, site 4):
+// a forwarder that DIES must fail the scan, not end it cleanly.
+mod scan_stream_forwarder;
 // Windowed streaming-scan driver (issue #1143); `pub` ONLY under non-default
 // `scan-offload-probe` so the #1143 guard reaches its probe, else private.
 #[cfg(not(feature = "scan-offload-probe"))]
