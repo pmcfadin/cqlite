@@ -1000,51 +1000,54 @@ impl MergeProducer {
             }
             // Count a partition actually scanned (post token-range filter).
             meter.record_partition();
-            for entry in rows {
-                // Build the row so predicates can reference any projected-out
-                // column too (`assemble_cols` includes filter-referenced columns);
-                // output projection is applied via `self.columns` during Arrow
-                // conversion. Columns the scan never reads are skipped in assembly.
-                let Some(row) = self.entry_to_row(
-                    &key.key,
-                    entry,
-                    &mut pk_cache,
-                    assemble_cols.as_ref(),
-                    self.now_secs,
-                )?
-                else {
-                    continue;
-                };
-                // Count a row materialised/examined by the scan (BEFORE the
-                // predicate filter — the `rows_scanned` semantic).
-                meter.record_row();
-                // Predicate pushdown: evaluate the nested filter tree with SQL
-                // Kleene logic and keep the row only when it is definitely True
-                // (Unknown and False both reject — WHERE semantics, issue #834).
-                if let Some(filter) = &self.spec.filter {
-                    if !filter.keeps(&row) {
-                        continue;
+            // Issue #3095 (NB2): the partition's entries go through the SHARED static
+            // choke point, so this route applies Cassandra's `processPartition()`
+            // static semantics identically to the streaming route (statics injected
+            // into every clustering row; a rowless-but-static partition yielding
+            // exactly one row; no phantom `ck = null` row). It is a plain
+            // materialize-each-entry loop for a table with no static column.
+            let flow = crate::statics::drive_partition_rows(
+                self,
+                &key,
+                rows,
+                &mut pk_cache,
+                assemble_cols.as_ref(),
+                |row| {
+                    // Count a row materialised/examined by the scan (BEFORE the
+                    // predicate filter — the `rows_scanned` semantic).
+                    meter.record_row();
+                    // Predicate pushdown: evaluate the nested filter tree with SQL
+                    // Kleene logic and keep the row only when it is definitely True
+                    // (Unknown and False both reject — WHERE semantics, issue #834).
+                    if let Some(filter) = &self.spec.filter {
+                        if !filter.keeps(&row) {
+                            return Ok(std::ops::ControlFlow::Continue(()));
+                        }
                     }
-                }
-                // Dual row-cap / byte-cap boundary (issue #2825), test-then-push:
-                // cut on the row that WOULD cross the cap, before it joins the
-                // buffer. `batch_bytes.rs` documents the rule and its one-row floor.
-                let width = estimate_arrow_row_bytes(&self.columns, &row);
-                if byte_cap.cut_before(width).is_yes() {
-                    self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
-                }
-                buffer.push(row);
-                emitted += 1;
-                byte_cap.accumulate(width);
-                if buffer.len() >= self.batch_size {
-                    self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
-                }
-                // LIMIT reached (counted post-filter): stop the merge early.
-                if let Some(cap) = limit {
-                    if emitted >= cap {
-                        break 'partitions;
+                    // Dual row-cap / byte-cap boundary (issue #2825), test-then-push:
+                    // cut on the row that WOULD cross the cap, before it joins the
+                    // buffer. `batch_bytes.rs` documents the rule and its one-row floor.
+                    let width = estimate_arrow_row_bytes(&self.columns, &row);
+                    if byte_cap.cut_before(width).is_yes() {
+                        self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
                     }
-                }
+                    buffer.push(row);
+                    emitted += 1;
+                    byte_cap.accumulate(width);
+                    if buffer.len() >= self.batch_size {
+                        self.flush_credited(sink, &mut buffer, &mut byte_cap, n_array_nodes)?;
+                    }
+                    // LIMIT reached (counted post-filter): stop the merge early.
+                    if let Some(cap) = limit {
+                        if emitted >= cap {
+                            return Ok(std::ops::ControlFlow::Break(()));
+                        }
+                    }
+                    Ok(std::ops::ControlFlow::Continue(()))
+                },
+            )?;
+            if flow.is_break() {
+                break 'partitions;
             }
         }
 
@@ -1136,24 +1139,29 @@ impl MergeProducer {
                     continue;
                 }
             }
-            for entry in rows {
-                let Some(row) = self.entry_to_row(
-                    &key.key,
-                    entry,
-                    &mut pk_cache,
-                    assemble_cols.as_ref(),
-                    self.now_secs,
-                )?
-                else {
-                    continue;
-                };
-                if let Some(filter) = &self.spec.filter {
-                    if !filter.keeps(&row) {
-                        continue;
+            // Issue #3095 (NB2): the SAME shared static choke point the row routes
+            // use. Without it `SELECT count(*)` over a static-bearing table counted a
+            // phantom `ck = null` row per static-bearing partition and MISSED a
+            // static-only partition's row — i.e. it disagreed with `SELECT *`'s row
+            // count over the same bytes.
+            // The aggregate route never breaks early (every surviving row must reach
+            // the accumulator), so the returned flow is always `Continue`.
+            let _ = crate::statics::drive_partition_rows(
+                self,
+                &key,
+                rows,
+                &mut pk_cache,
+                assemble_cols.as_ref(),
+                |row| {
+                    if let Some(filter) = &self.spec.filter {
+                        if !filter.keeps(&row) {
+                            return Ok(std::ops::ControlFlow::Continue(()));
+                        }
                     }
-                }
-                plan.accumulate_row(state, &row)?;
-            }
+                    plan.accumulate_row(state, &row)?;
+                    Ok(std::ops::ControlFlow::Continue(()))
+                },
+            )?;
         }
         Ok(())
     }

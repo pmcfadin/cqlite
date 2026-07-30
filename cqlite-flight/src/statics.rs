@@ -37,6 +37,7 @@
 //! column, so a table without statics keeps the previous code path exactly.
 
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use cqlite_core::query::{PartitionKeyCache, QueryRow};
@@ -52,6 +53,215 @@ use crate::row_source::{PendingRow, RowSource, SourceStep};
 /// by `entry_to_row` at the request's `now_secs`).
 type StaticValues = Vec<(Arc<str>, Value)>;
 
+/// The schema's STATIC column names, or `None` when the static adaptation does not
+/// apply at all (issue #3095).
+///
+/// A static column REQUIRES a clustering column in CQL (a table without one cannot
+/// declare a static column), and the clustering requirement is what makes
+/// "`clustering_key: None` identifies the static row" sound: with clustering columns
+/// present, no ordinary row can have an absent clustering key. Returning `None` here
+/// is what keeps every non-static table on its previous code path exactly.
+pub(crate) fn static_columns_of(
+    schema: &cqlite_core::schema::TableSchema,
+) -> Option<Vec<Arc<str>>> {
+    if schema.clustering_keys.is_empty() {
+        return None;
+    }
+    let cols: Vec<Arc<str>> = schema
+        .columns
+        .iter()
+        .filter(|c| c.is_static)
+        .map(|c| Arc::from(c.name.as_str()))
+        .collect();
+    (!cols.is_empty()).then_some(cols)
+}
+
+/// The per-partition static DECISIONS — the single place Cassandra's
+/// `processPartition()` static rules live (issue #3095).
+///
+/// Shared by BOTH drivers, so the two can never drift apart on the semantics:
+/// * the ROW-GRANULAR streaming route ([`StaticMergeSource`], the production
+///   `do_get` row path), and
+/// * the PARTITION-GRANULAR buffered + AGGREGATE routes
+///   ([`drive_partition_rows`], reached by `producer::drive_merge` /
+///   `producer::drive_aggregate`).
+pub(crate) struct StaticPartitionState {
+    /// The schema's STATIC column names (authoritative; never inferred).
+    static_columns: Vec<Arc<str>>,
+    /// The static values to inject into each of the partition's clustering rows.
+    statics: StaticValues,
+    /// The partition's materialized static row, held back until the partition ends —
+    /// emitted only if the partition yields no visible clustering row.
+    static_row: Option<QueryRow>,
+    /// Whether a VISIBLE clustering row was produced for this partition.
+    ///
+    /// "Produced", NOT "survived the request's predicate" — and that is the
+    /// Cassandra-faithful choice, not a convenience. A predicate can only remove
+    /// clustering rows when it restricts a clustering or REGULAR column, and in
+    /// exactly that case `returnStaticContentOnPartitionWithNoRows()` is FALSE
+    /// (`queriesFullPartitions()` =
+    /// `!hasClusteringColumnsRestrictions() && !hasRegularColumnsRestrictions()`), so
+    /// Cassandra returns ZERO rows for the partition. Treating a filtered-out row as
+    /// "the partition had rows" therefore yields the same result set, and a bare
+    /// `SELECT *` — where the static-only row IS returned — has no predicate to
+    /// remove anything.
+    emitted_clustering_row: bool,
+}
+
+impl StaticPartitionState {
+    pub(crate) fn new(static_columns: Vec<Arc<str>>) -> Self {
+        Self {
+            static_columns,
+            statics: Vec::new(),
+            static_row: None,
+            emitted_clustering_row: false,
+        }
+    }
+
+    /// Clear all partition-scoped state (called at every partition boundary).
+    pub(crate) fn reset(&mut self) {
+        self.statics = Vec::new();
+        self.static_row = None;
+        self.emitted_clustering_row = false;
+    }
+
+    /// Record the partition's static row: keep the full row for the
+    /// zero-clustering-row case, and its static column values for injection.
+    ///
+    /// FAILS LOUDLY when the static row arrives AFTER a clustering row of the same
+    /// partition (issue #3095 B6). The merger sorts every `clustering_key: None`
+    /// entry FIRST within a partition (`write_engine/merge/streaming.rs`'s
+    /// `static_row_carrier_always_sorts_first_regardless_of_partition_width`), so
+    /// this cannot happen today — but if that invariant ever broke, the rows already
+    /// handed downstream would carry a NULL static column and the loss would be
+    /// SILENT and total for the partition. An error is the only safe outcome.
+    pub(crate) fn record_static_row(
+        &mut self,
+        key: &DecoratedKey,
+        row: QueryRow,
+    ) -> Result<(), ProducerError> {
+        if self.emitted_clustering_row {
+            return Err(ProducerError::Merge(cqlite_core::Error::corruption(
+                format!(
+                    "static row for partition {:02x?} arrived AFTER a clustering row of \
+                 the same partition — the merger's static-sorts-first invariant is \
+                 broken, and the clustering rows already emitted carry a NULL static \
+                 column (issue #3095)",
+                    &key.key[..key.key.len().min(16)]
+                ),
+            )));
+        }
+        self.statics = self
+            .static_columns
+            .iter()
+            .filter_map(|name| {
+                row.values
+                    .get_key_value(name.as_ref())
+                    .map(|(k, v)| (Arc::clone(k), v.clone()))
+            })
+            .collect();
+        self.static_row = Some(row);
+        Ok(())
+    }
+
+    /// Inject the partition's static values into a clustering row and note that the
+    /// partition has produced a visible row.
+    ///
+    /// Cassandra fills each `case STATIC:` slot from the partition-level
+    /// `staticRow`, and a Cassandra-written clustering row never carries a static
+    /// cell, so on genuine Cassandra bytes "fill the absent column" and "overwrite"
+    /// are the same operation. Filling only absent columns is chosen deliberately:
+    /// it matches the single-generation decoder's `merge_static_cells`
+    /// (clustering-row-wins), keeping the two arms identical even on a
+    /// CQLite-written SSTable that mis-places a static cell into the clustering row
+    /// (the write-side #1074 shape).
+    pub(crate) fn inject_into_clustering_row(&mut self, row: &mut QueryRow) {
+        for (name, value) in &self.statics {
+            row.values
+                .entry(Arc::clone(name))
+                .or_insert_with(|| value.clone());
+        }
+        self.emitted_clustering_row = true;
+    }
+
+    /// The static-only row this partition owes, if any — consumed, so it can never be
+    /// emitted twice.
+    ///
+    /// Returning `None` because `emitted_clustering_row` is set is the CORRECT
+    /// Cassandra outcome, not a loss: with N > 0 clustering rows `processPartition()`
+    /// emits N rows and no separate static row, and each of those rows already
+    /// carries the static values via [`Self::inject_into_clustering_row`]. The
+    /// *ordering* hazard is rejected loudly at record time instead (B6), so it can
+    /// never reach here.
+    pub(crate) fn take_static_only_row(&mut self) -> Option<QueryRow> {
+        let row = self.static_row.take()?;
+        (!self.emitted_clustering_row).then_some(row)
+    }
+}
+
+/// Drive ONE partition's reconciled entries through Cassandra's static semantics,
+/// handing each resulting row to `emit` (issue #3095, NB2).
+///
+/// This is the PARTITION-GRANULAR choke point: `producer::drive_merge` (the buffered
+/// collect route behind the public `produce` / `produce_from_paths` /
+/// `produce_from_resolved`) and `producer::drive_aggregate` (every aggregating
+/// ticket, e.g. `SELECT count(*)`) both step the merge one WHOLE partition at a time
+/// and must not each grow their own copy of these rules. Both call this.
+///
+/// Uniform for static and non-static tables: with no static column the state is
+/// `None` and this is exactly the previous "materialize each entry, skip the
+/// suppressed ones" loop. Streaming, not buffering — `emit` is called per row, so
+/// peak memory is unchanged (no `Vec<QueryRow>` per partition), and `emit` may stop
+/// the scan early with [`ControlFlow::Break`] (the `LIMIT` path).
+pub(crate) fn drive_partition_rows<F>(
+    producer: &MergeProducer,
+    key: &DecoratedKey,
+    rows: Vec<MergeEntry>,
+    pk_cache: &mut PartitionKeyCache,
+    assemble_cols: Option<&HashSet<String>>,
+    mut emit: F,
+) -> Result<ControlFlow<()>, ProducerError>
+where
+    F: FnMut(QueryRow) -> Result<ControlFlow<()>, ProducerError>,
+{
+    let mut state = static_columns_of(&producer.schema).map(StaticPartitionState::new);
+    for entry in rows {
+        let is_static_entry = state.is_some() && entry.clustering_key.is_none();
+        let Some(mut row) =
+            producer.entry_to_row(&key.key, entry, pk_cache, assemble_cols, producer.now_secs)?
+        else {
+            continue;
+        };
+        match (is_static_entry, state.as_mut()) {
+            // The reconciled static row: held back, never emitted as its own row
+            // unless the partition turns out to have no visible clustering row.
+            (true, Some(state)) => state.record_static_row(key, row)?,
+            (_, Some(state)) => {
+                state.inject_into_clustering_row(&mut row);
+                if emit(row)?.is_break() {
+                    return Ok(ControlFlow::Break(()));
+                }
+            }
+            (_, None) => {
+                if emit(row)?.is_break() {
+                    return Ok(ControlFlow::Break(()));
+                }
+            }
+        }
+    }
+    // Cassandra's zero-clustering-row branch: exactly ONE row, statics populated,
+    // clustering + regular columns null.
+    if let Some(row) = state
+        .as_mut()
+        .and_then(StaticPartitionState::take_static_only_row)
+    {
+        if emit(row)?.is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+    }
+    Ok(ControlFlow::Continue(()))
+}
+
 /// Adapts the MERGE arm's row stream to Cassandra's static semantics (see the
 /// module docs).
 ///
@@ -66,30 +276,13 @@ type StaticValues = Vec<(Arc<str>, Value)>;
 pub(crate) struct StaticMergeSource<'a> {
     inner: &'a mut dyn RowSource,
     producer: &'a MergeProducer,
-    /// The schema's STATIC column names (authoritative; never inferred).
-    static_columns: Vec<Arc<str>>,
+    /// The per-partition static decisions, SHARED with the partition-granular route
+    /// (see [`StaticPartitionState`]) so the semantics exist in exactly one place.
+    state: StaticPartitionState,
     pk_cache: PartitionKeyCache,
     assemble_cols: Option<HashSet<String>>,
     /// The partition currently being adapted.
     partition: Option<DecoratedKey>,
-    /// The partition's materialized static row, held back until the partition ends
-    /// — emitted only if the partition yields no visible clustering row.
-    static_row: Option<QueryRow>,
-    /// The static values to inject into each of the partition's clustering rows.
-    statics: StaticValues,
-    /// Whether a VISIBLE clustering row was handed downstream for this partition.
-    ///
-    /// "Handed downstream", NOT "survived the request's predicate" — and that is
-    /// the Cassandra-faithful choice, not a convenience. A predicate can only
-    /// remove clustering rows when it restricts a clustering or REGULAR column,
-    /// and in exactly that case `returnStaticContentOnPartitionWithNoRows()` is
-    /// FALSE (`queriesFullPartitions()` =
-    /// `!hasClusteringColumnsRestrictions() && !hasRegularColumnsRestrictions()`),
-    /// so Cassandra returns ZERO rows for the partition. Treating a filtered-out
-    /// row as "the partition had rows" therefore yields the same result set, and a
-    /// bare `SELECT *` — where the static-only row IS returned — has no predicate
-    /// to remove anything.
-    emitted_clustering_row: bool,
     /// A FINAL step (never a `Row`) held back one `next_step` call so a partition's
     /// static-only row can be emitted before it.
     ///
@@ -145,29 +338,14 @@ impl<'a> StaticMergeSource<'a> {
         producer: &'a MergeProducer,
         inner: &'a mut dyn RowSource,
     ) -> Option<StaticMergeSource<'a>> {
-        let schema = &producer.schema;
-        if schema.clustering_keys.is_empty() {
-            return None;
-        }
-        let static_columns: Vec<Arc<str>> = schema
-            .columns
-            .iter()
-            .filter(|c| c.is_static)
-            .map(|c| Arc::from(c.name.as_str()))
-            .collect();
-        if static_columns.is_empty() {
-            return None;
-        }
+        let static_columns = static_columns_of(&producer.schema)?;
         Some(StaticMergeSource {
             inner,
             producer,
-            static_columns,
+            state: StaticPartitionState::new(static_columns),
             pk_cache: PartitionKeyCache::default(),
             assemble_cols: producer.assemble_columns(),
             partition: None,
-            static_row: None,
-            statics: Vec::new(),
-            emitted_clustering_row: false,
             ready: None,
             deferred_input: None,
             token_excluded: false,
@@ -193,9 +371,7 @@ impl<'a> StaticMergeSource<'a> {
     fn rotate_to(&mut self, key: &DecoratedKey) -> Option<(DecoratedKey, QueryRow)> {
         let owed = self.take_static_only_row();
         self.partition = Some(key.clone());
-        self.static_row = None;
-        self.statics = Vec::new();
-        self.emitted_clustering_row = false;
+        self.state.reset();
         // Issue #3095 (B5): the SAME token predicate `drive_row_source` applies, run
         // once per partition BEFORE any materialization.
         self.token_excluded = match &self.producer.spec.token {
@@ -205,80 +381,12 @@ impl<'a> StaticMergeSource<'a> {
         owed
     }
 
-    /// The static-only row the CURRENT partition owes, if any — consumed, so it can
-    /// never be emitted twice.
-    ///
-    /// Returning `None` because `emitted_clustering_row` is set is the CORRECT
-    /// Cassandra outcome, not a loss: with N > 0 clustering rows `processPartition()`
-    /// emits N rows and no separate static row, and each of those rows already
-    /// carries the static values via [`Self::inject`]. The *ordering* hazard — a
-    /// static row arriving AFTER a clustering row, which would silently lose statics
-    /// for the rows already emitted — is rejected LOUDLY at record time instead (B6,
-    /// see [`Self::record_static_row`]), so it can never reach here.
+    /// The static-only row the CURRENT partition owes, if any, paired with its key.
+    /// Delegates the DECISION to the shared [`StaticPartitionState`].
     fn take_static_only_row(&mut self) -> Option<(DecoratedKey, QueryRow)> {
-        let row = self.static_row.take()?;
-        if self.emitted_clustering_row {
-            return None;
-        }
+        let row = self.state.take_static_only_row()?;
         let key = self.partition.clone()?;
         Some((key, row))
-    }
-
-    /// Record the partition's static row: keep the full row for the
-    /// zero-clustering-row case, and its static column values for injection.
-    ///
-    /// FAILS LOUDLY when the static row arrives AFTER a clustering row of the same
-    /// partition (issue #3095 B6). The merger sorts every `clustering_key: None`
-    /// entry FIRST within a partition (`write_engine/merge/streaming.rs`'s
-    /// `static_row_carrier_always_sorts_first_regardless_of_partition_width`), so
-    /// this cannot happen today — but if that invariant ever broke, the rows already
-    /// handed downstream would carry a NULL static column and the loss would be
-    /// SILENT and total for the partition. An error is the only safe outcome.
-    fn record_static_row(
-        &mut self,
-        key: &DecoratedKey,
-        row: QueryRow,
-    ) -> Result<(), ProducerError> {
-        if self.emitted_clustering_row {
-            return Err(ProducerError::Merge(cqlite_core::Error::corruption(
-                format!(
-                    "static row for partition {:02x?} arrived AFTER a clustering row of \
-                 the same partition — the merger's static-sorts-first invariant is \
-                 broken, and the clustering rows already emitted carry a NULL static \
-                 column (issue #3095)",
-                    &key.key[..key.key.len().min(16)]
-                ),
-            )));
-        }
-        self.statics = self
-            .static_columns
-            .iter()
-            .filter_map(|name| {
-                row.values
-                    .get_key_value(name.as_ref())
-                    .map(|(k, v)| (Arc::clone(k), v.clone()))
-            })
-            .collect();
-        self.static_row = Some(row);
-        Ok(())
-    }
-
-    /// Inject the partition's static values into a clustering row.
-    ///
-    /// Cassandra fills each `case STATIC:` slot from the partition-level
-    /// `staticRow`, and a Cassandra-written clustering row never carries a static
-    /// cell, so on genuine Cassandra bytes "fill the absent column" and "overwrite"
-    /// are the same operation. Filling only absent columns is chosen deliberately:
-    /// it matches the single-generation decoder's `merge_static_cells`
-    /// (clustering-row-wins), keeping the two arms identical even on a
-    /// CQLite-written SSTable that mis-places a static cell into the clustering row
-    /// (the write-side #1074 shape).
-    fn inject(&self, row: &mut QueryRow) {
-        for (name, value) in &self.statics {
-            row.values
-                .entry(Arc::clone(name))
-                .or_insert_with(|| value.clone());
-        }
     }
 
     /// The materialized-row step for `key`, as the drive loop consumes it.
@@ -327,11 +435,10 @@ impl StaticMergeSource<'_> {
         if is_static_entry {
             // The reconciled static row. Held back: it is emitted only if this
             // partition turns out to have no visible clustering row.
-            self.record_static_row(&key, row)?;
+            self.state.record_static_row(&key, row)?;
             return Ok(SourceStep::Row(key, PendingRow::Suppressed));
         }
-        self.inject(&mut row);
-        self.emitted_clustering_row = true;
+        self.state.inject_into_clustering_row(&mut row);
         Ok(Self::materialized_step(key, row))
     }
 
