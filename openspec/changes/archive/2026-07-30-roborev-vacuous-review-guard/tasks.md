@@ -212,7 +212,11 @@
       form.
 - [ ] Verify publication by grepping the SERVED page for a distinctive new phrase (an HTTP 200 is not
       proof; CDN staleness ≈3 min) and re-check after a wait if absent. **Open: post-merge, after the
-      site deploys.**
+      site deploys.** Checked by the closer at merge+2min — the `Docs Site` workflow was still
+      `in_progress` on `main` and both greps returned `0` (NOT yet published, which is expected, not a
+      failure). Re-check once the deploy completes:
+      `curl -sS https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/ | grep -c 'single-SHA review covers ONE COMMIT'`
+      and `.../delivery-pipeline/ | grep -c 'one commit, not the branch'` — each must return non-zero.
 
 ## 6. Live worktree probe (AC5)
 - [x] Document the probe (wrapper `--help` text + the doctrine page): from a real `issue-<N>-*` worktree
@@ -237,16 +241,23 @@
       round-6 blocker fixes as spec obligations, the evidenced relaxations (input floor 25,000; the dropped
       output floor; tier 1 gated + `UNAVAILABLE` on an absent region) recorded as decisions, and the
       migrated surface set enumerated count-accurately (16).
-- [ ] `rust-reviewer` (no Rust here — skip if it has nothing to review) + roborev on the lite-green diff
+- [x] `rust-reviewer` (no Rust here — skip if it has nothing to review) + roborev on the lite-green diff
       via the NEW wrapper (review-first). Note: this change's own diff mixes shell/python with docs, so
       it is NOT code-free; six roborev rounds have run against it and their blockers are folded in
-      (round-6 blockers in `21bba65`/`83129d5`). **Open: the post-round-6 re-review is the closer's final
-      roborev pass below.**
-- [ ] Full gate ONCE via `flow-closer`; verify `tree-integrity:` alongside `RESULT:`.
-- [ ] **C (spec-auditor)** anchored to `openspec/changes/roborev-vacuous-review-guard/specs/**`: every
+      (round-6 blockers in `21bba65`/`83129d5`). Closed: the post-round-6 re-review ran as the closer's
+      final roborev pass below (job 10, dogfooded through the new wrapper).
+- [x] Full gate ONCE via `flow-closer`; verify `tree-integrity:` alongside `RESULT:`.
+      Gate of record `run-id: /tmp/agent-gate.xmN2Ij` at `39ee5b3`: `RESULT: PASS`,
+      `tree-integrity: PASS` (`tree-start` == `tree-end`), 29/29 components, `datasets: 144 Data.db`.
+- [x] **C (spec-auditor)** anchored to `openspec/changes/roborev-vacuous-review-guard/specs/**`: every
       requirement `satisfied` with public-surface (wrapper + regression-check + doctrine) evidence.
-- [ ] roborev clean; blockers fixed pre-merge, nits batched to ONE linked follow-up issue.
-- [ ] File the upstream follow-up noted in `design.md` (worktree-aware `--branch` resolution; non-zero
-      exit on a discarded code-free diff) so the external-binary gap is tracked.
+      Verdict PASS — 19/19 met (16 `satisfied`, 3 justified `partial`), no blockers, no permissive counts.
+- [x] roborev clean; blockers fixed pre-merge, nits batched to ONE linked follow-up issue.
+      Final pass: all guard keys PASS, `prompt-content: PASS (6/6)`, full range `f603c7f..39ee5b3`;
+      4 findings, **0 blockers**, 4 nits batched to #3133.
+- [x] File the upstream follow-up noted in `design.md` (worktree-aware `--branch` resolution; non-zero
+      exit on a discarded code-free diff) so the external-binary gap is tracked. Filed as #3126 +
+      kenn-io/roborev#1011.
 - [x] `openspec validate roborev-vacuous-review-guard --strict` clean.
-- [ ] `openspec archive` after merge.
+- [x] `openspec archive` after merge (archived as `2026-07-30-roborev-vacuous-review-guard`; the 19
+      requirements promoted to `openspec/specs/roborev-review-guard/spec.md`).
