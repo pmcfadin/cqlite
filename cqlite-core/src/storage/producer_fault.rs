@@ -1,5 +1,6 @@
-//! TEST-ONLY fault injection for the query row stream's two producer boundaries
-//! (issue #3106).
+//! TEST-ONLY fault injection for the producer-thread boundaries that used to
+//! collapse a dead producer into a clean end of input: the query row stream's two
+//! (issue #3106) and the k-way MERGE's shared row-forward funnel (issue #3120).
 //!
 //! # Why this exists
 //!
@@ -29,6 +30,22 @@
 //!   This is the arm a `do_get` with NO token filter takes, so it is the issue's
 //!   own repro; killing the task drops its sender with no terminator, which the
 //!   query-row thread used to read as "the scan finished".
+//! * [`arm_merge_producer_panic`] → the K-WAY MERGE boundary (issue #3120): a
+//!   merge producer THREAD panics at a row forward
+//!   ([`MergeProducerFault::before_row_forward`], consulted in
+//!   `write_engine::merge::from_readers::forward_row`). That is the `emit`
+//!   callback BOTH `stream_all_partitions_for_compaction` and
+//!   `..._for_query` invoke, and it sits in `write_engine/merge` ABOVE any
+//!   reader format branch — so unlike a checkpoint inside the reader there is no
+//!   `requires_chunk_stitching()`-style bypass that could make the fault silently
+//!   not fire, and ONE funnel covers BOTH producer shapes (path-based compaction
+//!   and shared-reader warm query).
+//!
+//!   Its registry is SEPARATE from the query-row one ([`arm_merge_producer_panic`]
+//!   vs [`arm_query_row_producer_panic`]) on purpose: a shared registry would let
+//!   a merge producer consume an arm a query-row test registered (and vice versa),
+//!   which is exactly the cross-consumption class the per-reader scoping below
+//!   exists to eliminate.
 //!
 //! # Every arm is SCOPED to one reader — no test can take another's (roborev)
 //!
@@ -128,6 +145,74 @@ impl ProducerFault {
     }
 }
 
+/// Merge-producer fault state captured ONCE when a k-way merge run's producer
+/// thread starts, then owned by that thread (issue #3120).
+///
+/// A zero-sized, no-op struct in a production build, exactly like
+/// [`ProducerFault`] (see the module doc).
+///
+/// Gated on `write-support` — unlike its query-row sibling [`ProducerFault`],
+/// which serves a READ-path stream that exists unconditionally. The k-way merge,
+/// its producer threads, and the `forward_row` funnel this checkpoint lives in are
+/// ALL `#[cfg(feature = "write-support")]` (`storage::write_engine::merge`), so
+/// without that feature there is no producer thread to injure and this type has no
+/// possible constructor. The gate's `minimal-build`
+/// (`--no-default-features --features all-compression`) proves it: an ungated
+/// version is genuinely dead code there, which is the wiring telling the truth
+/// rather than a warning to silence.
+#[cfg(feature = "write-support")]
+#[derive(Debug, Default)]
+pub(crate) struct MergeProducerFault {
+    /// Rows this producer may still forward into the merge channel before it
+    /// panics. `None` = no fault armed (always the case in production).
+    #[cfg(any(test, feature = "producer-fault-injection"))]
+    panic_after_rows: Option<u64>,
+}
+
+#[cfg(feature = "write-support")]
+impl MergeProducerFault {
+    /// Take the MERGE arm registered for this run's reader, if any (never any, in
+    /// production — `scope_of` is not even called).
+    pub(crate) fn capture_for(scope_of: impl FnOnce() -> std::path::PathBuf) -> Self {
+        #[cfg(not(any(test, feature = "producer-fault-injection")))]
+        let _ = scope_of;
+        Self {
+            #[cfg(any(test, feature = "producer-fault-injection"))]
+            panic_after_rows: armed::take_merge(&scope_of().to_string_lossy()),
+        }
+    }
+
+    /// Consulted by a merge producer THREAD immediately BEFORE it forwards one
+    /// converted row into the bounded merge channel — the single emit funnel both
+    /// the compaction stream and the warm query stream go through, so an injected
+    /// fault is observed identically on either.
+    ///
+    /// Panics ON PURPOSE once the armed row budget is exhausted; that panic is the
+    /// fault being injected, and it is what the producer's `catch_unwind` must
+    /// convert into a terminal `MergeMsg::Failed` instead of a dropped sender the
+    /// merge reads as "this run is exhausted". Compiles to an empty function in a
+    /// production build.
+    pub(crate) fn before_row_forward(&mut self) {
+        #[cfg(any(test, feature = "producer-fault-injection"))]
+        if let Some(remaining) = self.panic_after_rows.as_mut() {
+            if *remaining == 0 {
+                panic!("{}", INJECTED_PANIC_MESSAGE);
+            }
+            *remaining -= 1;
+        }
+    }
+
+    /// Build a MERGE fault state directly, WITHOUT touching the arm registry — so
+    /// a unit test of this module's own logic needs no scope and can never race,
+    /// or be raced by, a sibling test.
+    #[cfg(test)]
+    fn for_test(panic_after_rows: u64) -> Self {
+        Self {
+            panic_after_rows: Some(panic_after_rows),
+        }
+    }
+}
+
 /// Consulted at the INNER batched-scan task's checkpoint (its cursor-open
 /// prelude) so an armed fault unwinds THAT task — the boundary whose disconnect
 /// the query-row thread used to read as "the scan finished".
@@ -169,12 +254,28 @@ mod armed {
         scope: String,
     }
 
+    /// One registered MERGE arm (issue #3120). Shaped like [`OuterArm`] (it has a
+    /// row budget) but in its OWN registry, so a merge producer can never consume
+    /// a query-row test's arm — see the module doc.
+    ///
+    /// `write-support`-gated for the same reason [`super::MergeProducerFault`] is:
+    /// with no k-way merge compiled there is no producer thread to arm, so the
+    /// whole MERGE registry would be dead.
+    #[cfg(feature = "write-support")]
+    struct MergeArm {
+        id: u64,
+        scope: String,
+        after_rows: u64,
+    }
+
     /// Registered arms. A `Vec`, not a slot: concurrently armed tests coexist and
     /// cannot clobber one another (see the module doc). Every critical section
     /// below is a few comparisons long and NEVER spans an `.await`, so no guard is
     /// ever held across a suspension point.
     static OUTER_ARMS: Mutex<Vec<OuterArm>> = Mutex::new(Vec::new());
     static INNER_ARMS: Mutex<Vec<InnerArm>> = Mutex::new(Vec::new());
+    #[cfg(feature = "write-support")]
+    static MERGE_ARMS: Mutex<Vec<MergeArm>> = Mutex::new(Vec::new());
 
     /// Distinguishes two arms with the same scope, so a guard removes exactly its
     /// own registration.
@@ -230,6 +331,38 @@ mod armed {
             .iter()
             .position(|arm| path.contains(arm.scope.as_str()))?;
         Some(arms.remove(index).after_batches)
+    }
+
+    #[cfg(feature = "write-support")]
+    pub(super) fn arm_merge(scope: &str, after_rows: u64) -> u64 {
+        check_scope(scope);
+        let id = next_id();
+        MERGE_ARMS.lock().push(MergeArm {
+            id,
+            scope: scope.to_string(),
+            after_rows,
+        });
+        id
+    }
+
+    #[cfg(feature = "write-support")]
+    pub(super) fn disarm_merge(id: u64) {
+        MERGE_ARMS.lock().retain(|arm| arm.id != id);
+    }
+
+    /// Take the MERGE arm whose scope this run's reader path matches, if any. A
+    /// non-matching path leaves every arm registered — which is what stops one
+    /// run of a K-input merge from consuming the arm meant for another (a
+    /// TempDir-wide scope would kill whichever producer reached its first row
+    /// first: a nondeterministic victim AND a nondeterministic rows-through
+    /// count).
+    #[cfg(feature = "write-support")]
+    pub(super) fn take_merge(path: &str) -> Option<u64> {
+        let mut arms = MERGE_ARMS.lock();
+        let index = arms
+            .iter()
+            .position(|arm| path.contains(arm.scope.as_str()))?;
+        Some(arms.remove(index).after_rows)
     }
 
     pub(super) fn arm_inner(scope: &str) -> u64 {
@@ -343,6 +476,52 @@ impl Drop for ArmedInnerScanPanic {
     }
 }
 
+/// Arm the next k-way MERGE run over a reader whose `Data.db` path contains
+/// `scope` to panic in its producer THREAD just before it forwards row number
+/// `after_rows` (0-based), so `after_rows` rows reach the merge and the run then
+/// dies MID-WALK (issue #3120).
+///
+/// `0` kills the producer before its first row. Disarmed when the returned guard
+/// drops, and TAKEN by the first MATCHING run — a run over any other input leaves
+/// it alone, so in a K-input merge exactly the intended input's producer dies and
+/// the rows-through count is deterministic. Scope to ONE input's `Data.db` path,
+/// NOT the enclosing `TempDir` (see [`armed::take_merge`]).
+///
+/// TEST-ONLY: this symbol does not exist unless (`cfg(test)` or the
+/// `producer-fault-injection` feature) AND `write-support` — the k-way merge it
+/// injures is itself `write-support`-gated (see [`MergeProducerFault`]).
+#[cfg(all(
+    feature = "write-support",
+    any(test, feature = "producer-fault-injection")
+))]
+#[must_use = "the fault stays armed only while the guard is alive"]
+pub fn arm_merge_producer_panic(scope: &str, after_rows: u64) -> ArmedMergeProducerPanic {
+    ArmedMergeProducerPanic {
+        id: armed::arm_merge(scope, after_rows),
+    }
+}
+
+/// Guard returned by [`arm_merge_producer_panic`]: removes its own arm on drop.
+/// Holds no lock, so it is safe to hold across an `.await`.
+#[cfg(all(
+    feature = "write-support",
+    any(test, feature = "producer-fault-injection")
+))]
+#[derive(Debug)]
+pub struct ArmedMergeProducerPanic {
+    id: u64,
+}
+
+#[cfg(all(
+    feature = "write-support",
+    any(test, feature = "producer-fault-injection")
+))]
+impl Drop for ArmedMergeProducerPanic {
+    fn drop(&mut self) {
+        armed::disarm_merge(self.id);
+    }
+}
+
 /// A boxed panic hook, as [`std::panic::set_hook`] takes it.
 #[cfg(any(test, feature = "producer-fault-injection"))]
 type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
@@ -415,128 +594,8 @@ impl Drop for SilencedInjectedPanics {
     }
 }
 
+// Unit tests in a `*_tests.rs` sibling so this file stays under the ~800-line
+// campsite target (epic #1116 / #1135) — see that file's header.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn path_of(s: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(s)
-    }
-
-    /// A default-constructed fault (the production shape) NEVER panics, however
-    /// many batches are handed over.
-    #[test]
-    fn an_unarmed_producer_fault_is_inert() {
-        let mut fault = ProducerFault::default();
-        for _ in 0..1000 {
-            fault.before_batch_handoff();
-        }
-    }
-
-    /// The OUTER budget semantics, asserted WITHOUT touching the arm registry
-    /// (`for_test`): the fault survives exactly its budget of handoffs, then
-    /// panics.
-    #[test]
-    fn an_armed_producer_fault_panics_after_exactly_its_budget() {
-        let mut fault = ProducerFault::for_test(2);
-        fault.before_batch_handoff();
-        fault.before_batch_handoff();
-        // The panic is EXPECTED, so only THIS message is silenced (a blanket hook
-        // would hide a real failure from a parallel test) and the previous hook is
-        // restored before the assertion runs.
-        let died = {
-            let _silence = silence_injected_panics();
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                fault.before_batch_handoff();
-            }))
-        };
-        assert!(
-            died.is_err(),
-            "the armed fault must panic on the handoff after its budget"
-        );
-    }
-
-    /// SCOPING is what makes the registry safe in a shared test binary (roborev,
-    /// issue #3106): a reader whose path does not match must NOT take the arm, and
-    /// must leave it registered for the reader it was meant for.
-    #[test]
-    fn an_arm_is_taken_only_by_a_matching_reader_path() {
-        let scope = "issue-3106-scoping-unit-test/only-me";
-        let guard = arm_query_row_producer_panic(scope, 5);
-
-        // A foreign reader (what a concurrently-running sibling test looks like)
-        // captures NOTHING and leaves the arm in place.
-        for foreign in [
-            "/tmp/other-test/data/ks/tbl/nb-1-big-Data.db",
-            "/tmp/issue-3106-scoping-unit-test/someone-else/nb-1-big-Data.db",
-        ] {
-            let stolen = ProducerFault::capture_for(|| path_of(foreign));
-            assert_eq!(
-                stolen.panic_after_batches, None,
-                "a non-matching reader path must not consume the arm ({foreign})"
-            );
-        }
-
-        // The intended reader takes it, exactly once.
-        let matching = format!("/tmp/{scope}/nb-1-big-Data.db");
-        assert_eq!(
-            ProducerFault::capture_for(|| path_of(&matching)).panic_after_batches,
-            Some(5),
-            "the reader the arm was scoped to takes it"
-        );
-        assert_eq!(
-            ProducerFault::capture_for(|| path_of(&matching)).panic_after_batches,
-            None,
-            "and it is consumed — a second stream over the same reader is clean"
-        );
-        drop(guard);
-    }
-
-    /// Two arms coexist: arming second does not clobber the first, and each guard
-    /// removes only its OWN registration. This is the property a single global
-    /// slot could not provide, and it is why parallel arming tests are safe.
-    #[test]
-    fn concurrent_arms_coexist_and_each_guard_removes_only_its_own() {
-        let first = arm_query_row_producer_panic("issue-3106-coexist/alpha", 1);
-        let second = arm_query_row_producer_panic("issue-3106-coexist/beta", 2);
-
-        drop(first);
-        assert_eq!(
-            ProducerFault::capture_for(|| path_of("/x/issue-3106-coexist/alpha/d.db"))
-                .panic_after_batches,
-            None,
-            "dropping the first guard removes ONLY its arm"
-        );
-        assert_eq!(
-            ProducerFault::capture_for(|| path_of("/x/issue-3106-coexist/beta/d.db"))
-                .panic_after_batches,
-            Some(2),
-            "the second arm survives its sibling's disarm, un-clobbered"
-        );
-        drop(second);
-    }
-
-    /// The INNER checkpoint obeys the same scoping rule: a foreign scan passes
-    /// through untouched, the scoped one dies, and the arm is consumed.
-    #[test]
-    fn the_inner_checkpoint_fires_only_for_the_scoped_reader() {
-        let scope = "issue-3106-inner-scope-unit-test/only-me";
-        let guard = arm_inner_scan_task_panic(scope);
-        let matching = format!("/tmp/{scope}/nb-1-big-Data.db");
-
-        // A foreign scan must run right through the checkpoint.
-        inner_scan_task_checkpoint(|| path_of("/tmp/someone-else/nb-1-big-Data.db"));
-
-        let died = {
-            let _silence = silence_injected_panics();
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                inner_scan_task_checkpoint(|| path_of(&matching));
-            }))
-        };
-        assert!(died.is_err(), "the scoped scan must hit the injected panic");
-
-        // Consumed: a retry of the same scan is clean.
-        inner_scan_task_checkpoint(|| path_of(&matching));
-        drop(guard);
-    }
-}
+#[path = "producer_fault_tests.rs"]
+mod tests;
