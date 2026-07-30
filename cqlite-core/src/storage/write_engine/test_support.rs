@@ -3,6 +3,12 @@
 //! Extracted verbatim from `write_engine/mod.rs` (issue #1120, epic #1116).
 //! These helpers are shared by the `mod`, `maintenance`, and `stats` test
 //! modules; per-module-only helpers stay local to their owning submodule.
+//!
+//! `pub(crate)` (still `#[cfg(test)]`-only) since issue #3106: the READ-path
+//! producer-panic pin
+//! (`sstable/reader/.../summary_scan/query_rows_panic_tests.rs`) needs a real
+//! single-generation SSTable, and building it with these same helpers is what
+//! keeps its fixture from drifting from the write engine's own.
 
 use super::{Mutation, TableSchema, WriteEngine};
 use crate::schema::{Column, KeyColumn};
