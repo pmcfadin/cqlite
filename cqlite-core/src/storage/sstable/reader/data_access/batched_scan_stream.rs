@@ -107,20 +107,35 @@ fn dead_scan_task_error(join_err: &tokio::task::JoinError) -> Error {
 }
 
 impl SSTableReader {
+    /// Open the batched streaming scan's cursor — the FIRST thing the driver task
+    /// does, on both the stitching and non-stitching branch.
+    ///
+    /// A named seam because it is the fixture-independent test-only fault
+    /// checkpoint for THIS task (issue #3106): the branch a given SSTable takes
+    /// depends on its on-disk format, so a checkpoint in either branch alone can
+    /// silently not fire. Killing the task here reproduces exactly the condition
+    /// the fix is about — the task's sender drops with no error and no terminator —
+    /// for any reader.
+    pub(super) async fn open_batched_scan_cursor(&self) -> Result<super::ScanCursor> {
+        crate::storage::producer_fault::inner_scan_task_checkpoint();
+        self.new_scan_cursor().await
+    }
+
     /// Decode one `Data.db` block for the batched (non-stitching) streaming scan.
     ///
     /// A named seam rather than an inline call for two reasons: it pins
-    /// `read_shadowing = true` for this scan in ONE place, and it is where the
-    /// test-only inner-boundary fault checkpoint lives (issue #3106) — arming it
-    /// unwinds the scan task exactly as a real decode panic would, which is how
-    /// the fail-closed join above is PROVEN rather than asserted by inspection.
+    /// `read_shadowing = true` for this scan in ONE place, and it is a second
+    /// test-only fault checkpoint for the same task (issue #3106) — arming past
+    /// the prelude unwinds the task in the DECODE, exactly as a real
+    /// `parse_block_entries_at_now` panic would, on a reader whose format takes
+    /// the non-stitching branch.
     pub(super) fn parse_batched_block(
         &self,
         block: &[u8],
         schema: Option<&crate::schema::TableSchema>,
         now_secs: Option<i64>,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
-        crate::storage::producer_fault::inner_scan_decode_checkpoint();
+        crate::storage::producer_fault::inner_scan_task_checkpoint();
         self.parse_block_entries_at_now(block, schema, true, now_secs)
     }
 }

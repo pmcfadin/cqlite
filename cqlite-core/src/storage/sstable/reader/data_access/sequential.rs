@@ -597,7 +597,7 @@ impl SSTableReader {
             ScanAdmission::Exempt => None,
         };
 
-        let cursor = self.new_scan_cursor().await?;
+        let cursor = self.open_batched_scan_cursor().await?;
         let header_size = self.calculate_header_size();
         {
             let mut file_guard = cursor.file.lock().await;

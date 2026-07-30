@@ -49,7 +49,8 @@ use tonic::Request;
 
 use cqlite_core::schema::{Column, KeyColumn, TableSchema};
 use cqlite_core::storage::producer_fault::{
-    arm_query_row_producer_panic, silence_injected_panics, INJECTED_PANIC_MESSAGE,
+    arm_inner_scan_task_panic, arm_query_row_producer_panic, silence_injected_panics,
+    INJECTED_PANIC_MESSAGE,
 };
 use cqlite_core::storage::write_engine::{
     CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
@@ -265,6 +266,74 @@ async fn a_dead_query_row_producer_fails_the_do_get_instead_of_truncating_it_sil
         message.contains("PANICKED") && message.contains(INJECTED_PANIC_MESSAGE),
         "the client-visible error must carry the producer's panic message, so the \
          failure is diagnosable rather than a generic internal error, got: {message}"
+    );
+    assert!(
+        served.rows.len() < complete.rows.len(),
+        "the faulted RPC must be SHORT of the complete {} rows — otherwise the \
+         fault never fired and this test proves nothing (got {})",
+        complete.rows.len(),
+        served.rows.len()
+    );
+}
+
+/// The SECOND boundary (issue #3106, rust-reviewer blocker): the full-ring arm's
+/// rows come from an INNER `tokio` task over its own channel
+/// (`scan_stream_batched_admitted`), and that task's death was likewise read as
+/// "the scan finished".
+///
+/// This is the arm the reported defect actually takes — this ticket carries NO
+/// token filter, so `producer_warm` passes `token_bound = None` and
+/// `drive_full_scan_rows` runs. The fault is injected INSIDE the inner task, in
+/// the block decode (`parse_batched_block` → `parse_block_entries_at_now`), which
+/// on this uncompressed/non-stitching fixture runs directly in that task: the task
+/// unwinds, drops its sender, and the outer query-row thread sees a plain channel
+/// close. Before the fix that meant `Ok(())` → the `Done` sentinel → a SUCCESSFUL
+/// truncated `do_get`; the outer channel's own protocol cannot see it, which is
+/// why the first test above passes either way.
+///
+/// Same control-arm-first shape: the complete result set is established with no
+/// fault armed, so "the faulted RPC is short" is never vacuous.
+#[tokio::test]
+async fn a_dead_inner_scan_task_fails_the_do_get_instead_of_truncating_it_silently() {
+    let _serialized = FAULT_LOCK.lock().await;
+    let _forced = ForcedPath::bypass();
+    let (_temp, data_dir) = build_one_generation().await;
+    let svc = CqliteFlightService::new(data_dir, 8192);
+
+    // Control: no fault armed. NOTE this also proves the fixture is served by the
+    // full-ring arm successfully, i.e. the inner batched-scan task is genuinely on
+    // the path being killed below.
+    let complete = do_get_served(&svc, ticket_bytes()).await;
+    assert_eq!(
+        complete.error, None,
+        "the control do_get must succeed, or this fixture proves nothing"
+    );
+    assert_eq!(
+        complete.rows.len(),
+        PARTITIONS as usize,
+        "test precondition: the control do_get must return EVERY written row"
+    );
+
+    // Fault: the inner scan task panics at its FIRST checkpoint (the cursor-open
+    // prelude), so it dies before it can report anything — the purest form of "the
+    // sender just went away", and reached whatever format branch this reader takes
+    // (a checkpoint in one branch only can silently not fire).
+    let served = {
+        let _silence = silence_injected_panics();
+        let _fault = arm_inner_scan_task_panic(0);
+        do_get_served(&svc, ticket_bytes()).await
+    };
+
+    let message = served.error.expect(
+        "a dead INNER batched-scan task must FAIL the do_get — completing it is \
+         issue #3106 one layer down: the query-row thread read the inner channel's \
+         close as 'the scan finished', sent its Done sentinel, and served a \
+         truncated result set as a successful full-table scan",
+    );
+    assert!(
+        message.contains("DIED without reporting") && message.contains("TRUNCATED"),
+        "the client-visible error must name the dead task and the truncation, so \
+         the failure is diagnosable, got: {message}"
     );
     assert!(
         served.rows.len() < complete.rows.len(),

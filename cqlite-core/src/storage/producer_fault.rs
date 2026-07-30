@@ -19,11 +19,15 @@
 //! * [`arm_query_row_producer_panic`] → the OUTER boundary: the query-row producer
 //!   THREAD panics at a batch handoff ([`ProducerFault::before_batch_handoff`],
 //!   consulted in `query_rows::emit_rows`).
-//! * [`arm_inner_scan_decode_panic`] → the INNER boundary: the batched-scan
-//!   `tokio` TASK panics inside a block decode ([`inner_scan_decode_checkpoint`],
-//!   consulted in `data_access::batched_scan_stream::SSTableReader::parse_batched_block`,
-//!   i.e. in the same task as `parse_block_entries_at_now`). This is the arm a
-//!   `do_get` with no token filter takes, so it is the issue's own repro.
+//! * [`arm_inner_scan_task_panic`] → the INNER boundary: the batched-scan `tokio`
+//!   TASK panics ([`inner_scan_task_checkpoint`]). Two checkpoint sites, both in
+//!   `data_access::batched_scan_stream` and both INSIDE that task: its cursor-open
+//!   prelude (`open_batched_scan_cursor`, checkpoint 0 — reached whatever on-disk
+//!   format the reader has) and each block decode of the non-stitching branch
+//!   (`parse_batched_block`, i.e. the `parse_block_entries_at_now` call itself).
+//!   This is the arm a `do_get` with NO token filter takes, so it is the issue's
+//!   own repro; killing the task there drops its sender with no terminator, which
+//!   the query-row thread used to read as "the scan finished".
 //!
 //! # Why this is not a production knob (no-heuristics safe)
 //!
@@ -116,16 +120,17 @@ impl ProducerFault {
     }
 }
 
-/// Consulted by the INNER batched-scan task immediately before each block decode
-/// (`parse_batched_block`), so an armed fault unwinds THAT task — the boundary
-/// whose disconnect the query-row thread used to read as "the scan finished".
+/// Consulted at the INNER batched-scan task's checkpoints — its cursor-open
+/// prelude and every non-stitching block decode — so an armed fault unwinds THAT
+/// task, the boundary whose disconnect the query-row thread used to read as "the
+/// scan finished".
 ///
-/// Panics ON PURPOSE when the armed decode budget is exhausted. Compiles to an
-/// empty function in a production build.
+/// Panics ON PURPOSE when the armed budget is exhausted. Compiles to an empty
+/// function in a production build.
 #[inline]
-pub(crate) fn inner_scan_decode_checkpoint() {
+pub(crate) fn inner_scan_task_checkpoint() {
     #[cfg(any(test, feature = "producer-fault-injection"))]
-    armed::consume_inner_decode();
+    armed::consume_inner_checkpoint();
 }
 
 /// The panic message both checkpoints raise. Exported so a test can (a) assert
@@ -147,11 +152,11 @@ mod armed {
     /// stream can observe it.
     static OUTER_BATCHES: AtomicI64 = AtomicI64::new(DISARMED);
 
-    /// Block decodes the inner batched-scan task may perform before it panics, or
-    /// [`DISARMED`]. Decremented in place (the decode site has no per-scan state
-    /// to own it), which is why an arming caller must serialize — see the module
-    /// doc.
-    static INNER_DECODES: AtomicI64 = AtomicI64::new(DISARMED);
+    /// Checkpoints the inner batched-scan task may pass before it panics, or
+    /// [`DISARMED`]. Decremented in place (the checkpoint sites have no per-scan
+    /// state to own it), which is why an arming caller must serialize — see the
+    /// module doc.
+    static INNER_CHECKPOINTS: AtomicI64 = AtomicI64::new(DISARMED);
 
     /// Saturate rather than wrap: an absurd budget simply never fires, and a
     /// negative value would read as `DISARMED`.
@@ -171,27 +176,27 @@ mod armed {
         u64::try_from(OUTER_BATCHES.swap(DISARMED, Ordering::SeqCst)).ok()
     }
 
-    pub(super) fn arm_inner_decode(after_decodes: u64) {
-        INNER_DECODES.store(as_budget(after_decodes), Ordering::SeqCst);
+    pub(super) fn arm_inner_checkpoints(after_checkpoints: u64) {
+        INNER_CHECKPOINTS.store(as_budget(after_checkpoints), Ordering::SeqCst);
     }
 
-    pub(super) fn disarm_inner_decode() {
-        INNER_DECODES.store(DISARMED, Ordering::SeqCst);
+    pub(super) fn disarm_inner_checkpoints() {
+        INNER_CHECKPOINTS.store(DISARMED, Ordering::SeqCst);
     }
 
-    /// Spend one decode from the inner budget, panicking when it is exhausted.
-    /// The budget is DISARMED before the panic so the unwind cannot re-enter and
-    /// so a retry/sibling scan is never hit by the same arm.
-    pub(super) fn consume_inner_decode() {
-        let remaining = INNER_DECODES.load(Ordering::SeqCst);
+    /// Spend one checkpoint from the inner budget, panicking when it is
+    /// exhausted. The budget is DISARMED before the panic so the unwind cannot
+    /// re-enter and so a retry/sibling scan is never hit by the same arm.
+    pub(super) fn consume_inner_checkpoint() {
+        let remaining = INNER_CHECKPOINTS.load(Ordering::SeqCst);
         if remaining < 0 {
             return;
         }
         if remaining == 0 {
-            disarm_inner_decode();
+            disarm_inner_checkpoints();
             panic!("{}", super::INJECTED_PANIC_MESSAGE);
         }
-        INNER_DECODES.store(remaining - 1, Ordering::SeqCst);
+        INNER_CHECKPOINTS.store(remaining - 1, Ordering::SeqCst);
     }
 }
 
@@ -225,26 +230,30 @@ impl Drop for ArmedProducerPanic {
     }
 }
 
-/// Arm the INNER batched-scan task to panic inside block decode number
-/// `after_decodes` (0-based), i.e. in the same `tokio` task as
-/// `parse_block_entries_at_now`, so the task unwinds and drops its sender with no
-/// terminator.
+/// Arm the INNER batched-scan task to panic at checkpoint number
+/// `after_checkpoints` (0-based) inside itself, so the task unwinds and drops its
+/// sender with no terminator.
 ///
-/// `0` kills it on its first decode. Disarmed when the returned guard drops (and
-/// when the fault fires). PROCESS-GLOBAL and decremented at the decode site, so
-/// the caller MUST serialize against any sibling test that scans (see the module
-/// doc) — otherwise the sibling's scan spends the budget.
+/// `0` kills it in its cursor-open prelude — before any row, and independently of
+/// which format branch the reader takes. Higher values are spent on the
+/// non-stitching branch's per-block decodes (the `parse_block_entries_at_now`
+/// call), so a reader whose format takes the stitching branch never reaches them.
+///
+/// Disarmed when the returned guard drops (and when the fault fires).
+/// PROCESS-GLOBAL and decremented at the checkpoint sites, so the caller MUST
+/// serialize against any sibling test that scans (see the module doc) — otherwise
+/// the sibling's scan spends the budget.
 ///
 /// TEST-ONLY: this symbol does not exist unless `cfg(test)` or the
 /// `producer-fault-injection` feature is on.
 #[cfg(any(test, feature = "producer-fault-injection"))]
 #[must_use = "the fault stays armed only while the guard is alive"]
-pub fn arm_inner_scan_decode_panic(after_decodes: u64) -> ArmedInnerScanPanic {
-    armed::arm_inner_decode(after_decodes);
+pub fn arm_inner_scan_task_panic(after_checkpoints: u64) -> ArmedInnerScanPanic {
+    armed::arm_inner_checkpoints(after_checkpoints);
     ArmedInnerScanPanic
 }
 
-/// Guard returned by [`arm_inner_scan_decode_panic`]: disarms on drop. Holds no
+/// Guard returned by [`arm_inner_scan_task_panic`]: disarms on drop. Holds no
 /// lock, so it is safe to hold across an `.await`.
 #[cfg(any(test, feature = "producer-fault-injection"))]
 #[derive(Debug)]
@@ -253,7 +262,7 @@ pub struct ArmedInnerScanPanic;
 #[cfg(any(test, feature = "producer-fault-injection"))]
 impl Drop for ArmedInnerScanPanic {
     fn drop(&mut self) {
-        armed::disarm_inner_decode();
+        armed::disarm_inner_checkpoints();
     }
 }
 
