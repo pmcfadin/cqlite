@@ -36,7 +36,27 @@
 //! `comparison_detects_a_seeded_divergence` below (feeding the compare helper two
 //! different row sets must report a mismatch), complementing the manual
 //! seed-a-real-divergence verification recorded in the PR.
+//!
+//! ## Second axis: 1 generation vs N generations (issue #3129)
+//!
+//! `one_vs_n_generation` (submodule, same target) adds the orthogonal axis this
+//! file's point-vs-full comparison structurally CANNOT see: both of the point/full
+//! arms read the same fixture at the same generation count, so a divergence
+//! between single-generation reconciliation and the cross-generation merge kernel
+//! reproduces identically on both arms and stays green. That submodule reads the
+//! SAME bytes at 1 generation and at N ≥ 2 generations and requires identical
+//! result sets, reusing this file's corpus conventions, pinned `now`, SKIP
+//! contract and `normalize`.
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+
+// `#[path]` because this file IS the integration target's crate root: a bare
+// `mod` would resolve to `tests/one_vs_n_generation.rs`, which cargo would then
+// ALSO auto-discover as its own (helper-less, non-compiling) test target. Keeping
+// the submodule under `tests/point_vs_full_differential/` — a directory without a
+// `main.rs`, so cargo ignores it for target discovery — makes the ownership
+// obvious and keeps this file inside the campsite file-size target.
+#[path = "point_vs_full_differential/one_vs_n_generation.rs"]
+mod one_vs_n_generation;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -323,23 +343,26 @@ async fn open_db(
 /// Discover the DISTINCT integer partition-key values present in `table` by
 /// running a full-scan `SELECT` (on the `full`-mode DB, so a full-table read is
 /// legal). Returns them sorted + deduplicated so the probe set is deterministic.
-async fn discover_pk_ints(db: &Database, case: &TableCase) -> Result<Vec<i64>, String> {
-    let query = format!(
-        "SELECT {} FROM {}.{}",
-        case.pk_column, case.keyspace, case.table
-    );
+/// Parameterized (rather than taking a `TableCase`) so the `one_vs_n_generation`
+/// axis reuses the exact same discovery.
+async fn discover_pk_ints(
+    db: &Database,
+    keyspace: &str,
+    table: &str,
+    pk_column: &str,
+) -> Result<Vec<i64>, String> {
+    let query = format!("SELECT {pk_column} FROM {keyspace}.{table}");
     let result = db
         .execute(&query)
         .await
         .map_err(|e| format!("discovery SELECT failed: {e}"))?;
     let mut seen: BTreeMap<i64, ()> = BTreeMap::new();
     for row in &result.rows {
-        if let Some(v) = row.values.get(case.pk_column) {
+        if let Some(v) = row.values.get(pk_column) {
             let as_int = value_as_i64(v).ok_or_else(|| {
                 format!(
-                    "partition key {} decoded as a non-integer value {v:?}; this lane \
-                     only handles INT partition keys",
-                    case.pk_column
+                    "partition key {pk_column} decoded as a non-integer value {v:?}; this lane \
+                     only handles INT partition keys"
                 )
             })?;
             seen.insert(as_int, ());
@@ -411,7 +434,8 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
     let full_db = open_db(&root, &schema, case.keyspace, ReadPathMode::Full).await?;
     let point_db = open_db(&root, &schema, case.keyspace, ReadPathMode::Point).await?;
 
-    let discovered = discover_pk_ints(&full_db, case).await?;
+    let discovered =
+        discover_pk_ints(&full_db, case.keyspace, case.table, case.pk_column).await?;
     // Merge discovered (live) keys with the always-probe keys, deduplicated and
     // sorted so the probe set is deterministic.
     let mut key_set: BTreeMap<i64, ()> = BTreeMap::new();
