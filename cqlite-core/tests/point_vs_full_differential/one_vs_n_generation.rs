@@ -81,12 +81,24 @@ fn is_sidecar(name: &str) -> bool {
     name.ends_with(".jsonl") || name.ends_with(".db.txt")
 }
 
-/// One SSTable generation's on-disk component files, plus the file-name prefix
-/// (`<version>-<generation>-<format>-`) they share.
+/// One SSTable generation's on-disk component files, with the three descriptor
+/// fields its file names encode kept STRUCTURED (never re-parsed from a string) so
+/// renaming a copy can only ever change the generation token.
 struct GenerationFiles {
+    /// Format version (`nb`, `da`, …).
+    version: String,
+    /// Format family (`big`, `bti`).
+    format: String,
     generation: u64,
-    prefix: String,
     files: Vec<PathBuf>,
+}
+
+impl GenerationFiles {
+    /// The `<version>-<generation>-<format>-` file-name prefix every component of
+    /// this generation shares, for `generation` (defaults to this generation's own).
+    fn prefix_for(&self, generation: u64) -> String {
+        format!("{}-{generation}-{}-", self.version, self.format)
+    }
 }
 
 /// Group a table directory's component files by generation number, parsed from the
@@ -95,8 +107,8 @@ struct GenerationFiles {
 /// content sniffing.
 fn scan_generations(dir: &Path) -> Result<Vec<GenerationFiles>, String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
-    // generation -> (prefix, files)
-    let mut by_gen: BTreeMap<u64, (String, Vec<PathBuf>)> = BTreeMap::new();
+    // generation -> ((version, format), files)
+    let mut by_gen: BTreeMap<u64, ((String, String), Vec<PathBuf>)> = BTreeMap::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("dir entry in {}: {e}", dir.display()))?;
         let path = entry.path();
@@ -124,18 +136,28 @@ fn scan_generations(dir: &Path) -> Result<Vec<GenerationFiles>, String> {
                 parts[1]
             )
         })?;
-        let prefix = format!("{}-{}-{}-", parts[0], parts[1], parts[2]);
-        by_gen
+        let descriptor = (parts[0].to_string(), parts[2].to_string());
+        let slot = by_gen
             .entry(generation)
-            .or_insert_with(|| (prefix, Vec::new()))
-            .1
-            .push(path);
+            .or_insert_with(|| (descriptor.clone(), Vec::new()));
+        // Every component of one generation must agree on version+format; a
+        // disagreement means the name parse is wrong, never something to average over.
+        if slot.0 != descriptor {
+            return Err(format!(
+                "component file {name} in {} declares {descriptor:?} but generation {generation} \
+                 was already seen as {:?}",
+                dir.display(),
+                slot.0
+            ));
+        }
+        slot.1.push(path);
     }
     Ok(by_gen
         .into_iter()
-        .map(|(generation, (prefix, files))| GenerationFiles {
+        .map(|(generation, ((version, format), files))| GenerationFiles {
+            version,
+            format,
             generation,
-            prefix,
             files,
         })
         .collect())
@@ -148,6 +170,9 @@ struct MaterializedTable {
     _tmp: tempfile::TempDir,
     /// The `sstables` root to hand to `open_db` (the ingestion `data_dir`).
     root: PathBuf,
+    /// The materialized `<keyspace>/<table>-<uuid>` directory itself (returned so
+    /// the caller re-scans exactly what was written, never a re-derived path).
+    table_dir: PathBuf,
     generations: usize,
 }
 
@@ -173,30 +198,25 @@ fn materialize(
     std::fs::create_dir_all(&table_dir)
         .map_err(|e| format!("create {}: {e}", table_dir.display()))?;
 
+    let source_prefix = gen_files.prefix_for(gen_files.generation);
     for copy in 0..generations {
         let target_gen = gen_files
             .generation
             .checked_add(copy as u64)
             .ok_or_else(|| "materialize: generation number overflow".to_string())?;
+        // Rewrite ONLY the generation token; version/format/component are verbatim.
+        let target_prefix = gen_files.prefix_for(target_gen);
         for src in &gen_files.files {
             let name = src
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| format!("component {} has no name", src.display()))?;
-            let suffix = name.strip_prefix(&gen_files.prefix).ok_or_else(|| {
+            let component = name.strip_prefix(&source_prefix).ok_or_else(|| {
                 format!(
-                    "component {name} does not start with the generation prefix {}",
-                    gen_files.prefix
+                    "component {name} does not start with the generation prefix {source_prefix}"
                 )
             })?;
-            let mut new_prefix = gen_files.prefix.clone();
-            // Rewrite ONLY the generation token of the shared prefix.
-            let prefix_parts: Vec<&str> =
-                gen_files.prefix.trim_end_matches('-').split('-').collect();
-            if prefix_parts.len() == 3 {
-                new_prefix = format!("{}-{target_gen}-{}-", prefix_parts[0], prefix_parts[2]);
-            }
-            let dest = table_dir.join(format!("{new_prefix}{suffix}"));
+            let dest = table_dir.join(format!("{target_prefix}{component}"));
             std::fs::copy(src, &dest)
                 .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dest.display()))?;
         }
@@ -205,6 +225,7 @@ fn materialize(
     Ok(MaterializedTable {
         _tmp: tmp,
         root,
+        table_dir,
         generations,
     })
 }
@@ -494,16 +515,19 @@ async fn run_case(case: &GenerationCase) -> Result<bool, String> {
 
     let one = materialize(&source, case.keyspace, source_gen, 1)?;
     let many = materialize(&source, case.keyspace, source_gen, case.n_generations)?;
-    // Sanity: the N-gen tree must really hold N generations (a silently-failed
-    // rename would make this axis a tautology).
-    let materialized = scan_generations(
-        &many.root.join(case.keyspace).join(
-            source
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default(),
-        ),
-    )?;
+    // Sanity, BOTH arms: the trees must really hold 1 and N generations (a
+    // silently-failed rename, or a materializer that never copied, would turn this
+    // axis into a 1-vs-1 tautology that can never fail).
+    let one_materialized = scan_generations(&one.table_dir)?;
+    if one_materialized.len() != 1 {
+        return Err(format!(
+            "case {}.{}: materialized 1-gen tree holds {} generations, expected exactly 1",
+            case.keyspace,
+            case.table,
+            one_materialized.len()
+        ));
+    }
+    let materialized = scan_generations(&many.table_dir)?;
     if materialized.len() != case.n_generations {
         return Err(format!(
             "case {}.{}: materialized N-gen tree holds {} generations, expected {} — the axis \
