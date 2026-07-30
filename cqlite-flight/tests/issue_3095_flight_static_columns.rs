@@ -410,7 +410,12 @@ fn deltas_expected_select_star() -> Vec<Row> {
 #[tokio::test(flavor = "multi_thread")]
 async fn flight_static_column_semantics_match_cassandra() {
     let mut failures: Vec<String> = Vec::new();
-    let mut ran = 0usize;
+    // Per-fixture flags, NOT a count (both reviewers): a `ran >= 2` floor is satisfied
+    // by ANY two of the three cases, so with the fetch-only `test_writeparity` fixture
+    // present a COMMITTED fixture could be missing and the lane would still pass.
+    let mut ran_deltas = false;
+    let mut ran_tomb = false;
+    let mut ran_writeparity = false;
 
     // -- AC1: static + N clustering rows → exactly N rows, statics on each ------
     match fixture_dir(WP_KS, WP_TBL) {
@@ -430,7 +435,7 @@ async fn flight_static_column_semantics_match_cassandra() {
                 &mut failures,
             )
             .await;
-            ran += 1;
+            ran_writeparity = true;
         }
         None => {
             let msg = format!("{WP_KS}.{WP_TBL}: fixture absent");
@@ -541,7 +546,7 @@ async fn flight_static_column_semantics_match_cassandra() {
             )
             .await;
 
-            ran += 1;
+            ran_deltas = true;
         }
         None => {
             let msg = format!("{DL_KS}.{DL_TBL}: fixture absent");
@@ -603,7 +608,7 @@ async fn flight_static_column_semantics_match_cassandra() {
                 &mut failures,
             )
             .await;
-            ran += 1;
+            ran_tomb = true;
         }
         None => {
             let msg = format!("{TB_KS}.{TB_TBL}: fixture absent");
@@ -687,23 +692,29 @@ async fn flight_static_column_semantics_match_cassandra() {
         "issue #3095 static-column parity failures:\n{}",
         failures.join("\n\n")
     );
-    // Fail-closed floor, honest about WHAT ran (roborev/rust-reviewer): the two
-    // COMMITTED Cassandra fixtures (`test_deltas.static_with_rows`,
-    // `test_tomb.static_with_tombstones`) are present in every checkout, so they must
-    // ALWAYS run — a skip there is a hard failure regardless of
-    // `CQLITE_REQUIRE_FIXTURES`. `test_writeparity.static_clustering_shape` is
-    // deliberately EXCLUDED from the fetched corpus
-    // (`test-data/validation-matrix.md`), so it may legitimately skip; it is
-    // additive coverage, never the floor.
+    // Fail-closed floor, asserted PER FIXTURE and honest about what ran. Both
+    // COMMITTED Cassandra fixtures ship in the repo (binaries included), so a skip on
+    // either is a hard failure regardless of `CQLITE_REQUIRE_FIXTURES` — that is what
+    // makes AC1/AC2/AC3 non-vacuous on any machine.
+    // `test_writeparity.static_clustering_shape` is deliberately EXCLUDED from the
+    // fetched corpus (`test-data/validation-matrix.md`), so it may legitimately skip;
+    // it is additive coverage and never part of the floor.
     assert!(
-        ran >= COMMITTED_FIXTURE_CASES,
-        "only {ran} of the {COMMITTED_FIXTURE_CASES} COMMITTED Cassandra static \
-         fixtures ran — they ship in the repo, so a skip means the corpus or the \
-         resolution broke, and AC1/AC2/AC3 would be unverified"
+        ran_deltas,
+        "the COMMITTED fixture {DL_KS}.{DL_TBL} did not run — it ships in the repo, so \
+         a skip means the corpus or the directory resolution broke, and AC1/AC2/AC3 \
+         would be unverified"
     );
+    assert!(
+        ran_tomb,
+        "the COMMITTED fixture {TB_KS}.{TB_TBL} did not run — it ships in the repo, so \
+         a skip means the corpus or the directory resolution broke, and the B1 \
+         tombstone-vs-static case would be unverified"
+    );
+    if !ran_writeparity {
+        eprintln!(
+            "NOTE {WP_KS}.{WP_TBL} skipped (fetch-only fixture, excluded from the \
+             published corpus) — the COMMITTED fixtures above still ran"
+        );
+    }
 }
-
-/// Static fixtures whose binaries are COMMITTED (not fetch-only), and which therefore
-/// MUST run on any checkout: `test_deltas.static_with_rows` and
-/// `test_tomb.static_with_tombstones`.
-const COMMITTED_FIXTURE_CASES: usize = 2;

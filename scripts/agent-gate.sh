@@ -4334,23 +4334,40 @@ run_flight_query_semantics_oracle() {
   local log="$LOG_DIR/$name.log"
   local start end status
   start=$(date +%s)
-  local committed_ks="${CQLITE_DATASETS_ROOT:-}/sstables/test_compaction_tombstone_ttl"
-  if [ -z "${CQLITE_DATASETS_ROOT:-}" ] || [ ! -d "$committed_ks" ]; then
+  # Each lane has its OWN fixture precondition (issue #3095): the oracle lane needs
+  # the committed `test_compaction_tombstone_ttl` keyspace, the STATIC lane needs the
+  # committed `test_deltas` + `test_tomb` keyspaces. Sharing one SKIP predicate would
+  # let the static lane silently never run whenever the UNRELATED oracle fixtures are
+  # absent — which is exactly the "can never green-pass by skipping" claim it must
+  # actually satisfy. Selected here, per lane, and reported explicitly.
+  local -a targets=() skipped=()
+  if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT}/sstables/test_compaction_tombstone_ttl" ]; then
+    targets+=(--test query_semantics_flight_parity)
+  else
+    skipped+=("query_semantics_flight_parity (committed test_compaction_tombstone_ttl absent)")
+  fi
+  if [ -n "${CQLITE_DATASETS_ROOT:-}" ] \
+      && [ -d "${CQLITE_DATASETS_ROOT}/sstables/test_deltas" ] \
+      && [ -d "${CQLITE_DATASETS_ROOT}/sstables/test_tomb" ]; then
+    # The static lane itself asserts, unconditionally, that BOTH committed Cassandra
+    # fixtures ran — so once it is selected it cannot green-pass by skipping.
+    targets+=(--test issue_3095_flight_static_columns)
+  else
+    skipped+=("issue_3095_flight_static_columns (committed test_deltas/test_tomb absent)")
+  fi
+  local lane
+  for lane in ${skipped[@]+"${skipped[@]}"}; do
+    echo ">>> [$name] lane SKIPPED: $lane"
+  done
+  if [ "${#targets[@]}" -eq 0 ]; then
     status=SKIP
-    echo ">>> [$name] SKIP (CQLITE_DATASETS_ROOT unset or committed test_compaction_tombstone_ttl fixtures absent)"
+    echo ">>> [$name] SKIP (CQLITE_DATASETS_ROOT unset or no committed fixture keyspace present)"
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] query-semantics parity oracle vs Flight do_get (#2374/#2789)"
-  # Issue #3095: the STATIC-column semantics lane runs HERE, in the same
-  # fail-closed window. Its two Cassandra fixtures (test_deltas.static_with_rows,
-  # test_tomb.static_with_tombstones) have COMMITTED binaries, so it can never
-  # green-pass by skipping — the lane asserts both ran, unconditionally. Without
-  # this the lane existed but no full-gate component ever executed it.
+  echo ">>> [$name] query-semantics parity oracle vs Flight do_get (#2374/#2789) + STATIC-column semantics (#3095)"
   if env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
-      cargo test -p cqlite-flight \
-        --test query_semantics_flight_parity \
-        --test issue_3095_flight_static_columns >"$log" 2>&1; then
+      cargo test -p cqlite-flight "${targets[@]}" >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL

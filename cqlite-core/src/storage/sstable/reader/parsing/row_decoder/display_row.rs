@@ -144,17 +144,17 @@ pub(super) fn row_is_visible(row: &ScanRow) -> bool {
 /// inject-then-decide order — their callers must see every on-disk unfiltered and
 /// their output is byte-pinned — so this is used only where `read_shadowing` is on.
 pub(super) fn build_display_row_read_path(
-    mut cells: RowCells,
+    cells: RowCells,
     static_cells: &RowCells,
     row_header_opt: Option<&RowHeader>,
     schema: &TableSchema,
 ) -> ScanRow {
-    let own = build_display_row(cells, row_header_opt, schema);
-    let ScanRow::Row(mut kept) = own else {
+    match build_display_row(cells, row_header_opt, schema) {
+        ScanRow::Row(mut kept) => {
+            merge_static_cells(&mut kept, static_cells);
+            ScanRow::Row(kept)
+        }
         // A pure row tombstone (or an empty row): statics do not revive it.
-        return own;
-    };
-    merge_static_cells(&mut kept, static_cells);
-    cells = kept;
-    ScanRow::Row(cells)
+        other => other,
+    }
 }

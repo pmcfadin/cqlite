@@ -280,6 +280,12 @@ impl V5CompressedLegacyParser {
             // rationale as the primary site in `block_emit_windowed.rs`: user-facing
             // SELECT reads only (`read_shadowing`), a CONFIRMED-complete partition,
             // no clustering row emitted, and a live static row.
+            //
+            // Carries the SAME stated residual as that site: `partition_complete` is
+            // established PER BLOCK, so a static-only partition whose
+            // `END_OF_PARTITION` byte lands in the next decompressed block yields 0
+            // rows instead of 1 — fail-closed, and absent on the sliding-window path,
+            // which has an explicit `at_final_chunk` contract.
             if self.read_shadowing
                 && partition_complete
                 && !emitted_clustering_row

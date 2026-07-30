@@ -626,6 +626,23 @@ impl V5CompressedLegacyParser {
                     // partition (a static-bearing schema never takes the row-index
                     // fast-forward today, so this is a belt-and-braces invariant).
                     //
+                    // RESIDUAL, stated rather than left implicit (issue #3095 review):
+                    // `partition_complete` is established PER BLOCK here — it is set
+                    // only by this block's `END_OF_PARTITION` byte or by the next
+                    // partition's header appearing in THIS block. So a static-only
+                    // partition whose `END_OF_PARTITION` byte lands in the NEXT
+                    // decompressed block yields 0 rows where Cassandra returns 1. The
+                    // direction is FAIL-CLOSED (a row withheld, never a phantom row or
+                    // a wrong value), and the shape is narrow: a static-only partition
+                    // is a partition header + one static row, so its body straddling a
+                    // block boundary requires the boundary to fall inside those few
+                    // bytes. Closing it needs an `at_final_block`-style signal threaded
+                    // from every caller (`data_access::big_promoted`,
+                    // `data_access::bti_point`, the Summary-guided walk), i.e. the
+                    // `at_final_chunk` contract `drive_partition_sliding` already has —
+                    // which is why the SLIDING path (the full-scan route, and the one
+                    // the Flight fast arm drives) does NOT have this residual.
+                    //
                     // `static_cells` is already empty when the static row was shadowed
                     // by the partition tombstone or expired by its own TTL (#1741
                     // Finding 1), so a stale static row cannot resurface. The
