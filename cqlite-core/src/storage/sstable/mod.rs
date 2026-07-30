@@ -12,6 +12,8 @@ pub mod directory_integration_tests;
 pub mod format_detector;
 #[cfg(feature = "write-support")]
 mod generation_merge; // Cross-generation read reconciliation (issues #883/#885/#957/#1579).
+                      // The ≠1-generation streaming read path (issue #3124): the lazy fan-out k-way
+                      // merge + the per-row → batch re-chunker, both fail-closed on a dead producer.
 pub mod header_spec;
 pub mod index;
 pub mod index_reader;
@@ -20,6 +22,7 @@ pub mod performance_benchmarks;
 pub mod promoted_index_reader;
 pub mod read_work_counters;
 pub mod reader;
+mod scan_stream_fanout;
 pub mod summary_reader;
 pub mod version_gate;
 pub mod work_counters;
@@ -2102,9 +2105,11 @@ impl SSTableManager {
     /// O(one partition + channel), and time-to-first-row is O(first partition),
     /// not O(full merge). The merger already emits partitions in `(token, key)`
     /// order, byte-identical to `scan`'s `sort_by_token_order`, so the emitted
-    /// order is unchanged (issue #1579 ordering guardrail). On a merger
-    /// CONSTRUCTION error the driver reports back so this path FALLS BACK to the
-    /// lazy per-reader streaming merge, mirroring `scan`'s fall-back-to-concat. The
+    /// order is unchanged (issue #1579 ordering guardrail). On a REPORTED merger
+    /// CONSTRUCTION error this path FALLS BACK to the lazy per-reader streaming
+    /// merge, mirroring `scan`'s fall-back-to-concat; on a merge producer that DIED
+    /// it fails closed instead, because the concat is not reconciling and answering a
+    /// panic with it returns full-length WRONG data (issue #3124). The
     /// single-generation / no-schema / no-`write-support` cases keep the lazy
     /// streaming merge, which already matches `scan`'s concat path exactly and
     /// preserves LIMIT/backpressure.
@@ -2116,7 +2121,7 @@ impl SSTableManager {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> {
+    ) -> Result<reader::RowScanStream> {
         let readers = self.resolve_table_readers(table_id).await;
 
         // Issue #957: keep the materializing `scan` and this streaming path
@@ -2151,143 +2156,45 @@ impl SSTableManager {
                         );
                         return Ok(rx);
                     }
-                    Err(e) => {
-                        // Never fail a read because the merge could not be
-                        // constructed (unsupported format); fall back to the lazy
-                        // streaming merge, matching `scan`'s fall-back-to-concatenation.
-                        //
-                        // Error-path asymmetry, intentional (issue #1579): this `Err`
-                        // is ONLY the merger-CONSTRUCTION failure (`KWayMerger::new`,
-                        // signalled back before any row is streamed), so falling back
-                        // here can never emit a partially-merged, mis-reconciled
-                        // result — the streaming task has not sent anything yet. A
-                        // `step()` error occurring MID-merge (after some partitions
-                        // were already streamed to the caller) is NOT retried here;
-                        // it is delivered downstream as an `Err` item on the output
-                        // channel (see `stream_generations_for_read`), ending the
-                        // stream at that point. That is deliberately SAFER than the
-                        // materializing `scan`'s fallback, which — if it could fail
-                        // partway through populating its `Vec` — would have no way to
-                        // signal "these rows are reconciled, the rest are not"; the
-                        // streaming channel's `Err` item gives the caller an honest,
-                        // unambiguous cutoff instead of silently returning a
-                        // half-reconciled table.
+                    // Never fail a read because the merge could not be CONSTRUCTED
+                    // (unsupported input format); fall back to the lazy streaming
+                    // merge, matching `scan`'s fall-back-to-concatenation.
+                    //
+                    // Gated on the TYPE, not on the message (issue #3124, roborev):
+                    // `fallback_eligible()` is true for the REPORTED construction
+                    // failure ONLY. Nothing has been streamed at that point, so
+                    // falling back cannot mix reconciled and unreconciled rows, and
+                    // the concat's documented Issue #883 limitation is accepted for a
+                    // table the reconciling merge cannot open at all.
+                    //
+                    // The other setup failure — the producer task DIED before
+                    // signalling — is deliberately NOT eligible and propagates. Falling
+                    // back on a dead producer returned a FULL-LENGTH, UNRECONCILED
+                    // result set (duplicated overwritten rows, resurrected deleted
+                    // rows) as `Ok` with only a warning: silently WRONG data, one notch
+                    // worse than the silent truncation #3124 is about.
+                    Err(setup) if setup.fallback_eligible() => {
                         tracing::warn!(
-                            "SSTableManager::scan_stream - cross-generation merge failed for '{}' ({}); \
-                             falling back to lazy per-reader streaming merge",
+                            "SSTableManager::scan_stream - cross-generation merge could not be \
+                             constructed for '{}' ({}); falling back to lazy per-reader \
+                             streaming merge",
                             table_id,
-                            e
+                            setup.into_error()
                         );
                     }
+                    Err(setup) => return Err(setup.into_error()),
                 }
             }
         }
 
-        let (out_tx, out_rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
-
-        // Own everything the background merge task needs.
-        let table_id = table_id.clone();
-        let start_key = start_key.cloned();
-        let end_key = end_key.cloned();
-        let schema = schema.cloned();
-
-        tokio::spawn(async move {
-            // Admission control (issue #1594, F4): this fan-out merge is ONE
-            // top-level scan OPERATION that legitimately needs all N per-generation
-            // sub-scans live AT ONCE (it primes a head from every sub-scan before
-            // draining any). Acquire exactly ONE admission permit here, for the
-            // whole operation, and open each sub-scan `Exempt` (below) so the
-            // sub-scans do NOT each independently admit. If they did, a fan-out to
-            // `N > cap` generations would deadlock: `cap` sub-scans would win
-            // permits and park in backpressure while the rest blocked forever at
-            // `admit`, and this priming loop — waiting on the blocked sub-scans —
-            // would never drain the permit-holders. Held via this RAII guard for
-            // the whole merge; released on every exit. See `scan_admission` docs.
-            let _admission =
-                crate::storage::sstable::reader::scan_stream_windowed::scan_admission::admit()
-                    .await;
-
-            // Open one streaming scan per reader. Each is `Exempt` — the single
-            // permit above covers the whole fan-out operation (issue #1594).
-            let mut streams: Vec<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> = readers
-                .into_iter()
-                .map(|reader| {
-                    reader.scan_stream_admitted(
-                        table_id.clone(),
-                        start_key.clone(),
-                        end_key.clone(),
-                        schema.clone(),
-                        buffer_size,
-                        crate::storage::sstable::reader::scan_stream_windowed::scan_admission::ScanAdmission::Exempt,
-                    )
-                })
-                .collect();
-
-            // Prime one head per stream. Each head carries its precomputed
-            // Cassandra Murmur3 token so the merge orders by (token, key) — the
-            // authoritative cross-SSTable order (issue #1580) — and never hashes a
-            // key more than once. Comparing by raw `RowKey` bytes here (as this
-            // path previously did) diverged from `scan`'s token order.
-            let token_of = |key: &RowKey| {
-                crate::util::cassandra_murmur3::cassandra_murmur3_token(key.as_bytes())
-            };
-            let mut heads: Vec<Option<(i64, RowKey, ScanRow)>> = Vec::with_capacity(streams.len());
-            for stream in streams.iter_mut() {
-                match stream.recv().await {
-                    Some(Ok((key, row))) => heads.push(Some((token_of(&key), key, row))),
-                    Some(Err(e)) => {
-                        let _ = out_tx.send(Err(e)).await;
-                        return;
-                    }
-                    None => heads.push(None),
-                }
-            }
-
-            // K-way merge: repeatedly emit the head with the smallest
-            // (token, key), ties broken by reader index to match the stable
-            // token-order merge of `scan`.
-            loop {
-                let mut min_idx: Option<usize> = None;
-                for (i, head) in heads.iter().enumerate() {
-                    if let Some((ref token, ref key, _)) = head {
-                        match min_idx {
-                            None => min_idx = Some(i),
-                            Some(m) => {
-                                if let Some((ref min_token, ref min_key, _)) = heads[m] {
-                                    if (token, key) < (min_token, min_key) {
-                                        min_idx = Some(i);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                let idx = match min_idx {
-                    Some(idx) => idx,
-                    None => break, // all streams exhausted
-                };
-
-                // Take the winning entry and advance only that stream.
-                let entry = match heads[idx].take() {
-                    Some((_, key, row)) => (key, row),
-                    None => break, // unreachable: min_idx points to a Some head
-                };
-                match streams[idx].recv().await {
-                    Some(Ok((key, row))) => heads[idx] = Some((token_of(&key), key, row)),
-                    Some(Err(e)) => {
-                        let _ = out_tx.send(Err(e)).await;
-                        return;
-                    }
-                    None => {} // stream exhausted; head stays None
-                }
-
-                if out_tx.send(Ok(entry)).await.is_err() {
-                    return; // consumer dropped
-                }
-            }
-        });
-
-        Ok(out_rx)
+        Ok(scan_stream_fanout::spawn_fanout_merge(
+            readers,
+            table_id.clone(),
+            start_key.cloned(),
+            end_key.cloned(),
+            schema.cloned(),
+            buffer_size,
+        ))
     }
 
     /// Batched streaming scan (issue #1592, Epic F/F2): the additive companion to
@@ -2334,60 +2241,10 @@ impl SSTableManager {
         let per_row = self
             .scan_stream(table_id, start_key, end_key, schema, buffer_size)
             .await?;
-        Ok(Self::rechunk_into_batches(per_row, buffer_size))
-    }
-
-    /// Re-chunk a per-row streaming receiver into `BATCH_EMIT_ROWS`-sized `Vec`
-    /// batches over a bounded channel (issue #1592). Preserves order and content
-    /// exactly (FIFO push/flush) and preserves backpressure: the batch channel is
-    /// bounded, so a stalled consumer stops the drain of the per-row source, which
-    /// stops the upstream scan. The trailing partial batch is flushed at end. A
-    /// mid-stream error is forwarded as a terminal item.
-    ///
-    /// Used for the zero/multi-generation and `tombstones` cases, where a
-    /// straight-through single-reader hand-off is not applicable (the per-row
-    /// source is a k-way merge / materialized reconciliation, not one reader).
-    fn rechunk_into_batches(
-        mut per_row: tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>,
-        buffer_size: usize,
-    ) -> reader::BatchedScanStream {
-        use reader::scan_stream_windowed::BATCH_EMIT_ROWS;
-        // Bound the batch channel so its resident-row budget stays comparable to
-        // the per-row surface's `buffer_size`, not `buffer_size * BATCH_EMIT_ROWS`.
-        let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS).max(1);
-        let (tx, rx) = tokio::sync::mpsc::channel(cap);
-        let task = tokio::spawn(async move {
-            let mut batch: Vec<(RowKey, ScanRow)> = Vec::with_capacity(BATCH_EMIT_ROWS);
-            while let Some(item) = per_row.recv().await {
-                match item {
-                    Ok(entry) => {
-                        batch.push(entry);
-                        if batch.len() >= BATCH_EMIT_ROWS {
-                            if tx.send(Ok(std::mem::take(&mut batch))).await.is_err() {
-                                return; // consumer dropped
-                            }
-                            batch.reserve(BATCH_EMIT_ROWS);
-                        }
-                    }
-                    Err(e) => {
-                        // Flush already-received Ok rows BEFORE surfacing the
-                        // error, to match the per-row `scan_stream` guarantee
-                        // that confirmed rows are delivered ahead of a terminal
-                        // error (issue #1143 / #1592). Dropping them here would
-                        // silently lose up to BATCH_EMIT_ROWS-1 rows.
-                        if !batch.is_empty() {
-                            let _ = tx.send(Ok(std::mem::take(&mut batch))).await;
-                        }
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
-                }
-            }
-            if !batch.is_empty() {
-                let _ = tx.send(Ok(batch)).await;
-            }
-        });
-        reader::BatchedScanStream::new(rx, task)
+        Ok(scan_stream_fanout::rechunk_into_batches(
+            per_row,
+            buffer_size,
+        ))
     }
 
     /// Streaming scan under the `tombstones` feature.
@@ -2405,19 +2262,23 @@ impl SSTableManager {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> {
+    ) -> Result<reader::RowScanStream> {
         let results = self
             .scan(table_id, start_key, end_key, None, schema)
             .await?;
         let (tx, rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
-        tokio::spawn(async move {
+        // Issue #3124: the handle is RETAINED so a forwarder that dies mid-drain is
+        // an error at the consumer rather than a clean end of stream (this build's
+        // rows are already materialized, but the boundary must not be the one place
+        // where a dead producer still reads as a finished scan).
+        let task = tokio::spawn(async move {
             for entry in results {
                 if tx.send(Ok(entry)).await.is_err() {
                     break; // consumer dropped
                 }
             }
         });
-        Ok(rx)
+        Ok(reader::RowScanStream::new(rx, task))
     }
 
     /// Batched streaming scan under the `tombstones` feature (issue #1592).
@@ -2440,7 +2301,10 @@ impl SSTableManager {
         let per_row = self
             .scan_stream(table_id, start_key, end_key, schema, buffer_size)
             .await?;
-        Ok(Self::rechunk_into_batches(per_row, buffer_size))
+        Ok(scan_stream_fanout::rechunk_into_batches(
+            per_row,
+            buffer_size,
+        ))
     }
 
     /// Get list of all SSTable IDs
@@ -3061,7 +2925,14 @@ mod tests {
             .unwrap();
         drop(in_tx); // close the source
 
-        let mut out = SSTableManager::rechunk_into_batches(in_rx, 64);
+        // Issue #3124: the re-chunker's source is a `RowScanStream`, so this stand-in
+        // pairs the channel with a producer task that FINISHES cleanly — the source's
+        // end of stream is then a proven-clean one, exactly as a healthy scan's is,
+        // and the assertions below are about the flush-before-error ordering only.
+        let mut out = scan_stream_fanout::rechunk_into_batches(
+            reader::RowScanStream::new(in_rx, tokio::spawn(async {})),
+            64,
+        );
 
         // First item: the flushed pending batch with ALL confirmed rows, in order.
         let first = out

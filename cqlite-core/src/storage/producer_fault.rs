@@ -1,6 +1,7 @@
-//! TEST-ONLY fault injection for the producer-thread boundaries that used to
-//! collapse a dead producer into a clean end of input: the query row stream's two
-//! (issue #3106) and the k-way MERGE's shared row-forward funnel (issue #3120).
+//! TEST-ONLY fault injection for the producer boundaries that used to collapse a
+//! dead producer into a clean end of input: the query row stream's two (issue
+//! #3106), the k-way MERGE's shared row-forward funnel (issue #3120), and every
+//! spawned task on the multi-generation streaming-scan path (issue #3124).
 //!
 //! # Why this exists
 //!
@@ -15,7 +16,7 @@
 //! PROVES that, deterministically, without waiting for a real decode bug to
 //! unwind.
 //!
-//! Two independent seams, one per boundary:
+//! Independent seams, one per boundary:
 //!
 //! * [`arm_query_row_producer_panic`] → the OUTER boundary: the query-row producer
 //!   THREAD panics at a batch handoff ([`ProducerFault::before_batch_handoff`],
@@ -23,13 +24,21 @@
 //! * [`arm_inner_scan_task_panic`] → the INNER boundary: the batched-scan `tokio`
 //!   TASK panics ([`inner_scan_task_checkpoint`]). ONE checkpoint site, in that
 //!   task's cursor-open prelude
-//!   (`data_access::batched_scan_stream::SSTableReader::open_batched_scan_cursor`),
+//!   (`data_access::joined_scan_stream::SSTableReader::open_batched_scan_cursor`),
 //!   which sits ABOVE the `requires_chunk_stitching()` branch and is therefore
 //!   reached whatever on-disk format the reader has — a checkpoint inside either
 //!   branch would fire only for that branch's formats and could silently not fire.
 //!   This is the arm a `do_get` with NO token filter takes, so it is the issue's
 //!   own repro; killing the task drops its sender with no terminator, which the
 //!   query-row thread used to read as "the scan finished".
+//! * [`arm_scan_task_panic`] → the generalisation of the second seam to EVERY
+//!   spawned scan task on the ≠1-generation (query-engine full scan) path (issue
+//!   #3124): the fan-out k-way merge task, a per-reader per-row sub-scan, the
+//!   windowed forwarder, and the cross-generation RECONCILING merge task — see
+//!   [`ScanTaskSite`]. Each had a DISCARDED `JoinHandle`
+//!   and a consumer that read channel-close as end-of-scan, i.e. the #3106 defect
+//!   on the multi-generation path. An arm is keyed by `(site, scope)`, not scope
+//!   alone, because one scan traverses several of these checkpoints.
 //! * [`arm_merge_producer_panic`] → the K-WAY MERGE boundary (issue #3120): a
 //!   merge producer THREAD panics at a row forward
 //!   ([`MergeProducerFault::before_row_forward`], consulted in
@@ -213,19 +222,135 @@ impl MergeProducerFault {
     }
 }
 
-/// Consulted at the INNER batched-scan task's checkpoint (its cursor-open
-/// prelude) so an armed fault unwinds THAT task — the boundary whose disconnect
-/// the query-row thread used to read as "the scan finished".
+/// Which spawned scan task a checkpoint belongs to (issue #3124).
 ///
-/// Panics ON PURPOSE when an arm scoped to THIS reader is registered, taking that
-/// arm so exactly one scan task dies. Compiles to an empty function — which never
-/// calls `scope_of` — in a production build.
+/// Part of an arm's key, not just documentation: the four #3124 boundaries sit on
+/// ONE code path, so a single fan-out scan runs through the merge task, each
+/// per-reader sub-scan and (on a compressed reader) the windowed forwarder. Keyed by
+/// scope ALONE, a test arming the boundary it means to prove would have its arm
+/// consumed by whichever checkpoint the scan reached first, and would then pass
+/// while the boundary under test was never exercised.
+///
+/// Exists in production builds too (it is a checkpoint PARAMETER), where every
+/// checkpoint compiles to an empty function that never inspects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanTaskSite {
+    /// The BATCHED scan's driver task, at its cursor-open prelude
+    /// (`open_batched_scan_cursor`) — the issue-#3106 inner boundary.
+    InnerBatchedScan,
+    /// A PER-ROW `scan_stream_admitted` sub-scan task, at its prelude (issue #3124
+    /// site 2). Each generation of a fan-out merge runs one of these.
+    PerRowScan,
+    /// The fan-out k-way MERGE task of `SSTableManager::scan_stream` (issue #3124
+    /// site 1) — the multi-generation path's top-level producer.
+    ///
+    /// Constructed only on the non-`tombstones` path: a `tombstones` build routes
+    /// `scan_stream` through the materializing `scan`, so there is no fan-out merge
+    /// task there and this variant is legitimately unconstructed in that config.
+    #[cfg_attr(feature = "tombstones", allow(dead_code))]
+    FanoutMerge,
+    /// The windowed scan's FORWARDER task (issue #3124 site 4), which adapts the
+    /// blocking parse half's batches to the caller's surface. Reached only by
+    /// chunk-stitching (compressed) readers.
+    WindowedForwarder,
+    /// The CROSS-GENERATION reconciling merge task of
+    /// `generation_merge::stream_generations_for_read` (issue #3124 site 5), at its
+    /// prelude — i.e. inside the `KWayMerger::new` construction window, BEFORE the
+    /// task signals readiness.
+    ///
+    /// Deliberately its own site rather than sharing [`Self::FanoutMerge`]: that is
+    /// the schema-less lazy token-order CONCAT, this is the authoritative RECONCILING
+    /// merge a multi-generation read with a schema takes, and the whole point of the
+    /// site is that a death here must NOT be answered by silently substituting the
+    /// concat (roborev on #3124).
+    ///
+    /// # Gated to exactly where the site EXISTS
+    ///
+    /// `generation_merge` is a `write-support` module (it drives the write engine's
+    /// `KWayMerger`) and its streaming entry point is additionally
+    /// `cfg(not(tombstones))` — a `tombstones` build routes `scan_stream` through the
+    /// materializing `scan`. So this checkpoint exists in exactly one configuration,
+    /// and the variant is `#[cfg]`'d to match it rather than kept everywhere behind an
+    /// `allow(dead_code)`: in a read-only (`--no-default-features`) build there is no
+    /// cross-generation merge task to arm, and a variant nothing can ever construct
+    /// there would be a lie about the seam's coverage. Its only two references — the
+    /// checkpoint call and the end-to-end pin in
+    /// `scan_stream_fanout_panic_tests.rs` — carry this same triple already.
+    ///
+    /// ([`Self::FanoutMerge`] cannot use a `#[cfg]` here: this module's own always-
+    /// compiled unit tests name it, so under `--all-features` (i.e. `tombstones` on)
+    /// cfg'ing it away would break those tests rather than silence a lint.)
+    #[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+    CrossGenerationMerge,
+}
+
+/// Consulted at a spawned scan task's checkpoint so an armed fault unwinds THAT
+/// task — reproducing exactly the condition every one of these boundaries used to
+/// read as "the scan finished": the task's sender drops with no error and no
+/// terminator.
+///
+/// Panics ON PURPOSE when an arm for this SITE, scoped to THIS reader, is
+/// registered, taking that arm so exactly one task dies. Compiles to an empty
+/// function — which never calls `scope_of` — in a production build.
+#[inline]
+pub(crate) fn scan_task_checkpoint(
+    site: ScanTaskSite,
+    scope_of: impl FnOnce() -> std::path::PathBuf,
+) {
+    #[cfg(not(any(test, feature = "producer-fault-injection")))]
+    {
+        let _ = site;
+        let _ = scope_of;
+    }
+    #[cfg(any(test, feature = "producer-fault-injection"))]
+    armed::take_task_and_panic(site, &scope_of().to_string_lossy());
+}
+
+/// The INNER batched-scan task's checkpoint (its cursor-open prelude) — the
+/// boundary whose disconnect the query-row thread used to read as "the scan
+/// finished" (issue #3106). A named wrapper over
+/// [`scan_task_checkpoint`] so the #3106 call site reads as its own boundary.
 #[inline]
 pub(crate) fn inner_scan_task_checkpoint(scope_of: impl FnOnce() -> std::path::PathBuf) {
-    #[cfg(not(any(test, feature = "producer-fault-injection")))]
-    let _ = scope_of;
+    scan_task_checkpoint(ScanTaskSite::InnerBatchedScan, scope_of)
+}
+
+/// A checkpoint scope CAPTURED for a task that will run later, elsewhere (issue
+/// #3124).
+///
+/// [`scan_task_checkpoint`] takes a lazy closure because its callers hold the reader
+/// right there. Two #3124 sites do not: the fan-out merge task and the windowed
+/// forwarder are `tokio::spawn`ed with an environment that must OWN whatever they
+/// check, and the forwarder is spawned from a function with no reader in scope. This
+/// type is that owned scope — and it is a ZERO-SIZED, no-op struct in a production
+/// build, so a production scan clones no `PathBuf` and the spawned task's
+/// environment grows by nothing.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FaultScope {
     #[cfg(any(test, feature = "producer-fault-injection"))]
-    armed::take_inner_and_panic(&scope_of().to_string_lossy());
+    path: std::path::PathBuf,
+}
+
+impl FaultScope {
+    /// Capture the scope a later-spawned task will check against. `of` is called
+    /// only when the arming surface is compiled in.
+    pub(crate) fn capture(of: impl FnOnce() -> std::path::PathBuf) -> Self {
+        #[cfg(not(any(test, feature = "producer-fault-injection")))]
+        let _ = of;
+        Self {
+            #[cfg(any(test, feature = "producer-fault-injection"))]
+            path: of(),
+        }
+    }
+
+    /// The captured scope's checkpoint for `site`. Empty function in production.
+    #[inline]
+    pub(crate) fn checkpoint(&self, site: ScanTaskSite) {
+        #[cfg(not(any(test, feature = "producer-fault-injection")))]
+        let _ = site;
+        #[cfg(any(test, feature = "producer-fault-injection"))]
+        armed::take_task_and_panic(site, &self.path.to_string_lossy());
+    }
 }
 
 /// The panic message both checkpoints raise. Exported so a test can (a) assert
@@ -248,10 +373,15 @@ mod armed {
         after_batches: u64,
     }
 
-    /// One registered INNER arm.
-    struct InnerArm {
+    /// One registered TASK arm: a scope PLUS the checkpoint site it applies to
+    /// (issue #3124). The site is part of the key, so arming the fan-out merge over
+    /// a fixture cannot be consumed by that same fixture's per-reader sub-scan — the
+    /// four #3124 sites sit on ONE code path and every scan runs through several of
+    /// them, so a scope-only key would let a test prove the wrong boundary.
+    struct TaskArm {
         id: u64,
         scope: String,
+        site: super::ScanTaskSite,
     }
 
     /// One registered MERGE arm (issue #3120). Shaped like [`OuterArm`] (it has a
@@ -273,7 +403,7 @@ mod armed {
     /// below is a few comparisons long and NEVER spans an `.await`, so no guard is
     /// ever held across a suspension point.
     static OUTER_ARMS: Mutex<Vec<OuterArm>> = Mutex::new(Vec::new());
-    static INNER_ARMS: Mutex<Vec<InnerArm>> = Mutex::new(Vec::new());
+    static TASK_ARMS: Mutex<Vec<TaskArm>> = Mutex::new(Vec::new());
     #[cfg(feature = "write-support")]
     static MERGE_ARMS: Mutex<Vec<MergeArm>> = Mutex::new(Vec::new());
 
@@ -365,29 +495,34 @@ mod armed {
         Some(arms.remove(index).after_rows)
     }
 
-    pub(super) fn arm_inner(scope: &str) -> u64 {
+    pub(super) fn arm_task(scope: &str, site: super::ScanTaskSite) -> u64 {
         check_scope(scope);
         let id = next_id();
-        INNER_ARMS.lock().push(InnerArm {
+        TASK_ARMS.lock().push(TaskArm {
             id,
             scope: scope.to_string(),
+            site,
         });
         id
     }
 
-    pub(super) fn disarm_inner(id: u64) {
-        INNER_ARMS.lock().retain(|arm| arm.id != id);
+    pub(super) fn disarm_task(id: u64) {
+        TASK_ARMS.lock().retain(|arm| arm.id != id);
     }
 
-    /// TAKE the inner arm scoped to this reader and panic. Taken (not merely
-    /// read) and the lock RELEASED before the panic, so the unwind cannot
-    /// re-enter and a retry/sibling scan is never hit by the same arm.
-    pub(super) fn take_inner_and_panic(path: &str) {
+    /// TAKE the arm registered for THIS site and scoped to this reader, then panic.
+    /// Taken (not merely read) and the lock RELEASED before the panic, so the unwind
+    /// cannot re-enter and a retry/sibling scan is never hit by the same arm.
+    ///
+    /// Both parts of the key must match: an arm registered for another site is left
+    /// registered even when the path matches (issue #3124), so a checkpoint upstream
+    /// of the one under test cannot consume it.
+    pub(super) fn take_task_and_panic(site: super::ScanTaskSite, path: &str) {
         let armed = {
-            let mut arms = INNER_ARMS.lock();
+            let mut arms = TASK_ARMS.lock();
             match arms
                 .iter()
-                .position(|arm| path.contains(arm.scope.as_str()))
+                .position(|arm| arm.site == site && path.contains(arm.scope.as_str()))
             {
                 Some(index) => {
                     arms.remove(index);
@@ -455,24 +590,46 @@ impl Drop for ArmedProducerPanic {
 /// `producer-fault-injection` feature is on.
 #[cfg(any(test, feature = "producer-fault-injection"))]
 #[must_use = "the fault stays armed only while the guard is alive"]
-pub fn arm_inner_scan_task_panic(scope: &str) -> ArmedInnerScanPanic {
-    ArmedInnerScanPanic {
-        id: armed::arm_inner(scope),
+pub fn arm_inner_scan_task_panic(scope: &str) -> ArmedScanTaskPanic {
+    arm_scan_task_panic(scope, ScanTaskSite::InnerBatchedScan)
+}
+
+/// Arm the next scan task of `site`, over a reader whose `Data.db` path contains
+/// `scope`, to panic at that site's checkpoint — so the task unwinds and drops its
+/// sender with no error and no terminator (issue #3124).
+///
+/// The task dies before any row it would have produced at that site, and the join
+/// that must catch it wraps the whole task, so the property proven holds for a panic
+/// anywhere inside it. There is deliberately no "die after N units" knob: each site
+/// has exactly ONE checkpoint, so a count would be unspendable.
+///
+/// Disarmed when the returned guard drops, and TAKEN by the first scan that matches
+/// BOTH the site and the scope; any other scan — or the same scan at a different
+/// site — leaves it registered (see the module doc).
+///
+/// TEST-ONLY: this symbol does not exist unless `cfg(test)` or the
+/// `producer-fault-injection` feature is on.
+#[cfg(any(test, feature = "producer-fault-injection"))]
+#[must_use = "the fault stays armed only while the guard is alive"]
+pub fn arm_scan_task_panic(scope: &str, site: ScanTaskSite) -> ArmedScanTaskPanic {
+    ArmedScanTaskPanic {
+        id: armed::arm_task(scope, site),
     }
 }
 
-/// Guard returned by [`arm_inner_scan_task_panic`]: removes its own arm on drop.
-/// Holds no lock, so it is safe to hold across an `.await`.
+/// Guard returned by [`arm_scan_task_panic`] / [`arm_inner_scan_task_panic`]:
+/// removes its own arm on drop. Holds no lock, so it is safe to hold across an
+/// `.await`.
 #[cfg(any(test, feature = "producer-fault-injection"))]
 #[derive(Debug)]
-pub struct ArmedInnerScanPanic {
+pub struct ArmedScanTaskPanic {
     id: u64,
 }
 
 #[cfg(any(test, feature = "producer-fault-injection"))]
-impl Drop for ArmedInnerScanPanic {
+impl Drop for ArmedScanTaskPanic {
     fn drop(&mut self) {
-        armed::disarm_inner(self.id);
+        armed::disarm_task(self.id);
     }
 }
 

@@ -152,6 +152,12 @@ use tokio::sync::mpsc;
 mod guard;
 use guard::FeedFailureGuard;
 
+// The forwarder task + its join verdict (issue #3124, site 4): a forwarder that DIES
+// must FAIL the scan, not end it cleanly. Its own file (this one is already over the
+// campsite threshold, epic #1116).
+#[path = "scan_stream_forwarder.rs"]
+mod scan_stream_forwarder;
+
 // IO-half chunk decode (`decode_scan_chunk`, issue #1940 / D2) — sibling file
 // (campsite rule, epic #1116); an `impl SSTableReader` block.
 #[path = "scan_stream_windowed_decode.rs"]
@@ -514,7 +520,12 @@ impl SSTableReader {
         // had, just batched, on BOTH arms. If the consumer drops its receiver, the
         // send fails, the forwarder returns and drops `batch_rx`; the parse half's
         // next `blocking_send` then fails so it terminates (`*broke = true`).
-        let forwarder = Self::spawn_windowed_forwarder(out, batch_rx);
+        // Issue #3124 (site 4): capture this reader's fault scope for the
+        // forwarder's own checkpoint (a no-op ZST in production builds).
+        let forwarder_scope =
+            crate::storage::producer_fault::FaultScope::capture(|| self.file_path());
+        let forwarder =
+            scan_stream_forwarder::spawn_windowed_forwarder(out, batch_rx, forwarder_scope);
 
         // Feed raw chunks to the parse task, DECODING each on the way (issue #1940,
         // D2). The bounded `raw_tx` applies backpressure all the way back to disk
@@ -563,75 +574,24 @@ impl SSTableReader {
         };
         // Then await the forwarder so every batched row reaches the consumer
         // before this function returns (the public stream must not drop the
-        // trailing batch). The forwarder cannot fail the scan — it only flattens
-        // already-produced rows — so a join error there is non-fatal; the parse
-        // task's `Result` plus `io_err` remain canonical.
-        let _ = forwarder.await;
+        // trailing batch).
+        //
+        // Issue #3124 (site 4): its join outcome is OBSERVED, not discarded. This
+        // was `let _ = forwarder.await;` — justified as "the forwarder only
+        // flattens already-decoded rows, so it cannot fail the scan", which holds
+        // for a forwarder that RETURNS and not for one that DIES: an unwinding
+        // forwarder drops the rows it was holding AND `batch_rx` (so the parse half
+        // stops as if the consumer had walked away), and this function then returned
+        // `Ok(())` — a successful scan, silently short. An I/O error and a parse
+        // error stay CANONICAL (they are the root cause); the forwarder verdict is
+        // consulted only when neither failed, i.e. exactly the case that used to be
+        // reported as a clean, complete scan.
+        let forwarder_joined = forwarder.await;
         if let Some(e) = io_err {
             return Err(e);
         }
-        parse_result
-    }
-
-    /// Spawn the forwarder that drains the internal `Vec`-batched channel into the
-    /// caller's public surface (issue #1592, Epic F/F2).
-    ///
-    /// This is the ONE place per-row and batched delivery diverge; everything
-    /// upstream (I/O feed, blocking decompress+parse, the internal batch channel,
-    /// backpressure) is shared. The per-row arm is a thin flattening adapter over
-    /// the same batched stream the batched arm forwards straight through, so the
-    /// two surfaces are guaranteed to yield identical rows in identical order (the
-    /// batched arm's output flattened equals the per-row arm's output).
-    ///
-    /// Both arms preserve backpressure: a stalled consumer blocks the `send().await`
-    /// here, stopping the drain of `batch_rx`, which (bounded) blocks the parse
-    /// half's `blocking_send`, all the way back to disk reads. On consumer drop the
-    /// `send` fails and the forwarder returns, dropping `batch_rx` so the parse
-    /// half terminates.
-    fn spawn_windowed_forwarder(
-        out: WindowedOut,
-        mut batch_rx: mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            match out {
-                // Per-row (historical) surface: FLATTEN each confirmed batch back
-                // into single `(RowKey, ScanRow)` items. One send per row.
-                WindowedOut::PerRow(tx) => {
-                    while let Some(batch) = batch_rx.recv().await {
-                        match batch {
-                            Ok(rows) => {
-                                for entry in rows {
-                                    if tx.send(Ok(entry)).await.is_err() {
-                                        return; // consumer dropped
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                // Parse half surfaced a mid-stream error; forward it
-                                // as a terminal item and stop. The parse half also
-                                // returns the same error via its `Result`.
-                                let _ = tx.send(Err(e)).await;
-                                return;
-                            }
-                        }
-                    }
-                }
-                // Batched (F2) surface: FORWARD each confirmed batch straight
-                // through — one send per batch, not per row. A terminal error is
-                // forwarded as one item then the stream ends.
-                WindowedOut::Batched(tx) => {
-                    while let Some(batch) = batch_rx.recv().await {
-                        let terminal = batch.is_err();
-                        if tx.send(batch).await.is_err() {
-                            return; // consumer dropped
-                        }
-                        if terminal {
-                            return;
-                        }
-                    }
-                }
-            }
-        })
+        parse_result?;
+        scan_stream_forwarder::forwarder_verdict(forwarder_joined)
     }
 
     /// I/O + decode feed loop for the windowed scan — runs on ONE `spawn_blocking`

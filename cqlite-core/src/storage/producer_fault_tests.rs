@@ -1,4 +1,5 @@
-//! Unit tests for the producer-fault injection seams (issues #3106 / #3120).
+//! Unit tests for the producer-fault injection seams (issues #3106 / #3120 /
+//! #3124).
 //!
 //! Lifted VERBATIM out of `producer_fault.rs`: gating the MERGE seam on
 //! `write-support` (so the gate's `minimal-build` feature set stops seeing it as
@@ -226,5 +227,70 @@ fn the_inner_checkpoint_fires_only_for_the_scoped_reader() {
 
     // Consumed: a retry of the same scan is clean.
     inner_scan_task_checkpoint(|| path_of(&matching));
+    drop(guard);
+}
+
+/// Issue #3124: an arm is keyed by `(site, scope)`. A checkpoint at a DIFFERENT
+/// site over the very same reader must pass straight through and LEAVE the arm
+/// registered — otherwise a test arming (say) the fan-out merge would have its
+/// arm eaten by the per-row sub-scan checkpoint the same scan also runs, and
+/// would pass while the boundary under test never fired.
+#[test]
+fn an_arm_is_taken_only_at_its_own_site() {
+    let scope = "issue-3124-site-key-unit-test/only-me";
+    let matching = format!("/tmp/{scope}/nb-1-big-Data.db");
+    let guard = arm_scan_task_panic(scope, ScanTaskSite::FanoutMerge);
+
+    // Every OTHER site over the same reader path runs right through.
+    for other in [
+        ScanTaskSite::InnerBatchedScan,
+        ScanTaskSite::PerRowScan,
+        ScanTaskSite::WindowedForwarder,
+    ] {
+        scan_task_checkpoint(other, || path_of(&matching));
+    }
+
+    // The armed site still fires — the arm was not consumed above.
+    let died = {
+        let _silence = silence_injected_panics();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scan_task_checkpoint(ScanTaskSite::FanoutMerge, || path_of(&matching));
+        }))
+    };
+    assert!(
+        died.is_err(),
+        "the arm must survive checkpoints at other sites and fire at its own"
+    );
+
+    // Consumed exactly once.
+    scan_task_checkpoint(ScanTaskSite::FanoutMerge, || path_of(&matching));
+    drop(guard);
+}
+
+/// The owned-scope form ([`FaultScope`], used by the two #3124 sites whose task
+/// is spawned away from the reader) matches on the same `(site, scope)` key.
+#[test]
+fn a_captured_fault_scope_fires_for_its_own_site_and_scope() {
+    let scope = "issue-3124-captured-scope-unit-test/only-me";
+    let matching = format!("/tmp/{scope}/nb-1-big-Data.db");
+    let guard = arm_scan_task_panic(scope, ScanTaskSite::WindowedForwarder);
+
+    let foreign = FaultScope::capture(|| path_of("/tmp/someone-else/nb-1-big-Data.db"));
+    foreign.checkpoint(ScanTaskSite::WindowedForwarder);
+
+    let mine = FaultScope::capture(|| path_of(&matching));
+    // Wrong site over the right scope: pass through, arm retained.
+    mine.checkpoint(ScanTaskSite::FanoutMerge);
+
+    let died = {
+        let _silence = silence_injected_panics();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mine.checkpoint(ScanTaskSite::WindowedForwarder);
+        }))
+    };
+    assert!(
+        died.is_err(),
+        "a captured scope must fire at its armed site for its own reader"
+    );
     drop(guard);
 }

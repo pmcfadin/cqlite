@@ -512,6 +512,12 @@ impl StorageEngine {
     /// so streaming a large `SELECT *` no longer holds the entire result set in
     /// memory at once. Delegates to [`SSTableManager::scan_stream`].
     ///
+    /// Returns a [`RowScanStream`](sstable::reader::RowScanStream), not a bare
+    /// `mpsc::Receiver` (issue #3124): it owns the producer's `JoinHandle`, so a
+    /// producer that DIES mid-scan is reported as an error on `recv()` instead of a
+    /// clean end of stream that would hand the caller a silently short result set.
+    /// `recv()` has the same shape as the receiver's, so consumers are unchanged.
+    ///
     /// [`SSTableManager::scan_stream`]: sstable::SSTableManager::scan_stream
     pub async fn scan_stream(
         &self,
@@ -520,7 +526,7 @@ impl StorageEngine {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> {
+    ) -> Result<sstable::reader::RowScanStream> {
         record_table_scan_call();
         self.sstables
             .scan_stream(table_id, start_key, end_key, schema, buffer_size)
