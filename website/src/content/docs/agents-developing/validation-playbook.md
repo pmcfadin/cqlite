@@ -98,16 +98,40 @@ exact full-scan row count and partition count, both arms' generation counts are 
 after materialization (so the axis can never degenerate to 1-vs-1), and a source fixture
 that stops holding exactly one generation FAILs.
 
-Shapes that already diverge for a tracked defect are marked `known_divergent` with a
-documented reason and run only in the `#[ignore]`d
-`one_vs_n_generation_known_divergences` reproducer, so the enforcing lane still guards the
-shapes that agree:
+Two properties of this axis are easy to get wrong:
+
+* **It probes partitions that return NOTHING, on purpose.** Discovery runs
+  `SELECT <pk> FROM …`, so a fully-deleted partition yields no key and would never be point-read
+  — leaving the seek/merge path untested for exactly the deleted-partition phantom-row shape the
+  axis exists to catch. Each case therefore declares `empty_probe_keys` (deleted or absent
+  partitions), asserted to be undiscoverable AND to return zero rows on both arms in both modes.
+* **It covers structural merge, not precedence.** The N copies are byte-identical, so every
+  cross-generation comparison is a *tie*: interleaving, ordering, dedup, static injection and
+  tombstone application are exercised, but "a newer generation's tombstone shadows an older
+  generation's live row" is not. That asymmetric class belongs to the real 2-generation
+  Cassandra fixtures (`test_tomb.resurrection_gc0`, `skipped_partition_delete`) and the
+  Cassandra-oracle lanes.
+
+**A quarantine needs a release signal.** Shapes that already diverge for a tracked defect are
+marked `known_divergent` with a reason that MUST cite its issue (`#<number>`, asserted — a
+waiver with no cited issue is not a waiver). They are excluded from the enforcing lane, but they
+are NOT parked in an `#[ignore]`d reproducer: an ignored test is a ratchet that never releases,
+since the gate never runs it and nothing ever reports that the defect got fixed. Instead
+`one_vs_n_generation_quarantine_still_diverges` runs in the normal test run and pins the
+*expected divergence*: each quarantined case must STILL diverge, and the moment one starts
+agreeing the test fails with instructions to flip `known_divergent` to `None`. Only an error
+carrying the divergence marker counts — a harness/fixture error is reported separately, so a
+broken harness can never masquerade as "still broken":
 
 ```bash
 env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
   cargo test -p cqlite-core --features "state_machine cli-helpers" \
-  --test point_vs_full_differential -- --ignored one_vs_n_generation_known_divergences --nocapture
+  --test point_vs_full_differential -- one_vs_n_generation_quarantine_still_diverges --nocapture
 ```
+
+Generalizing: when a test must be excluded because of a known defect, prefer an
+**expected-failure pin that fails when the defect disappears** over `#[ignore]`. The former
+self-releases; the latter is green whether the code is broken or fixed.
 
 ### The self-round-trip blind spot (CQLite-written + CQLite-read, issue #3042)
 

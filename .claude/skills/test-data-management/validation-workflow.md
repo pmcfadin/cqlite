@@ -133,7 +133,7 @@ Real entrypoints (these exist; there is no `sstable_validation` target):
 |------------|--------|
 | `cqlite-core/tests/query_semantics_oracle_parity.rs` | query-semantics parity — the post-reconciliation `SELECT` result set at a PINNED `now` |
 | `cqlite-core/tests/point_vs_full_differential.rs` | point-vs-full differential lane — same query under `CQLITE_READ_PATH=point` vs `=full` |
-| `cqlite-core/tests/point_vs_full_differential/one_vs_n_generation.rs` | 1-gen-vs-N-gen differential axis (#3129) — same bytes read at 1 vs N ≥ 2 generations must agree |
+| `cqlite-core/tests/point_vs_full_differential/one_vs_n_generation.rs` | 1-gen-vs-N-gen differential axis (#3129) — same bytes read at 1 vs N ≥ 2 generations must agree, incl. point reads of deleted partitions; quarantined shapes are pinned as EXPECTED divergences (self-releasing), never `#[ignore]`d |
 | `bash test-data/scripts/smoke-test-all-tables.sh` | all-tables smoke across the enumerated corpus |
 
 The shape of a per-table parity assertion (illustrative, not a copy of a real file):
