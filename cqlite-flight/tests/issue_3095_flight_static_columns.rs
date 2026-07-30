@@ -220,12 +220,7 @@ async fn run_forced(
 fn row(pairs: &[(&str, Option<&str>)]) -> Row {
     pairs
         .iter()
-        .map(|(k, v)| {
-            (
-                (*k).to_string(),
-                v.unwrap_or("<null>").to_string(),
-            )
-        })
+        .map(|(k, v)| ((*k).to_string(), v.unwrap_or("<null>").to_string()))
         .collect()
 }
 
@@ -319,7 +314,11 @@ const DL_DDL: &str = "CREATE TABLE test_deltas.static_with_rows \
 /// clustering and null regular columns.
 fn deltas_expected_select_star() -> Vec<Row> {
     let mut out = Vec::new();
-    for (pk, statik) in [(1, "static_val_1"), (2, "static_val_2"), (3, "static_val_3")] {
+    for (pk, statik) in [
+        (1, "static_val_1"),
+        (2, "static_val_2"),
+        (3, "static_val_3"),
+    ] {
         for ck in 1..=4 {
             out.push(row(&[
                 ("pk", Some(&pk.to_string())),

@@ -317,7 +317,12 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         eprintln!("SKIP {msg}");
         return Ok(false);
     };
-    let Some(dir) = fixture_dir(&root, &case.keyspace, &case.fixture_dir_prefix, &case.sstable_prefix) else {
+    let Some(dir) = fixture_dir(
+        &root,
+        &case.keyspace,
+        &case.fixture_dir_prefix,
+        &case.sstable_prefix,
+    ) else {
         let msg = format!(
             "case {}: fixture dir {}* absent",
             case.id, case.fixture_dir_prefix

@@ -248,7 +248,11 @@ fn stage_case_dir(keyspace: &str, dir: &Path) -> Result<tempfile::TempDir, Strin
     std::fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
     for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| format!("read dir entry: {e}"))?;
-        if entry.file_type().map_err(|e| format!("file type: {e}"))?.is_file() {
+        if entry
+            .file_type()
+            .map_err(|e| format!("file type: {e}"))?
+            .is_file()
+        {
             std::fs::copy(entry.path(), dest.join(entry.file_name()))
                 .map_err(|e| format!("copy {}: {e}", entry.path().display()))?;
         }
@@ -319,9 +323,7 @@ fn ddl_for(
     // silently decode the wrong shape.
     if let Some(ddl) = declared_ddl {
         if !ddl.contains(table) {
-            return Err(format!(
-                "case DDL does not name table {table}: {ddl}"
-            ));
+            return Err(format!("case DDL does not name table {table}: {ddl}"));
         }
         return Ok(ddl.to_string());
     }
@@ -477,7 +479,12 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         eprintln!("SKIP {msg}");
         return Ok(false);
     };
-    let Some(dir) = fixture_dir(&root, &case.keyspace, &case.fixture_dir_prefix, &case.sstable_prefix) else {
+    let Some(dir) = fixture_dir(
+        &root,
+        &case.keyspace,
+        &case.fixture_dir_prefix,
+        &case.sstable_prefix,
+    ) else {
         let msg = format!(
             "case {}: fixture dir {}* absent",
             case.id, case.fixture_dir_prefix
@@ -563,7 +570,8 @@ async fn run_case(case: &Case) -> Result<bool, String> {
     // at the sstables root.
     // Stage the RESOLVED fixture dir, so the service reads exactly the bytes this
     // lane derived its physical counts from (see `stage_case_dir`).
-    let staged = stage_case_dir(&case.keyspace, &dir).map_err(|e| format!("case {}: {e}", case.id))?;
+    let staged =
+        stage_case_dir(&case.keyspace, &dir).map_err(|e| format!("case {}: {e}", case.id))?;
     std::env::set_var(TTL_NOW_OVERRIDE_ENV, case.pinned_now_secs.to_string());
     let svc = CqliteFlightService::new(staged.path().to_path_buf(), 8192);
     let ticket = ticket_bytes(&case.keyspace, &case.table, &ddl, &cols);

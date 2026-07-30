@@ -130,8 +130,12 @@ impl<'a> StaticMergeSource<'a> {
         key: &DecoratedKey,
         pending: PendingRow,
     ) -> Result<Option<QueryRow>, ProducerError> {
-        self.producer
-            .materialize_pending(key, pending, &mut self.pk_cache, self.assemble_cols.as_ref())
+        self.producer.materialize_pending(
+            key,
+            pending,
+            &mut self.pk_cache,
+            self.assemble_cols.as_ref(),
+        )
     }
 
     /// Begin a new partition, returning the PREVIOUS partition's static-only row

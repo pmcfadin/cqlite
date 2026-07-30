@@ -890,6 +890,10 @@ mod raw_type_value;
 mod raw_value;
 mod row_data;
 mod row_framing;
+// campsite split of `block_emit_windowed` (epic #1116): the streaming-scan
+// `SlidingPartitionPolicy`.
+mod timestamp_policy;
+use timestamp_policy::TimestampPolicy;
 mod udt;
 
 use partition_driver::{row_write_timestamp, MarkerOutcome, SlidingPartitionPolicy};
