@@ -69,6 +69,15 @@
 //!   forwarded as an INFORMATIVE terminal error naming the panic message rather
 //!   than a generic "the producer died". Before this, such a panic completed the
 //!   request SUCCESSFULLY with a silently truncated result set.
+//!
+//!   The two halves cover different builds ON PURPOSE, which is why both are
+//!   here: `catch_unwind` only fires under `panic = "unwind"` (dev/test, and the
+//!   `release-unwind` profile the bindings ship — `[profile.release]` is
+//!   `panic = "abort"`, where a panicking producer takes the process down instead,
+//!   loudly). The `Done` sentinel needs no unwinding at all: it makes "the walk
+//!   finished" an OBSERVED fact in every profile, so ANY way a producer can stop
+//!   without reporting — a future exit path that forgets its terminator included —
+//!   fails closed rather than being read as a complete scan.
 
 use std::ops::ControlFlow;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
