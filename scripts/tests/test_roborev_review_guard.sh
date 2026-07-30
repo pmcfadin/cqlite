@@ -1365,6 +1365,20 @@ assert_says 'case (x7) sha-assert refuses to certify' '^sha-assert: FAIL \(job r
 fi  # HAVE_PYTHON3
 
 if [ "$HAVE_PYTHON3" -eq 1 ]; then
+printf '== case (x9): a Summary word inside a finding body does not truncate the count ==\n'
+reset_stub
+# Observed on the live probe: the findings count read 3 where the review had 4, because
+# a finding's own prose contained "summary:" and closed the block early. The terminator
+# must be a LINE-INITIAL Summary label.
+work=$(make_fixture case_x9 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_VERDICT_FIELD=F
+STUB_REVIEW_RC=1
+STUB_VERDICT=$'## Review Findings\n\n- **Severity**: Medium\n- **Problem**: the code prints a summary: line that is not a heading\n\n- **Severity**: Low\n- **Problem**: second finding\n\n## Summary\n\nTwo findings.'
+run_wrapper "$work"
+STUB_REVIEW_RC=0
+assert_says 'case (x9) both findings are counted' '^findings: PRESENT \(2\)$'
+
 printf '== case (x8): show --json returns the REVIEW row; list --json must be used ==\n'
 reset_stub
 # MEASURED on the live probe: `roborev show <job> --json` returns the REVIEW row —

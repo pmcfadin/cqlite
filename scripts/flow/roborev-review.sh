@@ -800,12 +800,16 @@ fi
 FINDINGS_BLOCK_FILE="$LOG.findings"
 # The block runs from a Findings heading/label to the Summary heading/label — the
 # measured real shapes. Everything outside it (a quoted "[Low]" in prose, a severity
-# word inside a Problem sentence) is ignored.
+# word inside a Problem sentence) is ignored. The terminator must be a LINE-INITIAL
+# Summary label: matched mid-sentence it closed the block early when a finding's own
+# prose contained the word, under-counting the findings. (Under-counting is the
+# fail-closed direction for the tier-1 gate — fewer markers make a vacuity claim MORE
+# likely to fail — but the count is reported to a human, so it should be right.)
 { awk 'BEGIN { inblock = 0 }
        tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*(review[[:space:]]+)?findings?/ { inblock = 1; next }
        tolower($0) ~ /^[[:space:]]*findings?[[:space:]]*:/ { inblock = 1; next }
        tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*summary/ { inblock = 0 }
-       tolower($0) ~ /summary[[:space:]]*:/ { inblock = 0 }
+       tolower($0) ~ /^[[:space:]]*summary[[:space:]]*:/ { inblock = 0 }
        inblock { print }' "$LOG" 2>/dev/null || true; } >"$FINDINGS_BLOCK_FILE"
 block_marker_count=$({ grep -oiE '\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
 block_marker_count=${block_marker_count:-0}
