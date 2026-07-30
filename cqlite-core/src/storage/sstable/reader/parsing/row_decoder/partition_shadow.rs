@@ -263,9 +263,10 @@ impl PartitionShadow {
     /// PRESENCE fact `has_deleted_data_cell`; see [`Self::has_shadow_evidence`].
     ///
     /// This mirrors the multi-generation read path, whose merged-cell filter
-    /// (`generation_merge::ReadVisibility::filter_live`) already skipped
-    /// `Value::Tombstone` cells, and the collection path, which already skipped
-    /// tombstoned elements — so all three read paths now agree.
+    /// (`generation_merge::ReadShadow::filter_live`) skips `Value::Tombstone` cells
+    /// and reports their PRESENCE onward exactly as this path does, and the
+    /// collection path, which already skipped tombstoned elements — so all three
+    /// read paths agree.
     #[inline]
     pub(crate) fn cell_tombstone_dropped(user_facing: bool, is_cell_tombstone: bool) -> bool {
         user_facing && is_cell_tombstone
