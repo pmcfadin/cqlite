@@ -1365,7 +1365,7 @@ assert_says 'case (x7) sha-assert refuses to certify' '^sha-assert: FAIL \(job r
 fi  # HAVE_PYTHON3
 
 if [ "$HAVE_PYTHON3" -eq 1 ]; then
-printf '== case (x8): `show --json` returns the REVIEW row; `list --json` must be used ==\n'
+printf '== case (x8): show --json returns the REVIEW row; list --json must be used ==\n'
 reset_stub
 # MEASURED on the live probe: `roborev show <job> --json` returns the REVIEW row —
 # parseable, with id/agent/prompt but NO git_ref, status, verdict or token_usage. The
