@@ -133,7 +133,7 @@ mod tests {
 
     /// The verdict mapping itself: a clean join is `Ok`, a dead task is an `Err` that
     /// NAMES the truncation. The end-to-end pin over a real compressed fixture lives
-    /// in `scan_stream_windowed_forwarder_panic_tests.rs`; this is the decision guard,
+    /// in `scan_stream_forwarder_panic_tests.rs`; this is the decision guard,
     /// so the mapping cannot be inverted without a dataset-independent failure.
     #[tokio::test]
     async fn a_dead_forwarder_is_an_error_and_a_finished_one_is_not() {
@@ -159,3 +159,11 @@ mod tests {
         );
     }
 }
+
+// Issue #3124 site 4 END-TO-END pin over a REAL Cassandra 5.0 COMPRESSED fixture (the
+// forwarder exists only on the chunk-stitching branch, which no CQLite-written
+// SSTable takes): kill the forwarder mid-scan and assert the scan FAILS instead of
+// ending cleanly — after a control arm that pins the complete row count.
+#[cfg(test)]
+#[path = "scan_stream_forwarder_panic_tests.rs"]
+mod panic_tests;
