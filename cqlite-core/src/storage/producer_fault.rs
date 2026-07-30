@@ -97,6 +97,40 @@
 //! * `cqlite-flight` enables the feature from its `[dev-dependencies]` (the same
 //!   convention `arrow-shape-corpus` / `test-util` already use), so the shipped
 //!   Flight binary never links it.
+//!
+//! # One seam injects an `Err`, not a panic (issue #3154)
+//!
+//! [`arm_merge_construction_error`] (child module [`construction`]) makes
+//! `KWayMerger::new` REPORT a chosen error variant on the cross-generation merge
+//! path, which is what proves the narrowed fallback classification: an I/O or
+//! corruption failure must propagate, while a merger-ineligible unsupported-format
+//! failure must still degrade to the documented concat. See that module's doc.
+
+/// The `Err`-reporting construction seam (issue #3154), in a child module so this
+/// file stays under the ~800-line campsite target (epic #1116).
+///
+/// Gated to exactly where the seam it injures EXISTS —
+/// `generation_merge::stream_generations_for_read` is `write-support` AND
+/// `not(tombstones)` (a `tombstones` build routes `scan_stream` through the
+/// materializing `scan`, which has no `MergeStreamSetupError` at all) — for the same
+/// reason [`ScanTaskSite::CrossGenerationMerge`] is: a symbol that nothing in a
+/// configuration can ever reach would be a lie about that configuration's coverage,
+/// and `#[allow(dead_code)]` would hide it instead of stating it.
+#[cfg(all(
+    any(test, feature = "producer-fault-injection"),
+    feature = "write-support",
+    not(feature = "tombstones")
+))]
+mod construction;
+#[cfg(all(
+    any(test, feature = "producer-fault-injection"),
+    feature = "write-support",
+    not(feature = "tombstones")
+))]
+pub use construction::{
+    arm_merge_construction_error, ArmedMergeConstructionError, MergeConstructionFault,
+    INJECTED_CONSTRUCTION_MESSAGE,
+};
 
 /// Producer-fault state captured ONCE when a query row stream is opened, then
 /// owned by that stream's producer thread.
@@ -353,6 +387,39 @@ impl FaultScope {
     }
 }
 
+/// The `Err`-reporting construction seam's take side (issue #3154).
+///
+/// Gated to the one configuration whose call site exists — the cross-generation
+/// reconciling merge's construction window in
+/// `generation_merge::stream_generations_for_read` — so no build carries a method
+/// nothing can reach (see [`construction`]'s `mod` declaration above).
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+impl FaultScope {
+    /// The construction error a test armed for this scope, if any — i.e. the error
+    /// `KWayMerger::new` is made to report instead of building the merger.
+    ///
+    /// ALWAYS `None` in a production build, where [`Self::armed_construction_error`]
+    /// is a function that returns `None` without touching (or even compiling) any
+    /// registry.
+    #[inline]
+    pub(crate) fn injected_construction_error(&self) -> Option<crate::Error> {
+        self.armed_construction_error()
+    }
+
+    #[cfg(any(test, feature = "producer-fault-injection"))]
+    #[inline]
+    fn armed_construction_error(&self) -> Option<crate::Error> {
+        construction::take(&self.path.to_string_lossy())
+    }
+
+    /// Production build: nothing can be armed, so there is nothing to take.
+    #[cfg(not(any(test, feature = "producer-fault-injection")))]
+    #[inline]
+    fn armed_construction_error(&self) -> Option<crate::Error> {
+        None
+    }
+}
+
 /// The panic message both checkpoints raise. Exported so a test can (a) assert
 /// the forwarded error carries it and (b) suppress exactly this panic in its
 /// panic hook without silencing a real one.
@@ -411,7 +478,10 @@ mod armed {
     /// own registration.
     static NEXT_ARM_ID: AtomicU64 = AtomicU64::new(0);
 
-    fn next_id() -> u64 {
+    /// `pub(super)` so the sibling [`construction`](super::construction) registry
+    /// shares ONE id space with these three, rather than minting a second counter
+    /// whose ids could collide with theirs in a debugger or a log.
+    pub(super) fn next_id() -> u64 {
         NEXT_ARM_ID.fetch_add(1, Ordering::SeqCst)
     }
 
@@ -426,8 +496,10 @@ mod armed {
     /// order of magnitude.
     const MIN_SCOPE_LEN: usize = 8;
 
-    /// Fail LOUDLY on a scope that would match everything.
-    fn check_scope(scope: &str) {
+    /// Fail LOUDLY on a scope that would match everything. `pub(super)` so every
+    /// registry — including the sibling [`construction`](super::construction) one —
+    /// enforces the SAME minimum rather than re-deriving it.
+    pub(super) fn check_scope(scope: &str) {
         debug_assert!(
             scope.len() >= MIN_SCOPE_LEN,
             "producer-fault scope {scope:?} is shorter than {MIN_SCOPE_LEN} chars: a \

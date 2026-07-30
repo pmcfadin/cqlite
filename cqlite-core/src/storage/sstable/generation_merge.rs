@@ -627,7 +627,16 @@ pub(super) async fn stream_generations_for_read(
         fault_scope.checkpoint(crate::storage::producer_fault::ScanTaskSite::CrossGenerationMerge);
         // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
-        let mut merger = match KWayMerger::new(paths, &schema) {
+        // Issue #3154: a test may make construction REPORT a chosen error variant, so
+        // the narrowed fallback classification below can be proven per class (I/O vs
+        // corruption vs merger-ineligible). `None` — and `KWayMerger::new` called
+        // exactly as before — in every production build, where
+        // `injected_construction_error` returns `None` without touching a registry.
+        let constructed = match fault_scope.injected_construction_error() {
+            Some(injected) => Err(injected),
+            None => KWayMerger::new(paths, &schema),
+        };
+        let mut merger = match constructed {
             Ok(m) => {
                 // Signal readiness; if the caller already dropped, stop.
                 if ready_tx.send(Ok(())).is_err() {
@@ -636,7 +645,9 @@ pub(super) async fn stream_generations_for_read(
                 m
             }
             Err(e) => {
-                // Let the caller fall back to the lazy per-reader streaming merge.
+                // REPORT the failure verbatim; whether it earns the caller's fallback
+                // to the lazy per-reader concat is classified from its VARIANT at the
+                // receiving end (issue #3154), not decided here.
                 let _ = ready_tx.send(Err(e));
                 return;
             }
