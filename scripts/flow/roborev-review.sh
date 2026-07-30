@@ -159,20 +159,18 @@ ROBOREV_VACUITY_MIN_INPUT_TOKENS=25000
 # Advisory only (see above): reported next to the observed value, never a FAIL.
 ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS=200
 
-# prompt-content check: how many census paths to look for in the prompt actually
-# sent to the reviewer. All of them when the census is small; an evenly sampled
-# subset (still ALL of which must be present) when it is large, so the check stays
-# bounded on a 500-file diff.
-PROMPT_CONTENT_MAX_PATHS_CHECKED=40
+# (The former PROMPT_CONTENT_MAX_PATHS_CHECKED sampling cap is gone: every code path is
+# now checked against its exact `diff --git` header, cheap even for a 500-file diff, and
+# sampling was a hole — a partial prompt naming just the sampled files passed.)
 
 # The job record is written ASYNCHRONOUSLY: measured empty for git_ref/status/model/
-# token_usage the instant `--wait` returned, complete moments later. Poll this many
-# times at this interval before declaring the record DEGRADED. 15 x 1s is generous
-# against the observed sub-second lag while still bounded.
+# token_usage the instant `--wait` returned. MEASURED AGAIN in round 5: still
+# incomplete 15s after `--wait` returned on a 20-commit review, so the lag is NOT
+# sub-second. 45 x 1s is bounded and proportionate to a review that takes minutes.
 # Overridable ONLY as a timing knob (the hermetic self-test shortens it). Shortening
 # it can never weaken a check: fewer polls can only make the record MORE likely to be
 # reported DEGRADED, which is the fail-closed direction.
-JOB_RECORD_POLL_ATTEMPTS=${ROBOREV_JOB_RECORD_POLL_ATTEMPTS:-15}
+JOB_RECORD_POLL_ATTEMPTS=${ROBOREV_JOB_RECORD_POLL_ATTEMPTS:-45}
 JOB_RECORD_POLL_INTERVAL_SECS=${ROBOREV_JOB_RECORD_POLL_INTERVAL_SECS:-1}
 
 
@@ -636,8 +634,14 @@ if [ "$announce_ok" -eq 1 ]; then
     ?*)
       REVIEWED_SHA="$JOB_GIT_REF"
       if [ "$JOB_GIT_REF" = "$HEAD_SHA" ]; then
-        SHA_ASSERT="PASS"
-        DETAILS+=("NOTICE: sha-assert: the job record reports a SINGLE commit ('$JOB_GIT_REF'), not a range. It equals branch HEAD, but a single-commit review covers only that commit — prompt-content is what establishes the census was actually sent.")
+        # FAIL CLOSED on a single-commit record even when it equals HEAD (codex, round
+        # 5): a single-commit review covers ONE commit and prompt-content matches
+        # PATHS, so when several commits touch the SAME file a review of only the last
+        # one passes every path check while the earlier changes go unreviewed. The
+        # sanctioned invocation always records a range; a single sha means something
+        # else ran.
+        SHA_ASSERT="FAIL (single-commit record, not the census range)"
+        DETAILS+=("ERROR: sha-assert: the job record reports a SINGLE commit ('$JOB_GIT_REF'), not the census range. It equals branch HEAD, but a single-commit review covers only that commit: when several commits touch the same file, path-based checks cannot tell the difference and the earlier changes go unreviewed. The sanctioned invocation records a '<base>..<head>' range — something else produced this job.")
       else
         SHA_ASSERT="FAIL (reviewed-sha does not match head-sha)"
         DETAILS+=("ERROR: sha-assert: the job record's git_ref '$JOB_GIT_REF' does not equal branch HEAD '$HEAD_SHA' (job $JOB).")
@@ -675,11 +679,20 @@ fi
 
 # --- step 6a: review-completed — POSITIVE evidence that a review HAPPENED ------
 # The allow-list of terminal verdict markers. A review that finished emits either a
-# findings block (severity-tagged) or the clean shape ("no issues found" AND a
-# "Summary:" line). Anything else — a still-waiting job, a provider 400, a failed
+# findings block (a Findings heading / '**Severity**:' lines) or a Summary heading —
+# the shapes a real review actually emits. Anything else — a still-waiting job, a provider 400, a failed
 # job — matches NOTHING here and therefore cannot reach PASS. This is the inverse of
 # the old logic, which inferred success from the ABSENCE of a vacuous phrase.
-VERDICT_MARKER_RE='\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): |^[[:space:]]*findings?\b'
+# Built from the REAL transcript (MEASURED, issue #2964 round 5), not from guesses:
+#     ## Review Findings
+#     - **Severity**: Medium
+#     ## Summary
+# A finished review is identified by a Findings heading, a `**Severity**:` line, a
+# Summary heading/label, or the older bracket / `Medium:` shapes other agents emit.
+# Anything else — a still-waiting job, a provider 400, a failed job — matches none of
+# them. The previous list was INVENTED rather than measured and rejected a GENUINE
+# codex review: the false-FAIL direction that gets a guard bypassed.
+VERDICT_MARKER_RE='^[[:space:]]*#{1,4}[[:space:]]*(review[[:space:]]+)?findings?|\*\*severity\*\*[[:space:]]*:|^[[:space:]]*#{1,4}[[:space:]]*summary|(^|[^[:alnum:]])summary:|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): |^[[:space:]]*findings?[[:space:]:]'
 if [ ! -r "$LOG" ]; then
   REVIEW_COMPLETED="FAIL (transcript unreadable)"
   DETAILS+=("ERROR: review-completed: the transcript at $LOG is not readable, so there is no evidence a review happened. Failing closed.")
@@ -687,15 +700,13 @@ else
   verdict_marker=0
   if grep -qiE "$VERDICT_MARKER_RE" "$LOG"; then
     verdict_marker=1
-  elif grep -qi 'no issues found' "$LOG" && grep -qiE '(^|[^[:alnum:]])summary:' "$LOG"; then
-    verdict_marker=1
   fi
   if [ -n "$JOB_STATUS" ] && [ "$JOB_STATUS" != "done" ]; then
     REVIEW_COMPLETED="FAIL (job status '$JOB_STATUS' is not done)"
     DETAILS+=("ERROR: review-completed: the job record reports status '$JOB_STATUS', not 'done', so the review did NOT complete and nothing was certified. Failing closed — the absence of a vacuous phrase is never evidence that a review happened.")
   elif [ "$verdict_marker" -eq 0 ]; then
     REVIEW_COMPLETED="FAIL (no terminal verdict marker)"
-    DETAILS+=("ERROR: review-completed: the transcript carries NO terminal verdict marker — neither a severity-tagged findings block nor the clean 'no issues found' + 'Summary:' shape. A still-waiting job, a provider error (for example the #2433/#3037 model-mismatch 400) and a failed job all look like this, and none of them is a review. Failing closed. Transcript: $LOG")
+    DETAILS+=("ERROR: review-completed: the transcript carries NO terminal verdict marker — no Findings heading, no '**Severity**:' line and no Summary heading/label. A still-waiting job, a provider error (for example the #2433/#3037 model-mismatch 400) and a failed job all look like this, and none of them is a review. Failing closed. Transcript: $LOG")
   else
     REVIEW_COMPLETED="PASS"
     if [ -z "$JOB_STATUS" ]; then
@@ -723,25 +734,22 @@ else
   # files. That is also the empirical mechanism behind the "code-free diff silently
   # discarded" trigger: there is literally nothing left to review. Checking all 27
   # would false-FAIL every branch that touches documentation, which is most of them.
-  checked_paths=()
+  # EVERY code path is checked, and against its EXACT diff header rather than a bare
+  # substring (codex, round 5): sampling a subset let a partial prompt pass by naming
+  # the sampled files, and a substring match is satisfied by any incidental mention —
+  # including this wrapper quoting a path in a comment. A `diff --git a/P b/P` header is
+  # present if and only if the reviewer was sent that file's diff. Exact-header matching
+  # is cheap enough that the sampling cap is gone.
+  checked_paths=("${census_code_paths[@]}")
   census_total=${#census_code_paths[@]}
-  if [ "$census_total" -le "$PROMPT_CONTENT_MAX_PATHS_CHECKED" ]; then
-    checked_paths=("${census_code_paths[@]}")
-  else
-    sample_step=$(((census_total + PROMPT_CONTENT_MAX_PATHS_CHECKED - 1) / PROMPT_CONTENT_MAX_PATHS_CHECKED))
-    sample_index=0
-    while [ "$sample_index" -lt "$census_total" ]; do
-      checked_paths+=("${census_code_paths[$sample_index]}")
-      sample_index=$((sample_index + sample_step))
-    done
-  fi
   missing_paths=()
   for census_path in "${checked_paths[@]}"; do
-    grep -Fq -- "$census_path" "$PROMPT_FILE" || missing_paths+=("$census_path")
+    grep -Fq -- "diff --git a/$census_path b/$census_path" "$PROMPT_FILE" \
+      || missing_paths+=("$census_path")
   done
   if [ "${#missing_paths[@]}" -gt 0 ]; then
     PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"
-    DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} checked CODE census paths do NOT appear in the prompt actually sent to the reviewer, so the reviewer never received this diff. The census is authoritative ($CENSUS for ${BASE}...HEAD); a prompt that does not mention its files cannot have reviewed them. Missing (first 10):")
+    DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths have NO 'diff --git' header in the prompt actually sent to the reviewer, so the reviewer never received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a prompt that does not mention its files cannot have reviewed them. Missing (first 10):")
     printed=0
     for census_path in "${missing_paths[@]}"; do
       [ "$printed" -lt 10 ] || break
@@ -767,12 +775,16 @@ fi
 #      DOES carry severity markers is an INCONSISTENT state. It fails the run and, being
 #      neither PRESENT nor NONE, cannot exempt tier 1 either.
 FINDINGS_BLOCK_FILE="$LOG.findings"
+# The block runs from a Findings heading/label to the Summary heading/label — the
+# measured real shapes. Everything outside it (a quoted "[Low]" in prose, a severity
+# word inside a Problem sentence) is ignored.
 { awk 'BEGIN { inblock = 0 }
-       /^[[:space:]]*#*[[:space:]]*[Ff]indings?[[:space:]:]*$/ { inblock = 1; next }
-       /^[[:space:]]*#*[[:space:]]*[Ff]indings?:/ { inblock = 1; next }
-       /[Ss]ummary:/ { inblock = 0 }
+       tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*(review[[:space:]]+)?findings?/ { inblock = 1; next }
+       tolower($0) ~ /^[[:space:]]*findings?[[:space:]]*:/ { inblock = 1; next }
+       tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*summary/ { inblock = 0 }
+       tolower($0) ~ /summary[[:space:]]*:/ { inblock = 0 }
        inblock { print }' "$LOG" 2>/dev/null || true; } >"$FINDINGS_BLOCK_FILE"
-block_marker_count=$({ grep -oiE '\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
+block_marker_count=$({ grep -oiE '\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
 block_marker_count=${block_marker_count:-0}
 
 verdict_findings="unknown"

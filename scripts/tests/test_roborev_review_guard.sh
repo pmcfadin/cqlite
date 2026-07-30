@@ -61,6 +61,8 @@ trap 'rm -rf "$tmp"' EXIT
 #   STUB_REQUESTED_MODEL job requested_model field
 #   STUB_PROMPT          prompt text (plain, no quotes/backslashes)
 #   STUB_VERDICT_FIELD   the job record's structured `verdict` letter (P/F), '' to omit
+#   STUB_PAYLOAD_JOB     the id INSIDE the payload (differs from the announced job to
+#                        pin the narrowed ID-less fallback in roborev-job-facts.py)
 #   STUB_RECORD_BLANK_FOR the first N record reads return an empty record, so the
 #                        wrapper's bounded poll for the ASYNCHRONOUSLY written record
 #                        can be exercised (counter kept in $STUB_INVOKED.reads)
@@ -91,7 +93,7 @@ emit_job_object() {
     extra="$extra,\"verdict\":\"${STUB_VERDICT_FIELD}\""
   fi
   printf '{"id":%s,"git_ref":"%s","status":"%s","model":"%s","requested_model":"%s","prompt":"%s"%s}' \
-    "${STUB_JOB:-4600}" \
+    "${STUB_PAYLOAD_JOB:-${STUB_JOB:-4600}}" \
     "$git_ref" \
     "${STUB_STATUS:-done}" \
     "${STUB_MODEL:-gpt-5.6-sol}" \
@@ -395,6 +397,7 @@ export STUB_SHOW_JSON=object
 export STUB_HAS_TOKEN_DATA=''
 export STUB_VERDICT_FIELD=''
 export STUB_RECORD_BLANK_FOR=0
+export STUB_PAYLOAD_JOB=''
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
 
@@ -413,6 +416,7 @@ reset_stub() {
   STUB_HAS_TOKEN_DATA=''
   STUB_VERDICT_FIELD=''
   STUB_RECORD_BLANK_FOR=0
+  STUB_PAYLOAD_JOB=''
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -739,7 +743,7 @@ run_wrapper "$work"
 assert_verdict 'case (n)' FAIL 1
 assert_says 'case (n) prompt-content FAIL counts the absent paths' '^prompt-content: FAIL \(1/1 code census paths absent from the prompt\)$'
 assert_says 'case (n) names the missing path' '^  main\.rs$'
-assert_says 'case (n) says the reviewer never received the diff' 'the reviewer never received this diff'
+assert_says 'case (n) says the reviewer never received the diffs' 'the reviewer never received their diffs'
 assert_says 'case (n) every other check passed' '^vacuity-tier1: PASS$'
 assert_says 'case (n) review-completed still PASS' '^review-completed: PASS$'
 
@@ -1191,7 +1195,7 @@ run_wrapper "$work"
 assert_verdict 'case (x1)' FAIL 1
 assert_says 'case (x1) prompt-content names the uncovered code path' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
 assert_says 'case (x1) lists the missing file' '^  alpha\.rs$'
-assert_says 'case (x1) says the reviewer never received the diff' 'the reviewer never received this diff'
+assert_says 'case (x1) says the reviewer never received the diffs' 'the reviewer never received their diffs'
 assert_says 'case (x1) the range itself verified fine' '^sha-assert: PASS$'
 
 printf '== case (x3): a range anchored at the EMPTY TREE FAILs (two-positional form) ==\n'
@@ -1293,6 +1297,62 @@ run_wrapper "$work"
 assert_verdict 'case (z4)' FAIL 1
 assert_says 'case (z4) the exit-code contradiction is named' '^findings: INCONSISTENT \(exit 0, 1 findings marker\(s\)\)$'
 assert_says 'case (z4) it cannot exempt tier 1' 'cannot exempt the tier-1 vacuity check'
+fi  # HAVE_PYTHON3
+
+printf '== case (x4): a SINGLE-commit record FAILs even when it equals HEAD ==\n'
+reset_stub
+# codex, round 5: a single-commit review covers ONE commit while prompt-content matches
+# PATHS, so when several commits touch the same file a review of only the last one
+# passes every path check. The sanctioned form always records a range.
+work=$(make_fixture case_x4 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_GIT_REF=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (x4)' FAIL 1
+assert_says 'case (x4) the single-commit record is refused' '^sha-assert: FAIL \(single-commit record, not the census range\)$'
+assert_says 'case (x4) explains the same-file blind spot' 'when several commits touch the same file'
+
+printf '== case (x5): a MENTIONED path without a diff header does NOT count as covered ==\n'
+reset_stub
+# The substring form of this check was satisfied by any incidental mention — including
+# this wrapper quoting a path in a comment. Only a real `diff --git a/P b/P` header is
+# evidence the file's diff was sent.
+work=$(make_fixture case_x5 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_PROMPT='Review the branch. The wrapper mentions main.rs in prose but no diff is attached.'
+run_wrapper "$work"
+assert_verdict 'case (x5)' FAIL 1
+assert_says 'case (x5) a bare mention is not coverage' "^prompt-content: FAIL \(1/1 code census paths absent from the prompt\)\$"
+assert_says 'case (x5) the diff-header requirement is named' "have NO 'diff --git' header in the prompt"
+
+printf '== case (x6): the REAL codex review shape counts as a completed review ==\n'
+reset_stub
+# The previous allow-list was INVENTED and rejected a genuine codex review (measured on
+# the live probe): "## Review Findings" / "- **Severity**: Medium" / "## Summary".
+work=$(make_fixture case_x6 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_VERDICT_FIELD=F
+STUB_REVIEW_RC=1
+STUB_VERDICT=$'## Review Findings\n\n- **Severity**: Medium\n- **Location**: `scripts/flow/roborev-review.sh`\n- **Problem**: something\n- **Fix**: something else\n\n## Summary\n\nOne finding.'
+run_wrapper "$work"
+STUB_REVIEW_RC=0
+assert_says 'case (x6) the real shape is a completed review' '^review-completed: PASS$'
+assert_says 'case (x6) the **Severity** line is counted as a finding' '^findings: PRESENT \(1\)$'
+assert_says 'case (x6) it is reported as FINDINGS, not a malfunction' '^roborev-exit: FINDINGS \(exit 1\)$'
+
+if [ "$HAVE_PYTHON3" -eq 1 ]; then
+printf '== case (x7): a LIST payload whose job id differs is NOT used as a fallback ==\n'
+reset_stub
+# codex, round 5: the ID-less fallback used to return the first nested object carrying
+# git_ref, so a PREVIOUS review of the same range could falsely certify the new job.
+work=$(make_fixture case_x7 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_PAYLOAD_JOB=999
+STUB_SHOW_JSON=none
+run_wrapper "$work"
+assert_verdict 'case (x7)' FAIL 1
+assert_says 'case (x7) the mismatched record was refused' '^job-record: DEGRADED'
+assert_says 'case (x7) sha-assert refuses to certify' '^sha-assert: FAIL \(job record unavailable — reviewed range unverifiable\)$'
 fi  # HAVE_PYTHON3
 
 printf '== case (w): a MISSING oracles file FAILs closed, never silently no-ops ==\n'

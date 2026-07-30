@@ -81,10 +81,15 @@ def find_job(data, want):
         for key in ("id", "job_id", "job"):
             if key in obj and str(obj[key]) == want:
                 return obj
-    # A `show --json` payload may be the single job with no id echoed back.
-    for obj in objects(data):
-        if "git_ref" in obj or any(key in obj for key in TOKEN_CONTAINER_KEYS):
-            return obj
+    # A `show --json` payload may be the single job with no id echoed back. Accept that
+    # ONLY when the payload IS one top-level object (codex, issue #2964 round 5): for a
+    # list or a nested collection the first object carrying git_ref/token data can be an
+    # UNRELATED or EARLIER job, and a previous review of the same range would then
+    # falsely certify the job we just enqueued.
+    if isinstance(data, dict) and (
+        "git_ref" in data or any(key in data for key in TOKEN_CONTAINER_KEYS)
+    ):
+        return data
     return None
 
 
