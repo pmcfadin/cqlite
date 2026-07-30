@@ -54,6 +54,7 @@ trap 'rm -rf "$tmp"' EXIT
 #   STUB_MODEL           job model field
 #   STUB_REQUESTED_MODEL job requested_model field
 #   STUB_PROMPT          prompt text (plain, no quotes/backslashes)
+#   STUB_HAS_TOKEN_DATA  emit a has_token_data field with this value (true/false)
 #   STUB_SHOW_JSON       `none` => `show --json` returns null, forcing the
 #                        `list --json` fallback path
 #   STUB_INVOKED         file the stub appends its argv to (empty => never run)
@@ -67,18 +68,23 @@ cmd="${1:-}"
 shift || true
 
 emit_job_object() {
-  local usage=""
+  local usage="" extra=""
+  if [ -n "${STUB_HAS_TOKEN_DATA:-}" ]; then
+    extra=",\"has_token_data\":${STUB_HAS_TOKEN_DATA}"
+  fi
   if [ "${STUB_TOKEN_USAGE:-NONE}" != "NONE" ]; then
     usage=",\"token_usage\":\"${STUB_TOKEN_USAGE}\""
   fi
+  local git_ref="${STUB_GIT_REF:-${STUB_ANNOUNCE_SHA:-}}"
+  if [ "${STUB_GIT_REF:-}" = none ]; then git_ref=""; fi
   printf '{"id":%s,"git_ref":"%s","status":"%s","model":"%s","requested_model":"%s","prompt":"%s"%s}' \
     "${STUB_JOB:-4600}" \
-    "${STUB_GIT_REF:-${STUB_ANNOUNCE_SHA:-}}" \
+    "$git_ref" \
     "${STUB_STATUS:-done}" \
     "${STUB_MODEL:-gpt-5.6-sol}" \
     "${STUB_REQUESTED_MODEL:-gpt-5.6-sol}" \
     "${STUB_PROMPT:-}" \
-    "$usage"
+    "$usage$extra"
 }
 
 case "$cmd" in
@@ -126,7 +132,10 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   pushed          wide refspec, feature pushed (mirror ref present -> fast path)
 #   unpushed        wide refspec, feature never pushed
 #   empty           wide refspec, feature == main, pushed
-#   docs-only       wide refspec, markdown-only change, pushed
+#   docs-only       wide refspec, markdown-only change, pushed (code-free census)
+#   mixed           one markdown + one .rs file (NOT code-free)
+#   workflow-yaml   only .github/workflows/ci.yml (a .yml extension is CODE, so this
+#                   must NOT be classified code-free)
 #   narrow          NARROW refspec (+refs/heads/main:refs/remotes/origin/main) —
 #                   feature IS pushed but no refs/remotes/origin/feature ever
 #                   exists. This is THE fleet's real configuration, under which a
@@ -179,6 +188,18 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add README.md NOTES.md
       git_q "$work" commit -q -m 'docs only'
       ;;
+    mixed)
+      printf 'doc line\n' >>"$work/README.md"
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add README.md main.rs
+      git_q "$work" commit -q -m 'docs plus code'
+      ;;
+    workflow-yaml)
+      mkdir -p "$work/.github/workflows"
+      printf 'name: ci\non: push\n' >"$work/.github/workflows/ci.yml"
+      git_q "$work" add .github/workflows/ci.yml
+      git_q "$work" commit -q -m 'workflow only'
+      ;;
     *)
       printf 'fn helper() {}\n' >>"$work/main.rs"
       git_q "$work" add main.rs
@@ -204,6 +225,19 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       ;;
     no-base)
       git_q "$work" update-ref -d refs/remotes/origin/main
+      ;;
+    detached)
+      git_q "$work" checkout -q --detach HEAD
+      ;;
+    orphan-base)
+      # An unrelated root commit: `git diff <orphan>...HEAD` has NO merge base and
+      # therefore FAILS, which must never render as "census: 0 files".
+      git_q "$work" checkout -q --orphan unrelated
+      git_q "$work" rm -q -rf . >/dev/null 2>&1 || true
+      printf 'unrelated\n' >"$work/UNRELATED.txt"
+      git_q "$work" add UNRELATED.txt
+      git_q "$work" commit -q -m 'unrelated root'
+      git_q "$work" checkout -q feature
       ;;
     deleted-remote)
       # The mirror ref stays, EQUAL to HEAD, while the branch is deleted from the
@@ -260,7 +294,7 @@ assert_verdict() { # assert_verdict <label> <expected RESULT> <expected rc>
 }
 
 assert_says() { # assert_says <label> <extended-regex>
-  if grep -qE "$2" "$OUT"; then
+  if grep -qE -- "$2" "$OUT"; then
     ok "$1"
   else
     bad "$1: pattern '$2' not found in output"
@@ -269,7 +303,7 @@ assert_says() { # assert_says <label> <extended-regex>
 }
 
 assert_lacks() { # assert_lacks <label> <extended-regex>
-  if grep -qE "$2" "$OUT"; then
+  if grep -qE -- "$2" "$OUT"; then
     bad "$1: output unexpectedly matched '$2'"
   else
     ok "$1"
@@ -306,7 +340,7 @@ PROMPT_WITH_PATHS='Review the following change. diff --git a/main.rs b/main.rs @
 PROMPT_WITHOUT_PATHS='Please review the change on this branch. (no diff was attached to this prompt)'
 
 export STUB_JOB=4656
-export STUB_VERDICT='No issues found'
+export STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 export STUB_TOKEN_USAGE="$TOKENS_GENUINE_LARGE"
 export STUB_PROMPT="$PROMPT_WITH_PATHS"
 export STUB_STATUS=done
@@ -314,12 +348,13 @@ export STUB_GIT_REF=''
 export STUB_MODEL=gpt-5.6-sol
 export STUB_REQUESTED_MODEL=gpt-5.6-sol
 export STUB_SHOW_JSON=object
+export STUB_HAS_TOKEN_DATA=''
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
 
 reset_stub() {
   STUB_JOB=4656
-  STUB_VERDICT='No issues found'
+  STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
   STUB_TOKEN_USAGE="$TOKENS_GENUINE_LARGE"
   STUB_PROMPT="$PROMPT_WITH_PATHS"
   STUB_REVIEW_RC=0
@@ -329,6 +364,7 @@ reset_stub() {
   STUB_MODEL=gpt-5.6-sol
   STUB_REQUESTED_MODEL=gpt-5.6-sol
   STUB_SHOW_JSON=object
+  STUB_HAS_TOKEN_DATA=''
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -350,38 +386,95 @@ assert_verdict 'case (b)' FAIL 1
 assert_says 'case (b) names neither-endpoint' 'matches NEITHER endpoint'
 assert_says 'case (b) prints the reviewed sha beside expected head' "git_ref '0000000000000000000000000000000000000abc' does not equal branch HEAD"
 
-printf '== case (c): vacuous verdict vs non-empty census ==\n'
+printf '== case (c): a vacuous verdict on a CODE census raises an ADVISORY notice ==\n'
 reset_stub
+# Tier 1 is DEMOTED to advisory (round 3): it matched anywhere in the transcript, so
+# a review that merely QUOTED the phrase — as any review of THIS wrapper would — was
+# failed as vacuous, and agents learning to waive tier-1 FAILs would restore the very
+# defect the guard exists to stop. The docs-only trigger it used to be primary for is
+# now caught deterministically by `code-free:` (case (c2)). See the return packet: the
+# residual gap (reviewer HAD the diff yet concludes "no code changes" on a code
+# census) is now a NOTICE, which the spec's tier-1 requirement calls a hard failure.
 work=$(make_fixture case_c pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_VERDICT='No issues found. Summary: the diff contains no code changes to review.'
+STUB_VERDICT=$'No issues found.\nSummary: the diff contains no code changes to review.'
 run_wrapper "$work"
-assert_verdict 'case (c)' FAIL 1
-assert_says 'case (c) tier1 FAIL' '^vacuity-tier1: FAIL'
-assert_says 'case (c) names the contradiction' 'NO CODE CHANGES to review, but the locally computed census is NON-EMPTY'
-assert_says 'case (c) prints the census' '^census: [0-9]+ files, \+[0-9]+/-[0-9]+$'
+assert_verdict 'case (c)' PASS 0
+assert_says 'case (c) tier1 raises a NOTICE' '^vacuity-tier1: NOTICE \(vacuous verdict vs non-empty census\)$'
+assert_says 'case (c) the notice says it is advisory' 'ADVISORY, does not fail the run'
+assert_says 'case (c) prints the census' '^census: [0-9]+ files?, \+[0-9]+/-[0-9]+$'
 assert_says 'case (c) sha-assert still PASS' '^sha-assert: PASS$'
 
-printf '== case (c2): a code-free (docs-only) census is attributed to the code-free condition ==\n'
+printf '== case (c1b): the tier-1 match is anchored to the verdict/summary region ==\n'
 reset_stub
+# A genuine findings-bearing review that QUOTES the phrase in a finding body must not
+# be flagged: the match only looks at the Summary line.
+work=$(make_fixture case_c1b pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_VERDICT=$'Findings:\n[Medium] the tier-1 regex matches the literal phrase no code changes anywhere in the transcript\n[Low] naming nit\nSummary: 2 findings.'
+STUB_REVIEW_RC=1
+run_wrapper "$work"
+STUB_REVIEW_RC=0
+assert_says 'case (c1b) tier1 is NOT tripped by a quote in a finding body' '^vacuity-tier1: PASS$'
+assert_says 'case (c1b) the run fails only for the findings' '^roborev-exit: FINDINGS \(exit 1\)$'
+assert_lacks 'case (c1b) no vacuity notice' 'vacuity-tier1: NOTICE'
+
+printf '== case (c2): a code-free (docs-only) census FAILs deterministically ==\n'
+reset_stub
+# roborev structurally DISCARDS a code-free diff, so such a diff cannot be certified
+# at all. That is a property of OUR census, so it must not depend on the reviewer
+# admitting it: the previous revision computed the classification and used it only for
+# wording, and a docs-only census reached RESULT: PASS.
 work=$(make_fixture case_c2 docs-only)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_VERDICT='No issues found. Summary: the diff contains no code changes to review.'
 run_wrapper "$work"
 assert_verdict 'case (c2)' FAIL 1
-assert_says 'case (c2) names the code-free condition' 'CODE-FREE-DIFF condition'
+assert_says 'case (c2) code-free is its own FAIL key' '^code-free: FAIL \(code-free census: 2/2 files are documentation/specification text\)$'
+assert_says 'case (c2) names the structural discard' 'roborev STRUCTURALLY DISCARDS a code-free diff'
 assert_says 'case (c2) points at primary-source verification' 'primary-source verification recorded in the PR'
+assert_never_enqueued 'case (c2)'
+assert_says 'case (c2) later checks are SKIPped, not passed' '^review-completed: SKIP$'
+
+printf '== case (c2b): a code-free census FAILs even with a clean verdict and healthy tokens ==\n'
+reset_stub
+work=$(make_fixture case_c2b docs-only)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_GENUINE_LARGE"
+run_wrapper "$work"
+assert_verdict 'case (c2b)' FAIL 1
+assert_lacks 'case (c2b) never reports a pass' '^RESULT: PASS$'
+
+printf '== case (c2c): a mixed census is NOT code-free ==\n'
+reset_stub
+work=$(make_fixture case_c2c mixed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (c2c)' PASS 0
+assert_says 'case (c2c) code-free PASSes when any file is code' '^code-free: PASS$'
+
+printf '== case (c2d): a workflow .yml census is CODE, not documentation ==\n'
+reset_stub
+# The classification is EXTENSION-based: an earlier revision treated everything under
+# .github/ (and docs/) as non-code, which would make this a FALSE code-free FAIL now
+# that code-free fails the run.
+work=$(make_fixture case_c2d workflow-yaml)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_PROMPT='Review this diff: diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml'
+run_wrapper "$work"
+assert_verdict 'case (c2d)' PASS 0
+assert_says 'case (c2d) a .yml file is not classified documentation' '^code-free: PASS$'
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
 reset_stub
 work=$(make_fixture case_d pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_VERDICT='No issues found'
+STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
 run_wrapper "$work"
 assert_verdict 'case (d)' FAIL 1
 assert_says 'case (d) tier2 FAIL' '^vacuity-tier2: FAIL'
 assert_says 'case (d) tier1 unaffected' '^vacuity-tier1: PASS$'
+assert_says 'case (d) code-free PASSes on a code census' '^code-free: PASS$'
 assert_says 'case (d) prints observed input vs named constant' 'observed input=18700 < ROBOREV_VACUITY_MIN_INPUT_TOKENS=25000'
 assert_says 'case (d) prints observed cached vs the zero clause' 'observed cached=0 == 0'
 assert_says 'case (d) output floor is ADVISORY, not a failure condition' 'advisory \(NOT a failure condition\): observed output=53'
@@ -421,7 +514,7 @@ reset_stub
 work=$(make_fixture case_k narrow)
 assert_no_mirror_ref 'case (k)' "$work" origin
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_VERDICT='No issues found'
+STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 STUB_TOKEN_USAGE="$TOKENS_GENUINE_LARGE"
 run_wrapper "$work"
 assert_verdict 'case (k)' PASS 0
@@ -566,6 +659,7 @@ assert_says 'case (n) prompt-content FAIL counts the absent paths' '^prompt-cont
 assert_says 'case (n) names the missing path' '^  main\.rs$'
 assert_says 'case (n) says the reviewer never received the diff' 'the reviewer never received this diff'
 assert_says 'case (n) every other check passed' '^vacuity-tier1: PASS$'
+assert_says 'case (n) review-completed still PASS' '^review-completed: PASS$'
 
 printf '== case (n2): an unretrievable prompt degrades visibly, never a silent skip ==\n'
 reset_stub
@@ -579,7 +673,7 @@ assert_says 'case (n2) degraded-signal wording' 'DEGRADED SIGNAL, never a silent
 
 printf '== case (n3): prompt-content PASS reports the coverage it checked ==\n'
 reset_stub
-work=$(make_fixture case_n3 docs-only)
+work=$(make_fixture case_n3 mixed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
 assert_says 'case (n3) prompt-content PASS names the counts' '^prompt-content: PASS \(2/2 census paths present\)$'
@@ -624,7 +718,7 @@ reset_stub
 work=$(make_fixture case_f pushed)
 head_sha=$(git -C "$work" rev-parse HEAD)
 STUB_ANNOUNCE_SHA="$head_sha"
-STUB_VERDICT='No issues found'
+STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 STUB_TOKEN_USAGE="$TOKENS_GENUINE_LARGE"
 run_wrapper "$work"
 assert_verdict 'case (f)' PASS 0
@@ -669,25 +763,24 @@ assert_verdict 'case (h)' FAIL 1
 assert_says 'case (h) sha-assert FAIL (unverifiable)' '^sha-assert: FAIL \(no parseable enqueue announcement\)$'
 assert_says 'case (h) reviewed-sha unknown' '^reviewed-sha: -$'
 
-printf '== case (i): unavailable token accounting degrades visibly, tier 1 still governs ==\n'
+printf '== case (i): unavailable token accounting degrades visibly ==\n'
 reset_stub
 work=$(make_fixture case_i pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_VERDICT='No issues found. Summary: the diff contains no code changes to review.'
 STUB_TOKEN_USAGE=NONE
 run_wrapper "$work"
-assert_verdict 'case (i)' FAIL 1
+assert_verdict 'case (i)' PASS 0
 assert_says 'case (i) tokens UNAVAILABLE' '^tokens: UNAVAILABLE$'
 assert_says 'case (i) tier2 UNAVAILABLE' '^vacuity-tier2: UNAVAILABLE$'
-assert_says 'case (i) degraded-signal notice, not a skip' 'DEGRADED SIGNAL, never a silent skip'
-assert_says 'case (i) tier1 still FAILs' '^vacuity-tier1: FAIL'
-assert_lacks 'case (i) UNAVAILABLE never upgrades to PASS' '^RESULT: PASS$'
+assert_says 'case (i) degraded notice, not a skip' 'never a silent skip'
+assert_says 'case (i) tier1 records its advisory notice' '^vacuity-tier1: NOTICE'
 
 printf '== case (i2): unavailable accounting alone does not fail an otherwise clean review ==\n'
 reset_stub
 work=$(make_fixture case_i2 pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_VERDICT='No issues found'
+STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 STUB_TOKEN_USAGE=NONE
 run_wrapper "$work"
 assert_verdict 'case (i2)' PASS 0
@@ -700,12 +793,12 @@ reset_stub
 # told the reviewer broke retries or bypasses instead of FIXING THE FINDINGS.
 work=$(make_fixture case_j pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_VERDICT='Review complete. Findings: 1. [Medium] scripts/flow/roborev-review.sh:350 the fast path bypasses the authoritative remote check'
+STUB_VERDICT=$'Review complete.\nFindings:\n[Medium] scripts/flow/roborev-review.sh:350 the fast path bypasses the authoritative remote check\nSummary: 1 finding.'
 STUB_STATUS=done
 STUB_REVIEW_RC=1
 run_wrapper "$work"
 STUB_REVIEW_RC=0
-STUB_VERDICT='No issues found'
+STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 assert_verdict 'case (j)' FAIL 1
 assert_says 'case (j) roborev-exit is FINDINGS with the observed code' '^roborev-exit: FINDINGS \(exit 1\)$'
 assert_says 'case (j) findings are PRESENT and counted' '^findings: PRESENT \(1\)$'
@@ -730,7 +823,7 @@ STUB_REVIEW_RC=2
 run_wrapper "$work"
 STUB_REVIEW_RC=0
 STUB_STATUS=done
-STUB_VERDICT='No issues found'
+STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 assert_verdict 'case (j1b)' FAIL 1
 assert_says 'case (j1b) roborev-exit is ERROR with the observed code' '^roborev-exit: ERROR \(exit 2\)$'
 assert_says 'case (j1b) findings are UNKNOWN' '^findings: UNKNOWN$'
@@ -762,6 +855,238 @@ assert_verdict 'case (j3)' FAIL 1
 assert_says 'case (j3) roborev-exit SKIP (the process never ran)' '^roborev-exit: SKIP$'
 assert_never_enqueued 'case (j3)'
 
+printf '== case (s1): a job that never finished must NOT reach PASS ==\n'
+reset_stub
+# B1, the worst defect: there was no POSITIVE "a review happened" assert. Absence of
+# a vacuous phrase was treated as proof one occurred, so a still-waiting job passed.
+work=$(make_fixture case_s1 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_VERDICT='Waiting for job 4656 to complete...'
+run_wrapper "$work"
+assert_verdict 'case (s1)' FAIL 1
+assert_says 'case (s1) review-completed FAILs on the missing verdict marker' '^review-completed: FAIL \(no terminal verdict marker\)$'
+assert_says 'case (s1) roborev-exit is still PASS (exit 0)' '^roborev-exit: PASS$'
+assert_says 'case (s1) explains that absence is not evidence' 'none of them is a review'
+assert_lacks 'case (s1) never reports a pass' '^RESULT: PASS$'
+
+printf '== case (s2): the #2433/#3037 model-mismatch 400 must NOT reach PASS ==\n'
+reset_stub
+work=$(make_fixture case_s2 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_VERDICT='Error: 400 the requested model is not supported for this account. Review aborted.'
+run_wrapper "$work"
+assert_verdict 'case (s2)' FAIL 1
+assert_says 'case (s2) review-completed FAILs' '^review-completed: FAIL \(no terminal verdict marker\)$'
+assert_says 'case (s2) names the silent-outage class' '#2433/#3037 model-mismatch 400'
+
+printf '== case (s3): a failed job status must NOT reach PASS ==\n'
+reset_stub
+work=$(make_fixture case_s3 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_VERDICT='Job 4656 status: failed (provider timeout). No review was produced.'
+STUB_STATUS=failed
+run_wrapper "$work"
+assert_verdict 'case (s3)' FAIL 1
+assert_says 'case (s3) review-completed FAILs on the job status' "^review-completed: FAIL \(job status 'failed' is not done\)\$"
+assert_says 'case (s3) says nothing was certified' 'nothing was certified'
+
+printf '== case (t1): a 9-char SHORT sha announcement (the real shape) still verifies ==\n'
+reset_stub
+# The recorded real announcement carries an ABBREVIATED sha, so the fallback compare
+# must be a prefix match; strict equality would reject every real announcement.
+work=$(make_fixture case_t1 pushed)
+head_sha=$(git -C "$work" rev-parse HEAD)
+STUB_ANNOUNCE_SHA="${head_sha:0:9}"
+STUB_GIT_REF=none
+run_wrapper "$work"
+assert_verdict 'case (t1)' PASS 0
+assert_says 'case (t1) the abbreviated sha satisfied the assert' '^sha-assert: PASS$'
+assert_says 'case (t1) the weaker source is named' 'abbreviated-sha prefix parse'
+
+printf '== case (t2): an UPPERCASE announcement is normalised, not fed on as garbage ==\n'
+reset_stub
+work=$(make_fixture case_t2 pushed)
+head_sha=$(git -C "$work" rev-parse HEAD)
+STUB_ANNOUNCE_SHA=$(printf '%s' "${head_sha:0:9}" | tr 'a-f' 'A-F')
+STUB_GIT_REF=none
+run_wrapper "$work"
+assert_verdict 'case (t2)' PASS 0
+assert_says 'case (t2) reviewed-sha is lower-cased' "^reviewed-sha: ${head_sha:0:9}\$"
+
+printf '== case (t3): a 4-hex-char announcement is too short to verify ==\n'
+reset_stub
+work=$(make_fixture case_t3 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD | cut -c1-4)
+# git_ref absent on purpose: the ANNOUNCEMENT must be the load-bearing signal here,
+# or the structured oracle rejects the short sha for an unrelated reason and the
+# regex floor goes untested.
+STUB_GIT_REF=none
+run_wrapper "$work"
+assert_verdict 'case (t3)' FAIL 1
+assert_says 'case (t3) the 7-char floor rejects it' '^sha-assert: FAIL \(no parseable enqueue announcement\)$'
+assert_says 'case (t3) mentions the 7-hex-char floor' 'at least 7 hex chars'
+
+printf '== case (t4): with two announcements the LAST one is the effective enqueue ==\n'
+reset_stub
+work=$(make_fixture case_t4 pushed)
+head_sha=$(git -C "$work" rev-parse HEAD)
+base_sha=$(git -C "$work" rev-parse origin/main)
+STUB_ANNOUNCE_SHA="$base_sha"
+STUB_GIT_REF=none
+STUB_VERDICT=$'superseded; retrying\nEnqueued job 4656 for '"$head_sha"$'\nNo issues found.\nSummary: reviewed the diff; no issues found.'
+run_wrapper "$work"
+assert_verdict 'case (t4)' PASS 0
+assert_says 'case (t4) the multiplicity is recorded' 'the transcript carries 2 enqueue announcements'
+assert_says 'case (t4) the LAST announcement was asserted' "^reviewed-sha: $head_sha\$"
+
+printf '== case (t5): a detached HEAD FAILs before anything is enqueued ==\n'
+reset_stub
+work=$(make_fixture case_t5 detached)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (t5)' FAIL 1
+assert_says 'case (t5) push-assert names the detached HEAD' '^push-assert: FAIL \(detached HEAD\)$'
+assert_never_enqueued 'case (t5)'
+
+printf '== case (t6): a census whose git diff FAILS is not "genuinely empty" ==\n'
+reset_stub
+work=$(make_fixture case_t6 orphan-base)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work" --base unrelated
+assert_verdict 'case (t6)' FAIL 1
+assert_says 'case (t6) the diff failure is named' '^census-check: FAIL \(git diff failed\)$'
+assert_says 'case (t6) it is explicitly not NOTHING-TO-REVIEW' 'explicitly NOT a NOTHING-TO-REVIEW'
+assert_lacks 'case (t6) never reports NOTHING-TO-REVIEW' '^RESULT: NOTHING-TO-REVIEW$'
+assert_never_enqueued 'case (t6)'
+
+printf '== case (t7): a repository with no commits FAILs closed ==\n'
+reset_stub
+mkdir -p "$tmp/case_t7"
+git init -q -b main "$tmp/case_t7/work"
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+INVOKED="$tmp/invoked-$CASE_N.txt"
+: >"$INVOKED"
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --repo "$tmp/case_t7/work" \
+  --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
+RC=$?
+assert_verdict 'case (t7)' FAIL 1
+assert_says 'case (t7) names the missing commit' 'there is no commit to review'
+assert_never_enqueued 'case (t7)'
+
+printf '== case (t8): roborev absent from PATH FAILs closed ==\n'
+reset_stub
+work=$(make_fixture case_t8 pushed)
+nobin="$tmp/nobin"
+mkdir -p "$nobin"
+missing_tool=0
+for tool in git sed grep awk tr wc head tail cut mkdir dirname basename python3 cat bash; do
+  tool_path=$(command -v "$tool" 2>/dev/null || printf '')
+  if [ -n "$tool_path" ]; then ln -sf "$tool_path" "$nobin/$tool"; else missing_tool=1; fi
+done
+if [ "$missing_tool" -eq 1 ]; then
+  printf 'SKIP - case (t8): could not assemble a roborev-free PATH (a base tool is missing)\n'
+else
+  CASE_N=$((CASE_N + 1))
+  OUT="$tmp/out-$CASE_N.txt"
+  INVOKED="$tmp/invoked-$CASE_N.txt"
+  : >"$INVOKED"
+  STUB_INVOKED="$INVOKED" PATH="$nobin" "$nobin/bash" "$WRAPPER" --repo "$work" \
+    --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
+  RC=$?
+  assert_verdict 'case (t8)' FAIL 1
+  assert_says 'case (t8) names the absent binary' "'roborev' is not on PATH"
+  assert_never_enqueued 'case (t8)'
+fi
+
+printf '== case (t9): an abort BEFORE a verdict still emits a block (the EXIT trap) ==\n'
+reset_stub
+# Nothing exercised the on_exit trap. Pre-creating <log>.facts as a DIRECTORY makes
+# the facts-file truncation fail under `set -e` after the review is enqueued.
+work=$(make_fixture case_t9 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+mkdir -p "$tmp/trapcase.log.facts"
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+INVOKED="$tmp/invoked-$CASE_N.txt"
+: >"$INVOKED"
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --repo "$work" \
+  --agent codex --model gpt-5.6-sol --log "$tmp/trapcase.log" >"$OUT" 2>&1
+RC=$?
+assert_verdict 'case (t9)' FAIL 1
+assert_says 'case (t9) the abort is reported, not silent' 'terminated unexpectedly'
+assert_one_block 'case (t9)'
+
+printf '== case (u1): token accounting present but UNPARSEABLE is drift, and FAILs ==\n'
+if [ "$HAVE_PYTHON3" -eq 1 ]; then
+reset_stub
+# B3: any JSON shape change used to degrade the tier to a NON-FAILING UNAVAILABLE
+# while the real counts were the vacuous baseline, and the run PASSED.
+work=$(make_fixture case_u1 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE='{\"input_tokens\":null,\"cached_input_tokens\":\"n/a\",\"total_output_tokens\":53}'
+run_wrapper "$work"
+assert_verdict 'case (u1)' FAIL 1
+assert_says 'case (u1) drift is named under the tier-2 key' '^vacuity-tier2: FAIL \(token accounting present but unparseable — drift\)$'
+assert_says 'case (u1) points at the alias lists' 'INPUT/CACHED/OUTPUT_TOKEN_KEYS'
+assert_says 'case (u1) refuses a waiver' 'do not waive it'
+
+printf '== case (u2): RENAMED token fields resolve via the alias sets ==\n'
+reset_stub
+# The vacuous baseline hiding behind renamed fields: aliases must resolve it so the
+# vacuity check still fires instead of degrading to UNAVAILABLE + PASS.
+work=$(make_fixture case_u2 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE='{\"prompt_tokens\":18700,\"cache_read_tokens\":0,\"completion_tokens\":53}'
+run_wrapper "$work"
+assert_verdict 'case (u2)' FAIL 1
+assert_says 'case (u2) the renamed counts were read' '^tokens: input=18700 cached=0 output=53$'
+assert_says 'case (u2) the vacuous signature fires' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+
+printf '== case (u3): has_token_data=false beside real counts is a drift NOTICE, not a bypass ==\n'
+reset_stub
+work=$(make_fixture case_u3 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_TOKEN_USAGE="$TOKENS_VACUOUS"
+STUB_HAS_TOKEN_DATA=false
+run_wrapper "$work"
+STUB_HAS_TOKEN_DATA=''
+assert_verdict 'case (u3)' FAIL 1
+assert_says 'case (u3) the counts were still used' '^tokens: input=18700 cached=0 output=53$'
+assert_says 'case (u3) the inconsistency is recorded' 'has_token_data=false yet readable counts are present'
+assert_says 'case (u3) the vacuous signature still fires' '^vacuity-tier2: FAIL \(vacuous token signature\)$'
+fi  # HAVE_PYTHON3
+
+printf '== case (v): option-value and option-name validation ==\n'
+reset_stub
+work=$(make_fixture case_v pushed)
+for bad in "--repo" "--base" "--log"; do
+  CASE_N=$((CASE_N + 1))
+  OUT="$tmp/out-$CASE_N.txt"
+  INVOKED="$tmp/invoked-$CASE_N.txt"
+  : >"$INVOKED"
+  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" \
+    --agent codex --model gpt-5.6-sol "$bad" '' >"$OUT" 2>&1
+  RC=$?
+  if [ "$RC" -eq 2 ]; then ok "usage: an empty '$bad' value exits 2"; else bad "usage: an empty '$bad' value exited $RC (want 2)"; fi
+  assert_says "usage: an empty '$bad' value is named" "$bad was given an empty value"
+done
+for bad_invocation in "--nonsense" "--repo:$tmp/definitely-not-a-directory" "--repo:$tmp"; do
+  CASE_N=$((CASE_N + 1))
+  OUT="$tmp/out-$CASE_N.txt"
+  INVOKED="$tmp/invoked-$CASE_N.txt"
+  : >"$INVOKED"
+  case "$bad_invocation" in
+    --repo:*) set -- --repo "${bad_invocation#--repo:}" ;;
+    *) set -- "$bad_invocation" ;;
+  esac
+  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" \
+    --agent codex --model gpt-5.6-sol "$@" >"$OUT" 2>&1
+  RC=$?
+  if [ "$RC" -eq 2 ]; then ok "usage: '$bad_invocation' exits 2"; else bad "usage: '$bad_invocation' exited $RC (want 2)"; fi
+  assert_never_enqueued "usage: '$bad_invocation'"
+done
+
 printf '== usage errors: --agent and --model are BOTH required ==\n'
 reset_stub
 work=$(make_fixture case_usage pushed)
@@ -787,7 +1112,7 @@ printf '== the summary header is distinct from every agent-gate header ==\n'
 reset_stub
 work=$(make_fixture case_hdr pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_VERDICT='No issues found'
+STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 STUB_TOKEN_USAGE="$TOKENS_GENUINE_LARGE"
 run_wrapper "$work"
 assert_says 'header: roborev block present' '^==== ROBOREV REVIEW SUMMARY ====$'
