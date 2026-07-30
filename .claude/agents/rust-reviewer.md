@@ -80,6 +80,11 @@ Cassandra 3.x) is **OUT OF SCOPE** and SHALL NOT be reviewed for correctness or 
 Full guidance: https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/. Severity rubric:
 `docs/development/roborev-severity.md`. Every class here is a **blocker** by definition.
 
+You never invoke roborev yourself — the closer does, through the only sanctioned invocation
+`bash scripts/flow/roborev-review.sh --agent <agent> --model <model>` (#2964). But **flag as a blocker** any
+diff (docs, script, or agent surface) that reintroduces a bare `roborev review --branch` or the
+two-positional commit-range form: both can report clean having reviewed nothing.
+
 - **GitHub Actions injection** — never interpolate `${{ inputs.* }}` or step outputs into `run:`;
   allowlist-validate fail-closed before any secret step and pass via a quoted env var.
 - **Integer overflow / saturation** — use `num_bigint::BigInt` for unscaled decimal math; compare

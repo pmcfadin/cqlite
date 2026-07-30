@@ -125,11 +125,25 @@ never gate stdout or review churn.
    Do NOT run the full `scripts/agent-gate.sh` during the fix-round loop — that is the `flow-closer`'s single
    gate of record (step 7).
 5. **Review-first — DEFAULT, BEFORE the first full gate (issues #2086/#2087/#2088).** On the **lite-green**
-   diff, run `rust-reviewer` (explicit `model: opus`) **and** roborev NOW — there is **no
-   `/roborev-review-branch` slash command**; run the CLI and pass **BOTH** `--agent` and `--model` (#2433,
-   or codex hard-400s on the config-pinned `opus`):
-   `roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`
-   — before any full gate — so
+   diff, run `rust-reviewer` (explicit `model: opus`) **and** roborev NOW. **`scripts/flow/roborev-review.sh`
+   is the ONLY sanctioned roborev invocation (#2964)** — there is no `/roborev-review-branch` slash
+   command, and a bare `roborev review --branch --base origin/main` is **NON-SANCTIONED** (from a worktree
+   it resolves against the ROOT checkout and enqueues `origin/main`, reporting clean having reviewed
+   NOTHING), as is the two-positional commit-range form. **PUSH the implementation commit first** — the
+   wrapper asserts the push and FAILs an unpushed branch, since unpushed work is itself an empty-diff
+   cause. Pass **BOTH** `--agent` and `--model`; the wrapper requires them (#2433 — one alone inherits the
+   `.roborev.toml`-pinned model and hard-400s as a silent-looking review outage):
+   ```bash
+   bash scripts/flow/roborev-review.sh --agent codex --model gpt-5.6-sol
+   ```
+   Retain ONLY the `==== ROBOREV REVIEW SUMMARY ====` block, never the raw transcript (it goes to the
+   `log:` path in the block). Exit `0` PASS / `1` FAIL / `3` NOTHING-TO-REVIEW / `2` usage error, and
+   **any** non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a FAILED review round, never
+   "roborev clean": fix the cause the block names (unpushed branch, mismatched `reviewed-sha`, vacuous
+   verdict) and re-run. A **docs-only diff cannot be roborev-certified at all** — record primary-source
+   verification in the PR instead. Four rules + evidence:
+   https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/.
+   Run review-first before any full gate — so
    the ONE full gate certifies already-reviewed code. **Skip review-first ONLY for a genuinely mechanical
    diff:** no `pub`-item change AND a single call site AND no new surface (the narrow inverse of the old
    conditional). When in doubt, review.

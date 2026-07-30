@@ -55,7 +55,11 @@ AGENT_GATE_SUMMARY_FILE=/tmp/partial-<N>.txt \
 
 - **Division of labor (#1855/#2084/#2079):** the implementing subagent iterates on `--lite` / targeted
   tests and ends at commit + push + report. **The ONE full gate of record and the final roborev pass run
-  inside the disposable `flow-closer` subagent, NOT in the lead** — the lead never runs the full gate and
+  inside the disposable `flow-closer` subagent, NOT in the lead** — that roborev pass goes through the ONLY
+  sanctioned invocation, `bash scripts/flow/roborev-review.sh --agent <agent> --model <model>` (#2964; both
+  flags required, never a bare `roborev review --branch`), and the closer retains only its
+  `==== ROBOREV REVIEW SUMMARY ====` block, whose header is deliberately distinct from every
+  `AGENT-GATE *SUMMARY` so neither can be pasted as the other — the lead never runs the full gate and
   never reads its stdout; it retains only the closer's terminal packet (verdict, PR URL, summary-file
   path). The closer launches the gate via `Bash run_in_background` and reads the SUMMARY **from the file**:
   a subagent that idle-waits on a 12-25 min full gate is killed by the 600s stall watchdog and orphans its
@@ -81,7 +85,9 @@ gh run view <run-id> --log-failed # failed-job logs only
 ## Merge
 
 Merge is **autonomous on green** — once **local certification** holds (gate PASS + (design-driven)
-spec-auditor **C** PASS + roborev clean), and after the pre-merge SHA assert + `HOLD` re-read, **arm
+spec-auditor **C** PASS + roborev clean — a terminal `RESULT: PASS` from
+`scripts/flow/roborev-review.sh`, never `NOTHING-TO-REVIEW`), and after the pre-merge SHA assert + `HOLD`
+re-read, **arm
 `gh pr merge --auto --squash --delete-branch`** and stop; GitHub lands the PR when the #2433 `required`
 check goes green (#2667), then `flow-finalize <N>`. **Never `ScheduleWakeup`-poll a PR's own CI** — `--auto`
 replaces the busy-wait. Merge is not a human gate; hold only for a genuine design call, a scope/product

@@ -58,8 +58,11 @@ sequence workers with **signed issue comments**. That's it.
 - Design-driven issues pause mid-flow at Seam 1 (owner spec approval) — expect that; don't treat the pause
   as a stalled worker.
 - Never close an epic, change scope/title, or make a product call → put it on a short **NEEDS-YOU** list.
-- Doctrine: `docs/development/pm-operating-loop.md`. (Workers run roborev with **this machine's configured
-  agent** — commonly `claude-code` via `.roborev.toml`, no flags; explicit `--agent`/`--model` is a per-machine
-  troubleshooting override only. See `docs/development/agent-machine-setup.md`.)
+- Doctrine: `docs/development/pm-operating-loop.md`. (Workers run roborev ONLY through the sanctioned
+  wrapper `bash scripts/flow/roborev-review.sh --agent codex --model gpt-5.6-sol` (#2964) — **both
+  `--agent` and `--model` always**, branch pushed first; a bare `roborev review --branch` or the
+  two-positional commit-range form is NON-SANCTIONED and can report clean having reviewed nothing. So
+  "roborev clean" above means that wrapper's terminal `RESULT: PASS` — any other terminal `RESULT`,
+  `NOTHING-TO-REVIEW` included, is a failed round and a blocked merge. See CLAUDE.md.)
 
 Start now: one reconcile sweep, then report what you fed to Ready, the tempo, and the one thing that needs me. Go.

@@ -114,13 +114,22 @@ silently fails:
 | intent audit (C) | `spec-auditor` (anchored to `openspec/changes/<name>/specs/**`) | inside flow-closer, after the gate |
 | parity / test execution | `test-validator` | verify |
 | test quality | `coverage-reviewer` | review |
-| code review | roborev (`roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`) | review-first + final closer pass |
+| code review | roborev, via the ONLY sanctioned invocation `bash scripts/flow/roborev-review.sh --agent codex --model gpt-5.6-sol` (#2964) | review-first + final closer pass |
 | correctness | `scripts/agent-gate.sh` | the ONE gate of record, inside flow-closer |
 
-- **roborev invocation — there is NO `/roborev-review-branch` slash command.** Run the CLI and pass
-  **BOTH** `--agent` and `--model` (#2433): `.roborev.toml` on `main` pins `review_model = 'opus'`, and
-  `--agent codex` alone inherits it → codex hard-400s (`'opus' model is not supported`), a silent review
-  failure that looks like an outage.
+- **roborev invocation — `scripts/flow/roborev-review.sh` is the ONLY sanctioned call (#2964).** There is
+  NO `/roborev-review-branch` slash command, and a bare `roborev review --branch --base origin/main` is
+  **NON-SANCTIONED**: from a worktree it resolves against the ROOT checkout and enqueues `origin/main`, so
+  it reports clean having reviewed NOTHING (the two-positional commit-range form mis-enqueues too). The
+  wrapper verifies the reviewed SHA against branch HEAD, asserts the branch is pushed, and HARD-FAILs a
+  `"contains no code changes to review"` verdict on a non-empty diff; a **docs-only diff cannot be
+  roborev-certified at all** (record primary-source verification in the PR instead). Retain only its
+  `==== ROBOREV REVIEW SUMMARY ====` block; **any** non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW`
+  included — is a failed round and a blocked merge, never "roborev clean". Pass **BOTH** `--agent` and
+  `--model`; the wrapper requires them (#2433 — one alone inherits the `.roborev.toml`-pinned model, e.g.
+  `--agent claude-code` inheriting `review_model = 'gpt-5.6-sol'`, and hard-400s as a silent review
+  failure that looks like an outage). Doctrine: CLAUDE.md +
+  https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/.
 - Parallelize independent specialists in one message; sequence dependent work. A review finding that is
   **mechanical** (a missing test, a fmt/clippy nit) is the loop's to fix; a genuine **decision** goes to
   the owner. In an **attended** session ask via `AskUserQuestion`; in an **unattended** session

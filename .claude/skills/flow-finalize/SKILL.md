@@ -45,6 +45,9 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
      --gate pass --gate-runs <runs through the first PASS; don't re-run after a pass> \
      --claim-collisions <rejected claim pushes> --rebase-events <rebases/conflict resolutions> \
      --roborev-findings <roborev findings raised> --rework <re-open / re-review rounds>
+   # This skill NEVER invokes roborev (the closer owns the final pass, via the only sanctioned invocation
+   # `scripts/flow/roborev-review.sh` — #2964). "roborev clean" in this ledger means that wrapper's
+   # terminal `RESULT: PASS`; `NOTHING-TO-REVIEW` or FAIL is not clean and is not finalizable.
    # Land the ledger via a PR — `main` blocks direct pushes (#2433 branch protection: PR required,
    # enforce_admins=true). NEVER `git push`/`push origin HEAD:main` (rejected), and NEVER `git checkout`
    # in the shared root (a closer that switched root to a telemetry branch stranded it off main).
