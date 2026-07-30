@@ -113,9 +113,9 @@ pub use point_read::{
 /// via `impl KWayMerger` in this submodule, mirroring `point_read`'s
 /// `from_row_iterators` — no re-export needed). Also hosts
 /// `drive_compaction_stream`, the streaming-emit helper shared by BOTH the
-/// path-based producer thread (this file's `SSTableRowIteratorAdapter::
-/// producer_thread`) and the new shared-reader producer thread, so the two
-/// never drift.
+/// path-based producer thread (the sibling `producer_iter` module's
+/// `SSTableRowIteratorAdapter::producer_thread`) and the new shared-reader
+/// producer thread, so the two never drift.
 #[cfg(feature = "write-support")]
 mod from_readers;
 
