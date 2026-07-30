@@ -2156,23 +2156,23 @@ impl SSTableManager {
                         );
                         return Ok(rx);
                     }
-                    // Never fail a read because the merge could not be CONSTRUCTED
-                    // (unsupported input format); fall back to the lazy streaming
-                    // merge, matching `scan`'s fall-back-to-concatenation.
+                    // Never fail a read because the reconciling merge cannot handle the
+                    // INPUT (unsupported format/version); fall back to the lazy
+                    // streaming merge, matching `scan`'s fall-back-to-concatenation.
+                    // Nothing has been streamed at that point, so falling back cannot
+                    // mix reconciled and unreconciled rows, and the concat's documented
+                    // Issue #883 limitation is accepted for a table the reconciling
+                    // merge cannot open at all.
                     //
-                    // Gated on the TYPE, not on the message (issue #3124, roborev):
-                    // `fallback_eligible()` is true for the REPORTED construction
-                    // failure ONLY. Nothing has been streamed at that point, so
-                    // falling back cannot mix reconciled and unreconciled rows, and
-                    // the concat's documented Issue #883 limitation is accepted for a
-                    // table the reconciling merge cannot open at all.
-                    //
-                    // The other setup failure — the producer task DIED before
-                    // signalling — is deliberately NOT eligible and propagates. Falling
-                    // back on a dead producer returned a FULL-LENGTH, UNRECONCILED
-                    // result set (duplicated overwritten rows, resurrected deleted
-                    // rows) as `Ok` with only a warning: silently WRONG data, one notch
-                    // worse than the silent truncation #3124 is about.
+                    // Gated on the TYPE, not on the message (issues #3124/#3154,
+                    // roborev): `fallback_eligible()` is the single predicate, and it is
+                    // true for the merger-INELIGIBLE input ALONE. The other setup
+                    // failures — a REPORTED runtime failure (I/O, corruption, …) and a
+                    // producer that DIED before signalling — deliberately propagate.
+                    // Falling back on either returned a FULL-LENGTH, UNRECONCILED result
+                    // set (duplicated overwritten rows, resurrected deleted rows) as
+                    // `Ok` with only a warning: silently WRONG data, one notch worse
+                    // than the silent truncation #3124 is about.
                     Err(setup) if setup.fallback_eligible() => {
                         tracing::warn!(
                             "SSTableManager::scan_stream - cross-generation merge could not be \
