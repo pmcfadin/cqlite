@@ -461,6 +461,18 @@ bench-internals = []
 # links it.
 arrow-shape-corpus = ["arrow"]
 
+# TEST-ONLY producer-fault injection (issue #3106) — gates the arming API of
+# `storage::producer_fault`, the deterministic seam a test uses to kill the query
+# row stream's producer thread mid-walk so the consumer's fail-closed handling of
+# a dead producer (no terminal `Done` sentinel) can be PROVEN instead of asserted
+# by inspection. Adds NO dependencies and NO production behaviour: without this
+# feature the arming symbols do not exist, the armed-state statics do not exist,
+# `ProducerFault` is a zero-sized no-op struct and every default build / gate /
+# CI run is byte-identical. NOT in defaults; `cqlite-flight` enables it from its
+# `[dev-dependencies]` (the `arrow-shape-corpus` convention), so no shipped
+# binary links it.
+producer-fault-injection = []
+
 # Legacy heuristics support (backward compatibility for pre-5.0 formats)
 # NOT enabled in default CI configuration - opt-in only
 legacy-heuristics = []

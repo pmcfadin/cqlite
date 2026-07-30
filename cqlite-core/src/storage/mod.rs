@@ -2,6 +2,12 @@
 
 /// Shared, bytes-bounded, sharded decompressed-chunk cache (issue #1567).
 pub mod cache;
+/// TEST-ONLY producer-fault injection for the query row stream (issue #3106):
+/// the deterministic seam a test uses to kill the producer thread mid-stream and
+/// prove the consumer fails closed instead of reporting a clean, silently
+/// truncated end of stream. Inert (and, for the arming API, non-existent) in a
+/// production build.
+pub mod producer_fault;
 /// Always-on read-path ARM probes (issue #3058): explicit markers for
 /// "the k-way merge ran" vs "the single-generation query scan ran".
 pub mod read_path_probe;
