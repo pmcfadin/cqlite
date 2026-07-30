@@ -102,24 +102,59 @@ entirely, that is also a FAIL (unparseable ⇒ unverifiable ⇒ fail closed), ne
 
 **Step 7 — Emit a compact, machine-greppable summary block.**
 
+One field per line — a reader greps a single `^<key>: ` anchor, never a column offset. The as-built
+block (pinned by `scripts/tests/test_roborev_review_guard.sh`) is exactly:
+
 ```
 ==== ROBOREV REVIEW SUMMARY ====
-repo: <abs>            branch: <name>
-head-sha: <sha>        reviewed-sha: <sha>     job: <N>
-base: <ref>            census: <F> files, +<A>/-<D>
-tokens: input=<i> cached=<c> output=<o>   (or: tokens: UNAVAILABLE (degraded-signal))
-push-assert: PASS|FAIL
-sha-assert: PASS|FAIL(<reason>)
-vacuity-tier1: PASS|FAIL
-vacuity-tier2: PASS|FAIL|UNAVAILABLE
+repo: <abs>
+branch: <name>
+base: <ref>
+head-sha: <sha>
+reviewed-sha: <sha>|-
+job: <N>|-
+census: <F> files, +<A>/-<D>
+tokens: input=<i> cached=<c> output=<o>   (or: tokens: UNAVAILABLE)
+push-assert: PASS|FAIL(<reason>)|SKIP
+census-check: PASS|FAIL(<reason>)|SKIP
+sha-assert: PASS|FAIL(<reason>)|SKIP
+vacuity-tier1: PASS|FAIL(<reason>)|SKIP
+vacuity-tier2: PASS|FAIL(<reason>)|UNAVAILABLE|SKIP
+log: <transcript path>
 RESULT: PASS|FAIL|NOTHING-TO-REVIEW
 ```
 
-Exit codes: `0` = PASS, `1` = FAIL, `3` = NOTHING-TO-REVIEW. Modeled deliberately on the gate's
+The greppable key set is therefore `repo:` `branch:` `base:` `head-sha:` `reviewed-sha:` `job:`
+`census:` `tokens:` `push-assert:` `census-check:` `sha-assert:` `vacuity-tier1:` `vacuity-tier2:`
+`log:` and the terminal `RESULT:`. `census-check:` carries the census oracle's own verdict (it is the
+key that FAILs when the base ref is unresolvable, and the key that marks the empty-census
+`NOTHING-TO-REVIEW` path); `log:` names the transcript so a caller never needs to retain it. A
+per-check key whose step was never reached reads `SKIP` — a value that can never be mistaken for a
+pass, and never a blank.
+
+Exit codes: `0` = PASS, `1` = FAIL, `3` = NOTHING-TO-REVIEW, and `2` = **usage error**. Exit 2 is
+deliberately NOT a verdict: it emits **no** summary block at all (a loud `ERROR:` naming the missing
+option, on stderr, before any repo identity is resolved and before anything is enqueued), because a
+`RESULT:` line for a run that never happened would alias a usage error onto one of the three real
+outcomes — recreating the very indistinguishability this change exists to eliminate. `--help` (exit 0)
+is likewise not a verdict and emits no block. Modeled deliberately on the gate's
 summary-file contract: **an agent retains only this block, never raw roborev stdout** (the raw
 transcript goes to a log path named in the block). The block name is distinct from
 `AGENT-GATE SUMMARY` / `AGENT-GATE LITE SUMMARY` / `AGENT-GATE DELTA SUMMARY` so it can never be pasted
 as a gate verdict, and vice versa.
+
+**Step 7b — the reviewer's own exit status gets its own key: `roborev-exit:`.** A non-zero exit from the
+underlying `roborev` process is already a fail-closed FAIL (it forces `RESULT: FAIL` and adds an
+`ERROR:` detail line naming the observed code), but a detail line is **prose**: a reader that retains
+only the block and greps the per-check keys sees `push-assert`/`census-check`/`sha-assert`/
+`vacuity-tier1`/`vacuity-tier2` all `PASS` and no key explaining the FAIL. That is exactly the
+"which check tripped?" ambiguity every other key exists to remove, and it is the one failure cause a
+grep-based reader cannot attribute. So the block carries `roborev-exit: PASS` when the process exited
+zero and `roborev-exit: FAIL (exit <N>)` otherwise — placed with the other per-check keys, before
+`log:` — and it participates in the same `FAIL*` scan that computes the terminal verdict. (This key is
+the one field the step-7 sketch above does not yet list, because the sketch records the block as
+currently built: emitting it is a one-line addition to the wrapper's `emit_summary`, and the fail-closed
+BEHAVIOUR it reports is already implemented — only the greppable surfacing is missing.)
 
 **Step 8 — Hygiene.** The script stays small (we adopt the campsite rule's spirit: the gate's
 `file-size` ratchet covers `.rs` only, so this is a review expectation, not a mechanized one) and free
@@ -143,14 +178,27 @@ cannot be *certified* by a tool whose subject is compiled code, in either the ga
 ### Call-site migration
 
 Every roborev invocation in the agent surfaces routes through the wrapper, and bare `--branch` becomes
-non-sanctioned prose:
+non-sanctioned prose. The ten touched surfaces are NOT homogeneous — six carry an invocation, four
+carry only a *reference* — and conflating them would state an obligation four of them cannot satisfy:
 
-- `.claude/skills/`: `flow-implement` (the review-first step — the primary call site, currently
-  documenting `roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`),
-  `flow-activate`, `flow-address`, `flow-finalize`, `ci-cd-validation`.
-- `.claude/agents/`: `flow-closer` (the final confirmation pass — the **merge-gating** call site; note
-  it currently documents a `/roborev-review-branch` form, which `flow-lead` correctly says does not
-  exist), `flow-lead` (the stage table), `rust-reviewer`, `sstable-developer`, `test-validator`.
+- **Invocation sites** — the documented procedure runs the wrapper:
+  - Review-round sites (run a round themselves; must also state push-first and non-PASS-is-failed):
+    `.claude/skills/flow-implement/SKILL.md` (the review-first step — the primary call site, previously
+    documenting `roborev review --branch --base origin/main --agent codex --model gpt-5.6-sol --wait`),
+    `.claude/agents/flow-closer.md` (the final confirmation pass — the **merge-gating** call site;
+    previously documenting a `/roborev-review-branch` form that does not exist),
+    `.claude/skills/flow-address/SKILL.md` (the post-comment re-review).
+  - Prescribing sites (name the wrapper as the invocation to be used, without running a round in-line):
+    `.claude/agents/flow-lead.md` (the stage table + the doctrine bullet),
+    `.claude/skills/ci-cd-validation/SKILL.md` + `.claude/skills/ci-cd-validation/merge-process.md`
+    (the merge-readiness definition), `.claude/skills/flow-activate/SKILL.md` (the tasks it authors
+    must name the wrapper for their roborev step).
+- **Non-invoking surfaces** — they contain no roborev invocation at all and must say so, pointing at
+  the wrapper as the only sanctioned invocation: `.claude/skills/flow-finalize/SKILL.md` (the
+  telemetry `--roborev-findings` counter + what "roborev clean" means in the ledger),
+  `.claude/agents/rust-reviewer.md` (the pre-roborev self-check classes — and it additionally flags a
+  reintroduced bare `--branch`/range form as a **BLOCKER**), `.claude/agents/sstable-developer.md` and
+  `.claude/agents/test-validator.md` (the `roborev-lints` lite component + never-invoke-directly).
 
 ### Regression check + gate wiring
 

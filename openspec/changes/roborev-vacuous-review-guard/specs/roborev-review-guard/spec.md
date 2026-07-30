@@ -4,7 +4,7 @@
 
 | AC | Requirement(s) |
 |----|----------------|
-| 1 — an empty resolved diff on a non-empty requested range must fail loudly, never "No issues found" | *A non-empty local diff census with a vacuous review verdict is a hard failure*; *A genuinely empty census reports NOTHING-TO-REVIEW, never a pass*; *The wrapper emits a machine-greppable summary block with a terminal verdict* |
+| 1 — an empty resolved diff on a non-empty requested range must fail loudly, never "No issues found" | *A non-empty local diff census with a vacuous review verdict is a hard failure*; *A genuinely empty census reports NOTHING-TO-REVIEW, never a pass*; *The wrapper emits a machine-greppable summary block with a terminal verdict*; *A non-zero exit from the roborev process is a hard failure under its own greppable key* |
 | 2 — invoke with explicit SHA + explicit `--repo`, and assert the enqueued SHA equals branch HEAD | *The sanctioned invocation is by explicit SHA and explicit repository path*; *The reviewed SHA is asserted against branch HEAD*; *Every flow-\* roborev call site routes through the sanctioned wrapper* |
 | 3 — push the implementation commit before reviewing | *The branch is asserted pushed before any review is requested* |
 | 4 — doctrine updated (CLAUDE.md + the `agents-developing/roborev-findings` page) | *Doctrine records the verify-the-reviewed-SHA rule and the hard-fail verdict text* |
@@ -127,17 +127,37 @@ of an empty resolved diff.
 - **THEN** it exits non-zero with `RESULT: FAIL` naming the missing remote branch, and no review job is enqueued
 
 ### Requirement: The wrapper emits a machine-greppable summary block with a terminal verdict
-The wrapper SHALL emit a single compact `==== ROBOREV REVIEW SUMMARY ====` block carrying: the
-repository path, branch, head sha, reviewed sha, job id, base ref, the census (files and lines
-added/removed), the token accounting (or an explicit unavailable marker), a verdict line per check
-performed, and a terminal `RESULT: PASS|FAIL|NOTHING-TO-REVIEW`. The block's name SHALL be distinct from
-the agent gate's summary block names so neither can be pasted as the other. The wrapper SHALL exit
-non-zero on any outcome other than PASS, and SHALL be usable such that a caller retains ONLY this block
-and never the raw review transcript (which SHALL be written to a log path named in the block).
+The wrapper SHALL emit a single compact `==== ROBOREV REVIEW SUMMARY ====` block on every **VERDICT**
+exit path — a pass, any failed check, or an empty census — carrying one field per line under the
+greppable keys `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `job:`, `census:`, `tokens:`,
+`push-assert:`, `census-check:`, `sha-assert:`, `vacuity-tier1:`, `vacuity-tier2:`, `log:`, and a
+terminal `RESULT: PASS|FAIL|NOTHING-TO-REVIEW`. A per-check key whose step was never reached SHALL carry
+an explicit `SKIP` rather than a blank, so an unreached check can never read as a pass. The block's name
+SHALL be distinct from the agent gate's summary block names so neither can be pasted as the other. The
+wrapper SHALL exit non-zero on any outcome other than PASS, and SHALL be usable such that a caller
+retains ONLY this block and never the raw review transcript (which SHALL be written to the log path
+named in the block's `log:` field).
 
-#### Scenario: Every run emits the block with a terminal RESULT
-- **WHEN** the wrapper finishes for any reason (pass, any failed check, or an empty census)
+A **USAGE ERROR is NOT a verdict.** When a required option is missing or invalid (notably `--agent`
+without `--model`, or the reverse), the wrapper SHALL emit **NO summary block at all**: it SHALL print a
+loud `ERROR:` line naming the missing or invalid option and SHALL exit with the dedicated usage code
+`2`, before any repository identity is resolved and before anything is enqueued. This omission is
+DELIBERATE and SHALL NOT be "fixed" by emitting a block: the three `RESULT:` values are reserved for the
+three real outcomes, so a `RESULT:` line for a run that never happened would ALIAS a usage error onto a
+genuine verdict — precisely the indistinguishability this capability exists to eliminate. The `--help`
+path (exit `0`) is likewise not a verdict and SHALL emit no block. The "exactly one block" obligation
+therefore scopes to the three verdict paths; the verdict paths SHALL be exhaustive for them, including
+an unexpected mid-run abort, which SHALL emit the block with `RESULT: FAIL` rather than terminate
+silently.
+
+#### Scenario: Every verdict run emits exactly one block with a terminal RESULT
+- **WHEN** the wrapper finishes on a verdict path (pass, any failed check, or an empty census)
 - **THEN** it emits exactly one `==== ROBOREV REVIEW SUMMARY ====` block whose last line is `RESULT:` followed by exactly one of `PASS`, `FAIL`, or `NOTHING-TO-REVIEW`
+
+#### Scenario: A usage error emits no block and exits with its own distinct code
+- **GIVEN** an invocation supplying `--agent` but not `--model` (or `--model` but not `--agent`)
+- **WHEN** the wrapper runs
+- **THEN** it prints an `ERROR:` line naming the missing option, emits NO `==== ROBOREV REVIEW SUMMARY ====` block and NO `RESULT:` line at all, enqueues nothing, and exits `2` — a code distinct from PASS (`0`), FAIL (`1`), and NOTHING-TO-REVIEW (`3`), so a usage error can never be read as any of the three verdicts
 
 #### Scenario: The block carries the census, the reviewed sha, and the token accounting
 - **WHEN** a review was enqueued and completed
@@ -150,6 +170,27 @@ and never the raw review transcript (which SHALL be written to a log path named 
 #### Scenario: A non-PASS outcome exits non-zero
 - **WHEN** the terminal `RESULT:` is `FAIL` or `NOTHING-TO-REVIEW`
 - **THEN** the wrapper's process exit code is non-zero
+
+### Requirement: A non-zero exit from the roborev process is a hard failure under its own greppable key
+A non-zero exit status from the underlying `roborev` process SHALL be a hard, fail-closed failure: it
+SHALL force the terminal `RESULT: FAIL` on its own, independently of every other check's outcome, and
+SHALL NEVER be reportable as "roborev clean". Because a caller retains ONLY the summary block and reads
+it by grepping the per-check keys, this failure cause SHALL be surfaced in the block under its OWN
+greppable key `roborev-exit:` — value `PASS` when the process exited zero, otherwise a `FAIL` carrying
+the OBSERVED non-zero exit code — placed with the other per-check keys, ahead of the terminal `RESULT:`.
+It SHALL participate in the same per-check scan that computes the terminal verdict. A prose detail line
+alone SHALL NOT satisfy this requirement: without the key, a reader sees every per-check key reading
+`PASS` beside a `RESULT: FAIL` and cannot attribute the failure, which is the one failure cause a
+grep-based reader would otherwise be unable to name.
+
+#### Scenario: A non-zero roborev exit FAILs the run and names itself under its own key
+- **GIVEN** a pushed branch with a non-empty census whose push, census, sha, and both vacuity checks all pass
+- **WHEN** the `roborev` process itself exits non-zero (for example `1`)
+- **THEN** the block reports `roborev-exit: FAIL` carrying the observed exit code, the terminal `RESULT:` is `FAIL`, the wrapper exits non-zero, and the run is NOT reportable as "roborev clean"
+
+#### Scenario: A zero roborev exit records the key as PASS
+- **WHEN** the `roborev` process exits zero
+- **THEN** the block reports `roborev-exit: PASS`, and that key alone never turns any other check's FAIL into a pass
 
 ### Requirement: A code-free diff cannot be certified by roborev
 Because roborev structurally discards a code-free diff, a diff consisting only of documentation,
@@ -169,24 +210,68 @@ verification against primary sources, recorded in the pull request.
 
 ### Requirement: Every flow-* roborev call site routes through the sanctioned wrapper
 Every roborev invocation documented in the delivery-pipeline skills and agents SHALL be expressed as a
-call to the sanctioned wrapper, and the bare `--branch` form SHALL be documented as non-sanctioned. This
-covers `.claude/skills/flow-implement`, `.claude/skills/flow-activate`, `.claude/skills/flow-address`,
-`.claude/skills/flow-finalize`, `.claude/skills/ci-cd-validation`, and `.claude/agents/flow-closer`,
-`.claude/agents/flow-lead`, `.claude/agents/rust-reviewer`, `.claude/agents/sstable-developer`,
-`.claude/agents/test-validator`. The requirement that both the reviewer agent and the reviewer model are
-always supplied SHALL be preserved at every call site.
+call to the sanctioned wrapper, and the bare `--branch` form SHALL be documented as non-sanctioned
+everywhere it is mentioned. The affected surfaces fall into TWO classes carrying DIFFERENT obligations,
+because four of them contain no roborev invocation at all and an obligation to "invoke the wrapper"
+would be unsatisfiable for them:
 
-#### Scenario: No agent surface documents a bare --branch invocation
-- **WHEN** the delivery-pipeline skills and agents listed above are inspected for roborev invocations
-- **THEN** each one invokes the sanctioned wrapper, none instructs a bare `roborev review --branch` invocation, and the bare `--branch` form is explicitly marked non-sanctioned
+**(a) Invocation sites** — surfaces whose documented procedure runs the wrapper. Each SHALL express its
+roborev step as a call to `scripts/flow/roborev-review.sh`, SHALL pass BOTH the reviewer agent and the
+reviewer model, and SHALL NOT instruct a bare `roborev review --branch` invocation nor the
+two-positional commit-range form. They subdivide by what the surface itself does:
+
+- **Review-round sites** — they run a review round in-line: `.claude/skills/flow-implement/SKILL.md`
+  (review-first, the primary call site), `.claude/agents/flow-closer.md` (the final merge-gating
+  confirmation pass), `.claude/skills/flow-address/SKILL.md` (the post-comment re-review). Each of
+  these SHALL ADDITIONALLY state that the branch is pushed BEFORE the review is requested, and SHALL
+  treat ANY non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` INCLUDED — as a failed review round and a
+  blocked merge, never as "roborev clean".
+- **Prescribing sites** — they name the wrapper as the invocation to be used without running a round
+  in-line: `.claude/agents/flow-lead.md` (the stage table and the roborev doctrine bullet),
+  `.claude/skills/ci-cd-validation/SKILL.md` and `.claude/skills/ci-cd-validation/merge-process.md`
+  (the merge-readiness definition), `.claude/skills/flow-activate/SKILL.md` (the roborev step of the
+  `tasks.md` it authors). Each SHALL name the wrapper as the ONLY sanctioned invocation, and any
+  merge-readiness or finalizability rule it states SHALL require a terminal `RESULT: PASS` and SHALL
+  NOT accept `NOTHING-TO-REVIEW` or `FAIL`.
+
+**(b) Non-invoking surfaces** — surfaces that reference roborev (the `roborev-lints` gate component,
+the pre-roborev self-check pointer, the telemetry `--roborev-findings` counter) but contain NO roborev
+invocation: `.claude/skills/flow-finalize/SKILL.md`, `.claude/agents/rust-reviewer.md`,
+`.claude/agents/sstable-developer.md`, `.claude/agents/test-validator.md`. Each SHALL state explicitly
+that it never invokes roborev directly, SHALL point at `scripts/flow/roborev-review.sh` as the only
+sanctioned invocation, and SHALL NOT contradict any of the four doctrine rules (wrapper-only; verify
+the reviewed SHA; a "contains no code changes to review" verdict on a non-empty diff is a HARD FAIL; a
+docs-only diff cannot be roborev-certified). `.claude/agents/rust-reviewer.md` SHALL ADDITIONALLY
+require that a diff reintroducing a bare `roborev review --branch` or the two-positional range form is
+flagged as a **BLOCKER**.
+
+No surface in either class SHALL document a bare `--branch` or two-positional-range roborev invocation
+as sanctioned.
+
+#### Scenario: Every invocation site calls the wrapper and no surface documents a bare --branch invocation
+- **WHEN** the six class-(a) invocation surfaces are inspected for roborev invocations
+- **THEN** each expresses its roborev step as a `scripts/flow/roborev-review.sh` call passing both the reviewer agent and the reviewer model, none instructs a bare `roborev review --branch` invocation or the two-positional commit-range form, and the bare `--branch` form is explicitly marked non-sanctioned wherever it appears across all ten surfaces
+
+#### Scenario: Each review-round site states push-first and treats any non-PASS RESULT as a failed round
+- **WHEN** `.claude/skills/flow-implement/SKILL.md`, `.claude/agents/flow-closer.md`, and `.claude/skills/flow-address/SKILL.md` are inspected
+- **THEN** each states that the branch is pushed before the review is requested, and each states that any non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round and a blocked merge rather than "roborev clean"
+
+#### Scenario: Each prescribing site names the wrapper and requires RESULT PASS for readiness
+- **WHEN** `.claude/agents/flow-lead.md`, `.claude/skills/ci-cd-validation/SKILL.md`, `.claude/skills/ci-cd-validation/merge-process.md`, and `.claude/skills/flow-activate/SKILL.md` are inspected
+- **THEN** each names `scripts/flow/roborev-review.sh` as the only sanctioned invocation with both flags, and every merge-readiness or finalizability rule any of them states requires a terminal `RESULT: PASS` and rejects both `NOTHING-TO-REVIEW` and `FAIL`
+
+#### Scenario: Each non-invoking surface says so and points at the wrapper
+- **GIVEN** the four class-(b) surfaces, whose only roborev references are the `roborev-lints` gate component, the pre-roborev self-check pointer, and the telemetry `--roborev-findings` counter
+- **WHEN** `.claude/skills/flow-finalize/SKILL.md`, `.claude/agents/rust-reviewer.md`, `.claude/agents/sstable-developer.md`, and `.claude/agents/test-validator.md` are inspected
+- **THEN** each states that it never invokes roborev directly, each points at `scripts/flow/roborev-review.sh` as the only sanctioned invocation, none contradicts any of the four doctrine rules, and `.claude/agents/rust-reviewer.md` additionally requires flagging a reintroduced bare `--branch` or two-positional range form as a BLOCKER
 
 #### Scenario: The merge-gating confirmation pass routes through the wrapper
 - **GIVEN** the `flow-closer` agent's final roborev confirmation pass, whose verdict gates arming auto-merge
 - **WHEN** that step is inspected
 - **THEN** it invokes the sanctioned wrapper and treats a non-PASS terminal `RESULT` (including `NOTHING-TO-REVIEW`) as a blocked merge rather than a clean review
 
-#### Scenario: Both agent and model remain required at every call site
-- **WHEN** each migrated call site is inspected
+#### Scenario: Both agent and model remain required at every invocation site
+- **WHEN** each class-(a) invocation site is inspected
 - **THEN** it passes both the reviewer agent and the reviewer model, preserving the documented trap that supplying only one inherits a mismatched model from the repository roborev config and fails as a silent-looking review outage
 
 ### Requirement: Doctrine records the verify-the-reviewed-SHA rule and the hard-fail verdict text
