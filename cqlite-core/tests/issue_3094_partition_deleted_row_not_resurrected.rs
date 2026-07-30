@@ -52,6 +52,16 @@
 //! ZERO rows. A broken/empty fixture fails the first assertion instead of silently
 //! satisfying the second.
 //!
+//! That first, UNPATCHED read is a DECODE PROBE, not a parity claim. For the
+//! UPDATE-only row of the first test (no liveness marker, no live cell) Cassandra
+//! returns 0 rows even with no deletion at all — it purges the lone cell tombstone
+//! and drops the emptied row — so the `1` pinned there is CQLite's CURRENT
+//! behaviour, tracked as issue #3121, which will invert it to 0. Only the
+//! post-patch ZERO-row assertions are Cassandra parity. (The second test's
+//! unpatched read is different and genuinely IS parity: that row carries a live
+//! primary-key liveness marker from a pure-PK `INSERT`, which Cassandra returns as
+//! an all-null row.)
+//!
 //! Run with:
 //!   cargo test --package cqlite-core \
 //!     --features write-support,cli-helpers,state_machine \
