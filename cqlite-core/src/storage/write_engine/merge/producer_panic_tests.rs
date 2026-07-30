@@ -50,12 +50,16 @@
 //! deliberately is not one.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use tempfile::TempDir;
 
+use super::producer_iter::RunState;
+use super::producer_msg::MergeMsg;
 use super::{
-    compact_sstables, KWayMerger, MergeStep, SSTableRowIterator, SSTableRowIteratorAdapter,
+    channel_depth, compact_sstables, CellData, KWayMerger, MergeEntry, MergeStep, RowData,
+    SSTableRowIterator, SSTableRowIteratorAdapter,
 };
 use crate::platform::Platform;
 use crate::schema::{Column, KeyColumn, TableSchema};
@@ -64,7 +68,9 @@ use crate::storage::producer_fault::{
 };
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::SSTableReader;
-use crate::storage::write_engine::mutation::{CellOperation, Mutation, PartitionKey, TableId};
+use crate::storage::write_engine::mutation::{
+    CellOperation, DecoratedKey, Mutation, PartitionKey, TableId,
+};
 use crate::storage::write_engine::{WriteEngine, WriteEngineConfig};
 use crate::types::Value;
 use crate::Config;
@@ -493,5 +499,127 @@ fn a_compaction_whose_producer_dies_fails_and_publishes_no_output() {
         published.is_empty(),
         "a failed compaction must PUBLISH NOTHING — TOC.txt is the publication \
          barrier and must be absent, found: {published:?}"
+    );
+}
+
+/// Rows the hand-built producer delivers before it dies UNREPORTABLY, so the bare
+/// disconnect is genuinely a MID-run truncation and not an empty run.
+const ROWS_BEFORE_THE_BARE_DISCONNECT: usize = 3;
+
+/// A `MergeEntry` for the hand-built producer below. Content is irrelevant — only
+/// the message VARIANT matters to the protocol under test.
+fn synthetic_entry(n: i64) -> MergeEntry {
+    MergeEntry::new(
+        0,
+        DecoratedKey::new(n, n.to_be_bytes().to_vec()),
+        None,
+        100,
+        RowData::Live {
+            cells: vec![CellData::new("name".to_string(), Value::text("v"), 100)],
+        },
+    )
+}
+
+/// THE regression guard for the literal line that held the P0 defect (roborev,
+/// issue #3120): `RecvTimeoutError::Disconnected`. Revert that arm to `return None`
+/// and THIS test — and only this test — goes red.
+///
+/// # Why the four injected-fault tests above cannot cover this arm
+///
+/// The fix's `catch_unwind` is *too* effective for them to reach it: every panic it
+/// catches is converted into a proper `MergeMsg::Failed` TERMINATOR, so those tests
+/// exercise the `Failed` arm and the channel never disconnects terminator-less.
+/// Closing the front door made the back door unreachable from the front-door tests.
+/// A bare disconnect is still reachable in production by a death the producer cannot
+/// report at all: a process-level `abort`, a double panic, `panic = "abort"`, or a
+/// panic *inside the terminal `send` itself*. That is the case this pins.
+///
+/// So the producer is hand-built rather than fault-injected — deliberately BYPASSING
+/// the terminator protocol, which is the whole point. It delivers
+/// `ROWS_BEFORE_THE_BARE_DISCONNECT` entries (accounted on the egress-depth gauge
+/// exactly as `from_readers::forward_row` does, so the `Drop` reconcile's
+/// `debug_assert!(residual >= 0)` sees a truthful sent/received pair) and then drops
+/// its sender with NO `Done` and NO `Failed`.
+///
+/// Two assertions, both load-bearing:
+/// 1. the FIRST poll after the disconnect is the dead-producer ERROR, not `None` —
+///    `None` there is the silent truncation this P0 exists to eliminate;
+/// 2. a REPEAT poll returns the SAME sticky error, never `None` — separately
+///    load-bearing because `RunReader::refill_buffer` propagates our `Err` but keeps
+///    no sticky error of its own, so a consumer that swallowed the first one and
+///    advanced again would otherwise get a clean end-of-input for a truncated run.
+#[test]
+fn a_producer_that_disconnects_without_a_terminator_is_an_error_not_end_of_input() {
+    let (sender, receiver) =
+        std::sync::mpsc::sync_channel::<MergeMsg>(super::STREAMING_CHANNEL_CAPACITY);
+    let sent_count = Arc::new(AtomicI64::new(0));
+    let producer_sent_count = sent_count.clone();
+
+    // The "unreportable death": hand a few entries over, then drop the sender
+    // WITHOUT a terminator. No `producer_gauge::ProducerThreadGuard` is created
+    // here, so the live-producer gauge is untouched (this thread was never
+    // accounted as spawned).
+    let producer = std::thread::Builder::new()
+        .spawn(move || {
+            for n in 0..ROWS_BEFORE_THE_BARE_DISCONNECT as i64 {
+                let msg = MergeMsg::Item(synthetic_entry(n));
+                let is_data = msg.is_tracked_data();
+                if sender.send(msg).is_ok() && is_data {
+                    channel_depth::sent();
+                    producer_sent_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            drop(sender);
+        })
+        .expect("spawn hand-built producer");
+
+    let mut adapter = SSTableRowIteratorAdapter {
+        receiver: Some(receiver),
+        producer: Some(producer),
+        scan_cancel: ScanCancel::default(),
+        sent_count,
+        received_count: 0,
+        state: RunState::Streaming,
+        egress_channel_capacity: super::STREAMING_CHANNEL_CAPACITY,
+    };
+
+    let mut rows = 0;
+    let first = loop {
+        match adapter.next() {
+            Some(Ok(_)) => rows += 1,
+            Some(Err(e)) => break Some(e.to_string()),
+            None => break None,
+        }
+    };
+    let second = match adapter.next() {
+        Some(Ok(_)) => Some("<unexpected row>".to_string()),
+        Some(Err(e)) => Some(e.to_string()),
+        None => None,
+    };
+
+    assert_eq!(
+        rows, ROWS_BEFORE_THE_BARE_DISCONNECT,
+        "test precondition: every entry handed over before the disconnect must reach \
+         the consumer, or 'the run is truncated' would be vacuous"
+    );
+    let first = first.expect(
+        "a sender dropped WITHOUT a terminator can only mean the producer died in a \
+         way it could not report, so this run is TRUNCATED — returning end-of-input \
+         here is the literal issue #3120 defect: a silently short read, or an \
+         SSTable REWRITTEN missing rows",
+    );
+    assert!(
+        first.contains("WITHOUT a terminal Done") && first.contains("TRUNCATED"),
+        "the error must name the missing terminator and say the run is incomplete, \
+         got: {first}"
+    );
+    let second = second.expect(
+        "the Died verdict must be STICKY: a repeat poll that returns None hands a \
+         consumer which swallowed the first error a CLEAN end-of-input for a \
+         truncated run (issue #3120)",
+    );
+    assert_eq!(
+        second, first,
+        "the sticky verdict must be the IDENTICAL error, not a different one"
     );
 }
