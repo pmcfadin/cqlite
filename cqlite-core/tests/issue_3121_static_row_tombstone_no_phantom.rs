@@ -52,7 +52,7 @@
 //!
 //! | # | site (`…/reader/parsing/row_decoder/`) | decoder entry point                 | public surface that selects it |
 //! |---|---------------------------------------|-------------------------------------|--------------------------------|
-//! | A | `block_emit.rs`                       | `parse_block_emit_with_metadata`    | `SELECT …, WRITETIME(col) …` (a `ProjectionFlags::include_cell_metadata` projection routes to `stitch_and_parse_all_chunks_with_metadata` → `parse_block_with_cell_metadata`) |
+//! | A | `block_emit.rs`                       | `parse_block_emit_with_metadata`    | `SELECT …, WRITETIME(stat_col) …` (a `ProjectionFlags::include_cell_metadata` projection routes to `stitch_and_parse_all_chunks_with_metadata` → `parse_block_with_cell_metadata`) |
 //! | B | `block_emit_windowed.rs`              | `parse_block_emit_windowed`         | a partition-targeted `SELECT … WHERE pk = 1` (BIG promoted-index point read, `data_access/big_promoted.rs`) |
 //! | C | `timestamp_policy.rs`                 | `TimestampPolicy::on_data_row`      | `Database::execute_streaming` (batched streaming scan → `run_scan_stream_windowed` → `parse_one_partition_with_timestamps`) |
 //!
@@ -257,11 +257,21 @@ fn is_null_valued(v: &Value) -> bool {
     matches!(v, Value::Null | Value::Tombstone(_))
 }
 
-/// Assert the FULL Cassandra-semantics contract for `pk = 1` on one decode site.
+/// Whether the site's query projected the regular column `row_col`.
+///
+/// Site A cannot project it (see that test's docs), so its assertions cover the
+/// result set + statics only; sites B and C project it and check its values.
+#[derive(PartialEq, Eq)]
+enum RowColProjected {
+    Yes,
+    No,
+}
+
+/// Assert the Cassandra-semantics contract for `pk = 1` on one decode site.
 ///
 /// `site` names the production site under test so a failure identifies which of
 /// the three gates regressed.
-fn assert_pk1_contract(site: &str, observed: &[Observed]) {
+fn assert_pk1_contract(site: &str, observed: &[Observed], row_col: RowColProjected) {
     let cks: Vec<i32> = observed.iter().map(|o| o.ck).collect();
 
     // Anti-vacuity: the fixture IS present (checked in `fixture_root`), so a
@@ -299,6 +309,9 @@ fn assert_pk1_contract(site: &str, observed: &[Observed]) {
             o.ck
         );
 
+        if row_col == RowColProjected::No {
+            continue;
+        }
         if o.ck == DELETED_CELL_CK {
             assert!(
                 is_null_valued(&o.row_col),
@@ -331,8 +344,26 @@ fn observed_from(result: &QueryResult) -> Vec<Observed> {
 /// `parse_block_emit_with_metadata`, i.e. the `block_emit.rs` gate — a decode
 /// site NO prior static + row-tombstone test reached (issue #3121 AC3).
 ///
+/// `row_col` is deliberately NOT projected here, and the metadata column is
+/// `WRITETIME(stat_col)` rather than `WRITETIME(row_col)`.
+///
+/// A projection containing any `WRITETIME`/`TTL` expression is served by the
+/// EXPRESSION evaluator (`execute_projection` → `evaluate_select_expression`),
+/// which errors `Column not found: <col>` on a row that lacks a selected column,
+/// where the plain-column path (`trim_projection`) tolerantly omits it — a
+/// documented, separately-tracked contrast (issue #1952, pinned by
+/// `trim_projection_tolerates_absent_selected_cell`). A phantom `ck=2` carries the
+/// static cell but no `row_col`, so projecting `row_col` here turns the seeded
+/// regression into `QueryExecution("Column not found: row_col")`: red for the
+/// right underlying reason, but the phantom row is never OBSERVED, so the test
+/// could not distinguish this regression from an unrelated executor failure.
+/// Projecting only columns the phantom row would carry keeps it observable, so
+/// the seeded run fails on the explicit `ck` assertion. `row_col`'s values are
+/// asserted at sites B and C, which use the plain-column path.
+///
 /// Seeded-divergence verified (D3): forcing that site's `shadow.is_some()` arm to
-/// the old inject-then-decide order makes THIS test fail with `ck=2` present.
+/// the old inject-then-decide order makes THIS test — and only this one — fail
+/// with the observed `ck` sequence `[1, 2, 3, 6]`.
 #[tokio::test]
 async fn phantom_row_absent_on_cell_metadata_projection_site_block_emit() {
     let Some(root) = fixture_root() else { return };
@@ -341,7 +372,7 @@ async fn phantom_row_absent_on_cell_metadata_projection_site_block_emit() {
 
     let result = db
         .execute(&format!(
-            "SELECT pk, ck, stat_col, row_col, WRITETIME(row_col) FROM {TABLE} WHERE pk = 1"
+            "SELECT pk, ck, stat_col, WRITETIME(stat_col) FROM {TABLE} WHERE pk = 1"
         ))
         .await
         .expect("WRITETIME projection SELECT failed");
@@ -349,6 +380,7 @@ async fn phantom_row_absent_on_cell_metadata_projection_site_block_emit() {
     assert_pk1_contract(
         "block_emit.rs (cell-metadata projection)",
         &observed_from(&result),
+        RowColProjected::No,
     );
 }
 
@@ -379,6 +411,7 @@ async fn phantom_row_absent_on_point_read_site_block_emit_windowed() {
     assert_pk1_contract(
         "block_emit_windowed.rs (point read)",
         &observed_from(&result),
+        RowColProjected::Yes,
     );
 }
 
@@ -419,5 +452,9 @@ async fn phantom_row_absent_on_streaming_scan_site_timestamp_policy() {
 
     // The fixture holds exactly ONE partition (pk=1), so the unrestricted
     // streaming scan's result set IS the pk=1 result set.
-    assert_pk1_contract("timestamp_policy.rs (streaming scan)", &observed);
+    assert_pk1_contract(
+        "timestamp_policy.rs (streaming scan)",
+        &observed,
+        RowColProjected::Yes,
+    );
 }
