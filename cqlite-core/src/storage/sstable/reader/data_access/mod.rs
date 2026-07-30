@@ -86,11 +86,11 @@ mod point_compaction;
 mod point_compaction_fail_safe_tests;
 // Opt-in presence-oracle false-negative verification method (issue #2163), kept
 // out of this already-large entry-point file (campsite rule, epic #1116).
+pub(in crate::storage::sstable::reader) mod batched_scan_stream;
 mod presence_verify;
 // First/last-key range short-circuit (issue #1576, C5): an authoritative
 // `[first_key, last_key]` bound check that answers out-of-range point reads as
 // absence before any bloom/Index.db/trie work.
-pub(in crate::storage::sstable::reader) mod batched_scan_stream;
 mod range_short_circuit;
 mod sequential;
 

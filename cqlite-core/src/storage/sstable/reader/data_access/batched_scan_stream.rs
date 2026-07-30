@@ -51,9 +51,20 @@ use crate::{Error, Result, RowKey};
 pub struct BatchedScanStream {
     rx: mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>,
     /// The driver task. `Option` because it is JOINED — and therefore consumed —
-    /// the first time the channel reports close; a later `recv` on an
-    /// already-joined stream is a plain end of stream.
+    /// the first time the channel reports close.
     task: Option<JoinHandle<()>>,
+    /// Whether the join already reported a DEAD task (issue #3106, roborev).
+    ///
+    /// Makes the failure STICKY, mirroring the sibling boundary
+    /// (`QueryRowStream::terminated`): the join can only happen once, so without
+    /// this a consumer that polls [`Self::recv`] again after the error would get a
+    /// bare `None` — which this type DEFINES as a proven-clean end of stream. That
+    /// would hand a retrying external consumer (this is public API, returned by
+    /// `SSTableManager`/`StorageEngine::scan_stream_batched`) exactly the silent
+    /// truncation the join exists to prevent. No in-tree consumer polls past an
+    /// error — all four propagate with `?` — so this is a contract guard, not a
+    /// live bug fix.
+    task_died: bool,
 }
 
 impl BatchedScanStream {
@@ -65,6 +76,7 @@ impl BatchedScanStream {
         Self {
             rx,
             task: Some(task),
+            task_died: false,
         }
     }
 
@@ -75,17 +87,26 @@ impl BatchedScanStream {
     /// — panicked, or was cancelled/aborted — yields `Some(Err(..))`. That is the
     /// whole point: a dead producer must never be indistinguishable from a
     /// finished one (issue #3106).
+    ///
+    /// A dead task is STICKY: every subsequent call re-reports the failure, so
+    /// polling again can never downgrade it to a clean end of stream.
     pub async fn recv(&mut self) -> Option<Result<Vec<(RowKey, ScanRow)>>> {
+        if self.task_died {
+            return Some(Err(dead_scan_task_error_after_report()));
+        }
         if let Some(item) = self.rx.recv().await {
             return Some(item);
         }
         // Channel closed: the driver dropped its sender. Join it to learn WHY.
-        // `take()` makes this happen exactly once — a second `recv` after a
-        // clean join is an ordinary end of stream.
+        // `take()` makes the join happen exactly once; the `task_died` flag (not
+        // the absent handle) is what a later call reads.
         let task = self.task.take()?;
         match task.await {
             Ok(()) => None,
-            Err(join_err) => Some(Err(dead_scan_task_error(&join_err))),
+            Err(join_err) => {
+                self.task_died = true;
+                Some(Err(dead_scan_task_error(&join_err)))
+            }
         }
     }
 }
@@ -106,36 +127,126 @@ fn dead_scan_task_error(join_err: &tokio::task::JoinError) -> Error {
     ))
 }
 
+/// Re-report for a consumer that keeps polling after the dead-task error. The
+/// `JoinError` is consumed by the join, so this restates the verdict rather than
+/// re-deriving it — what matters is that it is still an ERROR, never a clean end
+/// of stream.
+fn dead_scan_task_error_after_report() -> Error {
+    Error::internal(
+        "batched scan stream: the scan task DIED without reporting (already \
+         reported) — the result set is TRUNCATED and cannot be reported as a \
+         complete scan (issue #3106)",
+    )
+}
+
 impl SSTableReader {
     /// Open the batched streaming scan's cursor — the FIRST thing the driver task
-    /// does, on both the stitching and non-stitching branch.
+    /// does, ABOVE the `requires_chunk_stitching()` branch, i.e. on every format.
     ///
-    /// A named seam because it is the fixture-independent test-only fault
-    /// checkpoint for THIS task (issue #3106): the branch a given SSTable takes
-    /// depends on its on-disk format, so a checkpoint in either branch alone can
-    /// silently not fire. Killing the task here reproduces exactly the condition
-    /// the fix is about — the task's sender drops with no error and no terminator —
-    /// for any reader.
+    /// A named seam because it is the SINGLE test-only fault checkpoint for this
+    /// task (issue #3106), and it is here precisely because it is
+    /// format-branch-independent: a checkpoint inside either branch fires only for
+    /// the formats that take that branch, so it can silently not fire and leave a
+    /// test passing vacuously. Killing the task here reproduces exactly the
+    /// condition the fix is about — the task's sender drops with no error and no
+    /// terminator — for any reader, and the join that catches it wraps the whole
+    /// task, so the property proven is branch-agnostic.
     pub(super) async fn open_batched_scan_cursor(&self) -> Result<super::ScanCursor> {
         crate::storage::producer_fault::inner_scan_task_checkpoint();
         self.new_scan_cursor().await
     }
 
-    /// Decode one `Data.db` block for the batched (non-stitching) streaming scan.
+    /// Decode one `Data.db` block for the batched NON-STITCHING streaming scan,
+    /// pinning `read_shadowing = true` for this scan in ONE place.
     ///
-    /// A named seam rather than an inline call for two reasons: it pins
-    /// `read_shadowing = true` for this scan in ONE place, and it is a second
-    /// test-only fault checkpoint for the same task (issue #3106) — arming past
-    /// the prelude unwinds the task in the DECODE, exactly as a real
-    /// `parse_block_entries_at_now` panic would, on a reader whose format takes
-    /// the non-stitching branch.
+    /// Deliberately carries NO fault checkpoint (issue #3106, roborev): it is
+    /// reached only by readers whose format takes the non-stitching branch, and no
+    /// fixture in the tree does, so a checkpoint here would be an armable-but-never-
+    /// armed seam — latent confusion suggesting coverage that does not exist. The
+    /// task-level checkpoint in [`Self::open_batched_scan_cursor`] covers both
+    /// branches, which is what the join it proves is scoped to anyway.
     pub(super) fn parse_batched_block(
         &self,
         block: &[u8],
         schema: Option<&crate::schema::TableSchema>,
         now_secs: Option<i64>,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
-        crate::storage::producer_fault::inner_scan_task_checkpoint();
         self.parse_block_entries_at_now(block, schema, true, now_secs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #3106: a driver task that DIED is reported as an error, and that
+    /// verdict is STICKY — a consumer that keeps polling can never coax a
+    /// "proven-clean end of stream" `None` out of a dead scan.
+    ///
+    /// The task is killed with a real panic (the same unwind a decode bug would
+    /// produce); its console noise is silenced by message so a genuine failure in
+    /// a parallel test is never masked.
+    #[tokio::test]
+    async fn a_dead_scan_task_is_reported_as_an_error_and_stays_one() {
+        let (tx, rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4);
+        let task = {
+            let _silence = crate::storage::producer_fault::silence_injected_panics();
+            let task = tokio::spawn(async move {
+                // Deliver one batch, then die WITHOUT reporting — the exact shape
+                // the discarded `JoinHandle` used to turn into a clean EOS.
+                let _ = tx
+                    .send(Ok(vec![(RowKey::new(vec![1]), ScanRow::Row(Vec::new()))]))
+                    .await;
+                panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
+            });
+            // Join here (under the silencer) so the panic is observed before the
+            // hook is restored; the handle's verdict is what `recv` re-joins.
+            let _ = (&task,);
+            task
+        };
+        let mut stream = BatchedScanStream::new(rx, task);
+
+        assert!(
+            matches!(stream.recv().await, Some(Ok(batch)) if batch.len() == 1),
+            "the batch produced before the task died is still delivered"
+        );
+        for attempt in 0..3 {
+            let err = stream
+                .recv()
+                .await
+                .expect("a dead task must never report a clean end of stream")
+                .expect_err("it must be an error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("DIED without reporting") && msg.contains("TRUNCATED"),
+                "attempt {attempt}: the error must name the dead task and the \
+                 truncation, got: {msg}"
+            );
+        }
+    }
+
+    /// The control: a task that finishes normally yields the clean end of stream,
+    /// so the fail-closed join above cannot be passing for a trivial reason.
+    #[tokio::test]
+    async fn a_finished_scan_task_yields_a_clean_end_of_stream() {
+        let (tx, rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4);
+        let task = tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(vec![(RowKey::new(vec![2]), ScanRow::Row(Vec::new()))]))
+                .await;
+        });
+        let mut stream = BatchedScanStream::new(rx, task);
+        assert!(
+            matches!(stream.recv().await, Some(Ok(_))),
+            "the batch arrives"
+        );
+        assert!(
+            stream.recv().await.is_none(),
+            "a task that returned normally is a clean end of stream"
+        );
+        assert!(
+            stream.recv().await.is_none(),
+            "and stays one on a later poll"
+        );
     }
 }

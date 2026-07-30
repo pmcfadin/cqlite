@@ -320,7 +320,7 @@ async fn a_dead_inner_scan_task_fails_the_do_get_instead_of_truncating_it_silent
     // (a checkpoint in one branch only can silently not fire).
     let served = {
         let _silence = silence_injected_panics();
-        let _fault = arm_inner_scan_task_panic(0);
+        let _fault = arm_inner_scan_task_panic();
         do_get_served(&svc, ticket_bytes()).await
     };
 
