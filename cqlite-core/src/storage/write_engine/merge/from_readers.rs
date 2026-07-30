@@ -18,8 +18,8 @@
 //! ## Delegation (no behavioural drift between the two producer shapes)
 //!
 //! [`drive_compaction_stream`] is the single streaming-emit helper BOTH producer
-//! thread shapes call: the path-based [`SSTableRowIteratorAdapter::producer_thread`]
-//! (`mod.rs`, unchanged opening/threading behaviour — still one fresh reader
+//! thread shapes call: the path-based `SSTableRowIteratorAdapter::producer_thread`
+//! (private to `producer_iter`; unchanged opening/threading behaviour — still one fresh reader
 //! opened per thread, in parallel, exactly as before this issue) and the new
 //! [`SSTableRowIteratorAdapter::open_from_reader`]'s producer thread (this file,
 //! never opens a reader). Factoring the conversion/backpressure/
@@ -53,7 +53,7 @@
 //! ## KNOWN GAP — a dead producer reads as end-of-input (issue #3120)
 //!
 //! Neither producer-thread shape sends an explicit terminator, and
-//! `SSTableRowIteratorAdapter::next` (`mod.rs`) maps a channel DISCONNECT onto
+//! `SSTableRowIteratorAdapter::next` (`producer_iter`) maps a channel DISCONNECT onto
 //! `None` = "this run is exhausted". So a producer thread that UNWINDS makes its
 //! run look finished, and the merge completes successfully having merged only the
 //! rows that reached the channel — a silently short read result, or a short
@@ -256,7 +256,8 @@ impl SSTableRowIteratorAdapter {
 
     /// Body of the shared-reader producer thread (issue #2346).
     ///
-    /// Unlike [`Self::producer_thread`] (path-based), this NEVER opens a
+    /// Unlike `Self::producer_thread` (path-based, private to `producer_iter`),
+    /// this NEVER opens a
     /// reader — it drives the caller-supplied `Arc<SSTableReader>` directly via
     /// [`drive_compaction_stream`], reusing the exact
     /// conversion/backpressure/cancellation-by-variant semantics. Still owns a
