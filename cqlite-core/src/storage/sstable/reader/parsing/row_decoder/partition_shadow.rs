@@ -257,10 +257,10 @@ impl PartitionShadow {
     /// receiving the tombstone with its authoritative deletion timestamp (#505),
     /// so their streams stay byte-unchanged.
     ///
-    /// A tombstone is additionally never folded into the row liveness aggregate
-    /// (`max_data_cell_timestamp` / `has_live_forever_data_cell`): it is not live
-    /// data, so it can neither keep a row visible against a covering deletion nor
-    /// mark the row live-forever. That fold is skipped at the call site.
+    /// A tombstone is never folded into the row LIVENESS aggregate
+    /// (`has_live_forever_data_cell` / `max_data_cell_expires_at`): it is not live
+    /// data, so it can neither mark the row live-forever nor supply an expiry. It
+    /// DOES supply shadowing evidence — see [`Self::shadow_evidence_timestamp`].
     ///
     /// This mirrors the multi-generation read path, whose merged-cell filter
     /// (`generation_merge::ReadVisibility::filter_live`) already skipped
@@ -269,6 +269,56 @@ impl PartitionShadow {
     #[inline]
     pub(crate) fn cell_tombstone_dropped(user_facing: bool, is_cell_tombstone: bool) -> bool {
         user_facing && is_cell_tombstone
+    }
+
+    /// Whether a decoded simple-cell `value` is specifically a CELL TOMBSTONE —
+    /// the ONLY tombstone shape [`Self::cell_tombstone_dropped`] may drop.
+    ///
+    /// Matching the `Value::Tombstone` discriminant alone would silently accept a
+    /// row/range/partition tombstone value if one ever surfaced in the simple-cell
+    /// loop (none can today: `cell_value.rs` builds exactly
+    /// `TombstoneType::CellTombstone` there) and drop it as if it were a deleted
+    /// cell. Naming the variant keeps the decision authoritative rather than
+    /// inferred from a broader shape (no-heuristics, #28); an unexpected shape
+    /// instead flows on unchanged and fails closed downstream.
+    #[inline]
+    pub(crate) fn is_cell_tombstone(value: &Value) -> bool {
+        matches!(
+            value,
+            Value::Tombstone(t) if matches!(t.tombstone_type, TombstoneType::CellTombstone)
+        )
+    }
+
+    /// The row's SHADOW-EVIDENCE write timestamp (µs) — what
+    /// [`RowHeader::shadowed_by_deletion_at`] compares against a covering deletion.
+    /// `live` is the max effective write ts across the row's non-tombstone data
+    /// cells; `deleted_only` the max across its CELL TOMBSTONES.
+    ///
+    /// A cell tombstone is authoritative evidence of a WRITE to this row at its
+    /// deletion timestamp (Cassandra reconciles it as a `Cell` carrying exactly
+    /// that `timestamp`), so a row whose ONLY cells are tombstones is NOT a row
+    /// with "no authoritative timestamp". Without this fallback such a row —
+    /// e.g. `UPDATE t SET w = null WHERE …` with no INSERT liveness marker — lands
+    /// on `shadowed_by_deletion_at`'s `i64::MIN` fail-safe and is emitted as an
+    /// all-null phantom row from inside a DELETED partition (issue #3094).
+    ///
+    /// Deleted-cell evidence is a FALLBACK, deliberately NOT folded into the max:
+    /// folding could only ever RAISE the aggregate, and raising it can only ever
+    /// UN-hide a row — the wrong direction for a resurrection fix. (Live `v`@1000
+    /// beside a `w` tombstone@6000 under a partition deletion at 5000 must stay
+    /// hidden on the strength of `v`'s evidence.) As written, this can only move a
+    /// row visible → hidden, never the reverse.
+    ///
+    /// Residual (issue #3121): a row with NO live cell whose deleted-cell evidence
+    /// POSTDATES the covering deletion still surfaces as an all-null phantom row,
+    /// because CQLite has no `Row.hasLiveData` purge yet. Hiding it is #3121's
+    /// rule ("no live cell AND no live liveness marker"), not this fallback's.
+    #[inline]
+    pub(crate) fn shadow_evidence_timestamp(
+        live: Option<i64>,
+        deleted_only: Option<i64>,
+    ) -> Option<i64> {
+        live.or(deleted_only)
     }
 }
 
@@ -614,6 +664,82 @@ mod tests {
         assert!(!PS::cell_tombstone_dropped(false, true));
         // Physical read + a live cell → kept.
         assert!(!PS::cell_tombstone_dropped(false, false));
+    }
+
+    /// Issue #3094 (nit 3): only a `TombstoneType::CellTombstone` is a DELETED CELL.
+    /// The simple-cell loop cannot surface any other tombstone shape today, so this
+    /// pins that the predicate names the variant instead of accepting the broader
+    /// `Value::Tombstone` discriminant — a row/range/partition tombstone value must
+    /// NOT be silently dropped as if it were a deleted cell (no-heuristics, #28).
+    #[test]
+    fn only_a_cell_tombstone_counts_as_a_deleted_cell() {
+        fn tombstone(kind: TombstoneType) -> Value {
+            Value::Tombstone(Box::new(TombstoneInfo {
+                deletion_time: 1_000,
+                tombstone_type: kind,
+                local_deletion_time: 1,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            }))
+        }
+        assert!(PartitionShadow::is_cell_tombstone(&tombstone(
+            TombstoneType::CellTombstone
+        )));
+        for other in [
+            TombstoneType::RowTombstone,
+            TombstoneType::RangeTombstone,
+            TombstoneType::PartitionTombstone,
+            TombstoneType::TtlExpiration,
+        ] {
+            assert!(
+                !PartitionShadow::is_cell_tombstone(&tombstone(other)),
+                "{other:?} is not a deleted CELL and must not be dropped as one"
+            );
+        }
+        // A live value is obviously not a deleted cell.
+        assert!(!PartitionShadow::is_cell_tombstone(&Value::Integer(7)));
+    }
+
+    /// Issue #3094 (blocker): the row's shadow-EVIDENCE timestamp. With no live-cell
+    /// evidence the row's CELL TOMBSTONES supply it, so a deletion-only row (an
+    /// `UPDATE … SET c = null` with no INSERT liveness marker) is recognised as
+    /// covered by a newer partition deletion instead of landing on
+    /// `shadowed_by_deletion_at`'s `i64::MIN` fail-safe and resurrecting as an
+    /// all-null phantom row. Live evidence always WINS, so the fallback can only
+    /// ever move a row visible → hidden, never the reverse.
+    ///
+    /// Revert-verify: returning `live` alone makes the deletion-only row visible
+    /// again (the #3094 blocker); returning `max(live, deleted_only)` makes the
+    /// last assertion 6_000 and un-hides a row main hides on `v`'s evidence.
+    #[test]
+    fn shadow_evidence_prefers_live_cells_and_falls_back_to_deleted_ones() {
+        let f = PartitionShadow::shadow_evidence_timestamp;
+        // Deletion-only row: the tombstone's own write ts IS the evidence.
+        assert_eq!(f(None, Some(1_000)), Some(1_000));
+        // No cell decoded at all → still no authoritative timestamp (fail-safe).
+        assert_eq!(f(None, None), None);
+        // Live evidence alone.
+        assert_eq!(f(Some(1_000), None), Some(1_000));
+        // Live evidence WINS over a newer deleted-cell ts (direction safety).
+        assert_eq!(f(Some(1_000), Some(6_000)), Some(1_000));
+    }
+
+    /// Issue #3094 (blocker, header-level consequence): the exact resurrection
+    /// shape. A row with NO liveness marker whose only cell is a tombstone written
+    /// at 1_000µs is hidden by a partition deletion at 5_000µs; the same row is NOT
+    /// hidden by an OLDER deletion at 500µs. The end-to-end pin is
+    /// `cqlite-core/tests/issue_3094_partition_deleted_row_not_resurrected.rs`.
+    #[test]
+    fn deletion_only_row_is_shadowed_by_a_newer_partition_deletion() {
+        // No liveness marker (UPDATE-only), and the row's ONLY cell is a tombstone
+        // written at 1_000µs — so the evidence comes from the fallback.
+        let mut h = row(0, None, None, false);
+        h.timestamp = None;
+        h.max_data_cell_timestamp = PartitionShadow::shadow_evidence_timestamp(None, Some(1_000));
+        assert!(PartitionShadow::open(0, Some((5_000, 12345)), vec![]).row_hidden(&h, &[]));
+        // An OLDER partition deletion does not cover the tombstone's write.
+        assert!(!PartitionShadow::open(0, Some((500, 12345)), vec![]).row_hidden(&h, &[]));
     }
 
     /// Issue #1741 (Finding 2, header-level consequence): a row whose aggregated
