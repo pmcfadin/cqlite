@@ -588,7 +588,6 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
 /// mergers on purpose; issue #2361 pins that), and by the time a `Drop` runs the
 /// consumer is gone, so there is nobody left to return an error to. The
 /// correctness answer was already delivered through the channel.
-#[allow(rustdoc::private_intra_doc_links)]
 #[cfg(feature = "write-support")]
 impl Drop for SSTableRowIteratorAdapter {
     fn drop(&mut self) {
