@@ -341,22 +341,43 @@ implement (TDD) → --lite each fix round (summary-file redirect)
 - **Review-first (#2086)**: review BEFORE the first full gate so the ONE gate certifies
   already-reviewed code. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
   call site AND no new surface). When in doubt, review.
-- **roborev invocation — the default is codex; overriding it means passing BOTH agent and model
-  (#2433/#3037).** `.roborev.toml` on `main` pins `agent`/`review_agent = 'codex'` +
-  `model`/`review_model = 'gpt-5.6-sol'` (the repo pin overrides your global `~/.roborev/config.toml`,
-  so it is the value that actually runs). So the plain
-  `roborev review --branch --base origin/main --wait` already runs codex — **no flags needed**.
-  The trap is the reverse case: to run the **Claude** reviewer you must override BOTH:
-  `roborev review --branch --base origin/main --agent claude-code --model claude-opus-5 --wait`.
-  `--agent claude-code` alone still inherits `review_model = 'gpt-5.6-sol'` from config — an OpenAI
-  model name Claude cannot serve — which fails as a silent review failure that looks like an outage.
-  (Historically the pin ran the other way and codex-on-a-ChatGPT-account rejected the inherited
-  Anthropic name with a hard `400 'opus' model is not supported`; same trap, mirrored.) Run from a
-  checkout whose `.roborev.toml` you know (worktrees inherit `main`'s pinned config); `--model` is the
-  reliable override. Note `gpt-5.6-sol` is **codex's own built-in default, not a config pin** — there
-  is no `~/.codex/config.toml` on the worker boxes; the bare `codex` default moved `gpt-5.5` →
-  `gpt-5.6-sol` in the 0.142.5 → 0.145.0 upgrade, so a future codex version bump can silently move it
-  again. `codex --version` + a bare `codex exec` header is how you check what it actually resolves to.
+- **roborev invocation — `scripts/flow/roborev-review.sh` is the ONLY sanctioned call, and it requires
+  BOTH `--agent` and `--model` (#2964/#2433/#3037).**
+  `bash scripts/flow/roborev-review.sh --agent <agent> --model <model> [--repo <abs-path>] [--base <ref>] [--log <path>]`
+  — codex is `--agent codex --model gpt-5.6-sol`; Claude is `--agent claude-code --model claude-opus-5`.
+  `--repo` defaults to the toplevel of `$PWD` (resolved absolute), `--base` to `origin/main`. Retain ONLY
+  its `==== ROBOREV REVIEW SUMMARY ====` block (header deliberately distinct from all three
+  `AGENT-GATE *SUMMARY` blocks so neither can be pasted as the other), never the transcript — that goes
+  to the `log:` path named in the block. Exit `0` PASS / `1` FAIL / `3` NOTHING-TO-REVIEW / `2` usage
+  error; **any** non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round and
+  a blocked merge, never "roborev clean". Four rules: **(1)** bare
+  `roborev review --branch --base origin/main` is NON-SANCTIONED, and so is the two-positional
+  commit-range form. **(2)** The **reviewed SHA must be VERIFIED against branch HEAD** — the wrapper
+  parses `Enqueued job <N> for <sha>`; a mismatch aborts the round, and a mismatch that equals the base
+  ref is the signature of the worktree bug. **(3)** `"contains no code changes to review"` on a
+  NON-EMPTY diff is a **HARD FAIL**, never a pass. **(4)** A docs-only (code-free) diff **cannot be
+  roborev-certified at all** — the wrapper fails it as vacuous; the sanctioned substitute is
+  primary-source verification recorded in the PR (e.g. `git show cassandra-5.0.8:<path>`), and no
+  docs-only change may ever record "roborev clean". Push first: an unpushed implementation commit is
+  itself an empty-diff cause, and the wrapper asserts the push and FAILs otherwise. **Why:** three
+  confirmed paths make roborev report clean having reviewed NOTHING, and a vacuous pass is TEXTUALLY
+  IDENTICAL to a genuine one — (T1) from a worktree, `--branch` resolves against the ROOT checkout
+  (normally on `main`) and enqueues the BASE commit: enqueued `39900e4db` (= origin/main) while branch
+  HEAD was `4e7ab591e`; (T2) the range form `roborev review 89fdbb895 989d7d2c3` enqueued `90a17d376` —
+  NEITHER endpoint; (T3) a code-free diff is SILENTLY DISCARDED even with the right SHA and the right
+  `--repo`, so **SHA verification alone is insufficient**. Token accounting is the tell: genuine reviews
+  398k–649k input / 314k–554k cached / 5.0k–6.3k output over ~2m30s, vs the vacuous baseline 18.7k input
+  / 0 cached / 53–56 output in 8s. Real cost: on #2950 two vacuous runs "passed"; re-run correctly
+  against the real SHA, the SAME diff produced TWO REAL BLOCKERS. 1:1:1:1 puts EVERY issue in a worktree
+  and `flow-closer`'s final pass is a MERGE GATE — so this could merge unreviewed code fleet-wide.
+  Reviewer-selection trap: `--agent claude-code` alone still inherits `review_model = 'gpt-5.6-sol'` from
+  `.roborev.toml` (the repo pin overrides your global `~/.roborev/config.toml`) — an OpenAI model name
+  Claude cannot serve, which fails as a silent review failure that looks like an outage; historically
+  mirrored (codex-on-a-ChatGPT-account hard-`400 'opus' model is not supported`). Hence the wrapper
+  enforces both. `gpt-5.6-sol` is **codex's own built-in default, not a config pin** — there is no
+  `~/.codex/config.toml` on the worker boxes; the bare `codex` default moved `gpt-5.5` → `gpt-5.6-sol` in
+  the 0.142.5 → 0.145.0 upgrade, so a version bump can silently move it again. `codex --version` + a bare
+  `codex exec` header is how you check what it actually resolves to.
 - **flow-closer (#2084/#2668)**: the full gate, the final roborev pass, and the merge run inside the
   disposable `flow-closer` subagent — the lead retains only its terminal packet (verdict, PR URL,
   summary-file path, ≤10 lines residual), never gate stdout or review churn. The closer has **no
