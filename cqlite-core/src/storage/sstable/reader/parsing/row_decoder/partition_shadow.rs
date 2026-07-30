@@ -382,9 +382,10 @@ pub(crate) fn merged_row_shadowed_by_partition(
         max_data_cell_timestamp,
         max_data_cell_expires_at: None,
         has_live_forever_data_cell: false,
-        // The `KWayMerger` output carries no tombstone cells (the multi-generation
-        // read path filters them before this fold), so there is no deleted-cell
-        // PRESENCE to report here (issue #3094 scope note).
+        // Hardcoded `false` as a DELIBERATE, TRACKED limitation (#3129 AC4), NOT because
+        // no tombstone can reach here: `apply_partition_shadowing`'s `is_data` is BY NAME,
+        // so a cell tombstone strictly newer than `markedForDeleteAt` survives the merge
+        // and `filter_live` drops it inside that same fold without reporting its presence.
         has_deleted_data_cell: false,
     };
     header.shadowed_by_deletion_at(deleted_at)
