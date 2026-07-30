@@ -64,8 +64,9 @@ trap 'rm -rf "$tmp"' EXIT
 #   STUB_PAYLOAD_JOB     the id INSIDE the payload (differs from the announced job to
 #                        pin the narrowed ID-less fallback in roborev-job-facts.py)
 #   STUB_RECORD_BLANK_FOR the first N record reads return an empty record, so the
-#                        wrapper's bounded poll for the ASYNCHRONOUSLY written record
-#                        can be exercised (counter kept in $STUB_INVOKED.reads)
+#                        wrapper's bounded read RETRY can be exercised (a transient
+#                        read failure — there is no asynchronous write to wait out;
+#                        counter kept in $STUB_INVOKED.reads)
 #   STUB_HAS_TOKEN_DATA  emit a has_token_data field with this value (true/false)
 #   STUB_LIST_JSON       `none` => `list --json` returns null, so `show` is the only
 #                        record source
@@ -107,8 +108,9 @@ emit_job_object() {
     "$usage$extra"
 }
 
-# record_read_blank: true while the first STUB_RECORD_BLANK_FOR record reads should
-# come back empty, replaying the real daemon's asynchronous record write.
+# record_read_blank: true while the first STUB_RECORD_BLANK_FOR record reads should come
+# back empty, simulating a TRANSIENT read failure. (It does NOT model an asynchronous
+# record write: the job row is present from enqueue — that diagnosis was retracted.)
 record_read_blank() {
   local want="${STUB_RECORD_BLANK_FOR:-0}" seen=0 counter="$STUB_INVOKED.reads"
   [ "$want" -gt 0 ] || return 1
@@ -1255,11 +1257,13 @@ assert_verdict 'case (x2)' PASS 0
 assert_says 'case (x2) every code census path was covered' '^prompt-content: PASS \(2/2 code census paths present\)$'
 
 if [ "$HAVE_PYTHON3" -eq 1 ]; then
-printf '== case (y1): the ASYNCHRONOUSLY written job record is POLLED, not assumed ==\n'
+printf '== case (y1): a transient failed record read is RETRIED, not accepted ==\n'
 reset_stub
-# DEFECT 2: the instant `--wait` returned, the record had no git_ref/status/model/
-# token_usage; moments later it had all four. Unpolled, FOUR asserts silently
-# degraded at once on a normal run.
+# An unreadable-on-first-attempt record must not be accepted as empty: doing so silently
+# degraded FOUR asserts at once (sha-assert, review-completed, tier 2, model). NOTE the
+# retry covers a TRANSIENT READ, not an asynchronous write — the round-5 "written
+# asynchronously" diagnosis was wrong and is retracted; the real cause was the two
+# payload shapes (see case (x10)).
 work=$(make_fixture case_y1 pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
 STUB_RECORD_BLANK_FOR=2
@@ -1267,7 +1271,8 @@ run_wrapper "$work"
 STUB_RECORD_BLANK_FOR=0
 assert_verdict 'case (y1)' PASS 0
 assert_says 'case (y1) the record is reported complete' '^job-record: PASS$'
-assert_says 'case (y1) the polling is disclosed' 'became complete only after [0-9]+ poll'
+assert_says 'case (y1) the retry is disclosed' 'read complete only on retry [0-9]+ of [0-9]+'
+assert_lacks 'case (y1) does not repeat the retracted async claim' 'written asynchronously'
 assert_says 'case (y1) the STRONG sha oracle was used' '^sha-assert: PASS$'
 assert_says 'case (y1) tier 2 evaluated rather than degrading' '^vacuity-tier2: PASS$'
 assert_says 'case (y1) the model was confirmed from the record' '^model: gpt-5\.6-sol$'
@@ -1603,7 +1608,12 @@ assert_says '--help states the exit-code contract' '0=PASS, 1=FAIL, 3=NOTHING-TO
 assert_says '--help names the sanctioned range invocation' 'Sanctioned invocation'
 assert_says '--help marks --branch-without-repo non-sanctioned' "WITHOUT an explicit --repo"
 assert_says '--help carries the live worktree probe' 'LIVE WORKTREE PROBE'
-assert_says '--help states the probe expectation' 'reviewed-sha == head-sha'
+# The probe expectation is stated in RANGE terms: reviewed-sha is '<base>..<head>', so
+# 'reviewed-sha == head-sha' could never hold and the old pinned wording defended an
+# instruction that was guaranteed to fail.
+assert_says '--help states the probe expectation in range terms' 'reviewed-sha is a RANGE'
+assert_says '--help says the range must end in the worktree HEAD' 'ENDS IN that same head-sha'
+assert_lacks '--help no longer asks for reviewed-sha == head-sha' 'reviewed-sha == head-sha'
 assert_says '--help requires both agent and model' 'Both are required'
 assert_never_enqueued '--help'
 

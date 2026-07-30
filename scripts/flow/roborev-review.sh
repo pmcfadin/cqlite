@@ -8,19 +8,30 @@
 # A vacuous review — one where roborev reviewed NOTHING — is textually identical to
 # a genuine clean one ("No issues found"), so "roborev clean" can be satisfied
 # without a review having happened and the pipeline merges unreviewed code with no
-# red anywhere. Three confirmed triggers:
+# red anywhere. FOUR confirmed triggers (the fourth, the partial review, was found by
+# this wrapper's own live probe and was not anticipated by issue #2964):
 #
-#   1. bare `--branch` from inside a git WORKTREE resolves against the ROOT
-#      checkout (which normally sits on `main`), so the enqueued commit is
-#      `origin/main` and the branch's own change is never seen. Worktrees are not
-#      in `roborev repo list`, and `roborev repo` has NO `add` subcommand — repos
-#      self-register on first use — so there is nothing to register and no way to
-#      make the bare form worktree-correct. => bare `--branch` is NON-SANCTIONED.
-#   2. the two-positional commit-RANGE form (`roborev review <a> <b>`) has been
-#      OBSERVED enqueueing a commit that is NEITHER endpoint. => NON-SANCTIONED.
-#   3. a code-free (docs/spec/workflow-only) diff is STRUCTURALLY DISCARDED and
-#      still reported as "No issues found" — with the CORRECT sha enqueued, so no
-#      sha check can catch it. => a docs-only diff CANNOT be roborev-certified at
+#   1. `--branch` WITHOUT an explicit `--repo`, from inside a git WORKTREE, resolves
+#      against the ROOT checkout (which normally sits on `main`), so the enqueued
+#      commit is `origin/main` and the branch's own change is never seen. An explicit
+#      `--repo` IS what makes `--branch` correct (measured: it then reported
+#      "17 commits since origin/main" and recorded `<base40>..<head40>`), so the
+#      sanctioned form is `--branch --base <base> --repo <abs>` and it is `--branch`
+#      WITHOUT `--repo` that is NON-SANCTIONED. (Registering the worktree is not an
+#      option and is not needed: `roborev repo` has no `add` subcommand — repos
+#      self-register on first use.)
+#   2. the two-positional commit-RANGE form (`roborev review <a> <b>`) bases the diff
+#      on git's EMPTY-TREE hash (measured `git_ref` =
+#      `4b825dc642cb6eb9a060e54bf8d69288fbee4904..<head>`), so the reviewer sees a
+#      fraction of the real change. => NON-SANCTIONED.
+#   3. the single-SHA form (`roborev review <sha>`) reviews ONE COMMIT, not the
+#      branch: on a multi-commit branch it certifies the branch from its last commit
+#      alone — a PARTIAL review reported as a complete one. => NON-SANCTIONED.
+#   4. a code-free (docs/spec/workflow-only) diff is DISCARDED and still reported as
+#      "No issues found" — with the CORRECT sha enqueued, so no sha check can catch
+#      it. Mechanism MEASURED: roborev omits non-code paths from the diff it builds
+#      (on a census of 22 markdown + 5 code files the prompt carried diff headers for
+#      exactly the 5 code files), so a docs-only diff leaves nothing to review. => a docs-only diff CANNOT be roborev-certified at
 #      all; the sanctioned substitute is primary-source verification recorded in
 #      the PR (e.g. `git show cassandra-5.0.8:<path>`).
 #
@@ -69,14 +80,33 @@
 #   findings: / roborev-exit: / log:
 #   RESULT: PASS|FAIL|NOTHING-TO-REVIEW
 #
-# Per-check values are PASS | FAIL | SKIP | UNAVAILABLE (a FAIL may carry a
-# parenthesised reason). `census:` is `<N> file(s), +<A>/-<D>`; `tokens:` is
-# `input=<n> cached=<n> output=<n>` or `UNAVAILABLE`. `findings:` is
-# `NONE | PRESENT [(<n>)] | UNKNOWN`. `roborev-exit:` is `PASS | FINDINGS (exit N) |
-# ERROR (exit N) | SKIP` — FINDINGS means the reviewer RAN and reported findings (a
-# GENUINE review to triage and fix), ERROR means the reviewer itself failed.
-# `vacuity-tier1:` is ADVISORY and adds `NOTICE (...)` to the value set; a NOTICE
-# never fails the run.
+# Per-check values, as built:
+#   push-assert / census-check / code-free / review-completed  PASS | FAIL (...) | SKIP
+#   job-record        PASS | PASS (no token accounting in the record) |
+#                     DEGRADED (incomplete after <n> retries: <fields>) | SKIP
+#   sha-assert        PASS | FAIL (...) | SKIP
+#   prompt-content    PASS (<k>/<n> code census paths present) |
+#                     FAIL (<k>/<n> code census paths absent from the prompt) |
+#                     FAIL (prompt unretrievable — ...) | SKIP
+#   vacuity-tier1     PASS | FAIL (vacuous verdict vs non-empty census) |
+#                     NOTICE (phrase present in a findings-bearing review) |
+#                     UNAVAILABLE | SKIP        (ADVISORY when it is a NOTICE)
+#   vacuity-tier2     PASS | FAIL (...) | UNAVAILABLE | SKIP
+#   findings          NONE | PRESENT [(<n>)] | INCONSISTENT (...) | UNKNOWN | SKIP
+#   roborev-exit      PASS | FINDINGS (exit N) | ERROR (exit N) | SKIP
+#   model             <model> | <model> (SUBSTITUTED — requested '<r>') |
+#                     <model> (UNCONFIRMED — no model field in the job record) | -
+#   census            `<N> file(s), +<A>/-<D>` | -
+#   tokens            `input=<n> cached=<n> output=<n>` | UNAVAILABLE
+# FINDINGS means the reviewer RAN and reported findings (a GENUINE review to triage and
+# fix); ERROR means the reviewer itself failed; INCONSISTENT means a "clean" signal is
+# contradicted by markers in the findings block.
+#
+# THE VERDICT SCAN: a key fails the run when its value starts with FAIL, FINDINGS,
+# ERROR or INCONSISTENT. PASS, SKIP, UNAVAILABLE, NOTICE and DEGRADED never do —
+# NOTICE is tier 1's advisory value, and DEGRADED reports an incomplete job record
+# whose consequences are carried by the dependent asserts (which fail on their own
+# terms).
 #
 # WHICH CHECKS CARRY THE VERDICT. The DETERMINISTIC ones, each judged against data we
 # obtained ourselves: `push-assert` (the remote, via ls-remote), `census-check` (our
@@ -163,13 +193,13 @@ ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS=200
 # now checked against its exact `diff --git` header, cheap even for a 500-file diff, and
 # sampling was a hole — a partial prompt naming just the sampled files passed.)
 
-# The job record is written ASYNCHRONOUSLY: measured empty for git_ref/status/model/
-# token_usage the instant `--wait` returned — which turned out NOT to be an async
-# durability problem at all (round 6): `roborev show --json` nests the JOB row under a
-# "job" key and the extractor was matching the outer REVIEW row, which carries none of
-# those fields. With the nested row read as a first-class source the record is complete
-# in ONE read, so this is now a short SANITY retry rather than a wait: 5 x 1s. It still
-# fails closed if the record genuinely cannot be read.
+# Job-record read retries. There is NO asynchronous write to wait out (an earlier
+# diagnosis to that effect was wrong and is retracted): `roborev show <id> --json`
+# nests the job row under a "job" key while `roborev list --json` carries the same
+# fields at top level, and the extractor was matching the outer REVIEW row. With the
+# nested row preferred the record is complete in ONE read, so this is a short SANITY
+# retry (transient read failure, not-yet-terminal status): 5 x 1s. It still fails
+# closed if the record genuinely cannot be read.
 # Overridable ONLY as a timing knob (the hermetic self-test shortens it). Shortening
 # it can never weaken a check: fewer polls can only make the record MORE likely to be
 # reported DEGRADED, which is the fail-closed direction.
@@ -225,12 +255,21 @@ a worktree; the gate's hermetic check uses a stub reviewer.
   2. From a real issue worktree on its own branch, with its commit PUSHED:
        cd /path/to/cqlite-wt/issue-<N>
        $PROGNAME --agent codex --model gpt-5.6-sol
-  3. In the emitted block assert: head-sha == the worktree branch HEAD;
-     reviewed-sha == head-sha (prefix match); reviewed-sha != git rev-parse
-     origin/main; sha-assert: PASS; census matching
-     'git diff --numstat origin/main...HEAD'; tokens above both thresholds;
-     RESULT: PASS (exit 0). A reviewed-sha equal to origin/main means the
-     explicit-repo invocation did NOT defeat the root-checkout resolution.
+  3. In the emitted block assert the reviewed SCOPE covers the worktree, remembering
+     that reviewed-sha is a RANGE '<base40>..<head40>', never a single sha:
+       - head-sha == the worktree branch HEAD (git rev-parse HEAD);
+       - sha-assert: PASS;
+       - reviewed-sha ENDS IN that same head-sha, and its base endpoint (before '..')
+         == git rev-parse <base> — i.e. the reviewed range IS <base>...HEAD;
+       - reviewed-sha is NOT the base ref alone, and its head endpoint is NOT the base
+         sha: either means the review never reached the worktree's own commits, which
+         is the root-checkout resolution this probe exists to rule out;
+       - prompt-content: PASS with the full code census covered;
+       - census matching 'git diff --numstat --no-renames <base>...HEAD';
+       - job-record: PASS and tokens above both thresholds.
+     RESULT is PASS (exit 0) only when the review is also finding-free; a review with
+     open findings correctly reports FINDINGS and exits 1 — that is not a probe
+     failure, and the scope assertions above are what the probe is for.
   4. Record the observed head-sha/reviewed-sha/job/census/tokens in the PR body,
      and re-run the probe after any roborev version bump.
 EOF
@@ -548,14 +587,21 @@ extract_job_facts() { # extract_job_facts <job> <json> <facts-out> <prompt-out>
 
 fact() { sed -n "s/^$1=//p" "$FACTS_FILE" | head -1; }
 
-# THE JOB RECORD IS WRITTEN ASYNCHRONOUSLY (issue #2964, round 5). Measured: the
-# instant `--wait` returned, the record for a completed job had NO git_ref, NO status,
-# NO model and NO token_usage; queried moments later it had all four. `--wait`
-# returning does NOT mean the record is durable. Unpolled, that silently weakened FOUR
-# asserts at once on a NORMAL run (sha-assert fell back to prose, review-completed to
-# the transcript alone, tier 2 to UNAVAILABLE, model to UNCONFIRMED) — the same
-# "silently disarmable" class as the token-shape drift.
-# So POLL, bounded, until the fields the asserts need are present.
+# TWO PAYLOAD SHAPES, NOT AN ASYNC WRITE (issue #2964; the round-5 "the job record is
+# written asynchronously" diagnosis was WRONG and is retracted — there is no durability
+# problem and no write race). The fields were always present, one level down:
+#   * `roborev list --json` returns JOB rows with git_ref / status / model /
+#     requested_model / token_usage / verdict at TOP level.
+#   * `roborev show <id> --json` returns a REVIEW row — agent, closed, created_at, id,
+#     job, job_id, output, prompt, uuid, verdict_bool — that NESTS the job row under a
+#     `job` key. Its own `id` equals the job id, so a first-id-match lookup returned
+#     the OUTER row, which carries none of those fields; that looked like an empty
+#     record and silently weakened FOUR asserts at once on a NORMAL run (sha-assert
+#     fell back to prose, review-completed to the transcript alone, tier 2 to
+#     UNAVAILABLE, model to UNCONFIRMED).
+# roborev-job-facts.py now prefers an id match that carries `git_ref`, so the record is
+# complete in ONE read. The loop below is therefore a short SANITY RETRY (it covers a
+# transient read failure and a not-yet-terminal status), never a wait on a write race.
 record_required_present() {
   local status
   [ -n "$(fact git_ref)" ] || return 1
@@ -624,7 +670,7 @@ if [ "$announce_ok" -eq 1 ]; then
   if record_complete; then
     JOB_RECORD="PASS"
     if [ "$record_polls" -gt 0 ]; then
-      DETAILS+=("NOTICE: job-record: the record became complete only after $record_polls poll(s) (~${record_polls}s) — it is written asynchronously, so 'roborev review --wait' returning does not mean it is durable.")
+      DETAILS+=("NOTICE: job-record: the record read complete only on retry $record_polls of $JOB_RECORD_POLL_ATTEMPTS. This is a transient read, NOT an asynchronous write — the job row is present from enqueue; 'roborev list --json' carries its fields at top level and 'roborev show <id> --json' nests them under a 'job' key.")
     fi
   elif record_required_present; then
     JOB_RECORD="PASS (no token accounting in the record)"
@@ -633,8 +679,8 @@ if [ "$announce_ok" -eq 1 ]; then
     [ -n "$(fact git_ref)" ] || missing="$missing git_ref"
     [ -n "$(fact status)" ] || missing="$missing status"
     [ "$(fact token_state)" = "parsed" ] || missing="$missing token_usage"
-    JOB_RECORD="DEGRADED (incomplete after ${JOB_RECORD_POLL_ATTEMPTS}s:${missing:- none})"
-    DETAILS+=("NOTICE: job-record: DEGRADED — after ${JOB_RECORD_POLL_ATTEMPTS} poll(s) the job record for '$JOB' is still missing:${missing:- nothing}. The dependent asserts below report their own verdicts; nothing here is silently weakened.")
+    JOB_RECORD="DEGRADED (incomplete after ${JOB_RECORD_POLL_ATTEMPTS} retries:${missing:- none})"
+    DETAILS+=("NOTICE: job-record: DEGRADED — after ${JOB_RECORD_POLL_ATTEMPTS} retries at ${JOB_RECORD_POLL_INTERVAL_SECS}s the job record for '$JOB' is still missing:${missing:- nothing}. The dependent asserts below report their own verdicts; nothing here is silently weakened.")
   fi
   # The prompt may not be carried in the JSON payload; ask for it directly.
   if [ ! -s "$PROMPT_FILE" ]; then
@@ -703,7 +749,7 @@ if [ "$announce_ok" -eq 1 ]; then
     *)
       SHA_ASSERT="FAIL (job record unavailable — reviewed range unverifiable)"
       REVIEWED_SHA="-"
-      DETAILS+=("ERROR: sha-assert: the job record carries no 'git_ref' after polling (job-record: $JOB_RECORD), so the reviewed RANGE cannot be verified. The stdout announcement names only the range BASE ('$ANNOUNCED_SHA') for a range review, so prose cannot establish that branch HEAD was reviewed — this fails closed rather than accepting a check that verifies nothing. Re-run; the record is written asynchronously and is normally present within seconds.")
+      DETAILS+=("ERROR: sha-assert: the job record carries no 'git_ref' after polling (job-record: $JOB_RECORD), so the reviewed RANGE cannot be verified. The stdout announcement names only the range BASE ('$ANNOUNCED_SHA') for a range review, so prose cannot establish that branch HEAD was reviewed — this fails closed rather than accepting a check that verifies nothing. The job row is present from enqueue — 'roborev list --json' carries git_ref at top level and 'roborev show <job> --json' nests it under a 'job' key — so an absent git_ref means the record could not be READ, not that it was not yet written; re-run, and if it persists check the daemon ('roborev status').")
       ;;
   esac
 fi
