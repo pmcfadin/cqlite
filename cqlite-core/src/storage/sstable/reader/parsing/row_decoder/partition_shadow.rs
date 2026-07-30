@@ -351,10 +351,15 @@ impl PartitionShadow {
 ///
 /// - `marker_timestamp` — the merged row's primary-key liveness marker write ts
 ///   (`MergeEntry::row_liveness.marker_timestamp`, #2374/#2789), `None` when the row
-///   has no marker. It is COMPARED against `cover` here, never trusted to be newer:
-///   `apply_partition_shadowing` decides its carry-forward from the ENTRY's row
-///   timestamp (the reconciled cluster max), not from this field, so a marker at/below
-///   `cover` legitimately arrives and must stay shadowed (`ts <= markedForDeleteAt`).
+///   has no marker. It is COMPARED against `cover` here, never trusted to be newer.
+///   The merger upstream DOES now judge the marker on this same field
+///   (`apply_partition_shadowing` → `RowLiveness::marker_survives_floor`, #3094),
+///   substituting `RowLiveness::default()` when its floor covers it — but that drop is
+///   not RELIED on here. The floor it applied is the merge's own MAX partition
+///   `markedForDeleteAt`, whereas `cover` is read independently from the merged
+///   partition-tombstone carrier, and this function is the read path's own
+///   authoritative application of `ts <= markedForDeleteAt`. So a marker at/below
+///   `cover` is handled as shadowed rather than assumed impossible.
 /// - `max_data_cell_timestamp` — max write ts across the merged LIVE data cells
 ///   (never a tombstone's, #3094). `None` when the row surfaced no live data cell.
 /// - `has_deleted_data_cell` — mere PRESENCE of a merged cell TOMBSTONE, threaded

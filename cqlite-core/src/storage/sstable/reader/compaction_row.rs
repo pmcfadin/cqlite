@@ -167,11 +167,28 @@ pub enum CompactionBound {
 ///
 /// A row is visible to a `SELECT` iff it has at least one live data cell OR a
 /// LIVE primary-key liveness marker (`HAS_TIMESTAMP`, whose TTL — if any — has
-/// not expired). Compaction (the WRITE path) does NOT consult this — it retains
-/// an expired marker within gc_grace for byte-parity — so this is carry-only for
-/// the read side (Flight `do_get` / cross-generation read merge), never a write
-/// decision. No-heuristics (#28): both fields come from the authoritative
-/// on-disk row header, never inferred.
+/// not expired). Compaction (the WRITE path) never SERIALIZES these fields — it
+/// retains an expired marker within gc_grace for byte-parity, and
+/// `merge_entry_to_mutation` does not read `row_liveness` at all (the emitted row
+/// marker is derived from `MergeEntry::timestamp` and the surviving cells) — so the
+/// consumer of the values is the read side (Flight `do_get` / cross-generation read
+/// merge).
+///
+/// Since #3094 the write path does gate one BRANCH on
+/// [`Self::marker_survives_floor`]: `apply_partition_shadowing`'s
+/// `!has_data && !marker_live` arm. That branch cannot move an emitted byte. It is
+/// reachable only when no data cell survives the partition floor, and in that case
+/// the reconciled `MergeEntry::timestamp` — `merge::reconcile`'s max over the
+/// surviving cells, INCLUDING the clustering pseudo-cells, whose timestamp is the
+/// marker's own — is itself at/below the floor, so the arm concludes exactly what the
+/// pre-#3094 row-timestamp test concluded. The #3094 shape (a cell tombstone written
+/// after the deletion) never reaches it at all: `apply_partition_shadowing`'s
+/// `is_data` test is BY NAME, so that tombstone survives the floor as data and
+/// `has_data` stays `true` — there `marker_survives_floor` only selects the carried,
+/// never-serialized `row_liveness`.
+///
+/// No-heuristics (#28): every field comes from the authoritative on-disk row header,
+/// never inferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RowLiveness {
     /// Whether the row carried a primary-key liveness marker (`HAS_TIMESTAMP` —
@@ -211,23 +228,40 @@ impl RowLiveness {
     /// marker survives iff [`marker_timestamp`](Self::marker_timestamp) is strictly
     /// greater than `floor`.
     ///
-    /// `row_timestamp` is the RECONCILED ROW timestamp (the max over the row's
-    /// surviving cells). It is retained as a NECESSARY condition solely for the row
-    /// that carries no marker at all (`marker_timestamp == None`, i.e.
-    /// `has_marker == false`): there is no marker timestamp to compare, so the
-    /// row-level test stays the only condition and marker-less behaviour is
-    /// unchanged. (Purging a marker-less tombstone-only row is tracked separately
-    /// as issue #3121.)
+    /// `row_timestamp` — the RECONCILED ROW timestamp (the max over the row's
+    /// surviving cells) — is therefore consulted ONLY on the marker-LESS arm
+    /// (`marker_timestamp == None`, i.e. `has_marker == false`): there is no marker
+    /// timestamp to judge, so the row-level test stays the sole condition and
+    /// marker-less behaviour is unchanged. (Purging a marker-less tombstone-only row
+    /// is tracked separately as issue #3121.)
     ///
-    /// Issue #3094: `row_timestamp` ALONE is wrong. A cell TOMBSTONE written AFTER
-    /// the deletion raises the reconciled row timestamp above `floor` even when the
-    /// marker itself is covered, so a deleted marker was carried forward and
-    /// resurrected an all-null phantom row out of a deleted partition — reaching
-    /// every consumer that decides row visibility from the merged entry alone
-    /// (Flight's `producer.rs::entry_to_row`, shared by its row-stream and
-    /// pushed-down-aggregate producers).
+    /// Deliberately NOT an `&&` of both tests. `row_timestamp` ALONE is the #3094
+    /// defect: a cell TOMBSTONE written AFTER the deletion raises the reconciled row
+    /// timestamp above `floor` even when the marker itself is covered, so a deleted
+    /// marker was carried forward and resurrected an all-null phantom row out of a
+    /// deleted partition — reaching every consumer that decides row visibility from
+    /// the merged entry alone (Flight's `producer.rs::entry_to_row`, shared by its
+    /// row-stream and pushed-down-aggregate producers). But keeping `row_timestamp`
+    /// as an ADDITIONAL necessary condition on the marker-present arm is equally
+    /// non-Cassandra in the other direction: `BTreeRow.filter` never consults the
+    /// row's cell timestamps when deciding the liveness marker's fate, so a marker
+    /// strictly newer than `floor` whose data cells all predate it must still keep
+    /// the key-only row VISIBLE. Conjoining the two tests would HIDE that row, and
+    /// is unobservable today only because of an UNASSERTED cross-module invariant
+    /// (`merge::reconcile` folds `row_timestamp` over the surviving clustering
+    /// pseudo-cells too, whose timestamp is the marker's own, so
+    /// `row_timestamp >= marker_timestamp` happens to hold). Splitting the arms
+    /// removes the dependency on that invariant instead of documenting it: a future
+    /// cleanup that excludes pseudo-cells from that fold can no longer silently
+    /// hide a row Cassandra returns.
     pub fn marker_survives_floor(&self, row_timestamp: i64, floor: i64) -> bool {
-        row_timestamp > floor && self.marker_timestamp.is_none_or(|ts| ts > floor)
+        match self.marker_timestamp {
+            // Marker present: judged on its OWN write timestamp, exactly as
+            // `BTreeRow.filter` does — nothing about the row's cells participates.
+            Some(marker_ts) => marker_ts > floor,
+            // No marker timestamp: the row-level test is the only evidence there is.
+            None => row_timestamp > floor,
+        }
     }
 
     /// Fold two liveness markers across generations by Cassandra
@@ -535,9 +569,15 @@ mod row_liveness_tests {
         assert!(marker(900, None).marker_survives_floor(1_000, 500));
         // Equal timestamps: the deletion wins (`ts <= markedForDeleteAt`).
         assert!(!marker(500, None).marker_survives_floor(1_000, 500));
-        // The row timestamp remains a necessary condition: a row wholly at/below the
-        // floor never carries a marker forward, however new the marker claims to be.
-        assert!(!marker(900, None).marker_survives_floor(500, 500));
+        // The row timestamp is NOT a second necessary condition once a marker is
+        // present: `BTreeRow.filter` decides the marker's fate from `newInfo
+        // .timestamp()` alone and never consults the row's cell timestamps, so a
+        // marker strictly newer than the floor keeps the key-only row VISIBLE even
+        // when every data cell it coexists with is at/below the floor. (Conjoining
+        // the two tests would hide a row Cassandra returns; that this shape cannot
+        // currently reach here is an unasserted invariant of `merge::reconcile`'s
+        // row-ts fold, not a property of this rule.)
+        assert!(marker(900, None).marker_survives_floor(500, 500));
         // MARKER-LESS row (`marker_timestamp == None`): unchanged behaviour — the
         // row-level test is the sole condition (#3121 tracks purging such a row).
         assert!(RowLiveness::default().marker_survives_floor(1_000, 500));
