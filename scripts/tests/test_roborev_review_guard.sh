@@ -126,7 +126,7 @@ case "$cmd" in
     ;;
   show)
     case " $* " in
-      *" --prompt "*) printf '%s\n' "${STUB_PROMPT:-}"; exit 0 ;;
+      *" --prompt "*) printf '%b\n' "${STUB_PROMPT:-}"; exit 0 ;;
     esac
     record_read_blank && { printf 'null\n'; exit 0; }
     [ "${STUB_SHOW_JSON:-object}" != none ] || { printf 'null\n'; exit 0; }
@@ -172,6 +172,7 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   docs-only       wide refspec, markdown-only change, pushed (code-free census)
 #   mixed           one markdown + one .rs file (NOT code-free)
 #   two-code-commits  two commits, each touching a DIFFERENT .rs file
+#   renamed         main.rs renamed to renamed.rs (census sees both paths)
 #   workflow-yaml   only .github/workflows/ci.yml (a .yml extension is CODE, so this
 #                   must NOT be classified code-free)
 #   narrow          NARROW refspec (+refs/heads/main:refs/remotes/origin/main) —
@@ -225,6 +226,12 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf '# spec\n' >"$work/NOTES.md"
       git_q "$work" add README.md NOTES.md
       git_q "$work" commit -q -m 'docs only'
+      ;;
+    renamed)
+      # A rename: with `--no-renames` the census sees TWO paths (old deleted, new added)
+      # while the reviewer's diff may carry ONE `diff --git a/old b/new` header.
+      git_q "$work" mv main.rs renamed.rs
+      git_q "$work" commit -q -m 'rename main.rs'
       ;;
     two-code-commits)
       # Two commits touching DIFFERENT code files: a single-commit review would cover
@@ -391,7 +398,10 @@ TOKENS_INPUT_AT_FLOOR='{\"input_tokens\":25000,\"cached_input_tokens\":9000,\"to
 TOKENS_OLD_FIELD_NAMES='{\"input_tokens\":505625,\"cached_input_tokens\":387328,\"output_tokens\":6332}'
 
 # A prompt that mentions every path any fixture touches, and one that mentions none.
-PROMPT_WITH_PATHS='Review the following change. diff --git a/main.rs b/main.rs @@ fn helper() {} @@ diff --git a/README.md b/README.md diff --git a/NOTES.md b/NOTES.md'
+# `\n` stays escaped: it is embedded in a JSON string in the stub payload and rendered
+# by `printf %b` on the --prompt path, so the wrapper sees real line-anchored headers
+# exactly as the measured prompt does.
+PROMPT_WITH_PATHS='Review the following change.\ndiff --git a/main.rs b/main.rs\n@@ fn helper() {} @@\ndiff --git a/README.md b/README.md\ndiff --git a/NOTES.md b/NOTES.md'
 PROMPT_WITHOUT_PATHS='Please review the change on this branch. (no diff was attached to this prompt)'
 
 export STUB_JOB=4656
@@ -553,7 +563,7 @@ reset_stub
 # that code-free fails the run.
 work=$(make_fixture case_c2d workflow-yaml)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_PROMPT='Review this diff: diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml'
+STUB_PROMPT='Review this diff:\ndiff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml'
 run_wrapper "$work"
 assert_verdict 'case (c2d)' PASS 0
 assert_says 'case (c2d) a .yml file is not classified documentation' '^code-free: PASS$'
@@ -756,15 +766,15 @@ assert_says 'case (n) says the reviewer never received the diffs' 'the reviewer 
 assert_says 'case (n) every other check passed' '^vacuity-tier1: PASS$'
 assert_says 'case (n) review-completed still PASS' '^review-completed: PASS$'
 
-printf '== case (n2): an unretrievable prompt degrades visibly, never a silent skip ==\n'
+printf '== case (n2): an unretrievable prompt FAILs — a pass would rest on nothing ==\n'
 reset_stub
 work=$(make_fixture case_n2 pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT=''
 run_wrapper "$work"
-assert_verdict 'case (n2)' PASS 0
-assert_says 'case (n2) prompt-content UNAVAILABLE' '^prompt-content: UNAVAILABLE$'
-assert_says 'case (n2) degraded-signal wording' 'DEGRADED SIGNAL, never a silent skip'
+assert_verdict 'case (n2)' FAIL 1
+assert_says 'case (n2) prompt-content FAILs on an unretrievable prompt' '^prompt-content: FAIL \(prompt unretrievable — no evidence any diff was delivered\)$'
+assert_says 'case (n2) says a pass would rest on nothing' 'a pass here would rest on nothing'
 
 printf '== case (n3): prompt-content PASS reports the coverage it checked ==\n'
 reset_stub
@@ -1199,7 +1209,7 @@ reset_stub
 # that the whole range actually reached the reviewer.
 work=$(make_fixture case_x1 two-code-commits)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
-STUB_PROMPT='Review this diff: diff --git a/beta.rs b/beta.rs +fn beta() {}'
+STUB_PROMPT='Review this diff:\ndiff --git a/beta.rs b/beta.rs\n+fn beta() {}'
 run_wrapper "$work"
 assert_verdict 'case (x1)' FAIL 1
 assert_says 'case (x1) prompt-content names the uncovered code path' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
@@ -1224,7 +1234,7 @@ printf '== case (x2): the full range in the prompt PASSes ==\n'
 reset_stub
 work=$(make_fixture case_x2 two-code-commits)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
-STUB_PROMPT='Review this diff: diff --git a/alpha.rs b/alpha.rs diff --git a/beta.rs b/beta.rs diff --git a/main.rs b/main.rs'
+STUB_PROMPT='Review this diff:\ndiff --git a/alpha.rs b/alpha.rs\ndiff --git a/beta.rs b/beta.rs\ndiff --git a/main.rs b/main.rs'
 run_wrapper "$work"
 assert_verdict 'case (x2)' PASS 0
 assert_says 'case (x2) every code census path was covered' '^prompt-content: PASS \(2/2 code census paths present\)$'
@@ -1332,7 +1342,7 @@ STUB_PROMPT='Review the branch. The wrapper mentions main.rs in prose but no dif
 run_wrapper "$work"
 assert_verdict 'case (x5)' FAIL 1
 assert_says 'case (x5) a bare mention is not coverage' "^prompt-content: FAIL \(1/1 code census paths absent from the prompt\)\$"
-assert_says 'case (x5) the diff-header requirement is named' "have NO 'diff --git' header in the prompt"
+assert_says 'case (x5) the diff-header requirement is named' "appear on NEITHER side of any 'diff --git' header"
 
 printf '== case (x6): the REAL codex review shape counts as a completed review ==\n'
 reset_stub
@@ -1396,6 +1406,77 @@ assert_says 'case (x8) the range oracle worked' '^sha-assert: PASS$'
 assert_says 'case (x8) tokens came from the job row' '^vacuity-tier2: PASS$'
 assert_says 'case (x8) the model was confirmed' '^model: gpt-5\.6-sol$'
 fi  # HAVE_PYTHON3
+
+printf '== case (v1): a multiline "## Summary" heading form is scanned by tier 1 ==\n'
+reset_stub
+# codex, round 6 (BLOCKER): the region used to be the LINES containing "Summary:", so the
+# real heading form — "## Summary", blank line, then the prose — was missed entirely and a
+# vacuous clean review whose "no code changes" sentence sits under the heading PASSED.
+work=$(make_fixture case_v1 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_VERDICT_FIELD=P
+STUB_VERDICT=$'No issues found.\n\n## Summary\n\nThe diff contains no code changes to review.'
+run_wrapper "$work"
+assert_verdict 'case (v1)' FAIL 1
+assert_says 'case (v1) tier1 FAILs on the heading form' '^vacuity-tier1: FAIL \(vacuous verdict vs non-empty census\)$'
+assert_says 'case (v1) findings are NONE, so the gate does not exempt it' '^findings: NONE$'
+
+printf '== case (v2): a RENAME header covers both census paths ==\n'
+reset_stub
+# codex, round 6 (BLOCKER): the census runs with --no-renames (two paths) while the
+# reviewer's diff may have rename detection ON (one a/old b/new header). Requiring
+# same-path headers falsely rejected every review containing a detected rename.
+work=$(make_fixture case_v2 renamed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_PROMPT='Review this diff:\ndiff --git a/main.rs b/renamed.rs\nsimilarity index 100%'
+run_wrapper "$work"
+assert_verdict 'case (v2)' PASS 0
+assert_says 'case (v2) both rename sides count as covered' '^prompt-content: PASS \(2/2 code census paths present\)$'
+
+printf '== case (w3): a MISSING checks file FAILs closed ==\n'
+reset_stub
+# Same bar as the oracles split: an absent checks file would turn review-completed,
+# prompt-content, findings and both vacuity tiers into no-ops while the block read PASS.
+work=$(make_fixture case_w3 pushed)
+lonely_checks="$tmp/lonely-checks"
+mkdir -p "$lonely_checks"
+cp "$WRAPPER" "$lonely_checks/roborev-review.sh"
+cp "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" "$lonely_checks/"
+cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$lonely_checks/" 2>/dev/null || true
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+INVOKED="$tmp/invoked-$CASE_N.txt"
+: >"$INVOKED"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$lonely_checks/roborev-review.sh" --repo "$work" \
+  --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
+RC=$?
+assert_verdict 'case (w3)' FAIL 1
+assert_says 'case (w3) names the missing checks file' 'checks file .* is missing'
+assert_says 'case (w3) refuses to run with the checks disabled' 'Failing closed rather than proceeding'
+assert_says 'case (w3) the checks never claim a pass' '^review-completed: SKIP$'
+assert_never_enqueued 'case (w3)'
+
+printf '== case (w4): a TRUNCATED checks file FAILs closed ==\n'
+reset_stub
+work=$(make_fixture case_w4 pushed)
+trunc_checks="$tmp/trunc-checks"
+mkdir -p "$trunc_checks"
+cp "$WRAPPER" "$trunc_checks/roborev-review.sh"
+cp "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" "$trunc_checks/"
+cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$trunc_checks/" 2>/dev/null || true
+printf '# corrupt: defines nothing\n' >"$trunc_checks/roborev-review-checks.sh"
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+INVOKED="$tmp/invoked-$CASE_N.txt"
+: >"$INVOKED"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$trunc_checks/roborev-review.sh" --repo "$work" \
+  --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
+RC=$?
+assert_verdict 'case (w4)' FAIL 1
+assert_says 'case (w4) names the undefined check function' 'did not define roborev_check_review_completed'
+assert_never_enqueued 'case (w4)'
 
 printf '== case (w): a MISSING oracles file FAILs closed, never silently no-ops ==\n'
 reset_stub

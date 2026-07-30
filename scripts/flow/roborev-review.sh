@@ -164,13 +164,16 @@ ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS=200
 # sampling was a hole — a partial prompt naming just the sampled files passed.)
 
 # The job record is written ASYNCHRONOUSLY: measured empty for git_ref/status/model/
-# token_usage the instant `--wait` returned. MEASURED AGAIN in round 5: still
-# incomplete 15s after `--wait` returned on a 20-commit review, so the lag is NOT
-# sub-second. 45 x 1s is bounded and proportionate to a review that takes minutes.
+# token_usage the instant `--wait` returned — which turned out NOT to be an async
+# durability problem at all (round 6): `roborev show --json` nests the JOB row under a
+# "job" key and the extractor was matching the outer REVIEW row, which carries none of
+# those fields. With the nested row read as a first-class source the record is complete
+# in ONE read, so this is now a short SANITY retry rather than a wait: 5 x 1s. It still
+# fails closed if the record genuinely cannot be read.
 # Overridable ONLY as a timing knob (the hermetic self-test shortens it). Shortening
 # it can never weaken a check: fewer polls can only make the record MORE likely to be
 # reported DEGRADED, which is the fail-closed direction.
-JOB_RECORD_POLL_ATTEMPTS=${ROBOREV_JOB_RECORD_POLL_ATTEMPTS:-45}
+JOB_RECORD_POLL_ATTEMPTS=${ROBOREV_JOB_RECORD_POLL_ATTEMPTS:-5}
 JOB_RECORD_POLL_INTERVAL_SECS=${ROBOREV_JOB_RECORD_POLL_INTERVAL_SECS:-1}
 
 
@@ -179,6 +182,7 @@ PROGNAME=$(basename "$0")
 # is invoked from arbitrary worktrees and a $PWD-relative lookup would silently miss.
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ORACLES_FILE="$SCRIPT_DIR/roborev-review-oracles.sh"
+CHECKS_FILE="$SCRIPT_DIR/roborev-review-checks.sh"
 JOB_FACTS_TOOL="$SCRIPT_DIR/roborev-job-facts.py"
 
 usage() {
@@ -419,6 +423,27 @@ fi
 
 roborev_push_assert
 roborev_census
+
+# --- the per-review checks (sourced) ------------------------------------------
+# Same contract as the oracles file: resolved from BASH_SOURCE, and FAIL CLOSED if it is
+# missing or incomplete — an absent checks file would silently turn all five checks into
+# no-ops while every key still read PASS. Validated HERE, before any review is
+# enqueued, so a broken installation costs no review; the functions are CALLED further
+# down (steps 6a-6e), once the job facts exist.
+if [ ! -f "$CHECKS_FILE" ]; then
+  DETAILS+=("ERROR: the required checks file '$CHECKS_FILE' is missing, so review-completed, prompt-content, findings and both vacuity tiers cannot run. Failing closed rather than proceeding with those checks silently disabled — restore scripts/flow/roborev-review-checks.sh.")
+  finish FAIL 1
+fi
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=roborev-review-checks.sh
+. "$CHECKS_FILE"
+for roborev_required_check in roborev_check_review_completed roborev_check_prompt_content \
+  roborev_check_findings roborev_check_tier1 roborev_check_tier2; do
+  if [ "$(type -t "$roborev_required_check")" != function ]; then
+    DETAILS+=("ERROR: '$CHECKS_FILE' did not define $roborev_required_check, so that check cannot run. Failing closed — the file is truncated or corrupt.")
+    finish FAIL 1
+  fi
+done
 
 # --- step 4: invoke over the CENSUS RANGE + an EXPLICIT absolute repo (AC2) ----
 if ! command -v roborev >/dev/null 2>&1; then
@@ -700,283 +725,12 @@ else
   MODEL_LINE="$MODEL (UNCONFIRMED — no model field in the job record)"
 fi
 
-# --- step 6a: review-completed — POSITIVE evidence that a review HAPPENED ------
-# The allow-list of terminal verdict markers. A review that finished emits either a
-# findings block (a Findings heading / '**Severity**:' lines) or a Summary heading —
-# the shapes a real review actually emits. Anything else — a still-waiting job, a provider 400, a failed
-# job — matches NOTHING here and therefore cannot reach PASS. This is the inverse of
-# the old logic, which inferred success from the ABSENCE of a vacuous phrase.
-# Built from the REAL transcript (MEASURED, issue #2964 round 5), not from guesses:
-#     ## Review Findings
-#     - **Severity**: Medium
-#     ## Summary
-# A finished review is identified by a Findings heading, a `**Severity**:` line, a
-# Summary heading/label, or the older bracket / `Medium:` shapes other agents emit.
-# Anything else — a still-waiting job, a provider 400, a failed job — matches none of
-# them. The previous list was INVENTED rather than measured and rejected a GENUINE
-# codex review: the false-FAIL direction that gets a guard bypassed.
-VERDICT_MARKER_RE='^[[:space:]]*#{1,4}[[:space:]]*(review[[:space:]]+)?findings?|\*\*severity\*\*[[:space:]]*:|^[[:space:]]*#{1,4}[[:space:]]*summary|(^|[^[:alnum:]])summary:|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): |^[[:space:]]*findings?[[:space:]:]'
-if [ ! -r "$LOG" ]; then
-  REVIEW_COMPLETED="FAIL (transcript unreadable)"
-  DETAILS+=("ERROR: review-completed: the transcript at $LOG is not readable, so there is no evidence a review happened. Failing closed.")
-else
-  verdict_marker=0
-  if grep -qiE "$VERDICT_MARKER_RE" "$LOG"; then
-    verdict_marker=1
-  fi
-  if [ -n "$JOB_STATUS" ] && [ "$JOB_STATUS" != "done" ]; then
-    REVIEW_COMPLETED="FAIL (job status '$JOB_STATUS' is not done)"
-    DETAILS+=("ERROR: review-completed: the job record reports status '$JOB_STATUS', not 'done', so the review did NOT complete and nothing was certified. Failing closed — the absence of a vacuous phrase is never evidence that a review happened.")
-  elif [ "$verdict_marker" -eq 0 ]; then
-    REVIEW_COMPLETED="FAIL (no terminal verdict marker)"
-    DETAILS+=("ERROR: review-completed: the transcript carries NO terminal verdict marker — no Findings heading, no '**Severity**:' line and no Summary heading/label. A still-waiting job, a provider error (for example the #2433/#3037 model-mismatch 400) and a failed job all look like this, and none of them is a review. Failing closed. Transcript: $LOG")
-  else
-    REVIEW_COMPLETED="PASS"
-    if [ -z "$JOB_STATUS" ]; then
-      DETAILS+=("NOTICE: review-completed: the job record's 'status' was unavailable, so completion rests on the transcript's terminal verdict marker alone (the weaker of the two signals).")
-    fi
-  fi
-fi
-
-# --- step 6b: prompt-content — DETERMINISTIC: did the reviewer GET the diff? ----
-# The strongest available check: it reads the prompt actually sent to the agent and
-# looks for OUR census's own file paths in it. Absent paths mean the reviewer never
-# received the diff — the T1/T2 family and any future variant — threshold-free, and
-# judged against our own authoritative census rather than the reviewer's prose.
-# A whitespace-only prompt file is a RETRIEVAL FAILURE, not evidence the paths are
-# absent: UNAVAILABLE (degraded), never a FAIL, or an unsupported roborev build would
-# false-FAIL every run.
-prompt_bytes=$(tr -d '[:space:]' <"$PROMPT_FILE" | wc -c | tr -d '[:space:]')
-if [ "${prompt_bytes:-0}" -eq 0 ]; then
-  PROMPT_CONTENT="UNAVAILABLE"
-  DETAILS+=("NOTICE: prompt-content: UNAVAILABLE — the prompt sent to the reviewer could not be retrieved for job '$JOB' (tried the job record's 'prompt' field, then 'roborev show <job> --prompt'). DEGRADED SIGNAL, never a silent skip: the other deterministic checks still govern and this can never upgrade a FAIL to a PASS.")
-else
-  # Check the CODE subset of the census, not every path. MEASURED (issue #2964,
-  # round 5): roborev EXCLUDES non-code paths from the diff it builds — on a census of
-  # 22 markdown + 5 code files, the prompt carried diff headers for exactly the 5 code
-  # files. That is also the empirical mechanism behind the "code-free diff silently
-  # discarded" trigger: there is literally nothing left to review. Checking all 27
-  # would false-FAIL every branch that touches documentation, which is most of them.
-  # EVERY code path is checked, and against its EXACT diff header rather than a bare
-  # substring (codex, round 5): sampling a subset let a partial prompt pass by naming
-  # the sampled files, and a substring match is satisfied by any incidental mention —
-  # including this wrapper quoting a path in a comment. A `diff --git a/P b/P` header is
-  # present if and only if the reviewer was sent that file's diff. Exact-header matching
-  # is cheap enough that the sampling cap is gone.
-  checked_paths=("${census_code_paths[@]}")
-  census_total=${#census_code_paths[@]}
-  missing_paths=()
-  for census_path in "${checked_paths[@]}"; do
-    grep -Fq -- "diff --git a/$census_path b/$census_path" "$PROMPT_FILE" \
-      || missing_paths+=("$census_path")
-  done
-  if [ "${#missing_paths[@]}" -gt 0 ]; then
-    PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} code census paths absent from the prompt)"
-    DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths have NO 'diff --git' header in the prompt actually sent to the reviewer, so the reviewer never received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a prompt that does not mention its files cannot have reviewed them. Missing (first 10):")
-    printed=0
-    for census_path in "${missing_paths[@]}"; do
-      [ "$printed" -lt 10 ] || break
-      DETAILS+=("  $census_path")
-      printed=$((printed + 1))
-    done
-  else
-    PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total code census paths present)"
-  fi
-fi
-
-# --- step 6c: findings — STRUCTURED first, prose only inside the block ----------
-# Tier 1 (step 6d) is gated on this answer, so deriving it from a regex over the WHOLE
-# transcript was a real weakness (codex, round 5): incidental or QUOTED severity text
-# such as "[Low]" anywhere in the output set findings: PRESENT, which then exempted a
-# genuinely vacuous "no code changes" verdict from the authoritative tier-1 failure. A
-# gate is only as strong as its input, so:
-#   1. STRUCTURED FIRST — the job record's `verdict` field ("F" = the review reported
-#      findings; a pass letter/true = it did not). Measured on real jobs.
-#   2. PROSE FALLBACK IS SCOPED — only the FINDINGS BLOCK (from a `Findings`/`## Findings`
-#      header up to the `Summary:` line) is scanned, never the whole transcript.
-#   3. CONTRADICTIONS FAIL — "clean" (verdict pass, or exit 0) while the findings block
-#      DOES carry severity markers is an INCONSISTENT state. It fails the run and, being
-#      neither PRESENT nor NONE, cannot exempt tier 1 either.
-FINDINGS_BLOCK_FILE="$LOG.findings"
-# The block runs from a Findings heading/label to the Summary heading/label — the
-# measured real shapes. Everything outside it (a quoted "[Low]" in prose, a severity
-# word inside a Problem sentence) is ignored. The terminator must be a LINE-INITIAL
-# Summary label: matched mid-sentence it closed the block early when a finding's own
-# prose contained the word, under-counting the findings. (Under-counting is the
-# fail-closed direction for the tier-1 gate — fewer markers make a vacuity claim MORE
-# likely to fail — but the count is reported to a human, so it should be right.)
-{ awk 'BEGIN { inblock = 0 }
-       tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*(review[[:space:]]+)?findings?/ { inblock = 1; next }
-       tolower($0) ~ /^[[:space:]]*findings?[[:space:]]*:/ { inblock = 1; next }
-       tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*summary/ { inblock = 0 }
-       tolower($0) ~ /^[[:space:]]*summary[[:space:]]*:/ { inblock = 0 }
-       inblock { print }' "$LOG" 2>/dev/null || true; } >"$FINDINGS_BLOCK_FILE"
-block_marker_count=$({ grep -oiE '\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
-block_marker_count=${block_marker_count:-0}
-
-verdict_findings="unknown"
-case "$JOB_VERDICT" in
-  P|p|PASS|pass|Pass|true|clean) verdict_findings="none" ;;
-  F|f|FAIL|fail|Fail|false) verdict_findings="present" ;;
-esac
-
-review_ran=0
-if [ -n "$JOB_STATUS" ]; then
-  case "$JOB_STATUS" in "done") review_ran=1 ;; esac
-elif [ "$REVIEW_COMPLETED" = "PASS" ]; then
-  review_ran=1
-fi
-
-if [ "$REVIEW_RC" -eq 0 ]; then
-  ROBOREV_EXIT="PASS"
-elif [ "$review_ran" -eq 1 ]; then
-  ROBOREV_EXIT="FINDINGS (exit $REVIEW_RC)"
-  DETAILS+=("ERROR: roborev-exit: FINDINGS — 'roborev review' exited $REVIEW_RC because the review REPORTED FINDINGS. The review is GENUINE (job status '${JOB_STATUS:-unknown}') and the reviewer did NOT malfunction: do not retry it and do not bypass it. TRIAGE AND FIX the findings in the transcript ($LOG), then push and re-review. RESULT is FAIL because a review with open findings is not \"roborev clean\".")
-else
-  ROBOREV_EXIT="ERROR (exit $REVIEW_RC)"
-  DETAILS+=("ERROR: roborev-exit: ERROR — 'roborev review' exited $REVIEW_RC and the job did not complete (status '${JOB_STATUS:-unavailable}'). The REVIEWER itself failed, so nothing was certified — this is an infra condition, not a findings outcome: check the daemon ('roborev status'), the agent's credentials, and the transcript at $LOG.")
-fi
-
-case "$verdict_findings" in
-  present)
-    if [ "$block_marker_count" -gt 0 ]; then
-      FINDINGS="PRESENT ($block_marker_count)"
-    else
-      FINDINGS="PRESENT"
-    fi
-    ;;
-  none)
-    if [ "$block_marker_count" -gt 0 ]; then
-      FINDINGS="INCONSISTENT (verdict clean, $block_marker_count findings marker(s))"
-      DETAILS+=("ERROR: findings: the job record's verdict '$JOB_VERDICT' says the review was clean, but its findings block carries $block_marker_count severity marker(s). One of the two is wrong, so the findings state is INCONSISTENT — failed closed, and it cannot exempt the tier-1 vacuity check either.")
-    else
-      FINDINGS="NONE"
-    fi
-    ;;
-  *)
-    # No structured verdict: fall back to the exit code, still refusing to trust prose
-    # over the whole transcript.
-    if [ "$ROBOREV_EXIT" = "PASS" ]; then
-      if [ "$block_marker_count" -gt 0 ]; then
-        FINDINGS="INCONSISTENT (exit 0, $block_marker_count findings marker(s))"
-        DETAILS+=("ERROR: findings: 'roborev review' exited 0 (which means no findings) while the findings block carries $block_marker_count severity marker(s), and the job record has no structured verdict to arbitrate. INCONSISTENT — failed closed, and it cannot exempt the tier-1 vacuity check.")
-      else
-        FINDINGS="NONE"
-      fi
-    else
-      case "$ROBOREV_EXIT" in
-        FINDINGS*)
-          if [ "$block_marker_count" -gt 0 ]; then
-            FINDINGS="PRESENT ($block_marker_count)"
-          else
-            FINDINGS="PRESENT"
-          fi
-          ;;
-        *) FINDINGS="UNKNOWN" ;;
-      esac
-    fi
-    ;;
-esac
-
-# --- step 6d: tier 1 — AUTHORITATIVE, but gated on `findings:` -----------------
-# The reviewer's own summary claiming there are no code changes, against a census we
-# measured as NON-EMPTY, is trigger T3 — and a merge-gating check must FAIL on it,
-# not merely note it. But the naive form of this check false-FAILs: it once matched
-# anywhere in the transcript, so a review that merely QUOTED the phrase was failed as
-# vacuous (this very wrapper's diff carries the phrase in several files). Agents
-# learning to WAIVE tier-1 failures would restore the defect the guard exists to stop.
-#
-# Two things make the strict version safe:
-#   1. ANCHORING — only the verdict/summary region is matched (the lines carrying a
-#      `Summary:`), never arbitrary finding bodies.
-#   2. GATING ON `findings:` — the deterministic disambiguator computed in step 6c:
-#        findings: NONE     the reviewer is CLAIMING CLEANLINESS, so the phrase is a
-#                           VACUITY CLAIM about a non-empty census  => HARD FAIL
-#        findings: PRESENT  the reviewer demonstrably analysed the diff and produced
-#                           findings, so the phrase is DISCUSSION   => advisory NOTICE
-#        findings: UNKNOWN  we cannot tell whether a review happened. Treated as
-#                           claiming cleanliness => HARD FAIL, because fail-closed is
-#                           the correct direction when the state is unknowable; an
-#                           unparseable findings state must never DISARM this check.
-# `code-free:` remains an independent, strictly earlier check (it fires pre-enqueue).
-VERDICT_REGION_FILE="$LOG.verdict"
-{ grep -iE '(^|[^[:alnum:]])summary:' "$LOG" 2>/dev/null || true; } >"$VERDICT_REGION_FILE"
-if [ ! -s "$VERDICT_REGION_FILE" ]; then
-  TIER1="UNAVAILABLE"
-elif grep -qi 'no code changes' "$VERDICT_REGION_FILE"; then
-  case "$FINDINGS" in
-    PRESENT*)
-      TIER1="NOTICE (phrase present in a findings-bearing review)"
-      DETAILS+=("NOTICE: vacuity-tier1 (advisory here, does not fail the run): the review's summary mentions 'no code changes' while the census is NON-EMPTY ($CENSUS), but the review reported findings ($FINDINGS) — so it demonstrably analysed the diff and the phrase is discussion, not a vacuity claim.")
-      ;;
-    *)
-      TIER1="FAIL (vacuous verdict vs non-empty census)"
-      DETAILS+=("ERROR: vacuity-tier1: the review's summary claims there are NO CODE CHANGES to review while the locally computed census is NON-EMPTY: $CENSUS (${BASE}...HEAD), and the review reported NO findings (findings: $FINDINGS) — so it is CLAIMING CLEANLINESS on a change it did not review. The reviewer's claim contradicts a fact we measured ourselves: this run is NOT reportable as \"roborev clean\".")
-      if [ "$FINDINGS" = "UNKNOWN" ]; then
-        DETAILS+=("ERROR: vacuity-tier1: the findings state is UNKNOWN (the reviewer errored), which is treated as claiming cleanliness — fail-closed is the correct direction when we cannot tell whether a review happened.")
-      fi
-      ;;
-  esac
-else
-  TIER1="PASS"
-fi
-
-# --- step 6e: tier 2 — token accounting; drift is FAILED, absence is not -------
-# Three distinguishable states (see scripts/flow/roborev-job-facts.py):
-#   absent      -> UNAVAILABLE. A build that reports no token data is a legitimate
-#                  difference, not a signal.
-#   unparseable -> FAIL. A token field IS present but no documented alias resolved to
-#                  a number: EXTERNAL-TOOL DRIFT. Chosen as a FAIL rather than a
-#                  NOTICE because this is exactly how the tier was silently disarmed
-#                  (a rename or a `null` degraded it to a non-failing UNAVAILABLE
-#                  while the real counts were the vacuous baseline and the run
-#                  PASSED). A drift FAIL costs one re-run after a one-line alias
-#                  addition; a silently disarmed guard costs an unreviewed merge.
-#   parsed      -> evaluate the thresholds.
-case "${TOKEN_STATE:-}" in
-  parsed)
-    TOKENS="input=$TOK_IN cached=$TOK_CACHED output=${TOK_OUT:-unknown}"
-    if [ "$JOB_HAS_TOKEN_DATA" = false ]; then
-      DETAILS+=("NOTICE: vacuity-tier2: the job record says has_token_data=false yet readable counts are present — a payload inconsistency (drift signal). The counts are used, because they are what the vacuity check asserts on.")
-    fi
-    tier2_trips=()
-    if [ "$TOK_IN" -lt "$ROBOREV_VACUITY_MIN_INPUT_TOKENS" ]; then
-      tier2_trips+=("observed input=$TOK_IN < ROBOREV_VACUITY_MIN_INPUT_TOKENS=$ROBOREV_VACUITY_MIN_INPUT_TOKENS (highest observed VACUOUS run: 18801)")
-    fi
-    if [ "$TOK_CACHED" -eq 0 ]; then
-      tier2_trips+=("observed cached=$TOK_CACHED == 0 (every observed vacuous run reports exactly 0; the most false-positive-prone term, retained fail-closed)")
-    fi
-    if [ "${#tier2_trips[@]}" -gt 0 ]; then
-      TIER2="FAIL (vacuous token signature)"
-      DETAILS+=("ERROR: vacuity-tier2: the token accounting for job '$JOB' carries the vacuous signature against a NON-EMPTY census ($CENSUS):")
-      for trip in "${tier2_trips[@]}"; do
-        DETAILS+=("  $trip")
-      done
-    else
-      TIER2="PASS"
-    fi
-    # ADVISORY ONLY — never a FAIL condition (see the constants block: a genuine
-    # CLEAN review and a vacuous one emit near-identical output token counts).
-    if [ -n "$TOK_OUT" ] && [ "$TOK_OUT" -lt "$ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS" ]; then
-      DETAILS+=("NOTICE: vacuity-tier2 advisory (NOT a failure condition): observed output=$TOK_OUT < ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS=$ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS. Output tokens cannot discriminate a genuine CLEAN review from a vacuous one (both emit roughly 20-60), so this is reported and never asserted.")
-    fi
-    ;;
-  unparseable)
-    TOKENS="UNAVAILABLE"
-    TIER2="FAIL (token accounting present but unparseable — drift)"
-    DETAILS+=("ERROR: vacuity-tier2: job '$JOB' DOES carry token accounting, but none of the documented field aliases resolved to a number — the installed roborev build has DRIFTED from the shape this guard reads. That is failed closed on purpose: a silently unreadable payload is exactly how this tier was disarmed while the real counts were the vacuous baseline. Add the new field name to scripts/flow/roborev-job-facts.py (INPUT/CACHED/OUTPUT_TOKEN_KEYS) and re-run; do not waive it.")
-    ;;
-  absent)
-    TOKENS="UNAVAILABLE"
-    TIER2="UNAVAILABLE"
-    DETAILS+=("NOTICE: vacuity-tier2: UNAVAILABLE — the job record for '$JOB' carries no token accounting at all. A build that reports none is a legitimate difference, not a signal, so this is a degraded-signal notice and never a silent skip: the deterministic checks still govern, and an unavailable tier 2 can never turn a FAIL into a PASS.")
-    ;;
-  *)
-    TOKENS="UNAVAILABLE"
-    TIER2="UNAVAILABLE"
-    DETAILS+=("NOTICE: vacuity-tier2: UNAVAILABLE — the structured job record for '$JOB' could not be read at all (no python3, no extractor, or no matching job in 'roborev show --json' / 'roborev list --json'). DEGRADED SIGNAL, never a silent skip.")
-    ;;
-esac
+# --- steps 6a-6e: the per-review checks (defined in the sourced checks file) ---
+roborev_check_review_completed
+roborev_check_prompt_content
+roborev_check_findings
+roborev_check_tier1
+roborev_check_tier2
 
 # --- step 7: the verdict ------------------------------------------------------
 # The findings COUNT is best-effort (it counts severity markers in the transcript);

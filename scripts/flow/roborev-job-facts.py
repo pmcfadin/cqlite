@@ -77,10 +77,24 @@ def objects(node):
 
 
 def find_job(data, want):
+    # `roborev show <id> --json` returns a REVIEW row whose top level carries
+    # [agent, closed, created_at, id, job, job_id, output, prompt, uuid, verdict_bool]
+    # and nests the JOB row — git_ref, status, model, requested_model, token_usage,
+    # verdict — under a "job" key. Both objects answer to the same id, so returning the
+    # FIRST id match handed back the review row, which has none of the fields the
+    # asserts need. Prefer an id match that actually carries git_ref (measured, issue
+    # #2964 round 6); fall back to the first match only if none does.
+    matches = []
     for obj in objects(data):
         for key in ("id", "job_id", "job"):
-            if key in obj and str(obj[key]) == want:
-                return obj
+            if key in obj and not isinstance(obj[key], (dict, list)) and str(obj[key]) == want:
+                matches.append(obj)
+                break
+    for obj in matches:
+        if "git_ref" in obj:
+            return obj
+    if matches:
+        return matches[0]
     # A `show --json` payload may be the single job with no id echoed back. Accept that
     # ONLY when the payload IS one top-level object (codex, issue #2964 round 5): for a
     # list or a nested collection the first object carrying git_ref/token data can be an
