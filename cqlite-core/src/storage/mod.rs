@@ -2,11 +2,19 @@
 
 /// Shared, bytes-bounded, sharded decompressed-chunk cache (issue #1567).
 pub mod cache;
-/// TEST-ONLY producer-fault injection for the query row stream (issue #3106):
-/// the deterministic seam a test uses to kill the producer thread mid-stream and
-/// prove the consumer fails closed instead of reporting a clean, silently
-/// truncated end of stream. Inert (and, for the arming API, non-existent) in a
-/// production build.
+/// TEST-ONLY fault injection for the query row stream's producer boundaries
+/// (issue #3106): the deterministic seam a test uses to kill a producer
+/// thread/task mid-stream and prove the consumer fails closed instead of
+/// reporting a clean, silently truncated end of stream.
+///
+/// `pub(crate)` in a production build — the module then has NO public items at
+/// all (every arming symbol is cfg'd out), so publishing it would advertise an
+/// empty module. It becomes `pub` only where the arming surface exists, i.e. for
+/// in-crate tests and for the `producer-fault-injection` feature that
+/// `cqlite-flight` enables from its `[dev-dependencies]`.
+#[cfg(not(any(test, feature = "producer-fault-injection")))]
+pub(crate) mod producer_fault;
+#[cfg(any(test, feature = "producer-fault-injection"))]
 pub mod producer_fault;
 /// Always-on read-path ARM probes (issue #3058): explicit markers for
 /// "the k-way merge ran" vs "the single-generation query scan ran".
@@ -537,7 +545,7 @@ impl StorageEngine {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>> {
+    ) -> Result<sstable::reader::BatchedScanStream> {
         record_table_scan_call();
         self.sstables
             .scan_stream_batched(table_id, start_key, end_key, schema, buffer_size)
