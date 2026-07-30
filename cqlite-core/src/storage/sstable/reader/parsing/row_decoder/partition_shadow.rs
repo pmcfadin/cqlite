@@ -237,6 +237,39 @@ impl PartitionShadow {
         let expired = eff_exp.is_some_and(|e| e <= now);
         shadowed || expired
     }
+
+    /// Whether a decoded SIMPLE CELL must be DROPPED from a user-facing row
+    /// because it is a CELL TOMBSTONE — i.e. a deleted cell (issue #3094).
+    ///
+    /// A deleted cell is ABSENT from the row Cassandra reconciles: `Cell.isLive`
+    /// is false for a tombstone, so the `Row`'s `ColumnData` carries nothing for
+    /// that column and CQL renders it NULL. Dropping it here is what makes
+    /// `SELECT` return NULL instead of surfacing the raw
+    /// `Value::Tombstone(CellTombstone)` that `cell_value.rs` decodes. Before
+    /// this drop that tombstone reached the row carrier, and the Arrow encoder
+    /// correctly fail-closed (#1485) on it, erroring the WHOLE Flight `do_get`
+    /// stream (`column 'w': expected Text value, got Tombstone(..)`).
+    ///
+    /// `user_facing` is the SAME discriminator the #1741 per-cell shadow/TTL
+    /// filter uses: `true` exactly when a [`PartitionShadow`] was threaded into
+    /// the decode (a query read). The PHYSICAL consumers — compaction merge
+    /// input, sstabledump parity, delta scan — thread `None` and MUST keep
+    /// receiving the tombstone with its authoritative deletion timestamp (#505),
+    /// so their streams stay byte-unchanged.
+    ///
+    /// A tombstone is additionally never folded into the row liveness aggregate
+    /// (`max_data_cell_timestamp` / `has_live_forever_data_cell`): it is not live
+    /// data, so it can neither keep a row visible against a covering deletion nor
+    /// mark the row live-forever. That fold is skipped at the call site.
+    ///
+    /// This mirrors the multi-generation read path, whose merged-cell filter
+    /// (`generation_merge::ReadVisibility::filter_live`) already skipped
+    /// `Value::Tombstone` cells, and the collection path, which already skipped
+    /// tombstoned elements — so all three read paths now agree.
+    #[inline]
+    pub(crate) fn cell_tombstone_dropped(user_facing: bool, is_cell_tombstone: bool) -> bool {
+        user_facing && is_cell_tombstone
+    }
 }
 
 /// Whether a partition-level deletion at `cover` (µs, `markedForDeleteAt`) shadows
@@ -557,6 +590,30 @@ mod tests {
         assert!(f(Some(2_000), Some(2_000)));
         // Data strictly newer than the deletion → survives.
         assert!(!f(Some(2_000), Some(3_000)));
+    }
+
+    /// Issue #3094: the cell-tombstone drop decision. A DELETED CELL is dropped
+    /// from a user-facing row (so the column reads NULL) and kept verbatim on the
+    /// physical read paths (so compaction / sstabledump / delta-scan streams stay
+    /// byte-unchanged with their authoritative deletion timestamps, #505).
+    ///
+    /// Revert-verify: hardcoding `false` (the pre-fix behaviour) makes the first
+    /// assertion FALSE and a deleted cell reaches the Arrow encoder as a raw
+    /// `Value::Tombstone`, failing the whole `do_get` stream; hardcoding `true`
+    /// makes the third assertion FALSE and silently strips cell tombstones out of
+    /// the compaction merge input, resurrecting deleted cells on rewrite.
+    #[test]
+    fn cell_tombstone_dropped_only_on_the_user_facing_path() {
+        use super::PartitionShadow as PS;
+        // User-facing read + a cell tombstone → dropped (column reads NULL).
+        assert!(PS::cell_tombstone_dropped(true, true));
+        // User-facing read + a live cell → kept (the tombstone rule must not
+        // touch live data; its shadow/TTL fate is `cell_shadowed_or_expired`).
+        assert!(!PS::cell_tombstone_dropped(true, false));
+        // PHYSICAL read + a cell tombstone → kept verbatim (#505).
+        assert!(!PS::cell_tombstone_dropped(false, true));
+        // Physical read + a live cell → kept.
+        assert!(!PS::cell_tombstone_dropped(false, false));
     }
 
     /// Issue #1741 (Finding 2, header-level consequence): a row whose aggregated

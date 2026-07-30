@@ -641,39 +641,14 @@ impl V5CompressedLegacyParser {
                         // `emit` is false for a DROPPED column (issue #1080 Part 2): we still
                         // advanced `offset` to consume its bytes, but emit no cell/metadata.
                         if emit {
-                            // Issue #1741 read-side shadowing aggregate (scalars only,
-                            // no allocation). A cell tombstone is not live data. A live
-                            // cell contributes its effective write timestamp and, if
-                            // expiring (explicit per-cell TTL, or USE_ROW_TTL inheriting
-                            // the row's expiry), its expiry; otherwise it is live-forever.
-                            // Computed BEFORE the metadata block, which moves `cell_exp`.
-                            //
-                            // Issue #3094: a SIMPLE CELL TOMBSTONE is deleted data, so a
-                            // user-facing `SELECT` must not surface it AT ALL — the column
-                            // reads NULL (Cassandra returns the row with that column absent
-                            // from the reconciled `Row`; `Cell.isLive` is false for a
-                            // tombstone, so `ColumnData` carries nothing for it). Before
-                            // this drop the raw `Value::Tombstone(CellTombstone)` reached
-                            // the row carrier and the Arrow encoder correctly refused to
-                            // coerce it (#1485), failing the WHOLE Flight `do_get` stream
-                            // with `column 'w': expected Text value, got Tombstone(..)`.
-                            //
-                            // Scoped to the user-facing read path (`cell_ctx.is_some()`,
-                            // i.e. a `PartitionShadow` was threaded in) exactly like the
-                            // #1741 per-cell shadow/TTL filter below: the PHYSICAL read
-                            // paths (compaction merge input, sstabledump parity, delta
-                            // scan) pass `None` and MUST keep receiving the tombstone with
-                            // its authoritative deletion timestamp (#505), so those streams
-                            // stay byte-unchanged.
-                            //
-                            // A tombstone is never folded into the row liveness aggregate
-                            // (`agg_*` below stays untouched for it): it is not live data,
-                            // so it can neither keep a row visible against a covering
-                            // deletion nor mark the row live-forever.
-                            let mut dropped = false;
-                            if matches!(value, Value::Tombstone(_)) {
-                                dropped = cell_ctx.is_some();
-                            } else {
+                            // Issue #1741 read-side shadow aggregate (scalars only, no
+                            // allocation) + the #3094 DELETED-CELL-reads-NULL drop (see
+                            // `PartitionShadow::cell_tombstone_dropped`). Runs BEFORE the
+                            // metadata block, which moves `cell_exp`.
+                            let tomb = matches!(value, Value::Tombstone(_));
+                            let mut dropped =
+                                PartitionShadow::cell_tombstone_dropped(cell_ctx.is_some(), tomb);
+                            if !tomb {
                                 let eff_ts = cell_own_ts.or(row_header.timestamp);
                                 // A USE_ROW_TTL cell inherits the ROW's expiry. For a
                                 // TTL-bearing INSERT that expiry is the pk-liveness
