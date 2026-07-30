@@ -404,19 +404,9 @@ impl SSTableReader {
     /// post-reconciliation early break (`drive_merge`) stops pulling, and the
     /// cancel-aware Drop teardown (cancel → drop receiver → join) then stops the
     /// producer promptly — bounding work WITHOUT any risk of under-return.
-    ///
-    /// `caller_schema` (issue #3097): the caller's AUTHORITATIVE schema, threaded
-    /// on to [`stream_all_partitions_via_full_index`](Self::stream_all_partitions_via_full_index)
-    /// so a `V5_0Uncompressed` reader (whose `nb` header carries no embedded
-    /// schema, hence a header-derived schema whose clustering columns bear the
-    /// placeholder `clustering_key` name) decodes clustering columns under the
-    /// caller's real names. `None` keeps the reader's own four-tier lookup — which
-    /// is exactly what the compaction caller passes today, so its byte-parity
-    /// resolution is unchanged.
     pub(in crate::storage::sstable::reader) async fn stream_all_partitions_cancellable<F>(
         &self,
         scan_cancel: &ScanCancel,
-        caller_schema: Option<&TableSchema>,
         mut emit: F,
     ) -> Result<()>
     where
@@ -424,7 +414,7 @@ impl SSTableReader {
     {
         if self.index_reader.is_some() && self.bti_partitions_db.is_none() {
             match self
-                .stream_all_partitions_via_full_index(scan_cancel, None, caller_schema, &mut emit)
+                .stream_all_partitions_via_full_index(scan_cancel, None, None, &mut emit)
                 .await?
             {
                 FullIndexStreamOutcome::Streamed => return Ok(()),
@@ -450,10 +440,7 @@ impl SSTableReader {
         // results, one call per RETURNED ROW; a second increment here would
         // double-count every partition body relative to what was actually decoded.
         let table_id = self.scan_table_id();
-        // Prefer the caller's authoritative schema (issue #3097), falling back to
-        // the reader's own header schema when the caller passed `None` (the
-        // compaction caller's behaviour, unchanged).
-        let schema = caller_schema.or(self.schema.as_deref());
+        let schema = self.schema.as_deref();
         let entries = self
             .sequential_scan(&table_id, None, None, None, schema, scan_cancel)
             .await?;

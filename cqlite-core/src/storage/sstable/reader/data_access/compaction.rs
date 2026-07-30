@@ -595,7 +595,7 @@ impl SSTableReader {
         // and would hit the no-schema `parse_block_entries` error; the stitch+parse
         // drain below decodes BTI correctly (as `bti_scan_with_metadata` does).
         if !self.requires_chunk_stitching() && self.bti_partitions_db.is_none() {
-            self.stream_all_partitions_cancellable(scan_cancel, schema, |(key, value)| {
+            self.stream_all_partitions_cancellable(scan_cancel, |(key, value)| {
                 let row =
                     super::super::compaction_row::CompactionRow::from_legacy_value(key, value, 0);
                 emit(row)
