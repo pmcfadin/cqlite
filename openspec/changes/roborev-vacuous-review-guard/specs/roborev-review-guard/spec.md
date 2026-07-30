@@ -1,58 +1,269 @@
 # roborev-review-guard — delta for roborev-vacuous-review-guard (issue #2964)
 
+**Architecture note (read this first).** The as-built guard is **DETERMINISTIC-PRIMARY**: the checks
+that carry the verdict are the ones judged against data the wrapper obtains ITSELF — the remote
+(`git ls-remote`), its own `git` diff census, its own code-free classification of that census, the job
+record's structured `git_ref`/`status`, and the census's own file paths inside the prompt actually sent
+to the reviewer. Reviewer PROSE matching and TOKEN accounting are **corroborating** signals layered on
+top. Any requirement below that reads like "match a phrase" is subordinate to the deterministic set by
+design, and a PASS is reachable ONLY on POSITIVE evidence that a review completed — never on the
+absence of a bad phrase.
+
 **Acceptance-criterion → requirement map** (issue #2964's numbered ACs):
 
 | AC | Requirement(s) |
 |----|----------------|
-| 1 — an empty resolved diff on a non-empty requested range must fail loudly, never "No issues found" | *A non-empty local diff census with a vacuous review verdict is a hard failure*; *A genuinely empty census reports NOTHING-TO-REVIEW, never a pass*; *The wrapper emits a machine-greppable summary block with a terminal verdict*; *A non-zero exit from the roborev process is a hard failure under its own greppable key* |
-| 2 — invoke with explicit SHA + explicit `--repo`, and assert the enqueued SHA equals branch HEAD | *The sanctioned invocation is by explicit SHA and explicit repository path*; *The reviewed SHA is asserted against branch HEAD*; *Every flow-\* roborev call site routes through the sanctioned wrapper* |
-| 3 — push the implementation commit before reviewing | *The branch is asserted pushed before any review is requested* |
-| 4 — doctrine updated (CLAUDE.md + the `agents-developing/roborev-findings` page) | *Doctrine records the verify-the-reviewed-SHA rule and the hard-fail verdict text* |
-| 5 — a regression check proves a worktree-launched review reviews the worktree's HEAD | *A hermetic regression check pins every vacuity trigger and is wired into the agent gate*; *A documented live worktree probe proves the worktree's HEAD is what gets reviewed* |
+| 1 — an empty resolved diff on a non-empty requested range must fail loudly, never "No issues found" | *A PASS requires positive evidence that a review completed*; *The locally computed diff census is the authoritative oracle*; *The reviewer must demonstrably have received the census's own files*; *A code-free census is a deterministic failure before any review is enqueued*; *A vacuous verdict claim against a non-empty census fails, gated on the findings state*; *Token accounting corroborates the deterministic checks and may only fail closed*; *A genuinely empty census reports NOTHING-TO-REVIEW, never a pass*; *A findings-bearing review is distinguished from a reviewer error, both under their own greppable keys*; *The wrapper emits a machine-greppable summary block with a terminal verdict* |
+| 2 — invoke with explicit SHA + explicit `--repo`, and assert the enqueued SHA equals branch HEAD | *The sanctioned invocation is by explicit SHA and explicit repository path*; *The reviewed SHA is asserted against branch HEAD using the job record as the oracle*; *A model substitution is surfaced, never silent*; *Every roborev call site and doctrine surface routes through the sanctioned wrapper* |
+| 3 — push the implementation commit before reviewing | *The branch is asserted pushed by asking the REMOTE, never a local mirror ref* |
+| 4 — doctrine updated (CLAUDE.md + the `agents-developing/roborev-findings` page) | *Doctrine records the four roborev rules*; *Every roborev call site and doctrine surface routes through the sanctioned wrapper* |
+| 5 — a regression check proves a worktree-launched review reviews the worktree's HEAD | *A hermetic regression check pins every vacuity trigger and is wired into the agent gate*; *The wrapper fails closed when its own local oracles are unavailable*; *A documented live worktree probe proves the worktree's HEAD is what gets reviewed* |
 
 ## ADDED Requirements
 
-### Requirement: A non-empty local diff census with a vacuous review verdict is a hard failure
-The sanctioned roborev wrapper SHALL compute a **local diff census** — the files changed and lines
-added/removed for `<base>...HEAD`, obtained from `git` in the target repository — and SHALL treat that
-locally-computed census as the authoritative statement of what must be reviewed. When the census is
-NON-empty, the wrapper SHALL FAIL LOUDLY (non-zero exit and an explicit message) rather than report a
-pass if EITHER of the following holds:
+### Requirement: A PASS requires positive evidence that a review completed
+The wrapper SHALL NOT report `RESULT: PASS` unless it holds POSITIVE evidence that a review actually
+completed, recorded under its own greppable key `review-completed:`. The absence of a vacuity phrase
+SHALL NEVER be treated as evidence that a review happened. The positive evidence SHALL be:
 
-- **Tier 1 (primary, deterministic, threshold-free):** the review output claims there are no code
-  changes to review (e.g. matching `contains no code changes to review` or `no code changes`,
-  case-insensitively).
-- **Tier 2 (corroborating, bounded token accounting):** the job's reported token accounting shows an
-  input token count below the named vacuity input threshold, OR a cached-input count of zero, OR an
-  output token count below the named vacuity output threshold.
+- the job record's structured `status` field, which SHALL NOT be a value other than `done` — a status
+  present and not `done` is `FAIL (job status '<s>' is not done)`; and
+- a **terminal verdict marker** in the transcript, drawn from a declared ALLOW-LIST: a severity-tagged
+  findings marker, or the clean shape (a "no issues found" statement AND a `Summary:` line). No marker
+  ⇒ `FAIL (no terminal verdict marker)`.
 
-Tier 1 SHALL be authoritative: it SHALL NOT be relaxed, overridden, or skipped by tier 2's outcome or
-availability. Tier 2's only permitted effect SHALL be to fail closed — it SHALL NEVER cause a run to
-pass. The tier-2 thresholds SHALL be named constants declared at the top of the wrapper with the
-measured evidence cited in a comment, and every tier-2 failure message SHALL print the observed values
-next to the threshold that tripped. When token accounting is unavailable from the installed roborev
-build, the wrapper SHALL record a degraded-signal notice in its summary block and SHALL still apply
-tier 1 — never a silent skip.
+An unreadable transcript SHALL be `FAIL (transcript unreadable)`. When the structured `status` is
+UNAVAILABLE the check MAY still pass on the transcript marker alone, and SHALL then record a NOTICE
+naming that as the weaker of the two signals — an unavailable status SHALL NEVER be silently treated as
+`done`. This requirement exists because the reproduced defect was exactly the inverse inference: a
+transcript showing only an unfinished job, a provider `400 … model is not supported` outage, or a job
+whose status was `failed` each contained NO vacuous phrase and therefore reached `RESULT: PASS`.
 
-#### Scenario: A "no code changes" verdict against a non-empty census fails loudly
-- **GIVEN** a branch whose local census against the base is non-empty (for example 5 files, +167/−63)
-- **WHEN** the wrapper runs and the review returns "No issues found" with a summary stating the diff contains no code changes to review
-- **THEN** the wrapper exits non-zero with `RESULT: FAIL`, its message names the vacuous-verdict-vs-census contradiction and prints the census, and the run is NOT reportable as "roborev clean"
+#### Scenario: A job that never finished cannot reach PASS
+- **GIVEN** a pushed branch with a non-empty code census whose transcript shows only that the wrapper was waiting for the job to complete, with no terminal verdict marker
+- **WHEN** the wrapper runs
+- **THEN** `review-completed:` reads `FAIL (no terminal verdict marker)`, the terminal `RESULT:` is `FAIL`, and the run is NOT reportable as "roborev clean"
+
+#### Scenario: A provider model-mismatch outage cannot reach PASS
+- **GIVEN** a review whose transcript carries a provider error (for example the #2433/#3037 `400 … model is not supported` mismatch) and no terminal verdict marker
+- **WHEN** the wrapper runs
+- **THEN** `review-completed:` FAILs, the terminal `RESULT:` is `FAIL`, and the failure message states that the absence of a vacuous phrase is never evidence that a review happened
+
+#### Scenario: A non-done job status fails closed
+- **GIVEN** a job whose structured `status` is `failed`
+- **WHEN** the wrapper evaluates completion
+- **THEN** `review-completed:` reads `FAIL (job status 'failed' is not done)` and the terminal `RESULT:` is `FAIL`
+
+#### Scenario: A completed review with a terminal verdict marker passes the completion check
+- **GIVEN** a job whose structured `status` is `done` and whose transcript carries a terminal verdict marker from the allow-list
+- **WHEN** the wrapper evaluates completion
+- **THEN** `review-completed:` reads `PASS`, and an unavailable `status` alongside a present marker instead records a NOTICE naming the weaker signal rather than a silent pass
+
+### Requirement: The locally computed diff census is the authoritative oracle
+The wrapper SHALL compute a **local diff census** — the files changed and lines added/removed for
+`<base>...HEAD`, obtained from `git` in the target repository — and SHALL treat that locally computed
+census as the authoritative statement of what must be reviewed. Every downstream judgement SHALL be
+made against that census and never against the reviewer's own report of what it saw. The census SHALL
+be reported under `census:` and its own verdict under `census-check:`.
+
+Rename detection SHALL be disabled, so every census entry is a REAL path (a rename-composite path such
+as `dir/{old => new}.rs` is not a path and could never be located in the reviewer's prompt).
+
+An unmeasurable census SHALL fail closed and SHALL be DISTINGUISHABLE from an empty one:
+`FAIL (base '<ref>' unresolvable)` when the base ref does not resolve to a commit, and
+`FAIL (git diff failed)` when the diff command itself exits non-zero. Neither SHALL be aliased to
+`FAIL (empty census)` / `NOTHING-TO-REVIEW`, because "we could not tell" is not "there is nothing to
+review". The wrapper SHALL NOT fetch on the caller's behalf to repair an unresolvable base.
+
+#### Scenario: An unresolvable base ref fails closed rather than reporting nothing to review
+- **GIVEN** a clone whose `origin/main` mirror ref does not resolve (a narrow fetch refspec that has never fetched it)
+- **WHEN** the wrapper runs with the default base
+- **THEN** `census-check:` reads `FAIL (base 'origin/main' unresolvable)`, the terminal `RESULT:` is `FAIL` (not `NOTHING-TO-REVIEW`), no review is enqueued, and the message states that an unresolvable base is "we cannot tell", never "there is nothing to review"
+
+#### Scenario: A failed git diff is not "genuinely empty"
+- **GIVEN** a repository in which `git diff --numstat --no-renames <base>...HEAD` exits non-zero
+- **WHEN** the wrapper computes the census
+- **THEN** `census-check:` reads `FAIL (git diff failed)`, the message reproduces what git said, and the outcome is `RESULT: FAIL` rather than `NOTHING-TO-REVIEW`
+
+#### Scenario: The census is the oracle every later judgement is measured against
+- **WHEN** the census is non-empty
+- **THEN** `census:` reports the file count and the added/removed line totals, and the code-free, prompt-content and vacuity checks all state their verdicts relative to that census rather than to anything the reviewer reports
+
+### Requirement: The reviewer must demonstrably have received the census's own files
+The wrapper SHALL assert, under its own greppable key `prompt-content:`, that the census's own changed
+file paths appear in the prompt ACTUALLY SENT to the reviewer, retrieved from the job record (the
+structured `prompt` field, else the reviewer's own prompt-retrieval command). This check SHALL be
+DETERMINISTIC and THRESHOLD-FREE: it catches "the reviewer never received the diff", the half of the
+defect space that a verdict-text comparison cannot see.
+
+Any checked path missing from the prompt SHALL be a `FAIL (<k>/<n> census paths absent from the
+prompt)` that names the missing paths. The number of paths checked MAY be bounded by a named constant
+for a large census, in which case the checked subset SHALL be evenly sampled across the census and ALL
+sampled paths SHALL be required present; the PASS value SHALL report the coverage it actually checked.
+
+A prompt that cannot be RETRIEVED (empty or whitespace-only) SHALL be `UNAVAILABLE` — a visible
+degraded signal, never a FAIL and never a silent skip — because a roborev build that does not expose
+the prompt would otherwise false-FAIL every run. An `UNAVAILABLE` SHALL never turn a FAIL into a PASS.
+
+#### Scenario: A prompt that does not mention the census's files is a hard failure
+- **GIVEN** a pushed branch with a non-empty code census whose review returns a clean verdict with healthy token accounting
+- **WHEN** the prompt actually sent to the reviewer mentions none of the census's file paths
+- **THEN** `prompt-content:` reads `FAIL (<k>/<n> census paths absent from the prompt)`, the message names the missing paths and states that a prompt that does not mention the census's files cannot have reviewed them, and the terminal `RESULT:` is `FAIL`
+
+#### Scenario: An unretrievable prompt degrades visibly instead of failing or skipping
+- **GIVEN** a roborev build from which the prompt for the job cannot be retrieved
+- **WHEN** the wrapper evaluates prompt content
+- **THEN** `prompt-content:` reads `UNAVAILABLE`, a NOTICE records the retrieval attempts and states that the deterministic checks still govern, and the run's verdict is decided by the other checks
+
+#### Scenario: A prompt carrying the census's files passes and reports its coverage
+- **WHEN** every checked census path appears in the prompt
+- **THEN** `prompt-content:` reads `PASS` and names how many census paths it checked, so a reader can see the coverage rather than trusting a bare PASS
+
+### Requirement: A code-free census is a deterministic failure before any review is enqueued
+Because roborev structurally discards a code-free diff, a census consisting ENTIRELY of
+documentation/specification prose SHALL be a DETERMINISTIC FAIL under its own greppable key
+`code-free:`, evaluated from the wrapper's OWN census classification **before any review is enqueued**,
+with no reviewer prose involved. No docs-only change SHALL record "roborev clean", and the sanctioned
+substitute SHALL be verification against primary sources recorded in the pull request.
+
+Classification SHALL be by file EXTENSION against a declared prose-extension set, with a path assist
+limited to EXTENSIONLESS files under declared prose directories. A file with a code-ish extension
+anywhere in the tree — including `docs/foo.py` and `.github/workflows/*.yml` — SHALL count as CODE, so
+the check cannot false-FAIL a code change that merely lives in a documentation directory.
+
+This requirement is deliberately STRONGER than a prose-matched detection: an earlier revision computed
+the same classification and used it only for attribution wording, which let a docs-only diff reach
+`RESULT: PASS` whenever the reviewer's verdict happened not to carry the vacuity phrase.
+
+#### Scenario: A markdown-only census fails deterministically before a review is enqueued
+- **GIVEN** a pushed branch whose census against the base is entirely markdown
+- **WHEN** the wrapper runs
+- **THEN** `code-free:` reads `FAIL (code-free census: <n>/<n> files are documentation/specification text)`, NO review is enqueued, the terminal `RESULT:` is `FAIL`, and the message directs the author to primary-source verification in the PR instead of "roborev clean"
+
+#### Scenario: A code-free census fails even when the review returns clean with healthy accounting
+- **GIVEN** a docs-only census and a reviewer that would return "No issues found" with genuine-looking token accounting
+- **WHEN** the wrapper runs
+- **THEN** the outcome is still `RESULT: FAIL` attributed to `code-free:`, because the failure is a property of the census the wrapper measured and never a bet on the reviewer admitting it
+
+#### Scenario: A workflow YAML or a script under a prose directory is CODE, not documentation
+- **GIVEN** a census consisting only of `.github/workflows/ci.yml`, and separately a census mixing one markdown file with one `.rs` file
+- **WHEN** the wrapper classifies each census
+- **THEN** neither is classified code-free, `code-free:` reads `PASS` for both, and the review proceeds — so a false code-free classification cannot manufacture a false FAIL
+
+#### Scenario: The sanctioned substitute for a docs-only change is primary-source verification
+- **GIVEN** a docs-only change that cannot be roborev-certified
+- **WHEN** the change is prepared for merge
+- **THEN** doctrine directs the author to record primary-source verification in the pull request (for example reading the pinned Cassandra source at the `cassandra-5.0.8` tag that the documentation describes) instead of recording "roborev clean"
+
+### Requirement: A vacuous verdict claim against a non-empty census fails, gated on the findings state
+The wrapper SHALL compare the reviewer's own verdict text against the non-empty census under the
+greppable key `vacuity-tier1:`, and a vacuity claim there SHALL be AUTHORITATIVE — a HARD FAIL that
+blocks the merge, not a note. Two properties SHALL bound the match so it cannot false-FAIL a genuine
+review:
+
+1. **ANCHORING.** The match SHALL be confined to the verdict/summary region of the transcript (the
+   lines carrying a `Summary:`), never to arbitrary finding bodies or quoted text. A transcript with no
+   such region SHALL read `UNAVAILABLE`.
+2. **GATING ON the findings state** (the `findings:` key below):
+   - `findings: NONE` — the reviewer is CLAIMING CLEANLINESS, so the phrase is a vacuity claim about a
+     census we measured as non-empty ⇒ `FAIL (vacuous verdict vs non-empty census)`.
+   - `findings: UNKNOWN` — the state is unknowable ⇒ HARD FAIL as well. An unknowable findings state
+     SHALL NEVER DISARM this check; fail-closed is the correct direction.
+   - `findings: PRESENT` (with or without a count) — the reviewer demonstrably analysed the diff and
+     produced findings, so the phrase is discussion ⇒ an advisory
+     `NOTICE (phrase present in a findings-bearing review)` that does NOT fail the run.
+
+The gating and anchoring SHALL be recorded as an EVIDENCED relaxation, not silent drift: the
+unanchored, ungated form false-FAILed a genuine findings-bearing review that merely QUOTED the phrase
+(this change's own diff carries the phrase in five or more files), and the systemic cost of a false
+FAIL is agents learning to WAIVE tier-1 FAILs — which restores the original defect wholesale.
+
+#### Scenario: A cleanliness claim of no code changes against a code census is a hard failure
+- **GIVEN** a pushed branch whose census against the base is non-empty and contains code
+- **WHEN** the review's summary states the diff contains no code changes to review and the review reports NO findings
+- **THEN** `vacuity-tier1:` reads `FAIL (vacuous verdict vs non-empty census)`, the message prints the census and states that the reviewer's claim contradicts a fact the wrapper measured itself, the terminal `RESULT:` is `FAIL`, and the run is NOT reportable as "roborev clean"
+
+#### Scenario: An UNKNOWN findings state does not disarm the check
+- **GIVEN** a run whose findings state is `UNKNOWN` because the reviewer errored
+- **WHEN** the verdict region carries the vacuity phrase
+- **THEN** `vacuity-tier1:` still reads `FAIL (vacuous verdict vs non-empty census)` and the message states that an unknowable findings state is treated as claiming cleanliness because fail-closed is the correct direction
+
+#### Scenario: A findings-bearing review that quotes the phrase is a NOTICE, not a failure
+- **GIVEN** a review that reported findings and whose summary discusses the phrase "no code changes"
+- **WHEN** the wrapper evaluates tier 1
+- **THEN** `vacuity-tier1:` reads `NOTICE (phrase present in a findings-bearing review)`, the NOTICE explains that the review demonstrably analysed the diff, and the NOTICE does not fail the run
+
+#### Scenario: The match is anchored to the verdict region, not the whole transcript
+- **GIVEN** a clean review whose finding bodies or quoted material mention "no code changes" while its own summary does not
+- **WHEN** the wrapper evaluates tier 1
+- **THEN** `vacuity-tier1:` reads `PASS`, because an unanchored match would false-FAIL a genuine review and teach agents to waive the check
+
+### Requirement: Token accounting corroborates the deterministic checks and may only fail closed
+Token accounting SHALL be a CORROBORATING signal under `vacuity-tier2:` whose only permitted effect is
+to FAIL CLOSED — it SHALL NEVER cause a run to pass, SHALL NEVER relax another check's FAIL, and SHALL
+NEVER be the sole thing standing between the pipeline and a vacuous pass.
+
+Extraction SHALL distinguish THREE states and SHALL be reported so a reader can tell them apart:
+
+- **absent** — the job record carries no token accounting at all ⇒ `UNAVAILABLE`, a visible
+  degraded-signal notice, never a silent skip.
+- **parsed** — counts readable ⇒ the thresholds are evaluated.
+- **present but unparseable** — a token field IS present yet no documented field alias resolves to a
+  number ⇒ `FAIL (token accounting present but unparseable — drift)`. This SHALL be a FAIL and SHALL
+  NOT be downgraded to a notice, because that is exactly how the tier was SILENTLY DISARMED: the real
+  payload double-encodes its token container as a JSON STRING and names the output count
+  `total_output_tokens`, so reading it as a nested object with `output_tokens` yielded no counts, the
+  tier reported a non-failing `UNAVAILABLE` on EVERY real run, and a guard that silently was not there
+  certified runs whose true counts were the vacuous baseline. The remedy named in the failure message
+  SHALL be to add the new field alias, never to waive the check.
+
+The FAIL conditions on parsed counts SHALL be: an input count below the named input floor, OR a cached
+input count of zero. Each SHALL print the OBSERVED value beside the named constant that tripped.
+Thresholds SHALL be named constants declared with the measured evidence cited beside them.
+
+Two calibration decisions SHALL be recorded with their evidence, so each is a documented decision
+rather than silent drift:
+
+- The input floor SHALL be anchored on the measured VACUOUS CEILING, not on the genuine band, because
+  the genuine band scales with diff size: **25,000** sits above the highest observed vacuous run
+  (18,801) and below the smallest observed genuine run (67,387). The originally specified 50,000 would
+  have false-FAILed that genuine run's size class, and an always-red guard is the failure mode that
+  gets a guard bypassed.
+- An output-token floor SHALL NOT be a FAIL condition; it MAY be reported as an advisory NOTICE only.
+  A genuine CLEAN review and a vacuous one emit near-identical output counts (both are "No issues
+  found" plus one sentence; the vacuous baseline measured 21–56), so the counts COLLIDE and any output
+  floor would false-FAIL precisely the case that matters most — a real review that is legitimately
+  clean.
+- A `cached_input_tokens == 0` FAIL SHALL be retained with its false-positive caveat documented (a
+  genuinely cold cache can report zero); it is an accepted trade in the fail-closed direction, made
+  affordable by the deterministic checks now carrying the verdict.
+
+Wall-clock duration SHALL NOT be asserted (host-dependent, #2642).
 
 #### Scenario: The vacuous token signature against a non-empty census fails loudly
-- **GIVEN** a branch whose local census against the base is non-empty
-- **WHEN** the review completes without a "no code changes" phrase, but the job's token accounting reports an input count below the vacuity input threshold, or zero cached input, or an output count below the vacuity output threshold
-- **THEN** the wrapper exits non-zero with `RESULT: FAIL`, and the message prints each observed token value beside the named threshold constant that tripped
+- **GIVEN** a pushed branch with a non-empty code census whose job reports the measured vacuous accounting (input ≈18k, cached 0)
+- **WHEN** the wrapper evaluates tier 2
+- **THEN** `vacuity-tier2:` reads `FAIL (vacuous token signature)`, each trip prints the observed value beside the named threshold constant, and the terminal `RESULT:` is `FAIL`
 
-#### Scenario: A genuine review with healthy accounting passes
-- **GIVEN** a branch whose local census against the base is non-empty, whose branch is pushed, and whose review enqueued the branch HEAD
-- **WHEN** the review returns a verdict containing no "no code changes" claim and reports token accounting above the thresholds (for example ~500k input, ~387k cached, ~6.3k output)
-- **THEN** the wrapper exits zero with `RESULT: PASS` and every per-check line in the summary block reads PASS
+#### Scenario: Token accounting present but unparseable is failed as drift
+- **GIVEN** a job whose token container is present but whose count fields match none of the documented aliases
+- **WHEN** the wrapper evaluates tier 2
+- **THEN** `vacuity-tier2:` reads `FAIL (token accounting present but unparseable — drift)`, the terminal `RESULT:` is `FAIL`, and the message names the extractor's alias sets as the fix and says not to waive it
 
-#### Scenario: Unavailable token accounting degrades visibly and tier 1 still governs
-- **GIVEN** a roborev build from which the wrapper cannot obtain token accounting for the job
-- **WHEN** the wrapper evaluates vacuity on a non-empty census
-- **THEN** the summary block records `vacuity-tier2: UNAVAILABLE` as an explicit degraded-signal notice, the tier-1 check is still applied and can still FAIL the run, and the unavailability alone never turns a FAIL into a PASS nor is recorded as a silent skip
+#### Scenario: The real doubly-encoded payload shape is decoded and the tier actually evaluates
+- **GIVEN** a job whose token container is a JSON-ENCODED STRING carrying `total_output_tokens`, with the measured small-but-genuine counts (67,387 input / 43,520 cached / 2,232 output)
+- **WHEN** the wrapper evaluates tier 2
+- **THEN** the counts appear on the `tokens:` line and `vacuity-tier2:` reads `PASS` — it is not reported as `UNAVAILABLE`, which is what a single decode produced on every real run
+
+#### Scenario: A low output count never fails a genuine clean review
+- **GIVEN** a genuine review with healthy input and cached counts whose output count is below the advisory output constant
+- **WHEN** the wrapper evaluates tier 2
+- **THEN** `vacuity-tier2:` reads `PASS`, and the low output count is reported only as an advisory NOTICE that states output tokens cannot discriminate a genuine clean review from a vacuous one
+
+#### Scenario: Absent token accounting degrades visibly and never rescues a failing run
+- **GIVEN** a roborev build whose job record carries no token accounting at all
+- **WHEN** the wrapper evaluates a run whose deterministic checks pass
+- **THEN** `vacuity-tier2:` reads `UNAVAILABLE` with an explicit degraded-signal notice, the deterministic checks still govern the verdict, and the unavailability alone neither fails the run nor turns any other check's FAIL into a PASS
 
 ### Requirement: A genuinely empty census reports NOTHING-TO-REVIEW, never a pass
 When the local diff census for `<base>...HEAD` is genuinely empty, the wrapper SHALL NOT invoke a review
@@ -74,7 +285,9 @@ The wrapper SHALL invoke roborev with an EXPLICIT commit SHA (the branch HEAD) a
 repository path, and SHALL NEVER use the bare `--branch` form (which resolves against the root checkout
 from inside a git worktree) nor the two-positional commit-range form (which has been observed to enqueue
 a commit that is neither endpoint). The wrapper SHALL require BOTH the reviewer agent and the reviewer
-model to be supplied, refusing to run with only one of them.
+model to be supplied, refusing to run with only one of them. An option supplied with an EMPTY value
+SHALL be a usage error rather than a silent fallback to the default, because a `--repo ""` falling back
+to `$PWD` is exactly how a caller reviews a repository it did not name.
 
 #### Scenario: The invocation names the HEAD sha and an absolute repo path
 - **WHEN** the wrapper invokes roborev
@@ -85,58 +298,173 @@ model to be supplied, refusing to run with only one of them.
 - **WHEN** the wrapper runs
 - **THEN** it refuses with a non-zero exit and a message naming the missing option, before any review is enqueued
 
-### Requirement: The reviewed SHA is asserted against branch HEAD
-The wrapper SHALL parse the enqueued-job announcement (`Enqueued job <N> for <sha>`) and SHALL require
-the announced sha to prefix-match the branch HEAD sha. A mismatch SHALL abort the round with a non-zero
-exit. When the mismatched sha resolves to the base ref (for example `origin/main`), the failure message
-SHALL say so explicitly, because that equality is the signature of the worktree `--branch` resolution
-trigger. An absent or unparseable enqueue announcement SHALL also be a failure, never a skipped check.
+#### Scenario: An empty option value is a usage error, not a default
+- **GIVEN** an invocation that passes an option with an empty value (for example an empty `--repo`)
+- **WHEN** the wrapper parses its arguments
+- **THEN** it refuses with the usage exit code and a message stating that an empty value is never a default, and nothing is enqueued
 
-#### Scenario: An enqueued sha equal to the base ref aborts and names the base
-- **GIVEN** a worktree branch whose HEAD is `4e7ab591e` and whose base `origin/main` is `39900e4db`
-- **WHEN** the review announces `Enqueued job N for 39900e4db`
-- **THEN** the wrapper exits non-zero with `RESULT: FAIL`, and the message states that the enqueued sha equals the base ref `origin/main` and therefore no branch change was reviewed
+### Requirement: The reviewed SHA is asserted against branch HEAD using the job record as the oracle
+The wrapper SHALL assert the reviewed sha against branch HEAD under the greppable key `sha-assert:`,
+using the **job record's structured `git_ref`** as the oracle — a full-length sha recorded by roborev
+itself, compared full-sha to full-sha. Parsing the tool's stdout announcement is the WEAKER source and
+SHALL be DEMOTED to a cross-check: a disagreement between the announcement and the structured field
+SHALL be recorded as a NOTICE (the structured field winning), and the structured field being
+unavailable SHALL fall back to a prefix comparison against the announced sha with a NOTICE naming the
+fallback as the weaker source.
 
-#### Scenario: An enqueued sha that is neither endpoint aborts
-- **GIVEN** a branch HEAD of `989d7d2c3` and a base of `89fdbb895`
-- **WHEN** the review announces `Enqueued job N for 90a17d376`, which matches neither the HEAD nor the base
-- **THEN** the wrapper exits non-zero with `RESULT: FAIL`, and the message prints the announced sha beside the expected HEAD sha
+The announcement SHALL nevertheless remain load-bearing enough to fail closed, because it carries the
+job id every structured query needs: an ABSENT announcement SHALL be `FAIL (no parseable enqueue
+announcement)` and a malformed one (a non-numeric job id, or a sha shorter than the declared hex-length
+floor) SHALL be `FAIL (unparseable enqueue announcement)` — never a skipped check. Parsing SHALL be
+defensive: case-normalised before matching, both fields validated before use, and when several
+announcements are present the LAST one SHALL be the effective enqueue with the multiplicity recorded.
 
-#### Scenario: A missing enqueue announcement fails closed
-- **WHEN** the review output contains no parseable `Enqueued job <N> for <sha>` line
-- **THEN** the wrapper exits non-zero with `RESULT: FAIL` because the reviewed sha is unverifiable, and does not report a pass
+A mismatch SHALL be `FAIL (reviewed-sha does not match head-sha)` and SHALL be ATTRIBUTED: when the
+reviewed sha equals the base ref the message SHALL say so explicitly (the signature of the worktree
+bare-`--branch` resolution trigger), and when it matches neither endpoint the message SHALL name that
+as the signature of the two-positional commit-range form.
 
-#### Scenario: A matching enqueued sha satisfies the assert
-- **WHEN** the announced sha prefix-matches the branch HEAD sha
-- **THEN** the summary block records `sha-assert: PASS` with both the head sha and the reviewed sha printed
+#### Scenario: The structured git_ref wins over a disagreeing stdout announcement
+- **GIVEN** a run whose stdout announces the branch HEAD while the job record's `git_ref` records the base ref as reviewed
+- **WHEN** the wrapper asserts the reviewed sha
+- **THEN** `sha-assert:` FAILs against the structured `git_ref`, the message states the reviewed sha equals the base ref and names the worktree resolution trigger, and the disagreement between the two surfaces is recorded as a NOTICE
 
-### Requirement: The branch is asserted pushed before any review is requested
-Before enqueuing a review, the wrapper SHALL assert that the remote tracking ref for the current branch
-(`origin/<branch>`) exists and equals the local HEAD. If it does not, the wrapper SHALL FAIL with a
-non-zero exit and name the unpushed commits, because an unpushed implementation commit is itself a cause
-of an empty resolved diff.
+#### Scenario: A reviewed sha equal to the base ref aborts and names the base
+- **GIVEN** a worktree branch whose HEAD differs from its base `origin/main`
+- **WHEN** the reviewed sha equals the base ref
+- **THEN** the wrapper exits non-zero with `RESULT: FAIL`, and the message states that the reviewed sha equals the base ref and therefore no branch change was reviewed
 
-#### Scenario: An unpushed commit fails before a review is enqueued
-- **GIVEN** a branch with one local commit that has not been pushed, so `origin/<branch>` is behind HEAD
+#### Scenario: A reviewed sha that is neither endpoint aborts
+- **GIVEN** a branch HEAD and a base that both differ from the reviewed sha
+- **WHEN** the wrapper asserts the reviewed sha
+- **THEN** it exits non-zero with `RESULT: FAIL`, and the message prints the reviewed sha beside the expected HEAD sha and names the two-positional range form as the signature
+
+#### Scenario: A missing or malformed enqueue announcement fails closed
+- **WHEN** the transcript contains no parseable enqueue announcement, or one whose job id is non-numeric or whose sha is shorter than the declared hex floor
+- **THEN** `sha-assert:` reads `FAIL (no parseable enqueue announcement)` or `FAIL (unparseable enqueue announcement)` respectively, the reviewed sha is treated as unverifiable, and the run does not report a pass
+
+#### Scenario: A matching reviewed sha satisfies the assert
+- **WHEN** the job record's `git_ref` equals the branch HEAD sha (or, on fallback, the announced abbreviated sha prefix-matches it)
+- **THEN** `sha-assert:` reads `PASS` with both the head sha and the reviewed sha printed in the block
+
+### Requirement: A model substitution is surfaced, never silent
+The wrapper SHALL report the model the job actually ran under the greppable key `model:`, and SHALL
+surface a difference between the requested model and the model the job ran as a LOUD NOTICE naming both
+values. It SHALL NOT be a FAIL: roborev legitimately canonicalises/resolves a model alias, so a
+mismatch is not by itself evidence of a bad review, and an always-red guard is the failure mode that
+gets a guard bypassed (a failure mode this change hit twice). When the job record carries no model
+field, the line SHALL say so explicitly rather than implying confirmation.
+
+#### Scenario: A substituted model is reported loudly without failing the run
+- **GIVEN** a job whose requested model differs from the model it ran
+- **WHEN** the wrapper emits its block
+- **THEN** `model:` names the model that ran and marks it as SUBSTITUTED, naming the requested model, a NOTICE tells the operator to confirm the substituted model is acceptable for a merge-gating review, and the substitution alone does not fail the run
+
+#### Scenario: A matching model is reported plainly and an absent one is marked unconfirmed
+- **WHEN** the job's model equals the requested model
+- **THEN** `model:` reports it plainly; and when the job record carries no model field at all, the line marks the value UNCONFIRMED rather than presenting it as confirmed
+
+### Requirement: The branch is asserted pushed by asking the REMOTE, never a local mirror ref
+Before enqueuing a review the wrapper SHALL assert, under `push-assert:`, that the branch exists on its
+remote and that the remote tip equals local HEAD — with `git ls-remote` (the REMOTE itself) as the
+AUTHORITATIVE oracle, compared full-sha. There SHALL be NO local mirror-ref (`refs/remotes/<remote>/<branch>`)
+fast path. Two evidenced reasons:
+
+- CQLite clones carry a NARROW fetch refspec (`+refs/heads/main:refs/remotes/origin/main`), so a feature
+  branch's mirror ref is NEVER created however often the branch is pushed — a mirror-based assert
+  false-FAILed 100% of the fleet, which would have made the only sanctioned invocation unusable and
+  pushed agents back to the bare `--branch` form this wrapper exists to replace.
+- A CACHED mirror ref survives a force-push or an outright deletion of the remote branch, so it can
+  equal HEAD while the remote no longer has the commit — enqueueing a review of a commit the reviewer
+  cannot fetch, which is itself a vacuous-review setup.
+
+The remote SHALL be taken from the branch's configured upstream, falling back to `origin`, never
+hard-coded. Failure causes SHALL be DISTINCT and correctly attributed: `FAIL (detached HEAD)`,
+`FAIL (ls-remote failed: infra/auth)` (an unknown remote state — explicitly NOT "never pushed", since
+`git` and `gh` are separate credential paths), `FAIL (branch absent on remote <remote>)`, and
+`FAIL (unpushed commits)` naming the unpushed commits (or the divergence when local HEAD is not a
+descendant of the remote tip). Every one of these SHALL happen BEFORE a review is enqueued.
+
+#### Scenario: A pushed branch under the fleet's narrow fetch refspec passes
+- **GIVEN** a clone whose fetch refspec only mirrors `main`, so `refs/remotes/origin/<branch>` never exists, and whose feature branch IS pushed
 - **WHEN** the wrapper runs
-- **THEN** it exits non-zero with `RESULT: FAIL`, its message names the unpushed commit(s), and no review job is enqueued
+- **THEN** `push-assert:` reads `PASS` because the assert asked the remote via `git ls-remote`, and the run proceeds to enqueue a review
 
-#### Scenario: A missing remote branch fails before a review is enqueued
-- **GIVEN** a branch that has never been pushed, so `origin/<branch>` does not exist
+#### Scenario: A stale mirror ref equal to HEAD does not satisfy the assert
+- **GIVEN** a branch whose local mirror ref equals HEAD but whose branch has been DELETED from the remote
 - **WHEN** the wrapper runs
-- **THEN** it exits non-zero with `RESULT: FAIL` naming the missing remote branch, and no review job is enqueued
+- **THEN** `push-assert:` reads `FAIL (branch absent on remote <remote>)` and no review is enqueued, because a cached local proxy is never authority for what the remote has
+
+#### Scenario: An unpushed or behind branch fails before a review is enqueued
+- **GIVEN** a branch that has never been pushed, and separately a branch whose remote tip is behind HEAD
+- **WHEN** the wrapper runs
+- **THEN** it exits non-zero with `RESULT: FAIL` — `FAIL (branch absent on remote <remote>)` in the first case and `FAIL (unpushed commits)` naming the unpushed commit(s) in the second — and no review job is enqueued
+
+#### Scenario: An ls-remote failure is attributed to infra/auth, not to being unpushed
+- **GIVEN** a remote that cannot be reached or read
+- **WHEN** the push assert runs
+- **THEN** `push-assert:` reads `FAIL (ls-remote failed: infra/auth)`, the message reproduces what git said and states this is NOT evidence the branch is unpushed (naming the separate `git`/`gh` credential paths), and the run fails closed on the unknown remote state
+
+#### Scenario: A detached HEAD fails before anything is enqueued
+- **GIVEN** a repository on a detached HEAD
+- **WHEN** the wrapper runs
+- **THEN** `push-assert:` reads `FAIL (detached HEAD)`, the message says to check out the issue branch, and no review is enqueued
+
+### Requirement: A findings-bearing review is distinguished from a reviewer error, both under their own greppable keys
+The wrapper SHALL report the findings state under its own greppable key `findings:` (`NONE`,
+`PRESENT`, `PRESENT (<n>)`, `UNKNOWN`, or `SKIP`) and the reviewer process's own status under
+`roborev-exit:`, and SHALL DISTINGUISH the two non-zero causes: `FINDINGS (exit <N>)` when the review
+RAN and reported findings, versus `ERROR (exit <N>)` when the reviewer itself failed. The authority for
+which occurred SHALL be the job record's structured `status`, falling back to the completion evidence.
+
+Both cause the terminal `RESULT: FAIL` — a review with open findings is not "roborev clean" — but the
+attribution SHALL be correct, because roborev exits NON-ZERO WHEN IT REPORTS FINDINGS, and calling that
+a reviewer malfunction is dangerous in the OPPOSITE direction from the vacuity defect: an agent told
+the reviewer broke will RETRY or BYPASS instead of FIXING the findings. The `FINDINGS` message SHALL
+therefore say the review is genuine, that the reviewer did not malfunction, and that the findings must
+be triaged and fixed; the `ERROR` message SHALL name it as an infra condition and point at the daemon,
+credentials and transcript. A zero exit SHALL read `roborev-exit: PASS`, and a failure before the
+reviewer ran SHALL read `SKIP`.
+
+A prose detail line alone SHALL NOT satisfy this requirement: because a caller retains ONLY the summary
+block and reads it by grepping the per-check keys, without these keys a reader sees every per-check key
+reading `PASS` beside a `RESULT: FAIL` and cannot attribute the failure.
+
+#### Scenario: A non-zero exit with a completed review is FINDINGS, not a malfunction
+- **GIVEN** a pushed branch with a non-empty census whose job status is `done` and whose reviewer process exited non-zero after reporting findings
+- **WHEN** the wrapper emits its block
+- **THEN** `roborev-exit:` reads `FINDINGS (exit <N>)`, `findings:` reads `PRESENT` (with a count when countable), the terminal `RESULT:` is `FAIL`, and the message states the review is genuine, tells the operator to triage and fix the findings, and says not to retry or bypass the reviewer
+
+#### Scenario: A non-zero exit with a job that did not complete is an ERROR
+- **GIVEN** a reviewer process that exited non-zero on a job whose status is not `done`
+- **WHEN** the wrapper emits its block
+- **THEN** `roborev-exit:` reads `ERROR (exit <N>)`, `findings:` reads `UNKNOWN`, the message names it an infra condition pointing at the daemon/credentials/transcript, and the terminal `RESULT:` is `FAIL`
+
+#### Scenario: A zero exit records the key as PASS and never rescues another check
+- **WHEN** the reviewer process exits zero
+- **THEN** `roborev-exit:` reads `PASS`, `findings:` reads `NONE` (or `PRESENT (<n>)` when severity markers are present), and that key alone never turns any other check's FAIL into a pass
+
+#### Scenario: A pre-invocation failure leaves the reviewer's status SKIPped, not passed
+- **GIVEN** a run that fails its push assert or census before the reviewer process is started
+- **WHEN** the wrapper emits its block
+- **THEN** `roborev-exit:` reads `SKIP`, which can never be mistaken for a pass
 
 ### Requirement: The wrapper emits a machine-greppable summary block with a terminal verdict
 The wrapper SHALL emit a single compact `==== ROBOREV REVIEW SUMMARY ====` block on every **VERDICT**
-exit path — a pass, any failed check, or an empty census — carrying one field per line under the
-greppable keys `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `job:`, `census:`, `tokens:`,
-`push-assert:`, `census-check:`, `sha-assert:`, `vacuity-tier1:`, `vacuity-tier2:`, `log:`, and a
-terminal `RESULT: PASS|FAIL|NOTHING-TO-REVIEW`. A per-check key whose step was never reached SHALL carry
-an explicit `SKIP` rather than a blank, so an unreached check can never read as a pass. The block's name
-SHALL be distinct from the agent gate's summary block names so neither can be pasted as the other. The
-wrapper SHALL exit non-zero on any outcome other than PASS, and SHALL be usable such that a caller
-retains ONLY this block and never the raw review transcript (which SHALL be written to the log path
-named in the block's `log:` field).
+exit path — a pass, any failed check, or an empty census — carrying one field per line, in a FIXED
+order that is part of the contract, under the greppable keys: `repo:`, `branch:`, `base:`, `head-sha:`,
+`reviewed-sha:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`,
+`sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`, `findings:`,
+`roborev-exit:`, `log:`, and a terminal `RESULT: PASS|FAIL|NOTHING-TO-REVIEW`.
+
+Every per-check key SHALL participate in ONE verdict scan in which a value beginning `FAIL`, `FINDINGS`
+or `ERROR` fails the run, and `PASS`, `SKIP`, `UNAVAILABLE` and `NOTICE` never do. A per-check key whose
+step was never reached SHALL carry an explicit `SKIP` rather than a blank, so an unreached check can
+never read as a pass. The block's name SHALL be distinct from the agent gate's summary block names so
+neither can be pasted as the other. The wrapper SHALL exit non-zero on any outcome other than PASS, and
+SHALL be usable such that a caller retains ONLY this block and never the raw review transcript (which
+SHALL be written to the log path named in the block's `log:` field). An unexpected mid-run abort SHALL
+still emit the block with `RESULT: FAIL` rather than terminate silently.
 
 A **USAGE ERROR is NOT a verdict.** When a required option is missing or invalid (notably `--agent`
 without `--model`, or the reverse), the wrapper SHALL emit **NO summary block at all**: it SHALL print a
@@ -145,23 +473,30 @@ loud `ERROR:` line naming the missing or invalid option and SHALL exit with the 
 DELIBERATE and SHALL NOT be "fixed" by emitting a block: the three `RESULT:` values are reserved for the
 three real outcomes, so a `RESULT:` line for a run that never happened would ALIAS a usage error onto a
 genuine verdict — precisely the indistinguishability this capability exists to eliminate. The `--help`
-path (exit `0`) is likewise not a verdict and SHALL emit no block. The "exactly one block" obligation
-therefore scopes to the three verdict paths; the verdict paths SHALL be exhaustive for them, including
-an unexpected mid-run abort, which SHALL emit the block with `RESULT: FAIL` rather than terminate
-silently.
+path (exit `0`) is likewise not a verdict and SHALL emit no block.
 
 #### Scenario: Every verdict run emits exactly one block with a terminal RESULT
 - **WHEN** the wrapper finishes on a verdict path (pass, any failed check, or an empty census)
 - **THEN** it emits exactly one `==== ROBOREV REVIEW SUMMARY ====` block whose last line is `RESULT:` followed by exactly one of `PASS`, `FAIL`, or `NOTHING-TO-REVIEW`
+
+#### Scenario: The block carries every per-check key in the contracted order
+- **WHEN** a review was enqueued and completed
+- **THEN** the block carries `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`, `sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:` and `log:` in that order, ahead of the terminal `RESULT:`
+
+#### Scenario: One scan over the per-check keys computes the verdict
+- **GIVEN** a block in which exactly one per-check key carries a failing value while every other reads `PASS`, `SKIP`, `UNAVAILABLE` or `NOTICE`
+- **WHEN** the terminal verdict is computed
+- **THEN** the run is `RESULT: FAIL` and the failing key names the cause, and a `NOTICE`, `UNAVAILABLE` or `SKIP` value never contributes a failure
 
 #### Scenario: A usage error emits no block and exits with its own distinct code
 - **GIVEN** an invocation supplying `--agent` but not `--model` (or `--model` but not `--agent`)
 - **WHEN** the wrapper runs
 - **THEN** it prints an `ERROR:` line naming the missing option, emits NO `==== ROBOREV REVIEW SUMMARY ====` block and NO `RESULT:` line at all, enqueues nothing, and exits `2` — a code distinct from PASS (`0`), FAIL (`1`), and NOTHING-TO-REVIEW (`3`), so a usage error can never be read as any of the three verdicts
 
-#### Scenario: The block carries the census, the reviewed sha, and the token accounting
-- **WHEN** a review was enqueued and completed
-- **THEN** the block reports the base ref and census (files changed, lines added, lines removed), the head sha and the reviewed sha, the job id, and either the observed input/cached/output token counts or an explicit unavailable marker
+#### Scenario: An unexpected abort still emits a block
+- **GIVEN** a run that dies mid-flight after the review was enqueued, before reaching a verdict
+- **WHEN** the process exits
+- **THEN** it still emits exactly one block with `RESULT: FAIL` and a line reporting the unexpected termination, so a run that died without a verdict never looks like a run that was never made
 
 #### Scenario: The block cannot be confused with an agent-gate summary
 - **WHEN** the block is compared with the agent gate's `AGENT-GATE SUMMARY`, `AGENT-GATE LITE SUMMARY`, and `AGENT-GATE DELTA SUMMARY` blocks
@@ -171,72 +506,59 @@ silently.
 - **WHEN** the terminal `RESULT:` is `FAIL` or `NOTHING-TO-REVIEW`
 - **THEN** the wrapper's process exit code is non-zero
 
-### Requirement: A non-zero exit from the roborev process is a hard failure under its own greppable key
-A non-zero exit status from the underlying `roborev` process SHALL be a hard, fail-closed failure: it
-SHALL force the terminal `RESULT: FAIL` on its own, independently of every other check's outcome, and
-SHALL NEVER be reportable as "roborev clean". Because a caller retains ONLY the summary block and reads
-it by grepping the per-check keys, this failure cause SHALL be surfaced in the block under its OWN
-greppable key `roborev-exit:` — value `PASS` when the process exited zero, otherwise a `FAIL` carrying
-the OBSERVED non-zero exit code — placed with the other per-check keys, ahead of the terminal `RESULT:`.
-It SHALL participate in the same per-check scan that computes the terminal verdict. A prose detail line
-alone SHALL NOT satisfy this requirement: without the key, a reader sees every per-check key reading
-`PASS` beside a `RESULT: FAIL` and cannot attribute the failure, which is the one failure cause a
-grep-based reader would otherwise be unable to name.
+### Requirement: The wrapper fails closed when its own local oracles are unavailable
+The wrapper's local oracles and helpers MAY be split across files for size hygiene, but a MISSING or
+TRUNCATED helper SHALL FAIL CLOSED with a named cause rather than silently reducing a check to a no-op
+— an absent oracles file that turned the push assert and the census into no-ops would be a worse
+failure than any this guard was built to catch. Helper paths SHALL be resolved relative to the
+wrapper's OWN file location, never `$PWD`, because the wrapper is invoked from arbitrary worktrees.
+Likewise, an absent `roborev` binary, an unresolvable HEAD, and any other precondition failure SHALL
+fail closed with a named cause and SHALL NOT report a pass.
 
-#### Scenario: A non-zero roborev exit FAILs the run and names itself under its own key
-- **GIVEN** a pushed branch with a non-empty census whose push, census, sha, and both vacuity checks all pass
-- **WHEN** the `roborev` process itself exits non-zero (for example `1`)
-- **THEN** the block reports `roborev-exit: FAIL` carrying the observed exit code, the terminal `RESULT:` is `FAIL`, the wrapper exits non-zero, and the run is NOT reportable as "roborev clean"
+#### Scenario: A missing or truncated oracles helper fails closed
+- **GIVEN** a checkout in which the sourced oracles helper is missing, and separately one in which it is present but truncated so it does not define both oracle functions
+- **WHEN** the wrapper runs
+- **THEN** both cases exit non-zero with `RESULT: FAIL` and a message naming the helper and stating that the push assert and the census cannot run, and neither reports a pass with those checks silently disabled
 
-#### Scenario: A zero roborev exit records the key as PASS
-- **WHEN** the `roborev` process exits zero
-- **THEN** the block reports `roborev-exit: PASS`, and that key alone never turns any other check's FAIL into a pass
+#### Scenario: An absent roborev binary or an unresolvable HEAD fails closed
+- **GIVEN** a PATH with no `roborev` binary, and separately a repository with no commits
+- **WHEN** the wrapper runs
+- **THEN** each exits non-zero with `RESULT: FAIL` naming the cause (the absent binary; no commit to review), and no review is enqueued
 
-### Requirement: A code-free diff cannot be certified by roborev
-Because roborev structurally discards a code-free diff, a diff consisting only of documentation,
-specification, or workflow text SHALL NOT be certifiable by roborev at all: the wrapper SHALL FAIL such a
-run as vacuous, and no docs-only change SHALL record "roborev clean". The sanctioned substitute SHALL be
-verification against primary sources, recorded in the pull request.
+### Requirement: Every roborev call site and doctrine surface routes through the sanctioned wrapper
+Every roborev invocation documented anywhere in the delivery pipeline's agent surfaces, commands,
+skills and doctrine SHALL be expressed as a call to `scripts/flow/roborev-review.sh`, and the bare
+`--branch` form and the two-positional commit-range form SHALL be documented as NON-SANCTIONED
+everywhere they are mentioned. **The migrated set is SIXTEEN surfaces** — thirteen under `.claude/**`
+plus three non-`.claude` doctrine surfaces — carrying THREE different obligations, because some of them
+contain no roborev invocation at all and an obligation to "invoke the wrapper" would be unsatisfiable
+for those. (Two further surfaces, CLAUDE.md and the published `roborev-findings` page, are covered by
+the doctrine requirement below, for eighteen surfaces referencing the wrapper in total.)
 
-#### Scenario: A markdown-only diff is failed as vacuous, not passed
-- **GIVEN** a pushed branch whose census against the base is 5 files, +167/−63, all markdown
-- **WHEN** the wrapper runs and the correctly-targeted review returns "No issues found" with a summary stating the diff contains no code changes to review
-- **THEN** the wrapper exits non-zero with `RESULT: FAIL`, and the failure is attributed to the code-free-diff condition rather than reported as a clean review
-
-#### Scenario: The sanctioned substitute for a docs-only change is primary-source verification
-- **GIVEN** a docs-only change that cannot be roborev-certified
-- **WHEN** the change is prepared for merge
-- **THEN** doctrine directs the author to record primary-source verification in the pull request (for example reading the pinned Cassandra source at the `cassandra-5.0.8` tag that the documentation describes) instead of recording "roborev clean"
-
-### Requirement: Every flow-* roborev call site routes through the sanctioned wrapper
-Every roborev invocation documented in the delivery-pipeline skills and agents SHALL be expressed as a
-call to the sanctioned wrapper, and the bare `--branch` form SHALL be documented as non-sanctioned
-everywhere it is mentioned. The affected surfaces fall into TWO classes carrying DIFFERENT obligations,
-because four of them contain no roborev invocation at all and an obligation to "invoke the wrapper"
-would be unsatisfiable for them:
-
-**(a) Invocation sites** — surfaces whose documented procedure runs the wrapper. Each SHALL express its
-roborev step as a call to `scripts/flow/roborev-review.sh`, SHALL pass BOTH the reviewer agent and the
-reviewer model, and SHALL NOT instruct a bare `roborev review --branch` invocation nor the
+**(a) Invocation sites (9)** — surfaces whose documented procedure runs or prescribes the wrapper. Each
+SHALL express its roborev step as a call to `scripts/flow/roborev-review.sh`, SHALL pass BOTH the
+reviewer agent and the reviewer model, and SHALL NOT instruct a bare `roborev review --branch` nor the
 two-positional commit-range form. They subdivide by what the surface itself does:
 
-- **Review-round sites** — they run a review round in-line: `.claude/skills/flow-implement/SKILL.md`
+- **Review-round sites (4)** — they run a review round in-line: `.claude/skills/flow-implement/SKILL.md`
   (review-first, the primary call site), `.claude/agents/flow-closer.md` (the final merge-gating
-  confirmation pass), `.claude/skills/flow-address/SKILL.md` (the post-comment re-review). Each of
-  these SHALL ADDITIONALLY state that the branch is pushed BEFORE the review is requested, and SHALL
-  treat ANY non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` INCLUDED — as a failed review round and a
-  blocked merge, never as "roborev clean".
-- **Prescribing sites** — they name the wrapper as the invocation to be used without running a round
-  in-line: `.claude/agents/flow-lead.md` (the stage table and the roborev doctrine bullet),
+  confirmation pass), `.claude/skills/flow-address/SKILL.md` (the post-comment re-review), and
+  `.claude/commands/worker.md` (the fleet's UNATTENDED entry point, which runs the implement loop's
+  review-first step itself). Each SHALL ADDITIONALLY state that the branch is pushed BEFORE the review
+  is requested, and SHALL treat ANY non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` INCLUDED — as a
+  failed review round and a blocked merge, never as "roborev clean".
+- **Prescribing sites (5)** — they name the wrapper as the invocation to be used without running a
+  round in-line: `.claude/agents/flow-lead.md` (the stage table and the roborev doctrine bullet),
   `.claude/skills/ci-cd-validation/SKILL.md` and `.claude/skills/ci-cd-validation/merge-process.md`
   (the merge-readiness definition), `.claude/skills/flow-activate/SKILL.md` (the roborev step of the
-  `tasks.md` it authors). Each SHALL name the wrapper as the ONLY sanctioned invocation, and any
+  `tasks.md` it authors), and `.claude/commands/manager.md` (which defines what "roborev clean" means
+  for the workers it dispatches). Each SHALL name the wrapper as the ONLY sanctioned invocation, and any
   merge-readiness or finalizability rule it states SHALL require a terminal `RESULT: PASS` and SHALL
   NOT accept `NOTHING-TO-REVIEW` or `FAIL`.
 
-**(b) Non-invoking surfaces** — surfaces that reference roborev (the `roborev-lints` gate component,
-the pre-roborev self-check pointer, the telemetry `--roborev-findings` counter) but contain NO roborev
-invocation: `.claude/skills/flow-finalize/SKILL.md`, `.claude/agents/rust-reviewer.md`,
+**(b) Non-invoking surfaces (4)** — surfaces that reference roborev (the `roborev-lints` gate
+component, the pre-roborev self-check pointer, the telemetry `--roborev-findings` counter) but contain
+NO roborev invocation: `.claude/skills/flow-finalize/SKILL.md`, `.claude/agents/rust-reviewer.md`,
 `.claude/agents/sstable-developer.md`, `.claude/agents/test-validator.md`. Each SHALL state explicitly
 that it never invokes roborev directly, SHALL point at `scripts/flow/roborev-review.sh` as the only
 sanctioned invocation, and SHALL NOT contradict any of the four doctrine rules (wrapper-only; verify
@@ -245,25 +567,44 @@ docs-only diff cannot be roborev-certified). `.claude/agents/rust-reviewer.md` S
 require that a diff reintroducing a bare `roborev review --branch` or the two-positional range form is
 flagged as a **BLOCKER**.
 
-No surface in either class SHALL document a bare `--branch` or two-positional-range roborev invocation
-as sanctioned.
+**(c) Non-`.claude` doctrine surfaces (3)** — the fleet-facing prose that prescribes how roborev is
+run: `website/src/content/docs/agents-developing/delivery-pipeline.md`,
+`docs/development/pm-operating-loop.md`, `docs/development/agent-machine-setup.md`. Each SHALL name the
+wrapper as the only sanctioned invocation with BOTH flags required, SHALL state push-first, and SHALL
+state that any non-PASS terminal `RESULT` (`NOTHING-TO-REVIEW` included) is a failed round and a blocked
+merge. These are NOT optional extras: each previously carried the INVERSE instruction — "roborev follows
+this machine's configured agent … run it with no `--agent`/`--model` flags", with
+`delivery-pipeline.md` calling explicit agent/model "never doctrine" — which directly contradicts the
+amended CLAUDE.md rule, so leaving them unmigrated would leave the fleet's published guidance
+prescribing the very invocation this change forbids.
 
-#### Scenario: Every invocation site calls the wrapper and no surface documents a bare --branch invocation
-- **WHEN** the six class-(a) invocation surfaces are inspected for roborev invocations
-- **THEN** each expresses its roborev step as a `scripts/flow/roborev-review.sh` call passing both the reviewer agent and the reviewer model, none instructs a bare `roborev review --branch` invocation or the two-positional commit-range form, and the bare `--branch` form is explicitly marked non-sanctioned wherever it appears across all ten surfaces
+No surface in any class SHALL document a bare `--branch` or two-positional-range roborev invocation as
+sanctioned. A historical quotation of a superseded command in design/spec prose SHALL be marked as
+historical so it cannot be copied as guidance. (`.claude/hooks/issue-gate.sh` is deliberately NOT in
+this set: it documents that no hook path runs roborev at all (#2671) and contains no invocation to
+migrate.)
+
+#### Scenario: All sixteen migrated surfaces route through the wrapper and none documents a bare --branch invocation
+- **WHEN** the sixteen migrated surfaces — the thirteen under `.claude/**` (`skills/flow-implement`, `agents/flow-closer`, `skills/flow-address`, `commands/worker`, `agents/flow-lead`, `skills/ci-cd-validation/SKILL.md`, `skills/ci-cd-validation/merge-process.md`, `skills/flow-activate`, `commands/manager`, `skills/flow-finalize`, `agents/rust-reviewer`, `agents/sstable-developer`, `agents/test-validator`) plus `website/src/content/docs/agents-developing/delivery-pipeline.md`, `docs/development/pm-operating-loop.md` and `docs/development/agent-machine-setup.md` — are inspected for roborev invocations
+- **THEN** every one of them names `scripts/flow/roborev-review.sh` as the sanctioned invocation, each of the nine class-(a) sites expresses its roborev step as a wrapper call passing both the reviewer agent and the reviewer model, none instructs a bare `roborev review --branch` invocation or the two-positional commit-range form as sanctioned, and the bare `--branch` form is explicitly marked non-sanctioned wherever it appears
 
 #### Scenario: Each review-round site states push-first and treats any non-PASS RESULT as a failed round
-- **WHEN** `.claude/skills/flow-implement/SKILL.md`, `.claude/agents/flow-closer.md`, and `.claude/skills/flow-address/SKILL.md` are inspected
+- **WHEN** `.claude/skills/flow-implement/SKILL.md`, `.claude/agents/flow-closer.md`, `.claude/skills/flow-address/SKILL.md` and `.claude/commands/worker.md` are inspected
 - **THEN** each states that the branch is pushed before the review is requested, and each states that any non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round and a blocked merge rather than "roborev clean"
 
 #### Scenario: Each prescribing site names the wrapper and requires RESULT PASS for readiness
-- **WHEN** `.claude/agents/flow-lead.md`, `.claude/skills/ci-cd-validation/SKILL.md`, `.claude/skills/ci-cd-validation/merge-process.md`, and `.claude/skills/flow-activate/SKILL.md` are inspected
+- **WHEN** `.claude/agents/flow-lead.md`, `.claude/skills/ci-cd-validation/SKILL.md`, `.claude/skills/ci-cd-validation/merge-process.md`, `.claude/skills/flow-activate/SKILL.md` and `.claude/commands/manager.md` are inspected
 - **THEN** each names `scripts/flow/roborev-review.sh` as the only sanctioned invocation with both flags, and every merge-readiness or finalizability rule any of them states requires a terminal `RESULT: PASS` and rejects both `NOTHING-TO-REVIEW` and `FAIL`
 
 #### Scenario: Each non-invoking surface says so and points at the wrapper
 - **GIVEN** the four class-(b) surfaces, whose only roborev references are the `roborev-lints` gate component, the pre-roborev self-check pointer, and the telemetry `--roborev-findings` counter
 - **WHEN** `.claude/skills/flow-finalize/SKILL.md`, `.claude/agents/rust-reviewer.md`, `.claude/agents/sstable-developer.md`, and `.claude/agents/test-validator.md` are inspected
 - **THEN** each states that it never invokes roborev directly, each points at `scripts/flow/roborev-review.sh` as the only sanctioned invocation, none contradicts any of the four doctrine rules, and `.claude/agents/rust-reviewer.md` additionally requires flagging a reintroduced bare `--branch` or two-positional range form as a BLOCKER
+
+#### Scenario: The three non-.claude doctrine surfaces no longer prescribe the inverse rule
+- **GIVEN** that `website/src/content/docs/agents-developing/delivery-pipeline.md`, `docs/development/pm-operating-loop.md` and `docs/development/agent-machine-setup.md` previously instructed running roborev with the machine's configured agent and NO `--agent`/`--model` flags, with one of them calling explicit agent/model "never doctrine"
+- **WHEN** they are inspected after this change
+- **THEN** none of them still carries that instruction, each names the wrapper with both flags required and push-first, and each states that any non-PASS terminal `RESULT` (`NOTHING-TO-REVIEW` included) is a failed round and a blocked merge
 
 #### Scenario: The merge-gating confirmation pass routes through the wrapper
 - **GIVEN** the `flow-closer` agent's final roborev confirmation pass, whose verdict gates arming auto-merge
@@ -274,17 +615,25 @@ as sanctioned.
 - **WHEN** each class-(a) invocation site is inspected
 - **THEN** it passes both the reviewer agent and the reviewer model, preserving the documented trap that supplying only one inherits a mismatched model from the repository roborev config and fails as a silent-looking review outage
 
-### Requirement: Doctrine records the verify-the-reviewed-SHA rule and the hard-fail verdict text
+### Requirement: Doctrine records the four roborev rules
 CLAUDE.md's roborev-invocation guidance and the published `agents-developing/roborev-findings` page
 SHALL both state, in this same change: (a) the wrapper is the only sanctioned roborev invocation;
 (b) the reviewed SHA must be verified against branch HEAD; (c) a "contains no code changes to review"
 verdict on a non-empty diff is a HARD FAIL, never a pass; and (d) a docs-only diff cannot be
-roborev-certified. The published page SHALL be accepted by confirming the NEW CONTENT is served — not by
-an HTTP 200 — because the CDN can serve the previous page for minutes after a successful deploy.
+roborev-certified. Both SHALL also record the wrapper's exit-code contract and that ANY non-PASS
+terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed round and a blocked merge. The
+`roborev-findings` page SHALL additionally carry the new guard in its "mechanized in `--lite`" table,
+since a mechanized class that is not listed there will be hand-checked forever. The published page
+SHALL be accepted by confirming the NEW CONTENT is served — not by an HTTP 200 — because the CDN can
+serve the previous page for minutes after a successful deploy.
 
 #### Scenario: Both doctrine surfaces carry all four rules
 - **WHEN** CLAUDE.md and `website/src/content/docs/agents-developing/roborev-findings.md` are inspected after this change
 - **THEN** both state that the wrapper is the only sanctioned invocation, that the reviewed SHA must be verified against branch HEAD, that a "contains no code changes to review" verdict on a non-empty diff is a HARD FAIL, and that a docs-only diff cannot be roborev-certified
+
+#### Scenario: The mechanized-in-lite table lists the new guard
+- **WHEN** the `roborev-findings` page's table of classes mechanized in `--lite` is inspected
+- **THEN** it carries a row for the vacuous-review class naming the hermetic regression check and the components it runs in
 
 #### Scenario: Publication is accepted by the served content, not a status code
 - **WHEN** the published `agents-developing/roborev-findings` page is verified after deployment
@@ -292,22 +641,40 @@ an HTTP 200 — because the CDN can serve the previous page for minutes after a 
 
 ### Requirement: A hermetic regression check pins every vacuity trigger and is wired into the agent gate
 A regression check SHALL exercise the wrapper hermetically — using a stub `roborev` on `PATH` that
-replays recorded real outputs, with no network and no live reviewer — and SHALL assert that the wrapper:
-(a) FAILs when the enqueued sha equals the base ref; (b) FAILs when the enqueued sha is neither endpoint;
-(c) FAILs on a "contains no code changes to review" verdict against a non-empty census; (d) FAILs on the
-vacuous token signature; (e) FAILs on an unpushed branch; (f) PASSes a genuine review with a matching sha
-and healthy token accounting; and (g) reports `NOTHING-TO-REVIEW` rather than PASS on a genuinely empty
-census. The check SHALL be registered in the agent gate's shell-tooling component set such that it runs
-in the fast `--lite` loop as well as the full gate, so a regression FAILs the fast loop rather than
-costing a review round. The check SHALL contain no wall-clock threshold assertion in its correctness path.
+replays recorded real outputs, with no network, no live reviewer, no dataset corpus and no cargo — and
+SHALL assert that the wrapper:
 
-#### Scenario: All seven trigger cases are asserted
+(a) FAILs when the reviewed sha equals the base ref, naming the base; (b) FAILs when the reviewed sha is
+neither endpoint; (c) FAILs a cleanliness vacuity claim against a non-empty code census, and does NOT
+fail a findings-bearing or out-of-summary mention of the same phrase; (d) FAILs the vacuous token
+signature, and pins the input floor at its exact declared value; (e) FAILs an unpushed branch, a branch
+absent from the remote, a stale-mirror/deleted-remote branch, and an `ls-remote` failure attributed to
+infra/auth — including under the fleet's NARROW fetch refspec, where the branch IS pushed and the
+assert must PASS; (f) PASSes a genuine review with a matching sha and healthy accounting; (g) reports
+`NOTHING-TO-REVIEW` rather than PASS on a genuinely empty census, and FAILs (never
+`NOTHING-TO-REVIEW`) on an unresolvable base or a failed `git diff`; (h) FAILs a code-free census
+deterministically while NOT classifying a workflow YAML or a mixed census as code-free; (i) FAILs when
+the job never completed, when the provider returned a model-mismatch error, and when the job status is
+not `done`; (j) FAILs when the prompt actually sent omits the census's paths, and degrades visibly when
+the prompt is unretrievable; (k) distinguishes `FINDINGS` from `ERROR` on a non-zero reviewer exit;
+(l) evaluates token accounting against the REAL doubly-encoded payload shape, accepts the documented
+field aliases, and FAILs a present-but-unparseable payload as drift; and (m) FAILs closed when its
+oracles helper is missing or truncated.
+
+The check SHALL also pin the block's key ORDER, the distinctness of its header from all three
+agent-gate summary headers, the usage-error path emitting no block, and hermeticity itself. It SHALL be
+registered in the agent gate's shell-tooling component set such that it runs in the fast `--lite` loop
+as well as the full gate, so a regression FAILs the fast loop rather than costing a review round. The
+check SHALL contain no wall-clock threshold assertion in its correctness path, and SHALL report a loud
+SKIP rather than a silent pass when an optional prerequisite for a subset of cases is unavailable.
+
+#### Scenario: Every trigger class is asserted against the block's own keys
 - **WHEN** the regression check runs
-- **THEN** it asserts each of the seven cases (a) through (g) above, each against the wrapper's terminal `RESULT` and exit code
+- **THEN** it asserts each of the classes (a) through (m) above against the wrapper's terminal `RESULT`, its per-check key values and its exit code, and it reports an explicit pass/fail tally so a partial run cannot read as a pass
 
 #### Scenario: The check is hermetic
 - **WHEN** the regression check runs on a machine with no network access and no real roborev binary installed
-- **THEN** it still runs to completion using the stub reviewer and throwaway git fixtures, requiring no dataset corpus, no live reviewer, and no network
+- **THEN** it still runs to completion using the stub reviewer and throwaway git fixtures, requiring no dataset corpus, no cargo, no live reviewer and no network
 
 #### Scenario: A regression fails the fast loop
 - **GIVEN** a change that removes or weakens one of the wrapper's asserts
@@ -322,7 +689,9 @@ costing a review round. The check SHALL contain no wall-clock threshold assertio
 The change SHALL include a documented live probe, runnable against the real roborev binary from inside a
 real issue worktree, that proves a worktree-launched review reviews the WORKTREE's HEAD rather than the
 root checkout's commit. The probe SHALL be documented rather than executed by the gate, because it
-requires network access and a live reviewer.
+requires network access and a live reviewer. Its procedure and expected summary-block values SHALL live
+in the wrapper's own `--help` output (so the two cannot drift apart) and in the doctrine page, and SHALL
+include re-running it after any roborev version bump.
 
 #### Scenario: The probe establishes reviewed-sha equals the worktree HEAD
 - **GIVEN** a real issue worktree, on its own branch, with its implementation commit pushed, while the root checkout sits on `main`
@@ -331,4 +700,4 @@ requires network access and a live reviewer.
 
 #### Scenario: The probe is documented, not gate-run
 - **WHEN** the agent gate's component set is inspected
-- **THEN** the live probe is not among its components, and the probe's procedure and expected summary-block values are recorded in the wrapper's usage documentation and the doctrine page instead
+- **THEN** the live probe is not among its components, and the probe's procedure and expected summary-block values are recorded in the wrapper's `--help` usage documentation and the doctrine page instead

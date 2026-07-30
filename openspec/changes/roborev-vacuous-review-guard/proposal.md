@@ -40,9 +40,15 @@ Three trigger paths are confirmed:
 | 4658 | `989d7d2c3` (docs-only) | 5f 167+/63− | 18,700 | 0 | 53 | 8s |
 | 4659 | `989d7d2c3` retry | same | 18,801 | 0 | 56 | 8s |
 | 4651 | known-EMPTY diff | 0 | 17,333 | — | 21 | — |
+| 1 (this branch) | `155e12c`-line | 20f +2279 | 67,387 | 43,520 | 2,232 | 68s |
 
-A genuine review is 400–650k input tokens with heavy cache reuse and minutes of wall time. The
-vacuous baseline is ~18k input / 0 cached / <60 output / <10s.
+A genuine review is 400–650k input tokens with heavy cache reuse and minutes of wall time on a LARGE
+diff; the last row is the measured **small** genuine review, added during implementation. The vacuous
+baseline is ~18k input / 0 cached / <60 output / <10s. Two consequences the original framing missed:
+the genuine band **scales with diff size**, so the input floor must be anchored on the vacuous ceiling
+(25,000) rather than on the genuine band (a 50,000 floor would false-FAIL the 67k row's size class);
+and **output counts collide** between a genuine CLEAN review and a vacuous one (both ~20–60), so an
+output floor cannot discriminate them and is advisory only.
 
 **Blast radius is total.** The 1:1:1:1 rule puts **every** issue in a worktree, so **every** flow-\*
 roborev run is exposed to trigger 1. Measured cost on #2950: two vacuous runs "passed"; re-run
@@ -53,31 +59,58 @@ have shipped.
 
 1. **A single sanctioned invocation surface: `scripts/flow/roborev-review.sh`** — a fail-closed
    CQLite-side wrapper. `roborev` is an **external binary** (`/usr/local/bin/roborev`, not vendored
-   here), so the guard cannot live upstream; it lives on our side of the call.
-2. **A locally-computed diff census as the oracle.** `git diff --numstat <base>...HEAD` produces the
-   authoritative files/+/− census. Every downstream vacuity claim is judged against that census, not
-   against the reviewer's own prose.
-3. **Ordered, fail-closed asserts**: push assert (an unpushed branch is itself an empty-diff cause) →
-   census → explicit-SHA + explicit-`--repo` invocation (never bare `--branch`, never the
-   two-positional range form) → reviewed-SHA assert against the `Enqueued job N for <sha>` line →
-   two-tier vacuity assert (deterministic verdict-text-vs-census comparison primary; bounded token
-   accounting corroborating) → a machine-greppable `==== ROBOREV REVIEW SUMMARY ====` block with a
-   terminal `RESULT: PASS|FAIL|NOTHING-TO-REVIEW` and a non-zero exit on anything but PASS.
-4. **A distinct `NOTHING-TO-REVIEW` status** for a genuinely empty census — explicitly **not** a pass,
+   here), so the guard cannot live upstream; it lives on our side of the call. Implemented as three
+   files: the wrapper, a sourced `roborev-review-oracles.sh` (push assert + census/code-free), and
+   `roborev-job-facts.py` (job-record/token JSON decoding).
+2. **DETERMINISTIC checks carry the verdict; prose and tokens only corroborate.** Each load-bearing
+   check is judged against data the wrapper obtains ITSELF: the REMOTE (`git ls-remote`), its own
+   `git diff --numstat --no-renames <base>...HEAD` census, its own code-free classification of that
+   census, the job record's structured `git_ref`/`status`, and the census's own file paths inside the
+   prompt ACTUALLY SENT to the reviewer. Judging the reviewer by its own narration is the defect, not
+   the fix.
+3. **A PASS requires POSITIVE evidence that a review completed** (`review-completed:` — job status
+   `done` plus a terminal verdict marker from an allow-list). Absence of a vacuity phrase is never
+   proof of a review: an unfinished job, a provider `400 … model is not supported`, and a `failed`
+   status all carry no phrase, and all three previously reached `RESULT: PASS`.
+4. **Ordered, fail-closed asserts**: push assert against the REMOTE (an unpushed branch is itself an
+   empty-diff cause; a local mirror ref is NOT authority) → census (an unresolvable base or a failed
+   `git diff` FAILs, distinctly from an empty census) → **deterministic code-free FAIL before anything
+   is enqueued** → explicit-SHA + explicit-`--repo` invocation (never bare `--branch`, never the
+   two-positional range form) → reviewed-SHA assert against the job record's full-40-char `git_ref`
+   (the stdout `Enqueued job N for <sha>` line demoted to a fail-closed cross-check) →
+   `review-completed` → `prompt-content` → findings-vs-error attribution → the two corroborating
+   vacuity tiers → a machine-greppable `==== ROBOREV REVIEW SUMMARY ====` block with a terminal
+   `RESULT: PASS|FAIL|NOTHING-TO-REVIEW` and a non-zero exit on anything but PASS.
+5. **A distinct `NOTHING-TO-REVIEW` status** for a genuinely empty census — explicitly **not** a pass,
    and not recordable as "roborev clean".
-5. **Docs-only diffs are declared non-certifiable by roborev.** Trigger 3 makes roborev structurally
-   unable to review a code-free diff, so a docs/spec/workflow-only diff FAILs the wrapper as vacuous;
-   the sanctioned substitute is verification against **primary sources** (for #2950 that was
-   `git show cassandra-5.0.8:<path>`) recorded in the PR.
-6. **Call-site migration.** Every roborev invocation in `.claude/skills/{flow-implement,flow-activate,
-   flow-address,flow-finalize,ci-cd-validation}` and `.claude/agents/{flow-closer,flow-lead,
-   rust-reviewer,sstable-developer,test-validator}` routes through the wrapper; bare `--branch` becomes
-   non-sanctioned.
-7. **A hermetic regression check** (`scripts/tests/test_roborev_review_guard.sh`, stub `roborev` on
-   `PATH` replaying the recorded outputs above) wired into the agent-gate component set, plus a
-   documented **live worktree probe** proving a worktree-launched review reviews the worktree's HEAD.
-8. **Doctrine in the same change** (CLAUDE.md's roborev-invocation paragraph + the
-   `agents-developing/roborev-findings` page).
+6. **Docs-only diffs are declared non-certifiable by roborev**, and enforced DETERMINISTICALLY.
+   Trigger 3 makes roborev structurally unable to review a code-free diff, so an all-prose census FAILs
+   under its own `code-free:` key from the wrapper's own classification, before a review is enqueued —
+   never contingent on the reviewer admitting it. The sanctioned substitute is verification against
+   **primary sources** (for #2950 that was `git show cassandra-5.0.8:<path>`) recorded in the PR.
+7. **A non-zero roborev exit is ATTRIBUTED, not merely reported.** roborev exits non-zero **when it
+   reports findings**, so `roborev-exit:` splits `FINDINGS (exit N)` (a genuine review to triage and
+   fix) from `ERROR (exit N)` (the reviewer itself failed), with a new `findings:` key as the
+   deterministic disambiguator. Both FAIL the run; misattributing findings as a malfunction is
+   dangerous in the opposite direction — an agent told the reviewer broke retries or bypasses instead
+   of fixing.
+8. **Token accounting is repaired and demoted.** It was PERMANENTLY `UNAVAILABLE` on every real run
+   (the payload's `token_usage` is a JSON-ENCODED STRING needing a double decode, and the output field
+   is `total_output_tokens`) — i.e. a guard that silently was not there. Now three-state: `absent` ⇒
+   `UNAVAILABLE`, `parsed` ⇒ evaluate, **`present-but-unparseable` ⇒ FAIL (drift)**. The input floor is
+   re-anchored to **25,000** on the measured vacuous ceiling, and the **output-token floor is dropped
+   as a FAIL condition** (it cannot discriminate a genuine CLEAN review from a vacuous one).
+9. **Call-site migration across SIXTEEN surfaces** — thirteen under `.claude/**` (including the
+   `/worker` and `/manager` fleet entry points) plus three non-`.claude` doctrine surfaces that
+   previously prescribed the **inverse** rule ("no `--agent`/`--model` flags"; one called explicit
+   agent/model "never doctrine"). Bare `--branch` becomes non-sanctioned everywhere.
+10. **A hermetic regression check** (`scripts/tests/test_roborev_review_guard.sh`, a stub `roborev` on
+    `PATH` replaying the recorded outputs — including the doubly-encoded token payload — against
+    throwaway git fixtures covering the fleet's narrow-refspec topology) wired into BOTH the `--lite`
+    `roborev-lints` component and the full-gate `tooling-tests`, plus a documented **live worktree
+    probe** proving a worktree-launched review reviews the worktree's HEAD.
+11. **Doctrine in the same change** (CLAUDE.md's roborev-invocation paragraph + the
+    `agents-developing/roborev-findings` page, including a row in its mechanized-in-`--lite` table).
 
 ## Non-goals
 
@@ -100,13 +133,19 @@ have shipped.
 ## Impact
 
 - **New scripts:** `scripts/flow/roborev-review.sh` (the sanctioned invocation),
-  `scripts/tests/test_roborev_review_guard.sh` (hermetic regression check).
+  `scripts/flow/roborev-review-oracles.sh` (sourced: push assert + census/code-free oracles),
+  `scripts/flow/roborev-job-facts.py` (job-record + token extraction),
+  `scripts/tests/test_roborev_review_guard.sh` (hermetic regression check — 258 assertions).
 - **Gate:** the regression check is registered in `scripts/agent-gate.sh`'s shell-tooling component
   set (`tooling-tests`, and `roborev-lints` so it also runs in `--lite`), so a regression FAILs the
   fast loop rather than costing a review round.
-- **Agent surfaces (call-site migration):** `.claude/skills/{flow-implement,flow-activate,flow-address,
-  flow-finalize,ci-cd-validation}/SKILL.md` and `.claude/agents/{flow-closer,flow-lead,rust-reviewer,
-  sstable-developer,test-validator}.md`.
+- **Agent surfaces (call-site migration, 13):** `.claude/skills/{flow-implement,flow-activate,
+  flow-address,flow-finalize,ci-cd-validation}/SKILL.md`,
+  `.claude/skills/ci-cd-validation/merge-process.md`, `.claude/agents/{flow-closer,flow-lead,
+  rust-reviewer,sstable-developer,test-validator}.md`, and `.claude/commands/{worker,manager}.md`.
+- **Fleet doctrine surfaces (3):** `website/src/content/docs/agents-developing/delivery-pipeline.md`,
+  `docs/development/pm-operating-loop.md`, `docs/development/agent-machine-setup.md` — each previously
+  prescribed the INVERSE rule (run roborev with the machine's configured agent and no flags).
 - **Doctrine (ships in this change per CLAUDE.md):** CLAUDE.md's roborev-invocation bullet in
   *Agent-Team Conventions*, plus `website/src/content/docs/agents-developing/roborev-findings.md`.
   Publication is accepted by **grepping the served page for a new distinctive phrase** — an HTTP 200
