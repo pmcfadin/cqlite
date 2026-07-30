@@ -156,12 +156,18 @@ pub async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
     // ck=3: two live columns (the multi-column shape).
     //
     // (Issue #3094 has since RE-ENABLED the CQLite-written simple cell tombstone as
-    // the `ck=5` shape below; it used to be excluded here because both arms surfaced
-    // it as a raw `Value::Tombstone` the Arrow encoder rejected. Still NOT to be
-    // conflated with issue #3140 (issue #3095 review): #3140 is the CASSANDRA-written
-    // cell tombstone, which the MERGE arm handles correctly and only the FAST arm
-    // aborts on — an arm DIVERGENCE. #3094's shape is CQLite-written and identical on
-    // BOTH arms, so it was never a divergence. Different defect class, different fix.)
+    // the `ck=5` shape below. The exclusion note that used to sit here justified
+    // itself with a claim that is measurably FALSE and is recorded as such so it is
+    // not reinstated: it said BOTH arms surfaced the deleted cell as a raw
+    // `Value::Tombstone` the Arrow encoder rejected, hence "not an arm divergence".
+    // Reverting the #3094 read-path drop and re-running this differential fails on
+    // the BYPASS arm ONLY — `column 'w': expected Text value, got Tombstone(..)` —
+    // because the merge arm has always dropped simple cell tombstones in
+    // `write_engine::merge::read_assembly::assemble_read_cells`. So the pre-#3094
+    // defect WAS an arm divergence, of the same shape as #3140; the two differ only
+    // in who WROTE the tombstone (#3140 Cassandra, #3094 CQLite), which is why
+    // #3140's `BypassReason::StaticColumnsWithDeletions` fail-closed guard is
+    // independent of this and stays pinned by `statics/select-star`.)
     engine
         .write(base(
             1,
@@ -182,10 +188,14 @@ pub async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
     // ck=5: the SIMPLE CELL TOMBSTONE shape (issue #3094, re-enabled here once the
     // read path stopped surfacing a deleted cell as a raw `Value::Tombstone` that
     // the Arrow encoder rejected). `v` stays live, `w` is deleted by a
-    // strictly-later cell tombstone, so both arms must return the row with `w`
-    // NULL — the divergence-prone part being that the merge arm reconciles it away
-    // in `generation_merge::filter_live` while the fast arm relies on the
-    // single-generation decoder's own per-cell drop.
+    // strictly-later cell tombstone, so both arms must return the row with `w` NULL.
+    // The two arms reach that answer through DIFFERENT code, which is what makes the
+    // shape worth pinning here: Flight's merge arm drops the tombstone while
+    // assembling the reconciled row (`write_engine::merge::read_assembly::
+    // assemble_read_cells`), whereas the fast/bypass arm relies on the
+    // single-generation decoder's own per-cell drop (`row_decoder`'s
+    // `PartitionShadow::cell_tombstone_dropped`) — the half that was missing before
+    // #3094 and that only the bypass arm exposes.
     engine
         .write(base(
             1,
