@@ -191,7 +191,14 @@ roborev_census() {
         case "$path" in "$prefix"*) file_non_code=1 ;; esac
       done
     fi
-    if [ "$file_non_code" -eq 1 ]; then census_non_code_files=$((census_non_code_files + 1)); fi
+    if [ "$file_non_code" -eq 1 ]; then
+    census_non_code_files=$((census_non_code_files + 1))
+  else
+    # The CODE subset is what the reviewer is actually sent: roborev EXCLUDES
+    # non-code paths from the diff it builds (measured — see the wrapper's
+    # prompt-content step), so only these paths can be looked for in the prompt.
+    census_code_paths+=("$path")
+  fi
   done <<<"$NUMSTAT"
 
   census_noun="files"
@@ -217,5 +224,4 @@ roborev_census() {
     finish FAIL 1
   fi
   CODE_FREE="PASS"
-  CODE_FREE="PASS"
-}
+  }

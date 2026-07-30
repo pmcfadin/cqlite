@@ -31,6 +31,12 @@ a `token_state` so the wrapper can tell three cases apart:
                     the tier to a non-failing UNAVAILABLE while the underlying
                     counts were the recorded vacuous baseline, and the run PASSED.
 
+`verdict` is reported because it is the STRUCTURED findings signal: measured values
+are "F" (the review reported findings) and, by symmetry, a pass letter. Deriving
+"did the reviewer find anything" from a regex over the transcript is a prose
+heuristic, and the wrapper gates its authoritative vacuity check on that answer — so
+the structured field must win wherever it exists.
+
 `has_token_data` is reported rather than obeyed: a `false` there alongside readable
 counts is itself a drift signal, and the counts are what the vacuity check needs.
 """
@@ -54,7 +60,7 @@ OUTPUT_TOKEN_KEYS = (
     "completionTokens",
 )
 TOKEN_CONTAINER_KEYS = ("token_usage", "tokenUsage", "usage", "token_counts")
-STRING_FACTS = ("git_ref", "status", "model", "requested_model")
+STRING_FACTS = ("git_ref", "status", "model", "requested_model", "verdict")
 
 
 def objects(node):

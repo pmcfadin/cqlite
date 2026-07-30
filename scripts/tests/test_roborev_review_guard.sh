@@ -30,6 +30,12 @@ if [ ! -f "$WRAPPER" ]; then
   exit 1
 fi
 
+# Shorten the wrapper's job-record poll bound: a TIMING knob only — fewer polls can
+# only make the record MORE likely to be reported DEGRADED (the fail-closed
+# direction), so it cannot weaken anything this suite asserts.
+export ROBOREV_JOB_RECORD_POLL_ATTEMPTS=2
+export ROBOREV_JOB_RECORD_POLL_INTERVAL_SECS=1
+
 PASS=0
 FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
@@ -54,6 +60,10 @@ trap 'rm -rf "$tmp"' EXIT
 #   STUB_MODEL           job model field
 #   STUB_REQUESTED_MODEL job requested_model field
 #   STUB_PROMPT          prompt text (plain, no quotes/backslashes)
+#   STUB_VERDICT_FIELD   the job record's structured `verdict` letter (P/F), '' to omit
+#   STUB_RECORD_BLANK_FOR the first N record reads return an empty record, so the
+#                        wrapper's bounded poll for the ASYNCHRONOUSLY written record
+#                        can be exercised (counter kept in $STUB_INVOKED.reads)
 #   STUB_HAS_TOKEN_DATA  emit a has_token_data field with this value (true/false)
 #   STUB_SHOW_JSON       `none` => `show --json` returns null, forcing the
 #                        `list --json` fallback path
@@ -77,6 +87,9 @@ emit_job_object() {
   fi
   local git_ref="${STUB_GIT_REF:-${STUB_ANNOUNCE_SHA:-}}"
   if [ "${STUB_GIT_REF:-}" = none ]; then git_ref=""; fi
+  if [ -n "${STUB_VERDICT_FIELD:-}" ]; then
+    extra="$extra,\"verdict\":\"${STUB_VERDICT_FIELD}\""
+  fi
   printf '{"id":%s,"git_ref":"%s","status":"%s","model":"%s","requested_model":"%s","prompt":"%s"%s}' \
     "${STUB_JOB:-4600}" \
     "$git_ref" \
@@ -85,6 +98,17 @@ emit_job_object() {
     "${STUB_REQUESTED_MODEL:-gpt-5.6-sol}" \
     "${STUB_PROMPT:-}" \
     "$usage$extra"
+}
+
+# record_read_blank: true while the first STUB_RECORD_BLANK_FOR record reads should
+# come back empty, replaying the real daemon's asynchronous record write.
+record_read_blank() {
+  local want="${STUB_RECORD_BLANK_FOR:-0}" seen=0 counter="$STUB_INVOKED.reads"
+  [ "$want" -gt 0 ] || return 1
+  [ ! -f "$counter" ] || seen=$(cat "$counter")
+  seen=$((seen + 1))
+  printf '%s' "$seen" >"$counter"
+  [ "$seen" -le "$want" ]
 }
 
 case "$cmd" in
@@ -100,11 +124,13 @@ case "$cmd" in
     case " $* " in
       *" --prompt "*) printf '%s\n' "${STUB_PROMPT:-}"; exit 0 ;;
     esac
+    record_read_blank && { printf 'null\n'; exit 0; }
     [ "${STUB_SHOW_JSON:-object}" != none ] || { printf 'null\n'; exit 0; }
     emit_job_object; printf '\n'
     exit 0
     ;;
   list)
+    record_read_blank && { printf 'null\n'; exit 0; }
     printf '['; emit_job_object; printf ']\n'
     exit 0
     ;;
@@ -134,6 +160,7 @@ git_q() { git -C "$1" -c user.email=t@example.invalid -c user.name=Tester -c com
 #   empty           wide refspec, feature == main, pushed
 #   docs-only       wide refspec, markdown-only change, pushed (code-free census)
 #   mixed           one markdown + one .rs file (NOT code-free)
+#   two-code-commits  two commits, each touching a DIFFERENT .rs file
 #   workflow-yaml   only .github/workflows/ci.yml (a .yml extension is CODE, so this
 #                   must NOT be classified code-free)
 #   narrow          NARROW refspec (+refs/heads/main:refs/remotes/origin/main) —
@@ -187,6 +214,16 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       printf '# spec\n' >"$work/NOTES.md"
       git_q "$work" add README.md NOTES.md
       git_q "$work" commit -q -m 'docs only'
+      ;;
+    two-code-commits)
+      # Two commits touching DIFFERENT code files: a single-commit review would cover
+      # only the second, which is the partial-review vacuity class.
+      printf 'fn alpha() {}\n' >"$work/alpha.rs"
+      git_q "$work" add alpha.rs
+      git_q "$work" commit -q -m 'first code commit'
+      printf 'fn beta() {}\n' >"$work/beta.rs"
+      git_q "$work" add beta.rs
+      git_q "$work" commit -q -m 'second code commit'
       ;;
     mixed)
       printf 'doc line\n' >>"$work/README.md"
@@ -258,6 +295,9 @@ assert_no_mirror_ref() { # assert_no_mirror_ref <label> <work> <remote>
   fi
 }
 
+# range_ref <work>: the git_ref shape a RANGE review records, "<base40>..<head40>".
+range_ref() { printf '%s..%s' "$(git -C "$1" rev-parse "${2:-origin/main}")" "$(git -C "$1" rev-parse HEAD)"; }
+
 CASE_N=0
 OUT=""
 RC=0
@@ -276,6 +316,10 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   OUT="$tmp/out-$CASE_N.txt"
   INVOKED="$tmp/invoked-$CASE_N.txt"
   : >"$INVOKED"
+  # The sanctioned invocation reviews the RANGE <base>..HEAD, so the job record's
+  # git_ref is "<base40>..<head40>". Default the stub to the correct range unless the
+  # case pinned git_ref itself (or asked for it to be absent with `none`).
+  if [ -z "${STUB_GIT_REF:-}" ]; then STUB_GIT_REF=$(range_ref "$work"); fi
   STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" \
     bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
@@ -349,6 +393,8 @@ export STUB_MODEL=gpt-5.6-sol
 export STUB_REQUESTED_MODEL=gpt-5.6-sol
 export STUB_SHOW_JSON=object
 export STUB_HAS_TOKEN_DATA=''
+export STUB_VERDICT_FIELD=''
+export STUB_RECORD_BLANK_FOR=0
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
 
@@ -365,12 +411,15 @@ reset_stub() {
   STUB_REQUESTED_MODEL=gpt-5.6-sol
   STUB_SHOW_JSON=object
   STUB_HAS_TOKEN_DATA=''
+  STUB_VERDICT_FIELD=''
+  STUB_RECORD_BLANK_FOR=0
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
 reset_stub
 work=$(make_fixture case_a pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_GIT_REF=$(git -C "$work" rev-parse origin/main)
 run_wrapper "$work"
 assert_verdict 'case (a)' FAIL 1
 assert_says 'case (a) names the base ref' "EQUALS the base ref 'origin/main'"
@@ -381,6 +430,7 @@ printf '== case (b): enqueued sha is neither endpoint ==\n'
 reset_stub
 work=$(make_fixture case_b pushed)
 STUB_ANNOUNCE_SHA='0000000000000000000000000000000000000abc'
+STUB_GIT_REF='0000000000000000000000000000000000000abc'
 run_wrapper "$work"
 assert_verdict 'case (b)' FAIL 1
 assert_says 'case (b) names neither-endpoint' 'matches NEITHER endpoint'
@@ -569,6 +619,7 @@ reset_stub
 work=$(make_fixture case_k3 narrow-upstream)
 assert_no_mirror_ref 'case (k3)' "$work" upstream
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_GIT_REF=$(range_ref "$work" upstream/main)
 run_wrapper "$work" --base upstream/main
 assert_verdict 'case (k3)' PASS 0
 assert_says 'case (k3) push-assert PASS against the configured upstream' '^push-assert: PASS$'
@@ -686,7 +737,7 @@ STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 run_wrapper "$work"
 assert_verdict 'case (n)' FAIL 1
-assert_says 'case (n) prompt-content FAIL counts the absent paths' '^prompt-content: FAIL \(1/1 census paths absent from the prompt\)$'
+assert_says 'case (n) prompt-content FAIL counts the absent paths' '^prompt-content: FAIL \(1/1 code census paths absent from the prompt\)$'
 assert_says 'case (n) names the missing path' '^  main\.rs$'
 assert_says 'case (n) says the reviewer never received the diff' 'the reviewer never received this diff'
 assert_says 'case (n) every other check passed' '^vacuity-tier1: PASS$'
@@ -707,21 +758,23 @@ reset_stub
 work=$(make_fixture case_n3 mixed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work"
-assert_says 'case (n3) prompt-content PASS names the counts' '^prompt-content: PASS \(2/2 census paths present\)$'
+assert_says 'case (n3) prompt-content counts only the CODE subset' '^prompt-content: PASS \(1/1 code census paths present\)$'
 
 printf '== case (o): the structured git_ref is the sha oracle, stdout is a cross-check ==\n'
 reset_stub
 # stdout announces the right sha while the job record says the base was reviewed:
 # the structured field must win, and the disagreement must be recorded.
 work=$(make_fixture case_o pushed)
-STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_GIT_REF=$(git -C "$work" rev-parse origin/main)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+# stdout announced the range BASE (normal for a range review, and it verifies nothing
+# about HEAD), while the record says the reviewed range STOPPED at the base. Only the
+# structured range can catch that the branch tip was never reviewed.
+STUB_GIT_REF="$(git -C "$work" rev-parse origin/main)..$(git -C "$work" rev-parse origin/main)"
 run_wrapper "$work"
 assert_verdict 'case (o)' FAIL 1
-assert_says 'case (o) sha-assert FAIL from the structured field' '^sha-assert: FAIL \(reviewed-sha does not match head-sha\)$'
-assert_says 'case (o) names the base-ref equality' "EQUALS the base ref 'origin/main'"
-assert_says 'case (o) records the stdout cross-check disagreement' 'sha-assert cross-check: stdout announced'
-assert_says 'case (o) reviewed-sha reports the structured value' "^reviewed-sha: $(git -C "$work" rev-parse origin/main)\$"
+assert_says 'case (o) sha-assert FAIL from the structured range' '^sha-assert: FAIL \(reviewed range does not match origin/main\.\.\.HEAD\)$'
+assert_says 'case (o) names the short-of-tip range head' 'the reviewed scope stops short of the branch tip'
+assert_says 'case (o) reviewed-sha reports the structured range' "^reviewed-sha: $(git -C "$work" rev-parse origin/main)\.\.$(git -C "$work" rev-parse origin/main)\$"
 
 printf '== case (p): a model substitution is surfaced loudly ==\n'
 reset_stub
@@ -756,21 +809,28 @@ assert_verdict 'case (f)' PASS 0
 for line in 'push-assert: PASS' 'census-check: PASS' 'sha-assert: PASS' 'vacuity-tier1: PASS' 'vacuity-tier2: PASS'; do
   assert_says "case (f) $line" "^$line\$"
 done
-assert_says 'case (f) reviewed-sha printed' "^reviewed-sha: $head_sha\$"
+assert_says 'case (f) reviewed-sha reports the RANGE' "^reviewed-sha: $(git -C "$work" rev-parse origin/main)\.\.$head_sha\$"
 assert_says 'case (f) job printed' '^job: 4656$'
 assert_says 'case (f) log path named' '^log: .+transcript-'
 assert_one_block 'case (f)'
 # The sanctioned invocation form: explicit HEAD sha, explicit ABSOLUTE --repo,
 # --wait, both --agent and --model — and never --branch, never two positionals.
-if grep -qF -- "review $head_sha --repo $work --agent codex --model gpt-5.6-sol --wait" "$INVOKED"; then
-  ok 'case (f): invoked by explicit sha + explicit absolute --repo + --wait'
+if grep -qF -- "review --branch --base origin/main --repo $work --agent codex --model gpt-5.6-sol --wait" "$INVOKED"; then
+  ok 'case (f): invoked over the census RANGE with an explicit absolute --repo + --wait'
 else
   bad "case (f): unexpected invocation form: $(cat "$INVOKED")"
 fi
-if grep -qF -- '--branch' "$INVOKED"; then
-  bad 'case (f): the non-sanctioned --branch form was used'
+# `--branch` is correct ONLY with an explicit --repo (without it, it resolves against
+# the ROOT checkout); the two-positional range form must never appear.
+if grep -qF -- '--branch' "$INVOKED" && grep -qF -- "--repo $work" "$INVOKED"; then
+  ok 'case (f): --branch is paired with an explicit absolute --repo'
 else
-  ok 'case (f): no --branch in the invocation'
+  bad "case (f): --branch/--repo pairing missing: $(cat "$INVOKED")"
+fi
+if grep -qE -- 'review [0-9a-f]{7,40} [0-9a-f]{7,40}' "$INVOKED"; then
+  bad 'case (f): the two-positional commit-range form was used'
+else
+  ok 'case (f): no two-positional commit-range form'
 fi
 
 printf '== case (g): genuinely empty census ==\n'
@@ -922,37 +982,35 @@ assert_verdict 'case (s3)' FAIL 1
 assert_says 'case (s3) review-completed FAILs on the job status' "^review-completed: FAIL \(job status 'failed' is not done\)\$"
 assert_says 'case (s3) says nothing was certified' 'nothing was certified'
 
-printf '== case (t1): a 9-char SHORT sha announcement (the real shape) still verifies ==\n'
+printf '== case (t1): the REAL announcement shape (abbreviated range base) parses ==\n'
 reset_stub
-# The recorded real announcement carries an ABBREVIATED sha, so the fallback compare
-# must be a prefix match; strict equality would reject every real announcement.
+# A range review announces "Enqueued job N for <abbreviated RANGE BASE>", so the
+# announcement carries the JOB ID and nothing verifiable about HEAD; the structured
+# range is what verifies the scope. The parse must still accept the short form.
 work=$(make_fixture case_t1 pushed)
-head_sha=$(git -C "$work" rev-parse HEAD)
-STUB_ANNOUNCE_SHA="${head_sha:0:9}"
-STUB_GIT_REF=none
+base_sha=$(git -C "$work" rev-parse origin/main)
+STUB_ANNOUNCE_SHA="${base_sha:0:9}"
 run_wrapper "$work"
 assert_verdict 'case (t1)' PASS 0
-assert_says 'case (t1) the abbreviated sha satisfied the assert' '^sha-assert: PASS$'
-assert_says 'case (t1) the weaker source is named' 'abbreviated-sha prefix parse'
+assert_says 'case (t1) the abbreviated announcement was parsed' '^job: 4656$'
+assert_says 'case (t1) the structured range verified the scope' '^sha-assert: PASS$'
 
 printf '== case (t2): an UPPERCASE announcement is normalised, not fed on as garbage ==\n'
 reset_stub
 work=$(make_fixture case_t2 pushed)
-head_sha=$(git -C "$work" rev-parse HEAD)
-STUB_ANNOUNCE_SHA=$(printf '%s' "${head_sha:0:9}" | tr 'a-f' 'A-F')
-STUB_GIT_REF=none
+base_sha=$(git -C "$work" rev-parse origin/main)
+STUB_ANNOUNCE_SHA=$(printf '%s' "${base_sha:0:9}" | tr 'a-f' 'A-F')
 run_wrapper "$work"
 assert_verdict 'case (t2)' PASS 0
-assert_says 'case (t2) reviewed-sha is lower-cased' "^reviewed-sha: ${head_sha:0:9}\$"
+assert_says 'case (t2) the upper-case announcement was parsed' '^job: 4656$'
+assert_says 'case (t2) sha-assert PASSes' '^sha-assert: PASS$'
 
 printf '== case (t3): a 4-hex-char announcement is too short to verify ==\n'
 reset_stub
 work=$(make_fixture case_t3 pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD | cut -c1-4)
-# git_ref absent on purpose: the ANNOUNCEMENT must be the load-bearing signal here,
-# or the structured oracle rejects the short sha for an unrelated reason and the
-# regex floor goes untested.
-STUB_GIT_REF=none
+# The range git_ref is left VALID on purpose, so the ONLY thing that can fail this run
+# is the announcement's 7-hex-char floor.
 run_wrapper "$work"
 assert_verdict 'case (t3)' FAIL 1
 assert_says 'case (t3) the 7-char floor rejects it' '^sha-assert: FAIL \(no parseable enqueue announcement\)$'
@@ -964,12 +1022,13 @@ work=$(make_fixture case_t4 pushed)
 head_sha=$(git -C "$work" rev-parse HEAD)
 base_sha=$(git -C "$work" rev-parse origin/main)
 STUB_ANNOUNCE_SHA="$base_sha"
-STUB_GIT_REF=none
-STUB_VERDICT=$'superseded; retrying\nEnqueued job 4656 for '"$head_sha"$'\nNo issues found.\nSummary: reviewed the diff; no issues found.'
+STUB_JOB=4655
+STUB_VERDICT=$'superseded; retrying\nEnqueued job 4656 for '"$base_sha"$'\nNo issues found.\nSummary: reviewed the diff; no issues found.'
 run_wrapper "$work"
 assert_verdict 'case (t4)' PASS 0
 assert_says 'case (t4) the multiplicity is recorded' 'the transcript carries 2 enqueue announcements'
-assert_says 'case (t4) the LAST announcement was asserted' "^reviewed-sha: $head_sha\$"
+assert_says 'case (t4) the LAST announcement supplied the job id' '^job: 4656$'
+assert_lacks 'case (t4) the FIRST job id was not used' '^job: 4655$'
 
 printf '== case (t5): a detached HEAD FAILs before anything is enqueued ==\n'
 reset_stub
@@ -1119,6 +1178,123 @@ for bad_invocation in "--nonsense" "--repo:$tmp/definitely-not-a-directory" "--r
   assert_never_enqueued "usage: '$bad_invocation'"
 done
 
+printf '== case (x1): a PARTIAL review (only the last commit) FAILs ==\n'
+reset_stub
+# DEFECT 1, the case that fired on the real probe: `roborev review <sha>` reviews ONE
+# COMMIT, so on a multi-commit branch "roborev clean" meant "the last commit was
+# clean". The wrapper now reviews the census RANGE, and prompt-content is the assert
+# that the whole range actually reached the reviewer.
+work=$(make_fixture case_x1 two-code-commits)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_PROMPT='Review this diff: diff --git a/beta.rs b/beta.rs +fn beta() {}'
+run_wrapper "$work"
+assert_verdict 'case (x1)' FAIL 1
+assert_says 'case (x1) prompt-content names the uncovered code path' '^prompt-content: FAIL \(1/2 code census paths absent from the prompt\)$'
+assert_says 'case (x1) lists the missing file' '^  alpha\.rs$'
+assert_says 'case (x1) says the reviewer never received the diff' 'the reviewer never received this diff'
+assert_says 'case (x1) the range itself verified fine' '^sha-assert: PASS$'
+
+printf '== case (x3): a range anchored at the EMPTY TREE FAILs (two-positional form) ==\n'
+reset_stub
+# The measured signature of the two-positional commit-range form: it anchors the range
+# at git's empty tree, so the "diff" is the whole file set and only a fraction of the
+# real change reaches the reviewer. Asserting BOTH range endpoints catches it.
+work=$(make_fixture case_x3 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_GIT_REF="4b825dc642cb6eb9a060e54bf8d69288fbee4904..$(git -C "$work" rev-parse HEAD)"
+run_wrapper "$work"
+assert_verdict 'case (x3)' FAIL 1
+assert_says 'case (x3) the wrong range BASE is named' 'the range BASE is .4b825dc642cb6eb9a060e54bf8d69288fbee4904.'
+assert_says 'case (x3) the empty-tree signature is called out' 'empty-tree base \(4b825dc6\.\.\.\) is the signature of the non-sanctioned two-positional'
+
+printf '== case (x2): the full range in the prompt PASSes ==\n'
+reset_stub
+work=$(make_fixture case_x2 two-code-commits)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_PROMPT='Review this diff: diff --git a/alpha.rs b/alpha.rs diff --git a/beta.rs b/beta.rs diff --git a/main.rs b/main.rs'
+run_wrapper "$work"
+assert_verdict 'case (x2)' PASS 0
+assert_says 'case (x2) every code census path was covered' '^prompt-content: PASS \(2/2 code census paths present\)$'
+
+if [ "$HAVE_PYTHON3" -eq 1 ]; then
+printf '== case (y1): the ASYNCHRONOUSLY written job record is POLLED, not assumed ==\n'
+reset_stub
+# DEFECT 2: the instant `--wait` returned, the record had no git_ref/status/model/
+# token_usage; moments later it had all four. Unpolled, FOUR asserts silently
+# degraded at once on a normal run.
+work=$(make_fixture case_y1 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_RECORD_BLANK_FOR=2
+run_wrapper "$work"
+STUB_RECORD_BLANK_FOR=0
+assert_verdict 'case (y1)' PASS 0
+assert_says 'case (y1) the record is reported complete' '^job-record: PASS$'
+assert_says 'case (y1) the polling is disclosed' 'became complete only after [0-9]+ poll'
+assert_says 'case (y1) the STRONG sha oracle was used' '^sha-assert: PASS$'
+assert_says 'case (y1) tier 2 evaluated rather than degrading' '^vacuity-tier2: PASS$'
+assert_says 'case (y1) the model was confirmed from the record' '^model: gpt-5\.6-sol$'
+
+printf '== case (y2): a permanently absent record FAILs, it does not fall back ==\n'
+reset_stub
+work=$(make_fixture case_y2 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_SHOW_JSON=none
+STUB_GIT_REF=none
+run_wrapper "$work"
+assert_verdict 'case (y2)' FAIL 1
+assert_says 'case (y2) the record is DEGRADED, explicitly' '^job-record: DEGRADED'
+assert_says 'case (y2) sha-assert refuses to guess' '^sha-assert: FAIL \(job record unavailable — reviewed range unverifiable\)$'
+assert_says 'case (y2) explains why prose cannot substitute' 'prose cannot establish that branch HEAD was reviewed'
+
+printf '== case (z1): exit 0 + a QUOTED severity marker cannot exempt tier 1 ==\n'
+reset_stub
+# DEFECT 3 (codex): findings used to come from a regex over the WHOLE transcript, so
+# incidental "[Low]" text set findings: PRESENT and exempted a vacuous verdict from
+# the authoritative tier-1 failure. The marker scan is now confined to the findings
+# BLOCK, and the structured verdict wins where it exists.
+work=$(make_fixture case_z1 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_VERDICT=$'No issues found.\nThe severity ladder here is [Critical] > [High] > [Medium] > [Low].\nSummary: the diff contains no code changes to review.'
+run_wrapper "$work"
+assert_verdict 'case (z1)' FAIL 1
+assert_says 'case (z1) the quoted markers did not become findings' '^findings: NONE$'
+assert_says 'case (z1) tier 1 still FAILs authoritatively' '^vacuity-tier1: FAIL \(vacuous verdict vs non-empty census\)$'
+
+printf '== case (z2): a structured verdict of F exempts the phrase (no false-FAIL) ==\n'
+reset_stub
+work=$(make_fixture case_z2 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_VERDICT_FIELD=F
+STUB_REVIEW_RC=1
+STUB_VERDICT=$'## Findings\n[Medium] the guard matches no code changes too broadly\n## Summary: 1 finding; it says no code changes.'
+run_wrapper "$work"
+STUB_REVIEW_RC=0
+assert_says 'case (z2) findings come from the structured verdict' '^findings: PRESENT \(1\)$'
+assert_says 'case (z2) tier 1 is a NOTICE, not a FAIL' '^vacuity-tier1: NOTICE \(phrase present in a findings-bearing review\)$'
+assert_lacks 'case (z2) tier 1 does not FAIL' '^vacuity-tier1: FAIL'
+
+printf '== case (z3): verdict says clean while the findings block has markers = INCONSISTENT ==\n'
+reset_stub
+work=$(make_fixture case_z3 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_VERDICT_FIELD=P
+STUB_VERDICT=$'## Findings\n[High] a real finding\n## Summary: clean.'
+run_wrapper "$work"
+assert_verdict 'case (z3)' FAIL 1
+assert_says 'case (z3) the contradiction is named' '^findings: INCONSISTENT \(verdict clean, 1 findings marker\(s\)\)$'
+assert_says 'case (z3) it fails closed' 'One of the two is wrong'
+
+printf '== case (z4): exit 0 with markers INSIDE the findings block = INCONSISTENT ==\n'
+reset_stub
+work=$(make_fixture case_z4 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_VERDICT=$'## Findings\n[High] a real finding the exit code contradicts\n## Summary: 1 finding.'
+run_wrapper "$work"
+assert_verdict 'case (z4)' FAIL 1
+assert_says 'case (z4) the exit-code contradiction is named' '^findings: INCONSISTENT \(exit 0, 1 findings marker\(s\)\)$'
+assert_says 'case (z4) it cannot exempt tier 1' 'cannot exempt the tier-1 vacuity check'
+fi  # HAVE_PYTHON3
+
 printf '== case (w): a MISSING oracles file FAILs closed, never silently no-ops ==\n'
 reset_stub
 # roborev-review.sh sources scripts/flow/roborev-review-oracles.sh for the push assert
@@ -1205,7 +1381,8 @@ STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --help >"$OUT" 2>&
 RC=$?
 if [ "$RC" -eq 0 ]; then ok '--help exits 0'; else bad "--help exited $RC (want 0)"; fi
 assert_says '--help states the exit-code contract' '0=PASS, 1=FAIL, 3=NOTHING-TO-REVIEW'
-assert_says '--help marks bare --branch non-sanctioned' 'Non-sanctioned forms'
+assert_says '--help names the sanctioned range invocation' 'Sanctioned invocation'
+assert_says '--help marks --branch-without-repo non-sanctioned' "WITHOUT an explicit --repo"
 assert_says '--help carries the live worktree probe' 'LIVE WORKTREE PROBE'
 assert_says '--help states the probe expectation' 'reviewed-sha == head-sha'
 assert_says '--help requires both agent and model' 'Both are required'
