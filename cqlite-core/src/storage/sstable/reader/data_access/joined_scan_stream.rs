@@ -124,12 +124,16 @@ enum TaskState {
     /// Joined, and the join returned `Ok(())`: the scan PROVABLY ran to completion.
     /// The only state from which end-of-stream is reported.
     Finished,
-    /// Joined, and the join returned a `JoinError` (panic or abort). STICKY: every
-    /// later `recv` re-reports the failure, mirroring the sibling boundary
+    /// Joined, and the join returned a `JoinError`. STICKY: every later `recv`
+    /// re-reports the failure, mirroring the sibling boundary
     /// (`QueryRowStream::terminated`), so a retrying consumer — these streams are
     /// public API, returned by `SSTableManager`/`StorageEngine` — can never
     /// downgrade a dead task to a clean end of stream.
-    Died,
+    ///
+    /// `cancelled` remembers WHICH kind of `JoinError` it was, so the sticky
+    /// re-report keeps saying the same thing the first report said (a cancellation
+    /// re-reported as a panic would be a lie about the cause).
+    Died { cancelled: bool },
 }
 
 impl<T: ScanStreamItem> JoinedStream<T> {
@@ -147,10 +151,12 @@ impl<T: ScanStreamItem> JoinedStream<T> {
     /// Next item, or `None` at a PROVEN-clean end of stream.
     ///
     /// When the channel closes, the producer task is joined: a task that returned
-    /// normally yields `None` (the scan really finished), while a task that DIED —
-    /// panicked, or was cancelled/aborted — yields `Some(Err(..))`. That is the
-    /// whole point: a dead producer must never be indistinguishable from a finished
-    /// one (issues #3106, #3124).
+    /// normally yields `None` (the scan really finished), while a task that DIED
+    /// yields `Some(Err(..))` — a panic as the fail-closed
+    /// [`dead_scan_task_error`], a CANCELLED/aborted task as [`Error::Cancelled`],
+    /// which is the honest cause for a scan someone stopped. That is the whole
+    /// point: a dead producer must never be indistinguishable from a finished one
+    /// (issues #3106, #3124).
     ///
     /// A dead task is STICKY: every subsequent call re-reports the failure, so
     /// polling again can never downgrade it to a clean end of stream.
@@ -167,8 +173,8 @@ impl<T: ScanStreamItem> JoinedStream<T> {
     /// verdict was ever recorded, and the following `recv` short-circuited to a
     /// clean end of stream for a task that may have panicked.
     pub async fn recv(&mut self) -> Option<Result<T>> {
-        if let TaskState::Died = self.task {
-            return Some(Err(dead_scan_task_error_after_report::<T>()));
+        if let TaskState::Died { cancelled } = self.task {
+            return Some(Err(sticky_dead_task_error::<T>(cancelled)));
         }
         if let Some(item) = self.rx.recv().await {
             return Some(item);
@@ -181,7 +187,9 @@ impl<T: ScanStreamItem> JoinedStream<T> {
             TaskState::Running(handle) => handle.await,
             // A proven-clean completion is the ONLY route to end-of-stream.
             TaskState::Finished => return None,
-            TaskState::Died => return Some(Err(dead_scan_task_error_after_report::<T>())),
+            TaskState::Died { cancelled } => {
+                return Some(Err(sticky_dead_task_error::<T>(*cancelled)))
+            }
         };
         // No `.await` between observing the outcome and recording it, so the verdict
         // cannot be lost to a cancellation.
@@ -191,8 +199,19 @@ impl<T: ScanStreamItem> JoinedStream<T> {
                 None
             }
             Err(join_err) => {
-                self.task = TaskState::Died;
-                Some(Err(dead_scan_task_error::<T>(&join_err)))
+                // A CANCELLED task (aborted, or its runtime shut down) is a distinct
+                // cause from a panic and gets the error the doc above already promised
+                // for it: `Error::Cancelled`. Nothing in the crate aborts these tasks
+                // today, so this arm is about the doc being TRUE — and about the next
+                // caller that does abort one getting an honest cause rather than an
+                // internal-invariant-violated report.
+                let cancelled = join_err.is_cancelled();
+                self.task = TaskState::Died { cancelled };
+                Some(Err(if cancelled {
+                    Error::Cancelled
+                } else {
+                    dead_scan_task_error::<T>(&join_err)
+                }))
             }
         }
     }
@@ -212,6 +231,15 @@ fn dead_scan_task_error<T: ScanStreamItem>(join_err: &tokio::task::JoinError) ->
          TRUNCATED and cannot be reported as a complete scan (issues #3106/#3124)",
         T::STREAM_KIND
     ))
+}
+
+/// Re-report for a consumer that keeps polling after the dead-task error, preserving
+/// the CAUSE the first report gave (a cancellation stays `Error::Cancelled`).
+fn sticky_dead_task_error<T: ScanStreamItem>(cancelled: bool) -> Error {
+    if cancelled {
+        return Error::Cancelled;
+    }
+    dead_scan_task_error_after_report::<T>()
 }
 
 /// Re-report for a consumer that keeps polling after the dead-task error. The
@@ -535,6 +563,41 @@ mod tests {
             stream.recv().await.is_none(),
             "and stays clean on a later poll"
         );
+    }
+
+    /// A CANCELLED (aborted) producer is reported as [`Error::Cancelled`], not as the
+    /// panic-flavoured internal error — and that cause survives the sticky re-report.
+    ///
+    /// Nothing in the crate aborts these tasks today; this pins that the documented
+    /// cancellation coverage is REAL rather than aspirational, so the first caller that
+    /// does abort a scan gets an honest cause instead of "an internal invariant was
+    /// violated".
+    #[tokio::test]
+    async fn a_cancelled_scan_task_is_reported_as_cancelled_and_stays_cancelled() {
+        let (tx, rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(4);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            // Park forever holding the sender: only the abort below can end this.
+            std::future::pending::<()>().await;
+            drop(tx);
+        });
+        started_rx.await.expect("the task started");
+        task.abort();
+        let mut stream = RowScanStream::new(rx, task);
+
+        for attempt in 0..3 {
+            let err = stream
+                .recv()
+                .await
+                .expect("an aborted producer must never report a clean end of stream")
+                .expect_err("it must be an error");
+            assert!(
+                matches!(err, Error::Cancelled),
+                "attempt {attempt}: a cancelled task is Error::Cancelled, not an \
+                 internal dead-task report, got: {err}"
+            );
+        }
     }
 
     /// The control: a task that finishes normally yields the clean end of stream,
