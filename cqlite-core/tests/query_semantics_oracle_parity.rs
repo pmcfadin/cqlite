@@ -327,18 +327,37 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         .first()
         .map(|r| r.keys().cloned().collect())
         .unwrap_or_default();
+    // A projected column must be DECLARED in the result metadata — a name that is
+    // not is an oracle typo and stays a hard error, never a silent NULL (issue
+    // #3094). Within a row, however, an ABSENT entry IS the core result model's
+    // representation of NULL: the decoder only inserts cells the row actually
+    // carries, and every consumer (`output/csv.rs`, `output/json.rs`,
+    // `export/arrow_convert.rs`) renders a missing column as null. A cell deleted
+    // by a cell tombstone is exactly that — absent from the reconciled row.
+    let declared: std::collections::BTreeSet<&str> = result
+        .metadata
+        .columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    for col in &cols {
+        if !declared.contains(col.as_str()) {
+            return Err(format!(
+                "case {}: projected column {col} is not declared in the result \
+                 metadata (declared: {declared:?}) — an oracle typo, not a NULL",
+                case.id
+            ));
+        }
+    }
     let mut actual: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
     for row in &result.rows {
         let mut m = serde_json::Map::new();
         for col in &cols {
-            let v = row
-                .values
-                .get(col.as_str())
-                .ok_or_else(|| format!("case {}: result row missing column {col}", case.id))?;
-            m.insert(
-                col.clone(),
-                value_to_json(v).map_err(|e| format!("case {}: {e}", case.id))?,
-            );
+            let json = match row.values.get(col.as_str()) {
+                Some(v) => value_to_json(v).map_err(|e| format!("case {}: {e}", case.id))?,
+                None => serde_json::Value::Null,
+            };
+            m.insert(col.clone(), json);
         }
         actual.push(m);
     }
