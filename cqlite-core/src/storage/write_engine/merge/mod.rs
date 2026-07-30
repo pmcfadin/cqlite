@@ -488,6 +488,12 @@ pub use egress_budget::{active_merge_count, egress_channel_capacity_for};
 #[cfg(all(test, feature = "write-support"))]
 mod teardown_tests;
 
+// Issue #3120: fail-closed pins for a PANICKING producer thread on both producer
+// shapes and on both the read and the WRITE (compaction) arm. In-src because the
+// `producer-fault-injection` arming API is `cfg(test)`-or-feature only.
+#[cfg(all(test, feature = "write-support"))]
+mod producer_panic_tests;
+
 // Issue #2765: end-to-end wiring evidence that the adaptive egress-budget
 // capacity snapshot reaches BOTH channel-construction sites (`open`,
 // `open_from_reader`) and is keyed per k-way MERGE (all source channels of one
