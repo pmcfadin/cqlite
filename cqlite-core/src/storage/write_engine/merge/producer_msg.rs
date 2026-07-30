@@ -121,6 +121,14 @@ impl MergeProducerError {
 /// implementation — `VecRun`, `SinglePartitionFilterRun`, the synthetic
 /// streaming iterators — has to know this protocol exists. Only the two
 /// producer-thread shapes and the one adapter that consumes their channels do.
+// `Item` is ~288 bytes and the terminators are small, but boxing is the WRONG
+// trade here: `Item` is the per-ROW hot path (one channel message per merged row),
+// so boxing it would add a heap allocation per row — precisely the per-entry cost
+// issue #1664 removed. And boxing a terminator cannot shrink the enum, since the
+// enum's size is set by `Item` either way. This is also EXACTLY the layout of the
+// pre-#3120 channel item (`Result<MergeEntry, MergeProducerError>`), so the
+// protocol change costs zero additional bytes per message.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(super) enum MergeMsg {
     /// One decoded merge entry. Carries a DATA row and NOTHING else BY
@@ -189,9 +197,7 @@ pub(super) fn dead_producer_error() -> Error {
 /// shapes are hand-rolled `panic_any`), so an unrecognized payload degrades to a
 /// named placeholder rather than being dropped — the terminator is still sent
 /// either way, which is the property that matters.
-pub(super) fn panicked_producer_error(
-    payload: &(dyn std::any::Any + Send),
-) -> MergeProducerError {
+pub(super) fn panicked_producer_error(payload: &(dyn std::any::Any + Send)) -> MergeProducerError {
     let message = payload
         .downcast_ref::<String>()
         .map(String::as_str)

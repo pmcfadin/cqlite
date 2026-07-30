@@ -50,18 +50,32 @@
 //! a generation's `Data.db` out from under a live `Arc` (evicting only its OWN
 //! reference, per #1749's fail-closed model) satisfies this trivially.
 //!
-//! ## KNOWN GAP — a dead producer reads as end-of-input (issue #3120)
+//! ## CLOSED — a dead producer is an ERROR, never end-of-input (issue #3120)
 //!
-//! Neither producer-thread shape sends an explicit terminator, and
-//! `SSTableRowIteratorAdapter::next` (`producer_iter`) maps a channel DISCONNECT onto
-//! `None` = "this run is exhausted". So a producer thread that UNWINDS makes its
-//! run look finished, and the merge completes successfully having merged only the
-//! rows that reached the channel — a silently short read result, or a short
-//! rewritten SSTable on the compaction path. The query row stream's version of
-//! this defect was fixed in issue #3106 (explicit `Done` sentinel +
-//! `catch_unwind` forwarding the panic as a terminal error); the same treatment
-//! here is issue #3120, held separately because it also changes compaction
-//! semantics and needs the byte-parity write suite as its evidence base.
+//! Neither producer-thread shape used to send an explicit terminator, and
+//! `SSTableRowIteratorAdapter::next` (`producer_iter`) mapped a channel DISCONNECT
+//! onto `None` = "this run is exhausted". So a producer thread that UNWOUND made
+//! its run look finished, and the merge completed successfully having merged only
+//! the rows that reached the channel — a silently short read result, or a short
+//! rewritten SSTable on the compaction path (silent data loss at rest). The query
+//! row stream's version of this defect was fixed in issue #3106; this is the same
+//! treatment for the merge:
+//!
+//! * The channel item is [`MergeMsg`](super::producer_msg::MergeMsg), whose
+//!   TERMINATORS make completion an observed fact — see that module's header for
+//!   the full protocol rationale.
+//! * BOTH producer thread bodies run under `catch_unwind` and send EXACTLY ONE
+//!   terminal message on EVERY exit path, with the BLOCKING `SyncSender::send`
+//!   (a `try_send` that dropped the terminator would recreate the ambiguity).
+//! * [`forward_row`] no longer sends a row-conversion failure as a mid-walk
+//!   channel message while RETURNING `Continue`. A non-terminal `Err` in the DATA
+//!   slot, after which the walk keeps going, is precisely the shape that lets a
+//!   later genuine dead-producer disconnect revert to a clean end-of-input. It
+//!   now RETURNS the `Err` out of the emit callback and the thread body emits the
+//!   single terminal `Failed`. Behaviour delta: the walk stops at the FIRST
+//!   row-conversion failure instead of continuing. The outcome observed by the
+//!   merge is unchanged, because `RunReader::refill_buffer` already returned that
+//!   `Err` to its caller immediately.
 //!
 //! UDT registry: [`SSTableRowIteratorAdapter::open`] (path-based) can call
 //! `reader.set_udt_registry(..)` because it just opened its OWN exclusive
@@ -78,12 +92,15 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
+use crate::storage::producer_fault::MergeProducerFault;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::SSTableReader;
 
+use super::producer_iter::RunState;
+use super::producer_msg::{panicked_producer_error, MergeMsg, MergeProducerError};
 use super::{
-    egress_budget, producer_gauge, KWayMerger, MergeEntry, MergeProducerError, RunReader,
-    SSTableRowIterator, SSTableRowIteratorAdapter,
+    egress_budget, producer_gauge, KWayMerger, RunReader, SSTableRowIterator,
+    SSTableRowIteratorAdapter,
 };
 
 /// Drive `reader`'s compaction stream into `sender`, converting each row via
@@ -101,12 +118,13 @@ pub(super) async fn drive_compaction_stream(
     run_index: usize,
     schema: &TableSchema,
     scan_cancel: &ScanCancel,
-    sender: &SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+    sender: &SyncSender<MergeMsg>,
     local_sent: &AtomicI64,
+    fault: &mut MergeProducerFault,
 ) -> Result<()> {
     reader
         .stream_all_partitions_for_compaction(Some(schema), scan_cancel, |compaction_row| {
-            forward_row(run_index, compaction_row, schema, sender, local_sent)
+            forward_row(run_index, compaction_row, schema, sender, local_sent, fault)
         })
         .await
 }
@@ -128,12 +146,13 @@ pub(super) async fn drive_query_stream(
     schema: &TableSchema,
     scan_cancel: &ScanCancel,
     token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
-    sender: &SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+    sender: &SyncSender<MergeMsg>,
     local_sent: &AtomicI64,
+    fault: &mut MergeProducerFault,
 ) -> Result<()> {
     reader
         .stream_all_partitions_for_query(Some(schema), scan_cancel, token_bound, |compaction_row| {
-            forward_row(run_index, compaction_row, schema, sender, local_sent)
+            forward_row(run_index, compaction_row, schema, sender, local_sent, fault)
         })
         .await
 }
@@ -143,6 +162,14 @@ pub(super) async fn drive_query_stream(
 /// [`drive_compaction_stream`] and [`drive_query_stream`] so their emit
 /// contract is defined in exactly one place.
 ///
+/// A row-conversion failure is RETURNED as `Err` (issue #3120), never sent as a
+/// channel message: only the thread body may put a terminator on the channel, and
+/// it sends EXACTLY ONE. The pre-#3120 code sent an `Err` here and returned
+/// `Continue`, i.e. a non-terminal error in the DATA slot after which the walk kept
+/// going — the shape that lets a later genuine dead-producer disconnect revert to a
+/// clean end-of-input. The outcome seen by the merge is unchanged: `RunReader::
+/// refill_buffer` already propagated that `Err` to its caller immediately.
+///
 /// `local_sent` is THIS adapter's own sent-count (issue #2419 roborev job
 /// 1733), incremented alongside the shared `channel_depth::sent()` gauge — it
 /// is what lets `Drop` compute an exact post-join reconcile residual instead of
@@ -151,15 +178,22 @@ fn forward_row(
     run_index: usize,
     compaction_row: crate::storage::sstable::reader::CompactionRow,
     schema: &TableSchema,
-    sender: &SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+    sender: &SyncSender<MergeMsg>,
     local_sent: &AtomicI64,
+    fault: &mut MergeProducerFault,
 ) -> Result<std::ops::ControlFlow<()>> {
-    let msg = SSTableRowIteratorAdapter::build_merge_entry(run_index, compaction_row, schema)
-        .map_err(MergeProducerError::from);
+    // TEST-ONLY (issue #3120): an empty function in a production build. This is
+    // the ONE emit funnel both stream shapes go through, and it sits ABOVE any
+    // reader format branch, so a fault armed here cannot silently fail to fire
+    // for a particular on-disk format.
+    fault.before_row_forward();
+    let entry = SSTableRowIteratorAdapter::build_merge_entry(run_index, compaction_row, schema)?;
+    let msg = MergeMsg::Item(entry);
     // Issue #2419 (WS2): only DATA entries are tracked on the egress-depth gauge
-    // (a terminal `Err` message is untracked on both send and receive, so it
-    // never unbalances the level). Captured BEFORE `send` moves `msg`.
-    let is_data = msg.is_ok();
+    // (a TERMINATOR is untracked on both send and receive, so it can never
+    // unbalance the level). ONE predicate, shared with the consumer's recv site —
+    // see `MergeMsg::is_tracked_data`. Captured BEFORE `send` moves `msg`.
+    let is_data = msg.is_tracked_data();
     match sender.send(msg) {
         Ok(()) => {
             if is_data {
@@ -221,6 +255,11 @@ impl SSTableRowIteratorAdapter {
         // page-in) is NOT reached by this single-hop propagation and is not
         // covered. `None` (no-op) for every non-flight caller.
         let subphase_sink = crate::observability::stream_subphase::current();
+        // Issue #3120: whatever fault a test armed FOR THIS INPUT is captured HERE
+        // (never re-read mid-walk) and owned by the producer thread. Always empty —
+        // and a zero-sized no-op whose scope closure is never called — in a
+        // production build.
+        let fault = MergeProducerFault::capture_for(|| reader.file_path());
         let producer = match std::thread::Builder::new().spawn(move || {
             let _subphase_guard = crate::observability::stream_subphase::install(subphase_sink);
             Self::producer_thread_from_reader(
@@ -231,6 +270,7 @@ impl SSTableRowIteratorAdapter {
                 token_bound,
                 sender,
                 producer_sent_count,
+                fault,
             );
         }) {
             Ok(handle) => handle,
@@ -249,6 +289,9 @@ impl SSTableRowIteratorAdapter {
             scan_cancel: adapter_cancel,
             sent_count,
             received_count: 0,
+            // Issue #3120: no terminator observed yet. `None` (end of input) is
+            // reachable ONLY from a `Done`-proven `RunState::Finished`.
+            state: RunState::Streaming,
             #[cfg(test)]
             egress_channel_capacity: channel_capacity,
         })
@@ -264,19 +307,36 @@ impl SSTableRowIteratorAdapter {
     /// dedicated `current_thread` runtime (issue #2316: zero extra worker
     /// threads) so the async `stream_all_partitions_for_compaction` call can
     /// run without a nested-runtime panic.
+    ///
+    /// Sends EXACTLY ONE terminal [`MergeMsg`] on EVERY exit path (issue #3120),
+    /// so the consumer never has to infer completion from a channel disconnect —
+    /// see the module header. `catch_unwind` covers the unwinding path; the
+    /// `Done` terminator covers every other way this thread could stop.
+    #[allow(clippy::too_many_arguments)]
     fn producer_thread_from_reader(
         reader: Arc<SSTableReader>,
         run_index: usize,
         schema: TableSchema,
         scan_cancel: ScanCancel,
         token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
-        sender: SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+        sender: SyncSender<MergeMsg>,
         sent_count: Arc<AtomicI64>,
+        mut fault: MergeProducerFault,
     ) {
         let _thread_guard = producer_gauge::ProducerThreadGuard;
-        let error_sender = sender.clone();
+        // Issue #3120: the terminal sender lives OUTSIDE the `catch_unwind`
+        // closure, so an unwind cannot drop it before the terminator is sent.
+        let terminal_sender = sender.clone();
 
-        let stream_result = (|| -> Result<()> {
+        // Issue #3120: an UNWINDING walk must not look like a finished one.
+        // `AssertUnwindSafe` is sound here because nothing the closure touched is
+        // observed after an unwind: the reader `Arc`, schema, cancel token and
+        // per-row fault state are dropped, and the only thing used afterwards is
+        // `terminal_sender` — an mpsc `SyncSender`, which has no
+        // poisoning/broken-invariant state. `sent_count` is an atomic whose value
+        // stays meaningful (it counts sends that already succeeded), and `Drop`
+        // reads it only after joining this thread.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -294,14 +354,22 @@ impl SSTableRowIteratorAdapter {
                 token_bound,
                 &sender,
                 sent_count.as_ref(),
+                &mut fault,
             ))
-        })();
+        }));
 
-        if let Err(e) = stream_result {
-            // Forward the error (preserving `Cancelled` distinctly, issue #2264);
-            // ignore send failure (consumer may have dropped).
-            let _ = error_sender.send(Err(MergeProducerError::from(e)));
-        }
+        // EXACTLY ONE terminal message, on every exit path. `Cancelled` is
+        // preserved distinctly (issue #2264) by `MergeProducerError::from`.
+        let terminal = match outcome {
+            Ok(Ok(())) => MergeMsg::Done,
+            Ok(Err(e)) => MergeMsg::Failed(MergeProducerError::from(e)),
+            Err(panic) => MergeMsg::Failed(panicked_producer_error(panic.as_ref())),
+        };
+        // The BLOCKING `send`, never `try_send`: dropping the terminator because
+        // the bounded channel happened to be full would recreate exactly the
+        // ambiguity this protocol removes. A failed send means the consumer is
+        // already gone, which is fine — nobody is left to mislead.
+        let _ = terminal_sender.send(terminal);
         // Channel closed naturally when `sender` is dropped here.
     }
 }

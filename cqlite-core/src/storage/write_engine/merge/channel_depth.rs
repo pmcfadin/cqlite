@@ -22,10 +22,34 @@
 //!   concurrently-running producer thread and can leak the gauge upward
 //!   permanently — see that `Drop` impl's doc for the full derivation.
 //!
-//! Only DATA entries (`Ok(MergeEntry)`) are tracked on BOTH sides; the rare
-//! terminal error message (`Err(MergeProducerError)`) is untracked on send and
-//! on receive, so it never unbalances the level. The `max(0)` floor matches
-//! `RpcMetrics::finish`, guarding against any unexpected residual imbalance.
+//! # THE invariant this module depends on (issue #3120)
+//!
+//! Only DATA entries (`MergeMsg::Item`) are tracked, and they are tracked on BOTH
+//! sides. The TERMINATORS (`MergeMsg::Failed` / `MergeMsg::Done`) are untracked on
+//! send AND on receive, so they can never unbalance the level. Formally, per
+//! adapter `A`, with `data(m) = 1` iff `m` is a DATA entry:
+//!
+//! ```text
+//! ∀ m:  counted_on_send(m) ⟺ counted_on_receive_or_residual(m) ⟺ data(m)
+//! and   sentA − recvA ≥ 0 at every join point
+//! ```
+//!
+//! An asymmetry here is INVISIBLE without help, which is why it is now asserted
+//! rather than merely documented: a message counted on exactly one side drives the
+//! residual NEGATIVE, [`reconcile_residual`]'s `> 0` guard then SKIPS it, and
+//! [`record`]'s `max(0)` floor hides the resulting drift from every observer,
+//! permanently. So:
+//!
+//! * both sides express the predicate through the SAME exhaustive
+//!   `MergeMsg::is_tracked_data` (send: `from_readers::forward_row`; receive: the
+//!   `MergeMsg::Item` arm of `SSTableRowIteratorAdapter::next`, and nowhere else),
+//!   and a future 4th `MergeMsg` variant is a compile error there rather than a
+//!   silent default; and
+//! * [`reconcile_residual`] carries a `debug_assert!(residual >= 0)`.
+//!
+//! The `max(0)` floor stays (it matches `RpcMetrics::finish`) as the release-build
+//! backstop; the `debug_assert` is what makes the imbalance OBSERVABLE in test and
+//! dev builds instead of being floored away.
 //!
 //! The gauge is OS-independent — it always emits on every platform (unlike the
 //! `/proc`-derived `cqlite.proc.*` saturation gauges).
@@ -75,6 +99,19 @@ pub(super) fn received() {
 /// (the common case: every send was received). See the module doc for why this
 /// must run only after the producer thread has been joined.
 pub(super) fn reconcile_residual(residual: i64) {
+    // Issue #3120: a NEGATIVE residual means the tracked-send and tracked-receive
+    // predicates disagreed — e.g. a terminator counted on exactly one side. The
+    // `> 0` guard below would silently skip it and `record`'s `max(0)` floor would
+    // hide the drift forever, so make it LOUD in a debug build instead. Sound as a
+    // hard invariant because every tracked receive is preceded by the tracked send
+    // of that same entry, and the only caller reads `sent_count` AFTER joining the
+    // producer thread — so no in-flight `fetch_add` can still be pending.
+    debug_assert!(
+        residual >= 0,
+        "egress-depth residual must never be negative (got {residual}): a tracked \
+         receive without a matching tracked send means the send/receive predicates \
+         disagree — see this module's invariant (issue #3120)"
+    );
     if residual > 0 {
         record(adjust(&DEPTH, -residual));
     }
@@ -209,6 +246,92 @@ mod tests {
              returning the gauge to its pre-scenario baseline — the #2419 \
              roborev job 1733 regression this fix eliminates"
         );
+    }
+
+    /// THE issue #3120 pin: a TERMINATOR is untracked on BOTH sides, so a run that
+    /// ends with one returns the depth to exactly baseline and leaves a residual of
+    /// exactly ZERO — never a negative residual, which the `> 0` guard would skip
+    /// and the `max(0)` floor would hide forever.
+    ///
+    /// Drives the REAL predicate (`MergeMsg::is_tracked_data`) over a REAL message
+    /// sequence, on both the send side and the receive side, so an asymmetry
+    /// between the two sites cannot hide from this test. Against a PRIVATE atomic,
+    /// never the shared `DEPTH` (the #2451 flake class): thousands of tests share
+    /// this binary and several drive real merge egress channels.
+    #[test]
+    fn a_terminator_is_untracked_on_both_sides_so_the_residual_is_exactly_zero() {
+        use crate::storage::write_engine::merge::producer_msg::{MergeMsg, MergeProducerError};
+        use crate::storage::write_engine::merge::{CellData, MergeEntry, RowData};
+        use crate::storage::write_engine::mutation::DecoratedKey;
+        use crate::types::Value;
+
+        fn data_item(n: i64) -> MergeMsg {
+            MergeMsg::Item(MergeEntry::new(
+                0,
+                DecoratedKey::new(n, n.to_be_bytes().to_vec()),
+                None,
+                100,
+                RowData::Live {
+                    cells: vec![CellData::new("name".to_string(), Value::text("v"), 100)],
+                },
+            ))
+        }
+
+        // Each run: N data entries followed by exactly ONE terminator — the shape
+        // every producer thread now produces on every exit path.
+        for terminator in [
+            MergeMsg::Done,
+            MergeMsg::Failed(MergeProducerError::Panicked("boom".to_string())),
+            MergeMsg::Failed(MergeProducerError::Cancelled),
+        ] {
+            const DATA_ENTRIES: usize = 5;
+            let depth = AtomicI64::new(0);
+            let baseline = depth.load(Ordering::SeqCst);
+            let mut sent_count: i64 = 0;
+            let mut received_count: i64 = 0;
+
+            let mut stream: Vec<MergeMsg> = (0..DATA_ENTRIES as i64).map(data_item).collect();
+            stream.push(terminator);
+
+            // SEND side: exactly what `from_readers::forward_row` does.
+            for msg in &stream {
+                if msg.is_tracked_data() {
+                    adjust(&depth, 1);
+                    sent_count += 1;
+                }
+            }
+            assert_eq!(
+                sent_count, DATA_ENTRIES as i64,
+                "only the DATA entries may be tracked on send — the terminator must \
+                 not be"
+            );
+
+            // RECEIVE side: exactly what the `MergeMsg::Item` arm of
+            // `SSTableRowIteratorAdapter::next` does (and no other arm does).
+            for msg in &stream {
+                if msg.is_tracked_data() {
+                    adjust(&depth, -1);
+                    received_count += 1;
+                }
+            }
+
+            let residual = sent_count - received_count;
+            assert_eq!(
+                residual, 0,
+                "a fully drained run whose last message is a terminator must leave a \
+                 residual of exactly zero; a NEGATIVE residual is skipped by the \
+                 `> 0` guard and floored away by `max(0)`, hiding the drift forever \
+                 (issue #3120)"
+            );
+            // The production reconcile would be a no-op here; running it proves the
+            // debug_assert is satisfied by the balanced case.
+            reconcile_residual(residual);
+            assert_eq!(
+                depth.load(Ordering::SeqCst),
+                baseline,
+                "the tracked level returns to baseline"
+            );
+        }
     }
 
     /// The `max(0)` floor never records a negative gauge even under an unexpected

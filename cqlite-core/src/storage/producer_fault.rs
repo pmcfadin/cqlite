@@ -748,14 +748,12 @@ mod tests {
             "the SIBLING input of the same merge must not consume the arm"
         );
         assert_eq!(
-            MergeProducerFault::capture_for(|| path_of(&format!("/tmp/{scope}")))
-                .panic_after_rows,
+            MergeProducerFault::capture_for(|| path_of(&format!("/tmp/{scope}"))).panic_after_rows,
             Some(1),
             "the input the arm was scoped to takes it"
         );
         assert_eq!(
-            MergeProducerFault::capture_for(|| path_of(&format!("/tmp/{scope}")))
-                .panic_after_rows,
+            MergeProducerFault::capture_for(|| path_of(&format!("/tmp/{scope}"))).panic_after_rows,
             None,
             "and it is consumed — a retry over the same input is clean"
         );

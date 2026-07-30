@@ -12,7 +12,9 @@
 use super::*;
 use crate::platform::Platform;
 use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn};
-use crate::storage::write_engine::merge::MergeStep;
+// `MergeEntry` is no longer among `from_readers`' own imports (issue #3120 moved
+// the channel item to `MergeMsg`), so name it explicitly here.
+use crate::storage::write_engine::merge::{MergeEntry, MergeStep};
 use crate::storage::write_engine::mutation::{CellOperation, Mutation, PartitionKey, TableId};
 use crate::storage::write_engine::test_support::{create_test_schema, flush_n_sstables_sync};
 use crate::storage::write_engine::{WriteEngine, WriteEngineConfig};
@@ -111,10 +113,7 @@ fn ck_mutation(id: i32, ck: i32, ts: i64, op: CellOperation) -> Mutation {
         TableId::new("test_ks", "test_table"),
         PartitionKey::single("id", Value::Integer(id)),
         Some(
-            crate::storage::write_engine::mutation::ClusteringKey::single(
-                "ck",
-                Value::Integer(ck),
-            ),
+            crate::storage::write_engine::mutation::ClusteringKey::single("ck", Value::Integer(ck)),
         ),
         vec![op],
         ts,

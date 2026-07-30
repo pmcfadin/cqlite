@@ -450,8 +450,6 @@ mod producer_iter_convert;
 /// #1116). Both producer shapes send it; `producer_iter`'s adapter consumes it.
 #[cfg(feature = "write-support")]
 mod producer_msg;
-#[cfg(feature = "write-support")]
-use producer_msg::{MergeMsg, MergeProducerError};
 
 /// MAXIMUM pre-fetched `MergeEntry` objects buffered per source in the streaming
 /// channel — the capacity used at LOW concurrency (a single active merge). Each

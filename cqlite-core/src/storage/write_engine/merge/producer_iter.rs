@@ -17,22 +17,60 @@
 //! [`producer_iter_convert`](super::producer_iter_convert); the SHARED-READER
 //! producer shape (`open_from_reader` / `producer_thread_from_reader`, which
 //! adds its own inherent `impl` onto this adapter) lives in
-//! [`from_readers`](super::from_readers); the egress-depth gauge accounting
-//! this module only *calls* lives in
+//! [`from_readers`](super::from_readers); the CHANNEL PROTOCOL both producer
+//! shapes speak lives in [`producer_msg`](super::producer_msg); the egress-depth
+//! gauge accounting this module only *calls* lives in
 //! [`channel_depth`](super::channel_depth).
 //!
-//! Open defect to know about before changing anything here: a producer thread
-//! that UNWINDS is indistinguishable from an exhausted run, because neither
-//! shape sends a terminator — see the [`Drop`] impl's `KNOWN-FALSE PREMISE`
-//! note and the `KNOWN GAP` section of the
-//! [`from_readers`](super::from_readers) header (issue #3120).
+//! Issue #3120 CLOSED the defect this module's header used to warn about (a
+//! producer thread that UNWINDS being indistinguishable from an exhausted run):
+//! completion is now an explicit [`MergeMsg::Done`] terminator and this adapter's
+//! [`RunState`] makes "receiver/verdict gone, so assume exhausted" unrepresentable.
+//! See [`producer_msg`](super::producer_msg)'s header for the protocol and
+//! [`from_readers`](super::from_readers)'s for the emit-side contract.
 
-use super::{
-    channel_depth, from_readers, producer_gauge, MergeEntry, MergeProducerError, SSTableRowIterator,
+use super::producer_msg::{
+    dead_producer_error, panicked_producer_error, MergeMsg, MergeProducerError,
 };
+use super::{channel_depth, from_readers, producer_gauge, MergeEntry, SSTableRowIterator};
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
+use crate::storage::producer_fault::MergeProducerFault;
 use std::path::{Path, PathBuf};
+
+/// Whether this adapter's producer run has been PROVEN finished, proven failed,
+/// or is of unknown standing (issue #3120).
+///
+/// The point of the type is that a verdict can never be DOWNGRADED to "clean end
+/// of input" by accident. Before this issue there were two silent routes to
+/// `None`: a channel disconnect (which an unwinding producer is
+/// indistinguishable from) and a `self.receiver.as_ref()?`. Both are now folded
+/// into this state, and `None` is reachable ONLY from [`RunState::Finished`].
+#[cfg(feature = "write-support")]
+pub(super) enum RunState {
+    /// No terminator observed yet: the producer may still send.
+    Streaming,
+    /// The producer sent [`MergeMsg::Done`] — the ONLY proof of a clean,
+    /// COMPLETE run, and therefore the only state from which
+    /// [`SSTableRowIterator::next`] may report end of input.
+    Finished,
+    /// The producer sent a terminal [`MergeMsg::Failed`], already reported once.
+    ///
+    /// STICKY, and it keeps the payload so a repeat poll re-reports the IDENTICAL
+    /// error instead of degrading to `None`. That matters because
+    /// `RunReader::refill_buffer` propagates our `Err` but keeps NO sticky error
+    /// of its own: a consumer that swallowed the error and advanced again would
+    /// otherwise see a dead producer downgraded to a clean end of input — issue
+    /// #3120 reintroduced inside its own fix, with no test failing.
+    Failed(MergeProducerError),
+    /// STICKY: the channel disconnected with NO terminator, or the receiver was
+    /// gone when a poll arrived. The verdict is "unknown, therefore TRUNCATED",
+    /// so every subsequent poll re-reports the error and never `None`.
+    ///
+    /// Deliberately NOT #3106's non-sticky `terminated` flag, which returns
+    /// `None` on the SECOND poll.
+    Died,
+}
 
 /// Adapter that wraps async SSTableReader into a true-streaming sync
 /// [`SSTableRowIterator`].
@@ -89,8 +127,7 @@ pub(super) struct SSTableRowIteratorAdapter {
     /// so [`Drop`] can drop it FIRST (issue #2361) — closing the channel wakes a
     /// producer blocked on a full `SyncSender::send` (its send returns `Err`), so
     /// the subsequent producer join is bounded and cannot deadlock.
-    pub(super) receiver:
-        Option<std::sync::mpsc::Receiver<std::result::Result<MergeEntry, MergeProducerError>>>,
+    pub(super) receiver: Option<std::sync::mpsc::Receiver<MergeMsg>>,
     /// Producer thread handle. `Option` so [`Drop`] can `take()` it and JOIN the
     /// thread (issue #2361) rather than detach it — the pre-#2361 `_producer`
     /// field's "joined on drop" doc was WRONG (dropping a `JoinHandle` detaches
@@ -120,6 +157,9 @@ pub(super) struct SSTableRowIteratorAdapter {
     /// makes ([`Self::next`]'s normal consumption). Only ever touched by the
     /// thread holding `&mut self` (never shared), so a plain `i64`.
     pub(super) received_count: i64,
+    /// This run's verdict (issue #3120) — see [`RunState`]. The single place a
+    /// "this run is exhausted" answer may come from.
+    pub(super) state: RunState,
     /// Test-only (issue #2765): the exact `sync_channel` capacity this adapter's
     /// egress channel was built with — the merge-scoped adaptive snapshot the
     /// constructor threaded in. Observed via [`SSTableRowIterator::egress_channel_capacity`]
@@ -202,6 +242,12 @@ impl SSTableRowIteratorAdapter {
         // target; the +2 lines are the minimal propagation.)
         let subphase_sink = crate::observability::stream_subphase::current();
 
+        // Issue #3120: whatever fault a test armed FOR THIS INPUT is captured HERE
+        // (never re-read mid-walk) and owned by the producer thread. Always empty —
+        // and a zero-sized no-op whose scope closure is never called — in a
+        // production build.
+        let fault = MergeProducerFault::capture_for(|| path.to_path_buf());
+
         // Spawn the producer thread via `Builder::spawn` (rather than the
         // panic-on-failure `std::thread::spawn`) so an OS thread-creation failure
         // is a recoverable `Err`, not a process abort: the gauge increment above
@@ -220,6 +266,7 @@ impl SSTableRowIteratorAdapter {
                 scan_cancel,
                 sender,
                 producer_sent_count,
+                fault,
             );
         }) {
             Ok(handle) => handle,
@@ -238,6 +285,9 @@ impl SSTableRowIteratorAdapter {
             scan_cancel: adapter_cancel,
             sent_count,
             received_count: 0,
+            // Issue #3120: no terminator observed yet. `None` (end of input) is
+            // reachable ONLY from a `Done`-proven `RunState::Finished`.
+            state: RunState::Streaming,
             #[cfg(test)]
             egress_channel_capacity: channel_capacity,
         })
@@ -254,15 +304,23 @@ impl SSTableRowIteratorAdapter {
     /// blocking `SyncSender::send` provides the backpressure that — together
     /// with the reader's sliding-window stitch+parse — keeps peak memory bounded
     /// by `max_partition_size + one_chunk + channel_capacity`, independent of
-    /// the total source size. Errors are forwarded as `Err(String)`.
+    /// the total source size.
+    ///
+    /// Sends EXACTLY ONE terminal [`MergeMsg`] on EVERY exit path (issue #3120) —
+    /// `Done` on a completed walk, `Failed` on an error return, `Failed(Panicked)`
+    /// on an unwind caught here — so the consumer never has to infer completion
+    /// from a channel disconnect. See [`producer_msg`](super::producer_msg)'s
+    /// header for why both the `catch_unwind` and the `Done` sentinel are needed.
+    #[allow(clippy::too_many_arguments)]
     fn producer_thread(
         path_buf: PathBuf,
         run_index: usize,
         schema: TableSchema,
         udt_registry: Option<crate::schema::UdtRegistry>,
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
-        sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, MergeProducerError>>,
+        sender: std::sync::mpsc::SyncSender<MergeMsg>,
         sent_count: std::sync::Arc<std::sync::atomic::AtomicI64>,
+        mut fault: MergeProducerFault,
     ) {
         // Issue #2316: decrement the live producer-thread gauge when this thread
         // exits (even on panic). Created FIRST so the spawn-time increment in
@@ -280,98 +338,147 @@ impl SSTableRowIteratorAdapter {
         // otherwise map (or direct-read) inputs above the size thresholds, so we
         // force `Buffered` explicitly here — clearing `use_mmap` alone is no
         // longer sufficient now that `Auto` ignores that legacy flag.
-        // Clone the sender for the error path: the streaming closure moves one
-        // clone for per-entry sends, leaving this one to report a fatal error.
-        let error_sender = sender.clone();
-        let stream_result = (|| -> Result<()> {
-            use crate::config::DiskAccessMode;
-            use crate::platform::Platform;
-            use crate::Config;
-            use std::sync::Arc;
+        // Clone the sender for the TERMINAL message: the streaming closure moves
+        // one clone for per-entry sends, leaving this one to report the single
+        // terminator. Issue #3120: it lives OUTSIDE the `catch_unwind` closure, so
+        // an unwind cannot drop it before the terminator is sent.
+        let terminal_sender = sender.clone();
+        // Reborrowed into the closure (and on into the `async move` block) so the
+        // per-row fault checkpoint is reached without the closure taking ownership.
+        let fault = &mut fault;
+        // Issue #3120: an UNWINDING walk must not look like a finished one.
+        // `AssertUnwindSafe` is sound here because nothing the closure touched is
+        // observed after an unwind: the reader, config, schema, cancel token and
+        // fault state are dropped, and the only thing used afterwards is
+        // `terminal_sender` — an mpsc `SyncSender`, which has no
+        // poisoning/broken-invariant state. `sent_count` is an atomic whose value
+        // stays meaningful (it counts sends that already succeeded) and `Drop`
+        // reads it only after joining this thread.
+        let stream_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || -> Result<()> {
+                use crate::config::DiskAccessMode;
+                use crate::platform::Platform;
+                use crate::Config;
+                use std::sync::Arc;
 
-            let mut config = Config::default();
-            config.storage.use_mmap = false;
-            config.storage.disk_access_mode = DiskAccessMode::Buffered;
+                let mut config = Config::default();
+                config.storage.use_mmap = false;
+                config.storage.disk_access_mode = DiskAccessMode::Buffered;
 
-            // Issue #2316: a `current_thread` runtime drives the scan ON this
-            // producer thread with ZERO extra workers. A multi-threaded
-            // `Runtime::new()` would spin up `num_cpus` workers per producer
-            // (~M·num_cpus threads/merge) that the single sequential scan never
-            // uses — pure overhead. This bounds the per-merge thread cost to O(M).
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    Error::Storage(format!(
-                        "streaming producer: failed to create runtime: {}",
-                        e
-                    ))
-                })?;
+                // Issue #2316: a `current_thread` runtime drives the scan ON this
+                // producer thread with ZERO extra workers. A multi-threaded
+                // `Runtime::new()` would spin up `num_cpus` workers per producer
+                // (~M·num_cpus threads/merge) that the single sequential scan never
+                // uses — pure overhead. This bounds the per-merge thread cost to O(M).
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        Error::Storage(format!(
+                            "streaming producer: failed to create runtime: {}",
+                            e
+                        ))
+                    })?;
 
-            rt.block_on(async move {
-                let platform = Arc::new(Platform::new(&config).await?);
-                let mut reader = crate::storage::sstable::reader::SSTableReader::open(
-                    &path_buf, &config, platform,
-                )
-                .await?;
+                rt.block_on(async move {
+                    let platform = Arc::new(Platform::new(&config).await?);
+                    let mut reader = crate::storage::sstable::reader::SSTableReader::open(
+                        &path_buf, &config, platform,
+                    )
+                    .await?;
 
-                // Issue #1234: wire the authoritative UDT registry onto the reader
-                // so the compaction read path decodes a top-level `frozen<UDT>`
-                // value structurally. Without it the value decode errors
-                // (`UDT not found in registry`), the row reconciles to empty, and
-                // the partition is dropped — silent data loss during compaction.
-                // This mutation requires `&mut self`, so it can only happen HERE
-                // — before the reader is ever shared — not on the shared-reader
-                // producer path (issue #2346, see `from_readers::open_from_reader`'s
-                // doc comment for that seam's UDT-registry contract).
-                if let Some(registry) = udt_registry {
-                    reader.set_udt_registry(registry);
-                }
+                    // Issue #1234: wire the authoritative UDT registry onto the reader
+                    // so the compaction read path decodes a top-level `frozen<UDT>`
+                    // value structurally. Without it the value decode errors
+                    // (`UDT not found in registry`), the row reconciles to empty, and
+                    // the partition is dropped — silent data loss during compaction.
+                    // This mutation requires `&mut self`, so it can only happen HERE
+                    // — before the reader is ever shared — not on the shared-reader
+                    // producer path (issue #2346, see `from_readers::open_from_reader`'s
+                    // doc comment for that seam's UDT-registry contract).
+                    if let Some(registry) = udt_registry {
+                        reader.set_udt_registry(registry);
+                    }
 
-                // Issue #2264/#2346: the cooperative-cancellation token is now a
-                // PER-CALL parameter to `stream_all_partitions_for_compaction`
-                // rather than mutated onto the reader (`set_scan_cancel` needed
-                // `&mut self`, which a SHARED reader cannot offer — see
-                // `from_readers::drive_compaction_stream`). This path-based
-                // producer still owns its freshly-opened `reader` exclusively, so
-                // passing `scan_cancel` by reference here is behaviourally
-                // identical to the old `set_scan_cancel` + field-read.
-                //
-                // Pass the schema so the parser uses the real clustering column
-                // names; the header-inferred fallback uses generic names like
-                // "clustering_key", which would defeat extract_clustering_key.
-                // `drive_compaction_stream` is the SAME streaming helper the
-                // shared-reader producer thread uses (issue #2346) — the
-                // conversion/backpressure/cancellation-by-variant semantics are
-                // defined in exactly one place.
-                from_readers::drive_compaction_stream(
-                    &reader,
-                    run_index,
-                    &schema,
-                    &scan_cancel,
-                    &sender,
-                    sent_count.as_ref(),
-                )
-                .await
-            })
-        })();
+                    // Issue #2264/#2346: the cooperative-cancellation token is now a
+                    // PER-CALL parameter to `stream_all_partitions_for_compaction`
+                    // rather than mutated onto the reader (`set_scan_cancel` needed
+                    // `&mut self`, which a SHARED reader cannot offer — see
+                    // `from_readers::drive_compaction_stream`). This path-based
+                    // producer still owns its freshly-opened `reader` exclusively, so
+                    // passing `scan_cancel` by reference here is behaviourally
+                    // identical to the old `set_scan_cancel` + field-read.
+                    //
+                    // Pass the schema so the parser uses the real clustering column
+                    // names; the header-inferred fallback uses generic names like
+                    // "clustering_key", which would defeat extract_clustering_key.
+                    // `drive_compaction_stream` is the SAME streaming helper the
+                    // shared-reader producer thread uses (issue #2346) — the
+                    // conversion/backpressure/cancellation-by-variant semantics are
+                    // defined in exactly one place.
+                    from_readers::drive_compaction_stream(
+                        &reader,
+                        run_index,
+                        &schema,
+                        &scan_cancel,
+                        &sender,
+                        sent_count.as_ref(),
+                        fault,
+                    )
+                    .await
+                })
+            }));
 
-        if let Err(e) = stream_result {
-            // Forward the error (preserving `Cancelled` distinctly, issue #2264);
-            // ignore send failure (consumer may have dropped).
-            let _ = error_sender.send(Err(MergeProducerError::from(e)));
-        }
+        // EXACTLY ONE terminal message, on every exit path (issue #3120).
+        // `Cancelled` is preserved distinctly (issue #2264) by
+        // `MergeProducerError::from`.
+        let terminal = match stream_result {
+            Ok(Ok(())) => MergeMsg::Done,
+            Ok(Err(e)) => MergeMsg::Failed(MergeProducerError::from(e)),
+            Err(panic) => MergeMsg::Failed(panicked_producer_error(panic.as_ref())),
+        };
+        // The BLOCKING `send`, never `try_send`: dropping the terminator because
+        // the bounded channel happened to be full would recreate exactly the
+        // ambiguity this protocol removes. A failed send means the consumer is
+        // already gone, which is fine — nobody is left to mislead.
+        let _ = terminal_sender.send(terminal);
         // Channel closed naturally when sender is dropped here.
     }
 }
 
 #[cfg(feature = "write-support")]
 impl SSTableRowIterator for SSTableRowIteratorAdapter {
+    /// Pull the next entry of this run.
+    ///
+    /// `None` means EXHAUSTED, and issue #3120 made that answer reachable from
+    /// exactly ONE place: a [`RunState::Finished`] proven by the producer's
+    /// [`MergeMsg::Done`] terminator. Every other way this adapter can stop —
+    /// a bare channel disconnect, a torn-down receiver, a terminal failure — is
+    /// an `Err`, because a run whose standing is unknown is a TRUNCATED run, and
+    /// merging (or REWRITING) a truncated run as if it were complete is silent
+    /// data loss.
     fn next(&mut self) -> Option<Result<MergeEntry>> {
         use std::sync::mpsc::RecvTimeoutError;
-        // The receiver is only `None` after `Drop` has run — never during a live
-        // merge — so treat a missing receiver as end-of-stream.
-        let receiver = self.receiver.as_ref()?;
+        // A terminal state is STICKY: re-poll it as many times as a consumer
+        // likes, and it never decays into a clean end of input. `RunReader::
+        // refill_buffer` propagates our `Err` but keeps no sticky error of its
+        // own, so this is where the stickiness has to live (issue #3120).
+        match &self.state {
+            RunState::Finished => return None,
+            RunState::Failed(e) => return Some(Err(e.to_error())),
+            RunState::Died => return Some(Err(dead_producer_error())),
+            RunState::Streaming => {}
+        }
+        // The receiver is torn down ONLY by `Drop`, so a live poll that finds it
+        // gone has NO verdict at all. Pre-#3120 this was a `?`, i.e. a second
+        // silent route to "exhausted"; fail closed instead.
+        let receiver = match self.receiver.as_ref() {
+            Some(receiver) => receiver,
+            None => {
+                self.state = RunState::Died;
+                return Some(Err(dead_producer_error()));
+            }
+        };
         // Cancel-aware blocking recv (issue #2361): a plain `recv()` blocks
         // indefinitely inside `KWayMerger::step`, so a `do_get` cancellation that
         // lands while the consumer is waiting for the next producer entry was NOT
@@ -379,11 +486,17 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
         // at a bounded interval so `drive_merge` sees `Error::Cancelled` promptly
         // even while blocked here.
         loop {
+            // A CANCELLED scan must never be reported as a dead producer (issue
+            // #3120): that is this fix's likeliest false positive. The check stays
+            // at the TOP of the loop so it wins over a queued terminator, and
+            // `ScanCancel` is set-once, so a repeat poll keeps answering
+            // `Cancelled` — no state transition is needed or wanted here (the run
+            // is abandoned, not truncated-and-misreported).
             if self.scan_cancel.is_cancelled() {
                 return Some(Err(Error::Cancelled));
             }
             match receiver.recv_timeout(RECV_CANCEL_POLL) {
-                Ok(Ok(entry)) => {
+                Ok(MergeMsg::Item(entry)) => {
                     // Issue #2419 (WS2): this DATA entry just left the bounded
                     // egress channel — decrement the live occupancy gauge,
                     // balancing the `channel_depth::sent()` at its send site
@@ -391,6 +504,15 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
                     // adapter's OWN mirror of that decrement (roborev job 1733),
                     // read by `Drop` post-join to compute the exact reconcile
                     // residual — see the field doc.
+                    //
+                    // Issue #3120: this accounting lives in the `Item` arm and
+                    // NOWHERE else, which is the receive-side half of "a
+                    // TERMINATOR is untracked on both sides" — the send side
+                    // expresses the same rule via `MergeMsg::is_tracked_data`.
+                    // Counting a terminator on exactly one side drives the
+                    // reconcile residual negative, which `reconcile_residual`'s
+                    // `> 0` guard skips and `record`'s `max(0)` floor then hides
+                    // from every observer, permanently.
                     channel_depth::received();
                     self.received_count += 1;
                     // Issue #2096: one merge entry decoded from `Data.db` by THIS
@@ -403,21 +525,31 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
                     crate::storage::sstable::work_counters::add_merge_run_entry_decoded();
                     return Some(Ok(entry));
                 }
-                // Issue #2264: reconstruct `Error::Cancelled` distinctly so a
-                // cancelled scan is never confused with a genuine I/O/corruption
-                // error at the merge/producer boundary — `drive_merge` matches on
-                // the variant, not on a side-channel flag.
-                Ok(Err(MergeProducerError::Cancelled)) => return Some(Err(Error::Cancelled)),
-                Ok(Err(MergeProducerError::Other(msg))) => {
-                    return Some(Err(Error::Storage(format!(
-                        "streaming merge producer error: {}",
-                        msg
-                    ))))
+                // TERMINAL failure. Recorded so a repeat poll re-reports the
+                // identical error. `Cancelled` stays a distinct `Error::Cancelled`
+                // (issue #2264) — `drive_merge` matches on the variant, not on a
+                // side-channel flag — via `MergeProducerError::to_error`.
+                Ok(MergeMsg::Failed(e)) => {
+                    let error = e.to_error();
+                    self.state = RunState::Failed(e);
+                    return Some(Err(error));
+                }
+                // The ONLY proof of a clean, COMPLETE run.
+                Ok(MergeMsg::Done) => {
+                    self.state = RunState::Finished;
+                    return None;
                 }
                 // No entry yet: re-poll the cancel flag and keep waiting.
                 Err(RecvTimeoutError::Timeout) => continue,
-                // Channel closed — producer finished normally.
-                Err(RecvTimeoutError::Disconnected) => return None,
+                // The sender was dropped WITHOUT a terminator. Only a dead
+                // producer can do that (a healthy one sends `Done`; a failing one
+                // sends `Failed`), so this run is TRUNCATED at an arbitrary point.
+                // Pre-#3120 this returned `None` — "the run is exhausted" — which
+                // is the defect: a short read result, or a short REWRITTEN SSTable.
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.state = RunState::Died;
+                    return Some(Err(dead_producer_error()));
+                }
             }
         }
     }
@@ -436,22 +568,27 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
 /// disconnect, error, panic) does not leave a detached producer streaming a
 /// multi-million-partition scan in the background.
 ///
-/// ## KNOWN-FALSE PREMISE in step 3 below — tracked in issue #3120
+/// ## Step order is LOAD-BEARING and must not change
 ///
-/// Step 3's inline comment says a failed join (producer panicked) "is ignored;
-/// the panic was already surfaced through the error channel." That premise is
-/// **NOT true in general** and is the defect issue #3120 fixes: neither producer
-/// shape sends an explicit terminator, so a producer thread that UNWINDS before
-/// (or instead of) sending its error simply drops its `SyncSender`, and
-/// [`SSTableRowIterator::next`] above maps that channel DISCONNECT onto `None` =
-/// "this run is exhausted" — a silently short read, not an error. The
-/// `handle.join()` result that WOULD reveal the unwind is discarded here.
-/// The comment is left byte-identical to its pre-#3139 form deliberately (that
-/// move was pure code motion); this doc is the qualification. Full analysis,
-/// including why the shared-reader shape has the same gap, is the `KNOWN GAP —
-/// a dead producer reads as end-of-input (issue #3120)` section of the
-/// [`from_readers`](super::from_readers) module header. Both shapes will need
-/// ONE terminator protocol, so fix them together.
+/// cancel → drop receiver → join → reconcile. (1)+(2) are what make (3) bounded,
+/// and (4) is only race-free once (3) has proven the producer can no longer send.
+///
+/// ## The join is a DIAGNOSTIC, never the verdict (issue #3120)
+///
+/// `std::thread::JoinHandle::join(self)` CONSUMES the handle and BLOCKS, so —
+/// unlike the `tokio::JoinHandle` that issue #3106 could poll in place — it can
+/// never be the mechanism that decides whether a run finished. The verdict comes
+/// entirely from the producer's explicit terminator (see
+/// [`SSTableRowIterator::next`] above and [`producer_msg`](super::producer_msg)),
+/// which is why `next()` performs no join at all and stays non-blocking.
+///
+/// What step 3 does now is stop DISCARDING the join outcome: a producer that
+/// unwound is logged here rather than silently swallowed. That is deliberately a
+/// log/metric only — this `Drop` must stay NON-PANICKING (`teardown_tests` drops
+/// mergers on purpose; issue #2361 pins that), and by the time a `Drop` runs the
+/// consumer is gone, so there is nobody left to return an error to. The
+/// correctness answer was already delivered through the channel.
+#[allow(rustdoc::private_intra_doc_links)]
 #[cfg(feature = "write-support")]
 impl Drop for SSTableRowIteratorAdapter {
     fn drop(&mut self) {
@@ -480,10 +617,21 @@ impl Drop for SSTableRowIteratorAdapter {
         drop(self.receiver.take());
         // 3. Join the producer — bounded, because after (1)+(2) the producer
         //    cannot block indefinitely: it either observes the cancel in its scan
-        //    loop or its next send fails. A failed join (producer panicked) is
-        //    ignored; the panic was already surfaced through the error channel.
+        //    loop or its next send fails. Issue #3120: the join outcome is no
+        //    longer DISCARDED. It is a diagnostic, not the verdict (see this
+        //    impl's doc): a producer that unwound has already reported itself
+        //    through the terminator protocol, and a `Drop` has no caller to return
+        //    an error to, so an unwind is LOGGED here — never re-panicked, which
+        //    would abort a teardown that is frequently itself running during an
+        //    unwind.
         if let Some(handle) = self.producer.take() {
-            let _ = handle.join();
+            if handle.join().is_err() {
+                tracing::warn!(
+                    "streaming merge producer thread PANICKED (issue #3120); its run \
+                     was reported to the merge as a terminal error via the channel \
+                     terminator, so no row was silently dropped"
+                );
+            }
         }
         // 4. Issue #2419 roborev job 1733: reconcile the shared egress-depth
         //    gauge AFTER the producer thread has definitively exited — `join`
