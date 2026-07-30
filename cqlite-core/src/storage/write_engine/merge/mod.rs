@@ -443,35 +443,15 @@ use producer_iter::SSTableRowIteratorAdapter;
 #[cfg(feature = "write-support")]
 mod producer_iter_convert;
 
-/// Channel-safe error payload sent from a producer thread to the merge (issue
-/// #2264).
-///
-/// The producer thread runs the reader's compaction scan under `Result<_,
-/// crate::Error>`, but `crate::Error` is not `Clone` and the channel item is
-/// consumed once anyway, so this small enum is the minimal payload that
-/// SURVIVES the thread boundary while still distinguishing a cooperative
-/// cancellation (`Error::Cancelled`) from every other failure. Without this,
-/// stringifying every error the same way would make a genuine I/O/corruption
-/// error indistinguishable from a cancelled scan at the receiving end — exactly
-/// the ambiguity `SSTableRowIterator::next` and `drive_merge` must NOT have.
+/// The producer→consumer CHANNEL PROTOCOL (issue #3120): `MergeMsg` (the DATA
+/// item plus the two TERMINATORS that make "this run finished" an observed fact
+/// rather than an inference from a channel disconnect) and the channel-safe
+/// `MergeProducerError` payload (issue #2264, moved here out of this file per
+/// #1116). Both producer shapes send it; `producer_iter`'s adapter consumes it.
 #[cfg(feature = "write-support")]
-#[derive(Debug)]
-enum MergeProducerError {
-    /// The scan was cooperatively cancelled (`Error::Cancelled`).
-    Cancelled,
-    /// Any other failure, stringified (matches the pre-#2264 behaviour).
-    Other(String),
-}
-
+mod producer_msg;
 #[cfg(feature = "write-support")]
-impl From<Error> for MergeProducerError {
-    fn from(e: Error) -> Self {
-        match e {
-            Error::Cancelled => MergeProducerError::Cancelled,
-            other => MergeProducerError::Other(other.to_string()),
-        }
-    }
-}
+use producer_msg::{MergeMsg, MergeProducerError};
 
 /// MAXIMUM pre-fetched `MergeEntry` objects buffered per source in the streaming
 /// channel — the capacity used at LOW concurrency (a single active merge). Each
