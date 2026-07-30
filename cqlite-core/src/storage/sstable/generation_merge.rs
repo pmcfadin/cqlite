@@ -109,9 +109,11 @@ impl ReadShadow {
 
     /// Filter one merged `RowData::Live` row's cells for read visibility given the
     /// partition-tombstone `cover` (`markedForDeleteAt` µs, or `None`) and the row's
-    /// SURVIVING primary-key liveness marker timestamp `marker_ts`
+    /// primary-key liveness marker timestamp `marker_ts`
     /// (`MergeEntry::row_liveness.marker_timestamp`, #2374/#2789 — `None` when the row
-    /// has no marker, or the merger already dropped one the partition floor covered).
+    /// has no marker, or the merger already dropped the one the partition floor
+    /// covered; a marker at/below `cover` can still arrive, and
+    /// [`merged_row_shadowed_by_partition`] compares it rather than assuming it newer).
     /// Returns `None` when the WHOLE row is hidden (partition-shadowed), else the
     /// surviving cells with cell tombstones plus TTL-expired / partition-shadowed data
     /// cells dropped.
