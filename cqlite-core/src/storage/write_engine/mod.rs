@@ -81,7 +81,7 @@ mod stats;
 #[cfg(feature = "write-support")]
 mod sweep;
 #[cfg(all(test, feature = "write-support"))]
-mod test_support;
+pub(crate) mod test_support;
 // Issue #1625: honest memtable hard-limit admission tests live in a sibling
 // module to avoid growing the already-oversized `mod.rs` (epic #1116/#1135).
 #[cfg(all(test, feature = "write-support"))]

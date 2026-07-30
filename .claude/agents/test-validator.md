@@ -92,6 +92,12 @@ slot (N in use)…` once) — use a long timeout or `run_in_background`, never a
 liveness probe on a summary file is `grep -qE 'RESULT: (PASS|FAIL)'` — a bare `INCOMPLETE` is the
 start-of-run placeholder, **not** a verdict (#3041).
 
+Likewise you never invoke roborev: the closer runs it through the only sanctioned invocation,
+`bash scripts/flow/roborev-review.sh --agent <agent> --model <model>` (#2964; both flags required). Its
+`==== ROBOREV REVIEW SUMMARY ====` block is deliberately distinct from every `AGENT-GATE *SUMMARY`, so
+neither can ever be pasted as the other, and any non-PASS terminal `RESULT` (`NOTHING-TO-REVIEW` included)
+is a failed review round, not a clean one.
+
 ### Gate invocation — summary-file redirect is MANDATORY (issues #1175/#2079)
 
 Run EVERY gate, including each `--lite` round, with the summary-file redirect and read the SUMMARY block

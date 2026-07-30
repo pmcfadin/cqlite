@@ -84,6 +84,19 @@ struct Case {
     query: String,
     pinned_now_secs: i64,
     physical_row_count: usize,
+    /// STATIC-ONLY partitions in the committed golden — partitions carrying a
+    /// `static_block` and ZERO `row` entries (issue #3095).
+    ///
+    /// Cassandra returns exactly ONE result row for each such partition
+    /// (`SelectStatement.processPartition()`: clustering + REGULAR columns null,
+    /// statics populated), and that row has NO physical `row` entry behind it. So
+    /// this is the amount by which a correct semantic result may LEGITIMATELY
+    /// exceed `physical_row_count` — the one exception to "an oracle only ever
+    /// HIDES rows a physical dump shows". Re-derived from the golden and asserted
+    /// below, so it can never be inflated to mask an over-emitting read path.
+    /// Defaults to 0, so every pre-existing case keeps the strict guard.
+    #[serde(default)]
+    physical_static_only_partitions: usize,
     /// Ordered map per row so JSON author-order is preserved for readable diffs.
     expected_rows: Vec<serde_json::Map<String, serde_json::Value>>,
     /// Explicit opt-in for a case whose correct semantic result is ZERO rows
@@ -140,19 +153,40 @@ fn schema_path(file: &str) -> Option<PathBuf> {
     candidates.into_iter().flatten().find(|p| p.exists())
 }
 
-fn fixture_dir(sstables_root: &Path, keyspace: &str, prefix: &str) -> Option<PathBuf> {
+/// Resolve `<sstables>/<keyspace>/<prefix><uuid>/` for a case.
+///
+/// A keyspace can hold SEVERAL directories for the same table name (each flush
+/// campaign mints a new CFID — `test_deltas` ships three `static_with_rows-*`),
+/// and only some of them carry the committed/fetched `Data.db`. So candidates are
+/// SORTED (deterministic, never `read_dir` order) and one holding this case's
+/// `<sstable_prefix>-Data.db` is preferred; with none, the first match is returned
+/// so the caller's "not fetched" SKIP / fail-closed path still reports the miss.
+fn fixture_dir(
+    sstables_root: &Path,
+    keyspace: &str,
+    prefix: &str,
+    sstable_prefix: &str,
+) -> Option<PathBuf> {
     let ks_dir = sstables_root.join(keyspace);
-    std::fs::read_dir(&ks_dir)
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&ks_dir)
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| {
+        .filter(|p| {
             p.is_dir()
                 && p.file_name()
                     .and_then(|n| n.to_str())
                     .map(|n| n.starts_with(prefix))
                     .unwrap_or(false)
         })
+        .collect();
+    candidates.sort();
+    let data_db = format!("{sstable_prefix}-Data.db");
+    candidates
+        .iter()
+        .find(|p| p.join(&data_db).exists())
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
 }
 
 /// Count `type == "row"` entries in the committed sstabledump JSONL golden
@@ -172,6 +206,33 @@ fn golden_row_count(dir: &Path, sstable_prefix: &str) -> Option<usize> {
                 .iter()
                 .filter(|r| r.get("type").and_then(|t| t.as_str()) == Some("row"))
                 .count();
+        }
+    }
+    Some(total)
+}
+
+/// Count partitions in the committed golden that hold a `static_block` and NO
+/// `type == "row"` entry — the STATIC-ONLY partitions Cassandra returns exactly one
+/// result row for (issue #3095). Derived from the golden, never authored.
+fn golden_static_only_partitions(dir: &Path, sstable_prefix: &str) -> Option<usize> {
+    let jsonl = dir.join(format!("{sstable_prefix}-Data.db.jsonl"));
+    let text = std::fs::read_to_string(&jsonl).ok()?;
+    let mut total = 0usize;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        let Some(rows) = v.get("rows").and_then(|r| r.as_array()) else {
+            continue;
+        };
+        let has = |k: &str| {
+            rows.iter()
+                .any(|r| r.get("type").and_then(|t| t.as_str()) == Some(k))
+        };
+        if has("static_block") && !has("row") {
+            total += 1;
         }
     }
     Some(total)
@@ -305,7 +366,12 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         eprintln!("SKIP {msg}");
         return Ok(false);
     };
-    let Some(dir) = fixture_dir(&root, &case.keyspace, &case.fixture_dir_prefix) else {
+    let Some(dir) = fixture_dir(
+        &root,
+        &case.keyspace,
+        &case.fixture_dir_prefix,
+        &case.sstable_prefix,
+    ) else {
         let msg = format!(
             "case {}: fixture dir {}* absent",
             case.id, case.fixture_dir_prefix
@@ -344,11 +410,26 @@ async fn run_case(case: &Case) -> Result<bool, String> {
             case.id, case.physical_row_count
         ));
     }
-    // The oracle never asserts fewer physical rows than the semantic result —
-    // a shadowing/expiry oracle only ever HIDES rows a physical dump shows.
-    if golden < case.expected_rows.len() {
+    // Issue #3095: the ONE way a correct semantic result may exceed the physical
+    // row count is a STATIC-ONLY partition (a `static_block` with no `row`), which
+    // Cassandra returns one row for. Re-derive that count from the golden and
+    // assert the oracle's declaration, so the allowance cannot be inflated to mask
+    // an over-emitting read path.
+    let static_only = golden_static_only_partitions(&dir, &case.sstable_prefix)
+        .ok_or_else(|| format!("case {}: golden JSONL missing/unreadable", case.id))?;
+    if static_only != case.physical_static_only_partitions {
         return Err(format!(
-            "case {}: physical rows {golden} < expected semantic rows {}",
+            "case {}: golden static-only partitions {static_only} != oracle \
+             physical_static_only_partitions {}",
+            case.id, case.physical_static_only_partitions
+        ));
+    }
+    // Otherwise the oracle never asserts fewer physical rows than the semantic
+    // result — a shadowing/expiry oracle only ever HIDES rows a physical dump shows.
+    if golden + static_only < case.expected_rows.len() {
+        return Err(format!(
+            "case {}: physical rows {golden} + static-only partitions {static_only} \
+             < expected semantic rows {}",
             case.id,
             case.expected_rows.len()
         ));
@@ -389,11 +470,25 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         .iter()
         .map(|c| c.name.clone())
         .collect();
+    //
+    // `validate_projection` SUBSUMES the earlier `origin/main` guard (issue #3095),
+    // which derived `cols` from the first expected row and then checked each was
+    // projected: it asserts BOTH directions — every oracle column is projected (an
+    // unprojected one is an oracle typo, not a NULL) AND every projected column is
+    // authored in every expected row (so no projected column is silently left out
+    // of the comparison).
     validate_projection(&case.id, &cols, &case.expected_rows)?;
     let mut actual: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
     for row in &result.rows {
         let mut m = serde_json::Map::new();
         for col in &cols {
+            // A PROJECTED column with no cell in this row reads NULL — CQL
+            // semantics, and exactly what Cassandra returns for the clustering and
+            // regular columns of a static-only partition's row (issue #3095;
+            // `processPartition()`'s `default: result.add((ByteBuffer) null)`), and
+            // equally what a cell TOMBSTONE leaves behind: an absent entry IS the
+            // core result model's NULL (issue #3094). `validate_projection` above is
+            // what keeps this from masking an oracle typo.
             let json = match row.values.get(col.as_str()) {
                 Some(v) => value_to_json(v).map_err(|e| format!("case {}: {e}", case.id))?,
                 None => serde_json::Value::Null,
@@ -445,6 +540,7 @@ fn synthetic_case(
         query: "SELECT 1".to_string(),
         pinned_now_secs: 0,
         physical_row_count,
+        physical_static_only_partitions: 0,
         expected_rows: if expected_rows_len_zero {
             Vec::new()
         } else {

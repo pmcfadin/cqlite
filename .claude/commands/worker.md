@@ -123,8 +123,18 @@ onto its own branch). Rules, non-negotiable:
       `==== AGENT-GATE LITE SUMMARY ====` block + **≤5 lines** of prose (#2080) — never raw logs/diffs.
       Iterate on lite until PASS and the change is complete.
    2. **Review-first is DEFAULT (#2086):** on the lite-green diff, spawn `rust-reviewer` (model: opus) AND
-      run roborev (this machine's configured agent — commonly `claude-code` via `.roborev.toml`; no flags)
-      **before any full gate**. Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
+      run roborev **before any full gate**, through the ONLY sanctioned invocation (#2964) — **push the
+      branch first** (the wrapper asserts it and FAILs otherwise), then
+      `bash scripts/flow/roborev-review.sh --agent codex --model gpt-5.6-sol` (Claude reviewer:
+      `--agent claude-code --model claude-opus-5`; on the fleet boxes only `codex` is healthy — confirm with
+      `roborev check-agents`). **BOTH `--agent` and `--model` are ALWAYS required** — the wrapper rejects a
+      missing one as a usage error, because one alone inherits the `.roborev.toml`-pinned model and fails as
+      a silent-looking review outage. A bare `roborev review --branch` and the two-positional commit-range
+      form are **NON-SANCTIONED** (from a worktree the former reviews `origin/main` and reports clean having
+      reviewed nothing). Retain only the `==== ROBOREV REVIEW SUMMARY ====` block; **any** non-PASS terminal
+      `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round and a blocked merge, never "roborev
+      clean" (why: CLAUDE.md + https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/).
+      Skip ONLY for a genuinely mechanical diff (no `pub`-item change AND single
       call site AND no new surface). Triage findings per `docs/development/roborev-severity.md`: **blockers**
       fixed now (each re-triggers `fix → --lite re-cert (+ diff-relevant parity/integration target) →
       re-review`, NEVER a full gate — #2087); **nits** batched into ONE linked follow-up issue at merge time,

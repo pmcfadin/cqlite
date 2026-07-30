@@ -87,6 +87,24 @@ struct Case {
     query: String,
     pinned_now_secs: i64,
     physical_row_count: usize,
+    /// STATIC-ONLY partitions in the committed golden — partitions carrying a
+    /// `static_block` and ZERO `row` entries (issue #3095). Cassandra returns
+    /// exactly ONE result row for each, and that row has no physical `row` entry
+    /// behind it, so this is the amount by which a correct semantic result may
+    /// LEGITIMATELY exceed `physical_row_count`. Re-derived from the golden and
+    /// asserted below; defaults to 0, keeping the strict guard for every other case.
+    #[serde(default)]
+    physical_static_only_partitions: usize,
+    /// The keyspace-qualified `CREATE TABLE` the Flight ticket must carry.
+    ///
+    /// Required for any case whose table is NOT the
+    /// `(id int, ck int, v text, PRIMARY KEY (id, ck))` shape every table in
+    /// `compaction-tombstone-ttl-parity.cql` shares — e.g. the static-column case
+    /// (issue #3095), whose DDL must declare the column `static`. Authored in the
+    /// oracle next to the query it belongs to; still cross-checked against the
+    /// schema file by [`ddl_for`].
+    #[serde(default)]
+    ddl: Option<String>,
     /// Ordered map per row so JSON author-order is preserved for readable diffs.
     expected_rows: Vec<serde_json::Map<String, serde_json::Value>>,
     /// Explicit opt-in for a case whose correct semantic result is ZERO rows.
@@ -154,19 +172,40 @@ fn schema_path(file: &str) -> Option<PathBuf> {
     candidates.into_iter().flatten().find(|p| p.exists())
 }
 
-fn fixture_dir(sstables_root: &Path, keyspace: &str, prefix: &str) -> Option<PathBuf> {
+/// Resolve `<sstables>/<keyspace>/<prefix><uuid>/` for a case.
+///
+/// A keyspace can hold SEVERAL directories for the same table name (each flush
+/// campaign mints a new CFID — `test_deltas` ships three `static_with_rows-*`),
+/// and only some of them carry the committed/fetched `Data.db`. So candidates are
+/// SORTED (deterministic, never `read_dir` order) and one holding this case's
+/// `<sstable_prefix>-Data.db` is preferred; with none, the first match is returned
+/// so the caller's "not fetched" SKIP / fail-closed path still reports the miss.
+fn fixture_dir(
+    sstables_root: &Path,
+    keyspace: &str,
+    prefix: &str,
+    sstable_prefix: &str,
+) -> Option<PathBuf> {
     let ks_dir = sstables_root.join(keyspace);
-    std::fs::read_dir(&ks_dir)
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&ks_dir)
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| {
+        .filter(|p| {
             p.is_dir()
                 && p.file_name()
                     .and_then(|n| n.to_str())
                     .map(|n| n.starts_with(prefix))
                     .unwrap_or(false)
         })
+        .collect();
+    candidates.sort();
+    let data_db = format!("{sstable_prefix}-Data.db");
+    candidates
+        .iter()
+        .find(|p| p.join(&data_db).exists())
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
 }
 
 /// Count `type == "row"` entries in the committed sstabledump JSONL golden
@@ -191,6 +230,63 @@ fn golden_row_count(dir: &Path, sstable_prefix: &str) -> Option<usize> {
     Some(total)
 }
 
+/// Stage exactly ONE fixture directory into a private `<tmp>/<keyspace>/<dir>/`
+/// data root for the service to resolve.
+///
+/// Load-bearing, not hygiene: a keyspace can hold SEVERAL directories for the same
+/// table name (`test_deltas` ships three `static_with_rows-*`, only one with the
+/// committed binaries), and `DirSource::resolve` picks one by directory listing. Without
+/// staging, the service could read a DIFFERENT generation than the one this lane
+/// derived `physical_row_count` from — comparing a golden against bytes it does not
+/// describe (and, when the resolved dir has no `Data.db`, silently returning 0 rows).
+fn stage_case_dir(keyspace: &str, dir: &Path) -> Result<tempfile::TempDir, String> {
+    let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let leaf = dir
+        .file_name()
+        .ok_or_else(|| format!("fixture dir has no file name: {}", dir.display()))?;
+    let dest = temp.path().join(keyspace).join(leaf);
+    std::fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("read dir entry: {e}"))?;
+        if entry
+            .file_type()
+            .map_err(|e| format!("file type: {e}"))?
+            .is_file()
+        {
+            std::fs::copy(entry.path(), dest.join(entry.file_name()))
+                .map_err(|e| format!("copy {}: {e}", entry.path().display()))?;
+        }
+    }
+    Ok(temp)
+}
+
+/// Count partitions in the committed golden holding a `static_block` and NO
+/// `type == "row"` entry — the STATIC-ONLY partitions Cassandra returns exactly one
+/// result row for (issue #3095). Derived from the golden, never authored.
+fn golden_static_only_partitions(dir: &Path, sstable_prefix: &str) -> Option<usize> {
+    let jsonl = dir.join(format!("{sstable_prefix}-Data.db.jsonl"));
+    let text = std::fs::read_to_string(&jsonl).ok()?;
+    let mut total = 0usize;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        let Some(rows) = v.get("rows").and_then(|r| r.as_array()) else {
+            continue;
+        };
+        let has = |k: &str| {
+            rows.iter()
+                .any(|r| r.get("type").and_then(|t| t.as_str()) == Some(k))
+        };
+        if has("static_block") && !has("row") {
+            total += 1;
+        }
+    }
+    Some(total)
+}
+
 // ---------------------------------------------------------------------------
 // DDL derivation (the schema file holds ALL tables; the Flight ticket carries
 // ONE `CREATE TABLE`, so build the per-table DDL matching the fixture)
@@ -202,7 +298,12 @@ fn golden_row_count(dir: &Path, sstable_prefix: &str) -> Option<usize> {
 /// `compaction-tombstone-ttl-parity.cql` has the identical
 /// `(id INT, ck INT, v TEXT, PRIMARY KEY (id, ck))` shape, so the DDL is derived
 /// authoritatively from the schema's declared column set rather than guessed.
-fn ddl_for(schema_file: &Path, keyspace: &str, table: &str) -> Result<String, String> {
+fn ddl_for(
+    schema_file: &Path,
+    keyspace: &str,
+    table: &str,
+    declared_ddl: Option<&str>,
+) -> Result<String, String> {
     // The parity schema declares every table with the SAME column set; assert
     // the target table is actually declared in the file so a typo can never
     // silently synthesize a DDL for a non-existent table.
@@ -216,20 +317,67 @@ fn ddl_for(schema_file: &Path, keyspace: &str, table: &str) -> Result<String, St
             schema_file.display()
         ));
     }
+    // A case that declares its own DDL wins (it is the only way to express a table
+    // shape the parity schema does not share — e.g. a STATIC column, issue #3095).
+    // It must still name THIS table, so a copy/paste from another case cannot
+    // silently decode the wrong shape.
+    if let Some(ddl) = declared_ddl {
+        if !ddl.contains(table) {
+            return Err(format!("case DDL does not name table {table}: {ddl}"));
+        }
+        return Ok(ddl.to_string());
+    }
     Ok(format!(
         "CREATE TABLE {keyspace}.{table} \
          (id int, ck int, v text, PRIMARY KEY (id, ck))"
     ))
 }
 
+/// The projected column list of an oracle case's recorded `SELECT`.
+///
+/// The oracle's `query` is the authoritative statement of what the case reads, so it
+/// — not the expected rows — determines the Flight ticket's projection. A `SELECT *`
+/// is REFUSED rather than silently expanded from a schema guess: no oracle case uses
+/// it today, and inventing a column order here would make the comparison depend on
+/// this test's guess instead of the recorded query.
+fn projection_from_query(query: &str) -> Result<Vec<String>, String> {
+    let upper = query.to_ascii_uppercase();
+    let select = upper
+        .find("SELECT ")
+        .ok_or_else(|| format!("query has no SELECT: {query}"))?
+        + "SELECT ".len();
+    let from = upper
+        .find(" FROM ")
+        .ok_or_else(|| format!("query has no FROM: {query}"))?;
+    if from <= select {
+        return Err(format!("query has an empty SELECT list: {query}"));
+    }
+    let list = query[select..from].trim();
+    if list.contains('*') {
+        return Err(format!(
+            "SELECT * is not expressible as an explicit Flight projection — list the \
+             columns in the oracle query: {query}"
+        ));
+    }
+    let cols: Vec<String> = list
+        .split(',')
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if cols.is_empty() {
+        return Err(format!("query projects no columns: {query}"));
+    }
+    Ok(cols)
+}
+
 /// Build the on-the-wire Flight ticket JSON: keyspace + table + per-table DDL +
 /// the oracle's `SELECT id, ck, v` projection.
-fn ticket_bytes(keyspace: &str, table: &str, ddl: &str) -> Vec<u8> {
+fn ticket_bytes(keyspace: &str, table: &str, ddl: &str, columns: &[String]) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "keyspace": keyspace,
         "table": table,
         "ddl": ddl,
-        "columns": ["id", "ck", "v"],
+        "columns": columns,
     }))
     .expect("serialize flight ticket")
 }
@@ -274,6 +422,7 @@ fn cell_to_json(batch: &RecordBatch, col: &str, i: usize) -> Result<serde_json::
 async fn do_get_rows(
     svc: &CqliteFlightService,
     ticket: Vec<u8>,
+    cols: &[String],
 ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
     let resp = svc
         .do_get(Request::new(Ticket::new(ticket)))
@@ -283,14 +432,13 @@ async fn do_get_rows(
         .into_inner()
         .map(|r| r.map_err(|s| FlightError::ExternalError(Box::new(s))));
     let mut rb = FlightRecordBatchStream::new_from_flight_data(stream);
-    let cols = ["id", "ck", "v"];
     let mut out = Vec::new();
     while let Some(batch) = rb.next().await {
         let batch: RecordBatch = batch.map_err(|e| format!("decode flight batch: {e}"))?;
         for i in 0..batch.num_rows() {
             let mut m = serde_json::Map::new();
             for col in cols {
-                m.insert(col.to_string(), cell_to_json(&batch, col, i)?);
+                m.insert(col.clone(), cell_to_json(&batch, col, i)?);
             }
             out.push(m);
         }
@@ -368,7 +516,12 @@ async fn run_case(case: &Case) -> Result<bool, String> {
         eprintln!("SKIP {msg}");
         return Ok(false);
     };
-    let Some(dir) = fixture_dir(&root, &case.keyspace, &case.fixture_dir_prefix) else {
+    let Some(dir) = fixture_dir(
+        &root,
+        &case.keyspace,
+        &case.fixture_dir_prefix,
+        &case.sstable_prefix,
+    ) else {
         let msg = format!(
             "case {}: fixture dir {}* absent",
             case.id, case.fixture_dir_prefix
@@ -407,27 +560,67 @@ async fn run_case(case: &Case) -> Result<bool, String> {
             case.id, case.physical_row_count
         ));
     }
-    // A shadowing/expiry oracle only ever HIDES rows a physical dump shows.
-    if golden < case.expected_rows.len() {
+    // Issue #3095: the ONE way a correct semantic result may EXCEED the physical row
+    // count is a STATIC-ONLY partition (a `static_block` with no `row`), which
+    // Cassandra returns one row for. Re-derived from the golden and cross-checked
+    // against the oracle's declaration, so the allowance cannot be inflated to mask
+    // an over-emitting read path.
+    let static_only = golden_static_only_partitions(&dir, &case.sstable_prefix)
+        .ok_or_else(|| format!("case {}: golden JSONL missing/unreadable", case.id))?;
+    if static_only != case.physical_static_only_partitions {
         return Err(format!(
-            "case {}: physical rows {golden} < expected semantic rows {}",
+            "case {}: golden static-only partitions {static_only} != oracle \
+             physical_static_only_partitions {}",
+            case.id, case.physical_static_only_partitions
+        ));
+    }
+    // Otherwise a shadowing/expiry oracle only ever HIDES rows a physical dump shows.
+    if golden + static_only < case.expected_rows.len() {
+        return Err(format!(
+            "case {}: physical rows {golden} + static-only partitions {static_only} \
+             < expected semantic rows {}",
             case.id,
             case.expected_rows.len()
         ));
     }
 
-    let ddl = ddl_for(&schema, &case.keyspace, &case.table)
+    let ddl = ddl_for(&schema, &case.keyspace, &case.table, case.ddl.as_deref())
         .map_err(|e| format!("case {}: {e}", case.id))?;
+    // Projection: derived from the case's own QUERY, not from its expected rows
+    // (issue #3095 B4, roborev BLOCKER). Deriving it from `expected_rows[0]` broke
+    // every legitimate ZERO-row case — an `expect_empty` case has no first row, so
+    // the lane errored before it ever queried, silently disabling that whole class
+    // (including AC2's zero-row half). The recorded `SELECT` list is the
+    // authoritative projection either way; the expected rows are the ANSWER, not the
+    // question.
+    let cols = projection_from_query(&case.query).map_err(|e| format!("case {}: {e}", case.id))?;
+    // Cross-check: a non-empty expectation must only name projected columns, so a
+    // typo in either place is loud rather than a silent all-null compare.
+    if let Some(first) = case.expected_rows.first() {
+        for name in first.keys() {
+            if !cols.iter().any(|c| c == name) {
+                return Err(format!(
+                    "case {}: expected_rows names column {name}, which the query does \
+                     not project ({cols:?})",
+                    case.id
+                ));
+            }
+        }
+    }
 
     // Pin the read-time TTL clock for this case (removed after do_get, before
     // the next case). The Flight producer threads this SAME `now` (via
     // `read_time_now_secs`, issue #2789) into its k-way merger's TTL expiry.
     // The service resolves `<data_dir>/<keyspace>/<table>-<uuid>/`, so point it
     // at the sstables root.
+    // Stage the RESOLVED fixture dir, so the service reads exactly the bytes this
+    // lane derived its physical counts from (see `stage_case_dir`).
+    let staged =
+        stage_case_dir(&case.keyspace, &dir).map_err(|e| format!("case {}: {e}", case.id))?;
     std::env::set_var(TTL_NOW_OVERRIDE_ENV, case.pinned_now_secs.to_string());
-    let svc = CqliteFlightService::new(root.clone(), 8192);
-    let ticket = ticket_bytes(&case.keyspace, &case.table, &ddl);
-    let got_rows = do_get_rows(&svc, ticket).await;
+    let svc = CqliteFlightService::new(staged.path().to_path_buf(), 8192);
+    let ticket = ticket_bytes(&case.keyspace, &case.table, &ddl, &cols);
+    let got_rows = do_get_rows(&svc, ticket, &cols).await;
     std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
     let actual = got_rows.map_err(|e| format!("case {}: {e}", case.id))?;
 
@@ -471,6 +664,8 @@ fn synthetic_case(
         query: "SELECT 1".to_string(),
         pinned_now_secs: 0,
         physical_row_count,
+        physical_static_only_partitions: 0,
+        ddl: None,
         expected_rows: if expected_rows_len_zero {
             Vec::new()
         } else {

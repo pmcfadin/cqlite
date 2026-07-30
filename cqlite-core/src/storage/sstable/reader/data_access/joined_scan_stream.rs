@@ -1,0 +1,627 @@
+//! A scan channel whose close is PROVEN, not assumed — for EVERY streaming scan
+//! surface, not just the batched one (issues #3106, #3124).
+//!
+//! # The defect class this type exists to make unrepresentable
+//!
+//! Every streaming scan in this crate is "a spawned producer that owns the sending
+//! half of a bounded channel and reports a failure by sending `Err(..)`". If the
+//! producer instead UNWINDS — a decode panic, an abort, a cancelled task — it drops
+//! its sender with NO error and NO terminator. A consumer that reads a channel
+//! close as "the scan finished" then reports a SHORT result set as a complete,
+//! successful scan: fewer rows, no error, no log line.
+//!
+//! Issue #3106 closed that hole for ONE surface (the batched single-source scan) by
+//! pairing the channel with its producer's `JoinHandle`. Issue #3124 found the same
+//! hole on the ≠1-generation (query-engine full scan) path, at four more
+//! boundaries: the fan-out k-way merge task, each per-reader per-row sub-scan, the
+//! per-row → batch re-chunker's source, and the windowed forwarder. Rather than
+//! grow a fourth bespoke protocol, the #3106 mechanism is generalised HERE over the
+//! channel's item type, so both surfaces share ONE implementation:
+//!
+//! * [`RowScanStream`] — per-row items, `Result<(RowKey, ScanRow)>`
+//!   (`SSTableReader::scan_stream`, `SSTableManager::scan_stream`,
+//!   `generation_merge::stream_generations_for_read`).
+//! * [`BatchedScanStream`] — batch items, `Result<Vec<(RowKey, ScanRow)>>`
+//!   (`SSTableReader::scan_stream_batched`, `SSTableManager::scan_stream_batched`).
+//!
+//! Consumers are unchanged in shape: [`JoinedStream::recv`] has the same
+//! `async fn(&mut self) -> Option<Result<T>>` signature `mpsc::Receiver::recv` had,
+//! so every `while let Some(item) = stream.recv().await` loop keeps working — and
+//! now fails closed.
+//!
+//! # The boundary #3106 closed first (the batched single-source scan)
+//!
+//! `scan_stream_batched_admitted` (`sequential.rs`) drives the scan in a spawned
+//! `tokio` task that owns the sending half of a bounded channel and reports a
+//! failure by sending `Err(..)`. Before this type it returned the bare
+//! `mpsc::Receiver` and DISCARDED the task's `JoinHandle`, so a task that
+//! UNWOUND — a decode panic in `parse_block_entries_at_now`, which on the
+//! non-stitching (uncompressed) branch runs directly inside that task, or any
+//! future panic on the walk — dropped its sender with no error and no terminator.
+//! Every consumer read that close as "the scan finished":
+//!
+//! * `query_rows::drive_full_scan_rows` returned `Ok(())`, its own thread then
+//!   sent the #3106 `Done` sentinel, and the Flight `do_get` completed
+//!   SUCCESSFULLY with a truncated result set — the #3106 defect exactly, one
+//!   layer below the channel #3106 first fixed, on the arm a `do_get` with no
+//!   token filter takes (i.e. the reported repro);
+//! * the query engine's streaming SELECT / aggregate folds
+//!   (`select_executor::streaming`, `stream_agg`, `executor::streaming_scan_rows`)
+//!   returned short row sets / wrong aggregates the same way.
+//!
+//! [`BatchedScanStream`] owns the handle instead, so a channel close is
+//! DISAMBIGUATED: the task is joined and a `JoinError` (panic or cancellation)
+//! surfaces as `Some(Err(..))` rather than `None`. This mirrors what the windowed
+//! sub-path already did internally for its own two child tasks
+//! (`scan_stream_windowed`'s `parse_task.await` / feed `join_err` arms map a
+//! `JoinError` to an error), so the two arms no longer diverge on whether a dead
+//! producer is an error.
+//!
+//! # The #3124 boundaries (the multi-generation path)
+//!
+//! `SSTableManager::scan_stream`'s fan-out k-way merge task, each per-generation
+//! `scan_stream_admitted` sub-scan, and the per-row → batch re-chunker's source had
+//! the identical shape on the ≠1-generation path, and the windowed forwarder
+//! discarded its `JoinError` outright. Their wiring lives in
+//! `storage/sstable/scan_stream_fanout.rs` and
+//! `storage/sstable/reader/scan_stream_forwarder.rs`; the mechanism they all use is
+//! this type.
+
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use super::super::SSTableReader;
+use crate::types::{ScanRow, TableId};
+use crate::{Error, Result, RowKey};
+
+/// An item type a [`JoinedStream`] can carry, plus the human name of the surface
+/// that carries it.
+///
+/// The name exists only so a dead-producer error says WHICH stream died
+/// (`per-row scan stream` vs `batched scan stream`) instead of being anonymous. It
+/// is an associated const rather than a constructor argument so a new stream
+/// surface cannot be wired up with a copy-pasted, wrong label — and so the
+/// existing `JoinedStream::new(rx, task)` call sites need no churn.
+pub trait ScanStreamItem {
+    /// How this stream is named in a failure message.
+    const STREAM_KIND: &'static str;
+}
+
+impl ScanStreamItem for (RowKey, ScanRow) {
+    const STREAM_KIND: &'static str = "per-row scan stream";
+}
+
+impl ScanStreamItem for Vec<(RowKey, ScanRow)> {
+    const STREAM_KIND: &'static str = "batched scan stream";
+}
+
+/// Consumer handle for a streaming scan: the item channel PLUS the producer task
+/// that feeds it, so end-of-stream is an OBSERVED fact rather than an assumption.
+///
+/// Dropping it drops the receiver, which makes the producer's next send fail and
+/// unwinds it cooperatively (the pre-existing backpressure/teardown behaviour); the
+/// task is deliberately NOT joined on drop, so an abandoned scan never blocks the
+/// consumer.
+pub struct JoinedStream<T: ScanStreamItem> {
+    rx: mpsc::Receiver<Result<T>>,
+    /// What is KNOWN about the producer task. See [`TaskState`] — the point of the
+    /// enum is that there is no representable "the handle is gone and I never saw a
+    /// verdict" state to accidentally read as success.
+    task: TaskState,
+}
+
+/// What a [`JoinedStream`] knows about its producer task (issue #3106, roborev).
+///
+/// Modelled as a state machine rather than `Option<JoinHandle>` + a `died` flag
+/// because that pair had an UNREPRESENTED third state — handle taken, verdict not
+/// yet observed — which a cancelled join produced and which then read as a clean
+/// end of stream. Here every state either OWNS the handle (so the join can still be
+/// completed later) or carries an observed verdict.
+enum TaskState {
+    /// Not yet joined; the handle is still owned HERE. A cancelled `recv` leaves the
+    /// stream in this state, so the next `recv` can still join.
+    Running(JoinHandle<()>),
+    /// Joined, and the join returned `Ok(())`: the scan PROVABLY ran to completion.
+    /// The only state from which end-of-stream is reported.
+    Finished,
+    /// Joined, and the join returned a `JoinError`. STICKY: every later `recv`
+    /// re-reports the failure, mirroring the sibling boundary
+    /// (`QueryRowStream::terminated`), so a retrying consumer — these streams are
+    /// public API, returned by `SSTableManager`/`StorageEngine` — can never
+    /// downgrade a dead task to a clean end of stream.
+    ///
+    /// `cancelled` remembers WHICH kind of `JoinError` it was, so the sticky
+    /// re-report keeps saying the same thing the first report said (a cancellation
+    /// re-reported as a panic would be a lie about the cause).
+    Died { cancelled: bool },
+}
+
+impl<T: ScanStreamItem> JoinedStream<T> {
+    /// Pair a scan channel with the task that drives it.
+    pub(in crate::storage::sstable) fn new(
+        rx: mpsc::Receiver<Result<T>>,
+        task: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            rx,
+            task: TaskState::Running(task),
+        }
+    }
+
+    /// Next item, or `None` at a PROVEN-clean end of stream.
+    ///
+    /// When the channel closes, the producer task is joined: a task that returned
+    /// normally yields `None` (the scan really finished), while a task that DIED
+    /// yields `Some(Err(..))` — a panic as the fail-closed
+    /// [`dead_scan_task_error`], a CANCELLED/aborted task as [`Error::Cancelled`],
+    /// which is the honest cause for a scan someone stopped. That is the whole
+    /// point: a dead producer must never be indistinguishable from a finished one
+    /// (issues #3106, #3124).
+    ///
+    /// A dead task is STICKY: every subsequent call re-reports the failure, so
+    /// polling again can never downgrade it to a clean end of stream.
+    ///
+    /// # Cancellation safety (issue #3106, roborev)
+    ///
+    /// This method is cancel-safe in the way that matters here: cancelling it
+    /// (`tokio::select!`, `timeout`, …) while it is awaiting the JOIN must not lose
+    /// the task's verdict. The handle is therefore polled IN PLACE — it is never
+    /// moved out of `self` before a result is observed — so a cancelled `recv`
+    /// leaves the stream in [`TaskState::Running`] and the next `recv` simply joins
+    /// again. Moving the handle out first (`self.task.take()?`) is exactly what
+    /// reintroduced the #3106 defect: the dropped handle DETACHED the task, no
+    /// verdict was ever recorded, and the following `recv` short-circuited to a
+    /// clean end of stream for a task that may have panicked.
+    pub async fn recv(&mut self) -> Option<Result<T>> {
+        if let TaskState::Died { cancelled } = self.task {
+            return Some(Err(sticky_dead_task_error::<T>(cancelled)));
+        }
+        if let Some(item) = self.rx.recv().await {
+            return Some(item);
+        }
+        // Channel closed: the producer dropped its sender. Join it to learn WHY.
+        let outcome = match &mut self.task {
+            // `JoinHandle: Future + Unpin`, so `&mut JoinHandle` is itself a future:
+            // awaiting it polls the join WITHOUT taking ownership. A cancellation
+            // here drops only this borrow.
+            TaskState::Running(handle) => handle.await,
+            // A proven-clean completion is the ONLY route to end-of-stream.
+            TaskState::Finished => return None,
+            TaskState::Died { cancelled } => {
+                return Some(Err(sticky_dead_task_error::<T>(*cancelled)))
+            }
+        };
+        // No `.await` between observing the outcome and recording it, so the verdict
+        // cannot be lost to a cancellation.
+        match outcome {
+            Ok(()) => {
+                self.task = TaskState::Finished;
+                None
+            }
+            Err(join_err) => {
+                // A CANCELLED task (aborted, or its runtime shut down) is a distinct
+                // cause from a panic and gets the error the doc above already promised
+                // for it: `Error::Cancelled`. Nothing in the crate aborts these tasks
+                // today, so this arm is about the doc being TRUE — and about the next
+                // caller that does abort one getting an honest cause rather than an
+                // internal-invariant-violated report.
+                let cancelled = join_err.is_cancelled();
+                self.task = TaskState::Died { cancelled };
+                Some(Err(if cancelled {
+                    Error::Cancelled
+                } else {
+                    dead_scan_task_error::<T>(&join_err)
+                }))
+            }
+        }
+    }
+}
+
+/// The fail-closed error for a scan producer task that died without reporting
+/// (issues #3106, #3124).
+///
+/// [`Error::Internal`] (not `Corruption`, not `Storage`): nothing suggests the
+/// `Data.db` is bad — an internal invariant was violated — and `Internal` is
+/// `is_recoverable() == false`, which is honest for a deterministic failure that a
+/// retry would reproduce. The panic message is carried in the payload so the
+/// failure is diagnosable rather than anonymous.
+fn dead_scan_task_error<T: ScanStreamItem>(join_err: &tokio::task::JoinError) -> Error {
+    Error::internal(format!(
+        "{}: the scan task DIED without reporting ({join_err}) — the result set is \
+         TRUNCATED and cannot be reported as a complete scan (issues #3106/#3124)",
+        T::STREAM_KIND
+    ))
+}
+
+/// Re-report for a consumer that keeps polling after the dead-task error, preserving
+/// the CAUSE the first report gave (a cancellation stays `Error::Cancelled`).
+fn sticky_dead_task_error<T: ScanStreamItem>(cancelled: bool) -> Error {
+    if cancelled {
+        return Error::Cancelled;
+    }
+    dead_scan_task_error_after_report::<T>()
+}
+
+/// Re-report for a consumer that keeps polling after the dead-task error. The
+/// `JoinError` is consumed by the join, so this restates the verdict rather than
+/// re-deriving it — what matters is that it is still an ERROR, never a clean end of
+/// stream.
+fn dead_scan_task_error_after_report<T: ScanStreamItem>() -> Error {
+    Error::internal(format!(
+        "{}: the scan task DIED without reporting (already reported) — the result \
+         set is TRUNCATED and cannot be reported as a complete scan (issues \
+         #3106/#3124)",
+        T::STREAM_KIND
+    ))
+}
+
+/// Per-row streaming scan handle (issue #3124): `SSTableReader::scan_stream`,
+/// `SSTableManager::scan_stream`, `StorageEngine::scan_stream` and the
+/// cross-generation `stream_generations_for_read` all return this instead of a bare
+/// `mpsc::Receiver`, so a producer that dies mid-scan is an ERROR at every one of
+/// those boundaries rather than a short, successful-looking result set.
+pub type RowScanStream = JoinedStream<(RowKey, ScanRow)>;
+
+/// The batched streaming scan's consumer handle: the batch channel PLUS the driver
+/// task that feeds it, so end-of-stream is an observed fact (issue #3106). Behaviour
+/// and API are unchanged from when this was its own `struct` (issue #3106); only the
+/// item type is fixed here.
+pub type BatchedScanStream = JoinedStream<Vec<(RowKey, ScanRow)>>;
+
+impl SSTableReader {
+    /// Open the batched streaming scan's cursor — the FIRST thing the driver task
+    /// does, ABOVE the `requires_chunk_stitching()` branch, i.e. on every format.
+    ///
+    /// A named seam because it is the SINGLE test-only fault checkpoint for this
+    /// task (issue #3106), and it is here precisely because it is
+    /// format-branch-independent: a checkpoint inside either branch fires only for
+    /// the formats that take that branch, so it can silently not fire and leave a
+    /// test passing vacuously. Killing the task here reproduces exactly the
+    /// condition the fix is about — the task's sender drops with no error and no
+    /// terminator — for any reader, and the join that catches it wraps the whole
+    /// task, so the property proven is branch-agnostic.
+    pub(super) async fn open_batched_scan_cursor(&self) -> Result<super::ScanCursor> {
+        crate::storage::producer_fault::inner_scan_task_checkpoint(|| self.file_path());
+        self.new_scan_cursor().await
+    }
+
+    /// Decode one `Data.db` block for the batched NON-STITCHING streaming scan,
+    /// pinning `read_shadowing = true` for this scan in ONE place.
+    ///
+    /// Deliberately carries NO fault checkpoint (issue #3106, roborev): it is
+    /// reached only by readers whose format takes the non-stitching branch, and no
+    /// fixture in the tree does, so a checkpoint here would be an armable-but-never-
+    /// armed seam — latent confusion suggesting coverage that does not exist. The
+    /// task-level checkpoint in [`Self::open_batched_scan_cursor`] covers both
+    /// branches, which is what the join it proves is scoped to anyway.
+    pub(super) fn parse_batched_block(
+        &self,
+        block: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+        now_secs: Option<i64>,
+    ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
+        self.parse_block_entries_at_now(block, schema, true, now_secs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    fn row(byte: u8) -> (RowKey, ScanRow) {
+        (RowKey::new(vec![byte]), ScanRow::Row(Vec::new()))
+    }
+
+    /// Issue #3124: the PER-ROW flavour of the #3106 property — a producer task that
+    /// DIED is reported as an error, and that verdict is sticky. The batched flavour
+    /// is pinned by the sibling tests below; this proves the generic machinery carries
+    /// the property to the per-row surface #3124 is about.
+    #[tokio::test]
+    async fn a_dead_per_row_task_is_reported_as_an_error_and_stays_one() {
+        // Held across every await that can raise the injected panic; the guard
+        // filters ONLY the injected message and delegates every other panic to the
+        // previous hook, so a genuine failure in a parallel test still prints.
+        let _silence = crate::storage::producer_fault::silence_injected_panics();
+        let (tx, rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(4);
+        let task = tokio::spawn(async move {
+            // Deliver one row, then die WITHOUT reporting — the exact shape the
+            // discarded `JoinHandle` used to turn into a clean end of stream.
+            let _ = tx.send(Ok(row(1))).await;
+            panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
+        });
+        let mut stream = RowScanStream::new(rx, task);
+
+        let first = stream.recv().await;
+        let mut rest = Vec::new();
+        for _ in 0..3 {
+            rest.push(stream.recv().await);
+        }
+        // Dropped BEFORE the assertions: restoring a panic hook from a panicking
+        // thread aborts the process, which would turn a legitimate failure below
+        // into an unreadable SIGABRT.
+        drop(_silence);
+
+        assert!(
+            matches!(first, Some(Ok((key, _))) if key.as_bytes() == [1]),
+            "the row produced before the task died is still delivered"
+        );
+        for (attempt, outcome) in rest.into_iter().enumerate() {
+            let msg = outcome
+                .expect("a dead task must never report a clean end of stream")
+                .expect_err("it must be an error")
+                .to_string();
+            assert!(
+                msg.contains("per-row scan stream")
+                    && msg.contains("DIED without reporting")
+                    && msg.contains("TRUNCATED"),
+                "attempt {attempt}: the error must name the surface, the dead task \
+                 and the truncation, got: {msg}"
+            );
+        }
+    }
+
+    /// The control: a per-row task that finishes normally yields the clean end of
+    /// stream, so the fail-closed join above cannot be passing for a trivial reason.
+    #[tokio::test]
+    async fn a_finished_per_row_task_yields_a_clean_end_of_stream() {
+        let (tx, rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(4);
+        let task = tokio::spawn(async move {
+            let _ = tx.send(Ok(row(2))).await;
+        });
+        let mut stream = RowScanStream::new(rx, task);
+        assert!(
+            matches!(stream.recv().await, Some(Ok(_))),
+            "the row arrives"
+        );
+        assert!(
+            stream.recv().await.is_none(),
+            "a task that returned normally is a clean end of stream"
+        );
+        assert!(
+            stream.recv().await.is_none(),
+            "and stays one on a later poll"
+        );
+    }
+
+    /// Issue #3106: a driver task that DIED is reported as an error, and that
+    /// verdict is STICKY — a consumer that keeps polling can never coax a
+    /// "proven-clean end of stream" `None` out of a dead scan.
+    ///
+    /// The task is killed with a real panic (the same unwind a decode bug would
+    /// produce); its console noise is silenced by message so a genuine failure in
+    /// a parallel test is never masked.
+    #[tokio::test]
+    async fn a_dead_scan_task_is_reported_as_an_error_and_stays_one() {
+        // Held for the whole test: the guard filters ONLY the injected message and
+        // delegates every other panic to the previous hook, so an assertion failure
+        // below (here or in a parallel test) still prints. The task panics
+        // asynchronously, so a narrower scope would race the hook restore.
+        let _silence = crate::storage::producer_fault::silence_injected_panics();
+        let (tx, rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4);
+        let task = tokio::spawn(async move {
+            // Deliver one batch, then die WITHOUT reporting — the exact shape the
+            // discarded `JoinHandle` used to turn into a clean end of stream.
+            let _ = tx
+                .send(Ok(vec![(RowKey::new(vec![1]), ScanRow::Row(Vec::new()))]))
+                .await;
+            panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
+        });
+        let mut stream = BatchedScanStream::new(rx, task);
+
+        let (first, rest) = {
+            let first = stream.recv().await;
+            let mut rest = Vec::new();
+            for _ in 0..3 {
+                rest.push(stream.recv().await);
+            }
+            (first, rest)
+        };
+        // The silencer (held above across every await that can raise the injected
+        // panic) is dropped here, BEFORE the assertions: restoring a panic hook
+        // from a panicking thread aborts the process, which would turn a
+        // legitimate failure below into an unreadable SIGABRT.
+        drop(_silence);
+        assert!(
+            matches!(first, Some(Ok(batch)) if batch.len() == 1),
+            "the batch produced before the task died is still delivered"
+        );
+        for (attempt, outcome) in rest.into_iter().enumerate() {
+            let msg = outcome
+                .expect("a dead task must never report a clean end of stream")
+                .expect_err("it must be an error")
+                .to_string();
+            assert!(
+                msg.contains("DIED without reporting") && msg.contains("TRUNCATED"),
+                "attempt {attempt}: the error must name the dead task and the \
+                 truncation, got: {msg}"
+            );
+        }
+    }
+
+    /// Build a stream whose task: sends one batch, CLOSES the channel, signals
+    /// that it has done so, then parks until released — so a `recv` that runs
+    /// after the close signal is guaranteed to be suspended in the JOIN, not in
+    /// the channel. `then_panic` decides how it finally exits.
+    ///
+    /// The close signal is what makes the cancellation test deterministic: without
+    /// it, a `recv` could be cancelled while still awaiting the channel, which
+    /// exercises nothing.
+    fn stream_parked_after_closing_the_channel(
+        then_panic: bool,
+    ) -> (
+        BatchedScanStream,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (tx, rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4);
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(vec![(RowKey::new(vec![7]), ScanRow::Row(Vec::new()))]))
+                .await;
+            drop(tx);
+            let _ = closed_tx.send(());
+            let _ = release_rx.await;
+            if then_panic {
+                panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
+            }
+        });
+        (BatchedScanStream::new(rx, task), closed_rx, release_tx)
+    }
+
+    /// Cancel a `recv` WHILE it is awaiting the join, then poll again.
+    ///
+    /// `biased` polls the `recv` first, so it runs to the join (the channel is
+    /// already closed and drained) and returns `Pending` because the task is
+    /// parked; the ready branch then completes the `select!` and DROPS the `recv`
+    /// future — a cancellation landing exactly on the join await.
+    async fn cancel_a_recv_mid_join(stream: &mut BatchedScanStream) {
+        tokio::select! {
+            biased;
+            _ = stream.recv() => panic!(
+                "test precondition: the join must still be pending — the driver \
+                 task is parked, so recv cannot have resolved"
+            ),
+            _ = std::future::ready(()) => {}
+        }
+    }
+
+    /// Issue #3106 (roborev blocker): a `recv` CANCELLED mid-join must not lose the
+    /// task's verdict. The pre-fix code moved the `JoinHandle` out of `self` before
+    /// awaiting it, so a cancellation dropped the handle (detaching the task) with
+    /// no verdict recorded — and the next `recv` short-circuited on the absent
+    /// handle to a clean end of stream for a task that then PANICKED. That is the
+    /// #3106 defect, re-entered through the door the fix built.
+    #[tokio::test]
+    async fn a_recv_cancelled_mid_join_still_reports_the_dead_task() {
+        let (mut stream, closed, release) = stream_parked_after_closing_the_channel(true);
+
+        assert!(
+            matches!(stream.recv().await, Some(Ok(batch)) if batch.len() == 1),
+            "the batch produced before the task parked is delivered"
+        );
+        closed
+            .await
+            .expect("the task signals that it closed the channel");
+        cancel_a_recv_mid_join(&mut stream).await;
+
+        // Now let the parked task die, and re-poll. The silencer is dropped BEFORE
+        // any assertion: restoring a panic hook from a panicking thread aborts the
+        // process, which would turn a legitimate failure below into an unreadable
+        // SIGABRT instead of a reported assertion.
+        let outcomes = {
+            let _silence = crate::storage::producer_fault::silence_injected_panics();
+            release.send(()).expect("release the parked task");
+            let mut outcomes = Vec::new();
+            for _ in 0..3 {
+                outcomes.push(stream.recv().await);
+            }
+            outcomes
+        };
+        for (attempt, outcome) in outcomes.into_iter().enumerate() {
+            let msg = outcome
+                .expect(
+                    "a cancelled join must NOT lose the verdict: reporting a clean \
+                     end of stream here is issue #3106 reintroduced",
+                )
+                .expect_err("the task panicked, so this must be an error")
+                .to_string();
+            assert!(
+                msg.contains("DIED without reporting") && msg.contains("TRUNCATED"),
+                "attempt {attempt}: the error must name the dead task and the \
+                 truncation, got: {msg}"
+            );
+        }
+    }
+
+    /// The complement: a cancelled join must not be turned into a spurious error
+    /// either. Same cancellation, but the task then finishes NORMALLY — the stream
+    /// must report the clean end of stream it genuinely observed.
+    #[tokio::test]
+    async fn a_recv_cancelled_mid_join_still_reports_a_clean_finish_as_clean() {
+        let (mut stream, closed, release) = stream_parked_after_closing_the_channel(false);
+
+        assert!(
+            matches!(stream.recv().await, Some(Ok(_))),
+            "the batch arrives"
+        );
+        closed
+            .await
+            .expect("the task signals that it closed the channel");
+        cancel_a_recv_mid_join(&mut stream).await;
+
+        release.send(()).expect("release the parked task");
+        assert!(
+            stream.recv().await.is_none(),
+            "a task that ran to completion is a clean end of stream, even though an \
+             earlier recv was cancelled mid-join"
+        );
+        assert!(
+            stream.recv().await.is_none(),
+            "and stays clean on a later poll"
+        );
+    }
+
+    /// A CANCELLED (aborted) producer is reported as [`Error::Cancelled`], not as the
+    /// panic-flavoured internal error — and that cause survives the sticky re-report.
+    ///
+    /// Nothing in the crate aborts these tasks today; this pins that the documented
+    /// cancellation coverage is REAL rather than aspirational, so the first caller that
+    /// does abort a scan gets an honest cause instead of "an internal invariant was
+    /// violated".
+    #[tokio::test]
+    async fn a_cancelled_scan_task_is_reported_as_cancelled_and_stays_cancelled() {
+        let (tx, rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(4);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            // Park forever holding the sender: only the abort below can end this.
+            std::future::pending::<()>().await;
+            drop(tx);
+        });
+        started_rx.await.expect("the task started");
+        task.abort();
+        let mut stream = RowScanStream::new(rx, task);
+
+        for attempt in 0..3 {
+            let err = stream
+                .recv()
+                .await
+                .expect("an aborted producer must never report a clean end of stream")
+                .expect_err("it must be an error");
+            assert!(
+                matches!(err, Error::Cancelled),
+                "attempt {attempt}: a cancelled task is Error::Cancelled, not an \
+                 internal dead-task report, got: {err}"
+            );
+        }
+    }
+
+    /// The control: a task that finishes normally yields the clean end of stream,
+    /// so the fail-closed join above cannot be passing for a trivial reason.
+    #[tokio::test]
+    async fn a_finished_scan_task_yields_a_clean_end_of_stream() {
+        let (tx, rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4);
+        let task = tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(vec![(RowKey::new(vec![2]), ScanRow::Row(Vec::new()))]))
+                .await;
+        });
+        let mut stream = BatchedScanStream::new(rx, task);
+        assert!(
+            matches!(stream.recv().await, Some(Ok(_))),
+            "the batch arrives"
+        );
+        assert!(
+            stream.recv().await.is_none(),
+            "a task that returned normally is a clean end of stream"
+        );
+        assert!(
+            stream.recv().await.is_none(),
+            "and stays one on a later poll"
+        );
+    }
+}

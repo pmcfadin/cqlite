@@ -42,8 +42,13 @@ Resolve them in the worktree and reply per thread.
    cat /tmp/lite-<N>.txt   # the LITE block (MODE: lite) is the ONLY gate text you retain
    ```
    Add any diff-relevant parity/integration `--test` target (run with `CQLITE_DATASETS_ROOT` pointed at
-   the main repo). Re-run C (`spec-auditor`) if requirements/tests changed; roborev again if code changed
-   materially. If the certified SHA moved, re-certification is the closer's full (or `--delta`) gate per
+   the main repo). Re-run C (`spec-auditor`) if requirements/tests changed; if code changed materially,
+   **push first**, then re-run roborev through the ONLY sanctioned invocation (#2964) —
+   `bash scripts/flow/roborev-review.sh --agent codex --model gpt-5.6-sol` (both flags always; never a bare
+   `roborev review --branch`, which from a worktree reviews `origin/main` and reports clean having reviewed
+   nothing). Retain only its `==== ROBOREV REVIEW SUMMARY ====` block; any non-PASS terminal `RESULT`,
+   `NOTHING-TO-REVIEW` included, is a failed round, not clean.
+   If the certified SHA moved, re-certification is the closer's full (or `--delta`) gate per
    the gate contract — not a full gate in this skill.
 6. **Push + reply.** `git -C <worktree> push`, then reply on each `$PR` thread with what changed (commit
    ref), and clear the transient `addressing` sub-marker. The board stays `In Review` (PR still open),

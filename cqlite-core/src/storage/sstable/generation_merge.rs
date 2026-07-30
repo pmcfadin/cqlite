@@ -37,8 +37,11 @@
 //! The whole module is gated on `write-support` at its `mod` declaration in the
 //! parent (`sstable/mod.rs`).
 //!
-//! NOTE (#1116 file-size): already over the 800-line target on `origin/main`; the
-//! #2063 admission acquires add a few lines. Splitting is tracked under epic #1116.
+//! NOTE (#1116 file-size): this file was over the 800-line target on `origin/main`.
+//! Touching it for issue #3124 split two responsibilities out into child modules —
+//! the streaming path's setup-outcome type (`merge_stream_setup`) and the
+//! read-visibility filter's unit pins (`read_shadow_tests`) — which brings it back
+//! under the target.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -57,6 +60,11 @@ use super::{reader, scan_merge};
 use crate::storage::write_engine::merge::{CellData, KWayMerger, MergeEntry, MergeStep, RowData};
 use crate::types::{CellWriteMetadata, TableId as CqlTableId};
 use crate::{Result, RowCells, RowKey, ScanRow, Value};
+
+#[cfg(not(feature = "tombstones"))]
+mod merge_stream_setup;
+#[cfg(not(feature = "tombstones"))]
+pub(super) use merge_stream_setup::MergeStreamSetupError;
 
 /// One reconciled metadata row inside the merge task, before per-cell metadata is
 /// attached: `(partition key bytes, ScanRow row carrier, [(column,
@@ -594,25 +602,25 @@ fn push_metadata_rows(
 /// guardrail).
 ///
 /// Construction (`KWayMerger::new`, which opens the input files) happens on the
-/// blocking task; its success/failure is signalled back over a oneshot BEFORE any
-/// streaming, so the caller can FALL BACK to the lazy per-reader streaming merge on
-/// a construction error exactly as the materializing `scan` falls back to
-/// concatenation. A runtime `step()` error mid-stream is delivered as an `Err`
-/// item on the channel (the consumer sees it), matching the lazy path's read-error
-/// behaviour.
+/// blocking task and is signalled back over a oneshot BEFORE any streaming — and the
+/// TWO ways that can fail are kept apart by the returned
+/// [`MergeStreamSetupError`] rather than flattened into one `Error`. Only a
+/// REPORTED construction failure is `fallback_eligible`; a producer that DIED
+/// without signalling is joined here and reported as `ProducerDied`, which the caller
+/// must not answer with the non-reconciling concat (issue #3124, roborev — see that
+/// type's module doc for why the flattened version returned wrong data).
 ///
-/// This is a deliberate, documented error-path asymmetry (issue #1579): the
-/// caller's fallback-to-concatenation only ever applies to the CONSTRUCTION
-/// failure above (nothing has been streamed yet, so falling back cannot mix
-/// reconciled and unreconciled rows). A `step()` failure after some partitions
-/// were already emitted downstream is NEVER retried/fallen-back — it ends the
-/// stream via the `Err` channel item instead. That is safer than it sounds: the
-/// materializing `merge_generations_for_read` has no equivalent mid-collection
-/// failure signal — a `step()` error there simply propagates the whole call as
-/// `Err` before any partial `Vec` is returned to the caller. The streaming
-/// driver's `Err` item preserves the same "no half-reconciled result surfaces
-/// silently" guarantee while still letting the caller observe exactly how many
-/// good rows it already received.
+/// A `step()` error mid-stream is delivered as an `Err` item on the channel, and a
+/// task that dies mid-stream is caught by the returned [`reader::RowScanStream`]'s
+/// join (issues #3106/#3124).
+///
+/// Deliberate, documented error-path asymmetry (issue #1579): the caller's
+/// fallback-to-concatenation applies ONLY to the construction failure above (nothing
+/// has been streamed, so falling back cannot mix reconciled and unreconciled rows). A
+/// `step()` failure after partitions were already emitted is NEVER retried — the
+/// `Err` item ends the stream, giving the caller an honest cutoff instead of a
+/// silently half-reconciled table (the materializing `merge_generations_for_read` has
+/// no equivalent mid-collection signal; it propagates the whole call as `Err`).
 #[cfg(not(feature = "tombstones"))]
 pub(super) async fn stream_generations_for_read(
     reader_list: &[Arc<reader::SSTableReader>],
@@ -620,16 +628,27 @@ pub(super) async fn stream_generations_for_read(
     start_key: Option<&RowKey>,
     end_key: Option<&RowKey>,
     buffer_size: usize,
-) -> Result<mpsc::Receiver<Result<(RowKey, ScanRow)>>> {
+) -> std::result::Result<reader::RowScanStream, MergeStreamSetupError> {
     let start_key = start_key.cloned();
     let end_key = end_key.cloned();
     let paths = ordered_generation_paths(reader_list);
     let schema = schema.clone();
 
+    // Issue #3124 (site 5): this task's ONE test-only fault checkpoint needs the
+    // reader identity INSIDE the task, so capture it as an owned scope (a zero-sized
+    // no-op in a production build). Any generation's path identifies the table
+    // directory a test scopes to.
+    let fault_scope = crate::storage::producer_fault::FaultScope::capture(|| {
+        paths.first().cloned().unwrap_or_default()
+    });
+
     let (ready_tx, ready_rx) = oneshot::channel::<Result<()>>();
     let (out_tx, out_rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(buffer_size.max(1));
 
-    tokio::task::spawn_blocking(move || {
+    let task = tokio::task::spawn_blocking(move || {
+        // Inside the construction window, i.e. BEFORE either readiness arm runs, so
+        // an armed fault reproduces exactly "the producer died without signalling".
+        fault_scope.checkpoint(crate::storage::producer_fault::ScanTaskSite::CrossGenerationMerge);
         // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
         let mut merger = match KWayMerger::new(paths, &schema) {
@@ -686,10 +705,15 @@ pub(super) async fn stream_generations_for_read(
     });
 
     match ready_rx.await {
-        Ok(Ok(())) => Ok(out_rx),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(crate::Error::Storage(
-            "cross-generation streaming merge task ended before signalling readiness".to_string(),
+        Ok(Ok(())) => Ok(reader::RowScanStream::new(out_rx, task)),
+        Ok(Err(e)) => Err(MergeStreamSetupError::Construction(e)),
+        // `ready_tx` is dropped-WITHOUT-send on exactly one condition: the blocking
+        // task unwound before either readiness arm ran. So this `Err` ⟺ a dead
+        // producer — JOIN the retained handle to recover the real cause (the panic
+        // message) instead of dropping it unjoined, and report it as the
+        // fallback-INELIGIBLE variant (issue #3124, roborev).
+        Err(_) => Err(MergeStreamSetupError::ProducerDied(
+            merge_stream_setup::dead_merge_producer_error(task.await),
         )),
     }
 }
@@ -704,5 +728,4 @@ fn ordered_generation_paths(reader_list: &[Arc<reader::SSTableReader>]) -> Vec<P
 }
 
 #[cfg(test)]
-#[path = "generation_merge_tests.rs"]
-mod tests;
+mod read_shadow_tests;

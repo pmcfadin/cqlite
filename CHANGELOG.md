@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A dead producer no longer completes a query SUCCESSFULLY with a silently
+  truncated result set (#3106).** Both channel boundaries behind the
+  single-generation read path (used by the Flight `do_get` row route) treated
+  "sender dropped" as "the scan finished", so a producer thread/task that UNWOUND —
+  a panic anywhere in the walk or decode, rather than an `Err` return — ended the
+  request with **fewer rows than the table holds, no error and no log**.
+  - The query row stream's producer→consumer protocol now has an EXPLICIT terminator
+    (`Done`) and a distinct `Failed` message; a disconnect WITHOUT a terminator is an
+    `Error::Internal` naming the truncation, never a clean end of stream. The
+    producer thread additionally runs under `catch_unwind`, so a panic reaches the
+    client as an informative error carrying the panic message.
+  - The batched streaming scan's driver task is now JOINED when its channel closes
+    (`BatchedScanStream`), so a task that panicked/was cancelled surfaces as an
+    `Error::Internal` instead of an empty-but-successful end of stream. This closes
+    the same hole for the streaming `SELECT` and aggregate-fold paths, which
+    consume the same surface.
+  - Both errors are `is_recoverable() == false`: the failure is deterministic, so a
+    retry would reproduce it.
+
+- **The same hole on the multi-generation (query-engine full scan) read path (#3124).**
+  Five more producer boundaries on the ≠1-generation path discarded their task's
+  `JoinHandle` and read a closed channel as "the scan finished": the fan-out k-way
+  merge task, each per-generation per-row sub-scan, the per-row → batch re-chunker's
+  source, the windowed forwarder, and the cross-generation reconciling merge. A panic
+  in any of them returned a silently SHORT result set with no error. All five now pair
+  the channel with the producer task (the #3106 mechanism, generalised over the item
+  type as `JoinedStream<T>`), so a dead producer is an `Error`, never end-of-stream.
+  - The cross-generation reconciling merge was worse than truncation: its setup
+    reported a dead task and a genuine `KWayMerger` CONSTRUCTION failure as the SAME
+    error, and `SSTableManager::scan_stream` answers a construction failure by falling
+    back to the non-reconciling token-order concatenation. So a panic during
+    construction returned a **FULL-LENGTH, UNRECONCILED** result set — duplicated
+    overwritten rows, resurrected deleted rows — as `Ok` with only a warning. The two
+    are now distinguished at the TYPE level and only a reported construction failure is
+    eligible for that fallback; a dead producer fails the read closed, with the panic
+    message preserved.
+  - An aborted/cancelled scan producer now surfaces as `Error::Cancelled` rather than
+    the panic-flavoured internal error, so the reported cause matches what happened.
+
 - **BTI `Rows.db` row-index base + leading `NEXT_COMPONENT` byte (#3002, #3040).** Two
   defects that cancelled each other on the BTI clustering read path are corrected:
   (a) the per-partition `TrieIndexEntry`'s SIGNED root delta is now measured from
@@ -54,6 +93,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Result<ValidatedRowsTrieRoot, RowsTrieRootRejection>` instead of a bare `usize`, so
   an unvalidated row-index root cannot be traversed by accident; use
   `trie_root_offset()` / `require_trie_root()` (#3002).
+- **Breaking (API):** the batched streaming scan now returns
+  `sstable::reader::BatchedScanStream` instead of
+  `tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>` — affecting
+  `StorageEngine::scan_stream_batched`, `SSTableManager::scan_stream_batched` (both
+  feature variants) and `SSTableReader::scan_stream_batched`/`_admitted`. The new type
+  owns the scan task's `JoinHandle` so a dead task cannot masquerade as end-of-stream
+  (#3106). Its `recv()` keeps the same `async fn(&mut self) -> Option<Result<..>>`
+  shape, so the usual `while let Some(batch) = stream.recv().await` consumer compiles
+  unchanged; code that named the `Receiver` type, stored it in a struct field, or
+  called `Receiver`-specific methods (`try_recv`, `blocking_recv`, `close`) must be
+  updated.
+- **Breaking (API):** the PER-ROW streaming scan now returns
+  `sstable::reader::RowScanStream` instead of
+  `tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>` — affecting
+  `StorageEngine::scan_stream`, `SSTableManager::scan_stream` and
+  `SSTableReader::scan_stream`/`_admitted`. Same reason and same migration as the
+  batched change above (both are now aliases of one `JoinedStream<T>`, re-exported
+  together with `ScanStreamItem`): `recv()` keeps its
+  `async fn(&mut self) -> Option<Result<..>>` shape, so `while let Some(row) =
+  stream.recv().await` compiles unchanged, while code that named the `Receiver` type,
+  stored it in a field, or called `try_recv`/`blocking_recv`/`close` must be updated
+  (#3124).
 
 ## [v0.16.1] - 2026-07-23
 

@@ -77,7 +77,11 @@ with `scripts/agent-gate.sh --lite` (~1-5 min) each fix round, iterating until i
 is `LITE_COMPONENTS` in `scripts/agent-gate.sh` — read it there or run `scripts/agent-gate.sh --lite-list`
 rather than trusting a transcribed list; note lite clippy is **per-package scoped** (NOT whole-workspace)
 and lite includes **`roborev-lints`** (#2656). **NEVER invoke the full `scripts/agent-gate.sh` yourself** —
-the `flow-closer` runs the full gate of record and the final roborev pass. A subagent idle-waiting on a
+the `flow-closer` runs the full gate of record and the final roborev pass (via
+`scripts/flow/roborev-review.sh`, the only sanctioned roborev invocation — #2964; never invoke `roborev`
+directly, and never a bare `roborev review --branch`, which from a worktree reviews `origin/main` and
+reports clean having reviewed nothing). **Push your commits** — an unpushed branch is itself an empty-diff
+cause and the wrapper FAILs it. A subagent idle-waiting on a
 12-20 min full gate gets killed by the 600s stall watchdog and takes its child gate process down with it (3
 implementers lost this way 2026-07-03/04). If ever asked to run the full gate: **queued gate ≠ hung gate** —
 under load it may **queue for a #1825 slot** (prints `waiting for gate slot (N in use)…` once) then run

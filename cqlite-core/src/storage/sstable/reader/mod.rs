@@ -1,12 +1,6 @@
-//! SSTable reader implementation
-//!
-//! This module provides efficient reading of SSTable files in Cassandra 5+ format.
-//! It supports:
-//! - Block-based reading with compression
-//! - Index-based lookups for efficient queries
-//! - Memory-efficient streaming
-//! - Bloom filter integration
-//! - Multiple compression algorithms
+//! SSTable reader implementation: efficient reading of SSTable files in Cassandra 5+
+//! format — block-based reading with compression (LZ4/Snappy/Deflate/Zstd), index-based
+//! lookups, memory-efficient streaming, and bloom-filter integration.
 
 // Submodules
 mod block_io;
@@ -79,10 +73,15 @@ pub use types::{
 };
 // Re-export the within-partition clustering-slice push-down spec (Issue #954).
 pub use data_access::ClusteringSlice;
+// Streaming-scan consumer handles (#3106/#3124). The aliases name a type whose defining
+// module is NOT publicly nameable, so `JoinedStream`/`ScanStreamItem` ship with them —
+// else an external holder of a `RowScanStream` cannot name its type or see `recv()`.
+pub use data_access::joined_scan_stream::{
+    BatchedScanStream, JoinedStream, RowScanStream, ScanStreamItem,
+};
 // Token-range bound pushed into the Summary-guided streaming walk (issue #2413
 // Option A) — used by the flight warm merge to scope a split's scan.
-pub use data_access::ScanTokenBound;
-pub use data_access::{QueryRowBatch, QueryRowStream};
+pub use data_access::{QueryRowBatch, QueryRowStream, ScanTokenBound};
 // Single-partition compaction seek outcome (issue #2207). `not(tombstones)` like
 // the seek path it wraps.
 #[cfg(not(feature = "tombstones"))]

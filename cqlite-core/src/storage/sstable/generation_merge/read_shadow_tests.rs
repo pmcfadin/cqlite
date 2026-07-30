@@ -1,8 +1,14 @@
 //! Post-merge read-visibility unit pins — the `#[cfg(test)] mod tests` of
-//! `generation_merge.rs`, extracted VERBATIM to a sibling file so the parent stays
-//! under the campsite-rule size threshold (epic #1116 / #1135). Included via
-//! `#[cfg(test)] #[path = "generation_merge_tests.rs"] mod tests;`, so `super` is
-//! still the `generation_merge` module and every path resolves exactly as before.
+//! `generation_merge.rs`, extracted to a child module so the parent stays under the
+//! campsite-rule size threshold (epic #1116 / #1135). Declared as
+//! `#[cfg(test)] mod read_shadow_tests;`, so `super` is still the `generation_merge`
+//! module and every path resolves exactly as before.
+//!
+//! Merge note: issue #3094 and `origin/main`'s #3124 split independently extracted
+//! this same module — #3094 to `generation_merge_tests.rs`, #3124 to this file. The
+//! merge keeps ONE copy: main's location (named by the parent's module doc) holding
+//! #3094's superset content (main's copy was a verbatim move; #3094 additionally
+//! updated the `filter_live` call sites and added the tombstone-PRESENCE pin).
 //!
 //! Issue #1849: deterministic pins for the post-merge read-visibility filter,
 //! independent of on-disk fixtures. The end-to-end multi-generation proof lives

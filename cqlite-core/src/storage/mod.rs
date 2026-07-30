@@ -2,6 +2,20 @@
 
 /// Shared, bytes-bounded, sharded decompressed-chunk cache (issue #1567).
 pub mod cache;
+/// TEST-ONLY fault injection for the query row stream's producer boundaries
+/// (issue #3106): the deterministic seam a test uses to kill a producer
+/// thread/task mid-stream and prove the consumer fails closed instead of
+/// reporting a clean, silently truncated end of stream.
+///
+/// `pub(crate)` in a production build — the module then has NO public items at
+/// all (every arming symbol is cfg'd out), so publishing it would advertise an
+/// empty module. It becomes `pub` only where the arming surface exists, i.e. for
+/// in-crate tests and for the `producer-fault-injection` feature that
+/// `cqlite-flight` enables from its `[dev-dependencies]`.
+#[cfg(not(any(test, feature = "producer-fault-injection")))]
+pub(crate) mod producer_fault;
+#[cfg(any(test, feature = "producer-fault-injection"))]
+pub mod producer_fault;
 /// Always-on read-path ARM probes (issue #3058): explicit markers for
 /// "the k-way merge ran" vs "the single-generation query scan ran".
 pub mod read_path_probe;
@@ -498,6 +512,12 @@ impl StorageEngine {
     /// so streaming a large `SELECT *` no longer holds the entire result set in
     /// memory at once. Delegates to [`SSTableManager::scan_stream`].
     ///
+    /// Returns a [`RowScanStream`](sstable::reader::RowScanStream), not a bare
+    /// `mpsc::Receiver` (issue #3124): it owns the producer's `JoinHandle`, so a
+    /// producer that DIES mid-scan is reported as an error on `recv()` instead of a
+    /// clean end of stream that would hand the caller a silently short result set.
+    /// `recv()` has the same shape as the receiver's, so consumers are unchanged.
+    ///
     /// [`SSTableManager::scan_stream`]: sstable::SSTableManager::scan_stream
     pub async fn scan_stream(
         &self,
@@ -506,7 +526,7 @@ impl StorageEngine {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> {
+    ) -> Result<sstable::reader::RowScanStream> {
         record_table_scan_call();
         self.sstables
             .scan_stream(table_id, start_key, end_key, schema, buffer_size)
@@ -531,7 +551,7 @@ impl StorageEngine {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>> {
+    ) -> Result<sstable::reader::BatchedScanStream> {
         record_table_scan_call();
         self.sstables
             .scan_stream_batched(table_id, start_key, end_key, schema, buffer_size)

@@ -140,9 +140,13 @@ fn row_key(id: i32) -> RowKey {
     RowKey::new(pk_bytes(id))
 }
 
-/// Drain a `scan_stream` receiver into a sorted (by key bytes) Vec.
+/// Drain a `scan_stream` handle into a sorted (by key bytes) Vec.
+///
+/// Issue #3124: `scan_stream` yields a `RowScanStream` (the channel PLUS its producer
+/// task) rather than a bare `mpsc::Receiver`, so a producer that dies mid-scan is an
+/// `Err` here instead of a silently short drain. `recv()` is shape-identical.
 async fn drain_stream(
-    mut rx: tokio::sync::mpsc::Receiver<cqlite_core::Result<(RowKey, cqlite_core::ScanRow)>>,
+    mut rx: cqlite_core::storage::sstable::reader::RowScanStream,
 ) -> Vec<(Vec<u8>, cqlite_core::ScanRow)> {
     let mut out = Vec::new();
     while let Some(item) = rx.recv().await {

@@ -19,6 +19,7 @@
 //! file-size target (epic #1116).
 
 use cqlite_core::query::{build_row_from_scan_cached, PartitionKeyCache, QueryRow};
+
 use cqlite_core::storage::write_engine::merge::{MergeEntry, StreamingStep};
 use cqlite_core::storage::write_engine::DecoratedKey;
 use cqlite_core::types::ScanRow;
@@ -71,17 +72,39 @@ pub(crate) enum SourceStep {
 /// materializing, exactly as the pre-#3058 loop did, so a token-excluded
 /// partition costs no row construction (and a decode error inside one cannot
 /// surface for a partition the split does not own).
+///
+/// A source DECORATOR that materializes rows itself must therefore apply the same
+/// token predicate first, so the invariant holds for the decorated arm too —
+/// `statics::StaticMergeSource` does (issue #3095 B5), which is why a
+/// `PendingRow::Materialized` never represents a token-excluded partition's row.
 pub(crate) enum PendingRow {
     /// A reconciled k-way merge entry (multi-source arm).
     Merged(Box<MergeEntry>),
     /// A single-generation, read-shadowed scan row (single-source fast arm).
     Scanned(RowKey, ScanRow),
+    /// An ALREADY-materialized row (issue #3095): a source decorator that had to
+    /// materialize a row to make its own decision hands the finished row straight
+    /// through, so no row is ever assembled twice.
+    Materialized(Box<QueryRow>),
+    /// A row increment that yields NO output row, but still counts as an increment
+    /// of its partition (issue #3095).
+    ///
+    /// Lets a decorator swallow a row — the static row it holds back, or one whose
+    /// materialization suppressed it — without changing the drive loop's
+    /// per-partition `record_partition` accounting, which fires on every `Row`
+    /// increment regardless of whether the row survives materialization.
+    Suppressed,
 }
 
 /// Abstraction over the row SOURCE the drive loop pulls from (issue #3058).
 pub(crate) trait RowSource {
     /// Advance the source by one increment (or report completion).
-    fn next_step(&mut self) -> Result<SourceStep, cqlite_core::Error>;
+    ///
+    /// Errors are already mapped into the producer taxonomy by the source (issue
+    /// #2264: map by VARIANT, never by racing the cancel flag), so a decorator that
+    /// materializes rows can surface an assembly error without a lossy round trip
+    /// through `cqlite_core::Error`.
+    fn next_step(&mut self) -> Result<SourceStep, ProducerError>;
 }
 
 /// Adapts the k-way merge [`RowStepper`] to the arm-independent [`RowSource`],
@@ -98,8 +121,8 @@ impl<'a> MergeRowSource<'a> {
 }
 
 impl RowSource for MergeRowSource<'_> {
-    fn next_step(&mut self) -> Result<SourceStep, cqlite_core::Error> {
-        Ok(match self.stepper.step_row()? {
+    fn next_step(&mut self) -> Result<SourceStep, ProducerError> {
+        Ok(match self.stepper.step_row().map_err(map_core_error)? {
             StreamingStep::ClusterGroup { key, row } => {
                 SourceStep::Row(key, PendingRow::Merged(row))
             }
@@ -147,6 +170,20 @@ impl MergeProducer {
                 Some(&self.schema),
                 pk_cache,
             )),
+            // Issue #3095: already assembled by a source decorator.
+            PendingRow::Materialized(row) => Ok(Some(*row)),
+            // Issue #3095: an increment that yields no output row.
+            PendingRow::Suppressed => Ok(None),
         }
+    }
+}
+
+/// Map a core error into the producer taxonomy, preserving a cooperative
+/// cancellation as `Cancelled` rather than a generic merge failure (issue #2264:
+/// map by VARIANT, never by racing the cancel flag).
+pub(crate) fn map_core_error(e: cqlite_core::Error) -> ProducerError {
+    match e {
+        cqlite_core::Error::Cancelled => ProducerError::Cancelled,
+        other => ProducerError::Merge(other),
     }
 }

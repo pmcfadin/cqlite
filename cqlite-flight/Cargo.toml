@@ -83,7 +83,16 @@ dhat-heap = []
 # estimator's conservatism contract is validated against — rather than a
 # hand-written subset, which is how the slack under-count reached a fail-closed
 # runtime check. Dev-only: `cargo build -p cqlite-flight` does not compile it.
-cqlite-core = { path = "../cqlite-core", features = ["arrow", "arrow-shape-corpus"] }
+# `producer-fault-injection` (issue #3106) additionally enables the TEST-ONLY
+# `storage::producer_fault` arming API, so `issue_3106_producer_panic_fails_closed`
+# can kill the single-source query row stream's producer thread mid-`do_get` and
+# prove the RPC fails closed instead of completing with a truncated result set.
+# Dev-only: `cargo build -p cqlite-flight` does not compile either flag.
+cqlite-core = { path = "../cqlite-core", features = [
+    "arrow",
+    "arrow-shape-corpus",
+    "producer-fault-injection",
+] }
 tempfile = { workspace = true }
 # `test-util` enables the paused/auto-advancing Tokio clock (`tokio::time::pause`)
 # so the #2420 admission-control tests drive the permit-wait timeout
