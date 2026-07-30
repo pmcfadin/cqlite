@@ -40,6 +40,9 @@ pub mod obs_subphase;
 pub mod pathsafe;
 pub mod point_read;
 pub mod producer;
+// The BUFFERED (whole-partition) drive loops — campsite split of `producer.rs`
+// (epic #1116); sibling of `producer_stream`'s row-granular loop.
+mod producer_drive;
 mod producer_point;
 mod producer_stream;
 mod producer_warm;
