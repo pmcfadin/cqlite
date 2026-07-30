@@ -531,17 +531,6 @@ fact() { sed -n "s/^$1=//p" "$FACTS_FILE" | head -1; }
 # the transcript alone, tier 2 to UNAVAILABLE, model to UNCONFIRMED) — the same
 # "silently disarmable" class as the token-shape drift.
 # So POLL, bounded, until the fields the asserts need are present.
-read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FILE
-  local show_json list_json
-  show_json=$(roborev show "$1" --json 2>/dev/null || printf '')
-  if ! extract_job_facts "$1" "$show_json" "$FACTS_FILE" "$PROMPT_FILE"; then
-    list_json=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '')
-    extract_job_facts "$1" "$list_json" "$FACTS_FILE" "$PROMPT_FILE" || return 1
-  fi
-  return 0
-}
-
-# REQUIRED to stop polling: the fields without which an assert cannot run at all.
 record_required_present() {
   local status
   [ -n "$(fact git_ref)" ] || return 1
@@ -558,6 +547,40 @@ record_complete() {
   return 0
 }
 
+# TWO SOURCES, DIFFERENT SHAPES — try both and keep the one that actually answers
+# (MEASURED, issue #2964 round 5). `roborev show <job> --json` returns the REVIEW row:
+# a parseable object carrying id/agent/prompt but NO git_ref, NO status, NO verdict and
+# NO token_usage. `roborev list --json` returns the JOB row, which has all of them.
+# Accepting the first payload that merely PARSED meant the richer source was never
+# consulted, and the record looked permanently incomplete — which read as an async lag
+# and silently downgraded sha-assert, tier 2 and model on every real run. So a source
+# only counts when it yields the fields the asserts require.
+read_job_record() { # read_job_record <job> -> populates FACTS_FILE / PROMPT_FILE
+  local payload best_facts="$FACTS_FILE.candidate"
+  : >"$best_facts"
+  for payload in show list; do
+    local json=""
+    case "$payload" in
+      show) json=$(roborev show "$1" --json 2>/dev/null || printf '') ;;
+      list) json=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '') ;;
+    esac
+    extract_job_facts "$1" "$json" "$FACTS_FILE" "$PROMPT_FILE" || continue
+    if record_required_present; then
+      rm -f "$best_facts"
+      return 0
+    fi
+    # Keep the poorer payload only as a last resort, so nothing is LOST if no source is
+    # complete, but never let it shadow a source that has the required fields.
+    cp "$FACTS_FILE" "$best_facts"
+  done
+  if [ -s "$best_facts" ]; then
+    cp "$best_facts" "$FACTS_FILE"
+  fi
+  rm -f "$best_facts"
+  return 1
+}
+
+# REQUIRED to stop polling: the fields without which an assert cannot run at all.
 if [ "$announce_ok" -eq 1 ]; then
   record_polls=0
   token_grace_used=0

@@ -67,7 +67,9 @@ trap 'rm -rf "$tmp"' EXIT
 #                        wrapper's bounded poll for the ASYNCHRONOUSLY written record
 #                        can be exercised (counter kept in $STUB_INVOKED.reads)
 #   STUB_HAS_TOKEN_DATA  emit a has_token_data field with this value (true/false)
-#   STUB_SHOW_JSON       `none` => `show --json` returns null, forcing the
+#   STUB_SHOW_JSON       `none` => `show --json` returns null; `review-row` => it
+#                        returns the REAL review-row shape (id/prompt, no git_ref or
+#                        status), forcing the richer `list --json` source; otherwise the
 #                        `list --json` fallback path
 #   STUB_INVOKED         file the stub appends its argv to (empty => never run)
 # ---------------------------------------------------------------------------
@@ -128,6 +130,13 @@ case "$cmd" in
     esac
     record_read_blank && { printf 'null\n'; exit 0; }
     [ "${STUB_SHOW_JSON:-object}" != none ] || { printf 'null\n'; exit 0; }
+    if [ "${STUB_SHOW_JSON:-object}" = review-row ]; then
+      # The REAL `show --json` shape: the REVIEW row — id/agent/prompt, and no
+      # git_ref / status / verdict / token_usage.
+      printf '{"id":%s,"job_id":%s,"agent":"codex","prompt":"%s"}\n' \
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_PROMPT:-}"
+      exit 0
+    fi
     emit_job_object; printf '\n'
     exit 0
     ;;
@@ -1353,6 +1362,25 @@ run_wrapper "$work"
 assert_verdict 'case (x7)' FAIL 1
 assert_says 'case (x7) the mismatched record was refused' '^job-record: DEGRADED'
 assert_says 'case (x7) sha-assert refuses to certify' '^sha-assert: FAIL \(job record unavailable — reviewed range unverifiable\)$'
+fi  # HAVE_PYTHON3
+
+if [ "$HAVE_PYTHON3" -eq 1 ]; then
+printf '== case (x8): `show --json` returns the REVIEW row; `list --json` must be used ==\n'
+reset_stub
+# MEASURED on the live probe: `roborev show <job> --json` returns the REVIEW row —
+# parseable, with id/agent/prompt but NO git_ref, status, verdict or token_usage. The
+# wrapper used to accept the first payload that merely PARSED, so the richer `list
+# --json` source was never consulted and the record looked permanently incomplete,
+# silently downgrading sha-assert, tier 2 and model on every real run.
+work=$(make_fixture case_x8 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_SHOW_JSON=review-row
+run_wrapper "$work"
+assert_verdict 'case (x8)' PASS 0
+assert_says 'case (x8) the richer source was used' '^job-record: PASS$'
+assert_says 'case (x8) the range oracle worked' '^sha-assert: PASS$'
+assert_says 'case (x8) tokens came from the job row' '^vacuity-tier2: PASS$'
+assert_says 'case (x8) the model was confirmed' '^model: gpt-5\.6-sol$'
 fi  # HAVE_PYTHON3
 
 printf '== case (w): a MISSING oracles file FAILs closed, never silently no-ops ==\n'
