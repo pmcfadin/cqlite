@@ -980,3 +980,136 @@ async fn merge_arm_query_fallback_no_summary_honours_caller_schema_clustering() 
          got {cols_none:?}"
     );
 }
+
+/// Issue #3097: the WARM merge arm's DEGENERATE fallback — taken when BOTH
+/// `Summary.db` AND `Index.db` are absent, so
+/// `stream_all_partitions_cancellable` finds `index_reader.is_none()`, skips the
+/// full-index route entirely, and delegates to the MATERIALISING `sequential_scan`
+/// of Data.db — must ALSO honour the caller's authoritative schema. The sibling
+/// `merge_arm_query_fallback_no_summary_honours_caller_schema_clustering` removes
+/// only `Summary.db`, so it exercises the FULL-INDEX fallback branch (Index.db
+/// still present); this case removes Index.db too, forcing the sequential-scan
+/// branch — the `sequential_scan(&table_id, …, caller_schema.or(self.schema), …)`
+/// seam the #3097 fix threads the caller schema through.
+///
+/// Pins that `stream_all_partitions_for_query(Some(schema), …)` surfaces the
+/// clustering column under the caller's real name `ck` through the sequential
+/// scan, and with `None` still falls back to the reader-derived placeholder —
+/// proving the parameter (not the bytes) governs. Would FAIL if the sequential
+/// branch resolved the decode schema from the reader alone (pre-#3097).
+#[cfg(all(feature = "write-support", feature = "lz4"))]
+#[tokio::test]
+async fn merge_arm_query_sequential_fallback_no_summary_no_index_honours_caller_schema_clustering()
+{
+    use std::collections::BTreeSet;
+    use std::ops::ControlFlow;
+
+    use super::compaction_row::{CompactionRow, CompactionRowData};
+    use crate::storage::scan_cancel::ScanCancel;
+
+    let (_temp, data_path, schema) = build_uncompressed_classified_clustered_fixture().await;
+
+    // Force the SEQUENTIAL-SCAN fallback: remove BOTH the `Summary.db` (so the
+    // summary-guided walk never fires) AND the `Index.db` (so
+    // `stream_all_partitions_cancellable` finds `index_reader.is_none()` and skips
+    // the full-index route, delegating straight to `sequential_scan`).
+    for suffix in ["-Summary.db", "-Index.db"] {
+        let sibling = data_path.with_file_name(
+            data_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .expect("data file name")
+                .replace("-Data.db", suffix),
+        );
+        if sibling.exists() {
+            std::fs::remove_file(&sibling)
+                .unwrap_or_else(|e| panic!("remove {suffix} to force sequential fallback: {e}"));
+        }
+    }
+
+    let reader = open_reader(&data_path)
+        .await
+        .expect("open fixture reader without Summary.db/Index.db");
+
+    // Preconditions: the non-stitching V5_0Uncompressed branch, no usable
+    // Summary.db, AND no Index.db — so the query arm skips both the summary-guided
+    // walk and the full-index fallback, genuinely exercising the sequential-scan
+    // route this test covers (fail LOUD if any precondition regresses, so the pin
+    // can never pass vacuously via a different route).
+    assert!(
+        !reader.requires_chunk_stitching(),
+        "fixture must classify as the non-stitching V5_0Uncompressed branch"
+    );
+    assert!(
+        reader.compression_info.is_none() && reader.bti_partitions_db.is_none(),
+        "fixture must be an uncompressed BIG reader (no CompressionInfo.db, no BTI)"
+    );
+    assert!(
+        reader
+            .summary_reader
+            .as_ref()
+            .map(|s| s.get_entries().is_empty())
+            .unwrap_or(true),
+        "Summary.db must be absent/empty so the summary-guided walk is skipped"
+    );
+    assert!(
+        reader.index_reader.is_none(),
+        "Index.db must be absent so `stream_all_partitions_cancellable` skips the \
+         full-index route and takes the SEQUENTIAL-SCAN fallback under test"
+    );
+
+    async fn columns_seen(
+        reader: &SSTableReader,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> (usize, BTreeSet<String>) {
+        let cancel = ScanCancel::default();
+        let mut rows = 0usize;
+        let mut cols = BTreeSet::new();
+        reader
+            .stream_all_partitions_for_query(schema, &cancel, None, |r: CompactionRow| {
+                rows += 1;
+                if let CompactionRowData::Live { simple, .. } = &r.row_data {
+                    for c in simple {
+                        cols.insert(c.column.clone());
+                    }
+                }
+                Ok(ControlFlow::Continue(()))
+            })
+            .await
+            .expect("sequential-scan fallback merge-arm query stream");
+        (rows, cols)
+    }
+
+    let (rows_with, cols_with) = columns_seen(&reader, Some(&schema)).await;
+    let (rows_none, cols_none) = columns_seen(&reader, None).await;
+
+    assert_eq!(
+        rows_with, 400,
+        "the sequential fallback must emit exactly one row per fixture partition — \
+         a zero/short result is a failure, not a vacuous pass"
+    );
+    assert_eq!(
+        rows_none, 400,
+        "the None-schema sequential fallback must emit every row too"
+    );
+
+    // The FIX: the caller schema wins through the sequential scan too.
+    assert!(
+        cols_with.contains("ck"),
+        "the sequential fallback must decode the clustering column under the \
+         caller's authoritative name `ck` (issue #3097); got {cols_with:?}"
+    );
+    assert!(
+        !cols_with.contains("clustering_key"),
+        "the sequential fallback must NOT surface the placeholder `clustering_key` \
+         when the caller supplied a real schema; got {cols_with:?}"
+    );
+
+    // Fallback preserved: with NO caller schema the reader-derived placeholder
+    // still governs, proving the PARAMETER changed the outcome, not the bytes.
+    assert!(
+        cols_none.contains("clustering_key") && !cols_none.contains("ck"),
+        "with no caller schema the reader-derived placeholder must still apply; \
+         got {cols_none:?}"
+    );
+}
