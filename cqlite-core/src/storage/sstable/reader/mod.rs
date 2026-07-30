@@ -83,6 +83,10 @@ pub use data_access::ClusteringSlice;
 // Option A) — used by the flight warm merge to scope a split's scan.
 pub use data_access::ScanTokenBound;
 pub use data_access::{batched_scan_stream::BatchedScanStream, QueryRowBatch, QueryRowStream};
+// Per-row streaming-scan handle (issue #3124): the per-row surface's channel PLUS
+// its producer task, so a producer that DIES mid-scan is an error rather than a
+// silently short result set.
+pub use data_access::joined_scan_stream::RowScanStream;
 // Single-partition compaction seek outcome (issue #2207). `not(tombstones)` like
 // the seek path it wraps.
 #[cfg(not(feature = "tombstones"))]

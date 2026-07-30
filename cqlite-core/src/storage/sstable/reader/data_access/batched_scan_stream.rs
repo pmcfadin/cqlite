@@ -33,144 +33,32 @@
 //! `async fn(&mut self) -> Option<Result<Vec<(RowKey, ScanRow)>>>` shape
 //! `mpsc::Receiver::recv` had, so every `while let Some(batch) = stream.recv().await`
 //! loop keeps working — and now fails closed.
+//!
+//! # Where the mechanism lives now (issue #3124)
+//!
+//! Issue #3124 found the SAME discarded-`JoinHandle` hole on four more boundaries of
+//! the ≠1-generation (query-engine full scan) path, whose channels carry PER-ROW
+//! items rather than batches. Rather than clone this protocol, the state machine was
+//! generalised over the item type into
+//! [`joined_scan_stream::JoinedStream`](super::joined_scan_stream::JoinedStream);
+//! `BatchedScanStream` is now the batch-item instantiation of it and
+//! [`RowScanStream`](super::joined_scan_stream::RowScanStream) the per-row one, so
+//! there is ONE implementation of "a channel close is joined, not assumed" for every
+//! streaming scan surface. This module keeps the batched surface's name, its
+//! documented boundary, and the reader-side helpers below.
 
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-
+use super::joined_scan_stream::JoinedStream;
 use super::super::SSTableReader;
 use crate::types::{ScanRow, TableId};
-use crate::{Error, Result, RowKey};
+use crate::{Result, RowKey};
 
-/// Consumer handle for the batched streaming scan: the batch channel PLUS the
-/// driver task that feeds it, so end-of-stream is an observed fact.
+/// The batched streaming scan's consumer handle: the batch channel PLUS the driver
+/// task that feeds it, so end-of-stream is an observed fact (issue #3106).
 ///
-/// Dropping it drops the receiver, which makes the driver task's next send fail
-/// and unwinds it cooperatively (the pre-existing backpressure/teardown
-/// behaviour); the task is deliberately NOT joined on drop, so an abandoned scan
-/// never blocks the consumer.
-pub struct BatchedScanStream {
-    rx: mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>,
-    /// What is KNOWN about the driver task. See [`TaskState`] — the point of the
-    /// enum is that there is no representable "the handle is gone and I never saw
-    /// a verdict" state to accidentally read as success.
-    task: TaskState,
-}
-
-/// What [`BatchedScanStream`] knows about its driver task (issue #3106, roborev).
-///
-/// Modelled as a state machine rather than `Option<JoinHandle>` + a `died` flag
-/// because that pair had an UNREPRESENTED third state — handle taken, verdict not
-/// yet observed — which a cancelled join produced and which then read as a clean
-/// end of stream. Here every state either OWNS the handle (so the join can still
-/// be completed later) or carries an observed verdict.
-enum TaskState {
-    /// Not yet joined; the handle is still owned HERE. A cancelled `recv` leaves
-    /// the stream in this state, so the next `recv` can still join.
-    Running(JoinHandle<()>),
-    /// Joined, and the join returned `Ok(())`: the scan PROVABLY ran to
-    /// completion. The only state from which end-of-stream is reported.
-    Finished,
-    /// Joined, and the join returned a `JoinError` (panic or abort). STICKY: every
-    /// later `recv` re-reports the failure, mirroring the sibling boundary
-    /// (`QueryRowStream::terminated`), so a retrying consumer — this is public API,
-    /// returned by `SSTableManager`/`StorageEngine::scan_stream_batched` — can
-    /// never downgrade a dead task to a clean end of stream.
-    Died,
-}
-
-impl BatchedScanStream {
-    /// Pair a batch channel with the task that drives it.
-    pub(in crate::storage::sstable) fn new(
-        rx: mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>,
-        task: JoinHandle<()>,
-    ) -> Self {
-        Self {
-            rx,
-            task: TaskState::Running(task),
-        }
-    }
-
-    /// Next batch, or `None` at a PROVEN-clean end of stream.
-    ///
-    /// When the channel closes, the driver task is joined: a task that returned
-    /// normally yields `None` (the scan really finished), while a task that DIED
-    /// — panicked, or was cancelled/aborted — yields `Some(Err(..))`. That is the
-    /// whole point: a dead producer must never be indistinguishable from a
-    /// finished one (issue #3106).
-    ///
-    /// A dead task is STICKY: every subsequent call re-reports the failure, so
-    /// polling again can never downgrade it to a clean end of stream.
-    ///
-    /// # Cancellation safety (issue #3106, roborev)
-    ///
-    /// This method is cancel-safe in the way that matters here: cancelling it
-    /// (`tokio::select!`, `timeout`, …) while it is awaiting the JOIN must not
-    /// lose the task's verdict. The handle is therefore polled IN PLACE — it is
-    /// never moved out of `self` before a result is observed — so a cancelled
-    /// `recv` leaves the stream in [`TaskState::Running`] and the next `recv`
-    /// simply joins again. Moving the handle out first (`self.task.take()?`) is
-    /// exactly what reintroduced the #3106 defect: the dropped handle DETACHED the
-    /// task, no verdict was ever recorded, and the following `recv` short-circuited
-    /// to a clean end of stream for a task that may have panicked.
-    pub async fn recv(&mut self) -> Option<Result<Vec<(RowKey, ScanRow)>>> {
-        if let TaskState::Died = self.task {
-            return Some(Err(dead_scan_task_error_after_report()));
-        }
-        if let Some(item) = self.rx.recv().await {
-            return Some(item);
-        }
-        // Channel closed: the driver dropped its sender. Join it to learn WHY.
-        let outcome = match &mut self.task {
-            // `JoinHandle: Future + Unpin`, so `&mut JoinHandle` is itself a
-            // future: awaiting it polls the join WITHOUT taking ownership. A
-            // cancellation here drops only this borrow.
-            TaskState::Running(handle) => handle.await,
-            // A proven-clean completion is the ONLY route to end-of-stream.
-            TaskState::Finished => return None,
-            TaskState::Died => return Some(Err(dead_scan_task_error_after_report())),
-        };
-        // No `.await` between observing the outcome and recording it, so the
-        // verdict cannot be lost to a cancellation.
-        match outcome {
-            Ok(()) => {
-                self.task = TaskState::Finished;
-                None
-            }
-            Err(join_err) => {
-                self.task = TaskState::Died;
-                Some(Err(dead_scan_task_error(&join_err)))
-            }
-        }
-    }
-}
-
-/// The fail-closed error for a batched-scan driver task that died without
-/// reporting (issue #3106).
-///
-/// [`Error::Internal`] (not `Corruption`, not `Storage`): nothing suggests the
-/// `Data.db` is bad — an internal invariant was violated — and `Internal` is
-/// `is_recoverable() == false`, which is honest for a deterministic failure that
-/// a retry would reproduce. The panic message is carried in the payload so the
-/// failure is diagnosable rather than anonymous.
-fn dead_scan_task_error(join_err: &tokio::task::JoinError) -> Error {
-    Error::internal(format!(
-        "batched scan stream: the scan task DIED without reporting ({join_err}) — \
-         the result set is TRUNCATED and cannot be reported as a complete scan \
-         (issue #3106)"
-    ))
-}
-
-/// Re-report for a consumer that keeps polling after the dead-task error. The
-/// `JoinError` is consumed by the join, so this restates the verdict rather than
-/// re-deriving it — what matters is that it is still an ERROR, never a clean end
-/// of stream.
-fn dead_scan_task_error_after_report() -> Error {
-    Error::internal(
-        "batched scan stream: the scan task DIED without reporting (already \
-         reported) — the result set is TRUNCATED and cannot be reported as a \
-         complete scan (issue #3106)",
-    )
-}
+/// See [`JoinedStream`] for the state machine, the cancellation-safety contract and
+/// the fail-closed error; this alias only fixes the channel's item type to a BATCH
+/// of `(RowKey, ScanRow)`.
+pub type BatchedScanStream = JoinedStream<Vec<(RowKey, ScanRow)>>;
 
 impl SSTableReader {
     /// Open the batched streaming scan's cursor — the FIRST thing the driver task
@@ -210,6 +98,8 @@ impl SSTableReader {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc;
+
     use super::*;
 
     /// Issue #3106: a driver task that DIED is reported as an error, and that
