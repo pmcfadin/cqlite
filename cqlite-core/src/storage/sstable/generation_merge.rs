@@ -574,8 +574,8 @@ fn push_metadata_rows(
 /// streaming, so the caller can FALL BACK to the lazy per-reader streaming merge on
 /// a construction error exactly as the materializing `scan` falls back to
 /// concatenation. A runtime `step()` error mid-stream is delivered as an `Err`
-/// item on the channel (the consumer sees it), matching the lazy path's read-error
-/// behaviour.
+/// item on the channel (the consumer sees it); a task that DIES instead of reporting
+/// is caught by the returned [`reader::RowScanStream`]'s join (issue #3124).
 ///
 /// This is a deliberate, documented error-path asymmetry (issue #1579): the
 /// caller's fallback-to-concatenation only ever applies to the CONSTRUCTION
@@ -605,13 +605,6 @@ pub(super) async fn stream_generations_for_read(
     let (ready_tx, ready_rx) = oneshot::channel::<Result<()>>();
     let (out_tx, out_rx) = mpsc::channel::<Result<(RowKey, ScanRow)>>(buffer_size.max(1));
 
-    // Issue #3124: the merge task's `JoinHandle` is RETAINED and handed to the
-    // returned `RowScanStream`. A `spawn_blocking` closure that PANICS (a decode
-    // bug inside `KWayMerger::step`, say) drops `out_tx` with no error and no
-    // terminator, and every consumer of this channel — the query engine's
-    // multi-generation full scan — used to read that as "the merge finished" and
-    // return FEWER ROWS WITH NO ERROR. Joining on channel close makes a dead
-    // merge an `Error::Internal` instead.
     let task = tokio::task::spawn_blocking(move || {
         // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());

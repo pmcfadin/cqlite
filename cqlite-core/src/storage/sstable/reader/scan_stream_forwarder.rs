@@ -2,7 +2,7 @@
 //!
 //! # The boundary this closes
 //!
-//! The windowed streaming scan ([`super::scan_stream_windowed`]) is a three-hop
+//! The windowed streaming scan ([`super`] = `scan_stream_windowed`) is a three-hop
 //! pipeline: an I/O + decode feed → a blocking stitch+parse task → this forwarder,
 //! which adapts the parse half's internal `Vec`-batched channel to the caller's
 //! chosen public surface (per-row flatten or batched straight-through, issue #1592).
@@ -35,7 +35,7 @@
 
 use tokio::task::{JoinError, JoinHandle};
 
-use super::scan_stream_windowed::WindowedOut;
+use super::WindowedOut;
 use crate::storage::producer_fault::{FaultScope, ScanTaskSite};
 use crate::types::ScanRow;
 use crate::{Error, Result, RowKey};

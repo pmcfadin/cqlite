@@ -49,9 +49,6 @@ mod prefetch_window;
 // sync-fallback registry-schema pre-resolution (issue #1692)
 #[cfg(feature = "state_machine")]
 mod registry_schema;
-// The windowed scan's forwarder task + its join verdict (issue #3124, site 4):
-// a forwarder that DIES must fail the scan, not end it cleanly.
-mod scan_stream_forwarder;
 // Windowed streaming-scan driver (issue #1143); `pub` ONLY under non-default
 // `scan-offload-probe` so the #1143 guard reaches its probe, else private.
 #[cfg(not(feature = "scan-offload-probe"))]
@@ -84,12 +81,8 @@ pub use types::{
 pub use data_access::ClusteringSlice;
 // Token-range bound pushed into the Summary-guided streaming walk (issue #2413
 // Option A) — used by the flight warm merge to scope a split's scan.
-pub use data_access::ScanTokenBound;
-pub use data_access::{batched_scan_stream::BatchedScanStream, QueryRowBatch, QueryRowStream};
-// Per-row streaming-scan handle (issue #3124): the per-row surface's channel PLUS
-// its producer task, so a producer that DIES mid-scan is an error rather than a
-// silently short result set.
-pub use data_access::joined_scan_stream::RowScanStream;
+pub use data_access::joined_scan_stream::{BatchedScanStream, RowScanStream};
+pub use data_access::{QueryRowBatch, QueryRowStream, ScanTokenBound};
 // Single-partition compaction seek outcome (issue #2207). `not(tombstones)` like
 // the seek path it wraps.
 #[cfg(not(feature = "tombstones"))]

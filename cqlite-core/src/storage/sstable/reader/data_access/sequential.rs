@@ -14,8 +14,7 @@
 use super::super::scan_stream_windowed::scan_admission::{self, ScanAdmission};
 use super::super::scan_stream_windowed::{WindowedOut, BATCH_EMIT_ROWS};
 use super::super::SSTableReader;
-use super::batched_scan_stream::BatchedScanStream;
-use super::joined_scan_stream::RowScanStream;
+use super::joined_scan_stream::{BatchedScanStream, RowScanStream};
 use super::model::{
     sort_by_token_order, sort_by_token_order_with_meta, table_ids_match, SCAN_FOR_KEY_CALLS,
 };
@@ -303,228 +302,6 @@ impl SSTableReader {
         results.retain(|(_tid, _key, value)| self.filter_tombstone(value));
 
         Ok(results)
-    }
-
-    /// Streaming scan (issue #790): yield `(RowKey, ScanRow)` entries lazily
-    /// through a bounded channel instead of materializing the whole result in a
-    /// `Vec`. Live heap is bounded by `buffer_size` rows (plus the stitched
-    /// data-section buffer) rather than growing O(rows).
-    ///
-    /// Entries are yielded in on-disk order — token order for a single SSTable —
-    /// matching the order of the materializing [`scan`](Self::scan) path. The
-    /// bounded channel applies backpressure: parsing pauses when the consumer
-    /// falls behind and stops entirely if the consumer is dropped.
-    ///
-    /// In-flight bound (chunk-stitching SSTables): the windowed pipeline (issue
-    /// #1143) materializes one confirmed partition at a time and batches its rows to
-    /// amortize the cross-thread wake, so against a stalled consumer the resident
-    /// `(RowKey, ScanRow)` count is the SUM of three inherent terms, not one constant:
-    /// `buffer_size` (this channel) `+ max_partition_size` (the one fully-materialized
-    /// confirmed partition — a pre-existing #1156 windowed-scan term, inherent to any
-    /// row-materializing partition scan) `+`
-    /// [`MAX_INFLIGHT_BATCH_ROWS`](super::super::scan_stream_windowed::MAX_INFLIGHT_BATCH_ROWS)
-    /// (the FIXED, BOUNDED amount the issue-#1143 batching subsystem may run ahead,
-    /// regardless of `buffer_size`, holding even for `buffer_size == 1`).
-    /// `MAX_INFLIGHT_BATCH_ROWS` bounds the batching subsystem alone, NOT the
-    /// `max_partition_size` materialization term. Non-stitching SSTables parse a
-    /// whole block before forwarding its rows, so the resident `(RowKey, ScanRow)`
-    /// count is bounded by `buffer_size + (one parsed block's entries)`.
-    pub fn scan_stream(
-        self: std::sync::Arc<Self>,
-        table_id: TableId,
-        start_key: Option<RowKey>,
-        end_key: Option<RowKey>,
-        schema: Option<crate::schema::TableSchema>,
-        buffer_size: usize,
-    ) -> RowScanStream {
-        // A directly-invoked reader scan is a top-level scan OPERATION: acquire one
-        // admission permit (issue #1594). Callers that fan out to multiple readers
-        // (`SSTableManager::scan_stream`) instead hold ONE permit for the whole
-        // operation and open each sub-scan `Exempt` via `scan_stream_admitted`.
-        self.scan_stream_admitted(
-            table_id,
-            start_key,
-            end_key,
-            schema,
-            buffer_size,
-            ScanAdmission::Acquire,
-        )
-    }
-
-    /// [`scan_stream`](Self::scan_stream) with an explicit admission context
-    /// (issue #1594). Admission is per top-level scan OPERATION: a cross-generation
-    /// fan-out merge passes [`ScanAdmission::Exempt`] for each sub-scan while
-    /// holding ONE permit for the whole operation, so a single query's fan-out to
-    /// `N > cap` generations can never hold-and-wait on itself (the deadlock a
-    /// per-sub-scan permit introduced). A direct scan passes
-    /// [`ScanAdmission::Acquire`].
-    pub(crate) fn scan_stream_admitted(
-        self: std::sync::Arc<Self>,
-        table_id: TableId,
-        start_key: Option<RowKey>,
-        end_key: Option<RowKey>,
-        schema: Option<crate::schema::TableSchema>,
-        buffer_size: usize,
-        admission: ScanAdmission,
-    ) -> RowScanStream {
-        let (tx, rx) = mpsc::channel(buffer_size.max(1));
-        // Issue #3124 (site 2): the task's `JoinHandle` is RETAINED, not discarded.
-        // This task is the per-generation producer a fan-out k-way merge primes a
-        // head from; before this, a task that UNWOUND (a decode panic, an abort)
-        // dropped `tx` with no error and no terminal item, the merge read that close
-        // as "this generation is exhausted", and the query returned FEWER ROWS WITH
-        // NO ERROR. `RowScanStream` joins the handle on channel close, so a dead
-        // producer is an `Err`, never a clean end of stream.
-        let task = tokio::spawn(async move {
-            if let Err(e) = self
-                .run_scan_stream(table_id, start_key, end_key, schema, tx.clone(), admission)
-                .await
-            {
-                // Surface the error to the consumer as a terminal stream item.
-                let _ = tx.send(Err(e)).await;
-            }
-        });
-        RowScanStream::new(rx, task)
-    }
-
-    async fn run_scan_stream(
-        self: std::sync::Arc<Self>,
-        table_id: TableId,
-        start_key: Option<RowKey>,
-        end_key: Option<RowKey>,
-        schema: Option<crate::schema::TableSchema>,
-        tx: mpsc::Sender<Result<(RowKey, ScanRow)>>,
-        admission: ScanAdmission,
-    ) -> Result<()> {
-        // Admission control (issue #1594, F4): a top-level scan operation acquires
-        // ONE blocking-pool permit here, at the top, BEFORE opening the cursor or
-        // spawning any `spawn_blocking` work, and holds it via this RAII guard for
-        // the whole scan (released on every exit — success, error, cancellation).
-        // A fan-out merge's sub-scan is `Exempt` (the merge holds the operation's
-        // single permit), so it acquires none — a fan-out to `N > cap` generations
-        // can never hold-and-wait on itself. No other permit/lock is held while
-        // awaiting admission, so this single-permit acquisition cannot deadlock.
-        let _admission = match admission {
-            ScanAdmission::Acquire => Some(scan_admission::admit().await),
-            ScanAdmission::Exempt => None,
-        };
-
-        // Issue #3124 (site 2): the ONE test-only fault checkpoint for this task,
-        // placed ABOVE every format branch (BTI trie walk, windowed stitch,
-        // block-by-block) so killing it reproduces the "sender dropped with no error
-        // and no terminator" condition for ANY reader — a checkpoint inside one
-        // branch would silently not fire for the other formats. The join that
-        // catches it wraps the whole task, so the property proven is
-        // branch-agnostic. Compiles to nothing in a production build.
-        crate::storage::producer_fault::scan_task_checkpoint(
-            crate::storage::producer_fault::ScanTaskSite::PerRowScan,
-            || self.file_path(),
-        );
-
-        // Issue #1577 (owner-chosen fix, 2026-07-06): BTI (`da`) readers MUST use
-        // the SAME per-reader decode path `SSTableReader::scan` uses — the trie-walk
-        // `bti_scan_with_metadata` — NOT the block-by-block `read_next_block` +
-        // `parse_block_entries_with_schema` decoder below. The block-by-block path
-        // diverges for BTI: it can under/over-produce, reorder, or (as here) fail
-        // outright ("Blob fallback not allowed for V5_0Bti"), while D1's LIMIT
-        // pushdown (`capped_fallback_scan`) trusts the streamed first-`cap` rows to
-        // be byte-identical to `scan`'s first-`cap` rows. Driving the identical
-        // authoritative decoder makes `scan_stream` PREFIX-AUTHORITATIVE with `scan`
-        // for BTI BY CONSTRUCTION (same rows, same `sort_by_token_order`, same
-        // key-range + `filter_tombstone` filtering — all applied INSIDE
-        // `bti_scan_with_metadata`), so no runtime reconcile against `scan` is
-        // needed. This gates on the SAME `self.bti_partitions_db.is_some()`
-        // condition `scan` uses, so the two can never disagree on which readers are
-        // BTI. BTI decode fully materializes the (small, index-less) reconciled
-        // table before streaming — mirrored by `scan_stream_materializes` returning
-        // `true` for BTI, so a bounded LIMIT consumer charges the true decoded count
-        // rather than assuming a lazy decode-stop.
-        if self.bti_partitions_db.is_some() {
-            let entries = self
-                .bti_scan_with_metadata(
-                    start_key.as_ref(),
-                    end_key.as_ref(),
-                    None,
-                    schema.as_ref(),
-                    true,
-                )
-                .await?;
-            for (entry_key, entry_value, _meta) in entries {
-                // `bti_scan_with_metadata` already applied the key-range and
-                // tombstone filters and token-ordered the rows; forward as-is so
-                // the stream is byte-identical to `scan`'s BTI path.
-                if tx.send(Ok((entry_key, entry_value))).await.is_err() {
-                    return Ok(()); // consumer dropped
-                }
-            }
-            return Ok(());
-        }
-
-        // Issue #815: independent per-scan cursor — no cross-scan serialization.
-        // Issue #1577 (rust-reviewer nit): created only for the non-BTI path — the
-        // BTI branch above mints its own cursor inside `bti_scan_with_metadata` and
-        // returned already, so opening+seeking one here for BTI was a wasted
-        // open(2)+seek. Mirrors how `scan`/`get_all_entries`/`scan_with_cell_metadata`
-        // gate cursor creation after their BTI early-return.
-        let cursor = self.new_scan_cursor().await?;
-
-        // Position at the start of the data section (mirrors sequential_scan).
-        let header_size = self.calculate_header_size();
-        {
-            let mut file_guard = cursor.file.lock().await;
-            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
-        }
-
-        if self.requires_chunk_stitching() {
-            // Issue #1143: SLIDING-WINDOW stitch+parse on a bounded blocking->async
-            // pipeline instead of stitching the ENTIRE Data.db into one growing
-            // `Vec<u8>` before parsing (which thrashed the allocator and blew up
-            // read p99 under concurrent write load). Keeps only a `window` bounded
-            // by `max_partition_size + one_chunk`. Same bounded driver as the
-            // compaction read path (issue #827); scan output (key-range + tombstone
-            // + `table_ids_match` filters, dropped timestamp) is parity-identical to
-            // `parse_stitched_stream`. Full rationale + the in-flight batching bound
-            // live in the `scan_stream_windowed` module docs.
-            self.run_scan_stream_windowed(
-                table_id,
-                start_key,
-                end_key,
-                schema,
-                &cursor,
-                None,
-                WindowedOut::PerRow(tx.clone()),
-            )
-            .await
-        } else {
-            // Non-stitching formats already read block-by-block; emit per block so
-            // only one block's entries are live at a time.
-            while let Some(block) = self.read_next_block(&cursor).await? {
-                let entries =
-                    self.parse_block_entries_with_schema(&block, schema.as_ref(), true)?;
-                for (entry_table_id, entry_key, entry_value) in entries {
-                    if !table_ids_match(&entry_table_id, &table_id) {
-                        continue;
-                    }
-                    if let Some(ref start) = start_key {
-                        if &entry_key < start {
-                            continue;
-                        }
-                    }
-                    if let Some(ref end) = end_key {
-                        if &entry_key > end {
-                            continue;
-                        }
-                    }
-                    if !self.filter_tombstone(&entry_value) {
-                        continue;
-                    }
-                    if tx.send(Ok((entry_key, entry_value))).await.is_err() {
-                        return Ok(()); // consumer dropped
-                    }
-                }
-            }
-            Ok(())
-        }
     }
 
     /// Batched streaming scan (issue #1592, Epic F/F2): the additive companion to
@@ -1701,3 +1478,9 @@ mod tests {
         );
     }
 }
+
+// The PER-ROW streaming scan (`scan_stream`, issue #790) and its issue-#3124
+// fail-closed producer boundary — its own file, since this one is more than twice the
+// ~800-line campsite target (epic #1116).
+#[path = "per_row_scan_stream.rs"]
+mod per_row_scan_stream;

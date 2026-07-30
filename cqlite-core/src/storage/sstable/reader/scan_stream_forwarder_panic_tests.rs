@@ -87,7 +87,10 @@ fn compressed_fixture_dir() -> Option<PathBuf> {
 fn copy_fixture(src_dir: &Path, dest: &Path) -> PathBuf {
     std::fs::create_dir_all(dest).expect("create fixture copy dir");
     let mut data_db = None;
-    for entry in std::fs::read_dir(src_dir).expect("read fixture dir").flatten() {
+    for entry in std::fs::read_dir(src_dir)
+        .expect("read fixture dir")
+        .flatten()
+    {
         let name = entry.file_name();
         let target = dest.join(&name);
         if entry.path().is_file() {

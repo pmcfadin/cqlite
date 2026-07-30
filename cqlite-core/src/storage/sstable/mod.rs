@@ -12,9 +12,8 @@ pub mod directory_integration_tests;
 pub mod format_detector;
 #[cfg(feature = "write-support")]
 mod generation_merge; // Cross-generation read reconciliation (issues #883/#885/#957/#1579).
-// The ≠1-generation streaming read path (issue #3124): the lazy fan-out k-way
-// merge + the per-row → batch re-chunker, both fail-closed on a dead producer.
-mod scan_stream_fanout;
+                      // The ≠1-generation streaming read path (issue #3124): the lazy fan-out k-way
+                      // merge + the per-row → batch re-chunker, both fail-closed on a dead producer.
 pub mod header_spec;
 pub mod index;
 pub mod index_reader;
@@ -23,6 +22,7 @@ pub mod performance_benchmarks;
 pub mod promoted_index_reader;
 pub mod read_work_counters;
 pub mod reader;
+mod scan_stream_fanout;
 pub mod summary_reader;
 pub mod version_gate;
 pub mod work_counters;
@@ -2240,7 +2240,10 @@ impl SSTableManager {
         let per_row = self
             .scan_stream(table_id, start_key, end_key, schema, buffer_size)
             .await?;
-        Ok(scan_stream_fanout::rechunk_into_batches(per_row, buffer_size))
+        Ok(scan_stream_fanout::rechunk_into_batches(
+            per_row,
+            buffer_size,
+        ))
     }
 
     /// Streaming scan under the `tombstones` feature.
@@ -2297,7 +2300,10 @@ impl SSTableManager {
         let per_row = self
             .scan_stream(table_id, start_key, end_key, schema, buffer_size)
             .await?;
-        Ok(scan_stream_fanout::rechunk_into_batches(per_row, buffer_size))
+        Ok(scan_stream_fanout::rechunk_into_batches(
+            per_row,
+            buffer_size,
+        ))
     }
 
     /// Get list of all SSTable IDs

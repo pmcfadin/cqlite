@@ -36,11 +36,17 @@
 //! the ~800-line source threshold, so the #3124 wiring lands here instead of growing
 //! it.
 
+// `spawn_fanout_merge` (and only it) is `not(tombstones)`; a `tombstones` build keeps
+// just the re-chunker, so its imports are gated the same way.
+#[cfg(not(feature = "tombstones"))]
 use std::sync::Arc;
 
 use super::reader::{self, RowScanStream};
+#[cfg(not(feature = "tombstones"))]
 use crate::storage::producer_fault::{FaultScope, ScanTaskSite};
-use crate::types::{ScanRow, TableId};
+use crate::types::ScanRow;
+#[cfg(not(feature = "tombstones"))]
+use crate::types::TableId;
 use crate::RowKey;
 
 /// Spawn the lazy per-generation token-ordered k-way merge and return its per-row

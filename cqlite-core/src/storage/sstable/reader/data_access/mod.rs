@@ -86,9 +86,6 @@ mod point_compaction;
 mod point_compaction_fail_safe_tests;
 // Opt-in presence-oracle false-negative verification method (issue #2163), kept
 // out of this already-large entry-point file (campsite rule, epic #1116).
-pub(in crate::storage::sstable::reader) mod batched_scan_stream;
-// The item-generic "a channel close is JOINED, not assumed" machinery shared by the
-// batched and per-row streaming-scan surfaces (issues #3106, #3124).
 pub(in crate::storage::sstable) mod joined_scan_stream;
 mod presence_verify;
 // First/last-key range short-circuit (issue #1576, C5): an authoritative

@@ -22,7 +22,7 @@
 //! * [`arm_inner_scan_task_panic`] → the INNER boundary: the batched-scan `tokio`
 //!   TASK panics ([`inner_scan_task_checkpoint`]). ONE checkpoint site, in that
 //!   task's cursor-open prelude
-//!   (`data_access::batched_scan_stream::SSTableReader::open_batched_scan_cursor`),
+//!   (`data_access::joined_scan_stream::SSTableReader::open_batched_scan_cursor`),
 //!   which sits ABOVE the `requires_chunk_stitching()` branch and is therefore
 //!   reached whatever on-disk format the reader has — a checkpoint inside either
 //!   branch would fire only for that branch's formats and could silently not fire.
@@ -156,6 +156,11 @@ pub enum ScanTaskSite {
     PerRowScan,
     /// The fan-out k-way MERGE task of `SSTableManager::scan_stream` (issue #3124
     /// site 1) — the multi-generation path's top-level producer.
+    ///
+    /// Constructed only on the non-`tombstones` path: a `tombstones` build routes
+    /// `scan_stream` through the materializing `scan`, so there is no fan-out merge
+    /// task there and this variant is legitimately unconstructed in that config.
+    #[cfg_attr(feature = "tombstones", allow(dead_code))]
     FanoutMerge,
     /// The windowed scan's FORWARDER task (issue #3124 site 4), which adapts the
     /// blocking parse half's batches to the caller's surface. Reached only by

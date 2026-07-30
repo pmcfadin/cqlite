@@ -152,6 +152,12 @@ use tokio::sync::mpsc;
 mod guard;
 use guard::FeedFailureGuard;
 
+// The forwarder task + its join verdict (issue #3124, site 4): a forwarder that DIES
+// must FAIL the scan, not end it cleanly. Its own file (this one is already over the
+// campsite threshold, epic #1116).
+#[path = "scan_stream_forwarder.rs"]
+mod scan_stream_forwarder;
+
 // IO-half chunk decode (`decode_scan_chunk`, issue #1940 / D2) — sibling file
 // (campsite rule, epic #1116); an `impl SSTableReader` block.
 #[path = "scan_stream_windowed_decode.rs"]
@@ -519,7 +525,7 @@ impl SSTableReader {
         let forwarder_scope =
             crate::storage::producer_fault::FaultScope::capture(|| self.file_path());
         let forwarder =
-            super::scan_stream_forwarder::spawn_windowed_forwarder(out, batch_rx, forwarder_scope);
+            scan_stream_forwarder::spawn_windowed_forwarder(out, batch_rx, forwarder_scope);
 
         // Feed raw chunks to the parse task, DECODING each on the way (issue #1940,
         // D2). The bounded `raw_tx` applies backpressure all the way back to disk
@@ -585,7 +591,7 @@ impl SSTableReader {
             return Err(e);
         }
         parse_result?;
-        super::scan_stream_forwarder::forwarder_verdict(forwarder_joined)
+        scan_stream_forwarder::forwarder_verdict(forwarder_joined)
     }
 
     /// I/O + decode feed loop for the windowed scan — runs on ONE `spawn_blocking`

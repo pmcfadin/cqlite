@@ -42,11 +42,11 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use crate::storage::sstable::SSTableManager;
 use crate::platform::Platform;
 use crate::storage::producer_fault::{
     arm_scan_task_panic, silence_injected_panics, ScanTaskSite, INJECTED_PANIC_MESSAGE,
 };
+use crate::storage::sstable::SSTableManager;
 use crate::storage::write_engine::test_support::{create_test_mutation, create_test_schema};
 use crate::storage::write_engine::{WriteEngine, WriteEngineConfig};
 use crate::types::TableId;
@@ -81,11 +81,7 @@ async fn flush_generations(temp_dir: &TempDir) -> PathBuf {
 
 fn flush_generations_blocking(root: &std::path::Path) -> PathBuf {
     let data_dir = root.join("data");
-    let config = WriteEngineConfig::new(
-        data_dir.clone(),
-        root.join("wal"),
-        create_test_schema(),
-    );
+    let config = WriteEngineConfig::new(data_dir.clone(), root.join("wal"), create_test_schema());
     let mut engine = WriteEngine::new(config).expect("write engine");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
