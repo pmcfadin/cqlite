@@ -67,7 +67,10 @@ trap 'rm -rf "$tmp"' EXIT
 #                        wrapper's bounded poll for the ASYNCHRONOUSLY written record
 #                        can be exercised (counter kept in $STUB_INVOKED.reads)
 #   STUB_HAS_TOKEN_DATA  emit a has_token_data field with this value (true/false)
-#   STUB_SHOW_JSON       `none` => `show --json` returns null; `review-row` => it
+#   STUB_LIST_JSON       `none` => `list --json` returns null, so `show` is the only
+#                        record source
+#   STUB_SHOW_JSON       `none` => `show --json` returns null; `nested` => the MEASURED
+#                        shape (review row nesting the job row under "job"); `review-row` => it
 #                        returns the REAL review-row shape (id/prompt, no git_ref or
 #                        status), forcing the richer `list --json` source; otherwise the
 #                        `list --json` fallback path
@@ -130,6 +133,15 @@ case "$cmd" in
     esac
     record_read_blank && { printf 'null\n'; exit 0; }
     [ "${STUB_SHOW_JSON:-object}" != none ] || { printf 'null\n'; exit 0; }
+    if [ "${STUB_SHOW_JSON:-object}" = nested ]; then
+      # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
+      # `id` (equal to the job id) that NESTS the job row under a "job" key.
+      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"prompt":"%s","job":' \
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_PROMPT:-}"
+      emit_job_object
+      printf '}\n'
+      exit 0
+    fi
     if [ "${STUB_SHOW_JSON:-object}" = review-row ]; then
       # The REAL `show --json` shape: the REVIEW row — id/agent/prompt, and no
       # git_ref / status / verdict / token_usage.
@@ -142,6 +154,7 @@ case "$cmd" in
     ;;
   list)
     record_read_blank && { printf 'null\n'; exit 0; }
+    [ "${STUB_LIST_JSON:-array}" != none ] || { printf 'null\n'; exit 0; }
     printf '['; emit_job_object; printf ']\n'
     exit 0
     ;;
@@ -417,6 +430,7 @@ export STUB_HAS_TOKEN_DATA=''
 export STUB_VERDICT_FIELD=''
 export STUB_RECORD_BLANK_FOR=0
 export STUB_PAYLOAD_JOB=''
+export STUB_LIST_JSON=array
 export STUB_REVIEW_RC=0
 export STUB_ANNOUNCE_SHA=''
 
@@ -436,6 +450,7 @@ reset_stub() {
   STUB_VERDICT_FIELD=''
   STUB_RECORD_BLANK_FOR=0
   STUB_PAYLOAD_JOB=''
+  STUB_LIST_JSON=array
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -1477,6 +1492,27 @@ RC=$?
 assert_verdict 'case (w4)' FAIL 1
 assert_says 'case (w4) names the undefined check function' 'did not define roborev_check_review_completed'
 assert_never_enqueued 'case (w4)'
+
+if [ "$HAVE_PYTHON3" -eq 1 ]; then
+printf '== case (x10): the NESTED job row in show --json is read as a first-class source ==\n'
+reset_stub
+# MEASURED (round 6): `roborev show <id> --json` returns a REVIEW row whose own `id`
+# equals the job id and which NESTS the job row — git_ref, status, model,
+# requested_model, token_usage, verdict — under a "job" key. Returning the FIRST id
+# match handed back the outer row, which has none of those fields; that looked like an
+# async durability problem and silently downgraded sha-assert, tier 2 and model.
+# `list --json` is disabled here so `show` is the ONLY source.
+work=$(make_fixture case_x10 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse origin/main)
+STUB_SHOW_JSON=nested
+STUB_LIST_JSON=none
+run_wrapper "$work"
+assert_verdict 'case (x10)' PASS 0
+assert_says 'case (x10) the nested job row was used' '^job-record: PASS$'
+assert_says 'case (x10) the range oracle worked from the nested row' '^sha-assert: PASS$'
+assert_says 'case (x10) tokens came from the nested row' '^vacuity-tier2: PASS$'
+assert_says 'case (x10) the model was confirmed from the nested row' '^model: gpt-5\.6-sol$'
+fi  # HAVE_PYTHON3
 
 printf '== case (w): a MISSING oracles file FAILs closed, never silently no-ops ==\n'
 reset_stub
