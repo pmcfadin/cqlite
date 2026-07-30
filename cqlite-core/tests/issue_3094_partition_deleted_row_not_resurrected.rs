@@ -81,6 +81,12 @@ const TBL: &str = "resurrect";
 const T_BASE_SECS: i64 = 1_700_000_000;
 /// The UPDATE's write timestamp (µs) — the cell tombstone's own timestamp.
 const T_UPDATE_MICROS: i64 = T_BASE_SECS * 1_000_000;
+/// A cell tombstone written strictly AFTER the partition deletion below — the
+/// second test's shape: a LIVE liveness marker at `T_UPDATE_MICROS`, a covering
+/// partition deletion, and then a cell tombstone NEWER than that deletion.
+const T_CELL_TOMB_AFTER_DELETE_MICROS: i64 = T_UPDATE_MICROS + 10_000_000;
+/// That cell tombstone's `localDeletionTime` (seconds).
+const T_CELL_TOMB_AFTER_DELETE_LDT: i32 = (T_BASE_SECS + 10) as i32;
 /// The partition deletion's `markedForDeleteAt` (µs) — strictly NEWER than the
 /// cell tombstone above, so it covers the whole row.
 const T_PARTITION_DELETE_MICROS: i64 = T_UPDATE_MICROS + 5_000_000;
@@ -90,6 +96,10 @@ const T_PARTITION_DELETE_LDT: i32 = (T_BASE_SECS + 5) as i32;
 /// The read clock (seconds).
 const PINNED_NOW: i64 = T_BASE_SECS + 100;
 
+/// Both tests in this file set `CQLITE_TTL_NOW_OVERRIDE_SECS` to the SAME
+/// [`PINNED_NOW`] and neither clears it: they share one test binary/process, so a
+/// set/clear pair would race the sibling test's read. Nothing here carries a TTL,
+/// so the value only makes the read clock deterministic.
 const TTL_NOW_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
 
 fn schema_cql() -> String {
@@ -116,9 +126,40 @@ fn update_set_w_null() -> Mutation {
     )
 }
 
-/// Flush the single-row fixture and return `(tempdir, data_dir)`. `data_dir`
+/// `INSERT INTO {TBL} (pk, ck) VALUES (1, 3)` — a PURE primary-key insert, which
+/// creates the row LIVENESS MARKER (`HAS_TIMESTAMP`) and no data cells.
+fn insert_liveness_marker_only() -> Mutation {
+    Mutation::new(
+        TableId::new(KS, TBL),
+        PartitionKey::single("pk", Value::Integer(1)),
+        Some(ClusteringKey::single("ck", Value::Integer(3))),
+        vec![],
+        T_UPDATE_MICROS,
+        None,
+    )
+}
+
+/// `UPDATE {TBL} SET w = null WHERE pk = 1 AND ck = 3 USING TIMESTAMP
+/// {T_CELL_TOMB_AFTER_DELETE_MICROS}` — the SAME row as
+/// [`insert_liveness_marker_only`], adding a cell tombstone that is NEWER than the
+/// partition deletion patched in by the second test.
+fn update_set_w_null_after_delete() -> Mutation {
+    Mutation::new(
+        TableId::new(KS, TBL),
+        PartitionKey::single("pk", Value::Integer(1)),
+        Some(ClusteringKey::single("ck", Value::Integer(3))),
+        vec![CellOperation::Delete {
+            column: "w".to_string(),
+            local_deletion_time: Some(T_CELL_TOMB_AFTER_DELETE_LDT),
+        }],
+        T_CELL_TOMB_AFTER_DELETE_MICROS,
+        None,
+    )
+}
+
+/// Flush `mutations` into one SSTable and return `(tempdir, data_dir)`. `data_dir`
 /// holds `<KS>/<TBL>/nb-1-big-*.db`.
-async fn build_fixture() -> (tempfile::TempDir, PathBuf) {
+async fn build_fixture(mutations: Vec<Mutation>) -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let data_dir = temp.path().join("data");
     let wal_dir = temp.path().join("wal");
@@ -126,7 +167,9 @@ async fn build_fixture() -> (tempfile::TempDir, PathBuf) {
     let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema);
     let mut engine = WriteEngine::new(config).expect("engine");
 
-    engine.write(update_set_w_null()).expect("write update");
+    for m in mutations {
+        engine.write(m).expect("write mutation");
+    }
     engine
         .flush()
         .await
@@ -162,6 +205,14 @@ fn copy_table_dir(data_dir: &Path, dst_root: &Path) -> PathBuf {
 /// i32 localDeletionTime BE | i64 markedForDeleteAt BE` — a fixed 12-byte
 /// non-delta `DeletionTime`, so this is a same-width in-place patch (no offset in
 /// Index.db/Summary.db moves).
+///
+/// The 12 bytes are asserted to hold the LIVE sentinel (`localDeletionTime =
+/// i32::MAX`, `markedForDeleteAt = i64::MIN`; guide Ch.5 "Partition Header Format",
+/// from `SortedTablePartitionWriter` + `DeletionTime.Serializer`) BEFORE they are
+/// overwritten. Without that assertion a mis-derived `del_off` would leave the real
+/// `DeletionTime` LIVE and merely corrupt the row body, so the read would return 0
+/// rows because the row FAILED TO DECODE — a green test pinning nothing. The
+/// assertion is what makes this a pin rather than a placebo.
 fn patch_partition_deletion(table_dir: &Path) {
     let data_path = data_db_path(table_dir);
     let mut bytes = std::fs::read(&data_path).expect("read Data.db");
@@ -171,6 +222,18 @@ fn patch_partition_deletion(table_dir: &Path) {
     assert!(
         bytes.len() >= del_off + 12,
         "Data.db too small to hold a partition-deletion field (key_len={key_len})"
+    );
+    assert_eq!(
+        &bytes[del_off..del_off + 4],
+        &i32::MAX.to_be_bytes(),
+        "del_off={del_off} (key_len={key_len}) does not point at a LIVE partition \
+         DeletionTime: localDeletionTime must be the i32::MAX LIVE sentinel before patching"
+    );
+    assert_eq!(
+        &bytes[del_off + 4..del_off + 12],
+        &i64::MIN.to_be_bytes(),
+        "del_off={del_off} (key_len={key_len}) does not point at a LIVE partition \
+         DeletionTime: markedForDeleteAt must be the i64::MIN LIVE sentinel before patching"
     );
     bytes[del_off..del_off + 4].copy_from_slice(&T_PARTITION_DELETE_LDT.to_be_bytes());
     bytes[del_off + 4..del_off + 12].copy_from_slice(&T_PARTITION_DELETE_MICROS.to_be_bytes());
@@ -220,7 +283,7 @@ async fn select_row_count(data_dir: &Path, schema_path: &Path) -> usize {
 async fn partition_deleted_update_only_row_is_not_resurrected() {
     std::env::set_var(TTL_NOW_ENV, PINNED_NOW.to_string());
 
-    let (temp, data_dir) = build_fixture().await;
+    let (temp, data_dir) = build_fixture(vec![update_set_w_null()]).await;
     let schema_path = temp.path().join("schema.cql");
     std::fs::write(&schema_path, schema_cql()).expect("write schema file");
 
@@ -230,14 +293,21 @@ async fn partition_deleted_update_only_row_is_not_resurrected() {
     copy_table_dir(&data_dir, &live_root);
     let deleted_table_dir = copy_table_dir(&data_dir, &deleted_root);
 
-    // (1) ANTI-VACUITY: without the partition tombstone the row IS present and
-    // decodable. A 0 here means the fixture never held the row, and the 0-row
-    // assertion below would be meaningless.
+    // (1) DECODE PROBE (anti-vacuity) — asserts CQLite's CURRENT behaviour, NOT
+    //     Cassandra parity. Without the partition tombstone this row still has no
+    //     liveness marker and no live cell: Cassandra purges its lone cell
+    //     tombstone (`Filter.applyToRow` → `row.purge(PURGE_ALL)`, guide Ch.11)
+    //     and drops the resulting EMPTY row, so a real `SELECT` returns 0 rows.
+    //     CQLite returns 1 because it has no `Row.hasLiveData` purge yet — tracked
+    //     as issue #3121, which will INVERT this expectation to 0.
+    //     Its purpose here is solely to prove the row is physically present and
+    //     decodable, so the 0-row assertion below is not vacuous.
     let live_rows = select_row_count(&live_root, &schema_path).await;
     assert_eq!(
         live_rows, 1,
-        "fixture sanity: the UPDATE-only row must be physically present and \
-         decodable BEFORE the partition tombstone is patched in — got {live_rows} rows"
+        "decode probe (current CQLite behaviour, NOT Cassandra parity — #3121): the \
+         UPDATE-only row must be physically present and decodable BEFORE the partition \
+         tombstone is patched in — got {live_rows} rows"
     );
 
     // (2) THE PIN: patch a partition tombstone strictly NEWER than the row's cell
@@ -245,15 +315,92 @@ async fn partition_deleted_update_only_row_is_not_resurrected() {
     patch_partition_deletion(&deleted_table_dir);
     let deleted_rows = select_row_count(&deleted_root, &schema_path).await;
 
-    std::env::remove_var(TTL_NOW_ENV);
-
     assert_eq!(
         deleted_rows, 0,
         "issue #3094: a row whose ONLY cell is a tombstone written at {T_UPDATE_MICROS}µs \
          is entirely covered by the partition deletion at {T_PARTITION_DELETE_MICROS}µs, so a \
          Cassandra SELECT returns 0 rows — the read path resurrected {deleted_rows} \
-         all-null phantom row(s) from a DELETED partition. A dropped cell tombstone must \
-         still fold its effective write timestamp into the row's shadow aggregate \
-         (evidence), even though it never counts as liveness."
+         all-null phantom row(s) from a DELETED partition. A decoded cell tombstone must \
+         defeat the `i64::MIN` no-authoritative-timestamp fail-safe, even though it never \
+         counts as liveness."
+    );
+}
+
+/// Issue #3094 (round-2 blocker): a CELL TOMBSTONE must NEVER RAISE the row's
+/// shadow-evidence maximum.
+///
+/// ## The shape (a Cassandra-writable ordering the first test does not cover)
+///
+/// ```cql
+/// INSERT INTO t (pk, ck) VALUES (1, 3) USING TIMESTAMP 1_700_000_000_000_000  -- liveness marker,
+///                                                                            -- NO data cell
+/// DELETE FROM t WHERE pk = 1 USING TIMESTAMP 1_700_000_005_000_000            -- partition tombstone
+/// UPDATE t SET w = null WHERE pk = 1 AND ck = 3
+///   USING TIMESTAMP 1_700_000_010_000_000                                     -- cell tombstone,
+///                                                                            -- NEWER than the delete
+/// SELECT * FROM t WHERE pk = 1                                               -- Cassandra: 0 rows
+/// ```
+///
+/// Cassandra returns NOTHING. The partition deletion at `…005…` deletes the row's
+/// liveness marker (`DeletionTime.deletes(ts) = ts <= markedForDeleteAt`). The `w`
+/// cell tombstone at `…010…` genuinely SURVIVES the deletion — but it is a
+/// tombstone, so `Filter.applyToRow` → `row.purge(…, PURGE_ALL, …)` removes it and
+/// the now-empty row is dropped before the client sees it (guide Ch.11
+/// "Merging, tombstones and shadowing"; `Filter.java` at `cassandra-5.0.8`). A
+/// tombstone can never make a row VISIBLE.
+///
+/// ## What regresses here
+///
+/// The row-level decision `RowHeader::shadowed_by_deletion_at` compares
+/// `max(liveness_ts, max_data_cell_ts)` against the covering deletion. If deleted-cell
+/// evidence is folded into `max_data_cell_ts` — even as a "fallback" that only applies
+/// when live-cell evidence is absent — then for THIS row (`agg_max_cell_ts = None`,
+/// because a pure-PK insert writes no cell) the aggregate becomes the tombstone's
+/// `…010…`, the `max()` with the liveness `…000…` raises the row maximum ABOVE the
+/// covering deletion, and the row is emitted as an all-null phantom row from a DELETED
+/// partition. Tombstone evidence must therefore only ever defeat the `i64::MIN`
+/// "no authoritative timestamp" fail-safe (a PRESENCE fact), never contribute a
+/// timestamp to the maximum.
+#[tokio::test]
+async fn partition_deleted_liveness_row_with_newer_cell_tombstone_is_not_resurrected() {
+    std::env::set_var(TTL_NOW_ENV, PINNED_NOW.to_string());
+
+    let (temp, data_dir) = build_fixture(vec![
+        insert_liveness_marker_only(),
+        update_set_w_null_after_delete(),
+    ])
+    .await;
+    let schema_path = temp.path().join("schema.cql");
+    std::fs::write(&schema_path, schema_cql()).expect("write schema file");
+
+    let live_root = temp.path().join("live");
+    let deleted_root = temp.path().join("deleted");
+    copy_table_dir(&data_dir, &live_root);
+    let deleted_table_dir = copy_table_dir(&data_dir, &deleted_root);
+
+    // (1) ANTI-VACUITY, and here it IS Cassandra parity: with no partition deletion
+    //     the row's liveness marker is live, so `SELECT` returns exactly one row
+    //     (v = null, w = null).
+    let live_rows = select_row_count(&live_root, &schema_path).await;
+    assert_eq!(
+        live_rows, 1,
+        "fixture sanity: the liveness-marker row must be present and decodable BEFORE \
+         the partition tombstone is patched in — got {live_rows} rows"
+    );
+
+    // (2) THE PIN: a partition deletion BETWEEN the liveness marker and the cell
+    //     tombstone. Cassandra returns 0 rows.
+    patch_partition_deletion(&deleted_table_dir);
+    let deleted_rows = select_row_count(&deleted_root, &schema_path).await;
+
+    assert_eq!(
+        deleted_rows, 0,
+        "issue #3094 (round-2 blocker): liveness marker @{T_UPDATE_MICROS}µs, partition \
+         deletion @{T_PARTITION_DELETE_MICROS}µs, cell tombstone \
+         @{T_CELL_TOMB_AFTER_DELETE_MICROS}µs. The deletion covers every LIVE piece of \
+         the row (its liveness marker); the surviving `w` tombstone is purged and the \
+         empty row dropped, so a Cassandra SELECT returns 0 rows — got {deleted_rows}. \
+         Cell-tombstone evidence must not RAISE the row's shadow maximum above the \
+         covering deletion."
     );
 }
