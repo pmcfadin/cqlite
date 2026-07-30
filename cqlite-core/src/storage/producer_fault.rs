@@ -331,8 +331,9 @@ type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'sta
 /// failure message from this test or any test running in parallel, exactly the
 /// "masked assertion" failure mode. Panics whose payload does not carry
 /// [`INJECTED_PANIC_MESSAGE`] are delegated to the hook that was installed
-/// before (libtest's capture hook, normally), and that hook is reinstated on
-/// drop.
+/// before (libtest's capture hook, normally), and that hook is reinstated when
+/// this guard drops — EXCEPT on an unwinding drop, where restoring is skipped
+/// (see [`SilencedInjectedPanics::drop`]).
 #[cfg(any(test, feature = "producer-fault-injection"))]
 #[must_use = "the injected panic is only silenced while the guard is alive"]
 pub fn silence_injected_panics() -> SilencedInjectedPanics {
@@ -359,7 +360,8 @@ fn is_injected(info: &std::panic::PanicHookInfo<'_>) -> bool {
     message.is_some_and(|m| m.contains(INJECTED_PANIC_MESSAGE))
 }
 
-/// Guard returned by [`silence_injected_panics`]; restores the previous hook.
+/// Guard returned by [`silence_injected_panics`]; restores the previous hook on a
+/// normal drop (see [`Self::drop`] for the unwinding case).
 #[cfg(any(test, feature = "producer-fault-injection"))]
 pub struct SilencedInjectedPanics {
     previous: std::sync::Arc<PanicHook>,
@@ -368,6 +370,18 @@ pub struct SilencedInjectedPanics {
 #[cfg(any(test, feature = "producer-fault-injection"))]
 impl Drop for SilencedInjectedPanics {
     fn drop(&mut self) {
+        // NEVER touch the hook while unwinding (roborev, issue #3106):
+        // `std::panic::set_hook` PANICS if called from a panicking thread, so a
+        // guard still alive when an assertion (or any fallible call inside the
+        // silenced block) fails would double-panic and ABORT the process — under
+        // libtest's capture that loses the original message entirely and, in an
+        // integration-test binary, takes every sibling test's result with it.
+        // Skipping the restore leaves the filtering hook installed for the rest of
+        // the process, which is harmless: it only ever suppresses
+        // `INJECTED_PANIC_MESSAGE` and delegates everything else.
+        if std::thread::panicking() {
+            return;
+        }
         // `set_hook` needs an owned `Box`, and the previous hook is behind an
         // `Arc` (it is borrowed by the filtering hook installed above), so it is
         // reinstated through one thin delegating wrapper. Behaviourally identical;
