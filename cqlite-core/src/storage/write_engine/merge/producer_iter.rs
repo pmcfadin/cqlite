@@ -21,7 +21,9 @@
 //! this module only *calls* lives in
 //! [`channel_depth`](super::channel_depth).
 
-use super::{channel_depth, producer_gauge, MergeEntry, MergeProducerError, SSTableRowIterator};
+use super::{
+    channel_depth, from_readers, producer_gauge, MergeEntry, MergeProducerError, SSTableRowIterator,
+};
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
 use std::path::{Path, PathBuf};

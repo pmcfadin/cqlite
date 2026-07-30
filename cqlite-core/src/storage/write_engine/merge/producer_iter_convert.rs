@@ -172,7 +172,7 @@ impl SSTableRowIteratorAdapter {
     ///
     /// The clustering columns are intentionally left inside the cells so the
     /// downstream read-back path can still find them.
-    fn extract_clustering_key_from_compaction(
+    pub(super) fn extract_clustering_key_from_compaction(
         row_data: &crate::storage::sstable::reader::compaction_row::CompactionRowData,
         schema: &TableSchema,
     ) -> Option<ClusteringKey> {
@@ -415,7 +415,10 @@ impl SSTableRowIteratorAdapter {
     /// per-element [`CompactionRow`]s). Retained for the legacy-collapse merge
     /// tests that assert the old whole-column collapse behavior.
     #[cfg(test)]
-    pub(super) fn value_to_row_data(value: &crate::types::Value, row_timestamp: i64) -> Result<RowData> {
+    pub(super) fn value_to_row_data(
+        value: &crate::types::Value,
+        row_timestamp: i64,
+    ) -> Result<RowData> {
         match value {
             crate::types::Value::Tombstone(info) => Ok(RowData::Tombstone {
                 deletion_time: info.deletion_time,
