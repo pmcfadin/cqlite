@@ -188,22 +188,20 @@ mod tests {
     /// a parallel test is never masked.
     #[tokio::test]
     async fn a_dead_scan_task_is_reported_as_an_error_and_stays_one() {
+        // Held for the whole test: the guard filters ONLY the injected message and
+        // delegates every other panic to the previous hook, so an assertion failure
+        // below (here or in a parallel test) still prints. The task panics
+        // asynchronously, so a narrower scope would race the hook restore.
+        let _silence = crate::storage::producer_fault::silence_injected_panics();
         let (tx, rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4);
-        let task = {
-            let _silence = crate::storage::producer_fault::silence_injected_panics();
-            let task = tokio::spawn(async move {
-                // Deliver one batch, then die WITHOUT reporting — the exact shape
-                // the discarded `JoinHandle` used to turn into a clean EOS.
-                let _ = tx
-                    .send(Ok(vec![(RowKey::new(vec![1]), ScanRow::Row(Vec::new()))]))
-                    .await;
-                panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
-            });
-            // Join here (under the silencer) so the panic is observed before the
-            // hook is restored; the handle's verdict is what `recv` re-joins.
-            let _ = (&task,);
-            task
-        };
+        let task = tokio::spawn(async move {
+            // Deliver one batch, then die WITHOUT reporting — the exact shape the
+            // discarded `JoinHandle` used to turn into a clean end of stream.
+            let _ = tx
+                .send(Ok(vec![(RowKey::new(vec![1]), ScanRow::Row(Vec::new()))]))
+                .await;
+            panic!("{}", crate::storage::producer_fault::INJECTED_PANIC_MESSAGE);
+        });
         let mut stream = BatchedScanStream::new(rx, task);
 
         assert!(
