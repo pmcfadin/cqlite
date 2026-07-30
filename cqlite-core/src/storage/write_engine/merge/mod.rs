@@ -3695,7 +3695,10 @@ impl KWayMerger {
     /// pseudo-cells are retained whenever any data cell survives so the row keeps
     /// its key columns for read-back. A row whose every data cell is shadowed AND
     /// whose row-marker liveness is `<= pmfda` produces nothing (the re-emitted
-    /// partition tombstone covers it). A row tombstone / coexisting row deletion /
+    /// partition tombstone covers it); the marker liveness is judged on the
+    /// MARKER's own `marker_timestamp`, not the reconciled row timestamp, which a
+    /// newer cell tombstone can raise above the floor (issue #3094). A row
+    /// tombstone / coexisting row deletion /
     /// complex deletion older-or-equal to the floor is subsumed; a strictly-newer
     /// one survives. `None` floor (`max_partition_deletion == None`) is the common
     /// case and returns the entry untouched.
@@ -3773,8 +3776,30 @@ impl KWayMerger {
                 let has_data = kept.iter().any(is_data);
 
                 // The row-marker liveness survives the partition floor only if its
-                // own timestamp is strictly newer.
-                let marker_live = entry.timestamp > pmfda;
+                // OWN timestamp is strictly newer.
+                //
+                // Issue #3094: `entry.timestamp` is the RECONCILED ROW timestamp (the
+                // max over the row's cells), so a cell TOMBSTONE written after the
+                // partition deletion raises it above `pmfda` even when the liveness
+                // marker itself is covered — carrying a deleted marker forward and
+                // resurrecting an all-null phantom row out of a deleted partition.
+                // Cassandra compares the marker's own timestamp: `BTreeRow.filter`
+                // (`cassandra-5.0.8`) does
+                // `if (activeDeletion.deletes(newInfo.timestamp())) newInfo =
+                // LivenessInfo.EMPTY;`, and `DeletionTime.deletes(long ts)` is
+                // `ts <= markedForDeleteAt`. So require the marker's authoritative
+                // write timestamp to clear the floor too.
+                //
+                // `marker_timestamp` is `None` exactly when the row carries NO
+                // liveness marker (`has_marker == false`); such a row has no marker
+                // to delete, so the row-level `entry.timestamp` test is left as the
+                // sole condition and marker-less behaviour is unchanged (the
+                // marker-less tombstone-only purge is #3121, out of scope here).
+                let marker_live = entry.timestamp > pmfda
+                    && entry
+                        .row_liveness
+                        .marker_timestamp
+                        .is_none_or(|marker_ts| marker_ts > pmfda);
 
                 if !has_data && !marker_live {
                     if let Some((dt, ldt)) = surviving_row_del {
