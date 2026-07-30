@@ -20,6 +20,12 @@
 //! [`from_readers`](super::from_readers); the egress-depth gauge accounting
 //! this module only *calls* lives in
 //! [`channel_depth`](super::channel_depth).
+//!
+//! Open defect to know about before changing anything here: a producer thread
+//! that UNWINDS is indistinguishable from an exhausted run, because neither
+//! shape sends a terminator — see the [`Drop`] impl's `KNOWN-FALSE PREMISE`
+//! note and the `KNOWN GAP` section of the
+//! [`from_readers`](super::from_readers) header (issue #3120).
 
 use super::{
     channel_depth, from_readers, producer_gauge, MergeEntry, MergeProducerError, SSTableRowIterator,
@@ -429,6 +435,23 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
 /// then JOIN the producer thread — so a dropped merger (LIMIT satisfied, client
 /// disconnect, error, panic) does not leave a detached producer streaming a
 /// multi-million-partition scan in the background.
+///
+/// ## KNOWN-FALSE PREMISE in step 3 below — tracked in issue #3120
+///
+/// Step 3's inline comment says a failed join (producer panicked) "is ignored;
+/// the panic was already surfaced through the error channel." That premise is
+/// **NOT true in general** and is the defect issue #3120 fixes: neither producer
+/// shape sends an explicit terminator, so a producer thread that UNWINDS before
+/// (or instead of) sending its error simply drops its `SyncSender`, and
+/// [`SSTableRowIterator::next`] above maps that channel DISCONNECT onto `None` =
+/// "this run is exhausted" — a silently short read, not an error. The
+/// `handle.join()` result that WOULD reveal the unwind is discarded here.
+/// The comment is left byte-identical to its pre-#3139 form deliberately (that
+/// move was pure code motion); this doc is the qualification. Full analysis,
+/// including why the shared-reader shape has the same gap, is the `KNOWN GAP —
+/// a dead producer reads as end-of-input (issue #3120)` section of the
+/// [`from_readers`](super::from_readers) module header. Both shapes will need
+/// ONE terminator protocol, so fix them together.
 #[cfg(feature = "write-support")]
 impl Drop for SSTableRowIteratorAdapter {
     fn drop(&mut self) {

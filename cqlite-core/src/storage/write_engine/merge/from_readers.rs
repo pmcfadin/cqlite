@@ -18,8 +18,8 @@
 //! ## Delegation (no behavioural drift between the two producer shapes)
 //!
 //! [`drive_compaction_stream`] is the single streaming-emit helper BOTH producer
-//! thread shapes call: the path-based [`SSTableRowIteratorAdapter::producer_thread`]
-//! (`producer_iter`, unchanged opening/threading behaviour — still one fresh reader
+//! thread shapes call: the path-based `SSTableRowIteratorAdapter::producer_thread`
+//! (private to `producer_iter`; unchanged opening/threading behaviour — still one fresh reader
 //! opened per thread, in parallel, exactly as before this issue) and the new
 //! [`SSTableRowIteratorAdapter::open_from_reader`]'s producer thread (this file,
 //! never opens a reader). Factoring the conversion/backpressure/
@@ -256,7 +256,8 @@ impl SSTableRowIteratorAdapter {
 
     /// Body of the shared-reader producer thread (issue #2346).
     ///
-    /// Unlike [`Self::producer_thread`] (path-based), this NEVER opens a
+    /// Unlike `Self::producer_thread` (path-based, private to `producer_iter`),
+    /// this NEVER opens a
     /// reader — it drives the caller-supplied `Arc<SSTableReader>` directly via
     /// [`drive_compaction_stream`], reusing the exact
     /// conversion/backpressure/cancellation-by-variant semantics. Still owns a

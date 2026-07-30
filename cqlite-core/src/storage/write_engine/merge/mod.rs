@@ -3,12 +3,15 @@
 //! Implements efficient k-way merge using a binary heap for producing
 //! compacted SSTables from multiple runs.
 //!
-//! File-size note (campsite rule, epic #1116): this file was already ~12.9k
-//! lines (far over the ~800-line source threshold) before issue #2346, which
-//! nudges it slightly further (a `producer_thread` refactor + new submodule
-//! declaration) — new code for #2346 lives in the sibling `from_readers`
-//! module instead of growing this file further. Splitting this file is out of
-//! #2346's scope; tracked under #1116.
+//! File-size note (campsite rule, epic #1116): this file is ~12.7k lines, still
+//! far over the ~800-line source threshold. Issue #3139 made a first cut into
+//! it, lifting the streaming producer/iterator seam out VERBATIM into the
+//! sibling `producer_iter` (adapter + path-based producer thread + consumer +
+//! teardown) and `producer_iter_convert` (reader→`MergeEntry` conversion)
+//! modules — ~890 lines, pure code motion, no behaviour change. What remains
+//! (`KWayMerger` and its reconciliation, plus ~8k lines of inline tests) is
+//! still #1116's scope. New code belongs in a sibling module, not here: #2346's
+//! shared-reader construction went to `from_readers` for the same reason.
 //!
 //! ## Architecture
 //!
