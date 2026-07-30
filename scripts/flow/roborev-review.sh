@@ -177,13 +177,21 @@ REPO_ARG=""
 BASE="origin/main"
 LOG_ARG=""
 
+# An option supplied with an EMPTY value is a usage error, never a silent fallback
+# to the default: `--repo ""` falling back to $PWD is exactly how a caller ends up
+# reviewing a repository it did not name.
+need_value() { # need_value <option> <argc> <value>
+  [ "$2" -ge 2 ] || die_usage "$1 requires a value"
+  [ -n "$3" ] || die_usage "$1 was given an empty value (an empty value is never a default)"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --agent) [ $# -ge 2 ] || die_usage "--agent requires a value"; AGENT="$2"; shift 2 ;;
-    --model) [ $# -ge 2 ] || die_usage "--model requires a value"; MODEL="$2"; shift 2 ;;
-    --repo)  [ $# -ge 2 ] || die_usage "--repo requires a value";  REPO_ARG="$2"; shift 2 ;;
-    --base)  [ $# -ge 2 ] || die_usage "--base requires a value";  BASE="$2"; shift 2 ;;
-    --log)   [ $# -ge 2 ] || die_usage "--log requires a value";   LOG_ARG="$2"; shift 2 ;;
+    --agent) need_value --agent $# "${2:-}"; AGENT="$2"; shift 2 ;;
+    --model) need_value --model $# "${2:-}"; MODEL="$2"; shift 2 ;;
+    --repo)  need_value --repo  $# "${2:-}"; REPO_ARG="$2"; shift 2 ;;
+    --base)  need_value --base  $# "${2:-}"; BASE="$2"; shift 2 ;;
+    --log)   need_value --log   $# "${2:-}"; LOG_ARG="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) die_usage "unknown option '$1'" ;;
   esac
