@@ -340,21 +340,33 @@ impl PartitionShadow {
 }
 
 /// Whether a partition-level deletion at `cover` (µs, `markedForDeleteAt`) shadows
-/// the WHOLE of a merged (post-`KWayMerger`) row whose maximum DATA-cell write
-/// timestamp is `max_data_cell_timestamp` (issue #1849).
+/// the WHOLE of a merged (post-`KWayMerger`) row (issues #1849, #3094).
 ///
 /// This is the multi-generation read path's reuse of the single-gen row-level
 /// decision [`RowHeader::shadowed_by_deletion_at`]: it builds the same `RowHeader`
-/// the single-gen emit path folds (a row with NO surfaced primary-key liveness
-/// marker — the `KWayMerger` output does not carry one — and the given max data-cell
-/// timestamp) and applies the identical `ts <= markedForDeleteAt` rule. A row with
-/// no data-cell timestamp (`None`) is NEVER shadowed (fail-safe / no-heuristics: we
-/// hide only what authoritative metadata proves predates the deletion).
+/// the single-gen emit path folds and applies the identical `ts <=
+/// markedForDeleteAt` rule, from the three pieces of authoritative evidence the
+/// merged row carries:
+///
+/// - `marker_timestamp` — the SURVIVING primary-key liveness marker's write ts
+///   (`MergeEntry::row_liveness.marker_timestamp`, #2374/#2789), `None` when the row
+///   has no marker. `apply_partition_shadowing` already drops a marker that did not
+///   survive the partition floor, so a `Some(m)` here always has `m > cover`.
+/// - `max_data_cell_timestamp` — max write ts across the merged LIVE data cells
+///   (never a tombstone's, #3094). `None` when the row surfaced no live data cell.
+/// - `has_deleted_data_cell` — mere PRESENCE of a merged cell TOMBSTONE, threaded
+///   from `ReadShadow::filter_live`'s tombstone skip. It only ever defeats the
+///   `i64::MIN` fail-safe (see [`PartitionShadow::has_shadow_evidence`]); it carries
+///   no timestamp, so it can never move a row hidden → visible.
+///
+/// A row with NO evidence at all (no marker, no live cell, no tombstone) is NEVER
+/// shadowed (fail-safe / no-heuristics: we hide only what authoritative metadata
+/// proves predates the deletion).
 ///
 /// Read-time TTL expiry is applied PER CELL on the merged path (via
 /// [`PartitionShadow::cell_shadowed_or_expired`]); whole-row TTL hiding needs the
-/// primary-key liveness marker, which the merger output lacks, so it is deliberately
-/// NOT decided here (issue #1849 scope note).
+/// marker's EXPIRY (`RowLiveness::expires_at_seconds`), which is not threaded here,
+/// so it is deliberately NOT decided here (issue #1849 scope note).
 ///
 /// Gated on `write-support`: the sole caller is the cross-generation read path
 /// (`generation_merge`), whose `mod` declaration in `sstable/mod.rs` is itself
@@ -365,13 +377,19 @@ impl PartitionShadow {
 #[cfg(feature = "write-support")]
 pub(crate) fn merged_row_shadowed_by_partition(
     cover: Option<i64>,
+    marker_timestamp: Option<i64>,
     max_data_cell_timestamp: Option<i64>,
+    has_deleted_data_cell: bool,
 ) -> bool {
     let Some(deleted_at) = cover else {
         return false;
     };
     let header = RowHeader {
-        timestamp: None,
+        // The SURVIVING liveness marker's write ts (#2374/#2789), not a hardcoded
+        // `None`: with #3094's presence rule in force, dropping it would hide a row
+        // whose marker is strictly NEWER than the deletion (Cassandra returns that
+        // row — the marker outlives the deletion and the tombstone is merely purged).
+        timestamp: marker_timestamp,
         ttl: None,
         liveness_expires_at_seconds: None,
         local_deletion_time: None,
@@ -382,11 +400,12 @@ pub(crate) fn merged_row_shadowed_by_partition(
         max_data_cell_timestamp,
         max_data_cell_expires_at: None,
         has_live_forever_data_cell: false,
-        // Hardcoded `false` as a DELIBERATE, TRACKED limitation (#3129 AC4), NOT because
-        // no tombstone can reach here: `apply_partition_shadowing`'s `is_data` is BY NAME,
-        // so a cell tombstone strictly newer than `markedForDeleteAt` survives the merge
-        // and `filter_live` drops it inside that same fold without reporting its presence.
-        has_deleted_data_cell: false,
+        // Threaded from the caller, NOT hardcoded (#3094 round 4): a cell tombstone
+        // strictly newer than `markedForDeleteAt` DOES survive the merge —
+        // `apply_partition_shadowing`'s `is_data` test is BY NAME — and
+        // `ReadShadow::filter_live` reports its PRESENCE from the same skip that drops
+        // it. Single- and multi-generation reads therefore agree on this shape.
+        has_deleted_data_cell,
     };
     header.shadowed_by_deletion_at(deleted_at)
 }

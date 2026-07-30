@@ -264,16 +264,43 @@ fn reduced_to_primary_key_row_is_hidden() {
 #[test]
 fn merged_row_partition_shadow_reuse() {
     use super::merged_row_shadowed_by_partition as f;
+    // Signature: (cover, marker_ts, max_data_cell_ts, has_deleted_data_cell).
     // No cover → never hidden.
-    assert!(!f(None, Some(1_000)));
-    // Cover but no data-cell ts (pk-only / undecodable) → never hidden.
-    assert!(!f(Some(2_000), None));
+    assert!(!f(None, None, Some(1_000), false));
+    // Cover but no evidence at all (pk-only / undecodable) → never hidden.
+    assert!(!f(Some(2_000), None, None, false));
     // Data older than the deletion → hidden.
-    assert!(f(Some(2_000), Some(1_000)));
+    assert!(f(Some(2_000), None, Some(1_000), false));
     // Data exactly at the deletion → hidden (deletes: ts <= markedForDeleteAt).
-    assert!(f(Some(2_000), Some(2_000)));
+    assert!(f(Some(2_000), None, Some(2_000), false));
     // Data strictly newer than the deletion → survives.
-    assert!(!f(Some(2_000), Some(3_000)));
+    assert!(!f(Some(2_000), None, Some(3_000), false));
+}
+
+/// Issue #3094 (round-4 blocker): the two evidence channels the MULTI-GENERATION
+/// caller threads in — the surviving liveness marker's timestamp and the mere
+/// PRESENCE of a merged cell tombstone. Presence may only ever defeat the `i64::MIN`
+/// fail-safe (hidden-ward); the marker is the one piece of LIVE evidence that can
+/// keep such a row visible.
+///
+/// Revert-verify: hardcoding `has_deleted_data_cell: false` makes the first assertion
+/// FALSE (the phantom row #3094 closes); hardcoding `timestamp: None` makes the third
+/// FALSE (a row whose marker outlives the deletion would be wrongly hidden).
+#[cfg(feature = "write-support")]
+#[test]
+fn merged_row_shadow_uses_tombstone_presence_and_the_surviving_marker() {
+    use super::merged_row_shadowed_by_partition as f;
+    // Tombstone presence alone, no live evidence → the fail-safe is defeated → hidden.
+    assert!(f(Some(5_000), None, None, true));
+    // No cover → presence hides nothing (#3121 residual).
+    assert!(!f(None, None, None, true));
+    // A surviving liveness marker NEWER than the deletion keeps the row visible even
+    // with a tombstone present (Cassandra: the marker outlives the deletion).
+    assert!(!f(Some(5_000), Some(7_000), None, true));
+    // A marker at/below the deletion is covered by it → still hidden.
+    assert!(f(Some(5_000), Some(5_000), None, true));
+    // Live data newer than the deletion keeps the row visible.
+    assert!(!f(Some(5_000), None, Some(9_000), true));
 }
 
 /// Issue #3094: the cell-tombstone drop decision. A DELETED CELL is dropped

@@ -108,19 +108,36 @@ impl ReadShadow {
     }
 
     /// Filter one merged `RowData::Live` row's cells for read visibility given the
-    /// partition-tombstone `cover` (`markedForDeleteAt` µs, or `None`). Returns `None`
-    /// when the WHOLE row is hidden (partition-shadowed), else the surviving cells
-    /// with cell tombstones plus TTL-expired / partition-shadowed data cells dropped.
-    fn filter_live(&self, cover: Option<i64>, cells: Vec<CellData>) -> Option<Vec<CellData>> {
+    /// partition-tombstone `cover` (`markedForDeleteAt` µs, or `None`) and the row's
+    /// SURVIVING primary-key liveness marker timestamp `marker_ts`
+    /// (`MergeEntry::row_liveness.marker_timestamp`, #2374/#2789 — `None` when the row
+    /// has no marker, or the merger already dropped one the partition floor covered).
+    /// Returns `None` when the WHOLE row is hidden (partition-shadowed), else the
+    /// surviving cells with cell tombstones plus TTL-expired / partition-shadowed data
+    /// cells dropped.
+    fn filter_live(
+        &self,
+        cover: Option<i64>,
+        marker_ts: Option<i64>,
+        cells: Vec<CellData>,
+    ) -> Option<Vec<CellData>> {
         let now = self.now_secs;
         let mut kept = Vec::with_capacity(cells.len());
         // Fold over REAL data cells (kept AND dropped) so a partition tombstone that
         // shadows every data cell is recognised at the row level — mirrors the
         // single-gen `agg_max_cell_ts` fold in `row_data.rs`.
         let mut max_data_ts: Option<i64> = None;
+        // Issue #3094: mere PRESENCE of a merged cell TOMBSTONE — the multi-gen twin of
+        // the single-gen `agg_has_deleted_cell`. It carries NO timestamp (one could only
+        // RAISE the row max, i.e. UN-hide the row); it exists solely to defeat the
+        // `i64::MIN` fail-safe in `PartitionShadow::has_shadow_evidence`.
+        let mut has_deleted_data_cell = false;
         for cell in cells {
-            // A cell tombstone is never live data (a deleted column is absent).
+            // A cell tombstone is never live data (a deleted column is absent). Record
+            // it as shadow evidence for DATA columns only, mirroring `row_data.rs`'s
+            // aggregate, which never sees a pk/ck pseudo-cell (#3094).
             if matches!(cell.value, Value::Tombstone(_)) {
+                has_deleted_data_cell |= !self.key_columns.contains(&cell.column);
                 continue;
             }
             // Primary-key (partition + clustering) pseudo-cells are STRUCTURAL: the
@@ -146,7 +163,7 @@ impl ReadShadow {
                 kept.push(cell);
             }
         }
-        if merged_row_shadowed_by_partition(cover, max_data_ts) {
+        if merged_row_shadowed_by_partition(cover, marker_ts, max_data_ts, has_deleted_data_cell) {
             return None;
         }
         Some(kept)
@@ -189,11 +206,14 @@ fn partition_live_rows(
     let cover = partition_cover(&rows);
     let mut out = Vec::new();
     for entry in rows {
+        // Read BEFORE `row_data` is moved out of `entry` below (`RowLiveness` is
+        // `Copy`): the surviving marker's write ts, #2374/#2789.
+        let marker_ts = entry.row_liveness.marker_timestamp;
         match entry.row_data {
             RowData::Live { cells } => {
                 // Read-time visibility: drop cell tombstones + TTL-expired /
                 // partition-shadowed data cells; `None` hides the whole row.
-                let Some(surviving) = shadow.filter_live(cover, cells) else {
+                let Some(surviving) = shadow.filter_live(cover, marker_ts, cells) else {
                     continue;
                 };
                 let row_cells: RowCells = surviving
@@ -534,10 +554,12 @@ fn push_metadata_rows(
     // plain path, so the WRITETIME/TTL projection agrees with `SELECT *`.
     let cover = partition_cover(&rows);
     for entry in rows {
+        // Read BEFORE `row_data` is moved out of `entry` (`RowLiveness` is `Copy`).
+        let marker_ts = entry.row_liveness.marker_timestamp;
         if let RowData::Live { cells } = entry.row_data {
             // `filter_live` drops cell tombstones + TTL-expired / partition-shadowed
             // data cells; `None` hides the whole row (partition-shadowed).
-            let Some(surviving) = shadow.filter_live(cover, cells) else {
+            let Some(surviving) = shadow.filter_live(cover, marker_ts, cells) else {
                 continue;
             };
             let mut row_cells: RowCells = Vec::with_capacity(surviving.len());
