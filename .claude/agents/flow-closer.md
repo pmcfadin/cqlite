@@ -117,10 +117,26 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    On re-invoke, the verdict MUST be PASS (every requirement `satisfied` with a
    public-surface test as evidence). An `unmet`/uncovered/unjustified-`partial` requirement
    blocks merge → route back (see step 4 escalation).
-3. **Final roborev confirmation pass.** Because review-first already ran, this should
-   converge to **clean-on-arrival**. Run roborev with the machine's configured agent
-   (`/roborev-review-branch --base origin/main`; no `--agent`/`--model` unless the local
-   config is broken). Triage every finding per `docs/development/roborev-severity.md`:
+3. **Final roborev confirmation pass — this GATES arming auto-merge.** Because review-first
+   already ran, this should converge to **clean-on-arrival**. Run the ONLY sanctioned
+   invocation (#2964), with the certified tip **PUSHED** (the wrapper asserts it) and **BOTH**
+   `--agent` and `--model` (#2433 — one alone inherits the `.roborev.toml`-pinned model and
+   hard-400s as a silent-looking outage):
+   ```bash
+   bash scripts/flow/roborev-review.sh --agent codex --model gpt-5.6-sol
+   ```
+   NEVER a bare `roborev review --branch --base origin/main` — from a worktree it resolves
+   against the ROOT checkout and enqueues `origin/main`, so it reports clean having reviewed
+   NOTHING — and never the two-positional commit-range form. Retain ONLY the
+   `==== ROBOREV REVIEW SUMMARY ====` block (never the transcript); it is deliberately distinct
+   from every `AGENT-GATE *SUMMARY`, so neither can be pasted as the other. Exit `0` PASS / `1`
+   FAIL / `3` NOTHING-TO-REVIEW / `2` usage error. **Any non-PASS terminal `RESULT` —
+   `NOTHING-TO-REVIEW` included — is a BLOCKED MERGE, not a clean review: do NOT arm
+   `gh pr merge --auto`.** Fix the cause the block names (unpushed branch, mismatched
+   `reviewed-sha`, vacuous verdict) and re-run. A **docs-only diff cannot be roborev-certified
+   at all** — record primary-source verification in the PR body instead of "roborev clean"
+   (https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/).
+   Triage every finding per `docs/development/roborev-severity.md`:
    - **Blockers** (correctness, data-parity, no-heuristics, safety/unwrap-panic paths,
      wiring-evidence gaps, security, any stated acceptance criterion) MUST be fixed pre-merge.
    - **Nits** (style/naming, comment/doc polish, test-robustness suggestions with no failing
@@ -142,7 +158,8 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
      implementer's) or rebased after step 1, **re-run the full gate** (back to step 1).
      `--lite` re-certs are never the gate of record.
 5. **Merge on green (worker-merges-own-PR model).** When gate PASS + C PASS (design) +
-   roborev clean all hold on the final tree: beat the heartbeat, rebase on `origin/main`
+   roborev clean (a terminal `RESULT: PASS` from the wrapper — never `NOTHING-TO-REVIEW`)
+   all hold on the final tree: beat the heartbeat, rebase on `origin/main`
    (resolve conflicts in the worktree — a rebase re-invalidates the gate per step 4),
    `git push` the certified tip, open the nits follow-up issue if any, then — **before** arming
    `gh pr merge --auto` — run the two mechanical pre-merge guards:
