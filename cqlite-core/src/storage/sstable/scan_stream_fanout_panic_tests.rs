@@ -20,7 +20,10 @@
 //!
 //! Each test drives the REAL public surface over a REAL multi-generation SSTable
 //! directory built by the write engine, and kills the task under test with a real
-//! `panic!` through the deterministic `storage::producer_fault` seam.
+//! `panic!` through the deterministic `storage::producer_fault` seam. The fixtures,
+//! the drains and the reconciled/unreconciled oracle live in the shared
+//! `generation_merge::multi_gen_fixture` module, so this suite and the issue-#3154
+//! setup-classification suite cannot drift on what "reconciled" means.
 //!
 //! # Control-arm-first, always (issue #3124 acceptance criterion 3)
 //!
@@ -52,162 +55,27 @@
 //! Included via `#[cfg(all(test, feature = "write-support", not(feature =
 //! "tombstones")))] #[path = ...] mod panic_tests;` in [`super`].
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use tempfile::TempDir;
 
-use crate::platform::Platform;
 use crate::storage::producer_fault::{
     arm_scan_task_panic, silence_injected_panics, ScanTaskSite, INJECTED_PANIC_MESSAGE,
 };
-use crate::storage::sstable::SSTableManager;
-use crate::storage::write_engine::test_support::{create_test_mutation, create_test_schema};
-use crate::storage::write_engine::{WriteEngine, WriteEngineConfig};
-use crate::types::TableId;
-use crate::Config;
+use crate::storage::sstable::generation_merge::multi_gen_fixture::{
+    assert_reconciled_control, drain_batched, drain_per_row, drain_reconciled, expected_rows,
+    flush_generations, flush_overlapping_generations, newest_value_prefix, open_manager,
+    unreconciled_rows, Drained,
+};
 
-/// Partitions written per generation. Comfortably more than one batch's worth on the
-/// batched surface would need, and enough that a short result is unmistakable.
-const PARTITIONS_PER_GENERATION: i32 = 12;
-
-/// Generations flushed. `> 1` is what routes `scan_stream` to the fan-out merge (the
-/// ≠1-generation path this issue is about) rather than the single-reader fast path.
-const GENERATIONS: i32 = 3;
-
-/// Small enough that the producers park in backpressure mid-scan, so a fault has a
-/// genuinely partial stream to truncate.
-const BUFFER: usize = 2;
-
-/// Write `GENERATIONS` flushes of `PARTITIONS_PER_GENERATION` DISJOINT partitions
-/// each, so every generation contributes rows to the merge and the total row count is
-/// exact and predictable.
-///
-/// Returns the write engine's data root (the directory an `SSTableManager` opens).
-///
-/// Runs on a BLOCKING thread: `WriteEngine::flush` drives its own current-thread
-/// runtime, which cannot be started from inside the test's runtime.
-async fn flush_generations(temp_dir: &TempDir) -> PathBuf {
-    let root = temp_dir.path().to_path_buf();
-    tokio::task::spawn_blocking(move || flush_generations_blocking(&root))
-        .await
-        .expect("fixture build task")
+/// The two assertion shapes THIS suite adds on top of the shared fixture's control
+/// arm: a healthy scan of the DISJOINT fixture is complete, and a faulted one FAILS
+/// short. (The overlapping fixture's control lives in the fixture module, shared with
+/// the issue-#3154 suite so both assert the same oracle.)
+trait PanicArm {
+    fn assert_is_the_complete_control(&self, surface: &str);
+    fn assert_failed_short(&self, surface: &str);
 }
 
-fn flush_generations_blocking(root: &std::path::Path) -> PathBuf {
-    let data_dir = root.join("data");
-    let config = WriteEngineConfig::new(data_dir.clone(), root.join("wal"), create_test_schema());
-    let mut engine = WriteEngine::new(config).expect("write engine");
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    for generation in 0..GENERATIONS {
-        for offset in 0..PARTITIONS_PER_GENERATION {
-            let id = generation * PARTITIONS_PER_GENERATION + offset;
-            engine
-                .write(create_test_mutation(id, &format!("row-{id}"), 1_000))
-                .expect("write");
-        }
-        rt.block_on(engine.flush())
-            .expect("flush")
-            .expect("flush wrote an SSTable");
-    }
-    data_dir
-}
-
-/// Total rows a healthy scan of the DISJOINT fixture must return.
-const fn expected_rows() -> usize {
-    (GENERATIONS * PARTITIONS_PER_GENERATION) as usize
-}
-
-/// Write `GENERATIONS` flushes that all rewrite the SAME `PARTITIONS_PER_GENERATION`
-/// partitions, each generation with a strictly newer timestamp and a distinguishable
-/// value — the OVERLAPPING fixture site 5 needs (see the header).
-///
-/// A reconciling read returns [`reconciled_rows`] rows, all carrying
-/// [`newest_value_prefix`]; the non-reconciling concat returns [`unreconciled_rows`]
-/// rows, including every older generation's superseded copy. That gap is what lets the
-/// site-5 test assert "it did not silently fall back to the concat".
-async fn flush_overlapping_generations(temp_dir: &TempDir) -> PathBuf {
-    let root = temp_dir.path().to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let data_dir = root.join("data");
-        let config =
-            WriteEngineConfig::new(data_dir.clone(), root.join("wal"), create_test_schema());
-        let mut engine = WriteEngine::new(config).expect("write engine");
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        for generation in 0..GENERATIONS {
-            for id in 0..PARTITIONS_PER_GENERATION {
-                engine
-                    .write(create_test_mutation(
-                        id,
-                        &format!("gen{generation}-row-{id}"),
-                        // Strictly increasing, so the LWW winner is unambiguous and
-                        // the newest generation is the one a reconciled read shows.
-                        1_000 + generation as i64,
-                    ))
-                    .expect("write");
-            }
-            rt.block_on(engine.flush())
-                .expect("flush")
-                .expect("flush wrote an SSTable");
-        }
-        data_dir
-    })
-    .await
-    .expect("fixture build task")
-}
-
-/// Rows a RECONCILED read of the overlapping fixture returns: last-write-wins collapses
-/// every generation's copy of a partition into one row.
-const fn reconciled_rows() -> usize {
-    PARTITIONS_PER_GENERATION as usize
-}
-
-/// Rows the NON-reconciling token-order concat returns over the same fixture: every
-/// generation's copy of every partition, superseded ones included.
-const fn unreconciled_rows() -> usize {
-    (GENERATIONS * PARTITIONS_PER_GENERATION) as usize
-}
-
-/// The value prefix only the NEWEST generation's cells carry. Every row of a reconciled
-/// read must have it; a concatenated read also surfaces older prefixes.
-fn newest_value_prefix() -> String {
-    format!("gen{}-", GENERATIONS - 1)
-}
-
-async fn open_manager(data_dir: &std::path::Path) -> SSTableManager {
-    let config = Config::default();
-    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
-    SSTableManager::new(
-        data_dir,
-        &config,
-        platform,
-        #[cfg(feature = "state_machine")]
-        None,
-    )
-    .await
-    .expect("manager")
-}
-
-fn table_id() -> TableId {
-    let schema = create_test_schema();
-    TableId::from(format!("{}.{}", schema.keyspace, schema.table).as_str())
-}
-
-/// How a drained stream ended, plus how many rows it delivered.
-struct Drained {
-    rows: usize,
-    /// `Some(message)` when the stream terminated with an ERROR; `None` on a clean
-    /// end of stream.
-    error: Option<String>,
-}
-
-impl Drained {
+impl PanicArm for Drained {
     /// The control arm's expectations, asserted in ONE place: a healthy scan of the
     /// fixture ends cleanly AND returns every written row. Both halves matter — the
     /// count makes a later "short" assertion meaningful, and the clean end proves the
@@ -253,123 +121,6 @@ impl Drained {
             expected_rows()
         );
     }
-}
-
-/// Drain the per-row surface (`SSTableManager::scan_stream`).
-///
-/// `schema = None` on purpose: with a schema present and `write-support` on, a
-/// multi-generation read routes to the authoritative `KWayMerger`
-/// (`stream_generations_for_read`), NOT the lazy fan-out merge that sites 1 and 2
-/// live on. Each reader still resolves its own schema for decoding, so the rows are
-/// real.
-async fn drain_per_row(manager: &SSTableManager) -> Drained {
-    let mut stream = match manager
-        .scan_stream(&table_id(), None, None, None, BUFFER)
-        .await
-    {
-        Ok(stream) => stream,
-        Err(e) => {
-            return Drained {
-                rows: 0,
-                error: Some(e.to_string()),
-            }
-        }
-    };
-    let mut rows = 0usize;
-    while let Some(item) = stream.recv().await {
-        match item {
-            Ok(_) => rows += 1,
-            Err(e) => {
-                return Drained {
-                    rows,
-                    error: Some(e.to_string()),
-                }
-            }
-        }
-    }
-    Drained { rows, error: None }
-}
-
-/// Drain the batched surface (`SSTableManager::scan_stream_batched`), whose
-/// multi-generation arm is the [`rechunk_into_batches`] adapter — site 3.
-async fn drain_batched(manager: &SSTableManager) -> Drained {
-    let mut stream = match manager
-        .scan_stream_batched(&table_id(), None, None, None, BUFFER)
-        .await
-    {
-        Ok(stream) => stream,
-        Err(e) => {
-            return Drained {
-                rows: 0,
-                error: Some(e.to_string()),
-            }
-        }
-    };
-    let mut rows = 0usize;
-    while let Some(item) = stream.recv().await {
-        match item {
-            Ok(batch) => rows += batch.len(),
-            Err(e) => {
-                return Drained {
-                    rows,
-                    error: Some(e.to_string()),
-                }
-            }
-        }
-    }
-    Drained { rows, error: None }
-}
-
-/// Drain the per-row surface WITH a schema, capturing every row's `name` value.
-///
-/// The schema is what routes a multi-generation read to the authoritative RECONCILING
-/// `KWayMerger` (`stream_generations_for_read`) instead of the lazy concat — i.e. it is
-/// what puts site 5 on the path at all. The captured values are what let the caller tell
-/// a reconciled result set from a concatenated one, which a row COUNT alone cannot do
-/// once a fallback returns a full-length answer.
-async fn drain_reconciled(manager: &SSTableManager) -> (Drained, Vec<String>) {
-    let schema = create_test_schema();
-    let mut stream = match manager
-        .scan_stream(&table_id(), None, None, Some(&schema), BUFFER)
-        .await
-    {
-        Ok(stream) => stream,
-        Err(e) => {
-            return (
-                Drained {
-                    rows: 0,
-                    error: Some(e.to_string()),
-                },
-                Vec::new(),
-            )
-        }
-    };
-    let mut rows = 0usize;
-    let mut values = Vec::new();
-    while let Some(item) = stream.recv().await {
-        match item {
-            Ok((_, row)) => {
-                rows += 1;
-                if let crate::types::ScanRow::Row(cells) = row {
-                    for (column, value) in cells.iter() {
-                        if column.as_ref() == "name" {
-                            values.push(value.as_str().unwrap_or_default().to_string());
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                return (
-                    Drained {
-                        rows,
-                        error: Some(e.to_string()),
-                    },
-                    values,
-                )
-            }
-        }
-    }
-    (Drained { rows, error: None }, values)
 }
 
 /// Site 1: the fan-out k-way MERGE task dies. Pre-fix its `JoinHandle` was discarded
@@ -479,39 +230,12 @@ async fn a_dead_cross_generation_merge_fails_the_scan_instead_of_falling_back_to
     let data_dir = flush_overlapping_generations(&temp_dir).await;
     let manager = open_manager(&data_dir).await;
 
-    // Test precondition: the fixture must make the two answers distinguishable at all.
-    assert_ne!(
-        reconciled_rows(),
-        unreconciled_rows(),
-        "test precondition: with reconciled == unreconciled this test could not tell a \
-         fail-closed read from a silent concat fallback"
-    );
-
-    // Control arm: the healthy read ends cleanly, is RECONCILED (one row per partition)
-    // and shows the newest generation's values.
-    let (control, control_values) = drain_reconciled(&manager).await;
-    assert_eq!(
-        control.error, None,
-        "a healthy multi-generation reconciling read must still end CLEANLY — the \
-         fail-closed join must not turn a live producer into an error"
-    );
-    assert_eq!(
-        control.rows,
-        reconciled_rows(),
-        "the control drain must be RECONCILED: {} partitions rewritten in every \
-         generation collapse to {} rows, not the concat's {}",
-        PARTITIONS_PER_GENERATION,
-        reconciled_rows(),
-        unreconciled_rows()
-    );
+    // Control arm FIRST (shared with the issue-#3154 suite, so both assert the same
+    // oracle): the healthy read ends cleanly, is RECONCILED (one row per partition),
+    // shows only the newest generation's values, and the fixture's two answers are
+    // distinguishable at all.
+    assert_reconciled_control(&manager).await;
     let newest = newest_value_prefix();
-    assert!(
-        control_values.len() == reconciled_rows()
-            && control_values.iter().all(|v| v.starts_with(&newest)),
-        "every reconciled row must carry the newest generation's ({newest}) value — \
-         otherwise the control is not the LWW winner set and 'did not fall back' below \
-         proves nothing, got: {control_values:?}"
-    );
 
     let scope = temp_dir.path().to_string_lossy().to_string();
     let (faulted, faulted_values) = {

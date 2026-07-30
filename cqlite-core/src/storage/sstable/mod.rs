@@ -2105,10 +2105,11 @@ impl SSTableManager {
     /// O(one partition + channel), and time-to-first-row is O(first partition),
     /// not O(full merge). The merger already emits partitions in `(token, key)`
     /// order, byte-identical to `scan`'s `sort_by_token_order`, so the emitted
-    /// order is unchanged (issue #1579 ordering guardrail). On a REPORTED merger
-    /// CONSTRUCTION error this path FALLS BACK to the lazy per-reader streaming
-    /// merge, mirroring `scan`'s fall-back-to-concat; on a merge producer that DIED
-    /// it fails closed instead, because the concat is not reconciling and answering a
+    /// order is unchanged (issue #1579 ordering guardrail). A merger CONSTRUCTION
+    /// failure now PROPAGATES (issue #3154) — the only two it can report,
+    /// `Error::Schema` and a thread-spawn `Error::Storage`, used to be answered with
+    /// the concat, so this diverges from `scan` there (follow-up #3170) — as does a
+    /// merge producer that DIED, because the concat is not reconciling and answering a
     /// panic with it returns full-length WRONG data (issue #3124). The
     /// single-generation / no-schema / no-`write-support` cases keep the lazy
     /// streaming merge, which already matches `scan`'s concat path exactly and
@@ -2124,14 +2125,17 @@ impl SSTableManager {
     ) -> Result<reader::RowScanStream> {
         let readers = self.resolve_table_readers(table_id).await;
 
-        // Issue #957: keep the materializing `scan` and this streaming path
-        // definitionally in lockstep. Reuse the EXACT guard `scan` uses for
-        // cross-generation reconciliation (`reader_list.len() > 1 && schema present`,
-        // write-support only) and the same merger, then forward the reconciled rows
-        // through the streaming channel. Without this, a partition spread across
-        // generations duplicates overwritten rows and resurrects deleted ones in the
-        // stream while `scan` returns the merged, deduplicated, tombstone-honouring
-        // result.
+        // Issue #957: keep the materializing `scan` and this streaming path in lockstep
+        // ON THE SUCCESS PATH. Reuse the EXACT guard `scan` uses for cross-generation
+        // reconciliation (`reader_list.len() > 1 && schema present`, write-support only)
+        // and the same merger, then forward the reconciled rows through the streaming
+        // channel. Without this, a partition spread across generations duplicates
+        // overwritten rows and resurrects deleted ones in the stream while `scan`
+        // returns the merged, deduplicated, tombstone-honouring result. They are NO
+        // LONGER in lockstep on the ERROR path (issue #3154): a schema whose
+        // `dropped_columns` fails `validate_dropped_columns` (`schema/mod.rs:611`, from
+        // `write_engine/merge/mod.rs:1728`) makes THIS path `Err` while `scan` still
+        // concatenates and returns rows — deliberate; follow-up #3170 owns `scan`.
         #[cfg(feature = "write-support")]
         if readers.len() > 1 {
             // No schema: cross-generation LWW/tombstone reconciliation needs the
@@ -2156,28 +2160,24 @@ impl SSTableManager {
                         );
                         return Ok(rx);
                     }
-                    // Never fail a read because the merge could not be CONSTRUCTED
-                    // (unsupported input format); fall back to the lazy streaming
-                    // merge, matching `scan`'s fall-back-to-concatenation.
-                    //
-                    // Gated on the TYPE, not on the message (issue #3124, roborev):
-                    // `fallback_eligible()` is true for the REPORTED construction
-                    // failure ONLY. Nothing has been streamed at that point, so
-                    // falling back cannot mix reconciled and unreconciled rows, and
-                    // the concat's documented Issue #883 limitation is accepted for a
-                    // table the reconciling merge cannot open at all.
-                    //
-                    // The other setup failure — the producer task DIED before
-                    // signalling — is deliberately NOT eligible and propagates. Falling
-                    // back on a dead producer returned a FULL-LENGTH, UNRECONCILED
-                    // result set (duplicated overwritten rows, resurrected deleted
-                    // rows) as `Ok` with only a warning: silently WRONG data, one notch
-                    // worse than the silent truncation #3124 is about.
+                    // Gated on the TYPE, never the message (issues #3124/#3154, roborev):
+                    // `fallback_eligible()` is true for the merger-INELIGIBLE input ALONE;
+                    // every other setup failure propagates, because answering one with the
+                    // concat returned a FULL-LENGTH UNRECONCILED result set under `Ok`.
+                    // This arm is DEFENSIVE and DEAD IN PRODUCTION: `KWayMerger::new`
+                    // cannot report an unsupported format/version — each input's
+                    // `SSTableReader::open`, with every format/version gate, runs in the
+                    // producer thread it spawns (`merge/producer_iter.rs:385-388`) and
+                    // surfaces mid-stream at `step()`; its reachable errors are
+                    // `Error::Schema` + spawn `Error::Storage`, which THIS PR narrowed to
+                    // propagate. Enumeration + why it is kept: `merge_stream_setup`'s doc.
                     Err(setup) if setup.fallback_eligible() => {
                         tracing::warn!(
-                            "SSTableManager::scan_stream - cross-generation merge could not be \
-                             constructed for '{}' ({}); falling back to lazy per-reader \
-                             streaming merge",
+                            "SSTableManager::scan_stream - cross-generation RECONCILING merge \
+                             could not be constructed for '{}' ({}); falling back to the lazy \
+                             per-reader NON-reconciling token-order CONCATENATION: rows are NOT \
+                             last-write-wins reconciled and may contain duplicated overwritten \
+                             rows and rows resurrected from under a tombstone (issue #883)",
                             table_id,
                             setup.into_error()
                         );

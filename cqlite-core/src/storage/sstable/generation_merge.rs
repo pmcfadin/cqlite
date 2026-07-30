@@ -601,14 +601,19 @@ fn push_metadata_rows(
 /// path's [`scan_merge::sort_by_token_order`] output (issue #1579 ordering
 /// guardrail).
 ///
-/// Construction (`KWayMerger::new`, which opens the input files) happens on the
-/// blocking task and is signalled back over a oneshot BEFORE any streaming — and the
-/// TWO ways that can fail are kept apart by the returned
-/// [`MergeStreamSetupError`] rather than flattened into one `Error`. Only a
-/// REPORTED construction failure is `fallback_eligible`; a producer that DIED
-/// without signalling is joined here and reported as `ProducerDied`, which the caller
-/// must not answer with the non-reconciling concat (issue #3124, roborev — see that
-/// type's module doc for why the flattened version returned wrong data).
+/// Construction (`KWayMerger::new`, which SPAWNS one producer thread per input —
+/// each input's `SSTableReader::open`, and so every format/version gate, runs inside
+/// that thread, not here) happens on the blocking task and is signalled back over a
+/// oneshot BEFORE any streaming — and the ways that can fail are kept apart by the
+/// returned [`MergeStreamSetupError`] rather than flattened into one `Error`. Only a
+/// merger-INELIGIBLE input (an unsupported format/version) is `fallback_eligible`,
+/// and because of that thread boundary NO production construction failure is ever
+/// classified that way — the reachable ones are `Error::Schema` and `Error::Storage`,
+/// and both now propagate (see [`MergeStreamSetupError`]'s module doc for the full
+/// enumeration and why that arm is kept as a defensive one). A producer that DIED
+/// without signalling — joined here to recover its panic — propagates too, because
+/// the caller must not answer it with the non-reconciling concat (issues
+/// #3124/#3154, roborev).
 ///
 /// A `step()` error mid-stream is delivered as an `Err` item on the channel, and a
 /// task that dies mid-stream is caught by the returned [`reader::RowScanStream`]'s
@@ -651,7 +656,16 @@ pub(super) async fn stream_generations_for_read(
         fault_scope.checkpoint(crate::storage::producer_fault::ScanTaskSite::CrossGenerationMerge);
         // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
-        let mut merger = match KWayMerger::new(paths, &schema) {
+        // Issue #3154: a test may make construction REPORT a chosen error variant, so
+        // the narrowed fallback classification below can be proven per class (I/O vs
+        // corruption vs merger-ineligible). `None` — and `KWayMerger::new` called
+        // exactly as before — in every production build, where
+        // `injected_construction_error` returns `None` without touching a registry.
+        let constructed = match fault_scope.injected_construction_error() {
+            Some(injected) => Err(injected),
+            None => KWayMerger::new(paths, &schema),
+        };
+        let mut merger = match constructed {
             Ok(m) => {
                 // Signal readiness; if the caller already dropped, stop.
                 if ready_tx.send(Ok(())).is_err() {
@@ -660,7 +674,9 @@ pub(super) async fn stream_generations_for_read(
                 m
             }
             Err(e) => {
-                // Let the caller fall back to the lazy per-reader streaming merge.
+                // REPORT the failure verbatim; whether it earns the caller's fallback
+                // to the lazy per-reader concat is classified from its VARIANT at the
+                // receiving end (issue #3154), not decided here.
                 let _ = ready_tx.send(Err(e));
                 return;
             }
@@ -706,7 +722,11 @@ pub(super) async fn stream_generations_for_read(
 
     match ready_rx.await {
         Ok(Ok(())) => Ok(reader::RowScanStream::new(out_rx, task)),
-        Ok(Err(e)) => Err(MergeStreamSetupError::Construction(e)),
+        // A REPORTED construction failure is CLASSIFIED from its `Error` variant (issue
+        // #3154): only a merger-INELIGIBLE input earns the caller's concat fallback, and
+        // an I/O / corruption / other runtime failure propagates. Answering the latter
+        // with the concat returned a full-length UNRECONCILED result set under `Ok`.
+        Ok(Err(e)) => Err(MergeStreamSetupError::from_construction_failure(e)),
         // `ready_tx` is dropped-WITHOUT-send on exactly one condition: the blocking
         // task unwound before either readiness arm ran. So this `Err` ⟺ a dead
         // producer — JOIN the retained handle to recover the real cause (the panic
@@ -729,3 +749,12 @@ fn ordered_generation_paths(reader_list: &[Arc<reader::SSTableReader>]) -> Vec<P
 
 #[cfg(test)]
 mod read_shadow_tests;
+
+// The multi-generation streaming read path's shared fixture + reconciled/unreconciled
+// oracle, and the issue-#3154 end-to-end pins built on it. `not(tombstones)` because
+// that build routes `scan_stream` through the materializing `scan`, so neither the
+// streaming merge nor its setup-outcome type exists there.
+#[cfg(all(test, not(feature = "tombstones")))]
+pub(super) mod multi_gen_fixture;
+#[cfg(all(test, not(feature = "tombstones")))]
+mod setup_fail_closed_tests;
