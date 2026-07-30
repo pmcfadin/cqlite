@@ -367,8 +367,7 @@ impl V5CompressedLegacyParser {
         let mut agg_max_cell_ts: Option<i64> = None;
         let mut agg_max_expires_at: Option<i64> = None;
         let mut agg_has_live_forever = false;
-        // Issue #3094: same max over the row's CELL TOMBSTONES, kept apart from
-        // `agg_max_cell_ts` (`PartitionShadow::shadow_evidence_timestamp`).
+        // #3094: same max over CELL TOMBSTONES (`shadow_evidence_timestamp`).
         let mut agg_max_deleted_cell_ts: Option<i64> = None;
 
         for (col_idx, ctp) in columns_in_order.iter().enumerate() {
@@ -644,8 +643,9 @@ impl V5CompressedLegacyParser {
                             // Issue #1741 read-side shadow aggregate (scalars only, no
                             // allocation) + the #3094 DELETED-CELL-reads-NULL drop. Runs
                             // BEFORE the metadata block, which moves `cell_exp`. `tomb` is
-                            // deliberately the BROAD shape (no tombstone of any kind is
-                            // live data); the #3094 drop is narrow — CELL tombstones only.
+                            // the BROAD shape (no tombstone of any kind is live data); the
+                            // #3094 drop is narrow — CELL tombstones only.
+                            let eff_ts = cell_own_ts.or(row_header.timestamp);
                             let tomb = matches!(value, Value::Tombstone(_));
                             let mut dropped = PartitionShadow::cell_tombstone_dropped(
                                 cell_ctx.is_some(),
@@ -653,12 +653,9 @@ impl V5CompressedLegacyParser {
                             );
                             if tomb {
                                 // Shadow EVIDENCE, never liveness (#3094).
-                                if let Some(t) = cell_own_ts.or(row_header.timestamp) {
-                                    agg_max_deleted_cell_ts =
-                                        Some(agg_max_deleted_cell_ts.map_or(t, |m| m.max(t)));
-                                }
+                                agg_max_deleted_cell_ts =
+                                    PartitionShadow::fold_max(agg_max_deleted_cell_ts, eff_ts);
                             } else {
-                                let eff_ts = cell_own_ts.or(row_header.timestamp);
                                 // A USE_ROW_TTL cell inherits the ROW's expiry. For a
                                 // TTL-bearing INSERT that expiry is the pk-liveness
                                 // localExpirationTime (`liveness_expires_at_seconds`,
@@ -701,19 +698,13 @@ impl V5CompressedLegacyParser {
                                 // + expiry, so a row reduced to nothing reads as shadowed/
                                 // expired rather than as an empty/truncated parse — but it is
                                 // NEVER counted live-forever (it is not live).
-                                if let Some(t) = eff_ts {
-                                    agg_max_cell_ts = Some(agg_max_cell_ts.map_or(t, |m| m.max(t)));
-                                }
-                                match eff_exp {
-                                    Some(e) => {
-                                        agg_max_expires_at =
-                                            Some(agg_max_expires_at.map_or(e, |m| m.max(e)));
-                                    }
-                                    None => {
-                                        if !dropped {
-                                            agg_has_live_forever = true;
-                                        }
-                                    }
+                                agg_max_cell_ts =
+                                    PartitionShadow::fold_max(agg_max_cell_ts, eff_ts);
+                                agg_max_expires_at =
+                                    PartitionShadow::fold_max(agg_max_expires_at, eff_exp);
+                                // A non-expiring cell that SURVIVED is live-forever.
+                                if eff_exp.is_none() && !dropped {
+                                    agg_has_live_forever = true;
                                 }
                             }
                             if dropped {

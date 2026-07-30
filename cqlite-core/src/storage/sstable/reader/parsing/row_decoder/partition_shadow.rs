@@ -320,6 +320,18 @@ impl PartitionShadow {
     ) -> Option<i64> {
         live.or(deleted_only)
     }
+
+    /// Fold `value` into a running `Option` MAX accumulator: `None` contributes
+    /// nothing, so an absent authoritative timestamp never becomes a `0` (which
+    /// would read as "written at the epoch" — a heuristic, #28).
+    #[inline]
+    pub(crate) fn fold_max(acc: Option<i64>, value: Option<i64>) -> Option<i64> {
+        match (acc, value) {
+            (Some(a), Some(v)) => Some(a.max(v)),
+            (Some(a), None) => Some(a),
+            (None, v) => v,
+        }
+    }
 }
 
 /// Whether a partition-level deletion at `cover` (µs, `markedForDeleteAt`) shadows
