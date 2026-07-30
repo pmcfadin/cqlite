@@ -150,6 +150,17 @@ impl ProducerFault {
 ///
 /// A zero-sized, no-op struct in a production build, exactly like
 /// [`ProducerFault`] (see the module doc).
+///
+/// Gated on `write-support` — unlike its query-row sibling [`ProducerFault`],
+/// which serves a READ-path stream that exists unconditionally. The k-way merge,
+/// its producer threads, and the `forward_row` funnel this checkpoint lives in are
+/// ALL `#[cfg(feature = "write-support")]` (`storage::write_engine::merge`), so
+/// without that feature there is no producer thread to injure and this type has no
+/// possible constructor. The gate's `minimal-build`
+/// (`--no-default-features --features all-compression`) proves it: an ungated
+/// version is genuinely dead code there, which is the wiring telling the truth
+/// rather than a warning to silence.
+#[cfg(feature = "write-support")]
 #[derive(Debug, Default)]
 pub(crate) struct MergeProducerFault {
     /// Rows this producer may still forward into the merge channel before it
@@ -158,6 +169,7 @@ pub(crate) struct MergeProducerFault {
     panic_after_rows: Option<u64>,
 }
 
+#[cfg(feature = "write-support")]
 impl MergeProducerFault {
     /// Take the MERGE arm registered for this run's reader, if any (never any, in
     /// production — `scope_of` is not even called).
@@ -245,6 +257,11 @@ mod armed {
     /// One registered MERGE arm (issue #3120). Shaped like [`OuterArm`] (it has a
     /// row budget) but in its OWN registry, so a merge producer can never consume
     /// a query-row test's arm — see the module doc.
+    ///
+    /// `write-support`-gated for the same reason [`super::MergeProducerFault`] is:
+    /// with no k-way merge compiled there is no producer thread to arm, so the
+    /// whole MERGE registry would be dead.
+    #[cfg(feature = "write-support")]
     struct MergeArm {
         id: u64,
         scope: String,
@@ -257,6 +274,7 @@ mod armed {
     /// ever held across a suspension point.
     static OUTER_ARMS: Mutex<Vec<OuterArm>> = Mutex::new(Vec::new());
     static INNER_ARMS: Mutex<Vec<InnerArm>> = Mutex::new(Vec::new());
+    #[cfg(feature = "write-support")]
     static MERGE_ARMS: Mutex<Vec<MergeArm>> = Mutex::new(Vec::new());
 
     /// Distinguishes two arms with the same scope, so a guard removes exactly its
@@ -315,6 +333,7 @@ mod armed {
         Some(arms.remove(index).after_batches)
     }
 
+    #[cfg(feature = "write-support")]
     pub(super) fn arm_merge(scope: &str, after_rows: u64) -> u64 {
         check_scope(scope);
         let id = next_id();
@@ -326,6 +345,7 @@ mod armed {
         id
     }
 
+    #[cfg(feature = "write-support")]
     pub(super) fn disarm_merge(id: u64) {
         MERGE_ARMS.lock().retain(|arm| arm.id != id);
     }
@@ -336,6 +356,7 @@ mod armed {
     /// TempDir-wide scope would kill whichever producer reached its first row
     /// first: a nondeterministic victim AND a nondeterministic rows-through
     /// count).
+    #[cfg(feature = "write-support")]
     pub(super) fn take_merge(path: &str) -> Option<u64> {
         let mut arms = MERGE_ARMS.lock();
         let index = arms
@@ -466,9 +487,13 @@ impl Drop for ArmedInnerScanPanic {
 /// the rows-through count is deterministic. Scope to ONE input's `Data.db` path,
 /// NOT the enclosing `TempDir` (see [`armed::take_merge`]).
 ///
-/// TEST-ONLY: this symbol does not exist unless `cfg(test)` or the
-/// `producer-fault-injection` feature is on.
-#[cfg(any(test, feature = "producer-fault-injection"))]
+/// TEST-ONLY: this symbol does not exist unless (`cfg(test)` or the
+/// `producer-fault-injection` feature) AND `write-support` — the k-way merge it
+/// injures is itself `write-support`-gated (see [`MergeProducerFault`]).
+#[cfg(all(
+    feature = "write-support",
+    any(test, feature = "producer-fault-injection")
+))]
 #[must_use = "the fault stays armed only while the guard is alive"]
 pub fn arm_merge_producer_panic(scope: &str, after_rows: u64) -> ArmedMergeProducerPanic {
     ArmedMergeProducerPanic {
@@ -478,13 +503,19 @@ pub fn arm_merge_producer_panic(scope: &str, after_rows: u64) -> ArmedMergeProdu
 
 /// Guard returned by [`arm_merge_producer_panic`]: removes its own arm on drop.
 /// Holds no lock, so it is safe to hold across an `.await`.
-#[cfg(any(test, feature = "producer-fault-injection"))]
+#[cfg(all(
+    feature = "write-support",
+    any(test, feature = "producer-fault-injection")
+))]
 #[derive(Debug)]
 pub struct ArmedMergeProducerPanic {
     id: u64,
 }
 
-#[cfg(any(test, feature = "producer-fault-injection"))]
+#[cfg(all(
+    feature = "write-support",
+    any(test, feature = "producer-fault-injection")
+))]
 impl Drop for ArmedMergeProducerPanic {
     fn drop(&mut self) {
         armed::disarm_merge(self.id);
@@ -666,6 +697,7 @@ mod tests {
 
     /// A default-constructed MERGE fault (the production shape) NEVER panics,
     /// however many rows are forwarded.
+    #[cfg(feature = "write-support")]
     #[test]
     fn an_unarmed_merge_producer_fault_is_inert() {
         let mut fault = MergeProducerFault::default();
@@ -677,6 +709,7 @@ mod tests {
     /// The MERGE budget semantics, asserted WITHOUT touching the arm registry
     /// (`for_test`): the fault survives exactly its budget of row forwards, then
     /// panics.
+    #[cfg(feature = "write-support")]
     #[test]
     fn an_armed_merge_producer_fault_panics_after_exactly_its_budget() {
         let mut fault = MergeProducerFault::for_test(2);
@@ -698,6 +731,7 @@ mod tests {
     /// merge run must not consume a query-row arm, and a query row stream must not
     /// consume a merge arm — cross-consumption would let either test pass for the
     /// wrong reason.
+    #[cfg(feature = "write-support")]
     #[test]
     fn merge_and_query_row_registries_never_consume_each_others_arms() {
         let scope = "issue-3120-registry-separation/only-me";
@@ -735,6 +769,7 @@ mod tests {
     /// A MERGE arm is taken ONLY by a matching input path — the property that
     /// makes a K-input merge's victim deterministic (a `TempDir`-wide scope would
     /// kill whichever producer reached its first row first).
+    #[cfg(feature = "write-support")]
     #[test]
     fn a_merge_arm_is_taken_only_by_a_matching_input_path() {
         let scope = "issue-3120-merge-scope/nb-2-big-Data.db";
