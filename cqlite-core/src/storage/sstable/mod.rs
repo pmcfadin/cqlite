@@ -2918,7 +2918,14 @@ mod tests {
             .unwrap();
         drop(in_tx); // close the source
 
-        let mut out = scan_stream_fanout::rechunk_into_batches(in_rx, 64);
+        // Issue #3124: the re-chunker's source is a `RowScanStream`, so this stand-in
+        // pairs the channel with a producer task that FINISHES cleanly — the source's
+        // end of stream is then a proven-clean one, exactly as a healthy scan's is,
+        // and the assertions below are about the flush-before-error ordering only.
+        let mut out = scan_stream_fanout::rechunk_into_batches(
+            reader::RowScanStream::new(in_rx, tokio::spawn(async {})),
+            64,
+        );
 
         // First item: the flushed pending batch with ALL confirmed rows, in order.
         let first = out

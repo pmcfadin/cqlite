@@ -235,3 +235,13 @@ pub(super) fn rechunk_into_batches(
     });
     reader::BatchedScanStream::new(rx, task)
 }
+
+// Issue #3124 END-TO-END pins for sites 1-3 (the fan-out merge task, a per-generation
+// sub-scan, and this re-chunker's source): each kills the task under test with a real
+// panic and asserts the public surface FAILS instead of returning short rows — after a
+// control arm that pins the complete row count. `write-support` because the fixture is
+// built with the write engine; `not(tombstones)` because that build routes
+// `scan_stream` through the materializing `scan` instead of this fan-out.
+#[cfg(all(test, feature = "write-support", not(feature = "tombstones")))]
+#[path = "scan_stream_fanout_panic_tests.rs"]
+mod panic_tests;
