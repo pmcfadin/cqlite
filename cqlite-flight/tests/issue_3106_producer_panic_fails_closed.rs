@@ -231,6 +231,9 @@ async fn a_dead_query_row_producer_fails_the_do_get_instead_of_truncating_it_sil
     let _serialized = FAULT_LOCK.lock().await;
     let _forced = ForcedPath::bypass();
     let (_temp, data_dir) = build_one_generation().await;
+    // Every fault below is SCOPED to this fixture's own path, so no other scan in
+    // the process can consume the arm and let this test pass for the wrong reason.
+    let scope = data_dir.to_string_lossy().to_string();
     let svc = CqliteFlightService::new(data_dir, 8192);
 
     // Control: no fault armed. Establishes the COMPLETE result set, and that the
@@ -252,7 +255,7 @@ async fn a_dead_query_row_producer_fails_the_do_get_instead_of_truncating_it_sil
         // restored before any assertion below runs, so a real failure message is
         // never masked.
         let _silence = silence_injected_panics();
-        let _fault = arm_query_row_producer_panic(BATCHES_BEFORE_THE_PANIC);
+        let _fault = arm_query_row_producer_panic(&scope, BATCHES_BEFORE_THE_PANIC);
         do_get_served(&svc, ticket_bytes()).await
     };
 
@@ -318,6 +321,9 @@ async fn a_dead_inner_scan_task_fails_the_do_get_instead_of_truncating_it_silent
     let _serialized = FAULT_LOCK.lock().await;
     let _forced = ForcedPath::bypass();
     let (_temp, data_dir) = build_one_generation().await;
+    // Every fault below is SCOPED to this fixture's own path, so no other scan in
+    // the process can consume the arm and let this test pass for the wrong reason.
+    let scope = data_dir.to_string_lossy().to_string();
     let svc = CqliteFlightService::new(data_dir, 8192);
 
     // Control: no fault armed. NOTE this also proves the fixture is served by the
@@ -340,7 +346,7 @@ async fn a_dead_inner_scan_task_fails_the_do_get_instead_of_truncating_it_silent
     // a checkpoint inside one branch can silently not fire).
     let served = {
         let _silence = silence_injected_panics();
-        let _fault = arm_inner_scan_task_panic();
+        let _fault = arm_inner_scan_task_panic(&scope);
         do_get_served(&svc, ticket_bytes()).await
     };
 

@@ -313,10 +313,12 @@ impl SSTableReader {
             caller: scan_cancel,
             child: child_cancel.clone(),
         };
-        // Issue #3106: whatever fault a test armed is captured HERE (never
-        // re-read mid-walk) and owned by the producer thread. Always empty — and
-        // a zero-sized no-op — in a production build.
-        let mut fault = crate::storage::producer_fault::ProducerFault::capture();
+        // Issue #3106: whatever fault a test armed FOR THIS READER is captured
+        // HERE (never re-read mid-walk) and owned by the producer thread. Always
+        // empty — and a zero-sized no-op whose scope closure is never called — in
+        // a production build.
+        let mut fault =
+            crate::storage::producer_fault::ProducerFault::capture_for(|| self.file_path());
         std::thread::Builder::new()
             .name("cqlite-query-rows".to_string())
             .spawn(move || {

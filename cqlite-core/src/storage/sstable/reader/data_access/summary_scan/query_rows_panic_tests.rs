@@ -162,11 +162,19 @@ fn a_producer_panic_mid_stream_fails_the_stream_instead_of_truncating_it_silentl
     );
 
     // Fault arm: the producer thread panics just before its second batch handoff.
+    //
+    // The arm is SCOPED to this test's own `TempDir` path (issue #3106, roborev):
+    // this file compiles into the shared `cqlite-core` lib test binary, where
+    // libtest runs thousands of tests in parallel, so an UNSCOPED process-global
+    // arm could be consumed by a concurrent test's stream — and this test would
+    // then pass for the wrong reason. A `TempDir` path is unique per run, so no
+    // other reader can match it and no sibling can clobber the registration.
+    let scope = temp_dir.path().to_string_lossy().to_string();
     let faulted = {
         // Silence ONLY the injected panic's console noise, and restore the
         // previous hook before any assertion below runs.
         let _silence = silence_injected_panics();
-        let _fault = arm_query_row_producer_panic(BATCHES_BEFORE_THE_PANIC);
+        let _fault = arm_query_row_producer_panic(&scope, BATCHES_BEFORE_THE_PANIC);
         drain(open_stream(&reader))
     };
 

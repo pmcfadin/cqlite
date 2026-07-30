@@ -152,7 +152,7 @@ impl SSTableReader {
     /// terminator — for any reader, and the join that catches it wraps the whole
     /// task, so the property proven is branch-agnostic.
     pub(super) async fn open_batched_scan_cursor(&self) -> Result<super::ScanCursor> {
-        crate::storage::producer_fault::inner_scan_task_checkpoint();
+        crate::storage::producer_fault::inner_scan_task_checkpoint(|| self.file_path());
         self.new_scan_cursor().await
     }
 

@@ -26,20 +26,44 @@
 //!   which sits ABOVE the `requires_chunk_stitching()` branch and is therefore
 //!   reached whatever on-disk format the reader has — a checkpoint inside either
 //!   branch would fire only for that branch's formats and could silently not fire.
-//!   No budget knob: a count would only be spendable at sites that do not exist.
 //!   This is the arm a `do_get` with NO token filter takes, so it is the issue's
 //!   own repro; killing the task drops its sender with no terminator, which the
 //!   query-row thread used to read as "the scan finished".
+//!
+//! # Every arm is SCOPED to one reader — no test can take another's (roborev)
+//!
+//! An arm is registered against a `scope` STRING, and a checkpoint fires only when
+//! the scanning reader's `Data.db` PATH contains that scope. This is the
+//! structural replacement for the earlier "process-global, caller serializes"
+//! convention, which was unsound in the `cqlite-core` lib test binary: the in-`src`
+//! panic tests compile into the SAME binary as thousands of other tests and
+//! libtest runs them in parallel, so a concurrent test's scan could consume the arm
+//! and let a panic-injection test pass for the wrong reason (a doc comment asking
+//! callers to serialize is exactly the mitigation that failed).
+//!
+//! Two properties make it structural rather than conventional:
+//!
+//! * **Scoped consumption.** A scan whose path does not match leaves the arm
+//!   registered, so it cannot consume a foreign arm even by racing. A test scopes
+//!   to its own `TempDir` path (unique per run) or to its own `keyspace/table`.
+//! * **A registry, not a slot.** Arms live in a `Vec`, so two concurrently armed
+//!   tests coexist; neither can clobber the other's arm by arming second. Each
+//!   guard removes its OWN entry (by id) on drop.
+//!
+//! Matching is by substring so a caller can scope to a directory (`keyspace/table`)
+//! without knowing the generated SSTable filename. An arm that matches nothing is
+//! simply never taken — the arming test then fails LOUDLY (it sees no error), which
+//! is the correct failure direction.
 //!
 //! # Why this is not a production knob (no-heuristics safe)
 //!
 //! * Everything that can arm a fault is `#[cfg(any(test, feature =
 //!   "producer-fault-injection"))]`. In a default build the arming API does not
-//!   exist, the armed-state statics do not exist, [`ProducerFault`] is a
-//!   zero-sized struct with no fields, and both checkpoints compile to empty
-//!   functions — the production build is byte-identical to one without this
-//!   module's body. The module itself is `pub(crate)`; only the test-only surface
-//!   is re-exported, so a default build publishes nothing from here.
+//!   exist, the registries do not exist, [`ProducerFault`] is a zero-sized struct
+//!   with no fields, and both checkpoints compile to empty functions that never
+//!   even evaluate their scope closure — so a production scan does not pay the
+//!   `PathBuf` clone. The production build is byte-identical to one without this
+//!   module's body, and the module itself is `pub(crate)` there.
 //! * No environment variable, config field or on-disk byte pattern can arm it: the
 //!   only way in is a Rust call to an arming function that does not exist in
 //!   production builds. So it cannot influence a decoding decision (issue #28)
@@ -47,29 +71,6 @@
 //! * `cqlite-flight` enables the feature from its `[dev-dependencies]` (the same
 //!   convention `arrow-shape-corpus` / `test-util` already use), so the shipped
 //!   Flight binary never links it.
-//!
-//! # Arming semantics — PROCESS-GLOBAL, caller serializes
-//!
-//! An arm is process-global rather than thread-local on purpose: the Flight
-//! `do_get` row route opens its stream on a `spawn_blocking` thread and drives the
-//! inner scan on yet another runtime, so a thread-local arm could never reach the
-//! surface whose fail-closed behaviour is the point of the fix.
-//!
-//! Consequently — exactly like [`crate::storage::read_path_probe`]'s
-//! process-global counters — **the caller must serialize**: one file = one test
-//! binary = one process is the strongest form, a mutex held across the armed
-//! window is the minimum. The arming functions deliberately return a plain
-//! `Send` disarm-on-drop guard and take NO internal lock, so a guard may be held
-//! across an `.await` without the `await_holding_lock` hazard; serialization is
-//! the test's own explicit business.
-//!
-//! Two properties keep the failure modes loud rather than silent:
-//!
-//! * The OUTER arm is TAKEN (consumed) by the first [`ProducerFault::capture`],
-//!   i.e. by exactly ONE stream, and is then owned by that stream's producer
-//!   thread — never re-read from a shared cell mid-walk.
-//! * A racing scan that stole an arm makes the arming test FAIL (it sees no
-//!   error), never pass silently.
 
 /// Producer-fault state captured ONCE when a query row stream is opened, then
 /// owned by that stream's producer thread.
@@ -84,12 +85,17 @@ pub(crate) struct ProducerFault {
 }
 
 impl ProducerFault {
-    /// Take whatever OUTER fault is armed for the next stream (nothing, in
-    /// production).
-    pub(crate) fn capture() -> Self {
+    /// Take the OUTER arm registered for this reader, if any (never any, in
+    /// production — `scope_of` is not even called).
+    ///
+    /// `scope_of` is lazy precisely so the production build pays nothing: it
+    /// clones a `PathBuf` only when the arming surface is compiled in.
+    pub(crate) fn capture_for(scope_of: impl FnOnce() -> std::path::PathBuf) -> Self {
+        #[cfg(not(any(test, feature = "producer-fault-injection")))]
+        let _ = scope_of;
         Self {
             #[cfg(any(test, feature = "producer-fault-injection"))]
-            panic_after_batches: armed::take_outer(),
+            panic_after_batches: armed::take_outer(&scope_of().to_string_lossy()),
         }
     }
 
@@ -111,9 +117,9 @@ impl ProducerFault {
         }
     }
 
-    /// Build an OUTER fault state directly, WITHOUT touching the process-global
-    /// arm — so a unit test of this module's own logic can never race, or be
-    /// raced by, a sibling test in the same binary.
+    /// Build an OUTER fault state directly, WITHOUT touching the arm registry —
+    /// so a unit test of this module's own logic needs no scope and can never
+    /// race, or be raced by, a sibling test.
     #[cfg(test)]
     fn for_test(panic_after_batches: u64) -> Self {
         Self {
@@ -126,12 +132,15 @@ impl ProducerFault {
 /// prelude) so an armed fault unwinds THAT task — the boundary whose disconnect
 /// the query-row thread used to read as "the scan finished".
 ///
-/// Panics ON PURPOSE when a fault is armed, consuming the arm so exactly one scan
-/// task dies. Compiles to an empty function in a production build.
+/// Panics ON PURPOSE when an arm scoped to THIS reader is registered, taking that
+/// arm so exactly one scan task dies. Compiles to an empty function — which never
+/// calls `scope_of` — in a production build.
 #[inline]
-pub(crate) fn inner_scan_task_checkpoint() {
+pub(crate) fn inner_scan_task_checkpoint(scope_of: impl FnOnce() -> std::path::PathBuf) {
+    #[cfg(not(any(test, feature = "producer-fault-injection")))]
+    let _ = scope_of;
     #[cfg(any(test, feature = "producer-fault-injection"))]
-    armed::consume_inner_checkpoint();
+    armed::take_inner_and_panic(&scope_of().to_string_lossy());
 }
 
 /// The panic message both checkpoints raise. Exported so a test can (a) assert
@@ -143,119 +152,170 @@ pub const INJECTED_PANIC_MESSAGE: &str =
 
 #[cfg(any(test, feature = "producer-fault-injection"))]
 mod armed {
-    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// No fault armed.
-    const DISARMED: i64 = -1;
+    use parking_lot::Mutex;
 
-    /// Batches the next opened query row stream may hand over before its producer
-    /// thread panics, or [`DISARMED`]. TAKEN by `take_outer`, so exactly one
-    /// stream can observe it.
-    static OUTER_BATCHES: AtomicI64 = AtomicI64::new(DISARMED);
-
-    /// Whether the NEXT inner batched-scan task to reach its checkpoint must
-    /// panic. Taken in place (the checkpoint site has no per-scan state to own
-    /// it), which is why an arming caller must serialize — see the module doc.
-    static INNER_TASK_ARMED: AtomicBool = AtomicBool::new(false);
-
-    /// Saturate rather than wrap: an absurd budget simply never fires, and a
-    /// negative value would read as `DISARMED`.
-    fn as_budget(count: u64) -> i64 {
-        i64::try_from(count).unwrap_or(i64::MAX)
+    /// One registered OUTER arm.
+    struct OuterArm {
+        id: u64,
+        scope: String,
+        after_batches: u64,
     }
 
-    pub(super) fn arm_outer(after_batches: u64) {
-        OUTER_BATCHES.store(as_budget(after_batches), Ordering::SeqCst);
+    /// One registered INNER arm.
+    struct InnerArm {
+        id: u64,
+        scope: String,
     }
 
-    pub(super) fn disarm_outer() {
-        OUTER_BATCHES.store(DISARMED, Ordering::SeqCst);
+    /// Registered arms. A `Vec`, not a slot: concurrently armed tests coexist and
+    /// cannot clobber one another (see the module doc). Every critical section
+    /// below is a few comparisons long and NEVER spans an `.await`, so no guard is
+    /// ever held across a suspension point.
+    static OUTER_ARMS: Mutex<Vec<OuterArm>> = Mutex::new(Vec::new());
+    static INNER_ARMS: Mutex<Vec<InnerArm>> = Mutex::new(Vec::new());
+
+    /// Distinguishes two arms with the same scope, so a guard removes exactly its
+    /// own registration.
+    static NEXT_ARM_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn next_id() -> u64 {
+        NEXT_ARM_ID.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub(super) fn take_outer() -> Option<u64> {
-        u64::try_from(OUTER_BATCHES.swap(DISARMED, Ordering::SeqCst)).ok()
+    pub(super) fn arm_outer(scope: &str, after_batches: u64) -> u64 {
+        let id = next_id();
+        OUTER_ARMS.lock().push(OuterArm {
+            id,
+            scope: scope.to_string(),
+            after_batches,
+        });
+        id
     }
 
-    pub(super) fn arm_inner_task() {
-        INNER_TASK_ARMED.store(true, Ordering::SeqCst);
+    pub(super) fn disarm_outer(id: u64) {
+        OUTER_ARMS.lock().retain(|arm| arm.id != id);
     }
 
-    pub(super) fn disarm_inner_task() {
-        INNER_TASK_ARMED.store(false, Ordering::SeqCst);
+    /// Take the arm whose scope this reader path matches, if any. A non-matching
+    /// path leaves every arm registered — which is what makes a foreign scan
+    /// unable to consume someone else's arm.
+    pub(super) fn take_outer(path: &str) -> Option<u64> {
+        let mut arms = OUTER_ARMS.lock();
+        let index = arms
+            .iter()
+            .position(|arm| path.contains(arm.scope.as_str()))?;
+        Some(arms.remove(index).after_batches)
     }
 
-    /// TAKE the inner-task arm, panicking if it was set. Taken (not merely read)
-    /// before the panic, so the unwind cannot re-enter and a retry/sibling scan is
-    /// never hit by the same arm.
-    pub(super) fn consume_inner_checkpoint() {
-        if INNER_TASK_ARMED.swap(false, Ordering::SeqCst) {
+    pub(super) fn arm_inner(scope: &str) -> u64 {
+        let id = next_id();
+        INNER_ARMS.lock().push(InnerArm {
+            id,
+            scope: scope.to_string(),
+        });
+        id
+    }
+
+    pub(super) fn disarm_inner(id: u64) {
+        INNER_ARMS.lock().retain(|arm| arm.id != id);
+    }
+
+    /// TAKE the inner arm scoped to this reader and panic. Taken (not merely
+    /// read) and the lock RELEASED before the panic, so the unwind cannot
+    /// re-enter and a retry/sibling scan is never hit by the same arm.
+    pub(super) fn take_inner_and_panic(path: &str) {
+        let armed = {
+            let mut arms = INNER_ARMS.lock();
+            match arms
+                .iter()
+                .position(|arm| path.contains(arm.scope.as_str()))
+            {
+                Some(index) => {
+                    arms.remove(index);
+                    true
+                }
+                None => false,
+            }
+        };
+        if armed {
             panic!("{}", super::INJECTED_PANIC_MESSAGE);
         }
     }
 }
 
-/// Arm the NEXT query row stream opened in this process to panic in its producer
-/// THREAD just before it hands over batch number `after_batches` (0-based), so
-/// `after_batches` batches reach the consumer and the walk then dies MID-STREAM.
+/// Arm the next query row stream opened over a reader whose `Data.db` path
+/// contains `scope` to panic in its producer THREAD just before it hands over
+/// batch number `after_batches` (0-based), so `after_batches` batches reach the
+/// consumer and the walk then dies MID-STREAM.
 ///
 /// `0` kills the producer before its first handoff. Disarmed when the returned
-/// guard drops (and consumed by the stream that captures it). PROCESS-GLOBAL:
-/// the caller serializes (see the module doc).
+/// guard drops, and TAKEN by the first MATCHING stream — a stream over any other
+/// reader leaves it alone, so a concurrently-running test can neither consume nor
+/// clobber this arm (see the module doc). Scope to something unique: a test's own
+/// `TempDir` path, or `keyspace/table`.
 ///
 /// TEST-ONLY: this symbol does not exist unless `cfg(test)` or the
 /// `producer-fault-injection` feature is on.
 #[cfg(any(test, feature = "producer-fault-injection"))]
 #[must_use = "the fault stays armed only while the guard is alive"]
-pub fn arm_query_row_producer_panic(after_batches: u64) -> ArmedProducerPanic {
-    armed::arm_outer(after_batches);
-    ArmedProducerPanic
+pub fn arm_query_row_producer_panic(scope: &str, after_batches: u64) -> ArmedProducerPanic {
+    ArmedProducerPanic {
+        id: armed::arm_outer(scope, after_batches),
+    }
 }
 
-/// Guard returned by [`arm_query_row_producer_panic`]: disarms on drop. Holds no
-/// lock, so it is safe to hold across an `.await`.
+/// Guard returned by [`arm_query_row_producer_panic`]: removes its own arm on
+/// drop. Holds no lock, so it is safe to hold across an `.await`.
 #[cfg(any(test, feature = "producer-fault-injection"))]
 #[derive(Debug)]
-pub struct ArmedProducerPanic;
+pub struct ArmedProducerPanic {
+    id: u64,
+}
 
 #[cfg(any(test, feature = "producer-fault-injection"))]
 impl Drop for ArmedProducerPanic {
     fn drop(&mut self) {
-        armed::disarm_outer();
+        armed::disarm_outer(self.id);
     }
 }
 
-/// Arm the NEXT batched-scan task to panic in its cursor-open prelude, so the task
-/// unwinds and drops its sender with no error and no terminator.
+/// Arm the next batched-scan task over a reader whose `Data.db` path contains
+/// `scope` to panic in its cursor-open prelude, so the task unwinds and drops its
+/// sender with no error and no terminator.
 ///
 /// It dies before any row and independently of which format branch the reader
 /// would have taken; the join that must catch it wraps the whole task, so the
 /// property this proves holds for a panic anywhere inside it. There is
 /// deliberately no "die after N units" knob — the prelude is the only checkpoint,
-/// so a count would be unspendable (issue #3106, roborev).
+/// so a count would be unspendable.
 ///
-/// Disarmed when the returned guard drops, and TAKEN when the fault fires.
-/// PROCESS-GLOBAL, so the caller MUST serialize against any sibling test that
-/// scans (see the module doc) — otherwise the sibling's scan takes the arm.
+/// Disarmed when the returned guard drops, and TAKEN by the first MATCHING scan;
+/// a scan over any other reader leaves it registered (see the module doc).
 ///
 /// TEST-ONLY: this symbol does not exist unless `cfg(test)` or the
 /// `producer-fault-injection` feature is on.
 #[cfg(any(test, feature = "producer-fault-injection"))]
 #[must_use = "the fault stays armed only while the guard is alive"]
-pub fn arm_inner_scan_task_panic() -> ArmedInnerScanPanic {
-    armed::arm_inner_task();
-    ArmedInnerScanPanic
+pub fn arm_inner_scan_task_panic(scope: &str) -> ArmedInnerScanPanic {
+    ArmedInnerScanPanic {
+        id: armed::arm_inner(scope),
+    }
 }
 
-/// Guard returned by [`arm_inner_scan_task_panic`]: disarms on drop. Holds no
-/// lock, so it is safe to hold across an `.await`.
+/// Guard returned by [`arm_inner_scan_task_panic`]: removes its own arm on drop.
+/// Holds no lock, so it is safe to hold across an `.await`.
 #[cfg(any(test, feature = "producer-fault-injection"))]
 #[derive(Debug)]
-pub struct ArmedInnerScanPanic;
+pub struct ArmedInnerScanPanic {
+    id: u64,
+}
 
 #[cfg(any(test, feature = "producer-fault-injection"))]
 impl Drop for ArmedInnerScanPanic {
     fn drop(&mut self) {
-        armed::disarm_inner_task();
+        armed::disarm_inner(self.id);
     }
 }
 
@@ -321,6 +381,10 @@ impl Drop for SilencedInjectedPanics {
 mod tests {
     use super::*;
 
+    fn path_of(s: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(s)
+    }
+
     /// A default-constructed fault (the production shape) NEVER panics, however
     /// many batches are handed over.
     #[test]
@@ -331,9 +395,9 @@ mod tests {
         }
     }
 
-    /// The OUTER budget semantics, asserted WITHOUT touching the process-global
-    /// arm (`for_test`), so this can never race a sibling test: the fault survives
-    /// exactly its budget of handoffs, then panics.
+    /// The OUTER budget semantics, asserted WITHOUT touching the arm registry
+    /// (`for_test`): the fault survives exactly its budget of handoffs, then
+    /// panics.
     #[test]
     fn an_armed_producer_fault_panics_after_exactly_its_budget() {
         let mut fault = ProducerFault::for_test(2);
@@ -354,32 +418,87 @@ mod tests {
         );
     }
 
-    /// `capture` TAKES the process-global arm, so a fault can never leak into an
-    /// unrelated later stream, and dropping the guard disarms. Single test = one
-    /// critical section over the global (no sibling here arms it).
+    /// SCOPING is what makes the registry safe in a shared test binary (roborev,
+    /// issue #3106): a reader whose path does not match must NOT take the arm, and
+    /// must leave it registered for the reader it was meant for.
     #[test]
-    fn the_global_arm_is_taken_by_one_capture_and_dropped_with_the_guard() {
-        let guard = arm_query_row_producer_panic(7);
-        let first = ProducerFault::capture();
-        let mut second = ProducerFault::capture();
-        assert_eq!(
-            first.panic_after_batches,
-            Some(7),
-            "the first capture takes the armed budget"
-        );
-        assert_eq!(
-            second.panic_after_batches, None,
-            "a second stream under the same arm is clean"
-        );
-        for _ in 0..10 {
-            second.before_batch_handoff();
+    fn an_arm_is_taken_only_by_a_matching_reader_path() {
+        let scope = "issue-3106-scoping-unit-test/only-me";
+        let guard = arm_query_row_producer_panic(scope, 5);
+
+        // A foreign reader (what a concurrently-running sibling test looks like)
+        // captures NOTHING and leaves the arm in place.
+        for foreign in [
+            "/tmp/other-test/data/ks/tbl/nb-1-big-Data.db",
+            "/tmp/issue-3106-scoping-unit-test/someone-else/nb-1-big-Data.db",
+        ] {
+            let stolen = ProducerFault::capture_for(|| path_of(foreign));
+            assert_eq!(
+                stolen.panic_after_batches, None,
+                "a non-matching reader path must not consume the arm ({foreign})"
+            );
         }
 
-        drop(guard);
+        // The intended reader takes it, exactly once.
+        let matching = format!("/tmp/{scope}/nb-1-big-Data.db");
         assert_eq!(
-            ProducerFault::capture().panic_after_batches,
-            None,
-            "dropping the guard disarms, so a later stream is never poisoned"
+            ProducerFault::capture_for(|| path_of(&matching)).panic_after_batches,
+            Some(5),
+            "the reader the arm was scoped to takes it"
         );
+        assert_eq!(
+            ProducerFault::capture_for(|| path_of(&matching)).panic_after_batches,
+            None,
+            "and it is consumed — a second stream over the same reader is clean"
+        );
+        drop(guard);
+    }
+
+    /// Two arms coexist: arming second does not clobber the first, and each guard
+    /// removes only its OWN registration. This is the property a single global
+    /// slot could not provide, and it is why parallel arming tests are safe.
+    #[test]
+    fn concurrent_arms_coexist_and_each_guard_removes_only_its_own() {
+        let first = arm_query_row_producer_panic("issue-3106-coexist/alpha", 1);
+        let second = arm_query_row_producer_panic("issue-3106-coexist/beta", 2);
+
+        drop(first);
+        assert_eq!(
+            ProducerFault::capture_for(|| path_of("/x/issue-3106-coexist/alpha/d.db"))
+                .panic_after_batches,
+            None,
+            "dropping the first guard removes ONLY its arm"
+        );
+        assert_eq!(
+            ProducerFault::capture_for(|| path_of("/x/issue-3106-coexist/beta/d.db"))
+                .panic_after_batches,
+            Some(2),
+            "the second arm survives its sibling's disarm, un-clobbered"
+        );
+        drop(second);
+    }
+
+    /// The INNER checkpoint obeys the same scoping rule: a foreign scan passes
+    /// through untouched, the scoped one dies, and the arm is consumed.
+    #[test]
+    fn the_inner_checkpoint_fires_only_for_the_scoped_reader() {
+        let scope = "issue-3106-inner-scope-unit-test/only-me";
+        let guard = arm_inner_scan_task_panic(scope);
+        let matching = format!("/tmp/{scope}/nb-1-big-Data.db");
+
+        // A foreign scan must run right through the checkpoint.
+        inner_scan_task_checkpoint(|| path_of("/tmp/someone-else/nb-1-big-Data.db"));
+
+        let died = {
+            let _silence = silence_injected_panics();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                inner_scan_task_checkpoint(|| path_of(&matching));
+            }))
+        };
+        assert!(died.is_err(), "the scoped scan must hit the injected panic");
+
+        // Consumed: a retry of the same scan is clean.
+        inner_scan_task_checkpoint(|| path_of(&matching));
+        drop(guard);
     }
 }
