@@ -77,6 +77,38 @@ The `CQLITE_READ_PATH` knob is a **test/debug** control (not a perf recommendati
 `point` fails closed rather than silently full-scanning. See the CLI reference for the
 user-facing knob docs.
 
+#### Second axis: 1 generation vs N generations (issue #3129)
+
+The point-vs-full comparison above holds the **generation count fixed**, so both of its
+arms route through the same reconciliation kernel and a disagreement between the
+*single-generation* read path and the *cross-generation* merge kernel
+(`generation_merge.rs`) reproduces identically on both arms — the lane stays green while a
+real `SELECT`'s answer depends on the table's compaction state. That is a fourth blind
+spot alongside physical-dump parity, query-semantics parity, and the self-round-trip class.
+
+`cqlite-core/tests/point_vs_full_differential/one_vs_n_generation.rs` (a submodule of the
+same test target) closes it: for each corpus fixture that holds **exactly one
+Cassandra-written generation**, it materializes two temp trees from those same bytes — one
+generation, and the same generation copied N ≥ 2 times under distinct generation numbers —
+then requires identical rows/values/**order** from both trees for the full scan, every
+per-partition read under both forced read-path modes, and the multi-key `IN`, at the same
+pinned `now`. N identical copies reconcile to exactly one copy under Cassandra's rules, so
+any inequality is a merge-kernel (or single-gen) defect. Anti-vacuity: each case pins the
+exact full-scan row count and partition count, both arms' generation counts are re-scanned
+after materialization (so the axis can never degenerate to 1-vs-1), and a source fixture
+that stops holding exactly one generation FAILs.
+
+Shapes that already diverge for a tracked defect are marked `known_divergent` with a
+documented reason and run only in the `#[ignore]`d
+`one_vs_n_generation_known_divergences` reproducer, so the enforcing lane still guards the
+shapes that agree:
+
+```bash
+env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test -p cqlite-core --features "state_machine cli-helpers" \
+  --test point_vs_full_differential -- --ignored one_vs_n_generation_known_divergences --nocapture
+```
+
 ### The self-round-trip blind spot (CQLite-written + CQLite-read, issue #3042)
 
 Both lanes above compare CQLite against an *external* oracle or against its own two read
