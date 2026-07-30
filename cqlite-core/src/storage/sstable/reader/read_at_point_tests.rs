@@ -640,3 +640,223 @@ async fn point_offset_read_uses_advised_point_source() {
         );
     }
 }
+
+/// Build a `V5_0Uncompressed`-CLASSIFIED clustered BIG fixture (issue #3097).
+///
+/// A `V5_0Uncompressed` reader is what the merge arm's NON-stitching branch
+/// (`stream_all_partitions_for_query` → `stream_partitions_summary_guided`)
+/// serves — and the ONLY classification where that branch's schema-resolution
+/// bug is observable, because a header-derived schema names its clustering
+/// column with the placeholder `clustering_key` rather than the caller's real
+/// `ck`. A CQLite-written `nb` file normally classifies as `V5_0NewBig`
+/// (chunk-stitching, which already honours the caller schema); the reader only
+/// takes the `V5_0Uncompressed` path when its headerless Data.db happens to
+/// begin with the four bytes of the `V5_0Uncompressed` magic (`00 10 04 5e`)
+/// and no `CompressionInfo.db` exists (`reader/header.rs`). We force that by
+/// choosing a 16-byte `blob` partition key prefixed `04 5e …` so the first
+/// partition's on-disk bytes are `00 10 04 5e` — authoritative on-disk framing,
+/// no heuristics (issue #28). Returns the fixture dir, its Data.db path, and
+/// the AUTHORITATIVE (caller) schema whose clustering column is named `ck`.
+#[cfg(all(feature = "write-support", feature = "lz4"))]
+async fn build_uncompressed_classified_clustered_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    crate::schema::TableSchema,
+) {
+    use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
+    use crate::storage::write_engine::{
+        CellOperation, ClusteringKey, Durability, Mutation, PartitionKey, TableId, WriteEngine,
+        WriteEngineConfig,
+    };
+    use crate::types::Value;
+
+    const KS: &str = "issue_3097_ks";
+    const TBL: &str = "clustered";
+    // Comfortably over the default min_index_interval so Summary.db carries
+    // multiple samples spanning distinct Index.db positions (see
+    // SUMMARY_FIXTURE_PARTITIONS) — the summary-guided branch under test
+    // requires a non-empty Summary.db.
+    const N: u16 = 400;
+
+    let schema = TableSchema {
+        keyspace: KS.into(),
+        table: TBL.into(),
+        partition_keys: vec![KeyColumn {
+            name: "pk".into(),
+            data_type: "blob".into(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".into(),
+            data_type: "int".into(),
+            position: 0,
+            order: Default::default(),
+        }],
+        columns: vec![
+            Column {
+                name: "pk".into(),
+                data_type: "blob".into(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "ck".into(),
+                data_type: "int".into(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "v".into(),
+                data_type: "text".into(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: Default::default(),
+        dropped_columns: Default::default(),
+    };
+
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let config = WriteEngineConfig::new(data_dir.clone(), temp.path().join("wal"), schema.clone())
+        .with_flush_threshold(1usize << 30)
+        .with_durability(Durability::Disabled);
+    let mut engine = WriteEngine::new(config).expect("engine");
+    for i in 0..N {
+        // 16-byte key prefixed `04 5e` so the FIRST partition's Data.db bytes
+        // are `00 (flags) 10 (key len) 04 5e …` == the V5_0Uncompressed magic.
+        let mut key = vec![0x04u8, 0x5e];
+        key.extend_from_slice(&[0u8; 12]);
+        key.extend_from_slice(&i.to_be_bytes());
+        engine
+            .write(Mutation::new(
+                TableId::new(KS, TBL),
+                PartitionKey::single("pk", Value::Blob(key.into())),
+                Some(ClusteringKey::single("ck", Value::Integer(i as i32))),
+                vec![CellOperation::Write {
+                    column: "v".into(),
+                    value: Value::text(format!("v{i}")),
+                }],
+                1_000_000 + i as i64,
+                None,
+            ))
+            .expect("write row");
+    }
+    engine.flush().await.expect("flush").expect("flush info");
+    engine.close().await.expect("close");
+    let (data_path, _) =
+        locate_data_db_under(&data_dir).expect("no *-Data.db produced under data_dir");
+    (temp, data_path, schema)
+}
+
+/// Issue #3097: the WARM k-way-merge arm's per-SSTable enumeration
+/// (`stream_all_partitions_for_query`, driven by
+/// `from_readers::drive_query_stream`) must decode with the CALLER's
+/// authoritative schema, so a clustered `V5_0Uncompressed` reader surfaces its
+/// clustering column under the caller's real name (`ck`) — not the header
+/// schema's placeholder `clustering_key`, which reached the merger as a NULL
+/// `ck` for a projected `SELECT`.
+///
+/// Pins merge-arm-vs-caller-schema equality: over the SAME bytes, the
+/// merge-arm surface with `Some(caller_schema)` must yield the clustering
+/// column keyed `ck`; with `None` (no caller schema) it falls back to the
+/// reader-derived placeholder — proving the parameter, not the reader header,
+/// is what governs the name. RED before this change (the branch hard-coded
+/// `None`), GREEN after.
+#[cfg(all(feature = "write-support", feature = "lz4"))]
+#[tokio::test]
+async fn merge_arm_query_stream_honours_caller_schema_clustering() {
+    use std::collections::BTreeSet;
+    use std::ops::ControlFlow;
+
+    use super::compaction_row::{CompactionRow, CompactionRowData};
+    use crate::storage::scan_cancel::ScanCancel;
+
+    let (_temp, data_path, schema) = build_uncompressed_classified_clustered_fixture().await;
+    let reader = open_reader(&data_path).await.expect("open fixture reader");
+
+    // Precondition: this MUST be the non-stitching V5_0Uncompressed branch —
+    // the only place the bug is observable. If a writer change ever makes the
+    // fixture classify as V5_0NewBig (chunk-stitching), this pin would pass
+    // vacuously via the already-schema-honouring compaction decoder, so fail
+    // LOUD instead of skipping.
+    assert!(
+        !reader.requires_chunk_stitching(),
+        "fixture must classify as the non-stitching V5_0Uncompressed branch \
+         (the only arm where the #3097 schema-resolution bug is observable)"
+    );
+    assert!(
+        reader.compression_info.is_none() && reader.bti_partitions_db.is_none(),
+        "fixture must be an uncompressed BIG reader (no CompressionInfo.db, no BTI)"
+    );
+    assert!(
+        reader
+            .summary_reader
+            .as_ref()
+            .map(|s| !s.get_entries().is_empty())
+            .unwrap_or(false),
+        "fixture's Summary.db must carry samples — the summary-guided merge arm \
+         under test requires it"
+    );
+
+    // Drive the SAME merge-arm surface both ways over the SAME bytes.
+    async fn columns_seen(
+        reader: &SSTableReader,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> (usize, BTreeSet<String>) {
+        let cancel = ScanCancel::default();
+        let mut rows = 0usize;
+        let mut cols = BTreeSet::new();
+        reader
+            .stream_all_partitions_for_query(schema, &cancel, None, |r: CompactionRow| {
+                rows += 1;
+                if let CompactionRowData::Live { simple, .. } = &r.row_data {
+                    for c in simple {
+                        cols.insert(c.column.clone());
+                    }
+                }
+                Ok(ControlFlow::Continue(()))
+            })
+            .await
+            .expect("summary-guided merge-arm query stream");
+        (rows, cols)
+    }
+
+    let (rows_with, cols_with) = columns_seen(&reader, Some(&schema)).await;
+    let (rows_none, cols_none) = columns_seen(&reader, None).await;
+
+    assert_eq!(
+        rows_with, 400,
+        "the merge arm must emit exactly one row per fixture partition — a \
+         zero/short result is a failure, not a vacuous pass"
+    );
+    assert_eq!(
+        rows_none, 400,
+        "the None-schema walk must emit every row too"
+    );
+
+    // The FIX: with the caller schema, the clustering column carries the
+    // caller's real name.
+    assert!(
+        cols_with.contains("ck"),
+        "the merge arm must decode the clustering column under the caller's \
+         authoritative name `ck` (issue #3097); got {cols_with:?}"
+    );
+    assert!(
+        !cols_with.contains("clustering_key"),
+        "the merge arm must NOT surface the header schema's placeholder \
+         `clustering_key` when the caller supplied a real schema; got {cols_with:?}"
+    );
+
+    // Fallback preserved: with NO caller schema the reader-derived header
+    // schema (placeholder-named) still governs — proving the caller-schema
+    // PARAMETER is what changed the outcome, not the fixture bytes.
+    assert!(
+        cols_none.contains("clustering_key") && !cols_none.contains("ck"),
+        "with no caller schema the reader-derived placeholder must still apply \
+         (fallback unchanged); got {cols_none:?}"
+    );
+}

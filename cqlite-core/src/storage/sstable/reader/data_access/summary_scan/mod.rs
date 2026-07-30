@@ -546,22 +546,29 @@ impl SSTableReader {
                 // CompactionRow (row_timestamp 0), matching the non-stitching
                 // compaction stream's emit exactly.
                 //
-                // `caller_schema` is deliberately `None` here (issue #3058
-                // roborev): this is the MERGE arm's warm entry, which on `main`
-                // resolved the decode schema from the reader's own four-tier
-                // lookup and ignored the caller's. Passing `Some(schema)` would
-                // change merge-arm decode for any ticket whose DDL differs from
-                // the reader-derived schema — outside #3058's remit, which is
-                // "the multi-source path is unchanged". The merge arm's blindness
-                // to the caller's authoritative schema (nb headers carry none, so
-                // clustering columns can decode as NULL) is a REAL pre-existing
-                // defect tracked separately by issue #3097; fix it there, with a
-                // pinning test, not by widening this change.
+                // `caller_schema` is the caller's AUTHORITATIVE `schema` (issue
+                // #3097): the merge arm previously passed `None` here and resolved
+                // the decode schema from the reader's own four-tier lookup, which
+                // for a `V5_0Uncompressed` reader (an `nb` header carries no
+                // embedded schema) is a header-derived schema whose clustering
+                // columns bear the placeholder name `clustering_key` — so a ticket
+                // whose DDL declares a real clustering key (`ck`) decoded that
+                // column under the wrong name (surfacing as NULL to a projected
+                // `SELECT`). Passing `Some(schema)` makes the merge arm honour the
+                // caller's schema EXACTLY as the chunk-stitching sibling
+                // (`stream_partitions_summary_guided_compaction`) and the fast arm
+                // (`query_rows::drive_query_rows`) already do. `stream_partitions_
+                // summary_guided`/`walk_in_range_partition_slices` still fall back
+                // to the reader-derived lookup when the caller passes `None`
+                // (e.g. `stream_all_partitions_for_query(None, …)`), so the no-
+                // caller-schema behaviour is preserved. Compaction never routes
+                // through this method (it uses `stream_all_partitions_for_
+                // compaction` directly), so byte-parity walks are untouched.
                 self.stream_partitions_summary_guided(
                     scan_cancel,
                     token_bound,
                     None,
-                    None,
+                    schema,
                     &mut |(k, v)| {
                         let row =
                             super::super::compaction_row::CompactionRow::from_legacy_value(k, v, 0);
