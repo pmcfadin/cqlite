@@ -40,6 +40,7 @@ use crate::batch_bytes::BatchByteCap;
 use crate::cancel::CancelFlag;
 use crate::producer::{BatchSink, MergeProducer, ProducerError};
 use crate::row_source::{MergeRowSource, RowSource, SourceStep};
+use crate::statics::StaticMergeSource;
 use crate::scan_progress::{ScanProgress, ScanProgressMeter};
 
 /// Per-request in-`stream` sub-phase accumulator for the row-drive loop (issue
@@ -195,7 +196,19 @@ impl MergeProducer {
         access_path: &'static str,
     ) -> Result<(), ProducerError> {
         let mut source = MergeRowSource::new(stepper);
-        self.drive_row_source(&mut source, cancel, sink, progress, access_path)
+        // Issue #3095: on a STATIC-bearing table the merger streams the reconciled
+        // static row as an ordinary `clustering_key: None` entry, which the drive
+        // loop would emit as a phantom `ck = null` row while the real rows kept a
+        // null static column. `StaticMergeSource` adapts that input shape to
+        // Cassandra's `processPartition()` semantics; it declines to wrap (and this
+        // is a plain re-borrow) for every table without both a static and a
+        // clustering column, so the non-static path is unchanged.
+        match StaticMergeSource::wrap(self, &mut source) {
+            Some(mut adapted) => {
+                self.drive_row_source(&mut adapted, cancel, sink, progress, access_path)
+            }
+            None => self.drive_row_source(&mut source, cancel, sink, progress, access_path),
+        }
     }
 
     /// The arm-independent row drive loop (issue #3058): identical batching,
@@ -266,10 +279,9 @@ impl MergeProducer {
             // recv-wait is producer starvation / cold-IO, not merge CPU). ~2
             // `Instant::now()`/row (this snapshot + the record), not ~4.
             let (iter_t0, wait_before) = accum.iter_start();
-            let step = source.next_step().map_err(|e| match e {
-                cqlite_core::Error::Cancelled => ProducerError::Cancelled,
-                other => ProducerError::Merge(other),
-            })?;
+            // Errors already arrive in the producer taxonomy (mapped by VARIANT
+            // inside each source, issue #2264 — never by racing the cancel flag).
+            let step = source.next_step()?;
 
             let (key, entry) = match step {
                 SourceStep::Row(key, row) => (key, row),

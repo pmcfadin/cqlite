@@ -51,6 +51,9 @@ pub mod scan_progress;
 pub mod service;
 pub mod shutdown;
 pub mod stats;
+// Cassandra STATIC-column `SELECT` semantics for the k-way merge arm of the row
+// route (issue #3095).
+mod statics;
 pub mod streaming;
 pub mod warm;
 

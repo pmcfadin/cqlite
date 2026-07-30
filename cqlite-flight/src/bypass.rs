@@ -160,24 +160,29 @@ pub enum BypassReason {
     /// [`declares_composite_keyed_collection`] tabulates every
     /// `assemble_complex` arm and which of them diverge.
     MulticellArmDivergence,
-    /// The schema declares a STATIC column.
+    /// The SSTable's static-column content cannot be settled against the caller
+    /// schema, so the two arms could disagree on static-row shape.
     ///
-    /// The two arms genuinely disagree on static-row shape today, in OPPOSITE
-    /// directions, so neither can be adopted silently (measured on
-    /// `test_writeparity.static_clustering_shape` and on a static fixture with a
-    /// static-ONLY partition):
-    /// * the merge arm emits the static row as its OWN `ck = null` row and does
-    ///   NOT inject the static value into the partition's clustering rows —
-    ///   Cassandra does the opposite;
-    /// * the single-generation decoder injects the static cells into every
-    ///   clustering row (correct) but emits NOTHING for a partition that has a
-    ///   static row and NO clustering rows — Cassandra returns one row there, so
-    ///   taking the fast path would DROP that row.
+    /// Both arms now implement Cassandra's `processPartition()` static semantics
+    /// (issue #3095): statics are merged into every clustering row and a
+    /// static-only partition returns exactly one row on the merge arm
+    /// (`statics::StaticMergeSource`) and on the single-generation arm (the
+    /// decoder's own static injection plus its static-only-partition emission).
+    /// A schema that DECLARES its static columns is therefore servable by the fast
+    /// path, and the equality is proven over Cassandra-written bytes by
+    /// `cqlite-flight/tests/issue_3095_flight_static_columns.rs`.
     ///
-    /// Changing query results is out of this change's remit either way, so a
-    /// static-bearing schema takes the merge arm and keeps today's behaviour
-    /// EXACTLY. Reconciling both arms with Cassandra's static semantics is a
-    /// follow-up (it changes the core read path, not just Flight routing).
+    /// Two cases still fail closed, because the arms' static handling is keyed off
+    /// the CALLER SCHEMA and would diverge without it:
+    /// * a static column present in the SSTable's own serialization header but NOT
+    ///   declared by the ticket DDL (a DDL predating an
+    ///   `ALTER TABLE ADD … STATIC`, or a hand-built ticket; an `nb` header carries
+    ///   no embedded schema to cross-check against, #3097). The single-generation
+    ///   decoder would still surface that partition's static-only row while the
+    ///   merge arm, seeing no declared static column, would not adapt at all;
+    /// * an SSTable whose serialization header could not be parsed, where the
+    ///   question cannot be answered at all
+    ///   ([`SSTableReader::static_columns_are_known`]).
     StaticColumns,
 }
 
@@ -211,18 +216,28 @@ pub fn bypass_reason(
     if !schema.dropped_columns.is_empty() {
         return BypassReason::DroppedColumns;
     }
-    if schema.columns.iter().any(|c| c.is_static) {
+    // Statics (issue #3095): both arms now implement Cassandra's
+    // `processPartition()` semantics, so a static-bearing table IS servable by the
+    // fast path — but only when the caller schema DECLARES the file's static
+    // columns, because each arm's static handling is keyed off that schema. The
+    // caller schema alone cannot settle the question (roborev, issue #3058): it is
+    // the ticket DDL and an `nb` header carries no embedded schema to cross-check
+    // it against (#3097), so consult the file's OWN serialization header and fail
+    // closed when it cannot answer at all.
+    if !only.static_columns_are_known() {
         return BypassReason::StaticColumns;
     }
-    // The caller SCHEMA is not a sufficient source for the static question
-    // (roborev, issue #3058): it is the ticket DDL, and an `nb` header carries no
-    // embedded schema to cross-check it against (#3097), so a DDL predating an
-    // `ALTER TABLE ADD … STATIC` (or a hand-built ticket) would sail through the
-    // check above while the SSTable actually holds static rows — and the fast path
-    // emits NOTHING for a static-only partition where the merge arm emits a row.
-    // Consult the file's OWN serialization header, and fail closed when it cannot
-    // answer at all.
-    if !only.static_columns_are_known() || !only.on_disk_static_columns().is_empty() {
+    let declared_static: std::collections::HashSet<&str> = schema
+        .columns
+        .iter()
+        .filter(|c| c.is_static)
+        .map(|c| c.name.as_str())
+        .collect();
+    if only
+        .on_disk_static_columns()
+        .iter()
+        .any(|on_disk| !declared_static.contains(on_disk.as_str()))
+    {
         return BypassReason::StaticColumns;
     }
     if schema
@@ -391,7 +406,7 @@ fn map_scan_error(e: cqlite_core::Error) -> ProducerError {
 }
 
 impl RowSource for ScanRowSource {
-    fn next_step(&mut self) -> Result<SourceStep, cqlite_core::Error> {
+    fn next_step(&mut self) -> Result<SourceStep, ProducerError> {
         loop {
             if let Some((key, row)) = self.batch.next() {
                 let decorated = self.decorate(&key);
@@ -406,13 +421,15 @@ impl RowSource for ScanRowSource {
                 Some(Ok(QueryRowBatch::Unsupported)) => {
                     // The walk contracts to report this pre-emit only; a late
                     // one means the stream lied about what it had served.
-                    return Err(cqlite_core::Error::corruption(format!(
-                        "single-source query row stream reported Unsupported after \
-                         emitting rows (emitted_any={}) — issue #3058",
-                        self.emitted_any
+                    return Err(ProducerError::Merge(cqlite_core::Error::corruption(
+                        format!(
+                            "single-source query row stream reported Unsupported after \
+                             emitting rows (emitted_any={}) — issue #3058",
+                            self.emitted_any
+                        ),
                     )));
                 }
-                Some(Err(e)) => return Err(e),
+                Some(Err(e)) => return Err(map_scan_error(e)),
             }
         }
     }
@@ -472,27 +489,32 @@ mod tests {
         );
     }
 
-    /// A schema declaring a STATIC column takes the merge arm, fail-closed: the
-    /// two arms disagree on static-row shape today (see [`BypassReason::StaticColumns`]),
-    /// so the fast path must not silently change those results.
+    /// Issue #3095: a DECLARED static column no longer forces the merge arm — both
+    /// arms implement Cassandra's `processPartition()` static semantics now, so the
+    /// fast path may serve a static-bearing schema.
+    ///
+    /// This fixture's SSTable holds no static row, so declaring the column in the
+    /// schema is the only difference: it isolates the retired precondition. The
+    /// still-live UNDECLARED-on-disk case is asserted by the differential test's
+    /// `assert_undeclared_static_column_is_refused_on_disk`, which needs a real
+    /// static-bearing file.
     #[test]
-    fn a_static_column_forces_the_merge_arm() {
+    fn a_declared_static_column_no_longer_forces_the_merge_arm() {
         use crate::testutil::{simple_schema, write_row};
         let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100)]]);
         let mut schema = simple_schema();
-        // An otherwise-selecting single-source request: only the static column
-        // differs, so this isolates the static precondition.
         assert_eq!(
             bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
             BypassReason::Selected,
-            "control: without the static column this request WOULD take the fast path"
+            "control: without the static column this request takes the fast path"
         );
         if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
             c.is_static = true;
         }
         assert_eq!(
             bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
-            BypassReason::StaticColumns
+            BypassReason::Selected,
+            "issue #3095: a static column the schema DECLARES is servable by the fast arm"
         );
     }
 

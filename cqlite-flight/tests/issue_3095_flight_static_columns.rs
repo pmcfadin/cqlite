@@ -310,7 +310,7 @@ const DL_KS: &str = "test_deltas";
 const DL_TBL: &str = "static_with_rows";
 /// Verbatim from `test-data/schemas/deltas.cql`.
 const DL_DDL: &str = "CREATE TABLE test_deltas.static_with_rows \
-     (pk int, ck int, static_col text, row_col text, PRIMARY KEY (pk, ck))";
+     (pk int, ck int, static_col text static, row_col text, PRIMARY KEY (pk, ck))";
 
 /// Every row Cassandra returns for `SELECT * FROM test_deltas.static_with_rows`,
 /// derived from the committed sstabledump golden + `processPartition()`: each of
