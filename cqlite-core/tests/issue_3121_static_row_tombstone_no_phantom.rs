@@ -79,6 +79,9 @@
 ))]
 
 use std::path::{Path, PathBuf};
+use std::sync::Once;
+
+use serial_test::serial;
 
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::result::{QueryResult, StreamingConfig};
@@ -117,19 +120,37 @@ const DELETED_CELL_CK: i32 = 3;
 
 const TTL_NOW_OVERRIDE_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
 
-/// A PINNED reconciliation instant, far past every `localDeletionTime` in the
-/// fixture, so no assertion here can depend on the wall clock.
+/// A PINNED reconciliation instant, so no wall-clock dependence can ever enter
+/// this test.
+///
+/// It is DEFENSIVE DETERMINISM, not load-bearing for the current fixture: the
+/// committed `nb-1-big-Data.db.jsonl` golden contains ZERO `ttl`/`expires_at`
+/// cells, so no assertion on any of the three sites can depend on the read clock
+/// at all. Nothing here covers TTL-expiry semantics; the pin only guarantees that
+/// stays true if the fixture is ever regenerated with expiring cells.
 const PINNED_NOW_SECS: i64 = 1_800_000_000;
+
+/// Guards the one-and-only `set_var` below.
+static PIN_READ_CLOCK: Once = Once::new();
 
 /// Pin the read-time clock for this test binary.
 ///
-/// Deliberately SET-ONLY and never removed: `std::env::set_var` is
-/// process-global, and every test in this file pins the SAME value, so
-/// concurrent tests cannot observe a different clock than they installed. A
-/// set/remove pair around each query WOULD race (test threads run in parallel by
-/// default) — that is the wall-clock-race class the doctrine calls out.
+/// Two properties make this safe, both enforced rather than assumed:
+///
+/// * **Written exactly once per process** — the `Once` guard means the
+///   process-global `set_var` happens on the first call only, so no later call
+///   can mutate `environ` while a sibling's query reads it (writing the same
+///   value is NOT sufficient: a `setenv` may reallocate `environ` under a
+///   concurrent C-side `getenv`).
+/// * **Serialized against every reader** — all three tests in this file are
+///   `#[serial]`, so the write can never overlap another test's query.
+///
+/// Deliberately SET-ONLY and never removed: a set/remove pair around each query
+/// would reintroduce exactly that write/read race.
 fn pin_read_clock() {
-    std::env::set_var(TTL_NOW_OVERRIDE_ENV, PINNED_NOW_SECS.to_string());
+    PIN_READ_CLOCK.call_once(|| {
+        std::env::set_var(TTL_NOW_OVERRIDE_ENV, PINNED_NOW_SECS.to_string());
+    });
 }
 
 // ===========================================================================
@@ -364,7 +385,11 @@ fn observed_from(result: &QueryResult) -> Vec<Observed> {
 /// Seeded-divergence verified (D3): forcing that site's `shadow.is_some()` arm to
 /// the old inject-then-decide order makes THIS test — and only this one — fail
 /// with the observed `ck` sequence `[1, 2, 3, 6]`.
+///
+/// `#[serial]`: `pin_read_clock` writes a process-global env var that every
+/// sibling test's query READS, so the three tests must never overlap.
 #[tokio::test]
+#[serial]
 async fn phantom_row_absent_on_cell_metadata_projection_site_block_emit() {
     let Some(root) = fixture_root() else { return };
     pin_read_clock();
@@ -395,7 +420,10 @@ async fn phantom_row_absent_on_cell_metadata_projection_site_block_emit() {
 ///
 /// Seeded-divergence verified (D3): forcing that site's arm to the old
 /// inject-then-decide order makes THIS test fail with `ck=2` present.
+///
+/// `#[serial]`: see site A — the pinned read clock is process-global.
 #[tokio::test]
+#[serial]
 async fn phantom_row_absent_on_point_read_site_block_emit_windowed() {
     let Some(root) = fixture_root() else { return };
     pin_read_clock();
@@ -430,7 +458,10 @@ async fn phantom_row_absent_on_point_read_site_block_emit_windowed() {
 ///
 /// Seeded-divergence verified (D3): forcing that site's arm to the old
 /// inject-then-decide order makes THIS test fail with `ck=2` present.
+///
+/// `#[serial]`: see site A — the pinned read clock is process-global.
 #[tokio::test]
+#[serial]
 async fn phantom_row_absent_on_streaming_scan_site_timestamp_policy() {
     let Some(root) = fixture_root() else { return };
     pin_read_clock();
