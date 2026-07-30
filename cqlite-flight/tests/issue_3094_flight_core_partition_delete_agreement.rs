@@ -41,8 +41,12 @@
 //! The fix is in the ONE place both consumers share, `KWayMerger::
 //! apply_partition_shadowing`, whose `marker_live` tested the RECONCILED ROW's
 //! timestamp (raised to `…010…` by the tombstone cell) instead of the marker's own.
-//! Tightening it to also require `row_liveness.marker_timestamp > markedForDeleteAt`
-//! makes the merger drop the deleted marker, so `entry_to_row` sees no marker and
+//! `RowLiveness::marker_survives_floor` REPLACES that test rather than conjoining
+//! with it: when a marker is PRESENT its own `marker_timestamp > markedForDeleteAt`
+//! is the whole decision — nothing about the row's cells participates, exactly as
+//! `BTreeRow.filter` judges a `primaryKeyLivenessInfo`. (The row-timestamp test
+//! survives only as the fallback for a row carrying no marker timestamp at all.)
+//! So the merger drops the deleted marker, `entry_to_row` then sees no marker and
 //! no live data cell and hides the row — Flight and core converge on Cassandra's
 //! answer.
 //!
