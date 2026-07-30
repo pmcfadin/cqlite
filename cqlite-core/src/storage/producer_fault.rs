@@ -184,7 +184,30 @@ mod armed {
         NEXT_ARM_ID.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Shortest scope an arm may register with.
+    ///
+    /// The match is a substring test, so an empty (or near-empty) scope matches
+    /// EVERY reader path and silently restores the process-global behaviour the
+    /// scoping exists to eliminate — invisibly, which is the worst failure
+    /// direction. Enforced rather than documented, since "callers are careful" is
+    /// exactly the mitigation that already failed once here (roborev, #3106). Any
+    /// real scope — a `TempDir` path or a `keyspace/table` pair — clears this by an
+    /// order of magnitude.
+    const MIN_SCOPE_LEN: usize = 8;
+
+    /// Fail LOUDLY on a scope that would match everything.
+    fn check_scope(scope: &str) {
+        debug_assert!(
+            scope.len() >= MIN_SCOPE_LEN,
+            "producer-fault scope {scope:?} is shorter than {MIN_SCOPE_LEN} chars: a \
+             substring that loose matches every reader path, which silently reverts \
+             the arm to process-global (issue #3106) — scope to a TempDir path or a \
+             keyspace/table instead"
+        );
+    }
+
     pub(super) fn arm_outer(scope: &str, after_batches: u64) -> u64 {
+        check_scope(scope);
         let id = next_id();
         OUTER_ARMS.lock().push(OuterArm {
             id,
@@ -210,6 +233,7 @@ mod armed {
     }
 
     pub(super) fn arm_inner(scope: &str) -> u64 {
+        check_scope(scope);
         let id = next_id();
         INNER_ARMS.lock().push(InnerArm {
             id,
