@@ -683,3 +683,9 @@ impl<'a> BatchSink<'a> {
 #[cfg(test)]
 #[path = "query_rows_tests.rs"]
 mod tests;
+
+// Issue #3106 END-TO-END pin: a real walk whose real producer thread PANICS. Needs
+// the write engine to build its fixture, so it is gated on `write-support`.
+#[cfg(all(test, feature = "write-support"))]
+#[path = "query_rows_panic_tests.rs"]
+mod panic_tests;

@@ -80,8 +80,10 @@ mod maintenance;
 mod stats;
 #[cfg(feature = "write-support")]
 mod sweep;
+// `pub(crate)` (still test-only): the read-path #3106 producer-panic pin builds
+// its SSTable fixture with these same helpers, so the two do not drift.
 #[cfg(all(test, feature = "write-support"))]
-mod test_support;
+pub(crate) mod test_support;
 // Issue #1625: honest memtable hard-limit admission tests live in a sibling
 // module to avoid growing the already-oversized `mod.rs` (epic #1116/#1135).
 #[cfg(all(test, feature = "write-support"))]
