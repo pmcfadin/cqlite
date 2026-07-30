@@ -32,10 +32,10 @@ fn a_disconnect_without_the_done_sentinel_is_an_error_not_a_clean_end_of_stream(
     let mut stream = stream_over(rx);
 
     // One batch is delivered, then the producer "dies" mid-stream.
-    tx.send(QueryRowMsg::Item(Ok(QueryRowBatch::Rows(vec![(
+    tx.send(QueryRowMsg::Item(QueryRowBatch::Rows(vec![(
         RowKey::new(vec![1]),
         ScanRow::Row(Vec::new()),
-    )]))))
+    )])))
     .expect("send batch");
     drop(tx);
 
@@ -80,14 +80,16 @@ fn the_done_sentinel_is_the_only_clean_end_of_stream() {
     );
 }
 
-/// A terminal `Err` (the walk failed, or its panic was caught and forwarded)
-/// also terminates the protocol, so the following disconnect must not turn
-/// into a second, spurious dead-producer error that would mask the real one.
+/// A terminal [`QueryRowMsg::Failed`] (the walk failed, or its panic was caught
+/// and forwarded) also terminates the protocol, so the following disconnect must
+/// not turn into a second, spurious dead-producer error that would mask the real
+/// one. `Failed` is a DISTINCT variant, so "this message is terminal" is
+/// structural: an `Item` cannot carry an error at all.
 #[test]
 fn a_terminal_error_terminates_the_protocol() {
     let (tx, rx) = sync_channel::<QueryRowMsg>(QUERY_ROWS_CHANNEL_BATCHES);
     let mut stream = stream_over(rx);
-    tx.send(QueryRowMsg::Item(Err(Error::Storage("walk failed".into()))))
+    tx.send(QueryRowMsg::Failed(Error::internal("walk failed")))
         .expect("send error");
     drop(tx);
     let msg = stream
@@ -180,7 +182,7 @@ fn a_caller_cancellation_breaks_the_token_bound_sink_at_a_batch_boundary() {
         ));
     }
     assert!(
-        matches!(rx.try_recv(), Ok(QueryRowMsg::Item(Ok(QueryRowBatch::Rows(b)))) if b.len() == QUERY_ROWS_PER_BATCH),
+        matches!(rx.try_recv(), Ok(QueryRowMsg::Item(QueryRowBatch::Rows(b))) if b.len() == QUERY_ROWS_PER_BATCH),
         "the first batch was handed to the consumer"
     );
 

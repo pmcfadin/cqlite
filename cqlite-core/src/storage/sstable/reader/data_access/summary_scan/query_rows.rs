@@ -75,9 +75,20 @@
 //!   `release-unwind` profile the bindings ship — `[profile.release]` is
 //!   `panic = "abort"`, where a panicking producer takes the process down instead,
 //!   loudly). The `Done` sentinel needs no unwinding at all: it makes "the walk
-//!   finished" an OBSERVED fact in every profile, so ANY way a producer can stop
+//!   finished" an OBSERVED fact in every profile, so any way THIS THREAD can stop
 //!   without reporting — a future exit path that forgets its terminator included —
 //!   fails closed rather than being read as a complete scan.
+//!
+//!   SCOPE, stated precisely (roborev, issue #3106): `Done` proves only that the
+//!   query-row THREAD ran to completion. It says nothing about that thread's own
+//!   upstream, and on the full-ring arm the rows come from an INNER `tokio` task
+//!   over a second channel — whose death this thread would report as a clean
+//!   walk. That boundary is closed separately and by the same principle, in
+//!   [`crate::storage::sstable::reader::BatchedScanStream`]: it owns the scan
+//!   task's `JoinHandle` and joins it when its channel closes, so a task that
+//!   died surfaces as an error there and reaches this thread as a normal `Err`
+//!   (hence a `Failed` terminator). The pair of boundaries is what makes the
+//!   end-to-end claim true; neither alone does.
 
 use std::ops::ControlFlow;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -123,8 +134,17 @@ pub enum QueryRowBatch {
 /// channel disconnect cannot do.
 #[derive(Debug)]
 enum QueryRowMsg {
-    /// A batch, or the walk's terminal error.
-    Item(Result<QueryRowBatch>),
+    /// A batch. Carries only `Ok` BY CONSTRUCTION (issue #3106, roborev): a
+    /// failure is [`QueryRowMsg::Failed`], so "this message ends the stream" is a
+    /// structural property of the variant rather than an unenforced invariant
+    /// about where an `Err` was built. Were a non-fatal mid-stream `Err` ever sent
+    /// as an `Item`, the consumer would mark the stream terminated and a LATER
+    /// genuine dead-producer disconnect would silently revert to a clean end of
+    /// stream — #3106 reintroduced with no test failing.
+    Item(QueryRowBatch),
+    /// The walk failed. TERMINAL: the producer sends exactly one of this or
+    /// [`QueryRowMsg::Done`], as its last act.
+    Failed(Error),
     /// The producer finished its walk and is exiting normally. This is the ONLY
     /// thing that makes [`QueryRowStream::next_batch`] report a clean end of
     /// stream; a disconnect without it is a dead producer.
@@ -185,12 +205,12 @@ impl QueryRowStream {
     pub fn next_batch(&mut self) -> Option<Result<QueryRowBatch>> {
         let received = crate::observability::stream_subphase::time_recv(|| self.rx.recv());
         match received {
-            Ok(QueryRowMsg::Item(item)) => {
-                // A terminal error ends the stream just as definitively as `Done`,
-                // so a caller that keeps polling after one gets a clean `None`
-                // rather than a spurious dead-producer error.
-                self.terminated |= item.is_err();
-                Some(item)
+            Ok(QueryRowMsg::Item(batch)) => Some(Ok(batch)),
+            Ok(QueryRowMsg::Failed(e)) => {
+                // Terminal by construction: a caller that keeps polling after it
+                // gets a clean `None`, not a spurious dead-producer error.
+                self.terminated = true;
+                Some(Err(e))
             }
             Ok(QueryRowMsg::Done) => {
                 self.terminated = true;
@@ -208,12 +228,16 @@ impl QueryRowStream {
 /// The fail-closed error for a producer that disconnected without a terminator
 /// (issue #3106).
 ///
-/// [`Error::Corruption`] rather than a softer variant on purpose: this is a
-/// violation of THIS stream's internal producer→consumer protocol, the same
-/// family as [`assert_nothing_emitted`], and the observable consequence is an
-/// incomplete result set that a caller must never mistake for a complete one.
+/// [`Error::Internal`] — ONE variant for both halves of this event (here and
+/// [`panicked_producer_error`]), chosen deliberately (roborev, issue #3106):
+/// nothing suggests the `Data.db` is bad, so `Corruption` would send an operator
+/// hunting a nonexistent bad file, and `Storage` is `is_recoverable() == true`
+/// (surfaced to consumers, e.g. the Node bindings' error mapping) which would
+/// advertise a deterministic internal failure as RETRYABLE. `Internal` is
+/// `is_recoverable() == false` and is the honest variant for a violated internal
+/// invariant.
 fn dead_producer_error() -> Error {
-    Error::corruption(
+    Error::internal(
         "query row stream: the producer thread disconnected WITHOUT its terminal \
          Done sentinel — it died mid-walk, so the result set is TRUNCATED and \
          cannot be reported as a complete scan (issue #3106)",
@@ -229,13 +253,16 @@ fn dead_producer_error() -> Error {
 /// every `panic!`/assertion (the only other shapes are hand-rolled
 /// `panic_any`), so an unrecognized payload degrades to a named placeholder
 /// rather than being dropped.
+///
+/// Same [`Error::Internal`] variant as [`dead_producer_error`] — one event, one
+/// variant, and not the `is_recoverable() == true` `Storage` this first used.
 fn panicked_producer_error(payload: &(dyn std::any::Any + Send)) -> Error {
     let message = payload
         .downcast_ref::<String>()
         .map(String::as_str)
         .or_else(|| payload.downcast_ref::<&'static str>().copied())
         .unwrap_or("<non-string panic payload>");
-    Error::Storage(format!(
+    Error::internal(format!(
         "query row stream: the producer thread PANICKED mid-walk ({message}) — the \
          result set is TRUNCATED and cannot be reported as a complete scan \
          (issue #3106)"
@@ -320,8 +347,8 @@ impl SSTableReader {
                 // consumer never has to infer completion from a disconnect.
                 let terminal = match outcome {
                     Ok(Ok(())) => QueryRowMsg::Done,
-                    Ok(Err(e)) => QueryRowMsg::Item(Err(e)),
-                    Err(panic) => QueryRowMsg::Item(Err(panicked_producer_error(panic.as_ref()))),
+                    Ok(Err(e)) => QueryRowMsg::Failed(e),
+                    Err(panic) => QueryRowMsg::Failed(panicked_producer_error(panic.as_ref())),
                 };
                 // The consumer may already be gone; a failed send is fine.
                 let _ = sender.send(terminal);
@@ -485,7 +512,7 @@ async fn drive_query_rows(
     // Neither walk can serve this reader. Report it as the FIRST and ONLY
     // message, having emitted nothing — enforced, for the same reason.
     assert_nothing_emitted(sink.emitted, "before reporting Unsupported")?;
-    let _ = tx.send(QueryRowMsg::Item(Ok(QueryRowBatch::Unsupported)));
+    let _ = tx.send(QueryRowMsg::Item(QueryRowBatch::Unsupported));
     Ok(())
 }
 
@@ -504,7 +531,7 @@ fn emit_rows(
     rows: Vec<(RowKey, ScanRow)>,
 ) -> bool {
     fault.before_batch_handoff();
-    tx.send(QueryRowMsg::Item(Ok(QueryRowBatch::Rows(rows))))
+    tx.send(QueryRowMsg::Item(QueryRowBatch::Rows(rows)))
         .is_ok()
 }
 
