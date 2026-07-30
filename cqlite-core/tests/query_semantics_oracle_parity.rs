@@ -24,6 +24,12 @@
 //!     returns. `expect_empty: true` additionally requires `physical_row_count >
 //!     0`, proving rows really existed on disk and were reconciled away rather
 //!     than an empty/misconfigured fixture masquerading as "reconciled to zero".
+//!   * The compared column set is the query's DECLARED projection (from the result
+//!     metadata), never inferred from the keys an expected row happens to carry: an
+//!     absent key is how the core result model spells NULL, so inference would drop
+//!     exactly the column a deleted-cell case asserts (#3094). Each expected row
+//!     must therefore enumerate that projection exactly — a NULL authored as an
+//!     explicit `null`.
 //!   * `physical_row_count` is re-derived from the committed golden JSONL and
 //!     asserted, proving the fixture's rows are physically present on disk.
 //!   * When the committed fixture (or its `*.db` binaries) is absent, the case
@@ -193,6 +199,49 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value, String> {
     })
 }
 
+/// Cross-check a case's authored `expected_rows` against `cols`, the query's
+/// DECLARED projection (issue #3094, round-3 review).
+///
+/// Every expected row must enumerate that projection EXACTLY: an unknown key is an
+/// oracle typo (never silently ignored), and a MISSING key is a column left
+/// un-asserted — a NULL must be authored as an explicit `null`, so the assertion is
+/// visible in the oracle rather than implied by omission. Without this, a case that
+/// simply omitted a column would compare fewer columns than it projects and pass
+/// vacuously on exactly the NULL it exists to assert.
+fn validate_projection(
+    case_id: &str,
+    cols: &[String],
+    expected_rows: &[serde_json::Map<String, serde_json::Value>],
+) -> Result<(), String> {
+    if cols.is_empty() {
+        return Err(format!(
+            "case {case_id}: result metadata declares no columns — the projection \
+             cannot be derived, and comparing zero columns would pass vacuously"
+        ));
+    }
+    for (i, row) in expected_rows.iter().enumerate() {
+        for key in row.keys() {
+            if !cols.contains(key) {
+                return Err(format!(
+                    "case {case_id}: expected_rows[{i}] names column {key}, which the \
+                     query's declared projection ({cols:?}) does not contain — an \
+                     oracle typo, not a NULL"
+                ));
+            }
+        }
+        for col in cols {
+            if !row.contains_key(col) {
+                return Err(format!(
+                    "case {case_id}: expected_rows[{i}] omits projected column {col} — \
+                     every projected column must be authored (a NULL as an explicit \
+                     `null`), otherwise it is silently left out of the comparison"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn open_db(sstables_dir: &Path, schema: &Path, keyspace: &str) -> Result<Database, String> {
     let cfg = IngestionConfig {
         schema_paths: vec![schema.to_path_buf()],
@@ -321,34 +370,26 @@ async fn run_case(case: &Case) -> Result<bool, String> {
     std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
     let result = exec.map_err(|e| format!("case {}: SELECT failed: {e}", case.id))?;
 
-    // Project each result row to the oracle's declared columns.
-    let cols: Vec<String> = case
-        .expected_rows
-        .first()
-        .map(|r| r.keys().cloned().collect())
-        .unwrap_or_default();
-    // A projected column must be DECLARED in the result metadata — a name that is
-    // not is an oracle typo and stays a hard error, never a silent NULL (issue
-    // #3094). Within a row, however, an ABSENT entry IS the core result model's
-    // representation of NULL: the decoder only inserts cells the row actually
-    // carries, and every consumer (`output/csv.rs`, `output/json.rs`,
-    // `export/arrow_convert.rs`) renders a missing column as null. A cell deleted
-    // by a cell tombstone is exactly that — absent from the reconciled row.
-    let declared: std::collections::BTreeSet<&str> = result
+    // The compared column set is the query's DECLARED projection, taken from the
+    // result metadata (the engine's rendering of the case's own `SELECT` list) —
+    // NOT the keys the first expected row happens to carry.
+    //
+    // Why that distinction is load-bearing (issue #3094, round-3 review): within a
+    // row, an ABSENT entry IS the core result model's representation of NULL — the
+    // decoder only inserts cells the row actually carries, and every consumer
+    // (`output/csv.rs`, `output/json.rs`, `export/arrow_convert.rs`) renders a
+    // missing column as null. A cell deleted by a cell tombstone is exactly that.
+    // So a column set INFERRED from present keys would silently drop precisely the
+    // column a deleted-cell case exists to assert, and the case would pass
+    // vacuously. Deriving it from the declared projection instead keeps the
+    // comparison authoritative rather than shaped by observed data (#28).
+    let cols: Vec<String> = result
         .metadata
         .columns
         .iter()
-        .map(|c| c.name.as_str())
+        .map(|c| c.name.clone())
         .collect();
-    for col in &cols {
-        if !declared.contains(col.as_str()) {
-            return Err(format!(
-                "case {}: projected column {col} is not declared in the result \
-                 metadata (declared: {declared:?}) — an oracle typo, not a NULL",
-                case.id
-            ));
-        }
-    }
+    validate_projection(&case.id, &cols, &case.expected_rows)?;
     let mut actual: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
     for row in &result.rows {
         let mut m = serde_json::Map::new();
@@ -440,6 +481,51 @@ async fn expect_empty_requires_nonzero_physical_row_count() {
     assert!(
         err.contains("physical_row_count"),
         "error must name the missing proof, got: {err}"
+    );
+}
+
+/// Issue #3094 round-3 review: the compared column set comes from the query's
+/// DECLARED projection, so a case that OMITS a projected column must fail loudly
+/// instead of quietly leaving that column out of the comparison. (Omission was the
+/// vacuity vector: an absent key is how the core result model spells NULL, so the
+/// dropped column would be exactly the one a deleted-cell case asserts.)
+#[test]
+fn expected_row_omitting_a_projected_column_fails_loudly() {
+    let cols = vec!["pk".to_string(), "ck".to_string(), "row_col".to_string()];
+    let row: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(r#"{"pk":1,"ck":3}"#).expect("row json");
+    let err = validate_projection("synthetic_omits_column", &cols, &[row])
+        .expect_err("an omitted projected column must fail loudly, not pass vacuously");
+    assert!(
+        err.contains("omits projected column row_col"),
+        "error must name the omitted column, got: {err}"
+    );
+}
+
+/// The mirror guard: a key the projection does not declare is an oracle typo and
+/// must never be silently ignored.
+#[test]
+fn expected_row_naming_an_undeclared_column_fails_loudly() {
+    let cols = vec!["pk".to_string(), "ck".to_string()];
+    let row: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(r#"{"pk":1,"ck":3,"typo_col":null}"#).expect("row json");
+    let err = validate_projection("synthetic_typo_column", &cols, &[row])
+        .expect_err("an undeclared column name must fail loudly");
+    assert!(
+        err.contains("typo_col"),
+        "error must name the undeclared column, got: {err}"
+    );
+}
+
+/// An empty declared projection can only compare zero columns, which would pass
+/// regardless of what the reader returned.
+#[test]
+fn empty_declared_projection_fails_loudly() {
+    let err = validate_projection("synthetic_no_cols", &[], &[])
+        .expect_err("an empty declared projection must fail loudly");
+    assert!(
+        err.contains("declares no columns"),
+        "error must name the empty projection, got: {err}"
     );
 }
 
