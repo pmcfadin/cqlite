@@ -19,11 +19,15 @@
 //!   * real Cassandra `nb` fixtures from the query-semantics oracle
 //!     (`test_compaction_tombstone_ttl`): range tombstone, row deletion,
 //!     expired-TTL cell + expired row-liveness marker, surviving live rows;
-//!   * the STATIC-column fail-closed fallback, on both a CQLite-written fixture
-//!     (including a static-ONLY partition) and the real Cassandra
-//!     `test_writeparity.static_clustering_shape`: a static-bearing schema must
-//!     take the MERGE arm and return exactly what it returns today (the two arms
-//!     genuinely disagree there — see `BypassReason::StaticColumns`);
+//!   * STATIC columns (issues #3095 / #3140): #3095 retired "any static column
+//!     refuses the fast arm", so a DELETION-FREE static-bearing table now takes the
+//!     fast arm — pinned here by `cassandra/static_clustering_shape(declared static,
+//!     both arms)` and, end to end, by `issue_3095_flight_static_columns.rs`. What
+//!     still fails closed, pinned by `statics/select-star`, is a static-bearing SSTable
+//!     that MAY contain a deletion
+//!     (`BypassReason::StaticColumnsWithDeletions`, the cell-tombstone arm divergence
+//!     #3140) and a static column present ON DISK that the ticket DDL does not declare
+//!     (`BypassReason::StaticColumns`, the `@stale-ddl` case);
 //!   * a CQLite-written fixture carrying a partition deletion, a range tombstone,
 //!     a row deletion, an expired-TTL cell and a live-TTL cell,
 //!     read at TWO pinned `now` values so the pinned clock itself is pinned;
@@ -70,19 +74,14 @@ use arrow_flight::Ticket;
 use futures::StreamExt;
 use tonic::Request;
 
-use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::read_path_probe::ReadPathProbe;
 use cqlite_core::storage::sstable::reader::SSTableReader;
-use cqlite_core::storage::write_engine::mutation::{
-    ClusteringBound, PartitionTombstone, RangeTombstone,
-};
-use cqlite_core::storage::write_engine::{
-    CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
-};
-use cqlite_core::types::Value;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_flight::bypass::{bypass_reason, BypassReason, ForcedMergePath, MERGE_PATH_ENV};
 use cqlite_flight::service::CqliteFlightService;
+
+mod differential_fixtures;
+use differential_fixtures::*;
 
 /// Serializes the process-global env + probe window (see the module doc).
 static PROBE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -418,363 +417,6 @@ async fn assert_refused_schema_unchanged(
 // CQLite-written tombstone/TTL fixture
 // ---------------------------------------------------------------------------
 
-const KS: &str = "diff_ks";
-const TBL: &str = "shapes";
-const DDL: &str =
-    "CREATE TABLE diff_ks.shapes (pk int, ck int, v text, w text, PRIMARY KEY (pk, ck))";
-
-fn shapes_schema() -> TableSchema {
-    TableSchema {
-        keyspace: KS.into(),
-        table: TBL.into(),
-        partition_keys: vec![KeyColumn {
-            name: "pk".into(),
-            data_type: "int".into(),
-            position: 0,
-        }],
-        clustering_keys: vec![ClusteringColumn {
-            name: "ck".into(),
-            data_type: "int".into(),
-            position: 0,
-            order: Default::default(),
-        }],
-        columns: vec![
-            col("pk", "int", false),
-            col("ck", "int", false),
-            col("v", "text", true),
-            col("w", "text", true),
-        ],
-        comments: Default::default(),
-        dropped_columns: Default::default(),
-    }
-}
-
-fn col(name: &str, ty: &str, nullable: bool) -> Column {
-    Column {
-        name: name.into(),
-        data_type: ty.into(),
-        nullable,
-        default: None,
-        is_static: false,
-    }
-}
-
-fn base(pk: i32, ck: i32, ops: Vec<CellOperation>, ts: i64) -> Mutation {
-    Mutation::new(
-        TableId::new(KS, TBL),
-        PartitionKey::single("pk", Value::Integer(pk)),
-        Some(ClusteringKey::single("ck", Value::Integer(ck))),
-        ops,
-        ts,
-        None,
-    )
-}
-
-fn write_v(pk: i32, ck: i32, v: &str, ts: i64) -> Mutation {
-    base(
-        pk,
-        ck,
-        vec![CellOperation::Write {
-            column: "v".into(),
-            value: Value::text(v),
-        }],
-        ts,
-    )
-}
-
-/// `v` live, `w` written with a TTL that expires at `write_secs + ttl`.
-fn write_v_and_ttl_w(pk: i32, ck: i32, v: &str, w: &str, ts: i64, ttl: u32, ldt: i32) -> Mutation {
-    base(
-        pk,
-        ck,
-        vec![
-            CellOperation::Write {
-                column: "v".into(),
-                value: Value::text(v),
-            },
-            CellOperation::WriteWithTtl {
-                column: "w".into(),
-                value: Value::text(w),
-                ttl_seconds: ttl,
-                local_deletion_time: Some(ldt),
-            },
-        ],
-        ts,
-    )
-}
-
-/// Base write timestamp (micros) and the derived pinned `now` values. Both
-/// pinned instants are CONSTANTS, never a wall-clock read (issue #2642): the
-/// fixture's TTL local-deletion-times are stamped explicitly, so the expiry
-/// decision is a pure function of these constants.
-const T_BASE_SECS: i64 = 1_700_000_000;
-const T_BASE_MICROS: i64 = T_BASE_SECS * 1_000_000;
-/// Before the TTL cell expires.
-const NOW_BEFORE_EXPIRY: i64 = T_BASE_SECS + 100;
-/// After it expires (its LDT is `T_BASE_SECS + 600`).
-const NOW_AFTER_EXPIRY: i64 = T_BASE_SECS + 1_000;
-const TTL_LDT: i32 = (T_BASE_SECS + 600) as i32;
-
-/// One SSTable holding: a live row, a row with a live-TTL cell, a cell
-/// tombstone, a whole-row deletion, a range tombstone and a partition deletion.
-async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
-    let temp = tempfile::TempDir::new().expect("tempdir");
-    let data_dir = temp.path().join("data");
-    let wal_dir = temp.path().join("wal");
-    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, shapes_schema());
-    let mut engine = WriteEngine::new(config).expect("engine");
-
-    // pk=1: a plain live row, a row whose `w` carries a TTL, a row whose `w` was
-    // deleted (cell tombstone), and a row deleted outright (row tombstone).
-    engine.write(write_v(1, 1, "live", T_BASE_MICROS)).unwrap();
-    engine
-        .write(write_v_and_ttl_w(
-            1,
-            2,
-            "ttl-row",
-            "expires",
-            T_BASE_MICROS,
-            600,
-            TTL_LDT,
-        ))
-        .unwrap();
-    // ck=3: two live columns (the multi-column shape). A CQLite-WRITTEN simple
-    // cell tombstone is deliberately NOT exercised here — EXCLUSION TRACKED BY
-    // ISSUE #3094: both arms surface it as a raw `Value::Tombstone` that the Arrow
-    // encoder then rejects ("expected Text value, got Tombstone(..)"). That
-    // reproduces with `CQLITE_FLIGHT_MERGE_PATH=merge`, i.e. on the pre-#3058
-    // merge path, so it is a PRE-EXISTING defect of the CQLite write/read
-    // round-trip (see #3094), identical on
-    // both arms and out of this change's scope — recorded for a follow-up rather
-    // than papered over here. Cassandra-written tombstones ARE covered, by the
-    // dataset cases below and by the query-semantics oracle.
-    engine
-        .write(base(
-            1,
-            3,
-            vec![
-                CellOperation::Write {
-                    column: "v".into(),
-                    value: Value::text("two-column"),
-                },
-                CellOperation::Write {
-                    column: "w".into(),
-                    value: Value::text("also-live"),
-                },
-            ],
-            T_BASE_MICROS,
-        ))
-        .unwrap();
-    engine
-        .write(write_v(1, 4, "doomed", T_BASE_MICROS))
-        .unwrap();
-    engine
-        .write(base(
-            1,
-            4,
-            vec![CellOperation::DeleteRow],
-            T_BASE_MICROS + 10,
-        ))
-        .unwrap();
-
-    // pk=2: rows covered by a RANGE tombstone plus one outside it.
-    engine
-        .write(write_v(2, 10, "rt-covered", T_BASE_MICROS))
-        .unwrap();
-    engine
-        .write(write_v(2, 11, "rt-covered", T_BASE_MICROS))
-        .unwrap();
-    engine
-        .write(write_v(2, 99, "rt-survivor", T_BASE_MICROS))
-        .unwrap();
-    let mut rt = Mutation::new(
-        TableId::new(KS, TBL),
-        PartitionKey::single("pk", Value::Integer(2)),
-        None,
-        vec![],
-        T_BASE_MICROS + 10,
-        None,
-    );
-    rt.range_tombstones = vec![RangeTombstone {
-        start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(10))),
-        end: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(11))),
-        deletion_time: T_BASE_MICROS + 10,
-        local_deletion_time: T_BASE_SECS as i32,
-    }];
-    engine.write(rt).unwrap();
-
-    // pk=3: entirely covered by a PARTITION deletion.
-    engine.write(write_v(3, 1, "gone", T_BASE_MICROS)).unwrap();
-    let mut pt = Mutation::new(
-        TableId::new(KS, TBL),
-        PartitionKey::single("pk", Value::Integer(3)),
-        None,
-        vec![],
-        T_BASE_MICROS + 10,
-        None,
-    );
-    pt.partition_tombstone = Some(PartitionTombstone {
-        deletion_time: T_BASE_MICROS + 10,
-        local_deletion_time: T_BASE_SECS as i32,
-    });
-    engine.write(pt).unwrap();
-
-    engine.flush().await.expect("flush").expect("flush info");
-    (temp, data_dir)
-}
-
-// ---------------------------------------------------------------------------
-// V5_0Uncompressed-CLASSIFIED clustered fixture (issue #3097)
-// ---------------------------------------------------------------------------
-
-const UNCOMP_TBL: &str = "clustered_uncomp";
-const UNCOMP_DDL: &str = "CREATE TABLE diff_ks.clustered_uncomp \
-     (pk blob, ck int, v text, PRIMARY KEY (pk, ck))";
-
-fn uncomp_schema() -> TableSchema {
-    TableSchema {
-        keyspace: KS.into(),
-        table: UNCOMP_TBL.into(),
-        partition_keys: vec![KeyColumn {
-            name: "pk".into(),
-            data_type: "blob".into(),
-            position: 0,
-        }],
-        clustering_keys: vec![ClusteringColumn {
-            name: "ck".into(),
-            data_type: "int".into(),
-            position: 0,
-            order: Default::default(),
-        }],
-        columns: vec![
-            col("pk", "blob", false),
-            col("ck", "int", false),
-            col("v", "text", true),
-        ],
-        comments: Default::default(),
-        dropped_columns: Default::default(),
-    }
-}
-
-/// Build a CQLite-written clustered SSTable that the reader classifies as
-/// `V5_0Uncompressed` (issue #3097) — the ONLY classification whose merge-arm
-/// enumeration takes the non-chunk-stitching Summary-guided branch
-/// (`stream_partitions_summary_guided`), where the pre-#3097 code ignored the
-/// caller's schema and decoded clustering columns under the header schema's
-/// placeholder name (surfacing `ck` as NULL).
-///
-/// The reader picks that classification when a headerless `nb` Data.db begins
-/// with the four bytes of the `V5_0Uncompressed` magic (`00 10 04 5e`) and no
-/// `CompressionInfo.db` exists (`reader/header.rs`). We force it deterministically
-/// (no heuristics, #28) with a 16-byte `blob` partition key prefixed `04 5e …`:
-/// the first partition's on-disk bytes are `00` (flags) `10` (16-byte key length)
-/// `04 5e` (key head). A real Cassandra `nb` fixture instead classifies as
-/// `V5_0NewBig` (chunk-stitching, which already honours the caller schema), so
-/// this write-path fixture is the only way to reach the buggy arm on the Flight
-/// surface.
-async fn build_uncomp_clustered_fixture() -> (tempfile::TempDir, PathBuf) {
-    let temp = tempfile::TempDir::new().expect("tempdir");
-    let data_dir = temp.path().join("data");
-    let config = WriteEngineConfig::new(data_dir.clone(), temp.path().join("wal"), uncomp_schema());
-    let mut engine = WriteEngine::new(config).expect("engine");
-    // Enough partitions to clear the default min_index_interval, so Summary.db
-    // carries samples and the merge arm's Summary-guided branch actually runs.
-    for i in 0u16..400 {
-        let mut key = vec![0x04u8, 0x5e];
-        key.extend_from_slice(&[0u8; 12]);
-        key.extend_from_slice(&i.to_be_bytes());
-        engine
-            .write(Mutation::new(
-                TableId::new(KS, UNCOMP_TBL),
-                PartitionKey::single("pk", Value::Blob(key.into())),
-                Some(ClusteringKey::single("ck", Value::Integer(i as i32))),
-                vec![CellOperation::Write {
-                    column: "v".into(),
-                    value: Value::text(format!("v{i}")),
-                }],
-                T_BASE_MICROS + i as i64,
-                None,
-            ))
-            .unwrap();
-    }
-    engine.flush().await.expect("flush").expect("flush info");
-    (temp, data_dir)
-}
-
-const STATIC_TBL: &str = "statics";
-const STATIC_DDL: &str = "CREATE TABLE diff_ks.statics \
-     (pk int, ck int, s text static, v text, PRIMARY KEY (pk, ck))";
-
-fn statics_schema() -> TableSchema {
-    let mut s = col("s", "text", true);
-    s.is_static = true;
-    TableSchema {
-        keyspace: KS.into(),
-        table: STATIC_TBL.into(),
-        partition_keys: vec![KeyColumn {
-            name: "pk".into(),
-            data_type: "int".into(),
-            position: 0,
-        }],
-        clustering_keys: vec![ClusteringColumn {
-            name: "ck".into(),
-            data_type: "int".into(),
-            position: 0,
-            order: Default::default(),
-        }],
-        columns: vec![
-            col("pk", "int", false),
-            col("ck", "int", false),
-            s,
-            col("v", "text", true),
-        ],
-        comments: Default::default(),
-        dropped_columns: Default::default(),
-    }
-}
-
-/// One SSTable with (a) a partition holding a static cell AND clustering rows,
-/// and (b) a partition holding ONLY a static cell (no clustering row).
-async fn build_statics_fixture() -> (tempfile::TempDir, PathBuf) {
-    let temp = tempfile::TempDir::new().expect("tempdir");
-    let data_dir = temp.path().join("data");
-    let wal_dir = temp.path().join("wal");
-    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, statics_schema());
-    let mut engine = WriteEngine::new(config).expect("engine");
-    let static_write = |pk: i32, val: &str| {
-        Mutation::new(
-            TableId::new(KS, STATIC_TBL),
-            PartitionKey::single("pk", Value::Integer(pk)),
-            None,
-            vec![CellOperation::Write {
-                column: "s".into(),
-                value: Value::text(val),
-            }],
-            T_BASE_MICROS,
-            None,
-        )
-    };
-    let row_write = |pk: i32, ck: i32, v: &str| {
-        Mutation::new(
-            TableId::new(KS, STATIC_TBL),
-            PartitionKey::single("pk", Value::Integer(pk)),
-            Some(ClusteringKey::single("ck", Value::Integer(ck))),
-            vec![CellOperation::Write {
-                column: "v".into(),
-                value: Value::text(v),
-            }],
-            T_BASE_MICROS,
-            None,
-        )
-    };
-    engine.write(static_write(1, "s1")).unwrap();
-    engine.write(row_write(1, 1, "v11")).unwrap();
-    engine.write(row_write(1, 2, "v12")).unwrap();
-    engine.write(static_write(2, "s2-only")).unwrap();
-    engine.flush().await.expect("flush").expect("flush info");
-    (temp, data_dir)
-}
-
 /// The whole differential (one test — see the module doc's isolation note).
 #[tokio::test]
 async fn forced_path_differential_agrees_on_every_shape() {
@@ -968,13 +610,22 @@ async fn forced_path_differential_agrees_on_every_shape() {
         }
     }
 
-    // ---- Static columns: the fail-closed fallback --------------------------
-    // A static-bearing schema must NOT take the fast path: the arms disagree on
-    // static-row shape (the merge arm emits a `ck = null` static row and injects
-    // nothing; the single-generation decoder injects statics into the clustering
-    // rows but drops a static-ONLY partition entirely). Both are wrong in
-    // DIFFERENT ways versus Cassandra, so this change keeps today's behaviour
-    // exactly and the divergence is a documented follow-up.
+    // ---- Static columns: FAIL-CLOSED to the merge arm (issues #3095 / #3140) ----
+    // #3095 retired the "any static column refuses the fast arm" exclusion, but a
+    // static-bearing SSTable that MAY contain a deletion still fails closed
+    // (`BypassReason::StaticColumnsWithDeletions`): a simple CELL tombstone diverges
+    // between the arms — the merge arm drops it (column reads null, Cassandra's answer)
+    // while the fast arm surfaces a raw `Value::Tombstone` the Arrow encoder rejects.
+    // This fixture contains a row deletion, so it takes that branch.
+    //
+    // SCOPE, so this is not mistaken for a Cassandra oracle: the fixture is
+    // CQLITE-WRITTEN, so its ROW CONTENT proves nothing about Cassandra (it is
+    // invariant to a uniform error and subject to the write-side #1074 — #3042). What
+    // it proves is that both FORCED values behave identically and that the fast arm is
+    // refused. The Cassandra-parity oracle is
+    // `cqlite-flight/tests/issue_3095_flight_static_columns.rs`, on Cassandra-written
+    // fixtures including a static-ONLY partition; the deletion-FREE static fixtures
+    // there DO take the fast arm, which is where #3095's AC5 is demonstrated.
     let (_stemp, statics_dir) = build_statics_fixture().await;
     let ssvc = CqliteFlightService::new(statics_dir, 8192);
     let sticket = ticket_json(KS, STATIC_TBL, STATIC_DDL);
@@ -987,6 +638,39 @@ async fn forced_path_differential_agrees_on_every_shape() {
         &mut failures,
     )
     .await;
+    // Not just "refused and identical": pin the SHAPE the merge arm returns, so an
+    // agreed-but-wrong result set (a phantom `ck = null` row alongside the real rows, or
+    // a dropped rowless partition) cannot pass. Expected per Cassandra's
+    // `processPartition()`: pk=1's two clustering rows carrying `s1`; ONE row for the
+    // static-only pk=2; ONE row for pk=3, whose only clustering row was deleted.
+    std::env::set_var(TTL_NOW_ENV, NOW_BEFORE_EXPIRY.to_string());
+    let static_rows = do_get_outcome(&ssvc, &sticket).await;
+    std::env::remove_var(TTL_NOW_ENV);
+    match static_rows {
+        Err(e) => failures.push(format!("statics/select-star: do_get failed: {e}")),
+        Ok(rows) => {
+            let mut shape: Vec<(String, String, String)> = rows
+                .iter()
+                .map(|r| {
+                    let get = |c: &str| r.get(c).cloned().unwrap_or_else(|| "<missing>".into());
+                    (get("pk"), get("ck"), get("s"))
+                })
+                .collect();
+            shape.sort();
+            let expected: Vec<(String, String, String)> = vec![
+                ("1".into(), "1".into(), "s1".into()),
+                ("1".into(), "2".into(), "s1".into()),
+                ("2".into(), "<null>".into(), "s2-only".into()),
+                ("3".into(), "<null>".into(), "s3-rows-deleted".into()),
+            ];
+            if shape != expected {
+                failures.push(format!(
+                    "statics/select-star: the (pk, ck, s) shape is not Cassandra's — \
+                     expected {expected:#?}, got {shape:#?}"
+                ));
+            }
+        }
+    }
 
     // ---- The on-disk static branch, asserted DIRECTLY on the predicate ------
     assert_undeclared_static_column_is_refused_on_disk(&mut failures).await;
@@ -1301,10 +985,12 @@ fn dataset_cases() -> Vec<DatasetCase> {
         },
         // REAL Cassandra static shape: `sdata` was written by
         // `UPDATE static_clustering_shape SET sdata='static-val' WHERE id=1`
-        // alongside an INSERTed clustering row. Its schema declares a STATIC
-        // column, so the predicate REFUSES the fast path (the arms disagree on
-        // static-row shape) — this case pins that fail-closed fallback on real
-        // Cassandra bytes.
+        // alongside an INSERTed clustering row. Issue #3095: with both arms now
+        // implementing Cassandra's `processPartition()` static semantics, a ticket
+        // DDL that DECLARES `sdata static` is servable by the fast arm, so this is
+        // an arm differential rather than a fail-closed fallback. (Its
+        // Cassandra-parity assertion — 1 row, static value present, no `ck = null`
+        // row — lives in `issue_3095_flight_static_columns.rs`.)
         // Spec R1/R6 (roborev): this table declares `set<frozen<contact_info>>`
         // and `map<text, frozen<contact_info>>` — a composite-keyed collection the
         // MERGE arm's reassembler fails closed on (#2339) while the
@@ -1416,7 +1102,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             token_of_int_pk: None,
         },
         DatasetCase {
-            label: "cassandra/static_clustering_shape(fail-closed static fallback)",
+            label: "cassandra/static_clustering_shape(declared static, both arms)",
             pk_only_label: "cassandra/static_clustering_shape@pk-only",
             keyspace: "test_writeparity",
             table: "static_clustering_shape",
@@ -1426,7 +1112,7 @@ fn dataset_cases() -> Vec<DatasetCase> {
             pinned_now: ORACLE_PINNED_NOW,
             min_rows: 1,
             pk_only_projection: vec![],
-            refuses_fast_arm: true,
+            refuses_fast_arm: false,
             refused_error_substr: None,
             columns: vec![],
             token_of_int_pk: None,

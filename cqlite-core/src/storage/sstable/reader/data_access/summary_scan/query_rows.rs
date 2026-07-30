@@ -418,6 +418,45 @@ impl SSTableReader {
             .collect()
     }
 
+    /// Whether this SSTable's OWN `Statistics.db` declares that it may contain a
+    /// DELETION of any kind — a partition/row/range/cell tombstone or a TTL'd cell.
+    ///
+    /// Authoritative on-disk metadata (issue #28), read with CASSANDRA'S OWN
+    /// comparison: `EncodingStats`'s constructor normalizes "no local deletion time"
+    /// to `DELETION_TIME_EPOCH` — `minLocalDeletionTime ==
+    /// LivenessInfo.NO_EXPIRATION_TIME ? DELETION_TIME_EPOCH : minLocalDeletionTime`
+    /// (`db/rows/EncodingStats.java`, pinned `cassandra-5.0.8`) — and Cassandra itself
+    /// tests "this stat records no deletion" as
+    /// `stats.minLocalDeletionTime != DELETION_TIME_EPOCH` before feeding a metadata
+    /// collector. So EPOCH means "no deletion recorded", NOT "a deletion in 2015".
+    ///
+    /// Note for anyone comparing with `sstabledump`: its
+    /// `SSTable min local deletion time: no tombstones (9223372036854775807)` line is
+    /// `StatsMetadata`'s SEPARATE field with its own `Long.MAX_VALUE` sentinel — a
+    /// different stat from the `EncodingStats` one read here.
+    ///
+    /// It is a MAY, deliberately: the metadata cannot distinguish a CELL tombstone from
+    /// a row/range/partition one or a TTL'd cell, so a caller that must fail closed on
+    /// one deletion shape fails closed on all of them.
+    ///
+    /// `false` means "this file declares NO deletion at all" and is authoritative only
+    /// when `Statistics.db` was parsed; with no statistics this reports `true`
+    /// (unknown ⇒ assume deletions ⇒ the caller fails closed).
+    pub fn may_contain_deletions(&self) -> bool {
+        // Cassandra `EncodingStats.DELETION_TIME_EPOCH` — Sept 22 2015 00:00:00 UTC in
+        // SECONDS, the vint base the stat is serialized against
+        // (`writeUnsignedVInt32((int)(stats.minLocalDeletionTime - DELETION_TIME_EPOCH))`).
+        // The repo's writer carries the same constant
+        // (`writer::stats_writer::DELETION_TIME_EPOCH`).
+        const DELETION_TIME_EPOCH: i64 = 1_442_880_000;
+        match self.statistics_reader.as_ref() {
+            Some(stats) => {
+                stats.statistics().timestamp_stats.min_deletion_time != DELETION_TIME_EPOCH
+            }
+            None => true,
+        }
+    }
+
     /// Whether [`Self::on_disk_static_columns`] is an ANSWER rather than an
     /// absence of information: `true` when the serialization header was parsed
     /// (so "no static columns" is authoritative), `false` when there is nothing

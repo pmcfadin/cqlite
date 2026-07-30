@@ -22,10 +22,49 @@
 //!   concurrently-running producer thread and can leak the gauge upward
 //!   permanently — see that `Drop` impl's doc for the full derivation.
 //!
-//! Only DATA entries (`Ok(MergeEntry)`) are tracked on BOTH sides; the rare
-//! terminal error message (`Err(MergeProducerError)`) is untracked on send and
-//! on receive, so it never unbalances the level. The `max(0)` floor matches
-//! `RpcMetrics::finish`, guarding against any unexpected residual imbalance.
+//! # THE invariant this module depends on (issue #3120)
+//!
+//! Only DATA entries (`MergeMsg::Item`) are tracked, and they are tracked on BOTH
+//! sides. The TERMINATORS (`MergeMsg::Failed` / `MergeMsg::Done`) are untracked on
+//! send AND on receive, so they can never unbalance the level. Formally, per
+//! adapter `A`, with `data(m) = 1` iff `m` is a DATA entry:
+//!
+//! ```text
+//! ∀ m:  counted_on_send(m) ⟺ counted_on_receive_or_residual(m) ⟺ data(m)
+//! and   sentA − recvA ≥ 0 at every join point
+//! ```
+//!
+//! An asymmetry here is INVISIBLE without help: a message counted on exactly one
+//! side drives the residual NEGATIVE, [`reconcile_residual`]'s `> 0` guard then
+//! SKIPS it, and [`record`]'s `max(0)` floor hides the resulting drift from every
+//! observer, permanently.
+//!
+//! ## What actually holds the invariant up (stated precisely — rust-reviewer)
+//!
+//! NOT "both sides call one shared predicate". They do not, and claiming they do
+//! would hide the real gap:
+//!
+//! * **Receive side** (`SSTableRowIteratorAdapter::next`) is a hand-written
+//!   `MergeMsg::Item(entry)` match arm that never calls `is_tracked_data`. Two
+//!   properties make it correct anyway: that `match` is **EXHAUSTIVE with no
+//!   wildcard arm**, so a future 4th `MergeMsg` variant is a COMPILE ERROR there
+//!   rather than silently falling into a catch-all; and [`received`],
+//!   `received_count`, and `add_merge_run_entry_decoded` each appear at EXACTLY ONE
+//!   site in the crate, all three inside that `Item` arm.
+//! * **Send side** (`from_readers::forward_row`) builds `MergeMsg::Item(entry)`
+//!   unconditionally, so its `msg.is_tracked_data()` is a TAUTOLOGY today — it can
+//!   only be `true`. Its value is as a compile-time tripwire, not a runtime test:
+//!   `MergeMsg::is_tracked_data`'s body is itself an exhaustive match, so adding a
+//!   variant forces an explicit tracked/untracked decision there.
+//! * The `channel_depth` test below pins `is_tracked_data`'s CLASSIFICATION (that
+//!   both terminators are untracked). It cannot — and does not claim to — detect a
+//!   divergence at the hand-written receive site.
+//! * [`reconcile_residual`] checks `residual >= 0` at the one place a violation
+//!   becomes observable, reporting it WITHOUT panicking from a `Drop` (see that
+//!   function).
+//!
+//! The `max(0)` floor stays (it matches `RpcMetrics::finish`) as the last-resort
+//! backstop so no negative gauge is ever recorded.
 //!
 //! The gauge is OS-independent — it always emits on every platform (unlike the
 //! `/proc`-derived `cqlite.proc.*` saturation gauges).
@@ -74,7 +113,50 @@ pub(super) fn received() {
 /// producer sent but its consumer never received. A no-op for `residual <= 0`
 /// (the common case: every send was received). See the module doc for why this
 /// must run only after the producer thread has been joined.
+///
+/// # A NEGATIVE residual is reported, never panicked out of a `Drop`
+///
+/// A negative residual means the tracked-send and tracked-receive sites disagreed
+/// (e.g. a terminator counted on exactly one side). The `> 0` guard below would
+/// silently skip it and [`record`]'s `max(0)` floor would hide the drift forever,
+/// so it must be reported — but this function's ONLY production caller is
+/// `SSTableRowIteratorAdapter::drop`, so 100% of its reachable paths are inside a
+/// `Drop` (rust-reviewer, issue #3120). A bare `debug_assert!` there would panic
+/// FROM a `Drop`: any test that fails an assertion with a live `KWayMerger` in
+/// scope drops the adapter while ALREADY UNWINDING → double panic → process
+/// ABORT, which under libtest destroys the original assertion message and every
+/// sibling test's result in the binary. `teardown_tests` drops mergers on purpose,
+/// so this is not hypothetical.
+///
+/// Hence the same idiom `producer_fault::SilencedInjectedPanics::drop` uses for
+/// `set_hook`: skip the panicking route while unwinding. The `tracing::error!`
+/// runs unconditionally, so the signal also exists in a release build (where
+/// `debug_assert!` compiles away entirely).
+///
+/// The invariant itself genuinely holds: every tracked receive is preceded by the
+/// tracked send of that same entry, and the caller reads `sent_count` strictly
+/// AFTER `join()`, which retires every pending `fetch_add`.
 pub(super) fn reconcile_residual(residual: i64) {
+    if residual < 0 {
+        tracing::error!(
+            residual,
+            "egress-depth residual is NEGATIVE: a tracked receive without a matching \
+             tracked send means the send and receive accounting sites disagree — the \
+             `> 0` guard below and `record`'s `max(0)` floor would otherwise hide \
+             this drift permanently (issue #3120)"
+        );
+        // Reaching here at all is the violation, so the assert's condition is
+        // deliberately "…and we are not ALREADY unwinding": it fails loudly on a
+        // normal drop (the signal we want) and stays silent when this `Drop` is
+        // itself running during someone else's panic, where a second panic would
+        // abort the process and take the original failure message with it.
+        debug_assert!(
+            std::thread::panicking(),
+            "egress-depth residual must never be negative (got {residual}): the \
+             send and receive accounting sites disagree — see this module's \
+             invariant (issue #3120)"
+        );
+    }
     if residual > 0 {
         record(adjust(&DEPTH, -residual));
     }
@@ -209,6 +291,154 @@ mod tests {
              returning the gauge to its pre-scenario baseline — the #2419 \
              roborev job 1733 regression this fix eliminates"
         );
+    }
+
+    /// Guards the REPORTING mechanism [`reconcile_residual`] uses for a negative
+    /// residual (rust-reviewer, issue #3120), because its condition is subtle
+    /// enough to be "corrected" into a no-op: the assert deliberately requires
+    /// `std::thread::panicking()`, so inverting it to `!panicking()` would silently
+    /// mean the invariant is NEVER checked. Both halves matter:
+    ///
+    /// 1. On a NORMAL (non-unwinding) call it FAILS LOUDLY — the signal.
+    /// 2. When [`reconcile_residual`] runs from a `Drop` that is itself unwinding
+    ///    (the only shape it is reachable in production, and what `teardown_tests`
+    ///    routinely produces), it adds NO second panic, so the ORIGINAL failure
+    ///    message survives instead of the process aborting and taking every
+    ///    sibling test's result with it.
+    ///
+    /// Uses `residual = -1` directly rather than trying to provoke a real
+    /// asymmetry: the invariant genuinely holds today, so the only way to exercise
+    /// the reporting path is to call it with a violating value.
+    #[test]
+    fn a_negative_residual_is_loud_normally_and_silent_while_unwinding() {
+        // (1) `debug_assert!` compiles away in a release build, so only assert the
+        // panic where the assertion actually exists.
+        #[cfg(debug_assertions)]
+        {
+            let died = std::panic::catch_unwind(|| reconcile_residual(-1));
+            assert!(
+                died.is_err(),
+                "a negative residual must fail LOUDLY on a normal (non-unwinding) \
+                 call — if this passes, the invariant is no longer checked at all"
+            );
+        }
+
+        // (2) The production shape: a `Drop` that reconciles while already
+        // unwinding must not double-panic.
+        struct ReconcilesOnDrop;
+        impl Drop for ReconcilesOnDrop {
+            fn drop(&mut self) {
+                reconcile_residual(-1);
+            }
+        }
+        let died = std::panic::catch_unwind(|| {
+            let _guard = ReconcilesOnDrop;
+            panic!("the original failure, whose message must survive the drop");
+        });
+        let payload = died.expect_err("the original panic must still propagate");
+        let message = payload
+            .downcast_ref::<&'static str>()
+            .copied()
+            .unwrap_or("<payload lost — a double panic would have aborted instead>");
+        assert!(
+            message.contains("the original failure"),
+            "the ORIGINAL panic message must survive a reconcile during unwind; a \
+             second panic here aborts the process under libtest, destroying this \
+             message and every sibling test's result, got: {message}"
+        );
+    }
+
+    /// Issue #3120: `MergeMsg::is_tracked_data` CLASSIFIES both terminators as
+    /// untracked, so a run that ends with one returns the depth to exactly baseline
+    /// and leaves a residual of exactly ZERO — never a negative residual, which the
+    /// `> 0` guard would skip and the `max(0)` floor would hide forever.
+    ///
+    /// SCOPE, stated honestly (rust-reviewer): this pins the PREDICATE, not the
+    /// symmetry of the two production call sites. The receive site
+    /// (`SSTableRowIteratorAdapter::next`) is a hand-written `MergeMsg::Item` match
+    /// arm that never calls `is_tracked_data`, so a divergence introduced THERE
+    /// would not fail this test. What protects that site is structural, not this
+    /// test: its `match` is exhaustive with no wildcard arm (a 4th variant is a
+    /// compile error) and the three receive-side accounting calls each appear at
+    /// exactly one place, inside that arm. See the module doc.
+    ///
+    /// Against a PRIVATE atomic, never the shared `DEPTH` (the #2451 flake class):
+    /// thousands of tests share this binary and several drive real merge egress
+    /// channels.
+    #[test]
+    fn a_terminator_is_untracked_on_both_sides_so_the_residual_is_exactly_zero() {
+        use crate::storage::write_engine::merge::producer_msg::{MergeMsg, MergeProducerError};
+        use crate::storage::write_engine::merge::{CellData, MergeEntry, RowData};
+        use crate::storage::write_engine::mutation::DecoratedKey;
+        use crate::types::Value;
+
+        fn data_item(n: i64) -> MergeMsg {
+            MergeMsg::Item(MergeEntry::new(
+                0,
+                DecoratedKey::new(n, n.to_be_bytes().to_vec()),
+                None,
+                100,
+                RowData::Live {
+                    cells: vec![CellData::new("name".to_string(), Value::text("v"), 100)],
+                },
+            ))
+        }
+
+        // Each run: N data entries followed by exactly ONE terminator — the shape
+        // every producer thread now produces on every exit path.
+        for terminator in [
+            MergeMsg::Done,
+            MergeMsg::Failed(MergeProducerError::Panicked("boom".to_string())),
+            MergeMsg::Failed(MergeProducerError::Cancelled),
+        ] {
+            const DATA_ENTRIES: usize = 5;
+            let depth = AtomicI64::new(0);
+            let baseline = depth.load(Ordering::SeqCst);
+            let mut sent_count: i64 = 0;
+            let mut received_count: i64 = 0;
+
+            let mut stream: Vec<MergeMsg> = (0..DATA_ENTRIES as i64).map(data_item).collect();
+            stream.push(terminator);
+
+            // SEND side: exactly what `from_readers::forward_row` does.
+            for msg in &stream {
+                if msg.is_tracked_data() {
+                    adjust(&depth, 1);
+                    sent_count += 1;
+                }
+            }
+            assert_eq!(
+                sent_count, DATA_ENTRIES as i64,
+                "only the DATA entries may be tracked on send — the terminator must \
+                 not be"
+            );
+
+            // RECEIVE side: exactly what the `MergeMsg::Item` arm of
+            // `SSTableRowIteratorAdapter::next` does (and no other arm does).
+            for msg in &stream {
+                if msg.is_tracked_data() {
+                    adjust(&depth, -1);
+                    received_count += 1;
+                }
+            }
+
+            let residual = sent_count - received_count;
+            assert_eq!(
+                residual, 0,
+                "a fully drained run whose last message is a terminator must leave a \
+                 residual of exactly zero; a NEGATIVE residual is skipped by the \
+                 `> 0` guard and floored away by `max(0)`, hiding the drift forever \
+                 (issue #3120)"
+            );
+            // The production reconcile would be a no-op here; running it proves the
+            // debug_assert is satisfied by the balanced case.
+            reconcile_residual(residual);
+            assert_eq!(
+                depth.load(Ordering::SeqCst),
+                baseline,
+                "the tracked level returns to baseline"
+            );
+        }
     }
 
     /// The `max(0)` floor never records a negative gauge even under an unexpected
