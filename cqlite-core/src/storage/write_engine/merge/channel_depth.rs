@@ -293,6 +293,61 @@ mod tests {
         );
     }
 
+    /// Guards the REPORTING mechanism [`reconcile_residual`] uses for a negative
+    /// residual (rust-reviewer, issue #3120), because its condition is subtle
+    /// enough to be "corrected" into a no-op: the assert deliberately requires
+    /// `std::thread::panicking()`, so inverting it to `!panicking()` would silently
+    /// mean the invariant is NEVER checked. Both halves matter:
+    ///
+    /// 1. On a NORMAL (non-unwinding) call it FAILS LOUDLY — the signal.
+    /// 2. When [`reconcile_residual`] runs from a `Drop` that is itself unwinding
+    ///    (the only shape it is reachable in production, and what `teardown_tests`
+    ///    routinely produces), it adds NO second panic, so the ORIGINAL failure
+    ///    message survives instead of the process aborting and taking every
+    ///    sibling test's result with it.
+    ///
+    /// Uses `residual = -1` directly rather than trying to provoke a real
+    /// asymmetry: the invariant genuinely holds today, so the only way to exercise
+    /// the reporting path is to call it with a violating value.
+    #[test]
+    fn a_negative_residual_is_loud_normally_and_silent_while_unwinding() {
+        // (1) `debug_assert!` compiles away in a release build, so only assert the
+        // panic where the assertion actually exists.
+        #[cfg(debug_assertions)]
+        {
+            let died = std::panic::catch_unwind(|| reconcile_residual(-1));
+            assert!(
+                died.is_err(),
+                "a negative residual must fail LOUDLY on a normal (non-unwinding) \
+                 call — if this passes, the invariant is no longer checked at all"
+            );
+        }
+
+        // (2) The production shape: a `Drop` that reconciles while already
+        // unwinding must not double-panic.
+        struct ReconcilesOnDrop;
+        impl Drop for ReconcilesOnDrop {
+            fn drop(&mut self) {
+                reconcile_residual(-1);
+            }
+        }
+        let died = std::panic::catch_unwind(|| {
+            let _guard = ReconcilesOnDrop;
+            panic!("the original failure, whose message must survive the drop");
+        });
+        let payload = died.expect_err("the original panic must still propagate");
+        let message = payload
+            .downcast_ref::<&'static str>()
+            .copied()
+            .unwrap_or("<payload lost — a double panic would have aborted instead>");
+        assert!(
+            message.contains("the original failure"),
+            "the ORIGINAL panic message must survive a reconcile during unwind; a \
+             second panic here aborts the process under libtest, destroying this \
+             message and every sibling test's result, got: {message}"
+        );
+    }
+
     /// Issue #3120: `MergeMsg::is_tracked_data` CLASSIFIES both terminators as
     /// untracked, so a run that ends with one returns the depth to exactly baseline
     /// and leaves a residual of exactly ZERO — never a negative residual, which the
