@@ -59,8 +59,11 @@ use arrow_flight::Ticket;
 use futures::StreamExt;
 use tonic::Request;
 
+use arrow::array::Int64Array;
 use cqlite_core::storage::read_path_probe::ReadPathProbe;
 use cqlite_flight::bypass::MERGE_PATH_ENV;
+use cqlite_flight::filter::ScanSpec;
+use cqlite_flight::producer::MergeProducer;
 use cqlite_flight::service::CqliteFlightService;
 
 /// Debug-only reader seam pinning the read-time reconciliation clock
@@ -214,6 +217,63 @@ async fn run_forced(
     let delta = ReadPathProbe::snapshot().delta_since(&before);
     std::env::remove_var(MERGE_PATH_ENV);
     (rows, delta)
+}
+
+/// Drain an AGGREGATING `do_get` into its partial-aggregate `cnt` values.
+// arrow-flight's `FlightError` Err type has a framework-fixed large size (#2856).
+#[allow(clippy::result_large_err)]
+async fn do_get_counts(svc: &CqliteFlightService, ticket: &serde_json::Value) -> Vec<i64> {
+    let bytes = serde_json::to_vec(ticket).expect("ticket json");
+    let resp = svc
+        .do_get(Request::new(Ticket::new(bytes)))
+        .await
+        .expect("do_get")
+        .into_inner();
+    let mapped = resp.map(|r| r.map_err(|e| FlightError::ExternalError(Box::new(e))));
+    let mut stream = FlightRecordBatchStream::new_from_flight_data(mapped);
+    let mut out = Vec::new();
+    while let Some(batch) = stream.next().await {
+        let batch = batch.expect("record batch");
+        let col = batch
+            .column_by_name("cnt")
+            .expect("the partial-aggregate schema carries `cnt`");
+        let counts = col
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("Count partials are Int64");
+        for i in 0..counts.len() {
+            out.push(counts.value(i));
+        }
+    }
+    out
+}
+
+/// Drive the BUFFERED collect route (`MergeProducer::produce_from_paths`, behind the
+/// public `produce` family) directly over the fixture's `Data.db` files.
+fn produce_from_paths_rows(dir: &Path, ddl: &str) -> Vec<Row> {
+    let schema = cqlite_core::schema::parse_cql_schema(ddl).expect("ddl parses");
+    let producer = MergeProducer::with_spec(schema, 8192, ScanSpec::default()).expect("producer");
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .expect("fixture dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-Data.db"))
+        })
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "the fixture must carry a Data.db");
+    std::env::set_var(TTL_NOW_ENV, PINNED_NOW.to_string());
+    let batches = producer.produce_from_paths(paths);
+    std::env::remove_var(TTL_NOW_ENV);
+    let batches = batches.expect("the buffered collect route runs");
+    let mut rows = Vec::new();
+    for batch in &batches {
+        push_rows(batch, &mut rows);
+    }
+    rows
 }
 
 /// Build one expected row from `(column, value)` pairs; `None` is a null column.
@@ -547,6 +607,73 @@ async fn flight_static_column_semantics_match_cassandra() {
         }
         None => {
             let msg = format!("{TB_KS}.{TB_TBL}: fixture absent");
+            if require_fixtures() {
+                failures.push(format!("REQUIRE_FIXTURES: {msg}"));
+            } else {
+                eprintln!("SKIP {msg}");
+            }
+        }
+    }
+
+    // -- NB2: the AGGREGATE route (every `SELECT count(*)` ticket) ------------
+    // `bypass_reason` returns `Aggregating` for every aggregating ticket, so this
+    // ALWAYS lands on `drive_aggregate`. Cassandra's `count(*)` counts exactly the
+    // rows `SELECT *` returns — 13 here, including the pk=99 static-only partition's
+    // row and EXCLUDING the phantom `ck = null` rows the pre-fix route counted (it
+    // reported 16). This is the route whose answer disagreed with `SELECT *` over the
+    // same bytes until the static choke point was hoisted.
+    match fixture_dir(DL_KS, DL_TBL) {
+        Some(dir) => {
+            let temp = stage(DL_KS, &dir).expect("stage fixture");
+            let svc = CqliteFlightService::new(temp.path().to_path_buf(), 8192);
+            let mut ticket = ticket_json(DL_KS, DL_TBL, DL_DDL);
+            ticket["aggregation"] = serde_json::json!({
+                "group_by": [],
+                "aggregates": [{ "func": "Count", "column": null, "output": "cnt" }]
+            });
+            std::env::set_var(TTL_NOW_ENV, PINNED_NOW.to_string());
+            let counted = do_get_counts(&svc, &ticket).await;
+            std::env::remove_var(TTL_NOW_ENV);
+            let expected = deltas_expected_select_star().len() as i64;
+            if counted != vec![expected] {
+                failures.push(format!(
+                    "case static_with_rows/count-star: the AGGREGATE route must count \
+                     exactly the rows SELECT * returns ({expected}); got {counted:?}"
+                ));
+            }
+        }
+        None => {
+            let msg = format!("{DL_KS}.{DL_TBL}: fixture absent (count-star case)");
+            if require_fixtures() {
+                failures.push(format!("REQUIRE_FIXTURES: {msg}"));
+            } else {
+                eprintln!("SKIP {msg}");
+            }
+        }
+    }
+
+    // -- NB2: the BUFFERED collect route (`produce_from_paths`) --------------
+    // The public non-streaming surface behind `produce` / `produce_from_paths` /
+    // `produce_from_resolved` drives `drive_merge`, which had the same gap. Asserted
+    // on the row SHAPE, not just a count.
+    match fixture_dir(DL_KS, DL_TBL) {
+        Some(dir) => {
+            let rows = produce_from_paths_rows(&dir, DL_DDL);
+            let want = sorted(&deltas_expected_select_star());
+            if sorted(&rows) != want {
+                failures.push(format!(
+                    "case static_with_rows/produce_from_paths: the BUFFERED collect \
+                     route diverges from Cassandra\n  expected ({} rows): {:#?}\n  \
+                     got      ({} rows): {:#?}",
+                    want.len(),
+                    want,
+                    rows.len(),
+                    sorted(&rows)
+                ));
+            }
+        }
+        None => {
+            let msg = format!("{DL_KS}.{DL_TBL}: fixture absent (produce_from_paths case)");
             if require_fixtures() {
                 failures.push(format!("REQUIRE_FIXTURES: {msg}"));
             } else {
