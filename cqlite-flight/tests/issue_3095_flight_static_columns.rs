@@ -430,6 +430,17 @@ const TB_TBL: &str = "static_with_tombstones";
 const TB_DDL: &str = "CREATE TABLE test_tomb.static_with_tombstones \
      (pk int, ck int, stat_col text static, row_col text, PRIMARY KEY (pk, ck))";
 
+// ---------------------------------------------------------------------------
+// Fixture 4: test_oa.static_table (Cassandra 5.0, `oa` FORMAT; fetch-only)
+// ---------------------------------------------------------------------------
+
+const OA_KS: &str = "test_oa";
+const OA_TBL: &str = "static_table";
+/// Verbatim from `test-data/schemas/oa-test.cql`.
+const OA_DDL: &str = "CREATE TABLE test_oa.static_table \
+     (partition_key uuid, clustering_key int, static_col text static, row_data text, \
+      PRIMARY KEY (partition_key, clustering_key))";
+
 /// Every row Cassandra returns for `SELECT * FROM test_deltas.static_with_rows`,
 /// derived from the committed sstabledump golden + `processPartition()`: each of
 /// the 12 clustering rows carries its partition's static value, and the
@@ -739,6 +750,57 @@ async fn flight_static_column_semantics_match_cassandra() {
                 eprintln!("SKIP {msg}");
             }
         }
+    }
+
+    // -- AC1 on the `oa` FORMAT --------------------------------------------
+    // The same static rule on a different on-disk format version: `oa` (BTI-era BIG),
+    // vs `nb` for every other fixture here. Statics on each of two partitions' two
+    // clustering rows, no phantom `ck = null` row. Fetch-only (not committed), so it
+    // SKIPs on a bare checkout and is never part of the committed-fixture floor.
+    match fixture_dir(OA_KS, OA_TBL) {
+        Some(dir) => {
+            let temp = stage(OA_KS, &dir).expect("stage fixture");
+            let svc = CqliteFlightService::new(temp.path().to_path_buf(), 8192);
+            // PROJECTION excludes `partition_key`, and not to weaken the case: CQLite
+            // renders a `uuid` WITHOUT hyphens
+            // (`11111111111111111111000000000001` where Cassandra and sstabledump
+            // render `11111111-1111-1111-1111-000000000001`). Both arms agree on it and
+            // it has nothing to do with static columns, so it is REPORTED as a separate
+            // defect rather than asserted-as-correct here or fixed in this diff. The
+            // partition association is still pinned: the two partitions carry disjoint
+            // `row_data` values, so a static value landing on the wrong partition's rows
+            // fails this case.
+            let mut ticket = ticket_json(OA_KS, OA_TBL, OA_DDL);
+            ticket["columns"] = serde_json::json!(["clustering_key", "static_col", "row_data"]);
+            let mut want = Vec::new();
+            for (statik, rows) in [
+                ("shared static value A", ["row 1 data", "row 2 data"]),
+                (
+                    "shared static value B",
+                    ["row 1 in partition 2", "row 2 in partition 2"],
+                ),
+            ] {
+                for (i, row_data) in rows.iter().enumerate() {
+                    want.push(row(&[
+                        ("clustering_key", Some(&(i + 1).to_string())),
+                        ("static_col", Some(statik)),
+                        ("row_data", Some(row_data)),
+                    ]));
+                }
+            }
+            assert_static_semantics(
+                "oa/static_table/select-star",
+                &svc,
+                &ticket,
+                &want,
+                &mut failures,
+            )
+            .await;
+        }
+        None => eprintln!(
+            "SKIP {OA_KS}.{OA_TBL}: fixture absent (fetch-only `oa` corpus; additive \
+             format coverage, never the floor)"
+        ),
     }
 
     assert!(
