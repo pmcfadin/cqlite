@@ -87,8 +87,13 @@
 //!   [`crate::storage::sstable::reader::BatchedScanStream`]: it owns the scan
 //!   task's `JoinHandle` and joins it when its channel closes, so a task that
 //!   died surfaces as an error there and reaches this thread as a normal `Err`
-//!   (hence a `Failed` terminator). The pair of boundaries is what makes the
-//!   end-to-end claim true; neither alone does.
+//!   (hence a `Failed` terminator). Both boundaries are needed for the end-to-end
+//!   claim; neither alone suffices — and the claim is bounded to those two, NOT
+//!   universal: on the chunk-stitching branch there is a THIRD hop, the windowed
+//!   driver's batch forwarder, whose `JoinError` is deliberately discarded
+//!   (`scan_stream_windowed`'s `let _ = forwarder.await;`), so a panic there is
+//!   still invisible. Pre-existing and low-likelihood (the forwarder only moves
+//!   already-decoded batches), tracked as a follow-up rather than fixed here.
 
 use std::ops::ControlFlow;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};

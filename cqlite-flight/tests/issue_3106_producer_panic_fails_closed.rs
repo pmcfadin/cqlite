@@ -283,13 +283,33 @@ async fn a_dead_query_row_producer_fails_the_do_get_instead_of_truncating_it_sil
 ///
 /// This is the arm the reported defect actually takes — this ticket carries NO
 /// token filter, so `producer_warm` passes `token_bound = None` and
-/// `drive_full_scan_rows` runs. The fault is injected INSIDE the inner task, in
-/// the block decode (`parse_batched_block` → `parse_block_entries_at_now`), which
-/// on this uncompressed/non-stitching fixture runs directly in that task: the task
-/// unwinds, drops its sender, and the outer query-row thread sees a plain channel
-/// close. Before the fix that meant `Ok(())` → the `Done` sentinel → a SUCCESSFUL
-/// truncated `do_get`; the outer channel's own protocol cannot see it, which is
-/// why the first test above passes either way.
+/// `drive_full_scan_rows` runs. The task unwinds, drops its sender, and the outer
+/// query-row thread sees a plain channel close. Before the fix that meant `Ok(())`
+/// → the `Done` sentinel → a SUCCESSFUL truncated `do_get`; the outer channel's
+/// own protocol cannot see it, which is why the first test above passes either
+/// way.
+///
+/// # Where the fault lands, and why that is enough
+///
+/// `arm_inner_scan_task_panic()` panics at the scan task's ONE checkpoint: its
+/// cursor-open PRELUDE (`batched_scan_stream::open_batched_scan_cursor`), NOT a
+/// block decode. That is chosen for FORMAT-BRANCH INDEPENDENCE. The task body
+/// branches on `requires_chunk_stitching()`, and this fixture is a CQLite-written
+/// `nb-*-big-Data.db`, which resolves to `CassandraVersion::V5_0NewBig` →
+/// `is_nb_format()` → **stitching branch** — so a checkpoint placed in the
+/// non-stitching block decode would never fire here, and an earlier draft of this
+/// very test passed VACUOUSLY for exactly that reason.
+///
+/// The property proven is nevertheless branch-agnostic: the join lives in
+/// `BatchedScanStream::recv`, wrapping the single `tokio::spawn` in
+/// `scan_stream_batched_admitted` — strictly ABOVE the `requires_chunk_stitching()`
+/// branch inside the task body — so a panic in EITHER branch surfaces as the
+/// identical `JoinError` on the identical code path.
+///
+/// What is therefore NOT covered end-to-end: a panic in the non-stitching branch's
+/// own decode, because no fixture in the tree takes that branch (it needs a reader
+/// whose format is not `nb`). Nothing about the fix is branch-specific, but do not
+/// read this test as evidence that the non-stitching decode has been exercised.
 ///
 /// Same control-arm-first shape: the complete result set is established with no
 /// fault armed, so "the faulted RPC is short" is never vacuous.
@@ -314,10 +334,10 @@ async fn a_dead_inner_scan_task_fails_the_do_get_instead_of_truncating_it_silent
         "test precondition: the control do_get must return EVERY written row"
     );
 
-    // Fault: the inner scan task panics at its FIRST checkpoint (the cursor-open
-    // prelude), so it dies before it can report anything — the purest form of "the
-    // sender just went away", and reached whatever format branch this reader takes
-    // (a checkpoint in one branch only can silently not fire).
+    // Fault: the inner scan task panics in its cursor-open prelude, so it dies
+    // before it can report anything — the purest form of "the sender just went
+    // away", and reached whatever format branch this reader takes (see the header:
+    // a checkpoint inside one branch can silently not fire).
     let served = {
         let _silence = silence_injected_panics();
         let _fault = arm_inner_scan_task_panic();
