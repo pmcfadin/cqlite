@@ -434,8 +434,7 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
     let full_db = open_db(&root, &schema, case.keyspace, ReadPathMode::Full).await?;
     let point_db = open_db(&root, &schema, case.keyspace, ReadPathMode::Point).await?;
 
-    let discovered =
-        discover_pk_ints(&full_db, case.keyspace, case.table, case.pk_column).await?;
+    let discovered = discover_pk_ints(&full_db, case.keyspace, case.table, case.pk_column).await?;
     // Merge discovered (live) keys with the always-probe keys, deduplicated and
     // sorted so the probe set is deterministic.
     let mut key_set: BTreeMap<i64, ()> = BTreeMap::new();

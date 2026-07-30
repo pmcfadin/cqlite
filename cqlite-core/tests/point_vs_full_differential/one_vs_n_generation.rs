@@ -170,7 +170,8 @@ fn materialize(
     let tmp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
     let root = tmp.path().join("sstables");
     let table_dir = root.join(keyspace).join(table_dir_name);
-    std::fs::create_dir_all(&table_dir).map_err(|e| format!("create {}: {e}", table_dir.display()))?;
+    std::fs::create_dir_all(&table_dir)
+        .map_err(|e| format!("create {}: {e}", table_dir.display()))?;
 
     for copy in 0..generations {
         let target_gen = gen_files
@@ -190,7 +191,8 @@ fn materialize(
             })?;
             let mut new_prefix = gen_files.prefix.clone();
             // Rewrite ONLY the generation token of the shared prefix.
-            let prefix_parts: Vec<&str> = gen_files.prefix.trim_end_matches('-').split('-').collect();
+            let prefix_parts: Vec<&str> =
+                gen_files.prefix.trim_end_matches('-').split('-').collect();
             if prefix_parts.len() == 3 {
                 new_prefix = format!("{}-{target_gen}-{}-", prefix_parts[0], prefix_parts[2]);
             }
@@ -226,7 +228,10 @@ fn table_dir(root: &Path, keyspace: &str, table: &str) -> Result<PathBuf, String
     found.sort();
     match found.len() {
         1 => Ok(found.remove(0)),
-        0 => Err(format!("no directory for {keyspace}.{table} under {}", ks_dir.display())),
+        0 => Err(format!(
+            "no directory for {keyspace}.{table} under {}",
+            ks_dir.display()
+        )),
         n => Err(format!(
             "{n} directories for {keyspace}.{table} under {} — ambiguous",
             ks_dir.display()
@@ -491,12 +496,14 @@ async fn run_case(case: &GenerationCase) -> Result<bool, String> {
     let many = materialize(&source, case.keyspace, source_gen, case.n_generations)?;
     // Sanity: the N-gen tree must really hold N generations (a silently-failed
     // rename would make this axis a tautology).
-    let materialized = scan_generations(&many.root.join(case.keyspace).join(
-        source
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default(),
-    ))?;
+    let materialized = scan_generations(
+        &many.root.join(case.keyspace).join(
+            source
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default(),
+        ),
+    )?;
     if materialized.len() != case.n_generations {
         return Err(format!(
             "case {}.{}: materialized N-gen tree holds {} generations, expected {} — the axis \
@@ -515,7 +522,8 @@ async fn run_case(case: &GenerationCase) -> Result<bool, String> {
     // (1) Full scan: `stream_generations_for_read`/`merge_generations_for_read` on
     // the N-gen arm vs the plain single-SSTable scan on the 1-gen arm.
     let scan_query = format!("SELECT * FROM {}.{}", case.keyspace, case.table);
-    let scan_rows = compare_query(&one_full, &many_full, &label, &scan_query, many.generations).await?;
+    let scan_rows =
+        compare_query(&one_full, &many_full, &label, &scan_query, many.generations).await?;
     if scan_rows != case.expected_full_scan_rows {
         return Err(format!(
             "case {label}: full scan agreed on {scan_rows} rows across both arms but the fixture \
