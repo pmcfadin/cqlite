@@ -110,14 +110,29 @@ bash test-data/scripts/fetch-datasets.sh
 export CQLITE_DATASETS_ROOT=/path/to/main/checkout/test-data/datasets
 ```
 
-## roborev: local config, never a pinned agent
+## roborev: the sanctioned wrapper, agent + model always explicit
 
-roborev runs with **this machine's configured agent** — read from `.roborev.toml`
-(commonly `codex`; `roborev config list` shows the resolved values). Run it with **no
-`--agent`/`--model` flags**; it uses your local setup. Explicit `--agent`/`--model` is
-a **per-machine troubleshooting override only** — reach for it when the bootstrap warns
-that your configured agent did not resolve (fix the local config, or override for one
-run). Do not treat any specific agent (claude-code, codex, …) as doctrine.
+Every review goes through the fail-closed wrapper, never the bare CLI (#2964):
+
+```bash
+bash scripts/flow/roborev-review.sh --agent codex --model gpt-5.6-sol \
+  [--repo /abs/path/to/checkout] [--base origin/main]     # Claude: --agent claude-code --model claude-opus-5
+```
+
+**Both `--agent` and `--model` are ALWAYS required** — the wrapper rejects a missing one
+as a usage error, because one alone inherits the mismatched `.roborev.toml`-pinned model
+and fails as a silent-looking review outage. **Push the branch first**; the wrapper asserts
+that and FAILs otherwise. A bare `roborev review --branch` and the two-positional
+commit-range form are **NON-SANCTIONED** — from a worktree the former resolves against the
+ROOT checkout and reviews the base commit, reporting clean having reviewed NOTHING. Any
+non-PASS terminal `RESULT`, `NOTHING-TO-REVIEW` included, is a failed round and a blocked
+merge, never a clean pass. Why: CLAUDE.md + the `agents-developing/roborev-findings` page.
+
+**Check per box which reviewer is actually usable: `roborev check-agents`.** A resolved
+`.roborev.toml` value is not a working reviewer — on this fleet box (roborev v0.61.2, daemon
+healthy) only `codex` passes; `claude-code` fails with `OAuth session expired and could not
+be refreshed`. That is exactly why "this machine's configured agent" was bad guidance: name
+the agent + model explicitly, choosing one `check-agents` reports healthy.
 
 ## Multi-machine: the claim protocol in two sentences
 
