@@ -56,7 +56,7 @@
 #   ==== ROBOREV REVIEW SUMMARY ====
 #   repo: / branch: / base: / head-sha: / reviewed-sha: / job: / census: / tokens:
 #   push-assert: / census-check: / sha-assert: / vacuity-tier1: / vacuity-tier2:
-#   log:
+#   roborev-exit: / log:
 #   RESULT: PASS|FAIL|NOTHING-TO-REVIEW
 #
 # Per-check values are PASS | FAIL | SKIP | UNAVAILABLE (a FAIL may carry a
@@ -65,8 +65,10 @@
 #
 # EXIT CODES (exactly three outcomes plus a usage code)
 #   0  PASS               — reviewed, sha verified, no vacuity signal.
-#   1  FAIL               — any failed check (push, census, sha, tier 1, tier 2,
-#                           or a non-zero roborev exit). NOT reportable as clean.
+#   1  FAIL               — any failed check: push-assert, census-check, sha-assert,
+#                           vacuity-tier1, vacuity-tier2, or roborev-exit (the
+#                           reviewer process's own status). Each names itself under
+#                           its own key. NOT reportable as "roborev clean".
 #   3  NOTHING-TO-REVIEW  — the census is genuinely empty; NO review was enqueued.
 #                           DISTINCT from PASS by exit code alone, so a caller can
 #                           never mistake "nothing to review" for "reviewed clean".
@@ -251,6 +253,12 @@ CENSUS_CHECK="SKIP"
 SHA_ASSERT="SKIP"
 TIER1="SKIP"
 TIER2="SKIP"
+# The reviewer process's OWN exit status, under its own greppable key: a caller
+# retains only the block and reads it by grepping the per-check keys, so without
+# this key a non-zero roborev exit shows up as every check reading PASS beside a
+# RESULT: FAIL — the one failure cause a grep-based reader could not attribute.
+# SKIP until the process actually runs (a push/census/PATH failure exits earlier).
+ROBOREV_EXIT="SKIP"
 RESULT="FAIL"
 DETAILS=()
 EMITTED=0
@@ -270,6 +278,7 @@ emit_summary() {
   printf 'sha-assert: %s\n' "$SHA_ASSERT"
   printf 'vacuity-tier1: %s\n' "$TIER1"
   printf 'vacuity-tier2: %s\n' "$TIER2"
+  printf 'roborev-exit: %s\n' "$ROBOREV_EXIT"
   printf 'log: %s\n' "$LOG"
   printf 'RESULT: %s\n' "$RESULT"
 }
@@ -399,6 +408,11 @@ roborev review "$HEAD_SHA" \
   --wait >"$LOG" 2>&1
 REVIEW_RC=$?
 set -e
+if [ "$REVIEW_RC" -eq 0 ]; then
+  ROBOREV_EXIT="PASS"
+else
+  ROBOREV_EXIT="FAIL (exit $REVIEW_RC)"
+fi
 
 # --- step 5: reviewed-SHA assert (AC2) ----------------------------------------
 ANNOUNCE=$(grep -oiE 'enqueued job [0-9]+ for [0-9a-fA-F]{4,40}' "$LOG" | tail -1 || printf '')
@@ -525,11 +539,13 @@ if [ "$REVIEW_RC" -ne 0 ]; then
   DETAILS+=("ERROR: 'roborev review' exited $REVIEW_RC. A non-zero reviewer exit is a fail-closed FAIL — read the transcript at $LOG before treating anything as clean.")
 fi
 
+# `roborev-exit` participates in the SAME per-check scan as every other key, so a
+# non-zero reviewer exit forces RESULT: FAIL through the documented path rather
+# than a special case bolted on beside it.
 failed=0
-for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$SHA_ASSERT" "$TIER1" "$TIER2"; do
+for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$SHA_ASSERT" "$TIER1" "$TIER2" "$ROBOREV_EXIT"; do
   case "$verdict" in FAIL*) failed=1 ;; esac
 done
-if [ "$REVIEW_RC" -ne 0 ]; then failed=1; fi
 
 if [ "$failed" -eq 0 ]; then
   finish PASS 0

@@ -342,6 +342,46 @@ run_wrapper "$work"
 assert_verdict 'case (i2)' PASS 0
 assert_says 'case (i2) tier2 UNAVAILABLE' '^vacuity-tier2: UNAVAILABLE$'
 
+printf '== case (j): a non-zero roborev exit FAILs under its own greppable key ==\n'
+work=$(make_fixture case_j pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_VERDICT='No issues found'
+STUB_TOKENS='505625 387328 6332'
+STUB_REVIEW_RC=1
+run_wrapper "$work"
+STUB_REVIEW_RC=0
+assert_verdict 'case (j)' FAIL 1
+assert_says 'case (j) roborev-exit FAIL names the observed code' '^roborev-exit: FAIL \(exit 1\)$'
+# Every OTHER per-check key passes here — that is the point of the key: without it a
+# reader retaining only the block would see all-PASS beside RESULT: FAIL and be
+# unable to attribute the failure.
+for line in 'push-assert: PASS' 'census-check: PASS' 'sha-assert: PASS' 'vacuity-tier1: PASS' 'vacuity-tier2: PASS'; do
+  assert_says "case (j) $line" "^$line\$"
+done
+assert_says 'case (j) names the reviewer exit in prose too' "'roborev review' exited 1"
+assert_lacks 'case (j) is not a PASS' '^RESULT: PASS$'
+
+printf '== case (j2): a zero roborev exit records roborev-exit: PASS ==\n'
+work=$(make_fixture case_j2 pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (j2)' PASS 0
+assert_says 'case (j2) roborev-exit PASS' '^roborev-exit: PASS$'
+# Key ORDER is part of the contract: roborev-exit sits between vacuity-tier2 and log.
+if [ "$(grep -nE '^(vacuity-tier2|roborev-exit|log):' "$OUT" | cut -d: -f2 | paste -sd,)" = "vacuity-tier2,roborev-exit,log" ]; then
+  ok 'case (j2): roborev-exit is positioned between vacuity-tier2 and log'
+else
+  bad "case (j2): unexpected key order: $(grep -nE '^(vacuity-tier2|roborev-exit|log):' "$OUT" | cut -d: -f2 | paste -sd,)"
+fi
+
+printf '== case (j3): a pre-invocation failure leaves roborev-exit: SKIP ==\n'
+work=$(make_fixture case_j3 unpushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work"
+assert_verdict 'case (j3)' FAIL 1
+assert_says 'case (j3) roborev-exit SKIP (the process never ran)' '^roborev-exit: SKIP$'
+assert_never_enqueued 'case (j3)'
+
 printf '== usage errors: --agent and --model are BOTH required ==\n'
 work=$(make_fixture case_usage pushed)
 for pair in "--agent codex" "--model gpt-5.6-sol"; do
