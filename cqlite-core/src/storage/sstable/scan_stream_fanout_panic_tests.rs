@@ -2,7 +2,7 @@
 //! path: a producer task that DIES mid-scan must FAIL the scan, never end it
 //! cleanly with a silently short result set.
 //!
-//! Three boundaries, one fixture, one shape:
+//! Four boundaries, two fixtures, one shape:
 //!
 //! * **site 1** — the fan-out k-way MERGE task ([`spawn_fanout_merge`]), the
 //!   multi-generation scan's top-level producer, whose `JoinHandle` was discarded;
@@ -11,7 +11,12 @@
 //!   generation is exhausted";
 //! * **site 3** — [`rechunk_into_batches`], the per-row → batch adapter behind
 //!   `SSTableManager::scan_stream_batched`, which read `per_row.recv() == None` as
-//!   "the scan finished".
+//!   "the scan finished";
+//! * **site 5** — the CROSS-GENERATION reconciling merge task
+//!   (`generation_merge::stream_generations_for_read`), whose death was flattened into
+//!   a plain setup error and then answered by FALLING BACK to the non-reconciling
+//!   concat — see the second fixture below. (Site 4, the windowed forwarder, has its
+//!   own end-to-end file: it needs a compressed reader.)
 //!
 //! Each test drives the REAL public surface over a REAL multi-generation SSTable
 //! directory built by the write engine, and kills the task under test with a real
@@ -24,6 +29,16 @@
 //! that yields nothing, an arm that never fires, or a scan that took a different code
 //! path would all pass. The control arm also pins that the fail-closed joins did not
 //! turn a healthy scan into an error.
+//!
+//! # Why site 5 needs its OWN, OVERLAPPING fixture
+//!
+//! Sites 1–3 write DISJOINT partitions per generation, where the reconciled and the
+//! concatenated result sets are the SAME 36 rows — fine when the property is "short vs
+//! complete", useless when the property is "reconciled vs unreconciled". Site 5's
+//! failure mode was a FULL-LENGTH but WRONG result set (the concat fallback), so its
+//! fixture rewrites the SAME partitions in every generation: 12 reconciled rows
+//! (newest-generation values) versus 36 unreconciled ones. The test can therefore tell
+//! the two apart by BOTH count and value, which a disjoint fixture cannot.
 //!
 //! # Why the arms are keyed by `(site, scope)`
 //!
@@ -101,9 +116,68 @@ fn flush_generations_blocking(root: &std::path::Path) -> PathBuf {
     data_dir
 }
 
-/// Total rows a healthy scan of the fixture must return.
+/// Total rows a healthy scan of the DISJOINT fixture must return.
 const fn expected_rows() -> usize {
     (GENERATIONS * PARTITIONS_PER_GENERATION) as usize
+}
+
+/// Write `GENERATIONS` flushes that all rewrite the SAME `PARTITIONS_PER_GENERATION`
+/// partitions, each generation with a strictly newer timestamp and a distinguishable
+/// value — the OVERLAPPING fixture site 5 needs (see the header).
+///
+/// A reconciling read returns [`reconciled_rows`] rows, all carrying
+/// [`newest_value_prefix`]; the non-reconciling concat returns [`unreconciled_rows`]
+/// rows, including every older generation's superseded copy. That gap is what lets the
+/// site-5 test assert "it did not silently fall back to the concat".
+async fn flush_overlapping_generations(temp_dir: &TempDir) -> PathBuf {
+    let root = temp_dir.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let data_dir = root.join("data");
+        let config =
+            WriteEngineConfig::new(data_dir.clone(), root.join("wal"), create_test_schema());
+        let mut engine = WriteEngine::new(config).expect("write engine");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        for generation in 0..GENERATIONS {
+            for id in 0..PARTITIONS_PER_GENERATION {
+                engine
+                    .write(create_test_mutation(
+                        id,
+                        &format!("gen{generation}-row-{id}"),
+                        // Strictly increasing, so the LWW winner is unambiguous and
+                        // the newest generation is the one a reconciled read shows.
+                        1_000 + generation as i64,
+                    ))
+                    .expect("write");
+            }
+            rt.block_on(engine.flush())
+                .expect("flush")
+                .expect("flush wrote an SSTable");
+        }
+        data_dir
+    })
+    .await
+    .expect("fixture build task")
+}
+
+/// Rows a RECONCILED read of the overlapping fixture returns: last-write-wins collapses
+/// every generation's copy of a partition into one row.
+const fn reconciled_rows() -> usize {
+    PARTITIONS_PER_GENERATION as usize
+}
+
+/// Rows the NON-reconciling token-order concat returns over the same fixture: every
+/// generation's copy of every partition, superseded ones included.
+const fn unreconciled_rows() -> usize {
+    (GENERATIONS * PARTITIONS_PER_GENERATION) as usize
+}
+
+/// The value prefix only the NEWEST generation's cells carry. Every row of a reconciled
+/// read must have it; a concatenated read also surfaces older prefixes.
+fn newest_value_prefix() -> String {
+    format!("gen{}-", GENERATIONS - 1)
 }
 
 async fn open_manager(data_dir: &std::path::Path) -> SSTableManager {
@@ -246,6 +320,58 @@ async fn drain_batched(manager: &SSTableManager) -> Drained {
     Drained { rows, error: None }
 }
 
+/// Drain the per-row surface WITH a schema, capturing every row's `name` value.
+///
+/// The schema is what routes a multi-generation read to the authoritative RECONCILING
+/// `KWayMerger` (`stream_generations_for_read`) instead of the lazy concat — i.e. it is
+/// what puts site 5 on the path at all. The captured values are what let the caller tell
+/// a reconciled result set from a concatenated one, which a row COUNT alone cannot do
+/// once a fallback returns a full-length answer.
+async fn drain_reconciled(manager: &SSTableManager) -> (Drained, Vec<String>) {
+    let schema = create_test_schema();
+    let mut stream = match manager
+        .scan_stream(&table_id(), None, None, Some(&schema), BUFFER)
+        .await
+    {
+        Ok(stream) => stream,
+        Err(e) => {
+            return (
+                Drained {
+                    rows: 0,
+                    error: Some(e.to_string()),
+                },
+                Vec::new(),
+            )
+        }
+    };
+    let mut rows = 0usize;
+    let mut values = Vec::new();
+    while let Some(item) = stream.recv().await {
+        match item {
+            Ok((_, row)) => {
+                rows += 1;
+                if let crate::types::ScanRow::Row(cells) = row {
+                    for (column, value) in cells.iter() {
+                        if column.as_ref() == "name" {
+                            values.push(value.as_str().unwrap_or_default().to_string());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                return (
+                    Drained {
+                        rows,
+                        error: Some(e.to_string()),
+                    },
+                    values,
+                )
+            }
+        }
+    }
+    (Drained { rows, error: None }, values)
+}
+
 /// Site 1: the fan-out k-way MERGE task dies. Pre-fix its `JoinHandle` was discarded
 /// and `scan_stream` handed back the bare receiver, so the consumer saw a clean end of
 /// stream and the query returned fewer rows with no error.
@@ -327,4 +453,108 @@ async fn a_dead_per_row_source_fails_the_batched_rechunk_instead_of_ending_it_cl
         drain_batched(&manager).await
     };
     faulted.assert_failed_short("scan_stream_batched with a dead per-row source");
+}
+
+/// Site 5: the CROSS-GENERATION reconciling merge task dies during construction.
+///
+/// Pre-fix this was the WORST of the #3124 family, because the consumer did not merely
+/// mistake it for a clean end of stream — it mistook it for "the merger could not be
+/// CONSTRUCTED" and answered by falling back to `spawn_fanout_merge`, the
+/// non-reconciling token-order CONCAT. The caller then got a FULL-LENGTH, UNRECONCILED
+/// result set (every generation's superseded copy of every partition) with `Ok` and a
+/// `tracing::warn!`: silently WRONG data rather than silently SHORT data.
+///
+/// So this test pins BOTH halves, and needs the overlapping fixture to do it:
+///
+/// 1. the query FAILS (a dead producer is never a successful scan), and
+/// 2. it did NOT fall back — the drain is not the unreconciled row set, by count and by
+///    value.
+///
+/// The control arm first proves the healthy read really is RECONCILED (12 rows, all
+/// newest-generation values), so half 2 is a meaningful assertion rather than a
+/// tautology over a fixture where both answers coincide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_cross_generation_merge_fails_the_scan_instead_of_falling_back_to_the_concat() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let data_dir = flush_overlapping_generations(&temp_dir).await;
+    let manager = open_manager(&data_dir).await;
+
+    // Test precondition: the fixture must make the two answers distinguishable at all.
+    assert_ne!(
+        reconciled_rows(),
+        unreconciled_rows(),
+        "test precondition: with reconciled == unreconciled this test could not tell a \
+         fail-closed read from a silent concat fallback"
+    );
+
+    // Control arm: the healthy read ends cleanly, is RECONCILED (one row per partition)
+    // and shows the newest generation's values.
+    let (control, control_values) = drain_reconciled(&manager).await;
+    assert_eq!(
+        control.error, None,
+        "a healthy multi-generation reconciling read must still end CLEANLY — the \
+         fail-closed join must not turn a live producer into an error"
+    );
+    assert_eq!(
+        control.rows,
+        reconciled_rows(),
+        "the control drain must be RECONCILED: {} partitions rewritten in every \
+         generation collapse to {} rows, not the concat's {}",
+        PARTITIONS_PER_GENERATION,
+        reconciled_rows(),
+        unreconciled_rows()
+    );
+    let newest = newest_value_prefix();
+    assert!(
+        control_values.len() == reconciled_rows()
+            && control_values.iter().all(|v| v.starts_with(&newest)),
+        "every reconciled row must carry the newest generation's ({newest}) value — \
+         otherwise the control is not the LWW winner set and 'did not fall back' below \
+         proves nothing, got: {control_values:?}"
+    );
+
+    let scope = temp_dir.path().to_string_lossy().to_string();
+    let (faulted, faulted_values) = {
+        // Silence ONLY the injected panic; restored before any assertion runs.
+        let _silence = silence_injected_panics();
+        let _fault = arm_scan_task_panic(&scope, ScanTaskSite::CrossGenerationMerge);
+        drain_reconciled(&manager).await
+    };
+
+    // Half 1: it FAILED, and the error says which producer died and that the fallback
+    // was refused on purpose.
+    let message = faulted.error.as_deref().unwrap_or_else(|| {
+        panic!(
+            "issue #3124: the cross-generation merge producer PANICKED, so this read \
+             MUST fail. Completing it means the concat fallback ran: {} rows of \
+             UNRECONCILED data (duplicated overwritten rows, resurrected deleted ones) \
+             served as a successful reconciling scan (got {} rows: {faulted_values:?})",
+            unreconciled_rows(),
+            faulted.rows
+        )
+    });
+    assert!(
+        message.contains("DIED without reporting")
+            && message.contains("CANNOT fall back")
+            && message.contains(INJECTED_PANIC_MESSAGE),
+        "the error must name the dead producer, say the concat fallback is refused, and \
+         carry THIS fault's panic message (not some unrelated failure), got: {message}"
+    );
+
+    // Half 2: it did NOT fall back — neither the unreconciled row COUNT nor any
+    // superseded older-generation VALUE reached the caller. The value half matters
+    // independently: a fallback that happened to return a coinciding count would still
+    // be caught here.
+    assert_ne!(
+        faulted.rows,
+        unreconciled_rows(),
+        "the faulted read returned exactly the {} rows the NON-reconciling concat \
+         produces — the fallback ran and served wrong data under an error",
+        unreconciled_rows()
+    );
+    assert!(
+        faulted_values.iter().all(|v| v.starts_with(&newest)),
+        "the faulted read surfaced a superseded older-generation value, which only the \
+         non-reconciling concat can produce: {faulted_values:?}"
+    );
 }
