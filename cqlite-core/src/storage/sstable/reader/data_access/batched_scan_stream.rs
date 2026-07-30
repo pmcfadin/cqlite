@@ -237,17 +237,28 @@ mod tests {
         });
         let mut stream = BatchedScanStream::new(rx, task);
 
+        let (first, rest) = {
+            let first = stream.recv().await;
+            let mut rest = Vec::new();
+            for _ in 0..3 {
+                rest.push(stream.recv().await);
+            }
+            (first, rest)
+        };
+        // The silencer (held above across every await that can raise the injected
+        // panic) is dropped here, BEFORE the assertions: restoring a panic hook
+        // from a panicking thread aborts the process, which would turn a
+        // legitimate failure below into an unreadable SIGABRT.
+        drop(_silence);
         assert!(
-            matches!(stream.recv().await, Some(Ok(batch)) if batch.len() == 1),
+            matches!(first, Some(Ok(batch)) if batch.len() == 1),
             "the batch produced before the task died is still delivered"
         );
-        for attempt in 0..3 {
-            let err = stream
-                .recv()
-                .await
+        for (attempt, outcome) in rest.into_iter().enumerate() {
+            let msg = outcome
                 .expect("a dead task must never report a clean end of stream")
-                .expect_err("it must be an error");
-            let msg = err.to_string();
+                .expect_err("it must be an error")
+                .to_string();
             assert!(
                 msg.contains("DIED without reporting") && msg.contains("TRUNCATED"),
                 "attempt {attempt}: the error must name the dead task and the \
@@ -313,7 +324,6 @@ mod tests {
     /// #3106 defect, re-entered through the door the fix built.
     #[tokio::test]
     async fn a_recv_cancelled_mid_join_still_reports_the_dead_task() {
-        let _silence = crate::storage::producer_fault::silence_injected_panics();
         let (mut stream, closed, release) = stream_parked_after_closing_the_channel(true);
 
         assert!(
@@ -325,12 +335,21 @@ mod tests {
             .expect("the task signals that it closed the channel");
         cancel_a_recv_mid_join(&mut stream).await;
 
-        // Now let the parked task die. Its verdict must still be reachable.
-        release.send(()).expect("release the parked task");
-        for attempt in 0..3 {
-            let msg = stream
-                .recv()
-                .await
+        // Now let the parked task die, and re-poll. The silencer is dropped BEFORE
+        // any assertion: restoring a panic hook from a panicking thread aborts the
+        // process, which would turn a legitimate failure below into an unreadable
+        // SIGABRT instead of a reported assertion.
+        let outcomes = {
+            let _silence = crate::storage::producer_fault::silence_injected_panics();
+            release.send(()).expect("release the parked task");
+            let mut outcomes = Vec::new();
+            for _ in 0..3 {
+                outcomes.push(stream.recv().await);
+            }
+            outcomes
+        };
+        for (attempt, outcome) in outcomes.into_iter().enumerate() {
+            let msg = outcome
                 .expect(
                     "a cancelled join must NOT lose the verdict: reporting a clean \
                      end of stream here is issue #3106 reintroduced",
