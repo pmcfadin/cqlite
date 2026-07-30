@@ -716,3 +716,12 @@ fn ordered_generation_paths(reader_list: &[Arc<reader::SSTableReader>]) -> Vec<P
 
 #[cfg(test)]
 mod read_shadow_tests;
+
+// The multi-generation streaming read path's shared fixture + reconciled/unreconciled
+// oracle, and the issue-#3154 end-to-end pins built on it. `not(tombstones)` because
+// that build routes `scan_stream` through the materializing `scan`, so neither the
+// streaming merge nor its setup-outcome type exists there.
+#[cfg(all(test, not(feature = "tombstones")))]
+pub(super) mod multi_gen_fixture;
+#[cfg(all(test, not(feature = "tombstones")))]
+mod setup_fail_closed_tests;
