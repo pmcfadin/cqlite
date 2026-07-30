@@ -623,6 +623,84 @@ async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
     (temp, data_dir)
 }
 
+// ---------------------------------------------------------------------------
+// V5_0Uncompressed-CLASSIFIED clustered fixture (issue #3097)
+// ---------------------------------------------------------------------------
+
+const UNCOMP_TBL: &str = "clustered_uncomp";
+const UNCOMP_DDL: &str = "CREATE TABLE diff_ks.clustered_uncomp \
+     (pk blob, ck int, v text, PRIMARY KEY (pk, ck))";
+
+fn uncomp_schema() -> TableSchema {
+    TableSchema {
+        keyspace: KS.into(),
+        table: UNCOMP_TBL.into(),
+        partition_keys: vec![KeyColumn {
+            name: "pk".into(),
+            data_type: "blob".into(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".into(),
+            data_type: "int".into(),
+            position: 0,
+            order: Default::default(),
+        }],
+        columns: vec![
+            col("pk", "blob", false),
+            col("ck", "int", false),
+            col("v", "text", true),
+        ],
+        comments: Default::default(),
+        dropped_columns: Default::default(),
+    }
+}
+
+/// Build a CQLite-written clustered SSTable that the reader classifies as
+/// `V5_0Uncompressed` (issue #3097) — the ONLY classification whose merge-arm
+/// enumeration takes the non-chunk-stitching Summary-guided branch
+/// (`stream_partitions_summary_guided`), where the pre-#3097 code ignored the
+/// caller's schema and decoded clustering columns under the header schema's
+/// placeholder name (surfacing `ck` as NULL).
+///
+/// The reader picks that classification when a headerless `nb` Data.db begins
+/// with the four bytes of the `V5_0Uncompressed` magic (`00 10 04 5e`) and no
+/// `CompressionInfo.db` exists (`reader/header.rs`). We force it deterministically
+/// (no heuristics, #28) with a 16-byte `blob` partition key prefixed `04 5e …`:
+/// the first partition's on-disk bytes are `00` (flags) `10` (16-byte key length)
+/// `04 5e` (key head). A real Cassandra `nb` fixture instead classifies as
+/// `V5_0NewBig` (chunk-stitching, which already honours the caller schema), so
+/// this write-path fixture is the only way to reach the buggy arm on the Flight
+/// surface.
+async fn build_uncomp_clustered_fixture() -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let config = WriteEngineConfig::new(data_dir.clone(), temp.path().join("wal"), uncomp_schema());
+    let mut engine = WriteEngine::new(config).expect("engine");
+    // Enough partitions to clear the default min_index_interval, so Summary.db
+    // carries samples and the merge arm's Summary-guided branch actually runs.
+    for i in 0u16..400 {
+        let mut key = vec![0x04u8, 0x5e];
+        key.extend_from_slice(&[0u8; 12]);
+        key.extend_from_slice(&i.to_be_bytes());
+        engine
+            .write(Mutation::new(
+                TableId::new(KS, UNCOMP_TBL),
+                PartitionKey::single("pk", Value::Blob(key.into())),
+                Some(ClusteringKey::single("ck", Value::Integer(i as i32))),
+                vec![CellOperation::Write {
+                    column: "v".into(),
+                    value: Value::text(format!("v{i}")),
+                }],
+                T_BASE_MICROS + i as i64,
+                None,
+            ))
+            .unwrap();
+    }
+    engine.flush().await.expect("flush").expect("flush info");
+    (temp, data_dir)
+}
+
 const STATIC_TBL: &str = "statics";
 const STATIC_DDL: &str = "CREATE TABLE diff_ks.statics \
      (pk int, ck int, s text static, v text, PRIMARY KEY (pk, ck))";
@@ -839,6 +917,55 @@ async fn forced_path_differential_agrees_on_every_shape() {
         failures.push(
             "byte-cap: capping changes only the batch boundaries, never the rows".to_string(),
         );
+    }
+
+    // ---- V5_0Uncompressed-classified clustered fixture (issue #3097) --------
+    // The merge arm's NON-stitching Summary-guided enumeration
+    // (`stream_all_partitions_for_query` → `stream_partitions_summary_guided`,
+    // via `from_readers::drive_query_stream`) must decode with the CALLER's
+    // authoritative ticket schema, so the clustering column `ck` is POPULATED —
+    // not decoded under the reader header schema's placeholder name and surfaced
+    // as NULL. Before #3097 the merge arm passed `None` here and this exact
+    // `SELECT *` returned `ck = null` while the bypass arm returned `ck`. This
+    // case runs both arms over the SAME bytes at a PINNED `now`, asserts they
+    // agree, and additionally pins that `ck` is non-null on BOTH — the difference
+    // the differential row-equality alone would miss if both arms regressed
+    // together.
+    let (_utemp, uncomp_dir) = build_uncomp_clustered_fixture().await;
+    let usvc = CqliteFlightService::new(uncomp_dir, 8192);
+    let uticket = ticket_json(KS, UNCOMP_TBL, UNCOMP_DDL);
+    let uncomp_rows = assert_arms_agree(
+        "clustered_uncomp/select-star(#3097 merge-arm caller schema)",
+        &usvc,
+        &uticket,
+        NOW_BEFORE_EXPIRY,
+        400,
+        &mut failures,
+    )
+    .await;
+    if let Some(rows) = uncomp_rows.as_ref() {
+        let ck_nulls = rows
+            .iter()
+            .filter(|r| r.get("ck").map(String::as_str) == Some("<null>"))
+            .count();
+        if ck_nulls != 0 {
+            failures.push(format!(
+                "clustered_uncomp: {ck_nulls} row(s) surfaced `ck` as NULL — the merge \
+                 arm must decode the clustering column under the caller's schema name \
+                 (issue #3097), never the reader header's placeholder"
+            ));
+        }
+        // Spot-check a concrete value: partition `i` was written with `ck = i`.
+        if !rows
+            .iter()
+            .any(|r| r.get("ck").map(String::as_str) == Some("0"))
+        {
+            failures.push(
+                "clustered_uncomp: expected a row with ck=0 (the first partition's \
+                 clustering value), but none surfaced"
+                    .to_string(),
+            );
+        }
     }
 
     // ---- Static columns: the fail-closed fallback --------------------------
