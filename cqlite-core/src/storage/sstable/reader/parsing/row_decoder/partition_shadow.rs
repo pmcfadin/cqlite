@@ -259,9 +259,8 @@ impl PartitionShadow {
     ///
     /// A tombstone is never folded into the row LIVENESS aggregate
     /// (`has_live_forever_data_cell` / `max_data_cell_expires_at`): it is not live
-    /// data, so it can neither mark the row live-forever nor supply an expiry. Nor
-    /// does it supply a TIMESTAMP to the row's shadow maximum — only the PRESENCE
-    /// fact `has_deleted_data_cell`; see [`Self::has_shadow_evidence`].
+    /// data. Nor does it supply a TIMESTAMP to the row's shadow maximum — only the
+    /// PRESENCE fact `has_deleted_data_cell`; see [`Self::has_shadow_evidence`].
     ///
     /// This mirrors the multi-generation read path, whose merged-cell filter
     /// (`generation_merge::ReadVisibility::filter_live`) already skipped
@@ -293,44 +292,35 @@ impl PartitionShadow {
     /// Whether the row carries enough authoritative evidence for
     /// [`RowHeader::shadowed_by_deletion_at`] to hide it — i.e. whether its
     /// `i64::MIN` "no authoritative timestamp" FAIL-SAFE is defeated (issue #3094).
-    ///
-    /// `max_write_ts` is the row's LIVE-write maximum (`max(liveness marker, live
-    /// data cells)`, `i64::MIN` when neither exists); `has_deleted_data_cell` is the
+    /// `max_write_ts` is the row's LIVE-write maximum (`max(liveness marker, live data
+    /// cells)`, `i64::MIN` when neither exists); `has_deleted_data_cell` is the mere
     /// PRESENCE of a decoded cell TOMBSTONE.
     ///
-    /// ## The invariant this encodes
+    /// ## The invariant
     ///
-    /// Tombstone evidence may only ever DEFEAT THE FAIL-SAFE. It must NEVER raise
-    /// the row maximum, because the maximum is compared `max_ts <= markedForDeleteAt`
-    /// — so raising it can only ever move a row hidden → VISIBLE, the exact
-    /// resurrection direction #3094 exists to close. A tombstone making a row
-    /// visible is never correct: in Cassandra a surviving tombstone is purged by
-    /// `Filter.applyToRow` → `row.purge(…, PURGE_ALL, …)` and an emptied row is
-    /// dropped (guide Ch.11), so a tombstone can only ever REMOVE data from a row.
+    /// Tombstone evidence may ONLY defeat the fail-safe; it must NEVER raise the row
+    /// maximum. That maximum is compared `max_ts <= markedForDeleteAt`, so raising it
+    /// can only move a row hidden → VISIBLE — the exact resurrection direction #3094
+    /// closes. A tombstone making a row visible is never correct: Cassandra purges a
+    /// surviving tombstone (`Filter.applyToRow` → `row.purge(…, PURGE_ALL, …)`) and
+    /// drops the emptied row (guide Ch.11), so it can only REMOVE data from a row.
     ///
-    /// The counterexample that forced this shape (an earlier "fallback max" —
-    /// `live.or(deleted_only)` — got it wrong): a row with a LIVE LIVENESS MARKER at
-    /// `T`, no data cell, and a cell tombstone at `T + 10s`, under a partition
-    /// deletion at `T + 5s`. There is no live-cell evidence, so the fallback fired
-    /// and the tombstone's `T + 10s` became the aggregate; `max_write_timestamp`
-    /// MAXes that with the liveness `T`, yielding `T + 10s > T + 5s` — an all-null
-    /// phantom row out of a deleted partition, where Cassandra returns 0 rows.
-    /// Presence carries no timestamp, so it cannot move the comparison at all.
+    /// The counterexample that forced presence over an earlier "fallback max"
+    /// (`live.or(deleted_only)`): a LIVE LIVENESS MARKER at `T`, NO data cell, a cell
+    /// tombstone at `T + 10s`, under a partition deletion at `T + 5s`. With no
+    /// live-cell evidence the fallback fired, so `T + 10s` became the aggregate and
+    /// `max_write_timestamp` MAXed it with the liveness `T` → `T + 10s > T + 5s`: an
+    /// all-null phantom row out of a deleted partition where Cassandra returns 0 rows.
     ///
-    /// ## Why presence alone suffices
+    /// ## Why presence suffices
     ///
-    /// A row whose ONLY cells are tombstones (e.g. `UPDATE t SET w = null WHERE …`
-    /// with no INSERT liveness marker) has `max_write_ts == i64::MIN`. The sole
-    /// reason the fail-safe exists is to avoid hiding an EMPTY/TRUNCATED parse; a
-    /// decoded tombstone proves this is instead a genuinely reduced row, so the row
-    /// is hidden by any covering deletion (`i64::MIN <= cover` always). That is
-    /// correct in the direction Cassandra answers: the row has no live data, so it
-    /// is dropped whether or not the deletion predates the tombstone.
-    ///
-    /// Residual (issue #3121): with NO covering deletion at all such a row is still
-    /// emitted as an all-null phantom row, because CQLite has no `Row.hasLiveData`
-    /// purge yet. Hiding THAT is #3121's rule ("no live cell AND no live liveness
-    /// marker"), not this predicate's.
+    /// A row whose ONLY cells are tombstones (`UPDATE t SET w = null WHERE …`, no
+    /// INSERT liveness marker) has `max_write_ts == i64::MIN`, and the fail-safe exists
+    /// solely to avoid hiding an EMPTY/TRUNCATED parse. A decoded tombstone proves a
+    /// genuinely reduced row, so any covering deletion hides it (`i64::MIN <= cover`
+    /// always) — the direction Cassandra answers, since a row with no live data is
+    /// dropped whether or not the deletion predates the tombstone. Residual (#3121):
+    /// with NO covering deletion such a row is still emitted, all-null.
     #[inline]
     pub(crate) fn has_shadow_evidence(max_write_ts: i64, has_deleted_data_cell: bool) -> bool {
         max_write_ts != i64::MIN || has_deleted_data_cell
@@ -734,14 +724,12 @@ mod tests {
     }
 
     /// Issue #3094 (blocker): tombstone evidence DEFEATS the `i64::MIN` fail-safe and
-    /// NOTHING ELSE. `has_shadow_evidence` is a pure presence predicate, so it cannot
-    /// carry a timestamp into the row maximum — the property that makes the fix
-    /// one-directional (visible → hidden only).
-    ///
+    /// NOTHING ELSE — a pure presence predicate cannot carry a timestamp into the row
+    /// maximum, which is what makes the fix one-directional (visible → hidden only).
     /// Revert-verify: dropping the `|| has_deleted_data_cell` term makes the first
-    /// assertion FALSE and a deletion-only row resurrects inside a deleted partition
-    /// (the #3094 blocker); returning `true` unconditionally makes the last assertion
-    /// FALSE and hides truncated/empty parses (the #28 fail-safe).
+    /// assertion FALSE (a deletion-only row resurrects inside a deleted partition);
+    /// returning `true` unconditionally makes the last FALSE (hiding truncated parses,
+    /// against the #28 fail-safe).
     #[test]
     fn tombstone_presence_defeats_the_failsafe_without_a_timestamp() {
         let f = PartitionShadow::has_shadow_evidence;
@@ -754,18 +742,14 @@ mod tests {
         assert!(!f(i64::MIN, false));
     }
 
-    /// Issue #3094 (blocker, header-level consequence): both resurrection shapes.
-    ///
-    /// (a) A row with NO liveness marker whose only cell is a tombstone is hidden by
-    ///     a covering partition deletion — the presence flag defeats the fail-safe.
-    /// (b) A row WITH a live liveness marker at 1_000µs, no live data cell, and a
-    ///     cell tombstone at 6_000µs is STILL hidden by a deletion at 5_000µs: the
-    ///     tombstone contributes no timestamp, so the row maximum stays 1_000µs.
-    ///     Revert-verify: folding the tombstone's 6_000µs into
-    ///     `max_data_cell_timestamp` (the pre-fix "fallback max") makes (b)'s
-    ///     assertion FALSE — an all-null phantom row out of a deleted partition. The
-    ///     end-to-end pin is
-    ///     `cqlite-core/tests/issue_3094_partition_deleted_row_not_resurrected.rs`.
+    /// Issue #3094 (blocker, header-level consequence): both resurrection shapes —
+    /// (a) no liveness marker, only a tombstone cell; (b) a live liveness marker at
+    /// 1_000µs, no live data cell, and a tombstone cell at 6_000µs under a deletion
+    /// at 5_000µs, which must stay HIDDEN because the tombstone contributes no
+    /// timestamp. Revert-verify: folding that 6_000µs into `max_data_cell_timestamp`
+    /// (the pre-fix "fallback max") makes (b) FALSE — an all-null phantom row out of
+    /// a deleted partition. End-to-end pin:
+    /// `cqlite-core/tests/issue_3094_partition_deleted_row_not_resurrected.rs`.
     #[test]
     fn deletion_only_and_liveness_only_rows_are_shadowed_by_a_covering_deletion() {
         // (a) No liveness marker (UPDATE-only); the row's ONLY cell is a tombstone.
