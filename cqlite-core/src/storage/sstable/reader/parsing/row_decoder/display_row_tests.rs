@@ -74,6 +74,9 @@ fn header(timestamp: Option<i64>, row_tombstone: bool) -> RowHeader {
         max_data_cell_timestamp: None,
         max_data_cell_expires_at: None,
         has_live_forever_data_cell: false,
+        // These row-visibility pins never involve a deleted cell; issue #3094's
+        // PRESENCE bit is exercised by `partition_shadow_tests.rs`.
+        has_deleted_data_cell: false,
     }
 }
 
