@@ -4,7 +4,9 @@
 > check) are gone — they encoded a human-merge model the pipeline no longer uses.
 
 Merge is **autonomous on green**: the moment **local certification** is met —
-`scripts/agent-gate.sh` PASS + (design-driven) spec-auditor **C** PASS + roborev clean — a worker (or the
+`scripts/agent-gate.sh` PASS + (design-driven) spec-auditor **C** PASS + roborev clean (a terminal
+`RESULT: PASS` from `scripts/flow/roborev-review.sh`, the only sanctioned roborev invocation — #2964;
+`NOTHING-TO-REVIEW` and FAIL are both blocked merges) — a worker (or the
 lead), after the pre-merge SHA assert + `HOLD` re-read, **arms `gh pr merge --auto --squash --delete-branch`**
 and stops. GitHub lands the PR when the #2433 `required` check goes green (#2667), then `flow-finalize <N>`.
 **Never `ScheduleWakeup`-poll a PR's own CI** — arming `--auto` replaces the busy-wait.

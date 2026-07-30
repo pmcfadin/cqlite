@@ -70,7 +70,9 @@ committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at a
 4. **Propose** with OpenSpec (use the `opsx:propose` skill / `openspec new change <slug>`): author
    `proposal.md` (state milestone + oracle/design + Non-goals + doctrine impact), `design.md`,
    `specs/<capability>/spec.md` (every requirement gets a verifiable `#### Scenario:`), `tasks.md`
-   (each task names the surface it exercises; include gate + C + roborev steps). Consult specialists for
+   (each task names the surface it exercises; include gate + C + roborev steps — roborev ALWAYS via
+   `bash scripts/flow/roborev-review.sh --agent <agent> --model <model>`, the only sanctioned invocation
+   (#2964), never a bare `roborev review --branch`). Consult specialists for
    facts where useful (e.g. a parity/format question → `test-validator` / `sstable-developer`), but
    **never decide a product/data-model question** — surface options to the owner.
 5. **Validate:** `openspec validate <slug> --strict` (must be clean). Commit the artifacts.
