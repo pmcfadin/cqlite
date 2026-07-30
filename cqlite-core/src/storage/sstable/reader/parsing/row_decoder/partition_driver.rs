@@ -106,6 +106,20 @@ pub(super) trait SlidingPartitionPolicy {
         resolution: &RowColumnResolution,
         pending: &mut Vec<Self::Row>,
     ) -> Option<usize>;
+
+    /// Called once per partition, AFTER its last row and only when the partition
+    /// is CONFIRMED complete (an `Emitted` return), immediately before `pending`
+    /// is flushed to the external emit. A mid-partition `NeedMore` discards
+    /// `pending` and never calls this, so a row pushed here can never be emitted
+    /// twice.
+    ///
+    /// Exists for Cassandra's static-content-on-an-empty-partition rule
+    /// (`SelectStatement.processPartition()`, issue #3095): a partition whose
+    /// static row is live but which yielded NO clustering row returns exactly one
+    /// result row, and "yielded no clustering row" is only knowable at the
+    /// partition's end. Defaults to a no-op so a policy with no partition-level
+    /// output (the compaction policy) is unaffected.
+    fn on_partition_close(&mut self, _schema: &TableSchema, _pending: &mut Vec<Self::Row>) {}
 }
 
 impl V5CompressedLegacyParser {
@@ -192,6 +206,10 @@ impl V5CompressedLegacyParser {
         // correctly.
         macro_rules! flush_and_emitted {
             ($consumed:expr) => {{
+                // The partition is confirmed complete here (never on `NeedMore`),
+                // so a policy may append a partition-level row — Cassandra's
+                // static-only-partition row (issue #3095) — before the flush.
+                policy.on_partition_close(schema, &mut pending);
                 for row in pending.drain(..) {
                     match emit(row)? {
                         std::ops::ControlFlow::Continue(()) => {}

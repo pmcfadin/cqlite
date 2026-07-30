@@ -306,6 +306,16 @@ impl V5CompressedLegacyParser {
                     // Issue #1642 (K3): positional `RowCells`, matching the decoder emit.
                     let mut static_cells: RowCells = Vec::new();
                     let mut row_count = 0;
+                    // Issue #3095: Cassandra's `partition.hasNext()` — clustering
+                    // rows only (the static row is delivered out of band by
+                    // `partition.staticRow()`), plus proof that this call really
+                    // saw the partition's END. A partition body that is only
+                    // PARTIALLY present in `data` must never be mistaken for an
+                    // empty one, so the static-only row below is emitted solely
+                    // when the walk reached `END_OF_PARTITION` or the next
+                    // partition header.
+                    let mut emitted_clustering_row = false;
+                    let mut partition_complete = false;
                     loop {
                         // Issue #954: stop at the clustering-slice end bound. The
                         // row-index block extent (`body_end`) is the authoritative
@@ -330,6 +340,7 @@ impl V5CompressedLegacyParser {
                                 partition_index, offset, row_count
                             );
                             offset += 1; // Skip the END_OF_PARTITION marker byte
+                            partition_complete = true;
                             break; // Move to next partition
                         }
 
@@ -507,6 +518,7 @@ impl V5CompressedLegacyParser {
                                     crate::storage::sstable::work_counters::add_rows_decoded(1);
 
                                     if !hidden {
+                                        emitted_clustering_row = true;
                                         match emit((
                                             table_id.clone(),
                                             partition_key.clone(),
@@ -545,6 +557,7 @@ impl V5CompressedLegacyParser {
                                         "V5CompressedLegacy: Partition {} complete: {} rows parsed (next partition detected at offset {})",
                                         partition_index, row_count, offset
                                     );
+                                    partition_complete = true;
                                     break; // Next partition starts here
                                 }
 
@@ -569,6 +582,51 @@ impl V5CompressedLegacyParser {
                                 }
                                 break; // End of valid data in partition
                             }
+                        }
+                    }
+
+                    // Issue #3095: Cassandra's static-content-on-an-empty-partition
+                    // rule. `SelectStatement.processPartition()` (cassandra-5.0.8,
+                    // L1099-1120): with NO clustering rows and a non-empty
+                    // out-of-band `partition.staticRow()`, the query returns EXACTLY
+                    // ONE row — clustering + REGULAR columns null
+                    // (`default: result.add((ByteBuffer) null)`), STATIC columns
+                    // populated — and that branch `return`s, making it mutually
+                    // exclusive with the per-row loop.
+                    //
+                    // Gated on `read_shadowing` (user-facing SELECT reads only), so a
+                    // PHYSICAL consumer still sees exactly the on-disk unfiltereds and
+                    // sstabledump/compaction parity is unchanged; on
+                    // `partition_complete`, so a partially-present partition body is
+                    // never mistaken for an empty one; and on a clustering-slice
+                    // window being absent, since a slice read decodes only part of the
+                    // partition (a static-bearing schema never takes the row-index
+                    // fast-forward today, so this is a belt-and-braces invariant).
+                    //
+                    // `static_cells` is already empty when the static row was shadowed
+                    // by the partition tombstone or expired by its own TTL (#1741
+                    // Finding 1), so a stale static row cannot resurface. The
+                    // clustering/regular-restriction half of
+                    // `returnStaticContentOnPartitionWithNoRows()` is enforced
+                    // downstream: this row's clustering AND regular columns are null,
+                    // so any restriction on one of them (the only way
+                    // `queriesFullPartitions()` becomes false) rejects it under the
+                    // three-valued predicate rule that keeps a row only when the
+                    // predicate is definitely True.
+                    if self.read_shadowing
+                        && partition_complete
+                        && row_body_end.is_none()
+                        && !emitted_clustering_row
+                        && !static_cells.is_empty()
+                    {
+                        // Non-empty cells holding a static (non-key) column, so the
+                        // shared display rule yields `ScanRow::Row`; no header is
+                        // needed (a shadowed/tombstoned static row already emptied
+                        // `static_cells`).
+                        let row_value = build_display_row(static_cells, None, schema);
+                        match emit((table_id.clone(), partition_key.clone(), row_value))? {
+                            std::ops::ControlFlow::Continue(()) => emitted += 1,
+                            std::ops::ControlFlow::Break(()) => return Ok(()),
                         }
                     }
 
@@ -927,6 +985,15 @@ struct TimestampPolicy<'a> {
     /// Issue #480 static cells accumulated for merge into each clustering row.
     /// Issue #1642 (K3): positional `RowCells`, matching the decoder emit.
     static_cells: RowCells,
+    /// Issue #3095: the static row's own write timestamp, carried so a
+    /// static-only partition's synthesized row reports the SAME authoritative
+    /// timestamp rule (`row_write_timestamp`) every other row does.
+    static_row_ts: i64,
+    /// Issue #3095: whether this partition yielded at least one CLUSTERING row —
+    /// Cassandra's `partition.hasNext()`, which counts clustering rows only
+    /// because the static row is delivered out of band by `partition.staticRow()`
+    /// (`db/rows/BaseRowIterator.java`).
+    emitted_clustering_row: bool,
 }
 
 impl<'a> TimestampPolicy<'a> {
@@ -937,6 +1004,8 @@ impl<'a> TimestampPolicy<'a> {
             partition_key: RowKey::new(Vec::new()),
             shadow: None,
             static_cells: Vec::new(),
+            static_row_ts: 0,
+            emitted_clustering_row: false,
         }
     }
 }
@@ -1036,6 +1105,7 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                             .is_some_and(|h| sh.row_hidden(h, &[]))
                     });
                     self.static_cells = if static_hidden { Vec::new() } else { cells };
+                    self.static_row_ts = row_ts;
                 } else {
                     // Positional, clustering-row-wins merge (issue #1642).
                     merge_static_cells(&mut cells, &self.static_cells);
@@ -1059,6 +1129,7 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                     let row_value = build_display_row(cells, row_header_opt.as_ref(), schema);
 
                     if !hidden {
+                        self.emitted_clustering_row = true;
                         pending.push((
                             self.table_id.clone(),
                             self.partition_key.clone(),
@@ -1071,5 +1142,46 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
             }
             Err(_) => None,
         }
+    }
+
+    /// Issue #3095: Cassandra's static-content-on-an-empty-partition rule.
+    ///
+    /// `SelectStatement.processPartition()` (cassandra-5.0.8, L1099-1120): when
+    /// `!partition.hasNext()` — no CLUSTERING rows — and the out-of-band
+    /// `partition.staticRow()` is not empty, the query returns EXACTLY ONE result
+    /// row whose clustering and REGULAR columns are null
+    /// (`default: result.add((ByteBuffer) null)`) and whose STATIC columns carry
+    /// the static row's values. That branch `return`s, so it is mutually exclusive
+    /// with the per-row loop — which is why this fires only when no clustering row
+    /// was emitted for the partition.
+    ///
+    /// Gated on `read_shadowing`, i.e. user-facing SELECT reads only: a PHYSICAL
+    /// consumer (`verify`, `get_all_entries`, compaction, delta-scan) must see
+    /// exactly the on-disk unfiltereds, so it never gets this synthesized row and
+    /// sstabledump/compaction parity is byte-unchanged.
+    ///
+    /// `self.static_cells` is already empty when the static row was shadowed by a
+    /// partition tombstone or expired by its own TTL (#1741 Finding 1), so a stale
+    /// static row can never resurface here. The clustering-restriction half of
+    /// `returnStaticContentOnPartitionWithNoRows()` is enforced downstream: the
+    /// row carries NULL clustering and NULL regular columns, so any restriction on
+    /// one of those (the only way `queriesFullPartitions()` becomes false) rejects
+    /// it under the reader's/producer's three-valued predicate rule, which keeps a
+    /// row only when the predicate is definitely True.
+    fn on_partition_close(&mut self, schema: &TableSchema, pending: &mut Vec<Self::Row>) {
+        if !self.parser.read_shadowing || self.emitted_clustering_row || self.static_cells.is_empty()
+        {
+            return;
+        }
+        // Cells are non-empty and hold at least one static (non-key) column, so
+        // the shared display rule yields `ScanRow::Row`; the header is not needed
+        // (a shadowed/tombstoned static row already emptied `static_cells`).
+        let row_value = build_display_row(std::mem::take(&mut self.static_cells), None, schema);
+        pending.push((
+            self.table_id.clone(),
+            self.partition_key.clone(),
+            row_value,
+            self.static_row_ts,
+        ));
     }
 }

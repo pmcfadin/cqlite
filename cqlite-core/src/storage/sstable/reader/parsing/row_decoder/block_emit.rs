@@ -110,10 +110,16 @@ impl V5CompressedLegacyParser {
             let mut static_cells: RowCells = Vec::new();
             let mut static_cell_meta: HashMap<String, CellWriteMetadata> = HashMap::new();
             let mut row_count = 0;
+            // Issue #3095: Cassandra's `partition.hasNext()` (clustering rows only)
+            // plus proof this call saw the partition's END — see the
+            // static-only-partition emission after the loop.
+            let mut emitted_clustering_row = false;
+            let mut partition_complete = false;
 
             loop {
                 if offset < data.len() && Self::is_end_of_partition(data[offset]) {
                     offset += 1;
+                    partition_complete = true;
                     break;
                 }
 
@@ -213,6 +219,7 @@ impl V5CompressedLegacyParser {
                                 build_display_row(cells, row_header_opt.as_ref(), schema);
 
                             if !hidden {
+                                emitted_clustering_row = true;
                                 match emit((
                                     table_id.clone(),
                                     partition_key.clone(),
@@ -234,6 +241,7 @@ impl V5CompressedLegacyParser {
                                 "V5CompressedLegacy: Partition {} detected at offset {} after {} rows",
                                 partition_index + 1, offset, row_count
                             );
+                            partition_complete = true;
                             break;
                         }
                     }
@@ -246,6 +254,30 @@ impl V5CompressedLegacyParser {
                         );
                         break;
                     }
+                }
+            }
+
+            // Issue #3095: Cassandra's static-content-on-an-empty-partition rule
+            // (`SelectStatement.processPartition()`, cassandra-5.0.8 L1099-1120) on
+            // the WRITETIME/TTL-projection decode, so a `SELECT … WRITETIME(s)`
+            // returns the same result SHAPE as a plain `SELECT *`. Same guards and
+            // rationale as the primary site in `block_emit_windowed.rs`: user-facing
+            // SELECT reads only (`read_shadowing`), a CONFIRMED-complete partition,
+            // no clustering row emitted, and a live static row.
+            if self.read_shadowing
+                && partition_complete
+                && !emitted_clustering_row
+                && !static_cells.is_empty()
+            {
+                let row_value = build_display_row(static_cells, None, schema);
+                match emit((
+                    table_id.clone(),
+                    partition_key.clone(),
+                    row_value,
+                    static_cell_meta,
+                ))? {
+                    std::ops::ControlFlow::Continue(()) => {}
+                    std::ops::ControlFlow::Break(()) => return Ok(()),
                 }
             }
         }
