@@ -287,6 +287,7 @@ mod tests {
             max_data_cell_timestamp: None,
             max_data_cell_expires_at: None,
             has_live_forever_data_cell: false,
+            has_deleted_data_cell: false,
         }
     }
 

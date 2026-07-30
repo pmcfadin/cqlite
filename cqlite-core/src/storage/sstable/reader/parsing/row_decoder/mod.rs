@@ -427,6 +427,16 @@ struct RowHeader {
     /// shadowed, not expired) and live-forever (no TTL). Keeps the row visible
     /// regardless of liveness expiry. A shadowed/expired cell never sets this.
     has_live_forever_data_cell: bool,
+    /// Issue #3094: `true` when the row decoded at least one TOMBSTONE cell — a
+    /// PRESENCE fact, deliberately carrying no timestamp. It proves the row is a
+    /// genuinely reduced row (something WAS written here and then deleted) rather
+    /// than an empty/truncated parse, which is the only thing
+    /// [`RowHeader::shadowed_by_deletion_at`]'s `i64::MIN` fail-safe needs to know.
+    /// A timestamp would be actively wrong here: folded into
+    /// `max_data_cell_timestamp` it could only RAISE the row maximum, and raising it
+    /// can only ever UN-hide a row — see
+    /// [`PartitionShadow::has_shadow_evidence`](partition_shadow::PartitionShadow::has_shadow_evidence).
+    has_deleted_data_cell: bool,
 }
 
 impl RowHeader {
@@ -516,9 +526,15 @@ impl RowHeader {
     /// no liveness and no decodable data cell, e.g. an empty/undecodable row) is
     /// NOT shadowed. We only hide a row when authoritative metadata proves it
     /// predates the deletion, never by guessing (no-heuristics mandate, issue #28).
+    ///
+    /// Issue #3094: a decoded cell TOMBSTONE defeats that fail-safe — it proves the
+    /// row was written and then deleted rather than being an empty parse — WITHOUT
+    /// contributing a timestamp to `max_write_timestamp`. See
+    /// [`PartitionShadow::has_shadow_evidence`](partition_shadow::PartitionShadow::has_shadow_evidence).
     fn shadowed_by_deletion_at(&self, deleted_at_micros: i64) -> bool {
         let max_ts = self.max_write_timestamp();
-        max_ts != i64::MIN && max_ts <= deleted_at_micros
+        PartitionShadow::has_shadow_evidence(max_ts, self.has_deleted_data_cell)
+            && max_ts <= deleted_at_micros
     }
 
     /// Issue #1741: read-time TTL expiry. `true` iff the row carries a TTL somewhere

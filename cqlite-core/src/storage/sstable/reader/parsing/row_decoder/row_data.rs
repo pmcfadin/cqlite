@@ -367,8 +367,8 @@ impl V5CompressedLegacyParser {
         let mut agg_max_cell_ts: Option<i64> = None;
         let mut agg_max_expires_at: Option<i64> = None;
         let mut agg_has_live_forever = false;
-        // #3094: same max over CELL TOMBSTONES (`shadow_evidence_timestamp`).
-        let mut agg_max_deleted_cell_ts: Option<i64> = None;
+        // #3094: PRESENCE of a tombstone cell — never a timestamp (`has_shadow_evidence`).
+        let mut agg_has_deleted_cell = false;
 
         for (col_idx, ctp) in columns_in_order.iter().enumerate() {
             // Skip columns marked MISSING by the row's bitmap (inline, no per-row
@@ -652,9 +652,9 @@ impl V5CompressedLegacyParser {
                                 PartitionShadow::is_cell_tombstone(&value),
                             );
                             if tomb {
-                                // Shadow EVIDENCE, never liveness (#3094).
-                                agg_max_deleted_cell_ts =
-                                    PartitionShadow::fold_max(agg_max_deleted_cell_ts, eff_ts);
+                                // #3094: PRESENCE only — a tombstone is neither liveness
+                                // nor a timestamp for the row's shadow maximum.
+                                agg_has_deleted_cell = true;
                             } else {
                                 // A USE_ROW_TTL cell inherits the ROW's expiry. For a
                                 // TTL-bearing INSERT that expiry is the pk-liveness
@@ -786,12 +786,12 @@ impl V5CompressedLegacyParser {
         }
 
         // Issue #1741: stash the read-side shadowing aggregate onto the header. #3094:
-        // absent live-cell evidence, the row's cell TOMBSTONES supply it, so a
-        // deletion-only row is not mistaken for a timestamp-less one.
-        row_header.max_data_cell_timestamp =
-            PartitionShadow::shadow_evidence_timestamp(agg_max_cell_ts, agg_max_deleted_cell_ts);
+        // a decoded tombstone cell rides as PRESENCE (`has_deleted_data_cell`) — it
+        // defeats the `i64::MIN` fail-safe without ever raising the row max.
+        row_header.max_data_cell_timestamp = agg_max_cell_ts;
         row_header.max_data_cell_expires_at = agg_max_expires_at;
         row_header.has_live_forever_data_cell = agg_has_live_forever;
+        row_header.has_deleted_data_cell = agg_has_deleted_cell;
 
         tracing::debug!(
             "V5CompressedLegacy: Parsed {}/{} on-disk columns (missing columns are NULL)",
