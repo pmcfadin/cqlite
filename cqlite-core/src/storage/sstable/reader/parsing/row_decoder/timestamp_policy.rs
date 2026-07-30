@@ -55,6 +55,17 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
         _pending: &mut Vec<Self::Row>,
     ) {
         self.partition_key = partition_key;
+        // Issue #3095 (roborev BLOCKER): RESET every partition-scoped field here.
+        // Not defensive style — required for correctness: the driver calls this
+        // hook again when a mid-partition `NeedMore` makes the caller refill and
+        // RE-PARSE the same partition from its start (its `pending` rows are
+        // discarded), and a policy instance may be reused across partitions. Left
+        // un-reset, `emitted_clustering_row` from an earlier partition/attempt would
+        // permanently suppress a LATER static-only partition's row, and
+        // `static_cells` would leak one partition's static values into the next.
+        self.static_cells = Vec::new();
+        self.static_row_ts = 0;
+        self.emitted_clustering_row = false;
         // Issue #1741 (F2): reuse the parser's once-per-read `now_secs`, not a
         // per-block wall-clock sample, so all blocks of one scan share one `now`.
         self.shadow = self.parser.read_shadowing.then(|| {
@@ -141,9 +152,6 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                     self.static_cells = if static_hidden { Vec::new() } else { cells };
                     self.static_row_ts = row_ts;
                 } else {
-                    // Positional, clustering-row-wins merge (issue #1642).
-                    merge_static_cells(&mut cells, &self.static_cells);
-
                     // Issue #1741: hide rows shadowed by a partition/range tombstone
                     // or expired by TTL (matching a Cassandra SELECT). No-op on the
                     // physical path (shadow == None).
@@ -158,12 +166,36 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
                         })
                     });
 
-                    // Issue #505/#932: row-tombstone display rule lives in the
-                    // shared `build_display_row` helper.
-                    let row_value = build_display_row(cells, row_header_opt.as_ref(), schema);
+                    // Issue #505/#932 row-tombstone display rule + issue #480/#1642
+                    // static merge. Issue #3095: on a user-facing SELECT read the
+                    // tombstone decision is taken over the row's OWN cells FIRST, so a
+                    // static value cannot revive a row-tombstoned row; PHYSICAL
+                    // consumers (compaction) keep the historical order and stay
+                    // byte-identical. See `build_display_row_read_path`.
+                    let row_value = if self.shadow.is_some() {
+                        build_display_row_read_path(
+                            cells,
+                            &self.static_cells,
+                            row_header_opt.as_ref(),
+                            schema,
+                        )
+                    } else {
+                        merge_static_cells(&mut cells, &self.static_cells);
+                        build_display_row(cells, row_header_opt.as_ref(), schema)
+                    };
 
                     if !hidden {
-                        self.emitted_clustering_row = true;
+                        // Issue #3095 (roborev + rust-reviewer BLOCKER): Cassandra's
+                        // `partition.hasNext()` is evaluated over the ALREADY-FILTERED
+                        // `RowIterator` (`UnfilteredRowIterators.filter`), so a purged
+                        // row does NOT count as a row. A `ScanRow::Marker` is a pure
+                        // row tombstone that every user-facing consumer suppresses
+                        // (`filter_tombstone` / `build_row_from_scan`'s `into_cells`),
+                        // strictly AFTER this point — counting it would make a
+                        // partition whose ONLY clustering rows are deleted emit
+                        // nothing, where Cassandra (and the k-way merge arm) return
+                        // the static row. Count only a VISIBLE row.
+                        self.emitted_clustering_row |= row_is_visible(&row_value);
                         pending.push((
                             self.table_id.clone(),
                             self.partition_key.clone(),
@@ -202,8 +234,21 @@ impl SlidingPartitionPolicy for TimestampPolicy<'_> {
     /// one of those (the only way `queriesFullPartitions()` becomes false) rejects
     /// it under the reader's/producer's three-valued predicate rule, which keeps a
     /// row only when the predicate is definitely True.
-    fn on_partition_close(&mut self, schema: &TableSchema, pending: &mut Vec<Self::Row>) {
-        if !self.parser.read_shadowing
+    fn on_partition_close(
+        &mut self,
+        schema: &TableSchema,
+        pending: &mut Vec<Self::Row>,
+        complete: bool,
+    ) {
+        // `complete` (issue #3095): synthesize ONLY at a STRUCTURALLY-confirmed
+        // partition end. A truncated/corrupt body (buffer exhausted with no
+        // END_OF_PARTITION, an unrepresentable range marker, an unparseable row) was
+        // only PARTLY observed, so "this partition yielded no clustering row" is not
+        // knowable — fail closed rather than invent a row. This is the SAME guard
+        // the two `block_emit*` decode sites apply via their own `partition_complete`,
+        // so all three paths now agree and the hook's doc is literally true.
+        if !complete
+            || !self.parser.read_shadowing
             || self.emitted_clustering_row
             || self.static_cells.is_empty()
         {

@@ -189,9 +189,10 @@ impl V5CompressedLegacyParser {
                                 static_cell_meta = row_cell_meta;
                             }
                         } else {
-                            // Merge static cells / metadata into clustering row
-                            // (clustering-row-wins; positional, issue #1642).
-                            merge_static_cells(&mut cells, &static_cells);
+                            // Merge static metadata into the clustering row
+                            // (clustering-row-wins; positional, issue #1642). The CELL
+                            // merge happens below, AFTER the row-tombstone decision on
+                            // a read path (issue #3095).
                             for (k, v) in &static_cell_meta {
                                 row_cell_meta.entry(k.clone()).or_insert_with(|| v.clone());
                             }
@@ -213,13 +214,28 @@ impl V5CompressedLegacyParser {
                                 })
                             });
 
-                            // Issue #505/#932: row-tombstone display rule lives in the
-                            // shared `build_display_row` helper.
-                            let row_value =
-                                build_display_row(cells, row_header_opt.as_ref(), schema);
+                            // Issue #505/#932 row-tombstone display rule. Issue #3095:
+                            // on a user-facing SELECT read the decision is taken over
+                            // the row's OWN cells FIRST so a static value cannot revive
+                            // a row-tombstoned row; physical consumers keep the
+                            // historical order. See `build_display_row_read_path`.
+                            let row_value = if shadow.is_some() {
+                                build_display_row_read_path(
+                                    cells,
+                                    &static_cells,
+                                    row_header_opt.as_ref(),
+                                    schema,
+                                )
+                            } else {
+                                merge_static_cells(&mut cells, &static_cells);
+                                build_display_row(cells, row_header_opt.as_ref(), schema)
+                            };
 
                             if !hidden {
-                                emitted_clustering_row = true;
+                                // Issue #3095: only a VISIBLE row counts (see
+                                // `row_is_visible`) — a suppressed `ScanRow::Marker`
+                                // must not hide a static-only partition's row.
+                                emitted_clustering_row |= row_is_visible(&row_value);
                                 match emit((
                                     table_id.clone(),
                                     partition_key.clone(),

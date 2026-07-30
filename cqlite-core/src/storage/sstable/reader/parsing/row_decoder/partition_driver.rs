@@ -107,19 +107,34 @@ pub(super) trait SlidingPartitionPolicy {
         pending: &mut Vec<Self::Row>,
     ) -> Option<usize>;
 
-    /// Called once per partition, AFTER its last row and only when the partition
-    /// is CONFIRMED complete (an `Emitted` return), immediately before `pending`
-    /// is flushed to the external emit. A mid-partition `NeedMore` discards
-    /// `pending` and never calls this, so a row pushed here can never be emitted
-    /// twice.
+    /// Called once per partition, AFTER its last row, on every `Emitted` return —
+    /// immediately before `pending` is flushed to the external emit. A
+    /// mid-partition `NeedMore` discards `pending` and never calls this, so a row
+    /// pushed here can never be emitted twice.
+    ///
+    /// `complete` distinguishes the two ways a partition parse ends (issue #3095,
+    /// reconciling this hook with `block_emit*`'s own `partition_complete` guard):
+    /// * `true` — the parse observed a STRUCTURAL end: the `END_OF_PARTITION`
+    ///   marker, or the next partition's header. A well-formed SSTable always ends
+    ///   a partition body this way.
+    /// * `false` — the parse ran out of buffer on the FINAL chunk, hit an
+    ///   unrepresentable range marker, or failed to parse a row. The partition body
+    ///   was only partially observed (truncated/corrupt), so "this partition
+    ///   yielded no clustering row" is NOT knowable.
     ///
     /// Exists for Cassandra's static-content-on-an-empty-partition rule
     /// (`SelectStatement.processPartition()`, issue #3095): a partition whose
     /// static row is live but which yielded NO clustering row returns exactly one
-    /// result row, and "yielded no clustering row" is only knowable at the
-    /// partition's end. Defaults to a no-op so a policy with no partition-level
-    /// output (the compaction policy) is unaffected.
-    fn on_partition_close(&mut self, _schema: &TableSchema, _pending: &mut Vec<Self::Row>) {}
+    /// result row, and "yielded no clustering row" is only knowable at a
+    /// structurally-confirmed partition end. Defaults to a no-op so a policy with
+    /// no partition-level output (the compaction policy) is unaffected.
+    fn on_partition_close(
+        &mut self,
+        _schema: &TableSchema,
+        _pending: &mut Vec<Self::Row>,
+        _complete: bool,
+    ) {
+    }
 }
 
 impl V5CompressedLegacyParser {
@@ -204,12 +219,13 @@ impl V5CompressedLegacyParser {
         // Flush the buffered rows, honouring an early `Break`, and report the
         // bytes consumed for this (complete) partition so the caller drains
         // correctly.
+        // `$complete` records whether the parse observed a STRUCTURAL partition end
+        // (END_OF_PARTITION / the next partition header) rather than simply running
+        // out of buffer or failing to parse — see `on_partition_close`. Never called
+        // on `NeedMore`, so a row a policy appends here cannot be emitted twice.
         macro_rules! flush_and_emitted {
-            ($consumed:expr) => {{
-                // The partition is confirmed complete here (never on `NeedMore`),
-                // so a policy may append a partition-level row — Cassandra's
-                // static-only-partition row (issue #3095) — before the flush.
-                policy.on_partition_close(schema, &mut pending);
+            ($consumed:expr, $complete:expr) => {{
+                policy.on_partition_close(schema, &mut pending, $complete);
                 for row in pending.drain(..) {
                     match emit(row)? {
                         std::ops::ControlFlow::Continue(()) => {}
@@ -224,7 +240,8 @@ impl V5CompressedLegacyParser {
             // END_OF_PARTITION (0x01): partition complete, consume the marker.
             if offset < data.len() && Self::is_end_of_partition(data[offset]) {
                 offset += 1;
-                return flush_and_emitted!(offset);
+                // STRUCTURAL end: the END_OF_PARTITION marker.
+                return flush_and_emitted!(offset, true);
             }
 
             // Consumed everything but never saw END_OF_PARTITION: the partition
@@ -232,7 +249,8 @@ impl V5CompressedLegacyParser {
             // buffered rows) so the caller can refill and re-parse from the start.
             if offset >= data.len() {
                 if at_final_chunk {
-                    return flush_and_emitted!(offset);
+                    // Buffer exhausted with NO END_OF_PARTITION: truncated body.
+                    return flush_and_emitted!(offset, false);
                 }
                 return Ok(ParseStep::NeedMore);
             }
@@ -245,7 +263,8 @@ impl V5CompressedLegacyParser {
                     }
                     MarkerOutcome::Stop => {
                         if at_final_chunk {
-                            return flush_and_emitted!(offset);
+                            // Unrepresentable marker: body only partly observed.
+                            return flush_and_emitted!(offset, false);
                         }
                         return Ok(ParseStep::NeedMore);
                     }
@@ -259,13 +278,13 @@ impl V5CompressedLegacyParser {
                         // End of the buffer without an explicit END_OF_PARTITION:
                         // the partition may continue in the next chunk.
                         if at_final_chunk {
-                            return flush_and_emitted!(offset);
+                            return flush_and_emitted!(offset, false);
                         }
                         return Ok(ParseStep::NeedMore);
                     }
                     if self.peek_is_partition_header(data, offset) {
-                        // Next partition starts here — current one is complete.
-                        return flush_and_emitted!(offset);
+                        // STRUCTURAL end: the next partition's header.
+                        return flush_and_emitted!(offset, true);
                     }
                 }
                 None => {
@@ -273,7 +292,8 @@ impl V5CompressedLegacyParser {
                     // straddling the chunk boundary, so request more bytes unless
                     // this is the final chunk (where it is end-of-partition).
                     if at_final_chunk {
-                        return flush_and_emitted!(offset);
+                        // Row framing unparseable: body only partly observed.
+                        return flush_and_emitted!(offset, false);
                     }
                     return Ok(ParseStep::NeedMore);
                 }

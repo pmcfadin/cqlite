@@ -480,10 +480,6 @@ impl V5CompressedLegacyParser {
                                     // Do NOT push to results — static rows are not result rows
                                     // Continue to next row/marker in partition
                                 } else {
-                                    // Merge static cells into this clustering row (Issue #480;
-                                    // positional, clustering-row-wins, issue #1642).
-                                    merge_static_cells(&mut cells, &static_cells);
-
                                     // Issue #1741: hide rows shadowed by a partition or
                                     // range tombstone, or expired by TTL, matching a
                                     // Cassandra SELECT. Active only for query reads
@@ -502,10 +498,29 @@ impl V5CompressedLegacyParser {
                                         })
                                     });
 
-                                    // Issue #505/#932: row-tombstone display rule now
-                                    // lives in the shared `build_display_row` helper.
-                                    let row_value =
-                                        build_display_row(cells, row_header_opt.as_ref(), schema);
+                                    // Issue #505/#932: row-tombstone display rule lives
+                                    // in the shared `build_display_row` helper. Issue
+                                    // #480/#1642: static cells are merged in
+                                    // (positional, clustering-row-wins).
+                                    //
+                                    // Issue #3095: on a user-facing SELECT read the
+                                    // tombstone decision is taken over the row's OWN
+                                    // cells FIRST, so a static value cannot revive a
+                                    // row-tombstoned row (see
+                                    // `build_display_row_read_path`). Physical consumers
+                                    // keep the historical inject-then-decide order, so
+                                    // their byte-pinned output is unchanged.
+                                    let row_value = if shadow.is_some() {
+                                        build_display_row_read_path(
+                                            cells,
+                                            &static_cells,
+                                            row_header_opt.as_ref(),
+                                            schema,
+                                        )
+                                    } else {
+                                        merge_static_cells(&mut cells, &static_cells);
+                                        build_display_row(cells, row_header_opt.as_ref(), schema)
+                                    };
 
                                     // Issue #954: count each clustering row actually
                                     // decoded out of Data.db so a slice query can be
@@ -518,7 +533,15 @@ impl V5CompressedLegacyParser {
                                     crate::storage::sstable::work_counters::add_rows_decoded(1);
 
                                     if !hidden {
-                                        emitted_clustering_row = true;
+                                        // Issue #3095 (roborev + rust-reviewer
+                                        // BLOCKER): only a VISIBLE row counts as one
+                                        // of Cassandra's `partition.hasNext()` rows —
+                                        // a `ScanRow::Marker` (pure row tombstone) is
+                                        // suppressed downstream by every user-facing
+                                        // consumer, so counting it would hide the
+                                        // static row of a partition whose clustering
+                                        // rows are all deleted. See `row_is_visible`.
+                                        emitted_clustering_row |= row_is_visible(&row_value);
                                         match emit((
                                             table_id.clone(),
                                             partition_key.clone(),

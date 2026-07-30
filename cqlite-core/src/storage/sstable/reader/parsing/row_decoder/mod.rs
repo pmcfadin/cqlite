@@ -718,7 +718,10 @@ const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 // (`row_has_non_key_cell`, `merge_static_cells`, `build_display_row`,
 // `extract_clustering_values`) live in `display_row`.
 mod display_row;
-use display_row::{build_display_row, extract_clustering_values, merge_static_cells};
+use display_row::{
+    build_display_row, build_display_row_read_path, extract_clustering_values, merge_static_cells,
+    row_is_visible,
+};
 // campsite split of `block_emit_windowed` (epic #1116): the streaming-scan
 // `SlidingPartitionPolicy`.
 mod timestamp_policy;

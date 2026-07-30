@@ -108,3 +108,53 @@ pub(super) fn extract_clustering_values(
         })
         .collect()
 }
+
+/// Whether a built display row is VISIBLE to a user-facing `SELECT` (issue #3095).
+///
+/// [`build_display_row`] returns `ScanRow::Marker` for a pure row tombstone / absent
+/// row, and EVERY user-facing consumer suppresses a marker downstream
+/// (`integrity::filter_tombstone`, and `build_row_from_scan`'s `into_cells`, issue
+/// #505) — so a marker is not a row a `SELECT` returns. This is the single predicate
+/// the static-content-on-an-empty-partition rule uses for Cassandra's
+/// `partition.hasNext()`, which is likewise evaluated over the already-FILTERED
+/// `RowIterator` (`UnfilteredRowIterators.filter`).
+pub(super) fn row_is_visible(row: &ScanRow) -> bool {
+    matches!(row, ScanRow::Row(_) | ScanRow::RawRow(_))
+}
+
+/// Build the display row for a CLUSTERING row of a static-bearing partition, on a
+/// user-facing SELECT read (issue #3095).
+///
+/// The ORDER is load-bearing: the row-tombstone display decision is taken over the
+/// row's OWN cells, and static cells are injected only into a row that survives it.
+///
+/// Cassandra authority — the static row is a PARTITION-level object
+/// (`BaseRowIterator.staticRow()`), never part of a clustering `Row`, and
+/// `UnfilteredRowIterators.filter` drops a clustering row whose own
+/// `hasLiveData(nowInSec, ...)` is false. So a static cell can NEVER make a
+/// row-tombstoned clustering row live. Injecting first (which
+/// [`merge_static_cells`] + [`build_display_row`] do when called in that order)
+/// made `row_has_non_key_cell` true for a PURE row tombstone, so the row surfaced
+/// as a live `ScanRow::Row` carrying the static value — a phantom row on the
+/// single-generation arm that the k-way merge arm correctly suppresses
+/// (`entry_to_row` drops `RowData::Tombstone`). That divergence is what made the
+/// two arms disagree on a static partition holding only deleted rows.
+///
+/// PHYSICAL consumers (compaction, `verify`, delta-scan) keep the historical
+/// inject-then-decide order — their callers must see every on-disk unfiltered and
+/// their output is byte-pinned — so this is used only where `read_shadowing` is on.
+pub(super) fn build_display_row_read_path(
+    mut cells: RowCells,
+    static_cells: &RowCells,
+    row_header_opt: Option<&RowHeader>,
+    schema: &TableSchema,
+) -> ScanRow {
+    let own = build_display_row(cells, row_header_opt, schema);
+    let ScanRow::Row(mut kept) = own else {
+        // A pure row tombstone (or an empty row): statics do not revive it.
+        return own;
+    };
+    merge_static_cells(&mut kept, static_cells);
+    cells = kept;
+    ScanRow::Row(cells)
+}
