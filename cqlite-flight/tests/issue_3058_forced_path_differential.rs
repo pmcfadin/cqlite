@@ -29,8 +29,9 @@
 //!     #3140) and a static column present ON DISK that the ticket DDL does not declare
 //!     (`BypassReason::StaticColumns`, the `@stale-ddl` case);
 //!   * a CQLite-written fixture carrying a partition deletion, a range tombstone,
-//!     a row deletion, an expired-TTL cell and a live-TTL cell,
-//!     read at TWO pinned `now` values so the pinned clock itself is pinned;
+//!     a row deletion, a SIMPLE CELL TOMBSTONE (issue #3094), an expired-TTL cell
+//!     and a live-TTL cell, read at TWO pinned `now` values so the pinned clock
+//!     itself is pinned;
 //!   * feature parity on the fast arm: predicate pushdown, projection, a token
 //!     range, and a `max_batch_bytes`-capped stream.
 //!
@@ -1164,5 +1165,29 @@ fn assert_semantics(rows: &[Row], failures: &mut Vec<String>) {
     }
     if cell(rows, "ck", "3", "w").as_deref() != Some("also-live") {
         failures.push("a live multi-column row must surface both of its cells".into());
+    }
+    // Issue #3094: the SIMPLE CELL TOMBSTONE row. The row itself survives (its
+    // liveness marker and its `v` cell are live), the deleted `w` reads NULL, and
+    // it never surfaces a raw tombstone value.
+    if !cks.contains(&"5") {
+        failures.push(
+            "the row whose `w` was deleted by a cell tombstone must still surface \
+             (its liveness marker and `v` cell are live) — issue #3094"
+                .into(),
+        );
+    }
+    if cell(rows, "ck", "5", "v").as_deref() != Some("cell-tomb-row") {
+        failures.push(format!(
+            "the cell-tombstone row's sibling `v` must stay live, got {:?} (#3094)",
+            cell(rows, "ck", "5", "v")
+        ));
+    }
+    match cell(rows, "ck", "5", "w").as_deref() {
+        Some("<null>") => {}
+        other => failures.push(format!(
+            "a DELETED cell must read as NULL, got {other:?} — a raw \
+             `Value::Tombstone` here is what used to fail the whole `do_get` stream \
+             in the Arrow encoder (issue #3094)"
+        )),
     }
 }

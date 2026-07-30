@@ -153,22 +153,21 @@ pub async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
             TTL_LDT,
         ))
         .unwrap();
-    // ck=3: two live columns (the multi-column shape). A CQLite-WRITTEN simple
-    // cell tombstone is deliberately NOT exercised here — EXCLUSION TRACKED BY
-    // ISSUE #3094: both arms surface it as a raw `Value::Tombstone` that the Arrow
-    // encoder then rejects ("expected Text value, got Tombstone(..)"). That
-    // reproduces with `CQLITE_FLIGHT_MERGE_PATH=merge`, i.e. on the pre-#3058
-    // merge path, so it is a PRE-EXISTING defect of the CQLite write/read
-    // round-trip (see #3094), identical on
-    // both arms and out of this change's scope — recorded for a follow-up rather
-    // than papered over here. Cassandra-written tombstones ARE covered, by the
-    // dataset cases below and by the query-semantics oracle.
+    // ck=3: two live columns (the multi-column shape).
     //
-    // NOT to be conflated with issue #3140 (issue #3095 review): #3140 is the
-    // CASSANDRA-written cell tombstone, which the MERGE arm handles correctly (it
-    // drops the cell, the column reads null) and only the FAST arm aborts on — an arm
-    // DIVERGENCE. #3094, above, is CQLite-written and identical on BOTH arms, so it is
-    // not a divergence at all. Different defect class, different fix.
+    // (Issue #3094 has since RE-ENABLED the CQLite-written simple cell tombstone as
+    // the `ck=5` shape below. The exclusion note that used to sit here justified
+    // itself with a claim that is measurably FALSE and is recorded as such so it is
+    // not reinstated: it said BOTH arms surfaced the deleted cell as a raw
+    // `Value::Tombstone` the Arrow encoder rejected, hence "not an arm divergence".
+    // Reverting the #3094 read-path drop and re-running this differential fails on
+    // the BYPASS arm ONLY — `column 'w': expected Text value, got Tombstone(..)` —
+    // because the merge arm has always dropped simple cell tombstones in
+    // `write_engine::merge::read_assembly::assemble_read_cells`. So the pre-#3094
+    // defect WAS an arm divergence, of the same shape as #3140; the two differ only
+    // in who WROTE the tombstone (#3140 Cassandra, #3094 CQLite), which is why
+    // #3140's `BypassReason::StaticColumnsWithDeletions` fail-closed guard is
+    // independent of this and stays pinned by `statics/select-star`.)
     engine
         .write(base(
             1,
@@ -184,6 +183,45 @@ pub async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
                 },
             ],
             T_BASE_MICROS,
+        ))
+        .unwrap();
+    // ck=5: the SIMPLE CELL TOMBSTONE shape (issue #3094, re-enabled here once the
+    // read path stopped surfacing a deleted cell as a raw `Value::Tombstone` that
+    // the Arrow encoder rejected). `v` stays live, `w` is deleted by a
+    // strictly-later cell tombstone, so both arms must return the row with `w` NULL.
+    // The two arms reach that answer through DIFFERENT code, which is what makes the
+    // shape worth pinning here: Flight's merge arm drops the tombstone while
+    // assembling the reconciled row (`write_engine::merge::read_assembly::
+    // assemble_read_cells`), whereas the fast/bypass arm relies on the
+    // single-generation decoder's own per-cell drop (`row_decoder`'s
+    // `PartitionShadow::cell_tombstone_dropped`) — the half that was missing before
+    // #3094 and that only the bypass arm exposes.
+    engine
+        .write(base(
+            1,
+            5,
+            vec![
+                CellOperation::Write {
+                    column: "v".into(),
+                    value: Value::text("cell-tomb-row"),
+                },
+                CellOperation::Write {
+                    column: "w".into(),
+                    value: Value::text("to-be-deleted"),
+                },
+            ],
+            T_BASE_MICROS,
+        ))
+        .unwrap();
+    engine
+        .write(base(
+            1,
+            5,
+            vec![CellOperation::Delete {
+                column: "w".into(),
+                local_deletion_time: Some(T_BASE_SECS as i32),
+            }],
+            T_BASE_MICROS + 10,
         ))
         .unwrap();
     engine

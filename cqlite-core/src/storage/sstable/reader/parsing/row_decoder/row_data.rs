@@ -367,6 +367,8 @@ impl V5CompressedLegacyParser {
         let mut agg_max_cell_ts: Option<i64> = None;
         let mut agg_max_expires_at: Option<i64> = None;
         let mut agg_has_live_forever = false;
+        // #3094: PRESENCE of a tombstone cell — never a timestamp (`has_shadow_evidence`).
+        let mut agg_has_deleted_cell = false;
 
         for (col_idx, ctp) in columns_in_order.iter().enumerate() {
             // Skip columns marked MISSING by the row's bitmap (inline, no per-row
@@ -635,21 +637,25 @@ impl V5CompressedLegacyParser {
                             value,
                             new_offset - offset
                         );
-                        // Only compute and store per-cell metadata when the caller requested it.
-                        // On the normal read hot-path (want_cell_metadata == false), cell_meta is
-                        // None and this entire block is skipped — zero allocations per cell.
                         // `emit` is false for a DROPPED column (issue #1080 Part 2): we still
                         // advanced `offset` to consume its bytes, but emit no cell/metadata.
                         if emit {
-                            // Issue #1741 read-side shadowing aggregate (scalars only,
-                            // no allocation). A cell tombstone is not live data. A live
-                            // cell contributes its effective write timestamp and, if
-                            // expiring (explicit per-cell TTL, or USE_ROW_TTL inheriting
-                            // the row's expiry), its expiry; otherwise it is live-forever.
-                            // Computed BEFORE the metadata block, which moves `cell_exp`.
-                            let mut dropped = false;
-                            if !matches!(value, Value::Tombstone(_)) {
-                                let eff_ts = cell_own_ts.or(row_header.timestamp);
+                            // Issue #1741 read-side shadow aggregate (scalars only, no
+                            // allocation) + the #3094 DELETED-CELL-reads-NULL drop. Runs
+                            // BEFORE the metadata block, which moves `cell_exp`. `tomb` is
+                            // the BROAD shape (no tombstone of any kind is live data); the
+                            // #3094 drop is narrow — CELL tombstones only.
+                            let eff_ts = cell_own_ts.or(row_header.timestamp);
+                            let tomb = matches!(value, Value::Tombstone(_));
+                            let mut dropped = PartitionShadow::cell_tombstone_dropped(
+                                cell_ctx.is_some(),
+                                PartitionShadow::is_cell_tombstone(&value),
+                            );
+                            if tomb {
+                                // #3094: PRESENCE only — a tombstone is neither liveness
+                                // nor a timestamp for the row's shadow maximum.
+                                agg_has_deleted_cell = true;
+                            } else {
                                 // A USE_ROW_TTL cell inherits the ROW's expiry. For a
                                 // TTL-bearing INSERT that expiry is the pk-liveness
                                 // localExpirationTime (`liveness_expires_at_seconds`,
@@ -677,37 +683,28 @@ impl V5CompressedLegacyParser {
                                     }
                                     None => None,
                                 };
-                                // Issue #1741 (Finding 1): per-cell shadow/TTL filter.
-                                // Drop this data cell from the EMITTED map when its
-                                // effective write ts is shadowed by the covering deletion
-                                // (`eff_ts <= cover`) or it is TTL-expired at `now`.
-                                // `cell_ctx` is `None` for physical reads → never drops →
-                                // byte-unchanged.
+                                // Issue #1741 (Finding 1): per-cell shadow/TTL filter — drop
+                                // this cell from the EMITTED map when its effective write ts
+                                // is shadowed by the covering deletion (`eff_ts <= cover`) or
+                                // it is TTL-expired at `now`. `cell_ctx` is `None` for
+                                // physical reads → never drops → byte-unchanged.
                                 if let Some((cover, now)) = cell_ctx {
                                     dropped = PartitionShadow::cell_shadowed_or_expired(
                                         cover, now, eff_ts, eff_exp,
                                     );
                                 }
-                                // Fold this cell into the ROW aggregate that drives the
-                                // row-level `row_hidden` decision. A dropped (shadowed/
-                                // expired) cell STILL contributes its ts + expiry — so a
-                                // row reduced to nothing is recognised as shadowed/expired
-                                // (its max ts stays `<= covering` / its expiry stays past)
-                                // rather than looking like an empty/truncated parse — but
-                                // it is NEVER counted live-forever (it is not live).
-                                if let Some(t) = eff_ts {
-                                    agg_max_cell_ts = Some(agg_max_cell_ts.map_or(t, |m| m.max(t)));
-                                }
-                                match eff_exp {
-                                    Some(e) => {
-                                        agg_max_expires_at =
-                                            Some(agg_max_expires_at.map_or(e, |m| m.max(e)));
-                                    }
-                                    None => {
-                                        if !dropped {
-                                            agg_has_live_forever = true;
-                                        }
-                                    }
+                                // Fold this cell into the ROW aggregate driving `row_hidden`.
+                                // A dropped (shadowed/expired) cell STILL contributes its ts
+                                // + expiry, so a row reduced to nothing reads as shadowed/
+                                // expired rather than as an empty/truncated parse — but it is
+                                // NEVER counted live-forever (it is not live).
+                                agg_max_cell_ts =
+                                    PartitionShadow::fold_max(agg_max_cell_ts, eff_ts);
+                                agg_max_expires_at =
+                                    PartitionShadow::fold_max(agg_max_expires_at, eff_exp);
+                                // A non-expiring cell that SURVIVED is live-forever.
+                                if eff_exp.is_none() && !dropped {
+                                    agg_has_live_forever = true;
                                 }
                             }
                             if dropped {
@@ -788,10 +785,13 @@ impl V5CompressedLegacyParser {
             }
         }
 
-        // Issue #1741: stash the read-side shadowing aggregate onto the header.
+        // Issue #1741: stash the read-side shadowing aggregate onto the header. #3094:
+        // a decoded tombstone cell rides as PRESENCE (`has_deleted_data_cell`) — it
+        // defeats the `i64::MIN` fail-safe without ever raising the row max.
         row_header.max_data_cell_timestamp = agg_max_cell_ts;
         row_header.max_data_cell_expires_at = agg_max_expires_at;
         row_header.has_live_forever_data_cell = agg_has_live_forever;
+        row_header.has_deleted_data_cell = agg_has_deleted_cell;
 
         tracing::debug!(
             "V5CompressedLegacy: Parsed {}/{} on-disk columns (missing columns are NULL)",

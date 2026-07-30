@@ -676,12 +676,12 @@ impl V5CompressedLegacyParser {
                 header_size,
                 row_size_vint_len,
                 missing_columns_bitmap,
-                // Issue #1741: populated after the cell loop in
-                // `parse_row_data_with_offset_impl`; defaults describe a row with no
-                // decoded data cells.
+                // Issues #1741/#3094: populated after the cell loop in
+                // `parse_row_data_with_offset_impl` (no data cell decoded yet).
                 max_data_cell_timestamp: None,
                 max_data_cell_expires_at: None,
                 has_live_forever_data_cell: false,
+                has_deleted_data_cell: false,
             },
             row_size,
         ))

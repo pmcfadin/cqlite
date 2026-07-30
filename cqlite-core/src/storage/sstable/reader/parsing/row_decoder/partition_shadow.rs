@@ -237,24 +237,144 @@ impl PartitionShadow {
         let expired = eff_exp.is_some_and(|e| e <= now);
         shadowed || expired
     }
+
+    /// Whether a decoded SIMPLE CELL must be DROPPED from a user-facing row
+    /// because it is a CELL TOMBSTONE — i.e. a deleted cell (issue #3094).
+    ///
+    /// A deleted cell is ABSENT from the row Cassandra reconciles: `Cell.isLive`
+    /// is false for a tombstone, so the `Row`'s `ColumnData` carries nothing for
+    /// that column and CQL renders it NULL. Dropping it here is what makes
+    /// `SELECT` return NULL instead of surfacing the raw
+    /// `Value::Tombstone(CellTombstone)` that `cell_value.rs` decodes. Before
+    /// this drop that tombstone reached the row carrier, and the Arrow encoder
+    /// correctly fail-closed (#1485) on it, erroring the WHOLE Flight `do_get`
+    /// stream (`column 'w': expected Text value, got Tombstone(..)`).
+    ///
+    /// `user_facing` is the SAME discriminator the #1741 per-cell shadow/TTL
+    /// filter uses: `true` exactly when a [`PartitionShadow`] was threaded into
+    /// the decode (a query read). The PHYSICAL consumers — compaction merge
+    /// input, sstabledump parity, delta scan — thread `None` and MUST keep
+    /// receiving the tombstone with its authoritative deletion timestamp (#505),
+    /// so their streams stay byte-unchanged.
+    ///
+    /// A tombstone is never folded into the row LIVENESS aggregate
+    /// (`has_live_forever_data_cell` / `max_data_cell_expires_at`): it is not live
+    /// data. Nor does it supply a TIMESTAMP to the row's shadow maximum — only the
+    /// PRESENCE fact `has_deleted_data_cell`; see [`Self::has_shadow_evidence`].
+    ///
+    /// This mirrors the multi-generation read path, whose merged-cell filter
+    /// (`generation_merge::ReadShadow::filter_live`) skips `Value::Tombstone` cells
+    /// and reports their PRESENCE onward exactly as this path does, and the
+    /// collection path, which already skipped tombstoned elements — so all three
+    /// read paths agree.
+    #[inline]
+    pub(crate) fn cell_tombstone_dropped(user_facing: bool, is_cell_tombstone: bool) -> bool {
+        user_facing && is_cell_tombstone
+    }
+
+    /// Whether a decoded simple-cell `value` is specifically a CELL TOMBSTONE —
+    /// the ONLY tombstone shape [`Self::cell_tombstone_dropped`] may drop.
+    ///
+    /// Matching the `Value::Tombstone` discriminant alone would silently accept a
+    /// row/range/partition tombstone value if one ever surfaced in the simple-cell
+    /// loop (none can today: `cell_value.rs` builds exactly
+    /// `TombstoneType::CellTombstone` there) and drop it as if it were a deleted
+    /// cell. Naming the variant keeps the decision authoritative rather than
+    /// inferred from a broader shape (no-heuristics, #28); an unexpected shape
+    /// instead flows on unchanged and fails closed downstream.
+    #[inline]
+    pub(crate) fn is_cell_tombstone(value: &Value) -> bool {
+        matches!(
+            value,
+            Value::Tombstone(t) if matches!(t.tombstone_type, TombstoneType::CellTombstone)
+        )
+    }
+
+    /// Whether the row carries enough authoritative evidence for
+    /// [`RowHeader::shadowed_by_deletion_at`] to hide it — i.e. whether its
+    /// `i64::MIN` "no authoritative timestamp" FAIL-SAFE is defeated (issue #3094).
+    /// `max_write_ts` is the row's LIVE-write maximum (`max(liveness marker, live data
+    /// cells)`, `i64::MIN` when neither exists); `has_deleted_data_cell` is the mere
+    /// PRESENCE of a decoded cell TOMBSTONE.
+    ///
+    /// ## The invariant
+    ///
+    /// Tombstone evidence may ONLY defeat the fail-safe; it must NEVER raise the row
+    /// maximum. That maximum is compared `max_ts <= markedForDeleteAt`, so raising it
+    /// can only move a row hidden → VISIBLE — the exact resurrection direction #3094
+    /// closes. A tombstone making a row visible is never correct: Cassandra purges a
+    /// surviving tombstone (`Filter.applyToRow` → `row.purge(…, PURGE_ALL, …)`) and
+    /// drops the emptied row (guide Ch.11), so it can only REMOVE data from a row.
+    ///
+    /// The counterexample that forced presence over an earlier "fallback max"
+    /// (`live.or(deleted_only)`): a LIVE LIVENESS MARKER at `T`, NO data cell, a cell
+    /// tombstone at `T + 10s`, under a partition deletion at `T + 5s`. With no
+    /// live-cell evidence the fallback fired, so `T + 10s` became the aggregate and
+    /// `max_write_timestamp` MAXed it with the liveness `T` → `T + 10s > T + 5s`: an
+    /// all-null phantom row out of a deleted partition where Cassandra returns 0 rows.
+    ///
+    /// ## Why presence suffices
+    ///
+    /// A row whose ONLY cells are tombstones (`UPDATE t SET w = null WHERE …`, no
+    /// INSERT liveness marker) has `max_write_ts == i64::MIN`, and the fail-safe exists
+    /// solely to avoid hiding an EMPTY/TRUNCATED parse. A decoded tombstone proves a
+    /// genuinely reduced row, so any covering deletion hides it (`i64::MIN <= cover`
+    /// always) — the direction Cassandra answers, since a row with no live data is
+    /// dropped whether or not the deletion predates the tombstone. Residual (#3121):
+    /// with NO covering deletion such a row is still emitted, all-null.
+    #[inline]
+    pub(crate) fn has_shadow_evidence(max_write_ts: i64, has_deleted_data_cell: bool) -> bool {
+        max_write_ts != i64::MIN || has_deleted_data_cell
+    }
+
+    /// Fold `value` into a running `Option` MAX accumulator: `None` contributes
+    /// nothing, so an absent authoritative timestamp never becomes a `0` (which
+    /// would read as "written at the epoch" — a heuristic, #28).
+    #[inline]
+    pub(crate) fn fold_max(acc: Option<i64>, value: Option<i64>) -> Option<i64> {
+        match (acc, value) {
+            (Some(a), Some(v)) => Some(a.max(v)),
+            (Some(a), None) => Some(a),
+            (None, v) => v,
+        }
+    }
 }
 
 /// Whether a partition-level deletion at `cover` (µs, `markedForDeleteAt`) shadows
-/// the WHOLE of a merged (post-`KWayMerger`) row whose maximum DATA-cell write
-/// timestamp is `max_data_cell_timestamp` (issue #1849).
+/// the WHOLE of a merged (post-`KWayMerger`) row (issues #1849, #3094).
 ///
 /// This is the multi-generation read path's reuse of the single-gen row-level
 /// decision [`RowHeader::shadowed_by_deletion_at`]: it builds the same `RowHeader`
-/// the single-gen emit path folds (a row with NO surfaced primary-key liveness
-/// marker — the `KWayMerger` output does not carry one — and the given max data-cell
-/// timestamp) and applies the identical `ts <= markedForDeleteAt` rule. A row with
-/// no data-cell timestamp (`None`) is NEVER shadowed (fail-safe / no-heuristics: we
-/// hide only what authoritative metadata proves predates the deletion).
+/// the single-gen emit path folds and applies the identical `ts <=
+/// markedForDeleteAt` rule, from the three pieces of authoritative evidence the
+/// merged row carries:
+///
+/// - `marker_timestamp` — the merged row's primary-key liveness marker write ts
+///   (`MergeEntry::row_liveness.marker_timestamp`, #2374/#2789), `None` when the row
+///   has no marker. It is COMPARED against `cover` here, never trusted to be newer.
+///   The merger upstream DOES now judge the marker on this same field
+///   (`apply_partition_shadowing` → `RowLiveness::marker_survives_floor`, #3094),
+///   substituting `RowLiveness::default()` when its floor covers it — but that drop is
+///   not RELIED on here. The floor it applied is the merge's own MAX partition
+///   `markedForDeleteAt`, whereas `cover` is read independently from the merged
+///   partition-tombstone carrier, and this function is the read path's own
+///   authoritative application of `ts <= markedForDeleteAt`. So a marker at/below
+///   `cover` is handled as shadowed rather than assumed impossible.
+/// - `max_data_cell_timestamp` — max write ts across the merged LIVE data cells
+///   (never a tombstone's, #3094). `None` when the row surfaced no live data cell.
+/// - `has_deleted_data_cell` — mere PRESENCE of a merged cell TOMBSTONE, threaded
+///   from `ReadShadow::filter_live`'s tombstone skip. It only ever defeats the
+///   `i64::MIN` fail-safe (see [`PartitionShadow::has_shadow_evidence`]); it carries
+///   no timestamp, so it can never move a row hidden → visible.
+///
+/// A row with NO evidence at all (no marker, no live cell, no tombstone) is NEVER
+/// shadowed (fail-safe / no-heuristics: we hide only what authoritative metadata
+/// proves predates the deletion).
 ///
 /// Read-time TTL expiry is applied PER CELL on the merged path (via
 /// [`PartitionShadow::cell_shadowed_or_expired`]); whole-row TTL hiding needs the
-/// primary-key liveness marker, which the merger output lacks, so it is deliberately
-/// NOT decided here (issue #1849 scope note).
+/// marker's EXPIRY (`RowLiveness::expires_at_seconds`), which is not threaded here,
+/// so it is deliberately NOT decided here (issue #1849 scope note).
 ///
 /// Gated on `write-support`: the sole caller is the cross-generation read path
 /// (`generation_merge`), whose `mod` declaration in `sstable/mod.rs` is itself
@@ -265,13 +385,19 @@ impl PartitionShadow {
 #[cfg(feature = "write-support")]
 pub(crate) fn merged_row_shadowed_by_partition(
     cover: Option<i64>,
+    marker_timestamp: Option<i64>,
     max_data_cell_timestamp: Option<i64>,
+    has_deleted_data_cell: bool,
 ) -> bool {
     let Some(deleted_at) = cover else {
         return false;
     };
     let header = RowHeader {
-        timestamp: None,
+        // The SURVIVING liveness marker's write ts (#2374/#2789), not a hardcoded
+        // `None`: with #3094's presence rule in force, dropping it would hide a row
+        // whose marker is strictly NEWER than the deletion (Cassandra returns that
+        // row — the marker outlives the deletion and the tombstone is merely purged).
+        timestamp: marker_timestamp,
         ttl: None,
         liveness_expires_at_seconds: None,
         local_deletion_time: None,
@@ -282,300 +408,16 @@ pub(crate) fn merged_row_shadowed_by_partition(
         max_data_cell_timestamp,
         max_data_cell_expires_at: None,
         has_live_forever_data_cell: false,
+        // Threaded from the caller, NOT hardcoded (#3094 round 4): a cell tombstone
+        // strictly newer than `markedForDeleteAt` DOES survive the merge —
+        // `apply_partition_shadowing`'s `is_data` test is BY NAME — and
+        // `ReadShadow::filter_live` reports its PRESENCE from the same skip that drops
+        // it. Single- and multi-generation reads therefore agree on this shape.
+        has_deleted_data_cell,
     };
     header.shadowed_by_deletion_at(deleted_at)
 }
 
 #[cfg(test)]
-mod tests {
-    //! Issue #1741: deterministic pins for the read-side shadowing primitives.
-    //! These exercise the exact partition-deletion, range-tombstone-FSM, and TTL
-    //! decision logic the emit paths call, independent of on-disk fixtures.
-    use super::*;
-
-    /// Build a `RowHeader` describing a live row whose max data timestamp is
-    /// `write_ts_micros` and (optionally) whose row-liveness TTL expires at
-    /// `liveness_expiry_secs`. `has_live_forever` marks a no-TTL data cell.
-    fn row(
-        write_ts_micros: i64,
-        liveness_expiry_secs: Option<i64>,
-        max_cell_expires_at_secs: Option<i64>,
-        has_live_forever: bool,
-    ) -> RowHeader {
-        RowHeader {
-            timestamp: Some(write_ts_micros),
-            ttl: None,
-            liveness_expires_at_seconds: liveness_expiry_secs,
-            local_deletion_time: None,
-            marked_for_delete_at: None,
-            header_size: 0,
-            row_size_vint_len: 0,
-            missing_columns_bitmap: None,
-            max_data_cell_timestamp: Some(write_ts_micros),
-            max_data_cell_expires_at: max_cell_expires_at_secs,
-            has_live_forever_data_cell: has_live_forever,
-        }
-    }
-
-    #[test]
-    fn partition_deletion_shadows_only_older_or_equal_rows() {
-        // Partition tombstone at markedForDeleteAt = 2000µs.
-        let shadow = PartitionShadow::open(0, Some((2000, 12345)), vec![]);
-        // Row older than the deletion → hidden.
-        assert!(shadow.row_hidden(&row(1000, None, None, false), &[]));
-        // Row exactly at the deletion → hidden (deletes: ts <= markedForDeleteAt).
-        assert!(shadow.row_hidden(&row(2000, None, None, false), &[]));
-        // Row strictly newer than the deletion → survives.
-        assert!(!shadow.row_hidden(&row(3000, None, None, false), &[]));
-    }
-
-    #[test]
-    fn row_with_no_authoritative_timestamp_is_not_shadowed() {
-        // A row with no liveness and no decodable data cell (max_ts = i64::MIN, e.g.
-        // an empty/undecodable row) must NOT be hidden — we only shadow when
-        // authoritative metadata proves the row predates the deletion (no guessing).
-        let mut h = row(0, None, None, false);
-        h.timestamp = None;
-        h.max_data_cell_timestamp = None;
-        let shadow = PartitionShadow::open(0, Some((8_000_000_000_000_000_000, 12345)), vec![]);
-        assert!(!shadow.row_hidden(&h, &[]));
-    }
-
-    #[test]
-    fn live_partition_hides_nothing() {
-        let shadow = PartitionShadow::open(0, None, vec![]);
-        assert!(!shadow.row_hidden(&row(1000, None, None, false), &[]));
-    }
-
-    #[test]
-    fn range_tombstone_fsm_shadows_covered_older_rows() {
-        // ASC single clustering column (no reversal). INCL_START at ck=[10],
-        // INCL_END at ck=[20], deleted_at = 5000µs.
-        let mut shadow = PartitionShadow::open(0, None, vec![false]);
-        shadow
-            .feed_range_marker(vec![Value::Integer(10)], 1, 5000, None)
-            .unwrap();
-        assert!(shadow.needs_clustering());
-        // Covered older row (ck=15, ts < deleted_at) → hidden.
-        assert!(shadow.row_hidden(&row(1000, None, None, false), &[Value::Integer(15)]));
-        // Covered but strictly-newer row (ts > deleted_at) → survives.
-        assert!(!shadow.row_hidden(&row(9000, None, None, false), &[Value::Integer(15)]));
-        // Row before the open start bound (ck=5) → not covered → survives.
-        assert!(!shadow.row_hidden(&row(1000, None, None, false), &[Value::Integer(5)]));
-        // Close the range; subsequent rows are no longer covered.
-        shadow
-            .feed_range_marker(vec![Value::Integer(20)], 6, 5000, None)
-            .unwrap();
-        assert!(!shadow.needs_clustering());
-        assert!(!shadow.row_hidden(&row(1000, None, None, false), &[Value::Integer(15)]));
-    }
-
-    #[test]
-    fn range_tombstone_coverage_honors_desc_clustering_order() {
-        // Table with `CLUSTERING ORDER BY (ck DESC)`: physical storage order is the
-        // REVERSE of value order, so an INCL_START marker at ck=[10] opens a range
-        // that physically covers rows with ck < 10 (which come AFTER [10] on disk),
-        // NOT rows with ck > 10. deleted_at = 5000µs; rows below are older (ts=1000).
-        //
-        // Revert-verify: with the pre-fix raw `partial_cmp` (ignoring DESC), the
-        // coverage sides invert — ck=15 is wrongly hidden and ck=5 wrongly kept.
-        let mut shadow = PartitionShadow::open(0, None, vec![true]);
-        shadow
-            .feed_range_marker(vec![Value::Integer(10)], 1, 5000, None)
-            .unwrap();
-        assert!(shadow.needs_clustering());
-        // ck=5 is physically AFTER the DESC start [10] → covered → hidden.
-        assert!(shadow.row_hidden(&row(1000, None, None, false), &[Value::Integer(5)]));
-        // ck=15 is physically BEFORE the DESC start [10] → not covered → survives.
-        assert!(!shadow.row_hidden(&row(1000, None, None, false), &[Value::Integer(15)]));
-        // Exact inclusive boundary ck=10 → covered → hidden.
-        assert!(shadow.row_hidden(&row(1000, None, None, false), &[Value::Integer(10)]));
-        // A covered DESC row that is strictly newer than the deletion still survives.
-        assert!(!shadow.row_hidden(&row(9000, None, None, false), &[Value::Integer(5)]));
-    }
-
-    #[test]
-    fn range_tombstone_boundary_reopens_new_range() {
-        // EXCL_END_INCL_START_BOUNDARY (kind 2) closes the prev range and opens a new
-        // one (inclusive start) using the secondary deletion time.
-        let mut shadow = PartitionShadow::open(0, None, vec![false]);
-        shadow
-            .feed_range_marker(vec![Value::Integer(10)], 2, 5000, Some(6000))
-            .unwrap();
-        // New range starts inclusive at ck=10 with deleted_at=6000.
-        assert!(shadow.row_hidden(&row(5500, None, None, false), &[Value::Integer(12)]));
-        assert!(!shadow.row_hidden(&row(7000, None, None, false), &[Value::Integer(12)]));
-    }
-
-    #[test]
-    fn unknown_bound_kind_is_rejected() {
-        let mut shadow = PartitionShadow::open(0, None, vec![false]);
-        assert!(shadow
-            .feed_range_marker(vec![Value::Integer(1)], 9, 1, None)
-            .is_err());
-    }
-
-    #[test]
-    fn ttl_expired_row_is_hidden_and_live_ttl_is_kept() {
-        // now = 1_000_000 epoch-seconds.
-        let now = 1_000_000i64;
-        let shadow = PartitionShadow::open(now, None, vec![]);
-        // Row-liveness TTL already expired, no live-forever cell → hidden.
-        assert!(shadow.row_hidden(&row(10, Some(500_000), None, false), &[]));
-        // Row-liveness TTL still in the future → visible.
-        assert!(!shadow.row_hidden(&row(10, Some(2_000_000), None, false), &[]));
-        // Expired liveness but a live-forever data cell (later UPDATE) → visible.
-        assert!(!shadow.row_hidden(&row(10, Some(500_000), None, true), &[]));
-        // Expired liveness, only expiring cells whose max expiry is still future → visible.
-        assert!(!shadow.row_hidden(&row(10, Some(500_000), Some(2_000_000), false), &[]));
-        // Row with NO TTL anywhere is never TTL-hidden.
-        assert!(!shadow.row_hidden(&row(10, None, None, false), &[]));
-    }
-
-    /// Issue #1741 (Finding 1, test 2 / per-cell drop decision): a data cell is
-    /// dropped when its effective write ts is shadowed by the covering deletion OR it
-    /// is TTL-expired at `now`; a cell without an authoritative write ts is never
-    /// shadowed. The per-cell TTL branch is pinned here (not end-to-end) because the
-    /// writer stamps an expiring cell's `localDeletionTime` as `now + ttl`, so a
-    /// PAST-expired per-cell TTL is not synthesizable via a fresh writer flush; the
-    /// row-data cell loop calls exactly this function.
-    ///
-    /// Revert-verify: dropping the `expired` term makes the TTL assertions FALSE;
-    /// dropping the `shadowed` term makes the shadow assertions FALSE.
-    #[test]
-    fn per_cell_shadow_and_ttl_drop_decision() {
-        use super::PartitionShadow as PS;
-        let now = 1_000_000i64;
-        // Shadow: cell older/equal to the covering deletion (2000µs) → dropped.
-        assert!(PS::cell_shadowed_or_expired(
-            Some(2000),
-            now,
-            Some(1000),
-            None
-        ));
-        assert!(PS::cell_shadowed_or_expired(
-            Some(2000),
-            now,
-            Some(2000),
-            None
-        ));
-        // Shadow: cell strictly newer than the deletion → kept.
-        assert!(!PS::cell_shadowed_or_expired(
-            Some(2000),
-            now,
-            Some(3000),
-            None
-        ));
-        // No covering deletion → never shadowed.
-        assert!(!PS::cell_shadowed_or_expired(None, now, Some(1), None));
-        // No authoritative write ts → never shadowed (no-heuristics).
-        assert!(!PS::cell_shadowed_or_expired(Some(2000), now, None, None));
-        // TTL: expiry at/BEFORE now → expired → dropped (regardless of covering).
-        assert!(PS::cell_shadowed_or_expired(
-            None,
-            now,
-            Some(9999),
-            Some(now)
-        ));
-        assert!(PS::cell_shadowed_or_expired(
-            None,
-            now,
-            Some(9999),
-            Some(now - 1)
-        ));
-        // TTL: expiry in the future → kept.
-        assert!(!PS::cell_shadowed_or_expired(
-            None,
-            now,
-            Some(9999),
-            Some(now + 1)
-        ));
-    }
-
-    /// Issue #1741 (Finding 1, test 3): a row whose non-key data cells are ALL
-    /// shadowed/expired and which has no live pk-liveness marker must be hidden. The
-    /// row-data cell loop drops the stale cells from the emitted map BUT still folds
-    /// their write ts / expiry into the row aggregate, so `row_hidden` recognises the
-    /// reduced row as fully shadowed/expired. A single decoded-then-dropped cell
-    /// leaves `max_data_cell_timestamp = Some(<= covering)` (NOT the `i64::MIN`
-    /// sentinel a truncated no-cell parse leaves), which is exactly the signal that
-    /// distinguishes a genuinely reduced row (hidden) from a truncated parse (kept).
-    ///
-    /// Revert-verify: if a shadowed/expired cell were EXCLUDED from the aggregate
-    /// (leaving `None`), `max_write_timestamp` would be the `i64::MIN` sentinel and
-    /// the first two assertions (hidden) would become FALSE.
-    #[test]
-    fn reduced_to_primary_key_row_is_hidden() {
-        // (a) All non-key cells shadowed by a partition tombstone (2000µs), no live
-        //     marker: the dropped cells' ts folds to max_data_cell_timestamp <= 2000,
-        //     so row_hidden shadows the whole row.
-        let shadow = PartitionShadow::open(0, Some((2000, 12345)), vec![]);
-        let mut h = row(0, None, None, false);
-        h.timestamp = None; // UPDATE-only row (no pk-liveness marker)
-        h.max_data_cell_timestamp = Some(1500); // newest shadowed cell, <= 2000
-        assert!(shadow.row_hidden(&h, &[]));
-
-        // (b) All non-key cells TTL-expired (no covering deletion), no live marker:
-        //     the dropped cells fold an expiry in the past and are NOT live-forever.
-        let now = 1_000_000i64;
-        let shadow_ttl = PartitionShadow::open(now, None, vec![]);
-        let mut h2 = row(0, None, Some(now - 1), false);
-        h2.timestamp = None;
-        assert!(shadow_ttl.row_hidden(&h2, &[]));
-
-        // (c) A truncated / marker-only parse (NO decoded cells → sentinel) is NOT
-        //     hidden — it is a partial read, not a genuinely reduced row.
-        let mut h3 = row(0, None, None, false);
-        h3.timestamp = None;
-        h3.max_data_cell_timestamp = None;
-        assert!(!shadow.row_hidden(&h3, &[]));
-
-        // (d) A surviving non-key cell newer than the deletion keeps the row visible.
-        let mut h4 = row(0, None, None, false);
-        h4.timestamp = None;
-        h4.max_data_cell_timestamp = Some(3000); // > 2000
-        assert!(!shadow.row_hidden(&h4, &[]));
-    }
-
-    /// Issue #1849: the multi-generation read path's row-level partition-shadow
-    /// reuse. A merged row is hidden by a partition tombstone iff its max DATA-cell
-    /// write ts is `<= markedForDeleteAt`; a row with no data-cell ts (`None`) or no
-    /// cover is NEVER hidden. Revert-verify: dropping the `<=` (using `<`) makes the
-    /// exact-boundary assertion FALSE; returning `true` on `None` cover would hide
-    /// live rows.
-    #[cfg(feature = "write-support")]
-    #[test]
-    fn merged_row_partition_shadow_reuse() {
-        use super::merged_row_shadowed_by_partition as f;
-        // No cover → never hidden.
-        assert!(!f(None, Some(1_000)));
-        // Cover but no data-cell ts (pk-only / undecodable) → never hidden.
-        assert!(!f(Some(2_000), None));
-        // Data older than the deletion → hidden.
-        assert!(f(Some(2_000), Some(1_000)));
-        // Data exactly at the deletion → hidden (deletes: ts <= markedForDeleteAt).
-        assert!(f(Some(2_000), Some(2_000)));
-        // Data strictly newer than the deletion → survives.
-        assert!(!f(Some(2_000), Some(3_000)));
-    }
-
-    /// Issue #1741 (Finding 2, header-level consequence): a row whose aggregated
-    /// max data-cell timestamp (which now folds in a non-frozen collection's newest
-    /// `max_element_writetime`) exceeds the covering deletion survives, even when
-    /// the row-liveness `timestamp` predates the deletion. The end-to-end fold is
-    /// pinned by `collection_element_newer_than_partition_tombstone_survives`; this
-    /// pins the decision the fold feeds.
-    #[test]
-    fn newer_collection_element_ts_keeps_row_visible() {
-        let shadow = PartitionShadow::open(0, Some((2000, 12345)), vec![]);
-        // Row marker older than the deletion (1000 <= 2000) but a folded element ts
-        // (3000) newer than it → NOT shadowed → visible.
-        let mut h = row(1000, None, None, false);
-        h.max_data_cell_timestamp = Some(3000);
-        assert!(!shadow.row_hidden(&h, &[]));
-        // Without the fold (max cell ts == row ts == 1000 <= 2000) → shadowed.
-        let mut h_prefold = row(1000, None, None, false);
-        h_prefold.max_data_cell_timestamp = Some(1000);
-        assert!(shadow.row_hidden(&h_prefold, &[]));
-    }
-}
+#[path = "partition_shadow_tests.rs"]
+mod tests;

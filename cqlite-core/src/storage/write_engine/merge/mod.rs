@@ -2791,8 +2791,8 @@ impl KWayMerger {
     /// partition deletion win an equal-ts tie, like #498/#933). Clustering-key
     /// pseudo-cells are retained whenever any data cell survives so the row keeps
     /// its key columns for read-back. A row whose every data cell is shadowed AND
-    /// whose row-marker liveness is `<= pmfda` produces nothing (the re-emitted
-    /// partition tombstone covers it). A row tombstone / coexisting row deletion /
+    /// whose row-marker liveness is `<= pmfda` (judged on the MARKER's own
+    /// timestamp, #3094) produces nothing. A row tombstone / coexisting row deletion /
     /// complex deletion older-or-equal to the floor is subsumed; a strictly-newer
     /// one survives. `None` floor (`max_partition_deletion == None`) is the common
     /// case and returns the entry untouched.
@@ -2869,9 +2869,9 @@ impl KWayMerger {
                     .collect();
                 let has_data = kept.iter().any(is_data);
 
-                // The row-marker liveness survives the partition floor only if its
-                // own timestamp is strictly newer.
-                let marker_live = entry.timestamp > pmfda;
+                // #3094: judged on the MARKER's OWN ts — see `marker_survives_floor`.
+                let liveness = entry.row_liveness;
+                let marker_live = liveness.marker_survives_floor(entry.timestamp, pmfda);
 
                 if !has_data && !marker_live {
                     if let Some((dt, ldt)) = surviving_row_del {
