@@ -63,21 +63,24 @@
 # agent-gate summary headers so neither can ever be pasted as the other:
 #
 #   ==== ROBOREV REVIEW SUMMARY ====
-#   repo: / branch: / base: / head-sha: / reviewed-sha: / job: / census: / tokens:
-#   push-assert: / census-check: / sha-assert: / vacuity-tier1: / vacuity-tier2:
-#   roborev-exit: / log:
+#   repo: / branch: / base: / head-sha: / reviewed-sha: / job: / model: / census:
+#   tokens: / push-assert: / census-check: / sha-assert: / vacuity-tier1:
+#   prompt-content: / vacuity-tier2: / findings: / roborev-exit: / log:
 #   RESULT: PASS|FAIL|NOTHING-TO-REVIEW
 #
 # Per-check values are PASS | FAIL | SKIP | UNAVAILABLE (a FAIL may carry a
 # parenthesised reason). `census:` is `<N> files, +<A>/-<D>`; `tokens:` is
-# `input=<n> cached=<n> output=<n>` or `UNAVAILABLE`.
+# `input=<n> cached=<n> output=<n>` or `UNAVAILABLE`. `findings:` is
+# `NONE | PRESENT [(<n>)] | UNKNOWN`. `roborev-exit:` is `PASS | FINDINGS (exit N) |
+# ERROR (exit N) | SKIP` — FINDINGS means the reviewer RAN and reported findings (a
+# GENUINE review to triage and fix), ERROR means the reviewer itself failed.
 #
 # EXIT CODES (exactly three outcomes plus a usage code)
 #   0  PASS               — reviewed, sha verified, no vacuity signal.
 #   1  FAIL               — any failed check: push-assert, census-check, sha-assert,
-#                           vacuity-tier1, vacuity-tier2, or roborev-exit (the
-#                           reviewer process's own status). Each names itself under
-#                           its own key. NOT reportable as "roborev clean".
+#                           vacuity-tier1, prompt-content, vacuity-tier2, or
+#                           roborev-exit (FINDINGS or ERROR). Each names itself
+#                           under its own key. NOT reportable as "roborev clean".
 #   3  NOTHING-TO-REVIEW  — the census is genuinely empty; NO review was enqueued.
 #                           DISTINCT from PASS by exit code alone, so a caller can
 #                           never mistake "nothing to review" for "reviewed clean".
@@ -91,49 +94,62 @@
 # LIVE WORKTREE PROBE (documented, NOT gate-run — needs network + a live reviewer)
 # -------------------------------------------------------------------------------
 # The hermetic regression check (scripts/tests/test_roborev_review_guard.sh) pins
-# every guard against a stub reviewer. Only this probe can prove the REAL external
-# binary honours the explicit `--repo` from inside a worktree. Procedure:
-#
-#   1. Confirm the ROOT checkout sits on `main` (that is what makes trigger 1
-#      reproducible):  git -C <root> rev-parse --abbrev-ref HEAD   # => main
-#   2. From a real issue worktree on its own branch, with its commit PUSHED:
-#        cd /path/to/cqlite-wt/issue-<N>
-#        scripts/flow/roborev-review.sh --agent codex --model gpt-5.6-sol
-#   3. Read ONLY the emitted summary block and assert:
-#        head-sha:      == the WORKTREE branch HEAD (git rev-parse HEAD)
-#        reviewed-sha:  == head-sha (prefix match)     <-- the probe's point
-#        reviewed-sha:  != `git rev-parse origin/main` <-- trigger 1 defeated
-#        sha-assert:    PASS
-#        census:        matches `git diff --numstat origin/main...HEAD`
-#        tokens:        input/cached/output all above the thresholds below
-#        RESULT:        PASS   (exit 0)
-#      A `reviewed-sha` equal to `origin/main` means the explicit-repo invocation
-#      did NOT defeat the root-checkout resolution and the wrapper must be fixed
-#      before any verdict from it is trusted.
-#   4. Record the observed head-sha / reviewed-sha / job / census / tokens in the
-#      PR body as the live evidence. Re-run after any roborev version bump.
+# every guard against a stub reviewer. Only the live probe can show the REAL binary
+# honours the explicit `--repo` from inside a worktree. Its full procedure and the
+# summary-block values it must produce are in the `--help` output (the wrapper's
+# usage documentation) — run `roborev-review.sh --help` rather than duplicating it
+# here, so the two can never drift apart.
 set -euo pipefail
 
-# --- Tier-2 vacuity thresholds (named constants; measured evidence below) -------
+# --- Vacuity signals: two DETERMINISTIC checks, then ADVISORY token accounting --
+#
+# The load-bearing checks are threshold-free and judged against our own locally
+# computed census:
+#   * verdict-text-vs-census (tier 1) catches "the reviewer GOT the diff and
+#     DISCARDED it" — the code-free-diff trigger T3.
+#   * prompt-content catches "the reviewer NEVER GOT the diff" — triggers T1/T2 and
+#     any future variant of them, since it reads the prompt actually sent and looks
+#     for our census's own file paths in it.
+# Together they cover both halves deterministically. Token accounting is a THIRD,
+# ADVISORY-corroborating signal that can only ever fail CLOSED.
 #
 # MEASURED EVIDENCE (issue #2964, real jobs on the fleet):
-#   GENUINE reviews:  398k-649k input, 314k-554k cached, 5.0k-6.3k output,
-#                     2m25s-2m45s wall  (jobs 4652 / 4654 / 4656)
-#   VACUOUS baseline: 18,700-18,801 input, 0 cached, 53-56 output, 8s wall
-#                     (jobs 4658 / 4659 — reproducible)
-#   KNOWN-EMPTY diff: 17,333 input, 21 output  (job 4651)
+#   VACUOUS baseline:  17,333-18,801 input, 0 cached, 21-56 output, 8s wall
+#                      (jobs 4651 / 4658 / 4659 — reproducible)
+#   GENUINE, SMALL:    67,387 input, 43,520 cached, 2,232 output, 68s wall
+#                      (job 1 on this branch: 20 files, +2279)
+#   GENUINE, LARGE:    398k-649k input, 314k-554k cached, 5.0k-6.3k output
+#                      (jobs 4652 / 4654 / 4656)
 #
-# So 50,000 input sits ~2.7x above the vacuous ceiling (18,801) and ~8x below the
-# genuine floor (398k); 200 output sits ~3.6x above the vacuous ceiling (56) and
-# ~25x below the genuine floor (5,067). Wall time is deliberately NOT asserted
-# (host-dependent — #2642).
+# INPUT FLOOR is anchored on the VACUOUS CEILING, not the genuine band: the
+# genuine band scales with diff size, so a floor derived from it false-FAILs small
+# genuine reviews. 25,000 sits ~1.33x above the highest observed vacuous run
+# (18,801) and ~2.7x below the smallest observed genuine run (67,387). The
+# original 50,000 was only 1.35x below that 67k run — one modestly smaller genuine
+# diff away from an always-red guard, which is the failure mode that gets a guard
+# bypassed (cf. the mirror-ref push-assert regression).
 #
-# Tier 2 is CORROBORATING and can ONLY fail closed: it can never manufacture a
-# PASS, never relax a tier-1 FAIL, and its unavailability is stamped visibly
-# rather than skipped silently. Recalibrating means editing these two constants
-# and this evidence block together.
-ROBOREV_VACUITY_MIN_INPUT_TOKENS=50000
-ROBOREV_VACUITY_MIN_OUTPUT_TOKENS=200
+# OUTPUT TOKENS ARE ADVISORY ONLY — NEVER a FAIL condition. A genuine CLEAN review
+# and a vacuous one emit nearly IDENTICAL output: both are "No issues found." plus
+# a one-sentence summary (~20-60 tokens; the vacuous baseline measured 21-56). The
+# counts therefore COLLIDE, and any output floor would false-FAIL precisely the
+# case we care most about — a real review that is legitimately clean. Reported for
+# the operator, never asserted.
+#
+# CACHED == 0 stays a FAIL condition. It is the most false-positive-prone term
+# (a genuinely cold cache can report 0), retained deliberately in the fail-closed
+# direction — acceptable now that prompt-content gives a deterministic primary
+# check, so tier 2 is no longer the only thing standing between us and a vacuous
+# pass. Wall time is deliberately NOT asserted (host-dependent — #2642).
+ROBOREV_VACUITY_MIN_INPUT_TOKENS=25000
+# Advisory only (see above): reported next to the observed value, never a FAIL.
+ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS=200
+
+# prompt-content check: how many census paths to look for in the prompt actually
+# sent to the reviewer. All of them when the census is small; an evenly sampled
+# subset (still ALL of which must be present) when it is large, so the check stays
+# bounded on a 500-file diff.
+PROMPT_CONTENT_MAX_PATHS_CHECKED=40
 
 # Code-free (non-code) census classification. A census consisting ENTIRELY of
 # these extensions/prefixes is structurally discarded by roborev (trigger 3), so
@@ -255,18 +271,25 @@ mkdir -p "$(dirname "$LOG")"
 # --- summary state -------------------------------------------------------------
 REVIEWED_SHA="-"
 JOB="-"
+MODEL_LINE="-"
 CENSUS="-"
 TOKENS="UNAVAILABLE"
 PUSH_ASSERT="SKIP"
 CENSUS_CHECK="SKIP"
 SHA_ASSERT="SKIP"
 TIER1="SKIP"
+PROMPT_CONTENT="SKIP"
 TIER2="SKIP"
-# The reviewer process's OWN exit status, under its own greppable key: a caller
-# retains only the block and reads it by grepping the per-check keys, so without
-# this key a non-zero roborev exit shows up as every check reading PASS beside a
-# RESULT: FAIL — the one failure cause a grep-based reader could not attribute.
-# SKIP until the process actually runs (a push/census/PATH failure exits earlier).
+FINDINGS="SKIP"
+# The reviewer process's OWN status, under its own greppable key: a caller retains
+# only the block and reads it by grepping the per-check keys, so without this key a
+# non-zero roborev exit shows up as every check reading PASS beside a RESULT: FAIL
+# — the one failure cause a grep-based reader could not attribute. Values:
+#   PASS            process exited 0
+#   FINDINGS (exit N)  the review RAN and reported findings — a GENUINE review whose
+#                   findings must be triaged, NOT a reviewer malfunction
+#   ERROR (exit N)  the reviewer itself failed (status not done / no review body)
+#   SKIP            a push/census/PATH failure exited before the process ran
 ROBOREV_EXIT="SKIP"
 RESULT="FAIL"
 DETAILS=()
@@ -280,13 +303,16 @@ emit_summary() {
   printf 'head-sha: %s\n' "${HEAD_SHA:--}"
   printf 'reviewed-sha: %s\n' "$REVIEWED_SHA"
   printf 'job: %s\n' "$JOB"
+  printf 'model: %s\n' "$MODEL_LINE"
   printf 'census: %s\n' "$CENSUS"
   printf 'tokens: %s\n' "$TOKENS"
   printf 'push-assert: %s\n' "$PUSH_ASSERT"
   printf 'census-check: %s\n' "$CENSUS_CHECK"
   printf 'sha-assert: %s\n' "$SHA_ASSERT"
   printf 'vacuity-tier1: %s\n' "$TIER1"
+  printf 'prompt-content: %s\n' "$PROMPT_CONTENT"
   printf 'vacuity-tier2: %s\n' "$TIER2"
+  printf 'findings: %s\n' "$FINDINGS"
   printf 'roborev-exit: %s\n' "$ROBOREV_EXIT"
   printf 'log: %s\n' "$LOG"
   printf 'RESULT: %s\n' "$RESULT"
@@ -346,56 +372,56 @@ fi
 REMOTE=$(git -C "$REPO" config --get "branch.$BRANCH.remote" 2>/dev/null || printf '')
 [ -n "$REMOTE" ] || REMOTE=origin
 
-# FAST PATH (optional, saves a remote round trip): a mirror ref that EXISTS and
-# already equals HEAD is proof enough. Its ABSENCE proves nothing — fall through.
-MIRROR_SHA=$(git -C "$REPO" rev-parse --verify --quiet "refs/remotes/$REMOTE/$BRANCH" || printf '')
-if [ "$MIRROR_SHA" = "$HEAD_SHA" ]; then
-  PUSH_ASSERT="PASS"
-else
-  set +e
-  LS_OUT=$(git -C "$REPO" ls-remote --heads "$REMOTE" "$BRANCH" 2>&1)
-  LS_RC=$?
-  set -e
-  if [ "$LS_RC" -ne 0 ]; then
-    # NOT "never pushed" — a misattributed cause sends people to fix the wrong
-    # thing. `git` and `gh` are SEPARATE credential paths (#2942): an
-    # authenticated `gh` with an unwired git fails every remote read here.
-    PUSH_ASSERT="FAIL (ls-remote failed: infra/auth)"
-    DETAILS+=("ERROR: push-assert: 'git ls-remote --heads $REMOTE $BRANCH' exited $LS_RC, so the remote state is UNKNOWN. This is an INFRA/AUTH condition, NOT evidence that the branch is unpushed — do not 'fix' it by pushing. git and gh are separate credential paths (#2942): check network reachability and git's own credentials ('gh auth setup-git'). git said:")
+# NO MIRROR-REF FAST PATH. An earlier revision short-circuited when
+# `refs/remotes/<remote>/<branch>` happened to equal HEAD; that is unsound, and the
+# reviewer flagged it. A CACHED mirror ref survives a force-push or an outright
+# DELETION of the remote branch, so it can equal HEAD while the remote no longer
+# has the commit at all — the wrapper would then enqueue a review for a commit the
+# reviewer cannot fetch, which is precisely a vacuous-review setup. `ls-remote`
+# costs ~1s, and not trusting local proxies is this wrapper's whole point.
+set +e
+LS_OUT=$(git -C "$REPO" ls-remote --heads "$REMOTE" "$BRANCH" 2>&1)
+LS_RC=$?
+set -e
+if [ "$LS_RC" -ne 0 ]; then
+  # NOT "never pushed" — a misattributed cause sends people to fix the wrong
+  # thing. `git` and `gh` are SEPARATE credential paths (#2942): an
+  # authenticated `gh` with an unwired git fails every remote read here.
+  PUSH_ASSERT="FAIL (ls-remote failed: infra/auth)"
+  DETAILS+=("ERROR: push-assert: 'git ls-remote --heads $REMOTE $BRANCH' exited $LS_RC, so the remote state is UNKNOWN. This is an INFRA/AUTH condition, NOT evidence that the branch is unpushed — do not 'fix' it by pushing. git and gh are separate credential paths (#2942): check network reachability and git's own credentials ('gh auth setup-git'). git said:")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    DETAILS+=("  $line")
+  done <<<"$LS_OUT"
+  DETAILS+=("ERROR: push-assert: failing closed on an unknown remote state. No review was enqueued.")
+  finish FAIL 1
+fi
+REMOTE_SHA=$(printf '%s\n' "$LS_OUT" | awk -v ref="refs/heads/$BRANCH" '$2 == ref { print $1; exit }')
+if [ -z "$REMOTE_SHA" ]; then
+  PUSH_ASSERT="FAIL (branch absent on remote $REMOTE)"
+  DETAILS+=("ERROR: push-assert: the remote '$REMOTE' has no branch '$BRANCH' (authoritative: git ls-remote) — this branch has never been pushed. The reviewer can only see what the remote has, so an unpushed branch is itself an empty-diff cause. Push it, then re-run. No review was enqueued.")
+  finish FAIL 1
+fi
+if [ "$REMOTE_SHA" != "$HEAD_SHA" ]; then
+  PUSH_ASSERT="FAIL (unpushed commits)"
+  DETAILS+=("ERROR: push-assert: $REMOTE/$BRANCH is at $REMOTE_SHA (authoritative: git ls-remote) but local HEAD is $HEAD_SHA.")
+  unpushed=""
+  if git -C "$REPO" cat-file -e "${REMOTE_SHA}^{commit}" 2>/dev/null; then
+    unpushed=$(git -C "$REPO" log --oneline "$REMOTE_SHA..HEAD" 2>/dev/null || printf '')
+  fi
+  if [ -n "$unpushed" ]; then
+    DETAILS+=("ERROR: push-assert: unpushed commit(s):")
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       DETAILS+=("  $line")
-    done <<<"$LS_OUT"
-    DETAILS+=("ERROR: push-assert: failing closed on an unknown remote state. No review was enqueued.")
-    finish FAIL 1
+    done <<<"$unpushed"
+  else
+    DETAILS+=("ERROR: push-assert: local HEAD is not a descendant of the remote tip (or the remote tip is not present locally) — the branch has diverged; reconcile before reviewing.")
   fi
-  REMOTE_SHA=$(printf '%s\n' "$LS_OUT" | awk -v ref="refs/heads/$BRANCH" '$2 == ref { print $1; exit }')
-  if [ -z "$REMOTE_SHA" ]; then
-    PUSH_ASSERT="FAIL (branch absent on remote $REMOTE)"
-    DETAILS+=("ERROR: push-assert: the remote '$REMOTE' has no branch '$BRANCH' (authoritative: git ls-remote) — this branch has never been pushed. The reviewer can only see what the remote has, so an unpushed branch is itself an empty-diff cause. Push it, then re-run. No review was enqueued.")
-    finish FAIL 1
-  fi
-  if [ "$REMOTE_SHA" != "$HEAD_SHA" ]; then
-    PUSH_ASSERT="FAIL (unpushed commits)"
-    DETAILS+=("ERROR: push-assert: $REMOTE/$BRANCH is at $REMOTE_SHA (authoritative: git ls-remote) but local HEAD is $HEAD_SHA.")
-    unpushed=""
-    if git -C "$REPO" cat-file -e "${REMOTE_SHA}^{commit}" 2>/dev/null; then
-      unpushed=$(git -C "$REPO" log --oneline "$REMOTE_SHA..HEAD" 2>/dev/null || printf '')
-    fi
-    if [ -n "$unpushed" ]; then
-      DETAILS+=("ERROR: push-assert: unpushed commit(s):")
-      while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        DETAILS+=("  $line")
-      done <<<"$unpushed"
-    else
-      DETAILS+=("ERROR: push-assert: local HEAD is not a descendant of the remote tip (or the remote tip is not present locally) — the branch has diverged; reconcile before reviewing.")
-    fi
-    DETAILS+=("ERROR: push-assert: push the branch before reviewing. No review was enqueued.")
-    finish FAIL 1
-  fi
-  PUSH_ASSERT="PASS"
+  DETAILS+=("ERROR: push-assert: push the branch before reviewing. No review was enqueued.")
+  finish FAIL 1
 fi
+PUSH_ASSERT="PASS"
 
 # --- step 3: the local diff census — THE ORACLE -------------------------------
 # `<base>` (default `origin/main`) IS a local mirror ref, so it can be stale or —
@@ -410,16 +436,23 @@ if ! BASE_SHA=$(git -C "$REPO" rev-parse --verify --quiet "${BASE}^{commit}"); t
   finish FAIL 1
 fi
 
-NUMSTAT=$(git -C "$REPO" diff --numstat "${BASE}...HEAD" 2>/dev/null || printf '')
+# `--no-renames` on purpose: with rename detection a renamed file is reported as the
+# composite path `dir/{old => new}.rs`, which is not a real path and so can never be
+# found in the reviewer's prompt (the prompt-content check below matches literal
+# paths). Splitting a rename into its delete+add pair keeps every census path a real
+# one, at the cost of counting it as two files.
+NUMSTAT=$(git -C "$REPO" diff --numstat --no-renames "${BASE}...HEAD" 2>/dev/null || printf '')
 census_files=0
 census_added=0
 census_deleted=0
 census_code_free=1
+census_paths=()
 while IFS=$'\t' read -r add del path; do
   [ -n "${path:-}" ] || continue
   if [ "$add" = "-" ]; then add=0; fi
   if [ "$del" = "-" ]; then del=0; fi
   census_files=$((census_files + 1))
+  census_paths+=("$path")
   census_added=$((census_added + add))
   census_deleted=$((census_deleted + del))
   # Code-free classification: the file must match a documented non-code extension
@@ -464,37 +497,200 @@ roborev review "$HEAD_SHA" \
   --wait >"$LOG" 2>&1
 REVIEW_RC=$?
 set -e
-if [ "$REVIEW_RC" -eq 0 ]; then
-  ROBOREV_EXIT="PASS"
-else
-  ROBOREV_EXIT="FAIL (exit $REVIEW_RC)"
-fi
 
-# --- step 5: reviewed-SHA assert (AC2) ----------------------------------------
+# --- step 5: reviewed-SHA assert (AC2) — STRUCTURED data is the oracle ---------
+#
+# The job record's `git_ref` field (from `roborev show <job> --json`, falling back
+# to `roborev list --json`) is a FULL 40-char sha recorded by roborev itself, so it
+# is compared full-sha to full-sha. The stdout `Enqueued job <N> for <sha>` line is
+# now a CROSS-CHECK ONLY: parsing a tool's prose is the weaker source whenever a
+# structured one exists. Its ABSENCE is still a hard failure — it carries the job
+# id every structured query needs, so without it nothing is verifiable.
 ANNOUNCE=$(grep -oiE 'enqueued job [0-9]+ for [0-9a-fA-F]{4,40}' "$LOG" | tail -1 || printf '')
+ANNOUNCED_SHA=""
+announce_ok=0
 if [ -z "$ANNOUNCE" ]; then
   SHA_ASSERT="FAIL (no parseable enqueue announcement)"
-  DETAILS+=("ERROR: sha-assert: the transcript contains no parseable 'Enqueued job <N> for <sha>' line, so the reviewed sha is UNVERIFIABLE. That is a failure, never a skipped check. Transcript: $LOG")
+  DETAILS+=("ERROR: sha-assert: the transcript contains no parseable 'Enqueued job <N> for <sha>' line, so neither the job record nor the reviewed sha can be located and the review is UNVERIFIABLE. That is a failure, never a skipped check. Transcript: $LOG")
 else
+  announce_ok=1
   JOB=$(printf '%s' "$ANNOUNCE" | sed -E 's/^[Ee]nqueued [Jj]ob ([0-9]+).*/\1/')
-  REVIEWED_SHA=$(printf '%s' "$ANNOUNCE" | sed -E 's/.*[Ff]or ([0-9a-fA-F]+)$/\1/' | tr 'A-F' 'a-f')
-  if [ "${HEAD_SHA:0:${#REVIEWED_SHA}}" = "$REVIEWED_SHA" ] \
-    || [ "${REVIEWED_SHA:0:${#HEAD_SHA}}" = "$HEAD_SHA" ]; then
-    SHA_ASSERT="PASS"
-  else
-    SHA_ASSERT="FAIL (reviewed-sha does not match head-sha)"
-    DETAILS+=("ERROR: sha-assert: announced reviewed-sha '$REVIEWED_SHA' does not prefix-match branch HEAD '$HEAD_SHA' (job $JOB).")
-    if [ "${BASE_SHA:0:${#REVIEWED_SHA}}" = "$REVIEWED_SHA" ]; then
-      DETAILS+=("ERROR: sha-assert: the announced sha EQUALS the base ref '$BASE' ($BASE_SHA) — NO branch change was reviewed. That equality is the signature of the worktree bare-'--branch' resolution trigger, where the review resolves against the ROOT checkout instead of this worktree.")
+  ANNOUNCED_SHA=$(printf '%s' "$ANNOUNCE" | sed -E 's/.*[Ff]or ([0-9a-fA-F]+)$/\1/' | tr 'A-F' 'a-f')
+fi
+
+# --- structured job facts ------------------------------------------------------
+# Diagnostics live beside the transcript, both named in the block via `log:`.
+FACTS_FILE="$LOG.facts"
+PROMPT_FILE="$LOG.prompt"
+: >"$FACTS_FILE"
+: >"$PROMPT_FILE"
+
+# extract_job_facts <job> <json> <facts-out> <prompt-out>
+# Emits `key=value` lines for the fields the asserts need, and writes the prompt
+# actually sent to the reviewer to its own file. `token_usage` is a JSON-ENCODED
+# STRING in the real payload (it must be decoded TWICE), and the output field is
+# `total_output_tokens`; both `total_output_tokens` and `output_tokens` are accepted
+# so a rename in either direction keeps working. Absence stays UNAVAILABLE.
+extract_job_facts() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  [ -n "$2" ] || return 1
+  printf '%s' "$2" | python3 -c '
+import json, sys
+want, facts_path, prompt_path = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+def objects(node):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            for found in objects(value):
+                yield found
+    elif isinstance(node, list):
+        for value in node:
+            for found in objects(value):
+                yield found
+
+job = None
+for obj in objects(data):
+    for key in ("id", "job_id", "job"):
+        if key in obj and str(obj[key]) == want:
+            job = obj
+            break
+    if job is not None:
+        break
+if job is None:
+    # A `show --json` payload may be the single job with no id echoed back.
+    for obj in objects(data):
+        if "git_ref" in obj or "token_usage" in obj:
+            job = obj
+            break
+if job is None:
+    sys.exit(1)
+
+usage = job.get("token_usage")
+if isinstance(usage, str):
+    try:
+        usage = json.loads(usage)
+    except Exception:
+        usage = None
+if not isinstance(usage, dict):
+    usage = {}
+
+def number(*keys):
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            return str(int(value))
+        if isinstance(value, str):
+            text = value.strip()
+            if text.lstrip("-").isdigit():
+                return str(int(text))
+    return ""
+
+lines = []
+for key in ("git_ref", "status", "model", "requested_model"):
+    value = job.get(key)
+    if isinstance(value, str) and value.strip():
+        lines.append(key + "=" + " ".join(value.split()))
+lines.append("input_tokens=" + number("input_tokens"))
+lines.append("cached_input_tokens=" + number("cached_input_tokens", "cached_tokens"))
+lines.append("output_tokens=" + number("total_output_tokens", "output_tokens"))
+with open(facts_path, "w") as handle:
+    handle.write("\n".join(lines) + "\n")
+
+prompt = job.get("prompt")
+if isinstance(prompt, str) and prompt.strip():
+    with open(prompt_path, "w") as handle:
+        handle.write(prompt)
+' "$1" "$3" "$4" 2>/dev/null
+}
+
+fact() { sed -n "s/^$1=//p" "$FACTS_FILE" | head -1; }
+
+if [ "$announce_ok" -eq 1 ]; then
+  SHOW_JSON=$(roborev show "$JOB" --json 2>/dev/null || printf '')
+  if ! extract_job_facts "$JOB" "$SHOW_JSON" "$FACTS_FILE" "$PROMPT_FILE"; then
+    LIST_JSON=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '')
+    extract_job_facts "$JOB" "$LIST_JSON" "$FACTS_FILE" "$PROMPT_FILE" || true
+  fi
+  # The prompt may not be carried in the JSON payload; ask for it directly.
+  if [ ! -s "$PROMPT_FILE" ]; then
+    roborev show "$JOB" --prompt >"$PROMPT_FILE" 2>/dev/null || : >"$PROMPT_FILE"
+  fi
+fi
+
+JOB_GIT_REF=$(fact git_ref | tr 'A-F' 'a-f')
+JOB_STATUS=$(fact status)
+JOB_MODEL=$(fact model)
+JOB_REQUESTED_MODEL=$(fact requested_model)
+TOK_IN=$(fact input_tokens)
+TOK_CACHED=$(fact cached_input_tokens)
+TOK_OUT=$(fact output_tokens)
+
+if [ "$announce_ok" -eq 1 ]; then
+  if [ -n "$JOB_GIT_REF" ]; then
+    REVIEWED_SHA="$JOB_GIT_REF"
+    if [ "$JOB_GIT_REF" = "$HEAD_SHA" ]; then
+      SHA_ASSERT="PASS"
     else
-      DETAILS+=("ERROR: sha-assert: the announced sha matches NEITHER endpoint (head '$HEAD_SHA', base '$BASE' $BASE_SHA) — the signature of the non-sanctioned two-positional commit-range form.")
+      SHA_ASSERT="FAIL (reviewed-sha does not match head-sha)"
+      DETAILS+=("ERROR: sha-assert: the job record's git_ref '$JOB_GIT_REF' does not equal branch HEAD '$HEAD_SHA' (job $JOB).")
+      if [ "$JOB_GIT_REF" = "$BASE_SHA" ]; then
+        DETAILS+=("ERROR: sha-assert: the reviewed sha EQUALS the base ref '$BASE' ($BASE_SHA) — NO branch change was reviewed. That equality is the signature of the worktree bare-'--branch' resolution trigger, where the review resolves against the ROOT checkout instead of this worktree.")
+      else
+        DETAILS+=("ERROR: sha-assert: the reviewed sha matches NEITHER endpoint (head '$HEAD_SHA', base '$BASE' $BASE_SHA) — the signature of the non-sanctioned two-positional commit-range form.")
+      fi
+    fi
+    if [ -n "$ANNOUNCED_SHA" ] && [ "${JOB_GIT_REF:0:${#ANNOUNCED_SHA}}" != "$ANNOUNCED_SHA" ]; then
+      DETAILS+=("NOTICE: sha-assert cross-check: stdout announced '$ANNOUNCED_SHA' but the job record's git_ref is '$JOB_GIT_REF'. The structured field is the oracle; the disagreement is recorded because it means one of the two surfaces is misreporting.")
+    fi
+  else
+    # No structured git_ref: fall back to the weaker stdout parse, and SAY SO.
+    REVIEWED_SHA="$ANNOUNCED_SHA"
+    DETAILS+=("NOTICE: sha-assert: the job record's structured 'git_ref' was unavailable, so the assert fell back to the sha announced on stdout (a prefix parse of the tool's prose — the weaker source).")
+    if [ "${HEAD_SHA:0:${#ANNOUNCED_SHA}}" = "$ANNOUNCED_SHA" ] \
+      || [ "${ANNOUNCED_SHA:0:${#HEAD_SHA}}" = "$HEAD_SHA" ]; then
+      SHA_ASSERT="PASS"
+    else
+      SHA_ASSERT="FAIL (reviewed-sha does not match head-sha)"
+      DETAILS+=("ERROR: sha-assert: announced reviewed-sha '$ANNOUNCED_SHA' does not prefix-match branch HEAD '$HEAD_SHA' (job $JOB).")
+      if [ "${BASE_SHA:0:${#ANNOUNCED_SHA}}" = "$ANNOUNCED_SHA" ]; then
+        DETAILS+=("ERROR: sha-assert: the announced sha EQUALS the base ref '$BASE' ($BASE_SHA) — NO branch change was reviewed. That equality is the signature of the worktree bare-'--branch' resolution trigger.")
+      else
+        DETAILS+=("ERROR: sha-assert: the announced sha matches NEITHER endpoint (head '$HEAD_SHA', base '$BASE' $BASE_SHA) — the signature of the non-sanctioned two-positional commit-range form.")
+      fi
     fi
   fi
 fi
 
-# --- step 6 tier 1: PRIMARY, deterministic, threshold-free (AC1) --------------
-# The census is known NON-empty here (an empty one exited above), so a reviewer
-# claiming there are no code changes contradicts a locally measured fact.
+# --- model-substitution check (review integrity) ------------------------------
+# A NOTICE, not a FAIL, deliberately: roborev legitimately canonicalises/resolves a
+# model alias, so a mismatch is not by itself evidence of a bad review — and an
+# always-red guard is the failure mode that gets guards bypassed. Review integrity
+# is carried by the deterministic checks (sha-assert, tier 1, prompt-content); this
+# line exists so a substitution can never happen SILENTLY.
+if [ -n "$JOB_MODEL" ]; then
+  if [ -n "$JOB_REQUESTED_MODEL" ] && [ "$JOB_REQUESTED_MODEL" != "$JOB_MODEL" ]; then
+    MODEL_LINE="$JOB_MODEL (SUBSTITUTED — requested '$JOB_REQUESTED_MODEL')"
+    DETAILS+=("NOTICE: model: the job ran '$JOB_MODEL' but '$JOB_REQUESTED_MODEL' was requested — a MODEL SUBSTITUTION. Recorded as a loud NOTICE rather than a FAIL (an alias resolution is legitimate), but confirm the substituted model is one you accept for a merge-gating review.")
+  else
+    MODEL_LINE="$JOB_MODEL"
+  fi
+else
+  MODEL_LINE="$MODEL (UNCONFIRMED — no model field in the job record)"
+fi
+
+# --- step 6 tier 1: DETERMINISTIC — verdict text vs the census -----------------
+# Catches "the reviewer GOT the diff and DISCARDED it" (trigger T3). The census is
+# known NON-empty here (an empty one exited above), so a reviewer claiming there are
+# no code changes contradicts a fact we measured ourselves.
 if grep -qiE 'contains no code changes to review|no code changes' "$LOG"; then
   TIER1="FAIL (vacuous verdict vs non-empty census)"
   DETAILS+=("ERROR: vacuity-tier1: the review output claims there are NO CODE CHANGES to review, but the locally computed census is NON-EMPTY: $CENSUS (${BASE}...HEAD). The reviewer's claim contradicts a fact we measured ourselves, so the change was demonstrably NOT reviewed and this run is NOT reportable as \"roborev clean\".")
@@ -505,79 +701,63 @@ else
   TIER1="PASS"
 fi
 
-# --- step 6 tier 2: CORROBORATING token accounting; can only FAIL CLOSED ------
-json_int() { # json_int <json> <key> -> integer or empty
-  local v=""
-  v=$(printf '%s' "$1" | tr -d ' \t\n' | grep -oE "\"$2\":-?[0-9]+" | head -1 | sed -E 's/.*://') || v=""
-  printf '%s' "$v"
-}
-
-has_token_fields() { # has_token_fields <json>
-  [ -n "$1" ] || return 1
-  printf '%s' "$1" | tr -d ' \t\n' | grep -q '"input_tokens":'
-}
-
-select_job_object() { # select_job_object <list-json> <job-id> -> object json or empty
-  command -v python3 >/dev/null 2>&1 || { printf ''; return 0; }
-  printf '%s' "$1" | python3 -c '
-import json, sys
-want = sys.argv[1]
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-def walk(node):
-    if isinstance(node, dict):
-        for key in ("id", "job_id", "job"):
-            if key in node and str(node[key]) == want:
-                print(json.dumps(node))
-                return True
-        for value in node.values():
-            if walk(value):
-                return True
-    elif isinstance(node, list):
-        for value in node:
-            if walk(value):
-                return True
-    return False
-walk(data)
-' "$2" 2>/dev/null || printf ''
-}
-
-TOKEN_JSON=""
-if [ "$JOB" != "-" ]; then
-  TOKEN_JSON=$(roborev show "$JOB" --json 2>/dev/null || printf '')
-  if ! has_token_fields "$TOKEN_JSON"; then
-    LIST_JSON=$(roborev list --json --limit 50 --repo "$REPO" 2>/dev/null || printf '')
-    TOKEN_JSON=$(select_job_object "$LIST_JSON" "$JOB")
+# --- step 6 prompt-content: DETERMINISTIC — did the reviewer GET the diff? -----
+# The complement of tier 1, and the strongest available check: it reads the prompt
+# actually sent to the agent and looks for OUR census's own file paths in it. If the
+# changed paths are absent, the reviewer demonstrably never received the diff — the
+# T1/T2 family and any future variant of it — threshold-free, judged against our own
+# authoritative census, never against the reviewer's prose.
+# A whitespace-only prompt file is a RETRIEVAL FAILURE, not evidence that the paths
+# are absent — treat it as UNAVAILABLE (degraded signal), never as a FAIL, or an
+# unsupported roborev build would false-FAIL every run.
+prompt_bytes=$(tr -d '[:space:]' <"$PROMPT_FILE" | wc -c | tr -d '[:space:]')
+if [ "${prompt_bytes:-0}" -eq 0 ]; then
+  PROMPT_CONTENT="UNAVAILABLE"
+  DETAILS+=("NOTICE: prompt-content: UNAVAILABLE — the prompt sent to the reviewer could not be retrieved for job '$JOB' (tried the job record's 'prompt' field, then 'roborev show <job> --prompt'). DEGRADED SIGNAL, never a silent skip: tier 1 still governs and this can never upgrade a FAIL to a PASS.")
+else
+  checked_paths=()
+  census_total=${#census_paths[@]}
+  if [ "$census_total" -le "$PROMPT_CONTENT_MAX_PATHS_CHECKED" ]; then
+    checked_paths=("${census_paths[@]}")
+  else
+    sample_step=$(((census_total + PROMPT_CONTENT_MAX_PATHS_CHECKED - 1) / PROMPT_CONTENT_MAX_PATHS_CHECKED))
+    sample_index=0
+    while [ "$sample_index" -lt "$census_total" ]; do
+      checked_paths+=("${census_paths[$sample_index]}")
+      sample_index=$((sample_index + sample_step))
+    done
+  fi
+  missing_paths=()
+  for census_path in "${checked_paths[@]}"; do
+    grep -Fq -- "$census_path" "$PROMPT_FILE" || missing_paths+=("$census_path")
+  done
+  if [ "${#missing_paths[@]}" -gt 0 ]; then
+    PROMPT_CONTENT="FAIL (${#missing_paths[@]}/${#checked_paths[@]} census paths absent from the prompt)"
+    DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} checked census paths do NOT appear in the prompt actually sent to the reviewer, so the reviewer never received this diff. The census is authoritative ($CENSUS for ${BASE}...HEAD); a prompt that does not mention its files cannot have reviewed them. Missing (first 10):")
+    printed=0
+    for census_path in "${missing_paths[@]}"; do
+      [ "$printed" -lt 10 ] || break
+      DETAILS+=("  $census_path")
+      printed=$((printed + 1))
+    done
+  else
+    PROMPT_CONTENT="PASS (${#checked_paths[@]}/$census_total census paths present)"
   fi
 fi
 
-TOK_IN=""
-TOK_CACHED=""
-TOK_OUT=""
-if has_token_fields "$TOKEN_JSON" \
-  && ! printf '%s' "$TOKEN_JSON" | tr -d ' \t\n' | grep -q '"has_token_data":false'; then
-  TOK_IN=$(json_int "$TOKEN_JSON" input_tokens)
-  TOK_CACHED=$(json_int "$TOKEN_JSON" cached_input_tokens)
-  TOK_OUT=$(json_int "$TOKEN_JSON" output_tokens)
-fi
-
-if [ -z "$TOK_IN" ] || [ -z "$TOK_CACHED" ] || [ -z "$TOK_OUT" ]; then
+# --- step 6 tier 2: ADVISORY-corroborating token accounting; FAILs CLOSED only --
+if [ -z "$TOK_IN" ] || [ -z "$TOK_CACHED" ]; then
   TOKENS="UNAVAILABLE"
   TIER2="UNAVAILABLE"
-  DETAILS+=("NOTICE: vacuity-tier2: UNAVAILABLE — token accounting for job '$JOB' could not be obtained from the installed roborev build (tried 'roborev show <job> --json', then 'roborev list --json'). This is a DEGRADED-SIGNAL notice, never a silent skip: tier 1 still governs, and an unavailable tier 2 can never turn a FAIL into a PASS.")
+  DETAILS+=("NOTICE: vacuity-tier2: UNAVAILABLE — token accounting for job '$JOB' could not be obtained from the installed roborev build (tried 'roborev show <job> --json', then 'roborev list --json'). DEGRADED SIGNAL, never a silent skip: the two deterministic checks still govern, and an unavailable tier 2 can never turn a FAIL into a PASS.")
 else
-  TOKENS="input=$TOK_IN cached=$TOK_CACHED output=$TOK_OUT"
+  TOKENS="input=$TOK_IN cached=$TOK_CACHED output=${TOK_OUT:-unknown}"
   tier2_trips=()
   if [ "$TOK_IN" -lt "$ROBOREV_VACUITY_MIN_INPUT_TOKENS" ]; then
-    tier2_trips+=("observed input=$TOK_IN < ROBOREV_VACUITY_MIN_INPUT_TOKENS=$ROBOREV_VACUITY_MIN_INPUT_TOKENS")
+    tier2_trips+=("observed input=$TOK_IN < ROBOREV_VACUITY_MIN_INPUT_TOKENS=$ROBOREV_VACUITY_MIN_INPUT_TOKENS (highest observed VACUOUS run: 18801)")
   fi
   if [ "$TOK_CACHED" -eq 0 ]; then
-    tier2_trips+=("observed cached=$TOK_CACHED == 0 (a genuine review reports a non-zero cached-input count; the recorded vacuous baseline reports exactly 0)")
-  fi
-  if [ "$TOK_OUT" -lt "$ROBOREV_VACUITY_MIN_OUTPUT_TOKENS" ]; then
-    tier2_trips+=("observed output=$TOK_OUT < ROBOREV_VACUITY_MIN_OUTPUT_TOKENS=$ROBOREV_VACUITY_MIN_OUTPUT_TOKENS")
+    tier2_trips+=("observed cached=$TOK_CACHED == 0 (every observed vacuous run reports exactly 0; the most false-positive-prone term, retained fail-closed)")
   fi
   if [ "${#tier2_trips[@]}" -gt 0 ]; then
     TIER2="FAIL (vacuous token signature)"
@@ -588,19 +768,53 @@ else
   else
     TIER2="PASS"
   fi
+  # ADVISORY ONLY — never a FAIL condition (see the constants block: a genuine CLEAN
+  # review and a vacuous one emit near-identical output token counts, so any floor
+  # here would false-FAIL a real review that is legitimately clean).
+  if [ -n "$TOK_OUT" ] && [ "$TOK_OUT" -lt "$ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS" ]; then
+    DETAILS+=("NOTICE: vacuity-tier2 advisory (NOT a failure condition): observed output=$TOK_OUT < ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS=$ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS. Output tokens cannot discriminate a genuine CLEAN review from a vacuous one (both emit roughly 20-60), so this is reported and never asserted.")
+  fi
 fi
 
-# --- step 7: verdict ----------------------------------------------------------
-if [ "$REVIEW_RC" -ne 0 ]; then
-  DETAILS+=("ERROR: 'roborev review' exited $REVIEW_RC. A non-zero reviewer exit is a fail-closed FAIL — read the transcript at $LOG before treating anything as clean.")
+# --- step 7: findings vs reviewer error, then the verdict ----------------------
+# roborev exits NON-ZERO when the review REPORTS FINDINGS. That is a NORMAL,
+# GENUINE outcome and must never be misreported as a reviewer malfunction: an agent
+# told the reviewer broke will retry or bypass instead of FIXING THE FINDINGS. The
+# structured `status` field is the authority for which of the two happened.
+findings_count=$({ grep -oiE '\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$LOG" || true; } | wc -l | tr -d '[:space:]')
+if [ "$REVIEW_RC" -eq 0 ]; then
+  ROBOREV_EXIT="PASS"
+  FINDINGS="NONE"
+else
+  review_ran=0
+  if [ -n "$JOB_STATUS" ]; then
+    case "$JOB_STATUS" in done) review_ran=1 ;; esac
+  elif grep -qiE 'no issues found|summary:|\[(critical|high|medium|low)\]|(critical|high|medium|low): ' "$LOG"; then
+    review_ran=1
+  fi
+  if [ "$review_ran" -eq 1 ]; then
+    ROBOREV_EXIT="FINDINGS (exit $REVIEW_RC)"
+    if [ "${findings_count:-0}" -gt 0 ]; then
+      FINDINGS="PRESENT ($findings_count)"
+    else
+      FINDINGS="PRESENT"
+    fi
+    DETAILS+=("ERROR: roborev-exit: FINDINGS — 'roborev review' exited $REVIEW_RC because the review REPORTED FINDINGS. The review is GENUINE (job status '${JOB_STATUS:-unknown}') and the reviewer did NOT malfunction: do not retry it and do not bypass it. TRIAGE AND FIX the findings in the transcript ($LOG), then push and re-review. RESULT is FAIL because a review with open findings is not \"roborev clean\".")
+  else
+    ROBOREV_EXIT="ERROR (exit $REVIEW_RC)"
+    FINDINGS="UNKNOWN"
+    DETAILS+=("ERROR: roborev-exit: ERROR — 'roborev review' exited $REVIEW_RC and the job did not complete (status '${JOB_STATUS:-unavailable}', no parseable review body in the transcript). The REVIEWER itself failed, so nothing was certified — this is an infra condition, not a findings outcome: check the daemon ('roborev status'), the agent's credentials, and the transcript at $LOG.")
+  fi
 fi
+# The findings COUNT is best-effort (it counts severity markers in the transcript);
+# the PRESENT/NONE distinction is the load-bearing part.
 
-# `roborev-exit` participates in the SAME per-check scan as every other key, so a
-# non-zero reviewer exit forces RESULT: FAIL through the documented path rather
-# than a special case bolted on beside it.
+# Every per-check key participates in ONE scan. A key fails the run when its value
+# starts with FAIL, FINDINGS or ERROR; PASS/SKIP/UNAVAILABLE never do.
 failed=0
-for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$SHA_ASSERT" "$TIER1" "$TIER2" "$ROBOREV_EXIT"; do
-  case "$verdict" in FAIL*) failed=1 ;; esac
+for verdict in "$PUSH_ASSERT" "$CENSUS_CHECK" "$SHA_ASSERT" "$TIER1" \
+  "$PROMPT_CONTENT" "$TIER2" "$ROBOREV_EXIT"; do
+  case "$verdict" in FAIL*|FINDINGS*|ERROR*) failed=1 ;; esac
 done
 
 if [ "$failed" -eq 0 ]; then
