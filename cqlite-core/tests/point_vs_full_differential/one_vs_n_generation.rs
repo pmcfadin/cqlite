@@ -46,6 +46,25 @@
 //! **Cassandra-written bytes**. The Cassandra-oracle counterpart for the absolute
 //! result set stays `query_semantics_oracle_parity.rs` / the physical goldens.
 //!
+//! ## LIMITATION — this axis exercises structural merge, NOT precedence
+//!
+//! Because the N copies are BYTE-IDENTICAL, every cross-generation comparison the
+//! merge kernel makes is a **TIE**: same key, same write timestamp, same value,
+//! same `markedForDeleteAt`. So the axis covers the merge kernel's *structural*
+//! behaviour — cross-generation interleaving and ordering, deduplication of equal
+//! keys, static-row injection, application of a partition/range/row tombstone that
+//! is present in every generation, and the seek path for a partition that must
+//! return nothing — but it can NOT cover **last-write-wins precedence**: no case
+//! here has a NEWER generation whose tombstone must shadow an OLDER generation's
+//! live row, nor a newer cell that must win over an older one, because a tie never
+//! forces a winner. That asymmetric class is covered by the multi-generation
+//! fixtures of the parent lane (`test_tomb.resurrection_gc0`,
+//! `resurrection_gc_positive`, `skipped_partition_delete` — real 2-generation
+//! Cassandra writes with `T_GEN2` deletes over `T_GEN1` rows) and by the
+//! Cassandra-oracle lanes; extending THIS axis to precedence would require
+//! synthesizing non-identical generations, which reintroduces the write path as a
+//! second variable (#3042).
+//!
 //! ## Contracts
 //!
 //!   * **Pinned `now`** (`CQLITE_TTL_NOW_OVERRIDE_SECS`, `PINNED_NOW_SECS`) — never
@@ -65,12 +84,14 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serial_test::serial;
+
 use cqlite_core::config::ReadPathMode;
 use cqlite_core::query::result::QueryRow;
 
 use super::{
-    discover_pk_ints, normalize, open_db, schema_path, skip_or_fail, sstables_root, table_has_data,
-    MAX_KEYS_PER_TABLE, PINNED_NOW_SECS, TTL_NOW_OVERRIDE_ENV,
+    discover_pk_ints, normalize, open_db, pin_read_clock, schema_path, skip_or_fail, sstables_root,
+    table_has_data, MAX_KEYS_PER_TABLE,
 };
 
 /// Sidecar files that live next to the real SSTable components in the committed
@@ -230,7 +251,27 @@ fn materialize(
     })
 }
 
-/// Locate the single `<table>-<uuid>` directory for `table` under `<root>/<keyspace>`.
+/// True when `dir` holds at least one `*-Data.db`, i.e. it really carries an SSTable
+/// generation. The committed corpus keeps SUPERSEDED `<table>-<uuid>` directories for
+/// some tables that hold only sidecars (`*-Data.db.jsonl`, `*-Statistics.db.txt`) plus
+/// a `Digest.crc32`/`TOC.txt` — no `Data.db`, hence no rows and no generation. This is
+/// the same authoritative "has fetched binaries" test the parent lane's
+/// `table_has_data` applies, not a content guess.
+fn dir_has_data_component(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok()).any(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.ends_with("-Data.db"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Locate the single `<table>-<uuid>` directory for `table` under `<root>/<keyspace>`
+/// that actually carries SSTable components.
 fn table_dir(root: &Path, keyspace: &str, table: &str) -> Result<PathBuf, String> {
     let ks_dir = root.join(keyspace);
     let entries =
@@ -244,17 +285,18 @@ fn table_dir(root: &Path, keyspace: &str, table: &str) -> Result<PathBuf, String
                     .and_then(|n| n.to_str())
                     .map(|n| n.starts_with(&format!("{table}-")))
                     .unwrap_or(false)
+                && dir_has_data_component(p)
         })
         .collect();
     found.sort();
     match found.len() {
         1 => Ok(found.remove(0)),
         0 => Err(format!(
-            "no directory for {keyspace}.{table} under {}",
+            "no directory carrying a *-Data.db for {keyspace}.{table} under {}",
             ks_dir.display()
         )),
         n => Err(format!(
-            "{n} directories for {keyspace}.{table} under {} — ambiguous",
+            "{n} directories carrying a *-Data.db for {keyspace}.{table} under {} — ambiguous",
             ks_dir.display()
         )),
     }
@@ -268,6 +310,13 @@ fn table_dir(root: &Path, keyspace: &str, table: &str) -> Result<PathBuf, String
 /// falling back to the full dumps (a bare `assert_eq!` on two large vectors is
 /// unreadable, and this lane exists to make a FUTURE regression diagnosable).
 const MAX_REPORTED_DIFFS: usize = 5;
+
+/// The token every 1-vs-N *divergence* error carries. The expected-divergence pin
+/// (`one_vs_n_generation_quarantine_still_diverges`) matches on it to tell a REAL
+/// divergence apart from a harness/fixture error (absent fixture, generation drift,
+/// an anti-vacuity row-count mismatch) — otherwise "any `Err`" would let a broken
+/// harness masquerade as "the quarantined defect is still there".
+const DIVERGENCE_MARKER: &str = "DIVERGENCE";
 
 /// Compare a 1-generation result set against the N-generation result set for the
 /// same logical content: rows, values AND order must match. `Ok(rows)` = agreed
@@ -306,7 +355,7 @@ fn compare_generation_axis(
     }
 
     Err(format!(
-        "1-gen-vs-{generations}-gen DIVERGENCE [{label}] for `{query}`: the SAME bytes read at 1 \
+        "1-gen-vs-{generations}-gen {DIVERGENCE_MARKER} [{label}] for `{query}`: the SAME bytes read at 1 \
          generation returned {} row(s) but at {generations} generations returned {} row(s) / \
          different values or order. A SELECT's answer must not depend on the table's compaction \
          state (issue #3129).\n{diffs}  1-gen result: {one:#?}\n  {generations}-gen result: {many:#?}",
@@ -333,14 +382,34 @@ struct GenerationCase {
     expected_full_scan_rows: usize,
     /// EXACT number of distinct partition keys the 1-gen full scan must discover.
     expected_partitions: usize,
+    /// Partition keys probed IN ADDITION to the ones the 1-gen full scan discovers,
+    /// every one of which must reconcile to ZERO rows (covered by a partition
+    /// tombstone, or absent from the fixture entirely).
+    ///
+    /// Why the field must exist (issue #3129 AC2): discovery runs
+    /// `SELECT <pk> FROM …`, so a partition that returns NOTHING yields no key and is
+    /// therefore never probed — leaving the N-gen seek path
+    /// (`seek_merge_generations_for_read`) untested for exactly the shape #3129 is
+    /// about, a POINT query against a deleted partition that must return no rows and
+    /// instead produced a phantom row. Mirrors the parent lane's `probe_keys`.
+    ///
+    /// Enforced at run time: each key must be ABSENT from the discovered set and must
+    /// return 0 rows on BOTH arms under BOTH read-path modes — so a fixture change
+    /// that makes such a key live (or a probe that silently matched live rows) fails
+    /// loudly instead of degrading into an ordinary probe.
+    empty_probe_keys: &'static [i64],
     /// Reconciliation classes covered (asserted exhaustive by the driver).
     divergence_classes: &'static [&'static str],
     /// `Some(reason)` = this shape ALREADY diverges on `main` for a defect tracked
     /// elsewhere, so it is NOT part of the enforcing lane (it would make the axis
     /// permanently red and hide a future regression in the shapes that do agree).
-    /// Such a case runs only in the `#[ignore]`d
-    /// `one_vs_n_generation_known_divergences` repro below. When the cited defect
-    /// is fixed, set this to `None` — do NOT delete the case.
+    /// The reason MUST cite the tracking issue (`#<number>`, asserted) — a waiver
+    /// with no cited issue is not a waiver.
+    ///
+    /// Such a case is instead pinned by `one_vs_n_generation_quarantine_still_diverges`
+    /// below, which asserts it STILL diverges and fails with instructions the moment
+    /// it stops — so the quarantine releases itself. When that fires, set this to
+    /// `None` (moving the case into the enforcing lane) — do NOT delete the case.
     known_divergent: Option<&'static str>,
 }
 
@@ -360,7 +429,35 @@ const CORPUS: &[GenerationCase] = &[
         n_generations: 2,
         expected_full_scan_rows: 3,
         expected_partitions: 2,
-        divergence_classes: &["tombstone"],
+        // id=1 keeps live rows (ck=2,3) while ck=1 is row-deleted, so no partition of
+        // this fixture is empty; 999 is absent from it entirely, which probes the
+        // N-gen seek path's MISS branch (no generation holds the key).
+        empty_probe_keys: &[999],
+        divergence_classes: &["tombstone", "absent_partition"],
+        known_divergent: None,
+    },
+    // Partition TOMBSTONES covering whole partitions, in the SAME single generation
+    // as the live ones (5 partitions × 3 rows, `DELETE WHERE pk=2` and `pk=4`). This
+    // is the #3129 shape itself: at N generations every copy carries both the
+    // partition tombstone and the rows it covers, so the cross-generation merge must
+    // still return NOTHING for pk=2/pk=4 — and a POINT read of those keys goes
+    // through `seek_merge_generations_for_read`, which no discovered (live) key can
+    // reach because discovery never yields a fully-deleted partition.
+    GenerationCase {
+        keyspace: "test_deltas",
+        table: "partition_tombstones",
+        schema: "deltas.cql",
+        pk_column: "pk",
+        n_generations: 3,
+        expected_full_scan_rows: 9,
+        expected_partitions: 3,
+        empty_probe_keys: &[2, 4, 999],
+        divergence_classes: &[
+            "partition_tombstone",
+            "deleted_partition",
+            "absent_partition",
+            "compressed",
+        ],
         known_divergent: None,
     },
     // Range tombstone spanning generations, compacted to one SSTable: the range
@@ -373,7 +470,8 @@ const CORPUS: &[GenerationCase] = &[
         n_generations: 2,
         expected_full_scan_rows: 2,
         expected_partitions: 1,
-        divergence_classes: &["range_tombstone"],
+        empty_probe_keys: &[999],
+        divergence_classes: &["range_tombstone", "absent_partition"],
         known_divergent: None,
     },
     // WIDE range tombstone (~3k live rows): the axis at scale, and the only case
@@ -387,7 +485,8 @@ const CORPUS: &[GenerationCase] = &[
         n_generations: 2,
         expected_full_scan_rows: 2987,
         expected_partitions: 1,
-        divergence_classes: &["range_tombstone", "wide_partition"],
+        empty_probe_keys: &[999],
+        divergence_classes: &["range_tombstone", "wide_partition", "absent_partition"],
         known_divergent: None,
     },
     // BTI (`da`) WIDE partitions (3 × 300 rows, LZ4-compressed): the
@@ -402,13 +501,16 @@ const CORPUS: &[GenerationCase] = &[
         n_generations: 2,
         expected_full_scan_rows: 900,
         expected_partitions: 3,
-        divergence_classes: &["bti", "wide_partition", "compressed"],
+        empty_probe_keys: &[999],
+        divergence_classes: &["bti", "wide_partition", "compressed", "absent_partition"],
         known_divergent: None,
     },
     // ---------------------------------------------------------------------
     // Known-divergent shapes: real 1-vs-N divergences this axis FOUND on
-    // `main` (not seeded). They are excluded from the enforcing lane so it can
-    // guard the agreeing shapes, and run in the `#[ignore]`d repro below.
+    // `main` (not seeded). They are excluded from the ENFORCING lane so it can
+    // guard the agreeing shapes, and are instead PINNED as expected divergences by
+    // `one_vs_n_generation_quarantine_still_diverges` below, which fails the moment
+    // one of them starts agreeing (so the quarantine releases itself).
     // ---------------------------------------------------------------------
     // TTL localDeletionTime boundary: at 2 generations the two TTL-EXPIRED rows
     // (ck=1, ck=2) come back as all-null phantom rows — the #3129 phantom shape
@@ -422,11 +524,15 @@ const CORPUS: &[GenerationCase] = &[
         n_generations: 2,
         expected_full_scan_rows: 1,
         expected_partitions: 1,
+        empty_probe_keys: &[],
         divergence_classes: &["ttl"],
         known_divergent: Some(
-            "2-gen arm resurrects TTL-expired rows ck=1,ck=2 as all-null phantom rows \
-             (the #3129 multi-gen liveness defect, reached via expiry); expected to clear \
-             with the #3129 fix (PR #3122) — flip to None then",
+            "issue #2189: the 2-gen arm resurrects the TTL-EXPIRED rows ck=1,ck=2 as all-null \
+             phantom rows. Root cause is that `MergeEntry` carries no primary-key row-liveness \
+             marker, so the multi-generation kernel has no row-liveness rule at all and cannot \
+             tell an expired row from a live one. NOT fixed by the #3129 partition-shadow work \
+             (PR #3122): `merged_row_shadowed_by_partition` short-circuits on `cover = None` and \
+             this fixture has no partition deletion. Flip to None when #2189 lands",
         ),
     },
     // TTL expired-vs-live: same class as `gc_before_boundary`, on the
@@ -439,10 +545,14 @@ const CORPUS: &[GenerationCase] = &[
         n_generations: 3,
         expected_full_scan_rows: 1,
         expected_partitions: 1,
+        empty_probe_keys: &[],
         divergence_classes: &["ttl"],
         known_divergent: Some(
-            "3-gen arm returns 2 rows where the 1-gen arm returns 1 — same multi-gen \
-             liveness defect as gc_before_boundary (#3129); flip to None with its fix",
+            "issue #2189: the 3-gen arm returns 2 rows where the 1-gen arm returns 1 — the same \
+             missing multi-generation row-liveness rule as gc_before_boundary (`MergeEntry` has no \
+             primary-key liveness marker), reached through an already-expired TTL cell rather than \
+             a cell tombstone. Not addressed by PR #3122 (no partition deletion here, so the \
+             partition-shadow decision is `cover = None`). Flip to None when #2189 lands",
         ),
     },
     // Live static cell surviving adjacent row/cell/range tombstones: a DIFFERENT
@@ -458,11 +568,14 @@ const CORPUS: &[GenerationCase] = &[
         n_generations: 2,
         expected_full_scan_rows: 3,
         expected_partitions: 1,
+        empty_probe_keys: &[],
         divergence_classes: &["static", "tombstone"],
         known_divergent: Some(
-            "N-gen arm emits an extra static-only row and drops the static column from \
-             the clustering rows (multi-gen static injection; #3121-adjacent, needs its \
-             own issue) — flip to None with that fix",
+            "issue #3168: the multi-generation read path never injects static cells, so the N-gen \
+             arm emits an extra static-only row AND drops `stat_col` from every clustering row, \
+             where the 1-gen arm merges the static cell into each row (Cassandra's behaviour). \
+             Distinct mechanism from the TTL family (#2189) and adjacent to #3121, which fixed the \
+             SINGLE-generation static/row-tombstone order. Flip to None when #3168 lands",
         ),
     },
 ];
@@ -570,7 +683,23 @@ async fn run_case(case: &GenerationCase) -> Result<bool, String> {
     // more partitions than the cap yields a TRUNCATED probe set — in which case the
     // per-partition rows cannot be expected to account for the whole scan.
     let truncated = discovered.len() >= MAX_KEYS_PER_TABLE;
-    let keys: Vec<i64> = discovered;
+    // Merge the discovered (live) keys with the case's declared EMPTY probe keys —
+    // partitions that return nothing and so can never be discovered (issue #3129
+    // AC2: a POINT read of a deleted partition is the shape that produced a phantom
+    // row, and it reaches `seek_merge_generations_for_read` on the N-gen arm).
+    // Deduplicated + sorted so the probe order is deterministic.
+    let mut key_set: BTreeMap<i64, ()> = discovered.iter().map(|k| (*k, ())).collect();
+    for k in case.empty_probe_keys {
+        if discovered.contains(k) {
+            return Err(format!(
+                "case {label}: key {k} is declared an EMPTY probe key (must reconcile to zero \
+                 rows) but the 1-gen full scan DISCOVERED it as live — the fixture changed, so \
+                 the deleted/absent-partition probe no longer probes an empty partition"
+            ));
+        }
+        key_set.insert(*k, ());
+    }
+    let keys: Vec<i64> = key_set.into_keys().collect();
 
     let one_point = open_db(&one.root, &schema, case.keyspace, ReadPathMode::Point).await?;
     let many_point = open_db(&many.root, &schema, case.keyspace, ReadPathMode::Point).await?;
@@ -594,11 +723,25 @@ async fn run_case(case: &GenerationCase) -> Result<bool, String> {
                 many.generations,
             )
             .await?;
+            // An empty probe key must return NOTHING on both arms, in both modes.
+            // `compare_query` only proves the two arms AGREE — and `0 == 0` is exactly
+            // what a phantom-row defect would break in one direction and a
+            // both-arms-wrong fixture drift in the other, so the absolute count is
+            // pinned here.
+            if case.empty_probe_keys.contains(k) && rows != 0 {
+                return Err(format!(
+                    "case {label} [read_path={mode_label}]: `{query}` returned {rows} row(s) on \
+                     BOTH arms, but {k} is a deleted/absent partition that must return ZERO rows \
+                     (a partition tombstone covers it, or it is not in the fixture) — \
+                     equal-but-wrong is still wrong"
+                ));
+            }
             if mode_label == "full" {
                 point_rows_total += rows;
             }
         }
-        // (3) `IN` over every discovered key (the multi-partition targeted path).
+        // (3) `IN` over every probed key — discovered AND empty (the multi-partition
+        // targeted path, including a list that mixes live and deleted partitions).
         if keys.len() >= 2 {
             let list = keys
                 .iter()
@@ -640,11 +783,13 @@ async fn run_case(case: &GenerationCase) -> Result<bool, String> {
     }
 
     eprintln!(
-        "PASS {label} — 1-gen vs {}-gen identical: full scan ({} rows) + {} partition reads × 2 \
-         read-path modes (classes: {:?})",
+        "PASS {label} — 1-gen vs {}-gen identical: full scan ({} rows) + {} partition reads \
+         ({} of them deleted/absent partitions asserted empty) × 2 read-path modes \
+         (classes: {:?})",
         case.n_generations,
         scan_rows,
         keys.len(),
+        case.empty_probe_keys.len(),
         case.divergence_classes
     );
     Ok(true)
@@ -669,26 +814,84 @@ async fn compare_query(
     compare_generation_axis(label, query, generations, &one.rows, &many.rows)
 }
 
-/// The ENFORCING lane: every corpus case that is not a documented known
-/// divergence must return an identical result set at 1 and at N generations.
-#[tokio::test]
-async fn one_vs_n_generation_differential_equality() {
-    // Corpus coverage: the ENFORCING set must span the reconciliation classes whose
-    // cross-generation kernel differs from the single-generation path, so the axis
-    // can never quietly narrow to a trivially-live corpus.
-    let covered: std::collections::BTreeSet<&str> = CORPUS
+// ---------------------------------------------------------------------------
+// Corpus invariants (checked by BOTH tests below, so neither can drift)
+// ---------------------------------------------------------------------------
+
+/// Reconciliation classes the ENFORCING set must cover: the axis can never quietly
+/// narrow to a trivially-live corpus. `partition_tombstone`/`deleted_partition` are
+/// required because a POINT read of a fully-deleted partition is the #3129 shape
+/// itself (AC2, `seek_merge_generations_for_read`).
+const REQUIRED_ENFORCED_CLASSES: &[&str] = &[
+    "tombstone",
+    "range_tombstone",
+    "partition_tombstone",
+    "deleted_partition",
+    "absent_partition",
+    "wide_partition",
+    "bti",
+];
+
+/// Classes that must be covered by an ASSERTED case — enforcing OR pinned as an
+/// expected divergence. `ttl` and `static` are currently quarantined (#2189, #3168),
+/// so they are asserted by `one_vs_n_generation_quarantine_still_diverges`; without
+/// this list a quarantined class would satisfy NO assertion at all, which is exactly
+/// how those two shapes went unguarded.
+const REQUIRED_ASSERTED_CLASSES: &[&str] = &["ttl", "static"];
+
+/// True when `reason` cites a tracking issue (`#` followed by at least one digit).
+/// Doctrine: a waiver with no cited issue is not a waiver.
+fn cites_an_issue(reason: &str) -> bool {
+    reason
+        .split('#')
+        .skip(1)
+        .any(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// Structural invariants over `CORPUS`. Called by both the enforcing lane and the
+/// expected-divergence pin, so a corpus edit cannot satisfy one and break the other.
+fn assert_corpus_invariants() {
+    let enforced: std::collections::BTreeSet<&str> = CORPUS
         .iter()
         .filter(|c| c.known_divergent.is_none())
         .flat_map(|c| c.divergence_classes.iter().copied())
         .collect();
-    for required in ["tombstone", "range_tombstone", "wide_partition", "bti"] {
+    for required in REQUIRED_ENFORCED_CLASSES {
         assert!(
-            covered.contains(required),
+            enforced.contains(required),
             "the ENFORCING 1-vs-N corpus must cover the {required:?} reconciliation class"
         );
     }
-    // Every known-divergent case must carry a substantive reason (never a bare
-    // marker), so an exclusion can never be undocumented.
+
+    // Every class in the corpus must be asserted SOMEWHERE. Every case is either
+    // enforcing or pinned, so the union covers both sets.
+    let asserted: std::collections::BTreeSet<&str> = CORPUS
+        .iter()
+        .flat_map(|c| c.divergence_classes.iter().copied())
+        .collect();
+    for required in REQUIRED_ASSERTED_CLASSES {
+        assert!(
+            asserted.contains(required),
+            "the {required:?} class must be covered by an ASSERTED case — either the enforcing \
+             lane or the expected-divergence pin (a quarantined class that satisfies no \
+             assertion is unguarded, green whether broken or fixed)"
+        );
+    }
+
+    // At least one ENFORCING case must probe a partition that returns NOTHING,
+    // otherwise the N-gen seek path is never asked for a deleted/absent partition
+    // (issue #3129 AC2) — discovery alone can never produce such a key.
+    assert!(
+        CORPUS
+            .iter()
+            .filter(|c| c.known_divergent.is_none())
+            .any(|c| !c.empty_probe_keys.is_empty()),
+        "at least one ENFORCING case must declare `empty_probe_keys` so a POINT/`IN` read of a \
+         deleted or absent partition reaches `seek_merge_generations_for_read` (issue #3129)"
+    );
+
+    // Every quarantined case must carry a substantive reason that CITES its tracking
+    // issue, so an exclusion can never be undocumented or untracked.
     for case in CORPUS.iter() {
         if let Some(reason) = case.known_divergent {
             assert!(
@@ -697,10 +900,28 @@ async fn one_vs_n_generation_differential_equality() {
                 case.keyspace,
                 case.table
             );
+            assert!(
+                cites_an_issue(reason),
+                "known-divergent case {}.{} must cite its tracking issue as `#<number>` — a \
+                 waiver with no cited issue is not a waiver: {reason:?}",
+                case.keyspace,
+                case.table
+            );
         }
     }
+}
 
-    std::env::set_var(TTL_NOW_OVERRIDE_ENV, PINNED_NOW_SECS.to_string());
+/// The ENFORCING lane: every corpus case that is not a documented known
+/// divergence must return an identical result set at 1 and at N generations.
+///
+/// `#[serial]`: pins the process-global `CQLITE_TTL_NOW_OVERRIDE_SECS` read seam
+/// that sibling tests in this same binary also pin — see `super::pin_read_clock`.
+#[tokio::test]
+#[serial]
+async fn one_vs_n_generation_differential_equality() {
+    assert_corpus_invariants();
+
+    let _clock = pin_read_clock();
 
     let mut ran = 0usize;
     let mut failures: Vec<String> = Vec::new();
@@ -711,8 +932,6 @@ async fn one_vs_n_generation_differential_equality() {
             Err(e) => failures.push(format!("{}.{}: {e}", case.keyspace, case.table)),
         }
     }
-
-    std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
 
     assert!(
         failures.is_empty(),
@@ -733,54 +952,137 @@ async fn one_vs_n_generation_differential_equality() {
     }
 }
 
-/// The known-divergent shapes, as a runnable reproducer. `#[ignore]`d because it
-/// is EXPECTED TO FAIL on today's `main`: it runs the very same axis over the
-/// `known_divergent` cases, i.e. the real 1-vs-N divergences this axis found
-/// (TTL-expired rows resurrecting as all-null phantom rows at N generations, and
-/// multi-generation static injection). It is the ready-made triage entry point for
-/// those follow-ups:
+/// The quarantine's RELEASE SIGNAL: an EXPECTED-DIVERGENCE pin over every
+/// `known_divergent` case. It is deliberately NOT `#[ignore]`d, so the gate's
+/// `core-tests` and CI run it on every change.
+///
+/// A `#[ignore]`d "expected-red reproducer" is a ratchet that never releases: the
+/// gate never runs it, so when a quarantined defect is FIXED nothing tells anyone to
+/// flip `known_divergent` to `None`, and the quarantined shapes stay unguarded
+/// indefinitely — green whether broken or fixed. This test inverts the assertion
+/// instead: each quarantined case MUST still diverge, and the moment one stops
+/// diverging the test FAILS with instructions to move it into the enforcing lane.
+///
+/// Anti-vacuity, three ways:
+///   * only an error carrying `DIVERGENCE_MARKER` counts as "still diverging"; any
+///     other error (fixture drift, an expected-row-count mismatch, a materialization
+///     failure) is a HARNESS failure reported separately, never mistaken for the
+///     quarantined defect;
+///   * a case that AGREES is a failure with the flip-it instruction (the release
+///     signal), never a silent pass;
+///   * an absent fixture SKIPs, and under `CQLITE_REQUIRE_FIXTURES=1` a run that
+///     pinned nothing fails closed — so this can never pass on an empty corpus.
+///
+/// Triage entry point for the cited follow-ups (#2189 TTL row liveness, #3168
+/// multi-generation static injection):
 ///
 /// ```text
 /// cargo test -p cqlite-core --features cli-helpers --test point_vs_full_differential \
-///   -- --ignored one_vs_n_generation_known_divergences --nocapture
+///   -- one_vs_n_generation_quarantine_still_diverges --nocapture
 /// ```
 ///
-/// It is NOT a bug-pin: it asserts the CORRECT property (1-gen == N-gen), so when a
-/// fix lands it goes green and the corresponding case's `known_divergent` flips to
-/// `None`, moving it into the enforcing lane above.
+/// `#[serial]`: pins the process-global TTL-now seam (see `super::pin_read_clock`).
 #[tokio::test]
-#[ignore = "expected-red reproducer for the known 1-vs-N divergences (see each case's known_divergent reason)"]
-async fn one_vs_n_generation_known_divergences() {
-    std::env::set_var(TTL_NOW_OVERRIDE_ENV, PINNED_NOW_SECS.to_string());
+#[serial]
+async fn one_vs_n_generation_quarantine_still_diverges() {
+    assert_corpus_invariants();
 
-    let mut failures: Vec<String> = Vec::new();
+    let _clock = pin_read_clock();
+
+    let quarantined: Vec<&GenerationCase> = CORPUS
+        .iter()
+        .filter(|c| c.known_divergent.is_some())
+        .collect();
+
+    let mut pinned = 0usize;
     let mut cleared: Vec<String> = Vec::new();
-    for case in CORPUS.iter().filter(|c| c.known_divergent.is_some()) {
+    let mut harness_failures: Vec<String> = Vec::new();
+    for case in &quarantined {
+        let label = format!("{}.{}", case.keyspace, case.table);
+        let reason = case.known_divergent.unwrap_or_default();
         match run_case(case).await {
-            Ok(true) => cleared.push(format!("{}.{}", case.keyspace, case.table)),
+            // The case now AGREES at 1 vs N generations: the cited defect is fixed
+            // (or the quarantine was wrong). Either way it must move into the
+            // enforcing lane — that is this test's whole purpose.
+            Ok(true) => cleared.push(format!(
+                "  `{label}` NO LONGER DIVERGES — flip its `known_divergent` to None so the \
+                 ENFORCING lane guards it (and drop its class from REQUIRED_ASSERTED_CLASSES \
+                 only if another case still covers it). Quarantine reason was: {reason}"
+            )),
             Ok(false) => {}
-            Err(e) => failures.push(format!(
-                "{}.{} (known: {}): {e}",
-                case.keyspace,
-                case.table,
-                case.known_divergent.unwrap_or("")
+            // The expected divergence: the case is still broken exactly as documented.
+            Err(e) if e.contains(DIVERGENCE_MARKER) => {
+                pinned += 1;
+                eprintln!("PINNED (still diverging, as expected) {label}: {reason}");
+            }
+            // Anything else is a harness/fixture problem, NOT the quarantined defect.
+            Err(e) => harness_failures.push(format!(
+                "  `{label}`: expected a 1-vs-N {DIVERGENCE_MARKER} but the harness failed for a \
+                 DIFFERENT reason, which must never be counted as \"still diverging\": {e}"
             )),
         }
     }
 
-    std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
+    assert!(
+        harness_failures.is_empty(),
+        "the expected-divergence pin hit harness/fixture failures:\n{}",
+        harness_failures.join("\n\n")
+    );
+    assert!(
+        cleared.is_empty(),
+        "quarantined 1-vs-N case(s) now AGREE — the quarantine must be released:\n{}",
+        cleared.join("\n\n")
+    );
 
-    if !cleared.is_empty() {
+    if quarantined.is_empty() {
         eprintln!(
-            "NOTE these known-divergent cases now AGREE at 1 vs N generations — set their \
-             `known_divergent` to None so the enforcing lane guards them: {cleared:?}"
+            "NOTE the 1-vs-N quarantine is EMPTY — every corpus case is enforced. \
+             Delete this pin (and REQUIRED_ASSERTED_CLASSES) once that is permanent."
+        );
+    } else if super::require_fixtures() {
+        assert!(
+            pinned > 0,
+            "CQLITE_REQUIRE_FIXTURES=1 but the expected-divergence pin ran no case \
+             (fixtures absent) — fail-closed"
+        );
+    } else if pinned == 0 {
+        eprintln!(
+            "SKIP one_vs_n_generation_quarantine_still_diverges: no fixtures present \
+             (set CQLITE_REQUIRE_FIXTURES=1 to fail-close)"
         );
     }
-    assert!(
-        failures.is_empty(),
-        "known 1-gen-vs-N-gen divergences (expected red until their fixes land):\n{}",
-        failures.join("\n\n")
-    );
+}
+
+/// The quarantine guard itself must be non-vacuous: `cites_an_issue` has to REJECT
+/// substantive-but-untracked prose, else a future quarantine could be added without a
+/// tracking issue ("a waiver with no cited issue is not a waiver").
+#[test]
+fn quarantine_reason_guard_requires_an_issue_reference() {
+    assert!(cites_an_issue(
+        "issue #2189: no row-liveness marker in MergeEntry"
+    ));
+    assert!(cites_an_issue("tracked at the end of the sentence (#3168)"));
+    // Substantive prose that cites nothing, and a bare `#` with no number, are both
+    // rejected.
+    assert!(!cites_an_issue(
+        "the N-gen arm emits an extra static-only row and drops the static column, \
+         which is clearly wrong and will be fixed later"
+    ));
+    assert!(!cites_an_issue("see the # section of the design doc"));
+    assert!(!cites_an_issue(""));
+    // Every quarantine reason actually in the corpus must satisfy the guard (the
+    // driver asserts this too; asserted here so a corpus edit fails even when the
+    // fixtures are absent and the async lanes SKIP).
+    for case in CORPUS.iter() {
+        if let Some(reason) = case.known_divergent {
+            assert!(
+                cites_an_issue(reason),
+                "{}.{} quarantine reason cites no issue: {reason:?}",
+                case.keyspace,
+                case.table
+            );
+        }
+    }
 }
 
 /// Seeded-divergence verification (issue #3129 AC6): the comparator must REPORT a

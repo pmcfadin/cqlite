@@ -61,6 +61,8 @@ mod one_vs_n_generation;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serial_test::serial;
+
 use cqlite_core::config::ReadPathMode;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::result::QueryRow;
@@ -79,6 +81,48 @@ const PINNED_NOW_SECS: i64 = 1_800_000_000;
 /// wide corpus while still covering every distinct partition in the small
 /// tombstone/TTL fixtures, which have only a handful of partitions).
 const MAX_KEYS_PER_TABLE: usize = 32;
+
+/// RAII guard for a PROCESS-GLOBAL env var: sets it on construction and restores
+/// the PREVIOUS state on drop — the earlier value if there was one, else unset.
+/// An unconditional `remove_var` would instead DISCARD a value the surrounding
+/// environment had set (e.g. a developer pinning the clock for a whole run), and a
+/// trailing `remove_var` statement never runs at all when an assertion panics.
+///
+/// The guard bounds the WINDOW; it does NOT bound concurrency. Because the seam is
+/// process-global and every test in this binary shares one process, each test that
+/// writes it is ALSO `#[serial]` — without that, one test's restore-on-drop would
+/// unpin a sibling's clock mid-run and its remaining scans would silently fall back
+/// to `SystemTime::now()` (`now_clock.rs`), producing a spurious divergence or
+/// masking a real one. Both parts are required; neither alone is sufficient.
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => std::env::set_var(self.key, previous),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// Pin the read-time TTL clock at `PINNED_NOW_SECS` (never wall-clock) for as long
+/// as the returned guard lives. Bind it to a NAMED local (`let _clock = …`); a bare
+/// `let _ =` would drop it immediately and unpin the clock.
+#[must_use = "the clock stays pinned only while the returned guard is alive"]
+fn pin_read_clock() -> EnvVarGuard {
+    EnvVarGuard::set(TTL_NOW_OVERRIDE_ENV, &PINNED_NOW_SECS.to_string())
+}
 
 fn require_fixtures() -> bool {
     std::env::var("CQLITE_REQUIRE_FIXTURES")
@@ -550,7 +594,12 @@ fn skip_or_fail(msg: &str) -> Result<bool, String> {
     Ok(false)
 }
 
+/// `#[serial]`: this test writes the process-global `CQLITE_TTL_NOW_OVERRIDE_SECS`
+/// read seam that the `one_vs_n_generation` sibling in this SAME binary also writes
+/// (libtest runs them on a multi-threaded pool by default), so the two must never
+/// overlap. The pure comparator tests below neither read nor write the seam.
 #[tokio::test]
+#[serial]
 async fn point_vs_full_differential_equality() {
     // Corpus coverage assertion: the lane must exercise every #1741 divergence
     // class (multi-generation, tombstone, TTL) — never silently narrow to a
@@ -566,9 +615,10 @@ async fn point_vs_full_differential_equality() {
         );
     }
 
-    // Pin the read-time TTL clock for the whole run (single-threaded here, so no
-    // sibling test in this binary races the process-global env seam).
-    std::env::set_var(TTL_NOW_OVERRIDE_ENV, PINNED_NOW_SECS.to_string());
+    // Pin the read-time TTL clock for the whole run. The seam is process-global, so
+    // the pin is held by an RAII guard (restores the previous value, even on panic)
+    // AND this test is `#[serial]` against every sibling that writes the same var.
+    let _clock = pin_read_clock();
 
     let mut ran = 0usize;
     let mut failures: Vec<String> = Vec::new();
@@ -579,8 +629,6 @@ async fn point_vs_full_differential_equality() {
             Err(e) => failures.push(format!("{}.{}: {e}", case.keyspace, case.table)),
         }
     }
-
-    std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
 
     assert!(
         failures.is_empty(),
