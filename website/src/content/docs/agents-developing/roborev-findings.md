@@ -142,15 +142,22 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
 1. **The wrapper is the only sanctioned roborev invocation.** A bare
    `roborev review --branch --base origin/main` is **NON-SANCTIONED**, and so is the two-positional
    commit-range form (`roborev review <sha-a> <sha-b>`).
-2. **The reviewed SHA must be VERIFIED against branch HEAD.** The wrapper does this by parsing
-   `Enqueued job <N> for <sha>`; a mismatch aborts the round, and a mismatch that *equals the base ref*
-   is the signature of the worktree bug below. Also push first — an unpushed implementation commit is
-   itself an empty-diff cause, and the wrapper asserts the push and FAILs otherwise.
+2. **The reviewed scope must be VERIFIED against branch HEAD.** The wrapper asserts it from the **job
+   record's structured fields** (read via `roborev list --json` / `roborev show --json` — e.g. the
+   full-sha `git_ref`), and treats the stdout `Enqueued job <N> for <sha>` announcement as a **demoted
+   cross-check** that still fails closed when it is absent or unparseable. A tool's structured record
+   is a stronger source than its human-readable prose — the same principle that moved the push assert
+   off the local `origin/<branch>` mirror ref onto `git ls-remote`. A reviewed scope that does not
+   match, or that *equals the base ref*, **aborts the round**; base-equality is the signature of the
+   worktree bug below. Also push first — an unpushed implementation commit is itself an empty-diff
+   cause, and the wrapper asserts the push and FAILs otherwise. Which fields are asserted is the
+   wrapper's business — see its `--help`.
 3. **`"contains no code changes to review"` on a NON-EMPTY diff is a HARD FAIL**, never a pass. The
    wrapper judges the reviewer's claim against a *locally computed* `git` diff census, so a reviewer
    asserting the opposite of a census we measured ourselves has demonstrably not reviewed the change.
-4. **A docs-only (code-free) diff cannot be roborev-certified at all** — the wrapper fails it as
-   vacuous. The sanctioned substitute is primary-source verification recorded in the PR (for a docs
+4. **A docs-only (code-free) diff cannot be roborev-certified at all** — the wrapper's deterministic
+   pre-enqueue `code-free:` check fails it before any review is enqueued, rather than matching reviewer
+   prose after the fact. The sanctioned substitute is primary-source verification recorded in the PR (for a docs
    change describing the on-disk format, `git show cassandra-5.0.8:<path>`). **No docs-only change may
    ever record "roborev clean."**
 

@@ -352,11 +352,16 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   error; **any** non-PASS terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round and
   a blocked merge, never "roborev clean". Four rules: **(1)** bare
   `roborev review --branch --base origin/main` is NON-SANCTIONED, and so is the two-positional
-  commit-range form. **(2)** The **reviewed SHA must be VERIFIED against branch HEAD** — the wrapper
-  parses `Enqueued job <N> for <sha>`; a mismatch aborts the round, and a mismatch that equals the base
-  ref is the signature of the worktree bug. **(3)** `"contains no code changes to review"` on a
+  commit-range form. **(2)** The **reviewed scope must be VERIFIED against branch HEAD** — the wrapper
+  asserts it from the **job record's structured fields** (`roborev list/show --json`; e.g. the full-sha
+  `git_ref`), with the stdout `Enqueued job <N> for <sha>` line DEMOTED to a cross-check that still
+  fails closed when absent or unparseable (a structured record beats parsing a tool's human-readable
+  prose — the same reasoning that moved the push-assert onto `git ls-remote`). A reviewed scope that
+  does not match, or that equals the base ref, **aborts the round** — base-equality is the signature of
+  the worktree bug. **(3)** `"contains no code changes to review"` on a
   NON-EMPTY diff is a **HARD FAIL**, never a pass. **(4)** A docs-only (code-free) diff **cannot be
-  roborev-certified at all** — the wrapper fails it as vacuous; the sanctioned substitute is
+  roborev-certified at all** — the wrapper's deterministic pre-enqueue `code-free:` check fails it
+  before any review is enqueued; the sanctioned substitute is
   primary-source verification recorded in the PR (e.g. `git show cassandra-5.0.8:<path>`), and no
   docs-only change may ever record "roborev clean". Push first: an unpushed implementation commit is
   itself an empty-diff cause, and the wrapper asserts the push and FAILs otherwise. **Why:** three
