@@ -381,3 +381,7 @@ impl RowSource for StaticMergeSource<'_> {
 fn entry_is_static(entry: &MergeEntry) -> bool {
     entry.clustering_key.is_none()
 }
+
+#[cfg(test)]
+#[path = "statics_tests.rs"]
+mod tests;

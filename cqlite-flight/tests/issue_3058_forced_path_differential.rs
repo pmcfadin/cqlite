@@ -694,6 +694,26 @@ async fn build_statics_fixture() -> (tempfile::TempDir, PathBuf) {
     engine.write(row_write(1, 1, "v11")).unwrap();
     engine.write(row_write(1, 2, "v12")).unwrap();
     engine.write(static_write(2, "s2-only")).unwrap();
+    // pk=3 (issue #3095 B1): a live static row whose ONLY clustering row is then
+    // ROW-DELETED in the same generation. Cassandra's `partition.hasNext()` is
+    // evaluated over the already-filtered iterator, so this partition counts as
+    // having no rows and returns its static content as ONE row — and the two arms
+    // reach that through completely different mechanisms (the merge arm drops
+    // `RowData::Tombstone` in `entry_to_row`; the single-generation decoder must
+    // build the row-tombstone display row from the row's OWN cells so the static
+    // value cannot revive it). Only a differential can show they agree.
+    engine.write(static_write(3, "s3-rows-deleted")).unwrap();
+    engine.write(row_write(3, 1, "doomed")).unwrap();
+    engine
+        .write(Mutation::new(
+            TableId::new(KS, STATIC_TBL),
+            PartitionKey::single("pk", Value::Integer(3)),
+            Some(ClusteringKey::single("ck", Value::Integer(1))),
+            vec![CellOperation::DeleteRow],
+            T_BASE_MICROS + 10,
+            None,
+        ))
+        .unwrap();
     engine.flush().await.expect("flush").expect("flush info");
     (temp, data_dir)
 }
@@ -859,7 +879,7 @@ async fn forced_path_differential_agrees_on_every_shape() {
     let (_stemp, statics_dir) = build_statics_fixture().await;
     let ssvc = CqliteFlightService::new(statics_dir, 8192);
     let sticket = ticket_json(KS, STATIC_TBL, STATIC_DDL);
-    let _ = assert_arms_agree(
+    let static_rows = assert_arms_agree(
         "statics/select-star",
         &ssvc,
         &sticket,
@@ -868,6 +888,33 @@ async fn forced_path_differential_agrees_on_every_shape() {
         &mut failures,
     )
     .await;
+    // Not just "the arms agree": pin the SHAPE, so an agreed-but-wrong result set
+    // (both arms emitting a phantom `ck = null` row alongside the real rows, or both
+    // dropping a rowless partition) cannot pass. Expected, per Cassandra's
+    // `processPartition()`: pk=1's two clustering rows carrying `s1`; ONE row for the
+    // static-only pk=2; ONE row for pk=3, whose only clustering row was deleted.
+    if let Some(rows) = static_rows {
+        let mut shape: Vec<(String, String, String)> = rows
+            .iter()
+            .map(|r| {
+                let get = |c: &str| r.get(c).cloned().unwrap_or_else(|| "<missing>".into());
+                (get("pk"), get("ck"), get("s"))
+            })
+            .collect();
+        shape.sort();
+        let expected: Vec<(String, String, String)> = vec![
+            ("1".into(), "1".into(), "s1".into()),
+            ("1".into(), "2".into(), "s1".into()),
+            ("2".into(), "<null>".into(), "s2-only".into()),
+            ("3".into(), "<null>".into(), "s3-rows-deleted".into()),
+        ];
+        if shape != expected {
+            failures.push(format!(
+                "statics/select-star: the arms agree but the (pk, ck, s) shape is not \
+                 Cassandra's — expected {expected:#?}, got {shape:#?}"
+            ));
+        }
+    }
 
     // ---- The on-disk static branch, asserted DIRECTLY on the predicate ------
     assert_undeclared_static_column_is_refused_on_disk(&mut failures).await;

@@ -4342,9 +4342,15 @@ run_flight_query_semantics_oracle() {
     return 0
   fi
   echo ">>> [$name] query-semantics parity oracle vs Flight do_get (#2374/#2789)"
+  # Issue #3095: the STATIC-column semantics lane runs HERE, in the same
+  # fail-closed window. Its two Cassandra fixtures (test_deltas.static_with_rows,
+  # test_tomb.static_with_tombstones) have COMMITTED binaries, so it can never
+  # green-pass by skipping — the lane asserts both ran, unconditionally. Without
+  # this the lane existed but no full-gate component ever executed it.
   if env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
       cargo test -p cqlite-flight \
-        --test query_semantics_flight_parity >"$log" 2>&1; then
+        --test query_semantics_flight_parity \
+        --test issue_3095_flight_static_columns >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL

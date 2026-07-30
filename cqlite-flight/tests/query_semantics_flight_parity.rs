@@ -333,6 +333,43 @@ fn ddl_for(
     ))
 }
 
+/// The projected column list of an oracle case's recorded `SELECT`.
+///
+/// The oracle's `query` is the authoritative statement of what the case reads, so it
+/// — not the expected rows — determines the Flight ticket's projection. A `SELECT *`
+/// is REFUSED rather than silently expanded from a schema guess: no oracle case uses
+/// it today, and inventing a column order here would make the comparison depend on
+/// this test's guess instead of the recorded query.
+fn projection_from_query(query: &str) -> Result<Vec<String>, String> {
+    let upper = query.to_ascii_uppercase();
+    let select = upper
+        .find("SELECT ")
+        .ok_or_else(|| format!("query has no SELECT: {query}"))?
+        + "SELECT ".len();
+    let from = upper
+        .find(" FROM ")
+        .ok_or_else(|| format!("query has no FROM: {query}"))?;
+    if from <= select {
+        return Err(format!("query has an empty SELECT list: {query}"));
+    }
+    let list = query[select..from].trim();
+    if list.contains('*') {
+        return Err(format!(
+            "SELECT * is not expressible as an explicit Flight projection — list the \
+             columns in the oracle query: {query}"
+        ));
+    }
+    let cols: Vec<String> = list
+        .split(',')
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if cols.is_empty() {
+        return Err(format!("query projects no columns: {query}"));
+    }
+    Ok(cols)
+}
+
 /// Build the on-the-wire Flight ticket JSON: keyspace + table + per-table DDL +
 /// the oracle's `SELECT id, ck, v` projection.
 fn ticket_bytes(keyspace: &str, table: &str, ddl: &str, columns: &[String]) -> Vec<u8> {
@@ -549,18 +586,26 @@ async fn run_case(case: &Case) -> Result<bool, String> {
 
     let ddl = ddl_for(&schema, &case.keyspace, &case.table, case.ddl.as_deref())
         .map_err(|e| format!("case {}: {e}", case.id))?;
-    // Project exactly the columns the oracle asserts (author order preserved).
-    let cols: Vec<String> = case
-        .expected_rows
-        .first()
-        .map(|r| r.keys().cloned().collect())
-        .unwrap_or_default();
-    if cols.is_empty() {
-        return Err(format!(
-            "case {}: expected_rows carries no columns, so the Flight projection \
-             would be empty and the comparison vacuous",
-            case.id
-        ));
+    // Projection: derived from the case's own QUERY, not from its expected rows
+    // (issue #3095 B4, roborev BLOCKER). Deriving it from `expected_rows[0]` broke
+    // every legitimate ZERO-row case — an `expect_empty` case has no first row, so
+    // the lane errored before it ever queried, silently disabling that whole class
+    // (including AC2's zero-row half). The recorded `SELECT` list is the
+    // authoritative projection either way; the expected rows are the ANSWER, not the
+    // question.
+    let cols = projection_from_query(&case.query).map_err(|e| format!("case {}: {e}", case.id))?;
+    // Cross-check: a non-empty expectation must only name projected columns, so a
+    // typo in either place is loud rather than a silent all-null compare.
+    if let Some(first) = case.expected_rows.first() {
+        for name in first.keys() {
+            if !cols.iter().any(|c| c == name) {
+                return Err(format!(
+                    "case {}: expected_rows names column {name}, which the query does \
+                     not project ({cols:?})",
+                    case.id
+                ));
+            }
+        }
     }
 
     // Pin the read-time TTL clock for this case (removed after do_get, before
