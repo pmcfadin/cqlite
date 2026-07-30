@@ -53,10 +53,11 @@ use super::MergeEntry;
 /// error indistinguishable from a cancelled scan at the receiving end — exactly
 /// the ambiguity `SSTableRowIterator::next` and `drive_merge` must NOT have.
 ///
-/// `Clone` since issue #3120: the consumer STORES the terminal verdict on the
-/// run's state so a repeat poll re-reports it instead of degrading to a clean
-/// end-of-input (see [`super::producer_iter`]'s `RunState`).
-#[derive(Debug, Clone)]
+/// Deliberately NOT `Clone` (rust-reviewer, issue #3120): the consumer stores the
+/// terminal verdict on the run's state by MOVE, and re-reports it through
+/// [`Self::to_error`], which borrows. Nothing ever clones one, so a `Clone` derive
+/// would only invite a needless copy of the payload string.
+#[derive(Debug)]
 pub(super) enum MergeProducerError {
     /// The scan was cooperatively cancelled (`Error::Cancelled`).
     Cancelled,
@@ -154,18 +155,29 @@ impl MergeMsg {
     /// Whether this message occupies a TRACKED data slot on the egress-depth
     /// gauge ([`channel_depth`](super::channel_depth)).
     ///
-    /// The ONE predicate both the send site (`from_readers::forward_row`) and
-    /// the receive site (`producer_iter`'s `next`, whose accounting lives in the
-    /// `Item` arm and nowhere else) express. Before issue #3120 they were two
-    /// DIFFERENT expressions of one rule — `msg.is_ok()` on send versus an
-    /// `Ok(Ok(_))` pattern on receive — and a message counted on exactly one
-    /// side drives the reconcile residual NEGATIVE, which
+    /// Called at the SEND site (`from_readers::forward_row`). It is worth being
+    /// precise about what this does and does not buy, because overclaiming here is
+    /// how the next reader stops looking (rust-reviewer, issue #3120):
+    ///
+    /// * At that call site it is a **TAUTOLOGY** — `forward_row` builds
+    ///   `MergeMsg::Item(entry)` unconditionally, so the answer can only be `true`.
+    ///   It is not a runtime filter; it is a **compile-time tripwire**. Because the
+    ///   body below is an EXHAUSTIVE match with no wildcard, adding a 4th
+    ///   `MergeMsg` variant forces an explicit tracked/untracked decision here
+    ///   instead of a silent default.
+    /// * The RECEIVE site (`producer_iter`'s `next`) does NOT call this. It is a
+    ///   hand-written `MergeMsg::Item(entry)` match arm, held correct by its own
+    ///   two properties: that `match` is exhaustive with no wildcard, and
+    ///   `channel_depth::received` / `received_count` /
+    ///   `add_merge_run_entry_decoded` each appear at exactly ONE site in the
+    ///   crate, all three inside that arm.
+    ///
+    /// Why it matters at all: before issue #3120 the two sides were two DIFFERENT
+    /// expressions of one rule — `msg.is_ok()` on send versus an `Ok(Ok(_))`
+    /// pattern on receive — and a message counted on exactly one side drives the
+    /// reconcile residual NEGATIVE, which
     /// `channel_depth::reconcile_residual`'s `> 0` guard skips and `record`'s
     /// `max(0)` floor then hides from every observer, permanently.
-    ///
-    /// Written as an EXHAUSTIVE match, not a `matches!`: a future 4th variant is
-    /// then a compile error here rather than being silently counted (or silently
-    /// not counted) by a catch-all arm.
     pub(super) fn is_tracked_data(&self) -> bool {
         match self {
             MergeMsg::Item(_) => true,

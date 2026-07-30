@@ -505,11 +505,16 @@ impl SSTableRowIterator for SSTableRowIteratorAdapter {
                     // read by `Drop` post-join to compute the exact reconcile
                     // residual — see the field doc.
                     //
-                    // Issue #3120: this accounting lives in the `Item` arm and
-                    // NOWHERE else, which is the receive-side half of "a
-                    // TERMINATOR is untracked on both sides" — the send side
-                    // expresses the same rule via `MergeMsg::is_tracked_data`.
-                    // Counting a terminator on exactly one side drives the
+                    // Issue #3120 — the receive-side half of "a TERMINATOR is
+                    // untracked on both sides". Note what enforces it HERE: this
+                    // arm does NOT call `MergeMsg::is_tracked_data` (that is the
+                    // send site's compile-time tripwire). It is correct because
+                    // (a) the `match` it belongs to is EXHAUSTIVE with no wildcard
+                    // arm, so a future 4th variant is a compile error rather than
+                    // a silent catch-all, and (b) `channel_depth::received`,
+                    // `received_count` and `add_merge_run_entry_decoded` each
+                    // appear at exactly ONE site in the crate — all three right
+                    // here. Counting a terminator on exactly one side drives the
                     // reconcile residual negative, which `reconcile_residual`'s
                     // `> 0` guard skips and `record`'s `max(0)` floor then hides
                     // from every observer, permanently.
@@ -623,6 +628,15 @@ impl Drop for SSTableRowIteratorAdapter {
         //    an error to, so an unwind is LOGGED here — never re-panicked, which
         //    would abort a teardown that is frequently itself running during an
         //    unwind.
+        //
+        //    NOT exercised by the injected-panic tests, on purpose: both producer
+        //    bodies wrap their whole walk in `catch_unwind`, so under
+        //    `panic = "unwind"` a caught panic never reaches the join as an `Err`.
+        //    This is the residual backstop for an unwind that escapes the
+        //    `catch_unwind` — a panic between it returning and the terminal `send`,
+        //    or inside the `send` itself — which is also the shape the bare-
+        //    disconnect arm of `next()` above reports (see
+        //    `producer_panic_tests::a_producer_that_disconnects_without_a_terminator_*`).
         if let Some(handle) = self.producer.take() {
             if handle.join().is_err() {
                 tracing::warn!(

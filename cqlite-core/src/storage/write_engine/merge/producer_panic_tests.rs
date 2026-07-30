@@ -415,7 +415,12 @@ fn the_shared_reader_merger_fails_when_a_producer_dies() {
         .error
         .expect("a shared-reader merge whose producer PANICKED must FAIL (issue #3120)");
     assert_names_the_dead_producer(&message);
-    assert!(faulted.rows < complete.rows);
+    assert!(
+        faulted.rows < complete.rows,
+        "the faulted merge MUST be short of the complete {} rows — otherwise the \
+         fault never fired and this test proves nothing",
+        complete.rows
+    );
 }
 
 /// WRITE arm — THE data-loss claim (issue #3120): a compaction whose producer
