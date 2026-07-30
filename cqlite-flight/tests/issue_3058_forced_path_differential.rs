@@ -25,8 +25,9 @@
 //!     take the MERGE arm and return exactly what it returns today (the two arms
 //!     genuinely disagree there — see `BypassReason::StaticColumns`);
 //!   * a CQLite-written fixture carrying a partition deletion, a range tombstone,
-//!     a row deletion, an expired-TTL cell and a live-TTL cell,
-//!     read at TWO pinned `now` values so the pinned clock itself is pinned;
+//!     a row deletion, a SIMPLE CELL TOMBSTONE (issue #3094), an expired-TTL cell
+//!     and a live-TTL cell, read at TWO pinned `now` values so the pinned clock
+//!     itself is pinned;
 //!   * feature parity on the fast arm: predicate pushdown, projection, a token
 //!     range, and a `max_batch_bytes`-capped stream.
 //!
@@ -538,16 +539,7 @@ async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
             TTL_LDT,
         ))
         .unwrap();
-    // ck=3: two live columns (the multi-column shape). A CQLite-WRITTEN simple
-    // cell tombstone is deliberately NOT exercised here — EXCLUSION TRACKED BY
-    // ISSUE #3094: both arms surface it as a raw `Value::Tombstone` that the Arrow
-    // encoder then rejects ("expected Text value, got Tombstone(..)"). That
-    // reproduces with `CQLITE_FLIGHT_MERGE_PATH=merge`, i.e. on the pre-#3058
-    // merge path, so it is a PRE-EXISTING defect of the CQLite write/read
-    // round-trip (see #3094), identical on
-    // both arms and out of this change's scope — recorded for a follow-up rather
-    // than papered over here. Cassandra-written tombstones ARE covered, by the
-    // dataset cases below and by the query-semantics oracle.
+    // ck=3: two live columns (the multi-column shape).
     engine
         .write(base(
             1,
@@ -563,6 +555,41 @@ async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
                 },
             ],
             T_BASE_MICROS,
+        ))
+        .unwrap();
+    // ck=5: the SIMPLE CELL TOMBSTONE shape (issue #3094, re-enabled here once the
+    // read path stopped surfacing a deleted cell as a raw `Value::Tombstone` that
+    // the Arrow encoder rejected). `v` stays live, `w` is deleted by a
+    // strictly-later cell tombstone, so both arms must return the row with `w`
+    // NULL — the divergence-prone part being that the merge arm reconciles it away
+    // in `generation_merge::filter_live` while the fast arm relies on the
+    // single-generation decoder's own per-cell drop.
+    engine
+        .write(base(
+            1,
+            5,
+            vec![
+                CellOperation::Write {
+                    column: "v".into(),
+                    value: Value::text("cell-tomb-row"),
+                },
+                CellOperation::Write {
+                    column: "w".into(),
+                    value: Value::text("to-be-deleted"),
+                },
+            ],
+            T_BASE_MICROS,
+        ))
+        .unwrap();
+    engine
+        .write(base(
+            1,
+            5,
+            vec![CellOperation::Delete {
+                column: "w".into(),
+                local_deletion_time: Some(T_BASE_SECS as i32),
+            }],
+            T_BASE_MICROS + 10,
         ))
         .unwrap();
     engine
@@ -1351,5 +1378,29 @@ fn assert_semantics(rows: &[Row], failures: &mut Vec<String>) {
     }
     if cell(rows, "ck", "3", "w").as_deref() != Some("also-live") {
         failures.push("a live multi-column row must surface both of its cells".into());
+    }
+    // Issue #3094: the SIMPLE CELL TOMBSTONE row. The row itself survives (its
+    // liveness marker and its `v` cell are live), the deleted `w` reads NULL, and
+    // it never surfaces a raw tombstone value.
+    if !cks.contains(&"5") {
+        failures.push(
+            "the row whose `w` was deleted by a cell tombstone must still surface \
+             (its liveness marker and `v` cell are live) — issue #3094"
+                .into(),
+        );
+    }
+    if cell(rows, "ck", "5", "v").as_deref() != Some("cell-tomb-row") {
+        failures.push(format!(
+            "the cell-tombstone row's sibling `v` must stay live, got {:?} (#3094)",
+            cell(rows, "ck", "5", "v")
+        ));
+    }
+    match cell(rows, "ck", "5", "w").as_deref() {
+        Some("<null>") => {}
+        other => failures.push(format!(
+            "a DELETED cell must read as NULL, got {other:?} — a raw \
+             `Value::Tombstone` here is what used to fail the whole `do_get` stream \
+             in the Arrow encoder (issue #3094)"
+        )),
     }
 }
