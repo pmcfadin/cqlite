@@ -200,6 +200,36 @@ impl RowLiveness {
         self.has_marker && self.expires_at_seconds.is_none_or(|s| s > now_secs)
     }
 
+    /// Whether a reconciled row's primary-key liveness marker survives a DELETION
+    /// FLOOR — the `markedForDeleteAt` (µs) of a covering partition (or range)
+    /// deletion — and may therefore still be carried forward.
+    ///
+    /// Cassandra judges this on the MARKER's OWN write timestamp: `BTreeRow.filter`
+    /// (`cassandra-5.0.8`) computes
+    /// `if (activeDeletion.deletes(newInfo.timestamp())) newInfo = LivenessInfo.EMPTY;`
+    /// and `DeletionTime.deletes(long ts)` is `ts <= markedForDeleteAt`. So the
+    /// marker survives iff [`marker_timestamp`](Self::marker_timestamp) is strictly
+    /// greater than `floor`.
+    ///
+    /// `row_timestamp` is the RECONCILED ROW timestamp (the max over the row's
+    /// surviving cells). It is retained as a NECESSARY condition solely for the row
+    /// that carries no marker at all (`marker_timestamp == None`, i.e.
+    /// `has_marker == false`): there is no marker timestamp to compare, so the
+    /// row-level test stays the only condition and marker-less behaviour is
+    /// unchanged. (Purging a marker-less tombstone-only row is tracked separately
+    /// as issue #3121.)
+    ///
+    /// Issue #3094: `row_timestamp` ALONE is wrong. A cell TOMBSTONE written AFTER
+    /// the deletion raises the reconciled row timestamp above `floor` even when the
+    /// marker itself is covered, so a deleted marker was carried forward and
+    /// resurrected an all-null phantom row out of a deleted partition — reaching
+    /// every consumer that decides row visibility from the merged entry alone
+    /// (Flight's `producer.rs::entry_to_row`, shared by its row-stream and
+    /// pushed-down-aggregate producers).
+    pub fn marker_survives_floor(&self, row_timestamp: i64, floor: i64) -> bool {
+        row_timestamp > floor && self.marker_timestamp.is_none_or(|ts| ts > floor)
+    }
+
     /// Fold two liveness markers across generations by Cassandra
     /// last-write-wins on the marker WRITE timestamp (issue #2374/#2789): the
     /// marker with the higher [`marker_timestamp`](Self::marker_timestamp) wins
@@ -481,6 +511,37 @@ mod row_liveness_tests {
         let later = marker(300, Some(900));
         assert_eq!(earlier.merge(later).expires_at_seconds, Some(900));
         assert_eq!(later.merge(earlier).expires_at_seconds, Some(900));
+    }
+
+    /// Issue #3094: `marker_survives_floor` judges the marker on its OWN write
+    /// timestamp, so a cell tombstone that raises the RECONCILED ROW timestamp
+    /// above a covering deletion cannot resurrect a marker the deletion covers.
+    ///
+    /// Cassandra authority (`cassandra-5.0.8`): `BTreeRow.filter` does
+    /// `if (activeDeletion.deletes(newInfo.timestamp())) newInfo =
+    /// LivenessInfo.EMPTY;`, and `DeletionTime.deletes(long ts)` is
+    /// `ts <= markedForDeleteAt` — hence the equal-timestamp case below is DELETED.
+    #[test]
+    fn marker_survives_floor_uses_the_markers_own_timestamp() {
+        // The #3094 shape: marker @100 <= floor 500 < reconciled row ts 1_000 (raised
+        // by a cell tombstone written AFTER the deletion). The marker is DELETED.
+        assert!(
+            !marker(100, None).marker_survives_floor(1_000, 500),
+            "a marker covered by the floor must not be resurrected by a newer cell \
+             tombstone raising the reconciled row timestamp (#3094)"
+        );
+        // A marker strictly NEWER than the floor survives (the #2374/#2789 key-only
+        // row that coexists with an older partition deletion stays VISIBLE).
+        assert!(marker(900, None).marker_survives_floor(1_000, 500));
+        // Equal timestamps: the deletion wins (`ts <= markedForDeleteAt`).
+        assert!(!marker(500, None).marker_survives_floor(1_000, 500));
+        // The row timestamp remains a necessary condition: a row wholly at/below the
+        // floor never carries a marker forward, however new the marker claims to be.
+        assert!(!marker(900, None).marker_survives_floor(500, 500));
+        // MARKER-LESS row (`marker_timestamp == None`): unchanged behaviour — the
+        // row-level test is the sole condition (#3121 tracks purging such a row).
+        assert!(RowLiveness::default().marker_survives_floor(1_000, 500));
+        assert!(!RowLiveness::default().marker_survives_floor(500, 500));
     }
 
     /// A generation with no marker contributes nothing.
