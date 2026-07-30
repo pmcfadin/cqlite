@@ -160,7 +160,22 @@ commit-range form (observed enqueueing a commit that is neither endpoint).
 A docs-only diff cannot be roborev-certified at all — record primary-source
 verification in the PR instead of "roborev clean".
 
-The live worktree probe procedure is in this script's header comment.
+LIVE WORKTREE PROBE (documented, NOT gate-run: needs network + a live reviewer).
+Only this probe can show the REAL binary honours the explicit --repo from inside
+a worktree; the gate's hermetic check uses a stub reviewer.
+  1. Confirm the ROOT checkout sits on main (what makes the trigger reproducible):
+       git -C <root> rev-parse --abbrev-ref HEAD    # => main
+  2. From a real issue worktree on its own branch, with its commit PUSHED:
+       cd /path/to/cqlite-wt/issue-<N>
+       $PROGNAME --agent codex --model gpt-5.6-sol
+  3. In the emitted block assert: head-sha == the worktree branch HEAD;
+     reviewed-sha == head-sha (prefix match); reviewed-sha != git rev-parse
+     origin/main; sha-assert: PASS; census matching
+     'git diff --numstat origin/main...HEAD'; tokens above both thresholds;
+     RESULT: PASS (exit 0). A reviewed-sha equal to origin/main means the
+     explicit-repo invocation did NOT defeat the root-checkout resolution.
+  4. Record the observed head-sha/reviewed-sha/job/census/tokens in the PR body,
+     and re-run the probe after any roborev version bump.
 EOF
 }
 
@@ -347,9 +362,11 @@ while IFS=$'\t' read -r add del path; do
   # census to "has code".
   file_non_code=0
   ext="${path##*.}"
+  # shellcheck disable=SC2086 # deliberate split of the space-separated constants
   for candidate in $CODE_FREE_EXTENSIONS; do
     if [ "$ext" = "$candidate" ]; then file_non_code=1; fi
   done
+  # shellcheck disable=SC2086 # deliberate split of the space-separated constants
   for prefix in $CODE_FREE_PREFIXES; do
     case "$path" in "$prefix"*) file_non_code=1 ;; esac
   done

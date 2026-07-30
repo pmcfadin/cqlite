@@ -373,6 +373,21 @@ assert_lacks 'header: no AGENT-GATE SUMMARY header' '==== AGENT-GATE SUMMARY ===
 assert_lacks 'header: no AGENT-GATE LITE SUMMARY header' '==== AGENT-GATE LITE SUMMARY ===='
 assert_lacks 'header: no AGENT-GATE DELTA SUMMARY header' '==== AGENT-GATE DELTA SUMMARY ===='
 
+printf '== --help documents the exit codes and the live worktree probe ==\n'
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+INVOKED="$tmp/invoked-$CASE_N.txt"
+: >"$INVOKED"
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --help >"$OUT" 2>&1
+RC=$?
+if [ "$RC" -eq 0 ]; then ok '--help exits 0'; else bad "--help exited $RC (want 0)"; fi
+assert_says '--help states the exit-code contract' '0=PASS, 1=FAIL, 3=NOTHING-TO-REVIEW'
+assert_says '--help marks bare --branch non-sanctioned' 'Non-sanctioned forms'
+assert_says '--help carries the live worktree probe' 'LIVE WORKTREE PROBE'
+assert_says '--help states the probe expectation' 'reviewed-sha == head-sha'
+assert_says '--help requires both agent and model' 'Both are required'
+assert_never_enqueued '--help'
+
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
 if grep -qE '^\s*roborev (review|show|list)' "$WRAPPER"; then
   ok 'wrapper invokes roborev only through PATH resolution (stubbable)'
