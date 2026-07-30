@@ -279,6 +279,48 @@ async fn a_dead_query_row_producer_fails_the_do_get_instead_of_truncating_it_sil
     );
 }
 
+/// The SCOPING proof (issue #3106, roborev): an arm belonging to a DIFFERENT
+/// reader must never be consumed by this scan.
+///
+/// Both fault seams are process-global registries, and the in-`src` core panic
+/// test shares a test binary with thousands of parallel siblings, so "a
+/// concurrent scan cannot take my arm" has to be a property of the mechanism,
+/// not of test discipline. Here both arms are registered against a scope that
+/// matches no reader in this process; the `do_get` must therefore behave exactly
+/// as if nothing were armed — every row, no error — and the arms must still be
+/// registered afterwards (they are dropped un-taken).
+///
+/// This is the end-to-end complement of the unit-level scoping tests in
+/// `cqlite_core::storage::producer_fault`.
+#[tokio::test]
+async fn an_arm_scoped_to_another_reader_is_never_consumed_by_this_scan() {
+    let _serialized = FAULT_LOCK.lock().await;
+    let _forced = ForcedPath::bypass();
+    let (_temp, data_dir) = build_one_generation().await;
+    let svc = CqliteFlightService::new(data_dir, 8192);
+
+    let served = {
+        // A scope no reader in this process can match — the shape of a foreign
+        // test's arm racing this scan.
+        let foreign = "issue-3106-some-other-tests-keyspace/its-table";
+        let _outer = arm_query_row_producer_panic(foreign, BATCHES_BEFORE_THE_PANIC);
+        let _inner = arm_inner_scan_task_panic(foreign);
+        do_get_served(&svc, ticket_bytes()).await
+    };
+
+    assert_eq!(
+        served.error, None,
+        "a foreign-scoped arm must NOT fire here: if it can, an unrelated \
+         concurrent test could satisfy (or break) a panic-injection test, which is \
+         exactly the 'green but blind' failure mode #3106 keeps producing"
+    );
+    assert_eq!(
+        served.rows.len(),
+        PARTITIONS as usize,
+        "and the scan must return EVERY row, i.e. it ran completely untouched"
+    );
+}
+
 /// The SECOND boundary (issue #3106, rust-reviewer blocker): the full-ring arm's
 /// rows come from an INNER `tokio` task over its own channel
 /// (`scan_stream_batched_admitted`), and that task's death was likewise read as
