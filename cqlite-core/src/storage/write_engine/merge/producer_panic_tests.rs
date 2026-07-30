@@ -472,8 +472,7 @@ fn a_compaction_whose_producer_dies_fails_and_publishes_no_output() {
     };
 
     let message = faulted
-        .err()
-        .expect(
+        .expect_err(
             "a compaction whose producer PANICKED must return Err — a short-but-Ok \
              CompactReport means an SSTable was REWRITTEN MISSING ROWS and its \
              inputs superseded: silent data loss at rest (issue #3120)",
