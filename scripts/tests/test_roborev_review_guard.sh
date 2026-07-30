@@ -343,7 +343,7 @@ export STUB_JOB=4656
 export STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 export STUB_TOKEN_USAGE="$TOKENS_GENUINE_LARGE"
 export STUB_PROMPT="$PROMPT_WITH_PATHS"
-export STUB_STATUS=done
+export STUB_STATUS="done"
 export STUB_GIT_REF=''
 export STUB_MODEL=gpt-5.6-sol
 export STUB_REQUESTED_MODEL=gpt-5.6-sol
@@ -359,7 +359,7 @@ reset_stub() {
   STUB_PROMPT="$PROMPT_WITH_PATHS"
   STUB_REVIEW_RC=0
   STUB_ANNOUNCE_SHA=''
-  STUB_STATUS=done
+  STUB_STATUS="done"
   STUB_GIT_REF=''
   STUB_MODEL=gpt-5.6-sol
   STUB_REQUESTED_MODEL=gpt-5.6-sol
@@ -386,24 +386,38 @@ assert_verdict 'case (b)' FAIL 1
 assert_says 'case (b) names neither-endpoint' 'matches NEITHER endpoint'
 assert_says 'case (b) prints the reviewed sha beside expected head' "git_ref '0000000000000000000000000000000000000abc' does not equal branch HEAD"
 
-printf '== case (c): a vacuous verdict on a CODE census raises an ADVISORY notice ==\n'
+printf '== case (c): findings NONE + a vacuity claim on a CODE census = HARD FAIL ==\n'
 reset_stub
-# Tier 1 is DEMOTED to advisory (round 3): it matched anywhere in the transcript, so
-# a review that merely QUOTED the phrase — as any review of THIS wrapper would — was
-# failed as vacuous, and agents learning to waive tier-1 FAILs would restore the very
-# defect the guard exists to stop. The docs-only trigger it used to be primary for is
-# now caught deterministically by `code-free:` (case (c2)). See the return packet: the
-# residual gap (reviewer HAD the diff yet concludes "no code changes" on a code
-# census) is now a NOTICE, which the spec's tier-1 requirement calls a hard failure.
+# Tier 1 is AUTHORITATIVE again (round 4) but GATED on `findings:`. With findings NONE
+# the reviewer is CLAIMING CLEANLINESS, so a "no code changes" summary against a
+# census we measured as non-empty is trigger T3 and must block the merge.
 work=$(make_fixture case_c pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_VERDICT=$'No issues found.\nSummary: the diff contains no code changes to review.'
 run_wrapper "$work"
-assert_verdict 'case (c)' PASS 0
-assert_says 'case (c) tier1 raises a NOTICE' '^vacuity-tier1: NOTICE \(vacuous verdict vs non-empty census\)$'
-assert_says 'case (c) the notice says it is advisory' 'ADVISORY, does not fail the run'
+assert_verdict 'case (c)' FAIL 1
+assert_says 'case (c) tier1 FAILs authoritatively' '^vacuity-tier1: FAIL \(vacuous verdict vs non-empty census\)$'
+assert_says 'case (c) names the claiming-cleanliness gate' 'reported NO findings \(findings: NONE\)'
 assert_says 'case (c) prints the census' '^census: [0-9]+ files?, \+[0-9]+/-[0-9]+$'
 assert_says 'case (c) sha-assert still PASS' '^sha-assert: PASS$'
+assert_says 'case (c) findings are NONE' '^findings: NONE$'
+
+printf '== case (c1c): findings UNKNOWN + the phrase FAILs (fail-closed on unknown) ==\n'
+reset_stub
+# The findings state is UNKNOWN when the reviewer errored. An unparseable/unknowable
+# findings state must never DISARM tier 1, so UNKNOWN is treated as claiming cleanliness.
+work=$(make_fixture case_c1c pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_VERDICT=$'No issues found.\nSummary: the diff contains no code changes to review.'
+STUB_STATUS=failed
+STUB_REVIEW_RC=3
+run_wrapper "$work"
+STUB_REVIEW_RC=0
+STUB_STATUS="done"
+assert_verdict 'case (c1c)' FAIL 1
+assert_says 'case (c1c) findings are UNKNOWN' '^findings: UNKNOWN$'
+assert_says 'case (c1c) tier1 still FAILs' '^vacuity-tier1: FAIL \(vacuous verdict vs non-empty census\)$'
+assert_says 'case (c1c) says fail-closed is the correct direction' 'treated as claiming cleanliness'
 
 printf '== case (c1b): the tier-1 match is anchored to the verdict/summary region ==\n'
 reset_stub
@@ -411,13 +425,30 @@ reset_stub
 # be flagged: the match only looks at the Summary line.
 work=$(make_fixture case_c1b pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-STUB_VERDICT=$'Findings:\n[Medium] the tier-1 regex matches the literal phrase no code changes anywhere in the transcript\n[Low] naming nit\nSummary: 2 findings.'
+STUB_VERDICT=$'## Findings\n[Medium] the tier-1 regex matches the literal phrase no code changes anywhere in the transcript\n[Low] naming nit\n## Summary: 2 findings; the guard says no code changes too broadly.'
 STUB_REVIEW_RC=1
 run_wrapper "$work"
 STUB_REVIEW_RC=0
-assert_says 'case (c1b) tier1 is NOT tripped by a quote in a finding body' '^vacuity-tier1: PASS$'
+assert_says 'case (c1b) tier1 does not FAIL a findings-bearing review' '^vacuity-tier1: NOTICE \(phrase present in a findings-bearing review\)$'
+assert_says 'case (c1b) the gate names the findings evidence' 'the review reported findings'
+assert_lacks 'case (c1b) tier1 never FAILs here' '^vacuity-tier1: FAIL'
 assert_says 'case (c1b) the run fails only for the findings' '^roborev-exit: FINDINGS \(exit 1\)$'
-assert_lacks 'case (c1b) no vacuity notice' 'vacuity-tier1: NOTICE'
+
+
+printf '== case (c1d): a CLEAN review quoting the phrase OUTSIDE its summary PASSes ==\n'
+reset_stub
+# This is what the verdict/summary ANCHORING buys, and the findings gate cannot cover
+# it: findings NONE (so the gate would fail it) yet the phrase appears only in a body
+# note, not in the review's conclusion. Unanchored matching fails this run; anchored
+# matching correctly passes it.
+work=$(make_fixture case_c1d pushed)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_VERDICT=$'No issues found.\nNote: the guard under review matches the literal phrase no code changes.\nSummary: reviewed 1 file; nothing to report.'
+run_wrapper "$work"
+assert_verdict 'case (c1d)' PASS 0
+assert_says 'case (c1d) tier1 PASSes on an out-of-region mention' '^vacuity-tier1: PASS$'
+assert_says 'case (c1d) findings are NONE' '^findings: NONE$'
+assert_lacks 'case (c1d) tier1 does not FAIL' '^vacuity-tier1: FAIL'
 
 printf '== case (c2): a code-free (docs-only) census FAILs deterministically ==\n'
 reset_stub
@@ -770,11 +801,12 @@ STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_VERDICT='No issues found. Summary: the diff contains no code changes to review.'
 STUB_TOKEN_USAGE=NONE
 run_wrapper "$work"
-assert_verdict 'case (i)' PASS 0
+assert_verdict 'case (i)' FAIL 1
 assert_says 'case (i) tokens UNAVAILABLE' '^tokens: UNAVAILABLE$'
 assert_says 'case (i) tier2 UNAVAILABLE' '^vacuity-tier2: UNAVAILABLE$'
 assert_says 'case (i) degraded notice, not a skip' 'never a silent skip'
-assert_says 'case (i) tier1 records its advisory notice' '^vacuity-tier1: NOTICE'
+assert_says 'case (i) tier1 governs even with tier 2 unavailable' '^vacuity-tier1: FAIL'
+assert_lacks 'case (i) UNAVAILABLE never upgrades to PASS' '^RESULT: PASS$'
 
 printf '== case (i2): unavailable accounting alone does not fail an otherwise clean review ==\n'
 reset_stub
@@ -794,7 +826,7 @@ reset_stub
 work=$(make_fixture case_j pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 STUB_VERDICT=$'Review complete.\nFindings:\n[Medium] scripts/flow/roborev-review.sh:350 the fast path bypasses the authoritative remote check\nSummary: 1 finding.'
-STUB_STATUS=done
+STUB_STATUS="done"
 STUB_REVIEW_RC=1
 run_wrapper "$work"
 STUB_REVIEW_RC=0
@@ -822,7 +854,7 @@ STUB_STATUS=failed
 STUB_REVIEW_RC=2
 run_wrapper "$work"
 STUB_REVIEW_RC=0
-STUB_STATUS=done
+STUB_STATUS="done"
 STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
 assert_verdict 'case (j1b)' FAIL 1
 assert_says 'case (j1b) roborev-exit is ERROR with the observed code' '^roborev-exit: ERROR \(exit 2\)$'
@@ -1087,6 +1119,49 @@ for bad_invocation in "--nonsense" "--repo:$tmp/definitely-not-a-directory" "--r
   assert_never_enqueued "usage: '$bad_invocation'"
 done
 
+printf '== case (w): a MISSING oracles file FAILs closed, never silently no-ops ==\n'
+reset_stub
+# roborev-review.sh sources scripts/flow/roborev-review-oracles.sh for the push assert
+# and the census. If that file vanished and the wrapper carried on, both checks would
+# become no-ops while every key still read PASS — the worst regression available here.
+work=$(make_fixture case_w pushed)
+lonely="$tmp/lonely"
+mkdir -p "$lonely"
+cp "$WRAPPER" "$lonely/roborev-review.sh"
+cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$lonely/" 2>/dev/null || true
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+INVOKED="$tmp/invoked-$CASE_N.txt"
+: >"$INVOKED"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$lonely/roborev-review.sh" --repo "$work" \
+  --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
+RC=$?
+assert_verdict 'case (w)' FAIL 1
+assert_says 'case (w) names the missing oracles file' 'oracles file .* is missing'
+assert_says 'case (w) refuses to run with the checks disabled' 'Failing closed rather than proceeding'
+assert_never_enqueued 'case (w)'
+assert_says 'case (w) push-assert never claims a pass' '^push-assert: SKIP$'
+
+printf '== case (w2): a TRUNCATED oracles file FAILs closed too ==\n'
+reset_stub
+work=$(make_fixture case_w2 pushed)
+truncated="$tmp/truncated"
+mkdir -p "$truncated"
+cp "$WRAPPER" "$truncated/roborev-review.sh"
+printf '# corrupt: defines nothing\n' >"$truncated/roborev-review-oracles.sh"
+CASE_N=$((CASE_N + 1))
+OUT="$tmp/out-$CASE_N.txt"
+INVOKED="$tmp/invoked-$CASE_N.txt"
+: >"$INVOKED"
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$truncated/roborev-review.sh" --repo "$work" \
+  --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
+RC=$?
+assert_verdict 'case (w2)' FAIL 1
+assert_says 'case (w2) names the undefined functions' 'did not define roborev_push_assert and roborev_census'
+assert_never_enqueued 'case (w2)'
+
 printf '== usage errors: --agent and --model are BOTH required ==\n'
 reset_stub
 work=$(make_fixture case_usage pushed)
@@ -1141,6 +1216,7 @@ reset_stub
 if grep -qE '^\s*roborev (review|show|list)' "$WRAPPER"; then
   ok 'wrapper invokes roborev only through PATH resolution (stubbable)'
 else
+  # shellcheck disable=SC2016 # the backticks are prose in the failure message
   bad 'wrapper does not invoke `roborev` by bare name — the stub cannot intercept it'
 fi
 

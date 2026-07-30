@@ -164,23 +164,13 @@ ROBOREV_VACUITY_ADVISORY_MIN_OUTPUT_TOKENS=200
 # bounded on a 500-file diff.
 PROMPT_CONTENT_MAX_PATHS_CHECKED=40
 
-# Code-free (non-code) census classification. A census consisting ENTIRELY of prose
-# is STRUCTURALLY DISCARDED by roborev (trigger 3), so it is a DETERMINISTIC FAIL
-# condition in its own right under the `code-free:` key — never a bet on the
-# reviewer's prose happening to admit it (which is what the previous revision did:
-# it computed this classification and then used it only for wording).
-#
-# EXTENSION-BASED, with a narrow path assist. An earlier revision treated every file
-# under `docs/`, `.github/` or `.claude/` as non-code, which misclassifies
-# `docs/foo.py` and a workflow `.yml` — and now that code-free is a FAIL condition, a
-# false code-free classification is a FALSE FAIL. So the test is the file EXTENSION,
-# and the path assist covers only EXTENSIONLESS files under a prose directory
-# (`docs/LICENSE`, `openspec/NOTES`). Anything with a code-ish extension anywhere —
-# including `.github/workflows/*.yml` — counts as CODE and does not trip this key.
-CODE_FREE_EXTENSIONS="md markdown mdx txt rst adoc"
-CODE_FREE_EXTENSIONLESS_PREFIXES="openspec/ docs/ website/ .claude/"
 
 PROGNAME=$(basename "$0")
+# Resolve helpers from THIS FILE's directory (BASH_SOURCE), never $PWD: the wrapper
+# is invoked from arbitrary worktrees and a $PWD-relative lookup would silently miss.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ORACLES_FILE="$SCRIPT_DIR/roborev-review-oracles.sh"
+JOB_FACTS_TOOL="$SCRIPT_DIR/roborev-job-facts.py"
 
 usage() {
   cat <<EOF
@@ -229,6 +219,7 @@ a worktree; the gate's hermetic check uses a stub reviewer.
 EOF
 }
 
+# shellcheck disable=SC2016 # the backticks in these messages are prose, not expansions
 die_usage() { # die_usage <message>
   printf 'ERROR: %s\n' "$1" >&2
   printf 'ERROR: run `%s --help` for the option contract.\n' "$PROGNAME" >&2
@@ -301,6 +292,13 @@ JOB="-"
 MODEL_LINE="-"
 CENSUS="-"
 TOKENS="UNAVAILABLE"
+# Populated by roborev_census (in the sourced oracles file); declared here so the
+# array always exists even if that oracle ever returns before filling it.
+# shellcheck disable=SC2034 # read in roborev-review-oracles.sh, not here
+census_files=0
+# shellcheck disable=SC2034 # read in roborev-review-oracles.sh, not here
+census_non_code_files=0
+census_paths=()
 PUSH_ASSERT="SKIP"
 CENSUS_CHECK="SKIP"
 CODE_FREE="SKIP"
@@ -367,6 +365,7 @@ finish() { # finish <PASS|FAIL|NOTHING-TO-REVIEW> <exit-code>
 
 # Emit a block on EVERY exit path, including an unexpected `set -e` abort: a run
 # that dies without a verdict must never look like a run that was never made.
+# shellcheck disable=SC2317 # invoked indirectly, by `trap on_exit EXIT` below
 on_exit() {
   local rc=$?
   if [ "$EMITTED" -eq 0 ]; then
@@ -385,174 +384,25 @@ if [ -z "$HEAD_SHA" ]; then
   finish FAIL 1
 fi
 
-# --- step 2: push assert (AC3) — before the census, so the operator gets the ---
-# --- actionable cause ("push your commits") rather than a downstream vacuity ---
-#
-# THE ORACLE IS THE REMOTE, NOT THE LOCAL MIRROR (#2964 follow-up). The obvious
-# implementation — read `refs/remotes/<remote>/<branch>` — is WRONG on this fleet
-# and was a 100%-reproducible false FAIL: CQLite clones carry a NARROW fetch
-# refspec
-#     remote.origin.fetch = +refs/heads/main:refs/remotes/origin/main
-# so `refs/remotes/origin/*` only ever holds `origin/main` (+ `origin/HEAD`). A
-# remote-tracking ref for a feature branch is NEVER created there, no matter how
-# many times the branch is pushed — so "mirror ref absent" says NOTHING about
-# whether the branch is pushed. `git ls-remote` asks the REMOTE, which is the
-# authoritative answer, exactly as the census asks `git` locally rather than
-# believing the reviewer's prose. A local proxy is never authority.
-if [ "$BRANCH" = "HEAD" ]; then
-  PUSH_ASSERT="FAIL (detached HEAD)"
-  DETAILS+=("ERROR: push-assert: $REPO is on a detached HEAD, so there is no branch to assert against. Check out the issue branch. No review was enqueued.")
+# --- the local oracles (sourced) ----------------------------------------------
+# Resolved from BASH_SOURCE, never $PWD, so the wrapper works from any directory.
+# FAIL CLOSED if the file is missing or does not define both functions: an absent
+# oracles file would silently turn the push assert and the census into no-ops, which
+# is a worse failure than any this guard was built to catch.
+if [ ! -f "$ORACLES_FILE" ]; then
+  DETAILS+=("ERROR: the required oracles file '$ORACLES_FILE' is missing, so the push assert and the diff census cannot run. Failing closed rather than proceeding with those checks silently disabled — reinstall/restore scripts/flow/roborev-review-oracles.sh.")
+  finish FAIL 1
+fi
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=roborev-review-oracles.sh
+. "$ORACLES_FILE"
+if [ "$(type -t roborev_push_assert)" != function ] || [ "$(type -t roborev_census)" != function ]; then
+  DETAILS+=("ERROR: '$ORACLES_FILE' did not define roborev_push_assert and roborev_census, so the push assert and the diff census cannot run. Failing closed — the file is truncated or corrupt.")
   finish FAIL 1
 fi
 
-# Prefer the branch's CONFIGURED upstream remote; fall back to `origin`.
-REMOTE=$(git -C "$REPO" config --get "branch.$BRANCH.remote" 2>/dev/null || printf '')
-[ -n "$REMOTE" ] || REMOTE=origin
-
-# NO MIRROR-REF FAST PATH. An earlier revision short-circuited when
-# `refs/remotes/<remote>/<branch>` happened to equal HEAD; that is unsound, and the
-# reviewer flagged it. A CACHED mirror ref survives a force-push or an outright
-# DELETION of the remote branch, so it can equal HEAD while the remote no longer
-# has the commit at all — the wrapper would then enqueue a review for a commit the
-# reviewer cannot fetch, which is precisely a vacuous-review setup. `ls-remote`
-# costs ~1s, and not trusting local proxies is this wrapper's whole point.
-set +e
-LS_OUT=$(git -C "$REPO" ls-remote --heads "$REMOTE" "$BRANCH" 2>&1)
-LS_RC=$?
-set -e
-if [ "$LS_RC" -ne 0 ]; then
-  # NOT "never pushed" — a misattributed cause sends people to fix the wrong
-  # thing. `git` and `gh` are SEPARATE credential paths (#2942): an
-  # authenticated `gh` with an unwired git fails every remote read here.
-  PUSH_ASSERT="FAIL (ls-remote failed: infra/auth)"
-  DETAILS+=("ERROR: push-assert: 'git ls-remote --heads $REMOTE $BRANCH' exited $LS_RC, so the remote state is UNKNOWN. This is an INFRA/AUTH condition, NOT evidence that the branch is unpushed — do not 'fix' it by pushing. git and gh are separate credential paths (#2942): check network reachability and git's own credentials ('gh auth setup-git'). git said:")
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    DETAILS+=("  $line")
-  done <<<"$LS_OUT"
-  DETAILS+=("ERROR: push-assert: failing closed on an unknown remote state. No review was enqueued.")
-  finish FAIL 1
-fi
-REMOTE_SHA=$(printf '%s\n' "$LS_OUT" | awk -v ref="refs/heads/$BRANCH" '$2 == ref { print $1; exit }')
-if [ -z "$REMOTE_SHA" ]; then
-  PUSH_ASSERT="FAIL (branch absent on remote $REMOTE)"
-  DETAILS+=("ERROR: push-assert: the remote '$REMOTE' has no branch '$BRANCH' (authoritative: git ls-remote) — this branch has never been pushed. The reviewer can only see what the remote has, so an unpushed branch is itself an empty-diff cause. Push it, then re-run. No review was enqueued.")
-  finish FAIL 1
-fi
-if [ "$REMOTE_SHA" != "$HEAD_SHA" ]; then
-  PUSH_ASSERT="FAIL (unpushed commits)"
-  DETAILS+=("ERROR: push-assert: $REMOTE/$BRANCH is at $REMOTE_SHA (authoritative: git ls-remote) but local HEAD is $HEAD_SHA.")
-  unpushed=""
-  if git -C "$REPO" cat-file -e "${REMOTE_SHA}^{commit}" 2>/dev/null; then
-    unpushed=$(git -C "$REPO" log --oneline "$REMOTE_SHA..HEAD" 2>/dev/null || printf '')
-  fi
-  if [ -n "$unpushed" ]; then
-    DETAILS+=("ERROR: push-assert: unpushed commit(s):")
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      DETAILS+=("  $line")
-    done <<<"$unpushed"
-  else
-    DETAILS+=("ERROR: push-assert: local HEAD is not a descendant of the remote tip (or the remote tip is not present locally) — the branch has diverged; reconcile before reviewing.")
-  fi
-  DETAILS+=("ERROR: push-assert: push the branch before reviewing. No review was enqueued.")
-  finish FAIL 1
-fi
-PUSH_ASSERT="PASS"
-
-# --- step 3: the local diff census — THE ORACLE -------------------------------
-# `<base>` (default `origin/main`) IS a local mirror ref, so it can be stale or —
-# on a narrow-refspec clone that has never fetched — absent. Fail CLOSED: an
-# unresolvable base must never be allowed to produce an empty census, which would
-# surface as NOTHING-TO-REVIEW and read as "nothing to look at" rather than "we
-# could not tell". No implicit `git fetch` is performed on the caller's behalf.
-BASE_SHA=""
-if ! BASE_SHA=$(git -C "$REPO" rev-parse --verify --quiet "${BASE}^{commit}"); then
-  CENSUS_CHECK="FAIL (base '$BASE' unresolvable)"
-  DETAILS+=("ERROR: census: base ref '$BASE' does not resolve to a commit in $REPO, so the census — and therefore every vacuity judgement — would be unfounded. This is a FAIL, explicitly NOT a NOTHING-TO-REVIEW: an unresolvable base is 'we cannot tell', never 'there is nothing to review'. If '$BASE' is a remote-tracking ref, this clone may have a narrow fetch refspec or have never fetched it; fetch it yourself (the wrapper never fetches behind your back) and re-run. No review was enqueued.")
-  finish FAIL 1
-fi
-
-# `--no-renames` on purpose: with rename detection a renamed file is reported as the
-# composite path `dir/{old => new}.rs`, which is not a real path and so can never be
-# found in the reviewer's prompt (the prompt-content check below matches literal
-# paths). Splitting a rename into its delete+add pair keeps every census path a real
-# one, at the cost of counting it as two files.
-# A FAILED `git diff` must NEVER alias to "genuinely empty". Discarding the exit
-# status here would assert a measurement that never happened — the same epistemic
-# error as reading a mirror ref instead of the remote — and it would surface as
-# NOTHING-TO-REVIEW, i.e. "there is nothing to look at" instead of "we could not
-# tell". Capture the status and fail CLOSED on it.
-set +e
-NUMSTAT=$(git -C "$REPO" diff --numstat --no-renames "${BASE}...HEAD" 2>&1)
-DIFF_RC=$?
-set -e
-if [ "$DIFF_RC" -ne 0 ]; then
-  CENSUS_CHECK="FAIL (git diff failed)"
-  DETAILS+=("ERROR: census: 'git diff --numstat --no-renames ${BASE}...HEAD' exited $DIFF_RC in $REPO, so the census was never measured. This is a FAIL, explicitly NOT a NOTHING-TO-REVIEW — an unmeasurable diff is 'we cannot tell', never 'there is nothing to review'. git said:")
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    DETAILS+=("  $line")
-  done <<<"$NUMSTAT"
-  finish FAIL 1
-fi
-
-census_files=0
-census_added=0
-census_deleted=0
-census_non_code_files=0
-census_paths=()
-while IFS=$'\t' read -r add del path; do
-  [ -n "${path:-}" ] || continue
-  if [ "$add" = "-" ]; then add=0; fi
-  if [ "$del" = "-" ]; then del=0; fi
-  census_files=$((census_files + 1))
-  census_paths+=("$path")
-  census_added=$((census_added + add))
-  census_deleted=$((census_deleted + del))
-  # Non-code classification: a documented prose EXTENSION, or an EXTENSIONLESS file
-  # under a documented prose directory. Anything else — including `docs/foo.py` and
-  # `.github/workflows/*.yml` — is code.
-  file_non_code=0
-  ext=""
-  case "$path" in *.*) ext="${path##*.}" ;; esac
-  if [ -n "$ext" ]; then
-    # shellcheck disable=SC2086 # deliberate split of the space-separated constant
-    for candidate in $CODE_FREE_EXTENSIONS; do
-      if [ "$ext" = "$candidate" ]; then file_non_code=1; fi
-    done
-  else
-    # shellcheck disable=SC2086 # deliberate split of the space-separated constant
-    for prefix in $CODE_FREE_EXTENSIONLESS_PREFIXES; do
-      case "$path" in "$prefix"*) file_non_code=1 ;; esac
-    done
-  fi
-  if [ "$file_non_code" -eq 1 ]; then census_non_code_files=$((census_non_code_files + 1)); fi
-done <<<"$NUMSTAT"
-
-census_noun="files"
-if [ "$census_files" -eq 1 ]; then census_noun="file"; fi
-CENSUS="$census_files $census_noun, +$census_added/-$census_deleted"
-
-if [ "$census_files" -eq 0 ]; then
-  CENSUS_CHECK="FAIL (empty census)"
-  DETAILS+=("NOTHING-TO-REVIEW: the local diff census for '${BASE}...HEAD' is genuinely empty (0 files changed), so no review was enqueued. This is explicitly NOT a pass and MUST NOT be recorded as \"roborev clean\".")
-  finish NOTHING-TO-REVIEW 3
-fi
-CENSUS_CHECK="PASS"
-
-# --- step 3b: code-free census — a DETERMINISTIC FAIL, before any review ------
-# roborev structurally DISCARDS a code-free diff, so such a diff cannot be certified
-# by roborev at all (this change's own spec requirement, and CLAUDE.md rule 4). That
-# is a property of OUR census, measured locally — it must not depend on the reviewer
-# admitting it in prose, which is what the previous revision bet on.
-if [ "$census_non_code_files" -eq "$census_files" ]; then
-  CODE_FREE="FAIL (code-free census: $census_non_code_files/$census_files files are documentation/specification text)"
-  DETAILS+=("ERROR: code-free: every file in the census ($CENSUS for ${BASE}...HEAD) is documentation/specification prose, and roborev STRUCTURALLY DISCARDS a code-free diff — so this diff CANNOT be certified by roborev at all, whatever verdict it returns. The sanctioned substitute is primary-source verification recorded in the PR (for example 'git show cassandra-5.0.8:<path>' for the source the docs describe). A docs-only change must NEVER record \"roborev clean\".")
-  DETAILS+=("ERROR: code-free: no review was enqueued, because a passing verdict on this diff would be meaningless.")
-  finish FAIL 1
-fi
-CODE_FREE="PASS"
+roborev_push_assert
+roborev_census
 
 # --- step 4: invoke by EXPLICIT sha + EXPLICIT absolute repo (AC2) ------------
 if ! command -v roborev >/dev/null 2>&1; then
@@ -587,6 +437,8 @@ set -e
 # validated before use. When several announcements are present the LAST one is the
 # effective enqueue, and the multiplicity is recorded.
 ANNOUNCE_COUNT=$({ grep -ociE 'enqueued job [0-9]+ for [0-9a-f]{7,40}' "$LOG" 2>/dev/null || printf 0; } | tail -1)
+# shellcheck disable=SC2018,SC2019 # ASCII-only on purpose: this normalises a HEX sha,
+# and the POSIX classes would make the transform locale-dependent for no benefit.
 ANNOUNCE=$({ tr 'A-Z' 'a-z' <"$LOG" 2>/dev/null || printf ''; } | grep -oE 'enqueued job [0-9]+ for [0-9a-f]{7,40}' | tail -1 || printf '')
 ANNOUNCED_SHA=""
 announce_ok=0
@@ -622,7 +474,6 @@ fi
 # Diagnostics live beside the transcript; `log:` names the base path.
 FACTS_FILE="$LOG.facts"
 PROMPT_FILE="$LOG.prompt"
-JOB_FACTS_TOOL="$(cd "$(dirname "$0")" && pwd)/roborev-job-facts.py"
 : >"$FACTS_FILE"
 : >"$PROMPT_FILE"
 
@@ -729,7 +580,7 @@ else
   elif grep -qi 'no issues found' "$LOG" && grep -qiE '(^|[^[:alnum:]])summary:' "$LOG"; then
     verdict_marker=1
   fi
-  if [ -n "$JOB_STATUS" ] && [ "$JOB_STATUS" != done ]; then
+  if [ -n "$JOB_STATUS" ] && [ "$JOB_STATUS" != "done" ]; then
     REVIEW_COMPLETED="FAIL (job status '$JOB_STATUS' is not done)"
     DETAILS+=("ERROR: review-completed: the job record reports status '$JOB_STATUS', not 'done', so the review did NOT complete and nothing was certified. Failing closed — the absence of a vacuous phrase is never evidence that a review happened.")
   elif [ "$verdict_marker" -eq 0 ]; then
@@ -786,28 +637,90 @@ else
   fi
 fi
 
-# --- step 6c: tier 1 — ADVISORY prose corroboration, anchored to the verdict ----
-# DEMOTED from primary to advisory, and deliberately so. It matched anywhere in the
-# transcript, so a review that merely QUOTED the phrase — including any review of
-# THIS wrapper, whose own diff contains it in several files — was failed as vacuous.
-# The systemic cost of that is agents learning to WAIVE tier-1 failures, which
-# restores the very defect the guard exists to prevent. It is no longer load-bearing
-# for anything: the docs-only trigger it was primary for is now caught deterministically
-# by `code-free:`, and "the reviewer never got the diff" by `prompt-content:`. So it
-# reports a NOTICE and never fails the run, matched ONLY within the verdict/summary
-# region (the lines carrying a `Summary:`), not over arbitrary finding bodies.
+# --- step 6c: findings vs reviewer error ---------------------------------------
+# roborev exits NON-ZERO when the review REPORTS FINDINGS. That is a NORMAL, GENUINE
+# outcome and must never be misreported as a reviewer malfunction: an agent told the
+# reviewer broke will retry or bypass instead of FIXING THE FINDINGS. The structured
+# `status` field is the authority for which of the two happened.
+#
+# This runs BEFORE tier 1 on purpose: `findings:` is the deterministic disambiguator
+# tier 1 is gated on (step 6d).
+findings_count=$({ grep -oiE '\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$LOG" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
+if [ "$REVIEW_RC" -eq 0 ]; then
+  ROBOREV_EXIT="PASS"
+  if [ "${findings_count:-0}" -gt 0 ]; then
+    # Exit 0 WITH severity markers: not the documented shape, but the markers are
+    # evidence the reviewer analysed the diff, which is what tier 1 needs to know.
+    FINDINGS="PRESENT ($findings_count)"
+  else
+    FINDINGS="NONE"
+  fi
+else
+  review_ran=0
+  if [ -n "$JOB_STATUS" ]; then
+    case "$JOB_STATUS" in "done") review_ran=1 ;; esac
+  elif [ "$REVIEW_COMPLETED" = "PASS" ]; then
+    review_ran=1
+  fi
+  if [ "$review_ran" -eq 1 ]; then
+    ROBOREV_EXIT="FINDINGS (exit $REVIEW_RC)"
+    if [ "${findings_count:-0}" -gt 0 ]; then
+      FINDINGS="PRESENT ($findings_count)"
+    else
+      FINDINGS="PRESENT"
+    fi
+    DETAILS+=("ERROR: roborev-exit: FINDINGS — 'roborev review' exited $REVIEW_RC because the review REPORTED FINDINGS. The review is GENUINE (job status '${JOB_STATUS:-unknown}') and the reviewer did NOT malfunction: do not retry it and do not bypass it. TRIAGE AND FIX the findings in the transcript ($LOG), then push and re-review. RESULT is FAIL because a review with open findings is not \"roborev clean\".")
+  else
+    ROBOREV_EXIT="ERROR (exit $REVIEW_RC)"
+    FINDINGS="UNKNOWN"
+    DETAILS+=("ERROR: roborev-exit: ERROR — 'roborev review' exited $REVIEW_RC and the job did not complete (status '${JOB_STATUS:-unavailable}'). The REVIEWER itself failed, so nothing was certified — this is an infra condition, not a findings outcome: check the daemon ('roborev status'), the agent's credentials, and the transcript at $LOG.")
+  fi
+fi
+
+# --- step 6d: tier 1 — AUTHORITATIVE, but gated on `findings:` -----------------
+# The reviewer's own summary claiming there are no code changes, against a census we
+# measured as NON-EMPTY, is trigger T3 — and a merge-gating check must FAIL on it,
+# not merely note it. But the naive form of this check false-FAILs: it once matched
+# anywhere in the transcript, so a review that merely QUOTED the phrase was failed as
+# vacuous (this very wrapper's diff carries the phrase in several files). Agents
+# learning to WAIVE tier-1 failures would restore the defect the guard exists to stop.
+#
+# Two things make the strict version safe:
+#   1. ANCHORING — only the verdict/summary region is matched (the lines carrying a
+#      `Summary:`), never arbitrary finding bodies.
+#   2. GATING ON `findings:` — the deterministic disambiguator computed in step 6c:
+#        findings: NONE     the reviewer is CLAIMING CLEANLINESS, so the phrase is a
+#                           VACUITY CLAIM about a non-empty census  => HARD FAIL
+#        findings: PRESENT  the reviewer demonstrably analysed the diff and produced
+#                           findings, so the phrase is DISCUSSION   => advisory NOTICE
+#        findings: UNKNOWN  we cannot tell whether a review happened. Treated as
+#                           claiming cleanliness => HARD FAIL, because fail-closed is
+#                           the correct direction when the state is unknowable; an
+#                           unparseable findings state must never DISARM this check.
+# `code-free:` remains an independent, strictly earlier check (it fires pre-enqueue).
 VERDICT_REGION_FILE="$LOG.verdict"
 { grep -iE '(^|[^[:alnum:]])summary:' "$LOG" 2>/dev/null || true; } >"$VERDICT_REGION_FILE"
 if [ ! -s "$VERDICT_REGION_FILE" ]; then
   TIER1="UNAVAILABLE"
 elif grep -qi 'no code changes' "$VERDICT_REGION_FILE"; then
-  TIER1="NOTICE (vacuous verdict vs non-empty census)"
-  DETAILS+=("NOTICE: vacuity-tier1 (ADVISORY, does not fail the run): the review's summary claims there are NO CODE CHANGES to review while the locally computed census is NON-EMPTY: $CENSUS (${BASE}...HEAD). Corroborating signal only — the deterministic checks above (code-free, review-completed, prompt-content, sha-assert) carry the verdict.")
+  case "$FINDINGS" in
+    PRESENT*)
+      TIER1="NOTICE (phrase present in a findings-bearing review)"
+      DETAILS+=("NOTICE: vacuity-tier1 (advisory here, does not fail the run): the review's summary mentions 'no code changes' while the census is NON-EMPTY ($CENSUS), but the review reported findings ($FINDINGS) — so it demonstrably analysed the diff and the phrase is discussion, not a vacuity claim.")
+      ;;
+    *)
+      TIER1="FAIL (vacuous verdict vs non-empty census)"
+      DETAILS+=("ERROR: vacuity-tier1: the review's summary claims there are NO CODE CHANGES to review while the locally computed census is NON-EMPTY: $CENSUS (${BASE}...HEAD), and the review reported NO findings (findings: $FINDINGS) — so it is CLAIMING CLEANLINESS on a change it did not review. The reviewer's claim contradicts a fact we measured ourselves: this run is NOT reportable as \"roborev clean\".")
+      if [ "$FINDINGS" = "UNKNOWN" ]; then
+        DETAILS+=("ERROR: vacuity-tier1: the findings state is UNKNOWN (the reviewer errored), which is treated as claiming cleanliness — fail-closed is the correct direction when we cannot tell whether a review happened.")
+      fi
+      ;;
+  esac
 else
   TIER1="PASS"
 fi
 
-# --- step 6d: tier 2 — token accounting; drift is FAILED, absence is not -------
+# --- step 6e: tier 2 — token accounting; drift is FAILED, absence is not -------
 # Three distinguishable states (see scripts/flow/roborev-job-facts.py):
 #   absent      -> UNAVAILABLE. A build that reports no token data is a legitimate
 #                  difference, not a signal.
@@ -864,39 +777,10 @@ case "${TOKEN_STATE:-}" in
     ;;
 esac
 
-# --- step 7: findings vs reviewer error, then the verdict ----------------------
-# roborev exits NON-ZERO when the review REPORTS FINDINGS. That is a NORMAL, GENUINE
-# outcome and must never be misreported as a reviewer malfunction: an agent told the
-# reviewer broke will retry or bypass instead of FIXING THE FINDINGS. The structured
-# `status` field is the authority for which of the two happened.
-findings_count=$({ grep -oiE '\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$LOG" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
-if [ "$REVIEW_RC" -eq 0 ]; then
-  ROBOREV_EXIT="PASS"
-  FINDINGS="NONE"
-else
-  review_ran=0
-  if [ -n "$JOB_STATUS" ]; then
-    case "$JOB_STATUS" in done) review_ran=1 ;; esac
-  elif [ "$REVIEW_COMPLETED" = "PASS" ]; then
-    review_ran=1
-  fi
-  if [ "$review_ran" -eq 1 ]; then
-    ROBOREV_EXIT="FINDINGS (exit $REVIEW_RC)"
-    if [ "${findings_count:-0}" -gt 0 ]; then
-      FINDINGS="PRESENT ($findings_count)"
-    else
-      FINDINGS="PRESENT"
-    fi
-    DETAILS+=("ERROR: roborev-exit: FINDINGS — 'roborev review' exited $REVIEW_RC because the review REPORTED FINDINGS. The review is GENUINE (job status '${JOB_STATUS:-unknown}') and the reviewer did NOT malfunction: do not retry it and do not bypass it. TRIAGE AND FIX the findings in the transcript ($LOG), then push and re-review. RESULT is FAIL because a review with open findings is not \"roborev clean\".")
-  else
-    ROBOREV_EXIT="ERROR (exit $REVIEW_RC)"
-    FINDINGS="UNKNOWN"
-    DETAILS+=("ERROR: roborev-exit: ERROR — 'roborev review' exited $REVIEW_RC and the job did not complete (status '${JOB_STATUS:-unavailable}'). The REVIEWER itself failed, so nothing was certified — this is an infra condition, not a findings outcome: check the daemon ('roborev status'), the agent's credentials, and the transcript at $LOG.")
-  fi
-fi
+# --- step 7: the verdict ------------------------------------------------------
 # The findings COUNT is best-effort (it counts severity markers in the transcript);
-# the PRESENT/NONE distinction is the load-bearing part.
-
+# the PRESENT/NONE/UNKNOWN distinction is the load-bearing part — tier 1 is gated on it.
+#
 # Every per-check key participates in ONE scan. A key fails the run when its value
 # starts with FAIL, FINDINGS or ERROR; PASS / SKIP / UNAVAILABLE / NOTICE never do
 # (NOTICE is the advisory tier's value and is deliberately non-failing).
