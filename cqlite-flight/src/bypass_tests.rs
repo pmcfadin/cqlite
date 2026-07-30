@@ -54,15 +54,26 @@ fn aggregating_request_never_selects_the_fast_path() {
     );
 }
 
-/// Issue #3095: a DECLARED static column no longer forces the merge arm — both
-/// arms implement Cassandra's `processPartition()` static semantics now, so the
-/// fast path may serve a static-bearing schema.
+/// Issue #3095: a DECLARED static column no longer forces the merge arm by ITSELF, and
+/// what forces it now is the CELL-TOMBSTONE divergence (issue #3140) — a static-bearing
+/// file that MAY contain a deletion.
 ///
-/// This fixture's SSTable holds no static row, so declaring the column in the
-/// schema is the only difference: it isolates the retired precondition. The
-/// still-live UNDECLARED-on-disk case is asserted by the differential test's
-/// `assert_undeclared_static_column_is_refused_on_disk`, which needs a real
-/// static-bearing file.
+/// The observable statement at this level is that the refusal REASON changed: a
+/// static-bearing schema is no longer refused for BEING static
+/// (`BypassReason::StaticColumns`); it is refused only when the file also declares a
+/// deletion (`StaticColumnsWithDeletions`). The deletion-FREE half — a static-bearing
+/// file SELECTED for the fast arm — cannot be shown on a CQLite-WRITTEN fixture (see the
+/// note below) and is asserted on real Cassandra bytes by
+/// `issue_3095_flight_static_columns.rs`, where `test_deltas.static_with_rows` and
+/// `test_writeparity.static_clustering_shape` both take the bypass.
+///
+/// OUT-OF-SCOPE OBSERVATION, recorded rather than worked around: CQLite's own
+/// `Statistics.db` writer does not emit Cassandra's `EncodingStats.DELETION_TIME_EPOCH`
+/// "no deletion recorded" sentinel for a deletion-free SSTable, so
+/// `may_contain_deletions()` reports `true` for every CQLite-written file. That is the
+/// SAFE direction (the fast arm is refused and the correct merge arm serves the request)
+/// and it affects CQLite-written fixtures only — the real Cassandra fixtures
+/// discriminate correctly.
 #[test]
 fn a_declared_static_column_no_longer_forces_the_merge_arm() {
     use crate::testutil::{simple_schema, write_row};
@@ -76,10 +87,51 @@ fn a_declared_static_column_no_longer_forces_the_merge_arm() {
     if let Some(c) = schema.columns.iter_mut().find(|c| c.name == "name") {
         c.is_static = true;
     }
+    let reason = bypass_reason(&readers, &schema, ForcedMergePath::Auto, false);
+    assert_ne!(
+        reason,
+        BypassReason::StaticColumns,
+        "issue #3095: a static column the schema DECLARES is no longer refused for \
+         BEING static"
+    );
     assert_eq!(
-        bypass_reason(&readers, &schema, ForcedMergePath::Auto, false),
+        reason,
+        BypassReason::StaticColumnsWithDeletions,
+        "…it is refused only by the #3140 deletion guard, which this CQLite-written \
+         fixture trips (see the note on CQLite's stats writer)"
+    );
+}
+
+/// Issue #3140 fail-closed branch, and its SCOPE: the guard applies to static-bearing
+/// tables ONLY — a deletion-bearing NON-static table keeps its pre-existing #3058 fast
+/// path, so this is not "any tombstone blocks the bypass".
+///
+/// A static-bearing file that MAY contain a simple cell tombstone must take the merge
+/// arm: the merge arm drops the tombstone (column reads null, matching Cassandra) while
+/// the fast arm surfaces a raw `Value::Tombstone` the Arrow encoder rejects, aborting
+/// `do_get` with zero rows. Retire this test with the variant when #3140 lands.
+#[test]
+fn the_deletion_guard_is_scoped_to_static_bearing_tables() {
+    use crate::testutil::{delete_row, simple_schema, write_row};
+    let (_temp, readers) = open_readers(vec![vec![write_row(1, "a", 10, 100), delete_row(2, 200)]]);
+    assert!(
+        readers[0].may_contain_deletions(),
+        "the fixture must declare a deletion for this case to mean anything"
+    );
+    let mut static_schema = simple_schema();
+    if let Some(c) = static_schema.columns.iter_mut().find(|c| c.name == "name") {
+        c.is_static = true;
+    }
+    assert_eq!(
+        bypass_reason(&readers, &static_schema, ForcedMergePath::Auto, false),
+        BypassReason::StaticColumnsWithDeletions,
+        "static + may-contain-deletions fails closed to the merge arm"
+    );
+    assert_eq!(
+        bypass_reason(&readers, &simple_schema(), ForcedMergePath::Auto, false),
         BypassReason::Selected,
-        "issue #3095: a static column the schema DECLARES is servable by the fast arm"
+        "a deletion-bearing NON-static table keeps its pre-existing #3058 fast path — \
+         the guard is NOT 'any table with a tombstone'"
     );
 }
 

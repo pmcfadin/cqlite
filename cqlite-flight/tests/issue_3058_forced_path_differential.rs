@@ -19,12 +19,15 @@
 //!   * real Cassandra `nb` fixtures from the query-semantics oracle
 //!     (`test_compaction_tombstone_ttl`): range tombstone, row deletion,
 //!     expired-TTL cell + expired row-liveness marker, surviving live rows;
-//!   * STATIC columns as an ARM DIFFERENTIAL (issue #3095): a CQLite-written
-//!     fixture (including a static-ONLY partition) and the real Cassandra
-//!     `test_writeparity.static_clustering_shape`, both with a DECLARING ticket
-//!     DDL, must agree row-for-row across the arms. Only the UNDECLARED-on-disk
-//!     static column still fails closed to the merge arm (see
-//!     `BypassReason::StaticColumns`), pinned by the `@stale-ddl` case;
+//!   * STATIC columns (issues #3095 / #3140): #3095 retired "any static column
+//!     refuses the fast arm", so a DELETION-FREE static-bearing table now takes the
+//!     fast arm — pinned here by `cassandra/static_clustering_shape(declared static,
+//!     both arms)` and, end to end, by `issue_3095_flight_static_columns.rs`. What
+//!     still fails closed, pinned by `statics/select-star`, is a static-bearing SSTable
+//!     that MAY contain a deletion
+//!     (`BypassReason::StaticColumnsWithDeletions`, the cell-tombstone arm divergence
+//!     #3140) and a static column present ON DISK that the ticket DDL does not declare
+//!     (`BypassReason::StaticColumns`, the `@stale-ddl` case);
 //!   * a CQLite-written fixture carrying a partition deletion, a range tombstone,
 //!     a row deletion, an expired-TTL cell and a live-TTL cell,
 //!     read at TWO pinned `now` values so the pinned clock itself is pinned;
@@ -549,6 +552,12 @@ async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
     // both arms and out of this change's scope — recorded for a follow-up rather
     // than papered over here. Cassandra-written tombstones ARE covered, by the
     // dataset cases below and by the query-semantics oracle.
+    //
+    // NOT to be conflated with issue #3140 (issue #3095 review): #3140 is the
+    // CASSANDRA-written cell tombstone, which the MERGE arm handles correctly (it
+    // drops the cell, the column reads null) and only the FAST arm aborts on — an arm
+    // DIVERGENCE. #3094, above, is CQLite-written and identical on BOTH arms, so it is
+    // not a divergence at all. Different defect class, different fix.
     engine
         .write(base(
             1,
@@ -862,57 +871,65 @@ async fn forced_path_differential_agrees_on_every_shape() {
         );
     }
 
-    // ---- Static columns: an ARM DIFFERENTIAL (issue #3095) -----------------
-    // The static exclusion this case used to pin is RETIRED: both arms now
-    // implement Cassandra's `processPartition()` static semantics (statics merged
-    // into every clustering row; a static-only partition returning exactly one
-    // row), so a schema DECLARING its static columns is servable by the fast arm
-    // and the two must agree row-for-row.
+    // ---- Static columns: FAIL-CLOSED to the merge arm (issues #3095 / #3140) ----
+    // #3095 retired the "any static column refuses the fast arm" exclusion, but a
+    // static-bearing SSTable that MAY contain a deletion still fails closed
+    // (`BypassReason::StaticColumnsWithDeletions`): a simple CELL tombstone diverges
+    // between the arms — the merge arm drops it (column reads null, Cassandra's answer)
+    // while the fast arm surfaces a raw `Value::Tombstone` the Arrow encoder rejects.
+    // This fixture contains a row deletion, so it takes that branch.
     //
-    // SCOPE, stated so this case is not mistaken for a Cassandra oracle: the
-    // fixture is CQLITE-WRITTEN, so its ROW CONTENT proves nothing about
-    // Cassandra (it is invariant to a uniform error and is subject to the
-    // write-side #1074 — #3042). What it does prove is ARM-INVARIANCE over bytes
-    // whose static layout differs from Cassandra's. The Cassandra-parity oracle
-    // is `cqlite-flight/tests/issue_3095_flight_static_columns.rs`, on
-    // Cassandra-written fixtures including a static-ONLY partition.
+    // SCOPE, so this is not mistaken for a Cassandra oracle: the fixture is
+    // CQLITE-WRITTEN, so its ROW CONTENT proves nothing about Cassandra (it is
+    // invariant to a uniform error and subject to the write-side #1074 — #3042). What
+    // it proves is that both FORCED values behave identically and that the fast arm is
+    // refused. The Cassandra-parity oracle is
+    // `cqlite-flight/tests/issue_3095_flight_static_columns.rs`, on Cassandra-written
+    // fixtures including a static-ONLY partition; the deletion-FREE static fixtures
+    // there DO take the fast arm, which is where #3095's AC5 is demonstrated.
     let (_stemp, statics_dir) = build_statics_fixture().await;
     let ssvc = CqliteFlightService::new(statics_dir, 8192);
     let sticket = ticket_json(KS, STATIC_TBL, STATIC_DDL);
-    let static_rows = assert_arms_agree(
+    assert_refused_schema_unchanged(
         "statics/select-star",
         &ssvc,
         &sticket,
         NOW_BEFORE_EXPIRY,
-        1,
+        None,
         &mut failures,
     )
     .await;
-    // Not just "the arms agree": pin the SHAPE, so an agreed-but-wrong result set
-    // (both arms emitting a phantom `ck = null` row alongside the real rows, or both
-    // dropping a rowless partition) cannot pass. Expected, per Cassandra's
+    // Not just "refused and identical": pin the SHAPE the merge arm returns, so an
+    // agreed-but-wrong result set (a phantom `ck = null` row alongside the real rows, or
+    // a dropped rowless partition) cannot pass. Expected per Cassandra's
     // `processPartition()`: pk=1's two clustering rows carrying `s1`; ONE row for the
     // static-only pk=2; ONE row for pk=3, whose only clustering row was deleted.
-    if let Some(rows) = static_rows {
-        let mut shape: Vec<(String, String, String)> = rows
-            .iter()
-            .map(|r| {
-                let get = |c: &str| r.get(c).cloned().unwrap_or_else(|| "<missing>".into());
-                (get("pk"), get("ck"), get("s"))
-            })
-            .collect();
-        shape.sort();
-        let expected: Vec<(String, String, String)> = vec![
-            ("1".into(), "1".into(), "s1".into()),
-            ("1".into(), "2".into(), "s1".into()),
-            ("2".into(), "<null>".into(), "s2-only".into()),
-            ("3".into(), "<null>".into(), "s3-rows-deleted".into()),
-        ];
-        if shape != expected {
-            failures.push(format!(
-                "statics/select-star: the arms agree but the (pk, ck, s) shape is not \
-                 Cassandra's — expected {expected:#?}, got {shape:#?}"
-            ));
+    std::env::set_var(TTL_NOW_ENV, NOW_BEFORE_EXPIRY.to_string());
+    let static_rows = do_get_outcome(&ssvc, &sticket).await;
+    std::env::remove_var(TTL_NOW_ENV);
+    match static_rows {
+        Err(e) => failures.push(format!("statics/select-star: do_get failed: {e}")),
+        Ok(rows) => {
+            let mut shape: Vec<(String, String, String)> = rows
+                .iter()
+                .map(|r| {
+                    let get = |c: &str| r.get(c).cloned().unwrap_or_else(|| "<missing>".into());
+                    (get("pk"), get("ck"), get("s"))
+                })
+                .collect();
+            shape.sort();
+            let expected: Vec<(String, String, String)> = vec![
+                ("1".into(), "1".into(), "s1".into()),
+                ("1".into(), "2".into(), "s1".into()),
+                ("2".into(), "<null>".into(), "s2-only".into()),
+                ("3".into(), "<null>".into(), "s3-rows-deleted".into()),
+            ];
+            if shape != expected {
+                failures.push(format!(
+                    "statics/select-star: the (pk, ck, s) shape is not Cassandra's — \
+                     expected {expected:#?}, got {shape:#?}"
+                ));
+            }
         }
     }
 

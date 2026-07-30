@@ -187,6 +187,34 @@ pub enum BypassReason {
     ///   question cannot be answered at all
     ///   ([`SSTableReader::static_columns_are_known`]).
     StaticColumns,
+    /// A STATIC-bearing table whose SSTable declares at least one DELETION, so it may
+    /// contain a simple CELL tombstone — a shape on which the two arms genuinely
+    /// diverge today (issue #3140).
+    ///
+    /// Mechanism, measured on the CASSANDRA-WRITTEN `test_tomb.static_with_tombstones`
+    /// (one generation; its `ck = 3` carries a cell tombstone on `row_col`):
+    /// * the MERGE arm is CORRECT — `assemble_read_cells` drops a simple cell
+    ///   tombstone, the column reads null, and `SELECT *` returns Cassandra's 3 rows;
+    /// * the single-generation FAST arm surfaces the tombstone as a raw
+    ///   `Value::Tombstone`, and the Arrow encoder then hard-errors
+    ///   (`expected Text value, got Tombstone(..)`), aborting `do_get` with ZERO rows.
+    ///
+    /// That is a read-path ARM DIVERGENCE on real Cassandra bytes — precisely what this
+    /// predicate exists to fail closed on — and it is DISTINCT from #3094, which is a
+    /// CQLite-WRITTEN shape reproducing identically on BOTH arms (so not a divergence
+    /// at all). Fixing the fast arm's cell-tombstone handling is issue #3140; when that
+    /// lands, THIS variant and its predicate branch are retired and
+    /// `test_tomb.static_with_tombstones` becomes an ordinary both-arms differential.
+    ///
+    /// Deliberately scoped to STATIC-bearing tables — the tables #3095 newly admitted
+    /// to the fast arm. The same fast-arm defect exists for a NON-static
+    /// single-generation table, but that is pre-existing #3058 behaviour this change
+    /// does not touch (and is #3140's remit). Narrowing further is not possible from
+    /// authoritative metadata: `EncodingStats.minLocalDeletionTime` cannot tell a cell
+    /// tombstone from a row/range/partition one or a TTL'd cell (see
+    /// [`SSTableReader::may_contain_deletions`]), so a static-bearing file that
+    /// declares NO deletion at all still takes the fast arm.
+    StaticColumnsWithDeletions,
 }
 
 impl BypassReason {
@@ -242,6 +270,18 @@ pub fn bypass_reason(
         .any(|on_disk| !declared_static.contains(on_disk.as_str()))
     {
         return BypassReason::StaticColumns;
+    }
+    // Issue #3140 (fail-closed, scoped to the static-bearing tables #3095 newly
+    // admitted): a simple CELL tombstone diverges between the arms — the merge arm
+    // drops it (column reads null, matching Cassandra) while the fast arm surfaces a
+    // raw `Value::Tombstone` the Arrow encoder rejects, aborting `do_get` with zero
+    // rows. The narrowest AUTHORITATIVE pre-read signal is "this file declares a
+    // deletion at all" (`EncodingStats.minLocalDeletionTime`); the metadata cannot
+    // single out a cell tombstone. A static-bearing file that declares NO deletion
+    // still takes the fast arm.
+    let has_statics = !declared_static.is_empty() || !only.on_disk_static_columns().is_empty();
+    if has_statics && only.may_contain_deletions() {
+        return BypassReason::StaticColumnsWithDeletions;
     }
     if schema
         .columns
