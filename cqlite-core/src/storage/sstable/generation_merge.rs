@@ -577,15 +577,19 @@ fn push_metadata_rows(
 /// path's [`scan_merge::sort_by_token_order`] output (issue #1579 ordering
 /// guardrail).
 ///
-/// Construction (`KWayMerger::new`, which opens the input files) happens on the
-/// blocking task and is signalled back over a oneshot BEFORE any streaming — and the
-/// ways that can fail are kept apart by the returned [`MergeStreamSetupError`] rather
-/// than flattened into one `Error`. Only a merger-INELIGIBLE input (an unsupported
-/// format/version) is `fallback_eligible`; a REPORTED runtime failure (I/O,
-/// corruption, …) and a producer that DIED without signalling — joined here to recover
-/// its panic — both propagate, because the caller must not answer either with the
-/// non-reconciling concat (issues #3124/#3154, roborev — see that type's module doc
-/// for why the flattened version returned wrong data).
+/// Construction (`KWayMerger::new`, which SPAWNS one producer thread per input —
+/// each input's `SSTableReader::open`, and so every format/version gate, runs inside
+/// that thread, not here) happens on the blocking task and is signalled back over a
+/// oneshot BEFORE any streaming — and the ways that can fail are kept apart by the
+/// returned [`MergeStreamSetupError`] rather than flattened into one `Error`. Only a
+/// merger-INELIGIBLE input (an unsupported format/version) is `fallback_eligible`,
+/// and because of that thread boundary NO production construction failure is ever
+/// classified that way — the reachable ones are `Error::Schema` and `Error::Storage`,
+/// and both now propagate (see [`MergeStreamSetupError`]'s module doc for the full
+/// enumeration and why that arm is kept as a defensive one). A producer that DIED
+/// without signalling — joined here to recover its panic — propagates too, because
+/// the caller must not answer it with the non-reconciling concat (issues
+/// #3124/#3154, roborev).
 ///
 /// A `step()` error mid-stream is delivered as an `Err` item on the channel, and a
 /// task that dies mid-stream is caught by the returned [`reader::RowScanStream`]'s

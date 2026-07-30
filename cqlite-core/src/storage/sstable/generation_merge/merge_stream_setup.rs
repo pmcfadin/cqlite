@@ -7,10 +7,13 @@
 //! `generation_merge::stream_generations_for_read` reports setup back over a
 //! oneshot from its blocking task, and the caller
 //! (`SSTableManager::scan_stream`) is allowed to substitute the lazy per-reader
-//! token-order concat when the merge cannot be CONSTRUCTED — e.g. an input
-//! format the `KWayMerger` cannot open. That substitution is safe there and only
+//! token-order concat when the merge cannot be CONSTRUCTED *because the merger
+//! cannot handle the input at all*. That substitution is safe there and only
 //! there: nothing has been streamed yet, and the concat's documented Issue #883
 //! limitation is accepted for a table the reconciling merge simply cannot read.
+//! (Whether that condition is actually REACHABLE through today's constructor is a
+//! separate question, answered — "no" — two sections down. Read it before
+//! concluding anything about production behaviour from this type.)
 //!
 //! But the oneshot has a SECOND failure mode: the blocking task can DIE (panic)
 //! before signalling anything, dropping its sender. Flattened into one `Error`,
@@ -46,17 +49,83 @@
 //! classification keys on the `Error` VARIANT — never on its message — and
 //! [`fallback_eligible`](MergeStreamSetupError::fallback_eligible) remains the SINGLE
 //! predicate the caller consults.
+//!
+//! # What `KWayMerger::new` can ACTUALLY return — and what issue #3154 changed
+//!
+//! The classification above must be read with the real constructor chain in hand,
+//! because it is NOT the chain the original wording of this module implied.
+//! `KWayMerger::new` (`storage/write_engine/merge/mod.rs:1627`) delegates through
+//! `new_with_gc` (`:1667`) / `new_with_gc_and_registry` (`:1683`) to
+//! `new_with_gc_and_registry_cancellable` (`:1710`), which has exactly THREE
+//! fallible steps:
+//!
+//! 1. `Error::InvalidInput` when `input_paths` is empty (`merge/mod.rs:1718-1721`) —
+//!    unreachable from the `scan_stream` site, which is guarded by
+//!    `readers.len() > 1`.
+//! 2. `schema.validate_dropped_columns()?` (`merge/mod.rs:1728`) → `Error::Schema`
+//!    (`schema/mod.rs:611`).
+//! 3. `SSTableRowIteratorAdapter::open(...)?` (`merge/mod.rs:1746`), whose ONLY error
+//!    is `Error::Storage("streaming producer: failed to spawn thread: …")`
+//!    (`merge/producer_iter.rs:275`).
+//!
+//! Step 3 OPENS NOTHING. `SSTableRowIteratorAdapter::open`
+//! (`merge/producer_iter.rs:201-294`) creates a channel and `Builder::spawn`s a
+//! producer thread; `SSTableReader::open` — and therefore EVERY
+//! `UnsupportedFormat` / `UnsupportedVersion` header- and version-gate check — runs
+//! INSIDE that thread (`merge/producer_iter.rs:385-388`) and surfaces as a failed
+//! producer message observed later at `merger.step()`, i.e. mid-stream on the output
+//! channel, never as a construction error. From the `scan_stream` site it is doubly
+//! impossible: `readers.len() > 1` means every generation ALREADY opened
+//! successfully through `SSTableReader::open`.
+//!
+//! Two consequences, stated plainly so no reader draws the flattering conclusion:
+//!
+//! * [`MergerIneligible`](MergeStreamSetupError::MergerIneligible) is **DEAD IN
+//!   PRODUCTION**. Only the test-only construction-error injection seam
+//!   (`producer_fault::FaultScope::injected_construction_error`) ever constructs it.
+//!   An unsupported-format / below-floor generation does NOT degrade to the concat at
+//!   this site — it errors mid-stream through the channel. **That was already true
+//!   BEFORE issue #3154's narrowing**, so the narrowing removed no real-world
+//!   degradation: AC2's "an unsupported input keeps falling back" property is
+//!   preserved only because the fallback was already unreachable. The AC2 test
+//!   therefore proves the CLASSIFIER, not an end-to-end fallback, and must not be
+//!   read as evidence that a BTI / unsupported multi-generation table currently
+//!   degrades to the concat. It does not.
+//! * The errors that WERE actually reaching the fallback are `Error::Schema`
+//!   (dropped-column validation, step 2) and `Error::Storage` (producer thread-spawn
+//!   failure, step 3). Both used to be answered with the non-reconciling concat under
+//!   `Ok`; both now PROPAGATE as an error. **That is the real behaviour change of
+//!   issue #3154** — not a change to unsupported-format handling.
+//!
+//! The `MergerIneligible` arm is nevertheless KEPT, as a DELIBERATELY DEFENSIVE arm:
+//! should a future constructor validate format/version EAGERLY (opening readers on
+//! the calling thread instead of inside the producer thread), an unsupported input
+//! would start arriving here as a construction error, and the documented Issue #883
+//! degradation must keep working the moment it does.
 
 use crate::Error;
 
 /// A streaming cross-generation merge that never produced a live stream.
 pub(in crate::storage::sstable) enum MergeStreamSetupError {
     /// `KWayMerger::new` reported that it cannot handle this INPUT: an unsupported
-    /// format, or a version outside the supported floor. Nothing was streamed, the
-    /// producer is alive and well-behaved, and the reconciling merge is genuinely
-    /// unavailable for this table — so the caller MAY answer with the non-reconciling
-    /// concat, accepting its documented Issue #883 limitation rather than failing a
-    /// read that CQLite could otherwise serve.
+    /// format, or a version outside the supported floor.
+    ///
+    /// **DEFENSIVE — dead in production.** The current `KWayMerger::new` chain cannot
+    /// return either of those variants: format/version gating happens inside the
+    /// producer thread's `SSTableReader::open`
+    /// (`storage/write_engine/merge/producer_iter.rs:385-388`) and surfaces mid-stream
+    /// at `step()`, not at construction (see this module's doc for the full
+    /// enumeration). Today only the test-only construction-error injection seam
+    /// constructs this variant, so an unsupported multi-generation table does NOT
+    /// currently degrade to the concat here. The arm is retained so that a future
+    /// eagerly-validating constructor keeps the documented Issue #883 degradation
+    /// instead of silently turning a merger-unreadable table into a failed read.
+    ///
+    /// When it IS produced the fallback is sound: nothing was streamed, the producer
+    /// is alive and well-behaved, and the reconciling merge is genuinely unavailable
+    /// for this table — so the caller MAY answer with the non-reconciling concat,
+    /// accepting its documented Issue #883 limitation rather than failing a read that
+    /// CQLite could otherwise serve.
     MergerIneligible(Error),
     /// `KWayMerger::new` reported a RUNTIME failure — an I/O error, a corrupt or
     /// unparseable input, a resource failure, or anything else that is not evidence
@@ -67,6 +136,13 @@ pub(in crate::storage::sstable) enum MergeStreamSetupError {
     /// there returns a FULL-LENGTH, UNRECONCILED result set (duplicated overwritten
     /// rows, resurrected deleted rows) as a success, which is strictly worse than
     /// reporting the failure the caller can act on.
+    ///
+    /// This is the ONLY outcome reachable in production at the `scan_stream` site:
+    /// `Error::Schema` (dropped-column validation, `merge/mod.rs:1728`) and
+    /// `Error::Storage` (producer thread-spawn failure,
+    /// `merge/producer_iter.rs:275`) are the two errors `KWayMerger::new` can actually
+    /// report there, and BOTH were previously answered with the concat. Narrowing them
+    /// to propagate is the real behaviour change of issue #3154.
     ConstructionFailed(Error),
     /// The producer task ended WITHOUT signalling readiness — it panicked (or was
     /// otherwise lost). The reconciling merge never started for an INTERNAL
@@ -82,6 +158,14 @@ impl MergeStreamSetupError {
     /// exactly the guess this module exists to eliminate, and it would silently
     /// re-classify itself whenever an error string is reworded.
     ///
+    /// What the current constructor can actually hand this function is enumerated in
+    /// the module doc, and it is worth being blunt about: `Error::Schema`
+    /// (dropped-column validation, `merge/mod.rs:1728`) and `Error::Storage`
+    /// (thread-spawn failure, `merge/producer_iter.rs:275`) are the reachable cases and
+    /// both propagate, while `UnsupportedFormat` / `UnsupportedVersion` are detected in
+    /// the producer thread (`merge/producer_iter.rs:385-388`) and surface at `step()`,
+    /// never here. The eligible arm below is therefore DEFENSIVE, not live.
+    ///
     /// The catch-all arm deliberately fails CLOSED. A future `Error` variant, or any
     /// error whose meaning is not "the merger cannot handle this input", propagates
     /// rather than earning the concat — the wrong direction there returns wrong data
@@ -89,10 +173,17 @@ impl MergeStreamSetupError {
     pub(in crate::storage::sstable) fn from_construction_failure(cause: Error) -> Self {
         match &cause {
             // The merger genuinely cannot read this input, which is the ONE condition
-            // the documented concat fallback exists to serve.
+            // the documented concat fallback exists to serve. Defensive: unreachable
+            // through today's constructor (see this function's doc).
             Error::UnsupportedFormat(_) | Error::UnsupportedVersion { .. } => {
                 Self::MergerIneligible(cause)
             }
+            // Fail CLOSED. Note the cost of that direction: a future `Error` variant
+            // that SHOULD earn the concat degrades SILENTLY into a propagated error
+            // here, with nothing to notice it. Whoever adds such a variant must also
+            // extend the enumerated classification table in this module's tests —
+            // `a_construction_failure_earns_the_concat_only_when_the_input_is_merger_ineligible`,
+            // whose `eligible` / `propagates` vectors ARE the contract.
             _ => Self::ConstructionFailed(cause),
         }
     }
