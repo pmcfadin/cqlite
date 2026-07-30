@@ -44,6 +44,35 @@ impl<'a> TimestampPolicy<'a> {
     }
 }
 
+#[cfg(test)]
+impl TimestampPolicy<'_> {
+    /// Test seam (issue #3095): install a live STATIC row for the current partition
+    /// exactly as `on_data_row`'s `is_static` branch does, so
+    /// [`TimestampPolicy::on_partition_close`]'s `complete` / `read_shadowing` /
+    /// visible-row decisions can be asserted DIRECTLY rather than only end-to-end.
+    pub(super) fn seed_static_for_test(
+        &mut self,
+        partition_key: RowKey,
+        schema: &TableSchema,
+        row_ts: i64,
+    ) {
+        let static_column = schema
+            .columns
+            .iter()
+            .find(|c| c.is_static)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "s".to_string());
+        self.partition_key = partition_key;
+        self.static_cells = vec![(Arc::from(static_column.as_str()), Value::text("static-val"))];
+        self.static_row_ts = row_ts;
+    }
+
+    /// Test seam: mark that the partition produced a VISIBLE clustering row.
+    pub(super) fn note_visible_row_for_test(&mut self) {
+        self.emitted_clustering_row = true;
+    }
+}
+
 impl SlidingPartitionPolicy for TimestampPolicy<'_> {
     type Row = (TableId, RowKey, ScanRow, i64);
 

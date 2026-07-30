@@ -117,7 +117,10 @@ pub(super) fn extract_clustering_values(
 /// #505) — so a marker is not a row a `SELECT` returns. This is the single predicate
 /// the static-content-on-an-empty-partition rule uses for Cassandra's
 /// `partition.hasNext()`, which is likewise evaluated over the already-FILTERED
-/// `RowIterator` (`UnfilteredRowIterators.filter`).
+/// `RowIterator`: `UnfilteredRowIterators.filter(iter, nowInSec)` →
+/// `FilteredRows.filter` installs `db/transform/Filter`, whose
+/// `applyToRow(row) = row.purge(PURGE_ALL, nowInSec, enforceStrictLiveness)` drops a
+/// row that purges to `null` (cassandra-5.0.8).
 pub(super) fn row_is_visible(row: &ScanRow) -> bool {
     matches!(row, ScanRow::Row(_) | ScanRow::RawRow(_))
 }
@@ -128,11 +131,27 @@ pub(super) fn row_is_visible(row: &ScanRow) -> bool {
 /// The ORDER is load-bearing: the row-tombstone display decision is taken over the
 /// row's OWN cells, and static cells are injected only into a row that survives it.
 ///
-/// Cassandra authority — the static row is a PARTITION-level object
-/// (`BaseRowIterator.staticRow()`), never part of a clustering `Row`, and
-/// `UnfilteredRowIterators.filter` drops a clustering row whose own
-/// `hasLiveData(nowInSec, ...)` is false. So a static cell can NEVER make a
-/// row-tombstoned clustering row live. Injecting first (which
+/// Cassandra authority, VERBATIM from the pinned `cassandra-5.0.8` tag:
+///
+/// * `db/transform/Filter.java` applies the static row and the clustering rows as
+///   SEPARATE transformations — `protected Row applyToStatic(Row row)` vs
+///   `protected Row applyToRow(Row row) { return row.purge(DeletionPurger.PURGE_ALL,
+///   nowInSec, enforceStrictLiveness); }`. A clustering row is purged from ITSELF and
+///   dropped when `purge` returns `null`; the static row never participates.
+/// * `db/rows/BTreeRow.java`'s `purge` → `update(info, deletion, newTree)` returns
+///   `null` when `info.isEmpty() && deletion.isLive() && BTree.isEmpty(newTree)` —
+///   the row's OWN primary-key liveness, OWN deletion and OWN cell btree. A static
+///   cell can never be in a clustering row's btree (the static row is a separate
+///   `Row` reached out of band via `BaseRowIterator.staticRow()`).
+/// * `db/transform/FilteredRows.java` states the separation outright:
+///   `public boolean isEmpty() { return staticRow().isEmpty() && !hasNext(); }` —
+///   `hasNext()` counts clustering rows only, which is why
+///   `SelectStatement.processPartition()` can branch on `!partition.hasNext()` while
+///   still reading `partition.staticRow()`.
+///
+/// So a static cell can NEVER make a row-tombstoned clustering row live, and a
+/// partition whose clustering rows all purge away still returns its static content.
+/// Injecting first (which
 /// [`merge_static_cells`] + [`build_display_row`] do when called in that order)
 /// made `row_has_non_key_cell` true for a PURE row tombstone, so the row surfaced
 /// as a live `ScanRow::Row` carrying the static value — a phantom row on the
@@ -158,3 +177,7 @@ pub(super) fn build_display_row_read_path(
         other => other,
     }
 }
+
+#[cfg(test)]
+#[path = "display_row_tests.rs"]
+mod tests;

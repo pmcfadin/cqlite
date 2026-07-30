@@ -168,13 +168,21 @@ impl StaticPartitionState {
     /// partition has produced a visible row.
     ///
     /// Cassandra fills each `case STATIC:` slot from the partition-level
-    /// `staticRow`, and a Cassandra-written clustering row never carries a static
-    /// cell, so on genuine Cassandra bytes "fill the absent column" and "overwrite"
-    /// are the same operation. Filling only absent columns is chosen deliberately:
-    /// it matches the single-generation decoder's `merge_static_cells`
-    /// (clustering-row-wins), keeping the two arms identical even on a
-    /// CQLite-written SSTable that mis-places a static cell into the clustering row
-    /// (the write-side #1074 shape).
+    /// `staticRow`, and a Cassandra-written clustering row NEVER carries a static
+    /// cell — the decoder's `merge_static_cells` documents that disjointness as a
+    /// construction property (a static cell's column has `is_static == true`; a
+    /// clustering row's cells are the clustering pseudo-cells plus the
+    /// `is_static == false` columns). On genuine Cassandra bytes, therefore, "fill
+    /// the absent column" and "overwrite" are the SAME operation and the two arms
+    /// agree exactly.
+    ///
+    /// The out-of-contract input differs in a way worth naming rather than
+    /// papering over: a CQLite-written SSTable that mis-places a static cell into
+    /// the clustering row (the write-side #1074 shape) makes the decoder APPEND a
+    /// second same-named cell (it performs no membership check), whereas this arm
+    /// keeps the clustering row's own value. Both then surface a single value to a
+    /// name-keyed consumer; which one is the consumer's keying rule on the decoder
+    /// arm. No committed Cassandra fixture exercises it.
     pub(crate) fn inject_into_clustering_row(&mut self, row: &mut QueryRow) {
         for (name, value) in &self.statics {
             row.values
