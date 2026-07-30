@@ -150,9 +150,14 @@ fn row_tombstone_entry(pk: i32, token: i64, ck: i32) -> PendingRow {
 
 /// An inner [`RowSource`] replaying a scripted step sequence, then `Complete`
 /// forever. Counts pulls so a test can prove the adapter defers rather than drops.
+///
+/// `fail_after` makes the source ERROR instead of yielding its Nth step, modelling a
+/// producer that dies mid-walk — the #3106 fail-closed event, whose interaction with a
+/// HELD-BACK static row is otherwise untested.
 struct Scripted {
     steps: std::vec::IntoIter<SourceStep>,
     pulls: usize,
+    fail_after: Option<usize>,
 }
 
 impl Scripted {
@@ -160,12 +165,33 @@ impl Scripted {
         Self {
             steps: steps.into_iter(),
             pulls: 0,
+            fail_after: None,
+        }
+    }
+
+    /// Yield `n` steps, then fail with a #3106-shaped dead-producer error.
+    fn failing_after(steps: Vec<SourceStep>, n: usize) -> Self {
+        Self {
+            steps: steps.into_iter(),
+            pulls: 0,
+            fail_after: Some(n),
         }
     }
 }
 
 impl RowSource for Scripted {
     fn next_step(&mut self) -> Result<SourceStep, crate::producer::ProducerError> {
+        if self.fail_after == Some(self.pulls) {
+            self.pulls += 1;
+            // The shape #3106 surfaces: a non-recoverable `Error::Internal` reporting a
+            // producer that died without its terminal sentinel.
+            return Err(crate::producer::ProducerError::Merge(
+                cqlite_core::Error::internal(
+                    "query row stream: the producer thread disconnected WITHOUT its \
+                     terminal Done sentinel (issue #3106)",
+                ),
+            ));
+        }
         self.pulls += 1;
         Ok(self.steps.next().unwrap_or(SourceStep::Complete))
     }
@@ -676,4 +702,90 @@ fn only_schema_declared_static_columns_are_injected() {
             Observed::Complete,
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Interaction with #3106's fail-closed producer death
+// ---------------------------------------------------------------------------
+
+/// Issue #3106 × #3095: a producer that dies MID-PARTITION while this adapter is
+/// holding a static row back must surface the ERROR — the held row must NOT be flushed
+/// as if the partition had ended.
+///
+/// #3106 made a producer death fatal precisely so a TRUNCATED result set can never be
+/// reported as success. The static adapter sits between the source and the drive loop
+/// and holds a row back across steps, so it is exactly the shape that could re-open
+/// that hole by treating "the source stopped" as "the partition ended". It must not:
+/// the partition's row set is incomplete, so emitting its static-only row would be a
+/// fabricated answer, and the error is the only correct outcome.
+#[test]
+fn a_producer_death_while_a_static_row_is_held_surfaces_the_error() {
+    let p = producer(static_schema());
+    // Step 0: the static row (held back). Step 1: the producer dies.
+    let mut inner = Scripted::failing_after(
+        vec![SourceStep::Row(key(9, 90), static_entry(9, 90, "held"))],
+        1,
+    );
+    let mut source = StaticMergeSource::wrap(&p, &mut inner).expect("wrapped");
+    assert_eq!(
+        observe(source.next_step().expect("the static row is recorded")),
+        Observed::Suppressed,
+        "the static row is held back, not emitted"
+    );
+    let msg = match source.next_step() {
+        Err(e) => format!("{e}"),
+        Ok(step) => panic!(
+            "a producer death must surface as an ERROR, not as the held static row or a \
+             clean end of stream — got {:?} (this would re-open #3106's truncation hole)",
+            observe(step)
+        ),
+    };
+    assert!(
+        msg.contains("#3106") || msg.contains("Done sentinel"),
+        "the producer's own terminal error must propagate unchanged, got: {msg}"
+    );
+}
+
+/// The same guarantee at a PARTITION BOUNDARY: the previous partition's owed
+/// static-only row is emitted first (it IS complete), and the death then surfaces on
+/// the following pull rather than being masked by that emission.
+#[test]
+fn a_producer_death_after_a_completed_partition_still_surfaces() {
+    let p = producer(static_schema());
+    // Partition A's static row, then partition B's first row (which rotates A out and
+    // flushes A's owed row), then death.
+    let mut inner = Scripted::failing_after(
+        vec![
+            SourceStep::Row(key(1, 10), static_entry(1, 10, "sa")),
+            SourceStep::Row(key(2, 20), static_entry(2, 20, "sb")),
+        ],
+        2,
+    );
+    let mut source = StaticMergeSource::wrap(&p, &mut inner).expect("wrapped");
+    assert_eq!(
+        observe(source.next_step().expect("A's static row recorded")),
+        Observed::Suppressed
+    );
+    // A is complete (B started), so A's static-only row is legitimately emitted.
+    assert_eq!(
+        observe(source.next_step().expect("A's owed row")),
+        row(1, None, Some("sa"), None)
+    );
+    // The deferred B input is re-adapted next, recording B's static row…
+    assert_eq!(
+        observe(source.next_step().expect("B's static row recorded")),
+        Observed::Suppressed
+    );
+    // …and THEN the producer death surfaces. B's held row is NOT flushed.
+    match source.next_step() {
+        Err(e) => assert!(
+            format!("{e}").contains("#3106") || format!("{e}").contains("Done sentinel"),
+            "expected the producer's terminal error, got: {e}"
+        ),
+        Ok(step) => panic!(
+            "the death must surface; B's partition never completed so its static row \
+             must not be emitted — got {:?}",
+            observe(step)
+        ),
+    }
 }

@@ -3968,6 +3968,14 @@ run_clippy() {
 #   * check-no-wallclock-asserts.sh — the #2642 wall-clock-race class. It already
 #     ran in the FULL gate (tooling-tests) but NOT in --lite; running it here makes
 #     the fast loop catch a reintroduced wall-clock threshold assert.
+#   * test_roborev_review_guard.sh — the #2964 VACUOUS-REVIEW class: the sanctioned
+#     wrapper scripts/flow/roborev-review.sh must fail closed on every recorded
+#     trigger that lets "roborev clean" be recorded without a review having
+#     happened. Its verdict gates a merge, so a weakened assert in it means the
+#     pipeline merges unreviewed code with no red anywhere. Hermetic (stub roborev
+#     on PATH + throwaway git fixtures; no network, no datasets, no cargo) and
+#     ~0.5s, so it belongs in the fast loop: a regression FAILs --lite instead of
+#     costing a review round.
 # Other candidate classes from the pre-roborev self-check are deliberately NOT
 # mechanized (see the taxonomy on #2656): manual_range_contains is already caught
 # by clippy; integer/decimal overflow, float-ordering-vs-Java, no-heuristics, and
@@ -3978,7 +3986,8 @@ run_clippy() {
 # and FAILs the component.
 run_roborev_lints_cmd() {
   bash "$REPO_ROOT/scripts/ci/check-workflow-injection.sh" &&
-    bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh"
+    bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" &&
+    bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh"
 }
 
 run_component() { # run_component <name> <cmd...>
@@ -4656,6 +4665,28 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_check_skill_flag_tables.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (skill flag-table drift guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # roborev vacuous-review guard (#2964): hermetic (stub roborev first on PATH +
+  # throwaway git fixtures), no network/datasets/cargo, ~0.5s. Pins every recorded
+  # trigger that lets "roborev clean" be recorded without a review having happened
+  # (worktree bare-`--branch` enqueueing the base sha, the range form enqueueing
+  # neither endpoint, a code-free diff silently discarded, the vacuous token
+  # signature, an unpushed branch, and an empty census reported as PASS). The
+  # wrapper's verdict gates a merge, so a weakened assert means unreviewed code
+  # merges with no red anywhere. Also runs in --lite via roborev-lints; kept here so
+  # the full gate covers it in its shell-tooling component set too. A failure FAILs
+  # the component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_roborev_review_guard.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (roborev vacuous-review guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)

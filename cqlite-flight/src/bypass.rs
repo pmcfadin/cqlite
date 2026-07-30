@@ -250,11 +250,17 @@ pub fn bypass_reason(
     // Statics (issue #3095): both arms now implement Cassandra's
     // `processPartition()` semantics, so a static-bearing table IS servable by the
     // fast path — but only when the caller schema DECLARES the file's static
-    // columns, because each arm's static handling is keyed off that schema. The
-    // caller schema alone cannot settle the question (roborev, issue #3058): it is
-    // the ticket DDL and an `nb` header carries no embedded schema to cross-check
-    // it against (#3097), so consult the file's OWN serialization header and fail
-    // closed when it cannot answer at all.
+    // columns, because each arm's static handling is keyed off that schema.
+    //
+    // SCHEMA AUTHORITY (issue #3097, which settled it): the CALLER's ticket schema is
+    // authoritative for DECODE on both arms — #3097 threaded it into the merge arm's
+    // enumeration so a clustering column no longer decodes under the reader header's
+    // placeholder name. `schema` here IS that authoritative schema, so this predicate
+    // and #3097 read the same source of truth. The file's own serialization header is
+    // consulted for ONE narrow, different purpose: detecting that the caller schema is
+    // STALE (an `nb` header carries no embedded schema to cross-check against, so a DDL
+    // predating an `ALTER TABLE ADD … STATIC` would otherwise sail through). That is a
+    // staleness cross-check, NOT a competing notion of decode authority.
     if !only.static_columns_are_known() {
         return BypassReason::StaticColumns;
     }

@@ -50,6 +50,19 @@
 //! a generation's `Data.db` out from under a live `Arc` (evicting only its OWN
 //! reference, per #1749's fail-closed model) satisfies this trivially.
 //!
+//! ## KNOWN GAP — a dead producer reads as end-of-input (issue #3120)
+//!
+//! Neither producer-thread shape sends an explicit terminator, and
+//! `SSTableRowIteratorAdapter::next` (`mod.rs`) maps a channel DISCONNECT onto
+//! `None` = "this run is exhausted". So a producer thread that UNWINDS makes its
+//! run look finished, and the merge completes successfully having merged only the
+//! rows that reached the channel — a silently short read result, or a short
+//! rewritten SSTable on the compaction path. The query row stream's version of
+//! this defect was fixed in issue #3106 (explicit `Done` sentinel +
+//! `catch_unwind` forwarding the panic as a terminal error); the same treatment
+//! here is issue #3120, held separately because it also changes compaction
+//! semantics and needs the byte-parity write suite as its evidence base.
+//!
 //! UDT registry: [`SSTableRowIteratorAdapter::open`] (path-based) can call
 //! `reader.set_udt_registry(..)` because it just opened its OWN exclusive
 //! reader. `open_from_reader` CANNOT — the reader is shared (`Arc`), so no

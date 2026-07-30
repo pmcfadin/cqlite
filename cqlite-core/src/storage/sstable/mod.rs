@@ -2316,7 +2316,7 @@ impl SSTableManager {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>> {
+    ) -> Result<reader::BatchedScanStream> {
         let readers = self.resolve_table_readers(table_id).await;
 
         if readers.len() == 1 {
@@ -2350,13 +2350,13 @@ impl SSTableManager {
     fn rechunk_into_batches(
         mut per_row: tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>,
         buffer_size: usize,
-    ) -> tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>> {
+    ) -> reader::BatchedScanStream {
         use reader::scan_stream_windowed::BATCH_EMIT_ROWS;
         // Bound the batch channel so its resident-row budget stays comparable to
         // the per-row surface's `buffer_size`, not `buffer_size * BATCH_EMIT_ROWS`.
         let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS).max(1);
         let (tx, rx) = tokio::sync::mpsc::channel(cap);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut batch: Vec<(RowKey, ScanRow)> = Vec::with_capacity(BATCH_EMIT_ROWS);
             while let Some(item) = per_row.recv().await {
                 match item {
@@ -2387,7 +2387,7 @@ impl SSTableManager {
                 let _ = tx.send(Ok(batch)).await;
             }
         });
-        rx
+        reader::BatchedScanStream::new(rx, task)
     }
 
     /// Streaming scan under the `tombstones` feature.
@@ -2436,7 +2436,7 @@ impl SSTableManager {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>> {
+    ) -> Result<reader::BatchedScanStream> {
         let per_row = self
             .scan_stream(table_id, start_key, end_key, schema, buffer_size)
             .await?;

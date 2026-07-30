@@ -123,7 +123,7 @@ async fn stream_all_partitions_cancellable_emits_every_partition() {
 
     let mut all = 0usize;
     reader
-        .stream_all_partitions_cancellable(&cancel, |_row| {
+        .stream_all_partitions_cancellable(&cancel, None, |_row| {
             all += 1;
             Ok(ControlFlow::Continue(()))
         })
@@ -204,7 +204,7 @@ async fn stream_all_partitions_cancellable_stops_on_break() {
 
     let mut emitted = 0usize;
     reader
-        .stream_all_partitions_cancellable(&cancel, |_row| {
+        .stream_all_partitions_cancellable(&cancel, None, |_row| {
             emitted += 1;
             Ok(ControlFlow::Break(()))
         })
@@ -233,7 +233,7 @@ async fn stream_all_partitions_cancellable_pre_cancel_emits_nothing() {
 
     let mut emitted = 0usize;
     let result = reader
-        .stream_all_partitions_cancellable(&cancel, |_row| {
+        .stream_all_partitions_cancellable(&cancel, None, |_row| {
             emitted += 1;
             Ok(ControlFlow::Continue(()))
         })
@@ -294,7 +294,7 @@ async fn sequential_scan_fallback_counts_each_partition_exactly_once() {
     let scope = StreamWalkScope::new();
     let mut emitted = 0usize;
     reader
-        .stream_all_partitions_cancellable(&cancel, |_row| {
+        .stream_all_partitions_cancellable(&cancel, None, |_row| {
             emitted += 1;
             Ok(ControlFlow::Continue(()))
         })

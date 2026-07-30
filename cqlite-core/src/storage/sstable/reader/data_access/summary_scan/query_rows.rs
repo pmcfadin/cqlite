@@ -59,6 +59,41 @@
 //!   flag is left intact so a fallback to the merge arm still works. Every batch
 //!   send also observes the bounded channel, and a dropped consumer breaks the
 //!   walk at its next send.
+//! * **A dead producer is an ERROR, never a clean end of stream (issue #3106).**
+//!   Completion is EXPLICIT: the producer thread's last act is to send
+//!   [`QueryRowMsg::Done`], and the consumer reports end-of-stream ONLY on that
+//!   sentinel. A bare channel disconnect — which is what an UNWINDING producer
+//!   leaves behind, since a panic drops the `SyncSender` without sending anything
+//!   — is reported as a hard error instead of "the walk finished". Belt and
+//!   braces: the thread body also runs under `catch_unwind`, so a panic is
+//!   forwarded as an INFORMATIVE terminal error naming the panic message rather
+//!   than a generic "the producer died". Before this, such a panic completed the
+//!   request SUCCESSFULLY with a silently truncated result set.
+//!
+//!   The two halves cover different builds ON PURPOSE, which is why both are
+//!   here: `catch_unwind` only fires under `panic = "unwind"` (dev/test, and the
+//!   `release-unwind` profile the bindings ship — `[profile.release]` is
+//!   `panic = "abort"`, where a panicking producer takes the process down instead,
+//!   loudly). The `Done` sentinel needs no unwinding at all: it makes "the walk
+//!   finished" an OBSERVED fact in every profile, so any way THIS THREAD can stop
+//!   without reporting — a future exit path that forgets its terminator included —
+//!   fails closed rather than being read as a complete scan.
+//!
+//!   SCOPE, stated precisely (roborev, issue #3106): `Done` proves only that the
+//!   query-row THREAD ran to completion. It says nothing about that thread's own
+//!   upstream, and on the full-ring arm the rows come from an INNER `tokio` task
+//!   over a second channel — whose death this thread would report as a clean
+//!   walk. That boundary is closed separately and by the same principle, in
+//!   [`crate::storage::sstable::reader::BatchedScanStream`]: it owns the scan
+//!   task's `JoinHandle` and joins it when its channel closes, so a task that
+//!   died surfaces as an error there and reaches this thread as a normal `Err`
+//!   (hence a `Failed` terminator). Both boundaries are needed for the end-to-end
+//!   claim; neither alone suffices — and the claim is bounded to those two, NOT
+//!   universal: on the chunk-stitching branch there is a THIRD hop, the windowed
+//!   driver's batch forwarder, whose `JoinError` is deliberately discarded
+//!   (`scan_stream_windowed`'s `let _ = forwarder.await;`), so a panic there is
+//!   still invisible. Pre-existing and low-likelihood (the forwarder only moves
+//!   already-decoded batches), tracked as a follow-up rather than fixed here.
 
 use std::ops::ControlFlow;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -67,6 +102,7 @@ use std::sync::Arc;
 use super::super::super::SSTableReader;
 use super::super::full_index_stream::FullIndexStreamOutcome;
 use super::ScanTokenBound;
+use crate::storage::producer_fault::ProducerFault;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::scan_stream_windowed::scan_admission::ScanAdmission;
 use crate::types::ScanRow;
@@ -95,12 +131,37 @@ pub enum QueryRowBatch {
     Unsupported,
 }
 
+/// One message on the producer→consumer channel (issue #3106).
+///
+/// INTERNAL: the terminator is deliberately NOT a [`QueryRowBatch`] variant, so
+/// no consumer can observe (or forget to handle) it — the sentinel exists purely
+/// to disambiguate "the walk finished" from "the producer died", which a bare
+/// channel disconnect cannot do.
+#[derive(Debug)]
+enum QueryRowMsg {
+    /// A batch. Carries only `Ok` BY CONSTRUCTION (issue #3106, roborev): a
+    /// failure is [`QueryRowMsg::Failed`], so "this message ends the stream" is a
+    /// structural property of the variant rather than an unenforced invariant
+    /// about where an `Err` was built. Were a non-fatal mid-stream `Err` ever sent
+    /// as an `Item`, the consumer would mark the stream terminated and a LATER
+    /// genuine dead-producer disconnect would silently revert to a clean end of
+    /// stream — #3106 reintroduced with no test failing.
+    Item(QueryRowBatch),
+    /// The walk failed. TERMINAL: the producer sends exactly one of this or
+    /// [`QueryRowMsg::Done`], as its last act.
+    Failed(Error),
+    /// The producer finished its walk and is exiting normally. This is the ONLY
+    /// thing that makes [`QueryRowStream::next_batch`] report a clean end of
+    /// stream; a disconnect without it is a dead producer.
+    Done,
+}
+
 /// A pull-based, single-generation query row stream (issue #3058).
 ///
 /// Dropping it requests cancellation of the underlying walk; the producer thread
 /// then observes the cancel (or a failed send into the dropped channel) and exits.
 pub struct QueryRowStream {
-    rx: Receiver<Result<QueryRowBatch>>,
+    rx: Receiver<QueryRowMsg>,
     /// This stream's OWN cancellation flag — a CHILD of the caller's, never the
     /// caller's own clone (roborev, issue #3058).
     ///
@@ -113,19 +174,29 @@ pub struct QueryRowStream {
     /// caller's flag is bridged INTO this child (caller-cancel stops the walk)
     /// but never the other way round.
     child_cancel: ScanCancel,
+    /// Whether an EXPLICIT terminator has been observed (issue #3106): either the
+    /// [`QueryRowMsg::Done`] sentinel or a terminal `Err`.
+    ///
+    /// This is what makes a subsequent channel disconnect interpretable. Set →
+    /// the producer is known to have finished/failed on purpose, so the
+    /// disconnect is a clean end of stream. Unset → the sender was dropped
+    /// WITHOUT a terminator, which only an unwinding (or otherwise dead)
+    /// producer can do, so the stream fails closed rather than reporting a
+    /// silently truncated result set as success.
+    terminated: bool,
 }
 
 impl QueryRowStream {
     /// Block until the next message is available. `None` = the walk finished
-    /// (clean end of stream).
+    /// (clean end of stream), proven by the explicit [`QueryRowMsg::Done`]
+    /// sentinel — never inferred from a channel disconnect.
     ///
-    /// KNOWN GAP — issue #3106: a `recv` error also means "the sender was
-    /// dropped", which a producer-thread PANIC produces without any terminal
-    /// message, so an unwinding walk currently reports a clean (silently
-    /// truncated) end of stream rather than an error. The channel protocol needs
-    /// an explicit `Done` sentinel (or `catch_unwind` → `Err`) for a disconnect
-    /// without a terminator to be treated as corruption; #3106 owns that, for
-    /// this stream AND the k-way merge adapter, whose stance this matches.
+    /// A disconnect WITHOUT that sentinel means the producer thread died mid-walk
+    /// (issue #3106) and yields `Some(Err(..))`: the result set is truncated, and
+    /// truncation must never be reported as success. A producer PANIC normally
+    /// arrives as a terminal `Err` carrying the panic message (the thread body
+    /// runs under `catch_unwind`), so this arm is the backstop for a producer that
+    /// died in a way it could not report at all (e.g. an abort of the send itself).
     ///
     /// The blocking wait is timed into the per-request RECV-WAIT accumulator
     /// (`stream_subphase::time_recv`), exactly as the k-way merge's own recv site
@@ -137,8 +208,70 @@ impl QueryRowStream {
     /// its evidence base. Inert (no clock read) when no sub-phase sink is
     /// installed, and it never touches the value returned.
     pub fn next_batch(&mut self) -> Option<Result<QueryRowBatch>> {
-        crate::observability::stream_subphase::time_recv(|| self.rx.recv().ok())
+        let received = crate::observability::stream_subphase::time_recv(|| self.rx.recv());
+        match received {
+            Ok(QueryRowMsg::Item(batch)) => Some(Ok(batch)),
+            Ok(QueryRowMsg::Failed(e)) => {
+                // Terminal by construction: a caller that keeps polling after it
+                // gets a clean `None`, not a spurious dead-producer error.
+                self.terminated = true;
+                Some(Err(e))
+            }
+            Ok(QueryRowMsg::Done) => {
+                self.terminated = true;
+                None
+            }
+            Err(_disconnected) if self.terminated => None,
+            Err(_disconnected) => {
+                self.terminated = true;
+                Some(Err(dead_producer_error()))
+            }
+        }
     }
+}
+
+/// The fail-closed error for a producer that disconnected without a terminator
+/// (issue #3106).
+///
+/// [`Error::Internal`] — ONE variant for both halves of this event (here and
+/// [`panicked_producer_error`]), chosen deliberately (roborev, issue #3106):
+/// nothing suggests the `Data.db` is bad, so `Corruption` would send an operator
+/// hunting a nonexistent bad file, and `Storage` is `is_recoverable() == true`
+/// (surfaced to consumers, e.g. the Node bindings' error mapping) which would
+/// advertise a deterministic internal failure as RETRYABLE. `Internal` is
+/// `is_recoverable() == false` and is the honest variant for a violated internal
+/// invariant.
+fn dead_producer_error() -> Error {
+    Error::internal(
+        "query row stream: the producer thread disconnected WITHOUT its terminal \
+         Done sentinel — it died mid-walk, so the result set is TRUNCATED and \
+         cannot be reported as a complete scan (issue #3106)",
+    )
+}
+
+/// Turn a caught producer-thread panic into an INFORMATIVE terminal error
+/// (issue #3106).
+///
+/// The bare disconnect backstop can only say "the producer died"; catching the
+/// unwind lets the client see WHERE/WHY, which is the difference between a
+/// debuggable failure and a mystery. The panic payload is a `String`/`&str` for
+/// every `panic!`/assertion (the only other shapes are hand-rolled
+/// `panic_any`), so an unrecognized payload degrades to a named placeholder
+/// rather than being dropped.
+///
+/// Same [`Error::Internal`] variant as [`dead_producer_error`] — one event, one
+/// variant, and not the `is_recoverable() == true` `Storage` this first used.
+fn panicked_producer_error(payload: &(dyn std::any::Any + Send)) -> Error {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied())
+        .unwrap_or("<non-string panic payload>");
+    Error::internal(format!(
+        "query row stream: the producer thread PANICKED mid-walk ({message}) — the \
+         result set is TRUNCATED and cannot be reported as a complete scan \
+         (issue #3106)"
+    ))
 }
 
 impl Drop for QueryRowStream {
@@ -171,7 +304,7 @@ impl SSTableReader {
         now_secs: i64,
         scan_cancel: ScanCancel,
     ) -> Result<QueryRowStream> {
-        let (tx, rx) = sync_channel::<Result<QueryRowBatch>>(QUERY_ROWS_CHANNEL_BATCHES);
+        let (tx, rx) = sync_channel::<QueryRowMsg>(QUERY_ROWS_CHANNEL_BATCHES);
         // This stream's own flag (see `QueryRowStream::child_cancel`): the walk
         // polls the CHILD, the caller's flag is bridged into it, and nothing ever
         // cancels the caller's.
@@ -180,37 +313,61 @@ impl SSTableReader {
             caller: scan_cancel,
             child: child_cancel.clone(),
         };
+        // Issue #3106: whatever fault a test armed FOR THIS READER is captured
+        // HERE (never re-read mid-walk) and owned by the producer thread. Always
+        // empty — and a zero-sized no-op whose scope closure is never called — in
+        // a production build.
+        let mut fault =
+            crate::storage::producer_fault::ProducerFault::capture_for(|| self.file_path());
         std::thread::Builder::new()
             .name("cqlite-query-rows".to_string())
             .spawn(move || {
                 let sender = tx.clone();
-                let outcome = (|| -> Result<()> {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|e| {
-                            Error::Storage(format!(
-                                "query row stream: failed to create runtime: {e}"
-                            ))
-                        })?;
-                    rt.block_on(drive_query_rows(
-                        self,
-                        schema,
-                        token_bound,
-                        now_secs,
-                        &bridge,
-                        &tx,
-                    ))
-                })();
-                if let Err(e) = outcome {
-                    // Forward the terminal error (consumer may already be gone).
-                    let _ = sender.send(Err(e));
-                }
+                // Issue #3106: an UNWINDING walk must not look like a finished
+                // one. `AssertUnwindSafe` is sound here because nothing the
+                // closure touched is observed after an unwind: the reader,
+                // schema, parser buffers and cancel bridge are dropped, and the
+                // only thing used afterwards is `sender` — an mpsc `SyncSender`,
+                // which has no poisoning/broken-invariant state — to report the
+                // failure. The walk's own output is already downstream.
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| {
+                                Error::Storage(format!(
+                                    "query row stream: failed to create runtime: {e}"
+                                ))
+                            })?;
+                        rt.block_on(drive_query_rows(
+                            self,
+                            schema,
+                            token_bound,
+                            now_secs,
+                            &bridge,
+                            &tx,
+                            &mut fault,
+                        ))
+                    }));
+                // EXACTLY ONE terminal message on every exit path, so the
+                // consumer never has to infer completion from a disconnect.
+                let terminal = match outcome {
+                    Ok(Ok(())) => QueryRowMsg::Done,
+                    Ok(Err(e)) => QueryRowMsg::Failed(e),
+                    Err(panic) => QueryRowMsg::Failed(panicked_producer_error(panic.as_ref())),
+                };
+                // The consumer may already be gone; a failed send is fine.
+                let _ = sender.send(terminal);
             })
             .map_err(|e| {
                 Error::Storage(format!("query row stream: failed to spawn thread: {e}"))
             })?;
-        Ok(QueryRowStream { rx, child_cancel })
+        Ok(QueryRowStream {
+            rx,
+            child_cancel,
+            terminated: false,
+        })
     }
 
     /// Whether this reader has the components the single-generation streaming
@@ -350,14 +507,15 @@ async fn drive_query_rows(
     token_bound: Option<ScanTokenBound>,
     now_secs: i64,
     cancel: &CancelBridge,
-    tx: &SyncSender<Result<QueryRowBatch>>,
+    tx: &SyncSender<QueryRowMsg>,
+    fault: &mut ProducerFault,
 ) -> Result<()> {
     if token_bound.is_none() {
-        return drive_full_scan_rows(reader, schema, now_secs, cancel, tx).await;
+        return drive_full_scan_rows(reader, schema, now_secs, cancel, tx, fault).await;
     }
 
     let scan_cancel = cancel.child();
-    let mut sink = BatchSink::new(tx, cancel);
+    let mut sink = BatchSink::new(tx, cancel, fault);
 
     // Each walk gets its OWN short-lived emit closure so the `&mut sink` borrow
     // ends with the call — that is what lets the pre-emit guard below actually
@@ -400,8 +558,27 @@ async fn drive_query_rows(
     // Neither walk can serve this reader. Report it as the FIRST and ONLY
     // message, having emitted nothing — enforced, for the same reason.
     assert_nothing_emitted(sink.emitted, "before reporting Unsupported")?;
-    let _ = tx.send(Ok(QueryRowBatch::Unsupported));
+    let _ = tx.send(QueryRowMsg::Item(QueryRowBatch::Unsupported));
     Ok(())
+}
+
+/// Hand ONE batch of rows to the consumer, returning `false` when the consumer
+/// has dropped the channel.
+///
+/// The SINGLE batch-handoff funnel for BOTH walk arms — which is exactly why the
+/// test-only producer-fault hook is consulted here (issue #3106): a fault armed
+/// against this stream is observed identically on the full-ring and the
+/// token-bounded arm, so neither can be fixed while the other silently truncates.
+/// [`ProducerFault::before_batch_handoff`] is a no-op (and `fault` a ZST) in a
+/// production build.
+fn emit_rows(
+    tx: &SyncSender<QueryRowMsg>,
+    fault: &mut ProducerFault,
+    rows: Vec<(RowKey, ScanRow)>,
+) -> bool {
+    fault.before_batch_handoff();
+    tx.send(QueryRowMsg::Item(QueryRowBatch::Rows(rows)))
+        .is_ok()
 }
 
 /// Fail closed when a walk reported `FellBack` AFTER handing rows to the sink.
@@ -484,7 +661,8 @@ async fn drive_full_scan_rows(
     schema: crate::schema::TableSchema,
     now_secs: i64,
     cancel: &CancelBridge,
-    tx: &SyncSender<Result<QueryRowBatch>>,
+    tx: &SyncSender<QueryRowMsg>,
+    fault: &mut ProducerFault,
 ) -> Result<()> {
     let table_id = reader.scan_table_id();
     let mut rx = reader.scan_stream_batched_admitted(
@@ -506,7 +684,7 @@ async fn drive_full_scan_rows(
         }
         cancel.child().check()?;
         let rows = msg?;
-        if tx.send(Ok(QueryRowBatch::Rows(rows))).is_err() {
+        if !emit_rows(tx, fault, rows) {
             // Consumer dropped: stop pulling (not an error).
             return Ok(());
         }
@@ -519,7 +697,7 @@ async fn drive_full_scan_rows(
 /// CALLER cancellation — into `ControlFlow::Break` so the walk stops instead of
 /// running to completion.
 struct BatchSink<'a> {
-    tx: &'a SyncSender<Result<QueryRowBatch>>,
+    tx: &'a SyncSender<QueryRowMsg>,
     /// The caller/child cancellation pair. The token-bounded walk polls the CHILD
     /// internally at its own cadence, but nothing there sees the CALLER's flag —
     /// so a client disconnect would otherwise only stop this walk once the
@@ -528,15 +706,23 @@ struct BatchSink<'a> {
     cancel: &'a CancelBridge,
     batch: Vec<(RowKey, ScanRow)>,
     emitted: u64,
+    /// Test-only producer-fault state for this stream (issue #3106); a ZST with
+    /// a no-op hook in a production build.
+    fault: &'a mut ProducerFault,
 }
 
 impl<'a> BatchSink<'a> {
-    fn new(tx: &'a SyncSender<Result<QueryRowBatch>>, cancel: &'a CancelBridge) -> Self {
+    fn new(
+        tx: &'a SyncSender<QueryRowMsg>,
+        cancel: &'a CancelBridge,
+        fault: &'a mut ProducerFault,
+    ) -> Self {
         Self {
             tx,
             cancel,
             batch: Vec::with_capacity(QUERY_ROWS_PER_BATCH),
             emitted: 0,
+            fault,
         }
     }
 
@@ -561,10 +747,11 @@ impl<'a> BatchSink<'a> {
         }
         let batch = std::mem::take(&mut self.batch);
         self.batch.reserve(QUERY_ROWS_PER_BATCH);
-        match self.tx.send(Ok(QueryRowBatch::Rows(batch))) {
-            Ok(()) => Ok(ControlFlow::Continue(())),
+        if emit_rows(self.tx, self.fault, batch) {
+            Ok(ControlFlow::Continue(()))
+        } else {
             // Consumer dropped: stop the walk (not an error).
-            Err(_) => Ok(ControlFlow::Break(())),
+            Ok(ControlFlow::Break(()))
         }
     }
 
@@ -575,119 +762,12 @@ impl<'a> BatchSink<'a> {
         Ok(())
     }
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "query_rows_tests.rs"]
+mod tests;
 
-    /// Roborev (issue #3058): the "`FellBack` is pre-emit only" contract is
-    /// ENFORCED, not assumed. Rows already handed to the sink (including an
-    /// under-full, still-buffered batch) must turn a second walk into a hard
-    /// corruption error rather than a silently duplicated result set.
-    #[test]
-    fn a_post_emit_fallback_fails_closed_instead_of_duplicating_rows() {
-        assert!(
-            assert_nothing_emitted(0, "before the full-index fallback walk").is_ok(),
-            "the pre-emit case is the normal fallback and must proceed"
-        );
-        let err = assert_nothing_emitted(1, "before the full-index fallback walk")
-            .expect_err("a post-emit fallback must fail closed");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("FellBack AFTER emitting"),
-            "the error must name the violated contract, got: {msg}"
-        );
-        assert!(
-            assert_nothing_emitted(127, "before reporting Unsupported").is_err(),
-            "a partially-filled batch (< QUERY_ROWS_PER_BATCH) still counts as emitted"
-        );
-    }
-
-    /// Roborev (issue #3058): a CALLER cancellation must reach the TOKEN-BOUNDED
-    /// walk too, at a batch boundary — not only once the consumer notices and
-    /// drops the stream (which on a wide partition is a whole batch later). The
-    /// caller's own flag must still be left un-cancelled (only the child is ever
-    /// cancelled), or the merge-arm fallback would be poisoned again.
-    #[test]
-    fn a_caller_cancellation_breaks_the_token_bound_sink_at_a_batch_boundary() {
-        let caller = ScanCancel::new();
-        let child = ScanCancel::new();
-        let bridge = CancelBridge {
-            caller: caller.clone(),
-            child: child.clone(),
-        };
-        let (tx, rx) = sync_channel::<Result<QueryRowBatch>>(QUERY_ROWS_CHANNEL_BATCHES);
-        let mut sink = BatchSink::new(&tx, &bridge);
-        let row = || (RowKey::new(vec![1]), ScanRow::Row(Vec::new()));
-
-        // A full batch with no cancellation flows through.
-        for _ in 0..QUERY_ROWS_PER_BATCH {
-            assert!(matches!(
-                sink.push(row()).expect("push"),
-                ControlFlow::Continue(())
-            ));
-        }
-        assert!(
-            matches!(rx.try_recv(), Ok(Ok(QueryRowBatch::Rows(b))) if b.len() == QUERY_ROWS_PER_BATCH),
-            "the first batch was handed to the consumer"
-        );
-
-        // Now the caller cancels. The next batch boundary must BREAK the walk.
-        caller.cancel();
-        let mut broke = false;
-        for _ in 0..QUERY_ROWS_PER_BATCH {
-            if matches!(sink.push(row()).expect("push"), ControlFlow::Break(())) {
-                broke = true;
-                break;
-            }
-        }
-        assert!(
-            broke,
-            "a caller cancellation must stop the token-bounded walk at the batch \
-             boundary, not only when the consumer drops the stream"
-        );
-        assert!(
-            child.is_cancelled(),
-            "the cancellation is propagated into the child so the walk's own poll \
-             aborts it promptly too"
-        );
-        assert!(
-            matches!(bridge.caller_result(), Err(Error::Cancelled)),
-            "a cancelled scan terminates with Cancelled, never a clean short stream"
-        );
-    }
-
-    /// The bridge is ONE-WAY: a caller cancellation stops the walk (via the
-    /// child), but nothing this stream does may cancel the caller's flag — the
-    /// fallback to the k-way merge arm depends on getting it back un-cancelled.
-    #[test]
-    fn the_cancel_bridge_is_one_way() {
-        let caller = ScanCancel::new();
-        let bridge = CancelBridge {
-            caller: caller.clone(),
-            child: ScanCancel::new(),
-        };
-        assert!(!bridge.poll_caller(), "no cancellation yet");
-        bridge.child().cancel();
-        assert!(
-            !caller.is_cancelled(),
-            "cancelling the CHILD must never reach the caller's flag"
-        );
-        assert!(!bridge.poll_caller(), "still no caller cancellation");
-
-        let caller2 = ScanCancel::new();
-        let bridge2 = CancelBridge {
-            caller: caller2.clone(),
-            child: ScanCancel::new(),
-        };
-        caller2.cancel();
-        assert!(
-            bridge2.poll_caller(),
-            "a caller cancellation stops the scan"
-        );
-        assert!(
-            bridge2.child().is_cancelled(),
-            "and is propagated into the child so the walk aborts promptly"
-        );
-    }
-}
+// Issue #3106 END-TO-END pin: a real walk whose real producer thread PANICS. Needs
+// the write engine to build its fixture, so it is gated on `write-support`.
+#[cfg(all(test, feature = "write-support"))]
+#[path = "query_rows_panic_tests.rs"]
+mod panic_tests;

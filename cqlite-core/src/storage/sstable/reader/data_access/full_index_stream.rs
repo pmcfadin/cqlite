@@ -404,9 +404,23 @@ impl SSTableReader {
     /// post-reconciliation early break (`drive_merge`) stops pulling, and the
     /// cancel-aware Drop teardown (cancel → drop receiver → join) then stops the
     /// producer promptly — bounding work WITHOUT any risk of under-return.
+    ///
+    /// `caller_schema` (issue #3097): the caller's AUTHORITATIVE schema, when it
+    /// has one. It is threaded into BOTH decode routes below —
+    /// [`stream_all_partitions_via_full_index`](Self::stream_all_partitions_via_full_index)
+    /// and the `sequential_scan` fallback — so it takes precedence over the
+    /// reader's own resolution exactly as the summary-guided merge arm does (an
+    /// `nb` `V5_0Uncompressed` header carries no embedded schema, so decoding it
+    /// with the reader-derived one drops the clustering columns → NULL). `None`
+    /// keeps the reader-derived resolution unchanged, which is what every
+    /// COMPACTION caller passes: compaction's effective decode schema on this seam
+    /// is byte-identical to origin/main (`None` here → `via_full_index(None)` /
+    /// `sequential_scan(self.schema)`). ONLY the QUERY arm's fallback passes
+    /// `Some(schema)`, so compaction behaviour is provably untouched (issue #3097).
     pub(in crate::storage::sstable::reader) async fn stream_all_partitions_cancellable<F>(
         &self,
         scan_cancel: &ScanCancel,
+        caller_schema: Option<&TableSchema>,
         mut emit: F,
     ) -> Result<()>
     where
@@ -414,7 +428,7 @@ impl SSTableReader {
     {
         if self.index_reader.is_some() && self.bti_partitions_db.is_none() {
             match self
-                .stream_all_partitions_via_full_index(scan_cancel, None, None, &mut emit)
+                .stream_all_partitions_via_full_index(scan_cancel, None, caller_schema, &mut emit)
                 .await?
             {
                 FullIndexStreamOutcome::Streamed => return Ok(()),
@@ -440,7 +454,11 @@ impl SSTableReader {
         // results, one call per RETURNED ROW; a second increment here would
         // double-count every partition body relative to what was actually decoded.
         let table_id = self.scan_table_id();
-        let schema = self.schema.as_deref();
+        // Issue #3097: prefer the caller's authoritative schema over the
+        // reader-derived one, mirroring the streaming full-index route above.
+        // Compaction callers pass `caller_schema = None`, so this collapses to
+        // `self.schema.as_deref()` exactly as origin/main did.
+        let schema = caller_schema.or(self.schema.as_deref());
         let entries = self
             .sequential_scan(&table_id, None, None, None, schema, scan_cancel)
             .await?;

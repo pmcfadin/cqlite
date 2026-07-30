@@ -866,3 +866,58 @@ issues have landed). Keep entries short so a future reader can re-run the measur
         ledger with zero records for it all sat outstanding. Verify the four
         artifacts directly — worktree removed, claim ref released, change archived,
         telemetry line present — never the issue's `state` field.
+
+## 2026-07-30 — #3106 (query-row stream fail-closed): lessons
+
+- **No single `CQLITE_DATASETS_ROOT` works on the fleet — verify BOTH the corpus and
+  the `../schemas` sibling before spending a gate (filed #3131).** The #3106 gate of
+  record burned one full cycle on `preflight: FAIL` +
+  `missing-fixtures: FAIL-CLOSED (#2078)` from `<repo>/test-data/datasets` (only 30
+  committed byte-parity refs; `test_basic` has **0** `Data.db`), then a second partial
+  cycle from `/data/datasets`, which HAS the corpus (~144-155 `Data.db`, pinned
+  `datasets-v3`) but has no sibling `schemas/`, so 7 fixtures panicked with
+  `Path does not exist: /data/datasets/../schemas/basic-types.cql`. **The killer detail:
+  that misconfiguration presents as 7 test failures in `core-tests` + `memory-budget`,
+  not as a config error** — an agent trusting the component names starts editing source.
+  Precheck both, in one second: `find <root> -name '*Data.db' | wc -l` against the
+  keyspace counts in CLAUDE.md, AND `ls <root>/../schemas/basic-types.cql`. Workaround
+  that certified #3106: a non-destructive symlink composite root (`sstables` from
+  `/data`, git-tracked `commitlog` from the repo, `test-data/` siblings for `../schemas`),
+  mutating neither the shared root nor any worktree.
+- **`fetch-datasets.sh` exits 0 having done nothing when the cache is warm**
+  (`already present in /data/datasets; skipping download`). A green fetch is NOT evidence
+  the tree gained fixtures, so the documented remedy can silently fail to remedy. (The
+  #2878 `rm -rf` hazard did not fire here precisely because it short-circuited: zero
+  deleted tracked files, all 4 commitlog fixtures intact.)
+- **`missing-fixtures: FAIL-CLOSED` is the gate working — never route around it.** The
+  remedy is a correct root, never `AGENT_GATE_ALLOW_MISSING_FIXTURES=1`, which buys green
+  by letting dataset-dependent components SKIP into a vacuous PASS that certifies nothing.
+- **Review-first earned its keep twice, and both wins were invisible to green tests.**
+  (a) Round 1 shipped an airtight OUTER channel while the default `do_get` arm
+  (`token_bound == None`) still truncated silently through a second, unterminated INNER
+  channel — the issue's own repro path. Both round-1 tests were genuinely watched-RED and
+  still blind to it (one forced `Some(full_ring())`, the other injected on the outer
+  channel). (b) A later test draft passed **vacuously**: its fault checkpoint sat in the
+  non-stitching decode, but every CQLite-written `nb` fixture resolves to `V5_0NewBig` →
+  `requires_chunk_stitching() == true`, so the checkpoint was never reached. Zero full
+  gates were spent on either.
+- **When fixing "a success signal that only means nothing reported a problem", audit
+  EVERY hop, not the one in the ticket.** #3106 named one boundary; the path had three
+  (outer producer thread, inner batched-scan task, and `scan_stream_windowed`'s discarded
+  forwarder `JoinError`), plus the multi-generation spawn sites (#3124) and the merge
+  adapter (#3120). Closing one hop while writing a universal "ANY way a producer can stop
+  fails closed" claim into the fixing file was itself a defect — **a doc that overclaims
+  coverage is what stops the remaining gap from ever being filed.** Enumerate the hops
+  first, then scope the claim to what is actually closed.
+- **An armable-but-never-armed fault seam is latent confusion — cover it or delete it.**
+  #3106 shipped two inner checkpoints while every test armed budget `0`; the second was
+  empirically unreachable for the available fixtures, and was deleted rather than left as
+  decoration.
+- **Press on ratchet/override claims the reviewer cannot verify.** "All edits line-neutral,
+  no override" was true but unprovable by a read-only reviewer. Asking for the *mechanism*
+  produced a checkable answer (`+2/-2` in the same file, `1087 → 1087`, no
+  `CQLITE_ALLOW_FILE_GROWTH`). Ask **how**, not whether.
+- **A subagent that pushes back on a lead's instruction can be right — leave room for it.**
+  The lead diagnosed a superseded gate block and ordered the closer to discard its triage;
+  the closer refused, and its evidence (the `../schemas` sibling) was the actual root cause.
+  An instruction to destroy evidence deserves resistance.
