@@ -518,14 +518,66 @@ fi
 utf8_root="$tmp/schémas-ünïcode"
 mkdir -p "$utf8_root"
 for f in "${CANONICAL[@]}"; do printf -- '-- synthetic\n' >"$utf8_root/$f"; done
+#
+# TWO WORLDS, deliberately. `_gate_schemas_override_is_utf8` REJECTS a non-ASCII value when
+# `iconv` is ABSENT ("could not check" must not mean "accept"). Asserting only the ACCEPT
+# outcome made this pin demand a result the implementation does not promise on an iconv-less
+# host, so `tooling-tests` — and with it the whole gate — would have redded there on a
+# perfectly valid root (roborev job 12, finding 2). That is a false RED, not a false green,
+# but a fleet foot-gun now that this self-test runs inside the gate. So assert whichever
+# outcome is DOCUMENTED for the host we are on.
 utf8_out=$(CQLITE_SCHEMAS_ROOT="$utf8_root" bash "$GATE" --preflight-schemas 2>/dev/null)
-if [ "$(hook_field STATUS "$utf8_out")" = OK ] \
-   && [ "$(hook_field SOURCE "$utf8_out")" = "CQLITE_SCHEMAS_ROOT override" ] \
-   && [ "$(hook_field ROOT "$utf8_out")" = "$utf8_root" ]; then
-  ok "3148-utf8-override-ok: a legitimate multibyte-UTF-8 override is still accepted"
+if command -v iconv >/dev/null 2>&1; then
+  if [ "$(hook_field STATUS "$utf8_out")" = OK ] \
+     && [ "$(hook_field SOURCE "$utf8_out")" = "CQLITE_SCHEMAS_ROOT override" ] \
+     && [ "$(hook_field ROOT "$utf8_out")" = "$utf8_root" ]; then
+    ok "3148-utf8-override-ok: a legitimate multibyte-UTF-8 override is still accepted (iconv present)"
+  else
+    bad "3148-utf8-override-ok: the UTF-8 guard over-rejected a valid non-ASCII root"
+    printf '%s\n' "$utf8_out"
+  fi
 else
-  bad "3148-utf8-override-ok: the UTF-8 guard over-rejected a valid non-ASCII root"
-  printf '%s\n' "$utf8_out"
+  # NOT a silent skip — on THIS host the documented result is a fail-closed rejection, so that
+  # is what gets asserted. A case that quietly stops testing is the pattern this change has
+  # already had to dig out of itself three times.
+  if [ "$(hook_field STATUS "$utf8_out")" = FAIL ] \
+     && printf '%s' "$utf8_out" | grep -q "must be valid UTF-8"; then
+    ok "3148-utf8-override-ok: iconv ABSENT here, so a multibyte override fails closed (documented)"
+  else
+    bad "3148-utf8-override-ok: iconv absent, but a multibyte override was not rejected fail-closed"
+    printf '%s\n' "$utf8_out"
+  fi
+fi
+
+# The absent-`iconv` branch above is UNREACHABLE on a host that has iconv, which would leave
+# the fail-closed-when-unverifiable promise permanently untested exactly where it matters.
+# Exercise it for real: re-run the hook with a PATH farm symlinking every executable EXCEPT
+# iconv, so `command -v iconv` genuinely fails while the gate still finds everything else.
+noiconv_bin="$tmp/noiconv-bin"
+mkdir -p "$noiconv_bin"
+farm_n=0
+for d in $(printf '%s\n' "$PATH" | tr ':' '\n'); do
+  [ -d "$d" ] || continue
+  for f in "$d"/*; do
+    [ -x "$f" ] || continue
+    b=${f##*/}
+    [ "$b" = iconv ] && continue
+    [ -e "$noiconv_bin/$b" ] || { ln -s "$f" "$noiconv_bin/$b" 2>/dev/null && farm_n=$((farm_n + 1)); }
+  done
+done
+if [ "$farm_n" -gt 0 ] && [ -e "$noiconv_bin/bash" ] && [ ! -e "$noiconv_bin/iconv" ]; then
+  noiconv_out=$(env PATH="$noiconv_bin" CQLITE_SCHEMAS_ROOT="$utf8_root" \
+    bash "$GATE" --preflight-schemas 2>/dev/null)
+  if [ "$(hook_field STATUS "$noiconv_out")" = FAIL ] \
+     && [ "$(hook_field SOURCE "$noiconv_out")" = "CQLITE_SCHEMAS_ROOT override REJECTED" ] \
+     && printf '%s' "$noiconv_out" | grep -q "must be valid UTF-8"; then
+    ok "3148-utf8-no-iconv: iconv removed from PATH, so a VALID multibyte override fails CLOSED"
+  else
+    bad "3148-utf8-no-iconv: iconv absent from PATH but the multibyte override was not rejected fail-closed"
+    printf '%s\n' "$noiconv_out"
+  fi
+else
+  bad "3148-utf8-no-iconv: could not build an iconv-less PATH farm (symlinked=$farm_n) — case NOT exercised"
 fi
 
 # ---------------------------------------------------------------------------

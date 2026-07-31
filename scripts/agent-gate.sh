@@ -1429,18 +1429,41 @@ _gate_schemas_override_reject_kind() {
 #
 # Two-step so the common case needs no external tool AND an unverifiable value is never
 # accepted:
-#   1. Pure ASCII (no byte outside printable ASCII — control characters are already rejected
-#      above) is valid UTF-8 by definition, so accept without invoking anything. `LC_ALL=C` makes
-#      `[[:print:]]` mean ASCII-printable regardless of the caller's locale.
+#   1. Pure printable ASCII is valid UTF-8 by definition, so accept without invoking anything.
+#      Done with a SUBPROCESS-FREE `case` under a function-local `LC_ALL=C`, which makes
+#      `[[:print:]]` mean ASCII-printable regardless of the caller's locale (verified identical
+#      under C, C.UTF-8 and en_US.UTF-8).
+#
+#      This replaced a `printf | grep -q` probe. DEFENSIVE HARDENING, not a fixed live bug:
+#      under the script-wide `set -o pipefail` (:369) a NEGATED pipeline whose LEFT side can
+#      take SIGPIPE is a latent branch-inversion hazard (roborev job 12, finding 1) — if it
+#      fired, a malformed override would take the "pure ASCII" branch and skip validation. It
+#      did NOT reproduce here: bash's BUILTIN `printf` gave `PIPESTATUS=[0 0]` at 5 B / 100 KB
+#      / 1 MB / 5 MB on bash 5.2.21, and independently a value big enough to fill a 64 KB pipe
+#      is ~16x this platform's `PATH_MAX` of 4096, so it could never name a real directory.
+#      Hardened anyway because the hazard is platform-scoped: the `case` form removes the
+#      pipeline, the SIGPIPE class, and the `grep` dependency at once.
+#
+#      ORDER IS LOAD-BEARING — `_gate_schemas_override_reject_kind()` screens control
+#      characters BEFORE calling this, and must keep doing so. A newline is VALID UTF-8, so
+#      this function ACCEPTS one; were the order reversed, a newline-bearing ABSOLUTE path
+#      would be accepted outright instead of classified `control-chars`. (This supersedes the
+#      earlier rationale, which cited `grep` treating a newline as a line terminator: the
+#      `grep` is gone, the ordering requirement is not.)
 #   2. Otherwise validate with `iconv -f UTF-8 -t UTF-8`, which fails on malformed input. If
 #      `iconv` is ABSENT we REJECT rather than assume: "could not check" must not mean "accept",
 #      or the hole comes straight back on a box without it. That is narrow — only non-ASCII
-#      override values are affected, and the remedy (an ASCII path) is always available.
+#      override values are affected, and the remedy (an ASCII path) is always available. The
+#      self-test asserts BOTH worlds (accept with `iconv`, fail-closed reject without), so an
+#      `iconv`-less host no longer reds the gate on a valid multibyte root (job 12, finding 2).
 _gate_schemas_override_is_utf8() {
   local v="${CQLITE_SCHEMAS_ROOT:-}"
-  if ! LC_ALL=C printf '%s' "$v" | LC_ALL=C grep -q '[^[:print:]]'; then
-    return 0
-  fi
+  # shellcheck disable=SC2034  # assigned to retarget bash's own pattern-matching locale
+  local LC_ALL=C
+  case "$v" in
+    *[![:print:]]*) : ;;
+    *) return 0 ;;
+  esac
   command -v iconv >/dev/null 2>&1 || return 1
   LC_ALL=C printf '%s' "$v" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
 }
