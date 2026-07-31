@@ -290,7 +290,17 @@ fn decode_entry_independently(rdb: &[u8], rows_offset: usize) -> EntryFields {
 /// off the committed `sstabledump` golden — an oracle INDEPENDENT of every CQLite
 /// decoder. `None` SKIPs (hard FAIL under `CQLITE_REQUIRE_FIXTURES=1`).
 fn golden_row_offsets() -> Option<Vec<(i32, u64, BTreeSet<u64>)>> {
-    let text = String::from_utf8(read_component(&format!("{GEN}-Data.db.jsonl"))?).ok()?;
+    // A PRESENT-but-unreadable golden is a FAILURE, never a skip (issue #3032
+    // roborev B2): `read_component` already fails-closed on absence/emptiness, so
+    // by here the bytes exist — non-UTF-8 means the committed golden is corrupt.
+    let raw = read_component(&format!("{GEN}-Data.db.jsonl"))?;
+    let text = match String::from_utf8(raw) {
+        Ok(t) => t,
+        Err(e) => panic!(
+            "the committed golden {GEN}-Data.db.jsonl is present but not valid UTF-8 \
+             ({e}) — a corrupt golden is a FAILURE, never a skip"
+        ),
+    };
     let mut out = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let v: serde_json::Value = serde_json::from_str(line).expect("golden line must be JSON");
