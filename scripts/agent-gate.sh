@@ -286,17 +286,24 @@
 #                      (a TMPDIR at/below it meant the rm -rf ate the list, which then
 #                      read as "nothing to restore"), and an absent list with a
 #                      nonzero captured count is a hard error, never a no-op; plus
-#                      skip-worktree/sparse-checkout entries are refused up front
-#                      because `git diff` cannot see them, so the integrity check
-#                      would be blind. Hermetic: throwaway git repos +
+#                      any index entry `git diff` cannot see (skip-worktree tag `S`
+#                      or ANY lowercase = assume-unchanged; `ls-files -t` hides the
+#                      both-flags case as a plain `H`) is refused up front, because
+#                      the integrity check would otherwise be blind; and an
+#                      INCOMPLETE nested-repository scan (find failing) must fail
+#                      closed instead of reading as "no nested repo".
+#                      Hermetic: throwaway git repos +
 #                      locally-built partial-overlap tarball + stub curl/tar/git, so
 #                      the real rm -rf/extract/restore run against a sandbox and
 #                      never the checkout's datasets; both signal arms are
-#                      deterministic (no sleeps). Proves non-vacuity with seven
-#                      mutants (guard disabled; abort-restore disabled; signals left
-#                      live during cleanup; GIT_* scrub removed; readability precheck
-#                      removed; partial-extraction discard removed; guard state back
-#                      under TMPDIR with no consistency check).
+#                      deterministic (no sleeps), and the case that hands `/` to the
+#                      script shadows `rm` so its blast radius does not depend on the
+#                      checks under test. Proves non-vacuity with nine mutants (guard
+#                      disabled; abort-restore disabled; signals left live during
+#                      cleanup; GIT_* scrub removed; readability precheck removed;
+#                      partial-extraction discard removed; guard state back under
+#                      TMPDIR with no consistency check; exact-`S` index-flag match;
+#                      failed nested scan read as clean).
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
