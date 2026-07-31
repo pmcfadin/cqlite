@@ -1708,7 +1708,11 @@ case "${1:-}" in
   # unreadable files — so the positive-control self-test asserts the preflight actually
   # FAILS on a schemas-less root, not merely that it passes on a good one. Pure — the
   # FAIL emit + exit lives in apply_schemas_preflight (exercised by the real gate run).
+  # Optional $2 seeds ONLY, so the self-test can assert the --only LENIENCY branch of
+  # the SAME pure decision without launching a real --only run (the arg dispatch is a
+  # single `case "$1"`, so `--only X --preflight-schemas` is not expressible).
   --preflight-schemas)
+    [ -n "${2:-}" ] && ONLY="$2"
     _ps_st=$(_schemas_status); echo "STATUS: $_ps_st"
     echo "ROOT: $(_gate_schemas_root)"
     echo "SOURCE: $(_gate_schemas_root_source)"
@@ -4714,7 +4718,12 @@ run_kit_dashboard_drift() {
 # row/extended/cell flag tables must match the real row_decoder constants, so an
 # agent can never again be taught a partition-boundary decode bug by a rotted skill
 # table (hermetic temp-sandbox copy; no cargo/datasets/network). Pure/offline, no
-# gh/network. SKIP-aware: the summary test's truncation case relies on a python3
+# gh/network. Also runs scripts/tests/test_agent_gate_schemas_preflight.sh (#3148),
+# the POSITIVE CONTROL for the committed-schemas preflight: it proves the preflight
+# REJECTS a schemas-less / present-but-incomplete root (the #3148 gap survived because
+# `STATUS: OK` was only ever observed on the happy path) and pins the checkout-relative
+# resolution contract. Hermetic temp roots; the FULL-gate cases exit AT the preflight,
+# so no cargo/datasets/network. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
 run_tooling_tests() {
@@ -4812,6 +4821,27 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (roborev vacuous-review guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # committed-schemas preflight guard (#3148 AC (c)): hermetic (temp dataset/schemas
+  # roots, no real corpus/network/cargo — the FULL-gate cases exit AT the preflight).
+  # POSITIVE CONTROL: it proves the preflight REJECTS a schemas-less and a
+  # present-but-incomplete root, not merely that it accepts a good one. The #3148 gap
+  # survived precisely because `STATUS: OK` was only ever observed on the happy path,
+  # so a preflight tested one-sided is untested. Also pins the checkout-relative
+  # contract (the schemas root must not vary with CQLITE_DATASETS_ROOT — the retired
+  # `..`-climb symlink trap) and the single-definition invariant. A failure FAILs the
+  # component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_schemas_preflight.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_schemas_preflight.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (committed-schemas preflight guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
