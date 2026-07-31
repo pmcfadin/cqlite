@@ -96,27 +96,70 @@ _gate_notify_severity() {
 _gate_notify_priority() { case "$1" in PASS) printf '3\n' ;; *) printf '5\n' ;; esac; }
 _gate_notify_tag() { case "$1" in PASS) printf 'white_check_mark\n' ;; *) printf 'rotating_light\n' ;; esac; }
 
-# _gate_notify_target: resolve the configured target into GATE_NOTIFY_ROOT and
-# GATE_NOTIFY_TOPIC, or return 1 when either cannot be resolved AUTHORITATIVELY.
-# (Named variables rather than a delimited string on stdout: a whitespace
-# delimiter in shell source is silently destroyed by a reformat.) Its ONLY caller
-# declares both names `local` first, so bash's dynamic scoping keeps these
-# assignments inside the caller's frame — nothing is written into the gate's shell.
+# _gate_notify_redact <url>: the PRINTABLE form of a target — scheme://host/ with the
+# query, the fragment and any URL userinfo removed. Three credential shapes reach a
+# terminal or a CI log otherwise: `?token=`, `?auth=` and `user:pass@`. This is the
+# ONLY function whose output may be echoed; see _gate_notify_target's contract.
+_gate_notify_redact() {
+  local in="${1:-}"
+  in="${in%%\?*}"
+  in="${in%%#*}"
+  case "$in" in
+    *://*)
+      local scheme="${in%%://*}" rest="${in#*://}"
+      local hostpart="${rest%%/*}"
+      case "$hostpart" in *@*) hostpart="${hostpart##*@}" ;; esac
+      printf '%s://%s/\n' "$scheme" "$hostpart"
+      ;;
+    *) printf '(unparseable target; not echoed)\n' ;;
+  esac
+}
+
+# _gate_notify_target: resolve the configured target into THREE values with THREE
+# distinct purposes, or return 1 when the topic cannot be resolved AUTHORITATIVELY.
+# (Named variables rather than a delimited string on stdout: a whitespace delimiter
+# in shell source is silently destroyed by a reformat.) Its ONLY caller declares all
+# three names `local` first, so bash's dynamic scoping keeps these assignments inside
+# the caller's frame — nothing is written into the gate's shell.
 #
-# ntfy JSON publishing requires POSTing to the SERVER ROOT with the topic in the
-# body; POSTed to /<topic> the body is taken as literal message text. The fleet
-# configures a TOPIC URL, so the split happens here.
+#   GATE_NOTIFY_DELIVERY_URL  what CURL POSTS TO. **Query string PRESERVED**, because
+#                             `?auth=<token>` is a documented ntfy credential shape and
+#                             dropping it publishes UNAUTHENTICATED — and since publish
+#                             failure is a deliberate no-op, it fails SILENTLY. This
+#                             value MUST NEVER be logged or echoed.
+#   GATE_NOTIFY_TOPIC         the body's `topic`. Parsed from the PATH only, so the
+#                             query/fragment can never end up inside the topic name.
+#   GATE_NOTIFY_SAFE_TARGET   the ONLY value safe to print. Query, fragment AND URL
+#                             userinfo removed, so no `?token=`/`?auth=`/`user:pass@`
+#                             credential can reach a terminal, a CI log or the debug
+#                             stream.
+#
+# DO NOT RE-COLLAPSE THESE. Round 2 of this PR's review added the query-strip to keep
+# credentials out of logs, but applied it to the single value that was ALSO the POST
+# target — so a valid `?auth=` target silently published unauthenticated. The names
+# above are deliberately explicit about which one curl receives; a logging change must
+# only ever touch GATE_NOTIFY_SAFE_TARGET.
+#
+# ntfy JSON publishing requires POSTing to the SERVER ROOT with the topic in the body;
+# POSTed to /<topic> the body is taken as literal message text. The fleet configures a
+# TOPIC URL, so the split happens here.
 #
 # A target from which no topic can be resolved returns 1 rather than guessing:
 # publishing to a guessed topic pages a stranger.
 _gate_notify_target() {
-  GATE_NOTIFY_ROOT=""
+  GATE_NOTIFY_DELIVERY_URL=""
   GATE_NOTIFY_TOPIC=""
+  GATE_NOTIFY_SAFE_TARGET=""
   local url="${CQLITE_NOTIFY_WEBHOOK:-${CODEX_NOTIFY_WEBHOOK:-}}"
   local topic="${CQLITE_NOTIFY_TOPIC:-${CODEX_NOTIFY_NTFY_TOPIC:-}}"
   [ -n "$url" ] || { _gate_notify_debug "no notify target configured"; return 1; }
-  local u="${url%%\?*}"          # drop any query string
-  u="${u%%#*}"                   # drop any fragment
+  # A fragment is never transmitted by HTTP, so it is dropped from everything.
+  local nofrag="${url%%#*}"
+  # The query is SPLIT OFF (not discarded) so it can be re-attached to the delivery
+  # URL after the topic is parsed out of the path.
+  local query=""
+  case "$nofrag" in *\?*) query="?${nofrag#*\?}" ;; esac
+  local u="${nofrag%%\?*}"
   while [ "${u: -1}" = "/" ]; do u="${u%/}"; done
   local root
   # Native regex, NOT `printf | grep -q`: under the caller's `set -o pipefail`
@@ -129,9 +172,10 @@ _gate_notify_target() {
     root="${u%/*}/"
     [ -n "$topic" ] || topic="${u##*/}"
   fi
-  [ -n "$topic" ] || { _gate_notify_debug "no topic resolvable from '$url'"; return 1; }
-  GATE_NOTIFY_ROOT="$root"
+  [ -n "$topic" ] || { _gate_notify_debug "no topic resolvable from the configured target"; return 1; }
+  GATE_NOTIFY_DELIVERY_URL="${root}${query}"
   GATE_NOTIFY_TOPIC="$topic"
+  GATE_NOTIFY_SAFE_TARGET=$(_gate_notify_redact "$root")
   return 0
 }
 
@@ -216,7 +260,7 @@ gate_notify_publish() {
   local severity payload to
   # Declared local HERE so _gate_notify_target's assignments land in THIS frame
   # (bash dynamic scoping) and never in the caller's shell.
-  local GATE_NOTIFY_ROOT GATE_NOTIFY_TOPIC
+  local GATE_NOTIFY_DELIVERY_URL GATE_NOTIFY_TOPIC GATE_NOTIFY_SAFE_TARGET
   severity=$(_gate_notify_severity "$result")
 
   # One bounding tool for ALL external calls, probed ONCE per publish. Absent (or
@@ -230,13 +274,17 @@ gate_notify_publish() {
       payload=$(_gate_notify_payload "$to" "$GATE_NOTIFY_TOPIC" "$title" "$body" \
         "$(_gate_notify_priority "$severity")" "$(_gate_notify_tag "$severity")") || payload=""
       if [ -n "$payload" ]; then
-        _gate_notify_debug "POST $GATE_NOTIFY_ROOT $payload"
+        # SAFE_TARGET, never DELIVERY_URL: the latter carries any `?auth=`/`?token=`
+        # credential and must not reach the debug stream.
+        _gate_notify_debug "POST $GATE_NOTIFY_SAFE_TARGET $payload"
         # UNIGNORABLE outer bound + the cooperative flag: --max-time alone is honoured
         # only by the REAL curl, so it cannot be the guarantee (#3119 B2).
+        # DELIVERY_URL here — query PRESERVED, or a query-credentialed ntfy target
+        # publishes unauthenticated, and silently (publish failure is a no-op).
         _gate_notify_bounded "$to" "$GATE_NOTIFY_CURL_TIMEOUT" \
           curl -sS -X POST -H 'Content-Type: application/json' \
           --max-time "$GATE_NOTIFY_CURL_TIMEOUT" \
-          -d "$payload" "$GATE_NOTIFY_ROOT" >/dev/null 2>&1 </dev/null || true
+          -d "$payload" "$GATE_NOTIFY_DELIVERY_URL" >/dev/null 2>&1 </dev/null || true
       else
         _gate_notify_debug "payload build failed (python3 missing, wedged, or errored)"
       fi
@@ -281,6 +329,15 @@ SHIM
 
   local self="${BASH_SOURCE[0]}"
   local severity expect_prio expect_tag log
+  # The validator below is an external call like any other, so it gets the same
+  # unignorable bound (review round 4 nit). No bounding tool ⇒ the probe cannot make a
+  # bounded claim, so it reports that rather than running the validator unbounded.
+  local selftest_to
+  if ! selftest_to=$(_gate_notify_bounded_timeout); then
+    echo "gate-notify --self-test: SKIP (no timeout(1) supporting --kill-after; cannot bound the validator)" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
   for severity in PASS FAIL; do
     case "$severity" in
       PASS) expect_prio=3; expect_tag=white_check_mark ;;
@@ -298,7 +355,8 @@ SHIM
       CQLITE_NOTIFY_WEBHOOK="$GATE_NOTIFY_SELFTEST_WEBHOOK" \
       bash -c '. "$1"; gate_notify_publish "$2" "gate '"$severity"' selftest@0000000" "RESULT: '"$severity"'"' \
       _ "$self" "$severity" >/dev/null 2>&1
-    if ! python3 - "$log" "$expect_prio" "$expect_tag" <<'PY'
+    if ! _gate_notify_bounded "$selftest_to" "$GATE_NOTIFY_PAYLOAD_TIMEOUT" \
+      python3 - "$log" "$expect_prio" "$expect_tag" <<'PY'
 import json, sys
 lines = open(sys.argv[1]).read().splitlines()
 if len(lines) != 1:

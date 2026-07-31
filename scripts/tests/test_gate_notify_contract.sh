@@ -274,6 +274,50 @@ for case_pair in "PASS:3:white_check_mark" "FAIL:5:rotating_light"; do
   fi
 done
 
+# ---- 7b. a query-credentialed target DELIVERS with its query intact -----------
+# `https://host/topic?auth=<token>` is a documented ntfy credential shape. Review
+# round 2 added a query-strip to keep credentials out of LOGS but applied it to the
+# single value that was ALSO the POST target, so such a target published
+# UNAUTHENTICATED — and silently, because publish failure is a deliberate no-op. The
+# delivery URL and the printable/redacted string are now separate values; this case
+# pins the delivery half so they can never be re-collapsed.
+qlog="$tmp/query.log"
+: > "$qlog"
+env CURL_LOG="$qlog" PATH="$shimdir:$PATH" \
+  CQLITE_NOTIFY_WEBHOOK="https://ntfy.invalid/$TOPIC?auth=tk_AbC123" CODEX_NOTIFY_WEBHOOK= \
+  CQLITE_NOTIFY_TOPIC= CODEX_NOTIFY_NTFY_TOPIC= \
+  GATE_NOTIFY_CURL_TIMEOUT=10 GATE_NOTIFY_PAYLOAD_TIMEOUT=10 GATE_NOTIFY_ADJUNCT_TIMEOUT=5 \
+  bash -c '. "$0"; gate_push_signal PASS issue-3119-notify-contract abc1234 ""' \
+  "$fnfile" >"$tmp/out.txt" 2>"$tmp/err.txt"
+rc=$?
+qurl=$(field "$qlog" __url__)
+if [ "$rc" -eq 0 ] && [ "$(lines_of "$qlog")" -eq 1 ] \
+   && [ "$qurl" = "https://ntfy.invalid/?auth=tk_AbC123" ] \
+   && [ "$(field "$qlog" topic)" = "$TOPIC" ] \
+   && [ "$(field "$qlog" title)" = "gate PASS issue-3119-notify-contract@abc1234" ]; then
+  ok "query-credentialed target: POSTed to the server root WITH the query preserved, topic parsed from the path"
+else
+  bad "query-credentialed target: delivery URL was '$qurl' (expected the query preserved)"; cat "$qlog"
+fi
+
+# ---- 7c. ...while the PRINTABLE form of that same target carries no credential --
+# The redaction property from round 2, asserted directly on the function whose output
+# is the only one allowed to be echoed. A regression that starts printing the delivery
+# URL — or stops redacting — reds here.
+# `_ "$LIB"` (not `"$LIB"` as $0): when $0 equals the sourced path the wrapper's
+# direct-execution block fires and prints usage instead of exposing its functions.
+redact_probe=$(bash -c '. "$1"; for u in \
+    "https://ntfy.invalid/t?token=s3cr3t" \
+    "https://ntfy.invalid/t#frag-s3cr3t" \
+    "https://alice:s3cr3t@ntfy.invalid/t?auth=tk_s3cr3t"; do
+      _gate_notify_redact "$u"; done' _ "$LIB" 2>&1)
+if ! printf '%s' "$redact_probe" | grep -qE 's3cr3t|alice:|token=|auth=' \
+   && [ "$(printf '%s\n' "$redact_probe" | grep -c 'https://ntfy.invalid/')" -eq 3 ]; then
+  ok "printable target form: query, fragment and userinfo all redacted (no credential can reach a log)"
+else
+  bad "printable target form leaked a credential: $redact_probe"
+fi
+
 # ---- 8. intercept surface: only the transport is substituted -----------------
 substituted=$(cd "$shimdir" && ls | sort | tr '\n' ' ')
 if [ "$substituted" = "agent-notify curl " ] \

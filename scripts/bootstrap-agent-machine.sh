@@ -937,7 +937,14 @@ else
   # Optional local desktop/sound adjunct. No version requirement: it is never in
   # the payload chain, and a hand-patched copy is never required by anything here.
   if have agent-notify; then
-    info "optional local adjunct: $(agent-notify --version 2>/dev/null | head -1 || echo 'agent-notify (version unknown)') — desktop/sound only, no version requirement"
+    # BOUNDED + stdin CLOSED, like every other call into this third-party binary:
+    # measured in #3119, the pristine upstream copy HANGS when it inherits a tty
+    # stdin, and bootstrap must never wedge on an optional version probe.
+    NOTIFY_ADJUNCT_VER=""
+    if have timeout && timeout --kill-after=1 1 true >/dev/null 2>&1; then
+      NOTIFY_ADJUNCT_VER=$(timeout --kill-after=1 5 agent-notify --version 2>/dev/null </dev/null | head -1)
+    fi
+    info "optional local adjunct: ${NOTIFY_ADJUNCT_VER:-agent-notify (version not probed)} — desktop/sound only, no version requirement"
   else
     info "optional local adjunct agent-notify not installed — not needed; ntfy delivery is unaffected"
   fi
