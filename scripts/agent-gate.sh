@@ -281,14 +281,22 @@
 #                      guard must PROVE every captured blob is readable in the
 #                      restore's own scrubbed environment (external/alternate/
 #                      quarantine object stores are otherwise invisible to it).
-#                      Hermetic: throwaway git repos +
+#                      Two more silent-loss paths are pinned: the guard's own capture
+#                      list must live in a location PROVEN outside the deletion target
+#                      (a TMPDIR at/below it meant the rm -rf ate the list, which then
+#                      read as "nothing to restore"), and an absent list with a
+#                      nonzero captured count is a hard error, never a no-op; plus
+#                      skip-worktree/sparse-checkout entries are refused up front
+#                      because `git diff` cannot see them, so the integrity check
+#                      would be blind. Hermetic: throwaway git repos +
 #                      locally-built partial-overlap tarball + stub curl/tar/git, so
 #                      the real rm -rf/extract/restore run against a sandbox and
 #                      never the checkout's datasets; both signal arms are
-#                      deterministic (no sleeps). Proves non-vacuity with six
+#                      deterministic (no sleeps). Proves non-vacuity with seven
 #                      mutants (guard disabled; abort-restore disabled; signals left
 #                      live during cleanup; GIT_* scrub removed; readability precheck
-#                      removed; partial-extraction discard removed).
+#                      removed; partial-extraction discard removed; guard state back
+#                      under TMPDIR with no consistency check).
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
