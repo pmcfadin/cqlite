@@ -433,23 +433,48 @@ git_admin_dir_at_or_above() {
 # a checkout, `HEAD` for a bare one); ~16ms over the real dataset tree, which
 # contains neither.
 nested_repo_under() {
-  local dir="$1" candidate parent
+  local dir="$1" candidate parent scan_out scan_err detail
   [ -d "${dir}" ] || return 1
+
+  # The traversal's EXIT STATUS is load-bearing. Discarding it (process substitution
+  # plus 2>/dev/null) made a FAILED scan — a permission error, an I/O error, an
+  # unsupported option — indistinguishable from a clean one, silently downgrading a
+  # structural refusal into "safe to delete": #2878's original silent bail in a new
+  # place. So the output goes to a scratch file (outside the deletion target) and a
+  # non-zero find is reported as a distinct "could not complete" verdict.
+  if ! scan_out="$(mktemp "${TRACKED_GUARD_STATE_DIR:-${TMPDIR:-/tmp}}/cqlite-nested-scan.XXXXXX")"; then
+    printf "the nested-repository scan of '%s' could not start (no scratch file)\n" "${dir}"
+    return 2
+  fi
+  scan_err="${scan_out}.err"
+  if ! find "${dir}" -mindepth 2 \( -name .git -o -name HEAD \) -print0 \
+    >"${scan_out}" 2>"${scan_err}"; then
+    detail="$(tr '\n' ' ' <"${scan_err}" 2>/dev/null | cut -c1-200)"
+    rm -f "${scan_out}" "${scan_err}"
+    printf "the nested-repository scan of '%s' FAILED to complete (find: %s)\n" \
+      "${dir}" "${detail:-no diagnostic}"
+    return 2
+  fi
+  rm -f "${scan_err}"
+
   while IFS= read -r -d '' candidate; do
     case "${candidate##*/}" in
       .git)
+        rm -f "${scan_out}"
         printf '%s\n' "${candidate}"
         return 0
         ;;
       HEAD)
         parent="$(dirname "${candidate}")"
         if git_repository_reason "${parent}" >/dev/null; then
+          rm -f "${scan_out}"
           printf '%s\n' "${parent}"
           return 0
         fi
         ;;
     esac
-  done < <(find "${dir}" -mindepth 2 \( -name .git -o -name HEAD \) -print0 2>/dev/null)
+  done <"${scan_out}"
+  rm -f "${scan_out}"
   return 1
 }
 
@@ -530,10 +555,6 @@ capture_tracked_dataset_files() {
     refuse_structural_dataset_root "'${dataset_abs}' is itself a git repository (${repo_reason%$'\n'}) — deleting it would destroy the repository, not just fixtures"
     return 0
   fi
-  if nested="$(nested_repo_under "${dataset_abs}")"; then
-    refuse_structural_dataset_root "'${dataset_abs}' contains a nested git repository at '${nested}' — deleting it would destroy that checkout irrecoverably"
-    return 0
-  fi
   local admin_dir
   if admin_dir="$(git_admin_dir_at_or_above "${dataset_abs}")"; then
     refuse_structural_dataset_root "'${dataset_abs}' is at or beneath git's administrative storage '${admin_dir}' — deleting it would corrupt the repository and destroy the object store this guard restores FROM"
@@ -541,12 +562,30 @@ capture_tracked_dataset_files() {
   fi
 
   # Establish where the guard's own state may live BEFORE anything else needs it, so
-  # neither the capture list nor the extraction staging area can sit inside the tree
-  # the `rm -rf` removes.
+  # neither the capture list, the nested-repository scan, nor the extraction staging
+  # area can sit inside the tree the `rm -rf` removes.
   if ! TRACKED_GUARD_STATE_DIR="$(resolve_guard_state_dir "${dataset_abs}")"; then
     refuse_structural_dataset_root "no writable temporary directory (of TMPDIR, /tmp, HOME) could be PROVEN to lie outside '${dataset_abs}', so this guard's own capture list would be deleted by the very 'rm -rf' it exists to undo"
     return 0
   fi
+
+  # STRUCTURAL: a repository NESTED beneath the target. Runs after the state dir is
+  # resolved because the scan needs a scratch file outside the deletion target. Exit
+  # code 2 means the scan could not COMPLETE — refused just as hard as a positive
+  # find, because an incomplete traversal that reads as "clean" is a fail-OPEN on a
+  # data-destroying path.
+  local nested_rc=0
+  nested="$(nested_repo_under "${dataset_abs}")" || nested_rc=$?
+  case "${nested_rc}" in
+    0)
+      refuse_structural_dataset_root "'${dataset_abs}' contains a nested git repository at '${nested}' — deleting it would destroy that checkout irrecoverably"
+      return 0
+      ;;
+    2)
+      refuse_structural_dataset_root "${nested} — a nested git repository therefore cannot be ruled out, and deleting one would be irrecoverable"
+      return 0
+      ;;
+  esac
 
   if ! command -v git >/dev/null 2>&1; then
     if ancestor_has_git_dir "${dataset_abs}"; then
@@ -642,33 +681,53 @@ capture_tracked_dataset_files() {
     return 0
   fi
 
-  # STRUCTURAL: skip-worktree / sparse-checkout entries break BOTH halves of the
-  # guard. `git restore` honours sparse rules, so it would not rebuild those paths —
-  # and `git diff` ignores skip-worktree entries, so the integrity postcondition
-  # cannot SEE the loss and would agree that nothing is wrong. That is the
-  # foreign-index failure again: an oracle pointed at something other than the
-  # thing it is meant to verify. `--ignore-skip-worktree-bits` would fix only the
-  # restore and leave the verification blind, so we refuse instead, with the
-  # remediation named. `ls-files -v` tags skip-worktree entries `S`.
-  local vlist record tag skip_count=0 skip_sample=""
-  vlist="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-tracked-flags.XXXXXX")"
+  # STRUCTURAL: index flags that make a path invisible to the restore and/or to the
+  # integrity check. Both halves of the guard break:
+  #   * `git restore` REFUSES a skip-worktree pathspec ("did not match any file(s)
+  #     known to git") and fails the WHOLE batch, so up to 400 other files in that
+  #     batch are not restored either;
+  #   * `git diff` ignores skip-worktree AND assume-unchanged entries, so the
+  #     postcondition cannot SEE their loss and would agree nothing is wrong — the
+  #     foreign-index failure again: an oracle pointed at something other than the
+  #     thing it verifies. `--ignore-skip-worktree-bits` would fix only the restore
+  #     and leave the verification blind, so refuse, naming the remediation.
+  #
+  # Tag parsing, verified against git 2.43 rather than assumed — `ls-files -v`
+  # LOWERCASES the tag for assume-unchanged, and the letter it lowercases is `h`,
+  # not `s`: a path carrying BOTH flags reports `h`, so matching `S`/`s` misses it,
+  # and `ls-files -t` reports that same path as a plain `H`, hiding it completely.
+  # The invariant is therefore "every entry must be exactly `H`-class": tag `S`
+  # (skip-worktree) or ANY lowercase tag (assume-unchanged, with or without
+  # skip-worktree) is refused, because those are precisely the entries `git diff`
+  # cannot see.
+  local vlist record tag blind_count=0 blind_sample="" blind_tag=""
+  if ! vlist="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-tracked-flags.XXXXXX")"; then
+    cleanup_tracked_guard_list
+    refuse_structural_dataset_root "could not create a scratch file to check the index flags of '${rel}', so skip-worktree/assume-unchanged entries cannot be ruled out"
+    return 0
+  fi
   if ! guard_git -C "${repo_root_phys}" ls-files -v -z -- ":(literal)${rel}" >"${vlist}"; then
     rm -f "${vlist}"
     cleanup_tracked_guard_list
-    refuse_unprotected_dataset_root "'git ls-files -v' failed for '${rel}' in '${repo_root_phys}', so skip-worktree/sparse entries cannot be ruled out"
+    refuse_unprotected_dataset_root "'git ls-files -v' failed for '${rel}' in '${repo_root_phys}', so skip-worktree/assume-unchanged entries cannot be ruled out"
     return 0
   fi
   while IFS= read -r -d '' record; do
     tag="${record%% *}"
-    if [ "${tag}" = "S" ]; then
-      skip_count=$((skip_count + 1))
-      [ -n "${skip_sample}" ] || skip_sample="${record#* }"
-    fi
+    case "${tag}" in
+      S | [a-z])
+        blind_count=$((blind_count + 1))
+        if [ -z "${blind_sample}" ]; then
+          blind_sample="${record#* }"
+          blind_tag="${tag}"
+        fi
+        ;;
+    esac
   done <"${vlist}"
   rm -f "${vlist}"
-  if [ "${skip_count}" -gt 0 ]; then
+  if [ "${blind_count}" -gt 0 ]; then
     cleanup_tracked_guard_list
-    refuse_structural_dataset_root "${skip_count} tracked path(s) under '${rel}' are SKIP-WORKTREE / sparse-checkout excluded (e.g. '${skip_sample}') — 'git restore' would not rebuild them AND 'git diff' cannot see them, so the loss would pass the integrity check unnoticed. Unsparse them (git sparse-checkout / git update-index --no-skip-worktree) or point CQLITE_DATASETS_ROOT outside the sparse-excluded area"
+    refuse_structural_dataset_root "${blind_count} tracked path(s) under '${rel}' carry index flags that hide them from the restore and/or the integrity check — SKIP-WORKTREE / sparse-checkout excluded (tag 'S') or ASSUME-UNCHANGED (any lowercase tag), e.g. '${blind_sample}' tagged '${blind_tag}'. 'git restore' would not rebuild a sparse-excluded path AND 'git diff' cannot see either flag class, so the loss would pass the integrity check unnoticed. Clear the flags (git update-index --no-skip-worktree --no-assume-unchanged), unsparse the path (git sparse-checkout), or point CQLITE_DATASETS_ROOT outside the affected area"
     return 0
   fi
 

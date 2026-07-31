@@ -1245,7 +1245,7 @@ fi
 run_fetch "$R22" "$R22/test-data/datasets"
 assert_refusal "skip-worktree" "SKIP-WORKTREE / sparse-checkout excluded" "$R22/$SKIP_REL"
 case "$OUT" in
-  *"git diff' cannot see them"*|*"cannot see them"*)
+  *"cannot see either flag class"*)
     ok "skip-worktree: message explains that the integrity check would be blind" ;;
   *) bad "skip-worktree: message does not explain the blind oracle; output: $OUT" ;;
 esac
@@ -1271,6 +1271,156 @@ if git -C "$R23" sparse-checkout init --cone >/dev/null 2>&1 \
   assert_structural_not_overridable "sparse-checkout" "$R23" "$R23/test-data/datasets" "$R23/keep/f"
 else
   printf 'INFO - sparse-checkout unavailable/ineffective here; skipping the sparse case\n'
+fi
+
+# === Case 24: BOTH index flags on one path (skip-worktree + assume-unchanged) ==
+# Verified on git 2.43: `ls-files -v` LOWERCASES the tag for assume-unchanged, so a
+# path carrying BOTH flags reports `s` — an exact `S` match misses it, and `git
+# restore` then REFUSES that pathspec ("did not match any file(s) known to git")
+# while `git diff` reports nothing, i.e. the file is gone and the oracle is blind.
+# The flags only compose across SEPARATE update-index invocations: passing both
+# options in ONE invocation lets the second override the first (tag `h`,
+# assume-unchanged only), which is why this fixture uses two calls.
+set_both_index_flags() {
+  git -C "$1" update-index --skip-worktree "$2"
+  git -C "$1" update-index --assume-unchanged "$2"
+}
+R24="$T/case24-repo"
+make_repo "$R24"
+BOTH_REL="test-data/datasets/goldens/simple_table-Data.db.jsonl"
+set_both_index_flags "$R24" "$BOTH_REL"
+BOTH_TAG="$(git -C "$R24" ls-files -v -- "$BOTH_REL" | cut -c1)"
+if [ "$BOTH_TAG" = "s" ]; then
+  ok "both-flags: fixture reports tag 's' — lowercase, so an exact 'S' match misses it"
+else
+  bad "both-flags: expected tag 's', got '$BOTH_TAG'; this git reports it differently"
+fi
+# Prove the hazard rather than assuming it: with the file removed, `git restore`
+# cannot rebuild that path and `git diff` does not report it missing.
+BOTH_PROBE="$T/case24-probe"
+make_repo "$BOTH_PROBE"
+set_both_index_flags "$BOTH_PROBE" "$BOTH_REL"
+rm -f "$BOTH_PROBE/$BOTH_REL"
+git -C "$BOTH_PROBE" restore --worktree -- ":(literal)$BOTH_REL" >/dev/null 2>&1
+if [ ! -f "$BOTH_PROBE/$BOTH_REL" ] \
+  && [ -z "$(git -C "$BOTH_PROBE" diff --name-status -- ":(literal)$BOTH_REL")" ]; then
+  ok "both-flags: git restore canNOT rebuild it AND git diff cannot see it missing"
+else
+  bad "both-flags: the hazard did not reproduce on this git (restore/diff behaved)"
+fi
+run_fetch "$R24" "$R24/test-data/datasets"
+assert_refusal "both-flags" "ASSUME-UNCHANGED (any lowercase tag)" "$R24/$BOTH_REL"
+case "$OUT" in
+  *"tagged '$BOTH_TAG'"*) ok "both-flags: message names the ACTUAL tag it saw ('$BOTH_TAG')" ;;
+  *) bad "both-flags: message does not name the observed tag; output: $OUT" ;;
+esac
+assert_structural_not_overridable "both-flags" "$R24" "$R24/test-data/datasets" "$R24/$BOTH_REL"
+
+# --- Case 24b: NON-VACUITY for the tag rule ----------------------------------
+# Reverting to an exact `S` match must let the both-flags path through — after which
+# `git restore` REFUSES the skip-worktree pathspec and fails the whole batch, so the
+# fixtures are deleted and not restored.
+MUTANT_EXACT_S="$T/fetch-datasets-mutant-exact-s.sh"
+sed 's#^      S | .*)$#      S)#' "$FETCH" >"$MUTANT_EXACT_S"
+if ! cmp -s "$FETCH" "$MUTANT_EXACT_S"; then
+  ok "non-vacuity: built an exact-'S'-match mutant"
+  R24B="$T/case24b-repo"
+  make_repo "$R24B"
+  set_both_index_flags "$R24B" "$BOTH_REL"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_EXACT_S"
+  run_fetch "$R24B" "$R24B/test-data/datasets"
+  FETCH="$FETCH_SAVED"
+  MUT24_MISSING=0
+  for rel in "${TRACKED_RELATIVE[@]}"; do
+    [ -f "$R24B/test-data/datasets/$rel" ] || MUT24_MISSING=$((MUT24_MISSING + 1))
+  done
+  if [ "$MUT24_MISSING" -gt 0 ]; then
+    ok "non-vacuity: mutant deletes and fails to restore $MUT24_MISSING fixture(s)"
+  else
+    bad "non-vacuity: mutant lost nothing — the both-flags assert is vacuous"
+  fi
+else
+  bad "non-vacuity: could not build the exact-'S'-match mutant (tag case changed?)"
+fi
+
+# === Case 25: ASSUME-UNCHANGED alone is equally invisible to `git diff` ========
+R25="$T/case25-repo"
+make_repo "$R25"
+git -C "$R25" update-index --assume-unchanged "$BOTH_REL"
+run_fetch "$R25" "$R25/test-data/datasets"
+assert_refusal "assume-unchanged" "ASSUME-UNCHANGED (any lowercase tag)" "$R25/$BOTH_REL"
+
+# === Case 26: an INCOMPLETE nested-repository scan must fail closed ===========
+# Swallowing find's exit status made a FAILED traversal indistinguishable from a
+# clean one — a fail-OPEN on a data-destroying path. Driven by a stub `find` that
+# fails deterministically (root-independent, unlike chmod-based permission tricks).
+# The fixture also contains a real nested repository that the broken scan cannot
+# see, so the mutant's harm is concrete rather than hypothetical.
+FINDBIN="$T/bin-broken-find"
+mkdir -p "$FINDBIN" || { echo "FAIL - could not create $FINDBIN"; exit 1; }
+cp "$BIN/curl" "$FINDBIN/curl"
+cat >"$FINDBIN/find" <<'MOCK'
+#!/usr/bin/env bash
+echo "find: '/simulated': Permission denied" >&2
+exit 1
+MOCK
+chmod +x "$FINDBIN/find"
+
+# broken_scan_fixture <dir> — a checkout whose dataset tree holds an untracked
+# canary plus a nested repository.
+broken_scan_fixture() {
+  local dir="$1"
+  make_repo "$dir"
+  printf 'untracked canary\n' >"$dir/test-data/datasets/scan-canary.txt"
+  git -C "$dir" init -q "$dir/test-data/datasets/vendor/nested"
+}
+R26="$T/case26-repo"
+broken_scan_fixture "$R26"
+FETCH_BIN="$FINDBIN"
+run_fetch "$R26" "$R26/test-data/datasets"
+FETCH_BIN=""
+assert_refusal "broken-scan" "FAILED to complete" "$R26/test-data/datasets/scan-canary.txt"
+case "$OUT" in
+  *"nested-repository scan"*"Permission denied"*)
+    ok "broken-scan: message names the scan AND find's own diagnostic" ;;
+  *) bad "broken-scan: message does not name why the scan failed; output: $OUT" ;;
+esac
+if [ -d "$R26/test-data/datasets/vendor/nested/.git" ]; then
+  ok "broken-scan: the nested repository the scan could not see is intact"
+else
+  bad "broken-scan: the nested repository was destroyed"
+fi
+assert_structural_not_overridable "broken-scan" "$R26" "$R26/test-data/datasets" \
+  "$R26/test-data/datasets/vendor/nested/.git"
+
+# --- Case 26b: NON-VACUITY for the fail-closed scan --------------------------
+# Treating a failed scan as "clean" (the pre-fix behaviour) must let the deletion
+# proceed and destroy the nested repository the scan never saw.
+MUTANT_SCAN_OPEN="$T/fetch-datasets-mutant-scan-open.sh"
+sed 's#^    return 2$#    return 1#' "$FETCH" >"$MUTANT_SCAN_OPEN"
+if ! cmp -s "$FETCH" "$MUTANT_SCAN_OPEN"; then
+  ok "non-vacuity: built a failed-scan-reads-as-clean mutant"
+  R26B="$T/case26b-repo"
+  broken_scan_fixture "$R26B"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_SCAN_OPEN"
+  FETCH_BIN="$FINDBIN"
+  run_fetch "$R26B" "$R26B/test-data/datasets"
+  FETCH="$FETCH_SAVED"
+  FETCH_BIN=""
+  if [ ! -d "$R26B/test-data/datasets/vendor/nested/.git" ]; then
+    ok "non-vacuity: mutant DESTROYS the nested repository (fail-open confirmed)"
+  else
+    bad "non-vacuity: mutant left the nested repository intact — the assert is vacuous"
+  fi
+  if [ ! -e "$R26B/test-data/datasets/scan-canary.txt" ]; then
+    ok "non-vacuity: mutant deleted the dataset tree (the refusal really prevents it)"
+  else
+    bad "non-vacuity: mutant deleted nothing — the broken-scan assert proves nothing"
+  fi
+else
+  bad "non-vacuity: could not build the failed-scan mutant (return codes changed?)"
 fi
 
 # --- summary -----------------------------------------------------------------
