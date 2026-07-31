@@ -260,14 +260,20 @@
 #                      red-ing the gate on a pristine main. Also pins the crash-safe
 #                      abort window (an abort between the rm -rf and the restore —
 #                      bad archive, tar failure, SIGINT — must still restore) and the
-#                      refusals that keep restoration possible at all (a target that
-#                      IS a repo root, contains a nested checkout, or is an ancestor
-#                      of one would delete .git). Hermetic: throwaway git repos +
-#                      locally-built partial-overlap tarball + stub curl/tar, so the
-#                      real rm -rf/extract/restore run against a sandbox and never
-#                      the checkout's datasets; the signal arm is deterministic (no
-#                      sleeps). Proves non-vacuity with two mutants (guard disabled;
-#                      abort-restore disabled).
+#                      refusals that keep restoration possible at all: a target that
+#                      IS a repo root (plain OR bare — a bare repo has no .git, and
+#                      was silently rm -rf'd with exit 0), contains a nested
+#                      checkout/mirror, is an ancestor of the work tree, or has
+#                      UNMERGED index entries (git restore cannot rebuild a
+#                      conflicted path). Those are STRUCTURAL and no env var unlocks
+#                      them; CQLITE_DATASETS_ALLOW_UNPROTECTED unlocks only the
+#                      guard-availability class. Hermetic: throwaway git repos +
+#                      locally-built partial-overlap tarball + stub curl/tar/git, so
+#                      the real rm -rf/extract/restore run against a sandbox and
+#                      never the checkout's datasets; both signal arms are
+#                      deterministic (no sleeps). Proves non-vacuity with four
+#                      mutants (guard disabled; abort-restore disabled; signals left
+#                      live during cleanup; GIT_DIR scrub removed).
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
