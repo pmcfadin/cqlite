@@ -212,7 +212,9 @@ nightly full pass is the drift backstop.
 ## Pre-condition: test data must be present
 
 The gate aborts with exit code 1 if no `*-Data.db` files exist under
-`$CQLITE_DATASETS_ROOT/sstables`. Fetch them first:
+`$CQLITE_DATASETS_ROOT/sstables`. Fetch them first, and export **the
+`export CQLITE_DATASETS_ROOT=<abs>` line the script prints** — on a box that already had the
+variable set, the fetch populates *that* root, not the checkout's (issue #3131):
 
 ```bash
 bash test-data/scripts/fetch-datasets.sh
@@ -221,6 +223,11 @@ bash test-data/scripts/fetch-datasets.sh
 This prevents the failure mode where dataset-dependent tests silently pass on an
 empty dataset by returning 0 rows.
 
+The fixture contract has two halves — the SSTable bytes and the committed CQL schemas that
+decode them — and the FULL gate now fails closed on either. The two markers are deliberately
+distinct text so a pasted SUMMARY separates the causes. The corpus guard runs first, so a run
+missing both reports #2078, the half an operator must act on.
+
 **Missing-fixtures fail-closed (issue #2078).** The FULL gate FAILs CLOSED when the
 fetched validation corpus (`test_basic/…`) is absent, even though a fresh worktree's
 committed byte-parity reference `*-Data.db` files keep the raw Data.db count > 0
@@ -228,6 +235,37 @@ committed byte-parity reference `*-Data.db` files keep the raw Data.db count > 0
 with the remedy (`bash test-data/scripts/fetch-datasets.sh`);
 `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` restores the lenient SKIP and stamps a visible
 `missing-fixtures: OPT-OUT (…)` line. `--lite`/`--only` are unchanged (lenient).
+
+**Missing-schemas fail-closed (issue #3148).** The FULL gate also FAILs CLOSED when the
+committed CQL schema fixtures are unreachable, stamping
+`missing-schemas: FAIL-CLOSED (#3148)`. It checks **readability of the specific canonical
+`.cql` files** the dataset-backed components consume, not directory existence, because a
+partial copy is the realistic failure. Two causes, each with its own remedy line:
+
+- a canonical `.cql` under the resolved schemas root is not a readable regular file —
+  remedy: unset `CQLITE_SCHEMAS_ROOT`, or
+  `git restore --source=HEAD -- test-data/schemas`;
+- `CQLITE_SCHEMAS_ROOT` was set to a **relative** path and was rejected — remedy: export an
+  absolute path, or unset it. A relative override cannot mean the same thing on both sides:
+  the gate resolves it against the repository root, cargo resolves it against each test
+  binary's *package* directory, so the SUMMARY would certify one schemas root while the tests
+  read another.
+
+On success the SUMMARY carries a positive
+`schemas: N/N canonical .cql readable under <root> (<source>)` line, so a pasted block shows
+the check RAN. `--lite`/`--only` stay lenient. Before #3148 the preflight validated only the
+corpus: a layout whose `sstables/` was complete but whose schemas were unreachable passed with
+`STATUS: OK`, built for ~8 minutes, then failed `core-tests` + `memory-budget` on opaque
+missing-`.cql` panics — worse than no preflight, since the recorded "fixtures verified" pointed
+triage at the diff under test.
+
+**There is deliberately no opt-out for `missing-schemas:`**, unlike #2078's
+`AGENT_GATE_ALLOW_MISSING_FIXTURES`. The fetched corpus is legitimately absent on a fresh box;
+committed source in a checkout never is. An unreachable schemas root means a broken checkout or
+a stale override, so an escape hatch could only buy a vacuous green.
+
+The schemas root itself is resolved **checkout-relative**, never as a `..` sibling of
+`$CQLITE_DATASETS_ROOT` — see [Test data](/cqlite/agents-developing/test-data/).
 
 ## Running the gate
 
@@ -516,6 +554,7 @@ PR report — prose summaries are not accepted.
 ==== AGENT-GATE SUMMARY ====
 commit: <short-sha> branch: <branch> dirty: yes|no
 datasets: <N> Data.db files under <CQLITE_DATASETS_ROOT>
+schemas: <N>/<N> canonical .cql readable under <root> (checkout-relative|CQLITE_SCHEMAS_ROOT override)
 ci-pins: DATASET_TAG: <tag>  DATASET_ASSET: <asset>  DATASET_SHA256: <sha>  
 tree-start: <head-sha12> dirty: yes|no digest: <digest12>
 tree-end:   <head-sha12> dirty: yes|no digest: <digest12>
