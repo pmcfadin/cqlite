@@ -147,6 +147,8 @@ IGN
 
 # run_fetch <cwd> <dataset-root> [extra env assignments...] — invoke the REAL
 # script with curl stubbed and CI explicitly unset unless an override is passed.
+# A dataset-root of "-" leaves CQLITE_DATASETS_ROOT UNSET so the script's
+# documented relative default (test-data/datasets) is exercised.
 # Sets $OUT (combined output) and $RC.
 run_fetch() {
   local cwd="$1" root="$2"
@@ -156,12 +158,20 @@ run_fetch() {
     unset CI GITHUB_ACTIONS CQLITE_DATASETS_ALLOW_UNPROTECTED
     export PATH="$BIN:$PATH"
     export STUB_CURL_PAYLOAD="$TARBALL"
-    env "$@" \
-      CQLITE_DATASETS_ROOT="$root" \
-      DATASET_TAG="fake-tag" \
-      DATASET_ASSET="$ASSET" \
-      DATASET_SHA256="$SHA" \
-      bash "$FETCH" 2>&1
+    if [ "$root" = "-" ]; then
+      env -u CQLITE_DATASETS_ROOT "$@" \
+        DATASET_TAG="fake-tag" \
+        DATASET_ASSET="$ASSET" \
+        DATASET_SHA256="$SHA" \
+        bash "$FETCH" 2>&1
+    else
+      env "$@" \
+        CQLITE_DATASETS_ROOT="$root" \
+        DATASET_TAG="fake-tag" \
+        DATASET_ASSET="$ASSET" \
+        DATASET_SHA256="$SHA" \
+        bash "$FETCH" 2>&1
+    fi
   )
   RC=$?
 }
@@ -223,6 +233,21 @@ case "$OUT" in
   *"Restoring "*"git-tracked file"*) ok "CI-unset: restore actually reported work (not a silent no-op)" ;;
   *) bad "CI-unset: no restore reported; output: $OUT" ;;
 esac
+
+# === Case 1a: the DOCUMENTED DEFAULT spelling (CQLITE_DATASETS_ROOT unset) ====
+# `bash test-data/scripts/fetch-datasets.sh` from a checkout root — the exact
+# invocation in CLAUDE.md that destroyed tracked fixtures before #2878.
+R1A="$T/case1a-repo"
+make_repo "$R1A"
+run_fetch "$R1A" "-"
+if [ "$RC" -eq 0 ]; then
+  ok "default-root: fetch exits 0 with CQLITE_DATASETS_ROOT unset"
+else
+  bad "default-root: fetch exited $RC"
+  printf '     %s\n' "$OUT"
+fi
+assert_tracked_intact "$R1A" "default-root"
+assert_archive_extracted "$R1A/test-data/datasets" "default-root"
 
 # === Case 1b: NON-VACUITY — the same fixture with the guard neutered =========
 # Mutant: the two `capture_tracked_dataset_files` call sites become no-ops, which
