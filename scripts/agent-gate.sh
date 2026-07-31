@@ -5038,7 +5038,13 @@ run_kit_dashboard_drift() {
 # REJECTS a schemas-less / present-but-incomplete root (the #3148 gap survived because
 # `STATUS: OK` was only ever observed on the happy path) and pins the checkout-relative
 # resolution contract. Hermetic temp roots; the FULL-gate cases exit AT the preflight,
-# so no cargo/datasets/network. SKIP-aware: the summary test's truncation case relies on a python3
+# so no cargo/datasets/network. Also runs scripts/tests/test_gate_notify_contract.sh (#3119),
+# which asserts the PUBLISHED push-signal payload (title/body/priority/tag, POSTed to the ntfy
+# server ROOT, message never a JSON document) at the TRANSPORT boundary via a curl-capture shim —
+# the companion test_agent_gate_notify.sh asserts only the ADVISORY half, and an argv-level
+# assertion is explicitly NOT evidence for payload fidelity (the swallowed `--category` defect was
+# invisible to one). Hermetic: no network, no real topic, pristine-agent-notify fixture copied into
+# its own tmpdir. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
 run_tooling_tests() {
@@ -5538,9 +5544,10 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1 &&
