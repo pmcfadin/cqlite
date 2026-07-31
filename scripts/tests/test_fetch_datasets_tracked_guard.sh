@@ -177,6 +177,7 @@ IGN
 FETCH_PAYLOAD=""
 FETCH_PAYLOAD_SHA=""
 FETCH_BIN=""
+FETCH_TMPDIR=""
 run_fetch() {
   local cwd="$1" root="$2"
   shift 2
@@ -189,7 +190,8 @@ run_fetch() {
     # Keep the script's own temporaries inside the sandbox: a run killed by a
     # signal (the abort/re-entrancy cases) never reaches its cleanup, so without
     # this each suite run would leak a /tmp/cqlite-tracked-datasets.* file.
-    export TMPDIR="$T"
+    # FETCH_TMPDIR overrides it for the cases that probe a hostile TMPDIR.
+    export TMPDIR="${FETCH_TMPDIR:-$T}"
     export STUB_CURL_PAYLOAD="$payload"
     if [ "$root" = "-" ]; then
       env -u CQLITE_DATASETS_ROOT "$@" \
@@ -1058,6 +1060,128 @@ fi
 # === Case 13: DATASET_ROOT == / =============================================
 run_fetch "$T" "/"
 assert_refusal "root-target" "unsafe CQLITE_DATASETS_ROOT" "/etc"
+
+# === Case 21: a HOSTILE TMPDIR at or below the deletion target ===============
+# The guard's own capture list used to be created under ${TMPDIR}; with TMPDIR
+# inside DATASET_ROOT the `rm -rf` ate the list, and a missing list then read as
+# "nothing to restore" — #2878's original silent no-op, reproduced by a knob this
+# very suite sets. Acceptable outcomes are: refuse up front, or complete with every
+# fixture intact. What must NEVER happen is success with a nonzero captured count
+# and no restore.
+R21="$T/case21-repo"
+make_repo "$R21"
+HOSTILE_TMPDIR="$R21/test-data/datasets/tmp"
+mkdir -p "$HOSTILE_TMPDIR"
+FETCH_TMPDIR="$HOSTILE_TMPDIR"
+run_fetch "$R21" "$R21/test-data/datasets"
+FETCH_TMPDIR=""
+MISSING21=0
+for rel in "${TRACKED_RELATIVE[@]}"; do
+  [ -f "$R21/test-data/datasets/$rel" ] || MISSING21=$((MISSING21 + 1))
+done
+if [ "$RC" -ne 0 ] || [ "$MISSING21" -eq 0 ]; then
+  ok "hostile-tmpdir: outcome is safe (exit $RC, $MISSING21 fixture(s) missing)"
+else
+  bad "hostile-tmpdir: succeeded while losing $MISSING21 tracked fixture(s)"
+fi
+case "$RC:$OUT" in
+  # Success is only acceptable if a restore actually happened.
+  0:*"Restoring "*) ok "hostile-tmpdir: success came WITH a real restore (list survived the rm -rf)" ;;
+  0:*) bad "hostile-tmpdir: reported success with NO restore performed — the silent no-op; output: $OUT" ;;
+  *) ok "hostile-tmpdir: refused rather than proceeding (exit $RC)" ;;
+esac
+if [ -z "$(git -C "$R21" status --porcelain 2>&1)" ]; then
+  ok "hostile-tmpdir: git status --porcelain is EMPTY"
+else
+  bad "hostile-tmpdir: checkout dirty: $(git -C "$R21" status --porcelain | head -3)"
+fi
+
+# --- Case 21b: NON-VACUITY for the guard-state location + consistency check ----
+# Put the capture list back under TMPDIR *and* remove the self-consistency check:
+# that is the pre-fix code, and it must show the silent-loss shape.
+MUTANT_UNSAFE_STATE="$T/fetch-datasets-mutant-unsafe-state.sh"
+sed -e 's#^  TRACKED_GUARD_LIST="$(mktemp .*#  TRACKED_GUARD_LIST="$(mktemp "${TMPDIR:-/tmp}/cqlite-tracked-datasets.XXXXXX")"#' \
+    -e 's#^  guard_list_is_consistent || return 1$#  : mutant-no-list-consistency-check#' \
+    "$FETCH" >"$MUTANT_UNSAFE_STATE"
+if ! cmp -s "$FETCH" "$MUTANT_UNSAFE_STATE" \
+  && grep -q 'mutant-no-list-consistency-check' "$MUTANT_UNSAFE_STATE" \
+  && grep -q 'TRACKED_GUARD_LIST="$(mktemp "${TMPDIR:-/tmp}' "$MUTANT_UNSAFE_STATE"; then
+  ok "non-vacuity: built an unsafe-guard-state mutant (list under TMPDIR, no consistency check)"
+  R21B="$T/case21b-repo"
+  make_repo "$R21B"
+  HOSTILE_TMPDIR_B="$R21B/test-data/datasets/tmp"
+  mkdir -p "$HOSTILE_TMPDIR_B"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_UNSAFE_STATE"
+  FETCH_TMPDIR="$HOSTILE_TMPDIR_B"
+  run_fetch "$R21B" "$R21B/test-data/datasets"
+  FETCH="$FETCH_SAVED"
+  FETCH_TMPDIR=""
+  MUT21_MISSING=0
+  for rel in "${TRACKED_RELATIVE[@]}"; do
+    [ -f "$R21B/test-data/datasets/$rel" ] || MUT21_MISSING=$((MUT21_MISSING + 1))
+  done
+  if [ "$RC" -eq 0 ] && [ "$MUT21_MISSING" -gt 0 ]; then
+    ok "non-vacuity: mutant reports SUCCESS while losing $MUT21_MISSING tracked fixture(s)"
+  else
+    bad "non-vacuity: mutant did not reproduce the silent loss (exit $RC, missing $MUT21_MISSING)"
+  fi
+  case "$OUT" in
+    *"Restoring "*) bad "non-vacuity: mutant restored something — the no-op shape is not what happened" ;;
+    *) ok "non-vacuity: mutant performed NO restore (its capture list was deleted with the tree)" ;;
+  esac
+  if [ -n "$(git -C "$R21B" status --porcelain 2>&1)" ]; then
+    ok "non-vacuity: mutant leaves the checkout dirty with tracked-file deletions"
+  else
+    bad "non-vacuity: mutant left a clean checkout — the assert is vacuous"
+  fi
+else
+  bad "non-vacuity: could not build the unsafe-guard-state mutant (anchors changed?)"
+fi
+
+# === Case 22: SKIP-WORKTREE entries in the subtree ===========================
+# `git restore` honours sparse rules so it would not rebuild them, AND `git diff`
+# ignores them so the integrity postcondition cannot see the loss — a compromised
+# oracle, so the guard refuses instead of restoring blind.
+R22="$T/case22-repo"
+make_repo "$R22"
+SKIP_REL="test-data/datasets/goldens/simple_table-Data.db.jsonl"
+git -C "$R22" update-index --skip-worktree "$SKIP_REL"
+if [ "$(git -C "$R22" ls-files -v -- "$SKIP_REL" | cut -c1)" = "S" ]; then
+  ok "skip-worktree: fixture really has a skip-worktree entry"
+else
+  bad "skip-worktree: could not set the skip-worktree bit"
+fi
+run_fetch "$R22" "$R22/test-data/datasets"
+assert_refusal "skip-worktree" "SKIP-WORKTREE / sparse-checkout excluded" "$R22/$SKIP_REL"
+case "$OUT" in
+  *"git diff' cannot see them"*|*"cannot see them"*)
+    ok "skip-worktree: message explains that the integrity check would be blind" ;;
+  *) bad "skip-worktree: message does not explain the blind oracle; output: $OUT" ;;
+esac
+case "$OUT" in
+  *"no-skip-worktree"*) ok "skip-worktree: message names the remediation" ;;
+  *) bad "skip-worktree: no remediation guidance; output: $OUT" ;;
+esac
+assert_structural_not_overridable "skip-worktree" "$R22" "$R22/test-data/datasets" "$R22/$SKIP_REL"
+
+# === Case 23: a SPARSE CHECKOUT excluding the dataset subtree =================
+R23="$T/case23-repo"
+make_repo "$R23"
+mkdir -p "$R23/keep"
+printf 'kept\n' >"$R23/keep/f"
+git -C "$R23" add keep/f
+git -C "$R23" commit -qm "keep dir"
+if git -C "$R23" sparse-checkout init --cone >/dev/null 2>&1 \
+  && git -C "$R23" sparse-checkout set keep >/dev/null 2>&1 \
+  && [ -n "$(git -C "$R23" ls-files -v -- test-data/datasets | grep '^S ' || true)" ]; then
+  ok "sparse-checkout: fixture excludes the dataset subtree (skip-worktree bits set)"
+  run_fetch "$R23" "$R23/test-data/datasets"
+  assert_refusal "sparse-checkout" "SKIP-WORKTREE / sparse-checkout excluded" "$R23/keep/f"
+  assert_structural_not_overridable "sparse-checkout" "$R23" "$R23/test-data/datasets" "$R23/keep/f"
+else
+  printf 'INFO - sparse-checkout unavailable/ineffective here; skipping the sparse case\n'
+fi
 
 # --- summary -----------------------------------------------------------------
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"

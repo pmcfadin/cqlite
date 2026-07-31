@@ -197,6 +197,11 @@ TRACKED_GUARD_COUNT=0
 # restore has verified the tracked subtree clean. While it is 1, an abort MUST
 # restore on the way out (see cleanup_fetch_temporaries).
 TRACKED_GUARD_DESTRUCTIVE_STARTED=0
+# Directory holding the guard's OWN state files, PROVEN to lie outside the deletion
+# target — see resolve_guard_state_dir. TMPDIR is a knob people really do set (this
+# repo's own test harness sets it), and a capture list stored under DATASET_ROOT is
+# eaten by the very `rm -rf` it exists to undo.
+TRACKED_GUARD_STATE_DIR=""
 
 # Escape hatch for an environment that genuinely cannot run the guard (no git
 # binary, exotic mount). Loud, opt-in, never the default — and it unlocks ONLY the
@@ -421,6 +426,42 @@ ancestor_has_git_dir() {
   done
 }
 
+# Prints the first writable directory PROVEN to lie outside the deletion target (and
+# outside git's admin storage) among TMPDIR, /tmp and HOME, else fails. Uses the same
+# component-wise containment test as the structural checks, so "outside" is proven
+# rather than assumed.
+resolve_guard_state_dir() {
+  local dataset_abs="$1" candidate candidate_phys
+  for candidate in "${TMPDIR:-}" /tmp "${HOME:-}"; do
+    [ -n "${candidate}" ] || continue
+    [ -d "${candidate}" ] && [ -w "${candidate}" ] || continue
+    candidate_phys="$(physical_path "${candidate}")" || continue
+    # Inside the tree we are about to delete? Then the state would be deleted too.
+    path_relative_inside "${dataset_abs}" "${candidate_phys}" >/dev/null && continue
+    git_admin_dir_at_or_above "${candidate_phys}" >/dev/null && continue
+    printf '%s\n' "${candidate_phys}"
+    return 0
+  done
+  return 1
+}
+
+# Self-consistency: the script KNOWS it captured N>0 entries, so a capture list that
+# has vanished or been emptied is provably an ERROR and must NEVER be read as
+# "nothing to restore" — that silent no-op IS #2878's original defect, and it is
+# exactly what a TMPDIR at or below DATASET_ROOT used to produce. Checked by
+# restore_tracked_dataset_files on every path, the abort path included.
+guard_list_is_consistent() {
+  [ "${TRACKED_GUARD_STATE}" = "in-repo" ] || return 0
+  [ "${TRACKED_GUARD_COUNT}" -gt 0 ] || return 0
+  if [ -n "${TRACKED_GUARD_LIST}" ] && [ -s "${TRACKED_GUARD_LIST}" ]; then
+    return 0
+  fi
+  echo "ERROR: the captured list of ${TRACKED_GUARD_COUNT} git-tracked file(s) under '${TRACKED_GUARD_REL}' is MISSING or EMPTY (expected at '${TRACKED_GUARD_LIST:-<unset>}')" >&2
+  echo "ERROR: — refusing to report a no-op restore as success (issue #2878)" >&2
+  echo "ERROR: recover with: git -C '${TRACKED_GUARD_REPO:-.}' restore --worktree -- '${TRACKED_GUARD_REL:-test-data/datasets}'" >&2
+  return 1
+}
+
 # Capture the git-tracked files under DATASET_ROOT. MUST be called before any
 # destructive step; safe to call repeatedly (re-captures).
 capture_tracked_dataset_files() {
@@ -455,6 +496,14 @@ capture_tracked_dataset_files() {
   local admin_dir
   if admin_dir="$(git_admin_dir_at_or_above "${dataset_abs}")"; then
     refuse_structural_dataset_root "'${dataset_abs}' is at or beneath git's administrative storage '${admin_dir}' — deleting it would corrupt the repository and destroy the object store this guard restores FROM"
+    return 0
+  fi
+
+  # Establish where the guard's own state may live BEFORE anything else needs it, so
+  # neither the capture list nor the extraction staging area can sit inside the tree
+  # the `rm -rf` removes.
+  if ! TRACKED_GUARD_STATE_DIR="$(resolve_guard_state_dir "${dataset_abs}")"; then
+    refuse_structural_dataset_root "no writable temporary directory (of TMPDIR, /tmp, HOME) could be PROVEN to lie outside '${dataset_abs}', so this guard's own capture list would be deleted by the very 'rm -rf' it exists to undo"
     return 0
   fi
 
@@ -519,7 +568,7 @@ capture_tracked_dataset_files() {
     return 0
   fi
 
-  TRACKED_GUARD_LIST="$(mktemp "${TMPDIR:-/tmp}/cqlite-tracked-datasets.XXXXXX")"
+  TRACKED_GUARD_LIST="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-tracked-datasets.XXXXXX")"
   # --deduplicate (git >= 2.31): a path in a merge conflict is otherwise listed
   # once per stage, duplicating the count and the restore pathspecs. Older git
   # lacks the option, so retry without it — duplicates only cost work.
@@ -549,6 +598,36 @@ capture_tracked_dataset_files() {
     unmerged_paths="$(printf '%s\n' "${unmerged}" | awk -F'\t' 'NF > 1 { print $2 }' | sort -u | head -3 | tr '\n' ' ' || true)"
     cleanup_tracked_guard_list
     refuse_structural_dataset_root "'${rel}' in '${repo_root_phys}' has UNMERGED (conflicted) index entries (e.g. ${unmerged_paths%% }) — 'git restore' cannot rebuild a conflicted path, so the deletion would be permanent. Resolve or abort the merge first"
+    return 0
+  fi
+
+  # STRUCTURAL: skip-worktree / sparse-checkout entries break BOTH halves of the
+  # guard. `git restore` honours sparse rules, so it would not rebuild those paths —
+  # and `git diff` ignores skip-worktree entries, so the integrity postcondition
+  # cannot SEE the loss and would agree that nothing is wrong. That is the
+  # foreign-index failure again: an oracle pointed at something other than the
+  # thing it is meant to verify. `--ignore-skip-worktree-bits` would fix only the
+  # restore and leave the verification blind, so we refuse instead, with the
+  # remediation named. `ls-files -v` tags skip-worktree entries `S`.
+  local vlist record tag skip_count=0 skip_sample=""
+  vlist="$(mktemp "${TRACKED_GUARD_STATE_DIR}/cqlite-tracked-flags.XXXXXX")"
+  if ! guard_git -C "${repo_root_phys}" ls-files -v -z -- ":(literal)${rel}" >"${vlist}"; then
+    rm -f "${vlist}"
+    cleanup_tracked_guard_list
+    refuse_unprotected_dataset_root "'git ls-files -v' failed for '${rel}' in '${repo_root_phys}', so skip-worktree/sparse entries cannot be ruled out"
+    return 0
+  fi
+  while IFS= read -r -d '' record; do
+    tag="${record%% *}"
+    if [ "${tag}" = "S" ]; then
+      skip_count=$((skip_count + 1))
+      [ -n "${skip_sample}" ] || skip_sample="${record#* }"
+    fi
+  done <"${vlist}"
+  rm -f "${vlist}"
+  if [ "${skip_count}" -gt 0 ]; then
+    cleanup_tracked_guard_list
+    refuse_structural_dataset_root "${skip_count} tracked path(s) under '${rel}' are SKIP-WORKTREE / sparse-checkout excluded (e.g. '${skip_sample}') — 'git restore' would not rebuild them AND 'git diff' cannot see them, so the loss would pass the integrity check unnoticed. Unsparse them (git sparse-checkout / git update-index --no-skip-worktree) or point CQLITE_DATASETS_ROOT outside the sparse-excluded area"
     return 0
   fi
 
@@ -583,7 +662,7 @@ verify_captured_blobs_readable() {
   [ -n "${TRACKED_GUARD_LIST}" ] && [ -s "${TRACKED_GUARD_LIST}" ] || return 0
 
   local staged_list record sha path check_out line idx unreadable sample
-  staged_list="$(mktemp "${TMPDIR:-/tmp}/cqlite-staged-blobs.XXXXXX")"
+  staged_list="$(mktemp "${TRACKED_GUARD_STATE_DIR:-${TMPDIR:-/tmp}}/cqlite-staged-blobs.XXXXXX")"
   if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -s -z -- ":(literal)${TRACKED_GUARD_REL}" >"${staged_list}"; then
     rm -f "${staged_list}"
     refuse_unprotected_dataset_root "'git ls-files -s' failed for '${TRACKED_GUARD_REL}', so blob readability cannot be established"
@@ -648,6 +727,7 @@ EOF
 # non-zero return into `exit 1` themselves.
 restore_tracked_dataset_files() {
   local mode="$1"
+  guard_list_is_consistent || return 1
   [ "${TRACKED_GUARD_STATE}" = "in-repo" ] || return 0
   [ -n "${TRACKED_GUARD_LIST}" ] && [ -s "${TRACKED_GUARD_LIST}" ] || return 0
 
@@ -866,7 +946,9 @@ rm -rf "${DATASET_ROOT}"
 if [ "${DATASET_ROOT}" = "${ARCHIVE_DATASET_ROOT}" ]; then
   tar -xzf "${ASSET_PATH}" -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
 else
-  EXTRACT_TMP="$(mktemp -d)"
+  # Staged in the PROVEN-safe directory, never a TMPDIR that may sit inside the
+  # dataset tree we just deleted (issue #2878).
+  EXTRACT_TMP="$(mktemp -d "${TRACKED_GUARD_STATE_DIR:-${TMPDIR:-/tmp}}/cqlite-dataset-extract.XXXXXX")"
   tar -xzf "${ASSET_PATH}" -C "${EXTRACT_TMP}" --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
 
   if [ ! -d "${EXTRACT_TMP}/${ARCHIVE_DATASET_ROOT}" ]; then
