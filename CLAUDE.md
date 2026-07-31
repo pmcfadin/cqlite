@@ -141,10 +141,18 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   DuckDB amalgamation (cqlite-cli `duckdb-tests`) + OTel stack (`observability`/
   `observability-testing`); parquet/arrow stay linted. `CQLITE_CLIPPY_FULL=1` (nightly `gate.yml`)
   runs the full matrix.
-- The FULL gate FAILs CLOSED when the fetched validation corpus is absent (#2078), stamping
-  `missing-fixtures: FAIL-CLOSED (#2078)`; `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` opts out visibly
-  (`missing-fixtures: OPT-OUT (...)`). Remedy: `bash test-data/scripts/fetch-datasets.sh`.
-  `--lite`/`--only` stay lenient.
+- The FULL gate FAILs CLOSED on **either half** of the fixture contract; `--lite`/`--only` stay
+  lenient for both.
+  - Fetched corpus absent (#2078): `missing-fixtures: FAIL-CLOSED (#2078)`, remedy
+    `bash test-data/scripts/fetch-datasets.sh`; `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` opts out
+    visibly (`missing-fixtures: OPT-OUT (...)`).
+  - Committed CQL schemas unreachable (#3148): `missing-schemas: FAIL-CLOSED (#3148)` — textually
+    distinct from #2078's marker, with two causes, an unreadable `test-data/schemas/*.cql` or a
+    **rejected relative `CQLITE_SCHEMAS_ROOT`**, each carrying its own remedy line. Success stamps a
+    positive `schemas: N/N canonical .cql readable under <root> (<source>)` line, so a pasted SUMMARY
+    shows the check RAN. **There is deliberately NO opt-out env var, and none may be added**:
+    committed source in a checkout is never legitimately absent, so an escape hatch could only buy a
+    vacuous green.
 - **A run whose worktree mutates MID-RUN cannot certify (#2926).** Every mode captures a tree
   identity at start, re-verifies it at each component boundary + the terminal emit, and FAILs closed
   with `tree-integrity: FAIL (tree-mutated-midrun; head <a>→<b>; changed: …)`. Every SUMMARY carries
@@ -160,11 +168,12 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
 
 ```bash
 cargo build
-env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-core
+cargo test --package cqlite-core            # needs CQLITE_DATASETS_ROOT exported — see "Test Data"
 env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features   # CI mode
 cargo fmt
 bash test-data/scripts/smoke-test-all-tables.sh
-bash test-data/scripts/fetch-datasets.sh    # fetch real SSTable binaries (required for integration tests)
+bash test-data/scripts/fetch-datasets.sh    # fetch real SSTable binaries; USE the export line it prints
+bash test-data/scripts/fetch-datasets.sh --verify-only   # is my root usable? mutates nothing
 ```
 
 Everything else (CLI usage/modes/output precedence, Python/Node build + test + examples, write
@@ -270,7 +279,21 @@ Location: `test-data/datasets/sstables/` — keyspaces `test_basic` (8), `test_c
 `test_timeseries` (9), `test_wide_rows` (8). **Pass rate: 100% (33/33, Dec 2025).**
 
 The repo ships only JSONL reference files; fetch real binaries with
-`bash test-data/scripts/fetch-datasets.sh` and set `CQLITE_DATASETS_ROOT=$PWD/test-data/datasets`.
+`bash test-data/scripts/fetch-datasets.sh`, then export **the exact
+`export CQLITE_DATASETS_ROOT=<abs>` line that script prints** — it names the only root that run
+guarantees, and on a fleet box it is often a machine-local root (e.g. `/data/datasets`), NOT
+`$PWD/test-data/datasets`. The printed line beats any root remembered from this file. The script
+rejects every unrecognized argument (exit 2) because its default path is destructive
+(`rm -rf` on the dataset root); `--verify-only` probes a root without mutating anything, `--help`
+lists the flags.
+
+**`CQLITE_DATASETS_ROOT` alone is sufficient on every layout (#3131/#3148)** — the corpus root needs
+no `schemas` sibling. The CQL schema fixtures (`test-data/schemas`, 23 committed files incl.
+`legacy/` + `udts/`) are **committed source resolved checkout-relative** (anchored on the
+workspace-root `Cargo.toml`), never derived from `CQLITE_DATASETS_ROOT`. `CQLITE_SCHEMAS_ROOT` is an
+optional out-of-tree override and **MUST be absolute**: a relative value is rejected fail-closed by
+both the gate and the tests, because the gate resolves it against the repo root while cargo resolves
+it against each package dir — so it would certify one schemas root while the tests read another.
 Without Data.db files, query tests pass but return 0 rows. Dataset pins:
 [test data](https://pmcfadin.github.io/cqlite/agents-developing/test-data/).
 
@@ -285,8 +308,10 @@ recipes: `docs/development/dev-cookbook.md`.
 
 ## Troubleshooting
 
-- **Missing test data / 0 rows**: `export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets` +
-  `bash test-data/scripts/fetch-datasets.sh`
+- **Missing test data / 0 rows**: `bash test-data/scripts/fetch-datasets.sh`, then export the
+  `CQLITE_DATASETS_ROOT=` line it prints — NOT `$PWD/test-data/datasets`, which on a fleet box is a
+  corpus-less root the fetch never populates. `--verify-only` re-checks an existing root
+  non-destructively. No `schemas` sibling is needed (#3131).
 - **Clippy failures**: run with `RUSTFLAGS="-D warnings"` to match CI
 - **Parsing issues**: `docs/sstables-definitive-guide/chapters/appendix-f-known-limitations.md`
 - **Python bindings**: Rust 1.85+, Python 3.9+, `pip install maturin`, then
@@ -462,7 +487,9 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   thing. Doctrine: [delivery pipeline](https://pmcfadin.github.io/cqlite/agents-developing/delivery-pipeline/).
 - **1:1:1:1**: one issue ↔ one worktree/branch `issue-<N>-<slug>` (branched from `origin/main`) ↔
   one OpenSpec change `<slug>` ↔ one PR. Worktrees lack gitignored Data.db binaries — point
-  `CQLITE_DATASETS_ROOT` at the main repo's `test-data/datasets`.
+  `CQLITE_DATASETS_ROOT` at the root the fetch's printed export line names (often machine-local, e.g.
+  `/data/datasets`), which is not necessarily the main repo's `test-data/datasets`. The committed CQL
+  schemas need no env var: they resolve from the worktree's own checkout (#3148).
 - **Board = sole dispatch authority (Path A, #1886)**: the GitHub Project `Status` field
   (`Backlog/Ready/In Progress/In Review/Done`); exactly one `P0`–`P3` per issue. New issues auto-land
   at `Backlog`. Empty Ready column = no work ready → STOP. Board unreachable (auth/scope) → STOP and

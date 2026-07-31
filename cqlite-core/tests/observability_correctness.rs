@@ -470,6 +470,12 @@ fn mc_baseline_is_zero(m: &testing::CapturedMetrics) -> bool {
 // Read fixtures (mirrors benches/fixtures, trimmed to what these tests need)
 // ---------------------------------------------------------------------------
 
+/// The ONE definition of every `test-data/` root (issues #3131 / #3148). Replaces the
+/// third hand-written copy of `datasets_root()` and the open-coded
+/// `datasets_root().join("../schemas")` that used to live in `read_fixtures`.
+#[path = "../../test-data/support/fixture_roots.rs"]
+mod fixture_roots;
+
 #[cfg(feature = "cli-helpers")]
 mod read_fixtures {
     use std::path::PathBuf;
@@ -497,11 +503,10 @@ mod read_fixtures {
         _tmp: tempfile::TempDir,
     }
 
+    /// Infallible shape (checkout-relative fallback) — see `crate::fixture_roots` for
+    /// the two-shape contract. Thin delegation: one implementation, no third copy.
     fn datasets_root() -> PathBuf {
-        match std::env::var("CQLITE_DATASETS_ROOT") {
-            Ok(root) => PathBuf::from(root),
-            Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-data/datasets"),
-        }
+        crate::fixture_roots::datasets_root()
     }
 
     fn table_dir(keyspace: &str, table: &str) -> PathBuf {
@@ -545,7 +550,8 @@ mod read_fixtures {
             .join(src.file_name().expect("dir name"));
         copy_dir(&src, &dst);
 
-        let schema_path = datasets_root().join("../schemas").join(fx.schema_file);
+        // Committed source, checkout-relative — never `datasets_root/../schemas` (#3148).
+        let schema_path = crate::fixture_roots::schema_path(fx.schema_file);
         let cfg = IngestionConfig {
             schema_paths: vec![schema_path],
             data_dir: tmp.path().to_path_buf(),

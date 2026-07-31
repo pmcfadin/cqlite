@@ -21,7 +21,10 @@
 //! type-heavy `test_collections.collection_table` (500 rows × 7 cols). The
 //! fixture-open logic is duplicated here (~30 lines) rather than sharing the
 //! `cqlite-core/benches/fixtures` module across crates — a deliberate,
-//! spec-blessed duplication (no new shared crate).
+//! spec-blessed duplication (no new shared crate). The *root resolution* is NOT
+//! duplicated: since #3148 it comes from the single shared
+//! `test-data/support/fixture_roots.rs`, so the datasets/schemas contract cannot
+//! drift between this bench and cqlite-core.
 //!
 //! Wiring evidence / non-vacuity: the bench runs the real `SELECT *`, **panics**
 //! at setup if it returns zero rows, and asserts the CSV writer produced a real
@@ -42,18 +45,19 @@ use criterion::{criterion_group, criterion_main, Criterion};
 // CSV export writer over a single loaded type-heavy fixture (cli-helpers).
 // ---------------------------------------------------------------------------
 
-/// Locate the `test-data/datasets` root (mirrors the core bench fixture loader).
-/// Prefers `CQLITE_DATASETS_ROOT`; else the workspace-relative fallback (the
-/// crate dir is `<workspace>/cqlite-cli`, so datasets live at
-/// `<workspace>/test-data/datasets`).
+/// The ONE definition of every `test-data/` root (issues #3131 / #3148), shared
+/// verbatim with `cqlite-core`'s benches/tests. Hosted under `test-data/support/`
+/// rather than in either crate: it encodes the layout of `test-data` itself, so the
+/// include path is symmetric (`../../` from any `<crate>/benches/`) and this bench
+/// still takes no dependency on `cqlite-core`'s bench internals.
+#[path = "../../test-data/support/fixture_roots.rs"]
+mod fixture_roots;
+
+/// Locate the `test-data/datasets` root — infallible shape (checkout-relative
+/// fallback when `CQLITE_DATASETS_ROOT` is unset).
 #[cfg(feature = "cli-helpers")]
 fn datasets_root() -> std::path::PathBuf {
-    match std::env::var("CQLITE_DATASETS_ROOT") {
-        Ok(root) => std::path::PathBuf::from(root),
-        Err(_) => {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-data/datasets")
-        }
-    }
+    fixture_roots::datasets_root()
 }
 
 /// Resolve the CFID-suffixed `<keyspace>/<table>-<hash>` SSTable directory, or
@@ -121,7 +125,8 @@ fn bench_csv_export(c: &mut Criterion) {
         .join(src.file_name().expect("fixture dir has a final component"));
     copy_dir_recursive(&src, &dst);
 
-    let schema_path = datasets_root().join("../schemas").join(SCHEMA_FILE);
+    // Committed source, checkout-relative — never `datasets_root/../schemas` (#3148).
+    let schema_path = fixture_roots::schema_path(SCHEMA_FILE);
     let cfg = IngestionConfig {
         schema_paths: vec![schema_path],
         data_dir: tmp.path().to_path_buf(),

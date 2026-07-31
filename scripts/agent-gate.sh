@@ -1281,6 +1281,391 @@ apply_fixture_preflight() {
   esac
 }
 
+# ---- issue #3148: FULL-gate fail-closed on an unreachable COMMITTED schemas root -
+# #2078 (above) validates the FETCHED SSTable corpus. It says nothing about the
+# COMMITTED CQL schema fixtures under test-data/schemas/ (23 files incl. legacy/ and
+# udts/), which the dataset-backed components must also read to decode those SSTables.
+# Before #3148, `grep -c schemas scripts/agent-gate.sh` was 0: a corpus whose
+# sstables/ was complete but whose schema fixtures were unreachable passed the
+# preflight with STATUS: OK, built for ~8 minutes, then failed core-tests +
+# memory-budget with opaque "Path does not exist: …/basic-types.cql" panics. Worse
+# than no preflight at all: `STATUS: OK` is POSITIVELY MISLEADING, so an agent reads
+# "fixtures verified" and suspects its own diff (this nearly cost #3095/PR #3141 a
+# misattributed triage).
+#
+# Since #3148 the Rust helpers resolve the schemas root CHECKOUT-RELATIVE
+# (test-data/support/fixture_roots.rs — never $CQLITE_DATASETS_ROOT/../schemas), so
+# this check is a cheap BELT-AND-BRACES assert on the same root that helper resolves:
+# an explicit CQLITE_SCHEMAS_ROOT override when set + readable, else the checkout's
+# test-data/schemas. Deliberately NO opt-out (unlike #2078's
+# AGENT_GATE_ALLOW_MISSING_FIXTURES): the fetched corpus is legitimately absent
+# sometimes, but committed source in a checkout never is — an unreachable schemas root
+# is a broken checkout or a stale override, and neither may certify a run.
+# --lite/--only stay lenient, unchanged from #2078's contract (#3148 AC (g)).
+
+# The exact schema files the gate's dataset-backed components consume — a directory
+# existence check is NOT enough (#3148 fix 1). The six from the shared bench fixture
+# catalog (cqlite-core/benches/fixtures/mod.rs, read by memory_budget,
+# issue_1494_converter_alloc_budget, issue_2075_row_assembly_alloc_budget,
+# tail_latency_harness), which also cover dead_cache_delete_tests (basic-types.cql),
+# observability_correctness (basic-types.cql) and cqlite-cli's export_csv bench
+# (collections.cql).
+CANONICAL_SCHEMA_FILES="basic-types.cql da-test.cql time-series.cql wide-table-bti.cql collections.cql wide-rows.cql"
+# Stamped into the SUMMARY on a successful check so the pasted block shows POSITIVELY
+# that the schemas root was validated, not merely that nothing complained.
+SCHEMAS_LINE=""
+
+# _gate_checkout_test_data_dir: the enclosing checkout's `test-data`, anchored on the
+# WORKSPACE-ROOT `Cargo.toml` (nearest ancestor manifest declaring `[workspace]`) exactly
+# as workspace_root() does in test-data/support/fixture_roots.rs. Anchoring on a checkout
+# MARKER rather than on the fixtures matters: keying on `test-data/schemas` would let a
+# sparse checkout — or a worktree nested inside another checkout — resolve to the OUTER
+# checkout's fixtures, wrong-but-existing and unreported. Falls back to REPO_ROOT when no
+# `[workspace]` manifest is found (not reachable in this repository).
+#
+# KNOWN EXCEPTION: `fuzz/Cargo.toml` declares its OWN `[workspace]` (deliberately — the
+# fuzz crate is excluded from the main workspace, see #1614). So a hypothetical caller
+# anchored inside `fuzz/` would resolve `fuzz/test-data`, which does not exist. Benign in
+# both mirrors: the result is a LOUD failure naming that absent path, never a silent
+# borrow of a wrong tree — and neither the gate (anchored on REPO_ROOT) nor any
+# `#[path]`-including target lives under `fuzz/`. Named here so the next reader does not
+# have to rediscover that the "nearest [workspace]" rule has an in-repo counterexample.
+_gate_checkout_test_data_dir() {
+  local d="$REPO_ROOT"
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    if [ -f "$d/Cargo.toml" ] && grep -q '^[[:space:]]*\[workspace\]' "$d/Cargo.toml" 2>/dev/null; then
+      printf '%s' "$d/test-data"; return 0
+    fi
+    d="$(dirname "$d")"
+  done
+  printf '%s' "$REPO_ROOT/test-data"
+}
+
+# _gate_schemas_override_reject: echoes a non-empty REASON when CQLITE_SCHEMAS_ROOT is set
+# but must be REJECTED rather than resolved. Today there is exactly one such case, and it
+# is the one that nearly reintroduced #3148's own defect: a RELATIVE override.
+#
+# The gate evaluates a relative path with CWD = REPO_ROOT; cargo runs each test binary
+# with CWD = the PACKAGE directory. So `CQLITE_SCHEMAS_ROOT=packaged/schemas` exported
+# from the checkout root passes the gate's `-d` test and gets stamped
+# `schemas: 6/6 … under packaged/schemas (override)`, while every test binary sees
+# `is_dir() == false`, falls back to the checkout, and reads DIFFERENT files. The SUMMARY
+# would then certify root A for a run that used root B — a positively misleading block,
+# which is the entire defect class #3148 was filed for. It also made the `expected
+# absolute path:` remedy line print a relative path, breaking AC (b).
+#
+# Both sides therefore reject it, removing the one input class on which they could not
+# possibly have agreed.
+#
+# HOW STRONG THAT IS, precisely: this shell resolution and
+# test-data/support/fixture_roots.rs are two HAND-WRITTEN mirrors, EQUIVALENT TODAY and
+# PINNED BY scripts/tests/test_agent_gate_schemas_preflight.sh — not equivalent by
+# construction. They have been walked case by case over the whole input table (unset /
+# "" / whitespace-only / control-character-bearing / "  /abs  " / absolute-non-dir /
+# absolute-dir / relative) and agree on every one. If you edit EITHER side, re-walk that
+# table and re-run that self-test: an unearned "by construction" here is precisely what
+# would stop you doing so, and a silent divergence between these two is the
+# root-certification mismatch this whole change exists to prevent.
+
+# _gate_schemas_override_present: THE single normalization of "is there an override?".
+# Returns a STATUS (0 = present), never text, and every consumer then reads
+# `$CQLITE_SCHEMAS_ROOT` DIRECTLY. Two reasons for that shape, both learned the hard way:
+#
+#   1. Single-sourcing presence (roborev job 9, finding 1): `_gate_schemas_override_reject`
+#      treated a WHITESPACE-ONLY value as unset (matching Rust's `v.trim().is_empty()`)
+#      while `_gate_schemas_root`/`_gate_schemas_root_source` tested the raw `-n` value. The
+#      whole point of the shell/Rust pair is that they answer identically on EVERY input, so
+#      one predicate decides presence for all of them.
+#   2. NO COMMAND SUBSTITUTION anywhere on the value path (roborev job 10, finding 2). The
+#      previous text-returning helper was consumed as `v="$(_gate_schemas_override)"`, and
+#      `$( )` STRIPS TRAILING NEWLINES. Measured: with `CQLITE_SCHEMAS_ROOT=$'/abs/dir\n'`
+#      the gate reported `STATUS: OK` + `SOURCE: CQLITE_SCHEMAS_ROOT override` + `ROOT:
+#      /abs/dir` (newline gone, `-d` true) while Rust kept the newline, got `is_dir() ==
+#      false`, and degraded to the checkout — the gate certifying root A for a run that used
+#      root B, i.e. the exact mis-certification this change exists to prevent, introduced by
+#      the round-2 refactor that fixed (1). Returning a status and reading the variable
+#      directly removes the substitution, and control-character values are additionally
+#      REJECTED below on both sides so no such value can reach a comparison at all.
+#
+# Presence is decided on the TRIMMED value while the value USED is the RAW one — exactly as
+# Rust does (`trim()` gates presence, `PathBuf::from(raw)` builds the path). Hence
+# `"  /abs  "` is *present* and then REJECTED as non-absolute on both sides, never silently
+# trimmed into `/abs`. The test is a pure-bash pattern, not `tr`, so it too is
+# substitution-free.
+_gate_schemas_override_present() {
+  case "${CQLITE_SCHEMAS_ROOT:-}" in
+    *[![:space:]]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# _gate_schemas_override_reject: echoes a non-empty REASON when an override is present but
+# must be REJECTED rather than resolved. Mirrors resolve_schemas_root()'s two Err cases.
+# _gate_schemas_override_reject_kind: `relative` | `control-chars` | (empty when accepted).
+# The KIND, separate from the reason text, so the FAIL emit can name the ACTUAL cause. Before
+# this the emit hard-coded "a RELATIVE schemas root ..." and stamped `... relative
+# CQLITE_SCHEMAS_ROOT rejected` for EVERY rejection — a FALSE message for a
+# control-character value, and untested because the round-3 coverage went through the pure
+# hook and never saw the real emit (spec-auditor, AC (b) partial).
+_gate_schemas_override_reject_kind() {
+  _gate_schemas_override_present || return 0
+  case "${CQLITE_SCHEMAS_ROOT:-}" in
+    *[[:cntrl:]]*) printf '%s' 'control-chars'; return 0 ;;
+  esac
+  _gate_schemas_override_is_utf8 || { printf '%s' 'non-utf8'; return 0; }
+  case "${CQLITE_SCHEMAS_ROOT:-}" in
+    /*) return 0 ;;
+    *) printf '%s' 'relative' ;;
+  esac
+}
+
+# _gate_schemas_override_is_utf8: rc 0 iff CQLITE_SCHEMAS_ROOT is (provably) valid UTF-8.
+#
+# Bash handles the value as BYTES, so without this the gate validated a non-UTF-8 override and
+# stamped it into the SUMMARY while Rust's `var_os(..).to_str()` could not represent it and
+# rejected — the gate certifying one schemas root while the tests resolved another (roborev job
+# 11, BLOCKER; measured `STATUS: OK` + `SOURCE: CQLITE_SCHEMAS_ROOT override` for a
+# `bad\xff\xfedir` path). Now both sides reject it.
+#
+# Two-step so the common case needs no external tool AND an unverifiable value is never
+# accepted:
+#   1. Pure printable ASCII is valid UTF-8 by definition, so accept without invoking anything.
+#      Done with a SUBPROCESS-FREE `case` under a function-local `LC_ALL=C`, which makes
+#      `[[:print:]]` mean ASCII-printable regardless of the caller's locale (verified identical
+#      under C, C.UTF-8 and en_US.UTF-8).
+#
+#      This replaced a `printf | grep -q` probe. DEFENSIVE HARDENING, not a fixed live bug:
+#      under the script-wide `set -o pipefail` (:369) a NEGATED pipeline whose LEFT side can
+#      take SIGPIPE is a latent branch-inversion hazard (roborev job 12, finding 1) — if it
+#      fired, a malformed override would take the "pure ASCII" branch and skip validation. It
+#      did NOT reproduce here: bash's BUILTIN `printf` gave `PIPESTATUS=[0 0]` at 5 B / 100 KB
+#      / 1 MB / 5 MB on bash 5.2.21, and independently a value big enough to fill a 64 KB pipe
+#      is ~16x this platform's `PATH_MAX` of 4096, so it could never name a real directory.
+#      Hardened anyway because the hazard is platform-scoped: the `case` form removes the
+#      pipeline, the SIGPIPE class, and the `grep` dependency at once.
+#
+#      ORDER IS LOAD-BEARING — `_gate_schemas_override_reject_kind()` screens control
+#      characters BEFORE calling this, and must keep doing so. A newline is VALID UTF-8, so
+#      this function ACCEPTS one; were the order reversed, a newline-bearing ABSOLUTE path
+#      would be accepted outright instead of classified `control-chars`. (This supersedes the
+#      earlier rationale, which cited `grep` treating a newline as a line terminator: the
+#      `grep` is gone, the ordering requirement is not.)
+#   2. Otherwise validate with `iconv -f UTF-8 -t UTF-8`, which fails on malformed input. If
+#      `iconv` is ABSENT we REJECT rather than assume: "could not check" must not mean "accept",
+#      or the hole comes straight back on a box without it. That is narrow — only non-ASCII
+#      override values are affected, and the remedy (an ASCII path) is always available. The
+#      self-test asserts BOTH worlds (accept with `iconv`, fail-closed reject without), so an
+#      `iconv`-less host no longer reds the gate on a valid multibyte root (job 12, finding 2).
+_gate_schemas_override_is_utf8() {
+  local v="${CQLITE_SCHEMAS_ROOT:-}"
+  # shellcheck disable=SC2034  # assigned to retarget bash's own pattern-matching locale
+  local LC_ALL=C
+  case "$v" in
+    *[![:print:]]*) : ;;
+    *) return 0 ;;
+  esac
+  command -v iconv >/dev/null 2>&1 || return 1
+  LC_ALL=C printf '%s' "$v" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+}
+
+_gate_schemas_override_reject() {
+  _gate_schemas_override_present || return 0
+  # Control characters (newline, CR, embedded tab, ...). A path carrying one is never a
+  # legitimate schemas root, and admitting it is what let `$( )`-stripping diverge the two
+  # mirrors (finding 2 above). Rejecting outright keeps them aligned without relying on
+  # every future consumer avoiding command substitution.
+  case "${CQLITE_SCHEMAS_ROOT:-}" in
+    *[[:cntrl:]]*)
+      printf '%s' "CQLITE_SCHEMAS_ROOT must not contain control characters (newline/CR/tab), got $(printf '%q' "${CQLITE_SCHEMAS_ROOT:-}")"
+      return 0 ;;
+  esac
+  _gate_schemas_override_is_utf8 \
+    || { printf '%s' "CQLITE_SCHEMAS_ROOT must be valid UTF-8, got $(printf '%q' "${CQLITE_SCHEMAS_ROOT:-}")"; return 0; }
+  case "${CQLITE_SCHEMAS_ROOT:-}" in
+    /*) return 0 ;;
+    *) printf '%s' "CQLITE_SCHEMAS_ROOT must be an ABSOLUTE path, got '${CQLITE_SCHEMAS_ROOT:-}'" ;;
+  esac
+}
+
+# _gate_schemas_root / _gate_schemas_root_source: mirror resolve_schemas_root() in
+# test-data/support/fixture_roots.rs rule for rule — the override applies only when set,
+# non-blank, ABSOLUTE and a readable directory (an absolute-but-unusable export degrades
+# to the checkout rather than pinning the run to a path that cannot work; a RELATIVE one
+# is rejected outright, see above), else checkout-relative. Both sides anchor on the same
+# workspace marker, so the gate asserts the path the tests will actually resolve.
+_gate_schemas_root() {
+  # Reads $CQLITE_SCHEMAS_ROOT DIRECTLY — never through `$( )`, which strips trailing
+  # newlines (roborev job 10, finding 2).
+  if _gate_schemas_override_present \
+     && [ -z "$(_gate_schemas_override_reject)" ] \
+     && [ -d "${CQLITE_SCHEMAS_ROOT:-}" ]; then
+    printf '%s' "${CQLITE_SCHEMAS_ROOT:-}"
+  else
+    printf '%s' "$(_gate_checkout_test_data_dir)/schemas"
+  fi
+}
+_gate_schemas_root_source() {
+  if [ -n "$(_gate_schemas_override_reject)" ]; then
+    printf '%s' "CQLITE_SCHEMAS_ROOT override REJECTED"
+  elif _gate_schemas_override_present && [ -d "${CQLITE_SCHEMAS_ROOT:-}" ]; then
+    printf '%s' "CQLITE_SCHEMAS_ROOT override"
+  else
+    printf '%s' "checkout-relative"
+  fi
+}
+
+# _missing_schema_files: the space-separated subset of CANONICAL_SCHEMA_FILES that is not
+# a READABLE REGULAR FILE under the resolved root. Empty means all present.
+#
+# `-f` as well as `-r`: bare `-r` accepts a DIRECTORY named `basic-types.cql`, while the
+# Rust side asks for a readable regular file. Same question on both sides or the gate can
+# certify a layout the tests reject (roborev job 8, finding 2; reviewer nit N7).
+_missing_schema_files() {
+  local root f out=""
+  root="$(_gate_schemas_root)"
+  # shellcheck disable=SC2086  # intentional word-split over the space-separated list
+  for f in $CANONICAL_SCHEMA_FILES; do
+    { [ -f "$root/$f" ] && [ -r "$root/$f" ]; } || out="${out:+$out }$f"
+  done
+  printf '%s' "$out"
+}
+
+# _schemas_status: PURE decision for the FULL-gate schemas guard. Echoes exactly one
+# token: OK (all canonical .cql readable, or not the full gate → no-op) or FAIL. No
+# side effects, so the hidden --preflight-schemas hook asserts the SAME decision
+# apply_schemas_preflight consumes (single-source; no drift).
+_schemas_status() {
+  # Only the FULL gate is strict: --only stays lenient, --lite already returned.
+  [ -z "$ONLY" ] || { echo OK; return 0; }
+  [ "$LITE" -eq 0 ] || { echo OK; return 0; }
+  # A rejected override FAILs even if the checkout's fixtures happen to be complete: the
+  # operator asked for a root the contract cannot honor, and quietly using a different
+  # one is the mis-certification this guard exists to prevent.
+  [ -z "$(_gate_schemas_override_reject)" ] || { echo FAIL; return 0; }
+  [ -z "$(_missing_schema_files)" ] && { echo OK; return 0; }
+  echo FAIL
+}
+
+# apply_schemas_preflight: EFFECTFUL FULL-gate schemas guard (issue #3148). Consumes
+# _schemas_status. OK → stamp the positive SCHEMAS_LINE and return. FAIL → emit a FAIL
+# SUMMARY carrying `missing-schemas: FAIL-CLOSED (#3148)` — textually DISTINCT from
+# #2078's `missing-fixtures:` so the two causes are separable in a pasted block — with
+# a remedy naming the exact expected absolute path, then exit 1.
+#
+# The leniency early-return below is load-bearing TWICE over, and both cases are the
+# defect this whole change exists to remove, one mode over:
+#
+#   1. `_schemas_status` returns OK unconditionally under `--only`/`--lite` (leniency, AC
+#      (g)), so the OK branch used to stamp `schemas: 6/6 canonical .cql readable under
+#      <root>` for a check that NEVER RAN. A positive assertion about an unperformed check
+#      is exactly #3148's misleading `STATUS: OK`. It is stamped as an explicit NAMED
+#      non-check rather than simply omitted: silence lets a reader of a pasted block
+#      assume the FULL contract held, whereas `schemas: not checked (…)` cannot be
+#      misread.
+#   2. The REJECT branch below was NOT governed by `_schemas_status`, so a relative
+#      override FAILed even an `--only` run — the effectful guard diverging from the pure
+#      decision it is documented to consume, i.e. the "single-source, no drift" property
+#      claimed for this pair. Gating both on ONE mode check restores it.
+apply_schemas_preflight() {
+  # REPORT-ONLY is a POSITIONAL ARGUMENT, deliberately not a variable (spec-auditor,
+  # requirement 8). The first cut used `${_SCHEMAS_PREFLIGHT_REPORT_ONLY:-}`, which was never
+  # initialized — so an INHERITED or EXPORTED value turned the FULL gate's fail-closed
+  # `exit 1` into `return 1` at the bare call site, the run continued, and the
+  # `missing-schemas: FAIL-CLOSED` text could be stamped inside a block reading
+  # `RESULT: PASS`. That is precisely the "no environment opt-out may permit a run to certify
+  # with the schemas root unreachable" requirement, defeated by the mechanism added to satisfy
+  # a comment fix two rounds earlier.
+  #
+  # Initializing the variable would only close the INHERITED path: an `export`ed value set
+  # after initialization still wins, because the read happens later. A positional parameter is
+  # airtight instead — `$1` inside a function comes from the CALL, and no environment variable,
+  # `export`, or `env -i` can supply it. The strict call site (the real gate) passes NOTHING,
+  # so strictness is the default that requires no state to be correct.
+  local mode="${1:-}" root missing reject
+  local report_only=0
+  [ "$mode" = report-only ] && report_only=1
+  root="$(_gate_schemas_root)"
+
+  # Leniency (AC (g), unchanged from #2078's contract): only the FULL gate is strict.
+  # --lite never reaches here (run_lite always exits first), but it is checked anyway so
+  # the invariant holds by construction rather than by call-site archaeology.
+  if [ -n "$ONLY" ] || [ "$LITE" -ne 0 ]; then
+    local _mode
+    if [ -n "$ONLY" ]; then _mode="--only $ONLY"; else _mode="--lite"; fi
+    SCHEMAS_LINE="schemas: not checked ($_mode is lenient, #3148 AC (g)) — this block asserts NOTHING about the schemas root"
+    return 0
+  fi
+
+  reject="$(_gate_schemas_override_reject)"
+  # A REJECTED override gets its own message and hint: "missing files" would be a lie
+  # (the checkout's fixtures may be perfectly complete), and the actionable fact is that
+  # the requested root cannot be honored identically by the gate and the test binaries.
+  if [ -n "$reject" ]; then
+    local kind why marker
+    kind="$(_gate_schemas_override_reject_kind)"
+    case "$kind" in
+      control-chars)
+        why="a schemas root carrying a CONTROL CHARACTER (newline/CR/tab) cannot round-trip through the gate's shell resolution — command substitution strips trailing newlines — so the gate would validate one path while cargo resolved another."
+        marker="missing-schemas: FAIL-CLOSED (#3148) — CQLITE_SCHEMAS_ROOT contains a control character; the gate and the test binaries would resolve DIFFERENT roots; overall verdict FAIL" ;;
+      non-utf8)
+        why="this shell handles the value as raw BYTES and would accept it, while the Rust resolver cannot represent a non-UTF-8 value as text and rejects it — so the gate would certify one schemas root while the tests resolved another."
+        marker="missing-schemas: FAIL-CLOSED (#3148) — CQLITE_SCHEMAS_ROOT is not valid UTF-8; the gate and the test binaries would resolve DIFFERENT roots; overall verdict FAIL" ;;
+      *)
+        why="a RELATIVE schemas root cannot mean the same thing on both sides: the gate resolves it against $REPO_ROOT, cargo resolves it against each test binary's PACKAGE dir."
+        marker="missing-schemas: FAIL-CLOSED (#3148) — relative CQLITE_SCHEMAS_ROOT rejected; the gate and the test binaries would resolve DIFFERENT roots; overall verdict FAIL" ;;
+    esac
+    echo "agent-gate: FAIL: $reject (#3148)" >&2
+    echo "agent-gate: $why" >&2
+    echo "agent-gate: continuing would stamp a SUMMARY certifying one schemas root while the tests read another — the exact mis-certification #3148 was filed for." >&2
+    echo "agent-gate: remedy: export a clean ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root" >&2
+    # REPORT-ONLY mode (see the --preflight-schemas-line hook): return instead of emitting.
+    # The hook cannot emit a SUMMARY — emit_summary/_tree_meta_array are defined AFTER the
+    # arg dispatch — and STUBBING them there defined a SECOND `_tree_meta_array`, which broke
+    # test_agent_gate_tree_portability.sh's derived-inventory uniqueness assert (n=45
+    # uniq=44) and FAILed `tooling-tests` in the gate of record while passing standalone.
+    # A mode flag on the terminal ACTION carries no decision and stamps no text, so it
+    # cannot make a lenient path assert something it did not check.
+    if [ "$report_only" -eq 1 ]; then
+      SCHEMAS_LINE="$marker"
+      return 1
+    fi
+    _tree_meta_array   # #2926
+    emit_summary FAIL \
+      "preflight: FAIL ($reject)" \
+      "$marker" \
+      "${TREE_META_LINES[@]}" \
+      "hint: export a clean ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root"
+    exit 1
+  fi
+  case "$(_schemas_status)" in
+    OK)
+      local n
+      # shellcheck disable=SC2086  # intentional word-split over the space-separated list
+      n=$(set -- $CANONICAL_SCHEMA_FILES; echo $#)
+      SCHEMAS_LINE="schemas: $n/$n canonical .cql readable under $root ($(_gate_schemas_root_source))"
+      return 0 ;;
+    *)
+      missing="$(_missing_schema_files)"
+      echo "agent-gate: FAIL: committed CQL schema fixtures unreachable under $root ($(_gate_schemas_root_source)) (#3148)" >&2
+      echo "agent-gate: unreadable: $missing" >&2
+      echo "agent-gate: expected absolute path: $root/${missing%% *}" >&2
+      echo "agent-gate: these are COMMITTED SOURCE (test-data/schemas, 23 files incl. legacy/ + udts/) — NOT part of the fetched corpus and NOT derived from CQLITE_DATASETS_ROOT." >&2
+      echo "agent-gate: dataset-backed components (core-tests, memory-budget, cli-tests) would build for ~8 min and then panic on the missing .cql." >&2
+      echo "agent-gate: remedy: unset CQLITE_SCHEMAS_ROOT (it overrides the checkout default), or restore the committed fixtures: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas" >&2
+      if [ "$report_only" -eq 1 ]; then
+        SCHEMAS_LINE="missing-schemas: FAIL-CLOSED (#3148) — unreadable: $missing"
+        return 1
+      fi
+      _tree_meta_array   # #2926: every emitted block carries the tree provenance
+      emit_summary FAIL \
+        "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
+        "missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic on an absent .cql; overall verdict FAIL" \
+        "${TREE_META_LINES[@]}" \
+        "hint: expected $root/${missing%% *} — unset CQLITE_SCHEMAS_ROOT, or: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas"
+      exit 1 ;;
+  esac
+}
+
 # ---- issue #2081: --delta executes node __test__/ + scripts/tests/*.sh ---------
 # --delta re-cert (issue #1892) fail-closed on node jest files + shell self-tests
 # purely because its components could not EXECUTE them. It now can: these helpers
@@ -1591,6 +1976,48 @@ case "${1:-}" in
   --preflight-fixtures)
     _pf_st=$(_fixture_status); echo "STATUS: $_pf_st"
     [ "$_pf_st" = OPTOUT ] && echo "$(_missing_fixtures_marker)"
+    exit 0 ;;
+  # Hidden self-test hook (issue #3148): print the FULL-gate COMMITTED-SCHEMAS decision
+  # (OK|FAIL) from _schemas_status, plus the resolved ROOT, its SOURCE and (on FAIL) the
+  # unreadable files — so the positive-control self-test asserts the preflight actually
+  # FAILS on a schemas-less root, not merely that it passes on a good one. Pure — the
+  # FAIL emit + exit lives in apply_schemas_preflight (exercised by the real gate run).
+  # Optional $2 seeds ONLY, so the self-test can assert the --only LENIENCY branch of
+  # the SAME pure decision without launching a real --only run (the arg dispatch is a
+  # single `case "$1"`, so `--only X --preflight-schemas` is not expressible).
+  --preflight-schemas)
+    [ -n "${2:-}" ] && ONLY="$2"
+    _ps_st=$(_schemas_status); echo "STATUS: $_ps_st"
+    echo "ROOT: $(_gate_schemas_root)"
+    echo "SOURCE: $(_gate_schemas_root_source)"
+    _ps_rj=$(_gate_schemas_override_reject)
+    [ -n "$_ps_rj" ] && echo "REJECT: $_ps_rj"
+    [ "$_ps_st" = FAIL ] && [ -z "$_ps_rj" ] && echo "MISSING: $(_missing_schema_files)"
+    exit 0 ;;
+  # Hidden self-test hook (issue #3148): run the REAL apply_schemas_preflight and print the
+  # SCHEMAS_LINE it stamped, so the self-test observes the ACTUAL summary text rather than a
+  # re-implementation of the decision. Optional $2 seeds ONLY (the arg dispatch is a single
+  # `case "$1"`, so `--only X --preflight-schemas-line` is not expressible, and a real
+  # `--only core-tests` run would spend minutes in cargo before printing anything).
+  # Deliberately drives the effectful function: the whole point is that a POSITIVE line must
+  # never be stamped for a check that did not run.
+  #
+  # It can NOT observe the FAIL SUMMARY, and saying otherwise would send a reader looking for
+  # a block that cannot exist: `emit_summary` and `_tree_meta_array` are defined AFTER this
+  # dispatch point. So the hook passes `report-only` as apply_schemas_preflight's FIRST
+  # ARGUMENT, and the two failure branches then RETURN with the marker in SCHEMAS_LINE instead
+  # of emitting + exiting. An argument, not a variable: an uninitialized env-readable flag was
+  # itself a way to defeat the fail-closed guard (see that function's header).
+  #
+  # The first attempt STUBBED those two functions here instead. That defined a SECOND
+  # `_tree_meta_array` in this file, which broke test_agent_gate_tree_portability.sh's
+  # derived-inventory uniqueness assert (n=45 uniq=44) and FAILed `tooling-tests` in the gate
+  # of record — while every self-test passed standalone, because that portability test only
+  # runs inside `tooling-tests`. Hence: never add a second definition of a `_tree*` function.
+  --preflight-schemas-line)
+    [ -n "${2:-}" ] && ONLY="$2"
+    apply_schemas_preflight report-only || true
+    echo "SCHEMAS_LINE: ${SCHEMAS_LINE:-<none>}"
     exit 0 ;;
   # Hidden self-test hooks (issue #2081): expose the node-build readiness decision and
   # the shell-selftest executor so scripts/tests assert the SAME logic run_delta uses.
@@ -3259,6 +3686,9 @@ _tree_boundary_meta_lines() {
     fi
   fi
   [ -n "${MISSING_FIXTURES_MARKER:-}" ] && printf '%s\n' "$MISSING_FIXTURES_MARKER"
+  # #3148: the POSITIVE schemas-root assertion (empty until the full gate's preflight
+  # has run, so a --lite/--delta boundary simply omits it rather than inventing it).
+  [ -n "${SCHEMAS_LINE:-}" ] && printf '%s\n' "$SCHEMAS_LINE"
   [ -n "${PINS:-}" ] && printf 'ci-pins: %s\n' "$PINS"
   # Both printers deliberately emit NO trailing newline (their normal callers capture them
   # into a SUMMARY_META element), so each needs its own '%s\n' here or the whole block
@@ -4589,7 +5019,12 @@ run_kit_dashboard_drift() {
 # row/extended/cell flag tables must match the real row_decoder constants, so an
 # agent can never again be taught a partition-boundary decode bug by a rotted skill
 # table (hermetic temp-sandbox copy; no cargo/datasets/network). Pure/offline, no
-# gh/network. SKIP-aware: the summary test's truncation case relies on a python3
+# gh/network. Also runs scripts/tests/test_agent_gate_schemas_preflight.sh (#3148),
+# the POSITIVE CONTROL for the committed-schemas preflight: it proves the preflight
+# REJECTS a schemas-less / present-but-incomplete root (the #3148 gap survived because
+# `STATUS: OK` was only ever observed on the happy path) and pins the checkout-relative
+# resolution contract. Hermetic temp roots; the FULL-gate cases exit AT the preflight,
+# so no cargo/datasets/network. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
 run_tooling_tests() {
@@ -4687,6 +5122,27 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (roborev vacuous-review guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # committed-schemas preflight guard (#3148 AC (c)): hermetic (temp dataset/schemas
+  # roots, no real corpus/network/cargo — the FULL-gate cases exit AT the preflight).
+  # POSITIVE CONTROL: it proves the preflight REJECTS a schemas-less and a
+  # present-but-incomplete root, not merely that it accepts a good one. The #3148 gap
+  # survived precisely because `STATUS: OK` was only ever observed on the happy path,
+  # so a preflight tested one-sided is untested. Also pins the checkout-relative
+  # contract (the schemas root must not vary with CQLITE_DATASETS_ROOT — the retired
+  # `..`-climb symlink trap) and the single-definition invariant. A failure FAILs the
+  # component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_schemas_preflight.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_schemas_preflight.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (committed-schemas preflight guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -6246,6 +6702,13 @@ if selected_needs_datasets; then
   # AGENT_GATE_ALLOW_MISSING_FIXTURES=1 (restores SKIP + stamps MISSING_FIXTURES_MARKER
   # into the SUMMARY). May emit a FAIL SUMMARY and exit 1.
   apply_fixture_preflight
+  # FULL-gate COMMITTED-SCHEMAS guard (issue #3148): the SSTable corpus above is only
+  # half the fixture contract — the dataset-backed components must also read the
+  # committed CQL schemas that decode it. Runs AFTER the corpus guard so a run missing
+  # both still reports the #2078 cause first (the corpus is the fetched half an
+  # operator must act on). Checkout-relative, so this is a cheap belt-and-braces
+  # assert; no opt-out. May emit a FAIL SUMMARY and exit 1.
+  apply_schemas_preflight
   # Historical hard preflight: zero Data.db at all is an error. For the FULL gate this
   # is already handled by apply_fixture_preflight above (an empty root has no
   # test_basic corpus either), so restrict it to --only — that way the opt-out can
@@ -6829,6 +7292,11 @@ fi
 # #2078: stamp the opt-out marker so an intentional AGENT_GATE_ALLOW_MISSING_FIXTURES=1
 # run is visible in the pasted SUMMARY block (empty otherwise → no line).
 [ -n "$MISSING_FIXTURES_MARKER" ] && SUMMARY_META+=("$MISSING_FIXTURES_MARKER")
+# #3148: stamp the POSITIVE committed-schemas assertion (which root was validated, and
+# whether via the checkout or a CQLITE_SCHEMAS_ROOT override), so the pasted block shows
+# the check RAN rather than merely that nothing complained. Empty when the preflight was
+# skipped (no dataset-dependent component selected) → no line.
+[ -n "$SCHEMAS_LINE" ] && SUMMARY_META+=("$SCHEMAS_LINE")
 SUMMARY_META+=("ci-pins: $PINS")
 SUMMARY_META+=("$(accelerators_line)")
 SUMMARY_META+=("$(cpu_budget_line)")
