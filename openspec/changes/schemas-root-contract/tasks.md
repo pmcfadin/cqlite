@@ -285,3 +285,41 @@
       schemas-less root; and **#3192 is now cited by number** in `proposal.md` and `spec.md`, together with
       why the reintroduction guard cannot be widened before that migration lands.
 - [x] Self-test 32 → 36 cases; contract tests 9 → 12; portability 29/29.
+
+## 12. C re-audit round 5 — requirement 8 defeated by the round-4 fix
+> **Process note, recorded deliberately.** This is the **sixth** instance in this delivery of a fix
+> introducing a defect, and the **third** time the introduced defect was the very property the change
+> exists to guarantee: (1) a positive `schemas:` line asserting an unperformed check (round 2), (2) a
+> `$( )`-stripped override diverging the two mirrors (round 3, from round 2's own fix), (3) this — an
+> uninitialized, env-readable report-only flag turning the fail-closed `exit 1` into `return 1` (round 4,
+> from round 3's comment fix). Each was found by review, not by the tests written alongside the fix. The
+> pattern is the argument for the revert-and-watch-it-fail discipline used throughout, and for treating
+> "does this fix reintroduce the class one layer over?" as a required question, not a courtesy.
+- [x] **The defect** — `_SCHEMAS_PREFLIGHT_REPORT_ONLY` was read as `${…:-}` and never initialized
+      (unlike `SCHEMAS_LINE=""`), so an inherited/exported value made the FULL gate's fail-closed branch
+      `return 1` at a bare call site with no `errexit`; the run continued and the
+      `missing-schemas: FAIL-CLOSED` text could be stamped inside a block reading `RESULT: PASS`.
+      Requirement 8 ("no environment opt-out may permit a run to certify with the schemas root
+      unreachable") was violated by construction.
+- [x] **Mechanism chosen: a POSITIONAL ARGUMENT, not a variable.** `apply_schemas_preflight
+      [report-only]`; the hook passes `report-only`, the real gate passes nothing, so STRICT is the
+      default that needs no state to be correct. Initialization alone would have closed only the
+      INHERITED path — an `export` performed after initialization still wins, because the read happens
+      later. `$1` inside a function comes from the CALL; no env var, `export`, or `env -i` can supply it.
+- [x] **Pinned** by `3148-no-env-report-only`: a FULL gate over the schemas-less root with
+      `_SCHEMAS_PREFLIGHT_REPORT_ONLY=1` — plus three other plausible spellings, because the property is
+      that the ENVIRONMENT cannot reach the mode, not that one name was retired — must exit non-zero with
+      `missing-schemas: FAIL-CLOSED`, `RESULT: FAIL`, and never `RESULT: PASS`. REVERT-PROOF: restoring
+      the uninitialized env-readable flag makes it FAIL (rc=124 — the run sailed past the preflight into
+      the components until the case's own `timeout` fired, exactly the "run proceeds" symptom).
+- [x] **Class audit** of every variable this change introduced in `scripts/agent-gate.sh`:
+      `CANONICAL_SCHEMA_FILES` (unconditional assignment — an inherited value is overwritten; SAFE),
+      `SCHEMAS_LINE` (initialized `""`, display-only, carries no decision; SAFE), the hook temporaries
+      `_ps_st`/`_ps_rj` (assigned by command substitution before every read; SAFE), every function
+      temporary — `mode`, `report_only`, `root`, `missing`, `reject`, `kind`, `why`, `marker`, `n`,
+      `_mode`, `d`, `v`, `f`, `out` — declared `local` (unreachable from the environment; SAFE). Env
+      values read on purpose: `CQLITE_SCHEMAS_ROOT` (the documented override, now fail-closed on
+      relative/control-char), `AGENT_GATE_ALLOW_MISSING_FIXTURES` (pre-existing; pinned as NOT applying
+      to schemas by `3148-no-optout`), `ONLY`/`LITE` (gate-internal, initialized at `:1832`/`:1834`).
+      `_SCHEMAS_PREFLIGHT_REPORT_ONLY` no longer exists outside one explanatory comment.
+- [x] Self-test 36 → 37 cases.

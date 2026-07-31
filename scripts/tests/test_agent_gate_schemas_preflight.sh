@@ -453,6 +453,38 @@ else
   cat "$optout_full" 2>/dev/null
 fi
 
+# 2e. NO environment value may turn the fail-closed guard into a soft return (requirement 8).
+#     The report-only mode began life as `${_SCHEMAS_PREFLIGHT_REPORT_ONLY:-}`, never
+#     initialized — so an INHERITED or EXPORTED value converted the FULL gate's `exit 1` into
+#     `return 1` at a bare call site with no errexit, the run continued, and the
+#     `missing-schemas: FAIL-CLOSED` text could be stamped inside a block reading
+#     `RESULT: PASS`. It is now a POSITIONAL ARGUMENT, which no export can supply. This case
+#     exports the retired name anyway — and any other plausible spelling — because the point is
+#     that the ENVIRONMENT cannot reach the mode at all, not that one variable was renamed.
+ro_ok=1
+for evil in _SCHEMAS_PREFLIGHT_REPORT_ONLY SCHEMAS_PREFLIGHT_REPORT_ONLY report_only mode; do
+  ro_full="$tmp/3148-report-only-$evil.txt"
+  env "$evil=1" CQLITE_GATE_DISABLE_CAP=1 CQLITE_DATASETS_ROOT="$ds_corpus" \
+    CQLITE_SCHEMAS_ROOT="$schemas_empty" AGENT_GATE_SUMMARY_FILE="$ro_full" \
+    timeout 180 bash "$GATE" >/dev/null 2>&1
+  ro_rc=$?
+  if [ "$ro_rc" -ne 0 ] \
+     && grep -q "^missing-schemas: FAIL-CLOSED (#3148)" "$ro_full" 2>/dev/null \
+     && grep -q "^RESULT: FAIL" "$ro_full" 2>/dev/null \
+     && ! grep -q "^RESULT: PASS" "$ro_full" 2>/dev/null; then
+    :
+  else
+    ro_ok=0
+    echo "   (exported $evil=1 weakened the guard: rc=$ro_rc)"
+    cat "$ro_full" 2>/dev/null
+  fi
+done
+if [ "$ro_ok" -eq 1 ]; then
+  ok "3148-no-env-report-only: no exported variable can turn the fail-closed guard into a soft return"
+else
+  bad "3148-no-env-report-only: an environment value defeated the schemas fail-closed guard (requirement 8)"
+fi
+
 # ---------------------------------------------------------------------------
 # 3. AC (g): --lite and --only stay LENIENT (unchanged from #2078's contract).
 # ---------------------------------------------------------------------------

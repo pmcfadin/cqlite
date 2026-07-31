@@ -1515,7 +1515,23 @@ _schemas_status() {
 #      decision it is documented to consume, i.e. the "single-source, no drift" property
 #      claimed for this pair. Gating both on ONE mode check restores it.
 apply_schemas_preflight() {
-  local root missing reject
+  # REPORT-ONLY is a POSITIONAL ARGUMENT, deliberately not a variable (spec-auditor,
+  # requirement 8). The first cut used `${_SCHEMAS_PREFLIGHT_REPORT_ONLY:-}`, which was never
+  # initialized — so an INHERITED or EXPORTED value turned the FULL gate's fail-closed
+  # `exit 1` into `return 1` at the bare call site, the run continued, and the
+  # `missing-schemas: FAIL-CLOSED` text could be stamped inside a block reading
+  # `RESULT: PASS`. That is precisely the "no environment opt-out may permit a run to certify
+  # with the schemas root unreachable" requirement, defeated by the mechanism added to satisfy
+  # a comment fix two rounds earlier.
+  #
+  # Initializing the variable would only close the INHERITED path: an `export`ed value set
+  # after initialization still wins, because the read happens later. A positional parameter is
+  # airtight instead — `$1` inside a function comes from the CALL, and no environment variable,
+  # `export`, or `env -i` can supply it. The strict call site (the real gate) passes NOTHING,
+  # so strictness is the default that requires no state to be correct.
+  local mode="${1:-}" root missing reject
+  local report_only=0
+  [ "$mode" = report-only ] && report_only=1
   root="$(_gate_schemas_root)"
 
   # Leniency (AC (g), unchanged from #2078's contract): only the FULL gate is strict.
@@ -1554,7 +1570,7 @@ apply_schemas_preflight() {
     # uniq=44) and FAILed `tooling-tests` in the gate of record while passing standalone.
     # A mode flag on the terminal ACTION carries no decision and stamps no text, so it
     # cannot make a lenient path assert something it did not check.
-    if [ -n "${_SCHEMAS_PREFLIGHT_REPORT_ONLY:-}" ]; then
+    if [ "$report_only" -eq 1 ]; then
       SCHEMAS_LINE="$marker"
       return 1
     fi
@@ -1581,7 +1597,7 @@ apply_schemas_preflight() {
       echo "agent-gate: these are COMMITTED SOURCE (test-data/schemas, 23 files incl. legacy/ + udts/) — NOT part of the fetched corpus and NOT derived from CQLITE_DATASETS_ROOT." >&2
       echo "agent-gate: dataset-backed components (core-tests, memory-budget, cli-tests) would build for ~8 min and then panic on the missing .cql." >&2
       echo "agent-gate: remedy: unset CQLITE_SCHEMAS_ROOT (it overrides the checkout default), or restore the committed fixtures: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas" >&2
-      if [ -n "${_SCHEMAS_PREFLIGHT_REPORT_ONLY:-}" ]; then
+      if [ "$report_only" -eq 1 ]; then
         SCHEMAS_LINE="missing-schemas: FAIL-CLOSED (#3148) — unreadable: $missing"
         return 1
       fi
@@ -1933,8 +1949,10 @@ case "${1:-}" in
   #
   # It can NOT observe the FAIL SUMMARY, and saying otherwise would send a reader looking for
   # a block that cannot exist: `emit_summary` and `_tree_meta_array` are defined AFTER this
-  # dispatch point. So the hook sets `_SCHEMAS_PREFLIGHT_REPORT_ONLY=1`, and the two failure
-  # branches then RETURN with the marker in SCHEMAS_LINE instead of emitting + exiting.
+  # dispatch point. So the hook passes `report-only` as apply_schemas_preflight's FIRST
+  # ARGUMENT, and the two failure branches then RETURN with the marker in SCHEMAS_LINE instead
+  # of emitting + exiting. An argument, not a variable: an uninitialized env-readable flag was
+  # itself a way to defeat the fail-closed guard (see that function's header).
   #
   # The first attempt STUBBED those two functions here instead. That defined a SECOND
   # `_tree_meta_array` in this file, which broke test_agent_gate_tree_portability.sh's
@@ -1943,8 +1961,7 @@ case "${1:-}" in
   # runs inside `tooling-tests`. Hence: never add a second definition of a `_tree*` function.
   --preflight-schemas-line)
     [ -n "${2:-}" ] && ONLY="$2"
-    _SCHEMAS_PREFLIGHT_REPORT_ONLY=1
-    apply_schemas_preflight || true
+    apply_schemas_preflight report-only || true
     echo "SCHEMAS_LINE: ${SCHEMAS_LINE:-<none>}"
     exit 0 ;;
   # Hidden self-test hooks (issue #2081): expose the node-build readiness decision and
