@@ -695,6 +695,11 @@ async fn flight_do_get_agrees_with_core_on_a_partition_deleted_row() {
         ));
     }
 
+    // `CQLITE_TTL_NOW_OVERRIDE_SECS` is PROCESS-GLOBAL, so it is cleared before the
+    // verdict below (which may panic) rather than after — the pin must not outlive
+    // the test that set it and leak into any future test in this binary.
+    std::env::remove_var(TTL_NOW_ENV);
+
     assert!(
         failures.is_empty(),
         "issue #3094 Flight-vs-core partition-delete agreement failures:\n{}",

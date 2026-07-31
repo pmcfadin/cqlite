@@ -290,14 +290,36 @@ fn sorted(rows: &[Row]) -> Vec<Row> {
     out
 }
 
-/// Assert `ticket` returns exactly `expected` (as a multiset) on BOTH arms at the
-/// pinned `now`, that the two arms genuinely DIFFERED, and that their row ORDER is
-/// identical (issue #3095 AC1/AC2/AC3).
+/// How strongly `expected` pins the shape of the result: the exact EMISSION ORDER,
+/// or only its content.
+///
+/// Cassandra's own order is only a TOTAL order over a result set when that set
+/// comes from a single partition — `UnfilteredRowIterator` walks a partition in
+/// CLUSTERING order (the table comparator) and `processPartition()` emits in
+/// iteration order, but the order BETWEEN partitions is murmur3 TOKEN order, which
+/// these expectations deliberately do not encode. So the order-sensitive
+/// assertion is scoped to the cases where Cassandra genuinely guarantees one.
+#[derive(Clone, Copy)]
+enum ExpectedOrder {
+    /// `expected` IS the sequence Cassandra emits — a single-partition result (in
+    /// clustering order) or a single-row result. Asserted position-by-position.
+    Exact,
+    /// A MULTI-partition result: only the multiset is asserted, because a total
+    /// order across partitions is not guaranteed by clustering alone. The
+    /// arm-vs-arm check still pins BOTH arms to the same order.
+    Multiset,
+}
+
+/// Assert `ticket` returns exactly `expected` on BOTH arms at the pinned `now` —
+/// in EMISSION ORDER for `ExpectedOrder::Exact`, as a multiset otherwise — that the
+/// two arms genuinely DIFFERED, and that their row order is identical (issue #3095
+/// AC1/AC2/AC3).
 async fn assert_static_semantics(
     label: &str,
     svc: &CqliteFlightService,
     ticket: &serde_json::Value,
     expected: &[Row],
+    order: ExpectedOrder,
     failures: &mut Vec<String>,
 ) {
     std::env::set_var(TTL_NOW_ENV, PINNED_NOW.to_string());
@@ -307,16 +329,35 @@ async fn assert_static_semantics(
 
     let want = sorted(expected);
     for (arm, got) in [("merge", &merge_rows), ("bypass", &bypass_rows)] {
-        if sorted(got) != want {
-            failures.push(format!(
-                "case {label} [{arm} arm]: STATIC SEMANTICS MISMATCH vs Cassandra 5.0.8 \
-                 processPartition()\n  expected ({} rows): {:#?}\n  got      ({} rows): {:#?}",
-                want.len(),
-                want,
-                got.len(),
-                sorted(got),
-            ));
+        let matches = match order {
+            ExpectedOrder::Exact => got.as_slice() == expected,
+            ExpectedOrder::Multiset => sorted(got) == want,
+        };
+        if matches {
+            continue;
         }
+        // An order-only divergence gets its own headline: the content is
+        // Cassandra's, the SEQUENCE is not, and that distinction is what makes the
+        // failure actionable.
+        let kind = if matches!(order, ExpectedOrder::Exact) && sorted(got) == want {
+            "CLUSTERING-ORDER MISMATCH vs Cassandra 5.0.8 (content matches; a \
+             single-partition result is emitted in clustering order)"
+        } else {
+            "STATIC SEMANTICS MISMATCH vs Cassandra 5.0.8 processPartition()"
+        };
+        // Show the compared forms, so the printed diff is the one that failed.
+        let (want_shown, got_shown) = match order {
+            ExpectedOrder::Exact => (expected.to_vec(), got.to_vec()),
+            ExpectedOrder::Multiset => (want.clone(), sorted(got)),
+        };
+        failures.push(format!(
+            "case {label} [{arm} arm]: {kind}\n  expected ({} rows): {:#?}\n  \
+             got      ({} rows): {:#?}",
+            want_shown.len(),
+            want_shown,
+            got_shown.len(),
+            got_shown,
+        ));
     }
     // AC3: the two arms agree over the SAME bytes at a PINNED `now`, in ORDER too.
     if merge_rows != bypass_rows {
@@ -443,6 +484,8 @@ async fn flight_static_column_semantics_match_cassandra() {
                     ("sdata", Some("static-val")),
                     ("rdata", Some("row-val")),
                 ])],
+                // ONE partition (`id = 1`), one row — Cassandra's emission order.
+                ExpectedOrder::Exact,
                 &mut failures,
             )
             .await;
@@ -469,6 +512,9 @@ async fn flight_static_column_semantics_match_cassandra() {
                 &svc,
                 &ticket_json(DL_KS, DL_TBL, DL_DDL),
                 &deltas_expected_select_star(),
+                // FOUR partitions (pk = 1, 2, 3, 99): the inter-partition order is
+                // token order, which this expectation does not encode.
+                ExpectedOrder::Multiset,
                 &mut failures,
             )
             .await;
@@ -505,6 +551,8 @@ async fn flight_static_column_semantics_match_cassandra() {
                         ("row_col", Some("row_3_1")),
                     ]),
                 ],
+                // One row from EACH of three partitions — token order across them.
+                ExpectedOrder::Multiset,
                 &mut failures,
             )
             .await;
@@ -534,6 +582,8 @@ async fn flight_static_column_semantics_match_cassandra() {
                     ("static_col", Some("static_only_val")),
                     ("row_col", None),
                 ])],
+                // The restriction leaves exactly one surviving partition's row.
+                ExpectedOrder::Exact,
                 &mut failures,
             )
             .await;
@@ -553,6 +603,8 @@ async fn flight_static_column_semantics_match_cassandra() {
                     ("static_col", Some("static_val_2")),
                     ("row_col", Some("row_2_3")),
                 ])],
+                // The restriction leaves exactly one row, from one partition.
+                ExpectedOrder::Exact,
                 &mut failures,
             )
             .await;
@@ -619,6 +671,15 @@ async fn flight_static_column_semantics_match_cassandra() {
                         ("row_col", Some("row_6")),
                     ]),
                 ],
+                // ORDER-SENSITIVE, and load-bearing for this PR: a SINGLE partition
+                // (`pk = 1`), so Cassandra's answer is these three rows in ASCENDING
+                // CLUSTERING order (`ck` 1, 3, 6 — the default `ASC` comparator, with
+                // the row-tombstoned `ck = 2` and the range-deleted `ck = 4..5`
+                // absent). Retiring the `StaticColumnsWithDeletions` guard is
+                // justified only if the fast arm's results are CORRECT, and correct
+                // includes Cassandra's clustering order — a both-arms inversion would
+                // slip past a multiset comparison and past the arm-vs-arm check.
+                ExpectedOrder::Exact,
                 &mut failures,
             )
             .await;
@@ -742,6 +803,9 @@ async fn flight_static_column_semantics_match_cassandra() {
                 &svc,
                 &ticket,
                 &want,
+                // TWO partitions — token order across them is not encoded here (and
+                // `partition_key` is projected out, so it could not be checked).
+                ExpectedOrder::Multiset,
                 &mut failures,
             )
             .await;
