@@ -32,13 +32,42 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
+[ -n "$SCRIPT_DIR" ] || { echo "FAIL - could not resolve SCRIPT_DIR"; exit 1; }
+[ -n "$REPO_ROOT" ] || { echo "FAIL - could not resolve REPO_ROOT"; exit 1; }
 [ -f "$FETCH" ] || { echo "FAIL - missing $FETCH"; exit 1; }
+command -v git >/dev/null 2>&1 || { echo "FAIL - git is required by this suite"; exit 1; }
 
-T=$(mktemp -d "${TMPDIR:-/tmp}/fetch-datasets-guard.XXXXXX")
+# EVERY path in this suite is formed by appending to $T, so an empty or missing $T
+# would resolve those paths onto the HOST: "$T/bin" becomes /bin, and the stub curl
+# would then write /bin/curl. The suite deliberately does not use `set -e` (see the
+# note at the bottom of this header), so a failed `mktemp -d` would otherwise be
+# IGNORED. Validate it explicitly and refuse to run otherwise — this suite is
+# registered in the gate's tooling-tests component and runs on every worker box.
+if ! T=$(mktemp -d "${TMPDIR:-/tmp}/fetch-datasets-guard.XXXXXX"); then
+  echo "FAIL - mktemp -d failed; refusing to run (an empty sandbox path resolves onto the host, e.g. /bin)" >&2
+  exit 1
+fi
+if [ -z "$T" ] || [ ! -d "$T" ] || [ ! -w "$T" ]; then
+  echo "FAIL - mktemp -d produced no usable sandbox directory ('${T:-<empty>}'); refusing to run" >&2
+  exit 1
+fi
+case "$T" in
+  /?*) ;;
+  *) echo "FAIL - sandbox path '$T' is not absolute; refusing to run" >&2; exit 1 ;;
+esac
+
 ASSET="cqlite-2878-fake-$$.tar.gz"
 # ASSET_PATH inside the script is hardcoded to /tmp/<asset>; the stub curl writes
-# there, so clean it up with the sandbox.
+# there, so clean it up with the sandbox. Armed only after $T is validated above.
 trap 'rm -rf "$T" "/tmp/$ASSET"' EXIT
+
+# On `set -euo pipefail`: `-u` and `-o pipefail` are on (see the `set` line above),
+# but `-e` is NOT viable here and is deliberately omitted. Most cases run a script
+# that is EXPECTED to exit non-zero (every refusal case, every mutant), captured as
+# `OUT=$( ... )` followed by `RC=$?`; under `-e` the failing assignment aborts the
+# suite BEFORE `RC=$?` can read the status, so every one of those cases would have
+# to be restructured, and the failure modes `-e` protects against here are exactly
+# the empty-path hazards now checked explicitly above (and at each stub-bin setup).
 
 # ---------------------------------------------------------------------------
 # The fake archive: same top-level layout as the real asset
@@ -49,7 +78,8 @@ trap 'rm -rf "$T" "/tmp/$ASSET"' EXIT
 WIDE_DIR="sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
 ARCHIVE_SRC="$T/archive-src"
 AD="$ARCHIVE_SRC/test-data/datasets"
-mkdir -p "$AD/sstables/test_basic/simple_table-aaaa" "$AD/$WIDE_DIR" "$AD/corruption"
+mkdir -p "$AD/sstables/test_basic/simple_table-aaaa" "$AD/$WIDE_DIR" "$AD/corruption" \
+  || { echo "FAIL - could not create the fake-archive tree under $AD"; exit 1; }
 printf 'fake: archive metadata\n' >"$AD/metadata.yml"
 for suffix in Data.db Index.db Summary.db Statistics.db; do
   printf 'archive %s\n' "$suffix" >"$AD/sstables/test_basic/simple_table-aaaa/nb-1-big-$suffix"
@@ -102,7 +132,7 @@ fi
 
 # --- stub curl ---------------------------------------------------------------
 BIN="$T/bin"
-mkdir -p "$BIN"
+mkdir -p "$BIN" || { echo "FAIL - could not create $BIN"; exit 1; }
 cat >"$BIN/curl" <<'MOCK'
 #!/usr/bin/env bash
 out=""
@@ -543,7 +573,7 @@ fi
 # a stub `tar` signals the fetch script itself, so bash runs the trap at the very
 # next command boundary. Nothing here depends on timing.
 SIGBIN="$T/bin-signal"
-mkdir -p "$SIGBIN"
+mkdir -p "$SIGBIN" || { echo "FAIL - could not create $SIGBIN"; exit 1; }
 cp "$BIN/curl" "$SIGBIN/curl"
 cat >"$SIGBIN/tar" <<'MOCK'
 #!/usr/bin/env bash
@@ -594,7 +624,7 @@ fi
 # fails — deterministic, no sleeps. (The in-place `tar -C .` branch is UNREACHABLE,
 # see #3198, so this `mv` is the live equivalent.)
 MVBIN="$T/bin-partial-mv"
-mkdir -p "$MVBIN"
+mkdir -p "$MVBIN" || { echo "FAIL - could not create $MVBIN"; exit 1; }
 cp "$BIN/curl" "$MVBIN/curl"
 cat >"$MVBIN/mv" <<'MOCK'
 #!/usr/bin/env bash
@@ -661,7 +691,7 @@ fi
 # completion and reports it; without that, the second signal re-enters and exits
 # mid-recovery, silently.
 SIG2BIN="$T/bin-signal-twice"
-mkdir -p "$SIG2BIN"
+mkdir -p "$SIG2BIN" || { echo "FAIL - could not create $SIG2BIN"; exit 1; }
 cp "$BIN/curl" "$SIG2BIN/curl"
 cp "$SIGBIN/tar" "$SIG2BIN/tar"
 REAL_GIT="$(command -v git)"
@@ -952,10 +982,28 @@ external_objects_repo() {
 R20="$T/case20-repo"
 external_objects_repo "$R20"
 EXT_OBJ="$R20/external-objects"
-if [ -z "$(GIT_ALTERNATE_OBJECT_DIRECTORIES="$EXT_OBJ" git -C "$R20" cat-file --batch-check <<<"$(git -C "$R20" ls-files -s -- test-data/datasets | awk 'NR==1{print $2}')" | grep -c ' blob ')" ]; then
-  bad "external-objects: fixture setup failed (blob unreadable even WITH the env var)"
+# Validate BOTH directions of the fixture. (`grep -c` prints "0" when nothing
+# matches, so testing its output for emptiness can never fail — an earlier version
+# of this check was vacuous for exactly that reason.)
+EXT_SHA="$(git -C "$R20" ls-files -s -- test-data/datasets | awk 'NR==1{print $2}')"
+if [ -n "$EXT_SHA" ]; then
+  ok "external-objects: resolved a staged blob SHA from the fixture index"
 else
-  ok "external-objects: fixture blobs are reachable only via GIT_ALTERNATE_OBJECT_DIRECTORIES"
+  bad "external-objects: could not resolve a staged blob SHA"
+fi
+if printf '%s\n' "$EXT_SHA" \
+  | GIT_ALTERNATE_OBJECT_DIRECTORIES="$EXT_OBJ" git -C "$R20" cat-file --batch-check 2>/dev/null \
+  | grep -q ' blob '; then
+  ok "external-objects: the blob IS readable with GIT_ALTERNATE_OBJECT_DIRECTORIES set"
+else
+  bad "external-objects: fixture setup failed (blob unreadable even WITH the env var)"
+fi
+if printf '%s\n' "$EXT_SHA" \
+  | git -C "$R20" cat-file --batch-check 2>/dev/null \
+  | grep -q ' blob '; then
+  bad "external-objects: fixture setup failed (blob still readable WITHOUT the env var)"
+else
+  ok "external-objects: the blob is NOT readable without it (the scrubbed restore env)"
 fi
 run_fetch "$R20" "$R20/test-data/datasets" GIT_ALTERNATE_OBJECT_DIRECTORIES="$EXT_OBJ"
 assert_refusal "external-objects" "UNREADABLE in the environment the restore will use" \
@@ -1058,8 +1106,50 @@ else
 fi
 
 # === Case 13: DATASET_ROOT == / =============================================
-run_fetch "$T" "/"
+# This case hands the REAL filesystem root to a script whose job includes
+# `rm -rf "${DATASET_ROOT}"`. The whole point is to catch a regression in the
+# safety checks — and the failure mode of such a regression, run bare, is an
+# attempted `rm -rf /` on a worker box. So the test's blast radius must not depend
+# on the correctness of the thing under test: `rm` is shadowed by a stub that
+# RECORDS the attempt and REFUSES it (exiting non-zero, which aborts the script
+# under its `set -e`). Asserting on the recorded attempts is also a stronger
+# assertion than "the tree survived".
+RMBIN="$T/bin-record-rm"
+mkdir -p "$RMBIN" || { echo "FAIL - could not create $RMBIN"; exit 1; }
+cp "$BIN/curl" "$RMBIN/curl"
+cat >"$RMBIN/rm" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${RM_ATTEMPT_LOG:?RM_ATTEMPT_LOG unset}"
+echo "stub rm: refusing to delete: $*" >&2
+exit 1
+MOCK
+chmod +x "$RMBIN/rm"
+RM_LOG="$T/rm-attempts.log"
+: >"$RM_LOG"
+
+# Prove the recording stub actually records, so "no attempt recorded" below is not
+# a vacuous assertion.
+if RM_ATTEMPT_LOG="$RM_LOG" bash "$RMBIN/rm" -rf /definitely/not/real 2>/dev/null; then
+  bad "rm-stub: the stub exited 0; it must refuse"
+else
+  ok "rm-stub: refuses and exits non-zero"
+fi
+if grep -q -- '-rf /definitely/not/real' "$RM_LOG"; then
+  ok "rm-stub: records the attempted deletion (so an empty log is meaningful)"
+else
+  bad "rm-stub: did not record the attempt; the case-13 assertion would be vacuous"
+fi
+: >"$RM_LOG"
+
+FETCH_BIN="$RMBIN"
+run_fetch "$T" "/" RM_ATTEMPT_LOG="$RM_LOG"
+FETCH_BIN=""
 assert_refusal "root-target" "unsafe CQLITE_DATASETS_ROOT" "/etc"
+if [ ! -s "$RM_LOG" ]; then
+  ok "root-target: NO deletion was even attempted (rm never invoked)"
+else
+  bad "root-target: a deletion was attempted: $(head -3 "$RM_LOG")"
+fi
 
 # === Case 21: a HOSTILE TMPDIR at or below the deletion target ===============
 # The guard's own capture list used to be created under ${TMPDIR}; with TMPDIR
