@@ -565,6 +565,76 @@ capture_tracked_dataset_files() {
   return 0
 }
 
+# Prove, BEFORE anything is deleted and in the RESTORE's exact environment, that
+# every captured blob can actually be READ (issue #2878). The capture reads only
+# the INDEX, so it can report a healthy count while the objects themselves are
+# unreachable — an external/alternate object store, a receive-hook quarantine
+# (git exports GIT_OBJECT_DIRECTORY there), a pruned or corrupt store. Deleting
+# first and discovering that afterwards IS the delete-then-cannot-restore failure
+# this guard exists to prevent, so it is a STRUCTURAL refusal.
+#
+# This makes the guard SELF-VERIFYING: the capture no longer merely claims
+# recoverability, it demonstrates it under the same environment scrub the restore
+# uses — which closes every future divergence between capture-env and restore-env,
+# the class behind several of this change's defects. Cost is one `ls-files -s` plus
+# one `cat-file --batch-check`: ~6ms over the real 875-file dataset tree.
+verify_captured_blobs_readable() {
+  [ "${TRACKED_GUARD_STATE}" = "in-repo" ] || return 0
+  [ -n "${TRACKED_GUARD_LIST}" ] && [ -s "${TRACKED_GUARD_LIST}" ] || return 0
+
+  local staged_list record sha path check_out line idx unreadable sample
+  staged_list="$(mktemp "${TMPDIR:-/tmp}/cqlite-staged-blobs.XXXXXX")"
+  if ! guard_git -C "${TRACKED_GUARD_REPO}" ls-files -s -z -- ":(literal)${TRACKED_GUARD_REL}" >"${staged_list}"; then
+    rm -f "${staged_list}"
+    refuse_unprotected_dataset_root "'git ls-files -s' failed for '${TRACKED_GUARD_REL}', so blob readability cannot be established"
+    return 0
+  fi
+
+  # Records are "<mode> <sha> <stage>\t<path>". Query by SHA, not by ":path": a SHA
+  # is fixed-width hex, so it streams to cat-file safely whatever the filenames
+  # look like (a path may contain a newline).
+  local -a shas=() paths=()
+  while IFS= read -r -d '' record; do
+    sha="${record#* }"
+    sha="${sha%% *}"
+    path="${record#*$'\t'}"
+    shas+=( "${sha}" )
+    paths+=( "${path}" )
+  done <"${staged_list}"
+  rm -f "${staged_list}"
+  [ "${#shas[@]}" -gt 0 ] || return 0
+
+  # cat-file exits 0 and prints "<sha> missing" for an unreadable object, so the
+  # verdict comes from the OUTPUT, not the status; a hard failure is also fatal.
+  if ! check_out="$(printf '%s\n' "${shas[@]}" \
+    | guard_git -C "${TRACKED_GUARD_REPO}" cat-file --batch-check 2>&1)"; then
+    refuse_structural_dataset_root "could not read the staged blobs under '${TRACKED_GUARD_REL}' ('git cat-file' failed: ${check_out}) — the object store is unreachable, so the deletion could not be undone"
+    return 0
+  fi
+
+  unreadable=0
+  sample=""
+  idx=0
+  while IFS= read -r line; do
+    case "${line}" in
+      *" blob "*) ;;
+      *)
+        unreadable=$((unreadable + 1))
+        [ -n "${sample}" ] || sample="${paths[idx]:-<unknown>}"
+        ;;
+    esac
+    idx=$((idx + 1))
+  done <<EOF
+${check_out}
+EOF
+
+  if [ "${unreadable}" -gt 0 ]; then
+    refuse_structural_dataset_root "${unreadable} of ${#shas[@]} staged blob(s) under '${TRACKED_GUARD_REL}' are UNREADABLE in the environment the restore will use (e.g. '${sample}') — the object store is unreachable, so deleting the directory could not be undone. Nothing has been deleted"
+    return 0
+  fi
+  return 0
+}
+
 # Restore the captured tracked files from the index.
 #   missing-only  only files that are absent on disk (pre-flight repair of an
 #                 earlier run's damage, and the abort path; never clobbers a
@@ -703,11 +773,19 @@ cleanup_fetch_temporaries() {
     TRACKED_GUARD_DESTRUCTIVE_STARTED=0
     echo "WARNING: dataset fetch aborted (status ${rc}) after '${DATASET_ROOT}' was deleted;" >&2
     echo "WARNING: restoring the git-tracked reference fixtures it contained (issue #2878)" >&2
+    # DISCARD any partial extraction output first. The live extraction path stages
+    # into a temp dir and `mv`s into place, and that `mv` is NOT atomic when TMPDIR
+    # is on a different filesystem (the usual /tmp-is-tmpfs case): a copy
+    # interrupted mid-way leaves a partially-populated dataset tree. Removing it
+    # here gives a single well-defined post-abort state — no archive content, all
+    # tracked fixtures restored — and makes the message below a VERIFIED statement
+    # rather than an assumption.
+    rm -rf "${DATASET_ROOT}" 2>/dev/null || true
     # `all`, not `missing-only`: an abort after the extraction landed can leave a
     # tracked reference file present but overwritten by the archive's stale copy,
     # and this mode also VERIFIES the subtree ends clean.
     if restore_tracked_dataset_files all; then
-      echo "WARNING: git-tracked fixtures under ${TRACKED_GUARD_REL:-${DATASET_ROOT}} restored; the archive content is NOT present — re-run the fetch" >&2
+      echo "WARNING: git-tracked fixtures under ${TRACKED_GUARD_REL:-${DATASET_ROOT}} restored; any partial extraction output was discarded, so the archive content is NOT present — re-run the fetch" >&2
     else
       echo "ERROR: could not restore git-tracked fixtures under ${TRACKED_GUARD_REL:-${DATASET_ROOT}};" >&2
       echo "ERROR: recover with: git -C '${TRACKED_GUARD_REPO:-.}' restore --worktree -- '${TRACKED_GUARD_REL:-test-data/datasets}'" >&2
@@ -771,11 +849,20 @@ fi
 # determine whether tracked files are at risk.
 capture_tracked_dataset_files
 
+# ...and prove every captured blob is READABLE in the restore's own environment
+# before the deletion, rather than discovering it afterwards.
+verify_captured_blobs_readable
+
 # From here until the restore below verifies the tracked subtree clean, an abort
 # on ANY path must restore on the way out — see cleanup_fetch_temporaries.
 TRACKED_GUARD_DESTRUCTIVE_STARTED=1
 
 rm -rf "${DATASET_ROOT}"
+# NOTE (#3198): this in-place `tar -C .` branch is currently UNREACHABLE —
+# canonicalize_dataset_root rewrites DATASET_ROOT to an ABSOLUTE path, which can
+# never equal the relative ARCHIVE_DATASET_ROOT, so the staged tmp+mv branch below
+# always runs. Left as-is deliberately; resolving the dead branch belongs to #3198,
+# not to #2878's data-safety work.
 if [ "${DATASET_ROOT}" = "${ARCHIVE_DATASET_ROOT}" ]; then
   tar -xzf "${ASSET_PATH}" -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
 else

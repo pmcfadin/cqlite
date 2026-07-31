@@ -463,6 +463,10 @@ else
   esac
 fi
 
+# The exact confirmation the abort path prints once it has discarded any partial
+# extraction output and restored the tracked fixtures — asserted by every abort case.
+RESTORE_CONFIRMED="any partial extraction output was discarded, so the archive content is NOT present"
+
 # === Case 8: ABORT AFTER the rm -rf must still restore (BLOCKER 1) ===========
 # A valid tarball with an unexpected top level hits the script's explicit
 # `exit 1` AFTER the dataset dir has been deleted. Every other abort in that
@@ -541,8 +545,19 @@ mkdir -p "$SIGBIN"
 cp "$BIN/curl" "$SIGBIN/curl"
 cat >"$SIGBIN/tar" <<'MOCK'
 #!/usr/bin/env bash
-# Stand in for an interrupted extraction: signal the invoking fetch script and
+# Stand in for an extraction interrupted PART WAY THROUGH: write some output into
+# the -C directory FIRST (so the abort really has partial extraction leftovers to
+# deal with, not an empty staging dir), then signal the invoking fetch script and
 # exit as a killed-by-signal tar would.
+dest="."
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -C) dest="${2:-.}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$dest/test-data/datasets/sstables/test_basic/simple_table-aaaa"
+printf 'half-written\n' >"$dest/test-data/datasets/partial-extraction.txt"
 kill -TERM "$PPID" 2>/dev/null
 exit 143
 MOCK
@@ -563,6 +578,79 @@ case "$OUT" in
   *) bad "abort-signal: no abort-restore announcement; output: $OUT" ;;
 esac
 assert_tracked_intact "$R8C" "abort-signal"
+if [ ! -e "$R8C/test-data/datasets/partial-extraction.txt" ]; then
+  ok "abort-signal: partially-extracted output did not reach the dataset tree"
+else
+  bad "abort-signal: partial extraction output was left in the dataset tree"
+fi
+
+# === Case 8f: a partially-completed `mv` must not leave a half dataset tree ===
+# The live extraction path stages into a temp dir and `mv`s into place; that `mv`
+# is NOT atomic when TMPDIR is on another filesystem (the usual /tmp-is-tmpfs
+# case), so an interruption mid-copy leaves a partially-populated dataset tree.
+# Driven by a stub `mv` that copies part of the tree into place, signals, and
+# fails — deterministic, no sleeps. (The in-place `tar -C .` branch is UNREACHABLE,
+# see #3198, so this `mv` is the live equivalent.)
+MVBIN="$T/bin-partial-mv"
+mkdir -p "$MVBIN"
+cp "$BIN/curl" "$MVBIN/curl"
+cat >"$MVBIN/mv" <<'MOCK'
+#!/usr/bin/env bash
+# mv <src> <dst>: land only PART of the tree, then be interrupted.
+src="$1"; dst="$2"
+mkdir -p "$dst"
+printf 'half-moved\n' >"$dst/partial-extraction.txt"
+kill -TERM "$PPID" 2>/dev/null
+exit 1
+MOCK
+chmod +x "$MVBIN/mv"
+R8F="$T/case8f-repo"
+make_repo "$R8F"
+FETCH_BIN="$MVBIN"
+run_fetch "$R8F" "$R8F/test-data/datasets"
+FETCH_BIN=""
+if [ "$RC" -ne 0 ]; then
+  ok "partial-mv: the interrupted move still fails the run (exit $RC)"
+else
+  bad "partial-mv: reported success; output: $OUT"
+fi
+if [ ! -e "$R8F/test-data/datasets/partial-extraction.txt" ]; then
+  ok "partial-mv: the half-moved content was discarded"
+else
+  bad "partial-mv: half-moved content left behind in the dataset tree"
+fi
+case "$OUT" in
+  *"$RESTORE_CONFIRMED"*) ok "partial-mv: the message about discarded output is a verified statement" ;;
+  *) bad "partial-mv: no discard/restore confirmation; output: $OUT" ;;
+esac
+assert_tracked_intact "$R8F" "partial-mv"
+
+# --- Case 8g: NON-VACUITY for the partial-output discard ----------------------
+MUTANT_NO_DISCARD="$T/fetch-datasets-mutant-no-discard.sh"
+sed 's|^    rm -rf "\${DATASET_ROOT}" 2>/dev/null .*$|    : mutant-no-partial-discard|' "$FETCH" >"$MUTANT_NO_DISCARD"
+if ! cmp -s "$FETCH" "$MUTANT_NO_DISCARD"; then
+  ok "non-vacuity: built a partial-discard-disabled mutant"
+  R8G="$T/case8g-repo"
+  make_repo "$R8G"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_NO_DISCARD"
+  FETCH_BIN="$MVBIN"
+  run_fetch "$R8G" "$R8G/test-data/datasets"
+  FETCH="$FETCH_SAVED"
+  FETCH_BIN=""
+  if [ -e "$R8G/test-data/datasets/partial-extraction.txt" ]; then
+    ok "non-vacuity: mutant leaves the half-moved file behind"
+  else
+    bad "non-vacuity: mutant also discarded it — the partial-mv assert is vacuous"
+  fi
+  if [ -n "$(git -C "$R8G" status --porcelain 2>&1)" ]; then
+    ok "non-vacuity: mutant leaves the checkout dirty with the leftover"
+  else
+    bad "non-vacuity: mutant left a clean checkout — the leftover is invisible to the oracle"
+  fi
+else
+  bad "non-vacuity: could not build the partial-discard-disabled mutant (discard line changed?)"
+fi
 
 # === Case 8d: a SECOND signal during recovery must not truncate the restore ===
 # Deterministic, no sleeps: a stub `tar` signals the script (entering the abort
@@ -588,7 +676,6 @@ done
 exec "${REAL_GIT:?REAL_GIT unset}" "$@"
 MOCK
 chmod +x "$SIG2BIN/git"
-RESTORE_CONFIRMED="restored; the archive content is NOT present"
 R8D="$T/case8d-repo"
 make_repo "$R8D"
 FETCH_BIN="$SIG2BIN"
@@ -845,6 +932,79 @@ case "$OUT" in
   *) bad "foreign-index: capture count wrong — the foreign index was used; output: $OUT" ;;
 esac
 assert_tracked_intact "$R19" "foreign-index"
+
+# === Case 20: staged blobs reachable ONLY via inherited git object env ========
+# The flip side of clearing the GIT_* namespace: `restore` needs the object store,
+# and with the blobs living in EXTERNAL storage (a receive-hook quarantine, a
+# borrowed/shared store) the scrubbed environment cannot read them. Capture reads
+# only the INDEX, so it reports a healthy count — and then the rm -rf runs and the
+# restore cannot read anything back. The readability precheck must catch that
+# BEFORE the deletion.
+# external_objects_repo <dir> — a repo whose objects are reachable only via env.
+external_objects_repo() {
+  local dir="$1"
+  make_repo "$dir"
+  mv "$dir/.git/objects" "$dir/external-objects"
+  mkdir -p "$dir/.git/objects"
+}
+R20="$T/case20-repo"
+external_objects_repo "$R20"
+EXT_OBJ="$R20/external-objects"
+if [ -z "$(GIT_ALTERNATE_OBJECT_DIRECTORIES="$EXT_OBJ" git -C "$R20" cat-file --batch-check <<<"$(git -C "$R20" ls-files -s -- test-data/datasets | awk 'NR==1{print $2}')" | grep -c ' blob ')" ]; then
+  bad "external-objects: fixture setup failed (blob unreadable even WITH the env var)"
+else
+  ok "external-objects: fixture blobs are reachable only via GIT_ALTERNATE_OBJECT_DIRECTORIES"
+fi
+run_fetch "$R20" "$R20/test-data/datasets" GIT_ALTERNATE_OBJECT_DIRECTORIES="$EXT_OBJ"
+assert_refusal "external-objects" "UNREADABLE in the environment the restore will use" \
+  "$R20/test-data/datasets/commitlog/clean-CommitLog.log"
+MISSING20=0
+for rel in "${TRACKED_RELATIVE[@]}"; do
+  [ -f "$R20/test-data/datasets/$rel" ] || MISSING20=$((MISSING20 + 1))
+done
+if [ "$MISSING20" -eq 0 ]; then
+  ok "external-objects: all tracked fixtures still present (nothing was deleted)"
+else
+  bad "external-objects: $MISSING20 tracked fixture(s) deleted despite the refusal"
+fi
+case "$OUT" in
+  *"object store is unreachable"*) ok "external-objects: message says the object store is unreachable" ;;
+  *) bad "external-objects: message does not explain the cause; output: $OUT" ;;
+esac
+run_fetch "$R20" "$R20/test-data/datasets" GIT_ALTERNATE_OBJECT_DIRECTORIES="$EXT_OBJ" CQLITE_DATASETS_ALLOW_UNPROTECTED=1
+if [ "$RC" -ne 0 ] && [ -f "$R20/test-data/datasets/commitlog/clean-CommitLog.log" ]; then
+  ok "external-objects: the escape hatch does NOT unlock it (structural)"
+else
+  bad "external-objects: the escape hatch unlocked an unrecoverable delete (exit $RC)"
+fi
+
+# --- Case 20b: NON-VACUITY for the readability precheck ------------------------
+MUTANT_NO_PRECHECK="$T/fetch-datasets-mutant-no-precheck.sh"
+sed 's/^verify_captured_blobs_readable$/: mutant-no-readability-precheck/' "$FETCH" >"$MUTANT_NO_PRECHECK"
+if ! cmp -s "$FETCH" "$MUTANT_NO_PRECHECK"; then
+  ok "non-vacuity: built a precheck-disabled mutant"
+  R20B="$T/case20b-repo"
+  external_objects_repo "$R20B"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_NO_PRECHECK"
+  run_fetch "$R20B" "$R20B/test-data/datasets" GIT_ALTERNATE_OBJECT_DIRECTORIES="$R20B/external-objects"
+  FETCH="$FETCH_SAVED"
+  MUT20_MISSING=0
+  for rel in "${TRACKED_RELATIVE[@]}"; do
+    [ -f "$R20B/test-data/datasets/$rel" ] || MUT20_MISSING=$((MUT20_MISSING + 1))
+  done
+  if [ "$MUT20_MISSING" -gt 0 ]; then
+    ok "non-vacuity: mutant deletes then CANNOT restore ($MUT20_MISSING fixture(s) lost)"
+  else
+    bad "non-vacuity: mutant lost nothing — the precheck assert is vacuous"
+  fi
+  case "$OUT" in
+    *"could not restore git-tracked fixtures"*) ok "non-vacuity: mutant hits the post-deletion restore failure" ;;
+    *) bad "non-vacuity: mutant did not report a failed restore; output: $OUT" ;;
+  esac
+else
+  bad "non-vacuity: could not build the precheck-disabled mutant (call site renamed?)"
+fi
 
 # --- Case 19b: NON-VACUITY for the GIT_* scrub (both spellings) ---------------
 # Neutering the scrub must reproduce BOTH reported failures: a refusal under an
