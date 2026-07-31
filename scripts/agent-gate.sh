@@ -1281,6 +1281,117 @@ apply_fixture_preflight() {
   esac
 }
 
+# ---- issue #3148: FULL-gate fail-closed on an unreachable COMMITTED schemas root -
+# #2078 (above) validates the FETCHED SSTable corpus. It says nothing about the
+# COMMITTED CQL schema fixtures under test-data/schemas/ (23 files incl. legacy/ and
+# udts/), which the dataset-backed components must also read to decode those SSTables.
+# Before #3148, `grep -c schemas scripts/agent-gate.sh` was 0: a corpus whose
+# sstables/ was complete but whose schema fixtures were unreachable passed the
+# preflight with STATUS: OK, built for ~8 minutes, then failed core-tests +
+# memory-budget with opaque "Path does not exist: …/basic-types.cql" panics. Worse
+# than no preflight at all: `STATUS: OK` is POSITIVELY MISLEADING, so an agent reads
+# "fixtures verified" and suspects its own diff (this nearly cost #3095/PR #3141 a
+# misattributed triage).
+#
+# Since #3148 the Rust helpers resolve the schemas root CHECKOUT-RELATIVE
+# (test-data/support/fixture_roots.rs — never $CQLITE_DATASETS_ROOT/../schemas), so
+# this check is a cheap BELT-AND-BRACES assert on the same root that helper resolves:
+# an explicit CQLITE_SCHEMAS_ROOT override when set + readable, else the checkout's
+# test-data/schemas. Deliberately NO opt-out (unlike #2078's
+# AGENT_GATE_ALLOW_MISSING_FIXTURES): the fetched corpus is legitimately absent
+# sometimes, but committed source in a checkout never is — an unreachable schemas root
+# is a broken checkout or a stale override, and neither may certify a run.
+# --lite/--only stay lenient, unchanged from #2078's contract (#3148 AC (g)).
+
+# The exact schema files the gate's dataset-backed components consume — a directory
+# existence check is NOT enough (#3148 fix 1). The six from the shared bench fixture
+# catalog (cqlite-core/benches/fixtures/mod.rs, read by memory_budget,
+# issue_1494_converter_alloc_budget, issue_2075_row_assembly_alloc_budget,
+# tail_latency_harness), which also cover dead_cache_delete_tests (basic-types.cql),
+# observability_correctness (basic-types.cql) and cqlite-cli's export_csv bench
+# (collections.cql).
+CANONICAL_SCHEMA_FILES="basic-types.cql da-test.cql time-series.cql wide-table-bti.cql collections.cql wide-rows.cql"
+# Stamped into the SUMMARY on a successful check so the pasted block shows POSITIVELY
+# that the schemas root was validated, not merely that nothing complained.
+SCHEMAS_LINE=""
+
+# _gate_schemas_root / _gate_schemas_root_source: mirror schemas_root_resolved() in
+# test-data/support/fixture_roots.rs EXACTLY — env override only when set, non-empty
+# AND a readable directory (a stale/broken export degrades to the checkout rather than
+# pinning the run to a path that cannot work), else checkout-relative. Both sides
+# anchor on the checkout, so the gate asserts the same path the tests will resolve.
+_gate_schemas_root() {
+  if [ -n "${CQLITE_SCHEMAS_ROOT:-}" ] && [ -d "${CQLITE_SCHEMAS_ROOT}" ]; then
+    printf '%s' "$CQLITE_SCHEMAS_ROOT"
+  else
+    printf '%s' "$REPO_ROOT/test-data/schemas"
+  fi
+}
+_gate_schemas_root_source() {
+  if [ -n "${CQLITE_SCHEMAS_ROOT:-}" ] && [ -d "${CQLITE_SCHEMAS_ROOT}" ]; then
+    printf '%s' "CQLITE_SCHEMAS_ROOT override"
+  else
+    printf '%s' "checkout-relative"
+  fi
+}
+
+# _missing_schema_files: the space-separated subset of CANONICAL_SCHEMA_FILES that is
+# not readable under the resolved root. Empty means all present.
+_missing_schema_files() {
+  local root f out=""
+  root="$(_gate_schemas_root)"
+  # shellcheck disable=SC2086  # intentional word-split over the space-separated list
+  for f in $CANONICAL_SCHEMA_FILES; do
+    [ -r "$root/$f" ] || out="${out:+$out }$f"
+  done
+  printf '%s' "$out"
+}
+
+# _schemas_status: PURE decision for the FULL-gate schemas guard. Echoes exactly one
+# token: OK (all canonical .cql readable, or not the full gate → no-op) or FAIL. No
+# side effects, so the hidden --preflight-schemas hook asserts the SAME decision
+# apply_schemas_preflight consumes (single-source; no drift).
+_schemas_status() {
+  # Only the FULL gate is strict: --only stays lenient, --lite already returned.
+  [ -z "$ONLY" ] || { echo OK; return 0; }
+  [ "$LITE" -eq 0 ] || { echo OK; return 0; }
+  [ -z "$(_missing_schema_files)" ] && { echo OK; return 0; }
+  echo FAIL
+}
+
+# apply_schemas_preflight: EFFECTFUL FULL-gate schemas guard (issue #3148). Consumes
+# _schemas_status. OK → stamp the positive SCHEMAS_LINE and return. FAIL → emit a FAIL
+# SUMMARY carrying `missing-schemas: FAIL-CLOSED (#3148)` — textually DISTINCT from
+# #2078's `missing-fixtures:` so the two causes are separable in a pasted block — with
+# a remedy naming the exact expected absolute path, then exit 1.
+apply_schemas_preflight() {
+  local root missing
+  root="$(_gate_schemas_root)"
+  case "$(_schemas_status)" in
+    OK)
+      local n
+      # shellcheck disable=SC2086  # intentional word-split over the space-separated list
+      n=$(set -- $CANONICAL_SCHEMA_FILES; echo $#)
+      SCHEMAS_LINE="schemas: $n/$n canonical .cql readable under $root ($(_gate_schemas_root_source))"
+      return 0 ;;
+    *)
+      missing="$(_missing_schema_files)"
+      echo "agent-gate: FAIL: committed CQL schema fixtures unreachable under $root ($(_gate_schemas_root_source)) (#3148)" >&2
+      echo "agent-gate: unreadable: $missing" >&2
+      echo "agent-gate: expected absolute path: $root/${missing%% *}" >&2
+      echo "agent-gate: these are COMMITTED SOURCE (test-data/schemas, 23 files incl. legacy/ + udts/) — NOT part of the fetched corpus and NOT derived from CQLITE_DATASETS_ROOT." >&2
+      echo "agent-gate: dataset-backed components (core-tests, memory-budget, cli-tests) would build for ~8 min and then panic on the missing .cql." >&2
+      echo "agent-gate: remedy: unset CQLITE_SCHEMAS_ROOT (it overrides the checkout default), or restore the committed fixtures: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas" >&2
+      _tree_meta_array   # #2926: every emitted block carries the tree provenance
+      emit_summary FAIL \
+        "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
+        "missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic on an absent .cql; overall verdict FAIL" \
+        "${TREE_META_LINES[@]}" \
+        "hint: expected $root/${missing%% *} — unset CQLITE_SCHEMAS_ROOT, or: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas"
+      exit 1 ;;
+  esac
+}
+
 # ---- issue #2081: --delta executes node __test__/ + scripts/tests/*.sh ---------
 # --delta re-cert (issue #1892) fail-closed on node jest files + shell self-tests
 # purely because its components could not EXECUTE them. It now can: these helpers
@@ -1591,6 +1702,17 @@ case "${1:-}" in
   --preflight-fixtures)
     _pf_st=$(_fixture_status); echo "STATUS: $_pf_st"
     [ "$_pf_st" = OPTOUT ] && echo "$(_missing_fixtures_marker)"
+    exit 0 ;;
+  # Hidden self-test hook (issue #3148): print the FULL-gate COMMITTED-SCHEMAS decision
+  # (OK|FAIL) from _schemas_status, plus the resolved ROOT, its SOURCE and (on FAIL) the
+  # unreadable files — so the positive-control self-test asserts the preflight actually
+  # FAILS on a schemas-less root, not merely that it passes on a good one. Pure — the
+  # FAIL emit + exit lives in apply_schemas_preflight (exercised by the real gate run).
+  --preflight-schemas)
+    _ps_st=$(_schemas_status); echo "STATUS: $_ps_st"
+    echo "ROOT: $(_gate_schemas_root)"
+    echo "SOURCE: $(_gate_schemas_root_source)"
+    [ "$_ps_st" = FAIL ] && echo "MISSING: $(_missing_schema_files)"
     exit 0 ;;
   # Hidden self-test hooks (issue #2081): expose the node-build readiness decision and
   # the shell-selftest executor so scripts/tests assert the SAME logic run_delta uses.
@@ -3259,6 +3381,9 @@ _tree_boundary_meta_lines() {
     fi
   fi
   [ -n "${MISSING_FIXTURES_MARKER:-}" ] && printf '%s\n' "$MISSING_FIXTURES_MARKER"
+  # #3148: the POSITIVE schemas-root assertion (empty until the full gate's preflight
+  # has run, so a --lite/--delta boundary simply omits it rather than inventing it).
+  [ -n "${SCHEMAS_LINE:-}" ] && printf '%s\n' "$SCHEMAS_LINE"
   [ -n "${PINS:-}" ] && printf 'ci-pins: %s\n' "$PINS"
   # Both printers deliberately emit NO trailing newline (their normal callers capture them
   # into a SUMMARY_META element), so each needs its own '%s\n' here or the whole block
@@ -6246,6 +6371,13 @@ if selected_needs_datasets; then
   # AGENT_GATE_ALLOW_MISSING_FIXTURES=1 (restores SKIP + stamps MISSING_FIXTURES_MARKER
   # into the SUMMARY). May emit a FAIL SUMMARY and exit 1.
   apply_fixture_preflight
+  # FULL-gate COMMITTED-SCHEMAS guard (issue #3148): the SSTable corpus above is only
+  # half the fixture contract — the dataset-backed components must also read the
+  # committed CQL schemas that decode it. Runs AFTER the corpus guard so a run missing
+  # both still reports the #2078 cause first (the corpus is the fetched half an
+  # operator must act on). Checkout-relative, so this is a cheap belt-and-braces
+  # assert; no opt-out. May emit a FAIL SUMMARY and exit 1.
+  apply_schemas_preflight
   # Historical hard preflight: zero Data.db at all is an error. For the FULL gate this
   # is already handled by apply_fixture_preflight above (an empty root has no
   # test_basic corpus either), so restrict it to --only — that way the opt-out can
@@ -6829,6 +6961,11 @@ fi
 # #2078: stamp the opt-out marker so an intentional AGENT_GATE_ALLOW_MISSING_FIXTURES=1
 # run is visible in the pasted SUMMARY block (empty otherwise → no line).
 [ -n "$MISSING_FIXTURES_MARKER" ] && SUMMARY_META+=("$MISSING_FIXTURES_MARKER")
+# #3148: stamp the POSITIVE committed-schemas assertion (which root was validated, and
+# whether via the checkout or a CQLITE_SCHEMAS_ROOT override), so the pasted block shows
+# the check RAN rather than merely that nothing complained. Empty when the preflight was
+# skipped (no dataset-dependent component selected) → no line.
+[ -n "$SCHEMAS_LINE" ] && SUMMARY_META+=("$SCHEMAS_LINE")
 SUMMARY_META+=("ci-pins: $PINS")
 SUMMARY_META+=("$(accelerators_line)")
 SUMMARY_META+=("$(cpu_budget_line)")
