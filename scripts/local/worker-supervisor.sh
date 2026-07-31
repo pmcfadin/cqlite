@@ -904,24 +904,33 @@ report_pending_at_exit() {
 # cannot observe the real notifier). finalize_exit fires up to TWO notifies
 # (report_pending_at_exit + the stop page).
 #
-# BUDGET ARITHMETIC — count all THREE bounded steps, not two. Each notify runs a
-# payload ENCODER, then the PUBLISH, then the optional ADJUNCT, sequentially, so a
-# single notify's worst case is the SUM of the three bounds. With the roomy defaults
-# (10 + 10 + 5) one notify is 25s and two are 50s — far over the ceiling. An earlier
-# revision of this block tightened only the transport and the adjunct and claimed
-# "2 x (4 + 2) = 12s"; that omitted the encoder, whose bound was also 4s, so the true
-# worst case was 2 x (4 + 4 + 2) = 20s — still OVER the pinned 15s. The bounds below
-# are therefore chosen so that:
+# BUDGET ARITHMETIC — count all THREE bounded steps, AND the SIGKILL grace on each.
+# Each notify runs a payload ENCODER, then the PUBLISH, then the optional ADJUNCT,
+# sequentially, so one notify's worst case is the SUM over steps of
+# (bound + GATE_NOTIFY_KILL_GRACE). Two omissions have already been caught here, both
+# by review, and both of the same shape — a term left out of this sum:
 #
-#     2 x (PAYLOAD + CURL + ADJUNCT) = 2 x (2 + 2 + 1) = 10s  <  15s   (5s headroom)
+#   1. The ENCODER term. An early revision tightened only transport+adjunct and claimed
+#      "2 x (4 + 2) = 12s"; the encoder's 4s bound was missing, so the truth was
+#      2 x (4 + 4 + 2) = 20s — OVER the ceiling.
+#   2. The KILL GRACE. `timeout` alone only SIGTERMs and a helper can ignore that
+#      (measured: a `trap "" TERM` helper under `timeout 2` never returned), so
+#      gate-notify.sh now escalates to SIGKILL via `--kill-after=<grace>`. That grace is
+#      ADDITIVE WALL-CLOCK — `--kill-after=1 2` returns at 3s — so keeping 2/2/1 would
+#      have made this 2 x (2+1 + 2+1 + 1+1) = 16s, again OVER the ceiling.
 #
-# Mechanized: scripts/tests/test_agent_gate_notify.sh reads these three values out of
-# THIS file and measures two real notifies with all three helpers wedged, so the
-# arithmetic can never silently drift again. Steady-state notifies keep the roomier
-# defaults; only the exit path is tightened, and it is still strictly better than the
-# UNBOUNDED `curl -s` this replaced.
-NOTIFY_EXIT_PAYLOAD_TIMEOUT="${NOTIFY_EXIT_PAYLOAD_TIMEOUT:-2}"
-NOTIFY_EXIT_CURL_TIMEOUT="${NOTIFY_EXIT_CURL_TIMEOUT:-2}"
+# So the bounds are retuned DOWN as part of adding the grace, never the ceiling up:
+#
+#     2 x [ (PAYLOAD+g) + (CURL+g) + (ADJUNCT+g) ]
+#   = 2 x [ (1+1) + (1+1) + (1+1) ] = 12s  <  15s   (3s headroom, g = 1)
+#
+# Mechanized: scripts/tests/test_agent_gate_notify.sh reads these three values AND the
+# grace out of the sources and measures two real notifies against SIGTERM-IGNORING
+# wedges, so neither omission can recur silently. Steady-state notifies keep the
+# roomier defaults; only the exit path is tightened, and it remains strictly better
+# than the UNBOUNDED `curl -s` this replaced.
+NOTIFY_EXIT_PAYLOAD_TIMEOUT="${NOTIFY_EXIT_PAYLOAD_TIMEOUT:-1}"
+NOTIFY_EXIT_CURL_TIMEOUT="${NOTIFY_EXIT_CURL_TIMEOUT:-1}"
 NOTIFY_EXIT_ADJUNCT_TIMEOUT="${NOTIFY_EXIT_ADJUNCT_TIMEOUT:-1}"
 
 finalize_exit() {

@@ -155,6 +155,65 @@ else
   bad "wedged-encoder case (rc=$rc elapsed=${elapsed}s) — the encoder is not bounded"
 fi
 
+# ---- Case 3e: a helper that IGNORES SIGTERM is still killed --------------------
+# THE defect this case exists for: plain `timeout <secs> <cmd>` sends SIGTERM ONLY.
+# Measured against a `trap "" TERM` helper, `timeout 2` NEVER RETURNED (still alive
+# when a 20s harness SIGKILLed it) — the bound bought nothing, re-opening the exact
+# signature this issue exists to prevent (gate_push_signal hanging after the summary
+# emit, so the gate never exits and the #1825 slot is never released). Every wedge in
+# the cases above uses `sleep`, which DIES on SIGTERM, so none of them can see this.
+# The fix is `--kill-after=<grace>`, whose SIGKILL cannot be trapped.
+trapdir="$tmp/trapterm"; mkdir -p "$trapdir"
+for helper in curl python3 agent-notify; do
+  printf '#!/usr/bin/env bash\ntrap "" TERM\nwhile :; do sleep 0.2; done\n' > "$trapdir/$helper"
+  chmod +x "$trapdir/$helper"
+done
+# An INDEPENDENT hard cap (SIGKILL, so it cannot itself be ignored) wraps the call:
+# under a regression to a plain SIGTERM-only `timeout` this case must produce a clean
+# RED, not hang the component until the gate's own timeout. Verified by mutation:
+# without this cap the whole suite had to be SIGKILLed at 90s with no verdict at all.
+CASE3E_CAP=25
+t0=$(date +%s)
+env CURL_LOG="$tmp/case3e.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$trapdir:$PATH" \
+  GATE_NOTIFY_PAYLOAD_TIMEOUT=1 GATE_NOTIFY_CURL_TIMEOUT=1 GATE_NOTIFY_ADJUNCT_TIMEOUT=1 \
+  timeout -s KILL "$CASE3E_CAP" \
+  bash -c '. "$0"; gate_push_signal PASS advisory-branch abc1234 ""' "$fnfile" \
+  >"$tmp/out.txt" 2>"$tmp/err.txt"
+rc=$?
+elapsed=$(( $(date +%s) - t0 ))
+# Two SIGTERM-ignoring steps at (1s bound + 1s grace) each, so a correct
+# implementation returns in a few seconds; rc=137 or elapsed at the cap means the
+# bound escaped and the caller was never released.
+if [ "$rc" -eq 0 ] && [ "$elapsed" -lt "$CASE3E_CAP" ] && silent; then
+  ok "SIGTERM-IGNORING helpers: killed at bound+grace (${elapsed}s), rc=0 — the bound is unignorable"
+else
+  bad "SIGTERM-ignoring-helper case (rc=$rc elapsed=${elapsed}s, cap ${CASE3E_CAP}s) — an escapable SIGTERM-only bound"
+fi
+
+# ---- Case 3f: a SIGTERM-only timeout does not count as a bounding tool ---------
+# Capability is PROBED, not assumed: a `timeout` lacking --kill-after can only be
+# escaped, so it must be treated as NO bounding tool (publish nothing) rather than
+# trusted. Shadow `timeout` with one that rejects --kill-after.
+sigtermonly="$tmp/sigtermonly"; mkdir -p "$sigtermonly"
+cp "$stubdir/curl" "$sigtermonly/curl"
+cat > "$sigtermonly/timeout" <<'TO'
+#!/usr/bin/env bash
+# A SIGTERM-only timeout: rejects --kill-after exactly as pre-8.5 coreutils would.
+case "${1:-}" in --kill-after*|-k) echo "timeout: unrecognized option '$1'" >&2; exit 125 ;; esac
+exec /usr/bin/timeout "$@"
+TO
+chmod +x "$sigtermonly/timeout"
+: > "$tmp/case3f.log"
+env CURL_LOG="$tmp/case3f.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$sigtermonly:$PATH" \
+  bash -c '. "$0"; gate_push_signal PASS advisory-branch abc1234 ""' "$fnfile" \
+  >"$tmp/out.txt" 2>"$tmp/err.txt"
+rc=$?
+if [ "$rc" -eq 0 ] && [ "$(publishes "$tmp/case3f.log")" -eq 0 ] && silent; then
+  ok "SIGTERM-only timeout: treated as NO bounding tool, publishes nothing, rc=0"
+else
+  bad "SIGTERM-only-timeout case (rc=$rc publishes=$(publishes "$tmp/case3f.log")) — trusted an escapable bound"
+fi
+
 # ---- Case 3d: with NO bounding tool, publish NOTHING rather than run unbounded -
 nobound="$tmp/nobound"; mkdir -p "$nobound"
 cp "$stubdir/curl" "$nobound/curl"
@@ -305,18 +364,26 @@ fi
 # three values out of worker-supervisor.sh and measure the real thing with ALL THREE
 # helpers wedged, so the arithmetic cannot drift silently.
 SUPERVISOR="$SCRIPT_DIR/../local/worker-supervisor.sh"
-exit_bound_of() { # <var-name>
-  sed -n "s/^$1=\"\${$1:-\([0-9]*\)}\".*/\1/p" "$SUPERVISOR" | head -1
+LIBFILE="$SCRIPT_DIR/../lib/gate-notify.sh"
+bound_of() { # <var-name> <file>
+  sed -n "s/^$1=\"\${$1:-\([0-9]*\)}\".*/\1/p" "$2" | head -1
 }
-ep=$(exit_bound_of NOTIFY_EXIT_PAYLOAD_TIMEOUT)
-ec=$(exit_bound_of NOTIFY_EXIT_CURL_TIMEOUT)
-ea=$(exit_bound_of NOTIFY_EXIT_ADJUNCT_TIMEOUT)
-if [ -z "$ep" ] || [ -z "$ec" ] || [ -z "$ea" ]; then
-  bad "exit-path budget: could not read NOTIFY_EXIT_* bounds from worker-supervisor.sh"
+ep=$(bound_of NOTIFY_EXIT_PAYLOAD_TIMEOUT "$SUPERVISOR")
+ec=$(bound_of NOTIFY_EXIT_CURL_TIMEOUT "$SUPERVISOR")
+ea=$(bound_of NOTIFY_EXIT_ADJUNCT_TIMEOUT "$SUPERVISOR")
+# The SIGKILL grace is ADDITIVE WALL-CLOCK and must be counted ONCE PER STEP.
+# Omitting a term from this sum is the exact defect this assertion exists to catch —
+# it has already happened twice (the encoder bound, then this grace).
+gr=$(bound_of GATE_NOTIFY_KILL_GRACE "$LIBFILE")
+if [ -z "$ep" ] || [ -z "$ec" ] || [ -z "$ea" ] || [ -z "$gr" ]; then
+  bad "exit-path budget: could not read the NOTIFY_EXIT_* bounds and/or GATE_NOTIFY_KILL_GRACE"
 else
+  # SIGTERM-IGNORING wedges. A `sleep`-based wedge DIES on SIGTERM, so it cannot
+  # observe an escapable bound at all — that structural blindness is why the plain
+  # `timeout` defect reached review instead of the fast loop.
   wedged="$tmp/wedged"; mkdir -p "$wedged"
   for helper in curl python3 agent-notify; do
-    printf '#!/usr/bin/env bash\nsleep 600\n' > "$wedged/$helper"
+    printf '#!/usr/bin/env bash\ntrap "" TERM\nwhile :; do sleep 0.2; done\n' > "$wedged/$helper"
     chmod +x "$wedged/$helper"
   done
   t0=$(date +%s)
@@ -328,13 +395,14 @@ else
       >"$tmp/out.txt" 2>"$tmp/err.txt"
   done
   elapsed=$(( $(date +%s) - t0 ))
-  budget=$(( 2 * (ep + ec + ea) ))
+  # 2 notifies x 3 sequential steps, each step costing (bound + grace).
+  budget=$(( 2 * ((ep + gr) + (ec + gr) + (ea + gr)) ))
   # The DECLARED budget must fit the pinned ceiling, and the MEASURED worst case must
   # not exceed the declared budget (plus process-spawn slack).
   if [ "$budget" -lt 15 ] && [ "$elapsed" -le $((budget + 8)) ]; then
-    ok "exit-path notify budget: 2 x ($ep+$ec+$ea) = ${budget}s < 15s (#2666), measured ${elapsed}s with all three helpers wedged"
+    ok "exit-path notify budget: 2 x [($ep+$gr)+($ec+$gr)+($ea+$gr)] = ${budget}s < 15s (#2666), measured ${elapsed}s against SIGTERM-ignoring wedges"
   else
-    bad "exit-path notify budget: declared ${budget}s (2 x ($ep+$ec+$ea)) vs #2666's 15s ceiling; measured ${elapsed}s"
+    bad "exit-path notify budget: declared ${budget}s (2 x [($ep+$gr)+($ec+$gr)+($ea+$gr)]) vs #2666's 15s ceiling; measured ${elapsed}s"
   fi
 fi
 

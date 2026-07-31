@@ -49,11 +49,30 @@
 # out-of-band per-machine binary).
 GATE_NOTIFY_CONTRACT_VERSION=1
 
-# Bounds. A black-holed network or a wedged helper must never stall a gate. Each
-# is an OUTER `timeout` bound, not a cooperative flag the helper may ignore.
+# Bounds. A black-holed network or a wedged helper must never stall a gate. Each is
+# an OUTER bound enforced with SIGTERM **and then SIGKILL**, so it does not depend on
+# the helper cooperating.
+#
+# Why the SIGKILL escalation is required, not belt-and-braces: plain
+# `timeout <secs> <cmd>` sends SIGTERM ONLY. Measured — a helper containing
+# `trap "" TERM` under `timeout 2` NEVER RETURNED (still alive when a 20s harness
+# SIGKILLed it), so the bound bought nothing at all. `--kill-after=<grace>` follows up
+# with SIGKILL, which cannot be trapped: the same helper then returned rc=137 at 3s
+# (bound 2 + grace 1). `agent-notify` is THIRD-PARTY upstream and mis-assuming its
+# behaviour is the original defect of this whole issue, so its signal handling is not
+# something to assume either.
+#
+# GRACE IS ADDITIVE WALL-CLOCK, never a substitute for the bound: a step's true worst
+# case is `bound + GATE_NOTIFY_KILL_GRACE`. Every caller with a latency ceiling must
+# count the grace once PER STEP (scripts/local/worker-supervisor.sh's exit path does,
+# and scripts/tests/test_agent_gate_notify.sh asserts that arithmetic).
+#
+# A `timeout` that does not support `--kill-after` is treated as NO bounding tool at
+# all — we publish nothing rather than run behind an escapable bound.
 GATE_NOTIFY_CURL_TIMEOUT="${GATE_NOTIFY_CURL_TIMEOUT:-10}"
 GATE_NOTIFY_ADJUNCT_TIMEOUT="${GATE_NOTIFY_ADJUNCT_TIMEOUT:-5}"
 GATE_NOTIFY_PAYLOAD_TIMEOUT="${GATE_NOTIFY_PAYLOAD_TIMEOUT:-10}"
+GATE_NOTIFY_KILL_GRACE="${GATE_NOTIFY_KILL_GRACE:-1}"
 
 _gate_notify_debug() {
   [ "${CQLITE_NOTIFY_DEBUG:-0}" = 1 ] || return 0
@@ -124,7 +143,7 @@ _gate_notify_target() {
 _gate_notify_payload() {
   local to="$1"; shift
   command -v python3 >/dev/null 2>&1 || return 1
-  "$to" "$GATE_NOTIFY_PAYLOAD_TIMEOUT" python3 -c '
+  _gate_notify_bounded "$to" "$GATE_NOTIFY_PAYLOAD_TIMEOUT" python3 -c '
 import json, sys
 topic, title, message, priority, tag = sys.argv[1:6]
 print(json.dumps({
@@ -136,13 +155,29 @@ print(json.dumps({
 }))' "$1" "$2" "$3" "$4" "$5" 2>/dev/null
 }
 
-# _gate_notify_bounded_timeout: print a timeout command prefix, or return 1 when
-# no bounded runner exists. No bound means we run NOTHING external — neither the
-# publish nor the adjunct. Every notification here is advisory; a wedged gate is not.
+# _gate_notify_bounded_timeout: print the name of a timeout(1) that supports
+# `--kill-after`, or return 1 when no such runner exists. The capability is PROBED,
+# not assumed: a `timeout` without `--kill-after` can only SIGTERM, which a helper may
+# ignore, so it does not count as a bounding tool here. No bounding tool means we run
+# NOTHING external — neither the publish nor the adjunct. Every notification here is
+# advisory; a wedged gate is not.
 _gate_notify_bounded_timeout() {
-  if command -v timeout >/dev/null 2>&1; then printf 'timeout\n'; return 0; fi
-  if command -v gtimeout >/dev/null 2>&1; then printf 'gtimeout\n'; return 0; fi
+  local c
+  for c in timeout gtimeout; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    "$c" --kill-after=1 1 true >/dev/null 2>&1 || continue
+    printf '%s\n' "$c"
+    return 0
+  done
   return 1
+}
+
+# _gate_notify_bounded <timeout-cmd> <secs> <cmd...>: run <cmd> under an
+# UNIGNORABLE bound — SIGTERM at <secs>, SIGKILL at <secs>+GATE_NOTIFY_KILL_GRACE.
+_gate_notify_bounded() {
+  local to="$1" secs="$2"
+  shift 2
+  "$to" --kill-after="$GATE_NOTIFY_KILL_GRACE" "$secs" "$@"
 }
 
 # _gate_notify_adjunct <title> <body>: OPTIONAL local desktop/sound notification.
@@ -155,13 +190,19 @@ _gate_notify_bounded_timeout() {
 #      inherits a tty stdin.
 # GATE_NOTIFY_DISABLE_ADJUNCT=1 suppresses it entirely — used by --self-test so a
 # capability probe never fires a real desktop/sound notification (review R3).
+# _gate_notify_adjunct <timeout-cmd> <title> <body>
 _gate_notify_adjunct() {
   [ "${GATE_NOTIFY_DISABLE_ADJUNCT:-0}" = 1 ] && return 0
+  local to="$1"
+  [ -n "$to" ] || { _gate_notify_debug "no unignorable bound available; skipping adjunct"; return 0; }
   command -v agent-notify >/dev/null 2>&1 || return 0
-  local to
-  to=$(_gate_notify_bounded_timeout) || { _gate_notify_debug "no timeout(1); skipping adjunct"; return 0; }
-  env CODEX_NOTIFY_WEBHOOK= CQLITE_NOTIFY_WEBHOOK= CODEX_NOTIFY_WEBHOOK_PRESET= \
-    "$to" "$GATE_NOTIFY_ADJUNCT_TIMEOUT" agent-notify "$1" "$2" >/dev/null 2>&1 </dev/null || true
+  # Subshell + export (not `env`) so the neutralization survives while the bound is
+  # applied by a shell FUNCTION. `</dev/null` is load-bearing: measured, the pristine
+  # upstream binary HANGS on an inherited tty stdin.
+  (
+    export CODEX_NOTIFY_WEBHOOK= CQLITE_NOTIFY_WEBHOOK= CODEX_NOTIFY_WEBHOOK_PRESET=
+    _gate_notify_bounded "$to" "$GATE_NOTIFY_ADJUNCT_TIMEOUT" agent-notify "$2" "$3"
+  ) >/dev/null 2>&1 </dev/null || true
   return 0
 }
 
@@ -178,18 +219,21 @@ gate_notify_publish() {
   local GATE_NOTIFY_ROOT GATE_NOTIFY_TOPIC
   severity=$(_gate_notify_severity "$result")
 
-  # One bounding tool for BOTH external calls; absent ⇒ publish nothing.
-  if ! to=$(_gate_notify_bounded_timeout); then
-    _gate_notify_debug "no timeout(1)/gtimeout(1); publishing nothing rather than running unbounded"
+  # One bounding tool for ALL external calls, probed ONCE per publish. Absent (or
+  # present without `--kill-after`, i.e. SIGTERM-only and therefore escapable) ⇒
+  # publish nothing.
+  to=$(_gate_notify_bounded_timeout) || to=""
+  if [ -z "$to" ]; then
+    _gate_notify_debug "no timeout(1) supporting --kill-after; publishing nothing rather than running behind an escapable bound"
   elif _gate_notify_target; then
     if command -v curl >/dev/null 2>&1; then
       payload=$(_gate_notify_payload "$to" "$GATE_NOTIFY_TOPIC" "$title" "$body" \
         "$(_gate_notify_priority "$severity")" "$(_gate_notify_tag "$severity")") || payload=""
       if [ -n "$payload" ]; then
         _gate_notify_debug "POST $GATE_NOTIFY_ROOT $payload"
-        # OUTER bound + the cooperative flag: --max-time alone is honoured only by
-        # the REAL curl, so it cannot be the guarantee (#3119 B2).
-        "$to" "$GATE_NOTIFY_CURL_TIMEOUT" \
+        # UNIGNORABLE outer bound + the cooperative flag: --max-time alone is honoured
+        # only by the REAL curl, so it cannot be the guarantee (#3119 B2).
+        _gate_notify_bounded "$to" "$GATE_NOTIFY_CURL_TIMEOUT" \
           curl -sS -X POST -H 'Content-Type: application/json' \
           --max-time "$GATE_NOTIFY_CURL_TIMEOUT" \
           -d "$payload" "$GATE_NOTIFY_ROOT" >/dev/null 2>&1 </dev/null || true
@@ -201,7 +245,7 @@ gate_notify_publish() {
     fi
   fi
 
-  _gate_notify_adjunct "$title" "$body"
+  _gate_notify_adjunct "$to" "$title" "$body"
   return 0
 }
 
