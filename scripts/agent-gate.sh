@@ -1354,37 +1354,67 @@ _gate_checkout_test_data_dir() {
 # which is the entire defect class #3148 was filed for. It also made the `expected
 # absolute path:` remedy line print a relative path, breaking AC (b).
 #
-# Both sides therefore reject it, so they agree BY CONSTRUCTION rather than by review.
-# _gate_schemas_override: THE single normalization of "is there an override?", echoing the
-# raw value when there is one and nothing when there is not. Every other helper consults
-# this rather than testing `$CQLITE_SCHEMAS_ROOT` itself.
+# Both sides therefore reject it, removing the one input class on which they could not
+# possibly have agreed.
 #
-# Single-sourcing it is not tidiness (roborev job 9, finding 1): `_gate_schemas_override_reject`
-# treated a WHITESPACE-ONLY value as unset (matching Rust's `v.trim().is_empty()`) while
-# `_gate_schemas_root`/`_gate_schemas_root_source` tested the raw `-n` value. So with a
-# directory literally named "  " present, the gate would have validated and reported it as
-# the override while Rust treated the var as unset and read the checkout's schemas —
-# recreating the very root-certification mismatch this change exists to prevent, in the one
-# input class the two mirrors disagreed on. Exotic, but the whole point of the pair is that
-# they answer identically on EVERY input, so it is fixed rather than argued about.
+# HOW STRONG THAT IS, precisely: this shell resolution and
+# test-data/support/fixture_roots.rs are two HAND-WRITTEN mirrors, EQUIVALENT TODAY and
+# PINNED BY scripts/tests/test_agent_gate_schemas_preflight.sh — not equivalent by
+# construction. They have been walked case by case over the whole input table (unset /
+# "" / whitespace-only / control-character-bearing / "  /abs  " / absolute-non-dir /
+# absolute-dir / relative) and agree on every one. If you edit EITHER side, re-walk that
+# table and re-run that self-test: an unearned "by construction" here is precisely what
+# would stop you doing so, and a silent divergence between these two is the
+# root-certification mismatch this whole change exists to prevent.
+
+# _gate_schemas_override_present: THE single normalization of "is there an override?".
+# Returns a STATUS (0 = present), never text, and every consumer then reads
+# `$CQLITE_SCHEMAS_ROOT` DIRECTLY. Two reasons for that shape, both learned the hard way:
 #
-# Note the deliberate asymmetry: presence is decided on the TRIMMED value, but the value
-# used is the RAW one (never trimmed) — exactly as Rust does, where `trim()` gates presence
-# and `PathBuf::from(raw)` builds the path. Hence `"  /abs  "` is *present* and then
-# REJECTED as non-absolute on both sides, rather than silently trimmed into `/abs`.
-_gate_schemas_override() {
-  local v="${CQLITE_SCHEMAS_ROOT:-}"
-  [ -n "$(printf '%s' "$v" | tr -d '[:space:]')" ] || return 0
-  printf '%s' "$v"
+#   1. Single-sourcing presence (roborev job 9, finding 1): `_gate_schemas_override_reject`
+#      treated a WHITESPACE-ONLY value as unset (matching Rust's `v.trim().is_empty()`)
+#      while `_gate_schemas_root`/`_gate_schemas_root_source` tested the raw `-n` value. The
+#      whole point of the shell/Rust pair is that they answer identically on EVERY input, so
+#      one predicate decides presence for all of them.
+#   2. NO COMMAND SUBSTITUTION anywhere on the value path (roborev job 10, finding 2). The
+#      previous text-returning helper was consumed as `v="$(_gate_schemas_override)"`, and
+#      `$( )` STRIPS TRAILING NEWLINES. Measured: with `CQLITE_SCHEMAS_ROOT=$'/abs/dir\n'`
+#      the gate reported `STATUS: OK` + `SOURCE: CQLITE_SCHEMAS_ROOT override` + `ROOT:
+#      /abs/dir` (newline gone, `-d` true) while Rust kept the newline, got `is_dir() ==
+#      false`, and degraded to the checkout — the gate certifying root A for a run that used
+#      root B, i.e. the exact mis-certification this change exists to prevent, introduced by
+#      the round-2 refactor that fixed (1). Returning a status and reading the variable
+#      directly removes the substitution, and control-character values are additionally
+#      REJECTED below on both sides so no such value can reach a comparison at all.
+#
+# Presence is decided on the TRIMMED value while the value USED is the RAW one — exactly as
+# Rust does (`trim()` gates presence, `PathBuf::from(raw)` builds the path). Hence
+# `"  /abs  "` is *present* and then REJECTED as non-absolute on both sides, never silently
+# trimmed into `/abs`. The test is a pure-bash pattern, not `tr`, so it too is
+# substitution-free.
+_gate_schemas_override_present() {
+  case "${CQLITE_SCHEMAS_ROOT:-}" in
+    *[![:space:]]*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
+# _gate_schemas_override_reject: echoes a non-empty REASON when an override is present but
+# must be REJECTED rather than resolved. Mirrors resolve_schemas_root()'s two Err cases.
 _gate_schemas_override_reject() {
-  local v
-  v="$(_gate_schemas_override)" || return 0
-  [ -n "$v" ] || return 0
-  case "$v" in
+  _gate_schemas_override_present || return 0
+  # Control characters (newline, CR, embedded tab, ...). A path carrying one is never a
+  # legitimate schemas root, and admitting it is what let `$( )`-stripping diverge the two
+  # mirrors (finding 2 above). Rejecting outright keeps them aligned without relying on
+  # every future consumer avoiding command substitution.
+  case "${CQLITE_SCHEMAS_ROOT:-}" in
+    *[[:cntrl:]]*)
+      printf '%s' "CQLITE_SCHEMAS_ROOT must not contain control characters (newline/CR/tab), got $(printf '%q' "${CQLITE_SCHEMAS_ROOT:-}")"
+      return 0 ;;
+  esac
+  case "${CQLITE_SCHEMAS_ROOT:-}" in
     /*) return 0 ;;
-    *) printf '%s' "CQLITE_SCHEMAS_ROOT must be an ABSOLUTE path, got '$v'" ;;
+    *) printf '%s' "CQLITE_SCHEMAS_ROOT must be an ABSOLUTE path, got '${CQLITE_SCHEMAS_ROOT:-}'" ;;
   esac
 }
 
@@ -1395,20 +1425,20 @@ _gate_schemas_override_reject() {
 # is rejected outright, see above), else checkout-relative. Both sides anchor on the same
 # workspace marker, so the gate asserts the path the tests will actually resolve.
 _gate_schemas_root() {
-  local v
-  v="$(_gate_schemas_override)"
-  if [ -z "$(_gate_schemas_override_reject)" ] && [ -n "$v" ] && [ -d "$v" ]; then
-    printf '%s' "$v"
+  # Reads $CQLITE_SCHEMAS_ROOT DIRECTLY — never through `$( )`, which strips trailing
+  # newlines (roborev job 10, finding 2).
+  if _gate_schemas_override_present \
+     && [ -z "$(_gate_schemas_override_reject)" ] \
+     && [ -d "${CQLITE_SCHEMAS_ROOT:-}" ]; then
+    printf '%s' "${CQLITE_SCHEMAS_ROOT:-}"
   else
     printf '%s' "$(_gate_checkout_test_data_dir)/schemas"
   fi
 }
 _gate_schemas_root_source() {
-  local v
-  v="$(_gate_schemas_override)"
   if [ -n "$(_gate_schemas_override_reject)" ]; then
     printf '%s' "CQLITE_SCHEMAS_ROOT override REJECTED"
-  elif [ -n "$v" ] && [ -d "$v" ]; then
+  elif _gate_schemas_override_present && [ -d "${CQLITE_SCHEMAS_ROOT:-}" ]; then
     printf '%s' "CQLITE_SCHEMAS_ROOT override"
   else
     printf '%s' "checkout-relative"

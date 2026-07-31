@@ -76,10 +76,59 @@ fn absent_or_blank_override_resolves_to_the_checkout() {
 /// must not break every fixture load. (A relative one is rejected instead; see above.)
 #[test]
 fn absolute_but_unusable_override_degrades_to_the_checkout() {
-    let (root, source) = resolve_schemas_root(Some("/nonexistent-cqlite-schemas-3148"))
+    // A GUARANTEED-absent absolute path, built under a fresh TempDir with native path
+    // handling rather than hard-coded as `/nonexistent-…` (roborev job 10, finding 3): a
+    // hard-coded root-level name is not absolute under Windows path semantics and is not
+    // guaranteed absent on Unix — someone can create it, and then this test would silently
+    // assert the OPPOSITE branch. The TempDir is unique per run and the child is never
+    // created, so absence is a property of the construction.
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let absent = tmp.path().join("no-such-schemas-dir");
+    assert!(absent.is_absolute(), "TempDir children are absolute");
+    assert!(!absent.exists(), "the child is deliberately never created");
+    let raw = absent.to_str().expect("utf-8 temp path");
+
+    let (root, source) = resolve_schemas_root(Some(raw))
         .expect("an absolute-but-absent override degrades, it is not an error");
     assert_eq!(source, SchemasRootSource::Checkout);
     assert_eq!(root, checkout_test_data_dir().join("schemas"));
+}
+
+/// A control-character-bearing override is REJECTED on both sides (roborev job 10, finding
+/// 2). The gate's shell mirror can only obtain the value through command substitution
+/// somewhere in its history, and `$( )` strips trailing newlines — so admitting such a value
+/// let the gate certify `/abs/dir` while this resolver kept the newline, failed `is_dir()`,
+/// and degraded to the checkout. Rejecting closes the divergence for good.
+#[test]
+fn control_character_override_is_rejected_fail_closed() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let dir = tmp.path().to_str().expect("utf-8 temp path");
+
+    for (label, raw) in [
+        ("trailing newline", format!("{dir}\n")),
+        ("leading newline", format!("\n{dir}")),
+        ("carriage return", format!("{dir}\r")),
+        ("embedded tab", format!("{dir}\tsub")),
+    ] {
+        match resolve_schemas_root(Some(&raw)) {
+            Err(e) => {
+                assert!(
+                    e.contains("control characters"),
+                    "{label}: rejection must name the rule; got: {e}"
+                );
+                assert!(
+                    e.contains("remedy"),
+                    "{label}: rejection must be actionable; got: {e}"
+                );
+            }
+            Ok((root, source)) => panic!(
+                "{label}: a control-character override was ACCEPTED ({} via {source:?}) — the \
+                 gate's shell mirror strips trailing newlines, so this is a root-certification \
+                 divergence, not a cosmetic issue",
+                root.display()
+            ),
+        }
+    }
 }
 
 /// An ABSOLUTE override naming a real directory wins, and is reported as an override so

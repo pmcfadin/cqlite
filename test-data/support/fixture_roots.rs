@@ -237,9 +237,18 @@ pub fn sstables_root() -> PathBuf {
 /// | raw override | result |
 /// |---|---|
 /// | absent / blank | `Ok(checkout)` — an exported-but-empty var is a scripting accident |
+/// | **contains a control char** | **`Err`** — see below |
 /// | **relative** | **`Err`** — cannot mean the same thing under two CWDs (see module docs) |
 /// | absolute + readable dir | `Ok(override)` |
 /// | absolute, not a dir | `Ok(checkout)` — a stale export degrades instead of breaking every load |
+///
+/// The control-character rejection is not hygiene theatre (roborev job 10, finding 2): the
+/// shell mirror could only obtain the value through `$( )`, which **strips trailing
+/// newlines**. Measured with `CQLITE_SCHEMAS_ROOT=$'/abs/dir\n'`, the gate reported
+/// `STATUS: OK` for `/abs/dir` while this resolver kept the newline, got
+/// `is_dir() == false`, and degraded to the checkout — two different roots, the gate
+/// certifying the one the run did not use. The shell no longer uses command substitution on
+/// the value path, AND both sides reject such a value, so the class is closed twice over.
 pub fn resolve_schemas_root(
     raw_override: Option<&str>,
 ) -> Result<(PathBuf, SchemasRootSource), String> {
@@ -252,6 +261,15 @@ pub fn resolve_schemas_root(
     let Some(raw) = raw_override.filter(|v| !v.trim().is_empty()) else {
         return Ok(checkout());
     };
+    if raw.chars().any(char::is_control) {
+        return Err(format!(
+            "{SCHEMAS_ROOT_ENV} must not contain control characters (newline/CR/tab), got {raw:?}.\n\
+             \x20 why    : the gate's shell mirror cannot round-trip such a value (command\n\
+             \x20          substitution strips trailing newlines), so the gate would validate and\n\
+             \x20          certify one root while the tests resolved another.\n\
+             \x20 remedy : export a clean absolute path, or unset {SCHEMAS_ROOT_ENV}."
+        ));
+    }
     let p = PathBuf::from(raw);
     if !p.is_absolute() {
         return Err(format!(

@@ -72,8 +72,13 @@ would red the gate broadly and is out of scope).
 ## Mechanism: the gate preflight
 
 `_gate_schemas_root` / `_gate_schemas_root_source` mirror the Rust `schemas_root_resolved()` exactly, so
-the gate asserts the **same path** the tests will resolve; both anchor on the checkout, so they cannot
-drift by construction. `_schemas_status` is a PURE `OK|FAIL` decision (returning `OK` for `--lite` and
+the gate asserts the **same path** the tests will resolve; both anchor on the same checkout marker. They are
+two **hand-written** mirrors, however — **equivalent today and pinned by
+`scripts/tests/test_agent_gate_schemas_preflight.sh`**, NOT equivalent by construction. Editing either side
+obliges re-walking the input table (unset, `""`, whitespace-only, control-character-bearing, `"  /abs  "`,
+absolute-non-dir, absolute-dir, relative) and re-running that self-test; a silent divergence between them is
+exactly the root-certification mismatch this change exists to prevent, and two of the three review rounds
+found one. `_schemas_status` is a PURE `OK|FAIL` decision (returning `OK` for `--lite` and
 `--only`), and the hidden `--preflight-schemas` hook prints that same decision plus `ROOT`, `SOURCE` and
 the unreadable file list — so the self-test asserts the decision the real gate consumes, not a parallel
 re-implementation of it. This mirrors #2078's `_fixture_status` / `apply_fixture_preflight` /

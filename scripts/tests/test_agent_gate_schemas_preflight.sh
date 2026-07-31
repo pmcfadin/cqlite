@@ -33,8 +33,35 @@ FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-schemas.XXXXXX")
+# Scratch root, VALIDATED before anything is built under it (roborev job 10, finding 1).
+# This script runs `set -uo pipefail` deliberately (no `errexit`: every case must run so a
+# single failure does not hide the rest), so an unchecked `mktemp -d` failure would leave
+# `$tmp` EMPTY and every derived path would become root-level — `/ds-corpus`,
+# `/schemas-empty`, `/hollow/datasets`, … — which a privileged CI job WOULD create, and the
+# EXIT trap would then `rm -rf ""`. A verification script that can write to `/` on a bad
+# `mktemp` is not a safe guard, so this fails loudly instead, BEFORE the trap is installed
+# (arming a cleanup trap on an unvalidated path is the second half of the same hazard).
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-schemas.XXXXXX") || {
+  echo "FATAL: mktemp -d failed; refusing to run with an unset scratch root (would resolve to /)" >&2
+  exit 1
+}
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  echo "FATAL: mktemp -d produced no usable directory ('$tmp'); refusing to run (paths would resolve under /)" >&2
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT
+
+# CHILD PROBE MODE. The scratch-root-guard case below re-invokes THIS script with a failing
+# `mktemp` stub on PATH; if the guard is absent the child would otherwise run every case —
+# including that one — and recurse without bound (observed: it did, while proving the case
+# discriminates). So a child stops HERE, immediately after the scratch root is validated,
+# which is the only thing the parent needs from it: with the guard present the child dies
+# above with `refusing to run`; without it, the child reaches this line and exits 0, and the
+# parent's assertion fails. Bounded to depth 1, fast, and the child creates nothing.
+if [ -n "${AGENT_GATE_SCHEMAS_SELFTEST_CHILD:-}" ]; then
+  echo "child: scratch root validated ('$tmp')"
+  exit 0
+fi
 
 # The six canonical .cql the gate's dataset-backed components consume. Kept here as a
 # LITERAL list rather than read back from agent-gate.sh: if someone shrinks
@@ -202,6 +229,55 @@ if [ "$rel_shapes_ok" -eq 1 ]; then
   ok "3148-whitespace-override: a whitespace-only value is unset (trim rule, single-sourced presence)"
 else
   bad "3148-whitespace-override: whitespace-only handling diverges from the Rust resolver"
+fi
+
+# A CONTROL-CHARACTER override must be REJECTED (roborev job 10, finding 2). Measured before
+# the fix: with `CQLITE_SCHEMAS_ROOT=$'<existing-dir>\n'` the gate reported STATUS OK +
+# SOURCE "CQLITE_SCHEMAS_ROOT override" + ROOT "<existing-dir>" — the newline eaten by the
+# `$( )` the helper was consumed through — while Rust kept it, failed `is_dir()`, and
+# degraded to the checkout. Two roots; the gate certifying the unused one. The directory here
+# is REAL and holds all six fixtures, so pre-fix the gate genuinely reported OK: that is what
+# makes this case discriminating rather than decorative.
+cc_root="$tmp/cc-override"
+mkdir -p "$cc_root"
+for f in "${CANONICAL[@]}"; do printf -- '-- synthetic\n' >"$cc_root/$f"; done
+cc_ok=1
+for raw in "$cc_root"$'\n' $'\n'"$cc_root" "$cc_root"$'\r' "$cc_root"$'\tsub'; do
+  cc_out=$(CQLITE_SCHEMAS_ROOT="$raw" bash "$GATE" --preflight-schemas 2>/dev/null)
+  if [ "$(hook_field STATUS "$cc_out")" = FAIL ] \
+     && [ "$(hook_field SOURCE "$cc_out")" = "CQLITE_SCHEMAS_ROOT override REJECTED" ] \
+     && grep -q 'must not contain control characters' <<<"$(hook_field REJECT "$cc_out")" \
+     && [ "$(hook_field ROOT "$cc_out")" = "$REPO/test-data/schemas" ]; then
+    :
+  else
+    cc_ok=0
+    echo "   (control-character override not rejected: $(printf '%q' "$raw"))"
+    printf '%s\n' "$cc_out"
+  fi
+done
+if [ "$cc_ok" -eq 1 ]; then
+  ok "3148-control-char-override: newline/CR/tab-bearing overrides are rejected, never silently trimmed"
+else
+  bad "3148-control-char-override: a control-character override was accepted (shell/Rust root divergence)"
+fi
+
+# The scratch-root guard (roborev job 10, finding 1) must fail LOUDLY rather than let every
+# path resolve under `/`. Driven with a stub `mktemp` that always fails, first on PATH. Safe
+# to run: with the guard the script dies before building anything; the assertion additionally
+# proves no root-level scratch path was created, which is the harm being prevented.
+mk_stub="$tmp/mk-stub"
+mkdir -p "$mk_stub"
+printf '#!/bin/sh\nexit 1\n' >"$mk_stub/mktemp"
+chmod +x "$mk_stub/mktemp"
+guard_out=$(PATH="$mk_stub:$PATH" AGENT_GATE_SCHEMAS_SELFTEST_CHILD=1 bash "$0" 2>&1)
+guard_rc=$?
+if [ "$guard_rc" -ne 0 ] \
+   && grep -q 'refusing to run' <<<"$guard_out" \
+   && [ ! -e /ds-corpus ] && [ ! -e /schemas-empty ]; then
+  ok "3148-scratch-root-guard: a failing mktemp aborts loudly instead of resolving paths under /"
+else
+  bad "3148-scratch-root-guard: expected a loud abort and no root-level scratch paths (rc=$guard_rc)"
+  printf '%s\n' "$guard_out" | head -5
 fi
 
 # The FULL gate must FAIL CLOSED on the relative override too — with its own reason, not
