@@ -420,7 +420,15 @@ has_required_dataset() {
 }
 
 EXTRACT_TMP=""
-trap 'rm -rf "${EXTRACT_TMP:-}"; cleanup_tracked_guard_list' EXIT
+# One EXIT trap for both temporaries. Guarded so a failing command inside the
+# trap can never turn a successful run's exit status non-zero under `set -e`
+# (BSD `rm -rf ""` is not silent everywhere).
+cleanup_fetch_temporaries() {
+  [ -n "${EXTRACT_TMP}" ] && rm -rf "${EXTRACT_TMP}"
+  cleanup_tracked_guard_list
+  return 0
+}
+trap cleanup_fetch_temporaries EXIT
 
 # Pre-flight repair: a previous run (or a pre-#2878 run) may have left tracked
 # fixtures deleted. Restore only the MISSING ones so an intentional local edit to
