@@ -215,3 +215,38 @@
       descended, so every count came back 0. The reported symptom understated it — verification FAILED
       outright, so `--verify-only` called a good corpus unusable on exactly the symlinked layout #3148
       documents. Fixed and pinned with a symlinked-root case.
+
+## 10. Review round 3 (rust-reviewer: mergeable as-is; roborev job 10 VALID, 3 findings)
+- [x] **Prose residue** — the "by construction" overclaim survived at `scripts/agent-gate.sh` (the shell
+      mirror's OWN header — the worst possible place, since a future editor reading it would believe
+      shell/Rust equivalence is structural and edit one side without re-walking the input table) and
+      `design.md`. Both now state what is true: two hand-written mirrors, equivalent today, PINNED BY
+      `test_agent_gate_schemas_preflight.sh`, with an explicit "if you edit either side, re-walk the table
+      and re-run that self-test". Blank separator restored so the sentence no longer dangles above
+      `_gate_schemas_override_present`. The genuinely structural uses elsewhere were left alone.
+- [x] **job 10 finding 1** (Medium, real) — `mktemp -d` was unchecked under `set -uo pipefail` (no
+      errexit, deliberately), so a failure left `$tmp` EMPTY and every derived path became root-level
+      (`/ds-corpus`, `/schemas-empty`, …) which a privileged CI job would create, with the EXIT trap then
+      running `rm -rf ""`. Now validated (non-empty AND a directory) BEFORE the trap is armed. Pinned by a
+      case that stubs a failing `mktemp` on PATH and asserts a loud abort plus the absence of root-level
+      paths. That case re-invokes this script, so a bounded CHILD PROBE MODE was added — without it the
+      child ran every case including its own and recursed without bound (observed during the revert proof).
+- [x] **job 10 finding 2** (Low as filed; treated as the mis-certification class) — command substitution
+      STRIPS TRAILING NEWLINES, and the round-2 refactor consumed the override through `$( )`. Measured:
+      with `CQLITE_SCHEMAS_ROOT=$'<real dir>\n'` the gate reported `STATUS: OK` / `SOURCE: override` /
+      `ROOT: <real dir>` while Rust kept the newline, got `is_dir() == false`, and degraded to the
+      checkout — gate certifying the root the run did not use. Note this was a regression INTRODUCED by
+      the round-2 fix for finding 9-1 (pre-refactor the shell read the raw var and agreed with Rust).
+      Closed twice over: presence is now a STATUS-returning predicate with the value read directly from
+      the environment (no substitution anywhere on the value path), AND control-character values are
+      rejected fail-closed on both sides.
+- [x] **job 10 finding 3** (Low, real) — the "absolute but unusable" test hard-coded
+      `/nonexistent-cqlite-schemas-3148`: not absolute under Windows path semantics and not guaranteed
+      absent on Unix, so if someone created it the test would silently assert the OPPOSITE branch. Now
+      built under a fresh `TempDir` with native path handling, asserting both `is_absolute()` and
+      `!exists()` so absence is a property of the construction. Test-hygiene, not a behavior fix — no
+      revert proof applies.
+- [x] Revert proofs performed for findings 1 and 2 (both cases FAIL on a revert, pass restored). Controls
+      re-run because finding 2 changed resolution logic on both sides: hostile-layout 8/8 + 3/3 + 1/1 +
+      1/1, empty-override 4-pass/4-fail, relative-override 4 fail-closed, negative-control FULL gate rc=1
+      with the marker. Self-test 30 → 32 cases; contract tests 8 → 9.

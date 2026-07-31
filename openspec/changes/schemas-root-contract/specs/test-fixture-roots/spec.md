@@ -81,6 +81,12 @@ gate.
 - **WHEN** the preflight runs
 - **THEN** the run exits non-zero with the schemas fail-closed marker naming the rejected relative override, stamps NO positive `schemas:` line, and does NOT report a list of "missing" files (the checkout's fixtures are in fact complete)
 
+#### Scenario: An override containing a control character is rejected
+- **GIVEN** `CQLITE_SCHEMAS_ROOT` names an EXISTING absolute directory but carries a control character (a trailing newline, a CR, an embedded tab)
+- **WHEN** the schemas root is resolved, on either side of the contract
+- **THEN** it is REJECTED with a message naming the rule and a remedy
+- **AND** the gate SHALL NOT report it as a validated override with the control character silently removed
+
 #### Scenario: A blank override is not an override
 - **GIVEN** `CQLITE_SCHEMAS_ROOT` is set to an empty or whitespace-only value
 - **WHEN** the schemas root is resolved
