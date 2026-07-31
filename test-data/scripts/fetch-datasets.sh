@@ -54,6 +54,17 @@ fail_unsafe_dataset_root() {
   exit 1
 }
 
+# EVERY git invocation in this script goes through this wrapper (issue #2878). An
+# exported GIT_DIR/GIT_WORK_TREE — routine inside git hooks and on some CI runners
+# — makes `rev-parse --show-toplevel` report the CURRENT DIRECTORY as a work-tree
+# root, which made the tracked-fixture guard refuse EVERY fetch while citing a
+# work tree that is not one. Scrubbing the two variables per invocation keeps the
+# fix scoped to this script's own probes and leaves the caller's environment
+# untouched.
+guard_git() {
+  env -u GIT_DIR -u GIT_WORK_TREE git "$@"
+}
+
 canonicalize_dataset_root() {
   local raw_root="$1"
   local abs_root parent base parent_abs repo_root
@@ -79,7 +90,7 @@ canonicalize_dataset_root() {
 
   abs_root="${parent_abs}/${base}"
 
-  if repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  if repo_root="$(guard_git rev-parse --show-toplevel 2>/dev/null)"; then
     repo_root="$(cd "${repo_root}" && pwd -P)"
     [ "${abs_root}" != "${repo_root}" ] \
       || fail_unsafe_dataset_root "refusing to replace the repository root"
@@ -167,7 +178,9 @@ TRACKED_GUARD_COUNT=0
 TRACKED_GUARD_DESTRUCTIVE_STARTED=0
 
 # Escape hatch for an environment that genuinely cannot run the guard (no git
-# binary, exotic mount). Loud, opt-in, never the default.
+# binary, exotic mount). Loud, opt-in, never the default — and it unlocks ONLY the
+# GUARD-AVAILABILITY class of refusal, never a STRUCTURAL one. See the two refuse_*
+# functions below.
 TRACKED_GUARD_ALLOW_UNPROTECTED="${CQLITE_DATASETS_ALLOW_UNPROTECTED:-}"
 
 cleanup_tracked_guard_list() {
@@ -176,11 +189,48 @@ cleanup_tracked_guard_list() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# TWO CLASSES OF REFUSAL (issue #2878). The distinction is whether anything would
+# be left to restore FROM after the `rm -rf`:
+#
+#   STRUCTURAL — the deletion would destroy the git repository itself (target is a
+#     repository root, plain or bare; contains a nested repository; is an ancestor
+#     of the work tree; resolves to the work-tree root; is $HOME or /) or an
+#     unrecoverable working state (unmerged/conflicted index entries, which
+#     `git restore` cannot rebuild). The index IS the guard's restore source, so
+#     losing it makes recovery impossible by construction. NON-OVERRIDABLE: no
+#     environment variable unlocks these, because there is no legitimate reason to
+#     delete a repository in order to unpack a dataset into it. (The $HOME and /
+#     spellings are enforced earlier, unconditionally, by
+#     canonicalize_dataset_root/fail_unsafe_dataset_root.)
+#
+#   GUARD-AVAILABILITY — the guard cannot TELL whether tracked files are at risk
+#     (no git binary, classification unresolved, `ls-files` unusable). The worst
+#     case here is losing tracked FILES, which a re-checkout recovers, and a user
+#     may knowingly fetch into a plain directory on a box without git — so this
+#     class alone is unlockable with CQLITE_DATASETS_ALLOW_UNPROTECTED=1.
+#
+# Ordering rule that makes the split real: every git-free STRUCTURAL check runs
+# BEFORE any overridable bail, so the hatch can never skip one by way of an
+# earlier availability escape.
+# ---------------------------------------------------------------------------
+refuse_structural_dataset_root() {
+  local reason="$1"
+  echo "ERROR: refusing to replace '${DATASET_ROOT}': ${reason}" >&2
+  echo "ERROR: this is a STRUCTURAL refusal (issue #2878): the deletion would destroy a git" >&2
+  echo "ERROR: repository or an unrecoverable working state, leaving NOTHING to restore from." >&2
+  echo "ERROR: It is NOT overridable — CQLITE_DATASETS_ALLOW_UNPROTECTED does not unlock it." >&2
+  echo "ERROR: Point CQLITE_DATASETS_ROOT at a plain directory instead." >&2
+  exit 1
+}
+
 refuse_unprotected_dataset_root() {
   local reason="$1"
   if [ "${TRACKED_GUARD_ALLOW_UNPROTECTED}" = "1" ]; then
     echo "WARNING: cannot protect git-tracked files under '${DATASET_ROOT}': ${reason}" >&2
     echo "WARNING: proceeding anyway because CQLITE_DATASETS_ALLOW_UNPROTECTED=1; tracked fixtures may be DELETED" >&2
+    echo "WARNING: (the override unlocks ONLY this guard-availability case; a repository-destroying" >&2
+    echo "WARNING: refusal is structural and stays refused regardless of this variable)" >&2
     TRACKED_GUARD_STATE=unprotected
     return 0
   fi
@@ -188,7 +238,7 @@ refuse_unprotected_dataset_root() {
   echo "ERROR: this script deletes that directory, and it may contain git-tracked reference files" >&2
   echo "ERROR: (issue #2878). Point CQLITE_DATASETS_ROOT at a directory outside any git checkout," >&2
   echo "ERROR: install git so the tracked files can be captured and restored, or set" >&2
-  echo "ERROR: CQLITE_DATASETS_ALLOW_UNPROTECTED=1 to accept the data loss." >&2
+  echo "ERROR: CQLITE_DATASETS_ALLOW_UNPROTECTED=1 to accept the loss of tracked files." >&2
   exit 1
 }
 
@@ -257,19 +307,59 @@ path_relative_inside() {
   esac
 }
 
-# Prints the first `.git` entry found STRICTLY BENEATH the given directory (depth
-# >= 2, i.e. a nested checkout or submodule, not the directory's own `.git`), else
-# fails. `rm -rf` on such a target destroys a repository whose index we do not
-# have, so restoration is impossible and the guard's premise is void. Uses only
-# `find` so it applies whether or not git is installed and regardless of whether
-# the target is itself inside a checkout. Cheap: a single short-circuited
-# (`-print -quit`) walk, ~16ms over the real dataset tree.
+# Prints WHY the given directory is itself a git repository, else fails. Purely a
+# filesystem probe (no git binary needed), and it must recognise a BARE repository
+# too: `git init --bare .../datasets` leaves NO `.git` entry, so an
+# `-e "$dir/.git"` test alone classified it as an ordinary directory and the
+# `rm -rf` deleted the whole repository while REPORTING SUCCESS. A bare repo has
+# `HEAD` + `objects/` at its top level, and its `config` declares `bare = true`;
+# either signature is enough, and over-refusing here is the safe direction.
+git_repository_reason() {
+  local dir="$1"
+  if [ -e "${dir}/.git" ]; then
+    printf "'%s/.git' exists\n" "${dir}"
+    return 0
+  fi
+  if [ -f "${dir}/HEAD" ] && [ -d "${dir}/objects" ]; then
+    printf "it has the layout of a BARE git repository ('HEAD' + 'objects/')\n"
+    return 0
+  fi
+  if [ -f "${dir}/config" ] \
+    && grep -qE '^[[:space:]]*bare[[:space:]]*=[[:space:]]*true' "${dir}/config" 2>/dev/null; then
+    printf "its 'config' declares 'bare = true'\n"
+    return 0
+  fi
+  return 1
+}
+
+# Prints the path of the first git repository found STRICTLY BENEATH the given
+# directory (depth >= 2 — a nested checkout, submodule or bare mirror, not the
+# directory's own repository), else fails. `rm -rf` on such a target destroys a
+# repository whose index we do not have, so restoration is impossible and the
+# guard's premise is void. Uses only `find` so it applies whether or not git is
+# installed and regardless of whether the target is itself inside a checkout. One
+# NUL-safe walk, matching the two entries that mark a repository root (`.git` for
+# a checkout, `HEAD` for a bare one); ~16ms over the real dataset tree, which
+# contains neither.
 nested_repo_under() {
-  local dir="$1" found
+  local dir="$1" candidate parent
   [ -d "${dir}" ] || return 1
-  found="$(find "${dir}" -mindepth 2 -name .git -print -quit 2>/dev/null || true)"
-  [ -n "${found}" ] || return 1
-  printf '%s\n' "${found}"
+  while IFS= read -r -d '' candidate; do
+    case "${candidate##*/}" in
+      .git)
+        printf '%s\n' "${candidate}"
+        return 0
+        ;;
+      HEAD)
+        parent="$(dirname "${candidate}")"
+        if git_repository_reason "${parent}" >/dev/null; then
+          printf '%s\n' "${parent}"
+          return 0
+        fi
+        ;;
+    esac
+  done < <(find "${dir}" -mindepth 2 \( -name .git -o -name HEAD \) -print0 2>/dev/null)
+  return 1
 }
 
 # True when some ancestor of the path (or the path itself) holds a .git entry —
@@ -295,22 +385,26 @@ capture_tracked_dataset_files() {
   TRACKED_GUARD_REL=""
   TRACKED_GUARD_COUNT=0
 
-  local dataset_abs probe repo_root repo_root_phys rel nested
+  local dataset_abs probe repo_root repo_root_phys rel nested repo_reason
+  # STRUCTURAL: an unresolvable path is refused outright rather than sent through
+  # the hatch — with no physical path, NONE of the safety checks below can run, so
+  # an overridable bail here would silently unlock all of them.
   if ! dataset_abs="$(physical_path "${DATASET_ROOT}")"; then
-    refuse_unprotected_dataset_root "could not resolve a physical path for it"
+    refuse_structural_dataset_root "could not resolve a physical path for it, so no safety check can be evaluated"
     return 0
   fi
 
-  # The target must never BE a repository, nor CONTAIN one: `rm -rf` would take
-  # the `.git` directory with it, and an index we deleted cannot restore anything.
-  # Checked before the git probes so it holds even without a git binary, and for
-  # an out-of-repo target too (someone else's checkout is just as unrecoverable).
-  if [ -e "${dataset_abs}/.git" ]; then
-    refuse_unprotected_dataset_root "'${dataset_abs}' is itself a git repository root ('${dataset_abs}/.git' exists) — deleting it would destroy the repository, not just fixtures"
+  # STRUCTURAL: the target must never BE a repository, nor CONTAIN one — `rm -rf`
+  # would take the repository with it, and an index we deleted cannot restore
+  # anything. Both are git-free filesystem probes, deliberately placed before every
+  # overridable bail so the hatch can never skip them, and they cover an
+  # out-of-repo target too (someone else's checkout is just as unrecoverable).
+  if repo_reason="$(git_repository_reason "${dataset_abs}")"; then
+    refuse_structural_dataset_root "'${dataset_abs}' is itself a git repository (${repo_reason%$'\n'}) — deleting it would destroy the repository, not just fixtures"
     return 0
   fi
   if nested="$(nested_repo_under "${dataset_abs}")"; then
-    refuse_unprotected_dataset_root "'${dataset_abs}' contains a nested git repository at '${nested}' — deleting it would destroy that checkout irrecoverably"
+    refuse_structural_dataset_root "'${dataset_abs}' contains a nested git repository at '${nested}' — deleting it would destroy that checkout irrecoverably"
     return 0
   fi
 
@@ -324,7 +418,7 @@ capture_tracked_dataset_files() {
   fi
 
   probe="$(nearest_existing_dir "${dataset_abs}")"
-  if ! repo_root="$(git -C "${probe}" rev-parse --show-toplevel 2>/dev/null)" || [ -z "${repo_root}" ]; then
+  if ! repo_root="$(guard_git -C "${probe}" rev-parse --show-toplevel 2>/dev/null)" || [ -z "${repo_root}" ]; then
     if ancestor_has_git_dir "${dataset_abs}"; then
       refuse_unprotected_dataset_root "'${dataset_abs}' looks like it is inside a git checkout, but 'git -C ${probe} rev-parse --show-toplevel' reported no work tree"
       return 0
@@ -345,18 +439,18 @@ capture_tracked_dataset_files() {
     # dataset_abs is not inside the work tree git reported. If the work tree is
     # inside IT, the `rm -rf` would delete the whole repository — refuse.
     if path_relative_inside "${dataset_abs}" "${repo_root_phys}" >/dev/null; then
-      refuse_unprotected_dataset_root "'${dataset_abs}' is an ANCESTOR of the git work tree at '${repo_root_phys}' — deleting it would destroy the repository"
+      refuse_structural_dataset_root "'${dataset_abs}' is an ANCESTOR of the git work tree at '${repo_root_phys}' — deleting it would destroy the repository"
       return 0
     fi
     refuse_unprotected_dataset_root "could not decide whether '${dataset_abs}' is inside the git work tree at '${repo_root_phys}' (probed from '${probe}')"
     return 0
   fi
 
-  # rel="." means the dataset dir IS the work-tree root (the `-e .git` check above
-  # covers the common shape; this also catches a work tree whose git dir lives
-  # elsewhere, e.g. a linked worktree or core.worktree).
+  # STRUCTURAL: rel="." means the dataset dir IS the work-tree root
+  # (git_repository_reason above covers the common shapes; this also catches a work
+  # tree whose git dir lives elsewhere, e.g. a linked worktree or core.worktree).
   if [ "${rel}" = "." ]; then
-    refuse_unprotected_dataset_root "'${dataset_abs}' is the root of the git work tree at '${repo_root_phys}' — deleting it would destroy the repository, not just fixtures"
+    refuse_structural_dataset_root "'${dataset_abs}' is the root of the git work tree at '${repo_root_phys}' — deleting it would destroy the repository, not just fixtures"
     return 0
   fi
 
@@ -364,12 +458,33 @@ capture_tracked_dataset_files() {
   # --deduplicate (git >= 2.31): a path in a merge conflict is otherwise listed
   # once per stage, duplicating the count and the restore pathspecs. Older git
   # lacks the option, so retry without it — duplicates only cost work.
-  if ! git -C "${repo_root_phys}" ls-files -z --deduplicate -- ":(literal)${rel}" >"${TRACKED_GUARD_LIST}" 2>/dev/null; then
-    if ! git -C "${repo_root_phys}" ls-files -z -- ":(literal)${rel}" >"${TRACKED_GUARD_LIST}"; then
+  if ! guard_git -C "${repo_root_phys}" ls-files -z --deduplicate -- ":(literal)${rel}" >"${TRACKED_GUARD_LIST}" 2>/dev/null; then
+    if ! guard_git -C "${repo_root_phys}" ls-files -z -- ":(literal)${rel}" >"${TRACKED_GUARD_LIST}"; then
       cleanup_tracked_guard_list
       refuse_unprotected_dataset_root "'git ls-files' failed for '${rel}' in '${repo_root_phys}'"
       return 0
     fi
+  fi
+
+  # STRUCTURAL: mid-merge is not a state in which to nuke and rebuild a fixture
+  # tree. `git restore --worktree` CANNOT rebuild an unmerged (conflicted) path —
+  # there is no single stage to restore from — so after the `rm -rf` the restore
+  # would fail on exactly those paths, the abort trap would retry the same failing
+  # call, and the working-tree content would be gone for good. Deduplicating the
+  # captured list (above) makes the list correct but does not make those entries
+  # restorable, so detecting them BEFORE the destructive step and refusing is the
+  # only safe answer.
+  local unmerged unmerged_paths
+  if ! unmerged="$(guard_git -C "${repo_root_phys}" ls-files -u -- ":(literal)${rel}")"; then
+    cleanup_tracked_guard_list
+    refuse_unprotected_dataset_root "'git ls-files -u' failed for '${rel}' in '${repo_root_phys}', so unmerged paths cannot be ruled out"
+    return 0
+  fi
+  if [ -n "${unmerged}" ]; then
+    unmerged_paths="$(printf '%s\n' "${unmerged}" | awk -F'\t' 'NF > 1 { print $2 }' | sort -u | head -3 | tr '\n' ' ' || true)"
+    cleanup_tracked_guard_list
+    refuse_structural_dataset_root "'${rel}' in '${repo_root_phys}' has UNMERGED (conflicted) index entries (e.g. ${unmerged_paths%% }) — 'git restore' cannot rebuild a conflicted path, so the deletion would be permanent. Resolve or abort the merge first"
+    return 0
   fi
 
   # Count NUL-terminated entries exactly (a filename may contain a newline).
@@ -418,7 +533,7 @@ restore_tracked_dataset_files() {
       # Restore from the INDEX (not HEAD): the index is what `git ls-files`
       # enumerated, so this reproduces the checkout's intended content and cannot
       # clobber a developer's STAGED edit to a tracked reference file.
-      if ! git -C "${TRACKED_GUARD_REPO}" restore --worktree -- "${pathspecs[@]:i:batch}"; then
+      if ! guard_git -C "${TRACKED_GUARD_REPO}" restore --worktree -- "${pathspecs[@]:i:batch}"; then
         echo "ERROR: failed to restore git-tracked files under ${TRACKED_GUARD_REL} in ${TRACKED_GUARD_REPO} (issue #2878)" >&2
         return 1
       fi
@@ -432,7 +547,7 @@ restore_tracked_dataset_files() {
   # not damage this script caused.
   if [ "${mode}" = "all" ]; then
     local dirty
-    if ! dirty="$(git -C "${TRACKED_GUARD_REPO}" diff --name-status -- ":(literal)${TRACKED_GUARD_REL}")"; then
+    if ! dirty="$(guard_git -C "${TRACKED_GUARD_REPO}" diff --name-status -- ":(literal)${TRACKED_GUARD_REL}")"; then
       echo "ERROR: could not verify tracked-file integrity under ${TRACKED_GUARD_REL} (issue #2878)" >&2
       return 1
     fi
@@ -511,6 +626,11 @@ EXTRACT_TMP=""
 # Only SIGKILL outruns this; the next run's `missing-only` pre-flight covers it.
 cleanup_fetch_temporaries() {
   local rc=$?
+  # IGNORE further signals for the duration of the cleanup. Without this the
+  # INT/TERM/HUP traps stay live inside this one, so a second Ctrl-C during
+  # recovery re-enters, `exit`s out of a PARTIALLY completed restore, and prints
+  # none of the messages below — a half-restored fixture tree, silently.
+  trap '' INT TERM HUP
   # Only `in-repo` has a captured list to restore from; any other state (incl. the
   # CQLITE_DATASETS_ALLOW_UNPROTECTED override's `unprotected`) must NOT print a
   # restoration claim it cannot back.

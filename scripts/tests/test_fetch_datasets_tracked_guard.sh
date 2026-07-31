@@ -225,6 +225,23 @@ assert_refusal() {
   fi
 }
 
+# assert_structural_not_overridable <label> <cwd> <dataset-root> <canary> — the
+# escape hatch must NOT unlock a repository-destroying refusal. It unlocks only the
+# guard-AVAILABILITY class; a structural one stays refused, nonzero, non-destructive.
+assert_structural_not_overridable() {
+  local label="$1" cwd="$2" root="$3" canary="$4"
+  run_fetch "$cwd" "$root" CQLITE_DATASETS_ALLOW_UNPROTECTED=1
+  if [ "$RC" -ne 0 ] && [ -e "$canary" ]; then
+    ok "$label: CQLITE_DATASETS_ALLOW_UNPROTECTED=1 does NOT unlock it (exit $RC, target intact)"
+  else
+    bad "$label: the escape hatch unlocked a repository-destroying refusal (exit $RC, canary '$canary' exists: $([ -e "$canary" ] && echo yes || echo NO))"
+  fi
+  case "$OUT" in
+    *"STRUCTURAL refusal"*) ok "$label: names the refusal class as STRUCTURAL" ;;
+    *) bad "$label: refusal not labelled structural; output: $OUT" ;;
+  esac
+}
+
 # assert_tracked_intact <repo> <label> — every tracked fixture is present with its
 # COMMITTED content, and the checkout is clean.
 assert_tracked_intact() {
@@ -543,6 +560,69 @@ case "$OUT" in
 esac
 assert_tracked_intact "$R8C" "abort-signal"
 
+# === Case 8d: a SECOND signal during recovery must not truncate the restore ===
+# Deterministic, no sleeps: a stub `tar` signals the script (entering the abort
+# path), and a stub `git` signals it a SECOND time from inside the recovery
+# restore. With signals ignored for the duration of the cleanup the restore runs to
+# completion and reports it; without that, the second signal re-enters and exits
+# mid-recovery, silently.
+SIG2BIN="$T/bin-signal-twice"
+mkdir -p "$SIG2BIN"
+cp "$BIN/curl" "$SIG2BIN/curl"
+cp "$SIGBIN/tar" "$SIG2BIN/tar"
+REAL_GIT="$(command -v git)"
+cat >"$SIG2BIN/git" <<'MOCK'
+#!/usr/bin/env bash
+# Shadow git: a `restore` invocation means the abort-path recovery is running, so
+# deliver a SECOND signal (a second Ctrl-C during recovery) before doing the work.
+for arg in "$@"; do
+  if [ "$arg" = "restore" ]; then
+    kill -TERM "$PPID" 2>/dev/null
+    break
+  fi
+done
+exec "${REAL_GIT:?REAL_GIT unset}" "$@"
+MOCK
+chmod +x "$SIG2BIN/git"
+RESTORE_CONFIRMED="restored; the archive content is NOT present"
+R8D="$T/case8d-repo"
+make_repo "$R8D"
+FETCH_BIN="$SIG2BIN"
+run_fetch "$R8D" "$R8D/test-data/datasets" REAL_GIT="$REAL_GIT"
+FETCH_BIN=""
+if [ "$RC" -ne 0 ]; then
+  ok "double-signal: the interrupted run still fails (exit $RC)"
+else
+  bad "double-signal: reported success; output: $OUT"
+fi
+case "$OUT" in
+  *"$RESTORE_CONFIRMED"*) ok "double-signal: recovery ran to completion and reported it" ;;
+  *) bad "double-signal: recovery was truncated/silent; output: $OUT" ;;
+esac
+assert_tracked_intact "$R8D" "double-signal"
+
+# --- Case 8e: NON-VACUITY for the re-entrancy fix ----------------------------
+MUTANT_REENTRANT="$T/fetch-datasets-mutant-reentrant.sh"
+sed "/^  trap '' INT TERM HUP\$/d" "$FETCH" >"$MUTANT_REENTRANT"
+if ! cmp -s "$FETCH" "$MUTANT_REENTRANT"; then
+  ok "non-vacuity: built a signals-stay-live mutant"
+  R8E="$T/case8e-repo"
+  make_repo "$R8E"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_REENTRANT"
+  FETCH_BIN="$SIG2BIN"
+  run_fetch "$R8E" "$R8E/test-data/datasets" REAL_GIT="$REAL_GIT"
+  FETCH="$FETCH_SAVED"
+  FETCH_BIN=""
+  case "$OUT" in
+    *"$RESTORE_CONFIRMED"*)
+      bad "non-vacuity: mutant also completed recovery — the double-signal assert is vacuous" ;;
+    *) ok "non-vacuity: mutant is re-entered by the second signal and never confirms recovery" ;;
+  esac
+else
+  bad "non-vacuity: could not build the signals-stay-live mutant (trap line changed?)"
+fi
+
 # === Case 9: the target IS a repository root (BLOCKER 2) =====================
 # `rm -rf` would take .git with it, so the index the guard restores from would be
 # gone too. cwd is deliberately outside any repo so this exercises the guard, not
@@ -559,7 +639,8 @@ else
   git -C "$R9" add keep.txt
   git -C "$R9" commit -qm "keep"
   run_fetch "$T" "$R9"
-  assert_refusal "repo-root-target" "is itself a git repository root" "$R9/.git"
+  assert_refusal "repo-root-target" "is itself a git repository" "$R9/.git"
+  assert_structural_not_overridable "repo-root-target" "$T" "$R9" "$R9/.git"
   if [ -f "$R9/keep.txt" ]; then
     ok "repo-root-target: the repository's own content survives"
   else
@@ -592,6 +673,7 @@ else
   make_repo "$ANC/inner-repo"
   run_fetch "$T" "$ANC"
   assert_refusal "ancestor-of-repo" "#2878" "$ANC/inner-repo/.git"
+  assert_structural_not_overridable "ancestor-of-repo" "$T" "$ANC" "$ANC/inner-repo/.git"
 
   # === Case 12: DATASET_ROOT == $HOME ======================================
   HOMEISH="$T/case12/datasets"
@@ -599,6 +681,111 @@ else
   printf 'home content\n' >"$HOMEISH/keep.txt"
   run_fetch "$T" "$HOMEISH" HOME="$HOMEISH"
   assert_refusal "home-target" "refusing to replace HOME" "$HOMEISH/keep.txt"
+  run_fetch "$T" "$HOMEISH" HOME="$HOMEISH" CQLITE_DATASETS_ALLOW_UNPROTECTED=1
+  if [ "$RC" -ne 0 ] && [ -f "$HOMEISH/keep.txt" ]; then
+    ok "home-target: the escape hatch does NOT unlock the HOME refusal"
+  else
+    bad "home-target: the escape hatch unlocked the HOME refusal (exit $RC)"
+  fi
+
+  # === Case 14: the target is a BARE repository ==============================
+  # `git init --bare .../datasets` leaves NO .git entry, so an `-e "$dir/.git"`
+  # test classified it as an ordinary directory: the repository was rm -rf'd and
+  # the run reported SUCCESS. Assert BOTH survival and a nonzero status — exit 0
+  # was precisely the bug.
+  BARE="$T/case14/datasets"
+  mkdir -p "$BARE"
+  git -C "$BARE" init -q --bare
+  run_fetch "$T" "$BARE"
+  assert_refusal "bare-repo-target" "BARE git repository" "$BARE/HEAD"
+  if [ -f "$BARE/HEAD" ] && [ -d "$BARE/objects" ]; then
+    ok "bare-repo-target: the bare repository survives intact"
+  else
+    bad "bare-repo-target: the bare repository was destroyed"
+  fi
+  assert_structural_not_overridable "bare-repo-target" "$T" "$BARE" "$BARE/HEAD"
+
+  # === Case 15: a nested BARE repository beneath the target =================
+  NESTB="$T/case15/test-data/datasets"
+  mkdir -p "$NESTB/mirrors/other.git"
+  git -C "$NESTB/mirrors/other.git" init -q --bare
+  printf 'keep\n' >"$NESTB/keep.txt"
+  run_fetch "$T" "$NESTB"
+  assert_refusal "nested-bare-repo" "contains a nested git repository" "$NESTB/mirrors/other.git/HEAD"
+  assert_structural_not_overridable "nested-bare-repo" "$T" "$NESTB" "$NESTB/mirrors/other.git/HEAD"
+fi
+
+# === Case 16: UNMERGED (conflicted) index entries ============================
+# `git restore --worktree` cannot rebuild a conflicted path — there is no single
+# stage to restore from — so a fetch mid-merge would delete the working-tree copy
+# permanently and the abort trap would retry the same failing call. Refuse first.
+R16="$T/case16-repo"
+make_repo "$R16"
+CONFLICT_REL="test-data/datasets/goldens/simple_table-Data.db.jsonl"
+BASE_BRANCH="$(git -C "$R16" rev-parse --abbrev-ref HEAD)"
+git -C "$R16" checkout -q -b conflicting-branch
+printf 'branch side\n' >"$R16/$CONFLICT_REL"
+git -C "$R16" add -f "$CONFLICT_REL"
+git -C "$R16" commit -qm "branch side"
+git -C "$R16" checkout -q "$BASE_BRANCH"
+printf 'base side\n' >"$R16/$CONFLICT_REL"
+git -C "$R16" add -f "$CONFLICT_REL"
+git -C "$R16" commit -qm "base side"
+git -C "$R16" merge -q conflicting-branch >/dev/null 2>&1 || true
+if [ -n "$(git -C "$R16" ls-files -u -- "$CONFLICT_REL")" ]; then
+  ok "conflicted-index: fixture really is mid-merge with an unmerged dataset path"
+  CONFLICT_BEFORE="$(cat "$R16/$CONFLICT_REL")"
+  run_fetch "$R16" "$R16/test-data/datasets"
+  assert_refusal "conflicted-index" "UNMERGED (conflicted) index entries" "$R16/$CONFLICT_REL"
+  if [ "$(cat "$R16/$CONFLICT_REL")" = "$CONFLICT_BEFORE" ]; then
+    ok "conflicted-index: the conflicted file's working-tree content is untouched"
+  else
+    bad "conflicted-index: the conflicted working-tree content changed"
+  fi
+  case "$OUT" in
+    *"Resolve or abort the merge first"*) ok "conflicted-index: message tells the operator what to do" ;;
+    *) bad "conflicted-index: no remediation guidance; output: $OUT" ;;
+  esac
+  assert_structural_not_overridable "conflicted-index" "$R16" "$R16/test-data/datasets" "$R16/$CONFLICT_REL"
+else
+  bad "conflicted-index: could not build a conflicted fixture (merge did not conflict)"
+fi
+
+# === Case 17: an exported GIT_DIR must not break a normal fetch ==============
+# Inside a git hook (and on some CI runners) GIT_DIR is exported; `rev-parse
+# --show-toplevel` then reports the CURRENT DIRECTORY as a work-tree root, which
+# made the guard refuse EVERY fetch citing a work tree that is not one. This case
+# fails outright without the per-invocation GIT_DIR/GIT_WORK_TREE scrub.
+R17="$T/case17-repo"
+make_repo "$R17"
+run_fetch "$R17" "$R17/test-data/datasets" GIT_DIR="$R17/.git"
+if [ "$RC" -eq 0 ]; then
+  ok "exported-GIT_DIR: fetch still succeeds"
+else
+  bad "exported-GIT_DIR: fetch exited $RC"
+  printf '     %s\n' "$OUT"
+fi
+assert_tracked_intact "$R17" "exported-GIT_DIR"
+assert_archive_extracted "$R17/test-data/datasets" "exported-GIT_DIR"
+
+# --- Case 17b: NON-VACUITY for the GIT_DIR scrub -----------------------------
+MUTANT_GITENV="$T/fetch-datasets-mutant-gitenv.sh"
+sed 's/^  env -u GIT_DIR -u GIT_WORK_TREE git "\$@"$/  git "$@"/' "$FETCH" >"$MUTANT_GITENV"
+if ! cmp -s "$FETCH" "$MUTANT_GITENV"; then
+  ok "non-vacuity: built a GIT_DIR-scrub-disabled mutant"
+  R17B="$T/case17b-repo"
+  make_repo "$R17B"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_GITENV"
+  run_fetch "$R17B" "$R17B/test-data/datasets" GIT_DIR="$R17B/.git"
+  FETCH="$FETCH_SAVED"
+  if [ "$RC" -ne 0 ]; then
+    ok "non-vacuity: mutant refuses the fetch outright under an exported GIT_DIR"
+  else
+    bad "non-vacuity: mutant also succeeded — the exported-GIT_DIR case proves nothing"
+  fi
+else
+  bad "non-vacuity: could not build the GIT_DIR-scrub-disabled mutant (guard_git changed?)"
 fi
 
 # === Case 13: DATASET_ROOT == / =============================================
