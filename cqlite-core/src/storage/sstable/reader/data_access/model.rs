@@ -62,9 +62,8 @@ pub(super) const MAX_OSS50_BOUND_SENTINEL_LEN: usize = 64;
 /// `ByteSource.LT_NEXT_COMPONENT` (cassandra-5.0.8
 /// `utils/bytecomparable/ByteSource.java:75`) — the byte-comparable terminator
 /// `ClusteringPrefix.Kind.INCL_START_BOUND` / `EXCL_END_BOUND` emit
-/// (`db/ClusteringPrefix.java:70-71`). It is smaller than every legal separator
-/// byte (`MIN_SEPARATOR = 0x10` … but crucially smaller than `NEXT_COMPONENT`
-/// `0x40`), so a bound carrying it sorts BELOW every clustering that extends it.
+/// (`db/ClusteringPrefix.java:70-71`). It is smaller than `NEXT_COMPONENT`
+/// (`0x40`), so a bound carrying it sorts BELOW every clustering that extends it.
 #[cfg(not(feature = "tombstones"))]
 const OSS50_LT_NEXT_COMPONENT: u8 = 0x20;
 
@@ -125,8 +124,21 @@ pub(super) fn physical_byte_bounds_for_slice(
 
     // Encode a closed CQL bound to its physical byte-comparable form; `None`
     // bubbles up as an un-encodable-bound fallback at the call site.
+    // The safe fallback is retained (an un-encodable bound just widens to the whole
+    // partition), but the encoder's error text is the ONLY diagnosis of WHICH
+    // clustering type is unsupported, so log it rather than dropping it silently.
     let encode = |values: &[Value]| -> Option<Vec<u8>> {
-        encode_clustering_bound_oss50_with_order(values, is_reversed).ok()
+        match encode_clustering_bound_oss50_with_order(values, is_reversed) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "OSS50 clustering bound not encodable; falling back to a full-partition \
+                     scan for this slice"
+                );
+                None
+            }
+        }
     };
 
     // The FIRST clustering column's order decides the value↔byte direction. A
