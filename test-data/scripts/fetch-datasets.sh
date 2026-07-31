@@ -124,24 +124,47 @@ write_pin() {
 # stageable deletions of tracked fixtures (data loss by accident).
 #
 # So we CAPTURE the tracked-file list from git BEFORE the destructive step and
-# restore exactly that captured list afterwards. Two rules follow from the
+# restore exactly that captured list afterwards. Four rules follow from the
 # pre-#2878 defect, whose restore path never ran:
 #   * NOT CI-gated. The local/agent box (CI unset) is the destructive arm.
 #   * NEVER a silent bail. If we cannot determine whether the dataset dir holds
 #     tracked files, we REFUSE to run `rm -rf` rather than guess — see
 #     refuse_unprotected_dataset_root.
+#   * NEVER destroy the thing that makes restoration possible. A target that IS a
+#     repository root, or that CONTAINS a nested checkout, would take `.git` with
+#     it and void the guard's whole premise (that the index survives) — refuse.
+#   * The window between `rm -rf` and the restore must be CRASH-SAFE. An abort in
+#     it (bad archive, tar failure, ENOSPC on the mv, SIGINT mid-extract) used to
+#     leave every fixture permanently deleted while the error blamed the archive,
+#     so the EXIT/INT/TERM/HUP path restores what it can and says so. Only
+#     SIGKILL can outrun that; the next run's `missing-only` pre-flight is the
+#     backstop for it.
 # ---------------------------------------------------------------------------
 
 # State published by capture_tracked_dataset_files, consumed by
-# restore_tracked_dataset_files. TRACKED_GUARD_STATE is one of:
-#   in-repo      dataset dir lives in a git work tree; LIST/REPO/REL/COUNT valid
-#   out-of-repo  dataset dir provably outside any git work tree; nothing to protect
-#   unset        capture has not run (restore is then a no-op)
+# restore_tracked_dataset_files. Only `in-repo` makes the restore do work; a
+# mislabelled state on a data-destroying path is how the original bug hid, so
+# every value is enumerated here:
+#   unset        capture has not run yet (restore is a no-op)
+#   pending      capture STARTED but did not reach a verdict (it refuses rather
+#                than returning in that case, so this value escapes only if a new
+#                early-return path is added — treated as "no restore possible")
+#   in-repo      the dataset dir lives in a git work tree; REPO/REL/LIST/COUNT are
+#                valid and the restore uses them
+#   out-of-repo  provably outside any git work tree; there is nothing to protect
+#   unprotected  the guard COULD NOT protect the dir but the operator overrode it
+#                with CQLITE_DATASETS_ALLOW_UNPROTECTED=1; the restore is a no-op
+#                and tracked files may be lost. Distinct from out-of-repo, which
+#                is a proof of safety rather than an accepted risk.
 TRACKED_GUARD_STATE=unset
 TRACKED_GUARD_REPO=""
 TRACKED_GUARD_REL=""
 TRACKED_GUARD_LIST=""
 TRACKED_GUARD_COUNT=0
+# Set to 1 immediately before the `rm -rf`, back to 0 once the post-extraction
+# restore has verified the tracked subtree clean. While it is 1, an abort MUST
+# restore on the way out (see cleanup_fetch_temporaries).
+TRACKED_GUARD_DESTRUCTIVE_STARTED=0
 
 # Escape hatch for an environment that genuinely cannot run the guard (no git
 # binary, exotic mount). Loud, opt-in, never the default.
@@ -158,7 +181,7 @@ refuse_unprotected_dataset_root() {
   if [ "${TRACKED_GUARD_ALLOW_UNPROTECTED}" = "1" ]; then
     echo "WARNING: cannot protect git-tracked files under '${DATASET_ROOT}': ${reason}" >&2
     echo "WARNING: proceeding anyway because CQLITE_DATASETS_ALLOW_UNPROTECTED=1; tracked fixtures may be DELETED" >&2
-    TRACKED_GUARD_STATE=out-of-repo
+    TRACKED_GUARD_STATE=unprotected
     return 0
   fi
   echo "ERROR: refusing to replace '${DATASET_ROOT}': ${reason}" >&2
@@ -234,6 +257,21 @@ path_relative_inside() {
   esac
 }
 
+# Prints the first `.git` entry found STRICTLY BENEATH the given directory (depth
+# >= 2, i.e. a nested checkout or submodule, not the directory's own `.git`), else
+# fails. `rm -rf` on such a target destroys a repository whose index we do not
+# have, so restoration is impossible and the guard's premise is void. Uses only
+# `find` so it applies whether or not git is installed and regardless of whether
+# the target is itself inside a checkout. Cheap: a single short-circuited
+# (`-print -quit`) walk, ~16ms over the real dataset tree.
+nested_repo_under() {
+  local dir="$1" found
+  [ -d "${dir}" ] || return 1
+  found="$(find "${dir}" -mindepth 2 -name .git -print -quit 2>/dev/null || true)"
+  [ -n "${found}" ] || return 1
+  printf '%s\n' "${found}"
+}
+
 # True when some ancestor of the path (or the path itself) holds a .git entry —
 # a git-free filesystem probe used only to decide whether an unprotectable
 # dataset dir is plausibly inside a checkout (i.e. whether to refuse).
@@ -252,14 +290,27 @@ ancestor_has_git_dir() {
 # destructive step; safe to call repeatedly (re-captures).
 capture_tracked_dataset_files() {
   cleanup_tracked_guard_list
-  TRACKED_GUARD_STATE=unknown
+  TRACKED_GUARD_STATE=pending
   TRACKED_GUARD_REPO=""
   TRACKED_GUARD_REL=""
   TRACKED_GUARD_COUNT=0
 
-  local dataset_abs probe repo_root repo_root_phys rel
+  local dataset_abs probe repo_root repo_root_phys rel nested
   if ! dataset_abs="$(physical_path "${DATASET_ROOT}")"; then
     refuse_unprotected_dataset_root "could not resolve a physical path for it"
+    return 0
+  fi
+
+  # The target must never BE a repository, nor CONTAIN one: `rm -rf` would take
+  # the `.git` directory with it, and an index we deleted cannot restore anything.
+  # Checked before the git probes so it holds even without a git binary, and for
+  # an out-of-repo target too (someone else's checkout is just as unrecoverable).
+  if [ -e "${dataset_abs}/.git" ]; then
+    refuse_unprotected_dataset_root "'${dataset_abs}' is itself a git repository root ('${dataset_abs}/.git' exists) — deleting it would destroy the repository, not just fixtures"
+    return 0
+  fi
+  if nested="$(nested_repo_under "${dataset_abs}")"; then
+    refuse_unprotected_dataset_root "'${dataset_abs}' contains a nested git repository at '${nested}' — deleting it would destroy that checkout irrecoverably"
     return 0
   fi
 
@@ -291,15 +342,34 @@ capture_tracked_dataset_files() {
   # to it — so a containment failure here means the two paths disagree in a way
   # we do not understand. Refusing is mandatory: a silent skip is the #2878 bug.
   if ! rel="$(path_relative_inside "${repo_root_phys}" "${dataset_abs}")"; then
+    # dataset_abs is not inside the work tree git reported. If the work tree is
+    # inside IT, the `rm -rf` would delete the whole repository — refuse.
+    if path_relative_inside "${dataset_abs}" "${repo_root_phys}" >/dev/null; then
+      refuse_unprotected_dataset_root "'${dataset_abs}' is an ANCESTOR of the git work tree at '${repo_root_phys}' — deleting it would destroy the repository"
+      return 0
+    fi
     refuse_unprotected_dataset_root "could not decide whether '${dataset_abs}' is inside the git work tree at '${repo_root_phys}' (probed from '${probe}')"
     return 0
   fi
 
-  TRACKED_GUARD_LIST="$(mktemp "${TMPDIR:-/tmp}/cqlite-tracked-datasets.XXXXXX")"
-  if ! git -C "${repo_root_phys}" ls-files -z -- ":(literal)${rel}" >"${TRACKED_GUARD_LIST}"; then
-    cleanup_tracked_guard_list
-    refuse_unprotected_dataset_root "'git ls-files' failed for '${rel}' in '${repo_root_phys}'"
+  # rel="." means the dataset dir IS the work-tree root (the `-e .git` check above
+  # covers the common shape; this also catches a work tree whose git dir lives
+  # elsewhere, e.g. a linked worktree or core.worktree).
+  if [ "${rel}" = "." ]; then
+    refuse_unprotected_dataset_root "'${dataset_abs}' is the root of the git work tree at '${repo_root_phys}' — deleting it would destroy the repository, not just fixtures"
     return 0
+  fi
+
+  TRACKED_GUARD_LIST="$(mktemp "${TMPDIR:-/tmp}/cqlite-tracked-datasets.XXXXXX")"
+  # --deduplicate (git >= 2.31): a path in a merge conflict is otherwise listed
+  # once per stage, duplicating the count and the restore pathspecs. Older git
+  # lacks the option, so retry without it — duplicates only cost work.
+  if ! git -C "${repo_root_phys}" ls-files -z --deduplicate -- ":(literal)${rel}" >"${TRACKED_GUARD_LIST}" 2>/dev/null; then
+    if ! git -C "${repo_root_phys}" ls-files -z -- ":(literal)${rel}" >"${TRACKED_GUARD_LIST}"; then
+      cleanup_tracked_guard_list
+      refuse_unprotected_dataset_root "'git ls-files' failed for '${rel}' in '${repo_root_phys}'"
+      return 0
+    fi
   fi
 
   # Count NUL-terminated entries exactly (a filename may contain a newline).
@@ -315,13 +385,17 @@ capture_tracked_dataset_files() {
   return 0
 }
 
-# Restore the captured tracked files from HEAD.
-#   missing-only  only files that are absent on disk (pre-flight repair of a
-#                 previous run's damage; never clobbers a local modification)
+# Restore the captured tracked files from the index.
+#   missing-only  only files that are absent on disk (pre-flight repair of an
+#                 earlier run's damage, and the abort path; never clobbers a
+#                 local modification)
 #   all           every captured file (post-extraction, after rm -rf)
-# In `all` mode the tracked subtree MUST end clean, else this is a hard error:
+# In `all` mode the tracked subtree MUST end clean, else this RETURNS NON-ZERO:
 # a restore that silently no-ops is otherwise indistinguishable from one that
 # worked (issue #2878 acceptance oracle).
+# Returns 1 rather than calling `exit` so it is safe to call from a trap, where an
+# `exit` would rewrite the aborting run's status. Callers on the main path turn a
+# non-zero return into `exit 1` themselves.
 restore_tracked_dataset_files() {
   local mode="$1"
   [ "${TRACKED_GUARD_STATE}" = "in-repo" ] || return 0
@@ -346,7 +420,7 @@ restore_tracked_dataset_files() {
       # clobber a developer's STAGED edit to a tracked reference file.
       if ! git -C "${TRACKED_GUARD_REPO}" restore --worktree -- "${pathspecs[@]:i:batch}"; then
         echo "ERROR: failed to restore git-tracked files under ${TRACKED_GUARD_REL} in ${TRACKED_GUARD_REPO} (issue #2878)" >&2
-        exit 1
+        return 1
       fi
     done
   fi
@@ -360,12 +434,12 @@ restore_tracked_dataset_files() {
     local dirty
     if ! dirty="$(git -C "${TRACKED_GUARD_REPO}" diff --name-status -- ":(literal)${TRACKED_GUARD_REL}")"; then
       echo "ERROR: could not verify tracked-file integrity under ${TRACKED_GUARD_REL} (issue #2878)" >&2
-      exit 1
+      return 1
     fi
     if [ -n "${dirty}" ]; then
       echo "ERROR: dataset fetch left git-tracked files under ${TRACKED_GUARD_REL} deleted or modified (issue #2878):" >&2
       printf '%s\n' "${dirty}" | head -20 >&2
-      exit 1
+      return 1
     fi
   fi
   return 0
@@ -420,21 +494,58 @@ has_required_dataset() {
 }
 
 EXTRACT_TMP=""
-# One EXIT trap for both temporaries. Guarded so a failing command inside the
-# trap can never turn a successful run's exit status non-zero under `set -e`
-# (BSD `rm -rf ""` is not silent everywhere).
+# ONE exit path for temporaries AND for the crash-safe restore (issue #2878
+# BLOCKER 1). Any abort between the `rm -rf` and the post-extraction restore —
+# a tarball with an unexpected layout (the explicit `exit 1` below), a tar
+# failure, ENOSPC on the mv, Ctrl-C mid-extract of a multi-GB archive — used to
+# leave every tracked fixture PERMANENTLY deleted while the error message blamed
+# the archive. So while TRACKED_GUARD_DESTRUCTIVE_STARTED=1 this restores what it
+# can on the way out, and says so.
+#
+# Ordering and status rules, both load-bearing:
+#   * the restore runs BEFORE cleanup_tracked_guard_list — the captured list is
+#     its input, so deleting it first would silently restore nothing;
+#   * the incoming $? is captured first and re-asserted with `exit`, so neither a
+#     failing cleanup command (under `set -e`) nor the restore itself can rewrite
+#     the aborting run's status — an abort stays an abort, a success stays 0.
+# Only SIGKILL outruns this; the next run's `missing-only` pre-flight covers it.
 cleanup_fetch_temporaries() {
+  local rc=$?
+  # Only `in-repo` has a captured list to restore from; any other state (incl. the
+  # CQLITE_DATASETS_ALLOW_UNPROTECTED override's `unprotected`) must NOT print a
+  # restoration claim it cannot back.
+  if [ "${TRACKED_GUARD_DESTRUCTIVE_STARTED}" = "1" ] && [ "${TRACKED_GUARD_STATE}" = "in-repo" ]; then
+    TRACKED_GUARD_DESTRUCTIVE_STARTED=0
+    echo "WARNING: dataset fetch aborted (status ${rc}) after '${DATASET_ROOT}' was deleted;" >&2
+    echo "WARNING: restoring the git-tracked reference fixtures it contained (issue #2878)" >&2
+    # `all`, not `missing-only`: an abort after the extraction landed can leave a
+    # tracked reference file present but overwritten by the archive's stale copy,
+    # and this mode also VERIFIES the subtree ends clean.
+    if restore_tracked_dataset_files all; then
+      echo "WARNING: git-tracked fixtures under ${TRACKED_GUARD_REL:-${DATASET_ROOT}} restored; the archive content is NOT present — re-run the fetch" >&2
+    else
+      echo "ERROR: could not restore git-tracked fixtures under ${TRACKED_GUARD_REL:-${DATASET_ROOT}};" >&2
+      echo "ERROR: recover with: git -C '${TRACKED_GUARD_REPO:-.}' restore --worktree -- '${TRACKED_GUARD_REL:-test-data/datasets}'" >&2
+    fi
+  fi
   [ -n "${EXTRACT_TMP}" ] && rm -rf "${EXTRACT_TMP}"
   cleanup_tracked_guard_list
-  return 0
+  exit "${rc}"
 }
 trap cleanup_fetch_temporaries EXIT
+# Signals must take the same path (a bare signal default would skip the EXIT trap
+# in some shells and always skips the restore). Exiting with the conventional
+# 128+signal status runs the EXIT trap above exactly once.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
-# Pre-flight repair: a previous run (or a pre-#2878 run) may have left tracked
-# fixtures deleted. Restore only the MISSING ones so an intentional local edit to
-# a tracked reference file survives, then let has_required_dataset judge.
+# Pre-flight repair: a previous run (or a pre-#2878 run, or a SIGKILLed one) may
+# have left tracked fixtures deleted. Restore only the MISSING ones so an
+# intentional local edit to a tracked reference file survives, then let
+# has_required_dataset judge.
 capture_tracked_dataset_files
-restore_tracked_dataset_files missing-only
+restore_tracked_dataset_files missing-only || exit 1
 
 if has_required_dataset; then
   write_pin
@@ -475,6 +586,10 @@ fi
 # determine whether tracked files are at risk.
 capture_tracked_dataset_files
 
+# From here until the restore below verifies the tracked subtree clean, an abort
+# on ANY path must restore on the way out — see cleanup_fetch_temporaries.
+TRACKED_GUARD_DESTRUCTIVE_STARTED=1
+
 rm -rf "${DATASET_ROOT}"
 if [ "${DATASET_ROOT}" = "${ARCHIVE_DATASET_ROOT}" ]; then
   tar -xzf "${ASSET_PATH}" -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
@@ -492,8 +607,10 @@ else
 fi
 
 # Undo the rm -rf for every captured tracked file, and hard-fail if the tracked
-# subtree is not clean afterwards (issue #2878).
-restore_tracked_dataset_files all
+# subtree is not clean afterwards (issue #2878). Only once that verification has
+# passed is the destructive window closed.
+restore_tracked_dataset_files all || exit 1
+TRACKED_GUARD_DESTRUCTIVE_STARTED=0
 
 # Remove macOS AppleDouble shadow files (`._*`). The archive may contain them
 # when produced on macOS, and they break test helpers that scan for files by
