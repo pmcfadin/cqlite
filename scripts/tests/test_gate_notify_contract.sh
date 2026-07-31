@@ -91,12 +91,31 @@ SHIM
 chmod +x "$shimdir/curl"
 
 # publish <log> <result> <branch> <sha> <fail-components> [extra env assignments...]
+#
+# HERMETIC BY CONSTRUCTION. Two properties this function must not lose:
+#
+#  1. It NEUTRALIZES every ambient variable the wrapper honours — the topic
+#     overrides (`CQLITE_NOTIFY_TOPIC`/`CODEX_NOTIFY_NTFY_TOPIC` BEAT the
+#     URL-derived topic), the alternate webhook var, and the timeout bounds.
+#     Measured before this was added: `CODEX_NOTIFY_NTFY_TOPIC=pmcfadin-cloud-100`
+#     in the environment reds `AC1 PASS payload` — i.e. `tooling-tests`, i.e. the
+#     FULL gate of record — on any box that merely exports a variable this repo's
+#     own docs tell it to export.
+#  2. It sources ONLY the extracted gate_push_signal and lets the REAL delegation
+#     inside it source the wrapper. Sourcing $LIB here would supply the very wiring
+#     the test claims to assert: mutation-proven, deleting the `. "$notify_lib"`
+#     line from gate_push_signal left this test 12/12 green.
 publish() {
   local log="$1" result="$2" branch="$3" sha="$4" fails="$5"; shift 5
   : > "$log"
-  env CURL_LOG="$log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$shimdir:$PATH" "$@" \
-    bash -c '. "$0"; . "$1"; gate_push_signal "$2" "$3" "$4" "$5"' \
-    "$fnfile" "$LIB" "$result" "$branch" "$sha" "$fails" >"$tmp/out.txt" 2>"$tmp/err.txt"
+  env CURL_LOG="$log" PATH="$shimdir:$PATH" \
+    CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" CODEX_NOTIFY_WEBHOOK= \
+    CQLITE_NOTIFY_TOPIC= CODEX_NOTIFY_NTFY_TOPIC= \
+    CQLITE_NOTIFY_DEBUG=0 \
+    GATE_NOTIFY_CURL_TIMEOUT=10 GATE_NOTIFY_PAYLOAD_TIMEOUT=10 GATE_NOTIFY_ADJUNCT_TIMEOUT=5 \
+    "$@" \
+    bash -c '. "$0"; gate_push_signal "$1" "$2" "$3" "$4"' \
+    "$fnfile" "$result" "$branch" "$sha" "$fails" >"$tmp/out.txt" 2>"$tmp/err.txt"
   return $?
 }
 
@@ -196,11 +215,17 @@ fi
 # Prefer a copy of the real pristine v1.1.0; otherwise synthesize its observable
 # behaviour (no --category arm -> manual "$1"/"$2" mode -> completion severity ->
 # JSON POSTed to the TOPIC url). Either way the fixture lives in the tmpdir.
-pristine_kind=synthesized
-if [ -r /usr/local/bin/agent-notify.bak.20260730 ]; then
-  cp /usr/local/bin/agent-notify.bak.20260730 "$shimdir/agent-notify" && pristine_kind=copied-real
+# DETERMINISM (review R4): the fixture is the REPO-OWNED stand-in below by
+# DEFAULT, always — never a machine-specific /usr/local/bin backup, whose presence
+# would make the gate's outcome depend on external host state. A real pristine
+# binary can be substituted deliberately for a local cross-check by exporting
+# CQLITE_NOTIFY_PRISTINE_BIN=/path/to/agent-notify-v1.1.0; that path is never
+# probed for implicitly.
+pristine_kind=repo-owned-stand-in
+if [ -n "${CQLITE_NOTIFY_PRISTINE_BIN:-}" ] && [ -r "${CQLITE_NOTIFY_PRISTINE_BIN}" ]; then
+  cp "$CQLITE_NOTIFY_PRISTINE_BIN" "$shimdir/agent-notify" && pristine_kind=real-opt-in
 fi
-if [ "$pristine_kind" = synthesized ]; then
+if [ "$pristine_kind" = repo-owned-stand-in ]; then
   cat > "$shimdir/agent-notify" <<'PRISTINE'
 #!/usr/bin/env bash
 # Stand-in reproducing pristine agent-notify v1.1.0's OBSERVABLE behaviour:
@@ -220,10 +245,20 @@ PRISTINE
 fi
 chmod +x "$shimdir/agent-notify"
 
+# The AC6 cases deliberately supply an AMBIENT CODEX_NOTIFY_WEBHOOK (review B4).
+# Probed: the pristine binary publishes ONLY when CODEX_NOTIFY_WEBHOOK is set and
+# ignores CQLITE_NOTIFY_WEBHOOK entirely (1 curl vs 0). Without this the
+# "exactly ONE payload" assertion is VACUOUS on precisely the machines the header
+# calls identical — a CI runner or a freshly bootstrapped box with no ambient
+# webhook — and would pass whether or not the wrapper's env-neutralization exists.
+# With it set, a regression in that neutralization publishes a SECOND payload and
+# these cases red.
+ADJUNCT_AMBIENT_WEBHOOK="https://ntfy.invalid/adjunct-would-double-publish"
 for case_pair in "PASS:3:white_check_mark" "FAIL:5:rotating_light"; do
   res=${case_pair%%:*}; rest=${case_pair#*:}; prio=${rest%%:*}; tag=${rest#*:}
   alog="$tmp/adjunct-$res.log"
-  publish "$alog" "$res" issue-3119-notify-contract abc1234 ""
+  publish "$alog" "$res" issue-3119-notify-contract abc1234 "" \
+    CODEX_NOTIFY_WEBHOOK="$ADJUNCT_AMBIENT_WEBHOOK"
   rc=$?
   n=$(lines_of "$alog")
   if [ "$rc" -eq 0 ] && [ "$n" -eq 1 ] \
@@ -231,8 +266,9 @@ for case_pair in "PASS:3:white_check_mark" "FAIL:5:rotating_light"; do
      && [ "$(field "$alog" priority)" = "$prio" ] \
      && [ "$(field "$alog" tags)"     = "[\"$tag\"]" ] \
      && [ "$(field "$alog" __url__)"  = "$ROOT" ] \
-     && ! message_is_json "$alog"; then
-    ok "AC6 $res with pristine agent-notify on PATH ($pristine_kind): ONE correct payload"
+     && ! message_is_json "$alog" \
+     && ! grep -q 'adjunct-would-double-publish' "$alog"; then
+    ok "AC6 $res, pristine agent-notify on PATH ($pristine_kind) + ambient webhook: ONE correct payload, adjunct published nothing"
   else
     bad "AC6 $res with pristine agent-notify on PATH ($pristine_kind) (rc=$rc lines=$n)"; cat "$alog"
   fi
