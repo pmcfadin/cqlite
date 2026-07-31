@@ -3,7 +3,7 @@
 # gate-notify.sh — the repo-owned notification contract (issue #3119).
 #
 # WHY THIS FILE OWNS THE PAYLOAD. The gate used to call
-# `agent-notify --category <cat> <title> <body>`. The installed upstream  notify-flag-allow
+# `agent-notify --category <cat> <title> <body>`. The installed upstream notify-flag-allow
 # `agent-notify` v1.1.0 has NO `--category` arm, so that call fell through to its
 # manual "$1"/"$2" mode: the title became the literal string `--category`, the
 # body became the category VALUE, and the real title/body were dropped as surplus
@@ -20,9 +20,21 @@
 # adjunct that is never in the payload chain.
 #
 # ADVISORY BY CONTRACT (load-bearing). Nothing in this file may change a caller's
-# verdict or exit status: every external call is time-bounded, its output is
-# discarded and its failure swallowed; no function here ever `exit`s, installs a
-# trap, or writes to any caller state. `gate_notify_publish` always returns 0.
+# verdict or exit status: EVERY external call — the payload encoder, the publish,
+# and the optional adjunct — runs under `timeout`, its output is discarded and its
+# failure swallowed; no function here ever `exit`s, installs a trap, or writes to
+# any caller state. `gate_notify_publish` always returns 0.
+#
+# Why the encoder needs a bound too, not just curl (#3119 review B2): the gate
+# calls this AFTER the terminal summary emit but BEFORE its own exit, so a wedged
+# `python3` (a pyenv/conda shim, an NFS-backed interpreter) would block
+# `payload=$(...)` forever — the gate process would never exit, its EXIT trap would
+# never release the #1825 gate slot, and every later gate on the box would queue
+# indefinitely. `curl --max-time` is NOT sufficient either: only the real curl
+# honours it (this repo's own tests prove a bash script can be `curl` on PATH), so
+# the outer bound is what actually guarantees termination. With NO bounding tool
+# available (`timeout`/`gtimeout`) we publish NOTHING rather than run unbounded —
+# a missed notification is advisory, a wedged gate is not.
 #
 # Configuration (the fleet already sets the second form in /etc/environment):
 #   CQLITE_NOTIFY_WEBHOOK / CODEX_NOTIFY_WEBHOOK   ntfy target (topic URL or root)
@@ -37,9 +49,11 @@
 # out-of-band per-machine binary).
 GATE_NOTIFY_CONTRACT_VERSION=1
 
-# Bounds. A black-holed network or a wedged helper must never stall a gate.
+# Bounds. A black-holed network or a wedged helper must never stall a gate. Each
+# is an OUTER `timeout` bound, not a cooperative flag the helper may ignore.
 GATE_NOTIFY_CURL_TIMEOUT="${GATE_NOTIFY_CURL_TIMEOUT:-10}"
 GATE_NOTIFY_ADJUNCT_TIMEOUT="${GATE_NOTIFY_ADJUNCT_TIMEOUT:-5}"
+GATE_NOTIFY_PAYLOAD_TIMEOUT="${GATE_NOTIFY_PAYLOAD_TIMEOUT:-10}"
 
 _gate_notify_debug() {
   [ "${CQLITE_NOTIFY_DEBUG:-0}" = 1 ] || return 0
@@ -63,10 +77,12 @@ _gate_notify_severity() {
 _gate_notify_priority() { case "$1" in PASS) printf '3\n' ;; *) printf '5\n' ;; esac; }
 _gate_notify_tag() { case "$1" in PASS) printf 'white_check_mark\n' ;; *) printf 'rotating_light\n' ;; esac; }
 
-# _gate_notify_target: resolve the configured target into the globals
-# GATE_NOTIFY_ROOT and GATE_NOTIFY_TOPIC, or return 1 when either cannot be
-# resolved AUTHORITATIVELY. (Globals rather than a delimited string on stdout:
-# a whitespace delimiter in shell source is silently destroyed by a reformat.)
+# _gate_notify_target: resolve the configured target into GATE_NOTIFY_ROOT and
+# GATE_NOTIFY_TOPIC, or return 1 when either cannot be resolved AUTHORITATIVELY.
+# (Named variables rather than a delimited string on stdout: a whitespace
+# delimiter in shell source is silently destroyed by a reformat.) Its ONLY caller
+# declares both names `local` first, so bash's dynamic scoping keeps these
+# assignments inside the caller's frame — nothing is written into the gate's shell.
 #
 # ntfy JSON publishing requires POSTing to the SERVER ROOT with the topic in the
 # body; POSTed to /<topic> the body is taken as literal message text. The fleet
@@ -84,7 +100,10 @@ _gate_notify_target() {
   u="${u%%#*}"                   # drop any fragment
   while [ "${u: -1}" = "/" ]; do u="${u%/}"; done
   local root
-  if printf '%s' "$u" | grep -Eq '^[A-Za-z][A-Za-z0-9+.-]*://[^/]+$'; then
+  # Native regex, NOT `printf | grep -q`: under the caller's `set -o pipefail`
+  # (agent-gate.sh) a pipeline whose reader exits early makes printf die on EPIPE
+  # and the pipeline return 141, which would MIS-BRANCH into the has-a-path arm.
+  if [[ "$u" =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/]+$ ]]; then
     # Already a bare server root: the topic can only come from the override.
     root="$u/"
   else
@@ -97,13 +116,15 @@ _gate_notify_target() {
   return 0
 }
 
-# _gate_notify_payload <topic> <title> <body> <priority> <tag>: emit the ntfy JSON.
-# Built with python3's json.dumps — never hand-quoted shell interpolation, so a
-# title/body carrying quotes, backslashes or non-ASCII (the body's em dash) can
-# never produce a malformed document.
+# _gate_notify_payload <timeout-cmd> <topic> <title> <body> <priority> <tag>: emit
+# the ntfy JSON. Built with python3's json.dumps — never hand-quoted shell
+# interpolation, so a title/body carrying quotes, backslashes or non-ASCII (the
+# body's em dash) can never produce a malformed document. Runs under the caller's
+# OUTER timeout: a wedged interpreter must not block the gate's exit (#3119 B2).
 _gate_notify_payload() {
+  local to="$1"; shift
   command -v python3 >/dev/null 2>&1 || return 1
-  python3 -c '
+  "$to" "$GATE_NOTIFY_PAYLOAD_TIMEOUT" python3 -c '
 import json, sys
 topic, title, message, priority, tag = sys.argv[1:6]
 print(json.dumps({
@@ -116,8 +137,8 @@ print(json.dumps({
 }
 
 # _gate_notify_bounded_timeout: print a timeout command prefix, or return 1 when
-# no bounded runner exists. No bound means we do not run the adjunct at all —
-# an unbounded helper could stall a gate, and the adjunct is optional by design.
+# no bounded runner exists. No bound means we run NOTHING external — neither the
+# publish nor the adjunct. Every notification here is advisory; a wedged gate is not.
 _gate_notify_bounded_timeout() {
   if command -v timeout >/dev/null 2>&1; then printf 'timeout\n'; return 0; fi
   if command -v gtimeout >/dev/null 2>&1; then printf 'gtimeout\n'; return 0; fi
@@ -129,8 +150,13 @@ _gate_notify_bounded_timeout() {
 #   1. POSITIONAL arguments only — never `--category`, the flag upstream swallows.
 #   2. Its webhook environment is NEUTRALIZED, so its own (broken) publish path
 #      cannot deliver a second, JSON-as-message notification.
-#   3. Time-bounded, output discarded, failure swallowed.
+#   3. Time-bounded, output discarded, failure swallowed. The `</dev/null` is
+#      load-bearing: measured, the pristine upstream binary HANGS (rc=124) when it
+#      inherits a tty stdin.
+# GATE_NOTIFY_DISABLE_ADJUNCT=1 suppresses it entirely — used by --self-test so a
+# capability probe never fires a real desktop/sound notification (review R3).
 _gate_notify_adjunct() {
+  [ "${GATE_NOTIFY_DISABLE_ADJUNCT:-0}" = 1 ] && return 0
   command -v agent-notify >/dev/null 2>&1 || return 0
   local to
   to=$(_gate_notify_bounded_timeout) || { _gate_notify_debug "no timeout(1); skipping adjunct"; return 0; }
@@ -146,22 +172,29 @@ _gate_notify_adjunct() {
 # an adjunct that rejects its arguments or is not executable) is a silent no-op.
 gate_notify_publish() {
   local result="${1:-FAIL}" title="${2:-}" body="${3:-}"
-  local severity root topic payload
+  local severity payload to
+  # Declared local HERE so _gate_notify_target's assignments land in THIS frame
+  # (bash dynamic scoping) and never in the caller's shell.
+  local GATE_NOTIFY_ROOT GATE_NOTIFY_TOPIC
   severity=$(_gate_notify_severity "$result")
 
-  if _gate_notify_target; then
-    root="$GATE_NOTIFY_ROOT"
-    topic="$GATE_NOTIFY_TOPIC"
+  # One bounding tool for BOTH external calls; absent ⇒ publish nothing.
+  if ! to=$(_gate_notify_bounded_timeout); then
+    _gate_notify_debug "no timeout(1)/gtimeout(1); publishing nothing rather than running unbounded"
+  elif _gate_notify_target; then
     if command -v curl >/dev/null 2>&1; then
-      payload=$(_gate_notify_payload "$topic" "$title" "$body" \
+      payload=$(_gate_notify_payload "$to" "$GATE_NOTIFY_TOPIC" "$title" "$body" \
         "$(_gate_notify_priority "$severity")" "$(_gate_notify_tag "$severity")") || payload=""
       if [ -n "$payload" ]; then
-        _gate_notify_debug "POST $root $payload"
-        curl -sS -X POST -H 'Content-Type: application/json' \
+        _gate_notify_debug "POST $GATE_NOTIFY_ROOT $payload"
+        # OUTER bound + the cooperative flag: --max-time alone is honoured only by
+        # the REAL curl, so it cannot be the guarantee (#3119 B2).
+        "$to" "$GATE_NOTIFY_CURL_TIMEOUT" \
+          curl -sS -X POST -H 'Content-Type: application/json' \
           --max-time "$GATE_NOTIFY_CURL_TIMEOUT" \
-          -d "$payload" "$root" >/dev/null 2>&1 </dev/null || true
+          -d "$payload" "$GATE_NOTIFY_ROOT" >/dev/null 2>&1 </dev/null || true
       else
-        _gate_notify_debug "payload build failed (python3 missing or errored)"
+        _gate_notify_debug "payload build failed (python3 missing, wedged, or errored)"
       fi
     else
       _gate_notify_debug "curl absent; nothing published"
@@ -200,7 +233,11 @@ SHIM
     esac
     log="$tmp/$severity.log"
     : > "$log"
-    env CURL_LOG="$log" PATH="$tmp/bin:$PATH" \
+    # GATE_NOTIFY_DISABLE_ADJUNCT: a capability PROBE must not fire a real
+    # desktop/sound notification, nor depend on a local helper (review R3).
+    # The topic overrides are cleared so the probe's own target is authoritative.
+    env CURL_LOG="$log" PATH="$tmp/bin:$PATH" GATE_NOTIFY_DISABLE_ADJUNCT=1 \
+      CQLITE_NOTIFY_TOPIC= CODEX_NOTIFY_NTFY_TOPIC= \
       CQLITE_NOTIFY_WEBHOOK="${CQLITE_NOTIFY_WEBHOOK:-${CODEX_NOTIFY_WEBHOOK:-https://ntfy.invalid/selftest}}" \
       bash -c '. "$1"; gate_notify_publish "$2" "gate '"$severity"' selftest@0000000" "RESULT: '"$severity"'"' \
       _ "$self" "$severity" >/dev/null 2>&1
