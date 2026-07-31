@@ -290,59 +290,6 @@ fn sorted(rows: &[Row]) -> Vec<Row> {
     out
 }
 
-/// Assert `ticket` returns exactly `expected` on the MERGE arm under BOTH forced
-/// values — i.e. the bypass predicate FAILS CLOSED for this shape and the fast arm is
-/// never taken (issue #3095 / #3140).
-///
-/// Used for the one static shape the arms genuinely diverge on: an SSTable that may
-/// contain a simple CELL tombstone. The merge arm is Cassandra-correct there; the fast
-/// arm surfaces a raw `Value::Tombstone` the Arrow encoder rejects. So the contract is
-/// "the correct rows, on the merge arm, under both forced values", plus positive proof
-/// that a merger really was built on BOTH legs.
-async fn assert_fail_closed_to_merge_arm(
-    label: &str,
-    svc: &CqliteFlightService,
-    ticket: &serde_json::Value,
-    expected: &[Row],
-    failures: &mut Vec<String>,
-) {
-    std::env::set_var(TTL_NOW_ENV, PINNED_NOW.to_string());
-    let (merge_rows, merge_delta) = run_forced(svc, ticket, "merge").await;
-    let (bypass_rows, bypass_delta) = run_forced(svc, ticket, "bypass").await;
-    std::env::remove_var(TTL_NOW_ENV);
-
-    let want = sorted(expected);
-    for (arm, got) in [("merge", &merge_rows), ("bypass", &bypass_rows)] {
-        if sorted(got) != want {
-            failures.push(format!(
-                "case {label} [{arm} arm]: STATIC SEMANTICS MISMATCH vs Cassandra 5.0.8 \
-                 processPartition()\n  expected ({} rows): {:#?}\n  got      ({} rows): {:#?}",
-                want.len(),
-                want,
-                got.len(),
-                sorted(got),
-            ));
-        }
-    }
-    if merge_rows != bypass_rows {
-        failures.push(format!(
-            "case {label}: the two forced values must behave IDENTICALLY (both take the \
-             merge arm)\n  merge: {merge_rows:#?}\n  bypass: {bypass_rows:#?}"
-        ));
-    }
-    // THE fail-closed assertion: a merger is built on BOTH legs, so the fast arm was
-    // refused even when explicitly requested. Without this the case would silently
-    // become a plain both-arms differential if the exclusion were dropped.
-    for (arm, delta) in [("merge", &merge_delta), ("bypass", &bypass_delta)] {
-        if delta.mergers_built == 0 {
-            failures.push(format!(
-                "case {label} [{arm} arm]: no merger was built — this shape must FAIL \
-                 CLOSED to the merge arm under both forced values until #3140 lands"
-            ));
-        }
-    }
-}
-
 /// Assert `ticket` returns exactly `expected` (as a multiset) on BOTH arms at the
 /// pinned `now`, that the two arms genuinely DIFFERED, and that their row ORDER is
 /// identical (issue #3095 AC1/AC2/AC3).
@@ -634,20 +581,22 @@ async fn flight_static_column_semantics_match_cassandra() {
         Some(dir) => {
             let temp = stage(TB_KS, &dir).expect("stage fixture");
             let svc = CqliteFlightService::new(temp.path().to_path_buf(), 8192);
-            // FULL `SELECT *`, asserted on the MERGE arm under both forced values.
-            // This fixture's `ck = 3` carries a simple CELL tombstone on `row_col`,
-            // which the arms handle differently: the merge arm drops it (the column
-            // reads null — Cassandra's answer), while the single-generation fast arm
-            // surfaces a raw `Value::Tombstone` that the Arrow encoder rejects,
-            // aborting `do_get` with zero rows. That divergence is issue #3140, and
-            // #3095 FAILS CLOSED on it (`BypassReason::StaticColumnsWithDeletions`), so
-            // the correct rows are what a client sees today. `row_col` is deliberately
-            // PROJECTED IN — the whole point is that Cassandra's `row_col` values,
-            // including the null on `ck = 3`, are asserted; the fail-closed helper is
-            // what pins that the fast arm is refused rather than papering over it.
-            // When #3140 lands this becomes a plain `assert_static_semantics` case.
-            assert_fail_closed_to_merge_arm(
-                "static_with_tombstones/select-star(fail-closed to merge, #3140)",
+            // FULL `SELECT *`, asserted on BOTH arms (issue #3140, the fail-closed
+            // guard now RETIRED). This fixture's `ck = 3` carries a simple CELL
+            // tombstone on `row_col`, which the arms used to handle differently: the
+            // merge arm dropped it (the column reads null — Cassandra's answer) while
+            // the single-generation fast arm surfaced a raw `Value::Tombstone` that the
+            // Arrow encoder rejected, aborting `do_get` with zero rows. PR #3122 fixed
+            // the fast arm at its source (`row_decoder`'s
+            // `PartitionShadow::cell_tombstone_dropped`), so this is now an ordinary
+            // both-arms differential — and `assert_static_semantics` is what makes that
+            // load-bearing: it requires the forced-bypass leg to build ZERO mergers, so
+            // the case cannot pass by silently routing back to the merge arm. `row_col`
+            // is deliberately PROJECTED IN — the whole point is that Cassandra's
+            // `row_col` values, including the null on `ck = 3`, are asserted on the FAST
+            // arm's own decode.
+            assert_static_semantics(
+                "static_with_tombstones/select-star(both arms, #3140)",
                 &svc,
                 &ticket_json(TB_KS, TB_TBL, TB_DDL),
                 &[
