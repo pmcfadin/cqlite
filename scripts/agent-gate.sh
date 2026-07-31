@@ -1401,6 +1401,23 @@ _gate_schemas_override_present() {
 
 # _gate_schemas_override_reject: echoes a non-empty REASON when an override is present but
 # must be REJECTED rather than resolved. Mirrors resolve_schemas_root()'s two Err cases.
+# _gate_schemas_override_reject_kind: `relative` | `control-chars` | (empty when accepted).
+# The KIND, separate from the reason text, so the FAIL emit can name the ACTUAL cause. Before
+# this the emit hard-coded "a RELATIVE schemas root ..." and stamped `... relative
+# CQLITE_SCHEMAS_ROOT rejected` for EVERY rejection — a FALSE message for a
+# control-character value, and untested because the round-3 coverage went through the pure
+# hook and never saw the real emit (spec-auditor, AC (b) partial).
+_gate_schemas_override_reject_kind() {
+  _gate_schemas_override_present || return 0
+  case "${CQLITE_SCHEMAS_ROOT:-}" in
+    *[[:cntrl:]]*) printf '%s' 'control-chars'; return 0 ;;
+  esac
+  case "${CQLITE_SCHEMAS_ROOT:-}" in
+    /*) return 0 ;;
+    *) printf '%s' 'relative' ;;
+  esac
+}
+
 _gate_schemas_override_reject() {
   _gate_schemas_override_present || return 0
   # Control characters (newline, CR, embedded tab, ...). A path carrying one is never a
@@ -1516,16 +1533,37 @@ apply_schemas_preflight() {
   # (the checkout's fixtures may be perfectly complete), and the actionable fact is that
   # the requested root cannot be honored identically by the gate and the test binaries.
   if [ -n "$reject" ]; then
+    local kind why marker
+    kind="$(_gate_schemas_override_reject_kind)"
+    case "$kind" in
+      control-chars)
+        why="a schemas root carrying a CONTROL CHARACTER (newline/CR/tab) cannot round-trip through the gate's shell resolution — command substitution strips trailing newlines — so the gate would validate one path while cargo resolved another."
+        marker="missing-schemas: FAIL-CLOSED (#3148) — CQLITE_SCHEMAS_ROOT contains a control character; the gate and the test binaries would resolve DIFFERENT roots; overall verdict FAIL" ;;
+      *)
+        why="a RELATIVE schemas root cannot mean the same thing on both sides: the gate resolves it against $REPO_ROOT, cargo resolves it against each test binary's PACKAGE dir."
+        marker="missing-schemas: FAIL-CLOSED (#3148) — relative CQLITE_SCHEMAS_ROOT rejected; the gate and the test binaries would resolve DIFFERENT roots; overall verdict FAIL" ;;
+    esac
     echo "agent-gate: FAIL: $reject (#3148)" >&2
-    echo "agent-gate: a RELATIVE schemas root cannot mean the same thing on both sides: the gate resolves it against $REPO_ROOT, cargo resolves it against each test binary's PACKAGE dir." >&2
+    echo "agent-gate: $why" >&2
     echo "agent-gate: continuing would stamp a SUMMARY certifying one schemas root while the tests read another — the exact mis-certification #3148 was filed for." >&2
-    echo "agent-gate: remedy: export an ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root" >&2
+    echo "agent-gate: remedy: export a clean ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root" >&2
+    # REPORT-ONLY mode (see the --preflight-schemas-line hook): return instead of emitting.
+    # The hook cannot emit a SUMMARY — emit_summary/_tree_meta_array are defined AFTER the
+    # arg dispatch — and STUBBING them there defined a SECOND `_tree_meta_array`, which broke
+    # test_agent_gate_tree_portability.sh's derived-inventory uniqueness assert (n=45
+    # uniq=44) and FAILed `tooling-tests` in the gate of record while passing standalone.
+    # A mode flag on the terminal ACTION carries no decision and stamps no text, so it
+    # cannot make a lenient path assert something it did not check.
+    if [ -n "${_SCHEMAS_PREFLIGHT_REPORT_ONLY:-}" ]; then
+      SCHEMAS_LINE="$marker"
+      return 1
+    fi
     _tree_meta_array   # #2926
     emit_summary FAIL \
       "preflight: FAIL ($reject)" \
-      "missing-schemas: FAIL-CLOSED (#3148) — relative CQLITE_SCHEMAS_ROOT rejected; the gate and the test binaries would resolve DIFFERENT roots; overall verdict FAIL" \
+      "$marker" \
       "${TREE_META_LINES[@]}" \
-      "hint: export an ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root"
+      "hint: export a clean ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root"
     exit 1
   fi
   case "$(_schemas_status)" in
@@ -1543,6 +1581,10 @@ apply_schemas_preflight() {
       echo "agent-gate: these are COMMITTED SOURCE (test-data/schemas, 23 files incl. legacy/ + udts/) — NOT part of the fetched corpus and NOT derived from CQLITE_DATASETS_ROOT." >&2
       echo "agent-gate: dataset-backed components (core-tests, memory-budget, cli-tests) would build for ~8 min and then panic on the missing .cql." >&2
       echo "agent-gate: remedy: unset CQLITE_SCHEMAS_ROOT (it overrides the checkout default), or restore the committed fixtures: git -C $REPO_ROOT restore --source=HEAD -- test-data/schemas" >&2
+      if [ -n "${_SCHEMAS_PREFLIGHT_REPORT_ONLY:-}" ]; then
+        SCHEMAS_LINE="missing-schemas: FAIL-CLOSED (#3148) — unreadable: $missing"
+        return 1
+      fi
       _tree_meta_array   # #2926: every emitted block carries the tree provenance
       emit_summary FAIL \
         "preflight: FAIL (committed CQL schema fixtures unreadable under $root — missing: $missing)" \
@@ -1891,18 +1933,18 @@ case "${1:-}" in
   #
   # It can NOT observe the FAIL SUMMARY, and saying otherwise would send a reader looking for
   # a block that cannot exist: `emit_summary` and `_tree_meta_array` are defined AFTER this
-  # dispatch point, so the strict-FAILURE branch would otherwise die on two
-  # `command not found` lines. They are stubbed below so that path exits non-zero with ONE
-  # named token instead — which is all the self-test needs from it (it asserts the LENIENT
-  # and the strict-HEALTHY paths; the strict-FAILURE emit is covered by the real full-gate
-  # cases). The stubs are safe: this arm always `exit`s before the real definitions are read.
+  # dispatch point. So the hook sets `_SCHEMAS_PREFLIGHT_REPORT_ONLY=1`, and the two failure
+  # branches then RETURN with the marker in SCHEMAS_LINE instead of emitting + exiting.
+  #
+  # The first attempt STUBBED those two functions here instead. That defined a SECOND
+  # `_tree_meta_array` in this file, which broke test_agent_gate_tree_portability.sh's
+  # derived-inventory uniqueness assert (n=45 uniq=44) and FAILed `tooling-tests` in the gate
+  # of record — while every self-test passed standalone, because that portability test only
+  # runs inside `tooling-tests`. Hence: never add a second definition of a `_tree*` function.
   --preflight-schemas-line)
     [ -n "${2:-}" ] && ONLY="$2"
-    # shellcheck disable=SC2317  # invoked indirectly, from apply_schemas_preflight
-    emit_summary() { echo "HOOK: strict-path FAIL (SUMMARY not emittable at dispatch time)"; }
-    # shellcheck disable=SC2317  # invoked indirectly, from apply_schemas_preflight
-    _tree_meta_array() { TREE_META_LINES=(); }
-    apply_schemas_preflight
+    _SCHEMAS_PREFLIGHT_REPORT_ONLY=1
+    apply_schemas_preflight || true
     echo "SCHEMAS_LINE: ${SCHEMAS_LINE:-<none>}"
     exit 0 ;;
   # Hidden self-test hooks (issue #2081): expose the node-build readiness decision and

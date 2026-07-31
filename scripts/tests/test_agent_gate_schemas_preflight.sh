@@ -405,6 +405,55 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 2c. The FAIL emit must name the ACTUAL rejection reason (spec-auditor, AC (b) partial).
+#     The reject branch hard-coded "a RELATIVE schemas root ..." and stamped `... relative
+#     CQLITE_SCHEMAS_ROOT rejected` for EVERY rejection — FALSE for a control-character
+#     value. It was untested because the round-3 control-char coverage went through the pure
+#     `--preflight-schemas` hook, which never reaches the emit. So this case drives the REAL
+#     FULL gate and asserts the emitted block, which is the only place the wording lives.
+# ---------------------------------------------------------------------------
+cc_emit_root="$tmp/cc-emit"
+mkdir -p "$cc_emit_root"
+for f in "${CANONICAL[@]}"; do printf -- '-- synthetic\n' >"$cc_emit_root/$f"; done
+cc_full="$tmp/3148-cc-full.txt"
+CQLITE_GATE_DISABLE_CAP=1 CQLITE_DATASETS_ROOT="$ds_corpus" \
+  CQLITE_SCHEMAS_ROOT="$cc_emit_root"$'\n' AGENT_GATE_SUMMARY_FILE="$cc_full" \
+  timeout 180 bash "$GATE" >"$tmp/3148-cc-full.out" 2>&1
+cc_full_rc=$?
+if [ "$cc_full_rc" -ne 0 ] \
+   && grep -q "^missing-schemas: FAIL-CLOSED (#3148)" "$cc_full" 2>/dev/null \
+   && grep -q "contains a control character" "$cc_full" 2>/dev/null \
+   && ! grep -q "relative CQLITE_SCHEMAS_ROOT rejected" "$cc_full" 2>/dev/null \
+   && grep -q "must not contain control characters" "$tmp/3148-cc-full.out" 2>/dev/null \
+   && ! grep -q "a RELATIVE schemas root" "$tmp/3148-cc-full.out" 2>/dev/null \
+   && grep -q "^RESULT: FAIL" "$cc_full" 2>/dev/null; then
+  ok "3148-cc-emit-wording: the real FAIL emit names the control-character cause, not a false 'relative' one"
+else
+  bad "3148-cc-emit-wording: the emitted block/stderr misnames the rejection cause (rc=$cc_full_rc)"
+  cat "$cc_full" 2>/dev/null
+fi
+
+# 2d. The #2078 opt-out must NOT buy a pass against a schemas-less root (spec-auditor (v)).
+#     The schemas guard deliberately has no opt-out — the fetched corpus is legitimately
+#     absent sometimes, committed source in a checkout never is. The code ignores
+#     AGENT_GATE_ALLOW_MISSING_FIXTURES, but nothing asserted it, so a future "consistency"
+#     patch wiring it in would land GREEN.
+optout_full="$tmp/3148-optout-full.txt"
+CQLITE_GATE_DISABLE_CAP=1 AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
+  CQLITE_DATASETS_ROOT="$ds_corpus" CQLITE_SCHEMAS_ROOT="$schemas_empty" \
+  AGENT_GATE_SUMMARY_FILE="$optout_full" timeout 180 bash "$GATE" >/dev/null 2>&1
+optout_full_rc=$?
+if [ "$optout_full_rc" -ne 0 ] \
+   && grep -q "^missing-schemas: FAIL-CLOSED (#3148)" "$optout_full" 2>/dev/null \
+   && grep -q "^RESULT: FAIL" "$optout_full" 2>/dev/null \
+   && ! grep -q "^RESULT: PASS" "$optout_full" 2>/dev/null; then
+  ok "3148-no-optout: AGENT_GATE_ALLOW_MISSING_FIXTURES=1 does NOT buy a pass on a schemas-less root"
+else
+  bad "3148-no-optout: the #2078 opt-out must not weaken the schemas guard (rc=$optout_full_rc)"
+  cat "$optout_full" 2>/dev/null
+fi
+
+# ---------------------------------------------------------------------------
 # 3. AC (g): --lite and --only stay LENIENT (unchanged from #2078's contract).
 # ---------------------------------------------------------------------------
 lite_block="$tmp/3148-lite.txt"
@@ -671,6 +720,59 @@ if [ "$sym_rc" -eq 0 ] \
 else
   bad "3131-symlinked-root: expected exit 0 and a non-zero Data.db count (rc=$sym_rc)"
   printf '%s\n' "$sym_out"
+fi
+
+# 6d. The WARM-CACHE call site and the "NOT the checkout default" NOTE (spec-auditor,
+#     requirement 12 partial). Every case above drives `--verify-only`; NOTHING exercised
+#     `guarantee_usable_root "warm cache, download skipped"` or the divergence NOTE, so
+#     deleting either line reddened nothing — and the warm-cache no-op is EXACTLY #3131 item
+#     2's original defect ("a green fetch is not evidence the tree is usable").
+#
+#     Hermetic: the root carries content AND a `.dataset-pin` matching the TRACKED pin, so
+#     `has_required_dataset` succeeds and the download is skipped. A failing `curl` stub is
+#     first on PATH so that if the pin ever stops matching, the case dies WITHOUT network and
+#     WITHOUT reaching `rm -rf` — a self-test must not be one typo away from a download.
+warm="$tmp/fetch-warm/datasets"
+warm_wide="$warm/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
+mkdir -p "$warm_wide" "$warm/sstables/test_basic/simple_table-0001"
+printf 'synthetic: true\n' >"$warm/metadata.yml"
+printf '{}\n' >"$warm_wide/nb-2-big-Data.db.jsonl"
+for c in nb-2-big-Data.db nb-2-big-Index.db nb-2-big-Digest.crc32 nb-2-big-CompressionInfo.db; do
+  : >"$warm_wide/$c"
+done
+for c in nb-1-big-Data.db nb-1-big-Index.db nb-1-big-Summary.db nb-1-big-Statistics.db; do
+  : >"$warm/sstables/test_basic/simple_table-0001/$c"
+done
+# The pin comes from the tracked source of truth, never hard-coded (issue #2646).
+# shellcheck disable=SC1090
+. "$REPO/test-data/dataset-pin.env"
+{ echo "tag=${DATASET_TAG}"; echo "asset=${DATASET_ASSET}"; echo "sha256=${DATASET_SHA256}"; } >"$warm/.dataset-pin"
+curl_stub="$tmp/curl-stub"
+mkdir -p "$curl_stub"
+printf '#!/bin/sh\necho "SELFTEST GUARD: curl invoked — the warm-cache path was NOT taken" >&2\nexit 1\n' >"$curl_stub/curl"
+chmod +x "$curl_stub/curl"
+warm_out=$(cd "$REPO" && PATH="$curl_stub:$PATH" CQLITE_DATASETS_ROOT="$warm" bash "$FETCH" 2>&1)
+warm_rc=$?
+if [ "$warm_rc" -eq 0 ] \
+   && grep -q "already present in $warm; skipping download" <<<"$warm_out" \
+   && grep -q "Dataset root VERIFIED (warm cache, download skipped)" <<<"$warm_out" \
+   && grep -q "^  export CQLITE_DATASETS_ROOT=$warm$" <<<"$warm_out" \
+   && ! grep -q "SELFTEST GUARD" <<<"$warm_out"; then
+  ok "3131-warm-cache: the warm-skip path VERIFIES the root and prints the export line it guarantees"
+else
+  bad "3131-warm-cache: expected a verified warm-cache skip naming the root (rc=$warm_rc)"
+  printf '%s\n' "$warm_out" | head -8
+fi
+
+# …and the divergence NOTE: the populated root here is NOT the checkout default, which is the
+# fact that made the documented `CQLITE_DATASETS_ROOT=$PWD/test-data/datasets` silently wrong.
+if grep -q "NOTE: this run populated $warm, NOT the checkout default" <<<"$warm_out" \
+   && grep -q "NOTE:   $REPO/test-data/datasets" <<<"$warm_out" \
+   && grep -q "NOTE: CQL schema fixtures (test-data/schemas) are committed source" <<<"$warm_out"; then
+  ok "3131-warm-cache-note: the run names the root it populated AND the checkout default it did not"
+else
+  bad "3131-warm-cache-note: the divergence NOTE (or the schemas NOTE) is missing"
+  printf '%s\n' "$warm_out" | head -12
 fi
 
 # 6c. #2878 boundary: this change must NOT have touched the rm -rf /
