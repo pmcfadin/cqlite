@@ -140,12 +140,12 @@ else
   printf '%s\n' "$rel_out"
 fi
 
-# …and it must not smuggle the relative string into the report as an "absolute path".
-if ! grep -q 'expected absolute path: packaged/schemas' <<<"$rel_out"; then
-  ok "3148-relative-override: no relative path is ever labelled absolute (AC (b))"
-else
-  bad "3148-relative-override: a relative path was reported as the expected absolute path"
-fi
+# NOTE: the AC-(b) "never labelled absolute" assert deliberately does NOT live here. It
+# used to, matching against `$rel_out` — but `expected absolute path:` is
+# apply_schemas_preflight STDERR, and this hook prints only STATUS/ROOT/SOURCE/REJECT/
+# MISSING on stdout, so the pattern could never appear and the case passed unconditionally,
+# INCLUDING after a full revert of the fix. It now runs against the real FULL-gate emit
+# below, where the string can actually occur.
 
 # Every relative shape, not just the bare one; and a blank/whitespace value is NOT an
 # override at all (a scripting accident), matching the Rust side's `trim().is_empty()`.
@@ -166,12 +166,51 @@ else
   bad "3148-relative-shapes: relative/blank handling diverges from the Rust resolver"
 fi
 
+# A WHITESPACE-ONLY override must be treated as UNSET, matching the Rust resolver's
+# `v.trim().is_empty()` (roborev job 9, finding 1). The two mirrors DID disagree here:
+# `_gate_schemas_override_reject` trimmed before deciding presence, while
+# `_gate_schemas_root`/`_gate_schemas_root_source` tested the RAW `-n` value — so a
+# directory literally named "   " would have been reported as the override while Rust read
+# the checkout's schemas. Presence is now normalized once, in `_gate_schemas_override`.
+#
+# PREMISE CORRECTION, recorded so nobody re-derives it: roborev's exploit path ("if a
+# relative directory named only with whitespace exists") is NOT reachable from a caller's
+# CWD, because agent-gate.sh `cd`s to its OWN repository root before anything else
+# (scripts/agent-gate.sh:410). The whitespace-named directory would have to exist in the
+# repo root itself. The inconsistency was real and is fixed; this case pins the OBSERVABLE
+# rule (whitespace-only ⇒ unset ⇒ checkout-relative), and the discriminating control for
+# the trim rule lives on the Rust side, where the resolver is pure and takes the value as
+# an argument (`absent_or_blank_override_resolves_to_the_checkout`).
+ws_dir_present="$tmp/ws-present"
+mkdir -p "$ws_dir_present/   "
+# `$'\t'` — a REAL tab. A literal '\t' would be a two-character RELATIVE path, which is
+# correctly REJECTED, so writing it that way tests the wrong rule (it did, first try).
+for raw in '   ' $'\t' ' ' $'\n'; do
+  ws_out=$(CQLITE_SCHEMAS_ROOT="$raw" bash "$GATE" --preflight-schemas 2>/dev/null)
+  if [ "$(hook_field STATUS "$ws_out")" = OK ] \
+     && [ "$(hook_field SOURCE "$ws_out")" = "checkout-relative" ] \
+     && [ "$(hook_field ROOT "$ws_out")" = "$REPO/test-data/schemas" ] \
+     && [ -z "$(hook_field REJECT "$ws_out")" ]; then
+    :
+  else
+    rel_shapes_ok=0
+    echo "   (whitespace-only value '$raw' was not treated as unset)"
+    printf '%s\n' "$ws_out"
+  fi
+done
+if [ "$rel_shapes_ok" -eq 1 ]; then
+  ok "3148-whitespace-override: a whitespace-only value is unset (trim rule, single-sourced presence)"
+else
+  bad "3148-whitespace-override: whitespace-only handling diverges from the Rust resolver"
+fi
+
 # The FULL gate must FAIL CLOSED on the relative override too — with its own reason, not
 # a misleading "missing files" list (the checkout's fixtures are in fact complete).
 rel_full="$tmp/3148-rel-full.txt"
+rel_full_out="$tmp/3148-rel-full.out"   # stdout+stderr: where `expected absolute path:` lives
 CQLITE_GATE_DISABLE_CAP=1 CQLITE_DATASETS_ROOT="$ds_corpus" \
   CQLITE_SCHEMAS_ROOT="packaged/schemas" AGENT_GATE_SUMMARY_FILE="$rel_full" \
-  bash "$GATE" >/dev/null 2>&1
+  timeout 180 bash "$GATE" >"$rel_full_out" 2>&1
 rel_full_rc=$?
 if [ "$rel_full_rc" -ne 0 ] \
    && grep -q "^missing-schemas: FAIL-CLOSED (#3148)" "$rel_full" 2>/dev/null \
@@ -184,14 +223,34 @@ else
   cat "$rel_full" 2>/dev/null
 fi
 
+# AC (b), asserted where the string can actually appear: no relative value may ever be
+# printed on an "expected absolute path" line, in the SUMMARY or on stderr. Revert the
+# reject branch and `_gate_schemas_root` resolves `packaged/schemas`, all six fixtures are
+# reported missing, and stderr prints
+# `expected absolute path: packaged/schemas/basic-types.cql` — so this case discriminates.
+if ! grep -q 'expected absolute path: *packaged/schemas' "$rel_full_out" 2>/dev/null \
+   && ! grep -q 'expected absolute path: *packaged/schemas' "$rel_full" 2>/dev/null \
+   && grep -q 'must be an ABSOLUTE path' "$rel_full_out" 2>/dev/null; then
+  ok "3148-relative-absolute-label: no relative path is ever labelled absolute (AC (b), real emit)"
+else
+  bad "3148-relative-absolute-label: a relative path reached an 'expected absolute path' line"
+  grep -n 'expected absolute path' "$rel_full_out" "$rel_full" 2>/dev/null | head -5
+fi
+
 # ---------------------------------------------------------------------------
 # 2. The FULL gate FAILS CLOSED, with a marker DISTINGUISHABLE from #2078's.
 #    apply_schemas_preflight fires before any cargo component, so this is fast.
+#
+#    `timeout 180` on the real gate invocations here and below is part of the contract, not
+#    defensive padding: these cases assert the run exits AT the preflight, so a run that
+#    does not is a FAILURE — and without a bound the regression it catches (the guard
+#    letting the layout through) would instead launch a 15-20 minute full gate inside a
+#    self-test. Observed while proving these cases discriminate.
 # ---------------------------------------------------------------------------
 full_fail="$tmp/3148-full-fail.txt"
 CQLITE_GATE_DISABLE_CAP=1 CQLITE_DATASETS_ROOT="$ds_corpus" \
   CQLITE_SCHEMAS_ROOT="$schemas_empty" AGENT_GATE_SUMMARY_FILE="$full_fail" \
-  bash "$GATE" >/dev/null 2>&1
+  timeout 180 bash "$GATE" >/dev/null 2>&1
 full_rc=$?
 if [ "$full_rc" -ne 0 ] \
    && grep -q "^missing-schemas: FAIL-CLOSED (#3148)" "$full_fail" 2>/dev/null \
@@ -517,6 +576,25 @@ if [ -n "$spacey_line" ] && [ "$spacey_eval" = "$spacey" ]; then
   ok "3131-export-quoting: the printed export line round-trips a path with spaces/metacharacters"
 else
   bad "3131-export-quoting: pasting the line does not reproduce the root (line: '$spacey_line' -> '$spacey_eval')"
+fi
+
+# 6b-ter. A SYMLINKED dataset root must verify, not be reported unusable (roborev job 9,
+#         finding 2). `find <symlink>` without `-H` stats the link and never descends, so
+#         every count came back 0 and `has_required_content` rejected a perfectly good
+#         corpus — and `ln -s <real corpus> <somewhere>/datasets` is precisely the layout
+#         #3148 documents operators reaching for.
+symparent="$tmp/symlinked"
+mkdir -p "$symparent"
+ln -s "$good" "$symparent/datasets"
+sym_out=$(CQLITE_DATASETS_ROOT="$symparent/datasets" bash "$FETCH" --verify-only 2>&1)
+sym_rc=$?
+if [ "$sym_rc" -eq 0 ] \
+   && grep -q "Dataset root VERIFIED" <<<"$sym_out" \
+   && ! grep -q "0 \*-Data.db present" <<<"$sym_out"; then
+  ok "3131-symlinked-root: a datasets root that is itself a symlink verifies with a real count"
+else
+  bad "3131-symlinked-root: expected exit 0 and a non-zero Data.db count (rc=$sym_rc)"
+  printf '%s\n' "$sym_out"
 fi
 
 # 6c. #2878 boundary: this change must NOT have touched the rm -rf /

@@ -1322,6 +1322,14 @@ SCHEMAS_LINE=""
 # sparse checkout — or a worktree nested inside another checkout — resolve to the OUTER
 # checkout's fixtures, wrong-but-existing and unreported. Falls back to REPO_ROOT when no
 # `[workspace]` manifest is found (not reachable in this repository).
+#
+# KNOWN EXCEPTION: `fuzz/Cargo.toml` declares its OWN `[workspace]` (deliberately — the
+# fuzz crate is excluded from the main workspace, see #1614). So a hypothetical caller
+# anchored inside `fuzz/` would resolve `fuzz/test-data`, which does not exist. Benign in
+# both mirrors: the result is a LOUD failure naming that absent path, never a silent
+# borrow of a wrong tree — and neither the gate (anchored on REPO_ROOT) nor any
+# `#[path]`-including target lives under `fuzz/`. Named here so the next reader does not
+# have to rediscover that the "nearest [workspace]" rule has an in-repo counterexample.
 _gate_checkout_test_data_dir() {
   local d="$REPO_ROOT"
   while [ -n "$d" ] && [ "$d" != "/" ]; do
@@ -1347,12 +1355,33 @@ _gate_checkout_test_data_dir() {
 # absolute path:` remedy line print a relative path, breaking AC (b).
 #
 # Both sides therefore reject it, so they agree BY CONSTRUCTION rather than by review.
-_gate_schemas_override_reject() {
+# _gate_schemas_override: THE single normalization of "is there an override?", echoing the
+# raw value when there is one and nothing when there is not. Every other helper consults
+# this rather than testing `$CQLITE_SCHEMAS_ROOT` itself.
+#
+# Single-sourcing it is not tidiness (roborev job 9, finding 1): `_gate_schemas_override_reject`
+# treated a WHITESPACE-ONLY value as unset (matching Rust's `v.trim().is_empty()`) while
+# `_gate_schemas_root`/`_gate_schemas_root_source` tested the raw `-n` value. So with a
+# directory literally named "  " present, the gate would have validated and reported it as
+# the override while Rust treated the var as unset and read the checkout's schemas —
+# recreating the very root-certification mismatch this change exists to prevent, in the one
+# input class the two mirrors disagreed on. Exotic, but the whole point of the pair is that
+# they answer identically on EVERY input, so it is fixed rather than argued about.
+#
+# Note the deliberate asymmetry: presence is decided on the TRIMMED value, but the value
+# used is the RAW one (never trimmed) — exactly as Rust does, where `trim()` gates presence
+# and `PathBuf::from(raw)` builds the path. Hence `"  /abs  "` is *present* and then
+# REJECTED as non-absolute on both sides, rather than silently trimmed into `/abs`.
+_gate_schemas_override() {
   local v="${CQLITE_SCHEMAS_ROOT:-}"
-  # Blank (or unset) is not an override at all — an exported-but-empty var is a scripting
-  # accident, and both sides treat it as unset. Whitespace-stripped, matching the Rust
-  # side's `v.trim().is_empty()`.
   [ -n "$(printf '%s' "$v" | tr -d '[:space:]')" ] || return 0
+  printf '%s' "$v"
+}
+
+_gate_schemas_override_reject() {
+  local v
+  v="$(_gate_schemas_override)" || return 0
+  [ -n "$v" ] || return 0
   case "$v" in
     /*) return 0 ;;
     *) printf '%s' "CQLITE_SCHEMAS_ROOT must be an ABSOLUTE path, got '$v'" ;;
@@ -1366,17 +1395,20 @@ _gate_schemas_override_reject() {
 # is rejected outright, see above), else checkout-relative. Both sides anchor on the same
 # workspace marker, so the gate asserts the path the tests will actually resolve.
 _gate_schemas_root() {
-  if [ -z "$(_gate_schemas_override_reject)" ] \
-     && [ -n "${CQLITE_SCHEMAS_ROOT:-}" ] && [ -d "${CQLITE_SCHEMAS_ROOT}" ]; then
-    printf '%s' "$CQLITE_SCHEMAS_ROOT"
+  local v
+  v="$(_gate_schemas_override)"
+  if [ -z "$(_gate_schemas_override_reject)" ] && [ -n "$v" ] && [ -d "$v" ]; then
+    printf '%s' "$v"
   else
     printf '%s' "$(_gate_checkout_test_data_dir)/schemas"
   fi
 }
 _gate_schemas_root_source() {
+  local v
+  v="$(_gate_schemas_override)"
   if [ -n "$(_gate_schemas_override_reject)" ]; then
     printf '%s' "CQLITE_SCHEMAS_ROOT override REJECTED"
-  elif [ -n "${CQLITE_SCHEMAS_ROOT:-}" ] && [ -d "${CQLITE_SCHEMAS_ROOT}" ]; then
+  elif [ -n "$v" ] && [ -d "$v" ]; then
     printf '%s' "CQLITE_SCHEMAS_ROOT override"
   else
     printf '%s' "checkout-relative"
@@ -1825,10 +1857,21 @@ case "${1:-}" in
   # `case "$1"`, so `--only X --preflight-schemas-line` is not expressible, and a real
   # `--only core-tests` run would spend minutes in cargo before printing anything).
   # Deliberately drives the effectful function: the whole point is that a POSITIVE line must
-  # never be stamped for a check that did not run. On the strict path this may emit a FAIL
-  # SUMMARY and exit non-zero, which the self-test treats as a regression of leniency.
+  # never be stamped for a check that did not run.
+  #
+  # It can NOT observe the FAIL SUMMARY, and saying otherwise would send a reader looking for
+  # a block that cannot exist: `emit_summary` and `_tree_meta_array` are defined AFTER this
+  # dispatch point, so the strict-FAILURE branch would otherwise die on two
+  # `command not found` lines. They are stubbed below so that path exits non-zero with ONE
+  # named token instead — which is all the self-test needs from it (it asserts the LENIENT
+  # and the strict-HEALTHY paths; the strict-FAILURE emit is covered by the real full-gate
+  # cases). The stubs are safe: this arm always `exit`s before the real definitions are read.
   --preflight-schemas-line)
     [ -n "${2:-}" ] && ONLY="$2"
+    # shellcheck disable=SC2317  # invoked indirectly, from apply_schemas_preflight
+    emit_summary() { echo "HOOK: strict-path FAIL (SUMMARY not emittable at dispatch time)"; }
+    # shellcheck disable=SC2317  # invoked indirectly, from apply_schemas_preflight
+    _tree_meta_array() { TREE_META_LINES=(); }
     apply_schemas_preflight
     echo "SCHEMAS_LINE: ${SCHEMAS_LINE:-<none>}"
     exit 0 ;;

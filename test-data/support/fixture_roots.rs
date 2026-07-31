@@ -51,7 +51,17 @@
 //!   `schemas: 6/6 … under packaged/schemas` while the tests silently read the
 //!   checkout's schemas — the block certifying root A for a run that used root B, i.e.
 //!   the "positively misleading `STATUS: OK`" defect of #3148 reintroduced by its own
-//!   fix. Rejecting relative values makes the two sides agree by construction.
+//!   fix. Rejecting relative values removes the one input class on which the two
+//!   mirrors could not possibly agree.
+//!
+//! To be precise about how strong that guarantee is: the shell mirror in
+//! `scripts/agent-gate.sh` and this module are two HAND-WRITTEN implementations kept
+//! EQUIVALENT and PINNED BY SELF-TESTS — not equivalent by construction. They have been
+//! walked case by case over the whole input table (unset / `""` / whitespace-only /
+//! `"  /abs  "` / absolute-non-dir / absolute-dir / relative) and agree on every one, and
+//! `scripts/tests/test_agent_gate_schemas_preflight.sh` asserts each case against the real
+//! gate. Claiming "by construction" would be exactly the unearned reassurance that stops
+//! the next reader from re-checking after a change to either side.
 //!
 //! This file is deliberately hosted under `test-data/` rather than inside either
 //! crate: it encodes the layout of `test-data/` itself, it is owned by neither
@@ -139,11 +149,31 @@ pub fn readable_file(p: &Path) -> bool {
 /// `test-data/schemas` (the first cut of this module) meant a sparse checkout or a
 /// worktree nested inside another checkout resolved to the OUTER checkout's `test-data`:
 /// wrong-but-existing fixtures, no warning. `[workspace]` is present in the repository
-/// root manifest and absent from every member manifest, so the NEAREST match is always
-/// the enclosing checkout's own root — nesting depth and fixture presence are both
-/// irrelevant to it.
-fn workspace_root() -> Option<PathBuf> {
-    for ancestor in Path::new(env!("CARGO_MANIFEST_DIR")).ancestors() {
+/// root manifest and absent from every member manifest, so the NEAREST match is the
+/// enclosing checkout's own root — nesting depth and fixture presence are both irrelevant
+/// to it.
+///
+/// KNOWN EXCEPTION: `fuzz/Cargo.toml` declares its own `[workspace]` (deliberately — the
+/// fuzz crate is excluded from the main workspace, #1614), so a caller anchored inside
+/// `fuzz/` would resolve `fuzz/test-data`, which does not exist. Benign: the outcome is a
+/// LOUD failure naming that absent path, never a silent borrow of a wrong tree — and no
+/// `#[path]`-including target lives under `fuzz/`. Named so the "nearest `[workspace]`"
+/// rule is not read as exception-free.
+pub fn workspace_root() -> Option<PathBuf> {
+    workspace_root_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+/// [`workspace_root`] parameterized on the starting directory.
+///
+/// Split out purely so the marker rule has a DISCRIMINATING test: in a healthy checkout the
+/// retired fixtures-keyed walk returns the same answer as the marker walk, so a test that
+/// can only run from `CARGO_MANIFEST_DIR` still passes if the rule is reverted — an
+/// assertion that cannot fail. Given an explicit start, a synthetic
+/// `outer/{Cargo.toml,test-data/schemas}` + `outer/inner/{Cargo.toml,member}` layout
+/// separates the two rules: the marker walk answers `outer/inner`, the fixtures-keyed walk
+/// answers `outer`.
+pub fn workspace_root_from(start: &Path) -> Option<PathBuf> {
+    for ancestor in start.ancestors() {
         let manifest = ancestor.join("Cargo.toml");
         if let Ok(text) = std::fs::read_to_string(&manifest) {
             if text

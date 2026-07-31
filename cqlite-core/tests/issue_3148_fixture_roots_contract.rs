@@ -19,7 +19,7 @@ mod fixture_roots;
 
 use fixture_roots::{
     checkout_test_data_dir, readable_file, resolve_schemas_root, schema_path, schemas_root,
-    SchemasRootSource,
+    workspace_root_from, SchemasRootSource,
 };
 
 /// A RELATIVE override is REJECTED, not resolved.
@@ -123,6 +123,63 @@ fn checkout_test_data_dir_is_anchored_on_the_workspace_marker() {
         "resolution escaped this checkout (nested-worktree hazard)"
     );
     assert!(td.is_dir(), "{} must exist in a checkout", td.display());
+}
+
+/// The DISCRIMINATING control for the marker rule: a worktree nested inside another
+/// checkout must resolve to ITS OWN root, not the outer one.
+///
+/// The test above cannot catch a revert of that rule — in a healthy checkout the retired
+/// fixtures-keyed walk returns the same path, so it would still pass. This one drives
+/// `workspace_root_from` over a synthetic layout where the two rules DISAGREE:
+///
+/// ```text
+/// outer/Cargo.toml            [workspace]
+/// outer/test-data/schemas/    <- the fixtures the retired walk would have latched onto
+/// outer/inner/Cargo.toml      [workspace]   <- the nested worktree's OWN root
+/// outer/inner/cqlite-core/Cargo.toml        (a member manifest, no [workspace])
+/// ```
+///
+/// Marker walk from `outer/inner/cqlite-core` ⇒ `outer/inner` (correct: this checkout).
+/// Fixtures-keyed walk ⇒ `outer` (wrong: the neighbour's tree, silently, and it EXISTS —
+/// which is exactly why the bug was invisible).
+#[test]
+fn nested_worktree_resolves_to_its_own_root_not_the_outer_checkout() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let outer = tmp.path().join("outer");
+    let inner = outer.join("inner");
+    let member = inner.join("cqlite-core");
+    std::fs::create_dir_all(outer.join("test-data").join("schemas")).expect("outer fixtures");
+    std::fs::create_dir_all(&member).expect("member dir");
+    std::fs::write(outer.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+        .expect("outer manifest");
+    std::fs::write(
+        inner.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"cqlite-core\"]\n",
+    )
+    .expect("inner manifest");
+    // A MEMBER manifest: no `[workspace]`, so the walk must pass through it.
+    std::fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"cqlite-core\"\n",
+    )
+    .expect("member manifest");
+
+    let resolved = workspace_root_from(&member).expect("a [workspace] ancestor exists");
+    assert_eq!(
+        resolved, inner,
+        "resolution escaped into the OUTER checkout — the marker rule regressed to a \
+         fixtures-keyed walk, which silently borrows a neighbour's test-data"
+    );
+    // Positive control on the layout itself: the outer fixtures really are present, so the
+    // assertion above discriminates the two rules instead of passing on an empty tree.
+    assert!(
+        outer.join("test-data").join("schemas").is_dir(),
+        "the discriminating layout requires the OUTER fixtures to exist"
+    );
+    assert!(
+        !inner.join("test-data").join("schemas").exists(),
+        "the discriminating layout requires the INNER fixtures to be ABSENT"
+    );
 }
 
 /// `readable_file` answers "readable REGULAR file", which is the same question the gate's

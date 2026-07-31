@@ -1,20 +1,31 @@
 # Tasks: schemas-root-contract (issues #3148, #3131)
 
 > Design decided in `design.md`: the committed schema fixtures resolve **checkout-relative**
-> (`CARGO_MANIFEST_DIR`-anchored ancestor walk), never from `CQLITE_DATASETS_ROOT` — #3148's proposed
+> (anchored on the WORKSPACE-ROOT `Cargo.toml` found by walking `CARGO_MANIFEST_DIR`'s ancestors — see
+> §7 N4; the first cut keyed that walk on `test-data/schemas` and was corrected in review), never
+> from `CQLITE_DATASETS_ROOT` — #3148's proposed
 > fix 4, taken as the owner's decision (AC (h)). One shared `#[path]`-included file hosted under
 > `test-data/support/` because it encodes the layout of `test-data` itself and is owned by neither crate.
 > The gate preflight becomes a belt-and-braces per-FILE readability assert with no opt-out.
 > AC → requirement map is at the top of `specs/test-fixture-roots/spec.md`.
 
 ## 1. The single roots contract (surface: `test-data/support/fixture_roots.rs`)
-- [x] Create the shared std-only module with `datasets_root`, `datasets_root_if_present`,
-      `sstables_root`, `schemas_root`, `schemas_root_resolved`, `schema_path`, `check_schema_files`.
-- [x] Resolve the checkout by walking `CARGO_MANIFEST_DIR`'s **ancestors** for the first holding
-      `test-data/schemas` (not a hardcoded `../test-data`), so a crate nested deeper than one level
-      still resolves and no `..` component is ever handed to the kernel.
-- [x] Honor `CQLITE_SCHEMAS_ROOT` only when set, non-empty AND a readable directory; fall through to the
-      checkout otherwise (a stale export must degrade, not pin every load to an unusable path).
+- [x] Create the shared std-only module. Delivered surface (as merged, after review round 1):
+      `datasets_root`, `datasets_root_if_present`, `sstables_root`, `schemas_root`,
+      `schemas_root_resolved`, `resolve_schemas_root` (the pure, env-free resolver), `schema_path`,
+      `readable_file`, `checkout_test_data_dir`, `workspace_root`, `workspace_root_from`. A
+      `check_schema_files` helper existed in the first cut and was DELETED in review round 1 (§7 N6):
+      zero callers, zero tests, no wiring evidence.
+- [x] Resolve the checkout by walking `CARGO_MANIFEST_DIR`'s **ancestors** (not a hardcoded
+      `../test-data`), so a crate nested deeper than one level still resolves and no `..` component is
+      ever handed to the kernel. **The walk keys on the workspace-root `Cargo.toml` marker, NOT on
+      `test-data/schemas`** — the fixtures-keyed version shipped in the first cut and was replaced in
+      review round 1 (§7 N4) because it let a sparse checkout, or a worktree nested inside another
+      checkout, silently resolve to the OUTER checkout's fixtures.
+- [x] Honor `CQLITE_SCHEMAS_ROOT` only when set, non-blank, **ABSOLUTE** AND a readable directory; fall
+      through to the checkout for an absolute-but-unusable value (a stale export must degrade, not pin
+      every load to an unusable path). A RELATIVE value is REJECTED fail-closed rather than resolved —
+      added in review round 1 (§7 B1).
 - [x] Treat an exported-but-EMPTY env value as unset for both roots (a scripting accident, never an
       intentional root).
 - [x] `schema_path` verifies readability and panics naming the resolved ABSOLUTE path, the root, the
@@ -132,7 +143,7 @@
       containing spaces or shell metacharacters.
 - [x] `cqlite-core/tests/issue_3148_fixture_roots_contract.rs` (7 tests) pins the Rust half of the
       resolution table via the PURE `resolve_schemas_root`, with no env mutation.
-- [x] Self-test grown 16 → 25 cases: relative-override (hook + shapes + blank + FULL-gate emit + the
+- [x] Self-test grown 16 → 25 cases in this round (30 after §8 and the round-2 corrections): relative-override (hook + shapes + blank + FULL-gate emit + the
       no-relative-labelled-absolute assert), the directory-named-like-a-`.cql` trap, `--verify-only`
       non-mutation asserted on the FILESYSTEM with a NOT-pre-created parent (the earlier case pre-`mkdir`ed
       its root and was blind to B2), unrecognized-argument rejection asserted against a POPULATED root so
@@ -168,3 +179,39 @@
       (`missing-schemas:` ×2 variants, `preflight: FAIL (…)`, `hint: expected …`) are emitted ONLY on the
       strict path, after the check actually ran and failed, and every value in them is derived from that
       performed check. Nothing else asserts an unverified fact.
+
+## 9. Review round 2 corrections (rust-reviewer: no blockers; 6 nits + roborev job 9's 2 findings)
+- [x] Rebased onto `origin/main` `8e85b9e` — roborev job 9 was VOID for certification (`origin/main`
+      advanced 4 commits mid-review, so `sha-assert` FAILed against a stale base). No conflicts.
+- [x] **NIT-A** — the AC-(b) "no relative path labelled absolute" case was VACUOUS: it matched
+      `--preflight-schemas` STDOUT, but `expected absolute path:` is `apply_schemas_preflight` STDERR,
+      so it passed unconditionally — including after a full revert of the fix. Re-pointed at the real
+      FULL-gate emit (stdout+stderr capture + the summary file) and PROVEN discriminating by reverting
+      the reject branch and watching it fail.
+- [x] **NIT-B** — the N4 marker rule had no discriminating control (in a healthy checkout the retired
+      fixtures-keyed walk returns the same path). Factored `workspace_root_from(start)` and added a
+      synthetic `outer/{Cargo.toml,test-data/schemas}` + `outer/inner/{Cargo.toml,cqlite-core}` layout
+      where the two rules DISAGREE; proven by reverting the rule and watching it fail.
+- [x] **NIT-C** — named the in-repo counterexample to "nearest `[workspace]` is always the enclosing
+      checkout": `fuzz/Cargo.toml` declares its own (#1614). Benign (loud failure, never a wrong-tree
+      borrow); recorded in both mirrors' comments.
+- [x] **NIT-D** — corrected the `--preflight-schemas-line` comment: it can NEVER observe a FAIL SUMMARY
+      because `emit_summary`/`_tree_meta_array` are defined after the arg dispatch. The two
+      `command not found` lines are gone: the hook stubs both so the strict-failure path exits non-zero
+      with one named token.
+- [x] **NIT-E** — de-staled this file: the deleted `check_schema_files` no longer listed as delivered,
+      the retired fixtures-keyed walk no longer described as the design, case counts corrected.
+- [x] **NIT-F** — narrowed the "named non-check" requirement to a lenient mode **that reached the
+      preflight**, so it stops contradicting its own `--lite` scenario (and `--only fmt`, which skips the
+      dataset preflight entirely).
+- [x] **B1 prose** — replaced the unearned "agree by construction" in `fixture_roots.rs` and `spec.md`
+      with what is actually true: two hand-written mirrors, EQUIVALENT and PINNED BY SELF-TESTS, walked
+      case by case over the whole input table.
+- [x] **roborev job 9 finding 1** — single-sourced override presence (`_gate_schemas_override`): the
+      reject helper trimmed before deciding presence while the root/source helpers tested the raw `-n`
+      value, so a directory literally named `"   "` would have been reported as the override while Rust
+      treated the var as unset. Pinned with a whitespace-named-directory case in a synthetic checkout.
+- [x] **roborev job 9 finding 2** — `find -H`: a `DATASET_ROOT` that is ITSELF a symlink was never
+      descended, so every count came back 0. The reported symptom understated it — verification FAILED
+      outright, so `--verify-only` called a good corpus unusable on exactly the symlinked layout #3148
+      documents. Fixed and pinned with a symlinked-root case.

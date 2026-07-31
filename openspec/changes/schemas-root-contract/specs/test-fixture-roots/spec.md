@@ -64,7 +64,12 @@ message SHALL name the offending value, state why relative values cannot be hono
 root, while cargo runs each test binary with CWD = the *package* directory. A relative value therefore
 resolves to two different places, and the gate would stamp a SUMMARY certifying one schemas root for a run
 whose tests read another — the "positively misleading `STATUS: OK`" defect this change exists to remove,
-reintroduced by its own fix. Rejection makes the two sides agree by construction rather than by review.
+reintroduced by its own fix. Rejection removes the one input class on which the two mirrors could not
+possibly agree. Note the guarantee's real strength: the gate's shell resolution and the Rust resolver are two
+HAND-WRITTEN mirrors kept **equivalent and pinned by self-tests** — not equivalent by construction. They have
+been walked case by case over the whole input table (unset, `""`, whitespace-only, `"  /abs  "`,
+absolute-non-dir, absolute-dir, relative) and agree on every one, and each case is asserted against the real
+gate.
 
 #### Scenario: A relative override fails the resolver
 - **GIVEN** `CQLITE_SCHEMAS_ROOT` is a relative path such as `packaged/schemas`, `./schemas` or `../schemas`
@@ -220,9 +225,16 @@ contract. A lenient mode SHALL NOT emit the schemas failure marker.
 
 ### Requirement: A summary line SHALL NOT assert a check the running mode did not perform
 The SUMMARY block SHALL NOT carry a positive assertion about the schemas root in a mode that did not
-validate it. In a lenient mode the block SHALL instead carry an explicitly NAMED non-check. Omitting the
-line silently is insufficient: a reader of a pasted block would assume the FULL contract held, which is the
-same false-confidence failure as a misleading `STATUS: OK`.
+validate it. In a lenient mode **that reached the preflight** the block SHALL instead carry an explicitly
+NAMED non-check. Omitting the line silently is insufficient there: a reader of a pasted block would assume
+the FULL contract held, which is the same false-confidence failure as a misleading `STATUS: OK`.
+
+**Why the qualifier is load-bearing, not hedging.** Two lenient modes never reach the preflight at all, and
+for them there is nothing to name: `--lite` returns before it, and an `--only` selection with no
+dataset-backed component skips the whole dataset preflight block. Those blocks carry no schemas line, which
+is correct — the requirement is about a mode that ran the preflight and was let through leniently, not about
+modes for which the preflight is not part of the run. Without the qualifier this requirement would
+contradict its own `--lite` scenario below.
 
 #### Scenario: A lenient --only run names the non-check instead of asserting readability
 - **GIVEN** an `--only` selection naming a dataset-backed component, with a schemas root holding none of the consumed `.cql` files

@@ -187,14 +187,21 @@ has_required_content() {
   [ -s "${WIDE_PARTITION_GOLDEN}" ] || return 1
 
   local core_fixture
-  core_fixture="$(find "${DATASET_ROOT}/sstables/test_basic" -path '*simple_table-*-Data.db' -print -quit 2>/dev/null || true)"
+  core_fixture="$(find -H "${DATASET_ROOT}/sstables/test_basic" -path '*simple_table-*-Data.db' -print -quit 2>/dev/null || true)"
   [ -n "${core_fixture}" ] || return 1
 
   local data_count index_count summary_count statistics_count
-  data_count="$(find "${DATASET_ROOT}" -name '*-Data.db' 2>/dev/null | wc -l | tr -d ' ')"
-  index_count="$(find "${DATASET_ROOT}" -name '*-Index.db' 2>/dev/null | wc -l | tr -d ' ')"
-  summary_count="$(find "${DATASET_ROOT}" -name '*-Summary.db' 2>/dev/null | wc -l | tr -d ' ')"
-  statistics_count="$(find "${DATASET_ROOT}" -name '*-Statistics.db' 2>/dev/null | wc -l | tr -d ' ')"
+  # `-H` (roborev job 9, finding 2): a DATASET_ROOT that is ITSELF a symlink — e.g.
+  # `ln -s /data/datasets <somewhere>/datasets`, the natural operator layout documented as
+  # #3148's "symlink trap" — is otherwise stat'ed as a plain file and never descended, so
+  # every count came back 0 and a perfectly good corpus was reported UNUSABLE. `-H`
+  # follows the COMMAND-LINE symlink only (not symlinks found during traversal), which is
+  # exactly the semantics wanted here. Verified: without it, `--verify-only` on a
+  # symlinked root failed; with it, it reports the real 155.
+  data_count="$(find -H "${DATASET_ROOT}" -name '*-Data.db' 2>/dev/null | wc -l | tr -d ' ')"
+  index_count="$(find -H "${DATASET_ROOT}" -name '*-Index.db' 2>/dev/null | wc -l | tr -d ' ')"
+  summary_count="$(find -H "${DATASET_ROOT}" -name '*-Summary.db' 2>/dev/null | wc -l | tr -d ' ')"
+  statistics_count="$(find -H "${DATASET_ROOT}" -name '*-Statistics.db' 2>/dev/null | wc -l | tr -d ' ')"
 
   [ "${data_count}" -gt 0 ] || return 1
   [ "${index_count}" -gt 0 ] || return 1
@@ -259,7 +266,8 @@ guarantee_usable_root() {
   fi
 
   local data_count
-  data_count="$(find "${DATASET_ROOT}" -name '*-Data.db' 2>/dev/null | wc -l | tr -d ' ')"
+  # -H: see has_required_content — a symlinked DATASET_ROOT must not report 0.
+  data_count="$(find -H "${DATASET_ROOT}" -name '*-Data.db' 2>/dev/null | wc -l | tr -d ' ')"
 
   echo "Dataset root VERIFIED (${phase}): ${DATASET_ROOT} — ${data_count} *-Data.db present"
   echo "Use EXACTLY this root (the only one this run guarantees):"
