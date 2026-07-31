@@ -166,8 +166,9 @@ pub async fn build_shapes_fixture() -> (tempfile::TempDir, PathBuf) {
     // `write_engine::merge::read_assembly::assemble_read_cells`. So the pre-#3094
     // defect WAS an arm divergence, of the same shape as #3140; the two differ only
     // in who WROTE the tombstone (#3140 Cassandra, #3094 CQLite), which is why
-    // #3140's `BypassReason::StaticColumnsWithDeletions` fail-closed guard is
-    // independent of this and stays pinned by `statics/select-star`.)
+    // #3140's `BypassReason::StaticColumnsWithDeletions` fail-closed guard was
+    // independent of this — and, once #3122 landed that same fix, was itself retired,
+    // so `statics/select-star` is now a plain both-arms differential.)
     engine
         .write(base(
             1,
