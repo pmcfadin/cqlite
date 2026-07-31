@@ -250,6 +250,18 @@
 #                      which pins the perf-corpus generator's TABLES validation, its
 #                      manifest writer's refusal of an empty table list, and the
 #                      tight scoping of its multi-GB stale-corpus pruning.
+#                      Also runs (no python3/network/datasets needed)
+#                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
+#                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
+#                      "${DATASET_ROOT}"` used to DELETE the ~875 git-tracked files
+#                      under test-data/datasets (JSONL goldens, force-added parity
+#                      *.db, the #2389 commitlog fixtures) because the restore path
+#                      was CI-gated off locally and silently prefix-bailed in CI,
+#                      red-ing the gate on a pristine main. Hermetic: throwaway git
+#                      repo + locally-built partial-overlap tarball + stub curl, so
+#                      the real rm -rf/extract/restore run against a sandbox and
+#                      never the checkout's datasets. Proves non-vacuity with a
+#                      guard-disabled mutant.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -4724,6 +4736,26 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_3068.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (perf-corpus generator guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # fetch-datasets tracked-fixture guard (#2878): hermetic (throwaway git repo +
+  # locally-built partial-overlap tarball + stub curl — no network, and the real
+  # test-data/datasets is never touched), no python3 needed, always runs. Pins the
+  # capture-before-`rm -rf`/restore-after guard in fetch-datasets.sh: without it a
+  # fetch DELETES the git-tracked reference fixtures under test-data/datasets, so
+  # this very gate FAILs core-tests + cli-tests on a pristine main and the checkout
+  # is left with stageable deletions of tracked files. A failure FAILs the
+  # component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_fetch_datasets_tracked_guard.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_fetch_datasets_tracked_guard.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (fetch-datasets tracked-fixture guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
