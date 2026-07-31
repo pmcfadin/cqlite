@@ -78,7 +78,10 @@ write timing simple (one claim → one outcome → one write → exit).
    that lingers after its marker write risks a `timeout`-killed abnormal judgment on an
    otherwise-successful iteration.
 3. **`reason` field for `blocked`**: keep it short (one line) — it flows verbatim into
-   an ntfy notification body (`agent-notify --category completion "<title>" "<reason>"`).
+   an ntfy notification body. **HISTORICAL (superseded by #3119)**: this line used to
+   prescribe `agent-notify --category completion "<title>" "<reason>"` (notify-flag-allow) —
+   do NOT do that. Upstream `agent-notify` v1.1.0 has no `--category` arm and swallows it.
+   The current call is `bash scripts/lib/gate-notify.sh --publish <PASS|FAIL> "<title>" "<reason>"`.
    Put the actionable ask in it (e.g. "roborev flagged a design call on #1234: needs
    owner decision on X"), not a restatement of the whole finding.
 4. **`duration_s`**: worker-measured wall clock for its own claim→finalize/block/no-work

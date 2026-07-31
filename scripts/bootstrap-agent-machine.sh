@@ -898,7 +898,19 @@ else
   fi
   NOTIFY_TARGET="${CQLITE_NOTIFY_WEBHOOK:-${CODEX_NOTIFY_WEBHOOK:-}}"
   if [ -n "$NOTIFY_TARGET" ]; then
-    ok "notify target configured (${NOTIFY_TARGET%/*}/…)"
+    # Report the HOST only, with any URL userinfo stripped. A target of the form
+    # https://user:token@host/topic would otherwise print credentials into a
+    # terminal or a CI log (roborev finding); the topic is likewise not secret but
+    # not useful here, so only scheme://host is shown.
+    NOTIFY_SCHEME="${NOTIFY_TARGET%%://*}"
+    NOTIFY_REST="${NOTIFY_TARGET#*://}"
+    NOTIFY_HOSTPART="${NOTIFY_REST%%/*}"
+    case "$NOTIFY_HOSTPART" in *@*) NOTIFY_HOSTPART="${NOTIFY_HOSTPART##*@}" ;; esac
+    if [ "$NOTIFY_SCHEME" = "$NOTIFY_TARGET" ]; then
+      ok "notify target configured (host not parseable from the value; not echoed)"
+    else
+      ok "notify target configured ($NOTIFY_SCHEME://$NOTIFY_HOSTPART/…)"
+    fi
   else
     warn "no notify target configured — gate/worker notifications are silent no-ops on this machine"
     info "fleet mechanism is /etc/environment; add (and re-login):"

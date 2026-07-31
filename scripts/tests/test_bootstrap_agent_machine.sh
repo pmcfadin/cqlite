@@ -1179,6 +1179,19 @@ if printf '%s' "$run_out" | grep -q 'Notification channel' && [ "$run_rc" -eq 0 
 else
   bad "notify: the section is not informational (rc=$run_rc)"
 fi
+# A notify target may carry URL userinfo (https://user:token@host/topic). Printing
+# it would leak a credential into a terminal or a CI log (roborev finding), so the
+# reported value must name the HOST only.
+redact_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
+  CODEX_NOTIFY_WEBHOOK='https://alice:s3cr3t-token@ntfy.example.com/private-topic' \
+  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+if printf '%s' "$redact_out" | grep -q 'notify target configured' \
+   && ! printf '%s' "$redact_out" | grep -qE 's3cr3t-token|alice:'; then
+  ok "notify: URL userinfo is redacted from the reported target"
+else
+  bad "notify: the reported target leaked URL userinfo"
+  printf '%s\n' "$redact_out" | grep -i 'notify target' | head -2
+fi
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

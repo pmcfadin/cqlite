@@ -387,15 +387,23 @@ fi
 # a `high` page published as ntfy priority 3 with a green check. The wrapper owns
 # the payload and publishes to the ntfy server ROOT; `agent-notify` survives only
 # as its optional, bounded, positional local desktop/sound adjunct.
-# CONVENTION: $NOTIFY_CMD takes THREE positional args — <severity> <title>
-# <message> — and is word-split like $CLAIM_CMD. Tests override it with a stub.
+# CONVENTION: the notify command takes THREE positional args — <severity> <title>
+# <message>. The DEFAULT is built as an ARRAY (never a word-split string) so a
+# REPO_ROOT containing a space cannot silently degrade every page to a WARN; an
+# externally supplied NOTIFY_CMD string remains word-split, as the test seam and
+# $CLAIM_CMD both are.
 NOOP_NOTIFY_MARKER="__noop_notify__"
 if [[ -z "${NOTIFY_CMD:-}" ]]; then
   if [[ -r "$REPO_ROOT/scripts/lib/gate-notify.sh" ]]; then
-    NOTIFY_CMD="bash $REPO_ROOT/scripts/lib/gate-notify.sh --publish"
+    NOTIFY_ARGV=(bash "$REPO_ROOT/scripts/lib/gate-notify.sh" --publish)
+    NOTIFY_CMD="${NOTIFY_ARGV[*]}"   # display/marker value only, never re-split
   else
     NOTIFY_CMD="$NOOP_NOTIFY_MARKER"
+    NOTIFY_ARGV=()
   fi
+else
+  # shellcheck disable=SC2206  # deliberate word-split of a caller-supplied string
+  NOTIFY_ARGV=($NOTIFY_CMD)
 fi
 
 # ---------------------------------------------------------------------------
@@ -414,11 +422,9 @@ notify() {
     fi
     return 0
   fi
-  # Word-split on purpose (same convention as $CLAIM_CMD): the default value is a
-  # multi-word `bash <path> --publish`. Positional args only — never a flag the
-  # notifier might swallow.
-  # shellcheck disable=SC2086
-  $NOTIFY_CMD "$category" "$title" "$message" || log "WARN: notify command failed (non-fatal)"
+  # Positional args only — never a flag the notifier might swallow. NOTIFY_ARGV is
+  # a properly quoted array, so a path with a space is safe.
+  "${NOTIFY_ARGV[@]}" "$category" "$title" "$message" || log "WARN: notify command failed (non-fatal)"
 }
 
 is_gt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)>(b+0)) exit 0; exit 1 }'; }
@@ -893,8 +899,22 @@ report_pending_at_exit() {
     "these PRs were OPEN with auto-merge armed and had not yet landed when the run stopped — check they merge: ${summary}"
 }
 
+# NOTIFY BOUNDS ON THE EXIT PATH (#2666 / #3119). Issue #2666 pins a <15s
+# supervisor exit latency (test_worker_supervisor.sh Test 22 — stubbed there, so it
+# cannot observe the real notifier). finalize_exit fires up to TWO notifies
+# (report_pending_at_exit + the stop page), and each default-bounded notify is up to
+# 10s publish + 5s adjunct = 30s worst case against a black-holed ntfy host — over
+# the pinned ceiling. So the exit path tightens its own bounds: 2 x (4s + 2s) = 12s
+# worst case, inside 15s with headroom, still strictly better than the old
+# UNBOUNDED `curl -s`. Steady-state notifies keep the roomier defaults.
+NOTIFY_EXIT_CURL_TIMEOUT="${NOTIFY_EXIT_CURL_TIMEOUT:-4}"
+NOTIFY_EXIT_ADJUNCT_TIMEOUT="${NOTIFY_EXIT_ADJUNCT_TIMEOUT:-2}"
+
 finalize_exit() {
   local reason="$1" code="$2"
+  export GATE_NOTIFY_CURL_TIMEOUT="$NOTIFY_EXIT_CURL_TIMEOUT"
+  export GATE_NOTIFY_PAYLOAD_TIMEOUT="$NOTIFY_EXIT_CURL_TIMEOUT"
+  export GATE_NOTIFY_ADJUNCT_TIMEOUT="$NOTIFY_EXIT_ADJUNCT_TIMEOUT"
   # Release this machine's claim ref on a clean stop (issue #2655). `reap`
   # refuses when the claim's issue still has an open PR, so an unfinished endgame
   # is preserved for adoption rather than orphaned.
