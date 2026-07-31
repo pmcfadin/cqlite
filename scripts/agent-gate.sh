@@ -3995,24 +3995,38 @@ _tree_result() {
 # Fire ONE advisory push at final-SUMMARY time so a backgrounded FULL gate
 # becomes a PUSH signal, not a passive poll target: the moment RESULT lands, the
 # waiting closer/worker is called back instead of idle-polling the summary file.
-# Wraps `agent-notify` (the same ntfy wrapper worker-supervisor.sh uses).
+# Delegates delivery to the REPO-OWNED contract in scripts/lib/gate-notify.sh
+# (#3119), which builds the ntfy payload itself and publishes it to the server
+# ROOT. It does NOT call `agent-notify --category` any more: the installed
+# upstream v1.1.0 has no `--category` arm, so that flag fell through to its
+# manual "$1"/"$2" mode — title became the literal `--category`, the body became
+# the category VALUE, the real title/body were dropped, and a FAIL published
+# priority 3 with a green check (a red gate paging as a routine success).
+# `agent-notify` survives only as the wrapper's optional, bounded, positional
+# local desktop/sound adjunct.
 # FULL gate ONLY — the sole call site guards out --lite/--delta/--only/selftest,
 # which are iteration aids and never the gate of record.
 #
-# Advisory by contract: if agent-notify is absent OR fails, this is a SILENT
-# no-op — the summary file stays the artifact of record, so a missing daemon or
-# a broken notifier NEVER changes the gate's verdict or exit status.
+# Advisory by contract: an absent/unreadable wrapper, an unset notify target, a
+# missing curl/python3, a notifier that fails OR REJECTS ITS ARGUMENTS, and a
+# publish that never completes are ALL silent no-ops — the summary file stays the
+# artifact of record, so the notify path NEVER changes the gate's verdict or exit
+# status. This function always returns 0 and never exits, traps, or writes state.
 #   title: "gate <RESULT> <branch>@<short-sha>"
 #   body:  "RESULT: <RESULT>" (+ "— failing: c1,c2" when any component FAILed)
 gate_push_signal() {
   local result="$1" branch="$2" short_sha="$3" fail_components="$4"
-  command -v agent-notify >/dev/null 2>&1 || return 0
-  local category=completion
-  case "$result" in PASS) category=completion ;; *) category=error ;; esac
+  local severity=PASS
+  case "$result" in PASS) severity=PASS ;; *) severity=FAIL ;; esac
   local title="gate $result ${branch}@${short_sha}"
   local body="RESULT: $result"
   [ -n "$fail_components" ] && body="$body — failing: $fail_components"
-  agent-notify --category "$category" "$title" "$body" >/dev/null 2>&1 || true
+  local notify_lib="${REPO_ROOT:-.}/scripts/lib/gate-notify.sh"
+  [ -r "$notify_lib" ] || return 0
+  # shellcheck disable=SC1090
+  . "$notify_lib" >/dev/null 2>&1 || return 0
+  command -v gate_notify_publish >/dev/null 2>&1 || return 0
+  gate_notify_publish "$severity" "$title" "$body" >/dev/null 2>&1 || true
   return 0
 }
 
