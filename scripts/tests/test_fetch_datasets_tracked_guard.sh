@@ -186,6 +186,10 @@ run_fetch() {
     cd "$cwd" || exit 90
     unset CI GITHUB_ACTIONS CQLITE_DATASETS_ALLOW_UNPROTECTED
     export PATH="$bin:$PATH"
+    # Keep the script's own temporaries inside the sandbox: a run killed by a
+    # signal (the abort/re-entrancy cases) never reaches its cleanup, so without
+    # this each suite run would leak a /tmp/cqlite-tracked-datasets.* file.
+    export TMPDIR="$T"
     export STUB_CURL_PAYLOAD="$payload"
     if [ "$root" = "-" ]; then
       env -u CQLITE_DATASETS_ROOT "$@" \
@@ -713,6 +717,46 @@ else
   run_fetch "$T" "$NESTB"
   assert_refusal "nested-bare-repo" "contains a nested git repository" "$NESTB/mirrors/other.git/HEAD"
   assert_structural_not_overridable "nested-bare-repo" "$T" "$NESTB" "$NESTB/mirrors/other.git/HEAD"
+
+  # === Case 18: a target INSIDE git's administrative storage ================
+  # Such a target holds no tracked files, so it used to classify as
+  # nothing-to-protect — and the rm -rf then deleted the object store the restore
+  # strategy itself depends on: the guard destroying its own recovery source while
+  # reporting success. (a) a LINKED WORKTREE's admin dir, reached via the `.git`-file
+  # indirection; (b) a BARE repository's object store.
+  R18="$T/case18-repo"
+  make_repo "$R18"
+  git -C "$R18" worktree add -q "$T/case18-worktree" >/dev/null 2>&1
+  WT_ADMIN="$R18/.git/worktrees/case18-worktree"
+  if [ -d "$WT_ADMIN" ] && [ -f "$T/case18-worktree/.git" ]; then
+    ok "admin-worktree: fixture has a linked worktree whose .git is a FILE"
+    mkdir -p "$WT_ADMIN/datasets"
+    printf 'worktree admin canary\n' >"$WT_ADMIN/datasets/canary.txt"
+    run_fetch "$T" "$WT_ADMIN/datasets"
+    assert_refusal "admin-worktree" "administrative storage" "$WT_ADMIN/datasets/canary.txt"
+    if [ -f "$WT_ADMIN/gitdir" ]; then
+      ok "admin-worktree: the worktree's admin data survives"
+    else
+      bad "admin-worktree: the worktree's admin data was destroyed"
+    fi
+    assert_structural_not_overridable "admin-worktree" "$T" "$WT_ADMIN/datasets" "$WT_ADMIN/datasets/canary.txt"
+  else
+    bad "admin-worktree: could not build a linked-worktree fixture"
+  fi
+
+  MIRROR="$T/case18-mirror.git"
+  mkdir -p "$MIRROR"
+  git -C "$MIRROR" init -q --bare
+  mkdir -p "$MIRROR/objects/datasets"
+  printf 'object store canary\n' >"$MIRROR/objects/datasets/canary.txt"
+  run_fetch "$T" "$MIRROR/objects/datasets"
+  assert_refusal "admin-bare" "administrative storage" "$MIRROR/objects/datasets/canary.txt"
+  if [ -f "$MIRROR/HEAD" ] && [ -d "$MIRROR/objects" ]; then
+    ok "admin-bare: the bare repository's object store survives"
+  else
+    bad "admin-bare: the bare repository's object store was destroyed"
+  fi
+  assert_structural_not_overridable "admin-bare" "$T" "$MIRROR/objects/datasets" "$MIRROR/objects/datasets/canary.txt"
 fi
 
 # === Case 16: UNMERGED (conflicted) index entries ============================
@@ -768,24 +812,87 @@ fi
 assert_tracked_intact "$R17" "exported-GIT_DIR"
 assert_archive_extracted "$R17/test-data/datasets" "exported-GIT_DIR"
 
-# --- Case 17b: NON-VACUITY for the GIT_DIR scrub -----------------------------
+# === Case 19: an exported, VALID but FOREIGN GIT_INDEX_FILE ==================
+# The dangerous spelling: `ls-files` reads the OTHER index and captures ZERO
+# files, then the post-extract `git diff` verification consults that SAME wrong
+# index and reports clean — so tracked fixtures were deleted and the run declared
+# success (#2878 through another door: the oracle pointed at the wrong index; an
+# EMPTY GIT_INDEX_FILE, by contrast, already failed closed). The COUNT is the
+# load-bearing assertion here: a capture of 0 that then "verifies clean" is the
+# whole bug, so a clean tree alone would not pin it.
+R19="$T/case19-repo"
+make_repo "$R19"
+FOREIGN_INDEX="$T/case19-foreign-index"
+(
+  export GIT_INDEX_FILE="$FOREIGN_INDEX"
+  git -C "$R19" read-tree --empty
+)
+if [ -f "$FOREIGN_INDEX" ] && [ -z "$(GIT_INDEX_FILE="$FOREIGN_INDEX" git -C "$R19" ls-files)" ]; then
+  ok "foreign-index: fixture is a valid index that lists ZERO files"
+else
+  bad "foreign-index: could not build a valid-but-empty foreign index"
+fi
+run_fetch "$R19" "$R19/test-data/datasets" GIT_INDEX_FILE="$FOREIGN_INDEX"
+if [ "$RC" -eq 0 ]; then
+  ok "foreign-index: fetch still succeeds"
+else
+  bad "foreign-index: fetch exited $RC"
+  printf '     %s\n' "$OUT"
+fi
+case "$OUT" in
+  *"(of ${#TRACKED_RELATIVE[@]} tracked"*)
+    ok "foreign-index: captured all ${#TRACKED_RELATIVE[@]} tracked files (read the REAL index)" ;;
+  *) bad "foreign-index: capture count wrong — the foreign index was used; output: $OUT" ;;
+esac
+assert_tracked_intact "$R19" "foreign-index"
+
+# --- Case 19b: NON-VACUITY for the GIT_* scrub (both spellings) ---------------
+# Neutering the scrub must reproduce BOTH reported failures: a refusal under an
+# exported GIT_DIR, and — worse — a SILENT success that leaves deletions behind
+# under a foreign GIT_INDEX_FILE, with the restore short-circuiting on the empty
+# captured list (no "Restoring" line at all).
 MUTANT_GITENV="$T/fetch-datasets-mutant-gitenv.sh"
-sed 's/^  env -u GIT_DIR -u GIT_WORK_TREE git "\$@"$/  git "$@"/' "$FETCH" >"$MUTANT_GITENV"
+sed 's/^    unset \${!GIT_@} .*$/    : mutant-no-git-env-scrub/' "$FETCH" >"$MUTANT_GITENV"
 if ! cmp -s "$FETCH" "$MUTANT_GITENV"; then
-  ok "non-vacuity: built a GIT_DIR-scrub-disabled mutant"
-  R17B="$T/case17b-repo"
-  make_repo "$R17B"
+  ok "non-vacuity: built a GIT_*-scrub-disabled mutant"
   FETCH_SAVED="$FETCH"
   FETCH="$MUTANT_GITENV"
+
+  R17B="$T/case17b-repo"
+  make_repo "$R17B"
   run_fetch "$R17B" "$R17B/test-data/datasets" GIT_DIR="$R17B/.git"
-  FETCH="$FETCH_SAVED"
   if [ "$RC" -ne 0 ]; then
     ok "non-vacuity: mutant refuses the fetch outright under an exported GIT_DIR"
   else
     bad "non-vacuity: mutant also succeeded — the exported-GIT_DIR case proves nothing"
   fi
+
+  R19B="$T/case19b-repo"
+  make_repo "$R19B"
+  FOREIGN_INDEX_B="$T/case19b-foreign-index"
+  (
+    export GIT_INDEX_FILE="$FOREIGN_INDEX_B"
+    git -C "$R19B" read-tree --empty
+  )
+  run_fetch "$R19B" "$R19B/test-data/datasets" GIT_INDEX_FILE="$FOREIGN_INDEX_B"
+  MUT19_MISSING=0
+  for rel in "${TRACKED_RELATIVE[@]}"; do
+    [ -f "$R19B/test-data/datasets/$rel" ] || MUT19_MISSING=$((MUT19_MISSING + 1))
+  done
+  if [ "$RC" -eq 0 ] && [ "$MUT19_MISSING" -gt 0 ] \
+    && [ -n "$(git -C "$R19B" status --porcelain 2>&1)" ]; then
+    ok "non-vacuity: mutant reports SUCCESS while deleting $MUT19_MISSING tracked fixture(s) (the exact silent-loss shape)"
+  else
+    bad "non-vacuity: mutant did not reproduce the silent loss (exit $RC, missing $MUT19_MISSING)"
+  fi
+  case "$OUT" in
+    *"Restoring "*) bad "non-vacuity: mutant attempted a restore — the empty-list short-circuit is not what happened" ;;
+    *) ok "non-vacuity: mutant captured an EMPTY list, so restore+verification both short-circuited" ;;
+  esac
+
+  FETCH="$FETCH_SAVED"
 else
-  bad "non-vacuity: could not build the GIT_DIR-scrub-disabled mutant (guard_git changed?)"
+  bad "non-vacuity: could not build the GIT_*-scrub-disabled mutant (guard_git changed?)"
 fi
 
 # === Case 13: DATASET_ROOT == / =============================================

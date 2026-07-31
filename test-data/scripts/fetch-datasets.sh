@@ -54,15 +54,36 @@ fail_unsafe_dataset_root() {
   exit 1
 }
 
-# EVERY git invocation in this script goes through this wrapper (issue #2878). An
-# exported GIT_DIR/GIT_WORK_TREE — routine inside git hooks and on some CI runners
-# — makes `rev-parse --show-toplevel` report the CURRENT DIRECTORY as a work-tree
-# root, which made the tracked-fixture guard refuse EVERY fetch while citing a
-# work tree that is not one. Scrubbing the two variables per invocation keeps the
-# fix scoped to this script's own probes and leaves the caller's environment
-# untouched.
+# EVERY git invocation in this script goes through this wrapper (issue #2878).
+#
+# POSTURE: clear the ENTIRE `GIT_*` namespace, rather than blacklisting names.
+# Inherited git environment is routine (hooks, `rebase --exec`, `filter-branch`,
+# some CI runners) and it can redirect every input this guard depends on:
+#   * GIT_DIR/GIT_WORK_TREE made `rev-parse --show-toplevel` report the CURRENT
+#     DIRECTORY as a work-tree root, so the guard refused EVERY fetch;
+#   * a VALID but FOREIGN GIT_INDEX_FILE was worse than that — `ls-files` read the
+#     other index and captured ZERO files, then the post-extract `git diff`
+#     verification consulted that same wrong index and reported CLEAN, so tracked
+#     fixtures were deleted and the run declared success. That is #2878 itself
+#     reproduced through another door: an oracle pointed at the wrong index.
+#   * GIT_OBJECT_DIRECTORY / GIT_ALTERNATE_OBJECT_DIRECTORIES / GIT_COMMON_DIR
+#     redirect object and admin storage the same way.
+# A `-u` blacklist is an ever-growing list that fails silently the day git adds
+# another variable, and NONE of this script's four operations (rev-parse, ls-files,
+# restore --worktree, diff) needs any GIT_* input, so clearing the namespace has no
+# legitimate cost. Where it is visible, it fails LOUDLY (e.g. a checkout that
+# needed a `safe.directory` supplied via GIT_CONFIG_GLOBAL now errors instead of
+# silently mis-reading), and loud beats silent data loss.
+# The subshell keeps the caller's environment untouched.
 guard_git() {
-  env -u GIT_DIR -u GIT_WORK_TREE git "$@"
+  (
+    # `${!GIT_@}` enumerates every GIT_-prefixed variable in scope, inherited ones
+    # included; unquoted on purpose (names cannot word-split), and `unset` with no
+    # arguments is a no-op.
+    # shellcheck disable=SC2086
+    unset ${!GIT_@} 2>/dev/null || true
+    git "$@"
+  )
 }
 
 canonicalize_dataset_root() {
@@ -332,6 +353,30 @@ git_repository_reason() {
   return 1
 }
 
+# Prints the git ADMINISTRATIVE directory at or above the given path, else fails.
+# A target inside git's own storage (`/repo/.git/…`, `/mirror.git/objects/…`, a
+# submodule's `.git/modules/…`, a linked worktree's `.git/worktrees/…`) holds no
+# tracked files, so it used to classify as "nothing to protect" — and the `rm -rf`
+# then deleted the object store that the restore strategy itself depends on: the
+# guard destroying its own recovery source while reporting success. Filesystem-only
+# (a directory named `.git`, or the admin layout HEAD+objects/) so it fires even
+# when git is absent — a missing git binary must never downgrade a STRUCTURAL
+# refusal into an overridable one.
+git_admin_dir_at_or_above() {
+  local head="$1"
+  while :; do
+    if [ -d "${head}" ] \
+      && { [ "${head##*/}" = ".git" ] || { [ -f "${head}/HEAD" ] && [ -d "${head}/objects" ]; }; }; then
+      printf '%s\n' "${head}"
+      return 0
+    fi
+    case "${head}" in
+      /|.|"") return 1 ;;
+    esac
+    head="$(dirname "${head}")"
+  done
+}
+
 # Prints the path of the first git repository found STRICTLY BENEATH the given
 # directory (depth >= 2 — a nested checkout, submodule or bare mirror, not the
 # directory's own repository), else fails. `rm -rf` on such a target destroys a
@@ -407,6 +452,11 @@ capture_tracked_dataset_files() {
     refuse_structural_dataset_root "'${dataset_abs}' contains a nested git repository at '${nested}' — deleting it would destroy that checkout irrecoverably"
     return 0
   fi
+  local admin_dir
+  if admin_dir="$(git_admin_dir_at_or_above "${dataset_abs}")"; then
+    refuse_structural_dataset_root "'${dataset_abs}' is at or beneath git's administrative storage '${admin_dir}' — deleting it would corrupt the repository and destroy the object store this guard restores FROM"
+    return 0
+  fi
 
   if ! command -v git >/dev/null 2>&1; then
     if ancestor_has_git_dir "${dataset_abs}"; then
@@ -431,6 +481,21 @@ capture_tracked_dataset_files() {
     refuse_unprotected_dataset_root "could not resolve a physical path for the enclosing repository '${repo_root}'"
     return 0
   fi
+
+  # STRUCTURAL, git-informed complement to git_admin_dir_at_or_above: ASK git where
+  # its administrative directories are, so a `.git`-FILE indirection (linked
+  # worktrees, submodules) is covered even though the admin storage lives outside
+  # the work tree and has no recognisable layout at the target's ancestors.
+  local admin_kind admin_raw admin_phys
+  for admin_kind in absolute-git-dir git-common-dir; do
+    admin_raw="$(guard_git -C "${probe}" rev-parse "--${admin_kind}" 2>/dev/null)" || continue
+    [ -n "${admin_raw}" ] || continue
+    admin_phys="$(physical_path "${admin_raw}")" || continue
+    if path_relative_inside "${admin_phys}" "${dataset_abs}" >/dev/null; then
+      refuse_structural_dataset_root "'${dataset_abs}' is at or beneath git's ${admin_kind} '${admin_phys}' — deleting it would corrupt the repository and destroy the object store this guard restores FROM"
+      return 0
+    fi
+  done
 
   # The probe IS inside this work tree, and dataset_abs only appends components
   # to it — so a containment failure here means the two paths disagree in a way
