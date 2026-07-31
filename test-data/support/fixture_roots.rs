@@ -29,8 +29,29 @@
 //! **Owner decision (#3148 AC (h), proposed fix 4): the schemas root is resolved
 //! CHECKOUT-RELATIVE, never from `CQLITE_DATASETS_ROOT`.** A checkout always has
 //! these files, so the failure mode is structurally impossible and the symlink trap
-//! disappears rather than being papered over — this module contains no `..` climbing
-//! from the datasets root, so there is nothing left to mis-resolve.
+//! disappears rather than being papered over — nothing here climbs `..` from the
+//! datasets root, so there is nothing left to mis-resolve.
+//!
+//! # Two rules that keep the resolution honest
+//!
+//! * **The checkout is identified by a checkout MARKER, not by the fixtures.** Keying
+//!   the ancestor walk on `test-data/schemas` looked convenient and was wrong: a sparse
+//!   checkout, or a worktree created *inside* another checkout, would skip past its own
+//!   root and silently resolve BOTH roots to the OUTER checkout's `test-data` —
+//!   wrong-but-existing fixtures, reported as `Checkout`, no warning. That is exactly
+//!   the failure class this module exists to eliminate, so the walk keys on the
+//!   workspace-root `Cargo.toml` (the nearest ancestor manifest declaring
+//!   `[workspace]`) and a missing `test-data/schemas` under it fails LOUDLY at
+//!   [`schema_path`] instead of being papered over by a neighbour's copy.
+//! * **A `CQLITE_SCHEMAS_ROOT` override MUST be absolute.** A *relative* override is
+//!   rejected fail-closed rather than resolved, because it cannot mean the same thing on
+//!   both sides of the contract: `scripts/agent-gate.sh` evaluates it with CWD =
+//!   repository root, while cargo runs each test binary with CWD = the *package*
+//!   directory. A relative value therefore let the gate stamp
+//!   `schemas: 6/6 … under packaged/schemas` while the tests silently read the
+//!   checkout's schemas — the block certifying root A for a run that used root B, i.e.
+//!   the "positively misleading `STATUS: OK`" defect of #3148 reintroduced by its own
+//!   fix. Rejecting relative values makes the two sides agree by construction.
 //!
 //! This file is deliberately hosted under `test-data/` rather than inside either
 //! crate: it encodes the layout of `test-data/` itself, it is owned by neither
@@ -73,7 +94,7 @@ pub const SCHEMAS_ROOT_ENV: &str = "CQLITE_SCHEMAS_ROOT";
 /// an operator can tell an override apart from the checkout default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchemasRootSource {
-    /// `CQLITE_SCHEMAS_ROOT` was set, non-empty, and named a readable directory.
+    /// `CQLITE_SCHEMAS_ROOT` was set, ABSOLUTE, and named a readable directory.
     EnvOverride,
     /// Checkout-relative: the `test-data/schemas` of the enclosing checkout.
     Checkout,
@@ -93,40 +114,72 @@ impl SchemasRootSource {
 
 /// A non-empty env var value, or `None`. An empty value is treated as unset: an
 /// exported-but-empty variable is a scripting accident, never an intentional root.
-fn env_dir(key: &str) -> Option<PathBuf> {
+fn env_dir(key: &str) -> Option<String> {
     match std::env::var(key) {
-        Ok(v) if !v.trim().is_empty() => Some(PathBuf::from(v)),
+        Ok(v) if !v.trim().is_empty() => Some(v),
         _ => None,
     }
 }
 
-/// The `test-data` directory of the enclosing checkout.
+/// True when `p` is a regular file that can actually be OPENED for reading.
 ///
-/// Walks up from `CARGO_MANIFEST_DIR` (expanded at compile time to the *consuming
-/// crate's* directory) and returns the first ancestor holding a `test-data/schemas`
-/// directory. Walking ancestors — rather than hardcoding `../test-data` — keeps this
-/// correct for a crate nested deeper than one level (e.g. `bindings/python`), and it
-/// never constructs a `..` component, so no path handed to the kernel can be
-/// re-rooted by a symlink.
+/// `Path::is_file()` alone answers the type question, not the permission question: a
+/// mode-000 fixture is `is_file() == true` and then fails inside ingestion, bypassing the
+/// actionable message this module exists to produce — and disagreeing with the gate's
+/// `[ -f ] && [ -r ]` check, which is the drift the whole change is meant to prevent
+/// (roborev job 8, finding 2). Both sides now answer "readable regular file".
+pub fn readable_file(p: &Path) -> bool {
+    p.is_file() && std::fs::File::open(p).is_ok()
+}
+
+/// The workspace root: the NEAREST ancestor of `CARGO_MANIFEST_DIR` whose `Cargo.toml`
+/// declares `[workspace]`.
 ///
-/// When no ancestor qualifies (a checkout with the fixtures deleted), returns the
-/// canonical one-level-up guess so callers can name a concrete absolute path in their
-/// error message instead of reporting "not found" with no path at all.
-pub fn checkout_test_data_dir() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for ancestor in manifest.ancestors() {
-        let candidate = ancestor.join("test-data");
-        if candidate.join("schemas").is_dir() {
-            return candidate;
+/// A checkout MARKER, deliberately — not the fixtures themselves. Keying the walk on
+/// `test-data/schemas` (the first cut of this module) meant a sparse checkout or a
+/// worktree nested inside another checkout resolved to the OUTER checkout's `test-data`:
+/// wrong-but-existing fixtures, no warning. `[workspace]` is present in the repository
+/// root manifest and absent from every member manifest, so the NEAREST match is always
+/// the enclosing checkout's own root — nesting depth and fixture presence are both
+/// irrelevant to it.
+fn workspace_root() -> Option<PathBuf> {
+    for ancestor in Path::new(env!("CARGO_MANIFEST_DIR")).ancestors() {
+        let manifest = ancestor.join("Cargo.toml");
+        if let Ok(text) = std::fs::read_to_string(&manifest) {
+            if text
+                .lines()
+                .any(|l| l.trim_start().starts_with("[workspace]"))
+            {
+                return Some(ancestor.to_path_buf());
+            }
         }
     }
-    manifest.join("../test-data")
+    None
+}
+
+/// The `test-data` directory of the enclosing checkout.
+///
+/// Anchored on [`workspace_root`]. The result is returned **whether or not it exists**,
+/// so a checkout missing its fixtures fails LOUDLY at [`schema_path`] — naming its OWN
+/// absolute path — rather than being silently satisfied by a neighbouring checkout's copy.
+///
+/// Falls back to the manifest's parent only when no `[workspace]` manifest is found at
+/// all (not reachable from a cargo-built target in this repository). Both branches use
+/// `Path::parent`/`join` on the absolute `CARGO_MANIFEST_DIR`, so no `..` component is
+/// ever constructed and nothing handed to the kernel can be re-rooted by a symlink.
+pub fn checkout_test_data_dir() -> PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root =
+        workspace_root().unwrap_or_else(|| manifest.parent().unwrap_or(manifest).to_path_buf());
+    root.join("test-data")
 }
 
 /// The **fetched** dataset corpus root — infallible shape. See the module docs for
 /// the contract; prefer [`datasets_root_if_present`] in a SKIP-gated test.
 pub fn datasets_root() -> PathBuf {
-    env_dir(DATASETS_ROOT_ENV).unwrap_or_else(|| checkout_test_data_dir().join("datasets"))
+    env_dir(DATASETS_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| checkout_test_data_dir().join("datasets"))
 }
 
 /// The **fetched** dataset corpus root — fallible shape, for SKIP-gated tests.
@@ -136,7 +189,7 @@ pub fn datasets_root() -> PathBuf {
 /// not instead run against a checkout that carries only committed byte-parity
 /// references and report a vacuous 0-row pass.
 pub fn datasets_root_if_present() -> Option<PathBuf> {
-    let p = env_dir(DATASETS_ROOT_ENV)?;
+    let p = PathBuf::from(env_dir(DATASETS_ROOT_ENV)?);
     p.is_dir().then_some(p)
 }
 
@@ -145,22 +198,58 @@ pub fn sstables_root() -> PathBuf {
     datasets_root().join("sstables")
 }
 
+/// PURE resolution of the schemas root from a raw override value.
+///
+/// Separated from the environment read so the contract is testable without mutating
+/// process-global state (an env-mutating test races every other test in the binary).
+/// Mirrors `_gate_schemas_root` in `scripts/agent-gate.sh` rule for rule:
+///
+/// | raw override | result |
+/// |---|---|
+/// | absent / blank | `Ok(checkout)` — an exported-but-empty var is a scripting accident |
+/// | **relative** | **`Err`** — cannot mean the same thing under two CWDs (see module docs) |
+/// | absolute + readable dir | `Ok(override)` |
+/// | absolute, not a dir | `Ok(checkout)` — a stale export degrades instead of breaking every load |
+pub fn resolve_schemas_root(
+    raw_override: Option<&str>,
+) -> Result<(PathBuf, SchemasRootSource), String> {
+    let checkout = || {
+        (
+            checkout_test_data_dir().join("schemas"),
+            SchemasRootSource::Checkout,
+        )
+    };
+    let Some(raw) = raw_override.filter(|v| !v.trim().is_empty()) else {
+        return Ok(checkout());
+    };
+    let p = PathBuf::from(raw);
+    if !p.is_absolute() {
+        return Err(format!(
+            "{SCHEMAS_ROOT_ENV} must be an ABSOLUTE path, got '{raw}'.\n\
+             \x20 why    : a relative value cannot mean the same thing on both sides of the\n\
+             \x20          contract — scripts/agent-gate.sh evaluates it with CWD = repository\n\
+             \x20          root, while cargo runs each test binary with CWD = the package dir.\n\
+             \x20          The gate would certify one schemas root while the tests read another.\n\
+             \x20 remedy : export an absolute path, or unset {SCHEMAS_ROOT_ENV} to use the\n\
+             \x20          checkout's test-data/schemas."
+        ));
+    }
+    if p.is_dir() {
+        return Ok((p, SchemasRootSource::EnvOverride));
+    }
+    Ok(checkout())
+}
+
 /// The **committed** schema-fixture root plus the provenance of that decision.
 ///
-/// `CQLITE_SCHEMAS_ROOT` wins when set, non-empty, and readable — an unreadable or
-/// empty override falls through to the checkout rather than pinning the run to a path
-/// that cannot work, so a stale export in a shell profile degrades to the correct
-/// answer instead of breaking every fixture load.
+/// Reads `CQLITE_SCHEMAS_ROOT` and applies [`resolve_schemas_root`]. Panics on a
+/// REJECTED override (a relative path) — fail-closed is the point: silently resolving it
+/// is what would let the gate certify a root the run never used.
 pub fn schemas_root_resolved() -> (PathBuf, SchemasRootSource) {
-    if let Some(p) = env_dir(SCHEMAS_ROOT_ENV) {
-        if p.is_dir() {
-            return (p, SchemasRootSource::EnvOverride);
-        }
+    match resolve_schemas_root(env_dir(SCHEMAS_ROOT_ENV).as_deref()) {
+        Ok(v) => v,
+        Err(e) => panic!("{e}"),
     }
-    (
-        checkout_test_data_dir().join("schemas"),
-        SchemasRootSource::Checkout,
-    )
 }
 
 /// The **committed** schema-fixture root (`test-data/schemas`).
@@ -179,7 +268,7 @@ pub fn schemas_root() -> PathBuf {
 pub fn schema_path(schema_file: &str) -> PathBuf {
     let (root, source) = schemas_root_resolved();
     let path = root.join(schema_file);
-    if path.is_file() {
+    if readable_file(&path) {
         return path;
     }
     panic!(
@@ -193,23 +282,4 @@ pub fn schema_path(schema_file: &str) -> PathBuf {
         root.display(),
         source.describe(),
     )
-}
-
-/// Assert every named schema fixture is readable, returning the first failure as an
-/// actionable message (the `Err` shape of [`schema_path`], for a caller that wants to
-/// report rather than panic).
-pub fn check_schema_files(files: &[&str]) -> Result<(), String> {
-    let (root, source) = schemas_root_resolved();
-    for f in files {
-        let path = root.join(f);
-        if !path.is_file() {
-            return Err(format!(
-                "schema fixture '{f}' unreadable at {} (root {} via {})",
-                path.display(),
-                root.display(),
-                source.describe()
-            ));
-        }
-    }
-    Ok(())
 }

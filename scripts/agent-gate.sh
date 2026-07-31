@@ -1315,34 +1315,86 @@ CANONICAL_SCHEMA_FILES="basic-types.cql da-test.cql time-series.cql wide-table-b
 # that the schemas root was validated, not merely that nothing complained.
 SCHEMAS_LINE=""
 
-# _gate_schemas_root / _gate_schemas_root_source: mirror schemas_root_resolved() in
-# test-data/support/fixture_roots.rs EXACTLY — env override only when set, non-empty
-# AND a readable directory (a stale/broken export degrades to the checkout rather than
-# pinning the run to a path that cannot work), else checkout-relative. Both sides
-# anchor on the checkout, so the gate asserts the same path the tests will resolve.
+# _gate_checkout_test_data_dir: the enclosing checkout's `test-data`, anchored on the
+# WORKSPACE-ROOT `Cargo.toml` (nearest ancestor manifest declaring `[workspace]`) exactly
+# as workspace_root() does in test-data/support/fixture_roots.rs. Anchoring on a checkout
+# MARKER rather than on the fixtures matters: keying on `test-data/schemas` would let a
+# sparse checkout — or a worktree nested inside another checkout — resolve to the OUTER
+# checkout's fixtures, wrong-but-existing and unreported. Falls back to REPO_ROOT when no
+# `[workspace]` manifest is found (not reachable in this repository).
+_gate_checkout_test_data_dir() {
+  local d="$REPO_ROOT"
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    if [ -f "$d/Cargo.toml" ] && grep -q '^[[:space:]]*\[workspace\]' "$d/Cargo.toml" 2>/dev/null; then
+      printf '%s' "$d/test-data"; return 0
+    fi
+    d="$(dirname "$d")"
+  done
+  printf '%s' "$REPO_ROOT/test-data"
+}
+
+# _gate_schemas_override_reject: echoes a non-empty REASON when CQLITE_SCHEMAS_ROOT is set
+# but must be REJECTED rather than resolved. Today there is exactly one such case, and it
+# is the one that nearly reintroduced #3148's own defect: a RELATIVE override.
+#
+# The gate evaluates a relative path with CWD = REPO_ROOT; cargo runs each test binary
+# with CWD = the PACKAGE directory. So `CQLITE_SCHEMAS_ROOT=packaged/schemas` exported
+# from the checkout root passes the gate's `-d` test and gets stamped
+# `schemas: 6/6 … under packaged/schemas (override)`, while every test binary sees
+# `is_dir() == false`, falls back to the checkout, and reads DIFFERENT files. The SUMMARY
+# would then certify root A for a run that used root B — a positively misleading block,
+# which is the entire defect class #3148 was filed for. It also made the `expected
+# absolute path:` remedy line print a relative path, breaking AC (b).
+#
+# Both sides therefore reject it, so they agree BY CONSTRUCTION rather than by review.
+_gate_schemas_override_reject() {
+  local v="${CQLITE_SCHEMAS_ROOT:-}"
+  # Blank (or unset) is not an override at all — an exported-but-empty var is a scripting
+  # accident, and both sides treat it as unset. Whitespace-stripped, matching the Rust
+  # side's `v.trim().is_empty()`.
+  [ -n "$(printf '%s' "$v" | tr -d '[:space:]')" ] || return 0
+  case "$v" in
+    /*) return 0 ;;
+    *) printf '%s' "CQLITE_SCHEMAS_ROOT must be an ABSOLUTE path, got '$v'" ;;
+  esac
+}
+
+# _gate_schemas_root / _gate_schemas_root_source: mirror resolve_schemas_root() in
+# test-data/support/fixture_roots.rs rule for rule — the override applies only when set,
+# non-blank, ABSOLUTE and a readable directory (an absolute-but-unusable export degrades
+# to the checkout rather than pinning the run to a path that cannot work; a RELATIVE one
+# is rejected outright, see above), else checkout-relative. Both sides anchor on the same
+# workspace marker, so the gate asserts the path the tests will actually resolve.
 _gate_schemas_root() {
-  if [ -n "${CQLITE_SCHEMAS_ROOT:-}" ] && [ -d "${CQLITE_SCHEMAS_ROOT}" ]; then
+  if [ -z "$(_gate_schemas_override_reject)" ] \
+     && [ -n "${CQLITE_SCHEMAS_ROOT:-}" ] && [ -d "${CQLITE_SCHEMAS_ROOT}" ]; then
     printf '%s' "$CQLITE_SCHEMAS_ROOT"
   else
-    printf '%s' "$REPO_ROOT/test-data/schemas"
+    printf '%s' "$(_gate_checkout_test_data_dir)/schemas"
   fi
 }
 _gate_schemas_root_source() {
-  if [ -n "${CQLITE_SCHEMAS_ROOT:-}" ] && [ -d "${CQLITE_SCHEMAS_ROOT}" ]; then
+  if [ -n "$(_gate_schemas_override_reject)" ]; then
+    printf '%s' "CQLITE_SCHEMAS_ROOT override REJECTED"
+  elif [ -n "${CQLITE_SCHEMAS_ROOT:-}" ] && [ -d "${CQLITE_SCHEMAS_ROOT}" ]; then
     printf '%s' "CQLITE_SCHEMAS_ROOT override"
   else
     printf '%s' "checkout-relative"
   fi
 }
 
-# _missing_schema_files: the space-separated subset of CANONICAL_SCHEMA_FILES that is
-# not readable under the resolved root. Empty means all present.
+# _missing_schema_files: the space-separated subset of CANONICAL_SCHEMA_FILES that is not
+# a READABLE REGULAR FILE under the resolved root. Empty means all present.
+#
+# `-f` as well as `-r`: bare `-r` accepts a DIRECTORY named `basic-types.cql`, while the
+# Rust side asks for a readable regular file. Same question on both sides or the gate can
+# certify a layout the tests reject (roborev job 8, finding 2; reviewer nit N7).
 _missing_schema_files() {
   local root f out=""
   root="$(_gate_schemas_root)"
   # shellcheck disable=SC2086  # intentional word-split over the space-separated list
   for f in $CANONICAL_SCHEMA_FILES; do
-    [ -r "$root/$f" ] || out="${out:+$out }$f"
+    { [ -f "$root/$f" ] && [ -r "$root/$f" ]; } || out="${out:+$out }$f"
   done
   printf '%s' "$out"
 }
@@ -1355,6 +1407,10 @@ _schemas_status() {
   # Only the FULL gate is strict: --only stays lenient, --lite already returned.
   [ -z "$ONLY" ] || { echo OK; return 0; }
   [ "$LITE" -eq 0 ] || { echo OK; return 0; }
+  # A rejected override FAILs even if the checkout's fixtures happen to be complete: the
+  # operator asked for a root the contract cannot honor, and quietly using a different
+  # one is the mis-certification this guard exists to prevent.
+  [ -z "$(_gate_schemas_override_reject)" ] || { echo FAIL; return 0; }
   [ -z "$(_missing_schema_files)" ] && { echo OK; return 0; }
   echo FAIL
 }
@@ -1365,8 +1421,25 @@ _schemas_status() {
 # #2078's `missing-fixtures:` so the two causes are separable in a pasted block — with
 # a remedy naming the exact expected absolute path, then exit 1.
 apply_schemas_preflight() {
-  local root missing
+  local root missing reject
   root="$(_gate_schemas_root)"
+  reject="$(_gate_schemas_override_reject)"
+  # A REJECTED override gets its own message and hint: "missing files" would be a lie
+  # (the checkout's fixtures may be perfectly complete), and the actionable fact is that
+  # the requested root cannot be honored identically by the gate and the test binaries.
+  if [ -n "$reject" ]; then
+    echo "agent-gate: FAIL: $reject (#3148)" >&2
+    echo "agent-gate: a RELATIVE schemas root cannot mean the same thing on both sides: the gate resolves it against $REPO_ROOT, cargo resolves it against each test binary's PACKAGE dir." >&2
+    echo "agent-gate: continuing would stamp a SUMMARY certifying one schemas root while the tests read another — the exact mis-certification #3148 was filed for." >&2
+    echo "agent-gate: remedy: export an ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root" >&2
+    _tree_meta_array   # #2926
+    emit_summary FAIL \
+      "preflight: FAIL ($reject)" \
+      "missing-schemas: FAIL-CLOSED (#3148) — relative CQLITE_SCHEMAS_ROOT rejected; the gate and the test binaries would resolve DIFFERENT roots; overall verdict FAIL" \
+      "${TREE_META_LINES[@]}" \
+      "hint: export an ABSOLUTE CQLITE_SCHEMAS_ROOT, or unset it to use $root"
+    exit 1
+  fi
   case "$(_schemas_status)" in
     OK)
       local n
@@ -1716,7 +1789,9 @@ case "${1:-}" in
     _ps_st=$(_schemas_status); echo "STATUS: $_ps_st"
     echo "ROOT: $(_gate_schemas_root)"
     echo "SOURCE: $(_gate_schemas_root_source)"
-    [ "$_ps_st" = FAIL ] && echo "MISSING: $(_missing_schema_files)"
+    _ps_rj=$(_gate_schemas_override_reject)
+    [ -n "$_ps_rj" ] && echo "REJECT: $_ps_rj"
+    [ "$_ps_st" = FAIL ] && [ -z "$_ps_rj" ] && echo "MISSING: $(_missing_schema_files)"
     exit 0 ;;
   # Hidden self-test hooks (issue #2081): expose the node-build readiness decision and
   # the shell-selftest executor so scripts/tests assert the SAME logic run_delta uses.

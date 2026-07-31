@@ -3,6 +3,36 @@ set -euo pipefail
 
 # Fetch canonical Cassandra 5 datasets into test-data/datasets
 # Usage: DATASET_TAG=datasets-v3 DATASET_ASSET=cassandra5-small-full-v3.5.tar.gz DATASET_SHA256=414195074f6df446a7381aad051af84158e9a021a6e2cd21cbc6c3ad0be1ba16 ./test-data/scripts/fetch-datasets.sh
+#        ./test-data/scripts/fetch-datasets.sh --verify-only   # report usability only; mutates nothing
+
+# ---- STRICT argument validation, FIRST, before ANY filesystem work -------------
+# This script's default path is DESTRUCTIVE (`rm -rf "${DATASET_ROOT}"` before
+# extraction). Until #3131 it accepted no flags, so an unrecognized argument was
+# harmless. Adding `--verify-only` created a data-loss hazard: matching the flag only
+# as `$1` (or ignoring extra args) means `--quiet --verify-only`, `-verify-only`, or any
+# typo SILENTLY selects the destructive path and rm -rf's the operator's corpus while
+# they believe they asked for a read-only probe. Introducing a flag obliges fail-closed
+# rejection of EVERY unrecognized argument, so parsing happens here — before the pin
+# load, before root canonicalization (which used to `mkdir -p` the parent), before
+# anything can touch the filesystem.
+VERIFY_ONLY=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --verify-only) VERIFY_ONLY=1; shift ;;
+    -h|--help)
+      echo "usage: fetch-datasets.sh [--verify-only]"
+      echo "  --verify-only  report whether \$CQLITE_DATASETS_ROOT is usable and print the"
+      echo "                 guaranteed export line; downloads/extracts/removes/creates nothing."
+      exit 0 ;;
+    *)
+      echo "ERROR: unrecognized argument '$1'" >&2
+      echo "ERROR: refusing to continue — this script's default path is DESTRUCTIVE" >&2
+      echo "ERROR: (rm -rf \"\${DATASET_ROOT}\" before extraction), so an unrecognized" >&2
+      echo "ERROR: argument must never be silently ignored." >&2
+      echo "ERROR: usage: fetch-datasets.sh [--verify-only]" >&2
+      exit 2 ;;
+  esac
+done
 
 # The canonical asset/tag/sha live in ONE tracked file (issue #2646):
 # test-data/dataset-pin.env. Load it for the defaults so this helper never
@@ -72,7 +102,18 @@ canonicalize_dataset_root() {
   [ "${base}" = "datasets" ] \
     || fail_unsafe_dataset_root "final path component must be 'datasets'"
 
-  mkdir -p "${parent}"
+  # --verify-only promises to mutate NOTHING (#3131 blocker B2): this `mkdir -p` runs
+  # BEFORE the mode dispatch, so an unqualified call created the parent of a root it was
+  # about to report unusable (e.g. probing /mnt/corpus/v4/datasets on a box where
+  # /mnt/corpus is empty created /mnt/corpus/v4). Under --verify-only we therefore never
+  # create anything: a parent that does not exist simply means the root is unusable, and
+  # saying so is the probe's whole job.
+  if [ "${VERIFY_ONLY}" = 1 ]; then
+    [ -d "${parent}" ] \
+      || fail_unsafe_dataset_root "parent directory ${parent} does not exist — root unusable (nothing created: --verify-only)"
+  else
+    mkdir -p "${parent}"
+  fi
   parent_abs="$(cd "${parent}" && pwd -P)"
   [ "${parent_abs}" != "/" ] \
     || fail_unsafe_dataset_root "refusing to replace a top-level /datasets directory"
@@ -223,7 +264,12 @@ guarantee_usable_root() {
   echo "Dataset root VERIFIED (${phase}): ${DATASET_ROOT} — ${data_count} *-Data.db present"
   echo "Use EXACTLY this root (the only one this run guarantees):"
   echo
-  echo "  export CQLITE_DATASETS_ROOT=${DATASET_ROOT}"
+  # %q, not plain interpolation (roborev job 8, finding 3): the promise is an EXACT
+  # copy-pasteable line, and a root containing a space or a shell metacharacter would
+  # otherwise print a command that breaks (or does something else) when pasted. For a
+  # metacharacter-free path %q is a no-op, so the common case is byte-identical.
+  # shellcheck disable=SC2059  # %q is the point; the value is the argument, not the format
+  printf '  export CQLITE_DATASETS_ROOT=%q\n' "${DATASET_ROOT}"
   echo
 
   # If a pre-existing CQLITE_DATASETS_ROOT sent the corpus somewhere other than the
@@ -257,7 +303,10 @@ guarantee_usable_root() {
 #      a check (the same one-sided-verification mistake as #3148).
 #   2. It gives an operator (or a preflight) a cheap "is this root usable?" probe that
 #      cannot mutate the tree.
-if [ "${1:-}" = "--verify-only" ]; then
+# The flag itself is parsed (and every unrecognized argument rejected) at the TOP of this
+# script, before any filesystem work; canonicalize_dataset_root honors VERIFY_ONLY by
+# never creating the parent directory.
+if [ "${VERIFY_ONLY}" = 1 ]; then
   guarantee_usable_root "verify-only (no download, no extraction)"
   exit 0
 fi
