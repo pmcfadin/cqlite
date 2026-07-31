@@ -209,6 +209,17 @@ gate_notify_publish() {
 # validate BOTH against the contract. This is the CAPABILITY assertion
 # bootstrap runs — the analogue of the mold link probe: nothing is declared
 # healthy because a file exists. Exits non-zero ONLY in this mode.
+#
+# FULLY INDEPENDENT of ambient configuration (review round 2). It pins its OWN
+# private topic URL rather than inheriting the machine's webhook: a legitimate
+# bare-server-root target plus a separate CQLITE_NOTIFY_TOPIC/CODEX_NOTIFY_NTFY_TOPIC
+# override would otherwise resolve to NO topic once the probe cleared those
+# overrides, publish nothing, and make bootstrap report a FAILED capability on a
+# CORRECTLY configured machine. Whether the machine's own target is usable is a
+# separate question, answered by bootstrap's target check — this probe's job is the
+# CODE PATH, so it must not vary with the environment.
+GATE_NOTIFY_SELFTEST_WEBHOOK="https://gate-notify-selftest.invalid/selftest-topic"
+
 gate_notify_selftest() {
   local tmp rc=0
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/gate-notify-selftest.XXXXXX") || return 1
@@ -235,10 +246,12 @@ SHIM
     : > "$log"
     # GATE_NOTIFY_DISABLE_ADJUNCT: a capability PROBE must not fire a real
     # desktop/sound notification, nor depend on a local helper (review R3).
-    # The topic overrides are cleared so the probe's own target is authoritative.
+    # Every target/topic variable is pinned to the probe's OWN private values, so
+    # the probe's verdict is about the code path and never about ambient config.
     env CURL_LOG="$log" PATH="$tmp/bin:$PATH" GATE_NOTIFY_DISABLE_ADJUNCT=1 \
-      CQLITE_NOTIFY_TOPIC= CODEX_NOTIFY_NTFY_TOPIC= \
-      CQLITE_NOTIFY_WEBHOOK="${CQLITE_NOTIFY_WEBHOOK:-${CODEX_NOTIFY_WEBHOOK:-https://ntfy.invalid/selftest}}" \
+      CQLITE_NOTIFY_TOPIC= CODEX_NOTIFY_NTFY_TOPIC= CODEX_NOTIFY_WEBHOOK= \
+      GATE_NOTIFY_PAYLOAD_TIMEOUT=10 GATE_NOTIFY_CURL_TIMEOUT=10 \
+      CQLITE_NOTIFY_WEBHOOK="$GATE_NOTIFY_SELFTEST_WEBHOOK" \
       bash -c '. "$1"; gate_notify_publish "$2" "gate '"$severity"' selftest@0000000" "RESULT: '"$severity"'"' \
       _ "$self" "$severity" >/dev/null 2>&1
     if ! python3 - "$log" "$expect_prio" "$expect_tag" <<'PY'

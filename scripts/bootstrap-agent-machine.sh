@@ -898,12 +898,18 @@ else
   fi
   NOTIFY_TARGET="${CQLITE_NOTIFY_WEBHOOK:-${CODEX_NOTIFY_WEBHOOK:-}}"
   if [ -n "$NOTIFY_TARGET" ]; then
-    # Report the HOST only, with any URL userinfo stripped. A target of the form
-    # https://user:token@host/topic would otherwise print credentials into a
-    # terminal or a CI log (roborev finding); the topic is likewise not secret but
-    # not useful here, so only scheme://host is shown.
+    # Report the HOST only. TWO credential shapes must be stripped before anything
+    # is echoed, because both reach a terminal or a CI log:
+    #   userinfo      https://user:token@host/topic
+    #   query/fragment  https://host?token=secret   (ntfy accepts a bare root, so
+    #                   there is no '/' to bound the authority and the whole
+    #                   "host?token=secret" would otherwise be printed)
+    # Order matters: drop the query and fragment FIRST, then bound the authority,
+    # then drop userinfo.
     NOTIFY_SCHEME="${NOTIFY_TARGET%%://*}"
     NOTIFY_REST="${NOTIFY_TARGET#*://}"
+    NOTIFY_REST="${NOTIFY_REST%%\?*}"
+    NOTIFY_REST="${NOTIFY_REST%%#*}"
     NOTIFY_HOSTPART="${NOTIFY_REST%%/*}"
     case "$NOTIFY_HOSTPART" in *@*) NOTIFY_HOSTPART="${NOTIFY_HOSTPART##*@}" ;; esac
     if [ "$NOTIFY_SCHEME" = "$NOTIFY_TARGET" ]; then
