@@ -90,6 +90,7 @@
 
 #![allow(dead_code)]
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// Environment override for the **fetched** dataset corpus.
@@ -124,11 +125,21 @@ impl SchemasRootSource {
     }
 }
 
-/// A non-empty env var value, or `None`. An empty value is treated as unset: an
-/// exported-but-empty variable is a scripting accident, never an intentional root.
-fn env_dir(key: &str) -> Option<String> {
-    match std::env::var(key) {
-        Ok(v) if !v.trim().is_empty() => Some(v),
+/// The raw OS value of an env var, or `None` when unset or empty.
+///
+/// `var_os`, deliberately — NOT `var` with a catch-all `_ => None` (roborev job 11, BLOCKER).
+/// `std::env::var` maps a NON-UTF-8 value to `Err(NotUnicode)`, and collapsing that to `None`
+/// made a malformed override silently resolve to the checkout while the Bash mirror validated
+/// the same BYTE path as a legitimate override — the gate certifying one schemas root while
+/// Rust used another. That is the same certify-A-use-B split already pinned for
+/// control-character and relative values, so it must not survive as the third, unpinned
+/// instance. Returning the `OsString` keeps the non-UTF-8 case REPRESENTABLE, so each consumer
+/// makes an explicit decision about it instead of inheriting a lossy conversion.
+///
+/// Blankness is judged only where the value IS valid text; a non-UTF-8 value is never blank.
+fn env_os(key: &str) -> Option<std::ffi::OsString> {
+    match std::env::var_os(key) {
+        Some(v) if !v.is_empty() => Some(v),
         _ => None,
     }
 }
@@ -209,7 +220,7 @@ pub fn checkout_test_data_dir() -> PathBuf {
 /// The **fetched** dataset corpus root — infallible shape. See the module docs for
 /// the contract; prefer [`datasets_root_if_present`] in a SKIP-gated test.
 pub fn datasets_root() -> PathBuf {
-    resolve_datasets_root(env_dir(DATASETS_ROOT_ENV).as_deref())
+    resolve_datasets_root(env_os(DATASETS_ROOT_ENV).as_deref())
 }
 
 /// PURE form of [`datasets_root`] — the infallible shape, parameterized on the raw value.
@@ -220,8 +231,10 @@ pub fn datasets_root() -> PathBuf {
 /// only guard was a grep for the function NAME, so giving the fallible shape a checkout
 /// fallback — collapsing the two shapes into one — reddened nothing (spec-auditor,
 /// requirement 6 partial).
-pub fn resolve_datasets_root(raw: Option<&str>) -> PathBuf {
-    match raw.filter(|v| !v.trim().is_empty()) {
+pub fn resolve_datasets_root(raw: Option<&OsStr>) -> PathBuf {
+    match raw.filter(|v| v.to_str().map(|t| !t.trim().is_empty()).unwrap_or(true)) {
+        // `unwrap_or(true)`: a NON-UTF-8 value is never blank, and it is HONORED rather than
+        // silently replaced by the checkout — see the note on this hazard below.
         Some(v) => PathBuf::from(v),
         None => checkout_test_data_dir().join("datasets"),
     }
@@ -234,15 +247,16 @@ pub fn resolve_datasets_root(raw: Option<&str>) -> PathBuf {
 /// not instead run against a checkout that carries only committed byte-parity
 /// references and report a vacuous 0-row pass.
 pub fn datasets_root_if_present() -> Option<PathBuf> {
-    resolve_datasets_root_if_present(env_dir(DATASETS_ROOT_ENV).as_deref())
+    resolve_datasets_root_if_present(env_os(DATASETS_ROOT_ENV).as_deref())
 }
 
 /// PURE form of [`datasets_root_if_present`] — the fallible shape.
 ///
 /// `None` unless the value is present AND names a directory. Deliberately has **no** checkout
 /// fallback; see [`datasets_root_if_present`] for why that difference is load-bearing.
-pub fn resolve_datasets_root_if_present(raw: Option<&str>) -> Option<PathBuf> {
-    let p = PathBuf::from(raw.filter(|v| !v.trim().is_empty())?);
+pub fn resolve_datasets_root_if_present(raw: Option<&OsStr>) -> Option<PathBuf> {
+    let p =
+        PathBuf::from(raw.filter(|v| v.to_str().map(|t| !t.trim().is_empty()).unwrap_or(true))?);
     p.is_dir().then_some(p)
 }
 
@@ -273,7 +287,7 @@ pub fn sstables_root() -> PathBuf {
 /// certifying the one the run did not use. The shell no longer uses command substitution on
 /// the value path, AND both sides reject such a value, so the class is closed twice over.
 pub fn resolve_schemas_root(
-    raw_override: Option<&str>,
+    raw_override: Option<&OsStr>,
 ) -> Result<(PathBuf, SchemasRootSource), String> {
     let checkout = || {
         (
@@ -281,9 +295,25 @@ pub fn resolve_schemas_root(
             SchemasRootSource::Checkout,
         )
     };
-    let Some(raw) = raw_override.filter(|v| !v.trim().is_empty()) else {
+    let Some(raw_os) = raw_override else {
         return Ok(checkout());
     };
+    // NON-UTF-8 is rejected, not degraded. The Bash mirror treats the value as bytes and would
+    // validate this same path as a usable override; silently falling back here is exactly the
+    // divergence this module exists to prevent (roborev job 11).
+    let Some(raw) = raw_os.to_str() else {
+        return Err(format!(
+            "{SCHEMAS_ROOT_ENV} is not valid UTF-8: {raw_os:?}.\n\
+             \x20 why    : the gate's shell mirror handles the value as raw BYTES and would accept\n\
+             \x20          it, while this resolver cannot represent it as text — so the gate would\n\
+             \x20          certify one schemas root while the tests resolved another.\n\
+             \x20 remedy : export a UTF-8 absolute path, or unset {SCHEMAS_ROOT_ENV} to use the\n\
+             \x20          checkout's test-data/schemas."
+        ));
+    };
+    if raw.trim().is_empty() {
+        return Ok(checkout());
+    }
     if raw.chars().any(char::is_control) {
         return Err(format!(
             "{SCHEMAS_ROOT_ENV} must not contain control characters (newline/CR/tab), got {raw:?}.\n\
@@ -317,7 +347,7 @@ pub fn resolve_schemas_root(
 /// REJECTED override (a relative path) — fail-closed is the point: silently resolving it
 /// is what would let the gate certify a root the run never used.
 pub fn schemas_root_resolved() -> (PathBuf, SchemasRootSource) {
-    match resolve_schemas_root(env_dir(SCHEMAS_ROOT_ENV).as_deref()) {
+    match resolve_schemas_root(env_os(SCHEMAS_ROOT_ENV).as_deref()) {
         Ok(v) => v,
         Err(e) => panic!("{e}"),
     }
@@ -361,13 +391,25 @@ pub fn resolve_schema_path(
     if readable_file(&path) {
         return Ok(path);
     }
+    // `git -C <workspace root>`, not a bare `git restore` (roborev job 11, nit 2): cargo runs
+    // each test binary with CWD = the PACKAGE dir, so a CWD-relative command FAILS when pasted
+    // — the same CWD asymmetry this module rejects relative overrides for. A remedy line that
+    // does not work when followed is not a remedy.
+    let restore = match workspace_root() {
+        Some(ws) => format!(
+            "git -C {} restore --source=HEAD -- test-data/schemas",
+            ws.display()
+        ),
+        None => "git restore --source=HEAD -- test-data/schemas (run from the repository root)"
+            .to_string(),
+    };
     Err(format!(
         "committed schema fixture '{schema_file}' is not readable at {}\n\
          \x20 schemas root : {} ({})\n\
          \x20 note         : test-data/schemas is COMMITTED SOURCE — it is NOT part of the fetched\n\
          \x20                dataset corpus and is NOT derived from {DATASETS_ROOT_ENV} (#3148).\n\
          \x20 remedy       : unset {SCHEMAS_ROOT_ENV} to use the checkout default, or restore the\n\
-         \x20                committed fixtures:  git restore --source=HEAD -- test-data/schemas",
+         \x20                committed fixtures:  {restore}",
         path.display(),
         root.display(),
         source.describe(),

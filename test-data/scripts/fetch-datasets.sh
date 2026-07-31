@@ -261,7 +261,12 @@ guarantee_usable_root() {
     echo "ERROR: reference binaries under" >&2
     echo "ERROR:   ${WIDE_PARTITION_DIR}" >&2
     echo "ERROR: remedy: re-run this script with the pin cleared so it re-downloads:" >&2
-    echo "ERROR:   rm -f ${PIN_FILE} && CQLITE_DATASETS_ROOT=${DATASET_ROOT} bash test-data/scripts/fetch-datasets.sh" >&2
+    # %q on both interpolations (roborev job 11, nit 3), for the same reason as the export line
+    # below: an unquoted path containing a space or a shell metacharacter prints a command that
+    # BREAKS (or does something else) when pasted, so the "remedy" would not be one.
+    # shellcheck disable=SC2059  # %q is the point; the values are arguments, not the format
+    printf 'ERROR:   rm -f %q && CQLITE_DATASETS_ROOT=%q bash test-data/scripts/fetch-datasets.sh\n' \
+      "${PIN_FILE}" "${DATASET_ROOT}" >&2
     exit 1
   fi
 

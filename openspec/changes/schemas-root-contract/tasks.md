@@ -323,3 +323,41 @@
       to schemas by `3148-no-optout`), `ONLY`/`LITE` (gate-internal, initialized at `:1832`/`:1834`).
       `_SCHEMAS_PREFLIGHT_REPORT_ONLY` no longer exists outside one explanatory comment.
 - [x] Self-test 36 → 37 cases.
+
+## 13. Final roborev (job 11) — the THIRD instance of the certify-A-use-B class
+- [x] **BLOCKER: non-UTF-8 override degraded silently.** `env_dir` used `std::env::var` with a
+      catch-all `_ => None`, so `Err(NotUnicode)` collapsed to "unset" and `resolve_schemas_root`
+      returned `Ok(checkout)` — while Bash, which handles the value as BYTES, validated the same path
+      as a legitimate override. MEASURED before the fix: `STATUS: OK` + `SOURCE: CQLITE_SCHEMAS_ROOT
+      override` for a real `bad\xff\xfedir` directory, against Rust's `Err(NotUnicode)`. Same
+      certify-A-use-B split already pinned for control-character and relative values; pinning two of
+      three is an incomplete fail-closed posture in the mechanism the gate now trusts.
+      * **Rust**: `env_os` (`var_os`, no catch-all over an error variant) and
+        `resolve_schemas_root(Option<&OsStr>)` — the signature now makes the non-UTF-8 case
+        REPRESENTABLE, so it gets an explicit `Err` arm instead of inheriting a lossy conversion.
+      * **Bash**: `_gate_schemas_override_is_utf8` → a new `non-utf8` reject kind with its own prose
+        and marker. Pure ASCII is accepted with no external tool (valid UTF-8 by definition); anything
+        else is validated with `iconv -f UTF-8 -t UTF-8`, and an ABSENT `iconv` REJECTS rather than
+        assumes — "could not check" must not mean "accept", or the hole returns on a box without it.
+      * Both sides now agree across the whole table: unset → checkout; empty/whitespace → checkout;
+        **non-UTF-8 → REJECT**; control-char → REJECT; relative → REJECT; absolute-non-dir → checkout;
+        absolute-dir → override. A legitimate MULTIBYTE UTF-8 root is still accepted (asserted), so the
+        guard is not an over-broad ban on non-ASCII paths.
+- [x] **Datasets asymmetry: real, and hardened here rather than deferred.** The hazard is the same and
+      arguably worse — the gate counts `Data.db` under `$CQLITE_DATASETS_ROOT`, so a non-UTF-8 value
+      would have had the gate certify a corpus while every test read the checkout's `datasets`, which
+      holds only committed byte-parity references and NO `test_basic`: a #2078 vacuous pass with the
+      preflight vouching for a corpus the run never used. `datasets_root()` is infallible, so the
+      mechanism chosen is **honor the OS value** (`PathBuf::from(&OsStr)`) rather than an actionable
+      panic: it is three lines, adds no new failure mode, removes a silent fallback, and makes Rust
+      agree with what Bash already does. No follow-up issue needed.
+- [x] **NIT 2 (Medium): the printed remedy was CWD-relative.** `git restore …` fails when pasted from
+      cargo's package-dir CWD — the same CWD asymmetry this module rejects relative overrides for. Now
+      `git -C <workspace_root> …`, with the emitted remedy asserted to carry an ABSOLUTE `-C`.
+- [x] **NIT 3 (Low): the fetch remedy interpolated `PIN_FILE`/`DATASET_ROOT` unquoted.** Now `%q`,
+      asserted by the same `eval` round-trip used for the export line, on a path with a space and `&`.
+- [x] **Three revert-proofs, all three drift instances now covered** (was two of three): reverting the
+      Bash UTF-8 guard FAILs `3148-non-utf8-override` (rc=124 — the run sailed past the preflight);
+      reverting the Rust arm FAILs `non_utf8_override_is_rejected_fail_closed`; reverting nit 2 FAILs
+      `unreadable_fixture_message_names_path_root_source_and_remedy`; reverting nit 3 FAILs
+      `3131-remedy-quoting`. Self-test 37 → 40 cases; contract tests 12 → 14.

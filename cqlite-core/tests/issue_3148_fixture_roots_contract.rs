@@ -12,6 +12,7 @@
 //! mutating `CQLITE_SCHEMAS_ROOT`. Env vars are process-global, so an env-mutating test
 //! races every other test in the binary — and a flaky guard gets deleted, not fixed.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[path = "../../test-data/support/fixture_roots.rs"]
@@ -32,7 +33,7 @@ use fixture_roots::{
 /// fell back to the checkout and read DIFFERENT files.
 #[test]
 fn relative_schemas_override_is_rejected_fail_closed() {
-    let err = resolve_schemas_root(Some("packaged/schemas"))
+    let err = resolve_schemas_root(Some(OsStr::new("packaged/schemas")))
         .expect_err("a relative CQLITE_SCHEMAS_ROOT must be rejected, not resolved");
     assert!(
         err.contains("must be an ABSOLUTE path"),
@@ -51,7 +52,7 @@ fn relative_schemas_override_is_rejected_fail_closed() {
     // Every relative shape, not just the bare one.
     for raw in ["./schemas", "../schemas", "a/b/schemas"] {
         assert!(
-            resolve_schemas_root(Some(raw)).is_err(),
+            resolve_schemas_root(Some(OsStr::new(raw))).is_err(),
             "relative override {raw:?} must be rejected"
         );
     }
@@ -62,7 +63,8 @@ fn relative_schemas_override_is_rejected_fail_closed() {
 #[test]
 fn absent_or_blank_override_resolves_to_the_checkout() {
     for raw in [None, Some(""), Some("   "), Some("\t")] {
-        let (root, source) = resolve_schemas_root(raw).expect("blank override is not an error");
+        let (root, source) =
+            resolve_schemas_root(raw.map(OsStr::new)).expect("blank override is not an error");
         assert_eq!(
             source,
             SchemasRootSource::Checkout,
@@ -89,7 +91,7 @@ fn absolute_but_unusable_override_degrades_to_the_checkout() {
     assert!(!absent.exists(), "the child is deliberately never created");
     let raw = absent.to_str().expect("utf-8 temp path");
 
-    let (root, source) = resolve_schemas_root(Some(raw))
+    let (root, source) = resolve_schemas_root(Some(OsStr::new(raw)))
         .expect("an absolute-but-absent override degrades, it is not an error");
     assert_eq!(source, SchemasRootSource::Checkout);
     assert_eq!(root, checkout_test_data_dir().join("schemas"));
@@ -111,7 +113,7 @@ fn control_character_override_is_rejected_fail_closed() {
         ("carriage return", format!("{dir}\r")),
         ("embedded tab", format!("{dir}\tsub")),
     ] {
-        match resolve_schemas_root(Some(&raw)) {
+        match resolve_schemas_root(Some(OsStr::new(&raw))) {
             Err(e) => {
                 assert!(
                     e.contains("control characters"),
@@ -138,7 +140,8 @@ fn control_character_override_is_rejected_fail_closed() {
 fn absolute_existing_override_wins_and_is_reported_as_such() {
     let tmp = tempfile::TempDir::new().expect("temp dir");
     let raw = tmp.path().to_str().expect("utf-8 temp path");
-    let (root, source) = resolve_schemas_root(Some(raw)).expect("absolute readable dir is valid");
+    let (root, source) =
+        resolve_schemas_root(Some(OsStr::new(raw))).expect("absolute readable dir is valid");
     assert_eq!(source, SchemasRootSource::EnvOverride);
     assert_eq!(root, PathBuf::from(raw));
 }
@@ -329,6 +332,23 @@ fn unreadable_fixture_message_names_path_root_source_and_remedy() {
         err.contains("remedy") && err.contains("restore --source=HEAD -- test-data/schemas"),
         "message must carry the remedy command; got: {err}"
     );
+    // …and the remedy must be CWD-INDEPENDENT (roborev job 11, nit 2). cargo runs each test
+    // binary with CWD = the PACKAGE dir, so a bare `git restore` FAILS when pasted — the same
+    // CWD asymmetry this module rejects relative overrides for. A remedy that does not work
+    // when followed is not a remedy, so it must carry an explicit ABSOLUTE `git -C <root>`.
+    let ws = fixture_roots::workspace_root().expect("a workspace root in a checkout");
+    let expected_restore = format!(
+        "git -C {} restore --source=HEAD -- test-data/schemas",
+        ws.display()
+    );
+    assert!(
+        err.contains(&expected_restore),
+        "remedy must be CWD-independent (`git -C <abs>`); got: {err}"
+    );
+    assert!(
+        ws.is_absolute(),
+        "the remedy's -C argument must be absolute, else it is CWD-relative again"
+    );
     // The override source must be distinguishable in the SAME message slot.
     let err_override = resolve_schema_path(root, SchemasRootSource::EnvOverride, "x.cql")
         .expect_err("an absent fixture must not resolve");
@@ -378,7 +398,7 @@ fn the_two_datasets_root_shapes_differ_as_documented() {
     assert_eq!(resolve_datasets_root(None), checkout_default);
     for blank in ["", "   "] {
         assert_eq!(
-            resolve_datasets_root(Some(blank)),
+            resolve_datasets_root(Some(OsStr::new(blank))),
             checkout_default,
             "an exported-but-blank value is a scripting accident, never a root"
         );
@@ -388,7 +408,7 @@ fn the_two_datasets_root_shapes_differ_as_documented() {
     let tmp = tempfile::TempDir::new().expect("temp dir");
     let absent = tmp.path().join("no-such-corpus");
     let absent_raw = absent.to_str().expect("utf-8");
-    assert_eq!(resolve_datasets_root(Some(absent_raw)), absent);
+    assert_eq!(resolve_datasets_root(Some(OsStr::new(absent_raw))), absent);
 
     // Fallible shape: NO checkout fallback — this is the assertion that catches a collapse.
     assert_eq!(
@@ -398,17 +418,95 @@ fn the_two_datasets_root_shapes_differ_as_documented() {
          run against committed byte-parity references and report a vacuous 0-row pass"
     );
     for blank in ["", "   "] {
-        assert_eq!(resolve_datasets_root_if_present(Some(blank)), None);
+        assert_eq!(
+            resolve_datasets_root_if_present(Some(OsStr::new(blank))),
+            None
+        );
     }
     assert_eq!(
-        resolve_datasets_root_if_present(Some(absent_raw)),
+        resolve_datasets_root_if_present(Some(OsStr::new(absent_raw))),
         None,
         "a value that is not a directory yields None"
     );
     let present = tmp.path().to_str().expect("utf-8");
     assert_eq!(
-        resolve_datasets_root_if_present(Some(present)),
+        resolve_datasets_root_if_present(Some(OsStr::new(present))),
         Some(tmp.path().to_path_buf()),
         "a value naming a real directory is returned"
+    );
+}
+
+/// A NON-UTF-8 override is REJECTED, not silently degraded (roborev job 11, BLOCKER).
+///
+/// `std::env::var` maps such a value to `Err(NotUnicode)`, and the first cut's `env_dir`
+/// collapsed that to `None` via a catch-all — so `resolve_schemas_root` returned
+/// `Ok(checkout)` while the Bash mirror validated the same BYTE path as a legitimate override
+/// (measured: `STATUS: OK` / `SOURCE: CQLITE_SCHEMAS_ROOT override` for
+/// `<dir>/bad\xff\xfedir`). The gate certifying one schemas root while the tests use another is
+/// the third instance of a class already pinned for control-character and relative values;
+/// this is its pin.
+///
+/// Unix-only: constructing an invalid-UTF-8 `OsString` needs `OsStringExt`, and the byte-path
+/// hazard is a Unix property. On other platforms there is nothing to assert.
+#[cfg(unix)]
+#[test]
+fn non_utf8_override_is_rejected_fail_closed() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    // A REAL directory whose name is not valid UTF-8, so the value is one Bash would accept:
+    // the test is about the two sides disagreeing, not about a nonexistent path.
+    let mut bytes = tmp.path().as_os_str().to_os_string().into_vec();
+    bytes.extend_from_slice(b"/bad\xff\xfedir");
+    let raw = std::ffi::OsString::from_vec(bytes);
+    std::fs::create_dir(&raw).expect("create a non-UTF-8 directory");
+    assert!(
+        raw.to_str().is_none(),
+        "the fixture value must actually be invalid UTF-8"
+    );
+    assert!(
+        std::path::Path::new(&raw).is_dir(),
+        "the value must name a REAL directory — a Bash mirror would accept it"
+    );
+
+    let err = resolve_schemas_root(Some(raw.as_os_str()))
+        .expect_err("a non-UTF-8 override must be rejected, not degraded to the checkout");
+    assert!(
+        err.contains("not valid UTF-8"),
+        "rejection must name the rule; got: {err}"
+    );
+    assert!(
+        err.contains("CQLITE_SCHEMAS_ROOT"),
+        "rejection must name the variable; got: {err}"
+    );
+    assert!(
+        err.contains("remedy"),
+        "rejection must be actionable; got: {err}"
+    );
+}
+
+/// The datasets root HONORS a non-UTF-8 value rather than silently substituting the checkout.
+///
+/// `datasets_root()` is infallible, so it cannot report an error — and falling back to the
+/// checkout would recreate the same certify-A-use-B split one variable over, with a WORSE
+/// fallback (the checkout's `datasets` carries only committed byte-parity references, no
+/// `test_basic` corpus). Honoring the value makes it agree with the gate, which counts
+/// `Data.db` under the byte path.
+#[cfg(unix)]
+#[test]
+fn non_utf8_datasets_root_is_honored_not_silently_replaced() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let raw = std::ffi::OsString::from_vec(b"/tmp/cqlite-3148-bad\xff\xfecorpus".to_vec());
+    assert!(raw.to_str().is_none(), "fixture must be invalid UTF-8");
+    assert_eq!(
+        resolve_datasets_root(Some(raw.as_os_str())),
+        PathBuf::from(&raw),
+        "a non-UTF-8 datasets root must be USED, not silently replaced by the checkout"
+    );
+    // The fallible shape still gates on is_dir() — the path above does not exist.
+    assert_eq!(
+        resolve_datasets_root_if_present(Some(raw.as_os_str())),
+        None
     );
 }

@@ -485,6 +485,49 @@ else
   bad "3148-no-env-report-only: an environment value defeated the schemas fail-closed guard (requirement 8)"
 fi
 
+# 2f. A NON-UTF-8 override is REJECTED at the REAL emit (roborev job 11, BLOCKER) — the THIRD
+#     instance of the certify-A-use-B class, alongside control-characters (2c) and relative
+#     paths (2a). Bash handles the value as BYTES and used to accept it (measured: STATUS: OK +
+#     SOURCE: override for a `bad\xff\xfedir` path) while Rust's `var_os(..).to_str()` cannot
+#     represent it. The directory is REAL, so pre-fix the gate genuinely validated it — that is
+#     what makes this discriminating. A legitimate NON-ASCII UTF-8 root must still be ACCEPTED,
+#     asserted below, or the fix would be an over-broad ban on non-ASCII paths.
+nu_root="$tmp/$(printf 'bad\xff\xfedir')"
+mkdir -p "$nu_root"
+for f in "${CANONICAL[@]}"; do printf -- '-- synthetic\n' >"$nu_root/$f"; done
+nu_full="$tmp/3148-nu-full.txt"
+CQLITE_GATE_DISABLE_CAP=1 CQLITE_DATASETS_ROOT="$ds_corpus" \
+  CQLITE_SCHEMAS_ROOT="$nu_root" AGENT_GATE_SUMMARY_FILE="$nu_full" \
+  timeout 180 bash "$GATE" >"$tmp/3148-nu-full.out" 2>&1
+nu_rc=$?
+if [ "$nu_rc" -ne 0 ] \
+   && grep -q "^missing-schemas: FAIL-CLOSED (#3148)" "$nu_full" 2>/dev/null \
+   && grep -q "is not valid UTF-8" "$nu_full" 2>/dev/null \
+   && grep -q "must be valid UTF-8" "$tmp/3148-nu-full.out" 2>/dev/null \
+   && grep -q "^RESULT: FAIL" "$nu_full" 2>/dev/null \
+   && ! grep -q "^RESULT: PASS" "$nu_full" 2>/dev/null \
+   && ! grep -q "^schemas: " "$nu_full" 2>/dev/null; then
+  ok "3148-non-utf8-override: a non-UTF-8 override fails closed at the real emit, naming the cause"
+else
+  bad "3148-non-utf8-override: a non-UTF-8 override did not fail closed (rc=$nu_rc)"
+  cat "$nu_full" 2>/dev/null
+fi
+
+# …and the guard must not become a ban on non-ASCII paths: a legitimate UTF-8 root with
+# multibyte characters is still a VALID override.
+utf8_root="$tmp/schémas-ünïcode"
+mkdir -p "$utf8_root"
+for f in "${CANONICAL[@]}"; do printf -- '-- synthetic\n' >"$utf8_root/$f"; done
+utf8_out=$(CQLITE_SCHEMAS_ROOT="$utf8_root" bash "$GATE" --preflight-schemas 2>/dev/null)
+if [ "$(hook_field STATUS "$utf8_out")" = OK ] \
+   && [ "$(hook_field SOURCE "$utf8_out")" = "CQLITE_SCHEMAS_ROOT override" ] \
+   && [ "$(hook_field ROOT "$utf8_out")" = "$utf8_root" ]; then
+  ok "3148-utf8-override-ok: a legitimate multibyte-UTF-8 override is still accepted"
+else
+  bad "3148-utf8-override-ok: the UTF-8 guard over-rejected a valid non-ASCII root"
+  printf '%s\n' "$utf8_out"
+fi
+
 # ---------------------------------------------------------------------------
 # 3. AC (g): --lite and --only stay LENIENT (unchanged from #2078's contract).
 # ---------------------------------------------------------------------------
@@ -805,6 +848,30 @@ if grep -q "NOTE: this run populated $warm, NOT the checkout default" <<<"$warm_
 else
   bad "3131-warm-cache-note: the divergence NOTE (or the schemas NOTE) is missing"
   printf '%s\n' "$warm_out" | head -12
+fi
+
+# 6e. The fetch script's REMEDY line must be pasteable too (roborev job 11, nit 3) — it
+#     interpolated PIN_FILE/DATASET_ROOT unquoted, so a path with a space or a metacharacter
+#     printed a command that breaks when followed. Same `eval` round-trip proof as the export
+#     line: evaluate the printed `CQLITE_DATASETS_ROOT=...` assignment out of the remedy and
+#     compare it to the real root.
+rem_root="$tmp/rem space & meta/datasets"
+mkdir -p "$rem_root"
+rem_out=$(CQLITE_DATASETS_ROOT="$rem_root" bash "$FETCH" --verify-only 2>&1)
+rem_line=$(printf '%s\n' "$rem_out" | grep 'CQLITE_DATASETS_ROOT=' | grep 'rm -f' | sed 's/^ERROR:   //')
+# Extract ONLY the assignment. Evaluating the whole remedy would run its `rm -f`, and appending
+# a command to the assignment would make it a per-command PREFIX (temporary), which never sets
+# the variable in the shell — that mistake made this case fail on a correctly-quoted line.
+rem_assign=$(printf '%s' "$rem_line" | sed 's/.*&& //; s/ bash .*//')
+rem_eval=$(
+  unset CQLITE_DATASETS_ROOT
+  eval "$rem_assign" 2>/dev/null
+  printf '%s' "${CQLITE_DATASETS_ROOT:-}"
+)
+if [ -n "$rem_line" ] && [ "$rem_eval" = "$rem_root" ]; then
+  ok "3131-remedy-quoting: the failure remedy round-trips a path with spaces/metacharacters"
+else
+  bad "3131-remedy-quoting: the remedy line does not reproduce the root (line: '$rem_line' -> '$rem_eval')"
 fi
 
 # 6c. #2878 boundary: this change must NOT have touched the rm -rf /

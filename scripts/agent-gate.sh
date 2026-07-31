@@ -1412,10 +1412,37 @@ _gate_schemas_override_reject_kind() {
   case "${CQLITE_SCHEMAS_ROOT:-}" in
     *[[:cntrl:]]*) printf '%s' 'control-chars'; return 0 ;;
   esac
+  _gate_schemas_override_is_utf8 || { printf '%s' 'non-utf8'; return 0; }
   case "${CQLITE_SCHEMAS_ROOT:-}" in
     /*) return 0 ;;
     *) printf '%s' 'relative' ;;
   esac
+}
+
+# _gate_schemas_override_is_utf8: rc 0 iff CQLITE_SCHEMAS_ROOT is (provably) valid UTF-8.
+#
+# Bash handles the value as BYTES, so without this the gate validated a non-UTF-8 override and
+# stamped it into the SUMMARY while Rust's `var_os(..).to_str()` could not represent it and
+# rejected — the gate certifying one schemas root while the tests resolved another (roborev job
+# 11, BLOCKER; measured `STATUS: OK` + `SOURCE: CQLITE_SCHEMAS_ROOT override` for a
+# `bad\xff\xfedir` path). Now both sides reject it.
+#
+# Two-step so the common case needs no external tool AND an unverifiable value is never
+# accepted:
+#   1. Pure ASCII (no byte outside printable ASCII — control characters are already rejected
+#      above) is valid UTF-8 by definition, so accept without invoking anything. `LC_ALL=C` makes
+#      `[[:print:]]` mean ASCII-printable regardless of the caller's locale.
+#   2. Otherwise validate with `iconv -f UTF-8 -t UTF-8`, which fails on malformed input. If
+#      `iconv` is ABSENT we REJECT rather than assume: "could not check" must not mean "accept",
+#      or the hole comes straight back on a box without it. That is narrow — only non-ASCII
+#      override values are affected, and the remedy (an ASCII path) is always available.
+_gate_schemas_override_is_utf8() {
+  local v="${CQLITE_SCHEMAS_ROOT:-}"
+  if ! LC_ALL=C printf '%s' "$v" | LC_ALL=C grep -q '[^[:print:]]'; then
+    return 0
+  fi
+  command -v iconv >/dev/null 2>&1 || return 1
+  LC_ALL=C printf '%s' "$v" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
 }
 
 _gate_schemas_override_reject() {
@@ -1429,6 +1456,8 @@ _gate_schemas_override_reject() {
       printf '%s' "CQLITE_SCHEMAS_ROOT must not contain control characters (newline/CR/tab), got $(printf '%q' "${CQLITE_SCHEMAS_ROOT:-}")"
       return 0 ;;
   esac
+  _gate_schemas_override_is_utf8 \
+    || { printf '%s' "CQLITE_SCHEMAS_ROOT must be valid UTF-8, got $(printf '%q' "${CQLITE_SCHEMAS_ROOT:-}")"; return 0; }
   case "${CQLITE_SCHEMAS_ROOT:-}" in
     /*) return 0 ;;
     *) printf '%s' "CQLITE_SCHEMAS_ROOT must be an ABSOLUTE path, got '${CQLITE_SCHEMAS_ROOT:-}'" ;;
@@ -1555,6 +1584,9 @@ apply_schemas_preflight() {
       control-chars)
         why="a schemas root carrying a CONTROL CHARACTER (newline/CR/tab) cannot round-trip through the gate's shell resolution — command substitution strips trailing newlines — so the gate would validate one path while cargo resolved another."
         marker="missing-schemas: FAIL-CLOSED (#3148) — CQLITE_SCHEMAS_ROOT contains a control character; the gate and the test binaries would resolve DIFFERENT roots; overall verdict FAIL" ;;
+      non-utf8)
+        why="this shell handles the value as raw BYTES and would accept it, while the Rust resolver cannot represent a non-UTF-8 value as text and rejects it — so the gate would certify one schemas root while the tests resolved another."
+        marker="missing-schemas: FAIL-CLOSED (#3148) — CQLITE_SCHEMAS_ROOT is not valid UTF-8; the gate and the test binaries would resolve DIFFERENT roots; overall verdict FAIL" ;;
       *)
         why="a RELATIVE schemas root cannot mean the same thing on both sides: the gate resolves it against $REPO_ROOT, cargo resolves it against each test binary's PACKAGE dir."
         marker="missing-schemas: FAIL-CLOSED (#3148) — relative CQLITE_SCHEMAS_ROOT rejected; the gate and the test binaries would resolve DIFFERENT roots; overall verdict FAIL" ;;
