@@ -1420,9 +1420,35 @@ _schemas_status() {
 # SUMMARY carrying `missing-schemas: FAIL-CLOSED (#3148)` — textually DISTINCT from
 # #2078's `missing-fixtures:` so the two causes are separable in a pasted block — with
 # a remedy naming the exact expected absolute path, then exit 1.
+#
+# The leniency early-return below is load-bearing TWICE over, and both cases are the
+# defect this whole change exists to remove, one mode over:
+#
+#   1. `_schemas_status` returns OK unconditionally under `--only`/`--lite` (leniency, AC
+#      (g)), so the OK branch used to stamp `schemas: 6/6 canonical .cql readable under
+#      <root>` for a check that NEVER RAN. A positive assertion about an unperformed check
+#      is exactly #3148's misleading `STATUS: OK`. It is stamped as an explicit NAMED
+#      non-check rather than simply omitted: silence lets a reader of a pasted block
+#      assume the FULL contract held, whereas `schemas: not checked (…)` cannot be
+#      misread.
+#   2. The REJECT branch below was NOT governed by `_schemas_status`, so a relative
+#      override FAILed even an `--only` run — the effectful guard diverging from the pure
+#      decision it is documented to consume, i.e. the "single-source, no drift" property
+#      claimed for this pair. Gating both on ONE mode check restores it.
 apply_schemas_preflight() {
   local root missing reject
   root="$(_gate_schemas_root)"
+
+  # Leniency (AC (g), unchanged from #2078's contract): only the FULL gate is strict.
+  # --lite never reaches here (run_lite always exits first), but it is checked anyway so
+  # the invariant holds by construction rather than by call-site archaeology.
+  if [ -n "$ONLY" ] || [ "$LITE" -ne 0 ]; then
+    local _mode
+    if [ -n "$ONLY" ]; then _mode="--only $ONLY"; else _mode="--lite"; fi
+    SCHEMAS_LINE="schemas: not checked ($_mode is lenient, #3148 AC (g)) — this block asserts NOTHING about the schemas root"
+    return 0
+  fi
+
   reject="$(_gate_schemas_override_reject)"
   # A REJECTED override gets its own message and hint: "missing files" would be a lie
   # (the checkout's fixtures may be perfectly complete), and the actionable fact is that
@@ -1792,6 +1818,19 @@ case "${1:-}" in
     _ps_rj=$(_gate_schemas_override_reject)
     [ -n "$_ps_rj" ] && echo "REJECT: $_ps_rj"
     [ "$_ps_st" = FAIL ] && [ -z "$_ps_rj" ] && echo "MISSING: $(_missing_schema_files)"
+    exit 0 ;;
+  # Hidden self-test hook (issue #3148): run the REAL apply_schemas_preflight and print the
+  # SCHEMAS_LINE it stamped, so the self-test observes the ACTUAL summary text rather than a
+  # re-implementation of the decision. Optional $2 seeds ONLY (the arg dispatch is a single
+  # `case "$1"`, so `--only X --preflight-schemas-line` is not expressible, and a real
+  # `--only core-tests` run would spend minutes in cargo before printing anything).
+  # Deliberately drives the effectful function: the whole point is that a POSITIVE line must
+  # never be stamped for a check that did not run. On the strict path this may emit a FAIL
+  # SUMMARY and exit non-zero, which the self-test treats as a regression of leniency.
+  --preflight-schemas-line)
+    [ -n "${2:-}" ] && ONLY="$2"
+    apply_schemas_preflight
+    echo "SCHEMAS_LINE: ${SCHEMAS_LINE:-<none>}"
     exit 0 ;;
   # Hidden self-test hooks (issue #2081): expose the node-build readiness decision and
   # the shell-selftest executor so scripts/tests assert the SAME logic run_delta uses.

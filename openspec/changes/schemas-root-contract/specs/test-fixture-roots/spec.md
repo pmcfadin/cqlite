@@ -17,7 +17,7 @@ derived from the first.
 | **#3148 (d)** schemas-root resolution exists once, used by every caller; no open-coded `join("../schemas")` | *Schemas-root resolution has exactly one definition, used by every schemas-consuming fixture site* (scope stated in that requirement); *An unreadable schema fixture fails with an actionable, path-naming message* |
 | **#3148 (e)** the two divergent `datasets_root()` implementations reconciled or documented | *The datasets root has one implementation with two documented shapes* |
 | **#3148 (f)** the symlinked-`datasets` layout works or is rejected, never silently mis-resolved | *The schemas root is independent of the datasets root* |
-| **#3148 (g)** `--lite` and `--only` remain lenient | *Only the FULL gate is strict about fixture roots* |
+| **#3148 (g)** `--lite` and `--only` remain lenient | *Only the FULL gate is strict about fixture roots*; *A summary line SHALL NOT assert a check the running mode did not perform* |
 | **#3148 (h)** scope decision recorded | *The schemas root is resolved checkout-relative by decision*; *A relative schemas-root override is rejected fail-closed* |
 | **#3131 (1)** one documented root that works | *The schemas root is independent of the datasets root*; *The schemas root is resolved checkout-relative by decision* (which supersedes #3131's item-1 either/or — see `design.md`) |
 | **#3131 (2)** `fetch-datasets.sh` must not exit 0 without leaving a usable root | *A dataset fetch reports success only with a verified, named root*; *The guaranteed export line is pasteable, not merely printed*; *Dataset-root usability is probeable without mutating anything*; *Every unrecognized argument to the dataset fetch is rejected fail-closed* |
@@ -212,6 +212,33 @@ contract. A lenient mode SHALL NOT emit the schemas failure marker.
 - **GIVEN** an unreachable schemas root and an `--only` selection naming a dataset-backed component
 - **WHEN** the preflight decision is evaluated
 - **THEN** it is OK
+
+#### Scenario: --only stays lenient for a rejected relative override too
+- **GIVEN** a relative `CQLITE_SCHEMAS_ROOT` and an `--only` selection naming a dataset-backed component
+- **WHEN** the preflight runs
+- **THEN** it returns without failing the run — the strict rejection path SHALL NOT bypass the lenient-mode check
+
+### Requirement: A summary line SHALL NOT assert a check the running mode did not perform
+The SUMMARY block SHALL NOT carry a positive assertion about the schemas root in a mode that did not
+validate it. In a lenient mode the block SHALL instead carry an explicitly NAMED non-check. Omitting the
+line silently is insufficient: a reader of a pasted block would assume the FULL contract held, which is the
+same false-confidence failure as a misleading `STATUS: OK`.
+
+#### Scenario: A lenient --only run names the non-check instead of asserting readability
+- **GIVEN** an `--only` selection naming a dataset-backed component, with a schemas root holding none of the consumed `.cql` files
+- **WHEN** the preflight runs
+- **THEN** the stamped schemas line reads as an explicit "not checked", naming the lenient mode
+- **AND** it SHALL NOT claim that any number of `.cql` files are readable
+
+#### Scenario: The positive assertion still appears when the check did run
+- **GIVEN** a FULL-mode preflight over a complete schemas root
+- **WHEN** the preflight runs
+- **THEN** the stamped schemas line asserts the validated count and the resolved root, so the non-check case above is not satisfied by simply never stamping anything
+
+#### Scenario: A --lite block carries no schemas line at all
+- **GIVEN** a `--lite` run with an unreachable schemas root
+- **WHEN** the LITE summary block is read
+- **THEN** it contains neither the failure marker nor any positive schemas assertion
 
 ### Requirement: The schemas preflight decision is exposed as a pure hook and positively controlled
 The preflight's decision SHALL be available as a side-effect-free hook reporting the decision, the

@@ -222,6 +222,54 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 2b. A POSITIVE line must never assert a check that did not run.
+#
+#     `_schemas_status` returns OK unconditionally under --only/--lite (leniency, AC (g)),
+#     so the OK branch used to stamp `schemas: 6/6 canonical .cql readable under <root>`
+#     for a check that NEVER RAN — #3148's own misleading `STATUS: OK`, one mode over. The
+#     assertion is therefore on the SUMMARY TEXT the real apply_schemas_preflight stamps,
+#     driven through the --preflight-schemas-line hook (a real `--only core-tests` run
+#     would spend minutes in cargo before printing anything).
+# ---------------------------------------------------------------------------
+line_field() { printf '%s\n' "$1" | grep '^SCHEMAS_LINE: ' | sed 's/^SCHEMAS_LINE: //'; }
+
+only_line_out=$(CQLITE_SCHEMAS_ROOT="$schemas_empty" \
+  bash "$GATE" --preflight-schemas-line core-tests 2>/dev/null)
+only_line_rc=$?
+only_line=$(line_field "$only_line_out")
+if [ "$only_line_rc" -eq 0 ] \
+   && ! grep -q 'readable' <<<"$only_line" \
+   && grep -q '^schemas: not checked' <<<"$only_line" \
+   && grep -q -- '--only core-tests' <<<"$only_line"; then
+  ok "3148-only-no-false-positive: an --only run stamps an explicit 'not checked', never 'N/N readable'"
+else
+  bad "3148-only-no-false-positive: a lenient --only run must not assert readability (rc=$only_line_rc, line: '$only_line')"
+fi
+
+# Same for a RELATIVE override under --only. This ALSO pins the second half of the same
+# class: the REJECT branch was not governed by _schemas_status, so it FAILed even a
+# lenient --only run — the effectful guard diverging from the pure decision it is
+# documented to consume.
+rel_only_out=$(CQLITE_SCHEMAS_ROOT="packaged/schemas" \
+  bash "$GATE" --preflight-schemas-line core-tests 2>/dev/null)
+rel_only_rc=$?
+rel_only=$(line_field "$rel_only_out")
+if [ "$rel_only_rc" -eq 0 ] && grep -q '^schemas: not checked' <<<"$rel_only"; then
+  ok "3148-only-reject-lenient: --only stays lenient for a relative override too (no strict-path drift)"
+else
+  bad "3148-only-reject-lenient: the reject branch is not governed by the lenient mode check (rc=$rel_only_rc, line: '$rel_only')"
+fi
+
+# …and the POSITIVE line must still appear when the check DID run, otherwise the two
+# asserts above would be satisfied by simply never stamping anything.
+full_line=$(line_field "$(bash "$GATE" --preflight-schemas-line 2>/dev/null)")
+if grep -q "^schemas: 6/6 canonical .cql readable under $REPO/test-data/schemas" <<<"$full_line"; then
+  ok "3148-full-positive-line: a FULL-mode check that ran stamps the positive N/N readable line"
+else
+  bad "3148-full-positive-line: expected the positive line for a real check (got '$full_line')"
+fi
+
+# ---------------------------------------------------------------------------
 # 3. AC (g): --lite and --only stay LENIENT (unchanged from #2078's contract).
 # ---------------------------------------------------------------------------
 lite_block="$tmp/3148-lite.txt"
@@ -229,10 +277,15 @@ CQLITE_DATASETS_ROOT="$ds_corpus" CQLITE_SCHEMAS_ROOT="$schemas_empty" \
   AGENT_GATE_SUMMARY_FILE="$lite_block" \
   bash "$GATE" --lite --emit-summary-selftest >/dev/null 2>&1
 lite_rc=$?
+# `! grep '^schemas: '` as well as the marker: a LITE block must carry NO schemas line at
+# all — neither a failure marker nor a POSITIVE assertion. run_lite always exits before
+# apply_schemas_preflight, so SCHEMAS_LINE is never stamped; this pins that, so a future
+# call-site move cannot start asserting readability in a mode that never checked it.
 if [ "$lite_rc" -eq 0 ] \
    && grep -q "AGENT-GATE LITE SUMMARY" "$lite_block" 2>/dev/null \
-   && ! grep -q "missing-schemas:" "$lite_block" 2>/dev/null; then
-  ok "3148-lite: --lite unaffected by an unreachable schemas root (clean LITE block, no marker)"
+   && ! grep -q "missing-schemas:" "$lite_block" 2>/dev/null \
+   && ! grep -q "^schemas: " "$lite_block" 2>/dev/null; then
+  ok "3148-lite: --lite unaffected by an unreachable schemas root (no schemas line at all)"
 else
   bad "3148-lite: --lite must stay lenient (rc=$lite_rc)"
   cat "$lite_block" 2>/dev/null

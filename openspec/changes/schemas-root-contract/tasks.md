@@ -140,3 +140,31 @@
       round-tripping through `eval`.
 - [x] N5 — scope the spec's single-definition requirement to the four hard-failing sites and record why
       the ~15 `parent()?.join("schemas")`-with-fallback sites are out of scope.
+
+## 8. Review round 2 (docs-pass finding: a positive line asserting an unperformed check)
+- [x] `apply_schemas_preflight` gained a LENIENCY early-return: under `--only`/`--lite` it stamps an
+      explicit `schemas: not checked (<mode> is lenient, #3148 AC (g)) — this block asserts NOTHING
+      about the schemas root` and returns. Previously `_schemas_status`'s unconditional OK under
+      `--only` fell into the OK branch and stamped `schemas: 6/6 canonical .cql readable under <root>`
+      for a check that never ran — #3148's misleading `STATUS: OK`, one mode over. Chose the explicit
+      named non-check over silent omission: silence lets a reader of a pasted block assume the FULL
+      contract held.
+- [x] The same early-return also fixes a SECOND instance of the class: the REJECT branch was not
+      governed by `_schemas_status`, so a relative override FAILed even a lenient `--only` run — the
+      effectful guard diverging from the pure decision it is documented to consume. One mode check now
+      governs both.
+- [x] Hidden `--preflight-schemas-line [only-list]` hook drives the REAL `apply_schemas_preflight` and
+      prints the stamped line, so the self-test observes the ACTUAL summary text (a real
+      `--only core-tests` run would spend minutes in cargo before printing anything).
+- [x] Three new positive controls, CONFIRMED FAILING before the fix (with the leniency early-return
+      temporarily removed): the `--only` case then stamped `schemas: 6/6 canonical .cql readable under
+      <empty dir>`, and the relative-override case exited 1. Both pass after; the third asserts the
+      positive line STILL appears in FULL mode so the first two cannot be satisfied by never stamping
+      anything.
+- [x] `--lite` audited: `run_lite` always exits before `apply_schemas_preflight`, so no schemas line was
+      ever reachable there. The lite case now additionally asserts `! grep '^schemas: '` so a future
+      call-site move cannot start asserting readability in a mode that never checked.
+- [x] Audited the rest of this change's SUMMARY output for the same class: the only other lines it adds
+      (`missing-schemas:` ×2 variants, `preflight: FAIL (…)`, `hint: expected …`) are emitted ONLY on the
+      strict path, after the check actually ran and failed, and every value in them is derived from that
+      performed check. Nothing else asserts an unverified fact.
