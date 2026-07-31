@@ -108,7 +108,7 @@ else
 fi
 
 # --- 4. The run must actually emit its section headers (it ran the checks). ---
-for section in "Rust toolchain" "Gate accelerators" "project scope" "roborev" "CQLITE_DATASETS_ROOT" "Bootstrap summary"; do
+for section in "Rust toolchain" "Gate accelerators" "project scope" "roborev" "CQLITE_DATASETS_ROOT" "Notification channel" "Bootstrap summary"; do
   if printf '%s' "$run_out" | grep -q "$section"; then
     ok "check section present: $section"
   else
@@ -1149,6 +1149,35 @@ if [ -z "$mutating" ]; then
   ok "board: probe never invoked a mutating gh/board operation"
 else
   bad "board: probe issued a MUTATING call: $mutating"
+fi
+
+# --- 9. Notification channel (issue #3119) ----------------------------------
+# The notify dep used to be an out-of-band, hand-patched /usr/local/bin binary
+# that bootstrap never mentioned. It is now a repo-owned contract, and bootstrap
+# must (a) assert the CAPABILITY by running the wrapper's own self-test rather
+# than checking that a file exists, (b) RECORD the pinned contract version, and
+# (c) never prescribe the swallowed `--category` shape.
+if grep -q 'NOTIFY_LIB=.*scripts/lib/gate-notify.sh' "$BOOTSTRAP" \
+   && grep -q '\$NOTIFY_LIB" --self-test' "$BOOTSTRAP"; then
+  ok "notify: bootstrap asserts the CAPABILITY via the wrapper's self-test"
+else
+  bad "notify: bootstrap does not run the wrapper's self-test (existence check only?)"
+fi
+if printf '%s' "$run_out" | grep -q 'notify contract v'; then
+  ok "notify: bootstrap RECORDS the pinned contract version"
+else
+  bad "notify: bootstrap did not record a pinned notify contract version"
+fi
+if ! grep -q 'agent-notify --category' "$BOOTSTRAP"; then   # notify-flag-allow
+  ok "notify: bootstrap never prescribes the swallowed --category shape"
+else
+  bad "notify: bootstrap prescribes the swallowed --category shape"
+fi
+# The section is informational: a machine with no notify target must still finish.
+if printf '%s' "$run_out" | grep -q 'Notification channel' && [ "$run_rc" -eq 0 ]; then
+  ok "notify: the section is informational — the run still exits 0"
+else
+  bad "notify: the section is not informational (rc=$run_rc)"
 fi
 
 echo

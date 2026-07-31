@@ -868,6 +868,63 @@ else
   info "(re-run with --yes to auto-append)"
 fi
 
+# ---- 5c. Notification channel (ntfy) — issue #3119 ----
+# The gate's push signal (#2667) and the worker supervisor page over ntfy. That
+# dependency used to be an out-of-band, per-machine `/usr/local/bin/agent-notify`
+# that this script never mentioned — and whose upstream v1.1.0 silently swallows
+# the flag both callers passed, publishing a FAIL as a green priority-3 success.
+# The payload contract now lives IN THE REPO (scripts/lib/gate-notify.sh), so the
+# only pinned notify artifact travels in git. What a machine still needs is the
+# transport (curl + python3) and a target; what bootstrap verifies is the
+# CAPABILITY — the wrapper's own self-test publishes a PASS *and* a FAIL payload
+# through a capture shim and validates both — never merely that a file exists
+# (same posture as the mold link probe above).
+hdr "Notification channel (ntfy, issue #3119)"
+NOTIFY_LIB="$REPO_ROOT/scripts/lib/gate-notify.sh"
+if [ ! -r "$NOTIFY_LIB" ]; then
+  warn "scripts/lib/gate-notify.sh missing from this checkout — gate/worker notifications are no-ops"
+else
+  info "pinned: $(bash "$NOTIFY_LIB" --version 2>/dev/null || echo 'gate-notify contract v?')  (in-repo, git-pinned)"
+  if have curl; then
+    ok "curl present — ntfy publish transport"
+  else
+    warn "curl MISSING — notifications cannot be published"
+    info "install curl via your package manager (apt/dnf/pacman/brew)"
+  fi
+  if have python3; then
+    ok "python3 present — payload encoder"
+  else
+    warn "python3 MISSING — the notify payload cannot be encoded (notifications become no-ops)"
+  fi
+  NOTIFY_TARGET="${CQLITE_NOTIFY_WEBHOOK:-${CODEX_NOTIFY_WEBHOOK:-}}"
+  if [ -n "$NOTIFY_TARGET" ]; then
+    ok "notify target configured (${NOTIFY_TARGET%/*}/…)"
+  else
+    warn "no notify target configured — gate/worker notifications are silent no-ops on this machine"
+    info "fleet mechanism is /etc/environment; add (and re-login):"
+    info "  CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<your-topic>"
+  fi
+  # The CAPABILITY assert. Runs against a private curl capture shim inside the
+  # wrapper's own tmpdir: no network, no real topic, nothing published anywhere.
+  if have python3; then
+    if selftest_out=$(bash "$NOTIFY_LIB" --self-test 2>&1); then
+      ok "notify capability verified — $selftest_out"
+    else
+      warn "notify self-test FAILED — PASS/FAIL payloads do not satisfy the contract"
+      printf '%s\n' "$selftest_out" | sed 's/^/         /'
+    fi
+  else
+    warn "notify self-test skipped (needs python3) — capability UNVERIFIED on this machine"
+  fi
+  # Optional local desktop/sound adjunct. No version requirement: it is never in
+  # the payload chain, and a hand-patched copy is never required by anything here.
+  if have agent-notify; then
+    info "optional local adjunct: $(agent-notify --version 2>/dev/null | head -1 || echo 'agent-notify (version unknown)') — desktop/sound only, no version requirement"
+  else
+    info "optional local adjunct agent-notify not installed — not needed; ntfy delivery is unaffected"
+  fi
+fi
+
 # ---- 6. Health check: gate fmt + authoritative accelerators line ----
 hdr "Health check (gate fmt + accelerators line)"
 if [ "$SKIP_SMOKE" = 1 ]; then

@@ -3997,7 +3997,7 @@ _tree_result() {
 # waiting closer/worker is called back instead of idle-polling the summary file.
 # Delegates delivery to the REPO-OWNED contract in scripts/lib/gate-notify.sh
 # (#3119), which builds the ntfy payload itself and publishes it to the server
-# ROOT. It does NOT call `agent-notify --category` any more: the installed
+# ROOT. It does NOT call `agent-notify --category` any more (notify-flag-allow): the installed
 # upstream v1.1.0 has no `--category` arm, so that flag fell through to its
 # manual "$1"/"$2" mode — title became the literal `--category`, the body became
 # the category VALUE, the real title/body were dropped, and a FAIL published

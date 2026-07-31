@@ -264,6 +264,26 @@ else
   bad "publish path emitted output"; head -5 "$tmp/out.txt" "$tmp/err.txt"
 fi
 
+# ---- 11. AC6 doctrine: no repo surface prescribes the swallowed flag --------
+# Mechanized so a reintroduction FAILs the gate instead of silently corrupting
+# every fleet page again. Scope is the EXECUTABLE/PRESCRIPTIVE surfaces — scripts,
+# agent skills/commands, workflows — because that is where the shape can actually
+# be invoked; prose that DOCUMENTS the historical defect (openspec artifacts, the
+# guide, archived reports) is not an offence. A line that must quote the shape
+# explanatorily marks itself `notify-flag-allow`, mirroring the repo's existing
+# `injection-lint-allow` idiom. The needle is ASSEMBLED so this file's own prose
+# can never be the thing it flags.
+needle="agent-notify"' --category'
+offenders=$(cd "$REPO_ROOT" && grep -rIn --exclude-dir=.git --exclude-dir=target \
+  -e "$needle" scripts .claude .github 2>/dev/null \
+  | grep -v 'notify-flag-allow' \
+  | grep -v '^scripts/tests/test_gate_notify_contract.sh:' || true)
+if [ -z "$offenders" ]; then
+  ok "AC6 doctrine: no script, skill or workflow invokes the swallowed-flag shape"
+else
+  bad "AC6 doctrine: the swallowed-flag shape survives in:"; printf '%s\n' "$offenders"
+fi
+
 echo "----------------------------------------"
 echo "test_gate_notify_contract: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

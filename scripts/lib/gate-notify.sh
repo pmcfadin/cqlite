@@ -3,7 +3,7 @@
 # gate-notify.sh — the repo-owned notification contract (issue #3119).
 #
 # WHY THIS FILE OWNS THE PAYLOAD. The gate used to call
-# `agent-notify --category <cat> <title> <body>`. The installed upstream
+# `agent-notify --category <cat> <title> <body>`. The installed upstream  notify-flag-allow
 # `agent-notify` v1.1.0 has NO `--category` arm, so that call fell through to its
 # manual "$1"/"$2" mode: the title became the literal string `--category`, the
 # body became the category VALUE, and the real title/body were dropped as surplus
