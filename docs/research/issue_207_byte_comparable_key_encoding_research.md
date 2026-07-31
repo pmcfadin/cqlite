@@ -7,6 +7,60 @@
 
 ---
 
+> # ⚠️ CORRECTION BANNER — PARTS OF THIS DOCUMENT ARE WRONG (issue #3032)
+>
+> This 2025-10-31 research note is the **origin of a real read-path bug**: its
+> variable-length terminator description was implemented verbatim in
+> `cqlite-core/src/storage/sstable/reader/parsing/byte_comparable.rs` and silently
+> truncated `text`-clustering slices. It is kept for history, **not** as format
+> authority. Format authority is pinned `cassandra-5.0.8` source
+> (`src/java/org/apache/cassandra/utils/bytecomparable/ByteSource.java`,
+> `src/java/org/apache/cassandra/db/ClusteringPrefix.java`,
+> `src/java/org/apache/cassandra/db/ClusteringComparator.java`), then `sstabledump`,
+> then `docs/sstables-definitive-guide/`.
+>
+> **Two specific errors, corrected:**
+>
+> **1. The variable-length terminator is a LONE `0x00`, not `0x00 0xFF`.**
+> Per `ByteSource.AbstractEscaper` (`ESCAPE = 0x00`, `ESCAPED_0_CONT = 0xFE`,
+> `ESCAPED_0_DONE = 0xFF`), zeros in the DATA are escaped as
+> `ESCAPE + zero or more ESCAPED_0_CONT + ESCAPED_0_DONE`. So:
+> * `00 FE` **continues** a run of zeros (it does *not* encode one literal zero);
+> * `00 FF` **closes** a run of zeros, emitting that run's last zero and returning to
+>   the unescaped state — it is **never** a terminator;
+> * a component whose data does not end in `0x00` terminates with a **single `0x00`**;
+>   one ending in `0x00` terminates with `00 FE`.
+>
+> Cassandra's own worked examples (`ByteSource.java:309-327`):
+> `"A\0\0B" → 41 00 FE FF 42 00`, `"A\0B\0" → 41 00 FF 42 00 FE`, `"A\0" → 41 00 FE`,
+> `"AB" → 41 42 00`. The terminator must sort BELOW the following component's
+> `NEXT_COMPONENT` (`0x40`); a two-byte `00 FF` terminator sorts *above* `00 40`,
+> which is exactly how the bug truncated slices. An **empty** variable-length
+> component is therefore just `0x00` (a full empty component: `40 00`) —
+> `NEXT_COMPONENT_EMPTY` (`0x3F`) applies only to an empty BUFFER for a fixed-length
+> numeric, never to text (`ClusteringComparator.java:328-329`).
+>
+> **2. `LT_NEXT_COMPONENT` / `GT_NEXT_COMPONENT` are NOT "exclusive lower / inclusive
+> upper bound".** They are the `ClusteringPrefix.Kind` byte-comparable values
+> (`ClusteringPrefix.java:70-81`, `Kind.asByteComparableValue`), and each covers
+> THREE kinds:
+> * `LT_NEXT_COMPONENT` (`0x20`) ← `EXCL_END_BOUND`, `INCL_START_BOUND`,
+>   `EXCL_END_INCL_START_BOUNDARY`
+> * `GT_NEXT_COMPONENT` (`0x60`) ← `INCL_END_EXCL_START_BOUNDARY`, `INCL_END_BOUND`,
+>   `EXCL_START_BOUND`
+>
+> (Also: `SSTABLE_LOWER_BOUND` → `LTLT_NEXT_COMPONENT` `0x1F`, `SSTABLE_UPPER_BOUND` →
+> `GTGT_NEXT_COMPONENT` `0x61`; a complete `CLUSTERING` ends in `TERMINATOR` `0x38`
+> under `Version.OSS50` and only in `NEXT_COMPONENT` `0x40` under `Version.LEGACY`.)
+>
+> The corrected encoder/decoder lives in
+> `cqlite-core/src/storage/sstable/bti/parser/encoding.rs`
+> (`encode_clustering_component_oss50`), validated against a real Cassandra 5.0 `da`
+> fixture by `cqlite-core/tests/issue_3032_multiclustering_rows_trie_shape.rs`.
+> Repairing the still-wrong `byte_comparable.rs` decoder is tracked by **#3207**.
+
+---
+
 ## Executive Summary
 
 This research investigates the **byte-comparable key encoding** format used in Cassandra 5.0's 'newbig' format, which is causing clustering key parsing failures across 11+ tables. The investigation reveals that Cassandra 5.0 introduced a comprehensive byte-comparable encoding system (CEP-25) for keys that differs fundamentally from the VInt-based encoding our parser currently assumes.
@@ -128,9 +182,10 @@ public static final int GT_NEXT_COMPONENT = 0x60;
 
 #### Strings/Blobs (text, varchar, blob)
 - **Encoding**: Zero-byte escaping using `0x00 0xFF` and `0x00 0xFE` sequences
-- **Details**:
-  - `0x00` byte in data → `0x00 0xFE`
-  - Terminator → `0x00 0xFF`
+- **Details** (⚠️ **WRONG — see the correction banner at the top, issue #3032**):
+  - ~~`0x00` byte in data → `0x00 0xFE`~~ — `00 FE` *continues* a run of zeros
+  - ~~Terminator → `0x00 0xFF`~~ — `00 FF` *closes* a zero run; the terminator is a
+    **lone `0x00`** (`00 FE` when the data itself ends in `0x00`)
   - Preserves lexicographic string ordering
 
 #### Decimals
@@ -152,8 +207,10 @@ public static final int GT_NEXT_COMPONENT = 0x60;
 | `NEXT_COMPONENT_EMPTY` | 0x3F | Empty component | Represents null from empty buffer |
 | `NEXT_COMPONENT_NULL` | 0x3E | Null marker | Explicit null for tuple/map/set |
 | `TERMINATOR` | 0x38 | Sequence terminator | Default end-of-sequence marker |
-| `LT_NEXT_COMPONENT` | 0x20 | Lower bound | Exclusive lower bound marker |
-| `GT_NEXT_COMPONENT` | 0x60 | Upper bound | Inclusive upper bound marker |
+| `LT_NEXT_COMPONENT` | 0x20 | `ClusteringPrefix.Kind` byte | ⚠️ **NOT** "exclusive lower bound" (#3032): `EXCL_END_BOUND`, `INCL_START_BOUND`, `EXCL_END_INCL_START_BOUNDARY` |
+| `GT_NEXT_COMPONENT` | 0x60 | `ClusteringPrefix.Kind` byte | ⚠️ **NOT** just "inclusive upper bound" (#3032): `INCL_END_EXCL_START_BOUNDARY`, `INCL_END_BOUND`, `EXCL_START_BOUND` |
+| `LTLT_NEXT_COMPONENT` | 0x1F | `SSTABLE_LOWER_BOUND` | Added for completeness (`ClusteringPrefix.java:80`) |
+| `GTGT_NEXT_COMPONENT` | 0x61 | `SSTABLE_UPPER_BOUND` | Added for completeness (`ClusteringPrefix.java:81`) |
 
 ### Reserved Range
 
@@ -163,9 +220,20 @@ public static final int GT_NEXT_COMPONENT = 0x60;
 
 **Original Data**: `0x48 0x65 0x6C 0x6C 0x6F 0x00 0x57 0x6F 0x72 0x6C 0x64` ("Hello\0World")
 
-**Encoded**: `0x48 0x65 0x6C 0x6C 0x6F 0x00 0xFE 0x57 0x6F 0x72 0x6C 0x64 0x00 0xFF`
-- `0x00` in data → `0x00 0xFE`
-- Terminator → `0x00 0xFF`
+⚠️ **The worked example below is WRONG (#3032) — corrected immediately after it.**
+
+**Encoded (WRONG, as originally written)**: `0x48 0x65 0x6C 0x6C 0x6F 0x00 0xFE 0x57 0x6F 0x72 0x6C 0x64 0x00 0xFF`
+- ~~`0x00` in data → `0x00 0xFE`~~
+- ~~Terminator → `0x00 0xFF`~~
+
+**Encoded (CORRECT, per pinned `cassandra-5.0.8` `ByteSource.AbstractEscaper`)**:
+`0x48 0x65 0x6C 0x6C 0x6F 0x00 0xFF 0x57 0x6F 0x72 0x6C 0x64 0x00`
+- the single `0x00` in the data opens an escape run (`0x00` emitted as-is);
+- the next non-zero byte (`'W'`) **closes** the run with `0xFF` and is then emitted;
+- end of data, run already closed → terminator is one `0x00`.
+
+Compare Cassandra's own examples (`ByteSource.java:314-317`):
+`"A\0\0B" → 41 00 FE FF 42 00`, `"A\0B\0" → 41 00 FF 42 00 FE`, `"AB" → 41 42 00`.
 
 ---
 
@@ -179,7 +247,8 @@ public static final int GT_NEXT_COMPONENT = 0x60;
 ```
 [Encoded UUID: 16 bytes]
 0x40  (NEXT_COMPONENT)
-[Encoded Text: variable length with 0x00 0xFF escaping]
+[Encoded Text: variable length, terminated by a LONE 0x00 - the
+           "0x00 0xFF escaping" originally written here is WRONG, see #3032]
 0x38  (TERMINATOR)
 ```
 
@@ -191,7 +260,8 @@ public static final int GT_NEXT_COMPONENT = 0x60;
 ```
 [Encoded Timestamp: 8 bytes, big-endian with sign flip]
 0x40  (NEXT_COMPONENT)
-[Encoded Text: variable length with 0x00 0xFF escaping]
+[Encoded Text: variable length, terminated by a LONE 0x00 - the
+           "0x00 0xFF escaping" originally written here is WRONG, see #3032]
 0x38  (TERMINATOR)
 ```
 
@@ -199,7 +269,9 @@ public static final int GT_NEXT_COMPONENT = 0x60;
 
 **Null Component**: `0x3E` (NEXT_COMPONENT_NULL)
 
-**Empty Component**: `0x3F` (NEXT_COMPONENT_EMPTY)
+**Empty Component**: `0x3F` (NEXT_COMPONENT_EMPTY) — ⚠️ only for an empty BUFFER of a
+fixed-length type (int, varint, …), **never** for an empty `text`/`blob`, which encodes
+as `0x40 0x00` (#3032; `ClusteringComparator.java:328-329`).
 
 **Example** (key with null middle component):
 ```
@@ -386,7 +458,8 @@ fn decode_component(data: &[u8], data_type: &DataType) -> Result<(Value, usize)>
             Ok((Value::Uuid(uuid_bytes.to_vec()), 16))
         }
         DataType::Text | DataType::Varchar => {
-            // Variable-length text with 0x00 0xFF terminator and 0x00 0xFE escaping
+            // WRONG per #3032 (proposed code, never correct): the OSS50 terminator is
+            // a LONE 0x00; 00 FF closes an escape run. See the correction banner.
             let mut decoded = Vec::new();
             let mut i = 0;
 
@@ -673,7 +746,8 @@ Where possible, avoid copying bytes:
 
 1. **Uses type-specific encodings** - Not VInt lengths everywhere
 2. **Includes component separators** - 0x40 between components
-3. **Has escape sequences** - 0x00 0xFE/0xFF for zero bytes
+3. **Has escape sequences** - 0x00 0xFE/0xFF for RUNS of zero bytes (continue/close);
+   the component terminator is a lone 0x00 (⚠️ corrected, #3032)
 4. **Requires schema knowledge** - Type-aware decoding essential
 5. **Is fully documented** - Both in Cassandra sources and our codebase
 
