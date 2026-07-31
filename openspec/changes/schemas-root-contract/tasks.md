@@ -1,0 +1,108 @@
+# Tasks: schemas-root-contract (issues #3148, #3131)
+
+> Design decided in `design.md`: the committed schema fixtures resolve **checkout-relative**
+> (`CARGO_MANIFEST_DIR`-anchored ancestor walk), never from `CQLITE_DATASETS_ROOT` — #3148's proposed
+> fix 4, taken as the owner's decision (AC (h)). One shared `#[path]`-included file hosted under
+> `test-data/support/` because it encodes the layout of `test-data` itself and is owned by neither crate.
+> The gate preflight becomes a belt-and-braces per-FILE readability assert with no opt-out.
+> AC → requirement map is at the top of `specs/test-fixture-roots/spec.md`.
+
+## 1. The single roots contract (surface: `test-data/support/fixture_roots.rs`)
+- [x] Create the shared std-only module with `datasets_root`, `datasets_root_if_present`,
+      `sstables_root`, `schemas_root`, `schemas_root_resolved`, `schema_path`, `check_schema_files`.
+- [x] Resolve the checkout by walking `CARGO_MANIFEST_DIR`'s **ancestors** for the first holding
+      `test-data/schemas` (not a hardcoded `../test-data`), so a crate nested deeper than one level
+      still resolves and no `..` component is ever handed to the kernel.
+- [x] Honor `CQLITE_SCHEMAS_ROOT` only when set, non-empty AND a readable directory; fall through to the
+      checkout otherwise (a stale export must degrade, not pin every load to an unusable path).
+- [x] Treat an exported-but-EMPTY env value as unset for both roots (a scripting accident, never an
+      intentional root).
+- [x] `schema_path` verifies readability and panics naming the resolved ABSOLUTE path, the root, the
+      resolution source, that these are committed source, and the remedy.
+- [x] Document the two-shape `datasets_root()` contract in the module docs with the stated reason for
+      each shape (#3148 AC (e)), including why the fallible shape has no checkout fallback.
+- [x] `#![allow(dead_code)]` at module scope — the file is `#[path]`-included into ~14 targets, each
+      using a subset.
+
+## 2. Migrate all four call sites (#3148 AC (d))
+- [x] `cqlite-core/benches/fixtures/mod.rs` — include the shared module as `pub mod roots`; reduce
+      `datasets_root`/`sstables_root`/`schemas_root` to thin delegations; switch `open_read_db_with_config`
+      to `roots::schema_path` so an unreachable fixture is diagnosed at the root, not inside ingest.
+- [x] `cqlite-core/tests/dead_cache_delete_tests.rs` — replace the local fallible `datasets_root()` with
+      `use fixture_roots::datasets_root_if_present as datasets_root;` and the `join("../schemas")` with
+      `schema_path`; drop the now-redundant `datasets_root()?` in `open_fixture_db` (its `data_db(..)?`
+      already short-circuits identically).
+- [x] `cqlite-core/tests/observability_correctness.rs` — delegate the third `datasets_root()` copy and
+      switch to `schema_path`.
+- [x] `cqlite-cli/benches/export_csv.rs` — include the shared module (symmetric `../../` path, no
+      cross-crate reach into cqlite-core's bench internals) and switch to `schema_path`; update the
+      module doc that declared the duplication deliberate so it now scopes that to fixture-OPEN logic only.
+- [x] Verify zero open-coded `join("../schemas")` expressions remain in Rust code.
+- [x] Compile all migrated targets under `RUSTFLAGS="-D warnings"`, including the `cli-helpers`-gated ones
+      and the `cqlite-cli` bench.
+
+## 3. Gate preflight (surface: `scripts/agent-gate.sh`) (#3148 ACs (a) (b) (g))
+- [x] Add `CANONICAL_SCHEMA_FILES` (the 6 `.cql` the dataset-backed components consume) and
+      `SCHEMAS_LINE`.
+- [x] Add `_gate_schemas_root` / `_gate_schemas_root_source` mirroring `schemas_root_resolved()` exactly.
+- [x] Add `_missing_schema_files` (per-FILE readability) and the PURE `_schemas_status` (`OK|FAIL`,
+      returning OK for `--lite`/`--only`).
+- [x] Add `apply_schemas_preflight`: stamp the positive `schemas:` line on OK; on FAIL emit
+      `missing-schemas: FAIL-CLOSED (#3148)` plus a remedy naming the exact absolute path and both fix
+      commands, then exit 1. No opt-out.
+- [x] Call it immediately after `apply_fixture_preflight` inside `if selected_needs_datasets`, so the
+      corpus cause is still reported first when both halves are missing.
+- [x] Stamp `SCHEMAS_LINE` into BOTH the terminal `SUMMARY_META` assembly and the component-boundary
+      block, guarded so a `--lite`/`--delta` boundary omits it rather than inventing it.
+- [x] Add the hidden `--preflight-schemas` hook (STATUS/ROOT/SOURCE/MISSING), with an optional 2nd arg
+      seeding `ONLY` so the `--only` leniency branch is assertable (the arg dispatch is one `case "$1"`).
+- [x] Update the `tooling-tests` doc block and the file-header component description.
+
+## 4. Positive-control self-test (surface: `scripts/tests/test_agent_gate_schemas_preflight.sh`) (#3148 AC (c))
+- [x] Hook cases: OK on the checkout; FAIL naming all 6 on a schemas-less root; FAIL naming ONLY the
+      absentees on a present-but-incomplete root.
+- [x] Real FULL-gate case with a COMPLETE synthetic corpus: non-zero exit, `missing-schemas: FAIL-CLOSED
+      (#3148)`, `RESULT: FAIL`, never `RESULT: PASS`, and no cargo run.
+- [x] Marker-separability case: the schemas failure must not stamp `missing-fixtures:`.
+- [x] Remedy case: the block names the absolute `.cql` path and both fix commands.
+- [x] Leniency cases: `--lite` clean LITE block with no marker; `--only core-tests` decision is OK.
+- [x] Symlink-independence case (#3148 AC (f)): identical resolved root across real / symlinked /
+      nonexistent datasets roots — asserted behaviorally, not claimed.
+- [x] Structural reintroduction guard: zero open-coded `join("../schemas")` expressions in Rust code,
+      exempting doc comments.
+- [x] Single-definition cases: the shared file exists with all three contract fns; all four sites include
+      it; no bench / migrated test reads `CQLITE_DATASETS_ROOT` directly.
+- [x] Scrub inherited `AGENT_GATE_SUMMARY_FILE` and `CQLITE_SCHEMAS_ROOT` so the test measures the
+      committed contract, not the caller's shell.
+- [x] Wire into the `tooling-tests` component.
+
+## 5. `fetch-datasets.sh` usability guarantee (#3131 items 1-2)
+- [x] Add `guarantee_usable_root`, called on BOTH the warm-skip and post-extraction paths: re-verify the
+      content independently of the pin fast path, fail loudly with a remedy naming the pin to clear, and
+      print the exact `export CQLITE_DATASETS_ROOT=<absolute path>` line the run guarantees.
+- [x] Print a NOTE when the populated root differs from the checkout default, naming the already-set env
+      var as the cause, so an operator cannot fall back to the documented default and get a corpus-less root.
+- [x] Print a NOTE that the CQL schema fixtures are committed source resolved checkout-relative and are
+      NOT a sibling of this root (#3148).
+- [x] Add non-mutating `--verify-only`, so the failure path is exercisable and operators/CI get a cheap
+      "is this root usable?" probe.
+- [x] Leave `rm -rf "${DATASET_ROOT}"` and `restore_ci_tracked_dataset_files`' CI-only short-circuit
+      untouched (#2878), with a code comment stating the boundary and a self-test case asserting it.
+- [x] Self-test cases: hollow root exits non-zero with a remedy; a content-complete root exits zero and
+      prints the verbatim export line; the #2878 boundary holds.
+
+## 6. Verification
+- [x] Hostile-layout run (the layout that made this fail): `CQLITE_DATASETS_ROOT` pointed at a scratch
+      root holding the corpus with **no** `../schemas` sibling, `CQLITE_SCHEMAS_ROOT` unset — the
+      previously-failing targets pass (`dead_cache_delete_tests` 8/8 incl. the 4 `stats_*`,
+      `memory_budget` 3/3, `issue_1494_converter_alloc_budget` 1/1,
+      `issue_2075_row_assembly_alloc_budget` 1/1), with `--features cli-helpers` (+ `dhat-heap,arrow` for
+      the budget lanes) so the `cli-helpers`-gated targets are actually compiled rather than silently empty.
+- [x] Non-vacuity control: with `CQLITE_SCHEMAS_ROOT` pointed at an empty directory, exactly the 4
+      schema-consuming `stats_*` tests FAIL with the new actionable message — proving the passes above are
+      real schema loads, not skips.
+- [x] Negative control: a real FULL gate with a complete corpus and an unreachable schemas root exits 1 at
+      the preflight stamping `missing-schemas: FAIL-CLOSED (#3148)`.
+- [x] `scripts/agent-gate.sh --lite` PASS with the summary-file redirect.
+- [ ] Doctrine pass (CLAUDE.md + the `agents-developing/test-data` page) — handled separately on this
+      branch; the required facts are listed at the end of `design.md`.
