@@ -64,17 +64,40 @@ printf '%s\n' "$ARCHIVE_STALE_CONTENT" >"$AD/corruption/committed-Data.db"
 TARBALL="$T/$ASSET"
 tar -czf "$TARBALL" -C "$ARCHIVE_SRC" test-data
 
-SHA=""
-if command -v sha256sum >/dev/null 2>&1; then
-  SHA="$(sha256sum "$TARBALL" | awk '{print $1}')"
-elif command -v shasum >/dev/null 2>&1; then
-  SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
-fi
+# A BAD archive for the abort-window case: valid gzip/tar, but its top level is
+# not test-data/datasets, so the script hits its explicit `exit 1` AFTER the
+# `rm -rf` — the exact window that used to lose the fixtures for good.
+BAD_SRC="$T/bad-archive-src"
+mkdir -p "$BAD_SRC/wrong-root/datasets"
+printf 'not the expected layout\n' >"$BAD_SRC/wrong-root/datasets/thing.txt"
+BAD_TARBALL="$T/bad-$ASSET"
+tar -czf "$BAD_TARBALL" -C "$BAD_SRC" wrong-root
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+SHA="$(sha256_of "$TARBALL")"
+BAD_SHA="$(sha256_of "$BAD_TARBALL")"
 if [ -n "$SHA" ]; then
   ok "fixture: computed real sha256 of the fake archive (checksum verification is exercised)"
 else
   printf 'INFO - no sha256 tool; the script will warn-and-continue (CI unset)\n'
   SHA="0000000000000000000000000000000000000000000000000000000000000000"
+  BAD_SHA="$SHA"
+fi
+
+# Cases that require a path to be OUTSIDE any git work tree are only meaningful
+# when the sandbox itself is not inside a checkout — git discovery would otherwise
+# find the enclosing repo. Probe ONCE and reuse (a test whose verdict depends on
+# where TMPDIR points is a flake, and gate flakes cost everyone).
+SANDBOX_IN_REPO=0
+if git -C "$T" rev-parse --show-toplevel >/dev/null 2>&1; then
+  SANDBOX_IN_REPO=1
+  printf 'INFO - TMPDIR (%s) is inside a git checkout; out-of-repo cases are skipped\n' "$T"
 fi
 
 # --- stub curl ---------------------------------------------------------------
@@ -148,32 +171,58 @@ IGN
 # run_fetch <cwd> <dataset-root> [extra env assignments...] — invoke the REAL
 # script with curl stubbed and CI explicitly unset unless an override is passed.
 # A dataset-root of "-" leaves CQLITE_DATASETS_ROOT UNSET so the script's
-# documented relative default (test-data/datasets) is exercised.
+# documented relative default (test-data/datasets) is exercised. Set
+# FETCH_PAYLOAD/FETCH_PAYLOAD_SHA to serve a different archive.
 # Sets $OUT (combined output) and $RC.
+FETCH_PAYLOAD=""
+FETCH_PAYLOAD_SHA=""
+FETCH_BIN=""
 run_fetch() {
   local cwd="$1" root="$2"
   shift 2
+  local payload="${FETCH_PAYLOAD:-$TARBALL}" sha="${FETCH_PAYLOAD_SHA:-$SHA}"
+  local bin="${FETCH_BIN:-$BIN}"
   OUT=$(
     cd "$cwd" || exit 90
     unset CI GITHUB_ACTIONS CQLITE_DATASETS_ALLOW_UNPROTECTED
-    export PATH="$BIN:$PATH"
-    export STUB_CURL_PAYLOAD="$TARBALL"
+    export PATH="$bin:$PATH"
+    export STUB_CURL_PAYLOAD="$payload"
     if [ "$root" = "-" ]; then
       env -u CQLITE_DATASETS_ROOT "$@" \
         DATASET_TAG="fake-tag" \
         DATASET_ASSET="$ASSET" \
-        DATASET_SHA256="$SHA" \
+        DATASET_SHA256="$sha" \
         bash "$FETCH" 2>&1
     else
       env "$@" \
         CQLITE_DATASETS_ROOT="$root" \
         DATASET_TAG="fake-tag" \
         DATASET_ASSET="$ASSET" \
-        DATASET_SHA256="$SHA" \
+        DATASET_SHA256="$sha" \
         bash "$FETCH" 2>&1
     fi
   )
   RC=$?
+}
+
+# assert_refusal <label> <expected-substring> <canary-path> — the run must fail
+# closed, say why, and have deleted nothing.
+assert_refusal() {
+  local label="$1" needle="$2" canary="$3"
+  if [ "$RC" -ne 0 ]; then
+    ok "$label: fails closed (exit $RC)"
+  else
+    bad "$label: exited 0 — a destructive path was taken silently"
+  fi
+  case "$OUT" in
+    *"$needle"*) ok "$label: error explains the refusal ('$needle')" ;;
+    *) bad "$label: error missing '$needle'; output: $OUT" ;;
+  esac
+  if [ -e "$canary" ]; then
+    ok "$label: refused BEFORE deleting anything"
+  else
+    bad "$label: '$canary' was destroyed despite the refusal"
+  fi
 }
 
 # assert_tracked_intact <repo> <label> — every tracked fixture is present with its
@@ -314,8 +363,8 @@ R4="$T/case4-repo"
 make_repo "$R4"
 OUTSIDE="$T/case4-outside"
 mkdir -p "$OUTSIDE/test-data"
-if git -C "$OUTSIDE" rev-parse --show-toplevel >/dev/null 2>&1; then
-  printf 'INFO - TMPDIR is inside a git checkout; skipping the out-of-repo case\n'
+if [ "$SANDBOX_IN_REPO" = 1 ]; then
+  printf 'INFO - skipping the out-of-repo case (sandbox is inside a checkout)\n'
 else
   run_fetch "$R4" "$OUTSIDE/test-data/datasets"
   if [ "$RC" -eq 0 ]; then
@@ -343,58 +392,218 @@ R5="$T/case5-repo"
 make_repo "$R5"
 SIBLING="$T/case5-repo-sibling"
 mkdir -p "$SIBLING/test-data"
-run_fetch "$R5" "$SIBLING/test-data/datasets"
-if [ "$RC" -eq 0 ]; then
-  ok "sibling-prefix: fetch exits 0 (not misclassified as in-repo)"
+if [ "$SANDBOX_IN_REPO" = 1 ]; then
+  printf 'INFO - skipping the sibling-prefix case (sandbox is inside a checkout)\n'
 else
-  bad "sibling-prefix: fetch exited $RC"
-  printf '     %s\n' "$OUT"
-fi
-assert_archive_extracted "$SIBLING/test-data/datasets" "sibling-prefix"
-if [ -z "$(git -C "$R5" status --porcelain 2>&1)" ]; then
-  ok "sibling-prefix: the neighbouring repo is untouched"
-else
-  bad "sibling-prefix: the neighbouring repo was modified"
+  run_fetch "$R5" "$SIBLING/test-data/datasets"
+  if [ "$RC" -eq 0 ]; then
+    ok "sibling-prefix: fetch exits 0 (not misclassified as in-repo)"
+  else
+    bad "sibling-prefix: fetch exited $RC"
+    printf '     %s\n' "$OUT"
+  fi
+  assert_archive_extracted "$SIBLING/test-data/datasets" "sibling-prefix"
+  if [ -z "$(git -C "$R5" status --porcelain 2>&1)" ]; then
+    ok "sibling-prefix: the neighbouring repo is untouched"
+  else
+    bad "sibling-prefix: the neighbouring repo was modified"
+  fi
 fi
 
 # === Case 6: cannot determine -> REFUSE loudly, never a silent bail ==========
 # A directory that carries a .git entry but is not a usable work tree: the guard
-# cannot enumerate tracked files, so it must refuse BEFORE the rm -rf.
+# cannot enumerate tracked files, so it must refuse BEFORE the rm -rf. Needs the
+# sandbox to be outside a checkout — git 2.43 discovery walks PAST an invalid
+# .git to an enclosing repo, which would make the dir classifiable after all.
 R6="$T/case6-broken"
 mkdir -p "$R6/.git" "$R6/test-data/datasets/commitlog"
 CANARY="$R6/test-data/datasets/commitlog/canary.log"
 printf 'canary must survive a refusal\n' >"$CANARY"
-run_fetch "$R6" "$R6/test-data/datasets"
-if [ "$RC" -ne 0 ]; then
-  ok "undeterminable: fetch fails closed (exit $RC)"
+if [ "$SANDBOX_IN_REPO" = 1 ]; then
+  printf 'INFO - skipping the undeterminable + opt-out cases (sandbox is inside a checkout)\n'
 else
-  bad "undeterminable: fetch exited 0 — a silent bail on a destructive path"
-fi
-case "$OUT" in
-  *"#2878"*) ok "undeterminable: error names issue #2878" ;;
-  *) bad "undeterminable: error does not cite #2878; output: $OUT" ;;
-esac
-case "$OUT" in
-  *"$R6/test-data/datasets"*) ok "undeterminable: error names the dataset path it refused" ;;
-  *) bad "undeterminable: error does not name the path; output: $OUT" ;;
-esac
-if [ -f "$CANARY" ]; then
-  ok "undeterminable: refused BEFORE deleting anything"
-else
-  bad "undeterminable: the dataset dir was destroyed despite the refusal"
+  run_fetch "$R6" "$R6/test-data/datasets"
+  assert_refusal "undeterminable" "#2878" "$CANARY"
+  case "$OUT" in
+    *"$R6/test-data/datasets"*) ok "undeterminable: error names the dataset path it refused" ;;
+    *) bad "undeterminable: error does not name the path; output: $OUT" ;;
+  esac
+
+  # === Case 7: the refusal is opt-out-able, loudly ==========================
+  run_fetch "$R6" "$R6/test-data/datasets" CQLITE_DATASETS_ALLOW_UNPROTECTED=1
+  if [ "$RC" -eq 0 ]; then
+    ok "opt-out: CQLITE_DATASETS_ALLOW_UNPROTECTED=1 proceeds"
+  else
+    bad "opt-out: still failed (exit $RC); output: $OUT"
+  fi
+  case "$OUT" in
+    *"WARNING"*"may be DELETED"*) ok "opt-out: warns that tracked fixtures may be deleted" ;;
+    *) bad "opt-out: no loud warning; output: $OUT" ;;
+  esac
 fi
 
-# === Case 7: the refusal is opt-out-able, loudly ============================
-run_fetch "$R6" "$R6/test-data/datasets" CQLITE_DATASETS_ALLOW_UNPROTECTED=1
-if [ "$RC" -eq 0 ]; then
-  ok "opt-out: CQLITE_DATASETS_ALLOW_UNPROTECTED=1 proceeds"
+# === Case 8: ABORT AFTER the rm -rf must still restore (BLOCKER 1) ===========
+# A valid tarball with an unexpected top level hits the script's explicit
+# `exit 1` AFTER the dataset dir has been deleted. Every other abort in that
+# window (tar failure, ENOSPC on the mv, SIGINT mid-extract) leaves the same
+# state, and before the fix all of them lost the fixtures permanently while the
+# error message blamed the archive.
+R8="$T/case8-repo"
+make_repo "$R8"
+FETCH_PAYLOAD="$BAD_TARBALL"
+FETCH_PAYLOAD_SHA="$BAD_SHA"
+run_fetch "$R8" "$R8/test-data/datasets"
+FETCH_PAYLOAD=""
+FETCH_PAYLOAD_SHA=""
+if [ "$RC" -ne 0 ]; then
+  ok "abort-window: the bad archive still fails the run (exit $RC)"
 else
-  bad "opt-out: still failed (exit $RC); output: $OUT"
+  bad "abort-window: bad archive accepted; output: $OUT"
 fi
 case "$OUT" in
-  *"WARNING"*"may be DELETED"*) ok "opt-out: warns that tracked fixtures may be deleted" ;;
-  *) bad "opt-out: no loud warning; output: $OUT" ;;
+  *"did not contain test-data/datasets"*) ok "abort-window: the original archive error is preserved" ;;
+  *) bad "abort-window: archive error lost; output: $OUT" ;;
 esac
+case "$OUT" in
+  *"aborted"*"restoring the git-tracked reference fixtures"*)
+    ok "abort-window: the abort path announces the restore it performed" ;;
+  *) bad "abort-window: no abort-restore announcement; output: $OUT" ;;
+esac
+assert_tracked_intact "$R8" "abort-window"
+if [ ! -f "$R8/test-data/datasets/metadata.yml" ]; then
+  ok "abort-window: no archive content claimed (the failure is not papered over)"
+else
+  bad "abort-window: archive content present after a failed extraction"
+fi
+
+# --- Case 8b: NON-VACUITY for the abort window -------------------------------
+# Flipping the flag that arms the abort-path restore reproduces the pre-fix loss.
+MUTANT_NO_ABORT="$T/fetch-datasets-mutant-no-abort.sh"
+sed 's/^TRACKED_GUARD_DESTRUCTIVE_STARTED=1$/TRACKED_GUARD_DESTRUCTIVE_STARTED=0/' "$FETCH" >"$MUTANT_NO_ABORT"
+if ! cmp -s "$FETCH" "$MUTANT_NO_ABORT"; then
+  ok "non-vacuity: built an abort-restore-disabled mutant"
+  R8B="$T/case8b-repo"
+  make_repo "$R8B"
+  FETCH_SAVED="$FETCH"
+  FETCH="$MUTANT_NO_ABORT"
+  FETCH_PAYLOAD="$BAD_TARBALL"
+  FETCH_PAYLOAD_SHA="$BAD_SHA"
+  run_fetch "$R8B" "$R8B/test-data/datasets"
+  FETCH="$FETCH_SAVED"
+  FETCH_PAYLOAD=""
+  FETCH_PAYLOAD_SHA=""
+  MUT8_MISSING=0
+  for rel in "${TRACKED_RELATIVE[@]}"; do
+    [ -f "$R8B/test-data/datasets/$rel" ] || MUT8_MISSING=$((MUT8_MISSING + 1))
+  done
+  if [ "$MUT8_MISSING" -eq "${#TRACKED_RELATIVE[@]}" ]; then
+    ok "non-vacuity: mutant loses ALL $MUT8_MISSING tracked fixtures in the abort window"
+  else
+    bad "non-vacuity: mutant lost only $MUT8_MISSING fixtures — the abort assert is weak"
+  fi
+  if [ -n "$(git -C "$R8B" status --porcelain 2>&1)" ]; then
+    ok "non-vacuity: mutant leaves the checkout dirty after the aborted fetch"
+  else
+    bad "non-vacuity: mutant left a clean checkout — the abort assert is vacuous"
+  fi
+else
+  bad "non-vacuity: could not build the abort-restore-disabled mutant (flag renamed?)"
+fi
+
+# === Case 8c: the SIGNAL arm of the abort window =============================
+# The window is also reachable by Ctrl-C / SIGTERM mid-extract, which a bare EXIT
+# trap alone would not cover. Driven DETERMINISTICALLY (no sleeps, no wall-clock):
+# a stub `tar` signals the fetch script itself, so bash runs the trap at the very
+# next command boundary. Nothing here depends on timing.
+SIGBIN="$T/bin-signal"
+mkdir -p "$SIGBIN"
+cp "$BIN/curl" "$SIGBIN/curl"
+cat >"$SIGBIN/tar" <<'MOCK'
+#!/usr/bin/env bash
+# Stand in for an interrupted extraction: signal the invoking fetch script and
+# exit as a killed-by-signal tar would.
+kill -TERM "$PPID" 2>/dev/null
+exit 143
+MOCK
+chmod +x "$SIGBIN/tar"
+R8C="$T/case8c-repo"
+make_repo "$R8C"
+FETCH_BIN="$SIGBIN"
+run_fetch "$R8C" "$R8C/test-data/datasets"
+FETCH_BIN=""
+if [ "$RC" -ne 0 ]; then
+  ok "abort-signal: an interrupted extraction still fails the run (exit $RC)"
+else
+  bad "abort-signal: interrupted extraction reported success; output: $OUT"
+fi
+case "$OUT" in
+  *"aborted"*"restoring the git-tracked reference fixtures"*)
+    ok "abort-signal: the signal path runs the same abort restore" ;;
+  *) bad "abort-signal: no abort-restore announcement; output: $OUT" ;;
+esac
+assert_tracked_intact "$R8C" "abort-signal"
+
+# === Case 9: the target IS a repository root (BLOCKER 2) =====================
+# `rm -rf` would take .git with it, so the index the guard restores from would be
+# gone too. cwd is deliberately outside any repo so this exercises the guard, not
+# canonicalize_dataset_root's cwd-repo check.
+if [ "$SANDBOX_IN_REPO" = 1 ]; then
+  printf 'INFO - skipping the repo-root / nested-checkout / HOME cases (sandbox is inside a checkout)\n'
+else
+  R9="$T/case9/datasets"
+  mkdir -p "$R9"
+  git -C "$R9" init -q
+  git -C "$R9" config user.email test@example.com
+  git -C "$R9" config user.name "Test"
+  printf 'in a repo whose root is named datasets\n' >"$R9/keep.txt"
+  git -C "$R9" add keep.txt
+  git -C "$R9" commit -qm "keep"
+  run_fetch "$T" "$R9"
+  assert_refusal "repo-root-target" "is itself a git repository root" "$R9/.git"
+  if [ -f "$R9/keep.txt" ]; then
+    ok "repo-root-target: the repository's own content survives"
+  else
+    bad "repo-root-target: repository content was deleted"
+  fi
+
+  # === Case 10: a nested checkout BENEATH an out-of-repo target =============
+  # An out-of-repo dataset dir is not a free pass: someone else's checkout inside
+  # it is just as unrecoverable.
+  NEST="$T/case10/test-data/datasets"
+  mkdir -p "$NEST/vendor/other-checkout"
+  printf 'keep\n' >"$NEST/keep.txt"
+  git -C "$NEST/vendor/other-checkout" init -q
+  git -C "$NEST/vendor/other-checkout" config user.email test@example.com
+  git -C "$NEST/vendor/other-checkout" config user.name "Test"
+  printf 'someone else work\n' >"$NEST/vendor/other-checkout/work.txt"
+  git -C "$NEST/vendor/other-checkout" add work.txt
+  git -C "$NEST/vendor/other-checkout" commit -qm "work"
+  run_fetch "$T" "$NEST"
+  assert_refusal "nested-checkout" "contains a nested git repository" "$NEST/vendor/other-checkout/.git"
+  if [ -f "$NEST/vendor/other-checkout/work.txt" ] && [ -f "$NEST/keep.txt" ]; then
+    ok "nested-checkout: the nested repository's content survives"
+  else
+    bad "nested-checkout: the nested checkout was destroyed"
+  fi
+
+  # === Case 11: the target is an ANCESTOR of a checkout =====================
+  ANC="$T/case11/datasets"
+  mkdir -p "$ANC"
+  make_repo "$ANC/inner-repo"
+  run_fetch "$T" "$ANC"
+  assert_refusal "ancestor-of-repo" "#2878" "$ANC/inner-repo/.git"
+
+  # === Case 12: DATASET_ROOT == $HOME ======================================
+  HOMEISH="$T/case12/datasets"
+  mkdir -p "$HOMEISH"
+  printf 'home content\n' >"$HOMEISH/keep.txt"
+  run_fetch "$T" "$HOMEISH" HOME="$HOMEISH"
+  assert_refusal "home-target" "refusing to replace HOME" "$HOMEISH/keep.txt"
+fi
+
+# === Case 13: DATASET_ROOT == / =============================================
+run_fetch "$T" "/"
+assert_refusal "root-target" "unsafe CQLITE_DATASETS_ROOT" "/etc"
 
 # --- summary -----------------------------------------------------------------
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$PASS" "$FAIL"
