@@ -139,7 +139,7 @@ jobs:
         # If the committed copy is overwritten, issue_1396_uncompressed_crc_verify panics
         # and the enforced coverage run exits 101 before any coverage % is computed. The
         # committed versions are authoritative and must win. Mirrors
-        # fetch-datasets.sh::restore_ci_tracked_dataset_files.
+        # fetch-datasets.sh::restore_tracked_dataset_files (issue #2878).
         git restore --source=HEAD -- test-data/datasets
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

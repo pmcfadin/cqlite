@@ -250,6 +250,60 @@
 #                      which pins the perf-corpus generator's TABLES validation, its
 #                      manifest writer's refusal of an empty table list, and the
 #                      tight scoping of its multi-GB stale-corpus pruning.
+#                      Also runs (no python3/network/datasets needed)
+#                      scripts/tests/test_fetch_datasets_tracked_guard.sh (#2878) —
+#                      pins fetch-datasets.sh's tracked-fixture guard: its `rm -rf
+#                      "${DATASET_ROOT}"` used to DELETE the ~875 git-tracked files
+#                      under test-data/datasets (JSONL goldens, force-added parity
+#                      *.db, the #2389 commitlog fixtures) because the restore path
+#                      was CI-gated off locally and silently prefix-bailed in CI,
+#                      red-ing the gate on a pristine main. Also pins the crash-safe
+#                      abort window (an abort between the rm -rf and the restore —
+#                      bad archive, tar failure, SIGINT — must still restore) and the
+#                      refusals that keep restoration possible at all: a target that
+#                      IS a repo root (plain OR bare — a bare repo has no .git, and
+#                      was silently rm -rf'd with exit 0), contains a nested
+#                      checkout/mirror, is an ancestor of the work tree, or has
+#                      UNMERGED index entries (git restore cannot rebuild a
+#                      conflicted path), or sits at/beneath git's ADMIN storage
+#                      (.git/…, mirror.git/objects/…, a linked worktree's admin dir
+#                      — deleting it destroys the object store the restore reads
+#                      FROM). Those are STRUCTURAL and no env var unlocks them;
+#                      CQLITE_DATASETS_ALLOW_UNPROTECTED unlocks only the
+#                      guard-availability class. Also pins the GIT_* environment
+#                      scrub: a VALID but FOREIGN GIT_INDEX_FILE made the capture
+#                      read the wrong index (0 files), after which restore AND
+#                      verification both short-circuited on the empty list and the
+#                      run deleted fixtures while reporting success — so the test
+#                      asserts the captured COUNT, not just a clean tree. The
+#                      converse arm is the self-verifying readability precheck: the
+#                      capture reads only the INDEX, so before deleting anything the
+#                      guard must PROVE every captured blob is readable in the
+#                      restore's own scrubbed environment (external/alternate/
+#                      quarantine object stores are otherwise invisible to it).
+#                      Two more silent-loss paths are pinned: the guard's own capture
+#                      list must live in a location PROVEN outside the deletion target
+#                      (a TMPDIR at/below it meant the rm -rf ate the list, which then
+#                      read as "nothing to restore"), and an absent list with a
+#                      nonzero captured count is a hard error, never a no-op; plus
+#                      any index entry `git diff` cannot see (skip-worktree tag `S`
+#                      or ANY lowercase = assume-unchanged; `ls-files -t` hides the
+#                      both-flags case as a plain `H`) is refused up front, because
+#                      the integrity check would otherwise be blind; and an
+#                      INCOMPLETE nested-repository scan (find failing) must fail
+#                      closed instead of reading as "no nested repo".
+#                      Hermetic: throwaway git repos +
+#                      locally-built partial-overlap tarball + stub curl/tar/git, so
+#                      the real rm -rf/extract/restore run against a sandbox and
+#                      never the checkout's datasets; both signal arms are
+#                      deterministic (no sleeps), and the case that hands `/` to the
+#                      script shadows `rm` so its blast radius does not depend on the
+#                      checks under test. Proves non-vacuity with nine mutants (guard
+#                      disabled; abort-restore disabled; signals left live during
+#                      cleanup; GIT_* scrub removed; readability precheck removed;
+#                      partial-extraction discard removed; guard state back under
+#                      TMPDIR with no consistency check; exact-`S` index-flag match;
+#                      failed nested scan read as clean).
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -5180,6 +5234,26 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_gen_perf_corpus_3068.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (perf-corpus generator guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # fetch-datasets tracked-fixture guard (#2878): hermetic (throwaway git repo +
+  # locally-built partial-overlap tarball + stub curl — no network, and the real
+  # test-data/datasets is never touched), no python3 needed, always runs. Pins the
+  # capture-before-`rm -rf`/restore-after guard in fetch-datasets.sh: without it a
+  # fetch DELETES the git-tracked reference fixtures under test-data/datasets, so
+  # this very gate FAILs core-tests + cli-tests on a pristine main and the checkout
+  # is left with stageable deletions of tracked files. A failure FAILs the
+  # component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_fetch_datasets_tracked_guard.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_fetch_datasets_tracked_guard.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (fetch-datasets tracked-fixture guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
