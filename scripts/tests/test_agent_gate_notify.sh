@@ -386,17 +386,22 @@ else
     printf '#!/usr/bin/env bash\ntrap "" TERM\nwhile :; do sleep 0.2; done\n' > "$wedged/$helper"
     chmod +x "$wedged/$helper"
   done
+  # 2 notifies x 3 sequential steps, each step costing (bound + grace).
+  budget=$(( 2 * ((ep + gr) + (ec + gr) + (ea + gr)) ))
+  # Independent SIGKILL cap per notify, for the same reason case 3e has one: under a
+  # regression to an escapable bound this must RED, not hang the component until the
+  # gate's own timeout. Measured: without a cap the suite ran past 200s with no verdict.
+  cap=$(( budget + 10 ))
   t0=$(date +%s)
   for _ in 1 2; do   # finalize_exit's two notifies
     env CURL_LOG="$tmp/case11b.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$wedged:$PATH" \
       GATE_NOTIFY_PAYLOAD_TIMEOUT="$ep" GATE_NOTIFY_CURL_TIMEOUT="$ec" \
       GATE_NOTIFY_ADJUNCT_TIMEOUT="$ea" \
+      timeout -s KILL "$cap" \
       bash -c '. "$0"; gate_push_signal FAIL advisory-branch abc1234 "fmt"' "$fnfile" \
       >"$tmp/out.txt" 2>"$tmp/err.txt"
   done
   elapsed=$(( $(date +%s) - t0 ))
-  # 2 notifies x 3 sequential steps, each step costing (bound + grace).
-  budget=$(( 2 * ((ep + gr) + (ec + gr) + (ea + gr)) ))
   # The DECLARED budget must fit the pinned ceiling, and the MEASURED worst case must
   # not exceed the declared budget (plus process-spawn slack).
   if [ "$budget" -lt 15 ] && [ "$elapsed" -le $((budget + 8)) ]; then
