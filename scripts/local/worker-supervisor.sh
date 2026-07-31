@@ -380,9 +380,22 @@ if [[ -z "${GH_VERIFY_CMD:-}" ]]; then
   GH_VERIFY_CMD='gh pr view "$1" --repo pmcfadin/cqlite --json state,mergedAt,autoMergeRequest'
 fi
 
+# Notification command (issue #3119). The default is the REPO-OWNED notify
+# contract, not the out-of-band `agent-notify` binary: upstream v1.1.0 has no
+# `--category` arm, so the flag this function used to pass was swallowed — the
+# title became the literal flag name, the message became the category value, and
+# a `high` page published as ntfy priority 3 with a green check. The wrapper owns
+# the payload and publishes to the ntfy server ROOT; `agent-notify` survives only
+# as its optional, bounded, positional local desktop/sound adjunct.
+# CONVENTION: $NOTIFY_CMD takes THREE positional args — <severity> <title>
+# <message> — and is word-split like $CLAIM_CMD. Tests override it with a stub.
 NOOP_NOTIFY_MARKER="__noop_notify__"
 if [[ -z "${NOTIFY_CMD:-}" ]]; then
-  if command -v agent-notify >/dev/null 2>&1; then NOTIFY_CMD="agent-notify"; else NOTIFY_CMD="$NOOP_NOTIFY_MARKER"; fi
+  if [[ -r "$REPO_ROOT/scripts/lib/gate-notify.sh" ]]; then
+    NOTIFY_CMD="bash $REPO_ROOT/scripts/lib/gate-notify.sh --publish"
+  else
+    NOTIFY_CMD="$NOOP_NOTIFY_MARKER"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -396,12 +409,16 @@ notify() {
   [[ "$priority" == "high" ]] && category="error"
   if [[ "$NOTIFY_CMD" == "$NOOP_NOTIFY_MARKER" ]]; then
     if [[ "$WARNED_NOOP_NOTIFY" -eq 0 ]]; then
-      log "WARN: agent-notify not on PATH; notifications are no-ops for this run"
+      log "WARN: no notify command resolved (scripts/lib/gate-notify.sh unreadable); notifications are no-ops for this run"
       WARNED_NOOP_NOTIFY=1
     fi
     return 0
   fi
-  "$NOTIFY_CMD" --category "$category" "$title" "$message" || log "WARN: notify command failed (non-fatal)"
+  # Word-split on purpose (same convention as $CLAIM_CMD): the default value is a
+  # multi-word `bash <path> --publish`. Positional args only — never a flag the
+  # notifier might swallow.
+  # shellcheck disable=SC2086
+  $NOTIFY_CMD "$category" "$title" "$message" || log "WARN: notify command failed (non-fatal)"
 }
 
 is_gt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)>(b+0)) exit 0; exit 1 }'; }

@@ -229,13 +229,22 @@ PY
   return "$rc"
 }
 
-# Direct execution: --self-test / --version. Sourced use never reaches here.
+# Direct execution: --publish / --self-test / --version. Sourced use never reaches
+# here. `--publish` is the CLI form for callers that hold a command STRING rather
+# than a sourced function (scripts/local/worker-supervisor.sh's $NOTIFY_CMD seam);
+# it keeps the advisory contract and always exits 0.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-}" in
+    --publish)
+      shift
+      gate_notify_publish "${1:-FAIL}" "${2:-}" "${3:-}" >/dev/null 2>&1 || true
+      exit 0
+      ;;
     --self-test) gate_notify_selftest ;;
     --version) echo "gate-notify contract v$GATE_NOTIFY_CONTRACT_VERSION" ;;
     *)
-      echo "usage: gate-notify.sh --self-test | --version   (or source it and call gate_notify_publish)" >&2
+      echo "usage: gate-notify.sh --publish <PASS|FAIL> <title> <body> | --self-test | --version" >&2
+      echo "       (or source it and call gate_notify_publish)" >&2
       exit 2
       ;;
   esac

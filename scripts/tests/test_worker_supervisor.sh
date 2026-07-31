@@ -44,9 +44,10 @@ new_case_dir() {
 write_notify_stub() {
   cat >"$1" <<'EOF'
 #!/usr/bin/env bash
-cat_arg="unknown"
-if [[ "${1:-}" == "--category" ]]; then cat_arg="$2"; shift 2; fi
-printf '%s|%s|%s\n' "$cat_arg" "${1:-}" "${2:-}" >>"${NOTIFY_LOG:?NOTIFY_LOG not set}"
+# $NOTIFY_CMD convention (issue #3119): THREE positional args, <severity>
+# <title> <message>. The old `--category <cat>` flag form is gone — the real
+# upstream agent-notify has no such arm and silently swallowed it.
+printf '%s|%s|%s\n' "${1:-}" "${2:-}" "${3:-}" >>"${NOTIFY_LOG:?NOTIFY_LOG not set}"
 EOF
   chmod +x "$1"
 }
