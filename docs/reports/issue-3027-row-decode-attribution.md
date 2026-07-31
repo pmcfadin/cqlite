@@ -39,9 +39,12 @@ Runs are pinned with `taskset -c 2` (core 2's HT sibling is core 10, left idle) 
   x 64 B/line** — *not* DRAM traffic. It is the right metric for comparing how much data movement a code
   path causes, and it is measurable; it is not the roofline's DRAM term.
 - `perf` needs `kernel.perf_event_paranoid` lowered (default 4 on this image blocks everything).
-- Datasets live at **`/data/datasets`**, not the in-tree `test-data/datasets`. `benches/fixtures/mod.rs`
-  additionally resolves schemas as `$CQLITE_DATASETS_ROOT/../schemas`, so `/data/schemas` must exist
-  (symlink to `test-data/schemas`).
+- Datasets live at **`/data/datasets`**, not the in-tree `test-data/datasets` — use the
+  `export CQLITE_DATASETS_ROOT=…` line `fetch-datasets.sh` prints. **RETIRED (#3131/#3148):** at the
+  time of this run `benches/fixtures/mod.rs` also resolved schemas as
+  `$CQLITE_DATASETS_ROOT/../schemas`, so a `/data/schemas` symlink was needed. That is no longer true
+  and **the symlink must not be created**: the schemas root is resolved checkout-relative, so
+  `CQLITE_DATASETS_ROOT` alone is sufficient.
 - **Do not pin the streaming bench to one core for a throughput number.** `read/scan_partition_dense_stream`
   under `taskset -c 2` spends 5.27 s of 12.43 s in `sys` — a multi-threaded tokio pipeline forced onto one
   core measures the scheduler, not the read path. Unpinned, `native_queued_spin_lock_slowpath` is 5.96%

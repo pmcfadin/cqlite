@@ -30,7 +30,7 @@ issues itself). Other machines run pure **workers**. A lead is a worker with a h
 ```bash
 git clone https://github.com/pmcfadin/cqlite && cd cqlite
 bash scripts/bootstrap-agent-machine.sh        # or manually: sccache, cargo-nextest, bash>=4.3, mold (Linux)
-bash test-data/scripts/fetch-datasets.sh       # real SSTable binaries — REQUIRED (see below)
+bash test-data/scripts/fetch-datasets.sh       # real SSTable binaries — REQUIRED; export the line it prints
 gh auth setup-git                              # git push credentials — SEPARATE from gh auth (#2942)
 gh auth status                                  # must include the 'project' scope (board access)
 bash scripts/flow/claim.sh smoke               # preflight: prove origin accepts refs/claims/* (see below)
@@ -102,7 +102,18 @@ Sanity check: `bash scripts/agent-gate.sh --lite` should pass in ~1–5 min, and
 **Datasets matter:** without them, parity components skip. The FULL gate FAILs CLOSED when the
 fetched validation corpus is absent (**#2078**), stamping `missing-fixtures: FAIL-CLOSED (#2078)`;
 `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` opts out visibly, and `--lite`/`--only` stay lenient. Fetch
-them on every machine, day one.
+them on every machine, day one — and export the `CQLITE_DATASETS_ROOT=` line the fetch prints, since
+on a box with a machine-local root (e.g. `/data/datasets`) the checkout's `test-data/datasets` stays
+corpus-less (**#3131**).
+
+**The corpus root is all you need (#3131/#3148).** `CQLITE_DATASETS_ROOT` alone is sufficient on every
+layout: the committed CQL schemas (`test-data/schemas`) are resolved **checkout-relative** and are not
+a sibling of the corpus root. Do **not** create a `schemas` symlink next to a relocated corpus, and do
+not assemble a composite root to make one appear — both are retired workarounds. The FULL gate has a
+second fail-closed fixture cause for this half, `missing-schemas: FAIL-CLOSED (#3148)`, which fires on
+an unreadable committed `.cql` **or** on a rejected relative `CQLITE_SCHEMAS_ROOT` (that override must
+be absolute). It has **no opt-out** — committed source in a checkout is never legitimately absent.
+`--lite`/`--only` stay lenient.
 
 ---
 
@@ -327,7 +338,8 @@ machine + heartbeat age (issue #2089). Interpretation:
 | Board unreachable (auth/scope error) | The session STOPS by design (labels are decorative, never a dispatch source). Fix `gh auth refresh -s project` and restart. If the scope is already present and `gh project` still fails for `read:org`, that is the #2942 delta — use the `updateProjectV2ItemFieldValue` GraphQL mutation for board writes, or widen the token with `-s read:org`. |
 | `fatal: could not read Username` on any push | git has no credentials even though `gh` does (#2942). The claim protocol pushes with plain git, so it is fully broken until fixed: `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes`. A claim attempt on such a box reports `reason=auth`, not a retryable transient. |
 | Gate seems hung | It's probably queued: look for `waiting for gate slot (N in use)…`. Queued ≠ hung. |
-| Green SUMMARY but parity lines say SKIP | Datasets missing on that machine — `fetch-datasets.sh`, re-run. The FULL gate FAILs CLOSED here (`missing-fixtures: FAIL-CLOSED (#2078)`) so it can't slip through; `--lite`/`--only` stay lenient. |
+| Green SUMMARY but parity lines say SKIP | Datasets missing on that machine — `fetch-datasets.sh`, export the root it prints, re-run. Probe an existing root with `fetch-datasets.sh --verify-only` (mutates nothing). The FULL gate FAILs CLOSED here (`missing-fixtures: FAIL-CLOSED (#2078)`) so it can't slip through; `--lite`/`--only` stay lenient. |
+| `missing-schemas: FAIL-CLOSED (#3148)` | Either a committed `test-data/schemas/*.cql` is unreadable (broken checkout — `git restore --source=HEAD -- test-data/schemas`) or `CQLITE_SCHEMAS_ROOT` is set to a **relative** path (export an absolute one, or unset it). Never a corpus-layout problem: the schemas root is checkout-relative. No opt-out exists — do not look for one. |
 | Two machines want the same issue | Impossible past the claim: the second claim-ref push is rejected server-side (non-fast-forward on the fixed-name ref, #2665); the loser sees `CLAIM LOST` and picks the next Ready item. |
 
 ---

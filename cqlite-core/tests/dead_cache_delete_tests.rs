@@ -33,15 +33,17 @@ fn require_fixtures() -> bool {
     )
 }
 
-fn datasets_root() -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
-        let p = PathBuf::from(root);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    None
-}
+/// The ONE definition of every `test-data/` root (issues #3131 / #3148): the datasets
+/// corpus (`CQLITE_DATASETS_ROOT`, relocatable/fetched) and the committed schema
+/// fixtures (checkout-relative, NEVER `datasets_root().join("../schemas")`).
+#[path = "../../test-data/support/fixture_roots.rs"]
+mod fixture_roots;
+
+/// Fallible shape of the datasets root: `Some` only when `CQLITE_DATASETS_ROOT` is set
+/// and names a directory — no checkout fallback, so these tests SKIP (rather than run
+/// against the committed byte-parity references and report a 0-row pass) when the
+/// fetched corpus is unavailable. See `fixture_roots` for the two-shape contract.
+use fixture_roots::datasets_root_if_present as datasets_root;
 
 fn data_db(ks: &str, tbl: &str) -> Option<PathBuf> {
     let base = datasets_root()?.join("sstables").join(ks);
@@ -588,7 +590,6 @@ async fn open_fixture_db(
 ) -> Option<cqlite_core::Database> {
     use cqlite_core::ingestion::{ingest, IngestionConfig};
 
-    let root = datasets_root()?;
     let src = data_db(ks, tbl)?.parent()?.to_path_buf();
     let tmp = tempfile::TempDir::new().expect("temp dir");
     let dst = tmp
@@ -601,7 +602,10 @@ async fn open_fixture_db(
     // reaping the dir mid-test would break reads.
     let _persisted = tmp.keep();
 
-    let schema_path = root.join("../schemas").join(schema_file);
+    // Committed source, resolved checkout-relative — NOT `datasets_root/../schemas`
+    // (#3148). Verified readable here, so an unreachable fixture names its absolute
+    // path instead of panicking anonymously deep inside ingestion.
+    let schema_path = fixture_roots::schema_path(schema_file);
     let cfg = IngestionConfig {
         schema_paths: vec![schema_path],
         data_dir: dst

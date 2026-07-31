@@ -50,28 +50,36 @@ pub fn seeded_rng() -> rand::rngs::StdRng {
     rand::rngs::StdRng::seed_from_u64(BENCH_SEED)
 }
 
-/// Locate the `test-data/datasets` root.
-///
-/// Prefers `CQLITE_DATASETS_ROOT`; otherwise falls back to the workspace-relative
-/// path derived from `CARGO_MANIFEST_DIR` (the crate dir is
-/// `<workspace>/cqlite-core`, so the datasets live at
-/// `<workspace>/test-data/datasets`). The fallback lets the benches run from a
-/// plain checkout with fetched datasets and no environment setup.
+/// The ONE definition of every `test-data/` root (issues #3131 / #3148). Hosted
+/// under `test-data/support/` because it encodes the layout of `test-data` itself
+/// and is shared with `cqlite-cli`'s benches and the integration tests; the
+/// helpers below are thin delegations so there is exactly one implementation.
+/// `#[path]` here is relative to THIS file's directory, so it resolves identically
+/// no matter which bench/test target `#[path]`-includes `fixtures/mod.rs`.
+#[path = "../../../test-data/support/fixture_roots.rs"]
+pub mod roots;
+
+/// Locate the `test-data/datasets` root — infallible shape (checkout-relative
+/// fallback when `CQLITE_DATASETS_ROOT` is unset), so benches run from a plain
+/// checkout with no environment setup. See [`roots`] for the full contract and the
+/// fallible [`roots::datasets_root_if_present`] shape used by SKIP-gated tests.
 pub fn datasets_root() -> PathBuf {
-    match std::env::var("CQLITE_DATASETS_ROOT") {
-        Ok(root) => PathBuf::from(root),
-        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-data/datasets"),
-    }
+    roots::datasets_root()
 }
 
 /// The `sstables/` subtree holding per-keyspace fixture data.
 pub fn sstables_root() -> PathBuf {
-    datasets_root().join("sstables")
+    roots::sstables_root()
 }
 
-/// The `test-data/schemas` directory (sibling of `datasets`).
+/// The committed `test-data/schemas` directory.
+///
+/// Resolved CHECKOUT-RELATIVE, never as `datasets_root().join("../schemas")` — these
+/// are committed source, not fetched data, and the old `..` climb mis-resolved through
+/// a symlinked `datasets` (#3148 AC (h)). Prefer [`roots::schema_path`], which also
+/// verifies the file is readable and names the absolute path when it is not.
 pub fn schemas_root() -> PathBuf {
-    datasets_root().join("../schemas")
+    roots::schemas_root()
 }
 
 /// Resolve the on-disk SSTable directory for `<keyspace>/<table>-<hash>`.
@@ -279,7 +287,7 @@ pub fn open_read_db_with_config(fx: &ReadFixture, core_config: cqlite_core::Conf
         .join(src.file_name().expect("fixture dir has a final component"));
     copy_dir_recursive(&src, &dst);
 
-    let schema_path = schemas_root().join(fx.schema_file);
+    let schema_path = roots::schema_path(fx.schema_file);
     let cfg = IngestionConfig {
         schema_paths: vec![schema_path],
         data_dir: tmp.path().to_path_buf(),

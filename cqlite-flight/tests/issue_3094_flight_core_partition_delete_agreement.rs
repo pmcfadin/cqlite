@@ -54,12 +54,23 @@
 //! requires a single reader, so a two-generation table always takes the merge arm.
 //! The probe assertion below proves that is what ran.
 //!
-//! ## Both `do_get` row producers
+//! ## All THREE `do_get` producers (issue #3146 AC4)
 //!
-//! `entry_to_row` is shared by `drive_merge` (the row stream) AND
-//! `drive_aggregate` (pushed-down aggregation, #841), so the same phantom corrupts
-//! a `count(*)`. Both are asserted: the row stream must yield exactly `ck = 9`, and
-//! the pushed-down `count(*)` must be `1`, not `2`.
+//! `entry_to_row` is shared by all three drive loops, so the same phantom corrupts
+//! every one of them, and each is pinned here:
+//!
+//! | leg | reached via | asserted |
+//! |---|---|---|
+//! | `drive_merge_streaming` → `MergeRowSource::materialize_pending` | `do_get` itself (`streaming.rs` → `produce_streaming` → `drive_merge_over`), and directly via `MergeProducer::produce_streaming_to_vec` | exactly `ck = 9` |
+//! | `drive_merge` (buffered, whole-partition) | `MergeProducer::produce_from_paths` → `merge_paths` | exactly `ck = 9` |
+//! | `drive_aggregate` (pushed-down aggregation, #841) | an aggregating ticket through `do_get` | `count(*) == 1`, not `2` |
+//!
+//! The two ROW loops are driven through the producer routes that select them by
+//! CONSTRUCTION rather than relying on which one `do_get` currently picks —
+//! measured on this branch, `do_get` routes to the STREAMING loop, so without the
+//! explicit `produce_from_paths` leg the buffered loop would be unpinned. Both
+//! share the `KWayMerger`, so the second leg is correct by construction; "by
+//! construction" is not a regression pin, which is what AC4 asks for.
 //!
 //! ## Oracle choice (#3042)
 //!
@@ -112,6 +123,9 @@ use cqlite_core::storage::write_engine::{
 };
 use cqlite_core::types::{TableId as CqlTableId, Value};
 use cqlite_core::{Config, ScanRow};
+use cqlite_flight::cancel::CancelFlag;
+use cqlite_flight::filter::ScanSpec;
+use cqlite_flight::producer::MergeProducer;
 use cqlite_flight::service::CqliteFlightService;
 
 const TTL_NOW_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
@@ -459,6 +473,45 @@ fn count_star_of(batches: &[RecordBatch]) -> i64 {
     totals[0]
 }
 
+/// The `ck` values each of Flight's TWO row-drive loops yields for the table
+/// directory under `root`, driven through the producer routes that select them by
+/// CONSTRUCTION rather than by whatever `do_get` happens to route to today
+/// (issue #3146 AC4).
+///
+/// * `MergeProducer::produce_from_paths` → `merge_paths` → `drive_merge` — the
+///   BUFFERED, whole-partition-at-a-time collect loop (`producer_drive.rs:43`);
+/// * `MergeProducer::produce_streaming_to_vec` → `produce_streaming` →
+///   `drive_merge_over` → `drive_merge_streaming` → `MergeRowSource::
+///   materialize_pending` (`row_source.rs`) — the ROW-GRANULAR loop, and the one
+///   `do_get` itself streams through (`streaming.rs:477`).
+///
+/// Both drive loops call the same `entry_to_row` over the same `KWayMerger`, so
+/// the streaming leg is correct BY CONSTRUCTION — but "by construction" is not a
+/// pin, and #3146 AC4 requires every arm that can reach this shape to fail if it
+/// regresses. Returns `(buffered ck values, streaming ck values)`.
+fn producer_route_ck_values(root: &Path, schema: &TableSchema) -> (Vec<i32>, Vec<i32>) {
+    let producer = MergeProducer::with_spec(schema.clone(), 8192, ScanSpec::default())
+        .expect("build a MergeProducer over the fixture schema");
+    let paths: Vec<PathBuf> = data_db_paths_by_generation(&root.join(KS).join(TBL))
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    assert_eq!(
+        paths.len(),
+        2,
+        "both producer routes must see the SAME two generations the surfaces above read"
+    );
+
+    let buffered = producer
+        .produce_from_paths(paths.clone())
+        .unwrap_or_else(|e| panic!("buffered drive_merge route must not error: {e}"));
+    let streaming = producer
+        .produce_streaming_to_vec(paths, &CancelFlag::new())
+        .unwrap_or_else(|e| panic!("streaming drive_merge_streaming route must not error: {e}"));
+
+    (ck_values_of(&buffered), ck_values_of(&streaming))
+}
+
 /// Read one root through BOTH surfaces at the pinned `now` and return
 /// `(core ck values, flight ck values, flight count(*), mergers built)`.
 async fn read_both_surfaces(root: &Path, schema: &TableSchema) -> (Vec<i32>, Vec<i32>, i64, u64) {
@@ -543,6 +596,22 @@ async fn flight_do_get_agrees_with_core_on_a_partition_deleted_row() {
             live_core.len()
         ));
     }
+    // Issue #3146 AC4, anti-vacuity half: BOTH row-drive loops physically see both
+    // rows before any partition tombstone exists, so the `[CK_SURVIVOR]` expectation
+    // below cannot be satisfied by a route that silently reads nothing.
+    let (live_buffered, live_streaming) = producer_route_ck_values(&live_root, &schema);
+    for (leg, got) in [
+        ("buffered drive_merge", &live_buffered),
+        ("streaming drive_merge_streaming", &live_streaming),
+    ] {
+        if got != &live_core {
+            failures.push(format!(
+                "fixture sanity ({leg}): with NO partition deletion present this drive \
+                 loop must return the same rows core does — core {live_core:?}, {leg} \
+                 {got:?}"
+            ));
+        }
+    }
 
     // ---- (2) THE PIN: the patched partition deletion ------------------------
     patch_newest_generation_partition_deletion(&deleted_table_dir);
@@ -586,6 +655,36 @@ async fn flight_do_get_agrees_with_core_on_a_partition_deleted_row() {
              re-derived per consumer."
         ));
     }
+    // ---- (3) Issue #3146 AC4: BOTH row-drive loops, pinned by construction --
+    // `do_get` above streams through `drive_merge_streaming`; the buffered
+    // `drive_merge` collect loop is reached only via `produce_from_paths`. Driving
+    // both explicitly means neither can regress unnoticed, and neither depends on
+    // which route `do_get` happens to select in a future refactor.
+    let (del_buffered, del_streaming) = producer_route_ck_values(&deleted_root, &schema);
+    for (leg, got) in [
+        ("buffered drive_merge", &del_buffered),
+        ("streaming drive_merge_streaming", &del_streaming),
+    ] {
+        if got != &vec![CK_SURVIVOR] {
+            failures.push(format!(
+                "issue #3146 AC4 ({leg}): under the partition deletion \
+                 @{T_PARTITION_DELETE_MICROS}µs this Flight row-drive loop must return \
+                 exactly [{CK_SURVIVOR}], matching core and Cassandra — got {got:?}. \
+                 `[{CK_PHANTOM}, {CK_SURVIVOR}]` is the all-null phantom row: both loops \
+                 call the SAME `entry_to_row` over the SAME `KWayMerger`, so a marker \
+                 whose OWN timestamp is `<= markedForDeleteAt` must already have been \
+                 dropped by `KWayMerger::apply_partition_shadowing` \
+                 (`BTreeRow.filter`: `activeDeletion.deletes(newInfo.timestamp())`)."
+            ));
+        }
+        if got != &del_core {
+            failures.push(format!(
+                "issue #3146 AC4 ({leg}): this Flight row-drive loop and core \
+                 `SSTableManager::scan` DIVERGE on the same bytes at the same pinned \
+                 now — core {del_core:?}, {leg} {got:?}"
+            ));
+        }
+    }
     // The aggregate producer (`drive_aggregate`) shares `entry_to_row`, so the
     // phantom corrupts a `count(*)` even when no row bytes are ever emitted.
     if del_count != 1 {
@@ -595,6 +694,11 @@ async fn flight_do_get_agrees_with_core_on_a_partition_deleted_row() {
              same phantom row `drive_merge` would emit"
         ));
     }
+
+    // `CQLITE_TTL_NOW_OVERRIDE_SECS` is PROCESS-GLOBAL, so it is cleared before the
+    // verdict below (which may panic) rather than after — the pin must not outlive
+    // the test that set it and leak into any future test in this binary.
+    std::env::remove_var(TTL_NOW_ENV);
 
     assert!(
         failures.is_empty(),
