@@ -118,6 +118,13 @@
 #                      the write-support-gated targets derived from Cargo.toml
 #                      required-features + two self-gated ground-truth targets. New
 #                      files are auto-covered; fails closed on zero targets.
+#   bti-multiclustering  the compound-clustering BTI ('da') lane (issue #3032):
+#                      issue_3032_multiclustering_rows_trie_shape +
+#                      issue_3032_multiclustering_clustering_slice_select against the
+#                      COMMITTED test_da/multiclustering_table fixture, pinned to
+#                      CQLITE_REQUIRE_FIXTURES=1 so an absent fixture FAILs rather
+#                      than silently skipping. Unconditionally fail-closed (the
+#                      fixture is in git, so it is present in every checkout).
 #   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
 #                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
 #                      Set RUN_SLOW_TESTS=1 to also run the CLI-parity suite.
@@ -1844,7 +1851,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity query-semantics-oracle flight-query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -4706,6 +4713,51 @@ run_compaction_byte_parity() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# bti-multiclustering: the compound-clustering BTI (`da`) lane (issue #3032). The
+# two targets read the real Cassandra 5.0 `test_da/multiclustering_table` fixture —
+# a 3-component PRIMARY KEY ((pk), bucket, seq) whose Rows.db trie is the only
+# in-corpus oracle for the OSS50 byte-comparable clustering encoding and for the
+# `ClusteringPrefix.Kind` bound markers.
+#
+# Why a DEDICATED component (issue #3032 roborev B1): both targets self-skip when
+# the fixture is missing, and core-tests runs them WITHOUT CQLITE_REQUIRE_FIXTURES —
+# so a deleted/renamed fixture would turn both into silent green no-ops. This lane
+# pins them to CQLITE_REQUIRE_FIXTURES=1, under which every absence path in both
+# files asserts instead of skipping.
+#
+# Fixture policy: FAIL-CLOSED, unconditionally. Unlike the fetched-corpus lanes,
+# these fixtures are COMMITTED to git (test-data/datasets/sstables/test_da/
+# multiclustering_table-fd74ad508d2311f1a29b6d2c15dcffdf/**, 9 components incl. the
+# sstabledump JSONL golden), so they are present in EVERY checkout and there is no
+# legitimate SKIP: the tests fall back to the in-repo corpus when
+# CQLITE_DATASETS_ROOT is unset. Absent fixture => FAIL, never SKIP. NOT in
+# DATASET_COMPONENTS: it needs no fetched corpus at all.
+run_bti_multiclustering() {
+  local name=bti-multiclustering
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  echo ">>> [$name] compound-clustering BTI trie shape + SELECT lanes, fail-closed (#3032)"
+  if env CQLITE_REQUIRE_FIXTURES=1 \
+      ${CQLITE_DATASETS_ROOT:+CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT"} \
+      cargo test -p cqlite-core --features "state_machine cli-helpers" \
+        --test issue_3032_multiclustering_rows_trie_shape \
+        --test issue_3032_multiclustering_clustering_slice_select >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # query-semantics-oracle: the QUERY-SEMANTICS parity lane (issue #1742), DISTINCT
 # from the physical sstabledump JSONL goldens. The physical goldens enumerate every
 # on-disk cell (tombstones, deleted rows, expired-but-uncompacted TTL cells), so a
@@ -7075,6 +7127,7 @@ dispatch_component() {
   [ "$rc" -eq 0 ] || exit "$rc"
   check_no_unexpected_zero_tests "Pass 2 (write-support)" "$log2"' ;;
     compaction-byte-parity) run_compaction_byte_parity ;;
+    bti-multiclustering) run_bti_multiclustering ;;
     query-semantics-oracle) run_query_semantics_oracle ;;
     flight-query-semantics-oracle) run_flight_query_semantics_oracle ;;
     python-bindings) run_python_bindings ;;
