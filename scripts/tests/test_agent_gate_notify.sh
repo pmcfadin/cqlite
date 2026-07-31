@@ -112,6 +112,67 @@ else
   bad "publish is NOT time-bounded: no --max-time in the curl invocation"
 fi
 
+# ---- Case 3b: the bound is an OUTER one, not just the cooperative flag --------
+# #3119 B2: --max-time is honoured only by the REAL curl, and this very file proves
+# a bash script can BE curl on PATH. gate_push_signal runs after the terminal
+# summary emit but before the gate's exit, so an unbounded transport would leave
+# the gate process alive forever and its EXIT trap would never release the #1825
+# gate slot — every later gate on the box would queue indefinitely. Assert with a
+# transport that IGNORES --max-time and hangs.
+hangcurl="$tmp/hangcurl"; mkdir -p "$hangcurl"
+printf '#!/usr/bin/env bash\nsleep 600\n' > "$hangcurl/curl"
+chmod +x "$hangcurl/curl"
+t0=$(date +%s)
+env CURL_LOG="$tmp/case3b.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$hangcurl:$PATH" \
+  GATE_NOTIFY_CURL_TIMEOUT=2 GATE_NOTIFY_ADJUNCT_TIMEOUT=2 \
+  bash -c '. "$0"; gate_push_signal PASS advisory-branch abc1234 ""' "$fnfile" \
+  >"$tmp/out.txt" 2>"$tmp/err.txt"
+rc=$?
+elapsed=$(( $(date +%s) - t0 ))
+# Loose ceiling (2s bound + generous slack): the property is "bounded at all".
+if [ "$rc" -eq 0 ] && [ "$elapsed" -lt 30 ] && silent; then
+  ok "hanging transport that ignores --max-time: abandoned at the OUTER bound (${elapsed}s), rc=0"
+else
+  bad "hanging-transport case (rc=$rc elapsed=${elapsed}s) — the publish is not outer-bounded"
+fi
+
+# ---- Case 3c: a wedged payload ENCODER cannot stall the gate either -----------
+# Same class as 3b for python3 (a pyenv/conda/NFS shim that stalls): the encoder
+# runs inside a command substitution, so an unbounded one blocks gate_push_signal.
+hangpy="$tmp/hangpy"; mkdir -p "$hangpy"; cp "$stubdir/curl" "$hangpy/curl"
+printf '#!/usr/bin/env bash\nsleep 600\n' > "$hangpy/python3"
+chmod +x "$hangpy/python3"
+t0=$(date +%s)
+env CURL_LOG="$tmp/case3c.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$hangpy:$PATH" \
+  GATE_NOTIFY_PAYLOAD_TIMEOUT=2 GATE_NOTIFY_ADJUNCT_TIMEOUT=2 \
+  bash -c '. "$0"; gate_push_signal PASS advisory-branch abc1234 ""' "$fnfile" \
+  >"$tmp/out.txt" 2>"$tmp/err.txt"
+rc=$?
+elapsed=$(( $(date +%s) - t0 ))
+if [ "$rc" -eq 0 ] && [ "$elapsed" -lt 30 ] && silent; then
+  ok "wedged payload encoder: abandoned at its bound (${elapsed}s), rc=0, nothing published"
+else
+  bad "wedged-encoder case (rc=$rc elapsed=${elapsed}s) — the encoder is not bounded"
+fi
+
+# ---- Case 3d: with NO bounding tool, publish NOTHING rather than run unbounded -
+nobound="$tmp/nobound"; mkdir -p "$nobound"
+cp "$stubdir/curl" "$nobound/curl"
+# A PATH holding ONLY curl + python3: no timeout(1), no gtimeout(1).
+py=$(command -v python3); [ -n "$py" ] && ln -sf "$py" "$nobound/python3"
+: > "$tmp/case3d.log"
+# Absolute interpreter: `env PATH=… bash` would resolve bash from the STRIPPED
+# PATH and die 127 before the code under test ever runs.
+env CURL_LOG="$tmp/case3d.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$nobound" \
+  "${BASH:-/bin/bash}" -c '. "$0"; gate_push_signal PASS advisory-branch abc1234 ""' "$fnfile" \
+  >"$tmp/out.txt" 2>"$tmp/err.txt"
+rc=$?
+if [ "$rc" -eq 0 ] && [ "$(publishes "$tmp/case3d.log")" -eq 0 ] && silent; then
+  ok "no timeout(1)/gtimeout(1): publishes NOTHING rather than running unbounded, rc=0"
+else
+  bad "no-bounding-tool case (rc=$rc publishes=$(publishes "$tmp/case3d.log")) — ran unbounded"
+fi
+
 # ---------------------------------------------------------------------------
 # The ADVISORY failure catalogue (#3119 AC4). For every one of these the
 # function must return 0 and write nothing — a notification path must NEVER be
