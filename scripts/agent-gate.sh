@@ -257,11 +257,17 @@
 #                      under test-data/datasets (JSONL goldens, force-added parity
 #                      *.db, the #2389 commitlog fixtures) because the restore path
 #                      was CI-gated off locally and silently prefix-bailed in CI,
-#                      red-ing the gate on a pristine main. Hermetic: throwaway git
-#                      repo + locally-built partial-overlap tarball + stub curl, so
-#                      the real rm -rf/extract/restore run against a sandbox and
-#                      never the checkout's datasets. Proves non-vacuity with a
-#                      guard-disabled mutant.
+#                      red-ing the gate on a pristine main. Also pins the crash-safe
+#                      abort window (an abort between the rm -rf and the restore —
+#                      bad archive, tar failure, SIGINT — must still restore) and the
+#                      refusals that keep restoration possible at all (a target that
+#                      IS a repo root, contains a nested checkout, or is an ancestor
+#                      of one would delete .git). Hermetic: throwaway git repos +
+#                      locally-built partial-overlap tarball + stub curl/tar, so the
+#                      real rm -rf/extract/restore run against a sandbox and never
+#                      the checkout's datasets; the signal arm is deterministic (no
+#                      sleeps). Proves non-vacuity with two mutants (guard disabled;
+#                      abort-restore disabled).
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
