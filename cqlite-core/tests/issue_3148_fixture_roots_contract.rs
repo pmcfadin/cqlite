@@ -18,8 +18,9 @@ use std::path::{Path, PathBuf};
 mod fixture_roots;
 
 use fixture_roots::{
-    checkout_test_data_dir, readable_file, resolve_schemas_root, schema_path, schemas_root,
-    workspace_root_from, SchemasRootSource,
+    checkout_test_data_dir, readable_file, resolve_datasets_root, resolve_datasets_root_if_present,
+    resolve_schema_path, resolve_schemas_root, schema_path, schemas_root, workspace_root_from,
+    SchemasRootSource,
 };
 
 /// A RELATIVE override is REJECTED, not resolved.
@@ -291,4 +292,123 @@ fn every_gate_asserted_schema_resolves_in_a_checkout() {
         assert_eq!(p, root.join(f));
         assert!(readable_file(&p), "{} must be readable", p.display());
     }
+}
+
+/// #3148 requirement 5: the unreadable-fixture message is the DELIVERABLE, so it is asserted.
+///
+/// Before this it was covered by nothing — the only test was the happy path, so reverting
+/// `schema_path` to a bare `expect` deep inside ingest left every test green. That is the
+/// diagnosis-free failure this issue was filed for, so the message gets a real assertion:
+/// the absolute path, the root, HOW the root was chosen, the committed-source note, and the
+/// remedy must all be present.
+#[test]
+fn unreadable_fixture_message_names_path_root_source_and_remedy() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let root = tmp.path();
+
+    let err = resolve_schema_path(root, SchemasRootSource::Checkout, "basic-types.cql")
+        .expect_err("an absent fixture must not resolve");
+    let expected_path = root.join("basic-types.cql");
+    assert!(
+        err.contains(&expected_path.display().to_string()),
+        "message must name the ABSOLUTE fixture path; got: {err}"
+    );
+    assert!(
+        err.contains(&root.display().to_string()),
+        "message must name the resolved root; got: {err}"
+    );
+    assert!(
+        err.contains("checkout-relative"),
+        "message must say HOW the root was chosen; got: {err}"
+    );
+    assert!(
+        err.contains("COMMITTED SOURCE") && err.contains("CQLITE_DATASETS_ROOT"),
+        "message must state these are committed source, not fetched data; got: {err}"
+    );
+    assert!(
+        err.contains("remedy") && err.contains("restore --source=HEAD -- test-data/schemas"),
+        "message must carry the remedy command; got: {err}"
+    );
+    // The override source must be distinguishable in the SAME message slot.
+    let err_override = resolve_schema_path(root, SchemasRootSource::EnvOverride, "x.cql")
+        .expect_err("an absent fixture must not resolve");
+    assert!(
+        err_override.contains("CQLITE_SCHEMAS_ROOT override"),
+        "an override root must be reported as such; got: {err_override}"
+    );
+}
+
+/// …and `schema_path` itself must PANIC with that message, not merely be able to build it.
+/// Uses `catch_unwind` over a fixture name that cannot exist in the real checkout, so no
+/// environment mutation is needed.
+#[test]
+fn schema_path_panics_with_the_actionable_message() {
+    let missing = "definitely-not-a-committed-schema-3148.cql";
+    // Silence the default hook so an EXPECTED panic does not print a scary backtrace.
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(|| schema_path(missing));
+    std::panic::set_hook(prev);
+
+    let payload = outcome.expect_err("schema_path must panic on an unreadable fixture");
+    let msg = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("<non-string panic payload>");
+    let expected_path = schemas_root().join(missing);
+    assert!(
+        msg.contains(&expected_path.display().to_string()),
+        "the panic must name the absolute path (not a bare 'Path does not exist'); got: {msg}"
+    );
+    assert!(
+        msg.contains("remedy"),
+        "the panic must be actionable; got: {msg}"
+    );
+}
+
+/// #3148 AC (e) / requirement 6: the two `datasets_root` shapes DIFFER, and the difference is
+/// the contract. Asserted BEHAVIOURALLY — the previous guard grepped for the function name, so
+/// giving the fallible shape a checkout fallback (collapsing the two into one) reddened nothing.
+#[test]
+fn the_two_datasets_root_shapes_differ_as_documented() {
+    let checkout_default = checkout_test_data_dir().join("datasets");
+
+    // Infallible shape: falls back to the checkout when there is no value…
+    assert_eq!(resolve_datasets_root(None), checkout_default);
+    for blank in ["", "   "] {
+        assert_eq!(
+            resolve_datasets_root(Some(blank)),
+            checkout_default,
+            "an exported-but-blank value is a scripting accident, never a root"
+        );
+    }
+    // …and returns a value it is given even when that value is not a directory (the per-fixture
+    // error later is more actionable than a root-level one — that is the documented choice).
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let absent = tmp.path().join("no-such-corpus");
+    let absent_raw = absent.to_str().expect("utf-8");
+    assert_eq!(resolve_datasets_root(Some(absent_raw)), absent);
+
+    // Fallible shape: NO checkout fallback — this is the assertion that catches a collapse.
+    assert_eq!(
+        resolve_datasets_root_if_present(None),
+        None,
+        "the fallible shape must NOT fall back to the checkout: a skip-gated test would then \
+         run against committed byte-parity references and report a vacuous 0-row pass"
+    );
+    for blank in ["", "   "] {
+        assert_eq!(resolve_datasets_root_if_present(Some(blank)), None);
+    }
+    assert_eq!(
+        resolve_datasets_root_if_present(Some(absent_raw)),
+        None,
+        "a value that is not a directory yields None"
+    );
+    let present = tmp.path().to_str().expect("utf-8");
+    assert_eq!(
+        resolve_datasets_root_if_present(Some(present)),
+        Some(tmp.path().to_path_buf()),
+        "a value naming a real directory is returned"
+    );
 }

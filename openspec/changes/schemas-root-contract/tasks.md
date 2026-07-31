@@ -250,3 +250,38 @@
       re-run because finding 2 changed resolution logic on both sides: hostile-layout 8/8 + 3/3 + 1/1 +
       1/1, empty-override 4-pass/4-fail, relative-override 4 fail-closed, negative-control FULL gate rc=1
       with the marker. Self-test 30 → 32 cases; contract tests 8 → 9.
+
+## 11. Gate of record FAIL + C (spec-auditor) PARTIAL — round 4
+- [x] **`tooling-tests: FAIL` root cause** — NOT nesting (the leading hypothesis is REFUTED: the schemas
+      self-test passed 32/32 INSIDE the gate, `tooling-tests.log:481`). The failure was the PRE-EXISTING
+      `test_agent_gate_tree_portability.sh` derived-inventory UNIQUENESS assert (`n=45 uniq=44`), because
+      round 3's NIT-D fix STUBBED `emit_summary`/`_tree_meta_array` in the
+      `--preflight-schemas-line` hook — a SECOND definition of a `_tree*` function. It passed standalone
+      because that portability test only runs inside `tooling-tests`, which had not been run. Replaced the
+      stubs with `_SCHEMAS_PREFLIGHT_REPORT_ONLY` (the two failure branches return with the marker in
+      `SCHEMAS_LINE` instead of emitting + exiting); a flag on the terminal ACTION carries no decision and
+      stamps no new text. Portability test 28/1 → 29/0.
+- [x] **C (i) requirement 5 UNCOVERED** — the unreadable-fixture message was asserted by nothing (revert
+      `schema_path` to a bare `expect` and every test stayed green). Factored `resolve_schema_path(root,
+      source, file) -> Result<_, String>` and added two tests: the message must name the absolute path,
+      the root, HOW the root was chosen, the committed-source note and the remedy; and `schema_path`
+      itself must PANIC with it (`catch_unwind`, no env mutation). REVERT-PROOF: replacing the body with
+      `Err("Path does not exist: …")` FAILs both.
+- [x] **C (ii) AC (b) partial — a FALSE message** — the reject branch hard-coded the RELATIVE explanation
+      and marker for EVERY rejection, so a control-character value was reported as "relative". Added
+      `_gate_schemas_override_reject_kind` and derived prose + marker from it. Pinned at the REAL FULL-gate
+      emit (`3148-cc-emit-wording`), asserting the control-character wording is present AND the false
+      "relative" wording is absent, in both the block and stderr.
+- [x] **C (iii) requirement 12 partial** — nothing exercised the warm-cache `guarantee_usable_root` call
+      site or the "NOT the checkout default" NOTE. Two cases now drive the REAL fetch script down the
+      warm-skip path (`.dataset-pin` derived from the TRACKED `dataset-pin.env`, never hard-coded), with a
+      failing `curl` stub first on PATH so a future pin mismatch dies without network and without reaching
+      `rm -rf`.
+- [x] **C (iv) requirement 6 partial** — the guard grepped for the function NAME. Factored
+      `resolve_datasets_root` / `resolve_datasets_root_if_present` and asserted both shapes behaviourally.
+      REVERT-PROOF: giving the fallible shape a checkout fallback FAILs
+      `the_two_datasets_root_shapes_differ_as_documented`.
+- [x] **C (v)** — `3148-no-optout`: `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` must not buy a pass on a
+      schemas-less root; and **#3192 is now cited by number** in `proposal.md` and `spec.md`, together with
+      why the reintroduction guard cannot be widened before that migration lands.
+- [x] Self-test 32 → 36 cases; contract tests 9 → 12; portability 29/29.

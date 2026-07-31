@@ -127,7 +127,8 @@ idiom — `datasets_root.parent()?.join("schemas")` tried **first and then a
 `issue_693_writetime_threading.rs:42,48`, `issue_1562_perf_gate_access_path.rs:50,56`). Because they already
 fall back to the checkout, they DEGRADE correctly on the layout that broke the four sites above; they are
 therefore out of scope here, and no requirement in this delta asserts anything about them. Consolidating them
-is a follow-up, not a silent claim of this change.
+is deferred to **#3192** (which must also widen the reintroduction guard to the `parent()`-based form —
+widening it first would red the gate on ~15 untouched files), not a silent claim of this change.
 
 #### Scenario: The requirement's scope is the four hard-failing sites, not every schemas reference
 - **GIVEN** the ~15 test files that try a datasets-sibling schemas path and then fall back to a checkout-anchored path

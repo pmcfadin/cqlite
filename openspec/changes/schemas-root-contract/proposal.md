@@ -115,7 +115,10 @@ components SKIP: a vacuous PASS, exactly what #2078 exists to prevent. The wrong
   `issue_693_writetime_threading.rs:42,48`, `issue_1562_perf_gate_access_path.rs:50,56`). Because they
   already fall back to the checkout they DEGRADE correctly on the layout that hard-failed the four sites
   in scope, so they are not part of this defect. The spec delta's single-definition requirement is
-  explicitly scoped to the four, so this change does not claim them. Consolidation is a follow-up.
+  explicitly scoped to the four, so this change does not claim them. Consolidation is deferred to
+  **#3192**, which must also widen the reintroduction guard from the literal `join("../schemas")` to
+  the `parent()`-based form — widening it BEFORE that migration would red the gate on ~15 untouched
+  files, so the guard and the migration have to land together.
 - **Not unifying the per-keyspace ad-hoc corpus checks** (`test_compactionparity`,
   `test_compaction_tombstone_ttl` at `scripts/agent-gate.sh:4238`, `:4295`) — noted as adjacent
   inconsistency in #3148's scope note and explicitly left out.

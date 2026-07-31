@@ -111,7 +111,9 @@ pub enum SchemasRootSource {
 }
 
 impl SchemasRootSource {
-    fn describe(self) -> String {
+    /// `pub` because the failure message it composes is now ASSERTED by
+    /// `cqlite-core/tests/issue_3148_fixture_roots_contract.rs` (#3148 requirement 5).
+    pub fn describe(self) -> String {
         match self {
             Self::EnvOverride => format!("{SCHEMAS_ROOT_ENV} override"),
             Self::Checkout => format!(
@@ -207,9 +209,22 @@ pub fn checkout_test_data_dir() -> PathBuf {
 /// The **fetched** dataset corpus root — infallible shape. See the module docs for
 /// the contract; prefer [`datasets_root_if_present`] in a SKIP-gated test.
 pub fn datasets_root() -> PathBuf {
-    env_dir(DATASETS_ROOT_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| checkout_test_data_dir().join("datasets"))
+    resolve_datasets_root(env_dir(DATASETS_ROOT_ENV).as_deref())
+}
+
+/// PURE form of [`datasets_root`] — the infallible shape, parameterized on the raw value.
+///
+/// Factored for the same reason as [`resolve_schemas_root`]: the two shapes' DIFFERENCE **is**
+/// the contract (#3148 AC (e)), and a test that can only read the ambient environment cannot
+/// assert it without `set_var`, which races every other test in the binary. Before this the
+/// only guard was a grep for the function NAME, so giving the fallible shape a checkout
+/// fallback — collapsing the two shapes into one — reddened nothing (spec-auditor,
+/// requirement 6 partial).
+pub fn resolve_datasets_root(raw: Option<&str>) -> PathBuf {
+    match raw.filter(|v| !v.trim().is_empty()) {
+        Some(v) => PathBuf::from(v),
+        None => checkout_test_data_dir().join("datasets"),
+    }
 }
 
 /// The **fetched** dataset corpus root — fallible shape, for SKIP-gated tests.
@@ -219,7 +234,15 @@ pub fn datasets_root() -> PathBuf {
 /// not instead run against a checkout that carries only committed byte-parity
 /// references and report a vacuous 0-row pass.
 pub fn datasets_root_if_present() -> Option<PathBuf> {
-    let p = PathBuf::from(env_dir(DATASETS_ROOT_ENV)?);
+    resolve_datasets_root_if_present(env_dir(DATASETS_ROOT_ENV).as_deref())
+}
+
+/// PURE form of [`datasets_root_if_present`] — the fallible shape.
+///
+/// `None` unless the value is present AND names a directory. Deliberately has **no** checkout
+/// fallback; see [`datasets_root_if_present`] for why that difference is load-bearing.
+pub fn resolve_datasets_root_if_present(raw: Option<&str>) -> Option<PathBuf> {
+    let p = PathBuf::from(raw.filter(|v| !v.trim().is_empty())?);
     p.is_dir().then_some(p)
 }
 
@@ -315,11 +338,30 @@ pub fn schemas_root() -> PathBuf {
 /// and bench code may panic; this file is never compiled into the library.
 pub fn schema_path(schema_file: &str) -> PathBuf {
     let (root, source) = schemas_root_resolved();
+    match resolve_schema_path(&root, source, schema_file) {
+        Ok(p) => p,
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// PURE form of [`schema_path`]: resolve + verify a fixture under an EXPLICIT root, returning
+/// the actionable message as `Err` instead of panicking.
+///
+/// Factored because the message TEXT is the deliverable (#3148 requirement 5) and it was
+/// asserted by **nothing**: the only coverage was the happy path, so reverting `schema_path` to
+/// a bare `expect` deep inside ingest left every test green (spec-auditor, requirement 5
+/// UNCOVERED). A message nobody asserts is a message that silently rots back into
+/// `Path does not exist:` — the diagnosis-free failure #3148 was filed for.
+pub fn resolve_schema_path(
+    root: &Path,
+    source: SchemasRootSource,
+    schema_file: &str,
+) -> Result<PathBuf, String> {
     let path = root.join(schema_file);
     if readable_file(&path) {
-        return path;
+        return Ok(path);
     }
-    panic!(
+    Err(format!(
         "committed schema fixture '{schema_file}' is not readable at {}\n\
          \x20 schemas root : {} ({})\n\
          \x20 note         : test-data/schemas is COMMITTED SOURCE — it is NOT part of the fetched\n\
@@ -329,5 +371,5 @@ pub fn schema_path(schema_file: &str) -> PathBuf {
         path.display(),
         root.display(),
         source.describe(),
-    )
+    ))
 }
