@@ -275,14 +275,20 @@
 #                      read the wrong index (0 files), after which restore AND
 #                      verification both short-circuited on the empty list and the
 #                      run deleted fixtures while reporting success — so the test
-#                      asserts the captured COUNT, not just a clean tree. Hermetic:
-#                      throwaway git repos +
+#                      asserts the captured COUNT, not just a clean tree. The
+#                      converse arm is the self-verifying readability precheck: the
+#                      capture reads only the INDEX, so before deleting anything the
+#                      guard must PROVE every captured blob is readable in the
+#                      restore's own scrubbed environment (external/alternate/
+#                      quarantine object stores are otherwise invisible to it).
+#                      Hermetic: throwaway git repos +
 #                      locally-built partial-overlap tarball + stub curl/tar/git, so
 #                      the real rm -rf/extract/restore run against a sandbox and
 #                      never the checkout's datasets; both signal arms are
-#                      deterministic (no sleeps). Proves non-vacuity with four
+#                      deterministic (no sleeps). Proves non-vacuity with six
 #                      mutants (guard disabled; abort-restore disabled; signals left
-#                      live during cleanup; GIT_* scrub removed).
+#                      live during cleanup; GIT_* scrub removed; readability precheck
+#                      removed; partial-extraction discard removed).
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
