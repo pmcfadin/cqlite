@@ -265,15 +265,24 @@
 #                      was silently rm -rf'd with exit 0), contains a nested
 #                      checkout/mirror, is an ancestor of the work tree, or has
 #                      UNMERGED index entries (git restore cannot rebuild a
-#                      conflicted path). Those are STRUCTURAL and no env var unlocks
-#                      them; CQLITE_DATASETS_ALLOW_UNPROTECTED unlocks only the
-#                      guard-availability class. Hermetic: throwaway git repos +
+#                      conflicted path), or sits at/beneath git's ADMIN storage
+#                      (.git/…, mirror.git/objects/…, a linked worktree's admin dir
+#                      — deleting it destroys the object store the restore reads
+#                      FROM). Those are STRUCTURAL and no env var unlocks them;
+#                      CQLITE_DATASETS_ALLOW_UNPROTECTED unlocks only the
+#                      guard-availability class. Also pins the GIT_* environment
+#                      scrub: a VALID but FOREIGN GIT_INDEX_FILE made the capture
+#                      read the wrong index (0 files), after which restore AND
+#                      verification both short-circuited on the empty list and the
+#                      run deleted fixtures while reporting success — so the test
+#                      asserts the captured COUNT, not just a clean tree. Hermetic:
+#                      throwaway git repos +
 #                      locally-built partial-overlap tarball + stub curl/tar/git, so
 #                      the real rm -rf/extract/restore run against a sandbox and
 #                      never the checkout's datasets; both signal arms are
 #                      deterministic (no sleeps). Proves non-vacuity with four
 #                      mutants (guard disabled; abort-restore disabled; signals left
-#                      live during cleanup; GIT_DIR scrub removed).
+#                      live during cleanup; GIT_* scrub removed).
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
