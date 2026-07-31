@@ -204,6 +204,15 @@ log "Copying SSTable to $DEST ..."
 mkdir -p "$DEST_PARENT"
 rm -rf "$DEST"
 $DOCKER cp "$CONTAINER:$SSTABLE_DIR" "$DEST_PARENT/"
+
+# `docker cp` writes as the docker CLI's effective user — root when DOCKER='sudo
+# docker' (the usual case on a box where the invoking user is not yet in the docker
+# group).  Normalize ownership before we write the JSONL golden INTO this directory,
+# otherwise the redirect below dies with EACCES after a full generation run.
+if [[ ! -w "$DEST" ]]; then
+  log "Fixture dir is not writable (docker cp ran as another user); reclaiming ownership..."
+  ${SUDO:-sudo} chown -R "$(id -u):$(id -g)" "$DEST"
+fi
 ls -la "$DEST"
 
 # --- fail-close 3: every component we depend on is present --------------------
