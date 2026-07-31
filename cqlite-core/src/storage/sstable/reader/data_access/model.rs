@@ -59,6 +59,23 @@ pub(super) struct ClusteringRowWindow {
 #[cfg(not(feature = "tombstones"))]
 pub(super) const MAX_OSS50_BOUND_SENTINEL_LEN: usize = 64;
 
+/// `ByteSource.LT_NEXT_COMPONENT` (cassandra-5.0.8
+/// `utils/bytecomparable/ByteSource.java:75`) — the byte-comparable terminator
+/// `ClusteringPrefix.Kind.INCL_START_BOUND` / `EXCL_END_BOUND` emit
+/// (`db/ClusteringPrefix.java:70-71`). It is smaller than every legal separator
+/// byte (`MIN_SEPARATOR = 0x10` … but crucially smaller than `NEXT_COMPONENT`
+/// `0x40`), so a bound carrying it sorts BELOW every clustering that extends it.
+#[cfg(not(feature = "tombstones"))]
+const OSS50_LT_NEXT_COMPONENT: u8 = 0x20;
+
+/// `ByteSource.GT_NEXT_COMPONENT` (`ByteSource.java:76`) — the terminator
+/// `ClusteringPrefix.Kind.INCL_END_BOUND` / `EXCL_START_BOUND` emit
+/// (`ClusteringPrefix.java:77-79`). It is LARGER than `NEXT_COMPONENT` (`0x40`)
+/// and than the variable-length escape bytes, so a bound carrying it sorts ABOVE
+/// every clustering that extends it.
+#[cfg(not(feature = "tombstones"))]
+const OSS50_GT_NEXT_COMPONENT: u8 = 0x60;
+
 /// Normalize a CQL [`ClusteringSlice`] into the `(physical_lower, physical_upper)`
 /// byte-comparable bounds that [`select_row_index_blocks_for_range`] consumes
 /// (issue #954 High-severity correctness fix).
@@ -135,7 +152,7 @@ pub(super) fn physical_byte_bounds_for_slice(
         }
     };
 
-    let (phys_lower, phys_upper) = if first_desc {
+    let (mut phys_lower, mut phys_upper) = if first_desc {
         // DESC: CQL upper-value bound → physical-lower bytes; CQL lower-value bound
         // → physical-upper bytes. Open CQL upper → physical -∞; open CQL lower →
         // physical +∞.
@@ -149,6 +166,36 @@ pub(super) fn physical_byte_bounds_for_slice(
         let upper = cql_upper_bytes.unwrap_or_else(pos_inf);
         (lower, upper)
     };
+
+    // Cassandra bound TERMINATORS (`ClusteringPrefix.Kind.asByteComparable`,
+    // cassandra-5.0.8 `db/ClusteringPrefix.java:68-81`).
+    //
+    // A `Rows.db` separator is the byte-comparable image of a full CLUSTERING (all
+    // components), while a slice bound may name only a PROPER PREFIX of the
+    // clustering key — e.g. `WHERE bucket = 'bo'` on `PRIMARY KEY (pk, bucket, seq)`.
+    // Cassandra distinguishes the two sides of such a prefix with a trailing marker:
+    // `LT_NEXT_COMPONENT` (0x20) sorts the bound BELOW every clustering that extends
+    // it, `GT_NEXT_COMPONENT` (0x60) sorts it ABOVE. Without one, a prefix bound is a
+    // bare prefix and therefore always sorts BELOW its extensions — which silently
+    // TRUNCATES an upper bound to the first row of the prefix's range (issue #3032:
+    // `bucket = 'bo'` returned 12 of 60 rows, the first row-index block only).
+    //
+    // The physical-LOW side always takes `LT` and the physical-HIGH side always takes
+    // `GT`. For the INCLUSIVE kinds (`=`, `>=`, `<=` — after the DESC role swap
+    // above) that is byte-exactly what Cassandra emits. For the EXCLUSIVE kinds it is
+    // deliberately one marker "wider" than Cassandra's, which can only ever ADD the
+    // boundary prefix's own rows to the window: block selection is over-inclusive by
+    // block granularity anyway and the post-scan `evaluate_leaf` backstop re-applies
+    // the exact CQL bound BY VALUE, so a wider window never changes the result — while
+    // a narrower one loses rows that were never decoded. Choosing by side rather than
+    // by inclusivity also keeps the DESC swap correct with no second mapping.
+    //
+    // Appending to the open sentinels is harmless: `-∞` is the empty vector (a lone
+    // 0x20 still sorts below every separator, all of which begin with the 0x40
+    // `NEXT_COMPONENT` byte, and at/above the stored `ByteComparable.EMPTY` block-0
+    // separator exactly as the bare empty bound did), and `+∞` is an all-0xFF run.
+    phys_lower.push(OSS50_LT_NEXT_COMPONENT);
+    phys_upper.push(OSS50_GT_NEXT_COMPONENT);
 
     Ok(Some((phys_lower, phys_upper)))
 }
@@ -621,6 +668,22 @@ mod tests {
         .expect("int encodes")
     }
 
+    /// `bytes` as the PHYSICAL-LOW bound: Cassandra's `LT_NEXT_COMPONENT`
+    /// terminator (`ClusteringPrefix.Kind.INCL_START_BOUND`) appended.
+    #[cfg(not(feature = "tombstones"))]
+    fn lo(mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes.push(OSS50_LT_NEXT_COMPONENT);
+        bytes
+    }
+
+    /// `bytes` as the PHYSICAL-HIGH bound: Cassandra's `GT_NEXT_COMPONENT`
+    /// terminator (`ClusteringPrefix.Kind.INCL_END_BOUND`) appended.
+    #[cfg(not(feature = "tombstones"))]
+    fn hi(mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes.push(OSS50_GT_NEXT_COMPONENT);
+        bytes
+    }
+
     /// ASC: the physical bounds are the CQL bounds, no swap.
     #[cfg(not(feature = "tombstones"))]
     #[test]
@@ -630,8 +693,16 @@ mod tests {
         let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[false])
             .expect("ok")
             .expect("encodable");
-        assert_eq!(lower, enc_int(100, false), "ASC physical-lower = enc(100)");
-        assert_eq!(upper, enc_int(110, false), "ASC physical-upper = enc(110)");
+        assert_eq!(
+            lower,
+            lo(enc_int(100, false)),
+            "ASC physical-lower = enc(100) + LT_NEXT_COMPONENT"
+        );
+        assert_eq!(
+            upper,
+            hi(enc_int(110, false)),
+            "ASC physical-upper = enc(110) + GT_NEXT_COMPONENT"
+        );
         // The physical range is well-ordered (lower <= upper) so block selection
         // returns a non-empty window for an in-range slice.
         assert!(lower <= upper, "ASC physical bounds must be ordered");
@@ -652,12 +723,12 @@ mod tests {
         // upper from the CQL LOWER bound (enc_desc(100)).
         assert_eq!(
             lower,
-            enc_int(110, true),
+            lo(enc_int(110, true)),
             "DESC physical-lower must come from the CQL upper bound (110)"
         );
         assert_eq!(
             upper,
-            enc_int(100, true),
+            hi(enc_int(100, true)),
             "DESC physical-upper must come from the CQL lower bound (100)"
         );
         // The whole point: under DESC the swapped bounds are well-ordered. With the
@@ -690,13 +761,14 @@ mod tests {
             .expect("encodable");
         assert_eq!(
             lower,
-            Vec::<u8>::new(),
+            lo(Vec::<u8>::new()),
             "DESC `ck >= 290`: open CQL upper → physical -∞ (the matching large \
-             values sort to the LOW physical-byte side)"
+             values sort to the LOW physical-byte side); a lone LT_NEXT_COMPONENT \
+             still sorts below every separator, which all begin with 0x40"
         );
         assert_eq!(
             upper,
-            enc_int(290, true),
+            hi(enc_int(290, true)),
             "DESC `ck >= 290`: physical-upper = enc_desc(290) (the boundary value)"
         );
         assert!(lower < upper, "must be ordered");
@@ -707,7 +779,7 @@ mod tests {
             "sanity: larger DESC value has smaller bytes"
         );
         assert!(
-            enc_int(299, true).as_slice() <= upper.as_slice(),
+            hi(enc_int(299, true)).as_slice() <= upper.as_slice(),
             "the physical window must include enc_desc(299), a matching row"
         );
     }
@@ -725,19 +797,19 @@ mod tests {
             .expect("encodable");
         assert_eq!(
             lower,
-            enc_int(20, true),
+            lo(enc_int(20, true)),
             "DESC `ck < 20`: physical-lower = enc_desc(20) (the boundary value)"
         );
         assert_eq!(
             upper,
-            vec![0xFFu8; MAX_OSS50_BOUND_SENTINEL_LEN],
+            hi(vec![0xFFu8; MAX_OSS50_BOUND_SENTINEL_LEN]),
             "DESC `ck < 20`: open CQL lower → physical +∞ sentinel"
         );
         assert!(lower < upper, "must be ordered");
         // A matching small value (ck=0) has the LARGEST DESC bytes, inside the
         // window; the buggy [-∞, enc_desc(20)] mapping would exclude it.
         assert!(
-            enc_int(0, true).as_slice() >= lower.as_slice(),
+            lo(enc_int(0, true)).as_slice() >= lower.as_slice(),
             "the physical window must include enc_desc(0), a matching row"
         );
     }
@@ -752,9 +824,15 @@ mod tests {
         let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
             .expect("ok")
             .expect("encodable");
-        assert_eq!(lower, enc_int(150, true));
-        assert_eq!(upper, enc_int(150, true));
-        assert_eq!(lower, upper, "equality is a single physical point");
+        assert_eq!(lower, lo(enc_int(150, true)));
+        assert_eq!(upper, hi(enc_int(150, true)));
+        assert_eq!(
+            lower[..lower.len() - 1],
+            upper[..upper.len() - 1],
+            "equality is a single physical point, bracketed by the two Cassandra \
+             bound terminators"
+        );
+        assert!(lower < upper);
     }
 
     /// Absent schema / empty `is_reversed` is treated as ASC (no swap), matching
@@ -766,9 +844,86 @@ mod tests {
         let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[])
             .expect("ok")
             .expect("encodable");
-        assert_eq!(lower, enc_int(5, false));
-        assert_eq!(upper, enc_int(50, false));
+        assert_eq!(lower, lo(enc_int(5, false)));
+        assert_eq!(upper, hi(enc_int(50, false)));
         assert!(lower < upper);
+    }
+
+    /// Issue #3032 — a bound naming only a PROPER PREFIX of a multi-component
+    /// clustering key must BRACKET every full clustering that extends it.
+    ///
+    /// `WHERE bucket = 'bo'` on `PRIMARY KEY (pk, bucket, seq)` yields
+    /// `start == end == [Text("bo")]`, a one-component bound against two-component
+    /// `Rows.db` separators. Without Cassandra's `GT_NEXT_COMPONENT` terminator the
+    /// physical upper bound is the bare prefix, which sorts BELOW every
+    /// `('bo', seq)` separator — so `strict_ceiling` returned the FIRST `bo` block
+    /// and the slice was truncated to it (12 of 60 rows on the
+    /// `test_da/multiclustering_table` fixture).
+    ///
+    /// The literal separator bytes below are the real Cassandra 5.0.2-written ones
+    /// from that fixture's `Rows.db` (`da-2-bti-Rows.db`, pk=1), not this encoder's
+    /// output.
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_bracket_extensions_of_a_prefix_bound() {
+        // The real on-disk separators for ('bo', 12), ('bo', 30), ('bo', 48) and the
+        // next bucket's ('charlie-extended-bucket', 5).
+        let bo_12 = vec![0x40u8, 0x62, 0x6f, 0x00, 0x40, 0x80, 0x00, 0x00, 0x0c];
+        let bo_48 = vec![0x40u8, 0x62, 0x6f, 0x00, 0x40, 0x80, 0x00, 0x00, 0x30];
+        let charlie_5 = vec![
+            0x40u8, 0x63, 0x68, 0x61, 0x72, 0x6c, 0x69, 0x65, 0x2d, 0x65, 0x78, 0x74, 0x65, 0x6e,
+            0x64, 0x65, 0x64, 0x2d, 0x62, 0x75, 0x63, 0x6b, 0x65, 0x74, 0x00, 0x40, 0x80, 0x00,
+            0x00, 0x05,
+        ];
+
+        let slice = ClusteringSlice {
+            start: vec![Value::text("bo".to_string())],
+            start_inclusive: true,
+            end: vec![Value::text("bo".to_string())],
+            end_inclusive: true,
+        };
+        // Two clustering columns, both ASC.
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[false, false])
+            .expect("ok")
+            .expect("encodable");
+
+        assert_eq!(
+            lower,
+            vec![0x40u8, 0x62, 0x6f, 0x00, OSS50_LT_NEXT_COMPONENT],
+            "the physical-low bound is the 'bo' prefix + LT_NEXT_COMPONENT"
+        );
+        assert_eq!(
+            upper,
+            vec![0x40u8, 0x62, 0x6f, 0x00, OSS50_GT_NEXT_COMPONENT],
+            "the physical-high bound is the 'bo' prefix + GT_NEXT_COMPONENT"
+        );
+
+        for sep in [&bo_12, &bo_48] {
+            assert!(
+                lower.as_slice() <= sep.as_slice(),
+                "the low bound must sort at/below every ('bo', seq) separator: \
+                 {lower:02x?} vs {sep:02x?}"
+            );
+            assert!(
+                sep.as_slice() < upper.as_slice(),
+                "the high bound must sort ABOVE every ('bo', seq) separator — this is \
+                 the property whose absence truncated the slice: {sep:02x?} vs \
+                 {upper:02x?}"
+            );
+        }
+        // ...and it must NOT reach into the next bucket, so the window stays narrow.
+        assert!(
+            upper.as_slice() < charlie_5.as_slice(),
+            "the high bound must still sort below the NEXT bucket's separators"
+        );
+        // Without the terminator the upper bound would sort below the very first
+        // extension — the exact regression this pins.
+        let bare_upper = vec![0x40u8, 0x62, 0x6f, 0x00];
+        assert!(
+            bare_upper.as_slice() < bo_12.as_slice(),
+            "sanity: a bare prefix sorts BELOW its own extensions, so it can never \
+             bound them from above"
+        );
     }
 
     #[test]
