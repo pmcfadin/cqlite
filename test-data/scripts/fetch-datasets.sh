@@ -184,11 +184,90 @@ has_required_dataset() {
   grep -qx "sha256=${SHA256_EXPECTED}" "${PIN_FILE}" || return 1
 }
 
+# guarantee_usable_root (issue #3131 item 2): a ZERO EXIT MUST MEAN "this root is
+# usable" — on the warm-cache path exactly as much as after a fresh extraction.
+#
+# Before #3131 the warm path's sole output was
+#   Dataset <asset> (tag <tag>) already present in <root>; skipping download
+# and exit 0. Nothing in that told an operator WHICH root was guaranteed, so a green
+# fetch was not evidence that any particular tree gained fixtures — and the
+# CLAUDE.md-documented `CQLITE_DATASETS_ROOT=$PWD/test-data/datasets` could still be
+# corpus-less, because an already-exported CQLITE_DATASETS_ROOT sends the extraction
+# somewhere else entirely. That is how the documented remedy silently failed to remedy.
+#
+# So: re-verify the CONTENT at the extraction target (independently of the
+# .dataset-pin fast path that got us here — a pin file is a claim, not the corpus),
+# fail loudly with a remedy when it is not there, and print the EXACT
+# `export CQLITE_DATASETS_ROOT=<absolute path>` line this run guarantees.
+#
+# Deliberately does NOT touch the `rm -rf "${DATASET_ROOT}"` / the
+# `[ -n "${CI:-}" ] || return 0` short-circuit in restore_ci_tracked_dataset_files:
+# that sibling defect is issue #2878, a separate delivery. Not widened here.
+guarantee_usable_root() {
+  local phase="$1"
+
+  if ! has_required_content; then
+    echo "ERROR: ${DATASET_ROOT} does not hold a usable dataset corpus (${phase})" >&2
+    echo "ERROR: required content missing — expected at least metadata.yml, a" >&2
+    echo "ERROR: test_basic/simple_table-*-Data.db, and the promoted wide_partition" >&2
+    echo "ERROR: reference binaries under" >&2
+    echo "ERROR:   ${WIDE_PARTITION_DIR}" >&2
+    echo "ERROR: remedy: re-run this script with the pin cleared so it re-downloads:" >&2
+    echo "ERROR:   rm -f ${PIN_FILE} && CQLITE_DATASETS_ROOT=${DATASET_ROOT} bash test-data/scripts/fetch-datasets.sh" >&2
+    exit 1
+  fi
+
+  local data_count
+  data_count="$(find "${DATASET_ROOT}" -name '*-Data.db' 2>/dev/null | wc -l | tr -d ' ')"
+
+  echo "Dataset root VERIFIED (${phase}): ${DATASET_ROOT} — ${data_count} *-Data.db present"
+  echo "Use EXACTLY this root (the only one this run guarantees):"
+  echo
+  echo "  export CQLITE_DATASETS_ROOT=${DATASET_ROOT}"
+  echo
+
+  # If a pre-existing CQLITE_DATASETS_ROOT sent the corpus somewhere other than the
+  # checkout's test-data/datasets, say so: the documented default would otherwise look
+  # like a valid choice and yield a corpus-less root (the #3131 report).
+  local repo_root repo_default
+  if repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    repo_default="$(cd "${repo_root}" && pwd -P)/test-data/datasets"
+    if [ "${DATASET_ROOT}" != "${repo_default}" ]; then
+      echo "NOTE: this run populated ${DATASET_ROOT}, NOT the checkout default"
+      echo "NOTE:   ${repo_default}"
+      echo "NOTE: (CQLITE_DATASETS_ROOT was already set in the environment). Exporting the"
+      echo "NOTE: checkout default instead would give you a corpus-less root — use the"
+      echo "NOTE: export line above."
+    fi
+  fi
+  # The CQL schema fixtures are COMMITTED SOURCE resolved checkout-relative (#3148);
+  # they are NOT part of this archive and need no environment variable. Said here
+  # because the pre-#3148 helpers looked for them at <root>/../schemas, so operators
+  # learned to expect a sibling this script never creates.
+  echo "NOTE: CQL schema fixtures (test-data/schemas) are committed source, resolved"
+  echo "NOTE: checkout-relative — not fetched here and not a sibling of this root (#3148)."
+}
+
+# --verify-only (issue #3131): report whether the resolved root is usable and print the
+# guaranteed export line, WITHOUT downloading, extracting, removing or re-pinning
+# anything. Two reasons this exists rather than being a pure internal:
+#   1. It makes guarantee_usable_root's FAILURE path directly exercisable. On the
+#      warm-cache path the pin fast-path implies the content check, so a self-test could
+#      otherwise only ever observe it passing — and a check observed only passing is not
+#      a check (the same one-sided-verification mistake as #3148).
+#   2. It gives an operator (or a preflight) a cheap "is this root usable?" probe that
+#      cannot mutate the tree.
+if [ "${1:-}" = "--verify-only" ]; then
+  guarantee_usable_root "verify-only (no download, no extraction)"
+  exit 0
+fi
+
 restore_ci_tracked_dataset_files
 
 if has_required_dataset; then
   write_pin
   echo "Dataset ${ASSET} (tag ${TAG}) already present in ${DATASET_ROOT}; skipping download"
+  guarantee_usable_root "warm cache, download skipped"
   exit 0
 fi
 
@@ -252,3 +331,4 @@ fi
 
 write_pin
 echo "Dataset extracted to ${DATASET_ROOT}"
+guarantee_usable_root "fresh extraction"

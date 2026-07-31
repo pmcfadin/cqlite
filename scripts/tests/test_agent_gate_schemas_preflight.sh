@@ -250,6 +250,63 @@ else
   printf '%s\n' "$dupes"
 fi
 
+# ---------------------------------------------------------------------------
+# 6. #3131 items 1-2: fetch-datasets.sh must never report success while leaving a
+#    root an operator cannot use, and must PRINT the export line it guarantees.
+#    Driven through --verify-only, which performs no download/extraction/removal —
+#    so this stays hermetic and never touches the real corpus or the tree.
+# ---------------------------------------------------------------------------
+FETCH="$REPO/test-data/scripts/fetch-datasets.sh"
+
+# 6a. Hollow root (exists, empty): must FAIL LOUDLY with a remedy — never exit 0.
+hollow="$tmp/hollow/datasets"
+mkdir -p "$hollow"
+hollow_out=$(CQLITE_DATASETS_ROOT="$hollow" bash "$FETCH" --verify-only 2>&1)
+hollow_rc=$?
+if [ "$hollow_rc" -ne 0 ] \
+   && grep -q "does not hold a usable dataset corpus" <<<"$hollow_out" \
+   && grep -q "remedy: re-run this script with the pin cleared" <<<"$hollow_out"; then
+  ok "3131-hollow-root: an unusable root exits non-zero with a remedy (never a green no-op)"
+else
+  bad "3131-hollow-root: expected non-zero + remedy text (rc=$hollow_rc)"
+  printf '%s\n' "$hollow_out"
+fi
+
+# 6b. A root holding the required content must report success AND print the exact
+#     `export CQLITE_DATASETS_ROOT=<absolute path>` line it guarantees — the missing
+#     half of #3131 item 2 (the pre-fix warm path named no actionable root at all).
+good="$tmp/fetch-good/datasets"
+wide="$good/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
+mkdir -p "$wide" "$good/sstables/test_basic/simple_table-0001"
+printf 'synthetic: true\n' >"$good/metadata.yml"
+printf '{}\n' >"$wide/nb-2-big-Data.db.jsonl"
+for c in nb-2-big-Data.db nb-2-big-Index.db nb-2-big-Digest.crc32 nb-2-big-CompressionInfo.db; do
+  : >"$wide/$c"
+done
+for c in nb-1-big-Data.db nb-1-big-Index.db nb-1-big-Summary.db nb-1-big-Statistics.db; do
+  : >"$good/sstables/test_basic/simple_table-0001/$c"
+done
+good_out=$(CQLITE_DATASETS_ROOT="$good" bash "$FETCH" --verify-only 2>&1)
+good_rc=$?
+if [ "$good_rc" -eq 0 ] \
+   && grep -q "^  export CQLITE_DATASETS_ROOT=$good$" <<<"$good_out" \
+   && grep -q "Dataset root VERIFIED" <<<"$good_out"; then
+  ok "3131-export-line: a usable root is confirmed and prints its exact export line"
+else
+  bad "3131-export-line: expected exit 0 + the verbatim export line for $good (rc=$good_rc)"
+  printf '%s\n' "$good_out"
+fi
+
+# 6c. #2878 boundary: this change must NOT have touched the rm -rf /
+#     restore_ci_tracked_dataset_files behavior. Both must still be present verbatim,
+#     so a future reader can see the sibling defect was left to its own delivery.
+if grep -q 'rm -rf "${DATASET_ROOT}"' "$FETCH" \
+   && grep -q '\[ -n "${CI:-}" \] || return 0' "$FETCH"; then
+  ok "3131-2878-boundary: rm -rf + restore_ci_tracked_dataset_files left untouched (#2878)"
+else
+  bad "3131-2878-boundary: the #2878-owned behavior was modified by this change"
+fi
+
 printf '\n%s\n' "----------------------------------------"
 printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
