@@ -158,6 +158,52 @@ fail-closed/SKIP contract as the query-semantics oracle:</p>
 <p>The <code dir="auto">CQLITE_READ_PATH</code> knob is a <strong>test/debug</strong> control (not a perf recommendation);
 <code dir="auto">point</code> fails closed rather than silently full-scanning. See the CLI reference for the
 user-facing knob docs.</p>
+<div class="sl-heading-wrapper level-h4"><h4 id="second-axis-1-generation-vs-n-generations-issue-3129">Second axis: 1 generation vs N generations (issue #3129)</h4><a class="sl-anchor-link" href="#second-axis-1-generation-vs-n-generations-issue-3129"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Second axis: 1 generation vs N generations (issue #3129)”</span></a></div>
+<p>The point-vs-full comparison above holds the <strong>generation count fixed</strong>, so both of its
+arms route through the same reconciliation kernel and a disagreement between the
+<em>single-generation</em> read path and the <em>cross-generation</em> merge kernel
+(<code dir="auto">generation_merge.rs</code>) reproduces identically on both arms — the lane stays green while a
+real <code dir="auto">SELECT</code>’s answer depends on the table’s compaction state. That is a fourth blind
+spot alongside physical-dump parity, query-semantics parity, and the self-round-trip class.</p>
+<p><code dir="auto">cqlite-core/tests/point_vs_full_differential/one_vs_n_generation.rs</code> (a submodule of the
+same test target) closes it: for each corpus fixture that holds <strong>exactly one
+Cassandra-written generation</strong>, it materializes two temp trees from those same bytes — one
+generation, and the same generation copied N ≥ 2 times under distinct generation numbers —
+then requires identical rows/values/<strong>order</strong> from both trees for the full scan, every
+per-partition read under both forced read-path modes, and the multi-key <code dir="auto">IN</code>, at the same
+pinned <code dir="auto">now</code>. N identical copies reconcile to exactly one copy under Cassandra’s rules, so
+any inequality is a merge-kernel (or single-gen) defect. Anti-vacuity: each case pins the
+exact full-scan row count and partition count, both arms’ generation counts are re-scanned
+after materialization (so the axis can never degenerate to 1-vs-1), and a source fixture
+that stops holding exactly one generation FAILs.</p>
+<p>Two properties of this axis are easy to get wrong:</p>
+<ul>
+<li><strong>It probes partitions that return NOTHING, on purpose.</strong> Discovery runs
+<code dir="auto">SELECT &#x3C;pk> FROM …</code>, so a fully-deleted partition yields no key and would never be point-read
+— leaving the seek/merge path untested for exactly the deleted-partition phantom-row shape the
+axis exists to catch. Each case therefore declares <code dir="auto">empty_probe_keys</code> (deleted or absent
+partitions), asserted to be undiscoverable AND to return zero rows on both arms in both modes.</li>
+<li><strong>It covers structural merge, not precedence.</strong> The N copies are byte-identical, so every
+cross-generation comparison is a <em>tie</em>: interleaving, ordering, dedup, static injection and
+tombstone application are exercised, but “a newer generation’s tombstone shadows an older
+generation’s live row” is not. That asymmetric class belongs to the real 2-generation
+Cassandra fixtures (<code dir="auto">test_tomb.resurrection_gc0</code>, <code dir="auto">skipped_partition_delete</code>) and the
+Cassandra-oracle lanes.</li>
+</ul>
+<p><strong>A quarantine needs a release signal.</strong> Shapes that already diverge for a tracked defect are
+marked <code dir="auto">known_divergent</code> with a reason that MUST cite its issue (<code dir="auto">#&#x3C;number></code>, asserted — a
+waiver with no cited issue is not a waiver). They are excluded from the enforcing lane, but they
+are NOT parked in an <code dir="auto">#[ignore]</code>d reproducer: an ignored test is a ratchet that never releases,
+since the gate never runs it and nothing ever reports that the defect got fixed. Instead
+<code dir="auto">one_vs_n_generation_quarantine_still_diverges</code> runs in the normal test run and pins the
+<em>expected divergence</em>: each quarantined case must STILL diverge, and the moment one starts
+agreeing the test fails with instructions to flip <code dir="auto">known_divergent</code> to <code dir="auto">None</code>. Only an error
+carrying the divergence marker counts — a harness/fixture error is reported separately, so a
+broken harness can never masquerade as “still broken”:</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">env</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">CQLITE_REQUIRE_FIXTURES=</span><span style="--0:#F78C6C;--1:#AA0982">1</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">CQLITE_DATASETS_ROOT=</span><span style="--0:#C5E478;--1:#3B61B0">$PWD</span><span style="--0:#ECC48D;--1:#3B61B0">/test-data/datasets</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#ECC48D;--1:#3B61B0">cargo</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">test</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-p</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">cqlite-core</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--features</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">state_machine cli-helpers</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--test</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">point_vs_full_differential</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">one_vs_n_generation_quarantine_still_diverges</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--nocapture</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \  cargo test -p cqlite-core --features &#x22;state_machine cli-helpers&#x22; \  --test point_vs_full_differential -- one_vs_n_generation_quarantine_still_diverges --nocapture"><div></div></button></div></figure></div>
+<p>Generalizing: when a test must be excluded because of a known defect, prefer an
+<strong>expected-failure pin that fails when the defect disappears</strong> over <code dir="auto">#[ignore]</code>. The former
+self-releases; the latter is green whether the code is broken or fixed.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="the-self-round-trip-blind-spot-cqlite-written--cqlite-read-issue-3042">The self-round-trip blind spot (CQLite-written + CQLite-read, issue #3042)</h3><a class="sl-anchor-link" href="#the-self-round-trip-blind-spot-cqlite-written--cqlite-read-issue-3042"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “The self-round-trip blind spot (CQLite-written + CQLite-read, issue #3042)”</span></a></div>
 <p>Both lanes above compare CQLite against an <em>external</em> oracle or against its own two read
 paths. A third class of test compares CQLite only to itself in a single direction — write
