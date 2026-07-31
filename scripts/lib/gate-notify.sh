@@ -63,8 +63,10 @@ _gate_notify_severity() {
 _gate_notify_priority() { case "$1" in PASS) printf '3\n' ;; *) printf '5\n' ;; esac; }
 _gate_notify_tag() { case "$1" in PASS) printf 'white_check_mark\n' ;; *) printf 'rotating_light\n' ;; esac; }
 
-# _gate_notify_target: print "<server-root><TAB><topic>" for the configured
-# target, or return 1 when either cannot be resolved AUTHORITATIVELY.
+# _gate_notify_target: resolve the configured target into the globals
+# GATE_NOTIFY_ROOT and GATE_NOTIFY_TOPIC, or return 1 when either cannot be
+# resolved AUTHORITATIVELY. (Globals rather than a delimited string on stdout:
+# a whitespace delimiter in shell source is silently destroyed by a reformat.)
 #
 # ntfy JSON publishing requires POSTing to the SERVER ROOT with the topic in the
 # body; POSTed to /<topic> the body is taken as literal message text. The fleet
@@ -73,6 +75,8 @@ _gate_notify_tag() { case "$1" in PASS) printf 'white_check_mark\n' ;; *) printf
 # A target from which no topic can be resolved returns 1 rather than guessing:
 # publishing to a guessed topic pages a stranger.
 _gate_notify_target() {
+  GATE_NOTIFY_ROOT=""
+  GATE_NOTIFY_TOPIC=""
   local url="${CQLITE_NOTIFY_WEBHOOK:-${CODEX_NOTIFY_WEBHOOK:-}}"
   local topic="${CQLITE_NOTIFY_TOPIC:-${CODEX_NOTIFY_NTFY_TOPIC:-}}"
   [ -n "$url" ] || { _gate_notify_debug "no notify target configured"; return 1; }
@@ -88,7 +92,9 @@ _gate_notify_target() {
     [ -n "$topic" ] || topic="${u##*/}"
   fi
   [ -n "$topic" ] || { _gate_notify_debug "no topic resolvable from '$url'"; return 1; }
-  printf '%s\t%s\n' "$root" "$topic"
+  GATE_NOTIFY_ROOT="$root"
+  GATE_NOTIFY_TOPIC="$topic"
+  return 0
 }
 
 # _gate_notify_payload <topic> <title> <body> <priority> <tag>: emit the ntfy JSON.
@@ -143,10 +149,9 @@ gate_notify_publish() {
   local severity root topic payload
   severity=$(_gate_notify_severity "$result")
 
-  local target
-  if target=$(_gate_notify_target); then
-    root="${target%%	*}"
-    topic="${target##*	}"
+  if _gate_notify_target; then
+    root="$GATE_NOTIFY_ROOT"
+    topic="$GATE_NOTIFY_TOPIC"
     if command -v curl >/dev/null 2>&1; then
       payload=$(_gate_notify_payload "$topic" "$title" "$body" \
         "$(_gate_notify_priority "$severity")" "$(_gate_notify_tag "$severity")") || payload=""
@@ -209,8 +214,9 @@ try:
     d = json.loads(body)
 except Exception as e:
     print("payload is not JSON: %s" % e); raise SystemExit(1)
-if not url.endswith("/") or url.rstrip("/").count("/") != 2:
-    print("POST target is not a server root: %s" % url); raise SystemExit(1)
+if not url.endswith("/") or url.rstrip("/").endswith("/" + str(d.get("topic", "\0"))):
+    print("POST target is not a server root (topic must be in the body): %s" % url)
+    raise SystemExit(1)
 if str(d.get("priority")) != sys.argv[2] or d.get("tags") != [sys.argv[3]]:
     print("severity mismatch: %s / %s" % (d.get("priority"), d.get("tags"))); raise SystemExit(1)
 msg = d.get("message", "")
