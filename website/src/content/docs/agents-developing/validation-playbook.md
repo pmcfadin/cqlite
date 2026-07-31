@@ -77,6 +77,62 @@ The `CQLITE_READ_PATH` knob is a **test/debug** control (not a perf recommendati
 `point` fails closed rather than silently full-scanning. See the CLI reference for the
 user-facing knob docs.
 
+#### Second axis: 1 generation vs N generations (issue #3129)
+
+The point-vs-full comparison above holds the **generation count fixed**, so both of its
+arms route through the same reconciliation kernel and a disagreement between the
+*single-generation* read path and the *cross-generation* merge kernel
+(`generation_merge.rs`) reproduces identically on both arms — the lane stays green while a
+real `SELECT`'s answer depends on the table's compaction state. That is a fourth blind
+spot alongside physical-dump parity, query-semantics parity, and the self-round-trip class.
+
+`cqlite-core/tests/point_vs_full_differential/one_vs_n_generation.rs` (a submodule of the
+same test target) closes it: for each corpus fixture that holds **exactly one
+Cassandra-written generation**, it materializes two temp trees from those same bytes — one
+generation, and the same generation copied N ≥ 2 times under distinct generation numbers —
+then requires identical rows/values/**order** from both trees for the full scan, every
+per-partition read under both forced read-path modes, and the multi-key `IN`, at the same
+pinned `now`. N identical copies reconcile to exactly one copy under Cassandra's rules, so
+any inequality is a merge-kernel (or single-gen) defect. Anti-vacuity: each case pins the
+exact full-scan row count and partition count, both arms' generation counts are re-scanned
+after materialization (so the axis can never degenerate to 1-vs-1), and a source fixture
+that stops holding exactly one generation FAILs.
+
+Two properties of this axis are easy to get wrong:
+
+* **It probes partitions that return NOTHING, on purpose.** Discovery runs
+  `SELECT <pk> FROM …`, so a fully-deleted partition yields no key and would never be point-read
+  — leaving the seek/merge path untested for exactly the deleted-partition phantom-row shape the
+  axis exists to catch. Each case therefore declares `empty_probe_keys` (deleted or absent
+  partitions), asserted to be undiscoverable AND to return zero rows on both arms in both modes.
+* **It covers structural merge, not precedence.** The N copies are byte-identical, so every
+  cross-generation comparison is a *tie*: interleaving, ordering, dedup, static injection and
+  tombstone application are exercised, but "a newer generation's tombstone shadows an older
+  generation's live row" is not. That asymmetric class belongs to the real 2-generation
+  Cassandra fixtures (`test_tomb.resurrection_gc0`, `skipped_partition_delete`) and the
+  Cassandra-oracle lanes.
+
+**A quarantine needs a release signal.** Shapes that already diverge for a tracked defect are
+marked `known_divergent` with a reason that MUST cite its issue (`#<number>`, asserted — a
+waiver with no cited issue is not a waiver). They are excluded from the enforcing lane, but they
+are NOT parked in an `#[ignore]`d reproducer: an ignored test is a ratchet that never releases,
+since the gate never runs it and nothing ever reports that the defect got fixed. Instead
+`one_vs_n_generation_quarantine_still_diverges` runs in the normal test run and pins the
+*expected divergence*: each quarantined case must STILL diverge, and the moment one starts
+agreeing the test fails with instructions to flip `known_divergent` to `None`. Only an error
+carrying the divergence marker counts — a harness/fixture error is reported separately, so a
+broken harness can never masquerade as "still broken":
+
+```bash
+env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test -p cqlite-core --features "state_machine cli-helpers" \
+  --test point_vs_full_differential -- one_vs_n_generation_quarantine_still_diverges --nocapture
+```
+
+Generalizing: when a test must be excluded because of a known defect, prefer an
+**expected-failure pin that fails when the defect disappears** over `#[ignore]`. The former
+self-releases; the latter is green whether the code is broken or fixed.
+
 ### The self-round-trip blind spot (CQLite-written + CQLite-read, issue #3042)
 
 Both lanes above compare CQLite against an *external* oracle or against its own two read

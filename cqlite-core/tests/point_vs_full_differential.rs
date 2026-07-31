@@ -36,10 +36,32 @@
 //! `comparison_detects_a_seeded_divergence` below (feeding the compare helper two
 //! different row sets must report a mismatch), complementing the manual
 //! seed-a-real-divergence verification recorded in the PR.
+//!
+//! ## Second axis: 1 generation vs N generations (issue #3129)
+//!
+//! `one_vs_n_generation` (submodule, same target) adds the orthogonal axis this
+//! file's point-vs-full comparison structurally CANNOT see: both of the point/full
+//! arms read the same fixture at the same generation count, so a divergence
+//! between single-generation reconciliation and the cross-generation merge kernel
+//! reproduces identically on both arms and stays green. That submodule reads the
+//! SAME bytes at 1 generation and at N ≥ 2 generations and requires identical
+//! result sets, reusing this file's corpus conventions, pinned `now`, SKIP
+//! contract and `normalize`.
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+
+// `#[path]` because this file IS the integration target's crate root: a bare
+// `mod` would resolve to `tests/one_vs_n_generation.rs`, which cargo would then
+// ALSO auto-discover as its own (helper-less, non-compiling) test target. Keeping
+// the submodule under `tests/point_vs_full_differential/` — a directory without a
+// `main.rs`, so cargo ignores it for target discovery — makes the ownership
+// obvious and keeps this file inside the campsite file-size target.
+#[path = "point_vs_full_differential/one_vs_n_generation.rs"]
+mod one_vs_n_generation;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use serial_test::serial;
 
 use cqlite_core::config::ReadPathMode;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
@@ -59,6 +81,48 @@ const PINNED_NOW_SECS: i64 = 1_800_000_000;
 /// wide corpus while still covering every distinct partition in the small
 /// tombstone/TTL fixtures, which have only a handful of partitions).
 const MAX_KEYS_PER_TABLE: usize = 32;
+
+/// RAII guard for a PROCESS-GLOBAL env var: sets it on construction and restores
+/// the PREVIOUS state on drop — the earlier value if there was one, else unset.
+/// An unconditional `remove_var` would instead DISCARD a value the surrounding
+/// environment had set (e.g. a developer pinning the clock for a whole run), and a
+/// trailing `remove_var` statement never runs at all when an assertion panics.
+///
+/// The guard bounds the WINDOW; it does NOT bound concurrency. Because the seam is
+/// process-global and every test in this binary shares one process, each test that
+/// writes it is ALSO `#[serial]` — without that, one test's restore-on-drop would
+/// unpin a sibling's clock mid-run and its remaining scans would silently fall back
+/// to `SystemTime::now()` (`now_clock.rs`), producing a spurious divergence or
+/// masking a real one. Both parts are required; neither alone is sufficient.
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => std::env::set_var(self.key, previous),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// Pin the read-time TTL clock at `PINNED_NOW_SECS` (never wall-clock) for as long
+/// as the returned guard lives. Bind it to a NAMED local (`let _clock = …`); a bare
+/// `let _ =` would drop it immediately and unpin the clock.
+#[must_use = "the clock stays pinned only while the returned guard is alive"]
+fn pin_read_clock() -> EnvVarGuard {
+    EnvVarGuard::set(TTL_NOW_OVERRIDE_ENV, &PINNED_NOW_SECS.to_string())
+}
 
 fn require_fixtures() -> bool {
     std::env::var("CQLITE_REQUIRE_FIXTURES")
@@ -323,23 +387,26 @@ async fn open_db(
 /// Discover the DISTINCT integer partition-key values present in `table` by
 /// running a full-scan `SELECT` (on the `full`-mode DB, so a full-table read is
 /// legal). Returns them sorted + deduplicated so the probe set is deterministic.
-async fn discover_pk_ints(db: &Database, case: &TableCase) -> Result<Vec<i64>, String> {
-    let query = format!(
-        "SELECT {} FROM {}.{}",
-        case.pk_column, case.keyspace, case.table
-    );
+/// Parameterized (rather than taking a `TableCase`) so the `one_vs_n_generation`
+/// axis reuses the exact same discovery.
+async fn discover_pk_ints(
+    db: &Database,
+    keyspace: &str,
+    table: &str,
+    pk_column: &str,
+) -> Result<Vec<i64>, String> {
+    let query = format!("SELECT {pk_column} FROM {keyspace}.{table}");
     let result = db
         .execute(&query)
         .await
         .map_err(|e| format!("discovery SELECT failed: {e}"))?;
     let mut seen: BTreeMap<i64, ()> = BTreeMap::new();
     for row in &result.rows {
-        if let Some(v) = row.values.get(case.pk_column) {
+        if let Some(v) = row.values.get(pk_column) {
             let as_int = value_as_i64(v).ok_or_else(|| {
                 format!(
-                    "partition key {} decoded as a non-integer value {v:?}; this lane \
-                     only handles INT partition keys",
-                    case.pk_column
+                    "partition key {pk_column} decoded as a non-integer value {v:?}; this lane \
+                     only handles INT partition keys"
                 )
             })?;
             seen.insert(as_int, ());
@@ -411,7 +478,7 @@ async fn run_case(case: &TableCase) -> Result<bool, String> {
     let full_db = open_db(&root, &schema, case.keyspace, ReadPathMode::Full).await?;
     let point_db = open_db(&root, &schema, case.keyspace, ReadPathMode::Point).await?;
 
-    let discovered = discover_pk_ints(&full_db, case).await?;
+    let discovered = discover_pk_ints(&full_db, case.keyspace, case.table, case.pk_column).await?;
     // Merge discovered (live) keys with the always-probe keys, deduplicated and
     // sorted so the probe set is deterministic.
     let mut key_set: BTreeMap<i64, ()> = BTreeMap::new();
@@ -527,7 +594,12 @@ fn skip_or_fail(msg: &str) -> Result<bool, String> {
     Ok(false)
 }
 
+/// `#[serial]`: this test writes the process-global `CQLITE_TTL_NOW_OVERRIDE_SECS`
+/// read seam that the `one_vs_n_generation` sibling in this SAME binary also writes
+/// (libtest runs them on a multi-threaded pool by default), so the two must never
+/// overlap. The pure comparator tests below neither read nor write the seam.
 #[tokio::test]
+#[serial]
 async fn point_vs_full_differential_equality() {
     // Corpus coverage assertion: the lane must exercise every #1741 divergence
     // class (multi-generation, tombstone, TTL) — never silently narrow to a
@@ -543,9 +615,10 @@ async fn point_vs_full_differential_equality() {
         );
     }
 
-    // Pin the read-time TTL clock for the whole run (single-threaded here, so no
-    // sibling test in this binary races the process-global env seam).
-    std::env::set_var(TTL_NOW_OVERRIDE_ENV, PINNED_NOW_SECS.to_string());
+    // Pin the read-time TTL clock for the whole run. The seam is process-global, so
+    // the pin is held by an RAII guard (restores the previous value, even on panic)
+    // AND this test is `#[serial]` against every sibling that writes the same var.
+    let _clock = pin_read_clock();
 
     let mut ran = 0usize;
     let mut failures: Vec<String> = Vec::new();
@@ -556,8 +629,6 @@ async fn point_vs_full_differential_equality() {
             Err(e) => failures.push(format!("{}.{}: {e}", case.keyspace, case.table)),
         }
     }
-
-    std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
 
     assert!(
         failures.is_empty(),
