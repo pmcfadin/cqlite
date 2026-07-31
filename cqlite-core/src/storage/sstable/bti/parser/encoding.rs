@@ -54,6 +54,34 @@ const OSS50_ESCAPED_0_DONE: u8 = 0xFF;
 /// slice to the tail of its bucket (issue #3032; a real Cassandra 5.0 `Rows.db`
 /// separator for `('bo', 12)` is `40 62 6f 00 40 80 00 00 0c`, terminator `00`).
 ///
+/// ## The EMPTY component (issue #3032 roborev N8)
+///
+/// An empty variable-length component encodes to a bare terminator — one `0x00` —
+/// so a full empty `text` clustering component is `40 00`. This is NOT a guess: it
+/// falls straight out of `AbstractEscaper.next()` (`bufpos == limit == 0`, not
+/// `escaped`, so the first call returns `ESCAPE` and the second `END_OF_STREAM`),
+/// and cassandra-5.0.8 `ClusteringComparator.java:271-273` states it outright in its
+/// worked examples: `"", null, Clustering -> 40 00 3F 40` and
+/// `"", 0000, Clustering -> 40 00 40 0000 40` — the empty first component is `40 00`
+/// in both.
+///
+/// `ByteSource.NEXT_COMPONENT_EMPTY` (`0x3F`, the `3F` above) is therefore **NOT**
+/// the encoding of an empty variable-length component. It replaces the leading
+/// `0x40` only when `AbstractType.asComparableBytes` returns Java `null`, which
+/// happens for a type whose production is `optionalSignedFixedLengthNumber` /
+/// `optionalFixedLength` (`ByteSource.java:176-179`, `:740-743`: `null` when
+/// `accessor.isEmpty(data)`) — i.e. an empty BUFFER for a fixed-length numeric.
+/// `ClusteringComparator.java:328-329` says so explicitly: "null values for some
+/// types (e.g. int, varint **but not text**) that are encoded as empty buffers".
+/// Text/blob go through `ByteSource.of(accessor, data, version)`
+/// (`ByteSource.java:91-94`), an `AccessorEscaper` that is never `null`.
+///
+/// That `0x3F` case is unreachable from this encoder by construction: a
+/// [`Value::Integer`]/[`Value::BigInt`]/… always carries a full-width number, so
+/// CQLite's value model cannot express the empty fixed-length buffer that produces
+/// it. If a representable empty-fixed-length value is ever added, this function's
+/// callers must emit `NEXT_COMPONENT_EMPTY` in place of `NEXT_COMPONENT` for it.
+///
 /// (The project's `ByteComparableEncoder` uses a different, non-Cassandra escape
 /// scheme and must NOT be used for trie-compatible bounds.)
 fn encode_varlen_oss50(bytes: &[u8], out: &mut Vec<u8>) {
@@ -166,8 +194,15 @@ fn encode_clustering_component_oss50(value: &Value, out: &mut Vec<u8>) -> BtiRes
 ///
 /// A [`OSS50_NEXT_COMPONENT`] (`0x40`) byte precedes **EVERY** component,
 /// including the FIRST: `ClusteringComparator.ByteComparableClustering`
-/// (cassandra-5.0.8 `ClusteringComparator.java:260-275`) "adds a NEXT_COMPONENT
-/// byte before each component", e.g. `("A", 0005)` → `40 4100 40 0005 40`. So a
+/// (cassandra-5.0.8 `ClusteringComparator.java:257-275`) "adds a NEXT_COMPONENT
+/// byte before each component ... and finishes with a suitable byte for the
+/// clustering kind", e.g. a COMPLETE `("A", 0005)` clustering →
+/// `40 4100 40 0005 38`, whose last byte is the `Kind` byte
+/// `ClusteringPrefix.Kind.CLUSTERING.asByteComparableValue(OSS50)` =
+/// `ByteSource.TERMINATOR` (`0x38`), NOT another `NEXT_COMPONENT`. (Cassandra's own
+/// javadoc renders that example as `... 0005 40` because it is written for
+/// `Version.LEGACY`, where `CLUSTERING` maps to `ByteSource.NEXT_COMPONENT`
+/// instead — `ClusteringPrefix.java:75-76`.) So a
 /// single `int` clustering ck=8 encodes to `40 80 00 00 08`, which is exactly the
 /// separator byte string a real `wide_table` `Rows.db` trie stores (issue #3002 —
 /// the previous "bare component bytes, NO framing" claim was calibrated against a
@@ -412,5 +447,54 @@ mod tests {
         assert!(m(1, 9) < m(1, 8) && m(1, 8) < m(1, 7));
         // Different first key dominates regardless of second (ASC leading).
         assert!(m(1, 0) < m(2, 9));
+    }
+
+    /// An EMPTY variable-length component encodes to a bare terminator: `40 00`
+    /// (issue #3032 roborev N8). NOT `ByteSource.NEXT_COMPONENT_EMPTY` (`0x3F`).
+    ///
+    /// Authority (pinned cassandra-5.0.8, never CQLite's own behavior):
+    ///  * `ByteSource.AbstractEscaper.next()` on an empty buffer — `bufpos == limit
+    ///    == 0`, not `escaped` — returns `ESCAPE` (`0x00`) once, then `END_OF_STREAM`.
+    ///  * `ClusteringComparator.java:271-272` states the result in its own worked
+    ///    examples: `"", null, Clustering -> 40 00 3F 40` and
+    ///    `"", 0000, Clustering -> 40 00 40 0000 40`.
+    ///  * `0x3F` there is the SECOND component's marker, emitted only when
+    ///    `asComparableBytes` returns Java `null` — an empty buffer for a
+    ///    fixed-length numeric (`ByteSource.java:176-179`). Text/blob use
+    ///    `AccessorEscaper`, which is never `null`
+    ///    (`ClusteringComparator.java:328-329`: "e.g. int, varint but not text").
+    #[test]
+    fn oss50_empty_varlen_component_is_a_bare_terminator() {
+        // text "" and blob b"" both encode to NEXT_COMPONENT + a lone ESCAPE.
+        assert_eq!(
+            encode_clustering_bound_oss50(&[Value::Text("".into())]).unwrap(),
+            vec![0x40, 0x00]
+        );
+        assert_eq!(
+            encode_clustering_bound_oss50(&[Value::Blob(Vec::new().into())]).unwrap(),
+            vec![0x40, 0x00]
+        );
+
+        // The `"", 0000, Clustering` shape from the Cassandra javadoc: the empty
+        // leading component is `40 00`, then the int component's own `0x40` framing
+        // (`0000` there is schematic; CQLite emits the sign-flipped Int32Type form).
+        assert_eq!(
+            encode_clustering_bound_oss50(&[Value::Text("".into()), Value::Integer(0)]).unwrap(),
+            vec![0x40, 0x00, 0x40, 0x80, 0x00, 0x00, 0x00]
+        );
+
+        // The load-bearing ORDER property: an empty component sorts below every
+        // non-empty one, and below a longer key sharing it as a prefix.
+        let empty = encode_clustering_bound_oss50(&[Value::Text("".into())]).unwrap();
+        let a = encode_clustering_bound_oss50(&[Value::Text("a".into())]).unwrap();
+        let nul = encode_clustering_bound_oss50(&[Value::Text("\u{0}".into())]).unwrap();
+        assert!(empty < a, "empty text must sort before \"a\"");
+        assert!(empty < nul, "empty text must sort before a single NUL");
+        let empty_then_int =
+            encode_clustering_bound_oss50(&[Value::Text("".into()), Value::Integer(0)]).unwrap();
+        assert!(
+            empty < empty_then_int,
+            "the empty component's terminator must sort below the following 0x40"
+        );
     }
 }
