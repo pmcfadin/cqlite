@@ -109,6 +109,13 @@ components SKIP: a vacuous PASS, exactly what #2078 exists to prevent. The wrong
 - **Not converting the other ad-hoc `CQLITE_DATASETS_ROOT` readers.** ~50 `cqlite-core/tests/**` and
   `src/**` inline suites resolve the corpus themselves. #3148 names three copies; touching fifty is a
   different change with a different risk profile.
+- **Not converting the ~15 sites that use the *fallback* schemas idiom.** A separate group of
+  `cqlite-core/tests/**` files tries `datasets_root.parent()?.join("schemas")` **and then** a
+  `CARGO_MANIFEST_DIR`-anchored checkout path (e.g. `issue_1143_windowed_scan_straddle_parity.rs:71,77`,
+  `issue_693_writetime_threading.rs:42,48`, `issue_1562_perf_gate_access_path.rs:50,56`). Because they
+  already fall back to the checkout they DEGRADE correctly on the layout that hard-failed the four sites
+  in scope, so they are not part of this defect. The spec delta's single-definition requirement is
+  explicitly scoped to the four, so this change does not claim them. Consolidation is a follow-up.
 - **Not unifying the per-keyspace ad-hoc corpus checks** (`test_compactionparity`,
   `test_compaction_tombstone_ttl` at `scripts/agent-gate.sh:4238`, `:4295`) — noted as adjacent
   inconsistency in #3148's scope note and explicitly left out.

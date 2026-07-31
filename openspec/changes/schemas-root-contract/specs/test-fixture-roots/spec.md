@@ -12,15 +12,15 @@ derived from the first.
 | AC | Requirement(s) |
 |----|----------------|
 | **#3148 (a)** FULL-gate preflight FAILS CLOSED with a named error + remedy when the schemas root is missing/unreadable | *The FULL gate fails closed when a consumed schema fixture is unreadable*; *The preflight validates individual schema files, not directory existence* |
-| **#3148 (b)** failure text names the exact absolute path + fix command; marker distinguishable from `missing-fixtures:` | *The FULL gate fails closed when a consumed schema fixture is unreadable* |
+| **#3148 (b)** failure text names the exact absolute path + fix command; marker distinguishable from `missing-fixtures:` | *The FULL gate fails closed when a consumed schema fixture is unreadable*; *A relative schemas-root override is rejected fail-closed* (a relative value would otherwise be printed on the `expected absolute path:` line) |
 | **#3148 (c)** positive-control self-test proves the preflight FAILS on a schemas-less root | *The schemas preflight decision is exposed as a pure hook and positively controlled* |
-| **#3148 (d)** schemas-root resolution exists once, used by every caller; no open-coded `join("../schemas")` | *Schemas-root resolution has exactly one definition, used by every caller*; *An unreadable schema fixture fails with an actionable, path-naming message* |
+| **#3148 (d)** schemas-root resolution exists once, used by every caller; no open-coded `join("../schemas")` | *Schemas-root resolution has exactly one definition, used by every schemas-consuming fixture site* (scope stated in that requirement); *An unreadable schema fixture fails with an actionable, path-naming message* |
 | **#3148 (e)** the two divergent `datasets_root()` implementations reconciled or documented | *The datasets root has one implementation with two documented shapes* |
 | **#3148 (f)** the symlinked-`datasets` layout works or is rejected, never silently mis-resolved | *The schemas root is independent of the datasets root* |
 | **#3148 (g)** `--lite` and `--only` remain lenient | *Only the FULL gate is strict about fixture roots* |
-| **#3148 (h)** scope decision recorded | *The schemas root is resolved checkout-relative by decision* |
+| **#3148 (h)** scope decision recorded | *The schemas root is resolved checkout-relative by decision*; *A relative schemas-root override is rejected fail-closed* |
 | **#3131 (1)** one documented root that works | *The schemas root is independent of the datasets root*; *The schemas root is resolved checkout-relative by decision* (which supersedes #3131's item-1 either/or — see `design.md`) |
-| **#3131 (2)** `fetch-datasets.sh` must not exit 0 without leaving a usable root | *A dataset fetch reports success only with a verified, named root*; *Dataset-root usability is probeable without mutating anything* |
+| **#3131 (2)** `fetch-datasets.sh` must not exit 0 without leaving a usable root | *A dataset fetch reports success only with a verified, named root*; *The guaranteed export line is pasteable, not merely printed*; *Dataset-root usability is probeable without mutating anything*; *Every unrecognized argument to the dataset fetch is rejected fail-closed* |
 | **#3131 (3)** preflight detects the schemas half, not just the corpus | *The FULL gate fails closed when a consumed schema fixture is unreadable*; *The preflight validates individual schema files, not directory existence* |
 
 ## ADDED Requirements
@@ -39,15 +39,47 @@ recorded scope decision (#3148 AC (h), proposed fix 4): because a checkout alway
 - **WHEN** a test or bench loads a fixture that needs a `.cql` schema
 - **THEN** the schema resolves from the checkout's `test-data/schemas` and the fixture loads successfully
 
+#### Scenario: The checkout is identified by a checkout marker, not by the fixtures
+- **GIVEN** a checkout whose `test-data/schemas` is absent (a sparse checkout, or a worktree created inside another checkout that DOES have fixtures)
+- **WHEN** the checkout's `test-data` directory is resolved
+- **THEN** it resolves to THIS checkout's own root — identified by the workspace-root manifest — and a missing `test-data/schemas` under it fails loudly naming that path
+- **AND** it SHALL NOT silently resolve to an enclosing checkout's fixtures
+
 #### Scenario: An out-of-tree run may override the schemas root
-- **GIVEN** `CQLITE_SCHEMAS_ROOT` is set to a readable directory holding the schema fixtures
+- **GIVEN** `CQLITE_SCHEMAS_ROOT` is set to an ABSOLUTE, readable directory holding the schema fixtures
 - **WHEN** a schema fixture is resolved
 - **THEN** the override directory is used, and the resolution source is reported as the override
 
-#### Scenario: An unusable override degrades to the checkout rather than breaking every load
-- **GIVEN** `CQLITE_SCHEMAS_ROOT` is set to an empty string, or to a path that is not a directory
+#### Scenario: An unusable absolute override degrades to the checkout rather than breaking every load
+- **GIVEN** `CQLITE_SCHEMAS_ROOT` is set to an empty string, or to an ABSOLUTE path that is not a directory
 - **WHEN** a schema fixture is resolved
 - **THEN** the checkout-relative root is used instead of the unusable override
+
+### Requirement: A relative schemas-root override is rejected fail-closed
+`CQLITE_SCHEMAS_ROOT` SHALL be an absolute path. A relative value SHALL be REJECTED — by the resolver and by
+the gate preflight alike — and SHALL NOT be resolved against the current working directory. The rejection
+message SHALL name the offending value, state why relative values cannot be honored, and give a remedy.
+
+**Why this is fail-closed rather than best-effort.** The gate evaluates the override with CWD = repository
+root, while cargo runs each test binary with CWD = the *package* directory. A relative value therefore
+resolves to two different places, and the gate would stamp a SUMMARY certifying one schemas root for a run
+whose tests read another — the "positively misleading `STATUS: OK`" defect this change exists to remove,
+reintroduced by its own fix. Rejection makes the two sides agree by construction rather than by review.
+
+#### Scenario: A relative override fails the resolver
+- **GIVEN** `CQLITE_SCHEMAS_ROOT` is a relative path such as `packaged/schemas`, `./schemas` or `../schemas`
+- **WHEN** the schemas root is resolved
+- **THEN** resolution fails with a message naming the value, the CWD asymmetry, and the remedy — it does NOT silently use either candidate directory
+
+#### Scenario: A relative override fails the FULL gate closed, under its own reason
+- **GIVEN** a FULL gate run with a complete corpus, complete checkout fixtures, and a relative `CQLITE_SCHEMAS_ROOT`
+- **WHEN** the preflight runs
+- **THEN** the run exits non-zero with the schemas fail-closed marker naming the rejected relative override, stamps NO positive `schemas:` line, and does NOT report a list of "missing" files (the checkout's fixtures are in fact complete)
+
+#### Scenario: A blank override is not an override
+- **GIVEN** `CQLITE_SCHEMAS_ROOT` is set to an empty or whitespace-only value
+- **WHEN** the schemas root is resolved
+- **THEN** it is treated as unset and the checkout-relative root is used, on both the resolver and the gate side
 
 ### Requirement: The schemas root is independent of the datasets root
 The resolved schemas root SHALL NOT vary with the value, shape or existence of `CQLITE_DATASETS_ROOT`. No
@@ -67,9 +99,29 @@ rather than detecting it.
 - **THEN** the run FAILs and names the offending file and line
 - **AND** a doc comment that merely quotes the retired idiom does NOT fail it
 
-### Requirement: Schemas-root resolution has exactly one definition, used by every caller
-There SHALL be exactly one definition of schemas-root resolution, and every consumer SHALL use it —
-including consumers in more than one crate. A consumer SHALL NOT re-implement the resolution locally.
+### Requirement: Schemas-root resolution has exactly one definition, used by every schemas-consuming fixture site
+There SHALL be exactly one definition of schemas-root resolution, and every site **in this change's scope**
+SHALL use it — including sites in more than one crate. A site in scope SHALL NOT re-implement the resolution
+locally.
+
+**Scope, stated precisely so the requirement does not overclaim.** "Every caller" means the four sites #3148
+enumerates — the ones that derived the schemas root from `CQLITE_DATASETS_ROOT` by climbing `..` with no
+fallback, and therefore *hard-failed* on a corpus root without a `schemas` sibling:
+`cqlite-core/benches/fixtures/mod.rs`, `cqlite-core/tests/dead_cache_delete_tests.rs`,
+`cqlite-core/tests/observability_correctness.rs`, `cqlite-cli/benches/export_csv.rs`.
+
+Approximately fifteen further `cqlite-core/tests/**` files resolve a schemas directory with a *different*
+idiom — `datasets_root.parent()?.join("schemas")` tried **first and then a
+`CARGO_MANIFEST_DIR`-anchored checkout fallback** (e.g. `issue_1143_windowed_scan_straddle_parity.rs:71,77`,
+`issue_693_writetime_threading.rs:42,48`, `issue_1562_perf_gate_access_path.rs:50,56`). Because they already
+fall back to the checkout, they DEGRADE correctly on the layout that broke the four sites above; they are
+therefore out of scope here, and no requirement in this delta asserts anything about them. Consolidating them
+is a follow-up, not a silent claim of this change.
+
+#### Scenario: The requirement's scope is the four hard-failing sites, not every schemas reference
+- **GIVEN** the ~15 test files that try a datasets-sibling schemas path and then fall back to a checkout-anchored path
+- **WHEN** the single-definition guard runs
+- **THEN** it asserts only the four in-scope sites, and does NOT report those ~15 as violations
 
 #### Scenario: All four historical call sites route through the single definition
 - **GIVEN** the four sites that previously open-coded the resolution (`cqlite-core/benches/fixtures/mod.rs`, `cqlite-core/tests/dead_cache_delete_tests.rs`, `cqlite-core/tests/observability_correctness.rs`, `cqlite-cli/benches/export_csv.rs`)
@@ -205,11 +257,21 @@ issue #2878).
 - **WHEN** the boundary guard runs
 - **THEN** the `rm -rf "${DATASET_ROOT}"` statement and the CI-only short-circuit in the tracked-file restore are present verbatim
 
+### Requirement: The guaranteed export line is pasteable, not merely printed
+The printed `export CQLITE_DATASETS_ROOT=…` line SHALL be shell-quoted, so that pasting it reproduces the
+exact root even when the path contains spaces or shell metacharacters. A line that is correct only for
+metacharacter-free paths does not satisfy "the exact actionable export line".
+
+#### Scenario: A root containing spaces and metacharacters round-trips
+- **GIVEN** a usable dataset root whose absolute path contains a space and a shell metacharacter
+- **WHEN** the printed export line is evaluated by a shell
+- **THEN** the resulting `CQLITE_DATASETS_ROOT` equals the original path exactly
+
 ### Requirement: Dataset-root usability is probeable without mutating anything
 `fetch-datasets.sh` SHALL provide a mode that reports whether the resolved root is usable — and prints the
-guaranteed export line — while performing no download, extraction, removal or re-pin. This exists so the
-usability guarantee's **failure** path is exercisable; a check that can only be observed passing is not a
-check.
+guaranteed export line — while performing **no** download, extraction, removal, re-pin **or directory
+creation**. This exists so the usability guarantee's **failure** path is exercisable; a check that can only be
+observed passing is not a check.
 
 #### Scenario: The probe reports a usable root without touching it
 - **GIVEN** a root holding the required content
@@ -220,3 +282,23 @@ check.
 - **GIVEN** an existing but empty dataset root
 - **WHEN** the probe runs
 - **THEN** it exits non-zero with the missing-content diagnosis and a remedy
+
+#### Scenario: The probe creates no directory, not even a missing parent
+- **GIVEN** a dataset root whose parent directory does not exist
+- **WHEN** the probe runs
+- **THEN** it exits non-zero AND the parent directory has not been created
+
+### Requirement: Every unrecognized argument to the dataset fetch is rejected fail-closed
+`fetch-datasets.sh`'s default path is destructive (it removes the dataset root before extracting), so it SHALL
+reject **any** unrecognized argument with a usage error and a non-zero exit, before performing any filesystem
+work. An unrecognized or misspelled argument SHALL NOT fall through to the destructive path.
+
+#### Scenario: A misspelled or extra flag never reaches the destructive path
+- **GIVEN** an invocation such as `--quiet --verify-only`, `-verify-only`, or any misspelling of the probe flag
+- **WHEN** the script runs against a populated dataset root
+- **THEN** it exits with a usage error naming the unrecognized argument, and the dataset root's contents are untouched
+
+#### Scenario: The recognized flags still work
+- **GIVEN** `--verify-only` or `--help`
+- **WHEN** the script runs
+- **THEN** the flag is honored (and `--help` documents the probe and exits zero)

@@ -100,6 +100,90 @@ else
   bad "3148-hook-partial: expected FAIL naming only the absent files (got '$partial_missing')"
 fi
 
+# A bare `-r` test accepts a DIRECTORY named `basic-types.cql`; the Rust side asks for a
+# readable REGULAR file (`readable_file`). Both sides must ask the same question or the
+# gate can certify a layout the tests reject (reviewer nit N7 / roborev finding 2).
+schemas_dirtrap="$tmp/schemas-dirtrap"
+mkdir -p "$schemas_dirtrap"
+for f in "${CANONICAL[@]}"; do mkdir -p "$schemas_dirtrap/$f"; done
+dirtrap_out=$(CQLITE_SCHEMAS_ROOT="$schemas_dirtrap" bash "$GATE" --preflight-schemas 2>/dev/null)
+dirtrap_missing=$(hook_field MISSING "$dirtrap_out")
+dirtrap_all=1
+for f in "${CANONICAL[@]}"; do
+  grep -qw -- "$f" <<<"$dirtrap_missing" || dirtrap_all=0
+done
+if [ "$(hook_field STATUS "$dirtrap_out")" = FAIL ] && [ "$dirtrap_all" -eq 1 ]; then
+  ok "3148-hook-dirtrap: a DIRECTORY named like a .cql is not a readable regular file"
+else
+  bad "3148-hook-dirtrap: expected FAIL for directories named like the fixtures (got '$dirtrap_missing')"
+fi
+
+# ---------------------------------------------------------------------------
+# 1b. A RELATIVE CQLITE_SCHEMAS_ROOT is REJECTED, not resolved (blocker B1).
+#
+#     The gate evaluates a relative override with CWD = REPO_ROOT; cargo runs each test
+#     binary with CWD = the PACKAGE dir. Resolving it let the gate stamp
+#     `schemas: 6/6 … under packaged/schemas (override)` while the tests silently fell
+#     back to the checkout — the SUMMARY certifying root A for a run that used root B,
+#     which IS #3148's defect. So the decision must be FAIL, the reported ROOT must be
+#     the checkout (never the relative string dressed up as absolute), and the reason
+#     must be named.
+# ---------------------------------------------------------------------------
+rel_out=$(CQLITE_SCHEMAS_ROOT="packaged/schemas" bash "$GATE" --preflight-schemas 2>/dev/null)
+if [ "$(hook_field STATUS "$rel_out")" = FAIL ] \
+   && [ "$(hook_field ROOT "$rel_out")" = "$REPO/test-data/schemas" ] \
+   && [ "$(hook_field SOURCE "$rel_out")" = "CQLITE_SCHEMAS_ROOT override REJECTED" ] \
+   && grep -q 'must be an ABSOLUTE path' <<<"$(hook_field REJECT "$rel_out")"; then
+  ok "3148-relative-override: a relative CQLITE_SCHEMAS_ROOT is rejected, not resolved"
+else
+  bad "3148-relative-override: expected FAIL + REJECTED source + the absolute-path reason"
+  printf '%s\n' "$rel_out"
+fi
+
+# …and it must not smuggle the relative string into the report as an "absolute path".
+if ! grep -q 'expected absolute path: packaged/schemas' <<<"$rel_out"; then
+  ok "3148-relative-override: no relative path is ever labelled absolute (AC (b))"
+else
+  bad "3148-relative-override: a relative path was reported as the expected absolute path"
+fi
+
+# Every relative shape, not just the bare one; and a blank/whitespace value is NOT an
+# override at all (a scripting accident), matching the Rust side's `trim().is_empty()`.
+rel_shapes_ok=1
+for raw in './schemas' '../schemas' 'a/b/schemas'; do
+  st=$(CQLITE_SCHEMAS_ROOT="$raw" bash "$GATE" --preflight-schemas 2>/dev/null \
+    | grep '^STATUS:' | sed 's/^STATUS: //')
+  [ "$st" = FAIL ] || { rel_shapes_ok=0; echo "   (not rejected: $raw -> $st)"; }
+done
+for raw in '' '   '; do
+  st=$(CQLITE_SCHEMAS_ROOT="$raw" bash "$GATE" --preflight-schemas 2>/dev/null \
+    | grep '^STATUS:' | sed 's/^STATUS: //')
+  [ "$st" = OK ] || { rel_shapes_ok=0; echo "   (blank treated as an override: '$raw' -> $st)"; }
+done
+if [ "$rel_shapes_ok" -eq 1 ]; then
+  ok "3148-relative-shapes: every relative form rejected; blank/whitespace is not an override"
+else
+  bad "3148-relative-shapes: relative/blank handling diverges from the Rust resolver"
+fi
+
+# The FULL gate must FAIL CLOSED on the relative override too — with its own reason, not
+# a misleading "missing files" list (the checkout's fixtures are in fact complete).
+rel_full="$tmp/3148-rel-full.txt"
+CQLITE_GATE_DISABLE_CAP=1 CQLITE_DATASETS_ROOT="$ds_corpus" \
+  CQLITE_SCHEMAS_ROOT="packaged/schemas" AGENT_GATE_SUMMARY_FILE="$rel_full" \
+  bash "$GATE" >/dev/null 2>&1
+rel_full_rc=$?
+if [ "$rel_full_rc" -ne 0 ] \
+   && grep -q "^missing-schemas: FAIL-CLOSED (#3148)" "$rel_full" 2>/dev/null \
+   && grep -q "relative CQLITE_SCHEMAS_ROOT rejected" "$rel_full" 2>/dev/null \
+   && grep -q "^RESULT: FAIL" "$rel_full" 2>/dev/null \
+   && ! grep -q "^schemas: " "$rel_full" 2>/dev/null; then
+  ok "3148-relative-full: FULL gate FAILs CLOSED on a relative override and stamps no positive schemas line"
+else
+  bad "3148-relative-full: expected fail-closed with the relative-override reason (rc=$rel_full_rc)"
+  cat "$rel_full" 2>/dev/null
+fi
+
 # ---------------------------------------------------------------------------
 # 2. The FULL gate FAILS CLOSED, with a marker DISTINGUISHABLE from #2078's.
 #    apply_schemas_preflight fires before any cargo component, so this is fast.
@@ -211,6 +295,7 @@ fi
 # ---------------------------------------------------------------------------
 shared="$REPO/test-data/support/fixture_roots.rs"
 if [ -f "$shared" ] \
+   && grep -q 'pub fn resolve_schemas_root' "$shared" \
    && grep -q 'pub fn schemas_root_resolved' "$shared" \
    && grep -q 'pub fn datasets_root_if_present' "$shared" \
    && grep -q 'pub fn datasets_root' "$shared"; then
@@ -272,6 +357,60 @@ else
   printf '%s\n' "$hollow_out"
 fi
 
+# 6a-bis. --verify-only must CREATE NOTHING (blocker B2). The first cut of case 6a
+#         pre-`mkdir`ed its hollow root, which made it BLIND to exactly this bug:
+#         `canonicalize_dataset_root` runs `mkdir -p "${parent}"` before the mode
+#         dispatch, so probing a root under a nonexistent parent silently created that
+#         parent and then reported the root unusable. The root here is therefore
+#         deliberately NOT pre-created, and the assertion is on the filesystem, not on
+#         the message.
+absent_parent="$tmp/verify-nomutate"
+absent_root="$absent_parent/v4/datasets"
+nomutate_out=$(CQLITE_DATASETS_ROOT="$absent_root" bash "$FETCH" --verify-only 2>&1)
+nomutate_rc=$?
+if [ "$nomutate_rc" -ne 0 ] && [ ! -e "$absent_parent" ]; then
+  ok "3131-verify-no-mutation: --verify-only creates nothing, even a missing parent dir"
+else
+  bad "3131-verify-no-mutation: expected non-zero AND no filesystem mutation (rc=$nomutate_rc, created: $(ls -d "$absent_parent" 2>&1))"
+  printf '%s\n' "$nomutate_out"
+fi
+
+# 6a-ter. Unrecognized arguments must be REJECTED, not silently ignored (blocker B3).
+#         The default path is DESTRUCTIVE (`rm -rf "${DATASET_ROOT}"` before extraction),
+#         so `--quiet --verify-only` or any typo previously skipped the probe and reached
+#         the rm -rf against the operator's corpus. Asserted with a real, POPULATED root:
+#         if the rejection ever regresses, this case would attempt the destructive path,
+#         so the surviving fixture is itself part of the assertion.
+argsafe_ok=1
+argsafe_root="$tmp/argsafe/datasets"
+mkdir -p "$argsafe_root/sstables/test_basic/simple_table-0001"
+: >"$argsafe_root/sstables/test_basic/simple_table-0001/nb-1-big-Data.db"
+for badarg in "--quiet --verify-only" "-verify-only" "--verifyonly" "verify-only" "--Verify-Only"; do
+  # shellcheck disable=SC2086  # intentional word-split: some cases pass TWO arguments
+  out=$(CQLITE_DATASETS_ROOT="$argsafe_root" bash "$FETCH" $badarg 2>&1)
+  rc=$?
+  if [ "$rc" -ne 2 ] || ! grep -q "unrecognized argument" <<<"$out"; then
+    argsafe_ok=0; echo "   (not rejected with exit 2: '$badarg' -> rc=$rc)"
+  fi
+done
+if [ ! -f "$argsafe_root/sstables/test_basic/simple_table-0001/nb-1-big-Data.db" ]; then
+  argsafe_ok=0; echo "   (DESTRUCTIVE path reached: the fixture Data.db was deleted)"
+fi
+if [ "$argsafe_ok" -eq 1 ]; then
+  ok "3131-arg-safety: every unrecognized argument exits 2 before any destructive work"
+else
+  bad "3131-arg-safety: an unrecognized argument was not fail-closed"
+fi
+
+# …and the recognized flag plus --help still work (a fail-closed parser that rejects its
+# own flag would be a silent regression of the probe).
+help_out=$(bash "$FETCH" --help 2>&1); help_rc=$?
+if [ "$help_rc" -eq 0 ] && grep -q -- '--verify-only' <<<"$help_out"; then
+  ok "3131-arg-safety: --help documents --verify-only and exits 0"
+else
+  bad "3131-arg-safety: --help should exit 0 and document the flag (rc=$help_rc)"
+fi
+
 # 6b. A root holding the required content must report success AND print the exact
 #     `export CQLITE_DATASETS_ROOT=<absolute path>` line it guarantees — the missing
 #     half of #3131 item 2 (the pre-fix warm path named no actionable root at all).
@@ -295,6 +434,36 @@ if [ "$good_rc" -eq 0 ] \
 else
   bad "3131-export-line: expected exit 0 + the verbatim export line for $good (rc=$good_rc)"
   printf '%s\n' "$good_out"
+fi
+
+# 6b-bis. The export line must be PASTEABLE, not merely printed (roborev job 8, finding
+#         3). A root containing a space or a shell metacharacter would, under plain
+#         interpolation, print a command that breaks (or does something else) when
+#         pasted — so the promise "the exact export line" would be false exactly when it
+#         matters. Asserted by EVALUATING the printed line and comparing the resulting
+#         variable to the real path: the strongest available statement of "pasteable".
+spacey="$tmp/fetch space & meta/datasets"
+spacey_wide="$spacey/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
+mkdir -p "$spacey_wide" "$spacey/sstables/test_basic/simple_table-0001"
+printf 'synthetic: true\n' >"$spacey/metadata.yml"
+printf '{}\n' >"$spacey_wide/nb-2-big-Data.db.jsonl"
+for c in nb-2-big-Data.db nb-2-big-Index.db nb-2-big-Digest.crc32 nb-2-big-CompressionInfo.db; do
+  : >"$spacey_wide/$c"
+done
+for c in nb-1-big-Data.db nb-1-big-Index.db nb-1-big-Summary.db nb-1-big-Statistics.db; do
+  : >"$spacey/sstables/test_basic/simple_table-0001/$c"
+done
+spacey_line=$(CQLITE_DATASETS_ROOT="$spacey" bash "$FETCH" --verify-only 2>/dev/null \
+  | grep '^  export CQLITE_DATASETS_ROOT=' | sed 's/^  //')
+spacey_eval=$(
+  unset CQLITE_DATASETS_ROOT
+  eval "$spacey_line" 2>/dev/null
+  printf '%s' "${CQLITE_DATASETS_ROOT:-}"
+)
+if [ -n "$spacey_line" ] && [ "$spacey_eval" = "$spacey" ]; then
+  ok "3131-export-quoting: the printed export line round-trips a path with spaces/metacharacters"
+else
+  bad "3131-export-quoting: pasting the line does not reproduce the root (line: '$spacey_line' -> '$spacey_eval')"
 fi
 
 # 6c. #2878 boundary: this change must NOT have touched the rm -rf /

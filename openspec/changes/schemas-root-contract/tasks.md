@@ -106,3 +106,37 @@
 - [x] `scripts/agent-gate.sh --lite` PASS with the summary-file redirect.
 - [ ] Doctrine pass (CLAUDE.md + the `agents-developing/test-data` page) — handled separately on this
       branch; the required facts are listed at the end of `design.md`.
+
+## 7. Review round 1 (rust-reviewer blockers B1-B3, nits N4/N6/N7; roborev job 8 findings 1-3)
+- [x] **B1** — reject a RELATIVE `CQLITE_SCHEMAS_ROOT` fail-closed on BOTH sides
+      (`resolve_schemas_root` returns `Err`; `_gate_schemas_override_reject` FAILs the preflight with its
+      own marker text and hint), so the gate can no longer stamp `schemas: … under <relative>` for a run
+      whose test binaries resolved a different root. Also removes the "relative path labelled absolute"
+      remedy line (AC (b)).
+- [x] **B2** — `--verify-only` creates nothing: `canonicalize_dataset_root` skips `mkdir -p "${parent}"`
+      under the probe and reports a nonexistent parent as "root unusable".
+- [x] **B3** — strict argument parsing FIRST, before the pin load and before canonicalization: any
+      unrecognized argument exits 2 with usage, so a typo can no longer fall through to `rm -rf`.
+      Confirmed no existing caller passes an argument.
+- [x] **N4 / roborev finding 1** — anchor the checkout on a MARKER (nearest ancestor `Cargo.toml`
+      declaring `[workspace]`) instead of on `test-data/schemas`, so a sparse checkout or a
+      nested-in-another-checkout worktree can no longer resolve to the OUTER checkout's fixtures; return
+      the path whether or not it exists so a missing tree fails loudly. Gate mirrors the same walk. The
+      `..`-free claim is now true by construction (`Path::parent`, never `join("..")`).
+- [x] **N6** — deleted `check_schema_files` (zero callers, zero tests).
+- [x] **N7 / roborev finding 2** — same readability question on both sides: `readable_file`
+      (`is_file()` AND openable) in Rust, `[ -f ] && [ -r ]` in the gate. Expanding the 6-file canonical
+      list is DEFERRED (see the requirement's scope note) — the list is the set whose absence produced
+      the observed failures.
+- [x] **roborev finding 3** — print the guaranteed export line with `printf %q` so it round-trips a path
+      containing spaces or shell metacharacters.
+- [x] `cqlite-core/tests/issue_3148_fixture_roots_contract.rs` (7 tests) pins the Rust half of the
+      resolution table via the PURE `resolve_schemas_root`, with no env mutation.
+- [x] Self-test grown 16 → 25 cases: relative-override (hook + shapes + blank + FULL-gate emit + the
+      no-relative-labelled-absolute assert), the directory-named-like-a-`.cql` trap, `--verify-only`
+      non-mutation asserted on the FILESYSTEM with a NOT-pre-created parent (the earlier case pre-`mkdir`ed
+      its root and was blind to B2), unrecognized-argument rejection asserted against a POPULATED root so
+      a regression would have to delete a fixture the case then checks for, `--help`, and export-line
+      round-tripping through `eval`.
+- [x] N5 — scope the spec's single-definition requirement to the four hard-failing sites and record why
+      the ~15 `parent()?.join("schemas")`-with-fallback sites are out of scope.
