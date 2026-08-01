@@ -44,9 +44,10 @@ new_case_dir() {
 write_notify_stub() {
   cat >"$1" <<'EOF'
 #!/usr/bin/env bash
-cat_arg="unknown"
-if [[ "${1:-}" == "--category" ]]; then cat_arg="$2"; shift 2; fi
-printf '%s|%s|%s\n' "$cat_arg" "${1:-}" "${2:-}" >>"${NOTIFY_LOG:?NOTIFY_LOG not set}"
+# $NOTIFY_CMD convention (issue #3119): THREE positional args, <severity>
+# <title> <message>. The old `--category <cat>` flag form is gone — the real
+# upstream agent-notify has no such arm and silently swallowed it.
+printf '%s|%s|%s\n' "${1:-}" "${2:-}" "${3:-}" >>"${NOTIFY_LOG:?NOTIFY_LOG not set}"
 EOF
   chmod +x "$1"
 }
@@ -524,6 +525,69 @@ cat >"$MARKER_FILE" <<JSON
 JSON
 EOF
   chmod +x "$path"
+}
+
+# ---------------------------------------------------------------------------
+# R7 (issue #3119): the DEFAULT notify path — the one production actually uses.
+#
+# Every other case in this file injects NOTIFY_CMD with a recording stub, so the
+# DEFAULT resolution (NOTIFY_ARGV=(bash <repo>/scripts/lib/gate-notify.sh --publish))
+# and the wrapper's `--publish` arm were exercised by NO test. Two mutations survived
+# green: reverting the default to bare `agent-notify` — whose pristine 3-positional
+# mode puts the SEVERITY in the title slot, i.e. the original defect of this issue,
+# reintroduced silently — and breaking the `--publish` arm outright.
+#
+# So: NOTIFY_CMD UNSET, a curl-capture shim on PATH, and a pre-created stop-file so
+# finalize_exit fires immediately. What is asserted is the PUBLISHED payload, which
+# only the real default chain can produce.
+# ---------------------------------------------------------------------------
+test_default_notify_path_publishes() {
+  local d curl_log rc title
+  d="$(new_case_dir)"
+  common_env "$d"
+  # THE point of the case: no injected notify command.
+  unset NOTIFY_CMD
+  curl_log="$d/curl.log"; : >"$curl_log"
+  cat >"$d/bin/curl" <<'CURLSHIM'
+#!/usr/bin/env bash
+body=""; prev=""
+for a in "$@"; do
+  [[ "$prev" == "-d" ]] && body="$a"
+  prev="$a"
+done
+printf '%s\n' "$body" >>"$CURL_LOG"
+CURLSHIM
+  chmod +x "$d/bin/curl"
+  export CURL_LOG="$curl_log"
+  export CQLITE_NOTIFY_WEBHOOK="https://ntfy.invalid/r7-default-path"
+  export CODEX_NOTIFY_WEBHOOK= CQLITE_NOTIFY_TOPIC= CODEX_NOTIFY_NTFY_TOPIC=
+  export PATH="$d/bin:$PATH"
+  touch "$STOP_FILE"   # stop at the first loop top -> finalize_exit -> notify
+  timeout -s KILL 60 bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  # The stop page is an `info`, so the wrapper must publish priority 3 and put the
+  # supervisor's own TITLE in the title field — not a severity token (the pristine
+  # `agent-notify` positional bug) and not nothing (a broken --publish arm).
+  title=$(python3 - "$curl_log" <<'PYP'
+import json, sys
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    print("%s|%s" % (d.get("title", ""), d.get("priority", "")))
+    break
+PYP
+)
+  unset CURL_LOG CQLITE_NOTIFY_WEBHOOK CODEX_NOTIFY_WEBHOOK CQLITE_NOTIFY_TOPIC CODEX_NOTIFY_NTFY_TOPIC
+  if [[ "$rc" -eq 0 && "$title" == "worker-supervisor stopped|3" ]]; then
+    pass "R7 default notify path: NOTIFY_CMD unset -> wrapper published title='worker-supervisor stopped' priority=3"
+  else
+    fail "R7 default notify path: rc=$rc published='$title' (expected 'worker-supervisor stopped|3'; see $curl_log)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -2720,5 +2784,6 @@ test_default_worker_cmd_is_headless
 test_healthy_worker_iterlog_nonempty
 test_claim_cmd_empty_truly_disables_no_network
 test_real_pgrep_usages_are_pid_scoped
+test_default_notify_path_publishes
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

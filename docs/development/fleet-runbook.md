@@ -36,6 +36,32 @@ gh auth status                                  # must include the 'project' sco
 bash scripts/flow/claim.sh smoke               # preflight: prove origin accepts refs/claims/* (see below)
 ```
 
+### Notification channel (ntfy) — one env var, no per-machine binary (#3119)
+
+Gate-completion pushes (#2667) and every supervisor page go over ntfy. **The payload contract lives in
+the repo** (`scripts/lib/gate-notify.sh`), so the only thing a machine supplies is the transport and a
+target:
+
+```bash
+# /etc/environment (fleet mechanism; re-login to pick it up)
+CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<your-topic>
+```
+
+`bash scripts/bootstrap-agent-machine.sh` prints the section *Notification channel (ntfy, issue #3119)*:
+it checks `curl` + `python3`, reports the target, runs `gate-notify.sh --self-test` as a **capability**
+assert (it publishes a PASS *and* a FAIL payload through a private capture shim — no network, no real
+topic) and records the pinned contract version. **No `agent-notify` install is required**, and no
+hand-patched copy is required by anything in this repo. If `agent-notify` happens to be installed it is
+used only as an optional local desktop/sound adjunct, invoked positionally with its webhook env
+neutralized.
+
+Why this is spelled out: the old path called `agent-notify --category <cat> …` (notify-flag-allow), a
+flag upstream v1.1.0 has no arm for. It fell through to manual title/message mode, so the title became
+the literal `--category`, the message became the category value, and **every FAIL paged as a green
+priority-3 success**; its ntfy publish also POSTed to the topic URL, so phones rendered raw JSON. A red
+gate that looks green is worse than no notification. With no target configured everything here is a
+silent no-op and nothing else changes — notifications never affect a gate verdict or a worker's exit.
+
 **Three deltas that fail with a message pointing away from their cause (#2942).** Each cost a
 worker a diagnosis round-trip on a Linux box; the bootstrap now checks the first two and fails
 loudly rather than reporting a healthy machine. Search for the message you actually saw:
@@ -242,6 +268,9 @@ What it guarantees:
 - **It cannot fail silently**: a push notification (ntfy) on every merge (info) and on any
   stop/hold/breaker-trip (alert). 2–3 consecutive abnormal exits trip the breaker → stop + alert,
   never hot-respawn. One journal line per iteration (issue, verdict, duration, PR, `verified`).
+  **The payload is repo-owned (#3119)** — see *Notification channel* below; an `alert` publishes ntfy
+  priority 5 + `rotating_light`, an `info` priority 3 + `white_check_mark`, so a red page can never
+  look like a routine one.
 - **It never wedges on a question (#2666)**: a worker that hits Seam 1 or a genuine owner decision
   **parks** (posts a `needs-decision` question comment + EXITs) rather than waiting — the supervisor
   judges it `parked-on-owner` and pages the owner once. A worker that nonetheless gets stuck on an

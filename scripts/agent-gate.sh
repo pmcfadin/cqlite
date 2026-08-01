@@ -4049,24 +4049,38 @@ _tree_result() {
 # Fire ONE advisory push at final-SUMMARY time so a backgrounded FULL gate
 # becomes a PUSH signal, not a passive poll target: the moment RESULT lands, the
 # waiting closer/worker is called back instead of idle-polling the summary file.
-# Wraps `agent-notify` (the same ntfy wrapper worker-supervisor.sh uses).
+# Delegates delivery to the REPO-OWNED contract in scripts/lib/gate-notify.sh
+# (#3119), which builds the ntfy payload itself and publishes it to the server
+# ROOT. It does NOT call `agent-notify --category` any more (notify-flag-allow): the installed
+# upstream v1.1.0 has no `--category` arm, so that flag fell through to its
+# manual "$1"/"$2" mode — title became the literal `--category`, the body became
+# the category VALUE, the real title/body were dropped, and a FAIL published
+# priority 3 with a green check (a red gate paging as a routine success).
+# `agent-notify` survives only as the wrapper's optional, bounded, positional
+# local desktop/sound adjunct.
 # FULL gate ONLY — the sole call site guards out --lite/--delta/--only/selftest,
 # which are iteration aids and never the gate of record.
 #
-# Advisory by contract: if agent-notify is absent OR fails, this is a SILENT
-# no-op — the summary file stays the artifact of record, so a missing daemon or
-# a broken notifier NEVER changes the gate's verdict or exit status.
+# Advisory by contract: an absent/unreadable wrapper, an unset notify target, a
+# missing curl/python3, a notifier that fails OR REJECTS ITS ARGUMENTS, and a
+# publish that never completes are ALL silent no-ops — the summary file stays the
+# artifact of record, so the notify path NEVER changes the gate's verdict or exit
+# status. This function always returns 0 and never exits, traps, or writes state.
 #   title: "gate <RESULT> <branch>@<short-sha>"
 #   body:  "RESULT: <RESULT>" (+ "— failing: c1,c2" when any component FAILed)
 gate_push_signal() {
   local result="$1" branch="$2" short_sha="$3" fail_components="$4"
-  command -v agent-notify >/dev/null 2>&1 || return 0
-  local category=completion
-  case "$result" in PASS) category=completion ;; *) category=error ;; esac
+  local severity=PASS
+  case "$result" in PASS) severity=PASS ;; *) severity=FAIL ;; esac
   local title="gate $result ${branch}@${short_sha}"
   local body="RESULT: $result"
   [ -n "$fail_components" ] && body="$body — failing: $fail_components"
-  agent-notify --category "$category" "$title" "$body" >/dev/null 2>&1 || true
+  local notify_lib="${REPO_ROOT:-.}/scripts/lib/gate-notify.sh"
+  [ -r "$notify_lib" ] || return 0
+  # shellcheck disable=SC1090
+  . "$notify_lib" >/dev/null 2>&1 || return 0
+  command -v gate_notify_publish >/dev/null 2>&1 || return 0
+  gate_notify_publish "$severity" "$title" "$body" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -5078,7 +5092,13 @@ run_kit_dashboard_drift() {
 # REJECTS a schemas-less / present-but-incomplete root (the #3148 gap survived because
 # `STATUS: OK` was only ever observed on the happy path) and pins the checkout-relative
 # resolution contract. Hermetic temp roots; the FULL-gate cases exit AT the preflight,
-# so no cargo/datasets/network. SKIP-aware: the summary test's truncation case relies on a python3
+# so no cargo/datasets/network. Also runs scripts/tests/test_gate_notify_contract.sh (#3119),
+# which asserts the PUBLISHED push-signal payload (title/body/priority/tag, POSTed to the ntfy
+# server ROOT, message never a JSON document) at the TRANSPORT boundary via a curl-capture shim —
+# the companion test_agent_gate_notify.sh asserts only the ADVISORY half, and an argv-level
+# assertion is explicitly NOT evidence for payload fidelity (the swallowed `--category` defect was
+# invisible to one). Hermetic: no network, no real topic, pristine-agent-notify fixture copied into
+# its own tmpdir. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
 run_tooling_tests() {
@@ -5598,9 +5618,10 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1 &&

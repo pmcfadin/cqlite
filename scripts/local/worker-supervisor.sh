@@ -380,9 +380,30 @@ if [[ -z "${GH_VERIFY_CMD:-}" ]]; then
   GH_VERIFY_CMD='gh pr view "$1" --repo pmcfadin/cqlite --json state,mergedAt,autoMergeRequest'
 fi
 
+# Notification command (issue #3119). The default is the REPO-OWNED notify
+# contract, not the out-of-band `agent-notify` binary: upstream v1.1.0 has no
+# `--category` arm, so the flag this function used to pass was swallowed — the
+# title became the literal flag name, the message became the category value, and
+# a `high` page published as ntfy priority 3 with a green check. The wrapper owns
+# the payload and publishes to the ntfy server ROOT; `agent-notify` survives only
+# as its optional, bounded, positional local desktop/sound adjunct.
+# CONVENTION: the notify command takes THREE positional args — <severity> <title>
+# <message>. The DEFAULT is built as an ARRAY (never a word-split string) so a
+# REPO_ROOT containing a space cannot silently degrade every page to a WARN; an
+# externally supplied NOTIFY_CMD string remains word-split, as the test seam and
+# $CLAIM_CMD both are.
 NOOP_NOTIFY_MARKER="__noop_notify__"
 if [[ -z "${NOTIFY_CMD:-}" ]]; then
-  if command -v agent-notify >/dev/null 2>&1; then NOTIFY_CMD="agent-notify"; else NOTIFY_CMD="$NOOP_NOTIFY_MARKER"; fi
+  if [[ -r "$REPO_ROOT/scripts/lib/gate-notify.sh" ]]; then
+    NOTIFY_ARGV=(bash "$REPO_ROOT/scripts/lib/gate-notify.sh" --publish)
+    NOTIFY_CMD="${NOTIFY_ARGV[*]}"   # display/marker value only, never re-split
+  else
+    NOTIFY_CMD="$NOOP_NOTIFY_MARKER"
+    NOTIFY_ARGV=()
+  fi
+else
+  # shellcheck disable=SC2206  # deliberate word-split of a caller-supplied string
+  NOTIFY_ARGV=($NOTIFY_CMD)
 fi
 
 # ---------------------------------------------------------------------------
@@ -396,12 +417,14 @@ notify() {
   [[ "$priority" == "high" ]] && category="error"
   if [[ "$NOTIFY_CMD" == "$NOOP_NOTIFY_MARKER" ]]; then
     if [[ "$WARNED_NOOP_NOTIFY" -eq 0 ]]; then
-      log "WARN: agent-notify not on PATH; notifications are no-ops for this run"
+      log "WARN: no notify command resolved (scripts/lib/gate-notify.sh unreadable); notifications are no-ops for this run"
       WARNED_NOOP_NOTIFY=1
     fi
     return 0
   fi
-  "$NOTIFY_CMD" --category "$category" "$title" "$message" || log "WARN: notify command failed (non-fatal)"
+  # Positional args only — never a flag the notifier might swallow. NOTIFY_ARGV is
+  # a properly quoted array, so a path with a space is safe.
+  "${NOTIFY_ARGV[@]}" "$category" "$title" "$message" || log "WARN: notify command failed (non-fatal)"
 }
 
 is_gt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)>(b+0)) exit 0; exit 1 }'; }
@@ -876,8 +899,45 @@ report_pending_at_exit() {
     "these PRs were OPEN with auto-merge armed and had not yet landed when the run stopped — check they merge: ${summary}"
 }
 
+# NOTIFY BOUNDS ON THE EXIT PATH (#2666 / #3119). Issue #2666 pins a <15s
+# supervisor exit latency (test_worker_supervisor.sh Test 22 — stubbed there, so it
+# cannot observe the real notifier). finalize_exit fires up to TWO notifies
+# (report_pending_at_exit + the stop page).
+#
+# BUDGET ARITHMETIC — count all THREE bounded steps, AND the SIGKILL grace on each.
+# Each notify runs a payload ENCODER, then the PUBLISH, then the optional ADJUNCT,
+# sequentially, so one notify's worst case is the SUM over steps of
+# (bound + GATE_NOTIFY_KILL_GRACE). Two omissions have already been caught here, both
+# by review, and both of the same shape — a term left out of this sum:
+#
+#   1. The ENCODER term. An early revision tightened only transport+adjunct and claimed
+#      "2 x (4 + 2) = 12s"; the encoder's 4s bound was missing, so the truth was
+#      2 x (4 + 4 + 2) = 20s — OVER the ceiling.
+#   2. The KILL GRACE. `timeout` alone only SIGTERMs and a helper can ignore that
+#      (measured: a `trap "" TERM` helper under `timeout 2` never returned), so
+#      gate-notify.sh now escalates to SIGKILL via `--kill-after=<grace>`. That grace is
+#      ADDITIVE WALL-CLOCK — `--kill-after=1 2` returns at 3s — so keeping 2/2/1 would
+#      have made this 2 x (2+1 + 2+1 + 1+1) = 16s, again OVER the ceiling.
+#
+# So the bounds are retuned DOWN as part of adding the grace, never the ceiling up:
+#
+#     2 x [ (PAYLOAD+g) + (CURL+g) + (ADJUNCT+g) ]
+#   = 2 x [ (1+1) + (1+1) + (1+1) ] = 12s  <  15s   (3s headroom, g = 1)
+#
+# Mechanized: scripts/tests/test_agent_gate_notify.sh reads these three values AND the
+# grace out of the sources and measures two real notifies against SIGTERM-IGNORING
+# wedges, so neither omission can recur silently. Steady-state notifies keep the
+# roomier defaults; only the exit path is tightened, and it remains strictly better
+# than the UNBOUNDED `curl -s` this replaced.
+NOTIFY_EXIT_PAYLOAD_TIMEOUT="${NOTIFY_EXIT_PAYLOAD_TIMEOUT:-1}"
+NOTIFY_EXIT_CURL_TIMEOUT="${NOTIFY_EXIT_CURL_TIMEOUT:-1}"
+NOTIFY_EXIT_ADJUNCT_TIMEOUT="${NOTIFY_EXIT_ADJUNCT_TIMEOUT:-1}"
+
 finalize_exit() {
   local reason="$1" code="$2"
+  export GATE_NOTIFY_PAYLOAD_TIMEOUT="$NOTIFY_EXIT_PAYLOAD_TIMEOUT"
+  export GATE_NOTIFY_CURL_TIMEOUT="$NOTIFY_EXIT_CURL_TIMEOUT"
+  export GATE_NOTIFY_ADJUNCT_TIMEOUT="$NOTIFY_EXIT_ADJUNCT_TIMEOUT"
   # Release this machine's claim ref on a clean stop (issue #2655). `reap`
   # refuses when the claim's issue still has an open PR, so an unfinished endgame
   # is preserved for adoption rather than orphaned.

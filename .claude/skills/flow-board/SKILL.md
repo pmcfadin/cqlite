@@ -212,9 +212,11 @@ selection, no "next thing" happens without the board. The one-time fix is the ow
      as above) **AND** there is an open PR whose **head SHA is unchanged > 4 hours** **AND** no review
      activity newer than 4 hours. This is the orphaned endgame: a certified PR sitting completed-but-unowned.
      - **Do NOT auto-adopt — surface it (owner-attention, not silent steal).** When all three hold:
-       1. **Page the owner** via `agent-notify` (the ntfy wrapper): e.g.
-          `agent-notify --category error "orphaned endgame #<N>" "PR #<pr> head+review idle >4h; claim heartbeat stale — adopt-eligible"`.
-          Best-effort — if `agent-notify` is absent, skip silently and rely on the comment + surfacing.
+       1. **Page the owner** via the repo-owned notify contract (#3119): e.g.
+          `bash scripts/lib/gate-notify.sh --publish FAIL "orphaned endgame #<N>" "PR #<pr> head+review idle >4h; claim heartbeat stale — adopt-eligible"`.
+          Best-effort — with no ntfy target configured it is a silent no-op; rely on the comment + surfacing.
+          Never call `agent-notify` with a `--category` flag: upstream v1.1.0 has no such arm and swallows
+          it, publishing the flag NAME as the title and a red page as a green priority-3 success.
        2. Post a traceable comment on the **PR**: the machine whose claim is stale, the head-SHA age,
           the review-activity age, and that the PR is now adopt-eligible.
        3. Mark the issue **adopt-eligible** exactly as the first reaper does — leave the

@@ -108,7 +108,7 @@ else
 fi
 
 # --- 4. The run must actually emit its section headers (it ran the checks). ---
-for section in "Rust toolchain" "Gate accelerators" "project scope" "roborev" "CQLITE_DATASETS_ROOT" "Bootstrap summary"; do
+for section in "Rust toolchain" "Gate accelerators" "project scope" "roborev" "CQLITE_DATASETS_ROOT" "Notification channel" "Bootstrap summary"; do
   if printf '%s' "$run_out" | grep -q "$section"; then
     ok "check section present: $section"
   else
@@ -1149,6 +1149,144 @@ if [ -z "$mutating" ]; then
   ok "board: probe never invoked a mutating gh/board operation"
 else
   bad "board: probe issued a MUTATING call: $mutating"
+fi
+
+# --- 9. Notification channel (issue #3119) ----------------------------------
+# The notify dep used to be an out-of-band, hand-patched /usr/local/bin binary
+# that bootstrap never mentioned. It is now a repo-owned contract, and bootstrap
+# must (a) assert the CAPABILITY by running the wrapper's own self-test rather
+# than checking that a file exists, (b) RECORD the pinned contract version, and
+# (c) never prescribe the swallowed `--category` shape.
+if grep -q 'NOTIFY_LIB=.*scripts/lib/gate-notify.sh' "$BOOTSTRAP" \
+   && grep -q '\$NOTIFY_LIB" --self-test' "$BOOTSTRAP"; then
+  ok "notify: bootstrap asserts the CAPABILITY via the wrapper's self-test"
+else
+  bad "notify: bootstrap does not run the wrapper's self-test (existence check only?)"
+fi
+if printf '%s' "$run_out" | grep -q 'notify contract v'; then
+  ok "notify: bootstrap RECORDS the pinned contract version"
+else
+  bad "notify: bootstrap did not record a pinned notify contract version"
+fi
+if ! grep -q 'agent-notify --category' "$BOOTSTRAP"; then   # notify-flag-allow
+  ok "notify: bootstrap never prescribes the swallowed --category shape"
+else
+  bad "notify: bootstrap prescribes the swallowed --category shape"
+fi
+# The section is informational: a machine with no notify target must still finish.
+if printf '%s' "$run_out" | grep -q 'Notification channel' && [ "$run_rc" -eq 0 ]; then
+  ok "notify: the section is informational — the run still exits 0"
+else
+  bad "notify: the section is not informational (rc=$run_rc)"
+fi
+# A notify target may carry URL userinfo (https://user:token@host/topic). Printing
+# it would leak a credential into a terminal or a CI log (roborev finding), so the
+# reported value must name the HOST only.
+redact_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
+  CODEX_NOTIFY_WEBHOOK='https://alice:s3cr3t-token@ntfy.example.com/private-topic' \
+  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+if printf '%s' "$redact_out" | grep -q 'notify target configured' \
+   && ! printf '%s' "$redact_out" | grep -qE 's3cr3t-token|alice:'; then
+  ok "notify: URL userinfo is redacted from the reported target"
+else
+  bad "notify: the reported target leaked URL userinfo"
+  printf '%s\n' "$redact_out" | grep -i 'notify target' | head -2
+fi
+
+# --- 10. The notify CAPABILITY assert is HONOURED, not merely present ---------
+# THE gap this closes (issue #3119 AC5, found by the C intent audit). Case 9 above
+# greps the SCRIPT TEXT for a `--self-test` call and the run output for a pin line.
+# Neither observes the `ok`-vs-`warn` DISTINCTION, so the auditor's mutation —
+# `if selftest_out=$(… --self-test); true; then ok …` plus a genuinely broken wrapper —
+# left this suite 77 PASS / 0 FAIL. That is this very issue reproduced one layer up:
+# the TEST was accepting the mere EXISTENCE of a probe call as evidence that the
+# capability is verified. These cases assert the VERDICT.
+#
+# Mechanism: bootstrap resolves REPO_ROOT from its own location, so each case gets a
+# throwaway tree holding a copy of the script plus the wrapper we want it to probe.
+mknotifyroot() { # mknotifyroot <dir> <good|broken>
+  local dir="$1" mode="$2"
+  mkdir -p "$dir/scripts/lib"
+  cp "$BOOTSTRAP" "$dir/scripts/bootstrap-agent-machine.sh"
+  if [ "$mode" = good ]; then
+    cp "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh"
+  else
+    # A REAL contract violation, caught by the wrapper's own validator: the FAIL
+    # payload carries the PASS tag — a red gate paging as a routine success.
+    # Heredoc body must be UNINDENTED: `<<'MUT'` is literal, so leading spaces reach
+    # python as indentation and raise IndentationError — which would red on STAGING
+    # instead of on the verdict under test (observed while proving this very case).
+    python3 - "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh" <<'MUT'
+import re, sys
+s = open(sys.argv[1]).read()
+# Match on the FUNCTION NAME, not on the tag literal: a literal-based mutation is a
+# no-op when the source is ALREADY broken (e.g. while proving this case against a
+# mutated tree), which would again red on staging rather than on the verdict.
+out = re.sub(r'^_gate_notify_tag\(\).*$',
+             "_gate_notify_tag() { printf 'white_check_mark\\n'; }",
+             s, count=1, flags=re.M)
+open(sys.argv[2], "w").write(out)
+raise SystemExit(0 if out != s else 1)
+MUT
+    [ $? -eq 0 ] || return 1
+  fi
+  return 0
+}
+runnotifyroot() { # runnotifyroot <dir> [env assignments...]
+  local dir="$1"; shift
+  env PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" "$@" \
+    timeout -s KILL 300 bash "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
+}
+
+# (b) POSITIVE twin: a healthy wrapper must be reported VERIFIED.
+goodroot="$tmp/notify-good"
+if mknotifyroot "$goodroot" good; then
+  good_out=$(runnotifyroot "$goodroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
+  if printf '%s' "$good_out" | grep -q 'notify capability verified' \
+     && ! printf '%s' "$good_out" | grep -q 'notify self-test FAILED'; then
+    ok "notify capability: a HEALTHY wrapper is reported verified"
+  else
+    bad "notify capability: healthy wrapper was not reported verified"
+    printf '%s\n' "$good_out" | grep -i 'notify' | head -4
+  fi
+else
+  bad "notify capability: could not stage the healthy wrapper tree"
+fi
+
+# (a) NEGATIVE: a genuinely broken wrapper must be reported FAILED, and must NOT be
+#     reported verified. This is the assertion the auditor's mutation defeats.
+badroot="$tmp/notify-broken"
+if mknotifyroot "$badroot" broken; then
+  bad_out=$(runnotifyroot "$badroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
+  if printf '%s' "$bad_out" | grep -q 'notify self-test FAILED' \
+     && ! printf '%s' "$bad_out" | grep -q 'notify capability verified'; then
+    ok "notify capability: a BROKEN wrapper is reported FAILED and never verified"
+  else
+    bad "notify capability: broken wrapper was not surfaced (probe verdict ignored?)"
+    printf '%s\n' "$bad_out" | grep -i 'notify' | head -4
+  fi
+else
+  bad "notify capability: could not stage the broken wrapper tree (mutation did not apply)"
+fi
+
+# (c) NO TARGET: never exercised on a fleet box, because the ambient
+#     CODEX_NOTIFY_WEBHOOK always takes the other branch. Assert the warning, the
+#     EXACT export text a reader is told to add, and rc 0 (bootstrap is advisory).
+if mknotifyroot "$tmp/notify-notarget" good; then
+  notarget_out=$(runnotifyroot "$tmp/notify-notarget" \
+    CODEX_NOTIFY_WEBHOOK= CQLITE_NOTIFY_WEBHOOK= CODEX_NOTIFY_NTFY_TOPIC= CQLITE_NOTIFY_TOPIC=)
+  notarget_rc=$?
+  if [ "$notarget_rc" -eq 0 ] \
+     && printf '%s' "$notarget_out" | grep -q 'no notify target configured' \
+     && printf '%s' "$notarget_out" | grep -q 'CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<your-topic>' \
+     && printf '%s' "$notarget_out" | grep -q 'silent no-ops on this machine'; then
+    ok "notify no-target: warns, prints the exact export line, and still exits 0"
+  else
+    bad "notify no-target case (rc=$notarget_rc)"
+    printf '%s\n' "$notarget_out" | grep -i 'notify' | head -4
+  fi
+else
+  bad "notify no-target: could not stage the tree"
 fi
 
 echo
