@@ -113,3 +113,19 @@
 - [ ] Live acceptance on this box: restore `/usr/local/bin/agent-notify` from
       `agent-notify.bak.20260730` and confirm a real PASS and a real FAIL page correctly
       (distinct priority/tag, no raw JSON) — this is the AC6 end-to-end evidence.
+
+## 9. Oracle hardening from the C intent audit (review round 5)
+- [x] AC5/R8 blocker: assert bootstrap HONOURS the probe verdict — a broken wrapper is
+      reported FAILED and never `verified` (the auditor's `; true;` + broken-wrapper
+      mutation now reds the suite where it previously stayed 77 PASS / 0 FAIL).
+- [x] Positive twin: a healthy wrapper is reported `notify capability verified`.
+- [x] No-target case: warns, prints the exact `CODEX_NOTIFY_WEBHOOK=` export, exits 0
+      (never exercised before — a fleet box's ambient var always took the other branch).
+- [x] Cover `gate_notify_selftest`'s own validator: a vacuous validator now reds.
+- [x] R7: cover the DEFAULT supervisor notify path (`NOTIFY_CMD` unset) — both the
+      bare-`agent-notify` revert and a broken `--publish` arm now red.
+- [x] Spec R1 S4 / R3 S3: cover the push-signal CALL SITE (stamped identity, and
+      `SUMMARY_WRITE_FAILED` forcing FAIL) read-only, with no seam added to the gate.
+- [x] Give EVERY timing-sensitive case an independent `timeout -s KILL` cap so an
+      unbounded-call regression reds instead of hanging the whole gate.
+- [x] Make case 3f discriminate probed-and-rejected from attempted-and-failed.
