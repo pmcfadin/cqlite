@@ -1193,6 +1193,94 @@ else
   printf '%s\n' "$redact_out" | grep -i 'notify target' | head -2
 fi
 
+# --- 10. The notify CAPABILITY assert is HONOURED, not merely present ---------
+# THE gap this closes (issue #3119 AC5, found by the C intent audit). Case 9 above
+# greps the SCRIPT TEXT for a `--self-test` call and the run output for a pin line.
+# Neither observes the `ok`-vs-`warn` DISTINCTION, so the auditor's mutation —
+# `if selftest_out=$(… --self-test); true; then ok …` plus a genuinely broken wrapper —
+# left this suite 77 PASS / 0 FAIL. That is this very issue reproduced one layer up:
+# the TEST was accepting the mere EXISTENCE of a probe call as evidence that the
+# capability is verified. These cases assert the VERDICT.
+#
+# Mechanism: bootstrap resolves REPO_ROOT from its own location, so each case gets a
+# throwaway tree holding a copy of the script plus the wrapper we want it to probe.
+mknotifyroot() { # mknotifyroot <dir> <good|broken>
+  local dir="$1" mode="$2"
+  mkdir -p "$dir/scripts/lib"
+  cp "$BOOTSTRAP" "$dir/scripts/bootstrap-agent-machine.sh"
+  if [ "$mode" = good ]; then
+    cp "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh"
+  else
+    # A REAL contract violation, caught by the wrapper's own validator: the FAIL
+    # payload carries the PASS tag — a red gate paging as a routine success.
+    python3 - "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh" <<'MUT'
+import sys
+s = open(sys.argv[1]).read()
+out = s.replace("printf 'rotating_light\\n'", "printf 'white_check_mark\\n'", 1)
+open(sys.argv[2], "w").write(out)
+raise SystemExit(0 if out != s else 1)
+MUT
+    [ $? -eq 0 ] || return 1
+  fi
+  return 0
+}
+runnotifyroot() { # runnotifyroot <dir> [env assignments...]
+  local dir="$1"; shift
+  env PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" "$@" \
+    timeout -s KILL 300 bash "$dir/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1
+}
+
+# (b) POSITIVE twin: a healthy wrapper must be reported VERIFIED.
+goodroot="$tmp/notify-good"
+if mknotifyroot "$goodroot" good; then
+  good_out=$(runnotifyroot "$goodroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
+  if printf '%s' "$good_out" | grep -q 'notify capability verified' \
+     && ! printf '%s' "$good_out" | grep -q 'notify self-test FAILED'; then
+    ok "notify capability: a HEALTHY wrapper is reported verified"
+  else
+    bad "notify capability: healthy wrapper was not reported verified"
+    printf '%s\n' "$good_out" | grep -i 'notify' | head -4
+  fi
+else
+  bad "notify capability: could not stage the healthy wrapper tree"
+fi
+
+# (a) NEGATIVE: a genuinely broken wrapper must be reported FAILED, and must NOT be
+#     reported verified. This is the assertion the auditor's mutation defeats.
+badroot="$tmp/notify-broken"
+if mknotifyroot "$badroot" broken; then
+  bad_out=$(runnotifyroot "$badroot" CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t')
+  if printf '%s' "$bad_out" | grep -q 'notify self-test FAILED' \
+     && ! printf '%s' "$bad_out" | grep -q 'notify capability verified'; then
+    ok "notify capability: a BROKEN wrapper is reported FAILED and never verified"
+  else
+    bad "notify capability: broken wrapper was not surfaced (probe verdict ignored?)"
+    printf '%s\n' "$bad_out" | grep -i 'notify' | head -4
+  fi
+else
+  bad "notify capability: could not stage the broken wrapper tree (mutation did not apply)"
+fi
+
+# (c) NO TARGET: never exercised on a fleet box, because the ambient
+#     CODEX_NOTIFY_WEBHOOK always takes the other branch. Assert the warning, the
+#     EXACT export text a reader is told to add, and rc 0 (bootstrap is advisory).
+if mknotifyroot "$tmp/notify-notarget" good; then
+  notarget_out=$(runnotifyroot "$tmp/notify-notarget" \
+    CODEX_NOTIFY_WEBHOOK= CQLITE_NOTIFY_WEBHOOK= CODEX_NOTIFY_NTFY_TOPIC= CQLITE_NOTIFY_TOPIC=)
+  notarget_rc=$?
+  if [ "$notarget_rc" -eq 0 ] \
+     && printf '%s' "$notarget_out" | grep -q 'no notify target configured' \
+     && printf '%s' "$notarget_out" | grep -q 'CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/<your-topic>' \
+     && printf '%s' "$notarget_out" | grep -q 'silent no-ops on this machine'; then
+    ok "notify no-target: warns, prints the exact export line, and still exits 0"
+  else
+    bad "notify no-target case (rc=$notarget_rc)"
+    printf '%s\n' "$notarget_out" | grep -i 'notify' | head -4
+  fi
+else
+  bad "notify no-target: could not stage the tree"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
