@@ -332,13 +332,15 @@ fi
 # The mutation is a REAL contract violation the validator must catch: FAIL publishes
 # the PASS tag, i.e. a red gate paging as a routine success — the original defect.
 python3 - "$LIB" "$selftest_dir/broken.sh" <<'MUT'
-import sys
-src, dst = sys.argv[1], sys.argv[2]
-s = open(src).read()
-needle = "printf 'rotating_light\\n'"
-# Only the FAIL tag emitter is rewritten; comments mentioning the tag are untouched.
-out = s.replace(needle, "printf 'white_check_mark\\n'", 1)
-open(dst, "w").write(out)
+import re, sys
+s = open(sys.argv[1]).read()
+# Match on the FUNCTION NAME, not on the tag literal: a literal-based mutation is a
+# no-op when the source is ALREADY broken, which would red on staging instead of on
+# the verdict under test (observed while proving this very case).
+out = re.sub(r'^_gate_notify_tag\(\).*$',
+             "_gate_notify_tag() { printf 'white_check_mark\\n'; }",
+             s, count=1, flags=re.M)
+open(sys.argv[2], "w").write(out)
 raise SystemExit(0 if out != s else 1)
 MUT
 if [ $? -eq 0 ]; then
