@@ -76,12 +76,22 @@ chmod +x "$stubdir/curl"
 drive() {
   local log="$1" bindir="$2" result="$3"; shift 3
   : > "$log"
-  env CURL_LOG="$log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$bindir:$PATH" "$@" \
+  capped env CURL_LOG="$log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$bindir:$PATH" "$@" \
     bash -c '. "$0"; gate_push_signal "$1" advisory-branch abc1234 ""' \
     "$fnfile" "$result" >"$tmp/out.txt" 2>"$tmp/err.txt"
   return $?
 }
 silent() { [ ! -s "$tmp/out.txt" ] && [ ! -s "$tmp/err.txt" ]; }
+# TIMING-CASE CAP (issue #3119, review round 5). Every case that measures elapsed
+# time is asserting "this call is bounded". Under the mutation such a case exists to
+# catch, the call is NOT bounded — so without an INDEPENDENT cap the case does not go
+# red, it HANGS, and because scripts/agent-gate.sh has no per-component timeout the
+# whole gate hangs with it. Measured: an audit run was SIGKILLed at 250s with no
+# verdict. SIGKILL (-s KILL) because the very thing under test may ignore SIGTERM.
+# INVARIANT: every `date +%s` case in this file routes its subject through capped().
+TIMING_CAP="${TIMING_CAP:-25}"
+capped() { timeout -s KILL "$TIMING_CAP" "$@"; }
+
 # grep -c prints 0 and exits 1 on no match; capture the count, ignore the status.
 publishes() { local n; n=$(grep -c '^CURL' "$1" 2>/dev/null); printf '%s\n' "${n:-0}"; }
 
@@ -123,14 +133,15 @@ hangcurl="$tmp/hangcurl"; mkdir -p "$hangcurl"
 printf '#!/usr/bin/env bash\nsleep 600\n' > "$hangcurl/curl"
 chmod +x "$hangcurl/curl"
 t0=$(date +%s)
-env CURL_LOG="$tmp/case3b.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$hangcurl:$PATH" \
+capped env CURL_LOG="$tmp/case3b.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$hangcurl:$PATH" \
   GATE_NOTIFY_CURL_TIMEOUT=2 GATE_NOTIFY_ADJUNCT_TIMEOUT=2 \
   bash -c '. "$0"; gate_push_signal PASS advisory-branch abc1234 ""' "$fnfile" \
   >"$tmp/out.txt" 2>"$tmp/err.txt"
 rc=$?
 elapsed=$(( $(date +%s) - t0 ))
-# Loose ceiling (2s bound + generous slack): the property is "bounded at all".
-if [ "$rc" -eq 0 ] && [ "$elapsed" -lt 30 ] && silent; then
+# Loose ceiling (2s bound + slack): the property is "bounded at all". rc must be 0 —
+# rc=137 at TIMING_CAP is the cap firing, i.e. the bound escaped.
+if [ "$rc" -eq 0 ] && [ "$elapsed" -lt "$TIMING_CAP" ] && silent; then
   ok "hanging transport that ignores --max-time: abandoned at the OUTER bound (${elapsed}s), rc=0"
 else
   bad "hanging-transport case (rc=$rc elapsed=${elapsed}s) — the publish is not outer-bounded"
@@ -143,13 +154,13 @@ hangpy="$tmp/hangpy"; mkdir -p "$hangpy"; cp "$stubdir/curl" "$hangpy/curl"
 printf '#!/usr/bin/env bash\nsleep 600\n' > "$hangpy/python3"
 chmod +x "$hangpy/python3"
 t0=$(date +%s)
-env CURL_LOG="$tmp/case3c.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$hangpy:$PATH" \
+capped env CURL_LOG="$tmp/case3c.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$hangpy:$PATH" \
   GATE_NOTIFY_PAYLOAD_TIMEOUT=2 GATE_NOTIFY_ADJUNCT_TIMEOUT=2 \
   bash -c '. "$0"; gate_push_signal PASS advisory-branch abc1234 ""' "$fnfile" \
   >"$tmp/out.txt" 2>"$tmp/err.txt"
 rc=$?
 elapsed=$(( $(date +%s) - t0 ))
-if [ "$rc" -eq 0 ] && [ "$elapsed" -lt 30 ] && silent; then
+if [ "$rc" -eq 0 ] && [ "$elapsed" -lt "$TIMING_CAP" ] && silent; then
   ok "wedged payload encoder: abandoned at its bound (${elapsed}s), rc=0, nothing published"
 else
   bad "wedged-encoder case (rc=$rc elapsed=${elapsed}s) — the encoder is not bounded"
@@ -172,11 +183,9 @@ done
 # under a regression to a plain SIGTERM-only `timeout` this case must produce a clean
 # RED, not hang the component until the gate's own timeout. Verified by mutation:
 # without this cap the whole suite had to be SIGKILLed at 90s with no verdict at all.
-CASE3E_CAP=25
 t0=$(date +%s)
-env CURL_LOG="$tmp/case3e.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$trapdir:$PATH" \
+capped env CURL_LOG="$tmp/case3e.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$trapdir:$PATH" \
   GATE_NOTIFY_PAYLOAD_TIMEOUT=1 GATE_NOTIFY_CURL_TIMEOUT=1 GATE_NOTIFY_ADJUNCT_TIMEOUT=1 \
-  timeout -s KILL "$CASE3E_CAP" \
   bash -c '. "$0"; gate_push_signal PASS advisory-branch abc1234 ""' "$fnfile" \
   >"$tmp/out.txt" 2>"$tmp/err.txt"
 rc=$?
@@ -184,10 +193,10 @@ elapsed=$(( $(date +%s) - t0 ))
 # Two SIGTERM-ignoring steps at (1s bound + 1s grace) each, so a correct
 # implementation returns in a few seconds; rc=137 or elapsed at the cap means the
 # bound escaped and the caller was never released.
-if [ "$rc" -eq 0 ] && [ "$elapsed" -lt "$CASE3E_CAP" ] && silent; then
+if [ "$rc" -eq 0 ] && [ "$elapsed" -lt "$TIMING_CAP" ] && silent; then
   ok "SIGTERM-IGNORING helpers: killed at bound+grace (${elapsed}s), rc=0 — the bound is unignorable"
 else
-  bad "SIGTERM-ignoring-helper case (rc=$rc elapsed=${elapsed}s, cap ${CASE3E_CAP}s) — an escapable SIGTERM-only bound"
+  bad "SIGTERM-ignoring-helper case (rc=$rc elapsed=${elapsed}s, cap ${TIMING_CAP}s) — an escapable SIGTERM-only bound"
 fi
 
 # ---- Case 3f: a SIGTERM-only timeout does not count as a bounding tool ---------
@@ -306,9 +315,10 @@ t0=$(date +%s)
 drive "$log" "$hangdir" PASS GATE_NOTIFY_ADJUNCT_TIMEOUT=2
 rc=$?
 elapsed=$(( $(date +%s) - t0 ))
-# Ceiling is deliberately loose (2s bound + generous slack) so CPU contention
+# Ceiling is the shared TIMING_CAP (2s bound + generous slack) so CPU contention
 # cannot flake it; the property under test is "bounded at all", not a latency SLO.
-if [ "$rc" -eq 0 ] && [ "$elapsed" -lt 30 ] && silent; then
+# `drive` routes through capped(), so an unbounded adjunct reds here instead of hanging.
+if [ "$rc" -eq 0 ] && [ "$elapsed" -lt "$TIMING_CAP" ] && silent; then
   ok "hanging notifier: abandoned at its bound (${elapsed}s), rc=0, silent"
 else
   bad "hanging-notifier case (rc=$rc elapsed=${elapsed}s)"
@@ -408,6 +418,79 @@ else
     ok "exit-path notify budget: 2 x [($ep+$gr)+($ec+$gr)+($ea+$gr)] = ${budget}s < 15s (#2666), measured ${elapsed}s against SIGTERM-ignoring wedges"
   else
     bad "exit-path notify budget: declared ${budget}s (2 x [($ep+$gr)+($ec+$gr)+($ea+$gr)]) vs #2666's 15s ceiling; measured ${elapsed}s"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# The CALL SITE (issue #3119 spec R1 scenario 4 / R3 scenario 3). Every case above
+# drives the extracted gate_push_signal FUNCTION, so none of them observes how the
+# gate DECIDES what to pass it. Those two scenarios are about exactly that decision,
+# so they are asserted here by extracting the call-site block from agent-gate.sh and
+# driving it in a sandbox with the surrounding gate state faked — READ-ONLY: nothing
+# in agent-gate.sh is modified, and no testability seam was added to it.
+# ---------------------------------------------------------------------------
+callsite="$tmp/callsite.sh"
+awk '/^if \[ -z "\$ONLY" \] && \[ "\$LITE" -eq 0 \] && \[ "\$DELTA" -eq 0 \] && \[ "\$SELFTEST" -eq 0 \]; then/{grab=1}
+     grab{print}
+     grab&&/^fi$/{exit}' "$GATE" > "$callsite"
+if ! grep -q 'gate_push_signal "\$_push_result"' "$callsite" \
+   || ! grep -q 'TREE_COMMIT_LINE' "$callsite" \
+   || ! grep -q 'SUMMARY_WRITE_FAILED' "$callsite"; then
+  bad "could not extract the push-signal CALL SITE from $GATE"
+else
+  # drive_callsite <overall> <summary-write-failed> <commit-line> [statuses...]
+  # Replaces gate_push_signal with a recorder so the assertion is about the
+  # ARGUMENTS THE GATE CHOSE, which is what both scenarios specify.
+  drive_callsite() {
+    local overall="$1" swf="$2" commitline="$3"; shift 3
+    ONLY="" LITE=0 DELTA=0 SELFTEST=0 \
+    OVERALL="$overall" SUMMARY_WRITE_FAILED="$swf" TREE_COMMIT_LINE="$commitline" \
+    STATUS_LIST="$*" \
+    bash -c '
+      ONLY="$ONLY"; LITE=$LITE; DELTA=$DELTA; SELFTEST=$SELFTEST
+      OVERALL="$OVERALL"; SUMMARY_WRITE_FAILED=$SUMMARY_WRITE_FAILED
+      TREE_COMMIT_LINE="$TREE_COMMIT_LINE"
+      NAMES=(); STATUSES=()
+      i=0; for st in $STATUS_LIST; do NAMES+=("c$i"); STATUSES+=("$st"); i=$((i+1)); done
+      gate_push_signal() { printf "%s|%s|%s|%s\n" "$1" "$2" "$3" "$4"; }
+      . "$1"
+    ' _ "$callsite" 2>/dev/null
+  }
+
+  # ---- R1 S4: the title names the identity the SUMMARY BLOCK stamped ----------
+  # A fresh emit-time `git` read would report the CURRENT checkout; the block's
+  # stamped line is the authority (#2926 review C1). Feed a commit line that could
+  # not possibly match this worktree and assert it is what comes through.
+  out=$(drive_callsite PASS 0 "commit: feedface branch: stamped-branch dirty: no" PASS PASS)
+  if [ "$out" = "PASS|stamped-branch|feedface|" ]; then
+    ok "R1 S4: push identity is taken from the SUMMARY's stamped line, not a fresh git read"
+  else
+    bad "R1 S4: expected 'PASS|stamped-branch|feedface|', got '$out'"
+  fi
+  # A malformed/absent stamp must degrade to the documented placeholders, never to a
+  # silently wrong identity.
+  out=$(drive_callsite PASS 0 "" PASS)
+  case "$out" in
+    PASS\|unknown\|unknown\|*) ok "R1 S4: an unparseable stamp degrades to 'unknown', never a guess" ;;
+    *) bad "R1 S4 placeholder: got '$out'" ;;
+  esac
+
+  # ---- R3 S3: a summary-write failure forces FAIL severity --------------------
+  # Correctness components all PASSed, but the run produced no artifact of record,
+  # so the signal must say FAIL — a green page for a run with no summary file is the
+  # inversion this whole issue exists to prevent.
+  out=$(drive_callsite PASS 1 "commit: abc1234 branch: b dirty: no" PASS PASS)
+  if [ "${out%%|*}" = FAIL ]; then
+    ok "R3 S3: SUMMARY_WRITE_FAILED forces the FAIL severity despite all-PASS components"
+  else
+    bad "R3 S3: expected FAIL severity, got '$out'"
+  fi
+  # ...and the failing-component list is still assembled from the real statuses.
+  out=$(drive_callsite FAIL 0 "commit: abc1234 branch: b dirty: no" PASS FAIL FAIL)
+  if [ "$out" = "FAIL|b|abc1234|c1,c2" ]; then
+    ok "R3 S3: the body lists exactly the FAILed components, comma-joined"
+  else
+    bad "R3 S3 components: expected 'FAIL|b|abc1234|c1,c2', got '$out'"
   fi
 fi
 
