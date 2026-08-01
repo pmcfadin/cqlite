@@ -161,12 +161,29 @@ auto-merge notification are the callbacks — the gate summary file is a push si
 <code dir="auto">ScheduleWakeup</code> remains valid for genuinely external, harness-untracked state — just not for polling a PR’s
 own CI after the work is complete.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="gate-completion-push-signal-2667">Gate completion push-signal (#2667)</h3><a class="sl-anchor-link" href="#gate-completion-push-signal-2667"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Gate completion push-signal (#2667)”</span></a></div>
-<p>The full <code dir="auto">agent-gate.sh</code> fires <strong>one advisory <code dir="auto">agent-notify</code> push</strong> at final-SUMMARY write time (title
+<p>The full <code dir="auto">agent-gate.sh</code> fires <strong>one advisory push</strong> at final-SUMMARY write time (title
 <code dir="auto">gate &#x3C;RESULT> &#x3C;branch>@&#x3C;sha></code>, body = RESULT + any failing components), converting the summary file from a
 passive poll target into a <strong>push signal</strong>: a backgrounded gate calls its waiting closer/worker back instead
 of being idle-polled. <code dir="auto">--lite</code>/<code dir="auto">--delta</code>/<code dir="auto">--only</code> are exempt (iteration aids, never the gate of record). It
-is advisory by contract — if <code dir="auto">agent-notify</code> is absent or fails, it is a silent no-op and the summary file
-remains the artifact of record, so a broken notifier never changes the gate’s verdict.</p>
+is advisory by contract — an absent notifier, an unset target, a failing notifier, or one that <strong>rejects its
+arguments</strong> is a silent no-op and the summary file remains the artifact of record, so a broken notifier never
+changes the gate’s verdict.</p>
+<p><strong>The payload contract is REPO-OWNED (#3119).</strong> <code dir="auto">scripts/lib/gate-notify.sh</code> builds the ntfy JSON itself and
+POSTs it to the ntfy <strong>server root</strong> (topic in the body). PASS publishes priority 3 + <code dir="auto">white_check_mark</code>;
+FAIL publishes priority 5 + <code dir="auto">rotating_light</code> — <strong>a red gate is distinguishable at a glance</strong>. This is not
+cosmetic: the gate previously called <code dir="auto">agent-notify</code> with a <code dir="auto">--category</code> flag that upstream v1.1.0 has no arm
+for, so it fell through to manual title/message mode — the title became the literal flag name, the message
+became the category value, the real title/body were dropped, and <strong>every FAIL paged as a green priority-3
+success</strong>; its ntfy path also POSTed the JSON to the topic URL, so phones rendered a raw JSON blob. Two of
+those defects live inside that binary, past any caller-side flag probe, which is why the payload now lives in
+git. <code dir="auto">agent-notify</code> remains only an <strong>optional local desktop/sound adjunct</strong>, invoked positionally (never
+<code dir="auto">--category</code>) with its webhook env neutralized so it cannot double-publish. Configure the target with
+<code dir="auto">CODEX_NOTIFY_WEBHOOK=https://ntfy.sh/&#x3C;topic></code> (the fleet uses <code dir="auto">/etc/environment</code>);
+<code dir="auto">bash scripts/bootstrap-agent-machine.sh</code> verifies the <strong>capability</strong> via <code dir="auto">gate-notify.sh --self-test</code> and
+records the pinned contract version. Payload fidelity is pinned by
+<code dir="auto">scripts/tests/test_gate_notify_contract.sh</code> (gate component <code dir="auto">tooling-tests</code>), which asserts the <strong>published
+bytes</strong> at the transport boundary — an argv-level assertion is explicitly not evidence, since that is exactly
+the blind spot the swallowed flag hid behind.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="github-enforced-merge-gate-2433">GitHub-enforced merge gate (#2433)</h3><a class="sl-anchor-link" href="#github-enforced-merge-gate-2433"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “GitHub-enforced merge gate (#2433)”</span></a></div>
 <p><code dir="auto">main</code> now carries <strong>full branch protection</strong>: the <code dir="auto">required</code> status check (the “Required PR Gate” CI
 workflow) is a required context, with <code dir="auto">enforce_admins</code> on. Merge-on-green is therefore
