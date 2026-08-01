@@ -1,0 +1,11 @@
+ws0/events histograms
+Percentile      Read Latency     Write Latency          SSTables    Partition Size        Cell Count
+                    (micros)          (micros)                             (bytes)                  
+50%                     0.00             60.00              0.00             14237               215
+75%                     0.00            103.00              0.00             14237               215
+95%                     0.00            179.00              0.00             14237               215
+98%                     0.00            215.00              0.00             14237               215
+99%                     0.00            215.00              0.00             14237               215
+Min                     0.00             15.00              0.00              6867                87
+Max                     0.00            535.00              0.00             14237               215
+

@@ -1,0 +1,11 @@
+[00:03:47] PART B start: C(N) ramp 1,2,4,8,16
+[00:18:25] PART B done
+[00:18:25] PART C start
+[00:18:25] device=nvme0n1p1
+[00:18:26] devN=1 loadgen 60s
+[00:19:34] devN=2 loadgen 60s
+[00:20:57] devN=4 loadgen 60s
+[00:22:55] devN=8 loadgen 60s
+[00:25:06] devN=16 loadgen 60s
+[00:29:31] PART C done
+[00:29:31] PART BC COMPLETE

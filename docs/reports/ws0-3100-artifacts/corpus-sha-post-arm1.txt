@@ -1,0 +1,1 @@
+2c297a0caf76338be0568be486570fe63b61c2ca9bfa6e68e7368f34c189d9a2  /home/ubuntu/ws0/apache-cassandra-5.0.8/data/data/ws0/events-23cee3208d2a11f1af3837acfbc90d02//nb-16-big-Data.db
