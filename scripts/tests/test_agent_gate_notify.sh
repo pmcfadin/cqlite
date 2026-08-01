@@ -199,28 +199,49 @@ else
   bad "SIGTERM-ignoring-helper case (rc=$rc elapsed=${elapsed}s, cap ${TIMING_CAP}s) — an escapable SIGTERM-only bound"
 fi
 
-# ---- Case 3f: a SIGTERM-only timeout does not count as a bounding tool ---------
+# ---- Case 3f: a SIGTERM-only timeout is PROBED AND REJECTED, not merely failed --
 # Capability is PROBED, not assumed: a `timeout` lacking --kill-after can only be
 # escaped, so it must be treated as NO bounding tool (publish nothing) rather than
-# trusted. Shadow `timeout` with one that rejects --kill-after.
+# trusted.
+#
+# DISCRIMINATION (review round 5). "publishes nothing, rc=0" is NOT sufficient
+# evidence: with the probe REMOVED the wrapper still attempts each bounded call, the
+# stub still rejects it, and the observable outcome is identical — so the assertion
+# passed on the stub's own rc=125 rather than on the probe existing. Measured:
+# deleting the probe left the suite 18/18 green. The discriminator is WHICH
+# invocations the stub receives:
+#   probed-and-rejected  -> exactly the probe (`--kill-after=1 1 true`), and NOTHING
+#                           else is ever attempted
+#   attempted-and-failed -> the stub is handed the real work (python3/curl), i.e. the
+#                           wrapper ran behind a bound it had not verified
 sigtermonly="$tmp/sigtermonly"; mkdir -p "$sigtermonly"
 cp "$stubdir/curl" "$sigtermonly/curl"
 cat > "$sigtermonly/timeout" <<'TO'
 #!/usr/bin/env bash
-# A SIGTERM-only timeout: rejects --kill-after exactly as pre-8.5 coreutils would.
+# A SIGTERM-only timeout: rejects --kill-after exactly as pre-8.5 coreutils would,
+# and RECORDS every invocation so the caller's intent is observable.
+{ printf 'TIMEOUT'; for a in "$@"; do printf '\t%s' "$a"; done; printf '\n'; } >> "$TIMEOUT_LOG"
 case "${1:-}" in --kill-after*|-k) echo "timeout: unrecognized option '$1'" >&2; exit 125 ;; esac
 exec /usr/bin/timeout "$@"
 TO
 chmod +x "$sigtermonly/timeout"
 : > "$tmp/case3f.log"
-env CURL_LOG="$tmp/case3f.log" CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$sigtermonly:$PATH" \
+: > "$tmp/case3f.timeout.log"
+# capped OUTSIDE env: `capped` is a shell function, so `env … capped` would exec a
+# non-existent binary (rc=127). This ordering also means the CAP uses the real
+# timeout(1) from the outer PATH, never the SIGTERM-only stub under test.
+capped env CURL_LOG="$tmp/case3f.log" TIMEOUT_LOG="$tmp/case3f.timeout.log" \
+  CQLITE_NOTIFY_WEBHOOK="$WEBHOOK" PATH="$sigtermonly:$PATH" \
   bash -c '. "$0"; gate_push_signal PASS advisory-branch abc1234 ""' "$fnfile" \
   >"$tmp/out.txt" 2>"$tmp/err.txt"
 rc=$?
-if [ "$rc" -eq 0 ] && [ "$(publishes "$tmp/case3f.log")" -eq 0 ] && silent; then
-  ok "SIGTERM-only timeout: treated as NO bounding tool, publishes nothing, rc=0"
+probe_seen=$(grep -c $'^TIMEOUT\t--kill-after=1\t1\ttrue$' "$tmp/case3f.timeout.log" 2>/dev/null)
+work_attempted=$(grep -cE $'^TIMEOUT\t.*\t(python3|curl|agent-notify)' "$tmp/case3f.timeout.log" 2>/dev/null)
+if [ "$rc" -eq 0 ] && [ "$(publishes "$tmp/case3f.log")" -eq 0 ] && silent \
+   && [ "${probe_seen:-0}" -ge 1 ] && [ "${work_attempted:-0}" -eq 0 ]; then
+  ok "SIGTERM-only timeout: PROBED and rejected (probe seen, zero work attempted), publishes nothing, rc=0"
 else
-  bad "SIGTERM-only-timeout case (rc=$rc publishes=$(publishes "$tmp/case3f.log")) — trusted an escapable bound"
+  bad "SIGTERM-only-timeout case (rc=$rc publishes=$(publishes "$tmp/case3f.log") probe=${probe_seen:-0} work-attempted=${work_attempted:-0}) — the capability was not probed before use"
 fi
 
 # ---- Case 3d: with NO bounding tool, publish NOTHING rather than run unbounded -
