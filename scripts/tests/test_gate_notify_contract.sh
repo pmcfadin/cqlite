@@ -318,6 +318,39 @@ else
   bad "printable target form leaked a credential: $redact_probe"
 fi
 
+# ---- 7d. the SELF-TEST's own verdict is honest (AC5's capability probe) --------
+# bootstrap's capability assertion is only as good as what `--self-test` reports, and
+# until review round 5 NOTHING tested the validator inside gate_notify_selftest: making
+# it vacuous reddened no suite. Assert both directions against the REAL wrapper and a
+# MUTATED copy, so a self-test that always succeeds cannot pass.
+selftest_dir="$tmp/selftest"; mkdir -p "$selftest_dir"
+if timeout -s KILL 90 bash "$LIB" --self-test >"$selftest_dir/good.out" 2>&1; then
+  ok "self-test on the real wrapper: exits 0 and reports PASS"
+else
+  bad "self-test on the real wrapper did not succeed"; cat "$selftest_dir/good.out"
+fi
+# The mutation is a REAL contract violation the validator must catch: FAIL publishes
+# the PASS tag, i.e. a red gate paging as a routine success — the original defect.
+python3 - "$LIB" "$selftest_dir/broken.sh" <<'MUT'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+needle = "printf 'rotating_light\\n'"
+# Only the FAIL tag emitter is rewritten; comments mentioning the tag are untouched.
+out = s.replace(needle, "printf 'white_check_mark\\n'", 1)
+open(dst, "w").write(out)
+raise SystemExit(0 if out != s else 1)
+MUT
+if [ $? -eq 0 ]; then
+  if timeout -s KILL 90 bash "$selftest_dir/broken.sh" --self-test >"$selftest_dir/bad.out" 2>&1; then
+    bad "self-test PASSED a wrapper whose FAIL payload carries the PASS tag — the probe is vacuous"
+  else
+    ok "self-test on a mutated wrapper (FAIL tagged white_check_mark): exits NON-ZERO"
+  fi
+else
+  bad "self-test mutation did not apply — the tag map was not found in $LIB"
+fi
+
 # ---- 8. intercept surface: only the transport is substituted -----------------
 substituted=$(cd "$shimdir" && ls | sort | tr '\n' ' ')
 if [ "$substituted" = "agent-notify curl " ] \
