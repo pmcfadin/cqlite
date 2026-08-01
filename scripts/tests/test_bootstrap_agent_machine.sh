@@ -1213,10 +1213,18 @@ mknotifyroot() { # mknotifyroot <dir> <good|broken>
   else
     # A REAL contract violation, caught by the wrapper's own validator: the FAIL
     # payload carries the PASS tag — a red gate paging as a routine success.
+    # Heredoc body must be UNINDENTED: `<<'MUT'` is literal, so leading spaces reach
+    # python as indentation and raise IndentationError — which would red on STAGING
+    # instead of on the verdict under test (observed while proving this very case).
     python3 - "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh" <<'MUT'
-import sys
+import re, sys
 s = open(sys.argv[1]).read()
-out = s.replace("printf 'rotating_light\\n'", "printf 'white_check_mark\\n'", 1)
+# Match on the FUNCTION NAME, not on the tag literal: a literal-based mutation is a
+# no-op when the source is ALREADY broken (e.g. while proving this case against a
+# mutated tree), which would again red on staging rather than on the verdict.
+out = re.sub(r'^_gate_notify_tag\(\).*$',
+             "_gate_notify_tag() { printf 'white_check_mark\\n'; }",
+             s, count=1, flags=re.M)
 open(sys.argv[2], "w").write(out)
 raise SystemExit(0 if out != s else 1)
 MUT
