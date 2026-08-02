@@ -1,0 +1,14 @@
+==== WS0 #3217 C(N) SWEEP SUMMARY ====
+label: calib-s6-n16   S=6   server_cpus=0,1,2,3,4,5,8,9,10,11,12,13   client_cpus=6,7,14,15   merge_path=bypass
+points: 1 total, 0 excluded (client-saturated)   admission_clean: YES
+
+N    rep  rows/s min    rows/s med    rows/s max    spr%    rows/s/strm   speedup  margeff  srvUtl  cliUtl  cs/s     
+16   1    1079742.9     1079742.9     1079742.9     0.0     67483.9       n/a      n/a      0.976   0.123   232114   
+
+byte bases (median, AC6 - never a bare MB/s):
+N    logical-uncomp B/s     on-disk-comp B/s       arrow-wire-cap B/s    
+16   748574265.9            211725783.7            13163532613.5         
+
+scheduler cost per N (AC5):
+N    cs/s (cpu-wide)  vol cs/s (proc)  nonvol cs/s (proc)
+16   232114           0.1              0.0             

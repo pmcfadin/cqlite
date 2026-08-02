@@ -1,0 +1,6 @@
+{"label":"calib-s6-n16","server_physical_cores_S":6,"server_cpus":"0,1,2,3,4,5,8,9,10,11,12,13",
+ "client_cpus":"6,7,14,15","ramp":"16","step_seconds":90,"reps":1,
+ "merge_path":"bypass","seed":42,"stage":"/data/ws0/ws0-h2h/datasets/sstables",
+ "flight_bin":"/home/ubuntu/workspace/repo/.claude/worktrees/issue-3217-fullbox-cn-attribution/target/release/cqlite-flight","loadgen_bin":"/home/ubuntu/workspace/repo/.claude/worktrees/issue-3217-fullbox-cn-attribution/target/release/flight-loadgen","ticket_template":"/data/ws0/ws0-h2h/ws0-events-template.json",
+ "server_flags":"--batch-size 8192 --max-batch-bytes 4194304 --max-inflight-egress-bytes 12582912 --max-concurrent-scans 16 --admission-wait-timeout-ms 30000","client_saturation_threshold":0.70,
+ "harness_commit":"4f8f1eb","started_utc":"2026-08-02T20:11:44Z"}
