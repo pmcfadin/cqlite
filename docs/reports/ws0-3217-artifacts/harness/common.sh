@@ -24,7 +24,7 @@ HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # the binaries live in the issue worktree's target/release).
 WS0_STAGE="${WS0_STAGE:-}"            # staged SSTable dir  (--data-dir)
 WS0_FLIGHT_BIN="${WS0_FLIGHT_BIN:-}"  # cqlite-flight binary
-WS0_LOADGEN_BIN="${WS0_LOADGEN_BIN:-}"# flight-loadgen binary
+WS0_LOADGEN_BIN="${WS0_LOADGEN_BIN:-}" # flight-loadgen binary
 WS0_TICKET_TPL="${WS0_TICKET_TPL:-}"  # --ticket-template JSON
 
 WS0_LISTEN_HOST="${WS0_LISTEN_HOST:-127.0.0.1}"

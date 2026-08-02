@@ -49,13 +49,19 @@ ws0_assert_sysctl
 ws0_verify_topology "$OUTDIR/cpu-topology.json"
 
 # ---- pick the collector ------------------------------------------------------
+# BOTH BPF collectors require root: bcc fails at BPF map creation
+# ("could not open bpf map: warn_events, error: Operation not permitted") and
+# bpftrace refuses outright ("only supports running as the root user"). A
+# permissive kernel.perf_event_paranoid does NOT cover this — that governs perf
+# events, not BPF map creation. Hence sudo -n on every BPF invocation.
+SUDO="${WS0_SUDO:-sudo -n}"
 OFFCPU_BPFCC="${WS0_OFFCPUTIME_BIN:-/usr/sbin/offcputime-bpfcc}"
 choose_tool() {
   if [ "$OFFCPU_TOOL" = "bpftrace" ]; then echo bpftrace; return; fi
   if [ -x "$OFFCPU_BPFCC" ]; then
     # Probe it against ourselves for 1s: a load failure surfaces here, not
     # mid-measurement with the load running.
-    if "$OFFCPU_BPFCC" -f -p $$ 1 >"$LOGDIR/offcpu-probe.log" 2>&1; then echo bpfcc; return; fi
+    if $SUDO "$OFFCPU_BPFCC" -f -p $$ 1 >"$LOGDIR/offcpu-probe.log" 2>&1; then echo bpfcc; return; fi
     ws0_warn "offcputime-bpfcc probe failed (see $LOGDIR/offcpu-probe.log) — falling back to bpftrace"
   else
     ws0_warn "offcputime-bpfcc not found at $OFFCPU_BPFCC — falling back to bpftrace"
@@ -68,10 +74,10 @@ ws0_log "off-CPU collector: $TOOL"
 fold_offcpu() {  # fold_offcpu <pid> <secs> <out-folded> <raw-log>
   local pid="$1" secs="$2" out="$3" raw="$4"
   if [ "$TOOL" = "bpfcc" ]; then
-    "$OFFCPU_BPFCC" -f -p "$pid" --stack-storage-size "$STACK_STORAGE" "$secs" \
+    $SUDO "$OFFCPU_BPFCC" -f -p "$pid" --stack-storage-size "$STACK_STORAGE" "$secs" \
       >"$out" 2>"$raw" || ws0_warn "offcputime-bpfcc returned non-zero; see $raw"
   else
-    bpftrace "$HARNESS_DIR/offcpu-fallback.bt" "$pid" "$secs" >"$raw.bt" 2>"$raw" \
+    $SUDO bpftrace "$HARNESS_DIR/offcpu-fallback.bt" "$pid" "$secs" >"$raw.bt" 2>"$raw" \
       || ws0_warn "bpftrace returned non-zero; see $raw"
     "$FLAMEGRAPH_DIR/stackcollapse-bpftrace.pl" "$raw.bt" >"$out" 2>>"$raw" || true
   fi
@@ -79,9 +85,14 @@ fold_offcpu() {  # fold_offcpu <pid> <secs> <out-folded> <raw-log>
 
 # ---- dry run: prove the fold -> flamegraph -> classify pipeline works ---------
 if [ "${WS0_DRY_RUN:-0}" = "1" ]; then
-  ws0_log "WS0_DRY_RUN=1: capturing off-CPU stacks of a real 'sleep' process to exercise the pipeline"
-  sleep 6 & PROBE=$!
-  fold_offcpu "$PROBE" 4 "$OUTDIR/offcpu-dryrun.folded" "$LOGDIR/offcpu-dryrun.log"
+  ws0_log "WS0_DRY_RUN=1: capturing off-CPU stacks of a repeatedly-blocking probe process"
+  # A single long `sleep` records NOTHING: offcputime charges a blocked interval
+  # only when the thread is switched back IN, so a process that never wakes
+  # inside the window contributes no stacks. The probe must block AND wake many
+  # times, exactly as the server's threads do.
+  bash -c 'end=$((SECONDS+12)); while [ $SECONDS -lt $end ]; do sleep 0.01; done' &
+  PROBE=$!
+  fold_offcpu "$PROBE" 5 "$OUTDIR/offcpu-dryrun.folded" "$LOGDIR/offcpu-dryrun.log"
   kill "$PROBE" 2>/dev/null || true; wait "$PROBE" 2>/dev/null || true
   if [ -s "$OUTDIR/offcpu-dryrun.folded" ]; then
     "$FLAMEGRAPH_DIR/flamegraph.pl" --countname=us --title="Off-CPU dry run" \
@@ -122,7 +133,7 @@ for N in ${NLIST//,/ }; do
   # AC5: run-queue latency alongside the off-CPU capture, same window.
   RUNQLAT_TXT="$OUTDIR/runqlat-$TAG.txt"
   if [ -x "$RUNQLAT" ]; then
-    "$RUNQLAT" -p "$WS0_SERVER_PID" "$DURATION" 1 >"$RUNQLAT_TXT" 2>"$LOGDIR/runqlat-$TAG.log" &
+    $SUDO "$RUNQLAT" -p "$WS0_SERVER_PID" "$DURATION" 1 >"$RUNQLAT_TXT" 2>"$LOGDIR/runqlat-$TAG.log" &
     RQ_PID=$!
   else
     ws0_warn "runqlat-bpfcc not found at $RUNQLAT — run-queue latency will be reported as unavailable"

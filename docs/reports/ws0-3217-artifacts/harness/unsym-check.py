@@ -46,6 +46,12 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=0.10)
     ap.add_argument("--out")
     ap.add_argument("--label", default="")
+    ap.add_argument("--gate-metric", default="frame_weighted_unsym_fraction",
+                    choices=["frame_weighted_unsym_fraction",
+                             "sample_fraction_with_any_unknown_frame",
+                             "leaf_unsym_fraction"],
+                    help="which of the three readings AC3's '<10%% of samples' is gated on "
+                         "(all three are always reported)")
     a = ap.parse_args()
 
     tot_frames = tot_unk = tot_samples = samples_any = samples_leaf = 0
@@ -85,10 +91,11 @@ def main() -> int:
         "sample_fraction_with_any_unknown_frame": frac(samples_any, tot_samples),
         "leaf_unsym_fraction": frac(samples_leaf, tot_samples),
         "threshold": a.threshold,
-        "gated_metric": "frame_weighted_unsym_fraction",
+        "gated_metric": a.gate_metric,
         "top_unknown_frames": worst.most_common(10),
     }
-    ok = doc["frame_weighted_unsym_fraction"] < a.threshold
+    doc["gated_value"] = doc[a.gate_metric]
+    ok = doc["gated_value"] < a.threshold
     doc["verdict"] = "PASS" if ok else "FAIL"
     doc["verdict_note"] = (
         "AC3 satisfied: unsymbolized frames below threshold"
@@ -104,8 +111,8 @@ def main() -> int:
         open(a.out, "w").write(text)
     sys.stdout.write(text)
     if not ok:
-        print("\n!!! AC3 GATE FAIL: frame-weighted unsymbolized fraction %.4f >= %.4f !!!"
-              % (doc["frame_weighted_unsym_fraction"], a.threshold), file=sys.stderr)
+        print("\n!!! AC3 GATE FAIL: %s = %.4f >= %.4f !!!"
+              % (a.gate_metric, doc["gated_value"], a.threshold), file=sys.stderr)
         return 1
     return 0
 

@@ -25,6 +25,12 @@ checksum on the header parse; a layout that does not reconcile is rejected. If
 neither reconciles, `logical_uncompressed_bytes` is reported as null with an
 explicit reason -- never a fabricated number.
 
+Parse validation (2026-08-02, live ws0 cassandra-stress corpus mid-flush):
+`logical_uncompressed_bytes / ondisk_compressed_bytes` = 2773 MB / 784 MB =
+**3.54x**, against the independently-derived #3026 WS0 constants
+692.70 / 195.96 bytes-per-row = **3.53x**. Two unrelated derivations agreeing to
+0.3% is the evidence that the CompressionInfo.db header parse is right.
+
 Usage:
     corpus-basis.py <stage-dir> [-o out.json]
 """
@@ -46,7 +52,23 @@ def _read_utf(buf: bytes, off: int) -> tuple[str, int]:
 
 
 def _try_layout(buf: bytes, with_max_compressed: bool):
-    """Return (data_length, chunk_count, header_end) or None if malformed."""
+    """Structurally validate one header layout.
+
+    Returns {data_length, chunk_count, chunk_length, ceil_consistent} or None.
+
+    The STRONG check is the offsets array: `chunkCount` 8-byte offsets must
+    account for the rest of the file (modulo an optional trailing CRC of <= 8
+    bytes). That single constraint separates the two candidate layouts
+    unambiguously in practice, because a wrong layout misreads `chunkCount` by
+    orders of magnitude.
+
+    `ceil(dataLength / chunkLength) == chunkCount` is recorded as a SOFT
+    consistency flag, not a rejection: it legitimately fails on an SSTable that
+    is still being written (observed on a live cassandra-stress flush), and
+    rejecting there would report the basis as UNAVAILABLE for a merely
+    in-progress corpus. It IS used to break a tie if both layouts survive the
+    strong check.
+    """
     try:
         off = 0
         _name, off = _read_utf(buf, off)
@@ -70,31 +92,41 @@ def _try_layout(buf: bytes, with_max_compressed: bool):
     if chunk_len <= 0 or data_len <= 0 or chunk_count <= 0:
         return None
     remaining = len(buf) - off
-    # offsets are 8 bytes each; trailing bytes are an optional CRC (<= 8).
+    # STRONG check: offsets are 8 bytes each; trailing bytes are an optional CRC.
     if not (0 <= remaining - chunk_count * 8 <= 8):
         return None
-    # chunkCount must be consistent with dataLength / chunkLength.
-    expected = (data_len + chunk_len - 1) // chunk_len
-    if expected != chunk_count:
-        return None
-    return data_len, chunk_count, off
+    return {
+        "data_length": data_len,
+        "chunk_count": chunk_count,
+        "chunk_length": chunk_len,
+        # +-1 tolerance: the offsets array may carry a terminal entry, so an
+        # off-by-one is structural, not a misparse. A larger divergence means a
+        # torn read of a file still being written (or a wrong layout).
+        "ceil_consistent": abs(((data_len + chunk_len - 1) // chunk_len) - chunk_count) <= 1,
+    }
 
 
 def compression_data_length(path: str):
     """Uncompressed dataLength from a CompressionInfo.db, or (None, reason)."""
     with open(path, "rb") as fh:
         buf = fh.read()
-    hits = []
-    for with_max in (True, False):
-        got = _try_layout(buf, with_max)
-        if got is not None:
-            hits.append((with_max, got))
+    hits = [(wm, r) for wm in (True, False)
+            for r in [_try_layout(buf, wm)] if r is not None]
     if not hits:
         return None, "no CompressionInfo.db header layout reconciled with the offsets array"
-    if len(hits) > 1 and hits[0][1][0] != hits[1][1][0]:
-        return None, "ambiguous: both header layouts reconcile with different dataLength"
-    with_max, (data_len, _cc, _off) = hits[0]
-    return data_len, ("layout=with_max_compressed_length" if with_max else "layout=legacy_no_max_compressed_length")
+    if len(hits) > 1 and hits[0][1]["data_length"] != hits[1][1]["data_length"]:
+        consistent = [h for h in hits if h[1]["ceil_consistent"]]
+        if len(consistent) != 1:
+            return None, "ambiguous: both header layouts reconcile with different dataLength"
+        hits = consistent
+    with_max, res = hits[0]
+    reason = "layout=with_max_compressed_length" if with_max else "layout=legacy_no_max_compressed_length"
+    if not res["ceil_consistent"]:
+        reason += (" (WARNING: ceil(dataLength/chunkLength)=%d != chunkCount=%d — the SSTable was "
+                   "likely still being written when read; re-measure on the final corpus)"
+                   % ((res["data_length"] + res["chunk_length"] - 1) // res["chunk_length"],
+                      res["chunk_count"]))
+    return res["data_length"], reason
 
 
 def scan(stage: str) -> dict:
