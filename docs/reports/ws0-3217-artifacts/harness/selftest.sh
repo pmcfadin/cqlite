@@ -239,6 +239,107 @@ else
   echo "  SKIP  sweep.sh dry run: set WS0_STAGE/WS0_FLIGHT_BIN/WS0_LOADGEN_BIN/WS0_TICKET_TPL"
 fi
 
+# ---------------------------------------------------------------- 8b
+step "8b  emit-point.py record assembly"
+cat >"$TMP/perf.csv" <<'CSV'
+# started on Sat Aug  2 00:00:00 2026
+1000000000,,cycles,2000000000,100.00,,
+2000000000,,instructions,2000000000,100.00,2.00,insn per cycle
+50000,,context-switches,2000000000,100.00,,
+CSV
+cat >"$TMP/step.jsonl" <<'JL'
+{"schema":"flight-loadgen.step/v1","round":"t","step":1,"target_concurrency":8,"shape":"full","seed":42,"duration_s":10.0,"requests_ok":4,"requests_unavailable":0,"requests_error":0,"error_codes":{},"qps":0.4,"rows_per_s":40000.0,"bytes_per_s":36000000.0,"rows_total":400000,"bytes_total":360000000,"latency_ms":{"p50":9000.0,"p95":9500.0,"p99":9900.0,"max":10000.0,"samples":4}}
+JL
+mk_ctx() { python3 - "$1" "$2" <<PY
+import json,sys
+json.dump({"label":"t","ts_unix_ms":0,"harness_commit":"deadbeef","server_physical_cores_S":6,
+ "server_cpus":"0-5,8-13","server_cpu_count":12,"client_cpus":"6,7,14,15","client_cpu_count":4,
+ "merge_path":"bypass","N":8,"rep":1,"reps_total":3,"step_seconds":10,"server_flags":"--x",
+ "wall_secs":10.0,"server_cpu_secs_delta":60.0,"client_cpuset_busy_secs_delta":$2,
+ "client_saturation_threshold":0.70,
+ "server_io_delta":{"rchar":123,"read_bytes":456,"syscr":7},
+ "server_ctxt_delta":{"voluntary_ctxt_switches":100,"nonvoluntary_ctxt_switches":20},
+ "corpus_basis":{"ondisk_compressed_bytes":19600000,"logical_uncompressed_bytes":69270000},
+ "logical_bytes_per_row_override":None}, open(sys.argv[1],"w"))
+PY
+}
+mk_ctx "$TMP/ctx-ok.json" 20.0        # 20/10/4 = 0.50 utilisation -> valid
+mk_ctx "$TMP/ctx-sat.json" 36.0       # 36/10/4 = 0.90 utilisation -> SATURATED
+: >"$TMP/pts.jsonl"
+python3 "$HERE/emit-point.py" --perf-csv "$TMP/perf.csv" --step-jsonl "$TMP/step.jsonl" \
+  --context-json "$TMP/ctx-ok.json" --out "$TMP/pts.jsonl" >/dev/null
+python3 "$HERE/emit-point.py" --perf-csv "$TMP/perf.csv" --step-jsonl "$TMP/step.jsonl" \
+  --context-json "$TMP/ctx-sat.json" --out "$TMP/pts.jsonl" >/dev/null
+python3 - "$TMP/pts.jsonl" <<'PY' && ok "throughput, IPC, per-row counters, three byte bases" || bad "record assembly"
+import json,sys
+a,b=[json.loads(l) for l in open(sys.argv[1])]
+assert a["rows_per_s_aggregate"]==40000.0 and a["rows_per_s_per_stream"]==5000.0
+assert abs(a["IPC"]-2.0)<1e-9 and abs(a["cycles_per_row"]-2500.0)<1e-9
+assert a["rows_per_scan_observed"]==100000.0
+# 19_600_000 on-disk / 100_000 rows = 196 B/row ; x 40000 rows/s
+assert abs(a["bytes_per_s_ondisk_compressed"]-40000.0*196.0)<1e-6, a["bytes_per_s_ondisk_compressed"]
+assert abs(a["bytes_per_s_logical_uncompressed"]-40000.0*692.7)<1e-6
+assert a["bytes_per_s_arrow_wire_capacity"]==36000000.0
+assert "CAPACITY" in a["bytes_per_s_arrow_wire_capacity_basis"]
+assert not any(k.endswith("MB_per_s") for k in a), "AC6: no bare MB/s field allowed"
+assert a["server_io_delta"]=={"rchar":123,"read_bytes":456,"syscr":7}
+assert a["server_voluntary_ctxt_switches"]==100 and a["server_nonvoluntary_ctxt_switches"]==20
+assert a["context_switches_per_second_cpu_wide"]==5000.0
+assert a["admission_clean"] is True
+PY
+python3 - "$TMP/pts.jsonl" <<'PY' && ok "validity gate: 0.50 -> OK, 0.90 -> INVALID_CLIENT_SATURATED" || bad "validity gate"
+import json,sys
+a,b=[json.loads(l) for l in open(sys.argv[1])]
+assert abs(a["client_cpu_utilization_of_pinned_set"]-0.5)<1e-9
+assert a["client_saturated"] is False and a["validity"]=="OK"
+assert abs(b["client_cpu_utilization_of_pinned_set"]-0.9)<1e-9
+assert b["client_saturated"] is True and b["validity"]=="INVALID_CLIENT_SATURATED"
+assert "MUST NOT be reported as a server" in b["client_saturation_note"]
+PY
+
+# ---------------------------------------------------------------- 8c
+step "8c  server launch / readiness poll / explicit-PID stop (the pkill trap)"
+STUB="$TMP/stub-flight"
+cat >"$STUB" <<'STUBEOF'
+#!/usr/bin/env bash
+# Stands in for `cqlite-flight --data-dir ...`: accepts and ignores the real
+# flag set, then listens so the readiness poll can succeed.
+port=8815
+while [ $# -gt 0 ]; do case "$1" in --listen) port="${2##*:}"; shift 2;; *) shift;; esac; done
+exec python3 -c "
+import socket,sys,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(('127.0.0.1',int(sys.argv[1]))); s.listen(16)
+while True:
+    try: c,_=s.accept(); c.close()
+    except Exception: time.sleep(0.1)
+" "$port"
+STUBEOF
+chmod +x "$STUB"
+export WS0_STAGE="${STAGE_PROBE:-$TMP}" WS0_FLIGHT_BIN="$STUB" \
+       WS0_LOADGEN_BIN="$STUB" WS0_TICKET_TPL="$TMP/topo.json" \
+       WS0_LISTEN_PORT=18815
+MY_PID=$$
+if ws0_start_server "2,10" bypass "$TMP/stub.log" >/dev/null 2>&1; then
+  ok "server launched under taskset and readiness poll succeeded (pid $WS0_SERVER_PID)"
+  STUB_PID="$WS0_SERVER_PID"
+  ws0_stop_server >/dev/null 2>&1
+  kill -0 "$STUB_PID" 2>/dev/null && bad "ws0_stop_server left the server alive" \
+    || ok "ws0_stop_server killed the target PID"
+  kill -0 "$MY_PID" 2>/dev/null && ok "TRAP CHECK: the launching shell SURVIVED (no pkill -f)" \
+    || bad "the launching shell was killed"
+  # Real usage only: comment lines documenting the trap are expected and fine.
+  if grep -vh '^[[:space:]]*#' "$HERE"/common.sh "$HERE"/sweep.sh \
+        "$HERE"/profile-oncpu.sh "$HERE"/profile-offcpu.sh | grep -q 'pkill'; then
+    bad "a script still CALLS pkill (it matches and kills the launching shell)"
+  else
+    ok "no pkill call anywhere in the harness (explicit PIDs only)"
+  fi
+else
+  bad "server launch / readiness poll"
+fi
+unset WS0_LISTEN_PORT
+
 # ---------------------------------------------------------------- 9 + 10
 if [ "$NO_BPF" = "1" ]; then
   echo; echo "== 9/10  perf + BPF captures: SKIPPED (--no-bpf) =="
