@@ -9,16 +9,18 @@ from __future__ import annotations
 import glob, json, os, statistics as st, sys
 
 RESULTS = sys.argv[1] if len(sys.argv) > 1 else "/data/ws0/results"
-SIDECAR = "/data/ws0/logs/ctxt/threads.jsonl"
+SIDECAR_V1 = "/data/ws0/logs/ctxt/threads.jsonl"        # aggregate-only; NOT monotone (thread churn)
+SIDECAR_V2 = "/data/ws0/logs/ctxt/threads-pertid.jsonl"  # per-TID; the usable one
 
 # #3100's published S=1 pinned-core control (rows/s), for the AC2 shape comparison.
 PUB_3100 = {1: 246940.0, 2: 287441.0, 4: 273438.0, 8: 248621.0, 16: 236734.0}
 
 
 def load_sidecar():
+    """Per-TID snapshots, time-ordered. v1's aggregate sum is deliberately unused."""
     rows = []
     try:
-        for line in open(SIDECAR):
+        for line in open(SIDECAR_V2):
             line = line.strip()
             if line:
                 try: rows.append(json.loads(line))
@@ -30,22 +32,46 @@ def load_sidecar():
 
 
 def sidecar_delta(sc, t0_ms, t1_ms):
-    """vol/nonvol delta over [t0,t1] for the single server pid alive in that window."""
+    """In-window voluntary/nonvoluntary ctxt switches, summed PER TID.
+
+    A live-thread aggregate is not a monotone counter: tokio retires threads, and a
+    retiring thread's accumulated count leaves the sum, producing negative deltas
+    (v1 measured -16925 vol/s). Summing per-TID (last - first) is churn-safe. It
+    slightly UNDER-counts: a thread born and retired entirely between two 2s samples
+    contributes nothing, and a thread first seen mid-window loses its pre-observation
+    switches. Both push the figure down, never up.
+    """
     win = [r for r in sc if t0_ms <= r["ts_unix_ms"] <= t1_ms]
     if len(win) < 2:
         return None
     pids = {r["pid"] for r in win}
     if len(pids) != 1:               # a server restart fell inside the window: counters reset
         return None
-    a, b = win[0], win[-1]
-    span = (b["ts_unix_ms"] - a["ts_unix_ms"]) / 1000.0
+    first, last = {}, {}
+    for snap in win:
+        for tid, (v, n) in snap["tids"].items():
+            if tid not in first:
+                first[tid] = (v, n)
+            last[tid] = (v, n)
+    vol = nonvol = 0
+    regressed = 0
+    for tid in last:
+        dv = last[tid][0] - first[tid][0]
+        dn = last[tid][1] - first[tid][1]
+        if dv < 0 or dn < 0:         # TID reuse; clamp rather than subtract
+            regressed += 1
+            dv = max(dv, 0); dn = max(dn, 0)
+        vol += dv; nonvol += dn
+    span = (win[-1]["ts_unix_ms"] - win[0]["ts_unix_ms"]) / 1000.0
     if span <= 0:
         return None
+    retired = len(set(first) - set(win[-1]["tids"]))
     return {
-        "vol": b["vol"] - a["vol"], "nonvol": b["nonvol"] - a["nonvol"],
-        "vol_per_s": (b["vol"] - a["vol"]) / span,
-        "nonvol_per_s": (b["nonvol"] - a["nonvol"]) / span,
-        "threads": b["threads"], "sample_span_s": span,
+        "vol": vol, "nonvol": nonvol,
+        "vol_per_s": vol / span, "nonvol_per_s": nonvol / span,
+        "threads": len(win[-1]["tids"]), "tids_seen_in_window": len(last),
+        "tids_retired_in_window": retired, "tids_with_regressed_counter": regressed,
+        "sample_span_s": span,
         "coverage_frac": span / max((t1_ms - t0_ms) / 1000.0, 1e-9),
     }
 
@@ -116,7 +142,9 @@ def main():
                 "server_thread_nonvol_ctxt_per_s_median": st.median(
                     [a["nonvol_per_s"] for a in ac5]) if ac5 else None,
                 "server_threads_observed": max((a["threads"] for a in ac5), default=None),
-                "ac5_source": ("per-thread sum over /proc/<pid>/task/*/status (sidecar, 0.5Hz)"
+                "server_tids_seen_in_window_max": max((a["tids_seen_in_window"] for a in ac5), default=None),
+                "server_tids_retired_in_window_max": max((a["tids_retired_in_window"] for a in ac5), default=None),
+                "ac5_source": ("per-TID delta sum over /proc/<pid>/task/*/status (0.5Hz sidecar); churn-safe, slight under-count"
                                if ac5 else "UNAVAILABLE: no clean sidecar window"),
                 "cycles_per_row_median": st.median(
                     [p["cycles_per_row"] for p in ps if p.get("cycles_per_row")]) or None,
