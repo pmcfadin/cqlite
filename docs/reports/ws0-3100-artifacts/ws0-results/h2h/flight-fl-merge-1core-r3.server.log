@@ -1,0 +1,5 @@
+[2m2026-07-31T22:46:27.231550Z[0m [32m INFO[0m [2mcqlite_flight[0m[2m:[0m cqlite-flight starting [3mlisten[0m[2m=[0m127.0.0.1:8815 [3mbatch_size[0m[2m=[0m8192 [3mmax_batch_bytes[0m[2m=[0m4194304 [3mmax_inflight_egress_bytes[0m[2m=[0m12582912 [3mmax_concurrent_scans[0m[2m=[0m64 [3madmission_wait_timeout_ms[0m[2m=[0m30000 [3mmax_concurrent_streams[0m[2m=[0m1024
+[2m2026-07-31T22:46:27.231789Z[0m [32m INFO[0m [2mcqlite_flight::saturation[0m[2m:[0m discovered 1 tables across 1 keyspaces under /home/ubuntu/ws0/ws0-h2h/datasets/sstables
+[2m2026-07-31T22:46:27.242561Z[0m [32m INFO[0m [2mcqlite_core::storage::sstable::reader::header[0m[2m:[0m Loaded CompressionInfo.db for NB format: algorithm=LZ4Compressor, chunk_length=16384, chunks=169194
+[2m2026-07-31T22:49:35.586475Z[0m [32m INFO[0m [2mcqlite_flight::shutdown[0m[2m:[0m shutdown signal received; draining in-flight RPCs
+[2m2026-07-31T22:49:35.586475Z[0m [32m INFO[0m [2mcqlite_flight::shutdown[0m[2m:[0m shutdown signal received; draining in-flight RPCs

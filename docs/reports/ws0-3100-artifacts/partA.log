@@ -1,0 +1,1138 @@
+[22:07:41] ARM1 start
+[22:07:41] arm1 count 1core r1 (cpus=2,10)
+daemon pid=15704 cpus=2,10 threads=214
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-count-1core-r1",
+ "temp": "warm",
+ "surface": "native-cql/count",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 12.490749753000273,
+ "rows_per_sec_wall": 320228.175177333,
+ "daemon_cpu_secs": 25.28,
+ "daemon_core_utilization": 1.0119488621540815,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 158223.49683544302,
+ "uncompressed_MB_per_s": 221.82205694533855,
+ "compressed_MB_per_s": 62.75191320775017,
+ "cycles": 89269134180,
+ "instructions": 156992703705,
+ "cycles_per_row": 22317.897287175398,
+ "instructions_per_row": 39249.25528077022,
+ "IPC": 1.7586448568935813,
+ "mem_traffic_in_bytes_per_row": 10841.331576618357,
+ "l2_evict_bytes_per_row": 10364.064707779464,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": "counted across 2 SMT siblings; wall cycles double-counted - take cycles/row and IPC from the -c 2 run"
+}
+[22:08:06] arm1 rows  1core r1 (cpus=2,10)
+daemon pid=15704 cpus=2,10 threads=214
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-rows-1core-r1",
+ "temp": "warm",
+ "surface": "native-cql/rows",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 18.278344151000056,
+ "rows_per_sec_wall": 218832.1856157389,
+ "daemon_cpu_secs": 36.58,
+ "daemon_core_utilization": 1.0006376862643385,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 109346.36413340624,
+ "uncompressed_MB_per_s": 151.58505497602235,
+ "compressed_MB_per_s": 42.8823550932602,
+ "cycles": 126311391595,
+ "instructions": 214556728158,
+ "cycles_per_row": 31578.716313448618,
+ "instructions_per_row": 53640.65715757183,
+ "IPC": 1.698633238448884,
+ "mem_traffic_in_bytes_per_row": 19021.987520656818,
+ "l2_evict_bytes_per_row": 17843.95608479233,
+ "daemon_io_delta": {
+  "rchar": 1060239940,
+  "read_bytes": 8192,
+  "syscr": 4113
+ },
+ "cycles_note": "counted across 2 SMT siblings; wall cycles double-counted - take cycles/row and IPC from the -c 2 run"
+}
+[22:08:38] arm1 count 1hw r1 (cpus=2)
+daemon pid=15704 cpus=2 threads=214
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-count-1hw-r1",
+ "temp": "warm",
+ "surface": "native-cql/count",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 11.806910483000138,
+ "rows_per_sec_wall": 338775.3304100284,
+ "daemon_cpu_secs": 11.89,
+ "daemon_core_utilization": 1.0070373631712968,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 336407.90580319596,
+ "uncompressed_MB_per_s": 234.6696713750267,
+ "compressed_MB_per_s": 66.38641374714916,
+ "cycles": 42286668732,
+ "instructions": 153367181039,
+ "cycles_per_row": 10571.957911842575,
+ "instructions_per_row": 38342.849688116425,
+ "IPC": 3.6268447157896118,
+ "mem_traffic_in_bytes_per_row": 9751.248031320862,
+ "l2_evict_bytes_per_row": 9388.422069606913,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": null
+}
+[22:09:02] arm1 rows  1hw r1 (cpus=2)
+daemon pid=15704 cpus=2 threads=214
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-rows-1hw-r1",
+ "temp": "warm",
+ "surface": "native-cql/rows",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 18.223924205999992,
+ "rows_per_sec_wall": 219485.6582361711,
+ "daemon_cpu_secs": 18.43,
+ "daemon_core_utilization": 1.0113079812926438,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 217031.47042864896,
+ "uncompressed_MB_per_s": 152.03771546019573,
+ "compressed_MB_per_s": 43.01040958796008,
+ "cycles": 64536028281,
+ "instructions": 209456325433,
+ "cycles_per_row": 16134.45076764611,
+ "instructions_per_row": 52365.521410088775,
+ "IPC": 3.2455719853256895,
+ "mem_traffic_in_bytes_per_row": 17496.60728470033,
+ "l2_evict_bytes_per_row": 16699.868238376555,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": null
+}
+[22:09:33] arm1 count 1core r2 (cpus=2,10)
+daemon pid=15704 cpus=2,10 threads=213
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-count-1core-r2",
+ "temp": "warm",
+ "surface": "native-cql/count",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 12.149822122999922,
+ "rows_per_sec_wall": 329213.87321614416,
+ "daemon_cpu_secs": 24.34,
+ "daemon_core_utilization": 1.0016607549308794,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 164334.0180772391,
+ "uncompressed_MB_per_s": 228.04644997682308,
+ "compressed_MB_per_s": 64.5127505954356,
+ "cycles": 85936964227,
+ "instructions": 153206221515,
+ "cycles_per_row": 21484.831889626963,
+ "instructions_per_row": 38302.60870048926,
+ "IPC": 1.7827744195188255,
+ "mem_traffic_in_bytes_per_row": 10088.999495486127,
+ "l2_evict_bytes_per_row": 9659.220860573665,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": "counted across 2 SMT siblings; wall cycles double-counted - take cycles/row and IPC from the -c 2 run"
+}
+[22:09:58] arm1 rows  1core r2 (cpus=2,10)
+daemon pid=15704 cpus=2,10 threads=213
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-rows-1core-r2",
+ "temp": "warm",
+ "surface": "native-cql/rows",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 17.62911930700011,
+ "rows_per_sec_wall": 226891.08459387065,
+ "daemon_cpu_secs": 35.41,
+ "daemon_core_utilization": 1.0043042815513625,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 112959.33352160407,
+ "uncompressed_MB_per_s": 157.1674542981742,
+ "compressed_MB_per_s": 44.46157693701488,
+ "cycles": 122113538578,
+ "instructions": 210196835408,
+ "cycles_per_row": 30529.224198165448,
+ "instructions_per_row": 52550.65399498486,
+ "IPC": 1.7213229413848883,
+ "mem_traffic_in_bytes_per_row": 18153.44070761946,
+ "l2_evict_bytes_per_row": 17025.65666955841,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": "counted across 2 SMT siblings; wall cycles double-counted - take cycles/row and IPC from the -c 2 run"
+}
+[22:10:28] arm1 count 1hw r2 (cpus=2)
+daemon pid=15704 cpus=2 threads=214
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-count-1hw-r2",
+ "temp": "warm",
+ "surface": "native-cql/count",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 11.574727384999733,
+ "rows_per_sec_wall": 345570.9898777968,
+ "daemon_cpu_secs": 11.78,
+ "daemon_core_utilization": 1.017734552890316,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 339549.23599320883,
+ "uncompressed_MB_per_s": 239.37702468834985,
+ "compressed_MB_per_s": 67.71809117645306,
+ "cycles": 41897256280,
+ "instructions": 152891465475,
+ "cycles_per_row": 10474.602121558342,
+ "instructions_per_row": 38223.91752648198,
+ "IPC": 3.6491999488755065,
+ "mem_traffic_in_bytes_per_row": 9633.00445962264,
+ "l2_evict_bytes_per_row": 9275.151226658732,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": null
+}
+[22:10:52] arm1 rows  1hw r2 (cpus=2)
+daemon pid=15704 cpus=2 threads=214
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-rows-1hw-r2",
+ "temp": "warm",
+ "surface": "native-cql/rows",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 18.247954822000338,
+ "rows_per_sec_wall": 219196.61896453187,
+ "daemon_cpu_secs": 18.39,
+ "daemon_core_utilization": 1.0077841697541035,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 217503.53452963565,
+ "uncompressed_MB_per_s": 151.83749795673123,
+ "compressed_MB_per_s": 42.95376945228966,
+ "cycles": 64266204264,
+ "instructions": 209542740128,
+ "cycles_per_row": 16066.99290830498,
+ "instructions_per_row": 52387.125677956145,
+ "IPC": 3.260543275081512,
+ "mem_traffic_in_bytes_per_row": 17440.577727887518,
+ "l2_evict_bytes_per_row": 16621.679528187025,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": null
+}
+[22:11:23] arm1 count 1core r3 (cpus=2,10)
+daemon pid=15704 cpus=2,10 threads=214
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-count-1core-r3",
+ "temp": "warm",
+ "surface": "native-cql/count",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 12.126700927999991,
+ "rows_per_sec_wall": 329841.5639792385,
+ "daemon_cpu_secs": 24.27,
+ "daemon_core_utilization": 1.0006843635420122,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 164807.993407499,
+ "uncompressed_MB_per_s": 228.48125136841853,
+ "compressed_MB_per_s": 64.63575287737157,
+ "cycles": 85815073250,
+ "instructions": 153126578823,
+ "cycles_per_row": 21454.358307353454,
+ "instructions_per_row": 38282.6974799307,
+ "IPC": 1.784378583199543,
+ "mem_traffic_in_bytes_per_row": 10070.51853925983,
+ "l2_evict_bytes_per_row": 9650.620384060561,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": "counted across 2 SMT siblings; wall cycles double-counted - take cycles/row and IPC from the -c 2 run"
+}
+[22:11:47] arm1 rows  1core r3 (cpus=2,10)
+daemon pid=15704 cpus=2,10 threads=213
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-rows-1core-r3",
+ "temp": "warm",
+ "surface": "native-cql/rows",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 17.716610417000084,
+ "rows_per_sec_wall": 225770.61333142375,
+ "daemon_cpu_secs": 35.64,
+ "daemon_core_utilization": 1.0058357428744218,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 112230.35914702581,
+ "uncompressed_MB_per_s": 156.39130385467723,
+ "compressed_MB_per_s": 44.2420093884258,
+ "cycles": 122711605242,
+ "instructions": 211210266821,
+ "cycles_per_row": 30678.74497598684,
+ "instructions_per_row": 52804.018815767435,
+ "IPC": 1.7211922735789453,
+ "mem_traffic_in_bytes_per_row": 18225.887659910648,
+ "l2_evict_bytes_per_row": 17088.576463852754,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": "counted across 2 SMT siblings; wall cycles double-counted - take cycles/row and IPC from the -c 2 run"
+}
+[22:12:18] arm1 count 1hw r3 (cpus=2)
+daemon pid=15704 cpus=2 threads=213
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-count-1hw-r3",
+ "temp": "warm",
+ "surface": "native-cql/count",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 11.787483560000055,
+ "rows_per_sec_wall": 339333.66520852066,
+ "daemon_cpu_secs": 11.82,
+ "daemon_core_utilization": 1.0027585565514838,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 338400.1692047377,
+ "uncompressed_MB_per_s": 235.05642988994225,
+ "compressed_MB_per_s": 66.4958250342617,
+ "cycles": 41954137777,
+ "instructions": 153026772433,
+ "cycles_per_row": 10488.822886879389,
+ "instructions_per_row": 38257.7451962429,
+ "IPC": 3.6474774728153747,
+ "mem_traffic_in_bytes_per_row": 9627.202284062812,
+ "l2_evict_bytes_per_row": 9272.307084444823,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": null
+}
+[22:12:42] arm1 rows  1hw r3 (cpus=2)
+daemon pid=15704 cpus=2 threads=213
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/etc/sudoers.d/axonops:1:50: wildcards are not allowed in command arguments
+axonops ALL=NOPASSWD: /sbin/service cassandra *, /usr/bin/systemctl * cassandra*
+                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-rows-1hw-r3",
+ "temp": "warm",
+ "surface": "native-cql/rows",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 18.130729931000133,
+ "rows_per_sec_wall": 220613.8426429783,
+ "daemon_cpu_secs": 18.29,
+ "daemon_core_utilization": 1.0087845370597874,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 218692.72826681248,
+ "uncompressed_MB_per_s": 152.81920879879104,
+ "compressed_MB_per_s": 43.231488604318024,
+ "cycles": 64002521714,
+ "instructions": 209133519882,
+ "cycles_per_row": 16001.070457937592,
+ "instructions_per_row": 52284.81780298958,
+ "IPC": 3.267582499585385,
+ "mem_traffic_in_bytes_per_row": 17404.883290290483,
+ "l2_evict_bytes_per_row": 16636.770839198078,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": null
+}
+[22:13:13] ARM1 done
+[22:13:13] draining cassandra
+[22:13:25] cassandra stopped
+2c297a0caf76338be0568be486570fe63b61c2ca9bfa6e68e7368f34c189d9a2  /home/ubuntu/ws0/apache-cassandra-5.0.8/data/data/ws0/events-23cee3208d2a11f1af3837acfbc90d02//nb-16-big-Data.db
+[22:13:27] ARM2a start
+[22:13:27] arm2a scan 1core r1
+{
+ "engine": "cqlite",
+ "label": "cq-scan-1core-r1",
+ "temp": "warm",
+ "surface": "scan",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "rows": 3999890,
+ "digest": "0xd1fba762150c532c",
+ "scan_secs": 9.526064545,
+ "rows_per_sec": 419889.0298407063,
+ "uncompressed_MB_per_s": 290.8571309706573,
+ "compressed_MB_per_s": 82.28145428758481,
+ "arrow_payload_bytes": 0,
+ "cycles": 66333153169,
+ "instructions": 101572820423,
+ "cycles_per_row": 16583.744345219493,
+ "instructions_per_row": 25393.90343809455,
+ "IPC": 1.53125270804206,
+ "l2_lines_in_all": 89505721,
+ "mem_traffic_in_bytes_per_row": 1432.130919600289,
+ "l2_evict_bytes_per_row": 1186.8790711744573,
+ "peak_rss_kib": 1041092,
+ "proc_io_delta": {
+  "rchar": 3085769,
+  "read_bytes": 0,
+  "syscr": 111
+ },
+ "cycles_per_row_WARNING": "counted across 2 SMT siblings; wall cycles are double-counted. Use the -c 2 run for cycles/row and IPC."
+}
+[22:13:46] arm2a scan 1hw r1
+{
+ "engine": "cqlite",
+ "label": "cq-scan-1hw-r1",
+ "temp": "warm",
+ "surface": "scan",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "rows": 3999890,
+ "digest": "0xd1fba762150c532c",
+ "scan_secs": 9.998298811,
+ "rows_per_sec": 400057.0572665194,
+ "uncompressed_MB_per_s": 277.119523568518,
+ "compressed_MB_per_s": 78.39518094194715,
+ "arrow_payload_bytes": 0,
+ "cycles": 36131610307,
+ "instructions": 94812637770,
+ "cycles_per_row": 9033.150988402182,
+ "instructions_per_row": 23703.811297310676,
+ "IPC": 2.6240911203349095,
+ "l2_lines_in_all": 77873345,
+ "mem_traffic_in_bytes_per_row": 1246.0077852140935,
+ "l2_evict_bytes_per_row": 1184.9504261367188,
+ "peak_rss_kib": 1041120,
+ "proc_io_delta": {
+  "rchar": 3085763,
+  "read_bytes": 0,
+  "syscr": 112
+ }
+}
+[22:14:06] arm2a scan 1core r2
+{
+ "engine": "cqlite",
+ "label": "cq-scan-1core-r2",
+ "temp": "warm",
+ "surface": "scan",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "rows": 3999890,
+ "digest": "0xd1fba762150c532c",
+ "scan_secs": 9.745155926,
+ "rows_per_sec": 410449.0508282504,
+ "uncompressed_MB_per_s": 284.31805750872905,
+ "compressed_MB_per_s": 80.43159600030395,
+ "arrow_payload_bytes": 0,
+ "cycles": 66701658693,
+ "instructions": 102034933822,
+ "cycles_per_row": 16675.873259764645,
+ "instructions_per_row": 25509.434964961536,
+ "IPC": 1.5297210867217617,
+ "l2_lines_in_all": 92939753,
+ "mem_traffic_in_bytes_per_row": 1487.076942615922,
+ "l2_evict_bytes_per_row": 1234.6664813282366,
+ "peak_rss_kib": 1041592,
+ "proc_io_delta": {
+  "rchar": 3085769,
+  "read_bytes": 0,
+  "syscr": 111
+ },
+ "cycles_per_row_WARNING": "counted across 2 SMT siblings; wall cycles are double-counted. Use the -c 2 run for cycles/row and IPC."
+}
+[22:14:25] arm2a scan 1hw r2
+{
+ "engine": "cqlite",
+ "label": "cq-scan-1hw-r2",
+ "temp": "warm",
+ "surface": "scan",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "rows": 3999890,
+ "digest": "0xd1fba762150c532c",
+ "scan_secs": 10.082313227,
+ "rows_per_sec": 396723.4413317439,
+ "uncompressed_MB_per_s": 274.810327810499,
+ "compressed_MB_per_s": 77.74192556336853,
+ "arrow_payload_bytes": 0,
+ "cycles": 35993088463,
+ "instructions": 94645177023,
+ "cycles_per_row": 8998.519575038314,
+ "instructions_per_row": 23661.944959236378,
+ "IPC": 2.6295375324707932,
+ "l2_lines_in_all": 78492893,
+ "mem_traffic_in_bytes_per_row": 1255.9208258227102,
+ "l2_evict_bytes_per_row": 1192.2860838673064,
+ "peak_rss_kib": 1041812,
+ "proc_io_delta": {
+  "rchar": 3085762,
+  "read_bytes": 0,
+  "syscr": 111
+ }
+}
+[22:14:45] arm2a scan 1core r3
+{
+ "engine": "cqlite",
+ "label": "cq-scan-1core-r3",
+ "temp": "warm",
+ "surface": "scan",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "rows": 3999890,
+ "digest": "0xd1fba762150c532c",
+ "scan_secs": 9.852486336,
+ "rows_per_sec": 405977.7261892566,
+ "uncompressed_MB_per_s": 281.22077093129803,
+ "compressed_MB_per_s": 79.55539522404672,
+ "arrow_payload_bytes": 0,
+ "cycles": 67555462970,
+ "instructions": 102394471471,
+ "cycles_per_row": 16889.330199080476,
+ "instructions_per_row": 25599.321849100852,
+ "IPC": 1.515709714201371,
+ "l2_lines_in_all": 91242668,
+ "mem_traffic_in_bytes_per_row": 1459.9228358779867,
+ "l2_evict_bytes_per_row": 1206.218579010923,
+ "peak_rss_kib": 1041804,
+ "proc_io_delta": {
+  "rchar": 3085770,
+  "read_bytes": 0,
+  "syscr": 112
+ },
+ "cycles_per_row_WARNING": "counted across 2 SMT siblings; wall cycles are double-counted. Use the -c 2 run for cycles/row and IPC."
+}
+[22:15:05] arm2a scan 1hw r3
+{
+ "engine": "cqlite",
+ "label": "cq-scan-1hw-r3",
+ "temp": "warm",
+ "surface": "scan",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "rows": 3999890,
+ "digest": "0xd1fba762150c532c",
+ "scan_secs": 10.198043051,
+ "rows_per_sec": 392221.329131159,
+ "uncompressed_MB_per_s": 271.69171468915386,
+ "compressed_MB_per_s": 76.85969165654191,
+ "arrow_payload_bytes": 0,
+ "cycles": 36135428209,
+ "instructions": 94823680012,
+ "cycles_per_row": 9034.10549015098,
+ "instructions_per_row": 23706.571933728177,
+ "IPC": 2.624119450406372,
+ "l2_lines_in_all": 78177357,
+ "mem_traffic_in_bytes_per_row": 1250.872110983052,
+ "l2_evict_bytes_per_row": 1197.1249689366457,
+ "peak_rss_kib": 1041324,
+ "proc_io_delta": {
+  "rchar": 3085762,
+  "read_bytes": 0,
+  "syscr": 111
+ }
+}
+[22:15:25] ARM2a done
+[22:15:25] AC5 fold digest
+pass 0 (cold): rows=3999890 cells=47998680 secs=11.499970 rows_per_sec=347817.4 arrow_payload_bytes=0 digest=0x4903ffa446163c4b io_read_bytes=0 io_rchar=186 io_syscr=12
+{"schema":"ws0-scan-harness/v1","mode":"Scan","keyspace":"ws0","table":"events","sql":"SELECT * FROM ws0.events","passes":1,"reopen_each_pass":false,"no_fold":false,"worker_threads":1,"rows_per_pass":3999890,"cells_per_pass":47998680,"cells_per_row":12.0,"digest":"0x4903ffa446163c4b","arrow_payload_bytes_per_pass":0,"cold_secs":11.499970112,"cold_rows_per_sec":347817.42570149736,"warm_rows_per_sec":null,"all_pass_rows_total":3999890,"all_pass_secs_total":11.499970112,"perf_denominator_rows":3999890,"perf_denominator_cells":47998680,"peak_rss_kib":1040916,"proc_io_start":{"cancelled_write_bytes":0,"rchar":13579,"read_bytes":0,"syscr":22,"syscw":0,"wchar":0,"write_bytes":0},"proc_io_end":{"cancelled_write_bytes":0,"rchar":3099344,"read_bytes":0,"syscr":133,"syscw":119717,"wchar":957698,"write_bytes":4096}}
+[22:15:37] ARM2b start
+[22:15:37] arm2b flight bypass 1core r1
+flight server pid=23033 cpus=2,10
+{
+ "engine": "cqlite-flight",
+ "label": "fl-bypass-1core-r1",
+ "temp": "warm",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "requests_ok": 9,
+ "requests_error": 0,
+ "rows_total": 35999010,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 144.965482988,
+ "rows_per_sec_step": 248328.14859093,
+ "rows_per_sec_from_p50_latency": 247725.9525649972,
+ "full_scan_p50_secs": 16.146431,
+ "full_scan_p99_secs": 16.408575,
+ "arrow_capacity_bytes_per_s": 3027457408.218545,
+ "uncompressed_MB_per_s": 172.01690852893722,
+ "compressed_MB_per_s": 48.66238399787865,
+ "server_cpu_secs": 227.46,
+ "server_cpu_utilization_of_pinned_set": 0.7845315840420742,
+ "rows_per_server_cpu_sec": 158265.23344763913,
+ "cycles": 824962236724,
+ "instructions": 1308015946205,
+ "cycles_per_row": 22916.247883594577,
+ "instructions_per_row": 36334.775489798194,
+ "IPC": 1.5855464504645087,
+ "mem_traffic_in_bytes_per_row": 19037.464131152494,
+ "l2_evict_bytes_per_row": 17393.190234509228,
+ "server_io_delta": {
+  "rchar": 111836,
+  "read_bytes": 0,
+  "syscr": 584
+ },
+ "cycles_per_row_WARNING": "counted across 2 SMT siblings; wall cycles double-counted"
+}
+[22:18:51] arm2b flight merge  1core r1
+flight server pid=23116 cpus=2,10
+{
+ "engine": "cqlite-flight",
+ "label": "fl-merge-1core-r1",
+ "temp": "warm",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "requests_ok": 3,
+ "requests_error": 0,
+ "rows_total": 11999670,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 145.20579967,
+ "rows_per_sec_step": 82639.05455065078,
+ "rows_per_sec_from_p50_latency": 82757.25972336094,
+ "full_scan_p50_secs": 48.332799,
+ "full_scan_p99_secs": 48.594943,
+ "arrow_capacity_bytes_per_s": 1007482314.5388763,
+ "uncompressed_MB_per_s": 57.24407308723579,
+ "compressed_MB_per_s": 16.193949129745526,
+ "server_cpu_secs": 237.17,
+ "server_cpu_utilization_of_pinned_set": 0.8166684820406663,
+ "rows_per_server_cpu_sec": 50595.22705232534,
+ "cycles": 869217188402,
+ "instructions": 1429138824011,
+ "cycles_per_row": 72436.75771100372,
+ "instructions_per_row": 119098.1772007897,
+ "IPC": 1.6441676983382945,
+ "mem_traffic_in_bytes_per_row": 30194.609503761352,
+ "l2_evict_bytes_per_row": 28017.936141243885,
+ "server_io_delta": {
+  "rchar": 14452910,
+  "read_bytes": 0,
+  "syscr": 806
+ },
+ "cycles_per_row_WARNING": "counted across 2 SMT siblings; wall cycles double-counted"
+}
+[22:22:06] arm2b flight bypass 1hw r1
+flight server pid=23970 cpus=2
+{
+ "engine": "cqlite-flight",
+ "label": "fl-bypass-1hw-r1",
+ "temp": "warm",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "requests_ok": 9,
+ "requests_error": 0,
+ "rows_total": 35999010,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 153.29059576,
+ "rows_per_sec_step": 234841.60800289398,
+ "rows_per_sec_from_p50_latency": 236793.3322847047,
+ "full_scan_p50_secs": 16.891903,
+ "full_scan_p99_secs": 17.498111,
+ "arrow_capacity_bytes_per_s": 2863038161.1611004,
+ "uncompressed_MB_per_s": 162.67478186360466,
+ "compressed_MB_per_s": 46.01956150424711,
+ "server_cpu_secs": 153.28,
+ "server_cpu_utilization_of_pinned_set": 0.9999308779514655,
+ "rows_per_server_cpu_sec": 234857.84185803757,
+ "cycles": 548922795195,
+ "instructions": 1294273681519,
+ "cycles_per_row": 15248.27474963895,
+ "instructions_per_row": 35953.035417335086,
+ "IPC": 2.3578428384618655,
+ "mem_traffic_in_bytes_per_row": 18202.663010566124,
+ "l2_evict_bytes_per_row": 16908.897908470262,
+ "server_io_delta": {
+  "rchar": 117733,
+  "read_bytes": 0,
+  "syscr": 616
+ }
+}
+[22:25:30] arm2b flight merge  1hw r1
+flight server pid=24050 cpus=2
+{
+ "engine": "cqlite-flight",
+ "label": "fl-merge-1hw-r1",
+ "temp": "warm",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "requests_ok": 3,
+ "requests_error": 0,
+ "rows_total": 11999670,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 166.727999326,
+ "rows_per_sec_step": 71971.5347662589,
+ "rows_per_sec_from_p50_latency": 71973.44207715883,
+ "full_scan_p50_secs": 55.574527,
+ "full_scan_p99_secs": 55.672830999999995,
+ "arrow_capacity_bytes_per_s": 877430759.8447071,
+ "uncompressed_MB_per_s": 49.85468213258754,
+ "compressed_MB_per_s": 14.103541952796096,
+ "server_cpu_secs": 166.71,
+ "server_cpu_utilization_of_pinned_set": 0.9998920437714556,
+ "rows_per_server_cpu_sec": 71979.30538060104,
+ "cycles": 598845774114,
+ "instructions": 1480861716605,
+ "cycles_per_row": 49905.18690213981,
+ "instructions_per_row": 123408.53678517826,
+ "IPC": 2.4728599259065556,
+ "mem_traffic_in_bytes_per_row": 28632.565288878777,
+ "l2_evict_bytes_per_row": 26887.18040546115,
+ "server_io_delta": {
+  "rchar": 14469510,
+  "read_bytes": 0,
+  "syscr": 894
+ }
+}
+[22:29:13] arm2b flight bypass 1core r2
+flight server pid=24109 cpus=2,10
+{
+ "engine": "cqlite-flight",
+ "label": "fl-bypass-1core-r2",
+ "temp": "warm",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "requests_ok": 10,
+ "requests_error": 0,
+ "rows_total": 39998900,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 154.815685346,
+ "rows_per_sec_step": 258364.64768156942,
+ "rows_per_sec_from_p50_latency": 257661.13652686038,
+ "full_scan_p50_secs": 15.523839,
+ "full_scan_p99_secs": 15.941631,
+ "arrow_capacity_bytes_per_s": 3149815963.609654,
+ "uncompressed_MB_per_s": 178.96919144902316,
+ "compressed_MB_per_s": 50.629136359680345,
+ "server_cpu_secs": 246.1,
+ "server_cpu_utilization_of_pinned_set": 0.7948161048733119,
+ "rows_per_server_cpu_sec": 162531.0849248273,
+ "cycles": 884413898359,
+ "instructions": 1427528095368,
+ "cycles_per_row": 22110.955510251533,
+ "instructions_per_row": 35689.18383675551,
+ "IPC": 1.6140950498592683,
+ "mem_traffic_in_bytes_per_row": 18658.123368792643,
+ "l2_evict_bytes_per_row": 17096.501611394313,
+ "server_io_delta": {
+  "rchar": 119496,
+  "read_bytes": 0,
+  "syscr": 624
+ },
+ "cycles_per_row_WARNING": "counted across 2 SMT siblings; wall cycles double-counted"
+}
+[22:32:49] arm2b flight merge  1core r2
+flight server pid=24201 cpus=2,10
+{
+ "engine": "cqlite-flight",
+ "label": "fl-merge-1core-r2",
+ "temp": "warm",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "requests_ok": 3,
+ "requests_error": 0,
+ "rows_total": 11999670,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 147.401119407,
+ "rows_per_sec_step": 81408.26913849164,
+ "rows_per_sec_from_p50_latency": 81432.26020781962,
+ "full_scan_p50_secs": 49.119231,
+ "full_scan_p99_secs": 49.250303,
+ "arrow_capacity_bytes_per_s": 992477368.7237862,
+ "uncompressed_MB_per_s": 56.39150803223316,
+ "compressed_MB_per_s": 15.952764420378823,
+ "server_cpu_secs": 241.07,
+ "server_cpu_utilization_of_pinned_set": 0.8177346310863624,
+ "rows_per_server_cpu_sec": 49776.703861948816,
+ "cycles": 868560960086,
+ "instructions": 1426555873674,
+ "cycles_per_row": 72382.0705141058,
+ "instructions_per_row": 118882.92541994905,
+ "IPC": 1.6424360974418544,
+ "mem_traffic_in_bytes_per_row": 29962.57433879432,
+ "l2_evict_bytes_per_row": 27826.784249900207,
+ "server_io_delta": {
+  "rchar": 14452910,
+  "read_bytes": 0,
+  "syscr": 806
+ },
+ "cycles_per_row_WARNING": "counted across 2 SMT siblings; wall cycles double-counted"
+}
+[22:36:07] arm2b flight bypass 1hw r2
+flight server pid=24253 cpus=2
+{
+ "engine": "cqlite-flight",
+ "label": "fl-bypass-1hw-r2",
+ "temp": "warm",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "requests_ok": 9,
+ "requests_error": 0,
+ "rows_total": 35999010,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 149.903747374,
+ "rows_per_sec_step": 240147.49884927715,
+ "rows_per_sec_from_p50_latency": 240053.0243701931,
+ "full_scan_p50_secs": 16.662526999999997,
+ "full_scan_p99_secs": 16.842751,
+ "arrow_capacity_bytes_per_s": 2927724176.988259,
+ "uncompressed_MB_per_s": 166.3501724528943,
+ "compressed_MB_per_s": 47.05930387450435,
+ "server_cpu_secs": 149.89,
+ "server_cpu_utilization_of_pinned_set": 0.9999082919924228,
+ "rows_per_server_cpu_sec": 240169.5243178331,
+ "cycles": 535771621430,
+ "instructions": 1277296314717,
+ "cycles_per_row": 14882.95432096605,
+ "instructions_per_row": 35481.4289258788,
+ "IPC": 2.3840312992088593,
+ "mem_traffic_in_bytes_per_row": 18006.89041081963,
+ "l2_evict_bytes_per_row": 16768.062991954503,
+ "server_io_delta": {
+  "rchar": 114675,
+  "read_bytes": 0,
+  "syscr": 600
+ }
+}
+[22:39:28] arm2b flight merge  1hw r2
+flight server pid=24333 cpus=2
+{
+ "engine": "cqlite-flight",
+ "label": "fl-merge-1hw-r2",
+ "temp": "warm",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "requests_ok": 3,
+ "requests_error": 0,
+ "rows_total": 11999670,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 166.721250607,
+ "rows_per_sec_step": 71974.4481061143,
+ "rows_per_sec_from_p50_latency": 71973.44207715883,
+ "full_scan_p50_secs": 55.574527,
+ "full_scan_p99_secs": 55.672830999999995,
+ "arrow_capacity_bytes_per_s": 877466277.4144146,
+ "uncompressed_MB_per_s": 49.85670020310538,
+ "compressed_MB_per_s": 14.10411285087416,
+ "server_cpu_secs": 166.7,
+ "server_cpu_utilization_of_pinned_set": 0.9998725381022356,
+ "rows_per_server_cpu_sec": 71983.62327534493,
+ "cycles": 598338469649,
+ "instructions": 1481320447999,
+ "cycles_per_row": 49862.91036745177,
+ "instructions_per_row": 123446.76545263328,
+ "IPC": 2.4757232288072317,
+ "mem_traffic_in_bytes_per_row": 28444.115989189704,
+ "l2_evict_bytes_per_row": 26711.41510258199,
+ "server_io_delta": {
+  "rchar": 14467981,
+  "read_bytes": 0,
+  "syscr": 886
+ }
+}
+[22:43:11] arm2b flight bypass 1core r3
+flight server pid=24395 cpus=2,10
+{
+ "engine": "cqlite-flight",
+ "label": "fl-bypass-1core-r3",
+ "temp": "warm",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "requests_ok": 9,
+ "requests_error": 0,
+ "rows_total": 35999010,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 145.565431194,
+ "rows_per_sec_step": 247304.6636465693,
+ "rows_per_sec_from_p50_latency": 247977.57873861122,
+ "full_scan_p50_secs": 16.130047,
+ "full_scan_p99_secs": 16.433151000000002,
+ "arrow_capacity_bytes_per_s": 3014979736.6594124,
+ "uncompressed_MB_per_s": 171.30794050797857,
+ "compressed_MB_per_s": 48.461821888181724,
+ "server_cpu_secs": 227.35,
+ "server_cpu_utilization_of_pinned_set": 0.7809202986422061,
+ "rows_per_server_cpu_sec": 158341.80778535298,
+ "cycles": 825022908384,
+ "instructions": 1312225098853,
+ "cycles_per_row": 22917.933253831146,
+ "instructions_per_row": 36451.69961210044,
+ "IPC": 1.590531711929429,
+ "mem_traffic_in_bytes_per_row": 19102.101889135283,
+ "l2_evict_bytes_per_row": 17456.11562006844,
+ "server_io_delta": {
+  "rchar": 111836,
+  "read_bytes": 0,
+  "syscr": 584
+ },
+ "cycles_per_row_WARNING": "counted across 2 SMT siblings; wall cycles double-counted"
+}
+[22:46:26] arm2b flight merge  1core r3
+flight server pid=24475 cpus=2,10
+{
+ "engine": "cqlite-flight",
+ "label": "fl-merge-1core-r3",
+ "temp": "warm",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "requests_ok": 3,
+ "requests_error": 0,
+ "rows_total": 11999670,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 142.467532564,
+ "rows_per_sec_step": 84227.40103686042,
+ "rows_per_sec_from_p50_latency": 84242.20713407481,
+ "full_scan_p50_secs": 47.480830999999995,
+ "full_scan_p99_secs": 47.874047,
+ "arrow_capacity_bytes_per_s": 1026846415.4826422,
+ "uncompressed_MB_per_s": 58.34432069823322,
+ "compressed_MB_per_s": 16.50520150718317,
+ "server_cpu_secs": 234.43,
+ "server_cpu_utilization_of_pinned_set": 0.8227488599716154,
+ "rows_per_server_cpu_sec": 51186.58021584268,
+ "cycles": 858830690418,
+ "instructions": 1421090264799,
+ "cycles_per_row": 71571.19240929125,
+ "instructions_per_row": 118427.44548800091,
+ "IPC": 1.6546803469579594,
+ "mem_traffic_in_bytes_per_row": 29864.719877129955,
+ "l2_evict_bytes_per_row": 27793.40469196236,
+ "server_io_delta": {
+  "rchar": 14451378,
+  "read_bytes": 0,
+  "syscr": 798
+ },
+ "cycles_per_row_WARNING": "counted across 2 SMT siblings; wall cycles double-counted"
+}
+[22:49:36] arm2b flight bypass 1hw r3
+flight server pid=24528 cpus=2
+{
+ "engine": "cqlite-flight",
+ "label": "fl-bypass-1hw-r3",
+ "temp": "warm",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "requests_ok": 8,
+ "requests_error": 0,
+ "rows_total": 31999120,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 144.397205122,
+ "rows_per_sec_step": 221604.84320291525,
+ "rows_per_sec_from_p50_latency": 221537.1367099512,
+ "full_scan_p50_secs": 18.055167,
+ "full_scan_p99_secs": 18.137087,
+ "arrow_capacity_bytes_per_s": 2701664020.2031403,
+ "uncompressed_MB_per_s": 153.50567488665942,
+ "compressed_MB_per_s": 43.42568507404327,
+ "server_cpu_secs": 144.37,
+ "server_cpu_utilization_of_pinned_set": 0.9998115952315212,
+ "rows_per_server_cpu_sec": 221646.60247973955,
+ "cycles": 517039883901,
+ "instructions": 1177947984011,
+ "cycles_per_row": 16157.94071527592,
+ "instructions_per_row": 36811.8868272315,
+ "IPC": 2.2782536138673337,
+ "mem_traffic_in_bytes_per_row": 18359.85603204088,
+ "l2_evict_bytes_per_row": 16967.283090284982,
+ "server_io_delta": {
+  "rchar": 110088,
+  "read_bytes": 0,
+  "syscr": 576
+ }
+}
+[22:52:55] arm2b flight merge  1hw r3
+flight server pid=24611 cpus=2
+{
+ "engine": "cqlite-flight",
+ "label": "fl-merge-1hw-r3",
+ "temp": "warm",
+ "pinned_cpus": "2",
+ "hw_threads": 1,
+ "requests_ok": 3,
+ "requests_error": 0,
+ "rows_total": 11999670,
+ "rows_per_scan_expected": 3999890,
+ "rows_per_scan_observed": 3999890.0,
+ "step_seconds": 166.049074345,
+ "rows_per_sec_step": 72265.80483711879,
+ "rows_per_sec_from_p50_latency": 72228.96909506476,
+ "full_scan_p50_secs": 55.377919,
+ "full_scan_p99_secs": 55.377919,
+ "arrow_capacity_bytes_per_s": 881018311.6832598,
+ "uncompressed_MB_per_s": 50.05852301067219,
+ "compressed_MB_per_s": 14.1612071158818,
+ "server_cpu_secs": 166.04,
+ "server_cpu_utilization_of_pinned_set": 0.9999453514267646,
+ "rows_per_server_cpu_sec": 72269.75427607806,
+ "cycles": 596529602592,
+ "instructions": 1479430156143,
+ "cycles_per_row": 49712.16730060077,
+ "instructions_per_row": 123289.23679926198,
+ "IPC": 2.4800615924418175,
+ "mem_traffic_in_bytes_per_row": 28714.07868783058,
+ "l2_evict_bytes_per_row": 26963.843729702567,
+ "server_io_delta": {
+  "rchar": 14467981,
+  "read_bytes": 0,
+  "syscr": 886
+ }
+}
+[22:56:37] ARM2b done
+[22:56:37] PART A BATTERY COMPLETE

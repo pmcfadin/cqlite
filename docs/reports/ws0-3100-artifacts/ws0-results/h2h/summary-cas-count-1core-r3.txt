@@ -1,0 +1,33 @@
+{
+ "engine": "cassandra-5.0.8",
+ "label": "cas-count-1core-r3",
+ "temp": "warm",
+ "surface": "native-cql/count",
+ "pinned_cpus": "2,10",
+ "hw_threads": 2,
+ "client_shards": 6,
+ "inflight": 8,
+ "ranges": 512,
+ "rows": 3999890,
+ "wall_secs": 12.126700927999991,
+ "rows_per_sec_wall": 329841.5639792385,
+ "daemon_cpu_secs": 24.27,
+ "daemon_core_utilization": 1.0006843635420122,
+ "client_bound": false,
+ "rows_per_daemon_cpu_sec": 164807.993407499,
+ "uncompressed_MB_per_s": 228.48125136841853,
+ "compressed_MB_per_s": 64.63575287737157,
+ "cycles": 85815073250,
+ "instructions": 153126578823,
+ "cycles_per_row": 21454.358307353454,
+ "instructions_per_row": 38282.6974799307,
+ "IPC": 1.784378583199543,
+ "mem_traffic_in_bytes_per_row": 10070.51853925983,
+ "l2_evict_bytes_per_row": 9650.620384060561,
+ "daemon_io_delta": {
+  "rchar": 1060235451,
+  "read_bytes": 0,
+  "syscr": 4111
+ },
+ "cycles_note": "counted across 2 SMT siblings; wall cycles double-counted - take cycles/row and IPC from the -c 2 run"
+}

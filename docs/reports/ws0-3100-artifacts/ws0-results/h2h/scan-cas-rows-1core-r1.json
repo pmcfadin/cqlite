@@ -1,0 +1,1 @@
+{"label": "cas-rows-1core-r1", "engine": "cassandra-5.0.8", "surface": "native-cql/rows", "ranges": 512, "inflight": 8, "client_shards": 6, "rows": 3999890, "wall_secs": 18.278344151000056, "rows_per_sec_wall": 218832.1856157389, "uncompressed_MB_per_s": 151.58505497602235, "compressed_MB_per_s": 42.8823550932602}

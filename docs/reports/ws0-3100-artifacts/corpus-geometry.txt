@@ -1,0 +1,13 @@
+CompressionInfo.db      : /home/ubuntu/ws0/apache-cassandra-5.0.8/data/data/ws0/events-23cee3208d2a11f1af3837acfbc90d02//nb-16-big-CompressionInfo.db
+Data.db                 : /home/ubuntu/ws0/apache-cassandra-5.0.8/data/data/ws0/events-23cee3208d2a11f1af3837acfbc90d02//nb-16-big-Data.db
+compressor              : LZ4Compressor
+other options           : {}
+chunk_length (bytes)    : 16384   (16 KiB)
+max_compressed_length   : 2147483647
+dataLength UNCOMPRESSED : 2772051730 bytes (2.7721 GB)
+Data.db on disk (comp)  : 784116369 bytes (0.7841 GB)
+chunk count             : 169194
+trailing bytes unread   : 0  (0 == format parsed exactly)
+compression ratio       : 3.5353x
+expected chunk count    : 169193  (match=False)
+per-chunk compressed size (incl 4B checksum): min=9 p50=4659 p99=5222 max=5423 mean=4634.4

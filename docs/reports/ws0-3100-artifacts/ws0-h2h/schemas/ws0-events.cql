@@ -1,0 +1,1 @@
+CREATE TABLE ws0.events (part_id text, seq int, event_time timestamp, blob_a blob, blob_b blob, device_id uuid, metric_a int, metric_b bigint, metric_c double, payload text, region text, status text, PRIMARY KEY (part_id, seq, event_time)) WITH CLUSTERING ORDER BY (seq ASC, event_time ASC);
