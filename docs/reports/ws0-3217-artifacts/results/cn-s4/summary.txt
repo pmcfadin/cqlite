@@ -1,0 +1,26 @@
+==== WS0 #3217 C(N) SWEEP SUMMARY ====
+label: cn-s4   S=4   server_cpus=0,1,2,3,8,9,10,11   client_cpus=6,7,14,15   merge_path=bypass
+points: 15 total, 0 excluded (client-saturated)   admission_clean: YES
+
+N    rep  rows/s min    rows/s med    rows/s max    spr%    rows/s/strm   speedup  margeff  srvUtl  cliUtl  cs/s     
+1    3    170447.3      175871.8      178729.8      4.7     175871.8      1.000    1.000    0.181   0.027   87156    
+2    3    315991.4      340877.9      357862.4      12.3    170439.0      1.938    0.969    0.405   0.043   175046   
+4    3    561143.1      565409.1      576220.2      2.7     141352.3      3.215    0.804    0.766   0.067   235160   
+8    3    718822.7      721434.1      727853.0      1.3     90179.3       4.102    0.513    0.947   0.083   172908   
+16   3    816264.6      818747.1      823953.9      0.9     51171.7       4.655    0.291    0.992   0.096   163503   
+
+byte bases (median, AC6 - never a bare MB/s):
+N    logical-uncomp B/s     on-disk-comp B/s       arrow-wire-cap B/s    
+1    121930044.3            34486537.1             2144116072.0          
+2    236327019.1            66842430.5             4155764585.3          
+4    391992139.4            110870553.1            6893105395.9          
+8    500162596.9            141465346.4            8795261814.0          
+16   567628671.5            160547364.2            9981639590.0          
+
+scheduler cost per N (AC5):
+N    cs/s (cpu-wide)  vol cs/s (proc)  nonvol cs/s (proc)
+1    87156            0.0              0.0             
+2    175046           0.0              0.0             
+4    235160           0.0              0.0             
+8    172908           0.0              0.0             
+16   163503           0.1              0.0             
