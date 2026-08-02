@@ -186,11 +186,12 @@ def main():
         lines.append("")
         lines.append("=== %s  (S=%s physical cores, cpus=%s, path=%s) ===" % (
             label, S, pts[0]["server_cpus"], path))
-        lines.append("%-4s %-4s %-12s %-12s %-12s %-7s %-12s %-8s %-8s %-7s %-7s %-6s" % (
+        lines.append("  (speedup/margeff below are SELF-normalised to THIS arm's own N=1 - NOT comparable across S; see the cross-S table)")
+        lines.append("%-4s %-4s %-12s %-12s %-12s %-7s %-12s %-12s %-12s %-7s %-7s %-6s" % (
             "N", "reps", "rows/s min", "rows/s med", "rows/s max", "spr%",
-            "rows/s/strm", "speedup", "margeff", "srvUtl", "cliUtl", "unav"))
+            "rows/s/strm", "spdup/selfN1", "meff/selfN1", "srvUtl", "cliUtl", "unav"))
         for r in rowsum:
-            lines.append("%-4d %-4d %-12.0f %-12.0f %-12.0f %-7.1f %-12.0f %-8.3f %-8.3f %-7.3f %-7.3f %-6d" % (
+            lines.append("%-4d %-4d %-12.0f %-12.0f %-12.0f %-7.1f %-12.0f %-12.3f %-12.3f %-7.3f %-7.3f %-6d" % (
                 r["N"], r["reps_valid"], r["rows_per_s_min"], r["rows_per_s_median"],
                 r["rows_per_s_max"], r["dispersion_pct_of_median"],
                 r["rows_per_s_per_stream_median"], r["speedup_vs_N1"] or 0,
@@ -241,6 +242,73 @@ def main():
                 ("%.0f" % r["server_thread_nonvol_ctxt_per_s_median"])
                 if r["server_thread_nonvol_ctxt_per_s_median"] is not None else "n/a",
                 r["server_threads_observed"]))
+
+    # ---- cross-S scaling against a COMMON reference -------------------------
+    # Self-normalising each arm to its own N=1 systematically flatters the wide arms:
+    # the N=1 baseline DECLINES as cores are added (a single stream cannot fill them),
+    # so a wide arm is divided by a weaker denominator. The cross-S curve therefore
+    # normalises every arm to one common single-physical-core reference.
+    arms = [(sw["S_physical_cores"], lab, sw) for lab, sw in out["sweeps"].items()
+            if sw["merge_path"] == "bypass" and sw["S_physical_cores"] and len(sw["per_N"]) >= 5]
+    arms.sort()
+    s1arm = next((a for a in arms if a[0] == 1), None)
+    if s1arm:
+        s1_pn = s1arm[2]["per_N"]
+        ref_n1 = next(r["rows_per_s_median"] for r in s1_pn if r["N"] == 1)
+        ref_peak_rec = max(s1_pn, key=lambda r: r["rows_per_s_median"])
+        ref_peak = ref_peak_rec["rows_per_s_median"]
+        rows = []
+        for S, lab, sw in arms:
+            best = max(sw["per_N"], key=lambda r: r["rows_per_s_median"])
+            n1 = next(r["rows_per_s_median"] for r in sw["per_N"] if r["N"] == 1)
+            rows.append({
+                "S_physical_cores": S, "arm": lab, "hw_threads": sw["server_cpus"],
+                "own_N1_rows_per_s_median": n1,
+                "best_rows_per_s_median": best["rows_per_s_median"],
+                "N_at_peak": best["N"],
+                "server_util_at_peak": best["server_cpu_util_of_pinned_set_median"],
+                "client_util_at_peak": best["client_cpu_util_of_pinned_set_median"],
+                "speedup_vs_common_ref_S1_N1": best["rows_per_s_median"] / ref_n1,
+                "marginal_efficiency_vs_common_ref_S1_N1":
+                    best["rows_per_s_median"] / (S * ref_n1),
+                "speedup_vs_common_ref_S1_PEAK": best["rows_per_s_median"] / ref_peak,
+                "marginal_efficiency_vs_common_ref_S1_PEAK":
+                    best["rows_per_s_median"] / (S * ref_peak),
+            })
+        out["cross_S_scaling"] = {
+            "common_reference_A_S1_N1_rows_per_s": ref_n1,
+            "common_reference_B_S1_PEAK_rows_per_s": ref_peak,
+            "common_reference_B_peak_N": ref_peak_rec["N"],
+            "reference_choice_note": (
+                "Reference B (S=1's PEAK, N=%d) is the primary denominator: it is the most the "
+                "engine achieves on ONE physical core, so it is the fair 'perfect scaling' unit, "
+                "and it is the CONSERVATIVE choice (it yields LOWER efficiencies than reference A). "
+                "Reference A (S=1 at N=1) is reported alongside because it is the naive baseline. "
+                "Both are shown so the denominator is never silently chosen."
+                % ref_peak_rec["N"]),
+            "self_normalisation_warning": (
+                "Per-arm speedup columns divide by that arm's OWN N=1, which DECLINES with core "
+                "count (S=1 %.0f, S=2 %.0f, S=4 %.0f, S=6 %.0f rows/s) because a single stream "
+                "cannot fill more cores. Those columns are NOT comparable across S."
+                % tuple([r["own_N1_rows_per_s_median"] for r in rows][:4] + [0] * (4 - len(rows)))),
+            "per_arm": rows,
+        }
+        lines.append("")
+        lines.append("=== CROSS-S SCALING vs a COMMON reference (the deliverable table) ===")
+        lines.append("common ref A = S=1 @ N=1   : %.0f rows/s" % ref_n1)
+        lines.append("common ref B = S=1 @ N=%-3d : %.0f rows/s   <- PRIMARY (best on 1 physical core; conservative)"
+                     % (ref_peak_rec["N"], ref_peak))
+        lines.append("%-3s %-14s %-13s %-6s %-8s %-11s %-11s %-11s %-11s" % (
+            "S", "own N=1", "best agg", "N@pk", "srvUtl", "spdup/refA", "meff/refA",
+            "spdup/refB", "meff/refB"))
+        for r in rows:
+            lines.append("%-3d %-14.0f %-13.0f %-6d %-8.3f %-11.3f %-11.3f %-11.3f %-11.3f" % (
+                r["S_physical_cores"], r["own_N1_rows_per_s_median"],
+                r["best_rows_per_s_median"], r["N_at_peak"], r["server_util_at_peak"],
+                r["speedup_vs_common_ref_S1_N1"], r["marginal_efficiency_vs_common_ref_S1_N1"],
+                r["speedup_vs_common_ref_S1_PEAK"], r["marginal_efficiency_vs_common_ref_S1_PEAK"]))
+        lines.append("NOTE: each arm's own N=1 DECLINES with core count, so per-arm self-normalised")
+        lines.append("      speedup/margeff columns flatter the wide arms and are NOT cross-comparable.")
 
     # ---- merge vs bypass -----------------------------------------------------
     lines.append("")
