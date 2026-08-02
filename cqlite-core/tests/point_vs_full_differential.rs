@@ -264,6 +264,53 @@ const CORPUS: &[TableCase] = &[
             ("ck > 0 AND ck <= 3", 3),
         ],
     },
+    // BTI (`da`) wide partition with a COMPOUND clustering key (issue #3032):
+    // `PRIMARY KEY (pk, bucket, seq)`, i.e. two components of DIFFERING types
+    // (`text` then `int`). `test_da.wide_table` above has a SINGLE `int` clustering
+    // column, so its slices can only ever bound the whole clustering key — it
+    // structurally cannot exercise a bound on a NON-first clustering component, nor
+    // a bound that is a PROPER PREFIX of the clustering key, nor the OSS50
+    // variable-length (text) component encoding. All three are covered here.
+    //
+    // Every row is live (no tombstone/TTL), so the divergence this case guards is a
+    // wrong within-partition window or a wrong post-scan bound evaluation on a
+    // multi-component clustering key.
+    TableCase {
+        keyspace: "test_da",
+        table: "multiclustering_table",
+        schema: "multiclustering-table-bti.cql",
+        pk_column: "pk",
+        probe_keys: &[1, 2, 3],
+        divergence_classes: &["bti_clustering_slice", "compound_clustering"],
+        // The fixture's partitions are DELIBERATELY non-uniform (pk=1: 3 buckets x
+        // 60 rows = 180; pk=2: 5 x 32 = 160; pk=3: 8 x 16 = 128), which is what makes
+        // their row-index tries differ structurally. This lane applies one expected
+        // count to EVERY probed key, so each predicate below is chosen to yield the
+        // SAME count in all three partitions: every bucket in every partition holds
+        // at least 16 rows (`seq` = 0..15), so a slice confined to `seq < 16` is
+        // partition-independent. Each count is strictly between 0 and the smallest
+        // partition's 128 rows, so neither an empty nor an unnarrowed result passes.
+        //
+        // A FIRST-component-only slice (e.g. `bucket = 'bo'`, the shape that actually
+        // drives the `Rows.db` prefix-bound narrowing) cannot appear here: its row
+        // count is the bucket size, which differs per partition by construction. That
+        // shape is covered instead by the query-semantics oracle case
+        // `multiclustering_bti__first_component_prefix_slice` and by
+        // `issue_3032_multiclustering_clustering_slice_select.rs`, which compare the
+        // point and full paths per partition against the committed JSONL golden.
+        clustering_slice_predicates: &[
+            // Bounds on the SECOND clustering component, under an equality on the
+            // first — the multi-component shape `wide_table` cannot express.
+            ("bucket = 'alpha' AND seq >= 2 AND seq < 8", 6),
+            ("bucket = 'bo' AND seq < 4", 4),
+            (
+                "bucket = 'charlie-extended-bucket' AND seq > 9 AND seq <= 14",
+                5,
+            ),
+            // A full two-component point read.
+            ("bucket = 'bo' AND seq = 5", 1),
+        ],
+    },
 ];
 
 // ---------------------------------------------------------------------------

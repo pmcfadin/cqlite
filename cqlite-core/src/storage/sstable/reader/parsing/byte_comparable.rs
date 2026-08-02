@@ -1,17 +1,37 @@
 //! Byte-comparable key decoding for Cassandra 5.0+ (CEP-25)
 //!
-//! This module implements decoding of byte-comparable encoded keys used in
-//! Cassandra 5.0's 'newbig' format. Byte-comparable encoding preserves the
-//! sort order of typed values when compared lexicographically as bytes.
+//! # WRONG per #3032 / #3207 — NOT format authority. Do not copy this scheme.
 //!
-//! ## Format Overview
+//! The variable-length terminator scheme documented and implemented below is
+//! **disproved**. Per pinned `cassandra-5.0.8`
+//! `src/java/org/apache/cassandra/utils/bytecomparable/ByteSource.java`
+//! (`AbstractEscaper`: `ESCAPE = 0x00`, `ESCAPED_0_CONT = 0xFE`,
+//! `ESCAPED_0_DONE = 0xFF`), a variable-length component ends at a **lone `0x00`**:
+//! `00 FF` is how an escape RUN of zeros is CLOSED (it emits the run's final zero and
+//! returns to the unescaped state), never a terminator, and `00 FE` continues a run
+//! rather than encoding one literal zero. The correct encoder/decoder pair lives in
+//! `storage::sstable::bti::parser::encoding` (`encode_clustering_component_oss50`),
+//! validated against the real Cassandra `da` fixture by
+//! `cqlite-core/tests/issue_3032_multiclustering_rows_trie_shape.rs`.
+//!
+//! This module is effectively dead: its only callers (`key_parsing.rs` and
+//! `row_cell_state_machine.rs`) are gated on `CassandraVersion::V5_0NewBigFormat`,
+//! reachable solely through the synthetic magic `0xD4645400` — never a real
+//! `na`/`nb`/`da` SSTable. Fixing it is deferred to **#3207**; until then treat every
+//! format claim in this file as a known-wrong historical artifact, and take format
+//! authority from pinned Cassandra source, `sstabledump`, or
+//! `docs/sstables-definitive-guide/` — never from here.
+//!
+//! ## Format Overview (AS IMPLEMENTED HERE — known wrong, see banner above)
 //!
 //! Keys are encoded as a sequence of components separated by markers:
 //! - `0x40` (NEXT_COMPONENT): Separates components
 //! - `0x38` (TERMINATOR): Marks end of key
 //! - `0x3E` (NULL_MARKER): Represents null component
 //! - `0x00 0xFE`: Escape sequence for literal zero byte
+//!   (WRONG: `00 FE` CONTINUES a zero run; see banner)
 //! - `0x00 0xFF`: End-of-variable-length-data marker
+//!   (WRONG: `00 FF` CLOSES a zero run; the terminator is a lone `0x00`)
 //!
 //! ## Type-Specific Encodings
 //!
@@ -109,6 +129,11 @@ pub fn decode_byte_comparable_key(input: &[u8]) -> IResult<&[u8], Vec<Vec<u8>>> 
 ///
 /// Handles escape sequences for variable-length data.
 ///
+/// **WRONG per #3032 / #3207** — the `00 FE` / `00 FF` handling below does not match
+/// pinned `cassandra-5.0.8` `ByteSource.AbstractEscaper` (a lone `0x00` ends a
+/// variable-length component; `00 FF` closes an escape RUN). See the module banner;
+/// use `bti::parser::encoding` for the correct scheme.
+///
 /// # Returns
 /// * `Ok((data, consumed))` - Decoded component data and bytes consumed
 /// * `Err(_)` - Parse error
@@ -137,12 +162,17 @@ fn extract_component(input: &[u8]) -> Result<(Vec<u8>, usize)> {
                 }
                 match input[i + 1] {
                     ESCAPE_FE => {
-                        // Literal 0x00
+                        // Literal 0x00.
+                        // WRONG per #3032/#3207: in Cassandra `00 FE` CONTINUES a run
+                        // of zeros; only the run's close (`00 FF`) emits the last one.
                         data.push(0x00);
                         i += 2;
                     }
                     ESCAPE_FF => {
-                        // End of variable-length data (acts as component terminator)
+                        // End of variable-length data (acts as component terminator).
+                        // WRONG per #3032/#3207: `00 FF` CLOSES an escape run (emitting
+                        // that run's final `0x00`) and returns to the unescaped state.
+                        // The real terminator is a LONE `0x00`.
                         return Ok((data, i + 2));
                     }
                     _ => {
@@ -229,6 +259,11 @@ pub fn decode_bigint_component(data: &[u8]) -> Result<i64> {
 ///
 /// Variable-length text with `0x00 0xFF` terminator and `0x00 0xFE` escaping.
 /// This function validates UTF-8 encoding.
+///
+/// **WRONG per #3032 / #3207**: that terminator/escaping description is the disproved
+/// scheme (see the module banner) — pinned `cassandra-5.0.8`
+/// `ByteSource.AbstractEscaper` ends a variable-length component at a LONE `0x00`.
+/// The UTF-8 validation itself is unaffected; only the framing prose is wrong.
 ///
 /// **NOTE**: This function is used for schema-aware key decoding when type
 /// information is available. The `#[allow(dead_code)]` annotation is present

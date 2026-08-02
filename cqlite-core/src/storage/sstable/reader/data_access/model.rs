@@ -59,6 +59,22 @@ pub(super) struct ClusteringRowWindow {
 #[cfg(not(feature = "tombstones"))]
 pub(super) const MAX_OSS50_BOUND_SENTINEL_LEN: usize = 64;
 
+/// `ByteSource.LT_NEXT_COMPONENT` (cassandra-5.0.8
+/// `utils/bytecomparable/ByteSource.java:75`) — the byte-comparable terminator
+/// `ClusteringPrefix.Kind.INCL_START_BOUND` / `EXCL_END_BOUND` emit
+/// (`db/ClusteringPrefix.java:70-71`). It is smaller than `NEXT_COMPONENT`
+/// (`0x40`), so a bound carrying it sorts BELOW every clustering that extends it.
+#[cfg(not(feature = "tombstones"))]
+const OSS50_LT_NEXT_COMPONENT: u8 = 0x20;
+
+/// `ByteSource.GT_NEXT_COMPONENT` (`ByteSource.java:76`) — the terminator
+/// `ClusteringPrefix.Kind.INCL_END_BOUND` / `EXCL_START_BOUND` emit
+/// (`ClusteringPrefix.java:77-79`). It is LARGER than `NEXT_COMPONENT` (`0x40`)
+/// and than the variable-length escape bytes, so a bound carrying it sorts ABOVE
+/// every clustering that extends it.
+#[cfg(not(feature = "tombstones"))]
+const OSS50_GT_NEXT_COMPONENT: u8 = 0x60;
+
 /// Normalize a CQL [`ClusteringSlice`] into the `(physical_lower, physical_upper)`
 /// byte-comparable bounds that [`select_row_index_blocks_for_range`] consumes
 /// (issue #954 High-severity correctness fix).
@@ -108,8 +124,21 @@ pub(super) fn physical_byte_bounds_for_slice(
 
     // Encode a closed CQL bound to its physical byte-comparable form; `None`
     // bubbles up as an un-encodable-bound fallback at the call site.
+    // The safe fallback is retained (an un-encodable bound just widens to the whole
+    // partition), but the encoder's error text is the ONLY diagnosis of WHICH
+    // clustering type is unsupported, so log it rather than dropping it silently.
     let encode = |values: &[Value]| -> Option<Vec<u8>> {
-        encode_clustering_bound_oss50_with_order(values, is_reversed).ok()
+        match encode_clustering_bound_oss50_with_order(values, is_reversed) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "OSS50 clustering bound not encodable; falling back to a full-partition \
+                     scan for this slice"
+                );
+                None
+            }
+        }
     };
 
     // The FIRST clustering column's order decides the value↔byte direction. A
@@ -135,7 +164,7 @@ pub(super) fn physical_byte_bounds_for_slice(
         }
     };
 
-    let (phys_lower, phys_upper) = if first_desc {
+    let (mut phys_lower, mut phys_upper) = if first_desc {
         // DESC: CQL upper-value bound → physical-lower bytes; CQL lower-value bound
         // → physical-upper bytes. Open CQL upper → physical -∞; open CQL lower →
         // physical +∞.
@@ -149,6 +178,36 @@ pub(super) fn physical_byte_bounds_for_slice(
         let upper = cql_upper_bytes.unwrap_or_else(pos_inf);
         (lower, upper)
     };
+
+    // Cassandra bound TERMINATORS (`ClusteringPrefix.Kind.asByteComparable`,
+    // cassandra-5.0.8 `db/ClusteringPrefix.java:68-81`).
+    //
+    // A `Rows.db` separator is the byte-comparable image of a full CLUSTERING (all
+    // components), while a slice bound may name only a PROPER PREFIX of the
+    // clustering key — e.g. `WHERE bucket = 'bo'` on `PRIMARY KEY (pk, bucket, seq)`.
+    // Cassandra distinguishes the two sides of such a prefix with a trailing marker:
+    // `LT_NEXT_COMPONENT` (0x20) sorts the bound BELOW every clustering that extends
+    // it, `GT_NEXT_COMPONENT` (0x60) sorts it ABOVE. Without one, a prefix bound is a
+    // bare prefix and therefore always sorts BELOW its extensions — which silently
+    // TRUNCATES an upper bound to the first row of the prefix's range (issue #3032:
+    // `bucket = 'bo'` returned 12 of 60 rows, the first row-index block only).
+    //
+    // The physical-LOW side always takes `LT` and the physical-HIGH side always takes
+    // `GT`. For the INCLUSIVE kinds (`=`, `>=`, `<=` — after the DESC role swap
+    // above) that is byte-exactly what Cassandra emits. For the EXCLUSIVE kinds it is
+    // deliberately one marker "wider" than Cassandra's, which can only ever ADD the
+    // boundary prefix's own rows to the window: block selection is over-inclusive by
+    // block granularity anyway and the post-scan `evaluate_leaf` backstop re-applies
+    // the exact CQL bound BY VALUE, so a wider window never changes the result — while
+    // a narrower one loses rows that were never decoded. Choosing by side rather than
+    // by inclusivity also keeps the DESC swap correct with no second mapping.
+    //
+    // Appending to the open sentinels is harmless: `-∞` is the empty vector (a lone
+    // 0x20 still sorts below every separator, all of which begin with the 0x40
+    // `NEXT_COMPONENT` byte, and at/above the stored `ByteComparable.EMPTY` block-0
+    // separator exactly as the bare empty bound did), and `+∞` is an all-0xFF run.
+    phys_lower.push(OSS50_LT_NEXT_COMPONENT);
+    phys_upper.push(OSS50_GT_NEXT_COMPONENT);
 
     Ok(Some((phys_lower, phys_upper)))
 }
@@ -400,484 +459,9 @@ pub(super) fn sort_by_token_order_with_meta(
     results.extend(tagged.into_iter().map(|(_, k, v, m)| (k, v, m)));
 }
 
+// Unit tests live in the sibling `model_tests.rs` (campsite rule, epic #1116):
+// this module's helpers are small and path-agnostic, but their test matrix is
+// several times the size of the code it covers.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // =========================================================================
-    // table_ids_match tests
-    // =========================================================================
-
-    #[test]
-    fn test_table_ids_match_strict_keyspace_aware() {
-        let a = TableId::new("ks_a.users".to_string());
-        let b = TableId::new("ks_b.users".to_string());
-        // Both qualified, different keyspace, same table name → must NOT match
-        // (the permissive helper would match these).
-        assert!(table_ids_match(&a, &b), "permissive helper matches on name");
-        assert!(
-            !table_ids_match_strict(&a, &b),
-            "strict guard must reject a wrong-keyspace same-name query"
-        );
-        // Both qualified, identical → match.
-        let a2 = TableId::new("ks_a.users".to_string());
-        assert!(table_ids_match_strict(&a, &a2));
-        // One side unqualified → fall back to permissive name match.
-        let unq = TableId::new("users".to_string());
-        assert!(table_ids_match_strict(&a, &unq));
-        assert!(table_ids_match_strict(&unq, &a));
-    }
-
-    /// Issue #1284 (hardened per review): the SEEK consistency check relaxes to a
-    /// name-only match across a header-keyspace divergence ONLY when resolution
-    /// was an EXACT fully-qualified match. A fully-qualified query that reached
-    /// the reader via the bare-name FALLBACK keeps STRICT keyspace matching, so a
-    /// wrong-keyspace query can never return another keyspace's same-named rows.
-    /// A different table name always rejects (the #831 wrong-table guard).
-    #[test]
-    fn test_table_header_consistent_for_seek_gates_on_resolution_mode() {
-        // The seek builds `entry` from the SSTable's authoritative header.
-        let header = TableId::new("ks_a.users".to_string());
-
-        // 1. EXACT fully-qualified match, header keyspace MATCHES, same table:
-        //    ACCEPT (seek engages — the genuine #1284 goal, no regression).
-        let query_same = TableId::new("ks_a.users".to_string());
-        assert!(
-            table_header_consistent_for_seek(&header, &query_same, /*fq_match=*/ true),
-            "exact FQ match with a consistent header keyspace+table must accept (seek engages)"
-        );
-
-        // 1b. EXACT fully-qualified match, header keyspace DIFFERS but resolution
-        //     was path-authoritative (the benign #1284 divergence): ACCEPT on the
-        //     consistent table name. The strict guard alone would wrongly reject.
-        let query_div_exact = TableId::new("ks_b.users".to_string());
-        assert!(
-            !table_ids_match_strict(&header, &query_div_exact),
-            "precondition: the strict guard rejects a different-keyspace same-name query"
-        );
-        assert!(
-            table_header_consistent_for_seek(&header, &query_div_exact, /*fq_match=*/ true),
-            "Issue #1284: an EXACT fully-qualified resolution must accept rows when only the \
-             header keyspace diverges and the table name is consistent"
-        );
-
-        // 2. Fully-qualified query, header keyspace DIFFERS, reached via the
-        //    bare-name FALLBACK (fq_match = false), SAME table name: REJECT — the
-        //    keyspaces genuinely differ, so accepting would surface another
-        //    keyspace's same-named rows (#1284 review correctness fix).
-        let query_other_ks = TableId::new("ks_b.users".to_string());
-        assert!(
-            !table_header_consistent_for_seek(&header, &query_other_ks, /*fq_match=*/ false),
-            "Issue #1284 review: a fully-qualified query resolved via the bare-name fallback must \
-             NOT accept rows from a reader whose header keyspace differs (no wrong-keyspace rows)"
-        );
-
-        // 3. DIFFERENT table name: REJECT regardless of resolution mode (the #831
-        //    wrong-table guard must survive the relaxation).
-        let query_wrong_table = TableId::new("ks_b.accounts".to_string());
-        assert!(
-            !table_header_consistent_for_seek(&header, &query_wrong_table, /*fq_match=*/ true),
-            "Issue #831: a genuinely different table name must still be rejected (exact match)"
-        );
-        assert!(
-            !table_header_consistent_for_seek(
-                &header,
-                &query_wrong_table,
-                /*fq_match=*/ false
-            ),
-            "Issue #831: a genuinely different table name must still be rejected (fallback)"
-        );
-
-        // 4. UNqualified query: defers to the strict guard's permissive name match
-        //    (resolution mode irrelevant — there is no keyspace to mismatch).
-        let query_unqualified = TableId::new("users".to_string());
-        assert!(table_header_consistent_for_seek(
-            &header,
-            &query_unqualified,
-            /*fq_match=*/ false
-        ));
-        let query_unqualified_wrong = TableId::new("accounts".to_string());
-        assert!(!table_header_consistent_for_seek(
-            &header,
-            &query_unqualified_wrong,
-            /*fq_match=*/ true
-        ));
-    }
-
-    /// Issue #1321: the `get()` POINT-LOOKUP decoder
-    /// (`bti_decompress_and_parse_target`) now applies the SAME
-    /// resolution-mode-aware guard the SEEK path adopted in #1284 — replacing its
-    /// previous unconditional `table_ids_match_strict`. This exercises the exact
-    /// row-acceptance predicate the get path evaluates per emitted partition:
-    ///   - ACCEPT: an EXACT fully-qualified resolution with a consistent table name
-    ///     even when the reader's header keyspace diverges (the #1321 goal);
-    ///   - REJECT (fallback): a fully-qualified query that reached the reader via
-    ///     the bare-name fallback whose header keyspace differs — no wrong-keyspace
-    ///     rows on get() either;
-    ///   - REJECT (different table): a genuinely different table name (#831).
-    #[test]
-    fn test_get_point_lookup_guard_gates_on_resolution_mode() {
-        // The get() decoder builds `entry` (`tid`) from the parser-emitted partition,
-        // whose table id is this reader's authoritative serialization header.
-        let header = TableId::new("ks_a.users".to_string());
-
-        // ACCEPT: exact FQ match, header keyspace diverges, same table name. The old
-        // strict-only get guard would WRONGLY reject this (the #1321 false rejection).
-        let query_div_exact = TableId::new("ks_b.users".to_string());
-        assert!(
-            !table_ids_match_strict(&header, &query_div_exact),
-            "precondition: the old get() guard (strict) rejects this divergence"
-        );
-        assert!(
-            table_header_consistent_for_seek(&header, &query_div_exact, /*fq_match=*/ true),
-            "Issue #1321: get() must accept rows when resolution was an exact FQ match \
-             and only the header keyspace diverges"
-        );
-
-        // REJECT (fallback): fully-qualified query resolved via the bare-name
-        // fallback, header keyspace differs — must NOT surface another keyspace's rows.
-        assert!(
-            !table_header_consistent_for_seek(&header, &query_div_exact, /*fq_match=*/ false),
-            "Issue #1321: a fully-qualified get() resolved via the bare-name fallback must \
-             still REJECT a wrong-keyspace reader (strict keyspace match preserved)"
-        );
-
-        // REJECT (different table): a genuinely different table never matches,
-        // regardless of resolution mode (#831 wrong-table guard survives).
-        let query_wrong_table = TableId::new("ks_a.accounts".to_string());
-        assert!(
-            !table_header_consistent_for_seek(&header, &query_wrong_table, /*fq_match=*/ true),
-            "Issue #831: get() must still reject a different table name (exact match)"
-        );
-        assert!(
-            !table_header_consistent_for_seek(
-                &header,
-                &query_wrong_table,
-                /*fq_match=*/ false
-            ),
-            "Issue #831: get() must still reject a different table name (fallback)"
-        );
-
-        // Sanity: the existing strict default (fq_match=false) the unchanged per-reader
-        // `get()` callers pass is exactly today's behavior for a consistent FQ query.
-        let query_same = TableId::new("ks_a.users".to_string());
-        assert!(table_header_consistent_for_seek(
-            &header,
-            &query_same,
-            /*fq_match=*/ false
-        ));
-    }
-
-    #[test]
-    fn test_bti_lookup_step_decision() {
-        // Key prefix buffered and matches → parse.
-        assert_eq!(bti_lookup_step(true, true, true), BtiLookupStep::Parse);
-        assert_eq!(bti_lookup_step(true, true, false), BtiLookupStep::Parse);
-        // Key prefix buffered but does NOT match → absent (prefix collision).
-        assert_eq!(bti_lookup_step(true, false, true), BtiLookupStep::Absent);
-        assert_eq!(bti_lookup_step(true, false, false), BtiLookupStep::Absent);
-        // Key prefix NOT yet buffered (header straddles a chunk boundary):
-        //  - chunk-targeted path MUST pull the next chunk, never parse a
-        //    truncated header (issue #831 review regression);
-        assert_eq!(
-            bti_lookup_step(false, false, true),
-            BtiLookupStep::PullNextChunk
-        );
-        //  - whole-section fallback cannot grow → absent.
-        assert_eq!(bti_lookup_step(false, false, false), BtiLookupStep::Absent);
-    }
-
-    // =========================================================================
-    // physical_byte_bounds_for_slice — DESC clustering normalization (issue #954)
-    // =========================================================================
-
-    /// Build a [`ClusteringSlice`] over a single integer clustering column.
-    #[cfg(not(feature = "tombstones"))]
-    fn int_slice(
-        start: Option<i64>,
-        start_inclusive: bool,
-        end: Option<i64>,
-        end_inclusive: bool,
-    ) -> ClusteringSlice {
-        ClusteringSlice {
-            start: start
-                .map(|v| vec![Value::Integer(v as i32)])
-                .unwrap_or_default(),
-            start_inclusive,
-            end: end
-                .map(|v| vec![Value::Integer(v as i32)])
-                .unwrap_or_default(),
-            end_inclusive,
-        }
-    }
-
-    /// The physical byte image of a single-int clustering bound under an order.
-    #[cfg(not(feature = "tombstones"))]
-    fn enc_int(v: i32, reversed: bool) -> Vec<u8> {
-        crate::storage::sstable::bti::encode_clustering_bound_oss50_with_order(
-            &[Value::Integer(v)],
-            &[reversed],
-        )
-        .expect("int encodes")
-    }
-
-    /// ASC: the physical bounds are the CQL bounds, no swap.
-    #[cfg(not(feature = "tombstones"))]
-    #[test]
-    fn physical_bounds_asc_no_swap() {
-        // ck >= 100 AND ck < 110
-        let slice = int_slice(Some(100), true, Some(110), false);
-        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[false])
-            .expect("ok")
-            .expect("encodable");
-        assert_eq!(lower, enc_int(100, false), "ASC physical-lower = enc(100)");
-        assert_eq!(upper, enc_int(110, false), "ASC physical-upper = enc(110)");
-        // The physical range is well-ordered (lower <= upper) so block selection
-        // returns a non-empty window for an in-range slice.
-        assert!(lower <= upper, "ASC physical bounds must be ordered");
-    }
-
-    /// DESC: the CQL lower/upper roles SWAP into physical order, and the result is
-    /// still a well-ordered `[phys_lower, phys_upper]` (the bug produced a
-    /// REVERSED, empty-selecting range).
-    #[cfg(not(feature = "tombstones"))]
-    #[test]
-    fn physical_bounds_desc_swaps_roles() {
-        // ck >= 100 AND ck < 110 on a DESC column.
-        let slice = int_slice(Some(100), true, Some(110), false);
-        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
-            .expect("ok")
-            .expect("encodable");
-        // Physical-lower comes from the CQL UPPER bound (enc_desc(110)); physical-
-        // upper from the CQL LOWER bound (enc_desc(100)).
-        assert_eq!(
-            lower,
-            enc_int(110, true),
-            "DESC physical-lower must come from the CQL upper bound (110)"
-        );
-        assert_eq!(
-            upper,
-            enc_int(100, true),
-            "DESC physical-upper must come from the CQL lower bound (100)"
-        );
-        // The whole point: under DESC the swapped bounds are well-ordered. With the
-        // un-swapped (buggy) mapping the range would be [enc_desc(100),
-        // enc_desc(110)] which is REVERSED (enc_desc(100) > enc_desc(110)) and
-        // `select_row_index_blocks_for_range` returns EMPTY → dropped rows.
-        assert!(
-            lower < upper,
-            "DESC swapped physical bounds must be ordered (lower < upper); \
-             got lower={lower:?} upper={upper:?}"
-        );
-        assert!(
-            enc_int(100, true) > enc_int(110, true),
-            "sanity: under DESC, enc(100) sorts AFTER enc(110) in physical bytes — \
-             the un-swapped mapping would build a reversed (empty) range"
-        );
-    }
-
-    /// DESC single-bound `ck >= v` (open CQL upper): the matching values (v and
-    /// larger) all sort to the physical-LOW byte side (DESC inverts bytes), so the
-    /// physical window is `[-∞, enc_desc(v)]`. (The buggy un-swapped code built
-    /// `[enc_desc(v), +∞]`, which EXCLUDED exactly those low-byte matching rows.)
-    #[cfg(not(feature = "tombstones"))]
-    #[test]
-    fn physical_bounds_desc_lower_bound_only() {
-        // ck >= 290, open above.
-        let slice = int_slice(Some(290), true, None, false);
-        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
-            .expect("ok")
-            .expect("encodable");
-        assert_eq!(
-            lower,
-            Vec::<u8>::new(),
-            "DESC `ck >= 290`: open CQL upper → physical -∞ (the matching large \
-             values sort to the LOW physical-byte side)"
-        );
-        assert_eq!(
-            upper,
-            enc_int(290, true),
-            "DESC `ck >= 290`: physical-upper = enc_desc(290) (the boundary value)"
-        );
-        assert!(lower < upper, "must be ordered");
-        // Crucial: enc_desc(290) sorts ABOVE enc_desc(299), so [-∞, enc_desc(290)]
-        // includes enc_desc(299) — the buggy [enc_desc(290), +∞] would NOT.
-        assert!(
-            enc_int(299, true) < enc_int(290, true),
-            "sanity: larger DESC value has smaller bytes"
-        );
-        assert!(
-            enc_int(299, true).as_slice() <= upper.as_slice(),
-            "the physical window must include enc_desc(299), a matching row"
-        );
-    }
-
-    /// DESC single-bound `ck < v` (open CQL lower): the matching values (smaller
-    /// than v) sort to the physical-HIGH byte side, so the physical window is
-    /// `[enc_desc(v), +∞]`.
-    #[cfg(not(feature = "tombstones"))]
-    #[test]
-    fn physical_bounds_desc_upper_bound_only() {
-        // ck < 20, open below.
-        let slice = int_slice(None, false, Some(20), false);
-        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
-            .expect("ok")
-            .expect("encodable");
-        assert_eq!(
-            lower,
-            enc_int(20, true),
-            "DESC `ck < 20`: physical-lower = enc_desc(20) (the boundary value)"
-        );
-        assert_eq!(
-            upper,
-            vec![0xFFu8; MAX_OSS50_BOUND_SENTINEL_LEN],
-            "DESC `ck < 20`: open CQL lower → physical +∞ sentinel"
-        );
-        assert!(lower < upper, "must be ordered");
-        // A matching small value (ck=0) has the LARGEST DESC bytes, inside the
-        // window; the buggy [-∞, enc_desc(20)] mapping would exclude it.
-        assert!(
-            enc_int(0, true).as_slice() >= lower.as_slice(),
-            "the physical window must include enc_desc(0), a matching row"
-        );
-    }
-
-    /// DESC equality `ck = v`: start == end == [v]; physical bounds collapse to
-    /// [enc_desc(v), enc_desc(v)] (a single-point range, identical to ASC since
-    /// the swap of equal endpoints is a no-op).
-    #[cfg(not(feature = "tombstones"))]
-    #[test]
-    fn physical_bounds_desc_equality_is_point() {
-        let slice = int_slice(Some(150), true, Some(150), true);
-        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
-            .expect("ok")
-            .expect("encodable");
-        assert_eq!(lower, enc_int(150, true));
-        assert_eq!(upper, enc_int(150, true));
-        assert_eq!(lower, upper, "equality is a single physical point");
-    }
-
-    /// Absent schema / empty `is_reversed` is treated as ASC (no swap), matching
-    /// the encoder's default.
-    #[cfg(not(feature = "tombstones"))]
-    #[test]
-    fn physical_bounds_no_order_defaults_ascending() {
-        let slice = int_slice(Some(5), true, Some(50), false);
-        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[])
-            .expect("ok")
-            .expect("encodable");
-        assert_eq!(lower, enc_int(5, false));
-        assert_eq!(upper, enc_int(50, false));
-        assert!(lower < upper);
-    }
-
-    #[test]
-    fn test_table_ids_match_exact() {
-        // Exact match cases
-        let id1 = TableId::new("simple_table".to_string());
-        let id2 = TableId::new("simple_table".to_string());
-        assert!(table_ids_match(&id1, &id2));
-
-        let id3 = TableId::new("test_basic.simple_table".to_string());
-        let id4 = TableId::new("test_basic.simple_table".to_string());
-        assert!(table_ids_match(&id3, &id4));
-    }
-
-    #[test]
-    fn test_table_ids_match_qualified_vs_unqualified() {
-        // Qualified matches unqualified
-        let qualified = TableId::new("test_basic.simple_table".to_string());
-        let unqualified = TableId::new("simple_table".to_string());
-
-        assert!(table_ids_match(&qualified, &unqualified));
-        assert!(table_ids_match(&unqualified, &qualified));
-    }
-
-    #[test]
-    fn test_table_ids_match_different_keyspaces() {
-        // Different keyspaces but same table name - should match on table name
-        let id1 = TableId::new("keyspace1.users".to_string());
-        let id2 = TableId::new("keyspace2.users".to_string());
-
-        assert!(
-            table_ids_match(&id1, &id2),
-            "Same table name should match across keyspaces"
-        );
-    }
-
-    #[test]
-    fn test_table_ids_match_completely_different() {
-        // Completely different tables - should not match
-        let id1 = TableId::new("users".to_string());
-        let id2 = TableId::new("orders".to_string());
-
-        assert!(!table_ids_match(&id1, &id2));
-
-        let id3 = TableId::new("test.users".to_string());
-        let id4 = TableId::new("test.orders".to_string());
-
-        assert!(!table_ids_match(&id3, &id4));
-    }
-
-    #[test]
-    fn test_table_ids_match_edge_cases() {
-        // Table names with dots (unusual but possible)
-        let id1 = TableId::new("schema.table.subtable".to_string());
-        let id2 = TableId::new("subtable".to_string());
-
-        assert!(
-            table_ids_match(&id1, &id2),
-            "Should match on last component"
-        );
-    }
-
-    #[test]
-    fn test_table_ids_match_empty() {
-        // Empty table IDs
-        let id1 = TableId::new("".to_string());
-        let id2 = TableId::new("".to_string());
-
-        assert!(table_ids_match(&id1, &id2), "Empty IDs should match");
-    }
-
-    // =========================================================================
-    // Key comparison tests
-    // =========================================================================
-
-    #[test]
-    fn test_row_key_comparison() {
-        let key1 = RowKey::new(vec![1, 2, 3]);
-        let key2 = RowKey::new(vec![1, 2, 3]);
-        let key3 = RowKey::new(vec![1, 2, 4]);
-
-        assert_eq!(key1, key2);
-        assert_ne!(key1, key3);
-        assert!(key1 < key3);
-    }
-
-    #[test]
-    fn test_row_key_ordering() {
-        let key_a = RowKey::new(vec![0x01]);
-        let key_b = RowKey::new(vec![0x02]);
-        let key_c = RowKey::new(vec![0x01, 0x00]); // Longer but starts with 0x01
-
-        assert!(key_a < key_b);
-        assert!(key_a < key_c); // Shorter prefix comes first in lexicographic order
-    }
-
-    // =========================================================================
-    // Value tests
-    // =========================================================================
-
-    #[test]
-    fn test_value_blob_creation() {
-        let data = vec![1, 2, 3, 4, 5];
-        let value = Value::blob(data.clone());
-
-        if let Value::Blob(v) = value {
-            assert_eq!(v, data);
-        } else {
-            panic!("Expected Value::Blob");
-        }
-    }
-}
+#[path = "model_tests.rs"]
+mod tests;
