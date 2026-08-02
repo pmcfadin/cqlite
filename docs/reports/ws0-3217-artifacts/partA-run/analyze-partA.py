@@ -230,18 +230,30 @@ def main():
     # ---- AC5 table -----------------------------------------------------------
     lines.append("")
     lines.append("=== AC5: context switches / migrations per N ===")
-    lines.append("%-16s %-4s %-14s %-14s %-14s %-14s %-8s" % (
-        "sweep", "N", "cs/s cpu-wide", "migr/s", "vol cs/s(thr)", "nonvol cs/s(thr)", "threads"))
+    lines.append("per-ROW columns are the load-bearing ones: cs/s necessarily rises with throughput,")
+    lines.append("so only per-row shows whether the per-unit-work scheduler cost actually grew.")
+    lines.append("%-16s %-4s %-14s %-14s %-14s %-14s %-8s %-11s %-11s" % (
+        "sweep", "N", "cs/s cpu-wide", "migr/s", "vol cs/s(thr)", "nonvol cs/s(thr)", "threads",
+        "vol/1k rows", "nonvol/1k"))
     for label, sw in out["sweeps"].items():
         for r in sw["per_N"]:
-            lines.append("%-16s %-4d %-14.0f %-14.0f %-14s %-14s %-8s" % (
+            rs = r["rows_per_s_median"]
+            v1k = (r["server_thread_vol_ctxt_per_s_median"] / rs * 1000
+                   if r["server_thread_vol_ctxt_per_s_median"] is not None and rs else None)
+            n1k = (r["server_thread_nonvol_ctxt_per_s_median"] / rs * 1000
+                   if r["server_thread_nonvol_ctxt_per_s_median"] is not None and rs else None)
+            r["server_thread_vol_ctxt_per_1k_rows"] = v1k
+            r["server_thread_nonvol_ctxt_per_1k_rows"] = n1k
+            lines.append("%-16s %-4d %-14.0f %-14.0f %-14s %-14s %-8s %-11s %-11s" % (
                 label, r["N"], r["ctxt_switches_cpu_wide_per_s_median"],
                 r["cpu_migrations_cpu_wide_per_s_median"],
                 ("%.0f" % r["server_thread_vol_ctxt_per_s_median"])
                 if r["server_thread_vol_ctxt_per_s_median"] is not None else "n/a",
                 ("%.0f" % r["server_thread_nonvol_ctxt_per_s_median"])
                 if r["server_thread_nonvol_ctxt_per_s_median"] is not None else "n/a",
-                r["server_threads_observed"]))
+                r["server_threads_observed"],
+                ("%.1f" % v1k) if v1k is not None else "n/a",
+                ("%.2f" % n1k) if n1k is not None else "n/a"))
 
     # ---- cross-S scaling against a COMMON reference -------------------------
     # Self-normalising each arm to its own N=1 systematically flatters the wide arms:
@@ -298,12 +310,12 @@ def main():
         lines.append("common ref A = S=1 @ N=1   : %.0f rows/s" % ref_n1)
         lines.append("common ref B = S=1 @ N=%-3d : %.0f rows/s   <- PRIMARY (best on 1 physical core; conservative)"
                      % (ref_peak_rec["N"], ref_peak))
-        lines.append("%-3s %-14s %-13s %-6s %-8s %-11s %-11s %-11s %-11s" % (
-            "S", "own N=1", "best agg", "N@pk", "srvUtl", "spdup/refA", "meff/refA",
+        lines.append("%-3s %-12s %-14s %-13s %-6s %-8s %-11s %-11s %-11s %-11s" % (
+            "S", "arm", "own N=1", "best agg", "N@pk", "srvUtl", "spdup/refA", "meff/refA",
             "spdup/refB", "meff/refB"))
         for r in rows:
-            lines.append("%-3d %-14.0f %-13.0f %-6d %-8.3f %-11.3f %-11.3f %-11.3f %-11.3f" % (
-                r["S_physical_cores"], r["own_N1_rows_per_s_median"],
+            lines.append("%-3d %-12s %-14.0f %-13.0f %-6d %-8.3f %-11.3f %-11.3f %-11.3f %-11.3f" % (
+                r["S_physical_cores"], r["arm"], r["own_N1_rows_per_s_median"],
                 r["best_rows_per_s_median"], r["N_at_peak"], r["server_util_at_peak"],
                 r["speedup_vs_common_ref_S1_N1"], r["marginal_efficiency_vs_common_ref_S1_N1"],
                 r["speedup_vs_common_ref_S1_PEAK"], r["marginal_efficiency_vs_common_ref_S1_PEAK"]))

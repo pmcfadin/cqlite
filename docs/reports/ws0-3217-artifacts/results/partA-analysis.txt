@@ -1,0 +1,125 @@
+
+=== calib-s6-n1  (S=6 physical cores, cpus=0,1,2,3,4,5,8,9,10,11,12,13, path=bypass) ===
+  (speedup/margeff below are SELF-normalised to THIS arm's own N=1 - NOT comparable across S; see the cross-S table)
+N    reps rows/s min   rows/s med   rows/s max   spr%    rows/s/strm  spdup/selfN1 meff/selfN1  srvUtl  cliUtl  unav  
+1    1    160471       160471       160471       0.0     160471       1.000        1.000        0.115   0.019   0     
+
+=== calib-s6-n16  (S=6 physical cores, cpus=0,1,2,3,4,5,8,9,10,11,12,13, path=bypass) ===
+  (speedup/margeff below are SELF-normalised to THIS arm's own N=1 - NOT comparable across S; see the cross-S table)
+N    reps rows/s min   rows/s med   rows/s max   spr%    rows/s/strm  spdup/selfN1 meff/selfN1  srvUtl  cliUtl  unav  
+16   1    1079743      1079743      1079743      0.0     67484        0.000        0.000        0.976   0.123   0     
+
+=== cn-s1-ac5  (S=1 physical cores, cpus=2,10, path=bypass) ===
+  (speedup/margeff below are SELF-normalised to THIS arm's own N=1 - NOT comparable across S; see the cross-S table)
+N    reps rows/s min   rows/s med   rows/s max   spr%    rows/s/strm  spdup/selfN1 meff/selfN1  srvUtl  cliUtl  unav  
+1    3    206523       212578       213778       3.4     212578       1.000        1.000        0.777   0.023   0     
+2    3    246507       249985       259080       5.0     124993       1.176        0.588        0.995   0.026   0     
+4    3    239059       240429       240684       0.7     60107        1.131        0.283        0.999   0.026   0     
+8    3    217903       221383       223586       2.6     27673        1.041        0.130        1.000   0.025   0     
+16   3    208010       212818       212911       2.3     13301        1.001        0.063        1.000   0.026   0     
+
+=== cn-s1-merge-n1  (S=1 physical cores, cpus=2,10, path=merge) ===
+  (speedup/margeff below are SELF-normalised to THIS arm's own N=1 - NOT comparable across S; see the cross-S table)
+N    reps rows/s min   rows/s med   rows/s max   spr%    rows/s/strm  spdup/selfN1 meff/selfN1  srvUtl  cliUtl  unav  
+1    3    72583        72632        72687        0.1     72632        1.000        1.000        0.820   0.017   0     
+
+=== cn-s1  (S=1 physical cores, cpus=2,10, path=bypass) ===
+  (speedup/margeff below are SELF-normalised to THIS arm's own N=1 - NOT comparable across S; see the cross-S table)
+N    reps rows/s min   rows/s med   rows/s max   spr%    rows/s/strm  spdup/selfN1 meff/selfN1  srvUtl  cliUtl  unav  
+1    3    209934       216229       218312       3.9     216229       1.000        1.000        0.782   0.022   0     
+2    3    247379       252420       260993       5.4     126210       1.167        0.584        0.996   0.026   0     
+4    3    237928       240361       243139       2.2     60090        1.112        0.278        0.998   0.029   0     
+8    3    218128       220865       222722       2.1     27608        1.021        0.128        0.999   0.027   0     
+16   3    207945       211010       211887       1.9     13188        0.976        0.061        1.000   0.026   0     
+
+=== cn-s2  (S=2 physical cores, cpus=0,2,8,10, path=bypass) ===
+  (speedup/margeff below are SELF-normalised to THIS arm's own N=1 - NOT comparable across S; see the cross-S table)
+N    reps rows/s min   rows/s med   rows/s max   spr%    rows/s/strm  spdup/selfN1 meff/selfN1  srvUtl  cliUtl  unav  
+1    3    199482       205129       205979       3.2     205129       1.000        1.000        0.424   0.027   0     
+2    3    316252       325364       338112       6.7     162682       1.586        0.793        0.771   0.038   0     
+4    3    417529       421621       430065       3.0     105405       2.055        0.514        0.957   0.048   0     
+8    3    439501       440677       444567       1.1     55085        2.148        0.269        0.995   0.050   0     
+16   3    414762       417424       419321       1.1     26089        2.035        0.127        0.999   0.049   0     
+
+=== cn-s4  (S=4 physical cores, cpus=0,1,2,3,8,9,10,11, path=bypass) ===
+  (speedup/margeff below are SELF-normalised to THIS arm's own N=1 - NOT comparable across S; see the cross-S table)
+N    reps rows/s min   rows/s med   rows/s max   spr%    rows/s/strm  spdup/selfN1 meff/selfN1  srvUtl  cliUtl  unav  
+1    3    170447       175872       178730       4.7     175872       1.000        1.000        0.181   0.027   0     
+2    3    315991       340878       357862       12.3    170439       1.938        0.969        0.405   0.043   0     
+4    3    561143       565409       576220       2.7     141352       3.215        0.804        0.766   0.067   0     
+8    3    718823       721434       727853       1.3     90179        4.102        0.513        0.947   0.083   0     
+16   3    816265       818747       823954       0.9     51172        4.655        0.291        0.992   0.096   0     
+
+=== cn-s6-merge-n1  (S=6 physical cores, cpus=0,1,2,3,4,5,8,9,10,11,12,13, path=merge) ===
+  (speedup/margeff below are SELF-normalised to THIS arm's own N=1 - NOT comparable across S; see the cross-S table)
+N    reps rows/s min   rows/s med   rows/s max   spr%    rows/s/strm  spdup/selfN1 meff/selfN1  srvUtl  cliUtl  unav  
+1    3    63561        63762        64378        1.3     63762        1.000        1.000        0.129   0.019   0     
+
+=== cn-s6  (S=6 physical cores, cpus=0,1,2,3,4,5,8,9,10,11,12,13, path=bypass) ===
+  (speedup/margeff below are SELF-normalised to THIS arm's own N=1 - NOT comparable across S; see the cross-S table)
+N    reps rows/s min   rows/s med   rows/s max   spr%    rows/s/strm  spdup/selfN1 meff/selfN1  srvUtl  cliUtl  unav  
+1    3    159664       163510       163980       2.6     163510       1.000        1.000        0.115   0.028   0     
+2    3    309753       332165       345286       10.7    166083       2.031        1.016        0.250   0.046   0     
+4    3    587340       601074       614297       4.5     150268       3.676        0.919        0.534   0.074   0     
+8    3    915247       916066       939588       2.7     114508       5.603        0.700        0.889   0.115   0     
+16   3    1076880      1076917      1082587      0.5     67307        6.586        0.412        0.967   0.138   0     
+
+=== AC2: S=1 shape vs #3100 published pinned-core control ===
+N    measured      norm      #3100         norm      meas/pub
+1    216229        1.000     246940        1.000     0.876   
+2    252420        1.167     287441        1.164     0.878   
+4    240361        1.112     273438        1.107     0.879   
+8    220865        1.021     248621        1.007     0.888   
+16   211010        0.976     236734        0.959     0.891   
+
+=== AC5: context switches / migrations per N ===
+per-ROW columns are the load-bearing ones: cs/s necessarily rises with throughput,
+so only per-row shows whether the per-unit-work scheduler cost actually grew.
+sweep            N    cs/s cpu-wide  migr/s         vol cs/s(thr)  nonvol cs/s(thr) threads  vol/1k rows nonvol/1k  
+calib-s6-n1      1    81715          30             n/a            n/a            None     n/a         n/a        
+calib-s6-n16     16   232114         13446          n/a            n/a            None     n/a         n/a        
+cn-s1-ac5        1    47626          270            25591          9112           14       120.4       42.86      
+cn-s1-ac5        2    49529          190            28655          16560          22       114.6       66.24      
+cn-s1-ac5        4    46827          52             27785          15892          41       115.6       66.10      
+cn-s1-ac5        8    36657          77             23469          11306          78       106.0       51.07      
+cn-s1-ac5        16   28994          109            21450          6838           24       100.8       32.13      
+cn-s1-merge-n1   1    26010          25             12397          172            7        170.7       2.37       
+cn-s1            1    48107          262            n/a            n/a            None     n/a         n/a        
+cn-s1            2    49896          178            n/a            n/a            None     n/a         n/a        
+cn-s1            4    46586          53             n/a            n/a            None     n/a         n/a        
+cn-s1            8    36375          79             n/a            n/a            None     n/a         n/a        
+cn-s1            16   28747          108            n/a            n/a            None     n/a         n/a        
+cn-s2            1    101245         550            46216          166            16       225.3       0.81       
+cn-s2            2    113008         4882           59030          7490           23       181.4       23.02      
+cn-s2            4    90226          3176           51817          25136          42       122.9       59.62      
+cn-s2            8    87327          258            51797          30136          74       117.5       68.39      
+cn-s2            16   69398          229            44784          21048          26       107.3       50.42      
+cn-s4            1    87156          26             41007          4              20       233.2       0.02       
+cn-s4            2    175046         1366           80671          70             26       236.7       0.20       
+cn-s4            4    235160         19210          119415         6112           44       211.2       10.81      
+cn-s4            8    172908         11497          99617          33866          85       138.1       46.94      
+cn-s4            16   163503         1018           97178          55883          25       118.7       68.25      
+cn-s6-merge-n1   1    94031          14             44415          4              17       696.6       0.06       
+cn-s6            1    83835          33             39115          4              24       239.2       0.02       
+cn-s6            2    177831         208            81622          8              30       245.7       0.03       
+cn-s6            4    309639         9209           143485         148            47       238.7       0.25       
+cn-s6            8    308412         26879          166144         23394          89       181.4       25.54      
+cn-s6            16   235367         14604          138798         55147          32       128.9       51.21      
+
+=== CROSS-S SCALING vs a COMMON reference (the deliverable table) ===
+common ref A = S=1 @ N=1   : 216229 rows/s
+common ref B = S=1 @ N=2   : 252420 rows/s   <- PRIMARY (best on 1 physical core; conservative)
+S   arm          own N=1        best agg      N@pk   srvUtl   spdup/refA  meff/refA   spdup/refB  meff/refB  
+1   cn-s1        216229         252420        2      0.996    1.167       1.167       1.000       1.000      
+1   cn-s1-ac5    212578         249985        2      0.995    1.156       1.156       0.990       0.990      
+2   cn-s2        205129         440677        8      0.995    2.038       1.019       1.746       0.873      
+4   cn-s4        175872         818747        16     0.992    3.786       0.947       3.244       0.811      
+6   cn-s6        163510         1076917       16     0.967    4.980       0.830       4.266       0.711      
+NOTE: each arm's own N=1 DECLINES with core count, so per-arm self-normalised
+      speedup/margeff columns flatter the wide arms and are NOT cross-comparable.
+
+=== merge vs bypass reference (N=1) ===
+s1   bypass=216229       merge=72632         merge/bypass=0.3359  (-66.41%)
+s6   bypass=163510       merge=63762         merge/bypass=0.3900  (-61.00%)
+
+warmth: total read_bytes across all 83 points = 0 (0 == fully page-cached)

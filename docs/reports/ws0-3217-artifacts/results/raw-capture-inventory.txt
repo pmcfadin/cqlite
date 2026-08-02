@@ -1,0 +1,33 @@
+# WS0 #3217 Part A - raw capture inventory (bulky logs deliberately NOT committed)
+generated: 2026-08-02T23:56:08Z
+
+## Raw per-point captures (perf CSV, loadgen step JSONL, /proc ctx JSON, server logs)
+192K	/data/ws0/logs/cn-s1
+192K	/data/ws0/logs/cn-s1-ac5
+192K	/data/ws0/logs/cn-s2
+192K	/data/ws0/logs/cn-s4
+192K	/data/ws0/logs/cn-s6
+48K	/data/ws0/logs/cn-s1-merge-n1
+48K	/data/ws0/logs/cn-s6-merge-n1
+24K	/data/ws0/logs/calib-s6-n1
+24K	/data/ws0/logs/calib-s6-n16
+
+## AC5 per-TID scheduler sidecar
+4.6M	/data/ws0/logs/ctxt/threads-pertid.jsonl
+484K	/data/ws0/logs/ctxt/threads.jsonl
+  threads.jsonl is sidecar v1 (aggregate over live threads) - RETAINED FOR PROVENANCE ONLY,
+  it is not a monotone counter under tokio thread churn and its deltas go negative.
+
+## Driver logs
+44K	/data/ws0/logs/driver
+
+## Corpus + geometry provenance (written by the corpus agent)
+-rw-rw-r--  1 ubuntu ubuntu 3426 Aug  2 20:49 OWNER-REPORT-REQUIREMENTS.md
+-rw-rw-r--  1 ubuntu ubuntu  437 Aug  2 20:03 corpus-fullscan.txt
+-rw-rw-r--  1 ubuntu ubuntu 2157 Aug  2 20:04 corpus-geometry.txt
+-rw-rw-r--  1 ubuntu ubuntu 6832 Aug  2 20:04 corpus-provenance.txt
+-rw-rw-r--  1 ubuntu ubuntu  158 Aug  2 20:02 corpus-sha-initial.txt
+-rw-rw-r--  1 ubuntu ubuntu  164 Aug  2 20:03 corpus-sha-staged.txt
+-rw-rw-r--  1 ubuntu ubuntu 2860 Aug  2 20:02 corpus-sstablemetadata.txt
+-rw-rw-r--  1 ubuntu ubuntu  932 Aug  2 20:02 corpus-tablehistograms.txt
+-rw-rw-r--  1 ubuntu ubuntu 1521 Aug  2 20:02 corpus-tablestats.txt
